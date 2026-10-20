@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { groupStatusSummary, groupChipTone } from "./wiki-gardener-group.ts";
+import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
 
 describe("groupStatusSummary", () => {
   test("counts each status once, in the rows' own order of first appearance", () => {
@@ -73,5 +73,33 @@ describe("groupChipTone", () => {
     expect(groupChipTone(["error", "applied"])).toBe("error");
     expect(groupChipTone(["something-new"])).toBe("something-new");
     expect(groupChipTone([])).toBe("draft");
+  });
+});
+
+describe("groupDriftNote", () => {
+  test("no drifted draft row means no note", () => {
+    expect(groupDriftNote([{ status: "draft", drifted: null }, { status: "stale", drifted: "x" }])).toBeNull();
+  });
+  // The preflight stops on ONE blocked row; the route marks it stale and returns
+  // the others to draft. "Accept will … mark them stale" promised one click.
+  test("one drifted page beside clean ones: a second Accept writes the rest", () => {
+    expect(groupDriftNote([{ status: "draft", drifted: "x" }, { status: "draft" }, { status: "draft", drifted: null }])).toBe(
+      "1 page changed since drafting — Accept writes nothing: it marks that page stale and returns the other 2 to draft, so a second Accept writes them.",
+    );
+  });
+  test("one drifted page and nothing else", () => {
+    expect(groupDriftNote([{ status: "draft", drifted: "x" }, { status: "applied" }])).toBe(
+      "1 page changed since drafting — Accept writes nothing and marks it stale.",
+    );
+  });
+  test("several drifted pages: one Accept per drifted page, then one more", () => {
+    expect(
+      groupDriftNote([{ status: "draft", drifted: "x" }, { status: "draft", drifted: "y" }, { status: "draft" }]),
+    ).toBe(
+      "2 pages changed since drafting — each Accept writes nothing and marks only one of them stale, returning the rest to draft. It takes 2 Accepts to mark all 2 stale, and one more to write the other 1.",
+    );
+    expect(groupDriftNote([{ status: "draft", drifted: "x" }, { status: "draft", drifted: "y" }])).toBe(
+      "2 pages changed since drafting — each Accept writes nothing and marks only one of them stale, returning the rest to draft. It takes 2 Accepts to mark all 2 stale.",
+    );
   });
 });

@@ -735,7 +735,10 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   read `seriesHead`/`newestSeriesPlan`; check 8.3(b) reads `seriesHead`, and
   8.3(a)/(c) read `headOf` (no label rung) — both count culled members. The
   editor's one-label check (`otherLabelledMember`) scans raw pages, not the
-  census, as on main (known gap, see the PR's known limits). So 8.3(a) normalises LIVE
+  census, re-reading every indexed markdown page's frontmatter INSIDE the write
+  section (batches of 32; ~12 ms on mimir's 513 pages, ~30 ms on jarvis's 1,480),
+  so a label another writer added since the index was built counts — including on
+  a page that joined the series after it. So 8.3(a) normalises LIVE
   members to a culled head's spelling, 8.3(b) removes a live member's label when
   a culled head carries the newer one, 8.3(c) joins under the head's spelling,
   and a finding whose head is culled is filed against the newest edited page.
@@ -1928,6 +1931,17 @@ the reader agree on where a sentence ends. Measured 2026-10-09
 `status-row-long` on none (no page carries `<StatusRows>` yet). Acceptance:
 `lint-report-top.test.ts`.
 
+Two more warnings on a `<StatusRows>` block (MDX visual components PR 2):
+`status-tones` (on the tag line: in any view a `tones=` entry it cannot read, a
+row named twice, or a label that matches no row — `statusToneWarnings` in
+`src/format/report-top.ts`, matched as the renderer matches, a wikilinked row
+label by its text, `[[t|l]]` → `l`, else `t`; and a non-empty `tones` on a
+block not in `view="tiles"`, which colours nothing) and
+`status-tile-long` (`view="tiles"` only, on the row's line: a first ` · ` part
+over `STATUS_TILE_FIRST_MAX`, 24 visible chars, which does not read as a tile).
+Measured 2026-10-20 with `view="tiles"` forced on every block of both wikis:
+about half the rows run over 24, so tiles are opt-in per block, not a default. Acceptance: `src/format/status-tiles.test.ts`.
+
 Its second half, `checkTldr`, holds the In short box rule (mdx-explainer
 «Report genres» and «Reference page shape»): `missing-tldr` (warning) when the
 first non-blank block after the leading `# ` heading is not a `<Tldr>`, and
@@ -2002,7 +2016,7 @@ Two warnings on `.mdx` pages that are not culled, report-only: `component-value`
 
 A page holding no component name followed by an attribute, and no `<Meter` (the one component with a `required` attribute; both sets come from `COMPONENT_SPEC`), is not rendered. Results are memoized per render seam on relPath + content hash (`COMPONENT_MEMO_MAX`, 2000): a hit makes its entry the newest, and past the cap the least recently used entry is evicted. Measured 2026-10-18, lint phase cold / warm: mimir ~1000 / ~230 ms, jarvis ~240 / ~205 ms, melosys-kode-wiki ~505 / ~235 ms (before: ~1000 / ~980, ~460 / ~450, ~525 / ~520). The renderer reads an attribute after parking its wikilinks and code spans, so a finding judges that value but prints the source text read at the tag's offset, only when the tag is located, its source attributes line up with the renderer's key for key, and the source value parked the renderer's way gives the renderer's value. Otherwise each parked part prints as `…`.
 
-`bun --no-env-file scripts/wiki-check.ts <absolute .mdx page or directory>` runs it, no index, one JSON line per finding, together with the other checks that read only the page's own text (`checkPageText` in `lint.ts`: index-truncation, nested-annotation, unrendered-fact-mark, question-block, decision-first-sentence, status-row-long, role-key with `roleKeys` from the root's `.wiki-reader.json`, case-board-labels, missing-tldr and tldr-no-more with `plan_status` read from the page's frontmatter by `readPlanStatus`, as the index reads it). `stale-updated` and check 9 run in `lintWiki` only: `stale-updated` and `draft-lane-stale` read the clock, and `checkDrift` runs the other three drift checks in the same pass. So does `missing-sources`, which reads the type the reader config resolves. `lintWiki` runs the same function per page, so the two agree on those checks wherever `wiki-check` finds the wiki root. With no `.wiki-reader.json` at or above the path the root is a guess, so `wiki-check` skips missing-tldr and tldr-no-more, which read the page's folder, and says so on stderr. Before that, a question closed as `Lukket 17.10.2026 (S1)` (a question id where a decision id goes) passed `wiki-check` silently while `lintWiki` flagged it. A directory checks the pages `lintWiki` checks: the store's scan of the wiki root (`wikiPageRelPaths`: `include`, the pipeline-source drop), minus a same-stem-shadowed page; there a culled page gets every check but the Tldr and component checks, as in `lintWiki`. A single page is checked as given, culled or not. An unreadable page is one stderr line and is skipped; exit 3 when none of a directory's pages could be read. Acceptance: `lint-components.test.ts`, `scripts/wiki-check.test.ts`.
+`bun --no-env-file scripts/wiki-check.ts <absolute .mdx page or directory>` runs it, no index, one JSON line per finding, together with the other checks that read only the page's own text (`checkPageText` in `lint.ts`: index-truncation, nested-annotation, unrendered-fact-mark, question-block, decision-first-sentence, status-row-long, status-tones, status-tile-long, role-key with `roleKeys` from the root's `.wiki-reader.json`, case-board-labels, missing-tldr and tldr-no-more with `plan_status` read from the page's frontmatter by `readPlanStatus`, as the index reads it). `stale-updated` and check 9 run in `lintWiki` only: `stale-updated` and `draft-lane-stale` read the clock, and `checkDrift` runs the other three drift checks in the same pass. So does `missing-sources`, which reads the type the reader config resolves. `lintWiki` runs the same function per page, so the two agree on those checks wherever `wiki-check` finds the wiki root. With no `.wiki-reader.json` at or above the path the root is a guess, so `wiki-check` skips missing-tldr and tldr-no-more, which read the page's folder, and says so on stderr. Before that, a question closed as `Lukket 17.10.2026 (S1)` (a question id where a decision id goes) passed `wiki-check` silently while `lintWiki` flagged it. A directory checks the pages `lintWiki` checks: the store's scan of the wiki root (`wikiPageRelPaths`: `include`, the pipeline-source drop), minus a same-stem-shadowed page; there a culled page gets every check but the Tldr and component checks, as in `lintWiki`. A single page is checked as given, culled or not. An unreadable page is one stderr line and is skipped; exit 3 when none of a directory's pages could be read. Acceptance: `lint-components.test.ts`, `scripts/wiki-check.test.ts`.
 
 ### Lint check 16 — the decision chain (`lint-decision-chain.ts`)
 
@@ -4002,6 +4016,9 @@ lines — and because a hook is synchronous on a tool call while a human clickin
 can wait. The stale window is the same on both sides: shorter here and muninn
 seizes a lock the stamper still holds; longer and muninn waits behind an
 interrupted stamp longer than the stamper would wait for itself.
+Known gap: the stale takeover can delete a lock it did not measure (a lock
+another process re-created between the stale check and the unlink) — finding 23
+of arch review 2026-10, deferred to a follow-up by the #720 class check.
 
 **On acquire muninn writes ONE JSON line into the file** — `{pid, host, op, at}`.
 For an operator it answers "who is holding this, and since when" from a file that

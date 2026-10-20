@@ -26,6 +26,7 @@
  */
 
 import path from "node:path";
+import { lstat } from "node:fs/promises";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import type { WikiIndex } from "../wiki/store.ts";
 import { containDraftBodyLinks, isPathConfined, stripOwnedAliases } from "./draft.ts";
@@ -136,6 +137,32 @@ export interface ApplyDeps {
  * `[source-drafter] draft: …`; consolidation-gardener synthesis pages are
  * `[consolidation] apply: …`.
  */
+/**
+ * Why an update-mode row can no longer apply, or null when the page on disk is
+ * still the one it was drafted against. The apply step refuses on it, and the
+ * gate's listing flags the row with it, so a reviewer sees the refusal before
+ * clicking. A row with no base hash proves nothing and counts as drift.
+ */
+export function updateBaseDrift(baseHash: string | null | undefined, current: string | null): string | null {
+  if (current === null) return "target file no longer exists";
+  if (!baseHash || sha256(current) !== baseHash) return "target file changed since drafting";
+  return null;
+}
+
+/**
+ * The gate listing's drift flag for an update row: the reason the apply's CAS
+ * (step 2b) would refuse it, else null. It runs the apply's own containment
+ * (`containForWrite`) and disk check (`judgeAgainstDisk`), so the two agree: a
+ * page equal to the CONTAINED draft is a no-op in both, and a page equal only
+ * to the raw draft (a body link whose target was deleted since drafting) is
+ * drift in both. `index` is the listing's index; null skips containment, as
+ * the apply does.
+ */
+export function listingDrift(row: WikiProposal, current: string | null, index: WikiIndex | null): string | null {
+  const judged = judgeAgainstDisk(row, containForWrite(row, index).finalContent, current);
+  return judged.step === "refuse" ? judged.outcome.reason : null;
+}
+
 export function commitMessageFor(proposal: WikiProposal): string {
   if (proposal.kind === "synthesis") return `[consolidation] apply: ${proposal.targetPath}`;
   if (proposal.kind === "lint") return `[lint] fix: ${proposal.targetPath}`;
@@ -255,6 +282,45 @@ export function insertLogEntry(existing: string | null, entry: string): string {
   return [...before, block, "", ...after].join("\n");
 }
 
+/** The read seams answer `null` for ANY failure, which conflates "absent" with
+ *  "unreadable". Only ENOENT (via `lstat`) counts as absent. */
+async function logIsAbsent(logPath: string): Promise<boolean> {
+  try {
+    await lstat(logPath);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT";
+  }
+}
+
+/**
+ * Splice `entry` into the wiki-global `log.md` — the ONE writer every log.md
+ * call site goes through (page writes, single and group gardener applies).
+ * Three read states: present (splice), absent (ENOENT only: create), unreadable
+ * (EACCES, EMFILE, EIO…: skip and warn). Writing `insertLogEntry(null, …)` over
+ * an unreadable log replaced the whole history with one entry (arch review
+ * 2026-10, finding 21). Throws only what the write throws; callers keep their
+ * best-effort catch so a log hiccup never undoes the page write.
+ */
+export async function appendWikiLogEntry(
+  logPath: string,
+  entry: string,
+  io: {
+    readFile: (absPath: string) => Promise<string | null>;
+    writeFile: (absPath: string, content: string) => Promise<void>;
+  },
+): Promise<"written" | "unreadable"> {
+  const existing = await io.readFile(logPath);
+  if (existing === null && !(await logIsAbsent(logPath))) {
+    log.warn("log.md is unreadable; skipping the log entry rather than overwriting it ({path})", {
+      path: logPath,
+    });
+    return "unreadable";
+  }
+  await io.writeFile(logPath, insertLogEntry(existing, entry));
+  return "written";
+}
+
 /** Ensure the written page body ends in exactly one trailing newline. */
 function withTrailingNewline(text: string): string {
   return `${text.replace(/\n+$/, "")}\n`;
@@ -335,11 +401,12 @@ export interface GroupApplyResult {
  * still runs OUTSIDE the section, as ONE commit over every path the group
  * touched.
  *
- * **It STOPS on the first row that is not `applied`, and says which.** A stale
- * or colliding row means the group's diffs no longer describe the wiki, and the
- * remaining rows are not attempted. Rows already written stay written: there is
- * no rollback, so the honest answer is to report the boundary and let the
- * reviewer re-propose, which the lint does deterministically on its next run.
+ * **It runs EVERY row's pre-write checks before writing any of them**
+ * (`preflightGroupRows`, inside the same section — the same `checkBeforeWrite`
+ * the per-row apply runs), so a member edited since seeding, or one the apply
+ * would refuse for any other reason, stops the group with nothing written. A row that fails later (a write error) still STOPS the
+ * group and says which; rows already written by then stay written, since there
+ * is no rollback.
  *
  * The per-row work is the SAME `applyInner` a single approve runs — the
  * confinement, staleness, write, `log.md` and reindex steps are not re-spelled
@@ -363,6 +430,15 @@ export async function applyWikiProposalGroup(
   const tail: { paths: string[] } = { paths: [] };
   const result = await runWikiWriteExclusive(deps.wikiDir, async () => {
     const out: GroupApplyResult = { results: [] };
+    // Every member's pre-write checks BEFORE the first write, so a stale or
+    // refused member stops the group with nothing written (finding 61). The section serializes the
+    // in-process writers, so the check holds until the loop below runs.
+    const blocked = await preflightGroupRows(rows, deps);
+    if (blocked) {
+      out.results.push(blocked);
+      out.stoppedAt = blocked;
+      return out;
+    }
     const written: WikiProposal[] = [];
     for (const row of rows) {
       // `skipLog: true` — a group writes ONE log.md entry, not one per row. A
@@ -441,18 +517,39 @@ async function writeGroupLogEntry(rows: readonly WikiProposal[], deps: ApplyDeps
   const head = rows.find((r) => r.targetPath === findingPath) ?? rows[0]!;
   const paths = rows.map((r) => r.targetPath);
   try {
-    const logPath = path.join(deps.wikiDir, WIKI_LOG_FILE);
-    const existingLog = await deps.readFile(logPath);
     const entry =
       `## [${todayOslo(deps.now())}] ${head.mode} | ${draftTitle(head)}\n` +
       `- via ${logWriterFor({ ...head, lintMeta: meta })}, ${paths.length} page${paths.length === 1 ? "" : "s"}: ${paths.join(", ")}`;
-    await deps.writeFile(logPath, insertLogEntry(existingLog, entry));
+    await appendWikiLogEntry(path.join(deps.wikiDir, WIKI_LOG_FILE), entry, deps);
   } catch (err) {
     log.warn("Wiki-gardener group apply: log.md update failed for {group}: {error}", {
       group: rows[0]?.groupKey ?? "(no group)",
       error: errMsg(err),
     });
   }
+}
+
+/**
+ * The group's pre-write checks, run over EVERY row before any row is written:
+ * the first row (in the given order) that `applyInner` would refuse, with the
+ * outcome it would give, or null when every row may go. It runs the SAME
+ * `checkBeforeWrite` the apply runs (unindexed or explainer target, path
+ * confinement, the containment passes, the CAS and the create-mode stem
+ * collision), so the two cannot disagree; a row that already IS its draft (2a,
+ * a no-op) passes. Every row is judged against the wiki as it was before the
+ * group, so two create rows colliding with EACH OTHER are not caught here —
+ * groups are lint update rows, which cannot.
+ */
+async function preflightGroupRows(
+  rows: readonly WikiProposal[],
+  deps: ApplyDeps,
+): Promise<GroupRowOutcome | null> {
+  const index = await deps.getWikiIndex();
+  for (const row of rows) {
+    const pre = await checkBeforeWrite(row, deps, index, { log: false });
+    if (pre.step === "refuse") return { id: row.id, targetPath: row.targetPath, outcome: pre.outcome };
+  }
+  return null;
 }
 
 /** The two read-only refusals `applyWikiProposal` makes before entering the
@@ -488,20 +585,115 @@ interface ApplyInnerOptions {
   skipLog?: boolean;
 }
 
-async function applyInner(
+/** What the pre-write checks decided for one row (`checkBeforeWrite`). */
+type PreWrite =
+  | { step: "refuse"; outcome: ApplyOutcome }
+  | { step: "noop"; absTarget: string }
+  | { step: "write"; absTarget: string; finalContent: string };
+
+/** What `containForWrite` makes of a draft: the bytes the apply writes, and
+ *  what it took out on the way (for the apply's log lines). */
+interface ContainedForWrite {
+  finalContent: string;
+  stripped: string[];
+  delinked: string[];
+}
+
+/**
+ * Steps 1c, 1d and the trailing-newline normalization: the bytes the apply
+ * would write for `proposal`, judged against `index`. Pure; the apply and the
+ * gate listing (`listingDrift`) both run it, so they agree on what "the page
+ * already is the draft" means.
+ */
+function containForWrite(proposal: WikiProposal, index: WikiIndex | null): ContainedForWrite {
+  // 1c. Alias-hijack re-strip against the in-queue index (defense in depth — the
+  //     runner stripped at persist time, but a canonical page created while the
+  //     proposal awaited review must still win its aliases). The target path
+  //     itself is always "self": on a create re-run after a crash-after-write,
+  //     the target's own first write is indexed and must not strip the draft's
+  //     aliases (a FOREIGN file at the target is caught by the stale check).
+  //
+  //     ⚠️ SKIPPED for a `lint` row, with 1d and the trailing-newline normalization
+  //     below. Both passes exist to CONTAIN MODEL OUTPUT: an alias a drafter
+  //     invented, a `[[link]]` to a page that does not exist. A lint draft is the
+  //     page's own bytes with one mechanical edit applied — so on that kind the
+  //     two passes only ever rewrite what a human wrote, and containment would
+  //     silently de-link every pre-existing dangling wikilink on a page whose
+  //     card promised one `See also` line and nothing else.
+  //
+  //     The self path is the target path: in update mode it IS the indexed
+  //     page's relPath (step 1a found it by equality).
+  const mechanical = proposal.kind === "lint";
+  const dealiased = mechanical
+    ? { draft: proposal.draft, stripped: [] as string[] }
+    : stripOwnedAliases(proposal.draft, { index, selfRelPath: proposal.targetPath });
+
+  // 1d. Body-link containment re-run against the in-queue index (TOCTOU symmetry with
+  //     the alias re-strip): a page linked in the body that was deleted between
+  //     draft and approve must not ship as a dangling wikilink. Null index ⇒ skip
+  //     (can't tell resolvable from phantom; don't de-link a whole page on an index
+  //     outage). This mutates finalContent, which drives the re-run-safe early
+  //     return below — an accepted, benign corner (a page deleted between draft and
+  //     approve, a crash after the page write, then a re-approve makes finalContent
+  //     no longer match disk, so the early return is skipped and create-mode falls
+  //     to `stale`; the row re-drafts next weekly cycle). When the index is
+  //     unchanged, containment is a no-op and idempotent recovery still holds.
+  let containedDraft = dealiased.draft;
+  let delinked: string[] = [];
+  if (index && !mechanical) {
+    const contained = containDraftBodyLinks(dealiased.draft, {
+      resolve: index.resolve,
+      selfTitle: draftTitle(proposal),
+    });
+    containedDraft = contained.draft;
+    delinked = contained.delinked;
+  }
+
+  // `withTrailingNewline` COLLAPSES a run of trailing newlines, which on a lint
+  // row is a second change the diff the reviewer approved did not show.
+  const finalContent = mechanical ? containedDraft : withTrailingNewline(containedDraft);
+  return { finalContent, stripped: dealiased.stripped, delinked };
+}
+
+/**
+ * Steps 2a and 2b: what the page on disk says about writing `finalContent`.
+ * Pure; the apply and the gate listing (`listingDrift`) both run it.
+ */
+function judgeAgainstDisk(
+  proposal: Pick<WikiProposal, "mode" | "baseHash">,
+  finalContent: string,
+  current: string | null,
+): { step: "noop" } | { step: "refuse"; outcome: Extract<ApplyOutcome, { outcome: "stale" }> } | { step: "proceed" } {
+  // 2a. Re-run safety: the target already IS the draft — a crash after the file
+  //     write (before the terminal CAS) or a double-approve. Report applied
+  //     without rewriting; the log.md entry from the first pass stands.
+  if (current !== null && current === finalContent) return { step: "noop" };
+
+  // 2b. Staleness — the target must be exactly as it was at draft time.
+  if (proposal.mode === "update") {
+    const drift = updateBaseDrift(proposal.baseHash, current);
+    if (drift) return { step: "refuse", outcome: { outcome: "stale", reason: drift } };
+  } else if (current !== null) {
+    return { step: "refuse", outcome: { outcome: "stale", reason: "target path already exists" } };
+  }
+  return { step: "proceed" };
+}
+
+/**
+ * Every check `applyInner` runs before it writes (steps 1a–2c), as ONE function
+ * the group preflight runs too, so the two cannot drift: a row this refuses is
+ * refused before any group member is written, and a row it calls a no-op (2a,
+ * judged on the contained draft, not the raw one) passes. `index` is the
+ * caller's in-queue index; `log: false` keeps the preflight from logging a
+ * refusal or a de-link twice.
+ */
+async function checkBeforeWrite(
   proposal: WikiProposal,
   deps: ApplyDeps,
-  deferCommit: DeferCommit,
-  opts: ApplyInnerOptions = {},
-): Promise<ApplyOutcome> {
+  index: WikiIndex | null,
+  opts: { log: boolean },
+): Promise<PreWrite> {
   const domain: "ai" | "life" = proposal.targetPath.startsWith("life/") ? "life" : "ai";
-
-  // This index backs the update-target check (1a), the alias re-strip (1c) and
-  // the create-mode collision re-check (2c). It is the TTL cache, NOT a forced
-  // rebuild — in-queue freshness comes from the previous queue holder's step-5
-  // `refreshIndex()`, so it is current w.r.t. every apply-path write; an
-  // off-path write inside the TTL window is the documented residual.
-  const index = await deps.getWikiIndex();
 
   // 1a. Update mode: the target must be a REAL indexed wiki page — look it up in
   //     the local store rather than trusting the row (passing the row's own
@@ -512,8 +704,8 @@ async function applyInner(
     const page = index?.pages.find((p) => p.relPath === proposal.targetPath);
     if (!page) {
       return {
-        outcome: "error",
-        reason: `update target "${proposal.targetPath}" is not an indexed wiki page`,
+        step: "refuse",
+        outcome: { outcome: "error", reason: `update target "${proposal.targetPath}" is not an indexed wiki page` },
       };
     }
     // …and it must be a MARKDOWN page. Since the rail's attachment groups a
@@ -526,8 +718,11 @@ async function applyInner(
     // twin elsewhere.
     if (page.type === "explainer") {
       return {
-        outcome: "error",
-        reason: `update target "${proposal.targetPath}" is an explainer page, not a markdown page`,
+        step: "refuse",
+        outcome: {
+          outcome: "error",
+          reason: `update target "${proposal.targetPath}" is an explainer page, not a markdown page`,
+        },
       };
     }
     existingRelPath = page.relPath;
@@ -543,102 +738,41 @@ async function applyInner(
     existingRelPath,
   });
   if (!confined) {
-    return { outcome: "error", reason: `path confinement failed for "${proposal.targetPath}"` };
+    return {
+      step: "refuse",
+      outcome: { outcome: "error", reason: `path confinement failed for "${proposal.targetPath}"` },
+    };
   }
 
-  // 1c. Alias-hijack re-strip against the in-queue index (defense in depth — the
-  //     runner stripped at persist time, but a canonical page created while the
-  //     proposal awaited review must still win its aliases). The target path
-  //     itself is always "self": on a create re-run after a crash-after-write,
-  //     the target's own first write is indexed and must not strip the draft's
-  //     aliases (a FOREIGN file at the target is caught by the stale check).
-  //
-  //     ⚠️ SKIPPED for a `lint` row, with 1d and the trailing-newline normalization
-  //     below. Both passes exist to CONTAIN MODEL OUTPUT: an alias a drafter
-  //     invented, a `[[link]]` to a page that does not exist. A lint draft is the
-  //     page's own bytes with one mechanical edit applied — so on that kind the
-  //     two passes only ever rewrite what a human wrote, and containment would
-  //     silently de-link every pre-existing dangling wikilink on a page whose
-  //     card promised one `See also` line and nothing else.
-  const mechanical = proposal.kind === "lint";
-  const dealiased = mechanical
-    ? { draft: proposal.draft, stripped: [] as string[] }
-    : stripOwnedAliases(proposal.draft, {
-        index,
-        selfRelPath: existingRelPath ?? proposal.targetPath,
-      });
-  if (dealiased.stripped.length > 0) {
+  // 1c, 1d and the trailing-newline normalization — see `containForWrite`.
+  const contained = containForWrite(proposal, index);
+  if (opts.log && contained.stripped.length > 0) {
     log.warn("Apply: stripped alias(es) owned by other pages from proposal {id}: {aliases}", {
       id: proposal.id,
-      aliases: dealiased.stripped.join(", "),
+      aliases: contained.stripped.join(", "),
     });
   }
-
-  // 1d. Body-link containment re-run against the in-queue index (TOCTOU symmetry with
-  //     the alias re-strip): a page linked in the body that was deleted between
-  //     draft and approve must not ship as a dangling wikilink. Null index ⇒ skip
-  //     (can't tell resolvable from phantom; don't de-link a whole page on an index
-  //     outage). This mutates finalContent, which drives the re-run-safe early
-  //     return below — an accepted, benign corner (a page deleted between draft and
-  //     approve, a crash after the page write, then a re-approve makes finalContent
-  //     no longer match disk, so the early return is skipped and create-mode falls
-  //     to `stale`; the row re-drafts next weekly cycle). When the index is
-  //     unchanged, containment is a no-op and idempotent recovery still holds.
-  let containedDraft = dealiased.draft;
-  if (index && !mechanical) {
-    const contained = containDraftBodyLinks(dealiased.draft, {
-      resolve: index.resolve,
-      selfTitle: draftTitle(proposal),
+  if (opts.log && contained.delinked.length > 0) {
+    log.warn("Apply: de-linked unresolvable body link(s) from proposal {id}: {links}", {
+      id: proposal.id,
+      links: contained.delinked.join(", "),
     });
-    containedDraft = contained.draft;
-    if (contained.delinked.length > 0) {
-      log.warn("Apply: de-linked unresolvable body link(s) from proposal {id}: {links}", {
-        id: proposal.id,
-        links: contained.delinked.join(", "),
-      });
-    }
   }
 
   const absTarget = path.join(deps.wikiDir, proposal.targetPath);
-  // `withTrailingNewline` COLLAPSES a run of trailing newlines, which on a lint
-  // row is a second change the diff the reviewer approved did not show.
-  const finalContent = mechanical ? containedDraft : withTrailingNewline(containedDraft);
+  const { finalContent } = contained;
   const current = await deps.readFile(absTarget);
 
-  // 2a. Re-run safety: the target already IS the draft — a crash after the file
-  //     write (before the terminal CAS) or a double-approve. Report applied
-  //     without rewriting; the log.md entry from the first pass stands.
-  if (current !== null && current === finalContent) {
-    log.info("Wiki-gardener apply: target already matches draft for {path} — treating as applied", {
-      path: proposal.targetPath,
-    });
-    // The crashed/double-approved pass may never have reached the wire stage or
-    // the reindex — run the idempotent wire stage here too, refresh, and reindex
-    // the union (including the target's own collection) before returning.
-    const modified = await runWireStage(proposal, deps, index);
-    try {
-      await deps.refreshIndex();
-    } catch (err) {
-      log.warn("Wiki-gardener apply: cache refresh failed: {error}", { error: errMsg(err) });
+  // 2a and 2b — see `judgeAgainstDisk`.
+  const judged = judgeAgainstDisk(proposal, finalContent, current);
+  if (judged.step === "refuse") return judged;
+  if (judged.step === "noop") {
+    if (opts.log) {
+      log.info("Wiki-gardener apply: target already matches draft for {path} — treating as applied", {
+        path: proposal.targetPath,
+      });
     }
-    reindexUnion(deps, proposal.targetPath, modified);
-    // Commit is the last step, and runs OUTSIDE the write section (see
-    // `applyWikiProposal`) — a re-run that changed nothing on disk stages an
-    // empty diff and the helper skips the commit quietly.
-    deferCommit(() => commitApply(proposal, deps, modified), commitPaths(proposal, modified));
-    return { outcome: "applied", writtenPath: proposal.targetPath, noop: true };
-  }
-
-  // 2b. Staleness — the target must be exactly as it was at draft time.
-  if (proposal.mode === "update") {
-    if (current === null) {
-      return { outcome: "stale", reason: "target file no longer exists" };
-    }
-    if (!proposal.baseHash || sha256(current) !== proposal.baseHash) {
-      return { outcome: "stale", reason: "target file changed since drafting" };
-    }
-  } else if (current !== null) {
-    return { outcome: "stale", reason: "target path already exists" };
+    return { step: "noop", absTarget };
   }
 
   // 2c. Stem collision, re-checked INSIDE the write queue. The approve route
@@ -674,13 +808,55 @@ async function applyInner(
     const stem = wikiPageStem(proposal.targetPath);
     const blocking = findStemTwin(index, stem, proposal.targetPath);
     if (blocking) {
-      log.warn("Wiki-gardener apply refused for {path}: stem is already owned by {blocking}", {
-        path: proposal.targetPath,
-        blocking: blocking.relPath,
-      });
-      return { outcome: "collision", reason: stemCollisionMessage(blocking, stem) };
+      if (opts.log) {
+        log.warn("Wiki-gardener apply refused for {path}: stem is already owned by {blocking}", {
+          path: proposal.targetPath,
+          blocking: blocking.relPath,
+        });
+      }
+      return { step: "refuse", outcome: { outcome: "collision", reason: stemCollisionMessage(blocking, stem) } };
     }
   }
+
+  return { step: "write", absTarget, finalContent };
+}
+
+async function applyInner(
+  proposal: WikiProposal,
+  deps: ApplyDeps,
+  deferCommit: DeferCommit,
+  opts: ApplyInnerOptions = {},
+): Promise<ApplyOutcome> {
+  // This index backs the update-target check (1a), the alias re-strip (1c) and
+  // the create-mode collision re-check (2c). It is the TTL cache, NOT a forced
+  // rebuild — in-queue freshness comes from the previous queue holder's step-5
+  // `refreshIndex()`, so it is current w.r.t. every apply-path write; an
+  // off-path write inside the TTL window is the documented residual.
+  const index = await deps.getWikiIndex();
+
+  const pre = await checkBeforeWrite(proposal, deps, index, { log: true });
+  if (pre.step === "refuse") return pre.outcome;
+  const { absTarget } = pre;
+
+  // 2a. The target already IS the draft — see `checkBeforeWrite`.
+  if (pre.step === "noop") {
+    // The crashed/double-approved pass may never have reached the wire stage or
+    // the reindex — run the idempotent wire stage here too, refresh, and reindex
+    // the union (including the target's own collection) before returning.
+    const modified = await runWireStage(proposal, deps, index);
+    try {
+      await deps.refreshIndex();
+    } catch (err) {
+      log.warn("Wiki-gardener apply: cache refresh failed: {error}", { error: errMsg(err) });
+    }
+    reindexUnion(deps, proposal.targetPath, modified);
+    // Commit is the last step, and runs OUTSIDE the write section (see
+    // `applyWikiProposal`) — a re-run that changed nothing on disk stages an
+    // empty diff and the helper skips the commit quietly.
+    deferCommit(() => commitApply(proposal, deps, modified), commitPaths(proposal, modified));
+    return { outcome: "applied", writtenPath: proposal.targetPath, noop: true };
+  }
+  const { finalContent } = pre;
 
   // 3. Write the draft.
   try {
@@ -693,10 +869,8 @@ async function applyInner(
   //    write — the page is the source of truth — so it degrades to a warning.
   //    Skipped for a GROUP apply, which files one entry for every row it wrote.
   if (!opts.skipLog) try {
-    const logPath = path.join(deps.wikiDir, "log.md");
-    const existingLog = await deps.readFile(logPath);
     const entry = `## [${todayOslo(deps.now())}] ${proposal.mode} | ${draftTitle(proposal)}\n- via ${logWriterFor(proposal)}, ${proposal.sourceDocs.length} sources`;
-    await deps.writeFile(logPath, insertLogEntry(existingLog, entry));
+    await appendWikiLogEntry(path.join(deps.wikiDir, WIKI_LOG_FILE), entry, deps);
   } catch (err) {
     log.warn("Wiki-gardener apply: log.md update failed for {path}: {error}", {
       path: proposal.targetPath,

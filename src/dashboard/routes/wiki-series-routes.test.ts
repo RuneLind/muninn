@@ -453,6 +453,75 @@ describe("what the 200 reports, and the two races the write can lose", () => {
 });
 
 describe("one labelled member per series", () => {
+  test("judges rule 4 on the members' on-disk state inside the section (architecture review 2026-10, finding 22)", async () => {
+    // The census used to read the index built BEFORE the queue, so a label
+    // another request wrote between that build and this write was invisible
+    // and the series ended up two-headed.
+    const OTHER = "plans/other-head.mdx";
+    const otherAbs = path.join(root, OTHER);
+    await writeFile(otherAbs, md("Other head", ["series: solo"]), "utf8");
+    try {
+      const target = await read(LONE);
+      const res = await post(
+        { wiki: "w", relPath: LONE, baseHash: sha256(target), series: "solo", seriesLabel: "Second name" },
+        {},
+        {
+          readFile: async (abs) => {
+            if (abs.endsWith(LONE)) {
+              // A concurrent request labels the other member after the index
+              // was built and before this write's section reads the target.
+              await writeFile(otherAbs, md("Other head", ["series: solo", "series_label: First name"]), "utf8");
+            }
+            return readFile(abs, "utf8").catch(() => null);
+          },
+        },
+      );
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ twoHeaded: true, headRelPath: OTHER });
+      expect(await read(LONE)).toBe(target);
+    } finally {
+      await rm(otherAbs, { force: true });
+    }
+  });
+
+  test("sees a page a concurrent request moved INTO the series with a label (finding 22, fix round 1)", async () => {
+    // The joiner is in NO series when the index is built, so a census over the
+    // index's series members never re-reads it — the on-path race that left
+    // the series two-headed.
+    const MEMBER = "plans/member-y.mdx";
+    const JOINER = "plans/joiner-z.mdx";
+    const memberAbs = path.join(root, MEMBER);
+    const joinerAbs = path.join(root, JOINER);
+    await writeFile(memberAbs, md("Member Y", ["series: duo"]), "utf8");
+    await writeFile(joinerAbs, md("Joiner Z", ["plan_status: proposed"]), "utf8");
+    try {
+      const target = await read(MEMBER);
+      const res = await post(
+        { wiki: "w", relPath: MEMBER, baseHash: sha256(target), series: "duo", seriesLabel: "Name B" },
+        {},
+        {
+          readFile: async (abs) => {
+            if (abs.endsWith(MEMBER)) {
+              await writeFile(
+                joinerAbs,
+                md("Joiner Z", ["plan_status: proposed", "series: duo", "series_label: Name A"]),
+                "utf8",
+              );
+            }
+            return readFile(abs, "utf8").catch(() => null);
+          },
+        },
+      );
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ twoHeaded: true, headRelPath: JOINER });
+      expect(await read(MEMBER)).toBe(target);
+    } finally {
+      await rm(memberAbs, { force: true });
+      await rm(joinerAbs, { force: true });
+      __resetWikiCacheForTest();
+    }
+  });
+
   test("409s a label on a series another member already names", async () => {
     // The rail reads the label off a MEMBER and silently picks one when two
     // carry it, so a second `series_label:` is an invisible fork of what the
@@ -531,6 +600,33 @@ describe("one labelled member per series", () => {
     } finally {
       await rm(path.join(root, lower), { force: true });
       await rm(path.join(root, upper), { force: true });
+      __resetWikiCacheForTest();
+    }
+  });
+
+  test("reports a mixed-case head by its real relPath, not the normalized key", async () => {
+    const head = "plans/Case-Z.mdx";
+    await writeFile(
+      path.join(root, head),
+      md("Case Z", ["series: Cases", "series_label: Case series"]),
+      "utf8",
+    );
+    try {
+      const before = await read(LONE);
+      const res = await post({
+        wiki: "w",
+        relPath: LONE,
+        baseHash: sha256(before),
+        series: "cases",
+        seriesLabel: "A second name",
+      });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { headRelPath: string; error: string };
+      expect(body.headRelPath).toBe(head);
+      expect(body.error).toContain(head);
+      expect(await read(LONE)).toBe(before);
+    } finally {
+      await rm(path.join(root, head), { force: true });
       __resetWikiCacheForTest();
     }
   });

@@ -19,7 +19,7 @@ import { findWikiByRoot, getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
-import { applyWikiProposal, draftTitle, type ApplyDeps } from "../../gardener/apply.ts";
+import { applyWikiProposal, draftTitle, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import {
   approveWikiProposal,
@@ -259,6 +259,13 @@ interface ProposalView {
   factcheck: ProposalFactcheckFlag | null;
   /** A `stale` row Redraft replaced: the replacement's id (`redraftReplacements`). */
   replacedBy: string | null;
+  /** A reviewable update row Approve would refuse as `stale`: the reason
+   *  (`listingDrift`, the apply's own containment and CAS on the listing's
+   *  index), else null. A page equal to the CONTAINED draft is not drift — the
+   *  apply no-ops it — but a page equal only to the raw draft is, when
+   *  containment now changes the draft. The diff is against the page as it is
+   *  now, not the page the draft was written on. */
+  drifted: string | null;
 }
 
 /** The checked docs as `<collection>/<docId>` → mark. A missing table or a failed
@@ -1352,8 +1359,12 @@ export function registerWikiGardenerRoutes(
         // it `previewHtml` for a page the reviewer can open in the reader.
         const mechanical = p.kind === "lint";
         let diff: DiffLine[] | null = null;
+        let drifted: string | null = null;
         if (reviewable && p.mode === "update" && root) {
           const current = await readFileOrNull(path.join(root, p.targetPath));
+          // The apply's own containment + CAS, on this listing's index, so the
+          // flag says exactly what Approve will do.
+          drifted = listingDrift(p, current, index);
           // A lint diff is one frontmatter line on a page the reviewer can open
           // in the reader, and the gate ships one per touched page — so its
           // context is TRIMMED. `lineDiff`'s full context is right for a drafted
@@ -1439,6 +1450,7 @@ export function registerWikiGardenerRoutes(
               : undefined,
           ),
           replacedBy: replacements.get(p.id) ?? null,
+          drifted,
         };
       }),
     );
@@ -3006,8 +3018,8 @@ export function registerWikiGardenerRoutes(
       return c.json(
         {
           outcome: "stopped",
-          // Written pages stay written — there is no rollback, so the honest
-          // answer names the boundary rather than implying nothing happened.
+          // The preflight refuses a stale member before any write; a later
+          // failure leaves earlier pages written, so the answer names both.
           applied,
           noop,
           skipped,

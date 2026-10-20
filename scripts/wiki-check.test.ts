@@ -49,6 +49,17 @@ const REPORT_TOP = [
   "</DecisionLog>",
   "",
 ].join("\n");
+const STATUS_TILES = [
+  "---",
+  "title: ST",
+  "---",
+  '<StatusRows view="tiles" tones="Nowhere:red">',
+  "",
+  "- **Build:** a first part far longer than any tile reads \u00b7 detail",
+  "",
+  "</StatusRows>",
+  "",
+].join("\n");
 const DECISION_CHAIN = [
   "---",
   "title: DC",
@@ -135,6 +146,7 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/a.mdx"), UNKNOWN_ATTR);
   await Bun.write(path.join(tmp, "page-checks/plans/rs.mdx"), CULLED_TEXT_SHAPES);
   await Bun.write(path.join(tmp, "page-checks/plans/dc.mdx"), DECISION_CHAIN);
+  await Bun.write(path.join(tmp, "page-checks/plans/st.mdx"), STATUS_TILES);
   await Bun.write(path.join(tmp, "page-checks/plans/o.mdx"), ORDERED);
   await Bun.write(path.join(tmp, "page-checks/plans/m.mdx"), TLDR_NO_MORE);
   await Bun.write(path.join(tmp, "page-checks/plans/d.mdx"), SHIPPED);
@@ -281,6 +293,8 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
         "component-attr",
         "decision-first-sentence",
         "status-row-long",
+        "status-tones",
+        "status-tile-long",
         "case-board-labels",
         "index-truncation",
         "nested-annotation",
@@ -292,6 +306,17 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
       ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
+  });
+
+  test("wiki-check reports a tiles block's status-tones and status-tile-long, as lintWiki does", async () => {
+    const root = path.join(tmp, "page-checks");
+    const keys = new Set(["status-tones", "status-tile-long"]);
+    const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => f.relPath === "plans/st.mdx" && keys.has(f.check));
+    const cli = (await runWikiCheck([path.join(root, "plans/st.mdx")])).out
+      .map((l) => JSON.parse(l) as { check: string; relPath: string })
+      .filter((f) => keys.has(f.check));
+    expect(cli.map((f) => f.check)).toEqual(["status-tones", "status-tile-long"]);
+    expect(cli).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
   });
 });
 

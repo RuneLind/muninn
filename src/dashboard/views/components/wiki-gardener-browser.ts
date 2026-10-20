@@ -35,7 +35,8 @@ import {
   type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
-import { groupStatusSummary, groupChipTone } from "./wiki-gardener-group.ts";
+import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
+import { approveButtonFor, singleDriftNote } from "./wiki-gardener-drift.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 interface SourceDoc {
@@ -81,6 +82,8 @@ interface ProposalView {
   } | null;
   /** A stale row Redraft replaced: the replacement's id. */
   replacedBy?: string | null;
+  /** Why Approve would be refused: the page changed since drafting. */
+  drifted?: string | null;
 }
 interface ProposalsResponse {
   proposals: ProposalView[];
@@ -171,6 +174,9 @@ function cardHtml(p: ProposalView): string {
     html +=
       '<div class="gard-stale-note">Target changed since drafting — this proposal was not applied. The topic becomes eligible again on the next weekly gardener run.</div>';
   }
+  if (p.drifted && p.status === "draft") {
+    html += `<div class="gard-stale-note" data-drifted>${esc(singleDriftNote(p.drifted))}</div>`;
+  }
   html += factcheckNoteHtml(p);
   if (p.rationale) {
     html += `<div class="gard-rationale">${esc(p.rationale)}</div>`;
@@ -204,9 +210,7 @@ function cardHtml(p: ProposalView): string {
   if (isDraft) {
     const locked = !!p.factcheck?.needsRedraft;
     html += '<div class="gard-actions">';
-    html += locked
-      ? `<button class="gard-btn gard-approve" data-action="approve" data-fc-locked disabled title="Drafted without the current fact-check — redraft it first">Approve</button>`
-      : `<button class="gard-btn gard-approve" data-action="approve">Approve</button>`;
+    html += approveButtonFor(p);
     if (locked) html += `<button class="gard-btn gard-redraft" data-action="redraft">Redraft</button>`;
     html += `<button class="gard-btn gard-reject" data-action="reject">Reject</button>`;
     html += '<span class="gard-outcome"></span>';
@@ -253,8 +257,11 @@ function groupCardHtml(rows: ProposalView[]): string {
 
   html += '<div class="gard-body">';
   if (head.rationale) html += `<div class="gard-rationale">${esc(head.rationale)}</div>`;
+  const driftNote = groupDriftNote(rows);
+  if (driftNote) html += `<div class="gard-stale-note" data-drifted>${esc(driftNote)}</div>`;
   for (const row of rows) {
-    html += `<div class="gard-group-diff"><div class="gard-group-diff-path">${esc(row.targetPath)} <span class="gard-group-diff-status">${esc(row.status)}</span></div>`;
+    const driftMark = row.status === "draft" && row.drifted ? ' <span class="gard-group-diff-status">changed since drafting</span>' : "";
+    html += `<div class="gard-group-diff"><div class="gard-group-diff-path">${esc(row.targetPath)} <span class="gard-group-diff-status">${esc(row.status)}</span>${driftMark}</div>`;
     html += row.diff && row.diff.length ? diffHtml(row.diff) : '<div class="gard-empty">No diff (the page changed since drafting).</div>';
     html += "</div>";
   }

@@ -46,7 +46,7 @@
 
 import path from "node:path";
 import { isPathConfined } from "../gardener/draft.ts";
-import { insertLogEntry } from "../gardener/apply.ts";
+import { appendWikiLogEntry } from "../gardener/apply.ts";
 import { sha256, todayOslo } from "../gardener/util.ts";
 import { runWikiWriteExclusive } from "./queue.ts";
 import { takeWikiWriteLock } from "./lockfile.ts";
@@ -361,10 +361,8 @@ export async function writeWikiPage(
     // Skipped wholesale in no-log mode — see `PageWriteNoLogOptions`.
     try {
       if (logging) {
-        const logPath = path.join(wikiDir, "log.md");
-        const existingLog = await opts.readFile(logPath);
         const entry = `## [${todayOslo(opts.now())}] ${logging.logKind} | ${logging.logTitle}\n- ${resolveLate(logging.logLine)}`;
-        await opts.writeFile(logPath, insertLogEntry(existingLog, entry));
+        await appendWikiLogEntry(path.join(wikiDir, "log.md"), entry, opts);
       }
     } catch (err) {
       log.warn("Wiki page write: log.md update failed for {path}: {error}", {
