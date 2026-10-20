@@ -1075,11 +1075,14 @@ operator auditing themselves on their own feed.
   unfiltered while `/api/traces/:traceId` is owner-guarded, so on a `local`
   instance an admin sees rows whose spans answer empty. The waterfall SAYS so;
   filtering the list is a separate change.
-- **A `user` still sees the operator nav.** The nav is rendered on every page
-  including `/chat`, so a role `user` can click `/traces` and get a 403 rather
-  than not seeing the link. Hiding it needs the role at render time on the chat
-  page and is deliberately out of this pass — a 403 is honest, an invisible link
-  is a second place for the boundary to be spelled.
+- **On `nais`, `/chat` is unlinked, not closed.** Since #683, `renderNav`
+  renders no `<nav>` for role `user` (on `/wiki` and `/chat`), and `GET /` sends
+  that role to `/wiki` when the profile serves the wiki read slice
+  (`servesWikiReadSliceOnly`). `/chat` stays in `USER_ZONE_PATHS`, so a typed
+  URL or an old bookmark still reaches a working chat page with no links back.
+  This is deliberate: retention on `messages` is unsettled, so chat is not
+  advertised, and closing it on the pod is a zone change. When chat opens, the
+  follow-up is a role-`user` nav with exactly Wiki and Chat.
 - **A resource guard's owner is a `users.id`, and `local` mode pins ONE.** So on
   an authenticating instance at the DEFAULT `MUNINN_LOCAL_ROLE=user`, the
   operator's own Telegram-owned traces and threads answer 404 to their own web

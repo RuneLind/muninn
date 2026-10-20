@@ -290,7 +290,7 @@ The collection path must send **compact one-liners** (`compactTweetText`), not f
 | `amplificationMinAuthors` | 3 | Distinct **amplifying** authors (normalized handles, the article's own owner excluded) required before an article earns a reserved digest slot. See "X-Article amplification signal". Validated at read time — a non-integer / `< 1` value is warned about and dropped back to the default. |
 | `amplificationMaxPromotions` | 1 | Reserved digest slots per run — the **bound** on promotion displacement (at most this many docs can ever be pushed out of the digest by a promotion; collapse is separately unbounded). `0` disables promotion; **collapse still runs** (it is a de-duplication fix, not a ranking preference). Validated like the field above, as an integer in **`0..20`** — the upper bound exists because the knob's whole job is to CAP displacement, so a fat-fingered `1e9` must not silently uncap it. At run time the effective value is further clamped to `min(maxPromotions, topN)`. |
 | `candidateMinScoreByKind` | — | Per-kind capture-floor overrides `{ "x-post"?, "x-link"? }` (name + semantics mirror the anthropic vertical). `"x-post"` overrides the long-form base floor (else `candidateMinScore`, 0.6) — the non-top raise still stacks on top; `"x-link"` sets the pointer-tweet floor (else 0.7). |
-| `captureMaxItems` | **3** (`DEFAULT_CAPTURE_MAX_ITEMS`, max 25) | **Per-run capture limit K** — the maximum items ONE gate run may admit, applied **after** the per-kind floors. Both a prompt clause (`withCaptureLimit`, appended to the base prompt *before* `withInterestProfile` so the profile block still lands last) and a deterministic post-gate cap (`applyCaptureLimit`). ⚠️ **Degrade direction is the INVERSE of every other capture knob:** absent or invalid ⇒ **ON at the default**, never unlimited — an unbudgeted gate is the defect this exists to fix, so a mistyped value must not silently restore it (contrast `captureAmplifyMin`, where invalid ⇒ off). Sizing: mean `aboveFloor` was **17.9** over 26 measured runs at ~7.7 capture runs/day, so K=3 ⇒ ~23 rows/day against ~138 pre-budget. Wave admissions (step 2b) are deliberately NOT capped — a wave paying out is cross-run bookkeeping, not this run's discretionary pick. See "Capture budget" below. |
+| `captureMaxItems` | **3** (`DEFAULT_CAPTURE_MAX_ITEMS`, max 25) | **Per-run capture limit K** — the maximum items ONE gate run may admit, applied **after** the per-kind floors. Both a prompt clause (`withCaptureLimit`, appended to the base prompt *before* `withInterestProfile` so the profile block still lands last) and a deterministic post-gate cap (`applyCaptureLimit`). ⚠️ **Degrade direction is the INVERSE of every other capture knob:** absent or invalid ⇒ **ON at the default**, never unlimited — an unbudgeted gate is the defect this exists to fix, so a mistyped value must not silently restore it (contrast `captureAmplifyMin`, where invalid ⇒ off). Sizing: mean `aboveFloor` was **17.9** over 26 measured runs at ~7.7 capture runs/day, so K=3 ⇒ ~23 rows/day against ~138 pre-budget. Wave admissions (step 2b) are deliberately NOT capped — a wave paying out is cross-run bookkeeping, not this run's discretionary pick. See the «Capture limit (2026-07-29)» bullet below. |
 | `captureAmplifyMin` | — (**OFF**) | **Step 2b flag.** Distinct POINTER authors a destination needs before SUB-TIER pointers (authors outside the tracked top-5%, which `isLinkTweet` excludes so they vanish today) can earn it a candidate row. **Unset ⇒ the whole any-tier path is off**: no gate-batch growth, no votes, byte-identical to step 2a. A present-but-invalid value (non-integer, `< 1`, wrong type) is warned about and also treated as OFF — the degrade direction for a mistyped knob must be "no batch growth", never "capture everything". The warn is emitted **once per process per watcher per bad value** (the knob is read on every 2h capture run, and a static config defect repeated forever is noise). Recommended value 3 (`DEFAULT_CAPTURE_AMPLIFY_MIN`); that ≥3-distinct-authors bar IS the compensating control for relaxing the top-author-only gate, so `1` effectively captures every pointer tweet on X. ⚠️ **Enablement gate — not just a preference:** turning it on grows the capture gate's batch by up to **+26** items (`maxDocs` 80 minus today's ~54 eligible floor), and the gate is the leg that ran **~18h with zero successful runs** on 07-25. Enable only once the `x-capture-gate ok` outcome log shows **≥2× duration headroom at current n**, or once chunking has shipped. See "Any-tier amplifier admission" below. |
 
 ### Silent alerts and the quality-gate pattern
@@ -1434,17 +1434,30 @@ the wiki** from this path.
 (the three SERIES checks, `src/wiki/lint-series.ts`) a finding can carry a `fix`,
 and the run SEEDS those into `wiki_proposals` as `kind: "lint"` rows for the
 human review gate — a DB write, never a wiki one, and refused outright when the
-instance is wiki-readonly or the ROOT is registered read-only. The seeding is
-gated on a finding carrying a fix at all, so a wiki whose findings are all
-hygiene ones makes no DB call, and it is best-effort: a seeding failure warns and
-the report still goes out. Rules and cuts: `src/wiki/CLAUDE.md`; the rows, the
-group apply and why Dismiss is durable: `src/gardener/CLAUDE.md`.
+instance is wiki-readonly or the ROOT is registered read-only. A pass seeds
+when the bot has a `wikiDir`, `getWikiIndex` reads the wiki, and neither
+read-only check refuses; it seeds even with zero fixable findings. A pass with
+no `wikiDir` or an unreadable wiki returns `[]` before seeding. The seeder's
+self-heal retires every live `draft` group no current finding mints, and a wiki
+whose fixable findings are all fixed is exactly where that matters. The cost is
+one indexed read per wiki per week. Do not restore a `fixable.length` guard in
+`wiki-linter.ts`; the first cut had one, and it left fixed cards live forever.
+Seeding is best-effort: a seeding failure warns and the report still goes out.
+Rules and cuts: `src/wiki/CLAUDE.md`; the rows, the group apply and why
+Dismiss is durable: `src/gardener/CLAUDE.md`.
 
 - **Lint engine** (`src/wiki/lint.ts`): pure functions over a built `WikiIndex`
   plus per-file content reads. Each finding is `{ check, relPath, message,
-  detail?, fix? }` — `fix` on check 8's findings alone. Seven hygiene checks,
-  plus the three series checks of check 8 (`src/wiki/CLAUDE.md` owns those
-  rules, their cuts and their measurements):
+  detail?, fix? }` — `fix` on check 8's findings alone. The full set of checks
+  is `LINT_CHECKS` in `src/wiki/lint.ts`. Where each check's rules live:
+  checks 1–5 and 7 in the list below; check 6 splits, with its lint-specific
+  facts in the list below and the rule it enforces in `src/web/CLAUDE.md`;
+  check 6b has a one-line summary below and its rule in `src/web/CLAUDE.md`;
+  check 10 (`question-block`) is in the answer cards' **Lint** bullet in
+  `src/web/CLAUDE.md`; checks 8, 9 and 11 onward are in the «Lint check N»
+  sections of `src/wiki/CLAUDE.md`, which this command lists:
+  `grep -n '^#.*Lint check' src/wiki/CLAUDE.md`.
+  The engine's first checks:
   1. **broken-link** — re-runs `extractWikilinks` + `extractMarkdownLinks` per
      page and resolves against the index (the store's builder silently drops
      unresolved targets, so resolution is recomputed here); `../`-escapes are

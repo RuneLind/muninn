@@ -53,7 +53,7 @@ docker exec muninn-postgres psql -U muninn -d muninn_test -c "YOUR SQL HERE"
 
 ## Schema overview
 
-33 tables; the complete schema is `db/init.sql`, and this overview covers the ones most often queried. All timestamps are `TIMESTAMPTZ`. UUIDs auto-generated. Most tables have `bot_name` for multi-bot isolation.
+The complete schema is `db/init.sql` (count its tables with `grep -c 'CREATE TABLE' db/init.sql`), and this overview covers the ones most often queried. All timestamps are `TIMESTAMPTZ`. UUIDs auto-generated. Most tables have `bot_name` for multi-bot isolation.
 
 ### Core data tables
 
@@ -97,7 +97,8 @@ docker exec muninn-postgres psql -U muninn -d muninn_test -c "YOUR SQL HERE"
 - `id` UUID PK, `trace_id`, `parent_id`, `name`, `kind` (root|span|event), `status` (ok|error), `bot_name`, `user_id`, `username`, `platform`, `started_at`, `duration_ms`, `attributes` JSONB, `created_at`
 
 **prompt_snapshots** — Full prompt captures per trace
-- `id` UUID PK, `trace_id`, `system_prompt`, `user_prompt`, `created_at`
+- `id` UUID PK, `trace_id`, `system_prompt`, `user_prompt`, `created_at`, `pass` (the model span: `''` for a chat turn, `claude` for a summary pass, `claude:select` for the YouTube selection pass; unique per `(trace_id, pass)`), `kind` (`chat`|`capture`, CHECKed), `source_url` (capture rows only)
+- Query capture snapshots with `kind = 'capture'` and the `pass` you want; chat and capture rows have separate retention windows.
 
 **schema_migrations** — Migration tracking
 - `version` TEXT PK, `name`, `applied_at`
