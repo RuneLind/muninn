@@ -92,10 +92,12 @@ export function prStateWord(state: PrState, language: QuestionLanguage): string 
   return STATE_WORDS[language][state];
 }
 
+// One shared `name`: opening a node closes the open one, so a row's popover
+// band holds one popover.
 function node(id: string, kind: "q" | "d", label: string, language: QuestionLanguage, struck = false): string {
   const text = escapeHtml(label);
   return (
-    `<details class="dc-node dc-${kind}${struck ? " dc-struck" : ""}"><summary>${escapeHtml(id)}</summary>` +
+    `<details class="dc-node dc-${kind}${struck ? " dc-struck" : ""}" name="dc-chain"><summary>${escapeHtml(id)}</summary>` +
     `<div class="dc-pop">${struck ? `<s>${text}</s>` : text} ` +
     `<a class="dc-go" href="#${anchorSlug(id)}" data-dc-ref="${escapeHtml(id)}">${GO_TO[language]} ${escapeHtml(id)} ↓</a></div></details>`
   );

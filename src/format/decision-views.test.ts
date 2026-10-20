@@ -66,7 +66,7 @@ describe("formatWebHtml views gate", () => {
     const html = formatWebHtml(PAGE, { reader: true, views: true, language: "no" });
     const rows = [...html.matchAll(/<div class="dc-row[^"]*">[\s\S]*?<summary>(D\d+)<\/summary>/g)].map((m) => m[1]);
     expect(rows).toEqual(["D3", "D2", "D1"]);
-    expect(html).toContain('<details class="dc-node dc-d dc-struck"><summary>D2</summary><div class="dc-pop"><s>Rows per item.</s>');
+    expect(html).toContain('<details class="dc-node dc-d dc-struck" name="dc-chain"><summary>D2</summary><div class="dc-pop"><s>Rows per item.</s>');
     expect(html).toContain('<span class="dc-snudd">Snudd</span>');
     expect(html).toContain("Beslutningskjede");
   });
@@ -257,7 +257,7 @@ describe("F13/F14: chain rows sit on one shared grid and read as a unit when nar
     expect(html).not.toContain('<span class="dc-outs"></span>');
     // D3: no question ⇒ the row opens on its decision; D2: neither questions
     // nor outputs ⇒ the decision cell alone.
-    expect(html).toContain('<div class="dc-row"><span class="dc-dec"><details class="dc-node dc-d"><summary>D3</summary>');
+    expect(html).toContain('<div class="dc-row"><span class="dc-dec"><details class="dc-node dc-d" name="dc-chain"><summary>D3</summary>');
     expect(html).toMatch(/<div class="dc-row dc-reversed"><span class="dc-dec">[\s\S]*?<span class="dc-snudd">Reversed<\/span><\/span><\/div>/);
   });
 
@@ -268,10 +268,25 @@ describe("F13/F14: chain rows sit on one shared grid and read as a unit when nar
     expect([".s .dc-qs", ".s .dc-a-q", ".s .dc-dec", ".s .dc-a-out", ".s .dc-outs"].map((s) => rule(s).match(/grid-column:\s*(\d)/)?.[1])).toEqual(["1", "2", "3", "4", "5"]);
   });
 
-  test("the popover is out of flow, anchored to the rows box", () => {
+  test("the popover sits in a band its own row reserves, so it covers no other row", () => {
     expect(rule(".s .dc-pop")).toMatch(/position:\s*absolute/);
-    expect(rule(".s .dc-rows")).toMatch(/position:\s*relative/);
+    expect(rule(".s .dc-pop")).toMatch(/bottom:\s*0/);
+    expect(rule(".s .dc-pop")).toMatch(/height:\s*var\(--dc-pop-h\)/);
+    expect(rule(".s .dc-row")).toMatch(/position:\s*relative/);
     expect(rule(".s .dc-node")).not.toMatch(/position:/);
+    expect(css).toMatch(/\.s \.dc-row:has\(\.dc-node\[open\]\)\s*\{[^}]*padding-bottom:\s*calc\(var\(--dc-pop-h\)/);
+  });
+
+  test("one node opens at a time: every node shares one exclusive details name", () => {
+    const html = formatWebHtml(PAGE, { reader: true, views: true });
+    const names = [...html.matchAll(/<details class="dc-node[^"]*"([^>]*)>/g)].map((m) => m[1]!.match(/name="([^"]*)"/)?.[1]);
+    expect(names.length).toBeGreaterThan(3);
+    expect(new Set(names)).toEqual(new Set(["dc-chain"]));
+  });
+
+  test("the questions and decision columns are capped, so one long row moves no other", () => {
+    const cols = rule(".s .dc-rows").match(/grid-template-columns:\s*([^;]*);/)?.[1] ?? "";
+    expect(cols).toMatch(/^fit-content\((?:min\([^)]*\)|[^)]*)\) auto fit-content\((?:min\([^)]*\)|[^)]*)\) auto /);
   });
 
   test("the narrow form reads the view's width, not the viewport's, and keeps the arrows", () => {
@@ -298,5 +313,18 @@ describe("F15: the strip legend lists each look once", () => {
     const html = formatWebHtml(["# Plan", "", NEXT, LOG, ledger].join("\n"), { reader: true, views: true });
     const keys = [...html.matchAll(/<span class="dc-key"><span class="dc-sw dc-s-([a-z-]+)" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]}=${m[2]}`);
     expect(keys).toEqual(["merged=merged", "closed=closed / dropped", "planned=planned / optional", "open=open"]);
+  });
+
+  test("a state repeated across rows is named once", () => {
+    const ledger = ["**PR ledger.**", "", "| PR | State | Decisions |", "|---|---|---|", "| 1 — a | open | D1 |", "| 2 — b | open | D2 |", "| 3 — c | measurement | D2 |", "| 4 — d | open | D3 |", "| 5 — e | measurement | D3 |", ""].join("\n");
+    const html = formatWebHtml(["# Plan", "", NEXT, LOG, ledger].join("\n"), { reader: true, views: true });
+    const keys = [...html.matchAll(/<span class="dc-key"><span class="dc-sw dc-s-([a-z-]+)" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]}=${m[2]}`);
+    expect(keys).toEqual(["open=open / measurement"]);
+  });
+
+  test("the swatch's base border comes before the state rules, so a state's look wins", () => {
+    const sw = css.indexOf(".s .dc-sw {");
+    expect(sw).toBeGreaterThan(-1);
+    expect(sw).toBeLessThan(css.indexOf(".s .dc-s-"));
   });
 });
