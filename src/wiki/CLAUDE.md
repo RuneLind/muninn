@@ -732,7 +732,8 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   read `seriesHead`/`newestSeriesPlan`; check 8.3(b) reads `seriesHead`, and
   8.3(a)/(c) read `headOf` (no label rung) — both count culled members. The
   editor's one-label check (`otherLabelledMember`) scans raw pages, not the
-  census, as on main (known gap, see the PR's known limits). So 8.3(a) normalises LIVE
+  census, re-reading every indexed series member's frontmatter INSIDE the write
+  section, so a label another writer added since the index was built counts. So 8.3(a) normalises LIVE
   members to a culled head's spelling, 8.3(b) removes a live member's label when
   a culled head carries the newer one, 8.3(c) joins under the head's spelling,
   and a finding whose head is culled is filed against the newest edited page.
