@@ -210,6 +210,11 @@ describe("a case on two leaves", () => {
     expect(caseFindings(r)).toHaveLength(1);
   });
 
+  test("a year on the path and on the leaf is named once", () => {
+    const r = read(tree("Renew=good", ["- *2024:*", "  - *In 2024:* → Renew — LIB-1"].join("\n")));
+    expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([["2024"]]);
+  });
+
   test("two leaves under one year parent share that year", () => {
     const r = read(tree("Renew=good;Return=muted", ["- *2024:*", "  - *Yes:* → Renew — LIB-1", "  - *No:* → Return — LIB-1"].join("\n")));
     expect(caseFindings(r)).toHaveLength(1);
@@ -226,6 +231,7 @@ describe("what drops silently is named", () => {
     ["a bold edge label", "**yes:** → Yes"],
     ["a bold italic edge label", "***yes:*** → Yes"],
     ["a bold italic arrow run", "***→ Yes***"],
+    ["an ASCII arrow in a bold run", "**-> Yes**"],
     ["a lead with * in a code span", "*`a*b`:* → Yes"],
   ])("an item with an arrow that is not a leaf: %s", (_name, item) => {
     const r = read(tree("Yes=good;Renew=good", `- ${item}`));
@@ -242,6 +248,7 @@ describe("what drops silently is named", () => {
     ["no arrow", "- Is the book reserved?"],
     ["a leaf", "- *Yes:* → Renew"],
     ["an arrow in a link destination", "- See [the rule](http://x/→)"],
+    ["an ASCII arrow inside the text", "- Is a -> b true?"],
   ])("no finding for %s", (_name, item) => {
     expect(notLeaf(read(tree("Renew=good", item)))).toEqual([]);
   });

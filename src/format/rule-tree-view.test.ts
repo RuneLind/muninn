@@ -279,6 +279,7 @@ describe("the reader and the lint read one tree", () => {
     ["a bold italic edge label", "***Yes:*** → Renew — LIB-1"],
     ["a bold italic arrow run", "***→ Renew*** — LIB-1"],
     ["a lead with * in a code span", "*`a*b`:* → Renew — LIB-1"],
+    ["an ASCII arrow in a bold run", "**-> Renew** — LIB-1"],
     ["a full stop after the id", "→ Renew — LIB-1."],
     ["a lowercase id", "→ Renew — lib-1"],
     ["ids joined by a word", "→ Renew — LIB-7 og LIB-8"],
