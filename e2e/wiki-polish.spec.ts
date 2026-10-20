@@ -50,7 +50,7 @@ const PAGE = [
   "",
   "**Words on the page**",
   "",
-  "- **Hold:** a loan kept back until the desk has looked at it.",
+  "- **Hold:** a loan kept back until the desk has looked at it (D2).",
   "- **Renewal:** another loan period on the same book.",
   "",
   "</Glossary>",
@@ -293,6 +293,9 @@ test.describe("Wiki reader: polish", () => {
     await expect(mark.locator(".gl-term")).toHaveAccessibleDescription(/Hold a loan kept back/);
     await page.keyboard.press("Escape");
     await expect(mark.locator(".gl-tip")).toBeHidden();
+    // An id in a definition stays text: a link inside role=tooltip is a tab stop in a hidden tip.
+    await expect(mark.locator(".gl-tip")).toContainText("(D2)");
+    await expect(page.locator(".wiki-article .gl-tip a")).toHaveCount(0);
   });
 
   test("forced colours: a pressed square is Highlight, the lanes' dots are CanvasText", async ({ page }) => {
