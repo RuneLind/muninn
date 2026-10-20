@@ -509,9 +509,8 @@ function renderInline(text: string): string {
 
   // Inline code FIRST — parking it before the component scan keeps a complete
   // component tag inside backticks literal (the sentinel carries no `<`).
-  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
-    ph.add("INLINE", `<code style="${S.code}">${escapeHtml(code)}</code>`),
-  );
+  // Spans pair by the shared exact-N rule (`renderCodeSpans`).
+  let result = renderCodeSpans(text, (s) => s, (code) => ph.add("INLINE", `<code style="${S.code}">${escapeHtml(code)}</code>`));
 
   result = scanInlineComponents(result)
     .map((seg) => {

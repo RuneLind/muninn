@@ -558,6 +558,55 @@ test("downloadVideo returns the output file, not a stream intermediate a failed 
   expect(r.videoPath).toBe(joinPath(r.work, "video.mp4"));
 }, 15_000);
 
+// -- downloadVideo timeout reaches yt-dlp's own children ---------------------
+// yt-dlp shells out to ffmpeg for the bv*+ba merge and the HLS fixup. A timeout
+// that signals yt-dlp alone leaves that ffmpeg running after the job failed.
+// The fake starts a sleeping grandchild, records its pid, and waits on it.
+test("downloadVideo's timeout kills the processes yt-dlp started", async () => {
+  const bin = testTempDirSync(joinPath(tmpdir(), "fake-ytdlp-group-"));
+  const work = testTempDirSync(joinPath(tmpdir(), "dl-work-group-"));
+  const pidFile = joinPath(bin, "grandchild.pid");
+  writeFileSync(joinPath(bin, "yt-dlp"), `#!/bin/sh\nsleep 30 &\necho $! > "${pidFile}"\nwait\n`);
+  chmodSync(joinPath(bin, "yt-dlp"), 0o755);
+  const script = `
+    import { downloadVideo } from ${JSON.stringify(joinPath(import.meta.dir, "media.ts"))};
+    try {
+      await downloadVideo("https://www.youtube.com/watch?v=x", ${JSON.stringify(work)}, { maxDurationSeconds: 600, timeoutMs: 500 });
+      console.log(JSON.stringify({ ok: true }));
+    } catch (e) {
+      console.log(JSON.stringify({ ok: false, error: e.message }));
+    }
+    process.exit(0);`;
+  let grandchild = 0;
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  try {
+    const proc = Bun.spawn([process.execPath, "-e", script], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    const result = JSON.parse(out.trim().split("\n").pop() ?? "{}") as { ok: boolean; error?: string };
+    expect(result.error).toMatch(/timed out/);
+    grandchild = Number(readFileSync(pidFile, "utf8").trim());
+    expect(grandchild).toBeGreaterThan(0);
+    for (let i = 0; i < 20 && alive(grandchild); i++) await Bun.sleep(50);
+    expect(alive(grandchild)).toBe(false);
+  } finally {
+    if (grandchild > 0 && alive(grandchild)) process.kill(grandchild, "SIGKILL");
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+}, 15_000);
+
 // -- extractKeyframes: the frames dir holds the kept frames and nothing else --
 // It is the summary call's one Read dir, so a dropped frame or a scratch file
 // left in it would widen what the model may read. Real ffmpeg (skips without

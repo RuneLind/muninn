@@ -8,6 +8,7 @@
  * {@link PageFiles} lookup built before `renderWikiHtml` runs.
  */
 import type { Block, CodeBlock } from "./markdown-ast.ts";
+import { codeSpanContent, lineCodeSpanRanges } from "./code-spans.ts";
 
 /** What the loader read for one `csv=`/`sql=` value. "Not found" and "outside
  *  the wiki root" are one reason, `unavailable`, so a page cannot tell them
@@ -224,15 +225,16 @@ export function queryLead(q: QueryAttrs): { head: string; answer: string } {
   };
 }
 
-/** `text` with each `` `code` `` span rendered by `code` and every other run by
- *  `plain` — the inline-code rule `renderInline` uses, for the surfaces that
- *  render attribute text without it. */
+/** `text` with each inline code span rendered by `code` (given the span's
+ *  content) and every other run by `plain`. Spans pair by CommonMark's exact-N
+ *  rule (`lineCodeSpanRanges`), the grammar every renderer shares, so
+ *  `` `` a ` b `` `` is one span. */
 export function renderCodeSpans(text: string, plain: (s: string) => string, code: (s: string) => string): string {
   let out = "";
   let last = 0;
-  for (const m of text.matchAll(/`([^`]+)`/g)) {
-    out += plain(text.slice(last, m.index)) + code(m[1]!);
-    last = m.index! + m[0].length;
+  for (const r of lineCodeSpanRanges(text)) {
+    out += plain(text.slice(last, r.start)) + code(codeSpanContent(text, r));
+    last = r.end;
   }
   return out + plain(text.slice(last));
 }

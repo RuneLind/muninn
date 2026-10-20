@@ -703,11 +703,12 @@ two legitimate jobs and neither may be dropped — the second waits, then runs, 
 its own 60 s budget starts when it does. ⚠️ The one exception is a
 `browser.close()` that does not return within `VIMEO_HARVEST_TEARDOWN_MS`: the
 harvest abandons it and the queue moves on. `closeWithin` then SIGKILLs the
-process when the `Browser` exposes `process()`, but a Browser from
-`chromium.launch()` does not (playwright-core 1.58 has `process()` only on
-`BrowserServer`), so in production it logs at warn that a Chromium process may
-have leaked, and that process lives until muninn exits while the next harvest
-launches its own.
+process `browserProcessOf` finds: the public `process()` first (playwright-core
+1.58 has it only on `BrowserServer`), else the private in-process path
+`browser._connection.toImpl(browser).options.browserProcess.process` (measured
+under Bun 2026-10-20 to yield the launched Chromium's pid). Both are
+feature-detected; with no handle it logs at warn that a Chromium process may
+have leaked, and that process lives until muninn exits.
 
 **The auto-caption rider is appended exactly when `detectCaptionKind` says
 `auto`.** Vimeo's machine captions garble proper nouns ("JavaBeen" for JavaBin,

@@ -187,6 +187,28 @@ describe("lintWiki", () => {
     expect(relPathsFor(findings, "orphan")).not.toContain("concepts/Good Concept.md");
   });
 
+  test("inline code pairs by run length, and a link whose label holds a backtick stays a link", async () => {
+    await write(
+      "concepts/Sidekick.md",
+      [
+        "---",
+        "type: concept",
+        "title: Sidekick",
+        "updated: 2026-06-03",
+        "sources: [x]",
+        "---",
+        "",
+        "Syntax: ``[[Ghost]]`` is a wikilink.",
+        "See [[Missing Page|the `x` label]] and [[Good Concept|the `y` label]].",
+        "A lone tick: [[Lost Page|a ` tick]] then `code` here.",
+      ].join("\n"),
+    );
+    const broken = (await lint())
+      .filter((f) => f.check === "broken-link" && f.relPath === "concepts/Sidekick.md")
+      .map((f) => f.message);
+    expect(broken).toEqual(["Unresolved wikilink [[Missing Page]]", "Unresolved wikilink [[Lost Page]]"]);
+  });
+
   test("literal [[wikilinks]] inside code fences and inline code are not broken links", async () => {
     await write(
       "concepts/Sidekick.md",

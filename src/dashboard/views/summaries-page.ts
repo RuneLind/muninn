@@ -200,9 +200,13 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
       max-width: 960px;
       margin: 16px auto 0;
       padding: 12px 16px;
-      background: var(--accent-dim, #2a2f3a);
-      border-left: 3px solid var(--accent, #6c8aff);
-      color: var(--text, #e6e6e6);
+      /* Theme tokens only: --accent-dim and --text were never defined, so the
+         banner was a fixed #2a2f3a in both themes and its light-theme link read
+         2.65:1. --tint-purple, not --bg-surface (1.017:1 on the light page):
+         fill/page 1.23 dark, 1.11 light; link 6.92 dark, 5.30 light. */
+      background: var(--tint-purple);
+      border-left: 3px solid var(--accent);
+      color: var(--text-primary);
       border-radius: 4px;
       font-size: 14px;
     }
@@ -213,7 +217,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     .delete-notice { cursor: pointer; }
     .delete-notice.err { border-left-color: var(--status-error); }
     .delete-notice.warn { border-left-color: var(--status-warning); }
-    .delete-notice a { color: var(--accent, #6c8aff); }
+    .delete-notice a { color: var(--accent-light); }
   </style>
 </head>
 <body>

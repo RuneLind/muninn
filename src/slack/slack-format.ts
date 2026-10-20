@@ -151,10 +151,12 @@ const slackRenderer: BlockRenderer = {
         // No card and no file read: lead lines, the body, then the result's
         // name. Attribute text is the author's plain text (`slackLiteral`).
         // A code span keeps its backticks; inside one only `&<>` are escaped,
-        // since Slack formats nothing there.
+        // since Slack formats nothing there, and a backtick becomes U+02CB
+        // (mrkdwn has no double-backtick span), as in `renderInline`.
         const q = parseQueryAttrs(attrs);
         const { head, answer } = queryLead(q);
-        const inline = (s: string) => renderCodeSpans(s, slackLiteral, (c) => `\`${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}\``);
+        const inline = (s: string) =>
+          renderCodeSpans(s, slackLiteral, (c) => `\`${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/`/g, "\u02CB")}\``);
         const result = queryResultLine(q);
         return [head ? `*${inline(head)}*` : "", inline(answer), children, result ? slackFileLine(result) : ""]
           .filter(Boolean)
@@ -338,9 +340,10 @@ function renderInline(text: string): string {
   // component tag inside backticks stays literal code (backticked) instead of
   // being interpreted. The parked sentinel carries no `<`, shielding the code
   // content from the scan below and from the trailing tag-strip.
-  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
-    ph.add("INLINE", `\`${code}\``),
-  );
+  // Spans pair by the shared exact-N rule (`renderCodeSpans`). mrkdwn has no
+  // double-backtick span, so a backtick in the content becomes U+02CB, the
+  // look-alike `slackLiteral` uses, and the span stays one span.
+  let result = renderCodeSpans(text, (s) => s, (code) => ph.add("INLINE", `\`${code.replace(/`/g, "\u02CB")}\``));
 
   // Inline components (Verdict, Pill) on the code-shielded text: substitute each
   // occurrence with its plain-text fallback (✅/❌ + label, or [label]) directly

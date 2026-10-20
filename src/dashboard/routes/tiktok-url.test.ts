@@ -30,7 +30,44 @@ const DOWNLOAD_URLS: Array<[string, string]> = [
   ["https://m.tiktok.com/@u/video/7412345678901234567", "https://www.tiktok.com/@u/video/7412345678901234567"],
   ["https://m.tiktok.com/v/7412345678901234567.html", "https://www.tiktok.com/@/video/7412345678901234567"],
   ["https://m.tiktok.com/v/7412345678901234567.html?_r=1&u_code=x", "https://www.tiktok.com/@/video/7412345678901234567"],
+  // The embed player, where a vm. short link can land.
+  ["https://www.tiktok.com/embed/7412345678901234567", "https://www.tiktok.com/@/video/7412345678901234567"],
+  ["https://www.tiktok.com/embed/v2/7412345678901234567?lang=en", "https://www.tiktok.com/@/video/7412345678901234567"],
+  ["https://tiktok.com/embed/v2/7412345678901234567/", "https://www.tiktok.com/@/video/7412345678901234567"],
+  // TikTok's Embed Player (developers.tiktok.com/doc/embed-player), query and all.
+  ["https://www.tiktok.com/player/v1/7412345678901234567?music_info=1&description=1", "https://www.tiktok.com/@/video/7412345678901234567"],
+  ["https://tiktok.com/player/v1/7412345678901234567/", "https://www.tiktok.com/@/video/7412345678901234567"],
+  ["https://m.tiktok.com/player/v1/7412345678901234567", "https://www.tiktok.com/@/video/7412345678901234567"],
 ];
+
+/**
+ * Embed-like shapes with no source naming them as a TikTok player URL: no
+ * yt-dlp extractor, TikTok doc or measured redirect. Paths are case-sensitive,
+ * so `/EMBED/` is not `/embed/`. Each stays unmapped, so the short-link route
+ * refuses it with `no_video` instead of guessing at an id.
+ */
+const UNMAPPED_EMBED_URLS = [
+  "https://www.tiktok.com/embed/v3/7412345678901234567",
+  "https://www.tiktok.com/embed/v2/7412345678901234567.html",
+  "https://www.tiktok.com/EMBED/7412345678901234567",
+  "https://www.tiktok.com/EMBED/v2/7412345678901234567",
+  "https://www.tiktok.com/player/v2/7412345678901234567",
+  "https://www.tiktok.com/PLAYER/v1/7412345678901234567",
+  "https://www.tiktok.com/embed/@someone",
+  // The player path is anchored at both ends: a suffix, a prefix or a trailing
+  // segment is another path, not the Embed Player.
+  "https://www.tiktok.com/player/v1/7412345678901234567.html",
+  "https://www.tiktok.com/x/player/v1/7412345678901234567",
+  "https://www.tiktok.com/player/v1/7412345678901234567/extra",
+];
+
+for (const input of UNMAPPED_EMBED_URLS) {
+  test(`${input} is not rewritten to a video URL`, () => {
+    const out = tiktokDownloadUrl(parseAllowedTikTokUrl(input)!);
+    expect(out).toBe(input);
+    expect(tiktokPathVideoId(new URL(out))).toBeNull();
+  });
+}
 
 for (const [input, expected] of DOWNLOAD_URLS) {
   test(`tiktokDownloadUrl hands yt-dlp an extractor-matched URL for ${input}`, () => {
@@ -40,6 +77,8 @@ for (const [input, expected] of DOWNLOAD_URLS) {
     // pattern and never on `vm.tiktok`'s, which re-follows a chain ungated.
     expect(TIKTOK_IE.test(out)).toBe(true);
     expect(TIKTOK_VM_IE.test(out)).toBe(false);
+    // The short-link route refuses a landing URL with no id here (no_video).
+    expect(tiktokPathVideoId(new URL(out))).toBe("7412345678901234567");
   });
 }
 

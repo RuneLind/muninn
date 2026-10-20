@@ -142,6 +142,7 @@ import {
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
 import { maskLineCodeSpans } from "../format/code-spans.ts";
+import { parkLinksThenCodeSpans } from "./park-links.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
@@ -287,9 +288,25 @@ function hasFrontmatterFence(content: string): boolean {
  * (docs about wikilink syntax), not a link, so flagging it is pure noise. The
  * store's extractors deliberately don't do this (the graph tolerates the extra
  * edges); the linter must not report them as broken.
+ *
+ * Inline spans are read the way the reader reads them: every `[[…]]` on a line
+ * is parked whole first (as `renderWikiHtml` does), then spans pair by the
+ * exact-N rule (`lineCodeSpanRanges`), so `` ``[[Ghost]]`` `` is code. A link
+ * whose label holds a backtick stays a link: masking spans before parking
+ * dropped such links on 5 live pages.
  */
 function stripCodeSpans(content: string): string {
-  return content.replace(/```[\s\S]*?(?:```|$)/g, "").replace(/`[^`\n]*`/g, "");
+  return content
+    .replace(/```[\s\S]*?(?:```|$)/g, "")
+    .split("\n")
+    .map(stripLineCodeSpansKeepingLinks)
+    .join("\n");
+}
+
+function stripLineCodeSpansKeepingLinks(line: string): string {
+  if (!line.includes("`")) return line;
+  const { text, links } = parkLinksThenCodeSpans(line, (i) => `\uE000${i}\uE001`, "");
+  return text.replace(/\uE000(\d+)\uE001/g, (m: string, i: string) => links[Number(i)] ?? m);
 }
 
 /** Broken [[wikilinks]] + relative .md links on one page, resolved against the index. */

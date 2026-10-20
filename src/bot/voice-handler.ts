@@ -37,17 +37,27 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     // --- Voice download ---
     agentStatus.set("receiving", username);
     t.start("voice_download");
-    const file = await ctx.api.getFile(voice.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${botConfig.telegramBotToken!}/${file.file_path}`;
-    const response = await fetch(fileUrl);
-    if (!response.ok) {
-      t.end("voice_download");
+    let oggBuffer: Uint8Array | null = null;
+    let downloadError = "Failed to download voice message";
+    try {
+      const file = await ctx.api.getFile(voice.file_id);
+      const fileUrl = `https://api.telegram.org/file/bot${botConfig.telegramBotToken!}/${file.file_path}`;
+      const response = await fetch(fileUrl);
+      if (response.ok) oggBuffer = new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      // Logged here because the throw no longer reaches bot.catch. The message
+      // only, never fileUrl: it carries the bot token.
+      downloadError = error instanceof Error ? error.message : String(error);
+      log.error("Voice download failed: {error}", { ...props, error: downloadError });
+      activityLog.push("error", `[Voice] Download failed: ${downloadError}`, { userId, username, botName: botConfig.name });
+    }
+    if (!oggBuffer) {
+      t.end("voice_download", undefined, "error");
       agentStatus.set("idle");
-      t.error("Failed to download voice message");
+      t.error(downloadError);
       await ctx.reply("Failed to download voice message.");
       return;
     }
-    const oggBuffer = new Uint8Array(await response.arrayBuffer());
     t.end("voice_download");
 
     // --- STT transcription ---
@@ -57,7 +67,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     try {
       text = await transcribeVoice(oggBuffer, config);
     } catch (error) {
-      t.end("stt");
+      t.end("stt", undefined, "error");
       agentStatus.set("idle");
       const msg = error instanceof Error ? error.message : String(error);
       t.error(msg);
@@ -122,15 +132,19 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
 
       // --- TTS voice reply ---
       agentStatus.set("synthesizing_voice", username);
+      // The span still open when a step throws is the one that failed.
+      let open: "tts" | "telegram_send_voice" | null = "tts";
       t.start("tts");
       try {
         const voiceBuffer = await synthesizeVoice(result.responseText);
         t.end("tts");
+        open = "telegram_send_voice";
         t.start("telegram_send_voice");
         await ctx.replyWithVoice(new InputFile(voiceBuffer, "response.ogg"));
+        open = null;
         t.end("telegram_send_voice");
       } catch (ttsError) {
-        if (!t.summary().tts) t.end("tts");
+        if (open) t.end(open, undefined, "error");
         const msg = ttsError instanceof Error ? ttsError.message : String(ttsError);
         log.error("TTS failed: {error}", { ...props, error: msg });
         activityLog.push("error", `[Voice] TTS failed: ${msg}`, { userId, username, botName: botConfig.name });

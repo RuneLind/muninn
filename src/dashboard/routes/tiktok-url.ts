@@ -62,13 +62,19 @@ export function tiktokPathVideoId(u: URL): string | null {
  * extractor matches, so the vertical's allowlist is `tiktok` alone. That
  * extractor matches only `www.`; the bare and `m.` hosts used to reach it
  * through `[generic]`'s redirect, which this rewrite reproduces: same path and
- * query on `www.`. `/v/<id>.html` (the `m.` share shape) becomes the id-only
- * video path. A short link throws: resolve it with
+ * query on `www.`. `/v/<id>.html` (the `m.` share shape), the embed shapes
+ * `/embed/<id>` (yt-dlp's TikTokIE) and `/embed/v2/<id>` (embed.js's iframe,
+ * where a short link can land), and the Embed Player's `/player/v1/<id>`
+ * become the id-only video path. Other embed-like paths stay unmapped (no
+ * source names them). A short link throws: resolve it with
  * {@link resolveTikTokShortLink} first.
  */
 export function tiktokDownloadUrl(u: URL): string {
   if (isShortLink(u)) throw new Error(`short link must be resolved before download: ${u.href}`);
-  const share = u.pathname.match(/^\/v\/(\d+)(?:\.html)?\/?$/);
+  const share =
+    u.pathname.match(/^\/v\/(\d+)(?:\.html)?\/?$/) ??
+    u.pathname.match(/^\/embed\/(?:v2\/)?(\d+)\/?$/) ??
+    u.pathname.match(/^\/player\/v1\/(\d+)\/?$/);
   if (share) return `https://www.tiktok.com/@/video/${share[1]}`;
   if (u.hostname === "www.tiktok.com") return u.href;
   return `https://www.tiktok.com${u.pathname}${u.search}`;
