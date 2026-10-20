@@ -4322,7 +4322,12 @@ healthy listing is unchanged; the reader shows one rail line under the felles
 chip (`views/components/wiki-mirror-status.ts`). The line paints from every
 listing response that is not stale, through `receivePages`' `onMirror` hook, so
 a listing held back under an open page or unchanged since the last one still
-updates it; a 1-minute tick redraws its age between listings. Counts and a timestamp only:
+updates it; a 1-minute tick redraws its age between listings. Both come from
+`installMirrorStatus` (the reader passes its clock and timer). Only the health
+message is a live region (`role="status"`, written only when it changes); the
+age sits beside it, so the minute tick does not re-announce the line. The wiring
+is pinned by `wiki-mirror-status.test.ts` and the last case of
+`e2e/wiki-bucket-mirror.spec.ts`. Counts and a timestamp only:
 no object name, path or error text. The backoff is unchanged: a degraded poll
 still counts as a poll that answered.
 

@@ -81,7 +81,7 @@ import {
   setFellesBtnMark,
   type FellesSync,
 } from "./wiki-felles-publish.ts";
-import { MIRROR_STATUS_TICK_MS, paintMirrorStatus, repaintMirrorStatus } from "./wiki-mirror-status.ts";
+import { installMirrorStatus } from "./wiki-mirror-status.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
 // load it — this file touches `document` at import time.
 import {
@@ -9324,7 +9324,7 @@ function handlePagesResponse(
     fingerprint,
     // The mirror line paints from every fresh response, not only an adopted one:
     // a deferred or unchanged listing still carries the current mirror health.
-    onMirror: (mirror) => paintMirrorStatus(mirror, Date.now()),
+    onMirror: paintMirrorFromListing,
   });
   if (outcome === "apply") applyPagesResponse({ data, fingerprint });
   // Returned for the ONE caller that must know: a write's own refetch, where
@@ -9446,8 +9446,8 @@ document.addEventListener("visibilitychange", () => {
 // event. Same gate, but the PLAIN fetch — server TTL freshness is fine for idle
 // drift.
 setInterval(() => maybeRefetchPages(false), WIKI_REFETCH_TICK_MS);
-// The mirror line's age text advances between listings.
-setInterval(() => repaintMirrorStatus(Date.now()), MIRROR_STATUS_TICK_MS);
+// The mirror line: painted from every listing, its age redrawn every minute.
+const paintMirrorFromListing = installMirrorStatus({ now: () => Date.now(), setInterval: (tick, ms) => setInterval(tick, ms) });
 
 // ── Boot ──────────────────────────────────────────────────────────────
 // Two independent flags, one installer (`wikiBlockedSelectorFor`):

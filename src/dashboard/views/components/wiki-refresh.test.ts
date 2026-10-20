@@ -16,7 +16,13 @@ import {
   type WikiViewState,
 } from "./wiki-refresh.ts";
 import type { WikiListing } from "./wiki-filter.ts";
-import { MIRROR_STATUS_SLOT_ID, paintMirrorStatus, type ListingMirrorStatus } from "./wiki-mirror-status.ts";
+import {
+  MIRROR_STATUS_AGE_ID,
+  MIRROR_STATUS_MSG_ID,
+  MIRROR_STATUS_SLOT_ID,
+  paintMirrorStatus,
+  type ListingMirrorStatus,
+} from "./wiki-mirror-status.ts";
 
 function page(name: string): WikiListing {
   return {
@@ -334,10 +340,13 @@ test("full cycle: throttled refetch → defer while reading → applied once on 
 // the real painter over a fake slot, so a status that never reaches the slot
 // fails here.
 
-function withMirrorSlot(run: (slot: { innerHTML: string; hidden: boolean }) => void): void {
+function withMirrorSlot(run: (slot: { readonly text: string; hidden: boolean }) => void): void {
   const saved = globalThis.document;
-  const slot = { innerHTML: "", hidden: true };
-  globalThis.document = { getElementById: (id: string) => (id === MIRROR_STATUS_SLOT_ID ? slot : null) } as unknown as Document;
+  const msg = { textContent: "" };
+  const age = { textContent: "" };
+  const slot = { hidden: true, get text() { return `${msg.textContent} ${age.textContent}`; } };
+  const byId: Record<string, unknown> = { [MIRROR_STATUS_SLOT_ID]: slot, [MIRROR_STATUS_MSG_ID]: msg, [MIRROR_STATUS_AGE_ID]: age };
+  globalThis.document = { getElementById: (id: string) => byId[id] ?? null } as unknown as Document;
   try {
     run(slot);
   } finally {
@@ -366,7 +375,7 @@ test("F2: a listing deferred under an open page still paints the mirror line", (
     // is held back, the rail line is not.
     expect(receiveWithMirror(model, payload(["a", "b"], { mirror: failing(MIRROR_NOW - 5 * 60_000) }), "article", MIRROR_NOW)).toBe("defer");
     expect(slot.hidden).toBe(false);
-    expect(slot.innerHTML).toContain("the bucket does not answer; last complete update 5 min ago");
+    expect(slot.text).toContain("the bucket does not answer; last complete update 5 min ago");
   });
 });
 
@@ -376,10 +385,10 @@ test("F1: an unchanged listing still repaints the mirror line, so its age advanc
     const data = payload(["a"], { mirror: failing(MIRROR_NOW - 2 * 60_000) });
     expect(receiveWithMirror(model, data, "start", MIRROR_NOW)).toBe("apply");
     apply(model, data);
-    expect(slot.innerHTML).toContain("2 min ago");
+    expect(slot.text).toContain("2 min ago");
     // Same bytes an hour later: the page list is untouched, the age is not.
     expect(receiveWithMirror(model, data, "start", MIRROR_NOW + 60 * 60_000)).toBe("unchanged");
-    expect(slot.innerHTML).toContain("1 h ago");
+    expect(slot.text).toContain("1 h ago");
   });
 });
 
