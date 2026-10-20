@@ -26,7 +26,9 @@
  * write. An edit (`answerId`) is a new version, accepted only from the author,
  * and names the version it was made from (`baseVersion`): it is stored as
  * exactly `baseVersion + 1`, so an edit from a stale base — a second tab, a
- * lost race — is a 409, never a silent overwrite.
+ * lost race — is a 409, never a silent overwrite. A NEW answer from an author
+ * who already has a live (unredacted) answer to the question is a 409
+ * `already_answered` naming that answer, which the card turns into its edit.
  */
 import type { Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -43,6 +45,7 @@ import {
   authorGroupsOf,
   codePointLength,
   isAskedAuthor,
+  isChoiceOffered,
   parseQuestionPage,
   parseQuestionTarget,
   parseQuestionsTo,
@@ -57,6 +60,7 @@ import { sessionIdentity, sessionRole } from "../../auth/guard.ts";
 import { decideZone } from "../../auth/zones.ts";
 import type { AuthRole } from "../../auth/role.ts";
 import {
+  findLiveWikiAnswerByAuthor,
   getLatestWikiAnswerVersion,
   insertWikiAnswerVersion,
   listLastExportedWikiAnswers,
@@ -66,6 +70,7 @@ import {
   markWikiAnswersExported,
   markWikiOrphanAnswersExported,
   redactWikiAnswer,
+  WikiAnswerAlreadyAnswered,
   WikiAnswerRedacted,
   WikiAnswerGone,
   WikiAnswerVersionConflict,
@@ -126,6 +131,8 @@ export interface WikiAnswerStore {
   listVersions: typeof listWikiAnswerVersions;
   /** Absent ⇒ {@link redactWikiAnswer}. */
   redact?: typeof redactWikiAnswer;
+  /** Absent ⇒ {@link findLiveWikiAnswerByAuthor}. */
+  findLive?: typeof findLiveWikiAnswerByAuthor;
 }
 
 const defaultStore: WikiAnswerStore = {
@@ -259,6 +266,10 @@ interface AnswerView extends AnswerVersionView {
    *  never leaves the server. It is matched against the page's CURRENT
    *  targets, not the ones the question had when the answer was saved. */
   asked: boolean | null;
+  /** The question's wording or choices changed since the latest version was
+   *  saved: its stored `question_hash` against the page's current one. Null
+   *  when the page no longer has the question. An edit stores the new hash. */
+  questionChanged: boolean | null;
   /** The `WIKI_ANSWER_GROUPS` groups holding the author's stored NAV ident,
    *  sorted — read from the CURRENT config, never stored, never the ident. */
   authorGroups: string[];
@@ -308,6 +319,19 @@ function hasUnstorableText(s: string): boolean {
 
 const answerRedacted = (c: Context) => err(c, 409, "answer_redacted", "this answer was redacted");
 
+/** One live answer per author and question: the answer to edit instead, with
+ *  its latest version as the edit's base. */
+const alreadyAnswered = (c: Context, live: { answerId: string; version: number }) =>
+  c.json(
+    {
+      error: "you already answered this question — edit that answer instead",
+      code: "already_answered",
+      answerId: live.answerId,
+      version: live.version,
+    },
+    409,
+  );
+
 const versionConflict = (c: Context) =>
   err(c, 409, "version_conflict", "the answer changed while you were editing it — reload and try again");
 
@@ -316,21 +340,37 @@ function pageError(c: Context, page: { status: 400 | 404 | 503; error: string })
   return err(c, page.status, page.status === 503 ? "wiki_unavailable" : "no_page", page.error);
 }
 
-/** Who each question on the page is for, by id — the first block wins on a
- *  duplicated id, as the card shows it. Empty when the page is unreadable. */
+/** A question as the page has it NOW: who it is for, the sha256 of its
+ *  `hashInput` (what an answer's stored `question_hash` is compared with) and
+ *  its parsed choices. */
+interface CurrentQuestion {
+  to: QuestionTarget[];
+  hash: string;
+  choices: string[];
+}
+
+/** Each question on the page by id — the first block wins on a duplicated id,
+ *  as the card shows it. Empty when the page is unreadable. */
 async function questionTargetsOf(
   page: { index: Parameters<typeof readWikiPage>[0]; meta: Parameters<typeof readWikiPage>[1] },
   owner: string | null,
-): Promise<Map<string, QuestionTarget[]>> {
-  const out = new Map<string, QuestionTarget[]>();
+): Promise<Map<string, CurrentQuestion>> {
+  const out = new Map<string, CurrentQuestion>();
   const markdown = await readWikiPage(page.index, page.meta);
   if (markdown === null) return out;
   const questionsTo = parseQuestionsTo(parseFrontmatter(markdown).questions_to);
   for (const q of parseQuestionPage(parseBlocks(stripFrontmatter(markdown))).questions) {
-    if (q.id !== null && !out.has(q.id)) out.set(q.id, resolveQuestionTargets(q.to, questionsTo, owner).to);
+    if (q.id === null || out.has(q.id)) continue;
+    out.set(q.id, { to: resolveQuestionTargets(q.to, questionsTo, owner).to, hash: sha256(q.hashInput), choices: q.choices });
   }
   return out;
 }
+
+/** Did the question change since this version was saved? Hashes, never text:
+ *  `hashInput` is reflow-insensitive, so a soft-wrap edit is no change. Null
+ *  when the page no longer has the question. */
+const questionChangedOf = (q: CurrentQuestion | undefined, storedHash: string): boolean | null =>
+  q ? q.hash !== storedHash : null;
 
 /** Admin, or auth off. A second lock beside the zone model's default-deny,
  *  which keeps both export paths out of every user zone today: answer cards
@@ -357,19 +397,23 @@ function parseConfirmRows(raw: unknown): [string, number][] | null {
 /** A stored version the export block prints. */
 type ExportRow = WikiAnswerVersion;
 
-function exportAnswerOf(a: ExportRow, targets: Map<string, QuestionTarget[]>, groups: AnswerGroups): ExportAnswer {
-  const t = targets.get(a.questionId);
+function exportAnswerOf(a: ExportRow, current: Map<string, CurrentQuestion>, groups: AnswerGroups): ExportAnswer {
+  const q = current.get(a.questionId);
   const redacted = a.redactedAt !== null;
+  const choice = redacted ? null : a.choice;
   return {
     questionId: a.questionId,
     authorName: a.author.name,
     authorGroups: authorGroupsOf(a.author.navIdent, groups),
-    asked: t ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, t, groups) : null,
+    asked: q ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, q.to, groups) : null,
     createdAt: a.createdAt,
-    choice: redacted ? null : a.choice,
+    choice,
     body: redacted ? "" : a.body,
     version: a.version,
     redacted,
+    questionChanged: questionChangedOf(q, a.questionHash),
+    // Judged only while the question is on the page: a gone question offers nothing to compare.
+    ...(q && choice !== null ? { choiceOffered: isChoiceOffered(choice, q.choices) } : {}),
   };
 }
 
@@ -416,9 +460,10 @@ export function registerWikiAnswerRoutes(
         firstCreatedAt: a.firstCreatedAt,
         mine: isMine(c, a),
         asked: (() => {
-          const t = targets.get(a.questionId);
-          return t ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, t, groups) : null;
+          const q = targets.get(a.questionId);
+          return q ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, q.to, groups) : null;
         })(),
+        questionChanged: questionChangedOf(targets.get(a.questionId), a.questionHash),
         authorGroups: authorGroupsOf(a.author.navIdent, groups),
         ...(earlier.has(a.answerId) ? { earlier: earlier.get(a.answerId) } : {}),
       }));
@@ -532,6 +577,14 @@ export function registerWikiAnswerRoutes(
       id = answerId;
       version = (baseVersion as number) + 1;
     } else {
+      // One live answer per author and question. The author is the session's
+      // (or the owner with auth off), never the body's, and an admin gets no
+      // passthrough. A fast answer only: the insert re-checks under a lock. An
+      // answer swept or redacted under its editor is no live answer, so the
+      // card's carried draft still posts.
+      const where = { wiki: page.entry.name, relPath: page.meta.relPath, questionId, author };
+      const live = await (store.findLive ?? findLiveWikiAnswerByAuthor)(where);
+      if (live) return alreadyAnswered(c, live);
       id = randomUUID();
       version = 1;
     }
@@ -578,6 +631,8 @@ export function registerWikiAnswerRoutes(
       return c.json({ answerId: saved.answerId, questionId, ...versionView(saved), mine: true }, version === 1 ? 201 : 200);
     } catch (e) {
       if (e instanceof WikiAnswerVersionConflict) return versionConflict(c);
+      // A first answer from the same author landed after the fast check above.
+      if (e instanceof WikiAnswerAlreadyAnswered) return alreadyAnswered(c, e);
       // The retention sweep deleted the answer after the read above: the same
       // answer the read itself would have given a moment later.
       if (e instanceof WikiAnswerGone) return err(c, 404, "unknown_answer", "no such answer to this question");
@@ -660,7 +715,7 @@ export function registerWikiAnswerRoutes(
       const orphanCount = orphans.length;
       const owner = answerConfig().owner;
       const groups = answerConfig().groups ?? new Map();
-      let targets: Map<string, QuestionTarget[]> | null = null;
+      let targets: Map<string, CurrentQuestion> | null = null;
       const build = async (picked: ExportRow[], exportedAt: number) => {
         if (picked.length === 0) return { block: "", rows: [] as [string, number][], count: 0 };
         targets ??= await questionTargetsOf(page, owner);

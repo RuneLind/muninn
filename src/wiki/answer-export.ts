@@ -36,6 +36,12 @@ export interface ExportAnswer {
   body: string;
   version: number;
   redacted: boolean;
+  /** The question's wording or choices changed since this version was saved:
+   *  ` (question changed since)` after `(asked)`. Absent or null ⇒ nothing. */
+  questionChanged?: boolean | null;
+  /** False when the question no longer offers `choice`: ` (no longer offered)`
+   *  after it. Absent ⇒ not judged (the question is gone). */
+  choiceOffered?: boolean;
 }
 
 const parts = new Intl.DateTimeFormat("en-GB", {
@@ -70,12 +76,19 @@ const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 /** A `-->` would end the header comment early. */
 const commentSafe = (s: string) => oneLine(s).replaceAll("-->", "-- >");
 
+/**
+ * The answer's heading. Agents and skills read this line, so a new fact is
+ * ADDED to it, never reshaped: `(question changed since)` rides after the
+ * asked part and `(no longer offered)` after the choice, and every older
+ * part keeps its place and spelling.
+ */
 export function exportHeading(a: ExportAnswer): string {
-  const asked = a.asked === null ? "" : a.asked ? " (asked)" : " (not asked)";
+  const asked = (a.asked === null ? "" : a.asked ? " (asked)" : " (not asked)") +
+    (a.questionChanged === true ? " (question changed since)" : "");
   const choice = a.redacted
     ? ", redacted"
     : a.choice !== null
-      ? `, chose ${a.choice === QUESTION_NOT_SURE ? NOT_SURE_TEXT : oneLine(a.choice)}`
+      ? `, chose ${a.choice === QUESTION_NOT_SURE ? NOT_SURE_TEXT : oneLine(a.choice)}${a.choiceOffered === false ? " (no longer offered)" : ""}`
       : "";
   const groups = a.authorGroups?.length ? ` [${a.authorGroups.join(", ")}]` : "";
   return `### ${a.questionId} — ${oneLine(a.authorName)}${groups}${asked}, ${answerStamp(a.createdAt)}${choice}, version ${a.version}`;

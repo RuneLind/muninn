@@ -378,3 +378,34 @@ describe("answer cards PR 5 fix round 1", () => {
     expect(text(403, "not json", no)).toBe("Svaret ble ikke fjernet (HTTP 403).");
   });
 });
+
+describe("arch-10 D: answer staleness and one live answer", () => {
+  const redactOff = { can: false, confirming: false, working: false };
+  test("an answer to an earlier wording carries a muted marker; an unchanged or unjudged one does not", () => {
+    expect(answerItemHtml(answer({ questionChanged: true }), en, "en", false)).toContain(">· answered an earlier wording<");
+    expect(answerItemHtml(answer({ questionChanged: true }), no, "no", false)).toContain(">· svar på en tidligere formulering<");
+    expect(answerItemHtml(answer({ questionChanged: false }), en, "en", false)).not.toContain("q-changed");
+    expect(answerItemHtml(answer({ questionChanged: null }), en, "en", false)).not.toContain("q-changed");
+  });
+  test("the choice chip is marked when the question no longer offers it", () => {
+    const gone = answerItemHtml(answer({ choice: "A" }), en, "en", false, false, redactOff, ["B", "C"]);
+    expect(gone).toContain("q-pick-gone");
+    expect(gone).toContain("(no longer offered)");
+    const kept = answerItemHtml(answer({ choice: "A" }), en, "en", false, false, redactOff, ["A", "B"]);
+    expect(kept).not.toContain("q-pick-gone");
+    // "not sure" is always offered on a question with choices.
+    expect(answerItemHtml(answer({ choice: QUESTION_NOT_SURE }), en, "en", false, false, redactOff, ["A"])).not.toContain("q-pick-gone");
+  });
+  test("an edit's draft drops a stored choice the question no longer offers", () => {
+    expect(draftChoiceFor("A", ["B"])).toBeNull();
+    expect(draftChoiceFor("B", ["B"])).toBe("B");
+  });
+  test("alreadyAnsweredOf reads only a 409 already_answered with an id and version", () => {
+    const of = cardModel.alreadyAnsweredOf;
+    expect(of(409, { code: "already_answered", answerId: "a9", version: 3 })).toEqual({ answerId: "a9", version: 3 });
+    expect(of(409, { code: "version_conflict", answerId: "a9", version: 3 })).toBeNull();
+    expect(of(200, { code: "already_answered", answerId: "a9", version: 3 })).toBeNull();
+    expect(of(409, { code: "already_answered" })).toBeNull();
+    expect(of(409, null)).toBeNull();
+  });
+});

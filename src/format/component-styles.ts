@@ -887,7 +887,9 @@ export function questionReaderCss(scope: string): string {
       font-size: 0.85em; color: var(--text-soft);
     }
     /* A part carries its own leading separator, so a wrap never strands a "·". */
-    ${scope} .q-by > .q-time, ${scope} .q-by > .q-edited { white-space: nowrap; }
+    ${scope} .q-by > .q-time, ${scope} .q-by > .q-edited, ${scope} .q-by > .q-changed { white-space: nowrap; }
+    /* The answer predates the question's current wording: muted, the q-by line's own ink. */
+    ${scope} .q-changed { font-style: italic; }
     ${scope} .q-author { color: var(--text-primary); font-weight: 600; }
     ${scope} .q-asked, ${scope} .q-pick {
       display: inline-block; padding: 0 0.45rem; border-radius: 999px; font-size: 0.85em; color: var(--text-primary);
@@ -908,6 +910,9 @@ export function questionReaderCss(scope: string): string {
       overflow: hidden; clip-path: inset(50%); white-space: nowrap;
     }
     ${scope} .q-pick { background: var(--tint-info); font-weight: 600; margin: 0.3rem 0.4rem 0 0; }
+    /* A choice the question no longer offers: no fill, dashed, and said in words. */
+    ${scope} .q-pick-gone { background: transparent; border: 1px dashed var(--border-secondary); }
+    ${scope} .q-pick-gone-note { font-weight: 400; color: var(--text-soft); }
     ${scope} .q-answer-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 0.3rem; }
     ${scope} .q-redacted { color: var(--text-soft); font-style: italic; }
     ${scope} .q-log { margin-top: 0.4rem; }

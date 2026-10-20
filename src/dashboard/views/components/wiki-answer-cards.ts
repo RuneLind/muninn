@@ -36,6 +36,7 @@ import {
 } from "../../../format/question-labels.ts";
 import { codePointLength, parseChoices, QUESTION_ANSWER_MAX } from "../../../format/question.ts";
 import {
+  alreadyAnsweredOf,
   answerItemHtml,
   cardDisplayState,
   composerCanSave,
@@ -393,7 +394,7 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
           can: ui.canRedact && ui.editing?.answerId !== a.answerId,
           confirming: ui.redact?.answerId === a.answerId,
           working: ui.redact?.answerId === a.answerId && ui.redact.working,
-        }) +
+        }, ui.choices) +
         // The editor sits under the answer it edits, so a 409 shows the newer
         // version above the reader's own text.
         (a.answerId === editingId ? composerHtml(composerView(ui), L) : ""),
@@ -676,6 +677,28 @@ async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
     const r = await loadAnswers(ctx);
     if (r === "failed" || r === "off") {
       ui.message = { text: L.composer.savedReloadFailed, kind: "warn", retry: true };
+      paint(ctx, ui, true);
+    }
+  } else if (!base && alreadyAnsweredOf(status, data)) {
+    // The viewer already has a live answer to this question (another tab, or a
+    // carried draft beside one): the draft becomes an edit of it, text and
+    // choice kept, based on the version the server named — so saving again is
+    // a deliberate replace, and a newer version since is a version_conflict.
+    const existing = alreadyAnsweredOf(status, data)!;
+    const wasCarried = ui.carried;
+    const known = () => ctx.answers.some((a) => a.answerId === existing.answerId);
+    ui.editing = { answerId: existing.answerId, version: existing.version };
+    ui.carried = false;
+    ui.rebaseOnLoad = false;
+    ui.message = { text: L.composer.alreadyAnswered, kind: "warn" };
+    // Painted only once the list holds the answer: an editor on an answer the
+    // list lacks reads as gone (paint's editGone rule).
+    if (known()) paint(ctx, ui, true);
+    const r = await loadAnswers(ctx);
+    if ((r === "failed" || r === "off") && !known()) {
+      ui.editing = null;
+      ui.carried = wasCarried;
+      ui.message = { text: `${L.composer.alreadyAnswered} ${L.composer.loadFailed}`, kind: "warn", retry: true };
       paint(ctx, ui, true);
     }
   } else if (isVersionConflict(status, data)) {

@@ -67,6 +67,32 @@ describe("the heading", () => {
   });
 });
 
+describe("staleness marks are ADDED to the heading, never reshaping it", () => {
+  test("a changed question adds (question changed since) after the asked part", () => {
+    expect(exportHeading(a({ questionChanged: true }))).toBe(
+      "### O3 — Synne Testdal (asked) (question changed since), 07.10.2026 21:32, chose B, version 2",
+    );
+    expect(exportHeading(a({ questionChanged: true, asked: null }))).toBe(
+      "### O3 — Synne Testdal (question changed since), 07.10.2026 21:32, chose B, version 2",
+    );
+  });
+  test("a choice no longer offered is annotated after the choice", () => {
+    expect(exportHeading(a({ choiceOffered: false }))).toBe(
+      "### O3 — Synne Testdal (asked), 07.10.2026 21:32, chose B (no longer offered), version 2",
+    );
+  });
+  test("an unchanged question, an offered choice and an unjudged one leave the heading as before", () => {
+    const plain = exportHeading(a());
+    expect(exportHeading(a({ questionChanged: false, choiceOffered: true }))).toBe(plain);
+    expect(exportHeading(a({ questionChanged: null }))).toBe(plain);
+  });
+  test("a redacted answer carries no choice annotation", () => {
+    expect(exportHeading(a({ redacted: true, choiceOffered: false }))).toBe(
+      "### O3 — Synne Testdal (asked), 07.10.2026 21:32, redacted, version 2",
+    );
+  });
+});
+
 describe("the body is quoted word for word", () => {
   test("every line prefixed, an empty line a bare `>`, markup untouched", () => {
     expect(quoteBody("**Ja** — `kode`\n\n- æøå <b>x</b>\n  indent")).toEqual([

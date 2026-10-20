@@ -102,6 +102,64 @@ async function lockAnswer(tx: Sql, answerId: string): Promise<void> {
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${answerId}::uuid::text, 0))`;
 }
 
+/** A new answer (version 1) from an author who already has a live answer to
+ *  the same question (route: 409 `already_answered`). */
+export class WikiAnswerAlreadyAnswered extends Error {
+  constructor(readonly answerId: string, readonly version: number) {
+    super(`the author already answered this question (answer ${answerId})`);
+  }
+}
+
+/** Where a new answer goes and who writes it: the one-live-answer key. */
+export interface WikiAnswerAuthorQuestion {
+  wiki: string;
+  relPath: string;
+  questionId: string;
+  author: WikiAnswerAuthor;
+}
+
+/** The author as the one-live-answer rule compares authors: the session's
+ *  user, else (auth off, no user) the stored name — the owner's. */
+function authorMatch(sql: Sql, author: WikiAnswerAuthor) {
+  return author.userId !== null
+    ? sql`author_user_id = ${author.userId}`
+    : sql`author_user_id IS NULL AND author_name = ${author.name}`;
+}
+
+/**
+ * The author's newest live answer to the question — no version of it redacted
+ * — with its latest version, or null. The route's fast check; the insert asks
+ * again under {@link lockAuthorQuestion}, which is what holds.
+ */
+export async function findLiveWikiAnswerByAuthor(
+  q: WikiAnswerAuthorQuestion,
+  sql: Sql = getDb(),
+): Promise<{ answerId: string; version: number } | null> {
+  const rows = await sql`
+    SELECT answer_id, max(version)::int AS version
+    FROM wiki_answers
+    WHERE wiki = ${q.wiki} AND rel_path = ${q.relPath} AND question_id = ${q.questionId}
+      AND ${authorMatch(sql, q.author)}
+    GROUP BY answer_id
+    HAVING bool_and(redacted_at IS NULL)
+    ORDER BY max(created_at) DESC, answer_id
+    LIMIT 1
+  `;
+  return rows[0] ? { answerId: rows[0].answer_id, version: rows[0].version } : null;
+}
+
+/**
+ * Serialize new answers from one author to one question: two first POSTs (two
+ * tabs, a double submit past the card's guard) would each find no live answer
+ * and both insert. Taken in a statement of its own before the re-check, as
+ * {@link lockAnswer} is, and always BEFORE it, so the two locks are ordered.
+ */
+async function lockAuthorQuestion(tx: Sql, q: WikiAnswerAuthorQuestion): Promise<void> {
+  const who = q.author.userId !== null ? `user:${q.author.userId}` : `name:${q.author.name}`;
+  const key = JSON.stringify(["wiki-answer-author", q.wiki, q.relPath, q.questionId, who]);
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+}
+
 /** A test seam: runs inside the write's transaction, after its last
  *  statement and before the commit, so a test can hold the transaction open. */
 export interface WikiAnswerWriteHooks {
@@ -121,6 +179,14 @@ export async function insertWikiAnswerVersion(
   try {
     return await sql.begin(async (_tx) => {
       const tx = _tx as unknown as Sql;
+      // A new answer: one live answer per author and question, re-checked
+      // under the author lock, so of two racing first POSTs one lands and the
+      // other is told which answer to edit.
+      if (input.version === 1) {
+        await lockAuthorQuestion(tx, input);
+        const live = await findLiveWikiAnswerByAuthor(input, tx);
+        if (live) throw new WikiAnswerAlreadyAnswered(live.answerId, live.version);
+      }
       await lockAnswer(tx, input.answerId);
       // Inside the lock: a redact that committed while this edit waited is seen here.
       const redacted = await tx`

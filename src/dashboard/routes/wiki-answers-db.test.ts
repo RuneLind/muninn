@@ -779,7 +779,9 @@ describe("answer cards PR 5: the scanner hook (D16)", () => {
       const app = appFor({ identity: synne, role: "user", profile: "nais", answers: cfg(refuses) });
       expect((await post(app, answer({ body: "nothing to see" }))).status).toBe(201);
       const before = await count();
-      const res = await post(app, answer({ body: `line one\ncontains ${MARKER} here` }));
+      // Another person: synne already has a live answer to O1 (one per author).
+      const olaApp = appFor({ identity: ola, role: "user", profile: "nais", answers: cfg(refuses) });
+      const res = await post(olaApp, answer({ body: `line one\ncontains ${MARKER} here` }));
       expect(res.status).toBe(422);
       expect(await res.json()).toEqual({
         error: "scanner_refused",
@@ -1071,5 +1073,143 @@ describe("answer groups (WIKI_ANSWER_GROUPS)", () => {
     const o = answers.find((a) => a.body === "owner on G1");
     expect([o.authorName, o.asked, o.authorGroups]).toEqual(["Kari Nordmann", true, ["fag"]]);
     expect(text).not.toContain("Z990002");
+  });
+});
+
+describe("arch-10 D: staleness (finding 2) and one live answer per author (finding 9)", () => {
+  const O1_TEXT = "**Keep the export block in Norwegian?**";
+  /** Rewrite the shared page for one test and always put it back. */
+  async function withPage(edit: (page: string) => string, run: () => Promise<void>) {
+    await Bun.write(path.join(root, REL), edit(PAGE));
+    try {
+      await run();
+    } finally {
+      await Bun.write(path.join(root, REL), PAGE);
+    }
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const o1 = async (app: Hono): Promise<any> =>
+    (await getAnswers(app)).answers.find((a: { questionId: string }) => a.questionId === "O1");
+  const exportText = async (app: Hono) => {
+    const res = await app.request(`/api/wiki/answers/export?wiki=answers&relPath=${encodeURIComponent(REL)}`);
+    expect(res.status).toBe(200);
+    return res.text();
+  };
+  const REWORDED = "**Keep the export block in English?**";
+
+  test("an answer to the unchanged question is not marked", async () => {
+    const app = appFor();
+    expect((await post(app, answer({ choice: "A" }))).status).toBe(201);
+    expect((await o1(app)).questionChanged).toBe(false);
+  });
+
+  test("rewording the question marks the answer; the export heading ADDS (question changed since)", async () => {
+    const app = appFor();
+    expect((await post(app, answer({ choice: "A" }))).status).toBe(201);
+    await withPage(
+      (p) => p.replace(O1_TEXT, REWORDED),
+      async () => {
+        expect((await o1(app)).questionChanged).toBe(true);
+        expect(await exportText(app)).toMatch(/### O1 — Rune Owner[^\n]*\(question changed since\), [^\n]*, chose A, version 1/);
+      },
+    );
+  });
+
+  test("a soft-wrap reflow is not a change", async () => {
+    const app = appFor();
+    expect((await post(app, answer({ choice: "A" }))).status).toBe(201);
+    await withPage(
+      (p) => p.replace(O1_TEXT, "**Keep the export block\nin Norwegian?**"),
+      async () => {
+        expect((await o1(app)).questionChanged).toBe(false);
+      },
+    );
+  });
+
+  test("a choice the page no longer offers is annotated in the export, never stated bare", async () => {
+    const app = appFor();
+    expect((await post(app, answer({ choice: "A" }))).status).toBe(201);
+    await withPage(
+      (p) => p.replace('choices="A|B"', 'choices="B|C"'),
+      async () => {
+        const text = await exportText(app);
+        expect(text).toContain("chose A (no longer offered)");
+        expect(text).not.toMatch(/chose A,/);
+      },
+    );
+  });
+
+  test("a removed question carries no marker (null): the answer is an orphan, not stale", async () => {
+    const app = appFor();
+    const first = await (await post(app, answer({ choice: "A" }))).json();
+    await withPage(
+      (p) => p.replace(/<Question id="O1"[\s\S]*?<\/Question>\n/, ""),
+      async () => {
+        const row = (await getAnswers(app)).answers.find((a: { answerId: string }) => a.answerId === first.answerId);
+        expect(row?.questionChanged ?? null).toBeNull();
+      },
+    );
+  });
+
+  test("an edit stores the current hash, which clears the marker", async () => {
+    const app = appFor();
+    const first = await (await post(app, answer({ choice: "A" }))).json();
+    await withPage(
+      (p) => p.replace(O1_TEXT, REWORDED),
+      async () => {
+        expect((await o1(app)).questionChanged).toBe(true);
+        const res = await post(app, answer({ choice: "B", answerId: first.answerId, baseVersion: 1 }));
+        expect(res.status).toBe(200);
+        expect((await o1(app)).questionChanged).toBe(false);
+      },
+    );
+  });
+
+  test("a second new answer by the same author is 409 already_answered naming the live answer; another author gets 201", async () => {
+    const synneApp = appFor({ identity: synne, role: "user" });
+    const first = await (await post(synneApp, answer())).json();
+    const again = await post(synneApp, answer({ body: "second thoughts" }));
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ code: "already_answered", answerId: first.answerId, version: 1 });
+    expect((await post(appFor({ identity: ola, role: "user" }), answer({ body: "ola's view" }))).status).toBe(201);
+    expect((await getDb()`SELECT count(DISTINCT answer_id)::int AS n FROM wiki_answers`)[0]!.n).toBe(2);
+  });
+
+  test("the author comes from the session: naming someone else in the body changes nothing", async () => {
+    const synneApp = appFor({ identity: synne, role: "user" });
+    await post(synneApp, answer());
+    expect((await post(synneApp, answer({ authorName: "Ola Nordmann", body: "spoofed" }))).status).toBe(409);
+  });
+
+  test("an admin is refused too: no passthrough", async () => {
+    const admin = appFor({ identity: ola, role: "admin" });
+    await post(admin, answer());
+    expect((await post(admin, answer({ body: "again" }))).status).toBe(409);
+  });
+
+  test("auth off: the owner is one author, so a second new answer is 409", async () => {
+    const app = appFor();
+    await post(app, answer());
+    expect((await post(app, answer({ body: "again" }))).status).toBe(409);
+  });
+
+  test("the editGone path: an answer swept away leaves no live row, so a fresh post is 201", async () => {
+    const app = appFor({ identity: synne, role: "user" });
+    const first = await (await post(app, answer())).json();
+    await getDb()`DELETE FROM wiki_answers WHERE answer_id = ${first.answerId}`;
+    expect((await post(app, answer({ body: "carried draft" }))).status).toBe(201);
+  });
+
+  test("a redacted answer is not live: the author may answer again", async () => {
+    const app = appFor({ identity: synne, role: "user" });
+    const first = await (await post(app, answer())).json();
+    await getDb()`UPDATE wiki_answers SET redacted_at = now(), body = '', choice = NULL WHERE answer_id = ${first.answerId}`;
+    expect((await post(app, answer({ body: "fresh" }))).status).toBe(201);
+  });
+
+  test("another question on the same page is its own slot", async () => {
+    const app = appFor({ identity: synne, role: "user" });
+    await post(app, answer());
+    expect((await post(app, answer({ questionId: "O3", choice: null, body: "on O3" }))).status).toBe(201);
   });
 });

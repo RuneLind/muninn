@@ -32,6 +32,12 @@ import { QUESTION_LABELS, type QuestionLanguage } from "./question-labels.ts";
 /** The fixed extra choice every card offers beside its parsed `choices`. */
 export const QUESTION_NOT_SURE = "not-sure";
 
+/** Does a question with `choices` still offer `choice`? The route's own rule:
+ *  the parsed choices plus "not sure", and nothing on a question with none. */
+export function isChoiceOffered(choice: string, choices: readonly string[]): boolean {
+  return choices.length > 0 && (choice === QUESTION_NOT_SURE || choices.includes(choice));
+}
+
 /** An answer's body cap, in code points — what Postgres `char_length` counts
  *  and the table's CHECK holds. The route refuses past it and the card's
  *  composer counts against it. */
