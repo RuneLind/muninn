@@ -7,7 +7,8 @@
  * both themes, that the separator after the big value is hidden from sight
  * but kept in the row's text — so a selection across the big value and its
  * note reads as the source row and Explain finds it — that a state pill in the
- * big value fits its tile and keeps an outline on a toned tile, that a block
+ * big value fits its tile, that a pill on a toned tile, in the big value or the
+ * note, keeps an outline in its own ink, that a block
  * without `view="tiles"` keeps its rows, and that nothing runs past the page at
  * 390 px.
  *
@@ -42,7 +43,7 @@ const PAGE = [
   // the tiles past the head it falls back to, so only a located selection
   // brings the row into the excerpt.
   ...Array.from({ length: 20 }, (_, i) => `Background paragraph ${i + 1}: a synthetic line of prose that only pads the page so Explain has to locate a selection instead of sending the whole body.\n`),
-  '<StatusRows view="tiles" tones="Gap=warn;Next=good;Probe=info;Old=muted;Deploy=warn;Live=info">',
+  '<StatusRows view="tiles" tones="Gap=warn;Next=good;Probe=info;Old=muted;Deploy=warn;Live=info;Ship=warn">',
   "",
   "- **Score:** 1 234 · up from 1 100 last week",
   "- **Gap:** 3 points · to the leader, closing",
@@ -51,6 +52,7 @@ const PAGE = [
   "- **Old:** retired",
   "- **Deploy:** merged, not in prod · the train leaves Friday",
   "- **Live:** in prod · since Monday",
+  "- **Ship:** 2 PRs · in prod",
   "",
   "</StatusRows>",
   "",
@@ -101,7 +103,7 @@ test.afterAll(async () => {
 });
 
 const TILES = ".wiki-article .status-rows.sr-tiles";
-const ROWS = 7;
+const ROWS = 8;
 
 /** The page at `width`; `focus` drops the rail and the Ask pane (the F key). */
 async function open(page: Page, width: number, focus = false): Promise<void> {
@@ -224,15 +226,17 @@ test.describe("Wiki reader: StatusRows tiles", () => {
     test(`${scheme}: a state pill on a toned tile keeps an outline in its own ink`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
       await open(page, 1280);
-      // Deploy: a warn pill on a warn tile (same tint); Live: a good pill on an info tile.
-      for (const [label, ink] of [["Deploy", "--tone-warn"], ["Live", "--tone-good"]] as const) {
+      // Deploy: a warn pill on a warn tile (same tint); Live: a good pill on an info tile;
+      // Ship: a good pill in the note, not the big value, on a warn tile.
+      for (const [label, ink] of [["Deploy", "--tone-warn"], ["Live", "--tone-good"], ["Ship", "--tone-good"]] as const) {
         const row = page.locator(`${TILES} .sr-row`, { has: page.locator(".sr-label", { hasText: label }) });
         const s = await row.evaluate((e) => {
-          const pill = getComputedStyle(e.querySelector(".sr-state")!);
-          return { tile: getComputedStyle(e).backgroundColor, border: pill.borderTopColor, width: parseFloat(pill.borderTopWidth) };
+          const el = e.querySelector(".sr-state")!;
+          const pill = getComputedStyle(el);
+          return { inBig: el.closest(".sr-big") !== null, tile: getComputedStyle(e).backgroundColor, border: pill.borderTopColor, width: parseFloat(pill.borderTopWidth) };
         });
         const want = await token(page, "color", ink);
-        expect({ label, border: s.border }).toEqual({ label, border: want });
+        expect({ label, inBig: s.inBig, border: s.border }).toEqual({ label, inBig: label !== "Ship", border: want });
         expect(s.border).not.toBe(s.tile);
         expect(s.width).toBeGreaterThanOrEqual(1);
       }

@@ -1066,10 +1066,10 @@ export function factcheckReaderCss(scope: string): string {
  * Reader-only: `<StatusRows view="tiles">` (`statusRowsHtml`, `web-format.ts`),
  * which only the reader's page render (`views: true`) draws. The rows markup
  * stays; each `sr-row` becomes a tile — the label, the first segment
- * (`sr-big`) as the big value, the rest as the note. The big value is a
- * full-width inline-block and the separator after it stays in the flow at
- * font-size 0: a block box or an out-of-flow separator turns a selection's
- * text into `3 points\n·to …`, which Explain cannot locate in the source. Theme
+ * (`sr-big`) as the big value, the rest as the note. The separator after the
+ * big value stays in the flow at font-size 0: taken out of the flow, it turns a
+ * selection's text into `3 points\n·to …`, which Explain cannot locate. The
+ * full-width inline-block keeps that text ` · `, as in the rows view. Theme
  * tokens only; tones are the state pills' (`sr-good` …) tint and text pairs.
  */
 export function statusTilesCss(scope: string): string {
