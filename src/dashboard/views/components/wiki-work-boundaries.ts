@@ -42,6 +42,19 @@ import { WORK_GROUP_SPLITS_MAX, type WorkGroupSplit } from "./wiki-work-group-pr
 import { readWorkEvidence, threadSessionsAvailability, type WorkGroupUnavailableReason, type WorkUnit } from "./wiki-work-groups.ts";
 import { isWorkHub, workSessionRef, type IndexWork, type WorkContribution, type WorkThread } from "../../../wiki/work-focus.ts";
 
+/** `normalizeWorkedPath`, memoized: the grouping model runs this module on
+ *  every click, over every page key. Measured on `wiki-rail-work-cap.test.ts`:
+ *  12.2 s memoized, 15.4–17.1 s uncached (12.1 s with the old lower-case fold). */
+const normCache = new Map<string, string>();
+function normPath(p: string): string {
+  let v = normCache.get(p);
+  if (v === undefined) {
+    if (normCache.size >= 50_000) normCache.clear();
+    v = normalizeWorkedPath(p);
+    normCache.set(p, v);
+  }
+  return v;
+}
 /** Where a stored definition stands this render. */
 export type BoundaryState =
   /** Applied. */
@@ -126,12 +139,12 @@ export interface WorkBoundariesInput {
  *  and an NFD name alike; the top-level folders are `aliasTopDirs` over the
  *  listing's first path segments. */
 function resolverFor(allPages: readonly WikiListing[]): (stored: string) => { page?: string; state?: "missing" | "ambiguous" } {
-  const byRel = new Set(allPages.map((p) => normalizeWorkedPath(p.relPath)));
+  const byRel = new Set(allPages.map((p) => normPath(p.relPath)));
   /** Path alias key (`aliasWorkedPaths`) → pages. `folder\0stem` of a bare
    *  alias → pages. */
   let byPath: Map<string, Set<string>> | null = null;
   let byStem: Map<string, Set<string>> | null = null;
-  const key = (v: string) => normalizeWorkedPath(v.trim()).replace(/\.mdx?$/i, "");
+  const key = (v: string) => normPath(v.trim()).replace(/\.mdx?$/i, "");
   const folderOf = (rel: string) => (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "");
   const add = (m: Map<string, Set<string>>, k: string, rel: string) => {
     const set = m.get(k) ?? new Set<string>();
@@ -141,14 +154,14 @@ function resolverFor(allPages: readonly WikiListing[]): (stored: string) => { pa
   const answer = (hits: Set<string> | undefined) =>
     hits?.size === 1 ? { page: [...hits][0]! } : hits?.size ? { state: "ambiguous" as const } : null;
   return (stored) => {
-    const rel = normalizeWorkedPath(stored);
+    const rel = normPath(stored);
     if (byRel.has(rel)) return { page: rel };
     if (!byPath || !byStem) {
       byPath = new Map();
       byStem = new Map();
       const topDirs = aliasTopDirs([...byRel].filter((r) => r.includes("/")).map((r) => r.slice(0, r.indexOf("/"))));
       for (const p of allPages) {
-        const own = normalizeWorkedPath(p.relPath);
+        const own = normPath(p.relPath);
         for (const a of p.aliases ?? []) {
           if (typeof a !== "string") continue;
           const ref = classifyAliasRef(a, topDirs);
@@ -169,17 +182,17 @@ function resolverFor(allPages: readonly WikiListing[]): (stored: string) => { pa
  *  earliest focus event on a non-hub page (a thread of hubs only: on a hub),
  *  a tie on the smaller relPath. */
 function remainderKey(pages: readonly string[], rows: readonly WorkContribution[], byRel: ReadonlyMap<string, WikiListing>): string {
-  const hub = (rel: string) => isWorkHub(byRel.get(normalizeWorkedPath(rel))?.backlinkCount ?? 0);
+  const hub = (rel: string) => isWorkHub(byRel.get(normPath(rel))?.backlinkCount ?? 0);
   const pool = pages.some((p) => !hub(p)) ? pages.filter((p) => !hub(p)) : pages;
   const firstOf = new Map<string, number>();
   for (const [, page, , kind, , firstMs] of rows) {
     if (kind !== "focus") continue;
-    const k = normalizeWorkedPath(page);
+    const k = normPath(page);
     firstOf.set(k, Math.min(firstOf.get(k) ?? Infinity, firstMs));
   }
   let best: { rel: string; ms: number } | null = null;
   for (const rel of pool) {
-    const ms = firstOf.get(normalizeWorkedPath(rel)) ?? Infinity;
+    const ms = firstOf.get(normPath(rel)) ?? Infinity;
     if (!best || ms < best.ms || (ms === best.ms && rel < best.rel)) best = { rel, ms };
   }
   return best!.rel;
@@ -190,16 +203,16 @@ function remainderKey(pages: readonly string[], rows: readonly WorkContribution[
  *  as touched pages the source's pages (focus, then touched) one of those
  *  sessions has a touch row on, less `pages`. A touch row never adds a session. */
 function attributed(source: WorkThread, key: string, pages: readonly string[], rows: readonly WorkContribution[]): WorkThread {
-  const mine = new Set(pages.map(normalizeWorkedPath));
+  const mine = new Set(pages.map(normPath));
   const refs = new Set<string>();
-  for (const [ref, page, , kind] of rows) if (kind === "focus" && mine.has(normalizeWorkedPath(page))) refs.add(ref);
+  for (const [ref, page, , kind] of rows) if (kind === "focus" && mine.has(normPath(page))) refs.add(ref);
   const touchedBy = new Set<string>();
-  for (const [ref, page, , kind] of rows) if (kind === "touch" && refs.has(ref)) touchedBy.add(normalizeWorkedPath(page));
+  for (const [ref, page, , kind] of rows) if (kind === "touch" && refs.has(ref)) touchedBy.add(normPath(page));
   const sessions = source.sessions.filter((s) => refs.has(workSessionRef(s)));
   return {
     key,
     pages: [...pages],
-    touched: [...source.pages, ...source.touched].filter((p) => touchedBy.has(normalizeWorkedPath(p)) && !mine.has(normalizeWorkedPath(p))),
+    touched: [...source.pages, ...source.touched].filter((p) => touchedBy.has(normPath(p)) && !mine.has(normPath(p))),
     // A remainder whose pages carry no focus row breaks the evidence contract;
     // it keeps the source's sessions rather than vanish as an unusable thread.
     sessions: sessions.length ? sessions : source.sessions,
@@ -226,7 +239,7 @@ export function applyWorkBoundaries(input: WorkBoundariesInput): WorkBoundaries 
     };
   }
   const byRel = new Map<string, WikiListing>();
-  for (const p of input.allPages) byRel.set(normalizeWorkedPath(p.relPath), p);
+  for (const p of input.allPages) byRel.set(normPath(p.relPath), p);
   const { evidence, reason } = readWorkEvidence(input.work?.evidence, input.work?.threads);
   const rows = evidence?.contributions?.rows ?? [];
   const resolve = resolverFor(input.allPages);
@@ -248,7 +261,7 @@ export function applyWorkBoundaries(input: WorkBoundariesInput): WorkBoundaries 
       definitions.push({ ...base, page: r.page, state: "conflict" });
       continue;
     }
-    const t = raw.find((x) => x.pages.some((p) => normalizeWorkedPath(p) === r.page));
+    const t = raw.find((x) => x.pages.some((p) => normPath(p) === r.page));
     if (!t) {
       definitions.push({ ...base, page: r.page, state: "dormant" });
       continue;
@@ -258,7 +271,7 @@ export function applyWorkBoundaries(input: WorkBoundariesInput): WorkBoundaries 
       definitions.push({ ...base, page: r.page, state: "incomplete", reasons: avail.reasons });
       continue;
     }
-    const focused = rows.some(([, page, thread, kind]) => thread === t.key && kind === "focus" && normalizeWorkedPath(page) === r.page);
+    const focused = rows.some(([, page, thread, kind]) => thread === t.key && kind === "focus" && normPath(page) === r.page);
     if (!focused) {
       definitions.push({ ...base, page: r.page, state: "unattributed" });
       continue;
@@ -277,13 +290,13 @@ export function applyWorkBoundaries(input: WorkBoundariesInput): WorkBoundaries 
       return;
     }
     const own = rows.filter(([, , thread]) => thread === source.key);
-    const left = source.pages.filter((p) => !split.has(normalizeWorkedPath(p)));
+    const left = source.pages.filter((p) => !split.has(normPath(p)));
     if (left.length) {
       threads.push({ thread: attributed(source, remainderKey(left, own, byRel), left, own), source, index, sub: 0, remainder: true });
     }
     let sub = 0;
     for (const p of source.pages) {
-      const id = split.get(normalizeWorkedPath(p));
+      const id = split.get(normPath(p));
       if (id === undefined) continue;
       sub++;
       threads.push({ thread: attributed(source, p, [p], own), source, index, sub, split: { id, page: p } });
@@ -306,7 +319,7 @@ export function applyWorkBoundaries(input: WorkBoundariesInput): WorkBoundaries 
     definitions.push({ kind: "keptApart", stored, page: r.page, state: "active" });
     (b.keptApart ??= []).push(stored);
     const newest = newestFocusPage(b.thread, byRel);
-    if (newest !== normalizeWorkedPath(stored)) reanchor.push([stored, newest]);
+    if (newest !== normPath(stored)) reanchor.push([stored, newest]);
   }
 
   const units: WorkUnit[] = threads.map((b) => ({
@@ -345,8 +358,8 @@ export function rowBoundaryAction(
   work: Partial<Pick<IndexWork, "threads" | "evidence">> | null | undefined,
   rel: string,
 ): RowBoundaryAction | null {
-  const k = normalizeWorkedPath(rel);
-  const holder = b.threads.find((x) => x.thread.pages.some((p) => normalizeWorkedPath(p) === k));
+  const k = normPath(rel);
+  const holder = b.threads.find((x) => x.thread.pages.some((p) => normPath(p) === k));
   if (!holder) return null;
   if (holder.split) return { kind: "return", id: holder.split.id };
   if (b.definitions.some((d) => d.state === "conflict" && d.page === k)) return { kind: "split", available: false, reason: "conflict" };
@@ -355,6 +368,6 @@ export function rowBoundaryAction(
   const avail = threadSessionsAvailability(evidence, holder.source.key, reason);
   if (!avail.available) return { kind: "split", available: false, reason: avail.reasons[0]! };
   const rows = evidence?.contributions?.rows ?? [];
-  const focused = rows.some(([, page, thread, kind]) => thread === holder.source.key && kind === "focus" && normalizeWorkedPath(page) === k);
+  const focused = rows.some(([, page, thread, kind]) => thread === holder.source.key && kind === "focus" && normPath(page) === k);
   return focused ? { kind: "split", available: true } : { kind: "split", available: false, reason: "unattributed" };
 }
