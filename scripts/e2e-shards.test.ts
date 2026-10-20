@@ -1,20 +1,9 @@
-import { afterAll, describe, test, expect } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { describe, test, expect } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { check, flatten, parseExpectedSkips, partition, pinTitle, specFiles, timingsFromReport, untimedSpecWarnings, type JsonReport } from "./e2e-shards.ts";
-import { mkdtempSync as makeTempDir, rmSync as removeTempDir } from "node:fs";
-
-/** Temp dirs this file creates; removed after the file (src/test/temp-dir-leaks.test.ts). */
-const TEMP_DIRS: string[] = [];
-function tempDirSync(prefix: string): string {
-  const dir = makeTempDir(prefix);
-  TEMP_DIRS.push(dir);
-  return dir;
-}
-afterAll(() => {
-  for (const dir of TEMP_DIRS.splice(0)) removeTempDir(dir, { recursive: true, force: true });
-});
+import { check, flatten, parseExpectedSkips, partition, pinTitle, planShard, specFiles, timingsFromReport, untimedSpecWarnings, type JsonReport } from "./e2e-shards.ts";
+import { testTempDirSync } from "../src/test/temp-dir.ts";
 
 describe("partition", () => {
   test("every file lands in exactly one shard", () => {
@@ -89,6 +78,28 @@ describe("untimedSpecWarnings", () => {
 
   test("a complete table warns about nothing", () => {
     expect(untimedSpecWarnings(["a.spec.ts"], { "a.spec.ts": 5 })).toEqual([]);
+  });
+});
+
+describe("planShard", () => {
+  const files = ["a.spec.ts", "b.spec.ts", "c.spec.ts", "new.spec.ts"];
+  const timings = { "a.spec.ts": 10, "b.spec.ts": 20, "c.spec.ts": 30 };
+
+  test("only shard 1 prints the untimed-spec warning, so four matrix shards show it once", () => {
+    const warned = [1, 2, 3, 4].map((i) => planShard(files, timings, i, 4).lines.filter((l) => l.startsWith("::warning::")));
+    expect(warned[0]).toEqual(untimedSpecWarnings(files, timings));
+    expect(warned[0]).toHaveLength(1);
+    expect(warned.slice(1)).toEqual([[], [], []]);
+  });
+
+  test("the per-shard load charges an untimed spec the median, as the packing does", () => {
+    const { lines } = planShard(files, timings, 2, 2);
+    // Packed by cost 30, 20 (median), 20, 10: shard 1 c + a, shard 2 b + new.
+    expect(lines.filter((l) => l.includes(" shard "))).toEqual([
+      "  shard 1/2: 2 files, ~40 s by the table",
+      "→ shard 2/2: 2 files, ~40 s by the table",
+    ]);
+    expect(planShard(files, timings, 2, 2).mine).toEqual(["b.spec.ts", "new.spec.ts"]);
   });
 });
 
@@ -366,7 +377,7 @@ test("parseExpectedSkips drops blank lines and comments", () => {
 });
 
 test("specFiles finds specs in subdirectories too, as testMatch **/*.spec.ts does", async () => {
-  const dir = tempDirSync(path.join(tmpdir(), "e2e-shards-"));
+  const dir = testTempDirSync(path.join(tmpdir(), "e2e-shards-"));
   mkdirSync(path.join(dir, "sub"));
   for (const f of ["a.spec.ts", "sub/b.spec.ts", "c.test.ts"]) writeFileSync(path.join(dir, f), "");
   expect(await specFiles(dir)).toEqual(["a.spec.ts", "sub/b.spec.ts"]);
