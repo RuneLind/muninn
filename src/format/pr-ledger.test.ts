@@ -224,7 +224,7 @@ describe("F2: one PR-link reader", () => {
   });
 
   test("identity prefers the PR, state and Landed cells over a Review cell", () => {
-    const r = parseLedgerTable(["PR", "Review", "State", "Landed"], [["fix x", "melosys-api#3540", "merged", `[#12](${U}/12)`]]).rows[0]!;
+    const r = parseLedgerTable(["PR", "Review", "State", "Landed"], [["fix x", "alpha-api#901", "merged", `[#12](${U}/12)`]]).rows[0]!;
     expect(r).toMatchObject({ link: 12, pr: 12 });
   });
 });
@@ -247,7 +247,7 @@ describe("F3: the slate is read from a slate column only", () => {
   });
 
   test("a Fase / Phase / Date column holds no slate", () => {
-    for (const h of ["Fase", "Phase", "Date", "Dato", "When"]) {
+    for (const h of ["Fase", "Phase", "Date", "Dato", "When", "Når", "Uke", "Week", "Sprint", "Runde", "Round", "Versjon", "Version", "**Fase (uke)**"]) {
       const l = parseLedgerTable([h, "State"], [["1", `merged [#40](${U}/40)`], ["2", "open"]]);
       expect(`${h}: ${JSON.stringify(l.rows.map((r) => [r.slate, r.pr]))}`).toBe(`${h}: [[null,40]]`);
     }
@@ -255,6 +255,12 @@ describe("F3: the slate is read from a slate column only", () => {
 
   test("a slate column by another name still holds the slate", () => {
     for (const h of ["#", "Oppgave", "Task", "Steg", "Step", "Planned PR", "Slice"]) {
+      expect(`${h}: ${parseLedgerTable([h, "State"], [["3 — x", "open"]]).rows[0]?.slate}`).toBe(`${h}: 3`);
+    }
+  });
+
+  test("any first header but a phase, date or period one holds the slate", () => {
+    for (const h of ["Slate", "PR #", "No.", "Item", "", "Endring"]) {
       expect(`${h}: ${parseLedgerTable([h, "State"], [["3 — x", "open"]]).rows[0]?.slate}`).toBe(`${h}: 3`);
     }
   });
@@ -351,6 +357,20 @@ describe("G3: a PR link is a PR URL or a PR-shaped text; a bare ref is `PR #n` o
   test("a capitalised word before `#n` numbers something else", () => {
     const l = parseLedgerTable(["Fase", "State"], [["Sprint #3 — x", "open"], ["Week #3", "open"], ["Bug #12", "open"], ["Attempt #2", "open"], ["y — PR #9", "open"]]);
     expect(l.rows.map((r) => r.pr)).toEqual([9]);
+  });
+
+  test("a struck link gives no identity; a struck first cell gives no slate", () => {
+    const l = parseLedgerTable(["PR", "Repo", "State"], [
+      [`~~[#3](${U}/3)~~ [#4](${U}/4)`, "", "open"],
+      ["fix x", `~~[#5](${U}/5)~~ [#6](${U}/6)`, "open"],
+      ["~~7 — x~~", "", "open"],
+      ["~~8 — y~~ 9 — y", "", "open"],
+    ]);
+    expect(l.rows.map((r) => [r.slate, r.link, r.pr])).toEqual([
+      [null, 4, 4],
+      [null, 6, 6],
+      [9, null, 9],
+    ]);
   });
 
   test("`dropped Sprint #4` is no rule-1 state", () => {

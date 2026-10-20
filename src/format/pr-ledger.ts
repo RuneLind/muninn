@@ -197,8 +197,9 @@ const STATE_HEADER_RE = /^(?:state|status|tilstand)(?:\s*\([^()]*\))?$/i;
 const LANDED_HEADER_RE = /^(?:landed|landet)$/i;
 const DECISIONS_HEADER_RE = /^(?:decisions?|beslutning(?:er)?)$/i;
 const PR_HEADER_RE = /^PR$/i;
-/** A first column that numbers the slate (not Fase/Phase/Date/When). */
-const SLATE_HEADER_RE = /^(?:(?:planned|planlagt)\s+)?(?:PR|#|nr\.?|oppgave|task|steg|step|slice|part|del)$/i;
+/** A first column that is a phase, a date or a period, not a slate; any
+ *  other first column numbers the slate. A qualifier in parentheses may follow. */
+const NOT_SLATE_HEADER_RE = /^(?:fase|phase|date|dato|når|when|uke|week|sprint|runde|round|versjon|version)(?:\s*\([^()]*\))?$/i;
 
 const DECISION_ID_GLOBAL = /(?<![\p{L}\p{N}])D(\d{1,4})(?![\p{L}\p{N}])/gu;
 
@@ -206,8 +207,8 @@ const DECISION_ID_GLOBAL = /(?<![\p{L}\p{N}])D(\d{1,4})(?![\p{L}\p{N}])/gu;
 export const LEDGER_PARSED_MIN = 0.75;
 
 export interface LedgerRow {
-  /** The slate number: the leading integer of the first cell, when the first
-   *  column is a slate column (PR, #, Task …, not Fase or Date). */
+  /** The slate number: the leading integer of the first cell, unless the
+   *  first column is a phase, date or period column (Fase, Date, Week …). */
   slate: number | null;
   /** The number of the row's PR link, read from the first cell, then the
    *  PR, State and Landed cells, then the rest in order (`linkOf`). */
@@ -240,7 +241,7 @@ function plain(cell: string): string {
   return cell.replace(/\*\*|__|~~/g, "").trim();
 }
 
-/** A cell with its struck text (`~~merged~~`) removed, for state matching. */
+/** A cell with its struck text (`~~merged~~`) removed, for state and identity. */
 function unstruck(cell: string): string {
   return cell.replace(/~~[^~]*~~/g, "");
 }
@@ -255,7 +256,7 @@ function prRefOf(text: string): number | null {
 }
 
 /** The slate number of a slate column's cell (`**12** — x`, `PR 12`,
- *  `[#351](…) 1 — x`); a date or a decimal is none. */
+ *  `[#351](…) 1 — x`); a date or a decimal is none. The cell comes unstruck. */
 function slateOf(cell: string, slateColumn: boolean): { slate: number | null; label: string } {
   const t = plain(cell).replace(/^[-–—\s]+/, "");
   if (!slateColumn) return { slate: null, label: t };
@@ -288,8 +289,8 @@ function stateWord(word: string): Exclude<PrState, "unknown"> {
   return STATE_WORDS.find(([s]) => s === w)![1];
 }
 
-function rowState(raw: string[], stateCol: number, landedCol: number): { state: PrState; rule: 0 | 1 | 2 | 3 } {
-  const cells = raw.map(unstruck);
+/** The row's state over its unstruck cells. */
+function rowState(cells: string[], stateCol: number, landedCol: number): { state: PrState; rule: 0 | 1 | 2 | 3 } {
   const rule1 = (i: number): { state: PrState; rule: 1 } | null => {
     const s = wordThenRef(cells[i] ?? "");
     return s ? { state: s, rule: 1 } : null;
@@ -331,14 +332,16 @@ export function parseLedgerTable(headers: string[], rows: string[][], source: Le
   const landedCol = headerIndex(headers, LANDED_HEADER_RE);
   const decisionsCol = headerIndex(headers, DECISIONS_HEADER_RE);
   const prCol = headerIndex(headers, PR_HEADER_RE);
-  const slateColumn = SLATE_HEADER_RE.test(plain(headers[0] ?? ""));
+  const slateColumn = !NOT_SLATE_HEADER_RE.test(plain(headers[0] ?? ""));
   const out: LedgerRow[] = [];
   for (const cells of rows) {
-    const { slate, label } = slateOf(cells[0] ?? "", slateColumn);
-    const link = linkOf(cells, [prCol, stateColumn, landedCol]);
+    // Struck text (`~~[#3](…)~~`) gives no identity, as it gives no state.
+    const live = cells.map(unstruck);
+    const { slate, label } = slateOf(live[0] ?? "", slateColumn);
+    const link = linkOf(live, [prCol, stateColumn, landedCol]);
     const pr = slate ?? link;
     if (pr === null) continue;
-    const { state, rule } = source === "glance" ? { state: "planned" as const, rule: 0 as const } : rowState(cells, stateColumn, landedCol);
+    const { state, rule } = source === "glance" ? { state: "planned" as const, rule: 0 as const } : rowState(live, stateColumn, landedCol);
     out.push({ slate, link, pr, state, rule, decisions: decisionsOf(cells, decisionsCol), label, cells });
   }
   const known = out.filter((r) => r.state !== "unknown").length;
