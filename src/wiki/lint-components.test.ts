@@ -826,15 +826,26 @@ describe("an enum value that folds to the default renders as written and is no f
     "Fact.v": (v) => page(`A <Fact n="1" v="${v}">c</Fact> b`),
     "Lane.kind": (v) => page("<NextMoves>", "", `<Lane kind="${v}">`, "", "- s", "", "</Lane>", "", "</NextMoves>"),
     "StatusRows.view": (v) => page(`<StatusRows view="${v}">`, "", "- **A:** 1 · b", "", "</StatusRows>"),
+    "Chart.normalize": (v) =>
+      page(`<Chart kind="steps" x="Step" ref="Base" normalize="${v}">`, "", "| Step | A |", "|---|---|", "| Base | 10 |", "| s1 | 12 |", "", "</Chart>"),
   };
   const upperFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
   // The reader's page render: `StatusRows view` draws only there.
   const readerHtml = (content: string) => renderWikiHtml(content, () => undefined, { views: true });
   const enumAttrs = Object.entries(COMPONENT_SPEC).flatMap(([name, spec]) =>
     Object.entries(spec.attrs as Record<string, { enum?: readonly string[]; default?: string | number }>)
-      .filter(([, a]) => a.enum)
+      // A required enum has no default to fold to (Chart kind): its own test is below.
+      .filter(([, a]) => a.enum && a.default !== undefined)
       .map(([attr, a]) => ({ key: `${name}.${attr}`, enum: a.enum!, def: String(a.default) })),
   );
+
+  test("Chart kind, a required enum, renders as written in any case and is no finding", () => {
+    const at = (v: string) => page(`<Chart kind="${v}" value="V" target="T" gap="G">`, "", "| R | V | T | G |", "|---|---|---|---|", "| a | 1 | 2 | 1 |", "", "</Chart>");
+    for (const v of ["Gap", "GAP", " gap "]) {
+      expect({ v, same: readerHtml(at(v)) === readerHtml(at("gap")), found: run(at(v)) }).toEqual({ v, same: true, found: [] });
+    }
+    expect(readerHtml(at("gap"))).toContain("vc-gap");
+  });
 
   test("every enum attribute has a page here", () => {
     expect(enumAttrs.map((a) => a.key).sort()).toEqual(Object.keys(pages).sort());

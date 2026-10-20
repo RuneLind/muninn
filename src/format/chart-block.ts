@@ -14,7 +14,7 @@
  */
 
 import { isEmptyCell, parseCellValue, tableDecimalComma, type NumberContext } from "./cell-number.ts";
-import type { ChartKind } from "./component-spec.ts";
+import { readChartNormalize, type ChartKind } from "./component-spec.ts";
 import { normalizeLabel } from "./delta-table.ts";
 import type { Block } from "./markdown-ast.ts";
 
@@ -288,7 +288,8 @@ export function readChart(kind: ChartKind | null, attrs: Readonly<Record<string,
     case "steps": {
       const xi = column("x", true);
       if (xi === null) return { model: null, findings, ctx };
-      const normalize = (attrs.normalize?.trim().toLowerCase() ?? "") === "ref";
+      // The spec's reader, so the view and lint check 15 agree: `Ref` renders as none.
+      const normalize = readChartNormalize(attrs.normalize).value === "ref";
       const refName = attrs.ref?.trim() ?? "";
       if (normalize && !refName) fatal('normalize="ref" needs ref= naming a row');
       const refRow = refName ? table.rows.findIndex((row) => normalizeLabel(cell(row, xi)) === normalizeLabel(refName)) : -1;

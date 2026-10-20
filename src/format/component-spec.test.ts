@@ -141,8 +141,10 @@ describe("readX: fellBack only for a present, unaccepted value", () => {
       )) {
         if (!spec.enum) continue;
         for (const v of spec.enum) expect({ attr, v, ...spec.parse(v) }).toEqual({ attr, v, value: v, fellBack: false });
-        expect(spec.parse("zzz")).toEqual({ value: spec.default, fellBack: true });
-        expect(spec.parse(undefined)).toEqual({ value: spec.default, fellBack: false });
+        // A required enum (Chart kind) has no default: unknown and missing read as null.
+        const def = "default" in spec ? spec.default : null;
+        expect(spec.parse("zzz")).toEqual({ value: def, fellBack: true });
+        expect(spec.parse(undefined)).toEqual({ value: def, fellBack: false });
       }
     }
   });
