@@ -30,26 +30,49 @@ import {
 
 const log = getLog("dashboard", "find-everywhere");
 
+/** The first registry entry whose root is `servedRoot`. */
+function firstEntryForRoot(
+  registry: ReadonlyArray<{ name: string; root: string }>,
+  servedRoot: string | null,
+): { name: string } | undefined {
+  return servedRoot === null ? undefined : registry.find((e) => sameWikiRoot(e.root, servedRoot));
+}
+
 /**
- * The registry name find-everywhere gives the wiki a `/wiki` page serves: the
- * resolved entry's name, else (the `WIKI_DIR` override, which has no entry)
- * the entry whose root is the served root, else "". The page injects it as
- * `__WIKI_FIND_SELF__`, so the palette can tell its own wiki's rows apart.
+ * The registry name of the wiki a `/wiki` page serves: the resolved entry's
+ * name, else (the `WIKI_DIR` override, which has no entry) the entry whose root
+ * is the served root, else "". Injected as `__WIKI_FIND_SELF__`. The answer
+ * cards, the answer export, new-since and the Agent lens send it as `wiki`, so
+ * it is the REQUESTED name: `?wiki=b` stays `b` on aliased roots, where answer
+ * rows and baselines are keyed and `WIKI_ANSWER_WIKIS` is checked.
  */
 export function findSelfWikiName(
   registry: ReadonlyArray<{ name: string; root: string }>,
   entry: { name: string } | undefined,
   servedRoot: string | null,
 ): string {
-  if (entry) return entry.name;
-  if (servedRoot === null) return "";
-  return registry.find((e) => sameWikiRoot(e.root, servedRoot))?.name ?? "";
+  return entry?.name ?? firstEntryForRoot(registry, servedRoot)?.name ?? "";
+}
+
+/**
+ * The name find-everywhere labels this page's own rows with: the FIRST registry
+ * entry whose root is the served root (`uniqueWikiRoots`' rule), else
+ * `findSelfWikiName`. On aliased roots (`a=/w,b=/w`) `?wiki=b` gets `a`.
+ * Injected as `__WIKI_FIND_ROWS__`; only the palette reads it, to dedupe
+ * Everywhere rows and open them in place. Never send it as a `wiki` param.
+ */
+export function findRowsWikiName(
+  registry: ReadonlyArray<{ name: string; root: string }>,
+  entry: { name: string } | undefined,
+  servedRoot: string | null,
+): string {
+  return firstEntryForRoot(registry, servedRoot)?.name ?? findSelfWikiName(registry, entry, servedRoot);
 }
 
 /**
  * One entry per ROOT. `WIKI_EXTRA=a=/w,b=/w`, or a bot's `wikiDir` registered
  * again in `WIKI_EXTRA`, would otherwise list every page of that root twice.
- * The first entry's name wins (`findSelfWikiName`'s rule); the collections are
+ * The first entry's name wins (`findRowsWikiName`'s rule); the collections are
  * the union of every entry's, so a hit in the second entry's collection still
  * resolves to the root's page.
  */

@@ -252,6 +252,11 @@ export async function pageProvenance(
   /** The wiki's index: its key map and its resolved tracker config feed the
    *  issue rows. Absent ⇒ no rows (a caller with no index in hand). */
   index?: WikiIndex,
+  /** The HTTP request's own signal: a reader who navigated away cancels the
+   *  claude-usage fetches; the two huginn reads take no signal and are only
+   *  raced. Only the deadline reads as `links.timedOut`. Absent (the Stamp
+   *  route's inline call) ⇒ the deadline alone. */
+  requestSignal?: AbortSignal,
 ): Promise<ProvenancePayload | null> {
   // ONE gate, `hasProvenance` — the same predicate the store's own callers use,
   // so "does this page carry provenance" has a single answer.
@@ -292,10 +297,11 @@ export async function pageProvenance(
   const trackers = index?.readerConfig?.trackers ?? [];
   const baseRows = issueRowsFor(meta, index?.issueKeys, trackers);
 
-  const signal =
+  const deadline =
     askLedger || askPrs || keys.length > 0 || baseRows.length > 0
       ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS)
       : undefined;
+  const signal = deadline && requestSignal ? AbortSignal.any([requestSignal, deadline]) : deadline;
 
   // Legs 1-4, started together. Held as PROMISES rather than awaited in one
   // `Promise.all`, because the second hop must not wait on leg 1.
@@ -346,7 +352,7 @@ export async function pageProvenance(
   // after the issue leg: that one carries its deadline on each row's `ledger`,
   // and a page whose other legs finished (or never ran) must not blame them.
   const linkLegsP = Promise.all([resolvedP, mergeP, handoffP, prP, ghostStageP]).then(
-    (legs) => [legs, signal?.aborted === true] as const,
+    (legs) => [legs, deadline?.aborted === true] as const,
   );
   const [[[resolved, mergeResult, handoffResult, prResult, ghostStage], linksTimedOut], issues] = await Promise.all([
     linkLegsP,

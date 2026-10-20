@@ -428,8 +428,9 @@ export function jiraChipView(j: ProvenanceJira): JiraChipView {
 /**
  * The strip's chips. On a wiki with a tracker the payload's `issues` supersede
  * `jira`: every Jira key that COUNTS, stamped and inferred, strongest first,
- * with its ✓ from the issue lookup's `known`; then any stamped value that is
- * not key-shaped, as the inert chip a wiki without a tracker draws for it. On
+ * with its ✓ from the issue lookup's `known`; then any stamped value the
+ * issue rows do not draw (prose, or a key the tracker's key rule refuses), as
+ * the inert chip a wiki without a tracker draws for it. On
  * a wiki without one, the stamped `jira` list as before.
  */
 export function stripChipViews(p: ProvenancePayload): JiraChipView[] {
@@ -437,7 +438,10 @@ export function stripChipViews(p: ProvenancePayload): JiraChipView[] {
   const keys = p.issues
     .filter((r) => r.tracker === JIRA_TRACKER_ID && relationsCount(r.relations))
     .map((r) => ({ key: r.key, url: r.url, known: r.known === true, inferred: !r.relations.includes("stamped") }));
-  return [...keys, ...p.jira.filter((j) => !isJiraKeyShape(j.key)).map(jiraChipView)];
+  // Every stamped value the issue rows do not draw: prose, and a key-shaped
+  // value the tracker's key rule refuses (`X-1`), which is no issue ref.
+  const drawn = new Set(keys.map((k) => k.key));
+  return [...keys, ...p.jira.filter((j) => !drawn.has(j.key)).map(jiraChipView)];
 }
 
 // ── Markup ───────────────────────────────────────────────────────────────────

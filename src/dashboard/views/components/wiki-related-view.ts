@@ -57,6 +57,8 @@ export interface RelatedViewOptions {
   /** The wiki's worked-on ledger covers pages (`workedAxisOn`): the age chip
    *  then marks where its date came from, as the rail's does. */
   workedAxis?: boolean;
+  /** `workedCoverage.asOfMs`: an age newer than the last ledger read says so. */
+  ledgerAsOfMs?: number;
   /** ONE server-anchored instant for the whole block (`recencyNow()`). */
   now?: number;
   order?: RelatedOrder;
@@ -131,10 +133,10 @@ export function strengthBarHtml(p: RelatedListing): string {
  * (`formatRailAge`) — and, only where the ledger covers the wiki, with the
  * rail's source marking (`workedSourceOf` + `workedChip`).
  */
-export function relatedAgeHtml(p: WikiListing, now: number, workedAxis: boolean): string {
+export function relatedAgeHtml(p: WikiListing, now: number, workedAxis: boolean, ledgerAsOfMs?: number): string {
   const signal = pageDateSignal(p, "worked", now);
   if (!signal) return "";
-  const source = workedAxis ? workedAxisSource(p, now, signal) : null;
+  const source = workedAxis ? workedAxisSource(p, now, signal, ledgerAsOfMs) : null;
   const chip = workedChip(source, signal.label, signal.kind === "added" ? "added" : "updated");
   return `<span class="wiki-rel-age${chip.cls}" title="${esc(chip.title)}">${esc(formatRailAge(signal.ms, now, signal.label))}</span>`;
 }
@@ -160,7 +162,7 @@ export function orderRelated(items: RelatedListing[], order: RelatedOrder, now: 
 
 /** The second line under a title: the bar, the score, the age, the series. */
 function metaHtml(p: RelatedListing, opts: RelatedViewOptions, now: number): string {
-  const inner = strengthBarHtml(p) + relatedAgeHtml(p, now, !!opts.workedAxis) + seriesPillHtml(p, opts.seriesLabelOf);
+  const inner = strengthBarHtml(p) + relatedAgeHtml(p, now, !!opts.workedAxis, opts.ledgerAsOfMs) + seriesPillHtml(p, opts.seriesLabelOf);
   return inner ? `<div class="wiki-rel-meta">${inner}</div>` : "";
 }
 

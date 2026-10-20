@@ -952,6 +952,13 @@ export interface WikiIndex {
    */
   shadowed?: ShadowedPage[];
   /**
+   * Words in each markdown page's body outside its links (`proseWordCount`),
+   * keyed like `outgoing`. Related work's index-shape cut reads it
+   * (`src/wiki/strength.ts`). Optional so hand-built test indexes stay valid;
+   * `buildWikiIndex` always sets it.
+   */
+  proseWords?: Map<string, number>;
+  /**
    * How much of this wiki the WORKED axis covers, as of this build: `matched`
    * pages carry a `workedMs`, out of `total` scanned, from `returned` rows the
    * ledger sent. Absent when no memo was warm (never fetched, or nothing has
@@ -1637,6 +1644,19 @@ function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[
  */
 export function stripFrontmatter(content: string): string {
   return splitFrontmatter(content).body;
+}
+
+/**
+ * Words in a page body after the frontmatter, with every `[[wikilink]]` and
+ * `[text](target)` link removed whole: what the page says besides its links.
+ * An index page is mostly links, so this over its outlink count separates an
+ * index from a long page that also links a lot.
+ */
+export function proseWordCount(content: string): number {
+  const body = stripFrontmatter(content).replace(/!?\[\[[^\]\n]*\]\]|!?\[[^\]\n]*\]\([^)\n]*\)/g, " ");
+  let n = 0;
+  for (const w of body.split(/\s+/)) if (w) n++;
+  return n;
 }
 
 /**
@@ -3379,6 +3399,8 @@ export async function buildWikiIndex(
   const rawOutgoing = new Map<string, string[]>();
   /** Per-page resolved relative-markdown-link targets (normalized relPaths). */
   const rawMdTargets = new Map<string, string[]>();
+  /** `WikiIndex.proseWords`, filled beside the two link maps. */
+  const proseWords = new Map<string, number>();
   /** The attachment pass's inputs, keyed by NORMALIZED relPath (the two maps
    *  above are keyed by the raw one — these are compared against resolved embed
    *  targets, which are normalized by construction). */
@@ -3549,6 +3571,7 @@ export async function buildWikiIndex(
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
       rawMdTargets.set(relPath, resolveMarkdownTargets(relPath, extractMarkdownLinks(content)));
+      proseWords.set(normalizeRelPath(relPath), proseWordCount(content));
       // The attachment pass's two inputs, read here where the body is already in
       // hand. Both feed `pairAttachments` and NOTHING else: an `<Embed>` target
       // is deliberately not a link (see `extractEmbedTargets`), so `outgoing`,
@@ -4114,6 +4137,7 @@ export async function buildWikiIndex(
     folderLabels,
     trails,
     shadowed,
+    proseWords,
     ...(workedCoverage ? { workedCoverage } : {}),
     ...(work ? { work } : {}),
     issueKeys: buildIssueKeyIndex(pages, trackers),

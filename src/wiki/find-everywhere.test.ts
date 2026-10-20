@@ -42,6 +42,7 @@ import {
   logLegFailures,
   uniqueWikiRoots,
   usageLegJson,
+  findRowsWikiName,
   findSelfWikiName,
   registerWikiFindEverywhereRoute,
 } from "../dashboard/routes/wiki-find-everywhere.ts";
@@ -650,11 +651,32 @@ describe("helpers", () => {
       { name: "other", root: "/nowhere" },
       { name: "mine", root: a.root },
     ];
+    // The requested entry wins, also when an earlier entry shares its root (an
+    // alias): the answer and new-since consumers send this name as `wiki`.
+    expect(findSelfWikiName([...registry, { name: "alias", root: a.root }], { name: "alias" }, a.root)).toBe("alias");
     expect(findSelfWikiName(registry, { name: "picked" }, a.root)).toBe("picked");
     expect(findSelfWikiName(registry, undefined, a.root)).toBe("mine");
     expect(findSelfWikiName(registry, undefined, `${a.root}/`)).toBe("mine");
     expect(findSelfWikiName(registry, undefined, "/unregistered")).toBe("");
     expect(findSelfWikiName(registry, undefined, null)).toBe("");
+  });
+
+  test("findRowsWikiName names the served root by its FIRST registry entry, as uniqueWikiRoots labels its rows", async () => {
+    const a = await wiki({ "p.md": page("P") });
+    const registry = [
+      { name: "other", root: "/nowhere" },
+      { name: "mine", root: a.root },
+      { name: "alias", root: a.root },
+    ];
+    // ?wiki=alias on an aliased root: the rows say "mine", so the palette must too.
+    expect(findRowsWikiName(registry, { name: "alias" }, a.root)).toBe("mine");
+    expect(uniqueWikiRoots(registry).find((e) => e.root === a.root)?.name).toBe("mine");
+    // An entry whose root no registry row holds keeps its own name.
+    expect(findRowsWikiName(registry, { name: "picked" }, "/elsewhere")).toBe("picked");
+    // The WIKI_DIR override (no entry) resolves by root, else "".
+    expect(findRowsWikiName(registry, undefined, `${a.root}/`)).toBe("mine");
+    expect(findRowsWikiName(registry, undefined, "/unregistered")).toBe("");
+    expect(findRowsWikiName(registry, undefined, null)).toBe("");
   });
 });
 

@@ -129,6 +129,14 @@ const SECTIONS = "details.fold, h1, h2, h3, h4, h5, h6";
 /** What a peek can show: the targets `peekParts` knows. */
 const TARGET_KINDS = `.dl-item, section.query, .cb-row, ${SECTIONS}`;
 
+/** Whether a chip's text can name its target in prose: two or more
+ *  characters, at least one a letter (D4, S1, Q-14, Q-A, MEL-601780). A
+ *  digit-only `10` would link the parts of a date or version, and a bare `A`
+ *  every sentence-initial A. */
+export function isRefId(key: string): boolean {
+  return /\p{L}/u.test(key) && [...key].length >= 2;
+}
+
 /** A key seen twice maps to null: it names no one target. */
 function claim(map: Map<string, Element | null>, key: string, el: Element): void {
   map.set(key, map.has(key) ? null : el);
@@ -148,7 +156,7 @@ export function refTargets(root: Element): { ids: Map<string, Element>; titles: 
   root.querySelectorAll(ID_TARGETS).forEach((chip) => {
     const key = (chip.textContent ?? "").trim();
     const target = chip.closest("[id]");
-    if (key && target) claim(idDefs, key, target);
+    if (key && target && isRefId(key)) claim(idDefs, key, target);
   });
   const folds = new Map<string, Element | null>();
   const headings = new Map<string, Element | null>();

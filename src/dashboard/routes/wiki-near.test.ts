@@ -16,7 +16,7 @@ import { Hono } from "hono";
 import { registerWikiRoutes } from "./wiki-routes.ts";
 import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
-import { NEAR_MAX, RELATED_HUB_BACKLINKS } from "../../wiki/related-constants.ts";
+import { NEAR_MAX, RELATED_HUB_BACKLINKS, RELATED_HUB_OUTLINKS } from "../../wiki/related-constants.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 
 function page(title: string, body: string): string {
@@ -35,13 +35,13 @@ describe("GET /api/wiki/page — near", () => {
       ["Notes/Mid.md", page("Mid", "Links [[far]].")],
       ["other/far.md", page("Far", "Nothing.")],
       ["plans/hub.md", page("Hub", "Links [[Mid]].")],
-      // A page whose near map overflows the cap: 30 first-hop pages, each with
-      // 10 of its own.
-      ["big/open.md", page("Big", Array.from({ length: 30 }, (_, i) => `[[m${i}]]`).join(" "))],
+      // A page whose near map overflows the cap: RELATED_HUB_OUTLINKS first-hop
+      // pages (one more makes it an outlink hub), each with 12 of its own.
+      ["big/open.md", page("Big", Array.from({ length: RELATED_HUB_OUTLINKS }, (_, i) => `[[m${i}]]`).join(" "))],
     ];
-    for (let i = 0; i < 30; i++) {
-      files.push([`big/m${i}.md`, page(`M${i}`, Array.from({ length: 10 }, (_, j) => `[[f${i}-${j}]]`).join(" "))]);
-      for (let j = 0; j < 10; j++) files.push([`big/f${i}-${j}.md`, page(`F${i}-${j}`, "x")]);
+    for (let i = 0; i < RELATED_HUB_OUTLINKS; i++) {
+      files.push([`big/m${i}.md`, page(`M${i}`, Array.from({ length: 12 }, (_, j) => `[[f${i}-${j}]]`).join(" "))]);
+      for (let j = 0; j < 12; j++) files.push([`big/f${i}-${j}.md`, page(`F${i}-${j}`, "x")]);
     }
     for (let i = 0; i <= RELATED_HUB_BACKLINKS; i++) files.push([`fill/f${i}.md`, page(`Fill ${i}`, "[[hub]]")]);
     for (const [rel, body] of files) {

@@ -52,6 +52,7 @@ import {
   pageDateSignal,
   pageWorkState,
   usableWorkEvents,
+  WORKED_INGEST_SLACK_MS,
   type WikiListing,
 } from "./wiki-filter.ts";
 import { rawWork, type PageWork, type WorkEvent } from "../../../wiki/work-focus.ts";
@@ -524,13 +525,9 @@ function usableWorkedMs(page: WikiListing, now: number): number {
  *  case-sensitive there too). */
 const LEDGER_PAGE_EXT = /\.mdx?$/;
 
-/** How long after an edit the ledger may still not hold it. `asOfMs` is when
- *  muninn got the answer, not how fresh the ledger's data is: a laptop edit
- *  reaches the mini's ledger through a push job that runs every minute. An
- *  update newer than `asOfMs` minus this is never set aside. It covers the
- *  steady state only: while that push stalls (one lasted 2h44m) a fresh laptop
- *  edit on a page with an older worked date is demoted until it lands. */
-export const WORKED_INGEST_SLACK_MS = 10 * 60_000;
+/** How long after an edit the ledger may still not hold it. Declared beside
+ *  `ledgerReadDayFor` in `wiki-filter.ts`, which the rail chip shares. */
+export { WORKED_INGEST_SLACK_MS };
 
 /**
  * Whether a worked stamp may stand in for this update signal at all. On an

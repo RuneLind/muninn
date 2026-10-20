@@ -252,6 +252,33 @@ describe("GET /api/wiki/html", () => {
     }
   });
 
+  // arch-review 2026-10 #15: the fallback serves only what the index could list.
+  test("the unlisted-.html fallback refuses dot segments and node_modules, also through a symlink", async () => {
+    await Bun.write(path.join(root, ".private/notes.html"), "<html>PRIVATE</html>");
+    await Bun.write(path.join(root, "node_modules/pkg/readme.html"), "<html>PRIVATE</html>");
+    await Bun.write(path.join(root, ".git/hooks/x.html"), "<html>PRIVATE</html>");
+    await symlink(path.join(root, ".private/notes.html"), path.join(root, "blogs/alias.html"));
+    // …and a dot-named path is refused even when it resolves to an ordinary file.
+    await Bun.write(path.join(root, "blogs/sub/plain.html"), "<html>OK</html>");
+    await symlink(path.join(root, "blogs/sub"), path.join(root, ".mirror"));
+    for (const rel of [
+      ".private/notes.html",
+      "blogs/../.private/notes.html",
+      "node_modules/pkg/readme.html",
+      ".git/hooks/x.html",
+      "blogs/alias.html",
+      ".mirror/plain.html",
+    ]) {
+      const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent(rel));
+      expect(`${rel}: ${res.status}`).toBe(`${rel}: 404`);
+      expect(await res.text()).toBe(`no explainer named "${rel}"`);
+    }
+    // A plain .html in an ordinary folder is still served.
+    const ok = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/sub/plain.html"));
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain("OK");
+  });
+
   test("a NUL byte in relPath is a 400, not a thrown 500", async () => {
     const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/p.mdx\u0000.html"));
     expect(res.status).toBe(400);
@@ -4475,5 +4502,45 @@ describe("the culled bit — listing and page payloads", () => {
     expect(data.outgoing.find((r) => r.relPath === "archive/old.md")?.culled).toBe(true);
     expect(data.backlinks.find((r) => r.relPath === "archive/old.md")?.culled).toBe(true);
     expect(data.related.map((r) => r.relPath)).not.toContain("archive/old.md");
+  });
+});
+
+// arch-review 2026-10 #60: on aliased roots the page injects TWO names. The
+// requested one (`__WIKI_FIND_SELF__`) is what the answer cards, the answer
+// export, new-since and the Agent lens send as `wiki`, so answers stored under
+// `b` and `WIKI_ANSWER_WIKIS=b` keep working on `?wiki=b`. The first entry on the
+// root (`__WIKI_FIND_ROWS__`) is what Everywhere rows carry, so only the palette
+// reads it.
+describe("GET /wiki — aliased roots inject the requested name and the rows name apart", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-alias-route-"));
+    await Bun.write(path.join(root, "p.md"), "# P\n\nBody.\n");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `aliasfirst=${root},aliassecond=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("?wiki=aliassecond keeps its own name for the consumers that key state, the first entry's for the rows", async () => {
+    const html = await (await app.request("/wiki?wiki=aliassecond")).text();
+    expect(html).toContain('window.__WIKI_FIND_SELF__ = "aliassecond"');
+    expect(html).toContain('window.__WIKI_FIND_ROWS__ = "aliasfirst"');
+    const first = await (await app.request("/wiki?wiki=aliasfirst")).text();
+    expect(first).toContain('window.__WIKI_FIND_SELF__ = "aliasfirst"');
+    expect(first).toContain('window.__WIKI_FIND_ROWS__ = "aliasfirst"');
   });
 });

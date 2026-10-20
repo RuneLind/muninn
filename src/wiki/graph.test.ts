@@ -310,6 +310,21 @@ describe("buildGraph — scopes", () => {
     expect(lanes(p).issue.sort()).toEqual(["DEMO-130", "DEMO-131"]);
   });
 
+  // arch-review 2026-10 #20: a series spelled two ways is ONE series, as in the rail.
+  test("series scope folds case and whitespace like the rail's census, and echoes the census key", async () => {
+    const mixed: WikiIndex = {
+      ...idx,
+      pages: idx.pages.map((p) => (p.relPath === "series/b.md" ? { ...p, series: " Demo-Serie" } : p)),
+    };
+    for (const root of ["demo-serie", "Demo-Serie", "DEMO-SERIE "]) {
+      const p = ok((await graph({ scope: "series", root }, fakePort(), mixed)).res);
+      expect(p.root).toBe("demo-serie");
+      expect(p.nodes.filter((n) => n.hop === 0).map((n) => n.id)).toEqual(["page:series/a.md", "page:series/b.md"]);
+    }
+    // The stored spelling is untouched: lint 8.3 still sees both variants.
+    expect(mixed.pages.find((p) => p.relPath === "series/b.md")?.series).toBe(" Demo-Serie");
+  });
+
   test("wiki scope defaults to level 1, roots at every counting key, asks no ledger, and carries the board's fields", async () => {
     const { res, port } = await graph({ scope: "wiki" });
     const p = ok(res);

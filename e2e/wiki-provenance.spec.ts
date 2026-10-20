@@ -1403,7 +1403,7 @@ test.describe("Wiki reader: provenance", () => {
     await page.route("**/api/wiki/page/provenance?**", async (route) => {
       calls += 1;
       if (calls === 1) await held;
-      await route.continue();
+      await route.continue().catch(() => {}); // fetch 1 was aborted by the page
     });
     await open_(page, SHAPE_REL);
     await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
@@ -1411,9 +1411,10 @@ test.describe("Wiki reader: provenance", () => {
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
     await page.locator(`.wiki-list-item[data-relpath="${SHAPE_REL}"]`).click();
     await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
-    const first = page.waitForResponse((r) => r.url().includes("/api/wiki/page/provenance"));
+    // Leaving the page aborted fetch 1, so it never answers: release it and
+    // give a late write the time it would have taken.
     release();
-    await first;
+    await page.waitForTimeout(200);
     await expect(page.locator(".wiki-article-head .wiki-prov-strip")).toHaveCount(1);
     await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
   });
@@ -1548,7 +1549,7 @@ test.describe("Wiki reader: provenance", () => {
         shapeLoads += 1;
         if (shapeLoads === 2) await loadHeld;
       }
-      await route.continue();
+      await route.continue().catch(() => {}); // the held load was aborted by the page
     });
     let releaseStamp: () => void = () => {};
     const stampHeld = new Promise<void>((r) => {
@@ -1574,9 +1575,10 @@ test.describe("Wiki reader: provenance", () => {
     // The refetch's GET is the THIRD shape load and passes straight through.
     await expect.poll(() => shapeLoads).toBe(3);
     await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
-    const second = page.waitForResponse((r) => r.url().includes(encodeURIComponent(SHAPE_REL)));
+    // The Stamp refetch aborted the held second load (leaving or reloading
+    // retires the load in flight), so it never answers: release it and give a
+    // late write the time it would have taken.
     releaseLoad();
-    await second;
     await page.waitForTimeout(200);
     await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
     await expect(page.locator(".wiki-prov-line")).toHaveCount(1);

@@ -510,6 +510,24 @@ describe("the strip's chips on a wiki with a tracker", () => {
     expect(html).toContain("wiki-prov-jira inferred");
   });
 
+  // arch-review 2026-10 #37: a stamped key the tracker's key rule refuses is no
+  // issue row, so the strip still draws it — as the inert chip.
+  test("a stamped key the tracker refuses stays on the strip as an inert chip", () => {
+    const p = payload({
+      jira: [
+        { key: "DEMO-180", url: "https://example.invalid/browse/DEMO-180" },
+        { key: "X-1", url: "https://example.invalid/browse/X-1" },
+        { key: "DEMO-0145", url: "https://example.invalid/browse/DEMO-0145" },
+      ],
+      issues: [issue("DEMO-180", ["stamped"], true)],
+    });
+    expect(stripChipViews(p).map((c) => [c.key, !!c.inferred])).toEqual([
+      ["DEMO-180", false],
+      ["X-1", false],
+      ["DEMO-0145", false],
+    ]);
+  });
+
   test("with no `issues` the strip draws `jira`, as before", () => {
     const p = payload({ jira: [{ key: "DEMO-180", url: "https://example.invalid/browse/DEMO-180" }] });
     expect(stripChipViews(p).map((c) => c.key)).toEqual(["DEMO-180"]);

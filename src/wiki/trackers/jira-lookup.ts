@@ -165,6 +165,9 @@ export async function loadIssueFields(
       const docs = Array.isArray(raw?.documents) ? raw.documents : [];
       if (docs.length === 0) throw new Error("listing came back empty");
       const facts = pickIssueFields(docs);
+      // Ids that all fail to parse are the same failure as an empty listing (a
+      // renamed doc-id spelling), not "huginn holds none of these keys".
+      if (facts.size === 0) throw new Error(`listing parsed to 0 keys from ${docs.length} docs`);
       cached.set(knowledgeApiUrl, { facts, fetchedAtMs: now });
       failedAt.delete(knowledgeApiUrl);
       warnedFailure.delete(knowledgeApiUrl);

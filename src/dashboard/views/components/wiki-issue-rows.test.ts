@@ -8,6 +8,7 @@ import {
   linkRefusalHtml,
   type IssueSectionOptions,
 } from "./wiki-issue-rows.ts";
+import { jiraAdapter } from "../../../wiki/trackers/jira.ts";
 import type { IssueRow } from "../../../wiki/trackers/types.ts";
 
 const row = (key: string, relations: IssueRow["relations"], over: Partial<IssueRow> = {}): IssueRow => ({
@@ -91,10 +92,27 @@ describe("the ledger label", () => {
     expect(ledgerLabel({ state: "priced", sessions: 1, totalCost: 0, costedSessions: 1, truncated: false })).toBe(
       "1 session mentions it · $0.00",
     );
+    // arch-review 2026-10 #18: no costed session is no cost, never "$0.00".
+    expect(ledgerLabel({ state: "priced", sessions: 2, totalCost: 0, costedSessions: 0, truncated: false })).toBe(
+      "2 sessions mention it · no costed session",
+    );
     expect(ledgerLabel({ state: "not-tracked" })).toBe("not tracked");
     expect(ledgerLabel({ state: "unpriced", reason: "demoted" })).toBe("");
     expect(ledgerLabel({ state: "unpriced", reason: "not-configured" })).toBe("");
     expect(ledgerLabel(undefined)).toBe("");
+  });
+
+  // arch-review 2026-10 #18 fix round 1: the three ways a key has no cost to show.
+  test("no session, no costed session, and a total the ledger could not give", () => {
+    expect(ledgerLabel({ state: "priced", sessions: 0, totalCost: 0, costedSessions: 0, truncated: false })).toBe(
+      "0 sessions mention it",
+    );
+    expect(ledgerLabel({ state: "priced", sessions: 2, totalCost: 0, costedSessions: 0, truncated: false })).toBe(
+      "2 sessions mention it · no costed session",
+    );
+    // A bad total parses to no answer, which `priceIssue` reports as unreachable.
+    expect(jiraAdapter.parseLedger!({ sessions: [{}], totalCost: "1.5", costedSessions: 1, truncated: false })).toBeNull();
+    expect(ledgerLabel({ state: "unpriced", reason: "unreachable" })).toBe("cost unavailable");
   });
 });
 

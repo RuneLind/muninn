@@ -11,7 +11,8 @@
 
 import { JIRA_KEY_SHAPE, normalizeJiraKey } from "../provenance.ts";
 import { extractJiraKeys } from "../../jira/key-scan.ts";
-import { maskFencedCode, maskInlineCode } from "../../jira/markdown-scan.ts";
+import { maskFencedCode } from "../../jira/markdown-scan.ts";
+import { lineCodeSpanRanges } from "../../format/code-spans.ts";
 import { JIRA_TRACKER_ID } from "./jira-id.ts";
 import { loadIssueFields } from "./jira-lookup.ts";
 import {
@@ -113,7 +114,12 @@ function scanKeys(
         const next = c.index + c[0].length;
         const rest = text.slice(next);
         if (num.length !== base.length || num[0] === "0" || END_RE.test(rest)) break;
-        if (opts.maxGap !== undefined && Math.abs(Number(num) - Number(base)) > opts.maxGap) break;
+        if (opts.maxGap !== undefined && Math.abs(Number(num) - Number(base)) > opts.maxGap) {
+          // A far number (`demo-8045-2026-notes`: a year) is no key, but it is
+          // not an end either: the base stands, judged after it.
+          pos = next;
+          break;
+        }
         found.push(`${project}-${num}`);
         pos = next;
       }
@@ -139,9 +145,10 @@ export function titleKeys(title: string, config: TrackerConfig): string[] {
   return scanKeys(title, config, { caseSensitive: true, chain: TITLE_CHAIN, maxGap: TITLE_MAX_GAP });
 }
 
-/** Stem keys, case-insensitive; `demo-7588-7969-notes` yields both. */
+/** Stem keys, case-insensitive; `demo-7588-7969-notes` yields both, and
+ *  `demo-8045-2026-notes` the base alone (the title rule's distance cap). */
 export function stemKeys(stem: string, config: TrackerConfig): string[] {
-  return scanKeys(stem, config, { caseSensitive: false, chain: STEM_CHAIN });
+  return scanKeys(stem, config, { caseSensitive: false, chain: STEM_CHAIN, maxGap: TITLE_MAX_GAP });
 }
 
 /** A tag that IS a key: `demo-145`. */
@@ -238,7 +245,27 @@ const blank = (s: string) => s.replace(/[^\n]/g, " ");
 /** Fenced code, inline code and HTML comments blanked — the text every body
  *  rule reads. A key there is an example or a note to self, not a reference. */
 function maskBody(body: string): string {
-  return maskInlineCode(maskFencedCode(body)).replace(/<!--[\s\S]*?-->/g, blank);
+  return maskCodeSpans(maskFencedCode(body)).replace(/<!--[\s\S]*?-->/g, blank);
+}
+
+/** Inline code blanked by the reader's own pairing (`lineCodeSpanRanges`), per
+ *  line and same-length, so a key the reader renders as code is never a mention
+ *  and `linkHits`' offsets still line up. */
+function maskCodeSpans(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const ranges = lineCodeSpanRanges(line);
+      if (ranges.length === 0) return line;
+      let out = "";
+      let cursor = 0;
+      for (const r of ranges) {
+        out += line.slice(cursor, r.start) + " ".repeat(r.end - r.start);
+        cursor = r.end;
+      }
+      return out + line.slice(cursor);
+    })
+    .join("\n");
 }
 
 function linkHits(maskedBody: string, config: TrackerConfig): LinkHit[] {
@@ -285,7 +312,10 @@ export function inferJiraIssues(page: TrackerPage, config: TrackerConfig): Issue
     }
   };
 
-  add(stampedKeys(page.frontmatter[jiraAdapter.frontmatterKey]), "stamped");
+  // One key shape for the index: a stamped key `parseKey` refuses (`X-1`,
+  // `DEMO-0145`) stays on the page's `jira` list and its strip, never an issue
+  // ref, since the graph and the Stamp route could not take it back.
+  add(stampedKeys(page.frontmatter[jiraAdapter.frontmatterKey]).filter((k) => parseClientKey(k) !== null), "stamped");
   for (const field of config.frontmatterKeys) {
     if (!Object.prototype.hasOwnProperty.call(page.frontmatter, field)) continue;
     add(valueStrings(page.frontmatter[field]).flatMap((v) => scanKeys(v, config, { caseSensitive: false })), "declared");
@@ -334,27 +364,43 @@ function projectOfKey(key: string): string | null {
   return JIRA_KEY_SHAPE.test(key) ? key.slice(0, key.indexOf("-")) : null;
 }
 
-/** `/api/jira?key=`'s answer — `{sessions[], totalCost, costedSessions,
- *  truncated}` — as a priced view, or null when it is not that shape. */
-function parseJiraLedger(raw: unknown): Extract<IssueLedgerView, { state: "priced" }> | null {
-  if (!raw || typeof raw !== "object") return null;
-  const r = raw as { sessions?: unknown; totalCost?: unknown; costedSessions?: unknown; truncated?: unknown };
-  if (!Array.isArray(r.sessions)) return null;
-  const total = typeof r.totalCost === "number" && Number.isFinite(r.totalCost) ? r.totalCost : 0;
-  return {
-    state: "priced",
-    sessions: r.sessions.length,
-    totalCost: Math.round(total * 100) / 100,
-    costedSessions: typeof r.costedSessions === "number" ? r.costedSessions : 0,
-    truncated: r.truncated === true,
-  };
-}
-
 /** claude-usage's own cap on `/api/jira/keys`: past it the answer is cut. */
 export const JIRA_KEYS_PER_CALL = 200;
 
 const count = (v: unknown): number | null =>
   typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+
+/**
+ * A ledger row's cost, rounded to cents, or null when it is no cost: not a
+ * number, not finite, or still negative after rounding (`-0.004` rounds to
+ * `-0`, is accepted and serializes as `0`). Rounded BEFORE the finite check:
+ * 1e308 is finite and ×100 is not. Both parsers read it, so one key never
+ * prices "$0.00" in Connections and "—" on the board.
+ */
+function ledgerCost(v: unknown): number | null {
+  const total = typeof v === "number" ? Math.round(v * 100) / 100 : NaN;
+  return Number.isFinite(total) && total >= 0 ? total : null;
+}
+
+/** `/api/jira?key=`'s answer — `{sessions[], totalCost, costedSessions,
+ *  truncated}` — as a priced view, or null when it is not that shape: by the
+ *  many-key parser's row rules, a cost that is no cost or more costed than
+ *  counted sessions is no answer, never a priced "$0". */
+function parseJiraLedger(raw: unknown): Extract<IssueLedgerView, { state: "priced" }> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { sessions?: unknown; totalCost?: unknown; costedSessions?: unknown; truncated?: unknown };
+  if (!Array.isArray(r.sessions)) return null;
+  const cost = ledgerCost(r.totalCost);
+  const costed = count(r.costedSessions);
+  if (cost === null || costed === null || costed > r.sessions.length) return null;
+  return {
+    state: "priced",
+    sessions: r.sessions.length,
+    totalCost: cost,
+    costedSessions: costed,
+    truncated: r.truncated === true,
+  };
+}
 
 /**
  * `/api/jira/keys?keys=`'s answer — `{keys: [{key, tracked, sessionCount,
@@ -374,9 +420,7 @@ export function parseJiraKeysLedger(raw: unknown): Map<string, KeyLedgerRow> | n
     if (typeof row.key !== "string" || typeof row.tracked !== "boolean") continue;
     const sessions = count(row.sessionCount);
     const costed = count(row.costedSessions);
-    // Rounded BEFORE the finite check: 1e308 is finite and ×100 is not.
-    const total = typeof row.totalCost === "number" ? Math.round(row.totalCost * 100) / 100 : NaN;
-    const cost = Number.isFinite(total) && total >= 0 ? total : null;
+    const cost = ledgerCost(row.totalCost);
     if (row.tracked && (sessions === null || costed === null || cost === null || costed > sessions)) continue;
     out.set(row.key.toUpperCase(), {
       tracked: row.tracked,
