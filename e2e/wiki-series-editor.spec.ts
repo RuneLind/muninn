@@ -458,8 +458,16 @@ test.describe("the base the menu holds", () => {
     // file under it is what proves the editor is holding that base rather than
     // re-reading it a millisecond before the POST.
     await openPage(page, SHIPPED, "Provenance chain strip");
+    // The menu reads the open page's base fresh at open (finding 66), so the
+    // out-of-band edit waits for that read: landing before it, the edit is a
+    // change since the page LOADED, which the menu refuses before any write.
+    const baseRead = page.waitForResponse((r) => {
+      const url = new URL(r.url());
+      return url.pathname === "/api/wiki/page" && url.searchParams.get("relPath") === SHIPPED;
+    });
     await page.locator("[data-series-edit]").click();
     await expect(menu(page)).toBeVisible();
+    await baseRead;
     const edited = (await read(root, SHIPPED)).replace("Body.", "Body, rewritten elsewhere.");
     await writeFile(path.join(root, SHIPPED), edited, "utf8");
 
@@ -566,6 +574,38 @@ test.describe("the menu between clicks", () => {
       .poll(async () => (await fence(root, JOINER)).some((l) => l.startsWith("series:")))
       .toBe(true);
     await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad")).toHaveCount(0);
+  });
+
+  // Fix round 1 of arch review 2026-10, finding 66 (B): the menu sent the open
+  // page's LOAD-time hash, so a page changed on disk since then 409ed on every
+  // reopen. It reads that base fresh now and refuses before writing.
+  test("the open page changed on disk since it loaded: refused before any write, and a reload clears it", async ({
+    page,
+  }) => {
+    let posts = 0;
+    page.on("request", (req) => {
+      if (req.method() === "POST" && req.url().includes("/api/wiki/series")) posts++;
+    });
+    await openPage(page, JOINER, "Search recall plan");
+    const edited = (await read(root, JOINER)).replace("Body.", "Body, rewritten elsewhere.");
+    await writeFile(path.join(root, JOINER), edited, "utf8");
+
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad")).toHaveText(
+      `${JOINER} changed since you opened it — reload it; nothing written`,
+    );
+    expect(posts).toBe(0);
+    expect(await read(root, JOINER)).toBe(edited);
+
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Search recall plan");
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await expect
+      .poll(async () => (await fence(root, JOINER)).find((l) => l.startsWith("series:")))
+      .toBe(`series: ${KEY}`);
+    expect(posts).toBe(1);
   });
 
   test("after a 409 the next click sends nothing and says to reopen", async ({ page }) => {

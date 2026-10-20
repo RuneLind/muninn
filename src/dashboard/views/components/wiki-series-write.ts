@@ -123,3 +123,18 @@ export async function prepareSeriesSave(input: {
   }
   return { bases, missing, openChanged };
 }
+
+/** The refusal both callers make after {@link prepareSeriesSave} and before
+ *  any write (arch review 2026-10, finding 66): the open page changed on disk
+ *  since the reader loaded it AND the sequence writes it ⇒ write nothing and
+ *  say so. `null` ⇒ proceed. An open page outside the writes is not this
+ *  sequence's to refuse. */
+export function openPageRefusal(
+  openChanged: string | null,
+  writes: readonly { relPath: string }[],
+): string | null {
+  if (!openChanged) return null;
+  const open = normalizeRel(openChanged);
+  if (!writes.some((w) => normalizeRel(w.relPath) === open)) return null;
+  return `${openChanged} changed since you opened it — reload it; nothing written`;
+}

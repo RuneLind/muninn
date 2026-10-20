@@ -1047,6 +1047,50 @@ describe("POST /api/wiki/series — a batched series save refreshes the index on
     expect(builds).toBe(6);
   });
 
+  // Fix round 1 (finding E): the last write refreshed only when it WROTE, so a
+  // noop, refused or missing last left the deferred writes out of the index
+  // for up to the cache TTL.
+  async function deferThenLast(last: { relPath: string; baseHash?: string }): Promise<{ statuses: number[]; builds: number }> {
+    __resetWikiCacheForTest();
+    await getWikiIndex({ root, refresh: true });
+    const before = __wikiIndexBuildsStartedForTest();
+    const statuses: number[] = [];
+    for (const rel of [LONE, BLOG]) {
+      const res = await post({ wiki: "w", relPath: rel, baseHash: await hashOf(rel), series: "newwork", batch: "defer" });
+      statuses.push(res.status);
+    }
+    const res = await post({ wiki: "w", relPath: last.relPath, baseHash: last.baseHash ?? (await hashOf(last.relPath)), series: "newwork", batch: "last" });
+    statuses.push(res.status);
+    return { statuses, builds: __wikiIndexBuildsStartedForTest() - before };
+  }
+  async function deferredInIndex(): Promise<(string | undefined)[]> {
+    const idx = await getWikiIndex({ root });
+    return [LONE, BLOG].map((rel) => idx!.resolveRelPath(rel)?.series);
+  }
+
+  test("a last write that is a noop still refreshes the index once", async () => {
+    await writeFile(path.join(root, DELTA), md("Delta plan", ["series: newwork"]));
+    const { statuses, builds } = await deferThenLast({ relPath: DELTA });
+    expect(statuses).toEqual([200, 200, 200]);
+    expect(builds).toBe(1);
+    expect(await deferredInIndex()).toEqual(["newwork", "newwork"]);
+  });
+
+  test("a last write refused as stale (409) still refreshes the index once", async () => {
+    await writeFile(path.join(root, DELTA), md("Delta plan", ["plan_status: proposed"]));
+    const { statuses, builds } = await deferThenLast({ relPath: DELTA, baseHash: "not-the-hash" });
+    expect(statuses).toEqual([200, 200, 409]);
+    expect(builds).toBe(1);
+    expect(await deferredInIndex()).toEqual(["newwork", "newwork"]);
+  });
+
+  test("a last write naming no page (404, before any write) still refreshes the index once", async () => {
+    const { statuses, builds } = await deferThenLast({ relPath: "plans/nope.mdx", baseHash: "x" });
+    expect(statuses).toEqual([200, 200, 404]);
+    expect(builds).toBe(1);
+    expect(await deferredInIndex()).toEqual(["newwork", "newwork"]);
+  });
+
   test("an unknown batch value is a 400 and writes nothing", async () => {
     const before = await read(LONE);
     const res = await post({ wiki: "w", relPath: LONE, baseHash: await hashOf(LONE), series: "x", batch: "first" });

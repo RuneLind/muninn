@@ -211,6 +211,13 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
     const readonly = readonlyRefusal(c, log);
     if (readonly) return readonly;
 
+    /** Set once a `batch: "last"` request has resolved its wiki root: the
+     *  `finally` below refreshes that root's index unless the write already
+     *  did. The batch's one refresh is owed on EVERY ending of its last call —
+     *  a noop, a 409, a 404 — or the deferred writes before it stay out of the
+     *  index for up to the cache TTL (fix round 1 of arch review 2026-10, 75). */
+    let lastBatchRoot: string | null = null;
+    let indexRefreshed = false;
     try {
       const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
       if (body === null || typeof body !== "object") {
@@ -254,6 +261,7 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       if (unknownWiki) return c.json({ error: "no wiki configured for that name" }, 404);
       const root = entry?.root ?? (envOverride ? resolveWikiRoot(undefined) : null);
       if (!root) return c.json({ error: "no wiki configured for that name" }, 404);
+      if (batch === "last") lastBatchRoot = root;
 
       // `refresh: true`, the gardener approve-guard's rule: the normalization
       // below and the two-headed check are DECISIONS made off this index, and
@@ -438,7 +446,13 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
           return current;
         },
         ...defaultPageWriteIo(root),
-        ...(batch === "defer" ? { refreshIndex: async () => {} } : {}),
+        refreshIndex:
+          batch === "defer"
+            ? async () => {}
+            : async () => {
+                indexRefreshed = true;
+                await getWikiIndex({ root, refresh: true });
+              },
         readFile: inSectionRead,
         // Unreachable in no-log mode (`writeWikiPage` skips the fan-out), and
         // required by the type — stated rather than relied on.
@@ -533,6 +547,14 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
         error: err instanceof Error ? err.message : String(err),
       });
       return c.json({ error: "internal error" }, 500);
+    } finally {
+      if (lastBatchRoot && !indexRefreshed) {
+        await getWikiIndex({ root: lastBatchRoot, refresh: true }).catch((err) => {
+          log.warn("wiki series: batch-end index refresh failed: {error}", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
     }
   });
 }

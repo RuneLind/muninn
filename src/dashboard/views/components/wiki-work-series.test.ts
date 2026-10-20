@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { checkNewSeriesKey, recheckSaveAsSeries, saveAsSeriesPlan } from "./wiki-work-series.ts";
 import { buildWorkEvidence } from "../../../wiki/work-evidence.ts";
 import type { WikiPageMeta } from "../../../wiki/store.ts";
-import { loadSeriesBaseMap, prepareSeriesSave, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { loadSeriesBaseMap, openPageRefusal, prepareSeriesSave, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupChild } from "./wiki-work-groups.ts";
 import { coinSeriesKey, isNarrativePage, seriesPageStem } from "../../../wiki/series-rules.ts";
@@ -317,6 +317,24 @@ describe("prepareSeriesSave: every base fresh, the open page included", () => {
     const r = await prepareSeriesSave({ relPaths: ["plans/gone.md"], openRelPath: "plans/gone.md", loadedHash: "old", hashOf });
     expect(r.missing).toEqual(["plans/gone.md"]);
     expect(r.openChanged).toBeNull();
+  });
+});
+
+// Fix round 1 (finding I): the decision both callers make after
+// `prepareSeriesSave`, before any write — Save as series and the ⋯ menu.
+describe("openPageRefusal: an open page changed on disk refuses the whole sequence", () => {
+  const writes = [{ relPath: "plans/a.md", series: "k" }, { relPath: "plans/open.md", series: "k" }];
+  test("changed and among the writes: refused, naming the page", () => {
+    expect(openPageRefusal("plans/open.md", writes)).toBe("plans/open.md changed since you opened it — reload it; nothing written");
+  });
+  test("changed and among the writes under another spelling: still refused", () => {
+    expect(openPageRefusal("Plans/Open.md", writes)).toContain("changed since you opened it");
+  });
+  test("changed but NOT among the writes: proceeds", () => {
+    expect(openPageRefusal("plans/elsewhere.md", writes)).toBeNull();
+  });
+  test("unchanged: proceeds", () => {
+    expect(openPageRefusal(null, writes)).toBeNull();
   });
 });
 

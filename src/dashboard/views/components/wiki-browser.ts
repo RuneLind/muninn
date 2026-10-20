@@ -168,7 +168,7 @@ import {
 } from "./wiki-groups.ts";
 import { railInputFor, threadPinAnchor, workBoundariesOf } from "./wiki-rail-input.ts";
 import { rowBoundaryAction, type WorkBoundaries } from "./wiki-work-boundaries.ts";
-import { prepareSeriesSave, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { openPageRefusal, prepareSeriesSave, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
 import { checkNewSeriesKey, recheckSaveAsSeries } from "./wiki-work-series.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
@@ -3788,6 +3788,9 @@ interface SeriesMenuState {
   /** Resolves when every base above has been read (or failed). A click that
    *  beats the fetches waits for it instead of racing them. */
   basesReady: Promise<void>;
+  /** The open page, when its base read at open is not the hash the reader
+   *  loaded (`prepareSeriesSave`): a write to it is refused before any write. */
+  openChanged: string | null;
   /** Set when the held bases no longer describe the files on disk — a write
    *  came back 409, or one of this menu's own writes landed and the popover
    *  stayed open to report it. Either way no further write may go out under
@@ -3927,6 +3930,7 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
     openerSel: seriesOpenerSel(anchor),
     bases: new Map(),
     basesReady: Promise.resolve(),
+    openChanged: null,
     staleBases: false,
   };
   state.basesReady = loadSeriesBases(state);
@@ -3950,6 +3954,11 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
  * edit view renders — so all of them are read at open. That is one request per
  * member of one series, issued once per popover open, and the alternative is a
  * base read after the reader has decided, which is the CAS this closes.
+ *
+ * The open page's base is read FRESH too, by Save as series' rule
+ * (`prepareSeriesSave`, arch review 2026-10, finding 66): its load-time hash
+ * made every reopen after a 409 send the same stale base. A changed open page
+ * is named in `openChanged`, and `applySeriesWrites` refuses before writing.
  */
 function loadSeriesBases(state: SeriesMenuState): Promise<void> {
   const { model, edit } = state;
@@ -3958,15 +3967,15 @@ function loadSeriesBases(state: SeriesMenuState): Promise<void> {
     if (model.headRel) targets.add(model.headRel);
     for (const m of model.members) targets.add(m.relPath);
   }
-  return Promise.all(
-    [...targets].map(async (rel) => {
-      const hash =
-        currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel) && currentPageHash
-          ? currentPageHash
-          : await seriesBaseHash(rel);
-      if (hash) state.bases.set(rel, hash);
-    }),
-  ).then(() => undefined);
+  return prepareSeriesSave({
+    relPaths: [...targets],
+    openRelPath: currentRelPath,
+    loadedHash: currentPageHash,
+    hashOf: seriesBaseHash,
+  }).then(({ bases, openChanged }) => {
+    for (const [rel, hash] of bases) state.bases.set(rel, hash);
+    state.openChanged = openChanged;
+  });
 }
 
 /** Say what happened, in the popover, without tearing it down — a refusal the
@@ -4054,6 +4063,11 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
   setSeriesMenuNote(state, "Saving…", false);
   try {
     await state.basesReady;
+    const refusal = openPageRefusal(state.openChanged, writes);
+    if (refusal) {
+      setSeriesMenuNote(state, refusal, true);
+      return;
+    }
     // The loop itself is `runSeriesWrites` (`wiki-series-write.ts`), shared
     // with the Work threads' Save as series.
     const run = await runSeriesWrites(writes, state.bases, postSeriesWrite);
@@ -5658,8 +5672,9 @@ async function runSaveAsSeries(): Promise<void> {
     }
     // The open page changed on disk since the reader loaded it: refuse before
     // any write rather than 409 on it mid-sequence (arch review 2026-10, 66).
-    if (openChanged && writes.some((w) => w.relPath === openChanged)) {
-      report = { text: `${openChanged} changed since you opened it — reload it; nothing written`, bad: true };
+    const refusal = openPageRefusal(openChanged, writes);
+    if (refusal) {
+      report = { text: refusal, bad: true };
       return;
     }
     const skipped = checked.moved.length
