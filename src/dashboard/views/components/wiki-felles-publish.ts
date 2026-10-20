@@ -65,8 +65,19 @@ export function fellesOutcomeLine(
   exitCode: number,
   dryRun: boolean,
   action: FellesAction = "publish",
+  dataFilesExitCode?: number | null,
 ): { text: string; ok: boolean } {
-  if (action === "remove") return fellesRemoveOutcomeLine(exitCode, dryRun);
+  if (action === "remove") {
+    // A real remove deletes the page alone, then its data files in a second
+    // run; a data file never uploaded fails only that second run.
+    if (exitCode === 0 && !dryRun && dataFilesExitCode !== undefined && dataFilesExitCode !== 0) {
+      return {
+        text: "Removed the page. At least one data file was not deleted — it may never have been uploaded. See the output.",
+        ok: true,
+      };
+    }
+    return fellesRemoveOutcomeLine(exitCode, dryRun);
+  }
   switch (exitCode) {
     case 0:
       return dryRun
@@ -110,13 +121,22 @@ function fellesRemoveOutcomeLine(exitCode: number, dryRun: boolean): { text: str
 const REMOVE_QUESTION = "Delete it from the bucket? The bucket keeps no copy; your local page stays.";
 
 /** The confirm row's text after a remove dry run: every object the confirm
- *  deletes (the page and the data files only it reads), and the data files kept
- *  because another local page reads them. `removes` is the route's answer. */
-export function fellesRemoveConfirmHtml(removes: readonly string[], keptShared: readonly string[]): string {
-  if (removes.length <= 1 && keptShared.length === 0) return REMOVE_QUESTION;
+ *  deletes (the page and the data files only it reads), the data files kept
+ *  because another local page reads them, and the ones kept because the script
+ *  refuses their name. The lists are the route's answer. */
+export function fellesRemoveConfirmHtml(
+  removes: readonly string[],
+  keptShared: readonly string[],
+  keptRefused: readonly string[] = [],
+): string {
+  if (removes.length <= 1 && keptShared.length === 0 && keptRefused.length === 0) return REMOVE_QUESTION;
   const list = (items: readonly string[]) => items.map((r) => `<code>${esc(r)}</code>`).join(", ");
-  let html = `Delete ${removes.length} objects from the bucket? The page and the data files only it reads: ${list(removes)}. The bucket keeps no copy; your local files stay.`;
+  let html =
+    removes.length <= 1
+      ? REMOVE_QUESTION
+      : `Delete ${removes.length} objects from the bucket? The page and the data files only it reads: ${list(removes)}. The bucket keeps no copy; your local files stay.`;
   if (keptShared.length > 0) html += ` Kept, since another page reads it: ${list(keptShared)}.`;
+  if (keptRefused.length > 0) html += ` Kept, since the script refuses its name: ${list(keptRefused)}.`;
   return html;
 }
 
@@ -351,14 +371,26 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
         body: JSON.stringify({ wiki: opts.wiki, relPath: opts.relPath, dryRun, allowIdent: ident.checked, action }),
       });
       const data = (await res.json().catch(() => null)) as
-        | { exitCode?: number; output?: string; error?: string; removes?: string[]; keptShared?: string[] }
+        | {
+            exitCode?: number;
+            output?: string;
+            error?: string;
+            removes?: string[];
+            keptShared?: string[];
+            keptRefused?: string[];
+            dataFilesExitCode?: number | null;
+          }
         | null;
       httpStatus = res.status;
       if (res.ok && data && typeof data.exitCode === "number") {
-        const line = fellesOutcomeLine(data.exitCode, dryRun, action);
+        const line = fellesOutcomeLine(data.exitCode, dryRun, action, data.dataFilesExitCode);
         setStatus(line.text, line.ok ? "ok" : "err");
         if (action === "remove" && dryRun && data.exitCode === 0) {
-          confirmText.innerHTML = fellesRemoveConfirmHtml(data.removes ?? [opts.relPath], data.keptShared ?? []);
+          confirmText.innerHTML = fellesRemoveConfirmHtml(
+            data.removes ?? [opts.relPath],
+            data.keptShared ?? [],
+            data.keptRefused ?? [],
+          );
           confirmRow.hidden = false;
         }
         if (data.output) {

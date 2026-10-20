@@ -9,7 +9,9 @@
  * POST body: `{ wiki, relPath, dryRun, allowIdent, action? }`. `action` is
  * `publish` (the default), `remove`, which runs the script's `--fjern` on the
  * page's object and the data files only it reads (`felles-remove.ts`; the answer
- * adds `removes` and `keptShared`), or `sync`, which runs `--synk` on the whole wiki and takes no
+ * adds `removes`, `keptShared` and `keptRefused`; a real remove deletes the page
+ * in one run and its data files in a second, whose exit code is
+ * `dataFilesExitCode`, null when it did not return), or `sync`, which runs `--synk` on the whole wiki and takes no
  * relPath; `allowIdent` is required for publish and sync. Answers 200
  * `{ exitCode, dryRun, output }` whenever the script ran — its exit code is the
  * verdict (0 ok, 1 a file refused, 2 usage/environment, 3 an upload or delete
@@ -283,95 +285,123 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
     if (target.refusal) return c.json(target.refusal.body, target.refusal.status);
     const { entry, bin } = target;
     let pageRel: string | undefined;
-    // remove: the page's data files go with it, except one another local page
-    // also reads (`felles-remove.ts`). Both lists ride the answer, so the
-    // dialog's confirm row names every object the confirm deletes.
-    let removeFiles: { dataFiles: string[]; shared: string[] } | undefined;
+    let pageRelPaths: string[] = [];
     if (action !== "sync") {
       const index = await getWikiIndex({ root: entry.root });
       const meta = index?.resolveRelPath(relPath);
       if (!meta) return c.json({ error: `no page at "${relPath}"` }, 404);
       pageRel = meta.relPath;
-      if (action === "remove") {
-        removeFiles = await fellesRemoveDataFiles(entry.root, pageRel, index!.pages.map((p) => p.relPath));
-      }
+      if (action === "remove") pageRelPaths = index!.pages.map((p) => p.relPath);
     }
     if (!existsSync(bin)) {
       return c.json({ error: `${FELLES_PUBLISH_BIN_ENV} names a file that does not exist` }, 501);
     }
-
-    const argv = [
-      ...interpreter(),
-      bin,
-      ...fellesScriptArgs({
-        action: action as FellesAction,
-        dryRun,
-        allowIdent,
-        root: entry.root,
-        relPath: pageRel,
-        alsoRemove: removeFiles?.dataFiles,
-      }),
-    ];
     if (inFlight) {
       return c.json({ error: "A publish, remove or sync is already running. Wait for it to finish.", reason: "running" }, 409);
     }
+    // Claimed before any await, so two requests cannot both pass the check.
     inFlight = true;
-    if (action === "sync") {
-      // A sync can outlast the server's idleTimeout (255 s). Bun 1.3.10 measured
-      // not cutting a pending handler at it; this keeps that true if it changes.
-      (c.env as { timeout?: (req: Request, seconds: number) => void } | undefined)?.timeout?.(c.req.raw, 0);
-    }
-    const timeoutMs =
-      action === "sync" ? (deps.syncTimeoutMs ?? FELLES_SYNC_TIMEOUT_MS) : (deps.timeoutMs ?? FELLES_PUBLISH_TIMEOUT_MS);
-    let proc;
     try {
-      proc = await (deps.runProc ?? runProc)(argv, timeoutMs, "felles-publish", {
-        env: fellesPublishChildEnv(),
-        processGroup: true,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (err instanceof ProcTimeoutError) {
-        log.warn("felles-publish did not return: {error}", { error: message });
-        // The whole process group is signalled, gcloud included, but a request
-        // gcloud had already sent can have gone through before it stopped.
-        if (!dryRun) invalidateStatus();
-        const error =
-          action === "remove"
-            ? "The script did not return in time and was stopped. The delete may already have gone through — check the page on the pod in about 2 minutes."
-            : action === "sync"
-              ? "The sync did not return in time and was stopped. Pages uploaded before that are published — refresh the status before running it again."
-              : "The publish script did not return in time and was stopped. An upload may already have finished — run a dry run to check.";
-        return c.json({ error, reason: "timeout" }, 504);
+      // remove: the page's data files go with it, except one another local page
+      // also reads or whose name the script refuses (`felles-remove.ts`). All
+      // three lists ride the answer, so the dialog's confirm row names every
+      // object the confirm deletes and every one it keeps.
+      const removeFiles =
+        action === "remove" && pageRel ? await fellesRemoveDataFiles(entry.root, pageRel, pageRelPaths) : undefined;
+      if (action === "sync") {
+        // A sync can outlast the server's idleTimeout (255 s). Bun 1.3.10 measured
+        // not cutting a pending handler at it; this keeps that true if it changes.
+        (c.env as { timeout?: (req: Request, seconds: number) => void } | undefined)?.timeout?.(c.req.raw, 0);
       }
-      // Bun.spawn threw: nothing ran, so the bucket is as the cache saw it.
-      log.warn("felles-publish could not be spawned: {error}", { error: message });
-      return c.json({ error: message }, 502);
+      const timeoutMs =
+        action === "sync" ? (deps.syncTimeoutMs ?? FELLES_SYNC_TIMEOUT_MS) : (deps.timeoutMs ?? FELLES_PUBLISH_TIMEOUT_MS);
+      const run = (relPathArg: string | undefined, alsoRemove?: readonly string[]) =>
+        (deps.runProc ?? runProc)(
+          [
+            ...interpreter(),
+            bin,
+            ...fellesScriptArgs({ action: action as FellesAction, dryRun, allowIdent, root: entry.root, relPath: relPathArg, alsoRemove }),
+          ],
+          timeoutMs,
+          "felles-publish",
+          { env: fellesPublishChildEnv(), processGroup: true },
+        );
+      // A real remove deletes the page in a run of its own, then the data files
+      // in a second: `--fjern` deletes in argv order and exits 3 on any object
+      // the bucket lacks, so one run reported a page that went as failed when a
+      // local data file was never uploaded. The dry run never asks the bucket,
+      // so it stays one run that names every object.
+      const twoRuns = action === "remove" && !dryRun && (removeFiles?.dataFiles.length ?? 0) > 0;
+      let proc;
+      try {
+        proc = await run(pageRel, twoRuns ? undefined : removeFiles?.dataFiles);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (err instanceof ProcTimeoutError) {
+          log.warn("felles-publish did not return: {error}", { error: message });
+          // The whole process group is signalled, gcloud included, but a request
+          // gcloud had already sent can have gone through before it stopped.
+          if (!dryRun) invalidateStatus();
+          const error =
+            action === "remove"
+              ? "The script did not return in time and was stopped. The delete may already have gone through — check the page on the pod in about 2 minutes."
+              : action === "sync"
+                ? "The sync did not return in time and was stopped. Pages uploaded before that are published — refresh the status before running it again."
+                : "The publish script did not return in time and was stopped. An upload may already have finished — run a dry run to check.";
+          return c.json({ error, reason: "timeout" }, 504);
+        }
+        // Bun.spawn threw: nothing ran, so the bucket is as the cache saw it.
+        log.warn("felles-publish could not be spawned: {error}", { error: message });
+        return c.json({ error: message }, 502);
+      }
+      const outputs = [proc.stdout.trimEnd(), proc.stderr.trimEnd()];
+      // The page run's exit code stays the answer's verdict; the data-file run
+      // only adds `dataFilesExitCode` (null when it threw or timed out).
+      let dataFilesExitCode: number | null | undefined;
+      if (twoRuns && proc.exitCode === 0 && removeFiles) {
+        const [first, ...rest] = removeFiles.dataFiles;
+        try {
+          const dataProc = await run(first, rest);
+          dataFilesExitCode = dataProc.exitCode;
+          outputs.push(dataProc.stdout.trimEnd(), dataProc.stderr.trimEnd());
+        } catch (err) {
+          dataFilesExitCode = null;
+          const message = err instanceof Error ? err.message : String(err);
+          log.warn("felles-publish data-file remove failed: {error}", { error: message });
+          outputs.push(
+            err instanceof ProcTimeoutError
+              ? "The data-file delete did not return in time and was stopped. Some data files may already be gone."
+              : `The data-file delete could not run: ${message}`,
+          );
+        }
+      }
+      // Only a run that could have changed the bucket drops the status cache: a
+      // dry run lists and scans, and must not make every Dry run cost a fresh
+      // gcloud listing.
+      if (!dryRun) invalidateStatus();
+      // No relPath in the log line: a path the scanner flags is printed masked by
+      // the script, and this line must not undo that.
+      log.info("felles-publish {action} exit {exitCode} on {wiki} (dryRun {dryRun})", {
+        action,
+        exitCode: proc.exitCode,
+        wiki: entry.name,
+        dryRun,
+      });
+      const output = outputs.filter(Boolean).join("\n");
+      if (removeFiles && pageRel) {
+        return c.json({
+          exitCode: proc.exitCode,
+          dryRun,
+          output,
+          removes: [pageRel, ...removeFiles.dataFiles].map((r) => r.normalize("NFC")),
+          keptShared: removeFiles.shared,
+          keptRefused: removeFiles.refused,
+          ...(dataFilesExitCode !== undefined ? { dataFilesExitCode } : {}),
+        });
+      }
+      return c.json({ exitCode: proc.exitCode, dryRun, output });
     } finally {
       inFlight = false;
     }
-    // Only a run that could have changed the bucket drops the status cache: a
-    // dry run lists and scans, and must not make every Dry run cost a fresh
-    // gcloud listing.
-    if (!dryRun) invalidateStatus();
-    // No relPath in the log line: a path the scanner flags is printed masked by
-    // the script, and this line must not undo that.
-    log.info("felles-publish {action} exit {exitCode} on {wiki} (dryRun {dryRun})", {
-      action,
-      exitCode: proc.exitCode,
-      wiki: entry.name,
-      dryRun,
-    });
-    const output = [proc.stdout.trimEnd(), proc.stderr.trimEnd()].filter(Boolean).join("\n");
-    if (removeFiles && pageRel) {
-      return c.json({
-        exitCode: proc.exitCode,
-        dryRun,
-        output,
-        removes: [pageRel, ...removeFiles.dataFiles].map((r) => r.normalize("NFC")),
-        keptShared: removeFiles.shared,
-      });
-    }
-    return c.json({ exitCode: proc.exitCode, dryRun, output });
   });
 }

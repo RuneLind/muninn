@@ -84,6 +84,28 @@ test("the remove confirm row lists the page's data files and the shared ones it 
   );
 });
 
+test("the confirm row names the data files kept because the script refuses their name", () => {
+  const html = felles.fellesRemoveConfirmHtml(["plans/case.mdx"], [], ["plans/a[1].csv", "plans/<x>*.csv"]);
+  expect(html).toContain("the script refuses");
+  expect(html).toContain("<code>plans/a[1].csv</code>");
+  expect(html).toContain("<code>plans/&lt;x&gt;*.csv</code>");
+  // Only the page goes, so the question counts one object.
+  expect(html).toContain("Delete it from the bucket?");
+});
+
+test("a page that went with a data file that did not is not a failed remove", () => {
+  // The route deletes the page first, alone; the data-file run's exit code rides beside it.
+  const partial = fellesOutcomeLine(0, false, "remove", 3);
+  expect(partial.ok).toBe(true);
+  expect(partial.text).toMatch(/^Removed the page/);
+  expect(partial.text).toMatch(/never have been uploaded/);
+  expect(fellesOutcomeLine(0, false, "remove", null).text).toMatch(/^Removed the page/);
+  // Every data file went: the ordinary line.
+  expect(fellesOutcomeLine(0, false, "remove", 0).text).toMatch(/^Removed\. /);
+  // The page run's own failure stays the verdict.
+  expect(fellesOutcomeLine(3, false, "remove", undefined).ok).toBe(false);
+});
+
 test("exit 1 claims nothing the code cannot know", () => {
   // Exit 1 is the scanner's refusal AND any crash of the script (an uncaught
   // exception, a missing module), which can land after an upload succeeded.

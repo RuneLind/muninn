@@ -255,6 +255,92 @@ describe("remove takes the page's data files", () => {
     await post(appWith(), { wiki: "kode", relPath: "plans/a.mdx", dryRun: true, action: "remove" });
     expect((await readFile(argvFile, "utf8")).trim().split("\n").slice(4, -1)).toEqual(["plans/a.mdx"]);
   });
+
+  // A data file added locally after the publish, or one the publish refused, is
+  // not in the bucket. `--fjern` deletes in argv order and exits 3 on any miss,
+  // so one run of page + data files deleted the page and still failed.
+  test("a data file the bucket never held does not fail a remove whose page went", async () => {
+    // The script's own rule: delete every named object it can, exit 3 if one is missing.
+    const bucket = new Set(["plans/case.mdx", "plans/case.yaml", "plans/runs.csv"]);
+    const runs: string[][] = [];
+    const app = appWith({
+      runProc: async (argv) => {
+        const objects = argv.slice(argv.indexOf("--") + 1);
+        runs.push(objects);
+        let missed = 0;
+        for (const o of objects) if (!bucket.delete(o)) missed++;
+        return { stdout: "", stderr: missed ? "Feil: sletting feilet" : "", exitCode: missed ? 3 : 0 };
+      },
+    });
+    const res = await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" });
+    const body = (await res.json()) as { exitCode: number; dataFilesExitCode?: number | null };
+    expect(body.exitCode).toBe(0);
+    expect(body.dataFilesExitCode).toBe(3);
+    expect(bucket.size).toBe(0);
+    // The page goes in a run of its own, first.
+    expect(runs[0]).toEqual(["plans/case.mdx"]);
+    expect(runs[1]).toEqual(["plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
+  });
+
+  test("a page delete that fails is the answer, and no data file is touched", async () => {
+    const runs: string[][] = [];
+    const app = appWith({
+      runProc: async (argv) => {
+        runs.push(argv.slice(argv.indexOf("--") + 1));
+        return { stdout: "", stderr: "", exitCode: 3 };
+      },
+    });
+    const body = (await (await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" })).json()) as {
+      exitCode: number;
+      dataFilesExitCode?: number | null;
+    };
+    expect(body.exitCode).toBe(3);
+    expect(body.dataFilesExitCode).toBeUndefined();
+    expect(runs).toEqual([["plans/case.mdx"]]);
+  });
+
+  test("a data-file run that does not return still answers that the page went", async () => {
+    let calls = 0;
+    const app = appWith({
+      runProc: async () => {
+        if (++calls === 2) throw new ProcTimeoutError("felles-publish", 5);
+        return { stdout: "slettet", stderr: "", exitCode: 0 };
+      },
+    });
+    const res = await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { exitCode: number; dataFilesExitCode?: number | null; output: string };
+    expect(body.exitCode).toBe(0);
+    expect(body.dataFilesExitCode).toBeNull();
+    expect(body.output).toMatch(/did not return in time/);
+  });
+});
+
+// The script's `sjekkStiform` refuses a whole `--fjern` run when one argv path
+// has `[ ] * ?`, ends in `#<digits>` or has a segment over 211 bytes, and
+// deletes nothing. muninn's ref check lets such a name through, so a data file
+// named that way must stay out of the argv, or the page could not be removed.
+describe("remove skips a data file name the script refuses", () => {
+  const long = "a".repeat(220) + ".csv";
+  beforeAll(async () => {
+    await Bun.write(
+      path.join(root, "odd", "page.mdx"),
+      "# Odd\n\n" +
+        '<DeltaTable src="ok.csv" />\n\n<DeltaTable src="a[1].csv" />\n\n<DeltaTable src="b*.csv" />\n\n' +
+        `<DeltaTable src="${long}" />\n`,
+    );
+    for (const f of ["ok.csv", "a[1].csv", "b*.csv", long]) await Bun.write(path.join(root, "odd", f), "a\n1\n");
+    __resetWikiCacheForTest();
+  });
+
+  test("the argv carries the page and the names the script accepts; the answer lists the rest as kept", async () => {
+    const res = await post(appWith(), { wiki: "kode", relPath: "odd/page.mdx", dryRun: true, action: "remove" });
+    expect(res.status).toBe(200);
+    expect((await readFile(argvFile, "utf8")).trim().split("\n").slice(4, -1)).toEqual(["odd/page.mdx", "odd/ok.csv"]);
+    const body = (await res.json()) as { removes?: string[]; keptRefused?: string[] };
+    expect(body.removes).toEqual(["odd/page.mdx", "odd/ok.csv"]);
+    expect(body.keptRefused).toEqual(["odd/a[1].csv", "odd/b*.csv", `odd/${long}`]);
+  });
 });
 
 describe("refusals before any spawn", () => {
