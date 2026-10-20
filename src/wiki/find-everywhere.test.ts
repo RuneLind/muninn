@@ -649,7 +649,11 @@ describe("helpers", () => {
       { name: "other", root: "/nowhere" },
       { name: "mine", root: a.root },
     ];
-    expect(findSelfWikiName(registry, { name: "picked" }, a.root)).toBe("picked");
+    // Root-first: an entry registered after "mine" on the same root (an alias)
+    // is named "mine", the name `uniqueWikiRoots` labels that root's rows with.
+    expect(findSelfWikiName([...registry, { name: "alias", root: a.root }], { name: "alias" }, a.root)).toBe("mine");
+    // An entry whose root no registry row holds keeps its own name.
+    expect(findSelfWikiName(registry, { name: "picked" }, "/elsewhere")).toBe("picked");
     expect(findSelfWikiName(registry, undefined, a.root)).toBe("mine");
     expect(findSelfWikiName(registry, undefined, `${a.root}/`)).toBe("mine");
     expect(findSelfWikiName(registry, undefined, "/unregistered")).toBe("");

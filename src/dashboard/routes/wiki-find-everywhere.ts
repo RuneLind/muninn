@@ -32,18 +32,20 @@ const log = getLog("dashboard", "find-everywhere");
 
 /**
  * The registry name find-everywhere gives the wiki a `/wiki` page serves: the
- * resolved entry's name, else (the `WIKI_DIR` override, which has no entry)
- * the entry whose root is the served root, else "". The page injects it as
- * `__WIKI_FIND_SELF__`, so the palette can tell its own wiki's rows apart.
+ * FIRST registry entry whose root is the served root — the name
+ * `uniqueWikiRoots` labels that root's rows with — else the resolved entry's
+ * name, else "". Root-first, so `?wiki=b` on aliased roots (`a=/w,b=/w`) names
+ * `a`, as its Everywhere rows do; the `WIKI_DIR` override (no entry) resolves
+ * the same way. The page injects it as `__WIKI_FIND_SELF__`, so the palette can
+ * tell its own wiki's rows apart.
  */
 export function findSelfWikiName(
   registry: ReadonlyArray<{ name: string; root: string }>,
   entry: { name: string } | undefined,
   servedRoot: string | null,
 ): string {
-  if (entry) return entry.name;
-  if (servedRoot === null) return "";
-  return registry.find((e) => sameWikiRoot(e.root, servedRoot))?.name ?? "";
+  const byRoot = servedRoot === null ? undefined : registry.find((e) => sameWikiRoot(e.root, servedRoot));
+  return byRoot?.name ?? entry?.name ?? "";
 }
 
 /**
