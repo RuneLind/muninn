@@ -46,6 +46,19 @@ describe("approveButtonFor", () => {
     expect(html).toContain("data-fc-locked");
     expect(html).toContain("disabled");
   });
+  // Finding 31: a listing that could not read the fact-checks marks the card
+  // unknown, and an unknown lock is not an open one.
+  test("an unknown fact-check state locks Approve, and says why", () => {
+    const html = approveButtonFor({ factcheck: null, factcheckUnknown: true, drifted: null });
+    expect(html).toContain("data-fc-locked");
+    expect(html).toContain("disabled");
+    expect(html).toContain("could not be read");
+  });
+  test("a row without the unknown flag keeps the plain Approve", () => {
+    expect(approveButtonFor({ factcheck: null, drifted: null })).toBe(
+      '<button class="gard-btn gard-approve" data-action="approve">Approve</button>',
+    );
+  });
   test("the gate's single card calls it with the row and nothing else", async () => {
     const src = await Bun.file(new URL("./wiki-gardener-browser.ts", import.meta.url)).text();
     expect(src).toContain("html += approveButtonFor(p);");

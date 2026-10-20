@@ -15,6 +15,15 @@ export interface BatchedDeleteOption extends StatementTimeoutOption {
   shouldStop?: () => boolean;
 }
 
+/** Throws for a retention window under 1 day: `NOW() - make_interval(days => 0)`
+ *  matches every row, so 0 or a negative value is a wipe, not a short window.
+ *  Same rule as `cleanupOldSnapshots`; config parses these with `positiveEnvInt`. */
+export function assertRetentionWindow(fn: string, days: number): void {
+  if (!Number.isFinite(days) || days < 1) {
+    throw new Error(`${fn}: retention must be at least 1 day, got ${days} — that window deletes every row`);
+  }
+}
+
 /** A batch failed. The batches before it are committed; `deleted` counts them. */
 export class BatchedDeleteError extends Error {
   constructor(

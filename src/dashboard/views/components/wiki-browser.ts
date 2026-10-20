@@ -81,6 +81,7 @@ import {
   setFellesBtnMark,
   type FellesSync,
 } from "./wiki-felles-publish.ts";
+import { installMirrorStatus } from "./wiki-mirror-status.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
 // load it — this file touches `document` at import time.
 import {
@@ -9197,6 +9198,8 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
       wiki: WIKI,
       hrefFor: pageUrlByRelPath,
       openPage: (relPath) => loadPageByRelPath(relPath),
+      bin: fellesPublishBin,
+      bucket: fellesPublishBucket,
       // A status that lands after the breadcrumb was drawn repaints its marker.
       onStatus: () => {
         const btn = document.getElementById(FELLES_BTN_ID);
@@ -9362,6 +9365,9 @@ function handlePagesResponse(
     view: force ? "start" : currentViewState(),
     seq,
     fingerprint,
+    // The mirror line paints from every fresh response, not only an adopted one:
+    // a deferred or unchanged listing still carries the current mirror health.
+    onMirror: paintMirrorFromListing,
   });
   if (outcome === "apply") applyPagesResponse({ data, fingerprint });
   // Returned for the ONE caller that must know: a write's own refetch, where
@@ -9408,6 +9414,8 @@ function maybeRefetchPages(refresh: boolean): void {
   if (document.hidden) return;
   if (!shouldRefetch(pagesRefresh, Date.now())) return;
   requestPages({ refresh });
+  // The felles status rides the same triggers and throttle (finding 67).
+  fellesSync?.refresh();
 }
 
 // Another tab pinned, unpinned or cleared storage (D7): adopt what storage now
@@ -9481,6 +9489,8 @@ document.addEventListener("visibilitychange", () => {
 // event. Same gate, but the PLAIN fetch — server TTL freshness is fine for idle
 // drift.
 setInterval(() => maybeRefetchPages(false), WIKI_REFETCH_TICK_MS);
+// The mirror line: painted from every listing, its age redrawn every minute.
+const paintMirrorFromListing = installMirrorStatus({ now: () => Date.now(), setInterval: (tick, ms) => setInterval(tick, ms) });
 
 // ── Boot ──────────────────────────────────────────────────────────────
 // Two independent flags, one installer (`wikiBlockedSelectorFor`):

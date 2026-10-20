@@ -3318,13 +3318,19 @@ export async function buildWikiIndex(
   // top-level `"include": "x"` (wrong type ⇒ degraded to none) and a list of
   // nothing but blanks all leave the scan just as unscoped, and measured, a
   // `{}` config silently re-admitted all eleven strays with no warn at all.
-  if (includePatterns.length === 0 && isReadonlyWikiRoot(root)) {
+  //
+  // Once per (root, reason): a bucket-mirror root is rebuilt on every changed
+  // poll and every TTL read, and a warn per build buried the mirror's own.
+  const unscopedReason = readerConfig ? "present but empty/invalid" : "missing or unreadable";
+  const unscopedKey = `${root}\u0000${unscopedReason}`;
+  if (includePatterns.length === 0 && isReadonlyWikiRoot(root) && !unscopedWarned.has(unscopedKey)) {
+    unscopedWarned.add(unscopedKey);
     log.warn(
       "{file} at read-only wiki root {root} names no `include` globs ({reason}) — the scan is unscoped (the read-only guard is unaffected; it lives in {env})",
       {
         file: WIKI_READER_CONFIG_FILE,
         root,
-        reason: readerConfig ? "present but empty/invalid" : "missing or unreadable",
+        reason: unscopedReason,
         env: WIKI_READONLY_ROOTS_ENV,
       },
     );
@@ -4129,6 +4135,8 @@ export async function buildWikiIndex(
 
 /** Per-root TTL cache — bots point at different wikis, so caches can't be shared. */
 const caches = new Map<string, WikiIndex>();
+/** `root\0reason` keys already warned about an unscoped read-only scan. */
+const unscopedWarned = new Set<string>();
 /** Roots we've already warned about being unreadable (one warn per root). */
 const warnedRoots = new Set<string>();
 
@@ -4259,5 +4267,6 @@ export async function readWikiPage(index: WikiIndex, meta: WikiPageMeta): Promis
 export function __resetWikiCacheForTest(): void {
   caches.clear();
   warnedRoots.clear();
+  unscopedWarned.clear();
   flights.clear();
 }

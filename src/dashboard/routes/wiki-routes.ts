@@ -1,4 +1,6 @@
 import type { Context, Hono } from "hono";
+import { bucketMirrorPayloadField } from "../../wiki/bucket-mirror-status.ts";
+import { compress } from "hono/compress";
 import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens, wikiTakesAnswers, type Config } from "../../config.ts";
 import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
@@ -1427,7 +1429,13 @@ export function registerWikiReadRoutes(
     return true;
   };
 
-  app.get("/wiki", async (c) => {
+  // gzip, because the page inlines the whole client bundle and CSS (~1.2 MB,
+  // ~0.29 MB gzipped) and nothing in front of muninn compresses it. Scoped to
+  // this route: the SSE and JSON routes beside it keep their framing. Called
+  // from inside the one GET handler: a second handler or an `app.use` adds a
+  // /wiki row that the route-table guards read as a separate route.
+  const gzipWikiPage = compress({ encoding: "gzip" });
+  const serveWikiPage = async (c: Context): Promise<Response> => {
     const { registry, wiki: selected, envOverride, entry, unknownWiki } = resolveReadRequest(
       readSliceOnly,
       c.req.query("wiki"),
@@ -1510,6 +1518,12 @@ export function registerWikiReadRoutes(
         role: sessionRole(c),
       }),
     );
+  };
+  app.get("/wiki", async (c) => {
+    await gzipWikiPage(c, async () => {
+      c.res = await serveWikiPage(c);
+    });
+    return c.res;
   });
 
   // Full page listing — the client filters/sorts locally (712 pages ≈ trivial).
@@ -1596,6 +1610,9 @@ export function registerWikiReadRoutes(
       // The ⇪ Felles control's gate, present only on a wiki that offers it. The
       // route re-checks; this only decides whether the button renders.
       ...fellesPublishPayloadField(entry?.name, entry?.root),
+      // A bucket-mirrored root's health, present only while the mirror is not
+      // up to date (finding 32): no object names, paths or error text.
+      ...bucketMirrorPayloadField(resolveWikiRoot(root)),
     });
   });
 

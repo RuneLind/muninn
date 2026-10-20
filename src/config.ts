@@ -844,8 +844,20 @@ export function optionalEnvInt(name: string, defaultValue: number): number {
   return parsed;
 }
 
+/** An optional sign and digits, after trimming, as a safe integer; anything
+ *  else throws `ConfigError`. Unset or empty ⇒ the default. */
+function strictEnvInt(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const value = Number(raw.trim());
+  if (!/^[+-]?\d+$/.test(raw.trim()) || !Number.isSafeInteger(value)) {
+    throw new ConfigError(`Environment variable ${name} must be a whole integer, got: "${raw}"`);
+  }
+  return value;
+}
+
 /**
- * {@link optionalEnvInt} for a value that has to be at least 1, refusing rather
+ * A whole-integer env value that has to be at least 1, refusing rather
  * than passing a wipe through.
  *
  * The RETENTION windows are what this exists for. They are day counts the
@@ -861,15 +873,13 @@ export function optionalEnvInt(name: string, defaultValue: number): number {
  * everything", here it is "delete everything", so the safe answer is the shipped
  * window plus a line saying the value was refused. Warned once per
  * `<name>=<value>`, since `loadConfig` runs more than once in a process. A value
- * that does not parse as an integer at all (`=ninety`) still throws
- * `ConfigError` from {@link optionalEnvInt} and refuses the boot, which this
- * function deliberately does not soften: an unparseable retention names no
- * window, so there is nothing to be lenient ABOUT, and refusing is the same
- * answer every other `optionalEnvInt` caller gets. An empty or unset value is
- * the default, as everywhere.
+ * that is not a whole integer (`=ninety`, and unlike {@link optionalEnvInt}
+ * also `=1e3`, `=30s`, `=5.9`, which `parseInt` reads as 1, 30 and 5) throws
+ * `ConfigError` and refuses the boot: such a value names no window, so there is
+ * nothing to be lenient ABOUT. An empty or unset value is the default.
  */
 export function positiveEnvInt(name: string, defaultValue: number): number {
-  const parsed = optionalEnvInt(name, defaultValue);
+  const parsed = strictEnvInt(name, defaultValue);
   if (parsed >= 1) return parsed;
   const key = `${name}=${parsed}`;
   if (!warnedEnvFlagValues.has(key)) {
@@ -946,7 +956,8 @@ export function loadConfig() {
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
-    tracingRetentionDays: optionalEnvInt("TRACING_RETENTION_DAYS", 7),
+    // `positiveEnvInt`: 0 here deleted every trace and thread citation hourly.
+    tracingRetentionDays: positiveEnvInt("TRACING_RETENTION_DAYS", 7),
     tracingCaptureToolOutputs: optionalEnv("TRACING_CAPTURE_TOOL_OUTPUTS", "true") === "true",
     // `positiveEnvInt`, not `optionalEnvInt`: a retention of 0 or less is a
     // WIPE, not a short window — see the helper.

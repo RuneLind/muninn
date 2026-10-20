@@ -51,6 +51,8 @@ const page = (marker: string) => [
 
 /** The fake bucket: name → {generation, body}. Mutated by the tests. */
 const objects = new Map<string, { generation: number; body: string }>();
+/** While true the bucket listing answers 500, so the mirror reports `failing`. */
+let listingDown = false;
 let gcs: Server | undefined;
 let server: ChildProcess | undefined;
 let base = "";
@@ -62,6 +64,7 @@ function startGcs(): Promise<void> {
     const m = /^\/storage\/v1\/b\/felles\/o(?:\/(.+))?$/.exec(url.pathname);
     if (!m) { res.writeHead(404).end("no bucket"); return; }
     if (!m[1]) {
+      if (listingDown) { res.writeHead(500).end("down"); return; }
       const items = [...objects].map(([name, o]) => ({
         name, generation: String(o.generation), size: String(Buffer.byteLength(o.body)),
       }));
@@ -185,4 +188,27 @@ test("a restart over an empty directory serves the wiki again", async () => {
   await rm(root, { recursive: true, force: true });
   await startMuninn();
   await expect.poll(pageRelPaths, { timeout: 15_000 }).toEqual([REL]);
+});
+
+test("a bucket that stops answering shows the rail line, and its age advances in an open tab", async ({ page: p }) => {
+  listingDown = true;
+  try {
+    await expect.poll(async () => {
+      const res = await fetch(`${BASE}/api/wiki/pages?wiki=${WIKI}`);
+      return res.ok ? ((await res.json()) as { mirror?: { health: string } }).mirror?.health : undefined;
+    }, { timeout: 15_000 }).toBe("failing");
+    await p.clock.install();
+    await p.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    const message = "Copy may be out of date: the bucket does not answer;";
+    // Painted from the listing (the `onMirror` hook)…
+    await expect(p.locator("#wikiMirrorStatus")).toBeVisible();
+    await expect(p.locator("#wikiMirrorStatusMsg")).toHaveText(message);
+    await expect(p.locator("#wikiMirrorStatusAge")).toHaveText(/^last complete update (just now|1 min ago)\.$/);
+    // …and redrawn by the minute tick, under the 5-min listing heartbeat.
+    await p.clock.fastForward(3 * 60_000);
+    await expect(p.locator("#wikiMirrorStatusAge")).toHaveText(/^last complete update [34] min ago\.$/);
+    await expect(p.locator("#wikiMirrorStatusMsg")).toHaveText(message);
+  } finally {
+    listingDown = false;
+  }
 });

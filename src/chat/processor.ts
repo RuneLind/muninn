@@ -1,8 +1,9 @@
 import type { Config } from "../config.ts";
-import type { BotConfig, ConnectorType } from "../bots/config.ts";
+import type { BotConfig } from "../bots/config.ts";
 import type { Platform } from "../types.ts";
 import { processMessage, type ProcessMessageResult } from "../core/message-processor.ts";
 import type { Connector } from "../db/connectors.ts";
+import { applyThreadConnector } from "./thread-connector.ts";
 
 import { chatState, type ChatMessage } from "./state.ts";
 
@@ -59,14 +60,7 @@ export async function processChatMessage(
   // Build effective config: thread connector > inline override > bot config.json
   let effectiveBotConfig = botConfig;
   if (threadConnector) {
-    effectiveBotConfig = {
-      ...botConfig,
-      connector: threadConnector.connectorType as ConnectorType,
-      model: threadConnector.model ?? botConfig.model,
-      baseUrl: threadConnector.baseUrl ?? botConfig.baseUrl,
-      thinkingMaxTokens: threadConnector.thinkingMaxTokens ?? botConfig.thinkingMaxTokens,
-      timeoutMs: threadConnector.timeoutMs ?? botConfig.timeoutMs,
-    };
+    effectiveBotConfig = applyThreadConnector(botConfig, threadConnector);
   } else if (connectorOverride) {
     effectiveBotConfig = { ...botConfig, connector: connectorOverride as BotConfig["connector"] };
   }

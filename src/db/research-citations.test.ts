@@ -150,6 +150,14 @@ describe("cleanupThreadCitations", () => {
     await seed();
     expect(await cleanupThreadCitations(90)).toBe(0);
   });
+
+  test("a window under 1 day throws and deletes nothing", async () => {
+    await seed();
+    for (const days of [0, -1]) {
+      await expect(cleanupThreadCitations(days)).rejects.toThrow(/at least 1 day/);
+    }
+    expect((await getCitationsForThread(THREAD)).length).toBe(3);
+  });
 });
 
 /**

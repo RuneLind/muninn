@@ -86,6 +86,7 @@ export type FellesAction = "publish" | "remove" | "sync" | "status";
  *  because the script uploads `rel.normalize("NFC")` but deletes the name it is
  *  given, and readdir hands back an NFD path as it was written. `--ja` answers
  *  the script's own prompt; the dialog's confirm step is where the reader is asked.
+ *  `alsoRemove` (the page's data files) follows the page, in NFC too.
  *  sync:    `--synk [--dry-run] [--tillat-ident] <root>` — publishes exactly the
  *  pages the bucket holds an older copy of.
  *  status:  `--status --json [--tillat-ident] <root>` — read-only; one JSON
@@ -97,13 +98,17 @@ export function fellesScriptArgs(opts: {
   allowIdent: boolean;
   root: string;
   relPath?: string;
+  /** remove only: more objects after the page — its data files (`felles-remove.ts`). */
+  alsoRemove?: readonly string[];
 }): string[] {
   const dry = opts.dryRun ? ["--dry-run"] : [];
   const ident = opts.allowIdent ? ["--tillat-ident"] : [];
   if (opts.action === "sync") return ["--synk", ...dry, ...ident, opts.root];
   if (opts.action === "status") return ["--status", "--json", ...ident, opts.root];
   if (!opts.relPath) throw new Error(`${opts.action} needs a relPath`);
-  if (opts.action === "remove") return ["--fjern", ...dry, "--ja", "--", opts.relPath.normalize("NFC")];
+  if (opts.action === "remove") {
+    return ["--fjern", ...dry, "--ja", "--", ...[opts.relPath, ...(opts.alsoRemove ?? [])].map((r) => r.normalize("NFC"))];
+  }
   return [...dry, ...ident, opts.root, "./" + opts.relPath];
 }
 
