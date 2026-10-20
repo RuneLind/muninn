@@ -49,6 +49,10 @@ export interface QuestionLabels {
     orphansTitle: string;
   };
   edited: (n: number) => string;
+  /** On an answer saved before the question's wording or choices changed. */
+  earlierWording: string;
+  /** After a chosen value the question no longer offers. */
+  choiceGone: string;
   /** Badge on a closed card holding answers not yet copied. */
   newBadge: (n: number) => string;
   /** A `<Question>` with no `id`. */
@@ -71,6 +75,9 @@ export interface QuestionLabels {
     /** The answer being edited is gone (deleted by the retention sweep): the
      *  reader's text is kept in the composer as a new answer. */
     editGone: string;
+    /** A 409 already_answered: the reader already has an answer to this
+     *  question, so the draft became an edit of it. */
+    alreadyAnswered: string;
     /** A 409 answer_redacted: an admin redacted the answer being edited. The
      *  editor closes and the draft goes: it is the text the admin removed. */
     editRedacted: string;
@@ -147,6 +154,8 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       orphansTitle: "Answers in this wiki, not copied yet, whose page or question is gone",
     },
     edited: (n) => `edited ${n}×`,
+    earlierWording: "answered an earlier wording",
+    choiceGone: "(no longer offered)",
     newBadge: (n) => `${n} new`,
     noId: "Question without id",
     duplicate: "Another question on this page uses this id.",
@@ -162,6 +171,8 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       conflict:
         "This answer changed somewhere else. The latest version is shown above; your text is still in the editor, and saving it replaces that version.",
       editGone: "The answer you were editing was removed. Your text is kept below; saving it adds it as a new answer.",
+      alreadyAnswered:
+        "You already answered this question. Your text is now an edit of that answer, shown above it; saving it replaces that answer.",
       editRedacted: "The answer you were editing was redacted. Your change was not saved.",
       questionClosed: "The answer was not saved: the question was closed while you were writing.",
       failed: "The answer was not saved",
@@ -219,6 +230,8 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       orphansTitle: "Svar i denne wikien, ikke kopiert ennå, der siden eller spørsmålet er borte",
     },
     edited: (n) => `endret ${n}×`,
+    earlierWording: "svar på en tidligere formulering",
+    choiceGone: "(ikke lenger et valg)",
     newBadge: (n) => `${n} nye`,
     noId: "Spørsmål uten id",
     duplicate: "Et annet spørsmål på siden bruker samme id.",
@@ -234,6 +247,8 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       conflict:
         "Svaret er endret et annet sted. Den nyeste versjonen vises over; teksten din står fortsatt i feltet, og lagrer du den, erstatter den den versjonen.",
       editGone: "Svaret du endret er fjernet. Teksten din er beholdt nedenfor; lagrer du den, blir den et nytt svar.",
+      alreadyAnswered:
+        "Du har allerede svart på dette spørsmålet. Teksten din er nå en endring av det svaret, som vises over; lagrer du den, erstatter den svaret.",
       editRedacted: "Svaret du endret er fjernet av en administrator. Endringen din ble ikke lagret.",
       questionClosed: "Svaret ble ikke lagret: spørsmålet ble lukket mens du skrev.",
       failed: "Svaret ble ikke lagret",

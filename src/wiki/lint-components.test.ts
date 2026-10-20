@@ -826,8 +826,11 @@ describe("an enum value that folds to the default renders as written and is no f
     "Meter.tone": (v) => page(`<Meter value="3" tone="${v}">L</Meter>`),
     "Fact.v": (v) => page(`A <Fact n="1" v="${v}">c</Fact> b`),
     "Lane.kind": (v) => page("<NextMoves>", "", `<Lane kind="${v}">`, "", "- s", "", "</Lane>", "", "</NextMoves>"),
+    "StatusRows.view": (v) => page(`<StatusRows view="${v}">`, "", "- **A:** 1 · b", "", "</StatusRows>"),
   };
   const upperFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  // The reader's page render: `StatusRows view` draws only there.
+  const readerHtml = (content: string) => renderWikiHtml(content, () => undefined, { views: true });
   const enumAttrs = Object.entries(COMPONENT_SPEC).flatMap(([name, spec]) =>
     Object.entries(spec.attrs as Record<string, { enum?: readonly string[]; default?: string | number }>)
       .filter(([, a]) => a.enum)
@@ -850,12 +853,17 @@ describe("an enum value that folds to the default renders as written and is no f
     test(`${key}: ${variants.map(([v]) => JSON.stringify(v)).join(", ")}`, () => {
       const at = pages[key]!;
       for (const [v, folded] of variants) {
-        const out = html(at(v));
+        const out = readerHtml(at(v));
         const found = run(at(v)).map((f) => f.message);
-        if (out === html(at(folded))) {
+        // Check 15 renders without `views`: a value that renders as the
+        // default in the reader renders as the default there too.
+        if (folded === def || out === readerHtml(at(def))) {
+          expect({ key, v, plainAsDefault: html(at(v)) === html(at(def)) }).toEqual({ key, v, plainAsDefault: true });
+        }
+        if (out === readerHtml(at(folded))) {
           expect({ key, v, found }).toEqual({ key, v, found: [] });
         } else {
-          expect({ key, v, asDefault: out === html(at(def)), folded }).toEqual({ key, v, asDefault: true, folded: other });
+          expect({ key, v, asDefault: out === readerHtml(at(def)), folded }).toEqual({ key, v, asDefault: true, folded: other });
           expect({ key, v, found }).toEqual({ key, v, found: [`${key.split(".")[0]} ${key.split(".")[1]}=${JSON.stringify(v)} renders as ${def}, not ${other}`] });
         }
       }

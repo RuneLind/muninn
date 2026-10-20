@@ -11,6 +11,7 @@
 import { escHtml as esc } from "./escape.ts";
 import {
   codePointLength,
+  isChoiceOffered,
   QUESTION_ANSWER_MAX,
   QUESTION_NOT_SURE,
   type QuestionState,
@@ -39,6 +40,12 @@ export interface AnswerWire extends AnswerVersionWire {
   asked?: boolean | null;
   /** The author's `WIKI_ANSWER_GROUPS` groups, sorted (never an ident). */
   authorGroups?: string[];
+  /** The question's wording or choices changed since this version was saved
+   *  (its stored hash differs from the page's); null when the question is gone. */
+  questionChanged?: boolean | null;
+  /** On the viewer's own unredacted answers: sent back as `carryToken` when a
+   *  draft is carried from this answer after it is swept. */
+  carryToken?: string;
   /** Earlier versions, newest first; only the author and an admin get them. */
   earlier?: AnswerVersionWire[];
 }
@@ -94,8 +101,7 @@ export function composerCanSave(choice: string | null, body: string): boolean {
 /** The stored choice an edit starts from: kept only when the card still offers
  *  it (a page that renamed or dropped a choice would 400 it). */
 export function draftChoiceFor(stored: string | null, choices: readonly string[]): string | null {
-  if (stored === null || choices.length === 0) return null;
-  return stored === QUESTION_NOT_SURE || choices.includes(stored) ? stored : null;
+  return stored !== null && isChoiceOffered(stored, choices) ? stored : null;
 }
 
 /**
@@ -167,9 +173,18 @@ export function choiceText(choice: string, L: QuestionLabels): string {
   return choice === QUESTION_NOT_SURE ? L.notSure : choice;
 }
 
-function versionContentHtml(v: AnswerVersionWire, L: QuestionLabels): string {
+/** The chosen value as a chip, marked in words when the card no longer offers
+ *  it (`choices`: the card's current ones; absent ⇒ never marked). */
+function pickHtml(choice: string, L: QuestionLabels, choices: readonly string[] | undefined): string {
+  if (choices === undefined || isChoiceOffered(choice, choices)) {
+    return `<span class="q-pick">${esc(choiceText(choice, L))}</span>`;
+  }
+  return `<span class="q-pick q-pick-gone">${esc(choiceText(choice, L))} <span class="q-pick-gone-note">${esc(L.choiceGone)}</span></span>`;
+}
+
+function versionContentHtml(v: AnswerVersionWire, L: QuestionLabels, choices?: readonly string[]): string {
   if (v.redacted) return `<div class="q-answer-body q-redacted">${esc(L.redacted)}</div>`;
-  const pick = v.choice !== null ? `<span class="q-pick">${esc(choiceText(v.choice, L))}</span>` : "";
+  const pick = v.choice !== null ? pickHtml(v.choice, L, choices) : "";
   const body = v.body.trim() !== "" ? `<div class="q-answer-body">${esc(v.body)}</div>` : "";
   return pick + body;
 }
@@ -213,10 +228,11 @@ function redactParts(a: AnswerWire, L: QuestionLabels, r: RedactView | undefined
   };
 }
 
-/** One answer: who, when, asked / not asked, edited N×, the choice, the body,
- *  an Edit button when the viewer may edit, an admin's Redact (`redact`), and
- *  the log fold when the server sent earlier versions (`logOpen`: the reader
- *  left it open). */
+/** One answer: who, when, asked / not asked, edited N×, "answered an earlier
+ *  wording" when the question changed since, the choice (marked when `choices`,
+ *  the card's current ones, no longer hold it), the body, an Edit button when
+ *  the viewer may edit, an admin's Redact (`redact`), and the log fold when the
+ *  server sent earlier versions (`logOpen`: the reader left it open). */
 export function answerItemHtml(
   a: AnswerWire,
   L: QuestionLabels,
@@ -224,6 +240,7 @@ export function answerItemHtml(
   canEdit: boolean,
   logOpen = false,
   redact?: RedactView,
+  choices?: readonly string[],
 ): string {
   const asked =
     a.asked === true
@@ -235,6 +252,7 @@ export function answerItemHtml(
     .map((g) => ` <span class="q-group"><span class="q-group-label">${esc(L.group)} </span>${esc(g)}</span>`)
     .join("");
   const edited = a.versionCount > 1 ? ` ${byPart("q-edited", L.edited(a.versionCount - 1))}` : "";
+  const changed = a.questionChanged === true && !a.redacted ? ` ${byPart("q-changed", L.earlierWording)}` : "";
   const edit = canEdit
     ? ` <button type="button" class="q-edit" data-answer-id="${esc(a.answerId)}">${esc(L.composer.edit)}</button>`
     : "";
@@ -245,16 +263,16 @@ export function answerItemHtml(
       earlier
         .map(
           (v) =>
-            `<div class="q-log-item"><div class="q-by"><span class="q-ver">${esc(L.version(v.version))}</span> ${byPart("q-time", formatAnswerTime(v.createdAt, lang))}</div>${versionContentHtml(v, L)}</div>`,
+            `<div class="q-log-item"><div class="q-by"><span class="q-ver">${esc(L.version(v.version))}</span> ${byPart("q-time", formatAnswerTime(v.createdAt, lang))}</div>${versionContentHtml(v, L, choices)}</div>`,
         )
         .join("") +
       `</details>`
     : "";
   return (
     `<div class="q-answer" data-answer-id="${esc(a.answerId)}">` +
-    `<div class="q-by"><span class="q-author">${esc(a.authorName)}</span>${groups} ${byPart("q-time", formatAnswerTime(a.createdAt, lang))}${asked}${edited}${edit}${redactInline}</div>` +
+    `<div class="q-by"><span class="q-author">${esc(a.authorName)}</span>${groups} ${byPart("q-time", formatAnswerTime(a.createdAt, lang))}${asked}${edited}${changed}${edit}${redactInline}</div>` +
     redactBlock +
-    versionContentHtml(a, L) +
+    versionContentHtml(a, L, choices) +
     log +
     `</div>`
   );
@@ -365,6 +383,40 @@ export function redactErrorText(status: number, payload: unknown, L: QuestionLab
 /** A 409 that means "someone saved a newer version first". */
 export function isVersionConflict(status: number, payload: unknown): boolean {
   return status === 409 && !!payload && typeof payload === "object" && (payload as { code?: unknown }).code === "version_conflict";
+}
+
+/** A 409 `already_answered`: the viewer already has a live answer to this
+ *  question, named with its latest version so the draft can become its edit. */
+export function alreadyAnsweredOf(status: number, payload: unknown): { answerId: string; version: number } | null {
+  if (status !== 409 || !payload || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  return p.code === "already_answered" &&
+    typeof p.answerId === "string" &&
+    Number.isInteger(p.version) &&
+    (p.version as number) >= 1
+    ? { answerId: p.answerId, version: p.version as number }
+    : null;
+}
+
+/** Keep every carry token a load lists, and the ones it no longer lists: a
+ *  token is wanted exactly when its answer is gone. A redacted answer's token
+ *  is dropped: its draft is the text the admin removed. */
+export function rememberCarryTokens(into: Map<string, string>, answers: readonly AnswerWire[]): void {
+  for (const a of answers) {
+    if (a.redacted) into.delete(a.answerId);
+    else if (typeof a.carryToken === "string") into.set(a.answerId, a.carryToken);
+  }
+}
+
+/** What a carried draft's POST adds: the swept answer and its token, so the
+ *  server lets it in beside the viewer's other live answer. Nothing without a
+ *  token — the ordinary one-live-answer rule then applies. */
+export function carryFieldsFor(
+  carriedFrom: string | null,
+  tokens: ReadonlyMap<string, string>,
+): { carriedFrom?: string; carryToken?: string } {
+  const token = carriedFrom === null ? undefined : tokens.get(carriedFrom);
+  return carriedFrom !== null && token !== undefined ? { carriedFrom, carryToken: token } : {};
 }
 
 /** A successful POST's body, when it has the saved answer's shape. */

@@ -20,7 +20,10 @@ import { getDb } from "../../db/client.ts";
 import type { Config } from "../../config.ts";
 import type { AuthRole } from "../../auth/role.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
-import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { __resetWikiCacheForTest, stripFrontmatter } from "../../wiki/store.ts";
+import { parseBlocks } from "../../format/markdown-ast.ts";
+import { parseQuestionPage } from "../../format/question.ts";
+import { sha256 } from "../../gardener/util.ts";
 import { EXPORT_CONFIRM_MAX_ROWS, registerWikiAnswerRoutes, type WikiAnswerExportStore } from "./wiki-answers.ts";
 import {
   getLatestWikiAnswerVersion,
@@ -127,6 +130,13 @@ function appFor(
 const T0 = "2026-10-07T19:32:00Z";
 const at = (minutes: number) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();
 
+/** The question's hash as the page has it now: a seeded answer is to the
+ *  CURRENT wording unless a test says otherwise. */
+function currentHash(markdown: string, q: string): string {
+  const found = parseQuestionPage(parseBlocks(stripFrontmatter(markdown))).questions.find((x) => x.id === q);
+  return found ? sha256(found.hashInput) : "seed";
+}
+
 async function insert(r: {
   id: string;
   version: number;
@@ -137,10 +147,13 @@ async function insert(r: {
   choice?: string | null;
   body: string;
   created: string;
+  hash?: string;
 }) {
+  const rel = r.rel ?? REL;
+  const hash = r.hash ?? currentHash(rel === GROUP_REL ? GROUP_PAGE : rel === REL ? PAGE : "", r.q);
   await getDb()`
     INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, author_nav_ident, choice, body, question_hash, created_at)
-    VALUES (${r.id}, ${r.version}, ${WIKI}, ${r.rel ?? REL}, ${r.q}, ${r.name}, ${r.ident ?? null}, ${r.choice ?? null}, ${r.body}, 'seed', ${r.created}::timestamptz)
+    VALUES (${r.id}, ${r.version}, ${WIKI}, ${rel}, ${r.q}, ${r.name}, ${r.ident ?? null}, ${r.choice ?? null}, ${r.body}, ${hash}, ${r.created}::timestamptz)
   `;
 }
 

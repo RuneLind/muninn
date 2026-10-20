@@ -18,6 +18,7 @@ import { getDb } from "./client.ts";
 import {
   insertWikiAnswerVersion,
   redactWikiAnswer,
+  WikiAnswerAlreadyAnswered,
   WikiAnswerRedacted,
   type WikiAnswerVersionInput,
 } from "./wiki-answers.ts";
@@ -161,5 +162,43 @@ describe("redactWikiAnswer", () => {
     await insertWikiAnswerVersion(version(id, 1));
     await redactWikiAnswer(id);
     await expect(insertWikiAnswerVersion(version(id, 2))).rejects.toBeInstanceOf(WikiAnswerRedacted);
+  });
+});
+
+describe("one live answer per author and question (arch-10 D)", () => {
+  test("two racing first answers by one author: the second waits on the author lock, then is told which answer to edit", async () => {
+    const a = randomUUID();
+    const b = randomUUID();
+    const hold = holdPoint();
+    const first = insertWikiAnswerVersion(version(a, 1), { beforeCommit: hold.hook });
+    await reachedHook(hold, first);
+    const second = insertWikiAnswerVersion(version(b, 1));
+    second.catch(() => {});
+    expect(await stateAfter(second, 400).finally(() => hold.release())).toBe("pending");
+    await first;
+    const err = await second.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(WikiAnswerAlreadyAnswered);
+    expect(err).toMatchObject({ answerId: a, version: 1 });
+    expect(await rowsOf(b)).toHaveLength(0);
+  });
+
+  test("a different author is not blocked by the held first answer", async () => {
+    const hold = holdPoint();
+    const first = insertWikiAnswerVersion(version(randomUUID(), 1), { beforeCommit: hold.hook });
+    await reachedHook(hold, first);
+    const other = insertWikiAnswerVersion({
+      ...version(randomUUID(), 1),
+      author: { userId: "u-other", oid: null, navIdent: null, name: "Other Person" },
+    });
+    try {
+      expect(await stateAfter(other, 2000)).toBe("settled");
+      expect((await other).version).toBe(1);
+    } finally {
+      hold.release();
+      await first;
+    }
   });
 });

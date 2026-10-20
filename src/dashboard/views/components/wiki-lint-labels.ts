@@ -33,6 +33,8 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "long-page-no-fold": "Long pages with no <Fold>",
   "decision-first-sentence": "DecisionLog first sentences over 160 chars",
   "status-row-long": "<StatusRows> rows over 160 chars",
+  "status-tones": "<StatusRows> tones entries it cannot use",
+  "status-tile-long": "<StatusRows> tiles with a first part over 24 chars",
   "missing-tldr": "Pages with no In short box (<Tldr>) under the title",
   "tldr-no-more": "In short boxes with no <More>",
   "state-outside-home": "PR, release or Jira state written outside its home",

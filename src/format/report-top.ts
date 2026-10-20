@@ -19,6 +19,7 @@ import type { Block } from "./markdown-ast.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 import { isAbbreviation } from "./abbreviations.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
+import { labelListWarnings, normalizeLabel, parseLabelList, type LabelList } from "./delta-table.ts";
 
 // ── <More> ───────────────────────────────────────────────────────────────────
 
@@ -69,18 +70,66 @@ export function statusRows(children: Block[]): StatusRow[] {
   return out;
 }
 
+/** One `<StatusRows>` block: its attributes as parsed and its rows. */
+export interface StatusRowsBlock {
+  attrs: Record<string, string>;
+  rows: StatusRow[];
+}
+
 /** Every `<StatusRows>` block on the page, at any depth, in source order. */
-export function statusRowBlocks(blocks: Block[]): StatusRow[][] {
-  const out: StatusRow[][] = [];
+export function statusRowBlocks(blocks: Block[]): StatusRowsBlock[] {
+  const out: StatusRowsBlock[] = [];
   const walk = (bs: Block[]) => {
     for (const b of bs) {
       if (b.type !== "component") continue;
-      if (b.name === "StatusRows") out.push(statusRows(b.children));
+      if (b.name === "StatusRows") out.push({ attrs: b.attrs, rows: statusRows(b.children) });
       walk(b.children);
     }
   };
   walk(blocks);
   return out;
+}
+
+// ── <StatusRows view="tiles"> ────────────────────────────────────────────────
+
+/** A tile's big value (the first ` · ` part) over this many visible chars
+ *  does not read as a tile; lint check 11 warns. */
+export const STATUS_TILE_FIRST_MAX = 24;
+
+/** The tones a `tones=` entry may name: the state pills' own vocabulary. */
+export const STATUS_TILE_TONES = ["good", "warn", "info", "muted"] as const;
+
+export type StatusTone = (typeof STATUS_TILE_TONES)[number];
+
+const readTone = (v: string): StatusTone | null => {
+  const t = v.trim().toLowerCase();
+  return (STATUS_TILE_TONES as readonly string[]).includes(t) ? (t as StatusTone) : null;
+};
+
+/** A `tones=` list read: `Label=tone; Label=tone`, labels keyed as
+ *  DeltaTable's `better` keys them (`normalizeLabel`). */
+export type StatusTones = LabelList<StatusTone>;
+
+/** A `tones=` value (`parseLabelList`). */
+export function parseStatusTones(raw: string | undefined): StatusTones {
+  return parseLabelList(raw ?? "", readTone);
+}
+
+/** The tone `tones` gives the row labelled `label`, if any. A wikilink in
+ *  the label must already read as its text (`[[t|l]]` → `l`, else `t`): the
+ *  reader's render passes it so, and lint check 11 resolves its labels the
+ *  same way before it calls {@link statusToneWarnings}. */
+export function statusTileTone(tones: StatusTones, label: string | null): StatusTone | undefined {
+  return label === null ? undefined : tones.rows.get(normalizeLabel(label));
+}
+
+/** The warning lines for a `tones=` list against the block's row labels: an
+ *  entry this cannot use, a label given twice, a label that names no row. */
+export function statusToneWarnings(tones: StatusTones, rowLabels: readonly (string | null)[]): string[] {
+  return [
+    tones.bad.length ? `tones entry not read (use "Label=${STATUS_TILE_TONES.join("|")}"): ${tones.bad.join("; ")}` : "",
+    ...labelListWarnings("tones", tones.labels, rowLabels.filter((l): l is string => l !== null)),
+  ].filter(Boolean);
 }
 
 /** The segment separator in a row's value. */
@@ -114,8 +163,6 @@ export function splitOutside(value: string, res: readonly RegExp[]): string[] {
   out.push(value.slice(start));
   return out;
 }
-
-export type StatusTone = "good" | "warn" | "muted" | "info";
 
 /** State phrases per `language` and their tone. Matched longest first, as
  *  whole words, any case. «i prod» is the only good state: the work reached

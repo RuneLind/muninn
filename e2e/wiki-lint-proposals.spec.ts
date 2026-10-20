@@ -450,29 +450,31 @@ test.describe("wiki lint fixes", () => {
     // `rows[0]` and claim the whole fix had landed. Order follows the rows, so
     // the assertion is on the parts.
     const chip = await card.locator(".gard-badge[class*='chip-']").last().textContent();
-    expect(chip!.split(" · ").sort()).toEqual(["1 applied", "1 draft", "1 stale"]);
-    // Rows before the boundary stay written; the rest are reviewable again.
-    expect(await read(HEAL_A)).toContain("series: ");
+    expect(chip!.split(" · ").sort()).toEqual(["1 stale", "2 draft"]);
+    // The preflight checks every member's CAS before the first write, so no
+    // page is written; the fresh members are reviewable again.
+    expect(await read(HEAL_A)).not.toContain("series: ");
     await expect(card.locator('[data-group-action="approve"]')).toHaveCount(1);
     await expect(card.locator('[data-group-action="reject"]')).toHaveCount(1);
 
     // A status filter picks which CARDS show, never which ROWS a card holds —
     // and only a MIXED group can tell the two apart. Filtered to `draft`, a
     // card built from the filtered list renders a one-page fix over a
-    // three-page group, with the applied member silently missing.
+    // three-page group, with the stale member silently missing.
     await page.locator('.gard-filter[data-status="draft"]').click();
     await expect(card.locator(".gard-group-diff")).toHaveCount(3);
     await expect(card.locator(".gard-badge.badge-group")).toHaveText("3 pages");
     await page.locator('.gard-filter[data-status=""]').click();
 
-    // …and the buttons DO something. The stop left one row `draft`, so a second
-    // Accept has to apply it — an all-or-nothing gate answers 409 `mixed` here
-    // and the reverted rows can never be applied at all.
+    // …and the buttons DO something. The stop left two rows `draft`, so a
+    // second Accept has to apply them — an all-or-nothing gate answers 409
+    // `mixed` here and the reverted rows can never be applied at all.
     const beforeSecond = await read(HEAL_C);
     await card.locator('[data-group-action="approve"]').click();
     await expect(card.locator(".gard-badge.chip-stale")).toHaveCount(1);
     expect(await read(HEAL_C)).not.toBe(beforeSecond);
     expect(await read(HEAL_C)).toContain("series: ");
+    expect(await read(HEAL_A)).toContain("series: ");
     // The chip is coloured by the SET, not by `rows[0]`: nothing is reviewable
     // any more, but a stale member means the card is not `applied` either.
     const settled = await card.locator(".gard-badge.chip-stale").textContent();

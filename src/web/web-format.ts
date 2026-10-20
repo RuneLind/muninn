@@ -75,10 +75,14 @@ import {
   MORE_LABELS,
   splitFirstSentence,
   type SentenceSplit,
+  parseStatusTones,
   STATUS_SEPARATOR,
   statusSegments,
   statusRows,
+  statusTileTone,
+  type StatusTones,
 } from "../format/report-top.ts";
+import { readStatusRowsView } from "../format/component-spec.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { ITEM_DATE_ATTR, itemDate } from "../format/item-dates.ts";
 import {
@@ -253,7 +257,8 @@ export function formatWebHtml(
     itemDates?: ItemDateDays;
     /** The wiki reader's page render (`/api/wiki/page` only): the decision
      *  chain view and the PR strip, after the page's first `<NextMoves>`, else
-     *  its first `<StatusRows>`. Absent ⇒ no visual and byte-identical output. */
+     *  its first `<StatusRows>`, and a `<StatusRows view="tiles">` as tiles.
+     *  Absent ⇒ no visual and byte-identical output. */
     views?: boolean;
     /** With `views`: the page is a `proposed` plan, so a page with no ledger
      *  draws its at-a-glance slate as planned (`pageLedgers`). */
@@ -275,6 +280,8 @@ export function formatWebHtml(
   const prevLaneCards = currentLaneCards;
   const prevLinkTexts = currentLinkTexts;
   const prevItemDates = currentItemDates;
+  const prevViews = currentViews;
+  currentViews = opts?.views === true;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
   currentReader = opts?.reader === true;
@@ -331,6 +338,7 @@ export function formatWebHtml(
     currentLaneCards = prevLaneCards;
     currentLinkTexts = prevLinkTexts;
     currentItemDates = prevItemDates;
+    currentViews = prevViews;
   }
 }
 
@@ -384,6 +392,9 @@ let currentPageFiles: PageFiles | undefined;
 
 /** `opts.reader` for the call in progress. */
 let currentReader = false;
+
+/** `opts.views` for the call in progress: `<StatusRows view="tiles">` draws tiles. */
+let currentViews = false;
 
 /** The wiki's `language` for the call in progress (`<More>`, `<StatusRows>`). */
 let currentLanguage: QuestionLanguage = "en";
@@ -1774,19 +1785,30 @@ function tldrBodyHtml(rawChildren: Block[], children: string): string {
 
 /** A `<StatusRows>` body: each list a label column and a value column, one
  *  row per item; a value's ` · ` segments separated and their state phrases
- *  coloured (`markStatePhrases`). Other blocks render in place. */
-function statusRowsHtml(rawChildren: Block[]): string {
+ *  coloured (`markStatePhrases`). Other blocks render in place.
+ *
+ *  `tiles` (the reader's page render with `view="tiles"`): the same markup,
+ *  plus `sr-tiles` on the section, the first segment wrapped in `sr-big` and
+ *  the row's `tones=` tone as `sr-tone-<tone>`. CSS draws the tiles, so the
+ *  row's text — what a peek copies and an Explain selection sends — is the
+ *  rows view's. */
+function statusRowsHtml(rawChildren: Block[], tiles: StatusTones | null): string {
   const body = rawChildren
     .map((b) => {
       if (b.type !== "ul" && b.type !== "ol") return renderBlocks([b], webRenderer);
       const rows = statusRows([b])
         .map((r, k) => {
           const value = statusSegments(r.value)
-            .map((seg) => markStatePhrases(itemHtml(seg), currentLanguage))
+            .map((seg, i) => {
+              const html = markStatePhrases(itemHtml(seg), currentLanguage);
+              return tiles && i === 0 ? `<span class="sr-big">${html}</span>` : html;
+            })
             .join(`<span class="sr-sep">${STATUS_SEPARATOR}</span>`);
           const under = (b.nested?.[k] ?? []).map(listChildHtml).join("");
+          // A wikilinked label matches by the link's text, as lint check 11 reads it.
+          const tone = tiles ? statusTileTone(tiles, r.label === null ? null : peekText(r.label)) : undefined;
           return (
-            `<div class="sr-row"><span class="sr-label">${r.label === null ? "" : renderInline(r.label)}</span>` +
+            `<div class="sr-row${tone ? ` sr-tone-${tone}` : ""}"><span class="sr-label">${r.label === null ? "" : renderInline(r.label)}</span>` +
             `<span class="sr-value">${value}${under}</span></div>`
           );
         })
@@ -1794,7 +1816,7 @@ function statusRowsHtml(rawChildren: Block[]): string {
       return `<div class="sr-grid">${rows}</div>`;
     })
     .join("\n");
-  return `<section class="status-rows">${body}</section>`;
+  return `<section class="status-rows${tiles ? " sr-tiles" : ""}">${body}</section>`;
 }
 
 /** A list nested under a `RunChecklist` step: labelled entries as rows, the
@@ -2122,7 +2144,11 @@ const webRenderer: BlockRenderer = {
         // renders in place.
         return children;
       case "StatusRows":
-        return statusRowsHtml(rawChildren);
+        // Tiles on the reader's page render only; every other surface prints rows.
+        return statusRowsHtml(
+          rawChildren,
+          currentViews && readStatusRowsView(attrs.view).value === "tiles" ? parseStatusTones(attrs.tones) : null,
+        );
       case "Timeline":
         // `gtl-`, not `timeline`/`tl-`: chat's inspector styles those unscoped.
         return `<section class="gtl">${wrappedListsHtml(rawChildren, "gtl-list", timelineItemHtml)}</section>`;

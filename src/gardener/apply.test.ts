@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { rm, mkdir, writeFile, readFile } from "node:fs/promises";
+import { rm, mkdir, writeFile, readFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   draftTitle,
   commitMessageFor,
   logWriterFor,
+  updateBaseDrift,
   type ApplyDeps,
 } from "./apply.ts";
 import { commitWikiChange, __resetForTest as resetCommitQueue } from "../wiki/commit.ts";
@@ -195,6 +196,23 @@ describe("applyWikiProposal", () => {
 
     expect(refreshed).toBe(1);
     expect(reindexed).toEqual(["wiki"]);
+  });
+
+  test("an UNREADABLE log.md is left intact: the page is applied, no entry is written (finding 21)", async () => {
+    const logPath = path.join(wikiDir, "log.md");
+    const original = "# Activity Log\n\n## [2026-01-01] create | Old\n- history that must survive\n";
+    await writeFile(logPath, original);
+    await chmod(logPath, 0o200); // read fails, write would succeed
+    try {
+      const res = await applyWikiProposal(makeProposal(), deps());
+      expect(res.outcome).toBe("applied");
+    } finally {
+      await chmod(logPath, 0o644);
+    }
+    expect(await readFile(logPath, "utf8")).toBe(original);
+    expect(await readFile(path.join(wikiDir, "concepts/Context Compaction.md"), "utf8")).toContain(
+      "# Context Compaction",
+    );
   });
 
   test("wiki-keyed synthesis apply reindexes the injected collections, not wiki/wiki-life", async () => {
@@ -944,19 +962,135 @@ describe("applyWikiProposalGroup", () => {
     expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).toContain("series: prov");
   });
 
-  test("stops at a stale row; earlier rows stay written, later rows are never attempted", async () => {
+  test("an UNREADABLE log.md is left intact by the group entry (finding 21)", async () => {
+    const logPath = path.join(wikiDir, "log.md");
+    const original = "# Activity Log\n\n## [2026-01-01] create | Old\n- history that must survive\n";
+    await writeFile(logPath, original);
+    await chmod(logPath, 0o200);
+    try {
+      const res = await applyWikiProposalGroup(
+        [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))],
+        deps(),
+      );
+      expect(res.results.map((r) => r.outcome.outcome)).toEqual(["applied", "applied"]);
+    } finally {
+      await chmod(logPath, 0o644);
+    }
+    expect(await readFile(logPath, "utf8")).toBe(original);
+  });
+
+  test("a member edited after seeding stops the group with NONE of its members written (finding 61)", async () => {
+    // The 8.2 shape: B is the head carrying the label edit, and the author
+    // edited it before Accept. Stopping after A was written left A carrying the
+    // coined key and the label edit lost for good.
+    const PAGE_C = "plans/c.mdx";
+    await writeFile(path.join(wikiDir, PAGE_C), pageBody("C"));
+    const rowB = lintRow("r2", PAGE_B, pageBody("B"));
     const rows = [
       lintRow("r1", PAGE_A, pageBody("A")),
-      { ...lintRow("r2", PAGE_B, pageBody("B")), baseHash: "0".repeat(64) },
-      lintRow("r3", PAGE_B, pageBody("B")),
+      { ...rowB, draft: rowB.draft.replace("series: prov\n", "series: prov\nseries_label: Prov Work\n") },
+      lintRow("r3", PAGE_C, pageBody("C")),
     ];
+    await writeFile(path.join(wikiDir, PAGE_B), pageBody("B") + "\nEdited after seeding.\n");
     const res = await applyWikiProposalGroup(rows, deps());
 
-    expect(res.results).toHaveLength(2);
     expect(res.stoppedAt?.id).toBe("r2");
     expect(res.stoppedAt?.outcome.outcome).toBe("stale");
-    expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toContain("series: prov");
-    expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).not.toContain("series: prov");
+    // Only the stale row was reached; the others are unreached (the route puts
+    // them back to draft).
+    expect(res.results.map((r) => r.id)).toEqual(["r2"]);
+    expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toBe(pageBody("A"));
+    expect(await readFile(path.join(wikiDir, PAGE_C), "utf8")).toBe(pageBody("C"));
+    let logExists = true;
+    try {
+      await readFile(path.join(wikiDir, "log.md"), "utf8");
+    } catch {
+      logExists = false;
+    }
+    expect(logExists).toBe(false);
+  });
+
+  test("a no-op member passes the group preflight (finding 61 scope guard)", async () => {
+    const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+    await writeFile(path.join(wikiDir, PAGE_A), rowA.draft); // already applied
+    const res = await applyWikiProposalGroup([rowA, lintRow("r2", PAGE_B, pageBody("B"))], deps());
+    expect(res.stoppedAt).toBeUndefined();
+    expect(res.results.map((r) => r.outcome.outcome)).toEqual(["applied", "applied"]);
+    expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).toContain("series: prov");
+  });
+
+  // Fix round 1 batch 2: the preflight runs applyInner's OWN pre-write checks,
+  // so a member the apply would refuse after the CAS stops the group before
+  // the first write, and a member applyInner treats as a no-op passes.
+  describe("the preflight mirrors every pre-write check (finding 61)", () => {
+    const groupHead = (): WikiProposal => lintRow("r1", PAGE_A, pageBody("A"));
+
+    test("an explainer member stops the group with nothing written", async () => {
+      const html = "<!doctype html><html><head><title>Z</title></head><body>Z</body></html>\n";
+      await writeFile(path.join(wikiDir, "plans/z.html"), html);
+      const explainer = makeProposal({
+        id: "r2",
+        kind: "lint",
+        mode: "update",
+        groupKey: "lint:series-unnamed:deadbeef1234",
+        targetPath: "plans/z.html",
+        baseHash: sha256(html),
+        draft: html.replace("Z</body>", "Z2</body>"),
+        sourceDocs: [],
+      });
+      const res = await applyWikiProposalGroup([groupHead(), explainer], deps());
+
+      expect(res.stoppedAt?.id).toBe("r2");
+      expect(res.stoppedAt?.outcome).toMatchObject({ outcome: "error", reason: expect.stringContaining("explainer page") });
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toBe(pageBody("A"));
+    });
+
+    test("a member that fails path confinement stops the group with nothing written", async () => {
+      const escaping = makeProposal({ id: "r2", targetPath: "../escape.md", status: "approved" });
+      const res = await applyWikiProposalGroup([groupHead(), escaping], deps());
+
+      expect(res.stoppedAt?.id).toBe("r2");
+      expect(res.stoppedAt?.outcome).toMatchObject({ outcome: "error", reason: expect.stringContaining("path confinement") });
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toBe(pageBody("A"));
+    });
+
+    test("a create member whose stem another page owns stops the group with nothing written", async () => {
+      // `concepts/a.md` would shadow `plans/a.mdx` (same stem, different extension).
+      const twin = makeProposal({ id: "r2", targetPath: "concepts/a.md" });
+      const res = await applyWikiProposalGroup([groupHead(), twin], deps());
+
+      expect(res.stoppedAt?.id).toBe("r2");
+      expect(res.stoppedAt?.outcome.outcome).toBe("collision");
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toBe(pageBody("A"));
+    });
+
+    test("a member whose page already IS its CONTAINED draft passes as a no-op", async () => {
+      // A concept update whose draft links a page that does not exist. Containment
+      // de-links it before step 2a, so after a crash-after-write the page on disk
+      // is the contained draft, not the raw one. applyInner calls that a no-op;
+      // a preflight comparing the raw draft called it drift and stopped the group.
+      const target = "concepts/Context Compaction.md";
+      const before = DRAFT_BODY.replace("A technique", "An older technique");
+      await mkdir(path.join(wikiDir, "concepts"), { recursive: true });
+      await writeFile(path.join(wikiDir, target), before);
+      const row = makeProposal({
+        id: "r2",
+        mode: "update",
+        baseHash: sha256(before),
+        draft: DRAFT_BODY.replace("A technique", "A technique, see [[No Such Page]],"),
+      });
+      const single = await applyWikiProposal(row, deps());
+      expect(single).toMatchObject({ outcome: "applied" });
+      expect(await readFile(path.join(wikiDir, target), "utf8")).not.toContain("[[No Such Page]]");
+
+      const res = await applyWikiProposalGroup([groupHead(), row], deps());
+      expect(res.stoppedAt).toBeUndefined();
+      expect(res.results.map((r) => r.outcome)).toEqual([
+        expect.objectContaining({ outcome: "applied" }),
+        expect.objectContaining({ outcome: "applied", noop: true }),
+      ]);
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toContain("series: prov");
+    });
   });
 
   test("makes ONE commit over every path the group touched", async () => {
@@ -1065,13 +1199,19 @@ describe("applyWikiProposalGroup", () => {
 
   test("a STOPPED group commits the pages it wrote, and its subject says so", async () => {
     const commits: Array<{ paths: string[]; message: string }> = [];
-    const rows = [
-      lintRow("r1", PAGE_A, pageBody("A")),
-      { ...lintRow("r2", PAGE_B, pageBody("B")), baseHash: "0".repeat(64) },
-    ];
+    const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+    // Both pass the preflight CAS; B's WRITE then fails, which is the stop the
+    // preflight cannot see (a stale member now stops with nothing written).
     await applyWikiProposalGroup(
       rows,
-      deps({ commit: async (paths, message) => { commits.push({ paths, message }); } }),
+      deps({
+        commit: async (paths, message) => { commits.push({ paths, message }); },
+        writeFile: async (absPath, content) => {
+          if (absPath.endsWith(PAGE_B)) throw new Error("disk full");
+          await mkdir(path.dirname(absPath), { recursive: true });
+          await writeFile(absPath, content);
+        },
+      }),
     );
     expect(commits).toHaveLength(1);
     // `log.md` is not a page. Counting the rows the apply REACHED said
@@ -1096,5 +1236,23 @@ describe("applyWikiProposalGroup", () => {
 
     expect(res.results[0]!.outcome.outcome).toBe("applied");
     expect(await readFile(path.join(wikiDir, "plans/c.mdx"), "utf8")).toBe(expected);
+  });
+});
+
+// Finding 63: the gate's listing and the apply step must agree on "this page
+// changed since the draft". One predicate, read by both.
+describe("updateBaseDrift", () => {
+  const page = "---\ntitle: A\n---\n\nBody.\n";
+  test("the page as drafted is not drift", () => {
+    expect(updateBaseDrift(sha256(page), page)).toBeNull();
+  });
+  test("a page edited since the draft is drift", () => {
+    expect(updateBaseDrift(sha256(page), page + "More.\n")).toBe("target file changed since drafting");
+  });
+  test("a vanished page is drift", () => {
+    expect(updateBaseDrift(sha256(page), null)).toBe("target file no longer exists");
+  });
+  test("a row with no base hash cannot prove anything, so it is drift", () => {
+    expect(updateBaseDrift(null, page)).toBe("target file changed since drafting");
   });
 });

@@ -46,6 +46,7 @@ import { sha256 } from "./util.ts";
 import { missingCodeBlocks } from "./code-block-retention.ts";
 import type { SummaryFactcheck } from "../db/summary-factchecks.ts";
 import { summaryFactcheckStale } from "../summaries/factcheck-body.ts";
+import { stripFactcheckBlock } from "../wiki/factcheck-context.ts";
 import {
   appendFactcheckBlock,
   buildFactcheckRider,
@@ -54,6 +55,7 @@ import {
   stripReproducedFactcheck,
 } from "./factcheck-carry.ts";
 import { getLog } from "../logging.ts";
+import { splitFrontmatter } from "../wiki/page-text.ts";
 
 const log = getLog("gardener", "source-drafter");
 
@@ -95,7 +97,9 @@ export function sourceRelatedPages(
   const seen = new Set<string>();
   const primary: WikiProposalRelatedPage[] = [];
   const fallback: WikiProposalRelatedPage[] = [];
-  for (const { target, label } of bodyWikilinks(stripFrontmatter(draft))) {
+  // A fact-check block's links are web-derived and never choose a host; an
+  // update-mode page keeps its existing block verbatim (finding 64).
+  for (const { target, label } of bodyWikilinks(stripFactcheckBlock(stripFrontmatter(draft)))) {
     const page = index.resolve(target);
     if (!page || page.domain !== domain) continue;
     const key = normalizeRelPath(page.relPath);
@@ -937,6 +941,9 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
           title = pinnedTitle;
           draftText = pinFrontmatterTitle(draftText, pinnedTitle);
         }
+        // The prompt asks the reviser to keep frontmatter; this enforces it on the
+        // model output, before the persist-time alias strip and url pin run.
+        draftText = keepCurrentFrontmatter(update.currentText, draftText);
       }
 
       const stem = sanitizeFilename(title);
@@ -1095,4 +1102,21 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
     log.error("Source drafter failed for {topic}: {error}", { botName, topic: topicKey, error: reason });
     return { outcome: "error", reason };
   }
+}
+
+/**
+ * A revise keeps the page's frontmatter: splice the CURRENT fence in over the
+ * draft's, carrying only the draft's `updated:` line (replaced in place, or
+ * appended). Either side without a fence is returned unchanged — the title
+ * check above has already refused a page with no frontmatter title.
+ */
+export function keepCurrentFrontmatter(currentText: string, draftText: string): string {
+  const current = splitFrontmatter(currentText);
+  const draft = splitFrontmatter(draftText);
+  if (current.frontmatter === null || draft.frontmatter === null) return draftText;
+  const updatedRe = /^updated:.*$/m;
+  const draftUpdated = draft.frontmatter.match(updatedRe)?.[0];
+  let fm = current.frontmatter;
+  if (draftUpdated) fm = updatedRe.test(fm) ? fm.replace(updatedRe, () => draftUpdated) : `${fm}\n${draftUpdated}`;
+  return `---\n${fm}\n---\n${draft.body}`;
 }

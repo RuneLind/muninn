@@ -87,6 +87,7 @@
  * browsers.
  */
 
+import path from "node:path";
 import type { Hono } from "hono";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
@@ -105,7 +106,7 @@ import {
 } from "../../wiki/page-write.ts";
 import { setFrontmatterScalar } from "../../plans/frontmatter.ts";
 import { sha256 } from "../../gardener/util.ts";
-import { normalizeSeriesKey, seriesCensusKey, seriesKeyOf } from "../views/components/wiki-groups.ts";
+import { normalizeSeriesKey, seriesCensusKey } from "../views/components/wiki-groups.ts";
 import { canEditSeriesPage, SERIES_VALUE_MAX } from "../views/components/wiki-series-menu.ts";
 import { decideStampRequest } from "./wiki-stamp.ts";
 import { readonlyRefusal } from "./route-utils.ts";
@@ -140,6 +141,9 @@ export interface WikiSeriesRouteDeps {
 /** The two frontmatter keys this route owns. */
 const SERIES_KEY = "series";
 const SERIES_LABEL_KEY = "series_label";
+
+/** How many pages rule 4's in-section census reads at once. */
+const CENSUS_READ_BATCH = 32;
 
 /**
  * A page a series member may be — {@link canEditSeriesPage}, the SAME predicate
@@ -273,16 +277,43 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
        * series, so a member spelling the key the other way is the very member
        * this must find.
        */
-      const otherLabelledMember = (): WikiPageMeta | undefined => {
-        const fold = seriesCensusKey(series ?? "");
-        const mine = normalizeRelPath(meta.relPath);
-        return index.pages.find(
-          (p) =>
-            normalizeRelPath(p.relPath) !== mine &&
-            !!seriesKeyOf(p) &&
-            seriesCensusKey(seriesKeyOf(p)) === fold &&
-            !!(p.seriesLabel ?? "").trim(),
+      // Judged on the pages' ON-DISK frontmatter, re-read inside the write
+      // section (`inSectionRead` below), never on `index`: that was built before
+      // the queue, so a label another writer added in between was invisible and
+      // the series ended up two-headed. EVERY indexed markdown page is read, not
+      // only the index's series members: a concurrent request of this route can
+      // move a page INTO the series with a label after the index was built.
+      // Keyed by the page's real relPath (it is reported back in the 409), and
+      // compared to this page's through `normalizeRelPath` separately.
+      const freshPairs = new Map<string, { series: string | null; seriesLabel: string | null }>();
+      const baseRead = deps.readFile ?? defaultPageWriteIo(root).readFile;
+      const mine = normalizeRelPath(meta.relPath);
+      const inSectionRead = async (absPath: string): Promise<string | null> => {
+        const target = await baseRead(absPath);
+        freshPairs.clear();
+        const others = index.pages.filter(
+          (p) => isMarkdownPage(p) && normalizeRelPath(p.relPath) !== mine,
         );
+        // Batched, not one `Promise.all` over the wiki: a 1,500-page wiki would
+        // open every file at once, and a read that fails reads as "no label".
+        for (let i = 0; i < others.length; i += CENSUS_READ_BATCH) {
+          const batch = others.slice(i, i + CENSUS_READ_BATCH);
+          const texts = await Promise.all(batch.map((p) => baseRead(path.join(root, p.relPath))));
+          batch.forEach((p, j) => {
+            const text = texts[j];
+            if (text != null) freshPairs.set(p.relPath, seriesPairOf(text));
+          });
+        }
+        return target;
+      };
+      const otherLabelledMember = (): { relPath: string; seriesLabel: string } | undefined => {
+        const fold = seriesCensusKey(series ?? "");
+        for (const [relPath, pair] of freshPairs) {
+          if (pair.series && pair.seriesLabel && seriesCensusKey(pair.series) === fold) {
+            return { relPath, seriesLabel: pair.seriesLabel };
+          }
+        }
+        return undefined;
       };
 
       // `writeWikiPage`'s `transform` seam speaks `null` for "nothing to do", so
@@ -296,7 +327,7 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
        *  the MOVE rather than because the caller asked. */
       let clearedLabel: { series: string; label: string } | null = null;
       /** Rule 4's loser — the member that already names this series. */
-      let twoHeaded: WikiPageMeta | null = null;
+      let twoHeaded: { relPath: string; seriesLabel: string } | null = null;
       // Non-null only where nothing else commits this wiki — see the header.
       const noCommitter = seriesCommitterWarning(
         entry ? { name: entry.name, root: entry.root, source: entry.source } : null,
@@ -397,7 +428,7 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
           return current;
         },
         ...defaultPageWriteIo(root),
-        ...(deps.readFile ? { readFile: deps.readFile } : {}),
+        readFile: inSectionRead,
         // Unreachable in no-log mode (`writeWikiPage` skips the fan-out), and
         // required by the type — stated rather than relied on.
         reindex: async () => {},
@@ -405,7 +436,7 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
 
       // Rule 4's refusal. Ahead of every other outcome for the same reason the
       // refusal reason is: the transform ran, decided, and wrote nothing.
-      const conflict = twoHeaded as WikiPageMeta | null;
+      const conflict = twoHeaded as { relPath: string; seriesLabel: string } | null;
       if (conflict) {
         return c.json(
           {

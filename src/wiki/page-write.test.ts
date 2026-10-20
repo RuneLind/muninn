@@ -1,8 +1,8 @@
 import { test, expect } from "bun:test";
-import { rm, mkdir, writeFile, realpath, symlink } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, realpath, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { writeWikiPage, type PageWriteOptions } from "./page-write.ts";
+import { writeWikiPage, defaultPageWriteIo, type PageWriteOptions } from "./page-write.ts";
 import { appendBlockToPage } from "./append-block.ts";
 import { applyEdits, type IntegrateEdit } from "./integrate-edits.ts";
 import { buildFactcheckBlock } from "./factcheck-context.ts";
@@ -457,4 +457,57 @@ test("the logged path is unchanged beside it", async () => {
   expect(res.outcome).toBe("written");
   expect(fs.files["/wiki/log.md"]).toContain("factcheck-integrate | Page Title");
   expect(reindexed).toEqual(["wiki"]);
+});
+
+test("an UNREADABLE log.md is skipped, never overwritten with a fresh log (finding 21)", async () => {
+  __resetWikiWriteQueueForTest();
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "logwipe-")));
+  const logPath = path.join(root, "log.md");
+  const pagePath = path.join(root, "analyses", "page.md");
+  const original = "# Activity Log\n\n## [2026-01-01] create | Old\n- an entry that must survive\n";
+  try {
+    await mkdir(path.dirname(pagePath), { recursive: true });
+    await writeFile(pagePath, "# Page\n\nBody.\n");
+    await writeFile(logPath, original);
+    // Write-only: the read fails (EACCES) while a write would still succeed — the
+    // shape of a transient EMFILE/EIO under which insertLogEntry(null) replaced
+    // the whole wiki-global log with a one-entry file.
+    await chmod(logPath, 0o200);
+    const io = defaultPageWriteIo(root);
+    const res = await writeWikiPage({
+      ...baseOpts(makeFs({}), { wikiDir: root, baseHash: sha256("# Page\n\nBody.\n") }),
+      readFile: io.readFile,
+      writeFile: io.writeFile,
+    });
+    expect(res.outcome).toBe("written");
+    await chmod(logPath, 0o644);
+    expect(await Bun.file(logPath).text()).toBe(original);
+    expect(await Bun.file(pagePath).text()).toContain("appended");
+  } finally {
+    await chmod(logPath, 0o644).catch(() => {});
+    __resetWikiWriteQueueForTest();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an ABSENT log.md is still created by a page write (finding 21 scope guard)", async () => {
+  __resetWikiWriteQueueForTest();
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "logcreate-")));
+  try {
+    await mkdir(path.join(root, "analyses"), { recursive: true });
+    await writeFile(path.join(root, "analyses", "page.md"), "# Page\n\nBody.\n");
+    const io = defaultPageWriteIo(root);
+    const res = await writeWikiPage({
+      ...baseOpts(makeFs({}), { wikiDir: root, baseHash: sha256("# Page\n\nBody.\n") }),
+      readFile: io.readFile,
+      writeFile: io.writeFile,
+    });
+    expect(res.outcome).toBe("written");
+    const log = await Bun.file(path.join(root, "log.md")).text();
+    expect(log.startsWith("# Activity Log")).toBe(true);
+    expect(log).toContain("factcheck-integrate | Page Title");
+  } finally {
+    __resetWikiWriteQueueForTest();
+    await rm(root, { recursive: true, force: true });
+  }
 });

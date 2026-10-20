@@ -887,7 +887,9 @@ export function questionReaderCss(scope: string): string {
       font-size: 0.85em; color: var(--text-soft);
     }
     /* A part carries its own leading separator, so a wrap never strands a "·". */
-    ${scope} .q-by > .q-time, ${scope} .q-by > .q-edited { white-space: nowrap; }
+    ${scope} .q-by > .q-time, ${scope} .q-by > .q-edited, ${scope} .q-by > .q-changed { white-space: nowrap; }
+    /* The answer predates the question's current wording: muted, the q-by line's own ink. */
+    ${scope} .q-changed { font-style: italic; }
     ${scope} .q-author { color: var(--text-primary); font-weight: 600; }
     ${scope} .q-asked, ${scope} .q-pick {
       display: inline-block; padding: 0 0.45rem; border-radius: 999px; font-size: 0.85em; color: var(--text-primary);
@@ -908,6 +910,9 @@ export function questionReaderCss(scope: string): string {
       overflow: hidden; clip-path: inset(50%); white-space: nowrap;
     }
     ${scope} .q-pick { background: var(--tint-info); font-weight: 600; margin: 0.3rem 0.4rem 0 0; }
+    /* A choice the question no longer offers: no fill, dashed, and said in words. */
+    ${scope} .q-pick-gone { background: transparent; border: 1px dashed var(--border-secondary); }
+    ${scope} .q-pick-gone-note { font-weight: 400; color: var(--text-soft); }
     ${scope} .q-answer-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 0.3rem; }
     ${scope} .q-redacted { color: var(--text-soft); font-style: italic; }
     ${scope} .q-log { margin-top: 0.4rem; }
@@ -1059,6 +1064,47 @@ export function factcheckReaderCss(scope: string): string {
     }
     ${scope} .fc-card-close:hover { color: var(--text-primary); }
     ${scope} .fc-card-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  `;
+}
+
+/**
+ * Reader-only: `<StatusRows view="tiles">` (`statusRowsHtml`, `web-format.ts`),
+ * which only the reader's page render (`views: true`) draws. The rows markup
+ * stays; each `sr-row` becomes a tile — the label, the first segment
+ * (`sr-big`) as the big value, the rest as the note. The separator after the
+ * big value stays in the flow at font-size 0: taken out of the flow, it turns a
+ * selection's text into `3 points\n·to …`, which Explain cannot locate. The
+ * full-width inline-block keeps that text ` · `, as in the rows view. Theme
+ * tokens only; tones are the state pills' (`sr-good` …) tint and text pairs.
+ */
+export function statusTilesCss(scope: string): string {
+  return `
+    ${scope} .sr-tiles .sr-grid {
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: 0.5rem;
+      padding: 0; border: 0; background: none; align-items: stretch;
+    }
+    ${scope} .sr-tiles .sr-row {
+      display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; overflow-wrap: anywhere;
+      padding: 0.55rem 0.75rem; border: 1px solid var(--border-secondary); border-radius: 9px; background: var(--bg-surface);
+    }
+    ${scope} .sr-tiles .sr-value { font-size: 0.85em; color: var(--text-soft); }
+    ${scope} .sr-tiles .sr-big {
+      display: inline-block; width: 100%; font-size: 1.55rem; line-height: 1.2; font-weight: 650; color: var(--text-primary);
+      font-variant-numeric: tabular-nums;
+    }
+    ${scope} .sr-tiles .sr-big + .sr-sep { font-size: 0; }
+    /* A pill in the big value wraps inside its tile instead of running under the next one. */
+    ${scope} .sr-tiles .sr-big .sr-state { display: inline-block; max-width: 100%; white-space: normal; border-radius: 0.5em; }
+    /* On a tinted tile the pill's own tint can match it: outline it in its ink. */
+    ${scope} .sr-tiles [class*="sr-tone-"] .sr-state { border-color: currentColor; }
+    ${scope} .sr-tiles .sr-tone-good { background: var(--tint-success); }
+    ${scope} .sr-tiles .sr-tone-good .sr-big { color: var(--tone-good); }
+    ${scope} .sr-tiles .sr-tone-warn { background: var(--tint-warning); }
+    ${scope} .sr-tiles .sr-tone-warn .sr-big { color: var(--tone-warn); }
+    ${scope} .sr-tiles .sr-tone-info { background: var(--tint-info); }
+    ${scope} .sr-tiles .sr-tone-info .sr-big { color: var(--tone-info); }
+    ${scope} .sr-tiles .sr-tone-muted { background: var(--tint-neutral); }
+    ${scope} .sr-tiles .sr-tone-muted .sr-big { color: var(--text-soft); }
   `;
 }
 

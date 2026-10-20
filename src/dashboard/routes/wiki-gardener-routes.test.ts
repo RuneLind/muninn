@@ -3112,7 +3112,9 @@ describe("lint proposals — seeding and the group verbs", () => {
 
     const first = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
     expect(first.status).toBe(409);
-    expect(store.rows().map((r) => r.status)).toEqual(["applied", "stale", "draft"]);
+    // The preflight stops before any write, so every row but the stale one is
+    // back in `draft` (finding 61).
+    expect(store.rows().map((r) => r.status)).toEqual(["draft", "stale", "draft"]);
 
     // THE POINT: the stop left the card reviewable, so the very next Accept has
     // to be able to act on it. An all-or-nothing gate answers `mixed` here and
@@ -3121,10 +3123,10 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(second.status).toBe(200);
     expect(await second.json()).toMatchObject({
       outcome: "applied",
-      applied: ["plans/c.mdx"],
+      applied: [PAGE_A, "plans/c.mdx"],
       noop: [],
       // The rows the apply skipped are reported, not silently dropped.
-      skipped: { applied: 1, stale: 1 },
+      skipped: { stale: 1 },
     });
     expect(await Bun.file(path.join(root, "plans/c.mdx")).text()).toContain("series: prov");
     expect(store.rows().map((r) => r.status)).toEqual(["applied", "stale", "applied"]);
@@ -3213,17 +3215,17 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(res.status).toBe(409);
     const payload = (await res.json()) as { outcome: string; applied: string[]; stoppedAt: string };
     expect(payload.outcome).toBe("stopped");
-    // Rows already written STAY written — there is no rollback, so the answer
-    // names the boundary instead of implying nothing happened.
-    expect(payload.applied).toEqual([PAGE_A]);
+    // The preflight checks every member's CAS before the first write, so a
+    // stale member stops the group with NOTHING written (finding 61).
+    expect(payload.applied).toEqual([]);
     expect(payload.stoppedAt).toBe(PAGE_B);
-    expect(store.marked).toEqual([["r1", "applied"], ["r2", "stale"]]);
-    expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
-    // The row AFTER the boundary was never attempted, so its page is untouched.
+    expect(store.marked).toEqual([["r2", "stale"]]);
+    expect(await Bun.file(path.join(root, PAGE_A)).text()).not.toContain("series:");
     expect(await Bun.file(path.join(root, "plans/c.mdx")).text()).not.toContain("series:");
-    // …and it is back in `draft`, so the card keeps its buttons. `approved`
-    // renders no verb in the gate at all.
-    expect(store.reverted).toEqual(["r3"]);
+    // …and every other row is back in `draft`, so the card keeps its buttons.
+    // `approved` renders no verb in the gate at all.
+    expect(store.reverted.sort()).toEqual(["r1", "r3"]);
+    expect(store.rows().find((r) => r.id === "r1")!.status).toBe("draft");
     expect(store.rows().find((r) => r.id === "r3")!.status).toBe("draft");
   });
 
