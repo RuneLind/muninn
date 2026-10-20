@@ -9117,6 +9117,8 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
       wiki: WIKI,
       hrefFor: pageUrlByRelPath,
       openPage: (relPath) => loadPageByRelPath(relPath),
+      bin: fellesPublishBin,
+      bucket: fellesPublishBucket,
       // A status that lands after the breadcrumb was drawn repaints its marker.
       onStatus: () => {
         const btn = document.getElementById(FELLES_BTN_ID);

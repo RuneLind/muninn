@@ -210,6 +210,25 @@ describe("finding 67 — the status follows the reader's refetch triggers", () =
   });
 });
 
+describe("finding 80 — the client wires the remove command into the dialog", () => {
+  test("with bin set, a page missing locally carries its command", async () => {
+    const missing = { relPath: "gone.md", masked: false, state: "missing-locally" as const, changedFiles: [], refusals: [], warnings: [] };
+    h.answers = [status({ pages: [missing] })];
+    const sync = initFellesSync({
+      wiki: "kode",
+      hrefFor: (r) => r,
+      openPage: () => {},
+      onStatus: () => {},
+      bin: "/x/publiser.ts",
+      bucket: "felles",
+    } as Parameters<typeof initFellesSync>[0]);
+    await sync.load();
+    h.slot.dispatch("click", { target: { closest: () => ({ getAttribute: (n: string) => (n === "data-state" ? "ok" : null) }) } });
+    await settle();
+    expect(h.dialog()!.innerHTML).toContain("<code>FELLES_WIKI_BUCKET=felles bun /x/publiser.ts --fjern -- gone.md</code>");
+  });
+});
+
 describe("finding 79 — a dry run is judged on a fresh status", () => {
   test("exit 1 with no refused page left reads red, though the dialog opened with one", async () => {
     // Opened on a view holding a refused page; the fresh status has none, so

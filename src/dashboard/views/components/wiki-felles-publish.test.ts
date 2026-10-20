@@ -288,3 +288,62 @@ describe("the sync status", () => {
     expect(fellesBtnHtml("a.md")).not.toContain(FELLES_STALE_CLASS);
   });
 });
+
+// Architecture review 2026-10, finding 80: "Missing locally" listed published
+// pages with no way to remove them. Read off the namespace, so a missing export
+// fails these tests alone.
+describe("finding 80 — a page missing locally carries its remove command", () => {
+  const removeCmd = (o: { bin: string; relPath: string; bucket?: string }) => felles.fellesRemoveCommand(o);
+  const bin = "/n/muninn-nais/scripts/publiser-felles-wiki.ts";
+
+  test("the command is --fjern -- <relPath>, NFC, quoted, with no --ja and no ./", () => {
+    expect(removeCmd({ bin, relPath: "plans/gone.mdx" })).toBe(`bun ${bin} --fjern -- plans/gone.mdx`);
+    const nfd = "plans/på.mdx".normalize("NFD");
+    expect(removeCmd({ bin, relPath: nfd })).toBe(`bun ${bin} --fjern -- '${"plans/på.mdx".normalize("NFC")}'`);
+    expect(removeCmd({ bin, relPath: "it's.md" })).toBe(`bun ${bin} --fjern -- 'it'\\''s.md'`);
+    expect(removeCmd({ bin, relPath: "--x.md" })).toBe(`bun ${bin} --fjern -- --x.md`);
+    expect(removeCmd({ bin: "/a b/p.ts", relPath: "x y.md" })).toBe("bun '/a b/p.ts' --fjern -- 'x y.md'");
+    expect(removeCmd({ bin, relPath: "a.md" })).not.toContain("--ja");
+  });
+
+  test("the bucket muninn targets is prefixed, as on ⧉ Copy command", () => {
+    expect(removeCmd({ bin, relPath: "a.md", bucket: "melosys-felles" })).toBe(
+      `FELLES_WIKI_BUCKET=melosys-felles bun ${bin} --fjern -- a.md`,
+    );
+  });
+
+  const status: FellesSyncStatus = {
+    bucket: "b",
+    changed: 0,
+    pages: [
+      { relPath: "gone<x>.md", masked: false, state: "missing-locally", changedFiles: [], refusals: [], warnings: [] },
+      { relPath: "[skjult sti: 1 funn]", masked: true, state: "missing-locally", changedFiles: [], refusals: [], warnings: [] },
+    ],
+    orphans: [],
+    maybeOrphans: [],
+  };
+  const href = (rel: string) => "/wiki?relPath=" + rel;
+  const cmdFor = (rel: string) => removeCmd({ bin, relPath: rel });
+
+  test("an unmasked missing page shows its command and a copy button; a masked one shows neither", () => {
+    const html = fellesSyncListHtml(status, href, cmdFor);
+    expect(html).toContain(`<code>bun ${bin} --fjern -- &#39;gone&lt;x&gt;.md&#39;</code>`);
+    expect(html).toContain('data-felles="copy-remove" data-felles-path="gone&lt;x&gt;.md"');
+    expect(html.match(/data-felles="copy-remove"/g)?.length).toBe(1);
+    expect(html.match(/--fjern/g)?.length).toBe(1);
+    expect(html).toContain(
+      '<p class="wiki-felles-hint">In the bucket, but not in this wiki. To remove one from the bucket, run its command in a terminal; the script asks before it deletes. A renamed page is tracked under its new name only after it is published once.</p>',
+    );
+  });
+
+  test("without a command builder the section is unchanged", () => {
+    const html = fellesSyncListHtml(status, href);
+    expect(html).not.toContain("copy-remove");
+    expect(html).not.toContain("--fjern");
+    expect(html).toContain('<p class="wiki-felles-hint">In the bucket, but not in this wiki.</p>');
+  });
+
+  test("the dialog passes the builder through", () => {
+    expect(fellesSyncDialogHtml(status, href, cmdFor)).toContain('data-felles="copy-remove"');
+  });
+});

@@ -42,6 +42,22 @@ export function fellesPublishCommand(opts: {
   ].join(" ");
 }
 
+/** The command that removes a published page from the bucket by hand, for a
+ *  page the local wiki no longer lists (architecture review 2026-10, finding
+ *  80): the route refuses a relPath the index does not list, by design. No
+ *  `--ja`, so the script asks before it deletes. The relPath is the object
+ *  name, so it goes in NFC and with no `./`. */
+export function fellesRemoveCommand(opts: { bin: string; relPath: string; bucket?: string }): string {
+  return [
+    ...(opts.bucket ? ["FELLES_WIKI_BUCKET=" + shellQuote(opts.bucket)] : []),
+    "bun",
+    shellQuote(opts.bin),
+    "--fjern",
+    "--",
+    shellQuote(opts.relPath.normalize("NFC")),
+  ].join(" ");
+}
+
 export type FellesAction = "publish" | "remove";
 
 /** One line for the script's exit code (`publiser-felles-wiki.ts` header). */
@@ -246,6 +262,8 @@ export function fellesPublishStyles(): string {
     .wiki-felles-refresh { margin: 6px 0 0; color: var(--text-primary); padding-left: 8px; border-left: 3px solid var(--status-error); }
     .wiki-felles-refresh[hidden] { display: none; }
     .wiki-felles-masked { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .wiki-felles-cmd { display: flex; gap: 6px; align-items: flex-start; margin-top: 2px; }
+    .wiki-felles-cmd code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 11.5px; color: var(--text-secondary); }
     .wiki-felles-warn { color: var(--text-secondary); font-size: 11.5px; border-left: 3px solid var(--status-warning); padding-left: 6px; margin-top: 2px; }
   `;
 }
@@ -480,8 +498,14 @@ function changedFilesHtml(relPath: string, files: string[]): string {
 }
 
 /** The status lists in the sync dialog: changed pages with their files,
- *  refused pages with the scanner's reasons, pages missing locally, orphans. */
-export function fellesSyncListHtml(status: FellesSyncStatus, hrefFor: (relPath: string) => string): string {
+ *  refused pages with the scanner's reasons, pages missing locally, orphans.
+ *  With `removeCommandFor`, each unmasked page missing locally carries the
+ *  command that removes it and a ⧉ copy for it. */
+export function fellesSyncListHtml(
+  status: FellesSyncStatus,
+  hrefFor: (relPath: string) => string,
+  removeCommandFor?: (relPath: string) => string,
+): string {
   const by = (state: FellesSyncState) => status.pages.filter((p) => p.state === state);
   const changed = by("changed");
   const refused = by("refused");
@@ -510,8 +534,18 @@ export function fellesSyncListHtml(status: FellesSyncStatus, hrefFor: (relPath: 
     section(
       "missing",
       "Missing locally",
-      "In the bucket, but not in this wiki.",
-      missing.map((p) => `<li><span class="wiki-felles-masked">${esc(p.relPath)}</span>${warn(p.warnings)}</li>`),
+      removeCommandFor
+        ? "In the bucket, but not in this wiki. To remove one from the bucket, run its command in a terminal; the script asks before it deletes. A renamed page is tracked under its new name only after it is published once."
+        : "In the bucket, but not in this wiki.",
+      missing.map(
+        (p) =>
+          `<li><span class="wiki-felles-masked">${esc(p.relPath)}</span>` +
+          (removeCommandFor && !p.masked
+            ? `<div class="wiki-felles-cmd"><code>${esc(removeCommandFor(p.relPath))}</code>` +
+              `<button type="button" class="wiki-felles-copy-remove" data-felles="copy-remove" data-felles-path="${esc(p.relPath)}" aria-label="Copy the remove command">⧉ Copy</button></div>`
+            : "") +
+          `${warn(p.warnings)}</li>`,
+      ),
     ) +
     section(
       "orphans",
@@ -532,11 +566,15 @@ export function fellesSyncListHtml(status: FellesSyncStatus, hrefFor: (relPath: 
   );
 }
 
-export function fellesSyncDialogHtml(status: FellesSyncStatus, hrefFor: (relPath: string) => string): string {
+export function fellesSyncDialogHtml(
+  status: FellesSyncStatus,
+  hrefFor: (relPath: string) => string,
+  removeCommandFor?: (relPath: string) => string,
+): string {
   return (
     `<div class="wiki-felles-body"><div class="wiki-felles-head"><span>melosys-felles — sync</span>` +
     `<button type="button" class="wiki-felles-x" data-felles="close" aria-label="Close">✕</button></div>` +
-    `<div class="wiki-felles-lists">${fellesSyncListHtml(status, hrefFor)}</div>` +
+    `<div class="wiki-felles-lists">${fellesSyncListHtml(status, hrefFor, removeCommandFor)}</div>` +
     `<p class="wiki-felles-refresh" role="alert" hidden></p>` +
     `<label class="wiki-felles-check"><input type="checkbox" data-felles="ident" checked> ` +
     `Allow NAVident and e-mail (<code>--tillat-ident</code>)</label>` +
@@ -616,6 +654,10 @@ export interface FellesSyncOptions {
   openPage: (relPath: string) => void;
   /** Called whenever a status arrives, so the ⇪ Felles marker can repaint. */
   onStatus: () => void;
+  /** The publish script and muninn's bucket, for the remove command a page
+   *  missing locally carries (finding 80). Without `bin`, no command. */
+  bin?: string;
+  bucket?: string;
 }
 
 export interface FellesSync {
@@ -651,6 +693,10 @@ async function requestStatus(wiki: string, allowIdent: boolean): Promise<StatusR
 
 /** Wire the rail chip and its dialog. Call once, on a wiki that offers ⇪ Felles. */
 export function initFellesSync(opts: FellesSyncOptions): FellesSync {
+  const bin = opts.bin;
+  const removeCommandFor = bin
+    ? (relPath: string) => fellesRemoveCommand({ bin, relPath, bucket: opts.bucket })
+    : undefined;
   // The last GOOD default status: a failed reload leaves it and the markers
   // standing, and only the chip says the status failed.
   let status: FellesSyncStatus | null = null;
@@ -718,7 +764,7 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     const dialog = document.createElement("dialog");
     dialog.id = SYNC_DIALOG_ID;
     dialog.className = "wiki-felles wiki-felles-sync-dialog";
-    dialog.innerHTML = fellesSyncDialogHtml(initial, opts.hrefFor);
+    dialog.innerHTML = fellesSyncDialogHtml(initial, opts.hrefFor, removeCommandFor);
     document.body.appendChild(dialog);
     let running = false;
     // Same hold as the page dialog: a run in flight keeps it open.
@@ -776,7 +822,7 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       if (r.ok) {
         view = r.status;
         viewReady = true;
-        lists.innerHTML = fellesSyncListHtml(view, opts.hrefFor);
+        lists.innerHTML = fellesSyncListHtml(view, opts.hrefFor, removeCommandFor);
         syncBtn.textContent = `Publish changed (${view.changed})`;
         setRefresh("");
       } else {
@@ -859,6 +905,17 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       if (action === "close") dialog.close();
       else if (action === "sync-dry") void run(true);
       else if (action === "sync") void run(false);
+      else if (action === "copy-remove" && removeCommandFor) {
+        const btn = target.closest("button") as HTMLButtonElement;
+        void copyText(removeCommandFor(btn.getAttribute("data-felles-path") || "")).then((ok) =>
+          flashCopyResult(btn, ok, {
+            text: "⧉ Copy",
+            ariaLabel: "Copy the remove command",
+            okText: "✓ Copied",
+            failText: "Copy failed",
+          }),
+        );
+      }
     });
     dialog.showModal();
     if (fresh) void reloadView(false);
