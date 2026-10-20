@@ -10,11 +10,16 @@
  *   `- **Hold**: …`, `- *Hold* — …` (a trailing `:` inside or after the
  *   emphasis, or a ` — `, ` – ` or ` - ` after it, is the separator; an item
  *   without one has no term);
- * - a paragraph: a sentence led by an emphasised span, or by an article and
- *   one (`A **Hold** …`, `Et **Lån** …`), defines that span; emphasis further in is
- *   definition text. The definition is the rest of the sentence plus the
- *   sentences after it that define nothing. A leading «Words on the page» /
- *   «Ord på siden» label is not a term.
+ * - a paragraph: a sentence led by an emphasised span defines that span. One
+ *   led by an article (a, an, the, en, ei, et, den, det, de) and a span does
+ *   only when a separator or a copula (is, are, er) follows the span
+ *   (`A **Hold** is …`, `Et **Lån**: …`), since `Det *må* fornyes.` and
+ *   `A *very* long wait follows.` go on a definition. Emphasis further in is
+ *   definition text. Sentences split where `isAbbreviation` (the DecisionLog
+ *   split's rule) finds no abbreviation, so `e.g. *paused*` starts none. The
+ *   definition is the rest of the sentence plus the sentences after it that
+ *   define nothing. A leading «Words on the page» / «Ord på siden» label is
+ *   not a term.
  *
  * A term whose text is one code span (`` **`--arm`:** ``) is code-spelled: it
  * is listed but never marked, since prose that names it is code too.
@@ -22,6 +27,7 @@
 
 import { componentBlocks, type Block } from "./markdown-ast.ts";
 import { visibleText } from "./report-top.ts";
+import { isAbbreviation } from "./abbreviations.ts";
 
 export interface GlossaryEntry {
   /** The term as the reader sees it. */
@@ -62,10 +68,32 @@ const GLOSSARY_TERM_MIN = 2;
 const LABEL_RE = /^(?:\*\*|__)\s*(?:words on the page|ord på siden)\s*[.:]?\s*(?:\*\*|__)\s*[.:]?\s*/iu;
 // Group 3 is the separator; an item needs it or a term ending in `:`.
 const ITEM_LEAD_RE = /^(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1(?![\p{L}\p{N}])\s*(?:(:|[—–-](?=\s))\s*)?/u;
-// An optional article before the span (88 real glossaries: «A», «The»); the separator is optional.
-const SENTENCE_LEAD_RE = /^(?:(?:an?|the|e[nit]|de[nt]?)\s+)?(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1(?![\p{L}\p{N}*_])\s*(?:(?::|[—–-](?=\s))\s*)?/iu;
+// Group 1 is an article before the span (88 real glossaries: «A», «The», «En»), group 4 the separator.
+const SENTENCE_LEAD_RE = /^((?:an?|the|e[nit]|de[nt]?)\s+)?(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\2(?![\p{L}\p{N}*_])\s*((?::|[—–-](?=\s))\s*)?/iu;
+const COPULA_RE = /^(?:is|are|er)(?![\p{L}\p{N}])/iu;
 const CODE_ONLY_RE = /^`+[^`]+`+$/;
 const SENTENCE_END_RE = /(?<=[.!?])\s+(?=\S)/u;
+const WORD_BEFORE_DOT_RE = /([\p{L}.]+)\.$/u;
+
+/** A paragraph's sentences: split after `.`, `!` or `?` and white space, not
+ *  after an abbreviation's dot. */
+function sentencesOf(body: string): string[] {
+  const out: string[] = [];
+  for (const piece of body.split(SENTENCE_END_RE)) {
+    const prev = out.at(-1);
+    const word = prev === undefined ? undefined : WORD_BEFORE_DOT_RE.exec(prev)?.[1];
+    if (prev !== undefined && word && isAbbreviation(word, piece)) out[out.length - 1] = `${prev} ${piece}`;
+    else out.push(piece);
+  }
+  return out;
+}
+
+/** A sentence's lead term, or null: an article-led span needs a separator or a copula after it. */
+function sentenceLead(sentence: string): RegExpExecArray | null {
+  const lead = SENTENCE_LEAD_RE.exec(sentence);
+  if (lead?.[1] && !lead[4] && !COPULA_RE.test(sentence.slice(lead[0].length))) return null;
+  return lead;
+}
 
 /** The key a term is matched and deduplicated on. */
 export function glossaryKey(term: string): { key: string; exactCase: boolean } {
@@ -99,16 +127,16 @@ function readItem(text: string, out: GlossaryBlockRead): void {
 
 function readParagraph(text: string, out: GlossaryBlockRead): void {
   const body = text.replace(LABEL_RE, "");
-  const sentences = body.split(SENTENCE_END_RE);
+  const sentences = sentencesOf(body);
   // A sentence with no lead term extends the definition above it.
-  const leads = sentences.map((s) => SENTENCE_LEAD_RE.exec(s));
+  const leads = sentences.map(sentenceLead);
   for (let i = 0; i < sentences.length; i++) {
     const at = out.reads.push(sentences[i]!) - 1;
     const lead = leads[i];
     if (!lead) continue;
     let definition = sentences[i]!.slice(lead[0].length);
     for (let j = i + 1; j < sentences.length && !leads[j]; j++) definition += ` ${sentences[j]}`;
-    const e = entry(lead[2]!, definition, at);
+    const e = entry(lead[3]!, definition, at);
     if (e) out.entries.push(e);
   }
 }

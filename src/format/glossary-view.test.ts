@@ -333,8 +333,8 @@ describe("a glossary's shapes, as the reader and the lint read them", () => {
 
   test("a paragraph term's tip does not repeat the term", () => {
     expect(tips(reader("A Hold lasts.\n" + glossary("**Hold** is a book kept back.")))).toEqual(["Hold is a book kept back."]);
-    expect(tips(reader("A Hold lasts.\n" + glossary("A **Hold** keeps a book back. It lasts a week.")))).toEqual([
-      "Hold keeps a book back. It lasts a week.",
+    expect(tips(reader("A Hold lasts.\n" + glossary("A **Hold** is a book kept back. It lasts a week.")))).toEqual([
+      "Hold is a book kept back. It lasts a week.",
     ]);
   });
 });

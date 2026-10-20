@@ -50,7 +50,7 @@ describe("lint check 19 — glossary", () => {
   });
 
   test("a paragraph term is found on the line its sentence starts, wrapped or not", () => {
-    const page = ["<Glossary>", "", "**Words on the page:** A **Renewal** keeps a book out.", "It lasts a week. A **Renewal**", "adds two weeks.", "", "</Glossary>", ""].join("\n");
+    const page = ["<Glossary>", "", "**Words on the page:** A **Renewal** is a new loan.", "It lasts a week. A **Renewal**", "is two weeks more.", "", "</Glossary>", ""].join("\n");
     expect(lint(page)).toEqual([[4, "warning", "<Glossary> defines «Renewal» twice; the first definition is shown"]]);
   });
 

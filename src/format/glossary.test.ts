@@ -56,9 +56,9 @@ describe("the list shape", () => {
 
 describe("the paragraph shape", () => {
   test("a sentence's lead span is a term; its definition runs to the next term's sentence, without the term", () => {
-    const [r] = read(block("**Words on the page:** A **Hold** keeps a book back. It lasts a week. **Renewal:** two weeks more."));
+    const [r] = read(block("**Words on the page:** A **Hold** is a book kept back. It lasts a week. **Renewal:** two weeks more."));
     expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([
-      ["Hold", "keeps a book back. It lasts a week."],
+      ["Hold", "is a book kept back. It lasts a week."],
       ["Renewal", "two weeks more."],
     ]);
   });
@@ -68,8 +68,39 @@ describe("the paragraph shape", () => {
     expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([["Hold", "is a book not returned. It is never lent. Then one reader waits."]]);
   });
 
+  // A continuation sentence opening with an article-list word then emphasis, and an
+  // abbreviation's dot, start no term (fix round 2, R2-1).
+  test.each([
+    ["Det before emphasis", "**Lån** er en avtale. Det *må* fornyes.", "Lån", "er en avtale. Det må fornyes."],
+    ["De before emphasis", "**Lån** er en avtale. De *eldste* lånene purres.", "Lån", "er en avtale. De eldste lånene purres."],
+    ["Den before emphasis", "**Lån** er en avtale. Den *skal* leveres.", "Lån", "er en avtale. Den skal leveres."],
+    ["A before an adverb", "**Hold** is a state. A *very* long wait follows.", "Hold", "is a state. A very long wait follows."],
+    ["e.g.", "**Hold** is a state, e.g. *paused* lending.", "Hold", "is a state, e.g. paused lending."],
+    ["f.eks.", "**Lån** er en avtale, f.eks. *pause* i lånet.", "Lån", "er en avtale, f.eks. pause i lånet."],
+    ["bl.a.", "**Lån** er en avtale, bl.a. *Renewal* av lånet.", "Lån", "er en avtale, bl.a. Renewal av lånet."],
+  ])("%s extends the definition above", (_name, para, term, definition) => {
+    const [r] = read(block(para));
+    expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([[term, definition]]);
+  });
+
+  test.each([
+    ["a copula", "A **Hold** is a book kept back.", "Hold", "is a book kept back."],
+    ["a Norwegian copula", "Et **Lån** er en avtale.", "Lån", "er en avtale."],
+    ["a plural copula", "The *Renewals* are new loans.", "Renewals", "are new loans."],
+    ["a colon", "A **Hold**: a book kept back.", "Hold", "a book kept back."],
+    ["an em dash", "The *Renewal* — a new loan.", "Renewal", "a new loan."],
+  ])("an article-led term followed by %s is a term", (_name, para, term, definition) => {
+    const [r] = read(block(para));
+    expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([[term, definition]]);
+  });
+
+  test("an article-led emphasis followed by any other word is definition text", () => {
+    const [r] = read(block("**Hold** is a state. A *Renewal* adds a week."));
+    expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([["Hold", "is a state. A Renewal adds a week."]]);
+  });
+
   test("the Norwegian label is not a term", () => {
-    const [r] = read(block("**Ord på siden:** Et **Lån** varer tre uker."));
+    const [r] = read(block("**Ord på siden:** Et **Lån** er en avtale om tre uker."));
     expect(r?.entries.map((e) => e.term)).toEqual(["Lån"]);
   });
 });
