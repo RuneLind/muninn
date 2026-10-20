@@ -102,23 +102,54 @@ describe("decision → PR", () => {
     expect(lines(log("**D1** — Ship PR 3 and oppgave 3."))).toEqual(["D1 → PR 3, oppgave 3"]);
   });
 
-  test("a ledger row citing a decision gates «PR n»; «oppgave n» only under an Oppgave ledger", () => {
+  test("a ledger row citing a decision gates only its own noun: a PR ledger «PR n», an Oppgave ledger «oppgave n»", () => {
     const LOG2 = log("**D1** — Do PR 3 and oppgave 3.", "**D2** — Other.");
     expect(lines(LOG2 + ledger(["PR", "State"], [["3 — x", "open — per D2"]]))).toEqual(["D2 → PR 3 (open)", "D1 → oppgave 3"]);
-    expect(lines(LOG2 + ledger(["Oppgave", "State"], [["3 — x", "open — per D2"]]))).toEqual(["D2 → PR 3 (open)"]);
+    expect(lines(LOG2 + ledger(["Oppgave", "State"], [["3 — x", "open — per D2"]]))).toEqual(["D2 → oppgave 3 (open)", "D1 → PR 3"]);
   });
 
-  test("an oppgave takes a state only from an Oppgave ledger", () => {
+  test("an Oppgave ledger's rows are oppgaver, in the ledger edge and the prose edge alike", () => {
+    const md = log("**D2** — Gjør oppgave 3 og oppgave 4.") + ledger(["Oppgave", "Status"], [["3 — x", "merged — per D2"], ["4 — y", "open"]]);
+    expect(lines(md)).toEqual(["D2 → oppgave 3 (merged), oppgave 4 (open)"]);
+  });
+
+  test("a PR ledger row and an Oppgave ledger row with one number citing one decision are two outputs", () => {
+    const md = log("**D1** — Ship it.") + ledger(["PR", "State"], [["3 — x", "open — per D1"]]) + ledger(["Oppgave", "Status"], [["3 — y", "merged — per D1"]]);
+    expect(lines(md)).toEqual(["D1 → PR 3 (open), oppgave 3 (merged)"]);
+  });
+
+  test("an oppgave takes a state only from an Oppgave ledger, a PR only from a PR ledger", () => {
     expect(lines(log("**D1** — Do oppgave 3.") + ledger(["PR", "State"], [["3 — x", "open"]]))).toEqual(["D1 → oppgave 3"]);
     expect(lines(log("**D1** — Do oppgave 3.") + ledger(["Oppgave", "State"], [["3 — x", "open"]]))).toEqual(["D1 → oppgave 3 (open)"]);
+    expect(lines(log("**D1** — Ship PR 3.") + ledger(["Oppgave", "State"], [["3 — x", "merged"]]))).toEqual(["D1 → PR 3"]);
   });
 
-  test("a range expands like a list; a range over 10 keeps its ends", () => {
+  test("a «Planlagt oppgave» or bold **Oppgave** header numbers oppgaver too", () => {
+    expect(lines(log("**D1** — Gjør oppgave 3.") + ledger(["Planlagt oppgave", "Status"], [["3 — x", "open"]]))).toEqual(["D1 → oppgave 3 (open)"]);
+    expect(lines(log("**D1** — Gjør oppgave 3.") + ledger(["**Oppgave**", "Status"], [["3 — x", "open"]]))).toEqual(["D1 → oppgave 3 (open)"]);
+  });
+
+  test("an en dash range expands like a list; a range over 10 numbers keeps its ends", () => {
     expect(lines(log("**D1** — Ship PR 4–6."))).toEqual(["D1 → PR 4, PR 5, PR 6"]);
-    expect(lines(log("**D1** — Ship PR 4-6."))).toEqual(["D1 → PR 4, PR 5, PR 6"]);
     expect(lines(log("**D1** — Ship PR 4, 5 og 6."))).toEqual(["D1 → PR 4, PR 5, PR 6"]);
     expect(lines(log("**D1** — Gjør oppgave 1–2 og 4."))).toEqual(["D1 → oppgave 1, oppgave 2, oppgave 4"]);
     expect(lines(log("**D1** — Ship PR 4–30."))).toEqual(["D1 → PR 4, PR 30"]);
+    expect(analyze(log("**D1** — Ship PR 1–10.")).chains[0]!.outputs.map((o) => o.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(lines(log("**D1** — Ship PR 1–11."))).toEqual(["D1 → PR 1, PR 11"]);
+  });
+
+  test("a hyphen is no range, and a number running on into `-n` or `.n` (a date, a version) is no PR number", () => {
+    expect(lines(log("**D1** — Ship PR 4-6."))).toEqual([]);
+    expect(lines(log("**D1** — Kjør PR 2-3 uker."))).toEqual([]);
+    expect(lines(log("**D1** — Kjør PR 3 - 5 uker."))).toEqual(["D1 → PR 3"]);
+    expect(lines(log("**D1** — Ship PR 3, 2026-10-03."))).toEqual(["D1 → PR 3"]);
+    expect(lines(log("**D1** — Bump to PR 3.2 of the spec."))).toEqual([]);
+    expect(lines(log("**D1** — Ship PR 3. Then rest."))).toEqual(["D1 → PR 3"]);
+  });
+
+  test("a non-breaking space may sit after PR and inside a list", () => {
+    expect(lines(log("**D1** — Ship PR\u00a07."))).toEqual(["D1 → PR 7"]);
+    expect(lines(log("**D1** — Ship PR 4,\u00a05."))).toEqual(["D1 → PR 4, PR 5"]);
   });
 
   test("«pr n» in lower case is no slate number (Norwegian «pr.» reads «per»)", () => {

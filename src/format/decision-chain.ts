@@ -11,8 +11,9 @@
  *  2. decision → PR: every ledger row citing the decision. «PR n» /
  *     «oppgave n» in the decision's prose adds an edge only when no ledger row
  *     for that number cites a decision, and not right after a context word
- *     («after PR 6», «som PR 9», «from the PR 2 review»). Every ledger numbers
- *     PRs; only a ledger whose first header is Oppgave numbers oppgaver.
+ *     («after PR 6», «som PR 9», «from the PR 2 review»). A ledger whose
+ *     first header is Oppgave numbers oppgaver; every other ledger numbers
+ *     PRs, and each noun is gated and stated by its own ledgers only.
  *  3. «via»: the `Q-n` ids a question item names.
  */
 
@@ -36,9 +37,10 @@ const CLOSES_RE =
 /** «PR 7», «oppgave 1 og 2», «PR 22/23», «PR 4–6»: a slate number in plain
  *  prose, `PR` in capitals only (Norwegian «pr 4» reads «per 4»). A
  *  `#` form (`PR #3497`, `[PR #3497](…)`) names a pull request on GitHub,
- *  usually as evidence, and is never a slate output. */
+ *  usually as evidence, and is never a slate output. Only an en dash makes a
+ *  range; a number running on into `-n` or `.n` is a date or a version. */
 const PROSE_PR_RE =
-  /(?<![\p{L}\p{N}_[])(PR|[Oo]ppgave)[ \t ]+(\d{1,4})((?:[ \t ]*(?:,|og|and|&|\/|–|-)[ \t ]*\d{1,4}(?![\p{L}\p{N}#]))*)(?![\p{L}\p{N}\]])/gu;
+  /(?<![\p{L}\p{N}_[])(PR|[Oo]ppgave)[ \t ]+(\d{1,4})(?![-.]\d)((?:[ \t ]*(?:,|og|and|&|\/|–)[ \t ]*\d{1,4}(?![\p{L}\p{N}#]|[-.]\d))*)(?![\p{L}\p{N}\]])/gu;
 /** A prose PR mention right after one of these words is context, not an
  *  output: «once after PR 6», «as PR 9 indexes», «from the PR 2 review». */
 const CONTEXT_BEFORE_RE =
@@ -143,10 +145,10 @@ const RANGE_MAX = 10;
 /** The numbers a prose mention names: a list as written, `4–6` as 4, 5, 6. */
 function numbersIn(first: string, tail: string): number[] {
   const out = [Number(first)];
-  for (const m of tail.matchAll(/(,|og|and|&|\/|–|-)[ \t\u00a0]*(\d{1,4})/g)) {
+  for (const m of tail.matchAll(/(,|og|and|&|\/|–)[ \t\u00a0]*(\d{1,4})/g)) {
     const n = Number(m[2]);
     const from = out[out.length - 1]!;
-    if ((m[1] === "–" || m[1] === "-") && n > from && n - from < RANGE_MAX) for (let k = from + 1; k < n; k++) out.push(k);
+    if (m[1] === "–" && n > from && n - from < RANGE_MAX) for (let k = from + 1; k < n; k++) out.push(k);
     out.push(n);
   }
   return out;
@@ -228,20 +230,24 @@ export function analyzeDecisionChains(blocks: Block[], ledgers: Ledger[], opts: 
     }
   }
 
-  // 2. decision → PR, from the ledgers.
-  const states = { PR: prStateMap(ledgers), oppgave: prStateMap(ledgers.filter(numbersOppgaver)) };
+  // 2. decision → PR, from the ledgers, each ledger under its own noun.
+  const nounOf = (l: Ledger): ChainOutput["noun"] => (numbersOppgaver(l) ? "oppgave" : "PR");
+  const states = {
+    PR: prStateMap(ledgers.filter((l) => nounOf(l) === "PR")),
+    oppgave: prStateMap(ledgers.filter((l) => nounOf(l) === "oppgave")),
+  };
   const cited = { PR: new Set<number>(), oppgave: new Set<number>() };
   for (const l of ledgers) {
+    const noun = nounOf(l);
     for (const r of l.rows) {
       if (r.pr === null || r.decisions.length === 0) continue;
-      cited.PR.add(r.pr);
-      if (numbersOppgaver(l)) cited.oppgave.add(r.pr);
+      cited[noun].add(r.pr);
       for (const did of r.decisions) {
         const d = firstEntry.get(did);
         if (!d) continue;
         const c = chain(d);
-        if (!c.outputs.some((o) => o.number === r.pr && o.noun === "PR"))
-          c.outputs.push({ noun: "PR", number: r.pr, state: r.state, source: "ledger" });
+        if (!c.outputs.some((o) => o.number === r.pr && o.noun === noun))
+          c.outputs.push({ noun, number: r.pr, state: r.state, source: "ledger" });
       }
     }
   }
