@@ -64,6 +64,7 @@
   },
   "overrides": {
     "sharp": "0.35.5",
-    "proxy-addr": "2.0.8"
+    "proxy-addr": "2.0.8",
+    "follow-redirects": "1.16.1"
   }
 }
