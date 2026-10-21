@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import {
   parseBlocks,
+  readerFences,
   parseMeterAttrs,
   normalizeMeterTone,
   normalizeFactVerdict,
@@ -1193,5 +1194,17 @@ describe("parseBlocks — a component's source line", () => {
     expect(callout?.type === "component" && callout.line).toBe(5);
     const verdict = callout?.type === "component" ? callout.children.find((b) => b.type === "component") : undefined;
     expect(verdict?.type === "component" && verdict.line).toBe(7);
+  });
+});
+
+describe("readerFences", () => {
+  test("each fence the reader renders: opener, closer, lang; tildes and an unclosed opener are prose; CRLF folded", () => {
+    const text = ["```Text title=x", "a", "```", "```", "b", "```", "~~~", "c", "~~~", "````ts", "```", "````", "```", "open"].join("\r\n");
+    expect(readerFences(text)).toEqual([
+      { opener: 0, closer: 2, lang: "Text" },
+      { opener: 3, closer: 5, lang: "" },
+      { opener: 9, closer: 11, lang: "ts" },
+    ]);
+    expect(readerFences("```\nx\n```")).toEqual([{ opener: 0, closer: 2, lang: "" }]);
   });
 });

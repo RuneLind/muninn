@@ -1317,6 +1317,37 @@ export function readerFencedLines(text: string): boolean[] {
   return fenced;
 }
 
+/** One code fence the reader renders: 0-based opener and closer lines of the
+ *  input, and the language the reader reads off the info string. */
+export interface ReaderFence {
+  opener: number;
+  closer: number;
+  lang: string;
+}
+
+/**
+ * The code fences the reader renders, read off {@link extractFences} like
+ * {@link readerFencedLines}: backticks only, an unclosed opener stays prose,
+ * CRLF folded first. A line linter that needs each fence's info string and
+ * body, not only the mask, reads this one.
+ */
+export function readerFences(text: string): ReaderFence[] {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, srcLine: [] };
+  const out = extractFences(normalized, store).split("\n");
+  const fences: ReaderFence[] = [];
+  out.forEach((line, k) => {
+    const opener = store.srcLine[k]!;
+    if (line === lines[opener]) return;
+    // The walk resumes on the line after the closer.
+    const closer = k + 1 < out.length ? store.srcLine[k + 1]! - 1 : lines.length - 1;
+    const id = Number(line.slice(3, -1));
+    fences.push({ opener, closer, lang: store.blocks.get(id)!.lang });
+  });
+  return fences;
+}
+
 export function parseBlocks(text: string): Block[] {
   const normalized = text.replace(/\r\n/g, "\n");
 

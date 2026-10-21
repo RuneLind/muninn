@@ -18,11 +18,11 @@
  * of the wiki root (`.wiki-reader.json` `include`, no dot directories or
  * `node_modules`, a `blogs/src/` source dropped only when its compiled `.html`
  * sibling exists), minus a page a readable same-stem `.md` shadows. In a
- * directory, a culled page (`signal: none`) gets every check but the Tldr and
- * component checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
+ * directory, a culled page (`signal: none`) gets every check but the Tldr,
+ * component and text-diagram checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
  * `.wiki-reader.json`, else the given directory (or the page's own folder);
  * `relPath` is relative to it. With no `.wiki-reader.json`, the root is a guess,
- * so missing-tldr and tldr-no-more, which read the page's folder, are skipped
+ * so missing-tldr, tldr-no-more and text-diagram, which read the page's folder, are skipped
  * and one stderr line says so. A `<CaseBoard>` data file whose ref climbs
  * above the guessed root (`../data/c.yaml` from a page checked alone) reads
  * nothing, so check 15 cannot judge it; a second stderr line names each such
@@ -103,13 +103,13 @@ export interface WikiCheckResult {
   unreadFiles?: string[];
 }
 
-/** The checks that read the page's folder under the wiki root (`isTldrScope`),
- *  so they need the root, not a guess. */
-const FOLDER_CHECKS: ReadonlySet<string> = new Set(["missing-tldr", "tldr-no-more"]);
+/** The checks that read the page's folder under the wiki root (`isTldrScope`,
+ *  text-diagram's `archive/`/`plans/` skip), so they need the root, not a guess. */
+const FOLDER_CHECKS: ReadonlySet<string> = new Set(["missing-tldr", "tldr-no-more", "text-diagram"]);
 
 /** The stderr line for a run whose wiki root is a guess. */
 export const noRootNote = (dir: string) =>
-  `wiki-check: no .wiki-reader.json at or above ${dir}: missing-tldr and tldr-no-more need the wiki root and were skipped`;
+  `wiki-check: no .wiki-reader.json at or above ${dir}: missing-tldr, tldr-no-more and text-diagram need the wiki root and were skipped`;
 
 /** The stderr line naming the CaseBoard data files above a guessed root. */
 export const unreadFilesNote = (refs: readonly string[]) =>
