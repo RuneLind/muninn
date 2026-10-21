@@ -120,6 +120,10 @@
  *                      least 2 non-blank lines, a third of them holding an
  *                      arrow or box token. Info; suggests a mermaid kind.
  *                      Rules: `lint-text-diagram.ts`.
+ * 21. diagram-svg — on `.mdx` pages that are not culled, what a `<Diagram>`
+ *                      picture lacks: a missing or unparsable HTML sibling,
+ *                      parts the sanitizer drops, or classes the reader does
+ *                      not style (warnings). Rules: `lint-diagram.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -160,6 +164,7 @@ import { CHART_LINT_CHECKS, checkCharts } from "./lint-chart.ts";
 import { checkRuleTrees, RULE_TREE_LINT_CHECKS } from "./lint-rule-tree.ts";
 import { checkGlossaries, GLOSSARY_LINT_CHECKS } from "./lint-glossary.ts";
 import { checkTextDiagrams, TEXT_DIAGRAM_LINT_CHECKS } from "./lint-text-diagram.ts";
+import { checkDiagrams, DIAGRAM_LINT_CHECKS } from "./lint-diagram.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
@@ -197,6 +202,7 @@ export const LINT_CHECKS = [
   ...RULE_TREE_LINT_CHECKS,
   ...GLOSSARY_LINT_CHECKS,
   ...TEXT_DIAGRAM_LINT_CHECKS,
+  ...DIAGRAM_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -230,6 +236,7 @@ export const PAGE_TEXT_LINT_CHECKS = [
   ...RULE_TREE_LINT_CHECKS,
   ...GLOSSARY_LINT_CHECKS,
   ...TEXT_DIAGRAM_LINT_CHECKS,
+  ...DIAGRAM_LINT_CHECKS,
 ] as const satisfies readonly LintCheck[];
 
 /** What the page-text checks read of a page. */
@@ -1036,7 +1043,7 @@ export function checkPageText(
     ...checkReportTop(page, content),
     ...checkDecisionChain(page, content),
   ];
-  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content));
+  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content), ...checkDiagrams(page, content, files));
   if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content), ...checkTextDiagrams(page, content));
   return findings;
 }

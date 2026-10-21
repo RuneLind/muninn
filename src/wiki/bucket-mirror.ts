@@ -27,7 +27,7 @@ import {
 } from "../config.ts";
 import { adcTokens, type GcpTokenProvider } from "../gcp/access-token.ts";
 import { readBounded, readBoundedBytes } from "../utils/bounded-fetch.ts";
-import { PAGE_FILE_KIND_EXTENSIONS, PAGE_FILE_MAX_BYTES } from "../format/query-block.ts";
+import { PAGE_FILE_KIND_EXTENSIONS, PAGE_FILE_MAX_BYTES, pageFileExtension } from "../format/query-block.ts";
 import { isReadonlyWikiRoot } from "./readonly.ts";
 import { findWikiByRoot, getWikiRegistry } from "./registry-memo.ts";
 import { getWikiIndex } from "./store.ts";
@@ -53,7 +53,7 @@ const MAX_LIST_PAGE_BYTES = 8 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 /** The only hidden file admitted, and only at the root. */
 const READER_CONFIG = ".wiki-reader.json";
-/** Pages, plus the data files a page's `<Query>`/`<CaseBoard>`/`<DeltaTable>`
+/** Pages, plus the data files a page's `<Query>`/`<CaseBoard>`/`<DeltaTable>`/`<Diagram>`
  *  reads beside itself (`page-files.ts`). No route serves wiki images, so an
  *  image would be unreachable bytes. */
 const PAGE_EXTENSIONS: ReadonlySet<string> = new Set([".md", ".mdx", ".html"]);
@@ -66,7 +66,7 @@ export const MAX_DATA_OBJECT_BYTES = PAGE_FILE_MAX_BYTES;
 
 /** The byte cap for one mirrored relPath: a data file's, or a page's. */
 export function maxObjectBytesFor(rel: string): number {
-  return DATA_EXTENSIONS.has(path.posix.extname(rel).toLowerCase()) ? MAX_DATA_OBJECT_BYTES : MAX_OBJECT_BYTES;
+  return DATA_EXTENSIONS.has(pageFileExtension(rel)) ? MAX_DATA_OBJECT_BYTES : MAX_OBJECT_BYTES;
 }
 /** Temp files for the atomic write — hidden, so the wiki scan skips them. */
 const TMP_INFIX = ".bmtmp-";
@@ -116,7 +116,7 @@ export function validateMirrorRelPath(rel: string): RelPathResult {
   }
   if (rel === READER_CONFIG) return { relPath: rel };
   if (segments.some((s) => s.startsWith("."))) return { refused: "hidden path segment" };
-  const ext = path.posix.extname(rel).toLowerCase();
+  const ext = pageFileExtension(rel);
   if (!ALLOWED_EXTENSIONS.has(ext)) return { refused: `extension "${ext || "(none)"}" not allowed` };
   return { relPath: rel };
 }

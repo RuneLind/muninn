@@ -191,6 +191,8 @@ export const E2E_PORTS = {
   "wiki-rule-tree": 3160,
   // Glossary marks, CaseBoard dots and timeline lanes: ONE muninn over a synthetic plan wiki.
   "wiki-polish": 3161,
+  // <Diagram> views: ONE muninn over a synthetic wiki with two archify-shaped files.
+  "wiki-diagram": 3162,
   // Tracker links: two temp wikis in ONE process — one declaring a `trackers`
   // block (pills, the widened Jira facet) and one that does not, which must
   // render today's stamped-only facet and no pills.

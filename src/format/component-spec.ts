@@ -450,6 +450,10 @@ export const COMPONENT_SPEC = {
   // first use per section: the text before the first heading, then each `#`
   // and `##` heading (a `###` does not start one).
   Glossary: { attrs: {} },
+  // An archify diagram: `src` names its JSON (`.architecture.json`,
+  // `.workflow.json`, `.lifecycle.json`); the picture is the one `<svg>` of the
+  // HTML sibling (`x.html`). See `src/format/diagram-block.ts`.
+  Diagram: { attrs: { src: text }, selfClosing: true },
 } as const satisfies Record<string, ComponentSpec>;
 
 export type ComponentName = keyof typeof COMPONENT_SPEC;

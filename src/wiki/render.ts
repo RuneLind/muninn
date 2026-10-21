@@ -26,6 +26,7 @@
 import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { chartViewHtml } from "../format/chart-view.ts";
+import { diagramViewHtml } from "../format/diagram-block.ts";
 import { ruleTreeViewHtml } from "../format/rule-tree-view.ts";
 import { caseDotsViewHtml } from "../format/case-dots-view.ts";
 import { timelineLanesHtml } from "../format/timeline-lanes.ts";
@@ -133,7 +134,7 @@ export function renderWikiHtml(
       wikiLinkTexts: linkTexts,
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
-      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml, timelineLanes: timelineLanesHtml } : {}),
+      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, diagramView: diagramViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml, timelineLanes: timelineLanesHtml } : {}),
     }),
     literal,
   );

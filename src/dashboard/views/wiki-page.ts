@@ -1,5 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { caseDotsCss, timelineLanesCss, chartViewCss, glossaryCss, ruleTreeCss, compactPartsHiddenCss, componentBlockCss, decisionViewsCss, factcheckReaderCss, questionReaderCss, statusTilesCss } from "../../format/component-styles.ts";
+import { diagramCss } from "../../format/diagram-block.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -2392,6 +2393,8 @@ export async function renderWikiPage(opts?: {
     ${statusTilesCss(".wiki-article")}
     /* Reader-only: the <Chart> view (chart-view.ts, views: true). */
     ${chartViewCss(".wiki-article")}
+    /* Reader-only: the <Diagram> view (diagram-block.ts, views: true). */
+    ${diagramCss(".wiki-article")}
     /* Reader-only: the <RuleTree> view (rule-tree-view.ts, views: true). */
     ${ruleTreeCss(".wiki-article")}
     ${glossaryCss(".wiki-article")}

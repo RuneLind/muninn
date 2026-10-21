@@ -14,8 +14,20 @@ import { codeSpanContent, lineCodeSpanRanges } from "./code-spans.ts";
  *  the wiki root" are one reason, `unavailable`, so a page cannot tell them
  *  apart and probe for files outside the root. */
 export type PageFileResult =
-  | { ok: true; text: string }
+  | { ok: true; text: string; svg?: DiagramSvgResult }
   | { ok: false; reason: PageFileFailure };
+
+/** What the loader made of a `<Diagram src=>` file's HTML sibling: the one
+ *  sanitized `<svg>`, or why there is none. The three `unknown*` lists are
+ *  what the sanitizer dropped that it has no rule for (the `diagram-svg` lint
+ *  finding); a drop by design is not in them. */
+export interface DiagramSvgResult {
+  svg: string | null;
+  problem?: "missing" | "unparsable" | "too-large" | "budget";
+  unknownElements: string[];
+  unknownAttrs: string[];
+  unknownClasses: string[];
+}
 export type PageFileFailure = "unavailable" | "invalid" | "extension" | "too-large" | "limit" | "budget";
 
 /** The loader's answer, keyed by the attribute value as written (trimmed). */
@@ -26,11 +38,19 @@ export interface PageFiles {
 /** The kinds of file a page reads beside itself, each for its own attribute:
  *  `<Query csv=>` and `<DeltaTable src=>` a `csv`, `<Query sql=>` a `sql`,
  *  `<CaseBoard src=>` a `yaml`. */
-export type PageFileKind = "csv" | "sql" | "yaml";
+export type PageFileKind = "csv" | "sql" | "yaml" | "diagram";
+/** Stands in, in a sanitized `<Diagram>` SVG, for the per-block id prefix the
+ *  renderer writes (`src/wiki/diagram-svg.ts` marks, `diagram-block.ts`
+ *  replaces). Here so the pure renderer never imports the sanitizer. */
+export const DIAGRAM_ID_MARK = "__dgm-id__";
+/** The archify JSON suffixes, one per diagram flavor. Never bare `.json`. */
+export const DIAGRAM_SUFFIXES = [".architecture.json", ".workflow.json", ".lifecycle.json"] as const;
+export type DiagramFlavor = "architecture" | "workflow" | "lifecycle";
 export const PAGE_FILE_KIND_EXTENSIONS: Readonly<Record<PageFileKind, readonly string[]>> = {
   csv: [".csv"],
   sql: [".sql"],
   yaml: [".yaml", ".yml"],
+  diagram: DIAGRAM_SUFFIXES,
 };
 const ALL_KINDS = Object.keys(PAGE_FILE_KIND_EXTENSIONS) as PageFileKind[];
 
@@ -45,13 +65,34 @@ export const PAGE_FILE_MAX_PER_PAGE = 50;
 export const PAGE_FILE_PAGE_BUDGET_BYTES = 8 * 1024 * 1024;
 export const QUERY_CSV_MAX_ROWS = 2000;
 
-/** A path's extension, lower-cased: from the last `.` of its last segment, and
- *  none for a dotfile (`.csv`), as `path.extname` reads it. The ONE rule the
- *  lexical gate and the loader's realpath check share. */
+/** A path's extension, lower-cased: one of the multi-part archify suffixes
+ *  (`.architecture.json`) when the name ends in one after a non-empty stem,
+ *  else from the last `.` of its last segment, and none for a dotfile
+ *  (`.csv`), as `path.extname` reads it. The ONE rule the lexical gate, the
+ *  loader's realpath check and the bucket mirror share. */
 export function pageFileExtension(p: string): string {
   const name = p.slice(p.lastIndexOf("/") + 1);
+  const lower = name.toLowerCase();
+  for (const suffix of DIAGRAM_SUFFIXES) {
+    if (lower.length > suffix.length && lower.endsWith(suffix)) return suffix;
+  }
   const dot = name.lastIndexOf(".");
-  return dot > 0 ? name.slice(dot).toLowerCase() : "";
+  return dot > 0 ? lower.slice(dot) : "";
+}
+
+/** The flavor a `<Diagram src=>` value names by its suffix, or null. */
+export function diagramFlavor(ref: string): DiagramFlavor | null {
+  const ext = pageFileExtension(ref);
+  if (ext === ".architecture.json") return "architecture";
+  if (ext === ".workflow.json") return "workflow";
+  return ext === ".lifecycle.json" ? "lifecycle" : null;
+}
+
+/** The HTML sibling of a diagram file: the kind suffix dropped, `.html` added
+ *  (`flows/x.architecture.json` → `flows/x.html`). Null for a non-diagram ref. */
+export function diagramSiblingHtml(ref: string): string | null {
+  if (!diagramFlavor(ref)) return null;
+  return `${ref.slice(0, ref.length - pageFileExtension(ref).length)}.html`;
 }
 
 /** True when a segment of `p` is one the wiki index never scans: a dot
@@ -126,7 +167,7 @@ export function splitQuerySql(children: Block[], hasSqlFile: boolean): { sql: Co
 
 /** The components that name a file beside the page, and the tag text a page
  *  must contain for the loader to parse it at all. */
-export const PAGE_FILE_COMPONENTS = ["Query", "CaseBoard", "DeltaTable"] as const;
+export const PAGE_FILE_COMPONENTS = ["Query", "CaseBoard", "DeltaTable", "Diagram"] as const;
 
 /** Every file value in `blocks`, at any depth, in source order, deduplicated:
  *  a `Query`'s `csv=`/`sql=`, a `CaseBoard`'s or `DeltaTable`'s `src=`. Walks
@@ -155,6 +196,7 @@ export function pageFileRefKinds(blocks: Block[]): Map<string, Set<PageFileKind>
         add(q.sql, "sql");
       } else if (b.name === "CaseBoard") add((b.attrs.src ?? "").trim(), "yaml");
       else if (b.name === "DeltaTable") add((b.attrs.src ?? "").trim(), "csv");
+      else if (b.name === "Diagram") add((b.attrs.src ?? "").trim(), "diagram");
       walk(b.children);
     }
   };
@@ -208,7 +250,7 @@ export function lookupPageFile(
   files: PageFiles | undefined,
   ref: string,
   kind: PageFileKind,
-): { ok: true; text: string } | { ok: false; reason: PageFileFailure | "not-loaded" } {
+): Extract<PageFileResult, { ok: true }> | { ok: false; reason: PageFileFailure | "not-loaded" } {
   if (checkPageFileRef(ref, [kind]) === "extension") return { ok: false, reason: "extension" };
   if (!files) return { ok: false, reason: "not-loaded" };
   return files.get(ref) ?? { ok: false, reason: "unavailable" };
@@ -244,13 +286,19 @@ export function queryResultLine(q: QueryAttrs): string {
 }
 
 export const CASEBOARD_NO_SRC = "CaseBoard without src";
+export const DIAGRAM_NO_SRC = "Diagram without src";
 
-/** The plain-text surfaces' line for a `<CaseBoard>` or a `<DeltaTable src>`,
- *  unescaped: `Cases: cases.yaml`, `Table: runs.csv`. Those surfaces read no
- *  file, so the line names it. A CaseBoard without `src` says so, as the web
- *  does; a DeltaTable without one renders its body table, so no line. */
-export function blockFileLine(name: "CaseBoard" | "DeltaTable", attrs: Record<string, string>): string {
+/** The plain-text surfaces' line for a `<CaseBoard>`, a `<DeltaTable src>` or
+ *  a `<Diagram>`, unescaped: `Cases: cases.yaml`, `Table: runs.csv`,
+ *  `Diagram: x.architecture.json (interactive: x.html)`. Those surfaces read no
+ *  file, so the line names it. A CaseBoard or Diagram without `src` says so,
+ *  as the web does; a DeltaTable without one renders its body table, so no line. */
+export function blockFileLine(name: "CaseBoard" | "DeltaTable" | "Diagram", attrs: Record<string, string>): string {
   const src = (attrs.src ?? "").trim();
-  if (!src) return name === "CaseBoard" ? CASEBOARD_NO_SRC : "";
+  if (!src) return name === "CaseBoard" ? CASEBOARD_NO_SRC : name === "Diagram" ? DIAGRAM_NO_SRC : "";
+  if (name === "Diagram") {
+    const html = diagramSiblingHtml(src);
+    return `Diagram: ${pageFileName(src)}${html ? ` (interactive: ${pageFileName(html)})` : ""}`;
+  }
   return `${name === "CaseBoard" ? "Cases" : "Table"}: ${pageFileName(src)}`;
 }

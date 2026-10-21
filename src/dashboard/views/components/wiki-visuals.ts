@@ -1,5 +1,5 @@
 /**
- * The reader's `<Chart>` toggles, `<RuleTree>` case picker, `<Glossary>`
+ * The reader's `<Chart>` toggles, `<Diagram>` view buttons, `<RuleTree>` case picker, `<Glossary>`
  * term definitions and `<CaseBoard view="dots">` squares. The server
  * draws every chart variant (`src/format/chart-view.ts`); this file only shows
  * one: Chart or Table, and the variant (points or % of target, the bar as
@@ -32,6 +32,37 @@ function applyChartToggle(target: Element | null): boolean {
     });
   }
   pressOne(btn);
+  return true;
+}
+
+/** Whether a diagram view dims an edge: both ends out of focus. An edge with
+ *  one end in focus stays lit, since it is how the focused part connects. An
+ *  empty focus (the "All" view) dims nothing. */
+export function diagramEdgeDimmed(focus: ReadonlySet<string>, from: string, to: string): boolean {
+  return focus.size > 0 && !focus.has(from) && !focus.has(to);
+}
+
+/** Apply one `<Diagram>` view button; false when `target` is not one. Dims
+ *  each node outside the view's focus (`data-node-id`) and each edge whose
+ *  ends are both outside it (`data-edge-from`/`data-edge-to`); an element
+ *  with neither attribute (the lifecycle's main rail) never dims. */
+function applyDiagramView(target: Element | null): boolean {
+  const btn = target?.closest?.<HTMLElement>("button[data-dgm-view]");
+  const fig = btn?.closest<HTMLElement>("figure.dgm");
+  if (!btn || !fig || fig.closest(".wiki-ref-peek")) return false;
+  const view = btn.dataset.dgmView ?? "";
+  const focus = new Set((btn.dataset.dgmFocus ?? "").split(" ").filter(Boolean));
+  const svg = fig.querySelector(".dgm-svg");
+  svg?.querySelectorAll<Element>("[data-node-id]").forEach((n) => {
+    n.classList.toggle("dgm-dim", focus.size > 0 && !focus.has(n.getAttribute("data-node-id") ?? ""));
+  });
+  svg?.querySelectorAll<Element>("[data-edge-from][data-edge-to]").forEach((e) => {
+    e.classList.toggle("dgm-dim", diagramEdgeDimmed(focus, e.getAttribute("data-edge-from") ?? "", e.getAttribute("data-edge-to") ?? ""));
+  });
+  fig.querySelectorAll<HTMLElement>(":scope > .dgm-note").forEach((p) => {
+    p.hidden = p.dataset.dgmNote !== view;
+  });
+  fig.querySelectorAll<HTMLElement>(":scope > .dgm-views button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
   return true;
 }
 
@@ -215,7 +246,7 @@ export function initWikiVisuals(doc: Document = document): void {
   installed = true;
   doc.addEventListener("click", (e) => {
     const target = e.target instanceof Element ? e.target : null;
-    if (!applyChartToggle(target)) applyCaseDot(target);
+    if (!applyChartToggle(target) && !applyDiagramView(target)) applyCaseDot(target);
   });
   doc.addEventListener("keydown", moveCaseDot);
   doc.addEventListener("change", (e) => {
