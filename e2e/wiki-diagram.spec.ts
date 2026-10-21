@@ -176,6 +176,28 @@ const FIT_JSON = {
 const FIT_REL = "flows/fit.mdx";
 const FIT_PAGE = ["---", "title: Fit", "---", "", "# Fit", "", '<Diagram src="./fit.architecture.json" />', "", "The line after.", ""].join("\n");
 
+/** The fit drawing twice: once in the open and once in a closed `<Fold>`, with
+ *  a link back to this page (a re-render) and one away (a navigation). */
+const FOCUS_REL = "flows/focus.mdx";
+const FOCUS_PAGE = [
+  "---",
+  "title: Focus",
+  "---",
+  "",
+  "# Focus",
+  "",
+  '<Diagram src="./fit.architecture.json" />',
+  "",
+  "Read [[focus]] again, or go to [[wide]].",
+  "",
+  '<Fold title="Folded picture">',
+  "",
+  '<Diagram src="./fit.architecture.json" />',
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
 // A hostile archify file: a stray </div> and an end tag whose quoted attribute
 // value holds a `>` and a glossary term, then an inert onerror probe. Before the
 // fix, the end tag passed through the sanitizer byte for byte, the glossary pass
@@ -227,6 +249,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, FIT_REL), FIT_PAGE, "utf8");
   await writeFile(path.join(root, "flows", "fit.architecture.json"), JSON.stringify(FIT_JSON), "utf8");
   await writeFile(path.join(root, "flows", "fit.html"), FIT_HTML, "utf8");
+  await writeFile(path.join(root, FOCUS_REL), FOCUS_PAGE, "utf8");
   await writeFile(path.join(root, HOSTILE_REL), HOSTILE_PAGE, "utf8");
   await writeFile(path.join(root, "flows", "hostile.architecture.json"), JSON.stringify(HOSTILE_JSON), "utf8");
   await writeFile(path.join(root, "flows", "hostile.html"), HOSTILE_HTML, "utf8");
@@ -598,5 +621,281 @@ test.describe("Wiki reader: a Diagram fills the column down to its legibility fl
     await at(FIT_FLOOR);
     await at(FIT_FLOOR + 1);
     await at(FIT_FLOOR - 1);
+  });
+});
+
+/**
+ * The picture box's keyboard stop across its state space (the table on
+ * `syncDiagramStop`, wiki-visuals.ts): one test per row Chromium can reach.
+ * The fit drawing's floor (425 px) sits between the 760 px window's column and
+ * the 1280 px one's; 700 and 1200 are a second width on each side.
+ */
+test.describe("Wiki reader: a Diagram picture's keyboard stop across its states", () => {
+  const SCROLLS = 760;
+  const SCROLLS_TOO = 700;
+  const FITS = 1280;
+  const FITS_TOO = 1200;
+  const NAME = "Fit map (drawing)";
+  const STOP = { role: "region", label: NAME, tabindex: "0" };
+  const NONE = { role: null, label: null, tabindex: null };
+
+  async function openFocus(page: Page, width: number): Promise<void> {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(FOCUS_REL)}`);
+    await expect(page.locator(".wiki-article figure.dgm .dgm-svg svg")).toHaveCount(2);
+  }
+  const topBox = (page: Page) => page.locator(".wiki-article figure.dgm .dgm-svg").first();
+  const foldBox = (page: Page) => page.locator(".wiki-article details.fold .dgm-svg");
+  const fold = (page: Page) => page.locator(".wiki-article details.fold");
+  /** The box's stop attributes, whether it scrolls, and where focus is. */
+  const stateOf = (box: ReturnType<Page["locator"]>) =>
+    box.evaluate((el: HTMLElement) => ({
+      scrolls: el.scrollWidth > el.clientWidth,
+      role: el.getAttribute("role"),
+      label: el.getAttribute("aria-label"),
+      tabindex: el.getAttribute("tabindex"),
+      focused: document.activeElement === el,
+    }));
+  /** Two frames: a ResizeObserver delivers before the next paint, so by then it ran. */
+  const settle = (page: Page) => page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+  const resize = async (page: Page, width: number) => {
+    await page.setViewportSize({ width, height: 900 });
+    await settle(page);
+  };
+  /** Tab from the top figure's last view button into its picture. */
+  const tabIn = async (page: Page) => {
+    await page.locator(".wiki-article figure.dgm .dgm-view").first().locator("xpath=..").locator("button").last().focus();
+    await page.keyboard.press("Tab");
+    await expect.poll(() => stateOf(topBox(page))).toMatchObject({ focused: true });
+  };
+  /** Where focus is: its tag, and its class when it has one. */
+  const active = (page: Page) =>
+    page.evaluate(() => {
+      const a = document.activeElement;
+      if (!a || a === document.body) return "BODY";
+      return [a.tagName, a.getAttribute("class")].filter(Boolean).join(".");
+    });
+  const heading = (page: Page) => page.locator("#articleWrap .wiki-article-head h1");
+
+  // Rows 1–4: focus elsewhere. The stop follows the scroll state.
+  test("row 1, fits → fits, focus elsewhere: no stop before or after", async ({ page }) => {
+    await openFocus(page, FITS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: false, ...NONE, focused: false });
+    await resize(page, FITS_TOO);
+    expect(await stateOf(topBox(page))).toEqual({ scrolls: false, ...NONE, focused: false });
+  });
+
+  test("row 2, fits → scrolls, focus elsewhere: it becomes the stop", async ({ page }) => {
+    await openFocus(page, FITS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: false, ...NONE, focused: false });
+    await resize(page, SCROLLS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: true, ...STOP, focused: false });
+  });
+
+  test("row 3, scrolls → scrolls, focus elsewhere: the stop stays", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: true, ...STOP, focused: false });
+    await resize(page, SCROLLS_TOO);
+    expect(await stateOf(topBox(page))).toEqual({ scrolls: true, ...STOP, focused: false });
+  });
+
+  test("row 4, scrolls → fits, focus elsewhere: the stop goes", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: true, ...STOP, focused: false });
+    await resize(page, FITS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: false, ...NONE, focused: false });
+  });
+
+  // Rows 5–8: focus on the box. It keeps the stop until focus leaves.
+  test("row 5, scrolls → fits, focus on the box: focus stays and so does the stop, until blur", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await tabIn(page);
+    await resize(page, FITS);
+    await expect.poll(() => stateOf(topBox(page))).toMatchObject({ scrolls: false });
+    expect(await active(page)).toBe("DIV.dgm-svg");
+    expect(await stateOf(topBox(page))).toEqual({ scrolls: false, ...STOP, focused: true });
+    // Focus leaves: the fit state applies, and Shift+Tab no longer lands on it.
+    await page.keyboard.press("Tab");
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: false, ...NONE, focused: false });
+    await page.keyboard.press("Shift+Tab");
+    expect(await page.evaluate(() => document.activeElement?.classList.contains("dgm-view") ?? false)).toBe(true);
+  });
+
+  test("row 6, fits → fits with the stop kept, focus on the box: still kept until blur", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await tabIn(page);
+    await resize(page, FITS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: false, ...STOP, focused: true });
+    await resize(page, FITS_TOO);
+    expect(await stateOf(topBox(page))).toEqual({ scrolls: false, ...STOP, focused: true });
+    await heading(page).click();
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: false, ...NONE, focused: false });
+  });
+
+  test("row 7, fits with the stop kept → scrolls, focus on the box: the stop stays after blur", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await tabIn(page);
+    await resize(page, FITS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: false, ...STOP, focused: true });
+    await resize(page, SCROLLS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: true, ...STOP, focused: true });
+    await page.keyboard.press("Tab");
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: true, ...STOP, focused: false });
+    await page.keyboard.press("Shift+Tab");
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: true, ...STOP, focused: true });
+  });
+
+  test("row 8, scrolls → scrolls, focus on the box: focus and the stop stay", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await tabIn(page);
+    await resize(page, SCROLLS_TOO);
+    expect(await stateOf(topBox(page))).toEqual({ scrolls: true, ...STOP, focused: true });
+  });
+
+  // Rows 9–10: unreachable focus. The test proves why.
+  test("row 9, a fitting box that never scrolled takes no focus, by script or by click", async ({ page }) => {
+    await openFocus(page, FITS);
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: false, ...NONE, focused: false });
+    await topBox(page).evaluate((el: HTMLElement) => el.focus());
+    await topBox(page).click();
+    expect((await stateOf(topBox(page))).focused).toBe(false);
+  });
+
+  test("row 10, nothing inside the box takes focus: the sanitizer keeps no link, tabindex or embedded content", async ({ page }) => {
+    for (const width of [SCROLLS, FITS]) {
+      await openFocus(page, width);
+      if (width === SCROLLS) await tabIn(page);
+      const took = await topBox(page).evaluate((box: HTMLElement) => {
+        const before = document.activeElement;
+        const els = Array.from(box.querySelectorAll<HTMLElement | SVGElement>("*"));
+        const hits = els.filter((el) => {
+          el.focus();
+          return document.activeElement === el;
+        });
+        return { count: els.length, hits: hits.map((h) => h.tagName), same: document.activeElement === before };
+      });
+      expect(took.count).toBeGreaterThan(5);
+      expect(took.hits).toEqual([]);
+      expect(took.same).toBe(true);
+    }
+  });
+
+  // Rows 11–13: a <Fold> hides and shows the box.
+  test("row 11, fold opened and closed, focus elsewhere: closed it takes no focus; opened, the stop follows the scroll state", async ({ page }) => {
+    /** Whether the box takes focus from a script (a closed fold's content does not). */
+    const takes = () => foldBox(page).evaluate((el: HTMLElement) => (el.focus(), document.activeElement === el));
+    await openFocus(page, SCROLLS);
+    expect(await takes()).toBe(false);
+    await fold(page).locator("summary").click();
+    await expect.poll(() => stateOf(foldBox(page))).toEqual({ scrolls: true, ...STOP, focused: false });
+    await fold(page).locator("summary").click();
+    await settle(page);
+    expect(await takes()).toBe(false);
+    await resize(page, FITS);
+    await fold(page).locator("summary").click();
+    await expect.poll(() => stateOf(foldBox(page))).toMatchObject({ scrolls: false });
+    await settle(page);
+    expect(await stateOf(foldBox(page))).toEqual({ scrolls: false, ...NONE, focused: false });
+  });
+
+  test("row 12, fold closed while the box has focus: the browser moves focus, as for a button in the fold; reopened, the stop is right", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await fold(page).locator("summary").click();
+    await expect.poll(() => stateOf(foldBox(page))).toMatchObject({ scrolls: true, tabindex: "0" });
+    // Only a script closes a fold without moving focus first: the summary takes focus on a click or a key.
+    await foldBox(page).focus();
+    await fold(page).evaluate((d: HTMLDetailsElement) => (d.open = false));
+    await settle(page);
+    const lostTo = await active(page);
+    // The same close with a view button of the folded figure focused.
+    await fold(page).evaluate((d: HTMLDetailsElement) => (d.open = true));
+    await fold(page).locator(".dgm-view").last().focus();
+    await fold(page).evaluate((d: HTMLDetailsElement) => (d.open = false));
+    await settle(page);
+    expect(lostTo).toBe(await active(page));
+    await fold(page).evaluate((d: HTMLDetailsElement) => (d.open = true));
+    await expect.poll(() => stateOf(foldBox(page))).toEqual({ scrolls: true, ...STOP, focused: false });
+  });
+
+  test("row 13, fold resized while closed: reopened, the stop matches the new width", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await resize(page, FITS);
+    await fold(page).locator("summary").click();
+    await expect.poll(() => stateOf(foldBox(page))).toMatchObject({ scrolls: false });
+    await settle(page);
+    expect(await stateOf(foldBox(page))).toEqual({ scrolls: false, ...NONE, focused: false });
+    await fold(page).locator("summary").click();
+    await resize(page, SCROLLS);
+    await fold(page).locator("summary").click();
+    await expect.poll(() => stateOf(foldBox(page))).toEqual({ scrolls: true, ...STOP, focused: false });
+  });
+
+  // Rows 14–16: the article is replaced.
+  /** Click a wikilink by script, so focus stays where it was until the render. */
+  const follow = async (page: Page, text: string, heading: string) => {
+    await page.locator(".wiki-article").evaluate((a) => ((a as HTMLElement & { __old?: boolean }).__old = true));
+    await page.locator(".wiki-article a", { hasText: text }).first().evaluate((a: HTMLAnchorElement) => a.click());
+    await expect.poll(() => page.locator(".wiki-article").evaluate((a) => !(a as HTMLElement & { __old?: boolean }).__old)).toBe(true);
+    await expect(page.locator("#articleWrap .wiki-article-head h1")).toHaveText(heading);
+  };
+
+  test("row 14, the article re-renders while the box has focus: focus goes where it goes for any focused control in the article", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await tabIn(page);
+    await follow(page, "focus", "Focus");
+    const fromBox = await active(page);
+    await page.locator(".wiki-article figure.dgm .dgm-view").last().focus();
+    await follow(page, "focus", "Focus");
+    expect(fromBox).toBe(await active(page));
+    expect(fromBox).toBe("BODY");
+    await expect.poll(() => stateOf(topBox(page))).toEqual({ scrolls: true, ...STOP, focused: false });
+  });
+
+  test("row 15, navigating away while the box has focus: the same as any focused control", async ({ page }) => {
+    await openFocus(page, SCROLLS);
+    await tabIn(page);
+    await follow(page, "wide", "Wide");
+    const fromBox = await active(page);
+    await openFocus(page, SCROLLS);
+    await page.locator(".wiki-article figure.dgm .dgm-view").last().focus();
+    await follow(page, "wide", "Wide");
+    expect(fromBox).toBe(await active(page));
+    expect(fromBox).toBe("BODY");
+  });
+
+  test("row 16, an article replaced without a new render (the Ask answer) leaves no detached box observed", async ({ page }) => {
+    // Count what every ResizeObserver on the page watches.
+    await page.addInitScript(() => {
+      const Native = window.ResizeObserver;
+      const watched: Set<Element>[] = [];
+      (window as unknown as { __watched: () => Element[] }).__watched = () => watched.flatMap((s) => [...s]);
+      window.ResizeObserver = class extends Native {
+        private seen = new Set<Element>();
+        constructor(cb: ResizeObserverCallback) {
+          super(cb);
+          watched.push(this.seen);
+        }
+        override observe(t: Element, o?: ResizeObserverOptions) {
+          this.seen.add(t);
+          super.observe(t, o);
+        }
+        override unobserve(t: Element) {
+          this.seen.delete(t);
+          super.unobserve(t);
+        }
+        override disconnect() {
+          this.seen.clear();
+          super.disconnect();
+        }
+      };
+    });
+    await openFocus(page, SCROLLS);
+    const boxes = () =>
+      page.evaluate(() =>
+        (window as unknown as { __watched: () => Element[] }).__watched().filter((e) => e.classList.contains("dgm-svg")).map((e) => e.isConnected),
+      );
+    await expect.poll(boxes).toEqual([true, true]);
+    await page.evaluate(() => (document.getElementById("articleWrap")!.innerHTML = "<p>An answer.</p>"));
+    await expect.poll(boxes).toEqual([]);
   });
 });

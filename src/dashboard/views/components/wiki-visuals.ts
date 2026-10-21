@@ -66,32 +66,90 @@ function applyDiagramView(target: Element | null): boolean {
   return true;
 }
 
-/** A `<Diagram>` picture's box is a named, focusable region while its drawing
- *  is wider than the box (`scrollWidth > clientWidth`), so the keyboard can
- *  scroll it; while the drawing fits, it is a plain box and no tab stop. The
- *  name is the server's `data-dgm-label`. */
+/**
+ * A `<Diagram>` picture's box is a named, focusable region (`role="region"`,
+ * the server's `data-dgm-label` as `aria-label`, `tabindex="0"`) while its
+ * drawing is wider than the box (`scrollWidth > clientWidth`), so the keyboard
+ * can scroll it, and a plain box with none of the three while it fits. One
+ * exception: a box that fits keeps the stop while it has focus, and takes the
+ * fit state when focus leaves (blur). This code never moves focus.
+ *
+ * | Scroll state         | Focus             | Trigger              | Result                                             |
+ * |----------------------|-------------------|----------------------|----------------------------------------------------|
+ * | fits → fits          | elsewhere         | resize               | no stop                                            |
+ * | fits → scrolls       | elsewhere         | resize               | stop                                               |
+ * | scrolls → scrolls    | elsewhere         | resize               | stop                                               |
+ * | scrolls → fits       | elsewhere         | resize               | no stop                                            |
+ * | scrolls → fits       | on the box        | resize               | stop kept, focus stays; no stop on blur            |
+ * | fits (kept) → fits   | on the box        | resize               | stop kept, focus stays; no stop on blur            |
+ * | fits (kept) → scrolls| on the box        | resize               | stop, focus stays; still a stop after blur         |
+ * | scrolls → scrolls    | on the box        | resize               | stop, focus stays                                  |
+ * | fits, never a stop   | on the box        | any                  | unreachable: the box has no tabindex               |
+ * | any                  | inside the box    | any                  | unreachable: the sanitizer keeps no link, tabindex |
+ * |                      |                   |                      | or embedded content, so nothing inside focuses     |
+ * | closed fold          | elsewhere         | fold opened, closed  | closed: not focusable; opened: by scroll state     |
+ * | closed fold          | on the box        | fold closed (script) | the browser moves focus to body, as for any        |
+ * |                      |                   |                      | control in the fold; reopened: by scroll state     |
+ * | any                  | elsewhere         | resize while closed  | reopened: by the new scroll state                  |
+ * | any                  | on the box        | article re-render    | the render replaces the box: focus goes to body,   |
+ * |                      |                   |                      | as for any focused control in the article; the     |
+ * |                      |                   |                      | new box starts by its scroll state                 |
+ * | any                  | on the box        | navigation away      | as re-render                                       |
+ * | any                  | any               | article replaced, no | the old boxes are unobserved                       |
+ * |                      |                   | new render (Ask)     | ({@link watchDiagramPictures})                     |
+ *
+ * A closed `<Fold>` still lays its content out (Chromium measures it scrolling
+ * at a narrow width), so a hidden box may carry the stop; hidden content takes
+ * no focus, and opening the fold resizes the box, which runs this again.
+ */
 function syncDiagramStop(box: HTMLElement): void {
   if (box.scrollWidth > box.clientWidth) {
     box.setAttribute("role", "region");
     box.setAttribute("aria-label", box.dataset.dgmLabel ?? "");
     box.tabIndex = 0;
-  } else {
+  } else if (box.ownerDocument.activeElement !== box) {
     box.removeAttribute("role");
     box.removeAttribute("aria-label");
     box.removeAttribute("tabindex");
   }
 }
 
+/** Focus left a box: apply its scroll state now (a kept stop goes if it fits). */
+const onDiagramBlur = (e: Event): void => syncDiagramStop(e.currentTarget as HTMLElement);
+
 let diagramBoxes: ResizeObserver | null = null;
+let diagramRoot: MutationObserver | null = null;
+let watchedBoxes: HTMLElement[] = [];
+
+/** Unobserve every watched box no longer in the document. */
+function dropDetachedBoxes(): void {
+  const gone = watchedBoxes.filter((b) => !b.isConnected);
+  if (gone.length === 0) return;
+  gone.forEach((b) => diagramBoxes?.unobserve(b));
+  watchedBoxes = watchedBoxes.filter((b) => b.isConnected);
+  if (watchedBoxes.length === 0) diagramRoot?.disconnect();
+}
 
 /** Keep every picture box under `root` in step with {@link syncDiagramStop},
- *  now and on each resize (a window resize moves the column). Re-observes from
- *  scratch on each call: the article render replaces the previous boxes. */
+ *  now, on each resize (a window resize moves the column, a fold opens) and on
+ *  blur. Re-observes from scratch on each call: the article render replaces the
+ *  previous boxes. Between calls, a change to `root`'s own children (the Ask
+ *  answer replacing the article without a new render) unobserves the boxes it
+ *  removed; a box removed deeper in `root` stays observed until the next call. */
 export function watchDiagramPictures(root: ParentNode): void {
   if (typeof ResizeObserver === "undefined") return;
   diagramBoxes ??= new ResizeObserver((entries) => entries.forEach((e) => syncDiagramStop(e.target as HTMLElement)));
   diagramBoxes.disconnect();
-  root.querySelectorAll<HTMLElement>(".dgm-svg").forEach((box) => diagramBoxes!.observe(box));
+  diagramRoot?.disconnect();
+  watchedBoxes = Array.from(root.querySelectorAll<HTMLElement>(".dgm-svg"));
+  for (const box of watchedBoxes) {
+    box.addEventListener("blur", onDiagramBlur);
+    diagramBoxes.observe(box);
+  }
+  if (watchedBoxes.length && typeof MutationObserver !== "undefined") {
+    diagramRoot ??= new MutationObserver(dropDetachedBoxes);
+    diagramRoot.observe(root as Node, { childList: true });
+  }
 }
 
 /** The case ids a rule tree row's leaf names (`data-rt-cases`, a JSON list). */

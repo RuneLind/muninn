@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DIAGRAM_CHROME_CLASSES, diagramViewHtml, lifecycleRail, readDiagram } from "./diagram-block.ts";
+import { DIAGRAM_CHROME_CLASSES, diagramLabelSizes, diagramViewHtml, lifecycleRail, readDiagram } from "./diagram-block.ts";
 import { DIAGRAM_ID_MARK, type DiagramSvgResult, type PageFiles } from "./query-block.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
@@ -202,7 +202,6 @@ describe("diagramViewHtml: the picture's size", () => {
 
   test("px sizes count; em, % and other units are ignored rather than misread", () => {
     expect(floorOf(`<text font-size="7px">a</text>`)).toBe(1409);
-    expect(floorOf(`<tspan font-size="7px">a</tspan>`)).toBe(1409);
     expect(floorOf(`<text font-size="0.5em">a</text>`)).toBe(0);
     expect(floorOf(`<text font-size="50%">a</text>`)).toBe(0);
     expect(floorOf(`<text font-size="7pt">a</text><text font-size="12">b</text>`)).toBe(822);
@@ -227,6 +226,38 @@ describe("diagramViewHtml: the picture's size", () => {
     expect(r.names.filter((n) => n === "height")).toHaveLength(1);
     expect([r.attr("width"), r.attr("height")]).toEqual(["1160", "552"]);
     expect(r.names.filter((n) => n === "style")).toHaveLength(1);
+  });
+
+  test("a closed <g>'s size reaches no label after it", () => {
+    expect(diagramLabelSizes(`<svg><g font-size="7"><rect/></g><text>b</text></svg>`)).toEqual([]);
+    expect(diagramLabelSizes(`<svg font-size="12"><g font-size="7"><rect/></g><text>b</text></svg>`)).toEqual([12]);
+  });
+
+  test("only a label that carries text counts toward the floor", () => {
+    expect(diagramLabelSizes(`<svg><text font-size="7"/></svg>`)).toEqual([]);
+    expect(diagramLabelSizes(`<svg><text font-size="7"></text></svg>`)).toEqual([]);
+    expect(diagramLabelSizes(`<svg><text font-size="7">  </text></svg>`)).toEqual([]);
+    expect(diagramLabelSizes(`<svg><text font-size="7">a</text></svg>`)).toEqual([7]);
+    expect(floorOf(`<text font-size="2"></text><text font-size="12">b</text>`)).toBe(822);
+  });
+
+  test("the viewBox reads every SVG number form: sign, decimals, exponent, comma or space", () => {
+    const sized = (box: string) => {
+      const r = root(`<svg viewBox="${box}"><text font-size="12">a</text></svg>`);
+      return [r.attr("width"), r.attr("height"), r.floor];
+    };
+    expect(sized("0 0 1e3 300")).toEqual(["1000", "300", 709]);
+    expect(sized("-10 -2.5e1 1E3 3e+2")).toEqual(["1000", "300", 709]);
+    expect(sized("+0,0,900,300")).toEqual(["900", "300", 638]);
+    expect(sized("0, 0 .9e3 , 300.")).toEqual(["900", "300", 638]);
+    expect(sized("  0 0 900 300  ")).toEqual(["900", "300", 638]);
+  });
+
+  test("a viewBox with a zero, negative or non-finite size, or not four numbers, sets no size", () => {
+    for (const box of ["0 0 0 300", "0 0 900 -300", "0 0 1e999 300", "0 0 900 1e400", "1e999 0 900 300", "0 0 900", "0 0 900 300 1", "0 0 9e 300", "0 0 . 300", "0 0 900px 300"]) {
+      const r = root(`<svg viewBox="${box}"><text font-size="12">a</text></svg>`);
+      expect([box, r.attr("width"), r.attr("style")]).toEqual([box, undefined, undefined]);
+    }
   });
 
   test("with no labels there is no floor; with no usable viewBox no size is invented", () => {

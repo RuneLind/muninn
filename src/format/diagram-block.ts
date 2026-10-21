@@ -211,22 +211,28 @@ function fontSizeAttr(attrs: string): number | "unread" | undefined {
   return m ? Number(m[1]) : "unread";
 }
 
-/** The px size of every label (`<text>`, `<tspan>`), its own or inherited from
- *  an ancestor (`<g>`, the root). Walks the sanitizer's output, which is
- *  well-formed with double-quoted attributes. A label whose size is unread, or
- *  under {@link DIAGRAM_FONT_IGNORE_BELOW_PX}, is left out. */
+/** The px size of every label that carries text (`<text>` with a non-space
+ *  character in it), its own or inherited from an ancestor (`<g>`, the root).
+ *  Walks the sanitizer's output, which is well-formed with double-quoted
+ *  attributes and keeps no `<tspan>`. A label whose size is unread, or under
+ *  {@link DIAGRAM_FONT_IGNORE_BELOW_PX}, is left out. */
 export function diagramLabelSizes(svg: string): number[] {
   const out: number[] = [];
-  const stack: (number | "unread" | undefined)[] = [];
+  const stack: { size: number | "unread" | undefined; label: boolean; text: boolean }[] = [];
+  let at = 0;
   for (const m of svg.matchAll(/<(\/?)([a-zA-Z][\w:-]*)((?:\s+[^\s=/>]+="[^"]*")*)\s*(\/?)>/g)) {
+    if (/\S/.test(svg.slice(at, m.index))) {
+      const label = stack.findLast((o) => o.label);
+      if (label) label.text = true;
+    }
+    at = m.index + m[0].length;
     if (m[1]) {
-      stack.pop();
+      const o = stack.pop();
+      if (o?.label && o.text && typeof o.size === "number" && o.size >= DIAGRAM_FONT_IGNORE_BELOW_PX) out.push(o.size);
       continue;
     }
-    const own = fontSizeAttr(m[3]!);
-    const size = own ?? stack[stack.length - 1];
-    if (/^t(?:ext|span)$/i.test(m[2]!) && typeof size === "number" && size >= DIAGRAM_FONT_IGNORE_BELOW_PX) out.push(size);
-    if (!m[4]) stack.push(size);
+    const size = fontSizeAttr(m[3]!) ?? stack[stack.length - 1]?.size;
+    if (!m[4]) stack.push({ size, label: m[2]!.toLowerCase() === "text", text: false });
   }
   return out;
 }
@@ -239,14 +245,27 @@ export function diagramFloorWidth(width: number, sizes: number[]): number {
   return Math.ceil(width * Math.min(DIAGRAM_SCALE_CAP, DIAGRAM_LABEL_MIN_PX / Math.min(...sizes)));
 }
 
+/** An SVG number: sign, integer or decimal part, exponent. */
+const SVG_NUMBER = String.raw`[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?`;
+/** Comma-or-whitespace between two numbers. */
+const SVG_SEP = String.raw`(?:\s*,\s*|\s+)`;
+/** A root `viewBox` of exactly four numbers. */
+const VIEWBOX = new RegExp(
+  String.raw`\sviewBox="\s*(${SVG_NUMBER})${SVG_SEP}(${SVG_NUMBER})${SVG_SEP}(${SVG_NUMBER})${SVG_SEP}(${SVG_NUMBER})\s*"`,
+  "i",
+);
+
 /** The root's size: `width`/`height` from the viewBox (replacing any it had)
- *  and the floor as `--dgm-floor`. The CSS fills the column (`width: 100%`)
+ *  and the floor as `--dgm-floor`, when the viewBox is four SVG numbers with a
+ *  finite, positive width and height; otherwise the root stays as written,
+ *  with no floor. The CSS fills the column (`width: 100%`)
  *  with `min-width: var(--dgm-floor)`, so the drawing scrolls only in a column
  *  narrower than its floor. */
 function drawnSize(svg: string): string {
   const open = /^<svg\b[^>]*>/i.exec(svg)?.[0] ?? "";
-  const box = /\sviewBox="\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)\s*"/i.exec(open);
-  const [w, h] = [Number(box?.[1]), Number(box?.[2])];
+  const box = VIEWBOX.exec(open)?.slice(1).map(Number);
+  if (!box || !box.every(Number.isFinite)) return svg;
+  const [, , w, h] = box as [number, number, number, number];
   if (!(w > 0 && h > 0)) return svg;
   const rest = open.slice(4).replace(/\s(?:width|height|style)="[^"]*"/gi, "");
   const floor = diagramFloorWidth(w, diagramLabelSizes(svg));
