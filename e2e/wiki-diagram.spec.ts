@@ -379,7 +379,9 @@ test.describe("Wiki reader: Diagram", () => {
     await page.locator(".wiki-article a.wiki-ref", { hasText: "Order life" }).first().hover();
     const peek = page.locator(".wiki-ref-peek");
     await expect(peek).toBeVisible();
-    await expect(peek).toContainText("New → Paid");
+    // The main lane in col order is the rail: each state once, under the lane's name.
+    await expect(peek.locator(".dgm-text .dgm-text-h").first()).toHaveText("Main");
+    await expect(peek.locator(".dgm-text li")).toHaveText(["New", "Paid", "Sent"]);
     expect((await peek.locator(".dgm-text").boundingBox())!.width).toBeGreaterThan(50);
     await expect(peek.locator("svg, .dgm-views, .dgm-svg, .dgm-foot, .dgm-note")).toHaveCount(0);
   });

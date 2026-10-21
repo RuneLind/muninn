@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DIAGRAM_CHROME_CLASSES, diagramLabelSizes, diagramViewHtml, lifecycleRail, readDiagram } from "./diagram-block.ts";
+import { DIAGRAM_CHROME_CLASSES, diagramLabelSizes, diagramViewHtml, readDiagram, type DiagramTextSection } from "./diagram-block.ts";
 import { DIAGRAM_ID_MARK, type DiagramSvgResult, type PageFiles } from "./query-block.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
@@ -44,55 +44,60 @@ function narrowest(open: string): number {
   return Number(floor ?? /\swidth="([\d.]+)"/.exec(open)?.[1] ?? 0);
 }
 
-describe("lifecycleRail", () => {
-  test("joins the main lane's states in col order", () => {
-    expect(lifecycleRail(LIFECYCLE)).toEqual(["New → Paid", "Paid → Sent"]);
-  });
-  test("falls back to the first lane when none is main", () => {
-    const doc = { lanes: [{ id: "a" }], states: [{ id: "p", lane: "a", col: 2 }, { id: "q", lane: "a", col: 1 }] };
-    expect(lifecycleRail(doc)).toEqual(["q → p"]);
-  });
-  test("one state is no rail", () => {
-    expect(lifecycleRail({ lanes: [{ id: "main" }], states: [{ id: "a", lane: "main" }] })).toEqual([]);
-  });
-});
-
 describe("readDiagram", () => {
-  test("lifecycle text form: states by lane in lane order, then the rail, transitions and view notes", () => {
+  test("lifecycle text form: states by lane in lane order (the main lane in col order), transitions, view notes", () => {
     const r = readDiagram("lifecycle", JSON.stringify(LIFECYCLE))!;
     expect(r.title).toBe("Order");
     expect(r.sections).toEqual([
       { heading: "Side", lines: ["Cancelled"] },
       { heading: "Main", lines: ["New", "Paid — card", "Sent"] },
-      { heading: "Main path", lines: ["New → Paid", "Paid → Sent"] },
       { heading: "Transitions", lines: ["New → Cancelled (abort)"] },
       { heading: "Views", lines: ["Rail: The happy path."] },
     ]);
     expect(r.views.map((v) => v.id)).toEqual(["rail", "x"]);
   });
 
-  test("architecture text form: components by type, boundaries, then connections", () => {
+  test("architecture text form: archify's legend names as headings, each component once under its innermost boundary", () => {
     const doc = {
+      meta: { legend: { entries: { frontend: { label: "Screens" } } } },
       components: [
         { id: "web", label: "Web", type: "frontend" },
+        { id: "q", label: "Queue", type: "messagebus" },
+        { id: "w", label: "Worker", type: "job-runner" },
         { id: "api", label: "API", type: "backend" },
-        { id: "db", label: "DB", type: "backend", col: 0 },
+        { id: "db", label: "DB", type: "database", col: 0 },
       ],
-      boundaries: [{ label: "VPC", wraps: ["api", "db"] }],
+      boundaries: [
+        { kind: "region", label: "VPC", wraps: ["api", "db"] },
+        { kind: "security-group", label: "", wraps: ["db"] },
+      ],
       connections: [{ from: "web", to: "api", label: "HTTPS" }],
     };
     expect(readDiagram("architecture", JSON.stringify(doc))!.sections).toEqual([
-      { heading: "frontend", lines: ["Web"] },
-      { heading: "backend", lines: ["API", "DB"] },
-      { heading: "Inside VPC", lines: ["API", "DB"] },
+      { heading: "Screens", lines: ["Web"] },
+      { heading: "Message bus", lines: ["Queue"] },
+      { heading: "Job runner", lines: ["Worker"] },
+      { heading: "Inside VPC", lines: ["API (Backend)"] },
+      { heading: "Inside VPC › Security group", lines: ["DB (Database)"] },
       { heading: "Connections", lines: ["Web → API (HTTPS)"] },
     ]);
   });
 
-  test("workflow text form: nodes by lane, then edges as steps", () => {
-    const doc = { lanes: [{ id: "u", label: "User" }], nodes: [{ id: "a", label: "Ask", lane: "u" }, { id: "b", label: "Get", lane: "u", col: 1 }], edges: [{ from: "a", to: "b" }] };
+  test("workflow text form: nodes by lane, a group's nodes under the lane and group, then edges as steps", () => {
+    const doc = {
+      lanes: [{ id: "u", label: "User" }, { id: "back-office" }],
+      groups: [{ id: "g", label: "Checkout", lane: "u", fromCol: 1, toCol: 2 }],
+      nodes: [
+        { id: "a", label: "Ask", lane: "u" },
+        { id: "b", label: "Get", lane: "u", col: 1 },
+        { id: "c", label: "File", lane: "back-office", col: 0 },
+      ],
+      edges: [{ from: "a", to: "b" }],
+    };
     expect(readDiagram("workflow", JSON.stringify(doc))!.sections).toEqual([
-      { heading: "User", lines: ["Ask", "Get"] },
+      { heading: "User", lines: ["Ask"] },
+      { heading: "User › Checkout", lines: ["Get"] },
+      { heading: "Back office", lines: ["File"] },
       { heading: "Steps", lines: ["Ask → Get"] },
     ]);
   });
@@ -101,6 +106,161 @@ describe("readDiagram", () => {
     expect(readDiagram("workflow", "[1]")).toBeNull();
     expect(readDiagram("workflow", "{")).toBeNull();
     expect(readDiagram("workflow", JSON.stringify({ nodes: "x", meta: { views: 3 } }))).toEqual({ flavor: "workflow", title: "", views: [], sections: [] });
+  });
+});
+
+/**
+ * The text form is the drawing's accessible alternative and its no-picture
+ * fallback, so it must be complete: over seeded synthetic archify files of all
+ * three kinds (known and unknown types, legend overrides, nested and
+ * overlapping boundaries and groups, wraps of unknown ids, nodes in no lane or
+ * an unknown one), every node is listed exactly once, under its innermost
+ * boundary or group, every edge exactly once, and no heading is a raw id.
+ */
+describe("readDiagram: the text form is complete", () => {
+  const EDGE_HEADINGS = new Set(["Connections", "Steps", "Transitions", "Views"]);
+  const KNOWN_TYPES = ["frontend", "backend", "database", "cloud", "security", "messagebus", "external"];
+
+  /** mulberry32: a small seeded PRNG, so a failure names its seed. */
+  function rng(seed: number) {
+    let a = seed >>> 0;
+    const next = () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const int = (n: number) => Math.floor(next() * n);
+    const pick = <T,>(xs: readonly T[]): T => xs[int(xs.length)]!;
+    const subset = <T,>(xs: readonly T[]): T[] => xs.filter(() => next() < 0.4);
+    return { next, int, pick, subset };
+  }
+
+  type Doc = Record<string, unknown>;
+  interface Case { flavor: "architecture" | "workflow" | "lifecycle"; doc: Doc; nodes: Doc[]; edges: Doc[]; rawIds: Set<string>; innermost: Map<Doc, string> }
+
+  function makeCase(seed: number): Case {
+    const r = rng(seed);
+    const flavor = r.pick(["architecture", "workflow", "lifecycle"] as const);
+    const n = 1 + r.int(9);
+    const ids = Array.from({ length: n }, (_, i) => `n${i}`);
+    const rawIds = new Set<string>();
+    const nodes: Doc[] = ids.map((id, i) => {
+      const node: Doc = { label: `Node ${i}` };
+      if (r.next() < 0.9) node.id = id;
+      if (r.next() < 0.3) node.sublabel = `sub ${i}`;
+      if (r.next() < 0.8) node.col = r.int(4);
+      return node;
+    });
+    const edges: Doc[] = Array.from({ length: r.int(8) }, (_, i) => ({ from: r.pick([...ids, "ghost"]), to: r.pick(ids), label: `e${i}` }));
+    const innermost = new Map<Doc, string>();
+    let doc: Doc;
+    if (flavor === "architecture") {
+      const types = [...KNOWN_TYPES, "job-runner", "data_lake", ""];
+      for (const node of nodes) {
+        const t = r.pick(types);
+        if (t || r.next() < 0.5) node.type = t;
+        if (t) rawIds.add(t);
+      }
+      const entries: Doc = {};
+      if (r.next() < 0.3) entries.backend = { label: "Our services" };
+      const bounds: Doc[] = Array.from({ length: r.int(4) }, (_, i) => {
+        const wraps = r.subset([...ids, "ghost"]);
+        const kind = r.pick(["region", "security-group"]);
+        rawIds.add(kind);
+        return { kind, label: r.next() < 0.8 ? `Zone ${i}` : "", wraps };
+      });
+      // A nested boundary: a strict subset of an earlier one.
+      if (bounds.length && r.next() < 0.5) {
+        const outer = (bounds[0]!.wraps as string[]).filter((x) => x !== "ghost");
+        if (outer.length > 1) bounds.push({ kind: "security-group", label: `Inner`, wraps: outer.slice(0, outer.length - 1) });
+      }
+      for (const node of nodes) {
+        const id = node.id as string | undefined;
+        const inside = id ? bounds.filter((b) => (b.wraps as string[]).includes(id)) : [];
+        if (inside.length === 0) continue;
+        // Innermost: the fewest wraps, the first listed on a tie.
+        const best = inside.reduce((a, b) => ((b.wraps as string[]).length < (a.wraps as string[]).length ? b : a));
+        const kindName = best.kind === "region" ? "Region" : "Security group";
+        innermost.set(node, (best.label as string) || kindName);
+      }
+      doc = { meta: { legend: { entries } }, components: nodes, boundaries: bounds, connections: edges };
+    } else {
+      const laneIds = ["main", "side-lane", "ops_team"].slice(0, 1 + r.int(3));
+      const lanes: Doc[] = laneIds.map((id) => (r.next() < 0.7 ? { id, label: `Lane ${id.toUpperCase()}` } : { id }));
+      for (const id of laneIds) rawIds.add(id);
+      for (const node of nodes) {
+        const lane = r.pick([...laneIds, "stray-lane", ""]);
+        if (lane) node.lane = lane;
+        if (lane) rawIds.add(lane);
+      }
+      if (flavor === "workflow") {
+        const groups: Doc[] = Array.from({ length: r.int(3) }, (_, i) => {
+          const from = r.int(3);
+          return { id: `g${i}`, label: `Group ${i}`, lane: r.pick(laneIds), fromCol: from, toCol: from + r.int(3) };
+        });
+        for (const node of nodes) {
+          const inside = groups.filter((g) => g.lane === node.lane && typeof node.col === "number" && (g.fromCol as number) <= node.col && node.col <= (g.toCol as number));
+          if (inside.length === 0) continue;
+          const span = (g: Doc) => (g.toCol as number) - (g.fromCol as number);
+          innermost.set(node, inside.reduce((a, b) => (span(b) < span(a) ? b : a)).label as string);
+        }
+        doc = { lanes, groups, nodes, edges };
+      } else {
+        doc = { lanes, states: nodes, transitions: edges };
+      }
+    }
+    return { flavor, doc, nodes, edges, rawIds, innermost };
+  }
+
+  const nodeText = (node: Doc) => `${node.label}${node.sublabel ? ` — ${node.sublabel}` : ""}`;
+  const edgeText = (e: Doc, nodes: Doc[]) => {
+    const name = (id: unknown) => (nodes.find((x) => x.id === id)?.label as string | undefined) ?? (id as string);
+    return `${name(e.from)} → ${name(e.to)} (${e.label})`;
+  };
+  const SEEDS = Array.from({ length: 400 }, (_, i) => i + 1);
+
+  test("every node is listed exactly once, and only nodes are listed outside the edge sections", () => {
+    for (const seed of SEEDS) {
+      const c = makeCase(seed);
+      const sections: DiagramTextSection[] = readDiagram(c.flavor, JSON.stringify(c.doc))!.sections;
+      const lines = sections.filter((s) => !EDGE_HEADINGS.has(s.heading)).flatMap((s) => s.lines);
+      const hits = (node: Doc) => lines.filter((l) => l === nodeText(node) || l.startsWith(`${nodeText(node)} (`)).length;
+      expect({ seed, counts: c.nodes.map(hits), lines: lines.length }).toEqual({ seed, counts: c.nodes.map(() => 1), lines: c.nodes.length });
+    }
+  });
+
+  test("every edge is listed exactly once", () => {
+    for (const seed of SEEDS) {
+      const c = makeCase(seed);
+      const sections = readDiagram(c.flavor, JSON.stringify(c.doc))!.sections;
+      const edgeLines = sections.filter((s) => EDGE_HEADINGS.has(s.heading) && s.heading !== "Views").flatMap((s) => s.lines);
+      expect({ seed, lines: edgeLines.toSorted() }).toEqual({ seed, lines: c.edges.map((e) => edgeText(e, c.nodes)).toSorted() });
+    }
+  });
+
+  test("a node inside a boundary or group is listed under its innermost one", () => {
+    for (const seed of SEEDS) {
+      const c = makeCase(seed);
+      const sections = readDiagram(c.flavor, JSON.stringify(c.doc))!.sections;
+      for (const node of c.nodes) {
+        const section = sections.find((s) => s.lines.some((l) => l === nodeText(node) || l.startsWith(`${nodeText(node)} (`)));
+        const last = section?.heading.split(" › ").at(-1)?.replace(/^Inside /, "");
+        expect({ seed, node: node.label, last }).toEqual({ seed, node: node.label, last: c.innermost.get(node) ?? last });
+        if (!c.innermost.has(node)) expect({ seed, nested: section?.heading.includes(" › ") || section?.heading.startsWith("Inside ") }).toEqual({ seed, nested: false });
+      }
+    }
+  });
+
+  test("no heading, or part of one, is a raw archify id", () => {
+    for (const seed of SEEDS) {
+      const c = makeCase(seed);
+      const parts = readDiagram(c.flavor, JSON.stringify(c.doc))!.sections.flatMap((s) => s.heading.replace(/^Inside /, "").split(" › "));
+      for (const part of parts) {
+        expect({ seed, part, raw: c.rawIds.has(part) || part === "" }).toEqual({ seed, part, raw: false });
+      }
+    }
   });
 });
 
@@ -125,7 +285,7 @@ describe("diagramViewHtml", () => {
     expect(html).toContain("Picture not shown: order.html");
     expect(html).not.toContain("dgm-views");
     expect(html).not.toContain("dgm-has-svg");
-    expect(html).toContain("<li>New → Paid</li>");
+    expect(html).toContain("<li>New → Cancelled (abort)</li>");
   });
 
   test("«Open interactive» only when the html sibling was read", () => {

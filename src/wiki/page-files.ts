@@ -81,6 +81,7 @@ async function readPageFile(
   ref: string,
   kinds: ReadonlySet<PageFileKind>,
   budget: { left: number },
+  siblings: SiblingReads,
 ): Promise<PageFileResult> {
   // Only a kind some component names this ref for: `<Query sql="x.yml">`
   // reads nothing, though `.yml` is a CaseBoard's.
@@ -103,8 +104,13 @@ async function readPageFile(
   const read = await readGuarded(found.real, PAGE_FILE_MAX_BYTES, budget);
   if (!read.ok) return read.reason === "unavailable" ? UNAVAILABLE : { ok: false, reason: read.reason };
   if (!kinds.has("diagram")) return { ok: true, text: read.text };
-  return { ok: true, text: read.text, svg: await readDiagramSibling(root, pageRelPath, ref, budget) };
+  return { ok: true, text: read.text, svg: await readDiagramSibling(root, pageRelPath, ref, budget, siblings) };
 }
+
+/** One page load's HTML sibling reads, by the sibling's wiki-relative path:
+ *  `x.architecture.json` and `x.workflow.json`, or `./x…` and `x…`, name one
+ *  `x.html`, which is read, sanitized and counted against the budget once. */
+type SiblingReads = Map<string, Promise<DiagramSvgResult>>;
 
 /** The most a `<Diagram>`'s HTML sibling may weigh (archify writes ~700 KB:
  *  the picture plus its own viewer). It counts against the page budget. */
@@ -160,16 +166,26 @@ const NO_SVG = (): DiagramSvgResult => ({ svg: null, unknownElements: [], unknow
  * same guards as {@link readPageFile} (no climb above the root, realpath
  * containment, no excluded segment, `O_NOFOLLOW`, one link), its real path
  * must end in `.html`, and it is capped at {@link DIAGRAM_HTML_MAX_BYTES}
- * against the same page budget.
+ * against the same page budget. Read once per page load ({@link SiblingReads}).
  */
 async function readDiagramSibling(
   root: string,
   pageRelPath: string,
   ref: string,
   budget: { left: number },
+  siblings: SiblingReads,
 ): Promise<DiagramSvgResult> {
   const rel = diagramSiblingRelPath(pageRelPath, ref);
   if (rel === null) return { ...NO_SVG(), problem: "missing" };
+  let read = siblings.get(rel);
+  if (!read) {
+    read = readSiblingOnce(root, rel, budget);
+    siblings.set(rel, read);
+  }
+  return read;
+}
+
+async function readSiblingOnce(root: string, rel: string, budget: { left: number }): Promise<DiagramSvgResult> {
   const found = await resolveContainedFile(root, rel);
   if (!found.ok) return { ...NO_SVG(), problem: "missing" };
   const realRel = path.relative(found.rootReal, found.real).split(path.sep).join("/");
@@ -197,10 +213,11 @@ export async function loadPageFiles(
   if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return out;
   const refs = [...pageFileRefKinds(parseBlocks(splitFrontmatter(markdown).body))];
   const budget = { left: PAGE_FILE_PAGE_BUDGET_BYTES };
+  const siblings: SiblingReads = new Map();
   for (const [k, [ref, kinds]] of refs.entries()) {
     out.set(
       ref,
-      k < PAGE_FILE_MAX_PER_PAGE ? await readPageFile(root, pageRelPath, ref, kinds, budget) : { ok: false, reason: "limit" },
+      k < PAGE_FILE_MAX_PER_PAGE ? await readPageFile(root, pageRelPath, ref, kinds, budget, siblings) : { ok: false, reason: "limit" },
     );
   }
   return out;

@@ -248,9 +248,10 @@ export function extractSvgSlice(html: string): string | null {
 
 /**
  * Sanitize one `<svg>` slice: build the tree under {@link CONTENT_MODEL}, then
- * serialize it. Null `svg` (and `tree`) when the slice holds the id mark, a
- * CDATA section or a raw-text escaping element, when no root svg was kept, or
- * when the self-check refuses the serialized string.
+ * serialize it. Null `svg` (and `tree`) when the slice holds the id mark
+ * (`problem: "id-mark"`, so the author is told what is wrong), a CDATA section
+ * or a raw-text escaping element, when no root svg was kept, or when the
+ * self-check refuses the serialized string.
  *
  * `serialize` exists for the test that pins the self-check call; callers never
  * pass it.
@@ -258,7 +259,7 @@ export function extractSvgSlice(html: string): string | null {
 export async function sanitizeSvg(
   slice: string,
   serialize: (tree: SvgTreeNode) => string = serializeSvgTree,
-): Promise<{ svg: string | null; tree: SvgTreeNode | null; drops: DiagramSvgDrops }> {
+): Promise<{ svg: string | null; tree: SvgTreeNode | null; drops: DiagramSvgDrops; problem?: "id-mark" }> {
   const drops: DiagramSvgDrops = {
     strippedElements: new Map(),
     strippedAttrs: new Map(),
@@ -267,7 +268,7 @@ export async function sanitizeSvg(
     unknownClasses: new Map(),
   };
   const none = { svg: null, tree: null, drops };
-  if (slice.includes(DIAGRAM_ID_MARK)) return none;
+  if (slice.includes(DIAGRAM_ID_MARK)) return { ...none, problem: "id-mark" };
   if (CDATA.test(slice)) {
     inc(drops.unknownElements, "#cdata");
     return none;
@@ -482,11 +483,11 @@ async function computeDiagramSvg(html: string): Promise<DiagramSvgResult> {
   const slice = extractSvgSlice(html);
   const empty = { unknownElements: [], unknownAttrs: [], unknownClasses: [] };
   if (!slice) return { svg: null, problem: "unparsable", ...empty };
-  const { svg, drops } = await sanitizeSvg(slice);
+  const { svg, drops, problem } = await sanitizeSvg(slice);
   const names = (m: Map<string, number>) => [...m.keys()].sort();
   return {
     svg,
-    ...(svg ? {} : { problem: "unparsable" as const }),
+    ...(svg ? {} : { problem: problem ?? ("unparsable" as const) }),
     unknownElements: names(drops.unknownElements),
     unknownAttrs: names(drops.unknownAttrs),
     unknownClasses: names(drops.unknownClasses),

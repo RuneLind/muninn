@@ -38,6 +38,12 @@ beforeAll(async () => {
   await writeFile(path.join(root, "flows", "nojson.html"), PICTURE);
   await writeFile(path.join(root, "flows", "huge.lifecycle.json"), `{"x":"${"a".repeat(PAGE_FILE_MAX_BYTES)}"}`);
   await writeFile(path.join(root, "flows", "huge.html"), PICTURE);
+  // One sibling named by five refs: 1.9 MB each time it is counted, so five
+  // counts (9.5 MB) overrun the 8 MB page budget and one count does not.
+  for (const kind of ["architecture", "workflow", "lifecycle"]) await writeFile(path.join(root, "flows", `shared.${kind}.json`), JSON_OK);
+  await writeFile(path.join(root, "flows", "shared.html"), `${PICTURE.replace("<script>1</script>", `<script>${" ".repeat(1900 * 1024)}</script>`)}`);
+  await writeFile(path.join(root, "flows", "marked.architecture.json"), JSON_OK);
+  await writeFile(path.join(root, "flows", "marked.html"), `<svg viewBox="0 0 1 1"><text>reserved __dgm-id__ text</text></svg>`);
 });
 
 afterAll(async () => {
@@ -64,6 +70,20 @@ describe("loadPageFiles: a <Diagram>'s html sibling", () => {
     expect(svg("./lone.architecture.json")?.problem).toBe("missing");
     expect(svg("./two.architecture.json")?.problem).toBe("unparsable");
     expect(svg("./big.architecture.json")?.problem).toBe("too-large");
+  });
+
+  test("one sibling named by several refs is read once and counted once against the page budget", async () => {
+    const refs = ["./shared.architecture.json", "shared.architecture.json", "./shared.workflow.json", "./shared.lifecycle.json", "shared.lifecycle.json"];
+    const files = await load(...refs);
+    expect(refs.map((ref) => {
+      const r = files.get(ref);
+      return r?.ok ? (r.svg?.problem ?? "drawn") : r?.reason;
+    })).toEqual(["drawn", "drawn", "drawn", "drawn", "drawn"]);
+  });
+
+  test("a picture holding the reserved id text says so, not unparsable", async () => {
+    const r = (await load("./marked.architecture.json")).get("./marked.architecture.json");
+    expect(r?.ok && r.svg?.problem).toBe("id-mark");
   });
 
   test("a symlink out of the root is missing, never read", async () => {
@@ -102,6 +122,21 @@ describe("diagram-svg lint", () => {
       '<Diagram src="./dirty.architecture.json"> picture had attributes the reader drops: onclick',
       '<Diagram src="./dirty.architecture.json"> picture has classes the reader does not style: zz',
     ]);
+  });
+
+  test("a picture holding the reserved id text is reported as that, not as unparsable", async () => {
+    expect((await lint("./marked.architecture.json")).map((x) => x.message)).toEqual([
+      '<Diagram src="./marked.architecture.json"> picture ./marked.html contains the reserved text __dgm-id__, which the reader uses for its own ids; the reader shows the text form',
+    ]);
+  });
+
+  test("two diagram kinds sharing one picture are reported on each; one kind named twice is not", async () => {
+    expect((await lint("./shared.architecture.json", "shared.architecture.json", "./shared.workflow.json")).map((x) => [x.line, x.message])).toEqual([
+      [5, '<Diagram src="./shared.architecture.json"> shares picture ./shared.html with <Diagram src="./shared.workflow.json">; archify writes one picture per diagram file, so these blocks show the same drawing'],
+      [7, '<Diagram src="shared.architecture.json"> shares picture shared.html with <Diagram src="./shared.workflow.json">; archify writes one picture per diagram file, so these blocks show the same drawing'],
+      [9, '<Diagram src="./shared.workflow.json"> shares picture ./shared.html with <Diagram src="./shared.architecture.json">, <Diagram src="shared.architecture.json">; archify writes one picture per diagram file, so these blocks show the same drawing'],
+    ]);
+    expect(await lint("./ok.architecture.json", "ok.architecture.json")).toEqual([]);
   });
 
   test("a json that is not an object is reported", async () => {

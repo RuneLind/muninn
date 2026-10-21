@@ -24,7 +24,8 @@ export type PageFileResult =
  *  finding); a drop by design is not in them. */
 export interface DiagramSvgResult {
   svg: string | null;
-  problem?: "missing" | "unparsable" | "too-large" | "budget";
+  /** `id-mark`: the slice holds the reserved `DIAGRAM_ID_MARK` text. */
+  problem?: "missing" | "unparsable" | "id-mark" | "too-large" | "budget";
   unknownElements: string[];
   unknownAttrs: string[];
   unknownClasses: string[];

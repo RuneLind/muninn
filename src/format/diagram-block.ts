@@ -65,36 +65,56 @@ function nameMap(nodes: Obj[]): Map<string, string> {
   return new Map(nodes.map((n) => [str(n.id), str(n.label) || str(n.id)]));
 }
 
-/** Nodes grouped by `key`, groups in `order` first, each group by `col`. */
-function grouped(nodes: Obj[], key: string, labels: Map<string, string>, order: string[]): DiagramTextSection[] {
-  const groups = new Map<string, Obj[]>();
-  for (const id of order) groups.set(id, []);
-  for (const n of nodes) {
-    const g = str(n[key]);
-    if (!groups.has(g)) groups.set(g, []);
-    groups.get(g)!.push(n);
-  }
-  return [...groups]
-    .filter(([, ns]) => ns.length > 0)
-    .map(([g, ns]) => ({
-      heading: labels.get(g) || g || "Other",
-      lines: [...ns].sort((a, b) => num(a.col) - num(b.col)).map(nodeText),
-    }));
+/** archify's own English legend names for an architecture component's `type`
+ *  (`legend.architecture.*` in archify's `renderers/shared/i18n.mjs`), in its
+ *  legend order. A file's `meta.legend.entries.<type>.label` overrides one. */
+export const ARCHIFY_TYPE_LABELS: Readonly<Record<string, string>> = {
+  frontend: "Frontend",
+  backend: "Backend",
+  database: "Database",
+  cloud: "Cloud",
+  security: "Security",
+  messagebus: "Message bus",
+  external: "External",
+};
+
+/** An id read as words, for an id archify names nothing for:
+ *  `security-group` → `Security group`; empty stays empty. */
+export function humanizeId(id: string): string {
+  const words = id.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+  return words ? words[0]!.toUpperCase() + words.slice(1) : "";
 }
 
-/** The lifecycle's main rail: the edges between the main lane's states in
- *  `col` order. The main lane is the lane `main`, else the first lane. */
-export function lifecycleRail(doc: Obj): string[] {
-  const lanes = objs(doc.lanes);
-  const main = lanes.some((l) => str(l.id) === "main") ? "main" : str(lanes[0]?.id);
-  const states = objs(doc.states);
-  const names = nameMap(states);
-  const rail = states.filter((s) => str(s.lane) === main).sort((a, b) => num(a.col) - num(b.col));
-  const out: string[] = [];
-  for (let i = 1; i < rail.length; i++) {
-    out.push(edgeLine({ from: rail[i - 1]!.id, to: rail[i]!.id }, names));
-  }
-  return out;
+/** One listed node: its line, the section it goes under, and where that
+ *  section sorts (compared element by element, a prefix first). */
+interface Placed {
+  node: Obj;
+  line: string;
+  key: string;
+  heading: string;
+  rank: number[];
+}
+
+function compareRank(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i]! - b[i]!;
+  return a.length - b.length;
+}
+
+/** Placed nodes as sections: one per key, sections by rank, each section's
+ *  lines by `col` (stable). Every node is one line in one section. */
+function sectionsOf(placed: Placed[]): DiagramTextSection[] {
+  const groups = new Map<string, Placed[]>();
+  for (const p of placed) groups.set(p.key, [...(groups.get(p.key) ?? []), p]);
+  return [...groups.values()]
+    .sort((a, b) => compareRank(a[0]!.rank, b[0]!.rank))
+    .map((ps) => ({ heading: ps[0]!.heading, lines: [...ps].sort((a, b) => num(a.node.col) - num(b.node.col)).map((p) => p.line) }));
+}
+
+/** The containers a node is inside, outermost first: most members (widest
+ *  column range) first. The last is its innermost; of two the same size, the
+ *  one first in the file. */
+function enclosing<T extends { index: number; size: number }>(all: T[], holds: (c: T) => boolean): T[] {
+  return all.filter(holds).sort((a, b) => b.size - a.size || b.index - a.index);
 }
 
 function readViews(doc: Obj): DiagramView[] {
@@ -109,40 +129,95 @@ function readViews(doc: Obj): DiagramView[] {
     .filter((v) => v.id !== "");
 }
 
+/** Components outside every boundary by type, under the type's legend name;
+ *  a component inside one or more boundaries once, under its innermost
+ *  (`Inside VPC › Private`), with its type's name after it; then connections. */
 function architectureSections(doc: Obj): DiagramTextSection[] {
   const comps = objs(doc.components);
   const names = nameMap(comps);
-  const sections = grouped(comps, "type", new Map(), []);
-  for (const b of objs(doc.boundaries)) {
-    const wraps = Array.isArray(b.wraps) ? b.wraps.map(str).filter(Boolean) : [];
-    if (wraps.length === 0) continue;
-    sections.push({ heading: `Inside ${str(b.label) || str(b.kind) || "boundary"}`, lines: wraps.map((id) => names.get(id) ?? id) });
-  }
+  const meta = isObj(doc.meta) ? doc.meta : {};
+  const legend = isObj(meta.legend) && isObj(meta.legend.entries) ? meta.legend.entries : {};
+  const typeName = (t: string) => {
+    const override = isObj(legend[t]) ? str((legend[t] as Obj).label) : "";
+    return override || ARCHIFY_TYPE_LABELS[t] || humanizeId(t) || "Other";
+  };
+  const catalog = Object.keys(ARCHIFY_TYPE_LABELS);
+  const unknownTypes: string[] = [];
+  const typeRank = (t: string) => {
+    if (!t) return Number.MAX_SAFE_INTEGER;
+    if (catalog.includes(t)) return catalog.indexOf(t);
+    if (!unknownTypes.includes(t)) unknownTypes.push(t);
+    return catalog.length + unknownTypes.indexOf(t);
+  };
+  const bounds = objs(doc.boundaries).map((b, index) => {
+    const wraps = new Set(Array.isArray(b.wraps) ? b.wraps.map(str).filter(Boolean) : []);
+    return { index, size: wraps.size, wraps, label: str(b.label) || humanizeId(str(b.kind)) || "Boundary" };
+  });
+  const placed = comps.map((c): Placed => {
+    const id = str(c.id);
+    const t = str(c.type);
+    const inside = id ? enclosing(bounds, (b) => b.wraps.has(id)) : [];
+    if (inside.length === 0) return { node: c, line: nodeText(c), key: `type:${t}`, heading: typeName(t), rank: [0, typeRank(t)] };
+    return {
+      node: c,
+      line: t ? `${nodeText(c)} (${typeName(t)})` : nodeText(c),
+      key: `in:${inside.map((b) => b.index).join(",")}`,
+      heading: `Inside ${inside.map((b) => b.label).join(" › ")}`,
+      rank: [1, ...inside.map((b) => b.index)],
+    };
+  });
+  const sections = sectionsOf(placed);
   const edges = objs(doc.connections);
   if (edges.length) sections.push({ heading: "Connections", lines: edges.map((e) => edgeLine(e, names)) });
   return sections;
 }
 
-function laneLabels(doc: Obj): { order: string[]; labels: Map<string, string> } {
+/** Each node under its lane (lanes in file order, a lane named in no `lanes`
+ *  entry after them, no lane last as `Other`); a workflow node inside a
+ *  group's column range is listed under `Lane › Group`, its innermost group. */
+function laneSections(doc: Obj, nodes: Obj[], groups: Obj[]): DiagramTextSection[] {
   const lanes = objs(doc.lanes);
-  return { order: lanes.map((l) => str(l.id)), labels: new Map(lanes.map((l) => [str(l.id), str(l.label) || str(l.id)])) };
+  const order = lanes.map((l) => str(l.id));
+  const labels = new Map(lanes.map((l) => [str(l.id), str(l.label) || humanizeId(str(l.id))]));
+  const laneRank = (lane: string) => {
+    if (!lane) return Number.MAX_SAFE_INTEGER;
+    if (!order.includes(lane)) order.push(lane);
+    return order.indexOf(lane);
+  };
+  const ranges = groups.map((g, index) => {
+    const from = num(g.fromCol);
+    const to = num(g.toCol);
+    return { index, size: to - from, lane: str(g.lane), from, to, label: str(g.label) || humanizeId(str(g.id)) || "Group" };
+  });
+  const placed = nodes.map((n): Placed => {
+    const lane = str(n.lane);
+    const laneName = labels.get(lane) || humanizeId(lane) || "Other";
+    const col = typeof n.col === "number" && Number.isFinite(n.col) ? n.col : null;
+    const inside = lane && col !== null ? enclosing(ranges, (g) => g.lane === lane && g.from <= col && col <= g.to) : [];
+    return {
+      node: n,
+      line: nodeText(n),
+      key: `${lane}\u0000${inside.map((g) => g.index).join(",")}`,
+      heading: [laneName, ...inside.map((g) => g.label)].join(" › "),
+      rank: [laneRank(lane), ...inside.map((g) => g.index + 1)],
+    };
+  });
+  return sectionsOf(placed);
 }
 
 function workflowSections(doc: Obj): DiagramTextSection[] {
   const nodes = objs(doc.nodes);
-  const { order, labels } = laneLabels(doc);
-  const sections = grouped(nodes, "lane", labels, order);
+  const sections = laneSections(doc, nodes, objs(doc.groups));
   const edges = objs(doc.edges);
   if (edges.length) sections.push({ heading: "Steps", lines: edges.map((e) => edgeLine(e, nameMap(nodes))) });
   return sections;
 }
 
+/** States by lane; the `main` lane, archify's phase rail, is in `col` order,
+ *  which is the rail's order, so the rail is not listed again. */
 function lifecycleSections(doc: Obj): DiagramTextSection[] {
   const states = objs(doc.states);
-  const { order, labels } = laneLabels(doc);
-  const sections = grouped(states, "lane", labels, order);
-  const rail = lifecycleRail(doc);
-  if (rail.length) sections.push({ heading: "Main path", lines: rail });
+  const sections = laneSections(doc, states, []);
   const transitions = objs(doc.transitions);
   if (transitions.length) sections.push({ heading: "Transitions", lines: transitions.map((e) => edgeLine(e, nameMap(states))) });
   return sections;
