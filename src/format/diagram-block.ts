@@ -194,18 +194,63 @@ const RO = READER_ONLY_ATTR;
 /** The smallest label's font size the picture is drawn at, in CSS px. A 7 px
  *  archify label at 1:1 measured an 8 px text box; at 8.5 px it is ≥ 9 px. */
 export const DIAGRAM_LABEL_MIN_PX = 8.5;
+/** The most the floor grows a drawing past its viewBox width. archify's
+ *  smallest label (7 px) needs 1.21 ×; 2 × reaches 8.5 px from 4.25 px labels,
+ *  and past that a bigger drawing only adds scrolling. */
+export const DIAGRAM_SCALE_CAP = 2;
+/** A font size under this is no label (`font-size="0.01"` passes the
+ *  sanitizer) and does not set the floor. */
+export const DIAGRAM_FONT_IGNORE_BELOW_PX = 1;
 
-/** The picture's drawn size: `width`/`height` from its viewBox, scaled up (never
- *  down) until its smallest `font-size` reaches {@link DIAGRAM_LABEL_MIN_PX}.
- *  Shrunk to the prose column instead, a 1160-wide map drew labels 4 px tall. */
+/** One element's `font-size`: px or unitless reads as px; em, %, any other
+ *  unit or keyword is `"unread"` (never guessed); absent is undefined. */
+function fontSizeAttr(attrs: string): number | "unread" | undefined {
+  const v = /\sfont-size="([^"]*)"/.exec(attrs)?.[1];
+  if (v === undefined) return undefined;
+  const m = /^\s*(\d*\.?\d+)(px)?\s*$/i.exec(v);
+  return m ? Number(m[1]) : "unread";
+}
+
+/** The px size of every label (`<text>`, `<tspan>`), its own or inherited from
+ *  an ancestor (`<g>`, the root). Walks the sanitizer's output, which is
+ *  well-formed with double-quoted attributes. A label whose size is unread, or
+ *  under {@link DIAGRAM_FONT_IGNORE_BELOW_PX}, is left out. */
+export function diagramLabelSizes(svg: string): number[] {
+  const out: number[] = [];
+  const stack: (number | "unread" | undefined)[] = [];
+  for (const m of svg.matchAll(/<(\/?)([a-zA-Z][\w:-]*)((?:\s+[^\s=/>]+="[^"]*")*)\s*(\/?)>/g)) {
+    if (m[1]) {
+      stack.pop();
+      continue;
+    }
+    const own = fontSizeAttr(m[3]!);
+    const size = own ?? stack[stack.length - 1];
+    if (/^t(?:ext|span)$/i.test(m[2]!) && typeof size === "number" && size >= DIAGRAM_FONT_IGNORE_BELOW_PX) out.push(size);
+    if (!m[4]) stack.push(size);
+  }
+  return out;
+}
+
+/** The narrowest the drawing may render, in CSS px: the width at which its
+ *  smallest label reaches {@link DIAGRAM_LABEL_MIN_PX}, capped at
+ *  {@link DIAGRAM_SCALE_CAP} × `width`; 0 with no label to read. */
+export function diagramFloorWidth(width: number, sizes: number[]): number {
+  if (sizes.length === 0) return 0;
+  return Math.ceil(width * Math.min(DIAGRAM_SCALE_CAP, DIAGRAM_LABEL_MIN_PX / Math.min(...sizes)));
+}
+
+/** The root's size: `width`/`height` from the viewBox (replacing any it had)
+ *  and the floor as `--dgm-floor`. The CSS fills the column (`width: 100%`)
+ *  with `min-width: var(--dgm-floor)`, so the drawing scrolls only in a column
+ *  narrower than its floor. */
 function drawnSize(svg: string): string {
   const open = /^<svg\b[^>]*>/i.exec(svg)?.[0] ?? "";
   const box = /\sviewBox="\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)\s*"/i.exec(open);
   const [w, h] = [Number(box?.[1]), Number(box?.[2])];
   if (!(w > 0 && h > 0)) return svg;
-  const sizes = [...svg.matchAll(/<(?:text|tspan)\b[^>]*\sfont-size="([\d.]+)"/gi)].map((m) => Number(m[1])).filter((n) => n > 0);
-  const k = sizes.length ? Math.max(1, DIAGRAM_LABEL_MIN_PX / Math.min(...sizes)) : 1;
-  return `<svg width="${Math.round(w * k)}" height="${Math.round(h * k)}"` + svg.slice(4);
+  const rest = open.slice(4).replace(/\s(?:width|height|style)="[^"]*"/gi, "");
+  const floor = diagramFloorWidth(w, diagramLabelSizes(svg));
+  return `<svg width="${Math.round(w)}" height="${Math.round(h)}" style="--dgm-floor:${floor}px"${rest}${svg.slice(open.length)}`;
 }
 
 /** The html sibling is worth a link: it was read, whether or not it drew. */
@@ -240,7 +285,8 @@ export const diagramViewHtml: DiagramViewRenderer = (input) => {
       : "";
   const picture = svg
     ? // One line: the web formatter turns a blank line into <br>, which ends the <svg> in an HTML parser.
-      `<div class="dgm-svg" role="region" aria-label="${escapeHtml(`${label} (drawing)`)}" tabindex="0" ${RO}>` +
+      // No tab stop here: the client makes it a named, focusable region only while it scrolls (wiki-visuals.ts).
+      `<div class="dgm-svg" data-dgm-label="${escapeHtml(`${label} (drawing)`)}" ${RO}>` +
       `${drawnSize(svg.replace(/\s*\n\s*/g, " ").replaceAll(DIAGRAM_ID_MARK, input.prefix))}</div>`
     : `<p class="dgm-missing" ${RO}>${escapeHtml(`Picture not shown: ${html ? pageFileName(html) : name}`)}</p>`;
   const foot = html && siblingRead(input.svg)
@@ -276,10 +322,11 @@ export function diagramCss(scope: string): string {
     ${scope} .dgm-view:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
     ${scope} .dgm-note { margin: 0 0 0.5rem; font-size: 0.85em; color: var(--text-soft); }
     ${scope} .dgm-note[hidden], ${scope} .dgm-open[hidden] { display: none; }
-    /* The picture keeps its natural size (width/height from the viewBox, see
-       drawnSize) and fills a wider column; past the column it scrolls in this
-       named region, whose scrollbar is styled so it is always drawn: an overlay
-       scrollbar gives no sign that half the drawing is out of view. */
+    /* The picture fills the column and never renders narrower than its floor
+       (--dgm-floor, see drawnSize); past the column it scrolls in this box, a
+       named tab stop only while it scrolls (wiki-visuals.ts). The scrollbar is
+       styled so WebKit and Blink draw it always: an overlay scrollbar gives no
+       sign that half the drawing is out of view. Firefox takes only the colours. */
     ${scope} .dgm-svg { overflow-x: auto; overflow-y: hidden; border-radius: 4px; }
     ${scope} .dgm-svg:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 2px; }
     ${scope} .dgm-svg::-webkit-scrollbar { height: 10px; }
@@ -288,7 +335,7 @@ export function diagramCss(scope: string): string {
     @supports not selector(::-webkit-scrollbar) {
       ${scope} .dgm-svg { scrollbar-color: var(--text-muted) var(--bg-surface); }
     }
-    ${scope} .dgm-svg > svg { display: block; max-width: none; min-width: 100%; height: auto; }
+    ${scope} .dgm-svg > svg { display: block; width: 100%; max-width: none; min-width: var(--dgm-floor, 0px); height: auto; }
     ${scope} .dgm-svg [data-node-id], ${scope} .dgm-svg [data-edge-from] { transition: opacity 0.2s; }
     ${scope} .dgm-svg .dgm-dim { opacity: 0.18; }
     ${scope} .dgm-text { font-size: 0.9em; }
@@ -308,7 +355,7 @@ export function diagramCss(scope: string): string {
     @media print {
       ${scope} .dgm-views, ${scope} .dgm-foot { display: none; }
       ${scope} .dgm-svg { overflow: visible; }
-      ${scope} .dgm-svg > svg { width: 100%; min-width: 0; }
+      ${scope} .dgm-svg > svg { min-width: 0; }
     }
     @media (forced-colors: active) {
       ${scope} .dgm-view[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }

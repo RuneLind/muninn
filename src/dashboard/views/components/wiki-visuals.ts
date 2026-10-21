@@ -1,5 +1,5 @@
 /**
- * The reader's `<Chart>` toggles, `<Diagram>` view buttons, `<RuleTree>` case picker, `<Glossary>`
+ * The reader's `<Chart>` toggles, `<Diagram>` view buttons and scroll stops, `<RuleTree>` case picker, `<Glossary>`
  * term definitions and `<CaseBoard view="dots">` squares. The server
  * draws every chart variant (`src/format/chart-view.ts`); this file only shows
  * one: Chart or Table, and the variant (points or % of target, the bar as
@@ -64,6 +64,34 @@ function applyDiagramView(target: Element | null): boolean {
   });
   fig.querySelectorAll<HTMLElement>(":scope > .dgm-views button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
   return true;
+}
+
+/** A `<Diagram>` picture's box is a named, focusable region while its drawing
+ *  is wider than the box (`scrollWidth > clientWidth`), so the keyboard can
+ *  scroll it; while the drawing fits, it is a plain box and no tab stop. The
+ *  name is the server's `data-dgm-label`. */
+function syncDiagramStop(box: HTMLElement): void {
+  if (box.scrollWidth > box.clientWidth) {
+    box.setAttribute("role", "region");
+    box.setAttribute("aria-label", box.dataset.dgmLabel ?? "");
+    box.tabIndex = 0;
+  } else {
+    box.removeAttribute("role");
+    box.removeAttribute("aria-label");
+    box.removeAttribute("tabindex");
+  }
+}
+
+let diagramBoxes: ResizeObserver | null = null;
+
+/** Keep every picture box under `root` in step with {@link syncDiagramStop},
+ *  now and on each resize (a window resize moves the column). Re-observes from
+ *  scratch on each call: the article render replaces the previous boxes. */
+export function watchDiagramPictures(root: ParentNode): void {
+  if (typeof ResizeObserver === "undefined") return;
+  diagramBoxes ??= new ResizeObserver((entries) => entries.forEach((e) => syncDiagramStop(e.target as HTMLElement)));
+  diagramBoxes.disconnect();
+  root.querySelectorAll<HTMLElement>(".dgm-svg").forEach((box) => diagramBoxes!.observe(box));
 }
 
 /** The case ids a rule tree row's leaf names (`data-rt-cases`, a JSON list). */

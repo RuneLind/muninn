@@ -9,7 +9,9 @@
  * archify classes take the reader's tokens in both themes; a view dims the
  * nodes out of focus and the edges with both ends out, and never the
  * lifecycle's main rail; the text form is visually hidden beside the picture
- * and is what a peek shows; the «Open interactive» link points at the html.
+ * and is what a peek shows; the «Open interactive» link points at the html;
+ * the picture fills the column down to its legibility floor, scrolls only
+ * below it, and is a tab stop only while it scrolls.
  *
  * No model calls, no DB rows: one muninn over a temp wiki holding one
  * synthetic page and two hand-written archify-shaped files (no live corpus).
@@ -155,6 +157,25 @@ const WIDE_PAGE = [
   "",
 ].join("\n");
 
+/**
+ * A drawing whose legibility floor (`ceil(600 × 8.5 / 12)` = 425 px) sits
+ * between the 760 px window's column (~344 px) and the 1280 px one's (~508
+ * px): it fills the wide column and scrolls in the narrow one. Its views put
+ * buttons before the picture, to Tab from.
+ */
+const FIT_FLOOR = 425;
+const fitLabel = (id: string, x: number, size: number) =>
+  `<g data-node-id="${id}"><rect x="${x}" y="60" width="160" height="60" rx="6" class="c-backend"/>` +
+  `<text x="${x + 80}" y="96" text-anchor="middle" font-size="${size}" class="t-primary">${id} label</text></g>`;
+const FIT_HTML = page(DEFS + fitLabel("one", 20, 14) + fitLabel("two", 220, 12) + fitLabel("three", 420, 12));
+const FIT_JSON = {
+  meta: { title: "Fit map", views: [{ id: "first", label: "First", focus: ["one"] }] },
+  components: ["one", "two", "three"].map((id) => ({ id, label: id, type: "backend" })),
+  connections: [],
+};
+const FIT_REL = "flows/fit.mdx";
+const FIT_PAGE = ["---", "title: Fit", "---", "", "# Fit", "", '<Diagram src="./fit.architecture.json" />', "", "The line after.", ""].join("\n");
+
 // A hostile archify file: a stray </div> and an end tag whose quoted attribute
 // value holds a `>` and a glossary term, then an inert onerror probe. Before the
 // fix, the end tag passed through the sanitizer byte for byte, the glossary pass
@@ -203,6 +224,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "flows", "wide.html"), WIDE_HTML, "utf8");
   // A diagram whose html sibling does not exist.
   await writeFile(path.join(root, "flows", "nohtml.architecture.json"), JSON.stringify(WIDE_JSON), "utf8");
+  await writeFile(path.join(root, FIT_REL), FIT_PAGE, "utf8");
+  await writeFile(path.join(root, "flows", "fit.architecture.json"), JSON.stringify(FIT_JSON), "utf8");
+  await writeFile(path.join(root, "flows", "fit.html"), FIT_HTML, "utf8");
   await writeFile(path.join(root, HOSTILE_REL), HOSTILE_PAGE, "utf8");
   await writeFile(path.join(root, "flows", "hostile.architecture.json"), JSON.stringify(HOSTILE_JSON), "utf8");
   await writeFile(path.join(root, "flows", "hostile.html"), HOSTILE_HTML, "utf8");
@@ -411,6 +435,53 @@ test.describe("Wiki reader: a hostile Diagram cannot break out of the picture", 
   });
 });
 
+/** A reader token resolved on a body probe, as the browser computes it. */
+const token = (page: Page, name: string) =>
+  page.evaluate((n) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${n})`;
+    document.body.appendChild(probe);
+    const v = getComputedStyle(probe).color;
+    probe.remove();
+    return v;
+  }, name);
+
+/** The first picture's box: its size, whether it scrolls and is a tab stop, and its labels' heights. */
+const pictureBox = (page: Page) =>
+  page.locator(".wiki-article figure.dgm .dgm-svg").first().evaluate((box: HTMLElement) => {
+    const svg = box.querySelector("svg")!.getBoundingClientRect();
+    const b = box.getBoundingClientRect();
+    const texts = Array.from(box.querySelectorAll("text")).map((t) => {
+      const r = t.getBoundingClientRect();
+      return { text: t.textContent ?? "", h: r.height, cut: r.left < b.left - 0.5 || r.right > b.right + 0.5 };
+    });
+    return {
+      svgW: svg.width,
+      svgH: svg.height,
+      clientW: box.clientWidth,
+      scrollW: box.scrollWidth,
+      minHeight: Math.min(...texts.map((t) => t.h)),
+      cut: texts.filter((t) => t.cut).map((t) => t.text),
+      // A classic scrollbar takes layout height; an overlay one (no cue) takes none.
+      scrollbar: box.offsetHeight - box.clientHeight,
+      role: box.getAttribute("role"),
+      name: box.getAttribute("aria-label") ?? "",
+      tabindex: box.getAttribute("tabindex"),
+      tabIndex: box.tabIndex,
+      pageScroll: document.scrollingElement!.scrollWidth - document.scrollingElement!.clientWidth,
+    };
+  });
+
+/** The focused picture's outline is the reader's own (2 px solid accent), which
+ *  the browser default (`auto`, 1 px) does not match. */
+async function expectFocusRing(page: Page, box: ReturnType<Page["locator"]>): Promise<void> {
+  const ring = await box.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { style: s.outlineStyle, width: s.outlineWidth, color: s.outlineColor, offset: s.outlineOffset };
+  });
+  expect(ring).toEqual({ style: "solid", width: "2px", color: await token(page, "--accent-light"), offset: "2px" });
+}
+
 test.describe("Wiki reader: a Diagram as wide as archify draws", () => {
   async function openWide(page: Page, width: number): Promise<void> {
     await page.setViewportSize({ width, height: 900 });
@@ -418,49 +489,29 @@ test.describe("Wiki reader: a Diagram as wide as archify draws", () => {
     await expect(page.locator(".wiki-article figure.dgm .dgm-svg svg")).toHaveCount(1);
   }
 
-  /** Every label's height, and whether one lies outside the box with no visible way to scroll to it. */
-  const legibility = (page: Page) =>
-    page.locator(".wiki-article figure.dgm .dgm-svg").first().evaluate((box: HTMLElement) => {
-      const b = box.getBoundingClientRect();
-      const texts = Array.from(box.querySelectorAll("text")).map((t) => {
-        const r = t.getBoundingClientRect();
-        return { text: t.textContent ?? "", h: r.height, cut: r.left < b.left - 0.5 || r.right > b.right + 0.5 };
-      });
-      const scrolls = box.scrollWidth > box.clientWidth;
-      return {
-        minHeight: Math.min(...texts.map((t) => t.h)),
-        cut: texts.filter((t) => t.cut).map((t) => t.text),
-        scrolls,
-        // A classic scrollbar takes layout height; an overlay one (no cue) takes none.
-        scrollbar: box.offsetHeight - box.clientHeight,
-        role: box.getAttribute("role"),
-        name: box.getAttribute("aria-label") ?? "",
-        tabIndex: box.tabIndex,
-        pageScroll: document.scrollingElement!.scrollWidth - document.scrollingElement!.clientWidth,
-      };
-    });
-
   for (const scheme of ["light", "dark"] as const) {
     for (const width of [1280, 760]) {
-      test(`${scheme} ${width}: every label is legible, and one out of view sits in a named region that shows it scrolls`, async ({ page }) => {
+      test(`${scheme} ${width}: past its floor the drawing scrolls in a named tab stop with a styled scrollbar, every label legible`, async ({ page }) => {
         await page.emulateMedia({ colorScheme: scheme });
         await openWide(page, width);
-        const m = await legibility(page);
+        const box = page.locator(".wiki-article figure.dgm .dgm-svg").first();
+        // The floor, ceil(1160 × 8.5 / 7) = 1409 px, is past both columns.
+        await expect.poll(async () => (await pictureBox(page)).tabIndex).toBe(0);
+        const m = await pictureBox(page);
+        expect(Math.round(m.svgW)).toBe(1409);
         expect(m.minHeight).toBeGreaterThanOrEqual(9);
         expect(m.pageScroll).toBeLessThanOrEqual(0);
-        if (m.cut.length > 0) {
-          expect(m.scrolls).toBe(true);
-          expect(m.scrollbar).toBeGreaterThan(0);
-          expect(m.role).toBe("region");
-          expect(m.name).toContain("Wide map");
-          expect(m.tabIndex).toBe(0);
-          // Scrolled to the end, the last label is in view.
-          const box = page.locator(".wiki-article figure.dgm .dgm-svg").first();
-          await box.evaluate((el) => (el.scrollLeft = el.scrollWidth));
-          expect((await legibility(page)).cut).not.toContain("bare t-external");
-          await box.focus();
-          expect(await box.evaluate((el) => getComputedStyle(el).outlineStyle)).not.toBe("none");
-        }
+        expect(m.cut.length).toBeGreaterThan(0);
+        expect(m.scrollW).toBeGreaterThan(m.clientW);
+        // The styled scrollbar's own height; a native one is 15 px on Linux and 0 as an overlay.
+        expect(m.scrollbar).toBe(10);
+        expect(m.role).toBe("region");
+        expect(m.name).toContain("Wide map");
+        // Scrolled to the end, the last label is in view.
+        await box.evaluate((el) => (el.scrollLeft = el.scrollWidth));
+        expect((await pictureBox(page)).cut).not.toContain("bare t-external");
+        await box.focus();
+        await expectFocusRing(page, box);
       });
     }
 
@@ -473,3 +524,79 @@ test.describe("Wiki reader: a Diagram as wide as archify draws", () => {
   }
 });
 
+
+test.describe("Wiki reader: a Diagram fills the column down to its legibility floor", () => {
+  async function openFit(page: Page, width: number): Promise<void> {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(FIT_REL)}`);
+    await expect(page.locator(".wiki-article figure.dgm .dgm-svg svg")).toHaveCount(1);
+  }
+  const fitBox = (page: Page) => page.locator(".wiki-article figure.dgm .dgm-svg").first();
+  /** Tab once from the view button before the picture; what has focus then. */
+  const tabFromViews = async (page: Page) => {
+    await page.locator(".wiki-article figure.dgm .dgm-view").last().focus();
+    await page.keyboard.press("Tab");
+    return page.evaluate(() => document.activeElement?.classList.contains("dgm-svg") ?? false);
+  };
+
+  test("1280: a drawing whose floor fits fills the column, does not scroll, and is no tab stop", async ({ page }) => {
+    await openFit(page, 1280);
+    const m = await pictureBox(page);
+    expect(m.clientW).toBeGreaterThan(FIT_FLOOR);
+    expect(Math.abs(m.svgW - m.clientW)).toBeLessThanOrEqual(1);
+    // The viewBox keeps the aspect ratio.
+    expect(Math.abs(m.svgH - (m.svgW * 200) / 600)).toBeLessThanOrEqual(1);
+    expect(m.scrollW).toBeLessThanOrEqual(m.clientW);
+    expect(m.scrollbar).toBe(0);
+    expect(m.minHeight).toBeGreaterThanOrEqual(9);
+    expect([m.role, m.tabindex, m.tabIndex]).toEqual([null, null, -1]);
+    expect(await tabFromViews(page)).toBe(false);
+  });
+
+  test("760: past the column it draws at its floor and scrolls in a focusable named region", async ({ page }) => {
+    await openFit(page, 760);
+    await expect.poll(async () => (await pictureBox(page)).tabIndex).toBe(0);
+    const m = await pictureBox(page);
+    expect(m.clientW).toBeLessThan(FIT_FLOOR);
+    expect(Math.round(m.svgW)).toBe(FIT_FLOOR);
+    expect(m.scrollW).toBeGreaterThan(m.clientW);
+    expect(m.scrollbar).toBe(10);
+    // Drawn at its floor, the 12 px labels are 8.5 px: at least 9 px tall.
+    expect(m.minHeight).toBeGreaterThanOrEqual(9);
+    expect(m.role).toBe("region");
+    expect(m.name).toBe("Fit map (drawing)");
+    expect(m.pageScroll).toBeLessThanOrEqual(0);
+    expect(await tabFromViews(page)).toBe(true);
+    await expectFocusRing(page, fitBox(page));
+  });
+
+  test("resizing the window across the floor makes the picture a tab stop and takes it back", async ({ page }) => {
+    await openFit(page, 1280);
+    const stop = async () => {
+      const m = await pictureBox(page);
+      return { scrolls: m.scrollW > m.clientW, tabIndex: m.tabIndex, role: m.role };
+    };
+    await expect.poll(stop).toEqual({ scrolls: false, tabIndex: -1, role: null });
+    await page.setViewportSize({ width: 760, height: 900 });
+    await expect.poll(stop).toEqual({ scrolls: true, tabIndex: 0, role: "region" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect.poll(stop).toEqual({ scrolls: false, tabIndex: -1, role: null });
+  });
+
+  test("at the floor's boundary: one px narrower scrolls, the floor and one px wider do not", async ({ page }) => {
+    await openFit(page, 1280);
+    const at = async (w: number) => {
+      await fitBox(page).evaluate((el, px) => (el.style.width = `${px}px`), w);
+      await expect
+        .poll(async () => {
+          const m = await pictureBox(page);
+          return m.clientW === w ? { scrolls: m.scrollW > m.clientW, tabIndex: m.tabIndex } : "resizing";
+        })
+        .toEqual(w < FIT_FLOOR ? { scrolls: true, tabIndex: 0 } : { scrolls: false, tabIndex: -1 });
+    };
+    await at(FIT_FLOOR - 1);
+    await at(FIT_FLOOR);
+    await at(FIT_FLOOR + 1);
+    await at(FIT_FLOOR - 1);
+  });
+});

@@ -36,6 +36,14 @@ const LIFECYCLE = {
 const svgOf = (svg: string): DiagramSvgResult => ({ svg, unknownElements: [], unknownAttrs: [], unknownClasses: [] });
 const PICTURE = `<svg viewBox="0 0 1 1"><defs><marker id="${M}arrowhead"/></defs><g id="${M}new" data-node-id="new"/><path marker-end="url(#${M}arrowhead)" data-edge-from="new" data-edge-to="paid"/></svg>`;
 
+/** The narrowest the drawing renders, in CSS px: its `--dgm-floor`; a root
+ *  without one (the shape before the floor) drew at its `width` and never
+ *  narrower. */
+function narrowest(open: string): number {
+  const floor = /--dgm-floor:\s*(\d+)px/.exec(open)?.[1];
+  return Number(floor ?? /\swidth="([\d.]+)"/.exec(open)?.[1] ?? 0);
+}
+
 describe("lifecycleRail", () => {
   test("joins the main lane's states in col order", () => {
     expect(lifecycleRail(LIFECYCLE)).toEqual(["New → Paid", "Paid → Sent"]);
@@ -131,22 +139,99 @@ describe("diagramViewHtml", () => {
     expect(open(undefined)).toBe(false);
   });
 
-  test("the picture keeps its natural size inside a named, focusable scroll region", () => {
-    const wide = `<svg viewBox="0 0 1160 552" role="img"><text>x</text></svg>`;
+  test("the server writes no tab stop: the client makes the region focusable only while it scrolls", () => {
+    const wide = `<svg viewBox="0 0 1160 552" role="img"><text font-size="7">x</text></svg>`;
     const html = diagramViewHtml({ ref, text, svg: svgOf(wide), prefix: "dgm1-" });
-    expect(html).toContain('<svg width="1160" height="552" viewBox="0 0 1160 552"');
-    expect(html).toMatch(/<div class="dgm-svg" role="region" aria-label="Order \(drawing\)" tabindex="0"/);
-    // A 7 px label scales the drawing up until it is drawn at 8.5 px; 12 px labels never shrink it.
-    const fine = `<svg viewBox="0 0 1160 552"><text font-size="12">a</text><text x="1" font-size="7">b</text></svg>`;
-    expect(diagramViewHtml({ ref, text, svg: svgOf(fine), prefix: "dgm1-" })).toContain('<svg width="1409" height="670"');
-    const big = `<svg viewBox="0 0 600 200"><text font-size="12">a</text></svg>`;
-    expect(diagramViewHtml({ ref, text, svg: svgOf(big), prefix: "dgm1-" })).toContain('<svg width="600" height="200"');
-    // No usable viewBox: no size is invented.
-    expect(diagramViewHtml({ ref, text, svg: svgOf("<svg><text>x</text></svg>"), prefix: "dgm1-" })).toContain("<svg><text>");
+    expect(html).toContain('<div class="dgm-svg" data-dgm-label="Order (drawing)"');
+    expect(html).not.toContain("tabindex");
+    expect(html).not.toContain('role="region"');
   });
 
   test("an unreadable file is one line", () => {
     expect(diagramViewHtml({ ref, text: "nope", prefix: "dgm1-" })).toContain("Diagram file not readable: order.lifecycle.json");
+  });
+});
+
+/**
+ * The drawing's size rule: it fills the column (CSS `width: 100%`) and never
+ * renders narrower than its legibility floor, written on the root as
+ * `--dgm-floor`: the width at which its smallest label is drawn at 8.5 px,
+ * `ceil(W × 8.5 / smallest)`, capped at 2 × W, from px or unitless font sizes
+ * of 1 px and up, own or inherited; 0 with no such label. `width`/`height` are
+ * the viewBox size.
+ */
+describe("diagramViewHtml: the picture's size", () => {
+  const ref = "./order.lifecycle.json";
+  const text = JSON.stringify(LIFECYCLE);
+  const root = (svg: string) => {
+    const html = diagramViewHtml({ ref, text, svg: svgOf(svg), prefix: "dgm1-" });
+    const open = /<svg\b[^>]*>/.exec(html)![0];
+    const attrs = [...open.matchAll(/\s([\w:-]+)="([^"]*)"/g)].map((m) => [m[1]!, m[2]!] as const);
+    return { open, names: attrs.map(([n]) => n), attr: (n: string) => attrs.find(([k]) => k === n)?.[1], floor: narrowest(open) };
+  };
+  const W = `viewBox="0 0 1160 552"`;
+  const floorOf = (body: string, rootAttrs = W) => root(`<svg ${rootAttrs}>${body}</svg>`).floor;
+
+  test("the floor is where the smallest label reaches 8.5 px, not the natural size: 900 wide, 12 px labels", () => {
+    const r = root(`<svg viewBox="0 0 900 300"><text font-size="12">a</text><text font-size="14">b</text></svg>`);
+    // 900 × 8.5 / 12 = 637.5: it fits a 734 px column at 734, and scrolls only below 638.
+    expect(r.floor).toBe(638);
+    expect([r.attr("width"), r.attr("height")]).toEqual(["900", "300"]);
+  });
+
+  test("archify's 7 px labels put the floor above the natural width; 8.5 px labels put it at it", () => {
+    expect(floorOf(`<text font-size="12">a</text><text font-size="7">b</text>`)).toBe(1409);
+    expect(floorOf(`<text font-size="8.5">a</text>`)).toBe(1160);
+    expect(floorOf(`<text font-size="17">a</text>`)).toBe(580);
+  });
+
+  test("the upscale is capped at 2 ×", () => {
+    expect(floorOf(`<text font-size="2">a</text>`)).toBe(2320);
+    expect(floorOf(`<text font-size="4.25">a</text>`)).toBe(2320);
+    expect(floorOf(`<text font-size="4.3">a</text>`)).toBe(2294);
+  });
+
+  test("a font size below 1 px is ignored, so it cannot blow the drawing up", () => {
+    const r = root(`<svg ${W}><text font-size="0.01">a</text></svg>`);
+    expect(r.floor).toBe(0);
+    expect(r.attr("width")).toBe("1160");
+    expect(floorOf(`<text font-size="0.01">a</text><text font-size="7">b</text>`)).toBe(1409);
+    expect(floorOf(`<text font-size="0.99">a</text><text font-size="12">b</text>`)).toBe(822);
+    expect(floorOf(`<text font-size="1">a</text>`)).toBe(2320);
+  });
+
+  test("px sizes count; em, % and other units are ignored rather than misread", () => {
+    expect(floorOf(`<text font-size="7px">a</text>`)).toBe(1409);
+    expect(floorOf(`<tspan font-size="7px">a</tspan>`)).toBe(1409);
+    expect(floorOf(`<text font-size="0.5em">a</text>`)).toBe(0);
+    expect(floorOf(`<text font-size="50%">a</text>`)).toBe(0);
+    expect(floorOf(`<text font-size="7pt">a</text><text font-size="12">b</text>`)).toBe(822);
+  });
+
+  test("a label inherits its size from a <g> or the root; its own size overrides", () => {
+    expect(floorOf(`<g font-size="7"><text>a</text></g><text font-size="12">b</text>`)).toBe(1409);
+    expect(floorOf(`<g font-size="7px"><g><text><tspan>a</tspan></text></g></g>`)).toBe(1409);
+    expect(floorOf(`<text>a</text>`, `${W} font-size="7"`)).toBe(1409);
+    expect(floorOf(`<g font-size="7"><text font-size="12">a</text></g>`)).toBe(822);
+    // A size on a <g> with no label in it, or on a self-closed one, reaches no label.
+    expect(floorOf(`<g font-size="7"><rect width="1" height="1"/></g><text font-size="12">b</text>`)).toBe(822);
+    expect(floorOf(`<g font-size="7"/><text>a</text><text font-size="12">b</text>`)).toBe(822);
+    // An em <g> leaves its unsized labels unread; a px label inside it still counts.
+    expect(floorOf(`<g font-size="2em"><text>a</text></g><text font-size="12">b</text>`)).toBe(822);
+    expect(floorOf(`<g font-size="2em"><text font-size="7">a</text></g>`)).toBe(1409);
+  });
+
+  test("a root's own width and height are replaced, never duplicated", () => {
+    const r = root(`<svg width="10" height="20" ${W}><text font-size="7">a</text></svg>`);
+    expect(r.names.filter((n) => n === "width")).toHaveLength(1);
+    expect(r.names.filter((n) => n === "height")).toHaveLength(1);
+    expect([r.attr("width"), r.attr("height")]).toEqual(["1160", "552"]);
+    expect(r.names.filter((n) => n === "style")).toHaveLength(1);
+  });
+
+  test("with no labels there is no floor; with no usable viewBox no size is invented", () => {
+    expect(floorOf(`<rect width="1" height="1"/>`)).toBe(0);
+    expect(diagramViewHtml({ ref, text, svg: svgOf("<svg><text>x</text></svg>"), prefix: "dgm1-" })).toContain("<svg><text>");
   });
 });
 
@@ -173,6 +258,12 @@ describe("<Diagram> through the reader render", () => {
     const svg = /<svg[\s\S]*?<\/svg>/.exec(html)![0];
     expect(svg).not.toContain("<br");
     expect(svg).toContain('marker-end="url(#dgm1-arrowhead)"');
+  });
+
+  test("the floor survives the reader render's string passes", () => {
+    const sized = `<svg viewBox="0 0 900 300"><text font-size="12">a</text></svg>`;
+    const html = renderWikiHtml('<Diagram src="./a.lifecycle.json" />\n', () => undefined, { files: files(sized), views: true });
+    expect(narrowest(/<svg\b[^>]*>/.exec(html)![0])).toBe(638);
   });
 
   test("web chat (no files) prints the not-loaded line", () => {
