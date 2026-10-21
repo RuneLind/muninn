@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DIAGRAM_ID_MARK, diagramSvgFromHtml, extractSvgSlice, sanitizeSvg } from "./diagram-svg.ts";
+import { renderWikiHtml } from "./render.ts";
 
 const M = DIAGRAM_ID_MARK;
 
@@ -126,5 +127,90 @@ describe("diagramSvgFromHtml", () => {
     expect(await diagramSvgFromHtml("<svg><circle r='1'/></svg>", key)).toBe(first);
     const moved = await diagramSvgFromHtml("<svg><circle r='1'/></svg>", { ...key, mtimeMs: 2 });
     expect(moved.svg).toContain("circle");
+  });
+});
+
+/** Every start-tag name and attribute name in `html`, read by an HTML parser. */
+async function liveMarkup(html: string): Promise<{ tags: string[]; attrs: string[] }> {
+  const tags: string[] = [];
+  const attrs: string[] = [];
+  await new HTMLRewriter()
+    .on("*", {
+      element(el) {
+        tags.push(el.tagName.toLowerCase());
+        for (const [n] of el.attributes) attrs.push(n.toLowerCase());
+      },
+    })
+    .transform(new Response(html))
+    .text();
+  return { tags, attrs };
+}
+
+describe("sanitized output is self-contained", () => {
+  const PAGE = "# P\n\nIntro.\n\n<Glossary>\n\n- **Hold:** a book kept back\n\n</Glossary>\n\n<Diagram src=\"./x.architecture.json\" />\n";
+  const render = async (body: string) => {
+    const svg = await diagramSvgFromHtml(`<!doctype html><body>${body}</body>`);
+    const json = JSON.stringify({ meta: { title: "T" }, components: [{ id: "a", label: "A" }] });
+    const files = new Map([["./x.architecture.json", { ok: true as const, text: json, svg }]]);
+    return { svg, html: renderWikiHtml(PAGE, () => undefined, { views: true, files }) };
+  };
+
+  test("a CDATA section is refused: no element escapes the picture through a glossary mark", async () => {
+    const { svg, html } = await render(
+      `<svg viewBox="0 0 100 100"><text x="1" y="10"><![CDATA[</div>]]> Hold <![CDATA[><img src=x onerror="window.__pwn='glossary'">]]></text></svg>`,
+    );
+    expect(svg.svg).toBeNull();
+    expect(svg.problem).toBe("unparsable");
+    expect(svg.unknownElements).toEqual(["#cdata"]);
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("onerror");
+    expect(html).not.toContain("CDATA");
+    const live = await liveMarkup(html);
+    expect(live.tags).not.toContain("img");
+    expect(live.attrs.filter((a) => a.startsWith("on"))).toEqual([]);
+  });
+
+  test("text is re-escaped, so no markup-significant byte survives in it", async () => {
+    const { svg } = await sanitizeSvg(`<svg viewBox="0 0 1 1"><text>a < b > c & d &amp; e &#x41;</text></svg>`);
+    expect(svg).toBe(`<svg viewBox="0 0 1 1"><text>a &lt; b &gt; c &amp; d &amp; e &#x41;</text></svg>`);
+  });
+
+  test("escaped text reaches the reader as text, with the glossary term left unmarked inside the picture", async () => {
+    const { svg, html } = await render(`<svg viewBox="0 0 100 100"><text x="1" y="10">Hold a < b</text></svg>`);
+    expect(svg.svg).toBe(`<svg viewBox="0 0 100 100"><text x="1" y="10">Hold a &lt; b</text></svg>`);
+    const picture = html.slice(html.indexOf('<div class="dgm-svg"'), html.indexOf("</svg>") + 6);
+    expect(picture).toContain(`<text x="1" y="10">Hold a &lt; b</text>`);
+    const live = await liveMarkup(picture);
+    expect(live.tags).toEqual(["div", "svg", "text"]);
+  });
+
+  test("a CSS-escaped, commented or image() reference in a presentation value is refused", async () => {
+    const E = "http://127.0.0.1:9/";
+    const { svg, drops } = await sanitizeSvg(
+      `<svg viewBox="0 0 10 10"><path d="M0 0L5 5" stroke="black" marker-end="u\\72 l(${E}m.svg#m)"/>` +
+        `<rect width="5" height="5" fill="u\\72 l(${E}p.svg#p)"/><rect width="5" height="5" stroke="ur/**/l(${E}q.svg#p)"/>` +
+        `<rect width="5" height="5" fill-opacity="image(${E}img.png)"/><path d="M0 0" marker-start="url(#m)"/>` +
+        `<rect width="5" height="5" stroke-width="\\31"/><rect width="5" height="5" font-family="a/*b"/></svg>`,
+    );
+    expect(svg).not.toContain("127.0.0.1");
+    expect(svg).not.toContain("\\");
+    expect(svg).not.toContain("image(");
+    expect(svg).toContain(`marker-start="url(#${M}m)"`);
+    expect([...drops.unknownAttrs.entries()].sort()).toEqual([
+      ["fill-opacity=<value>", 1],
+      ["fill=<value>", 1],
+      ["font-family=<value>", 1],
+      ["marker-end=<value>", 1],
+      ["stroke-width=<value>", 1],
+      ["stroke=<value>", 1],
+    ]);
+  });
+
+  test("an output that does not close its root svg is unparsable", async () => {
+    const plain = `<svg viewBox="0 0 10 10"><text>a</text><plaintext><img src=x onerror="alert(1)"></svg>`;
+    expect((await sanitizeSvg(plain)).svg).toBeNull();
+    const r = await diagramSvgFromHtml(`<body>${plain}</body>`);
+    expect(r.svg).toBeNull();
+    expect(r.problem).toBe("unparsable");
   });
 });

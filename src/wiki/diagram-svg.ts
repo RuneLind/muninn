@@ -52,6 +52,15 @@ const LOCAL_ID = /^[A-Za-z_][\w.:-]*$/;
 const LOCAL_URL = /^url\(\s*#([A-Za-z_][\w.:-]*)\s*\)$/;
 /** `url(` anywhere in a value: only a whole-value local `url(#id)` survives. */
 const ANY_URL = /url\s*\(/i;
+// A CSS escape, a function call or a comment: in a presentation value each can
+// spell a remote reference past ANY_URL (`u\72 l(...)`, `ur/**/l(...)`, `image(...)`).
+const CSS_SYNTAX = /[\\(]|\/\*/;
+const PRESENTATION_SET: ReadonlySet<string> = new Set(PRESENTATION);
+/** A CDATA section in SVG is text the parser hands through raw: it is refused. */
+const CDATA = /<!\[CDATA\[/i;
+/** `&` that does not start a character reference. */
+const BARE_AMP = /&(?!(?:#\d+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);)/g;
+const escapeText = (t: string) => t.replace(BARE_AMP, "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
 /** What one sanitize pass dropped, by set. Counts by name. */
 export interface DiagramSvgDrops {
@@ -75,8 +84,10 @@ export function extractSvgSlice(html: string): string | null {
   return html.slice(open, close + "</svg>".length);
 }
 
-/** Sanitize one `<svg>` slice. Null `svg` when the result does not start with
- *  an `<svg` element (the slice was not one). */
+/** Sanitize one `<svg>` slice. Null `svg` when the slice holds a CDATA section,
+ *  or the result does not start with an `<svg` element and end with `</svg>`.
+ *  Every text node is re-escaped, so no `<` or `>` in the output is text: the
+ *  output cannot open or close markup in the page that inlines it. */
 export async function sanitizeSvg(slice: string): Promise<{ svg: string | null; drops: DiagramSvgDrops }> {
   const drops: DiagramSvgDrops = {
     strippedElements: new Map(),
@@ -86,6 +97,11 @@ export async function sanitizeSvg(slice: string): Promise<{ svg: string | null; 
     unknownClasses: new Map(),
   };
   if (slice.includes(DIAGRAM_ID_MARK)) return { svg: null, drops };
+  if (CDATA.test(slice)) {
+    inc(drops.unknownElements, "#cdata");
+    return { svg: null, drops };
+  }
+  let text = "";
   let seenRoot = false;
   const rewriter = new HTMLRewriter()
     .on("*", {
@@ -118,10 +134,21 @@ export async function sanitizeSvg(slice: string): Promise<{ svg: string | null; 
     })
     .onDocument({
       doctype() {},
+      // One text node may arrive in several chunks: escape it whole, so a split
+      // character reference is not read as a bare `&`.
+      text(chunk) {
+        text += chunk.text;
+        if (!chunk.lastInTextNode) {
+          chunk.remove();
+          return;
+        }
+        chunk.replace(escapeText(text), { html: true });
+        text = "";
+      },
     });
   // A NUL is the reader's wikilink sentinel delimiter (`page-files.ts` maps it the same way).
   const out = (await rewriter.transform(new Response(slice)).text()).trim().replaceAll("\0", "\uFFFD");
-  return { svg: out.startsWith("<svg") ? out : null, drops };
+  return { svg: out.startsWith("<svg") && out.endsWith("</svg>") ? out : null, drops };
 }
 
 /** A kept attribute's value after the reference and class rules, or null to
@@ -147,6 +174,7 @@ function keptValue(name: string, value: string, drops: DiagramSvgDrops): string 
     const m = LOCAL_URL.exec(value.trim());
     return m ? `url(#${DIAGRAM_ID_MARK}${m[1]})` : refuse(name, drops);
   }
+  if (PRESENTATION_SET.has(name) && CSS_SYNTAX.test(value)) return refuse(name, drops);
   if (/javascript:/i.test(value)) return refuse(name, drops);
   return value;
 }
