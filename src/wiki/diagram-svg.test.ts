@@ -172,7 +172,8 @@ describe("sanitized output is self-contained", () => {
 
   test("text is re-escaped, so no markup-significant byte survives in it", async () => {
     const { svg } = await sanitizeSvg(`<svg viewBox="0 0 1 1"><text>a < b > c & d &amp; e &#x41;</text></svg>`);
-    expect(svg).toBe(`<svg viewBox="0 0 1 1"><text>a &lt; b &gt; c &amp; d &amp; e &#x41;</text></svg>`);
+    // Text is decoded (a closed set of references) and written back escaped.
+    expect(svg).toBe(`<svg viewBox="0 0 1 1"><text>a &lt; b &gt; c &amp; d &amp; e A</text></svg>`);
   });
 
   test("escaped text reaches the reader as text, with the glossary term left unmarked inside the picture", async () => {
@@ -238,7 +239,7 @@ describe("sanitized output is well-formed by construction (fix round 2)", () => 
     expect(svg).not.toContain("</div>");
     expect(svg).not.toContain("<div");
     const { ends } = tagTokens(svg!);
-    expect(ends.map((e) => e.name)).toEqual(["text", "g", "svg"]);
+    expect(ends.map((e) => e.name)).toEqual(["text", "g", "rect", "svg"]);
   });
 
   test("an end tag carrying attributes never reaches the output", async () => {
@@ -261,11 +262,11 @@ describe("sanitized output is well-formed by construction (fix round 2)", () => 
 
   test("every kept element pairs and nests in order", async () => {
     const { svg } = await sanitizeSvg(
-      `<svg viewBox="0 0 1 1"><defs><marker id="m"><polygon points="0 0"/></marker></defs><g><rect width="1"/><text>a<tspan>b</tspan></text></g></svg>`,
+      `<svg viewBox="0 0 1 1"><defs><marker id="m"><polygon points="0 0"/></marker></defs><g><rect width="1"/><text>a</text></g></svg>`,
     );
-    expect(svg).not.toBeNull();
-    expect(isWellFormedSanitizedSvg(svg!)).toBe(true);
-    // Round-trips its own self-check.
+    expect(svg).toBe(
+      `<svg viewBox="0 0 1 1"><defs><marker id="${DIAGRAM_ID_MARK}m"><polygon points="0 0"></polygon></marker></defs><g><rect width="1"></rect><text>a</text></g></svg>`,
+    );
     expect(isWellFormedSanitizedSvg(svg!)).toBe(true);
   });
 });
@@ -273,7 +274,9 @@ describe("sanitized output is well-formed by construction (fix round 2)", () => 
 describe("isWellFormedSanitizedSvg (fix round 2)", () => {
   test("accepts well-formed sanitized output", () => {
     expect(isWellFormedSanitizedSvg(`<svg viewBox="0 0 1 1"><g><text>a &lt; b</text></g></svg>`)).toBe(true);
-    expect(isWellFormedSanitizedSvg(`<svg><rect width="1"/></svg>`)).toBe(true);
+    expect(isWellFormedSanitizedSvg(`<svg><rect width="1"></rect></svg>`)).toBe(true);
+    // Never self-closed: the serializer pairs every element.
+    expect(isWellFormedSanitizedSvg(`<svg><rect width="1"/></svg>`)).toBe(false);
   });
 
   test("refuses a stray or unmatched end tag", () => {
@@ -359,51 +362,6 @@ async function allTagsAndOnAttrs(html: string): Promise<{ tags: string[]; onAttr
   return { tags, onAttrs };
 }
 
-/** Seeded, deterministic soup fuzz: a small alphabet of markup-significant
- *  tokens, a glossary term and kept element names, sanitized and rendered with
- *  the glossary, parsed, and the invariants asserted. */
-describe("property: random soups never break out of the picture (fix round 2)", () => {
-  const TOKENS = [
-    "<", ">", '"', "'", "/", "=", "</div", "]]>", "<!--", "-->", " Hold ",
-    "<text>", "</text>", "<g>", "</g>", "<rect width=\"1\"/>", "<script>", "data-x=", "onload=",
-    "a", "b", "url(#x)", "<![CDATA[", "<svg>", "</svg>",
-  ];
-  // A small deterministic PRNG (mulberry32), so a failure is reproducible.
-  function prng(seed: number): () => number {
-    let s = seed >>> 0;
-    return () => {
-      s = (s + 0x6d2b79f5) >>> 0;
-      let t = s;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-  const PAGE = '# P\n\n<Glossary>\n\n- **Hold:** a book kept back\n\n</Glossary>\n\n<Diagram src="./x.architecture.json" />\n';
-  const json = JSON.stringify({ meta: { title: "T" }, components: [{ id: "a", label: "A" }] });
-
-  test("300 seeded soups keep the picture opaque and the output well-formed", async () => {
-    const rnd = prng(0x5eed);
-    for (let i = 0; i < 300; i++) {
-      const n = 3 + Math.floor(rnd() * 12);
-      let body = "";
-      for (let j = 0; j < n; j++) body += TOKENS[Math.floor(rnd() * TOKENS.length)]!;
-      const slice = `<svg viewBox="0 0 10 10">${body}</svg>`;
-      const r = await diagramSvgFromHtml(`<body>${slice}</body>`);
-      // The sanitizer answers either a well-formed svg or null (fail closed).
-      if (r.svg !== null) expect(isWellFormedSanitizedSvg(r.svg)).toBe(true);
-      const files = new Map([["./x.architecture.json", { ok: true as const, text: json, svg: r }]]);
-      const html = renderWikiHtml(PAGE, () => undefined, { views: true, files });
-      // No gl-mark span inside any svg, no element or on* attribute outside the allowlist.
-      const open = html.indexOf("<svg");
-      if (open >= 0) {
-        const close = html.indexOf("</svg>", open);
-        expect(html.slice(open, close)).not.toContain("gl-mark");
-      }
-      const live = await allTagsAndOnAttrs(html);
-      expect(live.onAttrs).toEqual([]);
-      expect(live.tags).not.toContain("script");
-      expect(live.tags).not.toContain("img");
-    }
-  });
-});
+// The seeded soup that stood here passed against the unfixed sanitizer too; the
+// input space in src/test/diagram-svg-space.ts (its soup dimension included) and
+// diagram-svg-space.test.ts + e2e/wiki-diagram-sanitizer.spec.ts replace it.

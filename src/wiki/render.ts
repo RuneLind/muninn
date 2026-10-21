@@ -87,6 +87,11 @@ export function renderWikiHtml(
   // carrying a persisted fact-check block they rendered as a visible literal
   // `<!-- factcheck:start -->` line in the reader (live on all three annotated
   // pages before this).
+  // A NUL is never content: the renderer's own sentinels (`\x00WIKIPAGELINK<n>\x00`,
+  // the parked picture) are NUL-delimited and restored by search, so a NUL the
+  // page carries could forge one. Dropped, as the browser drops one in body
+  // text and the lane peek already did; with none left, none can reassemble.
+  markdown = markdown.replaceAll("\0", "");
   let body = stripFrontmatter(stripSentinelLines(markdown));
   // The reader renders its own title header — drop the page's leading H1 when
   // it just repeats that title, but keep distinct ones (e.g. index.md's
@@ -154,39 +159,65 @@ export function renderWikiHtml(
   );
   // Park each `<Diagram>` picture behind an opaque token so NO string-level
   // post-pass over the rendered page can insert anything between its `<svg` and
-  // its matching `</svg>`. The parking keys on the `.dgm-svg` wrapper alone, not
-  // on the svg's internal tags: the sanitizer (`diagram-svg.ts`) guarantees the
-  // svg holds no `</div>`, so the wrapper's own close is the first one after it.
-  // The reported break-out was markGlossaryTerms (a stray end tag popped the svg
-  // off its skip stack); chipLineRefs, upgradeObsidianCallouts and paragraphGaps
-  // are the other passes that run here over the inlined svg. Restored last.
-  const parked: string[] = [];
+  // its matching `</svg>` (the reported break-out was markGlossaryTerms; the
+  // others that run here are chipLineRefs, upgradeObsidianCallouts and
+  // paragraphGaps). The parking keys on the `.dgm-svg` wrapper alone: the
+  // sanitizer's content model holds no `div`, so the wrapper's own close is the
+  // first `</div>` after it. Restored last, and only where it was parked.
+  const parked: ParkedPicture[] = [];
   const guarded = parkDiagramPictures(html, parked);
   const finished = paragraphGaps(upgradeObsidianCallouts(chipLineRefs(guarded, codeAtFromPage(markdown))));
   const marked = opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
   return restoreDiagramPictures(marked, parked);
 }
 
-/** `\x00` sentinel for a parked `<Diagram>` picture (the NUL class the wikilink
- *  restore uses — it is not content and cannot be typed on a page). */
-const DIAGRAM_PICTURE_RE = /(<div class="dgm-svg"[^>]*>)([\s\S]*?)(<\/div>)/g;
-const DIAGRAM_PICTURE_TOKEN = /\x00DGMPIC(\d+)\x00/g;
+/** One parked picture: its wrapper's open tag as rendered, and its svg. */
+export interface ParkedPicture {
+  open: string;
+  svg: string;
+}
 
-/** Replace each `.dgm-svg` picture's svg with an opaque token, pushing the svg
- *  onto `parked`. The non-greedy body stops at the wrapper's own `</div>`,
- *  since a sanitized svg never contains a `<div>` (it is not a kept element). */
-function parkDiagramPictures(html: string, parked: string[]): string {
+const DIAGRAM_PICTURE_RE = /(<div class="dgm-svg"[^>]*>)([\s\S]*?)(<\/div>)/g;
+/** The parking token for picture `i`. NUL-delimited: the page body carries no
+ *  NUL (mapped at `renderWikiHtml` entry), so no page text can spell one. */
+const pictureToken = (i: number) => `\x00DGMPIC${i}\x00`;
+const ANY_PICTURE_TOKEN = /\x00DGMPIC(\d+)\x00/g;
+
+/** Replace each `.dgm-svg` picture's svg with its token, pushing it onto `parked`. */
+export function parkDiagramPictures(html: string, parked: ParkedPicture[]): string {
   if (!html.includes('<div class="dgm-svg"')) return html;
   return html.replace(DIAGRAM_PICTURE_RE, (_m, open: string, svg: string, close: string) => {
     const idx = parked.length;
-    parked.push(svg);
-    return `${open}\x00DGMPIC${idx}\x00${close}`;
+    parked.push({ open, svg });
+    return `${open}${pictureToken(idx)}${close}`;
   });
 }
 
-function restoreDiagramPictures(html: string, parked: string[]): string {
-  if (parked.length === 0) return html;
-  return html.replace(DIAGRAM_PICTURE_TOKEN, (_m, i: string) => parked[parseInt(i, 10)] ?? "");
+/**
+ * Put each parked picture back where its own block parked it, and nowhere else.
+ * A picture is restored only when its token occurs exactly once, directly
+ * between its own wrapper's open tag and a `</div>`, outside any rendered code
+ * region; otherwise the picture is dropped (the block keeps its text form). Every
+ * token-shaped run is removed from the output either way, so none is ever left
+ * as text or restored into an attribute, a code span or a fence.
+ */
+export function restoreDiagramPictures(html: string, parked: readonly ParkedPicture[]): string {
+  if (!html.includes("\x00DGMPIC")) return html;
+  const regions = renderedCodeRegions(html);
+  const placeAt = new Map<number, number>();
+  parked.forEach((p, i) => {
+    const tok = pictureToken(i);
+    const at = html.indexOf(tok);
+    if (at < 0 || html.indexOf(tok, at + 1) >= 0) return;
+    const wrapperAt = at - p.open.length;
+    if (wrapperAt < 0 || !html.startsWith(p.open, wrapperAt) || !html.startsWith("</div>", at + tok.length)) return;
+    if (inRenderedCode(regions, at) || inRenderedCode(regions, wrapperAt)) return;
+    placeAt.set(at, i);
+  });
+  return html.replace(ANY_PICTURE_TOKEN, (_m, _i: string, offset: number) => {
+    const i = placeAt.get(offset);
+    return i === undefined ? "" : parked[i]!.svg;
+  });
 }
 
 /** The page body's `<Glossary>` blocks, wikilinks read as their text — the
