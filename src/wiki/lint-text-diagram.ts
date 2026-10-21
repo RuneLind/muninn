@@ -37,9 +37,10 @@ const BOX_RE = /[─━│┃┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣
 /** A single arrow character counts only when it does not join two word
  *  characters: `red→green` is prose, `A → B` and `──→` are drawing. */
 const ARROW_RE = /(?<![\p{L}\p{N}])[→←↓↑↔↕⇒⇐]|[→←↓↑↔↕⇒⇐](?![\p{L}\p{N}])/u;
-/** `-->` by the same glue rule (`n-->0` is code, `(A)-->(B)` a drawing). An
- *  HTML comment (`<!-- x -->`) is removed from the line first. */
-const ASCII_ARROW_RE = /(?<![\p{L}\p{N}])-->|-->(?![\p{L}\p{N}])/u;
+/** `-->` by the same glue rule (`n-->0` is code, `(A)-->(B)` a drawing), and
+ *  not before a number that closes a parenthesis (`while (n --> 0)` is code).
+ *  An HTML comment (`<!-- x -->`) is removed from the line first. */
+const ASCII_ARROW_RE = /(?<![\p{L}\p{N}])-->(?!\s*\d+\s*\))|-->(?![\p{L}\p{N}]|\s*\d+\s*\))/u;
 const HTML_COMMENT_RE = /<!--.*?-->/g;
 /** A line of rule characters only: a heading underline, a CLI table rule or
  *  the underline of a sequence's participant heads. */
@@ -73,19 +74,28 @@ function isBoxTable(lines: readonly string[]): boolean {
   return lines.every((l) => /^\s*[┌└├╔╚╠]?[─═┼┬┴┤┐┘╬╦╩╣╗╝\s]*$/.test(l) || (TABLE_ROW_RE.test(l) && !ARROW_RE.test(l) && !/[▶◀►◄▼▲]/.test(l)));
 }
 
-/** A numbered message: `1.`, `1)`, `1:`, `(1)` or `①`, after any lifeline
- *  columns and arrow stems (`│── 1. GET`, `│◀─ 2. 200`). */
-const NUMBERED_RE = /^[\s│┃|─━◀▶►◄<>-]*(?:\d+[.):]|\(\d+\)|[①-⑳])\s/;
-/** A first-line column head that is an arrow, so the line is a chain, not
- *  participants. A box edge (`┌───┐`) is a head. */
-const ARROW_HEAD_RE = /[▶◀►◄→←↔⇒⇐]|-->|<--|^[─━-]+$/;
+/** A numbered message: `1.`, `1)`, `(1)` or `①` opening the line, or those
+ *  and `1:` after a lifeline or an arrow stem (`│── 1. GET`, `|-- 1.`,
+ *  `<-- 2.`). A stem is a box or pointer character, or an ASCII run of two or
+ *  more, so a single `- ` or `> ` marker is prose. The run takes all of its
+ *  characters, so a long dash line does not backtrack. */
+const NUMBERED_RE = /^\s*(?:\d+[.)]|\(\d+\)|[①-⑳])\s|^\s*(?:(?:[│┃─━◀▶►◄]|[|<>-]{2,}(?![|<>-]))\s*)+(?:\d+[.):]|\(\d+\)|[①-⑳])\s/;
+/** A box's top edge (`┌───┐`, `╔═══╗`, `┌─ desk ─┐`) is a participant head. */
+const BOX_EDGE_RE = /^[┌╔].*[┐╗]$/;
+
+/** A first-line column head names a participant when it is a box edge, or
+ *  holds a letter or digit and no drawing token. Any other head, an arrow or
+ *  rule of any spelling, makes the line a chain. */
+function namesParticipant(head: string): boolean {
+  return BOX_EDGE_RE.test(head) || (/[\p{L}\p{N}]/u.test(head) && !holdsDiagramToken(head));
+}
 
 /** `sequenceDiagram` when the first line names two or more participants
- *  (column heads three or more spaces apart, none of them an arrow) and two
- *  or more lines are numbered messages; `flowchart` otherwise. */
+ *  (column heads three or more spaces apart, each naming a participant) and
+ *  two or more lines are numbered messages; `flowchart` otherwise. */
 export function suggestMermaidKind(lines: readonly string[]): "sequenceDiagram" | "flowchart" {
   const heads = lines[0]!.trim().split(/\s{3,}/).filter((h) => h !== "");
-  if (heads.some((h) => ARROW_HEAD_RE.test(h))) return "flowchart";
+  if (!heads.every(namesParticipant)) return "flowchart";
   const numbered = lines.filter((l) => NUMBERED_RE.test(l)).length;
   return heads.length >= 2 && numbered >= 2 ? "sequenceDiagram" : "flowchart";
 }

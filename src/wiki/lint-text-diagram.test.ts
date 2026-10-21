@@ -100,7 +100,8 @@ describe("lint check 20 — text-diagram", () => {
   test("a lifeline sequence numbered after its arrows, or with `1:`, is a sequenceDiagram (fix round 1 batch 2)", () => {
     expect(suggestMermaidKind(["Client            Server", "  │── 1. GET /x ──▶│", "  │◀─ 2. 200 ──────│"])).toBe("sequenceDiagram");
     expect(suggestMermaidKind(["Client            Server", "  │ 1: GET /x ──▶│", "  │◀─ 2: 200 ────│"])).toBe("sequenceDiagram");
-    expect(suggestMermaidKind(["Client            Server", "1: GET /x", "2: 200"])).toBe("sequenceDiagram");
+    // `1:` at line start is a log line, not a message: it needs a lifeline or stem (fix round 2).
+    expect(suggestMermaidKind(["Client            Server", "1: GET /x", "2: 200"])).toBe("flowchart");
     expect(suggestMermaidKind(["Client            Server", "  │── 1. GET /x ──▶│", "  │ ok │"])).toBe("flowchart");
     expect(lint(fence(["Client            Server", "  │── 1. GET /x ──▶│", "  │◀─ 2. 200 ──────│"]))[0]?.[2]).toEndWith("draw it as a mermaid sequenceDiagram");
   });
@@ -210,5 +211,43 @@ describe("lint check 20 — text-diagram", () => {
   test("each fence is judged on its own", () => {
     const page = [fence(["catalog ──▶ loans", "loans ──▶ holds"]), "", fence(["const a = 1;", "const b = 2;"]), "", fence(["holds → shelf", "shelf → desk"])].join("\n");
     expect(lint(page).map((f) => f[0])).toEqual([1, 11]);
+  });
+
+  test("a spaced C goes-to `n --> 0)` is code; a --> between nodes stays a token (fix round 2)", () => {
+    expect(lint(fence(["while (n --> 0) {", "  sum += n;", "}"]))).toEqual([]);
+    for (const line of ["while (n --> 0) {", "while (n -->0) {", "while (n --> 0 ) {", "if (left --> 10) {", "while (n--> 0) {", "while (n -->10) {"]) expect([line, holdsDiagramToken(line)]).toEqual([line, false]);
+    for (const line of ["A --> B", "web --> api --> db", "│ --> │", "(A)-->(B)", "Raw sources  ──>  Wiki  ──>  Schema", "step --> 2. emit", "step --> 2 then", "step -->2 then", "step--> 2 then", "(A) --> (1)"]) {
+      expect([line, holdsDiagramToken(line)]).toEqual([line, true]);
+    }
+  });
+
+  test("a first-line head is a participant only when it names something; any other head makes a chain (fix round 2)", () => {
+    const legend = ["1. web calls api", "2. api reads db"];
+    for (const first of ["web   ──>   api   ──>   db", "web   ->   api   ->   db", "web   =>   api", "web   <──   api", "web   ↓   api", "web   ──HTTP──►   api"]) {
+      expect([first, suggestMermaidKind([first, ...legend])]).toEqual([first, "flowchart"]);
+    }
+    // Names (letters or digits only) and box edges are participants.
+    for (const first of ["web   api", "10.0.0.1   10.0.0.2", "┌─────┐        ┌─────┐", "╔═════╗        ╔═════╗", "┌─ desk ─┐     ┌─ shelf ─┐"]) {
+      expect([first, suggestMermaidKind([first, ...legend])]).toEqual([first, "sequenceDiagram"]);
+    }
+    // Half a box edge is no edge.
+    expect(suggestMermaidKind(["┌─────        ┌─────", ...legend])).toBe("flowchart");
+    expect(suggestMermaidKind(["─────┐        ─────┐", ...legend])).toBe("flowchart");
+  });
+
+  test("a numbered message follows a lifeline or a stem, or opens the line; a single markdown marker is prose (fix round 2)", () => {
+    const heads = "Client            Server";
+    for (const numbered of ["  │── 1. GET /x", "|-- 1. GET", "<-- 2. 200", "━━ 3. retry", "▶ 4. done", "  │ 1: GET /x", "|| 5) ack", ">> 6. ack", "1. GET", "   2) 200", "(3) retry", "④ done", "│ (3) retry", "│ ④ done", "┃ 7. x", "─ 8. x", "◀ 9. x", "► 10. x", "◄ 11. x"]) {
+      expect([numbered, suggestMermaidKind([heads, numbered, numbered])]).toEqual([numbered, "sequenceDiagram"]);
+    }
+    for (const prose of ["- 1. parse", "> 1) parse", "-1. drop", "10: start", "| 1. row", "< 1. x", "  - 2. emit", "1.5 GB", "│ ok │"]) {
+      expect([prose, suggestMermaidKind([heads, prose, prose])]).toEqual([prose, "flowchart"]);
+    }
+  });
+
+  test("a long dash run that is no numbered line is judged in linear time (fix round 2)", () => {
+    const t = performance.now();
+    expect(suggestMermaidKind(["Client            Server", `${"-".repeat(60)}x`, `${"<>".repeat(30)}x`])).toBe("flowchart");
+    expect(performance.now() - t).toBeLessThan(500);
   });
 });
