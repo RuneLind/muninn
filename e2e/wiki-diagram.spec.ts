@@ -155,6 +155,38 @@ const WIDE_PAGE = [
   "",
 ].join("\n");
 
+// A hostile archify file: a stray </div> and an end tag whose quoted attribute
+// value holds a `>` and a glossary term, then an inert onerror probe. Before the
+// fix, the end tag passed through the sanitizer byte for byte, the glossary pass
+// marked the term inside the attribute value, and the inserted span's `"` closed
+// the value — turning the rest into a live <img onerror>. The probe records a
+// window flag rather than fetching, so the fixture is inert by construction.
+const HOSTILE_REL = "flows/hostile.mdx";
+const HOSTILE_PAGE = [
+  "---",
+  "title: Hostile",
+  "---",
+  "",
+  "# Hostile",
+  "",
+  "<Glossary>",
+  "",
+  "- **Hold:** a book kept back",
+  "",
+  "</Glossary>",
+  "",
+  '<Diagram src="./hostile.architecture.json" />',
+  "",
+].join("\n");
+const HOSTILE_HTML =
+  `<!doctype html><html><head><title>x</title></head><body>` +
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" role="img">` +
+  `<title id="archify-diagram-title">T</title>` +
+  `<g data-node-id="a"><rect x="1" y="2" width="30" height="20" class="c-frontend"/><text x="5" y="15" class="t-primary">a</text></g>` +
+  `</div></g data-x="z>Hold<img src=x onerror='window.__dgmPwn=1'>y">` +
+  `</svg></body></html>`;
+const HOSTILE_JSON = { meta: { title: "Hostile map" }, components: [{ id: "a", label: "A", type: "frontend" }] };
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -171,6 +203,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "flows", "wide.html"), WIDE_HTML, "utf8");
   // A diagram whose html sibling does not exist.
   await writeFile(path.join(root, "flows", "nohtml.architecture.json"), JSON.stringify(WIDE_JSON), "utf8");
+  await writeFile(path.join(root, HOSTILE_REL), HOSTILE_PAGE, "utf8");
+  await writeFile(path.join(root, "flows", "hostile.architecture.json"), JSON.stringify(HOSTILE_JSON), "utf8");
+  await writeFile(path.join(root, "flows", "hostile.html"), HOSTILE_HTML, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -351,6 +386,30 @@ async function labelContrast(page: Page): Promise<{ text: string; ratio: number 
     });
   });
 }
+
+test.describe("Wiki reader: a hostile Diagram cannot break out of the picture", () => {
+  test("no injected element, no on* handler, no glossary mark, no flag set", async ({ page }) => {
+    const pwn: unknown[] = [];
+    await page.exposeFunction("__dgmReport", (v: unknown) => pwn.push(v));
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "__dgmPwn", { set: (v) => (window as unknown as { __dgmReport: (v: unknown) => void }).__dgmReport(v), configurable: true });
+    });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(HOSTILE_REL)}`);
+    await expect(page.locator(".wiki-article figure.dgm")).toHaveCount(1);
+    await page.waitForTimeout(300); // let any injected onerror fire
+    const fig = page.locator(".wiki-article figure.dgm");
+    // The sanitizer keeps the one benign node; nothing hostile reaches the DOM.
+    expect(await fig.locator("img, script").count()).toBe(0);
+    expect(await fig.locator(".gl-mark, .gl-term").count()).toBe(0);
+    // No on* attribute anywhere in the picture.
+    const onAttrs = await fig.locator(".dgm-svg").evaluate((el) =>
+      Array.from(el.querySelectorAll("*")).flatMap((n) => Array.from(n.attributes).map((a) => a.name)).filter((n) => n.toLowerCase().startsWith("on")),
+    );
+    expect(onAttrs).toEqual([]);
+    expect(pwn).toEqual([]);
+  });
+});
 
 test.describe("Wiki reader: a Diagram as wide as archify draws", () => {
   async function openWide(page: Page, width: number): Promise<void> {

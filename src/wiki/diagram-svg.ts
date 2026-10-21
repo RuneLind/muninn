@@ -47,6 +47,21 @@ export const STRIPPED_BY_DESIGN_ATTRS: ReadonlySet<string> = new Set([
 ]);
 const isStrippedByDesign = (name: string) => STRIPPED_BY_DESIGN_ATTRS.has(name) || name.startsWith("data-");
 
+/** HTMLRewriter reports attribute names lower-cased, so a rebuild must restore
+ *  SVG's camelCase for the names that carry it — the browser's own foreign-
+ *  content attribute adjustment, applied here so the serialized bytes read the
+ *  way the e2e and the drawnSize reader expect (markerWidth, refX, viewBox). */
+const CANONICAL_ATTR_NAME: Readonly<Record<string, string>> = {
+  viewbox: "viewBox",
+  markerwidth: "markerWidth",
+  markerheight: "markerHeight",
+  refx: "refX",
+  refy: "refY",
+  patternunits: "patternUnits",
+  preserveaspectratio: "preserveAspectRatio",
+};
+const canonicalAttr = (name: string) => CANONICAL_ATTR_NAME[name] ?? name;
+
 const CLASS_SET: ReadonlySet<string> = new Set(DIAGRAM_CLASSES);
 const LOCAL_ID = /^[A-Za-z_][\w.:-]*$/;
 const LOCAL_URL = /^url\(\s*#([A-Za-z_][\w.:-]*)\s*\)$/;
@@ -58,9 +73,18 @@ const CSS_SYNTAX = /[\\(]|\/\*/;
 const PRESENTATION_SET: ReadonlySet<string> = new Set(PRESENTATION);
 /** A CDATA section in SVG is text the parser hands through raw: it is refused. */
 const CDATA = /<!\[CDATA\[/i;
+/** A raw-text escaping element (`<plaintext>`, `<xmp>`) makes a browser read
+ *  everything after it as text, so the one `</svg>` the slice is sliced on no
+ *  longer closes the root there: refused, like CDATA, rather than healed. */
+const RAW_TEXT_ELEMENT = /<(?:plaintext|xmp)\b/i;
 /** `&` that does not start a character reference. */
 const BARE_AMP = /&(?!(?:#\d+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);)/g;
 const escapeText = (t: string) => t.replace(BARE_AMP, "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+/** An attribute value in a double-quoted context: as `escapeText`, plus `"`.
+ *  HTMLRewriter never hands back a value with a literal `"` (the parser ends the
+ *  value at one), so the `"` arm is a belt-and-braces guard, never load-bearing;
+ *  the `<`/`>`/bare-`&` arms re-serialize what a value may legally carry raw. */
+const escapeAttr = (v: string) => escapeText(v).replaceAll('"', "&quot;");
 
 /** What one sanitize pass dropped, by set. Counts by name. */
 export interface DiagramSvgDrops {
@@ -72,6 +96,17 @@ export interface DiagramSvgDrops {
 }
 
 const inc = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
+
+/** Register an end-tag handler, returning false when the element has none
+ *  (`onEndTag` throws "No end tag" for a void or raw-text element). */
+function registerEnd(el: { onEndTag(cb: () => void): void }, cb: () => void): boolean {
+  try {
+    el.onEndTag(cb);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** The `<svg>…</svg>` slice of an HTML file, or null unless the file holds
  *  exactly one `<svg` and one `</svg>` (a second picture, or a stray marker in
@@ -85,9 +120,18 @@ export function extractSvgSlice(html: string): string | null {
 }
 
 /** Sanitize one `<svg>` slice. Null `svg` when the slice holds a CDATA section,
- *  or the result does not start with an `<svg` element and end with `</svg>`.
- *  Every text node is re-escaped, so no `<` or `>` in the output is text: the
- *  output cannot open or close markup in the page that inlines it. */
+ *  or the rebuilt output does not start with an `<svg` element and end with
+ *  `</svg>`, or the final structural self-check fails.
+ *
+ *  The output is REBUILT from HTMLRewriter's parse events — a start tag I write
+ *  from kept, re-escaped attributes, an end tag I write from my own open stack,
+ *  escaped text, nothing else — never the source bytes with parts deleted. So a
+ *  stray, unmatched or attribute-carrying end tag, a comment, a doctype, a PI or
+ *  CDATA produces no output at all (it is dropped; a stray end tag is not an
+ *  element event, so it is not counted — see the PR Decisions). The parser's
+ *  corrected tree is what I re-emit, so the result is well-formed by
+ *  construction, and no `<`/`>`/`"` in it is anything but a tag I wrote. The
+ *  self-check at the end makes a future regression fail closed. */
 export async function sanitizeSvg(slice: string): Promise<{ svg: string | null; drops: DiagramSvgDrops }> {
   const drops: DiagramSvgDrops = {
     strippedElements: new Map(),
@@ -101,32 +145,54 @@ export async function sanitizeSvg(slice: string): Promise<{ svg: string | null; 
     inc(drops.unknownElements, "#cdata");
     return { svg: null, drops };
   }
+  if (RAW_TEXT_ELEMENT.test(slice)) {
+    inc(drops.unknownElements, "#rawtext");
+    return { svg: null, drops };
+  }
+  let out = "";
   let text = "";
   let seenRoot = false;
+  // Suppress output inside a dropped (unknown) element's subtree, including its
+  // kept descendants, which the old `el.remove()` also dropped. The dropped
+  // element's own end tag decrements it; a kept element inside skip emits
+  // nothing and registers no end tag, so it never writes an orphan close.
+  let skipDepth = 0;
   const rewriter = new HTMLRewriter()
     .on("*", {
       element(el) {
         const tag = el.tagName.toLowerCase();
-        if (!KEPT_ELEMENTS.has(tag)) {
-          inc(drops.unknownElements, tag);
-          el.remove();
+        const selfClosing = el.selfClosing;
+        if (skipDepth > 0 || !KEPT_ELEMENTS.has(tag)) {
+          // Dropped: emit nothing. An unknown element is counted wherever it
+          // sits (the lint reports it), but only the OUTERMOST dropped element
+          // opens a skip region — a dropped or kept descendant is already
+          // suppressed by it, so it tracks no end tag of its own.
+          if (!KEPT_ELEMENTS.has(tag)) inc(drops.unknownElements, tag);
+          if (skipDepth === 0 && !selfClosing && registerEnd(el, () => skipDepth--)) skipDepth++;
           return;
         }
-        // The slice starts with the root `<svg`, so the first element seen is it.
+        // The slice starts with the root `<svg`, so the first kept element is it.
         const isRoot = !seenRoot;
         seenRoot = true;
+        let attrs = "";
         for (const [rawName, value] of [...el.attributes]) {
           const name = rawName.toLowerCase();
-          if (name === "role" && isRoot) continue;
+          if (name === "role" && isRoot) {
+            attrs += ` role="${escapeAttr(value)}"`;
+            continue;
+          }
           if (!KEPT_ATTRS.has(name)) {
-            el.removeAttribute(rawName);
             inc(isStrippedByDesign(name) ? drops.strippedAttrs : drops.unknownAttrs, name);
             continue;
           }
           const next = keptValue(name, value, drops);
-          if (next === null) el.removeAttribute(rawName);
-          else if (next !== value) el.setAttribute(rawName, next);
+          if (next !== null) attrs += ` ${canonicalAttr(name)}="${escapeAttr(next)}"`;
         }
+        // A kept element with no end tag (void, or implicitly closed at EOF with
+        // no event) is emitted self-closed, so the output never carries a start
+        // tag it does not close.
+        const paired = !selfClosing && registerEnd(el, () => (out += `</${tag}>`));
+        out += paired ? `<${tag}${attrs}>` : `<${tag}${attrs}/>`;
       },
       comments(c) {
         c.remove();
@@ -135,20 +201,21 @@ export async function sanitizeSvg(slice: string): Promise<{ svg: string | null; 
     .onDocument({
       doctype() {},
       // One text node may arrive in several chunks: escape it whole, so a split
-      // character reference is not read as a bare `&`.
+      // character reference is not read as a bare `&`. The handler fires for
+      // text inside a dropped element too, so it is emitted only outside skip.
       text(chunk) {
         text += chunk.text;
-        if (!chunk.lastInTextNode) {
-          chunk.remove();
-          return;
-        }
-        chunk.replace(escapeText(text), { html: true });
+        if (!chunk.lastInTextNode) return;
+        if (skipDepth === 0) out += escapeText(text);
         text = "";
       },
     });
+  // The rewriter's own transformed output is discarded: `out` is the rebuild.
+  await rewriter.transform(new Response(slice)).text();
   // A NUL is the reader's wikilink sentinel delimiter (`page-files.ts` maps it the same way).
-  const out = (await rewriter.transform(new Response(slice)).text()).trim().replaceAll("\0", "\uFFFD");
-  return { svg: out.startsWith("<svg") && out.endsWith("</svg>") ? out : null, drops };
+  out = out.trim().replaceAll("\0", "\uFFFD");
+  const ok = out.startsWith("<svg") && out.endsWith("</svg>") && isWellFormedSanitizedSvg(out);
+  return { svg: ok ? out : null, drops };
 }
 
 /** A kept attribute's value after the reference and class rules, or null to
@@ -182,6 +249,75 @@ function keptValue(name: string, value: string, drops: DiagramSvgDrops): string 
 function refuse(name: string, drops: DiagramSvgDrops): null {
   inc(drops.unknownAttrs, `${name}=<value>`);
   return null;
+}
+
+/** A start tag of a kept element: name, then zero or more ` name="value"`
+ *  attributes whose value is double-quoted and holds no raw `<`, `>` or `"`
+ *  (a `&` is kept — it begins an escaped entity), then an optional `/` and `>`.
+ *  Anchored whole. */
+const WELL_FORMED_START = /^<([a-z][\w:-]*)((?:\s+[a-z][\w:-]*="[^<>"]*")*)\s*\/?>$/;
+const WELL_FORMED_END = /^<\/([a-z][\w:-]*)>$/;
+const WELL_FORMED_ATTR = /\s+([a-z][\w:-]*)="[^<>"]*"/g;
+
+/**
+ * The sanitizer's structural self-check: re-tokenize the output and confirm it
+ * is only start tags of kept elements (with allowlisted, double-quoted,
+ * escaped attributes), end tags that close an element opened earlier in
+ * nesting order and carry no attributes, and escaped text with no raw `<`/`>`.
+ * A single root `<svg>` must wrap it all. Any other shape — a stray or
+ * attribute-carrying end tag, a comment, an unknown element or attribute, a raw
+ * markup byte — answers false, so a future regression in {@link sanitizeSvg}
+ * fails closed instead of inlining the malformed bytes.
+ *
+ * The output never puts `<`/`>`/`"` inside an attribute value (escaped), so the
+ * `<[^>]*>` tokenizer is exact here; a malformed string that does would make a
+ * token that fails {@link WELL_FORMED_START}/`_END`, i.e. still fail closed.
+ */
+export function isWellFormedSanitizedSvg(out: string): boolean {
+  const stack: string[] = [];
+  let i = 0;
+  let sawRoot = false;
+  while (i < out.length) {
+    const lt = out.indexOf("<", i);
+    if (lt < 0) {
+      // Trailing text must be escaped (no raw `<`/`>`; `>` cannot appear here).
+      return !/[<>]/.test(out.slice(i));
+    }
+    // Text between tags: no raw `<` (we're at the next `<`) is guaranteed; a raw
+    // `>` in it would be a markup byte that escaping should have removed.
+    if (out.slice(i, lt).includes(">")) return false;
+    const gt = out.indexOf(">", lt);
+    if (gt < 0) return false;
+    const tag = out.slice(lt, gt + 1);
+    if (tag.startsWith("<!") || tag.startsWith("<?")) return false; // comment, doctype, PI
+    if (tag[1] === "/") {
+      const m = WELL_FORMED_END.exec(tag);
+      if (!m) return false; // an end tag with attributes, or a malformed one
+      if (stack.pop() !== m[1]) return false; // unmatched or mis-nested
+    } else {
+      const m = WELL_FORMED_START.exec(tag);
+      if (!m) return false;
+      const name = m[1]!;
+      if (!KEPT_ELEMENTS.has(name)) return false;
+      // Every attribute name must be allowlisted (role allowed on the root only).
+      // Names are re-emitted in SVG camelCase, so fold to the lower-case allowlist.
+      for (const am of (m[2] ?? "").matchAll(WELL_FORMED_ATTR)) {
+        const an = am[1]!.toLowerCase();
+        if (an === "role") {
+          if (sawRoot) return false;
+        } else if (!KEPT_ATTRS.has(an)) {
+          return false;
+        }
+      }
+      if (name === "svg" && sawRoot) return false; // only one root
+      if (name !== "svg" && !sawRoot) return false; // nothing before the root
+      sawRoot = true;
+      const selfClosing = tag.endsWith("/>");
+      if (!selfClosing) stack.push(name);
+    }
+    i = gt + 1;
+  }
+  return sawRoot && stack.length === 0;
 }
 
 const MAX_CACHE = 200;

@@ -152,8 +152,41 @@ export function renderWikiHtml(
       return rendered[i] ?? "";
     },
   );
-  const finished = paragraphGaps(upgradeObsidianCallouts(chipLineRefs(html, codeAtFromPage(markdown))));
-  return opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
+  // Park each `<Diagram>` picture behind an opaque token so NO string-level
+  // post-pass over the rendered page can insert anything between its `<svg` and
+  // its matching `</svg>`. The parking keys on the `.dgm-svg` wrapper alone, not
+  // on the svg's internal tags: the sanitizer (`diagram-svg.ts`) guarantees the
+  // svg holds no `</div>`, so the wrapper's own close is the first one after it.
+  // The reported break-out was markGlossaryTerms (a stray end tag popped the svg
+  // off its skip stack); chipLineRefs, upgradeObsidianCallouts and paragraphGaps
+  // are the other passes that run here over the inlined svg. Restored last.
+  const parked: string[] = [];
+  const guarded = parkDiagramPictures(html, parked);
+  const finished = paragraphGaps(upgradeObsidianCallouts(chipLineRefs(guarded, codeAtFromPage(markdown))));
+  const marked = opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
+  return restoreDiagramPictures(marked, parked);
+}
+
+/** `\x00` sentinel for a parked `<Diagram>` picture (the NUL class the wikilink
+ *  restore uses — it is not content and cannot be typed on a page). */
+const DIAGRAM_PICTURE_RE = /(<div class="dgm-svg"[^>]*>)([\s\S]*?)(<\/div>)/g;
+const DIAGRAM_PICTURE_TOKEN = /\x00DGMPIC(\d+)\x00/g;
+
+/** Replace each `.dgm-svg` picture's svg with an opaque token, pushing the svg
+ *  onto `parked`. The non-greedy body stops at the wrapper's own `</div>`,
+ *  since a sanitized svg never contains a `<div>` (it is not a kept element). */
+function parkDiagramPictures(html: string, parked: string[]): string {
+  if (!html.includes('<div class="dgm-svg"')) return html;
+  return html.replace(DIAGRAM_PICTURE_RE, (_m, open: string, svg: string, close: string) => {
+    const idx = parked.length;
+    parked.push(svg);
+    return `${open}\x00DGMPIC${idx}\x00${close}`;
+  });
+}
+
+function restoreDiagramPictures(html: string, parked: string[]): string {
+  if (parked.length === 0) return html;
+  return html.replace(DIAGRAM_PICTURE_TOKEN, (_m, i: string) => parked[parseInt(i, 10)] ?? "");
 }
 
 /** The page body's `<Glossary>` blocks, wikilinks read as their text — the

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DIAGRAM_ID_MARK, diagramSvgFromHtml, extractSvgSlice, sanitizeSvg } from "./diagram-svg.ts";
+import { DIAGRAM_ID_MARK, diagramSvgFromHtml, extractSvgSlice, isWellFormedSanitizedSvg, sanitizeSvg } from "./diagram-svg.ts";
 import { renderWikiHtml } from "./render.ts";
 
 const M = DIAGRAM_ID_MARK;
@@ -212,5 +212,198 @@ describe("sanitized output is self-contained", () => {
     const r = await diagramSvgFromHtml(`<body>${plain}</body>`);
     expect(r.svg).toBeNull();
     expect(r.problem).toBe("unparsable");
+  });
+});
+
+/** Every tag token in `html`, start and end, as an HTML tokenizer sees it. The
+ *  sanitized output never puts a `>` inside an attribute value (escaped), so a
+ *  `<[^>]*>` split is exact on well-formed output and still catches a malformed
+ *  one (a stray/attribute end tag becomes a token that fails these tests). */
+function tagTokens(html: string): { starts: string[]; ends: { name: string; raw: string }[] } {
+  const starts: string[] = [];
+  const ends: { name: string; raw: string }[] = [];
+  for (const m of html.matchAll(/<\/?[A-Za-z][^>]*>/g)) {
+    const raw = m[0];
+    if (raw[1] === "/") ends.push({ name: raw.slice(2, -1).trim().split(/[\s>]/)[0]!.toLowerCase(), raw });
+    else starts.push(raw);
+  }
+  return { starts, ends };
+}
+
+describe("sanitized output is well-formed by construction (fix round 2)", () => {
+  test("a stray end tag never reaches the output", async () => {
+    // A </div> that matches no opened element, inside the svg.
+    const { svg } = await sanitizeSvg(`<svg viewBox="0 0 1 1"><g><text>a</text></g></div><rect width="1"/></svg>`);
+    expect(svg).not.toBeNull();
+    expect(svg).not.toContain("</div>");
+    expect(svg).not.toContain("<div");
+    const { ends } = tagTokens(svg!);
+    expect(ends.map((e) => e.name)).toEqual(["text", "g", "svg"]);
+  });
+
+  test("an end tag carrying attributes never reaches the output", async () => {
+    // The verify-pass vector: an end tag whose quoted attribute value holds a > ,
+    // so a naive tokenizer closes the tag early and the rest becomes live text.
+    const { svg } = await sanitizeSvg(`<svg viewBox="0 0 1 1"><g><text>a</text></g></g data-x="z>Hold y"></svg>`);
+    expect(svg).not.toBeNull();
+    expect(svg).not.toContain("data-x");
+    expect(svg).not.toContain("z>Hold");
+    // No end tag in the output carries any attribute (text past its name).
+    for (const e of tagTokens(svg!).ends) expect(e.raw).toBe(`</${e.name}>`);
+  });
+
+  test("an unmatched extra end tag never reaches the output", async () => {
+    const { svg } = await sanitizeSvg(`<svg viewBox="0 0 1 1"><text>a</text></text></text></svg>`);
+    expect(svg).not.toBeNull();
+    // One <text> opened, so exactly one </text> and the root </svg>.
+    expect(tagTokens(svg!).ends.map((e) => e.name)).toEqual(["text", "svg"]);
+  });
+
+  test("every kept element pairs and nests in order", async () => {
+    const { svg } = await sanitizeSvg(
+      `<svg viewBox="0 0 1 1"><defs><marker id="m"><polygon points="0 0"/></marker></defs><g><rect width="1"/><text>a<tspan>b</tspan></text></g></svg>`,
+    );
+    expect(svg).not.toBeNull();
+    expect(isWellFormedSanitizedSvg(svg!)).toBe(true);
+    // Round-trips its own self-check.
+    expect(isWellFormedSanitizedSvg(svg!)).toBe(true);
+  });
+});
+
+describe("isWellFormedSanitizedSvg (fix round 2)", () => {
+  test("accepts well-formed sanitized output", () => {
+    expect(isWellFormedSanitizedSvg(`<svg viewBox="0 0 1 1"><g><text>a &lt; b</text></g></svg>`)).toBe(true);
+    expect(isWellFormedSanitizedSvg(`<svg><rect width="1"/></svg>`)).toBe(true);
+  });
+
+  test("refuses a stray or unmatched end tag", () => {
+    expect(isWellFormedSanitizedSvg(`<svg><text>a</text></div></svg>`)).toBe(false);
+    expect(isWellFormedSanitizedSvg(`<svg><text>a</text></text></svg>`)).toBe(false);
+    expect(isWellFormedSanitizedSvg(`</svg>`)).toBe(false);
+  });
+
+  test("refuses an end tag that carries attributes", () => {
+    expect(isWellFormedSanitizedSvg(`<svg><g>a</g data-x="y"></svg>`)).toBe(false);
+  });
+
+  test("refuses an unknown element or an attribute outside the allowlist", () => {
+    expect(isWellFormedSanitizedSvg(`<svg><script>x</script></svg>`)).toBe(false);
+    expect(isWellFormedSanitizedSvg(`<svg><rect onclick="x" width="1"/></svg>`)).toBe(false);
+  });
+
+  test("refuses raw markup-significant bytes in text", () => {
+    expect(isWellFormedSanitizedSvg(`<svg><text>a < b</text></svg>`)).toBe(false);
+    expect(isWellFormedSanitizedSvg(`<svg><!-- c --><rect width="1"/></svg>`)).toBe(false);
+  });
+
+  test("refuses output not wrapped in a single root svg", () => {
+    expect(isWellFormedSanitizedSvg(`<g></g>`)).toBe(false);
+    expect(isWellFormedSanitizedSvg(`<svg></svg><svg></svg>`)).toBe(false);
+  });
+});
+
+/** A `<Glossary>` whose term appears in a hostile position inside the svg. The
+ *  reader marks glossary terms over the fully rendered page; the picture must be
+ *  opaque to that pass. Parse the result with a real HTML parser (HTMLRewriter). */
+describe("the glossary pass treats the picture as opaque (fix round 2)", () => {
+  const PAGE = '# P\n\n<Glossary>\n\n- **Hold:** a book kept back\n\n</Glossary>\n\n<Diagram src="./x.architecture.json" />\n';
+  const render = async (slice: string) => {
+    const svg = await diagramSvgFromHtml(`<!doctype html><body>${slice}</body>`);
+    const json = JSON.stringify({ meta: { title: "T" }, components: [{ id: "a", label: "A" }] });
+    const files = new Map([["./x.architecture.json", { ok: true as const, text: json, svg }]]);
+    return { svg, html: renderWikiHtml(PAGE, () => undefined, { views: true, files }) };
+  };
+
+  test("a hostile end tag cannot smuggle a glossary span into the picture", async () => {
+    const { html } = await render(
+      `<svg viewBox="0 0 100 100"><text x="1" y="10">a</text></div></g data-x="z>Hold y"></svg>`,
+    );
+    const pictureStart = html.indexOf('<div class="dgm-svg"');
+    const svgClose = html.indexOf("</svg>", pictureStart);
+    const picture = html.slice(pictureStart, svgClose + 6);
+    expect(picture).not.toContain("gl-mark");
+    expect(picture).not.toContain("gl-term");
+    const live = await allTagsAndOnAttrs(picture);
+    // Only the picture's own elements: the wrapper div and the kept svg subtree.
+    expect(live.tags.filter((t) => !["div", "svg", "g", "text"].includes(t))).toEqual([]);
+    expect(live.onAttrs).toEqual([]);
+  });
+
+  test("no gl-mark span lands anywhere inside the svg, and nothing live after the picture", async () => {
+    // The glossary term is drawn as escaped text inside the picture; it must not be marked.
+    const { html } = await render(`<svg viewBox="0 0 100 100"><text x="1" y="10">Hold this</text></svg>`);
+    const open = html.indexOf("<svg");
+    const close = html.indexOf("</svg>", open);
+    const inside = html.slice(open, close);
+    expect(inside).not.toContain("gl-mark");
+    const live = await allTagsAndOnAttrs(html);
+    expect(live.onAttrs).toEqual([]);
+    expect(live.tags).not.toContain("img");
+    expect(live.tags).not.toContain("script");
+  });
+});
+
+/** Every element name and every `on*` attribute an HTML parser reads. */
+async function allTagsAndOnAttrs(html: string): Promise<{ tags: string[]; onAttrs: string[] }> {
+  const tags: string[] = [];
+  const onAttrs: string[] = [];
+  await new HTMLRewriter()
+    .on("*", {
+      element(el) {
+        tags.push(el.tagName.toLowerCase());
+        for (const [n] of el.attributes) if (n.toLowerCase().startsWith("on")) onAttrs.push(n.toLowerCase());
+      },
+    })
+    .transform(new Response(html))
+    .text();
+  return { tags, onAttrs };
+}
+
+/** Seeded, deterministic soup fuzz: a small alphabet of markup-significant
+ *  tokens, a glossary term and kept element names, sanitized and rendered with
+ *  the glossary, parsed, and the invariants asserted. */
+describe("property: random soups never break out of the picture (fix round 2)", () => {
+  const TOKENS = [
+    "<", ">", '"', "'", "/", "=", "</div", "]]>", "<!--", "-->", " Hold ",
+    "<text>", "</text>", "<g>", "</g>", "<rect width=\"1\"/>", "<script>", "data-x=", "onload=",
+    "a", "b", "url(#x)", "<![CDATA[", "<svg>", "</svg>",
+  ];
+  // A small deterministic PRNG (mulberry32), so a failure is reproducible.
+  function prng(seed: number): () => number {
+    let s = seed >>> 0;
+    return () => {
+      s = (s + 0x6d2b79f5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const PAGE = '# P\n\n<Glossary>\n\n- **Hold:** a book kept back\n\n</Glossary>\n\n<Diagram src="./x.architecture.json" />\n';
+  const json = JSON.stringify({ meta: { title: "T" }, components: [{ id: "a", label: "A" }] });
+
+  test("300 seeded soups keep the picture opaque and the output well-formed", async () => {
+    const rnd = prng(0x5eed);
+    for (let i = 0; i < 300; i++) {
+      const n = 3 + Math.floor(rnd() * 12);
+      let body = "";
+      for (let j = 0; j < n; j++) body += TOKENS[Math.floor(rnd() * TOKENS.length)]!;
+      const slice = `<svg viewBox="0 0 10 10">${body}</svg>`;
+      const r = await diagramSvgFromHtml(`<body>${slice}</body>`);
+      // The sanitizer answers either a well-formed svg or null (fail closed).
+      if (r.svg !== null) expect(isWellFormedSanitizedSvg(r.svg)).toBe(true);
+      const files = new Map([["./x.architecture.json", { ok: true as const, text: json, svg: r }]]);
+      const html = renderWikiHtml(PAGE, () => undefined, { views: true, files });
+      // No gl-mark span inside any svg, no element or on* attribute outside the allowlist.
+      const open = html.indexOf("<svg");
+      if (open >= 0) {
+        const close = html.indexOf("</svg>", open);
+        expect(html.slice(open, close)).not.toContain("gl-mark");
+      }
+      const live = await allTagsAndOnAttrs(html);
+      expect(live.onAttrs).toEqual([]);
+      expect(live.tags).not.toContain("script");
+      expect(live.tags).not.toContain("img");
+    }
   });
 });
