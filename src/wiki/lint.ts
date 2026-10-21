@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Thirty-four check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Thirty-five check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -114,6 +114,12 @@
  *                      cannot do: no term, or a term defined twice
  *                      (warnings); an item with no term (info). Rules:
  *                      `lint-glossary.ts`.
+ * 20. text-diagram — outside `archive/` and `plans/`, on pages that are not
+ *                      reserved or culled, a code fence with no
+ *                      language (or `text`) whose lines draw a diagram: at
+ *                      least 2 non-blank lines, a third of them holding an
+ *                      arrow or box token. Info; suggests a mermaid kind.
+ *                      Rules: `lint-text-diagram.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -153,6 +159,7 @@ import { checkDecisionChain, DECISION_CHAIN_LINT_CHECKS } from "./lint-decision-
 import { CHART_LINT_CHECKS, checkCharts } from "./lint-chart.ts";
 import { checkRuleTrees, RULE_TREE_LINT_CHECKS } from "./lint-rule-tree.ts";
 import { checkGlossaries, GLOSSARY_LINT_CHECKS } from "./lint-glossary.ts";
+import { checkTextDiagrams, TEXT_DIAGRAM_LINT_CHECKS } from "./lint-text-diagram.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
@@ -189,11 +196,12 @@ export const LINT_CHECKS = [
   ...CHART_LINT_CHECKS,
   ...RULE_TREE_LINT_CHECKS,
   ...GLOSSARY_LINT_CHECKS,
+  ...TEXT_DIAGRAM_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
 /** The checks that read a page's own text, its relPath and the reader
- *  config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17, 18 and 19),
+ *  config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17, 18, 19 and 20),
  *  and for check 15 the data files the page names ({@link pageTextFiles}). Check
  *  11's Tldr half reads `plan_status`, which the index parses from the page's
  *  own frontmatter ({@link readPlanStatus}). `lintWiki` runs them per page
@@ -221,6 +229,7 @@ export const PAGE_TEXT_LINT_CHECKS = [
   ...CHART_LINT_CHECKS,
   ...RULE_TREE_LINT_CHECKS,
   ...GLOSSARY_LINT_CHECKS,
+  ...TEXT_DIAGRAM_LINT_CHECKS,
 ] as const satisfies readonly LintCheck[];
 
 /** What the page-text checks read of a page. */
@@ -1007,8 +1016,9 @@ function checkCaseBoardLabels(page: PageRef, rawContent: string): LintFinding[] 
  * page's own business), 12 on a page with a role lane or a role-shaped
  * question target, 13 on a page with a labelled CaseBoard, 11's first half on a
  * page with a DecisionLog or StatusRows, 15 on an `.mdx` page that is not
- * culled, and 11's Tldr half on an `.mdx` page that is a live report page or a
- * reference page and is not reserved or culled.
+ * culled, 11's Tldr half on an `.mdx` page that is a live report page or a
+ * reference page and is not reserved or culled, and 20 on a page outside
+ * `archive/` and `plans/` that is not reserved or culled.
  */
 export function checkPageText(
   page: PageTextRef,
@@ -1027,7 +1037,7 @@ export function checkPageText(
     ...checkDecisionChain(page, content),
   ];
   if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content));
-  if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content));
+  if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content), ...checkTextDiagrams(page, content));
   return findings;
 }
 

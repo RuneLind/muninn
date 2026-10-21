@@ -128,6 +128,8 @@ const GLOSSARY = [
   "</Glossary>",
   "",
 ].join("\n");
+/** A text drawing in a plain fence, outside plans/ (check 20 skips plans/). */
+const TEXT_DIAGRAM = ["---", "title: D", "---", "```", "desk ──▶ loans ──▶ holds", "  :1      :2       :3", "```", ""].join("\n");
 const TEXT_SHAPES = [
   "---",
   "title: S",
@@ -197,6 +199,7 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/ch.mdx"), CHART);
   await Bun.write(path.join(tmp, "page-checks/plans/rt.mdx"), RULE_TREE);
   await Bun.write(path.join(tmp, "page-checks/plans/gl.mdx"), GLOSSARY);
+  await Bun.write(path.join(tmp, "page-checks/notes/td.mdx"), TEXT_DIAGRAM);
   await Bun.write(path.join(tmp, "page-checks/plans/st.mdx"), STATUS_TILES);
   await Bun.write(path.join(tmp, "page-checks/plans/o.mdx"), ORDERED);
   await Bun.write(path.join(tmp, "page-checks/plans/m.mdx"), TLDR_NO_MORE);
@@ -357,6 +360,7 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
         "chart-table",
         "rule-tree",
         "glossary",
+        "text-diagram",
       ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
