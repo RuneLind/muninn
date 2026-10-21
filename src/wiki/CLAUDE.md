@@ -523,7 +523,7 @@ to the embedding page's folder AND ITS DESCENDANTS — recorded on the child as
 |---|---|---|
 | 1 | `x.html` beside `x.md`/`x.mdx` | `stem` |
 | 2 | `x-prototype.html` / `x-prototype-N.html` beside a page at `x` | `suffix` |
-| 3 | the markdown page carries `<Embed src="./child.html">` or `<Embed src="./sub/dir/child.html">` — the RESOLVED target in the page's folder or below it; above or beside it (`../x.html`) pairs nothing. An html embedded by two or more pages, in any folders, pairs with none; a page that folds under its successor (a rule-4 child) adopts none of its embeds | `link` |
+| 3 | the markdown page carries `<Embed src="./child.html">` or `<Embed src="./sub/dir/child.html">`, or a `<Diagram src="./child.architecture.json">` whose html sibling (`child.html`) is the child — the RESOLVED target in the page's folder or below it; above or beside it (`../x.html`) pairs nothing. An html embedded by two or more pages, in any folders, pairs with none; a page that folds under its successor (a rule-4 child) adopts none of its embeds | `link` |
 | 4 | the child's frontmatter names `superseded_by: [[successor]]` | `superseded` |
 
 A META-stemmed `.html` beside its own meta markdown page (`index.html` +
@@ -588,6 +588,15 @@ with, so a `src` the renderer refuses pairs nothing — and feeds the pairing pa
 ONLY: `index.outgoing`, the backlinks, the Atlas graph and the lint checks are
 untouched, because an embedded diagram is part of the page while a cited one is a
 peer. An html embedded by two or more pages belongs to neither.
+
+A `<Diagram src>` embeds its html sibling the same way: the store reads the
+diagram refs from the parsed blocks (`pageFileRefKinds`, so a tag in a fence, in
+inline code or in the frontmatter names nothing) and joins each one's sibling
+through `diagramSiblingRelPath` (`query-block.ts`), the function the loader reads
+the sibling with — `x.architecture.json` → `x.html`, a ref the loader's lexical
+gate refuses (a leading `/`, a non-diagram extension) pairs nothing. It counts
+toward the two-embedder rule beside the `<Embed>` targets, and feeds the pairing
+pass only.
 
 **Rule 3 reaches DOWN, never up.** A page's explainers often live in a folder
 named after it (`reviews/<date>-melosys-api-3520/arkitektur.html`, embedded from
@@ -2147,7 +2156,7 @@ Two info findings, page text only (they run in `checkPageText`, so `wiki-check` 
 
 ### Lint check 21 — `<Diagram>` pictures (`lint-diagram.ts`)
 
-`diagram-svg` on `.mdx` pages that are not culled, page text only (it runs in `checkPageText` over the files `pageTextFiles` loads, so `wiki-check` reports it). Warnings, on the tag's line: the HTML sibling is missing, holds no single `<svg>`, is over its 2 MB cap or over the page budget (the reader shows the text form); the sanitizer dropped an element or attribute it has no rule for (a drop by design is not reported); the picture carries a class `DIAGRAM_CLASSES` does not style; the JSON is not an object. A diagram file that did not load is check 15's finding. The sibling is not a page file: it never joins `PAGE_FILE_KIND_EXTENSIONS` or the mirror's `DATA_EXTENSIONS`, and felles Remove, which targets page files, never names it. Acceptance: `page-files-diagram.test.ts`.
+`diagram-svg` on `.mdx` pages that are not culled, page text only (it runs in `checkPageText` over the files `pageTextFiles` loads, so `wiki-check` reports it). Warnings, on the tag's line, each worded in `DIAGRAM_FINDINGS`: the diagram file did not load (missing or unreadable, over its 1 MB cap, not a diagram file, past the page's file limit or budget) or is not a JSON object (the reader shows one line); the HTML sibling is missing, holds no single `<svg>`, is over its 2 MB cap or over the page budget (the reader shows the text form and a «Picture not shown» line); the sanitizer dropped an element or attribute it has no rule for (a drop by design is not reported); the picture carries a class `DIAGRAM_CLASSES` does not style. Only refs a `<Diagram>` names are judged (`pageFileRefKinds`); check 15 reads attributes only, so a file that did not load is this check's finding. The sibling is not a page file: it never joins `PAGE_FILE_KIND_EXTENSIONS` or the mirror's `DATA_EXTENSIONS`, and felles Remove, which targets page files, never names it. Acceptance: `page-files-diagram.test.ts`.
 
 ### Decision chain route and dry run
 

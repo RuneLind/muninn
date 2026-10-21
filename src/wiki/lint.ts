@@ -121,7 +121,8 @@
  *                      arrow or box token. Info; suggests a mermaid kind.
  *                      Rules: `lint-text-diagram.ts`.
  * 21. diagram-svg — on `.mdx` pages that are not culled, what a `<Diagram>`
- *                      picture lacks: a missing or unparsable HTML sibling,
+ *                      lacks: a diagram file that did not load or is not a
+ *                      JSON object, a missing or unparsable HTML sibling,
  *                      parts the sanitizer drops, or classes the reader does
  *                      not style (warnings). Rules: `lint-diagram.ts`.
  *

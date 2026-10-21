@@ -37,7 +37,7 @@ import {
   markdownCodeRegions,
   parseBlocks,
 } from "../format/markdown-ast.ts";
-import { pageFileRefs } from "../format/query-block.ts";
+import { diagramSiblingRelPath, pageFileRefKinds } from "../format/query-block.ts";
 import { parseEmbedAttrs, resolveEmbedRelPath } from "../format/embed.ts";
 import { buildWikiGitDates } from "./git-dates.ts";
 import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
@@ -537,7 +537,8 @@ function parsePlanFields(
  *
  *  - `stem` — the same bare stem in the same folder (`x.html` beside `x.mdx`).
  *  - `suffix` — `x-prototype.html` / `x-prototype-2.html` beside a page at `x`.
- *  - `link` — the markdown page EMBEDS it (`<Embed src="./child.html">`).
+ *  - `link` — the markdown page EMBEDS it (`<Embed src="./child.html">`, or
+ *    `<Diagram src="./child.architecture.json">`, whose html sibling it draws).
  *  - `superseded` — the child's frontmatter names its successor in
  *    `superseded_by:`. The only rule that makes a MARKDOWN page a child.
  */
@@ -3146,7 +3147,9 @@ function inFolderOrBelow(dir: string, base: string): boolean {
  *  2. **Prototype suffix** — `x-prototype.html` / `x-prototype-2.html` beside a
  *     page at `x`. Only that suffix.
  *  3. **Embedded** — the markdown page carries `<Embed src="./child.html">` or
- *     `<Embed src="./sub/dir/child.html">`: the RESOLVED target sits in the
+ *     `<Embed src="./sub/dir/child.html">`, or a `<Diagram src>` whose html
+ *     sibling is the child (`diagramSiblingRelPath`, the loader's own path):
+ *     the RESOLVED target sits in the
  *     page's own folder or below it (a review page keeping its explainers in a
  *     folder named after it). A target above or beside that folder pairs
  *     nothing, and a page that folds under its successor (a rule-4 child)
@@ -3563,16 +3566,24 @@ export async function buildWikiIndex(
       proseWords.set(normalizeRelPath(relPath), proseWordCount(content));
       // The attachment pass's two inputs, read here where the body is already in
       // hand. Both feed `pairAttachments` and NOTHING else: an `<Embed>` target
-      // is deliberately not a link (see `extractEmbedTargets`), so `outgoing`,
-      // the backlinks, the Atlas graph and the lint checks are untouched.
+      // and a `<Diagram>`'s html sibling are deliberately not links (see
+      // `extractEmbedTargets`), so `outgoing`, the backlinks, the Atlas graph and
+      // the lint checks are untouched.
       const embeds = extractEmbedTargets(content, relPath);
-      if (embeds.length) pairingEmbeds.set(normalizeRelPath(relPath), embeds);
       if (PAGE_FILE_REF_PROBE.test(content)) {
-        const refs = pageFileRefs(parseBlocks(splitFrontmatter(content).body))
+        const kinds = pageFileRefKinds(parseBlocks(splitFrontmatter(content).body));
+        const refs = [...kinds.keys()]
           .map((r) => resolveEmbedRelPath(relPath, r))
           .filter((r): r is string => !!r);
         if (refs.length) pageRefs.set(relPath, refs);
+        // A drawn diagram embeds its sibling, read where the reader reads it.
+        for (const [ref, k] of kinds) {
+          const sibling = k.has("diagram") ? diagramSiblingRelPath(relPath, ref) : null;
+          const key = sibling === null ? null : normalizeRelPath(sibling);
+          if (key !== null && !embeds.includes(key)) embeds.push(key);
+        }
       }
+      if (embeds.length) pairingEmbeds.set(normalizeRelPath(relPath), embeds);
       const supersededRaw =
         typeof fm.superseded_by === "string"
           ? fm.superseded_by.trim()

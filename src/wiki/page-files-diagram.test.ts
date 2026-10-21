@@ -3,6 +3,7 @@ import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DIAGRAM_HTML_MAX_BYTES, loadPageFiles } from "./page-files.ts";
+import { PAGE_FILE_MAX_BYTES } from "../format/query-block.ts";
 import { checkDiagrams } from "./lint-diagram.ts";
 import { checkPageText } from "./lint.ts";
 import { testTempDir } from "../test/temp-dir.ts";
@@ -34,6 +35,9 @@ beforeAll(async () => {
   await writeFile(path.join(root, "flows", "link.architecture.json"), JSON_OK);
   await symlink(path.join(base, "outside.html"), path.join(root, "flows", "link.html"));
   await writeFile(path.join(root, "flows", "plain.json"), JSON_OK);
+  await writeFile(path.join(root, "flows", "nojson.html"), PICTURE);
+  await writeFile(path.join(root, "flows", "huge.lifecycle.json"), `{"x":"${"a".repeat(PAGE_FILE_MAX_BYTES)}"}`);
+  await writeFile(path.join(root, "flows", "huge.html"), PICTURE);
 });
 
 afterAll(async () => {
@@ -104,6 +108,25 @@ describe("diagram-svg lint", () => {
     expect((await lint("./bad.workflow.json")).map((x) => x.message)).toEqual([
       '<Diagram src="./bad.workflow.json"> is not a JSON object; the reader shows one line instead of the diagram',
     ]);
+  });
+
+  test("a diagram file that did not load is reported, sibling or not", async () => {
+    expect((await lint("./gone.architecture.json", "./nojson.architecture.json", "./huge.lifecycle.json")).map((x) => [x.line, x.message])).toEqual([
+      [5, '<Diagram src="./gone.architecture.json"> file is missing or unreadable; the reader shows one line instead of the diagram'],
+      [7, '<Diagram src="./nojson.architecture.json"> file is missing or unreadable; the reader shows one line instead of the diagram'],
+      [9, '<Diagram src="./huge.lifecycle.json"> file is over its 1 MB cap; the reader shows one line instead of the diagram'],
+    ]);
+  });
+
+  test("another component's file that did not load is not this check's", async () => {
+    const content = `# T\n\n<Query id="Q-1" csv="gone.csv" />\n\n${tag("./ok.architecture.json")}\n`;
+    expect(checkDiagrams(page, content, await loadPageFiles(root, PAGE, content))).toEqual([]);
+  });
+
+  test("a file that did not load is diagram-svg's finding alone in checkPageText", async () => {
+    const content = `# T\n\n${tag("./gone.architecture.json")}\n`;
+    const files = await loadPageFiles(root, PAGE, content);
+    expect(checkPageText({ relPath: PAGE }, content, [], files).map((x) => x.check).filter((c) => !c.includes("tldr"))).toEqual(["diagram-svg"]);
   });
 
   test("runs in checkPageText on a .mdx page, so wiki-check reports it", async () => {

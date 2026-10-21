@@ -309,6 +309,55 @@ describe("<Diagram> through the reader render", () => {
   });
 });
 
+describe("<Diagram> and the glossary pass", () => {
+  // Every text the block writes holds «Hold»: the file name, the title, the
+  // labels, a view's label and note.
+  const HELD = {
+    meta: { title: "Hold board", views: [{ id: "h", label: "Hold view", focus: ["a"], note: "Hold the line." }] },
+    lanes: [{ id: "main", label: "Hold lane" }],
+    states: [
+      { id: "a", label: "Hold", lane: "main", col: 1 },
+      { id: "b", label: "Hold again", lane: "main", col: 2 },
+    ],
+    transitions: [{ from: "a", to: "b", label: "Hold on" }],
+  };
+  const glossary = "\n\n<Glossary>\n\n- **Hold:** a book kept back for one reader\n\n</Glossary>\n";
+  const drawn = svgOf(`<svg viewBox="0 0 10 10"><g data-node-id="a"><text font-size="12">Hold</text></g></svg>`);
+  const missing: DiagramSvgResult = { ...svgOf(""), svg: null, problem: "missing" };
+  const filesOf = (r: PageFiles extends { get: (k: string) => infer R } ? R : never): PageFiles => ({ get: () => r });
+  const STATES: [string, string, PageFiles | undefined][] = [
+    ["drawn, with views", '<Diagram src="./Hold.lifecycle.json" />', filesOf({ ok: true, text: JSON.stringify(HELD), svg: drawn })],
+    ["no picture", '<Diagram src="./Hold.lifecycle.json" />', filesOf({ ok: true, text: JSON.stringify(HELD), svg: missing })],
+    ["not a JSON object", '<Diagram src="./Hold.lifecycle.json" />', filesOf({ ok: true, text: "[]", svg: missing })],
+    ["file not available", '<Diagram src="./Hold.lifecycle.json" />', filesOf({ ok: false, reason: "unavailable" })],
+    ["not loaded", '<Diagram src="./Hold.lifecycle.json" />', undefined],
+  ];
+  const render = (md: string, files: PageFiles | undefined) => renderWikiHtml(md + glossary, () => undefined, { files, views: true });
+  const before = (html: string) => html.slice(0, html.indexOf('class="glossary'));
+
+  test.each(STATES)("%s: nothing in the block is marked", (_name, md, files) => {
+    const html = render(md, files);
+    expect(before(html)).toContain("Hold");
+    expect(before(html)).not.toContain("gl-mark");
+  });
+
+  test("the classes the block writes are the ones the glossary pass was decided for", () => {
+    // A new class here is a new piece of block text: decide whether the
+    // glossary pass may mark it (SKIP_CLASSES in glossary-view.ts), then add it.
+    const seen = new Set<string>();
+    for (const [, md, files] of STATES) {
+      const block = before(render(md, files)).replace(/<svg[\s\S]*?<\/svg>/g, "");
+      for (const m of block.matchAll(/\sclass="([^"]*)"/g)) for (const c of m[1]!.split(/\s+/)) seen.add(c);
+    }
+    expect([...seen].sort()).toEqual(
+      [
+        "dgm", "dgm-fallback", "dgm-foot", "dgm-has-svg", "dgm-lifecycle", "dgm-missing", "dgm-note", "dgm-open",
+        "dgm-svg", "dgm-text", "dgm-text-h", "dgm-unavailable", "dgm-view", "dgm-views",
+      ].sort(),
+    );
+  });
+});
+
 test("the peek strips exactly the diagram chrome", () => {
   expect([...PEEK_DIAGRAM_CHROME]).toEqual([...DIAGRAM_CHROME_CLASSES]);
 });

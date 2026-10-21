@@ -9,6 +9,7 @@
  */
 import type { Block, CodeBlock } from "./markdown-ast.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "./code-spans.ts";
+import { resolveEmbedRelPath } from "./embed.ts";
 
 /** What the loader read for one `csv=`/`sql=` value. "Not found" and "outside
  *  the wiki root" are one reason, `unavailable`, so a page cannot tell them
@@ -93,6 +94,17 @@ export function diagramFlavor(ref: string): DiagramFlavor | null {
 export function diagramSiblingHtml(ref: string): string | null {
   if (!diagramFlavor(ref)) return null;
   return `${ref.slice(0, ref.length - pageFileExtension(ref).length)}.html`;
+}
+
+/** The wiki-relative path the loader reads a `<Diagram src>`'s HTML sibling
+ *  from: the ref must pass the lexical gate for a diagram file, and its
+ *  sibling ({@link diagramSiblingHtml}) is joined onto the page's path by the
+ *  `<Embed>` rule. Null when the ref is no diagram file or the sibling climbs
+ *  above the root. The wiki index pairs the sibling under its page with it. */
+export function diagramSiblingRelPath(pageRelPath: string, ref: string): string | null {
+  if (checkPageFileRef(ref, ["diagram"]) !== "ok") return null;
+  const sibling = diagramSiblingHtml(ref);
+  return sibling === null ? null : resolveEmbedRelPath(pageRelPath.replace(/\\/g, "/"), sibling);
 }
 
 /** True when a segment of `p` is one the wiki index never scans: a dot

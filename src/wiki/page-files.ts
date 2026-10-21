@@ -19,7 +19,7 @@ import {
   PAGE_FILE_MAX_PER_PAGE,
   PAGE_FILE_PAGE_BUDGET_BYTES,
   checkPageFileRef,
-  diagramSiblingHtml,
+  diagramSiblingRelPath,
   hasExcludedSegment,
   pageFileKind,
   PAGE_FILE_COMPONENTS,
@@ -168,8 +168,7 @@ async function readDiagramSibling(
   ref: string,
   budget: { left: number },
 ): Promise<DiagramSvgResult> {
-  const sibling = diagramSiblingHtml(ref);
-  const rel = sibling === null ? null : resolveEmbedRelPath(pageRelPath.replace(/\\/g, "/"), sibling);
+  const rel = diagramSiblingRelPath(pageRelPath, ref);
   if (rel === null) return { ...NO_SVG(), problem: "missing" };
   const found = await resolveContainedFile(root, rel);
   if (!found.ok) return { ...NO_SVG(), problem: "missing" };

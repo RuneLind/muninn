@@ -31,8 +31,9 @@
  *   Query's warning, meta and unavailable lines; a Question card's label,
  *   state, for line and duplicate note; a DeltaTable's Δ column and its
  *   `blockNote` lines; a RunChecklist's count and row labels; an Embed's
- *   fallback; a Historic stamp; a CaseBoard's `blockNote` lines); a word
- *   inside a bare URL is not marked either;
+ *   fallback; a Historic stamp; a CaseBoard's `blockNote` lines; a Diagram's
+ *   text form and its unavailable line); a word inside a bare URL is not
+ *   marked either;
  * - attributes are never read or written, and the text a mark wraps is the
  *   source's own bytes.
  */
@@ -51,6 +52,9 @@ const SKIP_CLASSES = new Set([
   "query-warning", "query-meta", "query-unavailable", "q-label", "q-state", "q-for", "q-duplicate",
   "dt-delta", "dt-note", "dt-warning", "dt-unavailable", "rc-count", "rc-label", "embed-fallback", "historic-stamp",
   "cb-warning", "cb-truncated", "cb-unavailable", "dt-truncated",
+  // A Diagram's text form (another view of the drawing) and its status line;
+  // its other chrome is reader-only or an svg (diagram-block.test.ts pins the set).
+  "dgm-text", "dgm-unavailable",
 ]);
 const INLINE_TAGS = new Set(["strong", "em", "b", "i", "s", "del", "ins", "u", "mark", "span", "sup", "sub", "small"]);
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "wbr", "meta", "link", "col", "source", "area", "base", "embed", "track", "param"]);
