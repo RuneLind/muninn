@@ -212,6 +212,7 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "noconf/archive/projects/old.mdx"), REFERENCE);
   await Bun.write(path.join(tmp, "noconf/archive/projects/short.mdx"), TLDR_NO_MORE.replace("plan_status: in-flight\n", ""));
   await Bun.write(path.join(tmp, "noconf/notes/flight.mdx"), SHIPPED.replace("shipped", "in-flight"));
+  await Bun.write(path.join(tmp, "noconf/plans/drawing.mdx"), ["---", "title: D", "---", "```", "catalog ──▶ loans", "loans ──▶ holds", "```", ""].join("\n"));
 });
 afterAll(async () => {
   for (const f of ["locked/i.mdx", "mixed/j.mdx"]) await chmod(path.join(tmp, f), 0o644).catch(() => {});
@@ -306,6 +307,14 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
 
   test("a single culled page is checked as given, the Tldr checks included", async () => {
     expect((await wikiCheck(path.join(tmp, "page-checks/plans/rs.mdx"))).findings.map((f) => f.check)).toContain("missing-tldr");
+  });
+
+  test("with no .wiki-reader.json text-diagram is skipped too: the plans/ skip reads the folder (fix round 1)", async () => {
+    const page = path.join(tmp, "noconf/plans/drawing.mdx");
+    expect(await runWikiCheck([page])).toEqual({ code: 0, out: [], err: [noRootNote(path.dirname(page))] });
+    const dir = await runWikiCheck([path.join(tmp, "noconf/plans")]);
+    expect(dir.out).toEqual([]);
+    expect(noRootNote("x")).toContain("text-diagram");
   });
 
   test("with no .wiki-reader.json the Tldr checks are skipped, and stderr says so", async () => {

@@ -131,6 +131,27 @@ describe("lint check 20 — text-diagram", () => {
     expect(lint(["```", ...body].join("\n"))).toEqual([]);
   });
 
+  test("an HTML comment closer and a glued n-->0 are not ASCII arrows (fix round 1)", () => {
+    expect(lint(fence(["<!-- research:loans -->", "<!-- wiki:begin -->", "text", "<!-- wiki:end -->"]))).toEqual([]);
+    expect(lint(fence(["<div>", "<!-- keep this -->", "</div>"]))).toEqual([]);
+    expect(lint(fence(["while (n-->0) {", "  sum += n;", "}"]))).toEqual([]);
+    for (const line of ["<!-- x -->", "while (n-->0) {", "x-->y"]) expect([line, holdsDiagramToken(line)]).toEqual([line, false]);
+    for (const line of ["A --> B", "web --> api --> db", "│ --> │", "A-->", "-->B", "(A)-->(B)", "<!-- x --> then A --> B"]) {
+      expect([line, holdsDiagramToken(line)]).toEqual([line, true]);
+    }
+    expect(lint(fence(["catalog --> loans", "loans --> holds"]))).toHaveLength(1);
+  });
+
+  test("rule lines alone do not make a drawing; beside another token line they count (fix round 1)", () => {
+    expect(lint(fence(["Results", "───────", "pass 12"]))).toEqual([]);
+    expect(lint(fence(["Name      Status", "────────  ──────", "foo       ok"]))).toEqual([]);
+    expect(lint(fence(["Totals", "═══════", "━━━━━━━", "loans 4"]))).toEqual([]);
+    for (const line of ["┌──┐", "──▶", "├── loans", "──→", "loans ─── holds", "── │"]) expect([line, holdsDiagramToken(line)]).toEqual([line, true]);
+    // A box edge is no rule line, and a rule line beside an arrow counts: 2 of 6.
+    expect(lint(fence(["┌──────┐", "│ desk │", "└──────┘"]))).toHaveLength(1);
+    expect(lint(fence(["Desk", "────", "renew", "holds", "fines", "desk → shelf"]))).toHaveLength(1);
+  });
+
   test("each fence is judged on its own", () => {
     const page = [fence(["catalog ──▶ loans", "loans ──▶ holds"]), "", fence(["const a = 1;", "const b = 2;"]), "", fence(["holds → shelf", "shelf → desk"])].join("\n");
     expect(lint(page).map((f) => f[0])).toEqual([1, 11]);

@@ -30,14 +30,21 @@ export const TEXT_DIAGRAM_MIN_LINES = 2;
  *  and 1 of 5, which the check misses. */
 export const TEXT_DIAGRAM_MIN_SHARE = 1 / 3;
 
-/** Box-drawing and arrow characters, and the ASCII arrows `-->` and `<--`. */
-const BOX_RE = /[─━│┃┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬▶◀►◄▼▲]|-->|<--/;
+/** Box-drawing and arrow characters, and the ASCII arrow `<--`. */
+const BOX_RE = /[─━│┃┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬▶◀►◄▼▲]|<--/;
 /** A single arrow character counts only when it does not join two word
  *  characters: `red→green` is prose, `A → B` and `──→` are drawing. */
 const ARROW_RE = /(?<![\p{L}\p{N}])[→←↓↑↔↕⇒⇐]|[→←↓↑↔↕⇒⇐](?![\p{L}\p{N}])/u;
+/** `-->` by the same glue rule (`n-->0` is code, `(A)-->(B)` a drawing). An
+ *  HTML comment (`<!-- x -->`) is removed from the line first. */
+const ASCII_ARROW_RE = /(?<![\p{L}\p{N}])-->|-->(?![\p{L}\p{N}])/u;
+const HTML_COMMENT_RE = /<!--.*?-->/g;
+/** A line of rule characters only: a heading underline, a CLI table rule or
+ *  the underline of a sequence's participant heads. */
+const RULE_ONLY_RE = /^[\s─═━]*$/;
 
 export function holdsDiagramToken(line: string): boolean {
-  return BOX_RE.test(line) || ARROW_RE.test(line);
+  return BOX_RE.test(line) || ARROW_RE.test(line) || ASCII_ARROW_RE.test(line.replace(HTML_COMMENT_RE, " "));
 }
 
 /** A tree branch: indentation and `│` columns, then `├` or `└` and a dash. */
@@ -99,6 +106,9 @@ export function checkTextDiagrams(page: { relPath: string }, rawContent: string)
     if (body.length < TEXT_DIAGRAM_MIN_LINES) continue;
     const tokenLines = body.filter(holdsDiagramToken).length;
     if (tokenLines < TEXT_DIAGRAM_MIN_SHARE * body.length) continue;
+    // Rule lines alone are CLI output under a heading; they count only beside
+    // another token line (a sequence's underlined participant heads).
+    if (body.every((l) => RULE_ONLY_RE.test(l) || !holdsDiagramToken(l))) continue;
     if (isTree(body) || isBoxTable(body)) continue;
     const kind = suggestMermaidKind(body);
     findings.push({
