@@ -191,6 +191,26 @@ export const DIAGRAM_CHROME_CLASSES = ["dgm-views", "dgm-note", "dgm-svg", "dgm-
 
 const RO = READER_ONLY_ATTR;
 
+/** The smallest label's font size the picture is drawn at, in CSS px. A 7 px
+ *  archify label at 1:1 measured an 8 px text box; at 8.5 px it is ≥ 9 px. */
+export const DIAGRAM_LABEL_MIN_PX = 8.5;
+
+/** The picture's drawn size: `width`/`height` from its viewBox, scaled up (never
+ *  down) until its smallest `font-size` reaches {@link DIAGRAM_LABEL_MIN_PX}.
+ *  Shrunk to the prose column instead, a 1160-wide map drew labels 4 px tall. */
+function drawnSize(svg: string): string {
+  const open = /^<svg\b[^>]*>/i.exec(svg)?.[0] ?? "";
+  const box = /\sviewBox="\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)\s*"/i.exec(open);
+  const [w, h] = [Number(box?.[1]), Number(box?.[2])];
+  if (!(w > 0 && h > 0)) return svg;
+  const sizes = [...svg.matchAll(/<(?:text|tspan)\b[^>]*\sfont-size="([\d.]+)"/gi)].map((m) => Number(m[1])).filter((n) => n > 0);
+  const k = sizes.length ? Math.max(1, DIAGRAM_LABEL_MIN_PX / Math.min(...sizes)) : 1;
+  return `<svg width="${Math.round(w * k)}" height="${Math.round(h * k)}"` + svg.slice(4);
+}
+
+/** The html sibling is worth a link: it was read, whether or not it drew. */
+const siblingRead = (svg: DiagramSvgResult | undefined) => !!svg && (svg.svg !== null || svg.problem !== "missing");
+
 /** The reader's `<Diagram>`. */
 export const diagramViewHtml: DiagramViewRenderer = (input) => {
   const flavor = diagramFlavor(input.ref);
@@ -220,9 +240,10 @@ export const diagramViewHtml: DiagramViewRenderer = (input) => {
       : "";
   const picture = svg
     ? // One line: the web formatter turns a blank line into <br>, which ends the <svg> in an HTML parser.
-      `<div class="dgm-svg" ${RO}>${svg.replace(/\s*\n\s*/g, " ").replaceAll(DIAGRAM_ID_MARK, input.prefix)}</div>`
+      `<div class="dgm-svg" role="region" aria-label="${escapeHtml(`${label} (drawing)`)}" tabindex="0" ${RO}>` +
+      `${drawnSize(svg.replace(/\s*\n\s*/g, " ").replaceAll(DIAGRAM_ID_MARK, input.prefix))}</div>`
     : `<p class="dgm-missing" ${RO}>${escapeHtml(`Picture not shown: ${html ? pageFileName(html) : name}`)}</p>`;
-  const foot = html
+  const foot = html && siblingRead(input.svg)
     ? `<figcaption class="dgm-foot" ${RO}><a class="dgm-open" data-dgm-html="${escapeHtml(html)}" target="_blank" rel="noopener" hidden>Open interactive ↗</a></figcaption>`
     : "";
   return (
@@ -255,8 +276,19 @@ export function diagramCss(scope: string): string {
     ${scope} .dgm-view:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
     ${scope} .dgm-note { margin: 0 0 0.5rem; font-size: 0.85em; color: var(--text-soft); }
     ${scope} .dgm-note[hidden], ${scope} .dgm-open[hidden] { display: none; }
-    ${scope} .dgm-svg { overflow-x: auto; }
-    ${scope} .dgm-svg > svg { display: block; width: 100%; min-width: 36rem; height: auto; }
+    /* The picture keeps its natural size (width/height from the viewBox, see
+       drawnSize) and fills a wider column; past the column it scrolls in this
+       named region, whose scrollbar is styled so it is always drawn: an overlay
+       scrollbar gives no sign that half the drawing is out of view. */
+    ${scope} .dgm-svg { overflow-x: auto; overflow-y: hidden; border-radius: 4px; }
+    ${scope} .dgm-svg:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 2px; }
+    ${scope} .dgm-svg::-webkit-scrollbar { height: 10px; }
+    ${scope} .dgm-svg::-webkit-scrollbar-track { background: var(--bg-surface); border-radius: 5px; }
+    ${scope} .dgm-svg::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 5px; }
+    @supports not selector(::-webkit-scrollbar) {
+      ${scope} .dgm-svg { scrollbar-color: var(--text-muted) var(--bg-surface); }
+    }
+    ${scope} .dgm-svg > svg { display: block; max-width: none; min-width: 100%; height: auto; }
     ${scope} .dgm-svg [data-node-id], ${scope} .dgm-svg [data-edge-from] { transition: opacity 0.2s; }
     ${scope} .dgm-svg .dgm-dim { opacity: 0.18; }
     ${scope} .dgm-text { font-size: 0.9em; }
@@ -275,6 +307,8 @@ export function diagramCss(scope: string): string {
     }
     @media print {
       ${scope} .dgm-views, ${scope} .dgm-foot { display: none; }
+      ${scope} .dgm-svg { overflow: visible; }
+      ${scope} .dgm-svg > svg { width: 100%; min-width: 0; }
     }
     @media (forced-colors: active) {
       ${scope} .dgm-view[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }

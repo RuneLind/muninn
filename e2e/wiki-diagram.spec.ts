@@ -23,6 +23,10 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 
+// Playwright's headless Chromium passes --hide-scrollbars, which would hide the
+// cue a wide drawing's region gives that it scrolls.
+test.use({ launchOptions: { ignoreDefaultArgs: ["--hide-scrollbars"] } });
+
 const PORT = e2ePort("wiki-diagram");
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
@@ -105,6 +109,52 @@ const PAGE = [
   "",
 ].join("\n");
 
+
+/**
+ * As wide as the real archify files (viewBox 816–1160) and with their label
+ * classes and sizes: 7 px «fine» labels, 8 px edge labels on a mask, 11 px
+ * names, every coloured `t-` class on its own `c-` fill and on the bare panel.
+ */
+const WIDE_W = 1160;
+const KINDS = ["frontend", "backend", "database", "cloud", "security", "messagebus", "external"] as const;
+const wideNode = (k: string, i: number) => {
+  const x = 20 + i * 165;
+  return (
+    `<g data-node-id="${k}"><rect x="${x}" y="40" width="150" height="70" rx="6" class="c-${k}"/>` +
+    `<text x="${x + 75}" y="66" text-anchor="middle" font-size="11" class="t-primary">${k}-service-name</text>` +
+    `<text x="${x + 75}" y="82" text-anchor="middle" font-size="8" class="t-muted">sub ${k}</text>` +
+    `<text x="${x + 75}" y="98" text-anchor="middle" font-size="7" class="t-${k}">fine ${k}</text></g>`
+  );
+};
+const edgeLabel = (k: string, i: number) => {
+  const x = 20 + i * 165;
+  return `<g><rect x="${x + 20}" y="150" width="110" height="14" class="c-mask"/><text x="${x + 75}" y="160" text-anchor="middle" font-size="8" class="t-${k}">edge ${k}</text></g>`;
+};
+const bare = (cls: string, i: number) => `<g><text x="${20 + i * 125}" y="220" font-size="7" class="${cls}">bare ${cls}</text></g>`;
+const WIDE_HTML = page(
+  DEFS.replace('width="600" height="200"', `width="${WIDE_W}" height="260"`) +
+    KINDS.map(wideNode).join("") +
+    KINDS.map(edgeLabel).join("") +
+    ["t-dim", "t-muted", ...KINDS.map((k) => `t-${k}`)].map(bare).join(""),
+).replace('viewBox="0 0 600 200"', `viewBox="0 0 ${WIDE_W} 260"`);
+const WIDE_JSON = { meta: { title: "Wide map" }, components: KINDS.map((k) => ({ id: k, label: k, type: k })), connections: [] };
+
+const WIDE_REL = "flows/wide.mdx";
+const WIDE_PAGE = [
+  "---",
+  "title: Wide",
+  "---",
+  "",
+  "# Wide",
+  "",
+  '<Diagram src="./wide.architecture.json" />',
+  "",
+  "## No html",
+  "",
+  '<Diagram src="./nohtml.architecture.json" />',
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -116,6 +166,11 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "flows", "system.html"), ARCH_HTML, "utf8");
   await writeFile(path.join(root, "flows", "order.lifecycle.json"), JSON.stringify(LIFE_JSON), "utf8");
   await writeFile(path.join(root, "flows", "order.html"), LIFE_HTML, "utf8");
+  await writeFile(path.join(root, WIDE_REL), WIDE_PAGE, "utf8");
+  await writeFile(path.join(root, "flows", "wide.architecture.json"), JSON.stringify(WIDE_JSON), "utf8");
+  await writeFile(path.join(root, "flows", "wide.html"), WIDE_HTML, "utf8");
+  // A diagram whose html sibling does not exist.
+  await writeFile(path.join(root, "flows", "nohtml.architecture.json"), JSON.stringify(WIDE_JSON), "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -257,4 +312,105 @@ test.describe("Wiki reader: Diagram", () => {
     const res = await page.request.get(new URL(href!, BASE).toString());
     expect(res.ok()).toBe(true);
   });
+
+  test("an html sibling that is not there gets no «Open interactive» link", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(WIDE_REL)}`);
+    const fig = page.locator(".wiki-article figure.dgm").nth(1);
+    await expect(fig).toContainText("Picture not shown: nohtml.html");
+    // Let the client enhancer run, then look: no link, hidden or shown.
+    await expect(page.locator(".wiki-article figure.dgm").first().locator("a.dgm-open")).toBeVisible();
+    await expect(fig.locator("a.dgm-open")).toHaveCount(0);
+  });
 });
+
+/** WCAG contrast of every label against what is drawn behind it: the last
+ *  rect of its group (a node box or an edge-label mask), else the figure. */
+async function labelContrast(page: Page): Promise<{ text: string; ratio: number }[]> {
+  return page.locator(".wiki-article figure.dgm").first().evaluate((fig) => {
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+    const rgba = (css: string): number[] => {
+      probe.clearRect(0, 0, 1, 1);
+      probe.fillStyle = "#000";
+      probe.fillStyle = css;
+      probe.fillRect(0, 0, 1, 1);
+      const d = probe.getImageData(0, 0, 1, 1).data;
+      return [d[0]!, d[1]!, d[2]!, d[3]! / 255];
+    };
+    const over = (fg: number[], bg: number[]) => [0, 1, 2].map((i) => fg[i]! * fg[3]! + bg[i]! * (1 - fg[3]!)).concat(1);
+    const lum = (c: number[]) => {
+      const f = (v: number) => ((v /= 255) <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * f(c[0]!) + 0.7152 * f(c[1]!) + 0.0722 * f(c[2]!);
+    };
+    const panel = over(rgba(getComputedStyle(fig).backgroundColor), [255, 255, 255, 1]);
+    return Array.from(fig.querySelectorAll(".dgm-svg text")).map((t) => {
+      const rect = Array.from(t.closest("g")?.querySelectorAll(":scope > rect") ?? []).pop();
+      const bg = rect ? over(rgba(getComputedStyle(rect).fill), panel) : panel;
+      const [hi, lo] = [lum(over(rgba(getComputedStyle(t).fill), bg)), lum(bg)].sort((a, b) => b - a);
+      return { text: t.textContent ?? "", ratio: Math.round(((hi! + 0.05) / (lo! + 0.05)) * 100) / 100 };
+    });
+  });
+}
+
+test.describe("Wiki reader: a Diagram as wide as archify draws", () => {
+  async function openWide(page: Page, width: number): Promise<void> {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(WIDE_REL)}`);
+    await expect(page.locator(".wiki-article figure.dgm .dgm-svg svg")).toHaveCount(1);
+  }
+
+  /** Every label's height, and whether one lies outside the box with no visible way to scroll to it. */
+  const legibility = (page: Page) =>
+    page.locator(".wiki-article figure.dgm .dgm-svg").first().evaluate((box: HTMLElement) => {
+      const b = box.getBoundingClientRect();
+      const texts = Array.from(box.querySelectorAll("text")).map((t) => {
+        const r = t.getBoundingClientRect();
+        return { text: t.textContent ?? "", h: r.height, cut: r.left < b.left - 0.5 || r.right > b.right + 0.5 };
+      });
+      const scrolls = box.scrollWidth > box.clientWidth;
+      return {
+        minHeight: Math.min(...texts.map((t) => t.h)),
+        cut: texts.filter((t) => t.cut).map((t) => t.text),
+        scrolls,
+        // A classic scrollbar takes layout height; an overlay one (no cue) takes none.
+        scrollbar: box.offsetHeight - box.clientHeight,
+        role: box.getAttribute("role"),
+        name: box.getAttribute("aria-label") ?? "",
+        tabIndex: box.tabIndex,
+        pageScroll: document.scrollingElement!.scrollWidth - document.scrollingElement!.clientWidth,
+      };
+    });
+
+  for (const scheme of ["light", "dark"] as const) {
+    for (const width of [1280, 760]) {
+      test(`${scheme} ${width}: every label is legible, and one out of view sits in a named region that shows it scrolls`, async ({ page }) => {
+        await page.emulateMedia({ colorScheme: scheme });
+        await openWide(page, width);
+        const m = await legibility(page);
+        expect(m.minHeight).toBeGreaterThanOrEqual(9);
+        expect(m.pageScroll).toBeLessThanOrEqual(0);
+        if (m.cut.length > 0) {
+          expect(m.scrolls).toBe(true);
+          expect(m.scrollbar).toBeGreaterThan(0);
+          expect(m.role).toBe("region");
+          expect(m.name).toContain("Wide map");
+          expect(m.tabIndex).toBe(0);
+          // Scrolled to the end, the last label is in view.
+          const box = page.locator(".wiki-article figure.dgm .dgm-svg").first();
+          await box.evaluate((el) => (el.scrollLeft = el.scrollWidth));
+          expect((await legibility(page)).cut).not.toContain("bare t-external");
+          await box.focus();
+          expect(await box.evaluate((el) => getComputedStyle(el).outlineStyle)).not.toBe("none");
+        }
+      });
+    }
+
+    test(`${scheme}: every label reads at 4.5:1 or better on what is behind it`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await openWide(page, 1280);
+      const low = (await labelContrast(page)).filter((l) => l.ratio < 4.5);
+      expect(low).toEqual([]);
+    });
+  }
+});
+

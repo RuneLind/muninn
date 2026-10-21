@@ -95,35 +95,35 @@ const RULES: readonly (readonly [string, string])[] = [
   ],
   [
     ".t-dim",
-    "fill: var(--text-muted)"
+    "fill: color-mix(in srgb, var(--text-muted) 55%, var(--text-primary))"
   ],
   [
     ".t-frontend",
-    "fill: var(--status-cyan)"
+    "fill: color-mix(in srgb, var(--status-cyan) 55%, var(--text-primary))"
   ],
   [
     ".t-backend",
-    "fill: var(--status-success)"
+    "fill: color-mix(in srgb, var(--status-success) 55%, var(--text-primary))"
   ],
   [
     ".t-database",
-    "fill: var(--status-magenta)"
+    "fill: color-mix(in srgb, var(--status-magenta) 55%, var(--text-primary))"
   ],
   [
     ".t-cloud",
-    "fill: var(--status-warning)"
+    "fill: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary))"
   ],
   [
     ".t-security",
-    "fill: var(--status-error)"
+    "fill: color-mix(in srgb, var(--status-error) 55%, var(--text-primary))"
   ],
   [
     ".t-messagebus",
-    "fill: var(--status-tool)"
+    "fill: color-mix(in srgb, var(--status-tool) 55%, var(--text-primary))"
   ],
   [
     ".t-external",
-    "fill: var(--text-muted)"
+    "fill: color-mix(in srgb, var(--text-muted) 55%, var(--text-primary))"
   ],
   [
     ".semantic-sigil",

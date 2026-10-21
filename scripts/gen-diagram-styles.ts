@@ -47,6 +47,18 @@ export const TOKEN_MAP: Readonly<Record<string, string>> = {
   "--lane-stroke": "var(--border-secondary)",
 };
 
+/**
+ * A coloured label (`t-backend`, `t-dim`, …) is its hue mixed this far toward
+ * `--text-primary`: the hue alone measured 2.55:1 (light `t-backend` on its own
+ * 14 % fill). At 55 % every hue reads ≥ 5.2:1 light and ≥ 6.8:1 dark on every
+ * `c-` fill, `--bg-surface` and `--bg-panel` (computed from the theme tokens).
+ */
+export const TEXT_INK_PCT = 55;
+const TEXT_SELECTOR = /^(?:svg\s+)?\.t-[a-z-]+$/;
+/** A label's value: a hue or a muted grey becomes ink; body text stays. */
+const inkFor = (value: string) =>
+  /^var\(--(?:status-[a-z]+|text-muted)\)$/.test(value) ? `color-mix(in srgb, ${value} ${TEXT_INK_PCT}%, var(--text-primary))` : value;
+
 const CLASS_RE = /\.((?:[csatm]-[a-z][a-z0-9-]*)|semantic-sigil|sigil-fill)\b/g;
 
 export interface DiagramRule {
@@ -64,6 +76,7 @@ export function extractRules(templateHtml: string): { rules: DiagramRule[]; clas
     const kept = selectors.filter((s) => !s.includes("[data-preset") && /\.(?:[csatm]-[a-z]|semantic-sigil|sigil-fill)/.test(s));
     if (kept.length === 0) continue;
     for (const s of kept) for (const c of s.matchAll(CLASS_RE)) classes.add(c[1]!);
+    const isLabel = kept.every((s) => TEXT_SELECTOR.test(s));
     const body = m[2]!
       .split(";")
       .map((d) => d.trim())
@@ -72,7 +85,7 @@ export function extractRules(templateHtml: string): { rules: DiagramRule[]; clas
         d.replace(/var\((--[a-z0-9-]+)\)/g, (_, v: string) => {
           const to = TOKEN_MAP[v];
           if (!to) throw new Error(`archify variable ${v} has no reader token (selector ${kept[0]})`);
-          return to;
+          return isLabel ? inkFor(to) : to;
         }),
       )
       .join("; ");

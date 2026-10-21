@@ -120,6 +120,31 @@ describe("diagramViewHtml", () => {
     expect(html).toContain("<li>New → Paid</li>");
   });
 
+  test("«Open interactive» only when the html sibling was read", () => {
+    const open = (svg?: DiagramSvgResult) => diagramViewHtml({ ref, text, svg, prefix: "dgm1-" }).includes("dgm-open");
+    expect(open(svgOf(PICTURE))).toBe(true);
+    // The file is there but drew nothing: its viewer still opens.
+    expect(open({ ...svgOf(""), svg: null, problem: "unparsable" })).toBe(true);
+    expect(open({ ...svgOf(""), svg: null, problem: "too-large" })).toBe(true);
+    // No file, or nobody looked: no link to a 404.
+    expect(open({ ...svgOf(""), svg: null, problem: "missing" })).toBe(false);
+    expect(open(undefined)).toBe(false);
+  });
+
+  test("the picture keeps its natural size inside a named, focusable scroll region", () => {
+    const wide = `<svg viewBox="0 0 1160 552" role="img"><text>x</text></svg>`;
+    const html = diagramViewHtml({ ref, text, svg: svgOf(wide), prefix: "dgm1-" });
+    expect(html).toContain('<svg width="1160" height="552" viewBox="0 0 1160 552"');
+    expect(html).toMatch(/<div class="dgm-svg" role="region" aria-label="Order \(drawing\)" tabindex="0"/);
+    // A 7 px label scales the drawing up until it is drawn at 8.5 px; 12 px labels never shrink it.
+    const fine = `<svg viewBox="0 0 1160 552"><text font-size="12">a</text><text x="1" font-size="7">b</text></svg>`;
+    expect(diagramViewHtml({ ref, text, svg: svgOf(fine), prefix: "dgm1-" })).toContain('<svg width="1409" height="670"');
+    const big = `<svg viewBox="0 0 600 200"><text font-size="12">a</text></svg>`;
+    expect(diagramViewHtml({ ref, text, svg: svgOf(big), prefix: "dgm1-" })).toContain('<svg width="600" height="200"');
+    // No usable viewBox: no size is invented.
+    expect(diagramViewHtml({ ref, text, svg: svgOf("<svg><text>x</text></svg>"), prefix: "dgm1-" })).toContain("<svg><text>");
+  });
+
   test("an unreadable file is one line", () => {
     expect(diagramViewHtml({ ref, text: "nope", prefix: "dgm1-" })).toContain("Diagram file not readable: order.lifecycle.json");
   });
