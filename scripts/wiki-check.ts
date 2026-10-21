@@ -18,8 +18,8 @@
  * of the wiki root (`.wiki-reader.json` `include`, no dot directories or
  * `node_modules`, a `blogs/src/` source dropped only when its compiled `.html`
  * sibling exists), minus a page a readable same-stem `.md` shadows. In a
- * directory, a culled page (`signal: none`) gets every check but the Tldr and
- * component checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
+ * directory, a culled page (`signal: none`) gets every check but the Tldr,
+ * component and text-diagram checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
  * `.wiki-reader.json`, else the given directory (or the page's own folder);
  * `relPath` is relative to it. With no `.wiki-reader.json`, the root is a guess,
  * so missing-tldr, tldr-no-more and text-diagram, which read the page's folder, are skipped

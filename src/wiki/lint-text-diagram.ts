@@ -1,7 +1,7 @@
 /**
  * Lint check 20 — a drawing in a plain code fence. One key, `text-diagram`,
  * info, page text only (`checkPageText`, so `wiki-check` reports it). A fence
- * with no language, or `text`, is a drawing when it has at least
+ * with no language, or `text` in any case, is a drawing when it has at least
  * {@link TEXT_DIAGRAM_MIN_LINES} non-blank lines and at least
  * {@link TEXT_DIAGRAM_MIN_SHARE} of them hold an arrow or box token. The rule
  * counts lines, not characters: measured on mimir and melosys-kode-wiki
@@ -13,10 +13,12 @@
  * `plans/` are skipped: both wikis keep archive pages verbatim, and a plan is
  * a work record (D13). The finding suggests `sequenceDiagram` when the fence
  * names participants on its first line and numbers its messages, else
- * `flowchart`.
+ * `flowchart`. A code fence is one the reader renders as code
+ * (`readerFences`): backticks only, an unclosed opener is prose, CRLF folded.
  */
 
-import { fenceLineStates, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
+import { frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
+import { readerFences } from "../format/markdown-ast.ts";
 import type { LintFinding } from "./lint.ts";
 
 export const TEXT_DIAGRAM_LINT_CHECKS = ["text-diagram"] as const;
@@ -71,14 +73,19 @@ function isBoxTable(lines: readonly string[]): boolean {
   return lines.every((l) => /^\s*[┌└├╔╚╠]?[─═┼┬┴┤┐┘╬╦╩╣╗╝\s]*$/.test(l) || (TABLE_ROW_RE.test(l) && !ARROW_RE.test(l) && !/[▶◀►◄▼▲]/.test(l)));
 }
 
-/** A numbered message: `1.`, `1)`, `(1)` or `①`, after any lifeline columns. */
-const NUMBERED_RE = /^[\s│┃|]*(?:\d+[.)]|\(\d+\)|[①-⑳])\s/;
+/** A numbered message: `1.`, `1)`, `1:`, `(1)` or `①`, after any lifeline
+ *  columns and arrow stems (`│── 1. GET`, `│◀─ 2. 200`). */
+const NUMBERED_RE = /^[\s│┃|─━◀▶►◄<>-]*(?:\d+[.):]|\(\d+\)|[①-⑳])\s/;
+/** A first-line column head that is an arrow, so the line is a chain, not
+ *  participants. A box edge (`┌───┐`) is a head. */
+const ARROW_HEAD_RE = /[▶◀►◄→←↔⇒⇐]|-->|<--|^[─━-]+$/;
 
 /** `sequenceDiagram` when the first line names two or more participants
- *  (column heads three or more spaces apart) and two or more lines are
- *  numbered messages; `flowchart` otherwise. */
+ *  (column heads three or more spaces apart, none of them an arrow) and two
+ *  or more lines are numbered messages; `flowchart` otherwise. */
 export function suggestMermaidKind(lines: readonly string[]): "sequenceDiagram" | "flowchart" {
   const heads = lines[0]!.trim().split(/\s{3,}/).filter((h) => h !== "");
+  if (heads.some((h) => ARROW_HEAD_RE.test(h))) return "flowchart";
   const numbered = lines.filter((l) => NUMBERED_RE.test(l)).length;
   return heads.length >= 2 && numbered >= 2 ? "sequenceDiagram" : "flowchart";
 }
@@ -90,19 +97,11 @@ export function checkTextDiagrams(page: { relPath: string }, rawContent: string)
   if (SKIPPED_FOLDERS.some((f) => page.relPath.startsWith(f))) return [];
   const lines = rawContent.split("\n");
   const start = frontmatterEndLine(lines);
-  // "literal": an opener with no closer is prose, as the reader shows it.
-  const states = fenceLineStates(lines.slice(start), "literal");
   const findings: LintFinding[] = [];
-  for (let i = 0; i < states.length; i++) {
-    if (states[i] !== "opener") continue;
-    const opener = lines[start + i]!;
-    const lang = opener.trim().replace(/^(`{3,}|~{3,})/, "").trim().split(/\s/)[0]!.toLowerCase();
-    let j = i + 1;
-    while (j < states.length && states[j] === "inside") j++;
-    const body = lines.slice(start + i + 1, start + j).filter((l) => l.trim() !== "");
-    const at = i;
-    i = j;
-    if (lang !== "" && lang !== "text") continue;
+  for (const { opener, closer, lang } of readerFences(lines.slice(start).join("\n"))) {
+    const at = start + opener;
+    const body = lines.slice(at + 1, start + closer).filter((l) => l.trim() !== "");
+    if (lang !== "" && lang.toLowerCase() !== "text") continue;
     if (body.length < TEXT_DIAGRAM_MIN_LINES) continue;
     const tokenLines = body.filter(holdsDiagramToken).length;
     if (tokenLines < TEXT_DIAGRAM_MIN_SHARE * body.length) continue;
@@ -115,7 +114,7 @@ export function checkTextDiagrams(page: { relPath: string }, rawContent: string)
       check: "text-diagram",
       relPath: page.relPath,
       message: `a text drawing in a code fence (${tokenLines} of ${body.length} lines hold an arrow or box); draw it as a mermaid ${kind}`,
-      line: start + at + 1,
+      line: at + 1,
       severity: "info",
     });
   }

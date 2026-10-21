@@ -97,6 +97,42 @@ describe("lint check 20 — text-diagram", () => {
     expect(suggestMermaidKind(["loans pipeline", "1. harvest → cluster", "2. cluster → draft"])).toBe("flowchart");
   });
 
+  test("a lifeline sequence numbered after its arrows, or with `1:`, is a sequenceDiagram (fix round 1 batch 2)", () => {
+    expect(suggestMermaidKind(["Client            Server", "  │── 1. GET /x ──▶│", "  │◀─ 2. 200 ──────│"])).toBe("sequenceDiagram");
+    expect(suggestMermaidKind(["Client            Server", "  │ 1: GET /x ──▶│", "  │◀─ 2: 200 ────│"])).toBe("sequenceDiagram");
+    expect(suggestMermaidKind(["Client            Server", "1: GET /x", "2: 200"])).toBe("sequenceDiagram");
+    expect(suggestMermaidKind(["Client            Server", "  │── 1. GET /x ──▶│", "  │ ok │"])).toBe("flowchart");
+    expect(lint(fence(["Client            Server", "  │── 1. GET /x ──▶│", "  │◀─ 2. 200 ──────│"]))[0]?.[2]).toEndWith("draw it as a mermaid sequenceDiagram");
+  });
+
+  test("a chain line with a numbered legend is a flowchart: arrow tokens are not participants (fix round 1 batch 2)", () => {
+    expect(suggestMermaidKind(["web   ──▶   api   ──▶   db", "1. web calls api", "2. api reads db"])).toBe("flowchart");
+    expect(suggestMermaidKind(["web   -->   api   -->   db", "1. web calls api", "2. api reads db"])).toBe("flowchart");
+    expect(suggestMermaidKind(["web   ──HTTP──►   api", "1. web calls api", "2. api reads db"])).toBe("flowchart");
+    expect(suggestMermaidKind(["web   ───   api", "1. web calls api", "2. api reads db"])).toBe("flowchart");
+    // Box-drawn participant heads are heads, not arrows.
+    expect(suggestMermaidKind(["┌─────┐        ┌─────┐", "1. web calls api", "2. api reads db"])).toBe("sequenceDiagram");
+    expect(lint(fence(["web   ──▶   api   ──▶   db", "1. web calls api", "2. api reads db"]))[0]?.[2]).toEndWith("draw it as a mermaid flowchart");
+  });
+
+  test("`(1)` numbering is a numbered message", () => {
+    expect(suggestMermaidKind(["Desk            Shelf", "(1) renew", "(2) commit"])).toBe("sequenceDiagram");
+  });
+
+  test("a tree's connector: a dash run alone, or an ASCII arrow alone, is one", () => {
+    expect(lint(fence(["Loan", "  ├── book ─── Book#42", "  └── holds"]))).toHaveLength(1);
+    expect(lint(fence(["Loan", "  ├── book --> Book#42", "  └── holds"]))).toHaveLength(1);
+    expect(lint(fence(["Loan", "  ├── book <-- Book#42", "  └── holds"]))).toHaveLength(1);
+    expect(lint(fence(["Loan", "  ├── book", "  └── holds"]))).toEqual([]);
+  });
+
+  test("a tree is at least half branch lines", () => {
+    // 2 of 4 lines are branches: a tree.
+    expect(lint(fence(["library/", "├── catalog/", "└── loans/", "renewals live here"]))).toEqual([]);
+    // 1 of 3: under half, so not a tree, and 1 of 3 lines hold a token.
+    expect(lint(fence(["library/", "└── loans/", "renewals live here"]))).toHaveLength(1);
+  });
+
   test("archive/ and plans/ are skipped as a path prefix only", () => {
     const page = fence(CHAIN_OVER_PORTS);
     expect(lint(page, "archive/x/y.md")).toEqual([]);
@@ -113,9 +149,10 @@ describe("lint check 20 — text-diagram", () => {
     expect(lint(page, "flows/loans.md", { culled: true })).toEqual([]);
   });
 
-  test("fences: tildes, longer runs, indented and nested in a component behave like the other lints", () => {
+  test("fences are the reader's: backticks only, longer runs, indented and nested in a component", () => {
     const body = ["catalog ──▶ loans", "loans ──▶ holds"];
-    expect(lint(fence(body, "~~~", "~~~"))).toHaveLength(1);
+    // The reader renders a `~~~` block as prose, so it is no code fence (fix round 1 batch 2).
+    expect(lint(fence(body, "~~~", "~~~"))).toEqual([]);
     // A four-backtick fence holding a three-backtick line is one fence.
     expect(lint(["````", "```", ...body, "```", "````"].join("\n"))).toEqual([
       [1, "info", "a text drawing in a code fence (2 of 4 lines hold an arrow or box); draw it as a mermaid flowchart"],
@@ -129,6 +166,24 @@ describe("lint check 20 — text-diagram", () => {
     ]);
     // An opener with no closer is prose, as the reader shows it.
     expect(lint(["```", ...body].join("\n"))).toEqual([]);
+  });
+
+  test("a CRLF page is judged like its LF twin: lines, info string and line numbers (fix round 1 batch 2)", () => {
+    const crlf = (lines: string[]) => lines.join("\r\n") + "\r\n";
+    expect(lint(crlf(["```", "A ──► B", "B ──► C", "```"]))).toEqual([
+      [1, "info", "a text drawing in a code fence (2 of 2 lines hold an arrow or box); draw it as a mermaid flowchart"],
+    ]);
+    // Past the frontmatter, with a `text` info string; a `ts` one is still skipped.
+    const page = ["---", "title: Loans", "---", "# Loans", "", "```text", "catalog ──▶ loans", "loans ──▶ holds", "```", "", "```ts", "a ──▶ b", "b ──▶ c", "```"];
+    expect(lint(crlf(page))).toEqual(lint(page.join("\n")));
+    expect(lint(crlf(page))).toEqual([[6, "info", "a text drawing in a code fence (2 of 2 lines hold an arrow or box); draw it as a mermaid flowchart"]]);
+    // A closer with a trailing CR closes; an unclosed CRLF opener stays prose.
+    expect(lint(crlf(["```", "A ──► B", "B ──► C"]))).toEqual([]);
+  });
+
+  test("two fences back to back are two fences (fix round 1 batch 2)", () => {
+    const page = [fence(["catalog ──▶ loans", "loans ──▶ holds"]), fence(["const a = 1;", "const b = 2;"]), fence(["holds → shelf", "shelf → desk"])].join("\n");
+    expect(lint(page).map((f) => f[0])).toEqual([1, 9]);
   });
 
   test("an HTML comment closer and a glued n-->0 are not ASCII arrows (fix round 1)", () => {
