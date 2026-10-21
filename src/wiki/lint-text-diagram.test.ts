@@ -198,6 +198,11 @@ describe("lint check 20 — text-diagram", () => {
     expect(lint(fence(["catalog --> loans", "loans --> holds"]))).toHaveLength(1);
   });
 
+  test("the comment strip leaves a gap and strips every comment (fix round 2)", () => {
+    expect(holdsDiagramToken("x<!--c-->-->y")).toBe(true);
+    expect(holdsDiagramToken("<!-- a --> <!-- b -->")).toBe(false);
+  });
+
   test("rule lines alone do not make a drawing; beside another token line they count (fix round 1)", () => {
     expect(lint(fence(["Results", "───────", "pass 12"]))).toEqual([]);
     expect(lint(fence(["Name      Status", "────────  ──────", "foo       ok"]))).toEqual([]);
