@@ -523,14 +523,28 @@ test("the peek strips exactly the diagram chrome", () => {
 });
 
 describe("diagramEdgeDimmed", () => {
+  // archify's guided-view rule: an edge stays lit only when both its ends are in focus.
   const focus = new Set(["a", "b"]);
-  test("dims only an edge whose both ends are out of focus", () => {
-    expect(diagramEdgeDimmed(focus, "c", "d")).toBe(true);
-    expect(diagramEdgeDimmed(focus, "a", "d")).toBe(false);
-    expect(diagramEdgeDimmed(focus, "c", "b")).toBe(false);
-  });
-  test("the All view dims nothing", () => {
+  test("the All view (empty focus) dims nothing", () => {
     expect(diagramEdgeDimmed(new Set(), "c", "d")).toBe(false);
+    expect(diagramEdgeDimmed(new Set(), "a", "a")).toBe(false);
+  });
+  test("an edge with both ends in focus stays lit", () => {
+    expect(diagramEdgeDimmed(focus, "a", "b")).toBe(false);
+    expect(diagramEdgeDimmed(focus, "b", "a")).toBe(false);
+  });
+  test("an edge with only its from end in focus dims", () => {
+    expect(diagramEdgeDimmed(focus, "a", "d")).toBe(true);
+  });
+  test("an edge with only its to end in focus dims", () => {
+    expect(diagramEdgeDimmed(focus, "c", "b")).toBe(true);
+  });
+  test("an edge with neither end in focus dims", () => {
+    expect(diagramEdgeDimmed(focus, "c", "d")).toBe(true);
+  });
+  test("a self-edge follows its one node", () => {
+    expect(diagramEdgeDimmed(focus, "a", "a")).toBe(false);
+    expect(diagramEdgeDimmed(focus, "c", "c")).toBe(true);
   });
 });
 

@@ -35,17 +35,19 @@ function applyChartToggle(target: Element | null): boolean {
   return true;
 }
 
-/** Whether a diagram view dims an edge: both ends out of focus. An edge with
- *  one end in focus stays lit, since it is how the focused part connects. An
- *  empty focus (the "All" view) dims nothing. */
+/** Whether a diagram view dims an edge: archify's guided-view rule
+ *  (`Archify.focus.setMany` in `selection` mode), where an edge stays lit only
+ *  when both its ends are in focus, so an edge with one end out dims. An empty
+ *  focus (the "All" view) dims nothing. */
 export function diagramEdgeDimmed(focus: ReadonlySet<string>, from: string, to: string): boolean {
-  return focus.size > 0 && !focus.has(from) && !focus.has(to);
+  return focus.size > 0 && !(focus.has(from) && focus.has(to));
 }
 
 /** Apply one `<Diagram>` view button; false when `target` is not one. Dims
  *  each node outside the view's focus (`data-node-id`) and each edge whose
- *  ends are both outside it (`data-edge-from`/`data-edge-to`); an element
- *  with neither attribute (the lifecycle's main rail) never dims. */
+ *  ends are not both inside it (`data-edge-from`/`data-edge-to`); an element
+ *  with no edge attributes (the lifecycle's main rail, one bare `<path>` in
+ *  archify) never dims. */
 function applyDiagramView(target: Element | null): boolean {
   const btn = target?.closest?.<HTMLElement>("button[data-dgm-view]");
   const fig = btn?.closest<HTMLElement>("figure.dgm");

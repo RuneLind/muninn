@@ -7,8 +7,8 @@
  * What only a laid-out page can answer: two diagrams on one page keep every id
  * unique and every arrowhead's `marker-end` resolves to a drawn marker; the
  * archify classes take the reader's tokens in both themes; a view dims the
- * nodes out of focus and the edges with both ends out, and never the
- * lifecycle's main rail; the text form is visually hidden beside the picture
+ * nodes out of focus and every edge whose ends are not both in focus
+ * (archify's guided-view rule), and never the lifecycle's main rail; the text form is visually hidden beside the picture
  * and is what a peek shows; the «Open interactive» link points at the html;
  * the picture fills the column down to its legibility floor, scrolls only
  * below it, and is a tab stop only while it scrolls.
@@ -75,7 +75,8 @@ const ARCH_JSON = {
   ],
 };
 
-// The lifecycle's main rail is plain paths with no data-edge-* (archify draws it so).
+// The lifecycle's main rail carries no data-edge-* (archify's renderLifecycleRail
+// draws one bare <path>); two bare paths here stand in for it.
 const LIFE_HTML = page(
   DEFS + node("new", 20, "c-frontend") + node("paid", 240, "c-backend") + node("sent", 460, "c-backend") +
     '<path d="M 120 85 L 238 85" class="a-default" marker-end="url(#arrowhead)"/><path d="M 340 85 L 458 85" class="a-default" marker-end="url(#arrowhead)"/>',
@@ -348,15 +349,16 @@ test.describe("Wiki reader: Diagram", () => {
     });
   }
 
-  test("views dim the nodes out of focus and the edges with both ends out", async ({ page }) => {
+  test("views dim the nodes out of focus and every edge whose ends are not both in focus", async ({ page }) => {
     await open(page);
     const fig = arch(page);
     await fig.locator('button[data-dgm-view="back"]').click();
-    expect(await dimmed(page, fig)).toEqual(["web"]);
+    // web>api has one end (api) in focus and dims; api>db has both and stays lit.
+    expect(await dimmed(page, fig)).toEqual(["web", "web>api"]);
     await expect(fig.locator('.dgm-note[data-dgm-note="back"]')).toBeVisible();
     await expect(fig.locator('button[data-dgm-view="back"]')).toHaveAttribute("aria-pressed", "true");
     await fig.locator('button[data-dgm-view="front"]').click();
-    expect(await dimmed(page, fig)).toEqual(["api", "api>db", "db"]);
+    expect(await dimmed(page, fig)).toEqual(["api", "api>db", "db", "web>api"]);
     await expect(fig.locator('.dgm-note[data-dgm-note="back"]')).toBeHidden();
     await fig.locator('button[data-dgm-view=""]').click();
     expect(await dimmed(page, fig)).toEqual([]);
