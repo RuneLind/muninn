@@ -28,8 +28,7 @@
  *
  * **Focus survives a re-render.** `render()` replaces the panel's markup on
  * every state change, so it puts focus back on the matching control (or the
- * panel itself) when focus was inside the panel or had fallen to `<body>`
- * with it.
+ * panel itself) when focus was inside the panel.
  *
  * The stream is read with `fetch` + a ReadableStream (Share's reason: the 409
  * body carries a message EventSource cannot surface).
@@ -137,8 +136,8 @@ function render(): void {
   let panel = document.getElementById(WALKTHROUGH_PANEL_ID);
   const created = !panel;
   const active = document.activeElement;
-  const hadFocus = !!panel && (panel.contains(active) || !active || active === document.body);
-  const key = hadFocus && active && panel!.contains(active) ? focusKeyOf(active) : null;
+  const hadFocus = !!panel && !!active && panel.contains(active);
+  const key = hadFocus ? focusKeyOf(active!) : null;
   if (!panel) {
     panel = document.createElement("div");
     panel.id = WALKTHROUGH_PANEL_ID;
@@ -183,8 +182,7 @@ function open(btn: HTMLElement): void {
 async function run(target: WalkthroughPanelState, ctx: WalkthroughPageContext): Promise<void> {
   const ctrl = new AbortController();
   inFlight = ctrl;
-  // `opener` detached: the article was swapped before the observer ran.
-  const live = () => state === target && !ctrl.signal.aborted && !!opener?.isConnected;
+  const live = () => state === target && !ctrl.signal.aborted;
   const fail = (kind: WalkthroughErrorKind, message: string): void => {
     if (!live()) return;
     target.phase = "error";
@@ -290,8 +288,6 @@ function wire(): void {
     // Another dialog open on top owns its own Escape.
     if (document.querySelector(".wiki-share, .wiki-chatopt")) return;
     const panel = document.getElementById(WALKTHROUGH_PANEL_ID);
-    const active = document.activeElement;
-    if (!panel) return;
-    if (panel.contains(active) || active === opener || !active || active === document.body) closeWalkthrough();
+    if (panel && panel.contains(document.activeElement)) closeWalkthrough();
   });
 }
