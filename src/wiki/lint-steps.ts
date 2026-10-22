@@ -8,8 +8,8 @@
  * with no list, the steps are the file's `meta.views` and their `focus`. A
  * file's ids are its nodes' (`diagramNodeIds`: architecture `components`,
  * workflow `nodes`, lifecycle `states`). A file that did not load, is not a
- * JSON object or defines no nodes is check 21's finding (`diagram-svg`), not
- * this one's.
+ * JSON object or defines no node ids is check 21's finding (`diagram-svg`),
+ * which lands on every tag line that names the file, this `<Steps>` included.
  *
  * One warning per step that names any unknown id, on the item's own line as
  * the parser recorded it (`listItemLines`), else on the tag's line.

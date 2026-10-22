@@ -292,7 +292,7 @@ describe("fix round 1 batch 3: item lines, block names, a file with no nodes", (
   });
   const steps = async (md: string) => checkSteps({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md));
   const NO_NODES = (list: string) =>
-    `file defines no nodes (its ${list} list is missing or empty); the text form is empty and no focus id can light a node`;
+    `file defines no node ids (its ${list} list is missing, empty or has no ids), so no focus id can light a node`;
   const diagrams = async (md: string) => checkDiagrams({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md));
 
   test("a nested sub-bullet does not push step 2's finding onto the tag line", async () => {
@@ -382,5 +382,47 @@ describe("fix round 2 batch 1: the last paragraph that ends in spans, and a <ul>
   test("a <ul> uses up step numbers: a later <ol> starts after its items", () => {
     const md = block("- A", "- B", "", "Between.", "", "1. C");
     expect(renderWikiHtml(md, () => undefined, { views: true, files: files() })).toMatch(/<ol class="stp-list" start="3">/);
+  });
+});
+
+describe("fix round 2 batch 2: the no-node-ids message, the architecture list, a shared ref", () => {
+  let base = "";
+  let root = "";
+  const PAGE = "flows/page.mdx";
+  const NO_IDS = (list: string) =>
+    `file defines no node ids (its ${list} list is missing, empty or has no ids), so no focus id can light a node`;
+  beforeAll(async () => {
+    base = await testTempDir(path.join(tmpdir(), "muninn-steps5-"));
+    root = path.join(base, "wiki");
+    await mkdir(path.join(root, "flows"), { recursive: true });
+    const wf = { nodes: [{ label: "Alpha" }, { label: "Beta" }], edges: [{ from: "x", to: "y", label: "go" }] };
+    await writeFile(path.join(root, "flows", "n.workflow.json"), JSON.stringify(wf));
+    await writeFile(path.join(root, "flows", "n.html"), `<svg viewBox="0 0 1 1"></svg>`);
+    await writeFile(path.join(root, "flows", "a.architecture.json"), JSON.stringify({ components: [] }));
+    await writeFile(path.join(root, "flows", "a.html"), `<svg viewBox="0 0 1 1"></svg>`);
+    await writeFile(path.join(root, "flows", "e.lifecycle.json"), JSON.stringify({ meta: { title: "E" }, stats: LIFE.states }));
+    await writeFile(path.join(root, "flows", "e.html"), `<svg viewBox="0 0 1 1"></svg>`);
+  });
+  afterAll(async () => {
+    if (base) await rm(base, { recursive: true, force: true });
+  });
+  const diagrams = async (md: string) => checkDiagrams({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md));
+
+  test("nodes without ids: the message claims no empty list and no empty text form", async () => {
+    const d = await diagrams('# P\n\n<Diagram src="./n.workflow.json" />\n');
+    expect(d.map((f) => f.message)).toEqual([`<Diagram src="./n.workflow.json"> ${NO_IDS("nodes")}`]);
+  });
+  test("an architecture file names its components list", async () => {
+    const d = await diagrams('# P\n\n<Diagram src="./a.architecture.json" />\n');
+    expect(d.map((f) => f.message)).toEqual([`<Diagram src="./a.architecture.json"> ${NO_IDS("components")}`]);
+  });
+  test("a <Diagram> and a <Steps> on one no-node file: each tag line gets the finding", async () => {
+    const md = ["# P", "", '<Diagram src="./e.lifecycle.json" />', "", '<Steps src="./e.lifecycle.json">', "", "1. A `new`", "", "</Steps>", ""].join("\n");
+    expect(checkSteps({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md))).toEqual([]);
+    const d = await diagrams(md);
+    expect(d.map((f) => [f.line, f.message])).toEqual([
+      [3, `<Diagram src="./e.lifecycle.json"> ${NO_IDS("states")}`],
+      [5, `<Steps src="./e.lifecycle.json"> ${NO_IDS("states")}`],
+    ]);
   });
 });

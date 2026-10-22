@@ -7,8 +7,9 @@
  * - the diagram file did not load (missing, unreadable, over its cap, not a
  *   diagram file, past the page's limits): the reader shows one line;
  * - the JSON file is not a JSON object: the reader shows one line;
- * - the JSON file defines no nodes (its flavor's node list is missing, empty
- *   or has no ids): the text form is empty, and check 22 skips the file;
+ * - the JSON file defines no node ids (its flavor's node list is missing,
+ *   empty or has no ids): no focus id can light a node, and check 22 skips
+ *   the file;
  * - the HTML sibling is missing, unparsable (not exactly one `<svg>`, or one
  *   the sanitizer refuses whole), holds the reserved id text `__dgm-id__`, is
  *   over its 2 MB cap or over the page budget: the reader shows the text form;
@@ -21,6 +22,9 @@
  *   by design, such as `tabindex` or `data-preset`, is not reported);
  * - the SVG carries an archify class the reader's stylesheet does not map
  *   (`DIAGRAM_CLASSES`): that part draws unstyled.
+ *
+ * Every finding is about the file, so it lands on each tag line that names the
+ * file: a `<Diagram>` and a `<Steps>` on one file each get it.
  *
  * Check 15 judges the tag's attributes and the components in a page's loaded
  * data files, and skips a file that did not load: that is this check's finding.
@@ -64,7 +68,7 @@ export const DIAGRAM_FINDINGS = {
     budget: `file is over the page's file budget; ${ONE_LINE}`,
   } satisfies Record<PageFileFailure, string>,
   notObject: `is not a JSON object; ${ONE_LINE}`,
-  noNodes: (list: string) => `file defines no nodes (its ${list} list is missing or empty); the text form is empty and no focus id can light a node`,
+  noNodes: (list: string) => `file defines no node ids (its ${list} list is missing, empty or has no ids), so no focus id can light a node`,
   sharedPicture: (html: string, others: string) =>
     `shares picture ${html} with ${others}; archify writes one picture per diagram file, so these blocks show the same drawing`,
   picture: {
@@ -97,12 +101,13 @@ export function checkDiagrams(page: { relPath: string }, rawContent: string, fil
   const tagOn = (l: string): string | null => (l.includes("<Diagram") ? "Diagram" : l.includes("<Steps") ? "Steps" : null);
   // The ref as a whole quoted value first, so `x.architecture.json` does not
   // land on the line of `./x.architecture.json`.
-  const lineOf = (ref: string): number | undefined => {
-    const on = (has: (l: string) => boolean) => lines.findIndex((l, n) => !fenced[n] && tagOn(l) !== null && has(l));
-    let i = on((l) => l.includes(`"${ref}"`) || l.includes(`'${ref}'`));
-    if (i < 0) i = on((l) => l.includes(ref));
-    return i < 0 ? undefined : i + 1;
+  const linesOf = (ref: string): number[] => {
+    const on = (has: (l: string) => boolean) =>
+      lines.flatMap((l, n) => (!fenced[n] && tagOn(l) !== null && has(l) ? [n + 1] : []));
+    const quoted = on((l) => l.includes(`"${ref}"`) || l.includes(`'${ref}'`));
+    return quoted.length ? quoted : on((l) => l.includes(ref));
   };
+  const lineOf = (ref: string): number | undefined => linesOf(ref)[0];
   const findings: LintFinding[] = [];
   const refs = [...pageFileRefKinds(parseBlocks(splitFrontmatter(rawContent).body))].filter(([, kinds]) => kinds.has("diagram"));
   // The refs of each HTML sibling, to find two kinds sharing one picture.
@@ -121,10 +126,15 @@ export function checkDiagrams(page: { relPath: string }, rawContent: string, fil
   for (const [ref] of refs) {
     const result = files.get(ref);
     if (!result) continue;
-    const at = lineOf(ref);
-    const tag = tagOf(ref);
-    const push = (message: string) =>
-      findings.push({ check: "diagram-svg", relPath: page.relPath, message: `<${tag} src="${ref}"> ${message}`, ...(at === undefined ? {} : { line: at }) });
+    // One finding per tag line that names the file, each worded by its own tag.
+    const ats = linesOf(ref);
+    const push = (message: string) => {
+      if (!ats.length) findings.push({ check: "diagram-svg", relPath: page.relPath, message: `<Diagram src="${ref}"> ${message}` });
+      for (const at of ats) {
+        const tag = tagOn(lines[at - 1]!) ?? "Diagram";
+        findings.push({ check: "diagram-svg", relPath: page.relPath, message: `<${tag} src="${ref}"> ${message}`, line: at });
+      }
+    };
     if (!result.ok) {
       push(DIAGRAM_FINDINGS.file[result.reason]);
       continue;
