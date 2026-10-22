@@ -183,6 +183,8 @@ describe("WIKI_READONLY_ROOTS — routes", () => {
         "GET /api/wiki/factcheck/claim?wiki=rowiki&page=Widgets&mode=article&title=Claim&index=1&total=1",
       ],
       ["POST /api/wiki/share?wiki=rowiki", { page: "Widgets", preset: "neutral", lang: "en" }],
+      // Well-formed: a body missing `heading` or with a bad ordinal 400s before the guard.
+      ["POST /api/wiki/walkthrough?wiki=rowiki", { relPath: "Widgets.md", heading: "Widgets", ordinal: 0, count: 1 }],
       ["POST /api/wiki/remember?wiki=rowiki", { question: "q", answer: "a" }],
       ["POST /api/wiki/ask/chat?wiki=rowiki", { question: "q", answer: "a" }],
       [
@@ -221,6 +223,16 @@ describe("WIKI_READONLY_ROOTS — routes", () => {
     expect(share.status).toBe(400); // unknown preset — resolved AFTER the wiki
     expect(await share.text()).toContain("preset");
 
+    // A heading the page does not have: located AFTER the wiki and the page read.
+    const walkthrough = await post("/api/wiki/walkthrough?wiki=rwwiki", {
+      relPath: "Widgets.md",
+      heading: "No such heading",
+      ordinal: 0,
+      count: 1,
+    });
+    expect(walkthrough.status).toBe(404);
+    expect(await walkthrough.text()).toContain("No section headed");
+
     const chat = await post("/api/wiki/ask/chat?wiki=rwwiki", { question: "q", answer: "a" });
     expect(chat.status).toBe(400); // standalone wiki, no owner and no pin
     expect(((await chat.json()) as { needsBot?: boolean }).needsBot).toBe(true);
@@ -249,15 +261,21 @@ describe("WIKI_READONLY_ROOTS — routes", () => {
       reset: true,
     });
     try {
-      const res = await post("/api/wiki/share?wiki=rowiki", { page: "Widgets", preset: "neutral", lang: "en" });
-      expect(res.status).toBe(403);
-      const hit = records
-        .filter((r) => r.level === "info")
-        .find((r) => r.message.join("").includes("Read-only wiki"));
-      expect(hit).toBeDefined();
-      const props = JSON.stringify(hit!.properties);
-      expect(props).toContain("rowiki");
-      expect(props).toContain("/api/wiki/share");
+      for (const [route, body] of [
+        ["/api/wiki/share", { page: "Widgets", preset: "neutral", lang: "en" }],
+        ["/api/wiki/walkthrough", { relPath: "Widgets.md", heading: "Widgets", ordinal: 0, count: 1 }],
+      ] as const) {
+        records.length = 0;
+        const res = await post(`${route}?wiki=rowiki`, body);
+        expect(res.status).toBe(403);
+        const hit = records
+          .filter((r) => r.level === "info")
+          .find((r) => r.message.join("").includes("Read-only wiki"));
+        expect(hit).toBeDefined();
+        const props = JSON.stringify(hit!.properties);
+        expect(props).toContain("rowiki");
+        expect(props).toContain(route);
+      }
     } finally {
       await reset();
     }

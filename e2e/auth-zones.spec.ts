@@ -96,6 +96,7 @@ const WIKI_TOOL_POSTS = [
   STAMP_PATH,
   "/api/wiki/series",
   "/api/wiki/share",
+  "/api/wiki/walkthrough",
   "/api/wiki/remember",
   `/api/wiki/reindex?${WIKI_Q}`,
   "/api/wiki/ask/chat",

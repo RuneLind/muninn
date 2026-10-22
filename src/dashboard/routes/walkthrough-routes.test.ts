@@ -188,6 +188,33 @@ describe("POST /api/wiki/walkthrough — guards", () => {
     expect(((await res.json()) as { readonly?: boolean }).readonly).toBe(true);
     expect(ran).toBe(false);
   });
+
+  // Fix round 1 batch 4, finding 1: the refusal comes BEFORE the page is read,
+  // the section located and a slot taken. Each body below would stop at one of
+  // those later checks with its own status, so a refusal moved after it answers
+  // that status instead of 403.
+  test("a read-only wiki refuses before the page read, the section lookup and the slot", async () => {
+    __setReadonlyWikiRootsForTest([root]);
+    for (let i = 0; i < WALKTHROUGH_MAX_INFLIGHT_PER_PAGE; i++) {
+      expect(acquireWalkthroughFlight(walkthroughFlightKey("wtwiki", "Gardener.md")).ok).toBe(true);
+    }
+    const cases = [
+      ["page missing (404 once read)", { ...ok, relPath: "Missing.md" }],
+      ["explainer (400 once read)", { ...ok, relPath: "Explainer.html", heading: "X", count: 1 }],
+      ["stale hash (409 once read)", { ...ok, hash: "deadbeef" }],
+      ["heading not on the page (404 once located)", { ...ok, heading: "Nope", count: 1 }],
+      ["count mismatch (409 once located)", { ...ok, count: 1 }],
+      ["empty section (422 once located)", { relPath: "Empty.md", heading: "Nothing here", ordinal: 0, count: 1 }],
+      ["every slot taken (409 once a slot is asked for)", ok],
+    ] as const;
+    const got: string[] = [];
+    for (const [label, body] of cases) {
+      const res = await post(body);
+      const json = (await res.json()) as { readonly?: boolean };
+      got.push(`${label} → ${res.status}${json.readonly ? " readonly" : ""}`);
+    }
+    expect(got).toEqual(cases.map(([label]) => `${label} → 403 readonly`));
+  });
 });
 
 describe("POST /api/wiki/walkthrough — pre-commit answers", () => {
