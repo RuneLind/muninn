@@ -31,6 +31,7 @@ beforeAll(async () => {
   await writeFile(path.join(root, "flows", "dirty.html"), `<svg><script/><rect onclick="x()" class="zz c-backend"/></svg>`);
   await writeFile(path.join(root, "flows", "bad.workflow.json"), "[]");
   await writeFile(path.join(root, "flows", "bad.html"), PICTURE);
+  await writeFile(path.join(root, "flows", "nopic.workflow.json"), "[]");
   await writeFile(path.join(base, "outside.html"), PICTURE);
   await writeFile(path.join(root, "flows", "link.architecture.json"), JSON_OK);
   await symlink(path.join(base, "outside.html"), path.join(root, "flows", "link.html"));
@@ -142,6 +143,12 @@ describe("diagram-svg lint", () => {
   test("a json that is not an object is reported", async () => {
     expect((await lint("./bad.workflow.json")).map((x) => x.message)).toEqual([
       '<Diagram src="./bad.workflow.json"> is not a JSON object; the reader shows one line instead of the diagram',
+    ]);
+  });
+
+  test("a json that is not an object is its only finding, even with no picture", async () => {
+    expect((await lint("./nopic.workflow.json")).map((x) => x.message)).toEqual([
+      '<Diagram src="./nopic.workflow.json"> is not a JSON object; the reader shows one line instead of the diagram',
     ]);
   });
 

@@ -18,8 +18,8 @@
  * - the SVG carries an archify class the reader's stylesheet does not map
  *   (`DIAGRAM_CLASSES`): that part draws unstyled.
  *
- * Check 15 judges the tag's attributes only; a file that did not load is this
- * check's finding.
+ * Check 15 judges the tag's attributes and the components in a page's loaded
+ * data files, and skips a file that did not load: that is this check's finding.
  */
 
 import { readDiagram } from "../format/diagram-block.ts";
@@ -111,7 +111,10 @@ export function checkDiagrams(page: { relPath: string }, rawContent: string, fil
     }
     const flavor = diagramFlavor(ref);
     if (!flavor) continue;
-    if (!readDiagram(flavor, result.text)) push(DIAGRAM_FINDINGS.notObject);
+    if (!readDiagram(flavor, result.text)) {
+      push(DIAGRAM_FINDINGS.notObject);
+      continue;
+    }
     const rel = diagramSiblingRelPath(page.relPath, ref);
     const sharers = rel === null ? [] : (bySibling.get(rel) ?? []);
     if (new Set(sharers.map((s) => s.flavor)).size > 1) {
