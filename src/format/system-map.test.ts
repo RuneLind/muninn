@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { nodeKey, parseExternalList, parseGroups, readSystemMap, resolveSystemNode, type SystemMapTable } from "./system-map.ts";
-import { layoutSystemMap, SYSTEM_MAP_CHROME_CLASSES, systemMapCss, systemMapViewHtml } from "./system-map-view.ts";
+import { layoutSystemMap, SYSTEM_MAP_CHROME_CLASSES, systemMapCss, systemMapViewHtml, textWidthPx } from "./system-map-view.ts";
 import { PEEK_SYSTEM_MAP_CHROME } from "../dashboard/views/components/wiki-ref-links.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
@@ -324,10 +324,13 @@ describe("layout: routing and sizing", () => {
     expect(hits).toEqual([]);
   });
 
-  test("a node's many edges leave its side at different points", () => {
-    const starts = [...html.matchAll(/<path class="sm-edge [^"]*" d="M([\d.]+) ([\d.]+)[^"]*"[^>]*data-sm-from="api"/g)].map((m) => `${m[1]},${m[2]}`);
-    expect(starts.length).toBe(services.length + externals.length + 3);
-    expect(new Set(starts).size).toBe(starts.length);
+  test("a node's many edges attach to its side at points at least 4px apart", () => {
+    // api's 16 edges along its right side: 6 to the next column, 10 by one trunk.
+    const ys = [...html.matchAll(/<path class="sm-edge [^"]*" d="M[\d.]+ ([\d.]+)[^"]*"[^>]*data-sm-from="api"/g)].map((m) => Number(m[1]));
+    expect(ys.length).toBe(services.length + externals.length + 3);
+    const points = [...new Set(ys)].sort((p, q) => p - q);
+    expect(points.length).toBe(services.length + 1);
+    for (let i = 1; i < points.length; i++) expect(points[i]! - points[i - 1]!).toBeGreaterThanOrEqual(4);
   });
 
   test("a column is as wide as its longest label; only a label past the cap is cut, by width", () => {
@@ -509,5 +512,204 @@ describe("loops: self-edges and edges within one column", () => {
     // stubs from the side but never reach the band the lanes run down.
     const nearestLane = Math.min(...trunks.map((e) => Number(/ Q([\d.]+) /.exec(e.d)![1])));
     for (const w of within) expect(Math.max(...w.pts.map((p) => p.x))).toBeLessThan(nearestLane - 2);
+  });
+});
+
+/**
+ * The routing invariants, checked on any drawn map:
+ * I1 no two edges with different ends run along one horizontal or vertical
+ *    line, except edges sharing a source trunk (on its stub and trunk) or a
+ *    target trunk (on its trunk and stub);
+ * I2 no edge passes inside a box it does not end at, and every edge stays a
+ *    stroke width inside the drawing;
+ * I3 a side's attachment points sit inside it, at least 4px apart; a point is
+ *    shared only by edges on one trunk, or by one direction of a side's
+ *    merged edges to the next column.
+ */
+function routingViolations(html: string): string[] {
+  const vb = /viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(html)!;
+  const [W, H] = [Number(vb[1]), Number(vb[2])];
+  const rects = nodeRects(html);
+  const edges = [...html.matchAll(/<path class="sm-edge ([^"]*)" d="([^"]+)"[^>]*data-sm-from="([^"]+)" data-sm-to="([^"]+)"/g)].map((m, i) => {
+    const d = m[2]!;
+    // Corners are the Q control points; a curve (C) is one piece.
+    const nums = (re: RegExp) => [...d.matchAll(re)].map((x) => ({ x: Number(x[1]), y: Number(x[2]) }));
+    const start = nums(/^M([\d.]+) ([\d.]+)/g)[0]!;
+    const end = nums(/([\d.]+) ([\d.]+)$/g)[0]!;
+    const cubic = /C/.test(d);
+    const verts = cubic ? [start, end] : [start, ...nums(/Q([\d.]+) ([\d.]+)/g), end];
+    return { i, wrong: m[1]!.includes("sm-wrong"), d, from: m[3]!, to: m[4]!, cubic, verts, pts: samplePath(d) };
+  });
+  const out: string[] = [];
+  // I1: straight pieces, by role on a routed (six-point) edge.
+  const roles = ["stub-s", "trunk-s", "run", "trunk-t", "stub-t"];
+  const segs = edges.flatMap((e) =>
+    e.cubic
+      ? e.verts[0]!.y === e.verts[1]!.y && /^M[\d.]+ ([\d.]+) C[\d.]+ \1 [\d.]+ \1 [\d.]+ \1$/.test(e.d)
+        ? [{ e, role: "curve", h: true, c: e.verts[0]!.y, lo: Math.min(e.verts[0]!.x, e.verts[1]!.x), hi: Math.max(e.verts[0]!.x, e.verts[1]!.x) }]
+        : []
+      : e.verts.slice(1).flatMap((b, k) => {
+          const a = e.verts[k]!;
+          const role = e.verts.length === 6 ? roles[k]! : "other";
+          if (a.y === b.y && a.x !== b.x) return [{ e, role, h: true, c: a.y, lo: Math.min(a.x, b.x), hi: Math.max(a.x, b.x) }];
+          if (a.x === b.x && a.y !== b.y) return [{ e, role, h: false, c: a.x, lo: Math.min(a.y, b.y), hi: Math.max(a.y, b.y) }];
+          return [];
+        }),
+  );
+  for (let p = 0; p < segs.length; p++)
+    for (let q = p + 1; q < segs.length; q++) {
+      const [s, t] = [segs[p]!, segs[q]!];
+      if (s.e === t.e || s.h !== t.h || Math.abs(s.c - t.c) >= 1 || Math.min(s.hi, t.hi) <= Math.max(s.lo, t.lo)) continue;
+      if (s.e.from === t.e.from && s.e.to === t.e.to) continue;
+      const src = (x: typeof s) => x.role === "stub-s" || x.role === "trunk-s";
+      const tgt = (x: typeof s) => x.role === "stub-t" || x.role === "trunk-t";
+      if ((s.e.from === t.e.from && src(s) && src(t)) || (s.e.to === t.e.to && tgt(s) && tgt(t))) continue;
+      out.push(`I1 ${s.e.from}→${s.e.to} ${s.role} along ${t.e.from}→${t.e.to} ${t.role} at ${s.h ? "y" : "x"}=${s.c}`);
+    }
+  // I2
+  for (const e of edges) {
+    const sw = e.wrong ? 2 : 1.6;
+    if (e.pts.some((p) => p.x < sw || p.y < sw || p.x > W - sw || p.y > H - sw)) out.push(`I2 ${e.from}→${e.to} leaves the drawing`);
+    for (const [key, r] of rects) {
+      if (key === e.from || key === e.to) continue;
+      if (e.pts.some((p) => p.x > r.x + 0.5 && p.x < r.x + r.w - 0.5 && p.y > r.y + 0.5 && p.y < r.y + r.h - 0.5)) out.push(`I2 ${e.from}→${e.to} under ${key}`);
+    }
+  }
+  // I3
+  const sides = new Map<string, { y: number; kind: string }[]>();
+  for (const e of edges) {
+    for (const [end, pt] of [["s", e.verts[0]!], ["t", e.verts[e.verts.length - 1]!]] as const) {
+      const key = end === "s" ? e.from : e.to;
+      const r = rects.get(key)!;
+      const side = pt.x === r.x ? "L" : pt.x === r.x + r.w ? "R" : "?";
+      if (side === "?" || pt.y <= r.y || pt.y >= r.y + r.h) out.push(`I3 ${e.from}→${e.to} attaches off ${key}'s side`);
+      const routed = !e.cubic && e.verts.length === 6;
+      const kind = routed ? `trunk ${end} ${end === "s" ? e.verts[1]!.x : e.verts[4]!.x}` : e.cubic && rects.get(e.from)!.x !== rects.get(e.to)!.x ? `next-column ${end}` : `loop ${e.i}`;
+      sides.set(`${key}|${side}`, [...(sides.get(`${key}|${side}`) ?? []), { y: pt.y, kind }]);
+    }
+  }
+  for (const [side, list] of sides) {
+    const ys = [...new Set(list.map((l) => l.y))].sort((p, q) => p - q);
+    for (let i = 1; i < ys.length; i++) if (ys[i]! - ys[i - 1]! < 4) out.push(`I3 ${side} points ${(ys[i]! - ys[i - 1]!).toFixed(2)}px apart`);
+    for (const y of ys) {
+      const kinds = new Set(list.filter((l) => l.y === y).map((l) => l.kind));
+      if (kinds.size > 1 || [...kinds][0]!.startsWith("loop") && list.filter((l) => l.y === y).length > 1) out.push(`I3 ${side} shares y=${y} across ${[...kinds].join(" / ")}`);
+    }
+  }
+  return out;
+}
+
+describe("routing invariants", () => {
+  const draw = (groups: string, rows: string[][], headers = ["From", "To", "Status"]) =>
+    systemMapViewHtml({ read: readSystemMap({ groups }, T(headers, rows)), caption: "", tableHtml: "", beforeHtml: "", afterHtml: "", prefix: "sm7-", resolveNode: () => ({ kind: "repo", link: null }) });
+  const n = <T,>(k: number, f: (i: number) => T): T[] => Array.from({ length: k }, (_, i) => f(i));
+  const proto = ["REST", "Kafka", "SOAP", "gRPC"];
+  // Two sources to two targets two columns away, over four protocols: sixteen
+  // runs across, for two row gaps of five positions.
+  const crowded = draw(
+    "a=one;b=one;m=two;x=three;y=three",
+    [...["a", "b"].flatMap((s) => ["x", "y"].flatMap((t) => proto.map((p) => [s, t, p, "ok"]))), ["a", "m", "", "ok"]],
+    ["From", "To", "Protocol", "Status"],
+  );
+  const fivecols = (() => {
+    const rows: string[][] = [];
+    for (let k = 0; k < 5; k++) {
+      rows.push([`n0${k}`, `n4${(k + 1) % 5}`, "ok"], [`n4${k}`, `n0${(k + 2) % 5}`, "ok"], [`n1${k}`, `n3${k}`, "ok"], [`n3${k}`, `n1${(k + 3) % 5}`, "ok"]);
+      rows.push([`n0${k}`, `n2${k}`, "ok"], [`n2${k}`, `n4${k}`, "ok"], [`n4${k}`, `n2${(k + 1) % 5}`, "ok"], [`n0${k}`, `n1${k}`, "ok"], [`n1${(k + 1) % 5}`, `n0${k}`, "ok"]);
+    }
+    return draw(n(25, (i) => `n${Math.floor(i / 5)}${i % 5}=c${Math.floor(i / 5)}`).join(";"), rows);
+  })();
+  const maps: [string, string][] = [
+    ["sixteen runs across two row gaps", crowded],
+    ["65 edges to the next column", draw(["hub=one", ...n(65, (i) => `t${i}=two`)].join(";"), n(65, (i) => ["hub", `t${i}`, "ok"]))],
+    [
+      "65 edges by one trunk, 30 each way to the next column",
+      draw(
+        ["hub=one", ...n(30, (i) => `m${i}=two`), ...n(65, (i) => `t${i}=three`)].join(";"),
+        [...n(65, (i) => ["hub", `t${i}`, "ok"]), ...n(30, (i) => ["hub", `m${i}`, "ok"]), ...n(30, (i) => [`m${i}`, "hub", "ok"])],
+      ),
+    ],
+    ["five columns, forward, reverse and full spans", fivecols],
+    ["stubs from both sides of one gap, level", draw("l=c0;m=c1;r=c2;q=c3", [["m", "q", "ok"], ["r", "l", "ok"], ["l", "r", "ok"], ["q", "m", "ok"]])],
+    ["fourteen trunks in one gap", draw([...n(14, (i) => `s${i}=one`), "mid=two", "dst=three"].join(";"), [...n(14, (i) => [`s${i}`, "dst", "ok"]), ["s0", "mid", "ok"]])],
+    [
+      "a side with ten edges within its column",
+      draw([...n(11, (i) => `w${i}=one`), "x=two", "y=two", "z=three"].join(";"), [...n(10, (i) => ["w0", `w${i + 1}`, "ok"]), ["w0", "x", "ok"], ["w0", "y", "ok"], ["x", "w0", "ok"], ["w0", "z", "ok"], ["w0", "w0", "ok"]]),
+    ],
+    ["one column", draw("a=one;b=one;c=one", [["a", "b", "ok"], ["b", "c", "ok"], ["a", "c", "ok"], ["c", "a", "ok"]])],
+    ["two columns", draw("a=one;b=one;x=two;y=two", [["a", "x", "ok"], ["a", "y", "ok"], ["b", "x", "ok"], ["x", "a", "ok"], ["y", "b", "ok"]])],
+  ];
+  for (const [name, html] of maps) test(`I1–I3 hold: ${name}`, () => expect(routingViolations(html)).toEqual([]));
+
+  const runs = (html: string) =>
+    [...html.matchAll(/<path class="sm-edge [^"]*" d="([^"]+)"[^>]*data-sm-from="([^"]+)" data-sm-to="([^"]+)"/g)].flatMap((m) => {
+      const q = [...m[1]!.matchAll(/Q([\d.]+) ([\d.]+)/g)].map((x) => ({ x: Number(x[1]), y: Number(x[2]) }));
+      return q.length === 4 ? [{ from: m[2]!, to: m[3]!, y: q[1]!.y, lo: Math.min(q[1]!.x, q[2]!.x), hi: Math.max(q[1]!.x, q[2]!.x) }] : [];
+    });
+
+  test("runs past a row gap's five positions overflow under the last row, and the drawing grows to hold them", () => {
+    const rects = [...nodeRects(crowded).values()];
+    const lastRow = Math.max(...rects.map((r) => r.y + r.h));
+    const height = Number(/viewBox="0 0 [\d.]+ ([\d.]+)"/.exec(crowded)![1]);
+    const ys = runs(crowded).map((r) => r.y);
+    expect(ys.length).toBe(16);
+    expect(new Set(ys).size).toBe(16);
+    // Two row gaps hold ten; six run under the last row's gap, 5px apart.
+    const under = ys.filter((y) => y > lastRow + 14).sort((p, q) => p - q);
+    expect(under.length).toBe(6);
+    for (let i = 1; i < under.length; i++) expect(under[i]! - under[i - 1]!).toBe(5);
+    expect(height).toBeGreaterThanOrEqual(under.at(-1)! + 12);
+  });
+
+  test("runs whose spans do not overlap share a row-gap position", () => {
+    // a→c and d→f cross different gaps of one row gap, so they share a line.
+    const html = draw("a=c0;b=c1;c=c2;d=c2;e=c3;f=c4", [["a", "c", "ok"], ["d", "f", "ok"], ["a", "b", "ok"], ["e", "f", "ok"]]);
+    const r = runs(html);
+    expect(r.length).toBe(2);
+    expect(r[0]!.y).toBe(r[1]!.y);
+    expect(Math.max(r[0]!.lo, r[1]!.lo)).toBeGreaterThan(Math.min(r[0]!.hi, r[1]!.hi));
+  });
+
+  test("a gap widens to keep every trunk lane 24px from the boxes either side", () => {
+    const html = maps.find(([m]) => m === "fourteen trunks in one gap")![1];
+    const rects = nodeRects(html);
+    const lanes = [...html.matchAll(/data-sm-to="dst"/g)].length;
+    expect(lanes).toBe(14);
+    const xs = [...html.matchAll(/<path class="sm-edge [^"]*" d="M[\d.]+ [\d.]+ L[\d.]+ [\d.]+ Q([\d.]+) /g)].map((m) => Number(m[1]));
+    const [left, right] = [rects.get("s0")!.x + rects.get("s0")!.w, rects.get("mid")!.x];
+    expect(Math.min(...xs) - left).toBeGreaterThanOrEqual(24);
+    expect(right - Math.max(...xs)).toBeGreaterThanOrEqual(24);
+  });
+
+  test("a side over seven points merges its edges to the next column, one point each way, and no box grows", () => {
+    // hub's right side: ten edges out to the next column, two back in.
+    const html = draw(["hub=one", ...n(10, (i) => `t${i}=two`)].join(";"), [...n(10, (i) => ["hub", `t${i}`, "ok"]), ["t0", "hub", "ok"], ["t9", "hub", "ok"]]);
+    const es = [...html.matchAll(/d="M([\d.]+) ([\d.]+) C[^"]*? ([\d.]+) ([\d.]+)"[^>]*data-sm-from="([^"]+)" data-sm-to="([^"]+)"/g)];
+    const out = new Set(es.filter((m) => m[5] === "hub").map((m) => m[2]));
+    const back = new Set(es.filter((m) => m[6] === "hub").map((m) => m[4]));
+    expect([out.size, back.size]).toEqual([1, 1]);
+    expect([...out][0]).not.toBe([...back][0]);
+    expect(new Set([...nodeRects(html).values()].map((r) => r.h))).toEqual(new Set([34]));
+  });
+
+  test("a side that cannot hold its points 4px apart grows every box taller", () => {
+    const html = maps.find(([m]) => m === "a side with ten edges within its column")![1];
+    const hs = new Set([...nodeRects(html).values()].map((r) => r.h));
+    expect(hs.size).toBe(1);
+    expect([...hs][0]!).toBeGreaterThan(34);
+  });
+});
+
+describe("label width estimate", () => {
+  test("wide, fullwidth and emoji characters count at least their drawn width", () => {
+    expect(textWidthPx("漢字テスト한국", 12)).toBeGreaterThanOrEqual(7 * 12);
+    expect(textWidthPx("ＡＢＣ１２３", 12)).toBeGreaterThanOrEqual(6 * 12);
+    expect(textWidthPx("🚀🎉", 12)).toBeGreaterThanOrEqual(2 * 1.25 * 12);
+  });
+
+  test("a grapheme counts once: a variation selector, a ZWJ sequence, a combining mark", () => {
+    expect(textWidthPx("❤️", 12)).toBe(textWidthPx("❤", 12));
+    expect(textWidthPx("👨‍👩‍👧", 12)).toBe(textWidthPx("👨", 12));
+    expect(textWidthPx("e\u0301", 12)).toBe(textWidthPx("e", 12));
   });
 });

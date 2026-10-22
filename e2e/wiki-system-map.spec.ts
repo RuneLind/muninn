@@ -11,7 +11,9 @@
  * section shows the table, not the map; at 390 px the map scrolls inside
  * its own box while the page does not; the caption shows, each nesting level
  * has its own accessible name, keyboard focus on a node looks unlike hover,
- * and a node's kind shows without hovering (style, legend, node list).
+ * and a node's kind shows without hovering (style, legend, node list); the
+ * server's label width estimate is at least the drawn width for every
+ * character class.
  *
  * The map has no client code, so there is no state to enumerate: the server
  * draws it and the page only lays it out.
@@ -27,6 +29,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { textWidthPx } from "../src/format/system-map-view.ts";
 
 const PORT = e2ePort("wiki-system-map");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -208,6 +211,35 @@ test.describe("Wiki reader: SystemMap", () => {
       expect(ids).toEqual(expect.arrayContaining(["sm1-arr-ok", "sm1-arr-wrong"]));
     });
   }
+
+  test("a label's estimated width is at least its drawn width, for every character class", async ({ page }) => {
+    await open(page);
+    const samples: Record<string, string> = {
+      latin: "The quick brown fox jumps over the lazy dog",
+      capitals: "WMWM QUICK BROWN FOX 0123456789",
+      norwegian: "Særskilt fødselsår på Åsgårdstrand ÆØÅ æøå",
+      cjk: "漢字テスト中文日本語社会保障",
+      hangul: "한국어사회보장",
+      fullwidth: "ＡＢＣＤ１２３４（）",
+      emoji: "🚀🎉❤️👨‍👩‍👧🇳🇴😀",
+      emojiRun: "😀".repeat(14),
+    };
+    // Drawn as a node label is: a 12px text inside a node of the map.
+    const drawn = await page.locator(".wiki-article .sm-svg").evaluate((svg, s) => {
+      const g = svg.querySelector(".sm-node")!;
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(s)) {
+        const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        t.textContent = v;
+        g.append(t);
+        out[k] = t.getComputedTextLength();
+        t.remove();
+      }
+      return out;
+    }, samples);
+    const short = Object.keys(samples).filter((k) => textWidthPx(samples[k]!, 12) < drawn[k]!).map((k) => `${k}: ${textWidthPx(samples[k]!, 12)} < ${drawn[k]}`);
+    expect(short).toEqual([]);
+  });
 
   test("a node opens its repos page through the reader's navigation", async ({ page }) => {
     await open(page);
