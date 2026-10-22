@@ -357,8 +357,26 @@ function drawnSize(svg: string): string {
 /** The html sibling is worth a link: it was read, whether or not it drew. */
 const siblingRead = (svg: DiagramSvgResult | undefined) => !!svg && (svg.svg !== null || svg.problem !== "missing");
 
+/** The node ids a diagram file defines: architecture `components`, workflow
+ *  `nodes`, lifecycle `states`. Null when the file is not a JSON object. */
+export function diagramNodeIds(flavor: DiagramFlavor, text: string): Set<string> | null {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isObj(doc)) return null;
+  const list = flavor === "architecture" ? doc.components : flavor === "workflow" ? doc.nodes : doc.states;
+  return new Set(objs(list).map((n) => str(n.id)).filter(Boolean));
+}
+
 /** The reader's `<Diagram>`. */
-export const diagramViewHtml: DiagramViewRenderer = (input) => {
+export const diagramViewHtml: DiagramViewRenderer = (input) => diagramFigureHtml(input, true);
+
+/** The diagram figure, with its views as buttons when `withViews` (a
+ *  `<Diagram>`) or without them (a `<Steps>`, whose steps drive the picture). */
+export function diagramFigureHtml(input: DiagramViewInput, withViews: boolean): string {
   const flavor = diagramFlavor(input.ref);
   const read = flavor ? readDiagram(flavor, input.text) : null;
   const name = pageFileName(input.ref);
@@ -369,7 +387,7 @@ export const diagramViewHtml: DiagramViewRenderer = (input) => {
   const html = diagramSiblingHtml(input.ref);
   const label = read.title || name;
   const views =
-    svg && read.views.length
+    withViews && svg && read.views.length
       ? `<div class="dgm-views" role="group" aria-label="Views" ${RO}>` +
         `<button type="button" class="dgm-view" data-dgm-view="" aria-pressed="true">All</button>` +
         read.views
@@ -401,7 +419,7 @@ export const diagramViewHtml: DiagramViewRenderer = (input) => {
     foot +
     `</figure>`
   );
-};
+}
 
 /** The reader's `<Diagram>` CSS: the archify class rules themed with reader
  *  tokens (`diagram-styles.ts`, generated), the view buttons, the dimming, and

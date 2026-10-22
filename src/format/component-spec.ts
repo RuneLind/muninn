@@ -454,6 +454,10 @@ export const COMPONENT_SPEC = {
   // `.workflow.json`, `.lifecycle.json`); the picture is the one `<svg>` of the
   // HTML sibling (`x.html`). See `src/format/diagram-block.ts`.
   Diagram: { attrs: { src: text }, selfClosing: true },
+  // The same diagram stepped through: a numbered list whose items name their
+  // focus ids in a trailing code span, or self-closed for the file's views.
+  // See `src/format/steps-block.ts`.
+  Steps: { attrs: { src: text }, selfClosing: true },
 } as const satisfies Record<string, ComponentSpec>;
 
 export type ComponentName = keyof typeof COMPONENT_SPEC;

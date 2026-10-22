@@ -142,6 +142,8 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   Chart: null,
   // A diagram is self-closing: no body.
   Diagram: null,
+  // A steps block wraps a list; a fence in an item is an ordinary fence.
+  Steps: null,
   // A rule tree wraps a nested list; a fence in an item is an ordinary fence.
   RuleTree: null,
   Glossary: null,

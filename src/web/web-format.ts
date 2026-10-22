@@ -37,6 +37,7 @@ import { parseCsv } from "../format/csv.ts";
 import {
   CASEBOARD_NO_SRC,
   DIAGRAM_NO_SRC,
+  STEPS_NO_SRC,
   QUERY_CSV_MAX_ROWS,
   anchorSlug,
   formatCount,
@@ -90,6 +91,8 @@ import { readCaseBoardView, readChartKind, readStatusRowsView, type CaseBoardVie
 import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
 import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
 import type { DiagramViewRenderer } from "../format/diagram-block.ts";
+import type { StepsViewRenderer } from "../format/steps-block.ts";
+import { stepFocusOf, stepItemOpen } from "../format/steps-focus.ts";
 import { firstRowPerPr, pageLedgers, type LedgerRow } from "../format/pr-ledger.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { ITEM_DATE_ATTR, itemDate, listChildrenText } from "../format/item-dates.ts";
@@ -290,6 +293,10 @@ export function formatWebHtml(
      *  `diagramViewHtml`), passed in like `chartView`. Absent ⇒ a diagram is
      *  its not-loaded line. */
     diagramView?: DiagramViewRenderer;
+    /** With `views`: the `<Steps>` view (`renderWikiHtml` passes
+     *  `stepsViewHtml`), passed in like `chartView`. Absent ⇒ a steps block is
+     *  its list and its not-loaded line. */
+    stepsView?: StepsViewRenderer;
     /** With `views`: the `<CaseBoard view="dots">` squares (`renderWikiHtml`
      *  passes `caseDotsViewHtml`), passed in like `chartView`. Absent ⇒ the
      *  board's rows alone. */
@@ -316,6 +323,7 @@ export function formatWebHtml(
   const prevRuleTreeView = currentRuleTreeView;
   const prevDiagramView = currentDiagramView;
   const prevDiagramCount = currentDiagramCount;
+  const prevStepsView = currentStepsView;
   const prevCaseKorts = currentCaseKorts;
   const prevCaseDotsView = currentCaseDotsView;
   const prevCaseDotsPending = currentCaseDotsPending;
@@ -325,6 +333,7 @@ export function formatWebHtml(
   currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
   currentDiagramView = currentViews && text.includes("<Diagram") ? (opts?.diagramView ?? null) : null;
   currentDiagramCount = 0;
+  currentStepsView = currentViews && text.includes("<Steps") ? (opts?.stepsView ?? null) : null;
   currentCaseKorts = NO_CASE_KORTS;
   const chartView = currentViews && text.includes("<Chart") ? opts?.chartView : undefined;
   const charted = chartView !== undefined;
@@ -410,6 +419,7 @@ export function formatWebHtml(
     currentRuleTreeView = prevRuleTreeView;
     currentDiagramView = prevDiagramView;
     currentDiagramCount = prevDiagramCount;
+    currentStepsView = prevStepsView;
     currentCaseKorts = prevCaseKorts;
     currentCaseDotsView = prevCaseDotsView;
     currentCaseDotsPending = prevCaseDotsPending;
@@ -468,6 +478,10 @@ let currentChartView: ChartViewRenderer | null = null;
  *  not-loaded line. The count numbers the call's diagrams for their id prefix. */
 let currentDiagramView: DiagramViewRenderer | null = null;
 let currentDiagramCount = 0;
+
+/** `opts.stepsView` for the call in progress; null ⇒ a `<Steps>` is its list
+ *  and its not-loaded line. It numbers its picture with the diagram count. */
+let currentStepsView: StepsViewRenderer | null = null;
 
 /** `opts.ruleTreeView` for the call in progress; null ⇒ a `<RuleTree>` is its list. */
 let currentRuleTreeView: RuleTreeViewRenderer | null = null;
@@ -886,6 +900,26 @@ function diagramBlockHtml(attrs: Record<string, string>): string {
   if (!currentDiagramView) return blockNote("dgm-unavailable", pageFileFailureText("not-loaded", src, "Diagram"));
   currentDiagramCount++;
   return currentDiagramView({ ref: src, text: file.text, svg: file.svg, prefix: `dgm${currentDiagramCount}-` });
+}
+
+/** A `<Steps src>`: on the reader, the view over the file's picture with the
+ *  body's list items as steps (`steps-block.ts`); everywhere else, or for a file
+ *  that did not load, the body as written and one line naming the file. Its
+ *  picture takes the next diagram prefix, so a Diagram and a Steps on one file
+ *  share no id. */
+function stepsBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
+  const src = (attrs.src ?? "").trim();
+  const withNote = (note: string) => [children, blockNote("stp-unavailable", note)].filter(Boolean).join("\n");
+  if (!src) return withNote(STEPS_NO_SRC);
+  const file = lookupPageFile(currentPageFiles, src, "diagram");
+  if (!file.ok) return withNote(pageFileFailureText(file.reason, src, "Diagram"));
+  if (!currentStepsView) return withNote(pageFileFailureText("not-loaded", src, "Diagram"));
+  currentDiagramCount++;
+  let authored = 0;
+  const bodyHtml = rawChildren.some((b) => b.type === "ul" || b.type === "ol")
+    ? wrappedListsHtml(rawChildren, "stp-list", (text, nested, value) => `${stepItemOpen(authored++, stepFocusOf(text), value)}${itemHtml(text)}${nested}</li>`)
+    : children;
+  return currentStepsView({ ref: src, text: file.text, svg: file.svg, prefix: `dgm${currentDiagramCount}-`, bodyHtml, authored });
 }
 
 /** A `<Chart>`: on the reader's page render with a chart view, the view over
@@ -2339,6 +2373,8 @@ const webRenderer: BlockRenderer = {
         return chartBlockHtml(attrs, rawChildren, children);
       case "Diagram":
         return diagramBlockHtml(attrs);
+      case "Steps":
+        return stepsBlockHtml(attrs, rawChildren, children);
       case "RuleTree":
         return ruleTreeBlockHtml(attrs, rawChildren, children);
       case "Glossary":

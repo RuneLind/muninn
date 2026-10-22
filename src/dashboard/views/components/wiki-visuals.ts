@@ -1,5 +1,5 @@
 /**
- * The reader's `<Chart>` toggles, `<Diagram>` view buttons and scroll stops, `<RuleTree>` case picker, `<Glossary>`
+ * The reader's `<Chart>` toggles, `<Diagram>` view buttons and scroll stops, `<Steps>` controls, `<RuleTree>` case picker, `<Glossary>`
  * term definitions and `<CaseBoard view="dots">` squares. The server
  * draws every chart variant (`src/format/chart-view.ts`); this file only shows
  * one: Chart or Table, and the variant (points or % of target, the bar as
@@ -43,6 +43,106 @@ export function diagramEdgeDimmed(focus: ReadonlySet<string>, from: string, to: 
   return focus.size > 0 && !(focus.has(from) && focus.has(to));
 }
 
+/** A `data-*-focus` value (space-separated ids) as a set. */
+const focusSet = (raw: string | undefined): Set<string> => new Set((raw ?? "").split(" ").filter(Boolean));
+
+/** Dim one figure's picture to `focus` by archify's guided-view rule: each
+ *  `[data-node-id]` outside the focus, each edge whose ends are not both in
+ *  it; an element with neither attribute never dims, and an empty focus dims
+ *  nothing. The one rule a `<Diagram>` view and a `<Steps>` step share. */
+export function applyDiagramFocus(fig: Element, focus: ReadonlySet<string>): void {
+  const svg = fig.querySelector(".dgm-svg");
+  svg?.querySelectorAll<Element>("[data-node-id]").forEach((n) => {
+    n.classList.toggle("dgm-dim", focus.size > 0 && !focus.has(n.getAttribute("data-node-id") ?? ""));
+  });
+  svg?.querySelectorAll<Element>("[data-edge-from][data-edge-to]").forEach((e) => {
+    e.classList.toggle("dgm-dim", diagramEdgeDimmed(focus, e.getAttribute("data-edge-from") ?? "", e.getAttribute("data-edge-to") ?? ""));
+  });
+}
+
+/** The interval a playing `<Steps>` advances at, in ms. */
+export const STEPS_PLAY_MS = 2000;
+const stepsTimers = new WeakMap<Element, ReturnType<typeof setInterval>>();
+
+/** A `<Steps>` section's own steps (not a nested block's). */
+function stepItems(sec: Element): HTMLElement[] {
+  return Array.from(sec.querySelectorAll<HTMLElement>("li.stp-step")).filter((li) => li.closest("section.stp") === sec);
+}
+
+/** The next step index for an action: `-1` is Show all. Next from Show all is
+ *  the first step, Prev from it the last; both stop at the ends. */
+export function nextStepIndex(act: "prev" | "next", cur: number, count: number): number {
+  if (count <= 0) return -1;
+  if (act === "next") return cur < 0 ? 0 : Math.min(cur + 1, count - 1);
+  return cur < 0 ? count - 1 : Math.max(cur - 1, 0);
+}
+
+function stopSteps(sec: Element): void {
+  const t = stepsTimers.get(sec);
+  if (t !== undefined) clearInterval(t);
+  stepsTimers.delete(sec);
+  sec.querySelector('.stp-ctrl [data-stp-act="play"]')?.setAttribute("aria-pressed", "false");
+}
+
+/** Show step `i` of `sec` (`-1`: every step, nothing dimmed). */
+function setStep(sec: HTMLElement, i: number): void {
+  const items = stepItems(sec);
+  const cur = i >= 0 && i < items.length ? i : -1;
+  sec.dataset.stpCur = String(cur);
+  items.forEach((li, k) => {
+    li.classList.toggle("stp-cur", k === cur);
+    if (k === cur) li.setAttribute("aria-current", "step");
+    else li.removeAttribute("aria-current");
+  });
+  const fig = sec.querySelector(":scope > figure.dgm");
+  if (fig) applyDiagramFocus(fig, cur < 0 ? new Set() : focusSet(items[cur]!.dataset.stpFocus));
+  sec.querySelector('.stp-ctrl [data-stp-act="all"]')?.setAttribute("aria-pressed", String(cur < 0));
+  const pos = sec.querySelector(".stp-ctrl .stp-pos");
+  if (pos) pos.textContent = cur < 0 ? `${items.length} steps` : `Step ${cur + 1} of ${items.length}`;
+}
+
+function stepsAct(sec: HTMLElement, act: string): void {
+  const count = stepItems(sec).length;
+  const cur = Number(sec.dataset.stpCur ?? "-1");
+  if (act === "play") {
+    if (stepsTimers.has(sec)) return stopSteps(sec);
+    if (cur < 0 || cur >= count - 1) setStep(sec, 0);
+    sec.querySelector('.stp-ctrl [data-stp-act="play"]')?.setAttribute("aria-pressed", "true");
+    stepsTimers.set(
+      sec,
+      setInterval(() => {
+        const at = Number(sec.dataset.stpCur ?? "-1");
+        if (!sec.isConnected || at >= stepItems(sec).length - 1) return stopSteps(sec);
+        setStep(sec, at + 1);
+      }, STEPS_PLAY_MS),
+    );
+    return;
+  }
+  stopSteps(sec);
+  if (act === "all") setStep(sec, -1);
+  else if (act === "prev" || act === "next") setStep(sec, nextStepIndex(act, cur, count));
+}
+
+/** Apply one `<Steps>` control click; false when `target` is not one. */
+function applyStepsControl(target: Element | null): boolean {
+  const btn = target?.closest?.<HTMLElement>("button[data-stp-act]");
+  const sec = btn?.closest<HTMLElement>("section.stp");
+  if (!btn || !sec || sec.closest(".wiki-ref-peek")) return false;
+  stepsAct(sec, btn.dataset.stpAct ?? "");
+  return true;
+}
+
+/** ArrowLeft/ArrowRight inside a `<Steps>` toolbar step back and forth. */
+function stepsKey(e: KeyboardEvent): void {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  const target = e.target instanceof Element ? e.target : null;
+  const sec = target?.closest(".stp-ctrl")?.closest<HTMLElement>("section.stp");
+  if (!sec || sec.closest(".wiki-ref-peek")) return;
+  e.preventDefault();
+  stepsAct(sec, e.key === "ArrowLeft" ? "prev" : "next");
+}
+
 /** Apply one `<Diagram>` view button; false when `target` is not one. Dims
  *  each node outside the view's focus (`data-node-id`) and each edge whose
  *  ends are not both inside it (`data-edge-from`/`data-edge-to`); an element
@@ -53,14 +153,7 @@ function applyDiagramView(target: Element | null): boolean {
   const fig = btn?.closest<HTMLElement>("figure.dgm");
   if (!btn || !fig || fig.closest(".wiki-ref-peek")) return false;
   const view = btn.dataset.dgmView ?? "";
-  const focus = new Set((btn.dataset.dgmFocus ?? "").split(" ").filter(Boolean));
-  const svg = fig.querySelector(".dgm-svg");
-  svg?.querySelectorAll<Element>("[data-node-id]").forEach((n) => {
-    n.classList.toggle("dgm-dim", focus.size > 0 && !focus.has(n.getAttribute("data-node-id") ?? ""));
-  });
-  svg?.querySelectorAll<Element>("[data-edge-from][data-edge-to]").forEach((e) => {
-    e.classList.toggle("dgm-dim", diagramEdgeDimmed(focus, e.getAttribute("data-edge-from") ?? "", e.getAttribute("data-edge-to") ?? ""));
-  });
+  applyDiagramFocus(fig, focusSet(btn.dataset.dgmFocus));
   fig.querySelectorAll<HTMLElement>(":scope > .dgm-note").forEach((p) => {
     p.hidden = p.dataset.dgmNote !== view;
   });
@@ -336,9 +429,10 @@ export function initWikiVisuals(doc: Document = document): void {
   installed = true;
   doc.addEventListener("click", (e) => {
     const target = e.target instanceof Element ? e.target : null;
-    if (!applyChartToggle(target) && !applyDiagramView(target)) applyCaseDot(target);
+    if (!applyChartToggle(target) && !applyDiagramView(target) && !applyStepsControl(target)) applyCaseDot(target);
   });
   doc.addEventListener("keydown", moveCaseDot);
+  doc.addEventListener("keydown", stepsKey);
   doc.addEventListener("change", (e) => {
     applyRuleTreePick(e.target instanceof Element ? e.target : null);
   });

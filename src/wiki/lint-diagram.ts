@@ -22,6 +22,10 @@
  *
  * Check 15 judges the tag's attributes and the components in a page's loaded
  * data files, and skips a file that did not load: that is this check's finding.
+ *
+ * A `<Steps src>` names the same kind of file and draws the same picture, so
+ * this check judges its file and picture too, worded `<Steps src="…">`; its
+ * focus ids are check 22's (`lint-steps.ts`).
  */
 
 import { readDiagram } from "../format/diagram-block.ts";
@@ -79,13 +83,16 @@ const list = (xs: readonly string[]): string =>
   xs.length <= LIST_MAX ? xs.join(", ") : `${xs.slice(0, LIST_MAX).join(", ")} and ${xs.length - LIST_MAX} more`;
 
 export function checkDiagrams(page: { relPath: string }, rawContent: string, files: LoadedPageFiles | undefined): LintFinding[] {
-  if (!files || !rawContent.includes("<Diagram")) return [];
+  if (!files || !(rawContent.includes("<Diagram") || rawContent.includes("<Steps"))) return [];
   const lines = rawContent.split("\n");
   const fenced = fencedLineMask(lines);
+  // A `<Steps src>` draws the same picture, so this check judges its file too,
+  // named by the tag on the ref's line.
+  const tagOn = (l: string): string | null => (l.includes("<Diagram") ? "Diagram" : l.includes("<Steps") ? "Steps" : null);
   // The ref as a whole quoted value first, so `x.architecture.json` does not
   // land on the line of `./x.architecture.json`.
   const lineOf = (ref: string): number | undefined => {
-    const on = (has: (l: string) => boolean) => lines.findIndex((l, n) => !fenced[n] && l.includes("<Diagram") && has(l));
+    const on = (has: (l: string) => boolean) => lines.findIndex((l, n) => !fenced[n] && tagOn(l) !== null && has(l));
     let i = on((l) => l.includes(`"${ref}"`) || l.includes(`'${ref}'`));
     if (i < 0) i = on((l) => l.includes(ref));
     return i < 0 ? undefined : i + 1;
@@ -105,8 +112,9 @@ export function checkDiagrams(page: { relPath: string }, rawContent: string, fil
     const result = files.get(ref);
     if (!result) continue;
     const at = lineOf(ref);
+    const tag = (at === undefined ? null : tagOn(lines[at - 1]!)) ?? "Diagram";
     const push = (message: string) =>
-      findings.push({ check: "diagram-svg", relPath: page.relPath, message: `<Diagram src="${ref}"> ${message}`, ...(at === undefined ? {} : { line: at }) });
+      findings.push({ check: "diagram-svg", relPath: page.relPath, message: `<${tag} src="${ref}"> ${message}`, ...(at === undefined ? {} : { line: at }) });
     if (!result.ok) {
       push(DIAGRAM_FINDINGS.file[result.reason]);
       continue;

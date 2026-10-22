@@ -180,7 +180,7 @@ export function splitQuerySql(children: Block[], hasSqlFile: boolean): { sql: Co
 
 /** The components that name a file beside the page, and the tag text a page
  *  must contain for the loader to parse it at all. */
-export const PAGE_FILE_COMPONENTS = ["Query", "CaseBoard", "DeltaTable", "Diagram"] as const;
+export const PAGE_FILE_COMPONENTS = ["Query", "CaseBoard", "DeltaTable", "Diagram", "Steps"] as const;
 
 /** Every file value in `blocks`, at any depth, in source order, deduplicated:
  *  a `Query`'s `csv=`/`sql=`, a `CaseBoard`'s, `DeltaTable`'s or `Diagram`'s `src=`. Walks
@@ -209,7 +209,8 @@ export function pageFileRefKinds(blocks: Block[]): Map<string, Set<PageFileKind>
         add(q.sql, "sql");
       } else if (b.name === "CaseBoard") add((b.attrs.src ?? "").trim(), "yaml");
       else if (b.name === "DeltaTable") add((b.attrs.src ?? "").trim(), "csv");
-      else if (b.name === "Diagram") add((b.attrs.src ?? "").trim(), "diagram");
+      // A `<Steps>` draws the same picture as a `<Diagram>`: one read, one kind.
+      else if (b.name === "Diagram" || b.name === "Steps") add((b.attrs.src ?? "").trim(), "diagram");
       walk(b.children);
     }
   };
@@ -300,18 +301,20 @@ export function queryResultLine(q: QueryAttrs): string {
 
 export const CASEBOARD_NO_SRC = "CaseBoard without src";
 export const DIAGRAM_NO_SRC = "Diagram without src";
+export const STEPS_NO_SRC = "Steps without src";
 
-/** The plain-text surfaces' line for a `<CaseBoard>`, a `<DeltaTable src>` or
- *  a `<Diagram>`, unescaped: `Cases: cases.yaml`, `Table: runs.csv`,
- *  `Diagram: x.architecture.json (interactive: x.html)`. Those surfaces read no
- *  file, so the line names it. A CaseBoard or Diagram without `src` says so,
- *  as the web does; a DeltaTable without one renders its body table, so no line. */
-export function blockFileLine(name: "CaseBoard" | "DeltaTable" | "Diagram", attrs: Record<string, string>): string {
+/** The plain-text surfaces' line for a `<CaseBoard>`, a `<DeltaTable src>`, a
+ *  `<Diagram>` or a `<Steps>`, unescaped: `Cases: cases.yaml`, `Table: runs.csv`,
+ *  `Diagram: x.architecture.json (interactive: x.html)`, `Steps: …` alike. Those
+ *  surfaces read no file, so the line names it. A CaseBoard, Diagram or Steps
+ *  without `src` says so, as the web does; a DeltaTable without one renders its
+ *  body table, so no line. */
+export function blockFileLine(name: "CaseBoard" | "DeltaTable" | "Diagram" | "Steps", attrs: Record<string, string>): string {
   const src = (attrs.src ?? "").trim();
-  if (!src) return name === "CaseBoard" ? CASEBOARD_NO_SRC : name === "Diagram" ? DIAGRAM_NO_SRC : "";
-  if (name === "Diagram") {
+  if (!src) return name === "CaseBoard" ? CASEBOARD_NO_SRC : name === "Diagram" ? DIAGRAM_NO_SRC : name === "Steps" ? STEPS_NO_SRC : "";
+  if (name === "Diagram" || name === "Steps") {
     const html = diagramSiblingHtml(src);
-    return `Diagram: ${pageFileName(src)}${html ? ` (interactive: ${pageFileName(html)})` : ""}`;
+    return `${name}: ${pageFileName(src)}${html ? ` (interactive: ${pageFileName(html)})` : ""}`;
   }
   return `${name === "CaseBoard" ? "Cases" : "Table"}: ${pageFileName(src)}`;
 }

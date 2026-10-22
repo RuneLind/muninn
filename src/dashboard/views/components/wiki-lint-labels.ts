@@ -29,6 +29,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   glossary: "<Glossary> lists with no term, a term twice, or an item with no term",
   "text-diagram": "Drawings in plain code fences that a mermaid diagram could draw",
   "diagram-svg": "<Diagram> pictures that are missing, drop parts, or use unstyled classes",
+  "steps-focus": "<Steps> steps naming a focus id the diagram does not define",
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",

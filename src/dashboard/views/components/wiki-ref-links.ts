@@ -334,6 +334,10 @@ export const PEEK_CHART_CHROME = ["vc-head", "vc-plot", "vc-legend", "vc-notes"]
  *  view buttons and the link, and shows the text form. */
 export const PEEK_DIAGRAM_CHROME = ["dgm-views", "dgm-note", "dgm-svg", "dgm-foot", "dgm-missing"] as const;
 
+/** A `<Steps>`' controls (`STEPS_CHROME_CLASSES` in steps-block.ts, pinned
+ *  equal by a test): a peek shows the steps as a list. */
+export const PEEK_STEPS_CHROME = ["stp-ctrl"] as const;
+
 /** A peeked chart keeps its table and loses the classes that would hide it. */
 function bareChart(chart: Element): void {
   chart.removeAttribute("class");
@@ -393,6 +397,7 @@ export const PEEK_STRIP_SELECTOR = [
   ...PEEK_CHART_CHROME,
   ...PEEK_RULE_TREE_CHROME,
   ...PEEK_DIAGRAM_CHROME,
+  ...PEEK_STEPS_CHROME,
   "gl-tip",
   "cb-dots",
 ]

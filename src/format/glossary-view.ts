@@ -54,7 +54,7 @@ const SKIP_CLASSES = new Set([
   "cb-warning", "cb-truncated", "cb-unavailable", "dt-truncated",
   // A Diagram's text form (another view of the drawing) and its status line;
   // its other chrome is reader-only or an svg (diagram-block.test.ts pins the set).
-  "dgm-text", "dgm-unavailable",
+  "dgm-text", "dgm-unavailable", "stp-unavailable",
 ]);
 const INLINE_TAGS = new Set(["strong", "em", "b", "i", "s", "del", "ins", "u", "mark", "span", "sup", "sub", "small"]);
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "wbr", "meta", "link", "col", "source", "area", "base", "embed", "track", "param"]);
