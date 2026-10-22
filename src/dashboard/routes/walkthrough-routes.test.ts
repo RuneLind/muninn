@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { sha256 } from "../../gardener/util.ts";
 
 const realTraces = await import("../../db/traces.ts");
 mock.module("../../db/traces.ts", () => ({
@@ -217,6 +218,25 @@ describe("POST /api/wiki/walkthrough — pre-commit answers", () => {
     expect(res.status).toBe(409);
     expect(((await res.json()) as { stale?: boolean }).stale).toBe(true);
     expect((await post({ ...ok, hash: "deadbeef" })).status).toBe(409);
+  });
+
+  // Fix round 1 batch 3, finding 1: under a matching hash a heading the server
+  // cannot place is a client/server disagreement, and «the page changed» sent
+  // the reader into a reload loop that sends the same identity again.
+  test("under a matching hash, a count or heading the server cannot place is a non-stale 422", async () => {
+    const hash = sha256(PAGE);
+    for (const body of [{ ...ok, count: 1, hash }, { ...ok, heading: "Nope", count: 1, hash }]) {
+      const res = await post(body);
+      expect(res.status).toBe(422);
+      const json = (await res.json()) as { stale?: boolean; code?: string; error?: string };
+      expect(json.stale).toBeUndefined();
+      expect(json.code).toBe("heading_mismatch");
+      expect(json.error).toContain("reloading doesn't help");
+    }
+    // A stale hash stays the stale 409 even when the identity also disagrees.
+    const res = await post({ ...ok, count: 1, hash: "deadbeef" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { stale?: boolean }).stale).toBe(true);
   });
 
   test("a section with no text is a 422", async () => {

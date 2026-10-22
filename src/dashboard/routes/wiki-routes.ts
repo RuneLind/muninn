@@ -151,6 +151,7 @@ import {
 import {
   normalizeHeadingText,
   WALKTHROUGH_HEADING_MAX,
+  WALKTHROUGH_HEADING_MISMATCH,
   WALKTHROUGH_ORDINAL_MAX,
 } from "../../wiki/walkthrough-wire.ts";
 import { requireJsonRequest } from "./json-request.ts";
@@ -3295,7 +3296,11 @@ export function registerWikiToolRoutes(
       }
       const raw = await readWikiPage(index, meta);
       if (raw === null) return c.json({ error: "page file unreadable" }, 503);
-      if (typeof body.hash === "string" && body.hash && body.hash !== sha256(raw)) {
+      // With a matching hash the page is the one the reader rendered, so a
+      // heading the server cannot place is a disagreement between the two
+      // renderings, not staleness: reloading would send the same identity.
+      const hashChecked = typeof body.hash === "string" && body.hash !== "";
+      if (hashChecked && body.hash !== sha256(raw)) {
         return c.json({ error: "The page changed since it was opened — reload it and try again.", stale: true }, 409);
       }
       const located = locateSection(raw, {
@@ -3305,6 +3310,20 @@ export function registerWikiToolRoutes(
         stripTitle: meta.title,
         resolve: index.resolve,
       });
+      if (!located.ok && hashChecked) {
+        log.warn(
+          "Wiki walkthrough: heading identity disagrees with the unchanged page wiki={wiki} page={page} heading={heading} reason={reason} count={count} found={found}",
+          { wiki: entry.name, page: meta.relPath, heading, reason: located.reason, count, found: located.found },
+        );
+        return c.json(
+          {
+            error:
+              "The reader and the server read this heading differently, so the walkthrough can't find its section. The page is unchanged, so reloading doesn't help.",
+            code: WALKTHROUGH_HEADING_MISMATCH,
+          },
+          422,
+        );
+      }
       if (!located.ok) {
         return located.reason === "not_found"
           ? c.json({ error: `No section headed "${heading}" on this page.` }, 404)

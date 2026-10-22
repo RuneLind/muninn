@@ -4609,10 +4609,12 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // 🧭 on each top-level section heading. After the ref links, which index
       // heading text: the button's own glyph must not join that text.
       if (data.meta.relPath) {
+        const wtRelPath = data.meta.relPath;
         enhanceWalkthroughButtons(articleRoot, {
-          relPath: data.meta.relPath,
-          hash: currentPageHash,
+          relPath: wtRelPath,
+          hash: () => currentPageHash,
           withWiki,
+          reload: () => reloadPageInPlace(wtRelPath),
         });
       }
       // The lens (D2's precedence): a `?lens=` the page was opened with, once,
@@ -8236,14 +8238,20 @@ function openArticleShare(): void {
  * must not add a history entry.
  */
 function reloadCheckedPage(turn: AskTurn): void {
-  // The same page, reloaded in place: it keeps the lens its view showed.
-  const lens = renderedArticle && renderedArticle.relPath === turn.pageRelPath ? lensOf(renderedArticle.el) : null;
+  reloadPageInPlace(turn.pageRelPath, turn.page);
+}
+
+/** Reload one page in place (no history entry, no hash reveal), keeping the
+ *  lens its view showed. Shared by a fact-check write and the walkthrough
+ *  panel's Reload on a stale page. */
+function reloadPageInPlace(relPath: string | undefined, name?: string): void {
+  const lens = renderedArticle && renderedArticle.relPath === relPath ? lensOf(renderedArticle.el) : null;
   inPlaceLens = lens
     ? { relPath: renderedArticle!.relPath, lens, ...(lens === "agent" ? { agent: snapshotAgentPane(renderedArticle!.el) } : {}) }
     : null;
   try {
-    if (turn.pageRelPath) loadPageByRelPath(turn.pageRelPath, false, false);
-    else if (turn.page) loadPage(turn.page, false, false);
+    if (relPath) loadPageByRelPath(relPath, false, false);
+    else if (name) loadPage(name, false, false);
   } finally {
     // The load took its copy synchronously; no later load may read it.
     inPlaceLens = null;

@@ -56,6 +56,9 @@ export interface WalkthroughDonePayload {
 export const WALKTHROUGH_ALL_DROPPED = "all_dropped";
 /** `app_error.code` for a reply that was not the JSON shape. */
 export const WALKTHROUGH_PARSE_FAILED = "parse_failed";
+/** A 422's `code` when the page is unchanged (its hash matches) but the
+ *  server finds no section for the reader's heading identity. */
+export const WALKTHROUGH_HEADING_MISMATCH = "heading_mismatch";
 
 /** The POST body. `ordinal` is 0-based among the eligible headings whose
  *  normalized text equals `heading`; `count` is how many there are. */

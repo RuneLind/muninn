@@ -18,7 +18,8 @@
 
 import { test, expect, type Page, type Route } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
@@ -65,6 +66,25 @@ const GUIDE = [
   "",
 ].join("\n");
 
+/** A page the staleness rows edit behind the reader's back, and a series
+ *  head whose label the reader renames from the open page. */
+const STALE = ["---", "title: Stale", "type: concept", "---", "", "# Stale", "", "## Usage", "", "Stale prose.", ""].join("\n");
+const SERIES = [
+  "---",
+  "title: Series head",
+  "type: concept",
+  "series: wt",
+  "series_label: Walk series",
+  "---",
+  "",
+  "# Series head",
+  "",
+  "## Usage",
+  "",
+  "Series prose.",
+  "",
+].join("\n");
+
 const OTHER = ["---", "title: Other", "type: concept", "---", "", "# Other", "", "## Elsewhere", "", "Other prose.", ""].join("\n");
 
 function sse(events: [string, unknown][]): string {
@@ -102,6 +122,8 @@ test.beforeAll(async () => {
   roRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-wt-ro-"));
   await writeFile(path.join(root, "guide.md"), GUIDE, "utf8");
   await writeFile(path.join(root, "other.md"), OTHER, "utf8");
+  await writeFile(path.join(root, "stale.md"), STALE, "utf8");
+  await writeFile(path.join(root, "series.md"), SERIES, "utf8");
   await writeFile(path.join(roRoot, "guide.md"), GUIDE, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -157,6 +179,31 @@ async function stub(page: Page, opts: { hold?: boolean; respond?: (body: Record<
     else await fulfill(opts.respond ? opts.respond(body) : done(String(body.heading), "A"));
   });
   return { held, posted };
+}
+
+const diskHash = async (rel: string) => createHash("sha256").update(await readFile(path.join(root, rel), "utf8")).digest("hex");
+
+/**
+ * Staleness rows: a POST whose hash is the file's CURRENT hash is answered
+ * with a canned walkthrough (no model call); any other hash is passed to the
+ * REAL route, which answers its stale 409 before it resolves a bot.
+ */
+async function stubUnlessStale(page: Page, rel: string) {
+  const posted: Record<string, unknown>[] = [];
+  const statuses: number[] = [];
+  await page.route("**/api/wiki/walkthrough*", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    const body = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
+    posted.push(body);
+    if (body.hash !== (await diskHash(rel))) {
+      const res = await route.fetch();
+      statuses.push(res.status());
+      return route.fulfill({ response: res });
+    }
+    statuses.push(200);
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: done(String(body.heading), "FRESH") });
+  });
+  return { posted, statuses };
 }
 
 const btn = (page: Page, heading: string, nth = 0) =>
@@ -354,6 +401,64 @@ test.describe("Wiki reader: walk me through", () => {
       await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
     });
   }
+
+  // Fix round 1 batch 3, finding 3: a stale 409 was a dead end — no reload,
+  // and the buttons kept the stale hash, so every click 409ed again.
+  test("a page changed on disk: the stale 409 offers Reload, and after it a click runs", async ({ page }) => {
+    await writeFile(path.join(root, "stale.md"), STALE, "utf8");
+    const { posted, statuses } = await stubUnlessStale(page, "stale.md");
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=stale.md`);
+    await expect(btn(page, "Usage")).toBeVisible();
+    await writeFile(path.join(root, "stale.md"), STALE.replace("Stale prose.", "Stale prose, edited elsewhere."), "utf8");
+    await btn(page, "Usage").click();
+    const panel = page.locator("#wikiWalkthrough");
+    await expect(panel.locator(".wiki-wt-error")).toContainText("The page changed since it was opened");
+    expect(statuses).toEqual([409]);
+    await panel.locator("#wikiWalkthroughReload").click();
+    await expect(page.locator(".wiki-article")).toContainText("edited elsewhere");
+    await expect(panel).toHaveCount(0);
+    await btn(page, "Usage").click();
+    await expect(panel.locator(".wiki-wt-step")).toHaveCount(2);
+    expect(statuses).toEqual([409, 200]);
+    expect(posted[1]!.hash).toBe(await diskHash("stale.md"));
+  });
+
+  // Fix round 1 batch 3, finding 2: the buttons froze the page hash at render,
+  // so the reader's own series write made the next click 409 «page changed».
+  test("the reader's own series write moves the hash: the next click runs, no 409", async ({ page }) => {
+    await writeFile(path.join(root, "series.md"), SERIES, "utf8");
+    await fetch(`${BASE}/api/wiki/pages?wiki=${WIKI}&refresh=1`);
+    const { statuses } = await stubUnlessStale(page, "series.md");
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=series.md`);
+    await expect(btn(page, "Usage")).toBeVisible();
+    const before = await diskHash("series.md");
+    await page.locator("[data-series-edit]").click();
+    await page.locator('#wikiSeriesMenu [data-series-form="label"] [data-series-input]').fill("Renamed walk series");
+    await page.locator('#wikiSeriesMenu [data-series-form="label"] button[type="submit"]').click();
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(0);
+    await expect.poll(() => diskHash("series.md")).not.toBe(before);
+    await expect(page.locator(".wiki-series-head .wiki-series-name")).toHaveText("Renamed walk series");
+    await btn(page, "Usage").click();
+    await expect(page.locator("#wikiWalkthrough .wiki-wt-step")).toHaveCount(2);
+    expect(statuses).toEqual([200]);
+  });
+
+  // Fix round 1 batch 3, finding 1: a heading the server cannot place on an
+  // UNCHANGED page is not staleness, so no Reload loop.
+  test("hash matches but the identity disagrees: a non-stale error, no Reload", async ({ page }) => {
+    await page.route("**/api/wiki/walkthrough*", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const body = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
+      // The identity the server would not find, under the reader's own hash.
+      await route.fulfill({ response: await route.fetch({ postData: JSON.stringify({ ...body, count: 9, ordinal: 0 }) }) });
+    });
+    await openGuide(page);
+    await btn(page, "Usage").click();
+    const panel = page.locator("#wikiWalkthrough");
+    await expect(panel.locator(".wiki-wt-error")).toContainText("reloading doesn't help");
+    await expect(panel.locator(".wiki-wt-error")).not.toContainText("changed since");
+    await expect(panel.locator("#wikiWalkthroughReload")).toHaveCount(0);
+  });
 
   test("a read-only wiki renders no button at all", async ({ page }) => {
     await openGuide(page, RO_WIKI);

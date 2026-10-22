@@ -24,6 +24,8 @@ export const WALKTHROUGH_CLOSE_ID = "wikiWalkthroughClose";
 /** The heading button's marker attribute (also the read-only backstop selector). */
 export const WALKTHROUGH_BTN_ATTR = "data-walkthrough-btn";
 export const WALKTHROUGH_CHOICE_ATTR = "data-wt-choice";
+/** The stale-page panel's Reload button. */
+export const WALKTHROUGH_RELOAD_ID = "wikiWalkthroughReload";
 
 /** What the client sends to name a section. */
 export interface HeadingIdentity {
@@ -50,7 +52,9 @@ export function headingIdentities(texts: readonly string[]): (HeadingIdentity | 
   });
 }
 
-export type WalkthroughErrorKind = "all_dropped" | "parse" | "model" | "request" | "transport";
+/** `stale`: the page on disk is not the one the reader rendered (a 409
+ *  `{stale: true}`), so the panel offers a reload instead of a retry. */
+export type WalkthroughErrorKind = "all_dropped" | "parse" | "model" | "request" | "transport" | "stale";
 
 export interface WalkthroughPanelState {
   /** `relPath` + identity: what a repeat click is compared against. */
@@ -164,7 +168,11 @@ export function walkthroughPanelHtml(state: WalkthroughPanelState): string {
   }
   if (state.phase === "error" || !state.result) {
     const cls = state.errorKind === "all_dropped" ? "wiki-wt-error is-dropped" : "wiki-wt-error";
-    return head + `<p class="${cls}" role="alert">${esc(state.error ?? "The walkthrough failed.")}</p>`;
+    const reload =
+      state.errorKind === "stale"
+        ? `<button type="button" class="wiki-wt-reload" id="${WALKTHROUGH_RELOAD_ID}">Reload the page</button>`
+        : "";
+    return head + `<p class="${cls}" role="alert">${esc(state.error ?? "The walkthrough failed.")}</p>` + reload;
   }
   const r = state.result;
   const steps = r.steps
@@ -204,6 +212,10 @@ export function walkthroughStyles(): string {
     .wiki-wt-error {
       margin: 0; padding: 6px 10px; border-radius: 8px; color: var(--text-primary);
       border-left: 3px solid var(--status-error); background: var(--tint-error);
+    }
+    .wiki-wt-reload {
+      align-self: flex-start; padding: 5px 12px; border-radius: 8px; cursor: pointer; font-size: 12.5px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary);
     }
     .wiki-wt-error.is-dropped { border-left-color: var(--status-warning); background: var(--tint-warning); }
     .wiki-wt-steps, .wiki-wt-quiz { margin: 0; padding-left: 1.3em; display: flex; flex-direction: column; gap: 10px; }

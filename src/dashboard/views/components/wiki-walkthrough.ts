@@ -51,6 +51,7 @@ import {
   WALKTHROUGH_CHOICE_ATTR,
   WALKTHROUGH_CLOSE_ID,
   WALKTHROUGH_PANEL_ID,
+  WALKTHROUGH_RELOAD_ID,
   type HeadingIdentity,
   type WalkthroughErrorKind,
   type WalkthroughPanelState,
@@ -58,10 +59,15 @@ import {
 
 export interface WalkthroughPageContext {
   relPath: string;
-  /** `/api/wiki/page`'s content hash, sent so a changed page answers 409. */
-  hash: string | null;
+  /** The open page's content hash, read at CLICK time: the reader's own
+   *  series write moves it without re-rendering the article, and a hash
+   *  captured when the buttons were added would 409 on that change. */
+  hash: () => string | null;
   /** Builds a URL carrying the open wiki's `?wiki=`. */
   withWiki: (url: string) => string;
+  /** Reload the open page in place; the article swap closes the panel and
+   *  re-adds the buttons with the fresh hash. */
+  reload: () => void;
 }
 
 let page: WalkthroughPageContext | null = null;
@@ -192,6 +198,7 @@ async function run(target: WalkthroughPanelState, ctx: WalkthroughPageContext): 
     render();
   };
 
+  const hash = ctx.hash();
   let res: Response;
   try {
     res = await fetch(ctx.withWiki("/api/wiki/walkthrough"), {
@@ -202,7 +209,7 @@ async function run(target: WalkthroughPanelState, ctx: WalkthroughPageContext): 
         heading: target.identity.heading,
         ordinal: target.identity.ordinal,
         count: target.identity.count,
-        ...(ctx.hash ? { hash: ctx.hash } : {}),
+        ...(hash ? { hash } : {}),
       }),
       signal: ctrl.signal,
     });
@@ -212,11 +219,13 @@ async function run(target: WalkthroughPanelState, ctx: WalkthroughPageContext): 
   }
   if (!res.ok || !res.body) {
     let msg = `The walkthrough could not start (HTTP ${res.status}).`;
+    let stale = false;
     try {
-      const b = (await res.json()) as { error?: unknown };
+      const b = (await res.json()) as { error?: unknown; stale?: unknown };
       if (typeof b?.error === "string") msg = b.error;
+      stale = b?.stale === true;
     } catch { /* keep the status copy */ }
-    fail("request", msg);
+    fail(stale ? "stale" : "request", msg);
     return;
   }
 
@@ -275,6 +284,10 @@ function wire(): void {
     }
     if (t.closest(`#${WALKTHROUGH_CLOSE_ID}`)) {
       closeWalkthrough();
+      return;
+    }
+    if (t.closest(`#${WALKTHROUGH_RELOAD_ID}`)) {
+      page?.reload();
       return;
     }
     const choice = t.closest<HTMLElement>(`[${WALKTHROUGH_CHOICE_ATTR}]`);
