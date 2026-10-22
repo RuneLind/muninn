@@ -156,6 +156,52 @@ describe("the quote check", () => {
     ]);
   });
 
+  test("a kept quote is shown as the section's own text, not the model's spelling", () => {
+    const kept = checkQuotes(
+      {
+        steps: [{ title: "Install", text: "t", quote: "Run bun   install\nthen read the **docs**." }],
+        quiz: [{ question: "q", choices: ["a", "b"], answer: 0, quote: "It caches “packages” locally." }],
+        dropped: [],
+      },
+      sectionPlainText('Run **bun install** then read [the docs](https://example.com/docs).\n\nIt caches "packages" locally.'),
+    );
+    expect(kept.steps.map((s) => s.quote)).toEqual(["Run bun install then read the docs."]);
+    expect(kept.quiz.map((q) => q.quote)).toEqual(['It caches "packages" locally.']);
+  });
+
+  const one = (sectionMd: string, quote: string) =>
+    checkQuotes({ steps: [{ title: "s", text: "t", quote }], quiz: [], dropped: [] }, sectionPlainText(sectionMd));
+
+  test.each([
+    ["a link destination", "Read [the docs](https://evil.example/phish) before starting work."],
+    ["a wikilink target", "Read [[Invented Page|the docs]] before starting work."],
+  ])("a quote that adds %s the section lacks is dropped", (_what, quote) => {
+    const kept = one("Read [the docs](https://x.com) before starting work.", quote);
+    expect(kept.steps).toEqual([]);
+    expect(kept.dropped).toEqual([{ kind: "step", reason: "quote_not_in_section" }]);
+  });
+
+  test("a faithful quote of literal markdown from a code span is kept", () => {
+    const section = "Use `**bold**` to make bold text in a page.";
+    const shown = sectionPlainText(section);
+    expect(shown).toBe("Use **bold** to make bold text in a page.");
+    const kept = one(section, shown);
+    expect(kept.steps.map((s) => s.quote)).toEqual([shown]);
+    expect(kept.dropped).toEqual([]);
+  });
+
+  test.each([
+    ["smart quotes", 'He said "hello world" to everyone.', "He said “hello world” to everyone."],
+    ["NFD vs NFC", "Kaffe på Cafe\u0301 Oslo smaker godt.", "Kaffe på Café Oslo smaker godt."],
+    ["en dash vs hyphen", "The 2024–2025 window closes early.", "The 2024-2025 window closes early."],
+    ["arrow vs ->", "Page write → log line → commit.", "Page write -> log line -> commit."],
+    ["guillemets vs straight quotes", "Det heter «svar» på norsk her.", 'Det heter "svar" på norsk her.'],
+  ])("a faithful quote differing in %s is kept, shown as the section spells it", (_what, section, quote) => {
+    const kept = one(section, quote);
+    expect(kept.dropped).toEqual([]);
+    expect(kept.steps.map((s) => s.quote)).toEqual([sectionPlainText(section)]);
+  });
+
   test("a quote too short to ground anything is dropped even when it matches", () => {
     const kept = checkQuotes({ steps: [{ title: "x", text: "t", quote: "Run" }], quiz: [], dropped: [] }, plain);
     expect(kept.steps).toEqual([]);

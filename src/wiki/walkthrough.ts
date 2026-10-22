@@ -19,10 +19,16 @@
  * higher level (fewer `#`), else at the end of the page.
  *
  * **One plain text, two readers.** The model is given the section as
- * {@link sectionPlainText}, and a quote matches when its own plain text (the
- * same function) appears in it — so a faithful quote matches by construction,
- * and one that differs from the section only in markdown or whitespace matches
- * too.
+ * {@link sectionPlainText}. A quote matches when it is a substring of that text
+ * after {@link foldForMatch} on both sides (Unicode NFC, a small typography fold,
+ * whitespace collapsed). The quote is never re-rendered as markdown: a faithful
+ * copy of the text the model saw, literal `**` from a code span included,
+ * matches as written. Failing that, one second try strips the emphasis and code
+ * markers `*`, `_`, `~` and the backtick from the quote alone, so `**review gate**` matches
+ * `review gate`; a link destination or a wikilink target is content, not a
+ * marker, so a quote adding one does not match. A kept item's `quote` is
+ * replaced by the matching span of the section's plain text, so the panel only
+ * ever shows text that is in the section.
  */
 
 import { parseBlocks, headingLine } from "../format/markdown-ast.ts";
@@ -250,30 +256,95 @@ export function parseWalkthroughReply(raw: string): ParsedWalkthrough | null {
   return { steps, quiz, dropped };
 }
 
+/** Glyph variants a faithful copy may change, folded to one spelling on both
+ *  sides of the match. Whitespace (nbsp included) is collapsed separately. */
+const TYPOGRAPHY_FOLD: Record<string, string> = {
+  "‘": "'", "’": "'", "‚": "'", "‛": "'", "‹": "'", "›": "'",
+  "“": '"', "”": '"', "„": '"', "‟": '"', "«": '"', "»": '"',
+  "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
+  "→": "->", "←": "<-", "↔": "<->", "⇒": "=>", "…": "...",
+  "­": "", "​": "", "‌": "", "‍": "", "﻿": "",
+};
+
+/** One character cluster (a base and its combining marks) at a time, so every
+ *  folded character can be traced back to the span of the source it came from. */
+const CLUSTER_RE = /\P{M}\p{M}*|\p{M}+/gu;
+
+interface FoldedText {
+  text: string;
+  /** Per folded character: the source offsets of the cluster it came from. */
+  from: number[];
+  to: number[];
+}
+
 /**
- * Keep the steps and questions whose quote, reduced to plain text the same way
- * the section was, appears in the section's plain text.
+ * The text the quote check compares: Unicode NFC, {@link TYPOGRAPHY_FOLD},
+ * whitespace runs collapsed to one space, trimmed — with a map back to the
+ * source so a match can be shown in the section's own spelling.
  */
-export function checkQuotes(
-  parsed: ParsedWalkthrough,
-  sectionText: string,
-  toPlain: (markdown: string) => string = (md) => sectionPlainText(md),
-): ParsedWalkthrough {
+export function foldForMatch(s: string): FoldedText {
+  let text = "";
+  const from: number[] = [];
+  const to: number[] = [];
+  for (const m of s.matchAll(CLUSTER_RE)) {
+    const start = m.index!;
+    const end = start + m[0].length;
+    if (/^\s+$/.test(m[0])) {
+      if (text === "" || text.endsWith(" ")) continue;
+      text += " ";
+      from.push(start);
+      to.push(end);
+      continue;
+    }
+    for (const ch of m[0].normalize("NFC")) {
+      const out = TYPOGRAPHY_FOLD[ch] ?? ch;
+      for (const o of out) {
+        text += o;
+        from.push(start);
+        to.push(end);
+      }
+    }
+  }
+  if (text.endsWith(" ")) {
+    text = text.slice(0, -1);
+    from.pop();
+    to.pop();
+  }
+  return { text, from, to };
+}
+
+/** Emphasis and code markers a quote may carry that the plain text does not. */
+const MARKDOWN_MARKERS_RE = /[*_`~]/g;
+
+/**
+ * Keep the steps and questions whose quote appears in the section's plain
+ * text (see the module header for the rule), each with its `quote` replaced by
+ * the matching span of that text.
+ */
+export function checkQuotes(parsed: ParsedWalkthrough, sectionText: string): ParsedWalkthrough {
   const dropped = [...parsed.dropped];
-  const verdict = (quote: string): WalkthroughDrop["reason"] | null => {
-    const plain = toPlain(quote);
-    if (plain.length < WALKTHROUGH_QUOTE_MIN) return "quote_too_short";
-    return sectionText.includes(plain) ? null : "quote_not_in_section";
+  const section = foldForMatch(sectionText);
+  const verdict = (quote: string): { shown: string } | { reason: WalkthroughDrop["reason"] } => {
+    const tries = [foldForMatch(quote).text, foldForMatch(quote.replace(MARKDOWN_MARKERS_RE, "")).text];
+    if (tries.every((t) => t.length < WALKTHROUGH_QUOTE_MIN)) return { reason: "quote_too_short" };
+    for (const t of tries) {
+      if (t.length < WALKTHROUGH_QUOTE_MIN) continue;
+      const at = section.text.indexOf(t);
+      if (at !== -1) return { shown: sectionText.slice(section.from[at]!, section.to[at + t.length - 1]!) };
+    }
+    return { reason: "quote_not_in_section" };
   };
-  const steps = parsed.steps.filter((s) => {
-    const r = verdict(s.quote);
-    if (r) dropped.push({ kind: "step", reason: r });
-    return !r;
-  });
-  const quiz = parsed.quiz.filter((q) => {
-    const r = verdict(q.quote);
-    if (r) dropped.push({ kind: "question", reason: r });
-    return !r;
-  });
+  const steps: WalkthroughStep[] = [];
+  for (const s of parsed.steps) {
+    const v = verdict(s.quote);
+    if ("reason" in v) dropped.push({ kind: "step", reason: v.reason });
+    else steps.push({ ...s, quote: v.shown });
+  }
+  const quiz: WalkthroughQuestion[] = [];
+  for (const q of parsed.quiz) {
+    const v = verdict(q.quote);
+    if ("reason" in v) dropped.push({ kind: "question", reason: v.reason });
+    else quiz.push({ ...q, quote: v.shown });
+  }
   return { steps, quiz, dropped };
 }
