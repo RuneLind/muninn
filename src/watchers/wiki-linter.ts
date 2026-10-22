@@ -49,6 +49,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "rule-tree": { one: "rule tree problem", many: "rule tree problems" },
   glossary: { one: "glossary problem", many: "glossary problems" },
   "text-diagram": { one: "text drawing", many: "text drawings" },
+  "diagram-svg": { one: "diagram picture problem", many: "diagram picture problems" },
   "same-work-no-link": { one: "unlinked pair", many: "unlinked pairs" },
   "series-unnamed": { one: "unnamed series", many: "unnamed series" },
   "series-inconsistent": { one: "inconsistent series", many: "inconsistent series" },

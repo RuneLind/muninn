@@ -329,6 +329,11 @@ function decodeHash(href: string): string | null {
  *  pinned equal by a test; the server module stays out of this bundle). */
 export const PEEK_CHART_CHROME = ["vc-head", "vc-plot", "vc-legend", "vc-notes"] as const;
 
+/** A `<Diagram>`'s reader chrome (`DIAGRAM_CHROME_CLASSES` in
+ *  diagram-block.ts, pinned equal by a test): a peek drops the picture, the
+ *  view buttons and the link, and shows the text form. */
+export const PEEK_DIAGRAM_CHROME = ["dgm-views", "dgm-note", "dgm-svg", "dgm-foot", "dgm-missing"] as const;
+
 /** A peeked chart keeps its table and loses the classes that would hide it. */
 function bareChart(chart: Element): void {
   chart.removeAttribute("class");
@@ -387,6 +392,7 @@ export const PEEK_STRIP_SELECTOR = [
   DC_VIEW_CLASS,
   ...PEEK_CHART_CHROME,
   ...PEEK_RULE_TREE_CHROME,
+  ...PEEK_DIAGRAM_CHROME,
   "gl-tip",
   "cb-dots",
 ]

@@ -196,6 +196,11 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     doc: "A «Words on the page» list of `**Term:** definition` items, or a paragraph of sentences each led by an emphasised term (`A *Hold* is …`; a term needs a separator or a following word, and after Det/Den/De a copula); the wiki reader marks each term's first use per section (the text before the first heading, then each `#` and `##` heading; a `###` does not start one) with its definition (case-free unless the term holds a capital past its first letter), every other surface prints the list.",
     teach: WIKI,
   },
+  Diagram: {
+    doc: "An archify diagram from a `.architecture.json`, `.workflow.json` or `.lifecycle.json` file beside the page; the wiki reader draws the SVG from its HTML sibling (`x.html`) with the file's views as buttons, every other surface names the file.",
+    teach: WIKI,
+    attrs: { src: { doc: "The diagram file, relative to the page", printType: '"./<name>.architecture.json"' } },
+  },
 };
 
 /**

@@ -94,6 +94,8 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "cb-group", "cb-row", "cb-id", "cb-pill", "cb-hold", "cb-wait", "cb-wrong", "cb-none", "cb-ok", "cb-unknown",
   "cb-count-hold", "cb-count-wait", "cb-count-wrong", "cb-count-none", "cb-count-ok", "cb-count-unknown",
   "cb-owner", "cb-note", "cb-refs", "cb-ref",
+  // `<Diagram>`: chat prints its not-loaded line.
+  "dgm-unavailable",
   "delta-table", "dt-better-lower", "dt-better-higher", "dt-body", "dt-wrap", "dt-table", "dt-run",
   "dt-delta", "dt-delta-runs", "dt-abs", "dt-pct", "dt-good", "dt-bad", "dt-flat", "dt-none",
   "dt-unavailable", "dt-note", "dt-warning", "dt-truncated", "dt-mark", "dt-delta-dir", "dt-overflow",

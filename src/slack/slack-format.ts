@@ -163,7 +163,8 @@ const slackRenderer: BlockRenderer = {
           .join("\n");
       }
       case "CaseBoard":
-      case "DeltaTable": {
+      case "DeltaTable":
+      case "Diagram": {
         // No file read: the body (a DeltaTable's pipe table renders as a
         // table, with no delta), then the file's name.
         const line = blockFileLine(name, attrs);

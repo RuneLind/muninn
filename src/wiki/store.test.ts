@@ -1888,6 +1888,88 @@ describe("attachments — the pairing pass", () => {
     expect(child.pairedBy).toBe("link");
   });
 
+  test("rule 3: a <Diagram src>'s html sibling pairs like an Embed target, and joins no link", async () => {
+    await Bun.write(
+      path.join(root, "plans/drawn.mdx"),
+      '---\ntitle: Drawn\n---\n\n<Diagram src="./flow.architecture.json" />\n\n<Diagram src="./sub/steps.workflow.json" />\n',
+    );
+    await Bun.write(path.join(root, "plans/flow.architecture.json"), "{}");
+    await Bun.write(path.join(root, "plans/flow.html"), html("Flow"));
+    await Bun.write(path.join(root, "plans/sub/steps.html"), html("Steps"));
+    const index = await buildWikiIndex(root);
+
+    for (const rel of ["plans/flow.html", "plans/sub/steps.html"]) {
+      const child = index.pages.find((p) => p.relPath === rel)!;
+      expect(child.parent).toBe("plans/drawn.mdx");
+      expect(child.pairedBy).toBe("link");
+      expect(index.backlinks.get(rel)).toBeUndefined();
+    }
+    expect(index.outgoing.get("plans/drawn.mdx")).toEqual([]);
+  });
+
+  test("rule 3: a <Diagram> in code, a non-diagram src or an absolute src pairs nothing", async () => {
+    await Bun.write(
+      path.join(root, "plans/quoting.mdx"),
+      [
+        "---",
+        "title: Quoting",
+        "---",
+        "",
+        "Write `<Diagram src=\"./a.lifecycle.json\" />` like this:",
+        "",
+        "```mdx",
+        '<Diagram src="./b.lifecycle.json" />',
+        "```",
+        "",
+        '<Diagram src="./c.json" />',
+        "",
+        // The loader refuses a leading slash; joined anyway it would name plans/d.html.
+        '<Diagram src="/d.lifecycle.json" />',
+      ].join("\n"),
+    );
+    for (const s of ["a", "b", "c", "d"]) await Bun.write(path.join(root, `plans/${s}.html`), html(s));
+    const index = await buildWikiIndex(root);
+
+    for (const s of ["a", "b", "c", "d"]) {
+      expect(index.pages.find((p) => p.relPath === `plans/${s}.html`)!.parent).toBeUndefined();
+    }
+  });
+
+  test("rule 3: a non-Diagram ref to a diagram-named file pairs no sibling", async () => {
+    // pageFileRefKinds lists the ref as CaseBoard's; only a Diagram's ref embeds a sibling.
+    await Bun.write(path.join(root, "plans/board.mdx"), '---\ntitle: Board\n---\n\n<CaseBoard src="./cases.architecture.json" />\n');
+    await Bun.write(path.join(root, "plans/cases.html"), html("Cases"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/cases.html")!.parent).toBeUndefined();
+  });
+
+  test("rule 3: two Diagram refs sharing one sibling, or a Diagram and an Embed of it, count one embedder", async () => {
+    await Bun.write(
+      path.join(root, "plans/kinds.mdx"),
+      '---\ntitle: Kinds\n---\n\n<Diagram src="./k.architecture.json" />\n\n<Diagram src="./k.workflow.json" />\n',
+    );
+    await Bun.write(path.join(root, "plans/k.html"), html("K"));
+    await Bun.write(
+      path.join(root, "plans/both.mdx"),
+      '---\ntitle: Both\n---\n\n<Embed src="./b.html" />\n\n<Diagram src="./b.lifecycle.json" />\n',
+    );
+    await Bun.write(path.join(root, "plans/b.html"), html("B"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/k.html")!.parent).toBe("plans/kinds.mdx");
+    expect(index.pages.find((p) => p.relPath === "plans/b.html")!.parent).toBe("plans/both.mdx");
+  });
+
+  test("rule 3: a sibling one page draws and another embeds belongs to neither", async () => {
+    await Bun.write(path.join(root, "plans/one.mdx"), '---\ntitle: One\n---\n\n<Diagram src="./shared.lifecycle.json" />\n');
+    await Bun.write(path.join(root, "plans/two.mdx"), '---\ntitle: Two\n---\n\n<Embed src="./shared.html" />\n');
+    await Bun.write(path.join(root, "plans/shared.html"), html("Shared"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/shared.html")!.parent).toBeUndefined();
+  });
+
   test("rule 4: superseded_by folds a MARKDOWN page under its successor, wikilink or bare stem", async () => {
     await Bun.write(path.join(root, "plans/new.mdx"), "---\ntitle: New\n---\n\nThe successor.");
     await Bun.write(

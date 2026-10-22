@@ -36,6 +36,7 @@ import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
 import {
   CASEBOARD_NO_SRC,
+  DIAGRAM_NO_SRC,
   QUERY_CSV_MAX_ROWS,
   anchorSlug,
   formatCount,
@@ -88,6 +89,7 @@ import {
 import { readCaseBoardView, readChartKind, readStatusRowsView, type CaseBoardView } from "../format/component-spec.ts";
 import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
 import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
+import type { DiagramViewRenderer } from "../format/diagram-block.ts";
 import { firstRowPerPr, pageLedgers, type LedgerRow } from "../format/pr-ledger.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { ITEM_DATE_ATTR, itemDate, listChildrenText } from "../format/item-dates.ts";
@@ -284,6 +286,10 @@ export function formatWebHtml(
      *  `ruleTreeViewHtml`), passed in like `chartView`. Absent ⇒ a rule tree
      *  prints its list as written. */
     ruleTreeView?: RuleTreeViewRenderer;
+    /** With `views`: the `<Diagram>` view (`renderWikiHtml` passes
+     *  `diagramViewHtml`), passed in like `chartView`. Absent ⇒ a diagram is
+     *  its not-loaded line. */
+    diagramView?: DiagramViewRenderer;
     /** With `views`: the `<CaseBoard view="dots">` squares (`renderWikiHtml`
      *  passes `caseDotsViewHtml`), passed in like `chartView`. Absent ⇒ the
      *  board's rows alone. */
@@ -308,6 +314,8 @@ export function formatWebHtml(
   const prevLedgerRows = currentLedgerRows;
   const prevLogIds = currentLogIds;
   const prevRuleTreeView = currentRuleTreeView;
+  const prevDiagramView = currentDiagramView;
+  const prevDiagramCount = currentDiagramCount;
   const prevCaseKorts = currentCaseKorts;
   const prevCaseDotsView = currentCaseDotsView;
   const prevCaseDotsPending = currentCaseDotsPending;
@@ -315,6 +323,8 @@ export function formatWebHtml(
   currentViews = opts?.views === true;
   currentCaseDotsView = currentViews && text.includes("<CaseBoard") ? (opts?.caseDotsView ?? null) : null;
   currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
+  currentDiagramView = currentViews && text.includes("<Diagram") ? (opts?.diagramView ?? null) : null;
+  currentDiagramCount = 0;
   currentCaseKorts = NO_CASE_KORTS;
   const chartView = currentViews && text.includes("<Chart") ? opts?.chartView : undefined;
   const charted = chartView !== undefined;
@@ -398,6 +408,8 @@ export function formatWebHtml(
     currentLedgerRows = prevLedgerRows;
     currentLogIds = prevLogIds;
     currentRuleTreeView = prevRuleTreeView;
+    currentDiagramView = prevDiagramView;
+    currentDiagramCount = prevDiagramCount;
     currentCaseKorts = prevCaseKorts;
     currentCaseDotsView = prevCaseDotsView;
     currentCaseDotsPending = prevCaseDotsPending;
@@ -451,6 +463,11 @@ let currentViews = false;
 
 /** `opts.chartView` for the call in progress; null ⇒ a `<Chart>` is its table. */
 let currentChartView: ChartViewRenderer | null = null;
+
+/** `opts.diagramView` for the call in progress; null ⇒ a `<Diagram>` is its
+ *  not-loaded line. The count numbers the call's diagrams for their id prefix. */
+let currentDiagramView: DiagramViewRenderer | null = null;
+let currentDiagramCount = 0;
 
 /** `opts.ruleTreeView` for the call in progress; null ⇒ a `<RuleTree>` is its list. */
 let currentRuleTreeView: RuleTreeViewRenderer | null = null;
@@ -856,6 +873,19 @@ function deltaTableHtml(
   return (
     `${labelWarnings}<div class="dt-wrap"><table class="dt-table"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>${note}`
   );
+}
+
+/** A `<Diagram src>`: the reader's view over the file and its sanitized SVG;
+ *  everywhere else (chat, a render without views), or for a file that did not
+ *  load, one line naming the file. */
+function diagramBlockHtml(attrs: Record<string, string>): string {
+  const src = (attrs.src ?? "").trim();
+  if (!src) return blockNote("dgm-unavailable", DIAGRAM_NO_SRC);
+  const file = lookupPageFile(currentPageFiles, src, "diagram");
+  if (!file.ok) return blockNote("dgm-unavailable", pageFileFailureText(file.reason, src, "Diagram"));
+  if (!currentDiagramView) return blockNote("dgm-unavailable", pageFileFailureText("not-loaded", src, "Diagram"));
+  currentDiagramCount++;
+  return currentDiagramView({ ref: src, text: file.text, svg: file.svg, prefix: `dgm${currentDiagramCount}-` });
 }
 
 /** A `<Chart>`: on the reader's page render with a chart view, the view over
@@ -2307,6 +2337,8 @@ const webRenderer: BlockRenderer = {
         return children;
       case "Chart":
         return chartBlockHtml(attrs, rawChildren, children);
+      case "Diagram":
+        return diagramBlockHtml(attrs);
       case "RuleTree":
         return ruleTreeBlockHtml(attrs, rawChildren, children);
       case "Glossary":

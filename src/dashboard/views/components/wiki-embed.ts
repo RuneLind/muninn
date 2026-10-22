@@ -18,8 +18,9 @@
  *    `<Embed>` there stays its fallback line.
  */
 
-import { planEmbeds, type EmbedFigure } from "../../../format/embed.ts";
+import { planEmbeds, resolveEmbedRelPath, type EmbedFigure } from "../../../format/embed.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
+import { watchDiagramPictures } from "./wiki-visuals.ts";
 
 export const EMBED_FRAME_CLASS = "wiki-embed-frame";
 
@@ -62,4 +63,15 @@ export function enhanceEmbeds(
     else fig.appendChild(frame);
     fig.appendChild(open);
   }
+  // A `<Diagram>`'s «Open interactive» link: its html sibling, by the same
+  // resolution and route as an embed. The server cannot write the href, since
+  // `formatWebHtml` knows neither the page path nor the wiki.
+  root.querySelectorAll<HTMLAnchorElement>("a.dgm-open[data-dgm-html]").forEach((a) => {
+    const rel = resolveEmbedRelPath(pageRelPath, a.dataset.dgmHtml ?? "");
+    if (!rel) return;
+    a.setAttribute("href", withWiki("/api/wiki/html?relPath=" + encodeURIComponent(rel)));
+    a.hidden = false;
+  });
+  // A `<Diagram>` picture is a tab stop only while it scrolls.
+  watchDiagramPictures(root);
 }

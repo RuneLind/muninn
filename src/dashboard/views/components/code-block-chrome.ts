@@ -140,6 +140,8 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   StatusRows: null,
   // A chart wraps a pipe table; a fence in its body is an ordinary fence.
   Chart: null,
+  // A diagram is self-closing: no body.
+  Diagram: null,
   // A rule tree wraps a nested list; a fence in an item is an ordinary fence.
   RuleTree: null,
   Glossary: null,

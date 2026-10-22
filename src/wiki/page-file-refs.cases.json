@@ -514,6 +514,60 @@
           "rel": "plans/liste.csv"
         }
       ]
+    },
+    {
+      "name": "a Diagram naming each archify suffix",
+      "page": "flows/side.mdx",
+      "markdown": "<Diagram src=\"side-kart.architecture.json\" />\n\n<Diagram src=\"side-flyt.workflow.json\" />\n\n<Diagram src=\"data/side-liv.lifecycle.json\" />\n",
+      "refs": [
+        {
+          "ref": "side-kart.architecture.json",
+          "kinds": [
+            "diagram"
+          ],
+          "lexical": "ok",
+          "rel": "flows/side-kart.architecture.json"
+        },
+        {
+          "ref": "side-flyt.workflow.json",
+          "kinds": [
+            "diagram"
+          ],
+          "lexical": "ok",
+          "rel": "flows/side-flyt.workflow.json"
+        },
+        {
+          "ref": "data/side-liv.lifecycle.json",
+          "kinds": [
+            "diagram"
+          ],
+          "lexical": "ok",
+          "rel": "flows/data/side-liv.lifecycle.json"
+        }
+      ]
+    },
+    {
+      "name": "a Diagram naming a bare .json or its .html sibling",
+      "page": "flows/side.mdx",
+      "markdown": "<Diagram src=\"side.json\" />\n\n<Diagram src=\"side-kart.html\" />\n",
+      "refs": [
+        {
+          "ref": "side.json",
+          "kinds": [
+            "diagram"
+          ],
+          "lexical": "extension",
+          "rel": null
+        },
+        {
+          "ref": "side-kart.html",
+          "kinds": [
+            "diagram"
+          ],
+          "lexical": "extension",
+          "rel": null
+        }
+      ]
     }
   ]
 }

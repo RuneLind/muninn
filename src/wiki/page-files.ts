@@ -19,13 +19,16 @@ import {
   PAGE_FILE_MAX_PER_PAGE,
   PAGE_FILE_PAGE_BUDGET_BYTES,
   checkPageFileRef,
+  diagramSiblingRelPath,
   hasExcludedSegment,
   pageFileKind,
   PAGE_FILE_COMPONENTS,
   pageFileRefKinds,
   type PageFileKind,
+  type DiagramSvgResult,
   type PageFileResult,
 } from "../format/query-block.ts";
+import { diagramSvgFromHtml } from "./diagram-svg.ts";
 import { splitFrontmatter } from "./page-text.ts";
 
 export type ContainedFile =
@@ -78,6 +81,7 @@ async function readPageFile(
   ref: string,
   kinds: ReadonlySet<PageFileKind>,
   budget: { left: number },
+  siblings: SiblingReads,
 ): Promise<PageFileResult> {
   // Only a kind some component names this ref for: `<Query sql="x.yml">`
   // reads nothing, though `.yml` is a CaseBoard's.
@@ -97,18 +101,41 @@ async function readPageFile(
   // is refused, though a page may read `.yaml` files.
   if (pageFileKind(realRel) !== pageFileKind(ref)) return { ok: false, reason: "extension" };
   if (hasExcludedSegment(realRel)) return UNAVAILABLE;
+  const read = await readGuarded(found.real, PAGE_FILE_MAX_BYTES, budget);
+  if (!read.ok) return read.reason === "unavailable" ? UNAVAILABLE : { ok: false, reason: read.reason };
+  if (!kinds.has("diagram")) return { ok: true, text: read.text };
+  return { ok: true, text: read.text, svg: await readDiagramSibling(root, pageRelPath, ref, budget, siblings) };
+}
+
+/** One page load's HTML sibling reads, by the sibling's wiki-relative path:
+ *  `x.architecture.json` and `x.workflow.json`, or `./x…` and `x…`, name one
+ *  `x.html`, which is read, sanitized and counted against the budget once. */
+type SiblingReads = Map<string, Promise<DiagramSvgResult>>;
+
+/** The most a `<Diagram>`'s HTML sibling may weigh (archify writes ~700 KB:
+ *  the picture plus its own viewer). It counts against the page budget. */
+export const DIAGRAM_HTML_MAX_BYTES = 2 * 1024 * 1024;
+
+type GuardedRead =
+  | { ok: true; text: string; size: number; mtimeMs: number }
+  | { ok: false; reason: "unavailable" | "too-large" | "budget" };
+
+/** The bytes of one contained file, by the rules {@link readPageFile}
+ *  documents: one `O_NOFOLLOW | O_NONBLOCK` handle, a regular file with one
+ *  link, at most `cap` bytes and what is left of `budget`. */
+async function readGuarded(real: string, cap: number, budget: { left: number }): Promise<GuardedRead> {
   let fh: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    fh = await open(found.real, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
+    fh = await open(real, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
     const st = await fh.stat();
     // A hard link is invisible to realpath. Best effort only: a file with a
     // second name may be an outside file linked in, but once the outside name
     // is gone (or under a rename race) nlink reads 1 and the file is served.
-    if (!st.isFile() || st.nlink > 1) return UNAVAILABLE;
-    if (st.size > PAGE_FILE_MAX_BYTES) return { ok: false, reason: "too-large" };
+    if (!st.isFile() || st.nlink > 1) return { ok: false, reason: "unavailable" };
+    if (st.size > cap) return { ok: false, reason: "too-large" };
     if (st.size > budget.left) return { ok: false, reason: "budget" };
     // One byte past the cap shows a file grown past it since `fstat`.
-    const buf = Buffer.allocUnsafe(PAGE_FILE_MAX_BYTES + 1);
+    const buf = Buffer.allocUnsafe(cap + 1);
     let n = 0;
     for (;;) {
       const { bytesRead } = await fh.read(buf, n, buf.length - n, n);
@@ -116,28 +143,67 @@ async function readPageFile(
       n += bytesRead;
       if (n === buf.length) break;
     }
-    if (n > PAGE_FILE_MAX_BYTES) return { ok: false, reason: "too-large" };
+    if (n > cap) return { ok: false, reason: "too-large" };
     if (n > budget.left) return { ok: false, reason: "budget" };
     budget.left -= n;
     // A NUL is the wikilink sentinel's delimiter in `renderWikiHtml`; a
     // leading BOM would reach the SQL disclosure and its Copy text.
-    const text = buf.toString("utf8", 0, n).replace(/^\uFEFF/, "").replace(/\0/g, "�");
-    return { ok: true, text };
+    const text = buf.toString("utf8", 0, n).replace(/^\uFEFF/, "").replace(/\0/g, "\uFFFD");
+    return { ok: true, text, size: n, mtimeMs: st.mtimeMs };
   } catch {
-    return UNAVAILABLE;
+    return { ok: false, reason: "unavailable" };
   } finally {
     await fh?.close().catch(() => {});
   }
 }
 
+const NO_SVG = (): DiagramSvgResult => ({ svg: null, unknownElements: [], unknownAttrs: [], unknownClasses: [] });
+
 /**
- * Read every file the page's `<Query>`, `<CaseBoard>` and `<DeltaTable>`
- * blocks name. The refs come from the parsed AST (`pageFileRefs`), so a tag
- * inside a code fence reads nothing.
+ * The sanitized picture of a `<Diagram src="x.architecture.json">`, from its
+ * HTML sibling `x.html`. Not a page file: it never joins
+ * `PAGE_FILE_KIND_EXTENSIONS`, so no component can name it. Its read has the
+ * same guards as {@link readPageFile} (no climb above the root, realpath
+ * containment, no excluded segment, `O_NOFOLLOW`, one link), its real path
+ * must end in `.html`, and it is capped at {@link DIAGRAM_HTML_MAX_BYTES}
+ * against the same page budget. Read once per page load ({@link SiblingReads}).
+ */
+async function readDiagramSibling(
+  root: string,
+  pageRelPath: string,
+  ref: string,
+  budget: { left: number },
+  siblings: SiblingReads,
+): Promise<DiagramSvgResult> {
+  const rel = diagramSiblingRelPath(pageRelPath, ref);
+  if (rel === null) return { ...NO_SVG(), problem: "missing" };
+  let read = siblings.get(rel);
+  if (!read) {
+    read = readSiblingOnce(root, rel, budget);
+    siblings.set(rel, read);
+  }
+  return read;
+}
+
+async function readSiblingOnce(root: string, rel: string, budget: { left: number }): Promise<DiagramSvgResult> {
+  const found = await resolveContainedFile(root, rel);
+  if (!found.ok) return { ...NO_SVG(), problem: "missing" };
+  const realRel = path.relative(found.rootReal, found.real).split(path.sep).join("/");
+  if (!realRel.toLowerCase().endsWith(".html") || hasExcludedSegment(realRel)) return { ...NO_SVG(), problem: "missing" };
+  const read = await readGuarded(found.real, DIAGRAM_HTML_MAX_BYTES, budget);
+  if (!read.ok) return { ...NO_SVG(), problem: read.reason === "unavailable" ? "missing" : read.reason };
+  return diagramSvgFromHtml(read.text, { path: found.real, mtimeMs: read.mtimeMs, size: read.size });
+}
+
+/**
+ * Read every file the page's `<Query>`, `<CaseBoard>`, `<DeltaTable>` and
+ * `<Diagram>` blocks name, plus each `<Diagram>`'s HTML sibling. The refs come
+ * from the parsed AST (`pageFileRefKinds`), so a tag inside a code fence reads
+ * nothing.
  * Read one at a time in source order, so the per-page byte budget
  * (`PAGE_FILE_PAGE_BUDGET_BYTES`) cuts the same refs on every open. Past
  * `PAGE_FILE_MAX_PER_PAGE` distinct refs, the rest answer `limit` unread. A
- * page naming none of the three tags parses nothing.
+ * page naming none of the four tags parses nothing.
  */
 export async function loadPageFiles(
   root: string,
@@ -148,10 +214,11 @@ export async function loadPageFiles(
   if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return out;
   const refs = [...pageFileRefKinds(parseBlocks(splitFrontmatter(markdown).body))];
   const budget = { left: PAGE_FILE_PAGE_BUDGET_BYTES };
+  const siblings: SiblingReads = new Map();
   for (const [k, [ref, kinds]] of refs.entries()) {
     out.set(
       ref,
-      k < PAGE_FILE_MAX_PER_PAGE ? await readPageFile(root, pageRelPath, ref, kinds, budget) : { ok: false, reason: "limit" },
+      k < PAGE_FILE_MAX_PER_PAGE ? await readPageFile(root, pageRelPath, ref, kinds, budget, siblings) : { ok: false, reason: "limit" },
     );
   }
   return out;
