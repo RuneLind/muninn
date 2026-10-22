@@ -154,7 +154,8 @@ const telegramRenderer: BlockRenderer = {
       }
       case "CaseBoard":
       case "DeltaTable":
-      case "Diagram": {
+      case "Diagram":
+      case "Steps": {
         // No file read: the body (a DeltaTable's pipe table renders as a
         // table, with no delta), then the file's name.
         const line = blockFileLine(name, attrs);

@@ -1,5 +1,5 @@
 /**
- * The reader's `<Chart>` toggles, `<Diagram>` view buttons and scroll stops, `<RuleTree>` case picker, `<Glossary>`
+ * The reader's `<Chart>` toggles, `<Diagram>` view buttons and scroll stops, `<Steps>` controls, `<RuleTree>` case picker, `<Glossary>`
  * term definitions and `<CaseBoard view="dots">` squares. The server
  * draws every chart variant (`src/format/chart-view.ts`); this file only shows
  * one: Chart or Table, and the variant (points or % of target, the bar as
@@ -11,6 +11,7 @@
  * class), so a fresh render starts every chart as the server wrote it, and
  * one document-level listener serves every render without re-wiring.
  */
+import { STEPS_ALL_CAPTION, stepsPosText } from "../../../format/steps-focus.ts";
 
 /** Press `btn` and release the other buttons of its group. */
 function pressOne(btn: HTMLElement): void {
@@ -43,6 +44,271 @@ export function diagramEdgeDimmed(focus: ReadonlySet<string>, from: string, to: 
   return focus.size > 0 && !(focus.has(from) && focus.has(to));
 }
 
+/** A `data-*-focus` value (space-separated ids) as a set. */
+const focusSet = (raw: string | undefined): Set<string> => new Set((raw ?? "").split(" ").filter(Boolean));
+
+/** Dim one figure's picture to `focus` by archify's guided-view rule: each
+ *  `[data-node-id]` outside the focus, each edge whose ends are not both in
+ *  it; an element with neither attribute never dims, and an empty focus dims
+ *  nothing. An id no `[data-node-id]` in this picture carries leaves the focus
+ *  first, so a focus of only such ids dims nothing, for a `<Diagram>` view as
+ *  for a step. Lint check 22 reports such an id only on a `<Steps>` step, and
+ *  only when the JSON does not define it: it reads the file's ids, not the SVG's.
+ *  The one rule a `<Diagram>` view and a `<Steps>` step share. */
+export function applyDiagramFocus(fig: Element, requested: ReadonlySet<string>): Element[] {
+  const svg = fig.querySelector(".dgm-svg");
+  const nodes = Array.from(svg?.querySelectorAll<Element>("[data-node-id]") ?? []);
+  const drawn = new Set(nodes.map((n) => n.getAttribute("data-node-id") ?? ""));
+  const focus = new Set([...requested].filter((id) => drawn.has(id)));
+  nodes.forEach((n) => {
+    n.classList.toggle("dgm-dim", focus.size > 0 && !focus.has(n.getAttribute("data-node-id") ?? ""));
+  });
+  svg?.querySelectorAll<Element>("[data-edge-from][data-edge-to]").forEach((e) => {
+    e.classList.toggle("dgm-dim", diagramEdgeDimmed(focus, e.getAttribute("data-edge-from") ?? "", e.getAttribute("data-edge-to") ?? ""));
+  });
+  return nodes.filter((n) => focus.has(n.getAttribute("data-node-id") ?? ""));
+}
+
+/** Where a scroller showing `view` px of its content, now at `pos` and able to
+ *  go to `max`, must go to show the span [a, b] (content px): unchanged while
+ *  the span is in view (its start, when it is longer than the view); else the
+ *  span centred, or its start at the view's start when it is longer. Clamped. */
+export function revealOffset(pos: number, view: number, max: number, a: number, b: number): number {
+  if (max <= 0 || view <= 0) return pos;
+  const fits = b - a <= view;
+  if (fits ? a >= pos && b <= pos + view : a >= pos && a < pos + view) return pos;
+  return Math.round(Math.min(max, Math.max(0, fits ? (a + b - view) / 2 : a)));
+}
+
+/** The nearest ancestor that scrolls vertically, else the document's scroller. */
+function scrollerY(el: Element): Element {
+  for (let a = el.parentElement; a; a = a.parentElement) {
+    const oy = getComputedStyle(a).overflowY;
+    if ((oy === "auto" || oy === "scroll") && a.scrollHeight > a.clientHeight) return a;
+  }
+  return el.ownerDocument.scrollingElement ?? el.ownerDocument.documentElement;
+}
+
+/** Bring `lit` (a `<Diagram>` view's or a `<Steps>` step's lit nodes) into
+ *  view: across, in the picture's own box; down, in the scroller that holds
+ *  it, below where `stuck` (the Steps bar) sticks, cut to the window. Each
+ *  axis by {@link revealOffset}. Nothing lit, nothing moves; smooth unless
+ *  the reader asks for reduced motion. */
+export function revealDiagramFocus(fig: Element, lit: readonly Element[], stuck?: HTMLElement | null): void {
+  const box = fig.querySelector(".dgm-svg");
+  if (!box || lit.length === 0) return;
+  const rs = lit.map((n) => n.getBoundingClientRect());
+  const u = {
+    left: Math.min(...rs.map((r) => r.left)),
+    right: Math.max(...rs.map((r) => r.right)),
+    top: Math.min(...rs.map((r) => r.top)),
+    bottom: Math.max(...rs.map((r) => r.bottom)),
+  };
+  const win = fig.ownerDocument.defaultView;
+  const behavior: ScrollBehavior = win?.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
+  const x0 = box.getBoundingClientRect().left + box.clientLeft;
+  const left = revealOffset(box.scrollLeft, box.clientWidth, box.scrollWidth - box.clientWidth, u.left - x0 + box.scrollLeft, u.right - x0 + box.scrollLeft);
+  if (left !== box.scrollLeft) box.scrollTo({ left, behavior });
+  const sc = scrollerY(box);
+  const whole = sc === fig.ownerDocument.scrollingElement;
+  const at = whole ? 0 : sc.getBoundingClientRect().top + sc.clientTop;
+  // A sticky box sticks `top` below the scroller's padding edge.
+  const inset = stuck ? parseFloat(getComputedStyle(sc).paddingTop) + (parseFloat(getComputedStyle(stuck).top) || 0) + stuck.offsetHeight : 0;
+  const top = Math.max(at, 0) + inset;
+  const bottom = Math.min(at + (whole ? (win?.innerHeight ?? 0) : sc.clientHeight), win?.innerHeight ?? Infinity);
+  const y = revealOffset(sc.scrollTop, bottom - top, sc.scrollHeight - sc.clientHeight, u.top - top + sc.scrollTop, u.bottom - top + sc.scrollTop);
+  if (y !== sc.scrollTop) sc.scrollTo({ top: y, behavior });
+}
+
+type Rgba = [number, number, number, number];
+
+/** A computed CSS colour as 0–255 channels and 0–1 alpha: `transparent`,
+ *  `rgb()`/`rgba()` in either syntax, and `color(srgb …)` (Blink's computed
+ *  `color-mix`). Null for any other form. */
+function parseColor(raw: string): Rgba | null {
+  const s = raw.trim();
+  if (s === "transparent") return [0, 0, 0, 0];
+  const alpha = (v: string | undefined) => (v === undefined ? 1 : v.endsWith("%") ? parseFloat(v) / 100 : parseFloat(v));
+  const n = String.raw`(-?[\d.]+(?:e[+-]?\d+)?)`;
+  const rgb = new RegExp(String.raw`^rgba?\(\s*${n}[\s,]+${n}[\s,]+${n}(?:\s*[,/]\s*${n}(%?))?\s*\)$`, "i").exec(s);
+  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3]), alpha(rgb[4] === undefined ? undefined : rgb[4] + (rgb[5] ?? ""))];
+  const srgb = new RegExp(String.raw`^color\(srgb\s+${n}\s+${n}\s+${n}(?:\s*/\s*${n}(%?))?\s*\)$`, "i").exec(s);
+  if (srgb) return [Number(srgb[1]) * 255, Number(srgb[2]) * 255, Number(srgb[3]) * 255, alpha(srgb[4] === undefined ? undefined : srgb[4] + (srgb[5] ?? ""))];
+  return null;
+}
+
+/** The colour a stack of fills shows: `layers` innermost first (each
+ *  ancestor's computed `background-color`), laid over one another down to the
+ *  first opaque one. Null when no layer is opaque or one is unreadable. */
+export function stackedFill(layers: readonly string[]): string | null {
+  const read: Rgba[] = [];
+  for (const l of layers) {
+    const c = parseColor(l);
+    if (!c) return null;
+    read.push(c);
+    if (c[3] >= 1) break;
+  }
+  if (!read.length || read[read.length - 1]![3] < 1) return null;
+  let out = read.pop()!;
+  for (let k = read.length - 1; k >= 0; k--) {
+    const [r, g, b, a] = read[k]!;
+    out = [r * a + out[0] * (1 - a), g * a + out[1] * (1 - a), b * a + out[2] * (1 - a), 1];
+  }
+  return `rgb(${Math.round(out[0])}, ${Math.round(out[1])}, ${Math.round(out[2])})`;
+}
+
+/** Paint a stuck `<Steps>` bar in the fill its container shows, every tint
+ *  over its ground: opaque, so the picture never shows through as it scrolls
+ *  under. Unreadable ⇒ the CSS fallback (the pane's fill). */
+function paintStepsBar(bar: HTMLElement): void {
+  const layers: string[] = [];
+  for (let e = bar.parentElement; e; e = e.parentElement) layers.push(getComputedStyle(e).backgroundColor);
+  bar.style.backgroundColor = stackedFill(layers) ?? "";
+}
+
+const paintAllStepsBars = (doc: Document): void =>
+  doc.querySelectorAll<HTMLElement>("section.stp > .stp-ctrl").forEach(paintStepsBar);
+
+let stepsBarsWatched = false;
+
+/** Paint every Steps bar under `root` now, and every bar on the page again
+ *  whenever a fill can change: the theme (the system's or the reader's
+ *  `data-theme`) and the hash (a `:target` fill). */
+export function watchStepsBars(root: ParentNode): void {
+  root.querySelectorAll<HTMLElement>("section.stp > .stp-ctrl").forEach(paintStepsBar);
+  const doc = (root as Node).ownerDocument ?? (root as Document);
+  if (stepsBarsWatched || !doc?.defaultView) return;
+  stepsBarsWatched = true;
+  const again = () => paintAllStepsBars(doc);
+  doc.defaultView.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", again);
+  doc.defaultView.addEventListener("hashchange", again);
+  if (typeof MutationObserver !== "undefined") {
+    new MutationObserver(again).observe(doc.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  }
+}
+
+/** The interval a playing `<Steps>` advances at, in ms. */
+export const STEPS_PLAY_MS = 2000;
+const stepsTimers = new WeakMap<Element, ReturnType<typeof setInterval>>();
+
+/** A `<Steps>` section's own steps (not a nested block's). */
+function stepItems(sec: Element): HTMLElement[] {
+  return Array.from(sec.querySelectorAll<HTMLElement>("li.stp-step")).filter((li) => li.closest("section.stp") === sec);
+}
+
+/** The next step index for an action: `-1` is Show all. Next from Show all is
+ *  the first step, Prev from it the last; both stop at the ends. */
+export function nextStepIndex(act: "prev" | "next", cur: number, count: number): number {
+  if (count <= 0) return -1;
+  if (act === "next") return cur < 0 ? 0 : Math.min(cur + 1, count - 1);
+  return cur < 0 ? count - 1 : Math.max(cur - 1, 0);
+}
+
+/** Watches each playing block, to stop Play once it is hidden: its fold
+ *  closed (no box) or it left the view. */
+let stepsSeen: IntersectionObserver | null = null;
+
+/** The block's live line: silent while Play runs, so only a step the reader
+ *  picks is announced. */
+function setStepsLive(sec: Element, on: boolean): void {
+  sec.querySelector(".stp-ctrl .stp-now")?.setAttribute("aria-live", on ? "polite" : "off");
+}
+
+function stopSteps(sec: Element): void {
+  const t = stepsTimers.get(sec);
+  if (t !== undefined) clearInterval(t);
+  stepsTimers.delete(sec);
+  stepsSeen?.unobserve(sec);
+  sec.querySelector('.stp-ctrl [data-stp-act="play"]')?.setAttribute("aria-pressed", "false");
+  setStepsLive(sec, true);
+}
+
+/** Show step `i` of `sec` (`-1`: every step, nothing dimmed). */
+function setStep(sec: HTMLElement, i: number): void {
+  const items = stepItems(sec);
+  const cur = i >= 0 && i < items.length ? i : -1;
+  sec.dataset.stpCur = String(cur);
+  items.forEach((li, k) => {
+    li.classList.toggle("stp-cur", k === cur);
+    if (k === cur) li.setAttribute("aria-current", "step");
+    else li.removeAttribute("aria-current");
+  });
+  const fig = sec.querySelector(":scope > figure.dgm");
+  if (fig) {
+    const lit = applyDiagramFocus(fig, cur < 0 ? new Set() : focusSet(items[cur]!.dataset.stpFocus));
+    revealDiagramFocus(fig, lit, sec.querySelector<HTMLElement>(":scope > .stp-ctrl"));
+  }
+  // Prev and Next do nothing at their end; from Show all both go somewhere.
+  sec.querySelector('.stp-ctrl [data-stp-act="prev"]')?.setAttribute("aria-disabled", String(cur === 0));
+  sec.querySelector('.stp-ctrl [data-stp-act="next"]')?.setAttribute("aria-disabled", String(cur >= 0 && cur === items.length - 1));
+  const pos = sec.querySelector(".stp-ctrl .stp-pos");
+  if (pos) pos.textContent = stepsPosText(cur, items.length);
+  // The server's caption (`data-stp-cap`), never the item's DOM text; the
+  // CSS clamps it to two lines and `title` keeps it whole.
+  const cap = sec.querySelector<HTMLElement>(".stp-ctrl .stp-cap");
+  if (cap) {
+    cap.textContent = cur < 0 ? STEPS_ALL_CAPTION : (items[cur]!.dataset.stpCap ?? "");
+    cap.title = cur < 0 ? "" : cap.textContent;
+  }
+}
+
+function stepsAct(sec: HTMLElement, act: string): void {
+  const count = stepItems(sec).length;
+  const cur = Number(sec.dataset.stpCur ?? "-1");
+  if (act === "play") {
+    if (stepsTimers.has(sec)) return stopSteps(sec);
+    if (count > 1) setStepsLive(sec, false);
+    if (cur < 0 || cur >= count - 1) setStep(sec, 0);
+    if (count <= 1) return;
+    sec.querySelector('.stp-ctrl [data-stp-act="play"]')?.setAttribute("aria-pressed", "true");
+    if (typeof IntersectionObserver !== "undefined") {
+      stepsSeen ??= new IntersectionObserver((entries) => {
+        for (const e of entries) if (!e.isIntersecting) stopSteps(e.target);
+      });
+      stepsSeen.observe(sec);
+    }
+    stepsTimers.set(
+      sec,
+      setInterval(() => {
+        const at = Number(sec.dataset.stpCur ?? "-1");
+        const last = stepItems(sec).length - 1;
+        if (!sec.isConnected || at >= last) return stopSteps(sec);
+        setStep(sec, at + 1);
+        // Released on the tick that shows the last step, so Play there starts over.
+        if (at + 1 >= last) stopSteps(sec);
+      }, STEPS_PLAY_MS),
+    );
+    return;
+  }
+  if (act !== "all" && act !== "prev" && act !== "next") return;
+  const to = act === "all" ? -1 : nextStepIndex(act, cur, count);
+  // A Prev or Next at its end is disabled: it does nothing, Play included.
+  if (act !== "all" && to === cur) return;
+  stopSteps(sec);
+  setStep(sec, to);
+}
+
+/** Apply one `<Steps>` control click; false when `target` is not one. */
+function applyStepsControl(target: Element | null): boolean {
+  const btn = target?.closest?.<HTMLElement>("button[data-stp-act]");
+  const sec = btn?.closest<HTMLElement>("section.stp");
+  if (!btn || !sec || sec.closest(".wiki-ref-peek")) return false;
+  stepsAct(sec, btn.dataset.stpAct ?? "");
+  return true;
+}
+
+/** ArrowLeft/ArrowRight inside a `<Steps>` button group step back and forth
+ *  (a group, not an ARIA toolbar: Tab moves between the buttons). */
+function stepsKey(e: KeyboardEvent): void {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  const target = e.target instanceof Element ? e.target : null;
+  const sec = target?.closest(".stp-ctrl")?.closest<HTMLElement>("section.stp");
+  if (!sec || sec.closest(".wiki-ref-peek")) return;
+  e.preventDefault();
+  stepsAct(sec, e.key === "ArrowLeft" ? "prev" : "next");
+}
+
 /** Apply one `<Diagram>` view button; false when `target` is not one. Dims
  *  each node outside the view's focus (`data-node-id`) and each edge whose
  *  ends are not both inside it (`data-edge-from`/`data-edge-to`); an element
@@ -53,14 +319,7 @@ function applyDiagramView(target: Element | null): boolean {
   const fig = btn?.closest<HTMLElement>("figure.dgm");
   if (!btn || !fig || fig.closest(".wiki-ref-peek")) return false;
   const view = btn.dataset.dgmView ?? "";
-  const focus = new Set((btn.dataset.dgmFocus ?? "").split(" ").filter(Boolean));
-  const svg = fig.querySelector(".dgm-svg");
-  svg?.querySelectorAll<Element>("[data-node-id]").forEach((n) => {
-    n.classList.toggle("dgm-dim", focus.size > 0 && !focus.has(n.getAttribute("data-node-id") ?? ""));
-  });
-  svg?.querySelectorAll<Element>("[data-edge-from][data-edge-to]").forEach((e) => {
-    e.classList.toggle("dgm-dim", diagramEdgeDimmed(focus, e.getAttribute("data-edge-from") ?? "", e.getAttribute("data-edge-to") ?? ""));
-  });
+  revealDiagramFocus(fig, applyDiagramFocus(fig, focusSet(btn.dataset.dgmFocus)));
   fig.querySelectorAll<HTMLElement>(":scope > .dgm-note").forEach((p) => {
     p.hidden = p.dataset.dgmNote !== view;
   });
@@ -336,9 +595,10 @@ export function initWikiVisuals(doc: Document = document): void {
   installed = true;
   doc.addEventListener("click", (e) => {
     const target = e.target instanceof Element ? e.target : null;
-    if (!applyChartToggle(target) && !applyDiagramView(target)) applyCaseDot(target);
+    if (!applyChartToggle(target) && !applyDiagramView(target) && !applyStepsControl(target)) applyCaseDot(target);
   });
   doc.addEventListener("keydown", moveCaseDot);
+  doc.addEventListener("keydown", stepsKey);
   doc.addEventListener("change", (e) => {
     applyRuleTreePick(e.target instanceof Element ? e.target : null);
   });

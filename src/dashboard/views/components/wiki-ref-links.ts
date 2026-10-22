@@ -334,12 +334,26 @@ export const PEEK_CHART_CHROME = ["vc-head", "vc-plot", "vc-legend", "vc-notes"]
  *  view buttons and the link, and shows the text form. */
 export const PEEK_DIAGRAM_CHROME = ["dgm-views", "dgm-note", "dgm-svg", "dgm-foot", "dgm-missing"] as const;
 
+/** A `<Steps>`' controls (`STEPS_CHROME_CLASSES` in steps-block.ts, pinned
+ *  equal by a test): a peek shows the steps as a list. */
+export const PEEK_STEPS_CHROME = ["stp-ctrl"] as const;
+
 /** A peeked chart keeps its table and loses the classes that would hide it. */
 function bareChart(chart: Element): void {
   chart.removeAttribute("class");
   chart.removeAttribute("role");
   chart.removeAttribute("aria-label");
   chart.querySelector(":scope > .vc-table")?.classList.remove("vc-table");
+}
+
+/** A peeked `<Steps>` is at rest, as Show all leaves it: no current step.
+ *  The picture, and the dimming on it, goes with `.dgm-svg`. */
+function bareSteps(sec: Element): void {
+  sec.setAttribute("data-stp-cur", "-1");
+  sec.querySelectorAll("li.stp-step").forEach((li) => {
+    li.classList.remove("stp-cur");
+    li.removeAttribute("aria-current");
+  });
 }
 
 /** A `<RuleTree>`'s reader chrome (`RULE_TREE_CHROME_CLASSES` in
@@ -393,6 +407,7 @@ export const PEEK_STRIP_SELECTOR = [
   ...PEEK_CHART_CHROME,
   ...PEEK_RULE_TREE_CHROME,
   ...PEEK_DIAGRAM_CHROME,
+  ...PEEK_STEPS_CHROME,
   "gl-tip",
   "cb-dots",
 ]
@@ -410,6 +425,7 @@ function cloneBare<T extends Node>(n: T): T {
     c.querySelectorAll(PEEK_STRIP_SELECTOR).forEach((b) => b.remove());
     for (const chart of [c, ...Array.from(c.querySelectorAll("section.vc"))]) if (chart.matches("section.vc")) bareChart(chart);
     for (const tree of [c, ...Array.from(c.querySelectorAll("section.rt"))]) if (tree.matches("section.rt")) bareRuleTree(tree);
+    for (const sec of [c, ...Array.from(c.querySelectorAll("section.stp"))]) if (sec.matches("section.stp")) bareSteps(sec);
     bareGlossary(c);
     for (const list of [c, ...Array.from(c.querySelectorAll(".dl-list"))]) {
       if (!list.matches(".dl-list")) continue;

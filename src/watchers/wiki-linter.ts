@@ -50,6 +50,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   glossary: { one: "glossary problem", many: "glossary problems" },
   "text-diagram": { one: "text drawing", many: "text drawings" },
   "diagram-svg": { one: "diagram picture problem", many: "diagram picture problems" },
+  "steps-focus": { one: "step naming an unknown focus id", many: "steps naming unknown focus ids" },
   "same-work-no-link": { one: "unlinked pair", many: "unlinked pairs" },
   "series-unnamed": { one: "unnamed series", many: "unnamed series" },
   "series-inconsistent": { one: "inconsistent series", many: "inconsistent series" },

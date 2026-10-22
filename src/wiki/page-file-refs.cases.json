@@ -568,6 +568,37 @@
           "rel": null
         }
       ]
+    },
+    {
+      "name": "a Steps naming a diagram file, wrapping a list or self-closed",
+      "page": "flows/side.mdx",
+      "markdown": "<Steps src=\"side-liv.lifecycle.json\">\n\n1. Opprettet `opprettet`\n2. Vurdert `vurdert`\n\n</Steps>\n\n<Steps src=\"./side-flyt.workflow.json\" />\n\n<Steps src=\"side.json\" />\n",
+      "refs": [
+        {
+          "ref": "side-liv.lifecycle.json",
+          "kinds": [
+            "diagram"
+          ],
+          "lexical": "ok",
+          "rel": "flows/side-liv.lifecycle.json"
+        },
+        {
+          "ref": "./side-flyt.workflow.json",
+          "kinds": [
+            "diagram"
+          ],
+          "lexical": "ok",
+          "rel": "flows/side-flyt.workflow.json"
+        },
+        {
+          "ref": "side.json",
+          "kinds": [
+            "diagram"
+          ],
+          "lexical": "extension",
+          "rel": null
+        }
+      ]
     }
   ]
 }

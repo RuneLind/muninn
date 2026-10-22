@@ -20,7 +20,7 @@
 
 import { planEmbeds, resolveEmbedRelPath, type EmbedFigure } from "../../../format/embed.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
-import { watchDiagramPictures } from "./wiki-visuals.ts";
+import { watchDiagramPictures, watchStepsBars } from "./wiki-visuals.ts";
 
 export const EMBED_FRAME_CLASS = "wiki-embed-frame";
 
@@ -74,4 +74,6 @@ export function enhanceEmbeds(
   });
   // A `<Diagram>` picture is a tab stop only while it scrolls.
   watchDiagramPictures(root);
+  // A `<Steps>` bar paints its container's visible fill.
+  watchStepsBars(root);
 }

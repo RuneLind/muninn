@@ -25,3 +25,8 @@ test("the (info) suffix comes from the findings' severity", () => {
 test("the draft-lane label reads DRAFT_LANE_MAX_DAYS", () => {
   expect(LINT_LABELS["draft-lane-stale"]).toBe(`Draft lanes older than ${DRAFT_LANE_MAX_DAYS} days`);
 });
+
+test("diagram-svg's label names both blocks it judges", () => {
+  expect(LINT_LABELS["diagram-svg"]).toContain("<Diagram>");
+  expect(LINT_LABELS["diagram-svg"]).toContain("<Steps>");
+});

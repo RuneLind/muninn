@@ -41,7 +41,9 @@ beforeAll(async () => {
   await writeFile(path.join(root, "flows", "huge.html"), PICTURE);
   // One sibling named by five refs: 1.9 MB each time it is counted, so five
   // counts (9.5 MB) overrun the 8 MB page budget and one count does not.
-  for (const kind of ["architecture", "workflow", "lifecycle"]) await writeFile(path.join(root, "flows", `shared.${kind}.json`), JSON_OK);
+  // Each flavor's node list, so no shared file is a defines-no-nodes finding.
+  const sharedJson = JSON.stringify({ components: [{ id: "a", label: "A", type: "backend" }], nodes: [{ id: "a" }], states: [{ id: "a" }] });
+  for (const kind of ["architecture", "workflow", "lifecycle"]) await writeFile(path.join(root, "flows", `shared.${kind}.json`), sharedJson);
   await writeFile(path.join(root, "flows", "shared.html"), `${PICTURE.replace("<script>1</script>", `<script>${" ".repeat(1900 * 1024)}</script>`)}`);
   await writeFile(path.join(root, "flows", "marked.architecture.json"), JSON_OK);
   await writeFile(path.join(root, "flows", "marked.html"), `<svg viewBox="0 0 1 1"><text>reserved __dgm-id__ text</text></svg>`);

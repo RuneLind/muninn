@@ -53,8 +53,9 @@ const SKIP_CLASSES = new Set([
   "dt-delta", "dt-note", "dt-warning", "dt-unavailable", "rc-count", "rc-label", "embed-fallback", "historic-stamp",
   "cb-warning", "cb-truncated", "cb-unavailable", "dt-truncated",
   // A Diagram's text form (another view of the drawing) and its status line;
-  // its other chrome is reader-only or an svg (diagram-block.test.ts pins the set).
-  "dgm-text", "dgm-unavailable",
+  // its other chrome is reader-only or an svg (diagram-block.test.ts pins the
+  // set). A Steps' status line, which no test pins here.
+  "dgm-text", "dgm-unavailable", "stp-unavailable",
 ]);
 const INLINE_TAGS = new Set(["strong", "em", "b", "i", "s", "del", "ins", "u", "mark", "span", "sup", "sub", "small"]);
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "wbr", "meta", "link", "col", "source", "area", "base", "embed", "track", "param"]);

@@ -196,14 +196,14 @@ async function readSiblingOnce(root: string, rel: string, budget: { left: number
 }
 
 /**
- * Read every file the page's `<Query>`, `<CaseBoard>`, `<DeltaTable>` and
- * `<Diagram>` blocks name, plus each `<Diagram>`'s HTML sibling. The refs come
+ * Read every file the page's `<Query>`, `<CaseBoard>`, `<DeltaTable>`,
+ * `<Diagram>` and `<Steps>` blocks name, plus each diagram file's HTML sibling. The refs come
  * from the parsed AST (`pageFileRefKinds`), so a tag inside a code fence reads
  * nothing.
  * Read one at a time in source order, so the per-page byte budget
  * (`PAGE_FILE_PAGE_BUDGET_BYTES`) cuts the same refs on every open. Past
  * `PAGE_FILE_MAX_PER_PAGE` distinct refs, the rest answer `limit` unread. A
- * page naming none of the four tags parses nothing.
+ * page naming none of the five tags (`PAGE_FILE_COMPONENTS`) parses nothing.
  */
 export async function loadPageFiles(
   root: string,

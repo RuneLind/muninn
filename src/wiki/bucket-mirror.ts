@@ -53,7 +53,7 @@ const MAX_LIST_PAGE_BYTES = 8 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 /** The only hidden file admitted, and only at the root. */
 const READER_CONFIG = ".wiki-reader.json";
-/** Pages, plus the data files a page's `<Query>`/`<CaseBoard>`/`<DeltaTable>`/`<Diagram>`
+/** Pages, plus the data files a page's `<Query>`/`<CaseBoard>`/`<DeltaTable>`/`<Diagram>`/`<Steps>`
  *  reads beside itself (`page-files.ts`). No route serves wiki images, so an
  *  image would be unreachable bytes. */
 const PAGE_EXTENSIONS: ReadonlySet<string> = new Set([".md", ".mdx", ".html"]);

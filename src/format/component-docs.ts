@@ -201,6 +201,11 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     teach: WIKI,
     attrs: { src: { doc: "The diagram file, relative to the page", printType: '"./<name>.architecture.json"' } },
   },
+  Steps: {
+    doc: "A numbered list stepping through an archify diagram: each item ends in a code span naming the node ids in focus (`` `opprettet`, `grunnlag` `` or `` `opprettet, grunnlag` ``); self-closed, the steps are the file's views. The wiki reader draws the diagram above the list with Prev, Next, Play and Show all; every other surface prints an authored list and names the file, and a self-closed Steps there prints only the file line.",
+    teach: WIKI,
+    attrs: { src: { doc: "The diagram file, relative to the page", printType: '"./<name>.lifecycle.json"' } },
+  },
 };
 
 /**

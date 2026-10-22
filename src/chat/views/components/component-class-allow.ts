@@ -96,6 +96,8 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "cb-owner", "cb-note", "cb-refs", "cb-ref",
   // `<Diagram>`: chat prints its not-loaded line.
   "dgm-unavailable",
+  // `<Steps>`: chat prints its list and its not-loaded line.
+  "stp-unavailable",
   "delta-table", "dt-better-lower", "dt-better-higher", "dt-body", "dt-wrap", "dt-table", "dt-run",
   "dt-delta", "dt-delta-runs", "dt-abs", "dt-pct", "dt-good", "dt-bad", "dt-flat", "dt-none",
   "dt-unavailable", "dt-note", "dt-warning", "dt-truncated", "dt-mark", "dt-delta-dir", "dt-overflow",
