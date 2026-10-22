@@ -347,6 +347,7 @@ function bareSystemMap(sec: Element): void {
   sec.removeAttribute("class");
   sec.removeAttribute("role");
   sec.removeAttribute("aria-label");
+  sec.removeAttribute("aria-labelledby");
 }
 
 /** A peeked chart keeps its table and loses the classes that would hide it. */

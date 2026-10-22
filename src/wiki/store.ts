@@ -245,8 +245,18 @@ export interface WikiReaderConfig {
   systemMapLinkHeadings?: string[];
 }
 
+/** A heading's text with one trailing parenthetical dropped, trimmed:
+ *  «External integrations (all mocked)» → «External integrations». Here, not
+ *  in `lint-system-map.ts` (which re-exports it), so the parse below can use it
+ *  without an import cycle. */
+export function linkHeadingName(text: string): string {
+  return text.trim().replace(/\s*\([^()]*\)\s*$/, "").trim();
+}
+
 /** `systemMapLinkHeadings`: a list of non-blank strings, trimmed. Undefined
- *  when absent or null, not a list, or empty after the bad entries are dropped. */
+ *  when absent or null, not a list, or empty after the bad entries are dropped.
+ *  An entry with no name left once its parenthetical is dropped («(mock)»)
+ *  is a bad entry: it would match every heading that is only a parenthetical. */
 export function parseSystemMapLinkHeadings(raw: unknown): { headings: string[] | undefined; warnings: string[] } {
   if (raw === undefined || raw === null) return { headings: undefined, warnings: [] };
   if (!Array.isArray(raw)) return { headings: undefined, warnings: ["is not a list of heading names — using the default"] };
@@ -255,6 +265,10 @@ export function parseSystemMapLinkHeadings(raw: unknown): { headings: string[] |
   for (const h of raw) {
     if (typeof h !== "string" || !h.trim()) {
       warnings.push(`entry ${JSON.stringify(h)} is not a heading name — dropped`);
+      continue;
+    }
+    if (!linkHeadingName(h)) {
+      warnings.push(`entry ${JSON.stringify(h)} names no heading once its parenthetical is dropped — dropped`);
       continue;
     }
     if (!headings.includes(h.trim())) headings.push(h.trim());

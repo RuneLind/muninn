@@ -32,7 +32,7 @@ import { visibleText } from "../format/report-top.ts";
 import { nodeKey, readSystemMapBlock, resolveSystemNode, type SystemMapRead } from "../format/system-map.ts";
 import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
 import { stripLineCodeSpansKeepingLinks } from "./park-links.ts";
-import { extractMarkdownLinks, stripFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import { extractMarkdownLinks, linkHeadingName, stripFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import type { LintFinding } from "./lint.ts";
@@ -43,17 +43,15 @@ export const SYSTEM_MAP_DRIFT_LINT_CHECKS = ["system-map-drift"] as const;
 /** The link sections read when `.wiki-reader.json` names none. */
 export const SYSTEM_MAP_LINK_HEADINGS_DEFAULT: readonly string[] = ["External integrations", "Related repos", "Related", "Integrasjoner"];
 
-/** A heading's text with one trailing parenthetical dropped, trimmed:
- *  «External integrations (all mocked)» → «External integrations». */
-export function linkHeadingName(text: string): string {
-  return text.trim().replace(/\s*\([^()]*\)\s*$/, "").trim();
-}
+export { linkHeadingName };
 
 /** A heading matches when its name ({@link linkHeadingName}) equals the name
- *  of one of `headings` exactly: «Related concepts» is not «Related». */
+ *  of one of `headings` exactly: «Related concepts» is not «Related». An empty
+ *  name matches nothing, whichever side it is on (a hand-built config can
+ *  skip `parseSystemMapLinkHeadings`). */
 export function linkHeadingMatches(text: string, headings: readonly string[]): boolean {
   const name = linkHeadingName(text);
-  return headings.some((h) => linkHeadingName(h) === name);
+  return name !== "" && headings.some((h) => linkHeadingName(h) === name);
 }
 
 /** One `<SystemMap>` block as both checks read it. */

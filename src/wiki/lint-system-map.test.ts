@@ -65,6 +65,32 @@ describe("the heading match rule", () => {
     expect(parseSystemMapLinkHeadings([]).headings).toBeUndefined();
     expect(parseSystemMapLinkHeadings("Calls").headings).toBeUndefined();
   });
+
+  test("an entry that is only a parenthetical names no heading: dropped with a warning, and never matches", () => {
+    expect(parseSystemMapLinkHeadings(["(mock)", "Calls", " ( x ) "])).toEqual({
+      headings: ["Calls"],
+      warnings: ['entry "(mock)" names no heading once its parenthetical is dropped — dropped', 'entry " ( x ) " names no heading once its parenthetical is dropped — dropped'],
+    });
+    expect(parseSystemMapLinkHeadings(["(mock)"])).toEqual({
+      headings: undefined,
+      warnings: ['entry "(mock)" names no heading once its parenthetical is dropped — dropped', "names no heading — using the default"],
+    });
+    // The matcher refuses an empty name on either side (a hand-built config skips the parse).
+    expect(linkHeadingMatches("(draft)", ["(mock)"])).toBe(false);
+    expect(linkHeadingMatches("(draft)", [""])).toBe(false);
+  });
+
+  test("a configured «(mock)» reads no «## (draft)» section: no finding with an empty heading", async () => {
+    const out = await drift({
+      ".wiki-reader.json": JSON.stringify({ systemMapLinkHeadings: ["(mock)", "Calls"] }),
+      "repos/a.md": repo("a", "## (draft)\n\n- [[repos/b]]"),
+      "repos/b.md": repo("b", ""),
+      "flows/map.mdx": hub(["| a | c | REST | ok | |", "| b | c | REST | ok | |"]),
+      "repos/c.md": repo("c", ""),
+    });
+    expect(out.filter((f) => f.message.includes("has no row"))).toEqual([]);
+    expect(out.some((f) => f.message.includes("«»"))).toBe(false);
+  });
 });
 
 describe("system-map-drift", () => {
@@ -307,6 +333,15 @@ describe("where a finding points", () => {
       "flows/map.mdx": hub(["| a | b | REST | wrong | gone |"]),
     });
     expect(two.map((f) => f.message)).toEqual(["<SystemMap> row a → b is wrong, but repos/a.md:8 («Related») and repos/b.md:8 («Related repos») still link it"]);
+  });
+
+  test("a section linking the same node twice is named by its first link's line", async () => {
+    const out = await drift({
+      "repos/a.md": repo("a", "## Related\n\n- [[repos/b]]\n- [b again](./b.md)\n- [[repos/b|b once more]]"),
+      "repos/b.md": repo("b", ""),
+      "flows/map.mdx": hub(["| a | b | REST | wrong | gone |"]),
+    });
+    expect(out.map((f) => f.message)).toEqual(["<SystemMap> row a → b is wrong, but repos/a.md:8 («Related») still links it"]);
   });
 
   test("a link with no row names its line and sits on the first row naming either end", async () => {

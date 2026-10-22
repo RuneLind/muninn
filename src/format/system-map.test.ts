@@ -126,7 +126,7 @@ describe("systemMapViewHtml", () => {
     expect(html.match(/class="sm-node /g)!.length).toBe(4);
     expect(html.match(/<path class="sm-edge /g)!.length).toBe(3);
     expect(html.indexOf('class="sm-map"')).toBeLessThan(html.indexOf("<table>T</table>"));
-    expect(html).toContain('<section class="sm" role="figure" aria-label="System map: Systems">');
+    expect(html).toContain('<section class="sm" role="figure" aria-labelledby="sm1-caption">');
   });
 
   test("a wrong edge is marked and its title names the reason; ids carry the prefix", () => {
@@ -138,8 +138,8 @@ describe("systemMapViewHtml", () => {
 
   test("a repo node is a reader link; an external and an unresolved node are not", () => {
     expect(html).toContain('<a class="sm-node sm-repo" href="/wiki?relPath=repos%2Fweb.md" data-relpath="repos/web.md" data-wiki-page="web"');
-    expect(html).toMatch(/<g class="sm-node sm-external sm-nopage" data-sm-node="reg">/);
-    expect(html).toMatch(/<g class="sm-node sm-unresolved" data-sm-node="typo"><title>typo — names no repos\/ page<\/title>/);
+    expect(html).toMatch(/<g class="sm-node sm-external sm-nopage" role="img" aria-label="Reg — external, no page" data-sm-node="reg">/);
+    expect(html).toMatch(/<g class="sm-node sm-unresolved" role="img" aria-label="typo — names no repos\/ page" data-sm-node="typo"><title>typo — names no repos\/ page<\/title>/);
   });
 
   test("the map and the findings are reader-only and carry no newline (paragraphGaps)", () => {
@@ -388,11 +388,18 @@ describe("names, caption and node kinds", () => {
   });
 
   test("the caption is visible text above the map, reader-only like the map", () => {
-    expect(html).toContain('<div class="sm-caption" data-reader-only="">Systems &amp; co</div><div class="sm-map"');
+    expect(html).toContain('<div class="sm-caption" id="sm3-caption" aria-hidden="true" data-reader-only="">Systems &amp; co</div><div class="sm-map"');
   });
 
-  test("one name per level: the figure names the map, the scroll box is the drawing, the SVG repeats neither", () => {
-    expect(html).toContain('<section class="sm" role="figure" aria-label="System map: Systems &amp; co">');
+  test("one name per level: the caption names the figure once, the scroll box is the drawing, the SVG repeats neither", () => {
+    // The figure is named by the caption and the caption is hidden from
+    // assistive tech, so its words are announced once, not as name and text.
+    expect(html).toContain('<section class="sm" role="figure" aria-labelledby="sm3-caption">');
+    expect(html).not.toContain("System map: Systems");
+    // No caption: the figure keeps its own label.
+    const bare = systemMapViewHtml({ read: readSystemMap({}, T(["From", "To", "Status"], [["a", "b", "ok"]])), caption: "", tableHtml: "", beforeHtml: "", afterHtml: "", prefix: "sm6-", resolveNode: () => ({ kind: "repo", link: { href: "/", relPath: "r.md", name: "r" } }) });
+    expect(bare).toContain('<section class="sm" role="figure" aria-label="System map">');
+    expect(bare).not.toContain("sm-caption");
     expect(html).toContain('<div class="sm-map" data-reader-only="" role="region" tabindex="0" aria-label="Map drawing">');
     const svg = /<svg class="sm-svg"[^>]*>(<title>)?/.exec(html)!;
     expect(svg[0]).not.toContain("aria-label");
@@ -410,8 +417,14 @@ describe("names, caption and node kinds", () => {
     expect(html).toContain('aria-label="web — repo, opens its page"');
     expect(html).toContain('<a class="sm-node sm-external" href="/x/reg"');
     expect(html).toContain('aria-label="Reg — external, opens its page"');
-    expect(html).toContain('<g class="sm-node sm-external sm-nopage" data-sm-node="gone"><title>Gone — external, no page</title>');
-    expect(html).toContain('<g class="sm-node sm-unresolved" data-sm-node="typo"><title>typo — names no repos/ page</title>');
+    // A node with no page is a named image: a <title> on a plain <g> gives
+    // Chromium no name, so its kind would be read nowhere.
+    expect(html).toContain('<g class="sm-node sm-external sm-nopage" role="img" aria-label="Gone — external, no page" data-sm-node="gone"><title>Gone — external, no page</title>');
+    expect(html).toContain('<g class="sm-node sm-unresolved" role="img" aria-label="typo — names no repos/ page" data-sm-node="typo"><title>typo — names no repos/ page</title>');
+    // Every node, linked or not, carries a name that says its kind.
+    const named = [...html.matchAll(/<(a|g) class="sm-node [^"]*"[^>]*>/g)].map((m) => /aria-label="[^"]+ — [^"]+"/.test(m[0]));
+    expect(named.length).toBe(5);
+    expect(named.every(Boolean)).toBe(true);
   });
 
   test("the legend under the map names only the styles drawn on it", () => {
@@ -419,6 +432,9 @@ describe("names, caption and node kinds", () => {
     const items = [...legend.matchAll(/<\/svg>([^<]+)<\/li>/g)].map((m) => m[1]);
     expect(items).toEqual(["Repo, opens its page", "External, opens its page", "External, no page", "Names no repos/ page", "Edge: ok", "Edge: wrong"]);
     expect(html.indexOf("sm-legend")).toBeGreaterThan(html.indexOf("</svg></div>"));
+    // Rendered order: map, legend, node list, then the edge table.
+    expect(html.indexOf('class="sm-legend"')).toBeLessThan(html.indexOf('class="sm-list"'));
+    expect(html.indexOf('class="sm-legend"')).toBeLessThan(html.indexOf("<table>T</table>"));
     // A map of repos alone has a one-node-style legend.
     const plain = systemMapViewHtml({ read: readSystemMap({}, T(["From", "To", "Status"], [["a", "b", "ok"]])), caption: "", tableHtml: "", beforeHtml: "", afterHtml: "", prefix: "sm5-", resolveNode: () => ({ kind: "repo", link: { href: "/", relPath: "r.md", name: "r" } }) });
     expect([...plain.matchAll(/<\/svg>([^<]+)<\/li>/g)].map((m) => m[1])).toEqual(["Repo, opens its page", "Edge: ok"]);

@@ -513,13 +513,19 @@ function edgeTitle(r: SystemMapRow): string {
 
 export function systemMapViewHtml(input: SystemMapViewInput): string {
   const { read, prefix } = input;
-  const label = input.caption ? `System map: ${input.caption}` : "System map";
-  const figure = (cls: string) => `<section class="${cls}" role="figure" aria-label="${escapeHtml(label)}">`;
+  // A drawn map with a caption takes its name from the caption, which is then
+  // hidden from assistive tech so it is announced once (aria-labelledby still
+  // reads a hidden element). The fallback shows no caption, so it keeps a label.
+  const capId = `${prefix}caption`;
+  const figure = (cls: string, named: boolean) =>
+    named
+      ? `<section class="${cls}" role="figure" aria-labelledby="${capId}">`
+      : `<section class="${cls}" role="figure" aria-label="${escapeHtml(input.caption ? `System map: ${input.caption}` : "System map")}">`;
   const notes = read.findings.length
     ? `<ul class="sm-notes" ${RO}>${read.findings.map((f) => `<li>${escapeHtml(f.message)}</li>`).join("")}</ul>`
     : "";
   if (!read.drawable) {
-    return `${figure("sm sm-fallback")}${input.beforeHtml}${notes}${input.tableHtml}${input.afterHtml}</section>`;
+    return `${figure("sm sm-fallback", false)}${input.beforeHtml}${notes}${input.tableHtml}${input.afterHtml}</section>`;
   }
   const layout = layoutSystemMap(read.nodes, read.columns, read.rows);
   const { boxes, width, colW, colX, nodeH } = layout;
@@ -559,7 +565,9 @@ export function systemMapViewHtml(input: SystemMapViewInput): string {
         `<rect x="${box.x}" y="${box.y}" width="${colW}" height="${nodeH}" rx="6"/>` +
         `<text x="${box.x + colW / 2}" y="${box.y + nodeH / 2}" text-anchor="middle" dominant-baseline="central">${escapeHtml(fitText(node.label, colW - 2 * NODE_PAD_X, labelWidth))}</text>`;
       const title = `<title>${escapeHtml(node.label + what)}</title>`;
-      if (!link) return `<g class="${cls}" data-sm-node="${escapeHtml(node.key)}">${title}${shape}</g>`;
+      // A node with no page is one named image (Chromium exposes no name from
+      // a <title> on a plain <g>), so its kind is in its name like a link's.
+      if (!link) return `<g class="${cls}" role="img" aria-label="${escapeHtml(node.label + what)}" data-sm-node="${escapeHtml(node.key)}">${title}${shape}</g>`;
       return (
         `<a class="${cls}" href="${escapeHtml(link.href)}" data-relpath="${escapeHtml(link.relPath)}" data-wiki-page="${escapeHtml(link.name)}" ` +
         `data-sm-node="${escapeHtml(node.key)}" aria-label="${escapeHtml(node.label + what)}">${title}${shape}</a>`
@@ -579,7 +587,7 @@ export function systemMapViewHtml(input: SystemMapViewInput): string {
   const svg =
     `<svg class="sm-svg" role="group" viewBox="0 0 ${width} ${height}" style="max-width:${width}px;min-width:${Math.ceil((width * LABEL_MIN_PX) / Math.min(LABEL_PX, HEAD_PX))}px">` +
     `${markers}${heads}<g class="sm-edges">${edges}</g><g class="sm-nodes">${nodes}</g></svg>`;
-  const caption = input.caption ? `<div class="sm-caption" ${RO}>${escapeHtml(input.caption)}</div>` : "";
+  const caption = input.caption ? `<div class="sm-caption" id="${capId}" aria-hidden="true" ${RO}>${escapeHtml(input.caption)}</div>` : "";
   const map = `<div class="sm-map" ${RO} role="region" tabindex="0" aria-label="Map drawing">${svg}</div>`;
   const present = new Set([...kindOf.values()].map((k) => k.kind));
   const legend =
@@ -601,7 +609,7 @@ export function systemMapViewHtml(input: SystemMapViewInput): string {
       })
       .join("") +
     `</ul></details>`;
-  return `${figure("sm")}${input.beforeHtml}${caption}${map}${legend}${list}${notes}${input.tableHtml}${input.afterHtml}</section>`;
+  return `${figure("sm", !!input.caption)}${input.beforeHtml}${caption}${map}${legend}${list}${notes}${input.tableHtml}${input.afterHtml}</section>`;
 }
 
 /** Reader CSS. Theme tokens only, so both themes follow the page. */

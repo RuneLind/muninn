@@ -9,9 +9,12 @@
  * map in the theme's tokens; a `wrong` edge looks unlike an `ok` one; a node
  * opens its repos page through the reader's own navigation; a peek of the
  * section shows the table, not the map; at 390 px the map scrolls inside
- * its own box while the page does not; the caption shows, each nesting level
- * has its own accessible name, keyboard focus on a node looks unlike hover,
- * and a node's kind shows without hovering (style, legend, node list); the
+ * its own box while the page does not; the caption shows and names the
+ * figure once, each nesting level has its own accessible name, every node
+ * (with a page or not) is one named node saying its kind, keyboard focus on a
+ * node looks unlike hover (a solid ring, Highlight under forced colours), the
+ * legend comes before the node list and the table, and a node's kind shows
+ * without hovering (style, legend, node list); the
  * server's label width estimate is at least the drawn width for every
  * character class.
  *
@@ -143,7 +146,7 @@ test.describe("Wiki reader: SystemMap", () => {
       await page.emulateMedia({ colorScheme: scheme });
       await open(page);
       const sec = page.locator(".wiki-article section.sm");
-      await expect(sec).toHaveAttribute("aria-label", "System map: Synthetic systems");
+      await expect(sec).toHaveAttribute("aria-labelledby", "sm1-caption");
       // One box per node, one path per row; the table stays below the map.
       await expect(sec.locator(".sm-node")).toHaveCount(6);
       await expect(sec.locator("path.sm-edge")).toHaveCount(5);
@@ -254,7 +257,7 @@ test.describe("Wiki reader: SystemMap", () => {
     const peek = page.locator(".wiki-ref-peek");
     await expect(peek).toBeVisible();
     await expect(peek.locator("table")).toHaveCount(1);
-    await expect(peek.locator("svg, .sm-caption, .sm-map, .sm-legend, .sm-list, .sm-notes, [role=figure]")).toHaveCount(0);
+    await expect(peek.locator("svg, .sm-caption, .sm-map, .sm-legend, .sm-list, .sm-notes, [role=figure], [aria-labelledby]")).toHaveCount(0);
   });
 
   test("at 390 px the map scrolls in its own box; the page does not scroll sideways", async ({ page }) => {
@@ -278,13 +281,38 @@ test.describe("Wiki reader: SystemMap", () => {
       await expect(sec.locator(".sm-caption")).toBeVisible();
       await expect(sec.locator(".sm-caption")).toHaveText("Synthetic systems");
 
-      // One name per level: the figure, then the scroll box; the SVG adds none.
+      // One name per level: the caption names the figure, then the scroll box;
+      // the SVG adds none, and the caption's words are read once, not as the
+      // figure's name and again as text.
       const article = page.locator(".wiki-article");
-      await expect(article.getByRole("figure", { name: "System map: Synthetic systems" })).toHaveCount(1);
+      await expect(article.getByRole("figure", { name: "Synthetic systems" })).toHaveCount(1);
       await expect(sec.getByRole("region", { name: "Map drawing" })).toHaveCount(1);
       const tree = await sec.ariaSnapshot();
-      expect(tree.match(/System map/g)?.length).toBe(1);
-      expect(tree).not.toMatch(/^\s*- img\b/m);
+      expect(tree.match(/Synthetic systems/g)?.length).toBe(1);
+      // Every node, with a page or not, is one named node whose name says its
+      // kind: a link, or an image for a node with no page. No unnamed image.
+      const drawing = await sec.locator(".sm-map").ariaSnapshot();
+      const nodeNames = [...drawing.matchAll(/^\s*- (link|img) "([^"]+)"/gm)].map((m) => `${m[1]} ${m[2]}`);
+      expect(nodeNames.sort()).toEqual(
+        [
+          "link alpha-web — repo, opens its page",
+          "link beta-api — repo, opens its page",
+          "link gamma-service-under-a-label-far-too-long-for-one-column — repo, opens its page",
+          "link Registry — external, opens its page",
+          "img typo-svc — names no repos/ page",
+          "img Ledger — external, no page",
+        ].sort(),
+      );
+      expect(drawing).not.toMatch(/^\s*- img\s*$/m);
+      expect(drawing).not.toMatch(/^\s*- img:/m);
+      // A node with no page is not read as bare text beside the column heads.
+      const bare = [...drawing.matchAll(/^ {4}- text: (.*)$/gm)].map((m) => m[1]).join(" ");
+      expect(bare).not.toMatch(/Ledger|typo-svc/);
+      // Rendered order: the legend before the node list and the edge table.
+      const order = await sec.evaluate((s) => [".sm-legend", ".sm-list", "table"].map((q) => Array.from(s.querySelectorAll("*")).indexOf(s.querySelector(q)!)));
+      expect(order[0]).toBeGreaterThan(-1);
+      expect(order[0]).toBeLessThan(order[1]!);
+      expect(order[1]).toBeLessThan(order[2]!);
 
       // The kind shows without hovering: italics for a node with no page, a
       // legend naming each style drawn, a node list by column with its kind.
@@ -326,6 +354,34 @@ test.describe("Wiki reader: SystemMap", () => {
       expect(focus).not.toEqual(hover);
       expect(parseFloat(focus.width)).toBeGreaterThan(parseFloat(hover.width));
       expect(await contrast(page, focus.stroke, await css(page, ".wiki-article .sm-map", "background-color"))).toBeGreaterThanOrEqual(3);
+
+      // A focused dashed node (an external) shows a solid ring, not its dash.
+      const reg = '.wiki-article a.sm-node[data-sm-node="registry"]';
+      expect(await css(page, `${reg} rect`, "stroke-dasharray")).not.toBe("none");
+      for (let i = 0; i < 10 && !(await page.locator(reg).evaluate((e) => e === document.activeElement)); i++) await page.keyboard.press("Tab");
+      await expect(page.locator(reg)).toBeFocused();
+      expect(await css(page, `${reg} rect`, "stroke-dasharray")).toBe("none");
     });
   }
+
+  test("forced colours: a focused node's ring is the system Highlight colour", async ({ page }) => {
+    await page.emulateMedia({ forcedColors: "active" });
+    await open(page);
+    const sec = page.locator(".wiki-article section.sm");
+    const highlight = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "Highlight";
+      document.body.append(probe);
+      const c = getComputedStyle(probe).color;
+      probe.remove();
+      return c;
+    });
+    const rect = '.wiki-article a.sm-node[data-sm-node="alpha-web"] rect';
+    const idle = await css(page, rect, "stroke");
+    expect(idle).not.toBe(highlight);
+    await sec.locator(".sm-map").focus();
+    await page.keyboard.press("Tab");
+    await expect(page.locator('.wiki-article a.sm-node[data-sm-node="alpha-web"]')).toBeFocused();
+    expect(await css(page, rect, "stroke")).toBe(highlight);
+  });
 });
