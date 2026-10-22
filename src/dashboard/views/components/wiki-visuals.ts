@@ -100,9 +100,11 @@ function applyDiagramView(target: Element | null): boolean {
  * | any                  | any               | article replaced, no | the old boxes are unobserved                       |
  * |                      |                   | new render (Ask)     | ({@link watchDiagramPictures})                     |
  *
- * A closed `<Fold>` still lays its content out (Chromium measures it scrolling
- * at a narrow width), so a hidden box may carry the stop; hidden content takes
- * no focus, and opening the fold resizes the box, which runs this again.
+ * A `<Fold>` that was opened and then closed keeps its last layout (Chromium
+ * still measures the box scrolling at a narrow width), so a hidden box may carry
+ * the stop; a fold never opened has no layout, so its box carries none. Hidden
+ * content takes no focus, and opening the fold resizes the box, which runs this
+ * again.
  */
 function syncDiagramStop(box: HTMLElement): void {
   if (box.scrollWidth > box.clientWidth) {

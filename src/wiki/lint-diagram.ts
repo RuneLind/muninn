@@ -7,12 +7,14 @@
  * - the diagram file did not load (missing, unreadable, over its cap, not a
  *   diagram file, past the page's limits): the reader shows one line;
  * - the JSON file is not a JSON object: the reader shows one line;
- * - the HTML sibling is missing, unparsable (not exactly one `<svg>`), holds
- *   the reserved id text `__dgm-id__`, is over its 2 MB cap or over the page
- *   budget: the reader shows the text form;
+ * - the HTML sibling is missing, unparsable (not exactly one `<svg>`, or one
+ *   the sanitizer refuses whole), holds the reserved id text `__dgm-id__`, is
+ *   over its 2 MB cap or over the page budget: the reader shows the text form;
  * - two diagram files of different kinds share one HTML sibling: archify
  *   writes one picture per file, so both blocks draw the same picture, which
- *   matches at most one of them;
+ *   matches at most one of them. Known gap: the sharers are every ref, so a
+ *   ref whose file did not load or is not a JSON object still counts and is
+ *   named, while it gets no shared finding itself;
  * - the sanitizer dropped an element or attribute it has no rule for (a drop
  *   by design, such as `tabindex` or `data-preset`, is not reported);
  * - the SVG carries an archify class the reader's stylesheet does not map

@@ -416,12 +416,14 @@ const ESCAPED = /^(?:[^<>"&]|&(?:amp|lt|gt|quot);)*$/;
 
 /**
  * The sanitizer's self-check: re-read the output under {@link CONTENT_MODEL}
- * and answer whether it is exactly what the serializer writes. One root `<svg>`
+ * and answer whether it has the shape the serializer writes. One root `<svg>`
  * and nothing after it; every element kept, allowed in its parent, written as
  * a start tag with allowlisted, double-quoted, escaped attributes (`role` on
  * the root only) and closed by its own end tag in nesting order, never
  * self-closed; text only where the parent holds text, escaped. Anything else
- * answers false, so a regression in {@link sanitizeSvg} fails closed.
+ * answers false, so a regression in structure or escaping fails closed. It
+ * checks names and escaping only: an attribute value that breaks the `url(`,
+ * `href`, id or class rules, or a repeated attribute, still passes.
  */
 export function isWellFormedSanitizedSvg(out: string): boolean {
   const stack: string[] = ["#root"];

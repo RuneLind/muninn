@@ -179,7 +179,7 @@ export interface ParkedPicture {
 
 const DIAGRAM_PICTURE_RE = /(<div class="dgm-svg"[^>]*>)([\s\S]*?)(<\/div>)/g;
 /** The parking token for picture `i`. NUL-delimited: the page body carries no
- *  NUL (mapped at `renderWikiHtml` entry), so no page text can spell one. */
+ *  NUL (dropped at `renderWikiHtml` entry), so no page text can spell one. */
 const pictureToken = (i: number) => `\x00DGMPIC${i}\x00`;
 const ANY_PICTURE_TOKEN = /\x00DGMPIC(\d+)\x00/g;
 
@@ -196,8 +196,10 @@ export function parkDiagramPictures(html: string, parked: ParkedPicture[]): stri
 /**
  * Put each parked picture back where its own block parked it, and nowhere else.
  * A picture is restored only when its token occurs exactly once, directly
- * between its own wrapper's open tag and a `</div>`, outside any rendered code
- * region; otherwise the picture is dropped (the block keeps its text form). Every
+ * between its own wrapper's open tag and a `</div>`; otherwise the picture is
+ * dropped (the block keeps its text form). The rendered-code test beside those
+ * never fires on the renderer's output: code escapes `<`, so a wrapper's open
+ * tag never sits inside it. It is kept as a guard. Every
  * token-shaped run is removed from the output either way, so none is ever left
  * as text or restored into an attribute, a code span or a fence.
  */

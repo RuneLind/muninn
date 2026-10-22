@@ -606,6 +606,12 @@ describe("diagramEdgeDimmed", () => {
     expect(diagramEdgeDimmed(focus, "a", "a")).toBe(false);
     expect(diagramEdgeDimmed(focus, "c", "c")).toBe(true);
   });
+  test("a focus of one node dims an edge with that node at one end; All dims nothing", () => {
+    const one = new Set(["a"]);
+    expect(diagramEdgeDimmed(one, "a", "b")).toBe(true);
+    expect(diagramEdgeDimmed(one, "b", "a")).toBe(true);
+    expect(diagramEdgeDimmed(new Set(), "a", "b")).toBe(false);
+  });
 });
 
 describe("<Diagram> on the text surfaces (no file read)", () => {
