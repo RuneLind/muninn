@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DIAGRAM_CHROME_CLASSES, diagramLabelSizes, diagramViewHtml, readDiagram, type DiagramTextSection } from "./diagram-block.ts";
+import { DIAGRAM_CHROME_CLASSES, diagramLabelSizes, diagramViewHtml, humanizeId, readDiagram, type DiagramTextSection } from "./diagram-block.ts";
 import { DIAGRAM_ID_MARK, type DiagramSvgResult, type PageFiles } from "./query-block.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
@@ -100,6 +100,66 @@ describe("readDiagram", () => {
       { heading: "Back office", lines: ["File"] },
       { heading: "Steps", lines: ["Ask → Get"] },
     ]);
+  });
+
+  test("a type or legend entry named like an Object member reads as an unknown type", () => {
+    for (const t of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      const doc = { meta: { legend: { entries: {} } }, components: [{ id: "a", type: t }] };
+      expect(readDiagram("architecture", JSON.stringify(doc))!.sections).toEqual([{ heading: humanizeId(t), lines: ["a"] }]);
+    }
+    const page = '<Diagram src="./x.architecture.json" />\n';
+    for (const t of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      const text = JSON.stringify({ components: [{ id: "a", type: t }] });
+      const files: PageFiles = { get: (r) => (r === "./x.architecture.json" ? { ok: true, text } : undefined) };
+      const html = renderWikiHtml(page, () => undefined, { files, views: true });
+      expect(html).toContain(`<p class="dgm-text-h">${humanizeId(t)}</p>`);
+    }
+  });
+
+  test("a lane named in no lanes entry sorts after the listed lanes, before no lane", () => {
+    const doc = {
+      lanes: [{ id: "a", label: "A" }],
+      nodes: [
+        { id: "n0", label: "Loose" },
+        { id: "n1", label: "Stray", lane: "zz" },
+        { id: "n2", label: "Listed", lane: "a" },
+      ],
+    };
+    expect(readDiagram("workflow", JSON.stringify(doc))!.sections.map((s) => s.heading)).toEqual(["A", "Zz", "Other"]);
+  });
+
+  test("overlapping boundaries that do not nest are never chained: the smallest, first in the file on a tie", () => {
+    const doc = {
+      components: [
+        { id: "x", label: "X" },
+        { id: "y", label: "Y" },
+        { id: "z", label: "Z" },
+        { id: "w", label: "W" },
+      ],
+      boundaries: [
+        { label: "A", wraps: ["x", "y"] },
+        { label: "B", wraps: ["y", "z"] },
+        { label: "C", wraps: ["x", "y", "z", "w"] },
+      ],
+    };
+    // y is in A, B and C; A and B overlap without nesting, and C wraps both.
+    expect(readDiagram("architecture", JSON.stringify(doc))!.sections).toEqual([
+      { heading: "Inside C", lines: ["W"] },
+      { heading: "Inside C › A", lines: ["X", "Y"] },
+      { heading: "Inside C › B", lines: ["Z"] },
+    ]);
+  });
+
+  test("overlapping groups that do not nest are never chained either", () => {
+    const doc = {
+      lanes: [{ id: "u", label: "U" }],
+      groups: [
+        { id: "g1", label: "G1", lane: "u", fromCol: 0, toCol: 2 },
+        { id: "g2", label: "G2", lane: "u", fromCol: 2, toCol: 4 },
+      ],
+      nodes: [{ id: "n", label: "N", lane: "u", col: 2 }],
+    };
+    expect(readDiagram("workflow", JSON.stringify(doc))!.sections).toEqual([{ heading: "U › G1", lines: ["N"] }]);
   });
 
   test("not a JSON object reads as null; a wrong-shaped field as absent", () => {

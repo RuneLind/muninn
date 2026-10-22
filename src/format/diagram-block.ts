@@ -110,11 +110,17 @@ function sectionsOf(placed: Placed[]): DiagramTextSection[] {
     .map((ps) => ({ heading: ps[0]!.heading, lines: [...ps].sort((a, b) => num(a.node.col) - num(b.node.col)).map((p) => p.line) }));
 }
 
-/** The containers a node is inside, outermost first: most members (widest
- *  column range) first. The last is its innermost; of two the same size, the
- *  one first in the file. */
-function enclosing<T extends { index: number; size: number }>(all: T[], holds: (c: T) => boolean): T[] {
-  return all.filter(holds).sort((a, b) => b.size - a.size || b.index - a.index);
+/** The containers a node is inside that nest, outermost first. The innermost
+ *  is the smallest that holds it (fewest wrapped ids for a boundary, narrowest
+ *  column range for a group), the first in the file on a tie; each container
+ *  before it wraps the whole of the next, picked the same way. A container
+ *  that holds the node but only overlaps the chain is left out, so a `›`
+ *  heading never claims a nesting the drawing does not show. */
+function enclosing<T extends { index: number; size: number }>(all: T[], holds: (c: T) => boolean, contains: (outer: T, inner: T) => boolean): T[] {
+  const by = all.filter(holds).sort((a, b) => a.size - b.size || a.index - b.index);
+  const chain = by.slice(0, 1);
+  for (const c of by.slice(1)) if (contains(c, chain[0]!)) chain.unshift(c);
+  return chain;
 }
 
 function readViews(doc: Obj): DiagramView[] {
@@ -138,8 +144,9 @@ function architectureSections(doc: Obj): DiagramTextSection[] {
   const meta = isObj(doc.meta) ? doc.meta : {};
   const legend = isObj(meta.legend) && isObj(meta.legend.entries) ? meta.legend.entries : {};
   const typeName = (t: string) => {
-    const override = isObj(legend[t]) ? str((legend[t] as Obj).label) : "";
-    return override || ARCHIFY_TYPE_LABELS[t] || humanizeId(t) || "Other";
+    const entry = Object.hasOwn(legend, t) ? legend[t] : undefined;
+    const override = isObj(entry) ? str(entry.label) : "";
+    return override || (Object.hasOwn(ARCHIFY_TYPE_LABELS, t) ? ARCHIFY_TYPE_LABELS[t] : "") || humanizeId(t) || "Other";
   };
   const catalog = Object.keys(ARCHIFY_TYPE_LABELS);
   const unknownTypes: string[] = [];
@@ -156,7 +163,7 @@ function architectureSections(doc: Obj): DiagramTextSection[] {
   const placed = comps.map((c): Placed => {
     const id = str(c.id);
     const t = str(c.type);
-    const inside = id ? enclosing(bounds, (b) => b.wraps.has(id)) : [];
+    const inside = id ? enclosing(bounds, (b) => b.wraps.has(id), (o, i) => [...i.wraps].every((w) => o.wraps.has(w))) : [];
     if (inside.length === 0) return { node: c, line: nodeText(c), key: `type:${t}`, heading: typeName(t), rank: [0, typeRank(t)] };
     return {
       node: c,
@@ -193,7 +200,7 @@ function laneSections(doc: Obj, nodes: Obj[], groups: Obj[]): DiagramTextSection
     const lane = str(n.lane);
     const laneName = labels.get(lane) || humanizeId(lane) || "Other";
     const col = typeof n.col === "number" && Number.isFinite(n.col) ? n.col : null;
-    const inside = lane && col !== null ? enclosing(ranges, (g) => g.lane === lane && g.from <= col && col <= g.to) : [];
+    const inside = lane && col !== null ? enclosing(ranges, (g) => g.lane === lane && g.from <= col && col <= g.to, (o, i) => o.from <= i.from && i.to <= o.to) : [];
     return {
       node: n,
       line: nodeText(n),
