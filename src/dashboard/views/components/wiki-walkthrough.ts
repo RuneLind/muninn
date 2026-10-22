@@ -26,16 +26,30 @@
  * `#articleWrap` closes the panel then. No navigation path has to remember to
  * call in.
  *
- * **Focus.** Every open moves focus to the panel's Close button, including
- * a switch from A to B by keyboard (focus is on B's 🧭 then, not in the
- * panel). `render()` replaces the panel's markup on every state change, so it
- * puts focus back on the same control when focus was inside the panel; a quiz
- * choice comes back disabled, so focus goes to that question's verdict.
+ * **Escape and focus: Escape closes the thing focus is in.** Escape closes
+ * the panel only while focus is inside it (the panel itself included: it is
+ * focusable with tabindex -1, so a click on its body puts focus there), and
+ * then focus goes back to the opener 🧭. Focus on a 🧭, in the article or in
+ * the rail is someone else's Escape: the fact-check card closes on any Escape
+ * from inside `.wiki-article`, and one Escape closes one thing. Owners that
+ * stop the event (a peek, a glossary tip, the graph card, the rail options
+ * pane, Share) never reach this listener; one that only calls
+ * `preventDefault` wins through the `defaultPrevented` guard — focus mode's
+ * Escape, so with focus mode on the first Escape leaves focus mode and the
+ * second closes the panel. The Explain pill hides on every Escape and takes
+ * nothing from anyone. The panel is `role="region"`, not `dialog`: the
+ * reader's `modalOpen()` reads every visible `[role="dialog"]` as a modal, and
+ * a non-modal panel counted as one stopped the graph card's Escape and the
+ * page's single-key shortcuts for as long as it was open.
  *
- * **Escape** closes the panel when focus is in it or on any 🧭 button —
- * not anywhere on the page: the panel is non-modal, and the Ask box, the find
- * palette, focus mode and the Explain pill own their Escape. A peek owns
- * Escape first (it stops the event in the capture phase on `window`).
+ * Where focus goes: every open (first, or a switch from A to B) moves it to
+ * the panel's Close; a re-render puts it back on Close when it was inside the
+ * panel, and a quiz answer moves it to that question's verdict, since the
+ * choices come back disabled. ✕ and Escape return it to the opener. A close
+ * because the article was swapped (a navigation, a failed load) does not move
+ * it — the reader's own navigation owns it. Reload is the exception that moves
+ * it on purpose: after the article re-renders it goes to the NEW 🧭 for the
+ * same section (heading text + ordinal), else to the page title.
  *
  * The stream is read with `fetch` + a ReadableStream (Share's reason: the 409
  * body carries a message EventSource cannot surface).
@@ -82,6 +96,9 @@ let page: WalkthroughPageContext | null = null;
 let state: WalkthroughPanelState | null = null;
 let inFlight: AbortController | null = null;
 let opener: HTMLElement | null = null;
+/** The section a Reload was asked from, focused again once the article it
+ *  reloads has its buttons back. */
+let refocus: { relPath: string; heading: string; ordinal: number } | null = null;
 let wired = false;
 let observed: Element | null = null;
 
@@ -99,6 +116,8 @@ export function enhanceWalkthroughButtons(root: ParentNode, ctx: WalkthroughPage
   watchArticle();
   root.querySelectorAll(`[${WALKTHROUGH_BTN_ATTR}]`).forEach((b) => b.remove());
   page = ctx;
+  const want = refocus;
+  refocus = null;
   if (wikiReadonlyWikiFlag() || !wikiToolsFlag()) return;
   const article = root.querySelector(".wiki-article:not(.wiki-ask-article)");
   if (!article) return;
@@ -108,24 +127,34 @@ export function enhanceWalkthroughButtons(root: ParentNode, ctx: WalkthroughPage
     const id = ids[k];
     if (id) h.insertAdjacentHTML("beforeend", walkthroughBtnHtml(id));
   });
+  if (want && want.relPath === ctx.relPath) {
+    const again = Array.from(article.querySelectorAll<HTMLElement>(`[${WALKTHROUGH_BTN_ATTR}]`)).find(
+      (b) => b.getAttribute("data-wt-heading") === want.heading && Number(b.getAttribute("data-wt-ordinal")) === want.ordinal,
+    );
+    const title = document.querySelector<HTMLElement>("#articleWrap .wiki-article-head h1");
+    if (!again && title) title.tabIndex = -1;
+    (again ?? title)?.focus({ preventScroll: true });
+  }
 }
 
-/** Close the panel and abort its run. */
-export function closeWalkthrough(): void {
+/** Close the panel, abort its run and hand focus back to the opener. On the
+ *  article-swap path the opener is detached, so the focus call does nothing
+ *  and focus stays where the reader's navigation put it. */
+function closeWalkthrough(): void {
   inFlight?.abort();
   inFlight = null;
   state = null;
   document.getElementById(WALKTHROUGH_PANEL_ID)?.remove();
-  if (opener?.isConnected) opener.focus({ preventScroll: true });
+  opener?.focus({ preventScroll: true });
   opener = null;
 }
 
-/** Close unless the panel belongs to `relPath` (the reader calls this on
- *  every breadcrumb render, and with `null` when no page is open). */
-export function closeWalkthroughOnNavigate(relPath: string | null): void {
-  if (state && state.relPath !== relPath) closeWalkthrough();
-  if (page && page.relPath !== relPath) page = null;
-}
+/** The reader calls this on every breadcrumb render. It does nothing: every
+ *  navigation, failed or not, also swaps `#articleWrap`'s children, and the
+ *  observer below closes the panel then. Closing here as well ran while the
+ *  opener was still attached, so it pulled focus back to a 🧭 about to be
+ *  removed. Kept so the reader's call site needs no change. */
+export function closeWalkthroughOnNavigate(_relPath: string | null): void {}
 
 /** Close the panel once the article its opener sat in has been swapped out. */
 function watchArticle(): void {
@@ -133,53 +162,31 @@ function watchArticle(): void {
   if (!wrap || wrap === observed) return;
   observed = wrap;
   new MutationObserver(() => {
-    if (state && !opener?.isConnected) closeWalkthrough();
+    if (!opener?.isConnected) closeWalkthrough();
   }).observe(wrap, { childList: true });
 }
 
-/** Selectors that find the same control again in freshly rendered markup,
- *  best first: a choice falls back to its question's verdict, since a chosen
- *  answer's buttons come back disabled and cannot hold focus. */
-function focusKeysOf(el: Element): string[] {
-  if (el.id === WALKTHROUGH_CLOSE_ID) return [`#${WALKTHROUGH_CLOSE_ID}`];
-  const choice = el.getAttribute(WALKTHROUGH_CHOICE_ATTR);
-  if (choice !== null) {
-    const q = choice.split(":")[0];
-    return [`[${WALKTHROUGH_CHOICE_ATTR}="${choice}"]`, `[${WALKTHROUGH_VERDICT_ATTR}="${q}"]`];
-  }
-  return [];
-}
-
-/** `focusClose`: an open, which always moves focus to Close. */
-function render(focusClose = false): void {
-  if (!state) return;
+/** Paint `s` into the panel. `focusSel`: where focus goes (an open → Close,
+ *  a quiz answer → its verdict); without it, focus that was inside the panel
+ *  goes back to Close, the one control every state renders. */
+function render(s: WalkthroughPanelState, focusSel?: string): void {
   let panel = document.getElementById(WALKTHROUGH_PANEL_ID);
-  const active = document.activeElement;
-  const hadFocus = !!panel && !!active && panel.contains(active);
-  const keys = hadFocus ? focusKeysOf(active!) : [];
+  const hadFocus = !!panel && panel.contains(document.activeElement);
   if (!panel) {
     panel = document.createElement("div");
     panel.id = WALKTHROUGH_PANEL_ID;
     panel.className = "wiki-wt";
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-modal", "false");
+    // A region, not a dialog: see the header's Escape paragraph.
+    panel.setAttribute("role", "region");
     panel.setAttribute("aria-labelledby", "wikiWalkthroughTitle");
-    // Focusable as a fallback target, out of the tab order.
+    // Focusable, out of the tab order: a click on the panel's body puts focus
+    // in it, so Escape closes it.
     panel.tabIndex = -1;
     document.body.appendChild(panel);
   }
-  panel.innerHTML = walkthroughPanelHtml(state);
-  if (focusClose) {
-    document.getElementById(WALKTHROUGH_CLOSE_ID)?.focus({ preventScroll: true });
-    return;
-  }
-  if (!hadFocus) return;
-  const again = keys
-    .map((k) => panel.querySelector<HTMLElement>(k))
-    .find((el) => el && !(el as HTMLButtonElement).disabled);
-  // The panel itself only when nothing matches: it is focusable (tabindex -1)
-  // so focus never drops to <body>.
-  (again ?? panel).focus({ preventScroll: true });
+  panel.innerHTML = walkthroughPanelHtml(s);
+  const target = focusSel ?? (hadFocus ? `#${WALKTHROUGH_CLOSE_ID}` : null);
+  if (target) panel.querySelector<HTMLElement>(target)?.focus({ preventScroll: true });
 }
 
 function open(btn: HTMLElement): void {
@@ -196,7 +203,7 @@ function open(btn: HTMLElement): void {
   inFlight?.abort();
   opener = btn;
   state = initialPanelState(page.relPath, id);
-  render(true);
+  render(state, `#${WALKTHROUGH_CLOSE_ID}`);
   void run(state, page);
 }
 
@@ -210,7 +217,7 @@ async function run(target: WalkthroughPanelState, ctx: WalkthroughPageContext): 
     target.errorKind = kind;
     target.error = message;
     if (inFlight === ctrl) inFlight = null;
-    render();
+    render(target);
   };
 
   const hash = ctx.hash();
@@ -282,7 +289,7 @@ async function run(target: WalkthroughPanelState, ctx: WalkthroughPageContext): 
   target.phase = "ready";
   target.result = done;
   if (inFlight === ctrl) inFlight = null;
-  render();
+  render(target);
 }
 
 function wire(): void {
@@ -302,22 +309,19 @@ function wire(): void {
       return;
     }
     if (t.closest(`#${WALKTHROUGH_RELOAD_ID}`)) {
+      if (state && page) refocus = { relPath: page.relPath, heading: state.identity.heading, ordinal: state.identity.ordinal };
       page?.reload();
       return;
     }
     const choice = t.closest<HTMLElement>(`[${WALKTHROUGH_CHOICE_ATTR}]`);
     if (choice && state) {
       const [q, c] = (choice.getAttribute(WALKTHROUGH_CHOICE_ATTR) ?? "").split(":").map(Number);
-      if (chooseAnswer(state, q!, c!)) render();
+      if (chooseAnswer(state, q!, c!)) render(state, `[${WALKTHROUGH_VERDICT_ATTR}="${q}"]`);
     }
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !state || e.defaultPrevented) return;
-    // Another dialog open on top owns its own Escape.
-    if (document.querySelector(".wiki-share, .wiki-chatopt")) return;
+    if (e.key !== "Escape" || e.defaultPrevented) return;
     const panel = document.getElementById(WALKTHROUGH_PANEL_ID);
-    const active = document.activeElement;
-    const onButton = !!active && typeof active.closest === "function" && !!active.closest(`[${WALKTHROUGH_BTN_ATTR}]`);
-    if ((panel && panel.contains(active)) || onButton) closeWalkthrough();
+    if (panel && panel.contains(document.activeElement)) closeWalkthrough();
   });
 }

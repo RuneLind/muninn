@@ -25,7 +25,7 @@ export const WALKTHROUGH_CLOSE_ID = "wikiWalkthroughClose";
 export const WALKTHROUGH_BTN_ATTR = "data-walkthrough-btn";
 export const WALKTHROUGH_CHOICE_ATTR = "data-wt-choice";
 /** A quiz question's verdict; focusable (tabindex -1) as the focus target
- *  after a keyboard answer disables that question's choices. */
+ *  after a quiz answer disables that question's choices. */
 export const WALKTHROUGH_VERDICT_ATTR = "data-wt-verdict";
 /** The stale-page panel's Reload button. */
 export const WALKTHROUGH_RELOAD_ID = "wikiWalkthroughReload";

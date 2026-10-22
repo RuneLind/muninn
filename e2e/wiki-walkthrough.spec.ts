@@ -6,7 +6,10 @@
  * POST the click sends, and the panel's state table driven through real clicks —
  * one request per click while loading, success, the all-dropped error, an abort
  * on close, an A→B switch, a navigation mid-run, a fresh call on reopen, no
- * button on a read-only wiki, and legible text in both themes.
+ * button on a read-only wiki, and legible text in both themes. The Escape and
+ * focus rows (E1–E7, O1–O3, C1–C4) are the class-check table of PR #738: one
+ * test per row, against the reader's real Escape owners (fact-check card,
+ * focus mode, peek, glossary tip, graph card, rail options, Share, Discuss).
  *
  * NO MODEL CALLS: `POST /api/wiki/walkthrough` is stubbed at the network
  * boundary with canned SSE bodies. Each stubbed response can be HELD until the
@@ -68,7 +71,7 @@ const GUIDE = [
 
 /** A page the staleness rows edit behind the reader's back, and a series
  *  head whose label the reader renames from the open page. */
-const STALE = ["---", "title: Stale", "type: concept", "---", "", "# Stale", "", "## Usage", "", "Stale prose.", ""].join("\n");
+const STALE = ["---", "title: Stale", "type: concept", "---", "", "# Stale", "", "## Usage", "", "Stale prose.", "", "## Usage", "", "More stale prose.", ""].join("\n");
 const SERIES = [
   "---",
   "title: Series head",
@@ -84,6 +87,80 @@ const SERIES = [
   "Series prose.",
   "",
 ].join("\n");
+
+/** One fact-check mark and its appendix: the card whose Escape rule
+ *  («close whenever focus is inside `.wiki-article`») rows E2 and E5 meet. */
+const FACT = [
+  "---",
+  "title: Fact page",
+  "---",
+  "",
+  "# Fact page",
+  "",
+  "## Usage",
+  "",
+  '<Fact n="1" v="bad">The gardener approves every proposal.</Fact>',
+  "",
+  "<!-- factcheck:start -->",
+  '<FactCheck date="2026-08-30" ok="0" warn="0" bad="1">',
+  "",
+  "### ❌ Claim 1/1 — The gardener approves every proposal",
+  "",
+  "A human approves each one.",
+  "",
+  "Confidence: 90/100",
+  "",
+  "</FactCheck>",
+  "<!-- factcheck:end -->",
+  "",
+].join("\n");
+
+/** A glossary term and a bare query id: the glossary tip and the peek of E7. */
+const UI = [
+  "---",
+  "title: UI page",
+  "---",
+  "",
+  "# UI page",
+  "",
+  "## Usage",
+  "",
+  "<Glossary>",
+  "",
+  "**Words on the page**",
+  "",
+  "- **Hold:** a loan kept back until the desk has looked at it.",
+  "",
+  "</Glossary>",
+  "",
+  "A Hold stops a renewal; see Q-2.",
+  "",
+  '<Query id="Q-2" question="Which loans are held?" answer="Four loans." run="29.09.2026">',
+  "",
+  "Reading of the answer.",
+  "",
+  "</Query>",
+  "",
+].join("\n");
+
+/** A tracker block, so the reader offers graph mode (E7, the graph card). */
+const READER_CONFIG = JSON.stringify({
+  trackers: [{ id: "jira", projects: ["DEMO"], hosts: ["example.invalid"] }],
+});
+/** The graph route's answer for guide.md, stubbed so no huginn or ledger is asked. */
+const GRAPH = {
+  scope: "page",
+  root: "guide.md",
+  depth: 1,
+  level: 1,
+  lanes: ["issue", "page"],
+  nodes: [
+    { id: "page:guide.md", lane: "page", hop: 0, relPath: "guide.md", title: "Guide", type: "concept", pageTimeMs: 0, plan: false },
+    { id: "issue:jira:DEMO-1", lane: "issue", hop: 1, tracker: "jira", key: "DEMO-1", label: "Jira", url: "", pageCount: 1, planPages: [] },
+  ],
+  edges: [{ source: "issue:jira:DEMO-1", target: "page:guide.md", kind: "issue-page", relations: ["tag"] }],
+  ledger: { configured: false, asked: false, reachable: false, timedOut: false, mergesPartial: false, mergesTruncated: false },
+};
 
 const OTHER = ["---", "title: Other", "type: concept", "---", "", "# Other", "", "## Elsewhere", "", "Other prose.", ""].join("\n");
 
@@ -124,6 +201,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "other.md"), OTHER, "utf8");
   await writeFile(path.join(root, "stale.md"), STALE, "utf8");
   await writeFile(path.join(root, "series.md"), SERIES, "utf8");
+  await writeFile(path.join(root, "fact.mdx"), FACT, "utf8");
+  await writeFile(path.join(root, "ui.mdx"), UI, "utf8");
+  await writeFile(path.join(root, ".wiki-reader.json"), READER_CONFIG, "utf8");
   await writeFile(path.join(roRoot, "guide.md"), GUIDE, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -209,9 +289,21 @@ async function stubUnlessStale(page: Page, rel: string) {
 const btn = (page: Page, heading: string, nth = 0) =>
   page.locator(`.wiki-article > :is(h2,h3,h4) [data-walkthrough-btn][data-wt-heading="${heading}"]`).nth(nth);
 
-async function openGuide(page: Page, wiki = WIKI): Promise<void> {
-  await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=guide.md`);
+async function openGuide(page: Page, wiki = WIKI, rel = "guide.md"): Promise<void> {
+  await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${rel}`);
   await expect(page.locator(".wiki-article h3").first()).toBeVisible();
+}
+
+const panelEl = (page: Page) => page.locator("#wikiWalkthrough");
+const closeBtn = (page: Page) => page.locator("#wikiWalkthroughClose");
+
+/** Open «Usage»'s panel by mouse and let it render; returns its opener. */
+async function openReady(page: Page, rel = "guide.md") {
+  await openGuide(page, WIKI, rel);
+  const opener = btn(page, "Usage");
+  await opener.click();
+  await expect(panelEl(page).locator(".wiki-wt-step")).toHaveCount(2);
+  return opener;
 }
 
 test.describe("Wiki reader: walk me through", () => {
@@ -276,13 +368,20 @@ test.describe("Wiki reader: walk me through", () => {
     expect(posted).toHaveLength(2);
   });
 
-  test("A → B: only B's answer ever renders", async ({ page }) => {
+  test("O2: A → B by click aborts A, focuses B's Close, and only B's answer ever renders", async ({ page }) => {
     const { held } = await stub(page, { hold: true });
+    const failed: string[] = [];
+    page.on("requestfailed", (r) => {
+      if (r.url().includes("/api/wiki/walkthrough")) failed.push(r.postData() ?? "");
+    });
     await openGuide(page);
     await btn(page, "How it works", 0).click();
     await expect.poll(() => held.length).toBe(1);
     await btn(page, "Usage").click();
     await expect.poll(() => held.length).toBe(2);
+    await expect(closeBtn(page)).toBeFocused();
+    await expect.poll(() => failed.length).toBe(1);
+    expect(JSON.parse(failed[0]!).heading).toBe("How it works");
     // B answers first, then A's late answer arrives — it must not replace B.
     await held[1]!.release(done("Usage", "BBB"));
     await expect(page.locator("#wikiWalkthrough").getByText("BBB step one")).toBeVisible();
@@ -300,15 +399,20 @@ test.describe("Wiki reader: walk me through", () => {
     await expect(page.locator("#wikiWalkthrough .wiki-wt-step")).toHaveCount(0);
   });
 
-  test("navigating away mid-run renders nothing into the new page", async ({ page }) => {
+  test("C3/C4: navigating away mid-run renders nothing into the new page and leaves focus where the reader put it", async ({ page }) => {
     const { held } = await stub(page, { hold: true });
     await openGuide(page);
     await btn(page, "Usage").click();
     await expect.poll(() => held.length).toBe(1);
     // The reader's own in-page navigation (pushState + fetch), not a reload.
-    await page.locator('#wikiList [data-relpath="other.md"]').first().click();
+    // Focus sits outside the panel (the search box) and the row's click is
+    // dispatched without moving it, so the close must leave it there.
+    const search = page.locator("#wikiSearch");
+    await search.focus();
+    await page.locator('#wikiList [data-relpath="other.md"]').first().dispatchEvent("click");
     await expect(page.locator(".wiki-article h3", { hasText: "Elsewhere" })).toBeVisible();
     await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
+    await expect(search).toBeFocused();
     await held[0]!.release(done("Usage", "GONE"));
     await page.waitForTimeout(300);
     await expect(page.getByText("GONE step one")).toHaveCount(0);
@@ -344,34 +448,24 @@ test.describe("Wiki reader: walk me through", () => {
     expect(new URL(explain[0]!).searchParams.get("ctx")).toBe("Usage");
   });
 
-  test("keyboard: focus stays in the panel across renders, and Escape closes it and returns focus", async ({ page }) => {
+  // ── Class check (Escape/focus): one test per row of the enumerated table.
+  //    Rule: Escape closes the thing focus is in. ──
+
+  test("O1: a click on a 🧭 opens the panel with focus on Close; so does Enter", async ({ page }) => {
     const { held } = await stub(page, { hold: true });
     await openGuide(page);
-    const b = btn(page, "Usage");
-    await b.focus();
-    await page.keyboard.press("Enter");
-    await expect(page.locator("#wikiWalkthroughClose")).toBeFocused();
+    await btn(page, "Usage").click();
     await expect.poll(() => held.length).toBe(1);
-    await held[0]!.release(done("Usage", "KEY"));
-    const panel = page.locator("#wikiWalkthrough");
-    await expect(panel.locator(".wiki-wt-step")).toHaveCount(2);
-    // The ready render replaced the markup: focus is back on the same control.
-    await expect(page.locator("#wikiWalkthroughClose")).toBeFocused();
-    // A quiz answer by keyboard: its choices come back disabled, so focus goes
-    // to that question's verdict, not to the panel or <body>.
-    await panel.locator(".wiki-wt-choice", { hasText: "A human" }).focus();
+    await expect(closeBtn(page)).toBeFocused();
+    await closeBtn(page).click();
+    await expect(panelEl(page)).toHaveCount(0);
+    await btn(page, "How it works", 1).focus();
     await page.keyboard.press("Enter");
-    await expect(panel.locator(".wiki-wt-verdict.is-right")).toBeVisible();
-    await expect(panel.locator(".wiki-wt-choice[disabled]")).toHaveCount(2);
-    await expect(panel.locator(".wiki-wt-verdict")).toBeFocused();
-    await page.keyboard.press("Escape");
-    await expect(panel).toHaveCount(0);
-    await expect(b).toBeFocused();
+    await expect.poll(() => held.length).toBe(2);
+    await expect(closeBtn(page)).toBeFocused();
   });
 
-  // Fix round 2 batch 1, finding 1: a keyboard switch to B left focus on B's
-  // 🧭, where Escape did nothing.
-  test("keyboard A → B: focus moves into B's panel, and Escape there closes it", async ({ page }) => {
+  test("O2 by keyboard: A → B lands focus in B's panel, and Escape there closes it", async ({ page }) => {
     const { held } = await stub(page, { hold: true });
     await openGuide(page);
     await btn(page, "How it works", 0).focus();
@@ -382,50 +476,226 @@ test.describe("Wiki reader: walk me through", () => {
     await page.keyboard.press("Enter");
     await expect.poll(() => held.length).toBe(2);
     await expect(page.locator("#wikiWalkthroughTitle")).toContainText("Usage");
-    await expect(page.locator("#wikiWalkthroughClose")).toBeFocused();
+    await expect(closeBtn(page)).toBeFocused();
     await page.keyboard.press("Escape");
-    await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
+    await expect(panelEl(page)).toHaveCount(0);
     await expect(b).toBeFocused();
   });
 
-  test("Escape with focus on any 🧭 closes the open panel and returns focus to its opener", async ({ page }) => {
+  test("O3: Space on Close after a mouse open closes the panel (standard button behaviour)", async ({ page }) => {
+    await stub(page);
+    const opener = await openReady(page);
+    await expect(closeBtn(page)).toBeFocused();
+    await page.keyboard.press(" ");
+    await expect(panelEl(page)).toHaveCount(0);
+    await expect(opener).toBeFocused();
+  });
+
+  test("re-render: focus stays on Close across the ready render; a keyboard answer focuses its verdict", async ({ page }) => {
     const { held } = await stub(page, { hold: true });
     await openGuide(page);
-    const opener = btn(page, "Usage");
-    await opener.click();
+    await btn(page, "Usage").focus();
+    await page.keyboard.press("Enter");
+    await expect(closeBtn(page)).toBeFocused();
     await expect.poll(() => held.length).toBe(1);
-    // Another section's button, focused without activating it.
-    await btn(page, "How it works", 1).focus();
-    await page.keyboard.press("Escape");
-    await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
-    await expect(opener).toBeFocused();
-    await held[0]!.release(done("Usage", "BTNESC"));
-    await page.waitForTimeout(300);
-    await expect(page.getByText("BTNESC step one")).toHaveCount(0);
+    await held[0]!.release(done("Usage", "KEY"));
+    const panel = panelEl(page);
+    await expect(panel.locator(".wiki-wt-step")).toHaveCount(2);
+    await expect(closeBtn(page)).toBeFocused();
+    await panel.locator(".wiki-wt-choice", { hasText: "A human" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(panel.locator(".wiki-wt-verdict.is-right")).toBeVisible();
+    await expect(panel.locator(".wiki-wt-choice[disabled]")).toHaveCount(2);
+    await expect(panel.locator(".wiki-wt-verdict")).toBeFocused();
   });
 
-  test("Escape with focus outside the panel and off every 🧭 leaves the panel open", async ({ page }) => {
+  test("re-render: a mouse answer focuses its verdict too", async ({ page }) => {
     await stub(page);
-    await openGuide(page);
-    await btn(page, "Usage").click();
-    await expect(page.locator("#wikiWalkthrough .wiki-wt-step")).toHaveCount(2);
-    await page.locator("#wikiSearch").focus();
-    await page.keyboard.press("Escape");
-    await expect(page.locator("#wikiWalkthrough")).toHaveCount(1);
+    await openReady(page);
+    const panel = panelEl(page);
+    await panel.locator(".wiki-wt-choice", { hasText: "The gardener" }).click();
+    await expect(panel.locator(".wiki-wt-verdict.is-wrong")).toBeFocused();
   });
 
-  test("Escape while loading closes, aborts, and the late answer renders nothing", async ({ page }) => {
+  test("E1/C1: Escape inside the panel while loading closes it, aborts the run, and focuses the opener", async ({ page }) => {
     const { held } = await stub(page, { hold: true });
     await openGuide(page);
     await btn(page, "Usage").focus();
     await page.keyboard.press("Enter");
     await expect.poll(() => held.length).toBe(1);
     await page.keyboard.press("Escape");
-    await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
+    await expect(panelEl(page)).toHaveCount(0);
     await expect(btn(page, "Usage")).toBeFocused();
     await held[0]!.release(done("Usage", "ESC"));
     await page.waitForTimeout(300);
     await expect(page.getByText("ESC step one")).toHaveCount(0);
+  });
+
+  test("E1: a click on the panel's body puts focus in it, so Escape closes it", async ({ page }) => {
+    await stub(page);
+    const opener = await openReady(page);
+    await panelEl(page).locator(".wiki-wt-step p").first().click();
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("wikiWalkthrough");
+    await page.keyboard.press("Escape");
+    await expect(panelEl(page)).toHaveCount(0);
+    await expect(opener).toBeFocused();
+  });
+
+  test("C1: ✕ closes the panel and focuses the opener", async ({ page }) => {
+    await stub(page);
+    const opener = await openReady(page);
+    await closeBtn(page).click();
+    await expect(panelEl(page)).toHaveCount(0);
+    await expect(opener).toBeFocused();
+  });
+
+  test("E2: a fact-check card open, Escape inside the panel closes the panel and leaves the card open", async ({ page }) => {
+    await stub(page);
+    await openGuide(page, WIKI, "fact.mdx");
+    const opener = btn(page, "Usage");
+    await opener.click();
+    await expect(panelEl(page).locator(".wiki-wt-step")).toHaveCount(2);
+    await page.locator('.wiki-article .fc-chip[data-fact="1"]').click();
+    await expect(page.locator(".wiki-article .fc-card")).toHaveCount(1);
+    await closeBtn(page).focus();
+    await page.keyboard.press("Escape");
+    await expect(panelEl(page)).toHaveCount(0);
+    await expect(page.locator(".wiki-article .fc-card")).toHaveCount(1);
+    await expect(opener).toBeFocused();
+  });
+
+  test("E3: focus mode on, the first Escape inside the panel leaves focus mode, the second closes the panel", async ({ page }) => {
+    await stub(page);
+    const opener = await openReady(page);
+    const layout = page.locator(".wiki-layout");
+    await page.getByRole("button", { name: "Focus (F)" }).click();
+    await expect(layout).toHaveClass(/focus-mode/);
+    await closeBtn(page).focus();
+    await page.keyboard.press("Escape");
+    await expect(layout).not.toHaveClass(/focus-mode/);
+    await expect(panelEl(page)).toHaveCount(1);
+    await expect(closeBtn(page)).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(panelEl(page)).toHaveCount(0);
+    await expect(opener).toBeFocused();
+  });
+
+  test("E4: Escape with focus on a 🧭, out of the panel, leaves the panel open", async ({ page }) => {
+    const { held } = await stub(page, { hold: true });
+    await openGuide(page);
+    const opener = btn(page, "Usage");
+    await opener.click();
+    await expect.poll(() => held.length).toBe(1);
+    await opener.focus();
+    await page.keyboard.press("Escape");
+    await expect(panelEl(page)).toHaveCount(1);
+    await held[0]!.release(done("Usage", "BTNESC"));
+    await expect(panelEl(page).getByText("BTNESC step one")).toBeVisible();
+  });
+
+  // Both listeners sit on `document`, so which runs first is the order they
+  // were bound in: the fact-check card's binds on the first page that carries
+  // a chip, the panel's on the first page with a heading. Opened directly, the
+  // card's runs first and moves focus to its chip before the panel's sees the
+  // key; reached from another page in-place, the panel's runs first.
+  for (const via of ["opened directly", "reached from another page"] as const) {
+    test(`E5 (${via}): a fact-check card open and focus on a 🧭 — one Escape closes the card, the panel stays`, async ({ page }) => {
+      await stub(page);
+      if (via === "opened directly") {
+        await openGuide(page, WIKI, "fact.mdx");
+      } else {
+        await openGuide(page);
+        await page.locator('#wikiList [data-relpath="fact.mdx"]').first().click();
+        await expect(page.locator(".wiki-article .fc-chip")).toHaveCount(1);
+      }
+      const opener = btn(page, "Usage");
+      await opener.click();
+      await expect(panelEl(page).locator(".wiki-wt-step")).toHaveCount(2);
+      await page.locator('.wiki-article .fc-chip[data-fact="1"]').click();
+      await expect(page.locator(".wiki-article .fc-card")).toHaveCount(1);
+      await opener.focus();
+      await page.keyboard.press("Escape");
+      await expect(page.locator(".wiki-article .fc-card")).toHaveCount(0);
+      await expect(panelEl(page)).toHaveCount(1);
+    });
+  }
+
+  test("E6: Escape with focus elsewhere on the page leaves the panel open", async ({ page }) => {
+    await stub(page);
+    await openReady(page);
+    await page.locator("#wikiSearch").focus();
+    await page.keyboard.press("Escape");
+    await expect(panelEl(page)).toHaveCount(1);
+  });
+
+  test("E7 peek: focus in the panel, a peek open — Escape closes the peek, the panel stays", async ({ page }) => {
+    await stub(page);
+    await openReady(page, "ui.mdx");
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "Q-2" }).first().hover();
+    await expect(page.locator(".wiki-ref-peek")).toBeVisible();
+    await closeBtn(page).focus();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".wiki-ref-peek")).toHaveCount(0);
+    await expect(panelEl(page)).toHaveCount(1);
+  });
+
+  test("E7 glossary: focus in the panel, a glossary tip open — Escape dismisses the tip, the panel stays", async ({ page }) => {
+    await stub(page);
+    await openReady(page, "ui.mdx");
+    const mark = page.locator(".wiki-article .gl-mark").first();
+    await mark.hover();
+    await expect(mark.locator(".gl-tip")).toBeVisible();
+    await closeBtn(page).focus();
+    await page.keyboard.press("Escape");
+    await expect(mark).toHaveClass(/gl-dismissed/);
+    await expect(panelEl(page)).toHaveCount(1);
+  });
+
+  test("E7 graph card: focus in the card — Escape closes the card, the panel stays", async ({ page }) => {
+    await stub(page);
+    await page.route("**/api/wiki/graph?*", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(GRAPH) }),
+    );
+    await openReady(page);
+    await page.locator("#wikiGraphToggle").click();
+    await expect(page.locator("#wikiGraph .wiki-graph-lanes")).toBeVisible();
+    await page.locator('#wikiGraph [data-graph-node="issue:jira:DEMO-1"]').click();
+    const card = page.locator("#wikiGraphCard");
+    await expect(card).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(card).toBeHidden();
+    await expect(panelEl(page)).toHaveCount(1);
+  });
+
+  test("E7 rail options: the options pane open — Escape closes the pane, the panel stays", async ({ page }) => {
+    await stub(page);
+    await openReady(page);
+    await page.locator("#wikiOptionsBtn").click();
+    const pane = page.locator("#wikiOptions");
+    await expect(pane).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(pane).toBeHidden();
+    await expect(panelEl(page)).toHaveCount(1);
+  });
+
+  test("E7 Share: the Share dialog open — Escape closes the dialog, the panel stays", async ({ page }) => {
+    await stub(page);
+    await openReady(page);
+    await page.locator("#wikiShareBtn").click();
+    await expect(page.locator(".wiki-share")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".wiki-share")).toHaveCount(0);
+    await expect(panelEl(page)).toHaveCount(1);
+  });
+
+  test("E7 chat: the Discuss dialog open — Escape closes the dialog, the panel stays", async ({ page }) => {
+    await stub(page);
+    await openReady(page);
+    await page.locator("#wikiDiscussBtn").click();
+    await expect(page.locator("#wikiChatOpt")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiChatOpt")).toHaveCount(0);
+    await expect(panelEl(page)).toHaveCount(1);
   });
 
   for (const how of ["an error payload", "a rejected fetch"] as const) {
@@ -451,29 +721,74 @@ test.describe("Wiki reader: walk me through", () => {
 
   // Fix round 1 batch 3, finding 3: a stale 409 was a dead end — no reload,
   // and the buttons kept the stale hash, so every click 409ed again.
-  test("a page changed on disk: the stale 409 offers Reload, and after it a click runs", async ({ page }) => {
+  test("C2: a page changed on disk: the stale 409 offers Reload, and after it a click runs", async ({ page }) => {
     await writeFile(path.join(root, "stale.md"), STALE, "utf8");
     const { posted, statuses } = await stubUnlessStale(page, "stale.md");
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=stale.md`);
     await expect(btn(page, "Usage")).toBeVisible();
     await writeFile(path.join(root, "stale.md"), STALE.replace("Stale prose.", "Stale prose, edited elsewhere."), "utf8");
-    await btn(page, "Usage").click();
+    // The SECOND of two «Usage» sections: the refocus matches the ordinal too.
+    await btn(page, "Usage", 1).click();
     const panel = page.locator("#wikiWalkthrough");
     await expect(panel.locator(".wiki-wt-error")).toContainText("The page changed since it was opened");
     expect(statuses).toEqual([409]);
     await panel.locator("#wikiWalkthroughReload").click();
     await expect(page.locator(".wiki-article")).toContainText("edited elsewhere");
     await expect(panel).toHaveCount(0);
+    // C2: focus lands on the NEW 🧭 for the same section, not on <body>.
+    await expect(btn(page, "Usage", 1)).toBeFocused();
     await btn(page, "Usage").click();
     await expect(panel.locator(".wiki-wt-step")).toHaveCount(2);
     expect(statuses).toEqual([409, 200]);
     expect(posted[1]!.hash).toBe(await diskHash("stale.md"));
   });
 
+  test("C2: a Reload whose section is gone focuses the page title, not <body>", async ({ page }) => {
+    await writeFile(path.join(root, "stale.md"), STALE, "utf8");
+    await stubUnlessStale(page, "stale.md");
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=stale.md`);
+    await expect(btn(page, "Usage")).toBeVisible();
+    await writeFile(path.join(root, "stale.md"), STALE.replaceAll("## Usage", "## Renamed"), "utf8");
+    await btn(page, "Usage").click();
+    await page.locator("#wikiWalkthroughReload").click();
+    await expect(btn(page, "Renamed")).toBeVisible();
+    await expect(page.locator("#articleWrap .wiki-article-head h1")).toBeFocused();
+  });
+
+  test("C2: a Reload whose load fails leaves nothing to refocus on the pages opened after it", async ({ page }) => {
+    await writeFile(path.join(root, "stale.md"), STALE, "utf8");
+    await stubUnlessStale(page, "stale.md");
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=stale.md`);
+    await expect(btn(page, "Usage")).toBeVisible();
+    await writeFile(path.join(root, "stale.md"), STALE.replace("Stale prose.", "Stale prose, edited again."), "utf8");
+    await btn(page, "Usage").click();
+    await expect(page.locator("#wikiWalkthrough .wiki-wt-error")).toContainText("The page changed since it was opened");
+    let failReload = true;
+    await page.route("**/api/wiki/page?*", (route) =>
+      failReload && route.request().url().includes("stale.md") ? route.abort() : route.fallback(),
+    );
+    await page.locator("#wikiWalkthroughReload").click();
+    await expect(page.locator("#articleWrap .wiki-empty-state")).toBeVisible();
+    failReload = false;
+    // Another page with a «Usage» section, then the reloaded page itself: focus
+    // stays in the search box on both.
+    const search = page.locator("#wikiSearch");
+    await search.focus();
+    await page.locator('#wikiList [data-relpath="guide.md"]').first().dispatchEvent("click");
+    await expect(btn(page, "Usage")).toBeVisible();
+    await expect(search).toBeFocused();
+    await page.locator('#wikiList [data-relpath="stale.md"]').first().dispatchEvent("click");
+    await expect(page.locator(".wiki-article")).toContainText("edited again");
+    await expect(search).toBeFocused();
+  });
+
   // Fix round 1 batch 3, finding 2: the buttons froze the page hash at render,
   // so the reader's own series write made the next click 409 «page changed».
   test("the reader's own series write moves the hash: the next click runs, no 409", async ({ page }) => {
     await writeFile(path.join(root, "series.md"), SERIES, "utf8");
+  await writeFile(path.join(root, "fact.mdx"), FACT, "utf8");
+  await writeFile(path.join(root, "ui.mdx"), UI, "utf8");
+  await writeFile(path.join(root, ".wiki-reader.json"), READER_CONFIG, "utf8");
     await fetch(`${BASE}/api/wiki/pages?wiki=${WIKI}&refresh=1`);
     const { statuses } = await stubUnlessStale(page, "series.md");
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=series.md`);
