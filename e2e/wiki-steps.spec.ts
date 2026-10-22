@@ -48,6 +48,8 @@ const JSON_FILE = {
     views: [
       { id: "start", label: "Start", focus: ["opened"], note: "The case opens." },
       { id: "end", label: "End", focus: ["assessed", "decided"] },
+      // A typo: no node has this id, so the view dims nothing.
+      { id: "typo", label: "Typo", focus: ["nope"] },
     ],
   },
   lanes: [{ id: "main", label: "Main" }],
@@ -64,6 +66,8 @@ const PAGE = [
   "---",
   "",
   "# Case",
+  "",
+  "See «Authored» for the steps.",
   "",
   "## Authored",
   "",
@@ -92,7 +96,8 @@ const STEP_DIMS = [
   ["assessed", "basis", "decided", ...ALL_EDGES].sort(),
   ["assessed", "decided", "basis>assessed", "assessed>decided"].sort(),
   ["decided", "opened", "opened>basis", "assessed>decided"].sort(),
-  ["assessed", "basis", "decided", "opened", ...ALL_EDGES].sort(),
+  // Only an id the picture does not draw: the reader drops it, and the step dims nothing.
+  [],
 ];
 
 let server: ChildProcess | undefined;
@@ -216,13 +221,48 @@ test.describe("Wiki reader: Steps", () => {
     await expect(play).toHaveAttribute("aria-pressed", "false");
     await page.waitForTimeout(2_500);
     expect(await current(sec)).toBe("1");
-    // From the last step, Play starts over at the first.
-    await sec.locator('button[data-stp-act="next"]').click();
-    await sec.locator('button[data-stp-act="next"]').click();
+  });
+
+  test("Play releases on the tick that shows the last step and stays there; Play from the last step starts over", async ({ page }) => {
+    await open(page);
+    const sec = steps(page, 0);
+    const play = sec.locator('button[data-stp-act="play"]');
     await play.click();
-    await expect.poll(() => current(sec), { timeout: 3_000 }).toBe("0");
+    await expect.poll(() => current(sec), { timeout: 8_000, intervals: [50] }).toBe("3");
+    // Released with the last step, not one interval (2 s) later.
+    await expect(play).toHaveAttribute("aria-pressed", "false", { timeout: 500 });
+    await page.waitForTimeout(2_500);
+    expect(await current(sec)).toBe("3");
+    await expect(sec.locator(".stp-pos")).toHaveText("Step 4 of 4");
+    await play.click();
+    expect(await current(sec)).toBe("0");
+    await expect(play).toHaveAttribute("aria-pressed", "true");
     await sec.locator('button[data-stp-act="all"]').click();
     await expect(play).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("a peek of a stepped block shows it at rest: no current step, nothing dimmed", async ({ page }) => {
+    await open(page);
+    const sec = steps(page, 0);
+    await sec.locator('button[data-stp-act="next"]').click();
+    await sec.locator('button[data-stp-act="next"]').click();
+    await expect(sec.locator("li.stp-step.stp-cur")).toHaveCount(1);
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "Authored" }).first().hover();
+    const peek = page.locator(".wiki-ref-peek");
+    await expect(peek).toBeVisible();
+    await expect(peek.locator("li.stp-step")).toHaveCount(4);
+    await expect(peek.locator(".stp-cur, [aria-current], .dgm-dim, .stp-ctrl")).toHaveCount(0);
+    expect(await peek.locator("li.stp-step").evaluateAll((els) => els.map((e) => getComputedStyle(e).boxShadow))).toEqual(["none", "none", "none", "none"]);
+  });
+
+  test("a Diagram view naming only an id the picture does not draw dims nothing", async ({ page }) => {
+    await open(page);
+    const fig = page.locator(".wiki-article figure.dgm").filter({ has: page.locator("button[data-dgm-view]") });
+    await expect(fig).toHaveCount(1);
+    await fig.locator('button[data-dgm-view="start"]').click();
+    expect(await dimmed(fig)).toEqual(STEP_DIMS[0]);
+    await fig.locator('button[data-dgm-view="typo"]').click();
+    expect(await dimmed(fig)).toEqual([]);
   });
 
   for (const scheme of ["dark", "light"] as const) {
@@ -230,12 +270,14 @@ test.describe("Wiki reader: Steps", () => {
       await page.emulateMedia({ colorScheme: scheme });
       await open(page);
       const sec = steps(page, 1);
-      await expect(sec.locator("li.stp-step")).toHaveCount(2);
+      await expect(sec.locator("li.stp-step")).toHaveCount(3);
       await expect(sec.locator("li.stp-step").first()).toContainText("Start — The case opens.");
       await sec.locator('button[data-stp-act="next"]').click();
       expect(await dimmed(sec)).toEqual(STEP_DIMS[0]);
       await sec.locator('button[data-stp-act="next"]').click();
       expect(await dimmed(sec)).toEqual(["basis", "opened", "opened>basis", "basis>assessed"].sort());
+      await sec.locator('button[data-stp-act="next"]').click();
+      expect(await dimmed(sec)).toEqual([]);
       // The authored block above is untouched by this one.
       expect(await dimmed(steps(page, 0))).toEqual([]);
     });

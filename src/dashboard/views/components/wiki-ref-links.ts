@@ -346,6 +346,16 @@ function bareChart(chart: Element): void {
   chart.querySelector(":scope > .vc-table")?.classList.remove("vc-table");
 }
 
+/** A peeked `<Steps>` is at rest, as Show all leaves it: no current step.
+ *  The picture, and the dimming on it, goes with `.dgm-svg`. */
+function bareSteps(sec: Element): void {
+  sec.setAttribute("data-stp-cur", "-1");
+  sec.querySelectorAll("li.stp-step").forEach((li) => {
+    li.classList.remove("stp-cur");
+    li.removeAttribute("aria-current");
+  });
+}
+
 /** A `<RuleTree>`'s reader chrome (`RULE_TREE_CHROME_CLASSES` in
  *  rule-tree-view.ts, pinned equal by a test). */
 export const PEEK_RULE_TREE_CHROME = ["rt-head"] as const;
@@ -415,6 +425,7 @@ function cloneBare<T extends Node>(n: T): T {
     c.querySelectorAll(PEEK_STRIP_SELECTOR).forEach((b) => b.remove());
     for (const chart of [c, ...Array.from(c.querySelectorAll("section.vc"))]) if (chart.matches("section.vc")) bareChart(chart);
     for (const tree of [c, ...Array.from(c.querySelectorAll("section.rt"))]) if (tree.matches("section.rt")) bareRuleTree(tree);
+    for (const sec of [c, ...Array.from(c.querySelectorAll("section.stp"))]) if (sec.matches("section.stp")) bareSteps(sec);
     bareGlossary(c);
     for (const list of [c, ...Array.from(c.querySelectorAll(".dl-list"))]) {
       if (!list.matches(".dl-list")) continue;

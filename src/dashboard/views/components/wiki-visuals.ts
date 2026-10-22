@@ -49,10 +49,15 @@ const focusSet = (raw: string | undefined): Set<string> => new Set((raw ?? "").s
 /** Dim one figure's picture to `focus` by archify's guided-view rule: each
  *  `[data-node-id]` outside the focus, each edge whose ends are not both in
  *  it; an element with neither attribute never dims, and an empty focus dims
- *  nothing. The one rule a `<Diagram>` view and a `<Steps>` step share. */
-export function applyDiagramFocus(fig: Element, focus: ReadonlySet<string>): void {
+ *  nothing. An id no node in this picture carries (a typo lint check 22
+ *  reports) leaves the focus first, so a focus of only such ids dims nothing.
+ *  The one rule a `<Diagram>` view and a `<Steps>` step share. */
+export function applyDiagramFocus(fig: Element, requested: ReadonlySet<string>): void {
   const svg = fig.querySelector(".dgm-svg");
-  svg?.querySelectorAll<Element>("[data-node-id]").forEach((n) => {
+  const nodes = Array.from(svg?.querySelectorAll<Element>("[data-node-id]") ?? []);
+  const drawn = new Set(nodes.map((n) => n.getAttribute("data-node-id") ?? ""));
+  const focus = new Set([...requested].filter((id) => drawn.has(id)));
+  nodes.forEach((n) => {
     n.classList.toggle("dgm-dim", focus.size > 0 && !focus.has(n.getAttribute("data-node-id") ?? ""));
   });
   svg?.querySelectorAll<Element>("[data-edge-from][data-edge-to]").forEach((e) => {
@@ -107,13 +112,17 @@ function stepsAct(sec: HTMLElement, act: string): void {
   if (act === "play") {
     if (stepsTimers.has(sec)) return stopSteps(sec);
     if (cur < 0 || cur >= count - 1) setStep(sec, 0);
+    if (count <= 1) return;
     sec.querySelector('.stp-ctrl [data-stp-act="play"]')?.setAttribute("aria-pressed", "true");
     stepsTimers.set(
       sec,
       setInterval(() => {
         const at = Number(sec.dataset.stpCur ?? "-1");
-        if (!sec.isConnected || at >= stepItems(sec).length - 1) return stopSteps(sec);
+        const last = stepItems(sec).length - 1;
+        if (!sec.isConnected || at >= last) return stopSteps(sec);
         setStep(sec, at + 1);
+        // Released on the tick that shows the last step, so Play there starts over.
+        if (at + 1 >= last) stopSteps(sec);
       }, STEPS_PLAY_MS),
     );
     return;
