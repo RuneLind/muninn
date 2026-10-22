@@ -341,3 +341,46 @@ describe("fix round 1 batch 3: item lines, block names, a file with no nodes", (
     expect(d.map((f) => f.message)).toEqual([`<Diagram src="./z.workflow.json"> ${NO_NODES("nodes")}`]);
   });
 });
+
+describe("fix round 2 batch 1: the last paragraph that ends in spans, and a <ul> uses up steps", () => {
+  const focusOf = (md: string) =>
+    [...renderWikiHtml(md, () => undefined, { views: true, files: files() }).matchAll(/data-stp-focus="([^"]*)"/g)].map((m) => m[1]);
+  const block = (...lines: string[]) => ['<Steps src="./s.lifecycle.json">', "", ...lines, "", "</Steps>"].join("\n");
+  let base = "";
+  let root = "";
+  const PAGE = "flows/page.mdx";
+  beforeAll(async () => {
+    base = await testTempDir(path.join(tmpdir(), "muninn-steps4-"));
+    root = path.join(base, "wiki");
+    await mkdir(path.join(root, "flows"), { recursive: true });
+    await writeFile(path.join(root, "flows", "s.lifecycle.json"), JSON.stringify(LIFE));
+    await writeFile(path.join(root, "flows", "s.html"), `<svg viewBox="0 0 1 1"><g data-node-id="new"/></svg>`);
+  });
+  afterAll(async () => {
+    if (base) await rm(base, { recursive: true, force: true });
+  });
+
+  test("a plain paragraph after the item's text keeps the text's focus", () => {
+    expect(focusOf(block("1. Opened `new`", "", "   The case is created."))).toEqual(["new"]);
+  });
+  test("lint judges the text's focus when a plain paragraph follows it", async () => {
+    const md = ["# P", "", '<Steps src="./s.lifecycle.json">', "", "1. Opened `nope`", "", "   The case is created.", "", "</Steps>", ""].join("\n");
+    const out = checkSteps({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md));
+    expect(out).toHaveLength(1);
+    expect(out[0]!.message).toContain("nope");
+  });
+  test("focus only in the continuation paragraph still counts", () => {
+    expect(focusOf(block("1. Opened", "", "   para `work`"))).toEqual(["work"]);
+  });
+  test("two paragraphs that both end in spans: the last one is the focus", () => {
+    expect(focusOf(block("1. A", "", "   p1 `new`", "", "   p2 `work`"))).toEqual(["work"]);
+    expect(focusOf(block("1. A `new`", "", "   p2 `work`"))).toEqual(["work"]);
+  });
+  test("an item with no closing spans anywhere has no focus", () => {
+    expect(focusOf(block("1. A", "", "   plain"))).toEqual([""]);
+  });
+  test("a <ul> uses up step numbers: a later <ol> starts after its items", () => {
+    const md = block("- A", "- B", "", "Between.", "", "1. C");
+    expect(renderWikiHtml(md, () => undefined, { views: true, files: files() })).toMatch(/<ol class="stp-list" start="3">/);
+  });
+});

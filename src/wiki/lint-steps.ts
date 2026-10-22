@@ -4,7 +4,7 @@
  * `wiki-check` reports it), over the files `loadPageFiles` read for the page.
  *
  * A step's focus ids are `stepItemFocus`'s (the code spans that end the item's
- * last paragraph);
+ * last paragraph that has any);
  * with no list, the steps are the file's `meta.views` and their `focus`. A
  * file's ids are its nodes' (`diagramNodeIds`: architecture `components`,
  * workflow `nodes`, lifecycle `states`). A file that did not load, is not a

@@ -8,9 +8,10 @@
  * by commas or white space. `` - Saken opprettes `opprettet`, `grunnlag` ``
  * and `` - Saken opprettes `opprettet, grunnlag` `` both focus two ids. A span
  * followed by any other text (`` `a`. ``) is prose: the step has no focus.
- * The last line is the item's last paragraph's: its own text or a further
- * paragraph under it. A nested list or a fence under the item is part of the
- * step's text, not its focus, so the paragraph before it counts.
+ * The focus is the closing spans of the item's LAST paragraph that has any:
+ * its own text or a further paragraph under it, never a nested list or a
+ * fence (those are the step's text). A plain paragraph after the spans keeps
+ * them; an item with no closing spans anywhere has no focus.
  */
 import { codeSpanContent, lineCodeSpanRanges } from "./code-spans.ts";
 import { escapeHtml } from "./markdown-core.ts";
@@ -32,10 +33,14 @@ export function stepFocusOf(item: string): string[] {
   return [...new Set(out.flat())];
 }
 
-/** A list item's focus ids: `stepFocusOf` over its last paragraph. */
+/** A list item's focus ids: `stepFocusOf` over its last paragraph that has any. */
 export function stepItemFocus(text: string, children: readonly ListChild[] | undefined): string[] {
-  const paras = (children ?? []).filter((c) => c.type === "paragraph");
-  return stepFocusOf(paras.length ? paras[paras.length - 1]!.text : text);
+  const paras = [text, ...(children ?? []).flatMap((c) => (c.type === "paragraph" ? [c.text] : []))];
+  for (let k = paras.length - 1; k >= 0; k--) {
+    const focus = stepFocusOf(paras[k]!);
+    if (focus.length) return focus;
+  }
+  return [];
 }
 
 /** A `<Steps>` body with each ordered list numbered by its items' step places,
