@@ -143,6 +143,18 @@ describe("<Steps> everywhere else prints the list and a file line", () => {
     expect(formatTelegramHtml(md)).toContain("Steps: s.lifecycle.json (interactive: s.html)");
     expect(formatEmailHtml(md)).toContain("Steps: s.lifecycle.json (interactive: s.html)");
   });
+  test("a views-derived Steps: no surface but the reader has the file, so each prints only its file line", () => {
+    const md = '<Steps src="./flows/s.lifecycle.json" />';
+    const chat = formatWebHtml(md);
+    expect(chat).toContain("Steps not loaded here: s.lifecycle.json");
+    expect(formatTelegramHtml(md)).toBe("Steps: s.lifecycle.json (interactive: s.html)");
+    expect(formatSlackMrkdwn(md)).toBe("Steps: `s.lifecycle.json (interactive: s.html)`");
+    expect(formatEmailHtml(md)).toContain("Steps: s.lifecycle.json (interactive: s.html)");
+    for (const out of [chat, formatTelegramHtml(md), formatSlackMrkdwn(md), formatEmailHtml(md)]) {
+      expect(out).not.toContain("Start");
+      expect(out).not.toContain("Opened.");
+    }
+  });
   test("no src", () => {
     expect(formatTelegramHtml("<Steps />")).toBe("Steps without src");
     expect(formatSlackMrkdwn("<Steps />")).toBe("Steps without src");
@@ -325,7 +337,7 @@ describe("fix round 1 batch 3: item lines, block names, a file with no nodes", (
     const html = formatWebHtml(LIST);
     expect(html).toContain("Steps not loaded here: s.lifecycle.json");
     expect(html).not.toContain("Diagram not loaded here");
-    // A file that loaded, on a render with no steps view (chat with page files).
+    // A file that loaded, on a render with no steps view (the lint's render: page files, no views).
     const loaded = formatWebHtml(LIST, { files: files() });
     expect(loaded).toContain("Steps not loaded here: s.lifecycle.json");
     expect(loaded).not.toContain("Diagram not loaded here");
