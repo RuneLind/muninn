@@ -109,12 +109,15 @@ export function chooseAnswer(state: WalkthroughPanelState, question: number, cho
 
 const esc = escHtml;
 
-/** The heading button. Reader-only, so a selection or a peek copy leaves it out. */
+/** The heading button. It has NO text node: the 🧭 is CSS generated content
+ *  (`walkthroughStyles`), so the heading's `textContent` stays exactly its text
+ *  for every other reader of it (ref-link slugs, Explain's and Fact-check's
+ *  `ctx`, specs). `data-reader-only` keeps it out of a peek copy. */
 export function walkthroughBtnHtml(id: HeadingIdentity): string {
   return (
     `<button type="button" class="wiki-wt-btn" ${WALKTHROUGH_BTN_ATTR} data-reader-only ` +
     `data-wt-heading="${esc(id.heading)}" data-wt-ordinal="${id.ordinal}" data-wt-count="${id.count}" ` +
-    `title="Walk me through this section" aria-label="Walk me through: ${esc(id.heading)}">🧭</button>`
+    `title="Walk me through this section" aria-label="Walk me through: ${esc(id.heading)}"></button>`
   );
 }
 
@@ -182,6 +185,7 @@ export function walkthroughStyles(): string {
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
       color: var(--text-secondary); opacity: 0.55;
     }
+    .wiki-article > :is(h1,h2,h3,h4,h5,h6) > .wiki-wt-btn::before { content: "\\1F9ED"; }
     .wiki-article > :is(h1,h2,h3,h4,h5,h6):hover > .wiki-wt-btn,
     .wiki-article > :is(h1,h2,h3,h4,h5,h6) > .wiki-wt-btn:focus-visible { opacity: 1; }
     .wiki-wt {

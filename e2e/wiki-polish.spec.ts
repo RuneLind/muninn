@@ -366,6 +366,9 @@ test.describe("Wiki reader: polish", () => {
     await expect(first.getByRole("button", { name: "LIB-303: ok" })).toHaveAttribute("tabindex", "0");
     await expect(second.getByRole("button", { name: "LIB-101: hold" })).toHaveAttribute("tabindex", "0");
     await page.locator(".wiki-article a", { hasText: "Before the boards" }).focus();
+    // The «Returns» heading's 🧭 walkthrough button is its own tab stop.
+    await page.keyboard.press("Tab");
+    await expect(page.locator('[data-walkthrough-btn][data-wt-heading="Returns"]')).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(first.getByRole("button", { name: "LIB-303: ok" })).toBeFocused();
   });

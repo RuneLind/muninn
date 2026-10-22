@@ -57,7 +57,7 @@ const GUIDE = [
   "",
   "## Usage",
   "",
-  "Open the review gate and approve or reject each proposal.",
+  "Open the **review gate** and approve or reject each proposal.",
   "",
   "## How it works",
   "",
@@ -267,6 +267,93 @@ test.describe("Wiki reader: walk me through", () => {
     await expect(page.getByText("GONE step one")).toHaveCount(0);
     await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
   });
+
+  test("a heading's text stays exactly its text; the glyph is painted, not text", async ({ page }) => {
+    const explain: string[] = [];
+    await page.route("**/api/wiki/explain*", async (route) => {
+      explain.push(route.request().url());
+      await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: sse([["end", {}]]) });
+    });
+    await openGuide(page);
+    const usage = page.locator(".wiki-article > :is(h2,h3)", { has: page.locator('[data-walkthrough-btn][data-wt-heading="Usage"]') });
+    await expect(usage).toHaveText("Usage");
+    expect(await usage.evaluate((h) => [h.textContent, (h as HTMLElement).innerText])).toEqual(["Usage", "Usage"]);
+    expect(await btn(page, "Usage").evaluate((b) => getComputedStyle(b, "::before").content)).toBe('"🧭"');
+    // Explain's `ctx` is the nearest heading's text.
+    await page.evaluate(() => {
+      // Inside the bold run: Explain reads the heading before the selection's element.
+      const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, NodeFilter.SHOW_TEXT);
+      let t: Node | null;
+      while ((t = walker.nextNode()) && !t.textContent?.includes("review gate"));
+      const r = document.createRange();
+      r.selectNodeContents(t!);
+      const sel = window.getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(r);
+      document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
+    await page.locator("#wikiExplainBtn").click();
+    await expect.poll(() => explain.length).toBe(1);
+    expect(new URL(explain[0]!).searchParams.get("ctx")).toBe("Usage");
+  });
+
+  test("keyboard: focus stays in the panel across renders, and Escape closes it and returns focus", async ({ page }) => {
+    const { held } = await stub(page, { hold: true });
+    await openGuide(page);
+    const b = btn(page, "Usage");
+    await b.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#wikiWalkthroughClose")).toBeFocused();
+    await expect.poll(() => held.length).toBe(1);
+    await held[0]!.release(done("Usage", "KEY"));
+    const panel = page.locator("#wikiWalkthrough");
+    await expect(panel.locator(".wiki-wt-step")).toHaveCount(2);
+    expect(await panel.evaluate((p) => p.contains(document.activeElement))).toBe(true);
+    // A quiz answer by keyboard.
+    await panel.locator(".wiki-wt-choice", { hasText: "A human" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(panel.locator(".wiki-wt-verdict.is-right")).toBeVisible();
+    await expect(panel.locator(".wiki-wt-choice[disabled]")).toHaveCount(2);
+    expect(await panel.evaluate((p) => p.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    await expect(b).toBeFocused();
+  });
+
+  test("Escape while loading closes, aborts, and the late answer renders nothing", async ({ page }) => {
+    const { held } = await stub(page, { hold: true });
+    await openGuide(page);
+    await btn(page, "Usage").focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => held.length).toBe(1);
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
+    await expect(btn(page, "Usage")).toBeFocused();
+    await held[0]!.release(done("Usage", "ESC"));
+    await page.waitForTimeout(300);
+    await expect(page.getByText("ESC step one")).toHaveCount(0);
+  });
+
+  for (const how of ["an error payload", "a rejected fetch"] as const) {
+    test(`navigating to a page that fails to load (${how}) closes the panel; nothing renders late`, async ({ page }) => {
+      const { held } = await stub(page, { hold: true });
+      await page.route("**/api/wiki/page?*", async (route) => {
+        if (!route.request().url().includes("other.md")) return route.fallback();
+        if (how === "a rejected fetch") return route.abort();
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ error: "Page not found" }) });
+      });
+      await openGuide(page);
+      await btn(page, "Usage").click();
+      await expect.poll(() => held.length).toBe(1);
+      await page.locator('#wikiList [data-relpath="other.md"]').first().click();
+      await expect(page.locator("#articleWrap .wiki-empty-state")).toBeVisible();
+      await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
+      await held[0]!.release(done("Usage", "FAILNAV"));
+      await page.waitForTimeout(300);
+      await expect(page.getByText("FAILNAV step one")).toHaveCount(0);
+      await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
+    });
+  }
 
   test("a read-only wiki renders no button at all", async ({ page }) => {
     await openGuide(page, RO_WIKI);

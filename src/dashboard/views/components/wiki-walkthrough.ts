@@ -19,6 +19,18 @@
  * panel state still being the one that started it, so a late answer renders
  * nowhere.
  *
+ * **Navigation is watched at the article, not at the router.** The panel
+ * belongs to the heading button that opened it; every page swap (a load, a
+ * failed load, an Ask answer, an explainer) replaces `#articleWrap`'s
+ * children, which detaches that button, and a `childList` observer on
+ * `#articleWrap` closes the panel then. No navigation path has to remember to
+ * call in.
+ *
+ * **Focus survives a re-render.** `render()` replaces the panel's markup on
+ * every state change, so it puts focus back on the matching control (or the
+ * panel itself) when focus was inside the panel or had fallen to `<body>`
+ * with it.
+ *
  * The stream is read with `fetch` + a ReadableStream (Share's reason: the 409
  * body carries a message EventSource cannot surface).
  */
@@ -58,6 +70,7 @@ let state: WalkthroughPanelState | null = null;
 let inFlight: AbortController | null = null;
 let opener: HTMLElement | null = null;
 let wired = false;
+let observed: Element | null = null;
 
 /** What the reader sees as a heading's text: `textContent` without the
  *  reader's own chrome (this button, reader-only badges, glossary tips). */
@@ -70,6 +83,7 @@ export function headingTextOf(h: Element): string {
 /** Put a 🧭 button on every top-level heading of the rendered article. */
 export function enhanceWalkthroughButtons(root: ParentNode, ctx: WalkthroughPageContext): void {
   wire();
+  watchArticle();
   root.querySelectorAll(`[${WALKTHROUGH_BTN_ATTR}]`).forEach((b) => b.remove());
   page = ctx;
   if (wikiReadonlyWikiFlag() || !wikiToolsFlag()) return;
@@ -100,10 +114,31 @@ export function closeWalkthroughOnNavigate(relPath: string | null): void {
   if (page && page.relPath !== relPath) page = null;
 }
 
+/** Close the panel once the article its opener sat in has been swapped out. */
+function watchArticle(): void {
+  const wrap = document.getElementById("articleWrap");
+  if (!wrap || wrap === observed) return;
+  observed = wrap;
+  new MutationObserver(() => {
+    if (state && !opener?.isConnected) closeWalkthrough();
+  }).observe(wrap, { childList: true });
+}
+
+/** A selector that finds the same control again in freshly rendered markup. */
+function focusKeyOf(el: Element): string | null {
+  if (el.id === WALKTHROUGH_CLOSE_ID) return `#${WALKTHROUGH_CLOSE_ID}`;
+  const choice = el.getAttribute(WALKTHROUGH_CHOICE_ATTR);
+  if (choice !== null) return `[${WALKTHROUGH_CHOICE_ATTR}="${choice}"]`;
+  return null;
+}
+
 function render(): void {
   if (!state) return;
   let panel = document.getElementById(WALKTHROUGH_PANEL_ID);
   const created = !panel;
+  const active = document.activeElement;
+  const hadFocus = !!panel && (panel.contains(active) || !active || active === document.body);
+  const key = hadFocus && active && panel!.contains(active) ? focusKeyOf(active) : null;
   if (!panel) {
     panel = document.createElement("div");
     panel.id = WALKTHROUGH_PANEL_ID;
@@ -111,10 +146,20 @@ function render(): void {
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "false");
     panel.setAttribute("aria-labelledby", "wikiWalkthroughTitle");
+    // Focusable as a fallback target, out of the tab order.
+    panel.tabIndex = -1;
     document.body.appendChild(panel);
   }
   panel.innerHTML = walkthroughPanelHtml(state);
-  if (created) document.getElementById(WALKTHROUGH_CLOSE_ID)?.focus({ preventScroll: true });
+  if (created) {
+    document.getElementById(WALKTHROUGH_CLOSE_ID)?.focus({ preventScroll: true });
+    return;
+  }
+  if (!hadFocus) return;
+  // A chosen answer's buttons come back disabled, which cannot hold focus.
+  const again = key ? panel.querySelector<HTMLElement>(key) : null;
+  const target = again && !(again as HTMLButtonElement).disabled ? again : panel;
+  target.focus({ preventScroll: true });
 }
 
 function open(btn: HTMLElement): void {
@@ -138,7 +183,8 @@ function open(btn: HTMLElement): void {
 async function run(target: WalkthroughPanelState, ctx: WalkthroughPageContext): Promise<void> {
   const ctrl = new AbortController();
   inFlight = ctrl;
-  const live = () => state === target && !ctrl.signal.aborted;
+  // `opener` detached: the article was swapped before the observer ran.
+  const live = () => state === target && !ctrl.signal.aborted && !!opener?.isConnected;
   const fail = (kind: WalkthroughErrorKind, message: string): void => {
     if (!live()) return;
     target.phase = "error";
@@ -244,6 +290,8 @@ function wire(): void {
     // Another dialog open on top owns its own Escape.
     if (document.querySelector(".wiki-share, .wiki-chatopt")) return;
     const panel = document.getElementById(WALKTHROUGH_PANEL_ID);
-    if (panel && panel.contains(document.activeElement)) closeWalkthrough();
+    const active = document.activeElement;
+    if (!panel) return;
+    if (panel.contains(active) || active === opener || !active || active === document.body) closeWalkthrough();
   });
 }
