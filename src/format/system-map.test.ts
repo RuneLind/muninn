@@ -713,3 +713,256 @@ describe("label width estimate", () => {
     expect(textWidthPx("e\u0301", 12)).toBe(textWidthPx("e", 12));
   });
 });
+
+/**
+ * Loop invariants (self-loops and edges within one column), checked on any
+ * drawn map. A loop on one side of a column is the interval between its two
+ * attachment points:
+ * L1 a loop inside another never crosses it and reaches strictly less far;
+ * L2 two loops whose intervals partly overlap cross only when the map has no
+ *    side left for them: the drawn crossings equal `layout.loopCrossings`, 0
+ *    when the overlaps 2-colour;
+ * L3 a loop stays 2px short of the trunk lanes, of the next column's boxes
+ *    and of its loops on the facing side, and 12px inside the drawing;
+ * L4 the routing invariants I1–I3 hold.
+ */
+type Pt = { x: number; y: number };
+/** An absolute M/L/C/Q path as a polyline: lines by their ends, curves sampled. */
+function polyline(d: string): Pt[] {
+  const toks = d.match(/[MLCQ]|-?[\d.]+/g)!;
+  const pts: Pt[] = [];
+  let [i, cmd, x, y] = [0, "", 0, 0];
+  const num = () => Number(toks[i++]);
+  while (i < toks.length) {
+    if (/[A-Z]/.test(toks[i]!)) cmd = toks[i++]!;
+    if (cmd === "M" || cmd === "L") {
+      [x, y] = [num(), num()];
+      pts.push({ x, y });
+    } else {
+      const c = cmd === "C" ? [num(), num(), num(), num()] : [num(), num()];
+      const [ex, ey] = [num(), num()];
+      for (let s = 1; s <= 24; s++) {
+        const t = s / 24;
+        const u = 1 - t;
+        pts.push(
+          cmd === "C"
+            ? { x: u ** 3 * x + 3 * u * u * t * c[0]! + 3 * u * t * t * c[2]! + t ** 3 * ex, y: u ** 3 * y + 3 * u * u * t * c[1]! + 3 * u * t * t * c[3]! + t ** 3 * ey }
+            : { x: u * u * x + 2 * u * t * c[0]! + t * t * ex, y: u * u * y + 2 * u * t * c[1]! + t * t * ey },
+        );
+      }
+      [x, y] = [ex, ey];
+    }
+  }
+  return pts;
+}
+function segDist(a: Pt, b: Pt, c: Pt, d: Pt): number {
+  const cross = (o: Pt, p: Pt, q: Pt) => (p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x);
+  const [d1, d2, d3, d4] = [cross(c, d, a), cross(c, d, b), cross(a, b, c), cross(a, b, d)];
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return 0;
+  const toSeg = (p: Pt, s: Pt, e: Pt) => {
+    const l2 = (e.x - s.x) ** 2 + (e.y - s.y) ** 2;
+    const t = l2 ? Math.max(0, Math.min(1, ((p.x - s.x) * (e.x - s.x) + (p.y - s.y) * (e.y - s.y)) / l2)) : 0;
+    return Math.hypot(p.x - s.x - t * (e.x - s.x), p.y - s.y - t * (e.y - s.y));
+  };
+  return Math.min(toSeg(a, c, d), toSeg(b, c, d), toSeg(c, a, b), toSeg(d, a, b));
+}
+function lineDist(p: Pt[], q: Pt[]): number {
+  let m = Infinity;
+  for (let i = 1; i < p.length; i++) for (let j = 1; j < q.length; j++) m = Math.min(m, segDist(p[i - 1]!, p[i]!, q[j - 1]!, q[j]!));
+  return m;
+}
+const EDGE_RE = /<path class="sm-edge [^"]*" d="([^"]+)"[^>]*data-sm-from="([^"]+)" data-sm-to="([^"]+)"/g;
+interface DrawnLoop { name: string; x: number; side: "L" | "R"; lo: number; hi: number; ext: number; pts: Pt[] }
+function drawnLoops(html: string): DrawnLoop[] {
+  const rects = nodeRects(html);
+  return [...html.matchAll(EDGE_RE)].flatMap((m) => {
+    const [a, b] = [rects.get(m[2]!)!, rects.get(m[3]!)!];
+    if (a.x !== b.x) return [];
+    const pts = polyline(m[1]!);
+    const [s, e] = [pts[0]!, pts.at(-1)!];
+    return [{ name: `${m[2]}→${m[3]}`, x: s.x, side: s.x === a.x ? ("L" as const) : ("R" as const), lo: Math.min(s.y, e.y), hi: Math.max(s.y, e.y), ext: Math.max(...pts.map((p) => Math.abs(p.x - s.x))), pts }];
+  });
+}
+function loopReport(html: string): { violations: string[]; crossings: number; loops: DrawnLoop[] } {
+  const W = Number(/viewBox="0 0 ([\d.]+) /.exec(html)![1]);
+  const rects = [...nodeRects(html).values()];
+  const loops = drawnLoops(html);
+  const lanes = [...html.matchAll(EDGE_RE)].flatMap((m) => {
+    const q = [...m[1]!.matchAll(/Q([\d.]+) /g)].map((x) => Number(x[1]));
+    return q.length === 4 ? [q[0]!, q[3]!] : [];
+  });
+  const out = routingViolations(html);
+  let crossings = 0;
+  for (let p = 0; p < loops.length; p++)
+    for (let q = p + 1; q < loops.length; q++) {
+      const [s, t] = [loops[p]!, loops[q]!];
+      const dist = lineDist(s.pts, t.pts);
+      if (dist < 0.8) crossings++;
+      if (s.x !== t.x || s.side !== t.side) continue;
+      const [outer, inner] = s.lo < t.lo && t.hi < s.hi ? [s, t] : t.lo < s.lo && s.hi < t.hi ? [t, s] : [null, null];
+      if (outer && inner && (inner.ext >= outer.ext || dist < 2)) out.push(`L1 ${inner.name} (${inner.ext}) inside ${outer.name} (${outer.ext}), ${dist.toFixed(1)}px apart`);
+    }
+  for (const l of loops) {
+    const far = l.side === "R" ? l.x + l.ext : l.x - l.ext;
+    if (Math.min(...l.pts.map((p) => p.x)) < 12 - 0.01 || Math.max(...l.pts.map((p) => p.x)) > W - 12 + 0.01) out.push(`L3 ${l.name} within 12px of the drawing's edge`);
+    if (l.side === "R") {
+      const next = Math.min(...rects.map((r) => r.x).filter((x) => x > l.x));
+      const near = Math.min(next, ...lanes.filter((x) => x > l.x && x < next), ...loops.filter((o) => o.side === "L" && o.x === next).map((o) => o.x - o.ext));
+      if (far > near - 2) out.push(`L3 ${l.name} reaches ${far}, next line at ${near}`);
+    } else {
+      const prev = Math.max(...rects.map((r) => r.x + r.w).filter((x) => x < l.x));
+      const near = Math.max(prev, ...lanes.filter((x) => x < l.x && x > prev));
+      if (far < near + 2) out.push(`L3 ${l.name} reaches ${far}, previous line at ${near}`);
+    }
+  }
+  return { violations: out, crossings, loops };
+}
+
+describe("loop invariants", () => {
+  // Nodes stack in groups= order here, not first appearance, so a probe says its rows.
+  const read = (groups: string, rows: string[][]) => {
+    const r = readSystemMap({ groups }, T(["From", "To", "Protocol", "Status"], rows.map((row, i) => [row[0]!, row[1]!, row[2] ?? `p${i}`, "ok"])));
+    const at = groups.split(";").map((g) => g.split("=")[0]);
+    r.nodes.sort((p, q) => at.indexOf(p.key) - at.indexOf(q.key));
+    return r;
+  };
+  const draw = (r: ReturnType<typeof readSystemMap>) =>
+    systemMapViewHtml({ read: r, caption: "", tableHtml: "", beforeHtml: "", afterHtml: "", prefix: "sm9-", resolveNode: () => ({ kind: "repo", link: null }) });
+  const probes: [string, string, string[][]][] = [
+    // R9: a hub's core column, both directions to two neighbours.
+    ["two-way edges in a hub's core column", "web=frontend;api=core;skjema=core;eessi=core;ext=external", [["web", "api"], ["api", "skjema"], ["skjema", "api"], ["api", "eessi"], ["eessi", "api"], ["api", "ext"]]],
+    ["nested loops sharing an end, last column", "x=one;p=two;q=two;r=two", [["x", "p"], ["p", "q"], ["q", "r"], ["p", "r"]]],
+    // R10: a self-loop inside an edge within its column.
+    ["a self-loop inside a loop", "p=one;q=one;r=one;m=two", [["p", "m"], ["q", "q"], ["r", "m"], ["p", "r"]]],
+    ["three self-loops, one inside a loop", "p=one;q=one;r=one", [["p", "p"], ["q", "q"], ["r", "r"], ["p", "r"]]],
+    // R11: six loops in one column, the longest around the five others.
+    ["six loops in column one", "p=one;q=one;r=one;s=one;t=one;u=one", [["p", "q"], ["q", "r"], ["r", "s"], ["s", "t"], ["t", "u"], ["p", "u"]]],
+    ["two protocols over one span, and back", "a=one;b=one;c=two", [["a", "b", "REST"], ["a", "b", "Kafka"], ["b", "a", "REST"], ["a", "c"]]],
+    ["two self-loops on one node", "a=one;b=two", [["a", "b"], ["a", "a", "REST"], ["a", "a", "Kafka"]]],
+    [
+      "a nested chain six deep, with trunks in the gap after it",
+      [...Array.from({ length: 12 }, (_, i) => `n${i}=one`), "m=two", "z=three"].join(";"),
+      [["n0", "m"], ...Array.from({ length: 6 }, (_, i) => [`n${i}`, `n${11 - i}`]), ["n0", "z"], ["n11", "z"], ["n5", "z"]],
+    ],
+    ["ten loops from one node", [...Array.from({ length: 11 }, (_, i) => `w${i}=one`), "x=two"].join(";"), [...Array.from({ length: 10 }, (_, i) => ["w0", `w${i + 1}`]), ["w0", "x"], ["w0", "w0"]]],
+    ["loops on facing sides of one gap", "a=one;b=one;c=one;d=one;p=two;q=two;r=two;s=two", [["a", "c"], ["b", "d"], ["p", "r"], ["q", "s"], ["a", "p"]]],
+  ];
+  for (const [name, groups, rows] of probes)
+    test(`L1, L3, L4 hold and no loops cross: ${name}`, () => {
+      const rep = loopReport(draw(read(groups, rows)));
+      expect(rep.violations).toEqual([]);
+      expect(rep.crossings).toBe(0);
+    });
+
+  test("partly overlapping loops take opposite sides; the first keeps the right", () => {
+    const rep = loopReport(draw(read("p=one;q=one;r=one;s=one", [["p", "r"], ["q", "s"]])));
+    expect(rep.loops.map((l) => [l.name, l.side])).toEqual([["p→r", "R"], ["q→s", "L"]]);
+    expect(rep.crossings).toBe(0);
+  });
+
+  test("three loops overlapping pairwise: one crossing, declared by the layout", () => {
+    const r = read("p=one;q=one;r=one;s=one;t=one;u=one", [["p", "s"], ["q", "t"], ["r", "u"]]);
+    const rep = loopReport(draw(r));
+    expect(rep.violations).toEqual([]);
+    expect(rep.crossings).toBe(1);
+    expect(layoutSystemMap(r.nodes, r.columns, r.rows).loopCrossings).toBe(1);
+  });
+
+  test("loops on both sides of one column fit the drawing with a 12px margin each side", () => {
+    // r→u overlaps p→t and q→s, so it goes left; q→s nests inside p→t on the right.
+    const html = draw(read("p=one;q=one;r=one;s=one;t=one;u=one", [["p", "t"], ["q", "s"], ["r", "u"]]));
+    const rep = loopReport(html);
+    expect(rep.loops.map((l) => l.side)).toEqual(["R", "R", "L"]);
+    expect(rep.violations).toEqual([]);
+    expect(rep.crossings).toBe(0);
+  });
+
+  test("a deep nest widens the gap after its column, and the lanes keep clear of it", () => {
+    const [, groups, rows] = probes.find(([n]) => n.startsWith("a nested chain"))!;
+    const html = draw(read(groups, rows));
+    const reaches = loopReport(html).loops.map((l) => l.ext).sort((p, q) => p - q);
+    expect(new Set(reaches).size).toBe(6);
+    expect(reaches.at(-1)!).toBeGreaterThan(24);
+  });
+
+  // L1–L4 over random maps: loops within a column and on one node, nested
+  // chains, overlapping pairs, identical spans, with edges across columns.
+  test("L1–L4 hold over 240 random maps", () => {
+    const rng = (seed: number) => () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const failures: string[] = [];
+    let [loopsSeen, declaredSeen, maxPerColumn] = [0, 0, 0];
+    for (let seed = 1; seed <= 240; seed++) {
+      const rand = rng(seed);
+      const int = (n: number) => Math.floor(rand() * n);
+      const cols = Array.from({ length: 1 + int(4) }, (_, c) => Array.from({ length: 2 + int(6) }, (_, k) => `c${c}n${k}`));
+      const rows: string[][] = [];
+      for (const [c, col] of cols.entries()) {
+        const want = c === seed % cols.length ? int(13) : int(4);
+        const loops: string[][] = [];
+        const n = col.length;
+        while (loops.length < want) {
+          const kind = int(5);
+          const [i, j] = [int(n), int(n)];
+          if (kind === 0) loops.push([col[i]!, col[j]!]);
+          else if (kind === 1) loops.push([col[i]!, col[i]!]);
+          else if (kind === 2) for (let [a, b] = [Math.min(i, j), Math.max(i, j)]; a < b; a++, b--) loops.push([col[a]!, col[b]!]);
+          else if (kind === 3 && n >= 4) {
+            const a = int(n - 3);
+            loops.push([col[a]!, col[a + 2]!], [col[a + 1]!, col[a + 3]!]);
+          } else if (i !== j) loops.push([col[i]!, col[j]!], int(2) ? [col[j]!, col[i]!] : [col[i]!, col[j]!]);
+        }
+        rows.push(...loops.slice(0, want));
+        maxPerColumn = Math.max(maxPerColumn, want);
+      }
+      for (let k = int(9); k > 0; k--) {
+        const [a, b] = [int(cols.length), int(cols.length)];
+        if (a !== b) rows.push([cols[a]![int(cols[a]!.length)]!, cols[b]![int(cols[b]!.length)]!]);
+      }
+      if (!rows.length) continue;
+      const r = read(cols.flatMap((col, c) => col.map((k) => `${k}=c${c}`)).join(";"), rows);
+      const html = draw(r);
+      const rep = loopReport(html);
+      loopsSeen += rep.loops.length;
+      const declared = layoutSystemMap(r.nodes, r.columns, r.rows).loopCrossings;
+      declaredSeen += declared ?? 0;
+      // Whether every column's partly overlapping within-column loops 2-colour.
+      const rects = nodeRects(html);
+      const spans = r.rows.flatMap((row) => {
+        const [a, b] = [rects.get(nodeKey(row.from))!, rects.get(nodeKey(row.to))!];
+        return a.x === b.x && a !== b ? [{ x: a.x, lo: Math.min(a.y, b.y), hi: Math.max(a.y, b.y) }] : [];
+      });
+      const color = new Map<number, number>();
+      let bipartite = true;
+      for (let s = 0; s < spans.length; s++) {
+        if (color.has(s)) continue;
+        color.set(s, 0);
+        const queue = [s];
+        while (queue.length) {
+          const u = queue.shift()!;
+          for (let v = 0; v < spans.length; v++) {
+            const [p, q] = [spans[u]!, spans[v]!];
+            if (p.x !== q.x || !((p.lo < q.lo && q.lo < p.hi && p.hi < q.hi) || (q.lo < p.lo && p.lo < q.hi && q.hi < p.hi))) continue;
+            if (!color.has(v)) {
+              color.set(v, 1 - color.get(u)!);
+              queue.push(v);
+            } else if (color.get(v) === color.get(u)) bipartite = false;
+          }
+        }
+      }
+      const why = [...rep.violations];
+      if (rep.crossings !== declared) why.push(`${rep.crossings} crossings drawn, ${declared} declared`);
+      if (bipartite && rep.crossings !== 0) why.push(`${rep.crossings} crossings where the overlaps 2-colour`);
+      if (why.length) failures.push(`seed ${seed}: ${why.slice(0, 3).join("; ")}`);
+    }
+    expect(failures.slice(0, 8)).toEqual([]);
+    // The generator reaches the cases it is for.
+    expect(loopsSeen).toBeGreaterThan(600);
+    expect(declaredSeen).toBeGreaterThan(0);
+    expect(maxPerColumn).toBe(12);
+  });
+});

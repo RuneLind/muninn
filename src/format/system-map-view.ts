@@ -37,14 +37,15 @@ const NODE_H = 34;
 const GAP_Y = 14;
 const HEAD_H = 30;
 const PAD = 12;
-/** Room right of the last column for a same-column edge's loop, and left of
- *  the first column when a self-loop is drawn on that side. */
+/** Least room right of the last column, besides {@link PAD}. */
 const LOOP_W = 36;
-/** How far a loop reaches out from its side (the curve's widest point). The
- *  nearest trunk lane sits 24px from a side, so every loop stays short of it:
- *  a self-loop reaches 15px, the edges within one column 12, 15, 18 or 21px. */
-const SELF_REACH = 15;
-const WITHIN_REACH = [12, 15, 18, 21];
+/** A loop (a self-loop or an edge within one column) reaches out this far
+ *  from its side, {@link LOOP_STEP} further per level of loops inside it. */
+const LOOP_REACH = 12;
+const LOOP_STEP = 4;
+/** Trunk lanes start at least this far from a side, and at least one
+ *  {@link LOOP_STEP} past the loops on it. */
+const LANE_ROOM = 24;
 /** Node labels are 12px, column heads 11px; neither scales below 9px. */
 const LABEL_PX = 12;
 const HEAD_PX = 11;
@@ -123,6 +124,9 @@ interface Ports {
   ends: Map<string, [string, string]>;
 }
 
+/** A loop's side and how far it reaches out from it, by row index. */
+type Loops = Map<number, { side: "L" | "R"; reach: number }>;
+
 interface Layout {
   boxes: Map<string, Box>;
   width: number;
@@ -137,6 +141,11 @@ interface Layout {
   colX: number[];
   /** Width of the gap after each column. */
   gapW: number[];
+  /** Room kept clear of trunk lanes at each gap's left and right side. */
+  laneRoom: [number, number][];
+  loops: Loops;
+  /** Pairs of partly overlapping loops left on one side, so drawn crossing. */
+  loopCrossings: number;
   rows: number;
 }
 
@@ -176,17 +185,26 @@ function gapLanes(rows: readonly SystemMapRow[], colOf: Map<string, number>, gap
  * arrive by one target trunk, since they share the line from there. A side
  * that still holds more than {@link MAX_PORTS} points also merges its edges
  * to the next column into one outgoing and one incoming point. Points sort by
- * the mean row of the other ends, so lines cross as little as they can.
+ * the mean row of the other ends, so lines cross as little as they can; the
+ * ends of edges within the column go above them (upward) or below (downward).
  */
-function planPorts(rows: readonly SystemMapRow[], colOf: Map<string, number>, rowOf: Map<string, number>): Ports {
-  const ends: { id: string; side: string; port: string; other: number; i: number; adjacent?: "out" | "in" }[] = [];
+function planPorts(rows: readonly SystemMapRow[], colOf: Map<string, number>, rowOf: Map<string, number>, loopSide: Map<number, "L" | "R">): Ports {
+  // group 0: an edge within the column leaving upward; 2: downward; 1: the rest.
+  const ends: { id: string; side: string; port: string; other: number; i: number; group: number; adjacent?: "out" | "in" }[] = [];
   rows.forEach((r, i) => {
     const [fk, tk] = [nodeKey(r.from), nodeKey(r.to)];
     const [ca, cb] = [colOf.get(fk), colOf.get(tk)];
     if (ca === undefined || cb === undefined) return;
     if (fk === tk) {
-      const side = `${fk}|${selfLoopSide(r, rows, colOf)}`;
-      for (const end of ["a", "b"]) ends.push({ id: `${i}${end}`, side, port: `${side}#${i}${end}`, other: rowOf.get(fk)!, i });
+      const side = `${fk}|${loopSide.get(i)}`;
+      for (const end of ["a", "b"]) ends.push({ id: `${i}${end}`, side, port: `${side}#${i}${end}`, other: rowOf.get(fk)!, i, group: 1 });
+      return;
+    }
+    if (ca === cb) {
+      for (const [end, me, other] of [["a", fk, tk], ["b", tk, fk]] as const) {
+        const side = `${me}|${loopSide.get(i)}`;
+        ends.push({ id: `${i}${end}`, side, port: `${side}#${i}`, other: rowOf.get(other)!, i, group: rowOf.get(other)! < rowOf.get(me)! ? 0 : 2 });
+      }
       return;
     }
     const span = Math.abs(ca - cb);
@@ -194,7 +212,7 @@ function planPorts(rows: readonly SystemMapRow[], colOf: Map<string, number>, ro
       const [me, mine, theirs, other] = end === "a" ? [fk, ca, cb, tk] : [tk, cb, ca, fk];
       const side = `${me}|${theirs >= mine ? "R" : "L"}`;
       const port = span >= 2 ? `${side}#${end === "a" ? "s" : "t"}` : `${side}#${i}`;
-      ends.push({ id: `${i}${end}`, side, port, other: rowOf.get(other)!, i, adjacent: span === 1 ? (end === "a" ? "out" : "in") : undefined });
+      ends.push({ id: `${i}${end}`, side, port, other: rowOf.get(other)!, i, group: 1, adjacent: span === 1 ? (end === "a" ? "out" : "in") : undefined });
     }
   });
   const bySide = new Map<string, typeof ends>();
@@ -202,13 +220,27 @@ function planPorts(rows: readonly SystemMapRow[], colOf: Map<string, number>, ro
   const sides = new Map<string, string[]>();
   for (const [side, list] of bySide) {
     if (new Set(list.map((e) => e.port)).size > MAX_PORTS) for (const e of list) if (e.adjacent) e.port = `${side}#${e.adjacent}`;
-    const at = new Map<string, { sum: number; n: number; i: number }>();
+    const at = new Map<string, { sum: number; n: number; i: number; group: number }>();
     for (const e of list) {
-      const p = at.get(e.port) ?? { sum: 0, n: 0, i: e.i };
-      at.set(e.port, { sum: p.sum + e.other, n: p.n + 1, i: Math.min(p.i, e.i) });
+      const p = at.get(e.port) ?? { sum: 0, n: 0, i: e.i, group: e.group };
+      at.set(e.port, { sum: p.sum + e.other, n: p.n + 1, i: Math.min(p.i, e.i), group: e.group });
     }
     const key = (id: string) => at.get(id)!;
-    sides.set(side, [...at.keys()].sort((p, q) => key(p).sum / key(p).n - key(q).sum / key(q).n || key(p).i - key(q).i || (p < q ? -1 : 1)));
+    // Loops nest: upward ends first, the nearest other end on top, so a
+    // shorter loop starts inside a longer one; downward ends last, the
+    // farthest on top; equal spans nest by row order.
+    const loopOrder = (p: string, q: string) => {
+      const [a, b] = [key(p), key(q)];
+      return b.sum - a.sum || (a.group === 0 ? b.i - a.i : a.i - b.i);
+    };
+    sides.set(
+      side,
+      [...at.keys()].sort(
+        (p, q) =>
+          key(p).group - key(q).group ||
+          (key(p).group !== 1 ? loopOrder(p, q) : key(p).sum / key(p).n - key(q).sum / key(q).n || key(p).i - key(q).i || (p < q ? -1 : 1)),
+      ),
+    );
   }
   return { sides, ends: new Map(ends.map((e) => [e.id, [e.side, e.port]])) };
 }
@@ -220,17 +252,30 @@ export function layoutSystemMap(nodes: readonly SystemMapNode[], columns: readon
   const widest = Math.max(0, ...nodes.map((n) => labelWidth(n.label)), ...columns.map(headWidth));
   const colW = Math.min(COL_MAX, Math.max(COL_MIN, Math.ceil(widest + 2 * NODE_PAD_X)));
   const colOf = new Map(nodes.map((n) => [n.key, Math.max(0, columns.indexOf(n.group))]));
-  const gapW = gapLanes(rows, colOf, Math.max(0, columns.length - 1)).map((l) => Math.max(GAP_X, 2 * 24 + (l.length - 1) * LANE_STEP));
-  const left = rows.some((r) => selfLoopSide(r, rows, colOf) === "L" && colOf.get(nodeKey(r.from)) === 0) ? LOOP_W : PAD;
-  const colX = columns.map((_, i) => left + i * colW + gapW.slice(0, i).reduce((x, g) => x + g, 0));
   const perCol = columns.map(() => 0);
   const rowOf = new Map(nodes.map((n) => [n.key, perCol[colOf.get(n.key)!]!++]));
-  const ports = planPorts(rows, colOf, rowOf);
+  const { sides: loopSide, crossings } = planLoopSides(rows, colOf, rowOf);
+  const ports = planPorts(rows, colOf, rowOf, loopSide);
   const nodeH = Math.max(NODE_H, PORT_MIN * (Math.max(0, ...[...ports.sides.values()].map((p) => p.length)) + 1));
+  const rowY = (key: string) => PAD + HEAD_H + rowOf.get(key)! * (nodeH + GAP_Y);
+  const loops = loopReaches(rows, colOf, loopSide, (id) => portY(ports, nodeH, rowY, id));
+  // The farthest reach on each column's left and right side.
+  const reachOut = columns.map(() => ({ L: 0, R: 0 }));
+  rows.forEach((r, i) => {
+    const l = loops.get(i);
+    const side = l && reachOut[colOf.get(nodeKey(r.from))!]!;
+    if (l && side) side[l.side] = Math.max(side[l.side], l.reach);
+  });
+  const room = (reach: number) => (reach ? Math.max(LANE_ROOM, reach + LOOP_STEP) : LANE_ROOM);
+  const laneRoom = reachOut.slice(1).map((next, g): [number, number] => [room(reachOut[g]!.R), room(next.L)]);
+  const gapW = gapLanes(rows, colOf, Math.max(0, columns.length - 1)).map((l, g) => Math.max(GAP_X, laneRoom[g]![0] + laneRoom[g]![1] + Math.max(0, l.length - 1) * LANE_STEP));
+  const left = reachOut[0]?.L ? reachOut[0].L + PAD : PAD;
+  const right = Math.max(PAD + LOOP_W, (reachOut.at(-1)?.R ?? 0) + PAD);
+  const colX = columns.map((_, i) => left + i * colW + gapW.slice(0, i).reduce((x, g) => x + g, 0));
   const boxes = new Map<string, Box>();
   for (const node of nodes) {
     const col = colOf.get(node.key)!;
-    boxes.set(node.key, { node, col, x: colX[col]!, y: PAD + HEAD_H + rowOf.get(node.key)! * (nodeH + GAP_Y) });
+    boxes.set(node.key, { node, col, x: colX[col]!, y: rowY(node.key) });
   }
   const rowCount = Math.max(1, ...perCol);
   return {
@@ -240,8 +285,11 @@ export function layoutSystemMap(nodes: readonly SystemMapNode[], columns: readon
     ports,
     colX,
     gapW,
+    laneRoom,
+    loops,
+    loopCrossings: crossings,
     rows: rowCount,
-    width: left + PAD + columns.length * colW + gapW.reduce((x, g) => x + g, 0) + LOOP_W,
+    width: left + columns.length * colW + gapW.reduce((x, g) => x + g, 0) + right,
     // The last row's bottom; routing grows it to the lowest lane it draws.
     height: PAD * 2 + HEAD_H + rowCount * (nodeH + GAP_Y) - GAP_Y,
   };
@@ -286,6 +334,74 @@ function selfLoopSide(row: SystemMapRow, rows: readonly SystemMapRow[], colOf: M
   return l < r ? "L" : "R";
 }
 
+/** The y of an edge end's attachment point (`${row index}a` or `b`). */
+function portY(ports: Ports, nodeH: number, nodeY: (key: string) => number, id: string): number {
+  const [side, port] = ports.ends.get(id)!;
+  const list = ports.sides.get(side)!;
+  return nodeY(side.slice(0, side.lastIndexOf("|"))) + (nodeH * (list.indexOf(port) + 1)) / (list.length + 1);
+}
+
+/**
+ * The side of every loop, by row index. A self-loop takes {@link selfLoopSide}.
+ * Edges within one column whose row spans partly overlap would cross on one
+ * side, so they take opposite sides: each, in breadth-first order over the
+ * overlaps, takes the side where fewer of its overlapping edges already are,
+ * the right on a tie. That leaves no pair on one side when the overlaps
+ * 2-colour; otherwise the pairs left on one side cross, and are counted.
+ */
+function planLoopSides(rows: readonly SystemMapRow[], colOf: Map<string, number>, rowOf: Map<string, number>): { sides: Map<number, "L" | "R">; crossings: number } {
+  const sides = new Map<number, "L" | "R">();
+  const spans: { i: number; col: number; lo: number; hi: number }[] = [];
+  rows.forEach((r, i) => {
+    const [fk, tk] = [nodeKey(r.from), nodeKey(r.to)];
+    const col = colOf.get(fk);
+    if (col === undefined || colOf.get(tk) !== col) return;
+    if (fk === tk) sides.set(i, selfLoopSide(r, rows, colOf)!);
+    else spans.push({ i, col, lo: Math.min(rowOf.get(fk)!, rowOf.get(tk)!), hi: Math.max(rowOf.get(fk)!, rowOf.get(tk)!) });
+  });
+  const overlap = (p: (typeof spans)[number], q: (typeof spans)[number]) =>
+    p.col === q.col && ((p.lo < q.lo && q.lo < p.hi && p.hi < q.hi) || (q.lo < p.lo && p.lo < q.hi && q.hi < p.hi));
+  for (const root of spans) {
+    const queue = [root];
+    while (queue.length) {
+      const s = queue.shift()!;
+      if (sides.has(s.i)) continue;
+      const near = spans.filter((o) => overlap(s, o));
+      const on = (side: "L" | "R") => near.filter((o) => sides.get(o.i) === side).length;
+      sides.set(s.i, on("L") < on("R") ? "L" : "R");
+      queue.push(...near.filter((o) => !sides.has(o.i)));
+    }
+  }
+  let crossings = 0;
+  for (const [n, p] of spans.entries()) for (const q of spans.slice(n + 1)) if (overlap(p, q) && sides.get(p.i) === sides.get(q.i)) crossings++;
+  return { sides, crossings };
+}
+
+/**
+ * Every loop's reach, from its level on its column side: 0 for a loop with
+ * no other loop's span overlapping its own and shorter, else one more than
+ * the highest such loop. A loop inside another is shorter, so it always
+ * reaches less far, however deep the nesting.
+ */
+function loopReaches(rows: readonly SystemMapRow[], colOf: Map<string, number>, loopSide: Map<number, "L" | "R">, y: (id: string) => number): Loops {
+  const bySide = new Map<string, { i: number; lo: number; hi: number }[]>();
+  for (const [i, side] of loopSide) {
+    const [ya, yb] = [y(`${i}a`), y(`${i}b`)];
+    const k = `${colOf.get(nodeKey(rows[i]!.from))}|${side}`;
+    bySide.set(k, [...(bySide.get(k) ?? []), { i, lo: Math.min(ya, yb), hi: Math.max(ya, yb) }]);
+  }
+  const loops: Loops = new Map();
+  for (const list of bySide.values()) {
+    list.sort((p, q) => p.hi - p.lo - (q.hi - q.lo) || p.lo - q.lo || p.i - q.i);
+    const level: number[] = [];
+    list.forEach((l, n) => {
+      level[n] = Math.max(0, ...list.slice(0, n).flatMap((o, m) => (o.lo < l.hi && l.lo < o.hi ? [level[m]! + 1] : [])));
+      loops.set(l.i, { side: loopSide.get(l.i)!, reach: LOOP_REACH + level[n]! * LOOP_STEP });
+    });
+  }
+  return loops;
+}
+
 interface RoutedEdge {
   row: SystemMapRow;
   a: Box;
@@ -299,38 +415,25 @@ interface RoutedEdge {
  * adjacent columns is a curve across the gap between them. One that spans
  * more columns runs down its source's trunk in the gap it leaves by, across
  * the intermediate columns in a row gap near the straight line (never under a
- * box), and up or down its target's trunk into the target. Within a column an
- * edge loops out right, short of the trunk lanes; a self-loop leaves and
- * re-enters its side at two points of its own, between the edges to higher
- * and to lower nodes, so it meets none of them. The drawing grows taller when
- * a run across overflows under the last row.
+ * box), and up or down its target's trunk into the target. A loop goes out
+ * its side as far as {@link loopReaches} says, short of the trunk lanes. The
+ * drawing grows taller when a run across overflows under the last row.
  */
 export function routeSystemMapEdges(rows: readonly SystemMapRow[], layout: Layout): { edges: RoutedEdge[]; height: number } {
-  const { boxes, colW, colX, gapW, nodeH, ports } = layout;
+  const { boxes, colW, colX, gapW, laneRoom, loops, nodeH, ports } = layout;
   const items = rows.flatMap((row, i) => {
     const a = boxes.get(nodeKey(row.from));
     const b = boxes.get(nodeKey(row.to));
     return a && b ? [{ row, a, b, i }] : [];
   });
-  const yAt = (i: number, end: "a" | "b") => {
-    const [side, port] = ports.ends.get(`${i}${end}`)!;
-    const list = ports.sides.get(side)!;
-    return boxes.get(side.slice(0, side.lastIndexOf("|")))!.y + (nodeH * (list.indexOf(port) + 1)) / (list.length + 1);
-  };
+  const yAt = (i: number, end: "a" | "b") => portY(ports, nodeH, (key) => boxes.get(key)!.y, `${i}${end}`);
   const colOf = new Map([...boxes.values()].map((b) => [b.node.key, b.col]));
-  // Edges within one column, shortest first, take the reaches inside out.
-  const reach = new Map<number, number>();
-  const within = items.flatMap((e) => (e.a !== e.b && e.a.col === e.b.col ? [{ i: e.i, col: e.a.col, span: Math.abs(yAt(e.i, "a") - yAt(e.i, "b")) }] : []));
-  for (const col of new Set(within.map((w) => w.col))) {
-    within
-      .filter((w) => w.col === col)
-      .sort((p, q) => p.span - q.span || p.i - q.i)
-      .forEach((w, n) => reach.set(w.i, WITHIN_REACH[n % WITHIN_REACH.length]!));
-  }
   const lanes = gapLanes(rows, colOf, gapW.length);
+  // A gap's lanes, centred between the room kept clear at its sides.
   const laneX = (g: number, key: string) => {
     const l = lanes[g]!;
-    return colX[g]! + colW + gapW[g]! / 2 + (l.indexOf(key) - (l.length - 1) / 2) * LANE_STEP;
+    const [inL, inR] = laneRoom[g]!;
+    return colX[g]! + colW + inL + (gapW[g]! - inL - inR - (l.length - 1) * LANE_STEP) / 2 + l.indexOf(key) * LANE_STEP;
   };
   const gapY = (k: number) => PAD + HEAD_H + (k + 1) * (nodeH + GAP_Y) - GAP_Y / 2;
   // Row-gap lane "k:slot" → the x runs already on it.
@@ -339,20 +442,16 @@ export function routeSystemMapEdges(rows: readonly SystemMapRow[], layout: Layou
   const slotY = (k: number, slot: number) =>
     slot < CHANNEL_SLOTS ? gapY(k) + (slot % 2 === 1 ? 1 : -1) * Math.ceil(slot / 2) * CHANNEL_STEP : gapY(k) + 2 * CHANNEL_STEP + (slot - CHANNEL_SLOTS + 1) * LANE_STEP;
   let bottom = layout.height;
-  // A cubic bulge out from a side; its widest point is 3/4 of the control offset.
-  const bulge = (x: number, y1: number, y2: number, out: number) => {
-    const c = Math.round(x + (out * 4) / 3);
-    return `M${x} ${y1} C${c} ${y1} ${c} ${y2} ${x} ${y2}`;
-  };
-
   const edges = items.map(({ a, b, row, i }) => {
-    if (a === b) {
-      const right = selfLoopSide(row, rows, colOf) === "R";
-      return { row, a, b, d: bulge(right ? a.x + colW : a.x, yAt(i, "a"), yAt(i, "b"), right ? SELF_REACH : -SELF_REACH) };
-    }
     const ay = yAt(i, "a");
     const by = yAt(i, "b");
-    if (a.col === b.col) return { row, a, b, d: bulge(a.x + colW, ay, by, reach.get(i)!) };
+    const loop = loops.get(i);
+    if (loop) {
+      // Out from the side, along it, and back: a rectangle, so loops nest.
+      const x = loop.side === "R" ? a.x + colW : a.x;
+      const out = x + (loop.side === "R" ? loop.reach : -loop.reach);
+      return { row, a, b, d: roundedPath([[x, ay], [out, ay], [out, by], [x, by]]) };
+    }
     const forward = b.col > a.col;
     const x1 = forward ? a.x + colW : a.x;
     const x2 = forward ? b.x : b.x + colW;
