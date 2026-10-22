@@ -26,9 +26,16 @@
  * `#articleWrap` closes the panel then. No navigation path has to remember to
  * call in.
  *
- * **Focus survives a re-render.** `render()` replaces the panel's markup on
- * every state change, so it puts focus back on the matching control (or the
- * panel itself) when focus was inside the panel.
+ * **Focus.** Every open moves focus to the panel's Close button, including
+ * a switch from A to B by keyboard (focus is on B's 🧭 then, not in the
+ * panel). `render()` replaces the panel's markup on every state change, so it
+ * puts focus back on the same control when focus was inside the panel; a quiz
+ * choice comes back disabled, so focus goes to that question's verdict.
+ *
+ * **Escape** closes the panel when focus is in it or on any 🧭 button —
+ * not anywhere on the page: the panel is non-modal, and the Ask box, the find
+ * palette, focus mode and the Explain pill own their Escape. A peek owns
+ * Escape first (it stops the event in the capture phase on `window`).
  *
  * The stream is read with `fetch` + a ReadableStream (Share's reason: the 409
  * body carries a message EventSource cannot surface).
@@ -52,6 +59,7 @@ import {
   WALKTHROUGH_CLOSE_ID,
   WALKTHROUGH_PANEL_ID,
   WALKTHROUGH_RELOAD_ID,
+  WALKTHROUGH_VERDICT_ATTR,
   type HeadingIdentity,
   type WalkthroughErrorKind,
   type WalkthroughPanelState,
@@ -129,21 +137,26 @@ function watchArticle(): void {
   }).observe(wrap, { childList: true });
 }
 
-/** A selector that finds the same control again in freshly rendered markup. */
-function focusKeyOf(el: Element): string | null {
-  if (el.id === WALKTHROUGH_CLOSE_ID) return `#${WALKTHROUGH_CLOSE_ID}`;
+/** Selectors that find the same control again in freshly rendered markup,
+ *  best first: a choice falls back to its question's verdict, since a chosen
+ *  answer's buttons come back disabled and cannot hold focus. */
+function focusKeysOf(el: Element): string[] {
+  if (el.id === WALKTHROUGH_CLOSE_ID) return [`#${WALKTHROUGH_CLOSE_ID}`];
   const choice = el.getAttribute(WALKTHROUGH_CHOICE_ATTR);
-  if (choice !== null) return `[${WALKTHROUGH_CHOICE_ATTR}="${choice}"]`;
-  return null;
+  if (choice !== null) {
+    const q = choice.split(":")[0];
+    return [`[${WALKTHROUGH_CHOICE_ATTR}="${choice}"]`, `[${WALKTHROUGH_VERDICT_ATTR}="${q}"]`];
+  }
+  return [];
 }
 
-function render(): void {
+/** `focusClose`: an open, which always moves focus to Close. */
+function render(focusClose = false): void {
   if (!state) return;
   let panel = document.getElementById(WALKTHROUGH_PANEL_ID);
-  const created = !panel;
   const active = document.activeElement;
   const hadFocus = !!panel && !!active && panel.contains(active);
-  const key = hadFocus ? focusKeyOf(active!) : null;
+  const keys = hadFocus ? focusKeysOf(active!) : [];
   if (!panel) {
     panel = document.createElement("div");
     panel.id = WALKTHROUGH_PANEL_ID;
@@ -156,15 +169,17 @@ function render(): void {
     document.body.appendChild(panel);
   }
   panel.innerHTML = walkthroughPanelHtml(state);
-  if (created) {
+  if (focusClose) {
     document.getElementById(WALKTHROUGH_CLOSE_ID)?.focus({ preventScroll: true });
     return;
   }
   if (!hadFocus) return;
-  // A chosen answer's buttons come back disabled, which cannot hold focus.
-  const again = key ? panel.querySelector<HTMLElement>(key) : null;
-  const target = again && !(again as HTMLButtonElement).disabled ? again : panel;
-  target.focus({ preventScroll: true });
+  const again = keys
+    .map((k) => panel.querySelector<HTMLElement>(k))
+    .find((el) => el && !(el as HTMLButtonElement).disabled);
+  // The panel itself only when nothing matches: it is focusable (tabindex -1)
+  // so focus never drops to <body>.
+  (again ?? panel).focus({ preventScroll: true });
 }
 
 function open(btn: HTMLElement): void {
@@ -181,7 +196,7 @@ function open(btn: HTMLElement): void {
   inFlight?.abort();
   opener = btn;
   state = initialPanelState(page.relPath, id);
-  render();
+  render(true);
   void run(state, page);
 }
 
@@ -297,10 +312,12 @@ function wire(): void {
     }
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !state) return;
+    if (e.key !== "Escape" || !state || e.defaultPrevented) return;
     // Another dialog open on top owns its own Escape.
     if (document.querySelector(".wiki-share, .wiki-chatopt")) return;
     const panel = document.getElementById(WALKTHROUGH_PANEL_ID);
-    if (panel && panel.contains(document.activeElement)) closeWalkthrough();
+    const active = document.activeElement;
+    const onButton = !!active && typeof active.closest === "function" && !!active.closest(`[${WALKTHROUGH_BTN_ATTR}]`);
+    if ((panel && panel.contains(active)) || onButton) closeWalkthrough();
   });
 }

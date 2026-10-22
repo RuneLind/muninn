@@ -355,16 +355,63 @@ test.describe("Wiki reader: walk me through", () => {
     await held[0]!.release(done("Usage", "KEY"));
     const panel = page.locator("#wikiWalkthrough");
     await expect(panel.locator(".wiki-wt-step")).toHaveCount(2);
-    expect(await panel.evaluate((p) => p.contains(document.activeElement))).toBe(true);
-    // A quiz answer by keyboard.
+    // The ready render replaced the markup: focus is back on the same control.
+    await expect(page.locator("#wikiWalkthroughClose")).toBeFocused();
+    // A quiz answer by keyboard: its choices come back disabled, so focus goes
+    // to that question's verdict, not to the panel or <body>.
     await panel.locator(".wiki-wt-choice", { hasText: "A human" }).focus();
     await page.keyboard.press("Enter");
     await expect(panel.locator(".wiki-wt-verdict.is-right")).toBeVisible();
     await expect(panel.locator(".wiki-wt-choice[disabled]")).toHaveCount(2);
-    expect(await panel.evaluate((p) => p.contains(document.activeElement))).toBe(true);
+    await expect(panel.locator(".wiki-wt-verdict")).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(panel).toHaveCount(0);
     await expect(b).toBeFocused();
+  });
+
+  // Fix round 2 batch 1, finding 1: a keyboard switch to B left focus on B's
+  // 🧭, where Escape did nothing.
+  test("keyboard A → B: focus moves into B's panel, and Escape there closes it", async ({ page }) => {
+    const { held } = await stub(page, { hold: true });
+    await openGuide(page);
+    await btn(page, "How it works", 0).focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => held.length).toBe(1);
+    const b = btn(page, "Usage");
+    await b.focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => held.length).toBe(2);
+    await expect(page.locator("#wikiWalkthroughTitle")).toContainText("Usage");
+    await expect(page.locator("#wikiWalkthroughClose")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
+    await expect(b).toBeFocused();
+  });
+
+  test("Escape with focus on any 🧭 closes the open panel and returns focus to its opener", async ({ page }) => {
+    const { held } = await stub(page, { hold: true });
+    await openGuide(page);
+    const opener = btn(page, "Usage");
+    await opener.click();
+    await expect.poll(() => held.length).toBe(1);
+    // Another section's button, focused without activating it.
+    await btn(page, "How it works", 1).focus();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiWalkthrough")).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await held[0]!.release(done("Usage", "BTNESC"));
+    await page.waitForTimeout(300);
+    await expect(page.getByText("BTNESC step one")).toHaveCount(0);
+  });
+
+  test("Escape with focus outside the panel and off every 🧭 leaves the panel open", async ({ page }) => {
+    await stub(page);
+    await openGuide(page);
+    await btn(page, "Usage").click();
+    await expect(page.locator("#wikiWalkthrough .wiki-wt-step")).toHaveCount(2);
+    await page.locator("#wikiSearch").focus();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiWalkthrough")).toHaveCount(1);
   });
 
   test("Escape while loading closes, aborts, and the late answer renders nothing", async ({ page }) => {

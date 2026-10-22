@@ -199,8 +199,8 @@ describe("POST /api/wiki/walkthrough — guards", () => {
       expect(acquireWalkthroughFlight(walkthroughFlightKey("wtwiki", "Gardener.md")).ok).toBe(true);
     }
     const cases = [
-      ["page missing (404 once read)", { ...ok, relPath: "Missing.md" }],
-      ["explainer (400 once read)", { ...ok, relPath: "Explainer.html", heading: "X", count: 1 }],
+      ["page missing (404 at the index lookup)", { ...ok, relPath: "Missing.md" }],
+      ["explainer (400 at the meta.type check)", { ...ok, relPath: "Explainer.html", heading: "X", count: 1 }],
       ["stale hash (409 once read)", { ...ok, hash: "deadbeef" }],
       ["heading not on the page (404 once located)", { ...ok, heading: "Nope", count: 1 }],
       ["count mismatch (409 once located)", { ...ok, count: 1 }],

@@ -24,6 +24,9 @@ export const WALKTHROUGH_CLOSE_ID = "wikiWalkthroughClose";
 /** The heading button's marker attribute (also the read-only backstop selector). */
 export const WALKTHROUGH_BTN_ATTR = "data-walkthrough-btn";
 export const WALKTHROUGH_CHOICE_ATTR = "data-wt-choice";
+/** A quiz question's verdict; focusable (tabindex -1) as the focus target
+ *  after a keyboard answer disables that question's choices. */
+export const WALKTHROUGH_VERDICT_ATTR = "data-wt-verdict";
 /** The stale-page panel's Reload button. */
 export const WALKTHROUGH_RELOAD_ID = "wikiWalkthroughReload";
 
@@ -116,7 +119,10 @@ const esc = escHtml;
 /** The heading button. It has NO text node: the 🧭 is CSS generated content
  *  (`walkthroughStyles`), so the heading's `textContent` stays exactly its text
  *  for every other reader of it (ref-link slugs, Explain's and Fact-check's
- *  `ctx`, specs). `data-reader-only` keeps it out of a peek copy. */
+ *  `ctx`, specs). A peek never copies it: a heading peek copies the content
+ *  AFTER the heading (`leadingContent` skips headings), and no other peek
+ *  target contains a top-level heading. `data-reader-only` marks it as reader
+ *  chrome, which `headingTextOf` strips. */
 export function walkthroughBtnHtml(id: HeadingIdentity): string {
   return (
     `<button type="button" class="wiki-wt-btn" ${WALKTHROUGH_BTN_ATTR} data-reader-only ` +
@@ -150,7 +156,8 @@ function quizHtml(state: WalkthroughPanelState, r: WalkthroughDonePayload): stri
       .join("");
     const verdict = !answered
       ? ""
-      : `<div class="wiki-wt-verdict ${picked === q.answer ? "is-right" : "is-wrong"}" role="status">` +
+      : `<div class="wiki-wt-verdict ${picked === q.answer ? "is-right" : "is-wrong"}" role="status" ` +
+        `${WALKTHROUGH_VERDICT_ATTR}="${qi}" tabindex="-1">` +
         (picked === q.answer ? "Right." : `Not quite — the answer is “${esc(q.choices[q.answer]!)}”.`) +
         `<blockquote class="wiki-wt-quote">${esc(q.quote)}</blockquote></div>`;
     return `<li class="wiki-wt-q"><p>${esc(q.question)}</p><ul class="wiki-wt-choices">${choices}</ul>${verdict}</li>`;
