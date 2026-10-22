@@ -63,6 +63,9 @@ export function stepsPosText(cur: number, count: number): string {
   return cur < 0 ? `${count} ${count === 1 ? "step" : "steps"}` : `Step ${cur + 1} of ${count}`;
 }
 
+/** The caption while every step shows (`cur` -1). */
+export const STEPS_ALL_CAPTION = "All steps shown.";
+
 /** One step's `<li>`: its index and focus as data the client reads. */
 export function stepItemOpen(index: number, focus: readonly string[], value: string): string {
   return `<li class="stp-step" data-stp-i="${index}" data-stp-focus="${escapeHtml(focus.join(" "))}"${value}>`;

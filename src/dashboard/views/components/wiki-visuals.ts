@@ -11,7 +11,7 @@
  * class), so a fresh render starts every chart as the server wrote it, and
  * one document-level listener serves every render without re-wiring.
  */
-import { stepsPosText } from "../../../format/steps-focus.ts";
+import { STEPS_ALL_CAPTION, stepsPosText } from "../../../format/steps-focus.ts";
 
 /** Press `btn` and release the other buttons of its group. */
 function pressOne(btn: HTMLElement): void {
@@ -83,11 +83,23 @@ export function nextStepIndex(act: "prev" | "next", cur: number, count: number):
   return cur < 0 ? count - 1 : Math.max(cur - 1, 0);
 }
 
+/** Watches each playing block, to stop Play once it is hidden: its fold
+ *  closed (no box) or it left the view. */
+let stepsSeen: IntersectionObserver | null = null;
+
+/** The block's live line: silent while Play runs, so only a step the reader
+ *  picks is announced. */
+function setStepsLive(sec: Element, on: boolean): void {
+  sec.querySelector(".stp-ctrl .stp-now")?.setAttribute("aria-live", on ? "polite" : "off");
+}
+
 function stopSteps(sec: Element): void {
   const t = stepsTimers.get(sec);
   if (t !== undefined) clearInterval(t);
   stepsTimers.delete(sec);
+  stepsSeen?.unobserve(sec);
   sec.querySelector('.stp-ctrl [data-stp-act="play"]')?.setAttribute("aria-pressed", "false");
+  setStepsLive(sec, true);
 }
 
 /** Show step `i` of `sec` (`-1`: every step, nothing dimmed). */
@@ -102,9 +114,13 @@ function setStep(sec: HTMLElement, i: number): void {
   });
   const fig = sec.querySelector(":scope > figure.dgm");
   if (fig) applyDiagramFocus(fig, cur < 0 ? new Set() : focusSet(items[cur]!.dataset.stpFocus));
-  sec.querySelector('.stp-ctrl [data-stp-act="all"]')?.setAttribute("aria-pressed", String(cur < 0));
+  // Prev and Next do nothing at their end; from Show all both go somewhere.
+  sec.querySelector('.stp-ctrl [data-stp-act="prev"]')?.setAttribute("aria-disabled", String(cur === 0));
+  sec.querySelector('.stp-ctrl [data-stp-act="next"]')?.setAttribute("aria-disabled", String(cur >= 0 && cur === items.length - 1));
   const pos = sec.querySelector(".stp-ctrl .stp-pos");
   if (pos) pos.textContent = stepsPosText(cur, items.length);
+  const cap = sec.querySelector(".stp-ctrl .stp-cap");
+  if (cap) cap.textContent = cur < 0 ? STEPS_ALL_CAPTION : (items[cur]!.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
 function stepsAct(sec: HTMLElement, act: string): void {
@@ -112,9 +128,16 @@ function stepsAct(sec: HTMLElement, act: string): void {
   const cur = Number(sec.dataset.stpCur ?? "-1");
   if (act === "play") {
     if (stepsTimers.has(sec)) return stopSteps(sec);
+    if (count > 1) setStepsLive(sec, false);
     if (cur < 0 || cur >= count - 1) setStep(sec, 0);
     if (count <= 1) return;
     sec.querySelector('.stp-ctrl [data-stp-act="play"]')?.setAttribute("aria-pressed", "true");
+    if (typeof IntersectionObserver !== "undefined") {
+      stepsSeen ??= new IntersectionObserver((entries) => {
+        for (const e of entries) if (!e.isIntersecting) stopSteps(e.target);
+      });
+      stepsSeen.observe(sec);
+    }
     stepsTimers.set(
       sec,
       setInterval(() => {
@@ -128,9 +151,12 @@ function stepsAct(sec: HTMLElement, act: string): void {
     );
     return;
   }
+  if (act !== "all" && act !== "prev" && act !== "next") return;
+  const to = act === "all" ? -1 : nextStepIndex(act, cur, count);
+  // A Prev or Next at its end is disabled: it does nothing, Play included.
+  if (act !== "all" && to === cur) return;
   stopSteps(sec);
-  if (act === "all") setStep(sec, -1);
-  else if (act === "prev" || act === "next") setStep(sec, nextStepIndex(act, cur, count));
+  setStep(sec, to);
 }
 
 /** Apply one `<Steps>` control click; false when `target` is not one. */
@@ -142,7 +168,8 @@ function applyStepsControl(target: Element | null): boolean {
   return true;
 }
 
-/** ArrowLeft/ArrowRight inside a `<Steps>` toolbar step back and forth. */
+/** ArrowLeft/ArrowRight inside a `<Steps>` button group step back and forth
+ *  (a group, not an ARIA toolbar: Tab moves between the buttons). */
 function stepsKey(e: KeyboardEvent): void {
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
   if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;

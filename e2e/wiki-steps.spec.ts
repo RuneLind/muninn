@@ -100,6 +100,53 @@ const PAGE = [
   "",
 ].join("\n");
 
+// A picture taller than the 1000 px viewport (an archify lifecycle renders
+// ~850 px), one node near its top, one in the middle, one near its foot.
+const TALL_REL = "flows/tall.mdx";
+const TALL_HTML =
+  `<!doctype html><html><head><title>x</title></head><body>` +
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 2900" role="img"><title>T</title>` +
+  [["top", 100], ["mid", 1400], ["bot", 2700]]
+    .map(([id, y]) => `<g data-node-id="${id}"><rect x="300" y="${y}" width="200" height="80" class="c-backend"/><text x="400" y="${Number(y) + 45}" text-anchor="middle" class="t-primary">${id}</text></g>`)
+    .join("") +
+  `</svg></body></html>`;
+const TALL_JSON = {
+  meta: { title: "Tall" },
+  lanes: [{ id: "main", label: "Main" }],
+  states: ["top", "mid", "bot"].map((id, i) => ({ id, label: id, lane: "main", col: i + 1 })),
+  transitions: [],
+};
+const TALL_PAGE = [
+  "---",
+  "title: Tall",
+  "---",
+  "",
+  "# Tall",
+  "",
+  '<Steps src="./tall.lifecycle.json">',
+  "",
+  "1. The top node `top`",
+  "2. The middle node `mid`",
+  "3. The bottom node `bot`",
+  "",
+  "</Steps>",
+  "",
+  "## Folded",
+  "",
+  '<Fold title="Folded steps" open="true">',
+  "",
+  '<Steps src="./case.lifecycle.json">',
+  "",
+  "1. Opens `opened`",
+  "2. Basis `basis`",
+  "3. Assessed `assessed`",
+  "",
+  "</Steps>",
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
 const ALL_EDGES = ["opened>basis", "basis>assessed", "assessed>decided"];
 /** The dim set each authored step must leave, in order. */
 const STEP_DIMS = [
@@ -119,6 +166,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, REL), PAGE, "utf8");
   await writeFile(path.join(root, "flows", "case.lifecycle.json"), JSON.stringify(JSON_FILE), "utf8");
   await writeFile(path.join(root, "flows", "case.html"), HTML, "utf8");
+  await writeFile(path.join(root, TALL_REL), TALL_PAGE, "utf8");
+  await writeFile(path.join(root, "flows", "tall.lifecycle.json"), JSON.stringify(TALL_JSON), "utf8");
+  await writeFile(path.join(root, "flows", "tall.html"), TALL_HTML, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -159,6 +209,17 @@ const steps = (page: Page, n: number) => page.locator(".wiki-article section.stp
 const dimmed = (sec: Locator) =>
   sec.locator(".dgm-svg .dgm-dim").evaluateAll((els) => els.map((e) => e.getAttribute("data-node-id") ?? `${e.getAttribute("data-edge-from")}>${e.getAttribute("data-edge-to")}`).sort());
 const current = (sec: Locator) => sec.locator('li.stp-step[aria-current="step"]').getAttribute("data-stp-i");
+/** The block's one live region (the position line and the caption). */
+const live = (sec: Locator) => sec.locator(".stp-ctrl [aria-live]");
+/** Whether `loc` lies wholly inside the reader's scrolled pane and the window. */
+const inView = (loc: Locator) =>
+  loc.evaluate((e) => {
+    const r = e.getBoundingClientRect();
+    const w = document.querySelector("#articleWrap")!.getBoundingClientRect();
+    const top = Math.max(0, w.top);
+    const bottom = Math.min(window.innerHeight, w.bottom);
+    return r.height > 0 && r.top >= top - 1 && r.bottom <= bottom + 1;
+  });
 
 test.describe("Wiki reader: Steps", () => {
   for (const scheme of ["dark", "light"] as const) {
@@ -168,21 +229,37 @@ test.describe("Wiki reader: Steps", () => {
       const sec = steps(page, 0);
       expect(await dimmed(sec)).toEqual([]);
       await expect(sec.locator(".stp-pos")).toHaveText("4 steps");
+      // A named group of separate tab stops, not an ARIA toolbar (which promises arrow-key focus moves).
+      await expect(sec.locator(".stp-ctrl")).toHaveAttribute("role", "group");
+      await expect(sec.locator(".stp-ctrl")).toHaveAttribute("aria-label", "Steps: Case life");
+      const prev = sec.locator('button[data-stp-act="prev"]');
+      const next = sec.locator('button[data-stp-act="next"]');
+      const cap = sec.locator(".stp-ctrl .stp-cap");
+      // At rest both go somewhere (first/last step): neither is disabled.
+      for (const b of [prev, next]) await expect(b).not.toHaveAttribute("aria-disabled", "true");
+      await expect(cap).toHaveText("All steps shown.");
+      const capText = ["The case opens", "The basis is fetched", "The case is assessed", "A step naming nothing drawn"];
       for (let k = 0; k < STEP_DIMS.length; k++) {
-        await sec.locator('button[data-stp-act="next"]').click();
+        await next.click();
         expect(await dimmed(sec)).toEqual(STEP_DIMS[k]);
         expect(await current(sec)).toBe(String(k));
         await expect(sec.locator(".stp-pos")).toHaveText(`Step ${k + 1} of 4`);
+        await expect(cap).toContainText(capText[k]!);
+        await expect(prev).toHaveAttribute("aria-disabled", String(k === 0));
+        await expect(next).toHaveAttribute("aria-disabled", String(k === 3));
         expect(await sec.locator(".dgm-svg path.a-emphasis.dgm-dim").count()).toBe(0);
       }
-      // Next stops at the last step.
-      await sec.locator('button[data-stp-act="next"]').click();
+      // Next stops at the last step: disabled there, a press does nothing.
+      await next.click({ force: true });
       expect(await current(sec)).toBe("3");
       await sec.locator('button[data-stp-act="prev"]').click();
       expect(await dimmed(sec)).toEqual(STEP_DIMS[2]);
       await sec.locator('button[data-stp-act="all"]').click();
       expect(await dimmed(sec)).toEqual([]);
-      await expect(sec.locator('button[data-stp-act="all"]')).toHaveAttribute("aria-pressed", "true");
+      // Show all is a plain button: the caption says the state, no aria-pressed promises a toggle.
+      await expect(sec.locator('button[data-stp-act="all"]')).not.toHaveAttribute("aria-pressed", /.*/);
+      await expect(cap).toHaveText("All steps shown.");
+      for (const b of [prev, next]) await expect(b).not.toHaveAttribute("aria-disabled", "true");
       expect(await sec.locator('li.stp-step[aria-current]').count()).toBe(0);
       // The current step is visibly marked, and a dimmed node really fades.
       await sec.locator('button[data-stp-act="next"]').click();
@@ -222,13 +299,23 @@ test.describe("Wiki reader: Steps", () => {
     await open(page);
     const sec = steps(page, 0);
     const play = sec.locator('button[data-stp-act="play"]');
+    await expect(live(sec)).toHaveCount(1);
+    await expect(live(sec)).toHaveAttribute("aria-live", "polite");
     await play.click();
     await expect(play).toHaveAttribute("aria-pressed", "true");
+    // Play's ticks are not announced; only a step the reader picks is.
+    await expect(live(sec)).toHaveAttribute("aria-live", "off");
     expect(await current(sec)).toBe("0");
+    // Prev is disabled on the first step: pressing it does nothing, so Play runs on.
+    const prev = sec.locator('button[data-stp-act="prev"]');
+    await expect(prev).toHaveAttribute("aria-disabled", "true");
+    await prev.click({ force: true });
+    await expect(play).toHaveAttribute("aria-pressed", "true");
     await expect.poll(() => current(sec), { timeout: 5_000 }).toBe("1");
     expect(await dimmed(sec)).toEqual(STEP_DIMS[1]);
     await play.click();
     await expect(play).toHaveAttribute("aria-pressed", "false");
+    await expect(live(sec)).toHaveAttribute("aria-live", "polite");
     await page.waitForTimeout(2_500);
     expect(await current(sec)).toBe("1");
   });
@@ -303,4 +390,50 @@ test.describe("Wiki reader: Steps", () => {
       expect(await dimmed(steps(page, 0))).toEqual([]);
     });
   }
+  test("a picture taller than the window: after Next the toolbar, the caption and the newly lit node are all in view", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(TALL_REL)}`);
+    const sec = page.locator(".wiki-article section.stp").first();
+    await expect(sec.locator(".dgm-svg svg")).toHaveCount(1);
+    expect((await sec.locator(".dgm-svg svg").boundingBox())!.height).toBeGreaterThan(1500);
+    await sec.locator('button[data-stp-act="next"]').click();
+    const mid = sec.locator('.dgm-svg [data-node-id="mid"]');
+    await expect(mid).toHaveClass(/dgm-dim/);
+    // The reader scrolls down to the middle of the picture: the toolbar stays with it.
+    await mid.evaluate((e) => e.scrollIntoView({ block: "center" }));
+    expect(await inView(sec.locator(".stp-ctrl"))).toBe(true);
+    await sec.locator('button[data-stp-act="next"]').click();
+    await expect(mid).not.toHaveClass(/dgm-dim/);
+    expect(await inView(sec.locator(".stp-ctrl"))).toBe(true);
+    expect(await inView(mid)).toBe(true);
+    const cap = sec.locator(".stp-ctrl .stp-cap");
+    await expect(cap).toContainText("The middle node");
+    expect(await inView(cap)).toBe(true);
+  });
+
+  test("Play stops when its Fold closes, and when the block leaves the view", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(TALL_REL)}`);
+    const fold = page.locator(".wiki-article details.fold");
+    const sec = fold.locator("section.stp");
+    const play = sec.locator('button[data-stp-act="play"]');
+    await play.click();
+    await expect(play).toHaveAttribute("aria-pressed", "true");
+    expect(await current(sec)).toBe("0");
+    await fold.locator(":scope > summary").click();
+    await expect(fold).not.toHaveAttribute("open", /.*/);
+    await expect(play).toHaveAttribute("aria-pressed", "false", { timeout: 1_000 });
+    await expect(live(sec)).toHaveAttribute("aria-live", "polite");
+    await page.waitForTimeout(2_500);
+    expect(await current(sec)).toBe("0");
+    // Open again and play, then scroll the block out of the pane.
+    await fold.locator(":scope > summary").click();
+    await play.click();
+    await expect(play).toHaveAttribute("aria-pressed", "true");
+    await page.locator("#articleWrap").evaluate((e) => (e.scrollTop = 0));
+    expect(await inView(sec)).toBe(false);
+    await expect(play).toHaveAttribute("aria-pressed", "false", { timeout: 1_000 });
+    await page.waitForTimeout(2_500);
+    expect(await current(sec)).toBe("0");
+  });
 });

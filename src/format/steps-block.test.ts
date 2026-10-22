@@ -79,6 +79,17 @@ describe("<Steps> on the reader", () => {
     expect(html).toContain("<code>new</code>");
   });
 
+  test("the controls and a caption come before the picture, as a named group; Show all is a plain button", () => {
+    const html = renderWikiHtml(LIST, () => undefined, { views: true, files: files() });
+    const ctrl = /<div class="stp-ctrl"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(ctrl).toContain('role="group"');
+    expect(ctrl).toContain('aria-label="Steps: Case life"');
+    expect(html).not.toContain('role="toolbar"');
+    expect(html.indexOf('class="stp-ctrl"')).toBeLessThan(html.indexOf("<figure"));
+    expect(html).toMatch(/<div class="stp-now" aria-live="polite" aria-atomic="true"><span class="stp-pos">3 steps<\/span>.*<span class="stp-cap">All steps shown\.<\/span><\/div>/);
+    expect(html).toMatch(/<button type="button" class="stp-btn" data-stp-act="all">Show all<\/button>/);
+  });
+
   test("no list: the steps are the file's views, reader-only", () => {
     const html = renderWikiHtml('<Steps src="./s.lifecycle.json" />', () => undefined, { views: true, files: files() });
     expect(html).toContain('data-stp-count="2"');
@@ -238,7 +249,7 @@ describe("fix round 1 batch 2: focus off the item's last paragraph, numbering on
 
   test("one step reads «1 step»", () => {
     const html = renderWikiHtml(block("1. Only `new`"), () => undefined, { views: true, files: files() });
-    expect(html).toContain('aria-live="polite">1 step</span>');
+    expect(html).toContain('<span class="stp-pos">1 step</span>');
     expect(stepsFocus.stepsPosText(-1, 1)).toBe("1 step");
     expect(stepsFocus.stepsPosText(-1, 4)).toBe("4 steps");
     expect(stepsFocus.stepsPosText(0, 1)).toBe("Step 1 of 1");
