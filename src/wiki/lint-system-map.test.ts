@@ -12,6 +12,7 @@ import path from "node:path";
 import { linkHeadingMatches, linkHeadingName, SYSTEM_MAP_LINK_HEADINGS_DEFAULT } from "./lint-system-map.ts";
 import { lintWiki, PAGE_TEXT_LINT_CHECKS, LINT_CHECKS, checkPageText } from "./lint.ts";
 import { buildWikiIndex, parseSystemMapLinkHeadings } from "./store.ts";
+import { renderWikiHtml } from "./render.ts";
 
 function wiki(files: Record<string, string>): string {
   const root = testTempDirSync("muninn-sysmap-");
@@ -214,6 +215,41 @@ describe("node names", () => {
     expect(checkPageText({ relPath: "flows/map.mdx" }, content, []).filter((f) => f.check === "system-map")).toEqual([]);
     const out = await drift({ "repos/a.md": repo("a", ""), "integrations/pdl.md": "# PDL\n", "flows/map.mdx": content });
     expect(out).toEqual([]);
+  });
+});
+
+describe("markup in cells and attributes (lint and reader read alike)", () => {
+  const known: Record<string, { relPath: string; name: string }> = {
+    "repos/a": { relPath: "repos/a.md", name: "a" },
+    "integrations/pdl": { relPath: "integrations/pdl.md", name: "pdl" },
+  };
+  const readerHtml = (content: string) => renderWikiHtml(content, (t) => known[t.toLowerCase()] as never, { views: true, wiki: "w" });
+
+  test("external= written as code reads as its text, on both paths", async () => {
+    const content = hub(["| a | PDL | REST | ok | |"], ' external="`PDL`"');
+    expect(checkPageText({ relPath: "flows/map.mdx" }, content, []).filter((f) => f.check === "system-map")).toEqual([]);
+    const out = await drift({ "repos/a.md": repo("a", ""), "integrations/pdl.md": "# PDL\n", "flows/map.mdx": content });
+    expect(out).toEqual([]);
+    const html = readerHtml(content);
+    expect(html).toContain('data-relpath="integrations/pdl.md"');
+    expect(html).not.toContain("sm-unresolved");
+  });
+
+  test("a link's label reads as visible text: the repeat key, the evidence and the drawn label", async () => {
+    const rows = ["| [[repos/a|**Alpha**]] | b | [[integrations/kafka|`Kafka`]] | wrong | see [[repos/x|*old*]] |", "| a | b | Kafka | ok | |"];
+    const lint = checkPageText({ relPath: "flows/map.mdx" }, hub(rows), []).filter((f) => f.check === "system-map");
+    expect(lint.map((f) => f.message)).toEqual(["<SystemMap> row a → b (Kafka) is given as both ok and wrong"]);
+    const out = await drift({
+      "repos/a.md": repo("a", "## Related\n\n- [[repos/b]]"),
+      "repos/b.md": repo("b", ""),
+      "flows/map.mdx": hub([rows[0]!]),
+    });
+    expect(out.map((f) => f.detail)).toEqual(["evidence: see old"]);
+    const html = readerHtml(hub([rows[0]!]));
+    expect(html).toContain(">Alpha</text>");
+    expect(html).toContain("a → b · Kafka · wrong · see old");
+    // The drawing only: the table under it renders a wikilink label as written.
+    expect(html.slice(0, html.indexOf("<table>"))).not.toMatch(/\*\*Alpha|`Kafka`|\*old\*/);
   });
 });
 

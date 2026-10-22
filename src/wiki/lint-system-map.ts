@@ -26,10 +26,10 @@
  */
 
 import path from "node:path";
-import { chartBody, chartTable } from "../format/chart-block.ts";
+import { chartBody } from "../format/chart-block.ts";
 import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { visibleText } from "../format/report-top.ts";
-import { nodeKey, readSystemMap, resolveSystemNode, type SystemMapRead } from "../format/system-map.ts";
+import { nodeKey, readSystemMapBlock, resolveSystemNode, type SystemMapRead } from "../format/system-map.ts";
 import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
 import { stripLineCodeSpansKeepingLinks } from "./park-links.ts";
 import { extractMarkdownLinks, stripFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
@@ -79,10 +79,10 @@ function componentBlocks(blocks: readonly Block[], name: string): Extract<Block,
   return out;
 }
 
-/** Every `<SystemMap>` on a page, read as the reader reads it: wikilinks
- *  parked first, so a `|` in `[[t|l]]` splits no cell, and handed back as
- *  their `[[…]]` source in cells and in `external=`/`groups=` (a node names a
- *  link's target), as their text in the caption. */
+/** Every `<SystemMap>` on a page, read as the reader reads it
+ *  (`readSystemMapBlock`): wikilinks parked first, so a `|` in `[[t|l]]`
+ *  splits no cell, and handed back as their `[[…]]` source in cells and in
+ *  `external=`/`groups=` (a node names a link's target), as their text in the caption. */
 export function systemMapBlocks(rawContent: string): MapBlock[] {
   if (!rawContent.includes("<SystemMap")) return [];
   const body = stripFrontmatter(rawContent);
@@ -91,21 +91,14 @@ export function systemMapBlocks(rawContent: string): MapBlock[] {
   const fenced = fencedLineMask(lines);
   const links: { source: string; text: string }[] = [];
   const parked = body.replace(WIKILINK_WITH_LABEL_RE, (w: string, t: string, l?: string) => `\x00L${links.push({ source: w, text: wikiLinkText(t, l) }) - 1}\x00`);
-  const unpark = (raw: string, as: "source" | "text") => raw.replace(/\x00L(\d+)\x00/g, (_m, i: string) => links[Number(i)]?.[as] ?? "");
-  // The sentinels pass through `visibleText` untouched, so a link comes back whole.
-  const cellText = (raw: string) => unpark(visibleText(raw), "source");
-  const attrsOf = (attrs: Record<string, string>) => {
-    const out = { ...attrs };
-    for (const k of ["external", "groups"] as const) if (out[k] !== undefined) out[k] = unpark(out[k], "source");
-    return out;
-  };
+  const park = (raw: string) => raw.replace(/\x00L(\d+)\x00/g, "\uE000$1\uE001");
   return componentBlocks(parseBlocks(parked), "SystemMap").map((block) => {
     const { table } = chartBody(block.children);
     const tagLine = block.line === undefined ? undefined : bodyAt + block.line + 1;
     const headerLine = tagLine === undefined ? undefined : tableHeaderLine(lines, fenced, tagLine);
     return {
-      read: readSystemMap(attrsOf(block.attrs), table ? chartTable(table, cellText) : null),
-      caption: block.attrs.caption === undefined ? "" : visibleText(unpark(block.attrs.caption, "text")).trim(),
+      read: readSystemMapBlock(block.attrs, table, park, (i) => links[i]?.source ?? ""),
+      caption: block.attrs.caption === undefined ? "" : visibleText(block.attrs.caption.replace(/\x00L(\d+)\x00/g, (_m, i: string) => links[Number(i)]?.text ?? "")).trim(),
       tagLine,
       rowLine: (row: number) => (headerLine === undefined ? tagLine : headerLine + 2 + row),
     };
@@ -155,7 +148,10 @@ export interface LinkSection {
  * The link sections of one page and the pages each links to. A section ends
  * at the next heading of any level, so a «Related concepts» under «Related»
  * is not read. Fenced lines are neither headings nor links; code spans hold
- * no link, and a link whose label holds a backtick is still one.
+ * no link, as the reader pairs them: a `[[wikilink]]` is parked first, so one
+ * whose label holds a backtick is still a link, while a markdown link whose
+ * label holds a backtick that a later one on the line closes is a code span
+ * and links nothing (the reader renders it as code too).
  */
 export function linkSections(page: Pick<WikiPageMeta, "relPath">, rawContent: string, headings: readonly string[], index: Pick<WikiIndex, "resolve" | "resolveRelPath">): LinkSection[] {
   const body = stripFrontmatter(rawContent);

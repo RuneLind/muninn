@@ -89,7 +89,7 @@ import {
 } from "../format/report-top.ts";
 import { readCaseBoardView, readChartKind, readStatusRowsView, type CaseBoardView } from "../format/component-spec.ts";
 import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
-import { readSystemMap, type SystemMapViewInput, type SystemMapViewRenderer } from "../format/system-map.ts";
+import { readSystemMapBlock, type SystemMapViewInput, type SystemMapViewRenderer } from "../format/system-map.ts";
 import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
 import type { DiagramViewRenderer } from "../format/diagram-block.ts";
 import type { StepsViewRenderer } from "../format/steps-block.ts";
@@ -973,22 +973,20 @@ function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
 
 /** A `<SystemMap>`: on the reader's page render with a map view, the map over
  *  its edge table (the table under its findings when it cannot draw); else the
- *  body as written. Cells and `external=`/`groups=` are read as the lint reads
- *  them (`visibleText`), each wikilink sentinel handed back as its `[[…]]`
- *  source (`wikiLinkSources`, else its text), so a node names its target. */
+ *  body as written. Read through `readSystemMapBlock`, the lint's own call, with
+ *  each wikilink sentinel handed back as its `[[…]]` source (`wikiLinkSources`,
+ *  else its text), so a node names its target. */
 function systemMapBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
   if (!currentSystemMapView) return children;
   const body = chartBody(rawChildren);
   currentSystemMapCount++;
-  const sourced = (raw: string) =>
-    visibleText(raw.replace(/\x00WIKIPAGELINK(\d+)\x00/g, "\uE000$1\uE001").replace(/\x00/g, "")).replace(
-      /\uE000(\d+)\uE001/g,
-      (_m, i: string) => currentLinkSources?.[Number(i)] ?? currentLinkTexts?.[Number(i)] ?? "",
-    );
-  const read = { ...attrs };
-  for (const k of ["external", "groups"] as const) if (read[k] !== undefined) read[k] = sourced(read[k]);
   return currentSystemMapView.render({
-    read: readSystemMap(read, body.table ? chartTable(body.table, sourced) : null),
+    read: readSystemMapBlock(
+      attrs,
+      body.table,
+      (raw) => raw.replace(/\x00WIKIPAGELINK(\d+)\x00/g, "\uE000$1\uE001").replace(/\x00/g, ""),
+      (i) => currentLinkSources?.[i] ?? currentLinkTexts?.[i] ?? "",
+    ),
     caption: visibleText(peekText(attrs.caption ?? "")).trim(),
     tableHtml: body.table ? renderBlocks([body.table], webRenderer) : "",
     beforeHtml: renderBlocks(body.before, webRenderer),

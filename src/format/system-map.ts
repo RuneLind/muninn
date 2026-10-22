@@ -14,8 +14,11 @@
  *   one `[[wikilink]]` names its target (anchor dropped) and draws its label.
  *   `external=` declares the names that have no `repos/` page (`PDL;Sigrun`);
  *   the rest resolve to a `repos/` page stem.
- * - Cells reach {@link readSystemMap} as visible text with each wikilink kept
- *   as its `[[…]]` source; a cell that is not a node reads a link as its text.
+ * - Cells and `external=`/`groups=` reach {@link readSystemMap} through
+ *   {@link readSystemMapBlock}, the one reading the reader and both lints call:
+ *   visible text, each wikilink kept as its `[[target|label]]` source with the
+ *   label as visible text too; a cell that is not a node reads a link as its
+ *   label.
  * - The same directed pair and protocol given twice, or as both ok and wrong,
  *   is a finding.
  * - No coordinates are stored (D11). A node's column is its group:
@@ -24,6 +27,10 @@
  *   then `repos`, then `external`; nodes and rows run in order of first
  *   appearance.
  */
+
+import type { TableBlock } from "./markdown-ast.ts";
+import { chartTable } from "./chart-block.ts";
+import { visibleText } from "./report-top.ts";
 
 export type SystemMapStatus = "ok" | "wrong";
 
@@ -117,6 +124,33 @@ export function readNodeCell(cell: string): { name: string; label: string } {
   }
   const name = strip(cellLinksAsText(cell));
   return { name, label: name };
+}
+
+/** A wikilink source with its label read as visible text: `[[t|**A**]]` → `[[t|A]]`.
+ *  A source that is not one wikilink (a caller's text fallback) reads as visible text. */
+function visibleLinkSource(source: string): string {
+  const m = WHOLE_WIKILINK_RE.exec(source.trim());
+  if (!m) return visibleText(source);
+  return m[2] === undefined ? source.trim() : `[[${m[1]}|${visibleText(m[2])}]]`;
+}
+
+/**
+ * One `<SystemMap>` block read from its raw attributes and table, the reading
+ * the reader and both lints share. `park` turns a raw cell or attribute into
+ * text with each wikilink as `\uE000i\uE001`; `sourceOf(i)` is that link's
+ * `[[…]]` source. Cells, `external=` and `groups=` are then read as visible
+ * text (markup stripped, labels included), each link handed back as its source.
+ */
+export function readSystemMapBlock(
+  attrs: Readonly<Record<string, string>>,
+  table: TableBlock | null,
+  park: (raw: string) => string,
+  sourceOf: (i: number) => string,
+): SystemMapRead {
+  const text = (raw: string) => visibleText(park(raw)).replace(/\uE000(\d+)\uE001/g, (_m, i: string) => visibleLinkSource(sourceOf(Number(i))));
+  const read = { ...attrs };
+  for (const k of ["external", "groups"] as const) if (read[k] !== undefined) read[k] = text(read[k]);
+  return readSystemMap(read, table ? chartTable(table, text) : null);
 }
 
 /** A cell's node name ({@link readNodeCell}). */
