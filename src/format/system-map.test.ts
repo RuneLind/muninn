@@ -138,7 +138,7 @@ describe("systemMapViewHtml", () => {
 
   test("a repo node is a reader link; an external and an unresolved node are not", () => {
     expect(html).toContain('<a class="sm-node sm-repo" href="/wiki?relPath=repos%2Fweb.md" data-relpath="repos/web.md" data-wiki-page="web"');
-    expect(html).toMatch(/<g class="sm-node sm-external" data-sm-node="reg">/);
+    expect(html).toMatch(/<g class="sm-node sm-external sm-nopage" data-sm-node="reg">/);
     expect(html).toMatch(/<g class="sm-node sm-unresolved" data-sm-node="typo"><title>typo — names no repos\/ page<\/title>/);
   });
 
@@ -149,7 +149,7 @@ describe("systemMapViewHtml", () => {
 
   test("a map it cannot draw shows its findings over the table", () => {
     const fb = systemMapViewHtml({ read: readSystemMap({}, null), caption: "", tableHtml: "", beforeHtml: "<p>x</p>", afterHtml: "", prefix: "sm2-", resolveNode: () => ({ kind: "unresolved", link: null }) });
-    expect(fb).toBe('<section class="sm sm-fallback"><p>x</p><ul class="sm-notes" data-reader-only=""><li>holds no pipe table</li></ul></section>');
+    expect(fb).toBe('<section class="sm sm-fallback" role="figure" aria-label="System map"><p>x</p><ul class="sm-notes" data-reader-only=""><li>holds no pipe table</li></ul></section>');
   });
 
   test("layout: columns side by side, nodes stacked in order", () => {
@@ -340,7 +340,7 @@ describe("layout: routing and sizing", () => {
     expect(out).toContain(">faktureringskomponenten</text>");
     // Twenty wide letters do not fit a column: cut, the full name in the title.
     const w = /data-sm-node="wwwwwwwwwwwwwwwwwwww"[^>]*><title>([^<]*)<\/title><rect[^>]*\/><text[^>]*>([^<]*)<\/text>/.exec(out)!;
-    expect(w[1]).toBe("WWWWWWWWWWWWWWWWWWWW");
+    expect(w[1]).toBe("WWWWWWWWWWWWWWWWWWWW — repo, opens its page");
     expect(w[2]!.endsWith("…")).toBe(true);
     expect(w[2]!.length).toBeLessThan(20);
     const long = new RegExp(`data-sm-node="${"x".repeat(60)}"[^>]*><title>[^<]*</title><rect[^>]*/><text[^>]*>([^<]*)</text>`).exec(out)!;
@@ -361,5 +361,153 @@ describe("layout: routing and sizing", () => {
 
   test("print drops the inline min-width, so a printed map fits the page", () => {
     expect(systemMapCss(".a").replace(/\s+/g, " ")).toMatch(/@media print \{[^}]*\.a \.sm-svg \{ min-width: 0 !important; \}/);
+  });
+});
+
+describe("names, caption and node kinds", () => {
+  const read = readSystemMap(
+    { groups: "web=frontend;api=core", external: "Reg;Gone" },
+    T(["From", "To", "Status"], [["web", "api", "ok"], ["api", "Reg", "wrong"], ["api", "Gone", "ok"], ["api", "typo", "ok"]]),
+  );
+  const html = systemMapViewHtml({
+    read,
+    caption: "Systems & co",
+    tableHtml: "<table>T</table>",
+    beforeHtml: "",
+    afterHtml: "",
+    prefix: "sm3-",
+    resolveNode: (n) =>
+      n.key === "typo"
+        ? { kind: "unresolved", link: null }
+        : n.key === "gone"
+          ? { kind: "external", link: null }
+          : { kind: n.external ? "external" : "repo", link: { href: `/x/${n.key}`, relPath: `p/${n.key}.md`, name: n.key } },
+  });
+
+  test("the caption is visible text above the map, reader-only like the map", () => {
+    expect(html).toContain('<div class="sm-caption" data-reader-only="">Systems &amp; co</div><div class="sm-map"');
+  });
+
+  test("one name per level: the figure names the map, the scroll box is the drawing, the SVG repeats neither", () => {
+    expect(html).toContain('<section class="sm" role="figure" aria-label="System map: Systems &amp; co">');
+    expect(html).toContain('<div class="sm-map" data-reader-only="" role="region" tabindex="0" aria-label="Map drawing">');
+    const svg = /<svg class="sm-svg"[^>]*>(<title>)?/.exec(html)!;
+    expect(svg[0]).not.toContain("aria-label");
+    expect(svg[0]).toContain(`role="group"`);
+    expect(svg[1]).toBeUndefined();
+  });
+
+  test("a map it cannot draw is still a named figure", () => {
+    const fb = systemMapViewHtml({ read: readSystemMap({}, null), caption: "Hub", tableHtml: "", beforeHtml: "", afterHtml: "", prefix: "sm4-", resolveNode: () => ({ kind: "unresolved", link: null }) });
+    expect(fb.startsWith('<section class="sm sm-fallback" role="figure" aria-label="System map: Hub">')).toBe(true);
+  });
+
+  test("each node kind has its own class and says its kind in its name", () => {
+    expect(html).toContain('<a class="sm-node sm-repo" href="/x/web"');
+    expect(html).toContain('aria-label="web — repo, opens its page"');
+    expect(html).toContain('<a class="sm-node sm-external" href="/x/reg"');
+    expect(html).toContain('aria-label="Reg — external, opens its page"');
+    expect(html).toContain('<g class="sm-node sm-external sm-nopage" data-sm-node="gone"><title>Gone — external, no page</title>');
+    expect(html).toContain('<g class="sm-node sm-unresolved" data-sm-node="typo"><title>typo — names no repos/ page</title>');
+  });
+
+  test("the legend under the map names only the styles drawn on it", () => {
+    const legend = /<ul class="sm-legend" data-reader-only="">(.*?)<\/ul>/.exec(html)![1]!;
+    const items = [...legend.matchAll(/<\/svg>([^<]+)<\/li>/g)].map((m) => m[1]);
+    expect(items).toEqual(["Repo, opens its page", "External, opens its page", "External, no page", "Names no repos/ page", "Edge: ok", "Edge: wrong"]);
+    expect(html.indexOf("sm-legend")).toBeGreaterThan(html.indexOf("</svg></div>"));
+    // A map of repos alone has a one-node-style legend.
+    const plain = systemMapViewHtml({ read: readSystemMap({}, T(["From", "To", "Status"], [["a", "b", "ok"]])), caption: "", tableHtml: "", beforeHtml: "", afterHtml: "", prefix: "sm5-", resolveNode: () => ({ kind: "repo", link: { href: "/", relPath: "r.md", name: "r" } }) });
+    expect([...plain.matchAll(/<\/svg>([^<]+)<\/li>/g)].map((m) => m[1])).toEqual(["Repo, opens its page", "Edge: ok"]);
+  });
+
+  test("the text form lists every node by column with its kind", () => {
+    const list = /<details class="sm-list" data-reader-only=""><summary>Systems by column<\/summary>(.*?)<\/details>/.exec(html)![1]!;
+    expect(list).toBe(
+      "<ul>" +
+        "<li>frontend<ul><li>web — repo, opens its page</li></ul></li>" +
+        "<li>core<ul><li>api — repo, opens its page</li></ul></li>" +
+        "<li>repos<ul><li>typo — names no repos/ page</li></ul></li>" +
+        "<li>external<ul><li>Reg — external, opens its page</li><li>Gone — external, no page</li></ul></li>" +
+        "</ul>",
+    );
+  });
+
+  test("the peek drops the caption, the legend and the node list with the map", () => {
+    expect([...SYSTEM_MAP_CHROME_CLASSES]).toEqual(["sm-caption", "sm-map", "sm-legend", "sm-list", "sm-notes"]);
+  });
+
+  test("keyboard focus on a node is styled apart from hover", () => {
+    const css = systemMapCss(".a").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, " ");
+    // Each rule's selector list and body; the first rule naming a selector.
+    const decl = (sel: string) => [...css.matchAll(/(?<=^|\})([^{}]*)\{([^}]*)\}/g)].find((m) => m[1]!.split(",").map((s) => s.trim()).includes(sel))?.[2]!.trim();
+    const hover = decl(".a a.sm-node:hover rect");
+    const focus = decl(".a a.sm-node:focus-visible rect");
+    expect(hover).toBeDefined();
+    expect(focus).toBeDefined();
+    expect(focus).not.toBe(hover);
+  });
+});
+
+describe("loops: self-edges and edges within one column", () => {
+  const draw = (r: ReturnType<typeof readSystemMap>) =>
+    systemMapViewHtml({ read: r, caption: "", tableHtml: "", beforeHtml: "", afterHtml: "", prefix: "sm8-", resolveNode: () => ({ kind: "repo", link: null }) });
+  const paths = (html: string) =>
+    [...html.matchAll(/<path class="sm-edge [^"]*" d="([^"]+)"[^>]*data-sm-from="([^"]+)" data-sm-to="([^"]+)"/g)].map((m) => ({ d: m[1]!, from: m[2]!, to: m[3]!, pts: samplePath(m[1]!) }));
+  const minDist = (p: { x: number; y: number }[], q: { x: number; y: number }[]) => Math.min(...p.flatMap((a) => q.map((b) => Math.hypot(a.x - b.x, a.y - b.y))));
+  const ends = (pts: { x: number; y: number }[]) => [pts[0]!, pts[pts.length - 1]!].map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`);
+
+  test("a self-loop shares no point with the node's other edges", () => {
+    // a has an outgoing edge and a loop; hub has edges on both sides and a loop.
+    const r = readSystemMap(
+      { groups: "a=one;up=one;hub=two;down=two;z=three;y=three" },
+      T(["From", "To", "Status"], [["a", "hub", "ok"], ["a", "a", "ok"], ["up", "hub", "ok"], ["hub", "z", "ok"], ["hub", "y", "ok"], ["hub", "hub", "ok"], ["down", "z", "ok"]]),
+    );
+    const es = paths(draw(r));
+    for (const key of ["a", "hub"]) {
+      const loop = es.find((e) => e.from === key && e.to === key)!;
+      const others = es.filter((e) => e !== loop);
+      expect(minDist(loop.pts, others.flatMap((e) => e.pts))).toBeGreaterThan(2);
+      const otherEnds = new Set(others.flatMap((e) => ends(e.pts)));
+      expect(ends(loop.pts).filter((p) => otherEnds.has(p))).toEqual([]);
+    }
+    // a's left side is free, so its loop goes there.
+    const aLoop = es.find((e) => e.from === "a" && e.to === "a")!;
+    expect(Math.max(...aLoop.pts.map((p) => p.x))).toBeLessThanOrEqual(nodeRects(draw(r)).get("a")!.x);
+  });
+
+  test("a self-loop sits between a node's rising and falling edges", () => {
+    // mid has edges in on the left and out on the right, rising and falling.
+    const r = readSystemMap(
+      { groups: "i1=one;i2=one;i3=one;f=two;g=two;h=two;mid=two;o1=three;o2=three;o3=three" },
+      T(["From", "To", "Status"], [
+        ["f", "o1", "ok"], ["g", "o1", "ok"], ["h", "o1", "ok"], ["i1", "mid", "ok"], ["i2", "mid", "ok"], ["i3", "mid", "ok"],
+        ["mid", "o1", "ok"], ["mid", "o2", "ok"], ["mid", "o3", "ok"], ["mid", "mid", "ok"],
+      ]),
+    );
+    const es = paths(draw(r));
+    const loop = es.find((e) => e.from === "mid" && e.to === "mid")!;
+    expect(minDist(loop.pts, es.filter((e) => e !== loop).flatMap((e) => e.pts))).toBeGreaterThan(2);
+  });
+
+  test("an edge within a column stays short of the trunk lanes in the gap after it", () => {
+    // Four edges inside column one, and four trunks in the gap after it.
+    const r = readSystemMap(
+      { groups: "p=one;q=one;r=one;s=one;m=two;t=three;u=three" },
+      T(["From", "To", "Status"], [
+        ["p", "t", "ok"], ["q", "t", "ok"], ["r", "u", "ok"], ["s", "u", "ok"], ["p", "m", "ok"],
+        ["p", "q", "ok"], ["q", "r", "ok"], ["r", "s", "ok"], ["p", "s", "ok"],
+      ]),
+    );
+    const es = paths(draw(r));
+    const one = new Set(["p", "q", "r", "s"]);
+    const within = es.filter((e) => one.has(e.from) && one.has(e.to));
+    const trunks = es.filter((e) => one.has(e.from) && (e.to === "t" || e.to === "u"));
+    expect(within.length).toBe(4);
+    expect(trunks.length).toBe(4);
+    // A trunk's lane is the x of its first corner; the loops cross the trunks'
+    // stubs from the side but never reach the band the lanes run down.
+    const nearestLane = Math.min(...trunks.map((e) => Number(/ Q([\d.]+) /.exec(e.d)![1])));
+    for (const w of within) expect(Math.max(...w.pts.map((p) => p.x))).toBeLessThan(nearestLane - 2);
   });
 });

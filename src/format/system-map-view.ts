@@ -5,13 +5,14 @@
  * page runs no client code for it: no state, no toggles.
  *
  * The section keeps source order: the blocks before the table, the map, any
- * findings, the table as written, the blocks after it. The map and the
- * findings carry `READER_ONLY_ATTR`, so an Explain selection, a peek and every
+ * findings, the table as written, the blocks after it; the map is the caption,
+ * the drawing, a legend of the styles it draws and a node list by column (the
+ * text form of what the table does not say: each node's group and kind). All
+ * of it carries `READER_ONLY_ATTR`, so an Explain selection, a peek and every
  * other surface read the table. Columns are the node groups (D11); a node with
  * a page is an SVG link carrying `data-relpath`, which the reader's navigation
  * delegate opens like any wikilink. A `wrong` edge is dashed in the error tone
- * and its title names the reason; an unresolved node is drawn dashed with no
- * link.
+ * and its title names the reason.
  */
 
 import { escapeHtml } from "./markdown-core.ts";
@@ -20,7 +21,7 @@ import { nodeKey, type SystemMapNode, type SystemMapRow, type SystemMapViewInput
 
 /** The chrome a peek drops (`PEEK_SYSTEM_MAP_CHROME` in wiki-ref-links.ts,
  *  pinned equal by a test). */
-export const SYSTEM_MAP_CHROME_CLASSES = ["sm-map", "sm-notes"] as const;
+export const SYSTEM_MAP_CHROME_CLASSES = ["sm-caption", "sm-map", "sm-legend", "sm-list", "sm-notes"] as const;
 
 const RO = `${READER_ONLY_ATTR}=""`;
 
@@ -36,8 +37,14 @@ const NODE_H = 34;
 const GAP_Y = 14;
 const HEAD_H = 30;
 const PAD = 12;
-/** Room right of the last column for a same-column edge's loop. */
+/** Room right of the last column for a same-column edge's loop, and left of
+ *  the first column when a self-loop is drawn on that side. */
 const LOOP_W = 36;
+/** How far a loop reaches out from its side (the curve's widest point). The
+ *  nearest trunk lane sits 24px from a side, so every loop stays short of it:
+ *  a self-loop reaches 15px, the edges within one column 12, 15, 18 or 21px. */
+const SELF_REACH = 15;
+const WITHIN_REACH = [12, 15, 18, 21];
 /** Node labels are 12px, column heads 11px; neither scales below 9px. */
 const LABEL_PX = 12;
 const HEAD_PX = 11;
@@ -137,7 +144,8 @@ export function layoutSystemMap(nodes: readonly SystemMapNode[], columns: readon
   const colW = Math.min(COL_MAX, Math.max(COL_MIN, Math.ceil(widest + 2 * NODE_PAD_X)));
   const colOf = new Map(nodes.map((n) => [n.key, Math.max(0, columns.indexOf(n.group))]));
   const gapW = gapLanes(rows, colOf, Math.max(0, columns.length - 1)).map((l) => Math.max(GAP_X, 2 * 24 + (l.length - 1) * LANE_STEP));
-  const colX = columns.map((_, i) => PAD + i * colW + gapW.slice(0, i).reduce((x, g) => x + g, 0));
+  const left = rows.some((r) => selfLoopSide(r, rows, colOf) === "L" && colOf.get(nodeKey(r.from)) === 0) ? LOOP_W : PAD;
+  const colX = columns.map((_, i) => left + i * colW + gapW.slice(0, i).reduce((x, g) => x + g, 0));
   const boxes = new Map<string, Box>();
   const perCol = columns.map(() => 0);
   for (const node of nodes) {
@@ -152,7 +160,7 @@ export function layoutSystemMap(nodes: readonly SystemMapNode[], columns: readon
     colX,
     gapW,
     rows: rowCount,
-    width: PAD * 2 + columns.length * colW + gapW.reduce((x, g) => x + g, 0) + LOOP_W,
+    width: left + PAD + columns.length * colW + gapW.reduce((x, g) => x + g, 0) + LOOP_W,
     // One gap more than the rows need: the lane under the last row.
     height: PAD * 2 + HEAD_H + rowCount * (NODE_H + GAP_Y),
   };
@@ -176,6 +184,27 @@ function roundedPath(pts: readonly [number, number][]): string {
   return `${d} L${f(last[0])} ${f(last[1])}`;
 }
 
+/**
+ * The side a self-loop takes: the one with fewer of the node's other edges,
+ * the right on a tie. Null for a row that is not a self-loop.
+ */
+function selfLoopSide(row: SystemMapRow, rows: readonly SystemMapRow[], colOf: Map<string, number>): "L" | "R" | null {
+  const key = nodeKey(row.from);
+  const col = colOf.get(key);
+  if (key !== nodeKey(row.to) || col === undefined) return null;
+  let l = 0;
+  let r = 0;
+  for (const o of rows) {
+    const [f, t] = [nodeKey(o.from), nodeKey(o.to)];
+    if (f === t || (f !== key && t !== key)) continue;
+    const other = colOf.get(f === key ? t : f);
+    if (other === undefined) continue;
+    if (other >= col) r++;
+    else l++;
+  }
+  return l < r ? "L" : "R";
+}
+
 interface RoutedEdge {
   row: SystemMapRow;
   a: Box;
@@ -190,7 +219,9 @@ interface RoutedEdge {
  * more columns runs down its source's trunk in the gap it leaves by, across
  * the intermediate columns in a row gap near the straight line (never under a
  * box), and up or down its target's trunk into the target. Within a column an
- * edge loops out right.
+ * edge loops out right, short of the trunk lanes; a self-loop leaves and
+ * re-enters its side at two points of its own, between the edges to higher
+ * and to lower nodes, so it meets none of them.
  */
 export function routeSystemMapEdges(rows: readonly SystemMapRow[], layout: Layout): RoutedEdge[] {
   const { boxes, colW, colX, gapW } = layout;
@@ -206,23 +237,37 @@ export function routeSystemMapEdges(rows: readonly SystemMapRow[], layout: Layou
     const [me, other] = end === "a" ? [a, b] : [b, a];
     return `${me.node.key}|${other.col >= me.col ? "R" : "L"}`;
   };
-  const sides = new Map<string, { i: number; otherY: number }[]>();
+  const colOf = new Map([...boxes.values()].map((b) => [b.node.key, b.col]));
+  // A self-loop's two ends sort as a level edge would, so they sit together.
+  const sides = new Map<string, { id: string; i: number; otherY: number }[]>();
+  const attach = (k: string, id: string, i: number, otherY: number) => sides.set(k, [...(sides.get(k) ?? []), { id, i, otherY }]);
   items.forEach((e, i) => {
-    if (e.a === e.b) return;
+    if (e.a === e.b) {
+      const k = `${e.a.node.key}|${selfLoopSide(e.row, rows, colOf)}`;
+      for (const end of ["a", "b"]) attach(k, `${k}#${i}${end}`, i, centre(e.a));
+      return;
+    }
     for (const end of ["a", "b"] as const) {
       const k = sideOf(i, end);
-      sides.set(k, [...(sides.get(k) ?? []), { i, otherY: centre(end === "a" ? e.b : e.a) }]);
+      attach(k, `${k}#${i}`, i, centre(end === "a" ? e.b : e.a));
     }
   });
   const slotY = new Map<string, number>();
   for (const [k, list] of sides) {
     const box = boxes.get(k.slice(0, k.lastIndexOf("|")))!;
-    const sorted = [...list].sort((p, q) => p.otherY - q.otherY || p.i - q.i);
-    sorted.forEach(({ i }, n) => slotY.set(`${k}#${i}`, box.y + (NODE_H * (n + 1)) / (sorted.length + 1)));
+    const sorted = [...list].sort((p, q) => p.otherY - q.otherY || p.i - q.i || (p.id < q.id ? -1 : 1));
+    sorted.forEach(({ id }, n) => slotY.set(id, box.y + (NODE_H * (n + 1)) / (sorted.length + 1)));
   }
   const yAt = (i: number, end: "a" | "b") => slotY.get(`${sideOf(i, end)}#${i}`)!;
-
-  const colOf = new Map([...boxes.values()].map((b) => [b.node.key, b.col]));
+  // Edges within one column, shortest first, take the reaches inside out.
+  const reach = new Map<number, number>();
+  const within = items.flatMap((e, i) => (e.a !== e.b && e.a.col === e.b.col ? [{ i, col: e.a.col, span: Math.abs(yAt(i, "a") - yAt(i, "b")) }] : []));
+  for (const col of new Set(within.map((w) => w.col))) {
+    within
+      .filter((w) => w.col === col)
+      .sort((p, q) => p.span - q.span || p.i - q.i)
+      .forEach((w, n) => reach.set(w.i, WITHIN_REACH[n % WITHIN_REACH.length]!));
+  }
   const lanes = gapLanes(rows, colOf, gapW.length);
   const laneX = (g: number, key: string) => {
     const l = lanes[g]!;
@@ -230,18 +275,22 @@ export function routeSystemMapEdges(rows: readonly SystemMapRow[], layout: Layou
   };
   const gapY = (k: number) => PAD + HEAD_H + (k + 1) * (NODE_H + GAP_Y) - GAP_Y / 2;
   const channelUse = new Map<number, number>();
-  let loops = 0;
+  // A cubic bulge out from a side; its widest point is 3/4 of the control offset.
+  const bulge = (x: number, y1: number, y2: number, out: number) => {
+    const c = Math.round(x + (out * 4) / 3);
+    return `M${x} ${y1} C${c} ${y1} ${c} ${y2} ${x} ${y2}`;
+  };
 
   return items.map((e, i) => {
     const { a, b, row } = e;
-    if (a === b) return { row, a, b, d: selfLoop(a, colW) };
+    if (a === b) {
+      const k = `${a.node.key}|${selfLoopSide(row, rows, colOf)}`;
+      const right = k.endsWith("|R");
+      return { row, a, b, d: bulge(right ? a.x + colW : a.x, slotY.get(`${k}#${i}a`)!, slotY.get(`${k}#${i}b`)!, right ? SELF_REACH : -SELF_REACH) };
+    }
     const ay = yAt(i, "a");
     const by = yAt(i, "b");
-    if (a.col === b.col) {
-      const x = a.x + colW;
-      const out = x + 20 + 4 * (loops++ % 4);
-      return { row, a, b, d: `M${x} ${ay} C${out} ${ay} ${out} ${by} ${x} ${by}` };
-    }
+    if (a.col === b.col) return { row, a, b, d: bulge(a.x + colW, ay, by, reach.get(i)!) };
     const forward = b.col > a.col;
     const x1 = forward ? a.x + colW : a.x;
     const x2 = forward ? b.x : b.x + colW;
@@ -264,6 +313,21 @@ export function routeSystemMapEdges(rows: readonly SystemMapRow[], layout: Layou
   });
 }
 
+/** A node's drawn kind: its class, its words in a name, its legend entry. */
+const KINDS = {
+  repo: { cls: "sm-repo", says: "repo, opens its page", legend: "Repo, opens its page" },
+  external: { cls: "sm-external", says: "external, opens its page", legend: "External, opens its page" },
+  nopage: { cls: "sm-external sm-nopage", says: "external, no page", legend: "External, no page" },
+  unresolved: { cls: "sm-unresolved", says: "names no repos/ page", legend: "Names no repos/ page" },
+} as const;
+const EDGE_LEGEND = [
+  ["sm-ok", "Edge: ok"],
+  ["sm-wrong", "Edge: wrong"],
+  ["sm-none", "Edge: no status"],
+] as const;
+
+const swatch = (inner: string) => `<svg class="sm-swatch" viewBox="0 0 24 14" aria-hidden="true" focusable="false">${inner}</svg>`;
+
 function edgeTitle(r: SystemMapRow): string {
   const parts = [`${r.from} → ${r.to}`];
   if (r.protocol) parts.push(r.protocol);
@@ -275,11 +339,12 @@ function edgeTitle(r: SystemMapRow): string {
 export function systemMapViewHtml(input: SystemMapViewInput): string {
   const { read, prefix } = input;
   const label = input.caption ? `System map: ${input.caption}` : "System map";
+  const figure = (cls: string) => `<section class="${cls}" role="figure" aria-label="${escapeHtml(label)}">`;
   const notes = read.findings.length
     ? `<ul class="sm-notes" ${RO}>${read.findings.map((f) => `<li>${escapeHtml(f.message)}</li>`).join("")}</ul>`
     : "";
   if (!read.drawable) {
-    return `<section class="sm sm-fallback">${input.beforeHtml}${notes}${input.tableHtml}${input.afterHtml}</section>`;
+    return `${figure("sm sm-fallback")}${input.beforeHtml}${notes}${input.tableHtml}${input.afterHtml}</section>`;
   }
   const layout = layoutSystemMap(read.nodes, read.columns, read.rows);
   const { boxes, width, height, colW, colX } = layout;
@@ -291,20 +356,28 @@ export function systemMapViewHtml(input: SystemMapViewInput): string {
     })
     .join("");
 
+  const tones = new Set<string>();
   const edges = routeSystemMapEdges(read.rows, layout)
     .map(({ row: r, a, b, d }) => {
       const tone = r.status === "wrong" ? "sm-wrong" : r.status === "ok" ? "sm-ok" : "sm-none";
+      tones.add(tone);
       const marker = r.status === "wrong" ? "wrong" : "ok";
       return `<path class="sm-edge ${tone}" d="${d}" marker-end="url(#${prefix}arr-${marker})" data-sm-from="${escapeHtml(a.node.key)}" data-sm-to="${escapeHtml(b.node.key)}"><title>${escapeHtml(edgeTitle(r))}</title></path>`;
     })
     .join("");
 
+  const kindOf = new Map(
+    read.nodes.map((node) => {
+      const { kind, link } = input.resolveNode(node);
+      return [node.key, { kind: kind === "external" && !link ? ("nopage" as const) : kind, link }];
+    }),
+  );
   const nodes = read.nodes
     .map((node) => {
       const box = boxes.get(node.key)!;
-      const { kind, link } = input.resolveNode(node);
-      const cls = `sm-node sm-${kind}`;
-      const what = kind === "unresolved" ? " — names no repos/ page" : kind === "external" ? " — external" : "";
+      const { kind, link } = kindOf.get(node.key)!;
+      const cls = `sm-node ${KINDS[kind].cls}`;
+      const what = ` — ${KINDS[kind].says}`;
       const shape =
         `<rect x="${box.x}" y="${box.y}" width="${colW}" height="${NODE_H}" rx="6"/>` +
         `<text x="${box.x + colW / 2}" y="${box.y + NODE_H / 2}" text-anchor="middle" dominant-baseline="central">${escapeHtml(fitText(node.label, colW - 2 * NODE_PAD_X, labelWidth))}</text>`;
@@ -323,18 +396,35 @@ export function systemMapViewHtml(input: SystemMapViewInput): string {
       .map((m) => `<marker id="${prefix}arr-${m}" class="sm-arrow sm-arrow-${m}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z"/></marker>`)
       .join("") +
     `</defs>`;
+  // The figure carries the name; the scroll box (a tab stop) says what it
+  // holds; the SVG is an unnamed group (not an unlabelled image), so no name is
+  // announced twice.
   const svg =
-    `<svg class="sm-svg" viewBox="0 0 ${width} ${height}" style="max-width:${width}px;min-width:${Math.ceil((width * LABEL_MIN_PX) / Math.min(LABEL_PX, HEAD_PX))}px" aria-label="${escapeHtml(label)}">` +
-    `<title>${escapeHtml(label)}</title>${markers}${heads}<g class="sm-edges">${edges}</g><g class="sm-nodes">${nodes}</g></svg>`;
-  const map = `<div class="sm-map" ${RO} role="region" tabindex="0" aria-label="${escapeHtml(label)}">${svg}</div>`;
-  return `<section class="sm" role="figure" aria-label="${escapeHtml(label)}">${input.beforeHtml}${map}${notes}${input.tableHtml}${input.afterHtml}</section>`;
-}
-
-function selfLoop(a: Box, colW: number): string {
-  const x = a.x + colW;
-  const y = a.y + NODE_H / 2;
-  const out = x + 30;
-  return `M${x} ${y - 8} C${out} ${y - 24} ${out} ${y + 24} ${x} ${y + 8}`;
+    `<svg class="sm-svg" role="group" viewBox="0 0 ${width} ${height}" style="max-width:${width}px;min-width:${Math.ceil((width * LABEL_MIN_PX) / Math.min(LABEL_PX, HEAD_PX))}px">` +
+    `${markers}${heads}<g class="sm-edges">${edges}</g><g class="sm-nodes">${nodes}</g></svg>`;
+  const caption = input.caption ? `<div class="sm-caption" ${RO}>${escapeHtml(input.caption)}</div>` : "";
+  const map = `<div class="sm-map" ${RO} role="region" tabindex="0" aria-label="Map drawing">${svg}</div>`;
+  const present = new Set([...kindOf.values()].map((k) => k.kind));
+  const legend =
+    `<ul class="sm-legend" ${RO}>` +
+    (Object.keys(KINDS) as (keyof typeof KINDS)[])
+      .filter((k) => present.has(k))
+      .map((k) => `<li>${swatch(`<g class="sm-key-box ${KINDS[k].cls}"><rect x="1" y="1" width="22" height="12" rx="3"/></g>`)}${KINDS[k].legend}</li>`)
+      .join("") +
+    EDGE_LEGEND.filter(([t]) => tones.has(t))
+      .map(([t, words]) => `<li>${swatch(`<path class="sm-key-line ${t}" d="M1 7 L23 7"/>`)}${words}</li>`)
+      .join("") +
+    `</ul>`;
+  const list =
+    `<details class="sm-list" ${RO}><summary>Systems by column</summary><ul>` +
+    read.columns
+      .map((c) => {
+        const inCol = read.nodes.filter((n) => boxes.get(n.key)!.col === read.columns.indexOf(c));
+        return `<li>${escapeHtml(c)}<ul>${inCol.map((n) => `<li>${escapeHtml(n.label)} — ${KINDS[kindOf.get(n.key)!.kind].says}</li>`).join("")}</ul></li>`;
+      })
+      .join("") +
+    `</ul></details>`;
+  return `${figure("sm")}${input.beforeHtml}${caption}${map}${legend}${list}${notes}${input.tableHtml}${input.afterHtml}</section>`;
 }
 
 /** Reader CSS. Theme tokens only, so both themes follow the page. */
@@ -342,17 +432,28 @@ export function systemMapCss(scope: string): string {
   return `
     ${scope} section.sm { margin: 1rem 0; }
     ${scope} .sm-map { overflow-x: auto; margin: 0 0 0.75rem; border: 1px solid var(--border-primary); border-radius: 8px; background: var(--bg-panel); }
+    ${scope} .sm-caption { font-weight: 600; color: var(--text-primary); margin: 0 0 0.4rem; }
     ${scope} .sm-map:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     ${scope} .sm-svg { display: block; width: 100%; height: auto; font-family: inherit; }
     ${scope} .sm-col { fill: var(--text-secondary); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
-    ${scope} .sm-node rect { fill: var(--bg-surface); stroke: var(--border-primary); stroke-width: 1.5; }
+    ${scope} .sm-node rect, ${scope} .sm-key-box rect { fill: var(--bg-surface); stroke: var(--border-primary); stroke-width: 1.5; }
     ${scope} .sm-node text { fill: var(--text-primary); font-size: 12px; }
     ${scope} a.sm-node { cursor: pointer; }
-    ${scope} a.sm-node:hover rect, ${scope} a.sm-node:focus-visible rect { stroke: var(--accent); stroke-width: 2; }
+    ${scope} a.sm-node:hover rect { stroke: var(--accent); stroke-width: 2; }
+    /* Focus is a thick solid ring in the text colour: unlike hover in colour, width and dash. */
+    ${scope} a.sm-node:focus-visible rect { stroke: var(--text-primary); stroke-width: 3.5; stroke-dasharray: none; }
     ${scope} a.sm-node:focus { outline: none; }
-    ${scope} .sm-external rect { fill: var(--bg-panel); stroke: var(--text-soft); stroke-dasharray: 2 3; }
+    ${scope} .sm-external rect { fill: var(--bg-panel); stroke: var(--text-soft); stroke-dasharray: 4 3; }
+    ${scope} .sm-nopage rect { fill: transparent; stroke-dasharray: 1.5 3; }
     ${scope} .sm-unresolved rect { stroke: var(--tone-err); stroke-dasharray: 5 3; }
-    ${scope} .sm-edge { fill: none; stroke-width: 1.6; }
+    /* A node with no page reads in italics: the kind without hovering. */
+    ${scope} .sm-nopage text, ${scope} .sm-unresolved text { font-style: italic; }
+    ${scope} .sm-edge, ${scope} .sm-key-line { fill: none; stroke-width: 1.6; }
+    ${scope} .sm-legend { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; list-style: none; margin: 0 0 0.5rem; padding: 0; font-size: 0.85em; color: var(--text-secondary); }
+    ${scope} .sm-legend li { display: inline-flex; align-items: center; gap: 0.35rem; margin: 0; }
+    ${scope} .sm-swatch { width: 24px; height: 14px; flex: none; overflow: visible; }
+    ${scope} .sm-list { margin: 0 0 0.75rem; font-size: 0.9em; }
+    ${scope} .sm-list summary { cursor: pointer; color: var(--text-secondary); }
     ${scope} .sm-ok, ${scope} .sm-none { stroke: var(--text-secondary); }
     ${scope} .sm-none { stroke-dasharray: 1 3; }
     ${scope} .sm-wrong { stroke: var(--tone-err); stroke-dasharray: 6 4; stroke-width: 2; }
@@ -361,9 +462,10 @@ export function systemMapCss(scope: string): string {
     ${scope} .sm-notes { margin: 0 0 0.75rem; padding-left: 1.2rem; color: var(--text-soft); font-size: 0.9em; }
     @media print { ${scope} .sm-svg { min-width: 0 !important; } ${scope} .sm-map { overflow: visible; border: none; } }
     @media (forced-colors: active) {
-      ${scope} .sm-node rect { fill: Canvas; stroke: CanvasText; }
+      ${scope} .sm-node rect, ${scope} .sm-key-box rect { fill: Canvas; stroke: CanvasText; }
+      ${scope} a.sm-node:focus-visible rect { stroke: Highlight; }
       ${scope} .sm-node text, ${scope} .sm-col { fill: CanvasText; }
-      ${scope} .sm-edge { stroke: CanvasText; }
+      ${scope} .sm-edge, ${scope} .sm-key-line { stroke: CanvasText; }
       ${scope} .sm-arrow-ok path, ${scope} .sm-arrow-wrong path { fill: CanvasText; }
     }
   `;

@@ -8,8 +8,10 @@
  * it is read from; node labels reach 4.5:1 on their boxes and edges 3:1 on the
  * map in the theme's tokens; a `wrong` edge looks unlike an `ok` one; a node
  * opens its repos page through the reader's own navigation; a peek of the
- * section shows the table, not the map; and at 390 px the map scrolls inside
- * its own box while the page does not.
+ * section shows the table, not the map; at 390 px the map scrolls inside
+ * its own box while the page does not; the caption shows, each nesting level
+ * has its own accessible name, keyboard focus on a node looks unlike hover,
+ * and a node's kind shows without hovering (style, legend, node list).
  *
  * The map has no client code, so there is no state to enumerate: the server
  * draws it and the page only lays it out.
@@ -49,7 +51,7 @@ const FILES: Record<string, string> = {
     "",
     "## Map",
     "",
-    '<SystemMap caption="Synthetic systems" external="Registry" groups="alpha-web=frontend;beta-api=core;gamma-svc=services">',
+    '<SystemMap caption="Synthetic systems" external="Registry;Ledger" groups="alpha-web=frontend;beta-api=core;gamma-svc=services">',
     "",
     "| Fra | Til | Protokoll | Status | Bevis |",
     "|---|---|---|---|---|",
@@ -57,6 +59,7 @@ const FILES: Record<string, string> = {
     "| beta-api | [[repos/gamma-svc|gamma-service-under-a-label-far-too-long-for-one-column]] | Kafka | wrong | the topic was retired |",
     "| beta-api | Registry | SOAP | ok | |",
     "| gamma-svc | typo-svc | REST | ok | |",
+    "| gamma-svc | Ledger | REST | ok | |",
     "",
     "</SystemMap>",
     "",
@@ -139,8 +142,8 @@ test.describe("Wiki reader: SystemMap", () => {
       const sec = page.locator(".wiki-article section.sm");
       await expect(sec).toHaveAttribute("aria-label", "System map: Synthetic systems");
       // One box per node, one path per row; the table stays below the map.
-      await expect(sec.locator(".sm-node")).toHaveCount(5);
-      await expect(sec.locator("path.sm-edge")).toHaveCount(4);
+      await expect(sec.locator(".sm-node")).toHaveCount(6);
+      await expect(sec.locator("path.sm-edge")).toHaveCount(5);
       await expect(sec.locator("table")).toBeVisible();
       const order = await sec.evaluate((s) => [s.querySelector(".sm-map"), s.querySelector("table")].map((e) => Array.from(s.querySelectorAll("*")).indexOf(e!)));
       expect(order[0]).toBeLessThan(order[1]!);
@@ -175,12 +178,14 @@ test.describe("Wiki reader: SystemMap", () => {
       // Columns left to right in groups= order, then repos (typo-svc), then external.
       const x = async (key: string) => (await sec.locator(`[data-sm-node="${key}"] rect`).boundingBox())!.x;
       const xs = await Promise.all(["alpha-web", "beta-api", "gamma-svc", "typo-svc", "registry"].map(x));
+      expect(await x("ledger")).toBe(xs[4]!);
       for (let i = 1; i < xs.length; i++) expect(xs[i]!).toBeGreaterThan(xs[i - 1]!);
 
       // Kinds: a repo node links, an external links its integrations page, an unresolved one does not.
       await expect(sec.locator('a.sm-node.sm-repo[data-relpath="repos/beta-api.md"]')).toHaveCount(1);
       await expect(sec.locator('a.sm-node.sm-external[data-relpath="integrations/registry.md"]')).toHaveCount(1);
       await expect(sec.locator('g.sm-node.sm-unresolved[data-sm-node="typo-svc"]')).toHaveCount(1);
+      await expect(sec.locator('g.sm-node.sm-external.sm-nopage[data-sm-node="ledger"]')).toHaveCount(1);
 
       // Contrast in the theme's tokens: label on box 4.5:1, edges on the map 3:1.
       const mapBg = await css(page, ".wiki-article .sm-map", "background-color");
@@ -217,7 +222,7 @@ test.describe("Wiki reader: SystemMap", () => {
     const peek = page.locator(".wiki-ref-peek");
     await expect(peek).toBeVisible();
     await expect(peek.locator("table")).toHaveCount(1);
-    await expect(peek.locator("svg, .sm-map, .sm-notes, [role=figure]")).toHaveCount(0);
+    await expect(peek.locator("svg, .sm-caption, .sm-map, .sm-legend, .sm-list, .sm-notes, [role=figure]")).toHaveCount(0);
   });
 
   test("at 390 px the map scrolls in its own box; the page does not scroll sideways", async ({ page }) => {
@@ -230,6 +235,65 @@ test.describe("Wiki reader: SystemMap", () => {
     expect(doc.scroll).toBeLessThanOrEqual(doc.client);
     // The scrolling box is a keyboard stop with a name.
     await expect(box).toHaveAttribute("tabindex", "0");
-    await expect(box).toHaveAttribute("aria-label", "System map: Synthetic systems");
+    await expect(box).toHaveAttribute("aria-label", "Map drawing");
   });
+
+  for (const scheme of ["dark", "light"] as const) {
+    test(`${scheme}: caption, names, focus and node kinds read without hovering`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await open(page);
+      const sec = page.locator(".wiki-article section.sm");
+      await expect(sec.locator(".sm-caption")).toBeVisible();
+      await expect(sec.locator(".sm-caption")).toHaveText("Synthetic systems");
+
+      // One name per level: the figure, then the scroll box; the SVG adds none.
+      const article = page.locator(".wiki-article");
+      await expect(article.getByRole("figure", { name: "System map: Synthetic systems" })).toHaveCount(1);
+      await expect(sec.getByRole("region", { name: "Map drawing" })).toHaveCount(1);
+      const tree = await sec.ariaSnapshot();
+      expect(tree.match(/System map/g)?.length).toBe(1);
+      expect(tree).not.toMatch(/^\s*- img\b/m);
+
+      // The kind shows without hovering: italics for a node with no page, a
+      // legend naming each style drawn, a node list by column with its kind.
+      expect(await css(page, '.wiki-article [data-sm-node="ledger"] text', "font-style")).toBe("italic");
+      expect(await css(page, '.wiki-article [data-sm-node="typo-svc"] text', "font-style")).toBe("italic");
+      expect(await css(page, '.wiki-article [data-sm-node="registry"] text', "font-style")).toBe("normal");
+      expect(await css(page, '.wiki-article [data-sm-node="ledger"] rect', "stroke-dasharray")).not.toBe(await css(page, '.wiki-article [data-sm-node="registry"] rect', "stroke-dasharray"));
+      await expect(sec.locator(".sm-legend li")).toHaveText(["Repo, opens its page", "External, opens its page", "External, no page", "Names no repos/ page", "Edge: ok", "Edge: wrong"]);
+      await expect(sec.locator(".sm-legend")).toBeVisible();
+      const summary = sec.locator(".sm-list summary");
+      await summary.focus();
+      await page.keyboard.press("Enter");
+      await expect(sec.locator(".sm-list > ul > li")).toHaveCount(5);
+      await expect(sec.locator(".sm-list")).toContainText("Ledger — external, no page");
+      await expect(sec.locator(".sm-list")).toContainText("typo-svc — names no repos/ page");
+
+      // Keyboard focus differs from hover, in the theme's tokens.
+      const token = (v: string) =>
+        page.evaluate((name) => {
+          const probe = document.createElement("span");
+          probe.style.color = `var(${name})`;
+          document.body.append(probe);
+          const c = getComputedStyle(probe).color;
+          probe.remove();
+          return c;
+        }, v);
+      const rect = '.wiki-article a.sm-node[data-sm-node="alpha-web"] rect';
+      const idle = await css(page, rect, "stroke");
+      await page.locator('.wiki-article a.sm-node[data-sm-node="alpha-web"]').hover();
+      const hover = { stroke: await css(page, rect, "stroke"), width: await css(page, rect, "stroke-width") };
+      expect(hover.stroke).toBe(await token("--accent"));
+      await page.mouse.move(0, 0);
+      await expect.poll(() => css(page, rect, "stroke")).toBe(idle);
+      await sec.locator(".sm-map").focus();
+      await page.keyboard.press("Tab");
+      await expect(page.locator('.wiki-article a.sm-node[data-sm-node="alpha-web"]')).toBeFocused();
+      const focus = { stroke: await css(page, rect, "stroke"), width: await css(page, rect, "stroke-width") };
+      expect(focus.stroke).toBe(await token("--text-primary"));
+      expect(focus).not.toEqual(hover);
+      expect(parseFloat(focus.width)).toBeGreaterThan(parseFloat(hover.width));
+      expect(await contrast(page, focus.stroke, await css(page, ".wiki-article .sm-map", "background-color"))).toBeGreaterThanOrEqual(3);
+    });
+  }
 });

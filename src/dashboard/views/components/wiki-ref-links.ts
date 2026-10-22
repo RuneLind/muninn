@@ -340,7 +340,7 @@ export const PEEK_STEPS_CHROME = ["stp-ctrl"] as const;
 
 /** A `<SystemMap>`'s reader chrome (`SYSTEM_MAP_CHROME_CLASSES` in
  *  system-map-view.ts, pinned equal by a test): a peek shows the edge table. */
-export const PEEK_SYSTEM_MAP_CHROME = ["sm-map", "sm-notes"] as const;
+export const PEEK_SYSTEM_MAP_CHROME = ["sm-caption", "sm-map", "sm-legend", "sm-list", "sm-notes"] as const;
 
 /** A peeked system map is its table: no section class, no figure role. */
 function bareSystemMap(sec: Element): void {
