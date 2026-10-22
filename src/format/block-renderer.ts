@@ -1,4 +1,5 @@
 import { observeComponentScope } from "./component-observer.ts";
+import { numberStepLists } from "./steps-focus.ts";
 import type { Block, ComponentName, InlineComponentName, ListBlock, ListChild } from "./markdown-ast.ts";
 
 /** What sits under one list item: a child list one `depth` deeper or a fenced
@@ -100,8 +101,8 @@ function renderBlock(block: Block, r: BlockRenderer): string {
       // A component may emit the walked body or render it again: the observer
       // gets each tag once either way.
       return observeComponentScope(
-        () => renderBlocks(block.children, r),
-        (rendered) => r.component(block.name, block.attrs, rendered, block.children),
+        () => renderBlocks(componentChildren(block), r),
+        (rendered) => r.component(block.name, block.attrs, rendered, componentChildren(block)),
       );
     case "text":
       return r.text(block.lines);
@@ -110,6 +111,12 @@ function renderBlock(block: Block, r: BlockRenderer): string {
       return _exhaustive;
     }
   }
+}
+
+/** A component's body as every surface walks it: a `<Steps>` numbers its
+ *  ordered lists by step place (`numberStepLists`). */
+function componentChildren(block: Extract<Block, { type: "component" }>): Block[] {
+  return block.name === "Steps" ? numberStepLists(block.children) : block.children;
 }
 
 /**

@@ -88,6 +88,16 @@ const PAGE = [
   "",
   '<Diagram src="./case.lifecycle.json" />',
   "",
+  "## One step",
+  "",
+  '<Steps src="./case.lifecycle.json">',
+  "",
+  "1. The only step",
+  "",
+  "   Its focus ends the second paragraph `decided`",
+  "",
+  "</Steps>",
+  "",
 ].join("\n");
 
 const ALL_EDGES = ["opened>basis", "basis>assessed", "assessed>decided"];
@@ -141,8 +151,8 @@ test.afterAll(async () => {
 async function open(page: Page): Promise<void> {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
-  await expect(page.locator(".wiki-article section.stp")).toHaveCount(2);
-  await expect(page.locator(".wiki-article .dgm-svg svg")).toHaveCount(3);
+  await expect(page.locator(".wiki-article section.stp")).toHaveCount(3);
+  await expect(page.locator(".wiki-article .dgm-svg svg")).toHaveCount(4);
 }
 
 const steps = (page: Page, n: number) => page.locator(".wiki-article section.stp").nth(n);
@@ -263,6 +273,17 @@ test.describe("Wiki reader: Steps", () => {
     expect(await dimmed(fig)).toEqual(STEP_DIMS[0]);
     await fig.locator('button[data-dgm-view="typo"]').click();
     expect(await dimmed(fig)).toEqual([]);
+  });
+
+  test("one step: «1 step» at rest, and the focus from the item's second paragraph", async ({ page }) => {
+    await open(page);
+    const sec = steps(page, 2);
+    await expect(sec.locator(".stp-pos")).toHaveText("1 step");
+    await sec.locator('button[data-stp-act="next"]').click();
+    await expect(sec.locator(".stp-pos")).toHaveText("Step 1 of 1");
+    expect(await dimmed(sec)).toEqual(["assessed", "basis", "opened", ...ALL_EDGES].sort());
+    await sec.locator('button[data-stp-act="all"]').click();
+    await expect(sec.locator(".stp-pos")).toHaveText("1 step");
   });
 
   for (const scheme of ["dark", "light"] as const) {

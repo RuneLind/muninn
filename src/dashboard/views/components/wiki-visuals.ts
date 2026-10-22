@@ -11,6 +11,7 @@
  * class), so a fresh render starts every chart as the server wrote it, and
  * one document-level listener serves every render without re-wiring.
  */
+import { stepsPosText } from "../../../format/steps-focus.ts";
 
 /** Press `btn` and release the other buttons of its group. */
 function pressOne(btn: HTMLElement): void {
@@ -103,7 +104,7 @@ function setStep(sec: HTMLElement, i: number): void {
   if (fig) applyDiagramFocus(fig, cur < 0 ? new Set() : focusSet(items[cur]!.dataset.stpFocus));
   sec.querySelector('.stp-ctrl [data-stp-act="all"]')?.setAttribute("aria-pressed", String(cur < 0));
   const pos = sec.querySelector(".stp-ctrl .stp-pos");
-  if (pos) pos.textContent = cur < 0 ? `${items.length} steps` : `Step ${cur + 1} of ${items.length}`;
+  if (pos) pos.textContent = stepsPosText(cur, items.length);
 }
 
 function stepsAct(sec: HTMLElement, act: string): void {

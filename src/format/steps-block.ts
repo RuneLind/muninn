@@ -18,7 +18,7 @@ import { escapeHtml } from "./markdown-core.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
 import { diagramFigureHtml, readDiagram, type DiagramViewInput } from "./diagram-block.ts";
 import { diagramFlavor, pageFileName } from "./query-block.ts";
-import { stepItemOpen } from "./steps-focus.ts";
+import { stepItemOpen, stepsPosText } from "./steps-focus.ts";
 
 export interface StepsViewInput extends DiagramViewInput {
   /** The block's body as rendered, its authored steps as `li.stp-step`. */
@@ -64,7 +64,7 @@ export const stepsViewHtml: StepsViewRenderer = (input) => {
         `<button type="button" class="stp-btn" data-stp-act="next">Next<span aria-hidden="true"> →</span></button>` +
         `<button type="button" class="stp-btn" data-stp-act="play" aria-pressed="false"><span aria-hidden="true">▶ </span>Play</button>` +
         `<button type="button" class="stp-btn" data-stp-act="all" aria-pressed="true">Show all</button>` +
-        `<span class="stp-pos" aria-live="polite">${count} steps</span>` +
+        `<span class="stp-pos" aria-live="polite">${stepsPosText(-1, count)}</span>` +
         `</div>`
       : "";
   return `<section class="stp" data-stp-count="${count}" data-stp-cur="-1">${figure}${ctrl}${list}</section>`;

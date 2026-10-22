@@ -3,7 +3,8 @@
  * diagram file does not define. Page text only (`checkPageText`, so
  * `wiki-check` reports it), over the files `loadPageFiles` read for the page.
  *
- * A step's focus ids are `stepFocusOf`'s (the code spans that end the item);
+ * A step's focus ids are `stepItemFocus`'s (the code spans that end the item's
+ * last paragraph);
  * with no list, the steps are the file's `meta.views` and their `focus`. A
  * file's ids are its nodes' (`diagramNodeIds`: architecture `components`,
  * workflow `nodes`, lifecycle `states`). A file that did not load or is not a
@@ -18,7 +19,7 @@
 import { diagramNodeIds, readDiagram } from "../format/diagram-block.ts";
 import { diagramFlavor } from "../format/query-block.ts";
 import { parseBlocks, type Block } from "../format/markdown-ast.ts";
-import { stepFocusOf } from "../format/steps-focus.ts";
+import { stepItemFocus } from "../format/steps-focus.ts";
 import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import type { LoadedPageFiles } from "./lint-components.ts";
@@ -58,8 +59,10 @@ export function checkSteps(page: { relPath: string }, rawContent: string, files:
       if (!result?.ok || !flavor) continue;
       const known = diagramNodeIds(flavor, result.text);
       if (!known) continue;
-      const items = b.children.flatMap((c) => (c.type === "ul" || c.type === "ol" ? c.items : []));
-      const steps = items.length ? items.map(stepFocusOf) : (readDiagram(flavor, result.text)?.views ?? []).map((v) => v.focus);
+      const items = b.children.flatMap((c) =>
+        c.type === "ul" || c.type === "ol" ? c.items.map((text, k) => stepItemFocus(text, c.nested?.[k])) : [],
+      );
+      const steps = items.length ? items : (readDiagram(flavor, result.text)?.views ?? []).map((v) => v.focus);
       const tagLine = b.line === undefined ? undefined : b.line + offset;
       const at = items.length && tagLine !== undefined ? itemLines(tagLine, items.length) : null;
       steps.forEach((focus, k) => {

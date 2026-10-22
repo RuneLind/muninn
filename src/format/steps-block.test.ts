@@ -3,7 +3,8 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { STEPS_CHROME_CLASSES, stepsViewHtml } from "./steps-block.ts";
-import { stepFocusOf } from "./steps-focus.ts";
+import * as stepsFocus from "./steps-focus.ts";
+const { stepFocusOf } = stepsFocus;
 import { DIAGRAM_ID_MARK, type DiagramSvgResult, type PageFiles } from "./query-block.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
@@ -198,5 +199,76 @@ describe("lint: steps-focus and the Steps file under diagram-svg", () => {
     const f = await loadPageFiles(root, PAGE, md);
     const out = checkPageText({ relPath: PAGE, culled: false }, md, [], f);
     expect(out.filter((x) => x.check === "steps-focus")).toHaveLength(1);
+  });
+});
+
+describe("fix round 1 batch 2: focus off the item's last paragraph, numbering on, one step", () => {
+  const focusOf = (md: string) =>
+    [...renderWikiHtml(md, () => undefined, { views: true, files: files() }).matchAll(/data-stp-focus="([^"]*)"/g)].map((m) => m[1]);
+  const block = (...lines: string[]) => ['<Steps src="./s.lifecycle.json">', "", ...lines, "", "</Steps>"].join("\n");
+
+  test("a continuation paragraph's closing spans are the focus", () => {
+    expect(focusOf(block("1. First `new`", "2. Second", "", "   para two `work`"))).toEqual(["new", "work"]);
+  });
+  test("a nested list stays text: the focus is the last paragraph before it", () => {
+    expect(focusOf(block("1. Opened", "", "   para `work`", "", "   - sub `done`"))).toEqual(["work"]);
+    expect(focusOf(block("1. Opened `new`", "   - sub `done`"))).toEqual(["new"]);
+  });
+  test("a fence ending the item is skipped the same way", () => {
+    expect(focusOf(block("1. Opened `new`", "", "   ```", "   code `done`", "   ```"))).toEqual(["new"]);
+  });
+
+  test("two lists number on: the later <ol> starts after the steps before it", () => {
+    const md = block("1. A `new`", "2. B", "", "Between.", "", "1. C");
+    const html = renderWikiHtml(md, () => undefined, { views: true, files: files() });
+    expect(html).toMatch(/<ol class="stp-list" start="3">/);
+    expect(formatTelegramHtml(md)).toContain("3. C");
+    expect(formatSlackMrkdwn(md)).toContain("3. C");
+    expect(formatWebHtml(md)).toMatch(/<ol[^>]* start="3"/);
+  });
+  test("the source numbers give way to the step's place: start and item values", () => {
+    const md = block("4. A", "", "Between.", "", "5. B", "", "   more", "", "9. C");
+    const html = renderWikiHtml(md, () => undefined, { views: true, files: files() });
+    expect(html).toMatch(/<ol class="stp-list" start="2">/);
+    expect(html).toMatch(/<ol class="stp-list">/);
+    expect(html).not.toMatch(/ value="/);
+    expect(formatTelegramHtml(md)).toContain("3. C");
+    expect(formatTelegramHtml(md)).toContain("1. A");
+  });
+
+  test("one step reads «1 step»", () => {
+    const html = renderWikiHtml(block("1. Only `new`"), () => undefined, { views: true, files: files() });
+    expect(html).toContain('aria-live="polite">1 step</span>');
+    expect(stepsFocus.stepsPosText(-1, 1)).toBe("1 step");
+    expect(stepsFocus.stepsPosText(-1, 4)).toBe("4 steps");
+    expect(stepsFocus.stepsPosText(0, 1)).toBe("Step 1 of 1");
+  });
+});
+
+describe("fix round 1 batch 2: lint reads a continuation paragraph's focus", () => {
+  let base = "";
+  let root = "";
+  const PAGE = "flows/page.mdx";
+  beforeAll(async () => {
+    base = await testTempDir(path.join(tmpdir(), "muninn-steps2-"));
+    root = path.join(base, "wiki");
+    await mkdir(path.join(root, "flows"), { recursive: true });
+    await writeFile(path.join(root, "flows", "s.lifecycle.json"), JSON.stringify(LIFE));
+    await writeFile(path.join(root, "flows", "s.html"), `<svg viewBox="0 0 1 1"><g data-node-id="new"/></svg>`);
+  });
+  afterAll(async () => {
+    if (base) await rm(base, { recursive: true, force: true });
+  });
+  test("an unknown id in a continuation paragraph fires, on the item's line", async () => {
+    const md = ["# P", "", '<Steps src="./s.lifecycle.json">', "", "1. Known `new`", "2. Second", "", "   para `nope`", "", "</Steps>", ""].join("\n");
+    const out = checkSteps({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md));
+    expect(out).toHaveLength(1);
+    expect(out[0]!.message).toContain("step 2");
+    expect(out[0]!.message).toContain("nope");
+    expect(out[0]!.line).toBe(6);
+  });
+  test("a nested list's spans are not judged", async () => {
+    const md = ["# P", "", '<Steps src="./s.lifecycle.json">', "", "1. Known `new`", "   - sub `nope`", "", "</Steps>", ""].join("\n");
+    expect(checkSteps({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md))).toEqual([]);
   });
 });
