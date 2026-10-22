@@ -30,6 +30,8 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "text-diagram": "Drawings in plain code fences that a mermaid diagram could draw",
   "diagram-svg": "<Diagram> and <Steps> files and pictures that are missing, empty, drop parts, or use unstyled classes",
   "steps-focus": "<Steps> steps naming a focus id the diagram does not define",
+  "system-map": "<SystemMap> edge tables the map cannot read: no From/To, an unknown status, a wrong row with no evidence",
+  "system-map-drift": "<SystemMap> rows that disagree with the repos pages' links, and names that resolve to no page",
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",

@@ -195,6 +195,8 @@ export const E2E_PORTS = {
   "wiki-diagram": 3162,
   // <Steps> controls: ONE muninn over a synthetic wiki with two archify-shaped lifecycles.
   "wiki-steps": 3163,
+  // <SystemMap> view: ONE muninn over a synthetic wiki with repos pages and one hub page.
+  "wiki-system-map": 3164,
   // Tracker links: two temp wikis in ONE process — one declaring a `trackers`
   // block (pills, the widened Jira facet) and one that does not, which must
   // render today's stamped-only facet and no pills.

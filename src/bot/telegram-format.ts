@@ -167,6 +167,8 @@ const telegramRenderer: BlockRenderer = {
       case "More":
         return children;
       // One plain line per row, other blocks in place.
+      // The edge table as written: only the wiki reader draws the map.
+      case "SystemMap":
       // The table as written: only the wiki reader draws a chart.
       case "Chart":
         return children;

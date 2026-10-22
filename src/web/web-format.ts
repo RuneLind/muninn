@@ -89,6 +89,7 @@ import {
 } from "../format/report-top.ts";
 import { readCaseBoardView, readChartKind, readStatusRowsView, type CaseBoardView } from "../format/component-spec.ts";
 import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
+import { readSystemMap, type SystemMapViewInput, type SystemMapViewRenderer } from "../format/system-map.ts";
 import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
 import type { DiagramViewRenderer } from "../format/diagram-block.ts";
 import type { StepsViewRenderer } from "../format/steps-block.ts";
@@ -285,6 +286,11 @@ export function formatWebHtml(
      *  `chartViewHtml`). Passed in so the chat bundle never carries it.
      *  Absent ⇒ a chart prints its table as written. */
     chartView?: ChartViewRenderer;
+    /** With `views`: the `<SystemMap>` view (`renderWikiHtml` passes
+     *  `systemMapViewHtml`) and the node lookup it draws links from. Absent ⇒
+     *  a system map prints its table as written. */
+    systemMapView?: SystemMapViewRenderer;
+    systemMapNodes?: SystemMapViewInput["resolveNode"];
     /** With `views`: the `<RuleTree>` view (`renderWikiHtml` passes
      *  `ruleTreeViewHtml`), passed in like `chartView`. Absent ⇒ a rule tree
      *  prints its list as written. */
@@ -324,6 +330,8 @@ export function formatWebHtml(
   const prevDiagramView = currentDiagramView;
   const prevDiagramCount = currentDiagramCount;
   const prevStepsView = currentStepsView;
+  const prevSystemMapView = currentSystemMapView;
+  const prevSystemMapCount = currentSystemMapCount;
   const prevCaseKorts = currentCaseKorts;
   const prevCaseDotsView = currentCaseDotsView;
   const prevCaseDotsPending = currentCaseDotsPending;
@@ -334,6 +342,11 @@ export function formatWebHtml(
   currentDiagramView = currentViews && text.includes("<Diagram") ? (opts?.diagramView ?? null) : null;
   currentDiagramCount = 0;
   currentStepsView = currentViews && text.includes("<Steps") ? (opts?.stepsView ?? null) : null;
+  currentSystemMapView =
+    currentViews && text.includes("<SystemMap") && opts?.systemMapView
+      ? { render: opts.systemMapView, nodes: opts.systemMapNodes ?? (() => ({ kind: "unresolved", link: null })) }
+      : null;
+  currentSystemMapCount = 0;
   currentCaseKorts = NO_CASE_KORTS;
   const chartView = currentViews && text.includes("<Chart") ? opts?.chartView : undefined;
   const charted = chartView !== undefined;
@@ -417,6 +430,8 @@ export function formatWebHtml(
     currentLedgerRows = prevLedgerRows;
     currentLogIds = prevLogIds;
     currentRuleTreeView = prevRuleTreeView;
+    currentSystemMapView = prevSystemMapView;
+    currentSystemMapCount = prevSystemMapCount;
     currentDiagramView = prevDiagramView;
     currentDiagramCount = prevDiagramCount;
     currentStepsView = prevStepsView;
@@ -482,6 +497,12 @@ let currentDiagramCount = 0;
 /** `opts.stepsView` for the call in progress; null ⇒ a `<Steps>` is its list
  *  and its not-loaded line. It numbers its picture with the diagram count. */
 let currentStepsView: StepsViewRenderer | null = null;
+
+/** `opts.systemMapView` and its node lookup for the call in progress; null ⇒ a
+ *  `<SystemMap>` is its table. The count numbers the call's maps for their id
+ *  prefix. */
+let currentSystemMapView: { render: SystemMapViewRenderer; nodes: SystemMapViewInput["resolveNode"] } | null = null;
+let currentSystemMapCount = 0;
 
 /** `opts.ruleTreeView` for the call in progress; null ⇒ a `<RuleTree>` is its list. */
 let currentRuleTreeView: RuleTreeViewRenderer | null = null;
@@ -941,6 +962,25 @@ function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
     language: currentLanguage,
     ledgerRows: currentLedgerRows,
     logIds: currentLogIds,
+  });
+}
+
+/** A `<SystemMap>`: on the reader's page render with a map view, the map over
+ *  its edge table (the table under its findings when it cannot draw); else the
+ *  body as written. Cells are read as the lint reads them (`visibleText`),
+ *  wikilink sentinels as their link text first. */
+function systemMapBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
+  if (!currentSystemMapView) return children;
+  const body = chartBody(rawChildren);
+  currentSystemMapCount++;
+  return currentSystemMapView.render({
+    read: readSystemMap(attrs, body.table ? chartTable(body.table, (c) => visibleText(peekText(c))) : null),
+    caption: visibleText(peekText(attrs.caption ?? "")).trim(),
+    tableHtml: body.table ? renderBlocks([body.table], webRenderer) : "",
+    beforeHtml: renderBlocks(body.before, webRenderer),
+    afterHtml: renderBlocks(body.after, webRenderer),
+    prefix: `sm${currentSystemMapCount}-`,
+    resolveNode: currentSystemMapView.nodes,
   });
 }
 
@@ -2371,6 +2411,8 @@ const webRenderer: BlockRenderer = {
         return children;
       case "Chart":
         return chartBlockHtml(attrs, rawChildren, children);
+      case "SystemMap":
+        return systemMapBlockHtml(attrs, rawChildren, children);
       case "Diagram":
         return diagramBlockHtml(attrs);
       case "Steps":

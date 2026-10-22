@@ -206,6 +206,15 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     teach: WIKI,
     attrs: { src: { doc: "The diagram file, relative to the page", printType: '"./<name>.lifecycle.json"' } },
   },
+  SystemMap: {
+    doc: "An edge table (From/Fra, To/Til, Protocol/Protokoll, Status ok|wrong, Evidence/Bevis; a wrong row gives its reason as evidence) drawn as a map of systems; a node name is a repos/ page stem or a name listed in external=. The wiki reader draws the map above the table, every other surface prints the table.",
+    teach: WIKI,
+    attrs: {
+      caption: { doc: "A line naming the map, also its accessible name" },
+      external: { doc: "Names with no repos/ page; each links its integrations/ page when one exists", printType: '"<name>;<name>"' },
+      groups: { doc: "A node's column (default: repos, or external for an external name)", printType: '"<name>=<group>;…"' },
+    },
+  },
 };
 
 /**

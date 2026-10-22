@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Thirty-five check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Thirty-nine check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -129,6 +129,12 @@
  * 22. steps-focus — on `.mdx` pages that are not culled, a `<Steps>` step
  *                      naming a focus id its diagram file does not define
  *                      (warning). Rules: `lint-steps.ts`.
+ * 23. system-map / system-map-drift — on `.mdx` pages that are not culled,
+ *                      what a `<SystemMap>` edge table cannot read (page text,
+ *                      so `wiki-check` reports it), and, over the whole wiki,
+ *                      a node name that resolves to no page plus drift
+ *                      against the repos pages' link sections (`lintWiki`
+ *                      only). Rules: `lint-system-map.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -171,6 +177,7 @@ import { checkGlossaries, GLOSSARY_LINT_CHECKS } from "./lint-glossary.ts";
 import { checkTextDiagrams, TEXT_DIAGRAM_LINT_CHECKS } from "./lint-text-diagram.ts";
 import { checkDiagrams, DIAGRAM_LINT_CHECKS } from "./lint-diagram.ts";
 import { checkSteps, STEPS_LINT_CHECKS } from "./lint-steps.ts";
+import { checkSystemMapDrift, checkSystemMaps, SYSTEM_MAP_DRIFT_LINT_CHECKS, SYSTEM_MAP_LINT_CHECKS, type SystemMapPage } from "./lint-system-map.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
@@ -210,6 +217,8 @@ export const LINT_CHECKS = [
   ...TEXT_DIAGRAM_LINT_CHECKS,
   ...DIAGRAM_LINT_CHECKS,
   ...STEPS_LINT_CHECKS,
+  ...SYSTEM_MAP_LINT_CHECKS,
+  ...SYSTEM_MAP_DRIFT_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -245,6 +254,7 @@ export const PAGE_TEXT_LINT_CHECKS = [
   ...TEXT_DIAGRAM_LINT_CHECKS,
   ...DIAGRAM_LINT_CHECKS,
   ...STEPS_LINT_CHECKS,
+  ...SYSTEM_MAP_LINT_CHECKS,
 ] as const satisfies readonly LintCheck[];
 
 /** What the page-text checks read of a page. */
@@ -1051,7 +1061,7 @@ export function checkPageText(
     ...checkReportTop(page, content),
     ...checkDecisionChain(page, content),
   ];
-  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content), ...checkDiagrams(page, content, files), ...checkSteps(page, content, files));
+  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content), ...checkDiagrams(page, content, files), ...checkSteps(page, content, files), ...checkSystemMaps(page, content));
   if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content), ...checkTextDiagrams(page, content));
   return findings;
 }
@@ -1089,6 +1099,9 @@ export async function lintWiki(
   const statePhrases = index.readerConfig?.statePhrases ?? null;
   const stateOwnerPages: OwnerPage[] = [];
   const statePages: StatePage[] = [];
+  // `system-map-drift` reads the repos pages a map names, so it runs after
+  // the loop over the hub pages the loop collected.
+  const systemMapPages: SystemMapPage[] = [];
 
   for (const page of index.pages) {
     if (page.type === "explainer") continue; // no frontmatter, no links
@@ -1111,6 +1124,7 @@ export async function lintWiki(
       // Check 9 — live report pages only (`isLiveReportPage`).
       findings.push(...checkDrift(page, content, drift));
     }
+    if (judgesComponents(page) && content.includes("<SystemMap")) systemMapPages.push({ page, content });
     // Reserved and culled pages own nothing and are linted for nothing.
     if (statePhrases && !reservedBasename(page.relPath) && !page.culled) {
       const fm = parseFrontmatter(content);
@@ -1123,6 +1137,10 @@ export async function lintWiki(
     const projects = (index.readerConfig?.trackers ?? []).flatMap((t) => t.projects);
     findings.push(...checkState(statePages, stateOwners(stateOwnerPages), statePhrases, projects));
     findings.push(...checkOwnsEntries(stateOwnerPages));
+  }
+
+  if (systemMapPages.length > 0) {
+    findings.push(...(await checkSystemMapDrift(index, systemMapPages, (relPath) => readFile(path.join(index.root, relPath)))));
   }
 
   findings.push(...checkOrphans(index));

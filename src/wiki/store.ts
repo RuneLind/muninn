@@ -235,6 +235,32 @@ export interface WikiReaderConfig {
    * `readWikiReaderConfig` always sets it.
    */
   statePhrases?: StatePhrasesConfig | null;
+  /**
+   * The heading names whose sections the `system-map-drift` lint reads for
+   * links between `repos/` pages (`systemMapLinkHeadings`). Undefined ⇒ the
+   * default list (`SYSTEM_MAP_LINK_HEADINGS_DEFAULT`, `lint-system-map.ts`).
+   * A set list REPLACES the default. A bad entry warns and is dropped; a list
+   * left empty warns and is ignored.
+   */
+  systemMapLinkHeadings?: string[];
+}
+
+/** `systemMapLinkHeadings`: a list of non-blank strings, trimmed. Undefined
+ *  when absent, not a list, or empty after the bad entries are dropped. */
+export function parseSystemMapLinkHeadings(raw: unknown): { headings: string[] | undefined; warnings: string[] } {
+  if (raw === undefined) return { headings: undefined, warnings: [] };
+  if (!Array.isArray(raw)) return { headings: undefined, warnings: ["is not a list of heading names — using the default"] };
+  const warnings: string[] = [];
+  const headings: string[] = [];
+  for (const h of raw) {
+    if (typeof h !== "string" || !h.trim()) {
+      warnings.push(`entry ${JSON.stringify(h)} is not a heading name — dropped`);
+      continue;
+    }
+    if (!headings.includes(h.trim())) headings.push(h.trim());
+  }
+  if (headings.length === 0) return { headings: undefined, warnings: [...warnings, "names no heading — using the default"] };
+  return { headings, warnings };
 }
 
 /**
@@ -2082,6 +2108,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   for (const reason of statePhrases.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "statePhrases", reason });
   }
+  const systemMapLinkHeadings = parseSystemMapLinkHeadings(obj.systemMapLinkHeadings);
+  for (const reason of systemMapLinkHeadings.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "systemMapLinkHeadings", reason });
+  }
   for (const { key, reason } of cull.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
   }
@@ -2111,6 +2141,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     defaultLens: defaultLens.lens,
     roleKeys: roleKeys.keys,
     statePhrases: statePhrases.config,
+    ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

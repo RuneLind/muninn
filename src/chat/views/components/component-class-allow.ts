@@ -98,6 +98,8 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "dgm-unavailable",
   // `<Steps>`: chat prints its list and its not-loaded line.
   "stp-unavailable",
+  // `<SystemMap>`: no class. Chat prints the edge table as a plain table; only
+  // the wiki reader's page render draws the map (`systemMapView`).
   "delta-table", "dt-better-lower", "dt-better-higher", "dt-body", "dt-wrap", "dt-table", "dt-run",
   "dt-delta", "dt-delta-runs", "dt-abs", "dt-pct", "dt-good", "dt-bad", "dt-flat", "dt-none",
   "dt-unavailable", "dt-note", "dt-warning", "dt-truncated", "dt-mark", "dt-delta-dir", "dt-overflow",
