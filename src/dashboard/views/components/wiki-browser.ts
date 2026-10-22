@@ -72,6 +72,7 @@ import { closeChatOptionsIfNavigatingAway, initChatOptions } from "./wiki-chat-o
 // `Bun.build` entrypoint, so loading both would give the page two copies of the
 // module — two states, two document listener sets, one split dialog.
 import { openShareDialog, closeShareDialogOnNavigate } from "./share-dialog.ts";
+import { closeWalkthroughOnNavigate, enhanceWalkthroughButtons } from "./wiki-walkthrough.ts";
 import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
 import {
   fellesBtnHtml,
@@ -2896,6 +2897,8 @@ function renderBreadcrumb(m: WikiListing): void {
   // Keyed on relPath (`shareNavigationKey`): under the NAME, moving between two
   // same-stem pages left the dialog open and still aimed at the page just left.
   closeShareDialogOnNavigate(m.relPath || m.name);
+  // A walkthrough panel belongs to the page it was opened on.
+  closeWalkthroughOnNavigate(m.relPath || null);
   // The answer export belongs to the page that mounted it; the markdown path
   // mounts it again after this render, an explainer never does.
   unmountAnswerExport();
@@ -3007,6 +3010,7 @@ function hideBreadcrumb(): void {
   const el = document.getElementById("wikiBreadcrumb");
   if (el) el.style.display = "none";
   unmountAnswerExport(); // an Ask answer, the start view or an issue graph: no page
+  closeWalkthroughOnNavigate(null);
   // No page is open any more, so there is nothing for the Discuss button to act
   // on. Leaving the last page stamped here is the stale-state trap: the button is
   // hidden with the breadcrumb, but every other path that reads `currentArticle`
@@ -4602,6 +4606,15 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // After the fact-check layer, which anchors marks on the text as served;
       // before the hash reveal, which needs the fold and heading ids it adds.
       enhanceRefLinks(articleRoot, data.meta.relPath, reader?.idLabels);
+      // 🧭 on each top-level section heading. After the ref links, which index
+      // heading text: the button's own glyph must not join that text.
+      if (data.meta.relPath) {
+        enhanceWalkthroughButtons(articleRoot, {
+          relPath: data.meta.relPath,
+          hash: currentPageHash,
+          withWiki,
+        });
+      }
       // The lens (D2's precedence): a `?lens=` the page was opened with, once,
       // then the viewer's stored choice, then the page's default. Before the
       // hash reveal, whose REVEAL_EVENT switches a hidden target's view to All.

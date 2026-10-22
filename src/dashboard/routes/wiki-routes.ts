@@ -137,6 +137,24 @@ import {
 } from "../../share/prompt.ts";
 import { parseShareRequestBody, SHARE_LANGS } from "../../share/wire.ts";
 import {
+  acquireWalkthroughFlight,
+  streamWalkthroughSSE,
+  walkthroughFlightKey,
+} from "./walkthrough-sse.ts";
+import {
+  buildWalkthroughSystemPrompt,
+  buildWalkthroughUserPrompt,
+  locateSection,
+  sectionPlainText,
+  WALKTHROUGH_SECTION_MAX,
+} from "../../wiki/walkthrough.ts";
+import {
+  normalizeHeadingText,
+  WALKTHROUGH_HEADING_MAX,
+  WALKTHROUGH_ORDINAL_MAX,
+} from "../../wiki/walkthrough-wire.ts";
+import { requireJsonRequest } from "./json-request.ts";
+import {
   acquireClaimRetry,
   claimRetryKey,
   neutralizePromptFence,
@@ -935,6 +953,14 @@ export function resolveSharePreflight(input: {
  * real model call, and was therefore the one part of this route with no coverage.
  */
 let shareOneShot: typeof executeOneShot | null = null;
+
+/** Model seam for `POST /api/wiki/walkthrough` — Share's {@link shareOneShot}. */
+let walkthroughOneShot: typeof executeOneShot | null = null;
+
+/** Test-only: install (or clear, with no arg) the walkthrough one-shot. */
+export function __setWalkthroughOneShotForTest(fn?: typeof executeOneShot): void {
+  walkthroughOneShot = fn ?? null;
+}
 
 /** Test-only: install (or clear, with no arg) the share one-shot. */
 export function __setShareOneShotForTest(fn?: typeof executeOneShot): void {
@@ -3214,6 +3240,128 @@ export function registerWikiToolRoutes(
         error: err instanceof Error ? err.message : String(err),
       });
       return c.json({ error: "share failed" }, 500);
+    }
+  });
+
+  // «Walk me through» — one section of a page as steps and a quiz
+  // (`POST /api/wiki/walkthrough`, SSE). Share's guards and ordering: the JSON
+  // gate, every body check and every page/section check answer plain JSON BEFORE
+  // the stream commits a 200; the per-wiki egress prologue runs before bot
+  // resolution. Nothing is written. Admin-only by the zone model's default-deny
+  // (never add it to a user zone), and in the `wiki` group, so nais drops it.
+  app.post("/api/wiki/walkthrough", async (c) => {
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
+    try {
+      const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return c.json({ error: "body must be a JSON object" }, 400);
+      }
+      for (const f of ["wiki", "bot", "relPath", "heading", "hash"]) {
+        if (body[f] !== undefined && typeof body[f] !== "string") {
+          return c.json({ error: `${f} must be a string` }, 400);
+        }
+      }
+      const relPathRef = ((body.relPath as string | undefined) ?? "").trim();
+      const heading = normalizeHeadingText((body.heading as string | undefined) ?? "");
+      const { ordinal, count } = body;
+      if (!relPathRef) return c.json({ error: "relPath is required" }, 400);
+      if (!heading) return c.json({ error: "heading is required" }, 400);
+      if (heading.length > WALKTHROUGH_HEADING_MAX) {
+        return c.json({ error: `heading is longer than ${WALKTHROUGH_HEADING_MAX} characters` }, 400);
+      }
+      if (
+        !Number.isInteger(count) || (count as number) < 1 || (count as number) > WALKTHROUGH_ORDINAL_MAX ||
+        !Number.isInteger(ordinal) || (ordinal as number) < 0 || (ordinal as number) >= (count as number)
+      ) {
+        return c.json({ error: "ordinal and count must be integers with 0 <= ordinal < count" }, 400);
+      }
+
+      const { entry, unknownWiki, wiki } = resolveWikiRequest(
+        getWikiRegistry(),
+        c.req.query("wiki") ?? (body.wiki as string | undefined),
+        c.req.query("bot") ?? (body.bot as string | undefined),
+        process.env.WIKI_DIR,
+      );
+      const egress = egressRefusal(c, entry, unknownWiki);
+      if (egress) return egress;
+      if (unknownWiki || !entry) return c.json({ error: `No wiki configured for "${wiki || "(none)"}".` }, 404);
+      const index = await getWikiIndex({ root: entry.root });
+      if (!index) return c.json({ error: "wiki directory not found" }, 404);
+      const meta = resolvePageRef(index, relPathRef, "");
+      if (!meta) return c.json({ error: noPageMessage(relPathRef, "") }, 404);
+      if (meta.type === "explainer") {
+        return c.json({ error: "An HTML explainer has no sections to walk through." }, 400);
+      }
+      const raw = await readWikiPage(index, meta);
+      if (raw === null) return c.json({ error: "page file unreadable" }, 503);
+      if (typeof body.hash === "string" && body.hash && body.hash !== sha256(raw)) {
+        return c.json({ error: "The page changed since it was opened — reload it and try again.", stale: true }, 409);
+      }
+      const located = locateSection(raw, {
+        heading,
+        ordinal: ordinal as number,
+        count: count as number,
+        stripTitle: meta.title,
+        resolve: index.resolve,
+      });
+      if (!located.ok) {
+        return located.reason === "not_found"
+          ? c.json({ error: `No section headed "${heading}" on this page.` }, 404)
+          : c.json({ error: "The page changed since it was opened — reload it and try again.", stale: true }, 409);
+      }
+      const sectionText = sectionPlainText(located.section.markdown, index.resolve);
+      if (!sectionText) return c.json({ error: `The section "${heading}" has no text to walk through.` }, 422);
+      if (sectionText.length > WALKTHROUGH_SECTION_MAX) {
+        return c.json(
+          { error: `The section is too long to walk through (${sectionText.length} characters; the limit is ${WALKTHROUGH_SECTION_MAX}).` },
+          400,
+        );
+      }
+
+      const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
+      let release: (() => void) | undefined;
+      if (botConfig) {
+        const acquired = acquireWalkthroughFlight(walkthroughFlightKey(entry.name, meta.relPath));
+        if (!acquired.ok) {
+          return c.json(
+            {
+              state: "running",
+              expiresAtMs: acquired.expiresAtMs,
+              error: "Several walkthroughs are already being written for this page — try again in a minute.",
+            },
+            409,
+          );
+        }
+        release = acquired.release;
+        log.info("Wiki walkthrough: wiki={wiki} bot={bot} page={page} heading={heading}", {
+          wiki: entry.name,
+          bot: botConfig.name,
+          page: meta.relPath,
+          heading,
+        });
+      }
+      try {
+        return streamWalkthroughSSE(c, {
+          config,
+          botConfig: botConfig ?? null,
+          systemPrompt: buildWalkthroughSystemPrompt(entry.name),
+          userPrompt: buildWalkthroughUserPrompt({ pageTitle: meta.title, heading, sectionText }),
+          sectionText,
+          heading,
+          runName: `Walkthrough: ${heading}`,
+          ...(walkthroughOneShot ? { oneShot: walkthroughOneShot } : {}),
+          ...(release ? { onSettled: release } : {}),
+        });
+      } catch (err) {
+        release?.();
+        throw err;
+      }
+    } catch (err) {
+      log.error("Wiki walkthrough failed: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ error: "walkthrough failed" }, 500);
     }
   });
 

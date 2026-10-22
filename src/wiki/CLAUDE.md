@@ -2813,6 +2813,15 @@ Turns one wiki page into a pasteable post — the reader's **📤 Share** breadc
 - **`GET /api/wiki/share/presets?wiki=`** serves the merged preset list WITH its content (the dialog shows and edits the prompt) plus the language list. Read-only, model-free, 404 on an unknown wiki; a bot-less wiki still gets the shipped set with `bot: null`.
 - **One dialog module, one copy per page.** `share-dialog.ts` owns the state and the document listeners; `share-dialog-browser.ts` publishes `openShareDialog` on `globalThis` for pages that cannot import (the `/summaries` mount). The /wiki reader IMPORTS it from inside `wiki-browser.ts`'s bundle and never loads the standalone script — doing both would put two module states and two listener sets on one page.
 
+## Walk me through (`POST /api/wiki/walkthrough`)
+
+A 🧭 button on each section heading opens a panel with steps and a quiz for that section. Pure half `walkthrough.ts`, wire `walkthrough-wire.ts`, runner `dashboard/routes/walkthrough-sse.ts`, panel `dashboard/views/components/wiki-walkthrough{,-view}.ts`.
+
+- **A section is named by heading text + ordinal + count.** The reader decorates `.wiki-article > h1…h6`, which are exactly the TOP-LEVEL heading blocks of `parseBlocks(readerBody(page))` (`readerBody` is `renderWikiHtml`'s own preamble, exported): a heading in a `<Fold>` or another component is inside its wrapper, one in a fence is code. Both sides compare RENDERED text — the client `textContent` minus reader-only chrome, the server the heading rendered through `renderWikiHtml` and reduced by `htmlPlainText` — so inline code, links, emphasis and inline components agree. `headingLine` (`markdown-ast.ts`, a side table like `paragraphLines`) gives the source line; a section ends at the next top-level heading of the same or a higher level, else at EOF. A `count` the page no longer has, or a stale `hash`, is a 409 `{stale: true}` rather than a guess.
+- **One plain text, two readers.** The model gets the section as `sectionPlainText` (rendered, whitespace collapsed); a quote matches when ITS `sectionPlainText` is a substring, so quotes differing only in markdown or whitespace pass. Under `WALKTHROUGH_QUOTE_MIN` (12) characters is dropped. Every step dropped is an `app_error` with `code: "all_dropped"`; an unparseable reply `code: "parse_failed"`; a malformed ITEM is a `malformed` drop, not a failure.
+- **Guards are Share's.** JSON gate (415), every body, page and section check as plain JSON before the stream commits, `egressRefusal` before bot resolution, `toolSurface: "none"` plus the web pair excluded, no entries in `src/auth/` (default-deny keeps it admin-only), `wiki` group (nais drops it). Up to `WALKTHROUGH_MAX_INFLIGHT_PER_PAGE` (3) runs per page, since a closed panel aborts the client but not the model call.
+- **Nothing is stored** (O2 = A). The client hides the button on a read-only wiki and under the read slice; `[data-walkthrough-btn]` is in `WIKI_READONLY_EGRESS_SELECTOR` as the backstop. Smoked in `e2e/wiki-walkthrough.spec.ts`.
+
 ## Provenance (`provenance.ts`, `provenance-service.ts`, `session-ledger.ts`, `lockfile.ts`)
 
 Which agent sessions wrote a page, which Jira issue it serves, which PRs its work
@@ -4327,6 +4336,7 @@ So each of them carries a **per-wiki prologue** (`egressRefusal` in `wiki-routes
 | `GET /api/wiki/factcheck` | claim extraction + per-claim verification — **live web** |
 | `GET /api/wiki/factcheck/claim` | one re-verification — **live web** |
 | `POST /api/wiki/share` | one fenced one-shot turning the page into a pasteable post |
+| `POST /api/wiki/walkthrough` | one fenced, tool-less one-shot turning one section into steps and a quiz |
 | `POST /api/wiki/ask/chat` | a DB thread + conversation shell seeded with page content (**all three modes**) |
 | `POST /api/wiki/factcheck/integrate` | the ~90 s editor one-shot over the whole page |
 | `GET /api/wiki/digest` | a `log.md` summarization one-shot — gated by nothing else, so it fires on the reader's first start-view load |
