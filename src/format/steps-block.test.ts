@@ -272,3 +272,72 @@ describe("fix round 1 batch 2: lint reads a continuation paragraph's focus", () 
     expect(checkSteps({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md))).toEqual([]);
   });
 });
+
+describe("fix round 1 batch 3: item lines, block names, a file with no nodes", () => {
+  let base = "";
+  let root = "";
+  const PAGE = "flows/page.mdx";
+  beforeAll(async () => {
+    base = await testTempDir(path.join(tmpdir(), "muninn-steps3-"));
+    root = path.join(base, "wiki");
+    await mkdir(path.join(root, "flows"), { recursive: true });
+    await writeFile(path.join(root, "flows", "s.lifecycle.json"), JSON.stringify(LIFE));
+    await writeFile(path.join(root, "flows", "s.workflow.json"), JSON.stringify({ nodes: [{ id: "a" }] }));
+    await writeFile(path.join(root, "flows", "s.html"), `<svg viewBox="0 0 1 1"><g data-node-id="new"/></svg>`);
+    await writeFile(path.join(root, "flows", "e.lifecycle.json"), JSON.stringify({ meta: { title: "E" }, stats: LIFE.states }));
+    await writeFile(path.join(root, "flows", "e.html"), `<svg viewBox="0 0 1 1"></svg>`);
+  });
+  afterAll(async () => {
+    if (base) await rm(base, { recursive: true, force: true });
+  });
+  const steps = async (md: string) => checkSteps({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md));
+  const NO_NODES = (list: string) =>
+    `file defines no nodes (its ${list} list is missing or empty); the text form is empty and no focus id can light a node`;
+  const diagrams = async (md: string) => checkDiagrams({ relPath: PAGE }, md, await loadPageFiles(root, PAGE, md));
+
+  test("a nested sub-bullet does not push step 2's finding onto the tag line", async () => {
+    const md = ["# P", "", '<Steps src="./s.lifecycle.json">', "", "- A `new`", "  - nested note", "- B `nope`", "", "</Steps>", ""].join("\n");
+    const out = await steps(md);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.message).toContain("step 2");
+    expect(out[0]!.line).toBe(7);
+  });
+  test("an `N)` line the parser reads as prose is not an item", async () => {
+    const md = ["# P", "", '<Steps src="./s.lifecycle.json">', "", "1. A `new`", "2) prose", "2. B `nope`", "", "</Steps>", ""].join("\n");
+    const out = await steps(md);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.message).toContain("step 2");
+    expect(out[0]!.line).toBe(7);
+  });
+
+  test("web chat names a <Steps> file line «Steps», as the other platforms do", () => {
+    const html = formatWebHtml(LIST);
+    expect(html).toContain("Steps not loaded here: s.lifecycle.json");
+    expect(html).not.toContain("Diagram not loaded here");
+    // A file that loaded, on a render with no steps view (chat with page files).
+    const loaded = formatWebHtml(LIST, { files: files() });
+    expect(loaded).toContain("Steps not loaded here: s.lifecycle.json");
+    expect(loaded).not.toContain("Diagram not loaded here");
+  });
+  test("check 21 names a <Steps> sharer by its own tag", async () => {
+    const md = ["# P", "", '<Steps src="./s.lifecycle.json">', "", "1. A `new`", "", "</Steps>", "", '<Diagram src="./s.workflow.json" />', ""].join("\n");
+    const shared = (await diagrams(md)).filter((f) => f.message.includes("shares picture"));
+    expect(shared.map((f) => f.message)).toEqual([
+      '<Steps src="./s.lifecycle.json"> shares picture ./s.html with <Diagram src="./s.workflow.json">; archify writes one picture per diagram file, so these blocks show the same drawing',
+      '<Diagram src="./s.workflow.json"> shares picture ./s.html with <Steps src="./s.lifecycle.json">; archify writes one picture per diagram file, so these blocks show the same drawing',
+    ]);
+  });
+
+  test("a file with no node list is check 21's finding, and check 22 stays quiet", async () => {
+    const md = ["# P", "", '<Steps src="./e.lifecycle.json">', "", "1. A `new`", "2. B `work`", "", "</Steps>", ""].join("\n");
+    expect(await steps(md)).toEqual([]);
+    const d = await diagrams(md);
+    expect(d.map((f) => [f.line, f.message])).toEqual([[3, `<Steps src="./e.lifecycle.json"> ${NO_NODES("states")}`]]);
+  });
+  test("a <Diagram> on a file whose node list is empty gets the same finding", async () => {
+    await writeFile(path.join(root, "flows", "z.workflow.json"), JSON.stringify({ nodes: [] }));
+    await writeFile(path.join(root, "flows", "z.html"), `<svg viewBox="0 0 1 1"></svg>`);
+    const d = await diagrams('# P\n\n<Diagram src="./z.workflow.json" />\n');
+    expect(d.map((f) => f.message)).toEqual([`<Diagram src="./z.workflow.json"> ${NO_NODES("nodes")}`]);
+  });
+});

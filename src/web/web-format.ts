@@ -912,8 +912,8 @@ function stepsBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
   const withNote = (note: string) => [children, blockNote("stp-unavailable", note)].filter(Boolean).join("\n");
   if (!src) return withNote(STEPS_NO_SRC);
   const file = lookupPageFile(currentPageFiles, src, "diagram");
-  if (!file.ok) return withNote(pageFileFailureText(file.reason, src, "Diagram"));
-  if (!currentStepsView) return withNote(pageFileFailureText("not-loaded", src, "Diagram"));
+  if (!file.ok) return withNote(pageFileFailureText(file.reason, src, "Steps"));
+  if (!currentStepsView) return withNote(pageFileFailureText("not-loaded", src, "Steps"));
   currentDiagramCount++;
   let authored = 0;
   const bodyHtml = rawChildren.some((b) => b.type === "ul" || b.type === "ol")

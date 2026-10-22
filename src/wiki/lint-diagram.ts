@@ -7,6 +7,8 @@
  * - the diagram file did not load (missing, unreadable, over its cap, not a
  *   diagram file, past the page's limits): the reader shows one line;
  * - the JSON file is not a JSON object: the reader shows one line;
+ * - the JSON file defines no nodes (its flavor's node list is missing, empty
+ *   or has no ids): the text form is empty, and check 22 skips the file;
  * - the HTML sibling is missing, unparsable (not exactly one `<svg>`, or one
  *   the sanitizer refuses whole), holds the reserved id text `__dgm-id__`, is
  *   over its 2 MB cap or over the page budget: the reader shows the text form;
@@ -28,7 +30,7 @@
  * focus ids are check 22's (`lint-steps.ts`).
  */
 
-import { readDiagram } from "../format/diagram-block.ts";
+import { diagramNodeIds, readDiagram } from "../format/diagram-block.ts";
 import {
   diagramFlavor,
   diagramSiblingHtml,
@@ -62,6 +64,7 @@ export const DIAGRAM_FINDINGS = {
     budget: `file is over the page's file budget; ${ONE_LINE}`,
   } satisfies Record<PageFileFailure, string>,
   notObject: `is not a JSON object; ${ONE_LINE}`,
+  noNodes: (list: string) => `file defines no nodes (its ${list} list is missing or empty); the text form is empty and no focus id can light a node`,
   sharedPicture: (html: string, others: string) =>
     `shares picture ${html} with ${others}; archify writes one picture per diagram file, so these blocks show the same drawing`,
   picture: {
@@ -75,6 +78,9 @@ export const DIAGRAM_FINDINGS = {
   unknownAttrs: (names: string) => `picture had attributes the reader drops: ${names}`,
   unknownClasses: (names: string) => `picture has classes the reader does not style: ${names}`,
 } as const;
+
+/** The key of each flavor's node list, as `diagramNodeIds` reads it. */
+const NODE_LIST: Record<DiagramFlavor, string> = { architecture: "components", workflow: "nodes", lifecycle: "states" };
 
 /** At most this many names per list in one message. */
 const LIST_MAX = 8;
@@ -107,12 +113,16 @@ export function checkDiagrams(page: { relPath: string }, rawContent: string, fil
     if (rel === null || !flavor) continue;
     bySibling.set(rel, [...(bySibling.get(rel) ?? []), { ref, flavor }]);
   }
-  // The refs a `<Diagram>` names, as the loader collected them.
+  const tagOf = (ref: string): string => {
+    const at = lineOf(ref);
+    return (at === undefined ? null : tagOn(lines[at - 1]!)) ?? "Diagram";
+  };
+  // The refs a `<Diagram>` or `<Steps>` names, as the loader collected them.
   for (const [ref] of refs) {
     const result = files.get(ref);
     if (!result) continue;
     const at = lineOf(ref);
-    const tag = (at === undefined ? null : tagOn(lines[at - 1]!)) ?? "Diagram";
+    const tag = tagOf(ref);
     const push = (message: string) =>
       findings.push({ check: "diagram-svg", relPath: page.relPath, message: `<${tag} src="${ref}"> ${message}`, ...(at === undefined ? {} : { line: at }) });
     if (!result.ok) {
@@ -125,10 +135,11 @@ export function checkDiagrams(page: { relPath: string }, rawContent: string, fil
       push(DIAGRAM_FINDINGS.notObject);
       continue;
     }
+    if (!diagramNodeIds(flavor, result.text)?.size) push(DIAGRAM_FINDINGS.noNodes(NODE_LIST[flavor]));
     const rel = diagramSiblingRelPath(page.relPath, ref);
     const sharers = rel === null ? [] : (bySibling.get(rel) ?? []);
     if (new Set(sharers.map((s) => s.flavor)).size > 1) {
-      const others = sharers.filter((s) => s.flavor !== flavor).map((s) => `<Diagram src="${s.ref}">`);
+      const others = sharers.filter((s) => s.flavor !== flavor).map((s) => `<${tagOf(s.ref)} src="${s.ref}">`);
       push(DIAGRAM_FINDINGS.sharedPicture(diagramSiblingHtml(ref) ?? ref, others.join(", ")));
     }
     const svg = result.svg;
