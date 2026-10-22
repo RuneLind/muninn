@@ -246,9 +246,9 @@ export interface WikiReaderConfig {
 }
 
 /** `systemMapLinkHeadings`: a list of non-blank strings, trimmed. Undefined
- *  when absent, not a list, or empty after the bad entries are dropped. */
+ *  when absent or null, not a list, or empty after the bad entries are dropped. */
 export function parseSystemMapLinkHeadings(raw: unknown): { headings: string[] | undefined; warnings: string[] } {
-  if (raw === undefined) return { headings: undefined, warnings: [] };
+  if (raw === undefined || raw === null) return { headings: undefined, warnings: [] };
   if (!Array.isArray(raw)) return { headings: undefined, warnings: ["is not a list of heading names — using the default"] };
   const warnings: string[] = [];
   const headings: string[] = [];

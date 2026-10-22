@@ -140,6 +140,7 @@ export function renderWikiHtml(
       idLabels: opts?.idLabels,
       reader: true,
       wikiLinkTexts: linkTexts,
+      wikiLinkSources: literal,
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
       ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, diagramView: diagramViewHtml, stepsView: stepsViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml, timelineLanes: timelineLanesHtml, systemMapView: systemMapViewHtml, systemMapNodes: systemMapNodeLinks(resolve, wikiQuery) } : {}),

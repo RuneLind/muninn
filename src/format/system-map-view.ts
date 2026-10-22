@@ -136,12 +136,12 @@ export function systemMapViewHtml(input: SystemMapViewInput): string {
       const what = kind === "unresolved" ? " — names no repos/ page" : kind === "external" ? " — external" : "";
       const shape =
         `<rect x="${box.x}" y="${box.y}" width="${COL_W}" height="${NODE_H}" rx="6"/>` +
-        `<text x="${box.x + COL_W / 2}" y="${box.y + NODE_H / 2}" text-anchor="middle" dominant-baseline="central">${escapeHtml(cut(node.name, NAME_MAX))}</text>`;
-      const title = `<title>${escapeHtml(node.name + what)}</title>`;
+        `<text x="${box.x + COL_W / 2}" y="${box.y + NODE_H / 2}" text-anchor="middle" dominant-baseline="central">${escapeHtml(cut(node.label, NAME_MAX))}</text>`;
+      const title = `<title>${escapeHtml(node.label + what)}</title>`;
       if (!link) return `<g class="${cls}" data-sm-node="${escapeHtml(node.key)}">${title}${shape}</g>`;
       return (
         `<a class="${cls}" href="${escapeHtml(link.href)}" data-relpath="${escapeHtml(link.relPath)}" data-wiki-page="${escapeHtml(link.name)}" ` +
-        `data-sm-node="${escapeHtml(node.key)}" aria-label="${escapeHtml(node.name + what)}">${title}${shape}</a>`
+        `data-sm-node="${escapeHtml(node.key)}" aria-label="${escapeHtml(node.label + what)}">${title}${shape}</a>`
       );
     })
     .join("");

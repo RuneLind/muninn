@@ -10,9 +10,14 @@
  *   required.
  * - `Status` is `ok` or `wrong` (any case); a `wrong` row gives its reason in
  *   the evidence column (D10). Any other value reads as no status.
- * - A node is a name in a From or To cell, matched case-free. `external=`
- *   declares the names that have no `repos/` page (`PDL;Sigrun`); the rest
- *   resolve to a `repos/` page stem.
+ * - A node is a name in a From or To cell, matched case-free. A cell that is
+ *   one `[[wikilink]]` names its target (anchor dropped) and draws its label.
+ *   `external=` declares the names that have no `repos/` page (`PDL;Sigrun`);
+ *   the rest resolve to a `repos/` page stem.
+ * - Cells reach {@link readSystemMap} as visible text with each wikilink kept
+ *   as its `[[…]]` source; a cell that is not a node reads a link as its text.
+ * - The same directed pair and protocol given twice, or as both ok and wrong,
+ *   is a finding.
  * - No coordinates are stored (D11). A node's column is its group:
  *   `groups="web=frontend;api=core"`, else `repos` (or `external` for a
  *   declared external). Columns run in the order `groups=` first names them,
@@ -37,8 +42,10 @@ export interface SystemMapRow {
 export interface SystemMapNode {
   /** The case-free key (`nodeKey`). */
   key: string;
-  /** The first spelling the table uses. */
+  /** The first spelling the table uses; a wikilink cell's target stem. */
   name: string;
+  /** What the map draws: `name`, or a wikilink cell's label. */
+  label: string;
   external: boolean;
   group: string;
 }
@@ -84,14 +91,37 @@ export function nodeKey(name: string): string {
   return name.normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-/** A cell's node name: a `[[repos/x]]` link reads as its text, so a leading
- *  `repos/` or `integrations/` folder and a `.md`/`.mdx` extension are dropped. */
+const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
+const WHOLE_WIKILINK_RE = /^\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]$/;
+
+/** Every `[[t|l]]` in a cell as the text it shows: its label, else its target. */
+export function cellLinksAsText(cell: string): string {
+  return cell.replace(WIKILINK_RE, (_m, t: string, l?: string) => (l ?? t).trim() || t.trim());
+}
+
+/** A cell's node name and drawn label. A cell that is one wikilink names its
+ *  target with the `#anchor` dropped; any other cell reads its links as text.
+ *  A leading `repos/` or `integrations/` folder and a `.md`/`.mdx` extension
+ *  are dropped from the name. */
+export function readNodeCell(cell: string): { name: string; label: string } {
+  const strip = (s: string) =>
+    s
+      .trim()
+      .replace(/^(?:repos|integrations)\//i, "")
+      .replace(/\.mdx?$/i, "")
+      .trim();
+  const whole = WHOLE_WIKILINK_RE.exec(cell.trim());
+  if (whole) {
+    const name = strip(whole[1]!.replace(/#.*$/, ""));
+    return { name, label: whole[2]?.trim() || name };
+  }
+  const name = strip(cellLinksAsText(cell));
+  return { name, label: name };
+}
+
+/** A cell's node name ({@link readNodeCell}). */
 export function nodeName(cell: string): string {
-  return cell
-    .trim()
-    .replace(/^(?:repos|integrations)\//i, "")
-    .replace(/\.mdx?$/i, "")
-    .trim();
+  return readNodeCell(cell).name;
 }
 
 /** `external="PDL;Sigrun"`: names split on `;`, blanks dropped. */
@@ -130,8 +160,9 @@ export function parseGroups(raw: string | undefined): GroupsRead {
       bad.push(e);
       continue;
     }
-    groups.set(nodeKey(name), group);
-    names.set(nodeKey(name), name);
+    const node = nodeName(name);
+    groups.set(nodeKey(node), group);
+    names.set(nodeKey(node), node);
     if (!order.includes(group)) order.push(group);
   }
   return { groups, order, names, bad };
@@ -174,11 +205,16 @@ export function readSystemMap(attrs: Readonly<Record<string, string>>, table: Sy
   if (col.from < 0 || col.to < 0) return empty();
   if (col.status < 0) findings.push({ message: "has no Status column; no row is ok or wrong, so drift is not checked" });
 
-  const cell = (r: string[], i: number) => (i < 0 ? "" : (r[i] ?? "").trim());
+  const raw = (r: string[], i: number) => (i < 0 ? "" : (r[i] ?? "").trim());
+  const cell = (r: string[], i: number) => cellLinksAsText(raw(r, i)).trim();
   const rows: SystemMapRow[] = [];
+  const labels = new Map<string, string>();
+  const repeats = new Map<string, SystemMapStatus | null>();
   table.rows.forEach((r, row) => {
-    const from = nodeName(cell(r, col.from));
-    const to = nodeName(cell(r, col.to));
+    const fromCell = readNodeCell(raw(r, col.from));
+    const toCell = readNodeCell(raw(r, col.to));
+    const from = fromCell.name;
+    const to = toCell.name;
     if (!from || !to) {
       findings.push({ message: `row ${row + 1} has no ${!from ? "From" : "To"} name and is not drawn`, row });
       return;
@@ -192,14 +228,25 @@ export function readSystemMap(attrs: Readonly<Record<string, string>>, table: Sy
     if (status === "wrong" && !evidence) {
       findings.push({ message: `row ${from} → ${to} is wrong and gives no reason in the Evidence column`, row });
     }
-    rows.push({ row, from, to, protocol: cell(r, col.protocol), status, statusRaw, evidence });
+    const protocol = cell(r, col.protocol);
+    const pair = [nodeKey(from), nodeKey(to), protocol.toLowerCase()].join("\u0000");
+    if (repeats.has(pair)) {
+      const before = repeats.get(pair);
+      const both = status !== null && before !== null && before !== status;
+      findings.push({ message: `row ${from} → ${to}${protocol ? ` (${protocol})` : ""} is given ${both ? "as both ok and wrong" : "twice"}`, row });
+    } else repeats.set(pair, status);
+    for (const [name, label] of [[from, fromCell.label], [to, toCell.label]] as const) {
+      if (!labels.has(nodeKey(name))) labels.set(nodeKey(name), label);
+    }
+    rows.push({ row, from, to, protocol, status, statusRaw, evidence });
   });
   if (rows.length === 0) {
     findings.push({ message: "has no rows", fatal: true });
     return empty();
   }
 
-  const externals = new Set(parseExternalList(attrs.external).map(nodeKey));
+  const externalNames = parseExternalList(attrs.external).map(nodeName);
+  const externals = new Set(externalNames.map(nodeKey));
   const g = parseGroups(attrs.groups);
   for (const b of g.bad) findings.push({ message: `groups= entry "${b}" is not name=group` });
 
@@ -212,6 +259,7 @@ export function readSystemMap(attrs: Readonly<Record<string, string>>, table: Sy
     const node: SystemMapNode = {
       key,
       name,
+      label: labels.get(key) ?? name,
       external,
       group: g.groups.get(key) ?? (external ? SYSTEM_MAP_EXTERNAL_GROUP : SYSTEM_MAP_DEFAULT_GROUP),
     };
@@ -222,7 +270,7 @@ export function readSystemMap(attrs: Readonly<Record<string, string>>, table: Sy
     add(r.from);
     add(r.to);
   }
-  for (const name of parseExternalList(attrs.external)) {
+  for (const name of externalNames) {
     if (!seen.has(nodeKey(name))) findings.push({ message: `external= names "${name}", which no row names` });
   }
   for (const [key, name] of g.names) {
@@ -252,15 +300,35 @@ export type NodeResolution =
   | { kind: "external"; page: NodePageRef | null }
   | { kind: "unresolved" };
 
+/** An external's page stem: lower case, each run of characters that are not
+ *  a letter or a digit (any script, so Ø stays ø) as `-`, trimmed of `-`.
+ *  `Joark/SAF` → `joark-saf`. */
+export function systemSlug(name: string): string {
+  return name
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 /**
  * Where a node name points. A declared external links its `integrations/`
- * page when one exists; any other name resolves to a `repos/` page stem or to
- * nothing. `resolve` is the wiki index's wikilink resolver (path form:
- * `repos/<name>` tries `.md`, then `.mdx`, case-free).
+ * page when one exists, by its name as written, else by {@link systemSlug};
+ * any other name resolves to a `repos/` page stem or to nothing. A hit
+ * outside the folder (`../plans/x` collapses out of `repos/`) is no hit.
+ * `resolve` is the wiki index's wikilink resolver (path form: `repos/<name>`
+ * tries `.md`, then `.mdx`, case-free).
  */
 export function resolveSystemNode(node: Pick<SystemMapNode, "name" | "external">, resolve: (target: string) => NodePageRef | undefined): NodeResolution {
-  if (node.external) return { kind: "external", page: resolve(`integrations/${node.name}`) ?? null };
-  const page = resolve(`repos/${node.name}`);
+  const under = (dir: string, target: string) => {
+    const page = resolve(`${dir}/${target}`);
+    return page && page.relPath.toLowerCase().startsWith(`${dir}/`) ? page : undefined;
+  };
+  if (node.external) {
+    const slug = systemSlug(node.name);
+    return { kind: "external", page: under("integrations", node.name) ?? (slug ? under("integrations", slug) : undefined) ?? null };
+  }
+  const page = under("repos", node.name);
   return page ? { kind: "repo", page } : { kind: "unresolved" };
 }
 

@@ -201,3 +201,39 @@ describe("surfaces", () => {
     expect(renderWikiHtml(PAGE, (t) => known[t.toLowerCase()])).not.toContain("sm-map");
   });
 });
+
+describe("node names on the reader", () => {
+  const page = (relPath: string): WikiPageMeta => ({ relPath, name: relPath.replace(/^.*\//, "").replace(/\.md$/, "") }) as WikiPageMeta;
+  const known: Record<string, WikiPageMeta> = {
+    "repos/alpha-web": page("repos/alpha-web.md"),
+    "repos/beta-api": page("repos/beta-api.md"),
+    "integrations/joark-saf": page("integrations/joark-saf.md"),
+    "integrations/id-porten-tokenx": page("integrations/id-porten-tokenx.md"),
+    "integrations/pdl": page("integrations/pdl.md"),
+    "plans/secret": page("plans/secret.md"),
+  };
+  // Like the index: a path form is normalized, so `..` collapses.
+  const resolve = (t: string) => known[t.toLowerCase().replace(/^[^/]+\/\.\.\//, "")];
+  const render = (rows: string[], attrs = "") =>
+    renderWikiHtml(["<SystemMap" + attrs + ">", "", "| From | To | Status |", "|---|---|---|", ...rows, "", "</SystemMap>", ""].join("\n"), resolve, { views: true, wiki: "w" });
+
+  test("a wikilink cell links its target and draws its label", () => {
+    const html = render(["| [[repos/alpha-web|Alpha Web]] | [[repos/beta-api#api]] | ok |"]);
+    expect(html).toContain('data-relpath="repos/alpha-web.md" data-wiki-page="alpha-web" data-sm-node="alpha-web" aria-label="Alpha Web');
+    expect(html).toContain('data-relpath="repos/beta-api.md" data-wiki-page="beta-api" data-sm-node="beta-api"');
+    expect(html).toContain(">Alpha Web</text>");
+  });
+
+  test("an external resolves by slug; external= written as a wikilink reads as its target", () => {
+    const html = render(["| alpha-web | Joark/SAF | ok |", "| alpha-web | ID-porten/TokenX | ok |", "| alpha-web | PDL | ok |", "| alpha-web | Ørn | ok |"], ' external="Joark/SAF;ID-porten/TokenX;[[integrations/pdl|PDL]];Ørn"');
+    expect(html).toContain('data-relpath="integrations/joark-saf.md"');
+    expect(html).toContain('data-relpath="integrations/id-porten-tokenx.md"');
+    expect(html).toContain('data-relpath="integrations/pdl.md"');
+    expect(html).not.toContain("sm-unresolved");
+  });
+
+  test("a repo node must land under repos/", () => {
+    expect(resolveSystemNode({ name: "../plans/secret", external: false }, resolve)).toEqual({ kind: "unresolved" });
+    expect(resolve("repos/../plans/secret")).toBeDefined();
+  });
+});

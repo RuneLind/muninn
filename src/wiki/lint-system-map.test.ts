@@ -125,14 +125,14 @@ describe("system-map-drift", () => {
     expect(out).toEqual([]);
   });
 
-  test("a section ends at the next heading of its level or higher, not at a lower one", async () => {
+  test("a section ends at the next heading, whatever its level", async () => {
     const out = await drift({
-      "repos/a.md": repo("a", "## Related\n\n### Inner\n\n- [[repos/b]]\n\n## Other\n\n- [[repos/c]]"),
+      "repos/a.md": repo("a", "## Related\n\n- [[repos/c]]\n\n### Inner\n\n- [[repos/b]]"),
       "repos/b.md": repo("b", ""),
       "repos/c.md": repo("c", ""),
-      "flows/map.mdx": hub(["| a | b | REST | ok | |"]),
+      "flows/map.mdx": hub(["| a | b | REST | ok | |", "| a | c | REST | ok | |"]),
     });
-    expect(out).toEqual([]);
+    expect(out.map((f) => f.message)).toEqual(["<SystemMap> row a → b is ok, but neither repos/a.md nor repos/b.md links the other in a link section"]);
   });
 });
 
@@ -157,8 +157,93 @@ describe("system-map (page text)", () => {
     const out = checkPageText({ relPath: "flows/map.mdx" }, "# Map\n\n<SystemMap>\n\nprose\n\n</SystemMap>\n", []).filter((f) => f.check === "system-map");
     expect(out.map((f) => [f.line, f.message])).toEqual([[3, "<SystemMap> holds no pipe table; it renders as its table"]]);
   });
+});
 
-  test("a .md page is not judged", () => {
-    expect(checkPageText({ relPath: "flows/map.md" }, hub(["| a | b | REST | maybe | |"]), []).filter((f) => f.check === "system-map")).toEqual([]);
+describe("link sections", () => {
+  test("a link whose label holds a backtick is still a link", async () => {
+    const out = await drift({
+      "repos/a.md": repo("a", "## Related\n\n- [[repos/b|run `make]] then `x`"),
+      "repos/b.md": repo("b", ""),
+      "flows/map.mdx": hub(["| a | b | REST | ok | |"]),
+    });
+    expect(out).toEqual([]);
+  });
+
+  test("a section ends at the next heading of any level: «Related concepts» under «Related» is not read", async () => {
+    const out = await drift({
+      "repos/a.md": repo("a", "## Related\n\n### Related concepts\n\n- [[repos/b]]"),
+      "repos/b.md": repo("b", ""),
+      "flows/map.mdx": hub(["| a | b | REST | wrong | gone |"]),
+    });
+    expect(out).toEqual([]);
+  });
+
+  test("a configured heading with a trailing parenthetical matches; null reads as absent", async () => {
+    const out = await drift({
+      ".wiki-reader.json": JSON.stringify({ systemMapLinkHeadings: ["Calls (mock)"] }),
+      "repos/a.md": repo("a", "## Calls\n\n- [[repos/b]]"),
+      "repos/b.md": repo("b", ""),
+      "flows/map.mdx": hub(["| a | b | REST | ok | |"]),
+    });
+    expect(out).toEqual([]);
+    expect(parseSystemMapLinkHeadings(null)).toEqual({ headings: undefined, warnings: [] });
+  });
+});
+
+describe("node names", () => {
+  test("a wikilink cell resolves by its target, anchor dropped, not by its label", async () => {
+    const out = await drift({
+      "repos/alpha-web.md": repo("alpha-web", "## Related\n\n- [[repos/beta-api]]"),
+      "repos/beta-api.md": repo("beta-api", ""),
+      "flows/map.mdx": hub(["| [[repos/alpha-web|Alpha Web]] | [[repos/beta-api#api]] | REST | ok | |"]),
+    });
+    expect(out).toEqual([]);
+  });
+
+  test("a name must resolve to a page under repos/: ../plans/secret is unresolved", async () => {
+    const out = await drift({
+      "repos/a.md": repo("a", ""),
+      "plans/secret.md": "---\ntitle: secret\n---\n# secret\n",
+      "flows/map.mdx": hub(["| a | ../plans/secret | REST | wrong | gone |"]),
+    });
+    expect(out.map((f) => f.message)).toEqual(['<SystemMap> node "../plans/secret" resolves to no repos/ page and is not listed in external=']);
+  });
+
+  test("external= and groups= entries written as wikilinks read as their target", async () => {
+    const content = hub(["| a | PDL | REST | ok | |"], ' external="[[integrations/pdl|PDL]]" groups="[[repos/a|A]]=web"');
+    expect(checkPageText({ relPath: "flows/map.mdx" }, content, []).filter((f) => f.check === "system-map")).toEqual([]);
+    const out = await drift({ "repos/a.md": repo("a", ""), "integrations/pdl.md": "# PDL\n", "flows/map.mdx": content });
+    expect(out).toEqual([]);
+  });
+});
+
+describe("pairs", () => {
+  test("a wrong row is not reported while the same unordered pair has an ok row", async () => {
+    const out = await drift({
+      "repos/a.md": repo("a", "## Related\n\n- [[repos/b]]"),
+      "repos/b.md": repo("b", ""),
+      "flows/map.mdx": hub(["| a | b | REST | wrong | retired |", "| b | a | Kafka | ok | |"]),
+    });
+    expect(out).toEqual([]);
+  });
+
+  test("the same directed pair and protocol twice, or as both ok and wrong, is a system-map finding", () => {
+    const content = hub(["| Api | web | REST | ok | |", "| api | WEB | rest | wrong | dup |", "| a | b | Kafka | ok | |", "| a | b | Kafka | ok | |", "| a | b | REST | ok | |"]);
+    const out = checkPageText({ relPath: "flows/map.mdx" }, content, []).filter((f) => f.check === "system-map");
+    expect(out.map((f) => [f.line, f.message])).toEqual([
+      [11, "<SystemMap> row api → WEB (rest) is given as both ok and wrong"],
+      [13, "<SystemMap> row a → b (Kafka) is given twice"],
+    ]);
+  });
+
+  test("a .md hub is judged too: both checks run on it", async () => {
+    const content = hub(["| a | b | REST | maybe | |"]);
+    expect(checkPageText({ relPath: "flows/map.md" }, content, []).filter((f) => f.check === "system-map").map((f) => f.message)).toEqual(['<SystemMap> row a → b has Status "maybe"; write ok or wrong']);
+    const out = await drift({
+      "repos/a.md": repo("a", "## Related\n\n- [[repos/b]]"),
+      "repos/b.md": repo("b", ""),
+      "flows/map.md": hub(["| a | b | REST | wrong | gone |"]),
+    });
+    expect(out.map((f) => f.message)).toEqual(["<SystemMap> row a → b is wrong, but repos/a.md («Related») still links it"]);
   });
 });

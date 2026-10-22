@@ -129,7 +129,7 @@
  * 22. steps-focus — on `.mdx` pages that are not culled, a `<Steps>` step
  *                      naming a focus id its diagram file does not define
  *                      (warning). Rules: `lint-steps.ts`.
- * 23. system-map / system-map-drift — on `.mdx` pages that are not culled,
+ * 23. system-map / system-map-drift — on any page that is not culled,
  *                      what a `<SystemMap>` edge table cannot read (page text,
  *                      so `wiki-check` reports it), and, over the whole wiki,
  *                      a node name that resolves to no page plus drift
@@ -163,7 +163,7 @@ import {
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
 import { maskLineCodeSpans } from "../format/code-spans.ts";
-import { parkLinksThenCodeSpans } from "./park-links.ts";
+import { stripLineCodeSpansKeepingLinks } from "./park-links.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
@@ -335,12 +335,6 @@ function stripCodeSpans(content: string): string {
     .split("\n")
     .map(stripLineCodeSpansKeepingLinks)
     .join("\n");
-}
-
-function stripLineCodeSpansKeepingLinks(line: string): string {
-  if (!line.includes("`")) return line;
-  const { text, links } = parkLinksThenCodeSpans(line, (i) => `\uE000${i}\uE001`, "");
-  return text.replace(/\uE000(\d+)\uE001/g, (m: string, i: string) => links[Number(i)] ?? m);
 }
 
 /** Broken [[wikilinks]] + relative .md links on one page, resolved against the index. */
@@ -1061,7 +1055,9 @@ export function checkPageText(
     ...checkReportTop(page, content),
     ...checkDecisionChain(page, content),
   ];
-  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content), ...checkDiagrams(page, content, files), ...checkSteps(page, content, files), ...checkSystemMaps(page, content));
+  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content), ...checkDiagrams(page, content, files), ...checkSteps(page, content, files));
+  // The reader draws a `<SystemMap>` on `.md` pages too, so its checks skip only culled pages.
+  if (!page.culled) findings.push(...checkSystemMaps(page, content));
   if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content), ...checkTextDiagrams(page, content));
   return findings;
 }
@@ -1124,7 +1120,7 @@ export async function lintWiki(
       // Check 9 — live report pages only (`isLiveReportPage`).
       findings.push(...checkDrift(page, content, drift));
     }
-    if (judgesComponents(page) && content.includes("<SystemMap")) systemMapPages.push({ page, content });
+    if (!page.culled && content.includes("<SystemMap")) systemMapPages.push({ page, content });
     // Reserved and culled pages own nothing and are linted for nothing.
     if (statePhrases && !reservedBasename(page.relPath) && !page.culled) {
       const fm = parseFrontmatter(content);

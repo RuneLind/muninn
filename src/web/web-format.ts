@@ -264,6 +264,9 @@ export function formatWebHtml(
     /** `renderWikiHtml`'s wikilink sentinels, by index: the text each link
      *  shows. A lane's peek is plain text, so it reads a link as its text. */
     wikiLinkTexts?: readonly string[];
+    /** The `[[…]]` source each wikilink sentinel stands for, by index: a
+     *  `<SystemMap>` node names a link's target, not its text. */
+    wikiLinkSources?: readonly string[];
     /** D20/D49, reader only: `ref` is the day a yearless date is read against
      *  (the page's `status_date`, else the render day), `today` the render day,
      *  after which a date is skipped. Set ⇒ DecisionLog items, Query cards and
@@ -321,6 +324,7 @@ export function formatWebHtml(
   const prevLanguage = currentLanguage;
   const prevLaneCards = currentLaneCards;
   const prevLinkTexts = currentLinkTexts;
+  const prevLinkSources = currentLinkSources;
   const prevItemDates = currentItemDates;
   const prevViews = currentViews;
   const prevChartView = currentChartView;
@@ -355,6 +359,7 @@ export function formatWebHtml(
   currentLogIds = NO_LOG_IDS;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
+  currentLinkSources = opts?.wikiLinkSources;
   currentReader = opts?.reader === true;
   currentItemDates = currentReader ? opts?.itemDates : undefined;
   currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
@@ -424,6 +429,7 @@ export function formatWebHtml(
     currentLanguage = prevLanguage;
     currentLaneCards = prevLaneCards;
     currentLinkTexts = prevLinkTexts;
+    currentLinkSources = prevLinkSources;
     currentItemDates = prevItemDates;
     currentViews = prevViews;
     currentChartView = prevChartView;
@@ -967,14 +973,22 @@ function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
 
 /** A `<SystemMap>`: on the reader's page render with a map view, the map over
  *  its edge table (the table under its findings when it cannot draw); else the
- *  body as written. Cells are read as the lint reads them (`visibleText`),
- *  wikilink sentinels as their link text first. */
+ *  body as written. Cells and `external=`/`groups=` are read as the lint reads
+ *  them (`visibleText`), each wikilink sentinel handed back as its `[[…]]`
+ *  source (`wikiLinkSources`, else its text), so a node names its target. */
 function systemMapBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
   if (!currentSystemMapView) return children;
   const body = chartBody(rawChildren);
   currentSystemMapCount++;
+  const sourced = (raw: string) =>
+    visibleText(raw.replace(/\x00WIKIPAGELINK(\d+)\x00/g, "\uE000$1\uE001").replace(/\x00/g, "")).replace(
+      /\uE000(\d+)\uE001/g,
+      (_m, i: string) => currentLinkSources?.[Number(i)] ?? currentLinkTexts?.[Number(i)] ?? "",
+    );
+  const read = { ...attrs };
+  for (const k of ["external", "groups"] as const) if (read[k] !== undefined) read[k] = sourced(read[k]);
   return currentSystemMapView.render({
-    read: readSystemMap(attrs, body.table ? chartTable(body.table, (c) => visibleText(peekText(c))) : null),
+    read: readSystemMap(read, body.table ? chartTable(body.table, sourced) : null),
     caption: visibleText(peekText(attrs.caption ?? "")).trim(),
     tableHtml: body.table ? renderBlocks([body.table], webRenderer) : "",
     beforeHtml: renderBlocks(body.before, webRenderer),
@@ -1340,6 +1354,8 @@ let currentLaneCards: LaneCards | undefined;
 
 /** `opts.wikiLinkTexts` for the call in progress. */
 let currentLinkTexts: readonly string[] | undefined;
+/** `opts.wikiLinkSources` for the call in progress. */
+let currentLinkSources: readonly string[] | undefined;
 
 /** Characters an id may not touch on either side to count as named. */
 const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";

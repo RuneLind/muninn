@@ -2,7 +2,8 @@
  * Lint checks for `<SystemMap>` (wiki visuals v2, PR 4). Two keys:
  *
  * - `system-map` — page text only (`checkPageText`, so `wiki-check` reports
- *   it), on `.mdx` pages that are not culled: what the block cannot read,
+ *   it), on any page that is not culled (the reader draws a map on `.md`
+ *   pages too, so the gate is not check 15's `.mdx` one): what the block cannot read,
  *   from `readSystemMap` (`src/format/system-map.ts`), the reading the
  *   reader draws from. No table or no From/To column stops the map; the rest
  *   (an unknown Status, a `wrong` row with no evidence, an `external=` or
@@ -18,9 +19,8 @@
  *
  * A link section is a heading named in `.wiki-reader.json`
  * `systemMapLinkHeadings` (default {@link SYSTEM_MAP_LINK_HEADINGS_DEFAULT}),
- * matched exactly once a trailing parenthetical is dropped
- * ({@link linkHeadingMatches}), down to the next heading of the same or a
- * higher level. Its links are `[[wikilinks]]` and relative markdown links
+ * matched exactly once a trailing parenthetical is dropped from both sides
+ * ({@link linkHeadingMatches}), down to the next heading of any level. Its links are `[[wikilinks]]` and relative markdown links
  * outside code fences and code spans, resolved the way `broken-link` resolves
  * them.
  */
@@ -30,7 +30,8 @@ import { chartBody, chartTable } from "../format/chart-block.ts";
 import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { visibleText } from "../format/report-top.ts";
 import { nodeKey, readSystemMap, resolveSystemNode, type SystemMapRead } from "../format/system-map.ts";
-import { fencedLineMask, stripLineCodeSpans } from "../dashboard/views/components/wiki-integrate.ts";
+import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
+import { stripLineCodeSpansKeepingLinks } from "./park-links.ts";
 import { extractMarkdownLinks, stripFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { findUnfencedLine } from "./lint-lines.ts";
@@ -49,11 +50,11 @@ export function linkHeadingName(text: string): string {
   return text.trim().replace(/\s*\([^()]*\)\s*$/, "").trim();
 }
 
-/** A heading matches when its name ({@link linkHeadingName}) equals one of
- *  `headings` exactly: «Related concepts» is not «Related». */
+/** A heading matches when its name ({@link linkHeadingName}) equals the name
+ *  of one of `headings` exactly: «Related concepts» is not «Related». */
 export function linkHeadingMatches(text: string, headings: readonly string[]): boolean {
   const name = linkHeadingName(text);
-  return headings.some((h) => h.trim() === name);
+  return headings.some((h) => linkHeadingName(h) === name);
 }
 
 /** One `<SystemMap>` block as both checks read it. */
@@ -80,24 +81,32 @@ function componentBlocks(blocks: readonly Block[], name: string): Extract<Block,
 }
 
 /** Every `<SystemMap>` on a page, read as the reader reads it: wikilinks
- *  parked first, so a `|` in `[[t|l]]` splits no cell, and read as their text. */
+ *  parked first, so a `|` in `[[t|l]]` splits no cell, and handed back as
+ *  their `[[…]]` source in cells and in `external=`/`groups=` (a node names a
+ *  link's target), as their text in the caption. */
 export function systemMapBlocks(rawContent: string): MapBlock[] {
   if (!rawContent.includes("<SystemMap")) return [];
   const body = stripFrontmatter(rawContent);
   const bodyAt = rawContent.slice(0, rawContent.length - body.length).split("\n").length - 1;
   const lines = rawContent.split("\n");
   const fenced = fencedLineMask(lines);
-  const linkTexts: string[] = [];
-  const parked = body.replace(WIKILINK_WITH_LABEL_RE, (_w, t: string, l?: string) => `\x00L${linkTexts.push(wikiLinkText(t, l)) - 1}\x00`);
-  const unpark = (raw: string) => raw.replace(/\x00L(\d+)\x00/g, (_m, i: string) => linkTexts[Number(i)] ?? "");
-  const cellText = (raw: string) => visibleText(unpark(raw));
+  const links: { source: string; text: string }[] = [];
+  const parked = body.replace(WIKILINK_WITH_LABEL_RE, (w: string, t: string, l?: string) => `\x00L${links.push({ source: w, text: wikiLinkText(t, l) }) - 1}\x00`);
+  const unpark = (raw: string, as: "source" | "text") => raw.replace(/\x00L(\d+)\x00/g, (_m, i: string) => links[Number(i)]?.[as] ?? "");
+  // The sentinels pass through `visibleText` untouched, so a link comes back whole.
+  const cellText = (raw: string) => unpark(visibleText(raw), "source");
+  const attrsOf = (attrs: Record<string, string>) => {
+    const out = { ...attrs };
+    for (const k of ["external", "groups"] as const) if (out[k] !== undefined) out[k] = unpark(out[k], "source");
+    return out;
+  };
   return componentBlocks(parseBlocks(parked), "SystemMap").map((block) => {
     const { table } = chartBody(block.children);
     const tagLine = block.line === undefined ? undefined : bodyAt + block.line + 1;
     const headerLine = tagLine === undefined ? undefined : findUnfencedLine(lines, fenced, tagLine, (l) => l.trim().startsWith("|"));
     return {
-      read: readSystemMap(block.attrs, table ? chartTable(table, cellText) : null),
-      caption: block.attrs.caption === undefined ? "" : visibleText(unpark(block.attrs.caption)).trim(),
+      read: readSystemMap(attrsOf(block.attrs), table ? chartTable(table, cellText) : null),
+      caption: block.attrs.caption === undefined ? "" : visibleText(unpark(block.attrs.caption, "text")).trim(),
       tagLine,
       rowLine: (row: number) => (headerLine === undefined ? tagLine : headerLine + 2 + row),
     };
@@ -132,8 +141,10 @@ export interface LinkSection {
 }
 
 /**
- * The link sections of one page and the pages each links to. Fenced lines are
- * neither headings nor links; code spans hold no link.
+ * The link sections of one page and the pages each links to. A section ends
+ * at the next heading of any level, so a «Related concepts» under «Related»
+ * is not read. Fenced lines are neither headings nor links; code spans hold
+ * no link, and a link whose label holds a backtick is still one.
  */
 export function linkSections(page: Pick<WikiPageMeta, "relPath">, rawContent: string, headings: readonly string[], index: Pick<WikiIndex, "resolve" | "resolveRelPath">): LinkSection[] {
   const body = stripFrontmatter(rawContent);
@@ -141,7 +152,7 @@ export function linkSections(page: Pick<WikiPageMeta, "relPath">, rawContent: st
   const fenced = fencedLineMask(lines);
   const out: LinkSection[] = [];
   const dir = path.posix.dirname(page.relPath);
-  let open: { heading: string; level: number; lines: string[] } | null = null;
+  let open: { heading: string; lines: string[] } | null = null;
   const close = () => {
     if (!open) return;
     const text = open.lines.join("\n");
@@ -161,14 +172,13 @@ export function linkSections(page: Pick<WikiPageMeta, "relPath">, rawContent: st
   };
   lines.forEach((line, i) => {
     if (fenced[i]) return;
-    const h = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    const h = /^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line);
     if (h) {
-      const level = h[1]!.length;
-      if (open && level <= open.level) close();
-      if (!open && linkHeadingMatches(h[2]!, headings)) open = { heading: linkHeadingName(h[2]!), level, lines: [] };
+      close();
+      if (linkHeadingMatches(h[1]!, headings)) open = { heading: linkHeadingName(h[1]!), lines: [] };
       return;
     }
-    open?.lines.push(stripLineCodeSpans(line));
+    open?.lines.push(stripLineCodeSpansKeepingLinks(line));
   });
   close();
   return out;
@@ -238,14 +248,17 @@ export async function checkSystemMapDrift(
         return out;
       };
 
-      const rowPairs = new Set<string>();
+      // Links carry no direction or protocol: a wrong row's link is the one an
+      // ok row for the same unordered pair needs, so that pair is not reported.
+      const pairOf = (r: { from: string; to: string }) => [nodeKey(r.from), nodeKey(r.to)].sort().join("\u0000");
+      const rowPairs = new Set(b.read.rows.map(pairOf));
+      const okPairs = new Set(b.read.rows.filter((r) => r.status === "ok").map(pairOf));
       for (const r of b.read.rows) {
         const a = nodeKey(r.from);
         const c = nodeKey(r.to);
-        rowPairs.add([a, c].sort().join("\u0000"));
         if (a === c || !repoOf.has(a) || !repoOf.has(c) || r.status === null) continue;
         const by = linkedBy(a, c);
-        if (r.status === "wrong" && by.length > 0) {
+        if (r.status === "wrong" && by.length > 0 && !okPairs.has(pairOf(r))) {
           push(`row ${r.from} → ${r.to} is wrong, but ${by.join(" and ")} still links it`, b.rowLine(r.row), r.evidence ? `evidence: ${r.evidence}` : undefined);
         } else if (r.status === "ok" && by.length === 0) {
           push(`row ${r.from} → ${r.to} is ok, but neither ${repoOf.get(a)} nor ${repoOf.get(c)} links the other in a link section`, b.rowLine(r.row), `link sections: ${headings.join(", ")}`);
