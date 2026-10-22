@@ -162,6 +162,16 @@ export function paragraphLines(block: TextBlock | ListParagraph): readonly numbe
   return PARAGRAPH_LINES.get(block);
 }
 
+/** The 0-based source line of each heading `parseBlocks` made, by the same
+ *  side-table convention as {@link LIST_ITEM_LINES}: the Walk-me-through route
+ *  cuts a section out of the source at these lines. */
+const HEADING_LINES = new WeakMap<Block, number>();
+
+/** The source line of a heading block `parseBlocks` made, or undefined. */
+export function headingLine(block: Block): number | undefined {
+  return HEADING_LINES.get(block);
+}
+
 function noteParagraphLine(block: TextBlock | ListParagraph, line: number | undefined): void {
   if (line === undefined) return;
   const all = PARAGRAPH_LINES.get(block) ?? [];
@@ -1592,7 +1602,10 @@ function parseBlocksInner(
     const hMatch = line.match(HEADING_RE);
     if (hMatch) {
       flushText();
-      blocks.push({ type: "heading", level: hMatch[1]!.length, content: hMatch[2]! });
+      const heading: Block = { type: "heading", level: hMatch[1]!.length, content: hMatch[2]! };
+      const src = store.srcLine[base + i];
+      if (src !== undefined) HEADING_LINES.set(heading, src);
+      blocks.push(heading);
       i++;
       continue;
     }

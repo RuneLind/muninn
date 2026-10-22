@@ -72,6 +72,7 @@ import { closeChatOptionsIfNavigatingAway, initChatOptions } from "./wiki-chat-o
 // `Bun.build` entrypoint, so loading both would give the page two copies of the
 // module — two states, two document listener sets, one split dialog.
 import { openShareDialog, closeShareDialogOnNavigate } from "./share-dialog.ts";
+import { closeWalkthroughOnNavigate, enhanceWalkthroughButtons } from "./wiki-walkthrough.ts";
 import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
 import {
   fellesBtnHtml,
@@ -2896,6 +2897,8 @@ function renderBreadcrumb(m: WikiListing): void {
   // Keyed on relPath (`shareNavigationKey`): under the NAME, moving between two
   // same-stem pages left the dialog open and still aimed at the page just left.
   closeShareDialogOnNavigate(m.relPath || m.name);
+  // A walkthrough panel belongs to the page it was opened on.
+  closeWalkthroughOnNavigate(m.relPath || null);
   // The answer export belongs to the page that mounted it; the markdown path
   // mounts it again after this render, an explainer never does.
   unmountAnswerExport();
@@ -3007,6 +3010,7 @@ function hideBreadcrumb(): void {
   const el = document.getElementById("wikiBreadcrumb");
   if (el) el.style.display = "none";
   unmountAnswerExport(); // an Ask answer, the start view or an issue graph: no page
+  closeWalkthroughOnNavigate(null);
   // No page is open any more, so there is nothing for the Discuss button to act
   // on. Leaving the last page stamped here is the stale-state trap: the button is
   // hidden with the breadcrumb, but every other path that reads `currentArticle`
@@ -4602,6 +4606,17 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // After the fact-check layer, which anchors marks on the text as served;
       // before the hash reveal, which needs the fold and heading ids it adds.
       enhanceRefLinks(articleRoot, data.meta.relPath, reader?.idLabels);
+      // 🧭 on each top-level section heading. After the ref links, which index
+      // heading text: the button's own glyph must not join that text.
+      if (data.meta.relPath) {
+        const wtRelPath = data.meta.relPath;
+        enhanceWalkthroughButtons(articleRoot, {
+          relPath: wtRelPath,
+          hash: () => currentPageHash,
+          withWiki,
+          reload: () => reloadPageInPlace(wtRelPath),
+        });
+      }
       // The lens (D2's precedence): a `?lens=` the page was opened with, once,
       // then the viewer's stored choice, then the page's default. Before the
       // hash reveal, whose REVEAL_EVENT switches a hidden target's view to All.
@@ -8223,14 +8238,20 @@ function openArticleShare(): void {
  * must not add a history entry.
  */
 function reloadCheckedPage(turn: AskTurn): void {
-  // The same page, reloaded in place: it keeps the lens its view showed.
-  const lens = renderedArticle && renderedArticle.relPath === turn.pageRelPath ? lensOf(renderedArticle.el) : null;
+  reloadPageInPlace(turn.pageRelPath, turn.page);
+}
+
+/** Reload one page in place (no history entry, no hash reveal), keeping the
+ *  lens its view showed. Shared by a fact-check write and the walkthrough
+ *  panel's Reload on a stale page. */
+function reloadPageInPlace(relPath: string | undefined, name?: string): void {
+  const lens = renderedArticle && renderedArticle.relPath === relPath ? lensOf(renderedArticle.el) : null;
   inPlaceLens = lens
     ? { relPath: renderedArticle!.relPath, lens, ...(lens === "agent" ? { agent: snapshotAgentPane(renderedArticle!.el) } : {}) }
     : null;
   try {
-    if (turn.pageRelPath) loadPageByRelPath(turn.pageRelPath, false, false);
-    else if (turn.page) loadPage(turn.page, false, false);
+    if (relPath) loadPageByRelPath(relPath, false, false);
+    else if (name) loadPage(name, false, false);
   } finally {
     // The load took its copy synchronously; no later load may read it.
     inPlaceLens = null;

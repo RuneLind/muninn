@@ -53,6 +53,26 @@ export { stripFrontmatter } from "./store.ts";
 
 export { WIKILINK_WITH_LABEL_RE } from "./decision-text.ts";
 
+/**
+ * The markdown the reader renders for a page: NULs, fact-check sentinels and
+ * frontmatter dropped, and a leading H1 that repeats the reader's own title
+ * header removed. Exported so the Walk-me-through route cuts its sections out
+ * of the same text the reader drew its headings from.
+ */
+export function readerBody(markdown: string, stripTitle?: string): string {
+  let body = stripFrontmatter(stripSentinelLines(markdown.replaceAll("\0", "")));
+  // The reader renders its own title header — drop the page's leading H1 when
+  // it just repeats that title, but keep distinct ones (e.g. index.md's
+  // "# Wiki Index" under the fallback title "index").
+  if (stripTitle) {
+    const m = body.match(/^\s*#\s+(.+)\n?/);
+    if (m && m[1]!.trim().toLowerCase() === stripTitle.trim().toLowerCase()) {
+      body = body.slice(m.index! + m[0].length);
+    }
+  }
+  return body;
+}
+
 export function renderWikiHtml(
   markdown: string,
   resolve: (target: string) => WikiPageMeta | undefined,
@@ -95,16 +115,7 @@ export function renderWikiHtml(
   // page carries could forge one. Dropped, as the browser drops one in body
   // text and the lane peek already did; with none left, none can reassemble.
   markdown = markdown.replaceAll("\0", "");
-  let body = stripFrontmatter(stripSentinelLines(markdown));
-  // The reader renders its own title header — drop the page's leading H1 when
-  // it just repeats that title, but keep distinct ones (e.g. index.md's
-  // "# Wiki Index" under the fallback title "index").
-  if (opts?.stripTitle) {
-    const m = body.match(/^\s*#\s+(.+)\n?/);
-    if (m && m[1]!.trim().toLowerCase() === opts.stripTitle.trim().toLowerCase()) {
-      body = body.slice(m.index! + m[0].length);
-    }
-  }
+  const body = readerBody(markdown, opts?.stripTitle);
 
   const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
   const rendered: string[] = [];

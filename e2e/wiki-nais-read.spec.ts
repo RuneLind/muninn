@@ -692,6 +692,7 @@ const TOOL_POSTS = [
   "/api/wiki/provenance/stamp",
   "/api/wiki/series",
   "/api/wiki/share",
+  "/api/wiki/walkthrough",
   "/api/wiki/remember",
   "/api/wiki/factcheck/append",
   "/api/wiki/ask/chat",

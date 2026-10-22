@@ -81,6 +81,8 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect("tools" in o).toBe(false);
     expect("strictMcpConfig" in o).toBe(false);
     expect("canUseTool" in o).toBe(false);
+    // A chat-shaped run keeps whatever settings the SDK resolves (fix round 1 batch 4 scope).
+    expect("settings" in o).toBe(false);
   });
 
   test('"none": no tools, no MCP server, and strictMcpConfig so no project .mcp.json loads', async () => {
@@ -90,6 +92,9 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect(o.strictMcpConfig).toBe(true);
     expect("mcpServers" in o).toBe(false);
     expect(o.settingSources).toEqual([]);
+    // `settingSources: []` leaves auto memory on: a bot folder inside a git
+    // checkout loaded that repo's MEMORY.md into every tool-less one-shot.
+    expect(o.settings).toEqual({ autoMemoryEnabled: false });
   });
 
   test("{ read }: Read only, no MCP, no settings files, default mode, the dirs added, an empty agent home", async () => {
@@ -103,7 +108,7 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect(o.additionalDirectories).toEqual([framesDir]);
     expect(o.permissionMode).toBe("default");
     expect("allowDangerouslySkipPermissions" in o).toBe(false);
-    expect("settings" in o).toBe(false);
+    expect(o.settings).toEqual({ autoMemoryEnabled: false });
     expect((await ask(o, "Read", { file_path: join(framesDir, "x.jpg") })).behavior).toBe("allow");
     expect((await ask(o, "Read", { file_path: join(botDir, "config.json") })).behavior).toBe("deny");
     expect((await ask(o, "Read", { file_path: join(framesDir, "..", "..", "x") })).behavior).toBe("deny");
@@ -122,7 +127,7 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect(o.cwd).toBe(join(agentRoot, ".fenced"));
     expect("additionalDirectories" in o).toBe(false);
     // No allow rule: it would approve WebFetch before canUseTool is asked.
-    expect(o.settings).toEqual({ skipWebFetchPreflight: true });
+    expect(o.settings).toEqual({ skipWebFetchPreflight: true, autoMemoryEnabled: false });
     expect((await ask(o, "WebFetch", { url: "https://x" })).behavior).toBe("allow");
     expect((await ask(o, "WebFetch", { url: "https://127.0.0.1:8443/page" })).behavior).toBe("deny");
     expect((await ask(o, "Read", { file_path: join(framesDir, "x.jpg") })).behavior).toBe("deny");

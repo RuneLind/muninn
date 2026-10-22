@@ -200,6 +200,14 @@ export async function executePrompt(
         ? { tools: [], strictMcpConfig: true }
         : botConfig.allowedTools?.length ? { tools: botConfig.allowedTools } : {}),
     ...(botConfig.excludedTools?.length ? { disallowedTools: botConfig.excludedTools } : {}),
+    // A tool-less or fenced run carries only the prompt it is given.
+    // `settingSources: []` does not stop auto memory: in a bot folder inside a git
+    // checkout Claude Code loaded the developer's MEMORY.md for that repo into
+    // every walkthrough call (measured 2026-10-22, its transcript's AutoMem
+    // attachment), and 3 of 5 English sections came back in Norwegian.
+    ...(fence || botConfig.toolsDisabled
+      ? { settings: { ...(fencedOptions?.settings as Record<string, unknown> | undefined), autoMemoryEnabled: false } }
+      : {}),
   };
 
   const q = query({ prompt, options });

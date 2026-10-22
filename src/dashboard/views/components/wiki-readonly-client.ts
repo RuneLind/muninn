@@ -122,6 +122,9 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   // Fact-check claim retry (row ↻ + the batch bar).
   "[data-claim-retry-btn]",
   "#wikiClaimRetryAll",
+  // «Walk me through» on a section heading. The reader renders none on a
+  // read-only wiki or under the read slice; this is the backstop.
+  "[data-walkthrough-btn]",
   // The two text inputs whose Enter key is itself an egress trigger. They are in
   // the SELECTOR (not only in the disable list below) because `disabled` is a
   // per-render property and the follow-up bar is re-rendered on every turn

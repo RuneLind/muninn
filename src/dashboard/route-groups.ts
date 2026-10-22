@@ -36,7 +36,7 @@ export type RouteGroup = (typeof ROUTE_GROUPS)[number];
  *    repo-sync checkouts) that exist on a laptop and on the mini and not in a
  *    pod; `claude-usage` proxies a launchd service on the mini's loopback.
  *    `wiki` here is everything on the wiki surface EXCEPT the read slice —
- *    Ask, Explain, fact-check, Similar, share, remember, Stamp, the series
+ *    Ask, Explain, fact-check, Similar, share, walkthrough, remember, Stamp, the series
  *    editor, atlas, digest, reindex — i.e. every wiki route that writes, spends
  *    a model call or sends a page's text to huginn.
  *    `logs` is here for a different reason with the same shape: `/logs` +
