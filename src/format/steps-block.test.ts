@@ -469,3 +469,37 @@ describe("fix round 2 batch 2: the no-node-ids message, the architecture list, a
     ]);
   });
 });
+
+describe("class check B: the caption, every row (table)", () => {
+  const para = (text: string) => ({ type: "paragraph" as const, text });
+  const md = (items: string[]) => ['<Steps src="./s.lifecycle.json">', "", ...items, "", "</Steps>"].join("\n");
+  const caps = (html: string) => [...html.matchAll(/data-stp-cap="([^"]*)"/g)].map((m) => m[1]);
+  // [row, item lines, emitted data-stp-cap (escaped as written into the attribute)]
+  const rows: [string, string[], string][] = [
+    ["text then focus spans", ["1. Opened `new`"], "Opened"],
+    ["only focus spans: the ids as written", ["1. `new`"], "new"],
+    ["only focus spans, several", ["1. `new`, `work`"], "new, work"],
+    ["a span mid-line stays text", ["1. Run `make` then wait `new`"], "Run make then wait"],
+    ["the continuation paragraph holds the focus: the first keeps its spans as text", ["1. Fetch the `new`", "", "   It ends here `new`"], "Fetch the new"],
+    ["no focus at all", ["1. Closed"], "Closed"],
+    ['" & < are escaped in the attribute', ['1. Say "hi" & a < b `new`'], "Say &quot;hi&quot; &amp; a &lt; b"],
+    ["entities decode, then are escaped again", ["1. Quote &quot;x&quot; &amp; y `new`"], "Quote &quot;x&quot; &amp; y"],
+    ["a long text is emitted whole", [`1. ${"word ".repeat(80).trim()} \`new\``], "word ".repeat(80).trim()],
+  ];
+  for (const [row, items, want] of rows) {
+    test(row, () => {
+      const html = renderWikiHtml(md(items), () => undefined, { views: true, files: files() });
+      expect(caps(html)).toEqual([want]);
+    });
+  }
+  test("views-derived: «label — note», the label alone with no note; both escaped", () => {
+    const life = { ...LIFE, meta: { title: "x", views: [{ id: "a", label: 'A "q"', focus: ["new"], note: "x & <y>" }, { id: "b", label: "B", focus: ["done"] }] } };
+    const f: PageFiles = new Map([["./s.lifecycle.json", { ok: true, text: JSON.stringify(life), svg: svgOf(PICTURE) }]]);
+    const html = renderWikiHtml('<Steps src="./s.lifecycle.json" />', () => undefined, { views: true, files: f });
+    expect(caps(html)).toEqual(["A &quot;q&quot; — x &amp; &lt;y&gt;", "B"]);
+  });
+  test("stepItemCaption: only spans returns the item as written", () => {
+    expect(stepsFocus.stepItemCaption("`new`", undefined)).toBe("`new`");
+    expect(stepsFocus.stepItemCaption("`new`, `work`", [para("plain")])).toBe("`new`, `work`");
+  });
+});

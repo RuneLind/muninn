@@ -85,12 +85,12 @@ export function stepsCss(scope: string): string {
     ${scope} .stp { margin: 0.8rem 0 1rem; }
     ${scope} .stp > figure.dgm { margin: 0 0 0.4rem; }
     /* Stuck to the pane's top while the block is on screen, so the picture
-       scrolls under it: opaque, in its container's fill (the pane's, a Fold's,
-       a Callout's tint over what the Callout sits on; component-styles.ts). */
+       scrolls under it: opaque. The client paints it the fill its container
+       shows, every tint over its ground (watchStepsBars, wiki-visuals.ts);
+       this is the pane's fill until then. */
     ${scope} .stp-ctrl {
       position: sticky; top: 0; z-index: 2; margin: 0 0 0.4rem; padding: 0.35rem 0;
-      background-color: var(--surface-ground, var(--bg-panel)); background-image: var(--surface-tint, none);
-      box-shadow: 0 1px 0 var(--border-primary);
+      background: var(--bg-panel); box-shadow: 0 1px 0 var(--border-primary);
     }
     ${scope} .stp-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
     /* Two lines at most, so a long step never grows the bar over the picture;

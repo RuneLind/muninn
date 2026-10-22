@@ -54,12 +54,14 @@ export function stepItemFocus(text: string, children: readonly ListChild[] | und
 }
 
 /** A step's caption source: the item's own first paragraph, without the
- *  closing spans when they are the step's focus (no later paragraph has any).
- *  Nested lists, fences and further paragraphs are not part of it. */
+ *  closing spans when they are the step's focus (no later paragraph has any)
+ *  and text comes before them. A paragraph that is only the spans keeps them,
+ *  so the caption names the ids. Nested lists, fences and further paragraphs
+ *  are not part of it. */
 export function stepItemCaption(text: string, children: readonly ListChild[] | undefined): string {
   const later = (children ?? []).some((c) => c.type === "paragraph" && stepFocusOf(c.text).length > 0);
   const run = focusRun(text);
-  return later || !run.ids.length ? text : run.before;
+  return later || !run.ids.length || !run.before.trim() ? text : run.before;
 }
 
 /** A `<Steps>` body with each ordered list numbered by its items' step places,

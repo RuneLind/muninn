@@ -141,6 +141,7 @@ const TALL_PAGE = [
   "1. The top node `top`",
   "2. The middle node `mid`",
   "3. The bottom node `bot`",
+  "4. The top and the bottom `top`, `bot`",
   "",
   "</Steps>",
   "",
@@ -173,6 +174,118 @@ const TALL_PAGE = [
   "",
 ].join("\n");
 
+// A picture wider than the column: label size 8.5 px draws it at its viewBox
+// width (2400 px), so it scrolls in its box at any reader width. `a` sits at
+// the left end, `b` across the box's right edge at 1280 px, `c` at the far right.
+const WIDE_REL = "flows/wide.mdx";
+const wideNode = (id: string, x: number, w = 200) =>
+  `<g data-node-id="${id}"><rect x="${x}" y="40" width="${w}" height="60" class="c-backend"/>` +
+  `<text x="${x + w / 2}" y="75" font-size="8.5" text-anchor="middle" class="t-primary">${id}</text></g>`;
+const WIDE_HTML =
+  `<!doctype html><html><head><title>x</title></head><body>` +
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2400 140" role="img"><title>W</title>` +
+  wideNode("a", 20) + wideNode("b", 420) + wideNode("c", 2150) +
+  `</svg></body></html>`;
+const WIDE_JSON = {
+  meta: { title: "Wide", views: [{ id: "right", label: "Right", focus: ["c"] }, { id: "left", label: "Left", focus: ["a"] }] },
+  lanes: [{ id: "main", label: "Main" }],
+  states: ["a", "b", "c"].map((id, i) => ({ id, label: id, lane: "main", col: i + 1 })),
+  transitions: [],
+};
+const WIDE_PAGE = [
+  "---",
+  "title: Wide",
+  "---",
+  "",
+  "# Wide",
+  "",
+  '<Steps src="./wide.lifecycle.json">',
+  "",
+  "1. Left, in view at rest `a`",
+  "2. Across the right edge `b`",
+  "3. Far right `c`",
+  "4. Back to the left `a`",
+  "5. Both ends, wider than the box `a`, `c`",
+  "6. Only an id the picture does not draw `nope`",
+  "",
+  "</Steps>",
+  "",
+  "## Diagram",
+  "",
+  '<Diagram src="./wide.lifecycle.json" />',
+  "",
+].join("\n");
+
+// State space B: one Steps per caption row, then a views-derived one.
+const CAP_REL = "flows/caption.mdx";
+const CAP_ROWS: [string, string][] = [
+  ["The case opens `opened`", "The case opens"],
+  ["`opened`", "opened"],
+  ["`opened`, `basis`", "opened, basis"],
+  ["Run `make` then wait `basis`", "Run make then wait"],
+  ['Say "hi" & a < b `opened`', 'Say "hi" & a < b'],
+  ["Quote &quot;x&quot; &amp; y `opened`", 'Quote "x" & y'],
+];
+const CAP_PAGE = [
+  "---",
+  "title: Captions",
+  "---",
+  "",
+  "# Captions",
+  "",
+  '<Steps src="./case.lifecycle.json">',
+  "",
+  ...CAP_ROWS.map(([item], k) => `${k + 1}. ${item}`),
+  `${CAP_ROWS.length + 1}. Fetch the \`basis\``,
+  "",
+  "   It ends here `basis`",
+  "",
+  "</Steps>",
+  "",
+  "## Views",
+  "",
+  '<Steps src="./case.lifecycle.json" />',
+  "",
+].join("\n");
+const CAP_WANT = [...CAP_ROWS.map(([, want]) => want), "Fetch the basis"];
+
+// State space C: a Steps in every container that paints a fill and takes a body.
+const BOX_REL = "flows/boxes.mdx";
+const stepsIn = (open: string[], close: string[]) => [
+  ...open.flatMap((o) => [o, ""]),
+  '<Steps src="./case.lifecycle.json">',
+  "",
+  "1. Opens `opened`",
+  "",
+  "</Steps>",
+  "",
+  ...close.flatMap((c) => [c, ""]),
+];
+/** Each row: its label and the container wrapping it, innermost last. */
+const BOX_ROWS: [string, string[], string[]][] = [
+  ["article", [], []],
+  ["Callout", ['<Callout tone="warn" title="c">'], ["</Callout>"]],
+  ["Callout in Callout", ['<Callout tone="info" title="outer">', '<Callout tone="bad" title="inner">'], ["</Callout>", "</Callout>"]],
+  ["Fold", ['<Fold title="f" open="true">'], ["</Fold>"]],
+  ["Fold in Callout", ['<Callout tone="good" title="c">', '<Fold title="f" open="true">'], ["</Fold>", "</Callout>"]],
+  ["Callout in Fold", ['<Fold title="f" open="true">', '<Callout tone="info" title="c">'], ["</Callout>", "</Fold>"]],
+  ["Question", ['<Question id="Q1">'], ["</Question>"]],
+  ["Tldr", ['<Tldr label="Short">'], ["</Tldr>"]],
+  ["Callout in Tldr", ['<Tldr label="Short">', '<Callout tone="warn" title="c">'], ["</Callout>", "</Tldr>"]],
+  ["Historic", ['<Historic since="2026-01-01" note="old">'], ["</Historic>"]],
+  ["Figure", ['<Figure caption="fig">'], ["</Figure>"]],
+  ["Tab", ['<Tab label="t">'], ["</Tab>"]],
+];
+const BOX_PAGE = [
+  "---",
+  "title: Boxes",
+  "---",
+  "",
+  "# Boxes",
+  "",
+  ...BOX_ROWS.flatMap(([label, open, close]) => [`## ${label}`, "", ...stepsIn(open, close)]),
+].join("\n");
+
 const ALL_EDGES = ["opened>basis", "basis>assessed", "assessed>decided"];
 /** The dim set each authored step must leave, in order. */
 const STEP_DIMS = [
@@ -195,6 +308,11 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, TALL_REL), TALL_PAGE, "utf8");
   await writeFile(path.join(root, "flows", "tall.lifecycle.json"), JSON.stringify(TALL_JSON), "utf8");
   await writeFile(path.join(root, "flows", "tall.html"), TALL_HTML, "utf8");
+  await writeFile(path.join(root, WIDE_REL), WIDE_PAGE, "utf8");
+  await writeFile(path.join(root, "flows", "wide.lifecycle.json"), JSON.stringify(WIDE_JSON), "utf8");
+  await writeFile(path.join(root, "flows", "wide.html"), WIDE_HTML, "utf8");
+  await writeFile(path.join(root, CAP_REL), CAP_PAGE, "utf8");
+  await writeFile(path.join(root, BOX_REL), BOX_PAGE, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -432,46 +550,6 @@ test.describe("Wiki reader: Steps", () => {
   }
 
   for (const scheme of ["dark", "light"] as const) {
-    test(`${scheme}: the stuck bar takes its container's surface: the article, a Fold, a Callout`, async ({ page }) => {
-      await page.emulateMedia({ colorScheme: scheme });
-      await page.setViewportSize({ width: 1280, height: 1000 });
-      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(TALL_REL)}`);
-      await expect(page.locator(".wiki-article section.stp")).toHaveCount(3);
-      /** The bar's paint, and the first opaque ancestor fill above the block. */
-      const paint = (sec: Locator) =>
-        sec.locator(".stp-ctrl").evaluate((bar) => {
-          const cs = getComputedStyle(bar);
-          let e = bar.parentElement!.parentElement;
-          while (e && /rgba\(0, 0, 0, 0\)|transparent/.test(getComputedStyle(e).backgroundColor)) e = e.parentElement;
-          return { color: cs.backgroundColor, image: cs.backgroundImage, ground: e ? getComputedStyle(e).backgroundColor : "" };
-        });
-      const article = await paint(page.locator(".wiki-article section.stp").first());
-      expect(article.color).toBe(article.ground);
-      expect(article.image).toBe("none");
-      const folded = await paint(page.locator(".wiki-article details.fold section.stp"));
-      const foldFill = await page.locator(".wiki-article details.fold").evaluate((e) => getComputedStyle(e).backgroundColor);
-      expect(folded.color).toBe(foldFill);
-      expect(folded.color).not.toBe(article.color);
-      // A callout's fill is a tint over what it sits on: the bar paints the tint
-      // over that ground, so it is opaque and the callout's own colour.
-      const callout = page.locator(".wiki-article .callout");
-      const inCallout = await paint(callout.locator("section.stp"));
-      const tint = await callout.evaluate((e) => getComputedStyle(e).backgroundColor);
-      // The callout keeps its tone's fill (warn here), the bar's tint with it.
-      const warnFill = await callout.evaluate((e) => {
-        const probe = e.appendChild(document.createElement("i"));
-        probe.style.background = "color-mix(in srgb, var(--status-warning) 14%, transparent)";
-        const c = getComputedStyle(probe).backgroundColor;
-        probe.remove();
-        return c;
-      });
-      expect(tint).toBe(warnFill);
-      expect(inCallout.color).toBe(article.color);
-      expect(inCallout.image).toContain(tint);
-    });
-  }
-
-  for (const scheme of ["dark", "light"] as const) {
     test(`${scheme}: with no list, the steps are the file's views`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
       await open(page);
@@ -533,5 +611,281 @@ test.describe("Wiki reader: Steps", () => {
     await expect(play).toHaveAttribute("aria-pressed", "false", { timeout: 1_000 });
     await page.waitForTimeout(2_500);
     expect(await current(sec)).toBe("0");
+  });
+});
+
+/** The lit nodes of `sec`'s picture (or every node, with nothing dimmed) that
+ *  are not wholly inside what the reader sees: the box's client area, cut to
+ *  the window and to the article pane below a stuck Steps bar. With
+ *  `touch`, a node only has to intersect it (a focus wider than the view). */
+const litOutOfView = (sec: Locator, touch = false) =>
+  sec.evaluate((s, touch) => {
+    const box = s.querySelector<HTMLElement>(".dgm-svg")!;
+    const b = box.getBoundingClientRect();
+    const pane = document.querySelector("#articleWrap")!.getBoundingClientRect();
+    const bar = s.querySelector(".stp-ctrl")?.getBoundingClientRect();
+    const left = Math.max(b.left + box.clientLeft, 0);
+    const right = Math.min(b.left + box.clientLeft + box.clientWidth, window.innerWidth);
+    const top = Math.max(pane.top, 0, bar ? bar.bottom : 0);
+    const bottom = Math.min(pane.bottom, window.innerHeight, b.bottom);
+    return Array.from(box.querySelectorAll("[data-node-id]:not(.dgm-dim)"))
+      .filter((n) => {
+        const r = n.getBoundingClientRect();
+        if (touch) return !(r.right > left && r.left < right && r.bottom > top && r.top < bottom);
+        return !(r.left >= left - 1 && r.right <= right + 1 && r.top >= top - 1 && r.bottom <= bottom + 1);
+      })
+      .map((n) => n.getAttribute("data-node-id"));
+  }, touch);
+/** Where the picture box and the article pane are scrolled to. */
+const scrolled = (sec: Locator) =>
+  sec.evaluate((s) => ({ left: s.querySelector(".dgm-svg")!.scrollLeft, top: document.querySelector("#articleWrap")!.scrollTop }));
+/** Record every scrollTo/scrollBy/scrollIntoView call the page makes. */
+async function spyScrolls(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __scrolls: { on: string; behavior: string }[] };
+    w.__scrolls = [];
+    for (const name of ["scrollTo", "scrollBy", "scroll", "scrollIntoView"] as const) {
+      const orig = Element.prototype[name] as (...a: unknown[]) => void;
+      Element.prototype[name] = function (this: Element, ...a: unknown[]) {
+        const o = a[0];
+        w.__scrolls.push({ on: this.className || this.id || this.tagName, behavior: typeof o === "object" && o ? String((o as ScrollToOptions).behavior ?? "") : "" });
+        return orig.apply(this, a);
+      } as never;
+    }
+  });
+}
+const scrollCalls = (page: Page) => page.evaluate(() => (window as unknown as { __scrolls: { on: string; behavior: string }[] }).__scrolls.splice(0));
+
+test.describe("Steps class check A: each step brings its lit nodes into view", () => {
+  async function openWide(page: Page): Promise<Locator> {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(WIDE_REL)}`);
+    const sec = page.locator(".wiki-article section.stp").first();
+    await expect(sec.locator(".dgm-svg svg")).toHaveCount(1);
+    const m = await sec.locator(".dgm-svg").evaluate((e) => ({ sw: e.scrollWidth, cw: e.clientWidth }));
+    expect(m.sw).toBeGreaterThan(2 * m.cw);
+    return sec;
+  }
+
+  test("the fixture: `b` straddles the box's right edge at rest, `c` is wholly right of it", async ({ page }) => {
+    const sec = await openWide(page);
+    const edges = await sec.evaluate((s) => {
+      const box = s.querySelector(".dgm-svg")!.getBoundingClientRect();
+      const at = (id: string) => s.querySelector(`[data-node-id="${id}"]`)!.getBoundingClientRect();
+      return { right: box.right, b: [at("b").left, at("b").right], c: at("c").left };
+    });
+    expect(edges.b[0]).toBeLessThan(edges.right);
+    expect(edges.b[1]).toBeGreaterThan(edges.right);
+    expect(edges.c).toBeGreaterThan(edges.right);
+  });
+
+  const ROWS: { row: string; want: string[]; touch?: true }[] = [
+    { row: "focus fits and is in view: no scroll", want: [] },
+    { row: "focus partly right: wholly in view", want: [] },
+    { row: "focus fully right: wholly in view", want: [] },
+    { row: "focus fully left, after scrolling right: wholly in view", want: [] },
+    { row: "focus wider than the box: its left edge in view", want: ["c"], touch: true },
+  ];
+  test("Next through every row: the lit nodes intersect the visible box (table)", async ({ page }) => {
+    const sec = await openWide(page);
+    const next = sec.locator('button[data-stp-act="next"]');
+    for (let k = 0; k < ROWS.length; k++) {
+      await next.click();
+      await expect.poll(() => litOutOfView(sec, ROWS[k]!.touch), { message: ROWS[k]!.row }).toEqual(ROWS[k]!.want);
+      if (k === 0) {
+        await page.waitForTimeout(400);
+        expect((await scrolled(sec)).left, ROWS[0]!.row).toBe(0);
+      }
+    }
+    // Row: no focus the picture draws (the unknown-only step), then Show all:
+    // nothing moves. The box is parked mid-way first, so a reset to 0 shows.
+    await page.waitForTimeout(400);
+    await sec.locator(".dgm-svg").evaluate((e) => (e.scrollLeft = 700));
+    const at = await scrolled(sec);
+    expect(at.left).toBe(700);
+    await next.click();
+    await expect(sec.locator(".stp-pos")).toHaveText("Step 6 of 6");
+    await page.waitForTimeout(400);
+    expect(await scrolled(sec), "unknown-only focus").toEqual(at);
+    await sec.locator('button[data-stp-act="all"]').click();
+    await page.waitForTimeout(400);
+    expect(await scrolled(sec), "Show all").toEqual(at);
+  });
+
+  test("Prev, the arrow keys and a Play tick bring the step into view too", async ({ page }) => {
+    const sec = await openWide(page);
+    // Prev from Show all is the last step (no focus drawn); once more is step 5, then 4 (`a`), then 3 (`c`).
+    const prev = sec.locator('button[data-stp-act="prev"]');
+    await prev.click();
+    await prev.click();
+    await prev.click();
+    await expect.poll(() => litOutOfView(sec), { message: "Prev to `a`" }).toEqual([]);
+    await prev.click();
+    await expect.poll(() => litOutOfView(sec), { message: "Prev to `c`" }).toEqual([]);
+    await page.keyboard.press("ArrowLeft");
+    await expect(sec.locator(".stp-pos")).toHaveText("Step 2 of 6");
+    await expect.poll(() => litOutOfView(sec), { message: "ArrowLeft to `b`" }).toEqual([]);
+    await page.keyboard.press("ArrowLeft");
+    await expect.poll(() => litOutOfView(sec), { message: "ArrowLeft to `a`" }).toEqual([]);
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await expect(sec.locator(".stp-pos")).toHaveText("Step 3 of 6");
+    await expect.poll(() => litOutOfView(sec), { message: "ArrowRight to `c`" }).toEqual([]);
+    // Play from the start: its tick to step 3 brings `c` in from the left end.
+    await sec.locator('button[data-stp-act="all"]').click();
+    await sec.locator('button[data-stp-act="play"]').click();
+    await expect.poll(() => litOutOfView(sec), { message: "Play step 1" }).toEqual([]);
+    await expect.poll(() => sec.locator(".stp-pos").textContent(), { timeout: 6_000 }).toBe("Step 3 of 6");
+    await expect.poll(() => litOutOfView(sec), { message: "Play tick to `c`" }).toEqual([]);
+    await sec.locator('button[data-stp-act="all"]').click();
+  });
+
+  test("a Diagram view button follows the same rule", async ({ page }) => {
+    await openWide(page);
+    const fig = page.locator(".wiki-article figure.dgm").filter({ has: page.locator("button[data-dgm-view]") });
+    await fig.scrollIntoViewIfNeeded();
+    await fig.locator('button[data-dgm-view="right"]').click();
+    await expect.poll(() => litOutOfView(fig)).toEqual([]);
+    await fig.locator('button[data-dgm-view="left"]').click();
+    await expect.poll(() => litOutOfView(fig)).toEqual([]);
+    const at = await scrolled(fig);
+    await fig.locator('button[data-dgm-view=""]').click();
+    await page.waitForTimeout(400);
+    expect(await scrolled(fig), "All: no scroll").toEqual(at);
+  });
+
+  test("motion: smooth by default, instant under reduced motion", async ({ page }) => {
+    await spyScrolls(page);
+    const sec = await openWide(page);
+    await scrollCalls(page);
+    await sec.locator('button[data-stp-act="next"]').click();
+    await sec.locator('button[data-stp-act="next"]').click();
+    const calls = await scrollCalls(page);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((c) => c.behavior === "smooth")).toBe(true);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await sec.locator('button[data-stp-act="next"]').click();
+    // Instant: in view the moment the click returns, no poll.
+    expect(await litOutOfView(sec)).toEqual([]);
+    const reduced = await scrollCalls(page);
+    expect(reduced.length).toBeGreaterThan(0);
+    expect(reduced.every((c) => c.behavior !== "smooth")).toBe(true);
+  });
+
+  test("a picture with no overflow never scrolls its box", async ({ page }) => {
+    await spyScrolls(page);
+    await open(page);
+    const sec = steps(page, 0);
+    await scrollCalls(page);
+    for (let k = 0; k < 3; k++) await sec.locator('button[data-stp-act="next"]').click();
+    expect((await scrollCalls(page)).filter((c) => c.on.includes("dgm-svg"))).toEqual([]);
+    expect((await scrolled(sec)).left).toBe(0);
+  });
+
+  test("a picture taller than the window: each Next brings its node into the window under the bar", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(TALL_REL)}`);
+    const sec = page.locator(".wiki-article section.stp").first();
+    await expect(sec.locator(".dgm-svg svg")).toHaveCount(1);
+    const next = sec.locator('button[data-stp-act="next"]');
+    for (const id of ["top", "mid", "bot"]) {
+      await next.click();
+      await expect.poll(() => litOutOfView(sec), { message: id }).toEqual([]);
+      expect(await inView(sec.locator(".stp-ctrl")), `${id}: the bar`).toBe(true);
+    }
+    // Taller than the window: its top edge (`top`) comes into view, under the bar.
+    await next.click();
+    await expect.poll(() => litOutOfView(sec), { message: "top, bot" }).toEqual(["bot"]);
+    expect(await litOutOfView(sec, true), "only the top edge is in view").toEqual(["bot"]);
+    expect(await inView(sec.locator(".stp-ctrl"))).toBe(true);
+  });
+});
+
+test.describe("Steps class check B: the caption", () => {
+  test("every caption row shows its text (table), escaped and whole", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(CAP_REL)}`);
+    const sec = page.locator(".wiki-article section.stp").first();
+    await expect(sec.locator("li.stp-step")).toHaveCount(CAP_WANT.length);
+    const cap = sec.locator(".stp-ctrl .stp-cap");
+    for (let k = 0; k < CAP_WANT.length; k++) {
+      await sec.locator('button[data-stp-act="next"]').click();
+      await expect.soft(cap, `row ${k + 1}`).toHaveText(CAP_WANT[k]!);
+      await expect.soft(cap, `row ${k + 1} title`).toHaveAttribute("title", CAP_WANT[k]!);
+      await expect.soft(sec.locator(".stp-ctrl .stp-now"), `row ${k + 1} live line`).toHaveText(`Step ${k + 1} of ${CAP_WANT.length} · ${CAP_WANT[k]}`);
+    }
+    // No attribute broke out of data-stp-cap: each step has exactly the attributes the server writes.
+    const attrs = await sec.locator("li.stp-step").evaluateAll((els) => els.map((e) => e.getAttributeNames().filter((n) => !["class", "data-stp-i", "data-stp-focus", "data-stp-cap", "aria-current"].includes(n))));
+    expect(attrs.flat()).toEqual([]);
+    const views = page.locator(".wiki-article section.stp").nth(1);
+    const want = ["Start — The case opens.", "End", "Typo"];
+    for (const w of want) {
+      await views.locator('button[data-stp-act="next"]').click();
+      await expect.soft(views.locator(".stp-ctrl .stp-cap")).toHaveText(w);
+    }
+  });
+});
+
+test.describe("Steps class check C: the stuck bar's fill is its container's visible fill", () => {
+  /** One screen pixel's RGB. */
+  async function pixel(page: Page, x: number, y: number): Promise<number[]> {
+    const png = await page.screenshot({ clip: { x, y, width: 1, height: 1 } });
+    return page.evaluate(async (b64) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${b64}`;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = c.height = 1;
+      const g = c.getContext("2d")!;
+      g.drawImage(img, 0, 0);
+      return Array.from(g.getImageData(0, 0, 1, 1).data.slice(0, 3));
+    }, png.toString("base64"));
+  }
+  /** The bar's own pixel, and the pixel under it with the bar hidden. */
+  async function barAndUnder(page: Page, bar: Locator): Promise<{ bar: number[]; under: number[]; alpha: string }> {
+    await bar.scrollIntoViewIfNeeded();
+    const r = (await bar.boundingBox())!;
+    const x = Math.round(r.x + r.width - 4);
+    const y = Math.round(r.y + r.height / 2);
+    const own = await pixel(page, x, y);
+    await bar.evaluate((e) => (e.style.visibility = "hidden"));
+    const under = await pixel(page, x, y);
+    await bar.evaluate((e) => (e.style.visibility = ""));
+    const alpha = await bar.evaluate((e) => getComputedStyle(e).backgroundColor);
+    return { bar: own, under, alpha };
+  }
+  const close = (a: number[], b: number[]) => a.every((v, i) => Math.abs(v - b[i]!) <= 2);
+
+  for (const scheme of ["dark", "light"] as const) {
+    test(`${scheme}: every container row (table)`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(BOX_REL)}`);
+      const bars = page.locator(".wiki-article section.stp > .stp-ctrl");
+      await expect(bars).toHaveCount(BOX_ROWS.length);
+      const wrong: string[] = [];
+      for (let k = 0; k < BOX_ROWS.length; k++) {
+        const m = await barAndUnder(page, bars.nth(k));
+        if (!close(m.bar, m.under)) wrong.push(`${BOX_ROWS[k]![0]}: bar ${m.bar} under ${m.under}`);
+        // Opaque, so the picture never shows through when it scrolls under.
+        if (!/^rgb\(/.test(m.alpha)) wrong.push(`${BOX_ROWS[k]![0]}: not opaque (${m.alpha})`);
+      }
+      expect(wrong).toEqual([]);
+    });
+  }
+
+  test("a theme switch after the render repaints the bar", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(BOX_REL)}`);
+    const bars = page.locator(".wiki-article section.stp > .stp-ctrl");
+    await expect(bars).toHaveCount(BOX_ROWS.length);
+    await page.evaluate(() => (document.documentElement.dataset.theme = "light"));
+    for (const k of [1, 3]) {
+      await expect.poll(async () => {
+        const m = await barAndUnder(page, bars.nth(k));
+        return close(m.bar, m.under);
+      }, { message: BOX_ROWS[k]![0] }).toBe(true);
+    }
   });
 });

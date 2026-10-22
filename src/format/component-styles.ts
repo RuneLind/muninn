@@ -34,14 +34,9 @@ export function compactPartsHiddenCss(scope: string): string {
 export function componentBlockCss(scope: string): string {
   return `
     ${compactPartsHiddenCss(scope)}
-    /* A container's fill, for a block that must paint it (the stuck Steps bar):
-       --surface-ground is an opaque fill, --surface-tint a translucent one over
-       it as an image layer. A Fold resets both; a Callout sets the tint. */
     ${scope} .callout {
       border-left: 4px solid var(--accent);
-      --callout-fill: color-mix(in srgb, var(--accent) 14%, transparent);
-      --surface-tint: linear-gradient(var(--callout-fill), var(--callout-fill));
-      background: var(--callout-fill);
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
       border-radius: 0 8px 8px 0;
       padding: 1rem 1.2rem;
       margin: 1.5rem 0;
@@ -49,13 +44,13 @@ export function componentBlockCss(scope: string): string {
     ${scope} .callout-title { display: block; margin-bottom: 0.35rem; font-weight: 600; color: var(--accent-light); }
     ${scope} .callout-body > :first-child { margin-top: 0; }
     ${scope} .callout-body > :last-child { margin-bottom: 0; }
-    ${scope} .callout-info { border-left-color: var(--accent); --callout-fill: color-mix(in srgb, var(--accent) 14%, transparent); }
+    ${scope} .callout-info { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
     ${scope} .callout-info .callout-title { color: var(--accent-light); }
-    ${scope} .callout-good { border-left-color: var(--status-success); --callout-fill: color-mix(in srgb, var(--status-success) 14%, transparent); }
+    ${scope} .callout-good { border-left-color: var(--status-success); background: color-mix(in srgb, var(--status-success) 14%, transparent); }
     ${scope} .callout-good .callout-title { color: var(--status-success); }
-    ${scope} .callout-bad { border-left-color: var(--status-error); --callout-fill: color-mix(in srgb, var(--status-error) 14%, transparent); }
+    ${scope} .callout-bad { border-left-color: var(--status-error); background: color-mix(in srgb, var(--status-error) 14%, transparent); }
     ${scope} .callout-bad .callout-title { color: var(--status-error); }
-    ${scope} .callout-warn { border-left-color: var(--status-warning); --callout-fill: color-mix(in srgb, var(--status-warning) 14%, transparent); }
+    ${scope} .callout-warn { border-left-color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 14%, transparent); }
     ${scope} .callout-warn .callout-title { color: var(--status-warning); }
     /* A resolved callout: one compact good-tone row, body behind the fold. */
     ${scope} .callout-resolved { padding: 0.45rem 0.9rem; margin: 1rem 0; }
@@ -107,8 +102,6 @@ export function componentBlockCss(scope: string): string {
       border: 1px solid var(--border-secondary);
       border-radius: 10px;
       background: var(--bg-surface);
-      --surface-ground: var(--bg-surface);
-      --surface-tint: none;
     }
     ${scope} .fold > summary {
       cursor: pointer;
