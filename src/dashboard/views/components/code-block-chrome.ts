@@ -144,6 +144,8 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   Diagram: null,
   // A steps block wraps a list; a fence in an item is an ordinary fence.
   Steps: null,
+  // A system map wraps an edge table; a fence in its body is an ordinary fence.
+  SystemMap: null,
   // A rule tree wraps a nested list; a fence in an item is an ordinary fence.
   RuleTree: null,
   Glossary: null,

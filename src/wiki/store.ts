@@ -235,6 +235,46 @@ export interface WikiReaderConfig {
    * `readWikiReaderConfig` always sets it.
    */
   statePhrases?: StatePhrasesConfig | null;
+  /**
+   * The heading names whose sections the `system-map-drift` lint reads for
+   * links between `repos/` pages (`systemMapLinkHeadings`). Undefined ⇒ the
+   * default list (`SYSTEM_MAP_LINK_HEADINGS_DEFAULT`, `lint-system-map.ts`).
+   * A set list REPLACES the default. A bad entry warns and is dropped; a list
+   * left empty warns and is ignored.
+   */
+  systemMapLinkHeadings?: string[];
+}
+
+/** A heading's text with one trailing parenthetical dropped, trimmed:
+ *  «External integrations (all mocked)» → «External integrations». Here, not
+ *  in `lint-system-map.ts` (which re-exports it), so the parse below can use it
+ *  without an import cycle. */
+export function linkHeadingName(text: string): string {
+  return text.trim().replace(/\s*\([^()]*\)\s*$/, "").trim();
+}
+
+/** `systemMapLinkHeadings`: a list of non-blank strings, trimmed. Undefined
+ *  when absent or null, not a list, or empty after the bad entries are dropped.
+ *  An entry with no name left once its parenthetical is dropped («(mock)»)
+ *  is a bad entry: it would match every heading that is only a parenthetical. */
+export function parseSystemMapLinkHeadings(raw: unknown): { headings: string[] | undefined; warnings: string[] } {
+  if (raw === undefined || raw === null) return { headings: undefined, warnings: [] };
+  if (!Array.isArray(raw)) return { headings: undefined, warnings: ["is not a list of heading names — using the default"] };
+  const warnings: string[] = [];
+  const headings: string[] = [];
+  for (const h of raw) {
+    if (typeof h !== "string" || !h.trim()) {
+      warnings.push(`entry ${JSON.stringify(h)} is not a heading name — dropped`);
+      continue;
+    }
+    if (!linkHeadingName(h)) {
+      warnings.push(`entry ${JSON.stringify(h)} names no heading once its parenthetical is dropped — dropped`);
+      continue;
+    }
+    if (!headings.includes(h.trim())) headings.push(h.trim());
+  }
+  if (headings.length === 0) return { headings: undefined, warnings: [...warnings, "names no heading — using the default"] };
+  return { headings, warnings };
 }
 
 /**
@@ -2082,6 +2122,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   for (const reason of statePhrases.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "statePhrases", reason });
   }
+  const systemMapLinkHeadings = parseSystemMapLinkHeadings(obj.systemMapLinkHeadings);
+  for (const reason of systemMapLinkHeadings.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "systemMapLinkHeadings", reason });
+  }
   for (const { key, reason } of cull.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
   }
@@ -2111,6 +2155,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     defaultLens: defaultLens.lens,
     roleKeys: roleKeys.keys,
     statePhrases: statePhrases.config,
+    ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

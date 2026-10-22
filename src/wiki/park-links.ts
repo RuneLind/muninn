@@ -23,3 +23,11 @@ export function parkLinksThenCodeSpans(
   }
   return { text: out + parked.slice(cursor), links };
 }
+
+/** One line with its code spans removed and its `[[…]]` links kept whole,
+ *  even a link whose label holds a backtick (`parkLinksThenCodeSpans`). */
+export function stripLineCodeSpansKeepingLinks(line: string): string {
+  if (!line.includes("`")) return line;
+  const { text, links } = parkLinksThenCodeSpans(line, (i) => `\uE000${i}\uE001`, "");
+  return text.replace(/\uE000(\d+)\uE001/g, (m: string, i: string) => links[Number(i)] ?? m);
+}

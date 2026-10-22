@@ -29,6 +29,8 @@ import { chartViewHtml } from "../format/chart-view.ts";
 import { diagramViewHtml } from "../format/diagram-block.ts";
 import { stepsViewHtml } from "../format/steps-block.ts";
 import { ruleTreeViewHtml } from "../format/rule-tree-view.ts";
+import { systemMapViewHtml } from "../format/system-map-view.ts";
+import { resolveSystemNode, type SystemMapViewInput } from "../format/system-map.ts";
 import { caseDotsViewHtml } from "../format/case-dots-view.ts";
 import { timelineLanesHtml } from "../format/timeline-lanes.ts";
 import { glossaryTerms, readGlossaries, type GlossaryBlockRead } from "../format/glossary.ts";
@@ -138,9 +140,10 @@ export function renderWikiHtml(
       idLabels: opts?.idLabels,
       reader: true,
       wikiLinkTexts: linkTexts,
+      wikiLinkSources: literal,
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
-      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, diagramView: diagramViewHtml, stepsView: stepsViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml, timelineLanes: timelineLanesHtml } : {}),
+      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, diagramView: diagramViewHtml, stepsView: stepsViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml, timelineLanes: timelineLanesHtml, systemMapView: systemMapViewHtml, systemMapNodes: systemMapNodeLinks(resolve, wikiQuery) } : {}),
     }),
     literal,
   );
@@ -170,6 +173,19 @@ export function renderWikiHtml(
   const finished = paragraphGaps(upgradeObsidianCallouts(chipLineRefs(guarded, codeAtFromPage(markdown))));
   const marked = opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
   return restoreDiagramPictures(marked, parked);
+}
+
+/** A `<SystemMap>` node's page on the reader: a `repos/` page, or a declared
+ *  external's `integrations/` page, linked the way a wikilink is. */
+function systemMapNodeLinks(resolve: (target: string) => WikiPageMeta | undefined, wikiQuery: string): SystemMapViewInput["resolveNode"] {
+  return (node) => {
+    const r = resolveSystemNode(node, resolve);
+    const page = r.kind === "unresolved" ? null : r.page;
+    return {
+      kind: r.kind,
+      link: page ? { href: `/wiki?${wikiQuery}relPath=${encodeURIComponent(page.relPath)}`, relPath: page.relPath, name: page.name } : null,
+    };
+  };
 }
 
 /** One parked picture: its wrapper's open tag as rendered, and its svg. */

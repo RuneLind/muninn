@@ -458,6 +458,11 @@ export const COMPONENT_SPEC = {
   // focus ids in a trailing code span, or self-closed for the file's views.
   // See `src/format/steps-block.ts`.
   Steps: { attrs: { src: text }, selfClosing: true },
+  // An edge table (From/Fra, To/Til, Protocol/Protokoll, Status, Evidence/Bevis)
+  // drawn as a map of systems. `external` lists the names with no repos/ page
+  // (`PDL;Sigrun`), `groups` a node's column (`web=frontend;api=core`). See
+  // `src/format/system-map.ts`; lint checks `system-map` and `system-map-drift`.
+  SystemMap: { attrs: { caption: text, external: text, groups: text } },
 } as const satisfies Record<string, ComponentSpec>;
 
 export type ComponentName = keyof typeof COMPONENT_SPEC;

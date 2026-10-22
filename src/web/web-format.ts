@@ -89,6 +89,7 @@ import {
 } from "../format/report-top.ts";
 import { readCaseBoardView, readChartKind, readStatusRowsView, type CaseBoardView } from "../format/component-spec.ts";
 import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
+import { readSystemMapBlock, type SystemMapViewInput, type SystemMapViewRenderer } from "../format/system-map.ts";
 import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
 import type { DiagramViewRenderer } from "../format/diagram-block.ts";
 import type { StepsViewRenderer } from "../format/steps-block.ts";
@@ -263,6 +264,9 @@ export function formatWebHtml(
     /** `renderWikiHtml`'s wikilink sentinels, by index: the text each link
      *  shows. A lane's peek is plain text, so it reads a link as its text. */
     wikiLinkTexts?: readonly string[];
+    /** The `[[…]]` source each wikilink sentinel stands for, by index: a
+     *  `<SystemMap>` node names a link's target, not its text. */
+    wikiLinkSources?: readonly string[];
     /** D20/D49, reader only: `ref` is the day a yearless date is read against
      *  (the page's `status_date`, else the render day), `today` the render day,
      *  after which a date is skipped. Set ⇒ DecisionLog items, Query cards and
@@ -285,6 +289,11 @@ export function formatWebHtml(
      *  `chartViewHtml`). Passed in so the chat bundle never carries it.
      *  Absent ⇒ a chart prints its table as written. */
     chartView?: ChartViewRenderer;
+    /** With `views`: the `<SystemMap>` view (`renderWikiHtml` passes
+     *  `systemMapViewHtml`) and the node lookup it draws links from. Absent ⇒
+     *  a system map prints its table as written. */
+    systemMapView?: SystemMapViewRenderer;
+    systemMapNodes?: SystemMapViewInput["resolveNode"];
     /** With `views`: the `<RuleTree>` view (`renderWikiHtml` passes
      *  `ruleTreeViewHtml`), passed in like `chartView`. Absent ⇒ a rule tree
      *  prints its list as written. */
@@ -315,6 +324,7 @@ export function formatWebHtml(
   const prevLanguage = currentLanguage;
   const prevLaneCards = currentLaneCards;
   const prevLinkTexts = currentLinkTexts;
+  const prevLinkSources = currentLinkSources;
   const prevItemDates = currentItemDates;
   const prevViews = currentViews;
   const prevChartView = currentChartView;
@@ -324,6 +334,8 @@ export function formatWebHtml(
   const prevDiagramView = currentDiagramView;
   const prevDiagramCount = currentDiagramCount;
   const prevStepsView = currentStepsView;
+  const prevSystemMapView = currentSystemMapView;
+  const prevSystemMapCount = currentSystemMapCount;
   const prevCaseKorts = currentCaseKorts;
   const prevCaseDotsView = currentCaseDotsView;
   const prevCaseDotsPending = currentCaseDotsPending;
@@ -334,6 +346,11 @@ export function formatWebHtml(
   currentDiagramView = currentViews && text.includes("<Diagram") ? (opts?.diagramView ?? null) : null;
   currentDiagramCount = 0;
   currentStepsView = currentViews && text.includes("<Steps") ? (opts?.stepsView ?? null) : null;
+  currentSystemMapView =
+    currentViews && text.includes("<SystemMap") && opts?.systemMapView
+      ? { render: opts.systemMapView, nodes: opts.systemMapNodes ?? (() => ({ kind: "unresolved", link: null })) }
+      : null;
+  currentSystemMapCount = 0;
   currentCaseKorts = NO_CASE_KORTS;
   const chartView = currentViews && text.includes("<Chart") ? opts?.chartView : undefined;
   const charted = chartView !== undefined;
@@ -342,6 +359,7 @@ export function formatWebHtml(
   currentLogIds = NO_LOG_IDS;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
+  currentLinkSources = opts?.wikiLinkSources;
   currentReader = opts?.reader === true;
   currentItemDates = currentReader ? opts?.itemDates : undefined;
   currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
@@ -411,12 +429,15 @@ export function formatWebHtml(
     currentLanguage = prevLanguage;
     currentLaneCards = prevLaneCards;
     currentLinkTexts = prevLinkTexts;
+    currentLinkSources = prevLinkSources;
     currentItemDates = prevItemDates;
     currentViews = prevViews;
     currentChartView = prevChartView;
     currentLedgerRows = prevLedgerRows;
     currentLogIds = prevLogIds;
     currentRuleTreeView = prevRuleTreeView;
+    currentSystemMapView = prevSystemMapView;
+    currentSystemMapCount = prevSystemMapCount;
     currentDiagramView = prevDiagramView;
     currentDiagramCount = prevDiagramCount;
     currentStepsView = prevStepsView;
@@ -482,6 +503,12 @@ let currentDiagramCount = 0;
 /** `opts.stepsView` for the call in progress; null ⇒ a `<Steps>` is its list
  *  and its not-loaded line. It numbers its picture with the diagram count. */
 let currentStepsView: StepsViewRenderer | null = null;
+
+/** `opts.systemMapView` and its node lookup for the call in progress; null ⇒ a
+ *  `<SystemMap>` is its table. The count numbers the call's maps for their id
+ *  prefix. */
+let currentSystemMapView: { render: SystemMapViewRenderer; nodes: SystemMapViewInput["resolveNode"] } | null = null;
+let currentSystemMapCount = 0;
 
 /** `opts.ruleTreeView` for the call in progress; null ⇒ a `<RuleTree>` is its list. */
 let currentRuleTreeView: RuleTreeViewRenderer | null = null;
@@ -944,6 +971,31 @@ function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
   });
 }
 
+/** A `<SystemMap>`: on the reader's page render with a map view, the map over
+ *  its edge table (the table under its findings when it cannot draw); else the
+ *  body as written. Read through `readSystemMapBlock`, the lint's own call, with
+ *  each wikilink sentinel handed back as its `[[…]]` source (`wikiLinkSources`,
+ *  else its text), so a node names its target. */
+function systemMapBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
+  if (!currentSystemMapView) return children;
+  const body = chartBody(rawChildren);
+  currentSystemMapCount++;
+  return currentSystemMapView.render({
+    read: readSystemMapBlock(
+      attrs,
+      body.table,
+      (raw) => raw.replace(/\x00WIKIPAGELINK(\d+)\x00/g, "\uE000$1\uE001").replace(/\x00/g, ""),
+      (i) => currentLinkSources?.[i] ?? currentLinkTexts?.[i] ?? "",
+    ),
+    caption: visibleText(peekText(attrs.caption ?? "")).trim(),
+    tableHtml: body.table ? renderBlocks([body.table], webRenderer) : "",
+    beforeHtml: renderBlocks(body.before, webRenderer),
+    afterHtml: renderBlocks(body.after, webRenderer),
+    prefix: `sm${currentSystemMapCount}-`,
+    resolveNode: currentSystemMapView.nodes,
+  });
+}
+
 /** Every case id the page's CaseBoards hold, first board first, with its
  *  `kort:` (`caseKort`, the row's compact line); a board whose file does not
  *  load adds nothing. */
@@ -1300,6 +1352,8 @@ let currentLaneCards: LaneCards | undefined;
 
 /** `opts.wikiLinkTexts` for the call in progress. */
 let currentLinkTexts: readonly string[] | undefined;
+/** `opts.wikiLinkSources` for the call in progress. */
+let currentLinkSources: readonly string[] | undefined;
 
 /** Characters an id may not touch on either side to count as named. */
 const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
@@ -2371,6 +2425,8 @@ const webRenderer: BlockRenderer = {
         return children;
       case "Chart":
         return chartBlockHtml(attrs, rawChildren, children);
+      case "SystemMap":
+        return systemMapBlockHtml(attrs, rawChildren, children);
       case "Diagram":
         return diagramBlockHtml(attrs);
       case "Steps":

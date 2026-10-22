@@ -51,6 +51,8 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "text-diagram": { one: "text drawing", many: "text drawings" },
   "diagram-svg": { one: "diagram picture problem", many: "diagram picture problems" },
   "steps-focus": { one: "step naming an unknown focus id", many: "steps naming unknown focus ids" },
+  "system-map": { one: "system map table problem", many: "system map table problems" },
+  "system-map-drift": { one: "system map drift", many: "system map drifts" },
   "same-work-no-link": { one: "unlinked pair", many: "unlinked pairs" },
   "series-unnamed": { one: "unnamed series", many: "unnamed series" },
   "series-inconsistent": { one: "inconsistent series", many: "inconsistent series" },

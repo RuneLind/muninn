@@ -338,6 +338,18 @@ export const PEEK_DIAGRAM_CHROME = ["dgm-views", "dgm-note", "dgm-svg", "dgm-foo
  *  equal by a test): a peek shows the steps as a list. */
 export const PEEK_STEPS_CHROME = ["stp-ctrl"] as const;
 
+/** A `<SystemMap>`'s reader chrome (`SYSTEM_MAP_CHROME_CLASSES` in
+ *  system-map-view.ts, pinned equal by a test): a peek shows the edge table. */
+export const PEEK_SYSTEM_MAP_CHROME = ["sm-caption", "sm-map", "sm-legend", "sm-list", "sm-notes"] as const;
+
+/** A peeked system map is its table: no section class, no figure role. */
+function bareSystemMap(sec: Element): void {
+  sec.removeAttribute("class");
+  sec.removeAttribute("role");
+  sec.removeAttribute("aria-label");
+  sec.removeAttribute("aria-labelledby");
+}
+
 /** A peeked chart keeps its table and loses the classes that would hide it. */
 function bareChart(chart: Element): void {
   chart.removeAttribute("class");
@@ -408,6 +420,7 @@ export const PEEK_STRIP_SELECTOR = [
   ...PEEK_RULE_TREE_CHROME,
   ...PEEK_DIAGRAM_CHROME,
   ...PEEK_STEPS_CHROME,
+  ...PEEK_SYSTEM_MAP_CHROME,
   "gl-tip",
   "cb-dots",
 ]
@@ -426,6 +439,7 @@ function cloneBare<T extends Node>(n: T): T {
     for (const chart of [c, ...Array.from(c.querySelectorAll("section.vc"))]) if (chart.matches("section.vc")) bareChart(chart);
     for (const tree of [c, ...Array.from(c.querySelectorAll("section.rt"))]) if (tree.matches("section.rt")) bareRuleTree(tree);
     for (const sec of [c, ...Array.from(c.querySelectorAll("section.stp"))]) if (sec.matches("section.stp")) bareSteps(sec);
+    for (const sec of [c, ...Array.from(c.querySelectorAll("section.sm"))]) if (sec.matches("section.sm")) bareSystemMap(sec);
     bareGlossary(c);
     for (const list of [c, ...Array.from(c.querySelectorAll(".dl-list"))]) {
       if (!list.matches(".dl-list")) continue;
