@@ -207,6 +207,79 @@ describe("the quote check", () => {
     expect(kept.steps).toEqual([]);
     expect(kept.dropped).toEqual([{ kind: "step", reason: "quote_too_short" }]);
   });
+
+  test("a short quote the section lacks is dropped as too short", () => {
+    expect(checkQuotes({ steps: [{ title: "x", text: "t", quote: "Rxn" }], quiz: [], dropped: [] }, plain).dropped)
+      .toEqual([{ kind: "step", reason: "quote_too_short" }]);
+  });
+
+  test.each([
+    ["an identifier with _", "Set `WALKTHROUGH_QUOTE_MIN` to twelve chars.", "Set `WALKTHROUGH_QUOTE_MIN` to twelve chars."],
+    ["a path with ~", "Edit `~/.claude/CLAUDE.md` before you merge.", "Edit `~/.claude/CLAUDE.md` before you merge."],
+    ["a glob with *", "Glob `src/**/*.ts` finds every file here.", "Glob `src/**/*.ts` finds every file here."],
+    ["bold around an identifier", "Set `WALKTHROUGH_QUOTE_MIN` to twelve chars.", "Set **WALKTHROUGH_QUOTE_MIN** to twelve chars."],
+    ["a list marker", "1. Run the full suite before you merge.", "1. Run the full suite before you merge."],
+    ["a code span beside literal emphasis", "A critic you *dis*agree with: `w_i = max(0, r_i)` clamps it.", "A critic you *dis*agree with: `w_i = max(0, r_i)` clamps it."],
+  ])("a quote that differs only in markdown keeps the characters of %s", (_what, sectionMd, quote) => {
+    const kept = one(sectionMd, quote);
+    expect(kept.dropped).toEqual([]);
+    expect(kept.steps.map((s) => s.quote)).toEqual([sectionPlainText(sectionMd)]);
+  });
+
+  test.each([
+    ["an intraword _ the section spells another way", "the value is abc for sure, and a_b_c too", "the value is a_b_c for sure"],
+    ["an intraword _ opening a pair", "the key ab c here and more", "the key a_b c_ here and more"],
+    ["an intraword _ closing a pair", "the key ab cd here and more", "the key _ab c_d here and more"],
+    ["a lone * between spaces", "Price is 5 3 = 15 dollars total", "Price is 5 * 3 = 15 dollars"],
+    ["an emphasis opener with no closer", "use the glob pattern now", "use the *glob pattern now"],
+  ])("a quote is not loosened past markdown syntax: %s is dropped", (_what, sectionMd, quote) => {
+    expect(one(sectionMd, quote).dropped).toEqual([{ kind: "step", reason: "quote_not_in_section" }]);
+  });
+
+  test.each([
+    ["arrows that fold to 12", "→→→→→→ is a row of arrows here.", "->->->->->->"],
+    ["ellipses that fold to 12", "Wait…… ok… fine …. yes", "...... ok..."],
+    ["emoji counted per character", "Rate it 👍👍👍👍👍👍 ok then go.", "👍👍👍👍👍👍 ok"],
+  ])("the minimum is measured on the shown section text: %s", (_what, sectionMd, quote) => {
+    expect(one(sectionMd, quote).dropped).toEqual([{ kind: "step", reason: "quote_too_short" }]);
+  });
+
+  test.each([
+    ["starts inside ↔", "Page write ↔ log line here", "-> log line here"],
+    ["starts inside …", "He waited… then left the room", ". then left the room"],
+    ["ends inside →", "Page write → log line", "Page write -"],
+  ])("a match whose boundary %s is dropped", (_what, sectionMd, quote) => {
+    expect(one(sectionMd, quote).dropped).toEqual([{ kind: "step", reason: "quote_not_in_section" }]);
+  });
+
+  test("after an astral character the shown span is exactly the matched text", () => {
+    const kept = one("Rate it 👍👍 then run the full suite now.", "then run the full suite");
+    expect(kept.steps.map((s) => s.quote)).toEqual(["then run the full suite"]);
+  });
+
+  test("a misaligned hit does not hide a later aligned one, shown as the section spells it", () => {
+    const kept = one("x → log line here, y > log line here.", "> log line here");
+    expect(kept.steps.map((s) => s.quote)).toEqual(["> log line here"]);
+  });
+
+  test.each([
+    ["soft hyphen", "\u00ad"],
+    ["zero-width space", "\u200b"],
+    ["zero-width non-joiner", "\u200c"],
+    ["zero-width joiner", "\u200d"],
+  ])("a %s is ignored on either side", (_what, ch) => {
+    const withCh = `It caches pack${ch}ages locally.`;
+    expect(one(withCh, "It caches packages locally.").steps.map((s) => s.quote)).toEqual([withCh]);
+    expect(one("It caches packages locally.", withCh).steps.map((s) => s.quote)).toEqual(["It caches packages locally."]);
+  });
+
+  test("a quote ending in whitespace and a zero-width character still matches at the section's end", () => {
+    const kept = checkQuotes(
+      { steps: [{ title: "x", text: "t", quote: "It caches packages locally. \u200b" }], quiz: [], dropped: [] },
+      plain,
+    );
+    expect(kept.steps.map((s) => s.quote)).toEqual(["It caches packages locally."]);
+  });
 });
 
 describe("parseWalkthroughReply", () => {

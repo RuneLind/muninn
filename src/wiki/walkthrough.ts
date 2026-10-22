@@ -23,12 +23,17 @@
  * after {@link foldForMatch} on both sides (Unicode NFC, a small typography fold,
  * whitespace collapsed). The quote is never re-rendered as markdown: a faithful
  * copy of the text the model saw, literal `**` from a code span included,
- * matches as written. Failing that, one second try strips the emphasis and code
- * markers `*`, `_`, `~` and the backtick from the quote alone, so `**review gate**` matches
- * `review gate`; a link destination or a wikilink target is content, not a
- * marker, so a quote adding one does not match. A kept item's `quote` is
- * replaced by the matching span of the section's plain text, so the panel only
- * ever shows text that is in the section.
+ * matches as written. Failing that, two more tries remove the quote's markdown
+ * syntax ({@link stripMarkdownSyntax}): first line-start list, quote and
+ * heading markers and code-span backticks, then paired emphasis delimiters
+ * too, code content untouched either way. So `` `a_b` `` matches `a_b` even
+ * beside a `*dis*agree` the renderer left literal, and `**review gate**`
+ * matches `review gate`; a link destination or a wikilink target is content,
+ * not syntax, so a quote adding one does not match. A match
+ * must start and end on whole source characters, never inside a glyph the fold
+ * widened. A kept item's `quote` is replaced by the matching span of the
+ * section's plain text, so the panel only ever shows text that is in the
+ * section, and {@link WALKTHROUGH_QUOTE_MIN} is measured on that span.
  */
 
 import { parseBlocks, headingLine } from "../format/markdown-ast.ts";
@@ -47,8 +52,9 @@ import {
  *  against text the reader can see but the model never got. */
 export const WALKTHROUGH_SECTION_MAX = 16_000;
 
-/** A quote shorter than this (plain-text characters) is dropped: a two-word
- *  quote matches almost any section and grounds nothing. */
+/** A quote whose matching span of the section's plain text is shorter than
+ *  this many characters (code points) is dropped: a two-word quote matches
+ *  almost any section and grounds nothing. */
 export const WALKTHROUGH_QUOTE_MIN = 12;
 
 /** Caps on what the reply may carry; extra items are ignored, not dropped. */
@@ -257,13 +263,14 @@ export function parseWalkthroughReply(raw: string): ParsedWalkthrough | null {
 }
 
 /** Glyph variants a faithful copy may change, folded to one spelling on both
- *  sides of the match. Whitespace (nbsp included) is collapsed separately. */
+ *  sides of the match. Whitespace (nbsp and the BOM included: JS `\s` covers
+ *  both) is collapsed separately. */
 const TYPOGRAPHY_FOLD: Record<string, string> = {
   "‘": "'", "’": "'", "‚": "'", "‛": "'", "‹": "'", "›": "'",
   "“": '"', "”": '"', "„": '"', "‟": '"', "«": '"', "»": '"',
   "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
   "→": "->", "←": "<-", "↔": "<->", "⇒": "=>", "…": "...",
-  "­": "", "​": "", "‌": "", "‍": "", "﻿": "",
+  "­": "", "​": "", "‌": "", "‍": "",
 };
 
 /** One character cluster (a base and its combining marks) at a time, so every
@@ -298,8 +305,10 @@ export function foldForMatch(s: string): FoldedText {
     }
     for (const ch of m[0].normalize("NFC")) {
       const out = TYPOGRAPHY_FOLD[ch] ?? ch;
-      for (const o of out) {
-        text += o;
+      // One map entry per UTF-16 unit, since a match is an index into `text`:
+      // an astral character is two units.
+      text += out;
+      for (let k = 0; k < out.length; k++) {
         from.push(start);
         to.push(end);
       }
@@ -313,8 +322,86 @@ export function foldForMatch(s: string): FoldedText {
   return { text, from, to };
 }
 
-/** Emphasis and code markers a quote may carry that the plain text does not. */
-const MARKDOWN_MARKERS_RE = /[*_`~]/g;
+const isSpace = (c: string | undefined): boolean => c === undefined || /\s/u.test(c);
+const isPunct = (c: string | undefined): boolean => c !== undefined && /[\p{P}\p{S}]/u.test(c);
+
+/** A list, blockquote or heading marker at the start of a line. */
+const BLOCK_MARKER_RE = /^[ \t]*(?:>[ \t]?)*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+|#{1,6}[ \t]+)?/gm;
+
+/**
+ * The quote with its markdown SYNTAX removed and every other character kept:
+ * a list, blockquote or heading marker at a line start goes, a code span loses
+ * its backticks but none of its content, and, with `emphasis`, an emphasis
+ * delimiter run (`*`, `_`, `~`) goes only when it pairs with a run of the same
+ * character under CommonMark's flanking rules, so an intraword `_` as in
+ * `a_b_c` or a lone `*` stays. Link and wikilink syntax is untouched: a
+ * destination is content, so a quote that adds one does not match.
+ */
+export function stripMarkdownSyntax(quote: string, opts: { emphasis: boolean }): string {
+  const s = quote.replace(BLOCK_MARKER_RE, "");
+  type Piece = { text: string; delim?: { ch: string; open: boolean; close: boolean } };
+  const pieces: Piece[] = [];
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i]!;
+    if (c === "`") {
+      let n = 1;
+      while (s[i + n] === "`") n++;
+      const fence = "`".repeat(n);
+      let close = s.indexOf(fence, i + n);
+      while (close !== -1 && (s[close + n] === "`" || s[close - 1] === "`")) {
+        let e = close;
+        while (s[e] === "`") e++;
+        close = s.indexOf(fence, e);
+      }
+      if (close === -1) {
+        pieces.push({ text: fence });
+      } else {
+        let body = s.slice(i + n, close).replace(/\r?\n/g, " ");
+        if (body.length > 1 && body.startsWith(" ") && body.endsWith(" ") && body.trim() !== "") body = body.slice(1, -1);
+        pieces.push({ text: body });
+        n = close + n - i;
+      }
+      i += n;
+      continue;
+    }
+    if (opts.emphasis && (c === "*" || c === "_" || c === "~")) {
+      let n = 1;
+      while (s[i + n] === c) n++;
+      const before = s[i - 1];
+      const after = s[i + n];
+      const left = !isSpace(after) && (!isPunct(after) || isSpace(before) || isPunct(before));
+      const right = !isSpace(before) && (!isPunct(before) || isSpace(after) || isPunct(after));
+      const open = c === "_" ? left && (!right || isPunct(before)) : left;
+      const close = c === "_" ? right && (!left || isPunct(after)) : right;
+      pieces.push({ text: s.slice(i, i + n), delim: open || close ? { ch: c, open, close } : undefined });
+      i += n;
+      continue;
+    }
+    let j = i + 1;
+    while (j < s.length && s[j] !== "`" && !(opts.emphasis && "*_~".includes(s[j]!))) j++;
+    pieces.push({ text: s.slice(i, j) });
+    i = j;
+  }
+  // Pair each closer with the nearest open run of the same character; both go.
+  const openers: number[] = [];
+  const drop = new Set<number>();
+  pieces.forEach((p, k) => {
+    if (!p.delim) return;
+    if (p.delim.close) {
+      const at = openers.findLastIndex((o) => pieces[o]!.delim!.ch === p.delim!.ch);
+      if (at !== -1) {
+        drop.add(openers[at]!).add(k);
+        openers.length = at;
+        return;
+      }
+    }
+    if (p.delim.open) openers.push(k);
+  });
+  return pieces.map((p, k) => (drop.has(k) ? "" : p.text)).join("");
+}
+
+const MAX_CANDIDATES = 256;
 
 /**
  * Keep the steps and questions whose quote appears in the section's plain
@@ -324,15 +411,34 @@ const MARKDOWN_MARKERS_RE = /[*_`~]/g;
 export function checkQuotes(parsed: ParsedWalkthrough, sectionText: string): ParsedWalkthrough {
   const dropped = [...parsed.dropped];
   const section = foldForMatch(sectionText);
-  const verdict = (quote: string): { shown: string } | { reason: WalkthroughDrop["reason"] } => {
-    const tries = [foldForMatch(quote).text, foldForMatch(quote.replace(MARKDOWN_MARKERS_RE, "")).text];
-    if (tries.every((t) => t.length < WALKTHROUGH_QUOTE_MIN)) return { reason: "quote_too_short" };
-    for (const t of tries) {
-      if (t.length < WALKTHROUGH_QUOTE_MIN) continue;
-      const at = section.text.indexOf(t);
-      if (at !== -1) return { shown: sectionText.slice(section.from[at]!, section.to[at + t.length - 1]!) };
+  const n = section.text.length;
+  // A match counts only where both ends fall on a whole source character: `>`
+  // is not in a section that says `→`, though `→` folds to `->`. The scan stops
+  // after MAX_CANDIDATES misaligned hits (an arrow-filled section cost 0.5 s
+  // per 13-item reply without it).
+  const find = (t: string): string | null => {
+    if (t === "") return null;
+    let left = MAX_CANDIDATES;
+    for (let at = section.text.indexOf(t); at !== -1 && left-- > 0; at = section.text.indexOf(t, at + 1)) {
+      const last = at + t.length - 1;
+      const cleanStart = at === 0 || section.from[at - 1] !== section.from[at];
+      const cleanEnd = last === n - 1 || section.from[last + 1] !== section.from[last];
+      if (cleanStart && cleanEnd) return sectionText.slice(section.from[at]!, section.to[last]!);
     }
-    return { reason: "quote_not_in_section" };
+    return null;
+  };
+  const verdict = (quote: string): { shown: string } | { reason: WalkthroughDrop["reason"] } => {
+    const tries = [
+      quote,
+      stripMarkdownSyntax(quote, { emphasis: false }),
+      stripMarkdownSyntax(quote, { emphasis: true }),
+    ].map((q) => foldForMatch(q).text);
+    for (const t of tries) {
+      const shown = find(t);
+      if (shown === null) continue;
+      return [...shown].length < WALKTHROUGH_QUOTE_MIN ? { reason: "quote_too_short" } : { shown };
+    }
+    return tries[0]!.length < WALKTHROUGH_QUOTE_MIN ? { reason: "quote_too_short" } : { reason: "quote_not_in_section" };
   };
   const steps: WalkthroughStep[] = [];
   for (const s of parsed.steps) {
