@@ -3,11 +3,13 @@
  * web formatter (bundled into chat) and the lint read it; the reader's view
  * (`steps-block.ts`) does not belong in that bundle.
  *
- * An item's focus ids are the code spans that END its last line, separated by
- * commas and white space only; each span holds one id or several, separated
- * by commas or white space. `` - Saken opprettes `opprettet`, `grunnlag` ``
+ * A paragraph's closing spans are the code spans that END its last line,
+ * separated by commas and white space only; each span holds one id or several,
+ * separated by commas or white space. `` - Saken opprettes `opprettet`, `grunnlag` ``
  * and `` - Saken opprettes `opprettet, grunnlag` `` both focus two ids. A span
- * followed by any other text (`` `a`. ``) is prose: the step has no focus.
+ * followed by any other text (`` `a`. ``) is prose: that paragraph has no
+ * closing spans, and an earlier paragraph's still count. A span on an earlier
+ * line of the paragraph (a continuation line follows it) is not focus.
  * The focus is the closing spans of the item's LAST paragraph that has any:
  * its own text or a further paragraph under it, never a nested list or a
  * fence (those are the step's text). A plain paragraph after the spans keeps
@@ -62,7 +64,8 @@ export function stepItemCaption(text: string, children: readonly ListChild[] | u
 
 /** A `<Steps>` body with each ordered list numbered by its items' step places,
  *  so the list reads as the toolbar counts: a later list starts after the
- *  steps before it, and source numbers that skip give way. */
+ *  steps before it, and source numbers give way to the step's place. A `<ul>`
+ *  keeps its bullets but uses up step numbers. */
 export function numberStepLists(blocks: Block[]): Block[] {
   let n = 0;
   return blocks.map((b) => {

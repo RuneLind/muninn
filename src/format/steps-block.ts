@@ -7,13 +7,15 @@
  *
  * Where the steps come from:
  * - **An authored list.** Every item of every list directly in the block is a
- *   step, numbered on through the lists; its focus ids are `stepFocusOf`'s
- *   (`steps-focus.ts`: the code spans that end the item).
+ *   step, numbered on through the lists (`numberStepLists`); its focus ids are
+ *   `stepItemFocus`'s (`steps-focus.ts`: the code spans that end the item's
+ *   last paragraph that has any).
  * - **No list** (the tag self-closed, or a body without one): the file's
  *   `meta.views`, each view one step, listed by the reader alone.
  *
- * Pure: imported by the reader's render (`views: true`) only, through the
- * `stepsView` option of `formatWebHtml`, so the chat bundle never carries it.
+ * Pure: imported by the reader alone (its render with `views: true`, through
+ * the `stepsView` option of `formatWebHtml`, and its page CSS), so the chat
+ * bundle never carries it.
  */
 import { escapeHtml } from "./markdown-core.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";

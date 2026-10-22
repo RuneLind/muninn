@@ -50,8 +50,10 @@ const focusSet = (raw: string | undefined): Set<string> => new Set((raw ?? "").s
 /** Dim one figure's picture to `focus` by archify's guided-view rule: each
  *  `[data-node-id]` outside the focus, each edge whose ends are not both in
  *  it; an element with neither attribute never dims, and an empty focus dims
- *  nothing. An id no node in this picture carries (a typo lint check 22
- *  reports) leaves the focus first, so a focus of only such ids dims nothing.
+ *  nothing. An id no `[data-node-id]` in this picture carries leaves the focus
+ *  first, so a focus of only such ids dims nothing, for a `<Diagram>` view as
+ *  for a step. Lint check 22 reports such an id only on a `<Steps>` step, and
+ *  only when the JSON does not define it: it reads the file's ids, not the SVG's.
  *  The one rule a `<Diagram>` view and a `<Steps>` step share. */
 export function applyDiagramFocus(fig: Element, requested: ReadonlySet<string>): void {
   const svg = fig.querySelector(".dgm-svg");

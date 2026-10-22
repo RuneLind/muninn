@@ -183,7 +183,7 @@ export function splitQuerySql(children: Block[], hasSqlFile: boolean): { sql: Co
 export const PAGE_FILE_COMPONENTS = ["Query", "CaseBoard", "DeltaTable", "Diagram", "Steps"] as const;
 
 /** Every file value in `blocks`, at any depth, in source order, deduplicated:
- *  a `Query`'s `csv=`/`sql=`, a `CaseBoard`'s, `DeltaTable`'s or `Diagram`'s `src=`. Walks
+ *  a `Query`'s `csv=`/`sql=`, a `CaseBoard`'s, `DeltaTable`'s, `Diagram`'s or `Steps`' `src=`. Walks
  *  the AST, so a tag written inside a code fence (a `code_block`) contributes
  *  nothing. */
 export function pageFileRefs(blocks: Block[]): string[] {

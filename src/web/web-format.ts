@@ -904,9 +904,9 @@ function diagramBlockHtml(attrs: Record<string, string>): string {
 
 /** A `<Steps src>`: on the reader, the view over the file's picture with the
  *  body's list items as steps (`steps-block.ts`); everywhere else, or for a file
- *  that did not load, the body as written and one line naming the file. Its
- *  picture takes the next diagram prefix, so a Diagram and a Steps on one file
- *  share no id. */
+ *  that did not load, the body (its lists numbered by step place) and one line
+ *  naming the file. Its picture takes the next diagram prefix, so a Diagram and
+ *  a Steps on one file share no id. */
 function stepsBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
   const src = (attrs.src ?? "").trim();
   const withNote = (note: string) => [children, blockNote("stp-unavailable", note)].filter(Boolean).join("\n");
