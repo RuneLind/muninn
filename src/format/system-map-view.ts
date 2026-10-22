@@ -60,35 +60,89 @@ interface Box {
   y: number;
 }
 
-/** East Asian Wide and Fullwidth blocks (Hangul, CJK, kana, fullwidth forms):
- *  1.05em, since Chromium on Linux draws 14 CJK characters at 12px 168.7px wide. */
+/** Em width per character class: the widest glyph of the class measured on
+ *  mac Chromium, the CI runner (DejaVu Sans) and the Playwright noble image
+ *  (Liberation Sans), plus 2%, rounded up to 0.01 (PR #737, «Width estimate:
+ *  measured table»; pinned by `system-map.test.ts`). */
+export const WIDTH_EM = {
+  /** An emoji, an emoji sequence (variation selector, keycap) or any astral character. */
+  emoji: 1.31,
+  /** A keycap without its variation selector (`1⃣`): the digit and the cap draw apart. */
+  bareKeycap: 1.67,
+  /** East Asian Wide and Fullwidth (Hangul, CJK, kana, fullwidth forms). */
+  wide: 1.05,
+  cyrillicUpper: 1.14,
+  cyrillicLower: 0.97,
+  greekUpper: 0.93,
+  greekLower: 0.86,
+  /** Added to the base of an accented Latin letter outside {@link LATIN_EM} (`Ơ` over `O`). */
+  accent: 0.13,
+  /** The Arrows block, U+2190–U+21FF. */
+  arrow: 1.21,
+  /** Any other letter: Latin Extended-B, Arabic, Hebrew, Thai, Georgian, Armenian, Ethiopic. */
+  letter: 1.25,
+  /** Any other symbol, punctuation or mark. */
+  symbol: 1.46,
+};
+/** Indic scripts, per letter or spacing vowel sign in a cluster (a conjunct
+ *  is one grapheme), by block from U+0900: Devanagari, Bengali, Gurmukhi,
+ *  Gujarati, Oriya, Tamil, Telugu, Kannada, Malayalam, Sinhala. */
+export const INDIC_EM = [1.05, 1.21, 1.16, 1.31, 1.1, 1.63, 1.65, 1.56, 1.92, 1.34];
+/** Latin, Latin-1, Latin Extended-A and common punctuation, per character;
+ *  Latin Extended Additional and other accented letters by their base. */
+export const LATIN_EM: readonly (readonly [number, string])[] = [
+  [0.29, "ijl\u00ADìíîïĩīĭįıĵĺļ"],
+  [0.33, " ',.I\u00A0·ÌÍÎÏĨĪĬĮİł‘’′"],
+  [0.37, ":;f|¦ſ"],
+  [0.43, "!()[]rt¡²³¹ľŕŗřţťŧ"],
+  [0.53, "\"-`¨ª¯°´¸º‐“”„″‹›"],
+  [0.61, "/?FJL\\_cksvxyz¿çýÿćĉċčĳĴķĸĹĻĽŀŁśŝşšŷźżž†‡•"],
+  [0.65, "*012357EPTabdeghnopqu{}§µ¶ÈÉÊËÞàáâãäåèéêëðñòóôõöøùúûüþāăąēĕėęěĝğġģĥńņňŋōŏőŢŤŦũūŭůűų–"],
+  [0.70, "$4689AKSVXYZ¢£¤¥«»ÀÁÂÃÄÅÝßĀĂĄđĒĔĖĘĚĶŚŜŞŠŶŸŹŻŽ‒"],
+  [0.77, "BCHNRUÇÑÙÚÛÜĆĈĊČďĤħŃŅŇŊŔŖŘŨŪŬŮŰŲ"],
+  [0.81, "&DGOQÐÒÓÔÕÖØĎĐĜĞĠĢŌŎŐ"],
+  [0.86, "#+<=>^w~¬±×÷ĲĿŉŵ"],
+  [1.02, "%@MWm©®¼½ÆæĦŴ…€™"],
+  [1.06, "¾œ—―"],
+  [1.37, "Œ‰℃№"],
+  [1.46, "ǄǅǊǱǲ"],
+];
+const LATIN = new Map(LATIN_EM.flatMap(([em, chars]) => Array.from(chars, (c) => [c, em] as const)));
 const WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uA960-\uA97F\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]/;
-/** An emoji or any astral character: drawn from a colour or fallback font. */
-const PICTO = /\p{Extended_Pictographic}|[\u{10000}-\u{10FFFF}]/u;
+const EMOJI = /\p{Extended_Pictographic}|\p{Regional_Indicator}|\uFE0F|\u20E3|[\u{10000}-\u{10FFFF}]/u;
 const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
 
+/** Which {@link WIDTH_EM} class, {@link INDIC_EM} block (`indic`, with its
+ *  letter count) or {@link LATIN_EM} character a grapheme is measured as. */
+export function widthClass(g: string): { cls: keyof typeof WIDTH_EM } | { indic: number; units: number } | { latin: string; accented?: true } {
+  if (EMOJI.test(g)) return { cls: g.includes("\u20E3") && !g.includes("\uFE0F") ? "bareKeycap" : "emoji" };
+  const ch = g[0]!;
+  const cp = ch.codePointAt(0)!;
+  if (WIDE.test(ch)) return { cls: "wide" };
+  if (cp >= 0x900 && cp < 0xe00) return { indic: (cp - 0x900) >> 7, units: Math.max(1, g.match(/[\p{L}\p{Mc}]/gu)?.length ?? 0) };
+  if (LATIN.has(ch)) return { latin: ch };
+  const base = ch.normalize("NFD")[0]!;
+  if (LATIN.has(base)) return { latin: base, accented: true };
+  if (/\p{Script=Cyrillic}/u.test(ch)) return { cls: /\p{Lu}/u.test(ch) ? "cyrillicUpper" : "cyrillicLower" };
+  if (/\p{Script=Greek}/u.test(ch)) return { cls: /\p{Lu}/u.test(ch) ? "greekUpper" : "greekLower" };
+  if (cp >= 0x2190 && cp <= 0x21ff) return { cls: "arrow" };
+  return { cls: /\p{L}/u.test(ch) ? "letter" : "symbol" };
+}
+
+function graphemeEm(g: string): number {
+  const c = widthClass(g);
+  return "cls" in c ? WIDTH_EM[c.cls] : "indic" in c ? INDIC_EM[c.indic]! * c.units : LATIN.get(c.latin)! + (c.accented ? WIDTH_EM.accent : 0);
+}
+
 /**
- * A text's drawn width in px, estimated per character class from em widths
- * of a system UI sans, so a label is cut only when it would not fit. A
- * grapheme counts once: an emoji with a variation selector, a ZWJ sequence or
- * a letter with a combining mark is one character.
+ * A text's drawn width in px, estimated per grapheme from {@link graphemeEm},
+ * so a label is cut only when it would not fit. A grapheme counts once: an
+ * emoji with a variation selector, a ZWJ sequence or a letter with a
+ * combining mark is one character; an Indic conjunct counts its letters.
  */
 export function textWidthPx(s: string, px: number, letterSpacingEm = 0): number {
   let em = 0;
-  for (const { segment } of graphemes.segment(s)) {
-    const ch = segment[0]!;
-    if (PICTO.test(segment)) em += 1.25;
-    else if (WIDE.test(ch)) em += 1.05;
-    else if (ch === " " || "il.,:;'|!jI".includes(ch)) em += 0.3;
-    else if ("frt()[]/-".includes(ch)) em += 0.4;
-    else if ("WM".includes(ch)) em += 0.98;
-    else if ("mw@%ÆæŒœ".includes(ch)) em += 0.88;
-    else if (/[A-ZÅØÄÖ]/.test(ch)) em += 0.72;
-    else if (/[0-9]/.test(ch)) em += 0.6;
-    else if (/[a-zåøäöé]/.test(ch)) em += 0.58;
-    else em += 0.7;
-    em += letterSpacingEm;
-  }
+  for (const { segment } of graphemes.segment(s)) em += graphemeEm(segment) + letterSpacingEm;
   return em * px;
 }
 
@@ -101,8 +155,11 @@ function fitText(s: string, maxPx: number, width: (t: string) => number): string
 }
 
 const labelWidth = (t: string) => textWidthPx(t, LABEL_PX);
-/** Column heads are uppercase, semibold (≈ +6%) and spaced 0.04em. */
-const headWidth = (t: string) => textWidthPx(t.toUpperCase(), HEAD_PX, 0.04) * 1.06;
+/** Column heads are uppercase, semibold and spaced 0.04em: semibold draws up
+ *  to 1.25× the regular estimate (`“` in DejaVu Sans Bold, same table). */
+export const HEAD_SEMIBOLD = 1.25;
+export const headWidthPx = (t: string) => textWidthPx(t.toUpperCase(), HEAD_PX, 0.04) * HEAD_SEMIBOLD;
+const headWidth = headWidthPx;
 
 /** Spacing of the vertical lanes in a gap between two columns. */
 const LANE_STEP = 5;

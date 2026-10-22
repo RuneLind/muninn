@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { nodeKey, parseExternalList, parseGroups, readSystemMap, resolveSystemNode, type SystemMapTable } from "./system-map.ts";
-import { layoutSystemMap, SYSTEM_MAP_CHROME_CLASSES, systemMapCss, systemMapViewHtml, textWidthPx } from "./system-map-view.ts";
+import { headWidthPx, INDIC_EM, LATIN_EM, layoutSystemMap, SYSTEM_MAP_CHROME_CLASSES, systemMapCss, systemMapViewHtml, textWidthPx, WIDTH_EM, widthClass } from "./system-map-view.ts";
 import { PEEK_SYSTEM_MAP_CHROME } from "../dashboard/views/components/wiki-ref-links.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
@@ -717,16 +717,85 @@ describe("routing invariants", () => {
 });
 
 describe("label width estimate", () => {
-  test("wide, fullwidth and emoji characters count at least their drawn width", () => {
-    expect(textWidthPx("漢字テスト한국", 12)).toBeGreaterThanOrEqual(7 * 12);
-    expect(textWidthPx("ＡＢＣ１２３", 12)).toBeGreaterThanOrEqual(6 * 12);
-    expect(textWidthPx("🚀🎉", 12)).toBeGreaterThanOrEqual(2 * 1.25 * 12);
+  /** Each class's widest glyph and its drawn em at 12px, the max over mac
+   *  Chromium, the CI runner and the noble image (PR #737, «Width estimate:
+   *  measured table»). An estimate keeps 2% over it, so lowering any one
+   *  constant by 0.01 fails here. */
+  const WIDEST: [cls: string, glyph: string, em: number, env: string][] = [
+    ["accent", "Ơ", 0.913, "ci"],
+    ["arrow", "↭", 1.184, "noble"],
+    ["bareKeycap", "#\u20E3", 1.633, "mac"],
+    ["cyrillicLower", "щ", 0.942, "ci"],
+    ["cyrillicUpper", "Њ", 1.115, "mac"],
+    ["emoji", "◽", 1.283, "mac"],
+    ["greekLower", "ω", 0.837, "ci"],
+    ["greekUpper", "Μ", 0.908, "noble"],
+    ["indic 0", "आ", 1.023, "mac"],
+    ["indic 1", "আ", 1.181, "mac"],
+    ["indic 2", "ਆ", 1.135, "mac"],
+    ["indic 3", "આ", 1.283, "ci"],
+    ["indic 4", "ଆ", 1.073, "mac"],
+    ["indic 5", "ஔ", 1.590, "mac"],
+    ["indic 6", "ఋ", 1.616, "mac"],
+    ["indic 7", "ಊ", 1.525, "mac"],
+    ["indic 8", "ഐ", 1.875, "ci"],
+    ["indic 9", "ඎ", 1.311, "mac"],
+    ["latin 0.29", "i", 0.279, "ci"],
+    ["latin 0.33", "ł", 0.319, "mac"],
+    ["latin 0.37", "f", 0.362, "mac"],
+    ["latin 0.43", "r", 0.412, "ci"],
+    ["latin 0.53", "“", 0.518, "ci"],
+    ["latin 0.61", "v", 0.592, "ci"],
+    ["latin 0.65", "0", 0.637, "ci"],
+    ["latin 0.70", "A", 0.685, "ci"],
+    ["latin 0.77", "H", 0.753, "ci"],
+    ["latin 0.81", "O", 0.788, "ci"],
+    ["latin 0.86", "#", 0.837, "ci"],
+    ["latin 1.02", "@", 0.999, "ci"],
+    ["latin 1.06", "¾", 1.033, "mac"],
+    ["latin 1.37", "‰", 1.342, "ci"],
+    ["latin 1.46", "Ǆ", 1.422, "ci"],
+    ["letter", "ლ", 1.223, "mac"],
+    ["symbol", "⋘", 1.422, "ci"],
+    ["wide", "テ", 1.024, "noble"],
+  ];
+  test.each(WIDEST)("%s: %s counts at least 1.02× its drawn %f em (%s)", (_cls, glyph, em) => {
+    expect(textWidthPx(glyph, 1)).toBeGreaterThanOrEqual(em * 1.02);
+  });
+
+  test("every class of the table has its widest glyph pinned, and each glyph routes to its class", () => {
+    const classes = [...Object.keys(WIDTH_EM), ...INDIC_EM.map((_, i) => `indic ${i}`), ...LATIN_EM.map(([em]) => `latin ${em.toFixed(2)}`)];
+    expect(WIDEST.map(([cls]) => cls).sort()).toEqual(classes.sort());
+    for (const [cls, glyph] of WIDEST) {
+      const c = widthClass(glyph);
+      const key = "cls" in c ? c.cls : "indic" in c ? `indic ${c.indic}` : c.accented ? "accent" : `latin ${LATIN_EM.find(([, cs]) => cs.includes(c.latin))![0].toFixed(2)}`;
+      expect(key).toBe(cls);
+    }
+  });
+
+  test("a column head counts its semibold width: “ drew 7.662px at 11px on the CI runner", () => {
+    expect(headWidthPx("“")).toBeGreaterThanOrEqual(7.662 * 1.02);
+  });
+
+  test("a keycap and other emoji sequences count as one emoji; a bare keycap counts wider", () => {
+    expect(widthClass("1️⃣")).toEqual({ cls: "emoji" });
+    expect(widthClass("#️⃣")).toEqual({ cls: "emoji" });
+    expect(widthClass("↔️")).toEqual({ cls: "emoji" });
+    expect(widthClass("1⃣")).toEqual({ cls: "bareKeycap" });
+    expect(textWidthPx("1️⃣".repeat(6), 12)).toBeGreaterThanOrEqual(86.7);
+  });
+
+  test("an Indic conjunct counts each letter and spacing vowel sign, not one grapheme", () => {
+    expect(widthClass("क्ष")).toEqual({ indic: 0, units: 2 });
+    expect(widthClass("कि")).toEqual({ indic: 0, units: 2 });
+    expect(widthClass("न्त्र्य")).toEqual({ indic: 0, units: 4 });
+    expect(textWidthPx("क्षत्रज्ञ हिन्दी", 12)).toBeGreaterThanOrEqual(52.4);
   });
 
   test("a grapheme counts once: a variation selector, a ZWJ sequence, a combining mark", () => {
     expect(textWidthPx("❤️", 12)).toBe(textWidthPx("❤", 12));
     expect(textWidthPx("👨‍👩‍👧", 12)).toBe(textWidthPx("👨", 12));
-    expect(textWidthPx("e\u0301", 12)).toBe(textWidthPx("e", 12));
+    expect(textWidthPx("é", 12)).toBe(textWidthPx("e", 12));
   });
 });
 

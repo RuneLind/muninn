@@ -15,8 +15,8 @@
  * node looks unlike hover (a solid ring, Highlight under forced colours), the
  * legend comes before the node list and the table, and a node's kind shows
  * without hovering (style, legend, node list); the
- * server's label width estimate is at least the drawn width for every
- * character class.
+ * server's label and column-head width estimates are at least the drawn
+ * width for every character class of the measured table (PR #737).
  *
  * The map has no client code, so there is no state to enumerate: the server
  * draws it and the page only lays it out.
@@ -32,7 +32,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { textWidthPx } from "../src/format/system-map-view.ts";
+import * as view from "../src/format/system-map-view.ts";
 
 const PORT = e2ePort("wiki-system-map");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -215,32 +215,83 @@ test.describe("Wiki reader: SystemMap", () => {
     });
   }
 
+  /** One sample per class of the width table, with the class's widest glyphs. */
+  const WIDTH_SAMPLES: Record<string, string> = {
+    latin: "The quick brown fox jumps over the lazy dog",
+    capitals: "WMWM QUICK BROWN FOX 0123456789",
+    norwegian: "Særskilt fødselsår på Åsgårdstrand ÆØÅ æøå",
+    latinWidest: "WMQOGDHN Æ Œ œ æ @ % — … ‰ № ℃ ¾",
+    punctuation: "a, b. c; d: e! f? (g) [h] {i} /j\\ k-l_m 'n' \"o\" “p” ‘q’ «r» ‹s› •t –u",
+    latinExtended: "Ħ Ŵ ŵ ď ľ Č Š Ž ł ń ś ź ż Ą Ę Ĳ Ŀ ŉ",
+    accented: "Ơ Ư Ợ Ữ Ế Ộ Ȅ Ȩ Ḕ Ḟ ḷ Ṕ",
+    digraphs: "Ǆ ǅ Ǌ Ǳ ǲ",
+    ellipsis: "……………………",
+    cyrillic: "ЊЉЩЖЮШ щжюшфы Москва",
+    greek: "ΜΨΦΩ ωψφμ Ελληνικά",
+    arrows: "→←↔⇒⇅↭⇝",
+    symbols: "⋘⋙∰≠≤≥±×÷✓★☏⛟",
+    cjk: "漢字テスト中文日本語社会保障",
+    hangul: "한국어사회보장",
+    fullwidth: "ＡＢＣＤ１２３４（）",
+    emoji: "🚀🎉❤️👨‍👩‍👧🇳🇴😀◽",
+    emojiRun: "😀".repeat(14),
+    keycaps: "1️⃣2️⃣3️⃣#️⃣*️⃣🔟",
+    bareKeycaps: "1\u20e3#\u20e32\u20e3",
+    devanagari: "क्षत्रज्ञ हिन्दी आऔऐ",
+    bengali: "বাংলা ক্ষ আ",
+    gurmukhi: "ਪੰਜਾਬੀ ਆ",
+    gujarati: "ગુજરાતી ક્ષ આ",
+    oriya: "ଓଡ଼ିଆ ଆ",
+    tamil: "தமிழ் ஔ க்ஷ கௌ",
+    telugu: "తెలుగు క్ష ఋ",
+    kannada: "ಕನ್ನಡ ಊ ಕ್ಷ",
+    malayalam: "മലയാളം ഐ ക്ഷ കൌ",
+    sinhala: "සිංහල ඎ",
+    arabic: "سشصض العربية",
+    hebrew: "שתקמ עברית",
+    thai: "ภาษาไทย ญฌ",
+    georgian: "ქართული ლ",
+    armenian: "Հայերեն Խ",
+    ethiopic: "አማርኛ መ",
+    astral: "𝐀𝐖𝕎𠀀",
+  };
+  /** Each sample's drawn width inside the map, as a text with class `cls` in `host`. */
+  const drawnWidths = (page: Page, host: string, cls: string) =>
+    page.locator(".wiki-article .sm-svg").evaluate(
+      (svg, [s, h, c]) => {
+        const g = (h ? svg.querySelector(h) : svg)!;
+        const out: Record<string, number> = {};
+        for (const [k, v] of Object.entries(s as Record<string, string>)) {
+          const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          if (c) t.setAttribute("class", c as string);
+          t.textContent = v;
+          g.append(t);
+          out[k] = t.getComputedTextLength();
+          t.remove();
+        }
+        return out;
+      },
+      [WIDTH_SAMPLES, host, cls] as const,
+    );
+
   test("a label's estimated width is at least its drawn width, for every character class", async ({ page }) => {
     await open(page);
-    const samples: Record<string, string> = {
-      latin: "The quick brown fox jumps over the lazy dog",
-      capitals: "WMWM QUICK BROWN FOX 0123456789",
-      norwegian: "Særskilt fødselsår på Åsgårdstrand ÆØÅ æøå",
-      cjk: "漢字テスト中文日本語社会保障",
-      hangul: "한국어사회보장",
-      fullwidth: "ＡＢＣＤ１２３４（）",
-      emoji: "🚀🎉❤️👨‍👩‍👧🇳🇴😀",
-      emojiRun: "😀".repeat(14),
-    };
-    // Drawn as a node label is: a 12px text inside a node of the map.
-    const drawn = await page.locator(".wiki-article .sm-svg").evaluate((svg, s) => {
-      const g = svg.querySelector(".sm-node")!;
-      const out: Record<string, number> = {};
-      for (const [k, v] of Object.entries(s)) {
-        const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        t.textContent = v;
-        g.append(t);
-        out[k] = t.getComputedTextLength();
-        t.remove();
-      }
-      return out;
-    }, samples);
-    const short = Object.keys(samples).filter((k) => textWidthPx(samples[k]!, 12) < drawn[k]!).map((k) => `${k}: ${textWidthPx(samples[k]!, 12)} < ${drawn[k]}`);
+    // Drawn as node labels are: 12px inside a node, upright and (no page) italic.
+    for (const host of [".sm-repo", ".sm-nopage"]) {
+      const drawn = await drawnWidths(page, host, "");
+      const short = Object.keys(WIDTH_SAMPLES)
+        .filter((k) => view.textWidthPx(WIDTH_SAMPLES[k]!, 12) < drawn[k]!)
+        .map((k) => `${host} ${k}: ${view.textWidthPx(WIDTH_SAMPLES[k]!, 12)} < ${drawn[k]}`);
+      expect(short).toEqual([]);
+    }
+  });
+
+  test("a column head's estimated width is at least its drawn width, for every character class", async ({ page }) => {
+    await open(page);
+    const drawn = await drawnWidths(page, "", "sm-col");
+    const short = Object.keys(WIDTH_SAMPLES)
+      .filter((k) => view.headWidthPx(WIDTH_SAMPLES[k]!) < drawn[k]!)
+      .map((k) => `head ${k}: ${view.headWidthPx(WIDTH_SAMPLES[k]!)} < ${drawn[k]}`);
     expect(short).toEqual([]);
   });
 
