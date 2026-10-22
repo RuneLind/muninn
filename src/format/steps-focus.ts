@@ -17,20 +17,28 @@ import { codeSpanContent, lineCodeSpanRanges } from "./code-spans.ts";
 import { escapeHtml } from "./markdown-core.ts";
 import type { Block, ListChild } from "./markdown-ast.ts";
 
-/** The focus ids an item names, in order, each once. */
-export function stepFocusOf(item: string): string[] {
-  const line = item.slice(item.lastIndexOf("\n") + 1);
+/** An item's closing span run: its ids, and the item's text before the run. */
+function focusRun(item: string): { ids: string[]; before: string } {
+  const at = item.lastIndexOf("\n") + 1;
+  const line = item.slice(at);
   const ranges = lineCodeSpanRanges(line);
   const out: string[][] = [];
   let end = line.trimEnd().length;
+  let cut = end;
   for (let k = ranges.length - 1; k >= 0; k--) {
     const r = ranges[k]!;
     if (r.end !== end) break;
     out.unshift(codeSpanContent(line, r).split(/[\s,]+/).filter(Boolean));
     end = r.start;
     while (end > 0 && /[\s,]/.test(line[end - 1]!)) end--;
+    cut = end;
   }
-  return [...new Set(out.flat())];
+  return { ids: [...new Set(out.flat())], before: item.slice(0, at + cut) };
+}
+
+/** The focus ids an item names, in order, each once. */
+export function stepFocusOf(item: string): string[] {
+  return focusRun(item).ids;
 }
 
 /** A list item's focus ids: `stepFocusOf` over its last paragraph that has any. */
@@ -41,6 +49,15 @@ export function stepItemFocus(text: string, children: readonly ListChild[] | und
     if (focus.length) return focus;
   }
   return [];
+}
+
+/** A step's caption source: the item's own first paragraph, without the
+ *  closing spans when they are the step's focus (no later paragraph has any).
+ *  Nested lists, fences and further paragraphs are not part of it. */
+export function stepItemCaption(text: string, children: readonly ListChild[] | undefined): string {
+  const later = (children ?? []).some((c) => c.type === "paragraph" && stepFocusOf(c.text).length > 0);
+  const run = focusRun(text);
+  return later || !run.ids.length ? text : run.before;
 }
 
 /** A `<Steps>` body with each ordered list numbered by its items' step places,
@@ -66,7 +83,11 @@ export function stepsPosText(cur: number, count: number): string {
 /** The caption while every step shows (`cur` -1). */
 export const STEPS_ALL_CAPTION = "All steps shown.";
 
-/** One step's `<li>`: its index and focus as data the client reads. */
-export function stepItemOpen(index: number, focus: readonly string[], value: string): string {
-  return `<li class="stp-step" data-stp-i="${index}" data-stp-focus="${escapeHtml(focus.join(" "))}"${value}>`;
+/** One step's `<li>`: its index, focus and caption (plain text) as data the
+ *  client reads. */
+export function stepItemOpen(index: number, focus: readonly string[], caption: string, value: string): string {
+  return (
+    `<li class="stp-step" data-stp-i="${index}" data-stp-focus="${escapeHtml(focus.join(" "))}"` +
+    ` data-stp-cap="${escapeHtml(caption)}"${value}>`
+  );
 }

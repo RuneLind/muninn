@@ -119,8 +119,13 @@ function setStep(sec: HTMLElement, i: number): void {
   sec.querySelector('.stp-ctrl [data-stp-act="next"]')?.setAttribute("aria-disabled", String(cur >= 0 && cur === items.length - 1));
   const pos = sec.querySelector(".stp-ctrl .stp-pos");
   if (pos) pos.textContent = stepsPosText(cur, items.length);
-  const cap = sec.querySelector(".stp-ctrl .stp-cap");
-  if (cap) cap.textContent = cur < 0 ? STEPS_ALL_CAPTION : (items[cur]!.textContent ?? "").replace(/\s+/g, " ").trim();
+  // The server's caption (`data-stp-cap`), never the item's DOM text; the
+  // CSS clamps it to two lines and `title` keeps it whole.
+  const cap = sec.querySelector<HTMLElement>(".stp-ctrl .stp-cap");
+  if (cap) {
+    cap.textContent = cur < 0 ? STEPS_ALL_CAPTION : (items[cur]!.dataset.stpCap ?? "");
+    cap.title = cur < 0 ? "" : cap.textContent;
+  }
 }
 
 function stepsAct(sec: HTMLElement, act: string): void {

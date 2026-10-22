@@ -92,7 +92,7 @@ import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../for
 import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
 import type { DiagramViewRenderer } from "../format/diagram-block.ts";
 import type { StepsViewRenderer } from "../format/steps-block.ts";
-import { stepItemFocus, stepItemOpen } from "../format/steps-focus.ts";
+import { stepItemCaption, stepItemFocus, stepItemOpen } from "../format/steps-focus.ts";
 import { firstRowPerPr, pageLedgers, type LedgerRow } from "../format/pr-ledger.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { ITEM_DATE_ATTR, itemDate, listChildrenText } from "../format/item-dates.ts";
@@ -917,7 +917,7 @@ function stepsBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
   currentDiagramCount++;
   let authored = 0;
   const bodyHtml = rawChildren.some((b) => b.type === "ul" || b.type === "ol")
-    ? wrappedListsHtml(rawChildren, "stp-list", (text, nested, value, children) => `${stepItemOpen(authored++, stepItemFocus(text, children), value)}${itemHtml(text)}${nested}</li>`)
+    ? wrappedListsHtml(rawChildren, "stp-list", (text, nested, value, children) => `${stepItemOpen(authored++, stepItemFocus(text, children), visibleText(peekText(stepItemCaption(text, children))), value)}${itemHtml(text)}${nested}</li>`)
     : children;
   return currentStepsView({ ref: src, text: file.text, svg: file.svg, prefix: `dgm${currentDiagramCount}-`, bodyHtml, authored });
 }

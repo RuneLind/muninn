@@ -56,6 +56,19 @@ describe("stepFocusOf", () => {
   for (const [item, want] of cases) test(JSON.stringify(item), () => expect(stepFocusOf(item)).toEqual(want));
 });
 
+describe("stepItemCaption", () => {
+  const para = (text: string) => ({ type: "paragraph" as const, text });
+  test("the first paragraph without its closing focus spans", () => {
+    expect(stepsFocus.stepItemCaption("Worked `new`, `work`", undefined)).toBe("Worked");
+    expect(stepsFocus.stepItemCaption("Two lines\nsecond `x`", undefined)).toBe("Two lines\nsecond");
+    expect(stepsFocus.stepItemCaption("Prose `a`.", undefined)).toBe("Prose `a`.");
+  });
+  test("a later paragraph that holds the focus leaves the first one whole", () => {
+    expect(stepsFocus.stepItemCaption("Run `make`", [para("Then `done`")])).toBe("Run `make`");
+    expect(stepsFocus.stepItemCaption("Opened `new`", [para("No spans here")])).toBe("Opened");
+  });
+});
+
 describe("nextStepIndex", () => {
   test("from Show all, Next is the first and Prev the last; both stop at the ends", () => {
     expect(nextStepIndex("next", -1, 3)).toBe(0);
@@ -79,6 +92,12 @@ describe("<Steps> on the reader", () => {
     expect(html).toContain("<code>new</code>");
   });
 
+  test("each step carries its caption: the first paragraph as plain text, no nested list, fence or focus ids", () => {
+    const md = ['<Steps src="./s.lifecycle.json">', "", "1. Opened **now** `new`", "", "   - nested", "", "   ```", "   code()", "   ```", "", "2. Closed", "", "</Steps>"].join("\n");
+    const html = renderWikiHtml(md, () => undefined, { views: true, files: files() });
+    expect([...html.matchAll(/data-stp-cap="([^"]*)"/g)].map((m) => m[1])).toEqual(["Opened now", "Closed"]);
+  });
+
   test("the controls and a caption come before the picture, as a named group; Show all is a plain button", () => {
     const html = renderWikiHtml(LIST, () => undefined, { views: true, files: files() });
     const ctrl = /<div class="stp-ctrl"[^>]*>/.exec(html)?.[0] ?? "";
@@ -96,6 +115,7 @@ describe("<Steps> on the reader", () => {
     expect(html).toMatch(/<ol class="stp-list stp-derived" data-reader-only/);
     expect([...html.matchAll(/data-stp-focus="([^"]*)"/g)].map((m) => m[1])).toEqual(["new", "done"]);
     expect(html).toContain("<strong>Start</strong> — Opened.");
+    expect([...html.matchAll(/data-stp-cap="([^"]*)"/g)].map((m) => m[1])).toEqual(["Start — Opened.", "End"]);
   });
 
   test("a Diagram and a Steps on one file share no id", () => {

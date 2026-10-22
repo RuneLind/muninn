@@ -60,6 +60,11 @@ const JSON_FILE = {
     { from: "assessed", to: "decided" },
   ],
 };
+/** A step long enough to wrap the caption over several lines at any width. */
+const LONG_STEP =
+  "The case is assessed against every rule that applies to the person's situation, which takes in the country of work, " +
+  "the country of residence, the seat of the employer, the length of the posting, any agreement between the countries " +
+  "involved, and whether an earlier decision still holds for the period the case covers";
 const PAGE = [
   "---",
   "title: Case",
@@ -74,8 +79,16 @@ const PAGE = [
   '<Steps src="./case.lifecycle.json">',
   "",
   "1. The case opens `opened`",
-  "2. The basis is fetched `opened`, `basis`",
-  "3. The case is assessed `basis, assessed`",
+  "2. The basis is **fetched** `opened`, `basis`",
+  "",
+  "   - a nested point",
+  "   - another point",
+  "",
+  "   ```",
+  "   fetchBasis()",
+  "   ```",
+  "",
+  `3. ${LONG_STEP} \`basis, assessed\``,
   "4. A step naming nothing drawn `missing`",
   "",
   "</Steps>",
@@ -130,6 +143,19 @@ const TALL_PAGE = [
   "3. The bottom node `bot`",
   "",
   "</Steps>",
+  "",
+  "## In a callout",
+  "",
+  '<Callout tone="warn" title="Steps in a callout">',
+  "",
+  '<Steps src="./case.lifecycle.json">',
+  "",
+  "1. Opens `opened`",
+  "2. Basis `basis`",
+  "",
+  "</Steps>",
+  "",
+  "</Callout>",
   "",
   "## Folded",
   "",
@@ -238,13 +264,16 @@ test.describe("Wiki reader: Steps", () => {
       // At rest both go somewhere (first/last step): neither is disabled.
       for (const b of [prev, next]) await expect(b).not.toHaveAttribute("aria-disabled", "true");
       await expect(cap).toHaveText("All steps shown.");
-      const capText = ["The case opens", "The basis is fetched", "The case is assessed", "A step naming nothing drawn"];
+      // The step's own first paragraph as a reader sees it: no nested list, no
+      // fence (nor its Copy label), no trailing focus ids.
+      const capText = ["The case opens", "The basis is fetched", LONG_STEP, "A step naming nothing drawn"];
       for (let k = 0; k < STEP_DIMS.length; k++) {
         await next.click();
         expect(await dimmed(sec)).toEqual(STEP_DIMS[k]);
         expect(await current(sec)).toBe(String(k));
         await expect(sec.locator(".stp-pos")).toHaveText(`Step ${k + 1} of 4`);
-        await expect(cap).toContainText(capText[k]!);
+        await expect.soft(cap).toHaveText(capText[k]!);
+        await expect.soft(cap).toHaveAttribute("title", capText[k]!);
         await expect(prev).toHaveAttribute("aria-disabled", String(k === 0));
         await expect(next).toHaveAttribute("aria-disabled", String(k === 3));
         expect(await sec.locator(".dgm-svg path.a-emphasis.dgm-dim").count()).toBe(0);
@@ -373,6 +402,75 @@ test.describe("Wiki reader: Steps", () => {
     await expect(sec.locator(".stp-pos")).toHaveText("1 step");
   });
 
+  test("Play on a one-step block shows the step and leaves the live line on", async ({ page }) => {
+    await open(page);
+    const sec = steps(page, 2);
+    await sec.locator('button[data-stp-act="play"]').click();
+    await expect(sec.locator(".stp-pos")).toHaveText("Step 1 of 1");
+    await expect(sec.locator('button[data-stp-act="play"]')).toHaveAttribute("aria-pressed", "false");
+    await expect(live(sec)).toHaveAttribute("aria-live", "polite");
+  });
+
+  for (const width of [1280, 360]) {
+    test(`${width} px: a long step's caption takes at most one line more than the rest caption`, async ({ page }) => {
+      await open(page);
+      await page.setViewportSize({ width, height: 900 });
+      const sec = steps(page, 0);
+      const ctrl = sec.locator(".stp-ctrl");
+      const h = (loc: Locator) => loc.evaluate((e) => e.getBoundingClientRect().height);
+      const restBar = await h(ctrl);
+      const restLine = await h(sec.locator(".stp-now"));
+      for (let k = 0; k < 3; k++) await sec.locator('button[data-stp-act="next"]').click();
+      await expect(sec.locator(".stp-pos")).toHaveText("Step 3 of 4");
+      expect(await h(ctrl)).toBeLessThanOrEqual(restBar + restLine + 2);
+      // Two lines at most, whatever the width.
+      const now = sec.locator(".stp-now");
+      const line = await now.evaluate((e) => parseFloat(getComputedStyle(e).lineHeight));
+      expect(await h(now)).toBeLessThanOrEqual(2 * line + 1);
+      await expect(sec.locator(".stp-ctrl .stp-cap")).toHaveText(LONG_STEP);
+    });
+  }
+
+  for (const scheme of ["dark", "light"] as const) {
+    test(`${scheme}: the stuck bar takes its container's surface: the article, a Fold, a Callout`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.setViewportSize({ width: 1280, height: 1000 });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(TALL_REL)}`);
+      await expect(page.locator(".wiki-article section.stp")).toHaveCount(3);
+      /** The bar's paint, and the first opaque ancestor fill above the block. */
+      const paint = (sec: Locator) =>
+        sec.locator(".stp-ctrl").evaluate((bar) => {
+          const cs = getComputedStyle(bar);
+          let e = bar.parentElement!.parentElement;
+          while (e && /rgba\(0, 0, 0, 0\)|transparent/.test(getComputedStyle(e).backgroundColor)) e = e.parentElement;
+          return { color: cs.backgroundColor, image: cs.backgroundImage, ground: e ? getComputedStyle(e).backgroundColor : "" };
+        });
+      const article = await paint(page.locator(".wiki-article section.stp").first());
+      expect(article.color).toBe(article.ground);
+      expect(article.image).toBe("none");
+      const folded = await paint(page.locator(".wiki-article details.fold section.stp"));
+      const foldFill = await page.locator(".wiki-article details.fold").evaluate((e) => getComputedStyle(e).backgroundColor);
+      expect(folded.color).toBe(foldFill);
+      expect(folded.color).not.toBe(article.color);
+      // A callout's fill is a tint over what it sits on: the bar paints the tint
+      // over that ground, so it is opaque and the callout's own colour.
+      const callout = page.locator(".wiki-article .callout");
+      const inCallout = await paint(callout.locator("section.stp"));
+      const tint = await callout.evaluate((e) => getComputedStyle(e).backgroundColor);
+      // The callout keeps its tone's fill (warn here), the bar's tint with it.
+      const warnFill = await callout.evaluate((e) => {
+        const probe = e.appendChild(document.createElement("i"));
+        probe.style.background = "color-mix(in srgb, var(--status-warning) 14%, transparent)";
+        const c = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return c;
+      });
+      expect(tint).toBe(warnFill);
+      expect(inCallout.color).toBe(article.color);
+      expect(inCallout.image).toContain(tint);
+    });
+  }
+
   for (const scheme of ["dark", "light"] as const) {
     test(`${scheme}: with no list, the steps are the file's views`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
@@ -407,7 +505,7 @@ test.describe("Wiki reader: Steps", () => {
     expect(await inView(sec.locator(".stp-ctrl"))).toBe(true);
     expect(await inView(mid)).toBe(true);
     const cap = sec.locator(".stp-ctrl .stp-cap");
-    await expect(cap).toContainText("The middle node");
+    await expect(cap).toHaveText("The middle node");
     expect(await inView(cap)).toBe(true);
   });
 

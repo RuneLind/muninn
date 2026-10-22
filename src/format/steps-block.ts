@@ -50,7 +50,7 @@ export const stepsViewHtml: StepsViewRenderer = (input) => {
       read.views
         .map(
           (v, i) =>
-            stepItemOpen(i, v.focus, "") +
+            stepItemOpen(i, v.focus, v.note ? `${v.label} — ${v.note}` : v.label, "") +
             `<strong>${escapeHtml(v.label)}</strong>${v.note ? ` — ${escapeHtml(v.note)}` : ""}</li>`,
         )
         .join("") +
@@ -83,13 +83,20 @@ export function stepsCss(scope: string): string {
     ${scope} .stp { margin: 0.8rem 0 1rem; }
     ${scope} .stp > figure.dgm { margin: 0 0 0.4rem; }
     /* Stuck to the pane's top while the block is on screen, so the picture
-       scrolls under it; opaque on the article's own surface. */
+       scrolls under it: opaque, in its container's fill (the pane's, a Fold's,
+       a Callout's tint over what the Callout sits on; component-styles.ts). */
     ${scope} .stp-ctrl {
       position: sticky; top: 0; z-index: 2; margin: 0 0 0.4rem; padding: 0.35rem 0;
-      background: var(--bg-panel); box-shadow: 0 1px 0 var(--border-primary);
+      background-color: var(--surface-ground, var(--bg-panel)); background-image: var(--surface-tint, none);
+      box-shadow: 0 1px 0 var(--border-primary);
     }
     ${scope} .stp-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
-    ${scope} .stp-now { margin-top: 0.3rem; font-size: 0.9em; color: var(--text-primary); }
+    /* Two lines at most, so a long step never grows the bar over the picture;
+       the caption's title holds the whole text. */
+    ${scope} .stp-now {
+      margin-top: 0.3rem; font-size: 0.9em; line-height: 1.4; color: var(--text-primary); overflow-wrap: anywhere;
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+    }
     ${scope} .stp-btn {
       font: inherit; font-size: 0.85em; padding: 0.2rem 0.65rem; cursor: pointer; border-radius: 6px;
       color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--text-muted);
