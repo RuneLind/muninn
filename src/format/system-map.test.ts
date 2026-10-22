@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { nodeKey, parseExternalList, parseGroups, readSystemMap, resolveSystemNode, type SystemMapTable } from "./system-map.ts";
-import { layoutSystemMap, SYSTEM_MAP_CHROME_CLASSES, systemMapViewHtml } from "./system-map-view.ts";
+import { layoutSystemMap, SYSTEM_MAP_CHROME_CLASSES, systemMapCss, systemMapViewHtml } from "./system-map-view.ts";
 import { PEEK_SYSTEM_MAP_CHROME } from "../dashboard/views/components/wiki-ref-links.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
@@ -235,5 +235,131 @@ describe("node names on the reader", () => {
   test("a repo node must land under repos/", () => {
     expect(resolveSystemNode({ name: "../plans/secret", external: false }, resolve)).toEqual({ kind: "unresolved" });
     expect(resolve("repos/../plans/secret")).toBeDefined();
+  });
+});
+
+/** The `<rect>` of every node in a rendered map, by node key. */
+function nodeRects(html: string): Map<string, { x: number; y: number; w: number; h: number }> {
+  const out = new Map<string, { x: number; y: number; w: number; h: number }>();
+  for (const m of html.matchAll(/data-sm-node="([^"]+)"[^>]*>(?:<title>[^<]*<\/title>)?<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)) {
+    out.set(m[1]!, { x: Number(m[2]), y: Number(m[3]), w: Number(m[4]), h: Number(m[5]) });
+  }
+  return out;
+}
+
+/** Points along an absolute `M/L/H/V/C/Q` path, every curve sampled 40 times. */
+function samplePath(d: string): { x: number; y: number }[] {
+  const toks = d.match(/[MLHVCQ]|-?[\d.]+/g)!;
+  const pts: { x: number; y: number }[] = [];
+  let i = 0;
+  let cmd = "";
+  let x = 0;
+  let y = 0;
+  const num = () => Number(toks[i++]);
+  const line = (nx: number, ny: number) => {
+    for (let s = 1; s <= 40; s++) pts.push({ x: x + ((nx - x) * s) / 40, y: y + ((ny - y) * s) / 40 });
+    x = nx;
+    y = ny;
+  };
+  while (i < toks.length) {
+    if (/[A-Z]/.test(toks[i]!)) cmd = toks[i++]!;
+    if (cmd === "M") {
+      x = num();
+      y = num();
+      pts.push({ x, y });
+    } else if (cmd === "L") line(num(), num());
+    else if (cmd === "H") line(num(), y);
+    else if (cmd === "V") line(x, num());
+    else if (cmd === "C" || cmd === "Q") {
+      const c = cmd === "C" ? [num(), num(), num(), num()] : [num(), num()];
+      const ex = num();
+      const ey = num();
+      for (let s = 1; s <= 40; s++) {
+        const t = s / 40;
+        const u = 1 - t;
+        if (cmd === "C") {
+          pts.push({ x: u ** 3 * x + 3 * u * u * t * c[0]! + 3 * u * t * t * c[2]! + t ** 3 * ex, y: u ** 3 * y + 3 * u * u * t * c[1]! + 3 * u * t * t * c[3]! + t ** 3 * ey });
+        } else {
+          pts.push({ x: u * u * x + 2 * u * t * c[0]! + t * t * ex, y: u * u * y + 2 * u * t * c[1]! + t * t * ey });
+        }
+      }
+      x = ex;
+      y = ey;
+    } else throw new Error(`unsampled command ${cmd}`);
+  }
+  return pts;
+}
+
+describe("layout: routing and sizing", () => {
+  // Shaped like a real hub: frontend → core → services → external, with most
+  // core edges skipping the services column.
+  const services = ["svc-a", "svc-b", "svc-c", "svc-d", "svc-e", "svc-f"];
+  const externals = ["ext-a", "ext-b", "ext-c", "ext-d", "ext-e", "ext-f", "ext-g"];
+  const rows: string[][] = [
+    ["web-a", "api", "REST", "ok", ""],
+    ["web-b", "api", "REST", "ok", ""],
+    ...services.map((s) => ["api", s, "Kafka", "ok", ""]),
+    ...externals.map((e) => ["api", e, "REST", "ok", ""]),
+    ...externals.slice(0, 3).map((e) => ["api", e, "SOAP", "ok", ""]),
+    ["web-a", "ext-a", "REST", "ok", ""],
+    ["svc-b", "ext-c", "REST", "ok", ""],
+  ];
+  const groups = ["web-a=frontend", "web-b=frontend", "api=core", ...services.map((s) => `${s}=services`)].join(";");
+  const read = readSystemMap({ groups, external: externals.join(";") }, T(["From", "To", "Protocol", "Status", "Evidence"], rows));
+  const draw = (r = read) =>
+    systemMapViewHtml({ read: r, caption: "", tableHtml: "", beforeHtml: "", afterHtml: "", prefix: "sm9-", resolveNode: (n) => ({ kind: n.external ? "external" : "repo", link: null }) });
+  const html = draw();
+
+  test("no edge passes under a box it does not end at", () => {
+    const rects = nodeRects(html);
+    expect(rects.size).toBe(2 + 1 + services.length + externals.length);
+    const hits: string[] = [];
+    for (const m of html.matchAll(/<path class="sm-edge [^"]*" d="([^"]+)"[^>]*data-sm-from="([^"]+)" data-sm-to="([^"]+)"/g)) {
+      const [, d, from, to] = m;
+      for (const [key, r] of rects) {
+        if (key === from || key === to) continue;
+        if (samplePath(d!).some((p) => p.x > r.x + 0.5 && p.x < r.x + r.w - 0.5 && p.y > r.y + 0.5 && p.y < r.y + r.h - 0.5)) hits.push(`${from}→${to} under ${key}`);
+      }
+    }
+    expect(hits).toEqual([]);
+  });
+
+  test("a node's many edges leave its side at different points", () => {
+    const starts = [...html.matchAll(/<path class="sm-edge [^"]*" d="M([\d.]+) ([\d.]+)[^"]*"[^>]*data-sm-from="api"/g)].map((m) => `${m[1]},${m[2]}`);
+    expect(starts.length).toBe(services.length + externals.length + 3);
+    expect(new Set(starts).size).toBe(starts.length);
+  });
+
+  test("a column is as wide as its longest label; only a label past the cap is cut, by width", () => {
+    const r = readSystemMap(
+      { groups: "faktureringskomponenten=core" },
+      T(["From", "To", "Status"], [["faktureringskomponenten", "WWWWWWWWWWWWWWWWWWWW", "ok"], ["faktureringskomponenten", "x".repeat(60), "ok"]]),
+    );
+    const out = draw(r);
+    // 23 characters fit whole.
+    expect(out).toContain(">faktureringskomponenten</text>");
+    // Twenty wide letters do not fit a column: cut, the full name in the title.
+    const w = /data-sm-node="wwwwwwwwwwwwwwwwwwww"[^>]*><title>([^<]*)<\/title><rect[^>]*\/><text[^>]*>([^<]*)<\/text>/.exec(out)!;
+    expect(w[1]).toBe("WWWWWWWWWWWWWWWWWWWW");
+    expect(w[2]!.endsWith("…")).toBe(true);
+    expect(w[2]!.length).toBeLessThan(20);
+    const long = new RegExp(`data-sm-node="${"x".repeat(60)}"[^>]*><title>[^<]*</title><rect[^>]*/><text[^>]*>([^<]*)</text>`).exec(out)!;
+    expect(long[1]!.endsWith("…")).toBe(true);
+  });
+
+  test("a long group name is cut to its column, the full name in its title", () => {
+    const r = readSystemMap({ groups: "a=frontend-and-integration-layer-services" }, T(["From", "To", "Status"], [["a", "b", "ok"]]));
+    const head = /<text class="sm-col"[^>]*>(?:<title>([^<]*)<\/title>)?([^<]*)<\/text>/.exec(draw(r))!;
+    expect(head[1]).toBe("frontend-and-integration-layer-services");
+    expect(head[2]!.endsWith("…")).toBe(true);
+  });
+
+  test("the legibility floor is computed from the smallest font drawn (11px column heads)", () => {
+    const m = /viewBox="0 0 ([\d.]+) [\d.]+" style="max-width:[\d.]+px;min-width:(\d+)px"/.exec(html)!;
+    expect(Number(m[2])).toBe(Math.ceil((Number(m[1]) * 9) / 11));
+  });
+
+  test("print drops the inline min-width, so a printed map fits the page", () => {
+    expect(systemMapCss(".a").replace(/\s+/g, " ")).toMatch(/@media print \{[^}]*\.a \.sm-svg \{ min-width: 0 !important; \}/);
   });
 });

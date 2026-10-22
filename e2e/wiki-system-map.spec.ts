@@ -54,7 +54,7 @@ const FILES: Record<string, string> = {
     "| Fra | Til | Protokoll | Status | Bevis |",
     "|---|---|---|---|---|",
     "| alpha-web | beta-api | REST | ok | linked both ways |",
-    "| beta-api | gamma-svc | Kafka | wrong | the topic was retired |",
+    "| beta-api | [[repos/gamma-svc|gamma-service-under-a-label-far-too-long-for-one-column]] | Kafka | wrong | the topic was retired |",
     "| beta-api | Registry | SOAP | ok | |",
     "| gamma-svc | typo-svc | REST | ok | |",
     "",
@@ -145,10 +145,33 @@ test.describe("Wiki reader: SystemMap", () => {
       const order = await sec.evaluate((s) => [s.querySelector(".sm-map"), s.querySelector("table")].map((e) => Array.from(s.querySelectorAll("*")).indexOf(e!)));
       expect(order[0]).toBeLessThan(order[1]!);
 
-      // The map fills the article column and its 12px labels never draw under 9px.
+      // The map fills the article column and its smallest text (11px column
+      // heads) never draws under 9px.
       const scale = await sec.locator(".sm-svg").evaluate((svg) => svg.getBoundingClientRect().width / (svg as SVGSVGElement).viewBox.baseVal.width);
-      expect(12 * scale).toBeGreaterThanOrEqual(9 - 0.01);
+      expect(11 * scale).toBeGreaterThanOrEqual(9 - 0.01);
       expect(scale).toBeLessThanOrEqual(1);
+      // No label runs past its box, and no edge passes under a box it does not
+      // end at (beta-api → Registry crosses two columns).
+      const layout = await sec.locator(".sm-svg").evaluate((svg) => {
+        const boxes = Array.from(svg.querySelectorAll(".sm-node")).map((g) => {
+          const r = g.querySelector("rect") as SVGRectElement;
+          return { key: g.getAttribute("data-sm-node")!, x: r.x.baseVal.value, y: r.y.baseVal.value, w: r.width.baseVal.value, h: r.height.baseVal.value, text: (g.querySelector("text") as SVGTextElement).getComputedTextLength() };
+        });
+        const under: string[] = [];
+        for (const p of Array.from(svg.querySelectorAll("path.sm-edge")) as SVGPathElement[]) {
+          const ends = [p.getAttribute("data-sm-from"), p.getAttribute("data-sm-to")];
+          for (let s = 0; s <= p.getTotalLength(); s += 1) {
+            const pt = p.getPointAtLength(s);
+            const hit = boxes.find((b) => !ends.includes(b.key) && pt.x > b.x + 1 && pt.x < b.x + b.w - 1 && pt.y > b.y + 1 && pt.y < b.y + b.h - 1);
+            if (hit) {
+              under.push(`${ends.join("→")} under ${hit.key}`);
+              break;
+            }
+          }
+        }
+        return { overflow: boxes.filter((b) => b.text > b.w - 8).map((b) => b.key), under };
+      });
+      expect(layout).toEqual({ overflow: [], under: [] });
       // Columns left to right in groups= order, then repos (typo-svc), then external.
       const x = async (key: string) => (await sec.locator(`[data-sm-node="${key}"] rect`).boundingBox())!.x;
       const xs = await Promise.all(["alpha-web", "beta-api", "gamma-svc", "typo-svc", "registry"].map(x));

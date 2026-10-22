@@ -55,7 +55,7 @@ describe("the heading match rule", () => {
     };
     const out = await drift(files);
     // Only a's «Calls» counts now; b's «Related» is no longer a link section.
-    expect(out.map((f) => f.message)).toEqual(["<SystemMap> row a → b is wrong, but repos/a.md («Calls») still links it"]);
+    expect(out.map((f) => f.message)).toEqual(["<SystemMap> row a → b is wrong, but repos/a.md:8 («Calls») still links it"]);
   });
 
   test("parseSystemMapLinkHeadings: absent, bad entries, an empty list", () => {
@@ -77,7 +77,7 @@ describe("system-map-drift", () => {
       {
         check: "system-map-drift",
         relPath: "flows/map.mdx",
-        message: "<SystemMap> row a → b is wrong, but repos/a.md («External integrations») still links it",
+        message: "<SystemMap> row a → b is wrong, but repos/a.md:8 («External integrations») still links it",
         detail: "evidence: b dropped the endpoint",
         line: 10,
       },
@@ -102,7 +102,7 @@ describe("system-map-drift", () => {
     });
     expect(out.map((f) => f.message)).toEqual([
       "<SystemMap> row b → c is ok, but neither repos/b.md nor repos/c.md links the other in a link section",
-      "<SystemMap> has no row between a and c, but repos/a.md («Related repos») links them",
+      "<SystemMap> has no row between a and c, but repos/a.md:8 («Related repos») links them",
     ]);
   });
 
@@ -244,6 +244,48 @@ describe("pairs", () => {
       "repos/b.md": repo("b", ""),
       "flows/map.md": hub(["| a | b | REST | wrong | gone |"]),
     });
-    expect(out.map((f) => f.message)).toEqual(["<SystemMap> row a → b is wrong, but repos/a.md («Related») still links it"]);
+    expect(out.map((f) => f.message)).toEqual(["<SystemMap> row a → b is wrong, but repos/a.md:8 («Related») still links it"]);
+  });
+});
+
+describe("where a finding points", () => {
+  test("an unresolved name sits on the first row that names it", async () => {
+    const out = await drift({
+      "repos/a.md": repo("a", ""),
+      "repos/b.md": repo("b", ""),
+      "flows/map.mdx": hub(["| a | b | REST | ok | |", "| a | ab | REST | ok | |", "| ab | b | REST | ok | |"]),
+    });
+    expect(out.filter((f) => f.message.includes('"ab"')).map((f) => f.line)).toEqual([11]);
+  });
+
+  test("a wrong row names the line of each link that still links it; the verb agrees", async () => {
+    const one = await drift({
+      "repos/a.md": repo("a", "## Related\n\nIntro.\n\n- [[repos/b]]"),
+      "repos/b.md": repo("b", ""),
+      "flows/map.mdx": hub(["| a | b | REST | wrong | gone |"]),
+    });
+    expect(one.map((f) => f.message)).toEqual(["<SystemMap> row a → b is wrong, but repos/a.md:10 («Related») still links it"]);
+    const two = await drift({
+      "repos/a.md": repo("a", "## Related\n\n- [[repos/b]]"),
+      "repos/b.md": repo("b", "## Related repos\n\n- [a](./a.md)"),
+      "flows/map.mdx": hub(["| a | b | REST | wrong | gone |"]),
+    });
+    expect(two.map((f) => f.message)).toEqual(["<SystemMap> row a → b is wrong, but repos/a.md:8 («Related») and repos/b.md:8 («Related repos») still link it"]);
+  });
+
+  test("a link with no row names its line and sits on the first row naming either end", async () => {
+    const out = await drift({
+      "repos/a.md": repo("a", ""),
+      "repos/b.md": repo("b", ""),
+      "repos/c.md": repo("c", "## Related\n\n- [[repos/a]]"),
+      "flows/map.mdx": hub(["| a | b | REST | ok | |", "| b | c | REST | ok | |"]),
+    }).then((fs) => fs.filter((f) => f.message.includes("has no row")));
+    expect(out.map((f) => [f.line, f.message])).toEqual([[10, "<SystemMap> has no row between a and c, but repos/c.md:8 («Related») links them"]]);
+  });
+
+  test("a pipe line before the table is not its header: rows keep their own lines", () => {
+    const content = ["---", "title: Map", "---", "# Map", "", "<SystemMap>", "", "| note line", "", "| From | To | Status |", "|---|---|---|", "| a | b | maybe |", "", "</SystemMap>", ""].join("\n");
+    const out = checkPageText({ relPath: "flows/map.mdx" }, content, []).filter((f) => f.check === "system-map");
+    expect(out.map((f) => [f.line, f.message])).toEqual([[12, '<SystemMap> row a → b has Status "maybe"; write ok or wrong']]);
   });
 });

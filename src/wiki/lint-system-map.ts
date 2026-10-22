@@ -34,7 +34,6 @@ import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts"
 import { stripLineCodeSpansKeepingLinks } from "./park-links.ts";
 import { extractMarkdownLinks, stripFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import { extractWikilinks } from "./wikilinks.ts";
-import { findUnfencedLine } from "./lint-lines.ts";
 import { WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import type { LintFinding } from "./lint.ts";
 
@@ -103,7 +102,7 @@ export function systemMapBlocks(rawContent: string): MapBlock[] {
   return componentBlocks(parseBlocks(parked), "SystemMap").map((block) => {
     const { table } = chartBody(block.children);
     const tagLine = block.line === undefined ? undefined : bodyAt + block.line + 1;
-    const headerLine = tagLine === undefined ? undefined : findUnfencedLine(lines, fenced, tagLine, (l) => l.trim().startsWith("|"));
+    const headerLine = tagLine === undefined ? undefined : tableHeaderLine(lines, fenced, tagLine);
     return {
       read: readSystemMap(attrsOf(block.attrs), table ? chartTable(table, cellText) : null),
       caption: block.attrs.caption === undefined ? "" : visibleText(unpark(block.attrs.caption, "text")).trim(),
@@ -111,6 +110,16 @@ export function systemMapBlocks(rawContent: string): MapBlock[] {
       rowLine: (row: number) => (headerLine === undefined ? tagLine : headerLine + 2 + row),
     };
   });
+}
+
+/** The 1-based line of the first unfenced pipe line from `from` (0-based)
+ *  that an alignment row follows: the table's header, not a `| note` line. */
+function tableHeaderLine(lines: readonly string[], fenced: readonly boolean[], from: number): number | undefined {
+  const align = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  for (let i = from; i + 1 < lines.length; i++) {
+    if (!fenced[i] && lines[i]!.trim().startsWith("|") && !fenced[i + 1] && align.test(lines[i + 1]!)) return i + 1;
+  }
+  return undefined;
 }
 
 function tagOf(b: Pick<MapBlock, "caption">): string {
@@ -134,10 +143,12 @@ export function checkSystemMaps(page: Pick<WikiPageMeta, "relPath">, rawContent:
   return findings;
 }
 
-/** A link section: its heading as written and its links' resolved relPaths. */
+/** A link section: its heading as written, its links' resolved relPaths, and
+ *  the 1-based page line of each target's first link. */
 export interface LinkSection {
   heading: string;
   targets: string[];
+  lineOf: Map<string, number>;
 }
 
 /**
@@ -148,26 +159,31 @@ export interface LinkSection {
  */
 export function linkSections(page: Pick<WikiPageMeta, "relPath">, rawContent: string, headings: readonly string[], index: Pick<WikiIndex, "resolve" | "resolveRelPath">): LinkSection[] {
   const body = stripFrontmatter(rawContent);
+  const bodyAt = rawContent.slice(0, rawContent.length - body.length).split("\n").length - 1;
   const lines = body.split("\n");
   const fenced = fencedLineMask(lines);
   const out: LinkSection[] = [];
   const dir = path.posix.dirname(page.relPath);
-  let open: { heading: string; lines: string[] } | null = null;
+  let open: { heading: string; lines: { text: string; at: number }[] } | null = null;
   const close = () => {
     if (!open) return;
-    const text = open.lines.join("\n");
-    const targets = new Set<string>();
-    for (const t of extractWikilinks(text)) {
-      const hit = index.resolve(t);
-      if (hit) targets.add(hit.relPath);
+    const lineOf = new Map<string, number>();
+    const add = (rel: string, at: number) => {
+      if (!lineOf.has(rel)) lineOf.set(rel, at);
+    };
+    for (const { text, at } of open.lines) {
+      for (const t of extractWikilinks(text)) {
+        const hit = index.resolve(t);
+        if (hit) add(hit.relPath, at);
+      }
+      for (const raw of extractMarkdownLinks(text)) {
+        const joined = path.posix.normalize(path.posix.join(dir, raw));
+        if (joined === ".." || joined.startsWith("../")) continue;
+        const hit = index.resolveRelPath(joined);
+        if (hit) add(hit.relPath, at);
+      }
     }
-    for (const raw of extractMarkdownLinks(text)) {
-      const joined = path.posix.normalize(path.posix.join(dir, raw));
-      if (joined === ".." || joined.startsWith("../")) continue;
-      const hit = index.resolveRelPath(joined);
-      if (hit) targets.add(hit.relPath);
-    }
-    out.push({ heading: open.heading, targets: [...targets] });
+    out.push({ heading: open.heading, targets: [...lineOf.keys()], lineOf });
     open = null;
   };
   lines.forEach((line, i) => {
@@ -178,7 +194,7 @@ export function linkSections(page: Pick<WikiPageMeta, "relPath">, rawContent: st
       if (linkHeadingMatches(h[1]!, headings)) open = { heading: linkHeadingName(h[1]!), lines: [] };
       return;
     }
-    open?.lines.push(stripLineCodeSpansKeepingLinks(line));
+    open?.lines.push({ text: stripLineCodeSpansKeepingLinks(line), at: bodyAt + i + 1 });
   });
   close();
   return out;
@@ -217,36 +233,44 @@ export async function checkSystemMapDrift(
         findings.push({ check: "system-map-drift", relPath: hub.page.relPath, message: `${tagOf(b)} ${message}`, ...(detail ? { detail } : {}), ...(line === undefined ? {} : { line }) });
 
       // Node → repos page (relPath), for the nodes drift compares.
+      // The first row naming a node: where its finding sits.
+      const firstRow = (...keys: string[]) => {
+        const r = b.read.rows.find((row) => keys.includes(nodeKey(row.from)) || keys.includes(nodeKey(row.to)));
+        return r ? b.rowLine(r.row) : b.tagLine;
+      };
       const repoOf = new Map<string, string>();
       for (const node of b.read.nodes) {
         const r = resolveSystemNode(node, index.resolve);
         if (r.kind === "repo") repoOf.set(node.key, r.page.relPath);
-        else if (r.kind === "unresolved") push(`node "${node.name}" resolves to no repos/ page and is not listed in external=`, b.tagLine);
+        else if (r.kind === "unresolved") push(`node "${node.name}" resolves to no repos/ page and is not listed in external=`, firstRow(node.key));
       }
       const nodeOfPage = new Map<string, string>();
       for (const [key, rel] of repoOf) nodeOfPage.set(rel.toLowerCase(), key);
       const nameOf = new Map(b.read.nodes.map((n) => [n.key, n.name]));
 
       // Each repos node's links to other repos nodes, with the section that holds them.
-      const links = new Map<string, Map<string, string>>();
+      const links = new Map<string, Map<string, { heading: string; line: number }>>();
       for (const [key, rel] of repoOf) {
-        const m = new Map<string, string>();
+        const m = new Map<string, { heading: string; line: number }>();
         for (const s of await sectionsOf(rel)) {
           for (const t of s.targets) {
             const other = nodeOfPage.get(t.toLowerCase());
-            if (other && other !== key && !m.has(other)) m.set(other, s.heading);
+            if (other && other !== key && !m.has(other)) m.set(other, { heading: s.heading, line: s.lineOf.get(t)! });
           }
         }
         links.set(key, m);
       }
+      // «repos/a.md:12 («Related»)», per page that links the other.
       const linkedBy = (a: string, b2: string): string[] => {
         const out: string[] = [];
-        const ab = links.get(a)?.get(b2);
-        if (ab) out.push(`${repoOf.get(a)} («${ab}»)`);
-        const ba = links.get(b2)?.get(a);
-        if (ba) out.push(`${repoOf.get(b2)} («${ba}»)`);
+        for (const [from, to] of [[a, b2], [b2, a]] as const) {
+          const l = links.get(from)?.get(to);
+          if (l) out.push(`${repoOf.get(from)}:${l.line} («${l.heading}»)`);
+        }
         return out;
       };
+      const linkVerb = (by: string[]) => `${by.join(" and ")} ${by.length > 1 ? "link" : "links"}`;
+      const order = new Map(b.read.nodes.map((n, i) => [n.key, i]));
 
       // Links carry no direction or protocol: a wrong row's link is the one an
       // ok row for the same unordered pair needs, so that pair is not reported.
@@ -259,7 +283,7 @@ export async function checkSystemMapDrift(
         if (a === c || !repoOf.has(a) || !repoOf.has(c) || r.status === null) continue;
         const by = linkedBy(a, c);
         if (r.status === "wrong" && by.length > 0 && !okPairs.has(pairOf(r))) {
-          push(`row ${r.from} → ${r.to} is wrong, but ${by.join(" and ")} still links it`, b.rowLine(r.row), r.evidence ? `evidence: ${r.evidence}` : undefined);
+          push(`row ${r.from} → ${r.to} is wrong, but ${linkVerb(by).replace(/ (links?)$/, " still $1")} it`, b.rowLine(r.row), r.evidence ? `evidence: ${r.evidence}` : undefined);
         } else if (r.status === "ok" && by.length === 0) {
           push(`row ${r.from} → ${r.to} is ok, but neither ${repoOf.get(a)} nor ${repoOf.get(c)} links the other in a link section`, b.rowLine(r.row), `link sections: ${headings.join(", ")}`);
         }
@@ -270,7 +294,8 @@ export async function checkSystemMapDrift(
           const pair = [a, c].sort().join("\u0000");
           if (rowPairs.has(pair) || reported.has(pair)) continue;
           reported.add(pair);
-          push(`has no row between ${nameOf.get(a)} and ${nameOf.get(c)}, but ${linkedBy(a, c).join(" and ")} links them`, b.tagLine);
+          const [x, y] = [a, c].sort((p, q) => order.get(p)! - order.get(q)!) as [string, string];
+          push(`has no row between ${nameOf.get(x)} and ${nameOf.get(y)}, but ${linkVerb(linkedBy(x, y))} them`, firstRow(x, y));
         }
       }
     }
