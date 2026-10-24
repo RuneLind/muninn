@@ -250,9 +250,18 @@ describe("the age chip (D5)", () => {
     expect([sa1.focus.length, sa1.alsoIn?.map((p) => p.relPath)]).toEqual([0, ["plans/a.md"]]);
     expect(ago(sa1.ageMs)).toBe(5);
     expect(ago(named("title sa2")!.ageMs)).toBe(4);
-    // A touched page counts: sd2 owns d2 (its focus row 8.5h) and touched d.md at 2.5h.
-    expect(named("title sd2")!.touched.map((p) => p.relPath)).toContain("notes/d.md");
-    expect(ago(named("title sd2")!.ageMs)).toBe(2.5);
+    // A touched page does not count (D5: focus pages only): sd2 owns d2 (its
+    // focus row 8.5h) and only touched d.md at 2.5h.
+    const sd2 = named("title sd2")!;
+    expect(sd2.touched.map((p) => p.relPath)).toContain("notes/d.md");
+    expect(ago(sd2.ageMs)).toBe(8.5);
+    // The Threads stop agrees for the same session and pages: d2 split into
+    // its own thread holds sd2 alone.
+    const split = openWorkCards(whole.work, whole.pages, INERT, [], null, NOW, whole.pages, { stop: "threads", evidence: ALL, splits: [{ id: "x1", page: "notes/d2.md" }], keptApart: [] }).cards;
+    const d2 = thread(split, "notes/d2.md");
+    expect(d2.sessions.map((s) => s.id)).toEqual(["sd2"]);
+    expect(d2.focus.map((p) => p.relPath)).toEqual(["notes/d2.md"]);
+    expect(sd2.ageMs).toBe(d2.ageMs!);
     expect(cards.every((c) => c.ageMs !== undefined)).toBe(true);
   });
 });

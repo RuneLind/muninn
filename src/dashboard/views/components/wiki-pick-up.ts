@@ -68,7 +68,8 @@ export function workAgeSource(work: PickUpWork, allPages: readonly WikiListing[]
 /**
  * A card's age (D5): the newest `lastMs` of a contribution row, focus or
  * touch, whose session is one of `sessions` (`workSessionRef`) and whose page
- * is one of `pages`, the card's focus pages. A card whose source thread is in
+ * is one of `pages`, the card's focus pages (a Sessions-stop card passes its
+ * session's owned and `also in:` pages, never its touched ones). A card whose source thread is in
  * `contributions.cut`, or with no readable block or no such row, falls back to
  * the newest page-level focus time of its pages. Undefined when neither
  * exists. Never a creation or git date.

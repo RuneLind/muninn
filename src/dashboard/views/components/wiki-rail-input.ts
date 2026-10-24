@@ -446,9 +446,9 @@ export function openWorkCards(
         session: { ref: sc.ref },
         alsoIn,
         // D5 on a Sessions-stop card: its one session's newest row, focus or
-        // touch, on any page the card names (owned, `also in:`, touched), so a
-        // card owning no page still has one.
-        ...ageField(workCardAgeMs(ages, [sc.threadKey], [sc], [...sc.rows, ...sc.alsoIn, ...sc.touched].map((p) => p.relPath))),
+        // touch, on the session's focus pages (owned and `also in:`, never the
+        // touched ones), from the unfiltered lists; never empty for a session card.
+        ...ageField(workCardAgeMs(ages, [sc.threadKey], [sc], [...sc.rows, ...sc.alsoIn].map((p) => p.relPath))),
       }));
     return { cards, control };
   }

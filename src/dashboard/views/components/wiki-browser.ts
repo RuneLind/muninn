@@ -218,7 +218,7 @@ import {
   WORK_GROUP_FULL_TEXT,
   WORK_POP_ID,
 } from "./wiki-thread-view.ts";
-import { pickUpStep } from "./wiki-pick-up.ts";
+import { pickUpStep, pickUpTarget } from "./wiki-pick-up.ts";
 import {
   storageEventTouchesWorkGroup,
   workGroupAddRefused,
@@ -2245,8 +2245,9 @@ function revealActiveRow(flash: boolean): boolean {
  * re-reads the cards a render drew (`pickUpStep`), so the folds' two-spelling
  * rule decides every write. Focus stays on the strip row through those
  * renders (`data-pickup` is a rail control `renderList` restores), then moves
- * to the revealed row, so the focus ring is on screen and Tab continues from
- * the card rather than from the strip the rail scrolled away from.
+ * to the drawing card's fold, the header control a later render restores
+ * (`railControlSelector`); the scroll keeps that header and the row in view
+ * when both fit. Page rows get no `tabindex`.
  */
 function jumpToPickUp(rel: string): void {
   const page = findPageByRelPath(allPages, rel);
@@ -2270,16 +2271,21 @@ function jumpToPickUp(rel: string): void {
     loadPageByRelPath(page.relPath);
     return;
   }
-  const top = revealScrollTop(listEl.getBoundingClientRect(), row.getBoundingClientRect(), listEl.scrollTop);
+  const t = pickUpTarget(workCardsDrawn, page.relPath);
+  const fold = t ? listEl.querySelector<HTMLElement>(`.wiki-thread-card[data-thread="${CSS.escape(t.card.foldKey)}"] > .wiki-thread-fold`) : null;
+  const box = listEl.getBoundingClientRect();
+  const r = row.getBoundingClientRect();
+  const h = fold?.getBoundingClientRect();
+  // Header and row together when they fit, else the row alone.
+  const span = h ? { top: Math.min(h.top, r.top), bottom: Math.max(h.bottom, r.bottom) } : r;
+  const top = revealScrollTop(box, span.bottom - span.top <= box.bottom - box.top ? span : r, listEl.scrollTop);
   if (top !== null) listEl.scrollTop = top;
   listEl.querySelectorAll(".wiki-list-item.pickup-hl").forEach((el) => el.classList.remove("pickup-hl"));
   row.classList.add("pickup-hl");
   row.classList.remove("reveal-flash");
   void row.offsetWidth; // restart the animation on a repeat jump
   row.classList.add("reveal-flash");
-  // A plain row is no tab stop; -1 makes it focusable without adding one.
-  row.tabIndex = -1;
-  row.focus({ preventScroll: true });
+  fold?.focus({ preventScroll: true });
 }
 
 /**

@@ -3,8 +3,9 @@
  * `muninn-wiki-pick-up`, PR 3: D2, D5, D6, D11, D12, D14): five rows newest
  * first from focus rows only (a touch never shows, a page and its `.html`
  * attachment are one row); a click and Enter open the card that draws the
- * page (through a closed group and `+ N more threads`), scroll it into view
- * and highlight the row; a page no drawn card holds opens itself; a strip row
+ * page (through a closed group and `+ N more threads`), scroll it into view,
+ * highlight the row and focus the card's fold, which a repaint keeps; a
+ * page no drawn card holds opens itself; a strip row
  * adds no page row, no `data-relpath`, no current-page mark and nothing to
  * `#wikiCount`; the fold survives a reload; the strip hides during a search;
  * and every card shows an age chip in both themes, its colours the tokens
@@ -266,58 +267,111 @@ test.describe("Wiki rail: Pick up", () => {
     await expect(stripRows(page)).toHaveCount(5);
   });
 
-  test("Enter does the same through a closed group, and focus moves to the revealed row", async ({ page }) => {
+  test("Enter does the same through a closed group, and focus moves to the drawing card's fold, an operable control", async ({ page }) => {
     await openReader(page);
     await groupCard(page).locator(".wiki-thread-fold").click();
     await expect(groupCard(page).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "false");
     await expect(threadRow(page, A[1]!)).toHaveCount(0);
     await stripRow(page, A[1]!).focus();
     await page.keyboard.press("Enter");
+    const fold = cardOf(page, A[1]!).locator(":scope > .wiki-thread-fold");
     await expect(groupCard(page).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "true");
-    await expect(cardOf(page, A[1]!).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "true");
+    await expect(fold).toHaveAttribute("aria-expanded", "true");
     await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
     await expect(threadRow(page, A[1]!)).toBeInViewport();
-    await expect(threadRow(page, A[1]!)).toBeFocused();
+    await expect(fold).toBeFocused();
+    // A real control with a role and a name, not a bare row.
+    await expect(page.getByRole("button", { name: /Alpha 2/ }).and(fold)).toBeFocused();
     // A second Enter on the strip row, its card drawn open, only reveals it.
     await stripRow(page, A[1]!).focus();
     await page.keyboard.press("Enter");
     await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
-    await expect(threadRow(page, A[1]!)).toBeFocused();
-    await expect(cardOf(page, A[1]!).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "true");
+    await expect(fold).toBeFocused();
+    await expect(fold).toHaveAttribute("aria-expanded", "true");
+    // Two jumps and no page row is made focusable.
+    await expect(page.locator("#wikiList .wiki-list-item[tabindex]")).toHaveCount(0);
+    // Enter on the focused control does what the card's fold does: it closes the card.
+    await page.keyboard.press("Enter");
+    await expect(fold).toHaveAttribute("aria-expanded", "false");
+    await expect(threadRow(page, A[1]!)).toHaveCount(0);
   });
 
-  test("at a short viewport, focus lands on the revealed row inside the rail and Tab continues from there", async ({ page }) => {
+  test("at a short viewport, the card's fold and the row stay in the rail's box, Tab continues from the card, and another tab's write keeps focus there", async ({ page, context }) => {
     await page.setViewportSize({ width: 1400, height: 480 });
     await openReader(page);
     await groupCard(page).locator(".wiki-thread-fold").click();
     await expect(groupCard(page).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "false");
-    await stripRow(page, A[2]!).focus();
+    await stripRow(page, A[1]!).focus();
     await page.keyboard.press("Enter");
-    await expect(threadRow(page, A[2]!)).toHaveClass(/pickup-hl/);
-    // The rail scrolled: the strip row is above the list's box now.
+    await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
     const where = () =>
-      page.evaluate(() => {
+      page.evaluate((card) => {
         const list = document.getElementById("wikiList")!;
         const box = list.getBoundingClientRect();
+        const inBox = (el: Element | null) => {
+          const r = el?.getBoundingClientRect();
+          return !!r && r.top >= box.top - 0.5 && r.bottom <= box.bottom + 0.5;
+        };
         const a = document.activeElement as HTMLElement | null;
-        const r = a?.getBoundingClientRect();
-        const hl = list.querySelector(".pickup-hl")!.getBoundingClientRect();
+        const fold = list.querySelector(`.wiki-thread-card[data-thread="${CSS.escape(card)}"] > .wiki-thread-fold`);
         return {
           scrollTop: list.scrollTop,
-          focusIsHl: !!a && a.classList.contains("pickup-hl"),
-          focusInBox: !!a && !!r && list.contains(a) && r.top >= box.top - 0.5 && r.bottom <= box.bottom + 0.5,
-          hlInBox: hl.bottom > box.top && hl.top < box.bottom,
+          focusIsFold: !!a && a === fold,
+          focusInRail: !!a && list.contains(a),
+          foldInBox: inBox(fold),
+          hlInBox: inBox(list.querySelector(".pickup-hl")),
         };
-      });
+      }, `thread:${A[1]}`);
     const after = await where();
+    // The rail scrolled: the strip row is above the list's box now.
     expect(after.scrollTop, "the jump scrolled the rail").toBeGreaterThan(0);
-    expect(after.focusIsHl, "focus is on the highlighted row").toBe(true);
-    expect(after.focusInBox, "the focused row lies inside #wikiList's box").toBe(true);
+    expect(after.focusIsFold, "focus is on the drawing card's fold").toBe(true);
+    expect(after.foldInBox, "the card's fold lies inside #wikiList's box").toBe(true);
+    expect(after.hlInBox, "the highlighted row lies inside #wikiList's box").toBe(true);
+
+    // Another tab pins a card: a storage event, one renderList here, which
+    // replaces every rail node.
+    await page.locator("#wikiList").evaluate((el) => el.querySelectorAll(".wiki-thread-fold").forEach((n) => ((n as HTMLElement).dataset.old = "1")));
+    const other = await context.newPage();
+    await other.setViewportSize({ width: 1400, height: 900 });
+    await openReader(other);
+    // The group's own 📌: it is already first, so the same cards stay drawn.
+    await groupCard(other).locator("[data-thread-pin]").click();
+    await expect(groupCard(page)).toHaveClass(/pinned/);
+    await other.close();
+    const repainted = await where();
+    await expect(page.locator("#wikiList [data-old]")).toHaveCount(0);
+    expect(repainted.focusIsFold, "the repaint gave focus back to the card's fold").toBe(true);
+    await expect(cardOf(page, A[1]!).locator(":scope > .wiki-thread-fold")).toBeFocused();
+
     await page.keyboard.press("Tab");
     const tabbed = await where();
-    expect(tabbed.scrollTop, "Tab does not scroll the rail back above the row").toBeGreaterThanOrEqual(after.scrollTop);
-    expect(tabbed.hlInBox, "the highlighted row is still on screen").toBe(true);
-    expect(tabbed.focusInBox, "Tab moved to a control inside the rail's box").toBe(true);
+    expect(tabbed.focusInRail, "Tab moved to a control inside the rail").toBe(true);
+    expect(tabbed.scrollTop, "Tab does not scroll the rail back to the strip").toBeGreaterThan(0);
+  });
+
+  test("in a rail box too short to centre the row with its card's header above it, the jump scrolls to keep both", async ({ page }) => {
+    // At 420 px the rail's box is about 180 px: the header (about 90) and the
+    // row (about 42) fit together, but centring the row alone puts the header
+    // above the box.
+    await page.setViewportSize({ width: 1400, height: 420 });
+    await openReader(page);
+    await groupCard(page).locator(".wiki-thread-fold").click();
+    await stripRow(page, A[1]!).focus();
+    await page.keyboard.press("Enter");
+    await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
+    const fit = await page.evaluate((card) => {
+      const list = document.getElementById("wikiList")!;
+      const box = list.getBoundingClientRect();
+      const fold = list.querySelector(`.wiki-thread-card[data-thread="${CSS.escape(card)}"] > .wiki-thread-fold`)!.getBoundingClientRect();
+      const row = list.querySelector(".pickup-hl")!.getBoundingClientRect();
+      const inBox = (r: DOMRect) => r.top >= box.top - 0.5 && r.bottom <= box.bottom + 0.5;
+      return { span: row.bottom - fold.top, box: box.height, foldInBox: inBox(fold), rowInBox: inBox(row), rowCentredHidesFold: (row.top + row.bottom) / 2 - fold.top > box.height / 2 };
+    }, `thread:${A[1]}`);
+    expect(fit.span, "header and row fit the box together").toBeLessThanOrEqual(fit.box);
+    expect(fit.rowCentredHidesFold, "the fixture discriminates: centring the row alone would hide the header").toBe(true);
+    expect(fit.foldInBox, "the card's fold lies inside #wikiList's box").toBe(true);
+    expect(fit.rowInBox, "the highlighted row lies inside #wikiList's box").toBe(true);
   });
 
   test("two jumps in a row leave exactly one highlighted row, the second to a card already drawn open", async ({ page }) => {
