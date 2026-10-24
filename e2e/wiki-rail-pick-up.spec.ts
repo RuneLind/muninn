@@ -44,6 +44,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-width.ts";
+import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-rail-pick-up");
 const LEDGER_PORT = e2ePort("wiki-rail-pick-up/ledger");
@@ -213,6 +214,8 @@ test.describe("Wiki rail: Pick up", () => {
     await expect(header(page).locator(".wiki-sec-label")).toHaveText("Pick up");
     await expect(header(page).locator(".wiki-sec-count")).toHaveText("5");
     await expect(header(page).locator("[data-fold-key]")).toHaveAttribute("aria-expanded", "true");
+    // Its rows are pointers, not pages: the fold's hover names the strip.
+    await expect(header(page).locator("[data-fold-key]")).toHaveAttribute("title", "Hide Pick up");
     // Above Work threads, in DOM order.
     const order = await page.evaluate(() =>
       Array.from(document.querySelectorAll("#wikiList > .wiki-list-sec, #wikiList > .wiki-pickup")).map((e) => e.getAttribute("data-section")),
@@ -240,6 +243,7 @@ test.describe("Wiki rail: Pick up", () => {
     // Folding the strip moves no page row and no count.
     await header(page).locator("[data-fold-key]").click();
     await expect(strip(page)).toHaveCount(0);
+    await expect(header(page).locator("[data-fold-key]")).toHaveAttribute("title", "Show Pick up");
     expect(await page.locator("#wikiCount").textContent()).toBe(open);
     const after = await page.locator("#wikiList .wiki-list-item[data-relpath]").evaluateAll((els) => els.map((e) => e.getAttribute("data-relpath")));
     expect(after).toEqual(rels);
@@ -359,6 +363,38 @@ test.describe("Wiki rail: Pick up", () => {
     expect(forced.outlineWidth).toBeGreaterThanOrEqual(2);
     expect(visible(forced.outlineColor), forced.outlineColor).toBe(true);
     expect(forced.outlineColor).not.toBe(forced.background);
+  });
+
+  test("a live refresh that pushes the focused row out of the five moves focus to the strip's first row", async ({ page }) => {
+    // The refetch makes `old-1` the newest focus page (the page-level
+    // fallback: in no thread), so Alpha 3, the fifth row, drops out.
+    let pushed = false;
+    await page.route(
+      (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("wiki") === WIKI,
+      async (route) => {
+        const res = await route.fetch();
+        const body = (await res.json()) as { pages: Array<{ relPath: string; work?: unknown }> };
+        if (pushed) {
+          const old = body.pages.find((p) => p.relPath === "notes/old-1.md")!;
+          const at = Date.now() - 60_000;
+          old.work = { sinceMs: at - 8 * DAY, state: "F", focusMs: at, events: [[at, 5, "focus"]] };
+        }
+        await route.fulfill({ response: res, json: body });
+      },
+    );
+    await page.clock.install();
+    await openReader(page);
+    await expect(stripRows(page)).toHaveCount(5);
+    await stripRow(page, A[2]!).focus();
+    await expect(stripRow(page, A[2]!)).toBeFocused();
+    pushed = true;
+    const refetched = page.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes(`wiki=${WIKI}`));
+    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await refetched;
+    await expect(stripRow(page, "notes/old-1.md")).toHaveCount(1);
+    await expect(stripRow(page, A[2]!)).toHaveCount(0);
+    await expect(stripRows(page).first()).toBeFocused();
   });
 
   test("a page no drawn card holds opens the page itself (D12)", async ({ page }) => {

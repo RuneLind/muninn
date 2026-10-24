@@ -784,7 +784,7 @@ export function pickUpStripHtml(rows: readonly PickUpRow[], now: number): string
       const age = formatRailAge(r.atMs, now);
       const does = r.target
         ? `Show it in ${r.target.group ? `${r.target.group.name} › ` : ""}${r.target.card.name}`
-        : "Open the page: no work-thread card above draws it";
+        : "Open the page: no Work threads card draws it";
       const hover = [title, `Last focused ${threadInstantLabel(r.atMs, now)}`, meta + (r.low ? " (counts may be low)" : ""), does].join("\n");
       return (
         `<button type="button" class="wiki-pickup-row" data-pickup="${esc(r.page.relPath)}" data-pickup-to="${r.target ? "card" : "page"}" title="${esc(hover)}">` +

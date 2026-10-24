@@ -31,10 +31,6 @@ import {
 /** D2: the strip shows five rows. */
 export const PICK_UP_ROWS_MAX = 5;
 
-/** The strip's fold key (`SECTION_PICKUP_FOLD_KEY`): it defaults OPEN, so
- *  its header offers the `closed:` spelling. */
-export { SECTION_PICKUP_FOLD_KEY as PICK_UP_FOLD_KEY } from "./wiki-recents.ts";
-
 /** The work payload as the rail reads it. */
 export type PickUpWork = (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs" | "evidence">>) | null | undefined;
 
@@ -244,11 +240,13 @@ export function pickUpStep(cards: readonly RailWorkCard[], rel: string): PickUpS
 }
 
 /** A strip row's second line: edits, sessions, then the card that draws the
- *  page, or `not in Work threads`. A `+` marks a count that may be low. */
+ *  page, or `not in Work threads`. A `+` marks a count that may be low. Edits
+ *  are weighted (an attachment's count half), so they print rounded. */
 export function pickUpMetaLine(r: PickUpRow): string {
   const plus = r.low ? "+" : "";
+  const edits = Math.round(r.edits);
   const counts = [
-    `${r.edits}${plus} ${r.edits === 1 && !plus ? "edit" : "edits"}`,
+    `${edits}${plus} ${edits === 1 && !plus ? "edit" : "edits"}`,
     `${r.sessions}${plus} ${r.sessions === 1 && !plus ? "session" : "sessions"}`,
   ];
   return [...counts, r.target ? `in ${r.target.card.name}` : "not in Work threads"].join(" · ");

@@ -9,9 +9,10 @@
 
 import { describe, expect, test } from "bun:test";
 import { openWorkCards, railInputFor, type RailWikiFacts, type RailViewer } from "./wiki-rail-input.ts";
-import { buildRail, isRailGroupCard, type RailGroupCard, type RailThreadCard, type RailWorkCard } from "./wiki-recents.ts";
-import { PICK_UP_FOLD_KEY, pickUpMetaLine, pickUpRows, pickUpStep, pickUpTarget, workAgeSource, workCardAgeMs } from "./wiki-pick-up.ts";
+import { buildRail, isRailGroupCard, SECTION_PICKUP_FOLD_KEY, type RailGroupCard, type RailThreadCard, type RailWorkCard } from "./wiki-recents.ts";
+import { pickUpMetaLine, pickUpRows, pickUpStep, pickUpTarget, workAgeSource, workCardAgeMs } from "./wiki-pick-up.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "./wiki-activity-rank.ts";
+import { pickUpStripHtml } from "./wiki-thread-view.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupSplit } from "./wiki-work-group-prefs.ts";
 import { WORK_EVIDENCE_VERSION, WORK_FOCUS_EVENTS_MAX, type IndexWork, type WorkContribution, type WorkEvent, type WorkThread } from "../../../wiki/work-focus.ts";
@@ -273,6 +274,23 @@ describe("the strip's rows (D2, D11, D12)", () => {
     expect(pickUpMetaLine(rows[0]!)).toBe("6 edits · 1 session · in T plans/k.md");
     expect(pickUpMetaLine(rows[1]!)).toBe("3 edits · 1 session · not in Work threads");
   });
+  test("line 2 counts whole edits: weighted edits round, `1 edit` is singular, the `+` stays", () => {
+    const base = pickUpRows(fixture().work, fixture().pages, fixture().pages, INERT, cardsAt(fixture()))[1]!;
+    const meta = (edits: number, low = false) => pickUpMetaLine({ ...base, edits, low });
+    // An attachment's edits count at half weight, so a page's total can be fractional.
+    expect(meta(36.5)).toBe("37 edits · 1 session · not in Work threads");
+    expect(meta(6.5, true)).toBe("7+ edits · 1+ sessions · not in Work threads");
+    expect(meta(6.4)).toBe("6 edits · 1 session · not in Work threads");
+    expect(meta(1)).toBe("1 edit · 1 session · not in Work threads");
+    expect(meta(0.5)).toBe("1 edit · 1 session · not in Work threads");
+    expect(meta(1, true)).toBe("1+ edits · 1+ sessions · not in Work threads");
+  });
+  test("a row no drawn card holds says the page opens; the cards are below the strip, not above", () => {
+    const fx = fixture();
+    const html = pickUpStripHtml(pickUpRows(fx.work, fx.pages, fx.pages, INERT, cardsAt(fx)), NOW);
+    expect(html).toContain(`\nOpen the page: no Work threads card draws it"`);
+    expect(html).not.toContain("above");
+  });
   test("a truncated ledger answer keeps the times and marks the counts as possibly low", () => {
     const fx = fixture({ truncated: true });
     const rows = pickUpRows(fx.work, fx.pages, fx.pages, INERT, cardsAt(fx));
@@ -366,7 +384,7 @@ describe("the strip in buildRail: pointers, not rows", () => {
     const rail = buildRail(input);
     const first = rail.entries.findIndex((e) => e.section === "threads");
     expect(rail.entries.slice(0, 2).map((e) => e.kind)).toEqual(["header", "pickup"]);
-    expect(rail.entries[0]).toMatchObject({ section: "pickup", label: "Pick up", foldKey: PICK_UP_FOLD_KEY, toggleKey: `closed:${PICK_UP_FOLD_KEY}`, folded: false, count: 5 });
+    expect(rail.entries[0]).toMatchObject({ section: "pickup", label: "Pick up", foldKey: SECTION_PICKUP_FOLD_KEY, toggleKey: `closed:${SECTION_PICKUP_FOLD_KEY}`, folded: false, count: 5 });
     expect(first).toBe(2);
     // Every page still has exactly one row, and the strip adds none.
     const without = buildRail({ ...input, pickUp: [] });
@@ -377,7 +395,7 @@ describe("the strip in buildRail: pointers, not rows", () => {
   });
   test("folded: the header keeps its count and draws no rows; a query draws no strip", () => {
     const fx = fixture();
-    const folded = buildRail(railInputFor(facts(fx), viewer({ openFolds: [`closed:${PICK_UP_FOLD_KEY}`] })));
+    const folded = buildRail(railInputFor(facts(fx), viewer({ openFolds: [`closed:${SECTION_PICKUP_FOLD_KEY}`] })));
     expect(folded.entries[0]).toMatchObject({ section: "pickup", folded: true, count: 5 });
     expect(folded.entries.some((e) => e.kind === "pickup")).toBe(false);
     const q = buildRail(railInputFor(facts(fx), viewer({ filters: { ...INERT, q: "plans" } })));

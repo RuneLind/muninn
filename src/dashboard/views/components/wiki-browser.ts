@@ -1795,7 +1795,8 @@ function renderList(cause: "storage" | "local" = "local"): void {
           // says what it is instead of behaving like a broken toggle. `disabled`
           // is what makes that true — a disabled button dispatches no click.
           (entry.forcedOpen ? ` disabled` : "") +
-          ` title="${esc(entry.forcedOpen ? forcedOpenWhy("section") : label + " the " + entry.label.toLowerCase() + " pages")}">` +
+          // Pick up holds pointers, not pages: its hover names the strip.
+          ` title="${esc(entry.forcedOpen ? forcedOpenWhy("section") : entry.section === "pickup" ? `${label} ${entry.label}` : label + " the " + entry.label.toLowerCase() + " pages")}">` +
           `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
           `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
           `<span class="wiki-sec-count">${entry.count ?? 0}</span>` +
@@ -5336,7 +5337,15 @@ document.body.addEventListener("click", (e) => {
 function refocusRailControl(selector: string, pressed: Element): void {
   const found = Array.from(document.querySelectorAll<HTMLElement>(selector));
   const kind = pressed.classList[0];
-  const pick = found.find((el) => el.classList[0] === kind) ?? found[0];
+  const pick =
+    found.find((el) => el.classList[0] === kind) ??
+    found[0] ??
+    // A Pick up row whose page a refresh pushed out of the five: the strip's
+    // first row, else its header (folded), rather than `<body>`.
+    (pressed.hasAttribute("data-pickup")
+      ? (document.querySelector<HTMLElement>("#wikiList .wiki-pickup-row") ??
+        document.querySelector<HTMLElement>('#wikiList .wiki-list-sec[data-section="pickup"] [data-fold-key]'))
+      : null);
   pick?.focus({ preventScroll: true });
 }
 
