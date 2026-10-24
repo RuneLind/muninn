@@ -327,6 +327,7 @@ function groupRows(): { id: string; html: string }[] {
                 group: true, key: "x", foldKey: "group:anchor:x", toggleKey: "group:anchor:x", open: false, label, name,
                 pinned: false, pinAnchor: "x", anchorVisible: !(threads === 17 && n === 123), threads,
                 sessions: sessionsOf(n, span), movesYou: moves, children: [], hidden: 0, context: [], witnesses: [], score: 1,
+                ageMs: span.last,
               };
               rows.push({ id: `group ${threads}t ${n}s ✋${moves || "-"} ${span.form} name${ni} ${label}`, html: threadGroupHeaderHtml(card, true, TABLE_NOW, moves > 0) });
             }
@@ -344,7 +345,7 @@ function childRows(): { id: string; html: string }[] {
             for (const also of ALSO) {
               const card: RailThreadCard = {
                 key: "x", foldKey: "thread:x", toggleKey: "thread:x", name, open: false, pinned: false, pinAnchor: "x",
-                focus: [], created: [], touched: [], movesYou: moves, score: 1, sessions: sessionsOf(n, span),
+                focus: [], created: [], touched: [], movesYou: moves, score: 1, sessions: sessionsOf(n, span), ageMs: span.last,
                 child: { anchor: why === "anchor", why, witnesses: [], also },
               };
               rows.push({ id: `child ${n}s ✋${moves || "-"} ${span.form} name${ni} why${WHYS.indexOf(why)} also${also.length}`, html: threadCardHeaderHtml(card, true, TABLE_NOW, moves > 0) });
@@ -1127,10 +1128,14 @@ test.describe("Wiki rail: grouped work threads", () => {
         const at = `${font} ${p.rail}/${p.scheme}${forced ? "/forced" : ""} [${m.id}]`;
         for (const issue of m.fit.issues) failures.push(`${at}: ${issue}`);
         // Tally and span: one line each at 260 and 300; two below.
+        // A child card's span line holds three parts since D14 (`since`, the
+        // date and the age chip) in a narrower label, so at 200 px it may take
+        // 3 lines; a group header's keeps 2.
         const maxLines = p.rail >= 260 ? 1 : 2;
         for (const l of m.fit.lines) {
           if (l.cls.includes("wiki-thread-why")) continue;
-          if (l.lines > maxLines) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
+          const bound = m.kind === "child" && l.cls.includes("wiki-thread-span") && p.rail < 260 ? 3 : maxLines;
+          if (l.lines > bound) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
         }
         // A part never breaks inside itself (the chip may, past the line).
         // At 260 and 300 the also chip (its label cut to 24 characters) is one line too.

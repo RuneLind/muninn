@@ -196,9 +196,11 @@ export function nextCapScenario(r: CapRandom): CapScenario {
 }
 
 /** A card list as the frozen fixture compares it: PR 4's boundary fields
- *  (the chip, the card ⋯, `▸ split into N sessions`) left out, since origin
- *  has none of them. */
+ *  (the chip, the card ⋯, `▸ split into N sessions`) and the Pick up plan's
+ *  additive fields (the age chip's `ageMs`, a group's `hiddenChildren`) left
+ *  out, since origin has none of them. */
+const DIGEST_SKIP = new Set(["sessionSplit", "menu", "boundary", "ageMs", "hiddenChildren"]);
 export function capCardsDigest(cards: unknown): string {
-  const json = JSON.stringify(cards, (k, v) => (k === "sessionSplit" || k === "menu" || k === "boundary" ? undefined : v));
+  const json = JSON.stringify(cards, (k, v) => (DIGEST_SKIP.has(k) ? undefined : v));
   return Bun.hash(json).toString(16);
 }

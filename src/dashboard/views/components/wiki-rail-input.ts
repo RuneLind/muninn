@@ -30,6 +30,7 @@ import {
 import {
   GROUP_CHILDREN_SHOWN,
   groupFoldState,
+  isRailGroupCard,
   normalizeFoldKey,
   openWorkThreadCards,
   railSectionsVisible,
@@ -62,6 +63,7 @@ import { applyWorkBoundaries, type BoundedThread, type WorkBoundaries } from "./
 import { saveAsSeriesPlan } from "./wiki-work-series.ts";
 import { pageAddedMs } from "./wiki-filter.ts";
 import { normalizeRel } from "./wiki-nav.ts";
+import { pickUpRows, workAgeSource, workCardAgeMs, type WorkAgeSource } from "./wiki-pick-up.ts";
 import { WORK_WINDOW_MS, workSessionRef, type IndexWork, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
 import {
   claimOwnedFocus,
@@ -421,6 +423,7 @@ export function openWorkCards(
 
   // The Sessions stop (D19): one card per session, the newest session owning
   // a page, later ones linking it on `also in:`. No splits, no kept-apart, no 📌.
+  const ages = workAgeSource(work, allPages);
   if (grouping.stop === "sessions") {
     if (!sections) return { cards: [], control };
     const window = now - WORK_WINDOW_MS;
@@ -442,6 +445,10 @@ export function openWorkCards(
         score: 0,
         session: { ref: sc.ref },
         alsoIn,
+        // D5 on a Sessions-stop card: its one session's newest row, focus or
+        // touch, on the session's focus pages (owned and `also in:`, never the
+        // touched ones), from the unfiltered lists; never empty for a session card.
+        ...ageField(workCardAgeMs(ages, [sc.threadKey], [sc], [...sc.rows, ...sc.alsoIn].map((p) => p.relPath))),
       }));
     return { cards, control };
   }
@@ -473,7 +480,7 @@ export function openWorkCards(
 
   if (grouping.stop === "threads" || !sections) {
     const cards = openThreadCards(work?.threads, pool, filters, foldState, pin, now, allPages, work?.asOfMs, boundaries);
-    return { cards: cards.map((c) => decorate(c, false)), control };
+    return { cards: withWorkAges(cards.map((c) => decorate(c, false)), work, allPages, boundaries, ages), control };
   }
 
   const more = new Set((view.moreOpen ?? []).map(normalizeFoldKey));
@@ -508,14 +515,17 @@ export function openWorkCards(
     // The default-open child of the first card: the pinned one when the group
     // holds the pin (as the Threads stop opens the pinned thread), else the first.
     const openAt = Math.max(0, shownViews.findIndex((cv) => cv.child.pinned));
-    const children = shownViews.map((cv, j) =>
-      threadCard(cv, i === 0 && j === openAt, {
+    const childOf = (cv: WorkGroupChildView, defaultOpen: boolean) =>
+      threadCard(cv, defaultOpen, {
         anchor: cv.child === anchor,
         why: childWhyLine(cv.child, cv.child === anchor),
         witnesses: cv.child.witnesses.map((w) => witnessLine(w, byRel)),
         also: cv.child.also.map((a) => a.label),
-      }),
-    );
+      });
+    const children = shownViews.map((cv, j) => childOf(cv, i === 0 && j === openAt));
+    // Behind `+ N more threads`: never drawn, but the Pick up jump finds a
+    // page there and presses `+ N more` first.
+    const hiddenChildren = gv.children.filter((cv) => !shownViews.includes(cv)).map((cv) => childOf(cv, false));
     // Shared context: the visible pages the children only touched, once,
     // never a page any child of the group owns.
     const owned = new Set(g.children.flatMap((c) => c.owned.map((p) => normalizeRel(p.relPath))));
@@ -555,10 +565,46 @@ export function openWorkCards(
       witnesses: g.witnesses.map((w) => witnessLine(w, byRel)),
       score: anchor.score,
       ...(plan && !shared ? { series: plan } : {}),
+      ...(hiddenChildren.length ? { hiddenChildren } : {}),
     };
     return card;
   });
-  return { cards, control };
+  return { cards: withWorkAges(cards, work, allPages, boundaries, ages), control };
+}
+
+const ageField = (ms: number | undefined): { ageMs?: number } => (ms === undefined ? {} : { ageMs: ms });
+
+/**
+ * The age chip's instant on every card (plan `muninn-wiki-pick-up`, D5):
+ * a thread card, a split page, a remainder or a kept-apart thread reads the
+ * rows of its own sessions on its own focus pages (the derived thread's, after
+ * the reader's boundaries), falling back on its SOURCE thread's cut; a group
+ * takes its newest child's, the children behind `+ N more` included. A card
+ * that already has one (a Sessions-stop card) keeps it.
+ */
+export function withWorkAges(
+  cards: readonly RailWorkCard[],
+  work: RailWikiFacts["work"],
+  allPages: readonly WikiListing[],
+  boundaries?: WorkBoundaries,
+  src: WorkAgeSource = workAgeSource(work, allPages),
+): RailWorkCard[] {
+  const server = new Map(usableThreads(work?.threads).map((t) => [t.key, t] as const));
+  const bounded = new Map((boundaries?.threads ?? []).map((b) => [b.thread.key, b] as const));
+  const aged = (c: RailThreadCard): RailThreadCard => {
+    if (c.ageMs !== undefined || c.session) return c;
+    const b = bounded.get(c.key);
+    const t = b?.thread ?? server.get(c.key);
+    if (!t) return c;
+    return { ...c, ...ageField(workCardAgeMs(src, [b?.source.key ?? t.key], c.sessions, t.pages)) };
+  };
+  return cards.map((c) => {
+    if (!isRailGroupCard(c)) return aged(c);
+    const children = c.children.map(aged);
+    const hidden = c.hiddenChildren?.map(aged);
+    const times = [...children, ...(hidden ?? [])].flatMap((x) => (x.ageMs === undefined ? [] : [x.ageMs]));
+    return { ...c, children, ...(hidden ? { hiddenChildren: hidden } : {}), ...ageField(times.length ? Math.max(...times) : undefined) };
+  });
 }
 
 /**
@@ -734,9 +780,19 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
   const work = viewer.workGroup
     ? openWorkCards(wiki.work, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages, viewer.workGroup)
     : null;
+  const ages = workAgeSource(wiki.work, wiki.allPages);
   const threads: readonly RailWorkCard[] =
     work?.cards ??
-    openThreadCards(wiki.work?.threads, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages, wiki.work?.asOfMs);
+    withWorkAges(
+      openThreadCards(wiki.work?.threads, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages, wiki.work?.asOfMs),
+      wiki.work,
+      wiki.allPages,
+      undefined,
+      ages,
+    );
+  // The Pick up strip (plan `muninn-wiki-pick-up`): the same pool and facets
+  // as the cards, each row pointing at the card drawn above that holds it.
+  const pickUp = pickUpRows(wiki.work, wiki.allPages, pool, filters, threads, ages);
   const exclude = new Set<string>();
   for (const c of openWorkThreadCards(threads)) for (const p of c.focus) exclude.add(normalizeRel(p.relPath));
   return {
@@ -754,6 +810,7 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
       : [],
     ...(threads.length ? { threads } : {}),
     ...(threads.length && work ? { workControl: work.control } : {}),
+    ...(pickUp.length ? { pickUp } : {}),
     // The series peek's work term (D12), only while the gate lets work score —
     // a closed gate keeps today's peek as it keeps today's ranking.
     ...(wiki.workedGate?.open ? { workTerm: (p: WikiListing) => pageWorkTerm(p, now) } : {}),

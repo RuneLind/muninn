@@ -37,6 +37,7 @@ import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
 import type { WorkThreadSession } from "../../../wiki/work-focus.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
 import type { SaveSeriesPlan } from "./wiki-work-series.ts";
+import type { PickUpRow } from "./wiki-pick-up.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
  *  wiki) is appended, so two wikis in one browser never share a list. Versioned
@@ -241,6 +242,10 @@ export function parseRelatedOrder(raw: string | null | undefined): RelatedOrder 
  * comparison downstream is exact by construction.
  */
 export const SECTION_META_FOLD_KEY = "section:meta";
+
+/** The Pick up strip's fold (plan `muninn-wiki-pick-up`): the one section
+ *  that defaults OPEN, so its header offers the `closed:` spelling. */
+export const SECTION_PICKUP_FOLD_KEY = "section:pickup";
 
 /**
  * A key in that namespace, normalized: a parent page's relPath, a `section:` or
@@ -735,7 +740,7 @@ export function jumpHeaderLabel(jump: JiraKeyJump): string {
 
 // ── The rail ──────────────────────────────────────────────────────────
 
-export type RailSection = "jump" | "threads" | "activity" | "pinned" | "series" | "all" | "meta";
+export type RailSection = "jump" | "pickup" | "threads" | "activity" | "pinned" | "series" | "all" | "meta";
 
 /**
  * One work-thread card as the rail draws it — decided by `openThreadCards`
@@ -790,6 +795,10 @@ export interface RailThreadCard {
   /** PR 4, the Sessions stop: focus pages a newer session's card owns — the
    *  non-claiming `also in:` line (D19). */
   alsoIn?: WikiListing[];
+  /** The age chip's instant (plan `muninn-wiki-pick-up`, D5): the newest
+   *  contribution row of the card's sessions on its focus pages
+   *  (`workCardAgeMs`). Absent with no work data for it. */
+  ageMs?: number;
 }
 
 /** What a thread card's ⋯ offers. */
@@ -879,6 +888,11 @@ export interface RailGroupCard {
   /** PR 4: Save as series, on a group the children share no series in, on a
    *  wiki this instance may write (D8, D14). */
   series?: SaveSeriesPlan;
+  /** The age chip's instant: the newest child's (D5). */
+  ageMs?: number;
+  /** The visible children behind `+ N more threads`, so the Pick up jump can
+   *  find a page there. Never drawn, never lifted. Absent with none. */
+  hiddenChildren?: RailThreadCard[];
 }
 
 /** A card in the Work threads section: a thread, or a group of threads. */
@@ -945,6 +959,18 @@ export type RailEntry =
       count?: number;
       /** The Work threads header only: the Group control. */
       control?: RailWorkControl;
+      /** What a click on a foldable header flips, when it differs from
+       *  `foldKey`: the `closed:` spelling of a section that defaults open
+       *  (Pick up). */
+      toggleKey?: string;
+    }
+  | {
+      /** The Pick up strip's rows (plan `muninn-wiki-pick-up`): pointers to
+       *  the card that draws each page, never page rows. They claim nothing,
+       *  carry no relPath and `shown` does not count them (D11). */
+      kind: "pickup";
+      section: RailSection;
+      rows: PickUpRow[];
     }
   | {
       kind: "row";
@@ -1253,6 +1279,9 @@ export interface RailInput {
   threads?: readonly RailWorkCard[];
   /** The Group control for the Work threads label; absent ⇒ today's label. */
   workControl?: RailWorkControl;
+  /** The Pick up strip's rows (`pickUpRows`), newest first; absent or empty ⇒
+   *  no strip. */
+  pickUp?: readonly PickUpRow[];
   /**
    * The page the reader currently has OPEN, if any. The group HOLDING it is
    * expanded whatever the store says — a reader is never on a page the rail
@@ -1986,6 +2015,25 @@ export function buildRail(input: RailInput): RailModel {
     if (hidden > 0) entries.push({ kind: "more", section, foldKey, toggleKey: foldKey, hidden });
     return true;
   };
+
+  // ── Pick up (plan `muninn-wiki-pick-up`) ─────────────────────────────
+  // Above Work threads. Pointers, not rows: nothing is claimed, so the card
+  // below still draws each page and the rail keeps one row per page.
+  const pickUp = grouped ? (input.pickUp ?? []) : [];
+  if (pickUp.length) {
+    const stored = groupFoldState(open, SECTION_PICKUP_FOLD_KEY);
+    const folded = stored ? stored === "closed" : false;
+    entries.push({
+      kind: "header",
+      section: "pickup",
+      label: "Pick up",
+      foldKey: SECTION_PICKUP_FOLD_KEY,
+      toggleKey: closedFoldKey(SECTION_PICKUP_FOLD_KEY),
+      folded,
+      count: pickUp.length,
+    });
+    if (!folded) entries.push({ kind: "pickup", section: "pickup", rows: [...pickUp] });
+  }
 
   if (grouped && cards.length) {
     entries.push({

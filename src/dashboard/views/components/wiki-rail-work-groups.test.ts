@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { openThreadCards, openWorkCards, railInputFor, type RailWikiFacts, type RailViewer } from "./wiki-rail-input.ts";
+import { openThreadCards, openWorkCards, railInputFor, withWorkAges, type RailWikiFacts, type RailViewer } from "./wiki-rail-input.ts";
 import {
   buildRail,
   capFolds,
@@ -169,9 +169,9 @@ const keysOf = (cards: readonly RailWorkCard[]) =>
 const groupAt = (cards: readonly RailWorkCard[], i: number) => cards[i] as RailGroupCard;
 
 describe("openWorkCards: the Threads stop is today's rail", () => {
-  test("Threads draws exactly openThreadCards' cards", () => {
+  test("Threads draws exactly openThreadCards' cards, with their age chips", () => {
     const fx = fixture();
-    const today = openThreadCards(fx.work.threads, fx.pages, INERT, [], null, NOW, fx.pages, fx.work.asOfMs);
+    const today = withWorkAges(openThreadCards(fx.work.threads, fx.pages, INERT, [], null, NOW, fx.pages, fx.work.asOfMs), fx.work, fx.pages);
     expect(cardsAt("threads", {}, fx).cards).toEqual(today);
   });
 
@@ -387,7 +387,7 @@ describe("availability: Threads with a reason", () => {
   test("relations incomplete: Related draws today's Threads cards and keeps the choice", () => {
     const fx = fixture({ reasons: ["relations-cap"] });
     const { cards, control } = cardsAt("related", {}, fx);
-    expect(cards).toEqual(openThreadCards(fx.work.threads, fx.pages, INERT, [], null, NOW, fx.pages, fx.work.asOfMs));
+    expect(cards).toEqual(withWorkAges(openThreadCards(fx.work.threads, fx.pages, INERT, [], null, NOW, fx.pages, fx.work.asOfMs), fx.work, fx.pages));
     expect(control).toMatchObject({ requested: "related", stop: "threads", evidenceApplies: false });
     expect(control.stops.find((x) => x.stop === "related")).toMatchObject({ available: false, reasons: ["relations-cap"] });
   });

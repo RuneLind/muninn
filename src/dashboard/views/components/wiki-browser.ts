@@ -204,6 +204,7 @@ import {
   saveSeriesConfirmHtml,
   threadAlsoInHtml,
   threadCardHeaderHtml,
+  pickUpStripHtml,
   threadCardMenuHtml,
   threadGroupBodyStartHtml,
   threadGroupEndHtml,
@@ -217,6 +218,7 @@ import {
   WORK_GROUP_FULL_TEXT,
   WORK_POP_ID,
 } from "./wiki-thread-view.ts";
+import { pickUpStep, pickUpTarget } from "./wiki-pick-up.ts";
 import {
   storageEventTouchesWorkGroup,
   workGroupAddRefused,
@@ -1769,6 +1771,11 @@ function renderList(cause: "storage" | "local" = "local"): void {
       html += threadGroupEndHtml(entry.foldKey, entry.hidden, entry.context, pageUrlByRelPath, entry.name, workContextOpen.has(entry.foldKey));
       return;
     }
+    // The Pick up strip (plan `muninn-wiki-pick-up`): pointers, never rows.
+    if (entry.kind === "pickup") {
+      html += pickUpStripHtml(entry.rows, now);
+      return;
+    }
     if (entry.kind === "header" && entry.control) {
       html += workSectionHeaderHtml(entry.label, entry.control, workMenuOpen, workGroupRec.failed);
       return;
@@ -1782,13 +1789,14 @@ function renderList(cause: "storage" | "local" = "local"): void {
         html +=
           `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
           `<button type="button" class="wiki-sec-fold${entry.folded ? " folded" : ""}"` +
-          ` data-fold-key="${esc(entry.foldKey)}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+          ` data-fold-key="${esc(entry.toggleKey ?? entry.foldKey)}" aria-expanded="${entry.folded ? "false" : "true"}"` +
           // Forced open by the reader being on a page inside it: a click could
           // only write a stored key nothing on screen reflects, so the control
           // says what it is instead of behaving like a broken toggle. `disabled`
           // is what makes that true — a disabled button dispatches no click.
           (entry.forcedOpen ? ` disabled` : "") +
-          ` title="${esc(entry.forcedOpen ? forcedOpenWhy("section") : label + " the " + entry.label.toLowerCase() + " pages")}">` +
+          // Pick up holds pointers, not pages: its hover names the strip.
+          ` title="${esc(entry.forcedOpen ? forcedOpenWhy("section") : entry.section === "pickup" ? `${label} ${entry.label}` : label + " the " + entry.label.toLowerCase() + " pages")}">` +
           `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
           `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
           `<span class="wiki-sec-count">${entry.count ?? 0}</span>` +
@@ -2226,6 +2234,58 @@ function revealActiveRow(flash: boolean): boolean {
     row.classList.add("reveal-flash");
   }
   return true;
+}
+
+/**
+ * A Pick up row's jump (plan `muninn-wiki-pick-up`, D12): at any stop, the
+ * target is the drawn card that holds the page now. Its group opens, `+ N
+ * more threads` is pressed for a child behind it, the card opens; then the
+ * row scrolls into view, flashes and stays highlighted until the next render.
+ * With no drawn card holding the page, the page itself opens. Each step
+ * re-reads the cards a render drew (`pickUpStep`), so the folds' two-spelling
+ * rule decides every write. Focus stays on the strip row through those
+ * renders (`data-pickup` is a rail control `renderList` restores), then moves
+ * to the drawing card's fold, the header control a later render restores
+ * (`railControlSelector`); the scroll keeps that header and the row in view
+ * when both fit. Page rows get no `tabindex`.
+ */
+function jumpToPickUp(rel: string): void {
+  const page = findPageByRelPath(allPages, rel);
+  if (!page) return;
+  // Two opening steps at most (the group with `+ N more`, then the child),
+  // then `drawn`; four rounds leave a spare.
+  for (let i = 0; i < 4; i++) {
+    const step = pickUpStep(workCardsDrawn, page.relPath);
+    if (step.kind === "page") {
+      loadPageByRelPath(page.relPath);
+      return;
+    }
+    if (step.kind === "drawn") break;
+    for (const key of step.toggle) openFolds = toggleFolded(WIKI, key);
+    if (step.more) workMoreOpen.add(step.more);
+    renderList();
+  }
+  const listEl = document.getElementById("wikiList");
+  const row = listEl?.querySelector<HTMLElement>(`.wiki-list-item[data-section="threads"][data-relpath="${CSS.escape(page.relPath)}"]`);
+  if (!listEl || !row) {
+    loadPageByRelPath(page.relPath);
+    return;
+  }
+  const t = pickUpTarget(workCardsDrawn, page.relPath);
+  const fold = t ? listEl.querySelector<HTMLElement>(`.wiki-thread-card[data-thread="${CSS.escape(t.card.foldKey)}"] > .wiki-thread-fold`) : null;
+  const box = listEl.getBoundingClientRect();
+  const r = row.getBoundingClientRect();
+  const h = fold?.getBoundingClientRect();
+  // Header and row together when they fit, else the row alone.
+  const span = h ? { top: Math.min(h.top, r.top), bottom: Math.max(h.bottom, r.bottom) } : r;
+  const top = revealScrollTop(box, span.bottom - span.top <= box.bottom - box.top ? span : r, listEl.scrollTop);
+  if (top !== null) listEl.scrollTop = top;
+  listEl.querySelectorAll(".wiki-list-item.pickup-hl").forEach((el) => el.classList.remove("pickup-hl"));
+  row.classList.add("pickup-hl");
+  row.classList.remove("reveal-flash");
+  void row.offsetWidth; // restart the animation on a repeat jump
+  row.classList.add("reveal-flash");
+  fold?.focus({ preventScroll: true });
 }
 
 /**
@@ -5284,7 +5344,15 @@ document.body.addEventListener("click", (e) => {
 function refocusRailControl(selector: string, pressed: Element): void {
   const found = Array.from(document.querySelectorAll<HTMLElement>(selector));
   const kind = pressed.classList[0];
-  const pick = found.find((el) => el.classList[0] === kind) ?? found[0];
+  const pick =
+    found.find((el) => el.classList[0] === kind) ??
+    found[0] ??
+    // A Pick up row whose page a refresh pushed out of the five: the strip's
+    // first row, else its header (folded), rather than `<body>`.
+    (pressed.hasAttribute("data-pickup")
+      ? (document.querySelector<HTMLElement>("#wikiList .wiki-pickup-row") ??
+        document.querySelector<HTMLElement>('#wikiList .wiki-list-sec[data-section="pickup"] [data-fold-key]'))
+      : null);
   pick?.focus({ preventScroll: true });
 }
 
@@ -5308,6 +5376,8 @@ function railControlSelector(el: Element | null): string | null {
     "data-thread-sessions",
     "data-thread-row-menu",
     "data-work-reset",
+    // A Pick up row, by its page: kept through the renders a jump runs.
+    "data-pickup",
   ]) {
     const v = el.getAttribute(attr);
     if (v !== null) return at(attr, v);
@@ -5969,6 +6039,15 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     editWorkGroup({ evidence: key, value: boxBtn.getAttribute("aria-checked") !== "true" });
     renderList();
     focusWorkMenuItem(`[data-work-evidence="${CSS.escape(key)}"]`);
+    return;
+  }
+  // A Pick up row (plan `muninn-wiki-pick-up`): reveal its page in the card
+  // that draws it, or open the page when no drawn card does (D12).
+  const pickBtn = target.closest<HTMLElement>("[data-pickup]");
+  if (pickBtn) {
+    e.preventDefault();
+    const rel = pickBtn.getAttribute("data-pickup");
+    if (rel) jumpToPickUp(rel);
     return;
   }
   const moreBtn = target.closest("[data-thread-more]");

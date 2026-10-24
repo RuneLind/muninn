@@ -473,6 +473,37 @@ describe("live ledger answers", () => {
   }, 30_000);
 });
 
+describe("the grouped rail", () => {
+  test("a group's line is its header's: the tally, since <first>, then the age (D14)", async () => {
+    const f = await fixture();
+    const series = (title: string) => `---\ntitle: ${title}\nseries: alpha\nseries_label: Alpha series\n---\n\n# ${title}\n`;
+    await mkdir(path.join(f.repo, "plans"));
+    await writeFile(path.join(f.repo, "plans/a1.md"), series("Alpha 1"));
+    await writeFile(path.join(f.repo, "plans/a2.md"), series("Alpha 2"));
+    await commit(f.repo, "alpha", AT - 30 * H, AT - 30 * H);
+    const session = (id: string, rel: string, lastAgo: number) => ({
+      id,
+      provider: "claude",
+      title: `session ${id}`,
+      first: AT - (lastAgo + 1) * H,
+      last: AT - lastAgo * H,
+      bulk: false,
+      text: { from: "prompt", paths: [rel], links: [], files: [] },
+      files: [{ p: rel, edits: 12, firstMs: AT - (lastAgo + 1) * H, lastMs: AT - lastAgo * H }],
+    });
+    const args = await writeFrozen(f, { sessions: { sessions: [session("s1", "plans/a1.md", 2), session("s2", "plans/a2.md", 5)] } });
+    // TZ pins the clock labels' zone, so `since` reads the same on every machine.
+    const proc = spawnReplay(f, args, { TZ: "UTC" });
+    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    expect(err).toBe("");
+    expect(code).toBe(0);
+    const line = out.split("\n").find((l) => /^ {2}[▸▾] SERIES Alpha series/.test(l));
+    expect(line, out).toBeDefined();
+    // The tally, `since` the group's first session start (AT − 6 h, same day), then the age chip (2h).
+    expect(line!.split("— ")[1]).toBe("2 threads · 2 sessions · since today 06:00 · 2h");
+  }, 30_000);
+});
+
 describe("signalHandler", () => {
   const signalHandler = async (...a: Parameters<typeof import("./wiki-work-replay-git.ts").signalHandler>) =>
     (await import("./wiki-work-replay-git.ts")).signalHandler(...a);

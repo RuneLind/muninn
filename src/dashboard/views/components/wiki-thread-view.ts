@@ -9,7 +9,9 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+import { formatRailAge } from "./wiki-activity-rank.ts";
 import { displayTitleOf, localDay, type WikiListing } from "./wiki-filter.ts";
+import { pickUpMetaLine, type PickUpRow } from "./wiki-pick-up.ts";
 import {
   isRailGroupCard,
   type RailGroupCard,
@@ -71,12 +73,20 @@ function threadTallyParts(card: RailThreadCard, showMoves: boolean): HeaderTally
   };
 }
 
-/** The meta as one plain line, `N sessions · first → last · ✋ M` (the replay
- *  script's form; the card draws it on two lines). */
-export function threadMetaLine(card: RailThreadCard, now: number, showMoves: boolean): string {
-  const { counts, moves } = threadTallyParts(card, showMoves);
-  const { from, to } = threadSpanEnds(card, now, true);
-  return [...counts, from && `${from} → ${to}`, moves].filter(Boolean).join(" · ");
+/** The age chip's text (plan `muninn-wiki-pick-up`, D5): the rail's own age
+ *  spelling (`now`, `5h`, `2d`), or "" with no instant. */
+export function threadAgeLabel(card: Pick<RailThreadCard, "ageMs">, now: number): string {
+  return card.ageMs === undefined ? "" : formatRailAge(card.ageMs, now);
+}
+
+/** The meta as one plain line in the header's order (D14): `N sessions ·
+ *  ✋ M · since <first> · <age>`, a group's `N threads · M sessions · ✋ K ·
+ *  since <first> · <age>` — the replay script's form; the card draws the
+ *  tally over `since <first>` and the age chip. */
+export function threadMetaLine(card: RailWorkCard, now: number, showMoves: boolean): string {
+  const { counts, moves } = isRailGroupCard(card) ? threadGroupTallyParts(card, showMoves) : threadTallyParts(card, showMoves);
+  const { from } = threadSpanEnds(card, now, true);
+  return [...counts, moves, from && `since ${from}`, threadAgeLabel(card, now)].filter(Boolean).join(" · ");
 }
 
 /** A visually hidden ` · ` for the fold's accessible name, which is its
@@ -84,21 +94,34 @@ export function threadMetaLine(card: RailThreadCard, now: number, showMoves: boo
  *  together («✋ 12 today 16:20» reads as one run of numbers). */
 const SR_SEP = `<span class="wiki-sr-only"> · </span>`;
 
-/** The meta as markup: two lines, `N sessions · ✋ M` over `first → last`,
- *  laid out from the width table in `src/wiki/CLAUDE.md` (Work threads): each
- *  line fits on one line at the 260 and 300 px rails on macOS and Linux fonts,
- *  so nothing is cut. Each part is an inline block, so a rail narrower than
- *  260 (the viewport bound) breaks a line between parts, at ` · ` or ` → `,
- *  and only wraps inside a part when the part alone is wider than the rail. */
-function threadMetaHtml(tally: HeaderTally, from: string, to: string): string {
+/** The meta as markup: two lines, `N sessions · ✋ M` over `since <first>`
+ *  and the age chip (D14: the chip took the `→ last` slot, so a header shows
+ *  one recency), laid out from the width table in `src/wiki/CLAUDE.md` (Work
+ *  threads): each line fits on one line at the 260 and 300 px rails on macOS
+ *  and Linux fonts, so nothing is cut. Each part is an inline block, so a rail
+ *  narrower than 260 (the viewport bound) breaks a line between parts, and
+ *  only wraps inside a part when the part alone is wider than the rail. */
+function threadMetaHtml(tally: HeaderTally, from: string, age: { label: string; ms?: number }, now: number): string {
+  // A screen reader hears `last edit 5h` from a hidden phrase AFTER the line
+  // and not the bare chip: a hidden phrase inside the line would be measured
+  // by the width harness as a part of it.
+  const chip = age.label
+    ? ` <span class="wiki-thread-age" aria-hidden="true" title="${esc(`Newest session edit on its focus pages: ${threadInstantLabel(age.ms!, now)}`)}">` +
+      `${esc(age.label)}</span>`
+    : "";
   return (
     `<span class="wiki-thread-line wiki-thread-tally">` +
     tally.counts.map((c, i) => `${i ? " " : ""}<span class="wiki-thread-count">${i ? "· " : ""}${esc(c)}</span>`).join("") +
     (tally.moves ? ` <span class="wiki-thread-moves">· ${esc(tally.moves)}</span>` : "") +
     `</span>` +
-    (from
-      ? `${SR_SEP} <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">${esc(from)}</span>` +
-        ` <span class="wiki-thread-to">→ ${esc(to)}</span></span>`
+    (from || chip
+      ? `${SR_SEP} <span class="wiki-thread-line wiki-thread-span">` +
+        // `since` is a part of its own: joined to the date it was one part
+        // of 116 px on Linux, wider than a child card's label at a 200 px rail.
+        (from ? `<span class="wiki-thread-since">since</span> <span class="wiki-thread-from">${esc(from)}</span>` : "") +
+        chip +
+        `</span>` +
+        (chip ? `<span class="wiki-sr-only"> · last edit ${esc(age.label)}</span>` : "")
       : "")
   );
 }
@@ -179,7 +202,8 @@ export function threadCardHeaderHtml(
         disclose: threadDiscloseLabel(folded, pages ?? card.focus.length),
         pinLabel: "Pin this work thread first",
       };
-  const { from, to } = threadSpanEnds(card, now, true);
+  const { from } = threadSpanEnds(card, now, true);
+  const age = { label: threadAgeLabel(card, now), ms: card.ageMs };
   const why = `${folded ? "Show" : "Hide"} ${k.what}`;
   // No aria-label on the fold: its name is its content (name + meta) and
   // aria-expanded carries the state. Its title, the accessible description,
@@ -211,7 +235,7 @@ export function threadCardHeaderHtml(
     k.glyph +
     `<span class="wiki-thread-label">` +
     `<span class="wiki-thread-name">${k.name}</span>${SR_SEP}` +
-    `<small class="wiki-thread-meta">${threadMetaHtml(k.tally, from, to)}${k.line}</small>${SR_SEP}` +
+    `<small class="wiki-thread-meta">${threadMetaHtml(k.tally, from, age, now)}${k.line}</small>${SR_SEP}` +
     `<span class="wiki-thread-disclose"><span aria-hidden="true">${folded ? "▸" : "▾"} </span>` +
     `${esc(k.disclose)}</span>` +
     `</span>` +
@@ -743,4 +767,33 @@ export function saveSeriesConfirmHtml(card: RailGroupCard, plan: SaveSeriesPlan)
     `<div class="wiki-work-series-msg" role="status"></div>` +
     `</div>`
   );
+}
+
+// ── Pick up (plan `muninn-wiki-pick-up`, D2, D6, D11, D12) ──────────────────
+
+/** The Pick up strip: one button per row, two lines each — the age and the
+ *  title, then edits, sessions and the card that draws the page. A row is a
+ *  POINTER, not a page row: no `data-relpath`, no current-page mark, not in
+ *  `#wikiCount`. `data-pickup` is the page the jump targets; `data-pickup-to`
+ *  says what a click does (`card`: reveal it in its card; `page`: open it). */
+export function pickUpStripHtml(rows: readonly PickUpRow[], now: number): string {
+  const items = rows
+    .map((r) => {
+      const title = displayTitleOf(r.page);
+      const meta = pickUpMetaLine(r);
+      const age = formatRailAge(r.atMs, now);
+      const does = r.target
+        ? `Show it in ${r.target.group ? `${r.target.group.name} › ` : ""}${r.target.card.name}`
+        : "Open the page: no Work threads card draws it";
+      const hover = [title, `Last focused ${threadInstantLabel(r.atMs, now)}`, meta + (r.low ? " (counts may be low)" : ""), does].join("\n");
+      return (
+        `<button type="button" class="wiki-pickup-row" data-pickup="${esc(r.page.relPath)}" data-pickup-to="${r.target ? "card" : "page"}" title="${esc(hover)}">` +
+        `<span class="wiki-pickup-age"><span class="wiki-sr-only">last focused </span>${esc(age)}</span>` +
+        `<span class="wiki-pickup-text"><span class="wiki-pickup-title">${esc(title)}</span>${SR_SEP}` +
+        `<span class="wiki-pickup-meta">${esc(meta)}</span></span>` +
+        `</button>`
+      );
+    })
+    .join("");
+  return `<div class="wiki-pickup" data-section="pickup">${items}</div>`;
 }
