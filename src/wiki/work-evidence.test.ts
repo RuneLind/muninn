@@ -92,6 +92,22 @@ describe("relations", () => {
     ]);
   });
 
+  test("related: a focus page naming ONLY a stem child, or ONLY a suffix child, of another focus page gets the edge to that parent", () => {
+    const pages = [
+      meta("p/a.mdx", { related: ["p/b.html"] }),
+      meta("p/b.mdx"),
+      meta("p/b.html", { parent: "p/b.mdx", pairedBy: "stem" }),
+      meta("p/c.mdx", { related: ["p/d-prototype.html"] }),
+      meta("p/d.mdx"),
+      meta("p/d-prototype.html", { parent: "p/d.mdx", pairedBy: "suffix" }),
+    ];
+    const e = build(pages, [thread("p/a.mdx", ["p/a.mdx", "p/c.mdx"]), thread("p/b.mdx", ["p/b.mdx", "p/d.mdx"])]);
+    expect(e.relations.related).toEqual([
+      ["p/a.mdx", "p/b.mdx"],
+      ["p/c.mdx", "p/d.mdx"],
+    ]);
+  });
+
   test("related: a child `computeWorkFocus` keeps as its own page (parent meta, missing or itself a child) keeps the edge to itself, never its parent", () => {
     const fam = [
       { relPath: "p/x.mdx", related: ["p/m.html", "p/orph.html", "p/gc.html"] },

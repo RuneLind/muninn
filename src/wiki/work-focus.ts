@@ -224,8 +224,9 @@ export interface WorkPageInput {
   relPath: string;
   /** The rail attachment parent (`WikiPageMeta.parent`). With `pairedBy`
    *  `stem`, `suffix` or `link` this page is part of the parent's family: its
-   *  rows count toward the parent at full weight and it carries no `work` of
-   *  its own. A `superseded` pair stays two pages. */
+   *  rows count toward the parent at full weight, and its own `work` holds only
+   *  its own rows, at the family's kind in each session. A `superseded` pair
+   *  stays two pages. */
   parent?: string;
   pairedBy?: WorkPairedBy;
   /** `gitCreatedMs` and `birthtimeMs` — the created rule's anchor is their
