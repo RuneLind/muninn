@@ -65,6 +65,8 @@
   "overrides": {
     "sharp": "0.35.5",
     "proxy-addr": "2.0.8",
-    "follow-redirects": "1.16.1"
+    "follow-redirects": "1.16.1",
+    "body-parser": "2.4.0",
+    "zod": "4.6.6"
   }
 }
