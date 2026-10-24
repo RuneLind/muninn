@@ -115,7 +115,9 @@ function threadMetaHtml(tally: HeaderTally, from: string, age: { label: string; 
     `</span>` +
     (from || chip
       ? `${SR_SEP} <span class="wiki-thread-line wiki-thread-span">` +
-        (from ? `<span class="wiki-thread-from">since ${esc(from)}</span>` : "") +
+        // `since` is a part of its own: joined to the date it was one part
+        // of 116 px on Linux, wider than a child card's label at a 200 px rail.
+        (from ? `<span class="wiki-thread-since">since</span> <span class="wiki-thread-from">${esc(from)}</span>` : "") +
         chip +
         `</span>` +
         (chip ? `<span class="wiki-sr-only"> · last edit ${esc(age.label)}</span>` : "")

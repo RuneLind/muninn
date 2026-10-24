@@ -347,7 +347,7 @@ test.describe("Wiki rail: Pick up", () => {
       }
       // D14: the span line is `since <first>`; no `→ last` end anywhere.
       await expect(page.locator("#wikiList .wiki-thread-to")).toHaveCount(0);
-      await expect(page.locator("#wikiList .wiki-thread-from").first()).toHaveText(/^since /);
+      await expect(page.locator("#wikiList .wiki-thread-since").first()).toHaveText("since");
     }
   });
 

@@ -149,14 +149,14 @@ describe("threadCardHeaderHtml", () => {
         '<small class="wiki-thread-meta"><span class="wiki-thread-line wiki-thread-tally">' +
         '<span class="wiki-thread-count">2 sessions</span> <span class="wiki-thread-moves">· ✋ 18</span></span>' +
         '<span class="wiki-sr-only"> · </span>' +
-        ' <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">since 12.10 15:04</span>' +
+        ' <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-since">since</span> <span class="wiki-thread-from">12.10 15:04</span>' +
         '</span></small><span class="wiki-sr-only"> · </span>' +
         '<span class="wiki-thread-disclose"><span aria-hidden="true">▾ </span>Hide pages</span>',
     );
     // With an age: the chip takes the freed `→ last` slot, its instant in the
     // hover; a screen reader hears `last edit 13h` after the line instead.
     expect(threadCardHeaderHtml(card({ ageMs: at(14, 21, 26) }), false, NOW, true)).toContain(
-      '<span class="wiki-thread-from">since 12.10 15:04</span> ' +
+      '<span class="wiki-thread-since">since</span> <span class="wiki-thread-from">12.10 15:04</span> ' +
         '<span class="wiki-thread-age" aria-hidden="true" title="Newest session edit on its focus pages: yesterday 21:26">13h</span></span>' +
         '<span class="wiki-sr-only"> · last edit 13h</span></small>',
     );
@@ -277,7 +277,7 @@ describe("the group card", () => {
     expect(html).toContain(`data-fold-key="closed:group:series:alpha" aria-expanded="true"`);
     expect(html).toContain(`<span class="wiki-thread-kind">series</span> Alpha &lt;series&gt;`);
     expect(html).toContain(`>3 threads</span> <span class="wiki-thread-count">· 2 sessions</span> <span class="wiki-thread-moves">· ✋ 26</span>`);
-    expect(html).toContain(`<span class="wiki-thread-from">since 12.10 15:04</span>`);
+    expect(html).toContain(`<span class="wiki-thread-since">since</span> <span class="wiki-thread-from">12.10 15:04</span>`);
     expect(threadGroupHeaderHtml(groupCard({ ageMs: at(15, 7, 0) }), false, NOW, true)).toContain(`<span class="wiki-thread-age" aria-hidden="true" title="Newest session edit on its focus pages: today 07:00">3h</span></span><span class="wiki-sr-only"> · last edit 3h</span>`);
     expect(html).toContain("Hide 3 threads");
     expect(html).toContain(`data-thread-pin="plans/a-two.mdx" data-thread-pinned="0" aria-pressed="false" aria-label="Pin this work group first"`);
@@ -474,7 +474,7 @@ describe("one shell for the thread card and the group card", () => {
   test("today's thread card is byte-identical to the markup before the shared shell", () => {
     // Rendered at 5e17530d: 768 cards over folded × pinned × ✋ × sessions ×
     // child line × pages × movesYou, hashed, plus one card in full. Re-pinned
-    // for D14 (plan muninn-wiki-pick-up): the span line is `since <first>`,
+    // for D14 (plan muninn-wiki-pick-up): the span line is `since` `<first>`,
     // the `→ last` end gone; nothing else in the markup moved.
     const SESS = [card().sessions, [], [card().sessions[0]!]];
     const CHILD: RailThreadCard["child"][] = [
@@ -494,10 +494,10 @@ describe("one shell for the thread card and the group card", () => {
                   out.push(threadCardHeaderHtml(card({ pinned, sessions, child, movesYou }), folded, NOW, showMoves, pages));
     expect(out.length).toBe(768);
     expect(new Bun.CryptoHasher("sha256").update(out.join("\n")).digest("hex")).toBe(
-      "d4ca8f0f8aee837f7fd5e207a1633ac333cfdaa6ee8d48a63a98e75660f65c07",
+      "96b604acc063bccb59fd5970a0f96aa529acdc939d12acedc277b01455856e3c",
     );
     expect(threadCardHeaderHtml(card({ pinned: true }), false, NOW, true, 2)).toBe(
-      `<div class="wiki-thread-card open pinned" data-section="threads" data-thread="thread:plans/a.mdx"><button type="button" class="wiki-thread-fold" data-fold-key="closed:thread:plans/a.mdx" aria-expanded="true" title="Alpha &lt;work&gt; (pinned first)\n• Second (claude), yesterday 20:00 → yesterday 21:26\n• s1 (opencode), mon 12.10 15:04 → mon 12.10 16:00\nHide this work thread"><svg class="wiki-thread-glyph" viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3.5 1.5v11"/><circle cx="3.5" cy="3" r="1.6" fill="currentColor"/><circle cx="3.5" cy="7" r="1.6" fill="currentColor"/><circle cx="3.5" cy="11" r="1.6" fill="currentColor"/><path d="M7 3h5.5M7 7h4M7 11h5"/></svg><span class="wiki-thread-label"><span class="wiki-thread-name">Alpha &lt;work&gt;</span><span class="wiki-sr-only"> · </span><small class="wiki-thread-meta"><span class="wiki-thread-line wiki-thread-tally"><span class="wiki-thread-count">2 sessions</span> <span class="wiki-thread-moves">· ✋ 18</span></span><span class="wiki-sr-only"> · </span> <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">since 12.10 15:04</span></span></small><span class="wiki-sr-only"> · </span><span class="wiki-thread-disclose"><span aria-hidden="true">▾ </span>Hide 2 pages</span></span></button><button type="button" class="wiki-thread-pin on" data-thread-pin="plans/a.mdx" data-thread-pinned="1" aria-pressed="true" aria-label="Pin this work thread first" title="Pinned first. Click to unpin">📌</button></div>`,
+      `<div class="wiki-thread-card open pinned" data-section="threads" data-thread="thread:plans/a.mdx"><button type="button" class="wiki-thread-fold" data-fold-key="closed:thread:plans/a.mdx" aria-expanded="true" title="Alpha &lt;work&gt; (pinned first)\n• Second (claude), yesterday 20:00 → yesterday 21:26\n• s1 (opencode), mon 12.10 15:04 → mon 12.10 16:00\nHide this work thread"><svg class="wiki-thread-glyph" viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3.5 1.5v11"/><circle cx="3.5" cy="3" r="1.6" fill="currentColor"/><circle cx="3.5" cy="7" r="1.6" fill="currentColor"/><circle cx="3.5" cy="11" r="1.6" fill="currentColor"/><path d="M7 3h5.5M7 7h4M7 11h5"/></svg><span class="wiki-thread-label"><span class="wiki-thread-name">Alpha &lt;work&gt;</span><span class="wiki-sr-only"> · </span><small class="wiki-thread-meta"><span class="wiki-thread-line wiki-thread-tally"><span class="wiki-thread-count">2 sessions</span> <span class="wiki-thread-moves">· ✋ 18</span></span><span class="wiki-sr-only"> · </span> <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-since">since</span> <span class="wiki-thread-from">12.10 15:04</span></span></small><span class="wiki-sr-only"> · </span><span class="wiki-thread-disclose"><span aria-hidden="true">▾ </span>Hide 2 pages</span></span></button><button type="button" class="wiki-thread-pin on" data-thread-pin="plans/a.mdx" data-thread-pinned="1" aria-pressed="true" aria-label="Pin this work thread first" title="Pinned first. Click to unpin">📌</button></div>`,
     );
   });
 
