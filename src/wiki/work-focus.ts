@@ -366,11 +366,15 @@ export type WorkFamilyPage = Pick<WorkPageInput, "relPath" | "parent" | "pairedB
  */
 export function workFamilyParentOf(pages: readonly WorkFamilyPage[]): (p: WorkFamilyPage) => string | undefined {
   const byKey = new Map(pages.map((p) => [workPathKey(p.relPath), p] as const));
+  // Meta is tested on the original-case stem, as `computeWorkFocus` and the
+  // store's pairing do: `isMetaStem` is case-sensitive, and the lower-cased
+  // key would call `Index.md` meta and `CLAUDE.md` not.
+  const metaKeys = new Set(pages.filter((p) => isMetaStem(stemOf(p.relPath))).map((p) => workPathKey(p.relPath)));
   const pairedParent = (p: WorkFamilyPage): string | undefined =>
     p.parent && p.pairedBy && FAMILY_PAIRINGS.has(p.pairedBy) ? workPathKey(p.parent) : undefined;
   return (p) => {
     const k = pairedParent(p);
-    if (k === undefined || isMetaStem(stemOf(k))) return undefined;
+    if (k === undefined || metaKeys.has(k)) return undefined;
     const parent = byKey.get(k);
     return parent && pairedParent(parent) === undefined ? parent.relPath : undefined;
   };

@@ -13,14 +13,18 @@ import {
   WORK_HUB_BACKLINKS,
   WORK_THREADS_MAX,
   WORK_TITLE_MAX,
+  workFamilyParentOf,
   workSessionRef,
   type WorkFocusInput,
+  type WorkPairedBy,
   type WorkPageInput,
   type WorkSession,
   type WorkSessionFile,
 } from "./work-focus.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS, rankActivity } from "../dashboard/views/components/wiki-activity-rank.ts";
 import { workedShownSignal, workedSortSignal, type WikiListing } from "../dashboard/views/components/wiki-filter.ts";
+import { buildWorkEvidence } from "./work-evidence.ts";
+import type { WikiPageMeta } from "./store.ts";
 
 const H = 3_600_000;
 const DAY = 24 * H;
@@ -875,4 +879,81 @@ describe("family members carry the family's classification (pick-up D1, fix roun
       [1, "focus"],
     ]);
   });
+});
+
+// The family rule's whole state space (pick-up D1, class check at fix round 3):
+// child `pairedBy` × parent shape. `folds` is the expected column, taken from
+// running this table against f75c23f8's `computeWorkFocus` (the last commit
+// before the rule moved into `workFamilyParentOf`): 80 rows, a child folds iff
+// it is paired stem/suffix/link AND its parent row folds. `isMetaStem` is
+// case-sensitive (`index`, `log`, `CLAUDE` only), so `Index.md` is a parent and
+// `CLAUDE.md` is not, while `claude.md` is.
+describe("the family rule's state table (workFamilyParentOf, computeWorkFocus, buildWorkEvidence)", () => {
+  const CHILD = "p/diagram.html";
+  const childPairings: [WorkPairedBy | undefined, boolean][] = [
+    ["stem", true],
+    ["suffix", true],
+    ["link", true],
+    ["superseded", false],
+    [undefined, false],
+  ];
+  const plain = (stem: string, folds: boolean): [string, WorkPageInput[], string, boolean] => [stem, [pg(`p/${stem}.md`)], `p/${stem}.md`, folds];
+  const pairedMid = (by: WorkPairedBy, folds: boolean): [string, WorkPageInput[], string, boolean] => [
+    `itself paired ${by}`,
+    [pg("p/Top.md"), pg("p/Mid.md", { parent: "p/Top.md", pairedBy: by })],
+    "p/Mid.md",
+    folds,
+  ];
+  const parents: [name: string, extra: WorkPageInput[], parentRel: string, folds: boolean][] = [
+    ["missing", [], "p/Gone.md", false],
+    plain("Page", true),
+    plain("README", true),
+    plain("index", false),
+    plain("Index", true),
+    plain("INDEX", true),
+    plain("log", false),
+    plain("Log", true),
+    plain("LOG", true),
+    plain("CLAUDE", false),
+    plain("Claude", true),
+    plain("claude", true),
+    pairedMid("stem", false),
+    pairedMid("suffix", false),
+    pairedMid("link", false),
+    pairedMid("superseded", true),
+  ];
+  const rows = childPairings.flatMap(([by, family]) =>
+    parents.map(([name, extra, parentRel, folds]) => ({ by, name, extra, parentRel, expected: family && folds ? parentRel : CHILD })),
+  );
+
+  test("the table has every combination", () => {
+    expect(rows.length).toBe(80);
+  });
+
+  for (const { by, name, extra, parentRel, expected } of rows) {
+    test(`child ${by ?? "unpaired"} under parent ${name} → ${expected}`, () => {
+      const child = pg(CHILD, { parent: parentRel, ...(by ? { pairedBy: by } : {}) });
+      const pages = [...extra, child];
+      expect(workFamilyParentOf(pages)(child) ?? CHILD).toBe(expected);
+
+      // A session that writes only the child: one thread, keyed by its family.
+      const r = run([sess("s", [f(CHILD, 5, T(1))])], pages);
+      expect(r.threads.map((t) => t.key)).toEqual([expected]);
+
+      // A related: edge to the child lands on the same family's focus page.
+      const meta = (p: WorkPageInput): WikiPageMeta =>
+        ({ name: p.relPath, title: p.relPath, type: "plan", domain: "ai", tags: [], aliases: [], relPath: p.relPath, parent: p.parent, pairedBy: p.pairedBy }) as WikiPageMeta;
+      const e = buildWorkEvidence({
+        threads: [
+          { key: "p/x.md", pages: ["p/x.md"], touched: [], sessions: [] },
+          { key: expected, pages: [expected], touched: [], sessions: [] },
+        ],
+        candidates: 2,
+        contributions: [],
+        ledgerTruncated: false,
+        pages: [{ ...meta(pg("p/x.md")), related: [CHILD] }, ...pages.map(meta)],
+      });
+      expect(e.relations.related).toEqual([["p/x.md", expected]]);
+    });
+  }
 });
