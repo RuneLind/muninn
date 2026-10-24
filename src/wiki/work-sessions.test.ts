@@ -318,6 +318,29 @@ describe("the index post-pass", () => {
   });
 });
 
+describe("the index post-pass over a family (pick-up D1)", () => {
+  test("an attachment's writes reach its parent through the store: the thread is keyed on the parent, the child carries the family's kind", async () => {
+    const root = await testTempDir(path.join(tmpdir(), "work-sessions-"));
+    try {
+      await mkdir(path.join(root, "plans"));
+      await writeFile(path.join(root, "plans/x.mdx"), "# X\n");
+      await writeFile(path.join(root, "plans/x.html"), "<html><head><title>X</title></head><body>x</body></html>\n");
+      const files = [{ p: "plans/x.html", edits: 4, firstMs: NOW - 3_600_000, lastMs: NOW - 1_800_000 }];
+      const body = sessionsBody([session({ text: { from: "prompt", paths: [], links: [], files: [] }, files })]);
+      await refreshWorkSessions(root, deps({ sessions: body }, { registry: async () => [{ name: "t", root }] }));
+      const idx = await buildWikiIndex(root);
+      const page = (rel: string) => idx.pages.find((p) => p.relPath === rel)!;
+      expect(page("plans/x.html")).toMatchObject({ parent: "plans/x.mdx", pairedBy: "stem" });
+      expect(idx.work!.threads.map((t) => t.key)).toEqual(["plans/x.mdx"]);
+      expect(page("plans/x.mdx").work).toMatchObject({ state: "F" });
+      expect(page("plans/x.mdx").work!.events.map((e) => [e[1], e[2]])).toEqual([[4, "focus"]]);
+      expect(page("plans/x.html").work!.events.map((e) => [e[1], e[2]])).toEqual([[4, "focus"]]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("clipSessionsAt — the replay's view of a session that spans --at", () => {
   const AT = Date.UTC(2026, 9, 15, 8, 15);
   const H = 3_600_000;

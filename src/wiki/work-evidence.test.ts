@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildWorkEvidence, WORK_EVIDENCE_CONTRIBUTIONS_MAX, WORK_EVIDENCE_RELATIONS_MAX } from "./work-evidence.ts";
 import type { WikiPageMeta } from "./store.ts";
-import type { WorkContribution, WorkThread } from "./work-focus.ts";
+import { computeWorkFocus, type WorkContribution, type WorkThread } from "./work-focus.ts";
 
 function meta(relPath: string, over: Partial<WikiPageMeta> = {}): WikiPageMeta {
   const name = relPath.split("/").pop()!.replace(/\.[^.]+$/, "");
@@ -67,6 +67,82 @@ describe("relations", () => {
       ["p/b.mdx", "p/a.mdx"],
     ]);
     expect(e.relations.relatedSkipped).toEqual({ skipped: 2, ambiguous: 1 });
+  });
+
+  test("related: a target that is a rail attachment counts as its parent's edge (focus holds only the parent); once per pair, never a self-edge, a retired child stays its own page", () => {
+    const pages = [
+      meta("p/a.mdx", { related: ["p/b-prototype.html", "p/b.mdx", "p/a.html", "p/c.html", "p/d-notes.mdx", "p/old.md"] }),
+      meta("p/a.html", { parent: "p/a.mdx", pairedBy: "stem" }),
+      meta("p/b.mdx"),
+      meta("p/b-prototype.html", { parent: "p/b.mdx", pairedBy: "suffix" }),
+      meta("p/c.mdx"),
+      meta("p/c.html", { parent: "p/c.mdx", pairedBy: "stem" }),
+      meta("p/d.mdx"),
+      meta("p/d-notes.mdx", { parent: "p/d.mdx", pairedBy: "link" }),
+      meta("p/e.mdx"),
+      meta("p/old.md", { parent: "p/e.mdx", pairedBy: "superseded" }),
+    ];
+    const e = build(pages, [thread("p/a.mdx", ["p/a.mdx"]), thread("p/b.mdx", ["p/b.mdx", "p/d.mdx", "p/e.mdx"])]);
+    // b-prototype → b (and the direct b entry adds nothing); a.html → a is a
+    // self-edge; c is no focus page; d-notes (link) → d; old.md (superseded)
+    // is its own page and no focus page, so no edge to e.
+    expect(e.relations.related).toEqual([
+      ["p/a.mdx", "p/b.mdx"],
+      ["p/a.mdx", "p/d.mdx"],
+    ]);
+  });
+
+  test("related: a focus page naming ONLY a stem child, or ONLY a suffix child, of another focus page gets the edge to that parent", () => {
+    const pages = [
+      meta("p/a.mdx", { related: ["p/b.html"] }),
+      meta("p/b.mdx"),
+      meta("p/b.html", { parent: "p/b.mdx", pairedBy: "stem" }),
+      meta("p/c.mdx", { related: ["p/d-prototype.html"] }),
+      meta("p/d.mdx"),
+      meta("p/d-prototype.html", { parent: "p/d.mdx", pairedBy: "suffix" }),
+    ];
+    const e = build(pages, [thread("p/a.mdx", ["p/a.mdx", "p/c.mdx"]), thread("p/b.mdx", ["p/b.mdx", "p/d.mdx"])]);
+    expect(e.relations.related).toEqual([
+      ["p/a.mdx", "p/b.mdx"],
+      ["p/c.mdx", "p/d.mdx"],
+    ]);
+  });
+
+  test("related: a child `computeWorkFocus` keeps as its own page (parent meta, missing or itself a child) keeps the edge to itself, never its parent", () => {
+    const fam = [
+      { relPath: "p/x.mdx", related: ["p/m.html", "p/orph.html", "p/gc.html"] },
+      { relPath: "p/index.mdx" },
+      { relPath: "p/m.html", parent: "p/index.mdx", pairedBy: "link" as const },
+      { relPath: "p/orph.html", parent: "p/gone.mdx", pairedBy: "stem" as const },
+      { relPath: "p/top.mdx" },
+      { relPath: "p/mid.html", parent: "p/top.mdx", pairedBy: "stem" as const },
+      { relPath: "p/gc.html", parent: "p/mid.html", pairedBy: "link" as const },
+    ];
+    const AS_OF = Date.UTC(2026, 9, 15, 8, 0);
+    const worked = ["p/x.mdx", "p/m.html", "p/orph.html", "p/gc.html", "p/index.mdx", "p/mid.html"];
+    const r = computeWorkFocus({
+      sessions: worked.map((p, i) => {
+        const at = AS_OF - (i + 1) * 3_600_000;
+        return { id: `s${i}`, provider: "claude", title: `s${i}`, first: at, last: at + 60_000, bulk: false, text: { from: "prompt", paths: [], links: [], files: [] }, files: [{ p, edits: 5, firstMs: at, lastMs: at + 60_000 }] };
+      }),
+      pre: new Map(),
+      sinceMs: AS_OF - 8 * 24 * 3_600_000,
+      asOfMs: AS_OF,
+      pages: fam.map(({ relPath, parent, pairedBy }) => ({ relPath, backlinks: 0, ...(parent ? { parent, pairedBy } : {}) })),
+      identity: { roots: ["/w/kode"], names: ["kode"] },
+      otherRoots: [],
+    });
+    // The three children are focus pages of their own; mid.html folds into top.
+    expect(r.threads.map((t) => t.key).sort()).toEqual(["p/gc.html", "p/m.html", "p/orph.html", "p/top.mdx", "p/x.mdx"]);
+    const e = build(
+      fam.map(({ relPath, ...over }) => meta(relPath, over as Partial<WikiPageMeta>)),
+      r.threads,
+    );
+    expect(e.relations.related).toEqual([
+      ["p/x.mdx", "p/m.html"],
+      ["p/x.mdx", "p/orph.html"],
+      ["p/x.mdx", "p/gc.html"],
+    ]);
   });
 
   test("owned issue: the unique owner and every focus page naming the key by a ref that counts", () => {

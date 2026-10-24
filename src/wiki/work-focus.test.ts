@@ -13,12 +13,18 @@ import {
   WORK_HUB_BACKLINKS,
   WORK_THREADS_MAX,
   WORK_TITLE_MAX,
+  workFamilyParentOf,
   workSessionRef,
   type WorkFocusInput,
+  type WorkPairedBy,
   type WorkPageInput,
   type WorkSession,
   type WorkSessionFile,
 } from "./work-focus.ts";
+import { DEFAULT_ACTIVITY_WEIGHTS, rankActivity } from "../dashboard/views/components/wiki-activity-rank.ts";
+import { workedShownSignal, workedSortSignal, type WikiListing } from "../dashboard/views/components/wiki-filter.ts";
+import { buildWorkEvidence } from "./work-evidence.ts";
+import type { WikiPageMeta } from "./store.ts";
 
 const H = 3_600_000;
 const DAY = 24 * H;
@@ -65,9 +71,11 @@ function run(sessions: WorkSession[], pages: WorkPageInput[], over: Partial<Work
 const kinds = (r: ReturnType<typeof run>, relPath: string) => r.pages.get(relPath)?.events.map((e) => e[2]);
 
 describe("named (D18)", () => {
+  // The named page takes 2 edits: at 1, beside the 10-edit page it would be a
+  // weak link (pick-up D1), which the weak-link cases below cover.
   const pages = [pg("plans/2026-10-12-vaktsaker.mdx"), pg("plans/other.mdx"), pg("notes/note.mdx"), pg("misc/note.mdx")];
   const write = (s: Partial<Parameters<typeof sess>[2]>) =>
-    run([sess("a", [f("plans/2026-10-12-vaktsaker.mdx", 1, T(10)), f("plans/other.mdx", 10, T(10))], s)], pages);
+    run([sess("a", [f("plans/2026-10-12-vaktsaker.mdx", 2, T(10)), f("plans/other.mdx", 10, T(10))], s)], pages);
 
   test("by absolute path under this wiki's root", () => {
     expect(kinds(write({ paths: ["/w/kode/plans/2026-10-12-vaktsaker.mdx"] }), "plans/2026-10-12-vaktsaker.mdx")).toEqual(["focus"]);
@@ -96,7 +104,7 @@ describe("named (D18)", () => {
   // Arch review 2026-10, finding 71: a root registered twice answers to both names.
   test("a reader link names a page under ANY registry name of this root", () => {
     const link = (wiki: string | null) =>
-      run([sess("a", [f("plans/2026-10-12-vaktsaker.mdx", 1, T(10)), f("plans/other.mdx", 10, T(10))], { links: [{ wiki, relPath: "plans/2026-10-12-vaktsaker.mdx" }] })], pages, {
+      run([sess("a", [f("plans/2026-10-12-vaktsaker.mdx", 2, T(10)), f("plans/other.mdx", 10, T(10))], { links: [{ wiki, relPath: "plans/2026-10-12-vaktsaker.mdx" }] })], pages, {
         identity: { roots: ["/w/kode"], names: ["kode", "kode-extra"] },
       });
     expect(kinds(link("kode-extra"), "plans/2026-10-12-vaktsaker.mdx")).toEqual(["focus"]);
@@ -105,7 +113,7 @@ describe("named (D18)", () => {
     expect(kinds(link(null), "plans/2026-10-12-vaktsaker.mdx")).toEqual(["touch"]); // D18
   });
   test("on a clone, an absolute path under the REGISTERED root names the page", () => {
-    const r = run([sess("a", [f("plans/other.mdx", 1, T(10)), f("notes/note.mdx", 9, T(10))], { paths: ["/reg/kode/plans/other.mdx"] })], pages, {
+    const r = run([sess("a", [f("plans/other.mdx", 2, T(10)), f("notes/note.mdx", 9, T(10))], { paths: ["/reg/kode/plans/other.mdx"] })], pages, {
       identity: { roots: ["/reg/kode"], names: ["kode"] },
     });
     expect(kinds(r, "plans/other.mdx")).toEqual(["focus"]);
@@ -395,14 +403,14 @@ describe("events and states", () => {
     const nfc = "plans/s\u00e5k.mdx";
     const nfd = "plans/sa\u030ak.mdx";
     const pages = [pg(nfc), pg("plans/x.mdx")];
-    const writes = () => [f(nfc, 1, T(10)), f("plans/x.mdx", 10, T(10))];
+    const writes = () => [f(nfc, 2, T(10)), f("plans/x.mdx", 10, T(10))];
     expect(kinds(run([sess("a", writes(), { paths: [`/w/kode/${nfd}`] })], pages), nfc)).toEqual(["focus"]);
     expect(kinds(run([sess("a", writes(), { paths: [nfd] })], pages), nfc)).toEqual(["focus"]);
     expect(kinds(run([sess("a", writes(), { names: ["sa\u030ak.mdx"] })], pages), nfc)).toEqual(["focus"]);
   });
   test("a root and a prompt path match across NFC and NFD, here and elsewhere", () => {
     const pages = [pg("p/a.mdx"), pg("p/b.mdx")];
-    const writes = () => [f("p/a.mdx", 1, T(10)), f("p/b.mdx", 10, T(10))];
+    const writes = () => [f("p/a.mdx", 2, T(10)), f("p/b.mdx", 10, T(10))];
     const named = (path: string, root: string) =>
       kinds(run([sess("a", writes(), { paths: [path] })], pages, { identity: { roots: [root], names: ["kode"] } }), "p/a.mdx");
     expect(named("/w/ka\u030ade/p/a.mdx", "/w/k\u00e5de")).toEqual(["focus"]);
@@ -538,4 +546,414 @@ describe("fix round 1 batch 3 — I: a contribution names its session the way th
   test("a provider the mapping does not name keeps its own spelling", () => {
     expect(workSessionRef({ provider: "", id: "x" })).toBe(":x");
   });
+});
+
+describe("weak links and families (plan muninn-wiki-pick-up, D1/D10)", () => {
+  const threadOf = (r: ReturnType<typeof run>, id: string) => r.threads.find((t) => t.sessions.some((s) => s.id === id));
+  const ids = (r: ReturnType<typeof run>, id: string) => threadOf(r, id)?.sessions.map((s) => s.id).sort();
+
+  test("strong page + a 1-edit page the prompt names: the named page is a touch; joins only through the strong page", () => {
+    const pages = [pg("plans/mdx.mdx"), pg("plans/grocery.mdx")];
+    const r = run(
+      [
+        sess("a", [f("plans/mdx.mdx", 17, T(30)), f("plans/grocery.mdx", 1, T(30))], { names: ["grocery.mdx"] }),
+        sess("b", [f("plans/grocery.mdx", 5, T(40))]),
+        sess("c", [f("plans/mdx.mdx", 4, T(10))]),
+      ],
+      pages,
+    );
+    expect(r.weakLinks).toBe(1);
+    expect(ids(r, "a")).toEqual(["a", "c"]);
+    expect(threadOf(r, "a")!.key).toBe("plans/mdx.mdx");
+    expect(threadOf(r, "a")!.touched).toEqual(["plans/grocery.mdx"]);
+    expect(ids(r, "b")).toEqual(["b"]);
+    expect(r.contributions.filter((c) => c[0] === "claude-code:a").map((c) => [c[1], c[3]])).toEqual(
+      expect.arrayContaining([["plans/mdx.mdx", "focus"], ["plans/grocery.mdx", "touch"]]),
+    );
+  });
+
+  test("strong page + a 1-edit page it created: both focus; joins through both", () => {
+    const anchor = T(30);
+    const r = run(
+      [
+        sess("a", [f("plans/main.mdx", 5, T(31)), f("plans/born.mdx", 1, anchor - 60_000)]),
+        sess("b", [f("plans/born.mdx", 4, T(10))]),
+        sess("c", [f("plans/main.mdx", 4, T(5))]),
+      ],
+      [pg("plans/main.mdx"), pg("plans/born.mdx", { gitCreatedMs: anchor })],
+    );
+    expect(r.weakLinks).toBe(0);
+    expect(r.threads).toHaveLength(1);
+    expect(ids(r, "a")).toEqual(["a", "b", "c"]);
+  });
+
+  test("two strong pages (3 + 3): joins through both", () => {
+    const r = run(
+      [
+        sess("a", [f("p/x.mdx", 3, T(30)), f("p/y.mdx", 3, T(30))]),
+        sess("b", [f("p/x.mdx", 4, T(10))]),
+        sess("c", [f("p/y.mdx", 4, T(5))]),
+      ],
+      [pg("p/x.mdx"), pg("p/y.mdx")],
+    );
+    expect(r.weakLinks).toBe(0);
+    expect(ids(r, "a")).toEqual(["a", "b", "c"]);
+  });
+
+  test("two weak pages, neither created: the one with more edits stays focus, the other is a touch", () => {
+    // q.mdx's 1 edit plus its CSV's 1 at half weight is 1.5 — weak, but heavier than p's 1.
+    const pages = [pg("p/p.mdx"), pg("p/q.mdx", { refs: ["p/q.csv"] })];
+    const r = run([sess("a", [f("p/p.mdx", 1, T(30)), f("p/q.mdx", 1, T(20)), f("p/q.csv", 1, T(20))], { names: ["p.mdx", "q.mdx"] })], pages);
+    expect(kinds(r, "p/q.mdx")).toEqual(["focus"]);
+    expect(kinds(r, "p/p.mdx")).toEqual(["touch"]);
+    expect(r.weakLinks).toBe(1);
+    // Equal edits: the earliest event stays.
+    const tie = run([sess("a", [f("p/p.mdx", 1, T(20)), f("p/q.mdx", 1, T(30))], { names: ["p.mdx", "q.mdx"] })], pages);
+    expect(kinds(tie, "p/q.mdx")).toEqual(["focus"]);
+    expect(kinds(tie, "p/p.mdx")).toEqual(["touch"]);
+    // Equal edits and times: relPath decides.
+    const flat = run([sess("a", [f("p/p.mdx", 1, T(20)), f("p/q.mdx", 1, T(20))], { names: ["p.mdx", "q.mdx"] })], pages);
+    expect(kinds(flat, "p/p.mdx")).toEqual(["focus"]);
+    expect(kinds(flat, "p/q.mdx")).toEqual(["touch"]);
+  });
+
+  test("one strong session and three sessions with the same page as a weak link: focus only in the strong thread", () => {
+    const pages = [pg("p/shared.mdx"), pg("p/w1.mdx"), pg("p/w2.mdx"), pg("p/w3.mdx")];
+    const weak = (id: string, own: string, h: number) => sess(id, [f(own, 6, T(h)), f("p/shared.mdx", 1, T(h))], { names: ["shared.mdx"] });
+    const r = run([sess("s", [f("p/shared.mdx", 5, T(50))]), weak("w1", "p/w1.mdx", 40), weak("w2", "p/w2.mdx", 30), weak("w3", "p/w3.mdx", 20)], pages);
+    expect(r.weakLinks).toBe(3);
+    expect(r.threads).toHaveLength(4);
+    expect(r.threads.filter((t) => t.pages.includes("p/shared.mdx")).map((t) => t.key)).toEqual(["p/shared.mdx"]);
+    expect(ids(r, "s")).toEqual(["s"]);
+    for (const w of ["w1", "w2", "w3"]) {
+      expect(ids(r, w)).toEqual([w]);
+      expect(threadOf(r, w)!.touched).toEqual(["p/shared.mdx"]);
+    }
+  });
+
+  test("a hub-only session joins no thread (D16, unchanged)", () => {
+    const pages = [pg("flows/hub.mdx", { backlinks: 30 }), pg("p/a.mdx")];
+    const r = run([sess("h", [f("flows/hub.mdx", 5, T(30))]), sess("b", [f("flows/hub.mdx", 2, T(10)), f("p/a.mdx", 5, T(10))])], pages);
+    expect(r.weakLinks).toBe(0);
+    expect(ids(r, "b")).toEqual(["b"]);
+    expect(ids(r, "h")).toEqual(["h"]);
+  });
+
+  test("a hub plus a 1-edit named page: the page is the only non-hub family, stays focus and joins its thread", () => {
+    const pages = [pg("flows/hub.mdx", { backlinks: 30 }), pg("p/q.mdx")];
+    const r = run(
+      [sess("a", [f("flows/hub.mdx", 8, T(30)), f("p/q.mdx", 1, T(30))], { names: ["q.mdx"] }), sess("b", [f("p/q.mdx", 4, T(10))])],
+      pages,
+    );
+    expect(r.weakLinks).toBe(0);
+    expect(r.pages.get("p/q.mdx")!.events.map((e) => e[2])).toEqual(["focus", "focus"]);
+    expect(ids(r, "a")).toEqual(["a", "b"]);
+    expect(threadOf(r, "a")!.key).toBe("p/q.mdx");
+  });
+
+  test("a superseded old plan edited once beside its successor: two pages, no family", () => {
+    const pages = [pg("plans/new.mdx"), pg("plans/old.mdx", { parent: "plans/new.mdx", pairedBy: "superseded" })];
+    const r = run([sess("a", [f("plans/new.mdx", 5, T(30)), f("plans/old.mdx", 1, T(30))])], pages);
+    expect(r.pages.get("plans/old.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([[1, "touch"]]);
+    expect(r.pages.get("plans/new.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([[5, "focus"]]);
+  });
+
+  test("a plan edited once plus its same-stem .html edited once: one family with 2 edits, keyed on the plan", () => {
+    const pages = [pg("plans/x.mdx"), pg("plans/x.html", { parent: "plans/x.mdx", pairedBy: "stem" }), pg("p/big.mdx")];
+    const r = run(
+      [
+        sess("a", [f("p/big.mdx", 9, T(30)), f("plans/x.mdx", 1, T(20)), f("plans/x.html", 1, T(25))], { names: ["x.html"] }),
+        sess("b", [f("plans/x.html", 4, T(10))]),
+      ],
+      pages,
+    );
+    // The child's own rows, at the family's kind in each session.
+    expect(r.pages.get("plans/x.html")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [4, "focus"],
+      [1, "focus"],
+    ]);
+    expect(r.pages.get("plans/x.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [4, "focus"],
+      [2, "focus"],
+    ]);
+    expect(r.weakLinks).toBe(0);
+    expect(ids(r, "a")).toEqual(["a", "b"]);
+    expect(r.contributions.some((c) => c[1] === "plans/x.html")).toBe(false);
+    // `suffix` and `link` pairs are families too, at full weight.
+    for (const pairedBy of ["suffix", "link"] as const) {
+      const fam = run(
+        [sess("a", [f("p/big.mdx", 9, T(30)), f("plans/x.mdx", 1, T(20)), f("plans/x-prototype.html", 1, T(25))], { names: ["x.mdx"] })],
+        [pg("plans/x.mdx"), pg("plans/x-prototype.html", { parent: "plans/x.mdx", pairedBy }), pg("p/big.mdx")],
+      );
+      expect(fam.pages.get("plans/x.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([[2, "focus"]]);
+    }
+  });
+
+  test("shipped thread keys are unique", () => {
+    const pages = ["a", "b", "c", "d", "e"].map((x) => pg(`p/${x}.mdx`));
+    const sessions = [
+      sess("1", [f("p/a.mdx", 5, T(60)), f("p/b.mdx", 1, T(60))], { names: ["b.mdx"] }),
+      sess("2", [f("p/b.mdx", 5, T(50)), f("p/c.mdx", 1, T(50))], { names: ["c.mdx"] }),
+      sess("3", [f("p/c.mdx", 1, T(40)), f("p/d.mdx", 1, T(40))], { names: ["c.mdx", "d.mdx"] }),
+      sess("4", [f("p/d.mdx", 5, T(30)), f("p/e.mdx", 1, T(30))], { names: ["e.mdx", "a.mdx"] }),
+      sess("5", [f("p/e.mdx", 1, T(20)), f("p/a.mdx", 1, T(20))], { names: ["e.mdx", "a.mdx"] }),
+    ];
+    const r = run(sessions, pages);
+    const keys = r.threads.map((t) => t.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    const focusIn = new Map<string, number>();
+    for (const t of r.threads) for (const p of t.pages) focusIn.set(p, (focusIn.get(p) ?? 0) + 1);
+    expect([...focusIn.values()].every((n) => n === 1)).toBe(true);
+  });
+
+  test("a file rolled up through a ref or folder counts 0.5 toward the 2-edit bar", () => {
+    const pages = [pg("p/big.mdx"), pg("p/q.mdx", { refs: ["data/q.csv"] }), pg("p/r.mdx")];
+    const one = run([sess("a", [f("p/big.mdx", 9, T(30)), f("p/q.mdx", 1, T(30)), f("data/q.csv", 1, T(30))], { names: ["q.mdx"] })], pages);
+    expect(r1(one, "p/q.mdx")).toEqual([1.5, "touch"]);
+    const two = run(
+      [sess("a", [f("p/big.mdx", 9, T(30)), f("p/q.mdx", 1, T(30)), f("data/q.csv", 2, T(30))], { names: ["q.mdx"] })],
+      pages,
+    );
+    expect(r1(two, "p/q.mdx")).toEqual([2, "focus"]);
+    // A folder named after the page: p/r/x.json rolls into p/r.mdx.
+    const folder = run([sess("a", [f("p/big.mdx", 9, T(30)), f("p/r.mdx", 1, T(30)), f("p/r/x.json", 1, T(30))], { names: ["r.mdx"] })], pages);
+    expect(r1(folder, "p/r.mdx")).toEqual([1.5, "touch"]);
+  });
+  const r1 = (r: ReturnType<typeof run>, relPath: string) => {
+    const e = r.pages.get(relPath)!.events[0]!;
+    return [e[1], e[2]];
+  };
+});
+
+describe("family members carry the family's classification (pick-up D1, fix round 1)", () => {
+  const FAM = [
+    pg("plans/x.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+    pg("plans/x.html", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 70 * DAY, parent: "plans/x.mdx", pairedBy: "stem" }),
+    pg("p/big.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+  ];
+  const NOW = AS_OF + H;
+  /** The client's view: a listing row per page, carrying the server's `work`. */
+  const listing = (r: ReturnType<typeof run>, worked: Record<string, number>): WikiListing[] =>
+    FAM.map((p) => ({
+      relPath: p.relPath,
+      name: p.relPath.split("/").pop()!.replace(/\.[^.]+$/, ""),
+      title: p.relPath,
+      type: p.relPath.endsWith(".html") ? "explainer" : "plan",
+      addedMs: p.gitCreatedMs,
+      gitCreatedMs: p.gitCreatedMs,
+      updatedMs: worked[p.relPath],
+      gitUpdatedMs: worked[p.relPath],
+      workedMs: worked[p.relPath],
+      ...(p.parent ? { parent: p.parent, pairedBy: p.pairedBy } : {}),
+      ...(p.relPath === "plans/x.mdx" ? { children: ["plans/x.html"] } : {}),
+      ...(r.pages.get(p.relPath) ? { work: r.pages.get(p.relPath) } : {}),
+    })) as unknown as WikiListing[];
+  const activity = (r: ReturnType<typeof run>, worked: Record<string, number>) =>
+    rankActivity(listing(r, worked), DEFAULT_ACTIVITY_WEIGHTS, NOW, { open: true, candidates: 3, covered: 3, coverage: 1, asOfMs: AS_OF });
+  const childOf = (r: ReturnType<typeof run>) => listing(r, {}).find((p) => p.relPath === "plans/x.html")!;
+
+  test("a child written once beside a strong page is a touch: it carries a T work state and lifts neither itself nor its parent", () => {
+    const r = run([sess("a", [f("p/big.mdx", 9, T(5)), f("plans/x.html", 1, T(2))])], FAM);
+    expect(r.pages.get("plans/x.mdx")!.events.map((e) => e[2])).toEqual(["touch"]);
+    const child = r.pages.get("plans/x.html")!;
+    expect(child).toMatchObject({ state: "T", preMs: AS_OF - 70 * DAY });
+    expect(child.events.map((e) => [e[1], e[2]])).toEqual([[1, "touch"]]);
+    // Worked-on sorts the child at its pre-touch position, marked touched.
+    expect(workedSortSignal(childOf(r), NOW).ms).toBe(AS_OF - 70 * DAY);
+    expect(workedShownSignal(childOf(r), NOW).touched).toBeDefined();
+    // Activity: the parent's row is not lifted through the child's write.
+    const rows = activity(r, { "plans/x.mdx": AS_OF - 60 * DAY, "p/big.mdx": T(5) + 600_000, "plans/x.html": T(2) + 600_000 });
+    const parent = rows.find((row) => row.page.relPath === "plans/x.mdx");
+    expect(parent?.via).toBeUndefined();
+    expect(parent?.score ?? 0).toBeLessThan(0.2);
+  });
+
+  test("a child written by an elsewhere session is a pass: the parent's own row is not lifted through it", () => {
+    // The parent has its own focus row (session b). A family child cannot be
+    // "newer" than its parent through its rows (the parent carries them at the
+    // family's lastMs); the superseded case below pins the pass rule.
+    const r = run([sess("b", [f("plans/x.mdx", 9, T(30))]), sess("e", [f("plans/x.html", 3, T(2))], { paths: ["/w/mimir/foo.md"] })], FAM);
+    expect(r.pages.get("plans/x.html")!.events.map((e) => [e[1], e[2]])).toEqual([[3, "pass"]]);
+    expect(workedSortSignal(childOf(r), NOW).ms).toBe(AS_OF - 70 * DAY);
+    const rows = activity(r, { "plans/x.mdx": T(30) + 600_000, "p/big.mdx": AS_OF - 60 * DAY, "plans/x.html": T(2) + 600_000 });
+    const parent = rows.find((row) => row.page.relPath === "plans/x.mdx");
+    expect(parent).toBeDefined();
+    expect(parent?.via).toBeUndefined();
+    expect(parent?.newerChildren).toBeUndefined();
+  });
+
+  test("a superseded page's elsewhere pass, newer than its successor's work, gives the successor no newer-child dot", () => {
+    // A superseded pair stays two pages with their own work, and Activity folds
+    // the old page under the new one: only the pass rule withholds the dot.
+    const pages = [
+      pg("plans/new.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+      pg("plans/old.mdx", { gitCreatedMs: AS_OF - 300 * DAY, preGitMs: AS_OF - 90 * DAY, parent: "plans/new.mdx", pairedBy: "superseded" }),
+    ];
+    const r = run(
+      [
+        sess("c", [f("plans/old.mdx", 3, T(40))]),
+        sess("b", [f("plans/new.mdx", 9, T(30))]),
+        sess("e", [f("plans/old.mdx", 3, T(2))], { paths: ["/w/mimir/foo.md"] }),
+      ],
+      pages,
+    );
+    expect(r.pages.get("plans/old.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [3, "pass"],
+      [3, "focus"],
+    ]);
+    const worked: Record<string, number> = { "plans/new.mdx": T(30) + 600_000, "plans/old.mdx": T(2) + 600_000 };
+    const L = pages.map((p) => ({
+      relPath: p.relPath,
+      name: p.relPath.split("/").pop()!.replace(/\.[^.]+$/, ""),
+      title: p.relPath,
+      type: "plan",
+      addedMs: p.gitCreatedMs,
+      gitCreatedMs: p.gitCreatedMs,
+      updatedMs: worked[p.relPath],
+      gitUpdatedMs: worked[p.relPath],
+      workedMs: worked[p.relPath],
+      ...(p.parent ? { parent: p.parent, pairedBy: p.pairedBy } : { children: ["plans/old.mdx"] }),
+      work: r.pages.get(p.relPath),
+    })) as unknown as WikiListing[];
+    const rows = rankActivity(L, DEFAULT_ACTIVITY_WEIGHTS, NOW, { open: true, candidates: 2, covered: 2, coverage: 1, asOfMs: AS_OF });
+    const parent = rows.find((row) => row.page.relPath === "plans/new.mdx");
+    expect(parent).toBeDefined();
+    expect(parent?.via).toBeUndefined();
+    expect(parent?.newerChildren).toBeUndefined();
+  });
+
+  test("a child in a focus family carries its own rows as focus", () => {
+    const r = run([sess("a", [f("plans/x.html", 6, T(2))])], FAM);
+    const child = r.pages.get("plans/x.html")!;
+    expect(child).toMatchObject({ state: "F", focusMs: T(2) + 10 * 60_000 });
+    expect(child.events.map((e) => [e[1], e[2]])).toEqual([[6, "focus"]]);
+    expect(workedSortSignal(childOf(r), NOW).ms).toBe(T(2) + 10 * 60_000);
+    // Threads and contributions still name only the parent.
+    expect(r.threads.map((t) => t.key)).toEqual(["plans/x.mdx"]);
+    expect(r.contributions.some((c) => c[1] === "plans/x.html")).toBe(false);
+  });
+
+  test("a child's own last write dates it, not the family's later write in the same session", () => {
+    // One session: the plan at 15:xx listed before the explainer at 09:xx.
+    const r = run([sess("a", [f("plans/x.mdx", 2, T(3)), f("plans/x.html", 2, T(9))])], FAM);
+    expect(r.pages.get("plans/x.mdx")).toMatchObject({ state: "F", focusMs: T(3) + 10 * 60_000 });
+    const child = r.pages.get("plans/x.html")!;
+    expect(child).toMatchObject({ state: "F", focusMs: T(9) + 10 * 60_000 });
+    expect(child.events).toEqual([[T(9) + 10 * 60_000, 2, "focus"]]);
+    expect(workedSortSignal(childOf(r), NOW).ms).toBe(T(9) + 10 * 60_000);
+  });
+
+  test("created is judged per member: an attachment's first writer is credited though another session wrote the plan earlier", () => {
+    const pages = [
+      pg("plans/x.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+      pg("plans/x-prototype.html", { gitCreatedMs: T(20), parent: "plans/x.mdx", pairedBy: "suffix" }),
+    ];
+    // Day 1: session a edits the pre-existing plan. Day 2: session b creates the prototype.
+    const r = run([sess("a", [f("plans/x.mdx", 4, T(40))]), sess("b", [f("plans/x-prototype.html", 1, T(20) - 60_000)])], pages);
+    expect(r.pages.get("plans/x-prototype.html")!.events.map((e) => [e[1], e[2]])).toEqual([[1, "focus"]]);
+    expect(r.threads.map((t) => [t.key, t.sessions.map((s) => s.id).sort()])).toEqual([["plans/x.mdx", ["a", "b"]]]);
+  });
+
+  test("a session that creates only an attachment creates the family: focus, and it joins the plan's thread", () => {
+    const pages = [
+      pg("plans/x.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+      pg("plans/x-prototype.html", { gitCreatedMs: T(20), parent: "plans/x.mdx", pairedBy: "suffix" }),
+    ];
+    const sessions = [sess("a", [f("plans/x-prototype.html", 1, T(20) - 60_000)]), sess("b", [f("plans/x.mdx", 4, T(5))])];
+    const r = run(sessions, pages);
+    expect(r.pages.get("plans/x.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [4, "focus"],
+      [1, "focus"],
+    ]);
+    expect(r.threads.map((t) => [t.key, t.sessions.map((s) => s.id).sort()])).toEqual([["plans/x.mdx", ["a", "b"]]]);
+    // An attachment with pre-window rows was not created in the window.
+    const old = run(sessions, [pages[0]!, { ...pages[1]!, preGitMs: AS_OF - 30 * DAY }]);
+    expect(old.pages.get("plans/x.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [4, "focus"],
+      [1, "touch"],
+    ]);
+    // A later session's write is not the attachment's first, though inside the slack.
+    const later = run([...sessions, sess("c", [f("plans/x-prototype.html", 1, T(20) - 30_000)])], pages);
+    expect(later.pages.get("plans/x-prototype.html")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [1, "touch"],
+      [1, "focus"],
+    ]);
+  });
+});
+
+// The family rule's whole state space (pick-up D1, class check at fix round 3):
+// child `pairedBy` × parent shape. `folds` is the expected column, taken from
+// running this table against f75c23f8's `computeWorkFocus` (the last commit
+// before the rule moved into `workFamilyParentOf`): 80 rows, a child folds iff
+// it is paired stem/suffix/link AND its parent row folds. `isMetaStem` is
+// case-sensitive (`index`, `log`, `CLAUDE` only), so `Index.md` is a parent and
+// `CLAUDE.md` is not, while `claude.md` is.
+describe("the family rule's state table (workFamilyParentOf, computeWorkFocus, buildWorkEvidence)", () => {
+  const CHILD = "p/diagram.html";
+  const childPairings: [WorkPairedBy | undefined, boolean][] = [
+    ["stem", true],
+    ["suffix", true],
+    ["link", true],
+    ["superseded", false],
+    [undefined, false],
+  ];
+  const plain = (stem: string, folds: boolean): [string, WorkPageInput[], string, boolean] => [stem, [pg(`p/${stem}.md`)], `p/${stem}.md`, folds];
+  const pairedMid = (by: WorkPairedBy, folds: boolean): [string, WorkPageInput[], string, boolean] => [
+    `itself paired ${by}`,
+    [pg("p/Top.md"), pg("p/Mid.md", { parent: "p/Top.md", pairedBy: by })],
+    "p/Mid.md",
+    folds,
+  ];
+  const parents: [name: string, extra: WorkPageInput[], parentRel: string, folds: boolean][] = [
+    ["missing", [], "p/Gone.md", false],
+    plain("Page", true),
+    plain("README", true),
+    plain("index", false),
+    plain("Index", true),
+    plain("INDEX", true),
+    plain("log", false),
+    plain("Log", true),
+    plain("LOG", true),
+    plain("CLAUDE", false),
+    plain("Claude", true),
+    plain("claude", true),
+    pairedMid("stem", false),
+    pairedMid("suffix", false),
+    pairedMid("link", false),
+    pairedMid("superseded", true),
+  ];
+  const rows = childPairings.flatMap(([by, family]) =>
+    parents.map(([name, extra, parentRel, folds]) => ({ by, name, extra, parentRel, expected: family && folds ? parentRel : CHILD })),
+  );
+
+  test("the table has every combination", () => {
+    expect(rows.length).toBe(80);
+  });
+
+  for (const { by, name, extra, parentRel, expected } of rows) {
+    test(`child ${by ?? "unpaired"} under parent ${name} → ${expected}`, () => {
+      const child = pg(CHILD, { parent: parentRel, ...(by ? { pairedBy: by } : {}) });
+      const pages = [...extra, child];
+      expect(workFamilyParentOf(pages)(child) ?? CHILD).toBe(expected);
+
+      // A session that writes only the child: one thread, keyed by its family.
+      const r = run([sess("s", [f(CHILD, 5, T(1))])], pages);
+      expect(r.threads.map((t) => t.key)).toEqual([expected]);
+
+      // A related: edge to the child lands on the same family's focus page.
+      const meta = (p: WorkPageInput): WikiPageMeta =>
+        ({ name: p.relPath, title: p.relPath, type: "plan", domain: "ai", tags: [], aliases: [], relPath: p.relPath, parent: p.parent, pairedBy: p.pairedBy }) as WikiPageMeta;
+      const e = buildWorkEvidence({
+        threads: [
+          { key: "p/x.md", pages: ["p/x.md"], touched: [], sessions: [] },
+          { key: expected, pages: [expected], touched: [], sessions: [] },
+        ],
+        candidates: 2,
+        contributions: [],
+        ledgerTruncated: false,
+        pages: [{ ...meta(pg("p/x.md")), related: [CHILD] }, ...pages.map(meta)],
+      });
+      expect(e.relations.related).toEqual([["p/x.md", expected]]);
+    });
+  }
 });
