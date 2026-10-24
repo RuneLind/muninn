@@ -2242,8 +2242,10 @@ function revealActiveRow(flash: boolean): boolean {
  * row scrolls into view, flashes and stays highlighted until the next render.
  * With no drawn card holding the page, the page itself opens. Each step
  * re-reads the cards a render drew (`pickUpStep`), so the folds' two-spelling
- * rule decides every write. Focus stays on the strip row (`data-pickup` is a
- * rail control `renderList` restores), so Enter jumps again.
+ * rule decides every write. Focus stays on the strip row through those
+ * renders (`data-pickup` is a rail control `renderList` restores), then moves
+ * to the revealed row, so the focus ring is on screen and Tab continues from
+ * the card rather than from the strip the rail scrolled away from.
  */
 function jumpToPickUp(rel: string): void {
   const page = findPageByRelPath(allPages, rel);
@@ -2273,6 +2275,9 @@ function jumpToPickUp(rel: string): void {
   row.classList.remove("reveal-flash");
   void row.offsetWidth; // restart the animation on a repeat jump
   row.classList.add("reveal-flash");
+  // A plain row is no tab stop; -1 makes it focusable without adding one.
+  row.tabIndex = -1;
+  row.focus({ preventScroll: true });
 }
 
 /**
@@ -5355,7 +5360,7 @@ function railControlSelector(el: Element | null): string | null {
     "data-thread-sessions",
     "data-thread-row-menu",
     "data-work-reset",
-    // A Pick up row, by its page: a jump that reveals a card keeps focus on it.
+    // A Pick up row, by its page: kept through the renders a jump runs.
     "data-pickup",
   ]) {
     const v = el.getAttribute(attr);

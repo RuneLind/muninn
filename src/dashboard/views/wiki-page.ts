@@ -900,8 +900,11 @@ export async function renderWikiPage(opts?: {
     .wiki-pickup-title, .wiki-pickup-meta { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-pickup-title { font-size: 12.5px; line-height: 17px; color: var(--text-primary); }
     .wiki-pickup-meta { font-size: 10.5px; line-height: 15px; color: var(--text-muted); }
-    /* The row a Pick up jump revealed, until the next render. */
-    .wiki-list-item.pickup-hl { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+    /* The row a Pick up jump revealed, until the next render: a line round the
+       row, not a fill, so it never reads as the current page's tint. The jump
+       focuses the row, so this is its focus ring too. */
+    .wiki-list-item.pickup-hl { outline: 2px solid var(--accent); outline-offset: -2px; }
+    @media (forced-colors: active) { .wiki-list-item.pickup-hl { outline-color: Highlight; } }
     /* WORK THREADS (plan muninn-wiki-work-threads, PR 5): one card per thread
        above Activity. The header is a fold button (a thread glyph, the name,
        "N sessions · ✋ M" and "first → last", then "▸ Show N pages") beside a

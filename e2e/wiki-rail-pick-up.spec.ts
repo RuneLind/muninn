@@ -262,7 +262,7 @@ test.describe("Wiki rail: Pick up", () => {
     await expect(stripRows(page)).toHaveCount(5);
   });
 
-  test("Enter does the same through a closed group, and focus stays on the strip row", async ({ page }) => {
+  test("Enter does the same through a closed group, and focus moves to the revealed row", async ({ page }) => {
     await openReader(page);
     await groupCard(page).locator(".wiki-thread-fold").click();
     await expect(groupCard(page).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "false");
@@ -273,11 +273,92 @@ test.describe("Wiki rail: Pick up", () => {
     await expect(cardOf(page, A[1]!).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "true");
     await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
     await expect(threadRow(page, A[1]!)).toBeInViewport();
-    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-pickup"))).toBe(A[1]);
-    // A second Enter on a row whose card is drawn open only reveals it.
+    await expect(threadRow(page, A[1]!)).toBeFocused();
+    // A second Enter on the strip row, its card drawn open, only reveals it.
+    await stripRow(page, A[1]!).focus();
     await page.keyboard.press("Enter");
     await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
+    await expect(threadRow(page, A[1]!)).toBeFocused();
     await expect(cardOf(page, A[1]!).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "true");
+  });
+
+  test("at a short viewport, focus lands on the revealed row inside the rail and Tab continues from there", async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 480 });
+    await openReader(page);
+    await groupCard(page).locator(".wiki-thread-fold").click();
+    await expect(groupCard(page).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "false");
+    await stripRow(page, A[2]!).focus();
+    await page.keyboard.press("Enter");
+    await expect(threadRow(page, A[2]!)).toHaveClass(/pickup-hl/);
+    // The rail scrolled: the strip row is above the list's box now.
+    const where = () =>
+      page.evaluate(() => {
+        const list = document.getElementById("wikiList")!;
+        const box = list.getBoundingClientRect();
+        const a = document.activeElement as HTMLElement | null;
+        const r = a?.getBoundingClientRect();
+        const hl = list.querySelector(".pickup-hl")!.getBoundingClientRect();
+        return {
+          scrollTop: list.scrollTop,
+          focusIsHl: !!a && a.classList.contains("pickup-hl"),
+          focusInBox: !!a && !!r && list.contains(a) && r.top >= box.top - 0.5 && r.bottom <= box.bottom + 0.5,
+          hlInBox: hl.bottom > box.top && hl.top < box.bottom,
+        };
+      });
+    const after = await where();
+    expect(after.scrollTop, "the jump scrolled the rail").toBeGreaterThan(0);
+    expect(after.focusIsHl, "focus is on the highlighted row").toBe(true);
+    expect(after.focusInBox, "the focused row lies inside #wikiList's box").toBe(true);
+    await page.keyboard.press("Tab");
+    const tabbed = await where();
+    expect(tabbed.scrollTop, "Tab does not scroll the rail back above the row").toBeGreaterThanOrEqual(after.scrollTop);
+    expect(tabbed.hlInBox, "the highlighted row is still on screen").toBe(true);
+    expect(tabbed.focusInBox, "Tab moved to a control inside the rail's box").toBe(true);
+  });
+
+  test("two jumps in a row leave exactly one highlighted row, the second to a card already drawn open", async ({ page }) => {
+    await openReader(page);
+    await stripRow(page, A[0]!).click();
+    await expect(threadRow(page, A[0]!)).toHaveClass(/pickup-hl/);
+    await stripRow(page, A[1]!).click();
+    await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
+    // Alpha 1's card is still drawn open, so this jump renders nothing.
+    await expect(cardOf(page, A[0]!).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "true");
+    await stripRow(page, A[0]!).click();
+    await expect(threadRow(page, A[0]!)).toHaveClass(/pickup-hl/);
+    await expect(page.locator("#wikiList .pickup-hl")).toHaveCount(1);
+  });
+
+  test("the highlight paints unlike the current-page mark, and stays visible in forced colours", async ({ page }) => {
+    const paint = (rel: string) =>
+      threadRow(page, rel).evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return { background: cs.backgroundColor, outlineStyle: cs.outlineStyle, outlineWidth: parseFloat(cs.outlineWidth), outlineColor: cs.outlineColor };
+      });
+    const visible = (c: string) => !/^rgba\(.*,\s*0\)$/.test(c) && c !== "transparent";
+    await openReader(page, `&relPath=${encodeURIComponent(A[0]!)}`);
+    await stripRow(page, A[0]!).click();
+    await expect(threadRow(page, A[0]!)).toHaveClass(/active/);
+    await stripRow(page, A[1]!).click();
+    await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
+    const active = await paint(A[0]!);
+    const hl = await paint(A[1]!);
+    // The current-page mark is a fill; the highlight is a line round the row.
+    expect(active.outlineStyle).toBe("none");
+    expect(hl.outlineStyle).not.toBe("none");
+    expect(hl.outlineWidth).toBeGreaterThanOrEqual(2);
+    expect(visible(hl.outlineColor), hl.outlineColor).toBe(true);
+    expect(hl.background).not.toBe(active.background);
+
+    await page.emulateMedia({ forcedColors: "active" });
+    await openReader(page);
+    await stripRow(page, A[1]!).click();
+    await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
+    const forced = await paint(A[1]!);
+    expect(forced.outlineStyle).not.toBe("none");
+    expect(forced.outlineWidth).toBeGreaterThanOrEqual(2);
+    expect(visible(forced.outlineColor), forced.outlineColor).toBe(true);
+    expect(forced.outlineColor).not.toBe(forced.background);
   });
 
   test("a page no drawn card holds opens the page itself (D12)", async ({ page }) => {
