@@ -353,6 +353,28 @@ interface SessionEvent {
   kind: WorkEventKind;
 }
 
+/** The fields the family rule reads. */
+export type WorkFamilyPage = Pick<WorkPageInput, "relPath" | "parent" | "pairedBy">;
+
+/**
+ * The family rule (pick-up D1), the one `computeWorkFocus` and
+ * `buildWorkEvidence` share: a page paired `stem`, `suffix` or `link` folds
+ * into its parent when that parent is a page of `pages`, is not meta-stemmed
+ * and is not itself paired (pairing is one level deep). Returns the parent's
+ * relPath, or undefined when the page is its own.
+ */
+export function workFamilyParentOf(pages: readonly WorkFamilyPage[]): (p: WorkFamilyPage) => string | undefined {
+  const byKey = new Map(pages.map((p) => [workPathKey(p.relPath), p] as const));
+  const pairedParent = (p: WorkFamilyPage): string | undefined =>
+    p.parent && p.pairedBy && FAMILY_PAIRINGS.has(p.pairedBy) ? workPathKey(p.parent) : undefined;
+  return (p) => {
+    const k = pairedParent(p);
+    if (k === undefined || isMetaStem(stemOf(k))) return undefined;
+    const parent = byKey.get(k);
+    return parent && pairedParent(parent) === undefined ? parent.relPath : undefined;
+  };
+}
+
 // ── The computation ─────────────────────────────────────────────────────────
 
 export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
@@ -375,17 +397,10 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
     maxDefined([pre.get(workPathKey(p.relPath)), ...aliasesOf(p).map((a) => pre.get(a)), p.preGitMs]);
   const metaKeys = new Set<string>();
   for (const p of sorted) if (isMetaStem(stemOf(p.relPath))) metaKeys.add(workPathKey(p.relPath));
-  // Families (pick-up D1): an attachment whose parent is a page of its own here
-  // folds into that parent. Pairing is one level deep, so a parent is never a
-  // child; a meta-stemmed page stays out of every family.
-  const inputByKey = new Map(sorted.map((p) => [workPathKey(p.relPath), p] as const));
-  const pairedParent = (p: WorkPageInput): string | undefined =>
-    p.parent && p.pairedBy && FAMILY_PAIRINGS.has(p.pairedBy) ? workPathKey(p.parent) : undefined;
+  const familyParentOf = workFamilyParentOf(sorted);
   const parentKeyOf = (p: WorkPageInput): string | undefined => {
-    const k = pairedParent(p);
-    if (k === undefined || metaKeys.has(k)) return undefined;
-    const parent = inputByKey.get(k);
-    return parent && pairedParent(parent) === undefined ? k : undefined;
+    const parent = familyParentOf(p);
+    return parent === undefined ? undefined : workPathKey(parent);
   };
   const byKey = new Map<string, PageRec>();
   const recs: PageRec[] = [];

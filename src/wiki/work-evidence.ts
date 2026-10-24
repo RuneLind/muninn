@@ -20,6 +20,7 @@ import {
   type WorkEvidence,
   type WorkEvidenceReason,
   type WorkThread,
+  workFamilyParentOf,
 } from "./work-focus.ts";
 
 /**
@@ -77,11 +78,12 @@ export function buildWorkEvidence(input: WorkEvidenceInput): WorkEvidence {
     if (project) projects[rel] = project;
   }
 
-  // A `related:` target that is a rail attachment (rules 1–3) names its
-  // family, whose focus page is the parent; a retired child is its own page.
+  // A `related:` target in a family names it, and the family's focus page is
+  // the parent: `computeWorkFocus`'s own rule, so the two cannot disagree.
+  const familyParentOf = workFamilyParentOf(input.pages);
   const familyOf = (to: string): string => {
     const p = byRel.get(to);
-    return p?.parent && p.pairedBy !== "superseded" ? p.parent : to;
+    return (p && familyParentOf(p)) ?? to;
   };
   const related: [string, string][] = [];
   let skipped = 0;

@@ -20,11 +20,13 @@
  *  - `wsbcapf` — four busier lone plans ahead of a task thread whose key and
  *    rest pages sit in `drafts/`, so under `folder=plans` the thread is the
  *    fifth card showing two rows, `t-split` and `t-more`.
- *  - `wsbtwin` — the pair with an `.html` twin of `live-a` as its focus page;
+ *  - `wsbtwin` — the pair with an `.html` twin of `live-a` as the only page
+ *    its session wrote (the twin's family, so `live-a` is the focus page);
  *    `wsbstale`, `wsbslow`, `wsbslowfail`, `wsbnorefresh`, `wsbgone`,
  *    `wsbcleared`, `wsbabort`, `wsbretry`, `wsbthrow` — the pair again, one per Save as
- *    series lifecycle case; `wsbtwinslow` — the `.html`-twin pair again, its
- *    twin row carrying the row's own ⋯.
+ *    series lifecycle case; `wsbtwinslow` — the pair, `live-a`'s session also
+ *    writing a standalone `.html` (no markdown parent), whose row carries the
+ *    row's own ⋯.
  *
  * Synthetic names only (D11: no NAV data). No model calls; the only wiki
  * writes are Save as series on the synthetic series wikis.
@@ -81,6 +83,8 @@ const LA = "plans/live-a.md";
 const LB = "plans/live-b.md";
 const LONE = "notes/lone.md";
 const LAH = "plans/live-a.html";
+/** An `.html` with no markdown parent: a focus page of its own. */
+const LXH = "plans/live-notes.html";
 const OTHER = "notes/other.md";
 const BUSY = [1, 2, 3, 4].map((i) => `notes/busy-${i}.md`);
 const BUSYP = [1, 2, 3, 4].map((i) => `plans/busy-${i}.md`);
@@ -107,7 +111,7 @@ const SESSIONS: Record<string, string[][]> = {
   [AB]: [[LA], [LB], [LONE]],
   [RT]: [[LA], [LB], [LONE]],
   [TH]: [[LA], [LB], [LONE]],
-  [TWS]: [[LAH], [LB], [LONE]],
+  [TWS]: [[LA, LXH], [LB], [LONE]],
 };
 
 /** Per wiki: pages a session only TOUCHED (one edit, unnamed), by session
@@ -190,6 +194,7 @@ async function makeRoot(name: string, withTask: boolean, busy = false, twin = fa
   await write(LA, ["title: Living facts", "plan_status: active", "status_date: 2026-10-14"], 4 * HOUR);
   await write(LB, ["title: Reader lenses", "plan_status: active", "status_date: 2026-10-10", `related: ["[[${twin ? "plans/live-a.html" : "plans/live-a"}]]"]`], 5 * HOUR);
   if (twin) await writeFile(path.join(root, LAH), "<!doctype html><title>Living facts page</title><p>Twin.</p>\n", "utf8");
+  if (name === TWS) await writeFile(path.join(root, LXH), "<!doctype html><title>Living notes page</title><p>Notes.</p>\n", "utf8");
   if (name === ST) await write(OTHER, ["title: Other note", "series: other"], 7 * HOUR);
   await write(LONE, ["title: Lone note", "type: note"], 6 * HOUR);
   for (let i = 1; i <= 3; i++) await write(`notes/old-${i}.md`, [`title: Old ${i}`], (10 + i) * DAY);
@@ -266,7 +271,7 @@ test.beforeAll(async () => {
   await makeRoot(C, false, true);
   await makeFolderCapRoot();
   await makeRoot(TW, false, false, true);
-  await makeRoot(TWS, false, false, true);
+  await makeRoot(TWS, false);
   for (const w of [ST, SL, SF, NR, NG, CL, AB, RT, TH]) await makeRoot(w, false);
   ledger = await startLedger();
   server = spawn("bun", ["run", "src/index.ts"], {
@@ -790,10 +795,15 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await expect(groupCard(page, "group:series:live-a")).toHaveCount(1);
     expect(await readFile(path.join(roots[R]!, LB), "utf8")).toContain("series: live-a");
   });
-  test("Save as series on a group whose child is an .html twin: its markdown parent is written, the refresh names the group by the series and the action leaves its menu", async ({ page }) => {
+  // An `.html` twin is part of its markdown page's family (pick-up D1), so a
+  // session that wrote only the twin anchors the group on the markdown page
+  // and the twin is never a card or a group child of its own.
+  test("Save as series on a group whose session wrote only an .html twin: its markdown parent is written, the refresh names the group by the series and the action leaves its menu", async ({ page }) => {
     await openReader(page, TW);
-    const g = groupCard(page, `group:anchor:${LAH}`);
+    const g = groupCard(page, `group:anchor:${LA}`);
     await expect(g).toHaveCount(1);
+    await expect(page.locator(`#wikiList .wiki-thread-card[data-thread="thread:${LAH}"]`)).toHaveCount(0);
+    await expect(groupCard(page, `group:anchor:${LAH}`)).toHaveCount(0);
     await openMenu(g.locator("[data-work-card-menu]").first());
     await page.locator("#wikiWorkPop [data-work-save-series]").click();
     await expect(page.locator("#wikiWorkPop [data-work-series-key]")).toHaveValue("live-a");
@@ -801,7 +811,7 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     const sg = groupCard(page, "group:series:live-a");
     await expect(sg).toHaveCount(1);
     await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
-    await expect(groupCard(page, `group:anchor:${LAH}`)).toHaveCount(0);
+    await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(0);
     await expect(sg.locator("[data-work-card-menu]")).toHaveCount(0);
     for (const rel of [LA, LB]) expect(await readFile(path.join(roots[TW]!, rel), "utf8")).toContain("series: live-a");
     expect(await readFile(path.join(roots[TW]!, LAH), "utf8")).not.toContain("series");
@@ -1065,10 +1075,10 @@ test.describe("Wiki rail: Save as series, network errors and retries", () => {
       },
     );
     await openReader(page, TWS);
-    const g = groupCard(page, `group:anchor:${LAH}`);
-    const child = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LAH}"]`);
+    const g = groupCard(page, `group:anchor:${LA}`);
+    const child = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LA}"]`);
     if (!(await child.getAttribute("class"))!.includes("open")) await child.locator(".wiki-thread-fold").click();
-    const rowOpener = threadRow(page, LAH).locator("[data-thread-row-menu]");
+    const rowOpener = threadRow(page, LXH).locator("[data-thread-row-menu]");
     const otherCard = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`);
     await expect(rowOpener).toHaveCount(1);
     await expect(otherCard).toHaveCount(1);
