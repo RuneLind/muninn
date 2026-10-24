@@ -281,7 +281,8 @@ const pinWrites = (page: Page) => page.evaluate(() => (window as unknown as { __
 
 /** The header's WIDTH TABLE (`src/wiki/CLAUDE.md`, Work threads), built by the
  *  real renderer: every session count (1, 2-digit, 3-digit) × ✋ (absent, as on
- *  nais, and 1–3 digits) × span form × name (short, long enough to clamp). The
+ *  nais, and 1–3 digits) × span form (`since <first>` and the age chip, D14) ×
+ *  name (short, long enough to clamp). The
  *  fixture's own threads are a few hours long and two sessions wide. */
 const TABLE_NOW = new Date(2026, 9, 15, 10, 0).getTime();
 const at = (mo: number, d: number, h: number, m: number) => new Date(2026, mo, d, h, m).getTime();
@@ -308,6 +309,9 @@ function headerTable(): TableRow[] {
           const card: RailThreadCard = {
             key: "x", foldKey: "thread:x", toggleKey: "thread:x", name, open: false, pinned: false,
             pinAnchor: "x", focus: [], created: [], touched: [], movesYou: moves, score: 1,
+            // The age chip (plan muninn-wiki-pick-up, D14) at the span's end:
+            // `now`, `10h` and `2d` across the forms.
+            ageMs: span.last,
             sessions: Array.from({ length: n }, (_, i) => ({
               id: `w${i}`, provider: "claude", title: "",
               first: i === 0 ? span.first : span.first + 1000,
@@ -513,7 +517,8 @@ test.describe("Wiki rail: Work threads", () => {
     const sections = await page
       .locator(".wiki-list-sec")
       .evaluateAll((els) => els.map((e) => e.getAttribute("data-section")));
-    expect(sections.slice(0, 2)).toEqual(["threads", "activity"]);
+    // The Pick up strip (plan muninn-wiki-pick-up) sits above the section.
+    expect(sections.slice(0, 3)).toEqual(["pickup", "threads", "activity"]);
     await expect(cards(page)).toHaveCount(2);
     // The first card is the alpha thread, open, named by its top page cut at " — ".
     await expect(cards(page).nth(0).locator(".wiki-thread-name")).toHaveText("Alpha work");
@@ -1059,7 +1064,8 @@ test.describe("Wiki rail: Work threads", () => {
     // repeat it, and still lists the sessions.
     const fold = cards(page).nth(0).locator(".wiki-thread-fold");
     // The whole name, parts split by the visually hidden ` · `.
-    await expect(fold).toHaveAccessibleName(/^Alpha work · 2 sessions · ✋ 12 · \S+ \d\d:\d\d → \S+(?: \d\d:\d\d)? · Hide 2 pages$/);
+    // D14 (plan muninn-wiki-pick-up): `since <first>`, then the age chip.
+    await expect(fold).toHaveAccessibleName(/^Alpha work · 2 sessions · ✋ 12 · since \S+ \d\d:\d\d · last edit (now|\d+h) · Hide 2 pages$/);
     await expect(cards(page).nth(1).locator(".wiki-thread-fold")).toHaveAccessibleName(/ · Show 1 page$/);
     await expect(fold).toHaveAccessibleDescription(/session a1/);
     await expect(fold).not.toHaveAccessibleDescription(/sessions|✋/);

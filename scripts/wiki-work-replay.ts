@@ -72,6 +72,13 @@
  * PR 4) applies Make own thread to that page before grouping and prints each
  * split's own sessions and its remainder's key and sessions.
  *
+ * PICK UP (plan `muninn-wiki-pick-up`, PR 3). The grouped rail opens with the
+ * Pick up strip `buildRail` draws at that stop: each row's age, title and
+ * relPath, its second line (edits, sessions, the card that draws it), and the
+ * card and group a click opens, or `opens the page` (D12). Every card line
+ * prints `threadMetaLine` in the D14 form: the tally, `since <first>`, then
+ * the age chip.
+ *
  * Output is local only: melosys-kode-wiki titles are NAV data (D21). Nothing is
  * written anywhere but the temp clone, which is removed on exit and on SIGINT,
  * SIGTERM, SIGHUP and SIGQUIT, after the running git child's process group is
@@ -110,7 +117,9 @@ import {
   type WikiListing,
 } from "../src/dashboard/views/components/wiki-filter.ts";
 import { buildRail, isRailGroupCard, type RailInput } from "../src/dashboard/views/components/wiki-recents.ts";
-import { railGhostNote, threadGroupTally, threadMetaLine } from "../src/dashboard/views/components/wiki-thread-view.ts";
+import { railGhostNote, threadAgeLabel, threadGroupTally, threadInstantLabel, threadMetaLine } from "../src/dashboard/views/components/wiki-thread-view.ts";
+import { formatRailAge } from "../src/dashboard/views/components/wiki-activity-rank.ts";
+import { pickUpMetaLine } from "../src/dashboard/views/components/wiki-pick-up.ts";
 import { groupWorkThreads, type WorkWitness } from "../src/dashboard/views/components/wiki-work-groups.ts";
 import { WORK_GROUP_STOPS, type WorkGroupEvidenceToggles, type WorkGroupStop } from "../src/dashboard/views/components/wiki-work-group-prefs.ts";
 
@@ -206,10 +215,13 @@ function printGroupedRail(index: WikiIndex, listing: WikiListing[], at: number):
   if (ctl) {
     console.log(`  control: drawn ${ctl.stop}${ctl.stop !== ctl.requested ? ` (asked ${ctl.requested})` : ""}; ` + ctl.stops.map((x) => `${x.stop} ${x.available ? x.cards : `— ${x.reasons.join(",")}`}`).join(" · "));
   }
-  for (const e of buildRail(input).entries.filter((x) => x.section === "threads")) {
+  const built = buildRail(input);
+  printPickUp(built.entries, at);
+  for (const e of built.entries.filter((x) => x.section === "threads")) {
     if (e.kind === "thread-group") {
       const c = e.card;
-      console.log(`  ${e.folded ? "▸" : "▾"} ${c.label.toUpperCase()} ${c.name}${c.pinned ? "  📌" : ""}  — ${threadGroupTally(c, true)}${c.anchorVisible ? "" : "  (anchor outside the filters)"}`);
+      const age = threadAgeLabel(c, at);
+      console.log(`  ${e.folded ? "▸" : "▾"} ${c.label.toUpperCase()} ${c.name}${c.pinned ? "  📌" : ""}  — ${threadGroupTally(c, true)}${age ? ` · ${age}` : ""}${c.anchorVisible ? "" : "  (anchor outside the filters)"}`);
     } else if (e.kind === "thread") {
       const c = e.card;
       const pad = c.child ? "      " : "  ";
@@ -253,6 +265,20 @@ function printGroupedRail(index: WikiIndex, listing: WikiListing[], at: number):
     console.log(`  split ${d.stored}: own thread, ${own.thread.sessions.length} sessions (${ids(own.thread)}); source ${own.source.key} had ${own.source.pages.length} pages, ${own.source.sessions.length} sessions`);
     console.log(rem ? `    remainder key ${rem.thread.key}, ${rem.thread.pages.length} pages, ${rem.thread.sessions.length} sessions (${ids(rem.thread)})` : `    remainder: none (the source emptied)`);
   }
+}
+
+/** The Pick up strip as `buildRail` draws it (plan `muninn-wiki-pick-up`):
+ *  rows newest first, each with its second line and its jump target. */
+function printPickUp(entries: ReturnType<typeof buildRail>["entries"], at: number): void {
+  const strip = entries.find((e) => e.kind === "pickup");
+  console.log(`\nPick up (buildRail): ${strip?.kind === "pickup" ? "" : "none"}`);
+  if (strip?.kind !== "pickup") return;
+  strip.rows.forEach((r, i) => {
+    const t = r.target;
+    const jump = t ? `opens ${t.group ? `group «${t.group.name}» › ` : ""}card «${t.card.name}»${t.more ? " (behind + N more)" : ""}` : "opens the page";
+    console.log(`  ${i + 1}. ${formatRailAge(r.atMs, at).padStart(3)}  ${r.page.title}  (${r.page.relPath})`);
+    console.log(`        ${pickUpMetaLine(r)} · ${threadInstantLabel(r.atMs, at)} · ${r.source === "rows" ? "focus rows" : "page-level fallback"} · ${jump}`);
+  });
 }
 
 /** Every series that holds a ghost after the lift, and why each ghost is one —

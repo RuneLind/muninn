@@ -1285,6 +1285,12 @@ test.describe("Wiki rail: boundary controls by keyboard", () => {
     const sf = card(page, TSPLIT).locator(":scope > .wiki-thread-fold");
     if ((await sf.getAttribute("aria-expanded")) !== "true") await sf.click();
     await expect(threadRow(page, TSPLIT)).toHaveCount(1);
+    // Bring the row on screen and let its scroll event land first: any scroll
+    // closes the series menu ("viewport"), and with the Pick up strip above
+    // Work threads the row sits below the fold, so the opener's own focus()
+    // scrolled the rail and closed the menu its Enter had just opened.
+    await threadRow(page, TSPLIT).scrollIntoViewIfNeeded();
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
   }
 
   test("a repaint with focus on a thread row's page menu keeps it there, by its page (fix round 2, batch 4)", async ({ page }) => {

@@ -879,6 +879,29 @@ export async function renderWikiPage(opts?: {
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .wiki-list-ghost-note { flex-shrink: 0; font-size: 10.5px; color: var(--text-muted); }
+    /* PICK UP (plan muninn-wiki-pick-up, D2/D6/D11): five pointers above Work
+       threads, two lines each (the age and the title, then edits, sessions
+       and the card that draws the page). Buttons, not page rows: no relPath,
+       no .active mark, not counted. Each line is one line, cut with an
+       ellipsis; the hover holds both in full. */
+    .wiki-pickup { display: flex; flex-direction: column; gap: 1px; margin: 1px 0 6px; }
+    .wiki-pickup-row {
+      display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 6px; align-items: start;
+      width: 100%; padding: 3px 10px 3px 4px; border: 0; border-radius: 6px;
+      background: none; color: inherit; font-family: inherit; text-align: left; cursor: pointer;
+    }
+    .wiki-pickup-row:hover { background: var(--bg-surface); }
+    .wiki-pickup-row:focus-visible { background: var(--bg-surface); outline: 2px solid var(--accent); outline-offset: -2px; }
+    .wiki-pickup-age {
+      font-size: 10.5px; line-height: 17px; text-align: right; font-variant-numeric: tabular-nums;
+      color: var(--text-secondary);
+    }
+    .wiki-pickup-text { display: block; min-width: 0; }
+    .wiki-pickup-title, .wiki-pickup-meta { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wiki-pickup-title { font-size: 12.5px; line-height: 17px; color: var(--text-primary); }
+    .wiki-pickup-meta { font-size: 10.5px; line-height: 15px; color: var(--text-muted); }
+    /* The row a Pick up jump revealed, until the next render. */
+    .wiki-list-item.pickup-hl { background: color-mix(in srgb, var(--accent) 22%, transparent); }
     /* WORK THREADS (plan muninn-wiki-work-threads, PR 5): one card per thread
        above Activity. The header is a fold button (a thread glyph, the name,
        "N sessions · ✋ M" and "first → last", then "▸ Show N pages") beside a
@@ -929,6 +952,14 @@ export async function renderWikiPage(opts?: {
     .wiki-thread-line > span { display: inline-block; }
     .wiki-thread-fold:hover .wiki-thread-meta,
     .wiki-thread-card.open .wiki-thread-meta { color: var(--text-secondary); }
+    /* The age chip (plan muninn-wiki-pick-up, D5/D14): the time since the
+       card's newest session edit on its focus pages, in the slot the span's
+       \`→ last\` held, so the header shows one recency. A part of the line
+       like the others, so a narrow rail breaks before it, never inside it. */
+    .wiki-thread-age {
+      padding: 0 5px; border: 1px solid var(--border-secondary); border-radius: 999px;
+      line-height: 13px; color: var(--text-secondary);
+    }
     /* What a click does, in words: the header is a fold, not a link. */
     .wiki-thread-disclose {
       display: block; margin-top: 2px; font-size: 10.5px; line-height: 1.45;

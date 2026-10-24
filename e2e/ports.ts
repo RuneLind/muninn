@@ -181,6 +181,12 @@ export const E2E_PORTS = {
   // ONE muninn over writable and read-only synthetic wikis, ONE fake claude-usage.
   "wiki-rail-thread-boundaries": 3155,
   "wiki-rail-thread-boundaries/ledger": 3156,
+  // The Pick up strip and the age chip (plan `muninn-wiki-pick-up`, PR 3):
+  // ONE muninn over a synthetic wiki whose fake ledger's sessions form draws a
+  // group past three children and a thread past the five-card cap; ONE fake
+  // claude-usage.
+  "wiki-rail-pick-up": 3166,
+  "wiki-rail-pick-up/ledger": 3167,
   // The decision chain view and PR strip: ONE muninn over a synthetic plan wiki.
   "wiki-decision-views": 3157,
   // StatusRows view="tiles": ONE muninn over a synthetic plan wiki.

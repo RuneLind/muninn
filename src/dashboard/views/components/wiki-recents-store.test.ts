@@ -24,11 +24,14 @@ import {
   PINS_KEY_PREFIX,
   RECENTS_KEY_PREFIX,
   SECTION_META_FOLD_KEY,
+  SECTION_PICKUP_FOLD_KEY,
   foldsKey,
+  groupFoldState,
   isFoldOpen,
   threadPinKey,
 } from "./wiki-recents.ts";
 import { LAST_WIKI_KEY } from "./wiki-home.ts";
+import { closedFoldKey } from "./wiki-groups.ts";
 
 /** A `Storage`-shaped map: `key(i)` reads the insertion order and `removeItem`
  *  re-indexes it, which is the behaviour the purge's backwards walk exists for. */
@@ -229,6 +232,19 @@ describe("the fold store", () => {
       // Normalization must not damage it — it is why the sentinel is lowercase
       // and separator-free in the first place.
       expect(isFoldOpen(readFolds("mimir"), SECTION_META_FOLD_KEY)).toBe(true);
+    });
+  });
+
+  test("the Pick up strip's fold: open by default, closed stored per wiki as the closed: spelling, reopened by removing it", () => {
+    withStorage({}, (map) => {
+      // The header offers the closed: spelling, since the strip defaults open.
+      const toggle = closedFoldKey(SECTION_PICKUP_FOLD_KEY);
+      expect(groupFoldState(readFolds("mimir"), SECTION_PICKUP_FOLD_KEY)).toBeUndefined();
+      expect(toggleFolded("mimir", toggle)).toEqual([toggle]);
+      expect(groupFoldState(readFolds("mimir"), SECTION_PICKUP_FOLD_KEY)).toBe("closed");
+      expect(readFolds("melosys")).toEqual([]);
+      expect(toggleFolded("mimir", toggle)).toEqual([]);
+      expect(map.has(foldsKey("mimir"))).toBe(false);
     });
   });
 
