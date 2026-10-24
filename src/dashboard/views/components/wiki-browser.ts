@@ -2251,7 +2251,8 @@ function revealActiveRow(flash: boolean): boolean {
 function jumpToPickUp(rel: string): void {
   const page = findPageByRelPath(allPages, rel);
   if (!page) return;
-  // Three steps at most: the group, `+ N more`, then the child.
+  // Two opening steps at most (the group with `+ N more`, then the child),
+  // then `drawn`; four rounds leave a spare.
   for (let i = 0; i < 4; i++) {
     const step = pickUpStep(workCardsDrawn, page.relPath);
     if (step.kind === "page") {

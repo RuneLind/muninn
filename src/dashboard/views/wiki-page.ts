@@ -907,7 +907,7 @@ export async function renderWikiPage(opts?: {
     @media (forced-colors: active) { .wiki-list-item.pickup-hl { outline-color: Highlight; } }
     /* WORK THREADS (plan muninn-wiki-work-threads, PR 5): one card per thread
        above Activity. The header is a fold button (a thread glyph, the name,
-       "N sessions · ✋ M" and "first → last", then "▸ Show N pages") beside a
+       "N sessions · ✋ M" over "since <first>" and the age chip, then "▸ Show N pages") beside a
        📌. Every header is an outlined box, so it never reads as a page row;
        an OPEN card turns the outline accent and carries it round its focus
        rows and its \`touched:\` line (links, not rows). The rows' outline is
@@ -941,7 +941,7 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-thread-fold:hover .wiki-thread-name,
     .wiki-thread-card.open .wiki-thread-name { color: var(--text-primary); }
-    /* Two meta lines, \`N sessions · ✋ M\` over \`first → last\`: by the width
+    /* Two meta lines, \`N sessions · ✋ M\` over \`since <first>\` and the age chip: by the width
        table in src/wiki/CLAUDE.md (Work threads) each is one line at the 260
        and 300px rails on macOS and Linux DejaVu fonts, so nothing is cut and
        nothing needs an ellipsis. A part is an inline block, so under 260 (the

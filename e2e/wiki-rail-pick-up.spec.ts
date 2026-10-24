@@ -326,11 +326,33 @@ test.describe("Wiki rail: Pick up", () => {
     await expect(threadRow(page, A[0]!)).toHaveClass(/pickup-hl/);
     await stripRow(page, A[1]!).click();
     await expect(threadRow(page, A[1]!)).toHaveClass(/pickup-hl/);
-    // Alpha 1's card is still drawn open, so this jump renders nothing.
+    // Alpha 1's card is still drawn open, so this jump renders nothing: the
+    // rail's nodes survive it.
     await expect(cardOf(page, A[0]!).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "true");
+    await page.locator("#wikiList").evaluate((el) => el.querySelectorAll(".wiki-thread-card, .wiki-pickup-row").forEach((n) => ((n as HTMLElement).dataset.kept = "1")));
     await stripRow(page, A[0]!).click();
     await expect(threadRow(page, A[0]!)).toHaveClass(/pickup-hl/);
     await expect(page.locator("#wikiList .pickup-hl")).toHaveCount(1);
+    expect(await cardOf(page, A[0]!).getAttribute("data-kept")).toBe("1");
+    expect(await stripRow(page, A[0]!).getAttribute("data-kept")).toBe("1");
+  });
+
+  test("a jump flashes the row, and a repeat jump restarts the flash", async ({ page }) => {
+    await openReader(page);
+    await stripRow(page, A[0]!).click();
+    await expect(threadRow(page, A[0]!)).toHaveClass(/reveal-flash/);
+    const elapsed = () =>
+      threadRow(page, A[0]!).evaluate((el) => {
+        const a = el.getAnimations().find((x) => (x as CSSAnimation).animationName?.startsWith("wiki-reveal-flash"));
+        return a ? Number(a.currentTime) : null;
+      });
+    expect(await elapsed()).not.toBeNull();
+    await page.waitForTimeout(700);
+    expect(await elapsed()).toBeGreaterThanOrEqual(600);
+    await stripRow(page, A[0]!).click();
+    await expect(threadRow(page, A[0]!)).toHaveClass(/reveal-flash/);
+    // The 1.2 s flash runs again from its start, not on from 700 ms.
+    expect(await elapsed()).toBeLessThan(400);
   });
 
   test("the highlight paints unlike the current-page mark, and stays visible in forced colours", async ({ page }) => {
@@ -405,7 +427,7 @@ test.describe("Wiki rail: Pick up", () => {
     await expect(page.locator("#articleWrap h1").first()).toContainText("Solo 5");
   });
 
-  test("the fold survives a reload, per wiki", async ({ page }) => {
+  test("the fold survives a reload", async ({ page }) => {
     await openReader(page);
     await header(page).locator("[data-fold-key]").click();
     await expect(strip(page)).toHaveCount(0);
@@ -468,10 +490,26 @@ test.describe("Wiki rail: Pick up", () => {
     }
   });
 
-  test("the strip at the 260 px rail: each row two lines, inside the rail, nothing spilling", async ({ page }) => {
+  test("the strip at the 260 and 300 px rails: each row two lines, inside the rail, a long title and meta cut", async ({ page }) => {
+    // A real-length title on Alpha 1, so its row's title AND meta (`in
+    // <card name>`) are wider than either rail and must be cut.
+    const LONG = "Wiki visuals v2: diagrams from page data on the pages people come back to";
+    await page.route(
+      (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("wiki") === WIKI,
+      async (route) => {
+        const res = await route.fetch();
+        const body = (await res.json()) as { pages: Array<{ relPath: string; title?: string }> };
+        body.pages.find((p) => p.relPath === A[0])!.title = LONG;
+        await route.fulfill({ response: res, json: body });
+      },
+    );
     for (const width of [260, 300]) {
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
       await openReader(page);
+      await expect(stripRow(page, A[0]!).locator(".wiki-pickup-title")).toHaveText(LONG);
+      await expect(stripRow(page, A[0]!).locator(".wiki-pickup-meta")).toHaveText(`41 edits · 1 session · in ${LONG}`);
+      const railW = await page.locator(".wiki-layout > .wiki-pane:first-child").evaluate((e) => Math.round(e.getBoundingClientRect().width));
+      expect(railW, "the rail drew at the stored width").toBe(width);
       const fit = await page.evaluate(() => {
         const rail = document.querySelector(".wiki-layout > .wiki-pane:first-child")!.getBoundingClientRect();
         return Array.from(document.querySelectorAll<HTMLElement>("#wikiList .wiki-pickup-row")).map((row) => {
@@ -479,11 +517,23 @@ test.describe("Wiki rail: Pick up", () => {
           const lines = (el: HTMLElement) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight));
           const title = row.querySelector<HTMLElement>(".wiki-pickup-title")!;
           const meta = row.querySelector<HTMLElement>(".wiki-pickup-meta")!;
-          return { right: r.right <= rail.right + 0.5, titleLines: lines(title), metaLines: lines(meta), overflow: row.scrollWidth - row.clientWidth };
+          return {
+            rel: row.getAttribute("data-pickup"),
+            right: r.right <= rail.right + 0.5,
+            titleLines: lines(title),
+            metaLines: lines(meta),
+            overflow: row.scrollWidth - row.clientWidth,
+            cut: title.scrollWidth > title.clientWidth && meta.scrollWidth > meta.clientWidth,
+          };
         });
       });
       expect(fit, `${width}`).toHaveLength(5);
-      for (const f of fit) expect(f, `${width}`).toEqual({ right: true, titleLines: 1, metaLines: 1, overflow: 0 });
+      for (const f of fit) {
+        const { rel, cut, ...box } = f;
+        expect(box, `${width} ${rel}`).toEqual({ right: true, titleLines: 1, metaLines: 1, overflow: 0 });
+        // The long row is cut with an ellipsis rather than wrapped.
+        if (rel === A[0]) expect(cut, `${width} ${rel}`).toBe(true);
+      }
     }
   });
 });

@@ -1017,11 +1017,11 @@ test.describe("Wiki rail: Work threads", () => {
         const at = `${font} ${p.rail}/${p.scheme} [${rows[i]!.id}]`;
         for (const issue of f.issues) failures.push(`${at}: ${issue}`);
         if (f.lines.length !== 2) failures.push(`${at}: ${f.lines.length} meta lines, not 2`);
-        // The span line holds three parts since D14 (`since`, the date and
-        // the age chip): 3 lines at 200 px, 5 at 148 px, where the date wraps
-        // inside itself. Every other line keeps its bound.
-        const span = (cls: string) => cls.includes("wiki-thread-span");
-        const maxLines = (cls: string) => (p.rail >= 260 ? 1 : p.rail >= 200 ? (span(cls) ? 3 : 2) : span(cls) ? 5 : 4);
+        // Every row here is a lone card: at 200 px its span line keeps the
+        // 2-line bound (the 3-line allowance is a child card's only). At 148
+        // px the span's three parts (`since`, the date, the age chip, D14)
+        // take 5 lines, the date wrapping inside itself, measured on macOS.
+        const maxLines = (cls: string) => (p.rail >= 260 ? 1 : p.rail >= 200 ? 2 : cls.includes("wiki-thread-span") ? 5 : 4);
         for (const l of f.lines) if (l.lines > maxLines(l.cls)) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
         // Down to 200 px a line breaks only BETWEEN its parts.
         if (p.rail >= 200) for (const q of f.partLines) if (q.lines > 1) failures.push(`${at}: "${q.text}" breaks inside itself`);

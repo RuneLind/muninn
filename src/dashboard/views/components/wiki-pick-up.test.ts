@@ -185,6 +185,17 @@ describe("the age chip (D5)", () => {
     // The remainder holds sd1 only, so sd2's 2.5h touch on d.md is not its.
     expect(ago(thread(split, "notes/d.md").ageMs)).toBe(8);
   });
+  test("a remainder card reads its derived pages, not the server thread's: its session's newer row on the split page is not its", () => {
+    const fx = fixture();
+    // sd1, the remainder's session, also touched d2 (the split page) at 7h,
+    // newer than its 8h focus row on d.md.
+    fx.work.evidence!.contributions.rows.push(row("sd1", "notes/d2.md", "notes/d.md", 7, 1, "touch"));
+    const split = cardsAt(fx, { splits: [{ id: "x1", page: "notes/d2.md" }] });
+    expect(ago(thread(split, "notes/d.md").ageMs)).toBe(8);
+    // Unsplit, the same row is the whole card's (d2 is its focus page), but
+    // sd2's 2.5h touch on d.md is newer still.
+    expect(ago(thread(cardsAt(fx), "notes/d.md").ageMs)).toBe(2.5);
+  });
   test("a cut thread falls back to the newest page-level focus time of its pages", () => {
     const cards = cardsAt(fixture());
     expect(ago(thread(cards, "plans/c.md").ageMs)).toBe(7);
@@ -199,6 +210,20 @@ describe("the age chip (D5)", () => {
     const fx = fixture();
     delete fx.work.evidence;
     expect(ago(workCardAgeMs(workAgeSource(fx.work, fx.pages), ["plans/b.md"], [sess("sb2", 0.25)], ["plans/b.md"]))).toBe(6);
+  });
+  test("a multi-page cut thread falls back to the NEWEST page-level focus time across its pages", () => {
+    // c's thread, cut, also holds e (9h) and k (1h): the newest is k's, in
+    // either page order.
+    const fx = fixture();
+    const src = workAgeSource(fx.work, fx.pages);
+    const s = [sess("sc", 7)];
+    expect(ago(workCardAgeMs(src, ["plans/c.md"], s, ["plans/c.md", "plans/k.md", "plans/e.md"]))).toBe(1);
+    expect(ago(workCardAgeMs(src, ["plans/c.md"], s, ["plans/k.md", "plans/c.md", "plans/e.md"]))).toBe(1);
+    // Through the rail: the cut thread drawn with two pages.
+    fx.work.threads[2]!.pages = ["plans/c.md", "plans/e.md"];
+    fx.work.threads = fx.work.threads.filter((t) => t.key !== "plans/e.md");
+    fx.pages.find((p) => p.relPath === "plans/e.md")!.work!.focusMs = NOW - 0.75 * H;
+    expect(ago(thread(cardsAt(fx), "plans/c.md").ageMs)).toBe(0.75);
   });
   test("the Threads stop and a Sessions-stop card carry one too", () => {
     const fx = fixture();
@@ -249,6 +274,16 @@ describe("the strip's rows (D2, D11, D12)", () => {
     const a = rows[3]!;
     expect([a.edits, a.sessions, a.low]).toEqual([5, 2, false]);
     expect(rows.some((r) => r.page.relPath.endsWith(".html") || r.page.relPath === "plans/ctx.md")).toBe(false);
+  });
+  test("two rows at the same instant order by path, whatever order they were collected in", () => {
+    const fx = fixture();
+    // h's focus row moves to k's instant (1h); k's rows come first in the block.
+    const rows = fx.work.evidence!.contributions.rows;
+    rows[rows.findIndex((r) => r[0] === "claude-code:sh")] = row("sh", "plans/h.md", "plans/h.md", 1, 3);
+    expect(pickUpRows(fx.work, fx.pages, fx.pages, INERT, cardsAt(fx)).slice(0, 2).map((r) => r.page.relPath)).toEqual(["plans/h.md", "plans/k.md"]);
+    // Reversed collection order: the same answer.
+    fx.work.evidence!.contributions.rows = [...rows].reverse();
+    expect(pickUpRows(fx.work, fx.pages, fx.pages, INERT, cardsAt(fx)).slice(0, 2).map((r) => r.page.relPath)).toEqual(["plans/h.md", "plans/k.md"]);
   });
   test("a cut thread's page falls back to its page-level focus time", () => {
     const fx = fixture();
@@ -304,6 +339,13 @@ describe("the strip's rows (D2, D11, D12)", () => {
     const cut = pickUpRows(fx.work, fx.pages, fx.pages.filter((p) => !["plans/k.md", "plans/h.md"].includes(p.relPath)), INERT, cardsAt(fx));
     const c = cut.find((r) => r.page.relPath === "plans/c.md")!;
     expect([c.source, c.low]).toEqual(["page", true]);
+  });
+  test("a low row's hover says the counts may be low; an exact row's does not", () => {
+    const low = fixture({ truncated: true });
+    const html = pickUpStripHtml(pickUpRows(low.work, low.pages, low.pages, INERT, cardsAt(low)), NOW);
+    expect(html).toContain(`\n6+ edits · 1+ sessions · in T plans/k.md (counts may be low)\nShow it in`);
+    const fx = fixture();
+    expect(pickUpStripHtml(pickUpRows(fx.work, fx.pages, fx.pages, INERT, cardsAt(fx)), NOW)).not.toContain("counts may be low");
   });
   test("untruncated, a page-level row is low only when it holds the full WORK_FOCUS_EVENTS_MAX focus events", () => {
     const fx = fixture();
