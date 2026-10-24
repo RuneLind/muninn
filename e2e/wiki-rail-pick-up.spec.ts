@@ -439,6 +439,21 @@ test.describe("Wiki rail: Pick up", () => {
     expect(forced.outlineWidth).toBeGreaterThanOrEqual(2);
     expect(visible(forced.outlineColor), forced.outlineColor).toBe(true);
     expect(forced.outlineColor).not.toBe(forced.background);
+    // The system Highlight colour, resolved on a body probe the same way, and
+    // CanvasText beside it to prove the two differ in this browser.
+    const system = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      document.body.append(probe);
+      const at = (c: string) => {
+        probe.style.outline = `2px solid ${c}`;
+        return getComputedStyle(probe).outlineColor;
+      };
+      const out = { highlight: at("Highlight"), canvasText: at("CanvasText") };
+      probe.remove();
+      return out;
+    });
+    expect(system.highlight, "Highlight and CanvasText differ here").not.toBe(system.canvasText);
+    expect(forced.outlineColor, "the forced-colours outline is the system Highlight").toBe(system.highlight);
   });
 
   test("a live refresh that pushes the focused row out of the five moves focus to the strip's first row", async ({ page }) => {

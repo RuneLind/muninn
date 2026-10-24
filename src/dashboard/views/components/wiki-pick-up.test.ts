@@ -240,7 +240,7 @@ describe("the age chip (D5)", () => {
     // so the first card is sk's: its one row on k.md, 1h.
     expect(byS.map((c) => [c.name, ago(c.ageMs)])).toContainEqual(["title sk", 1]);
   });
-  test("a Sessions-stop card that owns no focus page still carries one: its session's newest row on any page it worked", () => {
+  test("a Sessions-stop card that owns no focus page still carries one: its session's newest row on its owned and `also in:` pages", () => {
     const whole = fixture();
     whole.work.evidence!.contributions = { complete: true, reasons: [], cut: [], rows: whole.work.evidence!.contributions.rows };
     const cards = openWorkCards(whole.work, whole.pages, INERT, [], null, NOW, whole.pages, { stop: "sessions", evidence: ALL }).cards as RailThreadCard[];
@@ -263,6 +263,20 @@ describe("the age chip (D5)", () => {
     expect(d2.focus.map((p) => p.relPath)).toEqual(["notes/d2.md"]);
     expect(sd2.ageMs).toBe(d2.ageMs!);
     expect(cards.every((c) => c.ageMs !== undefined)).toBe(true);
+  });
+  test("a Sessions-stop card's chip reads its session's unfiltered pages: a facet that hides one does not move it", () => {
+    const whole = fixture();
+    // sk also focuses d2 at 0.5h, newer than sd2's 8.5h row, so sk owns d2 too.
+    whole.work.evidence!.contributions = { complete: true, reasons: [], cut: [], rows: [...whole.work.evidence!.contributions.rows, row("sk", "notes/d2.md", "plans/k.md", 0.5, 2)] };
+    const at = (filters: WikiFilters) =>
+      (openWorkCards(whole.work, whole.pages, filters, [], null, NOW, whole.pages, { stop: "sessions", evidence: ALL }).cards as RailThreadCard[]).find((c) => c.name === "title sk")!;
+    const all = at(INERT);
+    expect(all.focus.map((p) => p.relPath).sort()).toEqual(["notes/d2.md", "plans/k.md"]);
+    expect(ago(all.ageMs)).toBe(0.5);
+    // Under `plans`, d2 is not drawn, yet the chip still reads its 0.5h row.
+    const plans = at({ ...INERT, folder: "plans" });
+    expect(plans.focus.map((p) => p.relPath)).toEqual(["plans/k.md"]);
+    expect(ago(plans.ageMs)).toBe(0.5);
   });
 });
 
