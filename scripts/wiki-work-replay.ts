@@ -117,7 +117,7 @@ import {
   type WikiListing,
 } from "../src/dashboard/views/components/wiki-filter.ts";
 import { buildRail, isRailGroupCard, type RailInput } from "../src/dashboard/views/components/wiki-recents.ts";
-import { railGhostNote, threadAgeLabel, threadGroupTally, threadInstantLabel, threadMetaLine } from "../src/dashboard/views/components/wiki-thread-view.ts";
+import { railGhostNote, threadInstantLabel, threadMetaLine } from "../src/dashboard/views/components/wiki-thread-view.ts";
 import { formatRailAge } from "../src/dashboard/views/components/wiki-activity-rank.ts";
 import { pickUpMetaLine } from "../src/dashboard/views/components/wiki-pick-up.ts";
 import { groupWorkThreads, type WorkWitness } from "../src/dashboard/views/components/wiki-work-groups.ts";
@@ -220,8 +220,7 @@ function printGroupedRail(index: WikiIndex, listing: WikiListing[], at: number):
   for (const e of built.entries.filter((x) => x.section === "threads")) {
     if (e.kind === "thread-group") {
       const c = e.card;
-      const age = threadAgeLabel(c, at);
-      console.log(`  ${e.folded ? "▸" : "▾"} ${c.label.toUpperCase()} ${c.name}${c.pinned ? "  📌" : ""}  — ${threadGroupTally(c, true)}${age ? ` · ${age}` : ""}${c.anchorVisible ? "" : "  (anchor outside the filters)"}`);
+      console.log(`  ${e.folded ? "▸" : "▾"} ${c.label.toUpperCase()} ${c.name}${c.pinned ? "  📌" : ""}  — ${threadMetaLine(c, at, true)}${c.anchorVisible ? "" : "  (anchor outside the filters)"}`);
     } else if (e.kind === "thread") {
       const c = e.card;
       const pad = c.child ? "      " : "  ";

@@ -80,10 +80,11 @@ export function threadAgeLabel(card: Pick<RailThreadCard, "ageMs">, now: number)
 }
 
 /** The meta as one plain line in the header's order (D14): `N sessions ·
- *  ✋ M · since <first> · <age>` — the replay script's form; the card draws
- *  the tally over `since <first>` and the age chip. */
-export function threadMetaLine(card: RailThreadCard, now: number, showMoves: boolean): string {
-  const { counts, moves } = threadTallyParts(card, showMoves);
+ *  ✋ M · since <first> · <age>`, a group's `N threads · M sessions · ✋ K ·
+ *  since <first> · <age>` — the replay script's form; the card draws the
+ *  tally over `since <first>` and the age chip. */
+export function threadMetaLine(card: RailWorkCard, now: number, showMoves: boolean): string {
+  const { counts, moves } = isRailGroupCard(card) ? threadGroupTallyParts(card, showMoves) : threadTallyParts(card, showMoves);
   const { from } = threadSpanEnds(card, now, true);
   return [...counts, moves, from && `since ${from}`, threadAgeLabel(card, now)].filter(Boolean).join(" · ");
 }

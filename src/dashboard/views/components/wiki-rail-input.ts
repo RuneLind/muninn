@@ -445,8 +445,10 @@ export function openWorkCards(
         score: 0,
         session: { ref: sc.ref },
         alsoIn,
-        // D5 on a Sessions-stop card: its one session's rows on the pages it owns.
-        ...ageField(workCardAgeMs(ages, [sc.threadKey], [sc], sc.rows.map((p) => p.relPath))),
+        // D5 on a Sessions-stop card: its one session's newest row, focus or
+        // touch, on any page the card names (owned, `also in:`, touched), so a
+        // card owning no page still has one.
+        ...ageField(workCardAgeMs(ages, [sc.threadKey], [sc], [...sc.rows, ...sc.alsoIn, ...sc.touched].map((p) => p.relPath))),
       }));
     return { cards, control };
   }

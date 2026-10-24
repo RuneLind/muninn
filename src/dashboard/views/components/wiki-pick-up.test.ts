@@ -14,7 +14,7 @@ import { PICK_UP_FOLD_KEY, pickUpMetaLine, pickUpRows, pickUpStep, pickUpTarget,
 import { DEFAULT_ACTIVITY_WEIGHTS } from "./wiki-activity-rank.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupSplit } from "./wiki-work-group-prefs.ts";
-import { WORK_EVIDENCE_VERSION, type IndexWork, type WorkContribution, type WorkEvent, type WorkThread } from "../../../wiki/work-focus.ts";
+import { WORK_EVIDENCE_VERSION, WORK_FOCUS_EVENTS_MAX, type IndexWork, type WorkContribution, type WorkEvent, type WorkThread } from "../../../wiki/work-focus.ts";
 
 const NOW = Date.UTC(2026, 9, 24, 7, 5);
 const H = 3_600_000;
@@ -214,6 +214,21 @@ describe("the age chip (D5)", () => {
     // so the first card is sk's: its one row on k.md, 1h.
     expect(byS.map((c) => [c.name, ago(c.ageMs)])).toContainEqual(["title sk", 1]);
   });
+  test("a Sessions-stop card that owns no focus page still carries one: its session's newest row on any page it worked", () => {
+    const whole = fixture();
+    whole.work.evidence!.contributions = { complete: true, reasons: [], cut: [], rows: whole.work.evidence!.contributions.rows };
+    const cards = openWorkCards(whole.work, whole.pages, INERT, [], null, NOW, whole.pages, { stop: "sessions", evidence: ALL }).cards as RailThreadCard[];
+    const named = (n: string) => cards.find((c) => c.name === n);
+    // sa2 and sa1 both focus a.md: the newer, sa2, owns it; sa1 links it on `also in:`.
+    const sa1 = named("title sa1")!;
+    expect([sa1.focus.length, sa1.alsoIn?.map((p) => p.relPath)]).toEqual([0, ["plans/a.md"]]);
+    expect(ago(sa1.ageMs)).toBe(5);
+    expect(ago(named("title sa2")!.ageMs)).toBe(4);
+    // A touched page counts: sd2 owns d2 (its focus row 8.5h) and touched d.md at 2.5h.
+    expect(named("title sd2")!.touched.map((p) => p.relPath)).toContain("notes/d.md");
+    expect(ago(named("title sd2")!.ageMs)).toBe(2.5);
+    expect(cards.every((c) => c.ageMs !== undefined)).toBe(true);
+  });
 });
 
 describe("the strip's rows (D2, D11, D12)", () => {
@@ -264,6 +279,23 @@ describe("the strip's rows (D2, D11, D12)", () => {
     expect(rows.map((r) => ago(r.atMs))).toEqual([1, 2, 3, 4, 6]);
     expect(rows.filter((r) => r.source === "rows").every((r) => r.low)).toBe(true);
     expect(pickUpMetaLine(rows[0]!)).toBe("6+ edits · 1+ sessions · in T plans/k.md");
+    // The page-level fallback too: a page in no thread (z) and a cut thread's (c).
+    expect(rows.every((r) => r.low)).toBe(true);
+    expect(rows.find((r) => r.page.relPath === "plans/z.md")!.source).toBe("page");
+    expect(pickUpMetaLine(rows.find((r) => r.page.relPath === "plans/z.md")!)).toBe("2+ edits · 1+ sessions · not in Work threads");
+    const cut = pickUpRows(fx.work, fx.pages, fx.pages.filter((p) => !["plans/k.md", "plans/h.md"].includes(p.relPath)), INERT, cardsAt(fx));
+    const c = cut.find((r) => r.page.relPath === "plans/c.md")!;
+    expect([c.source, c.low]).toEqual(["page", true]);
+  });
+  test("untruncated, a page-level row is low only when it holds the full WORK_FOCUS_EVENTS_MAX focus events", () => {
+    const fx = fixture();
+    const z = fx.pages.find((p) => p.relPath === "plans/z.md")!;
+    const at = (n: number) => {
+      z.work!.events = Array.from({ length: n }, (_, i) => [NOW - (3 + i) * H, 1, "focus"] as WorkEvent);
+      return pickUpRows(fx.work, fx.pages, fx.pages, INERT, cardsAt(fx)).find((r) => r.page.relPath === "plans/z.md")!;
+    };
+    expect([at(WORK_FOCUS_EVENTS_MAX - 1).source, at(WORK_FOCUS_EVENTS_MAX - 1).low]).toEqual(["page", false]);
+    expect(at(WORK_FOCUS_EVENTS_MAX).low).toBe(true);
   });
   test("the same pool and facets as the cards; none while a query is active", () => {
     const fx = fixture();

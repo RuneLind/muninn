@@ -208,7 +208,7 @@ export function pickUpRows(
       edits: focus.reduce((n, e) => n + e[1], 0),
       sessions: new Set(),
       count: focus.length,
-      low: focus.length >= WORK_FOCUS_EVENTS_MAX,
+      low: src.truncated || focus.length >= WORK_FOCUS_EVENTS_MAX,
       source: "page",
     });
   }
