@@ -1128,10 +1128,12 @@ test.describe("Wiki rail: grouped work threads", () => {
         const at = `${font} ${p.rail}/${p.scheme}${forced ? "/forced" : ""} [${m.id}]`;
         for (const issue of m.fit.issues) failures.push(`${at}: ${issue}`);
         // Tally and span: one line each at 260 and 300; two below.
+        // The span line holds three parts since D14 (`since`, the date and
+        // the age chip), so at 200 px it may take 3 lines; every other line 2.
         const maxLines = p.rail >= 260 ? 1 : 2;
         for (const l of m.fit.lines) {
           if (l.cls.includes("wiki-thread-why")) continue;
-          if (l.lines > maxLines) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
+          if (l.lines > (l.cls.includes("wiki-thread-span") && p.rail < 260 ? 3 : maxLines)) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
         }
         // A part never breaks inside itself (the chip may, past the line).
         // At 260 and 300 the also chip (its label cut to 24 characters) is one line too.
