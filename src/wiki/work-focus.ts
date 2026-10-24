@@ -11,7 +11,9 @@
  * The rules, in the order they run (plan `muninn-wiki-work-threads`, «Design»):
  *  1. fork dedupe (D23) — a row identical in path, firstMs, lastMs and edits to
  *     one already counted is dropped;
- *  2. roll-up (D3) — a written file that is not a page counts at half weight
+ *  2. roll-up (D3) — a rail attachment (`pairedBy` `stem`, `suffix` or `link`)
+ *     is part of its parent's family and counts at full weight toward it
+ *     (pick-up D1); a written file that is not a page counts at half weight
  *     toward the page that reads it (`csv=`/`sql=`/`src=`), else toward a page
  *     in an ancestor folder whose stem (or undated stem) names a folder on the
  *     file's path; a page keeps its old path's rows through a path-shaped alias;
@@ -20,9 +22,20 @@
  *     names, judged here against the page set and the registry;
  *  5. passes (D4) — a `bulk` or `elsewhere` session's events are weight-0
  *     markers;
- *  6. focus (D2) — named, created, or busy (≥3 edits and ≥ half the session's
- *     busiest page); every other write is a touch;
+ *  6. focus (D2) — named, created (the session wrote the first row of a
+ *     family member born in the window), or busy (≥3 edits and ≥ half the
+ *     session's busiest page); every other write is a touch. Then the weak-link rule
+ *     (pick-up D1/D10, `demoteWeakLinks`): beside a strong non-hub focus
+ *     family (≥ 2 weighted edits, or created), a non-hub focus family under 2
+ *     weighted edits that the session did not create is a touch; when every
+ *     non-hub focus family is weak, the strongest stays focus (most edits,
+ *     then earliest event, then relPath) and the rest are touches;
  *  7. threads (D6) — non-pass sessions joined by a shared non-hub focus page.
+ *
+ * A family's events, threads and contributions name the parent. Each
+ * attachment also gets a `PageWork` of its own rows, at the kind its family
+ * had in each session, so a client reading the child alone sees the family's
+ * classification.
  */
 
 import { isMetaStem } from "../dashboard/views/components/wiki-filter.ts";
@@ -194,13 +207,27 @@ export const WORK_TITLE_MAX = 140;
 /** The created rule's commit-lag allowance. */
 export const WORK_CREATED_SLACK_MS = 10 * 60_000;
 const BUSY_MIN_EDITS = 3;
+/** The weak-link bar (pick-up D1): a focus family under this many weighted
+ *  edits, not created by the session, is a weak link. */
+const STRONG_MIN_EDITS = 2;
 const ATTACHMENT_WEIGHT = 0.5;
+/** The pairings that make a family; `superseded` keeps two pages. */
+const FAMILY_PAIRINGS: ReadonlySet<WorkPairedBy> = new Set(["stem", "suffix", "link"]);
 const KIND_WEIGHT: Record<WorkEventKind, number> = { focus: 1, touch: 0.15, pass: 0 };
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
 
+/** `WikiPageMeta.pairedBy`'s values (`store.ts` `PairedBy`). */
+export type WorkPairedBy = "stem" | "suffix" | "link" | "superseded";
+
 export interface WorkPageInput {
   relPath: string;
+  /** The rail attachment parent (`WikiPageMeta.parent`). With `pairedBy`
+   *  `stem`, `suffix` or `link` this page is part of the parent's family: its
+   *  rows count toward the parent at full weight and it carries no `work` of
+   *  its own. A `superseded` pair stays two pages. */
+  parent?: string;
+  pairedBy?: WorkPairedBy;
   /** `gitCreatedMs` and `birthtimeMs` — the created rule's anchor is their
    *  minimum, and with neither the rule does not apply. */
   gitCreatedMs?: number;
@@ -229,6 +256,8 @@ export interface WorkFocusInput {
 }
 
 export interface WorkFocusResult {
+  /** relPath → work: each family under its parent, and each attachment with
+   *  its own rows at the family's kind per session. */
   pages: Map<string, PageWork>;
   threads: WorkThread[];
   /** Threads before the {@link WORK_THREADS_MAX} cut. */
@@ -236,6 +265,8 @@ export interface WorkFocusResult {
   /** Every non-pass event of a shipped thread's sessions, in thread order —
    *  a projection that changes neither `pages` nor `threads`. */
   contributions: WorkContribution[];
+  /** Session × family pairs the weak-link rule turned from focus into touch. */
+  weakLinks: number;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -282,18 +313,35 @@ interface PageRec {
   relPath: string;
   key: string;
   hub: boolean;
-  createdAnchor?: number;
+  /** The family's pre-touch position (parent and attachments). */
   preMs?: number;
 }
 
-/** One session's work on one page, after roll-up. */
-interface Contribution {
-  page: PageRec;
+/** One page of a family (the parent or an attachment), as the created rule
+ *  and the attachment's own `PageWork` read it. */
+interface MemberRec {
+  relPath: string;
+  family: PageRec;
+  /** True for an attachment, false for the parent itself. */
+  child: boolean;
+  createdAnchor?: number;
+  /** This page's own pre-touch position. */
+  preMs?: number;
+}
+
+interface Span {
   edits: number;
   firstMs: number;
   lastMs: number;
-  /** Earliest `firstMs` of the page's OWN rows (not attachments). */
-  ownFirstMs?: number;
+}
+
+/** One session's work on one page, after roll-up. */
+interface Contribution extends Span {
+  page: PageRec;
+  /** Earliest `firstMs` of each member's own rows (path or alias). */
+  memberFirst: Map<MemberRec, number>;
+  /** An attachment's own rows in this session. */
+  childRows: Map<MemberRec, Span>;
 }
 
 interface SessionEvent {
@@ -323,49 +371,92 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   const liveKeys = new Set(sorted.map((p) => workPathKey(p.relPath)));
   const aliasesOf = (p: WorkPageInput): string[] =>
     [...new Set((p.aliasPaths ?? []).map(workPathKey))].filter((a) => !liveKeys.has(a));
-  const byKey = new Map<string, PageRec>();
+  const preOf = (p: WorkPageInput): number | undefined =>
+    maxDefined([pre.get(workPathKey(p.relPath)), ...aliasesOf(p).map((a) => pre.get(a)), p.preGitMs]);
   const metaKeys = new Set<string>();
+  for (const p of sorted) if (isMetaStem(stemOf(p.relPath))) metaKeys.add(workPathKey(p.relPath));
+  // Families (pick-up D1): an attachment whose parent is a page of its own here
+  // folds into that parent. Pairing is one level deep, so a parent is never a
+  // child; a meta-stemmed page stays out of every family.
+  const inputByKey = new Map(sorted.map((p) => [workPathKey(p.relPath), p] as const));
+  const pairedParent = (p: WorkPageInput): string | undefined =>
+    p.parent && p.pairedBy && FAMILY_PAIRINGS.has(p.pairedBy) ? workPathKey(p.parent) : undefined;
+  const parentKeyOf = (p: WorkPageInput): string | undefined => {
+    const k = pairedParent(p);
+    if (k === undefined || metaKeys.has(k)) return undefined;
+    const parent = inputByKey.get(k);
+    return parent && pairedParent(parent) === undefined ? k : undefined;
+  };
+  const byKey = new Map<string, PageRec>();
   const recs: PageRec[] = [];
+  const selfMember = new Map<PageRec, MemberRec>();
+  const memberOf = (p: WorkPageInput, family: PageRec, child: boolean): MemberRec => {
+    const anchors = [p.gitCreatedMs, p.birthtimeMs].filter((v): v is number => typeof v === "number" && v > 0);
+    const preMs = preOf(p);
+    return {
+      relPath: p.relPath,
+      family,
+      child,
+      ...(anchors.length ? { createdAnchor: Math.min(...anchors) } : {}),
+      ...(preMs !== undefined ? { preMs } : {}),
+    };
+  };
   for (const p of sorted) {
     const key = workPathKey(p.relPath);
-    if (isMetaStem(stemOf(p.relPath))) {
-      metaKeys.add(key);
-      continue;
-    }
-    const anchors = [p.gitCreatedMs, p.birthtimeMs].filter((v): v is number => typeof v === "number" && v > 0);
-    const rec: PageRec = {
-      relPath: p.relPath,
-      key,
-      hub: isWorkHub(p.backlinks),
-      ...(anchors.length ? { createdAnchor: Math.min(...anchors) } : {}),
-    };
-    const preLedger = maxDefined([pre.get(key), ...aliasesOf(p).map((a) => pre.get(a))]);
-    const preMs = maxDefined([preLedger, p.preGitMs]);
+    if (metaKeys.has(key) || parentKeyOf(p) !== undefined) continue;
+    const rec: PageRec = { relPath: p.relPath, key, hub: isWorkHub(p.backlinks) };
+    const preMs = preOf(p);
     if (preMs !== undefined) rec.preMs = preMs;
     byKey.set(key, rec);
     recs.push(rec);
+    selfMember.set(rec, memberOf(p, rec, false));
+  }
+  /** The family a non-meta page belongs to: its own rec, or its parent's. */
+  const familyOf = (p: WorkPageInput): PageRec | undefined => {
+    const key = workPathKey(p.relPath);
+    if (metaKeys.has(key)) return undefined;
+    return byKey.get(parentKeyOf(p) ?? key);
+  };
+  // An attachment's own path and its aliases count toward its parent at full
+  // weight, as that attachment's own rows.
+  const memberOwner = new Map<string, MemberRec>();
+  const members: { p: WorkPageInput; rec: PageRec; member: MemberRec }[] = [];
+  for (const p of sorted) {
+    if (parentKeyOf(p) === undefined) continue;
+    const rec = familyOf(p)!;
+    const member = memberOf(p, rec, true);
+    members.push({ p, rec, member });
+    memberOwner.set(workPathKey(p.relPath), member);
+    if (member.preMs !== undefined && (rec.preMs === undefined || member.preMs > rec.preMs)) rec.preMs = member.preMs;
   }
   const aliasOwner = new Map<string, PageRec>();
-  sorted.forEach((p) => {
-    const rec = byKey.get(workPathKey(p.relPath));
-    if (!rec) return;
-    for (const a of aliasesOf(p)) if (!aliasOwner.has(a)) aliasOwner.set(a, rec);
-  });
-  const refOwner = new Map<string, PageRec>();
   for (const p of sorted) {
     const rec = byKey.get(workPathKey(p.relPath));
+    if (!rec) continue;
+    for (const a of aliasesOf(p)) if (!aliasOwner.has(a)) aliasOwner.set(a, rec);
+  }
+  for (const { p, member } of members) {
+    for (const a of aliasesOf(p)) if (!aliasOwner.has(a) && !memberOwner.has(a)) memberOwner.set(a, member);
+  }
+  const refOwner = new Map<string, PageRec>();
+  for (const p of sorted) {
+    const rec = familyOf(p);
     if (!rec) continue;
     for (const r of p.refs ?? []) {
       const k = workPathKey(r);
       if (!refOwner.has(k)) refOwner.set(k, rec);
     }
   }
-  // folder → (folder-name candidate → first page in that folder naming it).
+  // folder → (folder-name candidate → the family of the first page in that
+  // folder naming it).
   const folderStems = new Map<string, Map<string, PageRec>>();
-  for (const rec of recs) {
-    const slash = rec.key.lastIndexOf("/");
-    const dir = slash === -1 ? "" : rec.key.slice(0, slash);
-    const stem = stemOf(rec.key);
+  for (const p of sorted) {
+    const rec = familyOf(p);
+    if (!rec) continue;
+    const key = workPathKey(p.relPath);
+    const slash = key.lastIndexOf("/");
+    const dir = slash === -1 ? "" : key.slice(0, slash);
+    const stem = stemOf(key);
     const m = folderStems.get(dir) ?? new Map<string, PageRec>();
     for (const name of [stem, stem.replace(DATE_PREFIX_RE, "")]) if (name && !m.has(name)) m.set(name, rec);
     folderStems.set(dir, m);
@@ -381,12 +472,16 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
     }
     return undefined;
   };
-  const ownerOf = (key: string): { rec: PageRec; own: boolean } | undefined => {
+  /** Who a written path counts toward, at what weight, and which family
+   *  member's own row it is (none for a ref or folder file). */
+  const ownerOf = (key: string): { rec: PageRec; weight: number; member?: MemberRec } | undefined => {
     if (metaKeys.has(key)) return undefined;
     const direct = byKey.get(key) ?? aliasOwner.get(key);
-    if (direct) return { rec: direct, own: true };
+    if (direct) return { rec: direct, weight: 1, member: selfMember.get(direct)! };
+    const member = memberOwner.get(key);
+    if (member) return { rec: member.family, weight: 1, member };
     const rolled = refOwner.get(key) ?? folderOwner(key);
-    return rolled ? { rec: rolled, own: false } : undefined;
+    return rolled ? { rec: rolled, weight: ATTACHMENT_WEIGHT } : undefined;
   };
 
   // The named vocabulary (D18): unique file names, with and without the date
@@ -396,8 +491,12 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
     const prev = nameCount.get(name);
     nameCount.set(name, prev === undefined ? rec : prev === rec ? rec : null);
   };
-  for (const rec of recs) {
-    const base = rec.key.split("/").pop()!;
+  const nameOwners: [key: string, rec: PageRec][] = [
+    ...recs.map((r): [string, PageRec] => [r.key, r]),
+    ...members.map(({ p, rec }): [string, PageRec] => [workPathKey(p.relPath), rec]),
+  ];
+  for (const [key, rec] of nameOwners) {
+    const base = key.split("/").pop()!;
     addName(base, rec);
     const undated = base.replace(DATE_PREFIX_RE, "");
     if (undated !== base) addName(undated, rec);
@@ -407,7 +506,7 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   const wikiNames = new Set((input.identity.names ?? []).map((n) => n.toLowerCase()));
   const pageByToken = (token: string): PageRec | undefined => {
     const k = workPathKey(token);
-    return byKey.get(k) ?? aliasOwner.get(k);
+    return byKey.get(k) ?? aliasOwner.get(k) ?? memberOwner.get(k)?.family;
   };
   const namedBy = (s: WorkSession): Set<PageRec> => {
     const out = new Set<PageRec>();
@@ -451,7 +550,7 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   const sessions = [...input.sessions].sort((a, b) => a.first - b.first || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const seenRows = new Set<string>();
   const perSession: { s: WorkSession; contribs: Contribution[] }[] = [];
-  const earliestOwn = new Map<PageRec, number>();
+  const earliestOwn = new Map<MemberRec, number>();
   for (const s of sessions) {
     const contribs = new Map<PageRec, Contribution>();
     for (const f of s.files) {
@@ -462,44 +561,63 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
       seenRows.add(rowKey);
       const owner = ownerOf(key);
       if (!owner) continue;
-      const c = contribs.get(owner.rec) ?? { page: owner.rec, edits: 0, firstMs: f.firstMs, lastMs: f.lastMs };
-      c.edits += owner.own ? f.edits : f.edits * ATTACHMENT_WEIGHT;
+      const c = contribs.get(owner.rec) ?? {
+        page: owner.rec,
+        edits: 0,
+        firstMs: f.firstMs,
+        lastMs: f.lastMs,
+        memberFirst: new Map(),
+        childRows: new Map(),
+      };
+      c.edits += f.edits * owner.weight;
       c.firstMs = Math.min(c.firstMs, f.firstMs);
       c.lastMs = Math.max(c.lastMs, f.lastMs);
-      if (owner.own) {
-        c.ownFirstMs = Math.min(c.ownFirstMs ?? f.firstMs, f.firstMs);
-        const e = earliestOwn.get(owner.rec);
-        if (e === undefined || f.firstMs < e) earliestOwn.set(owner.rec, f.firstMs);
+      const m = owner.member;
+      if (m) {
+        c.memberFirst.set(m, Math.min(c.memberFirst.get(m) ?? f.firstMs, f.firstMs));
+        const e = earliestOwn.get(m);
+        if (e === undefined || f.firstMs < e) earliestOwn.set(m, f.firstMs);
+        if (m.child) {
+          const row = c.childRows.get(m) ?? { edits: 0, firstMs: f.firstMs, lastMs: f.lastMs };
+          row.edits += f.edits;
+          row.firstMs = Math.min(row.firstMs, f.firstMs);
+          row.lastMs = Math.max(row.lastMs, f.lastMs);
+          c.childRows.set(m, row);
+        }
       }
       contribs.set(owner.rec, c);
     }
     if (contribs.size) perSession.push({ s, contribs: [...contribs.values()] });
   }
 
-  // 4–6: named, passes, focus.
+  // 4–6: named, passes, focus, then the weak-link rule.
   const events: SessionEvent[] = [];
+  /** Each attachment's own rows at its family's kind in that session. */
+  const childEvents = new Map<MemberRec, (Span & { kind: WorkEventKind })[]>();
+  /** A member page born in the window whose first own row this session wrote
+   *  (a page with a pre-touch position existed before the window, whatever git
+   *  dates its creation: a rename-and-rewrite defeats rename detection). */
+  const createdBy = (m: MemberRec, first: number): boolean =>
+    m.createdAnchor !== undefined &&
+    m.preMs === undefined &&
+    m.createdAnchor >= sinceMs &&
+    first === earliestOwn.get(m) &&
+    first <= m.createdAnchor + WORK_CREATED_SLACK_MS;
+  let weakLinks = 0;
   for (const { s, contribs } of perSession) {
     const named = namedBy(s);
     const pass = s.bulk || isElsewhere(s, named);
     const busiest = Math.max(...contribs.map((c) => c.edits));
-    for (const c of contribs) {
-      let kind: WorkEventKind;
-      if (pass) kind = "pass";
-      else {
-        const anchor = c.page.createdAnchor;
-        // A page with a pre-touch position existed before the window, whatever
-        // git dates its creation (a rename-and-rewrite defeats rename detection).
-        const created =
-          anchor !== undefined &&
-          c.page.preMs === undefined &&
-          anchor >= sinceMs &&
-          c.ownFirstMs !== undefined &&
-          c.ownFirstMs === earliestOwn.get(c.page) &&
-          c.ownFirstMs <= anchor + WORK_CREATED_SLACK_MS;
-        const busy = c.edits >= BUSY_MIN_EDITS && c.edits * 2 >= busiest;
-        kind = named.has(c.page) || created || busy ? "focus" : "touch";
-      }
+    const classed: ClassedContribution[] = contribs.map((c) => {
+      if (pass) return { c, kind: "pass", created: false };
+      const created = [...c.memberFirst].some(([m, first]) => createdBy(m, first));
+      const busy = c.edits >= BUSY_MIN_EDITS && c.edits * 2 >= busiest;
+      return { c, kind: named.has(c.page) || created || busy ? "focus" : "touch", created };
+    });
+    weakLinks += demoteWeakLinks(classed);
+    for (const { c, kind } of classed) {
       events.push({ session: s, page: c.page, edits: c.edits, firstMs: c.firstMs, lastMs: c.lastMs, kind });
+      for (const [m, row] of c.childRows) childEvents.set(m, [...(childEvents.get(m) ?? []), { ...row, kind }]);
     }
   }
 
@@ -513,29 +631,11 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   const pages = new Map<string, PageWork>();
   const pageRaw = new Map<PageRec, number>();
   for (const [rec, list] of byPage) {
-    const desc = [...list].sort((a, b) => b.lastMs - a.lastMs);
-    const shipped: WorkEvent[] = [];
-    let focusN = 0;
-    let touch = false;
-    let pass = false;
-    for (const ev of desc) {
-      if (ev.kind === "focus" && focusN < WORK_FOCUS_EVENTS_MAX) focusN++;
-      else if (ev.kind === "touch" && !touch) touch = true;
-      else if (ev.kind === "pass" && !pass) pass = true;
-      else continue;
-      shipped.push([ev.lastMs, ev.edits, ev.kind]);
-    }
-    const focus = shipped.find((e) => e[2] === "focus");
-    const state: WorkState = focus ? "F" : rec.preMs !== undefined ? "T" : "T0";
-    pages.set(rec.relPath, {
-      sinceMs,
-      ...(rec.preMs !== undefined ? { preMs: rec.preMs } : {}),
-      state,
-      ...(focus ? { focusMs: focus[0] } : {}),
-      events: shipped,
-    });
-    pageRaw.set(rec, rawWork(shipped, asOfMs));
+    const w = pageWorkOf(list, rec.preMs, sinceMs);
+    pages.set(rec.relPath, w);
+    pageRaw.set(rec, rawWork(w.events, asOfMs));
   }
+  for (const [m, list] of childEvents) pages.set(m.relPath, pageWorkOf(list, m.preMs, sinceMs));
 
   const built = buildThreads(events, pageRaw, asOfMs);
   return {
@@ -543,7 +643,71 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
     threads: built.threads,
     candidates: built.candidates,
     contributions: projectContributions(events, built.kept),
+    weakLinks,
   };
+}
+
+/** One page's shipped events (newest first: at most 12 focus events, the
+ *  newest touch, the newest pass) and its state. */
+function pageWorkOf(list: readonly (Span & { kind: WorkEventKind })[], preMs: number | undefined, sinceMs: number): PageWork {
+  const desc = [...list].sort((a, b) => b.lastMs - a.lastMs);
+  const shipped: WorkEvent[] = [];
+  let focusN = 0;
+  let touch = false;
+  let pass = false;
+  for (const ev of desc) {
+    if (ev.kind === "focus" && focusN < WORK_FOCUS_EVENTS_MAX) focusN++;
+    else if (ev.kind === "touch" && !touch) touch = true;
+    else if (ev.kind === "pass" && !pass) pass = true;
+    else continue;
+    shipped.push([ev.lastMs, ev.edits, ev.kind]);
+  }
+  const focus = shipped.find((e) => e[2] === "focus");
+  const state: WorkState = focus ? "F" : preMs !== undefined ? "T" : "T0";
+  return {
+    sinceMs,
+    ...(preMs !== undefined ? { preMs } : {}),
+    state,
+    ...(focus ? { focusMs: focus[0] } : {}),
+    events: shipped,
+  };
+}
+
+interface ClassedContribution {
+  c: Contribution;
+  kind: WorkEventKind;
+  created: boolean;
+}
+
+/**
+ * The weak-link rule (plan `muninn-wiki-pick-up`, D1/D10), over one session's
+ * classified families, in place. Hubs are left out of the count and stay as
+ * they are (D16 owns them). Among the other focus families: one alone stays
+ * focus; beside a strong one (≥ {@link STRONG_MIN_EDITS} weighted edits, or
+ * created), a weak one is a touch; when all are weak, the strongest stays
+ * (most edits, then earliest event, then relPath). Returns the demotions.
+ */
+function demoteWeakLinks(classed: ClassedContribution[]): number {
+  const focus = classed.filter((x) => x.kind === "focus" && !x.c.page.hub);
+  if (focus.length < 2) return 0;
+  const strong = (x: ClassedContribution) => x.created || x.c.edits >= STRONG_MIN_EDITS;
+  const keep = focus.some(strong)
+    ? new Set(focus.filter(strong))
+    : new Set([
+        [...focus].sort(
+          (a, b) =>
+            b.c.edits - a.c.edits ||
+            a.c.firstMs - b.c.firstMs ||
+            (a.c.page.relPath < b.c.page.relPath ? -1 : a.c.page.relPath > b.c.page.relPath ? 1 : 0),
+        )[0]!,
+      ]);
+  let n = 0;
+  for (const x of focus) {
+    if (keep.has(x)) continue;
+    x.kind = "touch";
+    n++;
+  }
+  return n;
 }
 
 /** The `provider:id` a contribution names a session by: the ledger's
