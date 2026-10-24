@@ -19,6 +19,8 @@ import {
   type WorkSession,
   type WorkSessionFile,
 } from "./work-focus.ts";
+import { DEFAULT_ACTIVITY_WEIGHTS, rankActivity } from "../dashboard/views/components/wiki-activity-rank.ts";
+import { workedShownSignal, workedSortSignal, type WikiListing } from "../dashboard/views/components/wiki-filter.ts";
 
 const H = 3_600_000;
 const DAY = 24 * H;
@@ -661,7 +663,11 @@ describe("weak links and families (plan muninn-wiki-pick-up, D1/D10)", () => {
       ],
       pages,
     );
-    expect(r.pages.has("plans/x.html")).toBe(false);
+    // The child's own rows, at the family's kind in each session.
+    expect(r.pages.get("plans/x.html")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [4, "focus"],
+      [1, "focus"],
+    ]);
     expect(r.pages.get("plans/x.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([
       [4, "focus"],
       [2, "focus"],
@@ -713,4 +719,95 @@ describe("weak links and families (plan muninn-wiki-pick-up, D1/D10)", () => {
     const e = r.pages.get(relPath)!.events[0]!;
     return [e[1], e[2]];
   };
+});
+
+describe("family members carry the family's classification (pick-up D1, fix round 1)", () => {
+  const FAM = [
+    pg("plans/x.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+    pg("plans/x.html", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 70 * DAY, parent: "plans/x.mdx", pairedBy: "stem" }),
+    pg("p/big.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+  ];
+  const NOW = AS_OF + H;
+  /** The client's view: a listing row per page, carrying the server's `work`. */
+  const listing = (r: ReturnType<typeof run>, worked: Record<string, number>): WikiListing[] =>
+    FAM.map((p) => ({
+      relPath: p.relPath,
+      name: p.relPath.split("/").pop()!.replace(/\.[^.]+$/, ""),
+      title: p.relPath,
+      type: p.relPath.endsWith(".html") ? "explainer" : "plan",
+      addedMs: p.gitCreatedMs,
+      gitCreatedMs: p.gitCreatedMs,
+      updatedMs: worked[p.relPath],
+      gitUpdatedMs: worked[p.relPath],
+      workedMs: worked[p.relPath],
+      ...(p.parent ? { parent: p.parent, pairedBy: p.pairedBy } : {}),
+      ...(p.relPath === "plans/x.mdx" ? { children: ["plans/x.html"] } : {}),
+      ...(r.pages.get(p.relPath) ? { work: r.pages.get(p.relPath) } : {}),
+    })) as unknown as WikiListing[];
+  const activity = (r: ReturnType<typeof run>, worked: Record<string, number>) =>
+    rankActivity(listing(r, worked), DEFAULT_ACTIVITY_WEIGHTS, NOW, { open: true, candidates: 3, covered: 3, coverage: 1, asOfMs: AS_OF });
+  const childOf = (r: ReturnType<typeof run>) => listing(r, {}).find((p) => p.relPath === "plans/x.html")!;
+
+  test("a child written once beside a strong page is a touch: it carries a T work state and lifts neither itself nor its parent", () => {
+    const r = run([sess("a", [f("p/big.mdx", 9, T(5)), f("plans/x.html", 1, T(2))])], FAM);
+    expect(r.pages.get("plans/x.mdx")!.events.map((e) => e[2])).toEqual(["touch"]);
+    const child = r.pages.get("plans/x.html")!;
+    expect(child).toMatchObject({ state: "T", preMs: AS_OF - 70 * DAY });
+    expect(child.events.map((e) => [e[1], e[2]])).toEqual([[1, "touch"]]);
+    // Worked-on sorts the child at its pre-touch position, marked touched.
+    expect(workedSortSignal(childOf(r), NOW).ms).toBe(AS_OF - 70 * DAY);
+    expect(workedShownSignal(childOf(r), NOW).touched).toBeDefined();
+    // Activity: the parent's row is not lifted through the child's write.
+    const rows = activity(r, { "plans/x.mdx": AS_OF - 60 * DAY, "p/big.mdx": T(5) + 600_000, "plans/x.html": T(2) + 600_000 });
+    const parent = rows.find((row) => row.page.relPath === "plans/x.mdx");
+    expect(parent?.via).toBeUndefined();
+    expect(parent?.score ?? 0).toBeLessThan(0.2);
+  });
+
+  test("a child written by an elsewhere session is a pass: no parent row, no newer-child dot", () => {
+    const r = run([sess("e", [f("plans/x.html", 3, T(2))], { paths: ["/w/mimir/foo.md"] })], FAM);
+    expect(r.pages.get("plans/x.html")!.events.map((e) => [e[1], e[2]])).toEqual([[3, "pass"]]);
+    expect(workedSortSignal(childOf(r), NOW).ms).toBe(AS_OF - 70 * DAY);
+    const rows = activity(r, { "plans/x.mdx": AS_OF - 60 * DAY, "p/big.mdx": T(5) + 600_000, "plans/x.html": T(2) + 600_000 });
+    const parent = rows.find((row) => row.page.relPath === "plans/x.mdx");
+    expect(parent?.via).toBeUndefined();
+    expect(parent?.newerChildren).toBeUndefined();
+  });
+
+  test("a child in a focus family carries its own rows as focus", () => {
+    const r = run([sess("a", [f("plans/x.html", 6, T(2))])], FAM);
+    const child = r.pages.get("plans/x.html")!;
+    expect(child).toMatchObject({ state: "F", focusMs: T(2) + 10 * 60_000 });
+    expect(child.events.map((e) => [e[1], e[2]])).toEqual([[6, "focus"]]);
+    expect(workedSortSignal(childOf(r), NOW).ms).toBe(T(2) + 10 * 60_000);
+    // Threads and contributions still name only the parent.
+    expect(r.threads.map((t) => t.key)).toEqual(["plans/x.mdx"]);
+    expect(r.contributions.some((c) => c[1] === "plans/x.html")).toBe(false);
+  });
+
+  test("a session that creates only an attachment creates the family: focus, and it joins the plan's thread", () => {
+    const pages = [
+      pg("plans/x.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+      pg("plans/x-prototype.html", { gitCreatedMs: T(20), parent: "plans/x.mdx", pairedBy: "suffix" }),
+    ];
+    const sessions = [sess("a", [f("plans/x-prototype.html", 1, T(20) - 60_000)]), sess("b", [f("plans/x.mdx", 4, T(5))])];
+    const r = run(sessions, pages);
+    expect(r.pages.get("plans/x.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [4, "focus"],
+      [1, "focus"],
+    ]);
+    expect(r.threads.map((t) => [t.key, t.sessions.map((s) => s.id).sort()])).toEqual([["plans/x.mdx", ["a", "b"]]]);
+    // An attachment with pre-window rows was not created in the window.
+    const old = run(sessions, [pages[0]!, { ...pages[1]!, preGitMs: AS_OF - 30 * DAY }]);
+    expect(old.pages.get("plans/x.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [4, "focus"],
+      [1, "touch"],
+    ]);
+    // A later session's write is not the attachment's first, though inside the slack.
+    const later = run([...sessions, sess("c", [f("plans/x-prototype.html", 1, T(20) - 30_000)])], pages);
+    expect(later.pages.get("plans/x-prototype.html")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [1, "touch"],
+      [1, "focus"],
+    ]);
+  });
 });
