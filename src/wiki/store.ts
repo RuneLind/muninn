@@ -4135,6 +4135,7 @@ export async function buildWikiIndex(
         ...(pageRefs.has(meta.relPath) ? { refs: pageRefs.get(meta.relPath) } : {}),
         ...(aliasPaths.length ? { aliasPaths } : {}),
         ...(preGitMs !== undefined ? { preGitMs } : {}),
+        ...(meta.parent !== undefined && meta.pairedBy !== undefined ? { parent: meta.parent, pairedBy: meta.pairedBy } : {}),
       };
     });
     const result = computeWorkFocus({
@@ -4162,10 +4163,11 @@ export async function buildWikiIndex(
         pages,
       }),
     };
-    log.debug("wiki {root}: work facts — {pages} page(s), {threads} thread(s) in {ms} ms", {
+    log.debug("wiki {root}: work facts — {pages} page(s), {threads} thread(s), {weakLinks} weak link(s) in {ms} ms", {
       root,
       pages: result.pages.size,
       threads: result.threads.length,
+      weakLinks: result.weakLinks,
       ms: Math.round(performance.now() - started),
     });
   }
