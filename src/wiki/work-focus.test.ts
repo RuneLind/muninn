@@ -764,12 +764,56 @@ describe("family members carry the family's classification (pick-up D1, fix roun
     expect(parent?.score ?? 0).toBeLessThan(0.2);
   });
 
-  test("a child written by an elsewhere session is a pass: no parent row, no newer-child dot", () => {
-    const r = run([sess("e", [f("plans/x.html", 3, T(2))], { paths: ["/w/mimir/foo.md"] })], FAM);
+  test("a child written by an elsewhere session is a pass: the parent's own row is not lifted through it", () => {
+    // The parent has its own focus row (session b). A family child cannot be
+    // "newer" than its parent through its rows (the parent carries them at the
+    // family's lastMs); the superseded case below pins the pass rule.
+    const r = run([sess("b", [f("plans/x.mdx", 9, T(30))]), sess("e", [f("plans/x.html", 3, T(2))], { paths: ["/w/mimir/foo.md"] })], FAM);
     expect(r.pages.get("plans/x.html")!.events.map((e) => [e[1], e[2]])).toEqual([[3, "pass"]]);
     expect(workedSortSignal(childOf(r), NOW).ms).toBe(AS_OF - 70 * DAY);
-    const rows = activity(r, { "plans/x.mdx": AS_OF - 60 * DAY, "p/big.mdx": T(5) + 600_000, "plans/x.html": T(2) + 600_000 });
+    const rows = activity(r, { "plans/x.mdx": T(30) + 600_000, "p/big.mdx": AS_OF - 60 * DAY, "plans/x.html": T(2) + 600_000 });
     const parent = rows.find((row) => row.page.relPath === "plans/x.mdx");
+    expect(parent).toBeDefined();
+    expect(parent?.via).toBeUndefined();
+    expect(parent?.newerChildren).toBeUndefined();
+  });
+
+  test("a superseded page's elsewhere pass, newer than its successor's work, gives the successor no newer-child dot", () => {
+    // A superseded pair stays two pages with their own work, and Activity folds
+    // the old page under the new one: only the pass rule withholds the dot.
+    const pages = [
+      pg("plans/new.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+      pg("plans/old.mdx", { gitCreatedMs: AS_OF - 300 * DAY, preGitMs: AS_OF - 90 * DAY, parent: "plans/new.mdx", pairedBy: "superseded" }),
+    ];
+    const r = run(
+      [
+        sess("c", [f("plans/old.mdx", 3, T(40))]),
+        sess("b", [f("plans/new.mdx", 9, T(30))]),
+        sess("e", [f("plans/old.mdx", 3, T(2))], { paths: ["/w/mimir/foo.md"] }),
+      ],
+      pages,
+    );
+    expect(r.pages.get("plans/old.mdx")!.events.map((e) => [e[1], e[2]])).toEqual([
+      [3, "pass"],
+      [3, "focus"],
+    ]);
+    const worked: Record<string, number> = { "plans/new.mdx": T(30) + 600_000, "plans/old.mdx": T(2) + 600_000 };
+    const L = pages.map((p) => ({
+      relPath: p.relPath,
+      name: p.relPath.split("/").pop()!.replace(/\.[^.]+$/, ""),
+      title: p.relPath,
+      type: "plan",
+      addedMs: p.gitCreatedMs,
+      gitCreatedMs: p.gitCreatedMs,
+      updatedMs: worked[p.relPath],
+      gitUpdatedMs: worked[p.relPath],
+      workedMs: worked[p.relPath],
+      ...(p.parent ? { parent: p.parent, pairedBy: p.pairedBy } : { children: ["plans/old.mdx"] }),
+      work: r.pages.get(p.relPath),
+    })) as unknown as WikiListing[];
+    const rows = rankActivity(L, DEFAULT_ACTIVITY_WEIGHTS, NOW, { open: true, candidates: 2, covered: 2, coverage: 1, asOfMs: AS_OF });
+    const parent = rows.find((row) => row.page.relPath === "plans/new.mdx");
+    expect(parent).toBeDefined();
     expect(parent?.via).toBeUndefined();
     expect(parent?.newerChildren).toBeUndefined();
   });
@@ -783,6 +827,27 @@ describe("family members carry the family's classification (pick-up D1, fix roun
     // Threads and contributions still name only the parent.
     expect(r.threads.map((t) => t.key)).toEqual(["plans/x.mdx"]);
     expect(r.contributions.some((c) => c[1] === "plans/x.html")).toBe(false);
+  });
+
+  test("a child's own last write dates it, not the family's later write in the same session", () => {
+    // One session: the plan at 15:xx listed before the explainer at 09:xx.
+    const r = run([sess("a", [f("plans/x.mdx", 2, T(3)), f("plans/x.html", 2, T(9))])], FAM);
+    expect(r.pages.get("plans/x.mdx")).toMatchObject({ state: "F", focusMs: T(3) + 10 * 60_000 });
+    const child = r.pages.get("plans/x.html")!;
+    expect(child).toMatchObject({ state: "F", focusMs: T(9) + 10 * 60_000 });
+    expect(child.events).toEqual([[T(9) + 10 * 60_000, 2, "focus"]]);
+    expect(workedSortSignal(childOf(r), NOW).ms).toBe(T(9) + 10 * 60_000);
+  });
+
+  test("created is judged per member: an attachment's first writer is credited though another session wrote the plan earlier", () => {
+    const pages = [
+      pg("plans/x.mdx", { gitCreatedMs: AS_OF - 200 * DAY, preGitMs: AS_OF - 60 * DAY }),
+      pg("plans/x-prototype.html", { gitCreatedMs: T(20), parent: "plans/x.mdx", pairedBy: "suffix" }),
+    ];
+    // Day 1: session a edits the pre-existing plan. Day 2: session b creates the prototype.
+    const r = run([sess("a", [f("plans/x.mdx", 4, T(40))]), sess("b", [f("plans/x-prototype.html", 1, T(20) - 60_000)])], pages);
+    expect(r.pages.get("plans/x-prototype.html")!.events.map((e) => [e[1], e[2]])).toEqual([[1, "focus"]]);
+    expect(r.threads.map((t) => [t.key, t.sessions.map((s) => s.id).sort()])).toEqual([["plans/x.mdx", ["a", "b"]]]);
   });
 
   test("a session that creates only an attachment creates the family: focus, and it joins the plan's thread", () => {
