@@ -63,7 +63,9 @@ export function buildWorkEvidence(input: WorkEvidenceInput): WorkEvidence {
   // An attachment (rules 1–3, part of its page) counts in its markdown
   // parent's series, the page Save as series writes for it; its own `series:`
   // counts nowhere (the census skips it), and a retired (rule-4) child is its
-  // own page.
+  // own page. `computeWorkFocus` keys a family's threads by the parent, so no
+  // shipped focus page is a rules-1–3 child; this guards a caller whose
+  // threads name one.
   for (const rel of focus) {
     const p = byRel.get(rel);
     const fold = p?.parent && p.pairedBy !== "superseded" ? foldOf.get(p.parent) : undefined;
@@ -75,6 +77,12 @@ export function buildWorkEvidence(input: WorkEvidenceInput): WorkEvidence {
     if (project) projects[rel] = project;
   }
 
+  // A `related:` target that is a rail attachment (rules 1–3) names its
+  // family, whose focus page is the parent; a retired child is its own page.
+  const familyOf = (to: string): string => {
+    const p = byRel.get(to);
+    return p?.parent && p.pairedBy !== "superseded" ? p.parent : to;
+  };
   const related: [string, string][] = [];
   let skipped = 0;
   let ambiguous = 0;
@@ -83,7 +91,13 @@ export function buildWorkEvidence(input: WorkEvidenceInput): WorkEvidence {
     if (!page) continue;
     skipped += page.relatedSkipped ?? 0;
     ambiguous += page.relatedAmbiguous ?? 0;
-    for (const to of page.related ?? []) if (to !== rel && inFocus.has(to)) related.push([rel, to]);
+    const seen = new Set<string>();
+    for (const target of page.related ?? []) {
+      const to = familyOf(target);
+      if (to === rel || seen.has(to) || !inFocus.has(to)) continue;
+      seen.add(to);
+      related.push([rel, to]);
+    }
   }
 
   // Owners: the whole wiki, reserved and culled pages owning nothing (lint

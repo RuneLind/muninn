@@ -910,8 +910,8 @@ export function pageWorkBar(page: Pick<WikiListing, "work">, now: number): { lev
 /** The `why` clause naming a page's work: the sessions that focused on it and
  *  their edits, the touches, the passes, the instant a winning work term dates
  *  the row from (`workMs`, so the clause and the age cell agree), and the two
- *  numbers. Edits are weighted sums (an attachment counts at half weight),
- *  rounded, hence the "≈". */
+ *  numbers. Edits are weighted sums (a ref or folder file counts at half weight; a
+ *  rail attachment counts in full toward its parent), rounded, hence the "≈". */
 function workClause(events: readonly WorkEvent[], now: number, workMs: number, focused: boolean, raw: number, workTerm: number): string {
   const tally = { focus: [0, 0], touch: [0, 0], pass: [0, 0] } as Record<"focus" | "touch" | "pass", [number, number]>;
   for (const [, edits, kind] of events) {

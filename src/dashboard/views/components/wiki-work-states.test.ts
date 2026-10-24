@@ -182,7 +182,8 @@ const CASES: Case[] = [
   },
   {
     name: "F — late change wins: a hand edit landing four days after a small session",
-    fx: { rel: "f/late.md", createdH: 60 * 24, touchedH: 24, preGitH: 50 * 24, write: { edits: 1, h: 6 * 24, named: true } },
+    // 2 edits: the weak-link bar (pick-up D1) — a named 1-edit page beside busy.md is a touch.
+    fx: { rel: "f/late.md", createdH: 60 * 24, touchedH: 24, preGitH: 50 * 24, write: { edits: 2, h: 6 * 24, named: true } },
     state: "F", sortH: 6 * 24, shownH: 6 * 24, touched: false, term: "late", ageH: 24,
   },
   // ── T: only touches, with a pre-touch position ───────────────────────────

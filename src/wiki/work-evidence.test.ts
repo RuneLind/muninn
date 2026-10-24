@@ -69,6 +69,29 @@ describe("relations", () => {
     expect(e.relations.relatedSkipped).toEqual({ skipped: 2, ambiguous: 1 });
   });
 
+  test("related: a target that is a rail attachment counts as its parent's edge (focus holds only the parent); once per pair, never a self-edge, a retired child stays its own page", () => {
+    const pages = [
+      meta("p/a.mdx", { related: ["p/b-prototype.html", "p/b.mdx", "p/a.html", "p/c.html", "p/d-notes.mdx", "p/old.md"] }),
+      meta("p/a.html", { parent: "p/a.mdx", pairedBy: "stem" }),
+      meta("p/b.mdx"),
+      meta("p/b-prototype.html", { parent: "p/b.mdx", pairedBy: "suffix" }),
+      meta("p/c.mdx"),
+      meta("p/c.html", { parent: "p/c.mdx", pairedBy: "stem" }),
+      meta("p/d.mdx"),
+      meta("p/d-notes.mdx", { parent: "p/d.mdx", pairedBy: "link" }),
+      meta("p/e.mdx"),
+      meta("p/old.md", { parent: "p/e.mdx", pairedBy: "superseded" }),
+    ];
+    const e = build(pages, [thread("p/a.mdx", ["p/a.mdx"]), thread("p/b.mdx", ["p/b.mdx", "p/d.mdx", "p/e.mdx"])]);
+    // b-prototype → b (and the direct b entry adds nothing); a.html → a is a
+    // self-edge; c is no focus page; d-notes (link) → d; old.md (superseded)
+    // is its own page and no focus page, so no edge to e.
+    expect(e.relations.related).toEqual([
+      ["p/a.mdx", "p/b.mdx"],
+      ["p/a.mdx", "p/d.mdx"],
+    ]);
+  });
+
   test("owned issue: the unique owner and every focus page naming the key by a ref that counts", () => {
     const pages = [
       meta("p/owner.mdx", { owns: ["ABC-1"] }),

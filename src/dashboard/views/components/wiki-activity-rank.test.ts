@@ -1371,7 +1371,7 @@ describe("rankActivity — session work (D5)", () => {
   });
 
   test("the work clause rounds a fractional edit sum to the nearest edit", () => {
-    // 2.6 weighted edits (an attachment counts at half weight) read as ≈3.
+    // 2.6 weighted edits (a ref or folder file counts at half weight) read as ≈3.
     const p = worked(page({ relPath: "notes/half.md", createdDaysAgo: 100 }), { focus: [[5, 2.6]], preH: 50 * 24 });
     expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toMatch(/focused in 1 session \(≈3 edits\)/);
     expect(pageWorkBar(p, NOW)!.title).toMatch(/\(≈3 edits\)/);
@@ -1472,7 +1472,7 @@ describe("rankActivity — session work (D5)", () => {
     const t = worked(page({ relPath: "notes/t.md", createdDaysAgo: 100 }), { touch: [[30, 40], [4, 1]], preH: 50 * 24 });
     const tr = rankActivity([t], wide, NOW, OPEN)[0]!;
     expect(hoursIn(tr.why)).toBe(Math.round(tr.ageMs / H));
-    // Edits are weighted sums (attachments at half weight), not literal counts.
+    // Edits are weighted sums (ref and folder files at half weight), not literal counts.
     expect(fr.why).toMatch(/focused in 1 session \(≈40 edits\)/);
     expect(tr.why).toMatch(/touched in 2 sessions \(≈41 edits\)/);
   });

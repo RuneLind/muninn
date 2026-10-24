@@ -26,8 +26,10 @@
  *     family member born in the window), or busy (≥3 edits and ≥ half the
  *     session's busiest page); every other write is a touch. Then the weak-link rule
  *     (pick-up D1/D10, `demoteWeakLinks`): beside a strong non-hub focus
- *     family, a non-hub focus family under 2 weighted edits that the session
- *     did not create is a touch;
+ *     family (≥ 2 weighted edits, or created), a non-hub focus family under 2
+ *     weighted edits that the session did not create is a touch; when every
+ *     non-hub focus family is weak, the strongest stays focus (most edits,
+ *     then earliest event, then relPath) and the rest are touches;
  *  7. threads (D6) — non-pass sessions joined by a shared non-hub focus page.
  *
  * A family's events, threads and contributions name the parent. Each
