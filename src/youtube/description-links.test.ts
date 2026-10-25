@@ -425,7 +425,7 @@ describe("fix round 1 batch 2 — F5: titles and URL extraction", () => {
 
   test("a generic markdown link text joins the words before it", () => {
     const d = "➡️ My [Website](https://pat.example/)\nRead the [write-up](https://pat.example/w)";
-    expect(classifyDescriptionLinks(d, "Sample Channel").map((l) => l.title)).toEqual(["My Website", "write-up"]);
+    expect(classifyDescriptionLinks(d, "Sample Channel").map((l) => l.title)).toEqual(["My Website", "Read the write-up"]);
   });
 
   test("a quoted title before a parenthesised URL loses the quotes and the paren", () => {
@@ -492,5 +492,152 @@ describe("fix round 1 batch 2 — F6: host rules", () => {
       expect(`${h} ${link(`${h}\nhttps://p.example/x`, "https://p.example/x").cls}`).toBe(`${h} source`);
     }
     expect(classes("OPEN SOURCE TOOLS\n• Tool: https://tool.example/t")).toEqual({ "https://tool.example/t": "candidate" });
+  });
+});
+
+describe("fix round 2 batch 1 — R2-2: by-rule placement narrowed back", () => {
+  test("a trailing pointer is a heading's colon only after a source phrase, never a lone keyword", () => {
+    expect(classes("Grab the cheat sheet I mentioned 👇\nhttps://leads.example/sheet")).toEqual({
+      "https://leads.example/sheet": "candidate",
+    });
+    // No promo cue on this one: only the phrase rule keeps it out.
+    expect(classes("Tools I mentioned 👇\nhttps://tool.example/t")).toEqual({ "https://tool.example/t": "candidate" });
+    // The phrases still start a block, with or without a colon before the pointer.
+    for (const h of ["📚 Links mentioned in this video 👇", "Sources: 👇", "Further reading ⬇️", "Mentioned in the video 👇"]) {
+      expect(`${h} → ${link(`${h}\nhttps://x.example/a`, "https://x.example/a").cls}`).toBe(`${h} → source`);
+    }
+  });
+
+  test("no other trailing decoration counts as a colon", () => {
+    expect(classes("Sources: 📚\nhttps://s.example/1")).toEqual({ "https://s.example/1": "candidate" });
+    expect(classes("Sources: 👉\nhttps://s.example/1")).toEqual({ "https://s.example/1": "candidate" });
+  });
+
+  test("a singular Source/Reference/Paper heading starts a block only as the whole heading", () => {
+    expect(classes("Download our free white paper:\nhttps://leads.example/wp")).toEqual({ "https://leads.example/wp": "candidate" });
+    expect(classes("Background music source:\nhttps://music.example/track/1")).toEqual({ "https://music.example/track/1": "candidate" });
+    expect(classes("Data source:\nhttps://data.example/d")).toEqual({ "https://data.example/d": "candidate" });
+    expect(classes("Source code:\nhttps://github.com/acme/tool")).toEqual({ "https://github.com/acme/tool": "repo" });
+    for (const h of ["Source:", "📄 Paper:", "Reference:", "SOURCE"]) {
+      expect(`${h} → ${link(`${h}\nhttps://p.example/x`, "https://p.example/x").cls}`).toBe(`${h} → source`);
+    }
+  });
+
+  test("a pointer line after the block's first URL is prose and ends the block", () => {
+    expect(classes("SOURCES\n- Paper https://p.example/1\n👇\n- Check out my merch https://m.example/x")).toEqual({
+      "https://p.example/1": "source",
+      "https://m.example/x": "candidate",
+    });
+    expect(classes("SOURCES\n- Paper https://p.example/1\n👇\n• Gear: https://gear.example/x")).toEqual({
+      "https://p.example/1": "source",
+      "https://gear.example/x": "candidate",
+    });
+    expect(classes("SOURCES\n- Paper https://p.example/1\n\n👇\n- Paper two https://p.example/2")).toEqual({
+      "https://p.example/1": "source",
+      "https://p.example/2": "candidate",
+    });
+  });
+
+  test("lead-magnet cues (free, cheat sheet, download, grab) demote an entry in any heading shape", () => {
+    expect(classes("Grab the cheat sheet I mentioned:\nhttps://leads.example/sheet")).toEqual({ "https://leads.example/sheet": "candidate" });
+    expect(classes("SOURCES\n- Download the workbook https://leads.example/wb\n- Free guide https://leads.example/g")).toEqual({
+      "https://leads.example/wb": "candidate",
+      "https://leads.example/g": "candidate",
+    });
+  });
+
+  test("F2's legitimate shapes stay sources", () => {
+    expect(classes("📚 Links mentioned in this video 👇\nhttps://x.example/a")).toEqual({ "https://x.example/a": "source" });
+    expect(Object.values(classes("Links mentioned in this video:\n👇👇👇\nhttps://anthropic.com/a\nhttps://anthropic.com/b"))).toEqual([
+      "source",
+      "source",
+    ]);
+  });
+});
+
+describe("fix round 2 batch 1 — R2-3: titles", () => {
+  const title = (d: string, url: string) => {
+    const l = link(d, url);
+    return l.attribution === "" ? l.title : `${l.title} | ${l.attribution}`;
+  };
+
+  test("a markdown link's text is a title only when the words before it do not already name the entry", () => {
+    expect(title("SOURCES\n- Attention Is All You Need [PDF](https://arxiv.org/pdf/x)", "https://arxiv.org/pdf/x")).toBe(
+      "Attention Is All You Need",
+    );
+    expect(title("SOURCES\n- The scaling study: [paper](https://p.example/a)", "https://p.example/a")).toBe("The scaling study");
+    expect(title("SOURCES\n- Scaling laws – [arXiv](https://arxiv.org/abs/2)", "https://arxiv.org/abs/2")).toBe("Scaling laws");
+    expect(title("SOURCES\n- Scaling laws | [arXiv](https://arxiv.org/abs/3)", "https://arxiv.org/abs/3")).toBe("Scaling laws");
+    // One word before: the word and the link text together.
+    expect(title("➡️ My [Website](https://pat.example/)", "https://pat.example/")).toBe("My Website");
+    expect(title("• Camera: [Sony A7iii](https://shop.example/cam)", "https://shop.example/cam")).toBe("Camera Sony A7iii");
+    // Nothing before: the link text, its parenthetical included.
+    expect(title("SOURCES\n- [X (Twitter)](https://x.com/someone/status/1)", "https://x.com/someone/status/1")).toBe("X (Twitter)");
+    // A link text of three words or more is a title of its own.
+    expect(title("To start reading: [Entry 1: What it means](https://news.example/1)", "https://news.example/1")).toBe(
+      "Entry 1: What it means",
+    );
+    // A lead-in ending on an article runs on into the link text.
+    expect(title("Read the [write-up](https://pat.example/w)", "https://pat.example/w")).toBe("Read the write-up");
+    // Words before with their own parenthetical keep the attribution split.
+    expect(title("SOURCES\n- Spending your effort (Example Lab) [blog](https://lab.example/b)", "https://lab.example/b")).toBe(
+      "Spending your effort | Example Lab",
+    );
+  });
+
+  test("only a 1–2 digit list number is stripped; a year is title text", () => {
+    expect(title("SOURCES\n- 2024. Year in review https://y.example/r", "https://y.example/r")).toBe("2024. Year in review");
+    expect(title("SOURCES\n12. Twelfth item https://y.example/12", "https://y.example/12")).toBe("Twelfth item");
+  });
+
+  test("quotes are unwrapped only when one pair wraps the whole title", () => {
+    expect(title('SOURCES\n• "Foo" and "Bar" https://fb.example/x', "https://fb.example/x")).toBe('"Foo" and "Bar"');
+    expect(title("SOURCES\n• “The paper” https://fb.example/y", "https://fb.example/y")).toBe("The paper");
+  });
+});
+
+/** Pins for mutants the round-1 verify passes found surviving. */
+describe("fix round 2 batch 1 — mutant pins (description-links)", () => {
+  test("M17: a `Link:` label before the URL leaves the title line above it in the block", () => {
+    const d = "SOURCES\nThe effort post\nLink: https://lab.example/a";
+    expect([link(d, "https://lab.example/a").cls, link(d, "https://lab.example/a").title]).toEqual(["source", "The effort post"]);
+  });
+
+  test("M1b: a bullet title line over a BULLETED URL line is a bullet entry, not title-over-URL", () => {
+    expect(classes("SOURCES\n- https://a.example/1\n\n- Report two\n- https://a.example/2")).toEqual({
+      "https://a.example/1": "source",
+      "https://a.example/2": "source",
+    });
+  });
+
+  test("M1c: a bullet line that carries its own URL is a bullet entry, whatever is below it", () => {
+    expect(classes("SOURCES\n- A https://a.example/1\nhttps://a.example/2\n\n- C https://a.example/3")).toEqual({
+      "https://a.example/1": "source",
+      "https://a.example/2": "source",
+      "https://a.example/3": "source",
+    });
+  });
+
+  test("M2b: the heading lookahead skips pointer lines", () => {
+    expect(classes("SOURCES\n- See these:\n👇\nhttps://s.example/1")).toEqual({ "https://s.example/1": "source" });
+  });
+
+  test("M4b: a separator line alone ends the block, where prose would not", () => {
+    expect(classes("SOURCES\n- Paper https://p.example/1\n━━━━━━\nhttps://shop.example/x")).toEqual({
+      "https://p.example/1": "source",
+      "https://shop.example/x": "candidate",
+    });
+  });
+
+  test("M5c: URLs on one line come back in line order, a markdown link after a bare URL included", () => {
+    const d = "See https://a.example/1 and [B](https://b.example/2)";
+    expect(classifyDescriptionLinks(d, "Sample Channel").map((l) => l.url)).toEqual(["https://a.example/1", "https://b.example/2"]);
+  });
+
+  test("M9b: a URL upgraded to source by a later spelling keeps the first spelling", () => {
+    const d = "Read https://www.lab.example/x/?utm_source=yt\n\nSOURCES\n- A https://lab.example/x";
+    expect(classifyDescriptionLinks(d, "Sample Channel").map((l) => [l.url, l.cls])).toEqual([
+      ["https://www.lab.example/x/?utm_source=yt", "source"],
+    ]);
   });
 });

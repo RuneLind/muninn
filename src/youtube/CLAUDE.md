@@ -515,16 +515,23 @@ pieces, in order:
   domain; any other page on that domain is a candidate hinted `uploader's own
   site`) → `source` (inside a source block) → `repo` (GitHub repo, gist,
   Hugging Face, arXiv) → `candidate`. A source block starts at a heading line
-  naming *mentioned*, *reference(s)*, *source(s)* (not *open source* or
-  *source code*), *further reading*, *paper(s)* or *links in this video* (never
-  a bare *links* or *resources*; a trailing `👇` counts as a `:`; a line of
-  pointer emoji reads as a blank line) and ends at the
+  naming *mentioned*, *references*, *sources*, *further reading*, *papers* or
+  *links in this video*, or one whose WHOLE text is a singular *Source*,
+  *Reference* or *Paper* («white paper», «music source» never start one; nor
+  does a bare *links* or *resources*). A trailing `👇` counts as a `:` only
+  after a source phrase («Links mentioned in this video 👇», «Sources 👇»),
+  never after a keyword inside a longer line («… I mentioned 👇»). A line of
+  pointer emoji reads as a blank line before the block's first URL and as prose
+  after it. The block ends at the
   next heading, a separator line, a prose line (no URL, not a bullet, number or
   title line over its URL — before the first URL too), or a blank line not
   followed by an entry written like the block's first one. An entry whose line
   or title line carries a promo cue (sponsor, % off, use code, follow me,
-  newsletter…; `PROMO_CUE_RE`) is a candidate, never a source: a URL goes in by
-  rule only when its entry is unambiguous. The table was built from 30 sampled
+  newsletter, free, download, grab…; `PROMO_CUE_RE`) is a candidate, never a
+  source: a URL goes in by rule only when its entry is unambiguous. When a rule
+  cannot be made unambiguous it is narrowed, never guarded: a real source that
+  misses it still reaches the model as a candidate, while promo placed by rule
+  cannot be taken back. The table was built from 30 sampled
   descriptions (D17); every rule has an INVENTED fixture in
   `description-links.test.ts` — real descriptions stay out of this repo.
 - **The prompt.** With a description, the user prompt gains `## Video

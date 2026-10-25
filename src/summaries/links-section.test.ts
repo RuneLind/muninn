@@ -14,6 +14,10 @@ import {
 } from "./links-section.ts";
 import { splitClosingTakeaway } from "./takeaway-check.ts";
 import { parseSummaryResponse } from "../utils/summary-parser.ts";
+import { Marked } from "marked";
+import { renderExportMarkdown } from "./export.ts";
+import { escapeHtml } from "../format/markdown-core.ts";
+import { sanitizedMarkedInstallScript } from "../dashboard/views/components/doc-panel.ts";
 
 const LINE: LinkLine = {
   icon: "📄",
@@ -227,5 +231,84 @@ test("bodyUrlCounts reads URLs the way the classifier does, and compares them no
   expect(bodyUrlCounts("See https://www.lab.example/x/?utm_source=yt and [it](https://lab.example/x).", listed)).toEqual({
     bodyUrls: 2,
     bodyUrlsUnlisted: 0,
+  });
+});
+
+/**
+ * The two places a stored summary is rendered: the export (`renderExportMarkdown`)
+ * and the `/summaries` article view, whose `renderMarkdown` runs the page's
+ * marked (the same 15.0.12 build, default options) with the install script.
+ */
+function clientRender(markdown: string): string {
+  const m = new Marked();
+  new Function("marked", "esc", sanitizedMarkedInstallScript())(m, escapeHtml);
+  return m.parse(markdown, { async: false }) as string;
+}
+
+describe("fix round 2 batch 1 — R2-1: the fence closer agrees with marked", () => {
+  const SECTION = "## Links\n\n- 📄 [A](https://a.example) · from description";
+  const renders = (summary: string) => {
+    const body = `${appendLinksSection(summary, SECTION)}\n\n## Transcript\n\nwords`;
+    return [renderExportMarkdown(body), clientRender(body)];
+  };
+
+  test("a line opening with an inline triple-backtick span opens no fence: Links and Transcript render as headings", () => {
+    const summary = "Intro.\n\n```js``` is the inline form.\n\nMore text.";
+    for (const html of renders(summary)) {
+      expect(html).toContain("<h2>Links</h2>");
+      expect(html).toContain("<h2>Transcript</h2>");
+      expect(html).not.toContain("<pre>");
+    }
+    expect(appendLinksSection(summary, SECTION)).toBe(`${summary}\n\n${SECTION}`);
+  });
+
+  test("a ``` inside an indented code block opens no fence", () => {
+    const summary = "Intro.\n\n    ```\n    const x = 1;";
+    for (const html of renders(summary)) {
+      expect(html).toContain("<h2>Links</h2>");
+      expect(html).toContain("<h2>Transcript</h2>");
+    }
+    expect(appendLinksSection(summary, SECTION)).toBe(`${summary}\n\n${SECTION}`);
+  });
+
+  test("a body that really ends inside a fence is closed with the opener's own marker", () => {
+    for (const [summary, closer] of [
+      ["Intro\n\n```python\nprint(1)", "```"],
+      ["Intro\n\n~~~~\ncode", "~~~~"],
+      ["Intro\n\n````md\n```js\nx\n```", "````"],
+      // The walker reads line 3 as an opener and line 5 as its closer; marked
+      // reads line 3 as prose and line 5 as an opener, so the body ends open.
+      ["Intro\n\n```js``` inline\n\n```\ncode", "```"],
+    ] as const) {
+      expect(appendLinksSection(summary, SECTION)).toBe(`${summary}\n${closer}\n\n${SECTION}`);
+      for (const html of renders(summary)) {
+        expect(html).toContain("<h2>Links</h2>");
+        expect(html).toContain("<h2>Transcript</h2>");
+      }
+    }
+  });
+
+  test("a closed fence is untouched", () => {
+    const summary = "Intro\n\n```\nx\n```\n\nAfter.";
+    expect(appendLinksSection(summary, SECTION)).toBe(`${summary}\n\n${SECTION}`);
+  });
+});
+
+/** Pins for mutants the round-1 verify passes found surviving. */
+describe("fix round 2 batch 1 — mutant pins (links-section)", () => {
+  test("M7: every Unicode space run collapses, so a separator spelled with NBSP or em-space is replaced too", () => {
+    const line = renderLinkLine({ ...LINE, title: "a  b", detail: "x — y" });
+    expect(line).toBe("- 📄 [a b](https://lab.example/blog/spending) — x – y · from description");
+    const sep = renderLinksSection({ lines: [{ ...LINE, title: "t", detail: "x y" }], omitted: 0 })!;
+    expect(renderLinksSection(parseLinksSection(sep))).toBe(sep);
+  });
+
+  test("M8b: an indented (1–3 spaces) level-2 heading ends the section", () => {
+    const body = "## Links\n\n- x\n\n  ## After\n\nmore";
+    expect(body.slice(0, findLinksSection(body)!.end)).toBe("## Links\n\n- x\n\n");
+  });
+
+  test("M13: an envelope line ending in a full stop is still the envelope line", () => {
+    expect(parseLinksLine("CATEGORY: x\nLINKS: 1, 2.\nSUMMARY:\nb")).toEqual({ text: "CATEGORY: x\nSUMMARY:\nb", pick: [1, 2] });
   });
 });

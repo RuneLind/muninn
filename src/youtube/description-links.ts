@@ -278,30 +278,49 @@ function headingText(line: string): string {
     .trim();
 }
 
+/** Words that start a source block. Neither a bare *links* nor *resources* does. */
+const SOURCE_HEADING_RE = /\b(?:mentioned|references|sources|further reading|papers|links in this video)\b/i;
+
 /**
- * Words that start a source block. Neither a bare *links* nor *resources* does.
- * The singular *source* skips *open source* and *source code*.
+ * A singular word starts a block only as the WHOLE heading (`Source:`,
+ * `📄 Paper:`): «white paper», «music source» and «data source» name promo.
  */
-const SOURCE_HEADING_RE =
-  /\b(?:mentioned|references?|sources|(?<!open[\s-])source(?!\s+code)|further reading|papers?|links in this video)\b/i;
+const SINGULAR_HEADING_RE = /^(?:source|reference|paper)$/i;
 
 function isSourceHeadingText(text: string): boolean {
-  return SOURCE_HEADING_RE.test(text);
+  return SOURCE_HEADING_RE.test(text) || SINGULAR_HEADING_RE.test(text);
 }
+
+/**
+ * The phrases after which a trailing pointer (`👇`) reads as the heading's
+ * colon — the whole heading text, never a keyword inside a longer line: «Grab
+ * the cheat sheet I mentioned 👇» is a call to action, not a heading.
+ */
+const POINTER_HEADING_RE =
+  /^(?:links mentioned(?: in (?:this|the) video)?|mentioned in (?:this|the) video|links in this video|sources|references|papers|further reading)(?:(?: and)? (?:sources|references|papers|further reading))?$/i;
 
 /** Down-pointing emoji and arrows: «the links are below», nothing more. */
 const POINTER_CHARS = "👇⬇↓⤵🔽⏬";
 const POINTER_ONLY_RE = new RegExp(`^[${POINTER_CHARS}\\u{1F3FB}-\\u{1F3FF}\\ufe0f\\s]+$`, "u");
 const TRAILING_POINTER_RE = new RegExp(`[${POINTER_CHARS}][\\u{1F3FB}-\\u{1F3FF}\\ufe0f\\s]*$`, "u");
 
-/** A blank line, or a line of nothing but pointer emoji (`👇👇👇`), which reads as one. */
-function isBlankish(line: string): boolean {
-  const t = line.trim();
-  return t === "" || POINTER_ONLY_RE.test(t);
+/** A line of nothing but pointer emoji (`👇👇👇`). */
+function isPointerLine(line: string): boolean {
+  return POINTER_ONLY_RE.test(line.trim());
 }
 
+/**
+ * The next line that is neither blank nor a pointer line — the heading
+ * lookahead's rule, where `👇👇👇` under a heading reads as a blank line.
+ */
 function nextNonBlank(lines: readonly string[], from: number): number {
-  for (let j = from; j < lines.length; j++) if (!isBlankish(lines[j]!)) return j;
+  for (let j = from; j < lines.length; j++) if (lines[j]!.trim() !== "" && !isPointerLine(lines[j]!)) return j;
+  return -1;
+}
+
+/** The next non-blank line, a pointer line included — the block's own rule after its first URL. */
+function nextNonEmpty(lines: readonly string[], from: number): number {
+  for (let j = from; j < lines.length; j++) if (lines[j]!.trim() !== "") return j;
   return -1;
 }
 
@@ -324,10 +343,11 @@ export function isHeadingLine(lines: readonly string[], i: number): boolean {
   if (hasUrl(line)) return false;
   const text = headingText(line);
   if (text === "" || text.length > 60 || !/\p{L}/u.test(text)) return false;
-  // Trailing decoration first: «Sources: 👇» ends with `:`, and a trailing
-  // pointer (`👇`) says the same thing a `:` does.
+  // A trailing pointer says what a `:` does, but only after a source phrase
+  // («Sources: 👇», «Links mentioned in this video 👇»). Any other trailing
+  // decoration means the line does not end with `:`.
   const trimmed = line.trim();
-  const colon = TRAILING_POINTER_RE.test(trimmed) || trimmed.replace(TRAIL_DECOR_RE, "").endsWith(":");
+  const colon = trimmed.endsWith(":") || (TRAILING_POINTER_RE.test(trimmed) && POINTER_HEADING_RE.test(text));
   const allCaps = text === text.toUpperCase() && /\p{Lu}/u.test(text);
   if (colon) {
     const j = nextNonBlank(lines, i + 1);
@@ -423,11 +443,17 @@ export function sourceBlockLines(lines: readonly string[]): Set<number> {
       open = false;
       continue;
     }
-    if (isBlankish(line)) {
+    // Before the first URL a pointer line reads as a blank line; after it, a
+    // pointer line is prose and ends the block, like any other.
+    if (line.trim() === "" || (firstShape === null && isPointerLine(line))) {
       if (firstShape === null) continue;
-      const j = nextNonBlank(lines, i + 1);
-      const next = j < 0 ? null : entryShapeAt(lines, j);
+      const j = nextNonEmpty(lines, i + 1);
+      const next = j < 0 || isPointerLine(lines[j]!) ? null : entryShapeAt(lines, j);
       if (next === null || next === "inline" || next !== firstShape) open = false;
+      continue;
+    }
+    if (isPointerLine(line)) {
+      open = false;
       continue;
     }
     if (!hasUrl(line) && !continuesBlock(lines, i)) {
@@ -451,12 +477,11 @@ export function sourceBlockLines(lines: readonly string[]): Set<number> {
 const DECOR = "\\s\\p{Extended_Pictographic}\\u{1F1E6}-\\u{1F1FF}\\u{1F3FB}-\\u{1F3FF}\\u200d\\ufe0f\\u20e3•\\-*·▪►‣◦→➡⇒⟶>»|=–—";
 const LEAD_JUNK_RE = new RegExp(`^[${DECOR}]+`, "u");
 const TRAIL_JUNK_RE = new RegExp(`[${DECOR}:,]+$`, "u");
-/** Trailing decoration, but not a `:` — what comes off before the heading's colon test. */
-const TRAIL_DECOR_RE = new RegExp(`[${DECOR}↓⤵]+$`, "u");
 /** Labels that say "a link follows" and nothing about what it is (D17: «Links:» over a URL). */
 const GENERIC_LABEL_RE = /^(?:links?|resources?|sources?|references?|website|web|site|here|link below|check it out)$/i;
 
-const LEAD_NUMBER_RE = /^\d+[.)](?:\s+|$)/;
+/** A list number (1–2 digits); `2024.` is a year and stays. */
+const LEAD_NUMBER_RE = /^\d{1,2}[.)](?:\s+|$)/;
 
 function cleanTitle(text: string): string {
   return text
@@ -467,11 +492,25 @@ function cleanTitle(text: string): string {
     .trim();
 }
 
-/** A title written as `"Title" (` before its URL: the open paren and the quotes go. */
+/** Quote pairs, and the quote characters a wrapped title may not hold inside. */
+const QUOTE_PAIRS: Array<[string, string, RegExp]> = [
+  ['"', '"', /["“”]/],
+  ["“", "”", /["“”]/],
+  ["'", "'", /['‘’]/],
+  ["‘", "’", /['‘’]/],
+  ["«", "»", /[«»]/],
+];
+
+/**
+ * A title written as `"Title" (` before its URL: the open paren goes, and the
+ * quotes when ONE pair wraps the whole title (`"Foo" and "Bar"` keeps its own).
+ */
 function unwrapTitle(title: string): string {
   const t = title.replace(/\s*[(（]$/, "").trim();
-  const m = /^["“'‘«](.+)["”'’»]$/.exec(t);
-  return m ? m[1]!.trim() : t;
+  for (const [open, close, inner] of QUOTE_PAIRS) {
+    if (t.length > 2 && t.startsWith(open) && t.endsWith(close) && !inner.test(t.slice(1, -1))) return t.slice(1, -1).trim();
+  }
+  return t;
 }
 
 function splitAttribution(title: string): { title: string; attribution: string } {
@@ -492,18 +531,42 @@ export function hostAndPath(url: string): string {
 
 const TITLE_MAX = 200;
 
+/** A lead-in that runs on into the link text («Read the [write-up](…)»). */
+const RUN_ON_END_RE = /\b(?:the|a|an|my|our|your|this|his|her|their)$/i;
+
+/**
+ * A markdown link's title from the words before it and its text. Two or more
+ * words before a short (1–2 word) link text name the entry, and the text is a
+ * format word («Attention Is All You Need [PDF](…)»); a longer text is a title
+ * of its own («To start reading: [Entry 1: What it means](…)»). One word before
+ * joins the text («My [Website](…)», «Camera: [Sony A7iii](…)»); none leaves
+ * the text alone, its parenthetical included («[X (Twitter)](…)»). `split`
+ * says whether a trailing parenthetical is an attribution — only on words
+ * outside the link.
+ */
+function linkTitle(before: string, linked: string): { title: string; split: boolean } {
+  const lead = unwrapTitle(cleanTitle(before));
+  const words = lead === "" || GENERIC_LABEL_RE.test(lead) ? 0 : lead.split(" ").length;
+  const linkedWords = linked === "" ? 0 : linked.split(" ").length;
+  if (words >= 2 && linkedWords >= 3) return { title: linked, split: false };
+  if (words >= 2 && !RUN_ON_END_RE.test(lead)) return { title: lead, split: true };
+  if (words >= 1) return { title: linked === "" ? lead : `${lead} ${linked}`, split: false };
+  return { title: GENERIC_LABEL_RE.test(linked) ? "" : linked, split: false };
+}
+
 function titleFor(lines: readonly string[], i: number, found: LineUrl): { title: string; attribution: string } {
   const { url, index, linkText } = found;
   const line = lines[i]!;
-  const linked = linkText === undefined ? "" : cleanTitle(linkText.replace(URL_RE, " "));
   const before = line
     .slice(0, linkText === undefined ? index : line.lastIndexOf("[", index))
     .replace(MD_LINK_RE, " ")
     .replace(URL_RE, " ");
-  // A generic link text («My [Website](…)») joins the words before it.
-  let title =
-    linked !== "" && !GENERIC_LABEL_RE.test(linked) ? linked : unwrapTitle(cleanTitle(linked === "" ? before : `${before} ${linked}`));
+  let title: string;
+  let split = true;
+  if (linkText === undefined) title = unwrapTitle(cleanTitle(before));
+  else ({ title, split } = linkTitle(before, cleanTitle(linkText.replace(URL_RE, " "))));
   if (title === "" || GENERIC_LABEL_RE.test(title)) {
+    split = true;
     const prev = i > 0 ? lines[i - 1]! : "";
     const prevTitle = cleanTitle(prev);
     title =
@@ -511,20 +574,21 @@ function titleFor(lines: readonly string[], i: number, found: LineUrl): { title:
         ? prevTitle
         : "";
   }
-  const split = title === "" ? { title: hostAndPath(url), attribution: "" } : splitAttribution(title);
-  return { title: split.title.slice(0, TITLE_MAX), attribution: split.attribution.slice(0, TITLE_MAX) };
+  const cut = title === "" ? { title: hostAndPath(url), attribution: "" } : split ? splitAttribution(title) : { title, attribution: "" };
+  return { title: cut.title.slice(0, TITLE_MAX), attribution: cut.attribution.slice(0, TITLE_MAX) };
 }
 
 // --- the classifier --------------------------------------------------------
 
 /**
  * Words that mark an entry as promo whatever block it sits in: a sponsor, a
- * discount, an affiliate link, or the creator's own channels. Kept tight — a
- * cue demotes a block entry to `candidate` (the model can still pick it), it
- * never drops one.
+ * discount, an affiliate link, a lead magnet, or the creator's own channels.
+ * Kept tight — a cue demotes a block entry to `candidate` (the model can still
+ * pick it), it never drops one. Not `template`: it demoted a real source
+ * («chat template backdoors») in the 48-description sweep.
  */
 const PROMO_CUE_RE =
-  /\b(?:sponsor(?:ed|s)?|discount|deal|promo|coupon|use code|affiliate|follow me|subscribe|join my|my course|newsletter)\b|\d+\s*% off\b/i;
+  /\b(?:sponsor(?:ed|s)?|discount|deal|promo|coupon|use code|affiliate|follow me|subscribe|join my|my course|newsletter|free|cheat sheet|download|grab)\b|\d+\s*% off\b/i;
 
 /** Whether the entry around the URL on line `i` — its own line, and its title line above when the URL leads its line — carries a promo cue. */
 function entryHasPromoCue(lines: readonly string[], i: number): boolean {

@@ -20,7 +20,8 @@
  * Plain markdown, no HTML: `/summaries` and the export escape raw HTML.
  */
 
-import { mapProseLines, TRANSCRIPT_HEADING_RE, unclosedFenceMarker } from "./transcript-split.ts";
+import { Marked } from "marked";
+import { mapProseLines, TRANSCRIPT_HEADING_RE } from "./transcript-split.ts";
 import { extractLineUrls, linkKey } from "../youtube/description-links.ts";
 
 /** One line of the section. */
@@ -190,16 +191,36 @@ export function splitLinksSection(body: string): { body: string; section: string
   return { body: after.trim() === "" ? before : `${before}\n\n${after.trimStart()}`, section };
 }
 
+/** Block lexing only, default options: what `/summaries` and the export parse with (marked 15.0.12, no block extensions). */
+const fenceLexer = new Marked();
+
+/**
+ * The marker that closes the fenced block `summary` ends inside, as marked
+ * reads it, or `null` when the body does not end inside one. Decided by marked
+ * itself rather than by `mapProseLines`' line walk: the walk opens a fence on a
+ * line that starts with an inline ```` ```js``` ```` span or on a ``` inside an
+ * indented code block, and a closer appended there would OPEN a fence in the
+ * renderer.
+ */
+function trailingFenceCloser(summary: string): string | null {
+  const last = fenceLexer.lexer(`${summary}\n\n${LINKS_HEADING}\n`).at(-1);
+  if (last?.type !== "code") return null;
+  return /^ {0,3}(`{3,}|~{3,})/.exec(last.raw)?.[1] ?? null;
+}
+
 /**
  * `summary` with `section` appended as its last block, or `summary` as it is.
  * A summary that ends inside an open code fence (a model that never closed one)
- * gets the closer first, or the section would sit inside the fence and no
- * reader — the locator, the fact-check, the re-run split — would find it.
+ * gets the closer first, or the section would render inside the fence.
  */
 export function appendLinksSection(summary: string, section: string | null): string {
   if (section === null || section === "") return summary;
-  const open = unclosedFenceMarker(summary);
-  const closed = open === null ? summary.trimEnd() : `${summary.trimEnd()}\n${open}`;
+  let closed = summary.trimEnd();
+  // A closer of the opener's own character and length always ends a top-level
+  // fence; the loop re-lexes to confirm, and stops after a few rounds regardless.
+  for (let i = 0, closer = trailingFenceCloser(closed); closer !== null && i < 3; i++, closer = trailingFenceCloser(closed)) {
+    closed = `${closed}\n${closer}`;
+  }
   return `${closed}\n\n${section}`;
 }
 

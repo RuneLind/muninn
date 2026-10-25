@@ -57,21 +57,8 @@ export const TRANSCRIPT_WINDOW_RE = /^### \[\d{1,2}:\d{2}:\d{2}\]\s*$/;
  * with a browser.
  */
 export function mapProseLines(markdown: string, fn: (line: string, i: number) => string): string {
-  return walkFences(markdown, fn).text;
-}
-
-/**
- * The fence marker a line of exactly that marker would close, when `markdown`
- * ENDS inside a fenced block by {@link mapProseLines}' rule; `null` when it
- * does not. What is appended after an unclosed fence is code to every reader.
- */
-export function unclosedFenceMarker(markdown: string): string | null {
-  return walkFences(markdown, (line) => line).openFence;
-}
-
-function walkFences(markdown: string, fn: (line: string, i: number) => string): { text: string; openFence: string | null } {
   let fence: string | null = null;
-  const text = markdown.split("\n").map((line, i) => {
+  return markdown.split("\n").map((line, i) => {
     const m = /^\s*(`{3,}|~{3,})/.exec(line);
     if (m) {
       if (fence === null) {
@@ -85,7 +72,6 @@ function walkFences(markdown: string, fn: (line: string, i: number) => string): 
     }
     return fence === null ? fn(line, i) : line;
   }).join("\n");
-  return { text, openFence: fence };
 }
 
 /**
