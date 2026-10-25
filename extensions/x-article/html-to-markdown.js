@@ -65,7 +65,6 @@
       "h5",
       "h6"
     ]);
-    const LINE = "";
     const codeBlocks = [];
     const isHidden = options.isHidden;
     const tagOf = (node) => node.nodeName.toLowerCase();
@@ -210,6 +209,35 @@ ${out.join(`
 
 `;
     }
+    function preText(node) {
+      let out = "";
+      for (const c of children(node)) {
+        if (c.nodeType === TEXT)
+          out += c.textContent ?? "";
+        if (c.nodeType !== ELEMENT || SKIP.has(tagOf(c)) || hidden(c))
+          continue;
+        if (tagOf(c) === "br") {
+          out += `
+`;
+          continue;
+        }
+        const inner = preText(c);
+        if (!PRE_BREAK.has(tagOf(c))) {
+          out += inner;
+          continue;
+        }
+        if (out !== "" && !out.endsWith(`
+`))
+          out += `
+`;
+        out += inner;
+        if (inner !== "" && !inner.endsWith(`
+`))
+          out += `
+`;
+      }
+      return out;
+    }
     function walkChildren(node, ctx) {
       let out = "";
       for (const child of children(node))
@@ -219,7 +247,7 @@ ${out.join(`
     function walk(node, ctx) {
       if (node.nodeType === TEXT) {
         const text = node.textContent ?? "";
-        return ctx.pre ? text.split(LINE).join("") : text.replace(/[\s ]+/g, " ");
+        return text.replace(/[\s ]+/g, " ");
       }
       if (node.nodeType !== ELEMENT && node.nodeType !== 9 && node.nodeType !== 11)
         return "";
@@ -228,12 +256,6 @@ ${out.join(`
       const tag = tagOf(node);
       if (SKIP.has(tag) || hidden(node))
         return "";
-      if (ctx.pre) {
-        if (tag === "br")
-          return `
-`;
-        return PRE_BREAK.has(tag) ? `${LINE}${walkChildren(node, ctx)}${LINE}` : walkChildren(node, ctx);
-      }
       switch (tag) {
         case "br":
           return `
@@ -281,8 +303,7 @@ ${inner.split(`
         case "table":
           return table(node, ctx);
         case "pre": {
-          const code = walkChildren(node, { pre: true, inline: ctx.inline }).replace(/\n?\uE000+/g, `
-`).replace(/^\n+|\n+$/g, "");
+          const code = preText(node).replace(/^\n+|\n+$/g, "");
           if (code.trim() === "")
             return "";
           if (ctx.inline)
@@ -324,7 +345,7 @@ ${walkChildren(node, ctx)}
 ` : walkChildren(node, ctx);
       }
     }
-    return normalize(walk(root, { pre: false, inline: false })).split(`
+    return normalize(walk(root, { inline: false })).split(`
 `).map((line) => {
       const m = /\t\t(\d+)\t\t/.exec(line);
       if (m === null)

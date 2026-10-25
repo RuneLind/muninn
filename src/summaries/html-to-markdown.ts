@@ -66,8 +66,6 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
     ...BLOCK, "div", "li", "tr", "ul", "ol", "menu", "table", "blockquote", "pre", "hr",
     "h1", "h2", "h3", "h4", "h5", "h6",
   ]);
-  // Marks a line start inside `<pre>`; text nodes there are stripped of it.
-  const LINE = "\uE000";
   const codeBlocks: string[] = [];
   const isHidden = options.isHidden;
 
@@ -222,9 +220,30 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
   }
 
   interface Ctx {
-    readonly pre: boolean;
     /** A heading, a table cell or an anchor: one line, so a code block renders as inline code. */
     readonly inline: boolean;
+  }
+
+  /** A `<pre>`'s text as written; a block child starts and ends its own line. */
+  function preText(node: MarkdownSourceNode): string {
+    let out = "";
+    for (const c of children(node)) {
+      if (c.nodeType === TEXT) out += c.textContent ?? "";
+      if (c.nodeType !== ELEMENT || SKIP.has(tagOf(c)) || hidden(c)) continue;
+      if (tagOf(c) === "br") {
+        out += "\n";
+        continue;
+      }
+      const inner = preText(c);
+      if (!PRE_BREAK.has(tagOf(c))) {
+        out += inner;
+        continue;
+      }
+      if (out !== "" && !out.endsWith("\n")) out += "\n";
+      out += inner;
+      if (inner !== "" && !inner.endsWith("\n")) out += "\n";
+    }
+    return out;
   }
 
   function walkChildren(node: MarkdownSourceNode, ctx: Ctx): string {
@@ -236,16 +255,12 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
   function walk(node: MarkdownSourceNode, ctx: Ctx): string {
     if (node.nodeType === TEXT) {
       const text = node.textContent ?? "";
-      return ctx.pre ? text.split(LINE).join("") : text.replace(/[\s ]+/g, " ");
+      return text.replace(/[\s ]+/g, " ");
     }
     if (node.nodeType !== ELEMENT && node.nodeType !== 9 && node.nodeType !== 11) return "";
     if (node.nodeType !== ELEMENT) return walkChildren(node, ctx);
     const tag = tagOf(node);
     if (SKIP.has(tag) || hidden(node)) return "";
-    if (ctx.pre) {
-      if (tag === "br") return "\n";
-      return PRE_BREAK.has(tag) ? `${LINE}${walkChildren(node, ctx)}${LINE}` : walkChildren(node, ctx);
-    }
     switch (tag) {
       case "br":
         return "\n";
@@ -276,9 +291,7 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
       case "table":
         return table(node, ctx);
       case "pre": {
-        const code = walkChildren(node, { pre: true, inline: ctx.inline })
-          .replace(/\n?\uE000+/g, "\n")
-          .replace(/^\n+|\n+$/g, "");
+        const code = preText(node).replace(/^\n+|\n+$/g, "");
         if (code.trim() === "") return "";
         if (ctx.inline) return inlineCode(code.replace(/\s+/g, " ").trim());
         const longest = Math.max(2, ...(code.match(/`+/g) ?? []).map((r) => r.length));
@@ -315,7 +328,7 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
 
   // A code block is restored with its line's prefix (a list indent, `> `) on
   // every one of its lines, so it stays inside its container.
-  return normalize(walk(root, { pre: false, inline: false }))
+  return normalize(walk(root, { inline: false }))
     .split("\n")
     .map((line) => {
       const m = /\t\t(\d+)\t\t/.exec(line);
