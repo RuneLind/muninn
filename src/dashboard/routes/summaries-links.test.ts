@@ -292,6 +292,19 @@ describe("POST /api/summaries/links/search", () => {
     await again.text();
   });
 
+  test("a client that holds the stream open and never reads: the backstop still releases the lock", async () => {
+    const a = app({ run: { runTimeoutMs: 40, lockBackstopMs: 40, minAgentMs: 0 }, agent: async () => "{}" });
+    // The body is never read, so no SSE write settles and the stream's `finally` never runs.
+    const held = await post(a, "/api/summaries/links/search", { ...ref, candidates: [C_NONE] });
+    expect(held.status).toBe(200);
+    expect((await post(a, "/api/summaries/links/search", { ...ref, candidates: [C_NONE] })).status).toBe(409);
+    await tick(150);
+    const after = await post(a, "/api/summaries/links/search", { ...ref, candidates: [C_NONE] });
+    expect(after.status).toBe(200);
+    await after.body?.cancel();
+    await held.body?.cancel();
+  });
+
   test("past the run's deadline nothing more launches (skipped)", async () => {
     let t = 0;
     const a = app({ now: () => t, run: { concurrency: 1, runTimeoutMs: 1_000, minAgentMs: 500 }, agent: async () => ((t += 600), "{}") });

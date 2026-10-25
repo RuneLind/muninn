@@ -122,7 +122,14 @@ export interface SummariesLinksDeps {
   tracer?: (name: string, bot: BotConfig) => FindLinksTracer | null;
   now?: () => number;
   /** Run-level overrides (tests). */
-  run?: { concurrency?: number; agentTimeoutMs?: number; runTimeoutMs?: number; fetchTimeoutMs?: number; minAgentMs?: number };
+  run?: {
+    concurrency?: number;
+    agentTimeoutMs?: number;
+    runTimeoutMs?: number;
+    fetchTimeoutMs?: number;
+    minAgentMs?: number;
+    lockBackstopMs?: number;
+  };
   ingest?: SummaryIngest;
   claims?: SummarySaveClaims;
 }
@@ -370,33 +377,34 @@ export function registerSummariesLinksRoutes(
     const runTimeoutMs = deps.run?.runTimeoutMs ?? FIND_LINKS_RUN_TIMEOUT_MS;
     const fetchTimeoutMs = deps.run?.fetchTimeoutMs ?? FIND_LINKS_FETCH_TIMEOUT_MS;
     const minAgentMs = deps.run?.minAgentMs ?? MIN_AGENT_BUDGET_MS;
+    const lockBackstopMs = deps.run?.lockBackstopMs ?? LOCK_BACKSTOP_MS;
     const sourceTitle = titleFromDocId(t.docId);
+    const deadline = now() + runTimeoutMs;
     /** Every agent call launched, settled or not: the lock waits on these. */
     const launched: Promise<unknown>[] = [];
     let released = false;
+    // Armed with the lock, not at the stream's end: a client that never reads
+    // stalls every write, and the stream's `finally` with them.
+    const backstop = setTimeout(() => {
+      if (released) return;
+      log.warn("Find links: the search on {doc} still holds its lock {ms} ms past the run deadline; releasing it", {
+        doc: t.docId,
+        ms: lockBackstopMs,
+      });
+      release();
+    }, runTimeoutMs + lockBackstopMs);
     const release = () => {
       if (released) return;
       released = true;
+      clearTimeout(backstop);
       searching.delete(key);
     };
-    const releaseWhenSettled = (deadline: number) => {
-      const backstop = setTimeout(() => {
-        if (released) return;
-        log.warn("Find links: agents on {doc} still running {ms} ms past the run deadline; releasing the search lock", {
-          doc: t.docId,
-          ms: LOCK_BACKSTOP_MS,
-        });
-        release();
-      }, Math.max(0, deadline - now()) + LOCK_BACKSTOP_MS);
-      void Promise.allSettled(launched).then(() => {
-        clearTimeout(backstop);
-        release();
-      });
+    const releaseWhenSettled = () => {
+      void Promise.allSettled(launched).then(release);
     };
 
     try {
       return streamSSE(c, async (stream) => {
-        const deadline = now() + runTimeoutMs;
         let gone = false;
         stream.onAbort(() => {
           gone = true;
@@ -495,7 +503,7 @@ export function registerSummariesLinksRoutes(
           clearInterval(beat);
           await chain;
           tracer?.finish(status);
-          releaseWhenSettled(deadline);
+          releaseWhenSettled();
         }
       });
     } catch (err) {
