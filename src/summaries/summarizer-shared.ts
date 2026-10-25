@@ -10,6 +10,7 @@ import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { getConnectorLabel } from "../observability/agent-status.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 import { groundTakeaway, splitClosingTakeaway, type GroundTakeawayOptions } from "./takeaway-check.ts";
+import { demoteLinksHeadings } from "./links-section.ts";
 import {
   joinPromptPieces,
   summarySystemPromptPieces,
@@ -263,7 +264,11 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
     // It runs AFTER the summary call and OUTSIDE the YouTube two-pass budget,
     // bounded by the router's own timeout (and its CLI fallback); the usage is
     // accumulated onto the run, since the run's spend fields are the whole job.
-    let text = result.result;
+    // A level-2 heading the model wrote that starts with *Links* is demoted
+    // here, on every vertical: `## Links` is muninn's own section
+    // (`links-section.ts`), and a model-written one would be read as it — left
+    // out of the fact-check and carried over by a re-run.
+    let text = demoteLinksHeadings(result.result);
     if (opts.takeawayCheck !== false && splitClosingTakeaway(text) === null) {
       if (opts.pass === undefined) tracer.event("claude:takeaway-check", { takeaway: "no-takeaway" });
     } else if (opts.takeawayCheck !== false) {

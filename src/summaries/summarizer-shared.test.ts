@@ -767,6 +767,18 @@ describe("runCaptureOneShot", () => {
     expect(idx("end", "claude:takeaway-check")).toBeLessThan(idx("finish:ok"));
   });
 
+  test("every vertical's answer has a model-written `## Links` heading demoted before anything parses it", async () => {
+    const answer = "CATEGORY: tech\n\nSUMMARY:\nBody.\n\n## Links\n- a talk\n\n  ## Links to read\n- b";
+    const results = await Promise.all(
+      ["vimeo", "tiktok", "x-article", "article"].map(async (source) => {
+        const h = harness({ source, takeawayCheck: false, oneShot: async () => fakeResult({ result: answer }) });
+        return (await runCaptureOneShot(h.opts)).result;
+      }),
+    );
+    const demoted = "CATEGORY: tech\n\nSUMMARY:\nBody.\n\n### Links\n- a talk\n\n  ### Links to read\n- b";
+    expect(results).toEqual([demoted, demoted, demoted, demoted]);
+  });
+
   test("a grounded closer leaves the result object untouched", async () => {
     const h = harness({
       oneShot: async () => fakeResult({ result: WITH_CLOSER }),

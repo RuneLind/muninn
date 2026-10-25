@@ -284,12 +284,33 @@ function entryShapeAt(lines: readonly string[], j: number): EntryShape | null {
   return "inline";
 }
 
+/** Whether line `i` leads with its first URL: nothing but decoration (or a bare label) before it. */
+function urlLeadsLine(line: string): boolean {
+  const m = /https?:\/\//.exec(line);
+  if (!m) return false;
+  const before = cleanTitle(line.slice(0, m.index));
+  return before === "" || GENERIC_LABEL_RE.test(before);
+}
+
+/**
+ * Whether a URL-less line keeps an open block open: a bullet or numbered entry,
+ * or the title line of a two-line entry (the next line leads with its URL).
+ * Any other non-blank line is prose, and prose ends the block.
+ */
+function continuesBlock(lines: readonly string[], i: number): boolean {
+  const line = lines[i]!;
+  if (BULLET_RE.test(line) || NUMBER_RE.test(line)) return true;
+  return i + 1 < lines.length && urlLeadsLine(lines[i + 1]!);
+}
+
 /**
  * The 0-based line indexes inside source blocks.
  *
  * A block starts at a source heading. Blank lines before its first URL line are
- * skipped. After that it ends at the next heading line, at a separator line, or
- * at a blank line — unless the blank separates two entries written the same
+ * skipped. It ends at the next heading line, at a separator line, at a prose
+ * line — a non-blank line with no URL that is neither a bullet, a number nor
+ * the title line over a URL; this holds before the block's first URL too — or
+ * at a blank line, unless the blank separates two entries written the same
  * way: the next non-blank line starts an entry of the SAME shape as the block's
  * first entry (bullet, number, bare URL line, or a title line over its URL).
  * One-line `Title: URL` entries never continue across a blank line. (D17: the
@@ -317,6 +338,10 @@ export function sourceBlockLines(lines: readonly string[]): Set<number> {
       const j = nextNonBlank(lines, i + 1);
       const next = j < 0 ? null : entryShapeAt(lines, j);
       if (next === null || next === "inline" || next !== firstShape) open = false;
+      continue;
+    }
+    if (!hasUrl(line) && !continuesBlock(lines, i)) {
+      open = false;
       continue;
     }
     if (firstShape === null && hasUrl(line)) {
@@ -379,6 +404,22 @@ function titleFor(lines: readonly string[], i: number, url: string, index: numbe
 
 // --- the classifier --------------------------------------------------------
 
+/**
+ * Words that mark an entry as promo whatever block it sits in: a sponsor, a
+ * discount, an affiliate link, or the creator's own channels. Kept tight — a
+ * cue demotes a block entry to `candidate` (the model can still pick it), it
+ * never drops one.
+ */
+const PROMO_CUE_RE =
+  /\b(?:sponsor(?:ed|s)?|discount|deal|promo|coupon|use code|affiliate|follow me|subscribe|join my|my course|newsletter)\b|\d+\s*% off\b/i;
+
+/** Whether the entry around the URL on line `i` — its own line, and its title line above when the URL leads its line — carries a promo cue. */
+function entryHasPromoCue(lines: readonly string[], i: number): boolean {
+  const own = lines[i]!.replace(URL_RE, " ");
+  const title = i > 0 && urlLeadsLine(lines[i]!) && !hasUrl(lines[i - 1]!) ? lines[i - 1]! : "";
+  return PROMO_CUE_RE.test(own) || PROMO_CUE_RE.test(title);
+}
+
 /** Which class wins when one URL appears twice: a source anywhere makes it a source. */
 const CLASS_RANK: Record<DescriptionLinkClass, number> = { source: 0, repo: 1, candidate: 2, creator: 3, social: 4 };
 
@@ -410,7 +451,7 @@ export function classifyDescriptionLinks(description: string, uploader: string):
           cls = "candidate";
           hint = "uploader's own site";
         }
-      } else if (block.has(i)) cls = "source";
+      } else if (block.has(i) && !entryHasPromoCue(lines, i)) cls = "source";
       else if (isRepoUrl(parsed)) cls = "repo";
       else cls = "candidate";
       const { title, attribution } = titleFor(lines, i, url, index);

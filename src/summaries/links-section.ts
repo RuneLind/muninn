@@ -20,7 +20,7 @@
  * Plain markdown, no HTML: `/summaries` and the export escape raw HTML.
  */
 
-import { mapProseLines } from "./transcript-split.ts";
+import { mapProseLines, TRANSCRIPT_HEADING_RE, unclosedFenceMarker } from "./transcript-split.ts";
 
 /** One line of the section. */
 export interface LinkLine {
@@ -41,21 +41,25 @@ export interface LinksSection {
 }
 
 export const LINKS_HEADING = "## Links";
-/** The section's heading: exactly `## Links`, the one spelling the renderer writes. */
-export const LINKS_HEADING_RE = /^## Links[ \t]*$/;
+/** The section's heading: exactly `## Links`, the one spelling the renderer writes (a CRLF body's `\r` allowed, as on `## Transcript`). */
+export const LINKS_HEADING_RE = /^## Links\s*$/;
+
+/** Any level-2 ATX heading: up to three spaces, `##`, then a space, a tab or the line's end (CommonMark). */
+const LEVEL2_HEADING_RE = /^ {0,3}##(?:[ \t\r]|$)/;
 
 const ESCAPE_RE = /[\\[\]*_`]/g;
 
-/** Third-party text made safe for a link line: one line, escaped, separators replaced. */
+/**
+ * Third-party text made safe for a link line: one line, escaped, separators
+ * replaced. Idempotent, so render → parse → render is byte-stable: every `!`
+ * before `[` goes, every Unicode space run collapses to one space BEFORE the
+ * separators are looked for, and the separators are replaced until none is left
+ * (one pass leaves ` — ` in `a — — b`).
+ */
 function escapeText(text: string): string {
-  return text
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/ — /g, " – ")
-    .replace(/ · /g, ", ")
-    .replace(/!(?=\[)/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(ESCAPE_RE, (c) => `\\${c}`);
+  let out = text.replace(/!+(?=\[)/g, "").replace(/\s+/g, " ").trim();
+  while (out.includes(" — ") || out.includes(" · ")) out = out.replace(/ — /g, " – ").replace(/ · /g, ", ");
+  return out.replace(ESCAPE_RE, (c) => `\\${c}`);
 }
 
 function unescapeText(text: string): string {
@@ -156,11 +160,11 @@ export function findLinksSection(body: string): LinksRange | null {
   let transcriptAt = -1;
   mapProseLines(body, (line, i) => {
     if (transcriptAt >= 0) return line;
-    if (/^## Transcript\s*$/.test(line)) {
+    if (TRANSCRIPT_HEADING_RE.test(line)) {
       transcriptAt = i;
       return line;
     }
-    if (/^##(?!#)/.test(line)) level2.push(i);
+    if (LEVEL2_HEADING_RE.test(line)) level2.push(i);
     if (LINKS_HEADING_RE.test(line)) headingAt.push(i);
     return line;
   });
@@ -185,22 +189,34 @@ export function splitLinksSection(body: string): { body: string; section: string
   return { body: after.trim() === "" ? before : `${before}\n\n${after.trimStart()}`, section };
 }
 
-/** `summary` with `section` appended as its last block, or `summary` as it is. */
+/**
+ * `summary` with `section` appended as its last block, or `summary` as it is.
+ * A summary that ends inside an open code fence (a model that never closed one)
+ * gets the closer first, or the section would sit inside the fence and no
+ * reader — the locator, the fact-check, the re-run split — would find it.
+ */
 export function appendLinksSection(summary: string, section: string | null): string {
   if (section === null || section === "") return summary;
-  return `${summary.trimEnd()}\n\n${section}`;
+  const open = unclosedFenceMarker(summary);
+  const closed = open === null ? summary.trimEnd() : `${summary.trimEnd()}\n${open}`;
+  return `${closed}\n\n${section}`;
 }
 
 // --- the LINKS: envelope line ------------------------------------------------
 
 export type LinksPick = number[] | "none" | null;
 
-const LINKS_LINE_RE = /^\s*\**LINKS\**\s*:\s*(.*?)\s*$/i;
+/**
+ * The envelope line: `LINKS:` (any case, optional bold) and a value that is
+ * `none` or a list of ids — digits separated by commas or spaces, optionally in
+ * brackets. Anything else (`**Links:** this talk…`, `Links: https://…`) is
+ * prose and stays in the body.
+ */
+const LINKS_LINE_RE = /^\s*\**LINKS\**\s*:\s*\**\s*(none|\[?\s*\d+(?:[\s,]+\d+)*\s*\]?)\s*\**\.?\s*$/i;
 
 function parsePick(value: string): LinksPick {
-  if (/^\**\s*none\b/i.test(value)) return "none";
-  const ids = [...value.matchAll(/\d+/g)].map((m) => Number(m[0]));
-  return ids.length > 0 ? [...new Set(ids)] : "none";
+  if (/^none$/i.test(value)) return "none";
+  return [...new Set([...value.matchAll(/\d+/g)].map((m) => Number(m[0])))];
 }
 
 /**
@@ -229,14 +245,16 @@ export function parseLinksLine(raw: string): { text: string; pick: LinksPick } {
   return { text: lines.join("\n"), pick };
 }
 
-const MODEL_LINKS_HEADING_RE = /^##[ \t]+(?:\*\*|__)?[ \t]*links\b/i;
+const MODEL_LINKS_HEADING_RE = /^( {0,3})##([ \t]+(?:\*\*|__)?[ \t]*links\b)/i;
 
 /**
  * A level-2 heading the model wrote that starts with *Links*, demoted to level
- * 3, outside fenced code — so the body never holds a second `## Links`.
+ * 3, outside fenced code — so the body never holds a second `## Links`. An
+ * indented (1–3 spaces) heading keeps its indent. Every capture vertical runs
+ * this on the model's answer (`runCaptureOneShot`), not only YouTube.
  */
 export function demoteLinksHeadings(text: string): string {
-  return mapProseLines(text, (line) => (MODEL_LINKS_HEADING_RE.test(line) ? `#${line}` : line));
+  return mapProseLines(text, (line) => line.replace(MODEL_LINKS_HEADING_RE, "$1###$2"));
 }
 
 /**

@@ -273,6 +273,38 @@ describe("rule 3: source blocks", () => {
     expect(classes(d)).toEqual({ "https://paper.example/1": "source", "https://shop.example/x": "candidate" });
   });
 
+  test("a prose line ends a source block, before its first URL too", () => {
+    const before = "SOURCES\nThe study discussed is from a university.\nMore context here.\nRead the full write-up: https://write.example/up";
+    expect(classes(before)).toEqual({ "https://write.example/up": "candidate" });
+    const after = "SOURCES\n• Paper: https://paper.example/1\nThat is all for this week.\nShop: https://shop.example/x";
+    expect(classes(after)).toEqual({ "https://paper.example/1": "source", "https://shop.example/x": "candidate" });
+    // A title line over its URL and a URL-less bullet keep the block open.
+    const kept = "SOURCES\n• The study, in short\nThe study:\nhttps://study.example/s";
+    expect(classes(kept)).toEqual({ "https://study.example/s": "source" });
+  });
+
+  /**
+   * The invariant: a URL goes in by rule only when its entry is unambiguous.
+   * Every fixture's promo URL — a sponsor, a discount, a follow-me — is never a
+   * source, whatever block it sits in or shape it takes.
+   */
+  test("a promo entry inside or beside a source block is never a source", () => {
+    const fixtures: Array<[string, string]> = [
+      ["SOURCES\nThe study discussed is from a university.\nMore context here.\nGet 20% off WidgetVPN: https://widgetvpn.example/deal", "https://widgetvpn.example/deal"],
+      ["Links mentioned in this video:\n\nNothing this week, but thanks to our sponsor!\nTry Acme free: https://acme.example/promo", "https://acme.example/promo"],
+      ["Papers:\nhttps://a.example/paper\nhttps://b.example/paper\nFollow me: https://example.net/me", "https://example.net/me"],
+      ["SOURCES\n- Paper: https://p.example/1\n\n- Sponsor WidgetVPN: https://widgetvpn.example/x", "https://widgetvpn.example/x"],
+      ["Links mentioned in this video:\nSpending your effort (Example Lab):\nhttps://lab.example/a\n\nTry my sponsor today\nhttps://sponsor.example/deal", "https://sponsor.example/deal"],
+      ["REFERENCES\n• Study: https://study.example/1\n• Use code SAVE10 for a discount: https://store.example/s", "https://store.example/s"],
+      ["SOURCES\n• Report: https://report.example/r\n• Join my newsletter: https://letters.example/me", "https://letters.example/me"],
+    ];
+    expect(fixtures.map(([d, promo]) => `${promo} ${link(d, promo).cls}`)).toEqual(fixtures.map(([, promo]) => `${promo} candidate`));
+    // The real entries beside them stay sources.
+    expect(link(fixtures[2]![0], "https://a.example/paper").cls).toBe("source");
+    expect(link(fixtures[3]![0], "https://p.example/1").cls).toBe("source");
+    expect(link(fixtures[4]![0], "https://lab.example/a").cls).toBe("source");
+  });
+
   test("neither a bare «links» nor a «resources» heading starts a block", () => {
     const d = "🔗 My links\n• Site: https://a.example\n\nFREE RESOURCES\n• Guide: https://b.example/g\n\nLinks:\nhttps://c.example/post";
     expect(Object.values(classes(d))).toEqual(["candidate", "candidate", "candidate"]);
@@ -306,11 +338,11 @@ describe("rules 4 and 5: repo and candidate", () => {
   });
 
   test("a repeated URL is listed once, as its best class", () => {
-    const d = "Deal: https://deal.example/x\n\nSOURCES\n• Deal again: https://deal.example/x";
+    const d = "Study: https://study.example/x\n\nSOURCES\n• Study again: https://study.example/x";
     const links = classifyDescriptionLinks(d, "Sample Channel");
     expect(links).toHaveLength(1);
     expect(links[0]!.cls).toBe("source");
-    expect(links[0]!.title).toBe("Deal");
+    expect(links[0]!.title).toBe("Study");
   });
 });
 

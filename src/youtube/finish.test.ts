@@ -14,6 +14,8 @@ import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { finishYouTubeSummary } from "./finish.ts";
+import { summaryFactcheckBody } from "../summaries/factcheck-body.ts";
+import { splitLinksSection } from "../summaries/links-section.ts";
 import type { CaptureFrame } from "../summaries/frames.ts";
 import { testTempDirSync } from "../test/temp-dir.ts";
 
@@ -309,5 +311,20 @@ describe("the `## Links` step", () => {
     );
     expect(out.links?.picked).toEqual([2]);
     expect(out.links?.unknownIds).toEqual([7]);
+  });
+
+  test("a summary that never closed its code fence: the section is closed off, outside the fact-check and kept by a re-run", async () => {
+    const out = await finishYouTubeSummary({
+      raw: "CATEGORY: ai/rag\nLINKS: none\n\nSUMMARY:\nIntro\n\n```python\nprint(1)\n\n> 💬 **Takeaway:** A closer.",
+      jobId: "jl3",
+      videoId: VIDEO_ID,
+      frames: [],
+      visualDetail: "selected",
+      framesRoot: tmpRoot("yt-finish-root-"),
+      links: [{ url: "https://s.example/a", cls: "source", line: 0, title: "Src", attribution: "" }],
+    });
+    const stored = `${out.summary}\n\n## Transcript\n\nwords`;
+    expect(summaryFactcheckBody(stored)).not.toContain("https://s.example/a");
+    expect(splitLinksSection(stored).section).toBe("## Links\n\n- 📄 [Src](https://s.example/a) · from description");
   });
 });

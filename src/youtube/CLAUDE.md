@@ -516,8 +516,12 @@ pieces, in order:
   Hugging Face, arXiv) → `candidate`. A source block starts at a heading line
   naming *mentioned*, *references*, *sources*, *further reading*, *papers* or
   *links in this video* (never a bare *links* or *resources*) and ends at the
-  next heading, a separator line, or a blank line not followed by an entry
-  written like the block's first one. The table was built from 30 sampled
+  next heading, a separator line, a prose line (no URL, not a bullet, number or
+  title line over its URL — before the first URL too), or a blank line not
+  followed by an entry written like the block's first one. An entry whose line
+  or title line carries a promo cue (sponsor, % off, use code, follow me,
+  newsletter…; `PROMO_CUE_RE`) is a candidate, never a source: a URL goes in by
+  rule only when its entry is unambiguous. The table was built from 30 sampled
   descriptions (D17); every rule has an INVENTED fixture in
   `description-links.test.ts` — real descriptions stay out of this repo.
 - **The prompt.** With a description, the user prompt gains `## Video
