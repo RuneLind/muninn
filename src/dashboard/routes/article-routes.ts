@@ -36,31 +36,58 @@ async function findExistingByUrl(
   }
 }
 
-/** One markdown line as plain text: links to their text, emphasis, code and escape marks removed. */
+/**
+ * One markdown line as plain text: a leading heading, quote or list marker
+ * dropped, links to their text, and code, emphasis and escapes removed where
+ * they are paired — a lone `**` or `` ` `` is text (`2**10`).
+ */
 function plainLine(line: string): string {
+  const code: string[] = [];
   return line
     .trim()
-    .replace(/^#+\s+/, "")
+    .replace(/^(?:#+\s+|>\s?|[-*+]\s+|\d+[.)]\s+)+/, "")
+    // A code span's content is set aside, so no later step reads its `*`, `[` or `\\`.
+    .replace(/(?<!`)(`+)(?!`)(.*?[^`])\1(?!`)/g, (_m, _tick: string, inner: string) => {
+      code.push(/^ .* $/.test(inner) && inner.trim() !== "" ? inner.slice(1, -1) : inner);
+      return `\u{F0000}${code.length - 1}\u{F0001}`;
+    })
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/(`+)\s?([^`]*?)\s?\1/g, "$2")
-    .replace(/\*\*|__|~~/g, "")
+    .replace(/(\*\*|~~)(?=\S)(.*?\S)\1/g, "$2")
+    .replace(/(^|[^\w_])__(?=\S)(.*?\S)__(?![\w_])/g, "$1$2")
     .replace(/(^|[^\w*])[*_](\S(?:[^*_]*?\S)?)[*_](?=[^\w*]|$)/g, "$1$2")
     .replace(/\\([!-/:-@[-`{-~])/g, "$1")
+    .replace(/\u{F0000}(\d+)\u{F0001}/gu, (_m, i: string) => code[Number(i)] ?? "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 /**
- * Derive a non-empty title from the pasted text: the first non-empty line as
- * plain text (the paste form sends the walk's markdown), truncated to ~80
+ * Derive a non-empty title from the pasted text: the first line with prose
+ * as plain text (the paste form sends the walk's markdown), truncated to ~80
  * chars — so huginn's `/api/articles/ingest` never receives an empty title
- * (the drafter downstream keys pages off it).
+ * (the drafter downstream keys pages off it). Code fences and the lines inside
+ * them are skipped, and so is a line of markup alone (`---`, `**`).
  */
 export function deriveTitle(text: string): string {
-  const firstLine = text
-    .split("\n")
-    .map(plainLine)
-    .find((l) => l.length > 0) ?? "Untitled article";
+  let fence: string | null = null;
+  let firstLine = "Untitled article";
+  for (const line of text.split("\n")) {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence !== null) {
+      // A closing fence: the opening character, at least as long, nothing after it.
+      if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null;
+      continue;
+    }
+    if (marker !== undefined) {
+      fence = marker;
+      continue;
+    }
+    const plain = plainLine(line);
+    if (/[^\s*_`~#>=+\-|:]/.test(plain)) {
+      firstLine = plain;
+      break;
+    }
+  }
   return firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine;
 }
 

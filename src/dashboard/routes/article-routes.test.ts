@@ -22,4 +22,31 @@ describe("deriveTitle", () => {
     expect(deriveTitle(`[${"a".repeat(100)}](https://ex.com/p)`)).toBe(`${"a".repeat(77)}…`);
     expect(deriveTitle("**\n\n")).toBe("Untitled article");
   });
+
+  test("a leading code fence is skipped to the first prose line", () => {
+    expect(deriveTitle("```\nconst x = 1;\n```\nBody")).toBe("Body");
+    expect(deriveTitle("```js\nconst x = 1;\n```\n\nBody line")).toBe("Body line");
+    expect(deriveTitle("~~~\ncode\n~~~\nAfter tilde")).toBe("After tilde");
+    expect(deriveTitle("````\n```\n````\nAfter long fence")).toBe("After long fence");
+    expect(deriveTitle("```\nnever closed\n")).toBe("Untitled article");
+    expect(deriveTitle("```\n~~~\n```\nAfter mixed")).toBe("After mixed");
+    expect(deriveTitle("```\n```js\n```\nAfter info")).toBe("After info");
+  });
+
+  test("inline syntax is stripped only where it is paired", () => {
+    expect(deriveTitle("`` a`b ``")).toBe("a`b");
+    expect(deriveTitle("2**10 is big")).toBe("2**10 is big");
+    expect(deriveTitle("a ` lone tick")).toBe("a ` lone tick");
+    expect(deriveTitle("`[not](a link)` here")).toBe("[not](a link) here");
+  });
+
+  test("a leading quote, bullet or number marker is stripped", () => {
+    expect(deriveTitle("> Quoted lede")).toBe("Quoted lede");
+    expect(deriveTitle("- item one")).toBe("item one");
+    expect(deriveTitle("1. first step")).toBe("first step");
+  });
+
+  test("runs of whitespace collapse to one space", () => {
+    expect(deriveTitle("a  b\t c")).toBe("a b c");
+  });
 });

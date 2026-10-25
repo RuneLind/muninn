@@ -188,6 +188,58 @@ describe("htmlToMarkdown — code fidelity (fix round 1, R2)", () => {
   });
 });
 
+describe("htmlToMarkdown — fix round 2 (W1, W3)", () => {
+  test("only an http anchor inside code drops the code markup", () => {
+    expect(md('<p>Call <code><a href="#m">foo()</a></code> now</p>')).toBe("Call `foo()` now");
+    expect(md('<p><code><a href="struct.Foo.html">Foo</a>::new()</code></p>')).toBe("`Foo::new()`");
+  });
+
+  test("a backslash in a link label is escaped outside code only", () => {
+    expect(md('<p><a href="https://ex.com/p"><code>C:\\dir\\x</code></a></p>')).toBe("[`C:\\dir\\x`](https://ex.com/p)");
+    expect(md('<p><a href="https://ex.com/p">in C:\\a <code>C:\\b</code></a></p>')).toBe(
+      "[in C:\\\\a `C:\\b`](https://ex.com/p)",
+    );
+    expect(md('<a href="https://ex.com/p"><pre>C:\\b</pre></a>')).toBe("[`C:\\b`](https://ex.com/p)");
+    // Not a link, so not a label: the text stays as written.
+    expect(md('<p><a href="/rel">C:\\x</a></p>')).toBe("C:\\x");
+  });
+
+  test("an email-like label is not the URL", () => {
+    expect(md('<p><a href="https://ex.com/">me@ex.com</a></p>')).toBe("[me@ex.com](https://ex.com/)");
+  });
+
+  test("a pre's block children start and end their own line", () => {
+    expect(md("<pre>before<div>mid</div>after</pre>")).toBe("```\nbefore\nmid\nafter\n```");
+  });
+
+  test("a br inside pre is a newline; hidden and skipped children are dropped", () => {
+    expect(md("<pre>a<br>b</pre>")).toBe("```\na\nb\n```");
+    expect(md("<pre>a<span hidden>x</span>b</pre>")).toBe("```\nab\n```");
+    expect(md("<pre>a<script>y</script>b</pre>")).toBe("```\nab\n```");
+  });
+
+  test("text inside pre keeps its spaces", () => {
+    expect(md("<pre>  two\n    four <b>x</b> <b>y</b></pre>")).toBe("```\n  two\n    four x y\n```");
+  });
+
+  test("emphasis around a code block or a list is dropped, not wrapped", () => {
+    expect(md("<p>a</p><b><pre>x</pre></b>")).toBe("a\n\n```\nx\n```");
+    expect(md("<b><ul><li>x</li></ul></b>")).toBe("- x");
+    expect(md("<p><b>bold<br></b>after</p>")).toBe("**bold**\nafter");
+  });
+
+  test("a code block inside a heading or an anchor is inline code", () => {
+    expect(md("<h2>Run <pre>x</pre></h2>")).toBe("## Run `x`");
+    expect(md('<a href="https://ex.com/p">Run <pre>x</pre></a>')).toBe("[Run `x`](https://ex.com/p)");
+  });
+
+  test("a display URL matches on query, hash and a trailing slash", () => {
+    expect(md('<p><a href="https://ex.com/p?a=1">ex.com/p?b=2</a></p>')).toBe("[ex.com/p?b=2](https://ex.com/p?a=1)");
+    expect(md('<p><a href="https://ex.com/p#y">ex.com/p#x</a></p>')).toBe("[ex.com/p#x](https://ex.com/p#y)");
+    expect(md('<p><a href="https://github.com/acme/x">github.com/acme/x/</a></p>')).toBe("https://github.com/acme/x");
+  });
+});
+
 describe("the X extension's emitted walk", () => {
   const spec = EXTENSION_OUTPUTS.find((o) => o.output.endsWith("extensions/x-article/html-to-markdown.js"))!;
 

@@ -132,6 +132,8 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
   function textIsUrl(text: string, url: string): boolean {
     const shown = text.replace(/(?:…|\.\.\.)+$/, "");
     if (!/^\S+$/.test(shown)) return false;
+    // `me@ex.com` would parse as userinfo on the href's host: an address, not the URL.
+    if (/^(?:https?:\/\/)?[^/?#]*@/i.test(shown)) return false;
     let parsed: URL;
     let target: URL;
     try {
@@ -153,7 +155,8 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
    */
   function wrap(inner: string, open: string, close: string): string {
     const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(inner)!;
-    return m[2] === "" || /[\n\t]/.test(m[2]!) ? inner : `${m[1]}${open}${m[2]}${close}${m[3]}`;
+    // `\n\n` anywhere in the inner: a lone block child or code slot puts it in the edge whitespace.
+    return m[2] === "" || /\n/.test(m[2]!) || /\n\n/.test(inner) ? inner : `${m[1]}${open}${m[2]}${close}${m[3]}`;
   }
 
   /** CommonMark inline code: a delimiter longer than any backtick run inside, padded at an edge backtick. */
@@ -164,13 +167,18 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
     return `${tick}${pad}${code}${pad}${tick}`;
   }
 
-  function hasAnchor(node: MarkdownSourceNode): boolean {
-    return children(node).some((c) => c.nodeType === ELEMENT && (tagOf(c) === "a" || hasAnchor(c)));
+  /** An anchor the walk writes as a link (an http(s) href); any other keeps only its text. */
+  function hasLink(node: MarkdownSourceNode): boolean {
+    return children(node).some(
+      (c) =>
+        c.nodeType === ELEMENT &&
+        ((tagOf(c) === "a" && absoluteHttp((attr(c, "href") ?? "").trim()) !== null) || hasLink(c)),
+    );
   }
 
   function anchor(node: MarkdownSourceNode, ctx: Ctx): string {
-    const text = walkChildren(node, { ...ctx, inline: true });
     let target = absoluteHttp((attr(node, "href") ?? "").trim());
+    const text = walkChildren(node, { ...ctx, inline: true, label: target !== null });
     if (target !== null && isTco(target)) target = expandedFromText(node.textContent) ?? target;
     if (target === null) return text;
     const href = encodeHref(target);
@@ -180,8 +188,7 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
     // No visible text (an image link, a badge): nothing a reader would see.
     if (label === "") return text;
     if (textIsUrl(label, target)) return `${lead}${href}${tail}`;
-    // A backslash would escape the next character, `]` included.
-    return `${lead}[${label.replace(/\\/g, "\\\\")}](${href})${tail}`;
+    return `${lead}[${label}](${href})${tail}`;
   }
 
   function list(node: MarkdownSourceNode, ctx: Ctx, ordered: boolean): string {
@@ -222,6 +229,12 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
   interface Ctx {
     /** A heading, a table cell or an anchor: one line, so a code block renders as inline code. */
     readonly inline: boolean;
+    /**
+     * An http anchor's label: a text backslash is doubled, since it would escape
+     * the next character (`]` included). Code is left as is: CommonMark reads
+     * no escape inside a code span.
+     */
+    readonly label?: boolean;
   }
 
   /** A `<pre>`'s text as written; a block child starts and ends its own line. */
@@ -254,8 +267,8 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
 
   function walk(node: MarkdownSourceNode, ctx: Ctx): string {
     if (node.nodeType === TEXT) {
-      const text = node.textContent ?? "";
-      return text.replace(/[\s ]+/g, " ");
+      const text = (node.textContent ?? "").replace(/[\s ]+/g, " ");
+      return ctx.label ? text.replace(/\\/g, "\\\\") : text;
     }
     if (node.nodeType !== ELEMENT && node.nodeType !== 9 && node.nodeType !== 11) return "";
     if (node.nodeType !== ELEMENT) return walkChildren(node, ctx);
@@ -303,7 +316,7 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
       case "kbd":
       case "samp": {
         // A link inside code keeps its href; the code markup gives way.
-        if (hasAnchor(node)) return walkChildren(node, ctx);
+        if (hasLink(node)) return walkChildren(node, ctx);
         const code = (node.textContent ?? "").replace(/\s+/g, " ");
         if (code.trim() === "") return code;
         return inlineCode(code);

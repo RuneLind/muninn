@@ -115,6 +115,8 @@
       const shown = text.replace(/(?:…|\.\.\.)+$/, "");
       if (!/^\S+$/.test(shown))
         return false;
+      if (/^(?:https?:\/\/)?[^/?#]*@/i.test(shown))
+        return false;
       let parsed;
       let target;
       try {
@@ -131,7 +133,7 @@
     }
     function wrap(inner, open, close) {
       const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(inner);
-      return m[2] === "" || /[\n\t]/.test(m[2]) ? inner : `${m[1]}${open}${m[2]}${close}${m[3]}`;
+      return m[2] === "" || /\n/.test(m[2]) || /\n\n/.test(inner) ? inner : `${m[1]}${open}${m[2]}${close}${m[3]}`;
     }
     function inlineCode(code) {
       const longest = Math.max(0, ...(code.match(/`+/g) ?? []).map((r) => r.length));
@@ -139,12 +141,12 @@
       const pad = /^`|`$/.test(code) ? " " : "";
       return `${tick}${pad}${code}${pad}${tick}`;
     }
-    function hasAnchor(node) {
-      return children(node).some((c) => c.nodeType === ELEMENT && (tagOf(c) === "a" || hasAnchor(c)));
+    function hasLink(node) {
+      return children(node).some((c) => c.nodeType === ELEMENT && (tagOf(c) === "a" && absoluteHttp((attr(c, "href") ?? "").trim()) !== null || hasLink(c)));
     }
     function anchor(node, ctx) {
-      const text = walkChildren(node, { ...ctx, inline: true });
       let target = absoluteHttp((attr(node, "href") ?? "").trim());
+      const text = walkChildren(node, { ...ctx, inline: true, label: target !== null });
       if (target !== null && isTco(target))
         target = expandedFromText(node.textContent) ?? target;
       if (target === null)
@@ -157,7 +159,7 @@
         return text;
       if (textIsUrl(label, target))
         return `${lead}${href}${tail}`;
-      return `${lead}[${label.replace(/\\/g, "\\\\")}](${href})${tail}`;
+      return `${lead}[${label}](${href})${tail}`;
     }
     function list(node, ctx, ordered) {
       const items = children(node).filter((c) => c.nodeType === ELEMENT && tagOf(c) === "li" && !hidden(c));
@@ -246,8 +248,8 @@ ${out.join(`
     }
     function walk(node, ctx) {
       if (node.nodeType === TEXT) {
-        const text = node.textContent ?? "";
-        return text.replace(/[\s ]+/g, " ");
+        const text = (node.textContent ?? "").replace(/[\s ]+/g, " ");
+        return ctx.label ? text.replace(/\\/g, "\\\\") : text;
       }
       if (node.nodeType !== ELEMENT && node.nodeType !== 9 && node.nodeType !== 11)
         return "";
@@ -322,7 +324,7 @@ ${slot(codeBlocks.length - 1)}
         case "code":
         case "kbd":
         case "samp": {
-          if (hasAnchor(node))
+          if (hasLink(node))
             return walkChildren(node, ctx);
           const code = (node.textContent ?? "").replace(/\s+/g, " ");
           if (code.trim() === "")
