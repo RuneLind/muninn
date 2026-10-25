@@ -10,7 +10,7 @@ import { SAFE_RESOLVE_TIMEOUT_MS, safeResolveRedirect } from "./safe-fetch.ts";
 import { githubRepoLookup, withRepoDetails, type RepoLineLookup } from "./github-repo.ts";
 import {
   TEXT_LINKS_MAX,
-  classifyTextLinks,
+  classifyTextLinksCounted,
   pickTextLinks,
   redirectUrlsIn,
   renderTextLinksSection,
@@ -39,6 +39,8 @@ export interface PreparedTextLinks {
   readonly text: string;
   /** The numbered candidates, from that text. */
   readonly links: TextLink[];
+  /** Distinct candidates past the {@link TEXT_LINKS_MAX} cap, left out of `links`. */
+  readonly linksTruncated: number;
   /** `t.co` URLs found, and how many resolved. */
   readonly tcoFound: number;
   readonly tcoResolved: number;
@@ -128,7 +130,8 @@ export async function prepareTextLinks(text: string, deps: TextLinksDeps = {}, o
   }
   const tcoResolved = [...targets.keys()].filter(isTco).length;
   const substituted = substituteUrls(text, targets);
-  return { text: substituted, links: classifyTextLinks(substituted, ownUrl), tcoFound, tcoResolved };
+  const { links, truncated } = classifyTextLinksCounted(substituted, ownUrl);
+  return { text: substituted, links, linksTruncated: truncated, tcoFound, tcoResolved };
 }
 
 export interface FinishedTextLinks {
@@ -148,10 +151,11 @@ export async function finishTextLinks(
   return { section: renderTextLinksSection(detailed), picked: lines.length, unknownIds };
 }
 
-/** The summary span's link attributes: candidates listed, `t.co` links found and resolved. */
+/** The summary span's link attributes: candidates listed and cut by the cap, `t.co` links found and resolved. */
 export function linkTraceAttrs(prepared: PreparedTextLinks): Record<string, string> {
   return {
     linkCandidates: String(prepared.links.length),
+    linkCandidatesTruncated: String(prepared.linksTruncated),
     tcoFound: String(prepared.tcoFound),
     tcoResolved: String(prepared.tcoResolved),
   };

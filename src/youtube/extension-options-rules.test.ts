@@ -37,7 +37,7 @@ import {
   restoredKindNote,
   type CaptureOptions,
 } from "./extension-options-rules.ts";
-import { EXTENSION_RULES_OUTPUT, buildExtensionRules } from "./extension-build.ts";
+import { EXTENSION_OUTPUTS, EXTENSION_RULES_OUTPUT, buildExtensionOutput, buildExtensionRules } from "./extension-build.ts";
 import { testTempDirSync } from "../test/temp-dir.ts";
 
 /** An instance from BEFORE the visual-detail axis: kinds and frames, nothing else. */
@@ -348,14 +348,18 @@ describe("the checked-in extension copy", () => {
     // can name — the repo root two levels above it.
     const repoRoot = resolve(import.meta.dir, "../..");
     try {
-      process.chdir(repoRoot);
-      const fromRepoRoot = await buildExtensionRules(join(dir, "from-repo-root.js"));
-      const elsewhere: string[] = [];
-      for (const cwd of [join(repoRoot, "src"), tmpdir()]) {
-        process.chdir(cwd);
-        elsewhere.push(await buildExtensionRules(join(dir, `from-${elsewhere.length}.js`)));
+      // Every output: the X extension's IIFE indents its banners, which the
+      // ESM rules file never does.
+      for (const spec of EXTENSION_OUTPUTS) {
+        process.chdir(repoRoot);
+        const fromRepoRoot = await buildExtensionOutput(spec, join(dir, "from-repo-root.js"));
+        const elsewhere: string[] = [];
+        for (const cwd of [join(repoRoot, "src"), tmpdir()]) {
+          process.chdir(cwd);
+          elsewhere.push(await buildExtensionOutput(spec, join(dir, `from-${elsewhere.length}.js`)));
+        }
+        for (const text of elsewhere) expect(text).toBe(fromRepoRoot);
       }
-      for (const text of elsewhere) expect(text).toBe(fromRepoRoot);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });

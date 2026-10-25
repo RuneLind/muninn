@@ -98,15 +98,24 @@ function isSocialInText(url: URL): boolean {
  * link to it (same `linkKey`) is not listed.
  */
 export function classifyTextLinks(text: string, ownUrl?: string): TextLink[] {
+  return classifyTextLinksCounted(text, ownUrl).links;
+}
+
+/**
+ * {@link classifyTextLinks}, plus `truncated`: how many distinct candidates the
+ * cap left out. The cap counts candidates, so dropped social and X links never
+ * use it up.
+ */
+export function classifyTextLinksCounted(text: string, ownUrl?: string): { links: TextLink[]; truncated: number } {
   const seen = new Set<string>();
   if (ownUrl !== undefined && ownUrl.trim() !== "") seen.add(linkKey(ownUrl.trim()));
   const out: TextLink[] = [];
+  let truncated = 0;
   for (const line of text.split(/\r?\n/)) {
     let prevEnd = 0;
     for (const found of extractLineUrls(line)) {
       const before = line.slice(prevEnd, found.index).replace(/^\)/, "");
       prevEnd = found.index + found.url.length;
-      if (out.length >= TEXT_LINKS_MAX) return out;
       let parsed: URL;
       try {
         parsed = new URL(found.url);
@@ -117,6 +126,10 @@ export function classifyTextLinks(text: string, ownUrl?: string): TextLink[] {
       const key = linkKey(found.url);
       if (seen.has(key)) continue;
       seen.add(key);
+      if (out.length >= TEXT_LINKS_MAX) {
+        truncated++;
+        continue;
+      }
       out.push({
         id: out.length + 1,
         url: found.url,
@@ -125,7 +138,7 @@ export function classifyTextLinks(text: string, ownUrl?: string): TextLink[] {
       });
     }
   }
-  return out;
+  return { links: out, truncated };
 }
 
 /** The distinct `t.co` URLs in `text`, in order — what the run resolves first. */

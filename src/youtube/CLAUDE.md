@@ -545,10 +545,11 @@ pieces, in order:
   `## Links` (grammar and locator: `src/summaries/links-section.ts`) as the
   summary's last block: every `source` URL by rule, whatever the model picked; a
   repo or candidate only when its id was picked; creator and social URLs never,
-  only counted. No qualifying line, no section. A picked GitHub repo gets its
-  repo line (`src/summaries/github-repo.ts`, the `repoLine` dep; one API call,
-  5 s budget, `MUNINN_GITHUB_TOKEN` optional), and a failed lookup the plain
-  line. The section joins the summary
+  only counted. No qualifying line, no section. Every GitHub repo root or
+  default-branch tree link in the section, by-rule source line or picked one,
+  gets its repo line (`src/summaries/github-repo.ts`, the `repoLine` dep; one
+  API call per repo, 5 s budget, `MUNINN_GITHUB_TOKEN` optional), and a failed
+  lookup the plain line. The section joins the summary
   BEFORE `completeJob`, the ingest and the source draft. The trace root carries
   `bodyUrls` / `bodyUrlsUnlisted` (URLs the model wrote into its prose, and how
   many of those the description never listed); the summary span carries

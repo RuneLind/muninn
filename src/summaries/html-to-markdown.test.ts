@@ -53,7 +53,11 @@ describe("htmlToMarkdown — X article markup", () => {
   });
 
   test("a t.co text that spells t.co again is no expansion", () => {
-    expect(md('<p><a href="https://t.co/InventedE5">https://t.co/InventedE5</a></p>')).toBe("https://t.co/InventedE5");
+    // The text spells ANOTHER t.co URL, so only the `isTco` guard keeps the
+    // href: without it the text's t.co would replace the anchor's.
+    expect(md('<p><a href="https://t.co/InventedE5">https://t.co/InventedF6</a></p>')).toBe(
+      "[https://t.co/InventedF6](https://t.co/InventedE5)",
+    );
   });
 });
 

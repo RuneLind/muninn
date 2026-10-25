@@ -2,13 +2,14 @@ import { describe, expect, test } from "bun:test";
 import {
   TEXT_LINKS_MAX,
   classifyTextLinks,
+  classifyTextLinksCounted,
   pickTextLinks,
   renderTextLinksSection,
   substituteUrls,
   tcoUrlsIn,
   textLinksPromptSection,
 } from "./text-links.ts";
-import { finishTextLinks, prepareTextLinks } from "./text-links-run.ts";
+import { finishTextLinks, linkTraceAttrs, prepareTextLinks } from "./text-links-run.ts";
 import { parseLinksSection } from "./links-section.ts";
 
 /** Invented text; every URL is made up. */
@@ -37,6 +38,32 @@ describe("classifyTextLinks", () => {
     const links = classifyTextLinks(many);
     expect(links).toHaveLength(TEXT_LINKS_MAX);
     expect(links.at(-1)).toMatchObject({ id: 40, url: "https://example.org/page-39" });
+  });
+
+  test("the cap counts candidates: dropped social and X links never use it up", () => {
+    const dropped = Array.from({ length: 20 }, (_, i) => [
+      `https://x.com/someone_invented/status/${1000 + i}`,
+      `https://linkedin.com/in/someone-invented-${i}`,
+    ]).flat();
+    const real = Array.from({ length: 5 }, (_, i) => `https://example.org/source-${i}`);
+    const counted = classifyTextLinksCounted([...dropped, ...real].join("\n"));
+    expect(counted.links.map((l) => l.url)).toEqual(real);
+    expect(counted.truncated).toBe(0);
+  });
+
+  test("the candidates past the cap are counted, each distinct one once", async () => {
+    const many = Array.from({ length: 55 }, (_, i) => `https://example.org/page-${i}`);
+    const text = [...many, "https://example.org/page-50", "https://x.com/someone_invented"].join("\n");
+    expect(classifyTextLinksCounted(text).truncated).toBe(15);
+    const prepared = await prepareTextLinks(text);
+    expect(prepared.links).toHaveLength(TEXT_LINKS_MAX);
+    expect(prepared.linksTruncated).toBe(15);
+    expect(linkTraceAttrs(prepared)).toEqual({
+      linkCandidates: "40",
+      linkCandidatesTruncated: "15",
+      tcoFound: "0",
+      tcoResolved: "0",
+    });
   });
 });
 

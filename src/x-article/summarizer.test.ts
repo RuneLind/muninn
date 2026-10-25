@@ -69,6 +69,25 @@ const { buildArticleSystemPrompt } = await import("../article/prompt.ts");
 const { buildAnthropicSystemPrompt } = await import("../anthropic/prompt.ts");
 const { createJob, getJob } = await import("./state.ts");
 
+/**
+ * The attributes the `claude` span was STARTED with — where `extraTraceAttrs`
+ * (`linkTraceAttrs`) lands. The real prototype is patched rather than a module
+ * mocked, so the chain `runCaptureOneShot` → `tracedOneShot` → `tracer.start`
+ * stays under test; this file runs in a process of its own (its `mock.module`
+ * calls), so the patch reaches no other suite.
+ */
+let lastClaudeSpanAttrs: Record<string, unknown> | undefined;
+const { Tracer } = await import("../tracing/tracer.ts");
+const realTracerStart = Tracer.prototype.start;
+Tracer.prototype.start = function patchedStart(
+  this: InstanceType<typeof Tracer>,
+  label: string,
+  attributes?: Record<string, unknown>,
+) {
+  if (label === "claude") lastClaudeSpanAttrs = attributes;
+  return realTracerStart.call(this, label, attributes);
+};
+
 const config = { knowledgeApiUrl: "http://kb.test", claudeTimeoutMs: 120_000 } as unknown as Config;
 const bot = { name: "jarvis", dir: "/tmp/bot", model: "sonnet" } as unknown as BotConfig;
 
@@ -80,6 +99,7 @@ beforeEach(() => {
   lastPrompt = "";
   lastSystemPrompt = "";
   lastToolSurface = undefined;
+  lastClaudeSpanAttrs = undefined;
   sourceDraftCalls = [];
   installFetchMock();
 });
@@ -204,6 +224,14 @@ test("t.co targets replace the hrefs, the model picks from the list, the section
     buildXArticleSystemPrompt({ title: PIN_TITLE, author: PIN_AUTHOR, url: ARTICLE_URL, linksStep: true }),
   );
   expect(lastSystemPrompt).toContain('2. Then add one line "LINKS: <ids>"');
+  // The owner check reads these off the `claude` span on /traces.
+  expect(lastClaudeSpanAttrs).toMatchObject({
+    source: "x-article",
+    linkCandidates: "2",
+    linkCandidatesTruncated: "0",
+    tcoFound: "2",
+    tcoResolved: "1",
+  });
 
   const section =
     "## Links\n\n- 📦 [the repo](https://github.com/example/harness) — An invented harness, TypeScript, MIT, ★ 12 on 2026-10-25 · from text";
