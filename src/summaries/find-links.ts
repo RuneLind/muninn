@@ -448,11 +448,16 @@ export function buildCandidatesPrompt(summary: string): string {
   ].join("\n");
 }
 
+const JSON_UNCLOSED_RETRIES = 32;
+
 /** Every top-level JSON value opening with `open` that parses, in order. */
 function jsonValues(raw: string, open: "[" | "{"): unknown[] {
   const close = open === "[" ? "]" : "}";
   const out: unknown[] = [];
   let start = raw.indexOf(open);
+  // Each unclosed start scans to the end, so the retries are bounded:
+  // 100k unbounded unclosed opens measured 6 s.
+  let unclosed = 0;
   while (start >= 0) {
     let depth = 0;
     let inString = false;
@@ -469,7 +474,12 @@ function jsonValues(raw: string, open: "[" | "{"): unknown[] {
         break;
       }
     }
-    if (end < 0) break;
+    if (end < 0) {
+      // Never closes from here: a later value may still (`see [1:\n[{…}]`).
+      if (++unclosed > JSON_UNCLOSED_RETRIES) break;
+      start = raw.indexOf(open, start + 1);
+      continue;
+    }
     try {
       out.push(JSON.parse(raw.slice(start, end + 1)));
       start = raw.indexOf(open, end + 1);

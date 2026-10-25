@@ -201,6 +201,15 @@ describe("R5: parsing and reading", () => {
     expect(parseCandidates("Nothing here.")).toBeNull();
   });
 
+  test("an opening bracket that never closes does not hide a later valid value", () => {
+    expect(parseCandidates('Items mentioned (see [1:\n[{"title":"X Y Z","author":null,"topic":"the x post","kind":"post"}]')).toEqual([
+      { title: "X Y Z", author: null, topic: "the x post", kind: "post" },
+    ]);
+    expect(parseManifest('I searched {query: effort levels\n{"results":[{"url":"https://example.test/x","title":"X","quote":"q"}]}')).toEqual([
+      { url: "https://example.test/x", title: "X", quote: "q" },
+    ]);
+  });
+
   test("the manifest is the first object with a results array", () => {
     const raw = 'I checked {"a": 1} and then: {"results": [{"url": "https://example.test/x", "title": "X", "quote": "q"}, {"url": "javascript:alert(1)"}]}';
     expect(parseManifest(raw)).toEqual([{ url: "https://example.test/x", title: "X", quote: "q" }]);

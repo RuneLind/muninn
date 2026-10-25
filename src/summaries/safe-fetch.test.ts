@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { safeFetchText, type SafeFetchOptions } from "./safe-fetch.ts";
+import { safeFetchPage, safeFetchText, type SafeFetchOptions } from "./safe-fetch.ts";
 
 /**
  * The helper refuses by ADDRESS, so nothing local is reachable by its real name —
@@ -639,5 +639,28 @@ describe("safeFetchText — never throws", () => {
     });
     expect(res).toBeNull();
     expect(refusals().join()).toContain("enrichment");
+  });
+});
+
+describe("safeFetchPage — finalUrl is the parsed URL, never the caller's string", () => {
+  test("a no-redirect hit reports the canonical URL: scheme and host lower-cased, a space escaped", async () => {
+    fresh();
+    const page = await safeFetchPage("HTTP://Pub.TEST/ok?q=a b#frag", opts());
+    expect(page?.finalUrl).toBe("http://pub.test/ok?q=a%20b#frag");
+  });
+
+  test("a URL carrying credentials is refused, and the refusal does not log them", async () => {
+    fresh();
+    let fetched = 0;
+    const fetchImpl = (async () => (fetched++, new Response("x"))) as unknown as typeof fetch;
+    expect(await safeFetchPage("http://user:secret@pub.test/ok", opts({ fetchImpl }))).toBeNull();
+    expect(fetched).toBe(0);
+    expect(refusals().join()).toContain("credentials");
+    expect(refusals().join()).not.toContain("secret");
+  });
+
+  test("safeFetchText still fetches a URL carrying credentials (it reports no URL)", async () => {
+    fresh();
+    expect(await safeFetchText("http://user:secret@pub.test/ok", opts())).toBe("<html>hello  world\n</html>");
   });
 });

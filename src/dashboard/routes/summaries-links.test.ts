@@ -47,6 +47,10 @@ const PAGES: Record<string, SafePage> = {
   "https://hostile.example/x": { finalUrl: "https://hostile.example/x", contentType: "text/html", text: "<title>&#99999999; &#xFFFFFFF;</title>" },
 };
 
+/** The rows the panel shows for those pages: a save posts the row it accepts. */
+const HALLIE_ROW = { url: HALLIE_URL, title: "Claude Code effort level and model selection", detail: "Anthropic, Lydia Hallie", label: "matched" };
+const PDF_ROW = { url: PDF_URL, title: "The effort paper", detail: "", label: "unread" };
+
 const C_HALLIE: LinkCandidate = { title: null, author: "Lydia Hallie", topic: "Lydia Hallie's article on Claude Code effort levels", kind: "post" };
 const C_NONE: LinkCandidate = { title: null, author: null, topic: "an internal benchmark nobody published", kind: "doc" };
 const C_PDF: LinkCandidate = { title: "The effort paper", author: null, topic: "the effort paper", kind: "paper" };
@@ -403,7 +407,7 @@ describe("POST /api/summaries/links", () => {
   }
 
   test("415 without application/json", async () => {
-    expect((await post(app(), "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [{ url: HALLIE_URL }] }, "text/plain")).status).toBe(415);
+    expect((await post(app(), "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [HALLIE_ROW] }, "text/plain")).status).toBe(415);
   });
 
   test("R4: a URL no search verified is refused, whatever title the client sends", async () => {
@@ -414,10 +418,10 @@ describe("POST /api/summaries/links", () => {
     expect(ingests).toHaveLength(0);
   });
 
-  test("saves the server's verified line, keeps the fact-check hash, returns the hash of the RE-READ file; a second accept with it saves too", async () => {
+  test("saves the verified line, keeps the fact-check hash, returns the hash of the RE-READ file; a second accept with it saves too", async () => {
     const a = await searched();
     const checked = checkedSha256OfRaw(RAW);
-    const r1 = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [{ url: HALLIE_URL, title: "client title ignored" }] });
+    const r1 = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [HALLIE_ROW] });
     expect(r1.status).toBe(200);
     const b1 = (await r1.json()) as { added: number; linksBaseHash: string };
     expect(b1.added).toBe(1);
@@ -433,9 +437,59 @@ describe("POST /api/summaries/links", () => {
     // YouTube's ingest takes no tags.
     expect(ingests[0]).not.toHaveProperty("tags");
 
-    const r2 = await post(a, "/api/summaries/links", { ...ref, baseHash: b1.linksBaseHash, add: [{ url: PDF_URL }] });
+    const r2 = await post(a, "/api/summaries/links", { ...ref, baseHash: b1.linksBaseHash, add: [PDF_ROW] });
     expect(r2.status).toBe(200);
     expect(files.get(DOC)!).toMatch(/found by search\n- 🔎 \[The effort paper\]\(https:\/\/papers\.example\/effort\.pdf\) · found by search\n\n_7/);
+  });
+
+  test("a verified URL posted with a title, detail or label no search gave it is refused", async () => {
+    const a = await searched();
+    for (const row of [
+      { ...HALLIE_ROW, title: "client title" },
+      { ...HALLIE_ROW, detail: "Anthropic" },
+      { ...HALLIE_ROW, label: "reachable" },
+      { url: HALLIE_URL },
+    ]) {
+      const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [row] });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "not_verified" });
+    }
+    expect(ingests).toHaveLength(0);
+  });
+
+  describe("two candidates verify one URL as different rows: the save writes the row accepted", () => {
+    const C_OTHER: LinkCandidate = { title: null, author: "Someone Else", topic: "another post on effort", kind: "post" };
+    // No author match, but the quote is on the page: reachable, attributed to the site only.
+    const OTHER_QUOTE = "By Lydia Hallie. By Lydia Hallie. By Lydia Hallie.";
+    const OTHER_ROW = { ...HALLIE_ROW, detail: "Anthropic", label: "reachable" };
+    const lineOf = (detail: string) => `- 🔎 [${HALLIE_ROW.title}](${HALLIE_URL}) — ${detail} · found by search`;
+
+    test.each([
+      ["in one run", [[C_HALLIE, C_OTHER]]],
+      ["across two runs", [[C_HALLIE], [C_OTHER]]],
+    ] as const)("%s", async (_name, runs) => {
+      agentAnswers[C_OTHER.topic] = manifest(HALLIE_URL, OTHER_QUOTE);
+      const a = app();
+      const shown: unknown[] = [];
+      for (const candidates of runs) {
+        const evs = await events(await post(a, "/api/summaries/links/search", { ...ref, candidates }));
+        for (const e of evs) if (e.event === "result") shown.push(...(e.data.results as unknown[]));
+      }
+      // The panel shows both rows: the matched one carries the author.
+      expect(shown).toContainEqual(HALLIE_ROW);
+      expect(shown).toContainEqual(OTHER_ROW);
+      const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [HALLIE_ROW] });
+      expect(res.status).toBe(200);
+      expect(files.get(DOC)!).toContain(lineOf("Anthropic, Lydia Hallie"));
+    });
+
+    test("the other row, accepted, writes its own detail", async () => {
+      agentAnswers[C_OTHER.topic] = manifest(HALLIE_URL, OTHER_QUOTE);
+      const a = await searched({}, [C_OTHER, C_HALLIE]);
+      const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [OTHER_ROW] });
+      expect(res.status).toBe(200);
+      expect(files.get(DOC)!).toContain(`${lineOf("Anthropic")}\n`);
+    });
   });
 
   test("D19 9: a URL already in the section is never verified, so a save of it is refused and nothing is written", async () => {
@@ -444,7 +498,7 @@ describe("POST /api/summaries/links", () => {
     const b = await searched({ fetchPage: async (url) => (url === listedUrl ? { finalUrl: url, contentType: "application/pdf", text: null } : null) }, [
       { ...C_PDF, topic: "listed" },
     ]);
-    const res = await post(b, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [{ url: listedUrl }] });
+    const res = await post(b, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [{ ...PDF_ROW, url: listedUrl }] });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: "not_verified" });
     expect(ingests).toHaveLength(0);
@@ -454,7 +508,7 @@ describe("POST /api/summaries/links", () => {
     const a = await searched();
     const base = linksBaseHash(RAW);
     files.set(DOC, RAW.replace("is the reference.", "is the reference, re-run."));
-    const res = await post(a, "/api/summaries/links", { ...ref, baseHash: base, add: [{ url: HALLIE_URL }] });
+    const res = await post(a, "/api/summaries/links", { ...ref, baseHash: base, add: [HALLIE_ROW] });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: "links_changed" });
     expect(ingests).toHaveLength(0);
@@ -465,7 +519,7 @@ describe("POST /api/summaries/links", () => {
   test("a held claim answers 409 in_flight", async () => {
     const a = await searched();
     claims.claim("youtube", DOC, 60_000);
-    const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [{ url: HALLIE_URL }] });
+    const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [HALLIE_ROW] });
     expect(await res.json()).toMatchObject({ code: "in_flight" });
   });
 
@@ -473,7 +527,7 @@ describe("POST /api/summaries/links", () => {
     const raw = `---\ndate: 2026-03-22\nurl: "${URL_}"\n---\n\nJust a summary.\n`;
     files.set(DOC, raw);
     const a = await searched();
-    const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(raw), add: [{ url: HALLIE_URL }] });
+    const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(raw), add: [HALLIE_ROW] });
     expect(res.status).toBe(200);
     expect(files.get(DOC)!).toBe(
       `---\ndate: "2026-03-22"\nurl: "${URL_}"\n---\n\nJust a summary.\n\n## Links\n\n- 🔎 [Claude Code effort level and model selection](${HALLIE_URL}) — Anthropic, Lydia Hallie · found by search\n`,
@@ -483,6 +537,6 @@ describe("POST /api/summaries/links", () => {
   test("bounds: an empty add, a bad hash", async () => {
     const a = app();
     expect((await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [] })).status).toBe(400);
-    expect((await post(a, "/api/summaries/links", { ...ref, baseHash: "nope", add: [{ url: HALLIE_URL }] })).status).toBe(400);
+    expect((await post(a, "/api/summaries/links", { ...ref, baseHash: "nope", add: [HALLIE_ROW] })).status).toBe(400);
   });
 });

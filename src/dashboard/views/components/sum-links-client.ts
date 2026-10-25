@@ -302,7 +302,8 @@ async function drain(source: string, docId: string, key: string): Promise<void> 
       const res = await fetch("/api/summaries/links", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ source, docId, baseHash: s.baseHash, add: [{ url: next.url }] }),
+        // The whole row the panel showed: the server writes its own copy of exactly that row.
+        body: JSON.stringify({ source, docId, baseHash: s.baseHash, add: [{ url: next.url, title: next.title, detail: next.detail, label: next.label }] }),
       });
       const data = (await res.json().catch(() => ({}))) as { added?: number; linksBaseHash?: string | null; error?: string };
       if (res.ok) {
@@ -433,7 +434,9 @@ export function wireSumLinks(): void {
     const acceptBtn = target.closest<HTMLElement>("[data-accept]");
     if (acceptBtn) {
       const url = acceptBtn.getAttribute("data-accept") ?? "";
-      const found = stateFor(current.key).rows?.flatMap((r) => r.results).find((f) => f.url === url);
+      // The clicked candidate's row, not the first row carrying this URL: two candidates can verify one URL differently.
+      const ri = Number(acceptBtn.closest<HTMLElement>("[data-row]")?.getAttribute("data-row"));
+      const found = stateFor(current.key).rows?.[ri]?.results.find((f) => f.url === url);
       if (found) accept(found);
       return;
     }

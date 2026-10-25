@@ -337,7 +337,7 @@ export async function safeFetchText(
 
 /** What {@link safeFetchPage} answers for a URL that resolved. */
 export interface SafePage {
-  /** The URL the last hop answered from, after every redirect. */
+  /** The URL the last hop answered from, after every redirect, as parsed (`URL.toString()`). */
   readonly finalUrl: string;
   /** The answer's `content-type`, as sent. */
   readonly contentType: string;
@@ -393,6 +393,13 @@ async function safeFetchCore(rawUrl: string, options: SafeFetchOptions, reportPd
       }
       if (!ALLOWED_SCHEMES.has(url.protocol)) {
         return refuse(`refused scheme ${url.protocol}`, current);
+      }
+      // A page caller stores `finalUrl`, so a credential in the URL would reach the
+      // stored line. Refused at every hop; the logged URL drops it.
+      if (reportPdf && (url.username || url.password)) {
+        url.username = "";
+        url.password = "";
+        return refuse("URL carries credentials", url.toString());
       }
 
       // Resolve, then judge the ADDRESS — a hostname tells us nothing (`x.test` can
@@ -456,7 +463,7 @@ async function safeFetchCore(rawUrl: string, options: SafeFetchOptions, reportPd
         const contentType = res.headers.get("content-type");
         if (!isAllowedContentType(contentType)) {
           abandon(res.body, hopAbort);
-          if (reportPdf && isPdfContentType(contentType)) return { finalUrl: current, contentType: contentType ?? "", text: null };
+          if (reportPdf && isPdfContentType(contentType)) return { finalUrl: url.toString(), contentType: contentType ?? "", text: null };
           return refuse(`refused content-type ${contentType ?? "(none)"}`, current);
         }
 
@@ -464,7 +471,7 @@ async function safeFetchCore(rawUrl: string, options: SafeFetchOptions, reportPd
         // 50 MB before `capContent` ever sees it. Over the cap we keep what we have and
         // stop pulling: a truncated article still summarizes, a refused one does not.
         const body = res.body;
-        if (!body) return { finalUrl: current, contentType: contentType ?? "", text: "" };
+        if (!body) return { finalUrl: url.toString(), contentType: contentType ?? "", text: "" };
         const reader = body.getReader();
         const chunks: Uint8Array[] = [];
         let total = 0;
@@ -507,7 +514,7 @@ async function safeFetchCore(rawUrl: string, options: SafeFetchOptions, reportPd
         }
         // Non-fatal decode: cutting at a byte boundary can split a multi-byte
         // codepoint, and one U+FFFD at the tail is not worth losing the article over.
-        return { finalUrl: current, contentType: contentType ?? "", text: new TextDecoder("utf-8").decode(buf) };
+        return { finalUrl: url.toString(), contentType: contentType ?? "", text: new TextDecoder("utf-8").decode(buf) };
       } finally {
         hopChain.dispose();
       }

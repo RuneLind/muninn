@@ -257,21 +257,38 @@ async function loadSavable(deps: SummariesLinksDeps, t: Target): Promise<{ raw: 
   return { raw, stored };
 }
 
-/** Verified results per document: the only URLs a save accepts (D6 — nothing reaches the section that `safeFetchPage` did not resolve). */
+/** Rows kept per URL in one document: two candidates (or two runs) can each verify the same URL as a different row. */
+const VERIFIED_ROWS_PER_URL = 8;
+
+const sameRow = (a: FoundLink, b: FoundLink): boolean =>
+  a.url === b.url && a.title === b.title && a.detail === b.detail && a.label === b.label;
+
+/**
+ * Verified results per document: the only rows a save accepts (D6 — nothing
+ * reaches the section that `safeFetchPage` did not resolve). Every distinct row
+ * per URL is kept, so the save writes the row the panel showed, not whichever
+ * candidate verified that URL last.
+ */
 class VerifiedLinks {
-  private readonly docs = new Map<string, Map<string, { link: FoundLink; at: number }>>();
+  private readonly docs = new Map<string, Map<string, { link: FoundLink; at: number }[]>>();
   constructor(private readonly now: () => number) {}
 
   add(key: string, links: readonly FoundLink[]): void {
-    const m = this.docs.get(key) ?? new Map();
+    const m = this.docs.get(key) ?? new Map<string, { link: FoundLink; at: number }[]>();
     this.docs.delete(key);
-    for (const link of links) m.set(linkUrlKey(link.url), { link, at: this.now() });
+    for (const link of links) {
+      const k = linkUrlKey(link.url);
+      const rows = (m.get(k) ?? []).filter((r) => !sameRow(r.link, link));
+      rows.push({ link, at: this.now() });
+      m.set(k, rows.slice(-VERIFIED_ROWS_PER_URL));
+    }
     this.docs.set(key, m);
     while (this.docs.size > VERIFIED_MAX_DOCS) this.docs.delete(this.docs.keys().next().value!);
   }
 
-  get(key: string, url: string): FoundLink | null {
-    const hit = this.docs.get(key)?.get(linkUrlKey(url));
+  /** The verified row equal to `row` (URL, title, detail and label), or null. */
+  get(key: string, row: FoundLink): FoundLink | null {
+    const hit = this.docs.get(key)?.get(linkUrlKey(row.url))?.find((r) => sameRow(r.link, row));
     return hit && this.now() - hit.at <= VERIFIED_TTL_MS ? hit.link : null;
   }
 }
@@ -527,13 +544,16 @@ export function registerSummariesLinksRoutes(
     if (raw.length > FIND_LINKS_MAX_ADD) {
       return c.json({ error: `too many links — the cap is ${FIND_LINKS_MAX_ADD} per save`, code: "bad_request" }, 400);
     }
-    // Only a URL this process verified for this document: the title and the
-    // attribution are the server's, never the client's.
+    // Only a row this process verified for this document, matched whole: the
+    // title and the attribution are the server's, never the client's.
     const key = docKey(t);
     const add: FoundLink[] = [];
     for (const item of raw) {
-      const url = item && typeof item === "object" && typeof (item as { url?: unknown }).url === "string" ? (item as { url: string }).url : "";
-      const found = url ? verified.get(key, url) : null;
+      const row = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+      const found =
+        typeof row.url === "string" && typeof row.title === "string" && typeof row.detail === "string" && typeof row.label === "string"
+          ? verified.get(key, row as unknown as FoundLink)
+          : null;
       if (!found) {
         return c.json(
           { error: "That link was not verified by a Find links search on this summary. Search again.", code: "not_verified" },
