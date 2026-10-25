@@ -612,6 +612,44 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   the 44 stored `article-summaries` + `anthropic-summaries` documents keeps its
   source text, so there is nothing to regenerate from.
 
+## Find links (`/api/summaries/links*`)
+
+The doc panel's **🔎 Find links**: the posts, papers, repos, tools and docs a
+summary names but does not link, found on the web and accepted one at a time
+into its `## Links` section (plan muninn-summary-links, PR 3). Pure half:
+`find-links.ts`; routes: `src/dashboard/routes/summaries-links.ts`; client:
+`sum-links-client.ts` (its own bundle).
+
+- **The button** shows only where `GET …/links/options` says the save path
+  accepts the document (`preflightSummarySave`; a URL-less paste is `no_url`).
+- **Candidates** (`POST …/links/candidates`) are one Haiku-router call over the
+  summary minus the fact-check block and `## Links` (D10), dropping any whose
+  title or topic an existing line's title already names (`candidateIsListed`).
+- **Search** (`POST …/links/search`, SSE) runs one `{ web: true }` agent per
+  selected candidate (D6) on `resolveSummarizerBot`, at most 3 at a time, 60 s
+  each, 120 s for the run (`runFindLinks`): at the deadline the stream ends and
+  what is still out reads `timeout`/`skipped`. Every manifest URL goes through
+  `safeFetchPage` (`safe-fetch.ts`: `safeFetchText`'s guards plus `finalUrl` and
+  the content type, a non-text answer reported as `text: null`). A refused
+  fetch is not found and never shown.
+- **Labels score the PAGE title against the CANDIDATE** (D15), never the
+  manifest: `matched` needs ≥ 3 page-title tokens with ≥ 60 % in the
+  candidate's title + topic and the author's surname on the page or in its
+  byline metadata; `reachable` needs the agent's quote on the page (markdown
+  marks and whitespace removed on both sides — the agent quotes WebFetch's
+  markdown, the page is HTML); `unread` is a non-text answer. The fixtures are
+  in `find-links.test.ts`.
+- **The save** (`POST /api/summaries/links`) claims, re-reads, and answers
+  **409 `links_changed`** when `linksBaseHash` moved: sha256 of the body
+  (`sourceTextOfRaw`, so frontmatter re-quoting never moves it) with the section
+  cut by `splitLinksSection`, trailing whitespace dropped — a Links write never
+  moves it, any other body write does. Lines go after the last link line
+  (above the count line); a new section lands at the body's end, i.e. after
+  `## Visual reference` and before `## Transcript`. URLs dedup through
+  `encodeUrl` + `normalizeDestinationUrl`. The checked-text hash is asserted
+  unchanged before the write (D14). The response's hash comes from a GET of the
+  written file, and the panel sends it with the next accept.
+
 ## Capture jobs (module overview)
 
 <!-- moved out of the root CLAUDE.md by /doctor on 2026-10-13 -->

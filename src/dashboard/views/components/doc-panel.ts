@@ -250,6 +250,9 @@ export const DOC_PANEL_SHARE_BTN_ID = "docPanelShare";
  *  render and `sum-factcheck-client.ts`, which owns its click and visibility. */
 export const DOC_PANEL_FACTCHECK_BTN_ID = "docPanelFactcheck";
 
+/** The 🔎 Find links button's id (opt-in `findLinks`, /summaries only). */
+export const DOC_PANEL_FIND_LINKS_BTN_ID = "docPanelFindLinks";
+
 /** The 🗑 Delete button's id — the render and the summaries page's click handler. */
 export const DOC_PANEL_DELETE_BTN_ID = "docPanelDelete";
 const DOC_PANEL_DELETE_TITLE = "Delete this summary from huginn, and the wiki draft written from it";
@@ -320,6 +323,7 @@ export function docPanelHtml(
     rerun = false,
     moreMenu = false,
     factcheck = false,
+    findLinks = false,
   }: {
     askFollowUp?: boolean;
     share?: boolean;
@@ -328,6 +332,8 @@ export function docPanelHtml(
     rerun?: boolean;
     moreMenu?: boolean;
     factcheck?: boolean;
+    /** 🔎 Find links (/summaries only); `sum-links-client.ts` owns its click and visibility. */
+    findLinks?: boolean;
   } = {},
 ): string {
   const linksHtml = `
@@ -371,7 +377,9 @@ export function docPanelHtml(
         <button class="doc-panel-followup" id="${DOC_PANEL_SHARE_BTN_ID}" type="button"
           title="Turn this summary into a post you can paste into Slack or an email">&#128228; Share</button>` : ""}${factcheck ? `
         <button class="doc-panel-followup" id="${DOC_PANEL_FACTCHECK_BTN_ID}" type="button" hidden
-          title="Check this summary's claims against the web">&#10003; Fact check</button>` : ""}${moreMenu ? moreHtml : `${remove ? deleteHtml : ""}${exportPage ? exportHtml : ""}`}${askFollowUp ? `
+          title="Check this summary's claims against the web">&#10003; Fact check</button>` : ""}${findLinks ? `
+        <button class="doc-panel-followup" id="${DOC_PANEL_FIND_LINKS_BTN_ID}" type="button" hidden
+          title="Find the posts, papers, repos and tools this summary names but does not link">&#128270; Find links</button>` : ""}${moreMenu ? moreHtml : `${remove ? deleteHtml : ""}${exportPage ? exportHtml : ""}`}${askFollowUp ? `
         <a class="doc-panel-followup${moreMenu ? " doc-panel-primary" : ""}" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}${moreMenu ? "" : linksHtml}
       </div>${rerun ? `
       <div class="doc-panel-notice" id="${DOC_PANEL_RERUN_STATUS_ID}" hidden></div>` : ""}

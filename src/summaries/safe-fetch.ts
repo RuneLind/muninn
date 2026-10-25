@@ -332,6 +332,35 @@ export async function safeFetchText(
   rawUrl: string,
   options: SafeFetchOptions = {},
 ): Promise<string | null> {
+  return (await safeFetchCore(rawUrl, options, false))?.text ?? null;
+}
+
+/** What {@link safeFetchPage} answers for a URL that resolved. */
+export interface SafePage {
+  /** The URL the last hop answered from, after every redirect. */
+  readonly finalUrl: string;
+  /** The answer's `content-type`, as sent (`""` when it sent none). */
+  readonly contentType: string;
+  /** The body, or `null` when the type is not text (a PDF, an image): read nothing. */
+  readonly text: string | null;
+}
+
+/**
+ * {@link safeFetchText}'s guards, for a caller that needs to know WHERE the URL
+ * landed and what it answered: Find links stores `finalUrl` and labels a PDF
+ * that resolves "reachable, not read". A non-text answer is not refused here —
+ * its body is abandoned unread and `text` is `null`. Every other refusal (an
+ * address, a scheme, a status, a timeout) is `null`, logged once.
+ */
+export async function safeFetchPage(rawUrl: string, options: SafeFetchOptions = {}): Promise<SafePage | null> {
+  return safeFetchCore(rawUrl, options, true);
+}
+
+async function safeFetchCore(
+  rawUrl: string,
+  options: SafeFetchOptions,
+  acceptAnyType: boolean,
+): Promise<SafePage | null> {
   const maxBytes = options.maxBytes ?? SAFE_FETCH_MAX_BYTES;
   const maxRedirects = options.maxRedirects ?? SAFE_FETCH_MAX_REDIRECTS;
   const timeoutMs = options.timeoutMs ?? SAFE_FETCH_TIMEOUT_MS;
@@ -427,6 +456,7 @@ export async function safeFetchText(
         const contentType = res.headers.get("content-type");
         if (!isAllowedContentType(contentType)) {
           abandon(res.body, hopAbort);
+          if (acceptAnyType) return { finalUrl: current, contentType: contentType ?? "", text: null };
           return refuse(`refused content-type ${contentType ?? "(none)"}`, current);
         }
 
@@ -434,7 +464,7 @@ export async function safeFetchText(
         // 50 MB before `capContent` ever sees it. Over the cap we keep what we have and
         // stop pulling: a truncated article still summarizes, a refused one does not.
         const body = res.body;
-        if (!body) return "";
+        if (!body) return { finalUrl: current, contentType: contentType ?? "", text: "" };
         const reader = body.getReader();
         const chunks: Uint8Array[] = [];
         let total = 0;
@@ -477,7 +507,7 @@ export async function safeFetchText(
         }
         // Non-fatal decode: cutting at a byte boundary can split a multi-byte
         // codepoint, and one U+FFFD at the tail is not worth losing the article over.
-        return new TextDecoder("utf-8").decode(buf);
+        return { finalUrl: current, contentType: contentType ?? "", text: new TextDecoder("utf-8").decode(buf) };
       } finally {
         hopChain.dispose();
       }

@@ -31,6 +31,7 @@ import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript
 import { sumLatestRailStyles, sumLatestRailScript } from "./components/sum-latest-rail.ts";
 import { sumReaderStyles, sumReaderScript } from "./components/sum-reader.ts";
 import { sumFactcheckStyles, sumFactcheckClientScript } from "./components/sum-factcheck.ts";
+import { sumLinksStyles, sumLinksClientScript } from "./components/sum-links.ts";
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { shareDialogClientScript } from "./components/share-dialog-client.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -92,6 +93,8 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
   const shareDialog = await shareDialogClientScript();
   // The doc panel's ✓ Fact check section + rail badges (sum-factcheck-client.ts).
   const factcheckClient = await sumFactcheckClientScript();
+  // The doc panel's 🔎 Find links section (sum-links-client.ts).
+  const linksClient = await sumLinksClientScript();
   // Percentile cuts on the CURRENT huginn author ranking, computed once at render and
   // embedded — the page is fully server-rendered, so the X author tier badges + "Top
   // authors" filter read these directly (no extra endpoint). null when the scores file
@@ -128,6 +131,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     ${sumLatestRailStyles()}
     ${sumReaderStyles()}
     ${sumFactcheckStyles()}
+    ${sumLinksStyles()}
     ${sumOutcomesStyles()}
     ${sumStatsStyles()}
     ${agentPresenceStyles()}
@@ -276,7 +280,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     </div>
   </div>
 
-  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null, exportPage: true, rerun: true, moreMenu: true, factcheck: true })}
+  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null, exportPage: true, rerun: true, moreMenu: true, factcheck: true, findLinks: true })}
   ${tracesPromptModalHtml()}
 
   ${MARKED_CDN_SCRIPT}
@@ -284,6 +288,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
        the component scripts so their wiring can see it. -->
   <script>${shareDialog}</script>
   <script>${factcheckClient}</script>
+  <script>${linksClient}</script>
   <script>
     // Summary-source registry projection (from src/summaries/sources.ts).
     const SOURCES = ${clientSourcesJson()};

@@ -79,7 +79,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/api/search/health", "/api/search/collections", "/api/search/collection/:name/documents",
     "/api/search/document/:collection/*", "/api/research/bot-collections", "/api/research/tags",
     "/api/research/documents", "/api/research/document/:collection/*",
-    "/api/summaries/export", "/api/summaries/rerun/options", "/api/anthropic/document/*",
+    "/api/summaries/export", "/api/summaries/rerun/options", "/api/summaries/links/options", "/api/anthropic/document/*",
     "/api/articles/document/*", "/api/youtube/document/*", "/api/x-articles/document/*",
     "/api/tiktok/document/*", "/api/vimeo/document/*", "/api/graph/collections",
     "/api/wiki/gardener/backlog-doc-delete-status", "/api/indexing/overview",

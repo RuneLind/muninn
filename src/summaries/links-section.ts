@@ -69,7 +69,7 @@ function unescapeText(text: string): string {
 }
 
 /** `(` and `)` percent-encoded, so the link's closing paren is the only one. */
-function encodeUrl(url: string): string {
+export function encodeUrl(url: string): string {
   return url.replace(/\(/g, "%28").replace(/\)/g, "%29").replace(/\s/g, "%20");
 }
 

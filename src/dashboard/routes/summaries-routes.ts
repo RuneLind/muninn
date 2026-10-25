@@ -21,6 +21,7 @@ import { registerFramesRoutes } from "./frames-routes.ts";
 import { registerSummariesContextRoutes } from "./summaries-context.ts";
 import { registerSummariesFactcheckRoutes } from "./summaries-factcheck.ts";
 import { registerSummariesFactcheckWritebackRoutes } from "./summaries-factcheck-writeback.ts";
+import { registerSummariesLinksRoutes } from "./summaries-links.ts";
 
 const log = getLog("dashboard");
 
@@ -218,6 +219,8 @@ export function registerSummariesRoutes(
   registerSummariesFactcheckRoutes(app, config);
   // …and its write-back: ➕ Add the block, ✎ Integrate the corrections.
   registerSummariesFactcheckWritebackRoutes(app, config);
+  // 🔎 Find links: candidates, the web search and the save into `## Links`.
+  registerSummariesLinksRoutes(app, config);
 
   app.get("/api/summaries/stats", async (c) => {
     const botName = c.req.query("bot") || "jarvis";

@@ -418,6 +418,7 @@ export function sumArticleLibraryScript(): string {
       if (typeof closeShareDialog === 'function') closeShareDialog();
       // A fact-check write still running must not reopen the panel it finishes into.
       if (typeof sumFactcheckOnClose === 'function') sumFactcheckOnClose();
+      if (typeof sumLinksOnClose === 'function') sumLinksOnClose();
       // A re-run started from this panel keeps running. Its ONE stream moves to
       // the shelf's job card, which is the surface the reader can now see; the
       // menu and its status line go with the panel.
@@ -1353,6 +1354,8 @@ export function sumArticleLibraryScript(): string {
       // ✓ Fact check follows the same registered-source gate; the section
       // itself mounts once the article is rendered (below).
       if (typeof sumFactcheckOnOpen === 'function') sumFactcheckOnOpen(docId, _shareDoc ? source : null, null);
+      // 🔎 Find links: shown only on a document the save path accepts (its options route).
+      if (typeof sumLinksOnOpen === 'function') sumLinksOnOpen(docId, _shareDoc ? source : null, null);
 
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');
@@ -1474,6 +1477,7 @@ export function sumArticleLibraryScript(): string {
             if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
           }
           if (typeof sumFactcheckOnOpen === 'function') sumFactcheckOnOpen(docId, _shareDoc ? source : null, mainEl);
+          if (typeof sumLinksOnOpen === 'function') sumLinksOnOpen(docId, _shareDoc ? source : null, mainEl);
         }
 
         // Similar searches the summary's opening (readerSimilarQuery), the
