@@ -18,6 +18,7 @@ import { Marked } from "marked";
 import { renderExportMarkdown } from "./export.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { sanitizedMarkedInstallScript } from "../dashboard/views/components/doc-panel.ts";
+import { splitTranscript } from "./transcript-split.ts";
 
 const LINE: LinkLine = {
   icon: "📄",
@@ -276,9 +277,6 @@ describe("fix round 2 batch 1 — R2-1: the fence closer agrees with marked", ()
       ["Intro\n\n```python\nprint(1)", "```"],
       ["Intro\n\n~~~~\ncode", "~~~~"],
       ["Intro\n\n````md\n```js\nx\n```", "````"],
-      // The walker reads line 3 as an opener and line 5 as its closer; marked
-      // reads line 3 as prose and line 5 as an opener, so the body ends open.
-      ["Intro\n\n```js``` inline\n\n```\ncode", "```"],
     ] as const) {
       expect(appendLinksSection(summary, SECTION)).toBe(`${summary}\n${closer}\n\n${SECTION}`);
       for (const html of renders(summary)) {
@@ -310,5 +308,125 @@ describe("fix round 2 batch 1 — mutant pins (links-section)", () => {
 
   test("M13: an envelope line ending in a full stop is still the envelope line", () => {
     expect(parseLinksLine("CATEGORY: x\nLINKS: 1, 2.\nSUMMARY:\nb")).toEqual({ text: "CATEGORY: x\nSUMMARY:\nb", pick: [1, 2] });
+  });
+});
+
+/**
+ * The two fence readers — the line walker (`findLinksSection`, `splitTranscript`)
+ * and marked (`/summaries`, the export) — each say whether the body ends inside
+ * a fence. A closer goes in only when both say yes; every other cell keeps the
+ * plain append of 5fc5a849, which no reader may do worse than.
+ */
+describe("class check — the closer per (walker, marked) cell", () => {
+  const SECTION = "## Links\n\n- 📄 [A](https://a.example) · from description";
+  /** 5fc5a849's append, with no closer. */
+  const baseAppend = (summary: string) => `${summary.trimEnd()}\n\n${SECTION}`;
+  const verdicts = (body: string) => {
+    const range = findLinksSection(body);
+    const withTranscript = `${body}\n\n## Transcript\n\nwords`;
+    return {
+      walkerLinks: range !== null && body.slice(range.start, range.end).trim() === SECTION,
+      walkerTranscript: splitTranscript(withTranscript).transcript?.trim() === "words",
+      markedLinks: clientRender(withTranscript).includes("<h2>Links</h2>"),
+      exportLinks: renderExportMarkdown(withTranscript).includes("<h2>Links</h2>"),
+    };
+  };
+  const ALL = { walkerLinks: true, walkerTranscript: true, markedLinks: true, exportLinks: true };
+
+  test("both closed: nothing appended, every reader sees the section", () => {
+    const summary = "Intro\n\n```\nx\n```\n\nAfter.";
+    expect(appendLinksSection(summary, SECTION)).toBe(baseAppend(summary));
+    expect(verdicts(appendLinksSection(summary, SECTION))).toEqual(ALL);
+  });
+
+  test("both open: a closer both accept, and every reader sees the section", () => {
+    for (const [summary, closer] of [
+      ["Intro\n\n```python\nprint(1)", "```"],
+      ["Intro\n\n  ~~~~ js\ncode", "~~~~"],
+    ] as const) {
+      expect(appendLinksSection(summary, SECTION)).toBe(`${summary}\n${closer}\n\n${SECTION}`);
+      expect(verdicts(appendLinksSection(summary, SECTION))).toEqual(ALL);
+    }
+    // Both open on different characters: no closer ends both, so nothing is appended.
+    const mixed = "Intro\n\n```js``` inline\n~~~\ncode";
+    expect(appendLinksSection(mixed, SECTION)).toBe(baseAppend(mixed));
+  });
+
+  test("walker closed, marked open: nothing appended, the walker keeps the section and the transcript", () => {
+    for (const summary of [
+      "Intro\n\n```\ncode\n```text",
+      "Intro\n\n```\ncode\n    ```",
+      "1. Install:\n   ```bash\n   npm i\n```\n2. Run it.",
+      "Intro\n\n```js``` inline\n\n```\ncode",
+    ]) {
+      expect(appendLinksSection(summary, SECTION)).toBe(baseAppend(summary));
+      const v = verdicts(appendLinksSection(summary, SECTION));
+      expect(v.walkerLinks).toBe(true);
+      expect(v.walkerTranscript).toBe(true);
+    }
+  });
+
+  test("walker open, marked closed: nothing appended, marked keeps the heading", () => {
+    for (const summary of ["Intro\n\n```js``` is the inline form.\n\nMore.", "Intro\n\n    ```\n    const x = 1;"]) {
+      expect(appendLinksSection(summary, SECTION)).toBe(baseAppend(summary));
+      const v = verdicts(appendLinksSection(summary, SECTION));
+      expect(v.markedLinks).toBe(true);
+      expect(v.exportLinks).toBe(true);
+    }
+  });
+
+  /** mulberry32 — a fixed seed, so a failure names a reproducible body. */
+  const rng = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const SEED = 742;
+  const CASES = 5000;
+  const fenceBody = (r: () => number): string => {
+    const pick = <T,>(xs: readonly T[]) => xs[Math.floor(r() * xs.length)]!;
+    const fence = () =>
+      " ".repeat(pick([0, 0, 0, 1, 2, 3, 4, 6])) +
+      pick(["`", "~"]).repeat(3 + Math.floor(r() * 3)) +
+      pick(["", "", "", "js", " text", "python x"]);
+    const lines: string[] = [];
+    const n = 1 + Math.floor(r() * 8);
+    for (let i = 0; i < n; i++) {
+      lines.push(
+        pick([
+          fence,
+          fence,
+          fence,
+          () => "",
+          () => "Prose line.",
+          () => "   code inside",
+          () => "1. Install:",
+          () => "- item",
+          () => "```js``` inline",
+          () => "Some ```x``` span",
+        ])(),
+      );
+    }
+    return lines.join("\n");
+  };
+
+  test(`property: ${CASES} fence-ish bodies (seed ${SEED}) — no reader does worse than the plain append`, () => {
+    const r = rng(SEED);
+    const worse: string[] = [];
+    let closersAppended = 0;
+    for (let i = 0; i < CASES; i++) {
+      const summary = fenceBody(r);
+      const out = appendLinksSection(summary, SECTION);
+      if (out !== baseAppend(summary)) closersAppended++;
+      const base = verdicts(baseAppend(summary));
+      const now = verdicts(out);
+      for (const k of Object.keys(base) as (keyof typeof base)[]) {
+        if (base[k] && !now[k]) worse.push(`${k}: ${JSON.stringify(summary)}`);
+      }
+    }
+    expect(worse.slice(0, 5)).toEqual([]);
+    // The generator reaches the both-open cell, so the closer path is exercised.
+    expect(closersAppended).toBeGreaterThan(100);
   });
 });

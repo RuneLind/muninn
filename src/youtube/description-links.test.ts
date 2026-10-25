@@ -538,7 +538,7 @@ describe("fix round 2 batch 1 — R2-2: by-rule placement narrowed back", () => 
     });
   });
 
-  test("lead-magnet cues (free, cheat sheet, download, grab) demote an entry in any heading shape", () => {
+  test("lead-magnet cues (free, cheat sheet, download, grab) demote an entry on its own line or on a title line directly over its URL", () => {
     expect(classes("Grab the cheat sheet I mentioned:\nhttps://leads.example/sheet")).toEqual({ "https://leads.example/sheet": "candidate" });
     expect(classes("SOURCES\n- Download the workbook https://leads.example/wb\n- Free guide https://leads.example/g")).toEqual({
       "https://leads.example/wb": "candidate",

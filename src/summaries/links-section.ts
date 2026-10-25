@@ -194,34 +194,51 @@ export function splitLinksSection(body: string): { body: string; section: string
 /** Block lexing only, default options: what `/summaries` and the export parse with (marked 15.0.12, no block extensions). */
 const fenceLexer = new Marked();
 
-/**
- * The marker that closes the fenced block `summary` ends inside, as marked
- * reads it, or `null` when the body does not end inside one. Decided by marked
- * itself rather than by `mapProseLines`' line walk: the walk opens a fence on a
- * line that starts with an inline ```` ```js``` ```` span or on a ``` inside an
- * indented code block, and a closer appended there would OPEN a fence in the
- * renderer.
- */
-function trailingFenceCloser(summary: string): string | null {
-  const last = fenceLexer.lexer(`${summary}\n\n${LINKS_HEADING}\n`).at(-1);
-  if (last?.type !== "code") return null;
-  return /^ {0,3}(`{3,}|~{3,})/.exec(last.raw)?.[1] ?? null;
+/** The fence `text` ends inside as marked reads it (`{char, length}`), or `null`. */
+function markedOpenFence(text: string): { char: string; length: number } | null {
+  const last = fenceLexer.lexer(`${text}\n\n${LINKS_HEADING}\n`).at(-1);
+  const m = last?.type === "code" ? /^ {0,3}(`{3,}|~{3,})/.exec(last.raw) : null;
+  return m ? { char: m[1]!.charAt(0), length: m[1]!.length } : null;
+}
+
+/** Whether marked reads a `## Links` heading appended after `text` as the h2 it is. */
+function markedSeesHeading(text: string): boolean {
+  const last = fenceLexer.lexer(`${text}\n\n${LINKS_HEADING}\n`).at(-1);
+  return last?.type === "heading" && last.depth === 2;
+}
+
+/** The fence `text` ends inside as `mapProseLines` walks it, or `null`. Same rule, replayed for the opener. */
+function walkerOpenFence(text: string): { char: string; length: number } | null {
+  let fence: string | null = null;
+  for (const line of text.split("\n")) {
+    const m = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    if (m && fence === null) fence = m;
+    else if (m && fence !== null && m.charAt(0) === fence.charAt(0) && m.length >= fence.length) fence = null;
+  }
+  return fence === null ? null : { char: fence.charAt(0), length: fence.length };
+}
+
+/** Whether the walker finds a `## Links` heading appended after `text`. */
+function walkerSeesHeading(text: string): boolean {
+  return findLinksSection(`${text}\n\n${LINKS_HEADING}\n`)?.start === text.length + 2;
 }
 
 /**
  * `summary` with `section` appended as its last block, or `summary` as it is.
- * A summary that ends inside an open code fence (a model that never closed one)
- * gets the closer first, or the section would render inside the fence.
+ * Does the summary end inside a fence, per the line walker and per marked? Both
+ * open: a closer both accept, kept only when both then see `## Links`. Both closed,
+ * walker-only open, marked-only open: nothing, the plain append (no reader does worse).
  */
 export function appendLinksSection(summary: string, section: string | null): string {
   if (section === null || section === "") return summary;
-  let closed = summary.trimEnd();
-  // A closer of the opener's own character and length always ends a top-level
-  // fence; the loop re-lexes to confirm, and stops after a few rounds regardless.
-  for (let i = 0, closer = trailingFenceCloser(closed); closer !== null && i < 3; i++, closer = trailingFenceCloser(closed)) {
-    closed = `${closed}\n${closer}`;
+  const body = summary.trimEnd();
+  const walker = walkerOpenFence(body);
+  const marked = markedOpenFence(body);
+  if (walker && marked && !walkerSeesHeading(body)) {
+    const closed = `${body}\n${walker.char.repeat(Math.max(walker.length, marked.length))}`;
+    if (walkerSeesHeading(closed) && markedSeesHeading(closed)) return `${closed}\n\n${section}`;
   }
-  return `${closed}\n\n${section}`;
+  return `${body}\n\n${section}`;
 }
 
 // --- the LINKS: envelope line ------------------------------------------------
