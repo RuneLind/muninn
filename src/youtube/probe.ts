@@ -39,7 +39,7 @@ export function youtubeProbeArgs(url: string): string[] {
   return ["yt-dlp", ...YTDLP_ISOLATION_ARGS, "-O", YOUTUBE_PROBE_TEMPLATE, "--skip-download", "--no-playlist", url];
 }
 
-/** One probe line, parsed: `parseYtDlpJson`'s fields plus a string `description`. */
+/** One probe line, parsed: `ytDlpInfoFromRecord`'s fields plus a string `description`. */
 export function parseYouTubeProbe(line: string): YouTubeProbe | null {
   const rec = parseYtDlpRecord(line);
   if (rec === null) return null;

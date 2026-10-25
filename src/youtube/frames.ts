@@ -138,7 +138,7 @@ export interface YouTubeFramesDecision {
  * nothing else, so the state space is a table rather than a call graph.
  *
  * `duration_unknown` is its own answer and is checked BEFORE the length cuts,
- * deliberately: `parseYtDlpJson` maps a missing `duration` to **0** (a live
+ * deliberately: `ytDlpInfoFromRecord` (behind `parseYtDlpJson` and the YouTube probe) maps a missing `duration` to **0** (a live
  * stream reports none), and a probe that failed hands over `null` — both would
  * otherwise fall under the "too short" cut by accident and be reported as a
  * clip. A non-finite or negative duration is the same fact.

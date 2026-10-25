@@ -6,7 +6,7 @@
  *
  * Sources, in order:
  *   - the yt-dlp probe (`./probe.ts`), which every capture runs. Its sentinels
- *     count as absent: `parseYtDlpJson` maps a missing duration to `0` and a
+ *     count as absent: `ytDlpInfoFromRecord` (behind `parseYtDlpJson` and the YouTube probe) maps a missing duration to `0` and a
  *     missing uploader to `""`, and yt-dlp omits `upload_date` for live and
  *     upcoming videos.
  *   - YouTube oEmbed, for `author` alone, when the probe failed or named
