@@ -17,7 +17,12 @@
  * descriptions before they were coded (plan D17); the shapes that changed the
  * table are listed in the PR that added this file. Every rule has an invented
  * fixture in `description-links.test.ts` — the samples stay out of this repo.
+ *
+ * Pure: its one import is `normalizeDestinationUrl`, itself pure, which the
+ * dedup keys on.
  */
+
+import { normalizeDestinationUrl } from "../summaries/destination-url.ts";
 
 export type DescriptionLinkClass = "social" | "creator" | "source" | "repo" | "candidate";
 
@@ -55,6 +60,7 @@ const SHORTENER_HOSTS = new Set([
   // D17 survey additions: affiliate and sponsor shorteners seen in the sample.
   "amzn.to",
   "goo.gle",
+  "goo.gl",
   "hubs.li",
   "ow.ly",
   "lnkd.in",
@@ -80,6 +86,12 @@ const ONE_SEGMENT_PROFILE_HOSTS = new Set([
 ]);
 
 const PROFILE_TABS = new Set(["about", "videos", "featured"]);
+
+/** First path segments that are a post or a feature on a one-segment host, never a profile. */
+const NON_PROFILE_FIRST_SEGMENTS = new Set(["watch", "share", "story.php", "permalink.php", "photo.php", "hashtag", "search"]);
+
+/** A LinkedIn `/in/<x>/…` or `/company/<x>/…` tail that is a feed of posts, not the profile. */
+const LINKEDIN_POST_TABS = new Set(["posts", "recent-activity", "activity"]);
 
 /** Any URL on these hosts is promo: community, membership and link-in-bio pages. */
 const ANY_URL_SOCIAL_HOSTS = new Set([
@@ -113,11 +125,13 @@ export function isSocialUrl(url: URL): boolean {
   if (ONE_SEGMENT_PROFILE_HOSTS.has(host)) {
     if (segs.length === 0) return false;
     if (host === "tiktok.com" && !segs[0]!.startsWith("@")) return false;
+    if (NON_PROFILE_FIRST_SEGMENTS.has(segs[0]!.toLowerCase())) return false;
     if (segs.length === 1) return true;
     return segs.length === 2 && PROFILE_TABS.has(segs[1]!.toLowerCase());
   }
   if (host === "linkedin.com") {
-    return (segs[0] === "in" || segs[0] === "company") && segs.length >= 2 && segs.length <= 3;
+    if (segs[0] !== "in" && segs[0] !== "company") return false;
+    return segs.length === 2 || (segs.length === 3 && !LINKEDIN_POST_TABS.has(segs[2]!.toLowerCase()));
   }
   // D17: a Substack profile (`substack.com/@user`).
   if (host === "substack.com") return segs.length === 1 && segs[0]!.startsWith("@");
@@ -130,23 +144,35 @@ export function isSocialUrl(url: URL): boolean {
   return false;
 }
 
-/** The uploader name, and each part of a `Name | Topic` / `Name - Brand` name, as host-label keys. */
-export function uploaderKeys(uploader: string): string[] {
-  const norm = (s: string) => s.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const keys = new Set<string>();
-  const whole = norm(uploader);
-  if (whole.length >= 3) keys.add(whole);
-  for (const part of uploader.split(/\s[|\-–—·]\s|\|/)) {
-    const k = norm(part);
-    if (k.length >= 3) keys.add(k);
-  }
-  return [...keys];
+/** Name parts too generic to be the uploader's domain (`Pat - Podcast` must not claim `podcasts.apple.com`). */
+const GENERIC_NAME_PARTS = new Set(["podcast", "podcasts", "official", "clips", "channel", "tv", "news", "show", "ai", "tech", "media", "studio"]);
+
+export interface UploaderKeys {
+  /** The whole name, normalized; matched inside a host label when ≥5 chars, exactly otherwise. */
+  readonly whole: string | null;
+  /** Each part of a `Name | Topic` / `Name - Brand` name; matched against a whole host label only. */
+  readonly parts: string[];
 }
 
-function hostMatchesUploader(host: string, keys: readonly string[]): boolean {
-  if (keys.length === 0) return false;
+/** The uploader name as host-label keys. Keys under 3 chars are dropped. */
+export function uploaderKeys(uploader: string): UploaderKeys {
+  const norm = (s: string) => s.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const w = norm(uploader);
+  const whole = w.length >= 3 ? w : null;
+  const parts = new Set<string>();
+  for (const part of uploader.split(/\s[|\-–—·]\s|\|/)) {
+    const k = norm(part);
+    if (k.length >= 3 && k !== whole && !GENERIC_NAME_PARTS.has(k)) parts.add(k);
+  }
+  return { whole, parts: [...parts] };
+}
+
+function hostMatchesUploader(host: string, keys: UploaderKeys): boolean {
   const labels = host.split(".").slice(0, -1);
-  return labels.some((label) => keys.some((k) => label === k || (k.length >= 5 && label.includes(k))));
+  const { whole, parts } = keys;
+  return labels.some(
+    (label) => parts.includes(label) || (whole !== null && (label === whole || (whole.length >= 5 && label.includes(whole)))),
+  );
 }
 
 function isContentHost(host: string): boolean {
@@ -164,31 +190,38 @@ function isRepoUrl(url: URL): boolean {
 // --- URL extraction --------------------------------------------------------
 
 const URL_RE = /https?:\/\/[^\s<>"'`]+/g;
-const TRAILING_PUNCT = new Set([".", ",", ";", ":", "!", "?", "'", '"', "”", "’", "»", "*"]);
+const TRAILING_PUNCT = new Set([".", ",", ";", ":", "!", "?", "'", '"', "”", "’", "»", "*", "。", "，", "、", "！", "？", "：", "；"]);
+/** Closers stripped only when unbalanced, with their openers. */
+const CLOSERS: Record<string, string> = { ")": "(", "]": "[", "）": "（", "」": "「", "』": "『", "】": "【", "〉": "〈", "》": "《" };
+/** Trailing emoji (with skin tones, joiners, VS16): a pointer after a URL, never part of it. */
+const TRAILING_EMOJI_RE = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u200d\ufe0f\u20e3]+$/u;
+
+function count(s: string, ch: string): number {
+  return s.split(ch).length - 1;
+}
 
 /**
- * The URL out of one raw match: trailing `.,;:!?` (and closing quotes) stripped,
- * and a closing `)` stripped only when it is unbalanced, so `Foo_(bar)` keeps
- * its own parentheses and `(see https://a.b/c)` loses the prose one.
+ * The URL out of one raw match: trailing `.,;:!?` (and closing quotes,
+ * full-width punctuation and emoji) stripped, and a closing `)` (or `]`, `）`,
+ * `」`…) stripped only when it is unbalanced, so `Foo_(bar)` keeps its own
+ * parentheses and `(see https://a.b/c)` loses the prose one.
  */
 export function trimUrl(raw: string): string {
   let url = raw;
   for (;;) {
+    const emoji = TRAILING_EMOJI_RE.exec(url);
+    if (emoji) {
+      url = url.slice(0, emoji.index);
+      continue;
+    }
     const last = url.at(-1);
     if (last === undefined) return url;
     if (TRAILING_PUNCT.has(last)) {
       url = url.slice(0, -1);
       continue;
     }
-    if (last === ")") {
-      const open = (url.match(/\(/g) ?? []).length;
-      const close = (url.match(/\)/g) ?? []).length;
-      if (close > open) {
-        url = url.slice(0, -1);
-        continue;
-      }
-    }
-    if (last === "]" && !url.includes("[")) {
+    const opener = CLOSERS[last];
+    if (opener !== undefined && count(url, last) > count(url, opener)) {
       url = url.slice(0, -1);
       continue;
     }
@@ -196,14 +229,38 @@ export function trimUrl(raw: string): string {
   }
 }
 
-/** Every URL on one line, with its offset — in order. */
-export function extractLineUrls(line: string): Array<{ url: string; index: number }> {
-  const out: Array<{ url: string; index: number }> = [];
+/** `[text](https://…` — a markdown link; the href is trimmed like any URL. */
+const MD_LINK_RE = /\[([^\[\]\n]*)\]\((https?:\/\/[^\s<>"'`]+)/g;
+
+export interface LineUrl {
+  readonly url: string;
+  readonly index: number;
+  /** A markdown link's text, when the URL is the href of `[text](url)`. */
+  readonly linkText?: string;
+}
+
+/** Every URL on one line, with its offset — in order. A markdown link counts once, as its href. */
+export function extractLineUrls(line: string): LineUrl[] {
+  const out: LineUrl[] = [];
+  const spans: Array<[number, number]> = [];
+  for (const m of line.matchAll(MD_LINK_RE)) {
+    const url = trimUrl(m[2]!);
+    if (url.length <= "https://".length) continue;
+    const hrefAt = m.index + m[0].length - m[2]!.length;
+    spans.push([m.index, hrefAt + url.length]);
+    out.push({ url, index: hrefAt, linkText: m[1]! });
+  }
   for (const m of line.matchAll(URL_RE)) {
+    if (spans.some(([a, b]) => m.index >= a && m.index < b)) continue;
     const url = trimUrl(m[0]);
     if (url.length > "https://".length) out.push({ url, index: m.index });
   }
-  return out;
+  return out.sort((a, b) => a.index - b.index);
+}
+
+/** The dedup key: the normalized destination, else the URL itself. */
+export function linkKey(url: string): string {
+  return normalizeDestinationUrl(url) ?? url;
 }
 
 function hasUrl(line: string): boolean {
@@ -221,22 +278,38 @@ function headingText(line: string): string {
     .trim();
 }
 
-/** Words that start a source block. Neither a bare *links* nor *resources* does. */
-const SOURCE_HEADING_RE = /\b(?:mentioned|references|sources|further reading|papers|links in this video)\b/i;
+/**
+ * Words that start a source block. Neither a bare *links* nor *resources* does.
+ * The singular *source* skips *open source* and *source code*.
+ */
+const SOURCE_HEADING_RE =
+  /\b(?:mentioned|references?|sources|(?<!open[\s-])source(?!\s+code)|further reading|papers?|links in this video)\b/i;
 
 function isSourceHeadingText(text: string): boolean {
   return SOURCE_HEADING_RE.test(text);
 }
 
+/** Down-pointing emoji and arrows: «the links are below», nothing more. */
+const POINTER_CHARS = "👇⬇↓⤵🔽⏬";
+const POINTER_ONLY_RE = new RegExp(`^[${POINTER_CHARS}\\u{1F3FB}-\\u{1F3FF}\\ufe0f\\s]+$`, "u");
+const TRAILING_POINTER_RE = new RegExp(`[${POINTER_CHARS}][\\u{1F3FB}-\\u{1F3FF}\\ufe0f\\s]*$`, "u");
+
+/** A blank line, or a line of nothing but pointer emoji (`👇👇👇`), which reads as one. */
+function isBlankish(line: string): boolean {
+  const t = line.trim();
+  return t === "" || POINTER_ONLY_RE.test(t);
+}
+
 function nextNonBlank(lines: readonly string[], from: number): number {
-  for (let j = from; j < lines.length; j++) if (lines[j]!.trim() !== "") return j;
+  for (let j = from; j < lines.length; j++) if (!isBlankish(lines[j]!)) return j;
   return -1;
 }
 
-/** A line of nothing but rule characters (`━━━`, `___`, `===`, `---`). */
+/** A line of nothing but rule characters (`━━━`, `___`, `===`, `---`, `▬▬▬`) — not dots, not emoji. */
+const SEPARATOR_RE = /^[\u2500-\u257f\u25ac\u23af_=\-*~—–‐‒―]{3,}$/u;
+
 function isSeparatorLine(line: string): boolean {
-  const t = line.trim();
-  return t.length >= 3 && !/[\p{L}\p{N}]/u.test(t);
+  return SEPARATOR_RE.test(line.replace(/\s+/g, ""));
 }
 
 /**
@@ -251,7 +324,10 @@ export function isHeadingLine(lines: readonly string[], i: number): boolean {
   if (hasUrl(line)) return false;
   const text = headingText(line);
   if (text === "" || text.length > 60 || !/\p{L}/u.test(text)) return false;
-  const colon = line.trim().endsWith(":");
+  // Trailing decoration first: «Sources: 👇» ends with `:`, and a trailing
+  // pointer (`👇`) says the same thing a `:` does.
+  const trimmed = line.trim();
+  const colon = TRAILING_POINTER_RE.test(trimmed) || trimmed.replace(TRAIL_DECOR_RE, "").endsWith(":");
   const allCaps = text === text.toUpperCase() && /\p{Lu}/u.test(text);
   if (colon) {
     const j = nextNonBlank(lines, i + 1);
@@ -274,9 +350,23 @@ const BARE_URL_LINE_RE = /^\s*https?:\/\/\S+\s*$/;
 /** How one block entry is written — what a blank line must be followed by to continue the block. */
 type EntryShape = "bullet" | "number" | "bare" | "title-over-url" | "inline";
 
-/** The shape of the entry that starts at line `j` (a non-blank line). */
+/**
+ * The shape of the entry that starts at line `j` (a non-blank line). A bullet or
+ * numbered title line directly over a line that leads with its URL is a
+ * title-over-URL entry: the marker is decoration, the shape is the two lines.
+ */
 function entryShapeAt(lines: readonly string[], j: number): EntryShape | null {
   const line = lines[j]!;
+  const below = j + 1 < lines.length ? lines[j + 1]! : "";
+  if (
+    (BULLET_RE.test(line) || NUMBER_RE.test(line)) &&
+    !hasUrl(line) &&
+    urlLeadsLine(below) &&
+    !BULLET_RE.test(below) &&
+    !NUMBER_RE.test(below)
+  ) {
+    return "title-over-url";
+  }
   if (BULLET_RE.test(line)) return "bullet";
   if (NUMBER_RE.test(line)) return "number";
   if (BARE_URL_LINE_RE.test(line)) return "bare";
@@ -333,7 +423,7 @@ export function sourceBlockLines(lines: readonly string[]): Set<number> {
       open = false;
       continue;
     }
-    if (line.trim() === "") {
+    if (isBlankish(line)) {
       if (firstShape === null) continue;
       const j = nextNonBlank(lines, i + 1);
       const next = j < 0 ? null : entryShapeAt(lines, j);
@@ -361,11 +451,27 @@ export function sourceBlockLines(lines: readonly string[]): Set<number> {
 const DECOR = "\\s\\p{Extended_Pictographic}\\u{1F1E6}-\\u{1F1FF}\\u{1F3FB}-\\u{1F3FF}\\u200d\\ufe0f\\u20e3•\\-*·▪►‣◦→➡⇒⟶>»|=–—";
 const LEAD_JUNK_RE = new RegExp(`^[${DECOR}]+`, "u");
 const TRAIL_JUNK_RE = new RegExp(`[${DECOR}:,]+$`, "u");
+/** Trailing decoration, but not a `:` — what comes off before the heading's colon test. */
+const TRAIL_DECOR_RE = new RegExp(`[${DECOR}↓⤵]+$`, "u");
 /** Labels that say "a link follows" and nothing about what it is (D17: «Links:» over a URL). */
 const GENERIC_LABEL_RE = /^(?:links?|resources?|sources?|references?|website|web|site|here|link below|check it out)$/i;
 
+const LEAD_NUMBER_RE = /^\d+[.)](?:\s+|$)/;
+
 function cleanTitle(text: string): string {
-  return text.replace(LEAD_JUNK_RE, "").replace(TRAIL_JUNK_RE, "").replace(/\s+/g, " ").trim();
+  return text
+    .replace(LEAD_JUNK_RE, "")
+    .replace(LEAD_NUMBER_RE, "")
+    .replace(TRAIL_JUNK_RE, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** A title written as `"Title" (` before its URL: the open paren and the quotes go. */
+function unwrapTitle(title: string): string {
+  const t = title.replace(/\s*[(（]$/, "").trim();
+  const m = /^["“'‘«](.+)["”'’»]$/.exec(t);
+  return m ? m[1]!.trim() : t;
 }
 
 function splitAttribution(title: string): { title: string; attribution: string } {
@@ -386,10 +492,17 @@ export function hostAndPath(url: string): string {
 
 const TITLE_MAX = 200;
 
-function titleFor(lines: readonly string[], i: number, url: string, index: number): { title: string; attribution: string } {
+function titleFor(lines: readonly string[], i: number, found: LineUrl): { title: string; attribution: string } {
+  const { url, index, linkText } = found;
   const line = lines[i]!;
-  const before = line.slice(0, index).replace(URL_RE, " ");
-  let title = cleanTitle(before);
+  const linked = linkText === undefined ? "" : cleanTitle(linkText.replace(URL_RE, " "));
+  const before = line
+    .slice(0, linkText === undefined ? index : line.lastIndexOf("[", index))
+    .replace(MD_LINK_RE, " ")
+    .replace(URL_RE, " ");
+  // A generic link text («My [Website](…)») joins the words before it.
+  let title =
+    linked !== "" && !GENERIC_LABEL_RE.test(linked) ? linked : unwrapTitle(cleanTitle(linked === "" ? before : `${before} ${linked}`));
   if (title === "" || GENERIC_LABEL_RE.test(title)) {
     const prev = i > 0 ? lines[i - 1]! : "";
     const prevTitle = cleanTitle(prev);
@@ -425,7 +538,8 @@ const CLASS_RANK: Record<DescriptionLinkClass, number> = { source: 0, repo: 1, c
 
 /**
  * Every `http(s)` URL in `description`, each with exactly one class, in the
- * order of first appearance, deduplicated by URL.
+ * order of first appearance, deduplicated by normalized URL (`linkKey`) —
+ * the first occurrence's spelling is kept.
  */
 export function classifyDescriptionLinks(description: string, uploader: string): DescriptionLink[] {
   const lines = description.split(/\r?\n/);
@@ -433,7 +547,8 @@ export function classifyDescriptionLinks(description: string, uploader: string):
   const keys = uploaderKeys(uploader);
   const byUrl = new Map<string, { link: DescriptionLink; host: string }>();
   for (let i = 0; i < lines.length; i++) {
-    for (const { url, index } of extractLineUrls(lines[i]!)) {
+    for (const found of extractLineUrls(lines[i]!)) {
+      const { url } = found;
       let parsed: URL;
       try {
         parsed = new URL(url);
@@ -454,12 +569,15 @@ export function classifyDescriptionLinks(description: string, uploader: string):
       } else if (block.has(i) && !entryHasPromoCue(lines, i)) cls = "source";
       else if (isRepoUrl(parsed)) cls = "repo";
       else cls = "candidate";
-      const { title, attribution } = titleFor(lines, i, url, index);
+      const { title, attribution } = titleFor(lines, i, found);
       const link: DescriptionLink = { url, cls, line: i, title, attribution, ...(hint ? { hint } : {}) };
-      const seen = byUrl.get(url);
-      if (!seen) byUrl.set(url, { link, host });
+      const key = linkKey(url);
+      const seen = byUrl.get(key);
+      if (!seen) byUrl.set(key, { link, host });
       else if (CLASS_RANK[cls] < CLASS_RANK[seen.link.cls]) {
-        byUrl.set(url, { link: { ...link, line: seen.link.line, title: seen.link.title, attribution: seen.link.attribution }, host });
+        // The first occurrence's URL, line and title; the better class.
+        const first = seen.link;
+        byUrl.set(key, { link: { ...link, url: first.url, line: first.line, title: first.title, attribution: first.attribution }, host: seen.host });
       }
     }
   }
@@ -493,11 +611,11 @@ export const DESCRIPTION_TRUNCATION_NOTE = "[description truncated]";
  * and capped at {@link DESCRIPTION_PROMPT_MAX_CHARS} at a line boundary (D11).
  */
 export function descriptionForPrompt(description: string, links: readonly DescriptionLink[]): string {
-  const promo = new Set(links.filter((l) => isPromoClass(l.cls)).map((l) => l.url));
+  const promo = new Set(links.filter((l) => isPromoClass(l.cls)).map((l) => linkKey(l.url)));
   const kept: string[] = [];
   for (const line of description.split(/\r?\n/)) {
     const urls = extractLineUrls(line);
-    const promoHere = urls.filter((u) => promo.has(u.url));
+    const promoHere = urls.filter((u) => promo.has(linkKey(u.url)));
     if (promoHere.length === 0) {
       kept.push(line);
       continue;

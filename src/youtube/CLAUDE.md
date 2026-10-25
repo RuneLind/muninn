@@ -16,7 +16,7 @@ into huginn.
 | `scan-run.ts` | Its ffmpeg half: one decode pass producing thumbnails + signatures, the labelled tiled sheets (`contactSheetArgs`), the full-height re-grab |
 | `summarizer.ts` | The job: probe → transcript → download → frames (dense two-pass, or cadence) → `runCaptureOneShot` → ingest → source-draft |
 | `probe.ts` | The vertical's ONE yt-dlp probe (`probeYouTubeVideo`, `parseYouTubeProbe`): the six shared fields plus `description`. Frames-on runs it inside `framesQueue`, frames-off outside it with a 10 s bound. `null` on every failure; a missing binary (`ENOENT`) warns once per process |
-| `description-links.ts` | The description's links, classified, pure and import-free (`classifyDescriptionLinks`): social → creator → source block → repo → candidate, first rule wins. See **The description's links** below |
+| `description-links.ts` | The description's links, classified, pure (`classifyDescriptionLinks`; its one import is `normalizeDestinationUrl`, the dedup key): social → creator → source block → repo → candidate, first rule wins. See **The description's links** below |
 | `prompt.ts` | The two prompts as PURE builders (`buildYouTubeSystemPrompt` / `buildYouTubeUserPrompt`, plus the piece split `/summaries/prompts` tints by). Its own module so a view and the re-run can compose a prompt without yt-dlp, ffmpeg and the wiki queue behind it |
 | `finish.ts` | The post-model tail as ONE function (`finishYouTubeSummary`): `prepareLinksAnswer` (strip `LINKS:`, demote a model `## Links`) → parse → `enforceVisualReferences` → `keepReferencedFrames` → `dropFrameReferences` for whatever the copy could not serve. **A re-run must call this**, or it stores model-invented slide addresses the route 404s |
 | `kinds.ts` | `youtubeCaptureKinds` — the offer set this vertical narrows, called by the options route, the `bad_kind` check and the replay harness |
@@ -514,8 +514,10 @@ pieces, in order:
   domain; any other page on that domain is a candidate hinted `uploader's own
   site`) → `source` (inside a source block) → `repo` (GitHub repo, gist,
   Hugging Face, arXiv) → `candidate`. A source block starts at a heading line
-  naming *mentioned*, *references*, *sources*, *further reading*, *papers* or
-  *links in this video* (never a bare *links* or *resources*) and ends at the
+  naming *mentioned*, *reference(s)*, *source(s)* (not *open source* or
+  *source code*), *further reading*, *paper(s)* or *links in this video* (never
+  a bare *links* or *resources*; a trailing `👇` counts as a `:`; a line of
+  pointer emoji reads as a blank line) and ends at the
   next heading, a separator line, a prose line (no URL, not a bullet, number or
   title line over its URL — before the first URL too), or a blank line not
   followed by an entry written like the block's first one. An entry whose line

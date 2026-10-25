@@ -220,3 +220,12 @@ test("bodyUrlCounts counts prose URLs outside the section, and the ones the desc
     "See https://a.example/x, and https://invented.example/y.\n\n## Links\n\n- 📄 [A](https://a.example/x) · from description";
   expect(bodyUrlCounts(summary, new Set(["https://a.example/x"]))).toEqual({ bodyUrls: 2, bodyUrlsUnlisted: 1 });
 });
+
+test("bodyUrlCounts reads URLs the way the classifier does, and compares them normalized", () => {
+  const listed = new Set(["https://en.wikipedia.org/wiki/Foo_(bar)", "https://lab.example/x"]);
+  expect(bodyUrlCounts("See https://en.wikipedia.org/wiki/Foo_(bar).", listed)).toEqual({ bodyUrls: 1, bodyUrlsUnlisted: 0 });
+  expect(bodyUrlCounts("See https://www.lab.example/x/?utm_source=yt and [it](https://lab.example/x).", listed)).toEqual({
+    bodyUrls: 2,
+    bodyUrlsUnlisted: 0,
+  });
+});

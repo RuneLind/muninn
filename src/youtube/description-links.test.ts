@@ -132,7 +132,7 @@ describe("rule 2: creator", () => {
   });
 
   test("an uploader name's parts are keys too (`Name | Topic`, `Name - Brand`)", () => {
-    expect(uploaderKeys("Sam Doe | Agent Tips")).toEqual(["samdoeagenttips", "samdoe", "agenttips"]);
+    expect(uploaderKeys("Sam Doe | Agent Tips")).toEqual({ whole: "samdoeagenttips", parts: ["samdoe", "agenttips"] });
     expect(classes("Join → https://join.agenttips.example/x", "Sam Doe | Agent Tips")).toEqual({
       "https://join.agenttips.example/x": "creator",
     });
@@ -367,5 +367,125 @@ describe("what the prompt carries", () => {
     expect(text.length).toBeLessThanOrEqual(DESCRIPTION_PROMPT_MAX_CHARS);
     expect(text.endsWith(`\n${DESCRIPTION_TRUNCATION_NOTE}`)).toBe(true);
     expect(text.split("\n").at(-2)!.endsWith("x")).toBe(true);
+  });
+});
+
+describe("fix round 1 batch 2 — F2: real sources keep their by-rule placement", () => {
+  test("bulleted and numbered title-over-URL entries after the first stay in the block", () => {
+    const shapes = [
+      "SOURCES\n• Report one\nhttps://r.example/1\n\n• Report two\nhttps://r.example/2",
+      "Links mentioned in this video:\n\n- Spending your effort\nhttps://lab.example/blog/a\n\n- Effort levels\nhttps://lab.example/b",
+      "SOURCES\n1. Paper one\nhttps://p.example/1\n\n2. Paper two\nhttps://p.example/2",
+    ];
+    for (const d of shapes) expect(`${d} → ${Object.values(classes(d)).join(",")}`).toBe(`${d} → source,source`);
+  });
+
+  test("a pointer-emoji line under the heading is skipped like a blank line", () => {
+    const d = "Links mentioned in this video:\n👇👇👇\nhttps://lab.example/a\nhttps://lab.example/b";
+    expect(Object.values(classes(d))).toEqual(["source", "source"]);
+    expect(link(d, "https://lab.example/a").title).toBe("lab.example/a");
+    // Over a one-line entry too, where the pointer is no title line.
+    const inline = "Links mentioned in this video:\n👇\n• Paper: https://p.example/1";
+    expect(classes(inline)).toEqual({ "https://p.example/1": "source" });
+  });
+
+  test("a heading ending in a pointer emoji, directly over its URL, starts a block", () => {
+    const d = "📚 Links mentioned in this video 👇\nhttps://x.example/a";
+    expect(classes(d)).toEqual({ "https://x.example/a": "source" });
+  });
+
+  test("dots and emoji are not separators; a rule line still is", () => {
+    // A dots line is prose: it still ends the block, as a separator did.
+    const dots = "SOURCES\n• Paper: https://p.example/1\n...\n• Shop: https://shop.example/x";
+    expect(classes(dots)).toEqual({ "https://p.example/1": "source", "https://shop.example/x": "candidate" });
+    const rule = "SOURCES\n• Paper: https://p.example/1\n▬▬▬▬▬▬\n• Shop: https://shop.example/x";
+    expect(classes(rule)).toEqual({ "https://p.example/1": "source", "https://shop.example/x": "candidate" });
+  });
+
+  test("the promo invariant holds under the new shapes", () => {
+    const d = "Links mentioned in this video 👇\n• Paper one\nhttps://p.example/1\n\n• Sponsor: get 20% off\nhttps://deal.example/x";
+    expect(classes(d)).toEqual({ "https://p.example/1": "source", "https://deal.example/x": "candidate" });
+  });
+});
+
+describe("fix round 1 batch 2 — F5: titles and URL extraction", () => {
+  test("a markdown link gives its text as the title and its href as the URL", () => {
+    const d = "Sources:\n- [The attention paper](https://arxiv.org/abs/1706.00001)\n- [Wiki](https://en.wikipedia.org/wiki/Foo_(bar))";
+    const links = classifyDescriptionLinks(d, "Sample Channel");
+    expect(links.map((l) => [l.url, l.title, l.cls])).toEqual([
+      ["https://arxiv.org/abs/1706.00001", "The attention paper", "source"],
+      ["https://en.wikipedia.org/wiki/Foo_(bar)", "Wiki", "source"],
+    ]);
+  });
+
+  test("a generic markdown link text joins the words before it", () => {
+    const d = "➡️ My [Website](https://pat.example/)\nRead the [write-up](https://pat.example/w)";
+    expect(classifyDescriptionLinks(d, "Sample Channel").map((l) => l.title)).toEqual(["My Website", "write-up"]);
+  });
+
+  test("a quoted title before a parenthesised URL loses the quotes and the paren", () => {
+    const d = 'SOURCES\n• "The paper" (https://p.example/x)';
+    expect(link(d, "https://p.example/x").title).toBe("The paper");
+  });
+
+  test("list numbers are stripped from titles", () => {
+    const d = "SOURCES\n1. Spending your effort https://lab.example/a\n2) Other https://lab.example/b";
+    expect(classifyDescriptionLinks(d, "Sample Channel").map((l) => l.title)).toEqual(["Spending your effort", "Other"]);
+  });
+
+  test("trailing emoji and full-width punctuation are not part of the URL", () => {
+    expect(trimUrl("https://example.com/a👈")).toBe("https://example.com/a");
+    expect(trimUrl("https://example.com/a👈🏽")).toBe("https://example.com/a");
+    expect(trimUrl("https://example.com/b）")).toBe("https://example.com/b");
+    expect(trimUrl("https://example.com/c。")).toBe("https://example.com/c");
+    expect(trimUrl("https://example.com/d，")).toBe("https://example.com/d");
+    expect(trimUrl("https://example.com/e」")).toBe("https://example.com/e");
+    expect(trimUrl("https://example.com/（f）")).toBe("https://example.com/（f）");
+  });
+
+  test("dedup is by normalized URL; the first occurrence wins", () => {
+    const d = "SOURCES\n- A https://lab.example/x\n- B https://www.lab.example/x/?utm_source=yt";
+    const links = classifyDescriptionLinks(d, "Sample Channel");
+    expect(links.map((l) => [l.url, l.title])).toEqual([["https://lab.example/x", "A"]]);
+  });
+
+  test("a promo URL's second spelling is still dropped from the prompt", () => {
+    const d = "Intro.\nFollow: https://x.com/me\nAgain: https://www.x.com/me/?utm_source=yt";
+    expect(descriptionForPrompt(d, classifyDescriptionLinks(d, "Me"))).toBe("Intro.");
+  });
+});
+
+describe("fix round 1 batch 2 — F6: host rules", () => {
+  test("a generic part of the uploader name is not a key; parts match a host label exactly", () => {
+    expect(uploaderKeys("Pat Example - Podcast")).toEqual({ whole: "patexamplepodcast", parts: ["patexample"] });
+    expect(uploaderKeys("Sam Doe | Agent Tips")).toEqual({ whole: "samdoeagenttips", parts: ["samdoe", "agenttips"] });
+    const d = "SOURCES\n- Episode https://podcasts.apple.com/us/podcast/x/id1";
+    expect(classes(d, "Pat Example - Podcast")).toEqual({ "https://podcasts.apple.com/us/podcast/x/id1": "source" });
+    // A part matches a whole label, never inside one.
+    expect(link("Read: https://samdoeblog.example/post", "https://samdoeblog.example/post", "Sam Doe | Agent Tips").hint).toBeUndefined();
+    expect(link("Read: https://samdoe.example/post", "https://samdoe.example/post", "Sam Doe | Agent Tips").hint).toBe(
+      "uploader's own site",
+    );
+  });
+
+  test("post paths on Facebook and LinkedIn are not profiles", () => {
+    const d = [
+      "https://www.facebook.com/watch/?v=123",
+      "https://www.linkedin.com/company/acme/posts",
+      "https://www.linkedin.com/in/someone/recent-activity",
+    ].join("\n");
+    for (const cls of Object.values(classes(d))) expect(cls).toBe("candidate");
+    expect(classes("https://www.linkedin.com/in/someone/details")).toEqual({ "https://www.linkedin.com/in/someone/details": "social" });
+  });
+
+  test("goo.gl is a shortener", () => {
+    expect(classes("Check https://goo.gl/B3AWV5")).toEqual({ "https://goo.gl/B3AWV5": "creator" });
+  });
+
+  test("singular Source:, Paper: and Reference: headings start a block; OPEN SOURCE does not", () => {
+    for (const h of ["Source:", "Paper:", "Reference:"]) {
+      expect(`${h} ${link(`${h}\nhttps://p.example/x`, "https://p.example/x").cls}`).toBe(`${h} source`);
+    }
+    expect(classes("OPEN SOURCE TOOLS\n• Tool: https://tool.example/t")).toEqual({ "https://tool.example/t": "candidate" });
   });
 });

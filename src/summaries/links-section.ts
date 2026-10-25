@@ -21,6 +21,7 @@
  */
 
 import { mapProseLines, TRANSCRIPT_HEADING_RE, unclosedFenceMarker } from "./transcript-split.ts";
+import { extractLineUrls, linkKey } from "../youtube/description-links.ts";
 
 /** One line of the section. */
 export interface LinkLine {
@@ -266,16 +267,17 @@ export function prepareLinksAnswer(raw: string): { text: string; pick: LinksPick
   return { text: demoteLinksHeadings(text), pick };
 }
 
-const BODY_URL_RE = /https?:\/\/[^\s<>()"'`\]]+/g;
-
 /**
  * The `http(s)` URLs a summary's prose carries outside its `## Links` section —
  * `bodyUrls`, and how many of those the description never listed
- * (`bodyUrlsUnlisted`).
+ * (`bodyUrlsUnlisted`). URLs are read the way the classifier reads them
+ * (`extractLineUrls`) and compared by `linkKey`, so a spelling variant of a
+ * listed URL counts as listed.
  */
 export function bodyUrlCounts(summary: string, listed: ReadonlySet<string>): { bodyUrls: number; bodyUrlsUnlisted: number } {
   const range = findLinksSection(summary);
   const prose = range ? summary.slice(0, range.start) + summary.slice(range.end) : summary;
-  const urls = [...prose.matchAll(BODY_URL_RE)].map((m) => m[0].replace(/[.,;:!?]+$/, ""));
-  return { bodyUrls: urls.length, bodyUrlsUnlisted: urls.filter((u) => !listed.has(u)).length };
+  const urls = prose.split("\n").flatMap((line) => extractLineUrls(line).map((u) => u.url));
+  const keys = new Set([...listed].map(linkKey));
+  return { bodyUrls: urls.length, bodyUrlsUnlisted: urls.filter((u) => !keys.has(linkKey(u))).length };
 }
