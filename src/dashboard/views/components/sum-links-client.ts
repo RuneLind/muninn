@@ -340,9 +340,9 @@ function reopenIfShown(source: string, docId: string): void {
 
 /** The evidence muninn checked, never a claim that the page IS the item: open it before you accept. */
 const EVIDENCE: Record<Found["evidence"], { text: string; title: string }> = {
-  title: { text: "title matches", title: "The page's title has the same words as the title the summary states" },
-  repo: { text: "names this repo", title: "The summary names this GitHub repo as owner/repo" },
-  author: { text: "title overlaps, author named on page", title: "The page's title shares most words with the item, and the author the summary names appears on the page" },
+  title: { text: "title matches", title: "The page's title has the same words as the candidate's title" },
+  repo: { text: "names this repo", title: "The candidate names this GitHub repo as owner/repo" },
+  author: { text: "title overlaps, author named on page", title: "The page's title shares most words with the candidate, and the candidate's author appears on the page" },
   quote: { text: "quote found on page", title: "The page resolves and carries the sentence the search agent quoted" },
   pdf: { text: "PDF, not read", title: "A PDF that resolves; muninn did not read it" },
 };

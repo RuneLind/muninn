@@ -20,6 +20,7 @@ import {
   linksBaseHash,
   linkUrlKey,
   namesRepo,
+  normalizedTitle,
   pageBylines,
   pageVisibleText,
   parseCandidates,
@@ -160,7 +161,7 @@ describe("L4: the author check", () => {
   });
 });
 
-describe("D21 2: a line names the page's own byline, never the candidate's author", () => {
+describe("D22: a line names the site only, never a byline or the candidate's author", () => {
   const entry = { url: "https://example.test/post", title: "", quote: "Start with the defaults and adjust from there." };
   test("the author check passed on the visible text, no byline: the site only", () => {
     const p = page(`<meta property="og:site_name" content="Example"><title>Claude Code effort level and model selection</title>${filler("By Lydia Hallie.")}`);
@@ -168,11 +169,11 @@ describe("D21 2: a line names the page's own byline, never the candidate's autho
     expect(v).toMatchObject({ label: "matched", evidence: "author", authorCheck: "passed" });
     expect(foundLinkFrom(LYDIA, p, entry, v)?.detail).toBe("Example");
   });
-  test("the page's author meta is written, on a reachable page too", () => {
+  test("the page's author meta is not written, on a reachable page either", () => {
     const p = page(`<meta property="og:site_name" content="Example"><meta name="author" content="Lydia Hallie"><title>Claude Code best practices</title>${filler("Start with the defaults and adjust from there.")}`);
-    expect(foundLinkFrom(LYDIA, p, entry, judgePage(LYDIA, p, entry.quote))).toMatchObject({ label: "reachable", evidence: "quote", detail: "Example, Lydia Hallie" });
+    expect(foundLinkFrom(LYDIA, p, entry, judgePage(LYDIA, p, entry.quote))).toMatchObject({ label: "reachable", evidence: "quote", detail: "Example" });
   });
-  test("a page quoting the candidate's author it is not by: the page's own byline, never the quoted name", () => {
+  test("a page quoting the candidate's author it is not by: the site only, neither name", () => {
     const c: LinkCandidate = { title: null, author: "Andrej Karpathy", topic: "Karpathy's post on vibe coding", kind: "post" };
     const ld = '<script type="application/ld+json">{"@type":"BlogPosting","author":{"@type":"Person","name":"Simon Willison"}}</script>';
     const p = page(
@@ -182,15 +183,20 @@ describe("D21 2: a line names the page's own byline, never the candidate's autho
     const v = judgePage(c, p, "");
     expect(v).toMatchObject({ label: "matched", evidence: "author", authorCheck: "passed" });
     const line = foundLinkFrom(c, p, entry, v);
-    expect(line?.detail).toBe("Simon Willison's Weblog, Simon Willison");
-    expect(line?.detail).not.toContain("Karpathy");
+    expect(line?.detail).toBe("Simon Willison's Weblog");
   });
-  test("a profile URL in article:author is no byline; the next name is", () => {
-    const p = page(
-      `<meta property="og:site_name" content="Example"><meta property="article:author" content="https://www.facebook.com/someone"><meta name="author" content="Jane Doe"><title>Prompt caching in practice</title>`,
-    );
+  test("a JSON-LD commenter, a cited author and co-authors are never written", () => {
+    const ld =
+      '<script type="application/ld+json">{"@type":"NewsArticle","author":[{"name":"Nilay Patel"},{"name":"Alex Heath"}],' +
+      '"comment":[{"author":{"name":"Random Commenter"}}],"citation":[{"author":"Ashish Vaswani"}]}</script>';
+    const p = page(`<meta property="og:site_name" content="Ex">${ld}<title>Prompt caching in practice</title>`);
     const c: LinkCandidate = { title: "Prompt caching in practice", author: null, topic: "the caching post", kind: "post" };
-    expect(foundLinkFrom(c, p, entry, judgePage(c, p, ""))?.detail).toBe("Example, Jane Doe");
+    expect(foundLinkFrom(c, p, entry, judgePage(c, p, ""))?.detail).toBe("Ex");
+  });
+  test("no og:site_name: an empty detail, even with a byline", () => {
+    const p = page(`<meta name="author" content="Jane Doe"><title>Prompt caching in practice</title>`);
+    const c: LinkCandidate = { title: "Prompt caching in practice", author: null, topic: "the caching post", kind: "post" };
+    expect(foundLinkFrom(c, p, entry, judgePage(c, p, ""))).toMatchObject({ label: "matched", detail: "" });
   });
   test("matched by title equality with the check skipped carries no author", () => {
     const c: LinkCandidate = { ...LYDIA, title: "Claude Code effort level and model selection" };
@@ -199,7 +205,7 @@ describe("D21 2: a line names the page's own byline, never the candidate's autho
     expect(v).toMatchObject({ label: "matched", evidence: "title", authorCheck: "skipped" });
     expect(foundLinkFrom(c, p, entry, v)).toMatchObject({ label: "matched", detail: "Example" });
   });
-  test("og:site_name equal to the byline: the name is said once", () => {
+  test("og:site_name equal to the byline: the site name, once", () => {
     const c: LinkCandidate = { title: null, author: "Julia Evans", topic: "Julia Evans on what happens behind hello world on Linux", kind: "post" };
     const p = page(`<meta property="og:site_name" content="Julia Evans"><meta name="author" content="Julia Evans"><title>What happens behind the scenes when we run hello world on Linux</title>${filler("By Julia Evans.")}`);
     const v = judgePage(c, p, "");
@@ -540,6 +546,21 @@ describe("D20 filter: what hides a candidate", () => {
     expect(candidateIsListed(cand("The lethal trifecta for AI agents", "Simon's post"), ["Lethal trifecta for AI agents"])).toBe(true);
     expect(candidateIsListed(cand("An essay: on  agents!", "the essay"), ["essay on agents"])).toBe(true);
     expect(candidateIsListed(cand(null, "Building effective agents"), ["Building effective agents"])).toBe(false);
+  });
+
+  test("Unicode: NFC equals NFD, full-width folds, combining marks stay part of the word", () => {
+    expect(candidateIsListed(cand("Caf\u00e9 society", "the post"), ["Cafe\u0301 society"])).toBe(true);
+    expect(candidateIsListed(cand("ＧＰＴ-4 system card", "the card"), ["GPT-4 system card"])).toBe(true);
+    // A dropped vowel sign is a different title, not punctuation.
+    expect(candidateIsListed(cand("हिंदी भाषा", "the post"), ["हंदी भाषा"])).toBe(false);
+    expect(normalizedTitle("İstanbul notes").split(" ")).toHaveLength(2);
+  });
+
+  test("the label's tokens fold the same way", () => {
+    expect(titleTokens("Café society")).toEqual(titleTokens("Café society"));
+    expect(titleTokens("ＧＰＴ system card")).toEqual(["gpt", "system", "card"]);
+    expect(titleTokens("हिंदी भाषा")).not.toEqual(titleTokens("हंदी भाषा"));
+    expect(titleTokens("İstanbul")).toHaveLength(1);
   });
 
   test.each([

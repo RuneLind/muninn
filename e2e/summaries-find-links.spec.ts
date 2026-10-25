@@ -108,7 +108,7 @@ const FIXTURE = {
     [PDF_URL]: { finalUrl: PDF_URL, contentType: "application/pdf", text: null },
   },
 };
-const MATCHED_LINE = `- 🔎 [Claude Code effort level and model selection](${MATCHED_URL}) — Anthropic, Lydia Hallie · found by search`;
+const MATCHED_LINE = `- 🔎 [Claude Code effort level and model selection](${MATCHED_URL}) — Anthropic · found by search`;
 // D19 8: a PDF line takes the candidate's title, else its topic — never the manifest's «The effort paper».
 const PDF_LINE = `- 🔎 [${C_HALLIE.topic}](${PDF_URL}) · found by search`;
 

@@ -71,12 +71,21 @@ const STOP_WORDS = new Set([
   "at", "from", "as", "is", "are", "was", "were", "be", "it", "its", "this", "that", "vs", "via",
 ]);
 
+/**
+ * NFKC (NFD «Café» equals NFC, full-width «ＧＰＴ» is «GPT»), then the
+ * locale-independent lowercase: «İ» becomes «i» plus a combining dot, which
+ * {@link NON_WORD_RE} keeps inside the word.
+ */
+const foldCase = (text: string) => text.normalize("NFKC").toLowerCase();
+
+/** What separates words: anything but a letter, a combining mark (the vowel signs of «हिंदी») or a digit. */
+const NON_WORD_RE = /[^\p{L}\p{M}\p{N}]+/gu;
+
 /** A title's tokens IN ORDER, duplicates kept: lowercased, a possessive `'s` and punctuation stripped, stop words dropped, a plural `s` folded. */
 function tokenList(text: string): string[] {
-  return text
-    .toLowerCase()
+  return foldCase(text)
     .replace(/['’]s\b/g, "")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(NON_WORD_RE, " ")
     .split(" ")
     .filter((w) => w !== "" && !STOP_WORDS.has(w))
     .map((w) => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w));
@@ -528,15 +537,14 @@ export function inlineAnchorTexts(storedBody: string): string[] {
 }
 
 /**
- * A title as the candidate filter compares it (D21 5): lowercased, punctuation
- * folded to spaces, whitespace collapsed, a leading «the», «a» or «an»
- * dropped. Word order and every other word stay: «Humans on the loop» is not
- * «Humans in the loop».
+ * A title as the candidate filter compares it (D21 5): NFKC and lowercased
+ * ({@link foldCase}), punctuation folded to spaces (combining marks kept),
+ * whitespace collapsed, a leading «the», «a» or «an» dropped. Word order and
+ * every other word stay: «Humans on the loop» is not «Humans in the loop».
  */
 export function normalizedTitle(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
+  return foldCase(text)
+    .replace(NON_WORD_RE, " ")
     .trim()
     .replace(/^(?:the|a|an) /, "");
 }
@@ -747,41 +755,25 @@ export type LinkEvidence = "title" | "repo" | "author" | "quote" | "pdf";
 export interface FoundLink {
   readonly url: string;
   readonly title: string;
-  /** The site name, and the page's own byline when it has one (D21 2). */
+  /** The page's `og:site_name`, or "" when it has none. Never a byline (D22). */
   readonly detail: string;
   readonly label: LinkLabel;
   readonly evidence: LinkEvidence;
 }
 
-/** A byline longer than this is no name (a JSON-LD blob, a credits list). */
-const BYLINE_MAX = 120;
-
-/** The page's own byline: the first `author` / `article:author` meta or JSON-LD `author` that is a name, not a profile URL. */
-export function pageByline(html: string): string {
-  for (const b of pageBylines(html)) {
-    const name = b.replace(/\s+/g, " ").trim();
-    if (name && name.length <= BYLINE_MAX && !/^https?:|\//i.test(name)) return name;
-  }
-  return "";
-}
-
 /**
  * The line a verified page becomes: the stored `finalUrl`, the page's own title
  * (else the candidate's title, then topic — a PDF always takes the
- * candidate's, D19 8), and the site name plus the page's OWN byline. The
- * candidate's author is never written (D21 2): a page can quote the person it
- * is not by. The agent's manifest title is never stored: it is untrusted
- * text. `_entry` stays in the signature for the route's call.
+ * candidate's, D19 8), and the site name alone (D22): a page's byline metadata
+ * names commenters and cited authors and drops co-authors, so none is stored.
+ * The agent's manifest title is never stored: it is untrusted text. `_entry`
+ * stays in the signature for the route's call.
  */
 export function foundLinkFrom(c: LinkCandidate, page: SafePage, _entry: ManifestEntry, verdict: PageVerdict): FoundLink | null {
   if (!verdict.label) return null;
   const html = page.text ?? "";
   const title = verdict.lineTitle || c.title || c.topic;
-  const site = html ? siteName(html) : "";
-  const byline = html ? pageByline(html) : "";
-  // A personal site's og:site_name is often the author's own name: say it once.
-  const sameName = site !== "" && byline !== "" && sameSet(titleTokens(site), titleTokens(byline));
-  const detail = [site, sameName ? "" : byline].filter((p) => p !== "").join(", ");
+  const detail = html ? siteName(html) : "";
   const evidence: LinkEvidence = verdict.evidence ?? (verdict.label === "unread" ? "pdf" : "quote");
   return { url: page.finalUrl, title, detail, label: verdict.label, evidence };
 }

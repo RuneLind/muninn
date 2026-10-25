@@ -49,7 +49,7 @@ const PAGES: Record<string, SafePage> = {
 };
 
 /** The rows the panel shows for those pages: a save posts the row it accepts. */
-const HALLIE_ROW = { url: HALLIE_URL, title: "Claude Code effort level and model selection", detail: "Anthropic, Lydia Hallie", label: "matched", evidence: "author" };
+const HALLIE_ROW = { url: HALLIE_URL, title: "Claude Code effort level and model selection", detail: "Anthropic", label: "matched", evidence: "author" };
 const PDF_ROW = { url: PDF_URL, title: "The effort paper", detail: "", label: "unread", evidence: "pdf" };
 
 const C_HALLIE: LinkCandidate = { title: null, author: "Lydia Hallie", topic: "Lydia Hallie's article on Claude Code effort levels", kind: "post" };
@@ -533,7 +533,7 @@ describe("POST /api/summaries/links", () => {
     const b1 = (await r1.json()) as { added: number; linksBaseHash: string };
     expect(b1.added).toBe(1);
     const written = files.get(DOC)!;
-    expect(written).toContain(`- 🔎 [Claude Code effort level and model selection](${HALLIE_URL}) — Anthropic, Lydia Hallie · found by search\n\n_7 creator`);
+    expect(written).toContain(`- 🔎 [Claude Code effort level and model selection](${HALLIE_URL}) — Anthropic · found by search\n\n_7 creator`);
     expect(written).toContain('date: "2026-03-22"');
     expect(written).toMatch(/\n\n## Transcript\n\n### \[00:00:00\]/);
     expect(checkedSha256OfRaw(written.replace("reference.\n", "reference.  \n"))).toBe(checked);
@@ -553,7 +553,7 @@ describe("POST /api/summaries/links", () => {
     const a = await searched();
     for (const row of [
       { ...HALLIE_ROW, title: "client title" },
-      { ...HALLIE_ROW, detail: "Anthropic" },
+      { ...HALLIE_ROW, detail: "Anthropic, Lydia Hallie" },
       { ...HALLIE_ROW, label: "reachable" },
       { ...HALLIE_ROW, evidence: "title" },
       { url: HALLIE_URL, title: HALLIE_ROW.title, detail: HALLIE_ROW.detail, label: HALLIE_ROW.label },
@@ -570,7 +570,7 @@ describe("POST /api/summaries/links", () => {
     const C_OTHER: LinkCandidate = { title: null, author: "Someone Else", topic: "another post on effort", kind: "post" };
     // No author match, but the quote is on the page: reachable, attributed to the site only.
     const OTHER_QUOTE = "By Lydia Hallie. By Lydia Hallie. By Lydia Hallie.";
-    // D21 2: the detail is the page's (site + its own byline), so the two rows differ by label and evidence.
+    // D22: the detail is the site only, so the two rows differ by label and evidence.
     const OTHER_ROW = { ...HALLIE_ROW, label: "reachable", evidence: "quote" };
     const lineOf = (detail: string) => `- 🔎 [${HALLIE_ROW.title}](${HALLIE_URL}) — ${detail} · found by search`;
 
@@ -585,12 +585,12 @@ describe("POST /api/summaries/links", () => {
         const evs = await events(await post(a, "/api/summaries/links/search", { ...ref, candidates }));
         for (const e of evs) if (e.event === "result") shown.push(...(e.data.results as unknown[]));
       }
-      // The panel shows both rows: the matched one carries the author.
+      // The panel shows both rows.
       expect(shown).toContainEqual(HALLIE_ROW);
       expect(shown).toContainEqual(OTHER_ROW);
       const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [HALLIE_ROW] });
       expect(res.status).toBe(200);
-      expect(files.get(DOC)!).toContain(lineOf("Anthropic, Lydia Hallie"));
+      expect(files.get(DOC)!).toContain(lineOf("Anthropic"));
     });
 
     test("the other row, accepted, saves too", async () => {
@@ -598,7 +598,7 @@ describe("POST /api/summaries/links", () => {
       const a = await searched({}, [C_OTHER, C_HALLIE]);
       const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [OTHER_ROW] });
       expect(res.status).toBe(200);
-      expect(files.get(DOC)!).toContain(`${lineOf("Anthropic, Lydia Hallie")}\n`);
+      expect(files.get(DOC)!).toContain(`${lineOf("Anthropic")}\n`);
     });
   });
 
@@ -640,7 +640,7 @@ describe("POST /api/summaries/links", () => {
     const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(raw), add: [HALLIE_ROW] });
     expect(res.status).toBe(200);
     expect(files.get(DOC)!).toBe(
-      `---\ndate: "2026-03-22"\nurl: "${URL_}"\n---\n\nJust a summary.\n\n## Links\n\n- 🔎 [Claude Code effort level and model selection](${HALLIE_URL}) — Anthropic, Lydia Hallie · found by search\n`,
+      `---\ndate: "2026-03-22"\nurl: "${URL_}"\n---\n\nJust a summary.\n\n## Links\n\n- 🔎 [Claude Code effort level and model selection](${HALLIE_URL}) — Anthropic · found by search\n`,
     );
   });
 
