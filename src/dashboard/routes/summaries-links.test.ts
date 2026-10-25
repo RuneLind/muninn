@@ -193,8 +193,73 @@ describe("POST /api/summaries/links/search", () => {
       results: [{ url: HALLIE_URL, label: "matched", title: "Claude Code effort level and model selection", detail: "Anthropic, Lydia Hallie" }],
     });
     expect(results.find((r) => r.index === 1)).toMatchObject({ outcome: "not_found", results: [] });
-    expect(results.find((r) => r.index === 2)).toMatchObject({ outcome: "found", results: [{ url: PDF_URL, label: "unread", title: "x" }] });
+    expect(results.find((r) => r.index === 2)).toMatchObject({ outcome: "found", results: [{ url: PDF_URL, label: "unread", title: C_PDF.title }] });
     expect(evs.filter((e) => e.event === "state").map((e) => e.data.state)).toContain("checking");
+  });
+
+  describe("D19 9: a result the summary already carries is dropped by URL", () => {
+    /** A page that matches whatever candidate asks for it: the title is the candidate's. */
+    const pageFor = (url: string, title: string): SafePage => ({ finalUrl: url, contentType: "text/html", text: `<title>${title}</title>${filler("Body text.")}` });
+    async function run(body: string, cases: { c: LinkCandidate; url: string; finalUrl?: string; title: string }[]) {
+      files.set(DOC, `---\ndate: "2026-03-22"\nurl: "${URL_}"\n---\n\n${body}\n`);
+      const fetched: string[] = [];
+      // The quote is on every page, so a result that is not dropped is at least reachable.
+      for (const k of cases) agentAnswers[k.c.topic] = manifest(k.url, "Body text. Body text. Body text.");
+      const a = app({
+        fetchPage: async (url) => {
+          fetched.push(url);
+          const k = cases.find((x) => x.url === url);
+          return k ? pageFor(k.finalUrl ?? url, k.title) : null;
+        },
+      });
+      const evs = await events(await post(a, "/api/summaries/links/search", { ...ref, candidates: cases.map((k) => k.c) }));
+      return { results: evs.filter((e) => e.event === "result").map((e) => e.data), fetched };
+    }
+    const repo = (name: string): LinkCandidate => ({ title: name, author: null, topic: `the ${name} repo`, kind: "repo" });
+
+    test("a Links section whose lines show URL titles: every listed URL the agents return is dropped, unfetched", async () => {
+      const body = [
+        "REA is the MCP server the guide is built on.",
+        "",
+        "## Links",
+        "",
+        "- 📦 [github.com/morluto/rea](https://github.com/morluto/rea) · from text",
+        "- 📄 [anthropic.com/claude-opus-5-5](https://www.anthropic.com/claude-opus-5-5) · from text",
+      ].join("\n");
+      const { results, fetched } = await run(body, [
+        { c: { title: "REA", author: null, topic: "REA (Reverse Engineer Anything), the MCP server", kind: "tool" }, url: "https://github.com/morluto/rea", title: "rea" },
+        { c: { title: "Claude Opus 5.5", author: null, topic: "Anthropic's Claude Opus 5.5 page", kind: "doc" }, url: "https://anthropic.com/claude-opus-5-5/", title: "Claude Opus 5.5" },
+        { c: { title: null, author: null, topic: "the REA repo by morluto", kind: "repo" }, url: "https://github.com/Morluto/REA", title: "rea" },
+      ]);
+      expect(results.map((r) => r.outcome)).toEqual(["not_found", "not_found", "not_found"]);
+      expect(fetched).toEqual([]);
+    });
+
+    test("inline markdown links and bare URLs in the body: those results are dropped", async () => {
+      const { results } = await run("See [nanoGPT](https://github.com/karpathy/nanoGPT) and https://github.com/openai/evals for the code.", [
+        { c: repo("karpathy/nanoGPT"), url: "https://github.com/karpathy/nanoGPT", title: "karpathy/nanoGPT" },
+        { c: repo("openai/evals"), url: "https://github.com/openai/evals/", title: "openai/evals" },
+        { c: repo("openai/whisper"), url: "https://github.com/openai/whisper", title: "openai/whisper" },
+      ]);
+      expect(results.map((r) => r.outcome)).toEqual(["not_found", "not_found", "found"]);
+    });
+
+    test("a page that lands on a carried URL is dropped after the fetch; another URL is kept", async () => {
+      const { results } = await run("Run it on [Ollama](https://ollama.com/) and compare with [the BERT paper](https://arxiv.org/abs/1810.04805).", [
+        {
+          c: { title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding", author: null, topic: "the BERT paper", kind: "paper" },
+          url: "https://short.example/bert",
+          finalUrl: "https://arxiv.org/abs/1810.04805",
+          title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        },
+        {
+          c: { title: "Attention Is All You Need", author: null, topic: "the transformer paper", kind: "paper" },
+          url: "https://arxiv.org/abs/1706.03762",
+          title: "Attention Is All You Need",
+        },
+      ]);
+      expect(results.map((r) => r.outcome)).toEqual(["not_found", "found"]);
+    });
   });
 
   test("a bot without web tools is a JSON 503 before the stream", async () => {
@@ -357,17 +422,18 @@ describe("POST /api/summaries/links", () => {
 
     const r2 = await post(a, "/api/summaries/links", { ...ref, baseHash: b1.linksBaseHash, add: [{ url: PDF_URL }] });
     expect(r2.status).toBe(200);
-    expect(files.get(DOC)!).toMatch(/found by search\n- 🔎 \[x\]\(https:\/\/papers\.example\/effort\.pdf\) · found by search\n\n_7/);
+    expect(files.get(DOC)!).toMatch(/found by search\n- 🔎 \[The effort paper\]\(https:\/\/papers\.example\/effort\.pdf\) · found by search\n\n_7/);
   });
 
-  test("a URL already in the section is skipped and nothing is written", async () => {
+  test("D19 9: a URL already in the section is never verified, so a save of it is refused and nothing is written", async () => {
     const listedUrl = "https://www.claude.example/blog/spending-your-effort/?utm_source=x";
     agentAnswers.listed = manifest(listedUrl);
     const b = await searched({ fetchPage: async (url) => (url === listedUrl ? { finalUrl: url, contentType: "application/pdf", text: null } : null) }, [
       { ...C_PDF, topic: "listed" },
     ]);
-    const res = await post(b,"/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [{ url: listedUrl }] });
-    expect(await res.json()).toMatchObject({ ok: true, added: 0, skipped: 1 });
+    const res = await post(b, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [{ url: listedUrl }] });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "not_verified" });
     expect(ingests).toHaveLength(0);
   });
 

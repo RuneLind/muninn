@@ -57,6 +57,7 @@ import {
   buildSearchPrompt,
   candidateIsListed,
   candidateSummaryText,
+  carriedUrlKeys,
   coerceCandidate,
   FIND_LINKS_AGENT_TIMEOUT_MS,
   FIND_LINKS_CONCURRENCY,
@@ -371,6 +372,8 @@ export function registerSummariesLinksRoutes(
     const fetchTimeoutMs = deps.run?.fetchTimeoutMs ?? FIND_LINKS_FETCH_TIMEOUT_MS;
     const minAgentMs = deps.run?.minAgentMs ?? MIN_AGENT_BUDGET_MS;
     const sourceTitle = titleFromDocId(t.docId);
+    // D19 9: a URL the section or the body already carries is never a result.
+    const carried = carriedUrlKeys(doc.stored.body);
     /** Every agent call launched, settled or not: the lock waits on these. */
     const launched: Promise<unknown>[] = [];
     let released = false;
@@ -447,10 +450,11 @@ export function registerSummariesLinksRoutes(
             const checked = await Promise.all(
               parseManifest(raw).map(async (entry) => {
                 const left = deadline - now();
-                if (left <= 0) return null;
+                if (left <= 0 || carried.has(linkUrlKey(entry.url))) return null;
                 try {
                   const page = await deps.fetchPage(entry.url, Math.min(fetchTimeoutMs, left));
-                  return page ? foundLinkFrom(cand, page, entry, judgePage(cand, page, entry.quote)) : null;
+                  if (!page || carried.has(linkUrlKey(page.finalUrl))) return null;
+                  return foundLinkFrom(cand, page, entry, judgePage(cand, page, entry.quote));
                 } catch (err) {
                   log.warn("Find links: checking {url} failed: {error}", { url: entry.url, error: errText(err) });
                   return null;

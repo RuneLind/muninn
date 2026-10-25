@@ -94,7 +94,8 @@ const FIXTURE = {
   },
 };
 const MATCHED_LINE = `- 🔎 [Claude Code effort level and model selection](${MATCHED_URL}) — Anthropic, Lydia Hallie · found by search`;
-const PDF_LINE = `- 🔎 [The effort paper](${PDF_URL}) · found by search`;
+// D19 8: a PDF line takes the candidate's title, else its topic — never the manifest's «The effort paper».
+const PDF_LINE = `- 🔎 [${C_HALLIE.topic}](${PDF_URL}) · found by search`;
 
 const files = new Map<string, string>();
 const ingests: Record<string, unknown>[] = [];
