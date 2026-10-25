@@ -1,12 +1,10 @@
 /**
  * The YouTube vertical's ONE yt-dlp probe: the six shared metadata fields plus
- * `description` (plan D13).
- *
- * It replaces the shared `probeVideoInfo` call on this vertical, so a frames-on
- * capture still spawns exactly one yt-dlp before its download, and a frames-off
- * capture now spawns one too — a ~3 s metadata call the capture needs for the
- * description's links. `null` on every failure, never a throw: a capture without
- * a probe is today's capture.
+ * `description` (plan D13). Both capture paths run it: a frames-on capture
+ * before its download (the duration sizes it), a frames-off capture beside its
+ * transcript fetch (a ~3 s metadata call, 10 s bound, for the description's
+ * links). `null` on every failure, with one warn, never a throw: a capture
+ * without a probe is today's capture.
  *
  * `-O` with a field list, never `--dump-json`: the full info JSON measured
  * 11.7 MB on one video, past `runProc`'s 8 MB cap. A YouTube description is at
@@ -15,7 +13,14 @@
 
 import { getLog } from "../logging.ts";
 import { runProc } from "../utils/run-proc.ts";
-import { PROBE_TIMEOUT_MS, YTDLP_ISOLATION_ARGS, parseYtDlpJson, type YtDlpInfo } from "../video/media.ts";
+import {
+  PROBE_TIMEOUT_MS,
+  YTDLP_ISOLATION_ARGS,
+  parseYtDlpRecord,
+  ytDlpInfoFromRecord,
+  ytDlpInfoTemplate,
+  type YtDlpInfo,
+} from "../video/media.ts";
 
 const log = getLog("youtube", "probe");
 
@@ -25,7 +30,7 @@ export interface YouTubeProbe extends YtDlpInfo {
 }
 
 /** The six shared fields plus `description`, as one JSON line. */
-export const YOUTUBE_PROBE_TEMPLATE = "%(.{id,title,duration,uploader,webpage_url,upload_date,description})j";
+export const YOUTUBE_PROBE_TEMPLATE = ytDlpInfoTemplate(["description"]);
 
 /** The frames-off probe's budget: it runs beside the transcript fetch, not before it. */
 export const YOUTUBE_FRAMES_OFF_PROBE_TIMEOUT_MS = 10_000;
@@ -36,14 +41,10 @@ export function youtubeProbeArgs(url: string): string[] {
 
 /** One probe line, parsed: `parseYtDlpJson`'s fields plus a string `description`. */
 export function parseYouTubeProbe(line: string): YouTubeProbe | null {
-  const info = parseYtDlpJson(line);
-  if (info === null) return null;
-  let description: unknown;
-  try {
-    description = (JSON.parse(line.trim()) as Record<string, unknown>).description;
-  } catch {
-    return info;
-  }
+  const rec = parseYtDlpRecord(line);
+  if (rec === null) return null;
+  const info = ytDlpInfoFromRecord(rec);
+  const { description } = rec;
   return typeof description === "string" && description.trim() !== "" ? { ...info, description } : info;
 }
 
@@ -68,7 +69,9 @@ export async function probeYouTubeVideo(
       youtubeProbeArgs(url),
       opts.timeoutMs ?? PROBE_TIMEOUT_MS,
       "yt-dlp probe",
-      { processGroup: true },
+      // runProc's own timeout ERROR stays quiet: the rejection's message
+      // («yt-dlp probe timed out after …») reaches the one warn below.
+      { processGroup: true, quietTimeout: true },
     ));
   } catch (err) {
     if ((err as { code?: unknown } | null)?.code === "ENOENT") {

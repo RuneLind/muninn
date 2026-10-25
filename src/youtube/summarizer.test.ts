@@ -625,6 +625,11 @@ describe("frames off — the capture that shipped before this PR", () => {
     // absent, so the prompt pair is what it always was.
     expect(lastPrompt).toBe(transcriptBody.transcript);
     expect(lastSystemPrompt).not.toContain("### [HH:MM:SS]");
+    // The SYSTEM prompt byte for byte: sha256 of what `buildYouTubeSystemPrompt`
+    // composes for these inputs on main ea8fa4d5, before description links existed.
+    expect(new Bun.CryptoHasher("sha256").update(lastSystemPrompt ?? "").digest("hex")).toBe(
+      "25056ca855d466533a0c8daf3144dfe03432dae4295a8b7962f59ebc76b33f52",
+    );
     expect(lastToolSurface).toBe("none");
     expect(getJob(jobId)?.status).toBe("complete");
   });

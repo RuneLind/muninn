@@ -204,7 +204,14 @@ function parseArgs(argv: string[]): Args {
   const probeFile = flags.get("probe");
   let probe: Args["probe"] = null;
   if (probeFile !== undefined) {
-    const parsed = JSON.parse(readFileSync(resolve(probeFile), "utf8")) as Record<string, unknown>;
+    let parsed: Record<string, unknown>;
+    try {
+      const json: unknown = JSON.parse(readFileSync(resolve(probeFile), "utf8"));
+      if (json === null || typeof json !== "object" || Array.isArray(json)) throw new Error("not a JSON object");
+      parsed = json as Record<string, unknown>;
+    } catch (err) {
+      die(`--probe ${probeFile} could not be read as a JSON object: ${err instanceof Error ? err.message : String(err)}`);
+    }
     if (typeof parsed.uploader !== "string" || typeof parsed.description !== "string") {
       die(`--probe ${probeFile} must hold string "uploader" and "description" fields`);
     }

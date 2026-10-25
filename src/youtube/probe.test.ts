@@ -7,7 +7,7 @@ import {
   resetMissingYtDlpWarning,
   youtubeProbeArgs,
 } from "./probe.ts";
-import type { ProcResult } from "../utils/run-proc.ts";
+import { runProc, type ProcResult } from "../utils/run-proc.ts";
 
 const URL_ = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 const LINE = JSON.stringify({
@@ -21,18 +21,22 @@ const LINE = JSON.stringify({
 });
 
 const warnings: string[] = [];
+const errors: string[] = [];
 beforeEach(async () => {
   warnings.length = 0;
+  errors.length = 0;
   resetMissingYtDlpWarning();
   await reset();
   await configure({
     sinks: {
       mem: (r: LogRecord) => {
         if (r.level === "warning") warnings.push(r.message.map(String).join(""));
+        if (r.level === "error" || r.level === "fatal") errors.push(r.message.map(String).join(""));
       },
     },
     loggers: [
-      { category: ["muninn", "youtube", "probe"], lowestLevel: "debug", sinks: ["mem"] },
+      // All of muninn, so runProc's own timeout line is counted beside the probe's.
+      { category: ["muninn"], lowestLevel: "debug", sinks: ["mem"] },
       { category: ["logtape", "meta"], lowestLevel: "error", sinks: [] },
     ],
   });
@@ -111,5 +115,17 @@ describe("the probe call", () => {
     expect(await probeYouTubeVideo(URL_, { run: missing })).toBeNull();
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("not on PATH");
+  });
+
+  test("a timed-out probe is null with exactly ONE warn, and no runProc error line", async () => {
+    // A real child that outlives the budget: runProc's timeout kills it.
+    const out = await probeYouTubeVideo(URL_, {
+      timeoutMs: 200,
+      run: (_cmd, timeoutMs, label, opts) => runProc(["sleep", "5"], timeoutMs, label, { ...opts, killGraceMs: 200 }),
+    });
+    expect(out).toBeNull();
+    expect(errors).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("timed out");
   });
 });

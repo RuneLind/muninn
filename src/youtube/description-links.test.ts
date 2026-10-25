@@ -102,8 +102,13 @@ describe("rule 2: creator", () => {
     expect(Object.values(classes(d))).toEqual(["creator", "creator", "creator", "creator"]);
   });
 
-  test("a funnel subdomain on the uploader's own domain is creator; the shortener ON that domain too", () => {
+  test("a funnel subdomain on the uploader's own domain is creator", () => {
     const d = "Free → https://c.samplechannel.example/free\nCall → https://go.samplechannel.example/call";
+    expect(Object.values(classes(d))).toEqual(["creator", "creator"]);
+  });
+
+  test("a shortener on the uploader's own host is creator, even inside a source block", () => {
+    const d = "SOURCES\n• Report: https://l.samplechannel.example/r7\n• Paper: https://link.samplechannel.example/p2";
     expect(Object.values(classes(d))).toEqual(["creator", "creator"]);
   });
 
@@ -176,7 +181,7 @@ describe("rule 3: source blocks", () => {
       "SOURCES:",
       "",
       "The warning thread:",
-      "https://x.com/someone/status/2113325263157395456",
+      "https://x.com/someone/status/1234567890123456789",
       "",
       "The long post:",
       "https://x.com/someone/article/1234567890",
@@ -196,7 +201,7 @@ describe("rule 3: source blocks", () => {
   });
 
   test("a source heading ending in ' :' directly over a URL is still a heading (D17)", () => {
-    const d = "Today’s Sources :\nhttps://lab.example/research/one\n\nhttps://lab.example/news/two\n\n\n\n#tag";
+    const d = "Tonight’s Sources :\nhttps://lab.example/research/one\n\nhttps://lab.example/news/two\n\n\n\n#tag";
     const links = classifyDescriptionLinks(d, "Sample Channel");
     expect(links.map((l) => l.cls)).toEqual(["source", "source"]);
     // No usable text on the line or above it: the host and path.

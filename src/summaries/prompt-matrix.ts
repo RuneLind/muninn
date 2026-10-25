@@ -459,21 +459,23 @@ function structureChip(preset: CapturePreset): string {
 
 /**
  * The chips the system prompt's own pieces contribute, minus the structure one.
+ * Exported for its test.
  *
  * A piece whose text is only whitespace contributes NO chip: it is a separator
  * between two parts, not a part. The Vimeo intro split produces one (the `\n\n`
  * between the intro block and the envelope), and without this the cell listed
  * "intro" twice.
  */
-function pieceChips(pieces: readonly PromptPiece[], preset: CapturePreset | null): string[] {
-  const chips = pieces
-    .filter((p) => p.text.trim() !== "")
-    .map((p) =>
-      p.id === "structure" && preset !== null ? structureChip(preset) : p.label.toLowerCase(),
-    );
-  // One part in two spans (the envelope split around YouTube's `LINKS:` step)
-  // is still one chip.
-  return chips.filter((c, i) => chips.indexOf(c) === i);
+export function pieceChips(pieces: readonly PromptPiece[], preset: CapturePreset | null): string[] {
+  return (
+    pieces
+      .filter((p) => p.text.trim() !== "")
+      // One part in two spans (the envelope split around YouTube's `LINKS:` step)
+      // is still one chip: only that second span folds, so two distinct pieces
+      // that share a label still show two chips.
+      .filter((p) => p.id !== "envelope-summary" || !pieces.some((q) => q.id === "envelope" && q.text.trim() !== ""))
+      .map((p) => (p.id === "structure" && preset !== null ? structureChip(preset) : p.label.toLowerCase()))
+  );
 }
 
 /** Where a per-bot override of this kind would live, and whether it is there. */

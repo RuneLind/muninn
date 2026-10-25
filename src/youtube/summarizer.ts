@@ -1158,8 +1158,8 @@ export async function summarizeVideo(
         },
       );
     }
-    // What the probe knew, and oEmbed's `author` when it knew nobody (or never
-    // ran — a frames-off capture). A failed oEmbed omits the key, never the capture.
+    // What the probe knew, and oEmbed's `author` when it knew nobody (or
+    // failed). A failed oEmbed omits the key, never the capture.
     const videoFields = youtubeVideoFields(probe, await oembedAuthor);
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,

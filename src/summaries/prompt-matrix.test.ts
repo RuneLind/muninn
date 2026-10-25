@@ -60,6 +60,7 @@ import {
   PROMPT_MATRIX_SOURCES,
   buildPromptMatrix,
   noKindChip,
+  pieceChips,
   type PromptMatrix,
   type PromptMatrixCell,
 } from "./prompt-matrix.ts";
@@ -789,5 +790,17 @@ describe("the module graph", () => {
     // The walk really walked: the verticals' builders are on the far side of it.
     expect([...reached]).toContain(resolve(SRC, "youtube/prompt.ts"));
     expect([...reached]).toContain(resolve(SRC, "summaries/prompt-pieces.ts"));
+  });
+});
+
+describe("pieceChips", () => {
+  test("only the envelope's second span folds into its first; two distinct same-labelled pieces keep two chips", () => {
+    const pieces = [
+      { id: "envelope", label: "CATEGORY/SUMMARY envelope", text: "a" },
+      { id: "rule-a", label: "Rule", text: "b" },
+      { id: "rule-b", label: "Rule", text: "c" },
+      { id: "envelope-summary", label: "CATEGORY/SUMMARY envelope", text: "d" },
+    ];
+    expect(pieceChips(pieces, null)).toEqual(["category/summary envelope", "rule", "rule"]);
   });
 });

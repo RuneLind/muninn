@@ -49,6 +49,9 @@ export interface RunProcOptions {
   /** How long a timed-out child gets between SIGTERM and SIGKILL. Defaults to
    *  {@link RUN_PROC_KILL_GRACE_MS}. */
   killGraceMs?: number;
+  /** Leave the timeout's own ERROR line to the caller, which reports the
+   *  {@link ProcTimeoutError} itself (a probe whose failure is one warn). */
+  quietTimeout?: boolean;
 }
 
 export { RUN_PROC_KILL_GRACE_MS };
@@ -233,11 +236,13 @@ export async function runProc(
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutTimer = setTimeout(() => {
       timedOut = true;
-      log.error("{label} timed out after {timeoutMs}ms — killing PID {pid}", {
-        label,
-        timeoutMs,
-        pid: proc.pid,
-      });
+      if (!opts.quietTimeout) {
+        log.error("{label} timed out after {timeoutMs}ms — killing PID {pid}", {
+          label,
+          timeoutMs,
+          pid: proc.pid,
+        });
+      }
       signal("SIGTERM");
       const grace = opts.killGraceMs ?? RUN_PROC_KILL_GRACE_MS;
       // Fires only while the child is still there: an exit inside the grace
