@@ -5,7 +5,7 @@
  *
  *  - `GET /api/summaries/links/options?source=&docId=` — whether the document
  *    can take a links save (`preflightSummarySave`, and no unclosed code fence
- *    at its end). One raw read, no model; the doc panel shows the button only
+ *    or HTML block at its end). One raw read, no model; the doc panel shows the button only
  *    then. It carries no hash: the panel's baseline comes from the candidates
  *    call alone.
  *  - `POST /api/summaries/links/candidates` `{source, docId}` — one Haiku-tier
@@ -48,9 +48,9 @@ import {
   type SummarySaveClaims,
 } from "../../summaries/summary-save.ts";
 import type { SummaryIngest } from "../../summaries/summarizer-shared.ts";
-import { filterDocumentText } from "../../summaries/source-text.ts";
+import { filterDocumentText, hasS3FileUrl } from "../../summaries/source-text.ts";
 import { checkedSha256OfRaw, factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
-import { endsInsideFence } from "../../summaries/links-section.ts";
+import { endsInsideFence, endsInsideHtmlBlock } from "../../summaries/links-section.ts";
 import { safeFetchPage, type SafePage } from "../../summaries/safe-fetch.ts";
 import {
   buildCandidatesPrompt,
@@ -240,7 +240,7 @@ function webBot(deps: SummariesLinksDeps): BotConfig | Fail {
   return bot;
 }
 
-/** The read plus every refusal a links save would meet: missing, `preflightSummarySave`, and an unclosed fence at the body's end. */
+/** The read plus every refusal a links save would meet: missing, `preflightSummarySave`, and an unclosed fence or HTML block at the body's end. */
 async function loadSavable(deps: SummariesLinksDeps, t: Target): Promise<{ raw: string; stored: StoredCapture } | Fail> {
   let raw: string | null;
   try {
@@ -255,6 +255,9 @@ async function loadSavable(deps: SummariesLinksDeps, t: Target): Promise<{ raw: 
   if (!pre.ok) return { status: pre.status, body: { error: pre.error, code: pre.code } };
   if (endsInsideFence(stored.body)) {
     return fail(409, "open_fence", "The summary ends inside an unclosed code block, so a Links section cannot be added below it.");
+  }
+  if (endsInsideHtmlBlock(stored.body)) {
+    return fail(409, "open_html", "The summary ends inside an unclosed HTML block, so a Links section cannot be added below it.");
   }
   return { raw, stored };
 }
@@ -488,7 +491,8 @@ export function registerSummariesLinksRoutes(
                 try {
                   const page = await deps.fetchPage(entry.url, Math.min(fetchTimeoutMs, left));
                   if (page && carried.has(linkUrlKey(page.finalUrl))) return (carriedDrops++, null);
-                  if (!page) return null;
+                  // An S3 URL reads as `[file]` in every reader (`filterDocumentText`): never shown, never held.
+                  if (!page || hasS3FileUrl(page.finalUrl)) return null;
                   return foundLinkFrom(cand, page, entry, judgePage(cand, page, entry.quote));
                 } catch (err) {
                   log.warn("Find links: checking {url} failed: {error}", { url: entry.url, error: errText(err) });

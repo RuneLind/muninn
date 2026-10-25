@@ -267,12 +267,15 @@ async function findAndSearch(page: Page): Promise<void> {
 test("the section mounts above the article; a matched result lands as a found-by-search line; a second accept saves too", async ({ page }) => {
   await openDoc(page, DOCS.a.id, "Lydia Hallie");
   await findAndSearch(page);
-  // Panel order: Find links sits above the article body.
+  // Panel order: Find links sits above the fact-check section, which sits right above the article body.
+  await expect(page.locator("#sumFactcheck")).toHaveCount(1);
   expect(
     await page.evaluate(() => {
       const links = document.getElementById("sumLinks");
+      const factcheck = document.getElementById("sumFactcheck");
       const body = document.getElementById("sumArticleBody");
-      return !!links && !!body && (links.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+      const before = (a: Node, b: Node) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+      return !!links && !!factcheck && !!body && before(links, factcheck) && before(links, body);
     }),
   ).toBe(true);
   const panel = page.locator("#sumLinks");

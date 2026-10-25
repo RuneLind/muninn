@@ -235,6 +235,17 @@ export function endsInsideFence(text: string): boolean {
 }
 
 /**
+ * Whether marked folds a `## Links` heading appended after `text` into an HTML
+ * block left open at the end (CommonMark types 1–5 — `<pre>`, `<!--`, `<?`,
+ * `<!X`, `<![CDATA[` — run to their end marker or the document's end). The
+ * walker still sees the heading, so the save would succeed and every reader
+ * would show the section as raw text: Find links refuses such a document.
+ */
+export function endsInsideHtmlBlock(text: string): boolean {
+  return fenceLexer.lexer(`${text.trimEnd()}\n\n${LINKS_HEADING}\n`).at(-1)?.type === "html";
+}
+
+/**
  * `summary` with `section` appended as its last block, or `summary` as it is.
  * Does the summary end inside a fence, per the line walker and per marked? Both
  * open: a closer both accept, kept only when both then see `## Links`. Both closed,

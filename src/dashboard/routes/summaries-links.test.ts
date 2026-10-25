@@ -148,6 +148,16 @@ describe("GET /api/summaries/links/options", () => {
     files.set(DOC, `---\nurl: "${URL_}"\n---\n\n${body}`);
     expect(await (await opts(app())).json()).toMatchObject({ available: false, code: "open_fence" });
   });
+  test.each([
+    ["an open comment", "Summary.\n\n<!-- note to self\n"],
+    ["an open <pre>", "Summary.\n\n<pre>\nconst x = 1;\n"],
+  ])("a summary ending inside an unclosed HTML block (%s) gets no button, and the candidates call is refused", async (_name, body) => {
+    files.set(DOC, `---\nurl: "${URL_}"\n---\n\n${body}`);
+    expect(await (await opts(app())).json()).toMatchObject({ available: false, code: "open_html" });
+    const res = await post(app({ candidatesCall: async () => { throw new Error("must not run"); } }), "/api/summaries/links/candidates", ref);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "open_html" });
+  });
 });
 
 describe("POST /api/summaries/links/candidates", () => {
@@ -406,6 +416,30 @@ describe("POST /api/summaries/links/search", () => {
     await held.body?.cancel();
   });
 
+  test("a page whose final URL is an S3 file is neither shown nor held as verified (every reader shows it as [file])", async () => {
+    const s3 = "https://my-bucket.s3.eu-west-1.amazonaws.com/papers/effort.pdf";
+    const pdf = (finalUrl: string): SafePage => ({ finalUrl, contentType: "application/pdf", text: null });
+    // One manifest URL is the S3 file itself, one redirects there.
+    agentAnswers[C_PDF.topic] = JSON.stringify({ results: [{ url: s3, title: "x", quote: "" }, { url: "https://papers.example/go", title: "x", quote: "" }] });
+    const a = app({ fetchPage: async (url) => (url === s3 || url === "https://papers.example/go" ? pdf(s3) : null) });
+    const evs = await events(await post(a, "/api/summaries/links/search", { ...ref, candidates: [C_PDF] }));
+    expect(evs.filter((e) => e.event === "result").map((e) => e.data)).toEqual([{ index: 0, outcome: "not_found", results: [] }]);
+    const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [{ ...PDF_ROW, url: s3 }] });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "not_verified" });
+    expect(ingests).toHaveLength(0);
+  });
+
+  test("the launch gate's default: no agent with under 5 s of the run left, one with 5 s", async () => {
+    for (const [runTimeoutMs, launched] of [[4_999, false], [5_000, true]] as const) {
+      let calls = 0;
+      const a = app({ now: () => 0, run: { runTimeoutMs }, agent: async () => (calls++, "{}") });
+      const evs = await events(await post(a, "/api/summaries/links/search", { ...ref, candidates: [C_NONE] }));
+      expect(evs.filter((e) => e.event === "result").map((e) => e.data.outcome)).toEqual([launched ? "not_found" : "skipped"]);
+      expect(calls).toBe(launched ? 1 : 0);
+    }
+  });
+
   test("past the run's deadline nothing more launches (skipped)", async () => {
     let t = 0;
     const a = app({ now: () => t, run: { concurrency: 1, runTimeoutMs: 1_000, minAgentMs: 500 }, agent: async () => ((t += 600), "{}") });
@@ -564,6 +598,53 @@ describe("POST /api/summaries/links", () => {
     expect(files.get(DOC)!).toBe(
       `---\ndate: "2026-03-22"\nurl: "${URL_}"\n---\n\nJust a summary.\n\n## Links\n\n- 🔎 [Claude Code effort level and model selection](${HALLIE_URL}) — Anthropic, Lydia Hallie · found by search\n`,
     );
+  });
+
+  test("the verified store is per document: a row verified on one document is refused on another, and under another source", async () => {
+    const OTHER = "ai/claude/Another talk.md";
+    files.set(OTHER, RAW);
+    const a = await searched();
+    for (const target of [{ source: "youtube", docId: OTHER }, { source: "vimeo", docId: DOC }]) {
+      const res = await post(a, "/api/summaries/links", { ...target, baseHash: linksBaseHash(RAW), add: [HALLIE_ROW] });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "not_verified" });
+    }
+    expect(ingests).toHaveLength(0);
+  });
+
+  describe("a verified row lives an hour", () => {
+    const MIN = 60_000;
+    const save = (a: Hono) => post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [HALLIE_ROW] });
+    const search = async (a: Hono) => {
+      await events(await post(a, "/api/summaries/links/search", { ...ref, candidates: [C_HALLIE] }));
+      await tick();
+    };
+    test("verified at t0: accepted at +59 min", async () => {
+      let t = 0;
+      const a = app({ now: () => t });
+      await search(a);
+      t = 59 * MIN;
+      expect((await save(a)).status).toBe(200);
+    });
+    test("verified at t0: refused at +61 min", async () => {
+      let t = 0;
+      const a = app({ now: () => t });
+      await search(a);
+      t = 61 * MIN;
+      const res = await save(a);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "not_verified" });
+      expect(ingests).toHaveLength(0);
+    });
+    test("verified at t0 and again at +59 min: accepted at +61 min (the re-verify replaces the row's time)", async () => {
+      let t = 0;
+      const a = app({ now: () => t });
+      await search(a);
+      t = 59 * MIN;
+      await search(a);
+      t = 61 * MIN;
+      expect((await save(a)).status).toBe(200);
+    });
   });
 
   test("bounds: an empty add, a bad hash", async () => {

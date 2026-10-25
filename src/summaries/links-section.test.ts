@@ -3,6 +3,7 @@ import {
   appendLinksSection,
   bodyUrlCounts,
   demoteLinksHeadings,
+  endsInsideHtmlBlock,
   findLinksSection,
   parseLinksLine,
   parseLinksSection,
@@ -428,5 +429,35 @@ describe("class check — the closer per (walker, marked) cell", () => {
     expect(worse.slice(0, 5)).toEqual([]);
     // The generator reaches the both-open cell, so the closer path is exercised.
     expect(closersAppended).toBeGreaterThan(100);
+  });
+});
+
+describe("fix round 1 batch 3 — a summary ending inside an open HTML block", () => {
+  const SECTION = "## Links\n\n- 📄 [A](https://a.example) · from description";
+  // One opener per CommonMark HTML block type: 1–5 run to their end marker or
+  // the document's end, 6–7 end at a blank line.
+  const CASES: [string, string, boolean][] = [
+    ["type 1 <pre>", "<pre>\nconst x = 1;", true],
+    ["type 1 <script>", "<script>\nlet a = 1;", true],
+    ["type 1 <style>", "<style>\np { color: red }", true],
+    ["type 1 <textarea>", "<textarea>\nhi", true],
+    ["type 2 comment", "<!-- note to self", true],
+    ["type 3 processing instruction", "<?php echo 1;", true],
+    ["type 4 declaration", "<!DOCTYPE html", true],
+    ["type 5 CDATA", "<![CDATA[ x", true],
+    ["type 6 <div>", "<div>\nx", false],
+    ["type 7 custom tag", '<span class="a">\nx', false],
+    ["a closed comment", "<!-- ok -->", false],
+    ["an inline comment in a paragraph", "Text <!-- open", false],
+  ];
+  test.each(CASES)("%s: refused exactly when marked folds the appended section", (_name, tail, open) => {
+    const summary = `# T\n\nBody.\n\n${tail}`;
+    const body = `${appendLinksSection(summary, SECTION)}\n`;
+    for (const html of [renderExportMarkdown(body), clientRender(body)]) {
+      expect(html.includes("<h2>Links</h2>")).toBe(!open);
+    }
+    expect(endsInsideHtmlBlock(summary)).toBe(open);
+    // The walker finds the section either way: only marked can tell.
+    expect(findLinksSection(body)).not.toBeNull();
   });
 });
