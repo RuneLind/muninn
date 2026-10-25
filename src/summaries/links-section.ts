@@ -69,7 +69,7 @@ function unescapeText(text: string): string {
 }
 
 /** `(` and `)` percent-encoded, so the link's closing paren is the only one. */
-function encodeUrl(url: string): string {
+export function encodeUrl(url: string): string {
   return url.replace(/\(/g, "%28").replace(/\)/g, "%29").replace(/\s/g, "%20");
 }
 
@@ -221,6 +221,17 @@ function walkerOpenFence(text: string): { char: string; length: number } | null 
 /** Whether the walker finds a `## Links` heading appended after `text`. */
 function walkerSeesHeading(text: string): boolean {
   return findLinksSection(`${text}\n\n${LINKS_HEADING}\n`)?.start === text.length + 2;
+}
+
+/**
+ * Whether `text` ends inside a fenced code block per EITHER reader (the line
+ * walker or marked). Find links refuses such a document up front: a section
+ * appended there is code to one reader, so the save could not keep the
+ * checked text or the `linksBaseHash` where they were.
+ */
+export function endsInsideFence(text: string): boolean {
+  const body = text.trimEnd();
+  return walkerOpenFence(body) !== null || markedOpenFence(body) !== null;
 }
 
 /**

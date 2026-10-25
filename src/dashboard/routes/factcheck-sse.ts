@@ -651,15 +651,15 @@ export interface ClaimVerifyOutcome {
  * block instead of a verify. Returns outcomes in CLAIM ORDER; `onDone(i, outcome)`
  * fires per completion (in completion order) for SSE emission + progress.
  */
-export async function runClaimPool(opts: {
+export async function runClaimPool<T = ClaimVerifyOutcome>(opts: {
   total: number;
   concurrency: number;
   shouldSkip: () => boolean;
-  verify: (i: number) => Promise<ClaimVerifyOutcome>;
-  onSkip: (i: number) => ClaimVerifyOutcome;
-  onDone: (i: number, outcome: ClaimVerifyOutcome) => void;
-}): Promise<ClaimVerifyOutcome[]> {
-  const outcomes: ClaimVerifyOutcome[] = new Array(opts.total);
+  verify: (i: number) => Promise<T>;
+  onSkip: (i: number) => NoInfer<T>;
+  onDone: (i: number, outcome: NoInfer<T>) => void;
+}): Promise<T[]> {
+  const outcomes: T[] = new Array(opts.total);
   let next = 0;
   const worker = async (): Promise<void> => {
     while (true) {
@@ -1203,7 +1203,7 @@ async function runFactcheck(
       }
     };
 
-    const outcomes = await runClaimPool({
+    const outcomes = await runClaimPool<ClaimVerifyOutcome>({
       total,
       concurrency: FACTCHECK_CLAIM_CONCURRENCY,
       // Launch-gate: stop launching for a gone client or past the deadline

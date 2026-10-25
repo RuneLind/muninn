@@ -19,6 +19,7 @@
     "summaries-delete.spec.ts": 12.4,
     "summaries-factcheck-writeback.spec.ts": 30.7,
     "summaries-factcheck.spec.ts": 13.9,
+    "summaries-find-links.spec.ts": 7.3,
     "summaries-prompts.spec.ts": 5.5,
     "summaries-reader.spec.ts": 44.5,
     "summaries-rerun.spec.ts": 14.3,

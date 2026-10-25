@@ -135,6 +135,11 @@ export const E2E_PORTS = {
   // endpoint the throwaway summarizer bot is pointed at (the re-run shape).
   "summaries-paste-links": 3168,
   "summaries-paste-links/fake": 3169,
+  // 🔎 Find links: the real options, candidates, search and save routes on a
+  // muninn booted through `e2e/find-links-boot.ts` (model calls and page
+  // fetches canned in-process), against a fake huginn.
+  "summaries-find-links": 3170,
+  "summaries-find-links/huginn": 3171,
   // The reader's provenance strip and the chain it opens, end to end. ONE fake
   // `node:http` server plays claude-usage's `GET /api/sessions-by-id` and
   // `GET /api/merges` — pricing one of the fixture's two sessions and OMITTING
