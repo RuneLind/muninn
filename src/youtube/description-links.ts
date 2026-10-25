@@ -213,6 +213,19 @@ export function githubRepoOf(url: string | URL): { owner: string; repo: string }
   return GITHUB_NAME_RE.test(owner) && GITHUB_NAME_RE.test(repo) && repo !== "." && repo !== ".." ? { owner, repo } : null;
 }
 
+/**
+ * A section line's icon, ONE rule for the description and the text links: `📦`
+ * for a `repo`-class link that is a GitHub repo root or a gist, Hugging Face or
+ * arXiv page; `📄` for everything else, a pull request, issue, file or tree page
+ * inside a repo included. A default-branch `/tree/<branch>` line turns `📦`
+ * only when the repo lookup confirms the branch (`withRepoDetails`).
+ */
+export function linkLineIcon(url: string, cls: DescriptionLinkClass): "📦" | "📄" {
+  if (cls !== "repo") return "📄";
+  if (githubRepoOf(url) === null) return "📦";
+  return pathSegments(new URL(url)).length === 2 ? "📦" : "📄";
+}
+
 /** Rule 4: a code or paper host. Shared with the text classifier (`src/summaries/text-links.ts`). */
 export function isRepoUrl(url: URL): boolean {
   const host = bareHost(url.hostname);

@@ -313,6 +313,27 @@ describe("the `## Links` step", () => {
     expect(out.links?.unknownIds).toEqual([7]);
   });
 
+  test("📦 only on a GitHub repo root; a deeper GitHub page reads 📄 with its own title (G3, one rule with the text links)", async () => {
+    const out = await finishYouTubeSummary({
+      raw: "CATEGORY: ai/rag\nLINKS: 1, 2, 3\n\nSUMMARY:\n### Heading\n- point",
+      jobId: "jl-g3",
+      videoId: VIDEO_ID,
+      frames: [],
+      visualDetail: "selected",
+      framesRoot: tmpRoot("yt-finish-root-"),
+      links: [
+        { url: "https://github.com/example/harness", cls: "repo", line: 0, title: "Harness", attribution: "" },
+        { url: "https://github.com/example/harness/pull/3", cls: "repo", line: 1, title: "The fix", attribution: "" },
+        { url: "https://arxiv.org/abs/2401.00001", cls: "repo", line: 2, title: "Paper", attribution: "" },
+      ],
+    });
+    expect(out.summary).toBe(
+      "### Heading\n- point\n\n## Links\n\n- 📦 [Harness](https://github.com/example/harness) · from description\n" +
+        "- 📄 [The fix](https://github.com/example/harness/pull/3) · from description\n" +
+        "- 📦 [Paper](https://arxiv.org/abs/2401.00001) · from description",
+    );
+  });
+
   test("a summary that never closed its code fence: the section is closed off, outside the fact-check and kept by a re-run", async () => {
     const out = await finishYouTubeSummary({
       raw: "CATEGORY: ai/rag\nLINKS: none\n\nSUMMARY:\nIntro\n\n```python\nprint(1)\n\n> 💬 **Takeaway:** A closer.",

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatStars, githubRepoLookup, githubRepoOf, repoDetail, withRepoDetails } from "./github-repo.ts";
+import { formatStars, githubRepoLookup, githubRepoOf, repoDetail, repoLineRef, withRepoDetails } from "./github-repo.ts";
 import type { LinkLine } from "./links-section.ts";
 import { isRepoUrl } from "../youtube/description-links.ts";
 
@@ -60,9 +60,10 @@ describe("githubRepoLookup", () => {
   test("anonymous by default, one GET to the repo endpoint", async () => {
     const seen: Array<{ url: string; auth?: string }> = [];
     const lookup = githubRepoLookup({ token: "", fetchImpl: fakeFetch({ status: 200, body: REPO_JSON }, seen), today: () => "2026-10-25" });
-    expect(await lookup("https://github.com/example/harness/tree/main", new AbortController().signal)).toBe(
-      "Eval-first harness for invented agents, TypeScript, MIT, ★ 2.1k on 2026-10-25",
-    );
+    expect(await lookup("https://github.com/example/harness/tree/main", new AbortController().signal)).toEqual({
+      detail: "Eval-first harness for invented agents, TypeScript, MIT, ★ 2.1k on 2026-10-25",
+      defaultBranch: "main",
+    });
     expect(seen).toEqual([{ url: "https://api.github.com/repos/example/harness" }]);
   });
 
@@ -250,5 +251,41 @@ describe("repo lines: root only, deduped, bounded", () => {
       "TypeScript, ★ 3 on 2026-10-25",
     );
     expect(out[0]!.detail).toBe("Example Lab, Invented Person – TypeScript, ★ 3 on 2026-10-25");
+  });
+});
+
+describe("fix round 2 batch 2", () => {
+  const page = (url: string): LinkLine => ({ icon: "📄", title: "page", url, detail: "", provenance: "from text" });
+
+  test("a malformed percent-escape is not a repo-root line, and no line throws out of the section (G1)", async () => {
+    const bad = ["https://github.com/a/b/tree/%E0", "https://github.com/a/b/tree/%ZZ", "https://github.com/a/b/tree/main%"];
+    for (const u of bad) expect([u, repoLineRef(u)]).toEqual([u, null]);
+    const out = await withRepoDetails([...bad.map(page), line("https://github.com/example/harness")], async () => "Go, ★ 3 on 2026-10-25");
+    expect(out.slice(0, 3)).toEqual(bad.map(page));
+    expect(out[3]!.detail).toBe("Go, ★ 3 on 2026-10-25");
+  });
+
+  test("one API call per repo: the root, its default-branch tree and another branch share it (G3)", async () => {
+    const seen: Array<{ url: string }> = [];
+    const lookup = githubRepoLookup({
+      token: "",
+      fetchImpl: fakeFetch({ status: 200, body: { ...REPO_JSON, default_branch: "main" } }, seen),
+      today: () => "2026-10-25",
+    });
+    const out = await withRepoDetails(
+      [
+        page("https://github.com/example/harness"),
+        page("https://github.com/Example/Harness/tree/main"),
+        page("https://github.com/example/harness/tree/feature-x"),
+      ],
+      lookup,
+    );
+    expect(seen).toEqual([{ url: "https://api.github.com/repos/example/harness" }]);
+    const detail = "Eval-first harness for invented agents, TypeScript, MIT, ★ 2.1k on 2026-10-25";
+    expect(out.map((l) => [l.icon, l.detail])).toEqual([
+      ["📦", detail],
+      ["📦", detail],
+      ["📄", ""],
+    ]);
   });
 });

@@ -210,3 +210,40 @@ describe("the prompt list, the pick and the section", () => {
     expect(plain.section).toBe("## Links\n\n- 📦 [github.com/example/harness](https://github.com/example/harness) · from text");
   });
 });
+
+describe("fix round 2 batch 2 pins", () => {
+  test("📦 only on a GitHub repo root; a pull request, issue, file or tree page reads 📄 (G3)", () => {
+    const urls: string[] = [
+      "https://github.com/example/harness",
+      "https://github.com/example/harness/pull/3",
+      "https://github.com/example/harness/issues/12",
+      "https://github.com/example/harness/blob/main/README.md",
+      "https://github.com/example/harness/tree/main/subdir",
+      "https://github.com/example/harness/tree/main",
+      "https://arxiv.org/abs/2401.00001",
+    ];
+    const links = classifyTextLinks(urls.join("\n"));
+    expect(links.map((l) => l.cls)).toEqual(["repo", "repo", "repo", "repo", "repo", "repo", "repo"]);
+    const lines = pickTextLinks(links, links.map((l) => l.id)).lines;
+    expect(lines.map((l) => l.url)).toEqual(urls);
+    // A tree root is 📦 only once the lookup confirms the default branch (`withRepoDetails`).
+    expect(lines.map((l) => l.icon)).toEqual(["📦", "📄", "📄", "📄", "📄", "📄", "📦"]);
+  });
+
+  test("a fallback title carries at most 60 characters of the query (M10b)", () => {
+    const query = `q=${"a".repeat(100)}`;
+    const [link] = classifyTextLinks(`https://example.org/search?${query}`);
+    expect(link!.title).toBe(`example.org/search?${query.slice(0, 60)}`);
+  });
+
+  test("substitution tries the longest URL first, whatever the map's order (M26)", () => {
+    const out = substituteUrls(
+      "a https://bit.ly/x?y=1 b https://bit.ly/x",
+      new Map([
+        ["https://bit.ly/x", "https://e.test/short"],
+        ["https://bit.ly/x?y=1", "https://e.test/long"],
+      ]),
+    );
+    expect(out).toBe("a https://e.test/long b https://e.test/short");
+  });
+});

@@ -198,7 +198,7 @@ export interface YouTubeSummarizerDeps {
   framesRoot?: string;
   /**
    * A picked GitHub repo link's detail line (`githubRepoLookup`, one API call
-   * under a 5 s budget); `null` writes the plain line.
+   * per repo under a 5 s budget); `null` writes the plain line.
    */
   repoLine: RepoLineLookup;
   /**

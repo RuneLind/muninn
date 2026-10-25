@@ -28,6 +28,7 @@ import {
   isSocialUrl,
   leadInTitle,
   linkKey,
+  linkLineIcon,
 } from "../youtube/description-links.ts";
 
 /** At most this many candidates reach the prompt, and at most this many redirect lookups run per text. */
@@ -217,7 +218,7 @@ export function pickTextLinks(links: readonly TextLink[], pick: LinksPick): Pick
   return {
     lines: links
       .filter((l) => chosen.has(l.id))
-      .map((l) => ({ icon: l.cls === "repo" ? "📦" : "📄", title: l.title, url: l.url, detail: "", provenance: "from text" })),
+      .map((l) => ({ icon: linkLineIcon(l.url, l.cls), title: l.title, url: l.url, detail: "", provenance: "from text" })),
     unknownIds: asked.filter((id) => !ids.has(id)),
   };
 }

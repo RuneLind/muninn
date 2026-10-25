@@ -1,4 +1,4 @@
-import { test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { test, expect, beforeEach, afterEach, afterAll, mock } from "bun:test";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 
@@ -73,8 +73,8 @@ const { createJob, getJob } = await import("./state.ts");
  * The attributes the `claude` span was STARTED with — where `extraTraceAttrs`
  * (`linkTraceAttrs`) lands. The real prototype is patched rather than a module
  * mocked, so the chain `runCaptureOneShot` → `tracedOneShot` → `tracer.start`
- * stays under test; this file runs in a process of its own (its `mock.module`
- * calls), so the patch reaches no other suite.
+ * stays under test. `afterAll` puts the real method back: `test:coverage` runs
+ * every file in one process, where an unrestored patch would reach other suites.
  */
 let lastClaudeSpanAttrs: Record<string, unknown> | undefined;
 const { Tracer } = await import("../tracing/tracer.ts");
@@ -106,6 +106,21 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+afterAll(() => {
+  Tracer.prototype.start = realTracerStart;
+});
+
+test("the post's own address is not listed, even off x.com (M13c)", async () => {
+  const own = "https://example.org/mirror/post-1789456123";
+  const body = `Read it at [the post](${own}) and the paper https://example.org/paper.`;
+  const jobId = createJob(ARTICLE_ID, PIN_TITLE, own, PIN_AUTHOR);
+  await summarizeArticle(jobId, ARTICLE_ID, PIN_TITLE, own, PIN_AUTHOR, body, config, bot, {
+    resolveRedirect: async () => null,
+    repoLine: async () => null,
+  });
+  expect(lastPrompt).toBe(`${body}\n\n## Links in the text\n\n1. example.org/paper — https://example.org/paper`);
 });
 
 test("happy path completes the job and ingests the parsed summary", async () => {

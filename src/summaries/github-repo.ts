@@ -35,15 +35,20 @@ const API_BASE = "https://api.github.com";
  * The repo a URL gets a repo LINE for: the repo root, or `/tree/<branch>` with
  * nothing after it (the lookup then checks `<branch>` is the default branch).
  * Any deeper page — a pull request, an issue, a file, a subdirectory — gets
- * none: its line stays its own. `null` for those and for non-repo URLs.
+ * none: its line stays its own. `null` for those, for non-repo URLs and for a
+ * branch whose percent-escape does not decode (`/tree/%E0`).
  */
 export function repoLineRef(url: string): { owner: string; repo: string; branch?: string } | null {
   const ref = githubRepoOf(url);
   if (ref === null) return null;
   const segs = new URL(url).pathname.split("/").filter((s) => s !== "");
   if (segs.length === 2) return ref;
-  if (segs.length === 4 && segs[2] === "tree") return { ...ref, branch: decodeURIComponent(segs[3]!) };
-  return null;
+  if (segs.length !== 4 || segs[2] !== "tree") return null;
+  try {
+    return { ...ref, branch: decodeURIComponent(segs[3]!) };
+  } catch {
+    return null;
+  }
 }
 
 /** `2134` → `2.1k`, `1_200_000` → `1.2M`; a count that rounds to 1000 of a unit reads as the next unit. */
@@ -82,11 +87,22 @@ export function repoDetail(json: RepoJson, day: string): string {
 /** A lookup's answer when GitHub said the rate limit is spent: the caller stops looking up. */
 export const REPO_RATE_LIMITED = { rateLimited: true } as const;
 
+/** One repo's API answer: its detail text ("" when it has none) and its default branch. */
+export interface RepoInfo {
+  readonly detail: string;
+  readonly defaultBranch: string | null;
+}
+
 /**
- * Looks a repo URL up: its detail line, `null` (not a repo-line URL, or any
- * failure), or {@link REPO_RATE_LIMITED}.
+ * Looks the repo of a repo-line URL up: its {@link RepoInfo}, `null` (not a
+ * repo-line URL, or any failure), or {@link REPO_RATE_LIMITED}. A bare string
+ * is a detail with no default branch known, so it reaches the repo-root lines
+ * only (a test seam's shorthand).
  */
-export type RepoLineLookup = (url: string, signal: AbortSignal) => Promise<string | null | typeof REPO_RATE_LIMITED>;
+export type RepoLineLookup = (
+  url: string,
+  signal: AbortSignal,
+) => Promise<RepoInfo | string | null | typeof REPO_RATE_LIMITED>;
 
 export interface GitHubRepoLookupOptions {
   /** Default: `process.env.MUNINN_GITHUB_TOKEN`, read at call time. */
@@ -125,11 +141,11 @@ export function githubRepoLookup(options: GitHubRepoLookupOptions = {}): RepoLin
         return rateLimited ? REPO_RATE_LIMITED : null;
       }
       const json = (await res.json()) as RepoJson;
-      // `/tree/<branch>` is the repo's front page only on its default branch.
-      if (ref.branch !== undefined && json.default_branch !== ref.branch) return null;
       const day = options.today?.() ?? new Date().toISOString().slice(0, 10);
-      const detail = repoDetail(json, day);
-      return detail === "" ? null : detail;
+      return {
+        detail: repoDetail(json, day),
+        defaultBranch: typeof json.default_branch === "string" ? json.default_branch : null,
+      };
     } catch (err) {
       log.info("GitHub repo lookup for {repo} failed: {error} — plain link line", {
         repo: `${ref.owner}/${ref.repo}`,
@@ -140,34 +156,45 @@ export function githubRepoLookup(options: GitHubRepoLookupOptions = {}): RepoLin
   };
 }
 
-/** One lookup per repo, whatever the case of its owner and name. */
-function repoKey(url: string): string | null {
-  const ref = repoLineRef(url);
-  if (ref === null) return null;
-  return `${ref.owner.toLowerCase()}/${ref.repo.toLowerCase()}${ref.branch !== undefined ? `@${ref.branch}` : ""}`;
+/**
+ * A line's repo (owner and name lowercased: one lookup per repo, whatever the
+ * case or the branch) and its `/tree/` branch, or `null`. Never throws: one
+ * line cannot take the section down with it.
+ */
+function lineRepo(url: string): { key: string; branch?: string } | null {
+  try {
+    const ref = repoLineRef(url);
+    if (ref === null) return null;
+    return { key: `${ref.owner.toLowerCase()}/${ref.repo.toLowerCase()}`, ...(ref.branch !== undefined ? { branch: ref.branch } : {}) };
+  } catch {
+    return null;
+  }
 }
 
 /**
  * The lines with a repo detail where the lookup gave one: every line whose URL
- * is a repo root or its default-branch tree (`repoLineRef`), one lookup per
- * repo, at most {@link GITHUB_REPO_CONCURRENCY} at once, all under ONE
+ * is a repo root or its default-branch tree (`repoLineRef`), ONE lookup per
+ * repo (the root, `/tree/main` and `/tree/dev` of one repo share it; the
+ * default-branch check reads that one answer), at most
+ * {@link GITHUB_REPO_CONCURRENCY} at once, all under ONE
  * {@link GITHUB_REPO_TIMEOUT_MS} budget. After a rate-limit answer the rest are
  * not looked up. A line that already has a detail (a description's
- * attribution) keeps it in front, separated by ` – `. A failed lookup, or a
- * deeper page in a repo, leaves its line exactly as it was.
+ * attribution) keeps it in front, separated by ` – `. A failed lookup, a
+ * branch that is not the default, or a deeper page in a repo, leaves its line
+ * exactly as it was.
  */
 export async function withRepoDetails(
   lines: readonly LinkLine[],
   lookup: RepoLineLookup | undefined,
   timeoutMs: number = GITHUB_REPO_TIMEOUT_MS,
 ): Promise<LinkLine[]> {
-  const keys = lines.map((l) => repoKey(l.url));
-  if (lookup === undefined || keys.every((k) => k === null)) return [...lines];
+  const repos = lines.map((l) => lineRepo(l.url));
+  if (lookup === undefined || repos.every((r) => r === null)) return [...lines];
   const firstUrl = new Map<string, string>();
-  keys.forEach((k, i) => {
-    if (k !== null && !firstUrl.has(k)) firstUrl.set(k, lines[i]!.url);
+  repos.forEach((r, i) => {
+    if (r !== null && !firstUrl.has(r.key)) firstUrl.set(r.key, lines[i]!.url);
   });
-  const details = new Map<string, string>();
+  const details = new Map<string, RepoInfo>();
   const budget = new AbortController();
   const timer = setTimeout(() => budget.abort(), timeoutMs);
   try {
@@ -178,7 +205,7 @@ export async function withRepoDetails(
       for (let key = queue.shift(); key !== undefined; key = queue.shift()) {
         if (rateLimited || budget.signal.aborted) return;
         const answer = await Promise.race([lookup(firstUrl.get(key)!, budget.signal).catch(() => null), deadline]);
-        if (typeof answer === "object" && answer !== null && answer.rateLimited) {
+        if (typeof answer === "object" && answer !== null && "rateLimited" in answer) {
           if (!rateLimited) {
             rateLimited = true;
             log.warn("GitHub rate limit reached: {skipped} remaining repo lookup(s) skipped, their lines stay plain", {
@@ -187,7 +214,8 @@ export async function withRepoDetails(
           }
           return;
         }
-        if (typeof answer === "string" && answer !== "") details.set(key, answer);
+        if (typeof answer === "string") details.set(key, { detail: answer, defaultBranch: null });
+        else if (typeof answer === "object" && answer !== null && "detail" in answer) details.set(key, answer);
       }
     };
     await Promise.all(Array.from({ length: Math.min(GITHUB_REPO_CONCURRENCY, queue.length) }, worker));
@@ -195,8 +223,12 @@ export async function withRepoDetails(
     clearTimeout(timer);
   }
   return lines.map((line, i) => {
-    const detail = keys[i] === null ? undefined : details.get(keys[i]!);
-    if (detail === undefined) return line;
+    const repo = repos[i];
+    const info = repo === null || repo === undefined ? undefined : details.get(repo.key);
+    if (info === undefined || info.detail === "") return line;
+    // `/tree/<branch>` is the repo's front page only on its default branch.
+    if (repo!.branch !== undefined && repo!.branch !== info.defaultBranch) return line;
+    const detail = info.detail;
     return { ...line, icon: "📦", detail: line.detail === "" ? detail : `${line.detail} – ${detail}` };
   });
 }

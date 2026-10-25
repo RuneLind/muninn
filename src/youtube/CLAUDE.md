@@ -548,8 +548,11 @@ pieces, in order:
   only counted. No qualifying line, no section. Every GitHub repo root or
   default-branch tree link in the section, by-rule source line or picked one,
   gets its repo line (`src/summaries/github-repo.ts`, the `repoLine` dep; one
-  API call per repo, 5 s budget, `MUNINN_GITHUB_TOKEN` optional), and a failed
-  lookup the plain line. The section joins the summary
+  API call per repo, shared by its root and branch links, 5 s budget,
+  `MUNINN_GITHUB_TOKEN` optional), and a failed lookup the plain line. Only a
+  repo root (or a confirmed default-branch tree) reads `📦`; a pull request,
+  issue or file page in a repo reads `📄` (`linkLineIcon`, the text links' rule
+  too). The section joins the summary
   BEFORE `completeJob`, the ingest and the source draft. The trace root carries
   `bodyUrls` / `bodyUrlsUnlisted` (URLs the model wrote into its prose, and how
   many of those the description never listed); the summary span carries

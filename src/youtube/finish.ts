@@ -38,7 +38,7 @@ import {
   type LinksPick,
 } from "../summaries/links-section.ts";
 import { withRepoDetails, type RepoLineLookup } from "../summaries/github-repo.ts";
-import { isPromoClass, linkCandidates, type DescriptionLink } from "./description-links.ts";
+import { isPromoClass, linkCandidates, linkLineIcon, type DescriptionLink } from "./description-links.ts";
 
 // The CATEGORY stays the vertical's own, not this file's: the JSONL sink is
 // queried by category, and moving code between files must not move the records
@@ -106,7 +106,7 @@ export function buildDescriptionLinksSection(links: readonly DescriptionLink[], 
   const lines = candidates
     .filter((c) => c.cls === "source" || chosen.has(c.id))
     .map((c) => ({
-      icon: c.cls === "repo" ? "📦" : "📄",
+      icon: linkLineIcon(c.url, c.cls),
       title: c.title,
       url: c.url,
       detail: c.attribution,

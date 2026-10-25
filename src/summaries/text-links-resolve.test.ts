@@ -125,3 +125,101 @@ describe("t.co resolution", () => {
     expect(hits).toHaveLength(TEXT_LINKS_MAX);
   });
 });
+
+/** A resolver over a fixed answer table, recording every call; a `/hang` URL never answers. */
+function tableResolver(answers: Record<string, string>, calls: string[], delays: Record<string, number> = {}) {
+  return (url: string, signal: AbortSignal): Promise<string | null> => {
+    calls.push(url);
+    if (url.endsWith("/hang")) return new Promise(() => {});
+    const answer = answers[url] ?? null;
+    const ms = delays[url] ?? 0;
+    if (ms === 0) return Promise.resolve(answer);
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve(answer), ms);
+      signal.addEventListener("abort", () => clearTimeout(t), { once: true });
+    });
+  };
+}
+
+describe("second hops chained per link (fix round 2 batch 2, G2)", () => {
+  test("one hanging t.co does not starve another link's second hop", async () => {
+    const calls: string[] = [];
+    const prepared = await prepareTextLinks("A https://t.co/hang B https://t.co/toLnkd", {
+      resolveRedirect: tableResolver(
+        { "https://t.co/toLnkd": "https://lnkd.in/mid", "https://lnkd.in/mid": "https://pub.test/final" },
+        calls,
+      ),
+      tcoBudgetMs: 300,
+    });
+    expect(prepared.text).toBe("A https://t.co/hang B https://pub.test/final");
+  });
+
+  test("a shortener both bare in the text and a t.co target is looked up once", async () => {
+    const calls: string[] = [];
+    const prepared = await prepareTextLinks("A https://t.co/a1 B https://bit.ly/zz", {
+      resolveRedirect: tableResolver({ "https://t.co/a1": "https://bit.ly/zz", "https://bit.ly/zz": "https://pub.test/z" }, calls),
+    });
+    expect(calls.sort()).toEqual(["https://bit.ly/zz", "https://t.co/a1"]);
+    expect(prepared.text).toBe("A https://pub.test/z B https://pub.test/z");
+  });
+
+  test("a bare shortener that lands on another shortener gets no second hop (M23)", async () => {
+    const calls: string[] = [];
+    const prepared = await prepareTextLinks("A https://bit.ly/toLnkd", {
+      resolveRedirect: tableResolver({ "https://bit.ly/toLnkd": "https://lnkd.in/x", "https://lnkd.in/x": "https://pub.test/x" }, calls),
+    });
+    expect(calls).toEqual(["https://bit.ly/toLnkd"]);
+    expect(prepared.text).toBe("A https://lnkd.in/x");
+  });
+
+  test("the last lookup under the cap goes to the earlier link in the text, however fast the later one answers", async () => {
+    const calls: string[] = [];
+    // 39 first hops leave ONE lookup; the slow t.co comes first in the text.
+    const text = [
+      "https://t.co/slow",
+      "https://t.co/fast",
+      ...Array.from({ length: TEXT_LINKS_MAX - 3 }, (_, i) => `https://t.co/many${i}`),
+    ].join("\n");
+    const prepared = await prepareTextLinks(text, {
+      resolveRedirect: tableResolver(
+        {
+          "https://t.co/slow": "https://lnkd.in/p",
+          "https://t.co/fast": "https://lnkd.in/q",
+          "https://lnkd.in/p": "https://pub.test/p",
+          "https://lnkd.in/q": "https://pub.test/q",
+        },
+        calls,
+        { "https://t.co/slow": 50 },
+      ),
+    });
+    expect(calls).toContain("https://lnkd.in/p");
+    expect(calls).not.toContain("https://lnkd.in/q");
+    expect(calls).toHaveLength(TEXT_LINKS_MAX);
+    expect(prepared.text.split("\n").slice(0, 2)).toEqual(["https://pub.test/p", "https://lnkd.in/q"]);
+  });
+
+  test("under a tight cap a link waits on a hanging earlier one only while that one could take the last lookup", async () => {
+    const calls: string[] = [];
+    // 38 first hops leave TWO lookups; the hanging t.co could take one at most.
+    const text = [
+      "https://t.co/hang",
+      "https://t.co/plain1",
+      "https://t.co/plain2",
+      "https://t.co/toLnkd",
+      ...Array.from({ length: TEXT_LINKS_MAX - 6 }, (_, i) => `https://t.co/many${i}`),
+    ].join("\n");
+    const prepared = await prepareTextLinks(text, {
+      resolveRedirect: tableResolver(
+        {
+          "https://t.co/plain1": "https://pub.test/1",
+          "https://t.co/plain2": "https://pub.test/2",
+          "https://t.co/toLnkd": "https://lnkd.in/mid",
+          "https://lnkd.in/mid": "https://pub.test/final",
+        },
+        calls,
+      ),
+      tcoBudgetMs: 300,
+    });
+    expect(prepared.text.split("\n")[3]).toBe("https://pub.test/final");
+  });
+});
