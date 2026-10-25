@@ -1,4 +1,5 @@
 import type { Hono } from "hono";
+import { Marked, type Token } from "marked";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { createJob, getJob, getRecentJobs, subscribe } from "../../article/state.ts";
@@ -36,58 +37,59 @@ async function findExistingByUrl(
   }
 }
 
-/**
- * One markdown line as plain text: a leading heading, quote or list marker
- * dropped, links to their text, and code, emphasis and escapes removed where
- * they are paired — a lone `**` or `` ` `` is text (`2**10`).
- */
-function plainLine(line: string): string {
-  const code: string[] = [];
-  return line
-    .trim()
-    .replace(/^(?:#+\s+|>\s?|[-*+]\s+|\d+[.)]\s+)+/, "")
-    // A code span's content is set aside, so no later step reads its `*`, `[` or `\\`.
-    .replace(/(?<!`)(`+)(?!`)(.*?[^`])\1(?!`)/g, (_m, _tick: string, inner: string) => {
-      code.push(/^ .* $/.test(inner) && inner.trim() !== "" ? inner.slice(1, -1) : inner);
-      return `\u{F0000}${code.length - 1}\u{F0001}`;
-    })
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/(\*\*|~~)(?=\S)(.*?\S)\1/g, "$2")
-    .replace(/(^|[^\w_])__(?=\S)(.*?\S)__(?![\w_])/g, "$1$2")
-    .replace(/(^|[^\w*])[*_](\S(?:[^*_]*?\S)?)[*_](?=[^\w*]|$)/g, "$1$2")
-    .replace(/\\([!-/:-@[-`{-~])/g, "$1")
-    .replace(/\u{F0000}(\d+)\u{F0001}/gu, (_m, i: string) => code[Number(i)] ?? "")
-    .replace(/\s+/g, " ")
-    .trim();
+const titleLexer = new Marked();
+
+/** Inline tokens as plain text: links and emphasis to their text, code spans to their content, images and inline HTML to nothing. */
+function inlineText(tokens: readonly Token[]): string {
+  let out = "";
+  for (const t of tokens) {
+    switch (t.type) {
+      case "image":
+      case "html":
+        break;
+      case "br":
+        out += "\n";
+        break;
+      case "codespan":
+      case "escape":
+        out += t.text;
+        break;
+      default:
+        out += "tokens" in t && t.tokens ? inlineText(t.tokens) : "text" in t ? String(t.text) : "";
+    }
+  }
+  return out;
+}
+
+/** The first line with prose among `tokens`' headings and paragraphs, descending into quotes and lists. */
+function firstProseLine(tokens: readonly Token[]): string | null {
+  for (const t of tokens) {
+    let line: string | null = null;
+    if (t.type === "heading" || t.type === "paragraph" || t.type === "text") {
+      // A paragraph's soft and hard breaks end the title: the first line is the one a reader sees as the lede.
+      line = inlineText(t.tokens ?? []).split("\n").map((l) => l.replace(/\s+/g, " ").trim())
+        .find((l) => /[^\s*_`~#>=+\-|:]/.test(l)) ?? null;
+    } else if (t.type === "blockquote" || t.type === "list_item") {
+      line = firstProseLine(t.tokens ?? []);
+    } else if (t.type === "list") {
+      line = firstProseLine(t.items);
+    }
+    if (line !== null) return line;
+  }
+  return null;
 }
 
 /**
- * Derive a non-empty title from the pasted text: the first line with prose
- * as plain text (the paste form sends the walk's markdown), truncated to ~80
- * chars — so huginn's `/api/articles/ingest` never receives an empty title
- * (the drafter downstream keys pages off it). Code fences and the lines inside
- * them are skipped, and so is a line of markup alone (`---`, `**`).
+ * Derive a non-empty title from the pasted text (the paste form sends the
+ * walk's markdown), truncated to ~80 chars — so huginn's
+ * `/api/articles/ingest` never receives an empty title (the drafter
+ * downstream keys pages off it). marked parses the text, so CommonMark
+ * decides what is a fence, a heading or a list: the title is the first line
+ * with prose of the first heading or paragraph, reached through quotes and
+ * lists; code, HTML blocks, tables and rules are skipped.
  */
 export function deriveTitle(text: string): string {
-  let fence: string | null = null;
-  let firstLine = "Untitled article";
-  for (const line of text.split("\n")) {
-    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
-    if (fence !== null) {
-      // A closing fence: the opening character, at least as long, nothing after it.
-      if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null;
-      continue;
-    }
-    if (marker !== undefined) {
-      fence = marker;
-      continue;
-    }
-    const plain = plainLine(line);
-    if (/[^\s*_`~#>=+\-|:]/.test(plain)) {
-      firstLine = plain;
-      break;
-    }
-  }
+  const firstLine = firstProseLine(titleLexer.lexer(text)) ?? "Untitled article";
   return firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine;
 }
 
