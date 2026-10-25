@@ -159,15 +159,37 @@ describe("L4: the author check", () => {
   });
 });
 
-describe("L5: a line names an author only when the check passed", () => {
+describe("D21 2: a line names the page's own byline, never the candidate's author", () => {
   const entry = { url: "https://example.test/post", title: "", quote: "Start with the defaults and adjust from there." };
-  test("matched with the check passed carries the author", () => {
+  test("the author check passed on the visible text, no byline: the site only", () => {
     const p = page(`<meta property="og:site_name" content="Example"><title>Claude Code effort level and model selection</title>${filler("By Lydia Hallie.")}`);
-    expect(foundLinkFrom(LYDIA, p, entry, judgePage(LYDIA, p, ""))?.detail).toBe("Example, Lydia Hallie");
+    const v = judgePage(LYDIA, p, "");
+    expect(v).toMatchObject({ label: "matched", evidence: "author", authorCheck: "passed" });
+    expect(foundLinkFrom(LYDIA, p, entry, v)?.detail).toBe("Example");
   });
-  test("reachable carries the site only", () => {
-    const p = page(`<meta property="og:site_name" content="Example"><title>Claude Code best practices</title>${filler("Start with the defaults and adjust from there. Lydia Hallie.")}`);
-    expect(foundLinkFrom(LYDIA, p, entry, judgePage(LYDIA, p, entry.quote))).toMatchObject({ label: "reachable", detail: "Example" });
+  test("the page's author meta is written, on a reachable page too", () => {
+    const p = page(`<meta property="og:site_name" content="Example"><meta name="author" content="Lydia Hallie"><title>Claude Code best practices</title>${filler("Start with the defaults and adjust from there.")}`);
+    expect(foundLinkFrom(LYDIA, p, entry, judgePage(LYDIA, p, entry.quote))).toMatchObject({ label: "reachable", evidence: "quote", detail: "Example, Lydia Hallie" });
+  });
+  test("a page quoting the candidate's author it is not by: the page's own byline, never the quoted name", () => {
+    const c: LinkCandidate = { title: null, author: "Andrej Karpathy", topic: "Karpathy's post on vibe coding", kind: "post" };
+    const ld = '<script type="application/ld+json">{"@type":"BlogPosting","author":{"@type":"Person","name":"Simon Willison"}}</script>';
+    const p = page(
+      `<meta property="og:site_name" content="Simon Willison's Weblog">${ld}<title>Karpathy's post on vibe coding</title>${filler("Andrej Karpathy coined vibe coding in a post.")}`,
+      "https://simonwillison.net/2025/Mar/19/vibe-coding/",
+    );
+    const v = judgePage(c, p, "");
+    expect(v).toMatchObject({ label: "matched", evidence: "author", authorCheck: "passed" });
+    const line = foundLinkFrom(c, p, entry, v);
+    expect(line?.detail).toBe("Simon Willison's Weblog, Simon Willison");
+    expect(line?.detail).not.toContain("Karpathy");
+  });
+  test("a profile URL in article:author is no byline; the next name is", () => {
+    const p = page(
+      `<meta property="og:site_name" content="Example"><meta property="article:author" content="https://www.facebook.com/someone"><meta name="author" content="Jane Doe"><title>Prompt caching in practice</title>`,
+    );
+    const c: LinkCandidate = { title: "Prompt caching in practice", author: null, topic: "the caching post", kind: "post" };
+    expect(foundLinkFrom(c, p, entry, judgePage(c, p, ""))?.detail).toBe("Example, Jane Doe");
   });
   test("matched by title equality with the check skipped carries no author", () => {
     const c: LinkCandidate = { ...LYDIA, title: "Claude Code effort level and model selection" };
@@ -176,9 +198,9 @@ describe("L5: a line names an author only when the check passed", () => {
     expect(v).toMatchObject({ label: "matched", evidence: "title", authorCheck: "skipped" });
     expect(foundLinkFrom(c, p, entry, v)).toMatchObject({ label: "matched", detail: "Example" });
   });
-  test("og:site_name equal to the author: the name is said once", () => {
+  test("og:site_name equal to the byline: the name is said once", () => {
     const c: LinkCandidate = { title: null, author: "Julia Evans", topic: "Julia Evans on what happens behind hello world on Linux", kind: "post" };
-    const p = page(`<meta property="og:site_name" content="Julia Evans"><title>What happens behind the scenes when we run hello world on Linux</title>${filler("By Julia Evans.")}`);
+    const p = page(`<meta property="og:site_name" content="Julia Evans"><meta name="author" content="Julia Evans"><title>What happens behind the scenes when we run hello world on Linux</title>${filler("By Julia Evans.")}`);
     const v = judgePage(c, p, "");
     expect(foundLinkFrom(c, p, entry, v)?.detail).toBe("Julia Evans");
     expect(v).toMatchObject({ label: "matched", evidence: "author" });
@@ -195,6 +217,7 @@ describe("L6: only a PDF is reachable, not read", () => {
       title: LYDIA.topic,
       detail: "",
       label: "unread",
+      evidence: "pdf",
     });
   });
 });
@@ -208,7 +231,7 @@ describe("L7 / D20 filter: exact titles and carried URLs only", () => {
     ].join("\n");
     const anchors = inlineAnchorTexts(body);
     expect(anchors).toEqual(["Claude Code effort level and model selection"]);
-    expect(candidateIsListed({ ...LYDIA, title: "Claude Code Effort Levels and Model Selection" }, anchors)).toBe(true);
+    expect(candidateIsListed({ ...LYDIA, title: "Claude Code: Effort Level and Model Selection" }, anchors)).toBe(true);
     // No title, so only a URL can drop it; and a bare URL's slug is no title.
     expect(candidateIsListed(LYDIA, anchors)).toBe(false);
     expect(candidateIsListed({ title: "Spending your effort", author: null, topic: "the post", kind: "post" }, anchors)).toBe(false);
@@ -511,10 +534,25 @@ describe("D20 filter: what hides a candidate", () => {
     expect(candidateIsListed(c, [lineTitle])).toBe(false);
   });
 
-  test("an equal title token set hides it: case, possessive, plural and stop words fold", () => {
+  test("D21 5: an equal normalized title hides it: case, punctuation, whitespace and a leading article fold", () => {
     expect(candidateIsListed(cand("Building Effective Agents", "the post"), ["Building effective agents"])).toBe(true);
-    expect(candidateIsListed(cand("The lethal trifecta for AI agents", "Simon's post"), ["Lethal trifecta for AI agent"])).toBe(true);
+    expect(candidateIsListed(cand("The lethal trifecta for AI agents", "Simon's post"), ["Lethal trifecta for AI agents"])).toBe(true);
+    expect(candidateIsListed(cand("An essay: on  agents!", "the essay"), ["essay on agents"])).toBe(true);
     expect(candidateIsListed(cand(null, "Building effective agents"), ["Building effective agents"])).toBe(false);
+  });
+
+  test.each([
+    ["word order: «Python for Rust developers» vs «Rust for Python developers»", "Python for Rust developers", "Rust for Python developers"],
+    ["a stop word: «Humans on the loop» vs «Humans in the loop»", "Humans on the loop", "Humans in the loop"],
+    ["a plural: «Lethal trifecta for AI agents» vs «Lethal trifecta for AI agent»", "Lethal trifecta for AI agents", "Lethal trifecta for AI agent"],
+    ["a possessive: «Simon's notes» vs «Simon notes»", "Simon's notes", "Simon notes"],
+  ])("D21 5: a title that differs only in %s does not hide it", (_name, title, lineTitle) => {
+    expect(candidateIsListed(cand(title, "a post"), [lineTitle])).toBe(false);
+  });
+
+  test("a title-less or token-less candidate is never hidden by a token-less anchor (an emoji, an arrow)", () => {
+    expect(candidateIsListed(cand(null, "the arrow post"), ["→", "🙂"])).toBe(false);
+    expect(candidateIsListed(cand("→", "the arrow post"), ["🙂"])).toBe(false);
   });
 
   test("a URL the candidate itself names hides it when carried, with or without a scheme", () => {
@@ -530,8 +568,44 @@ describe("D20 filter: what hides a candidate", () => {
   });
 });
 
+describe("D21 3: namesRepo boundaries", () => {
+  test.each([
+    ["an npm scope", "the @ollama/ollama package", false],
+    ["a Unicode letter before", "the éollama/ollama fork", false],
+    ["a Unicode letter after", "the ollama/ollamaé fork", false],
+    ["a CJK letter before", "見ollama/ollama", false],
+    ["parentheses", "the server (ollama/ollama) itself", true],
+    ["a github.com URL", "https://github.com/ollama/ollama", true],
+  ])("%s: %s → named %p", (_name, topic, named) => {
+    expect(namesRepo("ollama/ollama", { title: null, topic })).toBe(named);
+  });
+
+  test("a repo root never matches by an equal title (clause 1): «Ollama» vs github.com/ollama/ollama", () => {
+    const c: LinkCandidate = { title: "Ollama", author: null, topic: "Ollama, the local model runner", kind: "tool" };
+    const v = judgePage(c, page(ghPage("ollama/ollama"), "https://github.com/ollama/ollama"), "");
+    expect(v.score?.titleEqual).toBe(true);
+    expect(v).toMatchObject({ label: null, evidence: null });
+  });
+});
+
+describe("D21 1: a shown row carries the evidence muninn checked", () => {
+  const entry = { url: "", title: "", quote: "" };
+  test.each([
+    ["title", { title: "Prompt caching", author: null, topic: "the docs", kind: "doc" }, "https://docs.example.test/pc", "<title>Prompt caching</title>", "", "title"],
+    ["repo", repoCand("karpathy/nanoGPT"), "https://github.com/karpathy/nanoGPT", ghPage("karpathy/nanoGPT"), "", "repo"],
+    ["author", LYDIA, "https://example.test/post", `<title>Claude Code effort level and model selection</title>${filler("By Lydia Hallie.")}`, "", "author"],
+    ["quote", LYDIA, "https://example.test/post", `<title>Claude Code best practices</title>${filler(QUOTE)}`, QUOTE, "quote"],
+    ["pdf", AGENTS, "https://example.test/a.pdf", null, "", "pdf"],
+  ] as const)("%s", (_name, c, url, html, quote, evidence) => {
+    const p: SafePage = html === null ? { finalUrl: url, contentType: "application/pdf", text: null } : page(html, url);
+    expect(foundLinkFrom(c, p, entry, judgePage(c, p, quote))?.evidence).toBe(evidence);
+  });
+});
+
 describe("D20: table defects fixed with the rule", () => {
   test.each([
+    ["Jane Smith MD", "Smith"],
+    ["Jane Smith JD", "Smith"],
     ["Yi Ma", "Ma"],
     ["Jack Ma", "Ma"],
     ["Lisa Ba", "Ba"],

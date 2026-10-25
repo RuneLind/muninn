@@ -32,13 +32,10 @@ export function sumLinksStyles(): string {
     .sum-links-result { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; padding: 2px 0; }
     .sum-links-result a { color: var(--accent-light); overflow-wrap: anywhere; }
     .sum-links-detail { font-size: 12px; color: var(--text-secondary); }
+    .sum-links-host { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono, monospace); }
     .sum-links-label {
       font-size: 11px; padding: 0 7px; border-radius: 999px; white-space: nowrap;
       border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-secondary);
-    }
-    .sum-links-label[data-label="matched"] {
-      color: color-mix(in srgb, var(--status-success) 60%, var(--text-primary));
-      border-color: color-mix(in srgb, var(--status-success) 45%, transparent);
     }
     .sum-links-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
     .sum-links-btn {

@@ -4,7 +4,7 @@
  *
  * What only this tier can see: the button appearing from the options route,
  * the section mounting above the article body, the candidate checklist, the
- * per-candidate states and labels as the stream lands, ✓ Accept writing the
+ * per-candidate states and evidence labels (D21) as the stream lands, ✓ Accept writing the
  * `found by search` line through the real save path from the server-held
  * verified result, the article reload that follows keeping the panel (so a
  * second accept from the same panel saves too), the 409 an accept meets after
@@ -103,7 +103,7 @@ const FIXTURE = {
     [MATCHED_URL]: {
       finalUrl: MATCHED_URL,
       contentType: "text/html",
-      text: `<title>Claude Code effort level and model selection</title><meta property="og:site_name" content="Anthropic"><p>${"By Lydia Hallie, on picking an effort level. ".repeat(20)}</p>`,
+      text: `<title>Claude Code effort level and model selection</title><meta property="og:site_name" content="Anthropic"><meta name="author" content="Lydia Hallie"><p>${"By Lydia Hallie, on picking an effort level. ".repeat(20)}</p>`,
     },
     [PDF_URL]: { finalUrl: PDF_URL, contentType: "application/pdf", text: null },
   },
@@ -259,12 +259,15 @@ async function findAndSearch(page: Page): Promise<void> {
   await expect(panel.locator(".sum-links-note").first()).toContainText("1 already in Links");
   await expect(panel.locator("[data-pick]:checked")).toHaveCount(2);
   await panel.getByRole("button", { name: "Search 2 selected" }).click();
-  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-label').first()).toHaveText("matched");
-  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-label').nth(1)).toHaveText("reachable, not read");
+  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-label').first()).toHaveText("title overlaps, author named on page");
+  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-label').nth(1)).toHaveText("PDF, not read");
+  // D21: each row names the evidence and the page's host; nothing claims «matched».
+  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-host').first()).toHaveText("claude.example");
+  await expect(panel).not.toContainText("matched");
   await expect(panel.locator('.sum-links-row[data-row="1"] .sum-links-state')).toHaveText("not found");
 }
 
-test("the section mounts above the article; a matched result lands as a found-by-search line; a second accept saves too", async ({ page }) => {
+test("the section mounts above the article; an accepted result lands as a found-by-search line; a second accept saves too", async ({ page }) => {
   await openDoc(page, DOCS.a.id, "Lydia Hallie");
   await findAndSearch(page);
   // Panel order: Find links sits above the fact-check section, which sits right above the article body.
@@ -303,7 +306,7 @@ test("a document with no section and no transcript gets one, and a second accept
   // No section: nothing is listed, so all three candidates are offered.
   await expect(panel.locator(".sum-links-row")).toHaveCount(3);
   await panel.getByRole("button", { name: "Search 3 selected" }).click();
-  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-label').first()).toHaveText("matched");
+  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-label').first()).toHaveText("title overlaps, author named on page");
   await panel.locator(`[data-accept="${MATCHED_URL}"]`).click();
   await expect(panel.locator(".sum-links-msg")).toHaveText("Saved to the Links section.");
   await panel.locator(`[data-accept="${PDF_URL}"]`).click();

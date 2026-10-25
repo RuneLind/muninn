@@ -17,7 +17,7 @@
  *    60 s each, no agent past the run's 120 s; every URL an agent names is
  *    fetched through `safeFetchPage` and labelled before the panel sees it, and
  *    kept server-side as the only URLs a save accepts. Writes no document.
- *  - `POST /api/summaries/links` `{source, docId, baseHash, add: [{url}]}` —
+ *  - `POST /api/summaries/links` `{source, docId, baseHash, add: [{url, title, detail, label, evidence}]}` —
  *    the save: claim, re-read, 409 `links_changed` when the `linksBaseHash`
  *    moved, the verified lines written through `saveSummaryBody`, and the new
  *    hash from a GET of the written file.
@@ -266,7 +266,7 @@ async function loadSavable(deps: SummariesLinksDeps, t: Target): Promise<{ raw: 
 const VERIFIED_ROWS_PER_URL = 8;
 
 const sameRow = (a: FoundLink, b: FoundLink): boolean =>
-  a.url === b.url && a.title === b.title && a.detail === b.detail && a.label === b.label;
+  a.url === b.url && a.title === b.title && a.detail === b.detail && a.label === b.label && a.evidence === b.evidence;
 
 /**
  * Verified results per document: the only rows a save accepts (D6 — nothing
@@ -291,14 +291,14 @@ class VerifiedLinks {
     while (this.docs.size > VERIFIED_MAX_DOCS) this.docs.delete(this.docs.keys().next().value!);
   }
 
-  /** The verified row equal to `row` (URL, title, detail and label), or null. */
+  /** The verified row equal to `row` (URL, title, detail, label and evidence), or null. */
   get(key: string, row: FoundLink): FoundLink | null {
     const hit = this.docs.get(key)?.get(linkUrlKey(row.url))?.find((r) => sameRow(r.link, row));
     return hit && this.now() - hit.at <= VERIFIED_TTL_MS ? hit.link : null;
   }
 }
 
-/** One candidate's terminal state on the wire. `already_linked`: every result the agent answered is a URL the summary already carries. */
+/** One candidate's terminal state on the wire. `already_linked`: the agent answered a URL the summary already carries, and no result is left to show. */
 type Outcome = "found" | "not_found" | "already_linked" | "error" | "timeout" | "skipped";
 interface CandidateResult {
   outcome: Outcome;
@@ -509,8 +509,8 @@ export function registerSummariesLinksRoutes(
             }
             const results = [...byKey.values()].sort((a, b) => LABEL_ORDER[a.label] - LABEL_ORDER[b.label]);
             verified.add(key, results);
-            const outcome: Outcome =
-              results.length > 0 ? "found" : manifest.length > 0 && carriedDrops === manifest.length ? "already_linked" : "not_found";
+            // D21 4: one carried URL and nothing to show reads «already linked».
+            const outcome: Outcome = results.length > 0 ? "found" : carriedDrops > 0 ? "already_linked" : "not_found";
             return { outcome, results };
           };
 
@@ -567,7 +567,7 @@ export function registerSummariesLinksRoutes(
     for (const item of raw) {
       const row = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
       const found =
-        typeof row.url === "string" && typeof row.title === "string" && typeof row.detail === "string" && typeof row.label === "string"
+        typeof row.url === "string" && typeof row.title === "string" && typeof row.detail === "string" && typeof row.label === "string" && typeof row.evidence === "string"
           ? verified.get(key, row as unknown as FoundLink)
           : null;
       if (!found) {

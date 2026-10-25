@@ -41,15 +41,15 @@ const PAGES: Record<string, SafePage> = {
   [HALLIE_URL]: {
     finalUrl: HALLIE_URL,
     contentType: "text/html",
-    text: `<title>Claude Code effort level and model selection</title><meta property="og:site_name" content="Anthropic">${filler("By Lydia Hallie.")}`,
+    text: `<title>Claude Code effort level and model selection</title><meta property="og:site_name" content="Anthropic"><meta name="author" content="Lydia Hallie">${filler("By Lydia Hallie.")}`,
   },
   [PDF_URL]: { finalUrl: PDF_URL, contentType: "application/pdf", text: null },
   "https://hostile.example/x": { finalUrl: "https://hostile.example/x", contentType: "text/html", text: "<title>&#99999999; &#xFFFFFFF;</title>" },
 };
 
 /** The rows the panel shows for those pages: a save posts the row it accepts. */
-const HALLIE_ROW = { url: HALLIE_URL, title: "Claude Code effort level and model selection", detail: "Anthropic, Lydia Hallie", label: "matched" };
-const PDF_ROW = { url: PDF_URL, title: "The effort paper", detail: "", label: "unread" };
+const HALLIE_ROW = { url: HALLIE_URL, title: "Claude Code effort level and model selection", detail: "Anthropic, Lydia Hallie", label: "matched", evidence: "author" };
+const PDF_ROW = { url: PDF_URL, title: "The effort paper", detail: "", label: "unread", evidence: "pdf" };
 
 const C_HALLIE: LinkCandidate = { title: null, author: "Lydia Hallie", topic: "Lydia Hallie's article on Claude Code effort levels", kind: "post" };
 const C_NONE: LinkCandidate = { title: null, author: null, topic: "an internal benchmark nobody published", kind: "doc" };
@@ -217,10 +217,10 @@ describe("POST /api/summaries/links/search", () => {
     const results = evs.filter((e) => e.event === "result").map((e) => e.data);
     expect(results.find((r) => r.index === 0)).toMatchObject({
       outcome: "found",
-      results: [{ url: HALLIE_URL, label: "matched", title: "Claude Code effort level and model selection", detail: "Anthropic, Lydia Hallie" }],
+      results: [HALLIE_ROW],
     });
     expect(results.find((r) => r.index === 1)).toMatchObject({ outcome: "not_found", results: [] });
-    expect(results.find((r) => r.index === 2)).toMatchObject({ outcome: "found", results: [{ url: PDF_URL, label: "unread", title: C_PDF.title }] });
+    expect(results.find((r) => r.index === 2)).toMatchObject({ outcome: "found", results: [{ url: PDF_URL, label: "unread", evidence: "pdf", title: C_PDF.title }] });
     expect(evs.filter((e) => e.event === "state").map((e) => e.data.state)).toContain("checking");
   });
 
@@ -288,7 +288,7 @@ describe("POST /api/summaries/links/search", () => {
       expect(results.map((r) => r.outcome)).toEqual(["already_linked", "found"]);
     });
 
-    test("D20: «already linked» only when EVERY result was a carried URL; one other result keeps «not found»", async () => {
+    test("D21 4: one carried URL and nothing left to show is «already linked», whatever else the agent answered", async () => {
       files.set(DOC, `---\ndate: "2026-03-22"\nurl: "${URL_}"\n---\n\nSee [nanoGPT](https://github.com/karpathy/nanoGPT).\n`);
       const c: LinkCandidate = { title: "nanoGPT", author: null, topic: "Karpathy's nanoGPT repo", kind: "repo" };
       agentAnswers[c.topic] = JSON.stringify({
@@ -298,7 +298,35 @@ describe("POST /api/summaries/links/search", () => {
         ],
       });
       const evs = await events(await post(app({ fetchPage: async () => null }), "/api/summaries/links/search", { ...ref, candidates: [c] }));
-      expect(evs.find((e) => e.event === "result")!.data).toMatchObject({ outcome: "not_found", results: [] });
+      expect(evs.find((e) => e.event === "result")!.data).toMatchObject({ outcome: "already_linked", results: [] });
+    });
+
+    test("D21 4: a carried URL beside a shown result: the result shows, never «already linked»", async () => {
+      files.set(DOC, `---\ndate: "2026-03-22"\nurl: "${URL_}"\n---\n\nSee [nanoGPT](https://github.com/karpathy/nanoGPT).\n`);
+      const c: LinkCandidate = { title: "nanoGPT notes", author: null, topic: "notes on nanoGPT", kind: "post" };
+      agentAnswers[c.topic] = JSON.stringify({
+        results: [
+          { url: "https://github.com/karpathy/nanoGPT", title: "x", quote: "" },
+          { url: "https://notes.example/nanogpt", title: "x", quote: "" },
+        ],
+      });
+      const notes: SafePage = { finalUrl: "https://notes.example/nanogpt", contentType: "text/html", text: "<title>nanoGPT notes</title>" };
+      const evs = await events(await post(app({ fetchPage: async (u) => (u === notes.finalUrl ? notes : null) }), "/api/summaries/links/search", { ...ref, candidates: [c] }));
+      expect(evs.find((e) => e.event === "result")!.data).toMatchObject({ outcome: "found", results: [{ url: notes.finalUrl, evidence: "title" }] });
+    });
+
+    test("a carried URL is counted before the deadline check: past the deadline it still reads «already linked»", async () => {
+      files.set(DOC, `---\ndate: "2026-03-22"\nurl: "${URL_}"\n---\n\nSee [nanoGPT](https://github.com/karpathy/nanoGPT).\n`);
+      const c: LinkCandidate = { title: "nanoGPT", author: null, topic: "Karpathy's nanoGPT repo", kind: "repo" };
+      let t = 0;
+      const a = app({
+        now: () => t,
+        run: { runTimeoutMs: 1_000, minAgentMs: 0 },
+        // The agent answers after the run's deadline.
+        agent: async () => ((t += 2_000), manifest("https://github.com/karpathy/nanoGPT")),
+      });
+      const evs = await events(await post(a, "/api/summaries/links/search", { ...ref, candidates: [c] }));
+      expect(evs.find((e) => e.event === "result")!.data).toMatchObject({ outcome: "already_linked", results: [] });
     });
 
     test("D20: an empty manifest is «not found», never «already linked»", async () => {
@@ -508,12 +536,14 @@ describe("POST /api/summaries/links", () => {
     expect(files.get(DOC)!).toMatch(/found by search\n- 🔎 \[The effort paper\]\(https:\/\/papers\.example\/effort\.pdf\) · found by search\n\n_7/);
   });
 
-  test("a verified URL posted with a title, detail or label no search gave it is refused", async () => {
+  test("a verified URL posted with a title, detail, label or evidence no search gave it is refused", async () => {
     const a = await searched();
     for (const row of [
       { ...HALLIE_ROW, title: "client title" },
       { ...HALLIE_ROW, detail: "Anthropic" },
       { ...HALLIE_ROW, label: "reachable" },
+      { ...HALLIE_ROW, evidence: "title" },
+      { url: HALLIE_URL, title: HALLIE_ROW.title, detail: HALLIE_ROW.detail, label: HALLIE_ROW.label },
       { url: HALLIE_URL },
     ]) {
       const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [row] });
@@ -527,7 +557,8 @@ describe("POST /api/summaries/links", () => {
     const C_OTHER: LinkCandidate = { title: null, author: "Someone Else", topic: "another post on effort", kind: "post" };
     // No author match, but the quote is on the page: reachable, attributed to the site only.
     const OTHER_QUOTE = "By Lydia Hallie. By Lydia Hallie. By Lydia Hallie.";
-    const OTHER_ROW = { ...HALLIE_ROW, detail: "Anthropic", label: "reachable" };
+    // D21 2: the detail is the page's (site + its own byline), so the two rows differ by label and evidence.
+    const OTHER_ROW = { ...HALLIE_ROW, label: "reachable", evidence: "quote" };
     const lineOf = (detail: string) => `- 🔎 [${HALLIE_ROW.title}](${HALLIE_URL}) — ${detail} · found by search`;
 
     test.each([
@@ -549,12 +580,12 @@ describe("POST /api/summaries/links", () => {
       expect(files.get(DOC)!).toContain(lineOf("Anthropic, Lydia Hallie"));
     });
 
-    test("the other row, accepted, writes its own detail", async () => {
+    test("the other row, accepted, saves too", async () => {
       agentAnswers[C_OTHER.topic] = manifest(HALLIE_URL, OTHER_QUOTE);
       const a = await searched({}, [C_OTHER, C_HALLIE]);
       const res = await post(a, "/api/summaries/links", { ...ref, baseHash: linksBaseHash(RAW), add: [OTHER_ROW] });
       expect(res.status).toBe(200);
-      expect(files.get(DOC)!).toContain(`${lineOf("Anthropic")}\n`);
+      expect(files.get(DOC)!).toContain(`${lineOf("Anthropic, Lydia Hallie")}\n`);
     });
   });
 

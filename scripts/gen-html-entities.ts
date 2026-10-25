@@ -16,7 +16,7 @@ const PER_LINE = 40;
 /** Python's `html.entities.html5`, or `null` when `python3` is not on PATH. */
 export function pythonHtml5Entities(): Record<string, string> | null {
   try {
-    const proc = Bun.spawnSync(["python3", "-c", "import html.entities, json; print(json.dumps(html.entities.html5))"]);
+    const proc = Bun.spawnSync(["python3", "-I", "-c", "import html.entities, json; print(json.dumps(html.entities.html5))"]);
     return proc.exitCode === 0 ? (JSON.parse(proc.stdout.toString()) as Record<string, string>) : null;
   } catch {
     return null;

@@ -36,6 +36,8 @@ interface Found {
   title: string;
   detail: string;
   label: "matched" | "reachable" | "unread";
+  /** What muninn checked on the page: the panel names it (D21). */
+  evidence: "title" | "repo" | "author" | "quote" | "pdf";
 }
 interface Row {
   candidate: Candidate;
@@ -303,7 +305,7 @@ async function drain(source: string, docId: string, key: string): Promise<void> 
         method: "POST",
         headers: { "content-type": "application/json" },
         // The whole row the panel showed: the server writes its own copy of exactly that row.
-        body: JSON.stringify({ source, docId, baseHash: s.baseHash, add: [{ url: next.url, title: next.title, detail: next.detail, label: next.label }] }),
+        body: JSON.stringify({ source, docId, baseHash: s.baseHash, add: [{ url: next.url, title: next.title, detail: next.detail, label: next.label, evidence: next.evidence }] }),
       });
       const data = (await res.json().catch(() => ({}))) as { added?: number; linksBaseHash?: string | null; error?: string };
       if (res.ok) {
@@ -335,11 +337,22 @@ function reopenIfShown(source: string, docId: string): void {
   if (reopen && current && current.source === source && current.docId === docId) reopen(docId, "", source);
 }
 
-const LABELS: Record<Found["label"], { text: string; title: string }> = {
-  matched: { text: "matched", title: "The page's title matches what the summary describes, both ways" },
-  reachable: { text: "reachable", title: "The page resolves and carries the agent's quote, but its title does not match" },
-  unread: { text: "reachable, not read", title: "A PDF that resolves; muninn did not read it" },
+/** The evidence muninn checked, never a claim that the page IS the item: open it before you accept. */
+const EVIDENCE: Record<Found["evidence"], { text: string; title: string }> = {
+  title: { text: "title matches", title: "The page's title has the same words as the title the summary states" },
+  repo: { text: "names this repo", title: "The summary names this GitHub repo as owner/repo" },
+  author: { text: "title overlaps, author named on page", title: "The page's title shares most words with the item, and the author the summary names appears on the page" },
+  quote: { text: "quote found on page", title: "The page resolves and carries the sentence the search agent quoted" },
+  pdf: { text: "PDF, not read", title: "A PDF that resolves; muninn did not read it" },
 };
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
 
 const STATE_TEXT: Record<Row["state"], string> = {
   idle: "",
@@ -381,8 +394,9 @@ function rowHtml(s: DocState, r: Row, i: number): string {
         ? `<span class="sum-links-saved">✓ Saved</span>`
         : `<button type="button" class="sum-links-btn" data-accept="${escHtml(f.url)}"${saving ? " disabled" : ""}>${saving ? "Saving…" : "✓ Accept"}</button>`;
       return (
-        `<li class="sum-links-result"><span class="sum-links-label" data-label="${f.label}" title="${escHtml(LABELS[f.label].title)}">${LABELS[f.label].text}</span>` +
+        `<li class="sum-links-result"><span class="sum-links-label" data-evidence="${escHtml(f.evidence)}" title="${escHtml(EVIDENCE[f.evidence]?.title ?? "")}">${escHtml(EVIDENCE[f.evidence]?.text ?? f.evidence)}</span>` +
         `<a href="${escHtml(f.url)}" target="_blank" rel="noopener noreferrer">${escHtml(f.title)}</a>` +
+        `<span class="sum-links-host">${escHtml(hostOf(f.url))}</span>` +
         (f.detail ? `<span class="sum-links-detail">${escHtml(f.detail)}</span>` : "") +
         `${action}</li>`
       );

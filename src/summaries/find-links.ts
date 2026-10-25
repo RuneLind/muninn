@@ -12,6 +12,9 @@
  * a passed author check. A fuzzy score alone measured 16 % false `matched` on
  * live pages. The page-title × candidate shapes the rule answers are
  * enumerated, one row each, in `find-links.test.ts` ("the D20 label table").
+ * The panel never says `matched` (D21): it names the evidence muninn checked
+ * ({@link LinkEvidence}), since a page with the candidate's title can still be
+ * another page, and the reader's accept is the gate.
  */
 
 import { sha256 } from "../gardener/util.ts";
@@ -236,9 +239,11 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * counts: «the Ollama Python library» is not `ollama/ollama`.
  */
 export function namesRepo(ownerRepo: string, c: Pick<LinkCandidate, "title" | "topic">): boolean {
+  // Boundaries are Unicode letters and digits (`éollama/ollama` is no repo
+  // name), and `@` before it is an npm scope (`@ollama/ollama`), never a repo (D21 3).
   const re = new RegExp(
-    `(?:^|[^\\w./-])(?:(?:https?://)?(?:www\\.)?github\\.com/)?${escapeRe(ownerRepo)}(?:\\.git)?(?![\\w-]|\\.[\\w-]|/[\\w.-])`,
-    "i",
+    `(?:^|[^\\p{L}\\p{N}_./@-])(?:(?:https?://)?(?:www\\.)?github\\.com/)?${escapeRe(ownerRepo)}(?:\\.git)?(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}_-]|/[\\p{L}\\p{N}_.-])`,
+    "iu",
   );
   return [c.title ?? "", c.topic].some((t) => re.test(t));
 }
@@ -376,7 +381,7 @@ function siteName(html: string): string {
 }
 
 const GENERATIONAL = /^(?:jr|sr|ii|iii|iv)\.?$/i;
-/** A trailing degree. The two-letter ones need their dots: Ma, Ba and Ms are surnames too (Yi Ma, Jack Ma, Lisa Ba). */
+/** A trailing degree. M.A., B.A. and M.S. need their dots, since Ma, Ba and Ms are surnames too (Yi Ma, Jack Ma, Lisa Ba); PhD, MD, JD, EdD, DPhil, MSc and BSc match with or without them. */
 const DEGREE = /^(?:ph\.?d|m\.?d|d\.?phil|ed\.?d|j\.?d|mba|m\.?sc|b\.?sc|m\.a|b\.a|m\.s|dds|esq|cpa|frs)\.?$/i;
 
 /** A handle's name: `@user@instance` → `user`, `name.bsky.social` → `name`, a leading `@` dropped. */
@@ -523,15 +528,29 @@ export function inlineAnchorTexts(storedBody: string): string[] {
 }
 
 /**
+ * A title as the candidate filter compares it (D21 5): lowercased, punctuation
+ * folded to spaces, whitespace collapsed, a leading «the», «a» or «an»
+ * dropped. Word order and every other word stay: «Humans on the loop» is not
+ * «Humans in the loop».
+ */
+export function normalizedTitle(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/^(?:the|a|an) /, "");
+}
+
+/**
  * Whether one of `titles` (the `## Links` lines' titles, or the body's anchor
- * texts) names this candidate EXACTLY (D20 filter i): its token set equals the
- * candidate's TITLE token set. A candidate with no title is never dropped this
- * way, and no score is involved: «Claude 4 Best Practices» does not hide
- * «Claude Code Best Practices».
+ * texts) names this candidate EXACTLY (D21 5): its {@link normalizedTitle}
+ * equals the candidate's. A candidate with no title is never dropped this way,
+ * and no score is involved: «Claude 4 Best Practices» does not hide «Claude
+ * Code Best Practices».
  */
 export function candidateIsListed(c: LinkCandidate, titles: readonly string[]): boolean {
-  const own = titleTokens(c.title ?? "");
-  return own.length > 0 && titles.some((t) => sameSet(titleTokens(t), own));
+  const own = normalizedTitle(c.title ?? "");
+  return own.length > 0 && titles.some((t) => normalizedTitle(t) === own);
 }
 
 /** A URL inside a candidate's text with no scheme: a host with a path (`github.com/obra/superpowers`), never a bare host (`rea.tools`, `Node.js`). */
@@ -716,35 +735,55 @@ export function judgePage(c: LinkCandidate, page: SafePage, quote: string): Page
   return { label, pageTitle, lineTitle, score, authorCheck, evidence: null };
 }
 
+/**
+ * What muninn checked on the page (D21 1), which the panel names: `title` «title
+ * matches», `repo` «names this repo», `author` «title overlaps, author named on
+ * page», `quote` «quote found on page», `pdf` «PDF, not read». Each is true of
+ * the page by construction; none claims the page IS the candidate.
+ */
+export type LinkEvidence = "title" | "repo" | "author" | "quote" | "pdf";
+
 /** One verified result, as the panel shows it and the save writes it. */
 export interface FoundLink {
   readonly url: string;
   readonly title: string;
-  /** The site name, and the candidate's author only when the author check passed. */
+  /** The site name, and the page's own byline when it has one (D21 2). */
   readonly detail: string;
   readonly label: LinkLabel;
+  readonly evidence: LinkEvidence;
+}
+
+/** A byline longer than this is no name (a JSON-LD blob, a credits list). */
+const BYLINE_MAX = 120;
+
+/** The page's own byline: the first `author` / `article:author` meta or JSON-LD `author` that is a name, not a profile URL. */
+export function pageByline(html: string): string {
+  for (const b of pageBylines(html)) {
+    const name = b.replace(/\s+/g, " ").trim();
+    if (name && name.length <= BYLINE_MAX && !/^https?:|\//i.test(name)) return name;
+  }
+  return "";
 }
 
 /**
  * The line a verified page becomes: the stored `finalUrl`, the page's own title
  * (else the candidate's title, then topic — a PDF always takes the
- * candidate's, D19 8), a checked attribution. The agent's manifest title is
- * never stored: it is untrusted text. `_entry` stays in the signature for the
- * route's call.
+ * candidate's, D19 8), and the site name plus the page's OWN byline. The
+ * candidate's author is never written (D21 2): a page can quote the person it
+ * is not by. The agent's manifest title is never stored: it is untrusted
+ * text. `_entry` stays in the signature for the route's call.
  */
 export function foundLinkFrom(c: LinkCandidate, page: SafePage, _entry: ManifestEntry, verdict: PageVerdict): FoundLink | null {
   if (!verdict.label) return null;
   const html = page.text ?? "";
   const title = verdict.lineTitle || c.title || c.topic;
-  // The candidate's author names a page only when that page IS the candidate
-  // (matched) and the author check found them on it.
-  const named = verdict.label === "matched" && verdict.authorCheck === "passed";
   const site = html ? siteName(html) : "";
-  const author = named ? (c.author ?? "") : "";
+  const byline = html ? pageByline(html) : "";
   // A personal site's og:site_name is often the author's own name: say it once.
-  const sameName = site !== "" && author !== "" && sameSet(titleTokens(site), titleTokens(author));
-  const detail = [site, sameName ? "" : author].filter((p) => p !== "").join(", ");
-  return { url: page.finalUrl, title, detail, label: verdict.label };
+  const sameName = site !== "" && byline !== "" && sameSet(titleTokens(site), titleTokens(byline));
+  const detail = [site, sameName ? "" : byline].filter((p) => p !== "").join(", ");
+  const evidence: LinkEvidence = verdict.evidence ?? (verdict.label === "unread" ? "pdf" : "quote");
+  return { url: page.finalUrl, title, detail, label: verdict.label, evidence };
 }
 
 const UNRESERVED = /[A-Za-z0-9\-._~]/;
