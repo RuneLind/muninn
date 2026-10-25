@@ -34,8 +34,10 @@ import {
   appendLinksSection,
   prepareLinksAnswer,
   renderLinksSection,
+  type LinkLine,
   type LinksPick,
 } from "../summaries/links-section.ts";
+import { withRepoDetails, type RepoLineLookup } from "../summaries/github-repo.ts";
 import { isPromoClass, linkCandidates, type DescriptionLink } from "./description-links.ts";
 
 // The CATEGORY stays the vertical's own, not this file's: the JSONL sink is
@@ -63,12 +65,20 @@ export interface FinishYouTubeSummaryInput {
    * a stray `LINKS:` line.
    */
   readonly links?: readonly DescriptionLink[];
+  /**
+   * Looks a GitHub repo line up (`githubRepoLookup`). Absent, a repo link gets
+   * the plain line — every caller but the capture itself (the re-run hands in
+   * no links at all, and the tests stay off the network).
+   */
+  readonly repoLine?: RepoLineLookup;
 }
 
 /** What the `## Links` step decided, for the trace and the completion line. */
 export interface FinishedLinks {
   /** The rendered section, or `null` when no line qualified. */
   readonly section: string | null;
+  /** The section's lines, in order. */
+  readonly lines: LinkLine[];
   /** Source URLs — in the section by rule. */
   readonly sources: number;
   /** Repo/candidate ids the model picked that exist in the list. */
@@ -105,6 +115,7 @@ export function buildDescriptionLinksSection(links: readonly DescriptionLink[], 
   const omitted = links.filter((l) => isPromoClass(l.cls)).length;
   return {
     section: renderLinksSection({ lines, omitted }),
+    lines,
     sources: candidates.filter((c) => c.cls === "source").length,
     picked: picked.filter((id) => candidates.find((c) => c.id === id)!.cls !== "source"),
     unknownIds,
@@ -210,6 +221,12 @@ export async function finishYouTubeSummary(
   let links: FinishedLinks | null = null;
   if (input.links !== undefined) {
     links = buildDescriptionLinksSection(input.links, prepared.pick);
+    if (input.repoLine !== undefined) {
+      // A GitHub repo line carries its description, language, license and
+      // stars (D7); a lookup that fails leaves the plain line.
+      const lines = await withRepoDetails(links.lines, input.repoLine);
+      links = { ...links, lines, section: renderLinksSection({ lines, omitted: links.omitted }) };
+    }
     summary = appendLinksSection(summary, links.section);
     if (links.unknownIds.length > 0) {
       log.warn("YouTube capture {jobId}: the LINKS line named id(s) {ids} the list does not have — dropped", {

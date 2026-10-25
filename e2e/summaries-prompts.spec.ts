@@ -304,7 +304,11 @@ test.describe("Summaries: the capture-prompt matrix", () => {
     await expect(page.locator('[data-fixed="x-article"]')).not.toContainText(
       "author and url: both present",
     );
-    await expect(page.locator('[data-fixed="x-article"]')).toContainText("nothing here varies");
+    await expect(page.locator('[data-fixed="x-article"]')).toContainText("title, author and url: all required");
+    // Both link-carrying text rows show the numbered list and the LINKS: step.
+    for (const id of ["x-article", "article"]) {
+      await expect(page.locator(`[data-fixed="${id}"]`)).toContainText("links list: present");
+    }
     // …and the `article` row keeps that line, because ITS two context lines
     // really are optional.
     await expect(page.locator('[data-fixed="article"]')).toContainText("author and url: both present");

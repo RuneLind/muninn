@@ -182,3 +182,26 @@ test("a paste with no url and no author omits those lines rather than sending bl
   expect(lastSystemPrompt).not.toContain("Article author:");
   expect(lastSystemPrompt).not.toContain("Article URL:");
 });
+
+// --- The paste's links (plan muninn-summary-links, PR 2) --------------------
+
+test("a pasted article's markdown links reach the list and the picked ones the section, plain without a repo detail", async () => {
+  claudeResult = "CATEGORY: ai/general\nLINKS: 1, 2, 7\n\nSUMMARY:\n### Heading\n- point";
+  const body =
+    "An invented paste citing [the paper](https://example.org/paper) and [a harness](https://github.com/example/harness).";
+  const jobId = createJob("Pasted Article", ART_URL, "Someone");
+  await summarizeArticle(jobId, "Pasted Article", ART_URL, "Someone", body, config, bot, {
+    repoLine: async () => null,
+  });
+  expect(lastPrompt).toBe(
+    `${body}\n\n## Links in the text\n\n1. the paper — https://example.org/paper\n2. a harness — https://github.com/example/harness [code or paper]`,
+  );
+  expect(lastSystemPrompt).toBe(
+    buildArticleSystemPrompt({ title: "Pasted Article", author: "Someone", url: ART_URL, linksStep: true }),
+  );
+  expect(getJob(jobId)!.summary).toBe(
+    "### Heading\n- point\n\n## Links\n\n" +
+      "- 📄 [the paper](https://example.org/paper) · from text\n" +
+      "- 📦 [a harness](https://github.com/example/harness) · from text",
+  );
+});

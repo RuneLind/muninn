@@ -57,6 +57,7 @@ import {
 import { SHORT_VIDEO_RUN_OVERRIDE } from "../video/short-video-kinds.ts";
 import { xArticleSystemPromptPieces } from "../x-article/prompt.ts";
 import { articleSystemPromptPieces } from "../article/prompt.ts";
+import { classifyTextLinks, textLinksPromptSection } from "./text-links.ts";
 import { anthropicSystemPromptPieces } from "../anthropic/prompt.ts";
 
 // ---------------------------------------------------------------------------
@@ -83,6 +84,15 @@ export const PLACEHOLDER_FLAT_TRANSCRIPT =
 /** The stand-in for a pasted or fetched body — the text verticals' user prompt. */
 export const PLACEHOLDER_ARTICLE_TEXT =
   "A placeholder article body. It states the problem, gives one measurement, and ends.";
+
+/**
+ * The two link-carrying text verticals' body: the placeholder plus two invented
+ * links, so their cells show the numbered list and the `LINKS:` step a real
+ * capture of a linked text sends.
+ */
+export const PLACEHOLDER_LINKED_ARTICLE_TEXT =
+  `${PLACEHOLDER_ARTICLE_TEXT} It cites [the measurement write-up](https://example.org/blog/the-measurement) ` +
+  "and [a harness](https://github.com/example/harness).";
 
 export const PLACEHOLDER_TITLE = "A placeholder capture";
 export const PLACEHOLDER_AUTHOR = "placeholder-author";
@@ -340,13 +350,13 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — pasted text",
-    // Branch points, from `src/x-article/prompt.ts`: NONE — title, author and
-    // url are required and interpolated unconditionally. The row used to
-    // declare "author and url: both present", which was a statement of the
-    // PLACEHOLDER rather than a pinned branch; it is gone. What is left is the
-    // one thing this builder does vary on: nothing, which is itself the fact
-    // worth showing. There is no user builder — the pasted text is the prompt.
-    fixedAxes: ["title, author and url: all required — nothing here varies"],
+    // Branch points, from `src/x-article/prompt.ts`: title, author and url are
+    // required and interpolated unconditionally (the row once declared "author
+    // and url: both present", which stated the PLACEHOLDER rather than a
+    // branch). The one branch is `linksStep`, present when the text carries a
+    // link to pick (`src/summaries/text-links.ts`); the user prompt is the text
+    // plus that numbered list.
+    fixedAxes: ["title, author and url: all required", "links list: present"],
     readsVisualDetail: false,
   },
   {
@@ -357,8 +367,9 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — pasted text",
-    // The same two optional context lines, in `src/article/prompt.ts`.
-    fixedAxes: ["author and url: both present"],
+    // The same two optional context lines, in `src/article/prompt.ts`, and
+    // the same `linksStep` branch as the X article row.
+    fixedAxes: ["author and url: both present", "links list: present"],
     readsVisualDetail: false,
   },
   {
@@ -571,11 +582,11 @@ function cellPrompts(
           title: PLACEHOLDER_TITLE,
           author: PLACEHOLDER_AUTHOR,
           url: PLACEHOLDER_XARTICLE_URL,
+          linksStep: true,
         }),
-        // The pasted article IS the user prompt — there is no builder to call,
-        // so the skeleton is the placeholder body itself rather than an
-        // invented wrapper around it.
-        userPrompt: PLACEHOLDER_ARTICLE_TEXT,
+        // The pasted article IS the user prompt, plus the numbered list of its
+        // links — the same two functions the run calls.
+        userPrompt: PLACEHOLDER_LINKED_ARTICLE_TEXT + textLinksPromptSection(classifyTextLinks(PLACEHOLDER_LINKED_ARTICLE_TEXT)),
       };
     case "article":
       return {
@@ -583,8 +594,9 @@ function cellPrompts(
           title: PLACEHOLDER_TITLE,
           author: PLACEHOLDER_AUTHOR,
           url: PLACEHOLDER_ARTICLE_URL,
+          linksStep: true,
         }),
-        userPrompt: PLACEHOLDER_ARTICLE_TEXT,
+        userPrompt: PLACEHOLDER_LINKED_ARTICLE_TEXT + textLinksPromptSection(classifyTextLinks(PLACEHOLDER_LINKED_ARTICLE_TEXT)),
       };
     case "anthropic":
       return {

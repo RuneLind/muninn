@@ -180,8 +180,8 @@ function isContentHost(host: string): boolean {
   return false;
 }
 
-/** Rule 4: a code or paper host. */
-function isRepoUrl(url: URL): boolean {
+/** Rule 4: a code or paper host. Shared with the text classifier (`src/summaries/text-links.ts`). */
+export function isRepoUrl(url: URL): boolean {
   const host = bareHost(url.hostname);
   if (host === "github.com") return pathSegments(url).length >= 2;
   return host === "gist.github.com" || hostIs(host, "huggingface.co") || hostIs(host, "arxiv.org");

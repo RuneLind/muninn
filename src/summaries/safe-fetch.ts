@@ -491,3 +491,119 @@ export async function safeFetchText(
     clearTimeout(timer);
   }
 }
+
+// ── One redirect, not followed ────────────────────────────────────────────────
+
+/** The budget one post's `t.co` links share (plan muninn-summary-links, PR 2). */
+export const SAFE_RESOLVE_TIMEOUT_MS = 10_000;
+
+export interface SafeResolveOptions {
+  /** This call's own timeout (default {@link SAFE_RESOLVE_TIMEOUT_MS}). */
+  timeoutMs?: number;
+  /**
+   * A budget shared with other calls: when it aborts, this call gives up. A
+   * caller resolving every `t.co` link in one post passes one signal to all of
+   * them, so the post spends one 10 s budget, not 10 s per link.
+   */
+  signal?: AbortSignal;
+  caller?: string;
+  /** Test seam: stubbed DNS. */
+  lookup?: HostLookup;
+  /** Test seam ONLY — see {@link SafeFetchOptions.fetchImpl}. */
+  fetchImpl?: typeof fetch;
+}
+
+/** Scheme check, then the ADDRESS check — the per-hop judgement `safeFetchText` makes. */
+async function judgeUrl(
+  url: URL,
+  lookup: HostLookup,
+  signal: AbortSignal,
+): Promise<{ ok: true } | { ok: false; reason: string; timeout?: boolean }> {
+  if (!ALLOWED_SCHEMES.has(url.protocol)) return { ok: false, reason: `refused scheme ${url.protocol}` };
+  const host = bareHost(url.hostname);
+  let addresses: string[];
+  if (isIP(host)) addresses = [host];
+  else {
+    const abortRace = rejectOnAbort(signal);
+    try {
+      addresses = await Promise.race([lookup(host), abortRace.promise]);
+    } catch {
+      if (signal.aborted) return { ok: false, reason: "timed out", timeout: true };
+      return { ok: false, reason: "host does not resolve" };
+    } finally {
+      abortRace.dispose();
+    }
+    if (addresses.length === 0) return { ok: false, reason: "host resolves to no address" };
+  }
+  const blocked = addresses.find(isBlockedAddress);
+  return blocked === undefined ? { ok: true } : { ok: false, reason: `non-public address ${blocked}` };
+}
+
+/**
+ * Where ONE redirect hop of `rawUrl` points, or `null`. For a shortener such as
+ * `t.co`, whose answer is a `Location` header, not a page.
+ *
+ * The address check runs on `rawUrl`, then ONE request with `redirect:
+ * "manual"` — its body is never read: the response is abandoned (cancelled and
+ * its socket aborted) the moment the headers are in. A 3xx `Location` is
+ * resolved against `rawUrl` and judged again (scheme, then address) before it
+ * is returned; it is never fetched. Anything else — a 200, a 4xx, a 3xx with
+ * no `Location`, a refused address, a timeout — is `null`, logged once. Never
+ * throws.
+ */
+export async function safeResolveRedirect(rawUrl: string, options: SafeResolveOptions = {}): Promise<string | null> {
+  const timeoutMs = options.timeoutMs ?? SAFE_RESOLVE_TIMEOUT_MS;
+  const lookup = options.lookup ?? defaultLookup;
+  const doFetch = options.fetchImpl ?? fetch;
+  const caller = options.caller ?? "unspecified";
+  const refuse = (reason: string, url: string, detail?: Record<string, unknown>): null => {
+    log.warn("Refused redirect lookup of {url} for {caller}: {reason}", { url, caller, reason, ...detail });
+    return null;
+  };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const shared = options.signal ? chainAbort(options.signal, controller) : { dispose: () => {} };
+  try {
+    let url: URL;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      return refuse("unparseable URL", rawUrl);
+    }
+    const first = await judgeUrl(url, lookup, controller.signal);
+    if (!first.ok) return refuse(first.reason, rawUrl);
+
+    // The hop's own controller, so abandoning its response leaves the budget's
+    // signal live for the target's DNS lookup below.
+    const hopAbort = new AbortController();
+    const hopChain = chainAbort(controller.signal, hopAbort);
+    let res: Response;
+    try {
+      res = await doFetch(url.toString(), { signal: hopAbort.signal, redirect: "manual" });
+    } catch (err) {
+      return refuse(controller.signal.aborted ? "timed out" : "fetch failed", rawUrl, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      hopChain.dispose();
+    }
+    // The headers are all this needs; the body is never read.
+    abandon(res.body, hopAbort);
+    if (!REDIRECT_STATUS.has(res.status)) return refuse(`status ${res.status}, not a redirect`, rawUrl);
+    const location = res.headers.get("location");
+    if (!location) return refuse(`redirect ${res.status} without a location`, rawUrl);
+    let target: URL;
+    try {
+      target = new URL(location, url);
+    } catch {
+      return refuse("redirect to an unparseable location", rawUrl, { location });
+    }
+    const second = await judgeUrl(target, lookup, controller.signal);
+    if (!second.ok) return refuse(`location ${second.reason}`, rawUrl, { location: target.toString() });
+    return target.toString();
+  } finally {
+    clearTimeout(timer);
+    shared.dispose();
+  }
+}

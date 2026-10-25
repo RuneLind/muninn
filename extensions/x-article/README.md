@@ -42,7 +42,11 @@ Runs on X/Twitter pages. Detects article navigation (including SPA transitions v
 - Article ID from URL
 - Author handle from URL
 - Article title from DOM headings or page title
-- Full article text from rendered DOM (multiple extraction strategies for robustness)
+- Full article text from rendered DOM (multiple extraction strategies for robustness). The first strategy writes the text as markdown with every link as `[text](href)`, so the summary's `## Links` section can list what the article cites; the `innerText` strategies are the fallback and lose the hrefs.
+
+### The markdown walk (`html-to-markdown.js`)
+
+Generated — never edit it by hand. `bun run build:extension` emits it from muninn's `src/summaries/html-to-markdown.ts` (the same walk the `/summaries` paste form uses) as an IIFE that sets `globalThis.muninnHtmlToMarkdown`; the manifest loads it before `content.js`. A test compares the checked-in file with a fresh build byte for byte. A `t.co` link whose text spells the expanded URL (X renders it partly in hidden spans) is written with that URL; muninn resolves any other `t.co` link server-side. After pulling a change to it, reload the extension in `chrome://extensions`.
 
 ### Popup (`popup.js`)
 

@@ -15,6 +15,7 @@ import {
 } from "../summaries/summarizer-shared.ts";
 import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "./prompt.ts";
 import { finishYouTubeSummary } from "./finish.ts";
+import { githubRepoLookup, type RepoLineLookup } from "../summaries/github-repo.ts";
 import { fetchYouTubeOembedAuthor, probeAuthor, youtubeVideoFields } from "./metadata.ts";
 import { YOUTUBE_FRAMES_OFF_PROBE_TIMEOUT_MS, probeYouTubeVideo, type YouTubeProbe } from "./probe.ts";
 import {
@@ -196,6 +197,11 @@ export interface YouTubeSummarizerDeps {
   /** Where quoted frames are kept (test seam); default `framesRootDir()`. */
   framesRoot?: string;
   /**
+   * A picked GitHub repo link's detail line (`githubRepoLookup`, one API call
+   * under a 5 s budget); `null` writes the plain line.
+   */
+  repoLine: RepoLineLookup;
+  /**
    * Fire the per-article source-page drafter on a successful capture. Default
    * ON — the route never passes it.
    *
@@ -218,6 +224,7 @@ const REAL_DEPS: YouTubeSummarizerDeps = {
   scanVideo: (input) => realRunDenseScan(input),
   buildSheets: (input) => realBuildContactSheets(input),
   regrabFrames: (input) => realRegrabFrames(input),
+  repoLine: githubRepoLookup(),
 };
 
 /**
@@ -1044,7 +1051,7 @@ export async function summarizeVideo(
       visualDetail,
       ...(resolved.framesRoot !== undefined ? { framesRoot: resolved.framesRoot } : {}),
       onCategory: (c) => setCategory(jobId, c),
-      ...(descriptionLinks !== undefined ? { links: descriptionLinks } : {}),
+      ...(descriptionLinks !== undefined ? { links: descriptionLinks, repoLine: resolved.repoLine } : {}),
     });
     const { summary, category } = finished;
     const keptFrames = finished.kept;

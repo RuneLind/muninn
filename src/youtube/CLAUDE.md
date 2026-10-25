@@ -21,7 +21,7 @@ into huginn.
 | `finish.ts` | The post-model tail as ONE function (`finishYouTubeSummary`): `prepareLinksAnswer` (strip `LINKS:`, demote a model `## Links`) → parse → `enforceVisualReferences` → `keepReferencedFrames` → `dropFrameReferences` for whatever the copy could not serve. **A re-run must call this**, or it stores model-invented slide addresses the route 404s |
 | `kinds.ts` | `youtubeCaptureKinds` — the offer set this vertical narrows, called by the options route, the `bad_kind` check and the replay harness |
 | `extension-options-rules.ts` | The popup's rules, pure and import-free — payload validation, restore-and-revalidate, the restore NOTE, the POST body. Emitted into `extensions/youtube/capture-rules.js` by `bun run build:extension` |
-| `extension-build.ts` | That emitter. Bundles for the browser and normalizes bun's cwd-relative module banner, so the byte gate cannot depend on where it ran |
+| `extension-build.ts` | That emitter, over a LIST of outputs (`EXTENSION_OUTPUTS`): this file's ESM `capture-rules.js`, and the X extension's IIFE `html-to-markdown.js` (`src/summaries/html-to-markdown.extension.ts`), each with its own byte gate. Bundles for the browser and normalizes bun's cwd-relative module banner (indented inside an IIFE), so a gate cannot depend on where it ran |
 | `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam this vertical uses whole — the cadence, the served root, the URL shape, the prompt section (and its optional `FramesPromptPolicy`), the id gate, `keepReferencedFrames`, `removeKeptFramesForDocument`, `extractCadenceFramesFromFile`. See `src/vimeo/CLAUDE.md` for its full contract |
 | `../summaries/visual-detail.ts` | The Selected/Detailed policy: the enum, the caps, the rubric the prompt states, and `enforceVisualReferences`/`dropFrameReferences`, the pass that holds the answer to it. See **Visual detail** below |
 
@@ -545,7 +545,10 @@ pieces, in order:
   `## Links` (grammar and locator: `src/summaries/links-section.ts`) as the
   summary's last block: every `source` URL by rule, whatever the model picked; a
   repo or candidate only when its id was picked; creator and social URLs never,
-  only counted. No qualifying line, no section. The section joins the summary
+  only counted. No qualifying line, no section. A picked GitHub repo gets its
+  repo line (`src/summaries/github-repo.ts`, the `repoLine` dep; one API call,
+  5 s budget, `MUNINN_GITHUB_TOKEN` optional), and a failed lookup the plain
+  line. The section joins the summary
   BEFORE `completeJob`, the ingest and the source draft. The trace root carries
   `bodyUrls` / `bodyUrlsUnlisted` (URLs the model wrote into its prose, and how
   many of those the description never listed); the summary span carries

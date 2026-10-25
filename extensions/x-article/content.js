@@ -130,8 +130,14 @@ function isGoodTitle(text) {
 
 /**
  * Extract the article's full text content from the rendered DOM.
- * Uses innerText for accurate visible-text extraction, then applies
- * multiple strategies to find the right container.
+ *
+ * The first strategy keeps the article's LINKS: `muninnHtmlToMarkdown`
+ * (`html-to-markdown.js`, emitted from muninn's `src/summaries/html-to-markdown.ts`
+ * by `bun run build:extension` and loaded before this file) walks the container
+ * and writes every anchor as `[text](href)`. A `t.co` anchor whose text spells
+ * the expanded URL (X renders it partly in hidden spans) gets that URL; muninn
+ * resolves any other `t.co` href. The `innerText` strategies below are the
+ * fallback, and they lose every href.
  */
 function extractArticleText() {
   // Cache the main content element across strategies
@@ -140,6 +146,10 @@ function extractArticleText() {
     || document.querySelector('main');
 
   const strategies = [
+    () => {
+      if (!main || typeof globalThis.muninnHtmlToMarkdown !== 'function') return null;
+      return filterUiLines(globalThis.muninnHtmlToMarkdown(main, { isHidden: isHiddenElement }));
+    },
     () => {
       if (!main) return null;
       return extractCleanText(main);
@@ -203,26 +213,38 @@ function extractArticleText() {
 function extractCleanText(container) {
   // Use innerText — it respects visibility and gives us what the user sees
   const raw = container.innerText || '';
-  const lines = raw.split('\n');
+  return filterUiLines(raw).split('\n').filter(line => line.trim()).join('\n');
+}
 
-  // Filter out lines that look like UI chrome
-  const uiPatterns = [
-    /^(Follow|Following|Sign up|Log in|More|Share|Bookmark|Copy link)$/i,
-    /^\d+(\.\d+)?[KMB]?\s*(views?|likes?|reposts?|replies|bookmarks?)$/i,  // engagement stats
-    /^(Reply|Repost|Like|View|Bookmark)$/i,
-    /^@\w+\s*·\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+$/i, // author line
-    /^·$/,
-    /^\(\d+\)$/, // notification count
-  ];
+// Lines that look like UI chrome, not article text.
+const UI_LINE_PATTERNS = [
+  /^(Follow|Following|Sign up|Log in|More|Share|Bookmark|Copy link)$/i,
+  /^\d+(\.\d+)?[KMB]?\s*(views?|likes?|reposts?|replies|bookmarks?)$/i,  // engagement stats
+  /^(Reply|Repost|Like|View|Bookmark)$/i,
+  /^@\w+\s*·\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+$/i, // author line
+  /^·$/,
+  /^\(\d+\)$/, // notification count
+];
 
-  const filtered = lines.filter(line => {
+/**
+ * Drop UI-chrome lines and lines under 3 characters. Blank lines stay (one at
+ * a time), so the markdown strategy keeps its paragraph breaks.
+ */
+function filterUiLines(text) {
+  const kept = (text || '').split('\n').filter(line => {
     const trimmed = line.trim();
-    if (!trimmed) return false;
+    if (!trimmed) return true;
     if (trimmed.length < 3) return false;
-    return !uiPatterns.some(p => p.test(trimmed));
+    return !UI_LINE_PATTERNS.some(p => p.test(trimmed));
   });
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
 
-  return filtered.join('\n');
+/** Whether an element is invisible on the page, for the markdown walk. */
+function isHiddenElement(el) {
+  if (el.closest && el.closest('[role="dialog"], [aria-modal="true"], [role="alertdialog"]')) return true;
+  const style = window.getComputedStyle(el);
+  return style.display === 'none' || style.visibility === 'hidden';
 }
 
 /**

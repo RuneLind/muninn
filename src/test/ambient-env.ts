@@ -252,4 +252,9 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   // exercise the cadence branch on that machine and the dense one on the other,
   // which is this file's whole failure shape. That suite sets the mode per case.
   "YOUTUBE_FRAME_SCAN",
+  // `MUNINN_GITHUB_TOKEN` — the repo-line lookup's credential
+  // (`src/summaries/github-repo.ts`). A developer's token would turn every
+  // anonymous-lookup case into an authenticated one on that machine only; the
+  // suite passes `token` explicitly.
+  "MUNINN_GITHUB_TOKEN",
 ];

@@ -8,6 +8,7 @@
 
 import { VALID_CATEGORIES } from "../utils/summary-parser.ts";
 import { joinPromptPieces, summarySystemPromptPieces, type PromptPiece } from "../summaries/prompt-pieces.ts";
+import { TEXT_LINKS_STEP } from "../summaries/text-links.ts";
 
 export const SUMMARIZE_INTRO =
   "You are a content analyst. Summarize the following X/Twitter article.";
@@ -17,11 +18,22 @@ export interface XArticleSystemPromptInput {
   /** The handle WITHOUT its `@` — the prompt adds one. */
   readonly author: string;
   readonly url: string;
+  /**
+   * Whether the user prompt lists the text's links to pick from (the `LINKS:`
+   * step). Absent or false, the prompt is byte-identical to the one before
+   * links existed.
+   */
+  readonly linksStep?: boolean;
 }
 
 export function xArticleSystemPromptPieces(input: XArticleSystemPromptInput): PromptPiece[] {
   return [
-    ...summarySystemPromptPieces(SUMMARIZE_INTRO, VALID_CATEGORIES),
+    ...summarySystemPromptPieces(
+      SUMMARIZE_INTRO,
+      VALID_CATEGORIES,
+      undefined,
+      input.linksStep === true ? { envelopeLines: [TEXT_LINKS_STEP] } : {},
+    ),
     {
       id: "context",
       label: "Article context",

@@ -167,3 +167,57 @@ test("the run sends x-article's OWN system prompt, with author and url the right
   // The pasted body IS the user prompt — this vertical has no user-prompt builder.
   expect(lastPrompt).toBe(PIN_BODY);
 });
+
+// --- The text's links (plan muninn-summary-links, PR 2) ---------------------
+// Invented markup and URLs; the `t.co` lookup and the repo line are seams, so
+// nothing here reaches the network.
+
+const LINKED_BODY = [
+  "An invented article body that names its sources.",
+  "",
+  "The harness lives at [the repo](https://t.co/InventedA1) and the write-up at https://example.org/write-up.",
+  "Also see https://t.co/InventedB2 and the author's profile https://x.com/someone_invented.",
+].join("\n");
+
+test("t.co targets replace the hrefs, the model picks from the list, the section lands before the ingest", async () => {
+  claudeResult = "CATEGORY: ai/rag\nLINKS: 1\n\nSUMMARY:\n### Heading\n- point";
+  const resolved: string[] = [];
+  const jobId = createJob(ARTICLE_ID, PIN_TITLE, ARTICLE_URL, PIN_AUTHOR);
+  await summarizeArticle(jobId, ARTICLE_ID, PIN_TITLE, ARTICLE_URL, PIN_AUTHOR, LINKED_BODY, config, bot, {
+    resolveRedirect: async (url) => {
+      resolved.push(url);
+      return url === "https://t.co/InventedA1" ? "https://github.com/example/harness" : null;
+    },
+    repoLine: async () => "An invented harness, TypeScript, MIT, ★ 12 on 2026-10-25",
+  });
+
+  expect(resolved.sort()).toEqual(["https://t.co/InventedA1", "https://t.co/InventedB2"]);
+  // The model reads the target, not the t.co href; the unresolved one stays as it was.
+  expect(lastPrompt).toContain("[the repo](https://github.com/example/harness)");
+  expect(lastPrompt).toContain("https://t.co/InventedB2");
+  expect(lastPrompt).toContain(
+    "## Links in the text\n\n1. the repo — https://github.com/example/harness [code or paper]\n2. example.org/write-up — https://example.org/write-up",
+  );
+  expect(lastPrompt).not.toMatch(/\d+\. .*x\.com/);
+  expect(lastPrompt).not.toMatch(/\d+\. .*t\.co/);
+  expect(lastSystemPrompt).toBe(
+    buildXArticleSystemPrompt({ title: PIN_TITLE, author: PIN_AUTHOR, url: ARTICLE_URL, linksStep: true }),
+  );
+  expect(lastSystemPrompt).toContain('2. Then add one line "LINKS: <ids>"');
+
+  const section =
+    "## Links\n\n- 📦 [the repo](https://github.com/example/harness) — An invented harness, TypeScript, MIT, ★ 12 on 2026-10-25 · from text";
+  expect(getJob(jobId)!.summary).toBe(`### Heading\n- point\n\n${section}`);
+  expect(ingestPayload!.summary).toBe(`### Heading\n- point\n\n${section}`);
+  expect(String(ingestPayload!.summary)).not.toContain("LINKS:");
+});
+
+test("LINKS: none writes no section, and the line never reaches the body", async () => {
+  claudeResult = "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n- point\n\nLINKS: none";
+  const jobId = createJob(ARTICLE_ID, PIN_TITLE, ARTICLE_URL, PIN_AUTHOR);
+  await summarizeArticle(jobId, ARTICLE_ID, PIN_TITLE, ARTICLE_URL, PIN_AUTHOR, LINKED_BODY, config, bot, {
+    resolveRedirect: async () => null,
+    repoLine: async () => null,
+  });
+  expect(getJob(jobId)!.summary).toBe("### Heading\n- point");
+});

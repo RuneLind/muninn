@@ -4,6 +4,9 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { parseSummaryResponse } from "../utils/summary-parser.ts";
 import { ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { appendLinksSection, prepareLinksAnswer } from "../summaries/links-section.ts";
+import { finishTextLinks, linkTraceAttrs, prepareTextLinks, type TextLinksDeps } from "../summaries/text-links-run.ts";
+import { textLinksPromptSection } from "../summaries/text-links.ts";
 import { buildArticleSystemPrompt } from "./prompt.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
@@ -26,14 +29,23 @@ export async function summarizeArticle(
   articleText: string,
   config: Config,
   botConfig: BotConfig,
+  /** Test seam for the links' network half (`t.co` lookups, repo lines). */
+  linkDeps: TextLinksDeps = {},
 ): Promise<void> {
   try {
     // 1. Summarize with Claude
     updateStatus(jobId, "summarizing");
 
+    // The text's links (plan muninn-summary-links, PR 2): every `t.co` URL
+    // resolved under one shared budget and spelled as its target, then the
+    // candidates numbered for the model's `LINKS:` pick. With none, both
+    // prompts are byte-identical to before links existed.
+    const textLinks = await prepareTextLinks(articleText, linkDeps);
+    const linksStep = textLinks.links.length > 0;
     // Only surface the context lines we actually have — a pasted article may
     // carry no url and no author. The composition is `./prompt.ts`.
     const systemPrompt = buildArticleSystemPrompt({
+      ...(linksStep ? { linksStep } : {}),
       title,
       ...(author ? { author } : {}),
       ...(url ? { url } : {}),
@@ -51,17 +63,30 @@ export async function summarizeArticle(
       jobId,
       title,
       url, // required string on the trace; "" when no URL was pasted
-      prompt: articleText,
+      prompt: textLinks.text + textLinksPromptSection(textLinks.links),
       systemPrompt,
       config,
       botConfig,
       attachRun,
       onProgress,
+      extraTraceAttrs: linkTraceAttrs(textLinks),
     });
 
-    // 2. Parse response
-    const { category, summary } = parseSummaryResponse(result.result);
+    // 2. Parse response. The `LINKS:` line comes out before the envelope
+    //    parse, wherever the model put it; the section is the summary's last
+    //    block, built only from the ids the model picked (no by-rule placement
+    //    for a text — plan muninn-summary-links, PR 2).
+    const prepared = prepareLinksAnswer(result.result);
+    const { category, summary: parsed } = parseSummaryResponse(prepared.text);
     setCategory(jobId, category);
+    const finishedLinks = await finishTextLinks(textLinks.links, prepared.pick, linkDeps);
+    const summary = appendLinksSection(parsed, finishedLinks.section);
+    if (finishedLinks.unknownIds.length > 0) {
+      log.warn("The LINKS line for job {jobId} named id(s) {ids} the list does not have — dropped", {
+        jobId,
+        ids: finishedLinks.unknownIds.join(", "),
+      });
+    }
 
     log.info("Summarized article {title}: category={category}, {tokens} output tokens", {
       title,

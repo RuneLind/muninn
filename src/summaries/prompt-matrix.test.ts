@@ -40,6 +40,7 @@ import { buildArticleSystemPrompt } from "../article/prompt.ts";
 import { buildAnthropicSystemPrompt } from "../anthropic/prompt.ts";
 import {
   PLACEHOLDER_ARTICLE_TEXT,
+  PLACEHOLDER_LINKED_ARTICLE_TEXT,
   PLACEHOLDER_ARTICLE_URL,
   PLACEHOLDER_ANTHROPIC_URL,
   PLACEHOLDER_AUTHOR,
@@ -528,6 +529,7 @@ describe("the text cells", () => {
         title: PLACEHOLDER_TITLE,
         author: PLACEHOLDER_AUTHOR,
         url: PLACEHOLDER_XARTICLE_URL,
+        linksStep: true,
       }),
     );
     expect(cell(matrix, "article", null).systemPrompt).toBe(
@@ -535,6 +537,7 @@ describe("the text cells", () => {
         title: PLACEHOLDER_TITLE,
         author: PLACEHOLDER_AUTHOR,
         url: PLACEHOLDER_ARTICLE_URL,
+        linksStep: true,
       }),
     );
     expect(cell(matrix, "anthropic", null).systemPrompt).toBe(
@@ -544,9 +547,11 @@ describe("the text cells", () => {
         url: PLACEHOLDER_ANTHROPIC_URL,
       }),
     );
-    // The pasted body IS the user prompt for all three — no builder to call.
-    for (const id of ["x-article", "article", "anthropic"]) {
-      expect(cell(matrix, id, null).userPrompt).toBe(PLACEHOLDER_ARTICLE_TEXT);
+    // The pasted body IS the user prompt — no builder to call; the two
+    // link-carrying verticals add the numbered list of its links.
+    expect(cell(matrix, "anthropic", null).userPrompt).toBe(PLACEHOLDER_ARTICLE_TEXT);
+    for (const id of ["x-article", "article"]) {
+      expect(cell(matrix, id, null).userPrompt.startsWith(`${PLACEHOLDER_LINKED_ARTICLE_TEXT}\n\n## Links in the text\n\n`)).toBe(true);
     }
   });
 
@@ -670,15 +675,13 @@ describe("the fixed axes the page pins", () => {
     }
 
     // The x-article row's old "author and url: both present" axis is GONE: that
-    // builder interpolates all three fields unconditionally, so the line stated
-    // the placeholder rather than a branch the page took. Its replacement is the
-    // honest version of the same fact, and the `article` row keeps the real one
-    // (its two context lines ARE optional).
-    expect(axes["x-article"]).toEqual(["title, author and url: all required — nothing here varies"]);
-    // "Nothing varies" as a comparison rather than a claim: the same piece list
-    // over two unrelated inputs, so an optional rider added later fails here.
+    // builder interpolates all three fields unconditionally. Its one branch is
+    // the links list, shown present.
+    expect(axes["x-article"]).toEqual(["title, author and url: all required", "links list: present"]);
+    // The context lines do not vary: the same piece list over two unrelated
+    // inputs, so an optional rider added later fails here.
     const ids = (i: { title: string; author: string; url: string }) =>
-      xArticleSystemPromptPieces(i).map((p) => p.id);
+      xArticleSystemPromptPieces({ ...i, linksStep: true }).map((p) => p.id);
     expect(ids({ title: "T", author: "A", url: "U" })).toEqual(
       ids({ title: "other", author: "", url: "" }),
     );
@@ -686,9 +689,19 @@ describe("the fixed axes the page pins", () => {
       cell(matrix, "x-article", null).systemPieces.map((p) => p.id),
     );
 
-    expect(axes["article"]).toEqual(["author and url: both present"]);
+    expect(axes["article"]).toEqual(["author and url: both present", "links list: present"]);
     expect(cell(matrix, "article", null).systemPrompt).toContain("Article author:");
     expect(cell(matrix, "article", null).systemPrompt).toContain("Article URL:");
+
+    // The links axis on both text rows: the step in the system pieces, the
+    // numbered list after the text in the user prompt.
+    for (const id of ["x-article", "article"]) {
+      expect(cell(matrix, id, null).systemPieces.map((p) => p.id)).toContain("links-step");
+      expect(cell(matrix, id, null).userPrompt).toContain(
+        "## Links in the text\n\n1. the measurement write-up — https://example.org/blog/the-measurement\n" +
+          "2. a harness — https://github.com/example/harness [code or paper]",
+      );
+    }
 
     expect(axes["anthropic"]).toEqual(["framing: Anthropic release", "linked-content rider: absent"]);
     const anthropicIds = cell(matrix, "anthropic", null).systemPieces.map((p) => p.id);
