@@ -41,6 +41,7 @@ interface Row {
   candidate: Candidate;
   selected: boolean;
   state: "idle" | "queued" | "searching" | "checking" | "done";
+  /** `interrupted`: the stream ended before this row's result arrived. */
   outcome?: string;
   results: Found[];
 }
@@ -65,6 +66,13 @@ interface DocState {
 
 const states = new Map<string, DocState>();
 let current: { source: string; docId: string; key: string } | null = null;
+/** The running search's fetch. Aborted when the panel closes or moves to another document, so the server stops launching agents. */
+let searchAbort: { key: string; controller: AbortController } | null = null;
+
+function abortSearch(): void {
+  searchAbort?.controller.abort();
+  searchAbort = null;
+}
 
 const keyOf = (source: string, docId: string) => `${source}\u0000${docId}`;
 
@@ -108,6 +116,7 @@ export function sumLinksOnOpen(docId: string, source: string | null, mainEl: HTM
   }
   const key = keyOf(source, docId);
   const changed = current?.key !== key;
+  if (changed && searchAbort && searchAbort.key !== key) abortSearch();
   current = { source, docId, key };
   if (btn && changed) btn.hidden = true;
   if (!mainEl) return;
@@ -131,6 +140,7 @@ export function sumLinksOnOpen(docId: string, source: string | null, mainEl: HTM
 }
 
 export function sumLinksOnClose(): void {
+  abortSearch();
   current = null;
 }
 
@@ -209,11 +219,16 @@ async function search(source: string, docId: string, key: string): Promise<void>
   s.message = null;
   for (const r of picked) Object.assign(r, { state: "queued", outcome: undefined, results: [] });
   render();
+  const controller = new AbortController();
+  searchAbort = { key, controller };
+  let streamed = false;
+  let finished = false;
   try {
     const res = await fetch("/api/summaries/links/search", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ source, docId, candidates: picked.map((r) => r.candidate) }),
+      signal: controller.signal,
     });
     if (!res.ok || !res.body) {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
@@ -235,9 +250,12 @@ async function search(source: string, docId: string, key: string): Promise<void>
         row.results = Array.isArray(data.results) ? (data.results as Found[]) : [];
       } else if (frame.event === "app_error") {
         s.message = { text: String(data.error ?? "The search failed."), error: true };
+      } else if (frame.event === "done") {
+        finished = true;
       }
       render();
     });
+    streamed = true;
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     for (;;) {
@@ -246,11 +264,20 @@ async function search(source: string, docId: string, key: string): Promise<void>
       parser.push(decoder.decode(value, { stream: true }));
     }
     parser.end();
+    if (!finished && !s.message) s.message = { text: "The search ended before it finished. Search again for the rows marked not finished.", error: true };
   } catch {
-    s.message = { text: "The search stopped: the connection dropped.", error: true };
+    s.message = controller.signal.aborted
+      ? { text: "The search stopped when the panel closed.", error: true }
+      : { text: "The search stopped: the connection dropped.", error: true };
   } finally {
+    if (searchAbort?.controller === controller) searchAbort = null;
     s.searching = false;
-    for (const r of picked) if (r.state !== "done") r.state = "idle";
+    for (const r of picked) {
+      if (r.state === "done") continue;
+      // A row the stream reached but never answered for is marked, so it does not read as never searched.
+      if (streamed) Object.assign(r, { state: "done", outcome: "interrupted", results: [] });
+      else r.state = "idle";
+    }
     render();
   }
 }
@@ -326,6 +353,7 @@ const OUTCOME_TEXT: Record<string, string> = {
   timeout: "timed out",
   skipped: "not searched",
   error: "search failed",
+  interrupted: "not finished",
 };
 
 function candidateLabel(c: Candidate): string {
@@ -334,7 +362,15 @@ function candidateLabel(c: Candidate): string {
 }
 
 function rowHtml(s: DocState, r: Row, i: number): string {
-  const status = r.state === "done" ? (r.outcome && r.outcome !== "found" ? OUTCOME_TEXT[r.outcome] ?? r.outcome : "") : STATE_TEXT[r.state];
+  // A finished row always says how it ended: an empty status would read as never searched.
+  const status =
+    r.state === "done"
+      ? r.outcome && r.outcome !== "found"
+        ? OUTCOME_TEXT[r.outcome] ?? r.outcome
+        : r.results.length === 0
+          ? "nothing found"
+          : ""
+      : STATE_TEXT[r.state];
   const results = r.results
     .map((f) => {
       const saved = s.accepted.has(f.url);

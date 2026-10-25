@@ -10,7 +10,10 @@
  * second accept from the same panel saves too), the 409 an accept meets after
  * an outside write, and — the R2 case — that reloading the article after an
  * outside write does NOT re-baseline the panel, so a stale result still meets
- * the 409.
+ * the 409. Also: closing the panel mid-search aborts the stream, so the server
+ * launches no more agents (counted through the boot seam's launch log), and a
+ * stream cut before `done` says so instead of leaving rows that read as never
+ * searched.
  *
  * **What is faked and why.** huginn is an in-process `node:http` server whose
  * `/api/youtube/ingest` rewrites its in-memory file the way `write_summary`
@@ -28,7 +31,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
@@ -66,7 +69,17 @@ const DOCS = {
   },
   c: { id: "ai/e2e/E2E links outside write.md", raw: withSection("https://www.youtube.com/watch?v=e2eLinksCCC") },
   d: { id: "ai/e2e/E2E links reload.md", raw: withSection("https://www.youtube.com/watch?v=e2eLinksDDD") },
+  // Its summary carries SLOW_MARKER, so the candidates call answers SLOW_CANDIDATES.
+  e: {
+    id: "ai/e2e/E2E links close mid-search.md",
+    raw: `---\ndate: 2026-03-24\nurl: "https://www.youtube.com/watch?v=e2eLinksEEE"\ncategory: "ai/e2e"\n---\n\nSLOWSIXMARKER names six slow things.\n`,
+  },
+  f: { id: "ai/e2e/E2E links cut stream.md", raw: withSection("https://www.youtube.com/watch?v=e2eLinksFFF") },
 };
+const SLOW_MARKER = "SLOWSIXMARKER";
+const SLOW_CANDIDATES = Array.from({ length: 6 }, (_, i) => ({ title: null, author: null, topic: `slow thing ${i}`, kind: "doc" }));
+/** Long enough that the first three are still running when the panel closes. */
+const SLOW_MS = 2_000;
 
 const MATCHED_URL = "https://claude.example/resources/articles/effort";
 const PDF_URL = "https://papers.example/effort.pdf";
@@ -75,6 +88,8 @@ const C_NONE = { title: null, author: null, topic: "an internal benchmark report
 const FIXTURE = {
   // The second is the section's own line: the server drops it as listed.
   candidates: [C_HALLIE, { title: "Spending your effort", author: null, topic: "the claude.dev post", kind: "post" }, C_NONE],
+  candidatesByMarker: { [SLOW_MARKER]: SLOW_CANDIDATES },
+  agentDelays: Object.fromEntries(SLOW_CANDIDATES.map((c) => [c.topic, SLOW_MS])),
   agents: {
     [C_HALLIE.topic]: JSON.stringify({
       results: [
@@ -102,6 +117,9 @@ const ingests: Record<string, unknown>[] = [];
 let server: ChildProcess | undefined;
 let fake: Server | undefined;
 let tmpRoot: string | undefined;
+let launchLog = "";
+/** The topics of every agent the server launched, in order. */
+const launches = (): string[] => (existsSync(launchLog) ? readFileSync(launchLog, "utf8").split("\n").filter(Boolean) : []);
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
@@ -162,6 +180,7 @@ function writeFixtures(): { botsRoot: string; fixture: string } {
   writeFileSync(path.join(dir, "config.json"), JSON.stringify({ connector: "claude-sdk" }, null, 2));
   const fixture = path.join(root, "fixture.json");
   writeFileSync(fixture, JSON.stringify(FIXTURE));
+  launchLog = path.join(root, "launches.log");
   tmpRoot = root;
   return { botsRoot: path.join(root, "bots"), fixture };
 }
@@ -202,6 +221,7 @@ test.beforeAll(async () => {
       SUMMARIZER_BOT: BOT,
       KNOWLEDGE_API_URL: FAKE,
       FIND_LINKS_E2E_FIXTURE: fixture,
+      FIND_LINKS_E2E_LAUNCH_LOG: launchLog,
     },
     stdio: "ignore",
   });
@@ -317,4 +337,57 @@ test("R2: reloading the article after an outside write keeps the panel's baselin
   await panel.locator(`[data-accept="${MATCHED_URL}"]`).click();
   await expect(panel.locator(".sum-links-msg.error")).toContainText("The summary changed since Find links read it");
   expect(ingests.length).toBe(before);
+});
+
+test("closing the panel mid-search aborts the stream: the server launches no more agents, and the lock lets go", async ({ page }) => {
+  await openDoc(page, DOCS.e.id, "six slow things");
+  await page.locator("#docPanelFindLinks").click();
+  const panel = page.locator("#sumLinks");
+  await expect(panel.locator(".sum-links-row")).toHaveCount(6);
+  // Three are selected by default; each change re-renders the list, so pick by index.
+  for (const i of [3, 4, 5]) await panel.locator(`[data-pick="${i}"]`).click();
+  await expect(panel.locator("[data-pick]:checked")).toHaveCount(6);
+  const before = launches().length;
+  await panel.getByRole("button", { name: "Search 6 selected" }).click();
+  // Concurrency 3: three agents run, three wait.
+  await expect.poll(() => launches().length - before).toBe(3);
+  await page.evaluate(() => (globalThis as unknown as { closeDocPanel: () => void }).closeDocPanel());
+  await expect(page.locator("#docOverlay")).not.toHaveClass(/visible/);
+  // Past the first three agents' end: with the stream still open, the next three would launch here.
+  await page.waitForTimeout(SLOW_MS + 1_500);
+  expect(launches().slice(before)).toEqual(["slow thing 0", "slow thing 1", "slow thing 2"]);
+  // The launched agents settled, so the lock is free: a search on the document answers 200, not 409 running.
+  const again = await page.evaluate(async ([docId, cand]) => {
+    const res = await fetch("/api/summaries/links/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source: "youtube", docId, candidates: [cand] }),
+    });
+    const status = res.status;
+    await res.body?.cancel();
+    return status;
+  }, [DOCS.e.id, SLOW_CANDIDATES[5]] as const);
+  expect(again).toBe(200);
+});
+
+test("a stream cut before done says the search ended early; unanswered rows read not finished, a finished empty row nothing found", async ({ page }) => {
+  // The stream ends after one state frame and one result with no links: no done, no other result.
+  await page.route("**/api/summaries/links/search", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body:
+        'event: start\ndata: {"total":2}\n\n' +
+        'event: state\ndata: {"index":0,"state":"searching"}\n\n' +
+        'event: result\ndata: {"index":1,"outcome":"found","results":[]}\n\n',
+    }),
+  );
+  await openDoc(page, DOCS.f.id, "Lydia Hallie");
+  await page.locator("#docPanelFindLinks").click();
+  const panel = page.locator("#sumLinks");
+  await expect(panel.locator(".sum-links-row")).toHaveCount(2);
+  await panel.getByRole("button", { name: "Search 2 selected" }).click();
+  await expect(panel.locator(".sum-links-msg.error")).toContainText("The search ended before it finished");
+  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-state')).toHaveText("not finished");
+  await expect(panel.locator('.sum-links-row[data-row="1"] .sum-links-state')).toHaveText("nothing found");
 });
