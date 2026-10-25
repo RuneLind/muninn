@@ -351,6 +351,7 @@ const STATE_TEXT: Record<Row["state"], string> = {
 
 const OUTCOME_TEXT: Record<string, string> = {
   not_found: "not found",
+  already_linked: "already linked",
   timeout: "timed out",
   skipped: "not searched",
   error: "search failed",

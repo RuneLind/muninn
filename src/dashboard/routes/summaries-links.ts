@@ -55,8 +55,10 @@ import { safeFetchPage, type SafePage } from "../../summaries/safe-fetch.ts";
 import {
   buildCandidatesPrompt,
   buildSearchPrompt,
+  bodyUrlKeys,
   candidateIsListed,
   candidateSummaryText,
+  candidateUrlCarried,
   carriedUrlKeys,
   coerceCandidate,
   FIND_LINKS_AGENT_TIMEOUT_MS,
@@ -66,7 +68,7 @@ import {
   FIND_LINKS_MAX_SELECTED,
   FIND_LINKS_RUN_TIMEOUT_MS,
   foundLinkFrom,
-  inlineLinkTitles,
+  inlineAnchorTexts,
   insertFoundLinks,
   judgePage,
   LABEL_ORDER,
@@ -293,8 +295,8 @@ class VerifiedLinks {
   }
 }
 
-/** One candidate's terminal state on the wire. */
-type Outcome = "found" | "not_found" | "error" | "timeout" | "skipped";
+/** One candidate's terminal state on the wire. `already_linked`: every result the agent answered is a URL the summary already carries. */
+type Outcome = "found" | "not_found" | "already_linked" | "error" | "timeout" | "skipped";
 interface CandidateResult {
   outcome: Outcome;
   results: FoundLink[];
@@ -353,13 +355,17 @@ export function registerSummariesLinksRoutes(
       log.warn("Find links: candidates answer for {doc} held no JSON array", { doc: t.docId });
       return c.json({ error: "The candidates call answered no list. Try again.", code: "model_unparseable" }, 502);
     }
-    const sectionTitles = storedLinks(doc.stored.body).titles;
-    const linkTitles = inlineLinkTitles(doc.stored.body);
+    // D20 filter: an exact title (token-set equality) or a URL the candidate
+    // itself names, nothing fuzzier. Everything else is searched; a result the
+    // summary carries is dropped by URL there and answered `already_linked`.
+    const section = storedLinks(doc.stored.body);
+    const anchors = inlineAnchorTexts(doc.stored.body);
+    const bodyKeys = bodyUrlKeys(doc.stored.body);
     let listed = 0;
     let linked = 0;
     const candidates = parsed.filter((cand) => {
-      if (candidateIsListed(cand, sectionTitles)) return (listed++, false);
-      if (candidateIsListed(cand, linkTitles)) return (linked++, false);
+      if (candidateIsListed(cand, section.titles) || candidateUrlCarried(cand, section.urlKeys)) return (listed++, false);
+      if (candidateIsListed(cand, anchors) || candidateUrlCarried(cand, bodyKeys)) return (linked++, false);
       return true;
     });
     tracer?.finish("ok", { candidates: candidates.length, listed, linked });
@@ -472,13 +478,17 @@ export function registerSummariesLinksRoutes(
               clearTimeout(timer);
             }
             write("state", { index, state: "checking" });
+            const manifest = parseManifest(raw);
+            let carriedDrops = 0;
             const checked = await Promise.all(
-              parseManifest(raw).map(async (entry) => {
+              manifest.map(async (entry) => {
+                if (carried.has(linkUrlKey(entry.url))) return (carriedDrops++, null);
                 const left = deadline - now();
-                if (left <= 0 || carried.has(linkUrlKey(entry.url))) return null;
+                if (left <= 0) return null;
                 try {
                   const page = await deps.fetchPage(entry.url, Math.min(fetchTimeoutMs, left));
-                  if (!page || carried.has(linkUrlKey(page.finalUrl))) return null;
+                  if (page && carried.has(linkUrlKey(page.finalUrl))) return (carriedDrops++, null);
+                  if (!page) return null;
                   return foundLinkFrom(cand, page, entry, judgePage(cand, page, entry.quote));
                 } catch (err) {
                   log.warn("Find links: checking {url} failed: {error}", { url: entry.url, error: errText(err) });
@@ -495,7 +505,9 @@ export function registerSummariesLinksRoutes(
             }
             const results = [...byKey.values()].sort((a, b) => LABEL_ORDER[a.label] - LABEL_ORDER[b.label]);
             verified.add(key, results);
-            return { outcome: results.length > 0 ? "found" : "not_found", results };
+            const outcome: Outcome =
+              results.length > 0 ? "found" : manifest.length > 0 && carriedDrops === manifest.length ? "already_linked" : "not_found";
+            return { outcome, results };
           };
 
           await runClaimPool<CandidateResult>({

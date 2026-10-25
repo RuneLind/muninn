@@ -13,7 +13,7 @@
  * the 409. Also: closing the panel mid-search aborts the stream, so the server
  * launches no more agents (counted through the boot seam's launch log), and a
  * stream cut before `done` says so instead of leaving rows that read as never
- * searched.
+ * searched, and an `already_linked` outcome reads «already linked».
  *
  * **What is faked and why.** huginn is an in-process `node:http` server whose
  * `/api/youtube/ingest` rewrites its in-memory file the way `write_summary`
@@ -390,4 +390,25 @@ test("a stream cut before done says the search ended early; unanswered rows read
   await expect(panel.locator(".sum-links-msg.error")).toContainText("The search ended before it finished");
   await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-state')).toHaveText("not finished");
   await expect(panel.locator('.sum-links-row[data-row="1"] .sum-links-state')).toHaveText("nothing found");
+});
+
+test("D20: a row whose every result the summary already carries reads already linked", async ({ page }) => {
+  await page.route("**/api/summaries/links/search", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body:
+        'event: start\ndata: {"total":2}\n\n' +
+        'event: result\ndata: {"index":0,"outcome":"already_linked","results":[]}\n\n' +
+        'event: result\ndata: {"index":1,"outcome":"not_found","results":[]}\n\n' +
+        'event: done\ndata: {"gone":false}\n\n',
+    }),
+  );
+  await openDoc(page, DOCS.f.id, "Lydia Hallie");
+  await page.locator("#docPanelFindLinks").click();
+  const panel = page.locator("#sumLinks");
+  await expect(panel.locator(".sum-links-row")).toHaveCount(2);
+  await panel.getByRole("button", { name: "Search 2 selected" }).click();
+  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-state')).toHaveText("already linked");
+  await expect(panel.locator('.sum-links-row[data-row="1"] .sum-links-state')).toHaveText("not found");
 });

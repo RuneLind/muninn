@@ -122,7 +122,7 @@ beforeEach(() => {
   candidatesAnswer = JSON.stringify([
     C_HALLIE,
     { title: "Spending your effort", author: null, topic: "the claude.dev post", kind: "post" },
-    { title: "Prompt caching guide", author: null, topic: "the prompt caching guide", kind: "doc" },
+    { title: "The caching guide", author: null, topic: "the prompt caching guide", kind: "doc" },
     C_NONE,
   ]);
   agentAnswers = {
@@ -160,6 +160,19 @@ describe("POST /api/summaries/links/candidates", () => {
     expect(body.candidates.map((c) => c.topic)).toEqual([C_HALLIE.topic, C_NONE.topic]);
     expect(body).toMatchObject({ listed: 1, linked: 1, maxSelected: 6, linksBaseHash: linksBaseHash(RAW) });
     expect(spans).toEqual(["start:candidates", "end:candidates", "finish:ok"]);
+  });
+  test("D20: only an equal title or a carried URL the candidate names drops it; nothing fuzzier", async () => {
+    candidatesAnswer = JSON.stringify([
+      // Shares words with the section's «Spending your effort» and the body's «the caching guide», equal to neither.
+      { title: "Spending your effort wisely on agents", author: null, topic: "a post on agent effort", kind: "post" },
+      { title: "Prompt caching guide", author: null, topic: "the prompt caching guide", kind: "doc" },
+      // Names a URL the section carries / the body carries.
+      { title: null, author: null, topic: "the post at claude.example/blog/spending-your-effort", kind: "post" },
+      { title: null, author: null, topic: "the guide, https://claude.example/docs/prompt-caching-guide", kind: "doc" },
+    ]);
+    const body = (await (await post(app(), "/api/summaries/links/candidates", ref)).json()) as { candidates: LinkCandidate[]; listed: number; linked: number };
+    expect(body.candidates.map((c) => c.title)).toEqual(["Spending your effort wisely on agents", "Prompt caching guide"]);
+    expect(body).toMatchObject({ listed: 1, linked: 1 });
   });
   test("an answer with no list is a 502, not an empty panel", async () => {
     candidatesAnswer = "I could not find anything.";
@@ -235,7 +248,7 @@ describe("POST /api/summaries/links/search", () => {
         { c: { title: "Claude Opus 5.5", author: null, topic: "Anthropic's Claude Opus 5.5 page", kind: "doc" }, url: "https://anthropic.com/claude-opus-5-5/", title: "Claude Opus 5.5" },
         { c: { title: null, author: null, topic: "the REA repo by morluto", kind: "repo" }, url: "https://github.com/Morluto/REA", title: "rea" },
       ]);
-      expect(results.map((r) => r.outcome)).toEqual(["not_found", "not_found", "not_found"]);
+      expect(results.map((r) => r.outcome)).toEqual(["already_linked", "already_linked", "already_linked"]);
       expect(fetched).toEqual([]);
     });
 
@@ -245,7 +258,7 @@ describe("POST /api/summaries/links/search", () => {
         { c: repo("openai/evals"), url: "https://github.com/openai/evals/", title: "openai/evals" },
         { c: repo("openai/whisper"), url: "https://github.com/openai/whisper", title: "openai/whisper" },
       ]);
-      expect(results.map((r) => r.outcome)).toEqual(["not_found", "not_found", "found"]);
+      expect(results.map((r) => r.outcome)).toEqual(["already_linked", "already_linked", "found"]);
     });
 
     test("a page that lands on a carried URL is dropped after the fetch; another URL is kept", async () => {
@@ -262,7 +275,26 @@ describe("POST /api/summaries/links/search", () => {
           title: "Attention Is All You Need",
         },
       ]);
-      expect(results.map((r) => r.outcome)).toEqual(["not_found", "found"]);
+      expect(results.map((r) => r.outcome)).toEqual(["already_linked", "found"]);
+    });
+
+    test("D20: «already linked» only when EVERY result was a carried URL; one other result keeps «not found»", async () => {
+      files.set(DOC, `---\ndate: "2026-03-22"\nurl: "${URL_}"\n---\n\nSee [nanoGPT](https://github.com/karpathy/nanoGPT).\n`);
+      const c: LinkCandidate = { title: "nanoGPT", author: null, topic: "Karpathy's nanoGPT repo", kind: "repo" };
+      agentAnswers[c.topic] = JSON.stringify({
+        results: [
+          { url: "https://github.com/karpathy/nanoGPT", title: "x", quote: "" },
+          { url: "https://elsewhere.example/nanogpt-notes", title: "x", quote: "" },
+        ],
+      });
+      const evs = await events(await post(app({ fetchPage: async () => null }), "/api/summaries/links/search", { ...ref, candidates: [c] }));
+      expect(evs.find((e) => e.event === "result")!.data).toMatchObject({ outcome: "not_found", results: [] });
+    });
+
+    test("D20: an empty manifest is «not found», never «already linked»", async () => {
+      agentAnswers[C_NONE.topic] = JSON.stringify({ results: [] });
+      const evs = await events(await post(app(), "/api/summaries/links/search", { ...ref, candidates: [C_NONE] }));
+      expect(evs.find((e) => e.event === "result")!.data).toMatchObject({ outcome: "not_found" });
     });
   });
 

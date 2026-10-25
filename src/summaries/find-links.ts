@@ -1,16 +1,17 @@
 /**
  * Find links — the pure half of the `/summaries` doc panel's 🔎 Find links
  * (plan muninn-summary-links, PR 3): the candidate and search prompts and their
- * parsers, the D19 title score and the labels it gives, the `linksBaseHash` CAS
+ * parsers, the D20 label rule, the candidate filter, the `linksBaseHash` CAS
  * input, the URLs a summary already carries, and the insert of accepted lines
  * into the `## Links` section.
  *
- * The label scores the PAGE against the CANDIDATE the summary described, never
- * against the agent's manifest: a manifest title proves only that the agent
- * read some real page. The score holds both ways (D18), so neither a short page
- * title nor a wordy candidate can match on its own. The page-title × candidate
- * shapes the rule answers are enumerated, one row each, in
- * `find-links.test.ts` ("the D19 label table").
+ * The label compares the PAGE with the CANDIDATE the summary described, never
+ * with the agent's manifest: a manifest title proves only that the agent read
+ * some real page. `matched` needs exact evidence (D20): an equal title, a
+ * repo root the candidate names as `owner/repo`, or the D18 two-way score with
+ * a passed author check. A fuzzy score alone measured 16 % false `matched` on
+ * live pages. The page-title × candidate shapes the rule answers are
+ * enumerated, one row each, in `find-links.test.ts` ("the D20 label table").
  */
 
 import { sha256 } from "../gardener/util.ts";
@@ -127,7 +128,7 @@ export function lineTitleOf(raw: string, ctx: TitleContext = {}): string {
   return split && isSiteNameSuffix(split.suffix, ctx) ? split.head : raw.replace(/\s+/g, " ").trim();
 }
 
-/** Which form of the page title a score read. `repo` is a github.com repo root (D19 2). */
+/** Which form of the page title a score read. `repo` is a github.com repo root. */
 export type TitleVariant = "whole" | "site-stripped" | "after-colon" | "prefix" | "repo";
 
 /**
@@ -174,7 +175,10 @@ export interface TitleScore {
   readonly b: number;
   /** Unique page-title tokens. */
   readonly pageTokens: number;
-  readonly matched: boolean;
+  /** D20 1: this form's token set equals the candidate's TITLE token set (never the prefix-alone form). */
+  readonly titleEqual: boolean;
+  /** D18 two-way score: on its own it never matches, only beside a passed author check (D20 3). */
+  readonly twoWay: boolean;
 }
 
 /** One direction of the score: the share of `of` found in `in_`. */
@@ -189,55 +193,54 @@ function candidateKeyTokens(c: Pick<LinkCandidate, "title" | "topic">): string[]
 }
 
 /**
- * One form's score. A form with ≥ 3 unique tokens matches when (a) ≥ 60 % of
- * them occur in the candidate's title + topic AND (b) ≥ 50 % of the
+ * One form's score. `titleEqual` (D20 1): the form's token set equals the
+ * candidate's TITLE token set, never its topic's and never for the prefix
+ * alone. `twoWay` (D18): a form with ≥ 3 unique tokens holds when (a) ≥ 60 %
+ * of them occur in the candidate's title + topic AND (b) ≥ 50 % of the
  * candidate's title tokens (topic's, without a title) occur in it; a shorter
- * form matches only when its token set EQUALS the candidate's title or topic
- * token set (D19 1: «Prompt caching» is the page, «Claude Code» is not
- * «Claude Code best practices»).
+ * form only when its token set EQUALS the candidate's title or topic token set.
  */
 function scoreForm(title: string, variant: TitleVariant, c: Pick<LinkCandidate, "title" | "topic">): TitleScore {
   const page = titleTokens(title);
+  const cTitle = titleTokens(c.title ?? "");
   const a = share(page, new Set(titleTokens(`${c.title ?? ""} ${c.topic}`)));
   const b = share(candidateKeyTokens(c), new Set(page));
-  const matched =
-    page.length >= 3
-      ? a >= 0.6 && b >= 0.5
-      : page.length > 0 && (sameSet(page, titleTokens(c.title ?? "")) || sameSet(page, titleTokens(c.topic)));
-  return { title, variant, a, b, pageTokens: page.length, matched };
+  const titleEqual = variant !== "prefix" && page.length > 0 && sameSet(page, cTitle);
+  const twoWay =
+    page.length >= 3 ? a >= 0.6 && b >= 0.5 : page.length > 0 && (sameSet(page, cTitle) || sameSet(page, titleTokens(c.topic)));
+  return { title, variant, a, b, pageTokens: page.length, titleEqual, twoWay };
 }
 
 /**
- * The best {@link pageTitleVariants} form: a matching form other than the
- * prefix first, then a matching prefix (which {@link judgePage} honours only
- * after a passed author check, D19 4), else the form with the highest `a + b`.
+ * The deciding {@link pageTitleVariants} form: the first form whose tokens
+ * equal the candidate's title, then the first whose two-way score holds (the
+ * prefix alone last), else the form with the highest `a + b`.
  */
 export function scoreTitle(pageTitle: string, c: Pick<LinkCandidate, "title" | "topic">, ctx: TitleContext = {}): TitleScore {
-  let best: TitleScore | null = null;
-  let prefix: TitleScore | null = null;
-  for (const { title, variant } of pageTitleVariants(pageTitle, ctx)) {
-    const score = scoreForm(title, variant, c);
-    if (score.matched && variant !== "prefix") return score;
-    if (score.matched) prefix ??= score;
-    else if (!best || score.a + score.b > best.a + best.b) best = score;
-  }
-  return prefix ?? best ?? scoreForm("", "whole", c);
+  const scores = pageTitleVariants(pageTitle, ctx).map(({ title, variant }) => scoreForm(title, variant, c));
+  return (
+    scores.find((s) => s.titleEqual) ??
+    scores.find((s) => s.twoWay && s.variant !== "prefix") ??
+    scores.find((s) => s.twoWay) ??
+    scores.reduce<TitleScore | null>((best, s) => (!best || s.a + s.b > best.a + best.b ? s : best), null) ??
+    scoreForm("", "whole", c)
+  );
 }
 
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /**
- * A github.com repo root's score (D19 2): matched when the candidate's title or
- * topic carries the repo name as a whole token sequence (`nanoGPT`,
- * `claude-code` → `claude code`). A candidate naming `owner/repo` in any case
- * always does: tokens split on `/` and are lowercased. `a` and `b` are the
- * ordinary score of `owner/repo`, for the record.
+ * Whether the candidate's title or topic names `ownerRepo` VERBATIM (D20 2):
+ * the whole `owner/repo` string, any case, optionally after `github.com/` (with
+ * or without a scheme and `www.`) and before `.git`. The bare repo name never
+ * counts: «the Ollama Python library» is not `ollama/ollama`.
  */
-export function scoreRepo(ownerRepo: string, c: Pick<LinkCandidate, "title" | "topic">): TitleScore {
-  const seq = tokenList(ownerRepo.split("/")[1] ?? "");
-  const hasSeq = (text: string) => {
-    const t = tokenList(text);
-    return seq.length > 0 && t.some((_, i) => seq.every((s, j) => t[i + j] === s));
-  };
-  return { ...scoreForm(ownerRepo, "repo", c), matched: [c.title ?? "", c.topic].some(hasSeq) };
+export function namesRepo(ownerRepo: string, c: Pick<LinkCandidate, "title" | "topic">): boolean {
+  const re = new RegExp(
+    `(?:^|[^\\w./-])(?:(?:https?://)?(?:www\\.)?github\\.com/)?${escapeRe(ownerRepo)}(?:\\.git)?(?![\\w-]|\\.[\\w-]|/[\\w.-])`,
+    "i",
+  );
+  return [c.title ?? "", c.topic].some((t) => re.test(t));
 }
 
 // --- HTML reading ------------------------------------------------------------
@@ -290,12 +293,13 @@ function metaContents(html: string, keys: readonly string[]): string[] {
   return out;
 }
 
-/** First path segments that are GitHub's own pages, never an owner (D19 2). */
+/** First path segments that are GitHub's own pages, never an owner. */
 const GITHUB_RESERVED = new Set([
-  "about", "account", "apps", "codespaces", "collections", "contact", "customer-stories", "dashboard", "enterprise",
-  "events", "explore", "features", "issues", "join", "login", "logout", "marketplace", "new", "notifications",
-  "organizations", "orgs", "pricing", "pulls", "readme", "search", "security", "sessions", "settings", "signup",
-  "site", "solutions", "sponsors", "stars", "team", "topics", "trending", "users", "watching", "resources",
+  "about", "account", "advisories", "apps", "codespaces", "collections", "contact", "customer-stories", "dashboard",
+  "education", "enterprise", "events", "explore", "features", "git-guides", "issues", "join", "login", "logout",
+  "marketplace", "new", "notifications", "open-source", "organizations", "orgs", "pricing", "pulls", "readme",
+  "search", "security", "sessions", "settings", "signup", "site", "solutions", "sponsors", "stars", "team", "topics",
+  "trending", "users", "watching", "resources",
 ]);
 
 /** `owner/repo` when `url` is a github.com REPO ROOT (`/owner/repo`, optionally `/`), else `null`: a deeper path or a GitHub page is no repo. */
@@ -350,7 +354,9 @@ function jsonLdAuthors(html: string): string[] {
       for (const x of Object.values(v)) walk(x, depth + 1);
     }
   };
-  for (const m of html.matchAll(/<script\b[^>]*\btype\s*=\s*["']?application\/ld\+json["']?[^>]*>([\s\S]*?)<\/script\s*>/gi)) {
+  // A commented-out block is no byline: comments go first, as in metaMarkup.
+  const markup = html.replace(/<!--[\s\S]*?-->/g, " ");
+  for (const m of markup.matchAll(/<script\b[^>]*\btype\s*=\s*["']?application\/ld\+json["']?[^>]*>([\s\S]*?)<\/script\s*>/gi)) {
     try {
       walk(JSON.parse(m[1]!), 0);
     } catch {
@@ -370,7 +376,8 @@ function siteName(html: string): string {
 }
 
 const GENERATIONAL = /^(?:jr|sr|ii|iii|iv)\.?$/i;
-const DEGREE = /^(?:ph\.?d|m\.?d|d\.?phil|ed\.?d|j\.?d|mba|m\.?sc|b\.?sc|m\.?a|b\.?a|m\.?s|dds|esq|cpa|frs)\.?$/i;
+/** A trailing degree. The two-letter ones need their dots: Ma, Ba and Ms are surnames too (Yi Ma, Jack Ma, Lisa Ba). */
+const DEGREE = /^(?:ph\.?d|m\.?d|d\.?phil|ed\.?d|j\.?d|mba|m\.?sc|b\.?sc|m\.a|b\.a|m\.s|dds|esq|cpa|frs)\.?$/i;
 
 /** A handle's name: `@user@instance` → `user`, `name.bsky.social` → `name`, a leading `@` dropped. */
 function handleName(word: string): string {
@@ -505,67 +512,63 @@ export function parseCandidates(raw: string): LinkCandidate[] | null {
   return list.map(coerceCandidate).filter((c): c is LinkCandidate => c !== null).slice(0, FIND_LINKS_MAX_CANDIDATES);
 }
 
-/** A title a link in the summary carries: its anchor text when it has words, else the URL's own name. */
-function linkedTitles(url: string, linkText: string | undefined): string[] {
-  const out: string[] = [];
-  if (linkText && titleTokens(linkText).some((t) => /\p{L}/u.test(t))) out.push(linkText);
-  const repo = githubOwnerRepo(url);
-  if (repo) out.push(`github.com/${repo}`);
-  else {
-    try {
-      const seg = new URL(url).pathname.split("/").filter(Boolean).at(-1);
-      if (seg) out.push(decodeURIComponentSafe(seg).replace(/\.[a-z0-9]{1,5}$/i, "").replace(/[-_+]+/g, " "));
-    } catch {
-      // not a URL: nothing to add
-    }
-  }
-  return out;
-}
-
-function decodeURIComponentSafe(s: string): string {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
-}
-
 /**
- * The titles of the links a stored body already carries outside its
- * `## Links` section (inline markdown links and bare URLs, a fact-check block's
- * citations included): anchor text, and the URL's `github.com/owner/repo`
- * (a repo root) or last path segment.
+ * The anchor texts of the markdown links a stored body carries outside its
+ * `## Links` section (a fact-check block's citations included). A bare URL has
+ * none: the candidate filter compares titles, never a URL's last segment.
  */
-export function inlineLinkTitles(storedBody: string): string[] {
+export function inlineAnchorTexts(storedBody: string): string[] {
   const body = splitLinksSection(storedBody).body;
-  return body.split("\n").flatMap((line) => extractLineUrls(line).flatMap((u) => linkedTitles(u.url, u.linkText)));
+  return body.split("\n").flatMap((line) => extractLineUrls(line).flatMap((u) => (u.linkText ? [u.linkText] : [])));
 }
 
 /**
- * Whether `title` (an existing line's, or a link's) already names this
- * candidate: the label's score without the prefix-alone form, and the repo rule
- * for a `github.com/owner/repo` title. A convenience filter only — the search
- * drops a result by URL ({@link carriedUrlKeys}).
+ * Whether one of `titles` (the `## Links` lines' titles, or the body's anchor
+ * texts) names this candidate EXACTLY (D20 filter i): its token set equals the
+ * candidate's TITLE token set. A candidate with no title is never dropped this
+ * way, and no score is involved: «Claude 4 Best Practices» does not hide
+ * «Claude Code Best Practices».
  */
 export function candidateIsListed(c: LinkCandidate, titles: readonly string[]): boolean {
-  return titles.some((t) => {
-    const repo = /^github\.com\/([^/\s]+\/[^/\s]+)\/?$/i.exec(t.trim())?.[1];
-    if (repo && scoreRepo(repo, c).matched) return true;
-    const s = scoreTitle(t, c);
-    return s.matched && s.variant !== "prefix";
-  });
+  const own = titleTokens(c.title ?? "");
+  return own.length > 0 && titles.some((t) => sameSet(titleTokens(t), own));
+}
+
+/** A URL inside a candidate's text with no scheme: a host with a path (`github.com/obra/superpowers`), never a bare host (`rea.tools`, `Node.js`). */
+const SCHEMELESS_URL_RE = /(?<![\w@/.-])((?:[a-z0-9-]+\.)+[a-z]{2,}\/[^\s<>()[\]"'`,;]*[^\s<>()[\]"'`,;.!?:])/gi;
+
+/** The URL keys of the URLs a candidate's own title and topic carry, with or without a scheme. */
+export function candidateUrlKeys(c: Pick<LinkCandidate, "title" | "topic">): string[] {
+  const keys = new Set<string>();
+  for (const text of [c.title ?? "", c.topic]) {
+    for (const u of extractLineUrls(text)) keys.add(linkUrlKey(u.url));
+    for (const m of text.replace(/https?:\/\/\S+/gi, " ").matchAll(SCHEMELESS_URL_RE)) keys.add(linkUrlKey(`https://${m[1]}`));
+  }
+  return [...keys];
+}
+
+/** Whether a URL the candidate itself names is in `carried` (D20 filter ii). */
+export function candidateUrlCarried(c: Pick<LinkCandidate, "title" | "topic">, carried: ReadonlySet<string>): boolean {
+  return candidateUrlKeys(c).some((k) => carried.has(k));
+}
+
+/** The URL keys the body carries OUTSIDE its `## Links` section: inline markdown links and bare URLs. */
+export function bodyUrlKeys(storedBody: string): Set<string> {
+  const keys = new Set<string>();
+  for (const line of splitLinksSection(storedBody).body.split("\n")) {
+    for (const u of extractLineUrls(line)) keys.add(linkUrlKey(u.url));
+  }
+  return keys;
 }
 
 /**
- * The URL keys ({@link linkUrlKey}) a stored body already carries (D19 9): its
+ * The URL keys ({@link linkUrlKey}) a stored body already carries: its
  * `## Links` section's lines, and every inline markdown link and bare URL in
  * the rest of the body. A search result at one of them is never shown.
  */
 export function carriedUrlKeys(storedBody: string): Set<string> {
   const keys = storedLinks(storedBody).urlKeys;
-  for (const line of splitLinksSection(storedBody).body.split("\n")) {
-    for (const u of extractLineUrls(line)) keys.add(linkUrlKey(u.url));
-  }
+  for (const k of bodyUrlKeys(storedBody)) keys.add(k);
   return keys;
 }
 
@@ -648,8 +651,10 @@ export interface PageVerdict {
   /** The title a stored line carries: the page title, its suffix stripped only when that is the site's name (`""` for a PDF). */
   readonly lineTitle: string;
   readonly score: TitleScore | null;
-  /** `ran` only on a page with ≥ 500 characters of visible text and a known author. */
+  /** `passed`/`failed` only on a page with ≥ 500 characters of visible text and a known author. */
   readonly authorCheck: "passed" | "failed" | "skipped" | "no_author";
+  /** Which D20 clause made it `matched`: `title` (1), `repo` (2), `author` (3); `null` when not matched. */
+  readonly evidence: "title" | "repo" | "author" | null;
 }
 
 /** The page's host, or `""`. */
@@ -666,36 +671,49 @@ const normalizeApostrophes = (s: string) => s.replace(/[‘’]/g, "'");
 /**
  * The label a resolved page earns (`label: null` is not found, not shown):
  * - `unread` — a PDF (`text: null`), whose body was never read;
- * - `matched` — the D19 score holds ({@link scoreRepo} on a github.com repo
- *   root, else {@link scoreTitle}) and the author check did not fail (it runs
- *   only with a known author on a page with ≥ {@link AUTHOR_CHECK_MIN_TEXT}
- *   characters of visible text); a match by the colon PREFIX alone needs the
- *   check to have run and passed (D19 4);
- * - `reachable` — the agent's quote is on the page.
+ * - `matched` — exact evidence (D20), and never with a failed author check:
+ *   1. `title`: a form other than the prefix alone ({@link scoreTitle}) whose
+ *      tokens equal the candidate's title tokens;
+ *   2. `repo`: a github.com repo root the candidate names as `owner/repo`
+ *      ({@link namesRepo}) — the only way a repo root matches;
+ *   3. `author`: the D18 two-way score holds on some form, the prefix alone
+ *      included, AND the author check ran and passed (it runs only with a
+ *      known author on a page with ≥ {@link AUTHOR_CHECK_MIN_TEXT} characters
+ *      of visible text);
+ * - `reachable` — anything else whose page carries the agent's quote.
  */
 export function judgePage(c: LinkCandidate, page: SafePage, quote: string): PageVerdict {
-  if (page.text === null) return { label: "unread", pageTitle: "", lineTitle: "", score: null, authorCheck: "skipped" };
+  if (page.text === null) return { label: "unread", pageTitle: "", lineTitle: "", score: null, authorCheck: "skipped", evidence: null };
   const html = page.text;
   const text = pageVisibleText(html);
   const repo = githubOwnerRepo(page.finalUrl);
   const pageTitle = extractPageTitle(html, page.finalUrl);
   const ctx: TitleContext = { siteName: siteName(html), host: hostOf(page.finalUrl) };
-  const score = repo ? scoreRepo(repo, c) : scoreTitle(pageTitle, c, ctx);
+  const score = repo ? scoreForm(repo, "repo", c) : scoreTitle(pageTitle, c, ctx);
   const lineTitle = repo ?? lineTitleOf(pageTitle, ctx);
   const surname = authorSurname(c.author);
   let authorCheck: PageVerdict["authorCheck"] = "no_author";
   if (surname) {
     if (text.length < AUTHOR_CHECK_MIN_TEXT) authorCheck = "skipped";
     else {
-      const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])${surname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[^\\p{L}\\p{N}])`, "iu");
+      const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escapeRe(surname)}(?:$|[^\\p{L}\\p{N}])`, "iu");
       authorCheck = re.test(normalizeApostrophes(`${text} ${pageBylines(html).join(" ")}`)) ? "passed" : "failed";
     }
   }
-  const matched = score.matched && authorCheck !== "failed" && (score.variant !== "prefix" || authorCheck === "passed");
-  if (matched) return { label: "matched", pageTitle, lineTitle, score, authorCheck };
+  const evidence: PageVerdict["evidence"] =
+    authorCheck === "failed"
+      ? null
+      : repo
+        ? namesRepo(repo, c) ? "repo" : null
+        : score.titleEqual
+          ? "title"
+          : score.twoWay && authorCheck === "passed"
+            ? "author"
+            : null;
+  if (evidence) return { label: "matched", pageTitle, lineTitle, score, authorCheck, evidence };
   const q = normalizeForQuote(quote);
   const label = q.length >= MIN_QUOTE_CHARS && normalizeForQuote(text).includes(q) ? "reachable" : null;
-  return { label, pageTitle, lineTitle, score, authorCheck };
+  return { label, pageTitle, lineTitle, score, authorCheck, evidence: null };
 }
 
 /** One verified result, as the panel shows it and the save writes it. */
@@ -721,9 +739,11 @@ export function foundLinkFrom(c: LinkCandidate, page: SafePage, _entry: Manifest
   // The candidate's author names a page only when that page IS the candidate
   // (matched) and the author check found them on it.
   const named = verdict.label === "matched" && verdict.authorCheck === "passed";
-  const detail = [html ? siteName(html) : "", named ? (c.author ?? "") : ""]
-    .filter((p) => p !== "")
-    .join(", ");
+  const site = html ? siteName(html) : "";
+  const author = named ? (c.author ?? "") : "";
+  // A personal site's og:site_name is often the author's own name: say it once.
+  const sameName = site !== "" && author !== "" && sameSet(titleTokens(site), titleTokens(author));
+  const detail = [site, sameName ? "" : author].filter((p) => p !== "").join(", ");
   return { url: page.finalUrl, title, detail, label: verdict.label };
 }
 
