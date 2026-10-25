@@ -117,6 +117,7 @@ import {
 import { FRAME_BUDGET_MAX, summarizeTimeoutFor } from "../../video/media.ts";
 import { youtubeWatchUrl } from "../../youtube/frames.ts";
 import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../../youtube/prompt.ts";
+import { appendLinksSection, splitLinksSection } from "../../summaries/links-section.ts";
 import { finishYouTubeSummary } from "../../youtube/finish.ts";
 import { buildVimeoSystemPrompt, buildVimeoUserPrompt } from "../../vimeo/prompt.ts";
 import { finishVimeoSummary } from "../../vimeo/finish.ts";
@@ -694,6 +695,13 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
       });
     }
 
+    // The stored `## Links` section is carried over UNCHANGED (plan D8), on
+    // every vertical: the re-run has no description to rebuild it from, and a
+    // reader may have added lines to it. It goes back as the new summary's last
+    // block — summary · Visual reference · Links — and on Vimeo, whose
+    // transcript rides huginn's `body_suffix`, it is part of the summary string.
+    const summary = appendLinksSection(finished.summary, splitLinksSection(stored.body).section);
+
     store.updateStatus(jobId, "ingesting");
     // The shared save (`src/summaries/summary-save.ts`): the claim this route
     // took before the model call, the stored fields re-sent, the new kind
@@ -702,7 +710,7 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
       descriptor: vertical,
       stored,
       docId: input.docId,
-      summary: finished.summary,
+      summary,
       summaryKind: preset.id,
       claim: input.claim,
       knowledgeApiUrl: input.config.knowledgeApiUrl,
@@ -731,7 +739,7 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
     // re-run calls no summarizer, and drafting a second wiki proposal for a
     // document that already has one is a duplicate the gate has to reject by
     // hand.
-    store.completeJob(jobId, finished.summary, category);
+    store.completeJob(jobId, summary, category);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error("Re-run {jobId} of {docId} failed: {error}", { jobId, docId: input.docId, error: message });

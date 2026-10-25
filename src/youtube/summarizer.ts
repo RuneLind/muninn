@@ -16,6 +16,15 @@ import {
 import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "./prompt.ts";
 import { finishYouTubeSummary } from "./finish.ts";
 import { fetchYouTubeOembedAuthor, probeAuthor, youtubeVideoFields } from "./metadata.ts";
+import { YOUTUBE_FRAMES_OFF_PROBE_TIMEOUT_MS, probeYouTubeVideo, type YouTubeProbe } from "./probe.ts";
+import {
+  classifyDescriptionLinks,
+  descriptionForPrompt,
+  isPromoClass,
+  linkCandidates,
+  type DescriptionLink,
+} from "./description-links.ts";
+import { bodyUrlCounts, prepareLinksAnswer } from "../summaries/links-section.ts";
 import {
   captureBotConfigFor,
   captureThinkingFor,
@@ -59,11 +68,9 @@ import {
 } from "./scan-run.ts";
 import {
   downloadVideo as realDownloadVideo,
-  probeVideoInfo as realProbeVideoInfo,
   summarizeTimeoutFor,
   type DownloadOptions,
   type DownloadResult,
-  type YtDlpInfo,
 } from "../video/media.ts";
 import {
   YOUTUBE_FRAMES_MAX_DURATION_SEC,
@@ -154,8 +161,12 @@ export type YouTubeScanOutcome =
   | "regrab_failed";
 
 export interface YouTubeSummarizerDeps {
-  /** yt-dlp metadata probe — the duration everything on the frames path is sized from. */
-  probeVideoInfo: (url: string, opts: { timeoutMs?: number }) => Promise<YtDlpInfo | null>;
+  /**
+   * The vertical's one yt-dlp metadata probe (`probeYouTubeVideo`) — the
+   * duration everything on the frames path is sized from, the uploader and
+   * dates the ingest carries, and the DESCRIPTION the links come from.
+   */
+  probeVideoInfo: (url: string, opts: { timeoutMs?: number }) => Promise<YouTubeProbe | null>;
   downloadVideo: (url: string, workDir: string, opts: DownloadOptions) => Promise<DownloadResult>;
   /** oEmbed `author_name`, or `undefined` on any failure — asked only when the probe named nobody. */
   fetchAuthor: (videoId: string) => Promise<string | undefined>;
@@ -199,7 +210,7 @@ export interface YouTubeSummarizerDeps {
 }
 
 const REAL_DEPS: YouTubeSummarizerDeps = {
-  probeVideoInfo: (url, opts) => realProbeVideoInfo(url, opts),
+  probeVideoInfo: (url, opts) => probeYouTubeVideo(url, opts),
   downloadVideo: (url, workDir, opts) => realDownloadVideo(url, workDir, opts),
   fetchAuthor: (videoId) => fetchYouTubeOembedAuthor(videoId),
   extractFrames: ({ file, durationSec, outDir }) =>
@@ -424,7 +435,20 @@ export async function summarizeVideo(
     let framesOutcome: FramesOutcome = "off";
     let durationSec = 0;
     /** The probe's answer, kept for the ingest's `author`/`upload_date`/`duration_sec`. */
-    let probe: YtDlpInfo | null = null;
+    let probe: YouTubeProbe | null = null;
+    /**
+     * The frames-OFF probe, started now and awaited after the transcript fetch.
+     * OUTSIDE `framesQueue` on purpose: it is a ~3 s metadata call, and queueing
+     * it would make a frames-off capture wait behind another capture's download.
+     * The 10 s bound keeps a hung yt-dlp from holding the capture; any failure
+     * is `null`, which is today's capture. Unbounded in number, short-lived.
+     */
+    let framesOffProbe: Promise<YouTubeProbe | null> | null = null;
+    if (opts.frames !== true) {
+      framesOffProbe = Promise.resolve()
+        .then(() => resolved.probeVideoInfo(videoUrl, { timeoutMs: YOUTUBE_FRAMES_OFF_PROBE_TIMEOUT_MS }))
+        .catch(() => null);
+    }
     if (opts.frames === true) {
       // In the frames queue: a probe is a yt-dlp process too.
       probe = await framesQueue.run(FRAMES_QUEUE_KEY, () =>
@@ -446,16 +470,15 @@ export async function summarizeVideo(
       }
     }
 
-    // oEmbed's `author`, started NOW so its ≤5 s runs beside the transcript
-    // fetch and the model call instead of after them — and only when no probe
-    // named the uploader. `.then`/`.catch` so neither a synchronous throw nor a
-    // rejection from an injected dep can fail the capture: it omits the key.
-    const oembedAuthor: Promise<string | undefined> =
-      probeAuthor(probe) === undefined
-        ? Promise.resolve()
-            .then(() => resolved.fetchAuthor(videoId))
-            .catch(() => undefined)
-        : Promise.resolve(undefined);
+    // oEmbed's `author`, started as soon as the probe has answered so its ≤5 s
+    // runs beside the transcript fetch and the model call instead of after them
+    // — and only when no probe named the uploader. On a frames-off capture it
+    // chains on the probe promise. `.then`/`.catch` so neither a synchronous
+    // throw nor a rejection from an injected dep can fail the capture: it omits
+    // the key.
+    const oembedAuthor: Promise<string | undefined> = (framesOffProbe ?? Promise.resolve(probe))
+      .then((p) => (probeAuthor(p) === undefined ? resolved.fetchAuthor(videoId) : undefined))
+      .catch(() => undefined);
 
     // 1. Fetch transcript
     const controller = new AbortController();
@@ -510,6 +533,17 @@ export async function summarizeVideo(
       length: transcriptText.length,
       timestamped,
     });
+
+    if (framesOffProbe !== null) probe = await framesOffProbe;
+    // The description's links, classified once (`description-links.ts`): what
+    // the prompt shows, what the `## Links` section may hold, what is counted.
+    const description = probe?.description?.trim() ?? "";
+    const descriptionLinks: DescriptionLink[] | undefined =
+      description === "" ? undefined : classifyDescriptionLinks(description, probe?.uploader ?? "");
+    const candidates = descriptionLinks === undefined ? [] : linkCandidates(descriptionLinks);
+    const descriptionUrls = new Set((descriptionLinks ?? []).map((l) => l.url));
+    const bodyUrlAttrs = (raw: string): Record<string, number> =>
+      bodyUrlCounts(prepareLinksAnswer(raw).text, descriptionUrls);
 
     // The model the kind asks for — `deep` swaps in `CAPTURE_DEEP_MODEL`, every
     // other kind keeps the bot's own. Resolved BEFORE `runCaptureOneShot`, which
@@ -896,6 +930,10 @@ export async function summarizeVideo(
       windowed: timestamped,
       title,
       videoUrl,
+      // The `LINKS:` step only where there is a list to pick from: with no
+      // description, or one with no source/repo/candidate URL, the system prompt
+      // is byte-identical to the one before links existed.
+      ...(candidates.length > 0 ? { linksStep: true } : {}),
     });
 
     // Whether this call INHERITS the bot's own thinking budget instead of the
@@ -938,7 +976,14 @@ export async function summarizeVideo(
       // byte-identical to the one that shipped before slides existed. The
       // composition is `./prompt.ts` — see `buildYouTubeUserPrompt` for why the
       // policy is built only where frames came out.
-      prompt: buildYouTubeUserPrompt(transcriptText, { videoId, frames, visualDetail }),
+      prompt: buildYouTubeUserPrompt(transcriptText, {
+        videoId,
+        frames,
+        visualDetail,
+        ...(descriptionLinks !== undefined
+          ? { description: { text: descriptionForPrompt(description, descriptionLinks), candidates } }
+          : {}),
+      }),
       systemPrompt,
       config,
       botConfig: runBot,
@@ -949,6 +994,9 @@ export async function summarizeVideo(
       // before.
       timeoutMs: synthesisTimeoutMs ?? summarizeTimeoutFor(frames.length, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS),
       ...(inheritThinking ? { thinkingMaxTokens: null } : {}),
+      // URLs the model wrote into its prose, counted on the root: how many, and
+      // how many the description never listed (the invented-URL signal).
+      rootFinishAttrs: (text) => bodyUrlAttrs(text),
       // Only on the two-pass path — everywhere else the seam opens and finishes
       // its own root, exactly as it always has.
       ...(parentTracer ? { parentTracer } : {}),
@@ -968,6 +1016,12 @@ export async function summarizeVideo(
         scanSamples: String(scanSamples),
         scanCandidates: String(scanCandidates),
         scanSheets: String(scanSheets),
+        // What the description gave the links step: `absent` with no probe or
+        // an empty description.
+        description: descriptionLinks === undefined ? "absent" : "present",
+        linkSources: String(candidates.filter((c) => c.cls === "source").length),
+        linkCandidates: String(candidates.filter((c) => c.cls !== "source").length),
+        linkPromo: String((descriptionLinks ?? []).filter((l) => isPromoClass(l.cls)).length),
       },
     });
     addUsage(result);
@@ -975,7 +1029,7 @@ export async function summarizeVideo(
     // spend summed, so a two-pass trace does not report the summary call's cost
     // as the whole job's. A no-op on every single-pass capture, where
     // `parentTracer` was never set and the seam has already finished its own.
-    finishParent("ok", { source: "youtube", model: result.model, ...passUsage });
+    finishParent("ok", { source: "youtube", model: result.model, ...passUsage, ...bodyUrlAttrs(result.result) });
 
     // 3. The post-model tail: parse the envelope, hold the summary's frame
     //    references to this capture's own manifest and this policy's caps, copy
@@ -990,6 +1044,7 @@ export async function summarizeVideo(
       visualDetail,
       ...(resolved.framesRoot !== undefined ? { framesRoot: resolved.framesRoot } : {}),
       onCategory: (c) => setCategory(jobId, c),
+      ...(descriptionLinks !== undefined ? { links: descriptionLinks } : {}),
     });
     const { summary, category } = finished;
     const keptFrames = finished.kept;
@@ -1050,6 +1105,13 @@ export async function summarizeVideo(
         // quoted, and the difference between the two is what the summary turned
         // down after reading the frames properly.
         selectionManifest: JSON.stringify(selection),
+        // The `## Links` step: the model's pick, what landed, what was counted.
+        description: descriptionLinks === undefined ? "absent" : "present",
+        linksPick: finished.links === null ? null : JSON.stringify(finished.links.pick),
+        linksSources: finished.links?.sources ?? 0,
+        linksPicked: finished.links?.picked.join(",") ?? "",
+        linksOmitted: finished.links?.omitted ?? 0,
+        linksSection: finished.links?.section ?? null,
       },
     );
 

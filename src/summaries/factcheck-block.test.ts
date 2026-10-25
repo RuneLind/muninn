@@ -194,3 +194,43 @@ describe("summaryCheckedRanges", () => {
     expect(ranges.map((r) => body.slice(r.start, r.end))).toEqual(["Intro.\n\n", "> 💬 **Takeaway:** T."]);
   });
 });
+
+describe("the `## Links` section (D14)", () => {
+  const LINKS =
+    "## Links\n\n- 📄 [A study](https://study.example/s) — Lab, A. Person · from description\n\n" +
+    "_2 creator and social links in the description are not listed._";
+  /** The raw file with a Links section where the capture writes it: last block before `## Transcript`. */
+  function withLinks(raw: string): string {
+    const at = raw.indexOf("\n## Transcript");
+    return at < 0 ? `${raw.trimEnd()}\n\n${LINKS}\n` : `${raw.slice(0, at).trimEnd()}\n\n${LINKS}\n${raw.slice(at)}`;
+  }
+
+  for (const [name, shape] of Object.entries(SHAPES)) {
+    test(`adding the section never moves the checked text — ${name}`, () => {
+      expect(checkedTextOfRaw(withLinks(shape.raw))).toBe(checkedTextOfRaw(shape.raw));
+      expect(checkedTextOfRaw(withLinks(shape.raw))).not.toContain("study.example");
+    });
+
+    test(`Add on a document with links keeps the hash and lands above the section — ${name}`, () => {
+      const written = addThroughWritePath(shape.source, withLinks(shape.raw));
+      expect(checkedTextOfRaw(written)).toBe(checkedTextOfRaw(shape.raw));
+      expect(written.indexOf("## Fact check")).toBeLessThan(written.indexOf("## Links"));
+      expect(written).toContain(LINKS);
+    });
+  }
+
+  test("insert goes above `## Links` with no visual reference, and above the visual reference when both", () => {
+    const block = buildSummaryFactcheckBlock(ANSWER, "2026-10-06");
+    const onlyLinks = insertSummaryFactcheckBlock(`Intro.\n\n${LINKS}`, block);
+    expect(onlyLinks.indexOf("Intro.")).toBeLessThan(onlyLinks.indexOf("## Fact check"));
+    expect(onlyLinks.indexOf("## Fact check")).toBeLessThan(onlyLinks.indexOf("## Links"));
+    expect(stripSummaryFactcheckBlock(onlyLinks)).toBe(`Intro.\n\n${LINKS}`);
+    const both = insertSummaryFactcheckBlock(`Intro.\n\n## Visual reference\n\n![a](f/1.jpg) Cap.\n\n${LINKS}`, block);
+    expect(both.indexOf("## Fact check")).toBeLessThan(both.indexOf("## Visual reference"));
+  });
+
+  test("the checked ranges skip the section", () => {
+    const body = `Intro.\n\n${LINKS}`;
+    expect(summaryCheckedRanges(body).map((r) => body.slice(r.start, r.end))).toEqual(["Intro.\n\n"]);
+  });
+});

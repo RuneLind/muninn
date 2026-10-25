@@ -226,7 +226,17 @@ test.describe("Summaries: the capture-prompt matrix", () => {
     const pieceIds = await deep
       .locator(".pm-system .pm-piece")
       .evaluateAll((els) => els.map((e) => e.getAttribute("data-piece")));
-    expect(pieceIds).toEqual(["intro", "envelope", "structure", "rider-windowed", "context"]);
+    // The placeholder description leaves links to pick, so the `LINKS:` step
+    // sits between the CATEGORY step and the SUMMARY half of the envelope.
+    expect(pieceIds).toEqual([
+      "intro",
+      "envelope",
+      "links-step",
+      "envelope-summary",
+      "structure",
+      "rider-windowed",
+      "context",
+    ]);
     // …and the spans really are the prompt: their concatenation is the whole text.
     const joined = await deep.locator(".pm-system .pm-piece").evaluateAll((els) => els.map((e) => e.textContent).join(""));
     expect(joined).toBe(await deep.locator(".pm-system").textContent());
@@ -238,6 +248,8 @@ test.describe("Summaries: the capture-prompt matrix", () => {
     expect(drawerText).toContain("### [00:02:00]");
     expect(drawerText).toContain("/tmp/muninn-capture-placeholder/frames/60.jpg — chart:");
     expect(drawerText).toContain("<takeaway>");
+    expect(drawerText).toContain("## Video description");
+    expect(drawerText).toContain("## Links in the description");
 
     // No file on disk yet.
     await expect(deep.locator("[data-override]")).toHaveText("not present");
@@ -273,6 +285,8 @@ test.describe("Summaries: the capture-prompt matrix", () => {
 
     // A skeleton is only honest if it says which branch it took.
     await expect(page.locator('[data-fixed="youtube"]')).toContainText("windowed transcript: yes");
+    await expect(page.locator('[data-fixed="youtube"]')).toContainText("description: present");
+    await expect(page.locator('[data-fixed="youtube"]')).toContainText("links list: present");
     await expect(page.locator('[data-fixed="vimeo"]')).toContainText("captions: auto-generated");
     await expect(page.locator('[data-fixed="vimeo"]')).toContainText("output language: English");
     await expect(page.locator('[data-fixed="anthropic"]')).toContainText("framing: Anthropic release");
@@ -449,9 +463,12 @@ test.describe("Summaries: the capture-prompt matrix", () => {
         "badge-off",
         "context",
         "envelope",
+        // YouTube's SUMMARY half of the envelope and its `LINKS:` step.
+        "envelope-summary",
         // The short-video slots' own spans, which arrived with the merge.
         "instructions",
         "intro",
+        "links-step",
         "no-commentary",
         "read-frames",
         "rider-auto-caption",

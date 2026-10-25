@@ -4,7 +4,7 @@
  *
  * The checked text is the SUMMARY: the source file (frontmatter already
  * stripped by `readSummarySourceText`) cut at `## Transcript`, minus a YouTube
- * `## Visual reference` appendix SECTION. The section is `findAppendixSection`'s
+ * `## Visual reference` appendix SECTION and minus the `## Links` section. The section is `findAppendixSection`'s
  * (it ends at the next heading of its level) and ALSO ends at the closing
  * `> 💬 **Takeaway:**` block, which is the summary's own claim even when the
  * model put it under the appendix — no heading separates them. A transcript is what
@@ -20,6 +20,7 @@ import { splitClosingTakeaway } from "./takeaway-check.ts";
 import { stripSummaryFactcheckBlock } from "./factcheck-block.ts";
 import { sourceTextOfRaw } from "./source-text.ts";
 import { sha256 } from "../gardener/util.ts";
+import { findLinksSection } from "./links-section.ts";
 
 /** A `[start, end)` range of a transcript-less summary body. */
 export interface CheckedRange {
@@ -35,6 +36,10 @@ export interface CheckedRange {
  * RAW body and splices each back on its own (D12).
  */
 export function summaryCheckedRanges(body: string): CheckedRange[] {
+  return withoutLinksSection(body, appendixRanges(body));
+}
+
+function appendixRanges(body: string): CheckedRange[] {
   const appendix = findAppendixSection(body, markdownCodeRegions(body));
   if (!appendix) return [{ start: 0, end: body.length }];
   const closer = splitClosingTakeaway(body);
@@ -43,6 +48,28 @@ export function summaryCheckedRanges(body: string): CheckedRange[] {
   return end < body.length
     ? [{ start: 0, end: appendix.start }, { start: end, end: body.length }]
     : [{ start: 0, end: appendix.start }];
+}
+
+/**
+ * The ranges minus the `## Links` section (D14): link lines are third-party
+ * titles, not the summary's claims, and a Links write must never move the
+ * checked-text hash. A range left holding only whitespace is dropped.
+ */
+function withoutLinksSection(body: string, ranges: CheckedRange[]): CheckedRange[] {
+  const links = findLinksSection(body);
+  if (!links) return ranges;
+  const out: CheckedRange[] = [];
+  for (const r of ranges) {
+    const parts =
+      links.end <= r.start || links.start >= r.end
+        ? [r]
+        : [
+            { start: r.start, end: Math.max(r.start, links.start) },
+            { start: Math.min(r.end, links.end), end: r.end },
+          ];
+    for (const p of parts) if (p.end > p.start && body.slice(p.start, p.end).trim() !== "") out.push(p);
+  }
+  return out.length > 0 ? out : [{ start: 0, end: 0 }];
 }
 
 export function summaryFactcheckBody(sourceText: string): string {

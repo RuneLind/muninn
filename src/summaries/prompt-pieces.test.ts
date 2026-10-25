@@ -241,10 +241,10 @@ Instructions:
   describe("the slot contract", () => {
     const ok = { id: "r", label: "R", text: "Do the thing." };
     /** Compose with one slot entry replaced by `bad`, in whichever slot. */
-    const withEntry = (slot: "before" | "after", bad: { id: string; label: string; text: string }) =>
+    const withEntry = (slot: "before" | "after" | "envelopeLines", bad: { id: string; label: string; text: string }) =>
       () => summarySystemPromptPieces("I.", ["a"], "- one", { [slot]: [bad] });
 
-    for (const slot of ["before", "after"] as const) {
+    for (const slot of ["before", "after", "envelopeLines"] as const) {
       test(`${slot}: empty text is refused`, () => {
         expect(withEntry(slot, { ...ok, text: "" })).toThrow(/no text/);
         expect(withEntry(slot, { ...ok, text: "   \n " })).toThrow(/no text/);
@@ -277,13 +277,14 @@ Instructions:
     });
 
     test("an id that collides with a piece the envelope itself emits is refused", () => {
-      for (const id of ["intro", "instructions", "envelope", "structure"]) {
+      for (const id of ["intro", "instructions", "envelope", "envelope-summary", "structure"]) {
         expect(withEntry("before", { ...ok, id })).toThrow(new RegExp(`duplicate piece id "${id}"`));
+        expect(withEntry("envelopeLines", { ...ok, id })).toThrow(new RegExp(`duplicate piece id "${id}"`));
       }
     });
 
     test("an empty id is refused — a span with no id is a span the page cannot tint", () => {
-      for (const slot of ["before", "after"] as const) {
+      for (const slot of ["before", "after", "envelopeLines"] as const) {
         expect(withEntry(slot, { ...ok, id: "" })).toThrow(/empty piece id/);
         expect(withEntry(slot, { ...ok, id: "  " })).toThrow(/empty piece id/);
       }
@@ -560,4 +561,96 @@ describe("the pieces each vertical contributes", () => {
     expect(bare).not.toContain("Article author:");
     expect(bare).not.toContain("Article URL:");
   });
+});
+
+describe("the envelopeLines slot (YouTube's LINKS: step)", () => {
+  const LINE = { id: "links-step", label: "LINKS: step", text: "Then add one LINKS line." };
+
+  test("the slotted shape is EXACTLY this: between CATEGORY and SUMMARY, numbered in sequence", () => {
+    expect(
+      joinPromptPieces(
+        summarySystemPromptPieces("Intro.", ["a"], "- one", {
+          envelopeLines: [LINE],
+          after: [{ id: "no-commentary", label: "N", text: "No commentary." }],
+        }),
+      ),
+    ).toBe(`Intro.
+
+Instructions:
+1. Start your response with EXACTLY this line: CATEGORY: <category>
+   Choose from: a
+2. Then add one LINKS line.
+3. Then add a blank line, then SUMMARY: on its own line
+4. Then write a structured summary with:
+   - one
+5. No commentary.`);
+  });
+
+  test("present, the envelope splits into `envelope` and `envelope-summary` around the slot", () => {
+    const pieces = summarySystemPromptPieces("Intro.", ["a"], "- one", { envelopeLines: [LINE] });
+    expect(pieces.map((p) => p.id)).toEqual(["intro", "envelope", "links-step", "envelope-summary", "structure"]);
+    expect(pieces[1]!.text).toBe("Instructions:\n1. Start your response with EXACTLY this line: CATEGORY: <category>\n   Choose from: a\n");
+    expect(pieces[2]!.text).toBe("2. Then add one LINKS line.\n");
+    expect(pieces[3]!.text).toBe("3. Then add a blank line, then SUMMARY: on its own line\n4. Then write a structured summary with:\n   ");
+  });
+
+  test("with a `before` slot too, one sequence of numbers", () => {
+    const text = joinPromptPieces(
+      summarySystemPromptPieces("I.", ["a"], "- one", {
+        before: [{ id: "r", label: "R", text: "Read first." }],
+        envelopeLines: [LINE],
+      }),
+    );
+    expect(text).toContain("1. Read first.\n2. Start your response");
+    expect(text).toContain("3. Then add one LINKS line.\n4. Then add a blank line");
+    expect(text).toContain("5. Then write a structured summary with:");
+  });
+
+  test("absent or empty ⇒ byte-identical bytes AND piece list", () => {
+    const bare = summarySystemPromptPieces("Intro.", VALID_CATEGORIES);
+    expect(summarySystemPromptPieces("Intro.", VALID_CATEGORIES, undefined, { envelopeLines: [] })).toEqual(bare);
+  });
+
+  test("YouTube with linksStep false/absent is the pre-links prompt; true adds the step", () => {
+    const input = { windowed: true, title: "T", videoUrl: "U" };
+    expect(buildYouTubeSystemPrompt(STANDARD, { ...input, linksStep: false })).toBe(buildYouTubeSystemPrompt(STANDARD, input));
+    expect(youTubeSystemPromptPieces(STANDARD, { ...input, linksStep: true }).map((p) => p.id)).toEqual([
+      "intro",
+      "envelope",
+      "links-step",
+      "envelope-summary",
+      "structure",
+      "rider-windowed",
+      "context",
+    ]);
+  });
+});
+
+/**
+ * Byte-identity against the code BEFORE the `envelopeLines` slot, pinned as
+ * hashes of each builder's piece list (`[id, label, text]`): computed on
+ * origin/main ea8fa4d5 and on this branch, identical. Every builder that passes
+ * no slot — the five slotless verticals, and YouTube without a links list —
+ * must keep these bytes AND these chips.
+ */
+describe("slotless builders are byte-identical to before the envelopeLines slot", () => {
+  const hash = (pieces: ReadonlyArray<{ id: string; label: string; text: string }>) =>
+    new Bun.CryptoHasher("sha256").update(JSON.stringify(pieces.map((p) => [p.id, p.label, p.text]))).digest("hex");
+  const cases: Array<[string, () => ReadonlyArray<{ id: string; label: string; text: string }>, string]> = [
+    ["youtube", () => youTubeSystemPromptPieces(STANDARD, { windowed: true, title: "T", videoUrl: "U" }), "de07e8fc1204b2e507131b591906a9ec634fc54aee2e14111f72d1f2cc2646f6"],
+    ["youtube (no window rider)", () => youTubeSystemPromptPieces(STANDARD, { windowed: false, title: "T", videoUrl: "U" }), "1c6491cc58e52a53fe5d76ccc45e0c5a0598097e09565d3af475c1fc5508f7e4"],
+    ["vimeo", () => vimeoSystemPromptPieces({ preset: STANDARD, title: "T", url: "U", captionKind: "auto", outputLang: "nb" }), "83771478c9535c2da3714e1fb1144df77eac601e468d2ce5ce37f65e961b5e44"],
+    ["vimeo (manual captions)", () => vimeoSystemPromptPieces({ preset: STANDARD, title: "T", url: "U", captionKind: "manual", outputLang: "en" }), "e701cdfef9c7a85f303718453bf04d1b31d95e653bb397f5bd2e6a3c43719fcf"],
+    ["tiktok", () => shortVideoSystemPromptPieces(TIKTOK_PROMPT_SPEC, { preset: STANDARD, title: "T", url: "U", author: "A" }), "6d95cae611956263a6f111ca3cae89825c3c3a817fa286b8d6ab12990dce18b0"],
+    ["tiktok (no frames)", () => shortVideoSystemPromptPieces(TIKTOK_PROMPT_SPEC, { preset: STANDARD, title: "T", url: "U", author: "A", frames: false }), "fae1870ad0d69b894f7989aae82c18c4d654b3b39a08ff5d04d0de3ac071bd08"],
+    ["x-video", () => shortVideoSystemPromptPieces(X_VIDEO_PROMPT_SPEC, { preset: STANDARD, title: "T", url: "U", author: "A" }), "1e8a3c520b03bd5c69be7b1f0da5382d0a71e38bc06a6bca57c8f1a9b9f84668"],
+    ["x-article", () => xArticleSystemPromptPieces({ title: "T", author: "A", url: "U" }), "73b25ed9fec5f43edee01d69aa8bfdb45b48228df7836745c4a69b46914cc73f"],
+    ["article", () => articleSystemPromptPieces({ title: "T", author: "A", url: "U" }), "04c823587559649772f49f711e6c8e4427054752b8c90651c7a5407819cc0b52"],
+    ["anthropic", () => anthropicSystemPromptPieces({ framing: "anthropic", title: "T", url: "U" }), "9d8f5865d66e705444a93244ffafe9d9191de6620e17a320793c0ea1dca3fae0"],
+  ];
+  for (const [name, pieces, want] of cases) {
+    test(name, () => {
+      expect(hash(pieces())).toBe(want);
+    });
+  }
 });

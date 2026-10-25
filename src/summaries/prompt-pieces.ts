@@ -142,10 +142,18 @@ export interface SummaryEnvelopeSlots {
   readonly before?: readonly EnvelopeInstruction[];
   /** Numbered after the structure step, on its own line each. */
   readonly after?: readonly EnvelopeInstruction[];
+  /**
+   * Numbered between the CATEGORY step and the SUMMARY step — an envelope line
+   * the model writes before `SUMMARY:` (YouTube's `LINKS:` step). Present, it
+   * splits the envelope piece into `envelope` (header + CATEGORY step) and
+   * `envelope-summary` (the SUMMARY and structure steps), since a span cannot
+   * be split around another span. Absent, the pieces are byte-identical.
+   */
+  readonly envelopeLines?: readonly EnvelopeInstruction[];
 }
 
 /** The piece ids {@link summarySystemPromptPieces} emits itself, in every shape. */
-const ENVELOPE_OWN_PIECE_IDS = ["intro", "instructions", "envelope", "structure"] as const;
+const ENVELOPE_OWN_PIECE_IDS = ["intro", "instructions", "envelope", "envelope-summary", "structure"] as const;
 
 /**
  * The slot contract, refused at construction with the offending id named.
@@ -163,10 +171,12 @@ const ENVELOPE_OWN_PIECE_IDS = ["intro", "instructions", "envelope", "structure"
 function assertEnvelopeInstructions(
   before: readonly EnvelopeInstruction[],
   after: readonly EnvelopeInstruction[],
+  envelopeLines: readonly EnvelopeInstruction[] = [],
 ): void {
   const seen = new Set<string>(ENVELOPE_OWN_PIECE_IDS);
   for (const [slot, list] of [
     ["before", before],
+    ["envelopeLines", envelopeLines],
     ["after", after],
   ] as const) {
     for (const inst of list) {
@@ -231,7 +241,8 @@ export function summarySystemPromptPieces(
 ): PromptPiece[] {
   const before = slots.before ?? [];
   const after = slots.after ?? [];
-  assertEnvelopeInstructions(before, after);
+  const envelopeLines = slots.envelopeLines ?? [];
+  assertEnvelopeInstructions(before, after, envelopeLines);
   // The envelope's own steps start after whatever `before` numbered.
   const first = before.length + 1;
   // The steps THEMSELVES, so `after` numbers on from however many there are
@@ -243,20 +254,26 @@ export function summarySystemPromptPieces(
     "Then add a blank line, then SUMMARY: on its own line",
     "Then write a structured summary with:",
   ];
+  const header = before.length > 0 ? "" : "Instructions:\n";
+  // The steps are numbered as ONE sequence whether or not `envelopeLines`
+  // splits the envelope piece: CATEGORY, the slot's lines, then the rest.
+  const stepNumber = (i: number): number => first + i + (i >= 1 ? envelopeLines.length : 0);
+  const steps = envelopeSteps.map((step, i) => `${stepNumber(i)}. ${step}\n`);
+  const envelopePieces: PromptPiece[] =
+    envelopeLines.length === 0
+      ? [{ id: "envelope", label: "CATEGORY/SUMMARY envelope", text: header + steps.join("") + `   ` }]
+      : [
+          { id: "envelope", label: "CATEGORY/SUMMARY envelope", text: header + steps[0]! },
+          ...envelopeLines.map((e, i) => ({ id: e.id, label: e.label, text: `${first + 1 + i}. ${e.text}\n` })),
+          { id: "envelope-summary", label: "CATEGORY/SUMMARY envelope", text: steps.slice(1).join("") + `   ` },
+        ];
   return [
     { id: "intro", label: "Intro", text: `${intro}\n\n` },
     ...(before.length > 0
       ? [{ id: "instructions", label: "Instructions", text: "Instructions:\n" }]
       : []),
     ...before.map((b, i) => ({ id: b.id, label: b.label, text: `${i + 1}. ${b.text}\n` })),
-    {
-      id: "envelope",
-      label: "CATEGORY/SUMMARY envelope",
-      text:
-        (before.length > 0 ? "" : "Instructions:\n") +
-        envelopeSteps.map((step, i) => `${first + i}. ${step}\n`).join("") +
-        `   `,
-    },
+    ...envelopePieces,
     {
       id: "structure",
       label: "Structure bullets",
@@ -265,7 +282,7 @@ export function summarySystemPromptPieces(
     ...after.map((a, i) => ({
       id: a.id,
       label: a.label,
-      text: `\n${first + envelopeSteps.length + i}. ${a.text}`,
+      text: `\n${first + envelopeSteps.length + envelopeLines.length + i}. ${a.text}`,
     })),
   ];
 }

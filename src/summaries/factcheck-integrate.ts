@@ -39,6 +39,7 @@ import { stripSummaryFactcheckBlock } from "./factcheck-block.ts";
 import { summaryCheckedRanges } from "./factcheck-body.ts";
 import { mapProseLines, splitTranscript, TRANSCRIPT_HEADING_RE } from "./transcript-split.ts";
 import { VISUAL_REFERENCE_HEADING_RE } from "./visual-detail.ts";
+import { LINKS_HEADING_RE } from "./links-section.ts";
 
 // ---------------------------------------------------------------------------
 // The voice (D5, D7)
@@ -335,13 +336,14 @@ const FACTCHECK_HEADING_RE = /^ {0,3}#{1,6}[ \t]+fact[ \t-]*check\b/i;
 const SENTINEL_LINE_RE = /^\s*<!--\s*factcheck:(?:start|end)\s*-->\s*$/;
 
 /** An unfenced line in an edit that the next read cuts on — the transcript
- *  heading, the visual-reference heading, a fact-check heading or a sentinel. */
+ *  heading, the visual-reference heading, the `## Links` heading, a fact-check
+ *  heading or a sentinel. */
 export function structuralLineRefusal(text: string): string | null {
   let hit: string | null = null;
   mapProseLines(text, (line) => {
     if (
       hit === null &&
-      (TRANSCRIPT_HEADING_RE.test(line) || VISUAL_REFERENCE_HEADING_RE.test(line) || FACTCHECK_HEADING_RE.test(line) || SENTINEL_LINE_RE.test(line))
+      (TRANSCRIPT_HEADING_RE.test(line) || VISUAL_REFERENCE_HEADING_RE.test(line) || LINKS_HEADING_RE.test(line) || FACTCHECK_HEADING_RE.test(line) || SENTINEL_LINE_RE.test(line))
     ) {
       hit = line.trim();
     }

@@ -60,6 +60,9 @@ const PIECE_TINTS: ReadonlyArray<{ id: string; label: string; color: string }> =
   // accident rather than by intent.)
   { id: "instructions", label: "Envelope", color: "var(--tok-com)" },
   { id: "envelope", label: "Envelope", color: "var(--tok-com)" },
+  // The envelope's SUMMARY half, split off when an `envelopeLines` slot entry
+  // (YouTube's `LINKS:` step) sits between it and the CATEGORY step. Same part.
+  { id: "envelope-summary", label: "Envelope", color: "var(--tok-com)" },
   { id: "structure", label: "Structure", color: "var(--tok-str)" },
   { id: "context", label: "Context", color: "var(--tok-typ)" },
   // The envelope's SLOTTED instructions — the short-video verticals' frame
@@ -69,6 +72,7 @@ const PIECE_TINTS: ReadonlyArray<{ id: string; label: string; color: string }> =
   { id: "read-frames", label: "Numbered rule", color: "var(--tok-num)" },
   { id: "visual-only", label: "Numbered rule", color: "var(--tok-num)" },
   { id: "no-commentary", label: "Numbered rule", color: "var(--tok-num)" },
+  { id: "links-step", label: "Numbered rule", color: "var(--tok-num)" },
   { id: "rider-windowed", label: "Rider", color: "var(--tok-kw)" },
   { id: "rider-auto-caption", label: "Rider", color: "var(--tok-kw)" },
   { id: "rider-language", label: "Rider", color: "var(--tok-kw)" },

@@ -272,3 +272,42 @@ describe("finishYouTubeSummary", () => {
     expect(readdirSync(root)).toEqual([]);
   });
 });
+
+describe("the `## Links` step", () => {
+  test("without a link list (a re-run) a stray LINKS line is still stripped and nothing is appended", async () => {
+    const out = await finishYouTubeSummary({
+      raw: "CATEGORY: ai/rag\nLINKS: 1, 2\n\nSUMMARY:\n### Heading\n- point",
+      jobId: "jl1",
+      videoId: VIDEO_ID,
+      frames: [],
+      visualDetail: "selected",
+      framesRoot: tmpRoot("yt-finish-root-"),
+    });
+    expect(out.summary).toBe("### Heading\n- point");
+    expect(out.links).toBeNull();
+  });
+
+  test("with a list: sources by rule, picked candidates in, unknown ids dropped, promo counted", async () => {
+    const out = await finishYouTubeSummary({
+      raw: "CATEGORY: ai/rag\nLINKS: 2, 7\n\nSUMMARY:\n### Heading\n- point",
+      jobId: "jl2",
+      videoId: VIDEO_ID,
+      frames: [],
+      visualDetail: "selected",
+      framesRoot: tmpRoot("yt-finish-root-"),
+      links: [
+        { url: "https://s.example/a", cls: "source", line: 0, title: "Src", attribution: "" },
+        { url: "https://c.example/b", cls: "candidate", line: 1, title: "Cand", attribution: "" },
+        { url: "https://c.example/never", cls: "candidate", line: 2, title: "Unpicked", attribution: "" },
+        { url: "https://bit.ly/x", cls: "creator", line: 3, title: "Funnel", attribution: "" },
+      ],
+    });
+    expect(out.summary).toBe(
+      "### Heading\n- point\n\n## Links\n\n- 📄 [Src](https://s.example/a) · from description\n" +
+        "- 📄 [Cand](https://c.example/b) · from description\n\n" +
+        "_1 creator or social link in the description is not listed._",
+    );
+    expect(out.links?.picked).toEqual([2]);
+    expect(out.links?.unknownIds).toEqual([7]);
+  });
+});

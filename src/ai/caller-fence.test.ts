@@ -351,7 +351,8 @@ for (const connector of ["claude-cli", "claude-sdk"] as const) {
       const o = await probe(hostileFrom(f.allowedDir, "traversal.txt"), () =>
         summarizeVideo(jobId, VIDEO_ID, "A talk", captureConfig(), bot(connector), {
           preset: STANDARD,
-          deps: { fetchAuthor: async () => undefined, sourceDraft: false },
+          // A frames-off capture probes too (the description); never a real yt-dlp here.
+          deps: { probeVideoInfo: async () => null, fetchAuthor: async () => undefined, sourceDraft: false },
         }),
       );
       report("youtube text-only", connector, o);

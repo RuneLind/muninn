@@ -30,6 +30,13 @@ import {
   enforceVisualReferences,
   type VisualDetail,
 } from "../summaries/visual-detail.ts";
+import {
+  appendLinksSection,
+  prepareLinksAnswer,
+  renderLinksSection,
+  type LinksPick,
+} from "../summaries/links-section.ts";
+import { isPromoClass, linkCandidates, type DescriptionLink } from "./description-links.ts";
 
 // The CATEGORY stays the vertical's own, not this file's: the JSONL sink is
 // queried by category, and moving code between files must not move the records
@@ -49,6 +56,61 @@ export interface FinishYouTubeSummaryInput {
   readonly framesRoot?: string;
   /** Told the parsed category at the same instant the inline tail told the job store. */
   readonly onCategory?: (category: string) => void;
+  /**
+   * The description's classified links. With them the tail resolves the
+   * model's `LINKS:` pick and appends the `## Links` section; without them (a
+   * re-run, a capture with no description) it appends nothing and still strips
+   * a stray `LINKS:` line.
+   */
+  readonly links?: readonly DescriptionLink[];
+}
+
+/** What the `## Links` step decided, for the trace and the completion line. */
+export interface FinishedLinks {
+  /** The rendered section, or `null` when no line qualified. */
+  readonly section: string | null;
+  /** Source URLs — in the section by rule. */
+  readonly sources: number;
+  /** Repo/candidate ids the model picked that exist in the list. */
+  readonly picked: number[];
+  /** Ids the model named that the list does not have — dropped. */
+  readonly unknownIds: number[];
+  /** Creator and social URLs left out and counted. */
+  readonly omitted: number;
+  /** What the model's line said: ids, `none`, or `null` for no line at all. */
+  readonly pick: LinksPick;
+}
+
+/**
+ * The `## Links` section for these links and this pick: every `source` URL by
+ * rule, a `repo` or `candidate` URL only when its id was picked, creator and
+ * social URLs counted and never listed (D12).
+ */
+export function buildDescriptionLinksSection(links: readonly DescriptionLink[], pick: LinksPick): FinishedLinks {
+  const candidates = linkCandidates(links);
+  const ids = new Set(candidates.map((c) => c.id));
+  const asked = Array.isArray(pick) ? pick : [];
+  const picked = asked.filter((id) => ids.has(id));
+  const unknownIds = asked.filter((id) => !ids.has(id));
+  const chosen = new Set(picked);
+  const lines = candidates
+    .filter((c) => c.cls === "source" || chosen.has(c.id))
+    .map((c) => ({
+      icon: c.cls === "repo" ? "📦" : "📄",
+      title: c.title,
+      url: c.url,
+      detail: c.attribution,
+      provenance: "from description",
+    }));
+  const omitted = links.filter((l) => isPromoClass(l.cls)).length;
+  return {
+    section: renderLinksSection({ lines, omitted }),
+    sources: candidates.filter((c) => c.cls === "source").length,
+    picked: picked.filter((id) => candidates.find((c) => c.id === id)!.cls !== "source"),
+    unknownIds,
+    omitted,
+    pick,
+  };
 }
 
 export interface FinishedYouTubeSummary {
@@ -63,6 +125,8 @@ export interface FinishedYouTubeSummary {
   readonly kept: number[];
   /** Referenced seconds the copy did not keep — their quotes were removed. */
   readonly unserved: number[];
+  /** The `## Links` step's outcome; `null` when no links were handed in. */
+  readonly links: FinishedLinks | null;
 }
 
 export async function finishYouTubeSummary(
@@ -76,7 +140,11 @@ export async function finishYouTubeSummary(
   // (`state.ts`, `youtube-routes.ts`): the terminal event carries the rewritten
   // body, so the live card swaps it in and an SSE replay after a reload serves it
   // too. Everything downstream is built from `summary` below, never from `parsed`.
-  const { category, summary: parsed } = parseSummaryResponse(raw);
+  // The `LINKS:` line comes out BEFORE the envelope parse, wherever the model
+  // put it, and a model-written `## Links` heading is demoted — so the stored
+  // body never carries the line nor a second `## Links`.
+  const prepared = prepareLinksAnswer(raw);
+  const { category, summary: parsed } = parseSummaryResponse(prepared.text);
   input.onCategory?.(category);
 
   const enforced = enforceVisualReferences({
@@ -137,5 +205,19 @@ export async function finishYouTubeSummary(
     );
   }
 
-  return { summary, category, selected: enforced.selected, referenced: enforced.referenced, kept, unserved };
+  // The section is the summary's LAST block, after any `## Visual reference`
+  // appendix (D12 order); `## Transcript` is appended later by the caller.
+  let links: FinishedLinks | null = null;
+  if (input.links !== undefined) {
+    links = buildDescriptionLinksSection(input.links, prepared.pick);
+    summary = appendLinksSection(summary, links.section);
+    if (links.unknownIds.length > 0) {
+      log.warn("YouTube capture {jobId}: the LINKS line named id(s) {ids} the list does not have — dropped", {
+        jobId,
+        ids: links.unknownIds.join(", "),
+      });
+    }
+  }
+
+  return { summary, category, selected: enforced.selected, referenced: enforced.referenced, kept, unserved, links };
 }

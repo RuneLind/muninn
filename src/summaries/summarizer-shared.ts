@@ -86,6 +86,13 @@ export interface CaptureOneShotOptions {
    */
   extraTraceAttrs?: Record<string, string>;
   /**
+   * Attributes computed from the model's FINAL text (after the takeaway check)
+   * and stamped on the trace root when this seam finishes it — the YouTube
+   * vertical's `bodyUrls` / `bodyUrlsUnlisted`. Ignored when a caller owns the
+   * root (`parentTracer`): that caller finishes it and stamps its own.
+   */
+  rootFinishAttrs?: (text: string) => Record<string, unknown>;
+  /**
    * The label of the model span this call opens. Defaults to `claude`, which is
    * the label every read-side fast path keys off — `/models`' observed-model
    * query and `src/db/traces.ts` both join on `c.name = 'claude'` — so a caller
@@ -288,7 +295,7 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       text = checked.text;
     }
 
-    if (ownsRoot) tracer.finish("ok", { source, ...usage });
+    if (ownsRoot) tracer.finish("ok", { source, ...usage, ...(opts.rootFinishAttrs?.(text) ?? {}) });
 
     return text === result.result ? result : { ...result, result: text };
   } catch (err) {
