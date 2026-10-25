@@ -9,13 +9,15 @@ import { getLog } from "../logging.ts";
 import { SAFE_RESOLVE_TIMEOUT_MS, safeResolveRedirect } from "./safe-fetch.ts";
 import { githubRepoLookup, withRepoDetails, type RepoLineLookup } from "./github-repo.ts";
 import {
+  TEXT_LINKS_MAX,
   classifyTextLinks,
   pickTextLinks,
+  redirectUrlsIn,
   renderTextLinksSection,
   substituteUrls,
-  tcoUrlsIn,
   type TextLink,
 } from "./text-links.ts";
+import { isShortenerHost } from "../youtube/description-links.ts";
 import type { LinksPick } from "./links-section.ts";
 
 const log = getLog("summaries", "text-links");
@@ -42,15 +44,54 @@ export interface PreparedTextLinks {
   readonly tcoResolved: number;
 }
 
+/** Runs `resolve` over `urls`, {@link TCO_CONCURRENCY} at a time, until the budget aborts. */
+async function resolveAll(
+  urls: readonly string[],
+  resolve: (url: string, signal: AbortSignal) => Promise<string | null>,
+  budget: AbortSignal,
+  deadline: Promise<null>,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const queue = [...urls];
+  const worker = async () => {
+    for (let url = queue.shift(); url !== undefined; url = queue.shift()) {
+      if (budget.aborted) return;
+      const target = await Promise.race([resolve(url, budget).catch(() => null), deadline]);
+      if (target !== null && target !== url) out.set(url, target);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(TCO_CONCURRENCY, urls.length) }, worker));
+  return out;
+}
+
+function isShortenerUrl(url: string): boolean {
+  try {
+    return isShortenerHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Resolve every `t.co` URL in `text` (one hop each, one shared budget), put the
- * targets in its place, and classify the result. An unresolved `t.co` stays in
- * the text and is dropped from the list (`isSkippedHost`).
+ * Resolve the redirects in `text` and classify the result, under ONE shared
+ * budget and at most {@link TEXT_LINKS_MAX} lookups in all:
+ *
+ * 1. every `t.co` URL and every known-shortener URL (`isShortenerHost`), one
+ *    hop each, the first {@link TEXT_LINKS_MAX} in order of first appearance;
+ * 2. a `t.co` whose target is on a known shortener (`lnkd.in`, `bit.ly`…) gets
+ *    ONE more hop, in text order, while lookups are left.
+ *
+ * The targets replace the URLs in one pass over the text. An unresolved `t.co`
+ * stays in the text and is dropped from the list (`isSkippedHost`); an
+ * unresolved shortener stays as a candidate. `ownUrl` is the capture's own
+ * address, never listed.
  */
-export async function prepareTextLinks(text: string, deps: TextLinksDeps = {}): Promise<PreparedTextLinks> {
-  const tco = tcoUrlsIn(text);
+export async function prepareTextLinks(text: string, deps: TextLinksDeps = {}, ownUrl?: string): Promise<PreparedTextLinks> {
+  const found = redirectUrlsIn(text);
+  const isTco = (u: string) => new URL(u).hostname.toLowerCase() === "t.co";
+  const tcoFound = found.filter(isTco).length;
   const targets = new Map<string, string>();
-  if (tco.length > 0) {
+  if (found.length > 0) {
     const resolve =
       deps.resolveRedirect ?? ((url: string, signal: AbortSignal) => safeResolveRedirect(url, { signal, caller: "text-links" }));
     const budget = new AbortController();
@@ -58,27 +99,36 @@ export async function prepareTextLinks(text: string, deps: TextLinksDeps = {}): 
     const timer = setTimeout(() => budget.abort(), budgetMs);
     const deadline = new Promise<null>((r) => budget.signal.addEventListener("abort", () => r(null), { once: true }));
     try {
-      const queue = [...tco];
-      const worker = async () => {
-        for (let url = queue.shift(); url !== undefined; url = queue.shift()) {
-          if (budget.signal.aborted) return;
-          const target = await Promise.race([resolve(url, budget.signal).catch(() => null), deadline]);
-          if (target !== null && target !== url) targets.set(url, target);
+      const first = found.slice(0, TEXT_LINKS_MAX);
+      const firstHop = await resolveAll(first, resolve, budget.signal, deadline);
+      for (const url of first) {
+        const target = firstHop.get(url);
+        if (target !== undefined) targets.set(url, target);
+      }
+      const left = TEXT_LINKS_MAX - first.length;
+      const middles = [
+        ...new Set(first.filter((u) => isTco(u) && targets.has(u) && isShortenerUrl(targets.get(u)!)).map((u) => targets.get(u)!)),
+      ].slice(0, Math.max(0, left));
+      if (middles.length > 0 && !budget.signal.aborted) {
+        const secondHop = await resolveAll(middles, resolve, budget.signal, deadline);
+        for (const url of first) {
+          const final = isTco(url) && targets.has(url) ? secondHop.get(targets.get(url)!) : undefined;
+          if (final !== undefined) targets.set(url, final);
         }
-      };
-      await Promise.all(Array.from({ length: Math.min(TCO_CONCURRENCY, tco.length) }, worker));
+      }
     } finally {
       clearTimeout(timer);
     }
-    if (targets.size < tco.length) {
-      log.info("Resolved {resolved} of {found} t.co link(s); the rest stay unexpanded and out of the links list", {
+    if (found.length > targets.size) {
+      log.info("Resolved {resolved} of {found} redirect link(s); the rest stay as written", {
         resolved: targets.size,
-        found: tco.length,
+        found: found.length,
       });
     }
   }
+  const tcoResolved = [...targets.keys()].filter(isTco).length;
   const substituted = substituteUrls(text, targets);
-  return { text: substituted, links: classifyTextLinks(substituted), tcoFound: tco.length, tcoResolved: targets.size };
+  return { text: substituted, links: classifyTextLinks(substituted, ownUrl), tcoFound, tcoResolved };
 }
 
 export interface FinishedTextLinks {

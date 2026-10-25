@@ -43,7 +43,8 @@ export async function summarizeArticle(
     // resolved under one shared budget and spelled as its target, then the
     // candidates numbered for the model's `LINKS:` pick. With none, both
     // prompts are byte-identical to before links existed.
-    const textLinks = await prepareTextLinks(articleText, linkDeps);
+    // A link to the post's own address is not listed.
+    const textLinks = await prepareTextLinks(articleText, linkDeps, url || undefined);
     const linksStep = textLinks.links.length > 0;
     const systemPrompt = buildXArticleSystemPrompt({ title, author, url, ...(linksStep ? { linksStep } : {}) });
 

@@ -40,6 +40,60 @@ describe("classifyTextLinks", () => {
   });
 });
 
+describe("classifyTextLinks on article-shaped text", () => {
+  test("X media hosts are skipped like X self-links", () => {
+    const text = "Photo https://pbs.twimg.com/media/Inv3nted.jpg and https://video.twimg.com/amplify_video/1/vid/a.mp4?tag=1";
+    expect(classifyTextLinks(text)).toEqual([]);
+  });
+
+  test("a YouTube playlist or video is content; a channel stays social", () => {
+    const text = [
+      "Playlist — https://youtube.com/playlist?list=PLinvented",
+      "Talk — https://www.youtube.com/watch?v=Invented123",
+      "Channel https://youtube.com/@someone_invented and https://youtube.com/channel/UCinvented",
+    ].join("\n");
+    expect(classifyTextLinks(text).map((l) => l.url)).toEqual([
+      "https://youtube.com/playlist?list=PLinvented",
+      "https://www.youtube.com/watch?v=Invented123",
+    ]);
+  });
+
+  test("a bare URL takes the text before it as its title when that text ends in a separator", () => {
+    const text = [
+      "6. Building Invented Agents — https://youtube.com/watch?v=Invented123",
+      "Docs: https://example.org/docs",
+      "Part two - https://example.org/two",
+      "Links: https://example.org/generic",
+      "  - https://example.org/bullet",
+      "Read https://example.org/no-separator",
+      "https://youtube.com/watch?v=Invented456&si=tracking",
+      "https://example.org/a/b?x=1",
+    ].join("\n");
+    expect(classifyTextLinks(text).map((l) => l.title)).toEqual([
+      "Building Invented Agents",
+      "Docs",
+      "Part two",
+      "example.org/generic",
+      "example.org/bullet",
+      "example.org/no-separator",
+      "youtube.com/watch?v=Invented456",
+      "example.org/a/b",
+    ]);
+  });
+
+  test("a GitHub owner or repo spelled in another case is the same link", () => {
+    const text = "One https://github.com/invented-owner/Tool and two https://github.com/Invented-Owner/tool.";
+    expect(classifyTextLinks(text).map((l) => l.url)).toEqual(["https://github.com/invented-owner/Tool"]);
+  });
+
+  test("the capture's own URL is not listed", async () => {
+    const text = "# [An invented headline](https://example.org/post/1?utm_source=x)\n\nSee https://example.org/other";
+    expect(classifyTextLinks(text, "https://www.example.org/post/1").map((l) => l.url)).toEqual(["https://example.org/other"]);
+    const prepared = await prepareTextLinks(text, {}, "https://example.org/post/1");
+    expect(prepared.links.map((l) => l.url)).toEqual(["https://example.org/other"]);
+  });
+});
+
 describe("t.co substitution", () => {
   test("finds each distinct t.co URL", () => {
     expect(tcoUrlsIn("a https://t.co/Ab1 b [x](https://t.co/Ab1) c https://t.co/Ab12")).toEqual([
