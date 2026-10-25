@@ -61,6 +61,13 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
     "p", "section", "article", "main", "header", "footer", "aside", "figure", "figcaption",
     "address", "details", "summary", "dl", "dt", "dd", "form", "fieldset",
   ]);
+  // Inside `<pre>`, these start a new line (a code viewer's one-div-per-line markup).
+  const PRE_BREAK = new Set([
+    ...BLOCK, "div", "li", "tr", "ul", "ol", "menu", "table", "blockquote", "pre", "hr",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+  ]);
+  // Marks a line start inside `<pre>`; text nodes there are stripped of it.
+  const LINE = "\uE000";
   const codeBlocks: string[] = [];
   const isHidden = options.isHidden;
 
@@ -90,8 +97,9 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
   function absoluteHttp(href: string): string | null {
     if (!/^https?:\/\//i.test(href)) return null;
     try {
+      // The parsed form: the URL parser drops a raw tab or newline, so none reaches the output.
       const url = new URL(href);
-      return url.protocol === "http:" || url.protocol === "https:" ? href : null;
+      return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
     } catch {
       return null;
     }
@@ -118,22 +126,52 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
     return url.replace(/\(/g, "%28").replace(/\)/g, "%29").replace(/ /g, "%20");
   }
 
-  /** Whether an anchor's visible text is just its URL (`github.com/acme/x…`). */
+  /**
+   * Whether an anchor's visible text is its URL (`github.com/acme/x…`): it parses
+   * as a URL, with or without a scheme, on the href's host (`www.` ignored), and
+   * its path is a prefix of the href's (a display URL may end with `…`).
+   */
   function textIsUrl(text: string, url: string): boolean {
-    const bare = (s: string) => s.replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/+$/, "");
-    const shown = bare(text.replace(/(?:…|\.\.\.)+$/, ""));
-    if (shown === "") return true;
-    return /^[^\s]+$/.test(shown) && bare(url).toLowerCase().startsWith(shown.toLowerCase());
+    const shown = text.replace(/(?:…|\.\.\.)+$/, "");
+    if (!/^\S+$/.test(shown)) return false;
+    let parsed: URL;
+    let target: URL;
+    try {
+      parsed = new URL(/^https?:\/\//i.test(shown) ? shown : `https://${shown}`);
+      target = new URL(url);
+    } catch {
+      return false;
+    }
+    const host = (u: URL) => u.hostname.toLowerCase().replace(/^www\./, "");
+    if (host(parsed) !== host(target)) return false;
+    const rest = (u: URL) => `${u.pathname}${u.search}${u.hash}`.replace(/\/+$/, "");
+    return rest(target).startsWith(rest(parsed));
   }
 
-  /** Inline content's leading and trailing whitespace, kept outside a marker. */
+  /**
+   * Inline content's leading and trailing whitespace, kept outside a marker.
+   * Content that spans lines (block children, a code slot) is left unwrapped:
+   * emphasis cannot cross a paragraph.
+   */
   function wrap(inner: string, open: string, close: string): string {
     const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(inner)!;
-    return m[2] === "" ? inner : `${m[1]}${open}${m[2]}${close}${m[3]}`;
+    return m[2] === "" || /[\n\t]/.test(m[2]!) ? inner : `${m[1]}${open}${m[2]}${close}${m[3]}`;
+  }
+
+  /** CommonMark inline code: a delimiter longer than any backtick run inside, padded at an edge backtick. */
+  function inlineCode(code: string): string {
+    const longest = Math.max(0, ...(code.match(/`+/g) ?? []).map((r) => r.length));
+    const tick = "`".repeat(longest + 1);
+    const pad = /^`|`$/.test(code) ? " " : "";
+    return `${tick}${pad}${code}${pad}${tick}`;
+  }
+
+  function hasAnchor(node: MarkdownSourceNode): boolean {
+    return children(node).some((c) => c.nodeType === ELEMENT && (tagOf(c) === "a" || hasAnchor(c)));
   }
 
   function anchor(node: MarkdownSourceNode, ctx: Ctx): string {
-    const text = walkChildren(node, ctx);
+    const text = walkChildren(node, { ...ctx, inline: true });
     let target = absoluteHttp((attr(node, "href") ?? "").trim());
     if (target !== null && isTco(target)) target = expandedFromText(node.textContent) ?? target;
     if (target === null) return text;
@@ -141,8 +179,11 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
     const label = text.replace(/\s+/g, " ").trim().replace(/\[/g, "(").replace(/\]/g, ")");
     const lead = /^\s/.test(text) ? " " : "";
     const tail = /\s$/.test(text) ? " " : "";
-    if (label === "" || textIsUrl(label, target)) return `${lead}${href}${tail}`;
-    return `${lead}[${label}](${href})${tail}`;
+    // No visible text (an image link, a badge): nothing a reader would see.
+    if (label === "") return text;
+    if (textIsUrl(label, target)) return `${lead}${href}${tail}`;
+    // A backslash would escape the next character, `]` included.
+    return `${lead}[${label.replace(/\\/g, "\\\\")}](${href})${tail}`;
   }
 
   function list(node: MarkdownSourceNode, ctx: Ctx, ordered: boolean): string {
@@ -173,7 +214,7 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
     const out: string[] = [];
     rows.forEach((row, i) => {
       const cells = children(row).filter((c) => c.nodeType === ELEMENT && (tagOf(c) === "td" || tagOf(c) === "th"));
-      const text = cells.map((c) => normalize(walkChildren(c, ctx)).replace(/\n+/g, " ").replace(/\|/g, "\\|"));
+      const text = cells.map((c) => normalize(walkChildren(c, { ...ctx, inline: true })).replace(/\n+/g, " ").replace(/\|/g, "\\|"));
       out.push(`| ${text.join(" | ")} |`);
       if (i === 0) out.push(`| ${cells.map(() => "---").join(" | ")} |`);
     });
@@ -182,6 +223,8 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
 
   interface Ctx {
     readonly pre: boolean;
+    /** A heading, a table cell or an anchor: one line, so a code block renders as inline code. */
+    readonly inline: boolean;
   }
 
   function walkChildren(node: MarkdownSourceNode, ctx: Ctx): string {
@@ -193,13 +236,16 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
   function walk(node: MarkdownSourceNode, ctx: Ctx): string {
     if (node.nodeType === TEXT) {
       const text = node.textContent ?? "";
-      return ctx.pre ? text : text.replace(/[\s ]+/g, " ");
+      return ctx.pre ? text.split(LINE).join("") : text.replace(/[\s ]+/g, " ");
     }
     if (node.nodeType !== ELEMENT && node.nodeType !== 9 && node.nodeType !== 11) return "";
     if (node.nodeType !== ELEMENT) return walkChildren(node, ctx);
     const tag = tagOf(node);
     if (SKIP.has(tag) || hidden(node)) return "";
-    if (ctx.pre) return tag === "br" ? "\n" : walkChildren(node, ctx);
+    if (ctx.pre) {
+      if (tag === "br") return "\n";
+      return PRE_BREAK.has(tag) ? `${LINE}${walkChildren(node, ctx)}${LINE}` : walkChildren(node, ctx);
+    }
     switch (tag) {
       case "br":
         return "\n";
@@ -211,7 +257,7 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
       case "h4":
       case "h5":
       case "h6": {
-        const text = normalize(walkChildren(node, ctx)).replace(/\n+/g, " ");
+        const text = normalize(walkChildren(node, { ...ctx, inline: true })).replace(/\n+/g, " ");
         return text === "" ? "" : `\n\n${"#".repeat(Number(tag[1]))} ${text}\n\n`;
       }
       case "div":
@@ -230,8 +276,11 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
       case "table":
         return table(node, ctx);
       case "pre": {
-        const code = walkChildren(node, { pre: true }).replace(/^\n+|\n+$/g, "");
+        const code = walkChildren(node, { pre: true, inline: ctx.inline })
+          .replace(/\n?\uE000+/g, "\n")
+          .replace(/^\n+|\n+$/g, "");
         if (code.trim() === "") return "";
+        if (ctx.inline) return inlineCode(code.replace(/\s+/g, " ").trim());
         const longest = Math.max(2, ...(code.match(/`+/g) ?? []).map((r) => r.length));
         const fence = "`".repeat(longest + 1);
         codeBlocks.push(`${fence}\n${code}\n${fence}`);
@@ -240,17 +289,23 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
       case "code":
       case "kbd":
       case "samp": {
+        // A link inside code keeps its href; the code markup gives way.
+        if (hasAnchor(node)) return walkChildren(node, ctx);
         const code = (node.textContent ?? "").replace(/\s+/g, " ");
         if (code.trim() === "") return code;
-        const tick = code.includes("`") ? "``" : "`";
-        return `${tick}${code}${tick}`;
+        return inlineCode(code);
       }
+      // Google Docs wraps a whole paste in `<b style="font-weight:normal">`.
       case "strong":
       case "b":
-        return wrap(walkChildren(node, ctx), "**", "**");
+        return /font-weight\s*:\s*(?:normal|[1-4]00)\b/i.test(attr(node, "style") ?? "")
+          ? walkChildren(node, ctx)
+          : wrap(walkChildren(node, ctx), "**", "**");
       case "em":
       case "i":
-        return wrap(walkChildren(node, ctx), "*", "*");
+        return /font-style\s*:\s*normal\b/i.test(attr(node, "style") ?? "")
+          ? walkChildren(node, ctx)
+          : wrap(walkChildren(node, ctx), "*", "*");
       case "a":
         return anchor(node, ctx);
       default:
@@ -258,8 +313,21 @@ export function htmlToMarkdown(root: MarkdownSourceNode, options: HtmlToMarkdown
     }
   }
 
-  const text = normalize(walk(root, { pre: false }));
-  return text.replace(/\t\t(\d+)\t\t|\t/g, (_m, i: string | undefined) =>
-    i === undefined ? " " : (codeBlocks[Number(i)] ?? ""),
-  );
+  // A code block is restored with its line's prefix (a list indent, `> `) on
+  // every one of its lines, so it stays inside its container.
+  return normalize(walk(root, { pre: false, inline: false }))
+    .split("\n")
+    .map((line) => {
+      const m = /\t\t(\d+)\t\t/.exec(line);
+      if (m === null) return line.replace(/\t/g, " ");
+      const prefix = line.slice(0, m.index);
+      const first = prefix.replace(/\t/g, " ");
+      const rest = prefix.replace(/[^>]/g, " ");
+      const block = (codeBlocks[Number(m[1])] ?? "")
+        .split("\n")
+        .map((l, j) => (j === 0 ? first + l : l === "" ? rest.trimEnd() : rest + l))
+        .join("\n");
+      return block + line.slice(m.index + m[0].length).replace(/\t/g, " ");
+    })
+    .join("\n");
 }

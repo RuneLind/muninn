@@ -114,6 +114,76 @@ describe("htmlToMarkdown — page markup", () => {
   });
 });
 
+describe("htmlToMarkdown — text fidelity (fix round 1, R1)", () => {
+  test("a Google Docs `<b style=font-weight:normal>` wrapper is no emphasis", () => {
+    expect(
+      md(
+        '<meta charset="utf-8"><b style="font-weight:normal;" id="docs-internal-guid-x"><h2>Heading</h2><p>Para one with <a href="https://ex.com/a">a link</a></p><p>Para two</p></b>',
+      ),
+    ).toBe("## Heading\n\nPara one with [a link](https://ex.com/a)\n\nPara two");
+    expect(md('<p><b>bold</b> <i style="font-style: normal">plain</i></p>')).toBe("**bold** plain");
+    expect(md('<p>a <b style="font-weight: 400">plain</b> b</p>')).toBe("a plain b");
+  });
+
+  test("emphasis around block children is dropped, not wrapped across paragraphs", () => {
+    expect(md("<strong><p>p1</p><p>p2</p></strong>")).toBe("p1\n\np2");
+    expect(md("<p>one <em>inline</em> two</p>")).toBe("one *inline* two");
+  });
+
+  test("a word that is not the URL keeps its link", () => {
+    expect(md('<p>Read more on <a href="https://medium.com/@x/post-123">medium</a> today</p>')).toBe(
+      "Read more on [medium](https://medium.com/@x/post-123) today",
+    );
+    expect(md('<p><a href="https://docs.python.org/3/">docs</a> <a href="https://github.com/acme">GitHub</a></p>')).toBe(
+      "[docs](https://docs.python.org/3/) [GitHub](https://github.com/acme)",
+    );
+    expect(md('<p><a href="https://other.org/x">example.org/x</a></p>')).toBe("[example.org/x](https://other.org/x)");
+    expect(md('<p><a href="https://example.org/other">example.org/x</a></p>')).toBe(
+      "[example.org/x](https://example.org/other)",
+    );
+    expect(md('<p><a href="https://example.org/x/yz">www.example.org/x/y…</a></p>')).toBe("https://example.org/x/yz");
+  });
+
+  test("the href is the parsed URL: no raw tab or newline reaches the output", () => {
+    expect(md('<p><a href="https://ex.com/a&#9;b">tab</a></p>')).toBe("[tab](https://ex.com/ab)");
+    expect(md('<p><a href="https://ex.com/a&#10;b">nl</a></p>')).toBe("[nl](https://ex.com/ab)");
+    expect(md('<pre>KEEP</pre><a href="https://ex.com/a&#9;&#9;0&#9;&#9;b">s</a>')).toBe(
+      "```\nKEEP\n```\n\n[s](https://ex.com/a0b)",
+    );
+  });
+
+  test("an anchor with no visible text (an image link) writes nothing", () => {
+    expect(md('<p>x <a href="https://cdn.example.org/image/fetch/a.png"><img src="a.png"></a> y</p>')).toBe("x y");
+  });
+
+  test("backslashes in the anchor text are escaped, so the link still parses", () => {
+    expect(md('<p><a href="https://ex.com/p">path C:\\dir\\</a></p>')).toBe("[path C:\\\\dir\\\\](https://ex.com/p)");
+  });
+});
+
+describe("htmlToMarkdown — code fidelity (fix round 1, R2)", () => {
+  test("inline code delimiters outrun the backtick runs inside and pad an edge backtick", () => {
+    expect(md("<p><code>a``b</code> <code>`x</code></p>")).toBe("```a``b``` `` `x ``");
+  });
+
+  test("an anchor inside code keeps its href; the code markup is dropped", () => {
+    expect(md('<p><code>see <a href="https://ex.com/p">x</a></code></p>')).toBe("see [x](https://ex.com/p)");
+  });
+
+  test("block children inside pre start new lines", () => {
+    expect(md("<pre><div>line1</div><div>line2</div></pre>")).toBe("```\nline1\nline2\n```");
+  });
+
+  test("a code block in a list item, a quote or a table cell keeps its container", () => {
+    expect(md("<ul><li>item<pre>a\nb</pre></li></ul>")).toBe("- item\n  ```\n  a\n  b\n  ```");
+    expect(md("<ol><li><pre>x\ny</pre></li></ol>")).toBe("1. ```\n   x\n   y\n   ```");
+    expect(md("<blockquote><pre>a\n\nb</pre></blockquote>")).toBe("> ```\n> a\n>\n> b\n> ```");
+    expect(md("<table><tr><td>h</td></tr><tr><td><pre>a\nb</pre></td></tr></table>")).toBe(
+      "| h |\n| --- |\n| `a b` |",
+    );
+  });
+});
+
 describe("the X extension's emitted walk", () => {
   const spec = EXTENSION_OUTPUTS.find((o) => o.output.endsWith("extensions/x-article/html-to-markdown.js"))!;
 

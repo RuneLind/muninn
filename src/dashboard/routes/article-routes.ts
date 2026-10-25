@@ -36,15 +36,30 @@ async function findExistingByUrl(
   }
 }
 
+/** One markdown line as plain text: links to their text, emphasis, code and escape marks removed. */
+function plainLine(line: string): string {
+  return line
+    .trim()
+    .replace(/^#+\s+/, "")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/(`+)\s?([^`]*?)\s?\1/g, "$2")
+    .replace(/\*\*|__|~~/g, "")
+    .replace(/(^|[^\w*])[*_](\S(?:[^*_]*?\S)?)[*_](?=[^\w*]|$)/g, "$1$2")
+    .replace(/\\([!-/:-@[-`{-~])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /**
- * Derive a non-empty title from the pasted text: the first non-empty line,
- * truncated to ~80 chars — so huginn's `/api/articles/ingest` never receives an
- * empty title (the drafter downstream keys pages off it).
+ * Derive a non-empty title from the pasted text: the first non-empty line as
+ * plain text (the paste form sends the walk's markdown), truncated to ~80
+ * chars — so huginn's `/api/articles/ingest` never receives an empty title
+ * (the drafter downstream keys pages off it).
  */
-function deriveTitle(text: string): string {
+export function deriveTitle(text: string): string {
   const firstLine = text
     .split("\n")
-    .map((l) => l.trim().replace(/^#+\s+/, ""))
+    .map(plainLine)
     .find((l) => l.length > 0) ?? "Untitled article";
   return firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine;
 }
