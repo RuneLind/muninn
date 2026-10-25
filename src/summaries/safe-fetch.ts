@@ -320,6 +320,28 @@ function abandon(body: ReadableStream<Uint8Array> | null, hop: AbortController):
 }
 
 /**
+ * A URL as a refusal log line may carry it: userinfo dropped, since an
+ * agent-supplied `ftp://u:secret@h/x` is refused before the credential check.
+ * An unparseable string loses anything shaped like `user:pass@` before its host.
+ */
+function logSafeUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (!url.username && !url.password) return raw;
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return raw.replace(/^([a-z][a-z0-9+.-]*:)?(\/\/)?[^/?#\s]*@/i, "$1$2");
+  }
+}
+
+/** A refusal's `detail` with any `location` passed through {@link logSafeUrl}. */
+function logSafeDetail(detail?: Record<string, unknown>): Record<string, unknown> | undefined {
+  return typeof detail?.location === "string" ? { ...detail, location: logSafeUrl(detail.location) } : detail;
+}
+
+/**
  * Fetch `rawUrl` and return its body as text, or `null` if anything about it is
  * refused or fails. Never throws; every refusal logs exactly one warning naming
  * the reason, the CURRENT hop and the caller, so a blocked capture is
@@ -369,7 +391,7 @@ async function safeFetchCore(rawUrl: string, options: SafeFetchOptions, reportPd
   const caller = options.caller ?? "unspecified";
 
   const refuse = (reason: string, url: string, detail?: Record<string, unknown>): null => {
-    log.warn("Refused fetch of {url} for {caller}: {reason}", { url, caller, reason, ...detail });
+    log.warn("Refused fetch of {url} for {caller}: {reason}", { url: logSafeUrl(url), caller, reason, ...logSafeDetail(detail) });
     return null;
   };
 
@@ -395,12 +417,8 @@ async function safeFetchCore(rawUrl: string, options: SafeFetchOptions, reportPd
         return refuse(`refused scheme ${url.protocol}`, current);
       }
       // A page caller stores `finalUrl`, so a credential in the URL would reach the
-      // stored line. Refused at every hop; the logged URL drops it.
-      if (reportPdf && (url.username || url.password)) {
-        url.username = "";
-        url.password = "";
-        return refuse("URL carries credentials", url.toString());
-      }
+      // stored line. Refused at every hop; `refuse` drops it from the logged URL.
+      if (reportPdf && (url.username || url.password)) return refuse("URL carries credentials", current);
 
       // Resolve, then judge the ADDRESS — a hostname tells us nothing (`x.test` can
       // be an A record for 127.0.0.1). An IP literal is judged as-is, no DNS.
@@ -594,7 +612,7 @@ export async function safeResolveRedirect(rawUrl: string, options: SafeResolveOp
   const doFetch = options.fetchImpl ?? fetch;
   const caller = options.caller ?? "unspecified";
   const refuse = (reason: string, url: string, detail?: Record<string, unknown>): null => {
-    log.warn("Refused redirect lookup of {url} for {caller}: {reason}", { url, caller, reason, ...detail });
+    log.warn("Refused redirect lookup of {url} for {caller}: {reason}", { url: logSafeUrl(url), caller, reason, ...logSafeDetail(detail) });
     return null;
   };
 

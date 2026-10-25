@@ -376,8 +376,8 @@ test("closing the panel mid-search aborts the stream: the server launches no mor
   expect(again).toBe(200);
 });
 
-test("a stream cut before done says the search ended early; unanswered rows read not finished, a finished empty row nothing found", async ({ page }) => {
-  // The stream ends after one state frame and one result with no links: no done, no other result.
+test("a stream cut before done says the search ended early; unanswered rows read not finished, a malformed found-but-empty frame search failed", async ({ page }) => {
+  // The stream ends after one state frame and one malformed result (`found` with no links, which the server never sends): no done.
   await page.route("**/api/summaries/links/search", (route) =>
     route.fulfill({
       status: 200,
@@ -395,7 +395,7 @@ test("a stream cut before done says the search ended early; unanswered rows read
   await panel.getByRole("button", { name: "Search 2 selected" }).click();
   await expect(panel.locator(".sum-links-msg.error")).toContainText("The search ended before it finished");
   await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-state')).toHaveText("not finished");
-  await expect(panel.locator('.sum-links-row[data-row="1"] .sum-links-state')).toHaveText("nothing found");
+  await expect(panel.locator('.sum-links-row[data-row="1"] .sum-links-state')).toHaveText("search failed");
 });
 
 test("D20: a row whose every result the summary already carries reads already linked", async ({ page }) => {

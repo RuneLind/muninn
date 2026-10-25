@@ -285,12 +285,23 @@ export interface LineUrl {
   readonly linkText?: string;
 }
 
+/**
+ * A URL cut at a curly closing quote that ends a word: `”`, or a `’` / `’s` not
+ * followed by a letter, digit, `-`, `_` or `/`. `github.com/obra/superpowers’s
+ * skills` names the repo, while a docs anchor `#restrict-claude’s-skill-access`
+ * keeps its `’` (measured in the stored corpus: 16 such anchors, no other `’`).
+ */
+export function cutAtClosingQuote(raw: string): string {
+  const at = raw.search(/”|’s?(?![\p{L}\p{N}_\/-])/u);
+  return at === -1 ? raw : raw.slice(0, at);
+}
+
 /** Every URL on one line, with its offset — in order. A markdown link counts once, as its href. */
 export function extractLineUrls(line: string): LineUrl[] {
   const out: LineUrl[] = [];
   const spans: Array<[number, number]> = [];
   for (const m of line.matchAll(MD_LINK_RE)) {
-    const url = trimUrl(m[2]!);
+    const url = trimUrl(cutAtClosingQuote(m[2]!));
     if (url.length <= "https://".length) continue;
     const hrefAt = m.index + m[0].length - m[2]!.length;
     spans.push([m.index, hrefAt + url.length]);
@@ -298,7 +309,7 @@ export function extractLineUrls(line: string): LineUrl[] {
   }
   for (const m of line.matchAll(URL_RE)) {
     if (spans.some(([a, b]) => m.index >= a && m.index < b)) continue;
-    const url = trimUrl(m[0]);
+    const url = trimUrl(cutAtClosingQuote(m[0]));
     if (url.length > "https://".length) out.push({ url, index: m.index });
   }
   return out.sort((a, b) => a.index - b.index);

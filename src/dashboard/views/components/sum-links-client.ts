@@ -378,14 +378,9 @@ function candidateLabel(c: Candidate): string {
 
 function rowHtml(s: DocState, r: Row, i: number): string {
   // A finished row always says how it ended: an empty status would read as never searched.
-  const status =
-    r.state === "done"
-      ? r.outcome && r.outcome !== "found"
-        ? OUTCOME_TEXT[r.outcome] ?? r.outcome
-        : r.results.length === 0
-          ? "nothing found"
-          : ""
-      : STATE_TEXT[r.state];
+  // The server sends `found` only with results; `found` with none, or no outcome, is a malformed frame.
+  const outcome = r.outcome === "found" ? (r.results.length > 0 ? "found" : "error") : r.outcome || "error";
+  const status = r.state === "done" ? (outcome === "found" ? "" : OUTCOME_TEXT[outcome] ?? outcome) : STATE_TEXT[r.state];
   const results = r.results
     .map((f) => {
       const saved = s.accepted.has(f.url);

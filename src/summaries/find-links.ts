@@ -19,7 +19,7 @@
 
 import { sha256 } from "../gardener/util.ts";
 import { neutralizePromptTags } from "../utils/prompt-fence.ts";
-import { extractLineUrls, linkKey } from "../youtube/description-links.ts";
+import { cutAtClosingQuote, extractLineUrls, linkKey } from "../youtube/description-links.ts";
 import { stripSummaryFactcheckBlock } from "./factcheck-block.ts";
 import {
   appendLinksSection,
@@ -553,7 +553,7 @@ export function candidateIsListed(c: LinkCandidate, titles: readonly string[]): 
   return own.length > 0 && titles.some((t) => normalizedTitle(t) === own);
 }
 
-/** A URL inside a candidate's text with no scheme: a host with a path (`github.com/obra/superpowers`), never a bare host (`rea.tools`, `Node.js`). */
+/** A URL inside a candidate's text with no scheme: a host with a path (`github.com/obra/superpowers`), never a bare host (`rea.tools`, `Node.js`); a closing quote ends it (`cutAtClosingQuote`). */
 const SCHEMELESS_URL_RE = /(?<![\w@/.-])((?:[a-z0-9-]+\.)+[a-z]{2,}\/[^\s<>()[\]"'`,;]*[^\s<>()[\]"'`,;.!?:])/gi;
 
 /** The URL keys of the URLs a candidate's own title and topic carry, with or without a scheme. */
@@ -561,7 +561,7 @@ export function candidateUrlKeys(c: Pick<LinkCandidate, "title" | "topic">): str
   const keys = new Set<string>();
   for (const text of [c.title ?? "", c.topic]) {
     for (const u of extractLineUrls(text)) keys.add(linkUrlKey(u.url));
-    for (const m of text.replace(/https?:\/\/\S+/gi, " ").matchAll(SCHEMELESS_URL_RE)) keys.add(linkUrlKey(`https://${m[1]}`));
+    for (const m of text.replace(/https?:\/\/\S+/gi, " ").matchAll(SCHEMELESS_URL_RE)) keys.add(linkUrlKey(`https://${cutAtClosingQuote(m[1]!)}`));
   }
   return [...keys];
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   authorSurname,
+  bodyUrlKeys,
   candidateIsListed,
   candidateUrlCarried,
   candidateUrlKeys,
@@ -565,6 +566,23 @@ describe("D20 filter: what hides a candidate", () => {
   test("a bare host (rea.tools, Node.js) is no URL; a host with a path is", () => {
     expect(candidateUrlKeys(cand(null, "the REA docs site, rea.tools, built on Node.js"))).toEqual([]);
     expect(candidateUrlKeys(cand(null, "see github.com/obra/superpowers."))).toEqual([linkUrlKey("https://github.com/obra/superpowers")]);
+  });
+
+  test.each([
+    ["a curly possessive", "github.com/obra/superpowers’s skills"],
+    ["a straight possessive", "github.com/obra/superpowers's skills"],
+    ["a lone curly apostrophe", "the authors’ repo github.com/obra/superpowers’ here"],
+    ["a curly closing quote", "“github.com/obra/superpowers” is the repo"],
+    ["a curly possessive after a scheme", "https://github.com/obra/superpowers’s skills"],
+  ])("a quote ends a URL the candidate names: %s", (_name, topic) => {
+    expect(candidateUrlKeys(cand(null, topic, "repo"))).toEqual([linkUrlKey("https://github.com/obra/superpowers")]);
+  });
+
+  test("a curly quote ends a URL the body carries, inline or in a markdown link", () => {
+    const want = linkUrlKey("https://github.com/obra/superpowers");
+    expect([...bodyUrlKeys("Read https://github.com/obra/superpowers’s README.")]).toEqual([want]);
+    expect([...bodyUrlKeys("Read “https://github.com/obra/superpowers” first.")]).toEqual([want]);
+    expect(carriedUrlKeys("See [superpowers](https://github.com/obra/superpowers’s).").has(want)).toBe(true);
   });
 });
 

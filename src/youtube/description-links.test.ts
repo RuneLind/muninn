@@ -9,6 +9,7 @@ import {
   descriptionForPrompt,
   DESCRIPTION_PROMPT_MAX_CHARS,
   DESCRIPTION_TRUNCATION_NOTE,
+  extractLineUrls,
   isHeadingLine,
   linkCandidates,
   trimUrl,
@@ -45,6 +46,18 @@ describe("URL extraction", () => {
     const d = "Links\n- Pat → https://x.com/patexample, https://patsite.example";
     expect(classes(d)).toEqual({ "https://x.com/patexample": "social", "https://patsite.example": "candidate" });
     expect(link(d, "https://patsite.example").title).toBe("Pat");
+  });
+
+  test("a curly closing quote that ends a word ends the URL; one inside an anchor does not", () => {
+    const urls = (line: string) => extractLineUrls(line).map((u) => u.url);
+    expect(urls("Read https://repo.example/obra/superpowers’s README")).toEqual(["https://repo.example/obra/superpowers"]);
+    expect(urls("the authors’ https://repo.example/obra/superpowers’ here")).toEqual(["https://repo.example/obra/superpowers"]);
+    expect(urls("“https://repo.example/obra/superpowers” first")).toEqual(["https://repo.example/obra/superpowers"]);
+    expect(urls("[it](https://repo.example/obra/superpowers’s)")).toEqual(["https://repo.example/obra/superpowers"]);
+    expect(urls("See https://docs.example/en/skills.md#restrict-claude’s-skill-access now")).toEqual([
+      "https://docs.example/en/skills.md#restrict-claude’s-skill-access",
+    ]);
+    expect(urls("See https://docs.example/en/review.md#a-repository-isn’t-listed")).toEqual(["https://docs.example/en/review.md#a-repository-isn’t-listed"]);
   });
 });
 
