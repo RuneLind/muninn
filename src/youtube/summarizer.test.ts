@@ -305,8 +305,16 @@ let regrabPartial = 0;
 /** The path of the "downloaded video", so a case can check when it was unlinked. */
 let lastVideoPath = "";
 
+/** What the repo-line lookup answers, and which URLs it was asked for — never the network. */
+let repoLineAnswer: string | null = null;
+let repoLineCalls: string[] = [];
+
 function deps() {
   return {
+    repoLine: async (url: string): Promise<string | null> => {
+      repoLineCalls.push(url);
+      return repoLineAnswer;
+    },
     probeVideoInfo: async (url: string, opts: { timeoutMs?: number }) => {
       probeCalls.push(url);
       probeTimeouts.push(opts.timeoutMs);
@@ -1858,11 +1866,32 @@ describe("the description's links", () => {
 
   test("a picked repo joins the section; an id outside the list is dropped", async () => {
     probeAnswer = withDescription(DESCRIPTION);
+    repoLineAnswer = null;
+    repoLineCalls = [];
     claudeResult = "CATEGORY: ai/rag\nLINKS: 2, 9\n\nSUMMARY:\n### Heading\n- point";
     const jobId = await run();
     const summary = getJob(jobId)?.summary ?? "";
+    // The lookup answered nothing: the plain line.
     expect(summary).toContain("- 📦 [Harness](https://github.com/example/harness) · from description");
     expect(summary).not.toContain("9");
+    expect(repoLineCalls).toEqual(["https://github.com/example/harness"]);
+  });
+
+  test("a picked GitHub repo carries the lookup's detail line", async () => {
+    probeAnswer = withDescription(DESCRIPTION);
+    repoLineAnswer = "An invented harness, TypeScript, MIT, ★ 2.1k on 2026-10-25";
+    repoLineCalls = [];
+    claudeResult = "CATEGORY: ai/rag\nLINKS: 2\n\nSUMMARY:\n### Heading\n- point";
+    try {
+      const jobId = await run();
+      expect(getJob(jobId)?.summary ?? "").toContain(
+        "- 📦 [Harness](https://github.com/example/harness) — An invented harness, TypeScript, MIT, ★ 2.1k on 2026-10-25 · from description",
+      );
+      // The source line is not a repo: looked up never.
+      expect(repoLineCalls).toEqual(["https://github.com/example/harness"]);
+    } finally {
+      repoLineAnswer = null;
+    }
   });
 
   test("a LINKS line as the LAST line, with no SUMMARY marker, is kept out of the body", async () => {

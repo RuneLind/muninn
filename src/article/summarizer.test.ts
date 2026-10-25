@@ -1,4 +1,4 @@
-import { test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { test, expect, beforeEach, afterEach, afterAll, mock } from "bun:test";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 
@@ -66,6 +66,25 @@ const { buildXArticleSystemPrompt } = await import("../x-article/prompt.ts");
 const { buildAnthropicSystemPrompt } = await import("../anthropic/prompt.ts");
 const { createJob, getJob } = await import("./state.ts");
 
+/**
+ * The attributes the `claude` span was STARTED with — where `extraTraceAttrs`
+ * (`linkTraceAttrs`) lands. The real prototype is patched rather than a module
+ * mocked, so the chain `runCaptureOneShot` → `tracedOneShot` → `tracer.start`
+ * stays under test. `afterAll` puts the real method back: `test:coverage` runs
+ * every file in one process, where an unrestored patch would reach other suites.
+ */
+let lastClaudeSpanAttrs: Record<string, unknown> | undefined;
+const { Tracer } = await import("../tracing/tracer.ts");
+const realTracerStart = Tracer.prototype.start;
+Tracer.prototype.start = function patchedStart(
+  this: InstanceType<typeof Tracer>,
+  label: string,
+  attributes?: Record<string, unknown>,
+) {
+  if (label === "claude") lastClaudeSpanAttrs = attributes;
+  return realTracerStart.call(this, label, attributes);
+};
+
 const config = { knowledgeApiUrl: "http://kb.test", claudeTimeoutMs: 120_000 } as unknown as Config;
 const bot = { name: "jarvis", dir: "/tmp/bot", model: "sonnet" } as unknown as BotConfig;
 
@@ -79,12 +98,27 @@ beforeEach(() => {
   lastPrompt = "";
   lastSystemPrompt = "";
   lastToolSurface = undefined;
+  lastClaudeSpanAttrs = undefined;
   sourceDraftCalls = [];
   installFetchMock();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+afterAll(() => {
+  Tracer.prototype.start = realTracerStart;
+});
+
+test("the article's own address is not listed (M13b)", async () => {
+  const body = `Originally at [the headline](${ART_URL}), citing https://example.org/paper.`;
+  const jobId = createJob("Pasted Article", ART_URL, "Someone");
+  await summarizeArticle(jobId, "Pasted Article", ART_URL, "Someone", body, config, bot, {
+    resolveRedirect: async () => null,
+    repoLine: async () => null,
+  });
+  expect(lastPrompt).toBe(`${body}\n\n## Links in the text\n\n1. example.org/paper — https://example.org/paper`);
 });
 
 test("fires the source-draft trigger with the huginn file_path docId, category, and url", async () => {
@@ -181,4 +215,35 @@ test("a paste with no url and no author omits those lines rather than sending bl
   expect(lastSystemPrompt).toBe(buildArticleSystemPrompt({ title: "No URL Article" }));
   expect(lastSystemPrompt).not.toContain("Article author:");
   expect(lastSystemPrompt).not.toContain("Article URL:");
+});
+
+// --- The paste's links (plan muninn-summary-links, PR 2) --------------------
+
+test("a pasted article's markdown links reach the list and the picked ones the section, plain without a repo detail", async () => {
+  claudeResult = "CATEGORY: ai/general\nLINKS: 1, 2, 7\n\nSUMMARY:\n### Heading\n- point";
+  const body =
+    "An invented paste citing [the paper](https://example.org/paper) and [a harness](https://github.com/example/harness).";
+  const jobId = createJob("Pasted Article", ART_URL, "Someone");
+  await summarizeArticle(jobId, "Pasted Article", ART_URL, "Someone", body, config, bot, {
+    repoLine: async () => null,
+  });
+  expect(lastPrompt).toBe(
+    `${body}\n\n## Links in the text\n\n1. the paper — https://example.org/paper\n2. a harness — https://github.com/example/harness [code or paper]`,
+  );
+  // The owner check reads these off the `claude` span on /traces.
+  expect(lastClaudeSpanAttrs).toMatchObject({
+    source: "article",
+    linkCandidates: "2",
+    linkCandidatesTruncated: "0",
+    tcoFound: "0",
+    tcoResolved: "0",
+  });
+  expect(lastSystemPrompt).toBe(
+    buildArticleSystemPrompt({ title: "Pasted Article", author: "Someone", url: ART_URL, linksStep: true }),
+  );
+  expect(getJob(jobId)!.summary).toBe(
+    "### Heading\n- point\n\n## Links\n\n" +
+      "- 📄 [the paper](https://example.org/paper) · from text\n" +
+      "- 📦 [a harness](https://github.com/example/harness) · from text",
+  );
 });

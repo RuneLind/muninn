@@ -575,6 +575,8 @@ for (let run = 1; run <= args.runs; run++) {
         uploader: args.probe?.uploader ?? "replay",
         ...(args.probe ? { description: args.probe.description } : {}),
       }),
+      // No GitHub API call either: a picked repo link gets the plain line.
+      repoLine: async () => null,
       // The summarizer UNLINKS what the download hands it, so the fixture is
       // copied into the work dir rather than handed over.
       downloadVideo: async (_url: string, workDir: string): Promise<DownloadResult> => {

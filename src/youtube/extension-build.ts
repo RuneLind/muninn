@@ -34,23 +34,50 @@ export const EXTENSION_RULES_ENTRY = join(REPO_ROOT, "src/youtube/extension-opti
 export const EXTENSION_RULES_OUTPUT = join(REPO_ROOT, "extensions/youtube/capture-rules.js");
 
 /**
+ * One emitted extension file: its entry, where the copy is checked in, and its
+ * format. Each output has its own byte gate in a co-located test.
+ *
+ * - `capture-rules.js` stays ESM: the YouTube popup and service worker import it.
+ * - `html-to-markdown.js` is an IIFE: the X extension's content script is a
+ *   classic script and cannot import a module, so the wrapper entry assigns
+ *   `globalThis.muninnHtmlToMarkdown` and the manifest lists the file before
+ *   `content.js`.
+ */
+export interface ExtensionOutput {
+  readonly name: string;
+  readonly entry: string;
+  readonly output: string;
+  readonly format: "esm" | "iife";
+}
+
+export const EXTENSION_OUTPUTS: readonly ExtensionOutput[] = [
+  { name: "youtube capture rules", entry: EXTENSION_RULES_ENTRY, output: EXTENSION_RULES_OUTPUT, format: "esm" },
+  {
+    name: "x-article html-to-markdown",
+    entry: join(REPO_ROOT, "src/summaries/html-to-markdown.extension.ts"),
+    output: join(REPO_ROOT, "extensions/x-article/html-to-markdown.js"),
+    format: "iife",
+  },
+];
+
+/**
  * Bun's per-module banner, rewritten from cwd-relative to repo-root-relative.
  *
  * The bundler strips every other comment, so the only `// …` lines in the
- * output are these banners — one per bundled module, one today (the rules
- * module is import-free by contract). Each is resolved against the CURRENT cwd,
+ * output are these banners — one per bundled module, indented inside an IIFE
+ * (two modules in the X output). Each is resolved against the CURRENT cwd,
  * which is what bun wrote it relative to, and re-expressed against the repo
  * root with forward slashes.
  */
 function normalizeModuleBanners(text: string): string {
-  return text.replace(/^\/\/ (\S.*\.tsx?)$/gm, (_line, emitted: string) => {
+  return text.replace(/^([ \t]*)\/\/ (\S.*\.tsx?)$/gm, (_line, indent: string, emitted: string) => {
     const abs = isAbsolute(emitted) ? emitted : resolve(process.cwd(), emitted);
-    return `// ${relative(REPO_ROOT, abs).split(sep).join("/")}`;
+    return `${indent}// ${relative(REPO_ROOT, abs).split(sep).join("/")}`;
   });
 }
 
 /**
- * Bundle the rules module for the popup and write it to `outfile`. Returns the
+ * Bundle one output for the browser and write it to `outfile`. Returns the
  * bytes it wrote.
  *
  * The bundle is taken in memory and written here rather than through `outdir` +
@@ -59,16 +86,21 @@ function normalizeModuleBanners(text: string): string {
  * slicing off `dirname(outfile)` broke on the first two — and the normalization
  * above has somewhere to run.
  */
-export async function buildExtensionRules(outfile: string): Promise<string> {
+export async function buildExtensionOutput(spec: ExtensionOutput, outfile: string): Promise<string> {
   const result = await Bun.build({
-    entrypoints: [EXTENSION_RULES_ENTRY],
+    entrypoints: [spec.entry],
     target: "browser",
-    format: "esm",
+    format: spec.format,
   });
   if (!result.success) {
-    throw new Error(`build:extension failed:\n${result.logs.map(String).join("\n")}`);
+    throw new Error(`build:extension (${spec.name}) failed:\n${result.logs.map(String).join("\n")}`);
   }
   const text = normalizeModuleBanners(await result.outputs[0]!.text());
   await Bun.write(resolve(outfile), text);
   return text;
+}
+
+/** The YouTube popup's rules, the first output — what the original byte gate re-runs. */
+export async function buildExtensionRules(outfile: string): Promise<string> {
+  return buildExtensionOutput(EXTENSION_OUTPUTS[0]!, outfile);
 }

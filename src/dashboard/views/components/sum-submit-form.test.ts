@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { captureUrlFormHtml, sumSubmitFormHtml, sumSubmitFormScript } from "./sum-submit-form.ts";
+import { parseHtml } from "../../../test/mini-dom.ts";
 
 /**
  * Harness for the INJECTED half of the two capture entries — the
@@ -85,6 +86,8 @@ interface Harness {
   submitCaptureUrlFromInput: () => Promise<void>;
   submitArticle: () => Promise<void>;
   detectCaptureProvider: (url: unknown) => string | null;
+  /** Fire a paste on the article textarea; answers whether the script took it over. */
+  paste: (clipboard: { types: string[]; data: Record<string, string> }) => boolean;
 }
 
 /** What the harness lets a case set up BEFORE the script runs. */
@@ -116,6 +119,7 @@ function harness(
   };
 
   const changeListeners: Record<string, Array<() => void>> = {};
+  const pasteListeners: Record<string, Array<(e?: unknown) => void>> = {};
   const element = (id: string) => ({
     get value() {
       return values[id] ?? "";
@@ -128,8 +132,18 @@ function harness(
     textContent: "Summarize",
     // A select's options, as the server rendered them; a text field has none.
     options: (setup.selects?.[id] ?? []).map((value) => ({ value })),
-    addEventListener(type: string, fn: () => void) {
+    addEventListener(type: string, fn: (e?: unknown) => void) {
       if (type === "change") (changeListeners[id] ??= []).push(fn);
+      if (type === "paste") (pasteListeners[id] ??= []).push(fn);
+    },
+    // The textarea's paste insert: replace the selection (here: append).
+    selectionStart: 0,
+    selectionEnd: 0,
+    setRangeText(text: string) {
+      values[id] = (values[id] ?? "") + text;
+    },
+    dispatchEvent() {
+      return true;
     },
   });
   // A select with options starts on its FIRST one, like a real <select>.
@@ -194,6 +208,15 @@ function harness(
     captureStreamIsLive: () => streamLive,
     showDuplicateBanner: () => {},
     openSummaryDoc: () => {},
+    // The browser's parser, played by the test shim over the same markup.
+    DOMParser: class {
+      parseFromString(html: string) {
+        return { body: parseHtml(html) };
+      }
+    },
+    Event: class {
+      constructor(readonly type: string) {}
+    },
   };
 
   const prelude = [
@@ -211,6 +234,8 @@ function harness(
     "var captureStreamIsLive = ctx.captureStreamIsLive;",
     "var showDuplicateBanner = ctx.showDuplicateBanner;",
     "var openSummaryDoc = ctx.openSummaryDoc;",
+    "var DOMParser = ctx.DOMParser;",
+    "var Event = ctx.Event;",
   ].join("\n");
 
   const made = new Function(
@@ -264,9 +289,48 @@ function harness(
     },
     checked: (id: string) => doc.getElementById(id).checked,
     stored: () => ({ ...stored }),
+    paste: (clipboard) => {
+      let prevented = false;
+      const event = {
+        clipboardData: { types: clipboard.types, getData: (t: string) => clipboard.data[t] ?? "" },
+        preventDefault: () => {
+          prevented = true;
+        },
+        target: doc.getElementById("articleText"),
+      };
+      for (const fn of pasteListeners.articleText ?? []) fn(event);
+      return prevented;
+    },
     ...made,
   };
 }
+
+describe("sum-submit-form: pasting HTML into the article box", () => {
+  /** Invented page markup, two anchors. */
+  const HTML =
+    '<meta charset="utf-8"><p>An invented post that cites <a href="https://example.org/paper">the paper</a> ' +
+    'and <a href="https://github.com/example/harness">a harness</a>.</p>';
+
+  test("a text/html clipboard goes in as markdown, both hrefs kept", () => {
+    const h = harness({ status: 200, body: {} });
+    const took = h.paste({ types: ["text/plain", "text/html"], data: { "text/html": HTML, "text/plain": "plain" } });
+    expect(took).toBe(true);
+    expect(h.articleValue()).toBe(
+      "An invented post that cites [the paper](https://example.org/paper) and [a harness](https://github.com/example/harness).",
+    );
+  });
+
+  test("a text/plain-only clipboard is left to the browser", () => {
+    const h = harness({ status: 200, body: {} });
+    expect(h.paste({ types: ["text/plain"], data: { "text/plain": "plain words" } })).toBe(false);
+    expect(h.articleValue()).toBe("");
+  });
+
+  test("an HTML flavour with no text falls back to the browser's paste", () => {
+    const h = harness({ status: 200, body: {} });
+    expect(h.paste({ types: ["text/html"], data: { "text/html": "<img src=x>" } })).toBe(false);
+  });
+});
 
 describe("sum-submit-form: the bare-link alert", () => {
   test("is byte-identical in the rendered script", () => {

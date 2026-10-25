@@ -12,7 +12,12 @@
  *    the Chrome extension, so a bare URL pasted there still points the user at
  *    the extension rather than trying (and failing) to fetch the page — EXCEPT a
  *    Vimeo link, which is forwarded to the same submit the URL field uses, so
- *    pasting into the wrong box works. */
+ *    pasting into the wrong box works. A paste whose clipboard carries
+ *    `text/html` is converted to markdown by the shared walk
+ *    (`src/summaries/html-to-markdown.ts`, injected by its source), so the
+ *    article's links keep their hrefs; a plain-text clipboard pastes as it is. */
+
+import { htmlToMarkdown } from "../../../summaries/html-to-markdown.ts";
 
 export function sumSubmitFormStyles(): string {
   return `
@@ -297,6 +302,35 @@ export function sumSubmitFormScript(): string {
         btn.textContent = 'Summarize';
       }
     }
+
+    // A paste with an HTML flavour (a copied web page) goes in as markdown, so
+    // \`[text](href)\` keeps every link the page had; the plain-text flavour
+    // would keep only the words. The walk is the shared one, injected by source.
+    ${htmlToMarkdown.toString()}
+
+    function pastedHtmlAsMarkdown(clipboard) {
+      if (!clipboard || typeof clipboard.getData !== 'function') return null;
+      var types = Array.prototype.slice.call(clipboard.types || []);
+      if (types.indexOf('text/html') < 0) return null;
+      var html = clipboard.getData('text/html');
+      if (!html || typeof DOMParser === 'undefined') return null;
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var md = htmlToMarkdown(doc.body);
+      return md && md.trim() ? md : null;
+    }
+
+    document.getElementById('articleText').addEventListener('paste', function(e) {
+      var md = pastedHtmlAsMarkdown(e.clipboardData);
+      if (md === null) return; // text/plain: the browser's own paste
+      e.preventDefault();
+      var el = e.target;
+      if (typeof el.setRangeText === 'function') {
+        el.setRangeText(md, el.selectionStart, el.selectionEnd, 'end');
+      } else {
+        el.value = el.value + md;
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    });
 
     // Ctrl/Cmd+Enter in the textarea submits (a plain Enter is a newline).
     document.getElementById('articleText').addEventListener('keydown', function(e) {

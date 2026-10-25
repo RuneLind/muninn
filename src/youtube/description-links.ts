@@ -180,10 +180,56 @@ function isContentHost(host: string): boolean {
   return false;
 }
 
-/** Rule 4: a code or paper host. */
-function isRepoUrl(url: URL): boolean {
+/** Whether `hostname` is a known link shortener. Shared with the text links' resolver (`src/summaries/text-links-run.ts`). */
+export function isShortenerHost(hostname: string): boolean {
+  return SHORTENER_HOSTS.has(bareHost(hostname));
+}
+
+/** First path segments on github.com that are not an owner. */
+const GITHUB_NOT_OWNERS = new Set([
+  "about", "apps", "collections", "customer-stories", "enterprise", "events", "explore", "features",
+  "issues", "login", "marketplace", "new", "notifications", "orgs", "pricing", "pulls", "search",
+  "security", "settings", "site", "sponsors", "topics", "trending",
+]);
+
+const GITHUB_NAME_RE = /^[A-Za-z0-9_.-]+$/;
+
+/**
+ * `{owner, repo}` for a github.com URL inside a repo (any page in it), or null.
+ * The ONE rule for "is it a GitHub repo": `isRepoUrl` and the repo-line lookup
+ * (`src/summaries/github-repo.ts`) both read it.
+ */
+export function githubRepoOf(url: string | URL): { owner: string; repo: string } | null {
+  let parsed: URL;
+  try {
+    parsed = typeof url === "string" ? new URL(url) : url;
+  } catch {
+    return null;
+  }
+  if (bareHost(parsed.hostname) !== "github.com") return null;
+  const [owner, rawRepo] = pathSegments(parsed);
+  if (!owner || !rawRepo || GITHUB_NOT_OWNERS.has(owner.toLowerCase())) return null;
+  const repo = rawRepo.replace(/\.git$/i, "");
+  return GITHUB_NAME_RE.test(owner) && GITHUB_NAME_RE.test(repo) && repo !== "." && repo !== ".." ? { owner, repo } : null;
+}
+
+/**
+ * A section line's icon, ONE rule for the description and the text links: `📦`
+ * for a `repo`-class link that is a GitHub repo root or a gist, Hugging Face or
+ * arXiv page; `📄` for everything else, a pull request, issue, file or tree page
+ * inside a repo included. A default-branch `/tree/<branch>` line turns `📦`
+ * only when the repo lookup confirms the branch (`withRepoDetails`).
+ */
+export function linkLineIcon(url: string, cls: DescriptionLinkClass): "📦" | "📄" {
+  if (cls !== "repo") return "📄";
+  if (githubRepoOf(url) === null) return "📦";
+  return pathSegments(new URL(url)).length === 2 ? "📦" : "📄";
+}
+
+/** Rule 4: a code or paper host. Shared with the text classifier (`src/summaries/text-links.ts`). */
+export function isRepoUrl(url: URL): boolean {
   const host = bareHost(url.hostname);
-  if (host === "github.com") return pathSegments(url).length >= 2;
+  if (host === "github.com") return githubRepoOf(url) !== null;
   return host === "gist.github.com" || hostIs(host, "huggingface.co") || hostIs(host, "arxiv.org");
 }
 
@@ -258,9 +304,15 @@ export function extractLineUrls(line: string): LineUrl[] {
   return out.sort((a, b) => a.index - b.index);
 }
 
-/** The dedup key: the normalized destination, else the URL itself. */
+/**
+ * The dedup key: the normalized destination, else the URL itself. GitHub owner
+ * and repo names are case-insensitive, so on github.com those two segments are
+ * lowercased (`NirDiamant/X` and `nirdiamant/X` are one repo).
+ */
 export function linkKey(url: string): string {
-  return normalizeDestinationUrl(url) ?? url;
+  const key = normalizeDestinationUrl(url) ?? url;
+  const m = /^(https:\/\/github\.com\/)([^/?#]+)(\/[^/?#]+)?/i.exec(key);
+  return m ? `${m[1]}${m[2]!.toLowerCase()}${(m[3] ?? "").toLowerCase()}${key.slice(m[0].length)}` : key;
 }
 
 function hasUrl(line: string): boolean {
@@ -517,6 +569,21 @@ function splitAttribution(title: string): { title: string; attribution: string }
   const m = /^(.*\S)\s*\(([^()]+)\)$/.exec(title);
   if (!m) return { title, attribution: "" };
   return { title: m[1]!.trim(), attribution: m[2]!.trim() };
+}
+
+/** A lead-in that names the URL after it: it ends in ` — `, `: ` or ` - `. */
+const LEAD_IN_END_RE = /(?:\s—|:|\s-)\s+$/u;
+
+/**
+ * The title a text capture gives a bare URL from the words before it on its
+ * line (`6. Building Agents — https://…` → `Building Agents`), cleaned like a
+ * description title; "" when those words do not end in a separator or are only
+ * a generic label (`Links:`).
+ */
+export function leadInTitle(before: string): string {
+  if (!LEAD_IN_END_RE.test(before)) return "";
+  const title = unwrapTitle(cleanTitle(before));
+  return GENERIC_LABEL_RE.test(title) ? "" : title.slice(0, TITLE_MAX);
 }
 
 /** `host/path`, the fallback title. */

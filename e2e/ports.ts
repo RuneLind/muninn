@@ -130,6 +130,11 @@ export const E2E_PORTS = {
   // pointed at, so the re-summarize spends no model call.
   "summaries-rerun": 3055,
   "summaries-rerun/fake": 3056,
+  // The article paste form keeps a pasted page's hrefs into the stored Links
+  // section. ONE fake plays huginn's article ingest and the OpenAI-compatible
+  // endpoint the throwaway summarizer bot is pointed at (the re-run shape).
+  "summaries-paste-links": 3168,
+  "summaries-paste-links/fake": 3169,
   // The reader's provenance strip and the chain it opens, end to end. ONE fake
   // `node:http` server plays claude-usage's `GET /api/sessions-by-id` and
   // `GET /api/merges` — pricing one of the fixture's two sessions and OMITTING
