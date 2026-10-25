@@ -46,6 +46,7 @@ import { joinPromptPieces, type PromptPiece } from "./prompt-pieces.ts";
 import type { Keyframe } from "../video/media.ts";
 
 import { buildYouTubeUserPrompt, youTubeSystemPromptPieces } from "../youtube/prompt.ts";
+import { classifyDescriptionLinks, descriptionForPrompt, linkCandidates } from "../youtube/description-links.ts";
 import { buildVimeoUserPrompt, vimeoSystemPromptPieces } from "../vimeo/prompt.ts";
 import {
   TIKTOK_PROMPT_SPEC,
@@ -108,6 +109,25 @@ export const PLACEHOLDER_XVIDEO_URL = "https://x.com/placeholder/status/12345678
  * an inspection page may talk its way past.
  */
 export const PLACEHOLDER_YOUTUBE_ID = "placeholder";
+
+/**
+ * An invented description: one source block, one repo outside it, one funnel
+ * and one profile — so the YouTube cell shows the description section, the
+ * numbered link list and the `LINKS:` step, and the promo lines dropped.
+ */
+export const PLACEHOLDER_YOUTUBE_UPLOADER = "Placeholder Channel";
+export const PLACEHOLDER_YOUTUBE_DESCRIPTION = [
+  "A walk through one measurement and the change that moved it.",
+  "",
+  "🎁 Free checklist → https://go.placeholderchannel.example/checklist",
+  "",
+  "SOURCES MENTIONED",
+  "• The measurement write-up (Example Lab, A. Author): https://example.org/blog/the-measurement",
+  "",
+  "Code: https://github.com/example/measurement-harness",
+  "",
+  "Follow me: https://x.com/placeholderchannel",
+].join("\n");
 export const PLACEHOLDER_VIMEO_ID = "1234567890";
 
 /** Where the placeholder frames pretend to live — a job work dir that never existed. */
@@ -231,11 +251,16 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     // and `frames.some((f) => (f.note ?? "") !== "")` in `buildYouTubeUserPrompt`.
     // The note also feeds `visualDetailPolicy`'s must-quote rule, which lives in
     // the `detailed` branch and is therefore NOT in what this row shows.
+    // The description axes, from `buildYouTubeUserPrompt`'s `description` input
+    // (the section is present whenever a description is) and `linksStep` in the
+    // system pieces (present only when the classifier left a link to pick).
     fixedAxes: [
       "windowed transcript: yes",
       "frames: two, so the cadence clause is present",
       "one frame carries a selection note",
       "visual detail: selected",
+      "description: present",
+      "links list: present",
     ],
     readsVisualDetail: true,
   },
@@ -434,18 +459,23 @@ function structureChip(preset: CapturePreset): string {
 
 /**
  * The chips the system prompt's own pieces contribute, minus the structure one.
+ * Exported for its test.
  *
  * A piece whose text is only whitespace contributes NO chip: it is a separator
  * between two parts, not a part. The Vimeo intro split produces one (the `\n\n`
  * between the intro block and the envelope), and without this the cell listed
  * "intro" twice.
  */
-function pieceChips(pieces: readonly PromptPiece[], preset: CapturePreset | null): string[] {
-  return pieces
-    .filter((p) => p.text.trim() !== "")
-    .map((p) =>
-      p.id === "structure" && preset !== null ? structureChip(preset) : p.label.toLowerCase(),
-    );
+export function pieceChips(pieces: readonly PromptPiece[], preset: CapturePreset | null): string[] {
+  return (
+    pieces
+      .filter((p) => p.text.trim() !== "")
+      // One part in two spans (the envelope split around YouTube's `LINKS:` step)
+      // is still one chip: only that second span folds, so two distinct pieces
+      // that share a label still show two chips.
+      .filter((p) => p.id !== "envelope-summary" || !pieces.some((q) => q.id === "envelope" && q.text.trim() !== ""))
+      .map((p) => (p.id === "structure" && preset !== null ? structureChip(preset) : p.label.toLowerCase()))
+  );
 }
 
 /** Where a per-bot override of this kind would live, and whether it is there. */
@@ -474,19 +504,24 @@ function cellPrompts(
   preset: CapturePreset | null,
 ): { pieces: PromptPiece[]; userPrompt: string } {
   switch (source.id) {
-    case "youtube":
+    case "youtube": {
+      const links = classifyDescriptionLinks(PLACEHOLDER_YOUTUBE_DESCRIPTION, PLACEHOLDER_YOUTUBE_UPLOADER);
+      const candidates = linkCandidates(links);
       return {
         pieces: youTubeSystemPromptPieces(preset!, {
           windowed: true,
           title: PLACEHOLDER_TITLE,
           videoUrl: `https://www.youtube.com/watch?v=${PLACEHOLDER_YOUTUBE_ID}`,
+          linksStep: candidates.length > 0,
         }),
         userPrompt: buildYouTubeUserPrompt(PLACEHOLDER_WINDOWED_TRANSCRIPT, {
           videoId: PLACEHOLDER_YOUTUBE_ID,
           frames: PLACEHOLDER_FRAMES,
           visualDetail: DEFAULT_VISUAL_DETAIL,
+          description: { text: descriptionForPrompt(PLACEHOLDER_YOUTUBE_DESCRIPTION, links), candidates },
         }),
       };
+    }
     case "vimeo":
       return {
         pieces: vimeoSystemPromptPieces({

@@ -5,11 +5,11 @@
  * and the export (huginn #139 accepts them on `/api/youtube/ingest`).
  *
  * Sources, in order:
- *   - the yt-dlp probe, which runs only on a frames-on capture. Its sentinels
- *     count as absent: `parseYtDlpJson` maps a missing duration to `0` and a
+ *   - the yt-dlp probe (`./probe.ts`), which every capture runs. Its sentinels
+ *     count as absent: `ytDlpInfoFromRecord` (behind `parseYtDlpJson` and the YouTube probe) maps a missing duration to `0` and a
  *     missing uploader to `""`, and yt-dlp omits `upload_date` for live and
  *     upcoming videos.
- *   - YouTube oEmbed, for `author` alone, when the probe did not run or named
+ *   - YouTube oEmbed, for `author` alone, when the probe failed or named
  *     nobody. Bounded at 5 s, and a failure omits the field — never the capture.
  *
  * Nothing estimated is stored: `duration_sec` means an EXACT length here, as it

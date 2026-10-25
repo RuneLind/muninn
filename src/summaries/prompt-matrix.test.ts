@@ -25,7 +25,8 @@ import {
 } from "./presets.ts";
 import { SHORT_VIDEO_THINKING } from "../video/short-video-kinds.ts";
 import { buildTakeawayCheckPrompt } from "./takeaway-check.ts";
-import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../youtube/prompt.ts";
+import { LINKS_STEP_TEXT, buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../youtube/prompt.ts";
+import { classifyDescriptionLinks, descriptionForPrompt, linkCandidates } from "../youtube/description-links.ts";
 import { buildVimeoSystemPrompt, buildVimeoUserPrompt } from "../vimeo/prompt.ts";
 import {
   TIKTOK_PROMPT_SPEC,
@@ -53,10 +54,13 @@ import {
   PLACEHOLDER_XVIDEO_URL,
   PLACEHOLDER_WINDOWED_TRANSCRIPT,
   PLACEHOLDER_XARTICLE_URL,
+  PLACEHOLDER_YOUTUBE_DESCRIPTION,
   PLACEHOLDER_YOUTUBE_ID,
+  PLACEHOLDER_YOUTUBE_UPLOADER,
   PROMPT_MATRIX_SOURCES,
   buildPromptMatrix,
   noKindChip,
+  pieceChips,
   type PromptMatrix,
   type PromptMatrixCell,
 } from "./prompt-matrix.ts";
@@ -162,6 +166,7 @@ describe("the chips", () => {
     expect(cell(matrix, "youtube", "standard").chips).toEqual([
       "intro",
       "category/summary envelope",
+      "links: step",
       "structure bullets",
       "windowed transcript rider",
       "video context",
@@ -351,13 +356,19 @@ describe("the prompts", () => {
         windowed: true,
         title: PLACEHOLDER_TITLE,
         videoUrl: `https://www.youtube.com/watch?v=${PLACEHOLDER_YOUTUBE_ID}`,
+        linksStep: true,
       }),
     );
+    const placeholderLinks = classifyDescriptionLinks(PLACEHOLDER_YOUTUBE_DESCRIPTION, PLACEHOLDER_YOUTUBE_UPLOADER);
     expect(cell(matrix, "youtube", "standard").userPrompt).toBe(
       buildYouTubeUserPrompt(PLACEHOLDER_WINDOWED_TRANSCRIPT, {
         videoId: PLACEHOLDER_YOUTUBE_ID,
         frames: PLACEHOLDER_FRAMES,
         visualDetail: "selected",
+        description: {
+          text: descriptionForPrompt(PLACEHOLDER_YOUTUBE_DESCRIPTION, placeholderLinks),
+          candidates: linkCandidates(placeholderLinks),
+        },
       }),
     );
     expect(cell(matrix, "vimeo", "standard").systemPrompt).toBe(
@@ -451,8 +462,9 @@ describe("the prompts", () => {
 Instructions:
 1. Start your response with EXACTLY this line: CATEGORY: <category>
    Choose from: ai/claude-code, ai/claude, ai/openclaw, ai/general, ai/rag, health, tech, career, parenting, entertainment, coding
-2. Then add a blank line, then SUMMARY: on its own line
-3. Then write a structured summary with:
+2. ${LINKS_STEP_TEXT}
+3. Then add a blank line, then SUMMARY: on its own line
+4. Then write a structured summary with:
    - One bullet, and nothing else.
 
 The transcript is grouped into windows, each opened by a \`### [HH:MM:SS]\` heading carrying its absolute position in the video; those headings are positions, not content — never quote one as if it were speech.
@@ -581,7 +593,19 @@ describe("the fixed axes the page pins", () => {
       "frames: two, so the cadence clause is present",
       "one frame carries a selection note",
       "visual detail: selected",
+      "description: present",
+      "links list: present",
     ]);
+    // The description axes: the section and the numbered list in the user
+    // prompt, and the `LINKS:` step in the system pieces. The funnel and the
+    // profile line are gone from the description the prompt carries.
+    expect(cell(matrix, "youtube", "standard").systemPieces.map((p) => p.id)).toContain("links-step");
+    expect(cell(matrix, "youtube", "standard").userPrompt).toContain("## Video description");
+    expect(cell(matrix, "youtube", "standard").userPrompt).toContain(
+      "## Links in the description\n\n1. The measurement write-up (Example Lab, A. Author) — https://example.org/blog/the-measurement [listed as a source]",
+    );
+    expect(cell(matrix, "youtube", "standard").userPrompt).not.toContain("go.placeholderchannel.example");
+    expect(cell(matrix, "youtube", "standard").userPrompt).not.toContain("x.com/placeholderchannel");
     expect(cell(matrix, "youtube", "standard").systemPieces.map((p) => p.id)).toContain("rider-windowed");
     const youtubeUser = cell(matrix, "youtube", "standard").userPrompt;
     // TWO frames, 60 s apart, so `framesPromptSection` states the cadence — a
@@ -766,5 +790,17 @@ describe("the module graph", () => {
     // The walk really walked: the verticals' builders are on the far side of it.
     expect([...reached]).toContain(resolve(SRC, "youtube/prompt.ts"));
     expect([...reached]).toContain(resolve(SRC, "summaries/prompt-pieces.ts"));
+  });
+});
+
+describe("pieceChips", () => {
+  test("only the envelope's second span folds into its first; two distinct same-labelled pieces keep two chips", () => {
+    const pieces = [
+      { id: "envelope", label: "CATEGORY/SUMMARY envelope", text: "a" },
+      { id: "rule-a", label: "Rule", text: "b" },
+      { id: "rule-b", label: "Rule", text: "c" },
+      { id: "envelope-summary", label: "CATEGORY/SUMMARY envelope", text: "d" },
+    ];
+    expect(pieceChips(pieces, null)).toEqual(["category/summary envelope", "rule", "rule"]);
   });
 });

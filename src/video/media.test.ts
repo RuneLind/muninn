@@ -8,7 +8,6 @@ import {
   parseYtDlpJson,
   parseShowinfoTimestamps,
   ytDlpDownloadArgs,
-  ytDlpProbeArgs,
   YTDLP_INFO_TEMPLATE,
   YTDLP_FORMAT_SELECTOR,
 } from "./media.ts";
@@ -293,19 +292,15 @@ test("ytDlpDownloadArgs is byte-identical to the pre-`format` argv when no forma
   ]);
 });
 
-test("neither yt-dlp argv asks for the full info JSON", () => {
+test("the download argv does not ask for the full info JSON", () => {
   // A YouTube info JSON measured 11.7 MB, past runProc's 8 MB cap: the capped
-  // read closed the pipe and yt-dlp exited 1 with `Broken pipe`, so the probe
-  // returned null (slides skipped) and the download threw.
-  for (const args of [
-    ytDlpProbeArgs("https://x.test/v"),
-    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 }),
-  ]) {
-    expect(args).not.toContain("--dump-json");
-    expect(args).not.toContain("--print-json");
-    expect(args).not.toContain("-j");
-    expect(args).not.toContain("-J");
-  }
+  // read closed the pipe and yt-dlp exited 1 with `Broken pipe`, so the
+  // download threw. (The YouTube probe's argv is pinned in its own test.)
+  const args = ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 });
+  expect(args).not.toContain("--dump-json");
+  expect(args).not.toContain("--print-json");
+  expect(args).not.toContain("-j");
+  expect(args).not.toContain("-J");
 });
 
 test("the info template carries every field parseYtDlpJson reads", () => {
@@ -377,12 +372,11 @@ test("ytDlpDownloadArgs ignores yt-dlp config files, with and without an allowli
   }
 });
 
-test("the probe and every download ignore yt-dlp config files and plugin dirs", () => {
+test("every download ignores yt-dlp config files and plugin dirs", () => {
   // A config supplying cookies or a proxy made the probe succeed where the
   // download (which ignores it) failed; a plugin extractor named `TikTok` or
   // `twitter` would sit inside the allowlist.
   for (const args of [
-    ytDlpProbeArgs("https://x.test/v"),
     ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 }),
     ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors: ["twitter"] }),
   ]) {
@@ -391,22 +385,6 @@ test("the probe and every download ignore yt-dlp config files and plugin dirs", 
     // Options, not the URL: both precede it.
     expect(args.indexOf("--no-plugin-dirs")).toBeLessThan(args.indexOf("https://x.test/v"));
   }
-});
-
-test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () => {
-  // `--skip-download` is the whole point (the probe runs BEFORE the download it
-  // sizes) and `--no-playlist` keeps a `&list=` watch URL from dumping a whole
-  // playlist's worth of JSON.
-  expect(ytDlpProbeArgs("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toEqual([
-    "yt-dlp",
-    "--ignore-config",
-    "--no-plugin-dirs",
-    "-O",
-    "%(.{id,title,duration,uploader,webpage_url,upload_date})j",
-    "--skip-download",
-    "--no-playlist",
-    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  ]);
 });
 
 // -- downloadVideo 403 retry ------------------------------------------------

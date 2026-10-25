@@ -1857,3 +1857,64 @@ describe("the Vimeo frame list is not a cadence either", () => {
     expect(user).not.toContain("one every ~");
   });
 });
+
+describe("the stored `## Links` section is carried over unchanged (D8)", () => {
+  const LINKS =
+    "## Links\n\n- 📄 [A study \\[draft\\]](https://study.example/s_%28v2%29) — Lab, A. Person · from description\n" +
+    "- 📦 [acme/harness](https://github.com/acme/harness) · from description\n\n" +
+    "_3 creator and social links in the description are not listed._";
+
+  test("YouTube: the section comes back byte-identical after the new summary, before the transcript", async () => {
+    const { deps, rec } = makeDeps(
+      youtubeDoc({ body: `The stored summary.\n\n${LINKS}\n` }),
+      // The model writes its own `## Links` heading and a stray LINKS line: neither survives.
+      { answer: "CATEGORY: ai/general\nLINKS: 1\n\nSUMMARY:\n\nA fresh summary.\n\n## Links\n- nope" },
+    );
+    await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    const summary = String(rec.ingests[0]!.body.summary);
+    expect(summary).toBe(
+      `A fresh summary.\n\n### Links\n- nope\n\n${LINKS}\n\n## Transcript\n\n### [00:00:00]\n\nHello.\n`,
+    );
+    // The re-run's prompt is today's: no description, no LINKS step.
+    expect(rec.prompts[0]!.system).not.toContain("LINKS:");
+    expect(rec.prompts[0]!.user).not.toContain("## Video description");
+  });
+
+  test("Vimeo (transcript carried as a field): the section is part of the summary string", async () => {
+    const raw = [
+      "---",
+      'date: "2026-09-01"',
+      'url: "https://vimeo.com/1234567"',
+      'summary_kind: "standard"',
+      'summary_lang: "en"',
+      'category: "ai/general"',
+      'tags: "ai, general"',
+      "---",
+      "",
+      "Body.",
+      "",
+      LINKS,
+      "",
+      "## Transcript",
+      "",
+      "### [00:00:00]",
+      "",
+      "Hello.",
+      "",
+    ].join("\n");
+    const { deps, rec } = makeDeps(raw);
+    await post(appFor(deps), { source: "vimeo", docId: "ai/general/En Talk.md" });
+    await settle();
+    const body = rec.ingests[0]!.body;
+    expect(body.summary).toBe(`A fresh summary.\n\n${LINKS}`);
+    expect(body.transcript_markdown).toBe("### [00:00:00]\n\nHello.");
+  });
+
+  test("a document with no section gets none", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc());
+    await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    expect(String(rec.ingests[0]!.body.summary)).not.toContain("## Links");
+  });
+});

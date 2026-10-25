@@ -14,6 +14,8 @@ import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { finishYouTubeSummary } from "./finish.ts";
+import { summaryFactcheckBody } from "../summaries/factcheck-body.ts";
+import { splitLinksSection } from "../summaries/links-section.ts";
 import type { CaptureFrame } from "../summaries/frames.ts";
 import { testTempDirSync } from "../test/temp-dir.ts";
 
@@ -270,5 +272,59 @@ describe("finishYouTubeSummary", () => {
     });
     expect(out.kept).toEqual([]);
     expect(readdirSync(root)).toEqual([]);
+  });
+});
+
+describe("the `## Links` step", () => {
+  test("without a link list (a re-run) a stray LINKS line is still stripped and nothing is appended", async () => {
+    const out = await finishYouTubeSummary({
+      raw: "CATEGORY: ai/rag\nLINKS: 1, 2\n\nSUMMARY:\n### Heading\n- point",
+      jobId: "jl1",
+      videoId: VIDEO_ID,
+      frames: [],
+      visualDetail: "selected",
+      framesRoot: tmpRoot("yt-finish-root-"),
+    });
+    expect(out.summary).toBe("### Heading\n- point");
+    expect(out.links).toBeNull();
+  });
+
+  test("with a list: sources by rule, picked candidates in, unknown ids dropped, promo counted", async () => {
+    const out = await finishYouTubeSummary({
+      raw: "CATEGORY: ai/rag\nLINKS: 2, 7\n\nSUMMARY:\n### Heading\n- point",
+      jobId: "jl2",
+      videoId: VIDEO_ID,
+      frames: [],
+      visualDetail: "selected",
+      framesRoot: tmpRoot("yt-finish-root-"),
+      links: [
+        { url: "https://s.example/a", cls: "source", line: 0, title: "Src", attribution: "" },
+        { url: "https://c.example/b", cls: "candidate", line: 1, title: "Cand", attribution: "" },
+        { url: "https://c.example/never", cls: "candidate", line: 2, title: "Unpicked", attribution: "" },
+        { url: "https://bit.ly/x", cls: "creator", line: 3, title: "Funnel", attribution: "" },
+      ],
+    });
+    expect(out.summary).toBe(
+      "### Heading\n- point\n\n## Links\n\n- 📄 [Src](https://s.example/a) · from description\n" +
+        "- 📄 [Cand](https://c.example/b) · from description\n\n" +
+        "_1 creator or social link in the description is not listed._",
+    );
+    expect(out.links?.picked).toEqual([2]);
+    expect(out.links?.unknownIds).toEqual([7]);
+  });
+
+  test("a summary that never closed its code fence: the section is closed off, outside the fact-check and kept by a re-run", async () => {
+    const out = await finishYouTubeSummary({
+      raw: "CATEGORY: ai/rag\nLINKS: none\n\nSUMMARY:\nIntro\n\n```python\nprint(1)\n\n> 💬 **Takeaway:** A closer.",
+      jobId: "jl3",
+      videoId: VIDEO_ID,
+      frames: [],
+      visualDetail: "selected",
+      framesRoot: tmpRoot("yt-finish-root-"),
+      links: [{ url: "https://s.example/a", cls: "source", line: 0, title: "Src", attribution: "" }],
+    });
+    const stored = `${out.summary}\n\n## Transcript\n\nwords`;
+    expect(summaryFactcheckBody(stored)).not.toContain("https://s.example/a");
+    expect(splitLinksSection(stored).section).toBe("## Links\n\n- 📄 [Src](https://s.example/a) · from description");
   });
 });

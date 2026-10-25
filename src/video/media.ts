@@ -211,12 +211,19 @@ export function summarizeTimeoutFor(frameCount: number, floorMs: number): number
 }
 
 /**
- * The yt-dlp `-O` template that prints ONLY the fields {@link parseYtDlpJson}
- * reads, as one JSON line. Not `--dump-json`/`--print-json`: a YouTube info JSON
+ * The fields {@link parseYtDlpJson} reads. A probe or download asks yt-dlp for
+ * ONLY these (plus a caller's extras) through an `-O` template, as one JSON line. Not `--dump-json`/`--print-json`: a YouTube info JSON
  * measured 11.7 MB (2026-09-24, `vsGwx28z4jk`), past `runProc`'s 8 MB cap, and
  * the capped read closes the pipe — yt-dlp then exits 1 with `Broken pipe`.
  */
-export const YTDLP_INFO_TEMPLATE = "%(.{id,title,duration,uploader,webpage_url,upload_date})j";
+export const YTDLP_INFO_FIELDS = ["id", "title", "duration", "uploader", "webpage_url", "upload_date"] as const;
+
+/** An `-O` template printing {@link YTDLP_INFO_FIELDS} plus `extra`, as one JSON line. */
+export function ytDlpInfoTemplate(extra: readonly string[] = []): string {
+  return `%(.{${[...YTDLP_INFO_FIELDS, ...extra].join(",")}})j`;
+}
+
+export const YTDLP_INFO_TEMPLATE = ytDlpInfoTemplate();
 
 /**
  * Parse a single yt-dlp {@link YTDLP_INFO_TEMPLATE} line into the fields we need. Returns
@@ -224,6 +231,12 @@ export const YTDLP_INFO_TEMPLATE = "%(.{id,title,duration,uploader,webpage_url,u
  * objects missing an `id`, so callers can scan every line for the first hit.
  */
 export function parseYtDlpJson(line: string): YtDlpInfo | null {
+  const rec = parseYtDlpRecord(line);
+  return rec === null ? null : ytDlpInfoFromRecord(rec);
+}
+
+/** One yt-dlp JSON line as a raw record with an `id`, or `null`. */
+export function parseYtDlpRecord(line: string): Record<string, unknown> | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return null;
   let obj: unknown;
@@ -232,9 +245,14 @@ export function parseYtDlpJson(line: string): YtDlpInfo | null {
   } catch {
     return null;
   }
-  if (obj === null || typeof obj !== "object") return null;
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
   const rec = obj as Record<string, unknown>;
   if (rec.id === null || rec.id === undefined) return null;
+  return rec;
+}
+
+/** The shared fields of a record {@link parseYtDlpRecord} accepted. */
+export function ytDlpInfoFromRecord(rec: Record<string, unknown>): YtDlpInfo {
   return {
     id: String(rec.id),
     title: typeof rec.title === "string" ? rec.title : "",
@@ -379,66 +397,6 @@ export function ytDlpDownloadArgs(
 
 /** How long a metadata-only probe may take. No bytes move; this bounds a hang. */
 export const PROBE_TIMEOUT_MS = 30_000;
-
-/**
- * The yt-dlp argv for a metadata-only probe. Pure, exported for the same reason
- * {@link ytDlpDownloadArgs} is.
- */
-export function ytDlpProbeArgs(url: string): string[] {
-  return ["yt-dlp", ...YTDLP_ISOLATION_ARGS, "-O", YTDLP_INFO_TEMPLATE, "--skip-download", "--no-playlist", url];
-}
-
-/**
- * What yt-dlp knows about a video BEFORE any bytes move — `null` when it will
- * not say.
- *
- * The frames path needs the duration to size everything it is about to spend
- * (the cap, the frame budget, the download and summarize timeouts), and
- * `downloadVideo`'s own info line arrives only AFTER the download it
- * is meant to bound. So this is a separate ~3 s call.
- *
- * `null` rather than a throw on every failure — a non-zero exit, an unparseable
- * stdout, a killed process — because the one caller degrades to a
- * transcript-only capture on any of them and a failed probe must never be a
- * failed job. The reason is logged here, where it is known, rather than
- * reconstructed by the caller from a null.
- */
-export async function probeVideoInfo(
-  url: string,
-  opts: { timeoutMs?: number } = {},
-): Promise<YtDlpInfo | null> {
-  let stdout: string;
-  let stderr: string;
-  let exitCode: number;
-  try {
-    ({ stdout, stderr, exitCode } = await runProc(
-      ytDlpProbeArgs(url),
-      opts.timeoutMs ?? PROBE_TIMEOUT_MS,
-      "yt-dlp probe",
-      PROC_GROUP,
-    ));
-  } catch (err) {
-    log.warn("yt-dlp probe of {url} failed: {error}", {
-      url,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-  if (exitCode !== 0) {
-    log.warn("yt-dlp probe of {url} exited {exitCode}: {stderr}", {
-      url,
-      exitCode,
-      stderr: stderr.slice(-300),
-    });
-    return null;
-  }
-  for (const line of stdout.split("\n")) {
-    const parsed = parseYtDlpJson(line);
-    if (parsed) return parsed;
-  }
-  log.warn("yt-dlp probe of {url} produced no parseable metadata JSON", { url });
-  return null;
-}
 
 /**
  * Download a video with yt-dlp into `workDir` (TikTok, X, or any yt-dlp-supported

@@ -14,6 +14,7 @@ import {
   findLiveSentinelBlocks,
 } from "../wiki/factcheck-context.ts";
 import { findAppendixSection } from "./visual-detail.ts";
+import { findLinksSection } from "./links-section.ts";
 import { markdownCodeRegions } from "../format/markdown-ast.ts";
 import { todayOslo } from "../gardener/util.ts";
 
@@ -65,11 +66,13 @@ export function stripSummaryFactcheckBlock(text: string): string {
 }
 
 /** `body` (no transcript) with `block` in place of any earlier one: above the
- *  `## Visual reference` section, else at the end. */
+ *  first of the `## Visual reference` and `## Links` sections, else at the end. */
 export function insertSummaryFactcheckBlock(body: string, block: string): string {
   const base = stripSummaryFactcheckBlock(body);
   const appendix = findAppendixSection(base, markdownCodeRegions(base));
-  if (appendix) return base.slice(0, appendix.start) + block + "\n\n" + base.slice(appendix.start);
+  const links = findLinksSection(base);
+  const at = Math.min(appendix?.start ?? Infinity, links?.start ?? Infinity);
+  if (at !== Infinity) return base.slice(0, at) + block + "\n\n" + base.slice(at);
   return `${base.trimEnd()}\n\n${block}`;
 }
 

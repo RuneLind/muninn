@@ -20,9 +20,12 @@
  * root, and `sourceDraft: false`. It never talks to the real huginn, never
  * writes under `~/.muninn/frames`, and never drafts a wiki page.
  *
- * One live call besides the model: a frames-OFF replay asks YouTube oEmbed
- * for the uploader (`fetchAuthor`, one small GET), because no probe ran. A
- * `--frames` replay does not — the stubbed probe answers `uploader: "replay"`.
+ * No yt-dlp call: the probe seam is stubbed on both paths. It answers
+ * `uploader: "replay"` and no description, or — with `--probe <json>` — the
+ * uploader and description that file carries (`{"uploader": "…",
+ * "description": "…"}`, saved once with `yt-dlp --skip-download -O
+ * "%(uploader)s" -O "%(description)s"` and kept OUT of the repo), so the
+ * description's `## Links` step runs exactly as in a live capture.
  *
  * The MODEL CALL is real: this runs on the resolved summarizer bot
  * (`SUMMARIZER_BOT`, jarvis on claude-sdk here) and spends money. That is the
@@ -45,7 +48,11 @@
  *   bun scripts/replay-youtube.ts \
  *     --video <local.mp4> --transcript <transcript.json> --video-id <11 chars> \
  *     --title "…" --kind standard|deep --frames \
- *     --visual-detail selected|detailed --scan dense|cadence --runs 2 --out <dir>
+ *     --visual-detail selected|detailed --scan dense|cadence --runs 2 --out <dir> \
+ *     [--probe <probe.json>]
+ *
+ * `--video` is required only with `--frames`: a frames-off replay downloads
+ * nothing, so it runs from the transcript (and the probe file) alone.
  *
  * `--visual-detail` is the SLIDES policy and is read only where `--frames` is
  * on; it defaults to `selected`, the route's own default. `--scan` writes
@@ -93,7 +100,7 @@
  */
 
 import { mkdir, copyFile, readdir, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { configure, type LogRecord } from "@logtape/logtape";
@@ -144,12 +151,16 @@ import {
 } from "../src/youtube/scan-run.ts";
 import { summarizeVideo } from "../src/youtube/summarizer.ts";
 import { createJob, getJob } from "../src/youtube/state.ts";
-import type { DownloadResult, YtDlpInfo } from "../src/video/media.ts";
+import type { DownloadResult } from "../src/video/media.ts";
+import type { YouTubeProbe } from "../src/youtube/probe.ts";
 
 // --- arguments --------------------------------------------------------------
 
 interface Args {
-  video: string;
+  /** The local rendition; `null` on a frames-off replay that names none. */
+  video: string | null;
+  /** The injected probe answer: uploader and description. */
+  probe: { uploader: string; description: string } | null;
   transcript: string;
   videoId: string;
   title: string;
@@ -190,8 +201,27 @@ function parseArgs(argv: string[]): Args {
     if (scan !== "dense" && scan !== "cadence") die("--scan must be dense or cadence");
     process.env[YOUTUBE_FRAME_SCAN_ENV] = scan;
   }
+  const probeFile = flags.get("probe");
+  let probe: Args["probe"] = null;
+  if (probeFile !== undefined) {
+    let parsed: Record<string, unknown>;
+    try {
+      const json: unknown = JSON.parse(readFileSync(resolve(probeFile), "utf8"));
+      if (json === null || typeof json !== "object" || Array.isArray(json)) throw new Error("not a JSON object");
+      parsed = json as Record<string, unknown>;
+    } catch (err) {
+      die(`--probe ${probeFile} could not be read as a JSON object: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (typeof parsed.uploader !== "string" || typeof parsed.description !== "string") {
+      die(`--probe ${probeFile} must hold string "uploader" and "description" fields`);
+    }
+    probe = { uploader: parsed.uploader, description: parsed.description };
+  }
+  const video = flags.get("video");
+  if (frames && video === undefined) die("--video is required with --frames");
   return {
-    video: resolve(need("video")),
+    video: video === undefined ? null : resolve(video),
+    probe,
     transcript: resolve(need("transcript")),
     videoId: need("video-id"),
     title: flags.get("title") ?? "Replay capture",
@@ -271,7 +301,7 @@ async function probeDurationSec(file: string): Promise<number> {
 // --- main -------------------------------------------------------------------
 
 const args = parseArgs(process.argv.slice(2));
-if (!existsSync(args.video)) die(`No such video file: ${args.video}`);
+if (args.video !== null && !existsSync(args.video)) die(`No such video file: ${args.video}`);
 if (!existsSync(args.transcript)) die(`No such transcript file: ${args.transcript}`);
 if (!isAbsolute(args.out)) die("--out must resolve to an absolute path");
 
@@ -386,7 +416,9 @@ if (!preset) {
   die(`Unknown kind "${args.kind}" on bot ${botConfig.name} — offered: ${presets.map((p) => p.id).join(", ")}`);
 }
 const runBot = captureBotConfigFor(botConfig, preset);
-const durationSec = await probeDurationSec(args.video);
+// No video (a frames-off replay): the probe reports no duration, as a live
+// stream's does — nothing on the frames-off path reads it.
+const durationSec = args.video === null ? 0 : await probeDurationSec(args.video);
 
 console.log(
   `replay: ${args.videoId} (${durationSec}s) · kind=${preset.id} · frames=${args.frames} · ` +
@@ -534,18 +566,21 @@ for (let run = 1; run <= args.runs; run++) {
       // Never a wiki proposal: this ingests into a stub, so a draft would be a
       // gate item about a document that does not exist.
       sourceDraft: false,
-      // The probe seam answers from the local file — no yt-dlp, no network.
-      probeVideoInfo: async (): Promise<YtDlpInfo> => ({
+      // The probe seam answers from the local file and `--probe` — no yt-dlp,
+      // no network.
+      probeVideoInfo: async (): Promise<YouTubeProbe> => ({
         id: args.videoId,
         title: args.title,
         duration: durationSec,
-        uploader: "replay",
+        uploader: args.probe?.uploader ?? "replay",
+        ...(args.probe ? { description: args.probe.description } : {}),
       }),
       // The summarizer UNLINKS what the download hands it, so the fixture is
       // copied into the work dir rather than handed over.
       downloadVideo: async (_url: string, workDir: string): Promise<DownloadResult> => {
         extractionStartedAt = Date.now();
         await mkdir(workDir, { recursive: true });
+        if (args.video === null) throw new Error("no --video to download");
         const target = join(workDir, basename(args.video));
         await copyFile(args.video, target);
         return {
@@ -618,7 +653,7 @@ for (let run = 1; run <= args.runs; run++) {
 
   // After the job, against the ORIGINAL fixture: the summarizer unlinks its own
   // copy, and this is a measurement of the video the capture actually read.
-  const parity = candidateSeconds.length > 0
+  const parity = candidateSeconds.length > 0 && args.video !== null
     ? await regrabParity(args.video, scanThumbDir, candidateSeconds, join(runDir, "regrab-check"))
     : null;
   await rm(join(runDir, "regrab-check"), { recursive: true, force: true });
@@ -773,6 +808,13 @@ for (let run = 1; run <= args.runs; run++) {
       .filter((n) => !Number.isNaN(n))
       .sort((a, b) => a - b),
     keptFrameCount: keptFrames.length,
+    // ── the description's `## Links` step, read off the completion line ──────
+    description: (summarized?.description as string | undefined) ?? null,
+    linksPick: summarized?.linksPick ? (JSON.parse(String(summarized.linksPick)) as unknown) : null,
+    linksSources: (summarized?.linksSources as number | undefined) ?? null,
+    linksPicked: (summarized?.linksPicked as string | undefined) ?? null,
+    linksOmitted: (summarized?.linksOmitted as number | undefined) ?? null,
+    linksSection: (summarized?.linksSection as string | null | undefined) ?? null,
     /** Whether the appendix landed BEFORE `## Transcript` in the ingested body. */
     appendixBeforeTranscript: appendixOrder(
       typeof ingestBody?.summary === "string" ? ingestBody.summary : null,

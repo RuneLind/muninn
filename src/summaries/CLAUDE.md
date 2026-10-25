@@ -419,7 +419,10 @@ article mode, unchanged prompts) over the summary and saves the result in
 - **What is checked.** `readSummarySourceText` (the raw file), cut by
   `summaryFactcheckBody` (`factcheck-body.ts`) at `## Transcript`, minus a
   `## Visual reference` appendix SECTION (`findAppendixSection`'s bounds, also
-  ended at the closing `> 💬 **Takeaway:**` block, which stays checked).
+  ended at the closing `> 💬 **Takeaway:**` block, which stays checked) and
+  minus the `## Links` section (`findLinksSection`, `links-section.ts`), so a
+  Links write never moves the hash (D14). The block inserts above the first of
+  the two; an integrate edit may not add a `## Links` heading.
   `body_sha256` hashes that cut text,
   so `/result`'s `stale` moves when the SUMMARY changes, not the transcript.
 - **Row identity is `(collection, doc_id)`, not the url.** The doc id is what the

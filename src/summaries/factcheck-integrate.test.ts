@@ -548,3 +548,10 @@ describe("run breaks over the whole state space of two neighbouring edits", () =
     expect(wrong).toEqual([]);
   });
 });
+
+test("an integrate edit may not introduce a `## Links` heading", async () => {
+  const { structuralLineRefusal } = await import("./factcheck-integrate.ts");
+  expect(structuralLineRefusal("Fixed.\n\n## Links\n\n- x")).toContain("## Links");
+  expect(structuralLineRefusal("```\n## Links\n```")).toBeNull();
+  expect(structuralLineRefusal("The links are below.")).toBeNull();
+});

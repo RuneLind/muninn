@@ -24,7 +24,8 @@ import type { BotConfig } from "../bots/config.ts";
 import type { CaptureFrame } from "../summaries/frames.ts";
 import type { VisualDetail } from "../summaries/visual-detail.ts";
 import { summarizeTimeoutFor } from "../video/media.ts";
-import type { DownloadOptions, DownloadResult, YtDlpInfo } from "../video/media.ts";
+import type { DownloadOptions, DownloadResult } from "../video/media.ts";
+import type { YouTubeProbe } from "./probe.ts";
 import { testTempDirSync } from "../test/temp-dir.ts";
 
 const VIDEO_ID = "dQw4w9WgXcQ";
@@ -255,8 +256,10 @@ afterAll(() => {
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
 });
 
-let probeAnswer: YtDlpInfo | null = { id: VIDEO_ID, title: "A talk", duration: 1200, uploader: "conf" };
+let probeAnswer: YouTubeProbe | null = { id: VIDEO_ID, title: "A talk", duration: 1200, uploader: "conf" };
 let probeCalls: string[] = [];
+/** The `timeoutMs` each probe call was handed (`undefined` = the probe's own default). */
+let probeTimeouts: Array<number | undefined> = [];
 /** What the fake oEmbed answers (`undefined` = a failed lookup), and who asked. */
 let oembedAuthor: string | undefined = "An Uploader";
 let oembedCalls: string[] = [];
@@ -304,8 +307,9 @@ let lastVideoPath = "";
 
 function deps() {
   return {
-    probeVideoInfo: async (url: string) => {
+    probeVideoInfo: async (url: string, opts: { timeoutMs?: number }) => {
       probeCalls.push(url);
+      probeTimeouts.push(opts.timeoutMs);
       atProbe?.();
       return probeAnswer;
     },
@@ -439,6 +443,7 @@ beforeEach(() => {
   oembedThrows = null;
   transcriptsAtOembed = [];
   atProbe = null;
+  probeTimeouts = [];
   atDownload = null;
   atExtract = null;
   downloadGate = null;
@@ -517,9 +522,22 @@ async function run(
 }
 
 describe("the video fields: author, upload_date, duration_sec", () => {
-  test("frames off: author from oEmbed, and no probe fields", async () => {
+  test("frames off: the probe's uploader, rounded duration and dashed date; oEmbed never asked", async () => {
+    probeAnswer = { id: VIDEO_ID, title: "A talk", duration: 1199.6, uploader: "conf", uploadDate: "20240115" };
     await run();
-    expect(probeCalls).toEqual([]);
+    // One probe, bounded at 10 s — the frames-off budget.
+    expect(probeCalls).toEqual([WATCH_URL]);
+    expect(probeTimeouts).toEqual([10_000]);
+    expect(oembedCalls).toEqual([]);
+    const body = ingestBodies[0]!;
+    expect(body.author).toBe("conf");
+    expect(body.duration_sec).toBe(1200);
+    expect(body.upload_date).toBe("2024-01-15");
+  });
+
+  test("frames off with a failed probe: author from oEmbed, and no probe fields", async () => {
+    probeAnswer = null;
+    await run();
     expect(oembedCalls).toEqual([VIDEO_ID]);
     const body = ingestBodies[0]!;
     expect(body.author).toBe("An Uploader");
@@ -527,7 +545,8 @@ describe("the video fields: author, upload_date, duration_sec", () => {
     expect(body).not.toHaveProperty("upload_date");
   });
 
-  test("frames off with a failed oEmbed: no author key, and the capture still ingests", async () => {
+  test("frames off with a failed probe AND a failed oEmbed: no author key, and the capture still ingests", async () => {
+    probeAnswer = null;
     oembedAuthor = undefined;
     await run();
     expect(ingestBodies.length).toBe(1);
@@ -535,6 +554,7 @@ describe("the video fields: author, upload_date, duration_sec", () => {
   });
 
   test("a fetchAuthor dep that throws or rejects still ingests, without author", async () => {
+    probeAnswer = null;
     for (const mode of ["sync", "async"] as const) {
       ingestBodies = [];
       oembedThrows = mode;
@@ -545,6 +565,7 @@ describe("the video fields: author, upload_date, duration_sec", () => {
   });
 
   test("oEmbed is asked BEFORE the transcript fetch, so it runs beside it and the model call", async () => {
+    probeAnswer = null;
     await run();
     expect(transcriptsAtOembed).toEqual([0]);
     expect(transcriptRequests.length).toBe(1);
@@ -592,16 +613,23 @@ describe("frames off — the capture that shipped before this PR", () => {
     expect(lastPrompt).toBeUndefined();
   });
 
-  test("no probe, no download, plain transcript URL, byte-identical prompt", async () => {
+  test("one probe, no download, plain transcript URL, byte-identical prompt without a description", async () => {
     const jobId = await run();
 
-    expect(probeCalls).toEqual([]);
+    // The frames-off probe runs (for the description and the frontmatter), and
+    // without a description the prompt pair is what it always was.
+    expect(probeCalls).toEqual([WATCH_URL]);
     expect(downloadCalls).toEqual([]);
     expect(transcriptRequests).toEqual([`/api/youtube/transcript/${VIDEO_ID}`]);
     // The frame list contributes nothing and the windowed-transcript rider is
     // absent, so the prompt pair is what it always was.
     expect(lastPrompt).toBe(transcriptBody.transcript);
     expect(lastSystemPrompt).not.toContain("### [HH:MM:SS]");
+    // The SYSTEM prompt byte for byte: sha256 of what `buildYouTubeSystemPrompt`
+    // composes for these inputs on main ea8fa4d5, before description links existed.
+    expect(new Bun.CryptoHasher("sha256").update(lastSystemPrompt ?? "").digest("hex")).toBe(
+      "25056ca855d466533a0c8daf3144dfe03432dae4295a8b7962f59ebc76b33f52",
+    );
     expect(lastToolSurface).toBe("none");
     expect(getJob(jobId)?.status).toBe("complete");
   });
@@ -1775,5 +1803,131 @@ describe("the run uses the prompt builders", () => {
     expect(lastSystemPrompt).not.toBe(
       buildYouTubeSystemPrompt(STANDARD_PRESET, { windowed: false, title: "A talk", videoUrl: WATCH_URL }),
     );
+  });
+});
+
+describe("the description's links", () => {
+  /** Invented: a funnel on the uploader's own domain, a profile, a source block and a repo outside it. */
+  const DESCRIPTION = [
+    "🎁 The free template → https://c.examplechannel.example/free",
+    "",
+    "🔗 LINKS MENTIONED IN THIS VIDEO",
+    "• Measuring the thing (Example Lab, A. Author): https://example.org/blog/measuring-the-thing",
+    "",
+    "Harness: https://github.com/example/harness",
+    "Follow: https://x.com/examplechannel",
+  ].join("\n");
+  const withDescription = (description: string): YouTubeProbe => ({
+    id: VIDEO_ID,
+    title: "A talk",
+    duration: 1200,
+    uploader: "Example Channel",
+    description,
+  });
+
+  test("the system prompt gains the LINKS step, the user prompt the description and list, promo dropped", async () => {
+    probeAnswer = withDescription(DESCRIPTION);
+    await run();
+    expect(lastSystemPrompt).toContain("2. Then add one line \"LINKS: <ids>\"");
+    expect(lastSystemPrompt).toContain("3. Then add a blank line, then SUMMARY: on its own line");
+    expect(lastPrompt!.startsWith(transcriptBody.transcript!)).toBe(true);
+    expect(lastPrompt).toContain("## Video description");
+    expect(lastPrompt).toContain(
+      "1. Measuring the thing (Example Lab, A. Author) — https://example.org/blog/measuring-the-thing [listed as a source]",
+    );
+    expect(lastPrompt).toContain("2. Harness — https://github.com/example/harness [code or paper]");
+    expect(lastPrompt).not.toContain("c.examplechannel.example");
+    expect(lastPrompt).not.toContain("x.com/examplechannel");
+  });
+
+  test("a source goes in by rule on LINKS: none; the line never reaches the body; promo is counted", async () => {
+    probeAnswer = withDescription(DESCRIPTION);
+    claudeResult = "CATEGORY: ai/rag\nLINKS: none\n\nSUMMARY:\n### Heading\n- point";
+    const jobId = await run();
+    const section =
+      "## Links\n\n" +
+      "- 📄 [Measuring the thing](https://example.org/blog/measuring-the-thing) — Example Lab, A. Author · from description\n\n" +
+      "_2 creator and social links in the description are not listed._";
+    expect(getJob(jobId)?.summary).toBe(`### Heading\n- point\n\n${section}`);
+    const ingested = String(ingestBodies[0]!.summary);
+    expect(ingested.startsWith(`### Heading\n- point\n\n${section}\n\n## Transcript\n`)).toBe(true);
+    expect(ingested).not.toContain("LINKS:");
+    expect(ingested).not.toContain("c.examplechannel.example");
+    expect(ingested).not.toContain("x.com/examplechannel");
+  });
+
+  test("a picked repo joins the section; an id outside the list is dropped", async () => {
+    probeAnswer = withDescription(DESCRIPTION);
+    claudeResult = "CATEGORY: ai/rag\nLINKS: 2, 9\n\nSUMMARY:\n### Heading\n- point";
+    const jobId = await run();
+    const summary = getJob(jobId)?.summary ?? "";
+    expect(summary).toContain("- 📦 [Harness](https://github.com/example/harness) · from description");
+    expect(summary).not.toContain("9");
+  });
+
+  test("a LINKS line as the LAST line, with no SUMMARY marker, is kept out of the body", async () => {
+    probeAnswer = withDescription(DESCRIPTION);
+    claudeResult = "CATEGORY: ai/rag\n\n### Heading\n- point\n\nLINKS: 1";
+    const jobId = await run();
+    expect(getJob(jobId)?.summary).not.toContain("LINKS:");
+    expect(getJob(jobId)?.summary?.startsWith("### Heading\n- point\n\n## Links\n")).toBe(true);
+  });
+
+  test("a description with only promo: the system prompt is byte-identical, the user prompt has no list", async () => {
+    probeAnswer = null;
+    await run();
+    const bare = lastSystemPrompt;
+    probeAnswer = withDescription("Get it → https://c.examplechannel.example/free\nhttps://x.com/examplechannel\nA talk about things.");
+    const jobId = await run();
+    expect(lastSystemPrompt).toBe(bare);
+    expect(lastPrompt).toContain("## Video description\n\n");
+    expect(lastPrompt).toContain("A talk about things.");
+    expect(lastPrompt).not.toContain("## Links in the description");
+    // No qualifying line, no section — the count line included.
+    expect(getJob(jobId)?.summary).toBe("### Heading\n- point");
+  });
+
+  test("a model-written ## Links heading is demoted", async () => {
+    probeAnswer = null;
+    claudeResult = "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n- point\n\n## Links\n- https://example.org";
+    const jobId = await run();
+    expect(getJob(jobId)?.summary).toBe("### Heading\n- point\n\n### Links\n- https://example.org");
+  });
+
+  test("bodyUrls / bodyUrlsUnlisted ride the trace root", async () => {
+    probeAnswer = withDescription(DESCRIPTION);
+    claudeResult =
+      "CATEGORY: ai/rag\nLINKS: none\n\nSUMMARY:\nSee https://example.org/blog/measuring-the-thing and https://invented.example/x.";
+    await run();
+    const root = finishCalls.at(-1)!;
+    expect(root.attrs?.bodyUrls).toBe(2);
+    expect(root.attrs?.bodyUrlsUnlisted).toBe(1);
+    expect(lastClaudeSpanAttrs?.description).toBe("present");
+    expect(lastClaudeSpanAttrs?.linkSources).toBe("1");
+    expect(lastClaudeSpanAttrs?.linkPromo).toBe("2");
+  });
+
+  test("a frames-off probe runs OUTSIDE the frames queue: it never waits behind another capture's download", async () => {
+    let release!: () => void;
+    downloadGate = new Promise<void>((r) => { release = r; });
+    const OTHER_ID = "abcdefghijk";
+    const holding = summarizeVideo(createJob(VIDEO_ID, "A", WATCH_URL), VIDEO_ID, "A", config, bot, {
+      frames: true,
+      preset: STANDARD_PRESET,
+      deps: deps(),
+    });
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(downloadTrace.filter((t) => t.startsWith("start:"))).toHaveLength(1);
+    const otherUrl = `https://www.youtube.com/watch?v=${OTHER_ID}`;
+    const offJob = createJob(OTHER_ID, "B", otherUrl);
+    await summarizeVideo(offJob, OTHER_ID, "B", config, bot, { preset: STANDARD_PRESET, deps: deps() });
+    // Finished while the first capture still holds the queue in its download.
+    expect(getJob(offJob)?.status).toBe("complete");
+    expect(probeCalls).toContain(otherUrl);
+    expect(downloadTrace.filter((t) => t.startsWith("end:"))).toHaveLength(0);
+    release();
+    downloadGate = null;
+    await holding;
   });
 });
