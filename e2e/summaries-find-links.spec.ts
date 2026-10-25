@@ -13,7 +13,10 @@
  * the 409. Also: closing the panel mid-search aborts the stream, so the server
  * launches no more agents (counted through the boot seam's launch log), and a
  * stream cut before `done` says so instead of leaving rows that read as never
- * searched, and an `already_linked` outcome reads «already linked».
+ * searched, and an `already_linked` outcome reads «already linked». Moving the
+ * panel to another document mid-search aborts the same way; a search that
+ * reached `done` shows no early-end message; ✓ Accept saves the clicked row's
+ * result when two rows verified one URL; a frame with no outcome reads «search failed».
  *
  * **What is faked and why.** huginn is an in-process `node:http` server whose
  * `/api/youtube/ingest` rewrites its in-memory file the way `write_summary`
@@ -75,7 +78,13 @@ const DOCS = {
     raw: `---\ndate: 2026-03-24\nurl: "https://www.youtube.com/watch?v=e2eLinksEEE"\ncategory: "ai/e2e"\n---\n\nSLOWSIXMARKER names six slow things.\n`,
   },
   f: { id: "ai/e2e/E2E links cut stream.md", raw: withSection("https://www.youtube.com/watch?v=e2eLinksFFF") },
+  // Its summary carries TWO_MARKER, so the candidates call answers [C_HALLIE, C_OTHER].
+  g: {
+    id: "ai/e2e/E2E links two rows one url.md",
+    raw: `---\ndate: 2026-03-25\nurl: "https://www.youtube.com/watch?v=e2eLinksGGG"\ncategory: "ai/e2e"\n---\n\nTWOROWSMARKER names the effort dial twice.\n`,
+  },
 };
+const TWO_MARKER = "TWOROWSMARKER";
 const SLOW_MARKER = "SLOWSIXMARKER";
 const SLOW_CANDIDATES = Array.from({ length: 6 }, (_, i) => ({ title: null, author: null, topic: `slow thing ${i}`, kind: "doc" }));
 /** Long enough that the first three are still running when the panel closes. */
@@ -85,10 +94,12 @@ const MATCHED_URL = "https://claude.example/resources/articles/effort";
 const PDF_URL = "https://papers.example/effort.pdf";
 const C_HALLIE = { title: null, author: "Lydia Hallie", topic: "Lydia Hallie's article on Claude Code effort levels", kind: "post" };
 const C_NONE = { title: null, author: null, topic: "an internal benchmark report", kind: "doc" };
+/** Verifies the same two URLs as C_HALLIE, differently: MATCHED_URL by its quote only, and the PDF under its own topic. */
+const C_OTHER = { title: null, author: null, topic: "a second look at the effort dial", kind: "doc" };
 const FIXTURE = {
   // The second is the section's own line: the server drops it as listed.
   candidates: [C_HALLIE, { title: "Spending your effort", author: null, topic: "the claude.dev post", kind: "post" }, C_NONE],
-  candidatesByMarker: { [SLOW_MARKER]: SLOW_CANDIDATES },
+  candidatesByMarker: { [SLOW_MARKER]: SLOW_CANDIDATES, [TWO_MARKER]: [C_HALLIE, C_OTHER] },
   agentDelays: Object.fromEntries(SLOW_CANDIDATES.map((c) => [c.topic, SLOW_MS])),
   agents: {
     [C_HALLIE.topic]: JSON.stringify({
@@ -98,6 +109,12 @@ const FIXTURE = {
       ],
     }),
     [C_NONE.topic]: JSON.stringify({ results: [{ url: "https://invented.example/nothing", title: "x", quote: "nothing" }] }),
+    [C_OTHER.topic]: JSON.stringify({
+      results: [
+        { url: MATCHED_URL, title: "x", quote: "By Lydia Hallie, on picking an effort level." },
+        { url: PDF_URL, title: "x", quote: "" },
+      ],
+    }),
   },
   pages: {
     [MATCHED_URL]: {
@@ -265,6 +282,9 @@ async function findAndSearch(page: Page): Promise<void> {
   await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-host').first()).toHaveText("claude.example");
   await expect(panel).not.toContainText("matched");
   await expect(panel.locator('.sum-links-row[data-row="1"] .sum-links-state')).toHaveText("not found");
+  // The stream reached `done`: once the search settles, no early-end message.
+  await expect(panel.getByRole("button", { name: "Search 2 selected" })).toBeEnabled();
+  await expect(panel.locator(".sum-links-msg")).toHaveCount(0);
 }
 
 test("the section mounts above the article; an accepted result lands as a found-by-search line; a second accept saves too", async ({ page }) => {
@@ -398,6 +418,75 @@ test("moving the panel to a document of an unregistered source mid-search aborts
   });
   await page.waitForTimeout(SLOW_MS + 1_500);
   expect(launches().slice(before)).toEqual(["slow thing 0", "slow thing 1", "slow thing 2"]);
+});
+
+test("moving the panel to another registered document mid-search aborts the stream too", async ({ page }) => {
+  // The previous test's three launched agents hold this document's lock until they settle.
+  await page.waitForTimeout(SLOW_MS + 500);
+  await openDoc(page, DOCS.e.id, "six slow things");
+  await page.locator("#docPanelFindLinks").click();
+  const panel = page.locator("#sumLinks");
+  await expect(panel.locator(".sum-links-row")).toHaveCount(6);
+  for (const i of [3, 4, 5]) await panel.locator(`[data-pick="${i}"]`).click();
+  await expect(panel.locator("[data-pick]:checked")).toHaveCount(6);
+  const before = launches().length;
+  await panel.getByRole("button", { name: "Search 6 selected" }).click();
+  await expect.poll(() => launches().length - before).toBe(3);
+  await page.evaluate((id) => {
+    void (globalThis as unknown as { openSummaryDoc: (d: string, u: string, s: string) => Promise<void> }).openSummaryDoc(id, "", "youtube");
+  }, DOCS.b.id);
+  await page.waitForTimeout(SLOW_MS + 1_500);
+  expect(launches().slice(before)).toEqual(["slow thing 0", "slow thing 1", "slow thing 2"]);
+});
+
+test("two rows verifying one URL: ✓ Accept saves the clicked row's result, not the first row's", async ({ page }) => {
+  await openDoc(page, DOCS.g.id, "effort dial twice");
+  await page.locator("#docPanelFindLinks").click();
+  const panel = page.locator("#sumLinks");
+  await expect(panel.locator(".sum-links-row")).toHaveCount(2);
+  await panel.getByRole("button", { name: "Search 2 selected" }).click();
+  const row0 = panel.locator('.sum-links-row[data-row="0"]');
+  const row1 = panel.locator('.sum-links-row[data-row="1"]');
+  await expect(row0.locator(".sum-links-label").first()).toHaveText("title overlaps, author named on page");
+  await expect(row1.locator(".sum-links-label").first()).toHaveText("quote found on page");
+  await expect(row1.locator(".sum-links-label").nth(1)).toHaveText("PDF, not read");
+
+  // A PDF line takes its candidate's topic, so row 1's line differs from row 0's.
+  await row1.locator(`[data-accept="${PDF_URL}"]`).click();
+  await expect(panel.locator(".sum-links-msg")).toHaveText("Saved to the Links section.");
+  const saved = files.get(DOCS.g.id)!;
+  expect(saved).toContain(`- 🔎 [${C_OTHER.topic}](${PDF_URL}) · found by search`);
+  expect(saved).not.toContain(C_HALLIE.topic);
+
+  // Both MATCHED_URL rows store the same line, so the row shows in what the panel sends.
+  const sent = page.waitForRequest((r) => r.method() === "POST" && new URL(r.url()).pathname === "/api/summaries/links");
+  await row1.locator(`[data-accept="${MATCHED_URL}"]`).click();
+  const body = (await sent).postDataJSON() as { add: Array<{ url: string; label: string; evidence: string }> };
+  expect(body.add).toEqual([expect.objectContaining({ url: MATCHED_URL, label: "reachable", evidence: "quote" })]);
+  await expect(panel.locator(".sum-links-saved")).toHaveCount(4);
+});
+
+test("a result frame with no outcome reads search failed; a stream that reached done shows no early-end message", async ({ page }) => {
+  await page.route("**/api/summaries/links/search", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body:
+        'event: start\ndata: {"total":2}\n\n' +
+        'event: result\ndata: {"index":0,"results":[]}\n\n' +
+        'event: result\ndata: {"index":1,"outcome":"not_found","results":[]}\n\n' +
+        'event: done\ndata: {"gone":false}\n\n',
+    }),
+  );
+  await openDoc(page, DOCS.f.id, "Lydia Hallie");
+  await page.locator("#docPanelFindLinks").click();
+  const panel = page.locator("#sumLinks");
+  await expect(panel.locator(".sum-links-row")).toHaveCount(2);
+  await panel.getByRole("button", { name: "Search 2 selected" }).click();
+  await expect(panel.locator('.sum-links-row[data-row="0"] .sum-links-state')).toHaveText("search failed");
+  await expect(panel.locator('.sum-links-row[data-row="1"] .sum-links-state')).toHaveText("not found");
+  await expect(panel.getByRole("button", { name: "Search 2 selected" })).toBeEnabled();
+  await expect(panel.locator(".sum-links-msg")).toHaveCount(0);
 });
 
 test("a stream cut before done says the search ended early; unanswered rows read not finished, a malformed found-but-empty frame search failed", async ({ page }) => {
