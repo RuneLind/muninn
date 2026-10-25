@@ -1,5 +1,4 @@
 import type { Hono } from "hono";
-import { Marked, type Token } from "marked";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { createJob, getJob, getRecentJobs, subscribe } from "../../article/state.ts";
@@ -37,59 +36,16 @@ async function findExistingByUrl(
   }
 }
 
-const titleLexer = new Marked();
-
-/** Inline tokens as plain text: links and emphasis to their text, code spans to their content, images and inline HTML to nothing. */
-function inlineText(tokens: readonly Token[]): string {
-  let out = "";
-  for (const t of tokens) {
-    switch (t.type) {
-      case "image":
-      case "html":
-        break;
-      case "br":
-        out += "\n";
-        break;
-      case "codespan":
-      case "escape":
-        out += t.text;
-        break;
-      default:
-        out += "tokens" in t && t.tokens ? inlineText(t.tokens) : "text" in t ? String(t.text) : "";
-    }
-  }
-  return out;
-}
-
-/** The first line with prose among `tokens`' headings and paragraphs, descending into quotes and lists. */
-function firstProseLine(tokens: readonly Token[]): string | null {
-  for (const t of tokens) {
-    let line: string | null = null;
-    if (t.type === "heading" || t.type === "paragraph" || t.type === "text") {
-      // A paragraph's soft and hard breaks end the title: the first line is the one a reader sees as the lede.
-      line = inlineText(t.tokens ?? []).split("\n").map((l) => l.replace(/\s+/g, " ").trim())
-        .find((l) => /[^\s*_`~#>=+\-|:]/.test(l)) ?? null;
-    } else if (t.type === "blockquote" || t.type === "list_item") {
-      line = firstProseLine(t.tokens ?? []);
-    } else if (t.type === "list") {
-      line = firstProseLine(t.items);
-    }
-    if (line !== null) return line;
-  }
-  return null;
-}
-
 /**
- * Derive a non-empty title from the pasted text (the paste form sends the
- * walk's markdown), truncated to ~80 chars — so huginn's
- * `/api/articles/ingest` never receives an empty title (the drafter
- * downstream keys pages off it). marked parses the text, so CommonMark
- * decides what is a fence, a heading or a list: the title is the first line
- * with prose of the first heading or paragraph, reached through quotes and
- * lists; code, HTML blocks, tables and rules are skipped.
+ * Derive a non-empty title from the pasted text: the first non-empty line,
+ * truncated to ~80 chars — so huginn's `/api/articles/ingest` never receives an
+ * empty title (the drafter downstream keys pages off it).
  */
-export function deriveTitle(text: string): string {
-  const firstLine = firstProseLine(titleLexer.lexer(text)) ?? "Untitled article";
+function deriveTitle(text: string): string {
+  const firstLine = text
+    .split("\n")
+    .map((l) => l.trim().replace(/^#+\s+/, ""))
+    .find((l) => l.length > 0) ?? "Untitled article";
   return firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine;
 }
 
