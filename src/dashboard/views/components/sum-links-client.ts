@@ -112,6 +112,7 @@ function section(): HTMLElement | null {
 export function sumLinksOnOpen(docId: string, source: string | null, mainEl: HTMLElement | null): void {
   const btn = button();
   if (!source) {
+    abortSearch();
     current = null;
     if (btn) btn.hidden = true;
     return;

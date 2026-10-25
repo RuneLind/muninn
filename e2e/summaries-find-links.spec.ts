@@ -376,6 +376,30 @@ test("closing the panel mid-search aborts the stream: the server launches no mor
   expect(again).toBe(200);
 });
 
+test("moving the panel to a document of an unregistered source mid-search aborts the stream too", async ({ page }) => {
+  // The previous test's last search holds this document's lock until its one slow agent settles.
+  await page.waitForTimeout(SLOW_MS + 500);
+  await openDoc(page, DOCS.e.id, "six slow things");
+  await page.locator("#docPanelFindLinks").click();
+  const panel = page.locator("#sumLinks");
+  await expect(panel.locator(".sum-links-row")).toHaveCount(6);
+  for (const i of [3, 4, 5]) await panel.locator(`[data-pick="${i}"]`).click();
+  await expect(panel.locator("[data-pick]:checked")).toHaveCount(6);
+  const before = launches().length;
+  await panel.getByRole("button", { name: "Search 6 selected" }).click();
+  await expect.poll(() => launches().length - before).toBe(3);
+  // `sum-article-library.ts` hands Find links a null source for a source `SOURCES` does not register.
+  await page.evaluate(() => {
+    void (globalThis as unknown as { openSummaryDoc: (d: string, u: string, s: string) => Promise<void> }).openSummaryDoc(
+      "ai/elsewhere.md",
+      "",
+      "not-a-registered-source",
+    );
+  });
+  await page.waitForTimeout(SLOW_MS + 1_500);
+  expect(launches().slice(before)).toEqual(["slow thing 0", "slow thing 1", "slow thing 2"]);
+});
+
 test("a stream cut before done says the search ended early; unanswered rows read not finished, a malformed found-but-empty frame search failed", async ({ page }) => {
   // The stream ends after one state frame and one malformed result (`found` with no links, which the server never sends): no done.
   await page.route("**/api/summaries/links/search", (route) =>

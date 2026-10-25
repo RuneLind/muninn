@@ -50,7 +50,7 @@ import {
 import type { SummaryIngest } from "../../summaries/summarizer-shared.ts";
 import { filterDocumentText, hasS3FileUrl } from "../../summaries/source-text.ts";
 import { checkedSha256OfRaw, factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
-import { endsInsideFence, endsInsideHtmlBlock } from "../../summaries/links-section.ts";
+import { endsInsideFence, endsInsideHtmlBlock, linksHeadingHidden } from "../../summaries/links-section.ts";
 import { safeFetchPage, type SafePage } from "../../summaries/safe-fetch.ts";
 import {
   buildCandidatesPrompt,
@@ -240,7 +240,7 @@ function webBot(deps: SummariesLinksDeps): BotConfig | Fail {
   return bot;
 }
 
-/** The read plus every refusal a links save would meet: missing, `preflightSummarySave`, and an unclosed fence or HTML block at the body's end. */
+/** The read plus every refusal a links save would meet: missing, `preflightSummarySave`, an unclosed fence or HTML block at the body's end, and a Links section the readers do not show as a heading. */
 async function loadSavable(deps: SummariesLinksDeps, t: Target): Promise<{ raw: string; stored: StoredCapture } | Fail> {
   let raw: string | null;
   try {
@@ -258,6 +258,9 @@ async function loadSavable(deps: SummariesLinksDeps, t: Target): Promise<{ raw: 
   }
   if (endsInsideHtmlBlock(stored.body)) {
     return fail(409, "open_html", "The summary ends inside an unclosed HTML block, so a Links section cannot be added below it.");
+  }
+  if (linksHeadingHidden(stored.body)) {
+    return fail(409, "links_hidden", "The summary's Links section sits inside an HTML or code block, so lines added to it would not show.");
   }
   return { raw, stored };
 }

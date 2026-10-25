@@ -3,8 +3,10 @@ import {
   appendLinksSection,
   bodyUrlCounts,
   demoteLinksHeadings,
+  endsInsideFence,
   endsInsideHtmlBlock,
   findLinksSection,
+  linksHeadingHidden,
   parseLinksLine,
   parseLinksSection,
   prepareLinksAnswer,
@@ -20,6 +22,9 @@ import { renderExportMarkdown } from "./export.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { sanitizedMarkedInstallScript } from "../dashboard/views/components/doc-panel.ts";
 import { splitTranscript } from "./transcript-split.ts";
+import { dropFactcheckSentinelLines } from "./factcheck-callout.ts";
+import { buildSummaryFactcheckBlock, insertSummaryFactcheckBlock } from "./factcheck-block.ts";
+import { insertFoundLinks } from "./find-links.ts";
 
 const LINE: LinkLine = {
   icon: "📄",
@@ -459,5 +464,57 @@ describe("fix round 1 batch 3 — a summary ending inside an open HTML block", (
     expect(endsInsideHtmlBlock(summary)).toBe(open);
     // The walker finds the section either way: only marked can tell.
     expect(findLinksSection(body)).not.toBeNull();
+  });
+});
+
+describe("pr745 fix round 2 batch 1 — the predicates read what the readers parse (sentinels dropped)", () => {
+  const FC = buildSummaryFactcheckBlock("### ✅ Claim 1/1 — ok\n\nConfidence: high", "2026-10-25");
+  const ADD = [{ url: "https://found.example/post", title: "Found post", detail: "" }];
+  /** Both readers as they run: the export, and the page's `renderMarkdown` (sentinel lines dropped first). */
+  const readers = (body: string) => [renderExportMarkdown(body), clientRender(dropFactcheckSentinelLines(body))];
+
+  test("F1: a `<!--` closed in the file only by the start sentinel is refused, and the readers would swallow the appended section", () => {
+    const summary = insertSummaryFactcheckBlock("# T\n\nBody.\n\n<!-- note to self", FC);
+    const saved = insertFoundLinks(summary, ADD).body;
+    expect(findLinksSection(saved)).not.toBeNull();
+    for (const html of readers(saved)) expect(html.includes("<h2>Links</h2>")).toBe(false);
+    expect(endsInsideHtmlBlock(summary)).toBe(true);
+    expect(endsInsideFence(summary)).toBe(false);
+  });
+
+  test("F1 control: a closed comment above the block, and a block with nothing open, stay available", () => {
+    for (const summary of [
+      insertSummaryFactcheckBlock("# T\n\n<!-- note -->\n\nBody.", FC),
+      insertSummaryFactcheckBlock("# T\n\nBody.", FC),
+    ]) {
+      expect(endsInsideHtmlBlock(summary)).toBe(false);
+      expect(endsInsideFence(summary)).toBe(false);
+      const saved = insertFoundLinks(summary, ADD).body;
+      for (const html of readers(saved)) expect(html).toContain("<h2>Links</h2>");
+    }
+  });
+
+  const LINKS = "## Links\n\n- 📄 [A](https://a.example) · from description";
+  const HIDDEN: [string, string][] = [
+    ["inside <pre> that closes later", `# T\n\n<pre>\n${LINKS}\n</pre>\n\nMore.`],
+    ["inside a comment that closes later", `# T\n\n<!-- old\n${LINKS}\n-->\n\nMore.`],
+    ["after a `<!--` only the start sentinel closes", insertSummaryFactcheckBlock(`# T\n\n<!-- note\n\n${LINKS}`, FC)],
+  ];
+  test.each(HIDDEN)("F2: a Links section %s is hidden, and a save into it shows in no reader", (_name, body) => {
+    expect(findLinksSection(body)).not.toBeNull();
+    expect(linksHeadingHidden(body)).toBe(true);
+    const saved = insertFoundLinks(body, ADD).body;
+    for (const html of readers(saved)) expect(html.includes("<h2>Links</h2>")).toBe(false);
+  });
+
+  const SHOWN: [string, string][] = [
+    ["an ordinary section", `# T\n\nBody.\n\n${LINKS}`],
+    ["a section after a closed <pre>", `# T\n\n<pre>\nx\n</pre>\n\n${LINKS}`],
+    ["a section after the fact-check block", insertSummaryFactcheckBlock(`# T\n\nBody.\n\n${LINKS}`, FC)],
+    ["a CRLF heading", `# T\r\n\r\nBody.\r\n\r\n## Links\r\n\r\n- 📄 [A](https://a.example) · from description`],
+    ["no section at all", "# T\n\nBody."],
+  ];
+  test.each(SHOWN)("F2 control: %s is not hidden", (_name, body) => {
+    expect(linksHeadingHidden(body)).toBe(false);
   });
 });

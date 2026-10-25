@@ -13,6 +13,7 @@ import { defaultSummariesLinksDeps, registerSummariesLinksRoutes, type FindLinks
 import { SummarySaveClaims } from "../../summaries/summary-save.ts";
 import { checkedSha256OfRaw } from "../../summaries/factcheck-body.ts";
 import { linksBaseHash, type LinkCandidate } from "../../summaries/find-links.ts";
+import { buildSummaryFactcheckBlock, insertSummaryFactcheckBlock } from "../../summaries/factcheck-block.ts";
 import type { SafePage } from "../../summaries/safe-fetch.ts";
 import type { executeOneShot } from "../../ai/one-shot.ts";
 
@@ -157,6 +158,18 @@ describe("GET /api/summaries/links/options", () => {
     const res = await post(app({ candidatesCall: async () => { throw new Error("must not run"); } }), "/api/summaries/links/candidates", ref);
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: "open_html" });
+  });
+  test("pr745 r2b1 F1: a comment only the fact-check start sentinel closes is open_html, as the readers parse it", async () => {
+    const body = insertSummaryFactcheckBlock("Summary.\n\n<!-- note to self", buildSummaryFactcheckBlock("### ✅ Claim 1/1 — ok", "2026-10-25"));
+    files.set(DOC, `---\nurl: "${URL_}"\n---\n\n${body}\n`);
+    expect(await (await opts(app())).json()).toMatchObject({ available: false, code: "open_html" });
+  });
+  test("pr745 r2b1 F2: a Links section inside a <pre> that closes later gets no button, and the candidates call is refused", async () => {
+    files.set(DOC, `---\nurl: "${URL_}"\n---\n\nSummary.\n\n<pre>\n## Links\n\n- 📄 [A](https://a.example) · from description\n</pre>\n\nMore.\n`);
+    expect(await (await opts(app())).json()).toMatchObject({ available: false, code: "links_hidden" });
+    const res = await post(app({ candidatesCall: async () => { throw new Error("must not run"); } }), "/api/summaries/links/candidates", ref);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "links_hidden" });
   });
 });
 
