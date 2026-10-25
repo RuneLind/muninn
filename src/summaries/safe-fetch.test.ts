@@ -693,6 +693,33 @@ describe("safeFetchPage — finalUrl is the parsed URL, never the caller's strin
     expect(refusals().join()).not.toContain("secret");
   });
 
+  test("a redirect to a URL carrying credentials is refused at that hop, unfetched and unlogged", async () => {
+    fresh();
+    const fetched: string[] = [];
+    const fetchImpl = (async (input: string) => {
+      fetched.push(input);
+      return new Response(null, { status: 302, headers: { location: "http://user:secret@pub.test/ok" } });
+    }) as unknown as typeof fetch;
+    expect(await safeFetchPage("http://pub.test/start", opts({ fetchImpl }))).toBeNull();
+    expect(fetched).toEqual(["http://pub.test/start"]);
+    expect(refusals().join()).toContain("credentials");
+    expect(refusals().join()).not.toContain("secret");
+  });
+
+  test("a PDF answer reports the canonical URL", async () => {
+    fresh();
+    const fetchImpl = (async () => new Response("%PDF-1.7", { headers: { "content-type": "application/pdf" } })) as unknown as typeof fetch;
+    const page = await safeFetchPage("HTTP://Pub.TEST/a b.pdf#page=3", opts({ fetchImpl }));
+    expect(page).toEqual({ finalUrl: "http://pub.test/a%20b.pdf#page=3", contentType: "application/pdf", text: null });
+  });
+
+  test("an empty-body answer reports the canonical URL", async () => {
+    fresh();
+    const fetchImpl = (async () => new Response(null, { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+    const page = await safeFetchPage("HTTP://Pub.TEST/a b.pdf#page=3", opts({ fetchImpl }));
+    expect(page).toEqual({ finalUrl: "http://pub.test/a%20b.pdf#page=3", contentType: "text/html", text: "" });
+  });
+
   test("safeFetchText still fetches a URL carrying credentials (it reports no URL)", async () => {
     fresh();
     expect(await safeFetchText("http://user:secret@pub.test/ok", opts())).toBe("<html>hello  world\n</html>");

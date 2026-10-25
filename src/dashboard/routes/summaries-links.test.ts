@@ -680,6 +680,15 @@ describe("POST /api/summaries/links", () => {
       expect(await res.json()).toMatchObject({ code: "not_verified" });
       expect(ingests).toHaveLength(0);
     });
+    test("verified at t0: accepted at exactly +60 min, refused 1 ms later", async () => {
+      let t = 0;
+      const a = app({ now: () => t });
+      await search(a);
+      t = 60 * MIN + 1;
+      expect((await save(a)).status).toBe(409);
+      t = 60 * MIN;
+      expect((await save(a)).status).toBe(200);
+    });
     test("verified at t0 and again at +59 min: accepted at +61 min (the re-verify replaces the row's time)", async () => {
       let t = 0;
       const a = app({ now: () => t });
