@@ -128,6 +128,8 @@ const MARKS_PAGE = [
   "",
   "# Marks Page",
   "",
+  "Plain **pbold** in the body.",
+  "",
   "Link with [**lbold**](https://example.com/a) and [`lcode`](https://example.com/b).",
   "",
   '<FileRef path="src/a.ts">`a.ts`</FileRef>',
@@ -161,6 +163,31 @@ const MARKS_PAGE = [
   "- [ ] **cbold** open step",
   "",
   "</Checklist>",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D1** — keep **kbold**. Opus-5.5, 26.10.2026.",
+  "- ~~**D2**~~ — dropped **xbold**. Opus-5.5, 26.10.2026.",
+  "",
+  "</DecisionLog>",
+  "",
+  '<StatusRows view="tiles">',
+  "",
+  "- **PRs:** 3 · detail **svbold**",
+  "",
+  "</StatusRows>",
+  "",
+  '<AnnotatedCode file="a.ts:1" lang="ts">',
+  "",
+  "```ts",
+  "const a = 1;",
+  "```",
+  "",
+  "Note with **anbold**.",
+  "",
+  "</AnnotatedCode>",
+  "",
+  "###### Six with **h6bold**",
   "",
 ].join("\n");
 
@@ -613,7 +640,16 @@ async function proseMarks(page: import("@playwright/test").Page, scope: string) 
     const code = root?.querySelector("code:not(pre > code)") as HTMLElement | null;
     const body = strong?.parentElement ?? null;
     if (!root || !strong || !code || !body) return null;
-    const parse = (c: string): number[] => (c.match(/-?[\d.]+/g) ?? ["0", "0", "0"]).map(Number);
+    // Any CSS colour (a relative `oklch(from …)` computes to `oklch(…)`, not
+    // `rgb(…)`) to sRGB 0–255 plus alpha, through one canvas pixel.
+    const cv = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+    const parse = (c: string): number[] => {
+      cv.clearRect(0, 0, 1, 1);
+      cv.fillStyle = c;
+      cv.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = cv.getImageData(0, 0, 1, 1).data;
+      return [r!, g!, b!, a! / 255];
+    };
     const lum = (c: number[]): number =>
       c.slice(0, 3)
         .map((v) => {
@@ -651,6 +687,99 @@ async function proseMarks(page: import("@playwright/test").Page, scope: string) 
       codeOnChip: ratio(parse(getComputedStyle(code).color), chip),
     };
   }, scope);
+}
+
+/**
+ * Every bold run under `scope`, against the colour of the text it sits in.
+ * Bold lifts its context's own colour (oklch, `--strong-lift`), so in every
+ * context it must (a) stand out from that text by contrast and (b) keep the
+ * context's hue: a link's bold stays blue, an amber title's stays amber. A
+ * context already at the ink limit (white text on dark, near-black on light;
+ * contrast >= 16) has nowhere to go and is skipped.
+ */
+async function boldLifts(page: import("@playwright/test").Page, scope: string) {
+  return page.evaluate((sel: string) => {
+    // As in proseMarks: any CSS colour to sRGB 0–255 plus alpha via a canvas pixel.
+    const cv = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+    const parse = (c: string): number[] => {
+      cv.clearRect(0, 0, 1, 1);
+      cv.fillStyle = c;
+      cv.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = cv.getImageData(0, 0, 1, 1).data;
+      return [r!, g!, b!, a! / 255];
+    };
+    const lin = (v: number) => {
+      const s = v / 255;
+      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    const lum = (c: number[]) => 0.2126 * lin(c[0]!) + 0.7152 * lin(c[1]!) + 0.0722 * lin(c[2]!);
+    const ratio = (a: number[], b: number[]) => {
+      const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+      return (x! + 0.05) / (y! + 0.05);
+    };
+    const oklab = (c: number[]) => {
+      const [r, g, b] = [lin(c[0]!), lin(c[1]!), lin(c[2]!)];
+      const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+      const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+      const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+      return [
+        0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+      ];
+    };
+    const behind = (el: Element): number[] => {
+      for (let n = el.parentElement; n; n = n.parentElement) {
+        const c = parse(getComputedStyle(n).backgroundColor);
+        if ((c[3] ?? 1) > 0) return c;
+      }
+      return [255, 255, 255];
+    };
+    // Prose bold only: a classed <strong> (a callout title, a DecisionLog id)
+    // is a component's own label with its own colour rule.
+    return [...document.querySelectorAll(`${sel} :is(strong, b):not([class])`)].map((el) => {
+      const own = parse(getComputedStyle(el).color);
+      const ctx = parse(getComputedStyle(el.parentElement!).color);
+      const bg = behind(el);
+      const [l1, a1, b1] = oklab(ctx);
+      const [l2, a2, b2] = oklab(own);
+      const chroma = Math.hypot(a1!, b1!);
+      const hueDiff = chroma < 0.03 ? 0 : (Math.abs(Math.atan2(b1!, a1!) - Math.atan2(b2!, a2!)) * 180) / Math.PI;
+      return {
+        text: (el.textContent || "").slice(0, 24),
+        // OKLab lightness of the context and the bold, and which way is "more ink".
+        ctxL: l1!,
+        ownL: l2!,
+        dark: lum(bg) < 0.2,
+        atLimit: ratio(ctx, bg) >= 16,
+        lead: ratio(own, bg) / ratio(ctx, bg),
+        hueDiff: hueDiff > 180 ? 360 - hueDiff : hueDiff,
+      };
+    });
+  }, scope);
+}
+
+/**
+ * The bold runs `boldLifts` says do not stand out, changed hue, or — given the
+ * body's own bold run `bodyBold` — sit in a dimmer context (a struck decision,
+ * a Historic body, AnnotatedCode notes) yet carry as much ink as body bold,
+ * which undoes the dimming. "Ink" is OKLab lightness toward white on dark and
+ * toward black on light, compared on the colours themselves because each
+ * context may paint its own background.
+ */
+function unlifted(rows: Awaited<ReturnType<typeof boldLifts>>, bodyBold?: string) {
+  const ref = bodyBold ? rows.find((r) => r.text === bodyBold) : undefined;
+  if (bodyBold && !ref) return [`no body bold "${bodyBold}" on the page`];
+  const ink = (l: number, dark: boolean) => (dark ? l : 1 - l);
+  return rows
+    .filter(
+      (r) =>
+        (!r.atLimit && (r.lead < 1.1 || r.hueDiff > 15)) ||
+        (ref !== undefined &&
+          ink(r.ctxL, r.dark) < ink(ref.ctxL, ref.dark) - 0.03 &&
+          ink(r.ownL, r.dark) > ink(ref.ownL, ref.dark) - 0.01),
+    )
+    .map((r) => `${r.text} (lead ${r.lead.toFixed(2)}, hue ${r.hueDiff.toFixed(0)}°, L ${r.ctxL.toFixed(2)}→${r.ownL.toFixed(2)})`);
 }
 
 test.describe("Bold and inline code stand apart from the body", () => {
@@ -713,7 +842,6 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
         const cs = (s: string) => getComputedStyle(q(s));
         return {
           link: cs("a[href$='/a']").color,
-          linkBold: cs("a[href$='/a'] strong").color,
           linkCode: cs("a[href$='/b'] code").color,
           linkOfCode: cs("a[href$='/b']").color,
           fileref: cs(".fileref").color,
@@ -722,33 +850,24 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
           frefInnerPadLeft: cs(".fileref code").paddingLeft,
           quote: cs("blockquote").color,
           quoteCode: cs("blockquote code").color,
-          quoteBold: cs("blockquote strong").color,
-          // Every context the 2026-10-26 enumeration found that sets its own
-          // text colour and holds bold: an Obsidian callout title, a Historic
-          // body, an open Checklist step. Bold there keeps that colour.
-          ctitle: cs(".callout-title").color,
-          ctitleBold: cs(".callout-title strong").color,
-          historic: cs(".historic-body").color,
-          historicBold: cs(".historic-body strong").color,
-          todo: cs(".check-item.check-todo .check-text").color,
-          todoBold: cs(".check-item.check-todo strong").color,
           treeProseShadow: cs(".filetree code:not(pre > code)").boxShadow,
         };
       });
-      expect(got.linkBold).toBe(got.link);
       expect(got.linkCode).toBe(got.linkOfCode);
       expect(got.frefInner).toBe(got.fileref);
       expect(got.frefInnerShadow).toBe("none");
       // …and no second padding inside the FileRef chip's own.
       expect(got.frefInnerPadLeft).toBe("0px");
       expect(got.quoteCode).toBe(got.quote);
-      expect(got.quoteBold).toBe(got.quote);
-      expect(got.ctitleBold).toBe(got.ctitle);
-      expect(got.historicBold).toBe(got.historic);
-      expect(got.todoBold).toBe(got.todo);
       // A FileTree body can hold prose beside its fence; inline code there
       // gets FileTree's flat look, never the chip's edge.
       expect(got.treeProseShadow).toBe("none");
+      // Bold in every context on the page — link, quote, callout title,
+      // Historic, open and done Checklist steps, dimmed DecisionLog items,
+      // StatusRows tiles, AnnotatedCode notes, h6 — lifts its own context.
+      const rows = await boldLifts(page, ".wiki-article");
+      expect(rows.length).toBeGreaterThan(10);
+      expect(unlifted(rows, "pbold")).toEqual([]);
     });
   }
 });
@@ -829,22 +948,12 @@ test.describe("The other prose surfaces", () => {
       const c = (s: string) => getComputedStyle(document.querySelector("#prose-probe " + s) as HTMLElement).color;
       return {
         a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
-        quote: c("blockquote"), quoteBold: c("blockquote strong"),
-        strongInk: (() => {
-          const p = document.createElement("span");
-          p.style.color = "var(--text-strong)";
-          document.body.appendChild(p);
-          return getComputedStyle(p).color;
-        })(),
       };
     });
-    expect(links.bold).toBe(links.a);
     expect(links.code).toBe(links.b);
-    // Unlike the wiki article, these surfaces always set bold in a quote to
-    // the strong ink (as on main): the summary fact-check callout is a
-    // blockquote whose bold runs ARE its claim headings.
-    expect(links.quoteBold).toBe(links.strongInk);
-    expect(links.quoteBold).not.toBe(links.quote);
+    // Bold in the link, the quote (a fact-check claim heading is bold in a
+    // blockquote) and the body all lift their own context.
+    expect(unlifted(await boldLifts(page, "#prose-probe"))).toEqual([]);
   });
 
   test("chat answer: bold and code inside a link keep the link colour, dark", async ({ page }) => {
@@ -865,21 +974,9 @@ test.describe("The other prose surfaces", () => {
       const c = (s: string) => getComputedStyle(probe.querySelector(s) as HTMLElement).color;
       return {
         a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
-        quote: c("blockquote"), quoteBold: c("blockquote strong"),
-        strongInk: (() => {
-          const p = document.createElement("span");
-          p.style.color = "var(--text-strong)";
-          document.body.appendChild(p);
-          return getComputedStyle(p).color;
-        })(),
       };
     });
-    expect(links.bold).toBe(links.a);
     expect(links.code).toBe(links.b);
-    // Unlike the wiki article, these surfaces always set bold in a quote to
-    // the strong ink (as on main): the summary fact-check callout is a
-    // blockquote whose bold runs ARE its claim headings.
-    expect(links.quoteBold).toBe(links.strongInk);
-    expect(links.quoteBold).not.toBe(links.quote);
+    expect(unlifted(await boldLifts(page, "#link-probe"))).toEqual([]);
   });
 });

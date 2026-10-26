@@ -106,9 +106,11 @@ const DARK_TOKENS = `
 
       /* Bold and inline code in prose. Dark measured 2026-10-26 in the wiki
          article: strong shared the body's #e0e0e0 (bold lead 1.00x), and the
-         inline chip on --bg-inset sat 1.9 L* from its #12121a panel. Now the
-         lead is 1.32x, and the chip fill steps 5.4 L* and its edge 20.0 L*. */
-      --text-strong: #ffffff;
+         inline chip on --bg-inset sat 1.9 L* from its #12121a panel. Bold now
+         lifts its context's own colour by --strong-lift in oklch lightness
+         (body #e0e0e0 -> #fff, lead 1.32x; a link stays blue, a muted quote
+         stays muted), and the chip fill steps 5.4 L* and its edge 20.0 L*. */
+      --strong-lift: 0.1;
       --strong-weight: 700;
       --bg-code-inline: #1c1c2e;
       --code-inline-border: rgba(255, 255, 255, 0.14);
@@ -208,8 +210,9 @@ const LIGHT_TOKENS = `
       --bg-code: #eceef3;
       --bg-code-bar: #e2e4ea;
 
-      /* Light already showed bold and inline code; these keep its look. */
-      --text-strong: var(--text-primary);
+      /* Light: bold darkens its context (body lead 1.43x); -0.1 keeps bold in
+         a dimmed context lighter than body text. The chip keeps light's look. */
+      --strong-lift: -0.1;
       --strong-weight: 700;
       --bg-code-inline: #eceef3;
       --code-inline-border: transparent;

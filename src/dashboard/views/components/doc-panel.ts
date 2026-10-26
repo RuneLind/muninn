@@ -48,8 +48,7 @@ export function markdownContentStyles(prefix: string): string {
     ${prefix} th { background: var(--bg-surface); font-weight: 600; color: var(--text-primary); }
     ${prefix} hr { border: none; border-top: 1px solid var(--border-primary); margin: 24px 0; }
     ${prefix} img { max-width: 100%; border-radius: 6px; }
-    ${prefix} strong { color: var(--text-strong); font-weight: var(--strong-weight); }
-    ${prefix} a strong { color: inherit; }
+    ${prefix} strong { color: oklch(from currentColor calc(l + var(--strong-lift)) c h); font-weight: var(--strong-weight); }
   `;
 }
 
