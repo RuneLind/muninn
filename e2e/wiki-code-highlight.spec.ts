@@ -737,7 +737,7 @@ async function boldLifts(page: import("@playwright/test").Page, scope: string) {
     };
     // Prose bold only: a classed <strong> (a callout title, a DecisionLog id)
     // is a component's own label with its own colour rule.
-    return [...document.querySelectorAll(`${sel} :is(strong, b):not([class])`)].map((el) => {
+    return Array.from(document.querySelectorAll(`${sel} :is(strong, b):not([class])`)).map((el) => {
       const own = parse(getComputedStyle(el).color);
       const ctx = parse(getComputedStyle(el.parentElement!).color);
       const bg = behind(el);
