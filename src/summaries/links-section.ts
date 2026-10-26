@@ -22,6 +22,7 @@
 
 import { Marked } from "marked";
 import { mapProseLines, TRANSCRIPT_HEADING_RE } from "./transcript-split.ts";
+import { dropFactcheckSentinelLines } from "./factcheck-callout.ts";
 import { extractLineUrls, linkKey } from "../youtube/description-links.ts";
 
 /** One line of the section. */
@@ -69,7 +70,7 @@ function unescapeText(text: string): string {
 }
 
 /** `(` and `)` percent-encoded, so the link's closing paren is the only one. */
-function encodeUrl(url: string): string {
+export function encodeUrl(url: string): string {
   return url.replace(/\(/g, "%28").replace(/\)/g, "%29").replace(/\s/g, "%20");
 }
 
@@ -221,6 +222,49 @@ function walkerOpenFence(text: string): { char: string; length: number } | null 
 /** Whether the walker finds a `## Links` heading appended after `text`. */
 function walkerSeesHeading(text: string): boolean {
   return findLinksSection(`${text}\n\n${LINKS_HEADING}\n`)?.start === text.length + 2;
+}
+
+/**
+ * Whether `text` ends inside a fenced code block per EITHER reader (the line
+ * walker or marked). Find links refuses such a document up front: a section
+ * appended there is code to one reader, so the save could not keep the
+ * checked text or the `linksBaseHash` where they were.
+ */
+export function endsInsideFence(text: string): boolean {
+  const body = text.trimEnd();
+  return walkerOpenFence(body) !== null || markedOpenFence(body) !== null;
+}
+
+/**
+ * Whether marked folds a `## Links` heading appended after `text` into an HTML
+ * block left open at the end (CommonMark types 1–5 — `<pre>`, `<!--`, `<?`,
+ * `<!X`, `<![CDATA[` — run to their end marker or the document's end), read on
+ * the text the readers parse: fact-check sentinel lines dropped, so a `<!--`
+ * that only the start sentinel closes in the file stays open. The
+ * walker still sees the heading, so the save would succeed and every reader
+ * would show the section as raw text: Find links refuses such a document.
+ */
+export function endsInsideHtmlBlock(text: string): boolean {
+  return fenceLexer.lexer(`${dropFactcheckSentinelLines(text.trimEnd()).trimEnd()}\n\n${LINKS_HEADING}\n`).at(-1)?.type === "html";
+}
+
+const HEADING_PROBE = "Links muninnlinksprobe";
+
+/**
+ * Whether the body HAS a `## Links` section (per {@link findLinksSection}) that
+ * the readers do not show as a heading: marked, on the sentinel-dropped text,
+ * folds it into an HTML block or a code block (`<pre>…## Links…</pre>`, a
+ * comment closed only by a fact-check sentinel). A links save would write into
+ * a section no reader shows, so Find links refuses such a document.
+ */
+export function linksHeadingHidden(text: string): boolean {
+  const range = findLinksSection(text);
+  if (!range) return false;
+  const eol = text.indexOf("\n", range.start);
+  const probe = `${text.slice(0, range.start)}## ${HEADING_PROBE}${eol < 0 ? "" : text.slice(eol)}`;
+  return !fenceLexer
+    .lexer(dropFactcheckSentinelLines(probe))
+    .some((t) => t.type === "heading" && t.depth === 2 && t.text === HEADING_PROBE);
 }
 
 /**

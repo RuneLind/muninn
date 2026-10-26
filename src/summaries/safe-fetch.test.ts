@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { safeFetchText, type SafeFetchOptions } from "./safe-fetch.ts";
+import { safeFetchPage, safeFetchText, safeResolveRedirect, type SafeFetchOptions } from "./safe-fetch.ts";
 
 /**
  * The helper refuses by ADDRESS, so nothing local is reachable by its real name —
@@ -639,5 +639,89 @@ describe("safeFetchText — never throws", () => {
     });
     expect(res).toBeNull();
     expect(refusals().join()).toContain("enrichment");
+  });
+});
+
+describe("safeFetchPage — finalUrl is the parsed URL, never the caller's string", () => {
+  test("a no-redirect hit reports the canonical URL: scheme and host lower-cased, a space escaped", async () => {
+    fresh();
+    const page = await safeFetchPage("HTTP://Pub.TEST/ok?q=a b#frag", opts());
+    expect(page?.finalUrl).toBe("http://pub.test/ok?q=a%20b#frag");
+  });
+
+  test("a URL carrying credentials is refused, and the refusal does not log them", async () => {
+    fresh();
+    let fetched = 0;
+    const fetchImpl = (async () => (fetched++, new Response("x"))) as unknown as typeof fetch;
+    expect(await safeFetchPage("http://user:secret@pub.test/ok", opts({ fetchImpl }))).toBeNull();
+    expect(fetched).toBe(0);
+    expect(refusals().join()).toContain("credentials");
+    expect(refusals().join()).not.toContain("secret");
+  });
+
+  test.each([
+    ["a refused scheme", "ftp://u:secret@pub.test/x", "ftp://pub.test/x"],
+    ["an unparseable URL", "http://u:secret@[bad/x", "http://[bad/x"],
+  ])("%s refused before the credential check does not log the credentials", async (_label, url, logged) => {
+    for (const run of [safeFetchText, safeFetchPage]) {
+      fresh();
+      expect(await run(url, opts())).toBeNull();
+      expect(warnings).toHaveLength(1);
+      expect(refusals().join()).not.toContain("secret");
+      expect(warnings[0]!.properties?.url).toBe(logged);
+    }
+  });
+
+  test("a redirect to an unparseable location does not log the location's credentials", async () => {
+    fresh();
+    const fetchImpl = (async () =>
+      new Response(null, { status: 302, headers: { location: "http://u:secret@[bad/x" } })) as unknown as typeof fetch;
+    expect(await safeFetchPage("http://pub.test/ok", opts({ fetchImpl }))).toBeNull();
+    expect(refusals().join()).toContain("unparseable location");
+    expect(refusals().join()).toContain("[bad/x");
+    expect(refusals().join()).not.toContain("secret");
+  });
+
+  test("safeResolveRedirect's refusals do not log credentials, in the URL or in its location", async () => {
+    fresh();
+    expect(await safeResolveRedirect("http://u:secret@[bad/x", opts())).toBeNull();
+    const fetchImpl = (async () =>
+      new Response(null, { status: 301, headers: { location: "http://u:secret@[bad/x" } })) as unknown as typeof fetch;
+    expect(await safeResolveRedirect("http://pub.test/short", opts({ fetchImpl }))).toBeNull();
+    expect(warnings).toHaveLength(2);
+    expect(refusals().join()).toContain("unparseable location");
+    expect(refusals().join()).not.toContain("secret");
+  });
+
+  test("a redirect to a URL carrying credentials is refused at that hop, unfetched and unlogged", async () => {
+    fresh();
+    const fetched: string[] = [];
+    const fetchImpl = (async (input: string) => {
+      fetched.push(input);
+      return new Response(null, { status: 302, headers: { location: "http://user:secret@pub.test/ok" } });
+    }) as unknown as typeof fetch;
+    expect(await safeFetchPage("http://pub.test/start", opts({ fetchImpl }))).toBeNull();
+    expect(fetched).toEqual(["http://pub.test/start"]);
+    expect(refusals().join()).toContain("credentials");
+    expect(refusals().join()).not.toContain("secret");
+  });
+
+  test("a PDF answer reports the canonical URL", async () => {
+    fresh();
+    const fetchImpl = (async () => new Response("%PDF-1.7", { headers: { "content-type": "application/pdf" } })) as unknown as typeof fetch;
+    const page = await safeFetchPage("HTTP://Pub.TEST/a b.pdf#page=3", opts({ fetchImpl }));
+    expect(page).toEqual({ finalUrl: "http://pub.test/a%20b.pdf#page=3", contentType: "application/pdf", text: null });
+  });
+
+  test("an empty-body answer reports the canonical URL", async () => {
+    fresh();
+    const fetchImpl = (async () => new Response(null, { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+    const page = await safeFetchPage("HTTP://Pub.TEST/a b.pdf#page=3", opts({ fetchImpl }));
+    expect(page).toEqual({ finalUrl: "http://pub.test/a%20b.pdf#page=3", contentType: "text/html", text: "" });
+  });
+
+  test("safeFetchText still fetches a URL carrying credentials (it reports no URL)", async () => {
+    fresh();
+    expect(await safeFetchText("http://user:secret@pub.test/ok", opts())).toBe("<html>hello  world\n</html>");
   });
 });

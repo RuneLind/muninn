@@ -320,6 +320,28 @@ function abandon(body: ReadableStream<Uint8Array> | null, hop: AbortController):
 }
 
 /**
+ * A URL as a refusal log line may carry it: userinfo dropped, since an
+ * agent-supplied `ftp://u:secret@h/x` is refused before the credential check.
+ * An unparseable string loses anything shaped like `user:pass@` before its host.
+ */
+function logSafeUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (!url.username && !url.password) return raw;
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return raw.replace(/^([a-z][a-z0-9+.-]*:)?(\/\/)?[^/?#\s]*@/i, "$1$2");
+  }
+}
+
+/** A refusal's `detail` with any `location` passed through {@link logSafeUrl}. */
+function logSafeDetail(detail?: Record<string, unknown>): Record<string, unknown> | undefined {
+  return typeof detail?.location === "string" ? { ...detail, location: logSafeUrl(detail.location) } : detail;
+}
+
+/**
  * Fetch `rawUrl` and return its body as text, or `null` if anything about it is
  * refused or fails. Never throws; every refusal logs exactly one warning naming
  * the reason, the CURRENT hop and the caller, so a blocked capture is
@@ -332,6 +354,35 @@ export async function safeFetchText(
   rawUrl: string,
   options: SafeFetchOptions = {},
 ): Promise<string | null> {
+  return (await safeFetchCore(rawUrl, options, false))?.text ?? null;
+}
+
+/** What {@link safeFetchPage} answers for a URL that resolved. */
+export interface SafePage {
+  /** The URL the last hop answered from, after every redirect, as parsed (`URL.toString()`). */
+  readonly finalUrl: string;
+  /** The answer's `content-type`, as sent. */
+  readonly contentType: string;
+  /** The body, or `null` for a PDF, whose body is never read. */
+  readonly text: string | null;
+}
+
+/** `application/pdf`: the one non-text answer {@link safeFetchPage} reports instead of refusing. */
+function isPdfContentType(raw: string | null): boolean {
+  return (raw ?? "").split(";")[0]!.trim().toLowerCase() === "application/pdf";
+}
+
+/**
+ * {@link safeFetchText}'s guards, for a caller that needs to know WHERE the URL
+ * landed (Find links stores `finalUrl`). A PDF answer is reported with
+ * `text: null` and its body abandoned unread; every other non-text answer (no
+ * content-type, octet-stream, an archive) is refused like any other refusal.
+ */
+export async function safeFetchPage(rawUrl: string, options: SafeFetchOptions = {}): Promise<SafePage | null> {
+  return safeFetchCore(rawUrl, options, true);
+}
+
+async function safeFetchCore(rawUrl: string, options: SafeFetchOptions, reportPdf: boolean): Promise<SafePage | null> {
   const maxBytes = options.maxBytes ?? SAFE_FETCH_MAX_BYTES;
   const maxRedirects = options.maxRedirects ?? SAFE_FETCH_MAX_REDIRECTS;
   const timeoutMs = options.timeoutMs ?? SAFE_FETCH_TIMEOUT_MS;
@@ -340,7 +391,7 @@ export async function safeFetchText(
   const caller = options.caller ?? "unspecified";
 
   const refuse = (reason: string, url: string, detail?: Record<string, unknown>): null => {
-    log.warn("Refused fetch of {url} for {caller}: {reason}", { url, caller, reason, ...detail });
+    log.warn("Refused fetch of {url} for {caller}: {reason}", { url: logSafeUrl(url), caller, reason, ...logSafeDetail(detail) });
     return null;
   };
 
@@ -365,6 +416,9 @@ export async function safeFetchText(
       if (!ALLOWED_SCHEMES.has(url.protocol)) {
         return refuse(`refused scheme ${url.protocol}`, current);
       }
+      // A page caller stores `finalUrl`, so a credential in the URL would reach the
+      // stored line. Refused at every hop; `refuse` drops it from the logged URL.
+      if (reportPdf && (url.username || url.password)) return refuse("URL carries credentials", current);
 
       // Resolve, then judge the ADDRESS — a hostname tells us nothing (`x.test` can
       // be an A record for 127.0.0.1). An IP literal is judged as-is, no DNS.
@@ -427,6 +481,7 @@ export async function safeFetchText(
         const contentType = res.headers.get("content-type");
         if (!isAllowedContentType(contentType)) {
           abandon(res.body, hopAbort);
+          if (reportPdf && isPdfContentType(contentType)) return { finalUrl: url.toString(), contentType: contentType ?? "", text: null };
           return refuse(`refused content-type ${contentType ?? "(none)"}`, current);
         }
 
@@ -434,7 +489,7 @@ export async function safeFetchText(
         // 50 MB before `capContent` ever sees it. Over the cap we keep what we have and
         // stop pulling: a truncated article still summarizes, a refused one does not.
         const body = res.body;
-        if (!body) return "";
+        if (!body) return { finalUrl: url.toString(), contentType: contentType ?? "", text: "" };
         const reader = body.getReader();
         const chunks: Uint8Array[] = [];
         let total = 0;
@@ -477,7 +532,7 @@ export async function safeFetchText(
         }
         // Non-fatal decode: cutting at a byte boundary can split a multi-byte
         // codepoint, and one U+FFFD at the tail is not worth losing the article over.
-        return new TextDecoder("utf-8").decode(buf);
+        return { finalUrl: url.toString(), contentType: contentType ?? "", text: new TextDecoder("utf-8").decode(buf) };
       } finally {
         hopChain.dispose();
       }
@@ -557,7 +612,7 @@ export async function safeResolveRedirect(rawUrl: string, options: SafeResolveOp
   const doFetch = options.fetchImpl ?? fetch;
   const caller = options.caller ?? "unspecified";
   const refuse = (reason: string, url: string, detail?: Record<string, unknown>): null => {
-    log.warn("Refused redirect lookup of {url} for {caller}: {reason}", { url, caller, reason, ...detail });
+    log.warn("Refused redirect lookup of {url} for {caller}: {reason}", { url: logSafeUrl(url), caller, reason, ...logSafeDetail(detail) });
     return null;
   };
 

@@ -113,6 +113,11 @@ const ALT_TOKEN_RE = /^[A-Za-z0-9_.,:!'()\-’–—…]{1,20}$/;
 const ALT_SCHEME_RE = /^[a-z][a-z0-9+.\-]*:\S/i;
 const ALT_MAX = 80;
 
+/** Whether `url` carries an S3 URL `filterDocumentText` would rewrite to `[file]`. `search` ignores the `g` flag's `lastIndex`. */
+export function hasS3FileUrl(url: string): boolean {
+  return url.search(S3_URL_RE) >= 0;
+}
+
 /** Images and S3 links rewritten over the WHOLE body, code included: cutting it
  *  at code spans let a backtick in an alt or a URL hide an image that marked
  *  still renders. */
