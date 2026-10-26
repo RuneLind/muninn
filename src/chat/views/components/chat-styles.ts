@@ -788,7 +788,7 @@ export function chatStyles(): string {
       font-size: 0.9em;
     }
     .web-content code:not(pre > code) {
-      background: var(--bg-code-inline); color: var(--code-inline-fg); box-shadow: inset 0 0 0 1px var(--code-inline-border);
+      background: var(--bg-code-inline); box-shadow: inset 0 0 0 1px var(--code-inline-border);
     }
     .web-content blockquote {
       border-left: 3px solid var(--accent);
@@ -828,6 +828,7 @@ export function chatStyles(): string {
     /* A list item's further paragraph: a small gap marks the paragraph break. */
     .web-content li > p { margin: 0.35em 0 0; }
     .web-content strong { font-weight: var(--strong-weight); color: var(--text-strong); }
+    .web-content a strong { color: inherit; }
     .web-content em { font-style: italic; }
     .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
     .web-content a:hover { text-decoration-color: var(--accent-light); }

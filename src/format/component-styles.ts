@@ -92,6 +92,7 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .tablewrap th { background: var(--bg-inset); color: var(--text-primary); }
     ${scope} .fileref { color: var(--accent-light); font-family: var(--mono, ui-monospace, monospace); }
+    ${scope} .fileref code { background: transparent; box-shadow: none; padding: 0; color: inherit; }
     ${scope} .figure { margin: 1.4rem 0; }
     ${scope} .figure-body { overflow-x: auto; }
     ${scope} .figure img { max-width: 100%; height: auto; }

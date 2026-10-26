@@ -2375,9 +2375,10 @@ export async function renderWikiPage(opts?: {
     .wiki-article blockquote { border-left: 3px solid var(--border-secondary); padding: 6px 12px; margin: 10px 0; color: var(--text-muted); background: var(--bg-surface); border-radius: 0 6px 6px 0; }
     .wiki-article code { background: var(--bg-inset); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
     .wiki-article code:not(pre > code) {
-      background: var(--bg-code-inline); color: var(--code-inline-fg); box-shadow: inset 0 0 0 1px var(--code-inline-border);
+      background: var(--bg-code-inline); box-shadow: inset 0 0 0 1px var(--code-inline-border);
     }
     .wiki-article strong, .wiki-article b { color: var(--text-strong); font-weight: var(--strong-weight); }
+    .wiki-article a strong, .wiki-article a b { color: inherit; }
     .wiki-article pre { background: var(--bg-inset); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 10px 0; }
     .wiki-article table { border-collapse: collapse; margin: 12px 0; width: 100%; font-size: 13px; }
     .wiki-article th, .wiki-article td { border: 1px solid var(--border-secondary); padding: 6px 10px; text-align: left; }

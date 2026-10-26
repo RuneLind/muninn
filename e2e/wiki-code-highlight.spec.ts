@@ -116,6 +116,26 @@ const LINK_PAGE = [
   "",
 ].join("\n");
 
+/**
+ * Contexts that set their own text colour: a link, a FileRef chip, a muted
+ * blockquote. Bold and inline code inside them must keep that colour; only
+ * the chip's fill and edge are theirs.
+ */
+const MARKS_PAGE = [
+  "---",
+  "title: Marks Page",
+  "---",
+  "",
+  "# Marks Page",
+  "",
+  "Link with [**lbold**](https://example.com/a) and [`lcode`](https://example.com/b).",
+  "",
+  '<FileRef path="src/a.ts">`a.ts`</FileRef>',
+  "",
+  "> Quote with `qcode` in it.",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -123,6 +143,7 @@ test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-code-"));
   await writeFile(path.join(root, "fence-page.md"), PAGE, "utf8");
   await writeFile(path.join(root, "link-page.md"), LINK_PAGE, "utf8");
+  await writeFile(path.join(root, "marks-page.mdx"), MARKS_PAGE, "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -641,4 +662,34 @@ test.describe("Bold and inline code stand apart from the body", () => {
     expect(m!.chipStep).toBeGreaterThanOrEqual(6);
     expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
   });
+});
+
+test.describe("Bold and inline code keep the colour of the context they sit in", () => {
+  for (const theme of ["dark", "light"] as const) {
+    test(`links, FileRef and blockquotes, ${theme}`, async ({ page }) => {
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=marks-page`);
+      await expect(page.locator(".wiki-article .fileref")).toBeVisible();
+      await page.evaluate((t) => document.documentElement.setAttribute("data-theme", t), theme);
+      const got = await page.evaluate(() => {
+        const q = (s: string) => document.querySelector(".wiki-article " + s) as HTMLElement;
+        const cs = (s: string) => getComputedStyle(q(s));
+        return {
+          link: cs("a[href$='/a']").color,
+          linkBold: cs("a[href$='/a'] strong").color,
+          linkCode: cs("a[href$='/b'] code").color,
+          linkOfCode: cs("a[href$='/b']").color,
+          fileref: cs(".fileref").color,
+          frefInner: cs(".fileref code").color,
+          frefInnerShadow: cs(".fileref code").boxShadow,
+          quote: cs("blockquote").color,
+          quoteCode: cs("blockquote code").color,
+        };
+      });
+      expect(got.linkBold).toBe(got.link);
+      expect(got.linkCode).toBe(got.linkOfCode);
+      expect(got.frefInner).toBe(got.fileref);
+      expect(got.frefInnerShadow).toBe("none");
+      expect(got.quoteCode).toBe(got.quote);
+    });
+  }
 });

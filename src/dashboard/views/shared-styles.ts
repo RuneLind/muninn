@@ -110,7 +110,6 @@ const DARK_TOKENS = `
       --text-strong: #ffffff;
       --strong-weight: 650;
       --bg-code-inline: #1c1c2e;
-      --code-inline-fg: #e2e2ec;
       --code-inline-border: rgba(255, 255, 255, 0.14);
 `;
 
@@ -212,7 +211,6 @@ const LIGHT_TOKENS = `
       --text-strong: var(--text-primary);
       --strong-weight: 700;
       --bg-code-inline: #eceef3;
-      --code-inline-fg: var(--text-secondary);
       --code-inline-border: transparent;
 `;
 
