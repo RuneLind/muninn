@@ -828,7 +828,7 @@ export function chatStyles(): string {
     /* A list item's further paragraph: a small gap marks the paragraph break. */
     .web-content li > p { margin: 0.35em 0 0; }
     .web-content strong { font-weight: var(--strong-weight); color: var(--text-strong); }
-    .web-content :is(a, blockquote) strong { color: inherit; }
+    .web-content a strong { color: inherit; }
     .web-content em { font-style: italic; }
     .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
     .web-content a:hover { text-decoration-color: var(--accent-light); }

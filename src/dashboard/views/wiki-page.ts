@@ -2378,7 +2378,7 @@ export async function renderWikiPage(opts?: {
       background: var(--bg-code-inline); box-shadow: inset 0 0 0 1px var(--code-inline-border);
     }
     .wiki-article strong, .wiki-article b { color: var(--text-strong); font-weight: var(--strong-weight); }
-    .wiki-article :is(a, blockquote) :is(strong, b) { color: inherit; }
+    .wiki-article :is(a, blockquote, .callout-title, .historic-body, .check-item) :is(strong, b) { color: inherit; }
     .wiki-article pre { background: var(--bg-inset); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 10px 0; }
     .wiki-article table { border-collapse: collapse; margin: 12px 0; width: 100%; font-size: 13px; }
     .wiki-article th, .wiki-article td { border: 1px solid var(--border-secondary); padding: 6px 10px; text-align: left; }

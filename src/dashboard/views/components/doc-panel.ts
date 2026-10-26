@@ -49,7 +49,7 @@ export function markdownContentStyles(prefix: string): string {
     ${prefix} hr { border: none; border-top: 1px solid var(--border-primary); margin: 24px 0; }
     ${prefix} img { max-width: 100%; border-radius: 6px; }
     ${prefix} strong { color: var(--text-strong); font-weight: var(--strong-weight); }
-    ${prefix} :is(a, blockquote) strong { color: inherit; }
+    ${prefix} a strong { color: inherit; }
   `;
 }
 

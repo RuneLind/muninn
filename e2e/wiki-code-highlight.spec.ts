@@ -147,6 +147,21 @@ const MARKS_PAGE = [
   "",
   "</FileTree>",
   "",
+  "> [!warning] A **ctbold** title",
+  "> Callout body.",
+  "",
+  '<Historic since="muninn#1" note="old">',
+  "",
+  "Historic **hbold** text.",
+  "",
+  "</Historic>",
+  "",
+  "<Checklist>",
+  "",
+  "- [ ] **cbold** open step",
+  "",
+  "</Checklist>",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -708,6 +723,15 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
           quote: cs("blockquote").color,
           quoteCode: cs("blockquote code").color,
           quoteBold: cs("blockquote strong").color,
+          // Every context the 2026-10-26 enumeration found that sets its own
+          // text colour and holds bold: an Obsidian callout title, a Historic
+          // body, an open Checklist step. Bold there keeps that colour.
+          ctitle: cs(".callout-title").color,
+          ctitleBold: cs(".callout-title strong").color,
+          historic: cs(".historic-body").color,
+          historicBold: cs(".historic-body strong").color,
+          todo: cs(".check-item.check-todo .check-text").color,
+          todoBold: cs(".check-item.check-todo strong").color,
           treeProseShadow: cs(".filetree code:not(pre > code)").boxShadow,
         };
       });
@@ -719,6 +743,9 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
       expect(got.frefInnerPadLeft).toBe("0px");
       expect(got.quoteCode).toBe(got.quote);
       expect(got.quoteBold).toBe(got.quote);
+      expect(got.ctitleBold).toBe(got.ctitle);
+      expect(got.historicBold).toBe(got.historic);
+      expect(got.todoBold).toBe(got.todo);
       // A FileTree body can hold prose beside its fence; inline code there
       // gets FileTree's flat look, never the chip's edge.
       expect(got.treeProseShadow).toBe("none");
@@ -803,11 +830,21 @@ test.describe("The other prose surfaces", () => {
       return {
         a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
         quote: c("blockquote"), quoteBold: c("blockquote strong"),
+        strongInk: (() => {
+          const p = document.createElement("span");
+          p.style.color = "var(--text-strong)";
+          document.body.appendChild(p);
+          return getComputedStyle(p).color;
+        })(),
       };
     });
     expect(links.bold).toBe(links.a);
     expect(links.code).toBe(links.b);
-    expect(links.quoteBold).toBe(links.quote);
+    // Unlike the wiki article, these surfaces always set bold in a quote to
+    // the strong ink (as on main): the summary fact-check callout is a
+    // blockquote whose bold runs ARE its claim headings.
+    expect(links.quoteBold).toBe(links.strongInk);
+    expect(links.quoteBold).not.toBe(links.quote);
   });
 
   test("chat answer: bold and code inside a link keep the link colour, dark", async ({ page }) => {
@@ -829,10 +866,20 @@ test.describe("The other prose surfaces", () => {
       return {
         a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
         quote: c("blockquote"), quoteBold: c("blockquote strong"),
+        strongInk: (() => {
+          const p = document.createElement("span");
+          p.style.color = "var(--text-strong)";
+          document.body.appendChild(p);
+          return getComputedStyle(p).color;
+        })(),
       };
     });
     expect(links.bold).toBe(links.a);
     expect(links.code).toBe(links.b);
-    expect(links.quoteBold).toBe(links.quote);
+    // Unlike the wiki article, these surfaces always set bold in a quote to
+    // the strong ink (as on main): the summary fact-check callout is a
+    // blockquote whose bold runs ARE its claim headings.
+    expect(links.quoteBold).toBe(links.strongInk);
+    expect(links.quoteBold).not.toBe(links.quote);
   });
 });
