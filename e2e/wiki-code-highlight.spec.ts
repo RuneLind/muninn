@@ -132,9 +132,20 @@ const MARKS_PAGE = [
   "",
   '<FileRef path="src/a.ts">`a.ts`</FileRef>',
   "",
-  "> Quote with `qcode` in it.",
+  "> Quote with **qbold** and `qcode` in it.",
   "",
   "See the source (`src/a.ts:12`).",
+  "",
+  "<FileTree>",
+  "",
+  "The tree under `ftsrc/`:",
+  "",
+  "```",
+  "ftsrc/",
+  "└── a.ts",
+  "```",
+  "",
+  "</FileTree>",
   "",
 ].join("\n");
 
@@ -695,6 +706,8 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
           frefInnerShadow: cs(".fileref code").boxShadow,
           quote: cs("blockquote").color,
           quoteCode: cs("blockquote code").color,
+          quoteBold: cs("blockquote strong").color,
+          treeProseShadow: cs(".filetree code:not(pre > code)").boxShadow,
         };
       });
       expect(got.linkBold).toBe(got.link);
@@ -702,6 +715,10 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
       expect(got.frefInner).toBe(got.fileref);
       expect(got.frefInnerShadow).toBe("none");
       expect(got.quoteCode).toBe(got.quote);
+      expect(got.quoteBold).toBe(got.quote);
+      // A FileTree body can hold prose beside its fence; inline code there
+      // gets FileTree's flat look, never the chip's edge.
+      expect(got.treeProseShadow).toBe("none");
     });
   }
 });
@@ -764,7 +781,8 @@ test.describe("The other prose surfaces", () => {
       card.appendChild(probe);
       probe.innerHTML =
         "<p><strong>Bold lead.</strong> Prose with <code>inline code</code> in it.</p>" +
-        '<p><a href="https://example.com/a"><strong>lbold</strong></a> and <a href="https://example.com/b"><code>lcode</code></a></p>';
+        '<p><a href="https://example.com/a"><strong>lbold</strong></a> and <a href="https://example.com/b"><code>lcode</code></a></p>' +
+        "<blockquote><p>Quote with <strong>qbold</strong>.</p></blockquote>";
       document.getElementById("turnsWrap")!.appendChild(card);
     });
     const m = await proseMarks(page, "#prose-probe");
@@ -772,10 +790,14 @@ test.describe("The other prose surfaces", () => {
     expect(m!.boldWeight).toBe(700);
     const links = await page.evaluate(() => {
       const c = (s: string) => getComputedStyle(document.querySelector("#prose-probe " + s) as HTMLElement).color;
-      return { a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code") };
+      return {
+        a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
+        quote: c("blockquote"), quoteBold: c("blockquote strong"),
+      };
     });
     expect(links.bold).toBe(links.a);
     expect(links.code).toBe(links.b);
+    expect(links.quoteBold).toBe(links.quote);
   });
 
   test("chat answer: bold and code inside a link keep the link colour, dark", async ({ page }) => {
@@ -789,12 +811,18 @@ test.describe("The other prose surfaces", () => {
       const probe = document.createElement("div");
       probe.className = "web-content";
       probe.id = "link-probe";
-      probe.innerHTML = g.formatWebHtml("[**lbold**](https://example.com/a) and [`lcode`](https://example.com/b)");
+      probe.innerHTML = g.formatWebHtml(
+        "[**lbold**](https://example.com/a) and [`lcode`](https://example.com/b)\n\n> Quote with **qbold**.",
+      );
       document.body.appendChild(probe);
       const c = (s: string) => getComputedStyle(probe.querySelector(s) as HTMLElement).color;
-      return { a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code") };
+      return {
+        a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
+        quote: c("blockquote"), quoteBold: c("blockquote strong"),
+      };
     });
     expect(links.bold).toBe(links.a);
     expect(links.code).toBe(links.b);
+    expect(links.quoteBold).toBe(links.quote);
   });
 });
