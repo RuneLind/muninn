@@ -134,6 +134,8 @@ const MARKS_PAGE = [
   "",
   "> Quote with `qcode` in it.",
   "",
+  "See the source (`src/a.ts:12`).",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -702,4 +704,97 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
       expect(got.quoteCode).toBe(got.quote);
     });
   }
+});
+
+test.describe("The other prose surfaces", () => {
+  test("a line-ref chip keeps its own look, not the inline-code chip", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=marks-page`);
+    await expect(page.locator(".wiki-article code.code-ref")).toBeVisible();
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+    const got = await page.evaluate(() => {
+      const chip = document.querySelector(".wiki-article code.code-ref") as HTMLElement;
+      const probe = document.createElement("div");
+      probe.style.background = "var(--bg-inset)";
+      document.body.appendChild(probe);
+      return {
+        shadow: getComputedStyle(chip).boxShadow,
+        bg: getComputedStyle(chip).backgroundColor,
+        inset: getComputedStyle(probe).backgroundColor,
+      };
+    });
+    expect(got.shadow).toBe("none");
+    expect(got.bg).toBe(got.inset);
+  });
+
+  test("markdownContentStyles (summary job card): the chip shows on --bg-panel, dark", async ({ page }) => {
+    // The job card is --bg-panel (#12121a); the old fill (--bg-surface,
+    // #1a1a2e) stepped ~4.9 L* from it. The research answer below sits on the
+    // bare page, where that old fill already stepped ~7, so it cannot pin this.
+    await page.goto(`${BASE}/summaries`);
+    await page.evaluate(() => {
+      document.documentElement.setAttribute("data-theme", "dark");
+      const card = document.createElement("div");
+      card.className = "job-card";
+      const probe = document.createElement("div");
+      probe.className = "summary-area";
+      probe.id = "prose-probe";
+      probe.innerHTML = "<p><strong>Bold lead.</strong> Prose with <code>inline code</code> in it.</p>";
+      card.appendChild(probe);
+      document.body.appendChild(card);
+    });
+    const m = await proseMarks(page, "#prose-probe");
+    expect(m).not.toBeNull();
+    expect(m!.chipStep).toBeGreaterThanOrEqual(6);
+    expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
+  });
+
+  test("markdownContentStyles (research answer): bold weight and links, dark", async ({ page }) => {
+    // One of the six pages that share markdownContentStyles (doc panel,
+    // summaries, search document, Jira preview, export); /research serves it
+    // as `.answer-body`.
+    await page.goto(`${BASE}/research`);
+    await page.evaluate(() => {
+      document.documentElement.setAttribute("data-theme", "dark");
+      // Inside the page's own #turnsWrap, as a real turn card.
+      const card = document.createElement("div");
+      card.className = "turn-card";
+      const probe = document.createElement("div");
+      probe.className = "answer-body";
+      probe.id = "prose-probe";
+      card.appendChild(probe);
+      probe.innerHTML =
+        "<p><strong>Bold lead.</strong> Prose with <code>inline code</code> in it.</p>" +
+        '<p><a href="https://example.com/a"><strong>lbold</strong></a> and <a href="https://example.com/b"><code>lcode</code></a></p>';
+      document.getElementById("turnsWrap")!.appendChild(card);
+    });
+    const m = await proseMarks(page, "#prose-probe");
+    expect(m).not.toBeNull();
+    expect(m!.boldWeight).toBe(700);
+    const links = await page.evaluate(() => {
+      const c = (s: string) => getComputedStyle(document.querySelector("#prose-probe " + s) as HTMLElement).color;
+      return { a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code") };
+    });
+    expect(links.bold).toBe(links.a);
+    expect(links.code).toBe(links.b);
+  });
+
+  test("chat answer: bold and code inside a link keep the link colour, dark", async ({ page }) => {
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () => typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function",
+    );
+    const links = await page.evaluate(() => {
+      document.documentElement.setAttribute("data-theme", "dark");
+      const g = globalThis as unknown as { formatWebHtml: (s: string) => string };
+      const probe = document.createElement("div");
+      probe.className = "web-content";
+      probe.id = "link-probe";
+      probe.innerHTML = g.formatWebHtml("[**lbold**](https://example.com/a) and [`lcode`](https://example.com/b)");
+      document.body.appendChild(probe);
+      const c = (s: string) => getComputedStyle(probe.querySelector(s) as HTMLElement).color;
+      return { a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code") };
+    });
+    expect(links.bold).toBe(links.a);
+    expect(links.code).toBe(links.b);
+  });
 });

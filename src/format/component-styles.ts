@@ -639,7 +639,7 @@ export function componentBlockCss(scope: string): string {
       color: var(--text-primary);
       white-space: pre;
     }
-    ${scope} .filetree code { background: transparent; padding: 0; color: inherit; box-shadow: none; }
+    ${scope} .filetree code { background: transparent; padding: 0; color: inherit; }
     ${scope} .checklist { list-style: none; margin: 1.2rem 0; padding: 0; }
     ${scope} .check-item {
       display: flex;
