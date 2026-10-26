@@ -704,6 +704,7 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
           fileref: cs(".fileref").color,
           frefInner: cs(".fileref code").color,
           frefInnerShadow: cs(".fileref code").boxShadow,
+          frefInnerPadLeft: cs(".fileref code").paddingLeft,
           quote: cs("blockquote").color,
           quoteCode: cs("blockquote code").color,
           quoteBold: cs("blockquote strong").color,
@@ -714,6 +715,8 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
       expect(got.linkCode).toBe(got.linkOfCode);
       expect(got.frefInner).toBe(got.fileref);
       expect(got.frefInnerShadow).toBe("none");
+      // …and no second padding inside the FileRef chip's own.
+      expect(got.frefInnerPadLeft).toBe("0px");
       expect(got.quoteCode).toBe(got.quote);
       expect(got.quoteBold).toBe(got.quote);
       // A FileTree body can hold prose beside its fence; inline code there
@@ -745,7 +748,7 @@ test.describe("The other prose surfaces", () => {
 
   test("markdownContentStyles (summary job card): the chip shows on --bg-panel, dark", async ({ page }) => {
     // The job card is --bg-panel (#12121a); the old fill (--bg-surface,
-    // #1a1a2e) stepped ~4.9 L* from it. The research answer below sits on the
+    // #1a1a2e) stepped ~4.5 L* from it. The research answer below sits on the
     // bare page, where that old fill already stepped ~7, so it cannot pin this.
     await page.goto(`${BASE}/summaries`);
     await page.evaluate(() => {
@@ -782,12 +785,19 @@ test.describe("The other prose surfaces", () => {
       probe.innerHTML =
         "<p><strong>Bold lead.</strong> Prose with <code>inline code</code> in it.</p>" +
         '<p><a href="https://example.com/a"><strong>lbold</strong></a> and <a href="https://example.com/b"><code>lcode</code></a></p>' +
-        "<blockquote><p>Quote with <strong>qbold</strong>.</p></blockquote>";
+        "<blockquote><p>Quote with <strong>qbold</strong>.</p></blockquote>" +
+        "<h3>Heading with <strong>hbold</strong></h3>";
       document.getElementById("turnsWrap")!.appendChild(card);
     });
     const m = await proseMarks(page, "#prose-probe");
     expect(m).not.toBeNull();
     expect(m!.boldWeight).toBe(700);
+    // The token, not the browser's `bolder`: under a 600 heading `bolder`
+    // computes to 900, and the paragraph probe above cannot tell the two apart.
+    const headingBold = await page.evaluate(
+      () => getComputedStyle(document.querySelector("#prose-probe h3 strong") as HTMLElement).fontWeight,
+    );
+    expect(headingBold).toBe("700");
     const links = await page.evaluate(() => {
       const c = (s: string) => getComputedStyle(document.querySelector("#prose-probe " + s) as HTMLElement).color;
       return {

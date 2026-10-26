@@ -107,7 +107,7 @@ const DARK_TOKENS = `
       /* Bold and inline code in prose. Dark measured 2026-10-26 in the wiki
          article: strong shared the body's #e0e0e0 (bold lead 1.00x), and the
          inline chip on --bg-inset sat 1.9 L* from its #12121a panel. Now the
-         lead is 1.32x, and the chip fill steps 5.4 L* and its edge 20.1 L*. */
+         lead is 1.32x, and the chip fill steps 5.4 L* and its edge 20.0 L*. */
       --text-strong: #ffffff;
       --strong-weight: 700;
       --bg-code-inline: #1c1c2e;
