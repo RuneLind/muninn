@@ -32,6 +32,9 @@ export function markdownContentStyles(prefix: string): string {
       margin: 0 0 16px;
     }
     ${prefix} pre code { background: none; padding: 0; font-size: 13px; }
+    ${prefix} code:not(pre > code) {
+      background: var(--bg-code-inline); color: var(--code-inline-fg); box-shadow: inset 0 0 0 1px var(--code-inline-border);
+    }
     ${prefix} blockquote {
       border-left: 3px solid var(--accent);
       margin: 0 0 12px;
@@ -45,7 +48,7 @@ export function markdownContentStyles(prefix: string): string {
     ${prefix} th { background: var(--bg-surface); font-weight: 600; color: var(--text-primary); }
     ${prefix} hr { border: none; border-top: 1px solid var(--border-primary); margin: 24px 0; }
     ${prefix} img { max-width: 100%; border-radius: 6px; }
-    ${prefix} strong { color: var(--text-primary); }
+    ${prefix} strong { color: var(--text-strong); font-weight: var(--strong-weight); }
   `;
 }
 

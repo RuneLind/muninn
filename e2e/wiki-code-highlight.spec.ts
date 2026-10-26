@@ -70,7 +70,7 @@ const PAGE = [
   "",
   "# Fence Page",
   "",
-  "Prose with `inline code` in it.",
+  "**Bold lead.** Prose with `inline code` in it.",
   "",
   "```sql",
   SQL_BODY,
@@ -546,5 +546,99 @@ test.describe("Wiki reader: a wikilink inside code is code", () => {
     await expect(inlineCode.filter({ hasText: "[[Fence Page]]" })).toHaveCount(1);
     // …and it is text, not markup: no anchor was substituted into it.
     expect(await inlineCode.locator("a, span.wiki-link-missing").count()).toBe(0);
+  });
+});
+
+/**
+ * What bold and an inline-code chip measure against the body text and the
+ * surface behind them, in the page's current theme. Bold is compared as a
+ * contrast RATIO against the body's; the chip as an L* step, because a ratio
+ * reads ~1.04 for any two near-blacks (see the fence test above). The chip's
+ * edge is its inset box-shadow composited over its own fill: an edge or a
+ * fill step both make a chip visible.
+ */
+async function proseMarks(page: import("@playwright/test").Page, scope: string) {
+  return page.evaluate((sel: string) => {
+    const root = document.querySelector(sel) as HTMLElement | null;
+    const strong = root?.querySelector("strong") as HTMLElement | null;
+    const code = root?.querySelector("code:not(pre > code)") as HTMLElement | null;
+    const body = strong?.parentElement ?? null;
+    if (!root || !strong || !code || !body) return null;
+    const parse = (c: string): number[] => (c.match(/-?[\d.]+/g) ?? ["0", "0", "0"]).map(Number);
+    const lum = (c: number[]): number =>
+      c.slice(0, 3)
+        .map((v) => {
+          const s = v / 255;
+          return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        })
+        .reduce((a, v, i) => a + v * [0.2126, 0.7152, 0.0722][i]!, 0);
+    const lstar = (c: number[]): number => {
+      const y = lum(c);
+      return y <= 0.008856 ? y * 903.3 : 116 * Math.pow(y, 1 / 3) - 16;
+    };
+    const ratio = (a: number[], b: number[]): number => {
+      const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+      return (x! + 0.05) / (y! + 0.05);
+    };
+    const behindOf = (el: HTMLElement): number[] => {
+      for (let n: HTMLElement | null = el.parentElement; n; n = n.parentElement) {
+        const c = parse(getComputedStyle(n).backgroundColor);
+        if ((c[3] ?? 1) > 0) return c;
+      }
+      return [255, 255, 255];
+    };
+    const page = behindOf(body);
+    const chip = parse(getComputedStyle(code).backgroundColor);
+    // `rgba(r, g, b, a) 0px 0px 0px 1px inset` → the edge colour over the fill.
+    const shadow = getComputedStyle(code).boxShadow;
+    const sc = shadow === "none" ? null : parse(shadow.slice(0, shadow.indexOf(")") + 1));
+    const a = sc ? (sc[3] ?? 1) : 0;
+    const edge = sc ? chip.map((v, i) => (i < 3 ? sc[i]! * a + v * (1 - a) : v)) : chip;
+    return {
+      boldLead:
+        ratio(parse(getComputedStyle(strong).color), page) / ratio(parse(getComputedStyle(body).color), page),
+      boldWeight: Number(getComputedStyle(strong).fontWeight),
+      chipStep: Math.max(Math.abs(lstar(chip) - lstar(page)), Math.abs(lstar(edge) - lstar(page))),
+      codeOnChip: ratio(parse(getComputedStyle(code).color), chip),
+    };
+  }, scope);
+}
+
+test.describe("Bold and inline code stand apart from the body", () => {
+  // The reported bug (2026-10-26): in dark, `strong` shared the body's #e0e0e0
+  // (lead 1.00) and the inline chip sat on --bg-inset, ~2 L* from the page.
+  // Light already showed both; its thresholds pin that it stays so.
+  for (const [theme, minStep] of [["dark", 6], ["light", 4]] as const) {
+    test(`in the wiki article, ${theme}`, async ({ page }) => {
+      await openPage(page);
+      await page.evaluate((t) => document.documentElement.setAttribute("data-theme", t), theme);
+      const m = await proseMarks(page, ".wiki-article");
+      expect(m).not.toBeNull();
+      expect(m!.boldLead).toBeGreaterThanOrEqual(1.15);
+      expect(m!.boldWeight).toBeGreaterThanOrEqual(600);
+      expect(m!.chipStep).toBeGreaterThanOrEqual(minStep);
+      expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+
+  test("in a chat answer, dark", async ({ page }) => {
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () => typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function",
+    );
+    await page.evaluate(() => {
+      document.documentElement.setAttribute("data-theme", "dark");
+      const g = globalThis as unknown as { formatWebHtml: (s: string) => string };
+      const probe = document.createElement("div");
+      probe.className = "web-content";
+      probe.id = "prose-probe";
+      probe.innerHTML = g.formatWebHtml("**Bold lead.** Prose with `inline code` in it.");
+      document.body.appendChild(probe);
+    });
+    const m = await proseMarks(page, "#prose-probe");
+    expect(m).not.toBeNull();
+    expect(m!.boldLead).toBeGreaterThanOrEqual(1.15);
+    expect(m!.chipStep).toBeGreaterThanOrEqual(6);
+    expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
   });
 });

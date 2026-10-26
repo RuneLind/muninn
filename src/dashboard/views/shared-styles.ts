@@ -103,6 +103,15 @@ const DARK_TOKENS = `
          its own direction. */
       --bg-code: #1a1a2e;
       --bg-code-bar: #22223c;
+
+      /* Bold and inline code in prose. Dark measured 2026-10-26: strong shared
+         the body's #e0e0e0 (bold lead 1.00x, weight alone), and the inline chip
+         sat on --bg-inset, 1.6 L* from the page. These give 1.32x and ~22 L*. */
+      --text-strong: #ffffff;
+      --strong-weight: 650;
+      --bg-code-inline: #1c1c2e;
+      --code-inline-fg: #e2e2ec;
+      --code-inline-border: rgba(255, 255, 255, 0.14);
 `;
 
 /**
@@ -198,6 +207,13 @@ const LIGHT_TOKENS = `
          value, kept under the new name so both themes read one token. */
       --bg-code: #eceef3;
       --bg-code-bar: #e2e4ea;
+
+      /* Light already showed bold and inline code; these keep its look. */
+      --text-strong: var(--text-primary);
+      --strong-weight: 700;
+      --bg-code-inline: #eceef3;
+      --code-inline-fg: var(--text-secondary);
+      --code-inline-border: transparent;
 `;
 
 /**
