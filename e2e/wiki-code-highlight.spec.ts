@@ -636,13 +636,19 @@ test.describe("Bold and inline code stand apart from the body", () => {
       const m = await proseMarks(page, ".wiki-article");
       expect(m).not.toBeNull();
       expect(m!.boldLead).toBeGreaterThanOrEqual(1.15);
-      expect(m!.boldWeight).toBeGreaterThanOrEqual(600);
+      // 700 in both themes: the browser's own bold, which the summary export
+      // (body text already --text-primary) relies on for its whole lead.
+      expect(m!.boldWeight).toBe(700);
       expect(m!.chipStep).toBeGreaterThanOrEqual(minStep);
       expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
     });
   }
 
-  test("in a chat answer, dark", async ({ page }) => {
+  test("in a chat research card, dark", async ({ page }) => {
+    // The card body sits on --bg-card (#1a1a2e), the same colour chat's old
+    // inline-code fill (--bg-surface) had, so there the old chip stepped 0 L*.
+    // A probe on the bare page could not see that: --bg-surface steps ~7 L*
+    // from --bg-page.
     await page.goto(`${BASE}/chat`);
     await page.waitForFunction(
       () => typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function",
@@ -650,15 +656,19 @@ test.describe("Bold and inline code stand apart from the body", () => {
     await page.evaluate(() => {
       document.documentElement.setAttribute("data-theme", "dark");
       const g = globalThis as unknown as { formatWebHtml: (s: string) => string };
+      const card = document.createElement("div");
+      card.className = "msg msg-research-card";
       const probe = document.createElement("div");
-      probe.className = "web-content";
+      probe.className = "research-card-body web-content";
       probe.id = "prose-probe";
       probe.innerHTML = g.formatWebHtml("**Bold lead.** Prose with `inline code` in it.");
-      document.body.appendChild(probe);
+      card.appendChild(probe);
+      document.body.appendChild(card);
     });
     const m = await proseMarks(page, "#prose-probe");
     expect(m).not.toBeNull();
     expect(m!.boldLead).toBeGreaterThanOrEqual(1.15);
+    expect(m!.boldWeight).toBe(700);
     expect(m!.chipStep).toBeGreaterThanOrEqual(6);
     expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
   });
