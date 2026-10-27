@@ -950,8 +950,10 @@ Bot configuration is mounted (not baked in) so you can change personas and MCP t
 The app container reads `.env` via `env_file`, with `DATABASE_URL` overridden to point at the Postgres container:
 
 ```
-DATABASE_URL=postgresql://muninn:muninn@postgres:5432/muninn
+DATABASE_URL=postgresql://muninn:${POSTGRES_PASSWORD:-muninn}@postgres:5432/muninn
 ```
+
+Postgres publishes on `127.0.0.1:5435` only, and its password comes from `POSTGRES_PASSWORD` in `.env` (default `muninn`).
 
 The dashboard port maps `DASHBOARD_PORT` (default 3010) on the host to port 3000 inside the container. The **image** pins `DASHBOARD_PORT=3000` and `DASHBOARD_HOST=0.0.0.0` so a bare `docker run -p 3000:3000` works: the app's own defaults (3010, loopback) would otherwise serve on a port nothing maps and bind to an address no probe outside the container can reach.
 

@@ -4,10 +4,10 @@ services:
     container_name: muninn-postgres
     restart: unless-stopped
     ports:
-      - "5435:5432"
+      - "127.0.0.1:5435:5432"   # loopback only: Colima forwards 0.0.0.0 past the macOS firewall
     environment:
       POSTGRES_USER: muninn
-      POSTGRES_PASSWORD: muninn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-muninn}   # first init only; to rotate, ALTER USER and set this in .env (see .env.example)
       POSTGRES_DB: muninn
     volumes:
       - muninn-pgdata:/var/lib/postgresql/data
@@ -28,7 +28,7 @@ services:
       - "${DASHBOARD_PORT:-3010}:3000"
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://muninn:muninn@postgres:5432/muninn
+      DATABASE_URL: postgresql://muninn:${POSTGRES_PASSWORD:-muninn}@postgres:5432/muninn
       DASHBOARD_PORT: "3000"  # Override .env inside container — host port mapped via ports above
       # The container's network is the trust boundary — bind 0.0.0.0 inside so
       # the Docker port forward can reach the listener. Without this the
