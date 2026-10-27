@@ -132,10 +132,14 @@ describe("GET /api/wiki/stale", () => {
   describe("with a claude-usage that answers", () => {
     let server: ReturnType<typeof Bun.serve>;
     let sessions: unknown[] = [];
+    // While set, a sessions call answers what `sessions` held when it ARRIVED,
+    // once the gate opens: a refresh in flight across a new write.
+    let gate: Promise<void> | null = null;
+    let calls = 0;
     let prevUrl: string | undefined;
-    const sessionRow = (id: string, files: string[]) => ({
+    const sessionRow = (id: string, files: string[], provider = "claude") => ({
       id,
-      provider: "claude",
+      provider,
       title: "t",
       first: Date.now() - 60_000,
       last: Date.now() - 1_000,
@@ -148,9 +152,14 @@ describe("GET /api/wiki/stale", () => {
       server = Bun.serve({
         port: 0,
         hostname: "127.0.0.1",
-        fetch(req) {
+        async fetch(req) {
           const q = new URL(req.url).searchParams;
-          if (q.get("sessions") === "1") return Response.json({ form: "sessions", truncated: false, sessions });
+          if (q.get("sessions") === "1") {
+            calls++;
+            const snap = sessions;
+            if (gate) await gate;
+            return Response.json({ form: "sessions", truncated: false, sessions: snap });
+          }
           return Response.json({ pages: [], ...(q.has("until") ? { until: Number(q.get("until")) } : {}) });
         },
       });
@@ -178,6 +187,49 @@ describe("GET /api/wiki/stale", () => {
       expect(body.session.pages).toEqual(["hub.md", "notes/side.md"]);
       expect(typeof body.session.asOfMs).toBe("number");
       expect(Date.now() - body.session.asOfMs).toBeLessThan(10_000);
+    });
+
+    test("a write after a fresh memo that already holds the session is in the answer (R2-3)", async () => {
+      __resetWorkSessionsForTest();
+      const index = await getWikiIndex({ root });
+      // The session wrote hub.md; a memo is taken (an index-build kick, or an
+      // earlier session request); then it writes notes/side.md, and the
+      // handoff asks within 30 s.
+      sessions = [sessionRow("abc", ["hub.md"])];
+      await refreshWorkSessions(index!.root, workSessionsDepsFromEnv());
+      expect(workSessionsFor(index!.root)?.sessions.map((s) => s.id)).toEqual(["abc"]);
+      sessions = [sessionRow("abc", ["hub.md", "notes/side.md"])];
+      const { body } = await get("wiki=stalewiki&session=claude-code:abc");
+      expect(body.session.pages).toEqual(["hub.md", "notes/side.md"]);
+      expect(body.session.refreshTimedOut).toBeUndefined();
+    });
+
+    test("a refresh in flight from before the request is not joined: a new one answers (R2-3)", async () => {
+      __resetWorkSessionsForTest();
+      const index = await getWikiIndex({ root });
+      sessions = [sessionRow("abc", ["hub.md"])];
+      let open!: () => void;
+      gate = new Promise<void>((r) => (open = r));
+      const before = calls;
+      const old = refreshWorkSessions(index!.root, workSessionsDepsFromEnv());
+      while (calls === before) await Bun.sleep(5);
+      sessions = [sessionRow("abc", ["hub.md", "notes/side.md"])];
+      const asked = get("wiki=stalewiki&session=claude-code:abc");
+      await Bun.sleep(50);
+      gate = null;
+      open();
+      await old;
+      const { body } = await asked;
+      expect(body.session.pages).toEqual(["hub.md", "notes/side.md"]);
+    });
+
+    test("a session whose ledger provider is empty matches on its bare id (R2-3)", async () => {
+      __resetWorkSessionsForTest();
+      sessions = [sessionRow("abc", ["hub.md"], "")];
+      for (const ref of ["abc", "claude-code:abc"]) {
+        const { body } = await get(`wiki=stalewiki&session=${ref}`);
+        expect([ref, body.session.found, body.session.pages]).toEqual([ref, true, ["hub.md"]]);
+      }
     });
   });
 

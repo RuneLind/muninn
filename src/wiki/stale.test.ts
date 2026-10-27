@@ -11,6 +11,7 @@ import {
   movedWith,
   pageLastChangeMs,
   parseStaleAsOf,
+  hasDateDM,
   passageClaim,
   resolveStatusLineHits,
   staleSummary,
@@ -21,6 +22,7 @@ import {
 } from "./stale.ts";
 import { buildWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import { lintWiki } from "./lint.ts";
+import { renderWikiHtml } from "./render.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
 const DAY = 86_400_000;
@@ -138,20 +140,28 @@ describe("statusLineCandidates (phase A)", () => {
     expect(statusLineCandidates("[[plan-a]] ~~shipped ~1 day~~ in-flight\n").map((x) => x.said)).toEqual([["in-flight"]]);
   });
 
-  test("an HTML comment hides its text, on one line or across lines (F1)", () => {
+  test("an HTML comment is read like any other text: the reader shows it (R2-2)", () => {
+    // `renderWikiHtml` (the `/api/wiki/page` path) escapes a comment and draws
+    // it, link and status word included, so the check reads it too.
+    const html = renderWikiHtml("<!-- [[plan-a]] is in-flight -->\n", () => undefined);
+    expect(html).toContain("&lt;!--");
+    expect(html).toContain("in-flight");
     const body = [
       fm(),
-      "<!-- [[plan-a]] in-flight -->",
+      "<!-- [[plan-a]] is in-flight -->",
       "<!--",
       "[[plan-a]] blocked",
       "-->",
-      "`<!--` [[plan-a]] shipped",
-      "x --> [[plan-a]] proposed <!-- [[plan-a]] blocked",
-      "[[plan-a]] blocked -->",
     ].join("\n");
     expect(statusLineCandidates(body).map((x) => [x.line, x.said])).toEqual([
-      [9, ["shipped"]],
-      [10, ["proposed"]],
+      [5, ["in-flight"]],
+      [7, ["blocked"]],
+    ]);
+    const shipped = { "plan-a": meta({ relPath: "plans/plan-a.md", plan_status: "shipped" }) } as Record<string, WikiPageMeta>;
+    const hits = resolveStatusLineHits("notes/x.md", statusLineCandidates(body), (t) => shipped[t]);
+    expect(hits.map((h) => [h.line, h.now])).toEqual([
+      [5, "shipped"],
+      [7, "shipped"],
     ]);
   });
 
@@ -242,6 +252,38 @@ describe("pageLastChangeMs (D29)", () => {
   });
 });
 
+describe("hasDateDM: the D.M date rule (R2-1)", () => {
+  const dates = [
+    "slettet av Rune 13.10", "avklart med Jonas 15.10", "Godkjent av Rune 24.10", "sendt Yvonne 13.10",
+    "Rune valgte B 24.10", "Vurdering 20.10", "Planreview 18.10", "Fag svarte ja på S1 12.10",
+    "valgte A på S4 20.10", "Simuleringen 29.09", "Oppdatering 20.08", "Status 11.09", "NAV 23.10",
+    "Møtet 23.10", "x, men. Siden 3.10 har den", "x og Torsdag 2.10 kom", "23.10", "den 4.6", "på 3.10",
+    "(23.10)", "23.10.2026", "fra 1.11.", "fra 1.11. til", "Siden 03.10", "Rune 08.10",
+    // Accepted loss: lowercase and two-digit versions read as dates.
+    "bun 1.3", "python 3.12", "node 22.12", "Node 22.12", "Python 3.12",
+    // A version word or capitalised word counts one space before, no more.
+    "section  4.2", "Opus  4.6",
+  ];
+  const notDates = [
+    "model: Opus 4.6", "| Opus 4.6 |", "[[x]]. Opus 4.6", "Gemini 2.5", "art. 13.1", "artikkel 13.1",
+    "sedVer 4.4", "4.4-versjon", "takes 2.5 min", "12.5 %", "section 4.2", "1.2.3", "v1.2", "sedVer4.4",
+    "CDM 4.4", "Bun 1.3", "version 2.10", "Versjon 2.10", "kap. 3.2", "seksjon 12.1", "kapittel 4.11", "5G 1.2",
+    // Accepted loss: a capitalised word and a single-digit date read as a version.
+    "Mandag 4.6",
+  ];
+  test("each string reads as a date or not, as the rule says", () => {
+    expect({ missedDates: dates.filter((t) => !hasDateDM(t)), readAsDates: notDates.filter((t) => hasDateDM(t)) }).toEqual({
+      missedDates: [],
+      readAsDates: [],
+    });
+  });
+  test("ISO is its own claim; a D.M inside a link is blanked first", () => {
+    expect(passageClaim("[[x]] 2026-10-23")).toBe("date");
+    expect(passageClaim("[[x]] Vurdering 20.10")).toBe("date");
+    expect(passageClaim("[[x]] Opus 4.6")).toBeUndefined();
+  });
+});
+
 describe("bucketFor (D5)", () => {
   const changedAtMs = T0;
   const passage = (text: string, over: { inFrontmatter?: boolean; pointerHeading?: boolean } = {}) => ({
@@ -295,18 +337,18 @@ describe("bucketFor (D5)", () => {
     // A version, an anchor and a link destination are no claim.
     expect(at("[[x]] needs v1.2 and [[x#12]] and [doc](y.md#34)")).toBe("mentions");
     // Version numbers, decimals and measurements are no date (F2).
-    for (const t of ["Opus 4.6", "CDM 4.4", "Bun 1.3", "Node 22.12", "section 4.2", "takes 2.5 min", "12.5 %", "v1.2", "1.2.3", "GPT‑5.6", "Python 3.10+", "in 9.5–10.6 min", "a 2.5k-char note", "Version 8.7", "phase 1.5"]) {
+    for (const t of ["Opus 4.6", "CDM 4.4", "Bun 1.3", "section 4.2", "takes 2.5 min", "12.5 %", "v1.2", "1.2.3", "GPT‑5.6", "Python 3.10+", "in 9.5–10.6 min", "a 2.5k-char note", "Version 8.7"]) {
       expect([t, at(`[[x]] uses ${t}`)]).toEqual([t, "mentions"]);
     }
     for (const t of ["on 23.10", "den 4.6", "på 3.10", "(23.10)", "23.10.2026", "fra 1.11.", "2026-10-23", "Siden 03.10", "x. Fra 13.10 y"]) {
       expect([t, at(`[[x]] ${t}`)]).toEqual([t, "toCheck"]);
     }
-    // A sentence-initial capitalised word keeps the date; an all-caps one does not.
+    // A two-digit day or month stays a date after a capitalised word; single
+    // digits after one read as a version (the full table: `hasDateDM`'s).
     expect(at("Mandag 23.10: [[x]] got its pin")).toBe("toCheck");
+    expect(at("[[x]] Vurdering 20.10")).toBe("toCheck");
     expect(at("CDM 4.4 rollout: [[x]] holds the toggle")).toBe("mentions");
-    // A link is a word: a capitalised word right after one is mid-sentence.
     expect(at("[[x]] Opus 4.6 drafts it")).toBe("mentions");
-    // A leading-zero day stays a date after a capitalised word mid-sentence.
     expect(at("[[x]] confirmed by Rune 08.10")).toBe("toCheck");
     // No linking passage left (all on exempt lines): a Mention.
     expect(bucketFor({ page, lastChangeMs: undefined, changedAtMs, passages: [] })).toBe("mentions");

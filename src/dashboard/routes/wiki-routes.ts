@@ -2324,10 +2324,14 @@ export function registerWikiToolRoutes(
     const base = { wiki: entry.name, readonly };
     const session = (c.req.query("session") ?? "").trim();
     if (session) {
-      // Fresh, not the background memo (up to a TTL old after an idle spell):
-      // a handoff asks right after the session wrote.
-      const matches = (s: { provider: string; id: string }) => sessionRefMatches(`${mapLedgerProvider(s.provider) ?? ""}:${s.id}`, session);
-      const { memo, timedOut } = await workSessionsForSession(index.root, matches);
+      // From a refresh started after this request, not the background memo:
+      // a handoff asks right after the session's last write. A row with no
+      // provider matches on its bare id.
+      const matches = (s: { provider: string; id: string }) => {
+        const p = mapLedgerProvider(s.provider);
+        return sessionRefMatches(p ? `${p}:${s.id}` : s.id, session);
+      };
+      const { memo, timedOut } = await workSessionsForSession(index.root);
       const found = memo?.sessions.find(matches);
       // Reserved pages (`index`/`log`/`CLAUDE`) are bookkeeping nearly every
       // session writes; they are never changed pages.

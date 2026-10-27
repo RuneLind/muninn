@@ -16,6 +16,7 @@ import {
   parseWorkSessions,
   refreshWorkSessions,
   workSessionsFor,
+  workSessionsForSession,
   WORK_MEMO_HOLD_MS,
   type WorkSessionsDeps,
 } from "./work-sessions.ts";
@@ -375,5 +376,28 @@ describe("clipSessionsAt — the replay's view of a session that spans --at", ()
     const { sessions, clipped } = clipSessionsAt([session("s", AT - H, AT + H, [])], AT);
     expect(clipped).toBe(1);
     expect(sessions[0]!.last).toBe(AT);
+  });
+});
+
+describe("workSessionsForSession (R2-3)", () => {
+  test("a refresh that outlives the wait answers the newest memo with timedOut", async () => {
+    await refreshWorkSessions("/w", deps({}));
+    let release!: () => void;
+    const hung = new Promise<void>((r) => (release = r));
+    const d = deps({}, { fetchSessions: async () => (await hung, sessionsBody([])) });
+    const r = await workSessionsForSession("/w", { deps: d, timeoutMs: 20 });
+    expect([r.timedOut, r.memo?.sessions.map((s) => s.id)]).toEqual([true, ["s1"]]);
+    release();
+  });
+
+  test("after a failed refresh, a request within 30 s asks nothing (the back-off)", async () => {
+    await refreshWorkSessions("/w", deps({}));
+    await refreshWorkSessions("/w", deps({ sessions: new Error("down") }));
+    const d = deps({});
+    const r = await workSessionsForSession("/w", { deps: d });
+    expect([d.calls.length, r.timedOut, r.memo?.sessions.length]).toEqual([0, false, 1]);
+    const later = deps({}, { now: () => NOW + 30_000 });
+    await workSessionsForSession("/w", { deps: later });
+    expect(later.calls.length).toBe(2);
   });
 });

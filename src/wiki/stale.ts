@@ -130,34 +130,11 @@ const STRUCK_RE = /~~[\s\S]*?~~/g;
 
 /**
  * One line with this check's in-line masks applied, in order: inline code
- * (to `\n`, which no wikilink crosses), HTML comments (blanked; `inComment`
- * carries one across lines), then strikethrough (blanked). Length-preserving.
+ * (to `\n`, which no wikilink crosses), then strikethrough (blanked).
+ * Length-preserving. An HTML comment is not masked: the reader draws it.
  */
-function maskLine(line: string, inComment: boolean): { text: string; inComment: boolean } {
-  const t = maskLineCodeSpans(line);
-  let out = "";
-  let i = 0;
-  let open = inComment;
-  while (i < t.length) {
-    if (open) {
-      const e = t.indexOf("-->", i);
-      const end = e < 0 ? t.length : e + 3;
-      out += blank(t.slice(i, end));
-      i = end;
-      if (e >= 0) open = false;
-    } else {
-      const s = t.indexOf("<!--", i);
-      if (s < 0) {
-        out += t.slice(i);
-        break;
-      }
-      out += t.slice(i, s) + blank("<!");
-      // The closer is searched from `s + 2`, so `<!-->` is the empty comment.
-      i = s + 2;
-      open = true;
-    }
-  }
-  return { text: out.replace(STRUCK_RE, blank), inComment: open };
+function maskLine(line: string): string {
+  return maskLineCodeSpans(line).replace(STRUCK_RE, blank);
 }
 
 /**
@@ -168,15 +145,13 @@ function maskLine(line: string, inComment: boolean): { text: string; inComment: 
  * segment on it, so check 14's masks, a full `parseBlocks`, are paid only on
  * pages that pass. Masks only blank text in place, so: a raw `[[` followed by
  * a {@link STATUS_PROBE} match is necessary; then the line's own masks
- * ({@link maskLine}, outside a comment) and the segment parse must find one —
- * exact, since the full pass masks the same way unless a comment opened on an
- * earlier line, and a line holding no `-->` is then masked whole (a line
- * holding one skips this second test).
+ * ({@link maskLine}) and the segment parse must find one, exactly as the full
+ * pass does.
  *
  * Exempt: check 14's masks ({@link stateExemptLines}) and inline code; by this
- * check's choice, strikethrough spans, HTML comments (body lines check 14
- * does not mask), the frontmatter `status_note`, `description` and `title`
- * (with their continuation lines), and a segment that holds a markdown link.
+ * check's choice, strikethrough spans, the frontmatter `status_note`,
+ * `description` and `title` (with their continuation lines), and a segment
+ * that holds a markdown link. An HTML comment is read: the reader shows it.
  */
 export function statusLineCandidates(content: string): StatusLineCandidate[] {
   if (!content.includes("[[")) return [];
@@ -186,7 +161,7 @@ export function statusLineCandidates(content: string): StatusLineCandidate[] {
     const l = raw[i]!;
     const at = l.indexOf("[[");
     if (at < 0 || !STATUS_PROBE.test(at === 0 ? l : l.slice(at))) continue;
-    if (l.includes("-->") || lineSegments(maskLine(l, false).text, i + 1, l).length) probe.add(i);
+    if (lineSegments(maskLine(l), i + 1, l).length) probe.add(i);
   }
   if (probe.size === 0) return [];
 
@@ -198,16 +173,9 @@ export function statusLineCandidates(content: string): StatusLineCandidate[] {
   }
 
   const out: StatusLineCandidate[] = [];
-  // A comment opens only in the body; an exempt line leaves its state alone.
-  let inComment = false;
-  for (let i = 0; i < lines.length; i++) {
+  for (const i of probe) {
     if (exempt.has(i)) continue;
-    const l = lines[i]!;
-    const inBody = i >= body;
-    if (!probe.has(i) && !(inBody && (inComment || l.includes("<!--")))) continue;
-    const m = maskLine(l, inBody && inComment);
-    if (inBody) inComment = m.inComment;
-    if (probe.has(i)) out.push(...lineSegments(m.text, i + 1, l));
+    out.push(...lineSegments(maskLine(lines[i]!), i + 1, lines[i]!));
   }
   return out;
 }
@@ -366,31 +334,32 @@ const BARE_ITEM_TAIL_MAX = 30;
 const HEADING = /^ {0,3}(#{1,6})\s+(.*)$/;
 
 /**
- * A `D.M` date (F2): day 1–31 and month 1–12, with no digit, `.digit`, letter
- * or `-letter` against it; not followed by a letter, `%`, `+`, `×` or a unit
- * word (`2.5k`, `12.5 %`, `9.5–10.6 min`); and not preceded by an all-caps
- * word (`CDM 4.4`), a version word (`section 4.2`) or a capitalised word
- * mid-sentence (`Opus 4.6`). A leading-zero day (`Siden 03.10`) and a
- * sentence-initial capitalised word (`Mandag 23.10`) keep it a date.
+ * A `D.M` date (F2, fix round 2): day 1–31 and month 1–12, not glued to a
+ * letter, digit or `.` before it (`v1.2`, `sedVer4.4`, `GPT-5.6`, `1.2.3`),
+ * nor followed by a digit or `.digit`, a letter, `-letter` (`4.4-versjon`),
+ * `%`, `+`, `×` or a unit word (`2.5k`, `12.5 %`, `9.5–10.6 min`); and not
+ * one space after a version word (`section 4.2`, `art. 13.1`, `sedVer 4.4`).
+ * `DD.MM.YYYY` is a date. Else it is a version ONLY when day and month are
+ * single digits AND it sits one space after a word that starts with a capital
+ * (`Opus 4.6`, `CDM 4.4`, `Bun 1.3`). Everything else is a date: a missed
+ * date is a missed stale passage, a false one costs one on-demand check.
+ * Accepted: `bun 1.3`, `Node 22.12` read as dates; `Mandag 4.6` as a version.
  */
-const DM_RE = /(?<![\p{L}\p{N}.]|[\p{L}][-‐‑])(0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])(\.\d{4})?(?![\p{N}]|\.\p{N})/gu;
-const DM_AFTER = /^(?:\s*[–—-]\s*\d+(?:[.,]\d+)?)?(?:[\p{L}%+×]|\s+(?:%|×|x|(?:ms|s|sek|sec|min|minutter|minutes|h|t|timer|hours|kB|KB|MB|GB|TB|k|oz|px|pt|em|rem)(?![\p{L}\p{N}])))/u;
-const DM_VERSION_WORD = /(?<![\p{L}])(?:v|ver|version|versjon|versions|release|section|seksjon|kapittel|kap|chapter|phase|fase|step|steg|check|sjekk|del|part|§)\.?\s*$/iu;
-const DM_PREV_WORD = /([\p{L}][\p{L}\p{N}'’]*)\s+$/u;
-const SENTENCE_START = /(?:^[\s>*_#|+\-–—\d.)]*|[.!?:;]\s+[*_]*)$/u;
+const DM_RE = /(?<![\p{L}\p{N}.]|[\p{L}][-‐‑])(0?[1-9]|[12]\d|3[01])\.(0?[1-9]|1[0-2])(\.\d{4})?(?![\p{N}]|\.\p{N})/gu;
+const DM_AFTER = /^(?:\s*[–—-]\s*\d+(?:[.,]\d+)?)?(?:[\p{L}%+×]|[-‐‑]\p{L}|\s+(?:%|×|x|(?:ms|s|sek|sec|min|minutter|minutes|h|t|timer|hours|kB|KB|MB|GB|TB|k|oz|px|pt|em|rem)(?![\p{L}\p{N}])))/u;
+/** A version word one space before: as a word, or a camelCase tail (`sedVer`). */
+const DM_VERSION_WORD = /(?:(?<![\p{L}\p{N}])(?:version|versjon|v|ver|section|seksjon|kapittel|kap\.|art\.|artikkel)|\p{Ll}(?:Ver|Version|Versjon)) $/iu;
+/** A word one space before that starts with a capital or is caps and
+ *  digits: `Opus`, `CDM`, `S4`, `5G`. */
+const DM_CAPITAL_WORD = /(?<![\p{L}\p{N}])(?:\p{Lu}[\p{L}\p{N}]*|[\p{Lu}\p{N}]*\p{Lu}[\p{Lu}\p{N}]*) $/u;
 
-function hasDateDM(text: string): boolean {
+export function hasDateDM(text: string): boolean {
   for (const m of text.matchAll(DM_RE)) {
-    const before = text.slice(0, m.index);
     if (DM_AFTER.test(text.slice(m.index! + m[0].length))) continue;
-    if (m[2]) return true; // a year
+    if (m[3]) return true; // a year
+    const before = text.slice(0, m.index);
     if (DM_VERSION_WORD.test(before)) continue;
-    const w = DM_PREV_WORD.exec(before);
-    if (w && /^\p{Lu}/u.test(w[1]!)) {
-      const allCaps = w[1]!.length > 1 && w[1] === w[1]!.toUpperCase();
-      if (allCaps) continue;
-      if (!m[1]!.startsWith("0") && !SENTENCE_START.test(before.slice(0, w.index))) continue;
-    }
+    if (m[1]!.length === 1 && m[2]!.length === 1 && DM_CAPITAL_WORD.test(before)) continue;
     return true;
   }
   return false;
