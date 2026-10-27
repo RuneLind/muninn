@@ -992,9 +992,11 @@ is the one surface the user zone is written around.
    is 401'd by auth first). They set
    BOT-GLOBAL state, so there is no "own" version. `GET` implies `HEAD`, because
    Hono dispatches `HEAD /x` to the `app.get("/x")` handler and RUNS its body.
-2. **The open zone** — `/api/live`, `/api/ready`, `/favicon.svg`, `/favicon.ico`.
-   The first two are additionally in `AUTH_EXCLUDED_PATHS`; the favicons
-   authenticate like everything else and merely need no role.
+2. **The open zone** — `/api/live`, `/api/ready`, `/favicon.svg`, `/favicon.ico`,
+   `/theme-lab.js`. The first two are additionally in `AUTH_EXCLUDED_PATHS`; the
+   favicons and the theme lab script authenticate like everything else and merely
+   need no role (the lab is client-only and writes nothing but the viewer's
+   localStorage).
 3. **The user zone** — `/chat` and `/chat/*`, the `/simulator` compat redirects,
    `/` (role-aware in the HANDLER: a `user` is 302'd to `/chat`, or to `/wiki`
    under `MUNINN_PROFILE=nais`), and the

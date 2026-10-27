@@ -41,8 +41,8 @@ import { registerJiraRoutes } from "./routes/jira-routes.ts";
  * Every dashboard route, minus whatever the serving profile drops (the drop
  * list and its rationale: `./route-groups.ts`).
  *
- * The five INLINE routes below (`/`, the two health paths, the favicons, the
- * build hash, `/api/attention`) are profile-independent and always present —
+ * The INLINE routes below (`/`, the two health paths, the favicons, the theme
+ * lab script, the build hash, `/api/attention`) are profile-independent and always present —
  * they are the instance itself, not a feature. So is the `/chat` slice, which
  * is mounted separately in `src/index.ts` and is therefore not filterable here
  * at all.
