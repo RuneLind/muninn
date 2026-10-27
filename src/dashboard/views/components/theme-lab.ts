@@ -12,6 +12,11 @@
  * and one slider state per theme choice, so switching themes in the ◐ menu
  * swaps the sliders. Open, the lab re-applies on every page load; closed (×),
  * it applies nothing and keeps the saved sliders for next time.
+ *
+ * Every page carries only `themeLabStubScript()`. The lab itself
+ * (`themeLabScript()`, ~22 KB) is served at `THEME_LAB_PATH` and loaded when
+ * the reader opens it, or on a page load while it is open: a page with the lab
+ * closed ships none of it (jira-page.test.ts holds pages to that).
  */
 
 import { PALETTES, PALETTE_REQUIRED_TOKENS } from "./palettes.ts";
@@ -19,6 +24,36 @@ import { LAB_BG_TOKENS, LAB_FUNCTIONS, LAB_LADDER, LAB_TEXT_TOKENS, LAB_WEIGHTS 
 
 export const THEME_LAB_KEY = "muninn-theme-lab";
 export const THEME_LAB_OPEN_ID = "themeLabOpen";
+export const THEME_LAB_PATH = "/theme-lab.js";
+
+/**
+ * The per-page half: defines `window.__themeLabOpen` (the ◐ menu calls it)
+ * and loads the lab when it is opened, or at once when it was left open.
+ * Opened while loading, the opens queue; a failed load can be retried.
+ */
+export function themeLabStubScript(): string {
+  return `
+  (function() {
+    if (window.__themeLabStub) return;
+    window.__themeLabStub = true;
+    var queue = null;
+    function withLab(cb) {
+      if (window.__themeLabOpenNow) return cb();
+      if (queue) { queue.push(cb); return; }
+      queue = [cb];
+      var s = document.createElement('script');
+      s.src = '${THEME_LAB_PATH}';
+      s.onload = function() { var q = queue; queue = null; if (window.__themeLabOpenNow) q.forEach(function(f) { f(); }); };
+      s.onerror = function() { queue = null; s.remove(); };
+      document.head.appendChild(s);
+    }
+    window.__themeLabOpen = function(focus) { withLab(function() { window.__themeLabOpenNow(focus === true); }); };
+    try {
+      var st = JSON.parse(localStorage.getItem('${THEME_LAB_KEY}') || '{}');
+      if (st && st.open) withLab(function() { window.__themeLabOpenNow(false); });
+    } catch (e) {}
+  })();`;
+}
 
 /** The ◐ menu entry that opens the lab. */
 export function themeLabMenuItemHtml(): string {
@@ -64,7 +99,14 @@ const SLIDERS: [string, string, number, number, number, string][] = [
   ["chipEdge", "Edge %", 0, 40, 1, "Code chip"],
 ];
 
+let labScript: string | undefined;
+
+/** The lab itself, served at `THEME_LAB_PATH`. Built once: its inputs are static. */
 export function themeLabScript(): string {
+  return (labScript ??= buildThemeLabScript());
+}
+
+function buildThemeLabScript(): string {
   const order: Record<string, string[]> = {};
   const labels: Record<string, string> = { "system:light": "System (light)", "system:dark": "System (dark)", light: "Light", dark: "Dark" };
   for (const p of PALETTES) { order[p.id] = Object.keys(p.tokens); labels[p.id] = p.label; }
@@ -246,16 +288,15 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
       var btn = document.getElementById('themeToggle');
       if (had && btn) btn.focus();
     }
-    // The ◐ menu's "Theme lab…" item calls this (theme.ts).
-    window.__themeLabOpen = openLab;
+    // The stub's window.__themeLabOpen calls this once the lab has loaded.
+    window.__themeLabOpenNow = function(focus) {
+      if (document.body) openLab(focus);
+      else document.addEventListener('DOMContentLoaded', function() { openLab(focus); });
+    };
     // A theme picked in the ◐ menu while the lab is open: start over from that theme.
     function follow() { if (panel && currentKey() !== choice) { begin(); render(); } }
     new MutationObserver(follow).observe(root, { attributes: true, attributeFilter: ['data-theme', 'data-palette'] });
     // Under System an OS scheme flip changes the reference without touching an attribute.
     if (scheme && scheme.addEventListener) scheme.addEventListener('change', follow);
-    if (load().open) {
-      if (document.body) openLab(false);
-      else document.addEventListener('DOMContentLoaded', function() { openLab(false); });
-    }
   })();`;
 }

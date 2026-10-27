@@ -3,6 +3,7 @@ import { resolveServingProfile, type Config } from "../config.ts";
 import { droppedRouteGroups, servesWikiReadSliceOnly, type RouteGroup } from "./route-groups.ts";
 import { sessionRole } from "../auth/guard.ts";
 import { HEALTH_LIVE_PATH, HEALTH_READY_PATH } from "../auth/zones.ts";
+import { THEME_LAB_PATH, themeLabScript } from "./views/components/theme-lab.ts";
 import { readiness } from "./health.ts";
 import { renderDashboardPage } from "./views/page.ts";
 import { FAVICON_SVG, FAVICON_HEADERS } from "./views/favicon.ts";
@@ -89,6 +90,12 @@ export function createDashboardRoutes(config: Config): Hono {
     c.body(FAVICON_SVG, 200, FAVICON_HEADERS);
   app.get("/favicon.svg", serveFavicon);
   app.get("/favicon.ico", serveFavicon);
+
+  // The theme lab, loaded only when a reader opens it (theme-lab.ts). Like the
+  // favicons it needs an identity but no role: it is client-only and writes
+  // nothing but the viewer's own localStorage.
+  app.get(THEME_LAB_PATH, (c) =>
+    c.body(themeLabScript(), 200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" }));
 
   // Build hash of the inlined browser bundles — the visibility-change watcher
   // in helpers-browser.ts compares this against the meta tag the page was

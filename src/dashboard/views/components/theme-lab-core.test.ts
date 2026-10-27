@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { PALETTES, PALETTE_REQUIRED_TOKENS } from "./palettes.ts";
 import { themeTokenStyles } from "../shared-styles.ts";
-import { THEME_LAB_KEY, themeLabScript } from "./theme-lab.ts";
+import { THEME_LAB_KEY, THEME_LAB_PATH, themeLabScript, themeLabStubScript } from "./theme-lab.ts";
 import { labChangedKeys, labDerive, labExport, labHsl, labInitialState, labLadderIssues, labParse, labStateKey } from "./theme-lab-core.ts";
 
 /** A base's token block, parsed (the palettes.test.ts helper). */
@@ -165,18 +165,55 @@ describe("theme lab script", () => {
     for (const fn of ["labDerive", "labInitialState", "labExport", "labLadderIssues"]) expect(src).toContain(`var ${fn} = `);
   });
 
-  test("a closed lab touches nothing on load", () => {
+  test("loaded, the lab sets nothing until it is opened", () => {
     const set: string[] = [];
-    const storage: Record<string, string> = { [THEME_LAB_KEY]: JSON.stringify({ open: false }) };
     const window: Record<string, unknown> = {};
-    const document = {
-      documentElement: { dataset: {}, style: { setProperty: (n: string) => set.push(n), removeProperty: () => {} } },
-      body: {},
-    };
-    const localStorage = { getItem: (k: string) => storage[k] ?? null, setItem: (k: string, v: string) => { storage[k] = v; } };
+    const document = { documentElement: { dataset: {}, style: { setProperty: (n: string) => set.push(n), removeProperty: () => {} } }, body: {} };
+    const localStorage = { getItem: () => JSON.stringify({ open: true }), setItem: () => {} };
     class MutationObserver { observe() {} }
     new Function("window", "document", "localStorage", "MutationObserver", themeLabScript())(window, document, localStorage, MutationObserver);
     expect(set).toEqual([]);
-    expect(typeof window.__themeLabOpen).toBe("function");
+    expect(typeof window.__themeLabOpenNow).toBe("function");
+  });
+});
+
+/** Run the per-page stub against stub storage; returns the scripts it added. */
+function runStub(stored: string | null): { added: { src: string }[]; window: Record<string, unknown> } {
+  const added: { src: string }[] = [];
+  const window: Record<string, unknown> = {};
+  const document = {
+    createElement: () => ({ src: "", remove() {} }),
+    head: { appendChild: (el: { src: string }) => added.push(el) },
+  };
+  const localStorage = { getItem: () => stored };
+  new Function("window", "document", "localStorage", themeLabStubScript())(window, document, localStorage);
+  return { added, window };
+}
+
+describe("theme lab stub (every page)", () => {
+  // Fix after CI (PR #755): the whole lab was inline on every page, clipboard
+  // code included, which jira-page.test.ts forbids on pages that copy nothing.
+  test("carries no lab code: no clipboard, a fraction of the lab's size", () => {
+    expect(themeLabStubScript()).not.toContain("clipboard");
+    expect(themeLabStubScript().length).toBeLessThan(themeLabScript().length / 10);
+  });
+
+  test("a closed or never-used lab loads nothing", () => {
+    expect(runStub(null).added).toEqual([]);
+    expect(runStub(JSON.stringify({ open: false })).added).toEqual([]);
+    expect(runStub("not json").added).toEqual([]);
+  });
+
+  test("a lab left open loads the lab script once; opening it again while loading queues", () => {
+    const { added, window } = runStub(JSON.stringify({ open: true }));
+    expect(added.map((s) => s.src)).toEqual([THEME_LAB_PATH]);
+    (window.__themeLabOpen as (f: boolean) => void)(true);
+    expect(added).toHaveLength(1);
+  });
+
+  test("the ◐ menu's open loads the lab script", () => {
+    const { added, window } = runStub(null);
+    (window.__themeLabOpen as (f: boolean) => void)(true);
+    expect(added.map((s) => s.src)).toEqual([THEME_LAB_PATH]);
   });
 });

@@ -720,6 +720,8 @@ test.describe("The theme lab", () => {
     await page.goto(BASE + `/wiki?wiki=${WIKI}`);
     const shipped = await pageBg(page);
     expect(shipped).toBe(hexToRgb(READING.tokens["--bg-page"]!));
+    // Closed, a page carries only the stub: the lab script is not loaded.
+    await expect(page.locator('script[src="/theme-lab.js"]')).toHaveCount(0);
 
     await page.locator("#themeToggle").click();
     await page.getByRole("menuitem", { name: /Theme lab/ }).click();

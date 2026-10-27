@@ -108,6 +108,8 @@ export const OPEN_ZONE_PATHS: readonly string[] = [
   HEALTH_READY_PATH,
   "/favicon.svg",
   "/favicon.ico",
+  // Every page's stub loads it; client-only, no data (theme-lab.ts).
+  "/theme-lab.js",
 ];
 
 /**

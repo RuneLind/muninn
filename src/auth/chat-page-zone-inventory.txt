@@ -25,6 +25,7 @@
 / | user-zone |    # role-aware in the handler: an admin gets the dashboard, a user is 302'd to /chat (/wiki under nais)
 /chat | user-zone |
 /favicon.svg | open |
+/theme-lab.js | open |    # the theme lab, loaded by every page's stub only when opened
 
 ## the chat sub-app — one prefix, one carve-out
 

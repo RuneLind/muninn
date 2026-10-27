@@ -1,5 +1,5 @@
 import { themeInitScript, themeToggleHtml, themeToggleScript } from "./components/theme.ts";
-import { themeLabScript } from "./components/theme-lab.ts";
+import { themeLabStubScript } from "./components/theme-lab.ts";
 import { paletteTokenStyles } from "./components/palettes.ts";
 import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
 import { droppedRouteGroups, servesWikiReadSliceOnly, type RouteGroup } from "../route-groups.ts";
@@ -874,5 +874,5 @@ ${options?.headerRight ?? ""}
     </div>
   </header>
   <script>${themeToggleScript()}</script>
-  <script>${themeLabScript()}</script>`;
+  <script>${themeLabStubScript()}</script>`;
 }
