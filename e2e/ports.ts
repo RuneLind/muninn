@@ -140,6 +140,9 @@ export const E2E_PORTS = {
   // fetches canned in-process), against a fake huginn.
   "summaries-find-links": 3170,
   "summaries-find-links/huginn": 3171,
+  // Reading themes: the palette picker, the no-flash init and mermaid under a
+  // palette, on a muninn with a temp `WIKI_EXTRA` wiki.
+  "theme-palettes": 3172,
   // The reader's provenance strip and the chain it opens, end to end. ONE fake
   // `node:http` server plays claude-usage's `GET /api/sessions-by-id` and
   // `GET /api/merges` — pricing one of the fixture's two sessions and OMITTING

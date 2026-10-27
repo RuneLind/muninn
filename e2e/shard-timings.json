@@ -38,6 +38,7 @@
     "wiki-chat-dialog.spec.ts": 8.6,
     "wiki-claim-retry.spec.ts": 9.7,
     "wiki-code-highlight.spec.ts": 5.7,
+    "theme-palettes.spec.ts": 6.4,
     "wiki-compact-lists.spec.ts": 18.2,
     "wiki-copy-path.spec.ts": 8,
     "wiki-decision-views.spec.ts": 3.6,

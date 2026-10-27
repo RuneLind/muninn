@@ -233,10 +233,10 @@ export function layoutStyles(): string {
       text-transform: uppercase;
       letter-spacing: 0.3px;
     }
-    .user-platform-badge.telegram { background: #1a2a3e; color: #54a9eb; }
+    .user-platform-badge.telegram { background: var(--tint-info); color: #54a9eb; }
     .user-platform-badge.slack_dm,
     .user-platform-badge.slack_channel,
-    .user-platform-badge.slack_assistant { background: #2a1a3e; color: #e0a0ff; }
+    .user-platform-badge.slack_assistant { background: var(--tint-magenta); color: #e0a0ff; }
 
 
     /* Thread-specific row styles */

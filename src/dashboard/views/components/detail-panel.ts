@@ -262,9 +262,9 @@ export function detailPanelStyles(): string {
       border-radius: 6px;
       font-weight: 600;
     }
-    .detail-mini-item .mini-badge.deadline { background: #3a2a1a; color: #f0c060; }
+    .detail-mini-item .mini-badge.deadline { background: var(--tint-warning); color: #f0c060; }
     .detail-mini-item .mini-badge.msgs { background: var(--bg-surface); color: var(--accent-muted); }
-    .detail-mini-item .mini-badge.quiet { background: #1a2a3e; color: #60b0f0; }
+    .detail-mini-item .mini-badge.quiet { background: var(--tint-info); color: #60b0f0; }
     .detail-mini-memory {
       padding: 8px 10px;
       background: var(--bg-inset);
@@ -376,7 +376,7 @@ export function detailPanelStyles(): string {
     }
 
     .detail-skeleton {
-      background: linear-gradient(90deg, var(--border-subtle) 25%, #22222e 50%, var(--border-subtle) 75%);
+      background: linear-gradient(90deg, var(--border-subtle) 25%, color-mix(in srgb, var(--border-subtle), #fff 4%) 50%, var(--border-subtle) 75%);
       background-size: 200% 100%;
       animation: shimmer 1.5s infinite;
       border-radius: 6px;

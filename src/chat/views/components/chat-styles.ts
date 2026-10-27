@@ -16,6 +16,7 @@ const CHAT_EXTRA_LIGHT = `
 `;
 
 import { componentBlockCss } from "../../../format/component-styles.ts";
+import { CHAT_PALETTE_TOKENS, paletteTokenStyles } from "../../../dashboard/views/components/palettes.ts";
 
 /** Chat page styles — layout, sidebar, messages, inspector, modals */
 export function chatStyles(): string {
@@ -29,6 +30,9 @@ export function chatStyles(): string {
     }
     html[data-theme="dark"] {${CHAT_EXTRA_DARK}    }
     html[data-theme="light"] {${CHAT_EXTRA_LIGHT}    }
+    /* A palette's chat tokens, after the base blocks above so they win on
+       source order (SHARED_STYLES emits the rest of the palette earlier). */
+${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
     body {
       display: flex;
       flex-direction: column;
