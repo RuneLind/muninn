@@ -3259,6 +3259,7 @@ function renderStart(): void {
   currentRelPath = null; // the two identities are cleared together, always
   currentPageHash = null;
   // No page, no stale report: the tab's count must not carry the last page's.
+  abortStaleCheck();
   staleFor = null;
   staleReport = null;
   renderStale();
@@ -3701,6 +3702,16 @@ let staleReport: StaleReportView | null = null;
 let staleFor: string | null = null;
 let staleChecking = false;
 let staleProgress = "";
+/** The Check stream in flight: its page and its abort (A9). A Check belongs
+ *  to the page it started on; leaving that page aborts it. */
+let staleCheckRun: { relPath: string; abort: AbortController } | null = null;
+
+/** Abort the Check in flight, if any: the reader left its page. */
+function abortStaleCheck(): void {
+  staleCheckRun?.abort.abort();
+  staleCheckRun = null;
+  staleChecking = false;
+}
 
 /** The tab exists where the tool routes do and the instance writes (D25). */
 function staleTabAvailable(): boolean {
@@ -3726,9 +3737,9 @@ function renderStale(): void {
 function loadStale(relPath: string): void {
   if (!staleTabAvailable()) return;
   if (staleFor !== relPath) {
+    abortStaleCheck();
     staleFor = relPath;
     staleReport = null;
-    staleChecking = false;
     staleProgress = "";
     renderStale();
   }
@@ -3749,6 +3760,10 @@ function loadStale(relPath: string): void {
 /** Check (D6): stream the check route, fill verdicts in as they arrive. */
 async function runStaleCheckClient(relPath: string): Promise<void> {
   if (staleChecking || staleFor !== relPath) return;
+  const run = { relPath, abort: new AbortController() };
+  staleCheckRun = run;
+  /** This run is still the open page's Check: only then does it paint. */
+  const mine = () => staleCheckRun === run && staleFor === relPath;
   staleChecking = true;
   staleProgress = "Starting…";
   renderStale();
@@ -3759,7 +3774,9 @@ async function runStaleCheckClient(relPath: string): Promise<void> {
       method: "POST",
       headers: { "content-type": "application/json", Accept: "text/event-stream" },
       body: JSON.stringify({ wiki: WIKI, page: relPath }),
+      signal: run.abort.signal,
     });
+    if (!mine()) return;
     if (!res.ok || !res.body || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
       let msg = "Check could not start (HTTP " + res.status + ").";
       try {
@@ -3774,7 +3791,7 @@ async function runStaleCheckClient(relPath: string): Promise<void> {
     const parser = makeSseFrameParser((frame) => {
       let d: Record<string, unknown> = {};
       try { d = JSON.parse(frame.data) as Record<string, unknown>; } catch { return; }
-      if (staleFor !== relPath) return;
+      if (!mine()) return;
       if (frame.event === "start") total = Number(d.toCheck) || 0;
       else if (frame.event === "verdict" || frame.event === "error") {
         checked++;
@@ -3786,15 +3803,17 @@ async function runStaleCheckClient(relPath: string): Promise<void> {
     });
     for (;;) {
       const { value, done } = await reader.read();
-      if (done) break;
+      if (done || !mine()) break;
       parser.push(decoder.decode(value, { stream: true }));
     }
-    parser.end();
+    if (mine()) parser.end();
   } catch {
-    staleProgress = "Could not reach the server.";
+    if (mine()) staleProgress = "Could not reach the server.";
   } finally {
-    staleChecking = false;
-    if (staleFor === relPath) {
+    // A run that was aborted or replaced leaves the state to its successor.
+    if (mine()) {
+      staleCheckRun = null;
+      staleChecking = false;
       renderStale();
       loadStale(relPath);
     }

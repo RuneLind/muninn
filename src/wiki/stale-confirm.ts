@@ -764,14 +764,33 @@ export async function stopStaleConfirmLoop(waitMs = 5_000): Promise<void> {
 export const CHECK_MAX_CALLS = 10;
 /** Calls in flight at once during a Check. */
 export const CHECK_CONCURRENCY = 3;
-/** A Check request ends within this long (each call's deadline). */
+/** A Check request ends within this long of its arrival (each call's deadline). */
 export const CHECK_BUDGET_MS = 4 * 60_000;
+/** A Check stream writes a heartbeat comment this often, so a call that runs
+ *  long never leaves it silent up to the server's 255 s `idleTimeout` (A11). */
+export const CHECK_HEARTBEAT_MS = 30_000;
+let heartbeatMs = CHECK_HEARTBEAT_MS;
+export const checkHeartbeatMs = () => heartbeatMs;
+export function __setCheckHeartbeatMsForTest(ms: number | null): void {
+  heartbeatMs = ms ?? CHECK_HEARTBEAT_MS;
+}
+
+/** The fixed text of Check's error events (A11): the raw error goes to the log only. */
+export const CHECK_CALL_FAILED = "The check call failed or timed out.";
+export const CHECK_ANSWER_UNREADABLE = "The model's answer could not be read.";
+export const CHECK_FAILED = "The check failed. The server log has the details.";
 
 export type StaleCheckEvent =
   | { type: "start"; changed: string; toCheck: number; cached: number; toCall: number; left: number }
   | { type: "verdict"; relPath: string; verdict: StaleVerdictValue; reason: string; edit: StaleEdit | null; cached: boolean }
   | { type: "error"; relPath: string; message: string }
-  | { type: "done"; calls: number; verdicts: number; errors: number; left: number };
+  /** `calls` this request started; `joined` the calls another Check had in flight (A9). */
+  | { type: "done"; calls: number; joined: number; verdicts: number; errors: number; left: number };
+
+/** Check's calls in flight, by wiki, kind and key (A9): a second Check on the
+ *  same page waits for the first call's row instead of buying it again. */
+const checkFlights = new Map<string, Promise<StaleVerdictRow>>();
+const checkFlightKey = (wiki: string, kind: StaleVerdictKind, key: string) => `${wiki}\0${kind}\0${key}`;
 
 const readText = async (abs: string): Promise<string | null> => {
   try {
@@ -803,7 +822,10 @@ export async function runStaleCheck(opts: {
   model?: StaleModel;
   onEvent: (e: StaleCheckEvent) => void | Promise<void>;
   isGone?: () => boolean;
+  /** Every call's deadline: the route takes it at the request's arrival (A11). */
+  deadlineAt?: number;
 }): Promise<boolean> {
+  const deadlineAt = opts.deadlineAt ?? Date.now() + CHECK_BUDGET_MS;
   const { wiki, index, bot, onEvent } = opts;
   const store = opts.store ?? staleVerdictStore();
   const model = opts.model ?? staleModel();
@@ -831,34 +853,53 @@ export async function runStaleCheck(opts: {
     verdicts++;
     await onEvent({ type: "verdict", relPath: i.l.relPath, verdict: row.verdict, reason: row.reason, edit: row.edit, cached: true });
   }
-  const deadlineAt = Date.now() + CHECK_BUDGET_MS;
+  let calls = 0;
+  let joined = 0;
+  const call = async (i: (typeof toCall)[number]): Promise<StaleVerdictRow> => {
+    const input: StaleCallInput = {
+      kind: "passage",
+      page: i.l.relPath,
+      passage: i.passage,
+      target: i.ctx.target,
+      commits: await commitsFor(index, changedMeta, i.l.lastChangeMs, opts.asOfMs),
+      otherPlans: i.ctx.otherPlans,
+    };
+    const raw = await model(buildStalePrompt(input), { bot, deadlineAt, source: "wiki_stale_check" });
+    const a = parseStaleAnswer(raw, i.passage);
+    // The stored row: a reader's verdict that landed during the call stays (A5).
+    return store.upsert({ wiki, kind: "passage", page: i.l.relPath, keyHash: i.key, verdict: a.verdict, reason: a.reason, edit: a.edit, checkedBy: `model:${bot.name}` });
+  };
   const queue = [...toCall];
   const worker = async () => {
     for (let i = queue.shift(); i; i = queue.shift()) {
+      // A reader who left starts no new call; one already in flight finishes.
       if (opts.isGone?.()) return;
+      const fk = checkFlightKey(wiki, "passage", i.key);
+      let flight = checkFlights.get(fk);
+      if (flight) joined++;
+      else {
+        calls++;
+        const p = call(i);
+        flight = p;
+        checkFlights.set(fk, p);
+        void p.then(
+          () => checkFlights.get(fk) === p && checkFlights.delete(fk),
+          () => checkFlights.get(fk) === p && checkFlights.delete(fk),
+        );
+      }
       try {
-        const input: StaleCallInput = {
-          kind: "passage",
-          page: i.l.relPath,
-          passage: i.passage,
-          target: i.ctx.target,
-          commits: await commitsFor(index, changedMeta, i.l.lastChangeMs, opts.asOfMs),
-          otherPlans: i.ctx.otherPlans,
-        };
-        const raw = await model(buildStalePrompt(input), { bot, deadlineAt, source: "wiki_stale_check" });
-        const a = parseStaleAnswer(raw, i.passage);
-        // The stored row: a reader's verdict that landed during the call stays (A5).
-        const row = await store.upsert({ wiki, kind: "passage", page: i.l.relPath, keyHash: i.key, verdict: a.verdict, reason: a.reason, edit: a.edit, checkedBy: `model:${bot.name}` });
+        const row = await flight;
         verdicts++;
         await onEvent({ type: "verdict", relPath: i.l.relPath, verdict: row.verdict, reason: row.reason, edit: row.edit, cached: false });
       } catch (err) {
         errors++;
-        await onEvent({ type: "error", relPath: i.l.relPath, message: err instanceof Error ? err.message : String(err) });
+        log.warn("Stale check call failed for {page} (linking {linking}): {error}", { wiki, page: buckets.relPath, linking: i.l.relPath, error: err instanceof Error ? err.message : String(err) });
+        await onEvent({ type: "error", relPath: i.l.relPath, message: err instanceof StaleAnswerUnreadableError ? CHECK_ANSWER_UNREADABLE : CHECK_CALL_FAILED });
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(CHECK_CONCURRENCY, toCall.length) }, worker));
-  await onEvent({ type: "done", calls: toCall.length, verdicts, errors, left });
+  await onEvent({ type: "done", calls, joined, verdicts, errors, left });
   return true;
 }
 

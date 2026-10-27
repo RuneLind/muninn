@@ -16,6 +16,8 @@
  *      drops with it.
  *   4. **The tab is hidden on a read-only instance (D25)**: a second muninn
  *      with `MUNINN_WIKI_READONLY=1` on the same wiki.
+ *   5. **A Check belongs to its page (A9)**: leaving the page aborts the
+ *      stream, and coming back does not let the old stream paint.
  *
  * **What is stubbed and why.** The model only: the throwaway bot's Haiku router
  * goes to the Anthropic backend, and `ANTHROPIC_BASE_URL` points it at a
@@ -65,6 +67,10 @@ let roServer: ChildProcess | undefined;
 let fake: Server | undefined;
 let sql: ReturnType<typeof postgres> | null = null;
 let modelCalls = 0;
+/** Model calls on `notes/two.md` wait for this (test 5). */
+let heldCalls = 0;
+let releaseHeld: () => void = () => {};
+let held = new Promise<void>((r) => (releaseHeld = r));
 /** Who sent each model request: the SDK (`Anthropic/JS …`) or the Claude CLI. */
 const modelAgents: string[] = [];
 
@@ -139,19 +145,26 @@ test.beforeAll(async () => {
   await write("plans/p.md", page("P", "The plan.", "plan_status: shipped\n"));
   await write("notes/old.md", page("Old", "The pin in [[hub]] landed on 23.05."));
   await write("hub.md", page("Hub", "First."));
+  await write("notes/two.md", page("Two", "The pin in [[hub2]] landed on 23.05."));
+  await write("hub2.md", page("Hub two", "First."));
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "seed"], now - 30 * DAY);
   await write("hub.md", page("Hub", `${CONFIRMED_LINE}\n${UNCONFIRMED_LINE}\n\nThe pin moved.`));
+  await write("hub2.md", page("Hub two", "Second hub. See [[p|the plan page]]."));
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "hub: the pin moves"], now - DAY);
 
   fake = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
-    req.on("end", () => {
+    req.on("end", async () => {
       if (req.method === "POST" && (req.url ?? "").startsWith("/v1/messages")) {
         modelCalls++;
         modelAgents.push(String(req.headers["user-agent"] ?? ""));
+        if (body.includes("notes/two.md")) {
+          heldCalls++;
+          await Promise.race([held, new Promise((r) => setTimeout(r, 15_000))]);
+        }
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({
           id: "msg_e2e", type: "message", role: "assistant", model: "claude-haiku-e2e",
@@ -261,4 +274,31 @@ test("a read-only instance hides the tab (D25)", async ({ page: p }) => {
     data: { wiki: WIKI, page: "hub.md", kind: "status-line", line: 5, verdict: "true" },
   });
   expect(res.status()).toBe(403);
+});
+
+test("leaving a page mid-Check aborts its stream, and coming back paints nothing from it (A9)", async ({ page: p }) => {
+  held = new Promise<void>((r) => (releaseHeld = r));
+  heldCalls = 0;
+  try {
+    await p.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("hub2.md")}`);
+    await expect(p.locator(".wiki-article")).toContainText("Second hub.");
+    await p.locator('.wiki-conn-tab[data-conntab="stale"]').click();
+    const aborted = p.waitForEvent("requestfailed", (r) => r.url().includes("/api/wiki/stale/check"));
+    await p.locator("#wikiStaleCheckBtn").click();
+    await expect.poll(() => heldCalls, { timeout: 15_000 }).toBe(1);
+    await p.locator(".wiki-article a", { hasText: "the plan page" }).click();
+    await expect(p.locator(".wiki-article")).toContainText("The plan.");
+    expect((await aborted).failure()?.errorText ?? "").toMatch(/abort/i);
+    await p.goBack();
+    await expect(p.locator(".wiki-article")).toContainText("Second hub.");
+    await expect(p.locator('[data-stale-linking="notes/two.md"]')).toBeVisible();
+    releaseHeld();
+    // The server finishes the call it had in flight; no stream is left to paint it.
+    await p.waitForTimeout(1_500);
+    await expect(p.locator('[data-stale-linking="notes/two.md"] .wiki-stale-verdict')).toHaveCount(0);
+    await expect(p.locator("#wikiStaleCheckBtn")).toBeEnabled();
+    expect(heldCalls).toBe(1);
+  } finally {
+    releaseHeld();
+  }
 });

@@ -18,11 +18,17 @@ import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "../../w
 import {
   __setStaleModelForTest,
   __setStaleVerdictStoreForTest,
+  CHECK_BUDGET_MS,
   CHECK_MAX_CALLS,
   memoryStaleVerdictStore,
   type StaleModel,
 } from "../../wiki/stale-confirm.ts";
+import * as confirmModule from "../../wiki/stale-confirm.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+
+// Fixed error copy (A11); spelled out so the test reads without the fix in place.
+const CHECK_CALL_FAILED = "The check call failed or timed out.";
+const CHECK_FAILED = "The check failed. The server log has the details.";
 import { wikiRouteTable } from "../../test/wiki-route-table.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
@@ -131,7 +137,7 @@ describe("the Stale check's verdict routes", () => {
     const verdicts = events.filter(([e]) => e === "verdict").map(([, d]) => d);
     expect(verdicts).toHaveLength(CHECK_MAX_CALLS);
     expect(prompts).toHaveLength(CHECK_MAX_CALLS);
-    expect(events.at(-1)).toEqual(["done", { type: "done", calls: CHECK_MAX_CALLS, verdicts: CHECK_MAX_CALLS, errors: 0, left: toCheck - CHECK_MAX_CALLS }]);
+    expect(events.at(-1)).toEqual(["done", { type: "done", calls: CHECK_MAX_CALLS, joined: 0, verdicts: CHECK_MAX_CALLS, errors: 0, left: toCheck - CHECK_MAX_CALLS }]);
     expect(store.rows.size).toBe(CHECK_MAX_CALLS);
     expect([...new Set([...store.rows.values()].map((r) => `${r.kind} ${r.checkedBy}`))]).toEqual(["passage model:checkbot"]);
     // The prompt carries the changed page's commit subjects up to asOf.
@@ -293,6 +299,149 @@ describe("the Stale check's verdict routes", () => {
     expect(body.hits[0].confirmation).toBe("unconfirmed");
     const summary = await get("wiki=checkwiki&asOf=2026-06-20");
     expect(summary).toMatchObject({ verdicts: "unavailable", totals: { staleLines: 0, hits: 1 } });
+  });
+
+  const answer = (prompt: string) =>
+    prompt.includes("notes/old.md")
+      ? '{"verdict":"stale","reason":"the pin moved","edit":{"old":"landed on 23.05","new":"landed on 18.06"}}'
+      : '{"verdict":"true","reason":"still so"}';
+  const until = async (ok: () => boolean, ms = 3_000) => {
+    const end = Date.now() + ms;
+    while (!ok() && Date.now() < end) await Bun.sleep(5);
+  };
+
+  // A9: a second Check on the same page joins the calls the first has in
+  // flight instead of buying them again.
+  test("A9: two concurrent Checks on one page make 10 calls between them, not 20", async () => {
+    fresh();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    __setStaleModelForTest(async (prompt) => {
+      prompts.push(prompt);
+      await gate;
+      return answer(prompt);
+    });
+    try {
+      const body = { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" };
+      const first = post("check", body);
+      await until(() => prompts.length >= 3);
+      const second = post("check", body);
+      // Give the second request time to reach its own workers.
+      await Bun.sleep(300);
+      release();
+      const [a, b] = await Promise.all([first, second].map(async (r) => sseEvents(await (await r).text())));
+      expect(prompts).toHaveLength(CHECK_MAX_CALLS);
+      for (const events of [a!, b!]) expect(events.filter(([e]) => e === "verdict")).toHaveLength(CHECK_MAX_CALLS);
+      const calls = [a!, b!].map((events) => events.at(-1)![1].calls as number);
+      expect(calls[0]! + calls[1]!).toBe(CHECK_MAX_CALLS);
+      expect(store.rows.size).toBe(CHECK_MAX_CALLS);
+    } finally {
+      __setStaleModelForTest(model);
+    }
+  });
+
+  // A9: a reader who navigates away aborts the stream; no new call starts after.
+  test("A9: a client that disconnects mid-stream stops new calls from starting", async () => {
+    fresh();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    __setStaleModelForTest(async (prompt) => {
+      prompts.push(prompt);
+      await gate;
+      return answer(prompt);
+    });
+    const server = Bun.serve({ port: 0, fetch: (req) => app.fetch(req) });
+    try {
+      const ac = new AbortController();
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/wiki/stale/check`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" }),
+        signal: ac.signal,
+      });
+      const reader = res.body!.getReader();
+      await reader.read();
+      await until(() => prompts.length >= 3);
+      ac.abort();
+      await Bun.sleep(100);
+      release();
+      await Bun.sleep(500);
+      expect(prompts).toHaveLength(3);
+    } finally {
+      release();
+      __setStaleModelForTest(model);
+      server.stop(true);
+    }
+  });
+
+  // A11: a heartbeat keeps a long Check under the server's idle timeout.
+  test("A11: the Check stream carries a heartbeat comment while calls run", async () => {
+    fresh();
+    const seam = (confirmModule as Record<string, unknown>).__setCheckHeartbeatMsForTest as ((ms: number | null) => void) | undefined;
+    seam?.(20);
+    __setStaleModelForTest(async (prompt) => {
+      prompts.push(prompt);
+      await Bun.sleep(120);
+      return answer(prompt);
+    });
+    try {
+      const text = await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text();
+      expect(text).toMatch(/^: heartbeat$/m);
+      // A comment is no event: the parsed stream is unchanged.
+      expect(sseEvents(text).filter(([e]) => e === "verdict")).toHaveLength(CHECK_MAX_CALLS);
+    } finally {
+      seam?.(null);
+      __setStaleModelForTest(model);
+    }
+  });
+
+  // A11: the 4-minute budget starts with the request, not after the buckets.
+  test("A11: every call's deadline is the request's start plus the budget", async () => {
+    fresh();
+    const deadlines: number[] = [];
+    __setStaleModelForTest(async (prompt, ctx) => {
+      prompts.push(prompt);
+      deadlines.push(ctx.deadlineAt);
+      return answer(prompt);
+    });
+    __resetWikiCacheForTest();
+    try {
+      const t0 = Date.now();
+      await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text();
+      expect(deadlines).toHaveLength(CHECK_MAX_CALLS);
+      for (const d of deadlines) {
+        expect(d).toBeGreaterThanOrEqual(t0 + CHECK_BUDGET_MS);
+        expect(d).toBeLessThanOrEqual(t0 + CHECK_BUDGET_MS + 15);
+      }
+    } finally {
+      __setStaleModelForTest(model);
+    }
+  });
+
+  // A11: an error event carries fixed text; the raw message stays in the log.
+  test("A11: error and app_error events carry fixed text, never the raw error", async () => {
+    fresh();
+    __setStaleModelForTest(async (prompt) => {
+      prompts.push(prompt);
+      throw new Error("spawn failed: /Users/secret/bots/checkbot/.claude ENOENT");
+    });
+    try {
+      const events = sseEvents(await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text());
+      const errs = events.filter(([e]) => e === "error").map(([, d]) => String(d.message));
+      expect(errs).toHaveLength(CHECK_MAX_CALLS);
+      for (const m of errs) {
+        expect(m).not.toContain("/Users/secret");
+        expect(m).toBe(CHECK_CALL_FAILED);
+      }
+      __setStaleVerdictStoreForTest({ get: async () => Promise.reject(new Error("connect ECONNREFUSED 10.1.2.3:5432")), upsert: store.upsert });
+      const failed = sseEvents(await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text());
+      const app = failed.find(([e]) => e === "app_error")!;
+      expect(String(app[1].message)).not.toContain("10.1.2.3");
+      expect(app[1].message).toBe(CHECK_FAILED);
+    } finally {
+      __setStaleModelForTest(model);
+      __setStaleVerdictStoreForTest(store);
+    }
   });
 
   test("both POSTs are tool-half routes, so MUNINN_PROFILE=nais drops them", () => {

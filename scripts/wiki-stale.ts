@@ -27,9 +27,12 @@
  *   http://127.0.0.1:3010.
  *
  * It reports and exits 0 always (D13), a usage error, an unreachable muninn
- * and an answer of the wrong shape included, and the whole run ends within
- * {@link RUN_DEADLINE_MS}, or {@link CHECK_RUN_DEADLINE_MS} with `--check`
- * (a Check of 10 calls takes longer than 25 s): a handoff that runs it must never fail or wait on it unbounded. On a
+ * and an answer of the wrong shape included. The free reports share one
+ * {@link RUN_DEADLINE_MS} budget, and each page's Check has its own
+ * {@link CHECK_PAGE_DEADLINE_MS} (a Check of 10 calls takes longer than 25 s),
+ * so a slow Check never starves the next page (A10): a handoff that runs it
+ * never fails, and waits at most 25 s plus one Check bound per changed page.
+ * Each line prints as it is made, a verdict as its event arrives. On a
  * readonly instance (D25) it prints the free checks plus one
  * «check unavailable: readonly instance» line; on a writable instance whose
  * wiki root is readonly (`WIKI_READONLY_ROOTS`), «… readonly wiki».
@@ -119,9 +122,9 @@ export type PostSse = (url: string, body: Json, signal?: AbortSignal) => Promise
  *  this long, however many calls a session report makes. The route's own
  *  bound on a session request (`SESSION_REFRESH_TIMEOUT_MS`, 8 s) fits in it. */
 export const RUN_DEADLINE_MS = 25_000;
-/** The run's deadline with `--check`: the check route's own budget (4 min)
- *  plus a margin for the free reports. */
-export const CHECK_RUN_DEADLINE_MS = 5 * 60_000;
+/** One page's Check deadline: the check route's own budget (4 min) plus a
+ *  margin. Each page has its own (A10). */
+export const CHECK_PAGE_DEADLINE_MS = 5 * 60_000;
 
 const day = (ms: number | undefined) => (ms === undefined ? "never" : new Date(ms).toISOString().slice(0, 10));
 const minute = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")}Z`;
@@ -182,7 +185,9 @@ export function formatPageReport(r: Json): string[] {
   // PR 2a: a hit counts once the confirm loop confirmed it (D11).
   const confirmed = typeof r.staleLines === "number" ? r.staleLines : r.hits.length;
   const unconfirmed = r.hits.filter((h: Json) => h.confirmation === "unconfirmed").length;
-  out.push(`  stale status lines: ${confirmed}${unconfirmed ? ` (+ ${unconfirmed} unconfirmed hit${unconfirmed === 1 ? "" : "s"})` : ""}`);
+  // A verdict read that failed leaves every hit unconfirmed: the count is unknown, not 0 (A10).
+  if (r.verdicts === "unavailable") out.push(`  stale status lines: unknown — the verdict store is unavailable (${r.hits.length} hit${r.hits.length === 1 ? "" : "s"} unconfirmed)`);
+  else out.push(`  stale status lines: ${confirmed}${unconfirmed ? ` (+ ${unconfirmed} unconfirmed hit${unconfirmed === 1 ? "" : "s"})` : ""}`);
   out.push(...hitLines(r.hits));
   if (!r.buckets) {
     out.push(`  not changed in the 14 days to ${day(r.asOfMs)} — no linking-page buckets`);
@@ -209,7 +214,8 @@ export function formatSummary(r: Json): string[] {
   const out: string[] = [];
   const t = r.totals;
   const unconfirmed = typeof t.hits === "number" && t.hits > t.staleLines ? ` (+ ${t.hits - t.staleLines} unconfirmed hit(s))` : "";
-  out.push(`${r.wiki}: ${t.staleLines} stale status line(s)${unconfirmed}, ${t.toCheck} linking page(s) to check, ${t.changedPages} changed page(s) in the 14 days to ${day(r.asOfMs)}`);
+  const lines = r.verdicts === "unavailable" ? `stale status lines unknown (the verdict store is unavailable${typeof t.hits === "number" ? `, ${t.hits} hit(s) unconfirmed` : ""})` : `${t.staleLines} stale status line(s)${unconfirmed}`;
+  out.push(`${r.wiki}: ${lines}, ${t.toCheck} linking page(s) to check, ${t.changedPages} changed page(s) in the 14 days to ${day(r.asOfMs)}`);
   const row = (p: Json) => `  ${p.relPath} — ${p.staleLines} stale line(s), ${p.toCheck} to check (last change ${day(p.lastChangeMs)})`;
   const groups: [string, (p: Json) => boolean][] = [
     ["uncommitted", (p) => p.changed && p.dirty],
@@ -236,12 +242,24 @@ export function formatSummary(r: Json): string[] {
  */
 export async function runWikiStale(
   argv: readonly string[],
-  deps: { fetchJson?: FetchJson; postSse?: PostSse; env?: Record<string, string | undefined>; deadlineMs?: number } = {},
+  deps: {
+    fetchJson?: FetchJson;
+    postSse?: PostSse;
+    env?: Record<string, string | undefined>;
+    /** The free reports' shared budget ({@link RUN_DEADLINE_MS}). */
+    deadlineMs?: number;
+    /** Each page's Check bound ({@link CHECK_PAGE_DEADLINE_MS}). */
+    checkDeadlineMs?: number;
+    /** Called with each line as it is made (the script prints through it). */
+    write?: (line: string) => void;
+  } = {},
 ): Promise<string[]> {
   const { args, errors } = parseStaleArgs(argv);
   const notice = (text: string) => (args.json ? JSON.stringify({ notice: text }) : text);
   if (errors.length || !args.wiki) {
-    return [...errors.map((e) => `wiki-stale: ${e}`), ...(args.wiki ? [] : ["wiki-stale: --wiki is required"]), USAGE].map(notice);
+    const usage = [...errors.map((e) => `wiki-stale: ${e}`), ...(args.wiki ? [] : ["wiki-stale: --wiki is required"]), USAGE].map(notice);
+    for (const l of usage) deps.write?.(l);
+    return usage;
   }
   const env = deps.env ?? process.env;
   const base = (args.baseUrl ?? env.WIKI_STALE_MUNINN_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
@@ -262,23 +280,42 @@ export async function runWikiStale(
   };
   const postSse: PostSse = deps.postSse ?? defaultPostSse;
   const out: string[] = [];
-  const deadlineMs = deps.deadlineMs ?? (args.check ? CHECK_RUN_DEADLINE_MS : RUN_DEADLINE_MS);
-  const abort = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<"deadline">((resolve) => {
-    timer = setTimeout(() => {
-      abort.abort();
-      resolve("deadline");
-    }, deadlineMs);
-  });
+  if (deps.write) {
+    const write = deps.write;
+    out.push = (...lines: string[]) => {
+      for (const l of lines) write(l);
+      return Array.prototype.push.apply(out, lines);
+    };
+  }
+  const deadlineMs = deps.deadlineMs ?? RUN_DEADLINE_MS;
+  const checkDeadlineMs = deps.checkDeadlineMs ?? CHECK_PAGE_DEADLINE_MS;
+  /** A bound of its own for one request: its signal and a promise that settles on expiry. */
+  const bounded = <T>(ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T | "deadline"> => {
+    const ac = new AbortController();
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<"deadline">((resolve) => {
+      t = setTimeout(() => {
+        ac.abort();
+        resolve("deadline");
+      }, Math.max(0, ms));
+    });
+    return Promise.race([run(ac.signal), expired]).finally(() => clearTimeout(t));
+  };
+  /** What is left of the free reports' budget: only their own time counts. */
+  let freeLeftMs = deadlineMs;
   /** Why the route refuses the model checks: the whole instance, or this wiki's root. */
   let readonly: "instance" | "wiki" | null = null;
   let late = false;
   const ask = async (extra: Record<string, string>, valid: (r: Json) => boolean, what: string): Promise<Json | null> => {
     if (late) return null;
+    const t0 = Date.now();
     try {
-      const got = await Promise.race([fetchJson(url(extra), abort.signal), expired]);
-      if (got === "deadline") throw new Error("deadline");
+      const got = await bounded(freeLeftMs, (signal) => fetchJson(url(extra), signal)).finally(() => (freeLeftMs -= Date.now() - t0));
+      if (got === "deadline") {
+        late = true;
+        out.push(notice(`wiki-stale: muninn did not answer in ${deadlineMs / 1000} s — no stale report`));
+        return null;
+      }
       const { status, body } = got;
       if (body?.readonly) readonly = body.readonly === "root" ? "wiki" : "instance";
       if (args.json) out.push(JSON.stringify(body));
@@ -294,9 +331,6 @@ export async function runWikiStale(
     } catch (err) {
       if (err instanceof NotJson) {
         out.push(notice(`wiki-stale: unexpected answer (not JSON) from ${url(extra)}${err.message}`));
-      } else if (abort.signal.aborted) {
-        late = true;
-        out.push(notice(`wiki-stale: muninn did not answer in ${deadlineMs / 1000} s — no stale report`));
       } else {
         out.push(notice(`wiki-stale: cannot reach muninn at ${base}: ${err instanceof Error ? err.message : String(err)}`));
       }
@@ -329,7 +363,7 @@ export async function runWikiStale(
         try {
           const r = await ask({ page }, isPageReport, `page ${page}`);
           if (r && !args.json) out.push(...formatPageReport(r), "");
-          if (r && args.check && !readonly && r.buckets && !late) await check(r.page.relPath);
+          if (r && args.check && !readonly && r.buckets) await check(r.page.relPath);
         } catch (err) {
           out.push(notice(`wiki-stale: unexpected answer from ${base} for page ${page}: ${err instanceof Error ? err.message : String(err)}`));
         }
@@ -341,8 +375,6 @@ export async function runWikiStale(
     }
   } catch (err) {
     out.push(notice(`wiki-stale: ${err instanceof Error ? err.message : String(err)}`));
-  } finally {
-    clearTimeout(timer);
   }
   if (readonly) out.push(notice(`check unavailable: readonly ${readonly}`));
   return out;
@@ -350,38 +382,38 @@ export async function runWikiStale(
   /** Check one changed page and print each verdict as it arrives. */
   async function check(page: string): Promise<void> {
     const label = (rel: unknown) => (typeof rel === "string" ? rel : "?");
-    try {
-      const got = await Promise.race([
-        postSse(`${base}/api/wiki/stale/check`, { wiki: args.wiki, page, ...(args.asOf ? { asOf: args.asOf } : {}) }, abort.signal),
-        expired,
-      ]);
-      if (got === "deadline") throw new Error("deadline");
-      if (!got.events) {
-        if (got.body?.readonly) readonly = got.body.readonly === "root" || /WIKI_READONLY_ROOTS/.test(String(got.body.error)) ? "wiki" : "instance";
-        if (args.json && got.body) out.push(JSON.stringify(got.body));
-        if (!readonly) out.push(notice(`wiki-stale: check ${page}: ${got.body?.error ?? `HTTP ${got.status}`}`));
-        return;
-      }
-      if (!args.json) out.push(`  check ${page}:`);
-      for await (const e of got.events) {
-        if (args.json) {
-          out.push(JSON.stringify({ event: e.event, ...e.data }));
-          continue;
-        }
-        const d = e.data;
-        if (e.event === "start") out.push(`    ${d.toCheck} to check: ${d.cached} cached, ${d.toCall} model call(s)${d.left ? `, ${d.left} left for another Check` : ""}`);
-        else if (e.event === "verdict") out.push(`    ${label(d.relPath)} ${verdictTag(d)}${d.cached ? " (cached)" : ""}${isObj(d.edit) ? ` — edit: «${cap(String(d.edit.old), 80)}» → «${cap(String(d.edit.new), 80)}»` : ""}`);
-        else if (e.event === "error") out.push(`    ${label(d.relPath)} [error: ${cap(String(d.message ?? ""), 140)}]`);
-        else if (e.event === "done") out.push(`    done: ${d.calls} call(s), ${d.verdicts} verdict(s), ${d.errors} error(s)`);
-        else if (e.event === "app_error") out.push(notice(`wiki-stale: check ${page}: ${String(d.message ?? "failed")}`));
-      }
-      out.push("");
-    } catch (err) {
-      if (abort.signal.aborted) {
-        late = true;
-        out.push(notice(`wiki-stale: check ${page} did not finish in ${deadlineMs / 1000} s`));
-      } else out.push(notice(`wiki-stale: check ${page}: ${err instanceof Error ? err.message : String(err)}`));
+    const timedOut = () => out.push(notice(`wiki-stale: check ${page} did not finish in ${checkDeadlineMs / 1000} s`));
+    // The whole Check, its stream included, runs under this page's own bound.
+    const ran = await bounded(checkDeadlineMs, (signal) => checkStream(page, label, signal)).catch((err) => {
+      out.push(notice(`wiki-stale: check ${page}: ${err instanceof Error ? err.message : String(err)}`));
+    });
+    if (ran === "deadline") timedOut();
+  }
+
+  async function checkStream(page: string, label: (rel: unknown) => string, signal: AbortSignal): Promise<void> {
+    const got = await postSse(`${base}/api/wiki/stale/check`, { wiki: args.wiki, page, ...(args.asOf ? { asOf: args.asOf } : {}) }, signal);
+    if (!got.events) {
+      if (got.body?.readonly) readonly = got.body.readonly === "root" || /WIKI_READONLY_ROOTS/.test(String(got.body.error)) ? "wiki" : "instance";
+      if (args.json && got.body) out.push(JSON.stringify(got.body));
+      if (!readonly) out.push(notice(`wiki-stale: check ${page}: ${got.body?.error ?? `HTTP ${got.status}`}`));
+      return;
     }
+    if (!args.json) out.push(`  check ${page}:`);
+    for await (const e of got.events) {
+      // Past this page's bound its lines are no longer this run's.
+      if (signal.aborted) return;
+      if (args.json) {
+        out.push(JSON.stringify({ event: e.event, ...e.data }));
+        continue;
+      }
+      const d = e.data;
+      if (e.event === "start") out.push(`    ${d.toCheck} to check: ${d.cached} cached, ${d.toCall} model call(s)${d.left ? `, ${d.left} left for another Check` : ""}`);
+      else if (e.event === "verdict") out.push(`    ${label(d.relPath)} ${verdictTag(d)}${d.cached ? " (cached)" : ""}${isObj(d.edit) ? ` — edit: «${cap(String(d.edit.old), 80)}» → «${cap(String(d.edit.new), 80)}»` : ""}`);
+      else if (e.event === "error") out.push(`    ${label(d.relPath)} [error: ${cap(String(d.message ?? ""), 140)}]`);
+      else if (e.event === "done") out.push(`    done: ${d.calls} call(s)${d.joined ? ` + ${d.joined} joined from another Check` : ""}, ${d.verdicts} verdict(s), ${d.errors} error(s)`);
+      else if (e.event === "app_error") out.push(notice(`wiki-stale: check ${page}: ${String(d.message ?? "failed")}`));
+    }
+    if (!args.json) out.push("");
   }
 }
 
@@ -426,8 +458,8 @@ export async function* readSse(body: ReadableStream<Uint8Array>): AsyncIterable<
 
 if (import.meta.main) {
   try {
-    const lines = await runWikiStale(process.argv.slice(2));
-    console.log(lines.join("\n"));
+    // Each line as it is made: a Check's verdicts print as they stream in (A10).
+    await runWikiStale(process.argv.slice(2), { write: (line) => console.log(line) });
   } catch (err) {
     console.log(`wiki-stale: ${err instanceof Error ? err.message : String(err)}`);
   }

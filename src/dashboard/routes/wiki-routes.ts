@@ -63,6 +63,9 @@ import {
   passageVerdictKey,
   passageVerdicts,
   changedHashOf,
+  CHECK_BUDGET_MS,
+  CHECK_FAILED,
+  checkHeartbeatMs,
   runStaleCheck,
   staleVerdictStore,
   statusLineVerdictKey,
@@ -2466,6 +2469,9 @@ export function registerWikiToolRoutes(
   // `verdict` or `error` per page, `done`; `app_error` once the stream is
   // committed). Everything refusable is refused as JSON before the stream.
   app.post("/api/wiki/stale/check", async (c) => {
+    // The budget runs from the request's arrival, so the index and the
+    // buckets count against it (A11).
+    const deadlineAt = Date.now() + CHECK_BUDGET_MS;
     const r = await staleRequest(c);
     if ("refusal" in r) return r.refusal;
     const { entry, index, meta, asOfMs } = r;
@@ -2473,8 +2479,13 @@ export function registerWikiToolRoutes(
     if (!bot) return c.json({ error: "No routing bot for this wiki" }, 409);
     return streamSSE(c, async (stream) => {
       let gone = false;
+      // A comment frame: no client sees it as an event (A11).
+      const heartbeat = setInterval(() => {
+        if (!gone) stream.write(": heartbeat\n\n").catch(() => (gone = true));
+      }, checkHeartbeatMs());
       stream.onAbort(() => {
         gone = true;
+        clearInterval(heartbeat);
       });
       const send = async (e: StaleCheckEvent | { type: "app_error"; message: string }) => {
         if (gone) return;
@@ -2491,11 +2502,14 @@ export function registerWikiToolRoutes(
           bot,
           onEvent: send,
           isGone: () => gone,
+          deadlineAt,
         });
         if (!ran) await send({ type: "app_error", message: `${meta.relPath} is not a changed page${asOfMs !== undefined ? " as of that date" : ""}: it has no linking pages to check` });
       } catch (err) {
         log.warn("Stale check failed for {page}: {error}", { page: meta.relPath, error: err instanceof Error ? err.message : String(err) });
-        await send({ type: "app_error", message: err instanceof Error ? err.message : String(err) });
+        await send({ type: "app_error", message: CHECK_FAILED });
+      } finally {
+        clearInterval(heartbeat);
       }
     });
   });
