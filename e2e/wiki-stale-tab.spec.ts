@@ -17,7 +17,9 @@
  *   4. **The tab is hidden on a read-only instance (D25)**: a second muninn
  *      with `MUNINN_WIKI_READONLY=1` on the same wiki.
  *   5. **A Check belongs to its page (A9)**: leaving the page aborts the
- *      stream, and coming back does not let the old stream paint.
+ *      stream, and coming back does not let the old stream paint. So do the
+ *      other ways off a page: an Ask answer, an issue graph (a tracker added
+ *      to the listing by a route), a page that fails to load.
  *   6. **Check paints while it streams (A15)**: on `hub3.md` one verdict is on
  *      screen while another call is still held open, so a Check that wrote
  *      everything at its end fails here. A failed call shows on its row and
@@ -67,6 +69,9 @@ const CONFIRMED_LINE = "- [[p]] is in-flight, two PRs open";
 const UNCONFIRMED_LINE = "- [[p]] is a draft of the lock design";
 const MODEL_ANSWER = '{"verdict":"stale","reason":"E2E: the pin moved on","edit":{"old":"landed on 23.05","new":"landed on 18.06","home":""}}';
 
+/** The ways off a page other than opening another page (test 6b). */
+const LEAVE_ROUTES = ["ask", "graph", "fail"] as const;
+
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
 
 let root = "";
@@ -85,6 +90,10 @@ let held = new Promise<void>((r) => (releaseHeld = r));
 let slowCalls = 0;
 let releaseSlow: () => void = () => {};
 let slow = new Promise<void>((r) => (releaseSlow = r));
+/** Model calls on `notes/hold-*.md` wait for this (test 6b). */
+let holdCalls = 0;
+let releaseHold: () => void = () => {};
+let hold = new Promise<void>((r) => (releaseHold = r));
 /** Who sent each model request: the SDK (`Anthropic/JS …`) or the Claude CLI. */
 const modelAgents: string[] = [];
 
@@ -165,12 +174,17 @@ test.beforeAll(async () => {
   for (const n of ["fast", "slow", "bad"]) await write(`notes/${n}.md`, page(n, "The pin in [[hub3]] landed on 23.05."));
   await write("hub4.md", page("Hub four", "First."));
   for (let i = 1; i <= 11; i++) await write(`many/m${i}.md`, page(`M${i}`, "The pin in [[hub4]] landed on 23.05."));
+  for (const n of LEAVE_ROUTES) {
+    await write(`hub-${n}.md`, page(`Hub ${n}`, "First."));
+    await write(`notes/hold-${n}.md`, page(`Hold ${n}`, `The pin in [[hub-${n}]] landed on 23.05.`));
+  }
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "seed"], now - 30 * DAY);
   await write("hub.md", page("Hub", `${CONFIRMED_LINE}\n${UNCONFIRMED_LINE}\n\nThe pin moved.`));
   await write("hub2.md", page("Hub two", "Second hub. See [[p|the plan page]]."));
   await write("hub3.md", page("Hub three", "The third hub moved."));
   await write("hub4.md", page("Hub four", "The fourth hub moved."));
+  for (const n of LEAVE_ROUTES) await write(`hub-${n}.md`, page(`Hub ${n}`, `The ${n} hub moved.`));
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "hub: the pin moves"], now - DAY);
   // The read-only root: the same history, so the same changed page and hits.
@@ -187,6 +201,10 @@ test.beforeAll(async () => {
         if (body.includes("notes/two.md")) {
           heldCalls++;
           await Promise.race([held, new Promise((r) => setTimeout(r, 15_000))]);
+        }
+        if (body.includes("notes/hold-")) {
+          holdCalls++;
+          await Promise.race([hold, new Promise((r) => setTimeout(r, 15_000))]);
         }
         if (body.includes("notes/slow.md")) {
           slowCalls++;
@@ -353,6 +371,57 @@ test("leaving a page mid-Check aborts its stream, and coming back paints nothing
     expect(heldCalls).toBe(1);
   } finally {
     releaseHeld();
+  }
+});
+
+test("an Ask answer, an issue graph and a page that fails to load each abort the Check, and nothing paints (A9)", async ({ page: p }) => {
+  // The issue graph needs a tracker; the fixture wiki declares none.
+  await p.route(
+    (u) => u.pathname === "/api/wiki/pages",
+    async (r) => {
+      const res = await r.fetch();
+      const json = (await res.json()) as Record<string, unknown>;
+      await r.fulfill({ response: res, json: { ...json, trackers: [{ id: "jira", label: "Jira" }] } });
+    },
+  );
+  await p.route((u) => u.pathname === "/api/wiki/ask", (r) => r.fulfill({ status: 200, contentType: "text/event-stream", body: "" }));
+  const leave: Record<(typeof LEAVE_ROUTES)[number], () => Promise<void>> = {
+    ask: async () => {
+      await p.locator('.wiki-conn-tab[data-conntab="ask"]').click();
+      await p.locator("#wikiAskInput").fill("What moved?");
+      await p.locator("#wikiAskBtn").click();
+      await expect(p.locator("#articleWrap")).toContainText("What moved?");
+    },
+    graph: async () => {
+      await p.evaluate(() => {
+        history.pushState({}, "", `${location.pathname}?wiki=e2estale&display=graph&issue=jira%3ADEMO-1`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await expect(p.locator("#articleWrap h1")).toHaveText("DEMO-1");
+    },
+    fail: async () => {
+      await p.route((u) => u.pathname === "/api/wiki/page", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ error: "E2E page gone" }) }));
+      await p.locator('[data-stale-linking="notes/hold-fail.md"] .wiki-stale-link').click();
+      await expect(p.locator("#articleWrap")).toContainText("E2E page gone");
+    },
+  };
+  for (const n of LEAVE_ROUTES) {
+    hold = new Promise<void>((r) => (releaseHold = r));
+    holdCalls = 0;
+    try {
+      await openPage(p, `hub-${n}.md`, `The ${n} hub moved.`);
+      const aborted = p.waitForEvent("requestfailed", { predicate: (r) => r.url().includes("/api/wiki/stale/check"), timeout: 10_000 });
+      await p.locator("#wikiStaleCheckBtn").click();
+      await expect.poll(() => holdCalls, { timeout: 15_000 }).toBe(1);
+      await leave[n]();
+      expect((await aborted).failure()?.errorText ?? "", n).toMatch(/abort/i);
+      releaseHold();
+      // The server finishes the call it had in flight; no stream is left to paint it.
+      await p.waitForTimeout(1_500);
+      await expect(p.locator(`[data-stale-linking="notes/hold-${n}.md"] .wiki-stale-verdict`), n).toHaveCount(0);
+    } finally {
+      releaseHold();
+    }
   }
 });
 

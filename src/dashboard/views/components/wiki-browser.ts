@@ -720,9 +720,19 @@ let currentName: string | null = null;
  * same-stem pages: the memory wiki's 30 `MEMORY.md` hubs all have the name
  * `MEMORY`, so opening one drew every one of them active. Assigned from the page
  * RESPONSE (like `currentName`), and cleared with it, so it can never describe a
- * page other than the one on screen.
+ * page other than the one on screen. Written only through `setCurrentRelPath`.
  */
 let currentRelPath: string | null = null;
+/** The one writer of `currentRelPath`. The shown page changing is what ends a
+ *  Check that belongs to another page (A9), on every route off it: another
+ *  page, the start view, an Ask answer, an issue graph. */
+function setCurrentRelPath(relPath: string | null): void {
+  currentRelPath = relPath;
+  if (staleCheckRun && staleCheckRun.relPath !== relPath) {
+    abortStaleCheck();
+    renderStale();
+  }
+}
 /**
  * The open page's content hash, from the `/api/wiki/page` response that
  * rendered it — the series editor's CAS base for that one page.
@@ -3256,7 +3266,7 @@ function renderStart(): void {
   consumeUrlLens();
   abortAgentRuns();
   currentName = null;
-  currentRelPath = null; // the two identities are cleared together, always
+  setCurrentRelPath(null); // the two identities are cleared together, always
   currentPageHash = null;
   // No page, no stale report: the tab's count must not carry the last page's.
   abortStaleCheck();
@@ -4668,7 +4678,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   currentName = m.name;
   // The listing IS the identity here (no page response to wait for), so the
   // active-row test gets its relPath immediately.
-  currentRelPath = m.relPath;
+  setCurrentRelPath(m.relPath);
   navInFlight = false; // `currentName` now carries the "article" signal on its own
   if (push) {
     graphIssue = ""; // a click opens a page: graph mode re-roots on it
@@ -4844,7 +4854,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // The RESPONSE's relPath, not the requested one: a by-name navigation
       // resolves server-side, and the active row must key on the page that
       // actually came back.
-      currentRelPath = data.meta.relPath || null;
+      setCurrentRelPath(data.meta.relPath || null);
       currentPageHash = typeof data.hash === "string" ? data.hash : null;
       currentNear = currentRelPath ? { relPath: currentRelPath, near: data.near ?? {} } : null;
       renderBreadcrumb(data.meta);
@@ -5226,7 +5236,7 @@ function renderIssueGraph(): void {
   if (!wrap || !root) return;
   setAtlasFull(false);
   currentName = null;
-  currentRelPath = null;
+  setCurrentRelPath(null);
   currentPageHash = null;
   hideBreadcrumb();
   removeGraph();
@@ -7999,7 +8009,7 @@ function setFollowupDisabled(disabled: boolean): void {
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
 function showAskAnswer(turn: AskTurn, buffer: string): void {
   currentName = null;
-  currentRelPath = null;
+  setCurrentRelPath(null);
   currentPageHash = null;
   // An answer replaces the article pane: graph mode ends with it, so a citation
   // clicked below opens its page for reading.

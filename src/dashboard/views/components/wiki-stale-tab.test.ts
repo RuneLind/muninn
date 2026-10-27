@@ -132,3 +132,14 @@ describe("the STALE tab", () => {
     expect(used.filter((t) => !defined.has(t) && !t.startsWith("--status-"))).toEqual([]);
   });
 });
+
+describe("the shown page's one writer (A9)", () => {
+  // Leaving the shown page aborts its Check in `setCurrentRelPath`, so a new
+  // way off a page that assigned `currentRelPath` itself would skip the abort.
+  test("wiki-browser.ts assigns currentRelPath only inside setCurrentRelPath", async () => {
+    const src = await Bun.file(new URL("./wiki-browser.ts", import.meta.url)).text();
+    const writes = src.split("\n").filter((l) => /\bcurrentRelPath\s*=(?!=)/.test(l) && !/^\s*(\/\/|\*)/.test(l));
+    expect(writes.map((l) => l.trim())).toEqual(["currentRelPath = relPath;"]);
+    expect(src).toMatch(/function setCurrentRelPath\(relPath: string \| null\): void \{\n  currentRelPath = relPath;\n  if \(staleCheckRun && staleCheckRun\.relPath !== relPath\) \{\n    abortStaleCheck\(\);/);
+  });
+});

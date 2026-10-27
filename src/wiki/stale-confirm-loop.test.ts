@@ -20,6 +20,7 @@ import {
   passageVerdictKey,
   passageVerdicts,
   runStaleCheck,
+  runStaleConfirm,
   startStaleConfirmLoop,
   statusLineCallInput,
   stopStaleConfirmLoop,
@@ -27,7 +28,8 @@ import {
   type StaleModel,
 } from "./stale-confirm.ts";
 import { linkingBuckets } from "./stale.ts";
-import { __resetWikiCacheForTest, getWikiIndex } from "./store.ts";
+import { __resetWikiCacheForTest, getWikiIndex, type WikiIndex } from "./store.ts";
+import type { Tracer } from "../tracing/tracer.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
 const BOT = { name: "fakebot", connector: "claude-cli" } as unknown as BotConfig;
@@ -178,6 +180,120 @@ describe("the confirm loop's start and stop (A8, A13)", () => {
     await Bun.sleep(100);
     expect(indexCalls).toHaveLength(0);
     expect(warnings().some((m) => m.includes("nais"))).toBe(true);
+  });
+
+  // ── Every exit path of a run (fix round 2) ──
+  /** A tracer that records its finishes, and a span that finishes the tracer it gets. */
+  const traced = () => {
+    const finishes: string[] = [];
+    const tracer = { finish: (status: string) => void finishes.push(status) } as unknown as Tracer;
+    const spans: { attrs: Record<string, unknown>; tracer: Tracer | null }[] = [];
+    const span = (attrs: Record<string, unknown>, t: Tracer | null) => {
+      spans.push({ attrs, tracer: t });
+      t?.finish(attrs.errors ? "error" : "ok", attrs);
+    };
+    return { finishes, tracer, spans, span };
+  };
+
+  test("a run whose only call was cut by stop still finishes the trace it opened", async () => {
+    const t = traced();
+    const { deps, started } = slowDeps(null, { tracer: () => t.tracer, span: t.span });
+    const ac = new AbortController();
+    const run = runStaleConfirm(["cw"], deps, ac.signal);
+    await waitFor(() => started.length === 1);
+    ac.abort();
+    const out = await run;
+    expect(out.calls).toBe(0);
+    expect(out.left).toBe(3);
+    // Under the old run the span never ran: calls and errors were both 0.
+    expect(t.spans).toHaveLength(1);
+    expect(t.spans[0]!.tracer).toBe(t.tracer);
+    expect(t.spans[0]!.attrs).toMatchObject({ calls: 0, errors: 0, stopped: 1 });
+    expect(t.finishes).toEqual(["ok"]);
+  });
+
+  test("a verdict write that stop catches in flight lands, counts as written and clears its failure", async () => {
+    const t = traced();
+    const failures = new Map<string, number>();
+    // A first run whose calls all fail, so every hit has a failure on record.
+    const failing = slowDeps(0, { failures, model: () => async () => Promise.reject(new Error("backend down")) });
+    expect((await runStaleConfirm(["cw"], failing.deps)).errors).toBe(3);
+    expect(failures.size).toBe(3);
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((r) => (releaseWrite = r));
+    const inner = memoryStaleVerdictStore();
+    let writes = 0;
+    const store = {
+      get: inner.get,
+      upsert: async (v: Parameters<typeof inner.upsert>[0]) => {
+        writes++;
+        await writeGate;
+        return inner.upsert(v);
+      },
+    };
+    const { deps } = slowDeps(0, { failures, store: () => store, tracer: () => t.tracer, span: t.span });
+    const ac = new AbortController();
+    const run = runStaleConfirm(["cw"], deps, ac.signal);
+    await waitFor(() => writes === 1);
+    ac.abort();
+    await Bun.sleep(50);
+    releaseWrite();
+    const out = await run;
+    expect(inner.rows.size).toBe(1);
+    // Under the old run this write landed yet was reported as left, its failure kept.
+    expect(out.calls).toBe(1);
+    expect(out.wikis[0]).toMatchObject({ calls: 1, stale: 1, left: 2 });
+    expect(failures.size).toBe(2);
+    expect(t.finishes).toEqual(["ok"]);
+  });
+
+  test("after stop, no remaining hit builds its call input (no git log spawn per hit)", async () => {
+    let lookupsAfterAbort = 0;
+    const ac = new AbortController();
+    const counting = (index: WikiIndex): WikiIndex =>
+      new Proxy(index, {
+        get(target, prop, recv) {
+          const v = Reflect.get(target, prop, recv);
+          if (prop !== "resolveRelPath" || typeof v !== "function") return v;
+          return (...args: unknown[]) => {
+            if (ac.signal.aborted) lookupsAfterAbort++;
+            return (v as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        },
+      });
+    const { deps, started } = slowDeps(null, { index: async (r) => counting((await getWikiIndex({ root: r, refresh: true }))!) });
+    const run = runStaleConfirm(["cw"], deps, ac.signal);
+    await waitFor(() => started.length === 1);
+    ac.abort();
+    const out = await run;
+    expect(out.left).toBe(3);
+    // `statusLineCallInput` resolves the hit's target first, then spawns git log.
+    expect(lookupsAfterAbort).toBe(0);
+  });
+
+  test("shutdown waits for a verdict write the run's bound abandoned", async () => {
+    let landed = 0;
+    const inner = memoryStaleVerdictStore();
+    const store = {
+      get: inner.get,
+      upsert: async (v: Parameters<typeof inner.upsert>[0]) => {
+        await Bun.sleep(700);
+        landed++;
+        return inner.upsert(v);
+      },
+    };
+    let runs = 0;
+    const { deps } = slowDeps(0, {
+      store: () => store,
+      limits: { budgetMs: 200, startCutoffMs: 200, callMaxMs: 200 },
+      span: () => void runs++,
+    });
+    startStaleConfirmLoop(ON, { deps, firstDelayMs: 1, intervalMs: 60_000 });
+    // The run gives up on the write at its 200 ms bound and ends.
+    await waitFor(() => runs === 1);
+    expect(landed).toBe(0);
+    await stopStaleConfirmLoop(5_000);
+    expect(landed).toBe(1);
   });
 });
 

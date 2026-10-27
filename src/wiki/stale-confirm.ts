@@ -648,8 +648,10 @@ async function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
  * {@link CONFIRM_CALL_MAX_MS} out. The rebuilds, the store and the calls all
  * race the run's {@link CONFIRM_RUN_BUDGET_MS}, so the run returns within it.
  * A failed call writes nothing, so a later run retries it. Never rejects.
- * Once `signal` aborts (the loop's stop, A8) every await the run is in
- * rejects, and no rebuild, call or write starts after it.
+ * Once `signal` aborts (the loop's stop, A8) no rebuild, call or write starts,
+ * and every await the run is in rejects except a verdict write already sent:
+ * the run waits for that one (within its bound) and counts it. A run that
+ * built a tracer finishes it on every way out.
  */
 export async function runStaleConfirm(wikiNames: readonly string[], deps: ConfirmDeps = realConfirmDeps, signal?: AbortSignal): Promise<ConfirmRunSummary> {
   const lim = { ...CONFIRM_LIMITS, ...deps.limits };
@@ -663,11 +665,14 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
     else signal?.addEventListener("abort", () => reject(new ConfirmStopped()), { once: true });
   });
   stoppedRace.catch(() => {});
+  const inBudget = <T>(p: Promise<T>, what: string) => within(p, endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`);
   const bounded = <T>(p: Promise<T>, what: string) => {
     if (signal?.aborted) return Promise.reject(new ConfirmStopped());
-    return Promise.race([within(p, endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`), stoppedRace]);
+    return Promise.race([inBudget(p, what), stoppedRace]);
   };
   const out: ConfirmRunSummary = { wikis: [], calls: 0, errors: 0, left: 0, elapsedMs: 0 };
+  /** Calls sent whose answer stop dropped: not counted as calls, but on the trace. */
+  let stopped = 0;
   let tracer: Tracer | null = null;
   const tracerOnce = () => (tracer ??= deps.tracer());
   const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -729,9 +734,11 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
     }
     out.calls++;
     row.calls++;
+    let sent = false;
     try {
       const input = await bounded(statusLineCallInput(t.index, t.page, t.hit), "call input");
       const callDeadline = Math.min(deadlineAt, deps.now() + lim.callMaxMs);
+      sent = true;
       const raw = await bounded(
         within(
           deps.model()(buildStalePrompt(input), {
@@ -748,7 +755,9 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       const answer = parseStaleAnswer(raw, input.passage, input.sourceLines);
       // An answer that resolved as the loop stopped is dropped, not written.
       if (signal?.aborted) throw new ConfirmStopped();
-      const stored = await bounded(
+      // A write once sent is waited for through a stop, so it is counted as it
+      // lands; only the run's bound abandons it, and shutdown still waits (A8).
+      const stored = await inBudget(
         (signal ? trackWrite : <T>(p: Promise<T>) => p)(deps.store().upsert({
           wiki: t.entry.name,
           kind: "status-line",
@@ -769,6 +778,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         out.calls--;
         row.calls--;
         row.left++;
+        if (sent) stopped++;
         continue;
       }
       row.errors++;
@@ -786,8 +796,10 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
     out.left += row.left;
   }
   out.elapsedMs = deps.now() - started;
-  if (out.calls > 0 || out.errors > 0) {
-    deps.span({ calls: out.calls, errors: out.errors, left: out.left, elapsedMs: out.elapsedMs, wikis: out.wikis }, tracerOnce());
+  // The tracer is built as the first call is sent and inserts its root span at
+  // once: a run whose only calls stop cut still finishes it.
+  if (out.calls > 0 || out.errors > 0 || stopped > 0) {
+    deps.span({ calls: out.calls, errors: out.errors, left: out.left, stopped, elapsedMs: out.elapsedMs, wikis: out.wikis }, tracerOnce());
     log.info("Stale confirm: {calls} call(s), {errors} error(s), {left} left for the next run, {elapsedMs} ms", {
       calls: out.calls,
       errors: out.errors,
@@ -887,9 +899,10 @@ export function startStaleConfirmLoop(
 /**
  * Stop the loop (A8): no run or call starts after this, a run in flight is
  * aborted (its pending await rejects; a model call already sent is not
- * cancelled, its answer is dropped), and the returned promise waits at most
- * `waitMs` for that run and the verdict writes it had in flight, so they land
- * before the database pool closes.
+ * cancelled, its answer is dropped; a verdict write already sent is waited
+ * for), and the returned promise waits at most `waitMs` for that run and for
+ * the verdict writes a run's bound abandoned, so they land before the
+ * database pool closes.
  */
 export async function stopStaleConfirmLoop(waitMs = 5_000): Promise<void> {
   stopped = true;
@@ -916,19 +929,29 @@ export const CHECK_MAX_CALLS = 10;
 export const CHECK_CONCURRENCY = 3;
 /** A Check request ends within this long of its arrival (each call's deadline). */
 export const CHECK_BUDGET_MS = 4 * 60_000;
-/** A Check stream writes a heartbeat comment this often, so a call that runs
- *  long never leaves it silent up to the server's 255 s `idleTimeout` (A11). */
+/** The route ends a Check stream this long past its budget, whatever its calls
+ *  are doing: the server's idle timer is off for the request, so this is its bound. */
+export const CHECK_STREAM_GRACE_MS = 15_000;
+/** A Check stream writes a heartbeat comment this often, for a proxy between
+ *  the reader and muninn. Bun's own `idleTimeout` is not reset by writes
+ *  (measured, Bun 1.3.10), so the route turns it off for the request. */
 export const CHECK_HEARTBEAT_MS = 30_000;
 let heartbeatMs = CHECK_HEARTBEAT_MS;
 export const checkHeartbeatMs = () => heartbeatMs;
 export function __setCheckHeartbeatMsForTest(ms: number | null): void {
   heartbeatMs = ms ?? CHECK_HEARTBEAT_MS;
 }
+let checkTiming = { budgetMs: CHECK_BUDGET_MS, graceMs: CHECK_STREAM_GRACE_MS };
+export const checkBudget = () => checkTiming;
+export function __setCheckBudgetForTest(t: { budgetMs: number; graceMs: number } | null): void {
+  checkTiming = t ?? { budgetMs: CHECK_BUDGET_MS, graceMs: CHECK_STREAM_GRACE_MS };
+}
 
 /** The fixed text of Check's error events (A11): the raw error goes to the log only. */
 export const CHECK_CALL_FAILED = "The check call failed or timed out.";
 export const CHECK_ANSWER_UNREADABLE = "The model's answer could not be read.";
 export const CHECK_FAILED = "The check failed. The server log has the details.";
+export const CHECK_TIMED_OUT = "The check ran out of time. Check again for the pages it did not reach.";
 
 export type StaleCheckEvent =
   | { type: "start"; changed: string; toCheck: number; cached: number; toCall: number; left: number }

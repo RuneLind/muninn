@@ -63,8 +63,9 @@ import {
   passageVerdictKey,
   passageVerdicts,
   changedHashOf,
-  CHECK_BUDGET_MS,
   CHECK_FAILED,
+  CHECK_TIMED_OUT,
+  checkBudget,
   checkHeartbeatMs,
   runStaleCheck,
   staleVerdictStore,
@@ -2471,17 +2472,25 @@ export function registerWikiToolRoutes(
   app.post("/api/wiki/stale/check", async (c) => {
     // The budget runs from the request's arrival, so the index and the
     // buckets count against it (A11).
-    const deadlineAt = Date.now() + CHECK_BUDGET_MS;
+    const { budgetMs, graceMs } = checkBudget();
+    const deadlineAt = Date.now() + budgetMs;
     const r = await staleRequest(c);
     if ("refusal" in r) return r.refusal;
     const { entry, index, meta, asOfMs } = r;
     const { bot } = resolveWikiSynthesisBot(entry, discoverAllBots());
     if (!bot) return c.json({ error: "No routing bot for this wiki" }, 409);
+    // Bun cuts a response at the server's idleTimeout (255 s) however often it
+    // writes (measured, Bun 1.3.10), so the timer is off for this request and
+    // the race below bounds the stream instead. `c.env` is the Bun server
+    // (`src/index.ts`); a test's `app.request` has none.
+    (c.env as { timeout?: (req: Request, seconds: number) => void } | undefined)?.timeout?.(c.req.raw, 0);
     return streamSSE(c, async (stream) => {
+      // Set when the reader disconnects: Hono cancels the response stream and
+      // runs `onAbort` (its `write` swallows errors, so a failed write says nothing).
       let gone = false;
-      // A comment frame: no client sees it as an event (A11).
+      // A comment frame no client sees as an event, for a proxy's read timeout.
       const heartbeat = setInterval(() => {
-        if (!gone) stream.write(": heartbeat\n\n").catch(() => (gone = true));
+        if (!gone) void stream.write(": heartbeat\n\n");
       }, checkHeartbeatMs());
       stream.onAbort(() => {
         gone = true;
@@ -2489,12 +2498,12 @@ export function registerWikiToolRoutes(
       });
       const send = async (e: StaleCheckEvent | { type: "app_error"; message: string }) => {
         if (gone) return;
-        await stream.writeSSE({ event: e.type, data: JSON.stringify(e) }).catch(() => {
-          gone = true;
-        });
+        await stream.writeSSE({ event: e.type, data: JSON.stringify(e) });
       };
+      let overrun: ReturnType<typeof setTimeout> | undefined;
+      const outOfTime = new Promise<"timeout">((r) => (overrun = setTimeout(() => r("timeout"), deadlineAt + graceMs - Date.now())));
       try {
-        const ran = await runStaleCheck({
+        const run = runStaleCheck({
           wiki: entry.name,
           index,
           relPath: meta.relPath,
@@ -2504,11 +2513,19 @@ export function registerWikiToolRoutes(
           isGone: () => gone,
           deadlineAt,
         });
-        if (!ran) await send({ type: "app_error", message: `${meta.relPath} is not a changed page${asOfMs !== undefined ? " as of that date" : ""}: it has no linking pages to check` });
+        const ran = await Promise.race([run, outOfTime]);
+        if (ran === "timeout") {
+          // The run goes on in the background: it starts no call and sends nothing more.
+          void run.catch(() => {});
+          log.warn("Stale check for {page} ran {graceMs} ms past its budget; the stream ends", { page: meta.relPath, graceMs });
+          await send({ type: "app_error", message: CHECK_TIMED_OUT });
+          gone = true;
+        } else if (!ran) await send({ type: "app_error", message: `${meta.relPath} is not a changed page${asOfMs !== undefined ? " as of that date" : ""}: it has no linking pages to check` });
       } catch (err) {
         log.warn("Stale check failed for {page}: {error}", { page: meta.relPath, error: err instanceof Error ? err.message : String(err) });
         await send({ type: "app_error", message: CHECK_FAILED });
       } finally {
+        clearTimeout(overrun);
         clearInterval(heartbeat);
       }
     });

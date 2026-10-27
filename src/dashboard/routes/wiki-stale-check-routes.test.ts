@@ -374,7 +374,69 @@ describe("the Stale check's verdict routes", () => {
     }
   });
 
-  // A11: a heartbeat keeps a long Check under the server's idle timeout.
+  // Bun 1.3.10 cuts a stream at its idleTimeout however often it writes, so
+  // the route turns the timer off for the Check request (fix round 2).
+  test("the Check stream outlives the server's idleTimeout, heartbeats or not", async () => {
+    fresh();
+    const seam = (confirmModule as Record<string, unknown>).__setCheckHeartbeatMsForTest as ((ms: number | null) => void) | undefined;
+    seam?.(200);
+    __setStaleModelForTest(async (prompt) => {
+      prompts.push(prompt);
+      await Bun.sleep(1_500);
+      return answer(prompt);
+    });
+    // idleTimeout 1 s: measured, Bun cuts such a stream at about 4 s.
+    const server = Bun.serve({ port: 0, idleTimeout: 1, fetch: (req, s) => app.fetch(req, s) });
+    try {
+      const t0 = Date.now();
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/wiki/stale/check`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" }),
+      });
+      const text = await res.text().catch((err: unknown) => `cut: ${String(err)}`);
+      // 10 calls, 3 at a time, 1.5 s each: about 6 s, past the cut.
+      expect(Date.now() - t0).toBeGreaterThan(5_000);
+      expect(text).toMatch(/^: heartbeat$/m);
+      expect(sseEvents(text).at(-1)?.[0]).toBe("done");
+      expect(sseEvents(text).filter(([e]) => e === "verdict")).toHaveLength(CHECK_MAX_CALLS);
+    } finally {
+      seam?.(null);
+      __setStaleModelForTest(model);
+      server.stop(true);
+    }
+  }, 20_000);
+
+  // With the idle timer off, the route's own bound ends a Check whose calls
+  // outlive their deadline (fix round 2).
+  test("a Check whose calls hang past the budget ends at the budget plus its grace", async () => {
+    fresh();
+    const seam = (confirmModule as Record<string, unknown>).__setCheckBudgetForTest as ((t: { budgetMs: number; graceMs: number } | null) => void) | undefined;
+    seam?.({ budgetMs: 300, graceMs: 300 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    __setStaleModelForTest(async (prompt) => {
+      prompts.push(prompt);
+      await gate;
+      return answer(prompt);
+    });
+    try {
+      const t0 = Date.now();
+      const res = await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" });
+      const text = await Promise.race([res.text(), Bun.sleep(4_000).then(() => "still open after 4 s")]);
+      expect(text).not.toBe("still open after 4 s");
+      expect(Date.now() - t0).toBeLessThan(2_000);
+      const events = sseEvents(text);
+      expect(events.at(-1)).toEqual(["app_error", { type: "app_error", message: "The check ran out of time. Check again for the pages it did not reach." }]);
+      expect(events.filter(([e]) => e === "verdict")).toHaveLength(0);
+    } finally {
+      release();
+      seam?.(null);
+      await Bun.sleep(50);
+      __setStaleModelForTest(model);
+    }
+  });
+
   test("A11: the Check stream carries a heartbeat comment while calls run", async () => {
     fresh();
     const seam = (confirmModule as Record<string, unknown>).__setCheckHeartbeatMsForTest as ((ms: number | null) => void) | undefined;
