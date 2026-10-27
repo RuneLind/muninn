@@ -216,7 +216,7 @@ const LIGHT_TOKENS = `
 
       /* Light: bold darkens its context (body lead 1.43x); 0.1 keeps bold in
          a dimmed context lighter than body text. The pivot sits above
-         --text-dim (L 0.62), so white ink on an accent chip stays white
+         --text-dim (L 0.61), so white ink on an accent chip stays white
          instead of darkening (RuleTree pick: 6.46:1 would drop to 4.80:1).
          The chip keeps light's look. */
       --strong-lift: 0.1;
