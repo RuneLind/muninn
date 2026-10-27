@@ -123,16 +123,18 @@ export function labDerive(ref: Record<string, string>, st: LabState): Record<str
   const body = labHsl(ref["--text-secondary"]!);
   if (!page || !body) return out;
   const dH = st.bgH - page[0], dS = st.bgS - page[1], dL = st.bgL - page[2];
+  // A grey token reports hue 0: saturation added to it takes the page's hue, not red.
+  const hueOf = (c: number[]) => (c[1]! < 0.5 ? page[0] : c[0]!);
   const shift = (name: string, h: number, s: number, l: number) => {
     const c = labHsl(ref[name] || "");
-    if (c) out[name] = labFromHsl(c[0] + h, c[1] + s, c[2] + l);
+    if (c) out[name] = labFromHsl(hueOf(c) + h, c[1] + s, c[2] + l);
   };
   for (const name of LAB_BG_TOKENS) shift(name, dH, dS, dL);
   // The graph canvas follows the page only where it IS the page (paper-light keeps a dark canvas).
   if ((ref["--graph-canvas"] || "").trim().toLowerCase() === (ref["--bg-page"] || "").trim().toLowerCase()) out["--graph-canvas"] = out["--bg-page"]!;
   for (const name of LAB_TEXT_TOKENS) shift(name, dH, st.textS - body[1], st.textL - body[2]);
   const chip = labHsl(ref["--bg-code-inline"] || "");
-  if (chip) out["--bg-code-inline"] = labFromHsl(chip[0] + dH, chip[1] + dS, st.bgL + st.chipLift);
+  if (chip) out["--bg-code-inline"] = labFromHsl(hueOf(chip) + dH, chip[1] + dS, st.bgL + st.chipLift);
   const edge = labParse(ref["--code-inline-border"] || "");
   if (edge) out["--code-inline-border"] = "rgba(" + Math.round(edge[0]) + ", " + Math.round(edge[1]) + ", " + Math.round(edge[2]) + ", " + st.chipEdge / 100 + ")";
   out["--strong-lift"] = String(st.strongLift);
@@ -157,14 +159,27 @@ export function labLadderIssues(ref: Record<string, string>, tokens: Record<stri
   return issues;
 }
 
+/** The overrides whose value differs from the reference: what the sliders actually moved. */
+export function labChangedKeys(ref: Record<string, string>, derived: Record<string, string>): string[] {
+  const norm = (v: string | undefined) => (v || "").trim().toLowerCase().replace(/\s+/g, "");
+  return Object.keys(derived).filter((k) => norm(derived[k]) !== norm(ref[k]));
+}
+
+/** Slider states are kept per choice; System keeps one per OS scheme, since its reference differs. */
+export function labStateKey(choice: string, prefersDark: boolean): string {
+  return choice === "system" ? "system:" + (prefersDark ? "dark" : "light") : choice;
+}
+
 /**
- * The `tokens: { … }` block for `palettes.ts`. `order` is the palette's own
- * key order (empty for a base), then every required and derived token it
- * lacks; a token with no value in `tokens` is listed in a comment instead.
+ * The `tokens: { … }` block for `palettes.ts`: the palette's own keys in its
+ * order (none for a base), then every required token and every token the
+ * sliders changed. Nothing else: a base value a palette need not set (the
+ * `--status-*` inks) stays the base's. A token with no value in `tokens` is
+ * listed in a comment instead.
  */
-export function labExport(tokens: Record<string, string>, order: readonly string[], required: readonly string[], header: string): string {
+export function labExport(tokens: Record<string, string>, order: readonly string[], required: readonly string[], changed: readonly string[], header: string): string {
   const keys: string[] = [];
-  for (const k of [...order, ...required, ...Object.keys(tokens)]) if (keys.indexOf(k) < 0) keys.push(k);
+  for (const k of [...order, ...required, ...changed]) if (keys.indexOf(k) < 0) keys.push(k);
   const lines = ["    tokens: {", "      // " + header];
   const missing: string[] = [];
   for (const k of keys) {
@@ -178,4 +193,4 @@ export function labExport(tokens: Record<string, string>, order: readonly string
 }
 
 /** Every function the lab script injects, in dependency-free order. */
-export const LAB_FUNCTIONS = [labParse, labHex, labToHsl, labFromHsl, labHsl, labLuminance, labContrast, labInitialState, labDerive, labLadderIssues, labExport];
+export const LAB_FUNCTIONS = [labParse, labHex, labToHsl, labFromHsl, labHsl, labLuminance, labContrast, labInitialState, labDerive, labLadderIssues, labChangedKeys, labStateKey, labExport];

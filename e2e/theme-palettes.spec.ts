@@ -763,6 +763,30 @@ test.describe("The theme lab", () => {
     expect(saved.states.reading.bgL).toBe(5);
   });
 
+  // Fix round 1 (PR #755, F3): under System an OS scheme flip kept the other
+  // scheme's overrides, and one saved state served both schemes.
+  test("under System, an OS scheme flip starts over from that scheme and keeps each scheme's sliders", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "light" });
+    await storeChoice(page, null);
+    await page.goto(BASE + "/");
+    await page.locator("#themeToggle").click();
+    await page.getByRole("menuitem", { name: /Theme lab/ }).click();
+    await expect(page.locator("#themeLab .theme-lab-title")).toContainText("System (light)");
+    await slide(page, "bgL", 90);
+    const lightTinted = await pageBg(page);
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect(page.locator("#themeLab .theme-lab-title")).toContainText("System (dark)");
+    const dark = (await pageBg(page)).match(/\d+/g)!.map(Number);
+    [10, 10, 15].forEach((v, i) => expect(Math.abs(dark[i]! - v), `dark page channel ${i}`).toBeLessThanOrEqual(2));
+
+    await page.reload();
+    expect((await pageBg(page)).match(/\d+/g)!.map(Number)[0]!, "a dark load keeps the dark state").toBeLessThan(20);
+    await page.emulateMedia({ colorScheme: "light" });
+    await expect.poll(() => pageBg(page)).toBe(lightTinted);
+    await page.locator('#themeLab [data-lab="close"]').click();
+  });
+
   test("Copy tokens puts a palettes.ts tokens block with the slid values on the clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await storeChoice(page, "reading");

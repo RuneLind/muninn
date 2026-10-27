@@ -66,7 +66,7 @@ const SLIDERS: [string, string, number, number, number, string][] = [
 
 export function themeLabScript(): string {
   const order: Record<string, string[]> = {};
-  const labels: Record<string, string> = { system: "System", light: "Light", dark: "Dark" };
+  const labels: Record<string, string> = { "system:light": "System (light)", "system:dark": "System (dark)", light: "Light", dark: "Dark" };
   for (const p of PALETTES) { order[p.id] = Object.keys(p.tokens); labels[p.id] = p.label; }
   const watched = [...new Set([...PALETTE_REQUIRED_TOKENS, ...Object.values(order).flat(), ...LAB_BG_TOKENS, ...LAB_TEXT_TOKENS])];
   return `
@@ -89,7 +89,10 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
 
     function load() { try { var s = JSON.parse(localStorage.getItem(KEY) || '{}'); return s && typeof s === 'object' ? s : {}; } catch (e) { return {}; } }
     function save(patch) { var s = load(); for (var k in patch) s[k] = patch[k]; try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) {} }
+    var scheme = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
     function currentChoice() { return root.dataset.palette || root.dataset.theme || 'system'; }
+    // The key slider states are saved under, and the panel's label: System has one per OS scheme.
+    function currentKey() { return labStateKey(currentChoice(), !!(scheme && scheme.matches)); }
     function clear() { applied.forEach(function(n) { root.style.removeProperty(n); }); applied = []; }
     function readRef() {
       clear();
@@ -106,7 +109,7 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
     function merged() { var d = derived(), t = {}; for (var n in ref) t[n] = ref[n]; for (var m in d) t[m] = d[m]; return t; }
     function persist() { var s = load(); var states = s.states || {}; states[choice] = state; save({ states: states }); }
     function begin() {
-      choice = currentChoice();
+      choice = currentKey();
       ref = readRef();
       var saved = (load().states || {})[choice];
       var init = labInitialState(ref);
@@ -177,7 +180,7 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
       var s = state;
       var header = 'Theme lab ' + new Date().toISOString().slice(0, 10) + ', from ' + (LABELS[choice] || choice) + ': page L' + fmt(s.bgL) + ' H' + fmt(s.bgH) + ' S' + fmt(s.bgS)
         + ', body L' + fmt(s.textL) + ' S' + fmt(s.textS) + ', lift ' + fmt(s.strongLift) + ' ' + s.strongWeight + ', chip ' + fmt(s.chipLift) + ' edge ' + fmt(s.chipEdge) + ' %. Re-measure the contrast comments before merging.';
-      return labExport(merged(), ORDER[choice] || [], REQUIRED, header);
+      return labExport(merged(), ORDER[choice] || [], REQUIRED, labChangedKeys(ref, derived()), header);
     }
     function openLab() {
       save({ open: true });
@@ -234,9 +237,10 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
     // The ◐ menu's "Theme lab…" item calls this (theme.ts).
     window.__themeLabOpen = openLab;
     // A theme picked in the ◐ menu while the lab is open: start over from that theme.
-    new MutationObserver(function() {
-      if (panel && currentChoice() !== choice) { begin(); render(); }
-    }).observe(root, { attributes: true, attributeFilter: ['data-theme', 'data-palette'] });
+    function follow() { if (panel && currentKey() !== choice) { begin(); render(); } }
+    new MutationObserver(follow).observe(root, { attributes: true, attributeFilter: ['data-theme', 'data-palette'] });
+    // Under System an OS scheme flip changes the reference without touching an attribute.
+    if (scheme && scheme.addEventListener) scheme.addEventListener('change', follow);
     if (load().open) {
       if (document.body) openLab();
       else document.addEventListener('DOMContentLoaded', openLab);

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PALETTES, PALETTE_REQUIRED_TOKENS } from "./palettes.ts";
 import { themeTokenStyles } from "../shared-styles.ts";
 import { THEME_LAB_KEY, themeLabScript } from "./theme-lab.ts";
-import { labDerive, labExport, labHsl, labInitialState, labLadderIssues, labParse } from "./theme-lab-core.ts";
+import { labChangedKeys, labDerive, labExport, labHsl, labInitialState, labLadderIssues, labParse, labStateKey } from "./theme-lab-core.ts";
 
 /** A base's token block, parsed (the palettes.test.ts helper). */
 function baseTokens(base: "light" | "dark"): Record<string, string> {
@@ -74,6 +74,19 @@ describe("theme lab derivation", () => {
     expect(out["--graph-canvas"]).toBe(out["--bg-page"]!);
   });
 
+  // Fix round 1 (PR #755, F1): a grey token has hue 0, so added saturation tinted it red.
+  test("saturation added to grey tokens takes the page's hue, not red", () => {
+    const ref = themeRef("dark");
+    const init = labInitialState(ref);
+    const out = labDerive(ref, { ...init, textS: 20, bgS: init.bgS + 20 });
+    const pageHue = labHsl(ref["--bg-page"]!)![0];
+    for (const name of ["--text-secondary", "--text-tertiary", "--tint-neutral", "--bg-panel"]) {
+      const c = labHsl(out[name]!)!;
+      expect(c[1], `${name} ${out[name]} is tinted`).toBeGreaterThan(5);
+      expect(Math.abs(c[0] - pageHue), `${name} ${out[name]} hue ${c[0].toFixed(0)} vs page ${pageHue.toFixed(0)}`).toBeLessThan(10);
+    }
+  });
+
   test("a ladder pair the overrides turn around is reported", () => {
     const ref = themeRef("reading");
     expect(labLadderIssues(ref, { ...ref, "--bg-inset": "#ffffff" })).toContain("bg-inset ≥ bg-panel");
@@ -81,10 +94,27 @@ describe("theme lab derivation", () => {
 });
 
 describe("theme lab export", () => {
+  // Fix round 1 (PR #755, F2): the block carried every watched token, e.g. the
+  // base's --status-* on Reading, freezing base values a palette need not set.
+  for (const p of PALETTES) {
+    test(`${p.id}: the block holds the palette's keys, the required ones and what the lab changed, nothing else`, () => {
+      const ref = themeRef(p.id);
+      const st = { ...labInitialState(ref), bgL: labInitialState(ref).bgL + (p.base === "dark" ? -4 : -3) };
+      const derived = labDerive(ref, st);
+      const changed = labChangedKeys(ref, derived);
+      const out = labExport({ ...ref, ...derived }, Object.keys(p.tokens), PALETTE_REQUIRED_TOKENS, changed, "x");
+      const keys = [...out.matchAll(/^\s+"(--[a-z0-9-]+)":/gm)].map((m) => m[1]!);
+      const allowed = new Set([...Object.keys(p.tokens), ...PALETTE_REQUIRED_TOKENS, ...changed]);
+      expect(keys.filter((k) => !allowed.has(k))).toEqual([]);
+      expect(keys.some((k) => k.startsWith("--status-")) && !Object.keys(p.tokens).some((k) => k.startsWith("--status-"))).toBe(false);
+      expect(changed).toContain("--bg-page");
+    });
+  }
+
   test("keeps the palette's key order, adds missing required tokens, lists empty ones", () => {
     const reading = PALETTES.find((p) => p.id === "reading")!;
     const tokens = { ...themeRef("reading"), "--bg-page": "#0d0c0b", "--on-accent-inherit": "" };
-    const out = labExport(tokens, Object.keys(reading.tokens), PALETTE_REQUIRED_TOKENS, "Theme lab test");
+    const out = labExport(tokens, Object.keys(reading.tokens), PALETTE_REQUIRED_TOKENS, [], "Theme lab test");
     expect(out.startsWith("    tokens: {\n      // Theme lab test\n")).toBe(true);
     expect(out).toContain('"--bg-page": "#0d0c0b",');
     const keys = [...out.matchAll(/^\s+"(--[a-z0-9-]+)":/gm)].map((m) => m[1]);
@@ -95,9 +125,19 @@ describe("theme lab export", () => {
 
   test("an exported block is a valid palette tokens object", () => {
     const ref = themeRef("paper-light");
-    const body = labExport({ ...ref, ...labDerive(ref, labInitialState(ref)) }, [], PALETTE_REQUIRED_TOKENS, "x");
+    const body = labExport({ ...ref, ...labDerive(ref, labInitialState(ref)) }, [], PALETTE_REQUIRED_TOKENS, [], "x");
     const parsed = new Function(`return {${body.trim().replace(/,$/, "")}}`)() as { tokens: Record<string, string> };
     expect(PALETTE_REQUIRED_TOKENS.filter((t) => !(t in parsed.tokens))).toEqual([]);
+  });
+});
+
+describe("theme lab state key", () => {
+  // Fix round 1 (PR #755, F3): System kept one absolute slider state for both OS schemes.
+  test("System keeps one state per OS scheme; an explicit choice keeps one", () => {
+    expect(labStateKey("system", true)).toBe("system:dark");
+    expect(labStateKey("system", false)).toBe("system:light");
+    expect(labStateKey("reading", true)).toBe("reading");
+    expect(labStateKey("dark", false)).toBe("dark");
   });
 });
 
