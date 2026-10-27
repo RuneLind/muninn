@@ -47,7 +47,16 @@ export const PALETTE_REQUIRED_TOKENS: readonly string[] = [
   // Chat-only tokens (chat-styles.ts): without them the chat page shows the
   // base's chat surface under the palette's sidebar.
   "--bg-chat", "--bg-elevated",
+  "--on-accent-inherit",
 ];
+
+/**
+ * Tokens the bases leave undefined on purpose: a rule that uses one computes
+ * main's inherited colour in plain light and dark, and the palette's value
+ * under a palette. `--on-accent-inherit` is the ink of the two chat hovers
+ * (`.research-actions button:hover`, `.dev-run-resend:hover`) on the accent.
+ */
+export const PALETTE_ONLY_TOKENS: readonly string[] = ["--on-accent-inherit"];
 
 /** The chat page's own tokens, re-emitted after its base blocks (chat-styles.ts). */
 export const CHAT_PALETTE_TOKENS: readonly string[] = ["--bg-chat", "--bg-elevated"];
@@ -102,6 +111,7 @@ export const PALETTES: readonly Palette[] = [
       "--accent-muted": "#b09a87",
       "--on-accent": "#1e1c1a",
       "--on-accent-primary": "#1e1c1a",
+      "--on-accent-inherit": "#1e1c1a",
 
       // Every dark tint measured >= 4.5:1 under its text (status colour, or
       // the accent for --tint-purple); kept. --tint-purple follows the accent's
@@ -118,7 +128,8 @@ export const PALETTES: readonly Palette[] = [
       // The dark-island badges take the dark tints (text on each, measured:
       // deadline 8.59, Slack 8.14, GitHub 7.16, X 6.20). --island-info keeps
       // the bases' #1a2a3e: Telegram's #54a9eb is 5.71:1 there, 4.52 on
-      // --tint-info. The shimmer is the warm border lifted 4% toward white.
+      // --tint-info. The shimmer #34322f is --border-primary #33302e plus 1/2/1 per
+      // channel.
       "--island-warning": "#2a2a1a",
       "--island-magenta": "#2a1a3a",
       "--island-success": "#1a3a2a",

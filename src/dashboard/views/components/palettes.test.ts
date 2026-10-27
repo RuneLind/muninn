@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CHAT_PALETTE_TOKENS, PALETTES, PALETTE_REQUIRED_TOKENS, paletteBaseMap, paletteTokenStyles } from "./palettes.ts";
+import { CHAT_PALETTE_TOKENS, PALETTES, PALETTE_ONLY_TOKENS, PALETTE_REQUIRED_TOKENS, paletteBaseMap, paletteTokenStyles } from "./palettes.ts";
 import { THEME_KEY, themeChoices, themeInitScript, themeToggleHtml, themeToggleScript } from "./theme.ts";
 import { baseTokenNames, SHARED_STYLES, themeTokenStyles } from "../shared-styles.ts";
 import { chatStyles } from "../../../chat/views/components/chat-styles.ts";
@@ -40,7 +40,8 @@ function runLoad(stored: Record<string, string>): { dataset: Record<string, stri
 
 describe("palette registry", () => {
   const chatNames = [...chatStyles().matchAll(/^\s*(--[a-z0-9-]+)\s*:/gm)].map((m) => m[1]!);
-  const known = new Set([...baseTokenNames(), ...chatNames]);
+  const declared = new Set([...baseTokenNames(), ...chatNames]);
+  const known = new Set([...declared, ...PALETTE_ONLY_TOKENS]);
 
   test("ids are unique and never collide with a base or system", () => {
     const ids = PALETTES.map((p) => p.id);
@@ -57,6 +58,12 @@ describe("palette registry", () => {
       for (const v of Object.values(p.tokens)) expect(v.trim().length).toBeGreaterThan(0);
     });
   }
+
+  test("a palette-only token is declared by no base and no chat block", () => {
+    // Undefined in the bases is what keeps their colour main's (inherited).
+    expect(PALETTE_ONLY_TOKENS.filter((t) => declared.has(t))).toEqual([]);
+    expect(PALETTE_ONLY_TOKENS.every((t) => PALETTE_REQUIRED_TOKENS.includes(t))).toBe(true);
+  });
 
   test("every required token is one the bases or the chat page declare", () => {
     expect(PALETTE_REQUIRED_TOKENS.filter((t) => !known.has(t))).toEqual([]);

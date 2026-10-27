@@ -591,9 +591,11 @@ ${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
       align-items: center;
       gap: 6px;
     }
+    /* --on-accent-inherit is a palette-only token: the bases leave it
+       undefined, so these two hovers inherit their colour as on main. */
     .research-actions button:hover:not(:disabled) {
       background: var(--accent);
-      color: var(--bg-primary);
+      color: var(--on-accent-inherit);
       border-color: var(--accent);
     }
     .research-actions button .btn-icon { font-size: 14px; }
@@ -676,7 +678,7 @@ ${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
     }
     .dev-run-resend:hover {
       background: var(--accent);
-      color: var(--bg-primary);
+      color: var(--on-accent-inherit);
       border-color: var(--accent);
     }
     /* Compact handle from the inline run card → inspector Agents tab (Phase C) */

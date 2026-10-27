@@ -168,18 +168,30 @@ export function themeToggleScript(): string {
         if (!e.target.closest('[data-theme-choice]')) e.preventDefault();
       });
     }
-    // Menu keys while it is open, wherever focus is (on ◐, on <body> after a
-    // stray click, on an item). Window capture runs before every document
-    // listener, so an Escape it takes reaches no page-level Escape handler.
+    // Menu keys while it is open. Window capture, so an Escape taken here
+    // reaches no document-level handler. The menu owns the keys only when
+    // focus is in the picker or on <body> (a stray click); elsewhere a key
+    // belongs to the focused control, and Escape only closes the menu.
     window.addEventListener('keydown', function(e) {
       if (!isOpen()) return;
-      var list = items(), i = list.indexOf(document.activeElement);
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(true); }
+      var picker = document.getElementById('themePicker');
+      var a = document.activeElement;
+      var ours = !a || a === document.body || (!!picker && picker.contains(a));
+      var list = items(), i = list.indexOf(a);
+      if (e.key === 'Escape') {
+        // A wiki peek card is opened over the menu, so it takes this Escape
+        // (its own window-capture listener, registered later).
+        if (document.querySelector('.wiki-ref-peek')) return;
+        if (!ours) { closeMenu(false); return; }
+        e.preventDefault(); e.stopPropagation(); closeMenu(true);
+      }
+      else if (!ours) return;
       else if (e.key === 'ArrowDown') { e.preventDefault(); list[(i + 1) % list.length].focus(); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); list[i < 0 ? list.length - 1 : (i - 1 + list.length) % list.length].focus(); }
       else if (e.key === 'Home') { e.preventDefault(); list[0].focus(); }
       else if (e.key === 'End') { e.preventDefault(); list[list.length - 1].focus(); }
-      else if (e.key === 'Tab' && i >= 0) closeMenu(false);
+      // Tab from an item, or Shift+Tab from ◐, leaves the picker; Tab from ◐ enters the menu.
+      else if (e.key === 'Tab' && (i >= 0 || (a === btn && e.shiftKey))) closeMenu(false);
     }, true);
     document.addEventListener('click', function(e) {
       var picker = document.getElementById('themePicker');

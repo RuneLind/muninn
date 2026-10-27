@@ -292,6 +292,114 @@ test.describe("The theme picker", () => {
     await expect(btn).toBeFocused();
   });
 
+  // Fix round 2 (PR #747): the open menu takes keys only from the picker or <body>.
+  /** /summaries with the menu open and focus moved (not clicked) into #captureUrl, caret at 5. */
+  async function menuOpenFieldFocused(page: Page) {
+    await storeChoice(page, null);
+    await page.goto(BASE + "/summaries");
+    const btn = page.locator("#themeToggle");
+    const menu = page.locator("#themeMenu");
+    const input = page.locator("#captureUrl");
+    await btn.click();
+    await expect(menu).toBeVisible();
+    await input.evaluate((el) => {
+      const i = el as HTMLInputElement;
+      i.value = "hello world";
+      i.focus();
+      i.setSelectionRange(5, 5);
+      (window as unknown as { __inputEsc: number }).__inputEsc = 0;
+      i.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") (window as unknown as { __inputEsc: number }).__inputEsc++;
+      });
+    });
+    return { btn, menu, input };
+  }
+
+  test("with the menu open, End in a text field moves the caret, not focus", async ({ page }) => {
+    const { menu, input } = await menuOpenFieldFocused(page);
+    await page.keyboard.press("End");
+    await expect(input, "End keeps focus in the field").toBeFocused();
+    expect(await input.evaluate((el) => (el as HTMLInputElement).selectionStart), "End moves the caret").toBe(11);
+    await expect(menu, "the menu stays open").toBeVisible();
+  });
+
+  test("with the menu open, Escape in a text field closes the menu and leaves focus in the field", async ({ page }) => {
+    const { btn, menu, input } = await menuOpenFieldFocused(page);
+    await page.keyboard.press("Escape");
+    await expect(menu, "Escape closes the menu").toBeHidden();
+    await expect(btn).toHaveAttribute("aria-expanded", "false");
+    await expect(input, "Escape leaves focus in the field").toBeFocused();
+    expect(await page.evaluate(() => (window as unknown as { __inputEsc: number }).__inputEsc), "the field sees its Escape").toBe(1);
+  });
+
+  test("with the menu open, arrows on a control outside the picker stay on it", async ({ page }) => {
+    await storeChoice(page, null);
+    await page.goto(BASE + "/agents");
+    const pill = page.locator('button.bot-pill[data-bot=""]');
+    await expect(pill).toBeVisible();
+    await page.locator("#themeToggle").click();
+    await expect(page.locator("#themeMenu")).toBeVisible();
+    await pill.focus();
+    for (const k of ["ArrowDown", "ArrowUp", "Home", "End"]) {
+      await page.keyboard.press(k);
+      await expect(pill, k).toBeFocused();
+    }
+  });
+
+  test("Tab from ◐ enters the menu; Shift+Tab from ◐ or Tab from an item leaves it and closes it", async ({ page }) => {
+    await storeChoice(page, null);
+    await page.goto(BASE + "/");
+    const btn = page.locator("#themeToggle");
+    const menu = page.locator("#themeMenu");
+    const inPicker = () => page.evaluate(() => document.getElementById("themePicker")!.contains(document.activeElement));
+    await btn.click();
+    await btn.focus();
+    await page.keyboard.press("Tab");
+    await expect(menu, "Tab from ◐ keeps the menu open").toBeVisible();
+    await expect(page.getByRole("menuitemradio", { name: /System/ })).toBeFocused();
+    await btn.focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(menu, "Shift+Tab from ◐ closes the menu").toBeHidden();
+    expect(await inPicker(), "focus left the picker").toBe(false);
+    await btn.click();
+    await expect(page.getByRole("menuitemradio", { name: /System/ })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(menu, "Tab from an item closes the menu").toBeHidden();
+  });
+
+  test("Escape in the picker or on <body> closes the menu, refocuses ◐ and reaches no page handler", async ({ page }) => {
+    await storeChoice(page, null);
+    await page.goto(BASE + "/");
+    const btn = page.locator("#themeToggle");
+    const menu = page.locator("#themeMenu");
+    await page.evaluate(() => {
+      (window as unknown as { __docEsc: number }).__docEsc = 0;
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") (window as unknown as { __docEsc: number }).__docEsc++;
+      });
+    });
+    const docEsc = () => page.evaluate(() => (window as unknown as { __docEsc: number }).__docEsc);
+    // Focus on an item.
+    await btn.click();
+    await expect(page.getByRole("menuitemradio", { name: /System/ })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
+    await expect(btn).toBeFocused();
+    expect(await docEsc(), "an item's Escape stops at the menu").toBe(0);
+    // Focus on <body> (guard: round 1 fixed this case and nothing tested it).
+    await btn.click();
+    await expect(menu).toBeVisible();
+    await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("menuitemradio", { name: /System/ }), "ArrowDown from <body> enters the menu").toBeFocused();
+    await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+    await page.keyboard.press("Escape");
+    await expect(menu, "Escape from <body>").toBeHidden();
+    await expect(btn, "focus back on ◐").toBeFocused();
+    expect(await docEsc(), "a <body> Escape stops at the menu").toBe(0);
+  });
+
   test("t cycles System → Light → Dark → every palette → System", async ({ page }) => {
     await storeChoice(page, null);
     await page.goto(BASE + "/");
@@ -485,6 +593,38 @@ test.describe("Text on the accent: the bases keep main's ink, a palette reaches 
           expect(await paintedContrast(loc, { withOpacity: true }), `${t.name} :hover`).toBeGreaterThanOrEqual(4.5);
           await page.mouse.move(0, 0);
         }
+      }
+    });
+  }
+
+  // Fix round 2 (PR #747): two chat hovers named an undefined token and drew
+  // the inherited colour on the accent. Main's colour (measured on 714ff8a1) is that inherited value.
+  const CHAT_HOVERS = [
+    { sel: "#hoverProbe .research-actions button", main: { light: "rgb(58, 61, 71)", dark: "rgb(224, 224, 224)" } },
+    { sel: "#hoverProbe .dev-run-resend", main: { light: "rgb(58, 61, 71)", dark: "rgb(224, 224, 224)" } },
+  ];
+  const HOVER_PROBE =
+    '<div id="hoverProbe" style="position:fixed;top:40px;left:40px;z-index:99999;display:flex;gap:16px">' +
+    '<div class="research-actions"><button type="button">Research</button></div><button type="button" class="dev-run-resend">Resend</button></div>';
+  for (const h of CHAT_HOVERS) {
+    test(`/chat ${h.sel.replace("#hoverProbe ", "")}:hover: the bases keep main's ink, a palette reaches 4.5:1`, async ({ page }) => {
+      await storeChoice(page, null);
+      await page.goto(BASE + "/chat");
+      await page.evaluate((p) => document.body.insertAdjacentHTML("beforeend", p), HOVER_PROBE);
+      const loc = page.locator(h.sel);
+      for (const t of BASES) {
+        await forceTheme(page, t);
+        await loc.hover();
+        const got = await loc.evaluate((el) => ({ c: getComputedStyle(el).color, parent: getComputedStyle(el.parentElement!).color }));
+        expect(got.c, `${t.name} :hover ink`).toBe(h.main[t.theme]);
+        expect(got.c, `${t.name} :hover ink is inherited`).toBe(got.parent);
+        await page.mouse.move(0, 0);
+      }
+      for (const t of PALETTE_THEMES) {
+        await forceTheme(page, t);
+        await loc.hover();
+        expect(await paintedContrast(loc, { withOpacity: true }), `${t.name} :hover`).toBeGreaterThanOrEqual(4.5);
+        await page.mouse.move(0, 0);
       }
     });
   }

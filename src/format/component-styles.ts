@@ -1204,8 +1204,8 @@ export function decisionViewsCss(scope: string): string {
   `;
 }
 
-/** The reader's `<Chart>` view (`src/format/chart-view.ts`): theme tokens, except
- *  the pressed button's white ink (the theme has no ink token for the accent fill).
+/** The reader's `<Chart>` view (`src/format/chart-view.ts`): theme tokens; the
+ *  pressed button draws `--on-accent` (white in both bases) on `--accent-hover`.
  *  In chart mode the table is visually hidden, not removed, so a screen
  *  reader and a selection still reach it; a peek card shows it plainly. */
 export function chartViewCss(scope: string): string {
@@ -1321,9 +1321,10 @@ export function chartViewCss(scope: string): string {
 
 /** The reader's `<RuleTree>` view (`src/format/rule-tree-view.ts`): theme
  *  tokens; the picked chip draws `--on-accent` (white in both bases) on
- *  `--accent-hover`, as Chart's pressed button does. The picker shows once `wiki-visuals.ts` has put `rt-js` on the
- *  document root; a picked case dims every row off its path with a muted ink
- *  and a dashed border, never with opacity alone. */
+ *  `--accent-hover`, as Chart's pressed button does. The picker shows once
+ *  `wiki-visuals.ts` has put `rt-js` on the document root; a picked case dims
+ *  every row off its path with a muted ink and a dashed border, never with
+ *  opacity alone. */
 export function ruleTreeCss(scope: string): string {
   const s = scope;
   return `
