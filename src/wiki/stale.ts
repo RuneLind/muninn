@@ -111,14 +111,17 @@ const blank = (s: string) => " ".repeat(s.length);
 const SKIPPED_FM_KEY = /^(status_note|description|title):/;
 
 /**
- * A hit's text (A1): the trimmed line when it fits {@link TEXT_CAP}, else a
- * window that holds the link (`linkStart`–`linkEnd`) and the status word
- * nearest it (`wordStart`–`wordEnd`), positions on the untrimmed `source`. `…` marks a
- * cut end; when link and words lie further apart than the cap, ` … ` marks
- * the gap between a link piece and a words piece. Never a head cut, so the
- * model always sees what it judges.
+ * A hit's or a long passage line's text (A1, A17): the trimmed line when it
+ * fits {@link TEXT_CAP}, else a window that holds the link
+ * (`linkStart`–`linkEnd`) and the status word or claim nearest it
+ * (`wordStart`–`wordEnd`), positions on the untrimmed `source`, in either
+ * order. `…` marks a cut end; when the two lie further apart than the cap,
+ * ` … ` marks the gap between their pieces. Never a head cut, so the model
+ * always sees what it judges, and every piece is verbatim from the line.
  */
 export function hitWindow(source: string, linkStart: number, linkEnd: number, wordStart: number, wordEnd: number, cap = TEXT_CAP): string {
+  if (wordStart < linkStart) [linkStart, linkEnd, wordStart, wordEnd] = [wordStart, wordEnd, linkStart, linkEnd];
+  wordEnd = Math.max(wordEnd, linkEnd);
   const lead = source.length - source.trimStart().length;
   const t = source.trim();
   if (t.length <= cap) return t;
@@ -405,27 +408,38 @@ const DM_VERSION_WORD = /(?<![\p{L}\p{N}])(?:version|versjon|ver|v|section|seksj
 const DM_CAPITAL_WORD = /(?<![\p{L}\p{N}])(?:\p{Lu}[\p{L}\p{N}]*|[\p{Lu}\p{N}]*\p{Lu}[\p{Lu}\p{N}]*) $/u;
 
 export function hasDateDM(text: string): boolean {
+  return dateDMSpan(text) !== null;
+}
+
+/** The first `D.M` date in `text` per {@link hasDateDM}, as `[start, end]`. */
+function dateDMSpan(text: string): [number, number] | null {
   for (const m of text.matchAll(DM_RE)) {
-    if (m[3]) return true; // a year, whatever precedes it
+    const span: [number, number] = [m.index!, m.index! + m[0].length];
+    if (m[3]) return span; // a year, whatever precedes it
     const after = text.slice(m.index! + m[0].length);
     if (DM_AFTER.test(after)) continue;
     if ((m[1]!.length === 1 || m[2]!.length === 1) && DM_AFTER_HYPHEN_WORD.test(after)) continue;
     const before = text.slice(0, m.index);
     if (DM_GLUED.test(before) || DM_VERSION_WORD.test(before)) continue;
     if (m[1]!.length === 1 && m[2]!.length === 1 && DM_CAPITAL_WORD.test(before)) continue;
-    return true;
+    return span;
   }
-  return false;
+  return null;
 }
+
+const spanOf = (re: RegExp) => (t: string): [number, number] | null => {
+  const m = re.exec(t);
+  return m ? [m.index, m.index + m[0].length] : null;
+};
 
 /** What makes a passage one to check: a status word, a date (`D.M` per
  *  {@link hasDateDM}, `DD.MM.YYYY`, ISO), a PR number (`#NN…`, `PR N`) or an
  *  «N of M» count. */
-const CLAIMS: readonly (readonly [string, (text: string) => boolean])[] = [
-  ["date", hasDateDM],
-  ["date", (t) => /(?<![\p{N}])20\d\d-[01]\d-[0-3]\d(?![\p{N}])/u.test(t)],
-  ["PR", (t) => /(?<![\p{L}\p{N}&/#])#\d{2,}(?![\p{N}])|(?<![\p{L}\p{N}])PR[ -]?#?\d+(?![\p{N}])/u.test(t)],
-  ["count", (t) => /(?<![\p{L}\p{N}])\d+ (?:of|av) \d+(?![\p{N}])/u.test(t)],
+const CLAIMS: readonly (readonly [string, (text: string) => [number, number] | null])[] = [
+  ["date", dateDMSpan],
+  ["date", spanOf(/(?<![\p{N}])20\d\d-[01]\d-[0-3]\d(?![\p{N}])/u)],
+  ["PR", spanOf(/(?<![\p{L}\p{N}&/#])#\d{2,}(?![\p{N}])|(?<![\p{L}\p{N}])PR[ -]?#?\d+(?![\p{N}])/u)],
+  ["count", spanOf(/(?<![\p{L}\p{N}])\d+ (?:of|av) \d+(?![\p{N}])/u)],
 ];
 
 /** Links become `·` runs: no claim reads them, and a link still stands as a
@@ -435,12 +449,21 @@ const filler = (s: string) => "·".repeat(s.length);
 /** The claim a passage's text makes, or undefined. Links are blanked first:
  *  a `[[plan#3]]` anchor or a `](x#12)` destination is not a PR. */
 export function passageClaim(line: string): string | undefined {
+  return passageClaimSpan(line)?.kind;
+}
+
+/** {@link passageClaim} with where its token sits on `line`: the masks keep
+ *  every position, so the span is the line's own. */
+function passageClaimSpan(line: string): { kind: string; span: [number, number] } | undefined {
   const text = maskLineCodeSpans(line)
     .replace(/\[\[[^\]\n]*\]\]/g, filler)
     .replace(/\]\([^)\n]*\)/g, filler);
   const said = statusWordsIn(text);
-  if (said.length) return said[0];
-  for (const [kind, has] of CLAIMS) if (has(text)) return kind;
+  if (said.length) return { kind: said[0]!, span: saidSpan(text, [said[0]!]) };
+  for (const [kind, at] of CLAIMS) {
+    const span = at(text);
+    if (span) return { kind, span };
+  }
   return undefined;
 }
 
@@ -455,6 +478,26 @@ function linksTo(line: string, targetKey: string, fromRelPath: string, index: Pi
     if (meta && normalizeRelPath(meta.relPath) === targetKey) return true;
   }
   return resolveMarkdownTargets(fromRelPath, extractMarkdownLinks(line)).includes(targetKey);
+}
+
+const MD_LINK_RE = /!?\[[^\]\n]*\]\([^)\n]*\)/g;
+
+/** Where the first link to `targetKey` sits on `line` (masked, so positions
+ *  are the line's), read as {@link linksTo} reads it; the first link of any
+ *  kind when none resolves one by one. */
+function linkSpanTo(line: string, targetKey: string, fromRelPath: string, index: Pick<WikiIndex, "resolve">): [number, number] {
+  const spans: [number, number, boolean][] = [];
+  for (const m of line.matchAll(WIKILINK_RE)) {
+    const meta = index.resolve(wikilinkTarget(m[1]!) ?? "");
+    spans.push([m.index!, m.index! + m[0].length, !!meta && normalizeRelPath(meta.relPath) === targetKey]);
+  }
+  for (const m of line.matchAll(MD_LINK_RE)) {
+    if (m[0].startsWith("!")) continue;
+    spans.push([m.index!, m.index! + m[0].length, resolveMarkdownTargets(fromRelPath, extractMarkdownLinks(m[0])).includes(targetKey)]);
+  }
+  spans.sort((a, b) => a[0] - b[0]);
+  const hit = spans.find((x) => x[2]) ?? spans[0];
+  return hit ? [hit[0], hit[1]] : [0, 0];
 }
 
 /**
@@ -511,10 +554,14 @@ function linkPassages(parsed: ParsedPage, fromRelPath: string, targetKey: string
     const pointerHeading = pointerLevel > 0;
     if (exempt.has(i) || (!l.includes("](") && !l.includes("[["))) continue;
     if (body > 0 && (i === 0 || i === body - 1)) continue;
-    if (!linksTo(maskLineCodeSpans(l), targetKey, fromRelPath, index)) continue;
-    const text = l.trim();
-    const claim = inFrontmatter ? undefined : passageClaim(text);
-    out.push({ line: i + 1, text: text.slice(0, TEXT_CAP), inFrontmatter, pointerHeading: !inFrontmatter && pointerHeading, ...(claim ? { claim } : {}) });
+    const masked = maskLineCodeSpans(l);
+    if (!linksTo(masked, targetKey, fromRelPath, index)) continue;
+    // A17: a long line is a window holding the link and the claim (or the
+    // line's head, which it holds, when it makes none), never a head cut.
+    const c = inFrontmatter ? undefined : passageClaimSpan(l);
+    const [ls, le] = linkSpanTo(masked, targetKey, fromRelPath, index);
+    const [cs, ce] = c?.span ?? [ls, le];
+    out.push({ line: i + 1, text: hitWindow(l, ls, le, cs, ce), inFrontmatter, pointerHeading: !inFrontmatter && pointerHeading, ...(c ? { claim: c.kind } : {}) });
   }
   return out;
 }

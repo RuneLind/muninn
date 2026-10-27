@@ -560,6 +560,7 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
   let index: WikiIndex;
   const asOfMs = Date.parse("2026-06-20T23:59:59.999Z");
   const long = "and its whole long description here";
+  const FILL = "lorem ipsum dolor sit amet ".repeat(16);
   const HEADINGS = [
     ["sources", "Sources"],
     ["see-also", "See also"],
@@ -603,6 +604,10 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
     await write("notes/quoted.md", page("Quoted", "Body.\n\n> The pin in [[hub]] landed on 23.05."));
     // B4-2: a frontmatter link is a Pointer, whatever its line says.
     await write("notes/fm.md", page("Fm", "Body.", 'up: "[[hub]] pinned 23.05"\n'));
+    // A17: a passage line past the cap keeps the link and the claim, whichever comes first.
+    await write("notes/longtail.md", page("Longtail", `${FILL}The pin in [[hub]] landed on 23.05, see the log.`));
+    await write("notes/longhead.md", page("Longhead", `Shown in PR #812, ${FILL}${FILL}and the fixtures sit in [[hub]].`));
+    await write("notes/longmd.md", page("Longmd", `Pinned 23.05: ${FILL}${FILL}the details sit in [Hub](../hub.md).`));
     await commitAt("2026-05-01T10:00:00Z", "seed");
     await write("hub.md", page("Hub", "Body two."));
     await write("notes/x,y.md", page("XY", "Body two."));
@@ -623,10 +628,32 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
       ...Object.fromEntries(HEADINGS.map(([slug]) => [`notes/h-${slug}.md`, "pointers"])),
       "notes/quoted.md": "mentions",
       "notes/fm.md": "pointers",
+      "notes/longtail.md": "toCheck",
+      "notes/longhead.md": "toCheck",
+      "notes/longmd.md": "toCheck",
     });
     expect(b!.linking.find((l) => l.relPath === "notes/quoted.md")!.passages).toEqual([]);
     const titled = b!.linking.find((l) => l.relPath === "notes/titled.md")!;
     expect(titled.passages.map((p) => [p.line, p.claim])).toEqual([[5, "date"]]);
+  });
+
+  test("A17: a long passage line's text holds the link and the claim, each piece verbatim from the line", async () => {
+    const b = await linkingBuckets(index, "hub.md", { asOfMs });
+    const lines = (rel: string) => Bun.file(path.join(root, rel)).text().then((t) => t.split("\n"));
+    const cases = [
+      ["notes/longtail.md", "[[hub]]", "23.05", "date"],
+      ["notes/longhead.md", "[[hub]]", "PR #812", "PR"],
+      ["notes/longmd.md", "[Hub](../hub.md)", "23.05", "date"],
+    ] as const;
+    for (const [rel, link, claimText, claim] of cases) {
+      const [p] = b!.linking.find((l) => l.relPath === rel)!.passages;
+      expect(p!.claim).toBe(claim);
+      expect(p!.text).toContain(link);
+      expect(p!.text).toContain(claimText);
+      expect(p!.text.length).toBeLessThanOrEqual(365);
+      const source = (await lines(rel))[p!.line - 1]!;
+      for (const piece of p!.text.split("…")) expect(source).toContain(piece.trim());
+    }
   });
 
   test("a %2C-escaped markdown link reaches its page", async () => {

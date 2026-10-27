@@ -24,6 +24,7 @@ import {
   runStaleConfirm,
   startStaleConfirmLoop,
   statusLineKeyHash,
+  statusLineVerdictKey,
   stopStaleConfirmLoop,
   type ConfirmDeps,
   type StaleModel,
@@ -107,10 +108,22 @@ describe("parseStaleAnswer", () => {
     const a = parseStaleAnswer('{"verdict":"stale","reason":"r","edit":{"old":"prototype built","new":"x"}}', passage);
     expect(a).toEqual({ verdict: "stale", reason: "r", edit: null });
   });
-  test("an unknown verdict or an unreadable answer is unsure", () => {
-    expect(parseStaleAnswer('{"verdict":"outdated","reason":"r"}', passage).verdict).toBe("unsure");
-    expect(parseStaleAnswer("I think it is stale.", passage)).toEqual({ verdict: "unsure", reason: "the model's answer could not be read", edit: null });
-    expect(parseStaleAnswer('["stale"]', passage).verdict).toBe("unsure");
+  // A4: an answer that names no known verdict is a failed call, never a
+  // lasting unsure; the model's own unsure stays a verdict.
+  test("A4: an unreadable answer or an unknown verdict throws; the model's unsure is a verdict", () => {
+    expect(() => parseStaleAnswer('{"verdict":"outdated","reason":"r"}', passage)).toThrow(/could not be read/);
+    expect(() => parseStaleAnswer("I think it is stale.", passage)).toThrow(/could not be read/);
+    expect(() => parseStaleAnswer('["stale"]', passage)).toThrow(/could not be read/);
+    expect(() => parseStaleAnswer('{"reason":"r"}', passage)).toThrow(/could not be read/);
+    expect(parseStaleAnswer('{"verdict":"unsure","reason":"cannot tell"}', passage)).toEqual({ verdict: "unsure", reason: "cannot tell", edit: null });
+  });
+  // A4: the malformed answer batch 1 measured on kode repos/melosys-e2e-tests.md:128 ends in a dangling `,"`.
+  test("A4: a dangling key at the end of the object is repaired", () => {
+    expect(parseStaleAnswer('{"verdict":"stale","reason":"r","edit":null,"', passage)).toEqual({ verdict: "stale", reason: "r", edit: null });
+    expect(parseStaleAnswer('{"verdict":"true","reason":"r","edit":null,"}', passage)).toEqual({ verdict: "true", reason: "r", edit: null });
+    expect(parseStaleAnswer('```json\n{"verdict":"stale","reason":"r","edit":{"old":"side","new":"x"},"\n```', passage)).toEqual({ verdict: "stale", reason: "r", edit: { old: "side", new: "x" } });
+    expect(parseStaleAnswer('{"verdict":"stale","reason":"r","edit":{"old":"side","new":"x","', passage)).toEqual({ verdict: "stale", reason: "r", edit: { old: "side", new: "x" } });
+    expect(() => parseStaleAnswer('{"verdict":"stale","reason":"r', passage)).toThrow(/could not be read/);
   });
   test("an edit on a verdict that is not stale is dropped", () => {
     const a = parseStaleAnswer('{"verdict":"true","reason":"r","edit":{"old":"side","new":"x"}}', passage);
@@ -136,10 +149,16 @@ describe("parseStaleAnswer: the edit (A3)", () => {
   test("an old text once on one line is kept", () => {
     expect(parseStaleAnswer(ans({ old: "er i gang", new: "er levert", home: "har status i planen" }), two).edit).toEqual({ old: "er i gang", new: "er levert", home: "har status i planen" });
   });
+  test("A17: a passage line's window gap and cut ends are line breaks too", () => {
+    const text = "…lead [[p]] er i gang … så levert 23.05…\n- [[q]] er levert";
+    expect(parseStaleAnswer(ans({ old: "i gang … så", new: "x" }), text).edit).toBeNull();
+    expect(parseStaleAnswer(ans({ old: "23.05…", new: "x" }), text).edit).toBeNull();
+    expect(parseStaleAnswer(ans({ old: "så levert 23.05", new: "så levert 18.06" }), text).edit).toEqual({ old: "så levert 23.05", new: "så levert 18.06" });
+  });
   test("a status-line window's gap is a line break too", () => {
     const text = "[[p]] lead … then shipped…";
-    expect(parseStaleAnswer(ans({ old: "lead … then", new: "x" }), text, "status-line").edit).toBeNull();
-    expect(parseStaleAnswer(ans({ old: "then shipped", new: "then in-flight" }), text, "status-line").edit).toEqual({ old: "then shipped", new: "then in-flight" });
+    expect(parseStaleAnswer(ans({ old: "lead … then", new: "x" }), text).edit).toBeNull();
+    expect(parseStaleAnswer(ans({ old: "then shipped", new: "then in-flight" }), text).edit).toEqual({ old: "then shipped", new: "then in-flight" });
   });
   test("a new text past the cap or across lines drops the edit; such a home drops only the home", () => {
     const passage = "- [[p]] er i gang";
@@ -336,6 +355,40 @@ describe("runStaleConfirm (D16)", () => {
     }
   });
 
+  test("A4: an unreadable answer writes nothing and counts as an error, so the next run asks again", async () => {
+    let calls = 0;
+    const { deps, store } = makeDeps({ model: () => async () => (calls++, "Sorry, I cannot answer in JSON.") });
+    const r = await runStaleConfirm(["cw"], deps);
+    expect(r).toMatchObject({ calls: 2, errors: 2 });
+    expect(store.rows.size).toBe(0);
+    await runStaleConfirm(["cw"], deps);
+    expect(calls).toBe(4);
+  });
+
+  test("A4: the model's own unsure is cached like any verdict", async () => {
+    let calls = 0;
+    const { deps, store } = makeDeps({ model: () => async () => (calls++, '{"verdict":"unsure","reason":"cannot tell"}') });
+    await runStaleConfirm(["cw"], deps);
+    expect([...store.rows.values()].map((r) => r.verdict)).toEqual(["unsure", "unsure"]);
+    await runStaleConfirm(["cw"], deps);
+    expect(calls).toBe(2);
+  });
+
+  test("A5: a model verdict landing on a key a reader decided keeps the reader's row", async () => {
+    const { deps, store } = makeDeps();
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    for (const hit of index.statusLineHits!.get("hub.md")!) {
+      await store.upsert({ wiki: "cw", kind: "status-line", page: "hub.md", keyHash: statusLineVerdictKey(index, "hub.md", hit), verdict: "true", reason: "reader", edit: null, checkedBy: "reader" });
+    }
+    // The loop read no verdict (a reader clicked during the call): its write must not replace the reader's.
+    const racing = { ...store, get: async () => new Map() };
+    await runStaleConfirm(["cw"], { ...deps, store: () => racing });
+    expect([...store.rows.values()].map((r) => [r.verdict, r.checkedBy])).toEqual([
+      ["true", "reader"],
+      ["true", "reader"],
+    ]);
+  });
+
   test("a readonly root is skipped with no index rebuild and no call", async () => {
     __setReadonlyWikiRootsForTest([root]);
     let built = 0;
@@ -378,5 +431,18 @@ describe("otherPlansIn", () => {
     };
     const index = { resolve: (t: string) => metas[t] as never };
     expect(otherPlansIn(index, "[[q]] and [[x]] and [[self]]", "plans/self.md")).toEqual([{ relPath: "plans/q.md", planStatus: "in-flight", statusNote: "T4 left" }]);
+  });
+});
+
+describe("memoryStaleVerdictStore (A5)", () => {
+  const v = (over: Record<string, unknown> = {}) => ({ wiki: "w", kind: "passage" as const, page: "a.md", keyHash: "k", verdict: "stale" as const, reason: "r", edit: null, checkedBy: "model:bot", ...over });
+  test("a model write never replaces a reader verdict; a reader replaces a model one and their own", async () => {
+    const store = memoryStaleVerdictStore();
+    await store.upsert(v({ verdict: "true", checkedBy: "reader" }));
+    expect(await store.upsert(v())).toMatchObject({ verdict: "true", checkedBy: "reader" });
+    expect((await store.get("w", "passage", ["k"])).get("k")).toMatchObject({ verdict: "true", checkedBy: "reader" });
+    expect(await store.upsert(v({ verdict: "not-status", checkedBy: "reader" }))).toMatchObject({ verdict: "not-status" });
+    await store.upsert(v({ keyHash: "m" }));
+    expect(await store.upsert(v({ keyHash: "m", verdict: "true", checkedBy: "reader" }))).toMatchObject({ verdict: "true", checkedBy: "reader" });
   });
 });

@@ -44,6 +44,27 @@ describe("wiki_stale_verdicts", () => {
     expect((await getStaleVerdicts("w", "status-line", [])).size).toBe(0);
   });
 
+  // A5: a reader's Still true / Not a status holds until its key changes (D7).
+  test("A5: a model write never replaces a reader verdict; a reader replaces a model one and their own", async () => {
+    await upsertStaleVerdict(row({ keyHash: "r1", verdict: "true", reason: "Marked still true by a reader", edit: null, checkedBy: "reader" }));
+    const kept = await upsertStaleVerdict(row({ keyHash: "r1" }));
+    expect(kept).toMatchObject({ verdict: "true", checkedBy: "reader", edit: null });
+    expect((await getStaleVerdicts("w", "status-line", ["r1"])).get("r1")).toMatchObject({ verdict: "true", checkedBy: "reader" });
+    await upsertStaleVerdict(row({ keyHash: "m1" }));
+    expect(await upsertStaleVerdict(row({ keyHash: "m1", verdict: "not-status", edit: null, checkedBy: "reader" }))).toMatchObject({ verdict: "not-status", checkedBy: "reader" });
+    expect(await upsertStaleVerdict(row({ keyHash: "m1", verdict: "true", edit: null, checkedBy: "reader" }))).toMatchObject({ verdict: "true", checkedBy: "reader" });
+    expect(await upsertStaleVerdict(row({ keyHash: "m2" }))).toMatchObject({ verdict: "stale", checkedBy: "model:bot" });
+    expect(await upsertStaleVerdict(row({ keyHash: "m2", verdict: "unsure", edit: null, checkedBy: "model:other" }))).toMatchObject({ verdict: "unsure", checkedBy: "model:other" });
+  });
+
+  test("A5: the cleanup keeps a reader verdict however old, and deletes an old model one", async () => {
+    await upsertStaleVerdict(row({ keyHash: "reader-old", verdict: "true", edit: null, checkedBy: "reader" }));
+    await upsertStaleVerdict(row({ keyHash: "model-old" }));
+    await getDb()`UPDATE wiki_stale_verdicts SET checked_at = now() - make_interval(days => ${STALE_VERDICT_RETENTION_DAYS * 3}) WHERE key_hash IN ('reader-old', 'model-old')`;
+    expect(await cleanupOldStaleVerdicts()).toBe(1);
+    expect([...(await getStaleVerdicts("w", "status-line", ["reader-old", "model-old"])).keys()]).toEqual(["reader-old"]);
+  });
+
   test("the CHECKs refuse an unknown kind or verdict", async () => {
     await expect(upsertStaleVerdict(row({ kind: "drift" as never }))).rejects.toThrow();
     await expect(upsertStaleVerdict(row({ verdict: "outdated" as never }))).rejects.toThrow();

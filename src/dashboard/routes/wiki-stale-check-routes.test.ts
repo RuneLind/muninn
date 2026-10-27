@@ -164,6 +164,46 @@ describe("the Stale check's verdict routes", () => {
     expect(n(await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20"))).toBe(0);
   });
 
+  // A4: an answer that cannot be read is a failed call on the stream, never a cached unsure.
+  test("A4: an unreadable answer streams an error and caches nothing; the next Check asks again", async () => {
+    fresh();
+    __setStaleModelForTest(async (prompt) => (prompts.push(prompt), "I would say stale, mostly."));
+    try {
+      const events = sseEvents(await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text());
+      expect(events.filter(([e]) => e === "verdict")).toHaveLength(0);
+      const errs = events.filter(([e]) => e === "error").map(([, d]) => d.message);
+      expect(errs).toHaveLength(CHECK_MAX_CALLS);
+      expect(errs[0]).toContain("could not be read");
+      expect(events.at(-1)![1]).toMatchObject({ verdicts: 0, errors: CHECK_MAX_CALLS });
+      expect(store.rows.size).toBe(0);
+      const again = sseEvents(await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text());
+      expect(again[0]![1]).toMatchObject({ cached: 0, toCall: CHECK_MAX_CALLS });
+    } finally {
+      __setStaleModelForTest(model);
+    }
+  });
+
+  // A5: a reader's Still true that lands while the call runs is the verdict the stream reports.
+  test("A5: a model answer on a key a reader decided keeps and streams the reader's verdict", async () => {
+    fresh();
+    for (let i = 0; i < 2; i++) await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text();
+    expect((await post("verdict", { wiki: "checkwiki", page: "hub.md", kind: "passage", linking: "notes/old.md", verdict: "true", asOf: "2026-06-20" })).status).toBe(200);
+    // The Check reads the cache before the reader's click lands: it sees every row but the reader's.
+    const racing = {
+      ...store,
+      get: async (...a: Parameters<typeof store.get>) => new Map([...(await store.get(...a))].filter(([, r]) => r.checkedBy !== "reader")),
+    };
+    __setStaleVerdictStoreForTest(racing);
+    prompts.length = 0;
+    const events = sseEvents(await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text());
+    __setStaleVerdictStoreForTest(store);
+    expect(prompts).toHaveLength(1);
+    const old = events.filter(([e, d]) => e === "verdict" && !d.cached).map(([, d]) => d);
+    expect(old).toEqual([expect.objectContaining({ relPath: "notes/old.md", verdict: "true", edit: null })]);
+    const row = [...store.rows.values()].find((r) => r.page === "notes/old.md")!;
+    expect(row).toMatchObject({ verdict: "true", checkedBy: "reader" });
+  });
+
   test("GET carries each To-check page's cached verdict and each hit's confirmation", async () => {
     fresh();
     let body = await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20");

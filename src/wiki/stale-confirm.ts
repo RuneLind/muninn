@@ -27,6 +27,7 @@ import { extractJson } from "../ai/json-extract.ts";
 import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig } from "../bots/config.ts";
 import {
   getStaleVerdicts,
+  READER_CHECKED_BY,
   upsertStaleVerdict,
   type StaleEdit,
   type StaleVerdictInput,
@@ -157,6 +158,8 @@ export function memoryStaleVerdictStore(): StaleVerdictStore & { rows: Map<strin
       return out;
     },
     async upsert(v) {
+      const prev = rows.get(k(v.wiki, v.kind, v.keyHash));
+      if (prev?.checkedBy === READER_CHECKED_BY && v.checkedBy !== READER_CHECKED_BY) return prev;
       const row = { ...v, checkedAt: Date.now() };
       rows.set(k(v.wiki, v.kind, v.keyHash), row);
       return row;
@@ -270,33 +273,78 @@ const fitsEdit = (s: string) => s.length <= EDIT_TEXT_CAP && !/[\r\n]/.test(s);
 /** The links a text holds: wikilink targets and markdown link URLs. */
 const linksIn = (s: string) => [...extractWikilinks(s).map((t) => `[[${t}]]`), ...[...s.matchAll(/\]\(([^)\s]+)/g)].map((m) => m[1]!)];
 
+/** An answer that names no known verdict (A4): the call failed, so nothing
+ *  is cached and the next run or Check asks again. */
+export class StaleAnswerUnreadableError extends Error {
+  constructor() {
+    super("the model's answer could not be read");
+    this.name = "StaleAnswerUnreadableError";
+  }
+}
+
+/** A JSON object whose last key was cut after its opening quote
+ *  (`…,"edit":null,"` or `…,"}`), the shape a real answer on kode
+ *  `repos/melosys-e2e-tests.md:128` had (A4): the dangling key dropped and
+ *  the open braces closed. Null for any other text. */
+export function repairDanglingKey(raw: string): unknown {
+  const t = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const m = /,\s*"\s*\}*\s*$/.exec(t);
+  if (!m || !t.startsWith("{")) return null;
+  const head = t.slice(0, m.index);
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < head.length; i++) {
+    const ch = head[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") depth--;
+  }
+  if (inString || depth < 1) return null;
+  try {
+    return JSON.parse(head + "}".repeat(depth));
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The model's answer, validated strictly: an unreadable answer or an unknown
- * verdict is `unsure`. An edit survives only on a stale verdict (else it is
- * dropped and the verdict kept), and only when (A3): `old` occurs exactly
- * once across the passage's source lines — a passage's `\n`-joined claim
- * lines, a status-line window's `…`-separated pieces — so it never spans a
- * join; `new` is one line of at most {@link EDIT_TEXT_CAP} characters and
+ * The model's answer, validated strictly: an unreadable answer or one with
+ * no known verdict throws {@link StaleAnswerUnreadableError} (A4), after one
+ * repair ({@link repairDanglingKey}). An edit survives only on a stale verdict (else it is
+ * dropped and the verdict kept), and only when (A3, A17): `old` occurs
+ * exactly once across the passage's source pieces — its `\n`-joined lines,
+ * each cut at a window's `…` (a status-line hit and a long passage line are
+ * both windows) — so it never spans a join and is verbatim on its line; `new` is one line of at most {@link EDIT_TEXT_CAP} characters and
  * differs from `old`. `home` is kept only when it fits the same bound,
  * differs from `old` and keeps every link `old` holds.
  */
-export function parseStaleAnswer(raw: string, passage: string, kind: StaleCallInput["kind"] = "passage"): StaleAnswer {
-  let obj: Record<string, unknown>;
+export function parseStaleAnswer(raw: string, passage: string): StaleAnswer {
+  const verdictOf = (x: unknown) => {
+    const v = x && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>).verdict : undefined;
+    const t = typeof v === "string" ? v.trim().toLowerCase() : "";
+    return (MODEL_VERDICTS as readonly string[]).includes(t) ? (t as StaleAnswer["verdict"]) : null;
+  };
+  let parsed: unknown;
   try {
-    const v = extractJson<unknown>(raw);
-    if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("not an object");
-    obj = v as Record<string, unknown>;
+    parsed = extractJson<unknown>(raw);
   } catch {
-    return { verdict: "unsure", reason: "the model's answer could not be read", edit: null };
+    parsed = null;
   }
-  const v = typeof obj.verdict === "string" ? obj.verdict.trim().toLowerCase() : "";
-  const verdict = (MODEL_VERDICTS as readonly string[]).includes(v) ? (v as StaleAnswer["verdict"]) : "unsure";
+  // A cut outer object leaves extractJson an inner one (the edit), so the
+  // repair runs whenever no verdict was read.
+  if (!verdictOf(parsed)) parsed = repairDanglingKey(raw);
+  const verdict = verdictOf(parsed);
+  if (!verdict) throw new StaleAnswerUnreadableError();
+  const obj = parsed as Record<string, unknown>;
   const reason = typeof obj.reason === "string" ? cap(obj.reason.trim().replace(/\s+/g, " "), REASON_CAP) : "";
   let edit: StaleEdit | null = null;
   const e = obj.edit as Record<string, unknown> | null | undefined;
   if (verdict === "stale" && e && typeof e === "object" && typeof e.old === "string" && typeof e.new === "string") {
     const old = e.old;
-    const sources = kind === "status-line" ? passage.split("…") : passage.split("\n");
+    const sources = passage.split(/\n|…/);
     const once = sources.reduce((n, src) => n + occurrences(src, old), 0) === 1;
     if (old.trim() && once && fitsEdit(e.new) && e.new !== old) {
       const home = e.home;
@@ -539,8 +587,8 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
             source: "wiki_stale_confirm",
             ...(tracerOnce() ? { tracer: tracerOnce()! } : {}),
           });
-          const answer = parseStaleAnswer(raw, input.passage, "status-line");
-          await deps.store().upsert({
+          const answer = parseStaleAnswer(raw, input.passage);
+          const stored = await deps.store().upsert({
             wiki: entry.name,
             kind: "status-line",
             page: t.page.relPath,
@@ -550,7 +598,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
             edit: answer.edit,
             checkedBy: `model:${bot.name}`,
           });
-          if (answer.verdict === "stale") row.stale++;
+          if (stored.verdict === "stale") row.stale++;
         } catch (err) {
           row.errors++;
           log.warn("Stale confirm: call for {page}:{line} failed: {error}", {
@@ -728,10 +776,11 @@ export async function runStaleCheck(opts: {
           otherPlans: i.ctx.otherPlans,
         };
         const raw = await model(buildStalePrompt(input), { bot, deadlineAt, source: "wiki_stale_check" });
-        const a = parseStaleAnswer(raw, i.passage, "passage");
-        await store.upsert({ wiki, kind: "passage", page: i.l.relPath, keyHash: i.key, verdict: a.verdict, reason: a.reason, edit: a.edit, checkedBy: `model:${bot.name}` });
+        const a = parseStaleAnswer(raw, i.passage);
+        // The stored row: a reader's verdict that landed during the call stays (A5).
+        const row = await store.upsert({ wiki, kind: "passage", page: i.l.relPath, keyHash: i.key, verdict: a.verdict, reason: a.reason, edit: a.edit, checkedBy: `model:${bot.name}` });
         verdicts++;
-        await onEvent({ type: "verdict", relPath: i.l.relPath, verdict: a.verdict, reason: a.reason, edit: a.edit, cached: false });
+        await onEvent({ type: "verdict", relPath: i.l.relPath, verdict: row.verdict, reason: row.reason, edit: row.edit, cached: false });
       } catch (err) {
         errors++;
         await onEvent({ type: "error", relPath: i.l.relPath, message: err instanceof Error ? err.message : String(err) });
