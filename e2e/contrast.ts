@@ -15,8 +15,9 @@ type Rgba = [number, number, number, number];
  * A function, living in the page, that reads ANY computed colour as sRGB.
  *
  * `rgb()`/`rgba()` and an in-gamut `color(srgb …)` are read exactly. Every
- * other colour, including a `color(srgb …)` with a negative or `none`
- * channel, goes through one canvas pixel, so the browser does the conversion: a
+ * other colour, including a `color(srgb …)` with a negative, `none` or
+ * over-1 channel, goes through one canvas pixel, so the browser does the
+ * conversion (and the clamping): a
  * relative colour such as bold's `oklch(from currentColor …)` computes to
  * `oklch(…)`, whose numbers read as RGB channels are near-black.
  *

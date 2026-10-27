@@ -695,13 +695,12 @@ async function proseMarks(page: import("@playwright/test").Page, scope: string) 
 }
 
 /**
- * Every bold run under `scope`, against the colour of the text it sits in.
- * Bold moves its context's own colour (oklch, `--strong-lift` away from
- * `--strong-pivot`), so in every context it must (a) stand out from that text
- * by contrast and lightness and (b) keep the context's hue and chroma: a
- * link's bold stays blue, an amber title's stays amber. A context already at
- * the ink limit (contrast >= 16, or white or black itself) has nowhere to go;
- * `unlifted` holds it to weight instead.
+ * Every bold run under `scope`, measured against the text it sits in: OKLab
+ * lightness and chroma of both colours, the WCAG lead of bold over its
+ * context on the background behind it, the hue difference (0 when the
+ * context's chroma is under 0.03, where hue is noise), the weight step, and
+ * whether the context is at the ink limit (contrast >= 16 on its background,
+ * or OKLab L >= 0.99 or <= 0.01). `unlifted` holds the rules.
  */
 async function boldLifts(page: import("@playwright/test").Page, scope: string) {
   const parse = await colorParser(page);
@@ -763,17 +762,20 @@ async function boldLifts(page: import("@playwright/test").Page, scope: string) {
 }
 
 /**
- * The bold runs `boldLifts` says do not stand out, changed hue, or — given the
- * body's own bold run `bodyBold` — sit in a dimmer context (a struck decision,
- * a Historic body, AnnotatedCode notes) yet carry as much ink as body bold,
- * which undoes the dimming. "Ink" is OKLab lightness toward white on dark and
- * toward black on light, compared on the colours themselves because each
- * context may paint its own background. Outside the ink limit, bold must
- * move lightness by at least 0.06 and, in a context with chroma >= 0.03, keep
- * its hue within 15° and 0.6x its chroma. These are floors for a visible
- * bold, not a pin on --strong-lift's value. No bold may read fainter
- * than its context, and where colour has no room (a white heading on dark),
- * weight must carry the difference.
+ * The bold runs that break a rule, as readable lines. A run fails when:
+ *  1. its lead is under 0.99: it reads fainter than its context;
+ *  2. outside the ink limit, its lead is under 1.1 or its hue moved over 15°;
+ *  3. outside the ink limit, its lightness moved under 0.06, or, in a context
+ *     with chroma >= 0.03, it kept under 0.6x that chroma;
+ *  4. at the ink limit, it is under 200 heavier than its context;
+ *  5. only when `bodyBold` names the body's own bold run: its context carries
+ *     over 0.03 less ink than the body's, yet the run carries under 0.01
+ *     less ink than body bold, which undoes the dimming (a struck decision,
+ *     a Historic body).
+ * "Ink" is OKLab lightness toward white on a dark background (luminance
+ * under 0.2) and toward black on a light one, compared on the colours themselves because each context
+ * may paint its own background. The numbers are floors for a visible bold,
+ * not a pin on --strong-lift's value.
  */
 function unlifted(rows: Awaited<ReturnType<typeof boldLifts>>, bodyBold?: string) {
   const ref = bodyBold ? rows.find((r) => r.text === bodyBold) : undefined;
