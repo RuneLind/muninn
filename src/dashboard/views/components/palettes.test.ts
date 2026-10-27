@@ -298,12 +298,14 @@ describe("palette colour rules", () => {
   // assistant bubble).
   const LADDER = ["--bg-page", "--bg-panel", "--bg-surface", "--bg-deep", "--bg-inset", "--bg-card"];
   const SAME = [...LADDER, "--chat-assistant-bg"];
+  // The neutral chip fill holds its place too: in dark above the fields, below the card.
+  const ORDERED = [...LADDER, "--tint-neutral"];
   for (const p of PALETTES) {
     test(`${p.id}: background tokens keep the ${p.base} base's lightness order`, () => {
       const base = baseTokens(p.base), t = { ...base, ...p.tokens };
       for (const k of SAME) expect(base[k], `${p.base} ${k}`).toMatch(/^#[0-9a-f]{6}$/);
-      for (const a of LADDER) {
-        for (const b of LADDER) {
+      for (const a of ORDERED) {
+        for (const b of ORDERED) {
           if (luminance(base[a]!) < luminance(base[b]!)) {
             expect(luminance(t[a]!), `${a} ${t[a]} should be darker than ${b} ${t[b]}`).toBeLessThan(luminance(t[b]!));
           }
@@ -319,7 +321,7 @@ describe("palette colour rules", () => {
 
   // On a dark base the neutral fill is a chip on cards, its common host: it
   // shows on page, panel and card at least as well as plain dark's (1.020, on
-  // its card). Reading once lifted it to #292725, above its fields, and the chips vanished on cards (1.016).
+  // its card). At #292725 Reading's chips vanished on cards (1.016); #1a1a1a sank them under its fields.
   const dark = baseTokens("dark");
   const darkNeutralFloor = Math.min(...SURFACES.map((s) => contrast(dark["--tint-neutral"]!, dark[s]!)));
   for (const p of PALETTES.filter((x) => x.base === "dark")) {

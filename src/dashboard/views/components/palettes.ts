@@ -117,7 +117,9 @@ export const PALETTES: readonly Palette[] = [
 
       // Every dark tint measured >= 4.5:1 under its text (status colour, or
       // the accent for --tint-purple); kept. --tint-purple follows the accent's
-      // hue to copper (accent 4.81:1, accent-light 6.91:1 on it).
+      // hue to copper (accent 4.81:1, accent-light 6.91:1 on it). --tint-neutral
+      // sits above the fields and below the card, as plain dark's does: 1.090
+      // on inset, 1.030 on card; --text-muted 4.97 on it.
       "--tint-success": "#1a3a2a",
       "--tint-error": "#3a1a1a",
       "--tint-warning": "#2a2a1a",
@@ -125,9 +127,9 @@ export const PALETTES: readonly Palette[] = [
       "--tint-purple": "#342820",
       "--tint-magenta": "#2a1a3a",
       "--tint-cyan": "#1a2e3a",
-      "--tint-neutral": "#1a1a1a",
+      "--tint-neutral": "#282624",
 
-      // The dark-island badges take the dark tints (text on each, measured:
+      // The dark-island badges take the dark base's tints (text on each, measured:
       // deadline 8.59, Slack 8.14, GitHub 7.16, X 6.20). --island-info keeps
       // the bases' #1a2a3e: Telegram's #54a9eb is 5.71:1 there, 4.52 on
       // --tint-info. The shimmer #34322f is --border-primary #33302e plus 1/2/1 per
