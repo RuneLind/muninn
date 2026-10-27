@@ -214,6 +214,80 @@ describe("palette colour rules", () => {
     });
   }
 
+  // --tint-purple is the accent's wash (badges, the summaries duplicate banner on
+  // the page, :target rows on cards), so it reads the same way. On the page the
+  // floor is plain light's own banner fill, #e7e7fb on #f3f4f7 (1.109:1).
+  const purpleOnPage = contrast(light["--tint-purple"]!, light["--bg-page"]!);
+  for (const t of THEME_SETS.filter((x) => x.base === "light")) {
+    test(`${t.id}: --tint-purple is a visible fill on page, panel and card`, () => {
+      const fill = t.tokens["--tint-purple"]!;
+      for (const s of SURFACES) {
+        const bg = t.tokens[s]!;
+        const floor = s === "--bg-page" ? purpleOnPage : neutralFloor;
+        expect(luminance(fill), `${fill} darker than ${s} ${bg}`).toBeLessThan(luminance(bg));
+        expect(contrast(fill, bg), `${fill} on ${s} ${bg}`).toBeGreaterThanOrEqual(floor - 1e-9);
+      }
+    });
+  }
+
+  // The accent as text: the logo, active tabs and links on every surface, and the
+  // badges on --tint-purple. Plain light's accent is 4.15:1 on its lavender and
+  // the dark base's 3.95 on its card, so the bases are pinned only where they
+  // already pass.
+  for (const t of THEME_SETS.filter((x) => x.id !== "dark")) {
+    test(`${t.id}: --accent and --accent-light text >= 4.5:1 on page, panel and card`, () => {
+      for (const ink of ["--accent", "--accent-light"]) {
+        for (const s of SURFACES) {
+          expect(contrast(t.tokens[ink]!, t.tokens[s]!), `${ink} ${t.tokens[ink]} on ${s} ${t.tokens[s]}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    });
+  }
+  for (const p of PALETTES) {
+    test(`${p.id}: --accent and --accent-light text >= 4.5:1 on --tint-purple`, () => {
+      const t = { ...baseTokens(p.base), ...p.tokens };
+      for (const ink of ["--accent", "--accent-light"]) {
+        expect(contrast(t[ink]!, t["--tint-purple"]!), `${ink} ${t[ink]} on ${t["--tint-purple"]}`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  }
+
+  // `.nav-link.active`: the accent on 15 % of itself over the header's panel
+  // (shared-styles.ts). Plain light reaches 4.13:1; a light palette must not drop under it.
+  const navActive = (tk: Record<string, string>) => {
+    const a = rgb(tk["--accent"]!), b = rgb(tk["--bg-panel"]!);
+    const fill = "#" + a.map((v, i) => Math.round((0.15 * v + 0.85 * b[i]!) * 255).toString(16).padStart(2, "0")).join("");
+    return contrast(tk["--accent"]!, fill);
+  };
+  for (const p of PALETTES.filter((x) => x.base === "light")) {
+    test(`${p.id}: the active nav link reads at least as well as plain light's`, () => {
+      const t = { ...light, ...p.tokens };
+      expect(navActive(t)).toBeGreaterThanOrEqual(navActive(light));
+    });
+  }
+
+  // Status colours as text (links, verdicts, notes, stat labels). A light
+  // palette's surfaces sit darker than plain light's, so it darkens their values:
+  // each stays at least plain light's own ratio on the same surface, and a colour
+  // plain light makes AA somewhere (info, error, magenta) reaches 4.5 everywhere.
+  const STATUS_INKS = ["--status-success", "--status-error", "--status-warning", "--status-info", "--status-tool", "--status-cyan", "--status-magenta"];
+  for (const p of PALETTES.filter((x) => x.base === "light")) {
+    test(`${p.id}: status text never reads worse than plain light's on page, panel and card`, () => {
+      const t = { ...light, ...p.tokens };
+      for (const ink of STATUS_INKS) {
+        const ref = SURFACES.map((s) => contrast(light[ink]!, light[s]!));
+        const aa = Math.max(...ref) >= 4.5 ? 4.5 : 0;
+        SURFACES.forEach((s, i) => {
+          const floor = Math.max(ref[i]!, aa);
+          expect(contrast(t[ink]!, t[s]!), `${ink} ${t[ink]} on ${s} ${t[s]} (floor ${floor.toFixed(2)})`).toBeGreaterThanOrEqual(floor - 1e-9);
+        });
+      }
+      // The GitHub watcher badge draws --status-success on --island-success.
+      const badge = contrast(light["--status-success"]!, light["--island-success"]!);
+      expect(contrast(t["--status-success"]!, t["--island-success"]!), "GitHub badge").toBeGreaterThanOrEqual(badge - 1e-9);
+    });
+  }
+
   for (const p of PALETTES) {
     test(`${p.id}: text drawn on --tint-neutral stays >= 4.5:1`, () => {
       const t = { ...baseTokens(p.base), ...p.tokens };
