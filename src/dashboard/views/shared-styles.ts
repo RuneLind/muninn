@@ -1,4 +1,5 @@
 import { themeInitScript, themeToggleHtml, themeToggleScript } from "./components/theme.ts";
+import { themeLabScript } from "./components/theme-lab.ts";
 import { paletteTokenStyles } from "./components/palettes.ts";
 import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
 import { droppedRouteGroups, servesWikiReadSliceOnly, type RouteGroup } from "../route-groups.ts";
@@ -330,6 +331,7 @@ ${paletteTokenStyles()}
     .theme-menu-item:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
     .theme-menu-item[aria-checked="true"] { color: var(--accent-light); }
     .theme-menu-glyph { width: 16px; text-align: center; }
+    .theme-menu-sep { height: 1px; margin: 3px 6px; background: var(--border-primary); }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -871,5 +873,6 @@ ${options?.headerRight ?? ""}
       ${themeToggleHtml()}
     </div>
   </header>
-  <script>${themeToggleScript()}</script>`;
+  <script>${themeToggleScript()}</script>
+  <script>${themeLabScript()}</script>`;
 }

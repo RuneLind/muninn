@@ -703,3 +703,82 @@ test.describe("A palette's text tokens read on every surface", () => {
     });
   }
 });
+
+test.describe("The theme lab", () => {
+  /** Set a lab slider the way a drag does: a new value, then an input event. */
+  async function slide(page: Page, key: string, value: number): Promise<void> {
+    await page.locator(`#themeLab input[data-key="${key}"]`).evaluate((el, v) => {
+      (el as HTMLInputElement).value = String(v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }, value);
+  }
+  const pageBg = (page: Page) => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  const inline = (page: Page) => page.evaluate(() => document.documentElement.getAttribute("style") ?? "");
+
+  test("opens from ◐, tints the real page, survives a reload, follows a theme switch and closes clean", async ({ page }) => {
+    await storeChoice(page, "reading");
+    await page.goto(BASE + `/wiki?wiki=${WIKI}`);
+    const shipped = await pageBg(page);
+    expect(shipped).toBe(hexToRgb(READING.tokens["--bg-page"]!));
+
+    await page.locator("#themeToggle").click();
+    await page.getByRole("menuitem", { name: /Theme lab/ }).click();
+    await expect(page.locator("#themeMenu")).toBeHidden();
+    const lab = page.locator("#themeLab");
+    await expect(lab).toBeVisible();
+    await expect(lab.locator(".theme-lab-title")).toContainText("Reading mode");
+    // Opening changes nothing: the sliders start at the theme as shipped.
+    expect(await pageBg(page)).toBe(shipped);
+
+    // Rune's 2026-10-27 ask: Reading mode at background lightness 5, saturation 12.
+    await slide(page, "bgL", 5);
+    await slide(page, "bgS", 12);
+    const tinted = await pageBg(page);
+    expect(tinted).not.toBe(shipped);
+    const [r, g, b] = tinted.match(/\d+/g)!.map(Number);
+    expect(Math.max(r!, g!, b!), "page lightness ~5 %").toBeLessThan(20);
+    await expect(lab.locator("#themeLabMeters")).toContainText("Ladder order");
+    await expect(lab.locator("#themeLabMeters b.bad")).toHaveCount(0);
+
+    // Open and slid, it comes back on the next page.
+    await page.goto(BASE + "/");
+    await expect(page.locator("#themeLab")).toBeVisible();
+    expect(await pageBg(page)).toBe(tinted);
+    await expect(page.locator('#themeLab input[data-key="bgL"]')).toHaveValue("5");
+
+    // Another theme from ◐: the lab starts over from that theme's own values.
+    await page.locator("#themeToggle").click();
+    await page.getByRole("menuitemradio", { name: /^.?Dark$/ }).click();
+    await expect(page.locator("#themeLab .theme-lab-title")).toContainText("Dark");
+    // Plain dark's page is #0a0a0f; the lab's HSL round trip may move a channel by 1–2.
+    const dark = (await pageBg(page)).match(/\d+/g)!.map(Number);
+    [10, 10, 15].forEach((v, i) => expect(Math.abs(dark[i]! - v), `channel ${i}`).toBeLessThanOrEqual(2));
+
+    // × removes every override; the saved sliders wait for the next open.
+    await page.locator('#themeLab [data-lab="close"]').click();
+    await expect(page.locator("#themeLab")).toHaveCount(0);
+    expect(await inline(page)).toBe("");
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("muninn-theme-lab") ?? "{}"));
+    expect(saved.open).toBe(false);
+    expect(saved.states.reading.bgL).toBe(5);
+  });
+
+  test("Copy tokens puts a palettes.ts tokens block with the slid values on the clipboard", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await storeChoice(page, "reading");
+    await page.goto(BASE + "/");
+    await page.locator("#themeToggle").click();
+    await page.getByRole("menuitem", { name: /Theme lab/ }).click();
+    await slide(page, "bgL", 5);
+    const bg = await page.evaluate(() => document.documentElement.style.getPropertyValue("--bg-page"));
+    await page.locator('#themeLab [data-lab="copy"]').click();
+    await expect(page.locator("#themeLabStatus")).toContainText("Copied");
+    const text = await page.evaluate(() => navigator.clipboard.readText());
+    expect(text).toMatch(/^ {4}tokens: \{\n {6}\/\/ Theme lab .*page L5 /);
+    expect(text).toContain(`"--bg-page": "${bg}",`);
+    // Every key Reading mode sets is in the block, in the same order.
+    const keys = [...text.matchAll(/^\s+"(--[a-z0-9-]+)":/gm)].map((m) => m[1]);
+    expect(keys.slice(0, Object.keys(READING.tokens).length)).toEqual(Object.keys(READING.tokens));
+    await page.locator('#themeLab [data-lab="close"]').click();
+  });
+});
