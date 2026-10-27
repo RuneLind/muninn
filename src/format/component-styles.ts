@@ -92,6 +92,7 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .tablewrap th { background: var(--bg-inset); color: var(--text-primary); }
     ${scope} .fileref { color: var(--accent-light); font-family: var(--mono, ui-monospace, monospace); }
+    ${scope} .fileref code { background: transparent; box-shadow: none; padding: 0; color: inherit; }
     ${scope} .figure { margin: 1.4rem 0; }
     ${scope} .figure-body { overflow-x: auto; }
     ${scope} .figure img { max-width: 100%; height: auto; }
@@ -638,7 +639,7 @@ export function componentBlockCss(scope: string): string {
       color: var(--text-primary);
       white-space: pre;
     }
-    ${scope} .filetree code { background: transparent; padding: 0; color: inherit; }
+    ${scope} .filetree code { background: transparent; padding: 0; color: inherit; box-shadow: none; }
     ${scope} .checklist { list-style: none; margin: 1.2rem 0; padding: 0; }
     ${scope} .check-item {
       display: flex;

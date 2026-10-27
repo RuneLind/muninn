@@ -787,6 +787,9 @@ export function chatStyles(): string {
       border-radius: 3px;
       font-size: 0.9em;
     }
+    .web-content code:not(pre > code) {
+      background: var(--bg-code-inline); box-shadow: inset 0 0 0 1px var(--code-inline-border);
+    }
     .web-content blockquote {
       border-left: 3px solid var(--accent);
       margin: 0;
@@ -824,7 +827,12 @@ export function chatStyles(): string {
     .web-content p { margin: 0; }
     /* A list item's further paragraph: a small gap marks the paragraph break. */
     .web-content li > p { margin: 0.35em 0 0; }
-    .web-content strong { font-weight: 600; color: var(--text-primary); }
+    /* The relative colour holds var(), so a browser without it would compute
+       inherit, not drop it; the guard keeps --text-primary there. */
+    .web-content strong { font-weight: var(--strong-weight); color: var(--text-primary); }
+    @supports (color: oklch(from currentColor calc(l + 0.1 * clamp(-1, (l - 0.5) * 1000, 1)) c h)) {
+      .web-content strong { color: oklch(from currentColor calc(l + var(--strong-lift) * clamp(-1, (l - var(--strong-pivot)) * 1000, 1)) c h); }
+    }
     .web-content em { font-style: italic; }
     .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
     .web-content a:hover { text-decoration-color: var(--accent-light); }

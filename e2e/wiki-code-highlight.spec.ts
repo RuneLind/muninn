@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { colorParser, token } from "./contrast.ts";
 
 const PORT = e2ePort("wiki-code-highlight");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -70,7 +71,7 @@ const PAGE = [
   "",
   "# Fence Page",
   "",
-  "Prose with `inline code` in it.",
+  "**Bold lead.** Prose with `inline code` in it.",
   "",
   "```sql",
   SQL_BODY,
@@ -116,6 +117,94 @@ const LINK_PAGE = [
   "",
 ].join("\n");
 
+/**
+ * Contexts that set their own text colour: a link, a FileRef chip, a muted
+ * blockquote. Bold and inline code inside them must keep that colour; only
+ * the chip's fill and edge are theirs.
+ */
+const MARKS_PAGE = [
+  "---",
+  "title: Marks Page",
+  "---",
+  "",
+  "# Marks Page",
+  "",
+  "Plain **pbold** in the body.",
+  "",
+  "Link with [**lbold**](https://example.com/a) and [`lcode`](https://example.com/b).",
+  "",
+  '<FileRef path="src/a.ts">`a.ts`</FileRef>',
+  "",
+  "> Quote with **qbold** and `qcode` in it.",
+  "",
+  "See the source (`src/a.ts:12`).",
+  "",
+  "<FileTree>",
+  "",
+  "The tree under `ftsrc/`:",
+  "",
+  "```",
+  "ftsrc/",
+  "└── a.ts",
+  "```",
+  "",
+  "</FileTree>",
+  "",
+  "> [!warning] A **ctbold** title",
+  "> Callout body.",
+  "",
+  '<Historic since="muninn#1" note="old">',
+  "",
+  "Historic **hbold** text.",
+  "",
+  "</Historic>",
+  "",
+  "<Checklist>",
+  "",
+  "- [ ] **cbold** open step",
+  "",
+  "</Checklist>",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D1** — keep **kbold**. Opus-5.5, 26.10.2026.",
+  "- ~~**D2**~~ — dropped **xbold**. Opus-5.5, 26.10.2026.",
+  "",
+  "</DecisionLog>",
+  "",
+  '<StatusRows view="tiles">',
+  "",
+  "- **PRs:** 3 · detail **svbold**",
+  "",
+  "</StatusRows>",
+  "",
+  '<AnnotatedCode file="a.ts:1" lang="ts">',
+  "",
+  "```ts",
+  "const a = 1;",
+  "```",
+  "",
+  "Note with **anbold**.",
+  "",
+  "</AnnotatedCode>",
+  "",
+  "###### Six with **h6bold**",
+  "",
+  "### Three with **h3bold**",
+  "",
+  "| Head **thbold** | b |",
+  "|---|---|",
+  "| c | d |",
+  "",
+  '<RuleTree title="Renew?" outcomes="Renew=good">',
+  "",
+  "- Is it reserved?",
+  "  - *No:* → Renew — **LIB-2**",
+  "",
+  "</RuleTree>",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -123,6 +212,7 @@ test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-code-"));
   await writeFile(path.join(root, "fence-page.md"), PAGE, "utf8");
   await writeFile(path.join(root, "link-page.md"), LINK_PAGE, "utf8");
+  await writeFile(path.join(root, "marks-page.mdx"), MARKS_PAGE, "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -546,5 +636,458 @@ test.describe("Wiki reader: a wikilink inside code is code", () => {
     await expect(inlineCode.filter({ hasText: "[[Fence Page]]" })).toHaveCount(1);
     // …and it is text, not markup: no anchor was substituted into it.
     expect(await inlineCode.locator("a, span.wiki-link-missing").count()).toBe(0);
+  });
+});
+
+/**
+ * What bold and an inline-code chip measure against the body text and the
+ * surface behind them, in the page's current theme. Bold is compared as a
+ * contrast RATIO against the body's; the chip as an L* step, because a ratio
+ * reads ~1.04 for any two near-blacks (see the fence test above). The chip's
+ * edge is its inset box-shadow composited over its own fill: an edge or a
+ * fill step both make a chip visible.
+ */
+async function proseMarks(page: import("@playwright/test").Page, scope: string) {
+  const parse = await colorParser(page);
+  return page.evaluate(([sel, parse]) => {
+    const root = document.querySelector(sel) as HTMLElement | null;
+    const strong = root?.querySelector("strong") as HTMLElement | null;
+    const code = root?.querySelector("code:not(pre > code)") as HTMLElement | null;
+    const body = strong?.parentElement ?? null;
+    if (!root || !strong || !code || !body) return null;
+    const lum = (c: number[]): number =>
+      c.slice(0, 3)
+        .map((v) => {
+          const s = v / 255;
+          return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        })
+        .reduce((a, v, i) => a + v * [0.2126, 0.7152, 0.0722][i]!, 0);
+    const lstar = (c: number[]): number => {
+      const y = lum(c);
+      return y <= 0.008856 ? y * 903.3 : 116 * Math.pow(y, 1 / 3) - 16;
+    };
+    const ratio = (a: number[], b: number[]): number => {
+      const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+      return (x! + 0.05) / (y! + 0.05);
+    };
+    const behindOf = (el: HTMLElement): number[] => {
+      for (let n: HTMLElement | null = el.parentElement; n; n = n.parentElement) {
+        const c = parse(getComputedStyle(n).backgroundColor);
+        if ((c[3] ?? 1) > 0) return c;
+      }
+      return [255, 255, 255];
+    };
+    const page = behindOf(body);
+    const chip = parse(getComputedStyle(code).backgroundColor);
+    // `rgba(r, g, b, a) 0px 0px 0px 1px inset` → the edge colour over the fill.
+    const shadow = getComputedStyle(code).boxShadow;
+    const sc = shadow === "none" ? null : parse(shadow.slice(0, shadow.indexOf(")") + 1));
+    const a = sc ? (sc[3] ?? 1) : 0;
+    const edge = sc ? chip.map((v, i) => (i < 3 ? sc[i]! * a + v * (1 - a) : v)) : chip;
+    return {
+      boldLead:
+        ratio(parse(getComputedStyle(strong).color), page) / ratio(parse(getComputedStyle(body).color), page),
+      boldWeight: Number(getComputedStyle(strong).fontWeight),
+      chipStep: Math.max(Math.abs(lstar(chip) - lstar(page)), Math.abs(lstar(edge) - lstar(page))),
+      codeOnChip: ratio(parse(getComputedStyle(code).color), chip),
+    };
+  }, [scope, parse] as const);
+}
+
+/**
+ * Every bold run under `scope`, measured against the text it sits in: OKLab
+ * lightness and chroma of both colours, the WCAG lead of bold over its
+ * context on the background behind it, the hue difference (0 when the
+ * context's chroma is under 0.03, where hue is noise), the weight step, and
+ * whether the context is at the ink limit (contrast >= 16 on its background,
+ * or OKLab L >= 0.99 or <= 0.01). `unlifted` holds the rules.
+ */
+async function boldLifts(page: import("@playwright/test").Page, scope: string) {
+  const parse = await colorParser(page);
+  return page.evaluate(([sel, parse]) => {
+    const lin = (v: number) => {
+      const s = v / 255;
+      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    const lum = (c: number[]) => 0.2126 * lin(c[0]!) + 0.7152 * lin(c[1]!) + 0.0722 * lin(c[2]!);
+    const ratio = (a: number[], b: number[]) => {
+      const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+      return (x! + 0.05) / (y! + 0.05);
+    };
+    const oklab = (c: number[]) => {
+      const [r, g, b] = [lin(c[0]!), lin(c[1]!), lin(c[2]!)];
+      const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+      const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+      const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+      return [
+        0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+      ];
+    };
+    const behind = (el: Element): number[] => {
+      for (let n = el.parentElement; n; n = n.parentElement) {
+        const c = parse(getComputedStyle(n).backgroundColor);
+        if ((c[3] ?? 1) > 0) return c;
+      }
+      return [255, 255, 255];
+    };
+    // Prose bold only: a classed <strong> (a callout title, a DecisionLog id)
+    // is a component's own label with its own colour rule.
+    return Array.from(document.querySelectorAll(`${sel} :is(strong, b):not([class])`)).map((el) => {
+      const own = parse(getComputedStyle(el).color);
+      const ctx = parse(getComputedStyle(el.parentElement!).color);
+      const bg = behind(el);
+      const [l1, a1, b1] = oklab(ctx);
+      const [l2, a2, b2] = oklab(own);
+      const chroma = Math.hypot(a1!, b1!);
+      const hueDiff = chroma < 0.03 ? 0 : (Math.abs(Math.atan2(b1!, a1!) - Math.atan2(b2!, a2!)) * 180) / Math.PI;
+      return {
+        text: (el.textContent || "").slice(0, 24),
+        // OKLab lightness of the context and the bold, and which way is "more ink".
+        ctxL: l1!,
+        ownL: l2!,
+        dark: lum(bg) < 0.2,
+        // No room to lift: the context is already near the ink limit, or is
+        // white or black itself (white on an accent chip).
+        atLimit: ratio(ctx, bg) >= 16 || l1! >= 0.99 || l1! <= 0.01,
+        weightStep: Number(getComputedStyle(el).fontWeight) - Number(getComputedStyle(el.parentElement!).fontWeight),
+        lead: ratio(own, bg) / ratio(ctx, bg),
+        hueDiff: hueDiff > 180 ? 360 - hueDiff : hueDiff,
+        ctxC: chroma,
+        ownC: Math.hypot(a2!, b2!),
+      };
+    });
+  }, [scope, parse] as const);
+}
+
+/**
+ * The bold runs that break a rule, as readable lines. A run fails when:
+ *  1. its lead is under 0.99: it reads fainter than its context;
+ *  2. outside the ink limit, its lead is under 1.1 or its hue moved over 15°;
+ *  3. outside the ink limit, its lightness moved under 0.06, or, in a context
+ *     with chroma >= 0.03, it kept under 0.6x that chroma;
+ *  4. at the ink limit, it is under 200 heavier than its context;
+ *  5. only when `bodyBold` names the body's own bold run: its context carries
+ *     over 0.03 less ink than the body's, yet the run carries under 0.01
+ *     less ink than body bold, which undoes the dimming (a struck decision,
+ *     a Historic body).
+ * "Ink" is OKLab lightness toward white on a dark background (luminance
+ * under 0.2) and toward black on a light one, compared on the colours themselves because each context
+ * may paint its own background. The numbers are floors for a visible bold,
+ * not a pin on --strong-lift's value.
+ */
+function unlifted(rows: Awaited<ReturnType<typeof boldLifts>>, bodyBold?: string) {
+  const ref = bodyBold ? rows.find((r) => r.text === bodyBold) : undefined;
+  if (bodyBold && !ref) return [`no body bold "${bodyBold}" on the page`];
+  const ink = (l: number, dark: boolean) => (dark ? l : 1 - l);
+  return rows
+    .filter(
+      (r) =>
+        r.lead < 0.99 ||
+        (!r.atLimit && (r.lead < 1.1 || r.hueDiff > 15)) ||
+        // The lift's size and the context's chroma, measured 2026-10-27: the
+        // smallest lift is 0.071 (an amber title, clipped to sRGB), and a link's
+        // blue keeps 0.65x its chroma once gamut-mapped lighter.
+        (!r.atLimit && (Math.abs(r.ownL - r.ctxL) < 0.06 || (r.ctxC >= 0.03 && r.ownC < 0.6 * r.ctxC))) ||
+        (r.atLimit && r.weightStep < 200) ||
+        (ref !== undefined &&
+          ink(r.ctxL, r.dark) < ink(ref.ctxL, ref.dark) - 0.03 &&
+          ink(r.ownL, r.dark) > ink(ref.ownL, ref.dark) - 0.01),
+    )
+    .map(
+      (r) =>
+        `${r.text} (lead ${r.lead.toFixed(2)}, hue ${r.hueDiff.toFixed(0)}°, L ${r.ctxL.toFixed(2)}→${r.ownL.toFixed(2)}, C ${r.ctxC.toFixed(3)}→${r.ownC.toFixed(3)}, +${r.weightStep})`,
+    );
+}
+
+test.describe("Bold and inline code stand apart from the body", () => {
+  // The reported bug (2026-10-26): in dark, `strong` shared the body's #e0e0e0
+  // (lead 1.00) and the inline chip sat on --bg-inset, ~2 L* from the page.
+  // Light already showed both; its thresholds pin that it stays so.
+  for (const [theme, minStep] of [["dark", 6], ["light", 4]] as const) {
+    test(`in the wiki article, ${theme}`, async ({ page }) => {
+      await openPage(page);
+      await page.evaluate((t) => document.documentElement.setAttribute("data-theme", t), theme);
+      const m = await proseMarks(page, ".wiki-article");
+      expect(m).not.toBeNull();
+      expect(m!.boldLead).toBeGreaterThanOrEqual(1.15);
+      // 700 over the 400 body in both themes, which the summary export (body
+      // text already --text-primary) relies on for its whole lead.
+      expect(m!.boldWeight).toBe(700);
+      expect(m!.chipStep).toBeGreaterThanOrEqual(minStep);
+      expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+
+  test("in a chat research card, dark", async ({ page }) => {
+    // The card body sits on --bg-card (#1a1a2e), the same colour chat's old
+    // inline-code fill (--bg-surface) had, so there the old chip stepped 0 L*.
+    // A probe on the bare page could not see that: --bg-surface steps ~7 L*
+    // from --bg-page.
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () => typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function",
+    );
+    await page.evaluate(() => {
+      document.documentElement.setAttribute("data-theme", "dark");
+      const g = globalThis as unknown as { formatWebHtml: (s: string) => string };
+      const card = document.createElement("div");
+      card.className = "msg msg-research-card";
+      const probe = document.createElement("div");
+      probe.className = "research-card-body web-content";
+      probe.id = "prose-probe";
+      probe.innerHTML = g.formatWebHtml("**Bold lead.** Prose with `inline code` in it.");
+      card.appendChild(probe);
+      document.body.appendChild(card);
+    });
+    const m = await proseMarks(page, "#prose-probe");
+    expect(m).not.toBeNull();
+    expect(m!.boldLead).toBeGreaterThanOrEqual(1.15);
+    expect(m!.boldWeight).toBe(700);
+    expect(m!.chipStep).toBeGreaterThanOrEqual(6);
+    expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+test.describe("Bold and inline code keep the colour of the context they sit in", () => {
+  for (const theme of ["dark", "light"] as const) {
+    test(`links, FileRef and blockquotes, ${theme}`, async ({ page }) => {
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=marks-page`);
+      await expect(page.locator(".wiki-article .fileref")).toBeVisible();
+      await page.evaluate((t) => document.documentElement.setAttribute("data-theme", t), theme);
+      const got = await page.evaluate(() => {
+        const q = (s: string) => document.querySelector(".wiki-article " + s) as HTMLElement;
+        const cs = (s: string) => getComputedStyle(q(s));
+        return {
+          link: cs("a[href$='/a']").color,
+          linkCode: cs("a[href$='/b'] code").color,
+          linkOfCode: cs("a[href$='/b']").color,
+          fileref: cs(".fileref").color,
+          frefInner: cs(".fileref code").color,
+          frefInnerShadow: cs(".fileref code").boxShadow,
+          frefInnerPadLeft: cs(".fileref code").paddingLeft,
+          quote: cs("blockquote").color,
+          quoteCode: cs("blockquote code").color,
+          treeProseShadow: cs(".filetree code:not(pre > code)").boxShadow,
+        };
+      });
+      expect(got.linkCode).toBe(got.linkOfCode);
+      expect(got.frefInner).toBe(got.fileref);
+      expect(got.frefInnerShadow).toBe("none");
+      // …and no second padding inside the FileRef chip's own.
+      expect(got.frefInnerPadLeft).toBe("0px");
+      expect(got.quoteCode).toBe(got.quote);
+      // A FileTree body can hold prose beside its fence; inline code there
+      // gets FileTree's flat look, never the chip's edge.
+      expect(got.treeProseShadow).toBe("none");
+      // A picked RuleTree case turns its chip white on the accent. The dimmest
+      // text tokens and dark ink on a warning fill sit next to a pivot: bold
+      // there must still move away from its background.
+      await page.evaluate(() => {
+        document.querySelectorAll(".wiki-article .rt-case").forEach((c) => c.classList.add("rt-hit"));
+        document.querySelector(".wiki-article")!.insertAdjacentHTML(
+          "beforeend",
+          '<p style="color: var(--text-faint)">Faint <strong>fbold</strong>.</p>' +
+            '<p style="color: var(--text-disabled)">Disabled <strong>dbold</strong>.</p>' +
+            '<p><span style="background: var(--status-warning); color: var(--on-warning)">Wait <strong>wbold</strong></span></p>',
+        );
+      });
+      // Bold in every context on the page — link, quote, callout title,
+      // Historic, open and done Checklist steps, dimmed DecisionLog items,
+      // StatusRows tiles, AnnotatedCode notes, h6, h3, th, the picked case
+      // chip — lifts its own context.
+      const rows = await boldLifts(page, ".wiki-article");
+      for (const t of ["h3bold", "thbold", "LIB-2", "fbold", "dbold", "wbold"]) expect(rows.map((r) => r.text)).toContain(t);
+      expect(rows.length).toBeGreaterThan(10);
+      expect(unlifted(rows, "pbold")).toEqual([]);
+    });
+  }
+});
+
+test.describe("The other prose surfaces", () => {
+  test("a line-ref chip keeps its own look, not the inline-code chip", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=marks-page`);
+    await expect(page.locator(".wiki-article code.code-ref")).toBeVisible();
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+    const got = await page.evaluate(() => {
+      const chip = document.querySelector(".wiki-article code.code-ref") as HTMLElement;
+      const probe = document.createElement("div");
+      probe.style.background = "var(--bg-inset)";
+      document.body.appendChild(probe);
+      return {
+        shadow: getComputedStyle(chip).boxShadow,
+        bg: getComputedStyle(chip).backgroundColor,
+        inset: getComputedStyle(probe).backgroundColor,
+      };
+    });
+    expect(got.shadow).toBe("none");
+    expect(got.bg).toBe(got.inset);
+  });
+
+  test("markdownContentStyles (summary job card): the chip shows on --bg-panel, dark", async ({ page }) => {
+    // The job card is --bg-panel (#12121a); the old fill (--bg-surface,
+    // #1a1a2e) stepped ~4.5 L* from it. The research answer below sits on the
+    // bare page, where that old fill already stepped ~7, so it cannot pin this.
+    await page.goto(`${BASE}/summaries`);
+    await page.evaluate(() => {
+      document.documentElement.setAttribute("data-theme", "dark");
+      const card = document.createElement("div");
+      card.className = "job-card";
+      const probe = document.createElement("div");
+      probe.className = "summary-area";
+      probe.id = "prose-probe";
+      probe.innerHTML = "<p><strong>Bold lead.</strong> Prose with <code>inline code</code> in it.</p>";
+      card.appendChild(probe);
+      document.body.appendChild(card);
+    });
+    const m = await proseMarks(page, "#prose-probe");
+    expect(m).not.toBeNull();
+    expect(m!.chipStep).toBeGreaterThanOrEqual(6);
+    expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
+  });
+
+  for (const theme of ["dark", "light"] as const) {
+    test(`markdownContentStyles (research answer): bold weight and links, ${theme}`, async ({ page }) => {
+      // One of the six pages that share markdownContentStyles (doc panel,
+      // summaries, search document, Jira preview, export); /research serves it
+      // as `.answer-body`.
+      await page.goto(`${BASE}/research`);
+      await page.evaluate((t) => {
+        document.documentElement.setAttribute("data-theme", t);
+        // Inside the page's own #turnsWrap, as a real turn card.
+        const card = document.createElement("div");
+        card.className = "turn-card";
+        const probe = document.createElement("div");
+        probe.className = "answer-body";
+        probe.id = "prose-probe";
+        card.appendChild(probe);
+        probe.innerHTML =
+          "<p><strong>Bold lead.</strong> Prose with <code>inline code</code> in it.</p>" +
+          '<p><a href="https://example.com/a"><strong>lbold</strong></a> and <a href="https://example.com/b"><code>lcode</code></a></p>' +
+          "<blockquote><p>Quote with <strong>qbold</strong>.</p></blockquote>" +
+          "<h3>Heading with <strong>hbold</strong></h3>";
+        document.getElementById("turnsWrap")!.appendChild(card);
+      }, theme);
+      const m = await proseMarks(page, "#prose-probe");
+      expect(m).not.toBeNull();
+      expect(m!.boldWeight).toBe(700);
+      // Bolder than its 600 heading: a heading is already --text-primary, so in
+      // dark weight is all bold has there. The paragraph probe above (400 → 700)
+      // cannot tell `bolder` from a fixed 700.
+      const headingBold = await page.evaluate(
+        () => getComputedStyle(document.querySelector("#prose-probe h3 strong") as HTMLElement).fontWeight,
+      );
+      expect(headingBold).toBe("900");
+      const links = await page.evaluate(() => {
+        const c = (s: string) => getComputedStyle(document.querySelector("#prose-probe " + s) as HTMLElement).color;
+        return {
+          a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
+        };
+      });
+      expect(links.code).toBe(links.b);
+      // Bold in the link, the quote (a fact-check claim heading is bold in a
+      // blockquote) and the body all lift their own context.
+      expect(unlifted(await boldLifts(page, "#prose-probe"))).toEqual([]);
+    });
+  }
+
+  test("without relative colour, bold keeps main's colour, dark", async ({ page }) => {
+    // A browser without relative colour still accepts the declaration (it
+    // holds var()) and computes it to `inherit`. Renaming the function to one
+    // no browser knows reproduces that: the @supports guard fails, and so
+    // would the declaration at computed-value time.
+    const unsupport = () =>
+      page.evaluate(() => {
+        document.documentElement.setAttribute("data-theme", "dark");
+        for (const st of Array.from(document.querySelectorAll("style"))) {
+          st.textContent = st.textContent!.replaceAll("oklch(from", "oklchx(from");
+        }
+      });
+    const boldColor = (sel: string) =>
+      page.evaluate((s) => getComputedStyle(document.querySelector(s) as HTMLElement).color, sel);
+
+    // Chat and the markdown prose styles gave bold --text-primary on main.
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () => typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function",
+    );
+    await unsupport();
+    await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.className = "web-content";
+      probe.id = "fallback-probe";
+      probe.innerHTML = "<p>Body with <strong>fbold</strong>.</p>";
+      document.body.appendChild(probe);
+    });
+    expect.soft(await boldColor("#fallback-probe strong")).toBe(await token(page, "--text-primary"));
+
+    await page.goto(`${BASE}/research`);
+    await unsupport();
+    await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.className = "answer-body";
+      probe.id = "fallback-probe";
+      probe.innerHTML = "<p>Body with <strong>fbold</strong>.</p>";
+      document.getElementById("turnsWrap")!.appendChild(probe);
+    });
+    expect.soft(await boldColor("#fallback-probe strong")).toBe(await token(page, "--text-primary"));
+
+    // The wiki article gave bold its context's colour on main: inherit is right.
+    await openPage(page);
+    await unsupport();
+    const wiki = await page.evaluate(() => {
+      const strong = document.querySelector(".wiki-article strong") as HTMLElement;
+      return { bold: getComputedStyle(strong).color, ctx: getComputedStyle(strong.parentElement!).color };
+    });
+    expect(wiki.bold).toBe(wiki.ctx);
+  });
+
+  for (const theme of ["dark", "light"] as const) {
+    test(`chat answer: bold and code inside a link keep the link colour, ${theme}`, async ({ page }) => {
+      await page.goto(`${BASE}/chat`);
+      await page.waitForFunction(
+        () => typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function",
+      );
+      const links = await page.evaluate((t) => {
+        document.documentElement.setAttribute("data-theme", t);
+        const g = globalThis as unknown as { formatWebHtml: (s: string) => string };
+        const probe = document.createElement("div");
+        probe.className = "web-content";
+        probe.id = "link-probe";
+        // A chat heading is 600 on --text-primary: in dark, weight is all its bold has.
+        probe.innerHTML = g.formatWebHtml(
+          "Body with **pbold**.\n\n[**lbold**](https://example.com/a) and [`lcode`](https://example.com/b)\n\n> Quote with **qbold**.\n\n### Head with **hbold**",
+        );
+        document.body.appendChild(probe);
+        const c = (s: string) => getComputedStyle(probe.querySelector(s) as HTMLElement).color;
+        return {
+          a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
+        };
+      }, theme);
+      expect(links.code).toBe(links.b);
+      const rows = await boldLifts(page, "#link-probe");
+      expect(rows.map((r) => r.text)).toEqual(["pbold", "lbold", "qbold", "hbold"]);
+      expect(unlifted(rows)).toEqual([]);
+    });
+  }
+});
+
+test.describe("e2e/contrast.ts colorParser", () => {
+  test("reads out-of-gamut and `none` channels as the browser paints them", async ({ page }) => {
+    // A color-mix() over an out-of-gamut colour can compute to a color(srgb)
+    // with channels past 0–1 or `none`; the regex read -0.1 as 0.1 and `none`
+    // as NaN. Expected values are the clamped sRGB the canvas paints.
+    const parse = await colorParser(page);
+    const got = await page.evaluate(
+      ([p, cs]) => cs.map((c) => p(c).map((v) => Math.round(v * 100) / 100)),
+      [parse, ["color(srgb 0.9 -0.1 0.5)", "color(srgb none 0.5 0.5)", "color(srgb 0.5 0.25 1 / 0.5)", "oklch(1 0 0)", "color(srgb 1.2 0.2 0.6)"]] as const,
+    );
+    expect.soft(got[0]).toEqual([230, 0, 128, 1]);
+    expect.soft(got[1]).toEqual([0, 128, 128, 1]);
+    // In gamut: read exactly, alpha included.
+    expect.soft(got[2]).toEqual([127.5, 63.75, 255, 0.5]);
+    expect.soft(got[3]).toEqual([255, 255, 255, 1]);
+    expect.soft(got[4]).toEqual([255, 51, 153, 1]);
   });
 });
