@@ -1,4 +1,5 @@
 import { themeInitScript, themeToggleHtml, themeToggleScript } from "./components/theme.ts";
+import { paletteTokenStyles } from "./components/palettes.ts";
 import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
 import { droppedRouteGroups, servesWikiReadSliceOnly, type RouteGroup } from "../route-groups.ts";
 import { LAST_WIKI_KEY } from "./components/wiki-home.ts";
@@ -16,6 +17,9 @@ const DARK_TOKENS = `
       --bg-gradient-end: #16162a;
       --bg-card: #1a1a2e;
       --bg-hover: rgba(255, 255, 255, 0.04);
+      /* /graph's force-graph canvas (set from JS): dark in both bases, since
+         its node and link colours are tuned for a dark field. */
+      --graph-canvas: #0a0a0f;
 
       /* Borders */
       --border-primary: #1e1e2e;
@@ -37,6 +41,11 @@ const DARK_TOKENS = `
       --accent: #6c63ff;
       --accent-hover: #5a52e0;
       --accent-light: #a5a0ff;
+      /* Text drawn on an --accent / --accent-hover fill. --on-accent is for
+         controls that draw white there; --on-accent-primary for the ones that
+         draw --text-primary (white in dark, near-black in light). */
+      --on-accent: #fff;
+      --on-accent-primary: var(--text-primary);
 
       /* Status colors */
       --status-success: #4ade80;
@@ -71,6 +80,17 @@ const DARK_TOKENS = `
       --tint-magenta: #2a1a3a;
       --tint-cyan: #1a2e3a;
       --tint-neutral: #1a1a1a;
+
+      /* Badges that are a dark island in BOTH bases (pale text on a dark
+         fill): the deadline/quiet mini-badges, the Telegram/Slack platform
+         badges, the GitHub/X watcher badges, and the skeleton shimmer's
+         highlight. A palette may warm them; the bases keep these values. */
+      --island-warning: #3a2a1a;
+      --island-info: #1a2a3e;
+      --island-magenta: #2a1a3e;
+      --island-success: #1a2a1a;
+      --island-neutral: #1a1a2a;
+      --skeleton-shine: #22222e;
 
       /* Accent text variants */
       --accent-muted: #8b8bcd;
@@ -137,6 +157,7 @@ const LIGHT_TOKENS = `
       --bg-gradient-end: #e8eaf2;
       --bg-card: #f1f2f6;
       --bg-hover: rgba(0, 0, 0, 0.04);
+      --graph-canvas: #0a0a0f;
 
       /* Borders */
       --border-primary: #e2e4ea;
@@ -158,6 +179,8 @@ const LIGHT_TOKENS = `
       --accent: #6357f0;
       --accent-hover: #5247d8;
       --accent-light: #5247d8;
+      --on-accent: #fff;
+      --on-accent-primary: var(--text-primary);
 
       /* Status colors */
       --status-success: #16a34a;
@@ -189,6 +212,12 @@ const LIGHT_TOKENS = `
       --tint-magenta: #f3e8ff;
       --tint-cyan: #cffafe;
       --tint-neutral: #eceef3;
+      --island-warning: #3a2a1a;
+      --island-info: #1a2a3e;
+      --island-magenta: #2a1a3e;
+      --island-success: #1a2a1a;
+      --island-neutral: #1a1a2a;
+      --skeleton-shine: #22222e;
 
       /* Accent text variants */
       --accent-muted: #6b6f9a;
@@ -247,9 +276,23 @@ export function themeTokenStyles(): string {
     html[data-theme="light"] {${LIGHT_TOKENS}    }`;
 }
 
+/** Every custom property a base block declares (dark and light declare the same set). */
+export function baseTokenNames(): string[] {
+  const names = new Set<string>();
+  for (const block of [DARK_TOKENS, LIGHT_TOKENS]) {
+    for (const m of block.matchAll(/^\s*(--[a-z0-9-]+)\s*:/gm)) names.add(m[1]!);
+  }
+  return [...names];
+}
+
 /** Shared CSS for all dashboard pages — base reset, header, and nav */
 export const SHARED_STYLES = `
 ${themeTokenStyles()}
+
+    /* Palettes (components/palettes.ts): layers over a base, set as
+       html[data-palette] beside html[data-theme]. Same specificity as the
+       data-theme blocks above, so they win on source order. */
+${paletteTokenStyles()}
 
     /* Theme toggle button (right of the nav, on every page) */
     .header-right { display: flex; align-items: center; gap: 12px; }
@@ -269,6 +312,24 @@ ${themeTokenStyles()}
       transition: color 0.15s, border-color 0.15s, background 0.15s;
     }
     .theme-toggle:hover { color: var(--text-primary); border-color: var(--border-secondary); }
+    .theme-picker { position: relative; }
+    .theme-menu {
+      position: absolute; right: 0; top: calc(100% + 6px); z-index: 1200;
+      min-width: 160px; padding: 4px;
+      display: flex; flex-direction: column; gap: 2px;
+      background: var(--bg-panel); border: 1px solid var(--border-secondary); border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+    .theme-menu[hidden] { display: none; }
+    .theme-menu-item {
+      display: flex; align-items: center; gap: 8px; width: 100%;
+      padding: 6px 10px; border: 0; border-radius: 6px; background: transparent;
+      color: var(--text-secondary); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+    }
+    .theme-menu-item:hover, .theme-menu-item:focus-visible { background: var(--bg-hover); color: var(--text-primary); outline: none; }
+    .theme-menu-item:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+    .theme-menu-item[aria-checked="true"] { color: var(--accent-light); }
+    .theme-menu-glyph { width: 16px; text-align: center; }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {

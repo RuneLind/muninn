@@ -109,7 +109,7 @@ export function connectorPanelStyles(): string {
     }
     .connector-add-btn {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border: none;
       padding: 6px 14px;
       border-radius: 6px;
@@ -213,7 +213,7 @@ export function connectorPanelStyles(): string {
     }
     .connector-modal-footer button.primary {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border-color: var(--accent);
     }
     .connector-modal-footer button.primary:hover {

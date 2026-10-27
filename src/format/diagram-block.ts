@@ -437,7 +437,7 @@ export function diagramCss(scope: string): string {
       font: inherit; font-size: 0.8em; padding: 0.15rem 0.6rem; cursor: pointer; border-radius: 6px;
       color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--text-muted);
     }
-    ${scope} .dgm-view[aria-pressed="true"] { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+    ${scope} .dgm-view[aria-pressed="true"] { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
     ${scope} .dgm-view:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
     ${scope} .dgm-note { margin: 0 0 0.5rem; font-size: 0.85em; color: var(--text-soft); }
     ${scope} .dgm-note[hidden], ${scope} .dgm-open[hidden] { display: none; }

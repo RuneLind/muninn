@@ -19,7 +19,7 @@ export function tracesFiltersStyles(): string {
     .filters select:focus, .filters input:focus { outline: none; border-color: var(--accent); }
     .filters button {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border: none;
       padding: 6px 14px;
       border-radius: 6px;

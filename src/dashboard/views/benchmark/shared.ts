@@ -328,7 +328,7 @@ export const BENCHMARK_STYLES = `
   }
   .rejudge-form button {
     background: var(--accent);
-    color: white;
+    color: var(--on-accent);
     border: none;
     border-radius: 6px;
     padding: 7px 14px;
@@ -544,7 +544,7 @@ export const BENCHMARK_STYLES = `
   }
   .preview-actions button {
     background: var(--accent);
-    color: white;
+    color: var(--on-accent);
     border: none;
     border-radius: 6px;
     padding: 8px 16px;
@@ -624,7 +624,7 @@ export const BENCHMARK_STYLES = `
   }
   .run-form button {
     background: var(--accent);
-    color: white;
+    color: var(--on-accent);
     border: none;
     border-radius: 6px;
     padding: 8px 16px;

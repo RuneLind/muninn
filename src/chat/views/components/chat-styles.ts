@@ -16,6 +16,7 @@ const CHAT_EXTRA_LIGHT = `
 `;
 
 import { componentBlockCss } from "../../../format/component-styles.ts";
+import { CHAT_PALETTE_TOKENS, paletteTokenStyles } from "../../../dashboard/views/components/palettes.ts";
 
 /** Chat page styles — layout, sidebar, messages, inspector, modals */
 export function chatStyles(): string {
@@ -29,6 +30,9 @@ export function chatStyles(): string {
     }
     html[data-theme="dark"] {${CHAT_EXTRA_DARK}    }
     html[data-theme="light"] {${CHAT_EXTRA_LIGHT}    }
+    /* A palette's chat tokens, after the base blocks above so they win on
+       source order (SHARED_STYLES emits the rest of the palette earlier). */
+${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
     body {
       display: flex;
       flex-direction: column;
@@ -86,7 +90,7 @@ export function chatStyles(): string {
     .sidebar-header h3 { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 0; }
     .new-thread-btn {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border: none;
       padding: 4px 10px;
       border-radius: 4px;
@@ -587,9 +591,11 @@ export function chatStyles(): string {
       align-items: center;
       gap: 6px;
     }
+    /* --on-accent-inherit is a palette-only token: the bases leave it
+       undefined, so these two hovers inherit their colour as on main. */
     .research-actions button:hover:not(:disabled) {
       background: var(--accent);
-      color: var(--bg-primary);
+      color: var(--on-accent-inherit);
       border-color: var(--accent);
     }
     .research-actions button .btn-icon { font-size: 14px; }
@@ -672,7 +678,7 @@ export function chatStyles(): string {
     }
     .dev-run-resend:hover {
       background: var(--accent);
-      color: var(--bg-primary);
+      color: var(--on-accent-inherit);
       border-color: var(--accent);
     }
     /* Compact handle from the inline run card → inspector Agents tab (Phase C) */
@@ -860,7 +866,7 @@ export function chatStyles(): string {
     .chat-input textarea:focus { border-color: var(--accent); }
     .chat-input button {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border: none;
       padding: 8px 16px;
       border-radius: 8px;
@@ -968,7 +974,7 @@ export function chatStyles(): string {
       justify-content: center;
       font-size: 15px;
       font-weight: 650;
-      color: rgba(255,255,255,0.92);
+      color: color-mix(in srgb, var(--on-accent) 92%, transparent);
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
       flex-shrink: 0;
     }
@@ -1565,7 +1571,7 @@ export function chatStyles(): string {
     }
     .thread-modal-save {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border-color: var(--accent) !important;
     }
     .thread-modal-save:hover { background: var(--accent-hover); }

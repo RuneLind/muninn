@@ -38,6 +38,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { colorParser, token } from "./contrast.ts";
+import { PALETTES } from "../src/dashboard/views/components/palettes.ts";
 
 const PORT = e2ePort("wiki-code-highlight");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -640,6 +641,27 @@ test.describe("Wiki reader: a wikilink inside code is code", () => {
 });
 
 /**
+ * Every theme a reader can pick: the two bases and every registry palette (a
+ * layer over its base). The prose specs below loop over this, so a new palette
+ * is measured without editing them. `minStep` is the chip's L* floor: dark
+ * surfaces need the larger step (PR 1 measured the dark chip invisible at 1.9).
+ */
+const THEMES = [
+  { name: "dark", theme: "dark", palette: undefined, minStep: 6 },
+  { name: "light", theme: "light", palette: undefined, minStep: 4 },
+  ...PALETTES.map((p) => ({ name: p.id, theme: p.base, palette: p.id, minStep: p.base === "dark" ? 6 : 4 })),
+];
+
+/** Force one theme the way the picker does: the base, and the palette when one is named. */
+async function applyTheme(page: import("@playwright/test").Page, t: (typeof THEMES)[number]): Promise<void> {
+  await page.evaluate(([theme, palette]) => {
+    document.documentElement.setAttribute("data-theme", theme!);
+    if (palette) document.documentElement.setAttribute("data-palette", palette);
+    else document.documentElement.removeAttribute("data-palette");
+  }, [t.theme, t.palette] as const);
+}
+
+/**
  * What bold and an inline-code chip measure against the body text and the
  * surface behind them, in the page's current theme. Bold is compared as a
  * contrast RATIO against the body's; the chip as an L* step, because a ratio
@@ -805,17 +827,17 @@ test.describe("Bold and inline code stand apart from the body", () => {
   // The reported bug (2026-10-26): in dark, `strong` shared the body's #e0e0e0
   // (lead 1.00) and the inline chip sat on --bg-inset, ~2 L* from the page.
   // Light already showed both; its thresholds pin that it stays so.
-  for (const [theme, minStep] of [["dark", 6], ["light", 4]] as const) {
-    test(`in the wiki article, ${theme}`, async ({ page }) => {
+  for (const t of THEMES) {
+    test(`in the wiki article, ${t.name}`, async ({ page }) => {
       await openPage(page);
-      await page.evaluate((t) => document.documentElement.setAttribute("data-theme", t), theme);
+      await applyTheme(page, t);
       const m = await proseMarks(page, ".wiki-article");
       expect(m).not.toBeNull();
       expect(m!.boldLead).toBeGreaterThanOrEqual(1.15);
       // 700 over the 400 body in both themes, which the summary export (body
       // text already --text-primary) relies on for its whole lead.
       expect(m!.boldWeight).toBe(700);
-      expect(m!.chipStep).toBeGreaterThanOrEqual(minStep);
+      expect(m!.chipStep).toBeGreaterThanOrEqual(t.minStep);
       expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
     });
   }
@@ -851,11 +873,11 @@ test.describe("Bold and inline code stand apart from the body", () => {
 });
 
 test.describe("Bold and inline code keep the colour of the context they sit in", () => {
-  for (const theme of ["dark", "light"] as const) {
-    test(`links, FileRef and blockquotes, ${theme}`, async ({ page }) => {
+  for (const t of THEMES) {
+    test(`links, FileRef and blockquotes, ${t.name}`, async ({ page }) => {
       await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=marks-page`);
       await expect(page.locator(".wiki-article .fileref")).toBeVisible();
-      await page.evaluate((t) => document.documentElement.setAttribute("data-theme", t), theme);
+      await applyTheme(page, t);
       const got = await page.evaluate(() => {
         const q = (s: string) => document.querySelector(".wiki-article " + s) as HTMLElement;
         const cs = (s: string) => getComputedStyle(q(s));
@@ -881,7 +903,7 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
       // A FileTree body can hold prose beside its fence; inline code there
       // gets FileTree's flat look, never the chip's edge.
       expect(got.treeProseShadow).toBe("none");
-      // A picked RuleTree case turns its chip white on the accent. The dimmest
+      // A picked RuleTree case draws --on-accent on the accent. The dimmest
       // text tokens and dark ink on a warning fill sit next to a pivot: bold
       // there must still move away from its background.
       await page.evaluate(() => {

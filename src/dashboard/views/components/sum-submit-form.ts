@@ -62,7 +62,7 @@ export function sumSubmitFormStyles(): string {
       border-radius: 8px;
       border: none;
       background: var(--accent);
-      color: #fff;
+      color: var(--on-accent);
       font-weight: 600;
       font-size: 14px;
       cursor: pointer;
@@ -97,7 +97,7 @@ export function sumSubmitFormStyles(): string {
       border-radius: 8px;
       border: none;
       background: var(--accent);
-      color: #fff;
+      color: var(--on-accent);
       font-weight: 600;
       font-size: 14px;
       font-family: inherit;

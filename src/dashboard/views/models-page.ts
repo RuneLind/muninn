@@ -143,7 +143,7 @@ export async function renderModelsPage(): Promise<string> {
     .editor-actions { display: flex; gap: 10px; align-items: center; }
     .editor-actions .hint { font-size: 11px; color: var(--text-dim); }
     .btn-save {
-      background: var(--accent); border: none; color: #fff; font-size: 12px; font-weight: 600;
+      background: var(--accent); border: none; color: var(--on-accent); font-size: 12px; font-weight: 600;
       padding: 5px 14px; border-radius: 6px; cursor: pointer;
     }
     .btn-save:hover { filter: brightness(1.08); }

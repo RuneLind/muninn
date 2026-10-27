@@ -944,7 +944,7 @@ ${compactCss()}
     }
     .${LENS_SWITCH_CLASS} button + button { border-left: 1px solid var(--border-secondary); }
     .${LENS_SWITCH_CLASS} button:hover, .${LENS_SWITCH_CLASS} button:focus-visible { color: var(--text-primary); }
-    .${LENS_SWITCH_CLASS} button.on { background: var(--accent); color: #fff; font-weight: 600; }
+    .${LENS_SWITCH_CLASS} button.on { background: var(--accent); color: var(--on-accent); font-weight: 600; }
     /* The breadcrumb chip: the pill the row's action buttons share (the
        .wiki-bc-factcheck rule in wiki-page.ts), tinted while Overview hides something. */
     .${LENS_CHIP_CLASS} {

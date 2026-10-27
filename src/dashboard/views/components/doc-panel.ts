@@ -198,7 +198,7 @@ export function docPanelStyles(animationName = "slideIn"): string {
     .doc-panel-followup.doc-panel-primary {
       background: var(--accent-hover);
       border-color: var(--accent-hover);
-      color: #fff;
+      color: var(--on-accent);
       font-weight: 600;
     }
     .doc-panel-followup.doc-panel-primary:hover { border-color: var(--accent-light); }

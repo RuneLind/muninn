@@ -386,6 +386,24 @@ test.describe("Wiki reader: in-page references", () => {
     expectClean(seen);
   });
 
+  // PR #747 fix round 2: the peek card opened over the open ◐ menu is on top.
+  test("one Escape closes a peek card over the open theme menu, the next closes the menu", async ({ page }) => {
+    const seen = await openPage(page);
+    const menu = page.locator("#themeMenu");
+    await page.locator("#themeToggle").click();
+    await expect(menu).toBeVisible();
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "D4" }).first().hover();
+    const peek = page.locator(".wiki-ref-peek");
+    await expect(peek).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(peek).toHaveCount(0);
+    await expect(menu, "the first Escape leaves the menu open").toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(menu, "the second Escape closes the menu").toBeHidden();
+    await expect(page.locator("#themeToggle")).toBeFocused();
+    expectClean(seen);
+  });
+
   test("Escape from inside the peek returns focus to the link without reopening it", async ({ page }) => {
     const seen = await openPage(page);
     // Tab from the article's last link enters the card; focus it directly here.

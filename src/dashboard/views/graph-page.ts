@@ -110,7 +110,7 @@ export async function renderGraphPage(): Promise<string> {
       font-size: 11px;
       cursor: pointer;
     }
-    .mode-btn.active { background: var(--accent); color: #fff; }
+    .mode-btn.active { background: var(--accent); color: var(--on-accent); }
     .mode-btn.inactive { background: var(--bg-surface); color: var(--text-secondary); }
 
     .graph-stats {
@@ -335,6 +335,13 @@ export async function renderGraphPage(): Promise<string> {
     let graphData = null;
     let nodeMap = new Map();
     let graph = null;
+    // The canvas fill is --graph-canvas (a palette can warm it); re-read when
+    // the theme picker changes data-theme / data-palette.
+    function graphCanvasColor() {
+      return getComputedStyle(document.documentElement).getPropertyValue('--graph-canvas').trim() || '#0a0a0f';
+    }
+    new MutationObserver(() => { if (graph) graph.backgroundColor(graphCanvasColor()); })
+      .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-palette'] });
     let activeCategories = new Set();
     let highlightNodes = new Set();
     let highlightLinks = new Set();
@@ -836,7 +843,7 @@ export async function renderGraphPage(): Promise<string> {
         .linkDirectionalParticles(link => highlightLinks.has(link) ? 2 : 0)
         .linkDirectionalParticleWidth(2)
         .linkDirectionalParticleColor(link => link.type === 'wikilink' ? '#f59e0b' : '#6c63ff')
-        .backgroundColor('#0a0a0f')
+        .backgroundColor(graphCanvasColor())
         .d3AlphaDecay(0.03)
         .d3VelocityDecay(0.3)
         .warmupTicks(80)

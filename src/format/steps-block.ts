@@ -103,7 +103,7 @@ export function stepsCss(scope: string): string {
       font: inherit; font-size: 0.85em; padding: 0.2rem 0.65rem; cursor: pointer; border-radius: 6px;
       color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--text-muted);
     }
-    ${scope} .stp-btn[aria-pressed="true"] { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+    ${scope} .stp-btn[aria-pressed="true"] { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
     ${scope} .stp-btn[aria-disabled="true"] { cursor: default; opacity: 0.45; }
     ${scope} .stp-btn:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
     ${scope} .stp-pos, ${scope} .stp-sep { color: var(--text-soft); }

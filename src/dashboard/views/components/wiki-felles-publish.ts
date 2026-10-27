@@ -390,7 +390,7 @@ export function fellesPublishStyles(): string {
       padding: 5px 12px; border-radius: 8px; cursor: pointer; font-size: 12.5px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary);
     }
-    .wiki-felles-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .wiki-felles-actions button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
     /* Red marks the edge only: --status-error measures under 4.5:1 as text on
        the light inset, the same reason the status line keeps its words primary. */
     .wiki-felles-actions button.danger, .wiki-felles-confirm button.danger { border-color: var(--status-error); }
