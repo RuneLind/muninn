@@ -480,15 +480,15 @@ describe("runStaleConfirm (D16)", () => {
 
   test("the loop starts only with the scheduler on, a writable instance and a registered wiki", async () => {
     const { deps } = makeDeps();
-    expect(startStaleConfirmLoop({ schedulerEnabled: false, wikiStaleConfirmWikis: ["cw"] }, { deps })).toEqual([]);
-    expect(startStaleConfirmLoop({ schedulerEnabled: true, wikiStaleConfirmWikis: [] }, { deps })).toEqual([]);
-    expect(startStaleConfirmLoop({ schedulerEnabled: true, wikiStaleConfirmWikis: ["nope"] }, { deps })).toEqual([]);
+    expect(startStaleConfirmLoop({ schedulerEnabled: false, wikiStaleConfirmWikis: ["cw"], profile: "default" }, { deps })).toEqual([]);
+    expect(startStaleConfirmLoop({ schedulerEnabled: true, wikiStaleConfirmWikis: [], profile: "default" }, { deps })).toEqual([]);
+    expect(startStaleConfirmLoop({ schedulerEnabled: true, wikiStaleConfirmWikis: ["nope"], profile: "default" }, { deps })).toEqual([]);
     __setWikiReadonlyForTest(true);
-    expect(startStaleConfirmLoop({ schedulerEnabled: true, wikiStaleConfirmWikis: ["cw"] }, { deps })).toEqual([]);
+    expect(startStaleConfirmLoop({ schedulerEnabled: true, wikiStaleConfirmWikis: ["cw"], profile: "default" }, { deps })).toEqual([]);
     __setWikiReadonlyForTest(false);
     const ran: number[] = [];
     const counting = { ...deps, span: () => ran.push(1) };
-    expect(startStaleConfirmLoop({ schedulerEnabled: true, wikiStaleConfirmWikis: ["cw", "nope"] }, { deps: counting, firstDelayMs: 1, intervalMs: 60_000 })).toEqual(["cw"]);
+    expect(startStaleConfirmLoop({ schedulerEnabled: true, wikiStaleConfirmWikis: ["cw", "nope"], profile: "default" }, { deps: counting, firstDelayMs: 1, intervalMs: 60_000 })).toEqual(["cw"]);
     for (let i = 0; i < 100 && ran.length === 0; i++) await Bun.sleep(20);
     await stopStaleConfirmLoop();
     expect(ran).toEqual([1]);

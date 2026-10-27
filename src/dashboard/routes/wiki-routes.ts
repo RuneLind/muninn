@@ -2548,7 +2548,8 @@ export function registerWikiToolRoutes(
       const report = await stalePageReport(index, meta, asOfMs !== undefined ? { asOfMs } : {});
       const l = report.buckets?.linking.find((x) => x.relPath === linkingRef && x.bucket === "toCheck");
       if (!l) return c.json({ error: `${linkingRef || "(no linking page)"} is not a page to check for ${meta.relPath}` }, 404);
-      const changedHash = (await changedHashOf(index, meta.relPath)) ?? "unreadable";
+      const changedHash = await changedHashOf(index, meta.relPath);
+      if (changedHash === null) return c.json({ error: `${meta.relPath} cannot be read, so its verdicts have no key` }, 409);
       const row = await staleVerdictStore().upsert({
         wiki: entry.name,
         kind: "passage",

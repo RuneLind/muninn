@@ -291,8 +291,9 @@ if (startRetentionCleanup(config)) {
 }
 
 // The Stale check's confirm loop (D16): beside the retention cleanup, on the
-// write owner only — off with SCHEDULER_ENABLED=false, on a readonly instance
-// and when WIKI_STALE_CONFIRM_WIKIS names no registered wiki.
+// write owner only — off with SCHEDULER_ENABLED=false, on a readonly instance,
+// under MUNINN_PROFILE=nais and when WIKI_STALE_CONFIRM_WIKIS names no wiki it
+// can cover (each such name logs a warning).
 const staleConfirmWikis = startStaleConfirmLoop(config);
 if (staleConfirmWikis.length) {
   log.info("Stale confirm loop on (every 5 min after a run ends): {wikis}", { wikis: staleConfirmWikis.join(", ") });

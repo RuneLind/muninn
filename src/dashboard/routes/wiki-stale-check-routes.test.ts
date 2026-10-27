@@ -7,7 +7,7 @@
  * in the tool half. The database store is `src/db/wiki-stale-verdicts.test.ts`'s.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -441,6 +441,25 @@ describe("the Stale check's verdict routes", () => {
     } finally {
       __setStaleModelForTest(model);
       __setStaleVerdictStoreForTest(store);
+    }
+  });
+
+  // A14: an unreadable changed page has no content hash, so no passage key.
+  test("A14: an unreadable changed page writes no reader verdict and Check streams one fixed error", async () => {
+    fresh();
+    await chmod(path.join(root, "hub.md"), 0o000);
+    try {
+      fresh();
+      const res = await post("verdict", { wiki: "checkwiki", page: "hub.md", kind: "passage", linking: "notes/old.md", verdict: "true", asOf: "2026-06-20" });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toContain("cannot be read");
+      expect(store.rows.size).toBe(0);
+      const events = sseEvents(await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text());
+      expect(events).toEqual([["app_error", { type: "app_error", message: CHECK_FAILED }]]);
+      expect(prompts).toHaveLength(0);
+      expect(store.rows.size).toBe(0);
+    } finally {
+      await chmod(path.join(root, "hub.md"), 0o644);
     }
   });
 

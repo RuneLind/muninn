@@ -25,6 +25,7 @@ import path from "node:path";
 import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig } from "../bots/config.ts";
+import type { MuninnProfile } from "../config.ts";
 import {
   getStaleVerdicts,
   READER_CHECKED_BY,
@@ -439,13 +440,13 @@ const targetFacts = (meta: WikiPageMeta | undefined, relPath: string): StaleCall
   ...(meta?.description ? { description: meta.description } : {}),
 });
 
-/** The commits a call carries about `target`: null for an uncommitted change
- *  newer than every commit, else the subjects between `sinceMs` and `untilMs`
- *  (the check's `asOf`). */
+/** The commits a call carries about `target`: null while it has uncommitted
+ *  edits (D29: they are its last change, and no subject describes them; A14),
+ *  else the subjects between `sinceMs` and `untilMs` (the check's `asOf`,
+ *  which the working tree postdates). */
 export async function commitsFor(index: Pick<WikiIndex, "root">, target: WikiPageMeta | undefined, sinceMs: number | undefined, untilMs?: number) {
   if (!target) return undefined;
-  const uncommitted = untilMs === undefined && target.gitDirty === true && (target.gitTouchedMs === undefined || (sinceMs !== undefined && target.gitTouchedMs <= sinceMs));
-  if (uncommitted) return null;
+  if (untilMs === undefined && target.gitDirty === true) return null;
   return (await commitSubjectsSince(index.root, target.relPath, sinceMs, untilMs)) ?? undefined;
 }
 
@@ -550,6 +551,18 @@ export interface ConfirmRunSummary {
 }
 
 class ConfirmTimeout extends Error {}
+/** The loop was stopped (A8): the run starts nothing more and writes nothing more. */
+class ConfirmStopped extends Error {}
+
+/** The loop's verdict writes in flight, an abandoned one included, so shutdown
+ *  can wait for them before the pool closes (A8). A direct run (no `signal`) is not the loop's. */
+const pendingWrites = new Set<Promise<unknown>>();
+function trackWrite<T>(p: Promise<T>): Promise<T> {
+  pendingWrites.add(p);
+  const done = () => void pendingWrites.delete(p);
+  p.then(done, done);
+  return p;
+}
 
 /** `p`, or a rejection after `ms`; the timer is cleared either way. */
 async function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
@@ -570,15 +583,25 @@ async function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
  * {@link CONFIRM_CALL_MAX_MS} out. The rebuilds, the store and the calls all
  * race the run's {@link CONFIRM_RUN_BUDGET_MS}, so the run returns within it.
  * A failed call writes nothing, so a later run retries it. Never rejects.
+ * Once `signal` aborts (the loop's stop, A8) every await the run is in
+ * rejects, and no rebuild, call or write starts after it.
  */
-export async function runStaleConfirm(wikiNames: readonly string[], deps: ConfirmDeps = realConfirmDeps): Promise<ConfirmRunSummary> {
+export async function runStaleConfirm(wikiNames: readonly string[], deps: ConfirmDeps = realConfirmDeps, signal?: AbortSignal): Promise<ConfirmRunSummary> {
   const lim = { ...CONFIRM_LIMITS, ...deps.limits };
   const failures = deps.failures ?? confirmFailures;
   const started = deps.now();
   const deadlineAt = started + lim.budgetMs;
   // Real time, whatever `deps.now` says: this is the bound the run returns within.
   const endsAt = Date.now() + lim.budgetMs;
-  const bounded = <T>(p: Promise<T>, what: string) => within(p, endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`);
+  const stoppedRace = new Promise<never>((_, reject) => {
+    if (signal?.aborted) reject(new ConfirmStopped());
+    else signal?.addEventListener("abort", () => reject(new ConfirmStopped()), { once: true });
+  });
+  stoppedRace.catch(() => {});
+  const bounded = <T>(p: Promise<T>, what: string) => {
+    if (signal?.aborted) return Promise.reject(new ConfirmStopped());
+    return Promise.race([within(p, endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`), stoppedRace]);
+  };
   const out: ConfirmRunSummary = { wikis: [], calls: 0, errors: 0, left: 0, elapsedMs: 0 };
   let tracer: Tracer | null = null;
   const tracerOnce = () => (tracer ??= deps.tracer());
@@ -589,6 +612,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   const todo: { row: Row; entry: WikiRegistryEntry; index: WikiIndex; bot: BotConfig; page: WikiPageMeta; hit: StatusLineHit; key: string }[] = [];
   const wanted = new Set(wikiNames.map((n) => n.toLowerCase()));
   for (const entry of deps.registry()) {
+    if (signal?.aborted) break;
     if (!wanted.has(entry.name.toLowerCase())) continue;
     const row: Row = { wiki: entry.name, hits: 0, cached: 0, calls: 0, stale: 0, errors: 0, left: 0 };
     out.wikis.push(row);
@@ -624,6 +648,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         else todo.push(t);
       }
     } catch (err) {
+      if (err instanceof ConfirmStopped) break;
       row.errors++;
       log.warn("Stale confirm: wiki {wiki} failed: {error}", { wiki: entry.name, error: errText(err) });
     }
@@ -633,7 +658,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   todo.sort((a, b) => (failures.get(a.key) ?? 0) - (failures.get(b.key) ?? 0));
   for (const t of todo) {
     const { row } = t;
-    if (out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || Date.now() >= endsAt) {
+    if (signal?.aborted || out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || Date.now() >= endsAt) {
       row.left++;
       continue;
     }
@@ -656,8 +681,10 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         "model call",
       );
       const answer = parseStaleAnswer(raw, input.passage);
+      // An answer that resolved as the loop stopped is dropped, not written.
+      if (signal?.aborted) throw new ConfirmStopped();
       const stored = await bounded(
-        deps.store().upsert({
+        (signal ? trackWrite : <T>(p: Promise<T>) => p)(deps.store().upsert({
           wiki: t.entry.name,
           kind: "status-line",
           page: t.page.relPath,
@@ -666,12 +693,19 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
           reason: answer.reason,
           edit: answer.edit,
           checkedBy: `model:${t.bot.name}`,
-        }),
+        })),
         "verdict write",
       );
       failures.delete(t.key);
       if (stored.verdict === "stale") row.stale++;
     } catch (err) {
+      // Stopped mid-call: the answer is dropped and the hit waits for the next run, not counted as failed.
+      if (err instanceof ConfirmStopped) {
+        out.calls--;
+        row.calls--;
+        row.left++;
+        continue;
+      }
       row.errors++;
       failures.set(t.key, deps.now());
       log.warn("Stale confirm: call for {page}:{line} failed: {error}", {
@@ -699,61 +733,112 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   return out;
 }
 
-/** The wikis the loop covers: `wikiNames` that are registered. */
-export function confirmLoopWikis(wikiNames: readonly string[], registry: readonly WikiRegistryEntry[]): string[] {
-  const names = new Map(registry.map((e) => [e.name.toLowerCase(), e.name]));
-  return [...new Set(wikiNames.map((n) => names.get(n.toLowerCase())).filter((n): n is string => !!n))];
+/** What the loop can cover of `wikiNames` (A13): the registered wikis with a
+ *  writable root and a routing bot, and the names it cannot cover, by reason. */
+export function confirmLoopCoverage(
+  wikiNames: readonly string[],
+  registry: readonly WikiRegistryEntry[],
+  bots: BotConfig[],
+): { wikis: string[]; unknown: string[]; readonly: string[]; noBot: string[] } {
+  const byName = new Map(registry.map((e) => [e.name.toLowerCase(), e]));
+  const out = { wikis: [] as string[], unknown: [] as string[], readonly: [] as string[], noBot: [] as string[] };
+  const seen = new Set<string>();
+  for (const name of wikiNames) {
+    if (seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    const entry = byName.get(name.toLowerCase());
+    if (!entry) out.unknown.push(name);
+    else if (isReadonlyWikiRoot(entry.root)) out.readonly.push(entry.name);
+    else if (!resolveWikiSynthesisBot(entry, bots).bot) out.noBot.push(entry.name);
+    else out.wikis.push(entry.name);
+  }
+  return out;
 }
 
 let timer: ReturnType<typeof setTimeout> | null = null;
 let running: Promise<unknown> | null = null;
+let runAbort: AbortController | null = null;
 let stopped = true;
+/** Bumped by every start and stop: a chain whose generation is past schedules nothing (A8). */
+let generation = 0;
 
 /**
- * Start the loop (D16) when the scheduler runs, the instance is not readonly
- * and `wikiNames` names a registered wiki; returns the covered wikis, or []
- * when it did not start. The next run is scheduled when the previous one
- * ends, so runs never overlap; holds no bot's scheduler tick.
+ * Start the loop (D16) when the scheduler runs, the instance is not readonly,
+ * the profile is not `nais` (it drops the tool half) and `wikiNames` names a
+ * wiki the loop can cover; returns the covered wikis, or [] when it did not
+ * start. A second start while the loop runs is a no-op. Each name it cannot
+ * cover logs one warning (A13). The next run is scheduled when the previous
+ * one ends, so runs never overlap; holds no bot's scheduler tick.
  */
 export function startStaleConfirmLoop(
-  config: { schedulerEnabled: boolean; wikiStaleConfirmWikis: readonly string[] },
+  config: { schedulerEnabled: boolean; wikiStaleConfirmWikis: readonly string[]; profile: MuninnProfile },
   opts: { deps?: ConfirmDeps; firstDelayMs?: number; intervalMs?: number } = {},
 ): string[] {
-  if (!stopped) return [];
-  if (!config.schedulerEnabled || isWikiReadonly()) return [];
+  if (!stopped || config.wikiStaleConfirmWikis.length === 0) return [];
+  const listed = config.wikiStaleConfirmWikis.join(",");
+  if (config.profile === "nais") {
+    log.warn("Stale confirm loop off: MUNINN_PROFILE=nais drops the tool half (WIKI_STALE_CONFIRM_WIKIS={wikis})", { wikis: listed });
+    return [];
+  }
+  if (!config.schedulerEnabled || isWikiReadonly()) {
+    log.info("Stale confirm loop off: {why} (WIKI_STALE_CONFIRM_WIKIS={wikis})", { why: config.schedulerEnabled ? "the instance is readonly" : "SCHEDULER_ENABLED is off", wikis: listed });
+    return [];
+  }
   const deps = opts.deps ?? realConfirmDeps;
-  const wikis = confirmLoopWikis(config.wikiStaleConfirmWikis, deps.registry());
+  const cover = confirmLoopCoverage(config.wikiStaleConfirmWikis, deps.registry(), deps.bots());
+  for (const wiki of cover.unknown) log.warn("Stale confirm: WIKI_STALE_CONFIRM_WIKIS names {wiki}, which is not a registered wiki — skipped", { wiki });
+  for (const wiki of cover.readonly) log.warn("Stale confirm: {wiki} has a readonly root (WIKI_READONLY_ROOTS) — skipped", { wiki });
+  for (const wiki of cover.noBot) log.warn("Stale confirm: {wiki} has no routing bot (synthesisBot, owner or research bot) — skipped", { wiki });
+  const wikis = cover.wikis;
   if (wikis.length === 0) return [];
   stopped = false;
+  const gen = ++generation;
+  const live = () => !stopped && gen === generation;
   const schedule = (ms: number) => {
-    if (stopped) return;
+    if (!live()) return;
     timer = setTimeout(tick, ms);
     timer.unref?.();
   };
   const tick = () => {
     timer = null;
+    if (!live()) return;
     if (running) {
       log.warn("Stale confirm skipped: the previous run is still in flight");
       return schedule(opts.intervalMs ?? CONFIRM_INTERVAL_MS);
     }
-    running = runStaleConfirm(wikis, deps).finally(() => {
-      running = null;
+    const ac = new AbortController();
+    runAbort = ac;
+    const run = runStaleConfirm(wikis, deps, ac.signal).finally(() => {
+      if (running === run) running = null;
+      if (runAbort === ac) runAbort = null;
       schedule(opts.intervalMs ?? CONFIRM_INTERVAL_MS);
     });
+    running = run;
   };
   schedule(opts.firstDelayMs ?? CONFIRM_FIRST_DELAY_MS);
   return wikis;
 }
 
-/** Stop the loop and wait (bounded) for a run in flight. */
+/**
+ * Stop the loop (A8): no run or call starts after this, a run in flight is
+ * aborted (its pending await rejects; a model call already sent is not
+ * cancelled, its answer is dropped), and the returned promise waits at most
+ * `waitMs` for that run and the verdict writes it had in flight, so they land
+ * before the database pool closes.
+ */
 export async function stopStaleConfirmLoop(waitMs = 5_000): Promise<void> {
   stopped = true;
+  generation++;
   if (timer) clearTimeout(timer);
   timer = null;
-  const inFlight = running;
-  if (!inFlight) return;
+  runAbort?.abort();
+  const settle = [...(running ? [running] : []), ...pendingWrites];
+  if (settle.length === 0) return;
   let t: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = await Promise.race([inFlight.then(() => false), new Promise<boolean>((r) => (t = setTimeout(() => r(true), waitMs)))]);
+  const timedOut = await Promise.race([
+    Promise.allSettled(settle).then(() => false),
+    new Promise<boolean>((r) => (t = setTimeout(() => r(true), waitMs))),
+  ]);
   clearTimeout(t);
   if (timedOut) log.warn("Shutdown: timed out waiting for the stale confirm run");
 }
@@ -800,7 +885,17 @@ const readText = async (abs: string): Promise<string | null> => {
   }
 };
 
-/** The changed page's content hash, or null when it cannot be read. */
+/** Check on a changed page that cannot be read: its content hash, and so
+ *  every passage key, is unknown (A14). */
+export class StaleChangedUnreadableError extends Error {
+  constructor(relPath: string) {
+    super(`the changed page ${relPath} cannot be read`);
+    this.name = "StaleChangedUnreadableError";
+  }
+}
+
+/** The changed page's content hash, or null when it cannot be read. A null
+ *  hash gives no passage key: callers skip or refuse, never key on a sentinel. */
 export async function changedHashOf(index: WikiIndex, relPath: string): Promise<string | null> {
   const text = await readText(path.join(index.root, relPath));
   return text === null ? null : changedPageContentHash(text);
@@ -832,7 +927,8 @@ export async function runStaleCheck(opts: {
   const buckets = await linkingBuckets(index, opts.relPath, opts.asOfMs !== undefined ? { asOfMs: opts.asOfMs } : {});
   if (!buckets) return false;
   const changedMeta = index.resolveRelPath(buckets.relPath);
-  const changedHash = (await changedHashOf(index, buckets.relPath)) ?? "unreadable";
+  const changedHash = await changedHashOf(index, buckets.relPath);
+  if (changedHash === null) throw new StaleChangedUnreadableError(buckets.relPath);
   const items = buckets.linking
     .filter((l) => l.bucket === "toCheck")
     .map((l) => {
@@ -948,7 +1044,8 @@ export async function passageVerdicts(
   const store = opts.store ?? staleVerdictStore();
   const toCheck = linking.filter((l) => l.bucket === "toCheck");
   if (toCheck.length === 0) return new Map();
-  const changedHash = (await changedHashOf(index, changedRelPath)) ?? "unreadable";
+  const changedHash = await changedHashOf(index, changedRelPath);
+  if (changedHash === null) return new Map();
   const keys = new Map(toCheck.map((l) => [l.relPath, passageVerdictKey(index, changedRelPath, changedHash, l, opts.asOfMs)]));
   const rows = await store.get(wiki, "passage", [...keys.values()]);
   const out = new Map<string, VerdictView>();
