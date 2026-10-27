@@ -1102,3 +1102,20 @@ test("buildWikiGitDates: culling a fenced page (signal: none + signal-reason + s
     await rm(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("newestEditAtOrBefore outside a git checkout answers each page's raw newest touch at or before asOf (B4-2)", async () => {
+  const { newestEditAtOrBefore } = await import("./git-dates.ts");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const dir = await mkdtemp(path.join(tmpdir(), "no-git-"));
+  try {
+    const touches = new Map([
+      ["a.md", [{ ts: 1_000, commit: "c1", path: "a.md" }, { ts: 2_000, commit: "c2", path: "a.md", parentPath: "a.md" }, { ts: 9_000, commit: "c3", path: "a.md", parentPath: "a.md" }]],
+      ["b.md", [{ ts: 8_000, commit: "c4", path: "b.md" }]],
+    ]);
+    expect([...(await newestEditAtOrBefore(dir, touches, 5_000))]).toEqual([["a.md", 2_000]]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

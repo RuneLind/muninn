@@ -27,7 +27,8 @@
  * and an answer of the wrong shape included, and the whole run ends within
  * {@link RUN_DEADLINE_MS}: a handoff that runs it must never fail or wait on it. On a
  * readonly instance (D25) it prints the free checks plus one
- * «check unavailable: readonly instance» line.
+ * «check unavailable: readonly instance» line; on a writable instance whose
+ * wiki root is readonly (`WIKI_READONLY_ROOTS`), «… readonly wiki».
  */
 
 export const DEFAULT_BASE_URL = "http://127.0.0.1:3010";
@@ -154,7 +155,9 @@ export function formatPageReport(r: Json): string[] {
 }
 
 /** The wiki-wide summary, as printed: uncommitted, recently committed, then
- *  every other page with a stale status line. */
+ *  every other page with a stale status line. In each group the rows with a
+ *  stale line or a page to check come first, and the rest fold into one count
+ *  line (`--json` keeps every row). */
 export function formatSummary(r: Json): string[] {
   const out: string[] = [];
   const t = r.totals;
@@ -169,7 +172,10 @@ export function formatSummary(r: Json): string[] {
     const rows = r.pages.filter(keep);
     if (!rows.length) continue;
     out.push(`${label} (${rows.length}):`);
-    out.push(...rows.map(row));
+    const live = rows.filter((p: Json) => p.staleLines > 0 || p.toCheck > 0);
+    out.push(...live.map(row));
+    const quiet = rows.length - live.length;
+    if (quiet) out.push(`  + ${quiet} page${quiet === 1 ? "" : "s"} with nothing stale`);
   }
   return out;
 }
@@ -211,7 +217,8 @@ export async function runWikiStale(
       resolve("deadline");
     }, deadlineMs);
   });
-  let readonly = false;
+  /** Why the route refuses the model checks: the whole instance, or this wiki's root. */
+  let readonly: "instance" | "wiki" | null = null;
   let late = false;
   const ask = async (extra: Record<string, string>, valid: (r: Json) => boolean, what: string): Promise<Json | null> => {
     if (late) return null;
@@ -219,7 +226,7 @@ export async function runWikiStale(
       const got = await Promise.race([fetchJson(url(extra), abort.signal), expired]);
       if (got === "deadline") throw new Error("deadline");
       const { status, body } = got;
-      if (body?.readonly) readonly = true;
+      if (body?.readonly) readonly = body.readonly === "root" ? "wiki" : "instance";
       if (args.json) out.push(JSON.stringify(body));
       if (status >= 400 || body?.error) {
         out.push(notice(`wiki-stale: ${body?.error ?? `HTTP ${status}`}${extra.page ? ` (${extra.page})` : ""}`));
@@ -274,7 +281,7 @@ export async function runWikiStale(
   } finally {
     clearTimeout(timer);
   }
-  if (readonly) out.push(notice("check unavailable: readonly instance"));
+  if (readonly) out.push(notice(`check unavailable: readonly ${readonly}`));
   else if (args.check) out.push(notice("check: the model checks arrive with PR 2a — these are the free checks only"));
   return out;
 }

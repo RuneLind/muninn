@@ -1107,6 +1107,9 @@ export async function lintWiki(
   const systemMapPages: SystemMapPage[] = [];
 
   for (const page of index.pages) {
+    // Check 24 — a status word after a link to a plan that says otherwise
+    // (info, D27): the hits the index build kept (`stale.ts`).
+    findings.push(...checkStatusLines(page.relPath, index));
     if (page.type === "explainer") continue; // no frontmatter, no links
     const content = await readFile(path.join(index.root, page.relPath));
     if (content === null) continue; // unreadable — skip, keep linting the rest
@@ -1128,9 +1131,6 @@ export async function lintWiki(
       findings.push(...checkDrift(page, content, drift));
     }
     if (!page.culled && content.includes("<SystemMap")) systemMapPages.push({ page, content });
-    // Check 24 — a status word after a link to a plan that says otherwise
-    // (info, D27). The index build runs the same two phases (`stale.ts`).
-    findings.push(...checkStatusLines(page, content, index));
     // Reserved and culled pages own nothing and are linted for nothing.
     if (statePhrases && !reservedBasename(page.relPath) && !page.culled) {
       const fm = parseFrontmatter(content);

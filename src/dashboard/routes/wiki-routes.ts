@@ -2318,7 +2318,10 @@ export function registerWikiToolRoutes(
     if (asOfMs === null) return c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms" }, 400);
     const index = await getWikiIndex({ root: entry.root });
     if (!index) return c.json({ error: "wiki directory not found" }, 503);
-    const base = { wiki: entry.name, readonly: isWikiReadonly() || isReadonlyWikiRoot(entry.root) };
+    // Why the model checks (PR 2a) are refused here, if they are: the
+    // instance switch, else this wiki's root in `WIKI_READONLY_ROOTS`.
+    const readonly = isWikiReadonly() ? "instance" : isReadonlyWikiRoot(entry.root) ? "root" : false;
+    const base = { wiki: entry.name, readonly };
     const session = (c.req.query("session") ?? "").trim();
     if (session) {
       // Fresh, not the background memo (up to a TTL old after an idle spell):

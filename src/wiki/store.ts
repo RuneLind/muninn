@@ -4105,10 +4105,12 @@ export async function buildWikiIndex(
   }
 
   // The Stale check's phase B: each candidate against its target's status.
-  // A page the same-stem rule dropped has no `byRelPath` entry and is skipped.
+  // A page the same-stem rule dropped has no `byRelPath` entry and is skipped;
+  // living-ness is read again on the final meta, after the attachment pass.
   const statusLineHits = new Map<string, StatusLineHit[]>();
   for (const [relPath, candidates] of staleCandidates) {
-    if (!resolveRelPath(relPath)) continue;
+    const meta = resolveRelPath(relPath);
+    if (!meta || !isLivingPage(meta)) continue;
     const hits = resolveStatusLineHits(relPath, candidates, resolve);
     if (hits.length) statusLineHits.set(relPath, hits);
   }

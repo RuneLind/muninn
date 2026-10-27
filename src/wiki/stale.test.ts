@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   bucketFor,
+  isChangedPage,
   isLivingPage,
   linkingBuckets,
   linkingCounts,
@@ -202,6 +203,28 @@ describe("living pages and history (D4)", () => {
     expect(isLivingPage(meta({ relPath: "plans/index.md" }))).toBe(false);
     expect(isLivingPage(meta({ relPath: "notes/a.md", culled: true }))).toBe(false);
   });
+
+  test("every history type and every closed status, on a plain path, is history (B4-2)", () => {
+    for (const type of ["archive", "report", "blog", "review", "handoff", "source"]) {
+      expect([type, isLivingPage(meta({ relPath: "notes/a.md", type }))]).toEqual([type, false]);
+    }
+    for (const plan_status of ["shipped", "superseded", "abandoned"] as const) {
+      expect([plan_status, isLivingPage(meta({ relPath: "plans/a.md", plan_status }))]).toEqual([plan_status, false]);
+    }
+    for (const plan_status of ["proposed", "ready", "in-flight", "blocked"] as const) {
+      expect([plan_status, isLivingPage(meta({ relPath: "plans/a.md", plan_status }))]).toEqual([plan_status, true]);
+    }
+  });
+});
+
+describe("isChangedPage: a 14-day window that ends at «now» (B4-2)", () => {
+  test("14 days back is changed, a millisecond more is not, and the future is not", () => {
+    expect(isChangedPage(T0 - 14 * DAY, T0)).toBe(true);
+    expect(isChangedPage(T0 - 14 * DAY - 1, T0)).toBe(false);
+    expect(isChangedPage(T0, T0)).toBe(true);
+    expect(isChangedPage(T0 + 1, T0)).toBe(false);
+    expect(isChangedPage(undefined, T0)).toBe(false);
+  });
 });
 
 describe("pageLastChangeMs (D29)", () => {
@@ -239,6 +262,17 @@ describe("bucketFor (D5)", () => {
   test("Changed since, then a page inside the 2-day margin is a Mention", () => {
     expect(bucketFor({ page, lastChangeMs: T0 + 1, changedAtMs, passages: [passage("[[x]] shipped")] })).toBe("changedSince");
     expect(bucketFor({ page, lastChangeMs: T0 - DAY, changedAtMs, passages: [passage("[[x]] shipped")] })).toBe("mentions");
+  });
+
+  test("the boundaries: the same instant is no Changed since; exactly 2 days before is inside the margin (B4-2)", () => {
+    const at = (lastChangeMs: number) => bucketFor({ page, lastChangeMs, changedAtMs, passages: [passage("[[x]] shipped")] });
+    expect(at(T0)).toBe("mentions");
+    expect(at(T0 - 2 * DAY)).toBe("mentions");
+    expect(at(T0 - 2 * DAY - 1)).toBe("toCheck");
+  });
+
+  test("a superseded plan is History (B4-2)", () => {
+    expect(bucketFor({ page: meta({ relPath: "plans/p.md", plan_status: "superseded" }), lastChangeMs: old, changedAtMs, passages: [passage("[[x]] shipped")] })).toBe("history");
   });
 
   test("older: Pointers when every passage is a pointer", () => {
@@ -363,6 +397,14 @@ describe("the index, the buckets and Moved with on a temp wiki", () => {
     expect(report.counts["status-line"]).toBe(1);
   });
 
+  test("lint check 24 reads the index's hits, not a second derivation (D27)", async () => {
+    const lines = async (statusLineHits: WikiIndex["statusLineHits"]) =>
+      (await lintWiki({ ...index, statusLineHits })).findings.filter((x) => x.check === "status-line").map((x) => [x.relPath, x.line]);
+    expect(await lines(new Map())).toEqual([]);
+    const planted = { line: 9, target: "plans/q.md", said: ["shipped" as const], now: "in-flight" as const, text: "x" };
+    expect(await lines(new Map([["notes/mention.md", [planted]]]))).toEqual([["notes/mention.md", 9]]);
+  });
+
   test("buckets for the changed page, as of a pinned day", async () => {
     const b = await linkingBuckets(index, "hub.md", { asOfMs });
     expect(b).not.toBeNull();
@@ -419,6 +461,16 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
   let index: WikiIndex;
   const asOfMs = Date.parse("2026-06-20T23:59:59.999Z");
   const long = "and its whole long description here";
+  const HEADINGS = [
+    ["sources", "Sources"],
+    ["see-also", "See also"],
+    ["related", "Related concepts"],
+    ["references", "References"],
+    ["kilder", "Kilder"],
+    ["se-ogsa", "Se også"],
+    ["relatert", "Relatert"],
+    ["lenker", "Lenker"],
+  ] as const;
 
   const write = async (rel: string, text: string) => {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
@@ -445,6 +497,13 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
     await write("notes/titled.md", page("Titled", 'The pin in [Hub](../hub.md "the hub") landed on 23.05.'));
     await write("notes/image.md", page("Image", "The fixtures live in [[hub]].\n\n![shot](../hub.md) taken 23.05."));
     await write("notes/comma.md", page("Comma", "The pin in [XY](x%2Cy.md) landed on 23.05."));
+    // B4-2: every pointer heading name, each over a claim-bearing line (a
+    // non-pointer heading would make it To check); «Related concepts» is a prefix word.
+    for (const [slug, heading] of HEADINGS) await write(`notes/h-${slug}.md`, page(slug, `## ${heading}\n\n- [[hub]] pinned 23.05 ${long}`));
+    // B4-2: a link only on an exempt line (a blockquote) leaves no passage: a Mention.
+    await write("notes/quoted.md", page("Quoted", "Body.\n\n> The pin in [[hub]] landed on 23.05."));
+    // B4-2: a frontmatter link is a Pointer, whatever its line says.
+    await write("notes/fm.md", page("Fm", "Body.", 'up: "[[hub]] pinned 23.05"\n'));
     await commitAt("2026-05-01T10:00:00Z", "seed");
     await write("hub.md", page("Hub", "Body two."));
     await write("notes/x,y.md", page("XY", "Body two."));
@@ -462,7 +521,11 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
       "notes/relaterte.md": "pointers",
       "notes/titled.md": "toCheck",
       "notes/image.md": "mentions",
+      ...Object.fromEntries(HEADINGS.map(([slug]) => [`notes/h-${slug}.md`, "pointers"])),
+      "notes/quoted.md": "mentions",
+      "notes/fm.md": "pointers",
     });
+    expect(b!.linking.find((l) => l.relPath === "notes/quoted.md")!.passages).toEqual([]);
     const titled = b!.linking.find((l) => l.relPath === "notes/titled.md")!;
     expect(titled.passages.map((p) => [p.line, p.claim])).toEqual([[5, "date"]]);
   });
@@ -519,6 +582,12 @@ describe("asOf steps back past metadata-only commits (D29, F3)", () => {
     expect(await linkingBuckets(index, "notes/a.md", { asOfMs })).toBeNull();
     // Without asOf the newest edit stands.
     expect((await stalePageReport(index, a)).lastChangeMs).toBe(Date.parse("2026-06-25T10:00:00Z"));
+  });
+
+  test("each asOf steps back on its own: a second, earlier asOf on the same index is not the first's answer (B4-2)", async () => {
+    const a = index.resolveRelPath("notes/a.md")!;
+    expect((await stalePageReport(index, a, { asOfMs })).lastChangeMs).toBe(Date.parse("2026-06-01T10:00:00Z"));
+    expect((await stalePageReport(index, a, { asOfMs: Date.parse("2026-05-15T23:59:59.999Z") })).lastChangeMs).toBe(Date.parse("2026-05-01T10:00:00Z"));
   });
 
   test("teardown", async () => {
@@ -586,6 +655,40 @@ describe("the summary's counts-only path (F6)", () => {
       expect(await linkingCounts(index, row.relPath, { asOfMs, readFile: (a) => Bun.file(a).text() })).toEqual(full!.counts);
     }
     expect((await linkingBuckets(index, "a.md", { asOfMs }))!.counts).toEqual({ toCheck: 1, mentions: 2, pointers: 1, history: 2, changedSince: 1 });
+  });
+
+  test("teardown", async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+});
+
+describe("a culled page and its attachment hold no hits, in the index and in lint alike (B4-1)", () => {
+  let root = "";
+  let index: WikiIndex;
+
+  test("setup", async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-stale-culled-"));
+    const write = async (rel: string, text: string) => {
+      await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+      await writeFile(path.join(root, rel), text);
+    };
+    await write("plans/p.md", page("P", "Body.", "plan_status: shipped\n"));
+    await write("notes/old.md", page("Old", "[[p]] is in-flight\n\n<Embed src=\"./old-x.html\" />", "signal: none\n"));
+    await write("notes/old.html", "<html><body><p>[[p]] is in-flight</p></body></html>");
+    await write("notes/old-x.html", "<html><body><p>[[p]] is in-flight</p></body></html>");
+    await write("notes/live.md", page("Live", "[[p]] is in-flight"));
+    // B4-2: history pages say the same and hold nothing.
+    await write("archive/arc.md", page("Arc", "[[p]] is in-flight"));
+    await write("notes/src.md", page("Src", "[[p]] is in-flight", "type: source\n"));
+    await write("plans/gone.md", page("Gone", "[[p]] is in-flight", "plan_status: superseded\n"));
+    index = await buildWikiIndex(root);
+  }, 30_000);
+
+  test("the attachments inherit the cull, and only the live page holds a hit", async () => {
+    expect(["notes/old.md", "notes/old.html", "notes/old-x.html"].map((r) => index.resolveRelPath(r)?.culled)).toEqual([true, true, true]);
+    expect([...(index.statusLineHits ?? new Map()).keys()]).toEqual(["notes/live.md"]);
+    const lint = (await lintWiki(index)).findings.filter((x) => x.check === "status-line").map((x) => x.relPath);
+    expect(lint).toEqual(["notes/live.md"]);
   });
 
   test("teardown", async () => {

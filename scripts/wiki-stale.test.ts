@@ -60,9 +60,14 @@ describe("runWikiStale", () => {
   });
 
   test("a readonly instance prints the free checks plus one «check unavailable» line", async () => {
-    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--check"], { fetchJson: fake(() => ({ ...report, readonly: true })) });
+    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--check"], { fetchJson: fake(() => ({ ...report, readonly: "instance" })) });
     expect(out.filter((l) => l.startsWith("check"))).toEqual(["check unavailable: readonly instance"]);
     expect(out.join("\n")).toContain("repos/api.md");
+  });
+
+  test("a readonly wiki on a writable instance names the wiki, not the instance (B4-3)", async () => {
+    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--check"], { fetchJson: fake(() => ({ ...report, readonly: "root" })) });
+    expect(out.filter((l) => l.startsWith("check"))).toEqual(["check unavailable: readonly wiki"]);
   });
 
   test("neither --pages nor --session: the summary, grouped uncommitted / recently committed", async () => {
@@ -84,6 +89,33 @@ describe("runWikiStale", () => {
     expect(out[0]).toBe("w: 2 stale status line(s), 3 linking page(s) to check, 2 changed page(s) in the 14 days to 2026-10-25");
     expect(out).toContain("uncommitted (1):");
     expect(out).toContain("recently committed (1):");
+  });
+
+  test("the summary prints rows with something to check first and folds the rest into one count line (B4-3)", async () => {
+    const pages = [
+      { relPath: "z0.md", staleLines: 0, toCheck: 0, changed: true, dirty: false },
+      { relPath: "a1.md", staleLines: 0, toCheck: 2, changed: true, dirty: false },
+      { relPath: "z1.md", staleLines: 0, toCheck: 0, changed: true, dirty: false },
+      { relPath: "b1.md", staleLines: 1, toCheck: 0, changed: true, dirty: false },
+      { relPath: "d0.md", staleLines: 0, toCheck: 0, changed: true, dirty: true },
+      { relPath: "o1.md", staleLines: 3, toCheck: 0, changed: false, dirty: false },
+    ];
+    const summary = { wiki: "w", asOfMs: 0, totals: { staleLines: 4, toCheck: 2, changedPages: 5 }, pages };
+    const out = await runWikiStale(["--wiki", "w"], { env: {}, fetchJson: fake(() => summary) });
+    const rel = (l: string) => l.trim().split(" ")[0];
+    expect(out.slice(1).map((l) => (l.startsWith("  ") && !l.startsWith("  +") ? rel(l) : l))).toEqual([
+      "uncommitted (1):",
+      "  + 1 page with nothing stale",
+      "recently committed (4):",
+      "a1.md",
+      "b1.md",
+      "  + 2 pages with nothing stale",
+      "older pages with stale status lines (1):",
+      "o1.md",
+    ]);
+    // --json keeps every row.
+    const json = await runWikiStale(["--wiki", "w", "--json"], { env: {}, fetchJson: fake(() => summary) });
+    expect(JSON.parse(json[0]!).pages).toHaveLength(6);
   });
 
   test("--session: the pages the session wrote, each reported", async () => {

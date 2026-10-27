@@ -16,6 +16,7 @@ import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 import { wikiRouteTable } from "../../test/wiki-route-table.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
+import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import { __resetWorkSessionsForTest, refreshWorkSessions, workSessionsDepsFromEnv, workSessionsFor } from "../../wiki/work-sessions.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
@@ -99,6 +100,21 @@ describe("GET /api/wiki/stale", () => {
     expect(status).toBe(200);
     expect(body.totals).toEqual({ staleLines: 1, toCheck: 1, changedPages: 2 });
     expect(body.pages[0]).toMatchObject({ relPath: "hub.md", staleLines: 1, toCheck: 1, changed: true, dirty: false });
+  });
+
+  test("readonly names its cause: the instance, else this wiki's root (B4-3)", async () => {
+    try {
+      __setReadonlyWikiRootsForTest([root]);
+      expect((await get("wiki=stalewiki&page=hub.md")).body.readonly).toBe("root");
+      __setWikiReadonlyForTest(true);
+      expect((await get("wiki=stalewiki&page=hub.md")).body.readonly).toBe("instance");
+      __setReadonlyWikiRootsForTest();
+      expect((await get("wiki=stalewiki")).body.readonly).toBe("instance");
+    } finally {
+      __setWikiReadonlyForTest();
+      __setReadonlyWikiRootsForTest();
+    }
+    expect((await get("wiki=stalewiki")).body.readonly).toBe(false);
   });
 
   test("refusals: an unknown wiki, a bad asOf, an unknown page", async () => {

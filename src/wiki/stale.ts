@@ -9,8 +9,8 @@
  *   {@link statusLineCandidates} reads one page's text (the prefilter, then
  *   check 14's masks on the matching pages only) and
  *   {@link resolveStatusLineHits} compares each candidate with its target
- *   once the whole index is resolved. Lint check 24 (`status-line`) and the
- *   index both call these two.
+ *   once the whole index is resolved. Lint check 24 (`status-line`) reads
+ *   the index's hits.
  * - **Linking-page buckets** — per linking page of a CHANGED page: History,
  *   Changed since, Pointers, To check, Mentions ({@link linkingBuckets}).
  *   Computed on request and cached per index, never in the build.
@@ -257,22 +257,13 @@ export function resolveStatusLineHits(
   return out;
 }
 
-/** The hits on one page, both phases — what lint check 24 calls. */
-export function pageStatusLineHits(
-  page: PageFacts,
-  content: string,
-  resolve: (target: string) => Pick<WikiPageMeta, "relPath" | "plan_status"> | undefined,
-): StatusLineHit[] {
-  if (!isLivingPage(page)) return [];
-  return resolveStatusLineHits(page.relPath, statusLineCandidates(content), resolve);
-}
-
-/** Lint check 24: one info finding per hit (D27 — `lintWiki` reads no
- *  verdicts, so a not-a-status hit must never reach the weekly alert). */
-export function checkStatusLines(page: PageFacts, content: string, index: Pick<WikiIndex, "resolve">): LintFinding[] {
-  return pageStatusLineHits(page, content, index.resolve).map((h) => ({
+/** Lint check 24: one info finding per hit the index keeps for the page, so
+ *  lint, the summary and the script give one answer (D27 — `lintWiki` reads
+ *  no verdicts, so a not-a-status hit must never reach the weekly alert). */
+export function checkStatusLines(relPath: string, index: Pick<WikiIndex, "statusLineHits">): LintFinding[] {
+  return (index.statusLineHits?.get(relPath) ?? []).map((h) => ({
     check: "status-line" as const,
-    relPath: page.relPath,
+    relPath,
     line: h.line,
     severity: "info" as const,
     message: `${h.said.map((s) => `«${s}»`).join(", ")} after [[${h.target}]], whose plan_status is ${h.now} — update the line or point at the plan's status`,
