@@ -48,6 +48,9 @@ const ALL_TABLES = [
   "summary_factchecks",
   "wiki_answers",
   "wiki_stale_verdicts",
+  // A row here outlived the suite and re-routed every later e2e server's Haiku
+  // calls to the Claude CLI (HAIKU_BACKEND=cli, A18).
+  "role_overrides",
 ];
 
 let dbInitialized = false;

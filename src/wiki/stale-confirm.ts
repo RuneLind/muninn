@@ -360,12 +360,10 @@ export function parseStaleAnswer(raw: string, passage: string): StaleAnswer {
 export type StaleModel = (prompt: string, ctx: { bot: BotConfig; deadlineAt: number; source: string; tracer?: Tracer }) => Promise<string>;
 
 /**
- * The real call: the bot's Haiku router, tool-less. Each attempt gets half
- * the time left (`timeoutMs`), and the router gives the CLI fallback only
- * what remains before `deadlineAt` (`HaikuRouterOptions.deadlineAt`). A
- * backend can still overrun its own `timeoutMs` (the Anthropic SDK retries,
- * Vertex refreshes its token once), so a race on `deadlineAt` bounds the
- * await; the router then refuses to start a fallback past it.
+ * The real call: the bot's Haiku router, tool-less, under `deadlineAt`
+ * (`HaikuRouterOptions.deadlineAt`). The router gives a backend attempt at
+ * most half the time left, aborted at that point, and the CLI what remains,
+ * all of it when no backend runs. A race on `deadlineAt` bounds the await.
  */
 export const routedStaleModel: StaleModel = async (prompt, { bot, deadlineAt, source, tracer }) => {
   const left = deadlineAt - Date.now();
@@ -377,7 +375,7 @@ export const routedStaleModel: StaleModel = async (prompt, { bot, deadlineAt, so
     botName: bot.name,
     connector: bot.connector,
     haikuBackend: bot.haikuBackend,
-    timeoutMs: Math.floor(left / 2),
+    timeoutMs: left,
     deadlineAt,
     ...(tracer ? { tracer } : {}),
   });
@@ -480,16 +478,40 @@ export async function statusLineCallInput(index: WikiIndex, page: WikiPageMeta, 
 
 // ── The confirm loop (D16) ─────────────────────────────────────────────────
 
-/** A run ends within this long: every call's deadline is the run's. */
+/** A run ends within this long: the index rebuilds, the store and every call
+ *  race one timer, and every call's deadline is at most the run's. */
 export const CONFIRM_RUN_BUDGET_MS = 4 * 60_000;
 /** No call starts this long after a run began. */
 export const CONFIRM_START_CUTOFF_MS = 3 * 60_000;
-/** A run makes at most this many calls; the rest wait for the next run. */
+/** One call's deadline is at most this far out, so a hung backend leaves the
+ *  rest of the run to the other hits. Real calls took 2.4–8.2 s (PR 2a stop
+ *  trigger, 11 calls). */
+export const CONFIRM_CALL_MAX_MS = 60_000;
+/** A run makes at most this many calls, failed ones included; the rest wait for the next run. */
 export const CONFIRM_MAX_CALLS = 20;
 /** The next run starts this long after the previous one ended. */
 export const CONFIRM_INTERVAL_MS = 5 * 60_000;
 /** The first run comes this long after boot. */
 export const CONFIRM_FIRST_DELAY_MS = 60_000;
+
+export interface ConfirmLimits {
+  budgetMs: number;
+  startCutoffMs: number;
+  callMaxMs: number;
+  maxCalls: number;
+}
+
+const CONFIRM_LIMITS: ConfirmLimits = {
+  budgetMs: CONFIRM_RUN_BUDGET_MS,
+  startCutoffMs: CONFIRM_START_CUTOFF_MS,
+  callMaxMs: CONFIRM_CALL_MAX_MS,
+  maxCalls: CONFIRM_MAX_CALLS,
+};
+
+/** When each key's call last failed, kept for a day: a run calls never-failed
+ *  hits first, then failed ones oldest failure first (A6). */
+const confirmFailures = new Map<string, number>();
+const FAILURE_MEMORY_MS = 24 * 60 * 60_000;
 
 export interface ConfirmDeps {
   registry: () => WikiRegistryEntry[];
@@ -502,6 +524,10 @@ export interface ConfirmDeps {
   span: (attrs: Record<string, unknown>, tracer: Tracer | null) => void;
   /** The run's tracer, for the calls' `haiku_usage` join. Null in tests. */
   tracer: () => Tracer | null;
+  /** Key → when its call last failed. Defaults to the process's own map. */
+  failures?: Map<string, number>;
+  /** Overrides of the run's limits; tests shrink them. */
+  limits?: Partial<ConfirmLimits>;
 }
 
 const realConfirmDeps: ConfirmDeps = {
@@ -523,30 +549,55 @@ export interface ConfirmRunSummary {
   elapsedMs: number;
 }
 
+class ConfirmTimeout extends Error {}
+
+/** `p`, or a rejection after `ms`; the timer is cleared either way. */
+async function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  p.catch(() => {});
+  try {
+    return await Promise.race([p, new Promise<never>((_, reject) => (t = setTimeout(() => reject(new ConfirmTimeout(what)), Math.max(0, ms))))]);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 /**
- * One confirm run over the named wikis: rebuild each index once, confirm the
- * status-line hits with no verdict yet, at most {@link CONFIRM_MAX_CALLS},
- * none started after {@link CONFIRM_START_CUTOFF_MS}, every call's deadline
- * the run's {@link CONFIRM_RUN_BUDGET_MS}. A failed call writes nothing, so
- * the next run retries it. Never rejects.
+ * One confirm run over the named wikis: rebuild each index once, then confirm
+ * the status-line hits with no verdict yet across all of them, never-failed
+ * hits first, at most {@link CONFIRM_MAX_CALLS} calls, none started after
+ * {@link CONFIRM_START_CUTOFF_MS}, each call's deadline at most
+ * {@link CONFIRM_CALL_MAX_MS} out. The rebuilds, the store and the calls all
+ * race the run's {@link CONFIRM_RUN_BUDGET_MS}, so the run returns within it.
+ * A failed call writes nothing, so a later run retries it. Never rejects.
  */
 export async function runStaleConfirm(wikiNames: readonly string[], deps: ConfirmDeps = realConfirmDeps): Promise<ConfirmRunSummary> {
+  const lim = { ...CONFIRM_LIMITS, ...deps.limits };
+  const failures = deps.failures ?? confirmFailures;
   const started = deps.now();
-  const deadlineAt = started + CONFIRM_RUN_BUDGET_MS;
+  const deadlineAt = started + lim.budgetMs;
+  // Real time, whatever `deps.now` says: this is the bound the run returns within.
+  const endsAt = Date.now() + lim.budgetMs;
+  const bounded = <T>(p: Promise<T>, what: string) => within(p, endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`);
   const out: ConfirmRunSummary = { wikis: [], calls: 0, errors: 0, left: 0, elapsedMs: 0 };
   let tracer: Tracer | null = null;
   const tracerOnce = () => (tracer ??= deps.tracer());
+  const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+  for (const [k, at] of failures) if (started - at > FAILURE_MEMORY_MS) failures.delete(k);
+
+  type Row = ConfirmRunSummary["wikis"][number];
+  const todo: { row: Row; entry: WikiRegistryEntry; index: WikiIndex; bot: BotConfig; page: WikiPageMeta; hit: StatusLineHit; key: string }[] = [];
   const wanted = new Set(wikiNames.map((n) => n.toLowerCase()));
   for (const entry of deps.registry()) {
     if (!wanted.has(entry.name.toLowerCase())) continue;
-    const row = { wiki: entry.name, hits: 0, cached: 0, calls: 0, stale: 0, errors: 0, left: 0 } as ConfirmRunSummary["wikis"][number];
+    const row: Row = { wiki: entry.name, hits: 0, cached: 0, calls: 0, stale: 0, errors: 0, left: 0 };
     out.wikis.push(row);
     try {
       if (isReadonlyWikiRoot(entry.root)) {
         row.skipped = "readonly root";
         continue;
       }
-      const index = await deps.index(entry.root);
+      const index = await bounded(deps.index(entry.root), `index rebuild of ${entry.name}`);
       if (!index) {
         row.skipped = "no index";
         continue;
@@ -560,59 +611,78 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         row.skipped = "no routing bot";
         continue;
       }
-      const todo: { page: WikiPageMeta; hit: StatusLineHit; key: string }[] = [];
+      const mine: typeof todo = [];
       for (const [rel, hits] of index.statusLineHits ?? []) {
         const page = index.resolveRelPath(rel);
         if (!page) continue;
-        for (const hit of hits) todo.push({ page, hit, key: statusLineVerdictKey(index, page.relPath, hit) });
+        for (const hit of hits) mine.push({ row, entry, index, bot, page, hit, key: statusLineVerdictKey(index, page.relPath, hit) });
       }
-      row.hits = todo.length;
-      const cached = await deps.store().get(entry.name, "status-line", todo.map((t) => t.key));
-      for (const t of todo) {
-        if (cached.has(t.key)) {
-          row.cached++;
-          continue;
-        }
-        if (out.calls >= CONFIRM_MAX_CALLS || deps.now() - started >= CONFIRM_START_CUTOFF_MS) {
-          row.left++;
-          continue;
-        }
-        out.calls++;
-        row.calls++;
-        try {
-          const input = await statusLineCallInput(index, t.page, t.hit);
-          const raw = await deps.model()(buildStalePrompt(input), {
-            bot,
-            deadlineAt,
-            source: "wiki_stale_confirm",
-            ...(tracerOnce() ? { tracer: tracerOnce()! } : {}),
-          });
-          const answer = parseStaleAnswer(raw, input.passage);
-          const stored = await deps.store().upsert({
-            wiki: entry.name,
-            kind: "status-line",
-            page: t.page.relPath,
-            keyHash: t.key,
-            verdict: answer.verdict,
-            reason: answer.reason,
-            edit: answer.edit,
-            checkedBy: `model:${bot.name}`,
-          });
-          if (stored.verdict === "stale") row.stale++;
-        } catch (err) {
-          row.errors++;
-          log.warn("Stale confirm: call for {page}:{line} failed: {error}", {
-            wiki: entry.name,
-            page: t.page.relPath,
-            line: t.hit.line,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
+      row.hits = mine.length;
+      const cached = await bounded(deps.store().get(entry.name, "status-line", mine.map((t) => t.key)), `verdict read for ${entry.name}`);
+      for (const t of mine) {
+        if (cached.has(t.key)) row.cached++;
+        else todo.push(t);
       }
     } catch (err) {
       row.errors++;
-      log.warn("Stale confirm: wiki {wiki} failed: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
+      log.warn("Stale confirm: wiki {wiki} failed: {error}", { wiki: entry.name, error: errText(err) });
     }
+  }
+
+  // Never-failed hits keep their order; failed ones follow, oldest failure first (stable sort).
+  todo.sort((a, b) => (failures.get(a.key) ?? 0) - (failures.get(b.key) ?? 0));
+  for (const t of todo) {
+    const { row } = t;
+    if (out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || Date.now() >= endsAt) {
+      row.left++;
+      continue;
+    }
+    out.calls++;
+    row.calls++;
+    try {
+      const input = await bounded(statusLineCallInput(t.index, t.page, t.hit), "call input");
+      const callDeadline = Math.min(deadlineAt, deps.now() + lim.callMaxMs);
+      const raw = await bounded(
+        within(
+          deps.model()(buildStalePrompt(input), {
+            bot: t.bot,
+            deadlineAt: callDeadline,
+            source: "wiki_stale_confirm",
+            ...(tracerOnce() ? { tracer: tracerOnce()! } : {}),
+          }),
+          callDeadline - deps.now(),
+          `the call passed its ${lim.callMaxMs} ms bound`,
+        ),
+        "model call",
+      );
+      const answer = parseStaleAnswer(raw, input.passage);
+      const stored = await bounded(
+        deps.store().upsert({
+          wiki: t.entry.name,
+          kind: "status-line",
+          page: t.page.relPath,
+          keyHash: t.key,
+          verdict: answer.verdict,
+          reason: answer.reason,
+          edit: answer.edit,
+          checkedBy: `model:${t.bot.name}`,
+        }),
+        "verdict write",
+      );
+      failures.delete(t.key);
+      if (stored.verdict === "stale") row.stale++;
+    } catch (err) {
+      row.errors++;
+      failures.set(t.key, deps.now());
+      log.warn("Stale confirm: call for {page}:{line} failed: {error}", {
+        wiki: t.entry.name,
+        page: t.page.relPath,
+        line: t.hit.line,
+        error: errText(err),
+      });
+    }
+  }
+  for (const row of out.wikis) {
     out.errors += row.errors;
     out.left += row.left;
   }

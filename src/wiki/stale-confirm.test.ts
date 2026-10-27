@@ -405,6 +405,78 @@ describe("runStaleConfirm (D16)", () => {
     expect(store.rows.size).toBe(0);
   });
 
+  const never = <T,>() => new Promise<T>(() => {});
+  const within = <T,>(p: Promise<T>, ms: number) => Promise.race([p, Bun.sleep(ms).then(() => "still running" as const)]);
+
+  test("A6: hits that failed last run go last, across pages and wikis, so the rest get their calls", async () => {
+    const rootA = await testTempDir(path.join(tmpdir(), "stale-confirm-a-"));
+    const rootB = await testTempDir(path.join(tmpdir(), "stale-confirm-b-"));
+    try {
+      for (const r of [rootA, rootB]) {
+        await mkdir(path.join(r, "plans"), { recursive: true });
+        await writeFile(path.join(r, "plans/p.md"), page("P", "Body.", "plan_status: shipped\n"));
+      }
+      await writeFile(path.join(rootA, "a.md"), page("A", Array.from({ length: CONFIRM_MAX_CALLS }, (_, i) => `- [[p]] is in-flight (f${i})`).join("\n")));
+      await writeFile(path.join(rootB, "b.md"), page("B", "- [[p]] is in-flight (good)"));
+      const wa = { name: "wa", root: rootA, source: "extra" } as WikiRegistryEntry;
+      const wb = { name: "wb", root: rootB, source: "extra" } as WikiRegistryEntry;
+      const asked: string[] = [];
+      const model: StaleModel = async (prompt) => {
+        const tag = /\((f\d+|good)\)/.exec(prompt)![1]!;
+        asked.push(tag);
+        if (tag !== "good") throw new Error("backend down for this hit");
+        return '{"verdict":"stale","reason":"shipped"}';
+      };
+      const { deps, store } = makeDeps({ registry: () => [wa, wb], model: () => model, failures: new Map() });
+      const first = await runStaleConfirm(["wa", "wb"], deps);
+      expect(first).toMatchObject({ calls: CONFIRM_MAX_CALLS, errors: CONFIRM_MAX_CALLS, left: 1 });
+      asked.length = 0;
+      const second = await runStaleConfirm(["wa", "wb"], deps);
+      expect(asked[0]).toBe("good");
+      expect(second.calls).toBe(CONFIRM_MAX_CALLS);
+      expect([...store.rows.values()].map((r) => [r.wiki, r.page, r.verdict])).toEqual([["wb", "b.md", "stale"]]);
+    } finally {
+      await rm(rootA, { recursive: true, force: true });
+      await rm(rootB, { recursive: true, force: true });
+    }
+  });
+
+  test("A6: one call's deadline is at most a minute out, not the run's four", async () => {
+    const left: number[] = [];
+    const { deps } = makeDeps({ model: () => async (_p, ctx) => (left.push(ctx.deadlineAt - Date.now()), '{"verdict":"true","reason":"ok"}'), failures: new Map() });
+    await runStaleConfirm(["cw"], deps);
+    expect(left).toHaveLength(2);
+    for (const ms of left) expect(ms).toBeLessThanOrEqual(60_000);
+  });
+
+  test("A6: a hung call is cut at its bound, so the next hit still gets its call", async () => {
+    const model: StaleModel = (prompt) => (prompt.includes("is in-flight") ? never<string>() : Promise.resolve('{"verdict":"not-status","reason":"a draft lock"}'));
+    const { deps, store } = makeDeps({ model: () => model, failures: new Map(), limits: { callMaxMs: 150, budgetMs: 3_000, startCutoffMs: 2_000 } });
+    const t0 = Date.now();
+    const r = await within(runStaleConfirm(["cw"], deps), 1_500);
+    expect(r).toMatchObject({ calls: 2, errors: 1 });
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect([...store.rows.values()].map((x) => x.verdict)).toEqual(["not-status"]);
+  });
+
+  test("A6: the run's bound covers the index rebuild", async () => {
+    const { deps } = makeDeps({ index: () => never(), failures: new Map(), limits: { budgetMs: 300 } });
+    const t0 = Date.now();
+    const r = await within(runStaleConfirm(["cw"], deps), 1_500);
+    expect(r).toMatchObject({ calls: 0, errors: 1 });
+    expect(Date.now() - t0).toBeLessThan(800);
+  });
+
+  test("A6: the run's bound covers the verdict store", async () => {
+    const store = memoryStaleVerdictStore();
+    const hung = { ...store, upsert: () => never<never>() };
+    const { deps } = makeDeps({ store: () => hung, failures: new Map(), limits: { budgetMs: 400 } });
+    const t0 = Date.now();
+    const r = await within(runStaleConfirm(["cw"], deps), 1_500);
+    expect(r).toMatchObject({ errors: 1, left: 1 });
+    expect(Date.now() - t0).toBeLessThan(900);
+  });
+
   test("the loop starts only with the scheduler on, a writable instance and a registered wiki", async () => {
     const { deps } = makeDeps();
     expect(startStaleConfirmLoop({ schedulerEnabled: false, wikiStaleConfirmWikis: ["cw"] }, { deps })).toEqual([]);

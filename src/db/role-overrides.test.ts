@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterAll } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import {
   _resetSnapshotForTests,
@@ -12,6 +12,11 @@ import {
 setupTestDb();
 
 describe("role-overrides", () => {
+  // Leave no row behind: the e2e servers boot on this database and read it (A18).
+  afterAll(async () => {
+    for (const role of ["SUMMARIZER_BOT", "RESEARCH_BOT", "HAIKU_BACKEND"] as const) await clearRoleOverride(role);
+  });
+
   beforeEach(async () => {
     // Start each test from a clean table + snapshot.
     await clearRoleOverride("SUMMARIZER_BOT");

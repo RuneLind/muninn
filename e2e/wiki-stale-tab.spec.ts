@@ -65,6 +65,8 @@ let roServer: ChildProcess | undefined;
 let fake: Server | undefined;
 let sql: ReturnType<typeof postgres> | null = null;
 let modelCalls = 0;
+/** Who sent each model request: the SDK (`Anthropic/JS …`) or the Claude CLI. */
+const modelAgents: string[] = [];
 
 function git(args: string[], atMs?: number): void {
   const date = atMs === undefined ? undefined : new Date(atMs).toISOString();
@@ -149,6 +151,7 @@ test.beforeAll(async () => {
     req.on("end", () => {
       if (req.method === "POST" && (req.url ?? "").startsWith("/v1/messages")) {
         modelCalls++;
+        modelAgents.push(String(req.headers["user-agent"] ?? ""));
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({
           id: "msg_e2e", type: "message", role: "assistant", model: "claude-haiku-e2e",
@@ -164,6 +167,10 @@ test.beforeAll(async () => {
 
   sql = postgres(TEST_DB, { max: 2 });
   await sql`DELETE FROM wiki_stale_verdicts WHERE wiki = ${WIKI}`;
+  // A HAIKU_BACKEND override row beats the bot's `haikuBackend` and the env.
+  // `bun run test` on this database leaves one (`cli`), and the Claude CLI then
+  // sends this fake 4 requests per Check call (A18).
+  await sql`DELETE FROM role_overrides WHERE role = 'HAIKU_BACKEND'`;
   await sql`
     INSERT INTO wiki_stale_verdicts (wiki, kind, page, key_hash, verdict, reason, checked_by)
     VALUES (${WIKI}, 'status-line', 'hub.md', ${statusLineKey("hub.md", CONFIRMED_LINE, ["in-flight"], "plans/p.md", "shipped", { title: "P" })}, 'stale', 'E2E: the plan shipped', 'model:e2e')
@@ -209,6 +216,7 @@ test("the tab counts the confirmed line and the page to check, and hides the unc
 
 test("Check streams one model verdict into the tab and writes its row", async ({ page: p }) => {
   modelCalls = 0;
+  modelAgents.length = 0;
   await openHub(p);
   await p.locator('.wiki-conn-tab[data-conntab="stale"]').click();
   await p.locator("#wikiStaleCheckBtn").click();
@@ -217,6 +225,8 @@ test("Check streams one model verdict into the tab and writes its row", async ({
   await expect(item).toContainText("E2E: the pin moved on");
   await item.locator(".wiki-stale-fix summary").click();
   await expect(item.locator(".wiki-stale-fix")).toContainText("landed on 18.06");
+  // One SDK request: a Claude CLI call reaches this fake too, as several requests.
+  expect(modelAgents.map((a) => a.split("/")[0])).toEqual(["Anthropic"]);
   expect(modelCalls).toBe(1);
   const rows = await sql!`SELECT kind, page, verdict, checked_by FROM wiki_stale_verdicts WHERE wiki = ${WIKI} AND kind = 'passage'`;
   expect(rows.map((r) => ({ ...r }))).toEqual([{ kind: "passage", page: "notes/old.md", verdict: "stale", checked_by: `model:${BOT}` }]);

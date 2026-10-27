@@ -81,15 +81,19 @@ export interface HaikuRouterOptions extends SpawnHaikuOptions {
   connector?: ConnectorType;
   /**
    * Epoch ms by which the WHOLE call, CLI fallback included, must be done.
-   * `timeoutMs` bounds each attempt, so without this a backend attempt plus
-   * its CLI fallback can take twice it. With it, the fallback gets only what
-   * is left (`min(timeoutMs, deadlineAt - now)`), and a fallback that would
-   * start past it throws instead. The backend attempt itself is bounded by
-   * `timeoutMs` alone: the caller passes one that fits (the Stale check
-   * passes half the time left).
+   * Without it each attempt gets `timeoutMs`, so a backend attempt plus its
+   * CLI fallback can take twice it. With it, a backend attempt gets
+   * `min(timeoutMs, half the time left)`, enforced by an abort signal (the
+   * Anthropic SDK stops its retries on it) and a race, so a hung backend
+   * cannot eat the fallback's half; the CLI then gets `min(timeoutMs, what
+   * is left)`, all of it when no backend was tried, and a CLI start past the
+   * deadline throws instead.
    */
   deadlineAt?: number;
 }
+
+/** {@link callHaikuDirect}'s options: the router's abort for a backend attempt under `deadlineAt`. */
+type DirectOptions = SpawnHaikuOptions & { signal?: AbortSignal };
 
 let cachedAnthropic: Anthropic | null = null;
 let cachedAuthSource: "api-key" | "oauth" | null = null;
@@ -264,7 +268,7 @@ export function _getAuthSourceForTests(): "api-key" | "oauth" | null {
 
 export async function callHaikuDirect(
   prompt: string,
-  opts: SpawnHaikuOptions,
+  opts: DirectOptions,
 ): Promise<HaikuResult> {
   const { source, botName, timeoutMs = HAIKU_TIMEOUT_MS, model, maxTokens } = opts;
   const effectiveModel = model || DEFAULT_MODEL;
@@ -287,7 +291,7 @@ export async function callHaikuDirect(
         ...(model ? {} : { output_config: { effort: HAIKU_EFFORT } }),
         messages: [{ role: "user", content: prompt }],
       },
-      { timeout: timeoutMs },
+      { timeout: timeoutMs, ...(opts.signal ? { signal: opts.signal } : {}) },
     );
   } catch (err) {
     // A rotated/revoked key authenticates the cached client forever otherwise —
@@ -474,6 +478,35 @@ function preflightMissing(backend: HaikuBackend): string | null {
   return null;
 }
 
+/** A backend attempt under `deadlineAt`: half the time left at most, aborted
+ *  and raced at that point, so the CLI fallback keeps the other half. */
+async function backendWithinShare(
+  backend: Exclude<HaikuBackend, "cli">,
+  prompt: string,
+  opts: HaikuRouterOptions,
+  deadlineAt: number,
+): Promise<HaikuResult> {
+  const share = Math.min(opts.timeoutMs ?? HAIKU_TIMEOUT_MS, Math.floor((deadlineAt - Date.now()) / 2));
+  if (share <= 0) throw new Error(`no time left before the deadline for the ${backend} attempt`);
+  const abort = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const attempt = NON_CLI_BACKENDS[backend](prompt, { ...opts, timeoutMs: share, signal: abort.signal } as HaikuRouterOptions);
+  attempt.catch(() => {});
+  try {
+    return await Promise.race([
+      attempt,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          abort.abort();
+          reject(new Error(`${backend} attempt passed its ${share} ms share of the deadline`));
+        }, share);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Drop-in replacement for `spawnHaiku` that routes through a backend picked
  * by `resolveBackend()`. Falls back to the CLI subprocess on any error.
@@ -507,7 +540,9 @@ export async function callHaikuWithFallback(
     });
   } else if (backend !== "cli") {
     try {
-      return await NON_CLI_BACKENDS[backend](prompt, opts);
+      return opts.deadlineAt === undefined
+        ? await NON_CLI_BACKENDS[backend](prompt, opts)
+        : await backendWithinShare(backend, prompt, opts, opts.deadlineAt);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       cliFallback = { backend, reason: message, cause: err };

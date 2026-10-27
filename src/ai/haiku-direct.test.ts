@@ -28,6 +28,9 @@ let sdkResponse: unknown = {
   usage: { input_tokens: 10, output_tokens: 5 },
 };
 let sdkThrow: Error | null = null;
+// A hung backend (A7): `create` never answers, and rejects only when the
+// request's `signal` aborts, the way the real SDK does.
+let sdkHang = false;
 let constructorOpts: unknown = null;
 
 class FakeAnthropic {
@@ -38,6 +41,10 @@ class FakeAnthropic {
       create: async (params: unknown, options?: unknown) => {
         sdkCalls.push({ params, options });
         if (sdkThrow) throw sdkThrow;
+        if (sdkHang) {
+          const signal = (options as { signal?: AbortSignal } | undefined)?.signal;
+          return new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new Error("Request was aborted."))));
+        }
         return sdkResponse;
       },
     };
@@ -185,6 +192,7 @@ beforeEach(() => {
   copilotDeleteSessionCount = 0;
   copilotCatalog = ["claude-haiku-4.5", "claude-sonnet-5.5"];
   sdkThrow = null;
+  sdkHang = false;
   constructorOpts = null;
   _resetClientForTests();
   delete process.env.HAIKU_DIRECT_ENABLED;
@@ -756,10 +764,44 @@ describe("callHaikuWithFallback deadlineAt (the Stale check's whole-call bound)"
     expect(spawnCalls).toHaveLength(0);
   });
 
+  test("A7: a hung backend is cut at half the time left, so the CLI fallback keeps the other half", async () => {
+    process.env.HAIKU_BACKEND = "anthropic";
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    sdkHang = true;
+    const t0 = Date.now();
+    const call = callHaikuWithFallback("hi", { source: "test", timeoutMs: 60_000, deadlineAt: t0 + 600 });
+    const res = await Promise.race([call, Bun.sleep(2_000).then(() => "still hung")]);
+    expect(res).toMatchObject({ result: "fallback-result", backend: "cli" });
+    const sdkOpts = sdkCalls[0]!.options as { timeout: number; signal?: AbortSignal };
+    expect(sdkOpts.timeout).toBeLessThanOrEqual(300);
+    expect(sdkOpts.signal?.aborted).toBe(true);
+    const cliMs = (spawnCalls[0]!.opts as { timeoutMs: number }).timeoutMs;
+    expect(cliMs).toBeGreaterThan(200);
+    expect(cliMs).toBeLessThanOrEqual(330);
+  });
+
   test("without deadlineAt the fallback keeps the caller's timeoutMs", async () => {
     copilotSessionThrow = new Error("copilot unreachable");
     await callHaikuWithFallback("hi", { source: "test", connector: "copilot-sdk", timeoutMs: 60_000 });
     expect((spawnCalls[0]!.opts as { timeoutMs: number }).timeoutMs).toBe(60_000);
+  });
+});
+
+describe("routedStaleModel (A7: the Stale check's call)", () => {
+  const bot = (over: Record<string, unknown>) => ({ name: "b", dir: "/tmp", persona: "", telegramAllowedUserIds: [], slackAllowedUserIds: [], ...over }) as unknown as import("../bots/config.ts").BotConfig;
+
+  test("a CLI-only bot gives the CLI the whole time left, not half", async () => {
+    const { routedStaleModel } = await import("../wiki/stale-confirm.ts");
+    await routedStaleModel("p", { bot: bot({ connector: "claude-cli" }), deadlineAt: Date.now() + 10_000, source: "test" });
+    expect(spawnCalls).toHaveLength(1);
+    expect((spawnCalls[0]!.opts as { timeoutMs: number }).timeoutMs).toBeGreaterThan(9_000);
+  });
+
+  test("an anthropic bot with no credentials gives the CLI the whole time left", async () => {
+    const { routedStaleModel } = await import("../wiki/stale-confirm.ts");
+    await routedStaleModel("p", { bot: bot({ connector: "claude-cli", haikuBackend: "anthropic" }), deadlineAt: Date.now() + 10_000, source: "test" });
+    expect(sdkCalls).toHaveLength(0);
+    expect((spawnCalls[0]!.opts as { timeoutMs: number }).timeoutMs).toBeGreaterThan(9_000);
   });
 });
 
