@@ -14,8 +14,9 @@ type Rgba = [number, number, number, number];
 /**
  * A function, living in the page, that reads ANY computed colour as sRGB.
  *
- * `rgb()`/`rgba()` and `color(srgb …)` are read exactly. Every other colour
- * space goes through one canvas pixel, so the browser does the conversion: a
+ * `rgb()`/`rgba()` and an in-gamut `color(srgb …)` are read exactly. Every
+ * other colour, including a `color(srgb …)` with a negative or `none`
+ * channel, goes through one canvas pixel, so the browser does the conversion: a
  * relative colour such as bold's `oklch(from currentColor …)` computes to
  * `oklch(…)`, whose numbers read as RGB channels are near-black.
  *
@@ -27,7 +28,7 @@ export function colorParser(page: Page): Promise<JSHandle<(c: string) => Rgba>> 
     return (c: string): Rgba => {
       const n = c.match(/[\d.]+/g)?.map(Number) ?? [];
       if (/^rgba?\(/.test(c)) return [n[0]!, n[1]!, n[2]!, n.length > 3 ? n[3]! : 1];
-      if (c.startsWith("color(srgb ")) return [n[0]! * 255, n[1]! * 255, n[2]! * 255, n.length > 3 ? n[3]! : 1];
+      if (c.startsWith("color(srgb ") && !/-|none/.test(c) && n.slice(0, 3).every((v) => v <= 1)) return [n[0]! * 255, n[1]! * 255, n[2]! * 255, n.length > 3 ? n[3]! : 1];
       cv.clearRect(0, 0, 1, 1);
       cv.fillStyle = c;
       cv.fillRect(0, 0, 1, 1);

@@ -698,10 +698,10 @@ async function proseMarks(page: import("@playwright/test").Page, scope: string) 
  * Every bold run under `scope`, against the colour of the text it sits in.
  * Bold moves its context's own colour (oklch, `--strong-lift` away from
  * `--strong-pivot`), so in every context it must (a) stand out from that text
- * by contrast and (b) keep the context's hue: a link's bold stays blue, an
- * amber title's stays amber. A context already at the ink limit (contrast
- * >= 16, or white or black itself) has nowhere to go; `unlifted` holds it to
- * weight instead.
+ * by contrast and lightness and (b) keep the context's hue and chroma: a
+ * link's bold stays blue, an amber title's stays amber. A context already at
+ * the ink limit (contrast >= 16, or white or black itself) has nowhere to go;
+ * `unlifted` holds it to weight instead.
  */
 async function boldLifts(page: import("@playwright/test").Page, scope: string) {
   const parse = await colorParser(page);
@@ -768,8 +768,10 @@ async function boldLifts(page: import("@playwright/test").Page, scope: string) {
  * a Historic body, AnnotatedCode notes) yet carry as much ink as body bold,
  * which undoes the dimming. "Ink" is OKLab lightness toward white on dark and
  * toward black on light, compared on the colours themselves because each
- * context may paint its own background. Bold must move lightness by most of
- * its lift and keep most of its context's chroma. No bold may read fainter
+ * context may paint its own background. Outside the ink limit, bold must
+ * move lightness by at least 0.06 and, in a context with chroma >= 0.03, keep
+ * its hue within 15° and 0.6x its chroma. These are floors for a visible
+ * bold, not a pin on --strong-lift's value. No bold may read fainter
  * than its context, and where colour has no room (a white heading on dark),
  * weight must carry the difference.
  */
@@ -1067,4 +1069,23 @@ test.describe("The other prose surfaces", () => {
       expect(unlifted(rows)).toEqual([]);
     });
   }
+});
+
+test.describe("e2e/contrast.ts colorParser", () => {
+  test("reads out-of-gamut and `none` channels as the browser paints them", async ({ page }) => {
+    // A color-mix() over an out-of-gamut colour can compute to a color(srgb)
+    // with channels past 0–1 or `none`; the regex read -0.1 as 0.1 and `none`
+    // as NaN. Expected values are the clamped sRGB the canvas paints.
+    const parse = await colorParser(page);
+    const got = await page.evaluate(
+      ([p, cs]) => cs.map((c) => p(c).map((v) => Math.round(v * 100) / 100)),
+      [parse, ["color(srgb 0.9 -0.1 0.5)", "color(srgb none 0.5 0.5)", "color(srgb 0.5 0.25 1 / 0.5)", "oklch(1 0 0)", "color(srgb 1.2 0.2 0.6)"]] as const,
+    );
+    expect.soft(got[0]).toEqual([230, 0, 128, 1]);
+    expect.soft(got[1]).toEqual([0, 128, 128, 1]);
+    // In gamut: read exactly, alpha included.
+    expect.soft(got[2]).toEqual([127.5, 63.75, 255, 0.5]);
+    expect.soft(got[3]).toEqual([255, 255, 255, 1]);
+    expect.soft(got[4]).toEqual([255, 51, 153, 1]);
+  });
 });
