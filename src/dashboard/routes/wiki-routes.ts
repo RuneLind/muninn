@@ -60,13 +60,12 @@ import {
   hitConfirmations,
   hitKey,
   isConfirmedStale,
-  linkingPassage,
-  passageKeyHash,
+  passageVerdictKey,
   passageVerdicts,
   changedHashOf,
   runStaleCheck,
   staleVerdictStore,
-  statusLineKeyHash,
+  statusLineVerdictKey,
   type StaleCheckEvent,
   type VerdictView,
 } from "../../wiki/stale-confirm.ts";
@@ -2387,7 +2386,7 @@ export function registerWikiToolRoutes(
       const hitsByPage = summary.pages.map((r) => [r.relPath, index.statusLineHits?.get(r.relPath) ?? []] as const);
       let confirmations: Map<string, VerdictView> | null = null;
       try {
-        confirmations = await hitConfirmations(entry.name, hitsByPage);
+        confirmations = await hitConfirmations(entry.name, index, hitsByPage);
       } catch (err) {
         log.warn("Stale verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
       }
@@ -2411,8 +2410,8 @@ export function registerWikiToolRoutes(
     let confirmations: Map<string, VerdictView> | null = null;
     let verdictsByLinking = new Map<string, VerdictView>();
     try {
-      confirmations = await hitConfirmations(entry.name, [[meta.relPath, report.hits]]);
-      if (report.buckets) verdictsByLinking = await passageVerdicts(entry.name, index, report.buckets.relPath, report.buckets.linking);
+      confirmations = await hitConfirmations(entry.name, index, [[meta.relPath, report.hits]]);
+      if (report.buckets) verdictsByLinking = await passageVerdicts(entry.name, index, report.buckets.relPath, report.buckets.linking, asOfMs !== undefined ? { asOfMs } : {});
     } catch (err) {
       confirmations = null;
       log.warn("Stale verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
@@ -2522,7 +2521,7 @@ export function registerWikiToolRoutes(
         wiki: entry.name,
         kind: "status-line",
         page: meta.relPath,
-        keyHash: statusLineKeyHash(meta.relPath, hit),
+        keyHash: statusLineVerdictKey(index, meta.relPath, hit),
         verdict,
         reason: verdict === "true" ? "Marked still true by a reader" : "Marked not a status by a reader",
         edit: null,
@@ -2540,7 +2539,7 @@ export function registerWikiToolRoutes(
         wiki: entry.name,
         kind: "passage",
         page: l.relPath,
-        keyHash: passageKeyHash(l.relPath, linkingPassage(l), changedHash),
+        keyHash: passageVerdictKey(index, meta.relPath, changedHash, l, asOfMs),
         verdict,
         reason: verdict === "true" ? "Marked still true by a reader" : "Marked not a status by a reader",
         edit: null,

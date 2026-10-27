@@ -144,6 +144,26 @@ describe("the Stale check's verdict routes", () => {
     expect(prompts).toHaveLength(toCheck);
   });
 
+  // A2: asOf cuts the commit subjects the call reads, so a verdict judged
+  // under one asOf is not reused under another.
+  test("A2: a Check under another asOf calls again, and the GET reads the verdicts of its own asOf", async () => {
+    fresh();
+    await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text();
+    expect(prompts).toHaveLength(CHECK_MAX_CALLS);
+    const later = sseEvents(await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-25" })).text());
+    expect(later[0]![1]).toMatchObject({ cached: 0, toCall: CHECK_MAX_CALLS });
+    expect(prompts).toHaveLength(2 * CHECK_MAX_CALLS);
+    const at20 = await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20");
+    const at25 = await get("wiki=checkwiki&page=hub.md&asOf=2026-06-25");
+    const n = (b: Record<string, any>) => b.buckets.linking.filter((l: any) => l.verdict).length;
+    expect([n(at20), n(at25)]).toEqual([CHECK_MAX_CALLS, CHECK_MAX_CALLS]);
+    // The reader's verdict is keyed under the request's asOf too.
+    fresh();
+    expect((await post("verdict", { wiki: "checkwiki", page: "hub.md", kind: "passage", linking: "notes/n3.md", verdict: "true", asOf: "2026-06-25" })).status).toBe(200);
+    expect(n(await get("wiki=checkwiki&page=hub.md&asOf=2026-06-25"))).toBe(1);
+    expect(n(await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20"))).toBe(0);
+  });
+
   test("GET carries each To-check page's cached verdict and each hit's confirmation", async () => {
     fresh();
     let body = await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20");
@@ -163,7 +183,7 @@ describe("the Stale check's verdict routes", () => {
     const hit = hub.hits[0];
     // Confirm it the way the loop does: a stale row on the hit's key.
     const { statusLineKeyHash } = await import("../../wiki/stale-confirm.ts");
-    await store.upsert({ wiki: "checkwiki", kind: "status-line", page: "hub.md", keyHash: statusLineKeyHash("hub.md", hit), verdict: "stale", reason: "shipped", edit: null, checkedBy: "model:checkbot" });
+    await store.upsert({ wiki: "checkwiki", kind: "status-line", page: "hub.md", keyHash: statusLineKeyHash("hub.md", hit, { relPath: "plans/p.md", title: "P", planStatus: "shipped" }), verdict: "stale", reason: "shipped", edit: null, checkedBy: "model:checkbot" });
     expect((await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20")).staleLines).toBe(1);
     const summary = await get("wiki=checkwiki&asOf=2026-06-20");
     expect(summary.totals).toMatchObject({ staleLines: 1, hits: 1 });

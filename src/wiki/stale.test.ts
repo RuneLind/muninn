@@ -180,6 +180,39 @@ describe("statusLineCandidates (phase A)", () => {
     // A status word BEFORE the link names nothing about it.
     expect(statusLineCandidates("shipped: [[plan-a]]\n")).toEqual([]);
   });
+
+  // A1: a long line is cut around the hit, never at its head, so the model
+  // always sees the link and the status word it judges.
+  test("A1: a long line's text is a window that holds the link and the status word", () => {
+    const head = "Lead-in prose that runs on and on. ".repeat(14); // 490 chars before the link
+    const c = statusLineCandidates(`${head}[[plan-a]] is in-flight, two PRs open. ${"Tail text. ".repeat(40)}\n`);
+    expect(c).toHaveLength(1);
+    expect(c[0]!.text).toContain("[[plan-a]] is in-flight");
+    expect(c[0]!.text.length).toBeLessThanOrEqual(362);
+    expect(c[0]!.text.startsWith("…")).toBe(true);
+    expect(c[0]!.text.endsWith("…")).toBe(true);
+  });
+
+  test("A1: a link far from its status word keeps both, with a gap between", () => {
+    const c = statusLineCandidates(`[[plan-a]] ${"and then some filler ".repeat(30)}is now shipped. ${"x ".repeat(100)}\n`);
+    expect(c).toHaveLength(1);
+    expect(c[0]!.text).toContain("[[plan-a]]");
+    expect(c[0]!.text).toContain("is now shipped");
+    expect(c[0]!.text).toContain(" … ");
+  });
+
+  test("A1: status words spread over a very long segment keep the window bounded, on the nearest word", () => {
+    const c = statusLineCandidates(`${"Lead. ".repeat(70)}[[plan-a]] is proposed ${"filler ".repeat(800)}and later shipped.\n`);
+    expect(c).toHaveLength(1);
+    expect(c[0]!.said).toEqual(["proposed", "shipped"]);
+    expect(c[0]!.text).toContain("[[plan-a]] is proposed");
+    expect(c[0]!.text.length).toBeLessThanOrEqual(365);
+  });
+
+  test("A1: a short line's text is the whole trimmed line", () => {
+    const c = statusLineCandidates("  - [[plan-a]] is shipped  \n");
+    expect(c[0]!.text).toBe("- [[plan-a]] is shipped");
+  });
 });
 
 function meta(over: Partial<WikiPageMeta> & { relPath: string }): WikiPageMeta {

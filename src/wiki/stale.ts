@@ -100,7 +100,8 @@ export interface StatusLineCandidate {
   /** The wikilink target as written, anchor and escapes dropped. */
   target: string;
   said: StatusKind[];
-  /** The source line, trimmed and capped. */
+  /** The source line, trimmed; a long one is cut to a window around the
+   *  segment ({@link hitWindow}). */
   text: string;
 }
 
@@ -109,18 +110,60 @@ const blank = (s: string) => " ".repeat(s.length);
 /** Frontmatter keys this check skips by its own choice. */
 const SKIPPED_FM_KEY = /^(status_note|description|title):/;
 
+/**
+ * A hit's text (A1): the trimmed line when it fits {@link TEXT_CAP}, else a
+ * window that holds the link (`linkStart`–`linkEnd`) and the status word
+ * nearest it (`wordStart`–`wordEnd`), positions on the untrimmed `source`. `…` marks a
+ * cut end; when link and words lie further apart than the cap, ` … ` marks
+ * the gap between a link piece and a words piece. Never a head cut, so the
+ * model always sees what it judges.
+ */
+export function hitWindow(source: string, linkStart: number, linkEnd: number, wordStart: number, wordEnd: number, cap = TEXT_CAP): string {
+  const lead = source.length - source.trimStart().length;
+  const t = source.trim();
+  if (t.length <= cap) return t;
+  const at = (i: number) => Math.min(t.length, Math.max(0, i - lead));
+  const s = at(linkStart);
+  const e = at(wordEnd);
+  const cut = (a: number, b: number, body: string) => `${a > 0 ? "…" : ""}${body}${b < t.length ? "…" : ""}`;
+  if (e - s <= cap) {
+    const b = Math.min(t.length, Math.max(0, s - Math.floor((cap - (e - s)) / 2)) + cap);
+    const a = Math.max(0, b - cap);
+    return cut(a, b, t.slice(a, b));
+  }
+  const left = Math.max(at(linkEnd), s + Math.floor(cap / 2));
+  const right = Math.max(left, e - Math.max(e - at(wordStart), cap - (left - s)));
+  return cut(s, e, `${t.slice(s, left)} … ${t.slice(right, e)}`);
+}
+
+/** The status word of `seg` nearest its link: the earliest first match of
+ *  a kind in `said`, as `[start, end]`. A segment can run for thousands of
+ *  characters (one HTML line), so the window anchors on one word, not all. */
+function saidSpan(seg: string, said: readonly StatusKind[]): [number, number] {
+  let best: [number, number] | null = null;
+  for (const [kind, re] of STATUS_WORDS) {
+    if (!said.includes(kind)) continue;
+    const m = re.exec(seg);
+    if (m && (!best || m.index < best[0])) best = [m.index, m.index + m[0].length];
+  }
+  return best ?? [0, 0];
+}
+
 /** The `[[link]] … status word` segments of one line (1-based `line`). */
 function lineSegments(lineText: string, line: number, sourceText: string): StatusLineCandidate[] {
   const out: StatusLineCandidate[] = [];
   const links = [...lineText.matchAll(WIKILINK_RE)];
   links.forEach((m, j) => {
     const end = j + 1 < links.length ? links[j + 1]!.index! : lineText.length;
-    const seg = lineText.slice(m.index! + m[0].length, end);
+    const segStart = m.index! + m[0].length;
+    const seg = lineText.slice(segStart, end);
     if (seg.includes("](")) return;
     const said = statusWordsIn(seg);
     if (said.length === 0) return;
     const target = wikilinkTarget(m[1]!);
-    if (target) out.push({ line, target, said, text: sourceText.trim().slice(0, TEXT_CAP) });
+    if (!target) return;
+    const [ws, we] = saidSpan(seg, said);
+    out.push({ line, target, said, text: hitWindow(sourceText, m.index!, segStart, segStart + ws, segStart + we) });
   });
   return out;
 }

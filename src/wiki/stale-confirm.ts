@@ -2,11 +2,12 @@
  * The Stale check's model half (plan muninn-wiki-drift-check, PR 2a): verdict
  * keys, the one model call, the confirm loop (D16) and Check (D6).
  *
- * - **Keys (D22)** hash content, never commits: a status line on the page,
- *   the line's text, the target plan and its `plan_status`; a passage on the
- *   linking page, its claim passages and the changed page's content hash
- *   (body, `plan_status` and `status_note` only, so a provenance stamp, an
- *   `updated:` bump or any other frontmatter key resets nothing).
+ * - **Keys (D22)** hash content, never commits, and every other input the
+ *   prompt carries: a status line on the page, the window the model saw, its
+ *   status words and the target's facts; a passage on the linking page, its
+ *   claim passages, the changed page's content hash (body, `plan_status` and
+ *   `status_note` only, so a provenance stamp or an `updated:` bump resets
+ *   nothing) and facts, the other plans' status and `asOf`.
  * - **The call (D17)** goes through the wiki's own bot
  *   (`resolveWikiSynthesisBot`) and its Haiku router (`callHaikuWithFallback`
  *   with the bot's connector and `haikuBackend`), tool-less, under a deadline
@@ -61,14 +62,62 @@ export function changedPageContentHash(content: string): string {
   return sha(["v1", splitFrontmatter(text).body, field("plan_status"), field("status_note")]);
 }
 
-/** A status-line confirmation's key: the page, the line's text, the target and its `plan_status`. */
-export function statusLineKeyHash(page: string, hit: Pick<StatusLineHit, "text" | "target" | "now">): string {
-  return sha(["status-line", normalizeRelPath(page), hit.text, normalizeRelPath(hit.target), hit.now]);
+/** The linked page's facts as the prompt carries them. */
+type TargetFacts = StaleCallInput["target"];
+const targetParts = (t: TargetFacts) => [normalizeRelPath(t.relPath), t.title, t.planStatus ?? "", t.statusNote ?? "", t.description ?? ""];
+
+/**
+ * A status-line confirmation's key: what the call was judged on — the page,
+ * the hit's text (the window the model saw), the status words it says, the
+ * target plan and its `plan_status`, and the target facts the prompt carries
+ * (title, `status_note`, `description`). No commits (D22), no line number.
+ */
+export function statusLineKeyHash(page: string, hit: Pick<StatusLineHit, "text" | "target" | "now" | "said">, target: TargetFacts): string {
+  return sha(["status-line/v2", normalizeRelPath(page), hit.text, hit.said.join(","), normalizeRelPath(hit.target), hit.now, ...targetParts(target).slice(1)]);
 }
 
-/** A passage verdict's key: the linking page, its passage and the changed page's content hash. */
-export function passageKeyHash(linkingPage: string, passage: string, changedHash: string): string {
-  return sha(["passage", normalizeRelPath(linkingPage), passage, changedHash]);
+/** What a passage prompt carries besides the passage and the commit subjects. */
+export interface PassageKeyContext {
+  target: TargetFacts;
+  otherPlans: NonNullable<StaleCallInput["otherPlans"]>;
+  /** The check's `asOf`: it cuts the commit subjects the call reads. */
+  asOfMs?: number;
+}
+
+/**
+ * A passage verdict's key: the linking page, its passage, the changed page's
+ * content hash, the changed page's facts the prompt carries, the other plans
+ * the passage links to with their status, and `asOf`. No commits (D22).
+ */
+export function passageKeyHash(linkingPage: string, passage: string, changedHash: string, ctx: PassageKeyContext): string {
+  const others = JSON.stringify(ctx.otherPlans.map((o) => [normalizeRelPath(o.relPath), o.planStatus, o.statusNote ?? ""]));
+  return sha(["passage/v2", normalizeRelPath(linkingPage), passage, changedHash, ...targetParts(ctx.target), others, ctx.asOfMs === undefined ? "" : String(ctx.asOfMs)]);
+}
+
+/** A status-line hit's key, its target facts read from the index. */
+export function statusLineVerdictKey(index: Pick<WikiIndex, "resolveRelPath">, page: string, hit: StatusLineHit): string {
+  return statusLineKeyHash(page, hit, targetFacts(index.resolveRelPath(hit.target), hit.target));
+}
+
+/** The key context of a passage on a page linking to `changedRelPath`. */
+export function passageKeyContext(index: Pick<WikiIndex, "resolve" | "resolveRelPath">, changedRelPath: string, passage: string, asOfMs?: number): PassageKeyContext {
+  return {
+    target: targetFacts(index.resolveRelPath(changedRelPath), changedRelPath),
+    otherPlans: otherPlansIn(index, passage, changedRelPath),
+    ...(asOfMs !== undefined ? { asOfMs } : {}),
+  };
+}
+
+/** A To-check linking page's passage verdict key. */
+export function passageVerdictKey(
+  index: Pick<WikiIndex, "resolve" | "resolveRelPath">,
+  changedRelPath: string,
+  changedHash: string,
+  l: Pick<LinkingPage, "relPath" | "passages">,
+  asOfMs?: number,
+): string {
+  const passage = linkingPassage(l);
+  return passageKeyHash(l.relPath, passage, changedHash, passageKeyContext(index, changedRelPath, passage, asOfMs));
 }
 
 /** The passage a To-check linking page is judged on: its lines that make a
@@ -136,14 +185,20 @@ export interface StaleCallInput {
 const PASSAGE_CAP = 2_000;
 const NOTE_CAP = 600;
 const cap = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+/** Wiki text in the prompt: a run of three `<` or `>` becomes `‹`/`›`, so
+ *  no wiki text can close or forge the passage fence (A3). */
+const defang = (s: string) => s.replace(/<{3,}/g, (m) => "‹".repeat(m.length)).replace(/>{3,}/g, (m) => "›".repeat(m.length));
+/** A one-line wiki field (title, note, subject): defanged, its line breaks
+ *  folded, so it cannot start a prompt line of its own. */
+const oneLine = (s: string) => defang(s).replace(/\s*[\r\n]+\s*/g, " ");
 
 /** The prompt for one call. Tool-less: everything the model needs is in it. */
 export function buildStalePrompt(input: StaleCallInput): string {
   const t = input.target;
   const status = [
-    t.planStatus ? `plan_status: ${t.planStatus}` : "plan_status: (none — not a plan)",
-    t.statusNote ? `status_note: ${cap(t.statusNote, NOTE_CAP)}` : "",
-    t.description ? `description: ${cap(t.description, NOTE_CAP)}` : "",
+    t.planStatus ? `plan_status: ${oneLine(t.planStatus)}` : "plan_status: (none — not a plan)",
+    t.statusNote ? `status_note: ${cap(oneLine(t.statusNote), NOTE_CAP)}` : "",
+    t.description ? `description: ${cap(oneLine(t.description), NOTE_CAP)}` : "",
   ].filter(Boolean);
   const commits =
     input.commits === undefined
@@ -151,10 +206,10 @@ export function buildStalePrompt(input: StaleCallInput): string {
       : input.commits === null
         ? ["The change to the linked page is uncommitted, so there are no commit subjects; judge from its current status above only."]
         : input.commits.length
-          ? ["Subjects of the linked page's commits since the passage's page last changed, newest first:", ...input.commits.map((s) => `- ${s}`)]
+          ? ["Subjects of the linked page's commits since the passage's page last changed, newest first:", ...input.commits.map((s) => `- ${oneLine(s)}`)]
           : ["The linked page has no commits since the passage's page last changed."];
   const others = input.otherPlans?.length
-    ? ["", "Other plans the passage links to, with their status today:", ...input.otherPlans.map((o) => `- [[${o.relPath}]]: plan_status ${o.planStatus}${o.statusNote ? ` — ${cap(o.statusNote, 300)}` : ""}`)]
+    ? ["", "Other plans the passage links to, with their status today:", ...input.otherPlans.map((o) => `- [[${oneLine(o.relPath)}]]: plan_status ${oneLine(o.planStatus)}${o.statusNote ? ` — ${cap(oneLine(o.statusNote), 300)}` : ""}`)]
     : [];
   const task =
     input.kind === "status-line"
@@ -170,13 +225,13 @@ export function buildStalePrompt(input: StaleCallInput): string {
   return [
     "You check a wiki for stale facts. Answer with ONE JSON object and nothing else.",
     "",
-    `Wiki page: ${input.page}`,
+    `Wiki page: ${oneLine(input.page)}`,
     "Passage (verbatim):",
     "<<<",
-    cap(input.passage, PASSAGE_CAP),
+    cap(defang(input.passage), PASSAGE_CAP),
     ">>>",
     "",
-    `Linked page: [[${t.relPath}]] — ${t.title}`,
+    `Linked page: [[${oneLine(t.relPath)}]] — ${oneLine(t.title)}`,
     ...status,
     ...(commits.length ? ["", ...commits] : []),
     ...others,
@@ -190,7 +245,8 @@ export function buildStalePrompt(input: StaleCallInput): string {
     '- "unsure": you cannot tell from what is here.',
     "",
     'Shape: {"verdict":"stale|true|not-status|unsure","reason":"one sentence","edit":null}',
-    'When the verdict is "stale", set "edit" to {"old":"…","new":"…","home":"…"}: "old" is the shortest span copied VERBATIM from the passage that holds the stale claim, "new" replaces it with the current fact, and "home" replaces it with text that drops the copied status but keeps every link, so the linked page stays the one place the status lives. Write "new" and "home" in the passage\'s language.',
+    'When the verdict is "stale", set "edit" to {"old":"…","new":"…","home":"…"}: "old" is the shortest span copied VERBATIM from ONE line of the passage that holds the stale claim and occurs on it once, "new" replaces it with the current fact, and "home" replaces it with text that drops the copied status but keeps every link, so the linked page stays the one place the status lives. Write "new" and "home" in the passage\'s language, one line each, at most 400 characters.',
+    '"new" may restate only facts stated above: the linked page\'s plan_status, status_note and description, the commit subjects and the other plans\' status. Never add a date, number, name, PR or outcome that is not stated above. A commit subject names a change, not how it works: never say how, when or by whom something happens beyond the subject\'s own words. When the inputs do not say what the current fact is, make "new" the same as "home".',
   ].join("\n");
 }
 
@@ -202,14 +258,29 @@ export interface StaleAnswer {
 
 const MODEL_VERDICTS = ["stale", "unsure", "true", "not-status"] as const;
 const REASON_CAP = 500;
+/** An edit's `new` or `home` is at most this long (the prompt says 400 too). */
+export const EDIT_TEXT_CAP = 400;
+
+const occurrences = (hay: string, needle: string) => {
+  let n = 0;
+  for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + 1)) n++;
+  return n;
+};
+const fitsEdit = (s: string) => s.length <= EDIT_TEXT_CAP && !/[\r\n]/.test(s);
+/** The links a text holds: wikilink targets and markdown link URLs. */
+const linksIn = (s: string) => [...extractWikilinks(s).map((t) => `[[${t}]]`), ...[...s.matchAll(/\]\(([^)\s]+)/g)].map((m) => m[1]!)];
 
 /**
  * The model's answer, validated strictly: an unreadable answer or an unknown
- * verdict is `unsure`; an edit survives only on a stale verdict and only when
- * its `old` text occurs verbatim in the passage (else the edit is dropped and
- * the verdict kept); `home` is kept when it is a string.
+ * verdict is `unsure`. An edit survives only on a stale verdict (else it is
+ * dropped and the verdict kept), and only when (A3): `old` occurs exactly
+ * once across the passage's source lines — a passage's `\n`-joined claim
+ * lines, a status-line window's `…`-separated pieces — so it never spans a
+ * join; `new` is one line of at most {@link EDIT_TEXT_CAP} characters and
+ * differs from `old`. `home` is kept only when it fits the same bound,
+ * differs from `old` and keeps every link `old` holds.
  */
-export function parseStaleAnswer(raw: string, passage: string): StaleAnswer {
+export function parseStaleAnswer(raw: string, passage: string, kind: StaleCallInput["kind"] = "passage"): StaleAnswer {
   let obj: Record<string, unknown>;
   try {
     const v = extractJson<unknown>(raw);
@@ -225,8 +296,12 @@ export function parseStaleAnswer(raw: string, passage: string): StaleAnswer {
   const e = obj.edit as Record<string, unknown> | null | undefined;
   if (verdict === "stale" && e && typeof e === "object" && typeof e.old === "string" && typeof e.new === "string") {
     const old = e.old;
-    if (old.trim() && passage.includes(old) && e.new !== old) {
-      edit = { old, new: e.new, ...(typeof e.home === "string" && e.home !== old ? { home: e.home } : {}) };
+    const sources = kind === "status-line" ? passage.split("…") : passage.split("\n");
+    const once = sources.reduce((n, src) => n + occurrences(src, old), 0) === 1;
+    if (old.trim() && once && fitsEdit(e.new) && e.new !== old) {
+      const home = e.home;
+      const homeOk = typeof home === "string" && home !== old && fitsEdit(home) && linksIn(old).every((l) => home.includes(l));
+      edit = { old, new: e.new, ...(homeOk ? { home } : {}) };
     }
   }
   return { verdict, reason, edit };
@@ -441,7 +516,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       for (const [rel, hits] of index.statusLineHits ?? []) {
         const page = index.resolveRelPath(rel);
         if (!page) continue;
-        for (const hit of hits) todo.push({ page, hit, key: statusLineKeyHash(page.relPath, hit) });
+        for (const hit of hits) todo.push({ page, hit, key: statusLineVerdictKey(index, page.relPath, hit) });
       }
       row.hits = todo.length;
       const cached = await deps.store().get(entry.name, "status-line", todo.map((t) => t.key));
@@ -464,7 +539,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
             source: "wiki_stale_confirm",
             ...(tracerOnce() ? { tracer: tracerOnce()! } : {}),
           });
-          const answer = parseStaleAnswer(raw, input.passage);
+          const answer = parseStaleAnswer(raw, input.passage, "status-line");
           await deps.store().upsert({
             wiki: entry.name,
             kind: "status-line",
@@ -622,7 +697,8 @@ export async function runStaleCheck(opts: {
     .filter((l) => l.bucket === "toCheck")
     .map((l) => {
       const passage = linkingPassage(l);
-      return { l, passage, key: passageKeyHash(l.relPath, passage, changedHash) };
+      const ctx = passageKeyContext(index, buckets.relPath, passage, opts.asOfMs);
+      return { l, passage, ctx, key: passageKeyHash(l.relPath, passage, changedHash, ctx) };
     });
   const cached = await store.get(wiki, "passage", items.map((i) => i.key));
   const fresh = items.filter((i) => !cached.has(i.key));
@@ -647,12 +723,12 @@ export async function runStaleCheck(opts: {
           kind: "passage",
           page: i.l.relPath,
           passage: i.passage,
-          target: targetFacts(changedMeta, buckets.relPath),
+          target: i.ctx.target,
           commits: await commitsFor(index, changedMeta, i.l.lastChangeMs, opts.asOfMs),
-          otherPlans: otherPlansIn(index, i.passage, buckets.relPath),
+          otherPlans: i.ctx.otherPlans,
         };
         const raw = await model(buildStalePrompt(input), { bot, deadlineAt, source: "wiki_stale_check" });
-        const a = parseStaleAnswer(raw, i.passage);
+        const a = parseStaleAnswer(raw, i.passage, "passage");
         await store.upsert({ wiki, kind: "passage", page: i.l.relPath, keyHash: i.key, verdict: a.verdict, reason: a.reason, edit: a.edit, checkedBy: `model:${bot.name}` });
         verdicts++;
         await onEvent({ type: "verdict", relPath: i.l.relPath, verdict: a.verdict, reason: a.reason, edit: a.edit, cached: false });
@@ -681,11 +757,12 @@ const view = (r: StaleVerdictRow): VerdictView => ({ verdict: r.verdict, reason:
 /** Every status-line hit's confirmation in one read, keyed `relPath\0line\0target`. */
 export async function hitConfirmations(
   wiki: string,
+  index: Pick<WikiIndex, "resolveRelPath">,
   hitsByPage: Iterable<readonly [string, readonly StatusLineHit[]]>,
   store: StaleVerdictStore = staleVerdictStore(),
 ): Promise<Map<string, VerdictView>> {
   const keyOf = new Map<string, string>();
-  for (const [rel, hits] of hitsByPage) for (const h of hits) keyOf.set(`${rel}\0${h.line}\0${h.target}`, statusLineKeyHash(rel, h));
+  for (const [rel, hits] of hitsByPage) for (const h of hits) keyOf.set(`${rel}\0${h.line}\0${h.target}`, statusLineVerdictKey(index, rel, h));
   const rows = await store.get(wiki, "status-line", [...new Set(keyOf.values())]);
   const out = new Map<string, VerdictView>();
   for (const [k, hash] of keyOf) {
@@ -700,18 +777,19 @@ export const hitKey = (relPath: string, h: Pick<StatusLineHit, "line" | "target"
 /** Is a hit a confirmed stale status line (D11, D26)? */
 export const isConfirmedStale = (v: VerdictView | undefined) => v?.verdict === "stale";
 
-/** The cached passage verdicts of a changed page's To-check pages, by linking relPath. */
+/** The cached passage verdicts of a changed page's To-check pages under `asOfMs`, by linking relPath. */
 export async function passageVerdicts(
   wiki: string,
   index: WikiIndex,
   changedRelPath: string,
   linking: readonly LinkingPage[],
-  store: StaleVerdictStore = staleVerdictStore(),
+  opts: { asOfMs?: number; store?: StaleVerdictStore } = {},
 ): Promise<Map<string, VerdictView>> {
+  const store = opts.store ?? staleVerdictStore();
   const toCheck = linking.filter((l) => l.bucket === "toCheck");
   if (toCheck.length === 0) return new Map();
   const changedHash = (await changedHashOf(index, changedRelPath)) ?? "unreadable";
-  const keys = new Map(toCheck.map((l) => [l.relPath, passageKeyHash(l.relPath, linkingPassage(l), changedHash)]));
+  const keys = new Map(toCheck.map((l) => [l.relPath, passageVerdictKey(index, changedRelPath, changedHash, l, opts.asOfMs)]));
   const rows = await store.get(wiki, "passage", [...keys.values()]);
   const out = new Map<string, VerdictView>();
   for (const [rel, k] of keys) {
