@@ -20,6 +20,7 @@
  */
 
 import { PALETTES, paletteBaseMap } from "./palettes.ts";
+import { themeLabMenuItemHtml } from "./theme-lab.ts";
 
 export const THEME_KEY = "muninn-theme";
 
@@ -79,7 +80,7 @@ export function themeToggleHtml(): string {
         `<button type="button" class="theme-menu-item" role="menuitemradio" aria-checked="false" data-theme-choice="${c.id}"><span class="theme-menu-glyph" aria-hidden="true">${c.glyph}</span>${c.label}</button>`,
     )
     .join("");
-  return `<div class="theme-picker" id="themePicker"><button type="button" class="theme-toggle" id="themeToggle" title="Theme (t to cycle)" aria-label="Theme" aria-haspopup="menu" aria-expanded="false" aria-controls="themeMenu">◐</button><div class="theme-menu" id="themeMenu" role="menu" aria-label="Theme" hidden>${items}</div></div>`;
+  return `<div class="theme-picker" id="themePicker"><button type="button" class="theme-toggle" id="themeToggle" title="Theme (t to cycle)" aria-label="Theme" aria-haspopup="menu" aria-expanded="false" aria-controls="themeMenu">◐</button><div class="theme-menu" id="themeMenu" role="menu" aria-label="Theme" hidden>${items}${themeLabMenuItemHtml()}</div></div>`;
 }
 
 /**
@@ -131,7 +132,8 @@ export function themeToggleScript(): string {
       for (var j = 0; j < CHOICES.length; j++) if (CHOICES[j].id === c) i = j;
       apply(CHOICES[(i + 1) % CHOICES.length].id, true);
     }
-    function items() { return menu ? Array.prototype.slice.call(menu.querySelectorAll('[data-theme-choice]')) : []; }
+    // The arrow keys also reach "Theme lab…", which is not a choice.
+    function items() { return menu ? Array.prototype.slice.call(menu.querySelectorAll('[data-theme-choice], [data-theme-lab]')) : []; }
     function isOpen() { return !!menu && !menu.hidden; }
     function openMenu() {
       if (!menu || !btn) return;
@@ -158,6 +160,11 @@ export function themeToggleScript(): string {
     });
     if (menu) {
       menu.addEventListener('click', function(e) {
+        if (e.target.closest('[data-theme-lab]')) {
+          closeMenu(false);
+          if (window.__themeLabOpen) window.__themeLabOpen(true);
+          return;
+        }
         var item = e.target.closest('[data-theme-choice]');
         if (!item) return;
         apply(item.getAttribute('data-theme-choice'), true);

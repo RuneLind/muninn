@@ -155,7 +155,8 @@ describe("theme picker", () => {
 function baseTokens(base: "light" | "dark"): Record<string, string> {
   const css = themeTokenStyles();
   const start = css.indexOf(`html[data-theme="${base}"] {`);
-  const block = css.slice(start, css.indexOf("}", start));
+  // Comments quote token names ("--bg-inset: …"), so drop them before parsing.
+  const block = css.slice(start, css.indexOf("}", start)).replace(/\/\*[\s\S]*?\*\//g, "");
   const out: Record<string, string> = {};
   for (const m of block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) out[m[1]!] = m[2]!.trim();
   return out;
@@ -201,7 +202,7 @@ describe("palette colour rules", () => {
   // The inks held to 4.5 on --tint-neutral. --text-dim, --text-faint and
   // --text-disabled are left out because they fail 4.5 on the fill in every
   // theme, not because every use is a disabled state: `.overview-event-badge.sys`
-  // and `.chip-rejected` draw readable labels in --text-dim on it (2.96:1 on
+  // and `.chip-rejected` draw readable labels in --text-dim on it (3.21:1 on
   // paper-light, 3.22 in plain light, 3.03 dark, 3.77 reading) — a known gap.
   const NEUTRAL_INKS = ["--text-primary", "--text-secondary", "--text-soft", "--text-muted", "--tok-fn"];
 
@@ -287,6 +288,84 @@ describe("palette colour rules", () => {
       // The GitHub watcher badge draws --status-success on --island-success.
       const badge = contrast(light["--status-success"]!, light["--island-success"]!);
       expect(contrast(t["--status-success"]!, t["--island-success"]!), "GitHub badge").toBeGreaterThanOrEqual(badge - 1e-9);
+    });
+  }
+
+  // The background ladder keeps its base's order: a field (--bg-inset) sits
+  // between the page and its panel in dark, below every surface in light.
+  // Reading's first inset sank below its page; paper-light's panel sat under its page.
+  // Tokens the base sets equal stay equal (light: deep = inset, surface = card =
+  // assistant bubble).
+  const LADDER = ["--bg-page", "--bg-panel", "--bg-surface", "--bg-deep", "--bg-inset", "--bg-card"];
+  const SAME = [...LADDER, "--chat-assistant-bg"];
+  // The neutral chip fill holds its place too: in dark above the fields, below the card.
+  const ORDERED = [...LADDER, "--tint-neutral"];
+  for (const p of PALETTES) {
+    test(`${p.id}: background tokens keep the ${p.base} base's lightness order`, () => {
+      const base = baseTokens(p.base), t = { ...base, ...p.tokens };
+      for (const k of SAME) expect(base[k], `${p.base} ${k}`).toMatch(/^#[0-9a-f]{6}$/);
+      for (const a of ORDERED) {
+        for (const b of ORDERED) {
+          if (luminance(base[a]!) < luminance(base[b]!)) {
+            expect(luminance(t[a]!), `${a} ${t[a]} should be darker than ${b} ${t[b]}`).toBeLessThan(luminance(t[b]!));
+          }
+        }
+      }
+      for (const a of SAME) {
+        for (const b of SAME) {
+          if (a < b && base[a] === base[b]) expect(t[a], `${a} should equal ${b}, as in the ${p.base} base`).toBe(t[b]!);
+        }
+      }
+    });
+  }
+
+  // On a dark base the neutral fill is a chip on cards, its common host: it
+  // shows on page, panel and card at least as well as plain dark's (1.020, on
+  // its card). At #292725 Reading's chips vanished on cards (1.016); #1a1a1a sank them under its fields.
+  const dark = baseTokens("dark");
+  const darkNeutralFloor = Math.min(...SURFACES.map((s) => contrast(dark["--tint-neutral"]!, dark[s]!)));
+  for (const p of PALETTES.filter((x) => x.base === "dark")) {
+    test(`${p.id}: --tint-neutral shows on page, panel and card`, () => {
+      const t = { ...dark, ...p.tokens };
+      for (const s of SURFACES) {
+        expect(contrast(t["--tint-neutral"]!, t[s]!), `--tint-neutral ${t["--tint-neutral"]} on ${s} ${t[s]}`).toBeGreaterThanOrEqual(darkNeutralFloor - 1e-9);
+      }
+    });
+  }
+
+  // Dim and faint text on a field (--bg-inset, --bg-deep) reads at least as
+  // well as plain light's: `.tdr-chip-muted`, `.rejudge-children th`.
+  for (const p of PALETTES.filter((x) => x.base === "light")) {
+    test(`${p.id}: --text-dim and --text-faint on fields never read worse than plain light's`, () => {
+      const t = { ...light, ...p.tokens };
+      for (const ink of ["--text-dim", "--text-faint"]) {
+        for (const s of ["--bg-inset", "--bg-deep"]) {
+          const floor = contrast(light[ink]!, light[s]!);
+          expect(contrast(t[ink]!, t[s]!), `${ink} ${t[ink]} on ${s} ${t[s]} (floor ${floor.toFixed(2)})`).toBeGreaterThanOrEqual(floor - 1e-9);
+        }
+      }
+    });
+  }
+
+  // A fenced block shows as a fill on the cards and surfaces it sits in, at least
+  // as well as plain light's (#eceef3 on #f1f2f6), and its syntax colours stay AA.
+  for (const p of PALETTES) {
+    test(`${p.id}: --bg-code reads as a fill and its syntax colours >= 4.5:1`, () => {
+      const t = { ...baseTokens(p.base), ...p.tokens };
+      if (p.base === "light") {
+        // The header bar (language label in --text-dim) steps off the fence like plain light's.
+        const bar = contrast(light["--bg-code-bar"]!, light["--bg-code"]!);
+        expect(contrast(t["--bg-code-bar"]!, t["--bg-code"]!), `--bg-code-bar ${t["--bg-code-bar"]} on --bg-code ${t["--bg-code"]}`).toBeGreaterThanOrEqual(bar - 1e-9);
+        const label = contrast(light["--text-dim"]!, light["--bg-code-bar"]!);
+        expect(contrast(t["--text-dim"]!, t["--bg-code-bar"]!), "fence label").toBeGreaterThanOrEqual(label - 1e-9);
+        const floor = contrast(light["--bg-code"]!, light["--bg-card"]!);
+        for (const s of ["--bg-card", "--bg-surface"]) {
+          expect(contrast(t["--bg-code"]!, t[s]!), `--bg-code ${t["--bg-code"]} on ${s} ${t[s]}`).toBeGreaterThanOrEqual(floor - 1e-9);
+        }
+      }
+      for (const k of ["--tok-com", "--tok-str", "--tok-kw", "--tok-num", "--tok-fn", "--tok-typ", "--tok-pun"]) {
+        expect(contrast(t[k]!, t["--bg-code"]!), `${k} ${t[k]} on --bg-code ${t["--bg-code"]}`).toBeGreaterThanOrEqual(4.5);
+      }
     });
   }
 

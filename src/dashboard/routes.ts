@@ -3,6 +3,7 @@ import { resolveServingProfile, type Config } from "../config.ts";
 import { droppedRouteGroups, servesWikiReadSliceOnly, type RouteGroup } from "./route-groups.ts";
 import { sessionRole } from "../auth/guard.ts";
 import { HEALTH_LIVE_PATH, HEALTH_READY_PATH } from "../auth/zones.ts";
+import { THEME_LAB_PATH, themeLabScript } from "./views/components/theme-lab.ts";
 import { readiness } from "./health.ts";
 import { renderDashboardPage } from "./views/page.ts";
 import { FAVICON_SVG, FAVICON_HEADERS } from "./views/favicon.ts";
@@ -40,8 +41,8 @@ import { registerJiraRoutes } from "./routes/jira-routes.ts";
  * Every dashboard route, minus whatever the serving profile drops (the drop
  * list and its rationale: `./route-groups.ts`).
  *
- * The five INLINE routes below (`/`, the two health paths, the favicons, the
- * build hash, `/api/attention`) are profile-independent and always present —
+ * The INLINE routes below (`/`, the two health paths, the favicons, the theme
+ * lab script, the build hash, `/api/attention`) are profile-independent and always present —
  * they are the instance itself, not a feature. So is the `/chat` slice, which
  * is mounted separately in `src/index.ts` and is therefore not filterable here
  * at all.
@@ -89,6 +90,16 @@ export function createDashboardRoutes(config: Config): Hono {
     c.body(FAVICON_SVG, 200, FAVICON_HEADERS);
   app.get("/favicon.svg", serveFavicon);
   app.get("/favicon.ico", serveFavicon);
+
+  // The theme lab, loaded only when a reader opens it (theme-lab.ts). Like the
+  // favicons it needs an identity but no role: it is client-only and writes
+  // nothing but the viewer's own localStorage.
+  // The ETag makes each navigation with the lab open a 304, not a 24 KB download.
+  const themeLabEtag = `"${Bun.hash(themeLabScript()).toString(36)}"`;
+  app.get(THEME_LAB_PATH, (c) => {
+    if (c.req.header("If-None-Match") === themeLabEtag) return c.body(null, 304, { ETag: themeLabEtag });
+    return c.body(themeLabScript(), 200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache", ETag: themeLabEtag });
+  });
 
   // Build hash of the inlined browser bundles — the visibility-change watcher
   // in helpers-browser.ts compares this against the meta tag the page was

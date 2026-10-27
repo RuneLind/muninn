@@ -101,13 +101,16 @@ export const ADMIN_DENY_LIST: readonly ZoneDenyEntry[] = [
 /**
  * Reachable without an admin role. The two health paths are additionally in
  * `AUTH_EXCLUDED_PATHS`, i.e. reachable with no credential at all; the favicons
- * are not — they authenticate like everything else and merely need no role.
+ * and the theme lab script are not — they authenticate like everything else and
+ * merely need no role.
  */
 export const OPEN_ZONE_PATHS: readonly string[] = [
   HEALTH_LIVE_PATH,
   HEALTH_READY_PATH,
   "/favicon.svg",
   "/favicon.ico",
+  // Every page's stub loads it; client-only, no data (theme-lab.ts).
+  "/theme-lab.js",
 ];
 
 /**
