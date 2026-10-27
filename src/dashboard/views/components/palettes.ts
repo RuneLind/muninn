@@ -30,7 +30,9 @@ export interface Palette {
 /**
  * The tokens every palette must set: surfaces, borders, text, accent, tints,
  * chat, syntax and the bold/chip rule. Status colours (`--status-*`, `--tone-*`,
- * `--on-warning`, the date inks) carry meaning and stay the base's. The
+ * `--on-warning`, the date inks) carry meaning: a palette may retune a status
+ * VALUE for its surfaces (paper-light darkens them) but never re-points one
+ * meaning onto another token, and need not set them. The
  * `--island-*` badge fills and `--skeleton-shine` are optional: unset, a
  * palette shows the bases' dark islands, which read on any surface.
  */
@@ -167,6 +169,127 @@ export const PALETTES: readonly Palette[] = [
 
       "--bg-chat": "#1b1917",
       "--bg-elevated": "#33302e",
+    },
+  },
+  {
+    id: "paper-light",
+    label: "Light reading mode",
+    base: "light",
+    glyph: "❧",
+    tokens: {
+      // The «Lesemodus lys» preset (owner pick, D5): page hsl(40 33% 95%),
+      // surfaces sink darker in its hue as the prototype's paletteFrom derives
+      // them (panel 92 %, card 90 %, chip 89 %, fence 91.4 %). Type stays
+      // 14px / 1.65 (D8).
+      "--bg-page": "#f6f4ee",
+      "--bg-panel": "#f1ede4",
+      "--bg-surface": "#eee8dd",
+      "--bg-deep": "#f0ebe2",
+      "--bg-inset": "#f0ebe2",
+      "--bg-gradient-end": "#ece6da",
+      "--bg-card": "#eee8dd",
+      "--bg-hover": "rgba(0, 0, 0, 0.04)",
+      "--graph-canvas": "#0a0a0f",
+
+      "--border-primary": "#e7dfd0",
+      "--border-secondary": "#ddd2bb",
+      "--border-subtle": "#ece6da",
+      "--scrollbar-thumb": "#d2cbbc",
+
+      // Body hsl(40 12% 24%) and heading hsl(40 12% 9%) from the preset; the
+      // steps between are spaced like the light ramp. --text-muted is #696357,
+      // not the preset's #81796a (3.53:1 on the card): 4.89 card, 5.10 panel,
+      // 5.42 page, and 4.70 on --tint-neutral, which sits darker than the card.
+      "--text-primary": "#1a1814",
+      "--text-secondary": "#454036",
+      "--text-tertiary": "#524d42",
+      "--text-soft": "#5f5a4e",
+      "--text-muted": "#696357",
+      "--text-dim": "#8b8374",
+      "--text-faint": "#a49e94",
+      "--text-disabled": "#c2beb7",
+
+      // A step darker than the preset's #a35f2f (owner decision D18), which
+      // read 4.07:1 as text on the card. #925427 measures 5.42 page, 5.11
+      // panel, 4.89 card, and 4.18 as the active nav link on its own 15 %
+      // tint (plain light 4.13). The hover keeps the preset's ~1.3 step
+      // below it. White reads 5.97 on the accent and 7.86 on the hover, so
+      // all three inks are white. --accent-light keeps the preset's text
+      // accent, 6.15 page / 5.54 card.
+      "--accent": "#925427",
+      "--accent-hover": "#7c4318",
+      "--accent-light": "#8a4b1f",
+      "--accent-muted": "#7d6250",
+      "--on-accent": "#fff",
+      "--on-accent-primary": "#fff",
+      "--on-accent-inherit": "#fff",
+
+      // The light base's pale tints read on paper: their pill text (--tone-*,
+      // 6.4–8.1:1 with the status values below) clears 4.5. --tint-purple
+      // follows the accent to a copper wash darker than every surface, like
+      // the base lavender: 1.184 page (plain light 1.109), 1.114 panel, 1.068
+      // card; --accent 4.58 and --accent-light 5.19 on it. --tint-neutral is
+      // darker than every surface by at least plain light's smallest step (1.038, its tint on its card):
+      // 1.040 card, 1.085 panel, 1.153 page. Its inks: --text-muted 4.70,
+      // --text-soft 5.41, --tok-fn 5.29.
+      "--tint-success": "#dcfce7",
+      "--tint-error": "#fee2e2",
+      "--tint-warning": "#fef3c7",
+      "--tint-info": "#dbeafe",
+      "--tint-purple": "#eedfd3",
+      "--tint-magenta": "#f3e8ff",
+      "--tint-cyan": "#cffafe",
+      "--tint-neutral": "#e8e4dc",
+
+      // Status text, darkened toward black in its own hue because the panel
+      // and card sit darker than plain light's: each reads at least plain
+      // light's ratio on the same surface, and info, error and magenta (AA
+      // somewhere in plain light) reach 4.5 everywhere. Page/panel/card:
+      // success 3.53/3.32/3.18, error 5.19/4.88/4.68, warning 3.42/3.21/3.08,
+      // info 5.54/5.22/5.00, tool 4.46/4.20/4.02, cyan 3.95/3.71/3.56,
+      // magenta 5.76/5.43/5.20. --on-warning on the warning fill: 4.85.
+      "--status-success": "#149544",
+      "--status-error": "#c72222",
+      "--status-warning": "#c66d05",
+      "--status-info": "#2159d4",
+      "--status-tool": "#b05909",
+      "--status-cyan": "#0784a3",
+      "--status-magenta": "#842ed3",
+      // The GitHub badge's green ink on this island: 4.61 (plain light 4.58).
+      "--island-success": "#0f1a0f",
+
+      "--chat-user-bg": "#f3e3d2",
+      "--chat-user-text": "#5c3a1e",
+      "--chat-assistant-bg": "#eee8dd",
+      "--chat-assistant-text": "#454036",
+
+      // The preset's syntax set, on the #f0ebe2 fence: 4.51–5.64:1.
+      "--tok-com": "#6b6258",
+      "--tok-str": "#2f6b1f",
+      "--tok-kw": "#8b2fd0",
+      "--tok-num": "#9c4a07",
+      "--tok-fn": "#1d4ed8",
+      "--tok-typ": "#0e7490",
+      "--tok-pun": "#6b6258",
+
+      "--bg-code": "#f0ebe2",
+      "--bg-code-bar": "#e7dfd0",
+
+      // Bold darkens its context 0.08 in oklch lightness: body (L 0.373)
+      // lands at 0.293, a 1.36 lead. The preset's strong ink (L 0.21) needs
+      // 0.16, which bolds --text-soft (L 0.469) darker than body text; at
+      // 0.08 every dimmed token's bold stays lighter (soft 0.389). The pivot
+      // keeps light's 0.9, between --text-disabled (L 0.80) and the white
+      // ink on the accent. The chip keeps its context's text colour (D14) on
+      // a fill 6 % darker than the page, with a 10 % black edge.
+      "--strong-lift": "0.08",
+      "--strong-pivot": "0.9",
+      "--strong-weight": "bolder",
+      "--bg-code-inline": "#ece6da",
+      "--code-inline-border": "rgba(0, 0, 0, 0.1)",
+
+      "--bg-chat": "#f9f7f3",
+      "--bg-elevated": "#fbf9f7",
     },
   },
 ];

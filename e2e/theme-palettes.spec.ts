@@ -2,18 +2,20 @@
  * Palettes (Reading mode) end to end: what a unit test over the init script's
  * string cannot see.
  *
- *  1. **No flash.** With `muninn-theme=reading` stored, `data-theme="dark"` and
- *     `data-palette="reading"` are both on <html> before the header parses and
- *     at DOMContentLoaded. A palette applied by the end-of-header script would
- *     paint the base first.
+ *  1. **No flash.** With a palette id stored (`reading`, `paper-light`), its
+ *     base as `data-theme` and its id as `data-palette` are both on <html>
+ *     before the header parses and at DOMContentLoaded. A palette applied by
+ *     the end-of-header script would paint the base first.
  *  2. **The palette wins.** Its block shares the `html[data-theme]` blocks'
  *     specificity and wins on source order only — on the dashboard and on the
- *     chat page, which re-declares its own tokens after SHARED_STYLES.
+ *     chat page, which re-declares its own tokens after SHARED_STYLES. Every
+ *     palette, under both OS colour schemes; a literal id → base table pins
+ *     each palette's base against a registry edit.
  *  3. **The picker.** Menu order, keyboard, Escape from anywhere, outside
  *     click and Tools ▾ closing each other, System
  *     clearing both attributes, and `t` cycling the same list.
  *  4. **Mermaid follows the base.** A palette is a layer, never a third base:
- *     the diagram renders mermaid's dark theme under Reading mode.
+ *     the diagram renders mermaid's theme for the palette's base.
  *
  * Boots its own muninn with a temp `WIKI_EXTRA` wiki (the mermaid fixture).
  * The mermaid bundle loads from the CDN, as it does for every reader.
@@ -35,6 +37,15 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI = "e2e-palettes";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const READING = PALETTES.find((p) => p.id === "reading")!;
+const PAPER_LIGHT = PALETTES.find((p) => p.id === "paper-light")!;
+
+/** `#rgb` / `#rrggbb` → the `rgb(r, g, b)` string getComputedStyle returns. */
+function hexToRgb(hex: string): string {
+  const h = hex.replace("#", "");
+  const full = h.length === 3 ? [...h].map((c) => c + c).join("") : h;
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16));
+  return `rgb(${r}, ${g}, ${b})`;
+}
 
 const PAGE = [
   "---",
@@ -107,9 +118,9 @@ const attrs = (page: Page) =>
     stored: localStorage.getItem("muninn-theme"),
   }));
 
-test.describe("Reading mode is applied before first paint", () => {
-  test("data-theme and data-palette are set before the header parses and at DOMContentLoaded", async ({ page }) => {
-    await storeChoice(page, "reading");
+test.describe("A palette is applied before first paint", () => {
+  for (const p of PALETTES) test(`${p.id}: data-theme and data-palette are set before the header parses and at DOMContentLoaded`, async ({ page }) => {
+    await storeChoice(page, p.id);
     await page.addInitScript(() => {
       const w = window as unknown as { __seen: Record<string, unknown> };
       w.__seen = {};
@@ -129,34 +140,49 @@ test.describe("Reading mode is applied before first paint", () => {
       await page.goto(BASE + url);
       const seen = await page.evaluate(() => (window as unknown as { __seen: unknown }).__seen);
       expect(seen, url).toEqual({
-        header: { theme: "dark", palette: "reading" },
-        dcl: { theme: "dark", palette: "reading" },
+        header: { theme: p.base, palette: p.id },
+        dcl: { theme: p.base, palette: p.id },
       });
     }
   });
 
-  test("the palette's tokens win over the base, on the dashboard and on chat", async ({ page }) => {
-    await storeChoice(page, "reading");
-    await page.goto(BASE + "/");
-    const dash = await page.evaluate(() => ({
-      body: getComputedStyle(document.body).backgroundColor,
-      header: getComputedStyle(document.querySelector("header")!).backgroundColor,
-    }));
-    expect(dash).toEqual({ body: "rgb(30, 28, 26)", header: "rgb(38, 36, 34)" }); // #1e1c1a, #262422
-    await page.goto(BASE + "/chat");
-    const chat = await page.evaluate(() => {
-      const cs = getComputedStyle(document.documentElement);
-      return {
-        page: cs.getPropertyValue("--bg-page").trim(),
-        chat: cs.getPropertyValue("--bg-chat").trim(),
-        elevated: cs.getPropertyValue("--bg-elevated").trim(),
-      };
+  // Every palette, under both OS schemes: the chat page re-emits only
+  // CHAT_PALETTE_TOKENS after its own base blocks, so a palette missing from
+  // that re-emit shows the base's chat surface under the palette's sidebar.
+  for (const p of PALETTES) for (const scheme of ["light", "dark"] as const) {
+    test(`${p.id} (OS ${scheme}): the palette's tokens win over the base, on the dashboard and on chat`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await storeChoice(page, p.id);
+      await page.goto(BASE + "/");
+      const dash = await page.evaluate(() => ({
+        body: getComputedStyle(document.body).backgroundColor,
+        header: getComputedStyle(document.querySelector("header")!).backgroundColor,
+      }));
+      expect(dash).toEqual({ body: hexToRgb(p.tokens["--bg-page"]!), header: hexToRgb(p.tokens["--bg-panel"]!) });
+      await page.goto(BASE + "/chat");
+      const chat = await page.evaluate(() => {
+        const cs = getComputedStyle(document.documentElement);
+        return {
+          page: cs.getPropertyValue("--bg-page").trim(),
+          chat: cs.getPropertyValue("--bg-chat").trim(),
+          elevated: cs.getPropertyValue("--bg-elevated").trim(),
+          painted: getComputedStyle(document.querySelector(".sim-chat")!).backgroundColor,
+        };
+      });
+      expect(chat).toEqual({
+        page: p.tokens["--bg-page"],
+        chat: p.tokens["--bg-chat"],
+        elevated: p.tokens["--bg-elevated"],
+        painted: hexToRgb(p.tokens["--bg-chat"]!),
+      });
     });
-    expect(chat).toEqual({
-      page: READING.tokens["--bg-page"],
-      chat: READING.tokens["--bg-chat"],
-      elevated: READING.tokens["--bg-elevated"],
-    });
+  }
+
+  // A literal table, so an edit to a registry entry's base fails here even
+  // though every loop above derives its expectation from that same entry.
+  test("each palette sits on the base it was designed for", () => {
+    const EXPECTED_BASE: Record<string, "light" | "dark"> = { reading: "dark", "paper-light": "light" };
+    expect(Object.fromEntries(PALETTES.map((p) => [p.id, p.base]))).toEqual(EXPECTED_BASE);
   });
 
   test("an unknown or 'system' stored value renders as system and stays stored", async ({ page }) => {
@@ -198,6 +224,21 @@ test.describe("The theme picker", () => {
     await page.getByRole("menuitemradio", { name: /System/ }).click();
     expect(await attrs(page)).toEqual({ theme: null, palette: null, stored: null });
     await expect(btn).toHaveText("◐");
+  });
+
+  test("◐ → Light reading mode applies and persists it", async ({ page }) => {
+    await storeChoice(page, null);
+    await page.goto(BASE + "/");
+    const btn = page.locator("#themeToggle");
+    await btn.click();
+    await page.getByRole("menuitemradio", { name: "Light reading mode", exact: true }).click();
+    await expect(page.locator("#themeMenu")).toBeHidden();
+    expect(await attrs(page)).toEqual({ theme: "light", palette: "paper-light", stored: "paper-light" });
+    await expect(btn).toHaveText(PAPER_LIGHT.glyph);
+    await page.reload();
+    expect(await attrs(page)).toEqual({ theme: "light", palette: "paper-light", stored: "paper-light" });
+    await btn.click();
+    await expect(page.getByRole("menuitemradio", { name: "Light reading mode", exact: true })).toHaveAttribute("aria-checked", "true");
   });
 
   test("keyboard: arrows move, Enter picks, Escape closes and refocuses, outside click closes", async ({ page }) => {
@@ -265,7 +306,7 @@ test.describe("The theme picker", () => {
     await expect(menu, "a padding click picks nothing and keeps the menu open").toBeVisible();
     await expect(page.getByRole("menuitemradio", { name: /System/ }), "focus stays on the item").toBeFocused();
     await page.keyboard.press("ArrowDown");
-    await expect(page.getByRole("menuitemradio", { name: /Light/ }), "arrows still move").toBeFocused();
+    await expect(page.getByRole("menuitemradio", { name: "Light", exact: true }), "arrows still move").toBeFocused();
     await page.keyboard.press("Escape");
     await expect(menu, "Escape after a padding click").toBeHidden();
     await expect(btn).toBeFocused();
@@ -420,16 +461,19 @@ test.describe("The theme picker", () => {
 });
 
 test.describe("A palette follows its base everywhere that asks light or dark", () => {
-  test("mermaid renders its dark theme under Reading mode", async ({ page }) => {
-    await storeChoice(page, "reading");
-    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=diagram-page`);
-    const node = page.locator("#articleWrap svg .node rect, #articleWrap svg .node polygon").first();
-    await expect(node).toBeVisible({ timeout: 20_000 });
-    const fill = await node.evaluate((el) => getComputedStyle(el).fill);
-    // mermaid's `default` theme fills nodes #ECECFF; `dark` fills #1f2020.
-    expect(fill).not.toBe("rgb(236, 236, 255)");
-    expect(fill).toBe("rgb(31, 32, 32)");
-  });
+  // mermaid's `default` theme fills nodes #ECECFF; `dark` fills #1f2020.
+  const MERMAID_FILL = { light: "rgb(236, 236, 255)", dark: "rgb(31, 32, 32)" } as const;
+  for (const p of PALETTES) {
+    test(`mermaid renders its ${p.base} theme under ${p.id}`, async ({ page }) => {
+      // The OS asks for the other scheme, so only the palette's base can draw this theme.
+      await page.emulateMedia({ colorScheme: p.base === "light" ? "dark" : "light" });
+      await storeChoice(page, p.id);
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=diagram-page`);
+      const node = page.locator("#articleWrap svg .node rect, #articleWrap svg .node polygon").first();
+      await expect(node).toBeVisible({ timeout: 20_000 });
+      expect(await node.evaluate((el) => getComputedStyle(el).fill)).toBe(MERMAID_FILL[p.base]);
+    });
+  }
 });
 
 // ── Fix round 1 (PR #747): a palette is a layer, the bases stay main's ─────
