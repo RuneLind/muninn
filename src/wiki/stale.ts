@@ -60,14 +60,14 @@ const NEGATION = `${L}(?:ikke|not)(?:\\s+(?:yet|ennå|enda|still|fortsatt))?\\s+
  */
 export const STATUS_WORDS: readonly (readonly [StatusKind, RegExp])[] = [
   ["proposed", words("proposed|forslag|foreslått|utkast|draft")],
-  ["in-flight", new RegExp(`${L}(?:in[- ]flight|pågår|i gang|påbegynt|under arbeid|open PRs?|(?:åpen|åpne) PR(?:-er)?)${R}|${NEGATION}(?:merget|merged)${R}`, "iu")],
+  ["in-flight", new RegExp(`${L}(?:in[- ]flight|pågår|i gang|påbegynt|under arbeid|open PRs?|åpen PR)${R}|${NEGATION}(?:merget|merged)${R}`, "iu")],
   ["shipped", new RegExp(`(?<!${NEGATION})${L}(?:shipped|levert|landet|ferdig|done|merget|merged)${R}`, "iu")],
   ["blocked", words("blocked|blokkert")],
 ];
 /** The prefilter: a plain, edge-free alternation over every status word's
  *  stem — a superset of {@link STATUS_WORDS}, and ~8× cheaper per line than
  *  the edged `u` regexes, which measured 12 ms over mimir's 282 link lines. */
-const STATUS_PROBE = /proposed|forslag|foreslått|utkast|draft|flight|pågår|i gang|påbegynt|under arbeid|merget|merged|open pr|åpen pr|åpne pr|shipped|levert|landet|ferdig|done|blocked|blokkert/i;
+const STATUS_PROBE = /proposed|forslag|foreslått|utkast|draft|flight|pågår|i gang|påbegynt|under arbeid|merget|merged|open pr|åpen pr|shipped|levert|landet|ferdig|done|blocked|blokkert/i;
 
 /** The status words a text names, in {@link STATUS_WORDS} order. */
 export function statusWordsIn(text: string): StatusKind[] {
@@ -336,8 +336,9 @@ const HEADING = /^ {0,3}(#{1,6})\s+(.*)$/;
 /**
  * A `D.M` date (F2, fix round 2): day 1–31 and month 1–12, not glued to a
  * letter, digit or `.` before it (`v1.2`, `sedVer4.4`, `GPT-5.6`, `1.2.3`),
- * nor followed by a digit or `.digit`, a letter, `-letter` (`4.4-versjon`),
- * `%`, `+`, `×` or a unit word (`2.5k`, `12.5 %`, `9.5–10.6 min`); and not
+ * nor followed by a digit or `.digit`, a letter, `%`, `+`, `×` or a unit word
+ * (`2.5k`, `12.5 %`, `9.5–10.6 min`), nor, when the day or the month has a
+ * single digit, by `-letter` (`4.4-versjon`; `08.09-sakene` is a date); and not
  * one space after a version word (`section 4.2`, `art. 13.1`, `sedVer 4.4`).
  * `DD.MM.YYYY` is a date. Else it is a version ONLY when day and month are
  * single digits AND it sits one space after a word that starts with a capital
@@ -346,7 +347,9 @@ const HEADING = /^ {0,3}(#{1,6})\s+(.*)$/;
  * Accepted: `bun 1.3`, `Node 22.12` read as dates; `Mandag 4.6` as a version.
  */
 const DM_RE = /(?<![\p{L}\p{N}.]|[\p{L}][-‐‑])(0?[1-9]|[12]\d|3[01])\.(0?[1-9]|1[0-2])(\.\d{4})?(?![\p{N}]|\.\p{N})/gu;
-const DM_AFTER = /^(?:\s*[–—-]\s*\d+(?:[.,]\d+)?)?(?:[\p{L}%+×]|[-‐‑]\p{L}|\s+(?:%|×|x|(?:ms|s|sek|sec|min|minutter|minutes|h|t|timer|hours|kB|KB|MB|GB|TB|k|oz|px|pt|em|rem)(?![\p{L}\p{N}])))/u;
+const DM_AFTER = /^(?:\s*[–—-]\s*\d+(?:[.,]\d+)?)?(?:[\p{L}%+×]|\s+(?:%|×|x|(?:ms|s|sek|sec|min|minutter|minutes|h|t|timer|hours|kB|KB|MB|GB|TB|k|oz|px|pt|em|rem)(?![\p{L}\p{N}])))/u;
+/** `-letter` after the match, past the same optional range: excludes only a single-digit day or month. */
+const DM_AFTER_HYPHEN_WORD = /^(?:\s*[–—-]\s*\d+(?:[.,]\d+)?)?[-‐‑]\p{L}/u;
 /** A version word one space before: as a word, or a camelCase tail (`sedVer`). */
 const DM_VERSION_WORD = /(?:(?<![\p{L}\p{N}])(?:version|versjon|v|ver|section|seksjon|kapittel|kap\.|art\.|artikkel)|\p{Ll}(?:Ver|Version|Versjon)) $/iu;
 /** A word one space before that starts with a capital or is caps and
@@ -355,7 +358,9 @@ const DM_CAPITAL_WORD = /(?<![\p{L}\p{N}])(?:\p{Lu}[\p{L}\p{N}]*|[\p{Lu}\p{N}]*\
 
 export function hasDateDM(text: string): boolean {
   for (const m of text.matchAll(DM_RE)) {
-    if (DM_AFTER.test(text.slice(m.index! + m[0].length))) continue;
+    const after = text.slice(m.index! + m[0].length);
+    if (DM_AFTER.test(after)) continue;
+    if ((m[1]!.length === 1 || m[2]!.length === 1) && DM_AFTER_HYPHEN_WORD.test(after)) continue;
     if (m[3]) return true; // a year
     const before = text.slice(0, m.index);
     if (DM_VERSION_WORD.test(before)) continue;
@@ -709,16 +714,17 @@ const realDay = (ymd: string) => {
 /**
  * `asOf` as the route and the script take it: `YYYY-MM-DD` is the END of that
  * UTC day (a commit made on it counts); an ISO instant is itself and must
- * carry its zone (`Z` or `±HH:MM`), since a zone-less one would be read in the
- * server's local time; exactly 13 digits are epoch ms (2001–2286), so an
- * epoch in seconds is refused rather than read as 1970 (F9a). A day that is
+ * carry its zone (`Z`, `±HH:MM` or `±HHMM`), since a zone-less one would be
+ * read in the server's local time; 13 digits with a leading 1–9 are epoch ms
+ * (2001-09-09 to 2286-11-20), so an epoch in seconds, zero-padded or not, is
+ * refused rather than read as 1970 (F9a). A day that is
  * not on the calendar is refused too. Absent ⇒ undefined; unreadable ⇒ null.
  */
 export function parseStaleAsOf(raw: string | undefined): number | undefined | null {
   const v = (raw ?? "").trim();
   if (!v) return undefined;
   if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return realDay(v) ? Date.parse(`${v}T23:59:59.999Z`) : null;
-  if (/^\d+$/.test(v)) return v.length === 13 ? Number(v) : null;
+  if (/^\d+$/.test(v)) return /^[1-9]\d{12}$/.test(v) ? Number(v) : null;
   const m = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.exec(v);
   if (!m || !realDay(m[1]!)) return null;
   const ms = Date.parse(v);

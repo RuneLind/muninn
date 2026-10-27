@@ -17,6 +17,7 @@ import { testTempDir } from "../../test/temp-dir.ts";
 import { wikiRouteTable } from "../../test/wiki-route-table.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
+import { runWikiStale } from "../../../scripts/wiki-stale.ts";
 import { __resetWorkSessionsForTest, refreshWorkSessions, workSessionsDepsFromEnv, workSessionsFor } from "../../wiki/work-sessions.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
@@ -115,6 +116,27 @@ describe("GET /api/wiki/stale", () => {
       __setReadonlyWikiRootsForTest();
     }
     expect((await get("wiki=stalewiki")).body.readonly).toBe(false);
+  });
+
+  test("the refusals carry readonly too, so the script still prints «check unavailable» (R2-6c)", async () => {
+    try {
+      __setReadonlyWikiRootsForTest([root]);
+      expect((await get("wiki=stalewiki&asOf=yesterday")).body).toMatchObject({ readonly: "root" });
+      expect((await get("wiki=nope")).body).toMatchObject({ readonly: false });
+      __setWikiReadonlyForTest(true);
+      expect((await get("wiki=stalewiki&asOf=yesterday")).body).toMatchObject({ readonly: "instance" });
+      expect((await get("wiki=nope")).body).toMatchObject({ readonly: "instance" });
+      const fetchJson = async (url: string) => {
+        const res = await app.request(url.replace("http://m", ""));
+        return { status: res.status, body: (await res.json()) as Record<string, any> };
+      };
+      const out = await runWikiStale(["--wiki", "stalewiki", "--pages", "hub.md", "--as-of", "yesterday", "--check", "--base-url", "http://m"], { env: {}, fetchJson });
+      expect(out.at(-1)).toBe("check unavailable: readonly instance");
+    } finally {
+      __setWikiReadonlyForTest();
+      __setReadonlyWikiRootsForTest();
+    }
+    expect((await get("wiki=stalewiki&asOf=yesterday")).body).toMatchObject({ readonly: false });
   });
 
   test("refusals: an unknown wiki, a bad asOf, an unknown page", async () => {

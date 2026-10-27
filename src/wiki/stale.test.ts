@@ -57,11 +57,16 @@ describe("status words (D18)", () => {
     expect(statusWordsIn("not yet still merged")).toEqual(["shipped"]);
   });
 
-  test("open PRs and åpne PR-er are in-flight (F7b)", () => {
-    for (const t of ["two open PRs", "åpne PR-er", "åpen PR-er", "åpne PR", "en åpen PR"]) expect([t, statusWordsIn(t)]).toEqual([t, ["in-flight"]]);
+  test("open PRs and åpen PR-er are in-flight (F7b)", () => {
+    for (const t of ["two open PRs", "åpen PR-er", "en åpen PR", "an open PR"]) expect([t, statusWordsIn(t)]).toEqual([t, ["in-flight"]]);
     expect(statusWordsIn("open PRsx")).toEqual([]);
     // The prefilter lets the plural through to the segment parse.
-    expect(statusLineCandidates("[[x]] har to åpne PR-er\n").map((c) => c.said)).toEqual([["in-flight"]]);
+    expect(statusLineCandidates("[[x]] har to open PRs\n").map((c) => c.said)).toEqual([["in-flight"]]);
+  });
+
+  test("«åpne» is the verb «to open», no status word (R2-4b)", () => {
+    for (const t of ["sjekk åpne PR-er", "kan åpne PR-er", "Åpne PR-en.", "åpne PR"]) expect([t, statusWordsIn(t)]).toEqual([t, []]);
+    expect(statusLineCandidates("[[x]] — sjekk åpne PR-er\n")).toEqual([]);
   });
 });
 
@@ -259,6 +264,8 @@ describe("hasDateDM: the D.M date rule (R2-1)", () => {
     "valgte A på S4 20.10", "Simuleringen 29.09", "Oppdatering 20.08", "Status 11.09", "NAV 23.10",
     "Møtet 23.10", "x, men. Siden 3.10 har den", "x og Torsdag 2.10 kom", "23.10", "den 4.6", "på 3.10",
     "(23.10)", "23.10.2026", "fra 1.11.", "fra 1.11. til", "Siden 03.10", "Rune 08.10",
+    // Two-digit day and month: a date before a hyphenated word (R2-4a).
+    "08.09-sakene", "29.09-siden", "14.10-lista", "28.05-kjøringen", "03.07-artefakter",
     // Accepted loss: lowercase and two-digit versions read as dates.
     "bun 1.3", "python 3.12", "node 22.12", "Node 22.12", "Python 3.12",
     // A version word or capitalised word counts one space before, no more.
@@ -266,7 +273,7 @@ describe("hasDateDM: the D.M date rule (R2-1)", () => {
   ];
   const notDates = [
     "model: Opus 4.6", "| Opus 4.6 |", "[[x]]. Opus 4.6", "Gemini 2.5", "art. 13.1", "artikkel 13.1",
-    "sedVer 4.4", "4.4-versjon", "takes 2.5 min", "12.5 %", "section 4.2", "1.2.3", "v1.2", "sedVer4.4",
+    "sedVer 4.4", "4.4-versjon", "3.10-mapping", "12.1-sak", "2.5-familien", "8.09-sakene", "takes 2.5 min", "12.5 %", "section 4.2", "1.2.3", "v1.2", "sedVer4.4",
     "CDM 4.4", "Bun 1.3", "version 2.10", "Versjon 2.10", "kap. 3.2", "seksjon 12.1", "kapittel 4.11", "5G 1.2",
     // Accepted loss: a capitalised word and a single-digit date read as a version.
     "Mandag 4.6",
@@ -374,6 +381,15 @@ describe("parseStaleAsOf", () => {
     expect(parseStaleAsOf("2026-10-25T10:00:00")).toBeNull();
     expect(parseStaleAsOf("2026-10-25T10:00:00+02:00")).toBe(Date.parse("2026-10-25T08:00:00Z"));
     expect(parseStaleAsOf("2024-02-29")).toBe(Date.parse("2024-02-29T23:59:59.999Z"));
+  });
+
+  test("13 digits with a leading 1–9 are epoch ms, 2001-09-09 to 2286-11-20; a zone may be ±HHMM (R2-4c)", () => {
+    expect(parseStaleAsOf("0000000000000")).toBeNull();
+    expect(parseStaleAsOf("0001761400000")).toBeNull();
+    expect(parseStaleAsOf("1000000000000")).toBe(1_000_000_000_000);
+    expect(parseStaleAsOf("9999999999999")).toBe(9_999_999_999_999);
+    expect(parseStaleAsOf("2026-10-25T10:00:00+0200")).toBe(Date.parse("2026-10-25T08:00:00Z"));
+    expect(parseStaleAsOf("2026-10-25T10:00-0130")).toBe(Date.parse("2026-10-25T11:30:00Z"));
   });
 });
 

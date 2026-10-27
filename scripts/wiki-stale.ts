@@ -112,11 +112,27 @@ const day = (ms: number | undefined) => (ms === undefined ? "never" : new Date(m
 const minute = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")}Z`;
 const cap = (s: string, n = 160) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 const isObj = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
-/** The answer shapes the printers read — anything else (a wrong `--base-url`,
- *  an older or newer muninn) is one line, never a throw. */
-const isPageReport = (r: Json) => isObj(r.page) && typeof r.page.relPath === "string" && Array.isArray(r.hits) && (r.buckets === null || (isObj(r.buckets) && isObj(r.buckets.counts) && Array.isArray(r.buckets.linking)));
-const isSummary = (r: Json) => isObj(r.totals) && Array.isArray(r.pages);
-const isSession = (r: Json) => isObj(r.session) && typeof r.session.found === "boolean" && Array.isArray(r.session.pages);
+const isStr = (v: unknown) => typeof v === "string";
+/** A finite number: `day()` and `minute()` throw on NaN and ±Infinity's dates. */
+const isNum = (v: unknown) => Number.isFinite(v) && Math.abs(v as number) <= 8.64e15;
+const isBool = (v: unknown) => typeof v === "boolean";
+const opt = (ok: (v: unknown) => boolean) => (v: unknown) => v === undefined || ok(v);
+const each = (ok: (v: Json) => boolean) => (v: unknown) => Array.isArray(v) && v.every((x) => isObj(x) && ok(x));
+/** The answer shapes the printers read, every field they read — anything
+ *  else (a wrong `--base-url`, an older or newer muninn) is one line, never
+ *  a throw. */
+const isHit = (h: Json) => isNum(h.line) && Array.isArray(h.said) && h.said.every(isStr) && isStr(h.target) && isStr(h.now) && opt(isStr)(h.text);
+const isPassage = (p: Json) => isNum(p.line) && isStr(p.text) && opt(isStr)(p.claim);
+const isLinking = (l: Json) => isStr(l.relPath) && isStr(l.title) && isStr(l.bucket) && opt(isNum)(l.lastChangeMs) && each(isPassage)(l.passages);
+const isBuckets = (b: unknown) => b === null || (isObj(b) && isObj(b.counts) && Object.values(b.counts).every(isNum) && each(isLinking)(b.linking));
+const isPageReport = (r: Json) =>
+  isObj(r.page) && isStr(r.page.relPath) && isStr(r.page.title) && opt(isStr)(r.page.planStatus) && opt(isNum)(r.asOfMs) && opt(isNum)(r.lastChangeMs) &&
+  each(isHit)(r.hits) && isBuckets(r.buckets) && opt(each((m) => isStr(m.relPath) && isNum(m.n)))(r.movedWith);
+const isRow = (p: Json) => isStr(p.relPath) && isNum(p.staleLines) && isNum(p.toCheck) && isBool(p.changed) && isBool(p.dirty) && opt(isNum)(p.lastChangeMs);
+const isSummary = (r: Json) => isObj(r.totals) && isNum(r.totals.staleLines) && isNum(r.totals.toCheck) && isNum(r.totals.changedPages) && opt(isNum)(r.asOfMs) && each(isRow)(r.pages);
+const isSession = (r: Json) => isObj(r.session) && isBool(r.session.found) && Array.isArray(r.session.pages) && opt(isNum)(r.session.asOfMs) && opt(isStr)(r.session.error);
+/** A body that is not JSON: an HTML page from a wrong `--base-url`, a proxy's error page. */
+class NotJson extends Error {}
 const BUCKET_LABEL: Record<string, string> = {
   toCheck: "to check",
   mentions: "mentions",
@@ -201,7 +217,12 @@ export async function runWikiStale(
     deps.fetchJson ??
     (async (url, signal) => {
       const res = await fetch(url, { signal });
-      return { status: res.status, body: (await res.json().catch(() => ({ error: `HTTP ${res.status}` }))) as Json };
+      const text = await res.text();
+      try {
+        return { status: res.status, body: JSON.parse(text) as Json };
+      } catch {
+        throw new NotJson(res.status === 200 ? "" : ` — HTTP ${res.status}`);
+      }
     });
   const url = (extra: Record<string, string>) => {
     const q = new URLSearchParams({ wiki: args.wiki!, ...(args.asOf ? { asOf: args.asOf } : {}), ...extra });
@@ -238,7 +259,9 @@ export async function runWikiStale(
       }
       return body;
     } catch (err) {
-      if (abort.signal.aborted) {
+      if (err instanceof NotJson) {
+        out.push(notice(`wiki-stale: unexpected answer (not JSON) from ${url(extra)}${err.message}`));
+      } else if (abort.signal.aborted) {
         late = true;
         out.push(notice(`wiki-stale: muninn did not answer in ${deadlineMs / 1000} s — no stale report`));
       } else {
@@ -269,8 +292,13 @@ export async function runWikiStale(
 
     if (pages.length) {
       for (const page of pages) {
-        const r = await ask({ page }, isPageReport, `page ${page}`);
-        if (r && !args.json) out.push(...formatPageReport(r), "");
+        // Per page: a throw the shape guards miss ends this page's report only.
+        try {
+          const r = await ask({ page }, isPageReport, `page ${page}`);
+          if (r && !args.json) out.push(...formatPageReport(r), "");
+        } catch (err) {
+          out.push(notice(`wiki-stale: unexpected answer from ${base} for page ${page}: ${err instanceof Error ? err.message : String(err)}`));
+        }
       }
     } else if (!args.session) {
       const r = await ask({}, isSummary, "the summary");

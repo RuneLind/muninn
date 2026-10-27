@@ -192,6 +192,91 @@ describe("D13: it never fails and never holds a handoff", () => {
   });
 });
 
+describe("R2-5: a wrong answer is one line for its page, and the run goes on", () => {
+  test("an HTML 200 (a wrong --base-url) is «unexpected answer (not JSON)», not «HTTP 200»", async () => {
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("<!doctype html><p>hi</p>", { headers: { "content-type": "text/html" } }) });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "--base-url", base], { env: {} });
+      expect(out).toEqual([`wiki-stale: unexpected answer (not JSON) from ${base}/api/wiki/stale?wiki=w&page=a.md`]);
+      const json = await runWikiStale(["--wiki", "w", "--base-url", base, "--json"], { env: {} });
+      expect(json.map((l) => JSON.parse(l))).toEqual([{ notice: `wiki-stale: unexpected answer (not JSON) from ${base}/api/wiki/stale?wiki=w` }]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  const BAD = "is --base-url a muninn of this version?";
+  test("a shallow-valid, deep-wrong page answer is one «unexpected answer» line, never a TypeError", async () => {
+    const bad: Record<string, unknown>[] = [
+      { ...report, hits: [{ ...report.hits[0], said: "proposed" }] },
+      { ...report, hits: [null] },
+      { ...report, hits: [{ ...report.hits[0], line: "124" }] },
+      { ...report, page: { relPath: "repos/x.md", title: 7 } },
+      { ...report, lastChangeMs: "yesterday" },
+      { ...report, buckets: { ...report.buckets, counts: { toCheck: "1" } } },
+      { ...report, buckets: { ...report.buckets, linking: [null] } },
+      { ...report, buckets: { ...report.buckets, linking: [{ ...report.buckets.linking[0], passages: [null] }] } },
+      { ...report, buckets: { ...report.buckets, linking: [{ ...report.buckets.linking[0], passages: "none" }] } },
+      { ...report, buckets: { ...report.buckets, linking: [{ ...report.buckets.linking[0], lastChangeMs: Number.MAX_VALUE }] } },
+      { ...report, movedWith: [null] },
+      { ...report, movedWith: "none" },
+    ];
+    for (const [i, body] of bad.entries()) {
+      const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md"], { env: {}, fetchJson: async () => ({ status: 200, body }) });
+      expect([i, out]).toEqual([i, [`wiki-stale: unexpected answer from http://127.0.0.1:3010 for page repos/x.md — ${BAD}`]]);
+    }
+  });
+
+  test("a shallow-valid, deep-wrong summary or session answer is one «unexpected answer» line", async () => {
+    const summary = { wiki: "w", asOfMs: 0, totals: { staleLines: 0, toCheck: 0, changedPages: 1 }, pages: [{ relPath: "a.md", staleLines: 0, toCheck: 0, changed: true, dirty: false }] };
+    for (const body of [{ ...summary, pages: [null] }, { ...summary, totals: { staleLines: "0" } }, { ...summary, pages: [{ relPath: "a.md" }] }, { ...summary, asOfMs: "now" }]) {
+      const out = await runWikiStale(["--wiki", "w"], { env: {}, fetchJson: async () => ({ status: 200, body }) });
+      expect([body, out]).toEqual([body, [`wiki-stale: unexpected answer from http://127.0.0.1:3010 for the summary — ${BAD}`]]);
+    }
+    const session = { session: { id: "s", found: true, asOfMs: "now", pages: [] } };
+    const out = await runWikiStale(["--wiki", "w", "--session", "s"], { env: {}, fetchJson: async () => ({ status: 200, body: session }) });
+    expect(out).toEqual([`wiki-stale: unexpected answer from http://127.0.0.1:3010 for session s — ${BAD}`]);
+  });
+
+  test("with --pages a b c, a bad answer for a still asks b and c; --json lines all parse", async () => {
+    for (const json of [false, true]) {
+      const urls: string[] = [];
+      const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "b.md", "c.md", ...(json ? ["--json"] : [])], {
+        env: {},
+        fetchJson: fake((q) => (q.get("page") === "a.md" ? { ...report, hits: [{ ...report.hits[0], said: "x" }] } : { ...report, page: { relPath: q.get("page"), title: "T" } }), urls),
+      });
+      expect(urls).toHaveLength(3);
+      if (json) {
+        for (const l of out) expect(() => JSON.parse(l)).not.toThrow();
+        expect(out.map((l) => JSON.parse(l)).filter((o) => o.page).map((o) => o.page.relPath)).toEqual(["repos/x.md", "b.md", "c.md"]);
+      } else {
+        expect(out[0]).toBe(`wiki-stale: unexpected answer from http://127.0.0.1:3010 for page a.md — ${BAD}`);
+        expect(out).toContain("b.md — T");
+        expect(out).toContain("c.md — T");
+      }
+    }
+  });
+
+  test("a throw the guards miss ends only that page's report", async () => {
+    const urls: string[] = [];
+    const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "b.md"], {
+      env: {},
+      fetchJson: fake((q) => {
+        const body: Record<string, unknown> = { ...report, page: { relPath: q.get("page"), title: "T" } };
+        if (q.get("page") === "a.md") {
+          // Throws only when the printer reads it, after the guard passed.
+          Object.defineProperty(body, "movedWith", { enumerable: true, get: () => { if (new Error().stack?.includes("formatPageReport")) throw new TypeError("late"); return []; } });
+        }
+        return body;
+      }, urls),
+    });
+    expect(urls).toHaveLength(2);
+    expect(out[0]).toBe("wiki-stale: unexpected answer from http://127.0.0.1:3010 for page a.md: late");
+    expect(out).toContain("b.md — T");
+  });
+});
+
 test("the script exits 0, even on a usage error", async () => {
   const proc = Bun.spawn(["bun", "--no-env-file", `${import.meta.dir}/wiki-stale.ts`, "--bogus"], { stdout: "pipe", stderr: "pipe" });
   const [code, out] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);

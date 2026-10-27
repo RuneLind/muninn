@@ -2313,14 +2313,15 @@ export function registerWikiToolRoutes(
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
-    if (unknownWiki || !entry) return c.json({ error: "no wiki configured for that name" }, 404);
-    const asOfMs = parseStaleAsOf(c.req.query("asOf"));
-    if (asOfMs === null) return c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms" }, 400);
-    const index = await getWikiIndex({ root: entry.root });
-    if (!index) return c.json({ error: "wiki directory not found" }, 503);
     // Why the model checks (PR 2a) are refused here, if they are: the
-    // instance switch, else this wiki's root in `WIKI_READONLY_ROOTS`.
+    // instance switch, else this wiki's root in `WIKI_READONLY_ROOTS`. On
+    // every answer, refusals included, so the script can say so.
+    if (unknownWiki || !entry) return c.json({ error: "no wiki configured for that name", readonly: isWikiReadonly() ? "instance" : false }, 404);
     const readonly = isWikiReadonly() ? "instance" : isReadonlyWikiRoot(entry.root) ? "root" : false;
+    const asOfMs = parseStaleAsOf(c.req.query("asOf"));
+    if (asOfMs === null) return c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms", readonly }, 400);
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return c.json({ error: "wiki directory not found", readonly }, 503);
     const base = { wiki: entry.name, readonly };
     const session = (c.req.query("session") ?? "").trim();
     if (session) {
