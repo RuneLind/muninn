@@ -830,8 +830,8 @@ export function chatStyles(): string {
     /* The relative colour holds var(), so a browser without it would compute
        inherit, not drop it; the guard keeps --text-primary there. */
     .web-content strong { font-weight: var(--strong-weight); color: var(--text-primary); }
-    @supports (color: oklch(from currentColor calc(l + 0.1) c h)) {
-      .web-content strong { color: oklch(from currentColor calc(l + var(--strong-lift)) c h); }
+    @supports (color: oklch(from currentColor calc(l + 0.1 * clamp(-1, (l - 0.5) * 1000, 1)) c h)) {
+      .web-content strong { color: oklch(from currentColor calc(l + var(--strong-lift) * clamp(-1, (l - var(--strong-pivot)) * 1000, 1)) c h); }
     }
     .web-content em { font-style: italic; }
     .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }

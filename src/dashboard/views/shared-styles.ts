@@ -107,11 +107,15 @@ const DARK_TOKENS = `
       /* Bold and inline code in prose. Dark measured 2026-10-26 in the wiki
          article: strong shared the body's #e0e0e0 (bold lead 1.00x), and the
          inline chip on --bg-inset sat 1.9 L* from its #12121a panel. Bold now
-         lifts its context's own colour by --strong-lift in oklch lightness
-         (body #e0e0e0 -> #fff, lead 1.32x; a link stays blue, a muted quote
-         stays muted), and the chip fill steps 5.4 L* and its edge 20.0 L*. */
+         moves its context's own colour --strong-lift in oklch lightness, away
+         from --strong-pivot (body #e0e0e0 -> #fff, lead 1.32x; a link stays
+         blue, a muted quote stays muted), and the chip fill steps 5.4 L* and
+         its edge 20.0 L*. The pivot sits below --text-dim (L 0.51), so only
+         dark ink on a bright chip darkens. Weight is bolder: a white heading
+         has no colour left, so 900 over its 700 carries the bold. */
       --strong-lift: 0.1;
-      --strong-weight: 700;
+      --strong-pivot: 0.35;
+      --strong-weight: bolder;
       --bg-code-inline: #1c1c2e;
       --code-inline-border: rgba(255, 255, 255, 0.14);
 `;
@@ -210,10 +214,14 @@ const LIGHT_TOKENS = `
       --bg-code: #eceef3;
       --bg-code-bar: #e2e4ea;
 
-      /* Light: bold darkens its context (body lead 1.43x); -0.1 keeps bold in
-         a dimmed context lighter than body text. The chip keeps light's look. */
-      --strong-lift: -0.1;
-      --strong-weight: 700;
+      /* Light: bold darkens its context (body lead 1.43x); 0.1 keeps bold in
+         a dimmed context lighter than body text. The pivot sits above
+         --text-dim (L 0.62), so white ink on an accent chip stays white
+         instead of darkening (RuleTree pick: 6.46:1 would drop to 4.80:1).
+         The chip keeps light's look. */
+      --strong-lift: 0.1;
+      --strong-pivot: 0.8;
+      --strong-weight: bolder;
       --bg-code-inline: #eceef3;
       --code-inline-border: transparent;
 `;

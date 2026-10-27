@@ -49,8 +49,8 @@ export function markdownContentStyles(prefix: string): string {
     ${prefix} hr { border: none; border-top: 1px solid var(--border-primary); margin: 24px 0; }
     ${prefix} img { max-width: 100%; border-radius: 6px; }
     ${prefix} strong { color: var(--text-primary); font-weight: var(--strong-weight); }
-    @supports (color: oklch(from currentColor calc(l + 0.1) c h)) {
-      ${prefix} strong { color: oklch(from currentColor calc(l + var(--strong-lift)) c h); }
+    @supports (color: oklch(from currentColor calc(l + 0.1 * clamp(-1, (l - 0.5) * 1000, 1)) c h)) {
+      ${prefix} strong { color: oklch(from currentColor calc(l + var(--strong-lift) * clamp(-1, (l - var(--strong-pivot)) * 1000, 1)) c h); }
     }
   `;
 }

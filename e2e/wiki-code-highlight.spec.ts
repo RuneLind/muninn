@@ -190,6 +190,19 @@ const MARKS_PAGE = [
   "",
   "###### Six with **h6bold**",
   "",
+  "### Three with **h3bold**",
+  "",
+  "| Head **thbold** | b |",
+  "|---|---|",
+  "| c | d |",
+  "",
+  '<RuleTree title="Renew?" outcomes="Renew=good">',
+  "",
+  "- Is it reserved?",
+  "  - *No:* → Renew — **LIB-2**",
+  "",
+  "</RuleTree>",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -683,11 +696,12 @@ async function proseMarks(page: import("@playwright/test").Page, scope: string) 
 
 /**
  * Every bold run under `scope`, against the colour of the text it sits in.
- * Bold lifts its context's own colour (oklch, `--strong-lift`), so in every
- * context it must (a) stand out from that text by contrast and (b) keep the
- * context's hue: a link's bold stays blue, an amber title's stays amber. A
- * context already at the ink limit (white text on dark, near-black on light;
- * contrast >= 16) has nowhere to go and is skipped.
+ * Bold moves its context's own colour (oklch, `--strong-lift` away from
+ * `--strong-pivot`), so in every context it must (a) stand out from that text
+ * by contrast and (b) keep the context's hue: a link's bold stays blue, an
+ * amber title's stays amber. A context already at the ink limit (contrast
+ * >= 16, or white or black itself) has nowhere to go; `unlifted` holds it to
+ * weight instead.
  */
 async function boldLifts(page: import("@playwright/test").Page, scope: string) {
   const parse = await colorParser(page);
@@ -735,7 +749,10 @@ async function boldLifts(page: import("@playwright/test").Page, scope: string) {
         ctxL: l1!,
         ownL: l2!,
         dark: lum(bg) < 0.2,
-        atLimit: ratio(ctx, bg) >= 16,
+        // No room to lift: the context is already near the ink limit, or is
+        // white or black itself (white on an accent chip).
+        atLimit: ratio(ctx, bg) >= 16 || l1! >= 0.99 || l1! <= 0.01,
+        weightStep: Number(getComputedStyle(el).fontWeight) - Number(getComputedStyle(el.parentElement!).fontWeight),
         lead: ratio(own, bg) / ratio(ctx, bg),
         hueDiff: hueDiff > 180 ? 360 - hueDiff : hueDiff,
       };
@@ -749,7 +766,9 @@ async function boldLifts(page: import("@playwright/test").Page, scope: string) {
  * a Historic body, AnnotatedCode notes) yet carry as much ink as body bold,
  * which undoes the dimming. "Ink" is OKLab lightness toward white on dark and
  * toward black on light, compared on the colours themselves because each
- * context may paint its own background.
+ * context may paint its own background. No bold may read fainter than its
+ * context, and where colour has no room (a white heading on dark), weight
+ * must carry the difference.
  */
 function unlifted(rows: Awaited<ReturnType<typeof boldLifts>>, bodyBold?: string) {
   const ref = bodyBold ? rows.find((r) => r.text === bodyBold) : undefined;
@@ -758,12 +777,14 @@ function unlifted(rows: Awaited<ReturnType<typeof boldLifts>>, bodyBold?: string
   return rows
     .filter(
       (r) =>
+        r.lead < 0.99 ||
         (!r.atLimit && (r.lead < 1.1 || r.hueDiff > 15)) ||
+        (r.atLimit && r.weightStep < 200) ||
         (ref !== undefined &&
           ink(r.ctxL, r.dark) < ink(ref.ctxL, ref.dark) - 0.03 &&
           ink(r.ownL, r.dark) > ink(ref.ownL, ref.dark) - 0.01),
     )
-    .map((r) => `${r.text} (lead ${r.lead.toFixed(2)}, hue ${r.hueDiff.toFixed(0)}°, L ${r.ctxL.toFixed(2)}→${r.ownL.toFixed(2)})`);
+    .map((r) => `${r.text} (lead ${r.lead.toFixed(2)}, hue ${r.hueDiff.toFixed(0)}°, L ${r.ctxL.toFixed(2)}→${r.ownL.toFixed(2)}, +${r.weightStep})`);
 }
 
 test.describe("Bold and inline code stand apart from the body", () => {
@@ -777,8 +798,8 @@ test.describe("Bold and inline code stand apart from the body", () => {
       const m = await proseMarks(page, ".wiki-article");
       expect(m).not.toBeNull();
       expect(m!.boldLead).toBeGreaterThanOrEqual(1.15);
-      // 700 in both themes: the browser's own bold, which the summary export
-      // (body text already --text-primary) relies on for its whole lead.
+      // 700 over the 400 body in both themes, which the summary export (body
+      // text already --text-primary) relies on for its whole lead.
       expect(m!.boldWeight).toBe(700);
       expect(m!.chipStep).toBeGreaterThanOrEqual(minStep);
       expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
@@ -846,10 +867,16 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
       // A FileTree body can hold prose beside its fence; inline code there
       // gets FileTree's flat look, never the chip's edge.
       expect(got.treeProseShadow).toBe("none");
+      // A picked RuleTree case turns its chip white on the accent.
+      await page.evaluate(() =>
+        document.querySelectorAll(".wiki-article .rt-case").forEach((c) => c.classList.add("rt-hit")),
+      );
       // Bold in every context on the page — link, quote, callout title,
       // Historic, open and done Checklist steps, dimmed DecisionLog items,
-      // StatusRows tiles, AnnotatedCode notes, h6 — lifts its own context.
+      // StatusRows tiles, AnnotatedCode notes, h6, h3, th, the picked case
+      // chip — lifts its own context.
       const rows = await boldLifts(page, ".wiki-article");
+      for (const t of ["h3bold", "thbold", "LIB-2"]) expect(rows.map((r) => r.text)).toContain(t);
       expect(rows.length).toBeGreaterThan(10);
       expect(unlifted(rows, "pbold")).toEqual([]);
     });
@@ -922,12 +949,13 @@ test.describe("The other prose surfaces", () => {
     const m = await proseMarks(page, "#prose-probe");
     expect(m).not.toBeNull();
     expect(m!.boldWeight).toBe(700);
-    // The token, not the browser's `bolder`: under a 600 heading `bolder`
-    // computes to 900, and the paragraph probe above cannot tell the two apart.
+    // Bolder than its 600 heading: a heading is already --text-primary, so in
+    // dark weight is all bold has there. The paragraph probe above (400 → 700)
+    // cannot tell `bolder` from a fixed 700.
     const headingBold = await page.evaluate(
       () => getComputedStyle(document.querySelector("#prose-probe h3 strong") as HTMLElement).fontWeight,
     );
-    expect(headingBold).toBe("700");
+    expect(headingBold).toBe("900");
     const links = await page.evaluate(() => {
       const c = (s: string) => getComputedStyle(document.querySelector("#prose-probe " + s) as HTMLElement).color;
       return {
