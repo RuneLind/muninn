@@ -198,9 +198,11 @@ describe("palette colour rules", () => {
   const SURFACES = ["--bg-page", "--bg-panel", "--bg-card"];
   const light = baseTokens("light");
   const neutralFloor = Math.min(...SURFACES.map((s) => contrast(light["--tint-neutral"]!, light[s]!)));
-  // The inks the dashboard draws on --tint-neutral as readable text. --text-dim,
-  // --text-faint and --text-disabled mark a disabled state and sit under 4.5 in
-  // the bases too.
+  // The inks held to 4.5 on --tint-neutral. --text-dim, --text-faint and
+  // --text-disabled are left out because they fail 4.5 on the fill in every
+  // theme, not because every use is a disabled state: `.overview-event-badge.sys`
+  // and `.chip-rejected` draw readable labels in --text-dim on it (2.96:1 on
+  // paper-light, 3.22 in plain light, 3.03 dark, 3.77 reading) — a known gap.
   const NEUTRAL_INKS = ["--text-primary", "--text-secondary", "--text-soft", "--text-muted", "--tok-fn"];
 
   for (const t of THEME_SETS.filter((x) => x.base === "light")) {

@@ -8,7 +8,9 @@
  *     the end-of-header script would paint the base first.
  *  2. **The palette wins.** Its block shares the `html[data-theme]` blocks'
  *     specificity and wins on source order only — on the dashboard and on the
- *     chat page, which re-declares its own tokens after SHARED_STYLES.
+ *     chat page, which re-declares its own tokens after SHARED_STYLES. Every
+ *     palette, under both OS colour schemes; a literal id → base table pins
+ *     each palette's base against a registry edit.
  *  3. **The picker.** Menu order, keyboard, Escape from anywhere, outside
  *     click and Tools ▾ closing each other, System
  *     clearing both attributes, and `t` cycling the same list.
@@ -35,6 +37,15 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI = "e2e-palettes";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const READING = PALETTES.find((p) => p.id === "reading")!;
+const PAPER_LIGHT = PALETTES.find((p) => p.id === "paper-light")!;
+
+/** `#rgb` / `#rrggbb` → the `rgb(r, g, b)` string getComputedStyle returns. */
+function hexToRgb(hex: string): string {
+  const h = hex.replace("#", "");
+  const full = h.length === 3 ? [...h].map((c) => c + c).join("") : h;
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16));
+  return `rgb(${r}, ${g}, ${b})`;
+}
 
 const PAGE = [
   "---",
@@ -135,28 +146,43 @@ test.describe("A palette is applied before first paint", () => {
     }
   });
 
-  test("the palette's tokens win over the base, on the dashboard and on chat", async ({ page }) => {
-    await storeChoice(page, "reading");
-    await page.goto(BASE + "/");
-    const dash = await page.evaluate(() => ({
-      body: getComputedStyle(document.body).backgroundColor,
-      header: getComputedStyle(document.querySelector("header")!).backgroundColor,
-    }));
-    expect(dash).toEqual({ body: "rgb(30, 28, 26)", header: "rgb(38, 36, 34)" }); // #1e1c1a, #262422
-    await page.goto(BASE + "/chat");
-    const chat = await page.evaluate(() => {
-      const cs = getComputedStyle(document.documentElement);
-      return {
-        page: cs.getPropertyValue("--bg-page").trim(),
-        chat: cs.getPropertyValue("--bg-chat").trim(),
-        elevated: cs.getPropertyValue("--bg-elevated").trim(),
-      };
+  // Every palette, under both OS schemes: the chat page re-emits only
+  // CHAT_PALETTE_TOKENS after its own base blocks, so a palette missing from
+  // that re-emit shows the base's chat surface under the palette's sidebar.
+  for (const p of PALETTES) for (const scheme of ["light", "dark"] as const) {
+    test(`${p.id} (OS ${scheme}): the palette's tokens win over the base, on the dashboard and on chat`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await storeChoice(page, p.id);
+      await page.goto(BASE + "/");
+      const dash = await page.evaluate(() => ({
+        body: getComputedStyle(document.body).backgroundColor,
+        header: getComputedStyle(document.querySelector("header")!).backgroundColor,
+      }));
+      expect(dash).toEqual({ body: hexToRgb(p.tokens["--bg-page"]!), header: hexToRgb(p.tokens["--bg-panel"]!) });
+      await page.goto(BASE + "/chat");
+      const chat = await page.evaluate(() => {
+        const cs = getComputedStyle(document.documentElement);
+        return {
+          page: cs.getPropertyValue("--bg-page").trim(),
+          chat: cs.getPropertyValue("--bg-chat").trim(),
+          elevated: cs.getPropertyValue("--bg-elevated").trim(),
+          painted: getComputedStyle(document.querySelector(".sim-chat")!).backgroundColor,
+        };
+      });
+      expect(chat).toEqual({
+        page: p.tokens["--bg-page"],
+        chat: p.tokens["--bg-chat"],
+        elevated: p.tokens["--bg-elevated"],
+        painted: hexToRgb(p.tokens["--bg-chat"]!),
+      });
     });
-    expect(chat).toEqual({
-      page: READING.tokens["--bg-page"],
-      chat: READING.tokens["--bg-chat"],
-      elevated: READING.tokens["--bg-elevated"],
-    });
+  }
+
+  // A literal table, so an edit to a registry entry's base fails here even
+  // though every loop above derives its expectation from that same entry.
+  test("each palette sits on the base it was designed for", () => {
+    const EXPECTED_BASE: Record<string, "light" | "dark"> = { reading: "dark", "paper-light": "light" };
+    expect(Object.fromEntries(PALETTES.map((p) => [p.id, p.base]))).toEqual(EXPECTED_BASE);
   });
 
   test("an unknown or 'system' stored value renders as system and stays stored", async ({ page }) => {
@@ -198,6 +224,21 @@ test.describe("The theme picker", () => {
     await page.getByRole("menuitemradio", { name: /System/ }).click();
     expect(await attrs(page)).toEqual({ theme: null, palette: null, stored: null });
     await expect(btn).toHaveText("◐");
+  });
+
+  test("◐ → Light reading mode applies and persists it", async ({ page }) => {
+    await storeChoice(page, null);
+    await page.goto(BASE + "/");
+    const btn = page.locator("#themeToggle");
+    await btn.click();
+    await page.getByRole("menuitemradio", { name: "Light reading mode", exact: true }).click();
+    await expect(page.locator("#themeMenu")).toBeHidden();
+    expect(await attrs(page)).toEqual({ theme: "light", palette: "paper-light", stored: "paper-light" });
+    await expect(btn).toHaveText(PAPER_LIGHT.glyph);
+    await page.reload();
+    expect(await attrs(page)).toEqual({ theme: "light", palette: "paper-light", stored: "paper-light" });
+    await btn.click();
+    await expect(page.getByRole("menuitemradio", { name: "Light reading mode", exact: true })).toHaveAttribute("aria-checked", "true");
   });
 
   test("keyboard: arrows move, Enter picks, Escape closes and refocuses, outside click closes", async ({ page }) => {
