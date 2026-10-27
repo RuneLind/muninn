@@ -240,6 +240,9 @@ const lastFailureAt = new Map<string, number>();
 /** The first failure since the memo's answer; cleared by a success. */
 const failingSince = new Map<string, number>();
 const fetchedAt = new Map<string, number>();
+/** Refreshes are numbered as they start; the number of a root's in-flight one. */
+let refreshSeq = 0;
+const inFlightSeq = new Map<string, number>();
 
 /** The warm memo for a root, or null — null too once a refresh has failed
  *  since its answer and the memo is {@link WORK_MEMO_HOLD_MS} old. The memo
@@ -278,8 +281,12 @@ export async function refreshWorkSessions(
   if (!deps.urlConfigured) return memos.get(root) ?? null;
   const existing = inFlight.get(root);
   if (existing) return existing;
-  const task = runRefresh(root, deps, opts.identityRoot ?? root).finally(() => inFlight.delete(root));
+  const task = runRefresh(root, deps, opts.identityRoot ?? root).finally(() => {
+    inFlight.delete(root);
+    inFlightSeq.delete(root);
+  });
   inFlight.set(root, task);
+  inFlightSeq.set(root, ++refreshSeq);
   return task;
 }
 
@@ -389,10 +396,63 @@ export function kickWorkSessionsRefresh(root: string, opts: { maxAgeMs?: number;
   void refreshWorkSessions(root, deps).catch(() => {});
 }
 
+/** claude-usage's per-session file cap in the sessions form
+ *  (`FILES_SESSIONS_FILE_LIMIT`, most edits first): a session listing this
+ *  many files may have written more. */
+export const WORK_SESSION_FILE_CAP = 200;
+/** A session request after a refresh failed this recently answers from the
+ *  memo without asking again (the back-off). */
+export const SESSION_MEMO_MAX_AGE_MS = 30_000;
+/** The longest a session request waits on a refresh; the refresh itself
+ *  keeps running and lands in the memo. */
+export const SESSION_REFRESH_TIMEOUT_MS = 8_000;
+
+/** A refresh that started at or after refresh number `from`: the in-flight
+ *  one if it did, else a new one once an older in-flight one settles. */
+function refreshStartedFrom(root: string, deps: WorkSessionsDeps, from: number): Promise<WorkSessionsMemo | null> {
+  const existing = inFlight.get(root);
+  const seq = inFlightSeq.get(root);
+  if (existing && seq !== undefined && seq < from) {
+    const again = () => refreshStartedFrom(root, deps, from);
+    return existing.then(again, again);
+  }
+  return refreshWorkSessions(root, deps);
+}
+
+/**
+ * The memo for one session request — `GET /api/wiki/stale?session=`, which a
+ * handoff runs right after the session wrote, often its last write. So the
+ * answer always comes from a refresh that started after the request arrived
+ * (an older in-flight one is waited out, not joined), awaited for at most
+ * {@link SESSION_REFRESH_TIMEOUT_MS}; on a timeout, the newest memo with
+ * `timedOut`. A refresh that failed in the last
+ * {@link SESSION_MEMO_MAX_AGE_MS} is not retried (the back-off).
+ */
+export async function workSessionsForSession(
+  root: string,
+  opts: { deps?: WorkSessionsDeps; timeoutMs?: number } = {},
+): Promise<{ memo: WorkSessionsMemo | null; timedOut: boolean }> {
+  const deps = opts.deps ?? workSessionsDepsFromEnv();
+  const from = refreshSeq + 1;
+  const now = (deps.now ?? Date.now)();
+  const failed = lastFailureAt.get(root);
+  if (!deps.urlConfigured || (failed !== undefined && now - failed < SESSION_MEMO_MAX_AGE_MS)) {
+    return { memo: workSessionsFor(root, now), timedOut: false };
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), opts.timeoutMs ?? SESSION_REFRESH_TIMEOUT_MS);
+  });
+  const done = await Promise.race([refreshStartedFrom(root, deps, from).catch(() => null), timeout]);
+  clearTimeout(timer);
+  return { memo: workSessionsFor(root, (deps.now ?? Date.now)()), timedOut: done === "timeout" };
+}
+
 /** Test-only: drop every memo, refresh and back-off. */
 export function __resetWorkSessionsForTest(): void {
   memos.clear();
   inFlight.clear();
+  inFlightSeq.clear();
   lastFailureAt.clear();
   failingSince.clear();
   fetchedAt.clear();

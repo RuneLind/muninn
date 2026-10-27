@@ -127,6 +127,14 @@ export interface WikiGitDates {
    * read per commit.
    */
   touchTimes: Map<string, number[]>;
+  /**
+   * The same non-sweep touches as {@link TouchRecord}s, ascending, keyed
+   * wiki-relative and rename-carried (each record's paths stay repo-relative)
+   * — what *Moved with* (`stale.ts`) groups by commit, and what the stale
+   * rules' `asOf` steps back through with {@link newestEditAtOrBefore}. Empty
+   * on a hash-less log.
+   */
+  touchCommits: Map<string, TouchRecord[]>;
 }
 
 /** A file entry from `--name-status`: a status letter, optional similarity score,
@@ -781,6 +789,34 @@ async function resolveMetadataOnlyTouches(
 }
 
 /**
+ * Per page, the newest touch at or before `asOfMs` that is an edit, by the
+ * same rule {@link resolveMetadataOnlyTouches} applies to the newest touch:
+ * `metadata-only` and `identical` commits step back, at most
+ * {@link METADATA_TOUCH_MAX_STEPS} per page, and a page whose every touch
+ * there steps back is absent. Sweeps are already out of `touches`. Keys are
+ * the caller's (wiki-relative); every degrade answers the raw newest touch at
+ * or before `asOfMs`, as the build's own rule does.
+ */
+export async function newestEditAtOrBefore(
+  root: string,
+  touches: ReadonlyMap<string, readonly TouchRecord[]>,
+  asOfMs: number,
+): Promise<Map<string, number>> {
+  const cut = new Map<string, TouchRecord[]>();
+  const touched = new Map<string, number>();
+  for (const [key, list] of touches) {
+    const kept = list.filter((r) => r.ts <= asOfMs);
+    if (kept.length === 0) continue;
+    cut.set(key, kept);
+    touched.set(key, kept[kept.length - 1]!.ts);
+  }
+  if (cut.size === 0) return touched;
+  const top = (await git(root, ["rev-parse", "--show-toplevel"]))?.trim();
+  if (!top) return touched;
+  return resolveMetadataOnlyTouches(root, top, "", touched, cut);
+}
+
+/**
  * Build the per-page date signals for the wiki rooted at `root`.
  *
  * The wiki root is often a SUBDIRECTORY of its repo (jarvis's wiki lives at
@@ -890,11 +926,13 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   // `listWikiSubtreeDirty` already returns WIKI-relative paths, so it needs no strip.
   const dirty = new Set(await dirtyPromise);
   const touchTimes = new Map<string, number[]>();
+  const touchCommits = new Map<string, TouchRecord[]>();
   for (const [p, list] of parsed.touches) {
     if (!p.startsWith(prefix)) continue;
     touchTimes.set(p.slice(prefix.length), list.map((r) => r.ts));
+    touchCommits.set(p.slice(prefix.length), list);
   }
-  if (!rel) return { created, touched, dirty, touchTimes };
+  if (!rel) return { created, touched, dirty, touchTimes, touchCommits };
 
   // Translate repo-relative → wiki-relative, dropping anything outside the subtree
   // (the pathspec makes that rare, but a rename's SOURCE can legitimately sit
@@ -904,7 +942,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     for (const [p, ms] of m) if (p.startsWith(prefix)) out.set(p.slice(prefix.length), ms);
     return out;
   };
-  const out = { created: strip(created), touched: strip(touched), dirty, touchTimes };
+  const out = { created: strip(created), touched: strip(touched), dirty, touchTimes, touchCommits };
   // The strip is the one step that can throw away EVERYTHING while git reported
   // success — a wrong prefix, or paths in a spelling the prefix can't match (the
   // `core.quotePath` class of bug). Distinguished here from the innocent

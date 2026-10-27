@@ -71,6 +71,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "state-owns-unread": { one: "owns: entry that names no key", many: "owns: entries that name no key" },
   "component-value": { one: "component value that falls back", many: "component values that fall back" },
   "component-attr": { one: "dropped component attribute", many: "dropped component attributes" },
+  "status-line": { one: "stale status line", many: "stale status lines" },
 };
 
 /** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks

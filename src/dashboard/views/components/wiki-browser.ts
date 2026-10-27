@@ -15,6 +15,7 @@
  * re-sorts mid-article. Article + connections come per-page from /api/wiki/page.
  */
 
+import { movedWithSectionHtml, type MovedWithListing } from "./wiki-moved-with.ts";
 import { escHtml as esc } from "./escape.ts";
 import {
   installWikiReadonlyGuard,
@@ -577,6 +578,9 @@ interface WikiPageDetail {
   issueRows?: IssueRow[];
   /** Whether a Link may be offered, before the deferred payload says so. */
   issueStampable?: boolean;
+  /** Connections' *Moved with* rows (`stale.ts`). ABSENT on an older server;
+   *  `[]` without git — both render no section. */
+  movedWith?: MovedWithListing[];
   /** sha256 of the page's RAW bytes, as of this response — the series editor's
    *  CAS base for the page the reader has open, captured when the popover opens
    *  rather than fetched again a millisecond before the POST. Kept in step with
@@ -3574,6 +3578,8 @@ function renderConnections(data: WikiPageDetail): void {
     relatedBlockHtml(data) +
     section("Linked from", data.backlinks) +
     section("Links to", data.outgoing) +
+    // Pages committed with this one (D10); absent without git or shared commits.
+    movedWithSectionHtml(data.movedWith, displayTitleOf) +
     // Placeholder the lazy "Similar" fetch fills in after the page renders.
     '<div id="wikiSimilar"></div>';
 }

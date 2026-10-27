@@ -3019,6 +3019,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     .wiki-conn-item span { font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     /* The culled marker is the title span's SIBLING and never shrinks: inside the
        ellipsis span a title over ~30 characters clipped it away. */
+    .wiki-conn-item .wiki-moved-n { margin-left: auto; flex-shrink: 0; font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
     .wiki-conn-item .wiki-cull-mark { flex-shrink: 0; font-size: 11px; color: var(--text-muted); white-space: nowrap; }
     .wiki-conn-empty { font-size: 12px; color: var(--text-dim); padding: 4px 8px; }
     /* A Related work row is two lines, so it tops-aligns and its dot drops onto

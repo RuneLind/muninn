@@ -330,6 +330,29 @@ function tableRows(lines: readonly string[], fenced: readonly boolean[], body: n
 }
 
 /**
+ * Check 14's line masks, for a check that reads lines rather than units (the
+ * stale check, `stale.ts`): which 0-based lines are exempt — a reader-fenced
+ * line, a `<Timeline>`/`<DecisionLog>`/`<Historic>` line where `parseBlocks`
+ * makes the block, a blockquote line, a table header row. The same calls
+ * {@link stateLineRoles} makes, so the two cannot disagree. Homes are NOT
+ * exempt here: a `**Status:**` line is exactly where a stale status sits.
+ * Inline code is the caller's (`maskLineCodeSpans`), per line.
+ */
+export function stateExemptLines(content: string): { lines: string[]; body: number; exempt: Set<number> } {
+  const folded = content.replace(/\r\n/g, "\n");
+  const lines = folded.split("\n");
+  const body = frontmatterBodyLine(folded);
+  const fenced = [...new Array<boolean>(body).fill(false), ...readerFencedLines(lines.slice(body).join("\n"))];
+  const headers = new Set<number>();
+  const tracked = trackedLines(lines, fenced, body, headers, new Set());
+  const exempt = new Set<number>(headers);
+  for (let i = body; i < lines.length; i++) {
+    if (fenced[i] || tracked.get(i) === "history" || QUOTE_RE.test(lines[i]!.trim())) exempt.add(i);
+  }
+  return { lines, body, exempt };
+}
+
+/**
  * Classify a page's lines. Frontmatter: `description` and `status_note`, each
  * with its indented continuation lines (a quoted, plain or block scalar, blank
  * lines inside a block scalar included), are a linted unit and a home unit;

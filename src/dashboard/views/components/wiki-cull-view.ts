@@ -152,15 +152,17 @@ export function cullBannerHtml(
 }
 
 /**
- * One Connections row (Linked from / Links to). The title span clips with an
+ * One Connections row (Linked from / Links to / Moved with). `tailHtml`, already
+ * escaped, goes last (Moved with's ×N). The title span clips with an
  * ellipsis, so the marker is its SIBLING — a non-shrinking flex item — rather
  * than text inside it, where a long title clipped it away.
  */
-export function connItemHtml(p: WikiListing, title: string): string {
+export function connItemHtml(p: WikiListing, title: string, tailHtml = ""): string {
   return (
     `<div class="wiki-conn-item" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
     `<div class="wiki-type-dot type-${esc(p.type)}"></div><span class="wiki-conn-name">${esc(title)}</span>` +
     (p.culled ? cullMarkHtml() : "") +
+    tailHtml +
     `</div>`
   );
 }

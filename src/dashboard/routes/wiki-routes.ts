@@ -35,7 +35,8 @@ import {
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
-import { hasProvenance, jiraCounts } from "../../wiki/provenance.ts";
+import { hasProvenance, jiraCounts, mapLedgerProvider, sessionRefMatches } from "../../wiki/provenance.ts";
+import { isReservedBasename } from "../../wiki/frontmatter-lists.ts";
 import { computeRelated, type RelatedRef } from "../../wiki/related.ts";
 import { RELATED_HOP_LIMIT_DEFAULT, RELATED_HOP_LIMIT_MAX } from "../../wiki/related-constants.ts";
 import { nearScores } from "../../wiki/strength.ts";
@@ -53,7 +54,9 @@ import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
-import { isReadonlyWikiRoot, wikiNoEgressReason } from "../../wiki/readonly.ts";
+import { isReadonlyWikiRoot, isWikiReadonly, wikiNoEgressReason } from "../../wiki/readonly.ts";
+import { movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
+import { WORK_SESSION_FILE_CAP, workSessionsForSession } from "../../wiki/work-sessions.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
   fetchSimilarPages,
@@ -1763,6 +1766,14 @@ export function registerWikiReadRoutes(
         : {}),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
+      // MOVED WITH (D10, `stale.ts`): the pages committed with this one in
+      // non-sweep commits over 28 days, off the index's one git walk — no git
+      // call here. `movedN` is the commit count; `[]` without git. «Now» is
+      // the index's build time (`staleNow`), as on `/api/wiki/stale` (F9b).
+      movedWith: movedWith(index, meta.relPath, staleNow(index)).flatMap((r) => {
+        const m = index.resolveRelPath(r.relPath);
+        return m ? [{ ...toListing(index, m), movedN: r.n }] : [];
+      }),
       // RELATED WORK — `cites ∪ cited-by ∪ shares ≥2 PR refs ∪ shares a session,
       // minus hubs, never transitive` (`neighbours()` in `strength.ts`),
       // strongest first (ties newest first), one `why` line, `strength` and
@@ -2287,6 +2298,78 @@ export function registerWikiToolRoutes(
   // the coverage fields (a partial union would flag really-indexed pages as
   // missing). `?refresh=1` busts the page-index TTL cache only — the collection
   // listings are 1–2 cheap calls and aren't muninn-side cached in v1.
+  // THE STALE CHECK'S FREE HALF (PR 1, `src/wiki/stale.ts`): with `page`, that
+  // page's status-line hits, its linking-page buckets when it is a changed page,
+  // and *Moved with*; without it, the wiki-wide summary (D31) — every changed
+  // page and every page with a hit, with both counts. `asOf` pins «now»
+  // (`parseStaleAsOf`); `session` names an agent session in the warm work
+  // memo and answers the pages it wrote. Spends and writes nothing: the hits
+  // come off the cached index, the buckets read the linking pages from disk
+  // and are cached on that index. Tool half: `MUNINN_PROFILE=nais` drops it.
+  app.get("/api/wiki/stale", async (c) => {
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    // Why the model checks (PR 2a) are refused here, if they are: the
+    // instance switch, else this wiki's root in `WIKI_READONLY_ROOTS`. On
+    // every answer, refusals included, so the script can say so.
+    if (unknownWiki || !entry) return c.json({ error: "no wiki configured for that name", readonly: isWikiReadonly() ? "instance" : false }, 404);
+    const readonly = isWikiReadonly() ? "instance" : isReadonlyWikiRoot(entry.root) ? "root" : false;
+    const asOfMs = parseStaleAsOf(c.req.query("asOf"));
+    if (asOfMs === null) return c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms", readonly }, 400);
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return c.json({ error: "wiki directory not found", readonly }, 503);
+    const base = { wiki: entry.name, readonly };
+    const session = (c.req.query("session") ?? "").trim();
+    if (session) {
+      // From a refresh started after this request, not the background memo:
+      // a handoff asks right after the session's last write. A row with no
+      // provider matches on its bare id.
+      const matches = (s: { provider: string; id: string }) => {
+        const p = mapLedgerProvider(s.provider);
+        return sessionRefMatches(p ? `${p}:${s.id}` : s.id, session);
+      };
+      const { memo, timedOut } = await workSessionsForSession(index.root);
+      const found = memo?.sessions.find(matches);
+      // Reserved pages (`index`/`log`/`CLAUDE`) are bookkeeping nearly every
+      // session writes; they are never changed pages.
+      const pages = found
+        ? [
+            ...new Set(
+              found.files
+                .map((f) => index.resolveRelPath(f.p)?.relPath)
+                .filter((r): r is string => !!r && !isReservedBasename(r)),
+            ),
+          ]
+        : [];
+      return c.json({
+        ...base,
+        session: {
+          id: session,
+          found: !!found,
+          ...(memo
+            ? {
+                sinceMs: memo.sinceMs,
+                asOfMs: memo.asOfMs,
+                truncated: memo.truncated,
+                ...(found && found.files.length >= WORK_SESSION_FILE_CAP ? { filesCapped: true } : {}),
+              }
+            : { error: "no work-sessions memo is warm for this wiki" }),
+          ...(timedOut ? { refreshTimedOut: true } : {}),
+          pages,
+        },
+      });
+    }
+    const pageRef = (c.req.query("page") ?? "").trim();
+    if (!pageRef) return c.json({ ...base, ...(await staleSummary(index, { asOfMs })) });
+    const meta = resolvePageRef(index, pageRef, pageRef);
+    if (!meta) return c.json({ ...base, error: `no page ${pageRef}` }, 404);
+    return c.json({ ...base, ...(await stalePageReport(index, meta, { asOfMs })) });
+  });
+
   app.get("/api/wiki/index-coverage", async (c) => {
     const nullCoverage = (extra: Partial<IndexCoverageResponse> & { error?: string }) =>
       c.json({

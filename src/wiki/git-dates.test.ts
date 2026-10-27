@@ -1102,3 +1102,27 @@ test("buildWikiGitDates: culling a fenced page (signal: none + signal-reason + s
     await rm(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("newestEditAtOrBefore outside a git checkout answers each page's raw newest touch at or before asOf (B4-2)", async () => {
+  const { newestEditAtOrBefore } = await import("./git-dates.ts");
+  const { parseStaleAsOf } = await import("./stale.ts");
+  const { rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = await testTempDir(path.join(tmpdir(), "no-git-"));
+  try {
+    const t = (iso: string) => Date.parse(iso);
+    const touches = new Map([
+      ["a.md", [{ ts: t("2026-10-01T08:00:00Z"), commit: "c1", path: "a.md" }, { ts: t("2026-10-02T08:00:00Z"), commit: "c2", path: "a.md", parentPath: "a.md" }, { ts: t("2026-10-09T08:00:00Z"), commit: "c3", path: "a.md", parentPath: "a.md" }]],
+      ["b.md", [{ ts: t("2026-10-08T08:00:00Z"), commit: "c4", path: "b.md" }]],
+    ]);
+    expect([...(await newestEditAtOrBefore(dir, touches, t("2026-10-05T00:00:00Z")))]).toEqual([["a.md", t("2026-10-02T08:00:00Z")]]);
+    // An asOf at a commit's own second keeps that commit (R2-6a), as an ISO
+    // instant and as epoch ms.
+    for (const raw of ["2026-10-02T08:00:00Z", String(t("2026-10-02T08:00:00Z"))]) {
+      expect([raw, [...(await newestEditAtOrBefore(dir, touches, parseStaleAsOf(raw)!))]]).toEqual([raw, [["a.md", t("2026-10-02T08:00:00Z")]]]);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

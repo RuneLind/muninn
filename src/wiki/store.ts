@@ -39,7 +39,8 @@ import {
 } from "../format/markdown-ast.ts";
 import { diagramSiblingRelPath, pageFileRefKinds } from "../format/query-block.ts";
 import { parseEmbedAttrs, resolveEmbedRelPath } from "../format/embed.ts";
-import { buildWikiGitDates } from "./git-dates.ts";
+import { buildWikiGitDates, type TouchRecord } from "./git-dates.ts";
+import { isLivingPage, resolveStatusLineHits, statusLineCandidates, type StatusLineCandidate, type StatusLineHit } from "./stale.ts";
 import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
@@ -1030,6 +1031,18 @@ export interface WikiIndex {
    * sets it.
    */
   issueKeys?: Map<string, IssueKeyEntry>;
+  /**
+   * The Stale check's status-line hits (`stale.ts`), per page relPath, found
+   * in the read pass's prefilter and resolved once the index is. Only pages
+   * with a hit have an entry. Optional so hand-built test indexes stay valid.
+   */
+  statusLineHits?: Map<string, StatusLineHit[]>;
+  /**
+   * Every non-sweep commit per page (wiki-relative relPath, ascending), from
+   * the one git walk — what *Moved with* groups by commit and what the stale
+   * rules' `asOf` steps back through. Absent without git.
+   */
+  gitTouches?: Map<string, TouchRecord[]>;
 }
 
 /** A page the same-stem precedence rule dropped, and the page that displaced it. */
@@ -1667,7 +1680,7 @@ export function pagePrRefs(
  * dropped. Lowercasing mirrors the case-insensitive `resolve()` used for the
  * wikilink graph so both link kinds match pages the same way.
  */
-function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[] {
+export function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[] {
   const dir = path.posix.dirname(fromRelPath);
   const out: string[] = [];
   for (const t of targets) {
@@ -3445,6 +3458,8 @@ export async function buildWikiIndex(
   const pairingSuperseded = new Map<string, string>();
   /** Each markdown page's raw `related:` entries, resolved after registration. */
   const rawRelated = new Map<string, RelatedEntry[]>();
+  /** The Stale check's phase A per living page, resolved after registration. */
+  const staleCandidates = new Map<string, StatusLineCandidate[]>();
 
   // Git date signals — ONE `git log` walk (plus a cheap concurrent `git status`) per
   // index build, inheriting the 5-min TTL, kicked off here so it overlaps the
@@ -3606,6 +3621,12 @@ export async function buildWikiIndex(
         if (issues) meta.issues = issues;
       }
       pages.push(meta);
+      // The Stale check's prefilter, while the body is in hand: check 14's
+      // masks run only on a page with a `[[link]]` and a status word on one line.
+      if (isLivingPage(meta)) {
+        const candidates = statusLineCandidates(content);
+        if (candidates.length) staleCandidates.set(relPath, candidates);
+      }
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
       rawMdTargets.set(relPath, resolveMarkdownTargets(relPath, extractMarkdownLinks(content)));
       proseWords.set(normalizeRelPath(relPath), proseWordCount(content));
@@ -4083,6 +4104,17 @@ export async function buildWikiIndex(
     }
   }
 
+  // The Stale check's phase B: each candidate against its target's status.
+  // A page the same-stem rule dropped has no `byRelPath` entry and is skipped;
+  // living-ness is read again on the final meta, after the attachment pass.
+  const statusLineHits = new Map<string, StatusLineHit[]>();
+  for (const [relPath, candidates] of staleCandidates) {
+    const meta = resolveRelPath(relPath);
+    if (!meta || !isLivingPage(meta)) continue;
+    const hits = resolveStatusLineHits(relPath, candidates, resolve);
+    if (hits.length) statusLineHits.set(relPath, hits);
+  }
+
   const outgoing = new Map<string, string[]>();
   const backlinks = new Map<string, string[]>();
   for (const meta of pages) {
@@ -4188,6 +4220,8 @@ export async function buildWikiIndex(
     ...(workedCoverage ? { workedCoverage } : {}),
     ...(work ? { work } : {}),
     issueKeys: buildIssueKeyIndex(pages, trackers),
+    statusLineHits,
+    ...(gitDates ? { gitTouches: gitDates.touchCommits } : {}),
   };
 }
 

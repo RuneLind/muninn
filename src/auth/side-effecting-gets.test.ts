@@ -63,7 +63,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/api/x-articles/video-options", "/api/tiktok/jobs", "/api/tiktok/options", "/api/vimeo/jobs",
     "/api/wiki/related", "/api/wiki/decision-chain", "/api/wiki/html",
     "/api/wiki/share/presets", "/api/wiki/chat-target", "/api/wiki/answers",
-    "/api/wiki/answers/export", "/api/wiki/proposals", "/api/wiki/linter-findings",
+    "/api/wiki/answers/export", "/api/wiki/proposals", "/api/wiki/linter-findings", "/api/wiki/stale",
     "/api/benchmark/preview", "/api/benchmark/cells/live/:traceId", "/api/benchmark/runs",
     "/api/benchmark/runs/:id", "/api/benchmark/runs/:id/rejudge-children",
     "/api/models/overview", "/api/agents/overview", "/api/sync/status", "/api/jira/archive",
