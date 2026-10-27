@@ -125,7 +125,7 @@ export const PALETTES: readonly Palette[] = [
       "--tint-purple": "#342820",
       "--tint-magenta": "#2a1a3a",
       "--tint-cyan": "#1a2e3a",
-      "--tint-neutral": "#292725",
+      "--tint-neutral": "#1a1a1a",
 
       // The dark-island badges take the dark tints (text on each, measured:
       // deadline 8.59, Slack 8.14, GitHub 7.16, X 6.20). --island-info keeps
@@ -274,7 +274,7 @@ export const PALETTES: readonly Palette[] = [
       "--tok-pun": "#6b6258",
 
       "--bg-code": "#ede8df",
-      "--bg-code-bar": "#e7dfd0",
+      "--bg-code-bar": "#e5ddce",
 
       // Bold darkens its context 0.08 in oklch lightness: body (L 0.373)
       // lands at 0.293, a 1.36 lead. The preset's strong ink (L 0.21) needs

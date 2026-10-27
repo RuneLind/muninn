@@ -202,7 +202,7 @@ describe("palette colour rules", () => {
   // The inks held to 4.5 on --tint-neutral. --text-dim, --text-faint and
   // --text-disabled are left out because they fail 4.5 on the fill in every
   // theme, not because every use is a disabled state: `.overview-event-badge.sys`
-  // and `.chip-rejected` draw readable labels in --text-dim on it (2.96:1 on
+  // and `.chip-rejected` draw readable labels in --text-dim on it (3.21:1 on
   // paper-light, 3.22 in plain light, 3.03 dark, 3.77 reading) — a known gap.
   const NEUTRAL_INKS = ["--text-primary", "--text-secondary", "--text-soft", "--text-muted", "--tok-fn"];
 
@@ -298,15 +298,12 @@ describe("palette colour rules", () => {
   // assistant bubble).
   const LADDER = ["--bg-page", "--bg-panel", "--bg-surface", "--bg-deep", "--bg-inset", "--bg-card"];
   const SAME = [...LADDER, "--chat-assistant-bg"];
-  // The neutral chip fill holds its place on the ladder too: lighter than a
-  // field in dark (a raised chip, not a hole), darker than every surface in light.
-  const ORDERED = [...LADDER, "--tint-neutral"];
   for (const p of PALETTES) {
     test(`${p.id}: background tokens keep the ${p.base} base's lightness order`, () => {
       const base = baseTokens(p.base), t = { ...base, ...p.tokens };
       for (const k of SAME) expect(base[k], `${p.base} ${k}`).toMatch(/^#[0-9a-f]{6}$/);
-      for (const a of ORDERED) {
-        for (const b of ORDERED) {
+      for (const a of LADDER) {
+        for (const b of LADDER) {
           if (luminance(base[a]!) < luminance(base[b]!)) {
             expect(luminance(t[a]!), `${a} ${t[a]} should be darker than ${b} ${t[b]}`).toBeLessThan(luminance(t[b]!));
           }
@@ -316,6 +313,20 @@ describe("palette colour rules", () => {
         for (const b of SAME) {
           if (a < b && base[a] === base[b]) expect(t[a], `${a} should equal ${b}, as in the ${p.base} base`).toBe(t[b]!);
         }
+      }
+    });
+  }
+
+  // On a dark base the neutral fill is a chip on cards, its common host: it
+  // shows on page, panel and card at least as well as plain dark's (1.020, on
+  // its card). Reading once lifted it to #292725, above its fields, and the chips vanished on cards (1.016).
+  const dark = baseTokens("dark");
+  const darkNeutralFloor = Math.min(...SURFACES.map((s) => contrast(dark["--tint-neutral"]!, dark[s]!)));
+  for (const p of PALETTES.filter((x) => x.base === "dark")) {
+    test(`${p.id}: --tint-neutral shows on page, panel and card`, () => {
+      const t = { ...dark, ...p.tokens };
+      for (const s of SURFACES) {
+        expect(contrast(t["--tint-neutral"]!, t[s]!), `--tint-neutral ${t["--tint-neutral"]} on ${s} ${t[s]}`).toBeGreaterThanOrEqual(darkNeutralFloor - 1e-9);
       }
     });
   }
@@ -340,6 +351,11 @@ describe("palette colour rules", () => {
     test(`${p.id}: --bg-code reads as a fill and its syntax colours >= 4.5:1`, () => {
       const t = { ...baseTokens(p.base), ...p.tokens };
       if (p.base === "light") {
+        // The header bar (language label in --text-dim) steps off the fence like plain light's.
+        const bar = contrast(light["--bg-code-bar"]!, light["--bg-code"]!);
+        expect(contrast(t["--bg-code-bar"]!, t["--bg-code"]!), `--bg-code-bar ${t["--bg-code-bar"]} on --bg-code ${t["--bg-code"]}`).toBeGreaterThanOrEqual(bar - 1e-9);
+        const label = contrast(light["--text-dim"]!, light["--bg-code-bar"]!);
+        expect(contrast(t["--text-dim"]!, t["--bg-code-bar"]!), "fence label").toBeGreaterThanOrEqual(label - 1e-9);
         const floor = contrast(light["--bg-code"]!, light["--bg-card"]!);
         for (const s of ["--bg-card", "--bg-surface"]) {
           expect(contrast(t["--bg-code"]!, t[s]!), `--bg-code ${t["--bg-code"]} on ${s} ${t[s]}`).toBeGreaterThanOrEqual(floor - 1e-9);
