@@ -198,8 +198,8 @@ export const PALETTES: readonly Palette[] = [
 
       // Body hsl(40 12% 24%) and heading hsl(40 12% 9%) from the preset; the
       // steps between are spaced like the light ramp. --text-muted is #696357,
-      // not the preset's #81796a (3.53:1 on the card): 4.89 card, 5.10 panel,
-      // 5.42 page, and 4.70 on --tint-neutral, which sits darker than the card.
+      // not the preset's #81796a (3.53:1 on the card): 5.10 card, 5.72 panel,
+      // 5.28 page, and 4.70 on --tint-neutral, which sits darker than the card.
       "--text-primary": "#1a1814",
       "--text-secondary": "#454036",
       "--text-tertiary": "#524d42",
@@ -210,12 +210,12 @@ export const PALETTES: readonly Palette[] = [
       "--text-disabled": "#c2beb7",
 
       // A step darker than the preset's #a35f2f (owner decision D18), which
-      // read 4.07:1 as text on the card. #925427 measures 5.42 page, 5.11
-      // panel, 4.89 card, and 4.18 as the active nav link on its own 15 %
+      // read 4.07:1 as text on the card. #925427 measures 5.29 page, 5.72
+      // panel, 5.11 card, and 4.64 as the active nav link on its own 15 %
       // tint (plain light 4.13). The hover keeps the preset's ~1.3 step
       // below it. White reads 5.97 on the accent and 7.86 on the hover, so
       // all three inks are white. --accent-light keeps the preset's text
-      // accent, 6.15 page / 5.54 card.
+      // accent, 5.99 page / 5.79 card.
       "--accent": "#925427",
       "--accent-hover": "#7c4318",
       "--accent-light": "#8a4b1f",
@@ -227,10 +227,10 @@ export const PALETTES: readonly Palette[] = [
       // The light base's pale tints read on paper: their pill text (--tone-*,
       // 6.4–8.1:1 with the status values below) clears 4.5. --tint-purple
       // follows the accent to a copper wash darker than every surface, like
-      // the base lavender: 1.184 page (plain light 1.109), 1.114 panel, 1.068
+      // the base lavender: 1.154 page (plain light 1.109), 1.249 panel, 1.114
       // card; --accent 4.58 and --accent-light 5.19 on it. --tint-neutral is
       // darker than every surface by at least plain light's smallest step (1.038, its tint on its card):
-      // 1.040 card, 1.085 panel, 1.153 page. Its inks: --text-muted 4.70,
+      // 1.085 card, 1.216 panel, 1.124 page. Its inks: --text-muted 4.70,
       // --text-soft 5.41, --tok-fn 5.29.
       "--tint-success": "#dcfce7",
       "--tint-error": "#fee2e2",
@@ -241,13 +241,13 @@ export const PALETTES: readonly Palette[] = [
       "--tint-cyan": "#cffafe",
       "--tint-neutral": "#e8e4dc",
 
-      // Status text, darkened toward black in its own hue because the panel
-      // and card sit darker than plain light's: each reads at least plain
+      // Status text, darkened toward black in its own hue because every
+      // surface sits darker than plain light's: each reads at least plain
       // light's ratio on the same surface, and info, error and magenta (AA
       // somewhere in plain light) reach 4.5 everywhere. Page/panel/card:
-      // success 3.53/3.32/3.18, error 5.19/4.88/4.68, warning 3.42/3.21/3.08,
-      // info 5.54/5.22/5.00, tool 4.46/4.20/4.02, cyan 3.95/3.71/3.56,
-      // magenta 5.76/5.43/5.20. --on-warning on the warning fill: 4.85.
+      // success 3.44/3.72/3.32, error 5.06/5.47/4.88, warning 3.33/3.60/3.21,
+      // info 5.41/5.85/5.22, tool 4.35/4.71/4.20, cyan 3.85/4.16/3.71,
+      // magenta 5.62/6.08/5.43. --on-warning on the warning fill: 4.85.
       "--status-success": "#149544",
       "--status-error": "#c72222",
       "--status-warning": "#c66d05",
@@ -282,7 +282,7 @@ export const PALETTES: readonly Palette[] = [
       // 0.08 every dimmed token's bold stays lighter (soft 0.389). The pivot
       // keeps light's 0.9, between --text-disabled (L 0.80) and the white
       // ink on the accent. The chip keeps its context's text colour (D14) on
-      // a fill 6 % darker than the page, with a 10 % black edge.
+      // a fill about 5 % darker than the page, with a 10 % black edge.
       "--strong-lift": "0.08",
       "--strong-pivot": "0.9",
       "--strong-weight": "bolder",
