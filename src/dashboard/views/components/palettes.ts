@@ -260,19 +260,20 @@ export const PALETTES: readonly Palette[] = [
 
       "--chat-user-bg": "#f3e3d2",
       "--chat-user-text": "#5c3a1e",
-      "--chat-assistant-bg": "#eee8dd",
+      "--chat-assistant-bg": "#f1ede4",
       "--chat-assistant-text": "#454036",
 
-      // The preset's syntax set, on the #f0ebe2 fence: 4.51–5.64:1.
+      // The preset's syntax set, on the #ede8df fence: 4.77–5.49:1 (--tok-typ
+      // darkened from #0e7490, 4.39 there).
       "--tok-com": "#6b6258",
       "--tok-str": "#2f6b1f",
       "--tok-kw": "#8b2fd0",
       "--tok-num": "#9c4a07",
       "--tok-fn": "#1d4ed8",
-      "--tok-typ": "#0e7490",
+      "--tok-typ": "#0d6e89",
       "--tok-pun": "#6b6258",
 
-      "--bg-code": "#f0ebe2",
+      "--bg-code": "#ede8df",
       "--bg-code-bar": "#e7dfd0",
 
       // Bold darkens its context 0.08 in oklch lightness: body (L 0.373)
