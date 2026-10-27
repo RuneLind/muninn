@@ -298,12 +298,15 @@ describe("palette colour rules", () => {
   // assistant bubble).
   const LADDER = ["--bg-page", "--bg-panel", "--bg-surface", "--bg-deep", "--bg-inset", "--bg-card"];
   const SAME = [...LADDER, "--chat-assistant-bg"];
+  // The neutral chip fill holds its place on the ladder too: lighter than a
+  // field in dark (a raised chip, not a hole), darker than every surface in light.
+  const ORDERED = [...LADDER, "--tint-neutral"];
   for (const p of PALETTES) {
     test(`${p.id}: background tokens keep the ${p.base} base's lightness order`, () => {
       const base = baseTokens(p.base), t = { ...base, ...p.tokens };
       for (const k of SAME) expect(base[k], `${p.base} ${k}`).toMatch(/^#[0-9a-f]{6}$/);
-      for (const a of LADDER) {
-        for (const b of LADDER) {
+      for (const a of ORDERED) {
+        for (const b of ORDERED) {
           if (luminance(base[a]!) < luminance(base[b]!)) {
             expect(luminance(t[a]!), `${a} ${t[a]} should be darker than ${b} ${t[b]}`).toBeLessThan(luminance(t[b]!));
           }
@@ -312,6 +315,20 @@ describe("palette colour rules", () => {
       for (const a of SAME) {
         for (const b of SAME) {
           if (a < b && base[a] === base[b]) expect(t[a], `${a} should equal ${b}, as in the ${p.base} base`).toBe(t[b]!);
+        }
+      }
+    });
+  }
+
+  // Dim and faint text on a field (--bg-inset, --bg-deep) reads at least as
+  // well as plain light's: `.tdr-chip-muted`, `.rejudge-children th`.
+  for (const p of PALETTES.filter((x) => x.base === "light")) {
+    test(`${p.id}: --text-dim and --text-faint on fields never read worse than plain light's`, () => {
+      const t = { ...light, ...p.tokens };
+      for (const ink of ["--text-dim", "--text-faint"]) {
+        for (const s of ["--bg-inset", "--bg-deep"]) {
+          const floor = contrast(light[ink]!, light[s]!);
+          expect(contrast(t[ink]!, t[s]!), `${ink} ${t[ink]} on ${s} ${t[s]} (floor ${floor.toFixed(2)})`).toBeGreaterThanOrEqual(floor - 1e-9);
         }
       }
     });

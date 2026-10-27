@@ -125,7 +125,7 @@ export const PALETTES: readonly Palette[] = [
       "--tint-purple": "#342820",
       "--tint-magenta": "#2a1a3a",
       "--tint-cyan": "#1a2e3a",
-      "--tint-neutral": "#1a1a1a",
+      "--tint-neutral": "#292725",
 
       // The dark-island badges take the dark tints (text on each, measured:
       // deadline 8.59, Slack 8.14, GitHub 7.16, X 6.20). --island-info keeps
@@ -205,8 +205,8 @@ export const PALETTES: readonly Palette[] = [
       "--text-tertiary": "#524d42",
       "--text-soft": "#5f5a4e",
       "--text-muted": "#696357",
-      "--text-dim": "#8b8374",
-      "--text-faint": "#a49e94",
+      "--text-dim": "#857d6f",
+      "--text-faint": "#9f998f",
       "--text-disabled": "#c2beb7",
 
       // A step darker than the preset's #a35f2f (owner decision D18), which
