@@ -877,16 +877,24 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
       // A FileTree body can hold prose beside its fence; inline code there
       // gets FileTree's flat look, never the chip's edge.
       expect(got.treeProseShadow).toBe("none");
-      // A picked RuleTree case turns its chip white on the accent.
-      await page.evaluate(() =>
-        document.querySelectorAll(".wiki-article .rt-case").forEach((c) => c.classList.add("rt-hit")),
-      );
+      // A picked RuleTree case turns its chip white on the accent. The dimmest
+      // text tokens and dark ink on a warning fill sit next to a pivot: bold
+      // there must still move away from its background.
+      await page.evaluate(() => {
+        document.querySelectorAll(".wiki-article .rt-case").forEach((c) => c.classList.add("rt-hit"));
+        document.querySelector(".wiki-article")!.insertAdjacentHTML(
+          "beforeend",
+          '<p style="color: var(--text-faint)">Faint <strong>fbold</strong>.</p>' +
+            '<p style="color: var(--text-disabled)">Disabled <strong>dbold</strong>.</p>' +
+            '<p><span style="background: var(--status-warning); color: var(--on-warning)">Wait <strong>wbold</strong></span></p>',
+        );
+      });
       // Bold in every context on the page — link, quote, callout title,
       // Historic, open and done Checklist steps, dimmed DecisionLog items,
       // StatusRows tiles, AnnotatedCode notes, h6, h3, th, the picked case
       // chip — lifts its own context.
       const rows = await boldLifts(page, ".wiki-article");
-      for (const t of ["h3bold", "thbold", "LIB-2"]) expect(rows.map((r) => r.text)).toContain(t);
+      for (const t of ["h3bold", "thbold", "LIB-2", "fbold", "dbold", "wbold"]) expect(rows.map((r) => r.text)).toContain(t);
       expect(rows.length).toBeGreaterThan(10);
       expect(unlifted(rows, "pbold")).toEqual([]);
     });
@@ -935,48 +943,50 @@ test.describe("The other prose surfaces", () => {
     expect(m!.codeOnChip).toBeGreaterThanOrEqual(4.5);
   });
 
-  test("markdownContentStyles (research answer): bold weight and links, dark", async ({ page }) => {
-    // One of the six pages that share markdownContentStyles (doc panel,
-    // summaries, search document, Jira preview, export); /research serves it
-    // as `.answer-body`.
-    await page.goto(`${BASE}/research`);
-    await page.evaluate(() => {
-      document.documentElement.setAttribute("data-theme", "dark");
-      // Inside the page's own #turnsWrap, as a real turn card.
-      const card = document.createElement("div");
-      card.className = "turn-card";
-      const probe = document.createElement("div");
-      probe.className = "answer-body";
-      probe.id = "prose-probe";
-      card.appendChild(probe);
-      probe.innerHTML =
-        "<p><strong>Bold lead.</strong> Prose with <code>inline code</code> in it.</p>" +
-        '<p><a href="https://example.com/a"><strong>lbold</strong></a> and <a href="https://example.com/b"><code>lcode</code></a></p>' +
-        "<blockquote><p>Quote with <strong>qbold</strong>.</p></blockquote>" +
-        "<h3>Heading with <strong>hbold</strong></h3>";
-      document.getElementById("turnsWrap")!.appendChild(card);
+  for (const theme of ["dark", "light"] as const) {
+    test(`markdownContentStyles (research answer): bold weight and links, ${theme}`, async ({ page }) => {
+      // One of the six pages that share markdownContentStyles (doc panel,
+      // summaries, search document, Jira preview, export); /research serves it
+      // as `.answer-body`.
+      await page.goto(`${BASE}/research`);
+      await page.evaluate((t) => {
+        document.documentElement.setAttribute("data-theme", t);
+        // Inside the page's own #turnsWrap, as a real turn card.
+        const card = document.createElement("div");
+        card.className = "turn-card";
+        const probe = document.createElement("div");
+        probe.className = "answer-body";
+        probe.id = "prose-probe";
+        card.appendChild(probe);
+        probe.innerHTML =
+          "<p><strong>Bold lead.</strong> Prose with <code>inline code</code> in it.</p>" +
+          '<p><a href="https://example.com/a"><strong>lbold</strong></a> and <a href="https://example.com/b"><code>lcode</code></a></p>' +
+          "<blockquote><p>Quote with <strong>qbold</strong>.</p></blockquote>" +
+          "<h3>Heading with <strong>hbold</strong></h3>";
+        document.getElementById("turnsWrap")!.appendChild(card);
+      }, theme);
+      const m = await proseMarks(page, "#prose-probe");
+      expect(m).not.toBeNull();
+      expect(m!.boldWeight).toBe(700);
+      // Bolder than its 600 heading: a heading is already --text-primary, so in
+      // dark weight is all bold has there. The paragraph probe above (400 → 700)
+      // cannot tell `bolder` from a fixed 700.
+      const headingBold = await page.evaluate(
+        () => getComputedStyle(document.querySelector("#prose-probe h3 strong") as HTMLElement).fontWeight,
+      );
+      expect(headingBold).toBe("900");
+      const links = await page.evaluate(() => {
+        const c = (s: string) => getComputedStyle(document.querySelector("#prose-probe " + s) as HTMLElement).color;
+        return {
+          a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
+        };
+      });
+      expect(links.code).toBe(links.b);
+      // Bold in the link, the quote (a fact-check claim heading is bold in a
+      // blockquote) and the body all lift their own context.
+      expect(unlifted(await boldLifts(page, "#prose-probe"))).toEqual([]);
     });
-    const m = await proseMarks(page, "#prose-probe");
-    expect(m).not.toBeNull();
-    expect(m!.boldWeight).toBe(700);
-    // Bolder than its 600 heading: a heading is already --text-primary, so in
-    // dark weight is all bold has there. The paragraph probe above (400 → 700)
-    // cannot tell `bolder` from a fixed 700.
-    const headingBold = await page.evaluate(
-      () => getComputedStyle(document.querySelector("#prose-probe h3 strong") as HTMLElement).fontWeight,
-    );
-    expect(headingBold).toBe("900");
-    const links = await page.evaluate(() => {
-      const c = (s: string) => getComputedStyle(document.querySelector("#prose-probe " + s) as HTMLElement).color;
-      return {
-        a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
-      };
-    });
-    expect(links.code).toBe(links.b);
-    // Bold in the link, the quote (a fact-check claim heading is bold in a
-    // blockquote) and the body all lift their own context.
-    expect(unlifted(await boldLifts(page, "#prose-probe"))).toEqual([]);
-  });
+  }
 
   test("without relative colour, bold keeps main's colour, dark", async ({ page }) => {
     // A browser without relative colour still accepts the declaration (it
@@ -1029,27 +1039,32 @@ test.describe("The other prose surfaces", () => {
     expect(wiki.bold).toBe(wiki.ctx);
   });
 
-  test("chat answer: bold and code inside a link keep the link colour, dark", async ({ page }) => {
-    await page.goto(`${BASE}/chat`);
-    await page.waitForFunction(
-      () => typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function",
-    );
-    const links = await page.evaluate(() => {
-      document.documentElement.setAttribute("data-theme", "dark");
-      const g = globalThis as unknown as { formatWebHtml: (s: string) => string };
-      const probe = document.createElement("div");
-      probe.className = "web-content";
-      probe.id = "link-probe";
-      probe.innerHTML = g.formatWebHtml(
-        "[**lbold**](https://example.com/a) and [`lcode`](https://example.com/b)\n\n> Quote with **qbold**.",
+  for (const theme of ["dark", "light"] as const) {
+    test(`chat answer: bold and code inside a link keep the link colour, ${theme}`, async ({ page }) => {
+      await page.goto(`${BASE}/chat`);
+      await page.waitForFunction(
+        () => typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function",
       );
-      document.body.appendChild(probe);
-      const c = (s: string) => getComputedStyle(probe.querySelector(s) as HTMLElement).color;
-      return {
-        a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
-      };
+      const links = await page.evaluate((t) => {
+        document.documentElement.setAttribute("data-theme", t);
+        const g = globalThis as unknown as { formatWebHtml: (s: string) => string };
+        const probe = document.createElement("div");
+        probe.className = "web-content";
+        probe.id = "link-probe";
+        // A chat heading is 600 on --text-primary: in dark, weight is all its bold has.
+        probe.innerHTML = g.formatWebHtml(
+          "Body with **pbold**.\n\n[**lbold**](https://example.com/a) and [`lcode`](https://example.com/b)\n\n> Quote with **qbold**.\n\n### Head with **hbold**",
+        );
+        document.body.appendChild(probe);
+        const c = (s: string) => getComputedStyle(probe.querySelector(s) as HTMLElement).color;
+        return {
+          a: c("a[href$='/a']"), bold: c("a[href$='/a'] strong"), b: c("a[href$='/b']"), code: c("a[href$='/b'] code"),
+        };
+      }, theme);
+      expect(links.code).toBe(links.b);
+      const rows = await boldLifts(page, "#link-probe");
+      expect(rows.map((r) => r.text)).toEqual(["pbold", "lbold", "qbold", "hbold"]);
+      expect(unlifted(rows)).toEqual([]);
     });
-    expect(links.code).toBe(links.b);
-    expect(unlifted(await boldLifts(page, "#link-probe"))).toEqual([]);
-  });
+  }
 });
