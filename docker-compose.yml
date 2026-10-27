@@ -4,10 +4,10 @@ services:
     container_name: muninn-postgres
     restart: unless-stopped
     ports:
-      - "5435:5432"
+      - "127.0.0.1:5435:5432"   # loopback only: Colima forwards 0.0.0.0 past the macOS firewall
     environment:
       POSTGRES_USER: muninn
-      POSTGRES_PASSWORD: muninn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-muninn}   # first init only; rotate a live DB with ALTER USER
       POSTGRES_DB: muninn
     volumes:
       - muninn-pgdata:/var/lib/postgresql/data
