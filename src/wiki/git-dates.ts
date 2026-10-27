@@ -128,11 +128,13 @@ export interface WikiGitDates {
    */
   touchTimes: Map<string, number[]>;
   /**
-   * The same non-sweep touches with their commit hash, ascending, wiki-relative
-   * and rename-carried — what *Moved with* (`stale.ts`) groups by commit to find
-   * the pages that moved with a page. Empty on a hash-less log.
+   * The same non-sweep touches as {@link TouchRecord}s, ascending, keyed
+   * wiki-relative and rename-carried (each record's paths stay repo-relative)
+   * — what *Moved with* (`stale.ts`) groups by commit, and what the stale
+   * rules' `asOf` steps back through with {@link newestEditAtOrBefore}. Empty
+   * on a hash-less log.
    */
-  touchCommits: Map<string, { commit: string; ts: number }[]>;
+  touchCommits: Map<string, TouchRecord[]>;
 }
 
 /** A file entry from `--name-status`: a status letter, optional similarity score,
@@ -787,6 +789,34 @@ async function resolveMetadataOnlyTouches(
 }
 
 /**
+ * Per page, the newest touch at or before `asOfMs` that is an edit, by the
+ * same rule {@link resolveMetadataOnlyTouches} applies to the newest touch:
+ * `metadata-only` and `identical` commits step back, at most
+ * {@link METADATA_TOUCH_MAX_STEPS} per page, and a page whose every touch
+ * there steps back is absent. Sweeps are already out of `touches`. Keys are
+ * the caller's (wiki-relative); every degrade answers the raw newest touch at
+ * or before `asOfMs`, as the build's own rule does.
+ */
+export async function newestEditAtOrBefore(
+  root: string,
+  touches: ReadonlyMap<string, readonly TouchRecord[]>,
+  asOfMs: number,
+): Promise<Map<string, number>> {
+  const cut = new Map<string, TouchRecord[]>();
+  const touched = new Map<string, number>();
+  for (const [key, list] of touches) {
+    const kept = list.filter((r) => r.ts <= asOfMs);
+    if (kept.length === 0) continue;
+    cut.set(key, kept);
+    touched.set(key, kept[kept.length - 1]!.ts);
+  }
+  if (cut.size === 0) return touched;
+  const top = (await git(root, ["rev-parse", "--show-toplevel"]))?.trim();
+  if (!top) return touched;
+  return resolveMetadataOnlyTouches(root, top, "", touched, cut);
+}
+
+/**
  * Build the per-page date signals for the wiki rooted at `root`.
  *
  * The wiki root is often a SUBDIRECTORY of its repo (jarvis's wiki lives at
@@ -896,11 +926,11 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   // `listWikiSubtreeDirty` already returns WIKI-relative paths, so it needs no strip.
   const dirty = new Set(await dirtyPromise);
   const touchTimes = new Map<string, number[]>();
-  const touchCommits = new Map<string, { commit: string; ts: number }[]>();
+  const touchCommits = new Map<string, TouchRecord[]>();
   for (const [p, list] of parsed.touches) {
     if (!p.startsWith(prefix)) continue;
     touchTimes.set(p.slice(prefix.length), list.map((r) => r.ts));
-    touchCommits.set(p.slice(prefix.length), list.map((r) => ({ commit: r.commit, ts: r.ts })));
+    touchCommits.set(p.slice(prefix.length), list);
   }
   if (!rel) return { created, touched, dirty, touchTimes, touchCommits };
 

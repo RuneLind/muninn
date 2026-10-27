@@ -39,7 +39,7 @@ import {
 } from "../format/markdown-ast.ts";
 import { diagramSiblingRelPath, pageFileRefKinds } from "../format/query-block.ts";
 import { parseEmbedAttrs, resolveEmbedRelPath } from "../format/embed.ts";
-import { buildWikiGitDates } from "./git-dates.ts";
+import { buildWikiGitDates, type TouchRecord } from "./git-dates.ts";
 import { isLivingPage, resolveStatusLineHits, statusLineCandidates, type StatusLineCandidate, type StatusLineHit } from "./stale.ts";
 import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
@@ -1042,7 +1042,7 @@ export interface WikiIndex {
    * the one git walk — what *Moved with* groups by commit and what the stale
    * rules' `asOf` steps back through. Absent without git.
    */
-  gitTouches?: Map<string, { commit: string; ts: number }[]>;
+  gitTouches?: Map<string, TouchRecord[]>;
 }
 
 /** A page the same-stem precedence rule dropped, and the page that displaced it. */

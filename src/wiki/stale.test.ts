@@ -107,6 +107,35 @@ describe("statusLineCandidates (phase A)", () => {
     expect(c.map((x) => x.line)).toEqual([12]);
   });
 
+  test("a markdown link the masks remove does not drop the segment (F1)", () => {
+    // The `](` sits inside inline code or a struck span: masked away, so the
+    // segment holds no markdown link and the status word is a candidate.
+    expect(statusLineCandidates("[[plan-a]] is in-flight, see `[x](y.md)`\n").map((x) => x.said)).toEqual([["in-flight"]]);
+    expect(statusLineCandidates("[[plan-a]] is in-flight ~~[old](y.md)~~\n").map((x) => x.said)).toEqual([["in-flight"]]);
+  });
+
+  test("a struck span holding inline code or a single `~` is struck whole (F1)", () => {
+    expect(statusLineCandidates("[[plan-a]] ~~shipped `v2`~~ in-flight\n").map((x) => x.said)).toEqual([["in-flight"]]);
+    expect(statusLineCandidates("[[plan-a]] ~~shipped ~1 day~~ in-flight\n").map((x) => x.said)).toEqual([["in-flight"]]);
+  });
+
+  test("an HTML comment hides its text, on one line or across lines (F1)", () => {
+    const body = [
+      fm(),
+      "<!-- [[plan-a]] in-flight -->",
+      "<!--",
+      "[[plan-a]] blocked",
+      "-->",
+      "`<!--` [[plan-a]] shipped",
+      "x --> [[plan-a]] proposed <!-- [[plan-a]] blocked",
+      "[[plan-a]] blocked -->",
+    ].join("\n");
+    expect(statusLineCandidates(body).map((x) => [x.line, x.said])).toEqual([
+      [9, ["shipped"]],
+      [10, ["proposed"]],
+    ]);
+  });
+
   test("no `[[` or no status word: nothing, and no masks paid", () => {
     expect(statusLineCandidates("shipped and done\n")).toEqual([]);
     expect(statusLineCandidates("[[plan-a]] and [[plan-b]]\n")).toEqual([]);
@@ -166,9 +195,9 @@ describe("pageLastChangeMs (D29)", () => {
     expect(pageLastChangeMs(p({ mtimeMs: T0 }))).toBeUndefined();
   });
 
-  test("asOf drops newer signals and steps the commit back through the touches", () => {
-    const touches = [T0 - 10 * DAY, T0 - 3 * DAY, T0 + 2 * DAY];
-    expect(pageLastChangeMs(p({ gitTouchedMs: T0 + 2 * DAY, workedMs: T0 + DAY }), T0, touches)).toBe(T0 - 3 * DAY);
+  test("asOf drops newer signals and falls back to the stepped-back commit", () => {
+    expect(pageLastChangeMs(p({ gitTouchedMs: T0 + 2 * DAY, workedMs: T0 + DAY }), T0, T0 - 3 * DAY)).toBe(T0 - 3 * DAY);
+    expect(pageLastChangeMs(p({ gitTouchedMs: T0 + 2 * DAY }), T0)).toBeUndefined();
   });
 });
 
@@ -213,6 +242,20 @@ describe("bucketFor (D5)", () => {
     expect(at("[[x]] holds the fixtures")).toBe("mentions");
     // A version, an anchor and a link destination are no claim.
     expect(at("[[x]] needs v1.2 and [[x#12]] and [doc](y.md#34)")).toBe("mentions");
+    // Version numbers, decimals and measurements are no date (F2).
+    for (const t of ["Opus 4.6", "CDM 4.4", "Bun 1.3", "Node 22.12", "section 4.2", "takes 2.5 min", "12.5 %", "v1.2", "1.2.3", "GPT‑5.6", "Python 3.10+", "in 9.5–10.6 min", "a 2.5k-char note", "Version 8.7", "phase 1.5"]) {
+      expect([t, at(`[[x]] uses ${t}`)]).toEqual([t, "mentions"]);
+    }
+    for (const t of ["on 23.10", "den 4.6", "på 3.10", "(23.10)", "23.10.2026", "fra 1.11.", "2026-10-23", "Siden 03.10", "x. Fra 13.10 y"]) {
+      expect([t, at(`[[x]] ${t}`)]).toEqual([t, "toCheck"]);
+    }
+    // A sentence-initial capitalised word keeps the date; an all-caps one does not.
+    expect(at("Mandag 23.10: [[x]] got its pin")).toBe("toCheck");
+    expect(at("CDM 4.4 rollout: [[x]] holds the toggle")).toBe("mentions");
+    // A link is a word: a capitalised word right after one is mid-sentence.
+    expect(at("[[x]] Opus 4.6 drafts it")).toBe("mentions");
+    // A leading-zero day stays a date after a capitalised word mid-sentence.
+    expect(at("[[x]] confirmed by Rune 08.10")).toBe("toCheck");
     // No linking passage left (all on exempt lines): a Mention.
     expect(bucketFor({ page, lastChangeMs: undefined, changedAtMs, passages: [] })).toBe("mentions");
   });
@@ -335,6 +378,54 @@ describe("the index, the buckets and Moved with on a temp wiki", () => {
     expect(r.changed).toBe(true);
     expect(r.hits).toHaveLength(1);
     expect(r.movedWith.map((m) => m.relPath)).toEqual(["plans/q.md"]);
+  });
+
+  test("teardown", async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+});
+
+describe("asOf steps back past metadata-only commits (D29, F3)", () => {
+  let root = "";
+  let index: WikiIndex;
+  // The stamp commit (06-18) is inside 14 days of asOf; the last edit before it (06-01) is not.
+  const asOfMs = Date.parse("2026-06-20T23:59:59.999Z");
+
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  const commitAt = async (iso: string, msg: string) => {
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "--date", iso, "-m", msg);
+  };
+
+  test("setup", async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-stale-asof-"));
+    await git(root, "init", "-q", "-b", "main");
+    await write("notes/a.md", page("A", "First text."));
+    await write("notes/b.md", page("B", "Links [[a]]."));
+    await commitAt("2026-05-01T10:00:00Z", "seed");
+    await write("notes/a.md", page("A", "Edited text."));
+    await commitAt("2026-06-01T10:00:00Z", "edit a");
+    // Metadata only: a series and a prs stamp, body unchanged.
+    await write("notes/a.md", page("A", "Edited text.", "series: s1\nprs: [12]\n"));
+    await commitAt("2026-06-18T10:00:00Z", "stamp a");
+    // A real edit after asOf, so the step-back runs.
+    await write("notes/a.md", page("A", "Edited again.", "series: s1\nprs: [12]\n"));
+    await commitAt("2026-06-25T10:00:00Z", "edit a again");
+    index = await buildWikiIndex(root);
+  }, 30_000);
+
+  test("the stamp commit is no change: as of 06-20 the page last changed 06-01, so it is not changed", async () => {
+    const a = index.resolveRelPath("notes/a.md")!;
+    expect(a.gitTouchedMs).toBe(Date.parse("2026-06-25T10:00:00Z"));
+    const r = await stalePageReport(index, a, { asOfMs });
+    expect(r.lastChangeMs).toBe(Date.parse("2026-06-01T10:00:00Z"));
+    expect(r.changed).toBe(false);
+    expect(await linkingBuckets(index, "notes/a.md", { asOfMs })).toBeNull();
+    // Without asOf the newest edit stands.
+    expect((await stalePageReport(index, a)).lastChangeMs).toBe(Date.parse("2026-06-25T10:00:00Z"));
   });
 
   test("teardown", async () => {

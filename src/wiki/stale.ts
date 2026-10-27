@@ -21,6 +21,7 @@
  */
 import path from "node:path";
 import { maskLineCodeSpans } from "../format/code-spans.ts";
+import { newestEditAtOrBefore, type TouchRecord } from "./git-dates.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { stateExemptLines } from "./lint-state.ts";
 import { normalizeRelPath } from "./rel-path.ts";
@@ -122,28 +123,70 @@ function lineSegments(lineText: string, line: number, sourceText: string): Statu
   return out;
 }
 
+/** A struck span: `~~` to the next `~~`, a single `~` and masked code inside. */
+const STRUCK_RE = /~~[\s\S]*?~~/g;
+
+/**
+ * One line with this check's in-line masks applied, in order: inline code
+ * (to `\n`, which no wikilink crosses), HTML comments (blanked; `inComment`
+ * carries one across lines), then strikethrough (blanked). Length-preserving.
+ */
+function maskLine(line: string, inComment: boolean): { text: string; inComment: boolean } {
+  const t = maskLineCodeSpans(line);
+  let out = "";
+  let i = 0;
+  let open = inComment;
+  while (i < t.length) {
+    if (open) {
+      const e = t.indexOf("-->", i);
+      const end = e < 0 ? t.length : e + 3;
+      out += blank(t.slice(i, end));
+      i = end;
+      if (e >= 0) open = false;
+    } else {
+      const s = t.indexOf("<!--", i);
+      if (s < 0) {
+        out += t.slice(i);
+        break;
+      }
+      out += t.slice(i, s) + blank("<!");
+      // The closer is searched from `s + 2`, so `<!-->` is the empty comment.
+      i = s + 2;
+      open = true;
+    }
+  }
+  return { text: out.replace(STRUCK_RE, blank), inComment: open };
+}
+
 /**
  * Phase A, one page's text: every segment from a `[[link]]` to the next
- * wikilink on its line that names a status word. The prefilter runs on the
- * raw lines first — a `[[` and a status word on one line, then a segment that
- * holds one — so check 14's masks, a full `parseBlocks`, are paid only on a
- * page that has such a segment (15 of mimir's 114 living pages). Masking only
- * removes text, so a line with no raw segment has none masked either.
+ * wikilink on its line that names a status word, read on the MASKED line.
+ *
+ * The prefilter keeps a line only when the masked parse could find a
+ * segment on it, so check 14's masks, a full `parseBlocks`, are paid only on
+ * pages that pass. Masks only blank text in place, so: a raw `[[` followed by
+ * a {@link STATUS_PROBE} match is necessary; then the line's own masks
+ * ({@link maskLine}, outside a comment) and the segment parse must find one —
+ * exact, since the full pass masks the same way unless a comment opened on an
+ * earlier line, and a line holding no `-->` is then masked whole (a line
+ * holding one skips this second test).
  *
  * Exempt: check 14's masks ({@link stateExemptLines}) and inline code; by this
- * check's choice, strikethrough spans, the frontmatter `status_note`,
- * `description` and `title` (with their continuation lines), and a segment
- * that holds a markdown link.
+ * check's choice, strikethrough spans, HTML comments (body lines check 14
+ * does not mask), the frontmatter `status_note`, `description` and `title`
+ * (with their continuation lines), and a segment that holds a markdown link.
  */
 export function statusLineCandidates(content: string): StatusLineCandidate[] {
   if (!content.includes("[[")) return [];
   const raw = content.replace(/\r\n/g, "\n").split("\n");
-  const probe: number[] = [];
+  const probe = new Set<number>();
   for (let i = 0; i < raw.length; i++) {
     const l = raw[i]!;
-    if (l.includes("[[") && STATUS_PROBE.test(l) && lineSegments(l, i + 1, l).length) probe.push(i);
+    const at = l.indexOf("[[");
+    if (at < 0 || !STATUS_PROBE.test(at === 0 ? l : l.slice(at))) continue;
+    if (l.includes("-->") || lineSegments(maskLine(l, false).text, i + 1, l).length) probe.add(i);
   }
-  if (probe.length === 0) return [];
+  if (probe.size === 0) return [];
 
   const { lines, body, exempt } = stateExemptLines(content);
   for (let i = 1; i < body - 1; i++) {
@@ -153,11 +196,16 @@ export function statusLineCandidates(content: string): StatusLineCandidate[] {
   }
 
   const out: StatusLineCandidate[] = [];
-  for (const i of probe) {
+  // A comment opens only in the body; an exempt line leaves its state alone.
+  let inComment = false;
+  for (let i = 0; i < lines.length; i++) {
     if (exempt.has(i)) continue;
-    // Code spans become `\n`, which no wikilink crosses; strikethrough blanks.
-    const masked = maskLineCodeSpans(lines[i]!).replace(/~~[^~\n]*?~~/g, blank);
-    out.push(...lineSegments(masked, i + 1, lines[i]!));
+    const l = lines[i]!;
+    const inBody = i >= body;
+    if (!probe.has(i) && !(inBody && (inComment || l.includes("<!--")))) continue;
+    const m = maskLine(l, inBody && inComment);
+    if (inBody) inComment = m.inComment;
+    if (probe.has(i)) out.push(...lineSegments(m.text, i + 1, l));
   }
   return out;
 }
@@ -238,16 +286,15 @@ type ChangeFacts = Pick<WikiPageMeta, "relPath" | "workedMs" | "gitTouchedMs" | 
  * newest non-sweep commit (`gitTouchedMs`, metadata-only commits already set
  * aside by `git-dates.ts`) and, while it has uncommitted edits (`gitDirty`,
  * metadata-only edits already dropped), its `mtimeMs`. With `asOfMs`, only
- * signals at or before it count; a newer commit falls back to the newest
- * touch at or before it (`touchTimes`, ascending). Undefined when no signal
- * qualifies.
+ * signals at or before it count; a newer commit falls back to
+ * `steppedBackGitMs`, the newest edit commit at or before it (D29: sweeps and
+ * metadata-only commits skipped — {@link lastChangeIn} resolves it).
+ * Undefined when no signal qualifies.
  */
-export function pageLastChangeMs(p: ChangeFacts, asOfMs?: number, touchTimes?: readonly number[]): number | undefined {
+export function pageLastChangeMs(p: ChangeFacts, asOfMs?: number, steppedBackGitMs?: number): number | undefined {
   const ok = (ms: number | undefined) => (ms !== undefined && (asOfMs === undefined || ms <= asOfMs) ? ms : undefined);
   let git = ok(p.gitTouchedMs);
-  if (git === undefined && p.gitTouchedMs !== undefined && asOfMs !== undefined && touchTimes) {
-    for (const t of touchTimes) if (t <= asOfMs) git = t;
-  }
+  if (git === undefined && p.gitTouchedMs !== undefined && asOfMs !== undefined) git = ok(steppedBackGitMs);
   const xs = [ok(p.workedMs), git, p.gitDirty ? ok(p.mtimeMs) : undefined].filter((x): x is number => x !== undefined);
   return xs.length ? Math.max(...xs) : undefined;
 }
@@ -256,9 +303,29 @@ export function pageLastChangeMs(p: ChangeFacts, asOfMs?: number, touchTimes?: r
  *  build time, so one index answers one way (and its cache holds). */
 export const staleNow = (index: Pick<WikiIndex, "scannedAt">, asOfMs?: number): number => asOfMs ?? index.scannedAt;
 
-function lastChangeIn(index: WikiIndex, p: WikiPageMeta, asOfMs?: number): number | undefined {
-  const touches = index.gitTouches?.get(p.relPath)?.map((t) => t.ts);
-  return pageLastChangeMs(p, asOfMs, touches);
+/** Per index and `asOf`: the stepped-back edit commit of every page whose
+ *  newest edit commit is newer than `asOf` — one `cat-file` round for all. */
+const asOfGitCache = new WeakMap<WikiIndex, Map<number, Promise<Map<string, number>>>>();
+
+function steppedBackGit(index: WikiIndex, asOfMs: number): Promise<Map<string, number>> {
+  let cache = asOfGitCache.get(index);
+  if (!cache) asOfGitCache.set(index, (cache = new Map()));
+  const hit = cache.get(asOfMs);
+  if (hit) return hit;
+  const touches = new Map<string, TouchRecord[]>();
+  for (const p of index.pages) {
+    if (p.gitTouchedMs === undefined || p.gitTouchedMs <= asOfMs) continue;
+    const list = index.gitTouches?.get(p.relPath);
+    if (list?.length) touches.set(p.relPath, list);
+  }
+  const out = touches.size ? newestEditAtOrBefore(index.root, touches, asOfMs) : Promise.resolve(new Map<string, number>());
+  cache.set(asOfMs, out);
+  return out;
+}
+
+async function lastChangeIn(index: WikiIndex, p: WikiPageMeta, asOfMs: number): Promise<number | undefined> {
+  const stepped = p.gitTouchedMs !== undefined && p.gitTouchedMs > asOfMs ? (await steppedBackGit(index, asOfMs)).get(p.relPath) : undefined;
+  return pageLastChangeMs(p, asOfMs, stepped);
 }
 
 /** Whether a page is a changed page as of `nowMs`. */
@@ -300,24 +367,60 @@ const BARE_ITEM = /^[-*+]\s+\[\[[^\]\n]+\]\](.*)$/;
 const BARE_ITEM_TAIL_MAX = 30;
 const HEADING = /^#{1,6}\s/;
 
-/** What makes a passage one to check: a status word, a date (`D.M`,
- *  `DD.MM.YYYY`, ISO), a PR number (`#NN…`, `PR N`) or an «N of M» count. */
-const CLAIM_RES: readonly (readonly [string, RegExp])[] = [
-  ["date", /(?<![\p{L}\p{N}.])(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])(?:\.\d{4})?(?![\p{N}]|\.\p{N})/u],
-  ["date", /(?<![\p{N}])20\d\d-[01]\d-[0-3]\d(?![\p{N}])/u],
-  ["PR", /(?<![\p{L}\p{N}&/#])#\d{2,}(?![\p{N}])|(?<![\p{L}\p{N}])PR[ -]?#?\d+(?![\p{N}])/u],
-  ["count", /(?<![\p{L}\p{N}])\d+ (?:of|av) \d+(?![\p{N}])/u],
+/**
+ * A `D.M` date (F2): day 1–31 and month 1–12, with no digit, `.digit`, letter
+ * or `-letter` against it; not followed by a letter, `%`, `+`, `×` or a unit
+ * word (`2.5k`, `12.5 %`, `9.5–10.6 min`); and not preceded by an all-caps
+ * word (`CDM 4.4`), a version word (`section 4.2`) or a capitalised word
+ * mid-sentence (`Opus 4.6`). A leading-zero day (`Siden 03.10`) and a
+ * sentence-initial capitalised word (`Mandag 23.10`) keep it a date.
+ */
+const DM_RE = /(?<![\p{L}\p{N}.]|[\p{L}][-‐‑])(0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])(\.\d{4})?(?![\p{N}]|\.\p{N})/gu;
+const DM_AFTER = /^(?:\s*[–—-]\s*\d+(?:[.,]\d+)?)?(?:[\p{L}%+×]|\s+(?:%|×|x|(?:ms|s|sek|sec|min|minutter|minutes|h|t|timer|hours|kB|KB|MB|GB|TB|k|oz|px|pt|em|rem)(?![\p{L}\p{N}])))/u;
+const DM_VERSION_WORD = /(?<![\p{L}])(?:v|ver|version|versjon|versions|release|section|seksjon|kapittel|kap|chapter|phase|fase|step|steg|check|sjekk|del|part|§)\.?\s*$/iu;
+const DM_PREV_WORD = /([\p{L}][\p{L}\p{N}'’]*)\s+$/u;
+const SENTENCE_START = /(?:^[\s>*_#|+\-–—\d.)]*|[.!?:;]\s+[*_]*)$/u;
+
+function hasDateDM(text: string): boolean {
+  for (const m of text.matchAll(DM_RE)) {
+    const before = text.slice(0, m.index);
+    if (DM_AFTER.test(text.slice(m.index! + m[0].length))) continue;
+    if (m[2]) return true; // a year
+    if (DM_VERSION_WORD.test(before)) continue;
+    const w = DM_PREV_WORD.exec(before);
+    if (w && /^\p{Lu}/u.test(w[1]!)) {
+      const allCaps = w[1]!.length > 1 && w[1] === w[1]!.toUpperCase();
+      if (allCaps) continue;
+      if (!m[1]!.startsWith("0") && !SENTENCE_START.test(before.slice(0, w.index))) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/** What makes a passage one to check: a status word, a date (`D.M` per
+ *  {@link hasDateDM}, `DD.MM.YYYY`, ISO), a PR number (`#NN…`, `PR N`) or an
+ *  «N of M» count. */
+const CLAIMS: readonly (readonly [string, (text: string) => boolean])[] = [
+  ["date", hasDateDM],
+  ["date", (t) => /(?<![\p{N}])20\d\d-[01]\d-[0-3]\d(?![\p{N}])/u.test(t)],
+  ["PR", (t) => /(?<![\p{L}\p{N}&/#])#\d{2,}(?![\p{N}])|(?<![\p{L}\p{N}])PR[ -]?#?\d+(?![\p{N}])/u.test(t)],
+  ["count", (t) => /(?<![\p{L}\p{N}])\d+ (?:of|av) \d+(?![\p{N}])/u.test(t)],
 ];
+
+/** Links become `·` runs: no claim reads them, and a link still stands as a
+ *  word before a capitalised one (`[[x]] Opus 4.6` is mid-sentence). */
+const filler = (s: string) => "·".repeat(s.length);
 
 /** The claim a passage's text makes, or undefined. Links are blanked first:
  *  a `[[plan#3]]` anchor or a `](x#12)` destination is not a PR. */
 export function passageClaim(line: string): string | undefined {
   const text = maskLineCodeSpans(line)
-    .replace(/\[\[[^\]\n]*\]\]/g, blank)
-    .replace(/\]\([^)\n]*\)/g, blank);
+    .replace(/\[\[[^\]\n]*\]\]/g, filler)
+    .replace(/\]\([^)\n]*\)/g, filler);
   const said = statusWordsIn(text);
   if (said.length) return said[0];
-  for (const [kind, re] of CLAIM_RES) if (re.test(text)) return kind;
+  for (const [kind, has] of CLAIMS) if (has(text)) return kind;
   return undefined;
 }
 
@@ -439,7 +542,7 @@ async function computeBuckets(
   // A reserved page (`index`/`log`/`CLAUDE`) is bookkeeping: it changes daily
   // and links everything, so it is never a changed page.
   if (!page || isReservedBasename(page.relPath)) return null;
-  const changedAtMs = lastChangeIn(index, page, asOfMs ?? nowMs);
+  const changedAtMs = await lastChangeIn(index, page, asOfMs ?? nowMs);
   if (!isChangedPage(changedAtMs, nowMs)) return null;
   const targetKey = normalizeRelPath(page.relPath);
   const counts = Object.fromEntries(BUCKETS.map((b) => [b, 0])) as Record<Bucket, number>;
@@ -450,7 +553,7 @@ async function computeBuckets(
     const content = await readFile(path.join(index.root, from.relPath));
     if (content === null) continue;
     const passages = linkPassages(content, from.relPath, targetKey, index);
-    const lastChangeMs = lastChangeIn(index, from, asOfMs ?? nowMs);
+    const lastChangeMs = await lastChangeIn(index, from, asOfMs ?? nowMs);
     const bucket = bucketFor({ page: from, lastChangeMs, changedAtMs, passages });
     counts[bucket]++;
     linking.push({
@@ -468,9 +571,9 @@ async function computeBuckets(
 
 /** One page's free stale facts: its status-line hits, whether it is changed,
  *  and its last change. The summary route reads this for every page. */
-export function pageStaleFacts(index: WikiIndex, p: WikiPageMeta, asOfMs?: number) {
+export async function pageStaleFacts(index: WikiIndex, p: WikiPageMeta, asOfMs?: number) {
   const nowMs = staleNow(index, asOfMs);
-  const lastChangeMs = lastChangeIn(index, p, asOfMs ?? nowMs);
+  const lastChangeMs = await lastChangeIn(index, p, asOfMs ?? nowMs);
   return {
     hits: index.statusLineHits?.get(p.relPath) ?? [],
     changed: !isReservedBasename(p.relPath) && isChangedPage(lastChangeMs, nowMs),
@@ -581,7 +684,7 @@ export interface StaleSummaryRow {
 export async function staleSummary(index: WikiIndex, opts: { asOfMs?: number; readFile?: StaleReadFile } = {}) {
   const rows: StaleSummaryRow[] = [];
   for (const p of index.pages) {
-    const facts = pageStaleFacts(index, p, opts.asOfMs);
+    const facts = await pageStaleFacts(index, p, opts.asOfMs);
     if (!facts.changed && facts.hits.length === 0) continue;
     const buckets = facts.changed ? await linkingBuckets(index, p.relPath, opts) : null;
     rows.push({
@@ -608,7 +711,7 @@ export async function staleSummary(index: WikiIndex, opts: { asOfMs?: number; re
 
 /** One page's answer: its hits, whether it changed, its buckets and *Moved with*. */
 export async function stalePageReport(index: WikiIndex, p: WikiPageMeta, opts: { asOfMs?: number; readFile?: StaleReadFile } = {}) {
-  const facts = pageStaleFacts(index, p, opts.asOfMs);
+  const facts = await pageStaleFacts(index, p, opts.asOfMs);
   const nowMs = staleNow(index, opts.asOfMs);
   return {
     asOfMs: nowMs,
