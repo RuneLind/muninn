@@ -178,16 +178,22 @@ describe("theme lab script", () => {
 });
 
 /** Run the per-page stub against stub storage; returns the scripts it added. */
-function runStub(stored: string | null): { added: { src: string }[]; window: Record<string, unknown> } {
-  const added: { src: string }[] = [];
-  const window: Record<string, unknown> = {};
+interface StubEl { src: string; style?: object; textContent?: string; onload?: () => void; onerror?: () => void; removed?: boolean; remove(): void; setAttribute?(): void }
+
+/** Run the per-page stub against stub storage and <html>; returns the scripts and toasts it added. */
+function runStub(stored: string | null, dataset: Record<string, string> = {}) {
+  const added: StubEl[] = [], toasts: StubEl[] = [], props: Record<string, string> = {};
+  const window: Record<string, unknown> = { matchMedia: () => ({ matches: true }), setTimeout: () => 0 };
+  const el = (): StubEl => ({ src: "", style: {}, remove() { this.removed = true; }, setAttribute() {} });
   const document = {
-    createElement: () => ({ src: "", remove() {} }),
-    head: { appendChild: (el: { src: string }) => added.push(el) },
+    documentElement: { dataset, style: { setProperty: (n: string, v: string) => { props[n] = v; } } },
+    createElement: el,
+    head: { appendChild: (e: StubEl) => added.push(e) },
+    body: { appendChild: (e: StubEl) => toasts.push(e) },
   };
   const localStorage = { getItem: () => stored };
-  new Function("window", "document", "localStorage", themeLabStubScript())(window, document, localStorage);
-  return { added, window };
+  new Function("window", "document", "localStorage", "setTimeout", themeLabStubScript())(window, document, localStorage, () => 0);
+  return { added, toasts, props, window };
 }
 
 describe("theme lab stub (every page)", () => {
@@ -209,6 +215,43 @@ describe("theme lab stub (every page)", () => {
     expect(added.map((s) => s.src)).toEqual([THEME_LAB_PATH]);
     (window.__themeLabOpen as (f: boolean) => void)(true);
     expect(added).toHaveLength(1);
+  });
+
+  // Rebuild review (PR #755): the stub's load and failure paths were unpinned.
+  test("on load, the queued opens run in order with their own focus", () => {
+    const { added, window } = runStub(JSON.stringify({ open: true }));
+    (window.__themeLabOpen as (f: boolean) => void)(true);
+    const calls: boolean[] = [];
+    window.__themeLabOpenNow = (f: boolean) => calls.push(f);
+    added[0]!.onload!();
+    expect(calls).toEqual([false, true]);
+  });
+
+  test("a failed load says so, and the next open tries again", () => {
+    const { added, toasts, window } = runStub(null);
+    (window.__themeLabOpen as (f: boolean) => void)(true);
+    added[0]!.onerror!();
+    expect(added[0]!.removed).toBe(true);
+    expect(toasts.map((t) => t.textContent)).toEqual([expect.stringContaining("did not load")]);
+    (window.__themeLabOpen as (f: boolean) => void)(true);
+    expect(added).toHaveLength(2);
+  });
+
+  test("a response that is not the lab (a login page) also says so", () => {
+    const { added, toasts, window } = runStub(null);
+    (window.__themeLabOpen as (f: boolean) => void)(true);
+    added[0]!.onload!();
+    expect(toasts).toHaveLength(1);
+  });
+
+  // Rebuild review (PR #755): a page load showed the shipped theme until /theme-lab.js arrived.
+  test("left open, the stub applies the saved overrides before the lab loads, for the same theme only", () => {
+    const applied = { key: "reading", tokens: { "--bg-page": "#0d0c0b" } };
+    expect(runStub(JSON.stringify({ open: true, applied }), { palette: "reading", theme: "dark" }).props).toEqual({ "--bg-page": "#0d0c0b" });
+    expect(runStub(JSON.stringify({ open: true, applied }), { theme: "dark" }).props).toEqual({});
+    expect(runStub(JSON.stringify({ open: false, applied }), { palette: "reading", theme: "dark" }).props).toEqual({});
+    const sys = { key: "system:dark", tokens: { "--bg-page": "#000000" } };
+    expect(runStub(JSON.stringify({ open: true, applied: sys })).props).toEqual({ "--bg-page": "#000000" });
   });
 
   test("the ◐ menu's open loads the lab script", () => {

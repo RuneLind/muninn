@@ -832,6 +832,27 @@ test.describe("The theme lab", () => {
     await page.locator('#themeLab [data-lab="close"]').click();
   });
 
+  // Rebuild review (PR #755): left open, a page load painted the shipped theme
+  // until /theme-lab.js arrived, and a failed load dropped the click silently.
+  test("left open, a page keeps the slid colours before the lab loads; a failed load says so", async ({ page }) => {
+    await storeChoice(page, "reading");
+    await page.goto(BASE + "/");
+    await page.locator("#themeToggle").click();
+    await page.getByRole("menuitem", { name: /Theme lab/ }).click();
+    await slide(page, "bgL", 5);
+    const tinted = await pageBg(page);
+    await page.route("**/theme-lab.js", (r) => r.abort());
+    await page.goto(BASE + "/");
+    expect(await pageBg(page), "the stub applied the saved overrides").toBe(tinted);
+    await expect(page.locator(".theme-lab-toast")).toContainText("did not load");
+    await page.unroute("**/theme-lab.js");
+    await page.locator("#themeToggle").click();
+    await page.getByRole("menuitem", { name: /Theme lab/ }).click();
+    await expect(page.locator("#themeLab")).toBeVisible();
+    await page.locator('#themeLab [data-lab="close"]').click();
+    expect(await inline(page)).toBe("");
+  });
+
   test("Copy tokens puts a palettes.ts tokens block with the slid values on the clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await storeChoice(page, "reading");

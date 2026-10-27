@@ -29,28 +29,45 @@ export const THEME_LAB_PATH = "/theme-lab.js";
 /**
  * The per-page half: defines `window.__themeLabOpen` (the ◐ menu calls it)
  * and loads the lab when it is opened, or at once when it was left open.
- * Opened while loading, the opens queue; a failed load can be retried.
+ * Left open, it first sets the overrides the lab last applied for this theme,
+ * so the page does not paint the shipped theme while the lab loads. Opened
+ * while loading, the opens queue; a failed load says so and can be retried.
  */
 export function themeLabStubScript(): string {
   return `
   (function() {
     if (window.__themeLabStub) return;
     window.__themeLabStub = true;
-    var queue = null;
+    var root = document.documentElement, queue = null;
+    function fail() {
+      var t = document.createElement('div');
+      t.className = 'theme-lab-toast'; t.setAttribute('role', 'status');
+      t.textContent = 'Theme lab did not load. Try again from ◐.';
+      t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:1300;padding:8px 12px;border-radius:8px;background:var(--bg-panel);color:var(--text-primary);border:1px solid var(--border-secondary);font:13px system-ui,sans-serif';
+      document.body.appendChild(t);
+      setTimeout(function() { t.remove(); }, 6000);
+    }
     function withLab(cb) {
       if (window.__themeLabOpenNow) return cb();
       if (queue) { queue.push(cb); return; }
       queue = [cb];
       var s = document.createElement('script');
       s.src = '${THEME_LAB_PATH}';
-      s.onload = function() { var q = queue; queue = null; if (window.__themeLabOpenNow) q.forEach(function(f) { f(); }); };
-      s.onerror = function() { queue = null; s.remove(); };
+      // A 200 that is not the lab (a login page) loads but defines nothing.
+      s.onload = function() { var q = queue; queue = null; if (window.__themeLabOpenNow) q.forEach(function(f) { f(); }); else { s.remove(); fail(); } };
+      s.onerror = function() { queue = null; s.remove(); fail(); };
       document.head.appendChild(s);
     }
     window.__themeLabOpen = function(focus) { withLab(function() { window.__themeLabOpenNow(focus === true); }); };
     try {
       var st = JSON.parse(localStorage.getItem('${THEME_LAB_KEY}') || '{}');
-      if (st && st.open) withLab(function() { window.__themeLabOpenNow(false); });
+      if (st && st.open) {
+        var key = root.dataset.palette || root.dataset.theme || 'system';
+        if (key === 'system') key += window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? ':dark' : ':light';
+        var a = st.applied;
+        if (a && a.key === key && a.tokens) for (var n in a.tokens) root.style.setProperty(n, a.tokens[n]);
+        withLab(function() { window.__themeLabOpenNow(false); });
+      }
     } catch (e) {}
   })();`;
 }
@@ -135,7 +152,8 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
     function currentChoice() { return root.dataset.palette || root.dataset.theme || 'system'; }
     // The key slider states are saved under, and the panel's label: System has one per OS scheme.
     function currentKey() { return labStateKey(currentChoice(), !!(scheme && scheme.matches)); }
-    function clear() { applied.forEach(function(n) { root.style.removeProperty(n); }); applied = []; }
+    // Every watched token, not only this script's own: the stub may have set the saved ones.
+    function clear() { WATCHED.concat(applied).forEach(function(n) { root.style.removeProperty(n); }); applied = []; }
     function readRef() {
       clear();
       var cs = getComputedStyle(root), out = {};
@@ -147,6 +165,8 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
       clear();
       var d = derived();
       for (var n in d) { root.style.setProperty(n, d[n]); applied.push(n); }
+      // What the stub sets on the next page load, before this script arrives.
+      save({ applied: { key: choice, tokens: d } });
     }
     function merged() { var d = derived(), t = {}; for (var n in ref) t[n] = ref[n]; for (var m in d) t[m] = d[m]; return t; }
     function persist() { var s = load(); var states = s.states || {}; states[choice] = state; save({ states: states }); }
@@ -279,7 +299,7 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
       if (focus === true) { var first = panel.querySelector(load().min ? '[data-lab="min"]' : 'input[data-key]'); if (first) first.focus(); }
     }
     function closeLab() {
-      save({ open: false });
+      save({ open: false, applied: null });
       clear();
       if (!panel) return;
       // Closed from inside the panel: focus goes back to ◐, not to <body>.

@@ -94,8 +94,12 @@ export function createDashboardRoutes(config: Config): Hono {
   // The theme lab, loaded only when a reader opens it (theme-lab.ts). Like the
   // favicons it needs an identity but no role: it is client-only and writes
   // nothing but the viewer's own localStorage.
-  app.get(THEME_LAB_PATH, (c) =>
-    c.body(themeLabScript(), 200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" }));
+  // The ETag makes each navigation with the lab open a 304, not a 24 KB download.
+  const themeLabEtag = `"${Bun.hash(themeLabScript()).toString(36)}"`;
+  app.get(THEME_LAB_PATH, (c) => {
+    if (c.req.header("If-None-Match") === themeLabEtag) return c.body(null, 304, { ETag: themeLabEtag });
+    return c.body(themeLabScript(), 200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache", ETag: themeLabEtag });
+  });
 
   // Build hash of the inlined browser bundles — the visibility-change watcher
   // in helpers-browser.ts compares this against the meta tag the page was
