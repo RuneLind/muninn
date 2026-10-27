@@ -74,8 +74,8 @@ export const PALETTES: readonly Palette[] = [
       "--bg-page": "#1e1c1a",
       "--bg-panel": "#262422",
       "--bg-surface": "#2b2826",
-      "--bg-deep": "#1a1816",
-      "--bg-inset": "#191715",
+      "--bg-deep": "#23211f",
+      "--bg-inset": "#211f1d",
       "--bg-gradient-end": "#2a2725",
       "--bg-card": "#2b2826",
       "--bg-hover": "rgba(255, 255, 255, 0.04)",
@@ -177,17 +177,17 @@ export const PALETTES: readonly Palette[] = [
     base: "light",
     glyph: "❧",
     tokens: {
-      // The «Lesemodus lys» preset (owner pick, D5): page hsl(40 33% 95%),
-      // surfaces sink darker in its hue as the prototype's paletteFrom derives
-      // them (panel 92 %, card 90 %, chip 89 %, fence 91.4 %). Type stays
-      // 14px / 1.65 (D8).
-      "--bg-page": "#f6f4ee",
-      "--bg-panel": "#f1ede4",
-      "--bg-surface": "#eee8dd",
-      "--bg-deep": "#f0ebe2",
-      "--bg-inset": "#f0ebe2",
+      // The «Lesemodus lys» preset (owner pick, D5), on plain light's ladder:
+      // the panel is the lightest paper, then page, card, and fields deepest.
+      // The prototype sank the panel below the page, which read as a grey slab
+      // with fields lost in it. Type stays 14px / 1.65 (D8).
+      "--bg-page": "#f4f1ea",
+      "--bg-panel": "#fcfaf6",
+      "--bg-surface": "#f1ede4",
+      "--bg-deep": "#ebe6dc",
+      "--bg-inset": "#ebe6dc",
       "--bg-gradient-end": "#ece6da",
-      "--bg-card": "#eee8dd",
+      "--bg-card": "#f1ede4",
       "--bg-hover": "rgba(0, 0, 0, 0.04)",
       "--graph-canvas": "#0a0a0f",
 

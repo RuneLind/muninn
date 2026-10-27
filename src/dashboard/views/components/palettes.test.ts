@@ -290,6 +290,23 @@ describe("palette colour rules", () => {
     });
   }
 
+  // The background ladder keeps its base's order: a field (--bg-inset) sits
+  // between the page and its panel in dark, below every surface in light.
+  // Reading's first inset sank below its page; paper-light's panel sat under its page.
+  const LADDER = ["--bg-page", "--bg-panel", "--bg-surface", "--bg-deep", "--bg-inset", "--bg-card"];
+  for (const p of PALETTES) {
+    test(`${p.id}: background tokens keep the ${p.base} base's lightness order`, () => {
+      const base = baseTokens(p.base), t = { ...base, ...p.tokens };
+      for (const a of LADDER) {
+        for (const b of LADDER) {
+          if (luminance(base[a]!) < luminance(base[b]!)) {
+            expect(luminance(t[a]!), `${a} ${t[a]} darker than ${b} ${t[b]}`).toBeLessThan(luminance(t[b]!));
+          }
+        }
+      }
+    });
+  }
+
   for (const p of PALETTES) {
     test(`${p.id}: text drawn on --tint-neutral stays >= 4.5:1`, () => {
       const t = { ...baseTokens(p.base), ...p.tokens };
