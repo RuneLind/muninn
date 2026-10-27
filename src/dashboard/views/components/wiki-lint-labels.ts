@@ -50,6 +50,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "state-owns-unread": "owns: entries that name no key",
   "component-value": "Component values the renderer falls back on",
   "component-attr": "Component attributes the renderer drops",
+  "status-line": "Status words beside a plan link that disagree with its plan_status",
 };
 
 /** A group's heading: its label, plus `(info)` when every finding in it carries

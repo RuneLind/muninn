@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Thirty-nine check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Forty check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -135,6 +135,11 @@
  *                      a node name that resolves to no page plus drift
  *                      against the repos pages' link sections (`lintWiki`
  *                      only). Rules: `lint-system-map.ts`.
+ * 24. status-line — on a living page, a status word after a `[[link]]` to a
+ *                      plan whose `plan_status` says otherwise (info, D27:
+ *                      no verdicts here, so a not-a-status hit never alerts).
+ *                      Reads the target's status, so `lintWiki` only. Rules:
+ *                      `stale.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -169,6 +174,7 @@ import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
 import { checkOwnsEntries, checkState, isStateScopePage, STATE_LINT_CHECKS, stateOwners, type OwnerPage, type StatePage } from "./lint-state.ts";
 import { checkComponents, COMPONENT_LINT_CHECKS, type LoadedPageFiles } from "./lint-components.ts";
+import { checkStatusLines, STALE_LINT_CHECKS } from "./stale.ts";
 import { loadPageFiles } from "./page-files.ts";
 import { checkDecisionChain, DECISION_CHAIN_LINT_CHECKS } from "./lint-decision-chain.ts";
 import { CHART_LINT_CHECKS, checkCharts } from "./lint-chart.ts";
@@ -219,6 +225,7 @@ export const LINT_CHECKS = [
   ...STEPS_LINT_CHECKS,
   ...SYSTEM_MAP_LINT_CHECKS,
   ...SYSTEM_MAP_DRIFT_LINT_CHECKS,
+  ...STALE_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -1121,6 +1128,9 @@ export async function lintWiki(
       findings.push(...checkDrift(page, content, drift));
     }
     if (!page.culled && content.includes("<SystemMap")) systemMapPages.push({ page, content });
+    // Check 24 — a status word after a link to a plan that says otherwise
+    // (info, D27). The index build runs the same two phases (`stale.ts`).
+    findings.push(...checkStatusLines(page, content, index));
     // Reserved and culled pages own nothing and are linted for nothing.
     if (statePhrases && !reservedBasename(page.relPath) && !page.culled) {
       const fm = parseFrontmatter(content);

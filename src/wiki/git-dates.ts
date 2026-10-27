@@ -127,6 +127,12 @@ export interface WikiGitDates {
    * read per commit.
    */
   touchTimes: Map<string, number[]>;
+  /**
+   * The same non-sweep touches with their commit hash, ascending, wiki-relative
+   * and rename-carried — what *Moved with* (`stale.ts`) groups by commit to find
+   * the pages that moved with a page. Empty on a hash-less log.
+   */
+  touchCommits: Map<string, { commit: string; ts: number }[]>;
 }
 
 /** A file entry from `--name-status`: a status letter, optional similarity score,
@@ -890,11 +896,13 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   // `listWikiSubtreeDirty` already returns WIKI-relative paths, so it needs no strip.
   const dirty = new Set(await dirtyPromise);
   const touchTimes = new Map<string, number[]>();
+  const touchCommits = new Map<string, { commit: string; ts: number }[]>();
   for (const [p, list] of parsed.touches) {
     if (!p.startsWith(prefix)) continue;
     touchTimes.set(p.slice(prefix.length), list.map((r) => r.ts));
+    touchCommits.set(p.slice(prefix.length), list.map((r) => ({ commit: r.commit, ts: r.ts })));
   }
-  if (!rel) return { created, touched, dirty, touchTimes };
+  if (!rel) return { created, touched, dirty, touchTimes, touchCommits };
 
   // Translate repo-relative → wiki-relative, dropping anything outside the subtree
   // (the pathspec makes that rare, but a rename's SOURCE can legitimately sit
@@ -904,7 +912,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     for (const [p, ms] of m) if (p.startsWith(prefix)) out.set(p.slice(prefix.length), ms);
     return out;
   };
-  const out = { created: strip(created), touched: strip(touched), dirty, touchTimes };
+  const out = { created: strip(created), touched: strip(touched), dirty, touchTimes, touchCommits };
   // The strip is the one step that can throw away EVERYTHING while git reported
   // success — a wrong prefix, or paths in a spelling the prefix can't match (the
   // `core.quotePath` class of bug). Distinguished here from the innocent
