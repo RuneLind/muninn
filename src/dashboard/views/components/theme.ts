@@ -179,8 +179,9 @@ export function themeToggleScript(): string {
       var ours = !a || a === document.body || (!!picker && picker.contains(a));
       var list = items(), i = list.indexOf(a);
       if (e.key === 'Escape') {
-        // A wiki peek card is opened over the menu, so it takes this Escape
-        // (its own window-capture listener, registered later).
+        // An open wiki peek card takes this Escape, whichever opened first.
+        // Its own window-capture listener is registered later and runs after
+        // this one, so yield here rather than close the menu too.
         if (document.querySelector('.wiki-ref-peek')) return;
         if (!ours) { closeMenu(false); return; }
         e.preventDefault(); e.stopPropagation(); closeMenu(true);
