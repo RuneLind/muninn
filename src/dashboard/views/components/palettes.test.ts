@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CHAT_PALETTE_TOKENS, PALETTES, PALETTE_REQUIRED_TOKENS, paletteBaseMap, paletteTokenStyles } from "./palettes.ts";
-import { THEME_KEY, themeChoices, themeInitScript, themeToggleHtml } from "./theme.ts";
+import { THEME_KEY, themeChoices, themeInitScript, themeToggleHtml, themeToggleScript } from "./theme.ts";
 import { baseTokenNames, SHARED_STYLES, themeTokenStyles } from "../shared-styles.ts";
 import { chatStyles } from "../../../chat/views/components/chat-styles.ts";
 
@@ -15,6 +15,26 @@ function runInit(stored: Record<string, string>): { dataset: Record<string, stri
   };
   const document = { documentElement: { dataset } };
   new Function("localStorage", "document", themeInitScript())(localStorage, document);
+  return { dataset, storage };
+}
+
+/**
+ * Run the real init script, then the real end-of-header script, against the
+ * same stub storage: one page load. The header script finds no ◐ button, so it
+ * runs only its load-time sync.
+ */
+function runLoad(stored: Record<string, string>): { dataset: Record<string, string>; storage: Record<string, string> } {
+  const storage = { ...stored };
+  const dataset: Record<string, string> = {};
+  const localStorage = {
+    getItem: (k: string) => (k in storage ? storage[k]! : null),
+    setItem: (k: string, v: string) => { storage[k] = v; },
+    removeItem: (k: string) => { delete storage[k]; },
+  };
+  const document = { documentElement: { dataset }, getElementById: () => null, addEventListener: () => {} };
+  const window = { addEventListener: () => {} };
+  new Function("localStorage", "document", themeInitScript())(localStorage, document);
+  new Function("localStorage", "document", "window", themeToggleScript())(localStorage, document, window);
   return { dataset, storage };
 }
 
@@ -91,6 +111,20 @@ describe("theme init script", () => {
   test("an unknown stored value behaves like system", () => {
     expect(runInit({ [THEME_KEY]: "sepia-9000" }).dataset).toEqual({});
     expect(runInit({ [THEME_KEY]: "toString" }).dataset).toEqual({});
+  });
+
+  test("a page load keeps an unknown or 'system' value stored, rendered as system", () => {
+    for (const v of ["sepia-9000", "system"]) {
+      const r = runLoad({ [THEME_KEY]: v });
+      expect(r.dataset, v).toEqual({});
+      expect(r.storage, v).toEqual({ [THEME_KEY]: v });
+    }
+  });
+
+  test("a stored value, even an unknown one, beats the legacy chat key", () => {
+    const r = runLoad({ [THEME_KEY]: "sepia-9000", "muninn-chat-theme": "light" });
+    expect(r.dataset).toEqual({});
+    expect(r.storage).toEqual({ [THEME_KEY]: "sepia-9000" });
   });
 
   test("the legacy chat key still migrates", () => {

@@ -14,7 +14,9 @@
  *     `html[data-palette=…]` block is emitted after the base blocks.
  *
  * The stored value under `muninn-theme` is the choice id: `light`, `dark` or a
- * palette id. Absent means system; an unknown value behaves like system.
+ * palette id. Absent means system; an unknown value behaves like system but
+ * stays stored — it may be a palette a newer build on the same origin wrote —
+ * and only an explicit pick of System (menu or `t`) removes the key.
  */
 
 import { PALETTES, paletteBaseMap } from "./palettes.ts";
@@ -52,11 +54,12 @@ export function themeInitScript(): string {
         if (!Object.prototype.hasOwnProperty.call(BASES, t)) {
           // One-time migration from the legacy chat-only key so an existing
           // explicit light/dark choice survives the move to the shared key.
-          // Must remove the legacy key after migrating, or picking 'system'
-          // (which clears THEME_KEY) would resurrect the stale legacy value
-          // on the very next load and silently override 'system' again.
+          // Only when the shared key is absent: any stored value, even one this
+          // build does not know, is a newer choice than the legacy key. Must
+          // remove the legacy key either way, or picking 'system' (which clears
+          // THEME_KEY) would resurrect it on the very next load.
           var legacy = localStorage.getItem('muninn-chat-theme');
-          if (legacy === 'light' || legacy === 'dark') { t = legacy; localStorage.setItem('${THEME_KEY}', legacy); }
+          if (t === null && (legacy === 'light' || legacy === 'dark')) { t = legacy; localStorage.setItem('${THEME_KEY}', legacy); }
           localStorage.removeItem('muninn-chat-theme');
         }
         var root = document.documentElement;
@@ -101,15 +104,17 @@ export function themeToggleScript(): string {
       try { var t = localStorage.getItem(KEY); return (t !== 'system' && byId(t)) ? t : 'system'; }
       catch (e) { return 'system'; }
     }
-    function apply(id) {
+    // persist: an explicit pick writes (or, for System, removes) the key. The
+    // load-time sync does not, so an unknown value stays stored.
+    function apply(id, persist) {
       if (!byId(id)) id = 'system';
       if (id === 'system') {
         delete root.dataset.theme; delete root.dataset.palette;
-        try { localStorage.removeItem(KEY); } catch (e) {}
+        if (persist) try { localStorage.removeItem(KEY); } catch (e) {}
       } else {
         root.dataset.theme = BASES[id];
         if (id === 'light' || id === 'dark') delete root.dataset.palette; else root.dataset.palette = id;
-        try { localStorage.setItem(KEY, id); } catch (e) {}
+        if (persist) try { localStorage.setItem(KEY, id); } catch (e) {}
       }
       var c = byId(id);
       if (btn) {
@@ -124,7 +129,7 @@ export function themeToggleScript(): string {
     function cycle() {
       var c = current(), i = 0;
       for (var j = 0; j < CHOICES.length; j++) if (CHOICES[j].id === c) i = j;
-      apply(CHOICES[(i + 1) % CHOICES.length].id);
+      apply(CHOICES[(i + 1) % CHOICES.length].id, true);
     }
     function items() { return menu ? Array.prototype.slice.call(menu.querySelectorAll('[data-theme-choice]')) : []; }
     function isOpen() { return !!menu && !menu.hidden; }
@@ -142,32 +147,40 @@ export function themeToggleScript(): string {
       btn.setAttribute('aria-expanded', 'false');
       if (refocus) btn.focus();
     }
-    apply(current()); // sync the button glyph on load
-    if (btn) btn.addEventListener('click', function(e) {
-      e.stopPropagation();
+    apply(current(), false); // sync the button glyph on load
+    // No stopPropagation on these clicks: the document-level closers (Tools ▾
+    // and this menu's own) must see them, so opening one popover closes the other.
+    if (btn) btn.addEventListener('click', function() {
       if (isOpen()) closeMenu(false); else openMenu();
     });
     if (btn) btn.addEventListener('keydown', function(e) {
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); openMenu(); }
+      if (!isOpen() && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); openMenu(); }
     });
     if (menu) {
       menu.addEventListener('click', function(e) {
         var item = e.target.closest('[data-theme-choice]');
         if (!item) return;
-        e.stopPropagation();
-        apply(item.getAttribute('data-theme-choice'));
+        apply(item.getAttribute('data-theme-choice'), true);
         closeMenu(true);
       });
-      menu.addEventListener('keydown', function(e) {
-        var list = items(), i = list.indexOf(document.activeElement);
-        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(true); }
-        else if (e.key === 'ArrowDown') { e.preventDefault(); list[(i + 1) % list.length].focus(); }
-        else if (e.key === 'ArrowUp') { e.preventDefault(); list[(i - 1 + list.length) % list.length].focus(); }
-        else if (e.key === 'Home') { e.preventDefault(); list[0].focus(); }
-        else if (e.key === 'End') { e.preventDefault(); list[list.length - 1].focus(); }
-        else if (e.key === 'Tab') closeMenu(false);
+      // A press in the menu's padding or gap would move focus to <body>; keep it.
+      menu.addEventListener('mousedown', function(e) {
+        if (!e.target.closest('[data-theme-choice]')) e.preventDefault();
       });
     }
+    // Menu keys while it is open, wherever focus is (on ◐, on <body> after a
+    // stray click, on an item). Window capture runs before every document
+    // listener, so an Escape it takes reaches no page-level Escape handler.
+    window.addEventListener('keydown', function(e) {
+      if (!isOpen()) return;
+      var list = items(), i = list.indexOf(document.activeElement);
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(true); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); list[(i + 1) % list.length].focus(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); list[i < 0 ? list.length - 1 : (i - 1 + list.length) % list.length].focus(); }
+      else if (e.key === 'Home') { e.preventDefault(); list[0].focus(); }
+      else if (e.key === 'End') { e.preventDefault(); list[list.length - 1].focus(); }
+      else if (e.key === 'Tab' && i >= 0) closeMenu(false);
+    }, true);
     document.addEventListener('click', function(e) {
       var picker = document.getElementById('themePicker');
       if (isOpen() && picker && !picker.contains(e.target)) closeMenu(false);
@@ -176,6 +189,7 @@ export function themeToggleScript(): string {
       if (e.key === 't' && !e.ctrlKey && !e.metaKey && !e.altKey &&
           !['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName) &&
           !e.target.isContentEditable) {
+        closeMenu(isOpen()); // an open menu closes, focus back on ◐
         cycle();
       }
     });

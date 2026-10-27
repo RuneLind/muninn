@@ -9,7 +9,8 @@
  *  2. **The palette wins.** Its block shares the `html[data-theme]` blocks'
  *     specificity and wins on source order only — on the dashboard and on the
  *     chat page, which re-declares its own tokens after SHARED_STYLES.
- *  3. **The picker.** Menu order, keyboard, Escape/outside click, System
+ *  3. **The picker.** Menu order, keyboard, Escape from anywhere, outside
+ *     click and Tools ▾ closing each other, System
  *     clearing both attributes, and `t` cycling the same list.
  *  4. **Mermaid follows the base.** A palette is a layer, never a third base:
  *     the diagram renders mermaid's dark theme under Reading mode.
@@ -158,11 +159,18 @@ test.describe("Reading mode is applied before first paint", () => {
     });
   });
 
-  test("an unknown stored value renders as system", async ({ page }) => {
-    await storeChoice(page, "no-such-palette");
-    await page.goto(BASE + "/");
-    expect(await attrs(page)).toMatchObject({ theme: null, palette: null });
-    await expect(page.locator("#themeToggle")).toHaveText("◐");
+  test("an unknown or 'system' stored value renders as system and stays stored", async ({ page }) => {
+    for (const v of ["no-such-palette", "system"]) {
+      await page.goto(BASE + "/");
+      await page.evaluate((x) => localStorage.setItem("muninn-theme", x), v);
+      await page.reload();
+      expect(await attrs(page), v).toEqual({ theme: null, palette: null, stored: v });
+      await expect(page.locator("#themeToggle")).toHaveText("◐");
+      // An explicit pick of System is what clears it.
+      await page.locator("#themeToggle").click();
+      await page.getByRole("menuitemradio", { name: /System/ }).click();
+      expect(await attrs(page), `${v} → System`).toEqual({ theme: null, palette: null, stored: null });
+    }
   });
 });
 
@@ -217,6 +225,71 @@ test.describe("The theme picker", () => {
     await page.mouse.click(5, 300);
     await expect(page.locator("#themeMenu")).toBeHidden();
     expect((await attrs(page)).stored).toBe("dark");
+  });
+
+  // Fix round 1 batch 2 (PR #747, F4): dismissal.
+  test("◐ and Tools ▾ close each other; each keeps its own toggle", async ({ page }) => {
+    await storeChoice(page, null);
+    await page.goto(BASE + "/");
+    const btn = page.locator("#themeToggle");
+    const menu = page.locator("#themeMenu");
+    const tools = page.locator("details.nav-dropdown");
+    const toolsOpen = () => tools.evaluate((d) => (d as HTMLDetailsElement).open);
+    await tools.locator("summary").click();
+    expect(await toolsOpen(), "Tools opens").toBe(true);
+    await btn.click();
+    await expect(menu).toBeVisible();
+    expect(await toolsOpen(), "opening ◐ closes Tools").toBe(false);
+    await tools.locator("summary").click();
+    expect(await toolsOpen(), "Tools opens again").toBe(true);
+    await expect(menu, "opening Tools closes ◐").toBeHidden();
+    await expect(btn).toHaveAttribute("aria-expanded", "false");
+    await tools.locator("summary").click();
+    expect(await toolsOpen(), "Tools' own toggle closes it").toBe(false);
+    await btn.click();
+    await expect(menu).toBeVisible();
+    await btn.click();
+    await expect(menu, "◐'s own toggle closes it").toBeHidden();
+  });
+
+  test("Escape closes the menu wherever focus is and returns focus to ◐", async ({ page }) => {
+    await storeChoice(page, null);
+    await page.goto(BASE + "/");
+    const btn = page.locator("#themeToggle");
+    const menu = page.locator("#themeMenu");
+    // A click in the menu's padding: nothing is picked, focus would drop to <body>.
+    await btn.click();
+    await expect(menu).toBeVisible();
+    const box = (await menu.boundingBox())!;
+    await page.mouse.click(box.x + 3, box.y + 3);
+    await expect(menu, "a padding click picks nothing and keeps the menu open").toBeVisible();
+    await expect(page.getByRole("menuitemradio", { name: /System/ }), "focus stays on the item").toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("menuitemradio", { name: /Light/ }), "arrows still move").toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu, "Escape after a padding click").toBeHidden();
+    await expect(btn).toBeFocused();
+    // Focus back on ◐ while the menu is open.
+    await btn.click();
+    await expect(menu).toBeVisible();
+    await btn.focus();
+    await page.keyboard.press("Escape");
+    await expect(menu, "Escape with focus on ◐").toBeHidden();
+    await expect(btn).toHaveAttribute("aria-expanded", "false");
+    expect((await attrs(page)).stored).toBeNull();
+  });
+
+  test("t with the menu open cycles and closes the menu, focus on ◐", async ({ page }) => {
+    await storeChoice(page, null);
+    await page.goto(BASE + "/");
+    const btn = page.locator("#themeToggle");
+    await btn.click();
+    await expect(page.locator("#themeMenu")).toBeVisible();
+    await page.keyboard.press("t");
+    expect(await attrs(page)).toEqual({ theme: "light", palette: null, stored: "light" });
+    await expect(page.locator("#themeMenu")).toBeHidden();
+    await expect(btn).toHaveAttribute("aria-expanded", "false");
+    await expect(btn).toBeFocused();
   });
 
   test("t cycles System → Light → Dark → every palette → System", async ({ page }) => {
