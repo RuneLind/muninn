@@ -85,6 +85,10 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   '[data-inspect-action="bulk-dismiss"]',
   "#wikiFactcheckAppendBtn",
   "#wikiFactcheckIntegrateBtn",
+  // The STALE tab's Still true / Not a status: a verdict row the routes
+  // refuse on a read-only instance and root. On the instance the whole tab is
+  // hidden (WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR); this is the backstop.
+  "[data-stale-verdict]",
   "#wikiFcIntAccept",
   ".wiki-atlas-cdraft",
 ].join(",");
@@ -121,6 +125,8 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   "[data-draft-plan]",
   // Fact-check claim retry (row ↻ + the batch bar).
   "[data-claim-retry-btn]",
+  // The STALE tab's Check: model calls over the wiki's pages.
+  "[data-stale-check]",
   "#wikiClaimRetryAll",
   // «Walk me through» on a section heading. The reader renders none on a
   // read-only wiki or under the read slice; this is the backstop.
@@ -133,6 +139,20 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   "#wikiAskInput",
   "#wikiFollowupInput",
 ].join(",");
+
+/**
+ * Surfaces HIDDEN, not dimmed, on a read-only INSTANCE (D25 of plan
+ * muninn-wiki-drift-check): the mini shows no stale marks or counts, because
+ * only the write owner runs the confirm loop, so its counts would read every
+ * hit as unconfirmed. Hidden through the `wiki-readonly-instance` body class,
+ * which {@link installWikiReadonlyGuard} stamps for the instance flag only — a
+ * read-only ROOT on a writable instance keeps the tab (its buckets are free;
+ * Check and the verdict buttons are dimmed and blocked by the lists above).
+ */
+export const WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR = ['[data-conntab="stale"]', "#staleBody"].join(",");
+
+/** The body class for {@link WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR}. */
+export const WIKI_READONLY_INSTANCE_CLASS = "wiki-readonly-instance";
 
 /**
  * The three egress buttons that are activated from a **`mousedown`** delegate
@@ -307,6 +327,7 @@ export function installWikiReadonlyGuard(): void {
   // read-only INSTANCE does not dim Share / fact check (which it still serves).
   body.classList.add("wiki-readonly");
   if (perWiki) body.classList.add("wiki-readonly-wiki");
+  if (instance) body.classList.add(WIKI_READONLY_INSTANCE_CLASS);
   const message = wikiBlockedMessageFor(instance, perWiki);
 
   for (const { type, selector } of plan) {
@@ -375,6 +396,9 @@ export function wikiReadonlyStyles(): string {
     }
     body.wiki-readonly-wiki ${WIKI_READONLY_EGRESS_SELECTOR.split(",").join(", body.wiki-readonly-wiki ")} {
       opacity: 0.45; cursor: not-allowed; filter: grayscale(0.6);
+    }
+    body.${WIKI_READONLY_INSTANCE_CLASS} ${WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR.split(",").join(`, body.${WIKI_READONLY_INSTANCE_CLASS} `)} {
+      display: none !important;
     }
     .wiki-readonly-note {
       position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);

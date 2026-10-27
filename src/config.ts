@@ -953,6 +953,10 @@ export function loadConfig() {
     wikiAnswers: resolveWikiAnswerConfig(),
     wikiAnswerRetention: resolveWikiAnswerRetention(),
     wikiDefaultLens: resolveWikiDefaultLens(),
+    // The Stale check's confirm loop (D16): the wikis whose status-line hits
+    // it confirms. Unset or empty means off. Names are matched against the
+    // registry when the loop starts; an unregistered name is skipped.
+    wikiStaleConfirmWikis: optionalEnv("WIKI_STALE_CONFIRM_WIKIS", "").split(",").map((s) => s.trim()).filter(Boolean),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

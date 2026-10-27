@@ -43,9 +43,9 @@ describe("parseStaleArgs", () => {
 });
 
 describe("runWikiStale", () => {
-  test("--pages: the page report, To-check passages, Moved with, and the PR 2a line for --check", async () => {
+  test("--pages: the page report, To-check passages, Moved with", async () => {
     const urls: string[] = [];
-    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--as-of", "2026-10-25", "--check", "--base-url", "http://m:1/"], {
+    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--as-of", "2026-10-25", "--base-url", "http://m:1/"], {
       fetchJson: fake(() => report, urls),
     });
     expect(urls).toEqual(["http://m:1/api/wiki/stale?wiki=w&asOf=2026-10-25&page=repos%2Fx.md"]);
@@ -56,7 +56,92 @@ describe("runWikiStale", () => {
     expect(text).toContain("repos/api.md — API (last change 2026-10-06)");
     expect(text).toContain("L59 [date] pin rule");
     expect(text).toContain("moved with: plans/p.mdx ×2");
-    expect(out.at(-1)).toBe("check: the model checks arrive with PR 2a — these are the free checks only");
+    expect(text).not.toContain("check repos/x.md");
+  });
+
+  test("PR 2a: a confirmed hit counts, an unconfirmed one is named apart, a passage verdict is printed", async () => {
+    const r2 = {
+      ...report,
+      staleLines: 1,
+      hits: [
+        { ...report.hits[0], confirmation: { verdict: "stale", reason: "the plan shipped 22.10" } },
+        { line: 128, target: "plans/q.mdx", said: ["proposed"], now: "in-flight", text: "q", confirmation: "unconfirmed" },
+      ],
+      buckets: { ...report.buckets, linking: [{ ...report.buckets.linking[0], verdict: { verdict: "true", reason: "still so" } }, report.buckets.linking[1]] },
+    };
+    const text = (await runWikiStale(["--wiki", "w", "--pages", "repos/x.md"], { fetchJson: fake(() => r2) })).join("\n");
+    expect(text).toContain("stale status lines: 1 (+ 1 unconfirmed hit)");
+    expect(text).toContain("plan_status shipped [stale: the plan shipped 22.10]");
+    expect(text).toContain("plan_status in-flight [unconfirmed]");
+    expect(text).toContain("repos/api.md — API (last change 2026-10-06) [still true: still so]");
+  });
+
+  test("--check posts the check route for a changed page and prints each streamed verdict", async () => {
+    const posts: { url: string; body: unknown }[] = [];
+    async function* events() {
+      yield { event: "start", data: { toCheck: 2, cached: 1, toCall: 1, left: 0 } };
+      yield { event: "verdict", data: { relPath: "repos/old.md", verdict: "true", reason: "fine", cached: true, edit: null } };
+      yield { event: "verdict", data: { relPath: "repos/api.md", verdict: "stale", reason: "misses the pin rule", cached: false, edit: { old: "a", new: "b" } } };
+      yield { event: "done", data: { calls: 1, verdicts: 2, errors: 0, left: 0 } };
+    }
+    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--as-of", "2026-10-25", "--check", "--base-url", "http://m:1"], {
+      fetchJson: fake(() => report),
+      postSse: async (url, body) => {
+        posts.push({ url, body });
+        return { status: 200, events: events() };
+      },
+    });
+    expect(posts).toEqual([{ url: "http://m:1/api/wiki/stale/check", body: { wiki: "w", page: "repos/x.md", asOf: "2026-10-25" } }]);
+    const text = out.join("\n");
+    expect(text).toContain("2 to check: 1 cached, 1 model call(s)");
+    expect(text).toContain("repos/old.md [still true: fine] (cached)");
+    expect(text).toContain("repos/api.md [stale: misses the pin rule] — edit: «a» → «b»");
+    expect(text).toContain("done: 1 call(s), 2 verdict(s), 0 error(s)");
+  });
+
+  test("--check skips a page that is not changed, and a refused check is one line", async () => {
+    let posted = 0;
+    const notChanged = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--check"], {
+      fetchJson: fake(() => ({ ...report, changed: false, buckets: null })),
+      postSse: async () => ((posted++), { status: 200 }),
+    });
+    expect(posted).toBe(0);
+    expect(notChanged.join("\n")).not.toContain("check repos/x.md");
+    const refused = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--check"], {
+      fetchJson: fake(() => report),
+      postSse: async () => ({ status: 409, body: { error: "No routing bot for this wiki" } }),
+    });
+    expect(refused).toContain("wiki-stale: check repos/x.md: No routing bot for this wiki");
+  });
+
+  test("--check gets the longer run deadline, a plain run keeps 25 s", async () => {
+    const { CHECK_RUN_DEADLINE_MS, RUN_DEADLINE_MS } = await import("./wiki-stale.ts");
+    expect(RUN_DEADLINE_MS).toBe(25_000);
+    expect(CHECK_RUN_DEADLINE_MS).toBe(300_000);
+    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--check"], {
+      deadlineMs: 50,
+      fetchJson: fake(() => report),
+      postSse: () => new Promise(() => {}),
+    });
+    expect(out.at(-1)).toBe("wiki-stale: check repos/x.md did not finish in 0.05 s");
+  });
+
+  test("readSse parses event blocks across chunk boundaries", async () => {
+    const { readSse } = await import("./wiki-stale.ts");
+    const enc = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode('event: start\ndata: {"toCheck":1}\n\nevent: ver'));
+        c.enqueue(enc.encode('dict\ndata: {"relPath":"a.md"}\n\n'));
+        c.close();
+      },
+    });
+    const got: unknown[] = [];
+    for await (const e of readSse(body)) got.push(e);
+    expect(got).toEqual([
+      { event: "start", data: { toCheck: 1 } },
+      { event: "verdict", data: { relPath: "a.md" } },
+    ]);
   });
 
   test("a readonly instance prints the free checks plus one «check unavailable» line", async () => {

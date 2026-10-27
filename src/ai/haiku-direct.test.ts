@@ -737,6 +737,32 @@ describe("callHaikuWithFallback dispatch", () => {
   });
 });
 
+describe("callHaikuWithFallback deadlineAt (the Stale check's whole-call bound)", () => {
+  test("the CLI fallback gets only what is left of the deadline, not a second full timeoutMs", async () => {
+    copilotSessionThrow = new Error("copilot unreachable");
+    const deadlineAt = Date.now() + 10_000;
+    await callHaikuWithFallback("hi", { source: "test", connector: "copilot-sdk", timeoutMs: 60_000, deadlineAt });
+    expect(spawnCalls).toHaveLength(1);
+    const t = (spawnCalls[0]!.opts as { timeoutMs: number }).timeoutMs;
+    expect(t).toBeLessThanOrEqual(10_000);
+    expect(t).toBeGreaterThan(9_000);
+  });
+
+  test("a fallback that would start past the deadline throws instead of spawning", async () => {
+    copilotSessionThrow = new Error("copilot unreachable");
+    await expect(
+      callHaikuWithFallback("hi", { source: "test", connector: "copilot-sdk", timeoutMs: 60_000, deadlineAt: Date.now() - 1 }),
+    ).rejects.toThrow(/deadline passed before the CLI fallback/);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test("without deadlineAt the fallback keeps the caller's timeoutMs", async () => {
+    copilotSessionThrow = new Error("copilot unreachable");
+    await callHaikuWithFallback("hi", { source: "test", connector: "copilot-sdk", timeoutMs: 60_000 });
+    expect((spawnCalls[0]!.opts as { timeoutMs: number }).timeoutMs).toBe(60_000);
+  });
+});
+
 describe("trackUsage trace_id join (obs-tail #1)", () => {
   // A structural stand-in for a Tracer — only `.traceId` is read by the backends.
   const tracer = { traceId: "trace-abc-123" } as unknown as import("../tracing/index.ts").Tracer;

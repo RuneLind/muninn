@@ -47,6 +47,7 @@ const ALL_TABLES = [
   "jira_drafts",
   "summary_factchecks",
   "wiki_answers",
+  "wiki_stale_verdicts",
 ];
 
 let dbInitialized = false;

@@ -16,6 +16,7 @@
  */
 
 import { movedWithSectionHtml, type MovedWithListing } from "./wiki-moved-with.ts";
+import { staleBodyHtml, staleTabBadge, type StaleReportView, type StaleVerdictView } from "./wiki-stale-tab.ts";
 import { escHtml as esc } from "./escape.ts";
 import {
   installWikiReadonlyGuard,
@@ -3257,6 +3258,10 @@ function renderStart(): void {
   currentName = null;
   currentRelPath = null; // the two identities are cleared together, always
   currentPageHash = null;
+  // No page, no stale report: the tab's count must not carry the last page's.
+  staleFor = null;
+  staleReport = null;
+  renderStale();
   // The overview has no graph, and its URL carries no `display=`: leaving an
   // article for it leaves graph mode too. Back restores it from the URL.
   graphMode = false;
@@ -3597,11 +3602,17 @@ function switchConnTab(tab: string, focus?: boolean): void {
   document.querySelectorAll(".wiki-conn-tab").forEach((b) => {
     b.classList.toggle("active", b.getAttribute("data-conntab") === tab);
   });
+  // The STALE tab is absent where its routes are (the read slice) and hidden
+  // on a read-only instance (D25): the rail stays on Connections there.
+  if (tab === "stale" && !staleTabAvailable()) tab = "conn";
   const connBody = document.getElementById("connBody");
   const askBody = document.getElementById("askBody");
+  const staleBody = document.getElementById("staleBody");
   const ask = tab === "ask";
-  if (connBody) connBody.style.display = ask ? "none" : "";
+  const stale = tab === "stale";
+  if (connBody) connBody.style.display = ask || stale ? "none" : "";
   if (askBody) askBody.style.display = ask ? "flex" : "none";
+  if (staleBody) staleBody.style.display = stale ? "" : "none";
   if (ask && focus) {
     const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement | null;
     if (input) input.focus();
@@ -3682,6 +3693,138 @@ function loadSimilar(page: { relPath: string }): void {
     .finally(() => {
       similarInFlight.delete(relPath);
     });
+}
+
+// ── The STALE tab (stale check PR 2a, `wiki-stale-tab.ts`) ────────────
+/** The tab's report for the open page, and Check's state. */
+let staleReport: StaleReportView | null = null;
+let staleFor: string | null = null;
+let staleChecking = false;
+let staleProgress = "";
+
+/** The tab exists where the tool routes do and the instance writes (D25). */
+function staleTabAvailable(): boolean {
+  return wikiToolsFlag() && !wikiReadonlyFlag();
+}
+
+function renderStale(): void {
+  const body = document.getElementById("staleBody");
+  if (body) {
+    body.innerHTML = staleFor === null
+      ? '<div class="wiki-conn-empty">Select a page to see what may be stale.</div>'
+      : staleBodyHtml(staleReport, { checking: staleChecking, progress: staleProgress });
+  }
+  const badge = document.getElementById("wikiStaleCount");
+  if (badge) {
+    const b = staleTabBadge(staleReport);
+    badge.textContent = b.text;
+    badge.parentElement?.setAttribute("title", b.title);
+  }
+}
+
+/** Fetch the open page's stale report (free hits, buckets, cached verdicts). */
+function loadStale(relPath: string): void {
+  if (!staleTabAvailable()) return;
+  if (staleFor !== relPath) {
+    staleFor = relPath;
+    staleReport = null;
+    staleChecking = false;
+    staleProgress = "";
+    renderStale();
+  }
+  fetch(withWiki("/api/wiki/stale?page=" + encodeURIComponent(relPath)))
+    .then((r) => r.json())
+    .then((data: StaleReportView) => {
+      if (staleFor !== relPath) return;
+      staleReport = data;
+      renderStale();
+    })
+    .catch(() => {
+      if (staleFor !== relPath) return;
+      staleReport = { error: "the stale report could not be loaded" };
+      renderStale();
+    });
+}
+
+/** Check (D6): stream the check route, fill verdicts in as they arrive. */
+async function runStaleCheckClient(relPath: string): Promise<void> {
+  if (staleChecking || staleFor !== relPath) return;
+  staleChecking = true;
+  staleProgress = "Starting…";
+  renderStale();
+  let checked = 0;
+  let total = 0;
+  try {
+    const res = await fetch("/api/wiki/stale/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ wiki: WIKI, page: relPath }),
+    });
+    if (!res.ok || !res.body || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
+      let msg = "Check could not start (HTTP " + res.status + ").";
+      try {
+        const b = (await res.json()) as { error?: unknown };
+        if (b && typeof b.error === "string") msg = b.error;
+      } catch { /* keep the status copy */ }
+      staleProgress = msg;
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const parser = makeSseFrameParser((frame) => {
+      let d: Record<string, unknown> = {};
+      try { d = JSON.parse(frame.data) as Record<string, unknown>; } catch { return; }
+      if (staleFor !== relPath) return;
+      if (frame.event === "start") total = Number(d.toCheck) || 0;
+      else if (frame.event === "verdict" || frame.event === "error") {
+        checked++;
+        const l = staleReport?.buckets?.linking.find((x) => x.relPath === d.relPath);
+        if (l && frame.event === "verdict") l.verdict = { verdict: d.verdict, reason: d.reason, edit: d.edit } as StaleVerdictView;
+      } else if (frame.event === "app_error") staleProgress = String(d.message ?? "Check failed");
+      if (frame.event !== "app_error") staleProgress = `${checked} of ${total} checked`;
+      renderStale();
+    });
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      parser.push(decoder.decode(value, { stream: true }));
+    }
+    parser.end();
+  } catch {
+    staleProgress = "Could not reach the server.";
+  } finally {
+    staleChecking = false;
+    if (staleFor === relPath) {
+      renderStale();
+      loadStale(relPath);
+    }
+  }
+}
+
+/** Still true / Not a status: one reader verdict row, then a reload. */
+async function postStaleVerdict(btn: Element): Promise<void> {
+  const relPath = btn.getAttribute("data-stale-page") || "";
+  const kind = btn.getAttribute("data-kind") || "";
+  const payload: Record<string, unknown> = { wiki: WIKI, page: relPath, kind, verdict: btn.getAttribute("data-stale-verdict") };
+  if (kind === "status-line") {
+    payload.line = Number(btn.getAttribute("data-line"));
+    payload.target = btn.getAttribute("data-target") || "";
+  } else payload.linking = btn.getAttribute("data-linking") || "";
+  (btn as HTMLButtonElement).disabled = true;
+  try {
+    const res = await fetch("/api/wiki/stale/verdict", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) {
+      const b = (await res.json().catch(() => ({}))) as { error?: unknown };
+      staleProgress = typeof b.error === "string" ? b.error : "The verdict was not saved (HTTP " + res.status + ").";
+      renderStale();
+      return;
+    }
+  } catch {
+    staleProgress = "Could not reach the server.";
+    renderStale();
+    return;
+  }
+  if (staleFor === relPath) loadStale(relPath);
 }
 
 /**
@@ -4478,6 +4621,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       // inserted when the block lands (`placeProvStrip`), with no placeholder.
       if (data.provenancePending) void loadProvStrip(m.relPath);
       loadSimilar(m);
+      loadStale(m.relPath);
     })
     .catch(() => {
       if (currentRelPath !== m.relPath) return;
@@ -4752,6 +4896,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
       loadSimilar(data.meta);
+      loadStale(data.meta.relPath);
       revealOnRender = true;
       renderList();
     })
@@ -5126,6 +5271,17 @@ document.body.addEventListener("click", (e) => {
   const connTab = target.closest ? target.closest(".wiki-conn-tab") : null;
   if (connTab) {
     switchConnTab(connTab.getAttribute("data-conntab") || "conn", true);
+    return;
+  }
+  // The STALE tab's buttons, before the nav-link branch below.
+  const staleCheck = target.closest ? target.closest("[data-stale-check]") : null;
+  if (staleCheck) {
+    void runStaleCheckClient(staleCheck.getAttribute("data-stale-page") || "");
+    return;
+  }
+  const staleVerdict = target.closest ? target.closest("[data-stale-verdict]") : null;
+  if (staleVerdict) {
+    void postStaleVerdict(staleVerdict);
     return;
   }
   // The rail's ★ lives inside a `[data-relpath]` row; it is the list's own

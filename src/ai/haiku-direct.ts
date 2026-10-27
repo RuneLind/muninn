@@ -79,6 +79,16 @@ export interface HaikuRouterOptions extends SpawnHaikuOptions {
   haikuBackend?: HaikuBackend;
   /** Bot's main connector — selects the connector-derived fallback. */
   connector?: ConnectorType;
+  /**
+   * Epoch ms by which the WHOLE call, CLI fallback included, must be done.
+   * `timeoutMs` bounds each attempt, so without this a backend attempt plus
+   * its CLI fallback can take twice it. With it, the fallback gets only what
+   * is left (`min(timeoutMs, deadlineAt - now)`), and a fallback that would
+   * start past it throws instead. The backend attempt itself is bounded by
+   * `timeoutMs` alone: the caller passes one that fits (the Stale check
+   * passes half the time left).
+   */
+  deadlineAt?: number;
 }
 
 let cachedAnthropic: Anthropic | null = null;
@@ -504,7 +514,15 @@ export async function callHaikuWithFallback(
       log.warn("haiku-router {backend} failed, falling back to CLI: {error}", { botName, backend, error: message });
     }
   }
-  return spawnHaiku(prompt, cliFallback ? { ...opts, cliFallback } : opts);
+  let spawnOpts: HaikuRouterOptions = cliFallback ? { ...opts, cliFallback } : opts;
+  if (opts.deadlineAt !== undefined) {
+    const left = opts.deadlineAt - Date.now();
+    if (left <= 0) {
+      throw new Error(`haiku-router: deadline passed before the CLI ${cliFallback ? "fallback" : "call"}${cliFallback ? ` (${cliFallback.backend}: ${cliFallback.reason})` : ""}`);
+    }
+    spawnOpts = { ...spawnOpts, timeoutMs: Math.min(opts.timeoutMs ?? HAIKU_TIMEOUT_MS, left) };
+  }
+  return spawnHaiku(prompt, spawnOpts);
 }
 
 /** Usage/backend for one {@link callHaikuMessageWithFallback} call. `backend` is

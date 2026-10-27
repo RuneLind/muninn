@@ -201,6 +201,11 @@ const WIKI_BUCKET_MIRROR_FLAGS = [
  *  reader shows first. The lens spec sets it per server. */
 const WIKI_LENS_FLAGS = ["WIKI_DEFAULT_LENS"];
 
+/** `WIKI_STALE_CONFIRM_WIKIS` (the Stale check's confirm loop, D16): a
+ *  developer's value would start a background model loop in every spawned
+ *  server on that machine only. The loop's tests pass the list explicitly. */
+const WIKI_STALE_FLAGS = ["WIKI_STALE_CONFIRM_WIKIS"];
+
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.
  *
@@ -229,6 +234,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...WIKI_ANSWER_FLAGS,
   ...WIKI_BUCKET_MIRROR_FLAGS,
   ...WIKI_LENS_FLAGS,
+  ...WIKI_STALE_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
   // fourteen route groups and turns every Claude-CLI spawn into a throw, so the

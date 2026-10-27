@@ -944,6 +944,25 @@ CREATE TABLE wiki_answers (
 CREATE INDEX idx_wiki_answers_page ON wiki_answers (wiki, rel_path, question_id);
 
 -- ============================================================================
+-- Stale check verdicts: one row per verdict on a status line or passage (migration 085)
+-- ============================================================================
+CREATE TABLE wiki_stale_verdicts (
+  id          BIGSERIAL PRIMARY KEY,
+  wiki        TEXT NOT NULL,
+  kind        TEXT NOT NULL CHECK (kind IN ('status-line', 'passage', 'fixed')),
+  page        TEXT NOT NULL,
+  key_hash    TEXT NOT NULL,
+  verdict     TEXT NOT NULL CHECK (verdict IN ('stale', 'unsure', 'true', 'not-status', 'fixed')),
+  reason      TEXT NOT NULL DEFAULT '',
+  edit        JSONB,
+  checked_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  checked_by  TEXT NOT NULL,
+  UNIQUE (wiki, kind, key_hash)
+);
+
+CREATE INDEX idx_wiki_stale_verdicts_checked ON wiki_stale_verdicts (checked_at);
+
+-- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
 -- ============================================================================
 CREATE TABLE schema_migrations (

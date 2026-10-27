@@ -18,6 +18,7 @@ import { wikiRouteTable } from "../../test/wiki-route-table.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import { runWikiStale } from "../../../scripts/wiki-stale.ts";
+import { __setStaleVerdictStoreForTest, memoryStaleVerdictStore } from "../../wiki/stale-confirm.ts";
 import { __resetWorkSessionsForTest, refreshWorkSessions, workSessionsDepsFromEnv, workSessionsFor } from "../../wiki/work-sessions.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
@@ -62,9 +63,14 @@ describe("GET /api/wiki/stale", () => {
     app = new Hono();
     app.onError((err, c) => c.json({ error: String(err) }, 500));
     registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+    // No database here: PR 2a's verdicts come from an empty in-memory store,
+    // so every hit is unconfirmed (`wiki-stale-check-routes.test.ts` covers
+    // the confirmed side).
+    __setStaleVerdictStoreForTest(memoryStaleVerdictStore());
   }, 30_000);
 
   afterAll(async () => {
+    __setStaleVerdictStoreForTest(null);
     if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
     else process.env.WIKI_EXTRA = prevExtra;
     __resetWikiRegistryForTest();
@@ -99,8 +105,9 @@ describe("GET /api/wiki/stale", () => {
   test("without a page: the wiki-wide summary with both counts", async () => {
     const { status, body } = await get("wiki=stalewiki&asOf=2026-06-20");
     expect(status).toBe(200);
-    expect(body.totals).toEqual({ staleLines: 1, toCheck: 1, changedPages: 2 });
-    expect(body.pages[0]).toMatchObject({ relPath: "hub.md", staleLines: 1, toCheck: 1, changed: true, dirty: false });
+    // PR 2a: an unconfirmed hit is not a stale line (D11), but it is counted as a hit.
+    expect(body.totals).toEqual({ staleLines: 0, hits: 1, toCheck: 1, changedPages: 2 });
+    expect(body.pages[0]).toMatchObject({ relPath: "hub.md", staleLines: 0, hits: 1, toCheck: 1, changed: true, dirty: false });
   });
 
   test("readonly names its cause: the instance, else this wiki's root (B4-3)", async () => {

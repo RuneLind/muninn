@@ -16,8 +16,11 @@
  *   clipped it. Each page is reported as `--pages` would.
  * - Neither: the wiki's uncommitted and recently committed pages and every
  *   page with a stale status line, with their counts. Edits nothing.
- * - `--as-of` pins «now» (tests); `--check` is accepted, and the model checks
- *   arrive with PR 2a; `--json` prints the route's answers as JSON lines, and
+ * - `--as-of` pins «now» (tests). `--check` runs Check (`POST
+ *   /api/wiki/stale/check`) on each changed page among `--pages`/`--session`:
+ *   one model call per linking page to check, at most 10 a page, each verdict
+ *   printed as it streams in; cached verdicts come back without a call. Each
+ *   hit line says whether the confirm loop confirmed it. `--json` prints the route's answers as JSON lines, and
  *   every notice (errors, the session line, the readonly line) as a
  *   `{"notice": …}` line, so each stdout line parses.
  * - Base URL: `--base-url`, else `WIKI_STALE_MUNINN_URL`, else
@@ -25,7 +28,8 @@
  *
  * It reports and exits 0 always (D13), a usage error, an unreachable muninn
  * and an answer of the wrong shape included, and the whole run ends within
- * {@link RUN_DEADLINE_MS}: a handoff that runs it must never fail or wait on it. On a
+ * {@link RUN_DEADLINE_MS}, or {@link CHECK_RUN_DEADLINE_MS} with `--check`
+ * (a Check of 10 calls takes longer than 25 s): a handoff that runs it must never fail or wait on it unbounded. On a
  * readonly instance (D25) it prints the free checks plus one
  * «check unavailable: readonly instance» line; on a writable instance whose
  * wiki root is readonly (`WIKI_READONLY_ROOTS`), «… readonly wiki».
@@ -102,11 +106,22 @@ export function parseStaleArgs(argv: readonly string[]): { args: StaleArgs; erro
 
 type Json = Record<string, any>;
 export type FetchJson = (url: string, signal?: AbortSignal) => Promise<{ status: number; body: Json }>;
+/** One server-sent event. */
+export interface SseEvent {
+  event: string;
+  data: Json;
+}
+/** POST a JSON body and read the answer: a refusal is JSON (`status` ≥ 400,
+ *  `body`), a stream is its events. */
+export type PostSse = (url: string, body: Json, signal?: AbortSignal) => Promise<{ status: number; body?: Json; events?: AsyncIterable<SseEvent> }>;
 
 /** The whole run's deadline (D13): a handoff waits on this script at most
  *  this long, however many calls a session report makes. The route's own
  *  bound on a session request (`SESSION_REFRESH_TIMEOUT_MS`, 8 s) fits in it. */
 export const RUN_DEADLINE_MS = 25_000;
+/** The run's deadline with `--check`: the check route's own budget (4 min)
+ *  plus a margin for the free reports. */
+export const CHECK_RUN_DEADLINE_MS = 5 * 60_000;
 
 const day = (ms: number | undefined) => (ms === undefined ? "never" : new Date(ms).toISOString().slice(0, 10));
 const minute = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")}Z`;
@@ -121,9 +136,12 @@ const each = (ok: (v: Json) => boolean) => (v: unknown) => Array.isArray(v) && v
 /** The answer shapes the printers read, every field they read — anything
  *  else (a wrong `--base-url`, an older or newer muninn) is one line, never
  *  a throw. */
-const isHit = (h: Json) => isNum(h.line) && Array.isArray(h.said) && h.said.every(isStr) && isStr(h.target) && isStr(h.now) && opt(isStr)(h.text);
+const isVerdict = (v: unknown) => isObj(v) && isStr(v.verdict) && opt(isStr)(v.reason);
+const isHit = (h: Json) =>
+  isNum(h.line) && Array.isArray(h.said) && h.said.every(isStr) && isStr(h.target) && isStr(h.now) && opt(isStr)(h.text) &&
+  (h.confirmation === undefined || h.confirmation === "unconfirmed" || isVerdict(h.confirmation));
 const isPassage = (p: Json) => isNum(p.line) && isStr(p.text) && opt(isStr)(p.claim);
-const isLinking = (l: Json) => isStr(l.relPath) && isStr(l.title) && isStr(l.bucket) && opt(isNum)(l.lastChangeMs) && each(isPassage)(l.passages);
+const isLinking = (l: Json) => isStr(l.relPath) && isStr(l.title) && isStr(l.bucket) && opt(isNum)(l.lastChangeMs) && each(isPassage)(l.passages) && (l.verdict === undefined || isVerdict(l.verdict));
 const isBuckets = (b: unknown) => b === null || (isObj(b) && isObj(b.counts) && Object.values(b.counts).every(isNum) && each(isLinking)(b.linking));
 const isPageReport = (r: Json) =>
   isObj(r.page) && isStr(r.page.relPath) && isStr(r.page.title) && opt(isStr)(r.page.planStatus) && opt(isNum)(r.asOfMs) && opt(isNum)(r.lastChangeMs) &&
@@ -141,8 +159,18 @@ const BUCKET_LABEL: Record<string, string> = {
   changedSince: "changed since",
 };
 
+const VERDICT_LABEL: Record<string, string> = { stale: "stale", unsure: "unsure", true: "still true", "not-status": "not a status", fixed: "fixed" };
+/** A verdict as one bracketed tag, with its reason. */
+export function verdictTag(v: Json): string {
+  return `[${VERDICT_LABEL[v.verdict] ?? v.verdict}${v.reason ? `: ${cap(String(v.reason), 140)}` : ""}]`;
+}
+
 function hitLines(hits: Json[]): string[] {
-  return hits.map((h) => `    L${h.line}  ${(h.said ?? []).map((s: string) => `«${s}»`).join(", ")} after [[${h.target}]] — plan_status ${h.now}: ${cap(String(h.text ?? ""))}`);
+  return hits.map((h) => {
+    const c = h.confirmation;
+    const tag = c === undefined ? "" : c === "unconfirmed" ? " [unconfirmed]" : ` ${verdictTag(c)}`;
+    return `    L${h.line}  ${(h.said ?? []).map((s: string) => `«${s}»`).join(", ")} after [[${h.target}]] — plan_status ${h.now}${tag}: ${cap(String(h.text ?? ""))}`;
+  });
 }
 
 /** One page's report, as printed. */
@@ -151,7 +179,10 @@ export function formatPageReport(r: Json): string[] {
   const p = r.page;
   out.push(`${p.relPath} — ${p.title}${p.planStatus ? ` (${p.planStatus})` : ""}`);
   out.push(`  last change ${day(r.lastChangeMs)}${r.dirty ? ", uncommitted edits" : ""}`);
-  out.push(`  stale status lines: ${r.hits.length}`);
+  // PR 2a: a hit counts once the confirm loop confirmed it (D11).
+  const confirmed = typeof r.staleLines === "number" ? r.staleLines : r.hits.length;
+  const unconfirmed = r.hits.filter((h: Json) => h.confirmation === "unconfirmed").length;
+  out.push(`  stale status lines: ${confirmed}${unconfirmed ? ` (+ ${unconfirmed} unconfirmed hit${unconfirmed === 1 ? "" : "s"})` : ""}`);
   out.push(...hitLines(r.hits));
   if (!r.buckets) {
     out.push(`  not changed in the 14 days to ${day(r.asOfMs)} — no linking-page buckets`);
@@ -162,7 +193,7 @@ export function formatPageReport(r: Json): string[] {
     const toCheck = b.linking.filter((l: Json) => l.bucket === "toCheck");
     if (toCheck.length) out.push("  to check:");
     for (const l of toCheck) {
-      out.push(`    ${l.relPath} — ${l.title} (last change ${day(l.lastChangeMs)})`);
+      out.push(`    ${l.relPath} — ${l.title} (last change ${day(l.lastChangeMs)})${l.verdict ? ` ${verdictTag(l.verdict)}` : ""}`);
       for (const ps of l.passages) if (ps.claim) out.push(`      L${ps.line} [${ps.claim}] ${cap(ps.text)}`);
     }
   }
@@ -177,7 +208,8 @@ export function formatPageReport(r: Json): string[] {
 export function formatSummary(r: Json): string[] {
   const out: string[] = [];
   const t = r.totals;
-  out.push(`${r.wiki}: ${t.staleLines} stale status line(s), ${t.toCheck} linking page(s) to check, ${t.changedPages} changed page(s) in the 14 days to ${day(r.asOfMs)}`);
+  const unconfirmed = typeof t.hits === "number" && t.hits > t.staleLines ? ` (+ ${t.hits - t.staleLines} unconfirmed hit(s))` : "";
+  out.push(`${r.wiki}: ${t.staleLines} stale status line(s)${unconfirmed}, ${t.toCheck} linking page(s) to check, ${t.changedPages} changed page(s) in the 14 days to ${day(r.asOfMs)}`);
   const row = (p: Json) => `  ${p.relPath} — ${p.staleLines} stale line(s), ${p.toCheck} to check (last change ${day(p.lastChangeMs)})`;
   const groups: [string, (p: Json) => boolean][] = [
     ["uncommitted", (p) => p.changed && p.dirty],
@@ -204,7 +236,7 @@ export function formatSummary(r: Json): string[] {
  */
 export async function runWikiStale(
   argv: readonly string[],
-  deps: { fetchJson?: FetchJson; env?: Record<string, string | undefined>; deadlineMs?: number } = {},
+  deps: { fetchJson?: FetchJson; postSse?: PostSse; env?: Record<string, string | undefined>; deadlineMs?: number } = {},
 ): Promise<string[]> {
   const { args, errors } = parseStaleArgs(argv);
   const notice = (text: string) => (args.json ? JSON.stringify({ notice: text }) : text);
@@ -228,8 +260,9 @@ export async function runWikiStale(
     const q = new URLSearchParams({ wiki: args.wiki!, ...(args.asOf ? { asOf: args.asOf } : {}), ...extra });
     return `${base}/api/wiki/stale?${q}`;
   };
+  const postSse: PostSse = deps.postSse ?? defaultPostSse;
   const out: string[] = [];
-  const deadlineMs = deps.deadlineMs ?? RUN_DEADLINE_MS;
+  const deadlineMs = deps.deadlineMs ?? (args.check ? CHECK_RUN_DEADLINE_MS : RUN_DEADLINE_MS);
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<"deadline">((resolve) => {
@@ -296,6 +329,7 @@ export async function runWikiStale(
         try {
           const r = await ask({ page }, isPageReport, `page ${page}`);
           if (r && !args.json) out.push(...formatPageReport(r), "");
+          if (r && args.check && !readonly && r.buckets && !late) await check(r.page.relPath);
         } catch (err) {
           out.push(notice(`wiki-stale: unexpected answer from ${base} for page ${page}: ${err instanceof Error ? err.message : String(err)}`));
         }
@@ -303,6 +337,7 @@ export async function runWikiStale(
     } else if (!args.session) {
       const r = await ask({}, isSummary, "the summary");
       if (r && !args.json) out.push(...formatSummary(r));
+      if (args.check && !readonly) out.push(notice("check: name the pages to check with --pages or --session"));
     }
   } catch (err) {
     out.push(notice(`wiki-stale: ${err instanceof Error ? err.message : String(err)}`));
@@ -310,8 +345,83 @@ export async function runWikiStale(
     clearTimeout(timer);
   }
   if (readonly) out.push(notice(`check unavailable: readonly ${readonly}`));
-  else if (args.check) out.push(notice("check: the model checks arrive with PR 2a — these are the free checks only"));
   return out;
+
+  /** Check one changed page and print each verdict as it arrives. */
+  async function check(page: string): Promise<void> {
+    const label = (rel: unknown) => (typeof rel === "string" ? rel : "?");
+    try {
+      const got = await Promise.race([
+        postSse(`${base}/api/wiki/stale/check`, { wiki: args.wiki, page, ...(args.asOf ? { asOf: args.asOf } : {}) }, abort.signal),
+        expired,
+      ]);
+      if (got === "deadline") throw new Error("deadline");
+      if (!got.events) {
+        if (got.body?.readonly) readonly = got.body.readonly === "root" || /WIKI_READONLY_ROOTS/.test(String(got.body.error)) ? "wiki" : "instance";
+        if (args.json && got.body) out.push(JSON.stringify(got.body));
+        if (!readonly) out.push(notice(`wiki-stale: check ${page}: ${got.body?.error ?? `HTTP ${got.status}`}`));
+        return;
+      }
+      if (!args.json) out.push(`  check ${page}:`);
+      for await (const e of got.events) {
+        if (args.json) {
+          out.push(JSON.stringify({ event: e.event, ...e.data }));
+          continue;
+        }
+        const d = e.data;
+        if (e.event === "start") out.push(`    ${d.toCheck} to check: ${d.cached} cached, ${d.toCall} model call(s)${d.left ? `, ${d.left} left for another Check` : ""}`);
+        else if (e.event === "verdict") out.push(`    ${label(d.relPath)} ${verdictTag(d)}${d.cached ? " (cached)" : ""}${isObj(d.edit) ? ` — edit: «${cap(String(d.edit.old), 80)}» → «${cap(String(d.edit.new), 80)}»` : ""}`);
+        else if (e.event === "error") out.push(`    ${label(d.relPath)} [error: ${cap(String(d.message ?? ""), 140)}]`);
+        else if (e.event === "done") out.push(`    done: ${d.calls} call(s), ${d.verdicts} verdict(s), ${d.errors} error(s)`);
+        else if (e.event === "app_error") out.push(notice(`wiki-stale: check ${page}: ${String(d.message ?? "failed")}`));
+      }
+      out.push("");
+    } catch (err) {
+      if (abort.signal.aborted) {
+        late = true;
+        out.push(notice(`wiki-stale: check ${page} did not finish in ${deadlineMs / 1000} s`));
+      } else out.push(notice(`wiki-stale: check ${page}: ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+}
+
+/** The real POST: JSON refusals as `body`, a `text/event-stream` as events. */
+const defaultPostSse: PostSse = async (url, body, signal) => {
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "text/event-stream" }, body: JSON.stringify(body), signal });
+  if (!(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
+    const text = await res.text();
+    try {
+      return { status: res.status, body: JSON.parse(text) as Json };
+    } catch {
+      return { status: res.status, body: { error: `unexpected answer (not JSON) — HTTP ${res.status}` } };
+    }
+  }
+  return { status: res.status, events: readSse(res.body!) };
+};
+
+/** Parse a `text/event-stream` body into events (`event:` + one `data:` line each). */
+export async function* readSse(body: ReadableStream<Uint8Array>): AsyncIterable<SseEvent> {
+  const decoder = new TextDecoder();
+  let buf = "";
+  for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+    buf += decoder.decode(chunk, { stream: true });
+    for (let i = buf.indexOf("\n\n"); i >= 0; i = buf.indexOf("\n\n")) {
+      const block = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      let event = "message";
+      let data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      try {
+        yield { event, data: JSON.parse(data) as Json };
+      } catch {
+        // a malformed frame is skipped
+      }
+    }
+  }
 }
 
 if (import.meta.main) {

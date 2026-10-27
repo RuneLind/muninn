@@ -29,6 +29,18 @@ describe("src/index.ts: retention cleanup wiring", () => {
     expect(close).toBeGreaterThan(awaited);
   });
 
+  test("the Stale check's confirm loop starts beside the cleanup at top level and is stopped and awaited before the pool closes (D16)", async () => {
+    const text = await readFile(INDEX, "utf8");
+    expect(text).toMatch(/^const staleConfirmWikis = startStaleConfirmLoop\(config\);$/m);
+    expect(text.indexOf("startStaleConfirmLoop(config)")).toBeGreaterThan(text.indexOf("startRetentionCleanup(config)"));
+    const shutdown = text.indexOf("async function shutdown()");
+    const stop = text.indexOf("const staleConfirmStopped = stopStaleConfirmLoop()", shutdown);
+    const awaited = text.indexOf("await staleConfirmStopped;", shutdown);
+    expect(stop).toBeGreaterThan(shutdown);
+    expect(awaited).toBeGreaterThan(stop);
+    expect(text.indexOf("await closeDb(", shutdown)).toBeGreaterThan(awaited);
+  });
+
   test("shutdown closes the pool with a timeout, so a statement blocked on a lock cannot hold the exit", async () => {
     const text = await readFile(INDEX, "utf8");
     const shutdown = text.indexOf("async function shutdown()");

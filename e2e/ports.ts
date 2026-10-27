@@ -143,6 +143,12 @@ export const E2E_PORTS = {
   // Reading themes: the palette picker, the no-flash init and mermaid under a
   // palette, on a muninn with a temp `WIKI_EXTRA` wiki.
   "theme-palettes": 3172,
+  // The reader's STALE tab (stale check PR 2a): a temp git wiki, a throwaway
+  // bot whose Haiku router is pointed at a fake Anthropic Messages API, and a
+  // second, read-only instance on which the tab must be hidden (D25).
+  "wiki-stale-tab": 3173,
+  "wiki-stale-tab/readonly": 3174,
+  "wiki-stale-tab/fake": 3175,
   // The reader's provenance strip and the chain it opens, end to end. ONE fake
   // `node:http` server plays claude-usage's `GET /api/sessions-by-id` and
   // `GET /api/merges` — pricing one of the fixture's two sessions and OMITTING
