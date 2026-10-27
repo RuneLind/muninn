@@ -28,7 +28,7 @@ services:
       - "${DASHBOARD_PORT:-3010}:3000"
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://muninn:muninn@postgres:5432/muninn
+      DATABASE_URL: postgresql://muninn:${POSTGRES_PASSWORD:-muninn}@postgres:5432/muninn
       DASHBOARD_PORT: "3000"  # Override .env inside container — host port mapped via ports above
       # The container's network is the trust boundary — bind 0.0.0.0 inside so
       # the Docker port forward can reach the listener. Without this the

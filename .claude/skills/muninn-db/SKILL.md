@@ -39,7 +39,7 @@ docker exec muninn-postgres psql -U muninn -d muninn -x -c "SELECT * FROM users 
 | Internal port | `5432` |
 | Image | `pgvector/pgvector:pg17` |
 
-The app connects via `DATABASE_URL=postgresql://muninn:muninn@127.0.0.1:5435/muninn`.
+The app connects via `DATABASE_URL=postgresql://muninn:muninn@127.0.0.1:5435/muninn` (default password; see `POSTGRES_PASSWORD` in `.env.example`).
 
 For IDE database tools (IntelliJ, DataGrip, etc.), use JDBC URL: `jdbc:postgresql://127.0.0.1:5435/muninn`
 
