@@ -162,7 +162,7 @@ export function themeToggleScript(): string {
       menu.addEventListener('click', function(e) {
         if (e.target.closest('[data-theme-lab]')) {
           closeMenu(false);
-          if (window.__themeLabOpen) window.__themeLabOpen();
+          if (window.__themeLabOpen) window.__themeLabOpen(true);
           return;
         }
         var item = e.target.closest('[data-theme-choice]');

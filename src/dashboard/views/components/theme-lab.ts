@@ -157,6 +157,8 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
     function fmt(v) { return String(Math.round(v * 100) / 100); }
     function render() {
       if (!panel) return;
+      // innerHTML replaces every control: put focus back on the one that had it.
+      var a = document.activeElement, keep = a && panel.contains(a) ? (a.getAttribute('data-key') ? '[data-key="' + a.getAttribute('data-key') + '"]' : a.getAttribute('data-lab') ? '[data-lab="' + a.getAttribute('data-lab') + '"]' : null) : null;
       var minimized = !!load().min;
       panel.classList.toggle('min', minimized);
       var html = '<div class="theme-lab-head"><span class="theme-lab-title">⚗ Theme lab — ' + (LABELS[choice] || choice) + '</span>'
@@ -174,6 +176,8 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
         + '<div class="theme-lab-actions"><button type="button" data-lab="reset">Reset</button><button type="button" class="primary" data-lab="copy">Copy tokens</button></div>'
         + '<div class="theme-lab-status" id="themeLabStatus" role="status"></div></div>';
       panel.innerHTML = html;
+      var back = keep && panel.querySelector(keep);
+      if (back) back.focus();
     }
     function status(msg) { var el = document.getElementById('themeLabStatus'); if (el) el.textContent = msg; }
     function exportText() {
@@ -182,7 +186,8 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
         + ', body L' + fmt(s.textL) + ' S' + fmt(s.textS) + ', lift ' + fmt(s.strongLift) + ' ' + s.strongWeight + ', chip ' + fmt(s.chipLift) + ' edge ' + fmt(s.chipEdge) + ' %. Re-measure the contrast comments before merging.';
       return labExport(merged(), ORDER[choice] || [], REQUIRED, labChangedKeys(ref, derived()), header);
     }
-    function openLab() {
+    // focus: opened by the reader (◐ menu), not re-opened by a page load.
+    function openLab(focus) {
       save({ open: true });
       if (!panel) {
         if (!document.getElementById('themeLabCss')) {
@@ -228,6 +233,8 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
       }
       begin();
       render();
+      // The first slider, or ▴ when the panel is minimized and its sliders hidden.
+      if (focus === true) { var first = panel.querySelector(load().min ? '[data-lab="min"]' : 'input[data-key]'); if (first) first.focus(); }
     }
     function closeLab() {
       save({ open: false });
@@ -242,8 +249,8 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
     // Under System an OS scheme flip changes the reference without touching an attribute.
     if (scheme && scheme.addEventListener) scheme.addEventListener('change', follow);
     if (load().open) {
-      if (document.body) openLab();
-      else document.addEventListener('DOMContentLoaded', openLab);
+      if (document.body) openLab(false);
+      else document.addEventListener('DOMContentLoaded', function() { openLab(false); });
     }
   })();`;
 }

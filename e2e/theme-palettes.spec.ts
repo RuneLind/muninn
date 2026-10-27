@@ -763,6 +763,27 @@ test.describe("The theme lab", () => {
     expect(saved.states.reading.bgL).toBe(5);
   });
 
+  // Fix round 1 (PR #755, F5): opening from the keyboard left focus on <body>,
+  // and every re-render (minimize, reset) dropped focus out of the panel.
+  test("opened from the keyboard, focus lands in the lab and survives its re-renders", async ({ page }) => {
+    await storeChoice(page, "reading");
+    await page.goto(BASE + "/");
+    await page.locator("#themeToggle").focus();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("End");
+    await expect(page.getByRole("menuitem", { name: /Theme lab/ })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator('#themeLab input[data-key="bgL"]')).toBeFocused();
+    await page.locator('#themeLab [data-lab="reset"]').focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator('#themeLab [data-lab="reset"]')).toBeFocused();
+    await page.locator('#themeLab [data-lab="min"]').focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator('#themeLab [data-lab="min"]')).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.locator('#themeLab [data-lab="close"]').click();
+  });
+
   // Fix round 1 (PR #755, F3): under System an OS scheme flip kept the other
   // scheme's overrides, and one saved state served both schemes.
   test("under System, an OS scheme flip starts over from that scheme and keeps each scheme's sliders", async ({ page }) => {

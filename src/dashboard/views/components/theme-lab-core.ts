@@ -42,9 +42,10 @@ export const LAB_LADDER: readonly string[] = ["--bg-page", "--bg-panel", "--bg-s
 
 export const LAB_WEIGHTS: readonly string[] = ["bolder", "600", "700", "800"];
 
-/** `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` (comma or space syntax) → channels; anything else → null. */
+/** `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` (comma or space syntax), `transparent` → channels; anything else → null. */
 export function labParse(c: string): Rgba | null {
   const s = (c || "").trim().toLowerCase();
+  if (s === "transparent") return [0, 0, 0, 0];
   const hex = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/);
   if (hex) {
     const h = hex[1]!.length === 3 ? hex[1]!.split("").map((x) => x + x).join("") : hex[1]!;

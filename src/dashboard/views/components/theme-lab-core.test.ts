@@ -66,6 +66,14 @@ describe("theme lab derivation", () => {
     expect(out["--code-inline-border"]).toBe("rgba(255, 255, 255, 0.25)");
   });
 
+  // Fix round 1 (PR #755, F4): light's edge is `transparent`, which did not parse, so the slider did nothing.
+  test("on light, the Edge slider draws a black edge from transparent", () => {
+    const ref = themeRef("light");
+    expect(ref["--code-inline-border"]).toBe("transparent");
+    expect(labInitialState(ref).chipEdge).toBe(0);
+    expect(labDerive(ref, { ...labInitialState(ref), chipEdge: 20 })["--code-inline-border"]).toBe("rgba(0, 0, 0, 0.2)");
+  });
+
   test("the graph canvas follows the page only where it is the page", () => {
     const paper = themeRef("paper-light");
     expect(labDerive(paper, { ...labInitialState(paper), bgL: 90 })["--graph-canvas"]).toBeUndefined();
