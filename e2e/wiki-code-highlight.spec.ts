@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { colorParser, token } from "./contrast.ts";
 
 const PORT = e2ePort("wiki-code-highlight");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -634,22 +635,13 @@ test.describe("Wiki reader: a wikilink inside code is code", () => {
  * fill step both make a chip visible.
  */
 async function proseMarks(page: import("@playwright/test").Page, scope: string) {
-  return page.evaluate((sel: string) => {
+  const parse = await colorParser(page);
+  return page.evaluate(([sel, parse]) => {
     const root = document.querySelector(sel) as HTMLElement | null;
     const strong = root?.querySelector("strong") as HTMLElement | null;
     const code = root?.querySelector("code:not(pre > code)") as HTMLElement | null;
     const body = strong?.parentElement ?? null;
     if (!root || !strong || !code || !body) return null;
-    // Any CSS colour (a relative `oklch(from …)` computes to `oklch(…)`, not
-    // `rgb(…)`) to sRGB 0–255 plus alpha, through one canvas pixel.
-    const cv = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
-    const parse = (c: string): number[] => {
-      cv.clearRect(0, 0, 1, 1);
-      cv.fillStyle = c;
-      cv.fillRect(0, 0, 1, 1);
-      const [r, g, b, a] = cv.getImageData(0, 0, 1, 1).data;
-      return [r!, g!, b!, a! / 255];
-    };
     const lum = (c: number[]): number =>
       c.slice(0, 3)
         .map((v) => {
@@ -686,7 +678,7 @@ async function proseMarks(page: import("@playwright/test").Page, scope: string) 
       chipStep: Math.max(Math.abs(lstar(chip) - lstar(page)), Math.abs(lstar(edge) - lstar(page))),
       codeOnChip: ratio(parse(getComputedStyle(code).color), chip),
     };
-  }, scope);
+  }, [scope, parse] as const);
 }
 
 /**
@@ -698,16 +690,8 @@ async function proseMarks(page: import("@playwright/test").Page, scope: string) 
  * contrast >= 16) has nowhere to go and is skipped.
  */
 async function boldLifts(page: import("@playwright/test").Page, scope: string) {
-  return page.evaluate((sel: string) => {
-    // As in proseMarks: any CSS colour to sRGB 0–255 plus alpha via a canvas pixel.
-    const cv = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
-    const parse = (c: string): number[] => {
-      cv.clearRect(0, 0, 1, 1);
-      cv.fillStyle = c;
-      cv.fillRect(0, 0, 1, 1);
-      const [r, g, b, a] = cv.getImageData(0, 0, 1, 1).data;
-      return [r!, g!, b!, a! / 255];
-    };
+  const parse = await colorParser(page);
+  return page.evaluate(([sel, parse]) => {
     const lin = (v: number) => {
       const s = v / 255;
       return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
@@ -756,7 +740,7 @@ async function boldLifts(page: import("@playwright/test").Page, scope: string) {
         hueDiff: hueDiff > 180 ? 360 - hueDiff : hueDiff,
       };
     });
-  }, scope);
+  }, [scope, parse] as const);
 }
 
 /**
@@ -954,6 +938,57 @@ test.describe("The other prose surfaces", () => {
     // Bold in the link, the quote (a fact-check claim heading is bold in a
     // blockquote) and the body all lift their own context.
     expect(unlifted(await boldLifts(page, "#prose-probe"))).toEqual([]);
+  });
+
+  test("without relative colour, bold keeps main's colour, dark", async ({ page }) => {
+    // A browser without relative colour still accepts the declaration (it
+    // holds var()) and computes it to `inherit`. Renaming the function to one
+    // no browser knows reproduces that: the @supports guard fails, and so
+    // would the declaration at computed-value time.
+    const unsupport = () =>
+      page.evaluate(() => {
+        document.documentElement.setAttribute("data-theme", "dark");
+        for (const st of Array.from(document.querySelectorAll("style"))) {
+          st.textContent = st.textContent!.replaceAll("oklch(from", "oklchx(from");
+        }
+      });
+    const boldColor = (sel: string) =>
+      page.evaluate((s) => getComputedStyle(document.querySelector(s) as HTMLElement).color, sel);
+
+    // Chat and the markdown prose styles gave bold --text-primary on main.
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () => typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function",
+    );
+    await unsupport();
+    await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.className = "web-content";
+      probe.id = "fallback-probe";
+      probe.innerHTML = "<p>Body with <strong>fbold</strong>.</p>";
+      document.body.appendChild(probe);
+    });
+    expect.soft(await boldColor("#fallback-probe strong")).toBe(await token(page, "--text-primary"));
+
+    await page.goto(`${BASE}/research`);
+    await unsupport();
+    await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.className = "answer-body";
+      probe.id = "fallback-probe";
+      probe.innerHTML = "<p>Body with <strong>fbold</strong>.</p>";
+      document.getElementById("turnsWrap")!.appendChild(probe);
+    });
+    expect.soft(await boldColor("#fallback-probe strong")).toBe(await token(page, "--text-primary"));
+
+    // The wiki article gave bold its context's colour on main: inherit is right.
+    await openPage(page);
+    await unsupport();
+    const wiki = await page.evaluate(() => {
+      const strong = document.querySelector(".wiki-article strong") as HTMLElement;
+      return { bold: getComputedStyle(strong).color, ctx: getComputedStyle(strong.parentElement!).color };
+    });
+    expect(wiki.bold).toBe(wiki.ctx);
   });
 
   test("chat answer: bold and code inside a link keep the link colour, dark", async ({ page }) => {

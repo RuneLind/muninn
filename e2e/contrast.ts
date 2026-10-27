@@ -6,7 +6,36 @@
  * copy: the rule the rail is judged against is one rule, and three copies is
  * three places for it to drift while every spec keeps passing.
  */
-import type { Locator, Page } from "@playwright/test";
+import type { JSHandle, Locator, Page } from "@playwright/test";
+
+/** A computed CSS colour as sRGB 0–255 channels plus a 0–1 alpha. */
+type Rgba = [number, number, number, number];
+
+/**
+ * A function, living in the page, that reads ANY computed colour as sRGB.
+ *
+ * `rgb()`/`rgba()` and `color(srgb …)` are read exactly. Every other colour
+ * space goes through one canvas pixel, so the browser does the conversion: a
+ * relative colour such as bold's `oklch(from currentColor …)` computes to
+ * `oklch(…)`, whose numbers read as RGB channels are near-black.
+ *
+ * Pass the handle into an `evaluate` to share one parser across specs.
+ */
+export function colorParser(page: Page): Promise<JSHandle<(c: string) => Rgba>> {
+  return page.evaluateHandle(() => {
+    const cv = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+    return (c: string): Rgba => {
+      const n = c.match(/[\d.]+/g)?.map(Number) ?? [];
+      if (/^rgba?\(/.test(c)) return [n[0]!, n[1]!, n[2]!, n.length > 3 ? n[3]! : 1];
+      if (c.startsWith("color(srgb ")) return [n[0]! * 255, n[1]! * 255, n[2]! * 255, n.length > 3 ? n[3]! : 1];
+      cv.clearRect(0, 0, 1, 1);
+      cv.fillStyle = c;
+      cv.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = cv.getImageData(0, 0, 1, 1).data;
+      return [r!, g!, b!, a! / 255];
+    };
+  });
+}
 
 /**
  * The contrast of an element's text against the nearest ancestor that really
@@ -17,9 +46,10 @@ import type { Locator, Page } from "@playwright/test";
  * token that reads fine on one surface is unreadable on the next.
  */
 export async function contrastOf(locator: Locator): Promise<number> {
-  return locator.evaluate((el) => {
+  const parse = await colorParser(locator.page());
+  return locator.evaluate((el, parse) => {
     const lum = (c: string): number => {
-      const [r, g, b] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number) as [number, number, number];
+      const [r, g, b] = parse(c);
       const ch = (v: number) => {
         const s = v / 255;
         return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
@@ -30,7 +60,7 @@ export async function contrastOf(locator: Locator): Promise<number> {
     let bg = "rgba(0, 0, 0, 0)";
     while (node) {
       const c = getComputedStyle(node).backgroundColor;
-      if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) {
+      if (c && parse(c)[3] > 0) {
         bg = c;
         break;
       }
@@ -39,7 +69,7 @@ export async function contrastOf(locator: Locator): Promise<number> {
     const a = lum(getComputedStyle(el).color);
     const b = lum(bg);
     return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  });
+  }, parse);
 }
 
 /**
@@ -60,13 +90,11 @@ export async function paintedContrast(
   locator: Locator,
   opts?: { withOpacity?: boolean; fill?: boolean },
 ): Promise<number> {
-  return locator.evaluate((el, [withOpacity, fill]) => {
-    // A color-mix() computes to `color(srgb r g b / a)` with 0–1 channels,
-    // not `rgb()`; read as 0–255 channels it is near-black.
+  const parse = await colorParser(locator.page());
+  return locator.evaluate((el, [withOpacity, fill, parse]) => {
     const rgba = (c: string) => {
-      const n = c.match(/[\d.]+/g)!.map(Number);
-      const k = c.startsWith("color(srgb") ? 255 : 1;
-      return { r: n[0]! * k, g: n[1]! * k, b: n[2]! * k, a: n.length > 3 ? n[3]! : 1 };
+      const [r, g, b, a] = parse(c);
+      return { r, g, b, a };
     };
     const layers: ReturnType<typeof rgba>[] = [];
     const behind = fill ? (el as HTMLElement).parentElement : (el as HTMLElement);
@@ -100,7 +128,7 @@ export async function paintedContrast(
     const a = lum(fg);
     const b = lum(bg);
     return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  }, [opts?.withOpacity ?? false, opts?.fill ?? false] as const);
+  }, [opts?.withOpacity ?? false, opts?.fill ?? false, parse] as const);
 }
 
 /** A token's computed value, read off a probe on `body`: what a rule written
