@@ -755,6 +755,8 @@ async function boldLifts(page: import("@playwright/test").Page, scope: string) {
         weightStep: Number(getComputedStyle(el).fontWeight) - Number(getComputedStyle(el.parentElement!).fontWeight),
         lead: ratio(own, bg) / ratio(ctx, bg),
         hueDiff: hueDiff > 180 ? 360 - hueDiff : hueDiff,
+        ctxC: chroma,
+        ownC: Math.hypot(a2!, b2!),
       };
     });
   }, [scope, parse] as const);
@@ -766,9 +768,10 @@ async function boldLifts(page: import("@playwright/test").Page, scope: string) {
  * a Historic body, AnnotatedCode notes) yet carry as much ink as body bold,
  * which undoes the dimming. "Ink" is OKLab lightness toward white on dark and
  * toward black on light, compared on the colours themselves because each
- * context may paint its own background. No bold may read fainter than its
- * context, and where colour has no room (a white heading on dark), weight
- * must carry the difference.
+ * context may paint its own background. Bold must move lightness by most of
+ * its lift and keep most of its context's chroma. No bold may read fainter
+ * than its context, and where colour has no room (a white heading on dark),
+ * weight must carry the difference.
  */
 function unlifted(rows: Awaited<ReturnType<typeof boldLifts>>, bodyBold?: string) {
   const ref = bodyBold ? rows.find((r) => r.text === bodyBold) : undefined;
@@ -779,12 +782,19 @@ function unlifted(rows: Awaited<ReturnType<typeof boldLifts>>, bodyBold?: string
       (r) =>
         r.lead < 0.99 ||
         (!r.atLimit && (r.lead < 1.1 || r.hueDiff > 15)) ||
+        // The lift's size and the context's chroma, measured 2026-10-27: the
+        // smallest lift is 0.071 (an amber title, clipped to sRGB), and a link's
+        // blue keeps 0.65x its chroma once gamut-mapped lighter.
+        (!r.atLimit && (Math.abs(r.ownL - r.ctxL) < 0.06 || (r.ctxC >= 0.03 && r.ownC < 0.6 * r.ctxC))) ||
         (r.atLimit && r.weightStep < 200) ||
         (ref !== undefined &&
           ink(r.ctxL, r.dark) < ink(ref.ctxL, ref.dark) - 0.03 &&
           ink(r.ownL, r.dark) > ink(ref.ownL, ref.dark) - 0.01),
     )
-    .map((r) => `${r.text} (lead ${r.lead.toFixed(2)}, hue ${r.hueDiff.toFixed(0)}°, L ${r.ctxL.toFixed(2)}→${r.ownL.toFixed(2)}, +${r.weightStep})`);
+    .map(
+      (r) =>
+        `${r.text} (lead ${r.lead.toFixed(2)}, hue ${r.hueDiff.toFixed(0)}°, L ${r.ctxL.toFixed(2)}→${r.ownL.toFixed(2)}, C ${r.ctxC.toFixed(3)}→${r.ownC.toFixed(3)}, +${r.weightStep})`,
+    );
 }
 
 test.describe("Bold and inline code stand apart from the body", () => {
