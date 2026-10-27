@@ -25,8 +25,8 @@ import { newestEditAtOrBefore, type TouchRecord } from "./git-dates.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { stateExemptLines } from "./lint-state.ts";
 import { normalizeRelPath } from "./rel-path.ts";
-import { WIKILINK_RE } from "./wikilinks.ts";
-import type { PlanStatus, WikiIndex, WikiPageMeta } from "./store.ts";
+import { extractWikilinks, WIKILINK_RE, wikilinkTarget } from "./wikilinks.ts";
+import { extractMarkdownLinks, resolveMarkdownTargets, type PlanStatus, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 
 export const STALE_LINT_CHECKS = ["status-line"] as const;
@@ -48,21 +48,26 @@ const L = "(?<![\\p{L}\\p{N}_])";
 const R = "(?![\\p{L}\\p{N}_])";
 const words = (xs: string) => new RegExp(`${L}(?:${xs})${R}`, "iu");
 
+/** A negation (F7a): the word `ikke`/`not`, any whitespace run, at most one
+ *  adverb (`yet`, `ennå`, `enda`, `still`, `fortsatt`) and whitespace again. */
+const NEGATION = `${L}(?:ikke|not)(?:\\s+(?:yet|ennå|enda|still|fortsatt))?\\s+`;
+
 /**
  * The status words (D18): the measured union of English and Norwegian, read on
- * every wiki whatever its `language`. `merget`/`merged` count as shipped
- * unless `ikke`/`not` stands right before them, which is in-flight.
+ * every wiki whatever its `language`. A shipped word right after a
+ * {@link NEGATION} is not shipped; a negated `merget`/`merged` is in-flight,
+ * any other negated shipped word (`not yet shipped`) names no status.
  */
 export const STATUS_WORDS: readonly (readonly [StatusKind, RegExp])[] = [
   ["proposed", words("proposed|forslag|foreslått|utkast|draft")],
-  ["in-flight", words("in[- ]flight|pågår|i gang|påbegynt|under arbeid|ikke merget|not merged|open PR|åpen PR")],
-  ["shipped", new RegExp(`${L}(?:shipped|levert|landet|ferdig|done)${R}|(?<!(?:ikke|not)\\s)${L}(?:merget|merged)${R}`, "iu")],
+  ["in-flight", new RegExp(`${L}(?:in[- ]flight|pågår|i gang|påbegynt|under arbeid|open PRs?|(?:åpen|åpne) PR(?:-er)?)${R}|${NEGATION}(?:merget|merged)${R}`, "iu")],
+  ["shipped", new RegExp(`(?<!${NEGATION})${L}(?:shipped|levert|landet|ferdig|done|merget|merged)${R}`, "iu")],
   ["blocked", words("blocked|blokkert")],
 ];
 /** The prefilter: a plain, edge-free alternation over every status word's
  *  stem — a superset of {@link STATUS_WORDS}, and ~8× cheaper per line than
  *  the edged `u` regexes, which measured 12 ms over mimir's 282 link lines. */
-const STATUS_PROBE = /proposed|forslag|foreslått|utkast|draft|flight|pågår|i gang|påbegynt|under arbeid|merget|merged|open pr|åpen pr|shipped|levert|landet|ferdig|done|blocked|blokkert/i;
+const STATUS_PROBE = /proposed|forslag|foreslått|utkast|draft|flight|pågår|i gang|påbegynt|under arbeid|merget|merged|open pr|åpen pr|åpne pr|shipped|levert|landet|ferdig|done|blocked|blokkert/i;
 
 /** The status words a text names, in {@link STATUS_WORDS} order. */
 export function statusWordsIn(text: string): StatusKind[] {
@@ -114,10 +119,7 @@ function lineSegments(lineText: string, line: number, sourceText: string): Statu
     if (seg.includes("](")) return;
     const said = statusWordsIn(seg);
     if (said.length === 0) return;
-    let target = m[1]!.replace(/\\/g, "").trim();
-    const hash = target.indexOf("#");
-    if (hash === 0) return;
-    if (hash > 0) target = target.slice(0, hash).trim();
+    const target = wikilinkTarget(m[1]!);
     if (target) out.push({ line, target, said, text: sourceText.trim().slice(0, TEXT_CAP) });
   });
   return out;
@@ -362,10 +364,15 @@ export interface StaleBuckets {
   linking: LinkingPage[];
 }
 
-const POINTER_HEADING = /^#{1,6}\s*(?:sources|see also|related|references|kilder|se også|relatert|lenker)(?![\p{L}\p{N}])/iu;
+/** A pointer heading's name (D5), matched as a prefix word: «Related
+ *  concepts» is one. A list of its own, not `SYSTEM_MAP_LINK_HEADINGS_DEFAULT`:
+ *  that names the sections a hub's system map reads, by exact name. */
+const POINTER_HEADING = /^(?:sources|see also|related|relaterte|references|kilder|se også|relatert|lenker)(?![\p{L}\p{N}])/iu;
 const BARE_ITEM = /^[-*+]\s+\[\[[^\]\n]+\]\](.*)$/;
 const BARE_ITEM_TAIL_MAX = 30;
-const HEADING = /^#{1,6}\s/;
+/** A heading, as `linkSections` (`lint-system-map.ts`) reads one: up to
+ *  three spaces of indent; group 1 is its level, group 2 its text. */
+const HEADING = /^ {0,3}(#{1,6})\s+(.*)$/;
 
 /**
  * A `D.M` date (F2): day 1–31 and month 1–12, with no digit, `.digit`, letter
@@ -424,29 +431,17 @@ export function passageClaim(line: string): string | undefined {
   return undefined;
 }
 
-/** Does `line` link to `targetKey` (a normalized relPath) — by wikilink or by
- *  a relative markdown link from `fromRelPath`? */
+/** Does `line` link to `targetKey` (a normalized relPath)? Read as the
+ *  backlink graph reads links (F8): `extractWikilinks` resolved through the
+ *  index, and `extractMarkdownLinks` (titles dropped, images skipped,
+ *  `decodeURIComponent`) joined from `fromRelPath` by `resolveMarkdownTargets`,
+ *  which drops a link that escapes the root. */
 function linksTo(line: string, targetKey: string, fromRelPath: string, index: Pick<WikiIndex, "resolve">): boolean {
-  for (const m of line.matchAll(WIKILINK_RE)) {
-    let t = m[1]!.replace(/\\/g, "").trim();
-    const hash = t.indexOf("#");
-    if (hash === 0) continue;
-    if (hash > 0) t = t.slice(0, hash).trim();
-    const meta = t ? index.resolve(t) : undefined;
+  for (const t of extractWikilinks(line)) {
+    const meta = index.resolve(t);
     if (meta && normalizeRelPath(meta.relPath) === targetKey) return true;
   }
-  for (const m of line.matchAll(/\]\(([^)\s]+)\)/g)) {
-    const dest = m[1]!.split("#")[0]!;
-    if (!dest || /^[a-z][a-z0-9+.-]*:/i.test(dest) || dest.startsWith("/")) continue;
-    let decoded = dest;
-    try {
-      decoded = decodeURI(dest);
-    } catch {
-      /* keep as written */
-    }
-    if (normalizeRelPath(path.posix.join(path.posix.dirname(fromRelPath), decoded)) === targetKey) return true;
-  }
-  return false;
+  return resolveMarkdownTargets(fromRelPath, extractMarkdownLinks(line)).includes(targetKey);
 }
 
 /**
@@ -492,11 +487,15 @@ type ParsedPage = ReturnType<typeof stateExemptLines>;
 function linkPassages(parsed: ParsedPage, fromRelPath: string, targetKey: string, index: Pick<WikiIndex, "resolve">) {
   const { lines, body, exempt } = parsed;
   const out: { line: number; text: string; inFrontmatter: boolean; pointerHeading: boolean; claim?: string }[] = [];
-  let pointerHeading = false;
+  // The level of the pointer heading the line sits under, 0 for none: a
+  // deeper heading keeps it, one of the same or a higher level ends it (F7c).
+  let pointerLevel = 0;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!;
     const inFrontmatter = body > 0 && i > 0 && i < body - 1;
-    if (i >= body && !exempt.has(i) && HEADING.test(l)) pointerHeading = POINTER_HEADING.test(l);
+    const h = i >= body && !exempt.has(i) ? HEADING.exec(l) : null;
+    if (h && !(pointerLevel && h[1]!.length > pointerLevel)) pointerLevel = POINTER_HEADING.test(h[2]!) ? h[1]!.length : 0;
+    const pointerHeading = pointerLevel > 0;
     if (exempt.has(i) || (!l.includes("](") && !l.includes("[["))) continue;
     if (body > 0 && (i === 0 || i === body - 1)) continue;
     if (!linksTo(maskLineCodeSpans(l), targetKey, fromRelPath, index)) continue;
@@ -741,21 +740,29 @@ export function movedWith(index: WikiIndex, relPath: string, nowMs: number = Dat
 
 // ── The route's two answers (`GET /api/wiki/stale`) ────────────────────────
 
+/** A `YYYY-MM-DD` that names a real calendar day (`2026-02-30` does not). */
+const realDay = (ymd: string) => {
+  const ms = Date.parse(`${ymd}T00:00:00Z`);
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === ymd;
+};
+
 /**
  * `asOf` as the route and the script take it: `YYYY-MM-DD` is the END of that
- * UTC day (a commit made on it counts), an ISO instant is itself, digits are
- * epoch ms. Absent ⇒ undefined; unreadable ⇒ null.
+ * UTC day (a commit made on it counts); an ISO instant is itself and must
+ * carry its zone (`Z` or `±HH:MM`), since a zone-less one would be read in the
+ * server's local time; exactly 13 digits are epoch ms (2001–2286), so an
+ * epoch in seconds is refused rather than read as 1970 (F9a). A day that is
+ * not on the calendar is refused too. Absent ⇒ undefined; unreadable ⇒ null.
  */
 export function parseStaleAsOf(raw: string | undefined): number | undefined | null {
   const v = (raw ?? "").trim();
   if (!v) return undefined;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
-    const ms = Date.parse(`${v}T23:59:59.999Z`);
-    return Number.isFinite(ms) ? ms : null;
-  }
-  if (/^\d{10,}$/.test(v)) return Number(v);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return realDay(v) ? Date.parse(`${v}T23:59:59.999Z`) : null;
+  if (/^\d+$/.test(v)) return v.length === 13 ? Number(v) : null;
+  const m = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.exec(v);
+  if (!m || !realDay(m[1]!)) return null;
   const ms = Date.parse(v);
-  return Number.isFinite(ms) && /^\d{4}-\d{2}-\d{2}T/.test(v) ? ms : null;
+  return Number.isFinite(ms) ? ms : null;
 }
 
 export interface StaleSummaryRow {

@@ -5,7 +5,7 @@
  * pins the route's shapes, its refusals and the tool-half placement.
  */
 
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, setSystemTime } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -168,8 +168,22 @@ describe("GET /api/wiki/stale", () => {
   test("the page payload carries movedWith rows", async () => {
     const res = await app.request("/api/wiki/page?wiki=stalewiki&relPath=hub.md");
     const body = (await res.json()) as Record<string, any>;
-    // No asOf on the page route: «now» is the real clock, so only the recent commit counts.
+    // «Now» is the index's build time, so only the recent commit counts.
     expect(body.movedWith.map((m: any) => [m.relPath, m.movedN, m.title])).toEqual([["notes/side.md", 1, "Side"]]);
+  });
+
+  test("the page payload's Moved with answers as of the index's build, as the stale route does (F9b)", async () => {
+    await getWikiIndex({ root });
+    // A clock that moved after the build (here: back 30 days) does not move «now».
+    setSystemTime(new Date(Date.now() - 30 * 86_400_000));
+    try {
+      const page = (await (await app.request("/api/wiki/page?wiki=stalewiki&relPath=hub.md")).json()) as Record<string, any>;
+      const { body: stale } = await get("wiki=stalewiki&page=hub.md");
+      expect(page.movedWith.map((m: any) => m.relPath)).toEqual(["notes/side.md"]);
+      expect(page.movedWith.map((m: any) => [m.relPath, m.movedN])).toEqual(stale.movedWith.map((m: any) => [m.relPath, m.n]));
+    } finally {
+      setSystemTime();
+    }
   });
 
   test("it is a tool-half route, so MUNINN_PROFILE=nais drops it", () => {

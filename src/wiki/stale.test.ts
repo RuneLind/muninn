@@ -43,6 +43,23 @@ describe("status words (D18)", () => {
     expect(statusWordsIn("not merged")).toEqual(["in-flight"]);
     expect(statusWordsIn("merged into main")).toEqual(["shipped"]);
   });
+
+  test("a negation reads through a whitespace run and one adverb, and cancels every shipped word (F7a)", () => {
+    for (const t of ["not yet merged", "ikke  merget", "ikke ennå merget", "ikke enda merget", "still not merged", "not still merged", "ikke fortsatt merget"]) {
+      expect([t, statusWordsIn(t)]).toEqual([t, ["in-flight"]]);
+    }
+    for (const t of ["not yet shipped", "ikke levert", "ikke ennå ferdig", "not done"]) expect([t, statusWordsIn(t)]).toEqual([t, []]);
+    // A negation word ending a longer word, or two adverbs, negates nothing.
+    expect(statusWordsIn("cannot merged")).toEqual(["shipped"]);
+    expect(statusWordsIn("not yet still merged")).toEqual(["shipped"]);
+  });
+
+  test("open PRs and åpne PR-er are in-flight (F7b)", () => {
+    for (const t of ["two open PRs", "åpne PR-er", "åpen PR-er", "åpne PR", "en åpen PR"]) expect([t, statusWordsIn(t)]).toEqual([t, ["in-flight"]]);
+    expect(statusWordsIn("open PRsx")).toEqual([]);
+    // The prefilter lets the plural through to the segment parse.
+    expect(statusLineCandidates("[[x]] har to åpne PR-er\n").map((c) => c.said)).toEqual([["in-flight"]]);
+  });
 });
 
 const fm = (extra = "") => `---\ntitle: Page\n${extra}---\n`;
@@ -271,6 +288,17 @@ describe("parseStaleAsOf", () => {
     expect(parseStaleAsOf("yesterday")).toBeNull();
     expect(parseStaleAsOf("2026-13-45")).toBeNull();
   });
+
+  test("an impossible date, an epoch in seconds and a zone-less instant are refused (F9a)", () => {
+    expect(parseStaleAsOf("2026-02-30")).toBeNull();
+    expect(parseStaleAsOf("2026-02-30T10:00:00Z")).toBeNull();
+    expect(parseStaleAsOf("1761400000")).toBeNull();
+    expect(parseStaleAsOf("99999999999999")).toBeNull();
+    expect(parseStaleAsOf("2026-10-25T10:00")).toBeNull();
+    expect(parseStaleAsOf("2026-10-25T10:00:00")).toBeNull();
+    expect(parseStaleAsOf("2026-10-25T10:00:00+02:00")).toBe(Date.parse("2026-10-25T08:00:00Z"));
+    expect(parseStaleAsOf("2024-02-29")).toBe(Date.parse("2024-02-29T23:59:59.999Z"));
+  });
 });
 
 // ── Against a real (temp, git-backed) index ────────────────────────────────
@@ -379,6 +407,70 @@ describe("the index, the buckets and Moved with on a temp wiki", () => {
     expect(r.changed).toBe(true);
     expect(r.hits).toHaveLength(1);
     expect(r.movedWith.map((m) => m.relPath)).toEqual(["plans/q.md"]);
+  });
+
+  test("teardown", async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+});
+
+describe("pointer headings and markdown links, as the backlink graph reads them (F7c-e, F8)", () => {
+  let root = "";
+  let index: WikiIndex;
+  const asOfMs = Date.parse("2026-06-20T23:59:59.999Z");
+  const long = "and its whole long description here";
+
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  const commitAt = async (iso: string, msg: string) => {
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "--date", iso, "-m", msg);
+  };
+
+  test("setup", async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-stale-edges-"));
+    await git(root, "init", "-q", "-b", "main");
+    await write("hub.md", page("Hub", "Body."));
+    await write("notes/x,y.md", page("XY", "Body."));
+    // F7c: a subheading stays under the pointer heading; a same-level one ends it.
+    await write("notes/subhead.md", page("Subhead", `## Sources\n\n### Plans\n\n- [[hub]] ${long}`));
+    await write("notes/reset.md", page("Reset", "## See also\n\n- [[x,y]]\n\n## Notes\n\nThe pin in [[hub]] landed on 23.05."));
+    // F7d: an indented heading is a heading.
+    await write("notes/indented.md", page("Indented", `Body.\n\n   ## See also\n\n- [[hub]] ${long}`));
+    // F7e: «Relaterte» is a pointer heading.
+    await write("notes/relaterte.md", page("Relaterte", `## Relaterte\n\n- [[hub]] ${long}`));
+    // F8: a titled markdown link counts, an image does not, `%2C` decodes.
+    await write("notes/titled.md", page("Titled", 'The pin in [Hub](../hub.md "the hub") landed on 23.05.'));
+    await write("notes/image.md", page("Image", "The fixtures live in [[hub]].\n\n![shot](../hub.md) taken 23.05."));
+    await write("notes/comma.md", page("Comma", "The pin in [XY](x%2Cy.md) landed on 23.05."));
+    await commitAt("2026-05-01T10:00:00Z", "seed");
+    await write("hub.md", page("Hub", "Body two."));
+    await write("notes/x,y.md", page("XY", "Body two."));
+    await commitAt("2026-06-18T10:00:00Z", "hub and xy");
+    index = await buildWikiIndex(root);
+  }, 30_000);
+
+  test("the buckets of the hub", async () => {
+    const b = await linkingBuckets(index, "hub.md", { asOfMs });
+    const by = Object.fromEntries(b!.linking.map((l) => [l.relPath, l.bucket]));
+    expect(by).toEqual({
+      "notes/subhead.md": "pointers",
+      "notes/reset.md": "toCheck",
+      "notes/indented.md": "pointers",
+      "notes/relaterte.md": "pointers",
+      "notes/titled.md": "toCheck",
+      "notes/image.md": "mentions",
+    });
+    const titled = b!.linking.find((l) => l.relPath === "notes/titled.md")!;
+    expect(titled.passages.map((p) => [p.line, p.claim])).toEqual([[5, "date"]]);
+  });
+
+  test("a %2C-escaped markdown link reaches its page", async () => {
+    const b = await linkingBuckets(index, "notes/x,y.md", { asOfMs });
+    const comma = b!.linking.find((l) => l.relPath === "notes/comma.md");
+    expect(comma?.bucket).toBe("toCheck");
   });
 
   test("teardown", async () => {

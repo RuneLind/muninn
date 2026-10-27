@@ -1680,7 +1680,7 @@ export function pagePrRefs(
  * dropped. Lowercasing mirrors the case-insensitive `resolve()` used for the
  * wikilink graph so both link kinds match pages the same way.
  */
-function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[] {
+export function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[] {
   const dir = path.posix.dirname(fromRelPath);
   const out: string[] = [];
   for (const t of targets) {

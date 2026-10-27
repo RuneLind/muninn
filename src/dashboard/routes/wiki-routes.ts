@@ -55,7 +55,7 @@ import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
 import { isReadonlyWikiRoot, isWikiReadonly, wikiNoEgressReason } from "../../wiki/readonly.ts";
-import { movedWith, parseStaleAsOf, staleSummary, stalePageReport } from "../../wiki/stale.ts";
+import { movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
 import { WORK_SESSION_FILE_CAP, workSessionsForSession } from "../../wiki/work-sessions.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
@@ -1768,8 +1768,9 @@ export function registerWikiReadRoutes(
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
       // MOVED WITH (D10, `stale.ts`): the pages committed with this one in
       // non-sweep commits over 28 days, off the index's one git walk — no git
-      // call here. `movedN` is the commit count; `[]` without git.
-      movedWith: movedWith(index, meta.relPath).flatMap((r) => {
+      // call here. `movedN` is the commit count; `[]` without git. «Now» is
+      // the index's build time (`staleNow`), as on `/api/wiki/stale` (F9b).
+      movedWith: movedWith(index, meta.relPath, staleNow(index)).flatMap((r) => {
         const m = index.resolveRelPath(r.relPath);
         return m ? [{ ...toListing(index, m), movedN: r.n }] : [];
       }),
@@ -2314,7 +2315,7 @@ export function registerWikiToolRoutes(
     );
     if (unknownWiki || !entry) return c.json({ error: "no wiki configured for that name" }, 404);
     const asOfMs = parseStaleAsOf(c.req.query("asOf"));
-    if (asOfMs === null) return c.json({ error: "asOf must be YYYY-MM-DD, an ISO instant or epoch ms" }, 400);
+    if (asOfMs === null) return c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms" }, 400);
     const index = await getWikiIndex({ root: entry.root });
     if (!index) return c.json({ error: "wiki directory not found" }, 503);
     const base = { wiki: entry.name, readonly: isWikiReadonly() || isReadonlyWikiRoot(entry.root) };

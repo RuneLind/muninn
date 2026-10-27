@@ -34,11 +34,19 @@ export const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
 export function extractWikilinks(content: string): string[] {
   const targets = new Set<string>();
   for (const m of content.matchAll(WIKILINK_RE)) {
-    let target = m[1]!.replace(/\\/g, "").trim();
-    const hash = target.indexOf("#");
-    if (hash === 0) continue; // bare [[#anchor]] — same-page, not a link
-    if (hash > 0) target = target.slice(0, hash).trim();
+    const target = wikilinkTarget(m[1]!);
     if (target) targets.add(target);
   }
   return [...targets];
+}
+
+/** One {@link WIKILINK_RE} capture as {@link extractWikilinks} reads it:
+ *  escapes and `#anchor` dropped; undefined for a bare `[[#anchor]]` (a
+ *  same-page reference) or an empty target. */
+export function wikilinkTarget(raw: string): string | undefined {
+  let target = raw.replace(/\\/g, "").trim();
+  const hash = target.indexOf("#");
+  if (hash === 0) return undefined;
+  if (hash > 0) target = target.slice(0, hash).trim();
+  return target || undefined;
 }
