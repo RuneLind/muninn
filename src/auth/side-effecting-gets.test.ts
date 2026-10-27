@@ -45,7 +45,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/models", "/indexing", "/agents", "/plans", "/jira", "/chat",
   ].map((p) => [p, PAGE] as const),
   ...[
-    "/api/live", "/api/ready", "/favicon.svg", "/favicon.ico", "/api/dashboard-build-hash",
+    "/api/live", "/api/ready", "/favicon.svg", "/favicon.ico", "/theme-lab.js", "/api/dashboard-build-hash",
     "/api/attention", "/api/openapi.json", "/api/bots", "/api/bots/config", "/api/stats",
     "/api/memories", "/api/memories/by-user", "/api/memories/user/:userId", "/api/goals",
     "/api/goals/:userId", "/api/tasks", "/api/scheduled-tasks/:userId", "/api/threads",

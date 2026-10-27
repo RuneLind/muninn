@@ -124,12 +124,16 @@ describe("MUNINN_PROFILE=nais route surface", () => {
     // hermetic paths: no DB, no network, no filesystem beyond the inlined
     // bundles.
     const answers: Record<string, number> = {};
-    for (const path of ["/api/live", "/", "/favicon.svg", "/favicon.ico", "/api/dashboard-build-hash"]) {
+    for (const path of ["/api/live", "/", "/favicon.svg", "/favicon.ico", "/theme-lab.js", "/api/dashboard-build-hash"]) {
       answers[path] = (await app.request(path)).status;
     }
     expect(answers).toEqual({
-      "/api/live": 200, "/": 200, "/favicon.svg": 200, "/favicon.ico": 200, "/api/dashboard-build-hash": 200,
+      "/api/live": 200, "/": 200, "/favicon.svg": 200, "/favicon.ico": 200, "/theme-lab.js": 200, "/api/dashboard-build-hash": 200,
     });
+    // A navigation with the theme lab open revalidates instead of downloading it again.
+    const etag = (await app.request("/theme-lab.js")).headers.get("ETag");
+    expect(etag).toBeTruthy();
+    expect((await app.request("/theme-lab.js", { headers: { "If-None-Match": etag! } })).status).toBe(304);
 
     // The remaining two are asserted by registration only: `/api/ready` and
     // `/api/attention` touch the database, so their STATUS depends on the
