@@ -169,6 +169,102 @@ export const PALETTES: readonly Palette[] = [
       "--bg-elevated": "#33302e",
     },
   },
+  {
+    id: "paper-light",
+    label: "Light reading mode",
+    base: "light",
+    glyph: "❧",
+    tokens: {
+      // The «Lesemodus lys» preset (owner pick, D5): page hsl(40 33% 95%),
+      // surfaces sink darker in its hue as the prototype's paletteFrom derives
+      // them (panel 92 %, card 90 %, chip 89 %, fence 91.4 %). Type stays
+      // 14px / 1.65 (D8).
+      "--bg-page": "#f6f4ee",
+      "--bg-panel": "#f1ede4",
+      "--bg-surface": "#eee8dd",
+      "--bg-deep": "#f0ebe2",
+      "--bg-inset": "#f0ebe2",
+      "--bg-gradient-end": "#ece6da",
+      "--bg-card": "#eee8dd",
+      "--bg-hover": "rgba(0, 0, 0, 0.04)",
+      "--graph-canvas": "#0a0a0f",
+
+      "--border-primary": "#e7dfd0",
+      "--border-secondary": "#ddd2bb",
+      "--border-subtle": "#ece6da",
+      "--scrollbar-thumb": "#d2cbbc",
+
+      // Body hsl(40 12% 24%) and heading hsl(40 12% 9%) from the preset; the
+      // steps between are spaced like the light ramp. --text-muted is #6d675a
+      // (L 39 %), not the preset's #81796a (L 46 %): that one measures 3.53:1
+      // on the card, this one 4.61 (4.81 panel, 5.11 page).
+      "--text-primary": "#1a1814",
+      "--text-secondary": "#454036",
+      "--text-tertiary": "#524d42",
+      "--text-soft": "#5f5a4e",
+      "--text-muted": "#6d675a",
+      "--text-dim": "#8b8374",
+      "--text-faint": "#a49e94",
+      "--text-disabled": "#c2beb7",
+
+      // Copper from the preset. White on #a35f2f is 4.96:1 and on the darker
+      // #8a4b1f hover 6.76, so all three inks are white: the light base's
+      // --text-primary there would be 3.58.
+      "--accent": "#a35f2f",
+      "--accent-hover": "#8a4b1f",
+      "--accent-light": "#8a4b1f",
+      "--accent-muted": "#7d6250",
+      "--on-accent": "#fff",
+      "--on-accent-primary": "#fff",
+      "--on-accent-inherit": "#fff",
+
+      // The light base's pale tints read on paper: their pill text (--tone-*,
+      // 5.7–7.9:1) clears 4.5. --tint-purple follows the accent to a copper
+      // wash a step LIGHTER than the panel: --accent reaches 4.5 only on a
+      // near-white fill (4.63 here, 4.07 on the base lavender; 6.31 for
+      // --accent-light). --tint-neutral warms (--text-muted 4.77, 4.26 on
+      // the base's #eceef3).
+      "--tint-success": "#dcfce7",
+      "--tint-error": "#fee2e2",
+      "--tint-warning": "#fef3c7",
+      "--tint-info": "#dbeafe",
+      "--tint-purple": "#fdf6ef",
+      "--tint-magenta": "#f3e8ff",
+      "--tint-cyan": "#cffafe",
+      "--tint-neutral": "#efece7",
+
+      "--chat-user-bg": "#f3e3d2",
+      "--chat-user-text": "#5c3a1e",
+      "--chat-assistant-bg": "#eee8dd",
+      "--chat-assistant-text": "#454036",
+
+      // The preset's syntax set, on the #f0ebe2 fence: 4.51–5.64:1.
+      "--tok-com": "#6b6258",
+      "--tok-str": "#2f6b1f",
+      "--tok-kw": "#8b2fd0",
+      "--tok-num": "#9c4a07",
+      "--tok-fn": "#1d4ed8",
+      "--tok-typ": "#0e7490",
+      "--tok-pun": "#6b6258",
+
+      "--bg-code": "#f0ebe2",
+      "--bg-code-bar": "#e7dfd0",
+
+      // Bold darkens its context 0.16 in oklch lightness: body (L 0.37)
+      // lands at L 0.21, the preset's strong ink hsl(25 35% 9%). The pivot
+      // keeps light's 0.9, between --text-disabled (L 0.80) and the white
+      // ink on the accent. The chip keeps its context's text colour (D14) on
+      // a fill 6 % darker than the page, with a 10 % black edge.
+      "--strong-lift": "0.16",
+      "--strong-pivot": "0.9",
+      "--strong-weight": "bolder",
+      "--bg-code-inline": "#ece6da",
+      "--code-inline-border": "rgba(0, 0, 0, 0.1)",
+
+      "--bg-chat": "#f9f7f3",
+      "--bg-elevated": "#fbf9f7",
+    },
+  },
 ];
 
 /** id → base, for the init script that runs before first paint. */

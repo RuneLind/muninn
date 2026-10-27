@@ -2,10 +2,10 @@
  * Palettes (Reading mode) end to end: what a unit test over the init script's
  * string cannot see.
  *
- *  1. **No flash.** With `muninn-theme=reading` stored, `data-theme="dark"` and
- *     `data-palette="reading"` are both on <html> before the header parses and
- *     at DOMContentLoaded. A palette applied by the end-of-header script would
- *     paint the base first.
+ *  1. **No flash.** With a palette id stored (`reading`, `paper-light`), its
+ *     base as `data-theme` and its id as `data-palette` are both on <html>
+ *     before the header parses and at DOMContentLoaded. A palette applied by
+ *     the end-of-header script would paint the base first.
  *  2. **The palette wins.** Its block shares the `html[data-theme]` blocks'
  *     specificity and wins on source order only — on the dashboard and on the
  *     chat page, which re-declares its own tokens after SHARED_STYLES.
@@ -13,7 +13,7 @@
  *     click and Tools ▾ closing each other, System
  *     clearing both attributes, and `t` cycling the same list.
  *  4. **Mermaid follows the base.** A palette is a layer, never a third base:
- *     the diagram renders mermaid's dark theme under Reading mode.
+ *     the diagram renders mermaid's theme for the palette's base.
  *
  * Boots its own muninn with a temp `WIKI_EXTRA` wiki (the mermaid fixture).
  * The mermaid bundle loads from the CDN, as it does for every reader.
@@ -107,9 +107,9 @@ const attrs = (page: Page) =>
     stored: localStorage.getItem("muninn-theme"),
   }));
 
-test.describe("Reading mode is applied before first paint", () => {
-  test("data-theme and data-palette are set before the header parses and at DOMContentLoaded", async ({ page }) => {
-    await storeChoice(page, "reading");
+test.describe("A palette is applied before first paint", () => {
+  for (const p of PALETTES) test(`${p.id}: data-theme and data-palette are set before the header parses and at DOMContentLoaded`, async ({ page }) => {
+    await storeChoice(page, p.id);
     await page.addInitScript(() => {
       const w = window as unknown as { __seen: Record<string, unknown> };
       w.__seen = {};
@@ -129,8 +129,8 @@ test.describe("Reading mode is applied before first paint", () => {
       await page.goto(BASE + url);
       const seen = await page.evaluate(() => (window as unknown as { __seen: unknown }).__seen);
       expect(seen, url).toEqual({
-        header: { theme: "dark", palette: "reading" },
-        dcl: { theme: "dark", palette: "reading" },
+        header: { theme: p.base, palette: p.id },
+        dcl: { theme: p.base, palette: p.id },
       });
     }
   });
@@ -265,7 +265,7 @@ test.describe("The theme picker", () => {
     await expect(menu, "a padding click picks nothing and keeps the menu open").toBeVisible();
     await expect(page.getByRole("menuitemradio", { name: /System/ }), "focus stays on the item").toBeFocused();
     await page.keyboard.press("ArrowDown");
-    await expect(page.getByRole("menuitemradio", { name: /Light/ }), "arrows still move").toBeFocused();
+    await expect(page.getByRole("menuitemradio", { name: "Light", exact: true }), "arrows still move").toBeFocused();
     await page.keyboard.press("Escape");
     await expect(menu, "Escape after a padding click").toBeHidden();
     await expect(btn).toBeFocused();
@@ -420,16 +420,19 @@ test.describe("The theme picker", () => {
 });
 
 test.describe("A palette follows its base everywhere that asks light or dark", () => {
-  test("mermaid renders its dark theme under Reading mode", async ({ page }) => {
-    await storeChoice(page, "reading");
-    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=diagram-page`);
-    const node = page.locator("#articleWrap svg .node rect, #articleWrap svg .node polygon").first();
-    await expect(node).toBeVisible({ timeout: 20_000 });
-    const fill = await node.evaluate((el) => getComputedStyle(el).fill);
-    // mermaid's `default` theme fills nodes #ECECFF; `dark` fills #1f2020.
-    expect(fill).not.toBe("rgb(236, 236, 255)");
-    expect(fill).toBe("rgb(31, 32, 32)");
-  });
+  // mermaid's `default` theme fills nodes #ECECFF; `dark` fills #1f2020.
+  const MERMAID_FILL = { light: "rgb(236, 236, 255)", dark: "rgb(31, 32, 32)" } as const;
+  for (const p of PALETTES) {
+    test(`mermaid renders its ${p.base} theme under ${p.id}`, async ({ page }) => {
+      // The OS asks for the other scheme, so only the palette's base can draw this theme.
+      await page.emulateMedia({ colorScheme: p.base === "light" ? "dark" : "light" });
+      await storeChoice(page, p.id);
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=diagram-page`);
+      const node = page.locator("#articleWrap svg .node rect, #articleWrap svg .node polygon").first();
+      await expect(node).toBeVisible({ timeout: 20_000 });
+      expect(await node.evaluate((el) => getComputedStyle(el).fill)).toBe(MERMAID_FILL[p.base]);
+    });
+  }
 });
 
 // ── Fix round 1 (PR #747): a palette is a layer, the bases stay main's ─────
