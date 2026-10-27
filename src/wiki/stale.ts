@@ -60,14 +60,14 @@ const NEGATION = `${L}(?:ikke|not)(?:\\s+(?:yet|ennå|enda|still|fortsatt))?\\s+
  */
 export const STATUS_WORDS: readonly (readonly [StatusKind, RegExp])[] = [
   ["proposed", words("proposed|forslag|foreslått|utkast|draft")],
-  ["in-flight", new RegExp(`${L}(?:in[- ]flight|pågår|i gang|påbegynt|under arbeid|open PRs?|åpen PR)${R}|${NEGATION}(?:merget|merged)${R}`, "iu")],
+  ["in-flight", new RegExp(`${L}(?:in[- ]flight|pågår|i gang|påbegynt|under arbeid|open PRs?|åpen PR|åpne PR-er|åpne PR-ene)${R}|${NEGATION}(?:merget|merged)${R}`, "iu")],
   ["shipped", new RegExp(`(?<!${NEGATION})${L}(?:shipped|levert|landet|ferdig|done|merget|merged)${R}`, "iu")],
   ["blocked", words("blocked|blokkert")],
 ];
 /** The prefilter: a plain, edge-free alternation over every status word's
  *  stem — a superset of {@link STATUS_WORDS}, and ~8× cheaper per line than
  *  the edged `u` regexes, which measured 12 ms over mimir's 282 link lines. */
-const STATUS_PROBE = /proposed|forslag|foreslått|utkast|draft|flight|pågår|i gang|påbegynt|under arbeid|merget|merged|open pr|åpen pr|shipped|levert|landet|ferdig|done|blocked|blokkert/i;
+const STATUS_PROBE = /proposed|forslag|foreslått|utkast|draft|flight|pågår|i gang|påbegynt|under arbeid|merget|merged|open pr|åpen pr|åpne pr|shipped|levert|landet|ferdig|done|blocked|blokkert/i;
 
 /** The status words a text names, in {@link STATUS_WORDS} order. */
 export function statusWordsIn(text: string): StatusKind[] {
@@ -334,36 +334,41 @@ const BARE_ITEM_TAIL_MAX = 30;
 const HEADING = /^ {0,3}(#{1,6})\s+(.*)$/;
 
 /**
- * A `D.M` date (F2, fix round 2): day 1–31 and month 1–12, not glued to a
- * letter, digit or `.` before it (`v1.2`, `sedVer4.4`, `GPT-5.6`, `1.2.3`),
- * nor followed by a digit or `.digit`, a letter, `%`, `+`, `×` or a unit word
- * (`2.5k`, `12.5 %`, `9.5–10.6 min`), nor, when the day or the month has a
- * single digit, by `-letter` (`4.4-versjon`; `08.09-sakene` is a date); and not
- * one space after a version word (`section 4.2`, `art. 13.1`, `sedVer 4.4`).
- * `DD.MM.YYYY` is a date. Else it is a version ONLY when day and month are
- * single digits AND it sits one space after a word that starts with a capital
- * (`Opus 4.6`, `CDM 4.4`, `Bun 1.3`). Everything else is a date: a missed
- * date is a missed stale passage, a false one costs one on-demand check.
- * Accepted: `bun 1.3`, `Node 22.12` read as dates; `Mandag 4.6` as a version.
+ * A `D.M` date (F2; the class-check rule, stated in `src/wiki/CLAUDE.md`). D and
+ * M are a whole number token's two parts (no digit or `.` before, no digit
+ * after: `1.2.3` and `D.2.1` hold none), 1–31 and 1–12. `D.M.YYYY` is a date whatever precedes it. Otherwise
+ * it is no date when followed by `.digit`, `%`, `+`, `×`, a letter, a unit word
+ * after a space or a range to one (`9.5–10.6 min`), or, when D or M has one
+ * digit, `-letter` (`4.4-versjon`; `08.09-sakene` is a date); when glued to a
+ * letter or a letter-hyphen before it (`v1.2`, `GPT‑5.6`); when one space after
+ * a whole version word (`section 4.2`, `art. 13.1`); or, both single digits,
+ * one space after a capitalised word (`Opus 4.6`, `CDM 4.4`, `S4 2.1`).
+ * Accepted: `bun 1.3`, `Node 22.12`, `sedVer 4.4` read as dates; `Mandag 4.6`
+ * as a version. A missed date is a missed stale passage, a false one costs
+ * one on-demand check.
  */
-const DM_RE = /(?<![\p{L}\p{N}.]|[\p{L}][-‐‑])(0?[1-9]|[12]\d|3[01])\.(0?[1-9]|1[0-2])(\.\d{4})?(?![\p{N}]|\.\p{N})/gu;
-const DM_AFTER = /^(?:\s*[–—-]\s*\d+(?:[.,]\d+)?)?(?:[\p{L}%+×]|\s+(?:%|×|x|(?:ms|s|sek|sec|min|minutter|minutes|h|t|timer|hours|kB|KB|MB|GB|TB|k|oz|px|pt|em|rem)(?![\p{L}\p{N}])))/u;
+const DM_RE = /(?<![\p{N}.])(0?[1-9]|[12]\d|3[01])\.(0?[1-9]|1[0-2])(\.\d{4})?(?![\p{N}]|\.\p{N})/gu;
+/** The units a space may separate from the number: kept from fix round 2. */
+const DM_UNITS = "%|×|x|ms|s|sek|sec|min|minutter|minutes|h|t|timer|hours|kB|KB|MB|GB|TB|k|oz|px|pt|em|rem";
+const DM_AFTER = new RegExp(`^(?:\\s*[–—-]\\s*\\d+(?:[.,]\\d+)?)?(?:[\\p{L}%+×]|\\s+(?:${DM_UNITS})(?![\\p{L}\\p{N}]))`, "u");
 /** `-letter` after the match, past the same optional range: excludes only a single-digit day or month. */
 const DM_AFTER_HYPHEN_WORD = /^(?:\s*[–—-]\s*\d+(?:[.,]\d+)?)?[-‐‑]\p{L}/u;
-/** A version word one space before: as a word, or a camelCase tail (`sedVer`). */
-const DM_VERSION_WORD = /(?:(?<![\p{L}\p{N}])(?:version|versjon|v|ver|section|seksjon|kapittel|kap\.|art\.|artikkel)|\p{Ll}(?:Ver|Version|Versjon)) $/iu;
+/** Glued on the left: a letter, or a letter and a hyphen (`GPT‑5.6`). */
+const DM_GLUED = /(?:\p{L}|\p{L}[-‐‑])$/u;
+/** A version word one space before, as a whole word only (`over 3.10` is a date). */
+const DM_VERSION_WORD = /(?<![\p{L}\p{N}])(?:version|versjon|ver|v|section|seksjon|kapittel|kap\.|art\.|artikkel) $/iu;
 /** A word one space before that starts with a capital or is caps and
  *  digits: `Opus`, `CDM`, `S4`, `5G`. */
 const DM_CAPITAL_WORD = /(?<![\p{L}\p{N}])(?:\p{Lu}[\p{L}\p{N}]*|[\p{Lu}\p{N}]*\p{Lu}[\p{Lu}\p{N}]*) $/u;
 
 export function hasDateDM(text: string): boolean {
   for (const m of text.matchAll(DM_RE)) {
+    if (m[3]) return true; // a year, whatever precedes it
     const after = text.slice(m.index! + m[0].length);
     if (DM_AFTER.test(after)) continue;
     if ((m[1]!.length === 1 || m[2]!.length === 1) && DM_AFTER_HYPHEN_WORD.test(after)) continue;
-    if (m[3]) return true; // a year
     const before = text.slice(0, m.index);
-    if (DM_VERSION_WORD.test(before)) continue;
+    if (DM_GLUED.test(before) || DM_VERSION_WORD.test(before)) continue;
     if (m[1]!.length === 1 && m[2]!.length === 1 && DM_CAPITAL_WORD.test(before)) continue;
     return true;
   }

@@ -64,9 +64,13 @@ describe("status words (D18)", () => {
     expect(statusLineCandidates("[[x]] har to open PRs\n").map((c) => c.said)).toEqual([["in-flight"]]);
   });
 
-  test("«åpne» is the verb «to open», no status word (R2-4b)", () => {
-    for (const t of ["sjekk åpne PR-er", "kan åpne PR-er", "Åpne PR-en.", "åpne PR"]) expect([t, statusWordsIn(t)]).toEqual([t, []]);
-    expect(statusLineCandidates("[[x]] — sjekk åpne PR-er\n")).toEqual([]);
+  test("plural «åpne PR-er/PR-ene» is in-flight; bare «åpne PR» and «åpne PR-en» are the verb (class check)", () => {
+    for (const t of ["sjekk åpne PR-er", "de åpne PR-ene", "Åpne PR-er:"]) expect([t, statusWordsIn(t)]).toEqual([t, ["in-flight"]]);
+    for (const t of ["Åpne PR-en.", "åpne PR", "åpne PR-en mot main"]) expect([t, statusWordsIn(t)]).toEqual([t, []]);
+    // Accepted loss: the verb with a plural object still reads as in-flight.
+    expect(statusWordsIn("kan åpne PR-er")).toEqual(["in-flight"]);
+    expect(statusLineCandidates("[[x]] — sjekk åpne PR-er\n").map((c) => c.said)).toEqual([["in-flight"]]);
+    expect(statusLineCandidates("[[x]] — Åpne PR-en.\n")).toEqual([]);
   });
 });
 
@@ -270,10 +274,14 @@ describe("hasDateDM: the D.M date rule (R2-1)", () => {
     "bun 1.3", "python 3.12", "node 22.12", "Node 22.12", "Python 3.12",
     // A version word or capitalised word counts one space before, no more.
     "section  4.2", "Opus  4.6",
+    // A version word is a whole word: these end in «ver» and are dates (class check).
+    "over 13.10", "server 3.10", "however 3.9", "Oliver 13.10",
+    // Accepted loss: no camelCase version tail any more; a year form after a letter is a date.
+    "sedVer 4.4", "v3.10.2026",
   ];
   const notDates = [
     "model: Opus 4.6", "| Opus 4.6 |", "[[x]]. Opus 4.6", "Gemini 2.5", "art. 13.1", "artikkel 13.1",
-    "sedVer 4.4", "4.4-versjon", "3.10-mapping", "12.1-sak", "2.5-familien", "8.09-sakene", "takes 2.5 min", "12.5 %", "section 4.2", "1.2.3", "v1.2", "sedVer4.4",
+    "4.4-versjon", "3.10-mapping", "12.1-sak", "2.5-familien", "8.09-sakene", "takes 2.5 min", "12.5 %", "section 4.2", "1.2.3", "v1.2", "sedVer4.4",
     "CDM 4.4", "Bun 1.3", "version 2.10", "Versjon 2.10", "kap. 3.2", "seksjon 12.1", "kapittel 4.11", "5G 1.2",
     // Accepted loss: a capitalised word and a single-digit date read as a version.
     "Mandag 4.6",
@@ -751,5 +759,167 @@ describe("a culled page and its attachment hold no hits, in the index and in lin
 
   test("teardown", async () => {
     await rm(root, { recursive: true, force: true });
+  });
+});
+
+// ── The claim rules, enumerated (class check, PR #748) ─────────────────────
+// Oracles written from the rule sentences in `src/wiki/CLAUDE.md` (Stale
+// check), as plain string logic: they share no regex with `stale.ts`, so the
+// cross product below compares two independent readings of one rule.
+
+const isDigit = (c: string | undefined) => c !== undefined && c >= "0" && c <= "9";
+const isLetter = (c: string | undefined) => c !== undefined && /\p{L}/u.test(c);
+const isWordChar = (c: string | undefined) => isLetter(c) || isDigit(c) || (c !== undefined && /\p{N}/u.test(c));
+const isUpper = (c: string | undefined) => c !== undefined && /\p{Lu}/u.test(c);
+const isSpace = (c: string | undefined) => c !== undefined && /\s/u.test(c);
+const HYPHENS = ["-", "‐", "‑"];
+const DASHES = ["–", "—", "-"];
+const VERSION_WORDS = ["version", "versjon", "ver", "v", "section", "seksjon", "kapittel", "kap.", "art.", "artikkel"];
+const UNITS = ["%", "×", "x", "ms", "s", "sek", "sec", "min", "minutter", "minutes", "h", "t", "timer", "hours", "kB", "KB", "MB", "GB", "TB", "k", "oz", "px", "pt", "em", "rem"];
+
+/** Rule 3's tail: does `after` (what follows the D.M, or a range's end) exclude it? */
+function oracleTailExcludes(after: string, singleDigit: boolean): boolean {
+  const c = after[0];
+  if (c === "%" || c === "+" || c === "×") return true;
+  if (isLetter(c)) return true;
+  if (singleDigit && HYPHENS.includes(c!) && isLetter(after[1])) return true;
+  let i = 0;
+  while (isSpace(after[i])) i++;
+  if (i > 0) {
+    for (const u of UNITS) if (after.startsWith(u, i) && !isWordChar(after[i + u.length])) return true;
+  }
+  return false;
+}
+
+/** Rule 3's range: optional space, a dash, optional space, a number; returns what follows it. */
+function oracleRangeEnd(after: string): string | undefined {
+  let i = 0;
+  while (isSpace(after[i])) i++;
+  if (!DASHES.includes(after[i]!)) return undefined;
+  i++;
+  while (isSpace(after[i])) i++;
+  if (!isDigit(after[i])) return undefined;
+  while (isDigit(after[i])) i++;
+  if ((after[i] === "." || after[i] === ",") && isDigit(after[i + 1])) {
+    i++;
+    while (isDigit(after[i])) i++;
+  }
+  return after.slice(i);
+}
+
+/** Rules 1–5 for one numeric token `parts` (a maximal run of digit groups joined by single dots). */
+function oracleTokenIsDate(text: string, start: number, end: number, parts: string[]): boolean {
+  const year = parts.length === 3 && parts[2]!.length === 4;
+  if (parts.length !== 2 && !year) return false; // `1.2.3`, `3.10.5`: a `.digit` other than a year
+  const [d, m] = parts as [string, string];
+  if (d.length > 2 || m.length > 2) return false;
+  if (+d < 1 || +d > 31 || +m < 1 || +m > 12) return false; // rule 1
+  if (year) return true; // rule 2
+  const singleDigit = d.length === 1 || m.length === 1;
+  const after = text.slice(end);
+  if (oracleTailExcludes(after, singleDigit)) return false; // rule 3
+  const rangeRest = oracleRangeEnd(after);
+  if (rangeRest !== undefined && oracleTailExcludes(rangeRest, singleDigit)) return false;
+  const before = text.slice(0, start);
+  const p1 = before[before.length - 1];
+  if (isLetter(p1)) return false; // rule 4: glued to a letter
+  if (HYPHENS.includes(p1!) && isLetter(before[before.length - 2])) return false; // `GPT‑5.6`
+  if (p1 === " ") {
+    const lower = before.toLowerCase();
+    for (const w of VERSION_WORDS) {
+      if (lower.endsWith(`${w} `) && !isWordChar(before[before.length - w.length - 2])) return false;
+    }
+    if (d.length === 1 && m.length === 1) { // rule 5
+      let k = before.length - 1;
+      while (k > 0 && isWordChar(before[k - 1])) k--;
+      const word = before.slice(k, before.length - 1);
+      const allCapsDigits = [...word].every((c) => isUpper(c) || isDigit(c)) && [...word].some(isUpper);
+      if (word && (isUpper(word[0]) || allCapsDigits)) return false;
+    }
+  }
+  return true;
+}
+
+function oracleHasDateDM(text: string): boolean {
+  let i = 0;
+  while (i < text.length) {
+    if (!isDigit(text[i])) { i++; continue; }
+    const start = i;
+    const parts: string[] = [];
+    for (;;) {
+      let k = i;
+      while (isDigit(text[k])) k++;
+      parts.push(text.slice(i, k));
+      i = k;
+      if (text[k] === "." && isDigit(text[k + 1])) { i = k + 1; continue; }
+      break;
+    }
+    // A token right after a `.` continues a dotted name (`D.2.1`, `type.2.4.a`): no D.M.
+    if (text[start - 1] !== "." && oracleTokenIsDate(text, start, i, parts)) return true;
+  }
+  return false;
+}
+
+const DM_LEFTS = ["", "den ", "på ", "(", "| ", "model: ", "Rune ", "Godkjent av Rune ", "NAV ", "S1 ", "Opus ", "Gemini ", "macOS ", "iPhone ", "over ", "server ", "Oliver ", "however ", "version ", "Version ", "versjon ", "Versjon ", "ver ", "v", "v ", "art. ", "Art. ", "artikkel ", "kap. ", "section ", "seksjon ", "kapittel ", "sedVer ", "sedVer", "§", "x", "5",
+  // Beyond the brief's minimum: the left-side arms the mutation check found unreached.
+  "GPT-", "GPT‑", "5G ", "e-", "D.", "type."];
+const DM_DAYS = ["0", "3", "03", "13", "31", "32"];
+const DM_MONTHS = ["0", "9", "09", "10", "12", "13"];
+const DM_RIGHTS = ["", " ", ". ", ".", ".2026", ".5", "5", "%", " %", "+", "×", " min", "min", " s", " GB", "x", "–10.6 min", "-sakene", "-versjon", "a", ")", ",",
+  // Beyond the minimum: a year form's own tail, and a unit's word edge.
+  ".2026 min", ".2026a", " x", " xyz"];
+
+/** Every (left, D, M, right) string the cross product builds, with both readings. */
+export function dmCrossProduct(): { text: string; code: boolean; oracle: boolean }[] {
+  const out: { text: string; code: boolean; oracle: boolean }[] = [];
+  for (const l of DM_LEFTS) for (const d of DM_DAYS) for (const m of DM_MONTHS) for (const r of DM_RIGHTS) {
+    const text = `${l}${d}.${m}${r}`;
+    out.push({ text, code: hasDateDM(text), oracle: oracleHasDateDM(text) });
+  }
+  return out;
+}
+
+const PR_IN_FLIGHT_FORMS = ["open PR", "open PRs", "åpen PR", "åpen PR-er", "åpne PR-er", "åpne PR-ene"];
+/** Whether `text` names an in-flight PR word: a form, any case, edged by a non-word character. */
+function oraclePrInFlight(text: string): boolean {
+  const lower = text.toLowerCase();
+  for (const f of PR_IN_FLIGHT_FORMS.map((x) => x.toLowerCase())) {
+    for (let i = lower.indexOf(f); i >= 0; i = lower.indexOf(f, i + 1)) {
+      const b = text[i - 1], a = text[i + f.length];
+      if (!isWordChar(b) && b !== "_" && !isWordChar(a) && a !== "_") return true;
+    }
+  }
+  return false;
+}
+const PR_FORMS = [...PR_IN_FLIGHT_FORMS, "åpne PR", "åpne PR-en", "Åpne PR", "Åpne PR-en", "Åpne PR-er", "Åpne PR-ene", "ÅPEN PR", "Open PRs", "åpen PR-en", "open PRsx", "åpne PR-erne", "åpenPR", "gjenåpne PR-er"];
+const PR_LEFTS = ["", "9 ", "de ", "sjekk ", "kan ", "for å "];
+const PR_RIGHTS = ["", ".", " for", ","];
+
+/** Every (left, form, right) string, read by the status words and by the prefiltered line parse. */
+export function prCrossProduct(): { text: string; code: boolean; line: boolean; oracle: boolean }[] {
+  const out: { text: string; code: boolean; line: boolean; oracle: boolean }[] = [];
+  for (const l of PR_LEFTS) for (const f of PR_FORMS) for (const r of PR_RIGHTS) {
+    const text = `${l}${f}${r}`;
+    const line = statusLineCandidates(`[[x]] ${text}\n`).some((c) => c.said.includes("in-flight"));
+    out.push({ text, code: statusWordsIn(text).includes("in-flight"), line, oracle: oraclePrInFlight(text) });
+  }
+  return out;
+}
+
+describe("the claim rules, enumerated against an oracle (class check)", () => {
+  test("hasDateDM agrees with the rule-sentence oracle over the whole cross product", () => {
+    const all = dmCrossProduct();
+    expect(all.length).toBe(DM_LEFTS.length * DM_DAYS.length * DM_MONTHS.length * DM_RIGHTS.length);
+    expect(all.filter((x) => x.code !== x.oracle).map((x) => `${JSON.stringify(x.text)} code=${x.code}`)).toEqual([]);
+  });
+  test("the oracle itself reads the hand-picked anchors as the rule says", () => {
+    const yes = ["Rune 24.9", "Godkjent av Rune 24.10", "NAV 23.10", "macOS 2.3", "iPhone 1.2", "over 3.9", "server 3.9", "however 3.9", "sedVer 4.4", "v3.10.2026", "fra 1.11.", "08.09-sakene", "§3.9", "x. 3.10"];
+    const no = ["Opus 4.6", "CDM 4.4", "S4 2.1", "Oliver 3.9", "version 3.10", "Art. 13.1", "v1.2", "GPT‑5.6", "4.4-versjon", "9.5–10.6 min", "12.5 %", "3.10+", "1.2.3", "5.3.10", "D.2.1", "cvc-complex-type.2.4.a", "x.3.10.2026"];
+    expect({ yes: yes.filter((t) => !oracleHasDateDM(t)), no: no.filter(oracleHasDateDM) }).toEqual({ yes: [], no: [] });
+  });
+  test("the in-flight PR words agree with the oracle, and the prefilter rejects no line the rule accepts", () => {
+    const all = prCrossProduct();
+    expect(all.length).toBe(PR_LEFTS.length * PR_FORMS.length * PR_RIGHTS.length);
+    expect(all.filter((x) => x.code !== x.oracle || x.line !== x.oracle).map((x) => `${JSON.stringify(x.text)} code=${x.code} line=${x.line}`)).toEqual([]);
   });
 });
