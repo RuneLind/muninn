@@ -15,6 +15,7 @@ import type { WikiRegistryEntry } from "./registry.ts";
 import {
   buildStalePrompt,
   changedPageContentHash,
+  commitsFor,
   CONFIRM_MAX_CALLS,
   CONFIRM_START_CUTOFF_MS,
   memoryStaleVerdictStore,
@@ -29,7 +30,7 @@ import {
   type ConfirmDeps,
   type StaleModel,
 } from "./stale-confirm.ts";
-import { __resetWikiCacheForTest, getWikiIndex } from "./store.ts";
+import { __resetWikiCacheForTest, getWikiIndex, type WikiPageMeta } from "./store.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
 
@@ -516,5 +517,63 @@ describe("memoryStaleVerdictStore (A5)", () => {
     expect(await store.upsert(v({ verdict: "not-status", checkedBy: "reader" }))).toMatchObject({ verdict: "not-status" });
     await store.upsert(v({ keyHash: "m" }));
     expect(await store.upsert(v({ keyHash: "m", verdict: "true", checkedBy: "reader" }))).toMatchObject({ verdict: "true", checkedBy: "reader" });
+  });
+});
+
+// A15: the commits a call carries about the changed page. The uncommitted case
+// with commits newer than `sinceMs` is A14's (batch 6) and is not pinned here.
+describe("commitsFor (A15)", () => {
+  const DAY = 86_400_000;
+  const t0 = Date.UTC(2026, 9, 20, 12);
+  let root = "";
+  const git = (args: string[], atMs?: number) => {
+    const date = atMs === undefined ? undefined : new Date(atMs).toISOString();
+    const r = Bun.spawnSync(["git", "-C", root, ...args], {
+      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", ...(date ? { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } : {}) },
+    });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  };
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-commits-"));
+    git(["init", "-q", "-b", "main"]);
+    await mkdir(path.join(root, "plans"), { recursive: true });
+    for (const [subject, ms] of [["one", t0 - 10 * DAY], ["two", t0 - 5 * DAY], ["three", t0 - DAY]] as const) {
+      await writeFile(path.join(root, "plans/p.md"), subject);
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", subject], ms);
+    }
+  });
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const meta = (over: Partial<WikiPageMeta> = {}) => ({ relPath: "plans/p.md", ...over }) as WikiPageMeta;
+
+  test("no target: no commit section", async () => {
+    expect(await commitsFor({ root }, undefined, t0 - 7 * DAY)).toBeUndefined();
+  });
+
+  test("the subjects after sinceMs, newest first, and none after untilMs", async () => {
+    expect(await commitsFor({ root }, meta(), t0 - 7 * DAY)).toEqual(["three", "two"]);
+    expect(await commitsFor({ root }, meta(), t0 - 7 * DAY, t0 - 3 * DAY)).toEqual(["two"]);
+    expect(await commitsFor({ root }, meta(), undefined)).toEqual(["three", "two", "one"]);
+  });
+
+  test("an uncommitted change newer than every commit is null; under asOf the commits still count", async () => {
+    const dirty = meta({ gitDirty: true, gitTouchedMs: t0 - DAY });
+    expect(await commitsFor({ root }, dirty, t0 - DAY)).toBeNull();
+    expect(await commitsFor({ root }, meta({ gitDirty: true }), t0 - 7 * DAY)).toBeNull();
+    // The same uncommitted page judged as of a past day: its commits up to then count.
+    const dirtyOld = meta({ gitDirty: true, gitTouchedMs: t0 - 10 * DAY });
+    expect(await commitsFor({ root }, dirtyOld, t0 - 7 * DAY)).toBeNull();
+    expect(await commitsFor({ root }, dirtyOld, t0 - 7 * DAY, t0 - 3 * DAY)).toEqual(["two"]);
+  });
+
+  test("git unavailable for the root: no commit section, not an empty one", async () => {
+    const plain = await testTempDir(path.join(tmpdir(), "stale-commits-nogit-"));
+    try {
+      expect(await commitsFor({ root: plain }, meta(), t0 - 7 * DAY)).toBeUndefined();
+    } finally {
+      await rm(plain, { recursive: true, force: true });
+    }
   });
 });

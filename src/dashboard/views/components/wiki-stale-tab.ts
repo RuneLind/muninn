@@ -64,15 +64,38 @@ export function confirmedHits(r: StaleReportView): StaleHitView[] {
   return (r.hits ?? []).filter((h) => h.confirmation !== undefined && h.confirmation !== "unconfirmed" && h.confirmation.verdict === "stale");
 }
 
-/** The tab's count badge: «N · M», or "" when both are 0. */
-export function staleTabBadge(r: StaleReportView | null | undefined): { text: string; title: string } {
+/** The STALE tab's own tooltip; the badge's counts are added to it, never put in its place (A12). */
+export const STALE_TAB_TITLE = "What a change to this page may have made untrue elsewhere";
+
+/** The tab's count badge: «N · M», or "" when both are 0. `tabTitle` is the
+ *  tab's tooltip: {@link STALE_TAB_TITLE}, then the counts when there are any. */
+export function staleTabBadge(r: StaleReportView | null | undefined): { text: string; title: string; tabTitle: string } {
   const { staleLines, toCheck } = staleCounts(r);
-  if (!staleLines && !toCheck) return { text: "", title: "Nothing stale" };
-  return {
-    text: `${staleLines} · ${toCheck}`,
-    title: `${staleLines} stale status line${staleLines === 1 ? "" : "s"} · ${toCheck} linking page${toCheck === 1 ? "" : "s"} to check`,
-  };
+  if (!staleLines && !toCheck) return { text: "", title: "Nothing stale", tabTitle: STALE_TAB_TITLE };
+  const title = `${staleLines} stale status line${staleLines === 1 ? "" : "s"} · ${toCheck} linking page${toCheck === 1 ? "" : "s"} to check`;
+  return { text: `${staleLines} · ${toCheck}`, title, tabTitle: `${STALE_TAB_TITLE}\n${title}` };
 }
+
+/** What the client knows beyond the report: Check's state and what it left. */
+export interface StaleBodyOpts {
+  checking?: boolean;
+  /** Check's live line while it runs, and its last line after. */
+  progress?: string;
+  /** A failure the reader must see wherever the check bar is (a verdict that was not saved). */
+  notice?: string;
+  /** Linking pages whose Check call failed, by relPath: shown on the row, never counted as checked. */
+  rowErrors?: Record<string, string>;
+  /** Pages the last Check left for the next one at its call limit. */
+  capLeft?: number;
+  /** Check's per-request call limit, for the cap line. */
+  capCalls?: number;
+  /** Open state of each `<details>` by its `data-stale-open` key, kept across re-renders. */
+  open?: Record<string, boolean>;
+}
+
+/** The `open` attribute for a `<details>`: the reader's last state, else the default. */
+const openAttr = (opts: StaleBodyOpts, key: string, byDefault: boolean) =>
+  ` data-stale-open="${esc(key)}"${(opts.open?.[key] ?? byDefault) ? " open" : ""}`;
 
 const BUCKET_LABEL: Record<StaleLinkingView["bucket"], string> = {
   toCheck: "To check",
@@ -97,27 +120,27 @@ function pageLink(relPath: string, title: string): string {
 }
 
 /** The model's drafted fix, read-only: old → new, and the point-to-the-home variant (D8). */
-export function draftFixHtml(edit: StaleVerdictView["edit"]): string {
+export function draftFixHtml(edit: StaleVerdictView["edit"], opts: StaleBodyOpts = {}, key = ""): string {
   if (!edit) return "";
   const home = typeof edit.home === "string"
     ? `<div class="wiki-stale-fix-row"><span class="wiki-stale-fix-k">Point to the home</span><del>${esc(edit.old)}</del> → <ins>${edit.home ? esc(edit.home) : "<em>(removed)</em>"}</ins></div>`
     : "";
   return (
-    `<details class="wiki-stale-fix"><summary>Draft fix</summary>` +
+    `<details class="wiki-stale-fix"${key ? openAttr(opts, key, false) : ""}><summary>Draft fix</summary>` +
     `<div class="wiki-stale-fix-row"><span class="wiki-stale-fix-k">Update the text</span><del>${esc(edit.old)}</del> → <ins>${esc(edit.new)}</ins></div>` +
     home +
     `<div class="wiki-stale-fix-note">Read-only: Apply and Send to Gardener come later.</div></details>`
   );
 }
 
-function verdictHtml(v: StaleVerdictView | undefined): string {
+function verdictHtml(v: StaleVerdictView | undefined, opts: StaleBodyOpts, fixKey: string): string {
   if (!v) return "";
   return (
     `<div class="wiki-stale-verdict v-${esc(v.verdict)}"><span class="wiki-stale-vlabel">${esc(VERDICT_LABEL[v.verdict] ?? v.verdict)}</span>` +
     (v.checkedBy === "reader" ? `<span class="wiki-stale-by">by a reader</span>` : "") +
     (v.reason ? ` <span class="wiki-stale-reason">${esc(v.reason)}</span>` : "") +
     `</div>` +
-    (v.verdict === "stale" || v.verdict === "unsure" ? draftFixHtml(v.edit) : "")
+    (v.verdict === "stale" || v.verdict === "unsure" ? draftFixHtml(v.edit, opts, fixKey) : "")
   );
 }
 
@@ -131,7 +154,7 @@ function verdictButtons(attrs: string): string {
 }
 
 /** The tab's body. `progress` is Check's live line while it runs. */
-export function staleBodyHtml(r: StaleReportView | null, opts: { checking?: boolean; progress?: string } = {}): string {
+export function staleBodyHtml(r: StaleReportView | null, opts: StaleBodyOpts = {}): string {
   if (!r) return `<div class="wiki-conn-empty">Loading…</div>`;
   if (r.error) return `<div class="wiki-conn-empty">Stale check unavailable: ${esc(r.error)}</div>`;
   const page = r.page?.relPath ?? "";
@@ -142,6 +165,7 @@ export function staleBodyHtml(r: StaleReportView | null, opts: { checking?: bool
       ? `⚠ ${staleLines} stale status line${staleLines === 1 ? "" : "s"} · ${toCheck} linking page${toCheck === 1 ? "" : "s"} to check`
       : "✓ nothing stale") +
     `</div>`;
+  if (opts.notice) html += `<div class="wiki-stale-error" role="alert" data-stale-notice>${esc(opts.notice)}</div>`;
   if (r.verdicts === "unavailable") html += `<div class="wiki-stale-note">Verdicts are unavailable right now, so no status line shows as confirmed.</div>`;
 
   const hits = confirmedHits(r);
@@ -153,7 +177,7 @@ export function staleBodyHtml(r: StaleReportView | null, opts: { checking?: bool
         `<div class="wiki-stale-item" data-stale-hit="${h.line}">` +
         `<div class="wiki-stale-line"><span class="wiki-stale-ln">L${h.line}</span> ${esc(h.text)}</div>` +
         `<div class="wiki-stale-target">${pageLink(h.target, stem(h.target))} is <code>${esc(h.now)}</code></div>` +
-        verdictHtml(c) +
+        verdictHtml(c, opts, `fix:hit:${h.line}:${h.target}`) +
         verdictButtons(`data-kind="status-line" data-stale-page="${esc(page)}" data-line="${h.line}" data-target="${esc(h.target)}"`) +
         `</div>`;
     }
@@ -169,21 +193,26 @@ export function staleBodyHtml(r: StaleReportView | null, opts: { checking?: bool
   html += `<div class="wiki-conn-section"><div class="wiki-conn-title">Linking pages (${r.buckets.linking.length})</div>`;
   if (toCheck) {
     const done = (byBucket.get("toCheck") ?? []).filter((l) => l.verdict).length;
+    const left = opts.capLeft ?? 0;
     html +=
       `<div class="wiki-stale-checkbar"><button type="button" class="wiki-stale-btn primary" id="wikiStaleCheckBtn" data-stale-check data-stale-page="${esc(page)}"${opts.checking ? " disabled" : ""}>` +
       `${opts.checking ? "Checking…" : done === toCheck ? "Check again" : `Check ${toCheck - done} page${toCheck - done === 1 ? "" : "s"}`}</button>` +
-      `<span class="wiki-stale-progress" id="wikiStaleProgress">${esc(opts.progress ?? (done ? `${done} of ${toCheck} checked` : ""))}</span></div>`;
+      `<span class="wiki-stale-progress" id="wikiStaleProgress">${esc(opts.progress ?? (done ? `${done} of ${toCheck} checked` : ""))}</span></div>` +
+      (left > 0
+        ? `<div class="wiki-stale-note wiki-stale-cap" data-stale-cap="${left}">Check makes at most ${opts.capCalls ?? 10} calls at a time: ${left} page${left === 1 ? "" : "s"} still to check. Check again for the rest.</div>`
+        : "");
   }
   for (const b of BUCKET_ORDER) {
     const rows = byBucket.get(b) ?? [];
     if (!rows.length) continue;
-    const open = b === "toCheck" ? " open" : "";
-    html += `<details class="wiki-stale-bucket" data-bucket="${b}"${open}><summary>${BUCKET_LABEL[b]} (${rows.length})</summary>`;
+    html += `<details class="wiki-stale-bucket" data-bucket="${b}"${openAttr(opts, `bucket:${b}`, b === "toCheck")}><summary>${BUCKET_LABEL[b]} (${rows.length})</summary>`;
     for (const l of rows) {
       html += `<div class="wiki-stale-item" data-stale-linking="${esc(l.relPath)}"><div class="wiki-stale-ltitle">${pageLink(l.relPath, l.title)}</div>`;
       if (b === "toCheck") {
         for (const p of l.passages.filter((x) => x.claim)) html += `<div class="wiki-stale-line"><span class="wiki-stale-ln">L${p.line}</span> ${esc(p.text)}</div>`;
-        html += verdictHtml(l.verdict);
+        const failed = opts.rowErrors?.[l.relPath];
+        if (failed) html += `<div class="wiki-stale-error" data-stale-row-error>Not checked: ${esc(failed)}</div>`;
+        html += verdictHtml(l.verdict, opts, `fix:linking:${l.relPath}`);
         if (l.verdict?.checkedBy !== "reader") html += verdictButtons(`data-kind="passage" data-stale-page="${esc(page)}" data-linking="${esc(l.relPath)}"`);
       }
       html += `</div>`;
@@ -196,9 +225,10 @@ export function staleBodyHtml(r: StaleReportView | null, opts: { checking?: bool
 /** The tab's CSS, injected by `wiki-page.ts`. */
 export function wikiStaleTabStyles(): string {
   return `
-    .wiki-stale-count { margin-left: 5px; padding: 0 5px; border-radius: 8px; font-size: 10px; background: color-mix(in srgb, var(--status-warning) 22%, transparent); color: var(--text-primary); }
+    .wiki-stale-count { margin-left: 5px; padding: 0 5px; border-radius: 8px; font-size: 10px; white-space: nowrap; background: color-mix(in srgb, var(--status-warning) 22%, transparent); color: var(--text-primary); }
     .wiki-stale-count:empty { display: none; }
     .wiki-stale-head { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); padding: 4px 4px 10px; }
+    .wiki-stale-error { font-size: 12px; color: var(--status-error); padding: 3px 4px; line-height: 1.45; overflow-wrap: anywhere; }
     .wiki-stale-note { font-size: 12px; color: var(--text-dim); padding: 4px; line-height: 1.5; }
     .wiki-stale-item { padding: 7px 8px; margin: 4px 0; border-radius: 6px; background: var(--bg-surface); border: 1px solid var(--border-primary); }
     .wiki-stale-line { font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin: 2px 0; overflow-wrap: anywhere; }
@@ -219,7 +249,7 @@ export function wikiStaleTabStyles(): string {
     .wiki-stale-fix ins { color: var(--status-success); text-decoration: none; }
     .wiki-stale-fix-note { font-size: 11px; color: var(--text-faint); }
     .wiki-stale-actions { display: flex; gap: 6px; margin-top: 5px; }
-    .wiki-stale-btn { font: inherit; font-size: 11.5px; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--border-secondary); background: var(--bg-primary); color: var(--text-secondary); cursor: pointer; }
+    .wiki-stale-btn { font: inherit; font-size: 11.5px; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--border-secondary); background: var(--bg-panel); color: var(--text-secondary); cursor: pointer; }
     .wiki-stale-btn:hover { border-color: var(--accent); color: var(--text-primary); }
     .wiki-stale-btn.primary { border-color: var(--accent); color: var(--accent-light); }
     .wiki-stale-btn[disabled] { opacity: 0.6; cursor: progress; }

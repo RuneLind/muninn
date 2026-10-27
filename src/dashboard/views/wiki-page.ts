@@ -56,7 +56,7 @@ import {
 } from "./components/wiki-readonly-client.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
 import { WIKI_READ_SLICE_CLASS, wikiReadSliceStyles } from "./components/wiki-read-slice.ts";
-import { wikiStaleTabStyles } from "./components/wiki-stale-tab.ts";
+import { STALE_TAB_TITLE, wikiStaleTabStyles } from "./components/wiki-stale-tab.ts";
 import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
 import { FACTCHECK_CONF_CHIP_CSS } from "./components/factcheck-conf-chip-styles.ts";
 import type { AuthRole } from "../../auth/role.ts";
@@ -3245,7 +3245,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
       </div>
       <div class="wiki-conn-tabs">
         <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
-        <button class="wiki-conn-tab" data-conntab="stale" title="What a change to this page may have made untrue elsewhere">Stale<span class="wiki-stale-count" id="wikiStaleCount"></span></button>
+        <button class="wiki-conn-tab" data-conntab="stale" title="${STALE_TAB_TITLE}">Stale<span class="wiki-stale-count" id="wikiStaleCount"></span></button>
         <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
         <div class="wiki-conn-tools">
           <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>

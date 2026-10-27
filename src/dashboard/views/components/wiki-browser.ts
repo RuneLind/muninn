@@ -3600,12 +3600,13 @@ function renderConnections(data: WikiPageDetail): void {
 function switchConnTab(tab: string, focus?: boolean): void {
   // No Ask route under the read slice: the rail stays on Connections.
   if (!wikiToolsFlag()) tab = "conn";
+  // The STALE tab is absent where its routes are (the read slice) and hidden
+  // on a read-only instance (D25): the rail stays on Connections there. Decided
+  // before the active mark, so only the tab actually shown is marked (A12).
+  if (tab === "stale" && !staleTabAvailable()) tab = "conn";
   document.querySelectorAll(".wiki-conn-tab").forEach((b) => {
     b.classList.toggle("active", b.getAttribute("data-conntab") === tab);
   });
-  // The STALE tab is absent where its routes are (the read slice) and hidden
-  // on a read-only instance (D25): the rail stays on Connections there.
-  if (tab === "stale" && !staleTabAvailable()) tab = "conn";
   const connBody = document.getElementById("connBody");
   const askBody = document.getElementById("askBody");
   const staleBody = document.getElementById("staleBody");
@@ -3702,6 +3703,15 @@ let staleReport: StaleReportView | null = null;
 let staleFor: string | null = null;
 let staleChecking = false;
 let staleProgress = "";
+/** A failure shown above the report whatever else renders (a verdict not saved, A12). */
+let staleNotice = "";
+/** Linking pages whose last Check call failed: shown per row, not counted (A12). */
+let staleRowErrors: Record<string, string> = {};
+/** Pages the last Check left at its call limit (A12). */
+let staleCapLeft = 0;
+let staleCapCalls = 10;
+/** Each `<details>`'s open state by its `data-stale-open` key: a re-render keeps it (A12). */
+let staleOpen: Record<string, boolean> = {};
 /** The Check stream in flight: its page and its abort (A9). A Check belongs
  *  to the page it started on; leaving that page aborts it. */
 let staleCheckRun: { relPath: string; abort: AbortController } | null = null;
@@ -3718,18 +3728,48 @@ function staleTabAvailable(): boolean {
   return wikiToolsFlag() && !wikiReadonlyFlag();
 }
 
+/** Forget the page's client-side Check state: a new page starts clean. */
+function resetStaleClientState(): void {
+  staleProgress = "";
+  staleNotice = "";
+  staleRowErrors = {};
+  staleCapLeft = 0;
+  staleOpen = {};
+}
+
+/** The open page did not load: its stale report is an error, never the
+ *  previous page's report (A12). */
+function staleForFailedPage(): void {
+  abortStaleCheck();
+  staleFor = "";
+  staleReport = { error: "the page did not load" };
+  resetStaleClientState();
+  renderStale();
+}
+
 function renderStale(): void {
   const body = document.getElementById("staleBody");
   if (body) {
+    body.querySelectorAll("details[data-stale-open]").forEach((d) => {
+      staleOpen[d.getAttribute("data-stale-open") || ""] = (d as HTMLDetailsElement).open;
+    });
     body.innerHTML = staleFor === null
       ? '<div class="wiki-conn-empty">Select a page to see what may be stale.</div>'
-      : staleBodyHtml(staleReport, { checking: staleChecking, progress: staleProgress });
+      : staleBodyHtml(staleReport, {
+        checking: staleChecking,
+        progress: staleProgress,
+        notice: staleNotice,
+        rowErrors: staleRowErrors,
+        capLeft: staleCapLeft,
+        capCalls: staleCapCalls,
+        open: staleOpen,
+      });
   }
   const badge = document.getElementById("wikiStaleCount");
   if (badge) {
     const b = staleTabBadge(staleReport);
     badge.textContent = b.text;
-    badge.parentElement?.setAttribute("title", b.title);
+    badge.parentElement?.setAttribute("title", b.tabTitle);
   }
 }
 
@@ -3740,7 +3780,7 @@ function loadStale(relPath: string): void {
     abortStaleCheck();
     staleFor = relPath;
     staleReport = null;
-    staleProgress = "";
+    resetStaleClientState();
     renderStale();
   }
   fetch(withWiki("/api/wiki/stale?page=" + encodeURIComponent(relPath)))
@@ -3766,8 +3806,11 @@ async function runStaleCheckClient(relPath: string): Promise<void> {
   const mine = () => staleCheckRun === run && staleFor === relPath;
   staleChecking = true;
   staleProgress = "Starting…";
+  staleRowErrors = {};
+  staleCapLeft = 0;
   renderStale();
   let checked = 0;
+  let failed = 0;
   let total = 0;
   try {
     const res = await fetch("/api/wiki/stale/check", {
@@ -3792,13 +3835,23 @@ async function runStaleCheckClient(relPath: string): Promise<void> {
       let d: Record<string, unknown> = {};
       try { d = JSON.parse(frame.data) as Record<string, unknown>; } catch { return; }
       if (!mine()) return;
-      if (frame.event === "start") total = Number(d.toCheck) || 0;
-      else if (frame.event === "verdict" || frame.event === "error") {
+      const rel = String(d.relPath ?? "");
+      if (frame.event === "start") {
+        total = Number(d.toCheck) || 0;
+        staleCapLeft = Number(d.left) || 0;
+        staleCapCalls = Number(d.toCall) > 0 && staleCapLeft > 0 ? Number(d.toCall) : staleCapCalls;
+      } else if (frame.event === "verdict") {
         checked++;
-        const l = staleReport?.buckets?.linking.find((x) => x.relPath === d.relPath);
-        if (l && frame.event === "verdict") l.verdict = { verdict: d.verdict, reason: d.reason, edit: d.edit } as StaleVerdictView;
-      } else if (frame.event === "app_error") staleProgress = String(d.message ?? "Check failed");
-      if (frame.event !== "app_error") staleProgress = `${checked} of ${total} checked`;
+        delete staleRowErrors[rel];
+        const l = staleReport?.buckets?.linking.find((x) => x.relPath === rel);
+        if (l) l.verdict = { verdict: d.verdict, reason: d.reason, edit: d.edit } as StaleVerdictView;
+      } else if (frame.event === "error") {
+        // A failed call is not a checked page (A12): the row says why.
+        failed++;
+        staleRowErrors[rel] = String(d.message ?? "the check call failed");
+      } else if (frame.event === "done") staleCapLeft = Number(d.left) || 0;
+      if (frame.event === "app_error") staleProgress = String(d.message ?? "Check failed");
+      else staleProgress = `${checked} of ${total} checked` + (failed ? ` · ${failed} failed` : "");
       renderStale();
     });
     for (;;) {
@@ -3830,20 +3883,27 @@ async function postStaleVerdict(btn: Element): Promise<void> {
     payload.target = btn.getAttribute("data-target") || "";
   } else payload.linking = btn.getAttribute("data-linking") || "";
   (btn as HTMLButtonElement).disabled = true;
+  // The notice renders above the report, check bar or not (A12).
+  const fail = (msg: string) => {
+    if (staleFor !== relPath) return;
+    staleNotice = msg;
+    renderStale();
+  };
   try {
     const res = await fetch("/api/wiki/stale/verdict", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
     if (!res.ok) {
       const b = (await res.json().catch(() => ({}))) as { error?: unknown };
-      staleProgress = typeof b.error === "string" ? b.error : "The verdict was not saved (HTTP " + res.status + ").";
-      renderStale();
+      fail("The verdict was not saved: " + (typeof b.error === "string" ? b.error : "HTTP " + res.status) + ".");
       return;
     }
   } catch {
-    staleProgress = "Could not reach the server.";
-    renderStale();
+    fail("The verdict was not saved: could not reach the server.");
     return;
   }
-  if (staleFor === relPath) loadStale(relPath);
+  if (staleFor === relPath) {
+    staleNotice = "";
+    loadStale(relPath);
+  }
 }
 
 /**
@@ -4628,7 +4688,11 @@ function loadExplainer(m: WikiListing, push: boolean): void {
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
       // A fast page flip may have moved on — don't clobber the new page's panel.
-      if (data.error || currentRelPath !== m.relPath) return;
+      if (currentRelPath !== m.relPath) return;
+      if (data.error) {
+        staleForFailedPage();
+        return;
+      }
       // Re-stamp from the SINGLE-PAGE payload: the listing this render started
       // from came out of `/api/wiki/pages`, which strips `desc` (and an
       // explainer's `description` is sniffed, not always in the listing).
@@ -4646,6 +4710,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       if (currentRelPath !== m.relPath) return;
       document.getElementById("connBody")!.innerHTML =
         '<div class="wiki-conn-empty">Connections unavailable.</div>';
+      staleForFailedPage();
     });
   revealOnRender = true;
   renderList();
@@ -4765,6 +4830,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
           `<div class="wiki-empty-state">${esc(data.error)}</div>`;
         // The breadcrumb is the previous page's; its lens chip goes with that article.
         removeLensChip(document.getElementById("wikiBreadcrumb"));
+        // Its stale report goes with it: the tab says the page did not load (A12).
+        staleForFailedPage();
         // The PREVIOUS page's `currentName` deliberately survives a failed load, so
         // the view state keeps reading "article" and a refresh keeps deferring
         // until the reader navigates somewhere that succeeds or returns to start.
@@ -4927,6 +4994,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       document.getElementById("articleWrap")!.innerHTML =
         `<div class="wiki-empty-state">Failed to load page: ${esc(err.message)}</div>`;
       removeLensChip(document.getElementById("wikiBreadcrumb"));
+      staleForFailedPage();
       renderList();
     });
 }

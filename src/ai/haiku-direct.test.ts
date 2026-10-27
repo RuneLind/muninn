@@ -68,6 +68,8 @@ mock.module("@anthropic-ai/sdk", () => {
 // Mock spawnHaiku — fallback path. We only check it's called with the same
 // shape, not that the CLI actually runs.
 const spawnCalls: Array<{ prompt: string; opts: unknown }> = [];
+/** The fake CLI never answers (routedStaleModel's own deadline race, A15). */
+let spawnHang = false;
 // trackUsage calls captured so we can assert the trace_id join (6th param).
 const trackUsageCalls: Array<{
   source: string;
@@ -83,6 +85,7 @@ mock.module("../scheduler/executor.ts", () => ({
   HAIKU_TIMEOUT_MS: 60_000,
   spawnHaiku: async (prompt: string, opts: unknown) => {
     spawnCalls.push({ prompt, opts });
+    if (spawnHang) await new Promise(() => {});
     return {
       result: "fallback-result",
       inputTokens: 1,
@@ -193,6 +196,7 @@ beforeEach(() => {
   copilotCatalog = ["claude-haiku-4.5", "claude-sonnet-5.5"];
   sdkThrow = null;
   sdkHang = false;
+  spawnHang = false;
   constructorOpts = null;
   _resetClientForTests();
   delete process.env.HAIKU_DIRECT_ENABLED;
@@ -802,6 +806,33 @@ describe("routedStaleModel (A7: the Stale check's call)", () => {
     await routedStaleModel("p", { bot: bot({ connector: "claude-cli", haikuBackend: "anthropic" }), deadlineAt: Date.now() + 10_000, source: "test" });
     expect(sdkCalls).toHaveLength(0);
     expect((spawnCalls[0]!.opts as { timeoutMs: number }).timeoutMs).toBeGreaterThan(9_000);
+  });
+
+  // A15: the gaps batch 3 left — the no-time refusal, the call's own deadline
+  // race, and what the call carries to the router and back.
+  test("A15: with a second or less left it refuses and makes no call", async () => {
+    const { routedStaleModel } = await import("../wiki/stale-confirm.ts");
+    await expect(routedStaleModel("p", { bot: bot({ connector: "claude-cli" }), deadlineAt: Date.now() + 900, source: "test" })).rejects.toThrow(/no time left/);
+    expect(spawnCalls).toHaveLength(0);
+    expect(sdkCalls).toHaveLength(0);
+  });
+
+  test("A15: a call that never answers rejects at its deadline", async () => {
+    spawnHang = true;
+    const { routedStaleModel } = await import("../wiki/stale-confirm.ts");
+    const t0 = Date.now();
+    const call = routedStaleModel("p", { bot: bot({ connector: "claude-cli" }), deadlineAt: t0 + 1_300, source: "test" });
+    const res = await Promise.race([call.then(() => "answered", (e: Error) => e.message), Bun.sleep(3_000).then(() => "still hung")]);
+    expect(res).toMatch(/passed its deadline/);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  test("A15: the call carries the bot and source to the router and returns the answer text", async () => {
+    const { routedStaleModel } = await import("../wiki/stale-confirm.ts");
+    const out = await routedStaleModel("the prompt", { bot: bot({ name: "kode", connector: "claude-cli" }), deadlineAt: Date.now() + 10_000, source: "wiki_stale_check" });
+    expect(out).toBe("fallback-result");
+    expect(spawnCalls[0]!.prompt).toBe("the prompt");
+    expect(spawnCalls[0]!.opts).toMatchObject({ source: "wiki_stale_check", entrypoint: "kode-wiki_stale_check", botName: "kode" });
   });
 });
 

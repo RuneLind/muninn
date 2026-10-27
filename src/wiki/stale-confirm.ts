@@ -442,7 +442,7 @@ const targetFacts = (meta: WikiPageMeta | undefined, relPath: string): StaleCall
 /** The commits a call carries about `target`: null for an uncommitted change
  *  newer than every commit, else the subjects between `sinceMs` and `untilMs`
  *  (the check's `asOf`). */
-async function commitsFor(index: WikiIndex, target: WikiPageMeta | undefined, sinceMs: number | undefined, untilMs?: number) {
+export async function commitsFor(index: Pick<WikiIndex, "root">, target: WikiPageMeta | undefined, sinceMs: number | undefined, untilMs?: number) {
   if (!target) return undefined;
   const uncommitted = untilMs === undefined && target.gitDirty === true && (target.gitTouchedMs === undefined || (sinceMs !== undefined && target.gitTouchedMs <= sinceMs));
   if (uncommitted) return null;
