@@ -239,7 +239,12 @@ ${LAB_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")
     function closeLab() {
       save({ open: false });
       clear();
-      if (panel) { panel.remove(); panel = null; }
+      if (!panel) return;
+      // Closed from inside the panel: focus goes back to ◐, not to <body>.
+      var had = panel.contains(document.activeElement);
+      panel.remove(); panel = null;
+      var btn = document.getElementById('themeToggle');
+      if (had && btn) btn.focus();
     }
     // The ◐ menu's "Theme lab…" item calls this (theme.ts).
     window.__themeLabOpen = openLab;

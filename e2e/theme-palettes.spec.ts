@@ -781,6 +781,28 @@ test.describe("The theme lab", () => {
     await page.keyboard.press("Enter");
     await expect(page.locator('#themeLab [data-lab="min"]')).toBeFocused();
     await page.keyboard.press("Enter");
+    // Fix round 2 (PR #755): closing with × from the keyboard left focus on <body>.
+    await page.locator('#themeLab [data-lab="close"]').focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#themeLab")).toHaveCount(0);
+    await expect(page.locator("#themeToggle")).toBeFocused();
+  });
+
+  // Fix round 2 (PR #755): pins the two open-focus branches. A page load that
+  // re-opens the lab never takes focus; opened minimized, focus goes to ▴.
+  test("a page load never moves focus into the lab; opened minimized, focus goes to ▴", async ({ page }) => {
+    await storeChoice(page, "reading");
+    await page.goto(BASE + "/");
+    await page.locator("#themeToggle").click();
+    await page.getByRole("menuitem", { name: /Theme lab/ }).click();
+    await page.locator('#themeLab [data-lab="min"]').click();
+    await page.reload();
+    await expect(page.locator("#themeLab")).toBeVisible();
+    expect(await page.evaluate(() => document.activeElement === document.body), "focus stays on the page").toBe(true);
+    await page.locator("#themeToggle").click();
+    await page.getByRole("menuitem", { name: /Theme lab/ }).click();
+    await expect(page.locator('#themeLab [data-lab="min"]')).toBeFocused();
+    await page.locator('#themeLab [data-lab="min"]').click();
     await page.locator('#themeLab [data-lab="close"]').click();
   });
 

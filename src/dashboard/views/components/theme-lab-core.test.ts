@@ -102,6 +102,15 @@ describe("theme lab derivation", () => {
 });
 
 describe("theme lab export", () => {
+  // Fix round 2 (PR #755): string comparison flagged #fff vs #ffffff and
+  // transparent vs rgba(0, 0, 0, 0) as moved before any slider did.
+  for (const id of ["dark", "light", ...PALETTES.map((p) => p.id)]) {
+    test(`${id}: at the initial sliders, nothing counts as changed`, () => {
+      const ref = themeRef(id);
+      expect(labChangedKeys(ref, labDerive(ref, labInitialState(ref)))).toEqual([]);
+    });
+  }
+
   // Fix round 1 (PR #755, F2): the block carried every watched token, e.g. the
   // base's --status-* on Reading, freezing base values a palette need not set.
   for (const p of PALETTES) {

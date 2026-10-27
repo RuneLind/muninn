@@ -160,10 +160,19 @@ export function labLadderIssues(ref: Record<string, string>, tokens: Record<stri
   return issues;
 }
 
-/** The overrides whose value differs from the reference: what the sliders actually moved. */
+/**
+ * The overrides whose value differs from the reference: what the sliders
+ * actually moved. Colours compare by value (`#fff` = `#ffffff`,
+ * `transparent` = `rgba(0, 0, 0, 0)`); anything else by its text.
+ */
 export function labChangedKeys(ref: Record<string, string>, derived: Record<string, string>): string[] {
   const norm = (v: string | undefined) => (v || "").trim().toLowerCase().replace(/\s+/g, "");
-  return Object.keys(derived).filter((k) => norm(derived[k]) !== norm(ref[k]));
+  const same = (a: string | undefined, b: string | undefined) => {
+    const x = labParse(a || ""), y = labParse(b || "");
+    if (!x || !y) return norm(a) === norm(b);
+    return [0, 1, 2].every((i) => Math.round(x[i]!) === Math.round(y[i]!)) && Math.abs(x[3] - y[3]) < 0.005;
+  };
+  return Object.keys(derived).filter((k) => !same(derived[k], ref[k]));
 }
 
 /** Slider states are kept per choice; System keeps one per OS scheme, since its reference differs. */
