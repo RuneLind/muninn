@@ -10,17 +10,22 @@
  * - `--pages` (one or several, space- or comma-separated): each page's stale
  *   status lines, and, when it changed in the 14 days to «now», its linking
  *   pages by bucket, the To-check ones with their passages, and *Moved with*.
- * - `--session <id>`: the pages that agent session wrote, from muninn's warm
- *   work memo (the last 8 days), reported as `--pages` would.
+ * - `--session <id>`: the pages that agent session wrote (reserved pages
+ *   left out), from muninn's work memo of the last 8 days, refreshed for the
+ *   request; the line says the memo's as-of and whether claude-usage's caps
+ *   clipped it. Each page is reported as `--pages` would.
  * - Neither: the wiki's uncommitted and recently committed pages and every
  *   page with a stale status line, with their counts. Edits nothing.
  * - `--as-of` pins «now» (tests); `--check` is accepted, and the model checks
- *   arrive with PR 2a; `--json` prints the route's answers as JSON lines.
+ *   arrive with PR 2a; `--json` prints the route's answers as JSON lines, and
+ *   every notice (errors, the session line, the readonly line) as a
+ *   `{"notice": …}` line, so each stdout line parses.
  * - Base URL: `--base-url`, else `WIKI_STALE_MUNINN_URL`, else
  *   http://127.0.0.1:3010.
  *
- * It reports and exits 0 always (D13), a usage error and an unreachable
- * muninn included: a handoff that runs it must never fail on it. On a
+ * It reports and exits 0 always (D13), a usage error, an unreachable muninn
+ * and an answer of the wrong shape included, and the whole run ends within
+ * {@link RUN_DEADLINE_MS}: a handoff that runs it must never fail or wait on it. On a
  * readonly instance (D25) it prints the free checks plus one
  * «check unavailable: readonly instance» line.
  */
@@ -95,10 +100,22 @@ export function parseStaleArgs(argv: readonly string[]): { args: StaleArgs; erro
 }
 
 type Json = Record<string, any>;
-export type FetchJson = (url: string) => Promise<{ status: number; body: Json }>;
+export type FetchJson = (url: string, signal?: AbortSignal) => Promise<{ status: number; body: Json }>;
+
+/** The whole run's deadline (D13): a handoff waits on this script at most
+ *  this long, however many calls a session report makes. The route's own
+ *  bound on a session request (`SESSION_REFRESH_TIMEOUT_MS`, 8 s) fits in it. */
+export const RUN_DEADLINE_MS = 25_000;
 
 const day = (ms: number | undefined) => (ms === undefined ? "never" : new Date(ms).toISOString().slice(0, 10));
+const minute = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")}Z`;
 const cap = (s: string, n = 160) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+const isObj = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
+/** The answer shapes the printers read — anything else (a wrong `--base-url`,
+ *  an older or newer muninn) is one line, never a throw. */
+const isPageReport = (r: Json) => isObj(r.page) && typeof r.page.relPath === "string" && Array.isArray(r.hits) && (r.buckets === null || (isObj(r.buckets) && isObj(r.buckets.counts) && Array.isArray(r.buckets.linking)));
+const isSummary = (r: Json) => isObj(r.totals) && Array.isArray(r.pages);
+const isSession = (r: Json) => isObj(r.session) && typeof r.session.found === "boolean" && Array.isArray(r.session.pages);
 const BUCKET_LABEL: Record<string, string> = {
   toCheck: "to check",
   mentions: "mentions",
@@ -108,7 +125,7 @@ const BUCKET_LABEL: Record<string, string> = {
 };
 
 function hitLines(hits: Json[]): string[] {
-  return hits.map((h) => `    L${h.line}  ${h.said.map((s: string) => `«${s}»`).join(", ")} after [[${h.target}]] — plan_status ${h.now}: ${cap(h.text)}`);
+  return hits.map((h) => `    L${h.line}  ${(h.said ?? []).map((s: string) => `«${s}»`).join(", ")} after [[${h.target}]] — plan_status ${h.now}: ${cap(String(h.text ?? ""))}`);
 }
 
 /** One page's report, as printed. */
@@ -159,22 +176,25 @@ export function formatSummary(r: Json): string[] {
 
 /**
  * Run the script: returns the lines to print. Never throws — every failure
- * is a line — so the caller always exits 0.
+ * is a line — so the caller always exits 0, and the whole run ends within
+ * `deadlineMs` ({@link RUN_DEADLINE_MS}). With `--json` every line is JSON:
+ * the route's answers as they came, and each notice as `{"notice": …}`.
  */
 export async function runWikiStale(
   argv: readonly string[],
-  deps: { fetchJson?: FetchJson; env?: Record<string, string | undefined> } = {},
+  deps: { fetchJson?: FetchJson; env?: Record<string, string | undefined>; deadlineMs?: number } = {},
 ): Promise<string[]> {
   const { args, errors } = parseStaleArgs(argv);
+  const notice = (text: string) => (args.json ? JSON.stringify({ notice: text }) : text);
   if (errors.length || !args.wiki) {
-    return [...errors.map((e) => `wiki-stale: ${e}`), ...(args.wiki ? [] : ["wiki-stale: --wiki is required"]), USAGE];
+    return [...errors.map((e) => `wiki-stale: ${e}`), ...(args.wiki ? [] : ["wiki-stale: --wiki is required"]), USAGE].map(notice);
   }
   const env = deps.env ?? process.env;
   const base = (args.baseUrl ?? env.WIKI_STALE_MUNINN_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
   const fetchJson: FetchJson =
     deps.fetchJson ??
-    (async (url) => {
-      const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+    (async (url, signal) => {
+      const res = await fetch(url, { signal });
       return { status: res.status, body: (await res.json().catch(() => ({ error: `HTTP ${res.status}` }))) as Json };
     });
   const url = (extra: Record<string, string>) => {
@@ -182,50 +202,89 @@ export async function runWikiStale(
     return `${base}/api/wiki/stale?${q}`;
   };
   const out: string[] = [];
+  const deadlineMs = deps.deadlineMs ?? RUN_DEADLINE_MS;
+  const abort = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<"deadline">((resolve) => {
+    timer = setTimeout(() => {
+      abort.abort();
+      resolve("deadline");
+    }, deadlineMs);
+  });
   let readonly = false;
-  const ask = async (extra: Record<string, string>): Promise<Json | null> => {
+  let late = false;
+  const ask = async (extra: Record<string, string>, valid: (r: Json) => boolean, what: string): Promise<Json | null> => {
+    if (late) return null;
     try {
-      const { status, body } = await fetchJson(url(extra));
+      const got = await Promise.race([fetchJson(url(extra), abort.signal), expired]);
+      if (got === "deadline") throw new Error("deadline");
+      const { status, body } = got;
       if (body?.readonly) readonly = true;
       if (args.json) out.push(JSON.stringify(body));
       if (status >= 400 || body?.error) {
-        out.push(`wiki-stale: ${body?.error ?? `HTTP ${status}`}${extra.page ? ` (${extra.page})` : ""}`);
+        out.push(notice(`wiki-stale: ${body?.error ?? `HTTP ${status}`}${extra.page ? ` (${extra.page})` : ""}`));
+        return null;
+      }
+      if (!isObj(body) || !valid(body)) {
+        out.push(notice(`wiki-stale: unexpected answer from ${base} for ${what} — is --base-url a muninn of this version?`));
         return null;
       }
       return body;
     } catch (err) {
-      out.push(`wiki-stale: cannot reach muninn at ${base}: ${err instanceof Error ? err.message : String(err)}`);
+      if (abort.signal.aborted) {
+        late = true;
+        out.push(notice(`wiki-stale: muninn did not answer in ${deadlineMs / 1000} s — no stale report`));
+      } else {
+        out.push(notice(`wiki-stale: cannot reach muninn at ${base}: ${err instanceof Error ? err.message : String(err)}`));
+      }
       return null;
     }
   };
 
-  let pages = args.pages;
-  if (args.session) {
-    const s = await ask({ session: args.session });
-    if (s) {
-      const sess = s.session;
-      if (!sess.found) out.push(`wiki-stale: session ${args.session} wrote nothing in ${args.wiki} in the work memo's window${sess.error ? ` (${sess.error})` : ""}`);
-      else out.push(`session ${args.session}: ${sess.pages.length} page(s) in ${args.wiki}`);
-      pages = [...new Set([...pages, ...sess.pages])];
+  try {
+    let pages = args.pages;
+    if (args.session) {
+      const s = await ask({ session: args.session }, isSession, `session ${args.session}`);
+      if (s) {
+        const sess = s.session;
+        const memo = [
+          ...(typeof sess.asOfMs === "number" ? [`work memo as of ${minute(sess.asOfMs)}`] : []),
+          ...(sess.refreshTimedOut ? ["claude-usage did not answer in time, so the memo may miss the newest writes"] : []),
+          ...(sess.truncated ? ["the memo hit claude-usage's 200-session cap, so older sessions may be missing"] : []),
+          ...(sess.filesCapped ? ["the session lists claude-usage's 200-file cap, so it may have written more"] : []),
+        ];
+        const tail = memo.length ? ` (${memo.join("; ")})` : "";
+        if (!sess.found) out.push(notice(`wiki-stale: session ${args.session} wrote nothing in ${args.wiki} in the work memo's window${sess.error ? ` (${sess.error})` : ""}${tail}`));
+        else out.push(notice(`session ${args.session}: ${sess.pages.length} page(s) in ${args.wiki}${tail}`));
+        pages = [...new Set([...pages, ...sess.pages.filter((p: unknown): p is string => typeof p === "string")])];
+      }
     }
-  }
 
-  if (pages.length) {
-    for (const page of pages) {
-      const r = await ask({ page });
-      if (r && !args.json) out.push(...formatPageReport(r), "");
+    if (pages.length) {
+      for (const page of pages) {
+        const r = await ask({ page }, isPageReport, `page ${page}`);
+        if (r && !args.json) out.push(...formatPageReport(r), "");
+      }
+    } else if (!args.session) {
+      const r = await ask({}, isSummary, "the summary");
+      if (r && !args.json) out.push(...formatSummary(r));
     }
-  } else if (!args.session) {
-    const r = await ask({});
-    if (r && !args.json) out.push(...formatSummary(r));
+  } catch (err) {
+    out.push(notice(`wiki-stale: ${err instanceof Error ? err.message : String(err)}`));
+  } finally {
+    clearTimeout(timer);
   }
-  if (readonly) out.push("check unavailable: readonly instance");
-  else if (args.check) out.push("check: the model checks arrive with PR 2a — these are the free checks only");
+  if (readonly) out.push(notice("check unavailable: readonly instance"));
+  else if (args.check) out.push(notice("check: the model checks arrive with PR 2a — these are the free checks only"));
   return out;
 }
 
 if (import.meta.main) {
-  const lines = await runWikiStale(process.argv.slice(2));
-  console.log(lines.join("\n"));
+  try {
+    const lines = await runWikiStale(process.argv.slice(2));
+    console.log(lines.join("\n"));
+  } catch (err) {
+    console.log(`wiki-stale: ${err instanceof Error ? err.message : String(err)}`);
+  }
   process.exit(0);
 }

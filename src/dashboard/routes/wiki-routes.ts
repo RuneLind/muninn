@@ -35,7 +35,8 @@ import {
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
-import { hasProvenance, jiraCounts } from "../../wiki/provenance.ts";
+import { hasProvenance, jiraCounts, mapLedgerProvider, sessionRefMatches } from "../../wiki/provenance.ts";
+import { isReservedBasename } from "../../wiki/frontmatter-lists.ts";
 import { computeRelated, type RelatedRef } from "../../wiki/related.ts";
 import { RELATED_HOP_LIMIT_DEFAULT, RELATED_HOP_LIMIT_MAX } from "../../wiki/related-constants.ts";
 import { nearScores } from "../../wiki/strength.ts";
@@ -55,7 +56,7 @@ import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
 import { isReadonlyWikiRoot, isWikiReadonly, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { movedWith, parseStaleAsOf, staleSummary, stalePageReport } from "../../wiki/stale.ts";
-import { workSessionsFor } from "../../wiki/work-sessions.ts";
+import { WORK_SESSION_FILE_CAP, workSessionsForSession } from "../../wiki/work-sessions.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
   fetchSimilarPages,
@@ -2319,18 +2320,36 @@ export function registerWikiToolRoutes(
     const base = { wiki: entry.name, readonly: isWikiReadonly() || isReadonlyWikiRoot(entry.root) };
     const session = (c.req.query("session") ?? "").trim();
     if (session) {
-      const memo = workSessionsFor(index.root);
-      const bare = session.includes(":") ? session.slice(session.indexOf(":") + 1) : session;
-      const found = memo?.sessions.find((s) => s.id === bare || `${s.provider}:${s.id}` === session);
+      // Fresh, not the background memo (up to a TTL old after an idle spell):
+      // a handoff asks right after the session wrote.
+      const matches = (s: { provider: string; id: string }) => sessionRefMatches(`${mapLedgerProvider(s.provider) ?? ""}:${s.id}`, session);
+      const { memo, timedOut } = await workSessionsForSession(index.root, matches);
+      const found = memo?.sessions.find(matches);
+      // Reserved pages (`index`/`log`/`CLAUDE`) are bookkeeping nearly every
+      // session writes; they are never changed pages.
       const pages = found
-        ? [...new Set(found.files.map((f) => index.resolveRelPath(f.p)?.relPath).filter((r): r is string => !!r))]
+        ? [
+            ...new Set(
+              found.files
+                .map((f) => index.resolveRelPath(f.p)?.relPath)
+                .filter((r): r is string => !!r && !isReservedBasename(r)),
+            ),
+          ]
         : [];
       return c.json({
         ...base,
         session: {
           id: session,
           found: !!found,
-          ...(memo ? { sinceMs: memo.sinceMs } : { error: "no work-sessions memo is warm for this wiki" }),
+          ...(memo
+            ? {
+                sinceMs: memo.sinceMs,
+                asOfMs: memo.asOfMs,
+                truncated: memo.truncated,
+                ...(found && found.files.length >= WORK_SESSION_FILE_CAP ? { filesCapped: true } : {}),
+              }
+            : { error: "no work-sessions memo is warm for this wiki" }),
+          ...(timedOut ? { refreshTimedOut: true } : {}),
           pages,
         },
       });

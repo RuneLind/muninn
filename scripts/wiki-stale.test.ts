@@ -106,6 +106,60 @@ describe("runWikiStale", () => {
   });
 });
 
+describe("D13: it never fails and never holds a handoff", () => {
+  test("a 200 with an unexpected shape is a line, never a throw — summary, page and session", async () => {
+    const empty = fake(() => ({}));
+    for (const argv of [["--wiki", "w"], ["--wiki", "w", "--pages", "a.md"], ["--wiki", "w", "--session", "claude-code:abc"]]) {
+      const out = await runWikiStale(argv, { fetchJson: empty, env: {} });
+      expect(out.join("\n")).toContain("unexpected answer");
+    }
+  });
+
+  test("one overall deadline: a muninn that never answers costs the deadline once, not a timeout per call", async () => {
+    let calls = 0;
+    const never: FetchJson = () => {
+      calls++;
+      return new Promise(() => {});
+    };
+    const t0 = Date.now();
+    const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "b.md", "c.md"], { fetchJson: never, env: {}, deadlineMs: 150 });
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(calls).toBe(1);
+    expect(out).toContain("wiki-stale: muninn did not answer in 0.15 s — no stale report");
+  });
+
+  test("--json: every line parses as JSON — notices, errors and the readonly line included", async () => {
+    const answers = fake((q) =>
+      q.has("session")
+        ? { readonly: true, session: { id: "claude-code:abc", found: true, asOfMs: 1, truncated: true, pages: ["repos/x.md", "nope.md"] } }
+        : q.get("page") === "nope.md"
+          ? { error: "no page nope.md" }
+          : { ...report, readonly: true },
+    );
+    const out = await runWikiStale(["--wiki", "w", "--session", "claude-code:abc", "--check", "--json"], { fetchJson: answers, env: {} });
+    expect(out.length).toBeGreaterThan(3);
+    for (const line of out) expect(() => JSON.parse(line)).not.toThrow();
+    const notices = out.map((l) => JSON.parse(l)).filter((o) => typeof o.notice === "string").map((o) => o.notice);
+    expect(notices).toContain("check unavailable: readonly instance");
+    expect(notices.some((n: string) => n.includes("no page nope.md"))).toBe(true);
+  });
+
+  test("--session prints the memo's as-of and its clipping", async () => {
+    const out = await runWikiStale(["--wiki", "w", "--session", "claude-code:abc"], {
+      env: {},
+      fetchJson: fake((q) =>
+        q.has("session")
+          ? { session: { id: "claude-code:abc", found: true, asOfMs: Date.parse("2026-10-25T10:30:00Z"), truncated: true, filesCapped: true, pages: [] } }
+          : report,
+      ),
+    });
+    const text = out.join("\n");
+    expect(text).toContain("work memo as of 2026-10-25 10:30Z");
+    expect(text).toContain("200-session cap");
+    expect(text).toContain("200-file cap");
+  });
+});
+
 test("the script exits 0, even on a usage error", async () => {
   const proc = Bun.spawn(["bun", "--no-env-file", `${import.meta.dir}/wiki-stale.ts`, "--bogus"], { stdout: "pipe", stderr: "pipe" });
   const [code, out] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);

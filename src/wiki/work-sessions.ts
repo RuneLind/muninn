@@ -389,6 +389,45 @@ export function kickWorkSessionsRefresh(root: string, opts: { maxAgeMs?: number;
   void refreshWorkSessions(root, deps).catch(() => {});
 }
 
+/** claude-usage's per-session file cap in the sessions form
+ *  (`FILES_SESSIONS_FILE_LIMIT`, most edits first): a session listing this
+ *  many files may have written more. */
+export const WORK_SESSION_FILE_CAP = 200;
+/** A memo this young answers a session request without asking again. */
+export const SESSION_MEMO_MAX_AGE_MS = 30_000;
+/** The longest a session request waits on a refresh; the refresh itself
+ *  keeps running and lands in the memo. */
+export const SESSION_REFRESH_TIMEOUT_MS = 8_000;
+
+/**
+ * The memo for one session request — `GET /api/wiki/stale?session=`, which a
+ * handoff runs right after the session wrote. The background memo is up to a
+ * TTL old after an idle spell, so it is refreshed here, awaited for at most
+ * {@link SESSION_REFRESH_TIMEOUT_MS}, unless the session is in a memo at most
+ * {@link SESSION_MEMO_MAX_AGE_MS} old. A refresh that failed in that window
+ * is not retried (the back-off).
+ */
+export async function workSessionsForSession(
+  root: string,
+  matches: (s: WorkSession) => boolean,
+  opts: { deps?: WorkSessionsDeps; timeoutMs?: number } = {},
+): Promise<{ memo: WorkSessionsMemo | null; timedOut: boolean }> {
+  const deps = opts.deps ?? workSessionsDepsFromEnv();
+  const now = (deps.now ?? Date.now)();
+  const memo = workSessionsFor(root, now);
+  const fresh = memo !== null && now - memo.asOfMs <= SESSION_MEMO_MAX_AGE_MS;
+  if (fresh && memo.sessions.some(matches)) return { memo, timedOut: false };
+  const failed = lastFailureAt.get(root);
+  if (!deps.urlConfigured || (failed !== undefined && now - failed < SESSION_MEMO_MAX_AGE_MS)) return { memo, timedOut: false };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), opts.timeoutMs ?? SESSION_REFRESH_TIMEOUT_MS);
+  });
+  const done = await Promise.race([refreshWorkSessions(root, deps).catch(() => null), timeout]);
+  clearTimeout(timer);
+  return { memo: workSessionsFor(root, (deps.now ?? Date.now)()), timedOut: done === "timeout" };
+}
+
 /** Test-only: drop every memo, refresh and back-off. */
 export function __resetWorkSessionsForTest(): void {
   memos.clear();

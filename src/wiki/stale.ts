@@ -463,10 +463,9 @@ export function bucketFor(input: {
   passages: readonly { line: number; text: string; inFrontmatter: boolean; pointerHeading: boolean; claim?: string }[];
 }): Bucket {
   const { page, lastChangeMs, changedAtMs, passages } = input;
-  if (isHistoryPage(page)) return "history";
-  if (lastChangeMs !== undefined && lastChangeMs > changedAtMs) return "changedSince";
-  const older = lastChangeMs === undefined || lastChangeMs < changedAtMs - OLDER_MARGIN_MS;
-  if (!older || passages.length === 0) return "mentions";
+  const decided = metadataBucket(page, lastChangeMs, changedAtMs);
+  if (decided) return decided;
+  if (passages.length === 0) return "mentions";
   const pointer = passages.every((p) => {
     if (p.inFrontmatter || p.pointerHeading) return true;
     const m = BARE_ITEM.exec(p.text);
@@ -477,9 +476,21 @@ export function bucketFor(input: {
   return "mentions";
 }
 
+/** {@link bucketFor}'s first three rules, which read no passage: History,
+ *  Changed since, and a page inside the margin (a Mention). Null when the
+ *  passages decide — the only case that reads the linking page. */
+function metadataBucket(page: PageFacts, lastChangeMs: number | undefined, changedAtMs: number): Bucket | null {
+  if (isHistoryPage(page)) return "history";
+  if (lastChangeMs !== undefined && lastChangeMs > changedAtMs) return "changedSince";
+  const older = lastChangeMs === undefined || lastChangeMs < changedAtMs - OLDER_MARGIN_MS;
+  return older ? null : "mentions";
+}
+
+type ParsedPage = ReturnType<typeof stateExemptLines>;
+
 /** Every line of a linking page that links to the target, with its context. */
-function linkPassages(content: string, fromRelPath: string, targetKey: string, index: Pick<WikiIndex, "resolve">) {
-  const { lines, body, exempt } = stateExemptLines(content);
+function linkPassages(parsed: ParsedPage, fromRelPath: string, targetKey: string, index: Pick<WikiIndex, "resolve">) {
+  const { lines, body, exempt } = parsed;
   const out: { line: number; text: string; inFrontmatter: boolean; pointerHeading: boolean; claim?: string }[] = [];
   let pointerHeading = false;
   for (let i = 0; i < lines.length; i++) {
@@ -531,6 +542,28 @@ export function linkingBuckets(
   return p;
 }
 
+/** The changed page behind a bucket request, or null when it is none. */
+async function changedPageOf(index: WikiIndex, relPath: string, nowMs: number, asOfMs: number | undefined) {
+  const page = index.resolveRelPath(relPath);
+  // A reserved page (`index`/`log`/`CLAUDE`) is bookkeeping: it changes daily
+  // and links everything, so it is never a changed page.
+  if (!page || isReservedBasename(page.relPath)) return null;
+  const changedAtMs = await lastChangeIn(index, page, asOfMs ?? nowMs);
+  if (!isChangedPage(changedAtMs, nowMs)) return null;
+  return { page, changedAtMs, targetKey: normalizeRelPath(page.relPath) };
+}
+
+/** A changed page's linking pages: its backlinks minus reserved pages and itself. */
+function* linkingPagesOf(index: WikiIndex, targetKey: string): Generator<WikiPageMeta> {
+  for (const fromKey of index.backlinks.get(targetKey) ?? []) {
+    const from = index.resolveRelPath(fromKey);
+    if (!from || isReservedBasename(from.relPath) || normalizeRelPath(from.relPath) === targetKey) continue;
+    yield from;
+  }
+}
+
+const emptyCounts = () => Object.fromEntries(BUCKETS.map((b) => [b, 0])) as Record<Bucket, number>;
+
 async function computeBuckets(
   index: WikiIndex,
   relPath: string,
@@ -538,21 +571,15 @@ async function computeBuckets(
   asOfMs: number | undefined,
   readFile: StaleReadFile,
 ): Promise<StaleBuckets | null> {
-  const page = index.resolveRelPath(relPath);
-  // A reserved page (`index`/`log`/`CLAUDE`) is bookkeeping: it changes daily
-  // and links everything, so it is never a changed page.
-  if (!page || isReservedBasename(page.relPath)) return null;
-  const changedAtMs = await lastChangeIn(index, page, asOfMs ?? nowMs);
-  if (!isChangedPage(changedAtMs, nowMs)) return null;
-  const targetKey = normalizeRelPath(page.relPath);
-  const counts = Object.fromEntries(BUCKETS.map((b) => [b, 0])) as Record<Bucket, number>;
+  const changed = await changedPageOf(index, relPath, nowMs, asOfMs);
+  if (!changed) return null;
+  const { page, changedAtMs, targetKey } = changed;
+  const counts = emptyCounts();
   const linking: LinkingPage[] = [];
-  for (const fromKey of index.backlinks.get(targetKey) ?? []) {
-    const from = index.resolveRelPath(fromKey);
-    if (!from || isReservedBasename(from.relPath) || normalizeRelPath(from.relPath) === targetKey) continue;
+  for (const from of linkingPagesOf(index, targetKey)) {
     const content = await readFile(path.join(index.root, from.relPath));
     if (content === null) continue;
-    const passages = linkPassages(content, from.relPath, targetKey, index);
+    const passages = linkPassages(stateExemptLines(content), from.relPath, targetKey, index);
     const lastChangeMs = await lastChangeIn(index, from, asOfMs ?? nowMs);
     const bucket = bucketFor({ page: from, lastChangeMs, changedAtMs, passages });
     counts[bucket]++;
@@ -567,6 +594,74 @@ async function computeBuckets(
     });
   }
   return { relPath: page.relPath, changedAtMs, counts, linking };
+}
+
+/** One summary call's reads: each linking page read and masked once, however
+ *  many changed pages it links to. */
+export type StaleReadMemo = Map<string, Promise<ParsedPage | null>>;
+
+/** Per index: the counts-only answers, keyed like {@link bucketCache}. */
+const countsCache = new WeakMap<WikiIndex, Map<string, Promise<Record<Bucket, number> | null>>>();
+
+/**
+ * {@link linkingBuckets}' counts alone, for the summary (D31): each linking
+ * page is sorted by {@link metadataBucket} first, and only the older,
+ * non-history ones are read — through `memo`, so once per call. The same
+ * counts as the full path, with one difference no index shows: the full path
+ * drops a linking page whose file vanished since the build, and this path
+ * counts a metadata-decided one without reading it. Cached on the index;
+ * a full answer already cached gives its counts.
+ */
+export function linkingCounts(
+  index: WikiIndex,
+  relPath: string,
+  opts: { asOfMs?: number; readFile?: StaleReadFile; memo?: StaleReadMemo } = {},
+): Promise<Record<Bucket, number> | null> {
+  const nowMs = staleNow(index, opts.asOfMs);
+  const key = `${normalizeRelPath(relPath)}\0${nowMs}`;
+  if (!opts.readFile) {
+    const full = bucketCache.get(index)?.get(key);
+    if (full) return full.then((b) => b?.counts ?? null);
+  }
+  let cache = countsCache.get(index);
+  if (!cache) countsCache.set(index, (cache = new Map()));
+  const hit = opts.readFile ? undefined : cache.get(key);
+  if (hit) return hit;
+  const p = computeCounts(index, relPath, nowMs, opts.asOfMs, opts.readFile ?? defaultReadFile, opts.memo ?? new Map());
+  if (!opts.readFile) cache.set(key, p);
+  return p;
+}
+
+async function computeCounts(
+  index: WikiIndex,
+  relPath: string,
+  nowMs: number,
+  asOfMs: number | undefined,
+  readFile: StaleReadFile,
+  memo: StaleReadMemo,
+): Promise<Record<Bucket, number> | null> {
+  const changed = await changedPageOf(index, relPath, nowMs, asOfMs);
+  if (!changed) return null;
+  const { changedAtMs, targetKey } = changed;
+  const counts = emptyCounts();
+  for (const from of linkingPagesOf(index, targetKey)) {
+    const lastChangeMs = await lastChangeIn(index, from, asOfMs ?? nowMs);
+    const decided = metadataBucket(from, lastChangeMs, changedAtMs);
+    if (decided) {
+      counts[decided]++;
+      continue;
+    }
+    let parsed = memo.get(from.relPath);
+    if (!parsed) {
+      parsed = readFile(path.join(index.root, from.relPath)).then((c) => (c === null ? null : stateExemptLines(c)));
+      memo.set(from.relPath, parsed);
+    }
+    const page = await parsed;
+    if (page === null) continue;
+    const passages = linkPassages(page, from.relPath, targetKey, index);
+    counts[bucketFor({ page: from, lastChangeMs, changedAtMs, passages })]++;
+  }
+  return counts;
 }
 
 /** One page's free stale facts: its status-line hits, whether it is changed,
@@ -678,20 +773,21 @@ export interface StaleSummaryRow {
 
 /**
  * The wiki-wide summary (D31): every changed page and every page with a
- * status-line hit, with its two counts (D26). Changed pages' buckets are
- * computed (and cached) here; nothing is written.
+ * status-line hit, with its two counts (D26). Changed pages' counts come
+ * off {@link linkingCounts} (cached); nothing is written.
  */
 export async function staleSummary(index: WikiIndex, opts: { asOfMs?: number; readFile?: StaleReadFile } = {}) {
   const rows: StaleSummaryRow[] = [];
+  const memo: StaleReadMemo = new Map();
   for (const p of index.pages) {
     const facts = await pageStaleFacts(index, p, opts.asOfMs);
     if (!facts.changed && facts.hits.length === 0) continue;
-    const buckets = facts.changed ? await linkingBuckets(index, p.relPath, opts) : null;
+    const counts = facts.changed ? await linkingCounts(index, p.relPath, { ...opts, memo }) : null;
     rows.push({
       relPath: p.relPath,
       title: p.displayTitle ?? p.title,
       staleLines: facts.hits.length,
-      toCheck: buckets?.counts.toCheck ?? 0,
+      toCheck: counts?.toCheck ?? 0,
       changed: facts.changed,
       dirty: p.gitDirty === true,
       ...(facts.lastChangeMs !== undefined ? { lastChangeMs: facts.lastChangeMs } : {}),

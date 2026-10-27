@@ -6,6 +6,7 @@ import {
   bucketFor,
   isLivingPage,
   linkingBuckets,
+  linkingCounts,
   movedWith,
   pageLastChangeMs,
   parseStaleAsOf,
@@ -426,6 +427,73 @@ describe("asOf steps back past metadata-only commits (D29, F3)", () => {
     expect(await linkingBuckets(index, "notes/a.md", { asOfMs })).toBeNull();
     // Without asOf the newest edit stands.
     expect((await stalePageReport(index, a)).lastChangeMs).toBe(Date.parse("2026-06-25T10:00:00Z"));
+  });
+
+  test("teardown", async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+});
+
+describe("the summary's counts-only path (F6)", () => {
+  let root = "";
+  let index: WikiIndex;
+  const asOfMs = Date.parse("2026-06-20T23:59:59.999Z");
+
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  const commitAt = async (iso: string, msg: string) => {
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "--date", iso, "-m", msg);
+  };
+
+  test("setup", async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-stale-counts-"));
+    await git(root, "init", "-q", "-b", "main");
+    // Older pages linking BOTH changed pages: one claim-bearing, one mention, one pointer.
+    await write("notes/claim.md", page("Claim", "[[a]] landed on 23.05.\n\n[[b]] has 3 of 5 done."));
+    await write("notes/mention.md", page("Mention", "See [[a]] and [[b]]."));
+    await write("notes/pointer.md", page("Pointer", "Body.\n\n## See also\n\n- [[a]]\n- [[b]]"));
+    // History, whatever its passages say.
+    await write("archive/old.md", page("Old", "[[a]] was shipped on 01.05, [[b]] on 02.05."));
+    await write("plans/done.md", page("Done", "[[a]] on 03.05.", "plan_status: shipped\n"));
+    await write("notes/later.md", page("Later", "Draft of [[a]] and [[b]]."));
+    await write("a.md", page("A", "Body."));
+    await write("b.md", page("B", "Body."));
+    await commitAt("2026-05-01T10:00:00Z", "seed");
+    await write("a.md", page("A", "Body two."));
+    await write("b.md", page("B", "Body two."));
+    await commitAt("2026-06-12T10:00:00Z", "a and b");
+    // A linking page changed after both did, and one inside the 2-day margin.
+    await write("notes/later.md", page("Later", "Draft of [[a]] and [[b]], 12.06."));
+    await commitAt("2026-06-19T10:00:00Z", "later");
+    await write("notes/near.md", page("Near", "[[a]] on 11.06."));
+    await commitAt("2026-06-11T10:00:00Z", "near");
+    index = await buildWikiIndex(root);
+  }, 30_000);
+
+  test("it reads only the older, non-history linking pages, each once across changed pages", async () => {
+    const reads: string[] = [];
+    const readFile = async (abs: string) => {
+      reads.push(path.relative(root, abs));
+      return Bun.file(abs).text();
+    };
+    await staleSummary(index, { asOfMs, readFile });
+    expect(reads.sort()).toEqual(["notes/claim.md", "notes/mention.md", "notes/pointer.md"]);
+  });
+
+  test("its counts are exactly the full path's, page by page", async () => {
+    const s = await staleSummary(index, { asOfMs });
+    const changed = s.pages.filter((p) => p.changed);
+    expect(changed.map((p) => p.relPath).sort()).toEqual(["a.md", "b.md", "notes/later.md", "notes/near.md"]);
+    for (const row of changed) {
+      const full = await linkingBuckets(index, row.relPath, { asOfMs });
+      expect([row.relPath, row.toCheck]).toEqual([row.relPath, full!.counts.toCheck]);
+      // A readFile bypasses both caches, so these are the counts path's own.
+      expect(await linkingCounts(index, row.relPath, { asOfMs, readFile: (a) => Bun.file(a).text() })).toEqual(full!.counts);
+    }
+    expect((await linkingBuckets(index, "a.md", { asOfMs }))!.counts).toEqual({ toCheck: 1, mentions: 2, pointers: 1, history: 2, changedSince: 1 });
   });
 
   test("teardown", async () => {

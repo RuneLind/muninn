@@ -15,6 +15,8 @@ import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 import { wikiRouteTable } from "../../test/wiki-route-table.ts";
+import { getWikiIndex } from "../../wiki/store.ts";
+import { __resetWorkSessionsForTest, refreshWorkSessions, workSessionsDepsFromEnv, workSessionsFor } from "../../wiki/work-sessions.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
 
@@ -48,6 +50,7 @@ describe("GET /api/wiki/stale", () => {
     // A recent commit for the page route, whose «now» is the real clock.
     await write("hub.md", page("Hub", "- [[p]] is in-flight\n\nMore, again."));
     await write("notes/side.md", page("Side", "x"));
+    await write("log.md", "# Log\n\n- hub and side\n");
     await git(root, "add", "-A");
     await git(root, "commit", "-q", "--date", new Date(Date.now() - 86_400_000).toISOString(), "-m", "hub and side");
     prevExtra = process.env.WIKI_EXTRA;
@@ -108,6 +111,58 @@ describe("GET /api/wiki/stale", () => {
     const { status, body } = await get("wiki=stalewiki&session=claude-code:abc");
     expect(status).toBe(200);
     expect(body.session).toMatchObject({ id: "claude-code:abc", found: false, pages: [] });
+  });
+
+  describe("with a claude-usage that answers", () => {
+    let server: ReturnType<typeof Bun.serve>;
+    let sessions: unknown[] = [];
+    let prevUrl: string | undefined;
+    const sessionRow = (id: string, files: string[]) => ({
+      id,
+      provider: "claude",
+      title: "t",
+      first: Date.now() - 60_000,
+      last: Date.now() - 1_000,
+      bulk: false,
+      text: { from: "title", paths: [], links: [], files: [] },
+      files: files.map((p) => ({ p, edits: 1, firstMs: Date.now() - 60_000, lastMs: Date.now() - 1_000 })),
+    });
+
+    beforeAll(() => {
+      server = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch(req) {
+          const q = new URL(req.url).searchParams;
+          if (q.get("sessions") === "1") return Response.json({ form: "sessions", truncated: false, sessions });
+          return Response.json({ pages: [], ...(q.has("until") ? { until: Number(q.get("until")) } : {}) });
+        },
+      });
+      prevUrl = process.env.CLAUDE_USAGE_URL;
+      process.env.CLAUDE_USAGE_URL = `http://127.0.0.1:${server.port}`;
+    });
+
+    afterAll(() => {
+      server.stop(true);
+      if (prevUrl === undefined) delete process.env.CLAUDE_USAGE_URL;
+      else process.env.CLAUDE_USAGE_URL = prevUrl;
+      __resetWorkSessionsForTest();
+    });
+
+    test("a session that wrote after the warm memo was taken is found, reserved pages dropped, with the memo's as-of", async () => {
+      const index = await getWikiIndex({ root });
+      // A memo taken before the session wrote anything: the idle-muninn case.
+      sessions = [];
+      await refreshWorkSessions(index!.root, workSessionsDepsFromEnv());
+      expect(workSessionsFor(index!.root)?.sessions).toEqual([]);
+      sessions = [sessionRow("abc", ["hub.md", "log.md", "notes/side.md", "gone.md"])];
+      const { status, body } = await get("wiki=stalewiki&session=claude-code:abc");
+      expect(status).toBe(200);
+      expect(body.session).toMatchObject({ id: "claude-code:abc", found: true, truncated: false });
+      expect(body.session.pages).toEqual(["hub.md", "notes/side.md"]);
+      expect(typeof body.session.asOfMs).toBe("number");
+      expect(Date.now() - body.session.asOfMs).toBeLessThan(10_000);
+    });
   });
 
   test("the page payload carries movedWith rows", async () => {
