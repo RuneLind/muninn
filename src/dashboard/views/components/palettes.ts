@@ -74,8 +74,8 @@ export const PALETTES: readonly Palette[] = [
       "--bg-page": "#1e1c1a",
       "--bg-panel": "#262422",
       "--bg-surface": "#2b2826",
-      "--bg-deep": "#1a1816",
-      "--bg-inset": "#191715",
+      "--bg-deep": "#23211f",
+      "--bg-inset": "#211f1d",
       "--bg-gradient-end": "#2a2725",
       "--bg-card": "#2b2826",
       "--bg-hover": "rgba(255, 255, 255, 0.04)",
@@ -117,7 +117,9 @@ export const PALETTES: readonly Palette[] = [
 
       // Every dark tint measured >= 4.5:1 under its text (status colour, or
       // the accent for --tint-purple); kept. --tint-purple follows the accent's
-      // hue to copper (accent 4.81:1, accent-light 6.91:1 on it).
+      // hue to copper (accent 4.81:1, accent-light 6.91:1 on it). --tint-neutral
+      // sits above the fields and below the card, as plain dark's does: 1.090
+      // on inset, 1.030 on card; --text-muted 4.97 on it.
       "--tint-success": "#1a3a2a",
       "--tint-error": "#3a1a1a",
       "--tint-warning": "#2a2a1a",
@@ -125,9 +127,9 @@ export const PALETTES: readonly Palette[] = [
       "--tint-purple": "#342820",
       "--tint-magenta": "#2a1a3a",
       "--tint-cyan": "#1a2e3a",
-      "--tint-neutral": "#1a1a1a",
+      "--tint-neutral": "#282624",
 
-      // The dark-island badges take the dark tints (text on each, measured:
+      // The dark-island badges take the dark base's tints (text on each, measured:
       // deadline 8.59, Slack 8.14, GitHub 7.16, X 6.20). --island-info keeps
       // the bases' #1a2a3e: Telegram's #54a9eb is 5.71:1 there, 4.52 on
       // --tint-info. The shimmer #34322f is --border-primary #33302e plus 1/2/1 per
@@ -177,17 +179,17 @@ export const PALETTES: readonly Palette[] = [
     base: "light",
     glyph: "❧",
     tokens: {
-      // The «Lesemodus lys» preset (owner pick, D5): page hsl(40 33% 95%),
-      // surfaces sink darker in its hue as the prototype's paletteFrom derives
-      // them (panel 92 %, card 90 %, chip 89 %, fence 91.4 %). Type stays
-      // 14px / 1.65 (D8).
-      "--bg-page": "#f6f4ee",
-      "--bg-panel": "#f1ede4",
-      "--bg-surface": "#eee8dd",
-      "--bg-deep": "#f0ebe2",
-      "--bg-inset": "#f0ebe2",
+      // The «Lesemodus lys» preset (owner pick, D5), on plain light's ladder:
+      // the panel is the lightest paper, then page, card, and fields deepest.
+      // The prototype sank the panel below the page, which read as a grey slab
+      // with fields lost in it. Type stays 14px / 1.65 (D8).
+      "--bg-page": "#f4f1ea",
+      "--bg-panel": "#fcfaf6",
+      "--bg-surface": "#f1ede4",
+      "--bg-deep": "#ebe6dc",
+      "--bg-inset": "#ebe6dc",
       "--bg-gradient-end": "#ece6da",
-      "--bg-card": "#eee8dd",
+      "--bg-card": "#f1ede4",
       "--bg-hover": "rgba(0, 0, 0, 0.04)",
       "--graph-canvas": "#0a0a0f",
 
@@ -198,24 +200,24 @@ export const PALETTES: readonly Palette[] = [
 
       // Body hsl(40 12% 24%) and heading hsl(40 12% 9%) from the preset; the
       // steps between are spaced like the light ramp. --text-muted is #696357,
-      // not the preset's #81796a (3.53:1 on the card): 4.89 card, 5.10 panel,
-      // 5.42 page, and 4.70 on --tint-neutral, which sits darker than the card.
+      // not the preset's #81796a (3.53:1 on the card): 5.10 card, 5.72 panel,
+      // 5.28 page, and 4.70 on --tint-neutral, which sits darker than the card.
       "--text-primary": "#1a1814",
       "--text-secondary": "#454036",
       "--text-tertiary": "#524d42",
       "--text-soft": "#5f5a4e",
       "--text-muted": "#696357",
-      "--text-dim": "#8b8374",
-      "--text-faint": "#a49e94",
+      "--text-dim": "#857d6f",
+      "--text-faint": "#9f998f",
       "--text-disabled": "#c2beb7",
 
       // A step darker than the preset's #a35f2f (owner decision D18), which
-      // read 4.07:1 as text on the card. #925427 measures 5.42 page, 5.11
-      // panel, 4.89 card, and 4.18 as the active nav link on its own 15 %
+      // read 4.07:1 as text on the card. #925427 measures 5.29 page, 5.72
+      // panel, 5.11 card, and 4.64 as the active nav link on its own 15 %
       // tint (plain light 4.13). The hover keeps the preset's ~1.3 step
       // below it. White reads 5.97 on the accent and 7.86 on the hover, so
       // all three inks are white. --accent-light keeps the preset's text
-      // accent, 6.15 page / 5.54 card.
+      // accent, 5.99 page / 5.79 card.
       "--accent": "#925427",
       "--accent-hover": "#7c4318",
       "--accent-light": "#8a4b1f",
@@ -227,10 +229,10 @@ export const PALETTES: readonly Palette[] = [
       // The light base's pale tints read on paper: their pill text (--tone-*,
       // 6.4–8.1:1 with the status values below) clears 4.5. --tint-purple
       // follows the accent to a copper wash darker than every surface, like
-      // the base lavender: 1.184 page (plain light 1.109), 1.114 panel, 1.068
+      // the base lavender: 1.154 page (plain light 1.109), 1.249 panel, 1.114
       // card; --accent 4.58 and --accent-light 5.19 on it. --tint-neutral is
       // darker than every surface by at least plain light's smallest step (1.038, its tint on its card):
-      // 1.040 card, 1.085 panel, 1.153 page. Its inks: --text-muted 4.70,
+      // 1.085 card, 1.216 panel, 1.124 page. Its inks: --text-muted 4.70,
       // --text-soft 5.41, --tok-fn 5.29.
       "--tint-success": "#dcfce7",
       "--tint-error": "#fee2e2",
@@ -241,13 +243,13 @@ export const PALETTES: readonly Palette[] = [
       "--tint-cyan": "#cffafe",
       "--tint-neutral": "#e8e4dc",
 
-      // Status text, darkened toward black in its own hue because the panel
-      // and card sit darker than plain light's: each reads at least plain
+      // Status text, darkened toward black in its own hue because every
+      // surface sits darker than plain light's: each reads at least plain
       // light's ratio on the same surface, and info, error and magenta (AA
       // somewhere in plain light) reach 4.5 everywhere. Page/panel/card:
-      // success 3.53/3.32/3.18, error 5.19/4.88/4.68, warning 3.42/3.21/3.08,
-      // info 5.54/5.22/5.00, tool 4.46/4.20/4.02, cyan 3.95/3.71/3.56,
-      // magenta 5.76/5.43/5.20. --on-warning on the warning fill: 4.85.
+      // success 3.44/3.72/3.32, error 5.06/5.47/4.88, warning 3.33/3.60/3.21,
+      // info 5.41/5.85/5.22, tool 4.35/4.71/4.20, cyan 3.85/4.16/3.71,
+      // magenta 5.62/6.08/5.43. --on-warning on the warning fill: 4.85.
       "--status-success": "#149544",
       "--status-error": "#c72222",
       "--status-warning": "#c66d05",
@@ -260,20 +262,21 @@ export const PALETTES: readonly Palette[] = [
 
       "--chat-user-bg": "#f3e3d2",
       "--chat-user-text": "#5c3a1e",
-      "--chat-assistant-bg": "#eee8dd",
+      "--chat-assistant-bg": "#f1ede4",
       "--chat-assistant-text": "#454036",
 
-      // The preset's syntax set, on the #f0ebe2 fence: 4.51–5.64:1.
+      // The preset's syntax set, on the #ede8df fence: 4.77–5.49:1 (--tok-typ
+      // darkened from #0e7490, 4.39 there).
       "--tok-com": "#6b6258",
       "--tok-str": "#2f6b1f",
       "--tok-kw": "#8b2fd0",
       "--tok-num": "#9c4a07",
       "--tok-fn": "#1d4ed8",
-      "--tok-typ": "#0e7490",
+      "--tok-typ": "#0d6e89",
       "--tok-pun": "#6b6258",
 
-      "--bg-code": "#f0ebe2",
-      "--bg-code-bar": "#e7dfd0",
+      "--bg-code": "#ede8df",
+      "--bg-code-bar": "#e5ddce",
 
       // Bold darkens its context 0.08 in oklch lightness: body (L 0.373)
       // lands at 0.293, a 1.36 lead. The preset's strong ink (L 0.21) needs
@@ -281,7 +284,7 @@ export const PALETTES: readonly Palette[] = [
       // 0.08 every dimmed token's bold stays lighter (soft 0.389). The pivot
       // keeps light's 0.9, between --text-disabled (L 0.80) and the white
       // ink on the accent. The chip keeps its context's text colour (D14) on
-      // a fill 6 % darker than the page, with a 10 % black edge.
+      // a fill about 5 % darker than the page, with a 10 % black edge.
       "--strong-lift": "0.08",
       "--strong-pivot": "0.9",
       "--strong-weight": "bolder",
