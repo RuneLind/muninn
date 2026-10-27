@@ -90,7 +90,7 @@ ${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
     .sidebar-header h3 { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 0; }
     .new-thread-btn {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border: none;
       padding: 4px 10px;
       border-radius: 4px;
@@ -864,7 +864,7 @@ ${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
     .chat-input textarea:focus { border-color: var(--accent); }
     .chat-input button {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border: none;
       padding: 8px 16px;
       border-radius: 8px;
@@ -972,7 +972,7 @@ ${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
       justify-content: center;
       font-size: 15px;
       font-weight: 650;
-      color: rgba(255,255,255,0.92);
+      color: color-mix(in srgb, var(--on-accent) 92%, transparent);
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
       flex-shrink: 0;
     }
@@ -1569,7 +1569,7 @@ ${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
     }
     .thread-modal-save {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border-color: var(--accent) !important;
     }
     .thread-modal-save:hover { background: var(--accent-hover); }

@@ -221,7 +221,7 @@ export function layoutStyles(): string {
       justify-content: center;
       font-size: 13px;
       font-weight: 600;
-      color: rgba(255,255,255,0.9);
+      color: color-mix(in srgb, var(--on-accent) 90%, transparent);
       flex-shrink: 0;
       text-shadow: 0 1px 2px rgba(0,0,0,0.3);
     }
@@ -233,10 +233,10 @@ export function layoutStyles(): string {
       text-transform: uppercase;
       letter-spacing: 0.3px;
     }
-    .user-platform-badge.telegram { background: var(--tint-info); color: #54a9eb; }
+    .user-platform-badge.telegram { background: var(--island-info); color: #54a9eb; }
     .user-platform-badge.slack_dm,
     .user-platform-badge.slack_channel,
-    .user-platform-badge.slack_assistant { background: var(--tint-magenta); color: #e0a0ff; }
+    .user-platform-badge.slack_assistant { background: var(--island-magenta); color: #e0a0ff; }
 
 
     /* Thread-specific row styles */

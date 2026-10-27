@@ -60,7 +60,7 @@ export async function renderResearchPage(): Promise<string> {
       border-radius: 10px;
       border: none;
       background: var(--accent);
-      color: #fff;
+      color: var(--on-accent);
       font-size: 14px;
       font-weight: 600;
       cursor: pointer;

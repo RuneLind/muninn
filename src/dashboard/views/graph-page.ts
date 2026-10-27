@@ -110,7 +110,7 @@ export async function renderGraphPage(): Promise<string> {
       font-size: 11px;
       cursor: pointer;
     }
-    .mode-btn.active { background: var(--accent); color: #fff; }
+    .mode-btn.active { background: var(--accent); color: var(--on-accent); }
     .mode-btn.inactive { background: var(--bg-surface); color: var(--text-secondary); }
 
     .graph-stats {

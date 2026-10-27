@@ -27,6 +27,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { PALETTES } from "../src/dashboard/views/components/palettes.ts";
+import { paintedContrast, token } from "./contrast.ts";
 
 const PORT = e2ePort("theme-palettes");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -248,4 +249,200 @@ test.describe("A palette follows its base everywhere that asks light or dark", (
     expect(fill).not.toBe("rgb(236, 236, 255)");
     expect(fill).toBe("rgb(31, 32, 32)");
   });
+});
+
+// ── Fix round 1 (PR #747): a palette is a layer, the bases stay main's ─────
+
+/** The three themes a reader can be on that this file measures: both bases, then every palette. */
+const BASES = [
+  { name: "light", theme: "light", palette: null },
+  { name: "dark", theme: "dark", palette: null },
+] as const;
+const PALETTE_THEMES = PALETTES.map((p) => ({ name: p.id, theme: p.base, palette: p.id }));
+
+async function forceTheme(page: Page, t: { theme: string; palette: string | null }): Promise<void> {
+  await page.evaluate(([theme, palette]) => {
+    // Buttons animate `background` over 0.2s: without this a read right after
+    // the switch measures a fill halfway between the two themes.
+    if (!document.getElementById("noTransitions")) {
+      document.head.insertAdjacentHTML("beforeend", '<style id="noTransitions">*, *::before, *::after { transition: none !important; }</style>');
+    }
+    document.documentElement.setAttribute("data-theme", theme!);
+    if (palette) document.documentElement.setAttribute("data-palette", palette);
+    else document.documentElement.removeAttribute("data-palette");
+  }, [t.theme, t.palette] as const);
+}
+
+/** WCAG ratio of two computed `rgb()` strings. */
+function ratio(a: string, b: string): number {
+  const lum = (c: string) => {
+    const [r, g, bl] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number).map((v) => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r! + 0.7152 * g! + 0.0722 * bl!;
+  };
+  const x = lum(a), y = lum(b);
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+}
+
+/**
+ * The seven dashboard rules that drew hardcoded pale text on a hardcoded dark
+ * fill on main (714ff8a1): dark islands in BOTH bases. A probe of each is added
+ * to the real dashboard page, so the page's own CSS styles it.
+ */
+const ISLANDS = [
+  { sel: ".detail-mini-item .mini-badge.deadline", bg: "rgb(58, 42, 26)", fg: "rgb(240, 192, 96)" }, // #3a2a1a / #f0c060
+  { sel: ".detail-mini-item .mini-badge.quiet", bg: "rgb(26, 42, 62)", fg: "rgb(96, 176, 240)" }, // #1a2a3e / #60b0f0
+  { sel: ".user-platform-badge.telegram", bg: "rgb(26, 42, 62)", fg: "rgb(84, 169, 235)" }, // #1a2a3e / #54a9eb
+  { sel: ".user-platform-badge.slack_assistant", bg: "rgb(42, 26, 62)", fg: "rgb(224, 160, 255)" }, // #2a1a3e / #e0a0ff
+  { sel: ".watcher-badge.github", bg: "rgb(26, 42, 26)", fg: null }, // #1a2a1a / --status-success
+  { sel: ".watcher-badge.x", bg: "rgb(26, 26, 42)", fg: "rgb(136, 153, 204)" }, // #1a1a2a / #8899cc
+];
+const ISLAND_PROBE =
+  '<div id="islandProbe"><div class="detail-mini-item"><span class="mini-badge deadline">due</span><span class="mini-badge quiet">quiet</span></div>' +
+  '<span class="user-platform-badge telegram">telegram</span><span class="user-platform-badge slack_assistant">slack</span>' +
+  '<span class="watcher-badge github">github</span><span class="watcher-badge x">x</span><div class="detail-skeleton"></div></div>';
+
+async function islandColours(page: Page) {
+  return page.evaluate(([probe, sels]) => {
+    if (!document.getElementById("islandProbe")) document.body.insertAdjacentHTML("beforeend", probe as string);
+    const root = document.getElementById("islandProbe")!;
+    const out: Record<string, { bg: string; fg: string }> = {};
+    for (const s of sels as string[]) {
+      const el = root.querySelector(s)!;
+      const cs = getComputedStyle(el);
+      out[s] = { bg: cs.backgroundColor, fg: cs.color };
+    }
+    return {
+      out,
+      shimmer: getComputedStyle(root.querySelector(".detail-skeleton")!).backgroundImage,
+      success: (() => {
+        const p = document.createElement("span");
+        p.style.color = "var(--status-success)";
+        root.appendChild(p);
+        const c = getComputedStyle(p).color;
+        p.remove();
+        return c;
+      })(),
+    };
+  }, [ISLAND_PROBE, ISLANDS.map((i) => i.sel)] as const);
+}
+
+test.describe("Plain light and plain dark keep main's colours", () => {
+  for (const t of BASES) {
+    test(`the seven dark-island badges and the skeleton shimmer, ${t.name}`, async ({ page }) => {
+      await storeChoice(page, null);
+      await page.goto(BASE + "/");
+      await forceTheme(page, t);
+      const got = await islandColours(page);
+      for (const i of ISLANDS) {
+        expect(got.out[i.sel]!.bg, `${i.sel} fill`).toBe(i.bg);
+        expect(got.out[i.sel]!.fg, `${i.sel} text`).toBe(i.fg ?? got.success);
+      }
+      // #22222e at the gradient's midpoint, in both bases.
+      expect(got.shimmer).toContain("rgb(34, 34, 46) 50%");
+    });
+  }
+});
+
+test.describe("A palette keeps the dark-island badges readable", () => {
+  for (const t of PALETTE_THEMES) {
+    test(`every badge's text is >= 4.5:1 on its fill, ${t.name}`, async ({ page }) => {
+      await storeChoice(page, null);
+      await page.goto(BASE + "/");
+      await forceTheme(page, t);
+      const got = await islandColours(page);
+      for (const i of ISLANDS) {
+        const c = got.out[i.sel]!;
+        expect(ratio(c.fg, c.bg), `${i.sel}: ${c.fg} on ${c.bg}`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  }
+});
+
+/**
+ * Text drawn on an `--accent` fill, on three pages. Base expectations are
+ * main's colours (white, or `--text-primary` where main used it: #fff in dark,
+ * #14151a in light); a palette must reach 4.5:1, its hover fill included.
+ */
+const ACCENT_CONTROLS: { url: string; sel: string; main: { light: string; dark: string }; hover?: boolean; enable?: boolean; probe?: string }[] = [
+  { url: "/chat", sel: "#newThreadBtn", main: { light: "rgb(20, 21, 26)", dark: "rgb(255, 255, 255)" }, hover: true },
+  { url: "/chat", sel: "#chatSend", main: { light: "rgb(20, 21, 26)", dark: "rgb(255, 255, 255)" }, enable: true, hover: true },
+  { url: `/wiki?wiki=${WIKI}&page=diagram-page`, sel: "#wikiAskBtn", main: { light: "rgb(255, 255, 255)", dark: "rgb(255, 255, 255)" } },
+  {
+    url: `/wiki?wiki=${WIKI}&page=diagram-page`,
+    sel: "#lensProbe button.on",
+    main: { light: "rgb(255, 255, 255)", dark: "rgb(255, 255, 255)" },
+    probe: '<div class="wiki-lens-switch" id="lensProbe"><button class="on">Overview</button><button>All</button></div>',
+  },
+  { url: "/summaries", sel: "#submitBtn", main: { light: "rgb(255, 255, 255)", dark: "rgb(255, 255, 255)" } },
+  { url: "/summaries", sel: "#captureUrlBtn", main: { light: "rgb(255, 255, 255)", dark: "rgb(255, 255, 255)" } },
+];
+
+async function openControl(page: Page, c: (typeof ACCENT_CONTROLS)[number]) {
+  await page.goto(BASE + c.url);
+  await page.evaluate(([probe, sel, enable]) => {
+    if (probe) document.body.insertAdjacentHTML("afterbegin", probe as string);
+    const el = document.querySelector(sel as string) as HTMLButtonElement;
+    if (enable) el.disabled = false;
+  }, [c.probe ?? null, c.sel, c.enable ?? false] as const);
+  const loc = page.locator(c.sel).first();
+  await expect(loc).toHaveCount(1);
+  return loc;
+}
+
+test.describe("Text on the accent: the bases keep main's ink, a palette reaches 4.5:1", () => {
+  for (const c of ACCENT_CONTROLS) {
+    test(`${c.url.split("?")[0]} ${c.sel}`, async ({ page }) => {
+      await storeChoice(page, null);
+      const loc = await openControl(page, c);
+      for (const t of BASES) {
+        await forceTheme(page, t);
+        expect(await loc.evaluate((el) => getComputedStyle(el).color), `${t.name} ink`).toBe(c.main[t.theme]);
+      }
+      for (const t of PALETTE_THEMES) {
+        await forceTheme(page, t);
+        // The chat script disables Send again once it loads; measure it enabled.
+        if (c.enable) await loc.evaluate((el) => ((el as HTMLButtonElement).disabled = false));
+        expect(await loc.evaluate((el) => (el as HTMLButtonElement).disabled), "measured enabled").toBe(false);
+        expect(await paintedContrast(loc, { withOpacity: true }), `${t.name}`).toBeGreaterThanOrEqual(4.5);
+        if (c.hover) {
+          await loc.hover();
+          expect(await paintedContrast(loc, { withOpacity: true }), `${t.name} :hover`).toBeGreaterThanOrEqual(4.5);
+          await page.mouse.move(0, 0);
+        }
+      }
+    });
+  }
+
+  for (const t of PALETTE_THEMES) {
+    test(`the accent ink tokens on --accent and --accent-hover, ${t.name}`, async ({ page }) => {
+      await storeChoice(page, null);
+      await page.goto(BASE + "/");
+      await forceTheme(page, t);
+      for (const ink of ["--on-accent", "--on-accent-primary"]) {
+        for (const fill of ["--accent", "--accent-hover"]) {
+          const r = ratio(await token(page, ink), await token(page, fill));
+          expect(r, `${ink} on ${fill}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    });
+  }
+});
+
+test.describe("A palette's text tokens read on every surface", () => {
+  for (const t of PALETTE_THEMES) {
+    test(`--text-secondary … --text-muted >= 4.5:1 on page, panel, card and surface, ${t.name}`, async ({ page }) => {
+      await storeChoice(page, null);
+      await page.goto(BASE + "/");
+      await forceTheme(page, t);
+      for (const text of ["--text-primary", "--text-secondary", "--text-tertiary", "--text-soft", "--text-muted"]) {
+        for (const bg of ["--bg-page", "--bg-panel", "--bg-card", "--bg-surface"]) {
+          const r = ratio(await token(page, text), await token(page, bg));
+          expect(r, `${text} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    });
+  }
 });

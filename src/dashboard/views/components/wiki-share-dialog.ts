@@ -663,7 +663,7 @@ export function shareDialogStyles(): string {
       color: var(--text-secondary);
     }
     .wiki-share-chip.is-active, .wiki-share-tab.is-active {
-      background: var(--accent); border-color: var(--accent); color: #fff;
+      background: var(--accent); border-color: var(--accent); color: var(--on-accent);
     }
     .wiki-share-chip[disabled], .wiki-share-tab[disabled] { opacity: 0.5; cursor: default; }
     .wiki-share-prompt > summary {
@@ -696,7 +696,7 @@ export function shareDialogStyles(): string {
     .wiki-share-foot { display: flex; gap: 8px; align-items: center; }
     .wiki-share-primary {
       padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 12.5px;
-      border: 1px solid var(--accent); background: var(--accent); color: #fff;
+      border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent);
     }
     .wiki-share-ghost {
       padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 12.5px;

@@ -91,7 +91,7 @@ export function sumFactcheckStyles(): string {
     .sum-fc-wb-btn:hover { border-color: var(--accent); color: var(--text-primary); }
     .sum-fc-wb-btn:disabled { opacity: 0.55; cursor: default; }
     /* --accent-hover fill: white on dark --accent is 4.32:1 (the wiki chat-escalation precedent). */
-    .sum-fc-wb-btn.primary { background: var(--accent-hover); border-color: var(--accent); color: #fff; }
+    .sum-fc-wb-btn.primary { background: var(--accent-hover); border-color: var(--accent); color: var(--on-accent); }
     .sum-fc-wb-done { font-size: 12px; font-weight: 600; color: color-mix(in srgb, var(--status-success) 70%, var(--text-primary)); }
     .sum-fc-wb-msg { margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
     .sum-fc-wb-items { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }

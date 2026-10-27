@@ -108,7 +108,7 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .bk-control { display: inline-flex; align-items: center; gap: 8px; }
     /* Primary run button — deliberately reads as a button, not inline stat text. */
     .gard-backlog .gard-btn.bk-run {
-      background: var(--accent); border: 1px solid var(--accent); color: #fff;
+      background: var(--accent); border: 1px solid var(--accent); color: var(--on-accent);
       font-size: 13px; font-weight: 600; padding: 7px 16px; border-radius: 7px;
       font-family: inherit; cursor: pointer;
     }
@@ -126,7 +126,7 @@ export async function renderWikiGardenerPage(opts?: {
       font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 7px;
       font-family: inherit; cursor: pointer;
     }
-    .gard-backlog .gard-btn.bk-run-watcher:hover:not(:disabled) { background: var(--accent); color: #fff; }
+    .gard-backlog .gard-btn.bk-run-watcher:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); }
     .gard-backlog .gard-btn.bk-run-watcher:disabled { opacity: 0.55; cursor: default; }
     .gard-backlog .bk-queued { color: var(--accent-light); font-size: 12px; font-weight: 600; }
     /* Informational run-suggestion meter — a tiny progress bar toward a suggested run.
@@ -150,7 +150,7 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .bk-confirm-copy strong { color: var(--text-primary); font-weight: 700; }
     .gard-backlog .bk-confirm-actions { display: flex; gap: 8px; }
     .gard-backlog .gard-btn.bk-start {
-      background: var(--accent); border: 1px solid var(--accent); color: #fff;
+      background: var(--accent); border: 1px solid var(--accent); color: var(--on-accent);
       font-size: 13px; font-weight: 600; padding: 7px 16px; border-radius: 7px; font-family: inherit; cursor: pointer;
     }
     .gard-backlog .gard-btn.bk-start:hover { background: var(--accent-light); border-color: var(--accent-light); }
@@ -179,7 +179,7 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .bk-banner-msg { color: var(--text-secondary); font-size: 12.5px; }
     .gard-backlog .bk-banner-actions { display: inline-flex; gap: 8px; }
     .gard-backlog .gard-btn.bk-recover {
-      background: var(--accent); border: 1px solid var(--accent); color: #fff;
+      background: var(--accent); border: 1px solid var(--accent); color: var(--on-accent);
       font-size: 12px; font-weight: 600; padding: 4px 13px; border-radius: 7px; font-family: inherit; cursor: pointer;
     }
     .gard-backlog .gard-btn.bk-recover:hover { background: var(--accent-light); border-color: var(--accent-light); }

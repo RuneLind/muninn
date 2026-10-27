@@ -30,13 +30,15 @@ export interface Palette {
 /**
  * The tokens every palette must set: surfaces, borders, text, accent, tints,
  * chat, syntax and the bold/chip rule. Status colours (`--status-*`, `--tone-*`,
- * `--on-warning`, the date inks) carry meaning and stay the base's.
+ * `--on-warning`, the date inks) carry meaning and stay the base's. The
+ * `--island-*` badge fills and `--skeleton-shine` are optional: unset, a
+ * palette shows the bases' dark islands, which read on any surface.
  */
 export const PALETTE_REQUIRED_TOKENS: readonly string[] = [
   "--bg-page", "--bg-panel", "--bg-surface", "--bg-deep", "--bg-inset", "--bg-gradient-end", "--bg-card", "--bg-hover", "--graph-canvas",
   "--border-primary", "--border-secondary", "--border-subtle", "--scrollbar-thumb",
   "--text-primary", "--text-secondary", "--text-tertiary", "--text-soft", "--text-muted", "--text-dim", "--text-faint", "--text-disabled",
-  "--accent", "--accent-hover", "--accent-light", "--accent-muted",
+  "--accent", "--accent-hover", "--accent-light", "--accent-muted", "--on-accent", "--on-accent-primary",
   "--tint-success", "--tint-error", "--tint-warning", "--tint-info", "--tint-purple", "--tint-magenta", "--tint-cyan", "--tint-neutral",
   "--chat-user-bg", "--chat-user-text", "--chat-assistant-bg", "--chat-assistant-text",
   "--tok-com", "--tok-str", "--tok-kw", "--tok-num", "--tok-fn", "--tok-typ", "--tok-pun",
@@ -83,18 +85,23 @@ export const PALETTES: readonly Palette[] = [
       "--text-secondary": "#d4d1ce",
       "--text-tertiary": "#c4c0bc",
       "--text-soft": "#aca7a2",
-      "--text-muted": "#918a83",
+      // #9a938c, not the preset's #918a83 (4.30:1 on the #2b2826 card):
+      // 4.83 on card/surface, 5.10 on panel, 5.60 on page.
+      "--text-muted": "#9a938c",
       "--text-dim": "#7a746e",
       "--text-faint": "#6a645f",
       "--text-disabled": "#57524d",
 
-      // --accent-hover is the fill every white-label control uses for
-      // contrast (doc panel, Steps, RuleTree pick): #fff measures 5.31:1 on
-      // #9a5c36, 2.97:1 on the #c8875a accent.
+      // Text on an accent fill is dark ink (owner decision D17), not white:
+      // #fff on #c8875a is 2.97:1, #1e1c1a 5.72:1. So the hover fill lightens
+      // instead of darkening: #1e1c1a on #d4976a is 6.82:1 (on the old
+      // #9a5c36 it would be 3.20).
       "--accent": "#c8875a",
-      "--accent-hover": "#9a5c36",
+      "--accent-hover": "#d4976a",
       "--accent-light": "#e3a87c",
       "--accent-muted": "#b09a87",
+      "--on-accent": "#1e1c1a",
+      "--on-accent-primary": "#1e1c1a",
 
       // Every dark tint measured >= 4.5:1 under its text (status colour, or
       // the accent for --tint-purple); kept. --tint-purple follows the accent's
@@ -107,6 +114,16 @@ export const PALETTES: readonly Palette[] = [
       "--tint-magenta": "#2a1a3a",
       "--tint-cyan": "#1a2e3a",
       "--tint-neutral": "#1a1a1a",
+
+      // The dark-island badges take the dark tints (text on each, measured:
+      // deadline 8.59, Slack 8.14, GitHub 7.16, X 6.20). --island-info keeps
+      // the bases' #1a2a3e: Telegram's #54a9eb is 5.71:1 there, 4.52 on
+      // --tint-info. The shimmer is the warm border lifted 4% toward white.
+      "--island-warning": "#2a2a1a",
+      "--island-magenta": "#2a1a3a",
+      "--island-success": "#1a3a2a",
+      "--island-neutral": "#1a1a1a",
+      "--skeleton-shine": "#34322f",
 
       "--chat-user-bg": "#3a2f26",
       "--chat-user-text": "#ecdccb",

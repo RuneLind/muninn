@@ -386,7 +386,7 @@ export async function renderWikiPage(opts?: {
     .wiki-hub-card.culled .wiki-hub-title, .wiki-atlas-node.culled b, .wiki-atlas-cmember.culled { font-style: italic; }
 
     .wiki-gardener-badge {
-      background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 600;
+      background: var(--accent); color: var(--on-accent); font-size: 10.5px; font-weight: 600;
       min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
       display: inline-flex; align-items: center; justify-content: center;
     }
@@ -430,7 +430,7 @@ export async function renderWikiPage(opts?: {
     .wiki-filters:not([open]) { display: none; }
     .wiki-filters-summary { display: none; }
     .wiki-filter-count {
-      background: var(--accent); color: #fff; font-size: 10px; font-weight: 600;
+      background: var(--accent); color: var(--on-accent); font-size: 10px; font-weight: 600;
       min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px;
       display: inline-flex; align-items: center; justify-content: center;
     }
@@ -1446,7 +1446,7 @@ export async function renderWikiPage(opts?: {
     .wiki-atlas-node[data-t="analysis"] { border-left-color: var(--status-magenta); }
     .wiki-atlas-badge {
       position: absolute; top: -8px; left: -8px; width: 18px; height: 18px; border-radius: 50%;
-      background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 700; z-index: 7;
+      background: var(--accent); color: var(--on-accent); font-size: 10.5px; font-weight: 700; z-index: 7;
       display: none; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,.4);
     }
     .wiki-atlas-canvas.sel .wiki-atlas-node { opacity: .15; }
@@ -1478,7 +1478,7 @@ export async function renderWikiPage(opts?: {
     .wiki-atlas-hint { color: var(--text-faint); font-size: 12px; padding: 8px 2px; }
     .wiki-atlas-intro { border-left: 3px solid var(--accent); padding: 3px 10px; margin: 2px 2px 10px; color: var(--text-dim); font-size: 12px; }
     .wiki-atlas-step { display: grid; grid-template-columns: 22px 1fr; gap: 9px; margin: 10px 2px; }
-    .wiki-atlas-num { width: 19px; height: 19px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-top: 2px; }
+    .wiki-atlas-num { width: 19px; height: 19px; border-radius: 50%; background: var(--accent); color: var(--on-accent); font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-top: 2px; }
     .wiki-atlas-step.ghost .wiki-atlas-num { background: var(--text-faint); }
     .wiki-atlas-step b { font-size: 12px; font-family: ui-monospace, Menlo, monospace; color: var(--text-secondary); }
     .wiki-atlas-step.ghost b { color: var(--text-dim); }
@@ -1795,7 +1795,7 @@ export async function renderWikiPage(opts?: {
     .wiki-bc-touched { color: var(--text-muted); text-decoration: underline dotted; text-underline-offset: 2px; }
     .wiki-bc-explain {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
-      background: var(--accent); color: #fff;
+      background: var(--accent); color: var(--on-accent);
       border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
       font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
     }
@@ -2674,7 +2674,7 @@ export async function renderWikiPage(opts?: {
     .wiki-followup-input:disabled { opacity: 0.6; }
     .wiki-followup-btn {
       padding: 0 16px; border-radius: 8px; border: none;
-      background: var(--accent); color: #fff; font-size: 13px; font-weight: 600;
+      background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 600;
       cursor: pointer; white-space: nowrap;
     }
     .wiki-followup-btn:hover { opacity: 0.9; }
@@ -2715,7 +2715,7 @@ export async function renderWikiPage(opts?: {
        stays as loud as it was and passes in BOTH themes. --accent keeps the border,
        which reads as a lighter rim rather than losing the edge. */
     .wiki-chatesc-decline {
-      border-color: var(--accent); background: var(--accent-hover); color: #fff;
+      border-color: var(--accent); background: var(--accent-hover); color: var(--on-accent);
     }
     .wiki-chatesc-decline:hover { filter: brightness(1.08); }
     .wiki-chatesc-gear {
@@ -2816,7 +2816,7 @@ export async function renderWikiPage(opts?: {
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
       color: var(--text-primary); font-size: 12px; font-weight: 600; cursor: pointer;
     }
-    .wiki-fc-int-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .wiki-fc-int-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
     .wiki-fc-int-btn:disabled, .wiki-fc-retryall-btn:disabled { opacity: 0.5; cursor: default; }
     .wiki-fc-int-budget { font-size: 11px; color: var(--text-dim); margin-left: auto; }
     .wiki-fc-int-budget.over { color: var(--status-error); }
@@ -2878,7 +2878,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     .wiki-ask-input:focus { outline: none; border-color: var(--accent); }
     .wiki-ask-btn {
       padding: 0 14px; border-radius: 7px; border: none;
-      background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600;
+      background: var(--accent); color: var(--on-accent); font-size: 12.5px; font-weight: 600;
       cursor: pointer; white-space: nowrap;
     }
     .wiki-ask-btn:hover { opacity: 0.9; }
@@ -3002,7 +3002,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     .wiki-chatopt-foot { display: flex; gap: 8px; align-items: center; }
     .wiki-chatopt-btn {
       padding: 5px 12px; border-radius: 7px; border: none; cursor: pointer;
-      background: var(--accent); color: #fff; font-size: 12px; font-weight: 600;
+      background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 600;
     }
     .wiki-chatopt-btn.ghost {
       background: var(--bg-inset); color: var(--text-secondary);

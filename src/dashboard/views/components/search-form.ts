@@ -26,7 +26,7 @@ export function searchFormStyles(): string {
     .search-input::placeholder { color: var(--text-faint); }
     .search-btn {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       border: none;
       padding: 10px 24px;
       border-radius: 8px;

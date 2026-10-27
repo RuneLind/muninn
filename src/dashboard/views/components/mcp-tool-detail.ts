@@ -116,7 +116,7 @@ export function mcpToolDetailStyles(): string {
     /* Call section */
     .btn-call {
       background: var(--accent);
-      color: var(--text-primary);
+      color: var(--on-accent-primary);
       padding: 8px 20px;
       border-radius: 6px;
       font-size: 13px;

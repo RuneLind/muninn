@@ -41,6 +41,11 @@ const DARK_TOKENS = `
       --accent: #6c63ff;
       --accent-hover: #5a52e0;
       --accent-light: #a5a0ff;
+      /* Text drawn on an --accent / --accent-hover fill. --on-accent is for
+         controls that draw white there; --on-accent-primary for the ones that
+         draw --text-primary (white in dark, near-black in light). */
+      --on-accent: #fff;
+      --on-accent-primary: var(--text-primary);
 
       /* Status colors */
       --status-success: #4ade80;
@@ -75,6 +80,17 @@ const DARK_TOKENS = `
       --tint-magenta: #2a1a3a;
       --tint-cyan: #1a2e3a;
       --tint-neutral: #1a1a1a;
+
+      /* Badges that are a dark island in BOTH bases (pale text on a dark
+         fill): the deadline/quiet mini-badges, the Telegram/Slack platform
+         badges, the GitHub/X watcher badges, and the skeleton shimmer's
+         highlight. A palette may warm them; the bases keep these values. */
+      --island-warning: #3a2a1a;
+      --island-info: #1a2a3e;
+      --island-magenta: #2a1a3e;
+      --island-success: #1a2a1a;
+      --island-neutral: #1a1a2a;
+      --skeleton-shine: #22222e;
 
       /* Accent text variants */
       --accent-muted: #8b8bcd;
@@ -163,6 +179,8 @@ const LIGHT_TOKENS = `
       --accent: #6357f0;
       --accent-hover: #5247d8;
       --accent-light: #5247d8;
+      --on-accent: #fff;
+      --on-accent-primary: var(--text-primary);
 
       /* Status colors */
       --status-success: #16a34a;
@@ -194,6 +212,12 @@ const LIGHT_TOKENS = `
       --tint-magenta: #f3e8ff;
       --tint-cyan: #cffafe;
       --tint-neutral: #eceef3;
+      --island-warning: #3a2a1a;
+      --island-info: #1a2a3e;
+      --island-magenta: #2a1a3e;
+      --island-success: #1a2a1a;
+      --island-neutral: #1a1a2a;
+      --skeleton-shine: #22222e;
 
       /* Accent text variants */
       --accent-muted: #6b6f9a;

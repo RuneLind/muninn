@@ -903,7 +903,7 @@ test.describe("Bold and inline code keep the colour of the context they sit in",
       // A FileTree body can hold prose beside its fence; inline code there
       // gets FileTree's flat look, never the chip's edge.
       expect(got.treeProseShadow).toBe("none");
-      // A picked RuleTree case turns its chip white on the accent. The dimmest
+      // A picked RuleTree case draws --on-accent on the accent. The dimmest
       // text tokens and dark ink on a warning fill sit next to a pivot: bold
       // there must still move away from its background.
       await page.evaluate(() => {

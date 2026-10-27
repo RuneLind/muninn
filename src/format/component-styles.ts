@@ -239,7 +239,7 @@ export function componentBlockCss(scope: string): string {
     ${scope} .nm-compact .nm-blocked .nm-who { color: var(--tone-err); }
     ${scope} .nm-compact .nm-mine-mark {
       font-size: 0.8em; font-weight: 700; padding: 0 0.45rem; border-radius: 5px;
-      background: var(--accent-hover); color: #fff;
+      background: var(--accent-hover); color: var(--on-accent);
     }
     ${scope} .nm-compact .nm-waiting .nm-mine-mark { background: var(--status-warning); color: var(--on-warning); }
     ${scope} .nm-compact .nm-head > .nm-peek {
@@ -959,7 +959,7 @@ export function questionReaderCss(scope: string): string {
     ${scope} .q-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.4rem; }
     ${scope} .q-save {
       font: inherit; font-weight: 600; padding: 0.3rem 0.9rem; border-radius: 7px; border: none; cursor: pointer;
-      background: var(--accent-hover); color: #fff;
+      background: var(--accent-hover); color: var(--on-accent);
     }
     ${scope} .q-save:disabled { opacity: 0.5; cursor: default; }
     ${scope} .q-count { margin-left: auto; font-size: 0.8em; color: var(--text-soft); font-variant-numeric: tabular-nums; }
@@ -1227,7 +1227,7 @@ export function chartViewCss(scope: string): string {
     ${scope} .vc-btn + .vc-btn { border-inline-start-width: 0; }
     ${scope} .vc-btn:first-child { border-start-start-radius: 6px; border-end-start-radius: 6px; }
     ${scope} .vc-btn:last-child { border-start-end-radius: 6px; border-end-end-radius: 6px; }
-    ${scope} .vc-btn[aria-pressed="true"] { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+    ${scope} .vc-btn[aria-pressed="true"] { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
     ${scope} .vc-btn:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
     ${scope} .vc-rows { display: grid; grid-template-columns: minmax(6rem, max-content) minmax(8rem, 1fr) minmax(0, max-content); gap: 0.35rem 0.7rem; align-items: center; }
     ${scope} .vc-row { display: contents; }
@@ -1320,8 +1320,8 @@ export function chartViewCss(scope: string): string {
 }
 
 /** The reader's `<RuleTree>` view (`src/format/rule-tree-view.ts`): theme
- *  tokens, except the picked chip's `#fff` on `--accent-hover` (the theme has
- *  no ink token for the accent fill; Chart's pressed button does the same). The picker shows once `wiki-visuals.ts` has put `rt-js` on the
+ *  tokens; the picked chip draws `--on-accent` (white in both bases) on
+ *  `--accent-hover`, as Chart's pressed button does. The picker shows once `wiki-visuals.ts` has put `rt-js` on the
  *  document root; a picked case dims every row off its path with a muted ink
  *  and a dashed border, never with opacity alone. */
 export function ruleTreeCss(scope: string): string {
@@ -1369,7 +1369,7 @@ export function ruleTreeCss(scope: string): string {
       ${s} .rt-picked .rt-off > .rt-row .rt-edge { color: var(--text-soft); }
       ${s} .rt-picked .rt-on > .rt-row { font-weight: 600; border-block-color: var(--accent); border-inline-end-color: var(--accent); }
       ${s} .rt-picked .rt-on:not(.rt-leaf) > .rt-row { border-inline-start-color: var(--accent); }
-      ${s} .rt-case.rt-hit { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+      ${s} .rt-case.rt-hit { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
       /* A case id the reader links to its board row keeps the chip's ink. */
       ${s} .rt-case.rt-hit a { color: inherit; }
     }

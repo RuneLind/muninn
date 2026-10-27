@@ -45,7 +45,7 @@ export function sumLinksStyles(): string {
     .sum-links-btn:hover:not([disabled]) { border-color: var(--accent); color: var(--text-primary); }
     .sum-links-btn[disabled] { cursor: default; opacity: 0.6; }
     /* --accent-hover fill: white on dark --accent is 4.32:1 (the fact-check write-back precedent). */
-    .sum-links-btn.primary { background: var(--accent-hover); border-color: var(--accent); color: #fff; }
+    .sum-links-btn.primary { background: var(--accent-hover); border-color: var(--accent); color: var(--on-accent); }
     .sum-links-saved { font-size: 12px; font-weight: 600; color: color-mix(in srgb, var(--status-success) 70%, var(--text-primary)); }
     .sum-links-msg { margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
     .sum-links-msg.error { color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }
