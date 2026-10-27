@@ -38,8 +38,10 @@ export function themeLabStubScript(): string {
   (function() {
     if (window.__themeLabStub) return;
     window.__themeLabStub = true;
-    var root = document.documentElement, queue = null;
+    var root = document.documentElement, queue = null, preset = [];
     function fail() {
+      // No lab will clear what this stub set, so it goes now, before a theme switch inherits it.
+      preset.forEach(function(n) { root.style.removeProperty(n); }); preset = [];
       var t = document.createElement('div');
       t.className = 'theme-lab-toast'; t.setAttribute('role', 'status');
       t.textContent = 'Theme lab did not load. Try again from ◐.';
@@ -65,7 +67,7 @@ export function themeLabStubScript(): string {
         var key = root.dataset.palette || root.dataset.theme || 'system';
         if (key === 'system') key += window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? ':dark' : ':light';
         var a = st.applied;
-        if (a && a.key === key && a.tokens) for (var n in a.tokens) root.style.setProperty(n, a.tokens[n]);
+        if (a && a.key === key && a.tokens) for (var n in a.tokens) { root.style.setProperty(n, a.tokens[n]); preset.push(n); }
         withLab(function() { window.__themeLabOpenNow(false); });
       }
     } catch (e) {}

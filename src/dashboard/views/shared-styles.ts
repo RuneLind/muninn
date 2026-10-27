@@ -802,7 +802,8 @@ ${toolsItems.map((item) => `            ${item}`).join("\n")}
           </div>
         </details>`;
   return `
-  <script>${themeInitScript()}</script>${navToggle}
+  <script>${themeInitScript()}</script>
+  <script>${themeLabStubScript()}</script>${navToggle}
   <script>
     if (!window.__fullscreenNav) {
       window.__fullscreenNav = true;
@@ -873,6 +874,5 @@ ${options?.headerRight ?? ""}
       ${themeToggleHtml()}
     </div>
   </header>
-  <script>${themeToggleScript()}</script>
-  <script>${themeLabStubScript()}</script>`;
+  <script>${themeToggleScript()}</script>`;
 }

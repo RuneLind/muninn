@@ -841,16 +841,39 @@ test.describe("The theme lab", () => {
     await page.getByRole("menuitem", { name: /Theme lab/ }).click();
     await slide(page, "bgL", 5);
     const tinted = await pageBg(page);
-    await page.route("**/theme-lab.js", (r) => r.abort());
-    await page.goto(BASE + "/");
+    // Hold the lab script: what shows meanwhile is the stub's doing alone.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/theme-lab.js", async (r) => { await held; await r.abort(); });
+    await page.goto(BASE + "/", { waitUntil: "domcontentloaded" });
     expect(await pageBg(page), "the stub applied the saved overrides").toBe(tinted);
+    release();
     await expect(page.locator(".theme-lab-toast")).toContainText("did not load");
+    // Fix round 2 (PR #755): with no lab to clear them, the stub's overrides
+    // stayed on the page and followed a theme switch.
+    expect(await inline(page), "a failed load leaves no override behind").toBe("");
     await page.unroute("**/theme-lab.js");
     await page.locator("#themeToggle").click();
     await page.getByRole("menuitem", { name: /Theme lab/ }).click();
     await expect(page.locator("#themeLab")).toBeVisible();
     await page.locator('#themeLab [data-lab="close"]').click();
     expect(await inline(page)).toBe("");
+  });
+
+  // Fix round 2 (PR #755): pins clear() removing the stub's overrides before the
+  // lab reads its reference; read back, Reset would return to the slid colours.
+  test("left open and reloaded, Reset returns to the theme as shipped", async ({ page }) => {
+    await storeChoice(page, "reading");
+    await page.goto(BASE + "/");
+    const shipped = await pageBg(page);
+    await page.locator("#themeToggle").click();
+    await page.getByRole("menuitem", { name: /Theme lab/ }).click();
+    await slide(page, "bgL", 5);
+    await page.reload();
+    await expect(page.locator("#themeLab")).toBeVisible();
+    await page.locator('#themeLab [data-lab="reset"]').click();
+    expect(await pageBg(page)).toBe(shipped);
+    await page.locator('#themeLab [data-lab="close"]').click();
   });
 
   test("Copy tokens puts a palettes.ts tokens block with the slid values on the clipboard", async ({ page, context }) => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { PALETTES, PALETTE_REQUIRED_TOKENS } from "./palettes.ts";
-import { themeTokenStyles } from "../shared-styles.ts";
+import { renderNav, themeTokenStyles } from "../shared-styles.ts";
 import { THEME_LAB_KEY, THEME_LAB_PATH, themeLabScript, themeLabStubScript } from "./theme-lab.ts";
 import { labChangedKeys, labDerive, labExport, labHsl, labInitialState, labLadderIssues, labParse, labStateKey } from "./theme-lab-core.ts";
 
@@ -252,6 +252,15 @@ describe("theme lab stub (every page)", () => {
     expect(runStub(JSON.stringify({ open: false, applied }), { palette: "reading", theme: "dark" }).props).toEqual({});
     const sys = { key: "system:dark", tokens: { "--bg-page": "#000000" } };
     expect(runStub(JSON.stringify({ open: true, applied: sys })).props).toEqual({ "--bg-page": "#000000" });
+  });
+
+  // Fix round 2 (PR #755): the stub ran at the end of <header>, so a paint
+  // between the header and the stub still showed the shipped theme.
+  test("runs before the header, right after the theme init script", () => {
+    const nav = renderNav("dashboard", { profile: "default" });
+    const stub = nav.indexOf("__themeLabStub");
+    expect(stub).toBeGreaterThan(-1);
+    expect(stub).toBeLessThan(nav.indexOf("<header"));
   });
 
   test("the ◐ menu's open loads the lab script", () => {
