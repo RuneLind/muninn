@@ -150,3 +150,96 @@ describe("theme picker", () => {
     expect(html).toContain('aria-haspopup="menu"');
   });
 });
+
+/** The resolved hex value of every token a base block declares. */
+function baseTokens(base: "light" | "dark"): Record<string, string> {
+  const css = themeTokenStyles();
+  const start = css.indexOf(`html[data-theme="${base}"] {`);
+  const block = css.slice(start, css.indexOf("}", start));
+  const out: Record<string, string> = {};
+  for (const m of block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) out[m[1]!] = m[2]!.trim();
+  return out;
+}
+
+function rgb(hex: string): number[] {
+  let h = hex.replace("#", "");
+  if (h.length === 3) h = [...h].map((c) => c + c).join("");
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+}
+const lin = (s: number) => (s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4);
+const luminance = (hex: string) => {
+  const [r, g, b] = rgb(hex).map(lin) as [number, number, number];
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+/** WCAG contrast ratio, lighter over darker. */
+const contrast = (a: string, b: string) => {
+  const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p);
+  return (x! + 0.05) / (y! + 0.05);
+};
+/** OKLab lightness, the `l` the bold rule's `oklch(from currentColor …)` moves. */
+const okL = (hex: string) => {
+  const [r, g, b] = rgb(hex).map(lin) as [number, number, number];
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
+};
+
+/** The two bases plus every palette, each as the token set the page computes. */
+const THEME_SETS = [
+  { id: "light", base: "light" as const, tokens: baseTokens("light") },
+  { id: "dark", base: "dark" as const, tokens: baseTokens("dark") },
+  ...PALETTES.map((p) => ({ id: p.id, base: p.base, tokens: { ...baseTokens(p.base), ...p.tokens } })),
+];
+
+describe("palette colour rules", () => {
+  // A neutral fill reads by being darker than whatever it sits on. The floor is
+  // plain light's own smallest step: #eceef3 on its #f1f2f6 card, 1.038:1.
+  const SURFACES = ["--bg-page", "--bg-panel", "--bg-card"];
+  const light = baseTokens("light");
+  const neutralFloor = Math.min(...SURFACES.map((s) => contrast(light["--tint-neutral"]!, light[s]!)));
+  // The inks the dashboard draws on --tint-neutral as readable text. --text-dim,
+  // --text-faint and --text-disabled mark a disabled state and sit under 4.5 in
+  // the bases too.
+  const NEUTRAL_INKS = ["--text-primary", "--text-secondary", "--text-soft", "--text-muted", "--tok-fn"];
+
+  for (const t of THEME_SETS.filter((x) => x.base === "light")) {
+    test(`${t.id}: --tint-neutral is a visible fill on page, panel and card`, () => {
+      const fill = t.tokens["--tint-neutral"]!;
+      for (const s of SURFACES) {
+        const bg = t.tokens[s]!;
+        expect(luminance(fill), `${fill} darker than ${s} ${bg}`).toBeLessThan(luminance(bg));
+        expect(contrast(fill, bg), `${fill} on ${s} ${bg}`).toBeGreaterThanOrEqual(neutralFloor - 1e-9);
+      }
+    });
+  }
+
+  for (const p of PALETTES) {
+    test(`${p.id}: text drawn on --tint-neutral stays >= 4.5:1`, () => {
+      const t = { ...baseTokens(p.base), ...p.tokens };
+      for (const ink of NEUTRAL_INKS) {
+        expect(contrast(t[ink]!, t["--tint-neutral"]!), `${ink} ${t[ink]} on ${t["--tint-neutral"]}`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  }
+
+  // Bold moves its context's oklch L by --strong-lift, away from --strong-pivot
+  // (shared-styles.ts). A dimmed context's bold must stay dimmer than the body:
+  // on a light base lighter than unbolded body text, on a dark base dimmer than
+  // body bold. Body text is --text-secondary.
+  const DIMMED = ["--text-soft", "--text-muted", "--text-dim", "--text-faint", "--text-disabled", "--accent-muted", "--worked-ink", "--changed-ink"];
+  for (const t of THEME_SETS) {
+    test(`${t.id}: bold in a dimmed context stays dimmer than the body`, () => {
+      const lift = Number(t.tokens["--strong-lift"]);
+      const pivot = Number(t.tokens["--strong-pivot"]);
+      const bold = (l: number) => Math.min(1, Math.max(0, l + lift * Math.max(-1, Math.min(1, (l - pivot) * 1000))));
+      const body = okL(t.tokens["--text-secondary"]!);
+      for (const tok of DIMMED) {
+        const b = bold(okL(t.tokens[tok]!));
+        const msg = `${tok} ${t.tokens[tok]} bolds to L ${b.toFixed(3)}, body L ${body.toFixed(3)}, body bold ${bold(body).toFixed(3)}`;
+        if (t.base === "light") expect(b, msg).toBeGreaterThan(body);
+        else expect(b, msg).toBeLessThan(bold(body));
+      }
+    });
+  }
+});

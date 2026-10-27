@@ -195,14 +195,14 @@ export const PALETTES: readonly Palette[] = [
       "--scrollbar-thumb": "#d2cbbc",
 
       // Body hsl(40 12% 24%) and heading hsl(40 12% 9%) from the preset; the
-      // steps between are spaced like the light ramp. --text-muted is #6d675a
-      // (L 39 %), not the preset's #81796a (L 46 %): that one measures 3.53:1
-      // on the card, this one 4.61 (4.81 panel, 5.11 page).
+      // steps between are spaced like the light ramp. --text-muted is #696357,
+      // not the preset's #81796a (3.53:1 on the card): 4.89 card, 5.10 panel,
+      // 5.42 page, and 4.70 on --tint-neutral, which sits darker than the card.
       "--text-primary": "#1a1814",
       "--text-secondary": "#454036",
       "--text-tertiary": "#524d42",
       "--text-soft": "#5f5a4e",
-      "--text-muted": "#6d675a",
+      "--text-muted": "#696357",
       "--text-dim": "#8b8374",
       "--text-faint": "#a49e94",
       "--text-disabled": "#c2beb7",
@@ -222,8 +222,10 @@ export const PALETTES: readonly Palette[] = [
       // 5.7–7.9:1) clears 4.5. --tint-purple follows the accent to a copper
       // wash a step LIGHTER than the panel: --accent reaches 4.5 only on a
       // near-white fill (4.63 here, 4.07 on the base lavender; 6.31 for
-      // --accent-light). --tint-neutral warms (--text-muted 4.77, 4.26 on
-      // the base's #eceef3).
+      // --accent-light). --tint-neutral is darker than every surface by at
+      // least plain light's smallest step (1.038, its tint on its card):
+      // 1.040 card, 1.085 panel, 1.153 page. Its inks: --text-muted 4.70,
+      // --text-soft 5.41, --tok-fn 5.29.
       "--tint-success": "#dcfce7",
       "--tint-error": "#fee2e2",
       "--tint-warning": "#fef3c7",
@@ -231,7 +233,7 @@ export const PALETTES: readonly Palette[] = [
       "--tint-purple": "#fdf6ef",
       "--tint-magenta": "#f3e8ff",
       "--tint-cyan": "#cffafe",
-      "--tint-neutral": "#efece7",
+      "--tint-neutral": "#e8e4dc",
 
       "--chat-user-bg": "#f3e3d2",
       "--chat-user-text": "#5c3a1e",
@@ -250,12 +252,14 @@ export const PALETTES: readonly Palette[] = [
       "--bg-code": "#f0ebe2",
       "--bg-code-bar": "#e7dfd0",
 
-      // Bold darkens its context 0.16 in oklch lightness: body (L 0.37)
-      // lands at L 0.21, the preset's strong ink hsl(25 35% 9%). The pivot
+      // Bold darkens its context 0.08 in oklch lightness: body (L 0.373)
+      // lands at 0.293, a 1.36 lead. The preset's strong ink (L 0.21) needs
+      // 0.16, which bolds --text-soft (L 0.469) darker than body text; at
+      // 0.08 every dimmed token's bold stays lighter (soft 0.389). The pivot
       // keeps light's 0.9, between --text-disabled (L 0.80) and the white
       // ink on the accent. The chip keeps its context's text colour (D14) on
       // a fill 6 % darker than the page, with a 10 % black edge.
-      "--strong-lift": "0.16",
+      "--strong-lift": "0.08",
       "--strong-pivot": "0.9",
       "--strong-weight": "bolder",
       "--bg-code-inline": "#ece6da",
