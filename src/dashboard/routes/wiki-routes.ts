@@ -56,6 +56,24 @@ import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
 import { isReadonlyWikiRoot, isWikiReadonly, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
+import {
+  hitConfirmations,
+  hitKey,
+  isConfirmedStale,
+  passageVerdictKey,
+  passageVerdicts,
+  changedHashOf,
+  CHECK_FAILED,
+  CHECK_TIMED_OUT,
+  checkBudget,
+  checkHeartbeatMs,
+  runStaleCheck,
+  staleVerdictStore,
+  statusLineVerdictKey,
+  type StaleCheckEvent,
+  type VerdictView,
+} from "../../wiki/stale-confirm.ts";
+import { streamSSE } from "hono/streaming";
 import { WORK_SESSION_FILE_CAP, workSessionsForSession } from "../../wiki/work-sessions.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
@@ -2364,10 +2382,204 @@ export function registerWikiToolRoutes(
       });
     }
     const pageRef = (c.req.query("page") ?? "").trim();
-    if (!pageRef) return c.json({ ...base, ...(await staleSummary(index, { asOfMs })) });
+    // PR 2a: the cached verdicts. A hit counts as a stale status line only
+    // once confirmed (D11, D26); a verdict read that fails leaves every hit
+    // unconfirmed and says so (`verdicts: "unavailable"`), never a 5xx.
+    if (!pageRef) {
+      const summary = await staleSummary(index, { asOfMs });
+      const hitsByPage = summary.pages.map((r) => [r.relPath, index.statusLineHits?.get(r.relPath) ?? []] as const);
+      let confirmations: Map<string, VerdictView> | null = null;
+      try {
+        confirmations = await hitConfirmations(entry.name, index, hitsByPage);
+      } catch (err) {
+        log.warn("Stale verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+      }
+      const pages = summary.pages.map((r) => {
+        const hits = index.statusLineHits?.get(r.relPath) ?? [];
+        return { ...r, hits: hits.length, staleLines: confirmations ? hits.filter((h) => isConfirmedStale(confirmations!.get(hitKey(r.relPath, h)))).length : 0 };
+      });
+      // The summary's order, on the confirmed count (`staleSummary` sorted on the free hits).
+      pages.sort((a, b) => b.staleLines + b.toCheck - (a.staleLines + a.toCheck) || (b.lastChangeMs ?? 0) - (a.lastChangeMs ?? 0) || a.relPath.localeCompare(b.relPath));
+      return c.json({
+        ...base,
+        ...summary,
+        totals: { ...summary.totals, staleLines: pages.reduce((n, r) => n + r.staleLines, 0), hits: pages.reduce((n, r) => n + r.hits, 0) },
+        pages,
+        ...(confirmations ? {} : { verdicts: "unavailable" }),
+      });
+    }
     const meta = resolvePageRef(index, pageRef, pageRef);
     if (!meta) return c.json({ ...base, error: `no page ${pageRef}` }, 404);
-    return c.json({ ...base, ...(await stalePageReport(index, meta, { asOfMs })) });
+    const report = await stalePageReport(index, meta, { asOfMs });
+    let confirmations: Map<string, VerdictView> | null = null;
+    let verdictsByLinking = new Map<string, VerdictView>();
+    try {
+      confirmations = await hitConfirmations(entry.name, index, [[meta.relPath, report.hits]]);
+      if (report.buckets) verdictsByLinking = await passageVerdicts(entry.name, index, report.buckets.relPath, report.buckets.linking);
+    } catch (err) {
+      confirmations = null;
+      log.warn("Stale verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+    }
+    const hits = report.hits.map((h) => ({ ...h, confirmation: confirmations?.get(hitKey(meta.relPath, h)) ?? ("unconfirmed" as const) }));
+    return c.json({
+      ...base,
+      ...report,
+      hits,
+      staleLines: hits.filter((h) => h.confirmation !== "unconfirmed" && h.confirmation.verdict === "stale").length,
+      buckets: report.buckets
+        ? {
+            ...report.buckets,
+            linking: report.buckets.linking.map((l) => {
+              const v = verdictsByLinking.get(l.relPath);
+              return v ? { ...l, verdict: v } : l;
+            }),
+          }
+        : null,
+      ...(confirmations ? {} : { verdicts: "unavailable" }),
+    });
+  });
+
+  // THE STALE CHECK'S MODEL HALF (PR 2a, `src/wiki/stale-confirm.ts`).
+  // Both refuse on a readonly instance (D25) and on a readonly root (the
+  // egress guard, which reads the root), take JSON only and resolve the wiki
+  // like the GET above.
+  const staleRequest = async (c: Context) => {
+    const notJson = requireJsonRequest(c);
+    if (notJson) return { refusal: notJson } as const;
+    const ro = readonlyRefusal(c);
+    if (ro) return { refusal: ro } as const;
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+    const str = (k: string) => (typeof body[k] === "string" ? (body[k] as string).trim() : "");
+    const { entry, unknownWiki } = resolveWikiRequest(getWikiRegistry(), str("wiki") || c.req.query("wiki"), undefined, process.env.WIKI_DIR);
+    if (unknownWiki || !entry) return { refusal: c.json({ error: "no wiki configured for that name" }, 404) } as const;
+    const egress = egressRefusal(c, entry, unknownWiki);
+    if (egress) return { refusal: egress } as const;
+    const asOfMs = parseStaleAsOf(str("asOf") || undefined);
+    if (asOfMs === null) return { refusal: c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms" }, 400) } as const;
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return { refusal: c.json({ error: "wiki directory not found" }, 503) } as const;
+    const pageRef = str("page");
+    if (!pageRef) return { refusal: c.json({ error: "page is required" }, 400) } as const;
+    const meta = resolvePageRef(index, pageRef, pageRef);
+    if (!meta) return { refusal: c.json({ error: `no page ${pageRef}` }, 404) } as const;
+    return { entry, index, meta, asOfMs, str } as const;
+  };
+
+  // Check (D6): one model call per To-check linking page of a changed page,
+  // at most 10 a request, progress as server-sent events (`start`, one
+  // `verdict` or `error` per page, `done`; `app_error` once the stream is
+  // committed). Everything refusable is refused as JSON before the stream.
+  app.post("/api/wiki/stale/check", async (c) => {
+    // The budget runs from the request's arrival, so the index and the
+    // buckets count against it (A11).
+    const { budgetMs, graceMs } = checkBudget();
+    const deadlineAt = Date.now() + budgetMs;
+    const r = await staleRequest(c);
+    if ("refusal" in r) return r.refusal;
+    const { entry, index, meta, asOfMs } = r;
+    const { bot } = resolveWikiSynthesisBot(entry, discoverAllBots());
+    if (!bot) return c.json({ error: "No routing bot for this wiki" }, 409);
+    // Bun cuts a response at the server's idleTimeout (255 s) however often it
+    // writes (measured, Bun 1.3.10), so the timer is off for this request and
+    // the race below bounds the stream instead. `c.env` is the Bun server
+    // (`src/index.ts`); a test's `app.request` has none.
+    (c.env as { timeout?: (req: Request, seconds: number) => void } | undefined)?.timeout?.(c.req.raw, 0);
+    return streamSSE(c, async (stream) => {
+      // Set when the reader disconnects: Hono cancels the response stream and
+      // runs `onAbort` (its `write` swallows errors, so a failed write says nothing).
+      let gone = false;
+      // A comment frame no client sees as an event, for a proxy's read timeout.
+      const heartbeat = setInterval(() => {
+        if (!gone) void stream.write(": heartbeat\n\n");
+      }, checkHeartbeatMs());
+      stream.onAbort(() => {
+        gone = true;
+        clearInterval(heartbeat);
+      });
+      const send = async (e: StaleCheckEvent | { type: "app_error"; message: string }) => {
+        if (gone) return;
+        await stream.writeSSE({ event: e.type, data: JSON.stringify(e) });
+      };
+      let overrun: ReturnType<typeof setTimeout> | undefined;
+      const outOfTime = new Promise<"timeout">((r) => (overrun = setTimeout(() => r("timeout"), deadlineAt + graceMs - Date.now())));
+      try {
+        const run = runStaleCheck({
+          wiki: entry.name,
+          index,
+          relPath: meta.relPath,
+          ...(asOfMs !== undefined ? { asOfMs } : {}),
+          bot,
+          onEvent: send,
+          isGone: () => gone,
+          deadlineAt,
+        });
+        const ran = await Promise.race([run, outOfTime]);
+        if (ran === "timeout") {
+          // The run goes on in the background: it starts no call and sends nothing more.
+          void run.catch(() => {});
+          log.warn("Stale check for {page} ran {graceMs} ms past its budget; the stream ends", { page: meta.relPath, graceMs });
+          await send({ type: "app_error", message: CHECK_TIMED_OUT });
+          gone = true;
+        } else if (!ran) await send({ type: "app_error", message: `${meta.relPath} is not a changed page${asOfMs !== undefined ? " as of that date" : ""}: it has no linking pages to check` });
+      } catch (err) {
+        log.warn("Stale check failed for {page}: {error}", { page: meta.relPath, error: err instanceof Error ? err.message : String(err) });
+        await send({ type: "app_error", message: CHECK_FAILED });
+      } finally {
+        clearTimeout(overrun);
+        clearInterval(heartbeat);
+      }
+    });
+  });
+
+  // Still true / Not a status (D7): a reader's verdict row. The key is
+  // derived here from the page as it is now, never taken from the client.
+  // `kind: "status-line"` names a hit by `line` + `target`; `kind: "passage"`
+  // names a changed `page` and its To-check `linking` page.
+  app.post("/api/wiki/stale/verdict", async (c) => {
+    const r = await staleRequest(c);
+    if ("refusal" in r) return r.refusal;
+    const { entry, index, meta, asOfMs, str } = r;
+    const verdict = str("verdict");
+    if (verdict !== "true" && verdict !== "not-status") return c.json({ error: "verdict must be true or not-status" }, 400);
+    const kind = str("kind");
+    if (kind === "status-line") {
+      const body = await c.req.json<{ line?: unknown }>().catch(() => ({}) as { line?: unknown });
+      const line = Number(body.line);
+      const target = str("target");
+      const hit = (index.statusLineHits?.get(meta.relPath) ?? []).find((h) => h.line === line && (!target || h.target === target));
+      if (!hit) return c.json({ error: `no status-line hit on ${meta.relPath} line ${str("line") || body.line}` }, 404);
+      const row = await staleVerdictStore().upsert({
+        wiki: entry.name,
+        kind: "status-line",
+        page: meta.relPath,
+        keyHash: statusLineVerdictKey(index, meta.relPath, hit),
+        verdict,
+        reason: verdict === "true" ? "Marked still true by a reader" : "Marked not a status by a reader",
+        edit: null,
+        checkedBy: "reader",
+      });
+      return c.json({ ok: true, verdict: row.verdict, checkedAt: row.checkedAt });
+    }
+    if (kind === "passage") {
+      const linkingRef = str("linking");
+      const report = await stalePageReport(index, meta, asOfMs !== undefined ? { asOfMs } : {});
+      const l = report.buckets?.linking.find((x) => x.relPath === linkingRef && x.bucket === "toCheck");
+      if (!l) return c.json({ error: `${linkingRef || "(no linking page)"} is not a page to check for ${meta.relPath}` }, 404);
+      const changedHash = await changedHashOf(index, meta.relPath);
+      if (changedHash === null) return c.json({ error: `${meta.relPath} cannot be read, so its verdicts have no key` }, 409);
+      const row = await staleVerdictStore().upsert({
+        wiki: entry.name,
+        kind: "passage",
+        page: l.relPath,
+        keyHash: passageVerdictKey(index, meta.relPath, changedHash, l),
+        verdict,
+        reason: verdict === "true" ? "Marked still true by a reader" : "Marked not a status by a reader",
+        edit: null,
+        checkedBy: "reader",
+      });
+      return c.json({ ok: true, verdict: row.verdict, checkedAt: row.checkedAt });
+    }
+    return c.json({ error: "kind must be status-line or passage" }, 400);
   });
 
   app.get("/api/wiki/index-coverage", async (c) => {

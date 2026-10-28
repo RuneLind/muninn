@@ -1369,6 +1369,13 @@ export { extractWikilinks } from "./wikilinks.ts";
 
 const MD_LINK_RE = /(!?)\[(?:[^\]]*)\]\(([^)]+)\)/g;
 
+/** Where each {@link MD_LINK_RE} match sits on `content`, images included:
+ *  the grammar {@link extractMarkdownLinks} reads, for callers that need a
+ *  link's position (the Stale check's windows and edit checks). */
+export function markdownLinkSpans(content: string): { start: number; end: number; image: boolean }[] {
+  return [...content.matchAll(MD_LINK_RE)].map((m) => ({ start: m.index!, end: m.index! + m[0].length, image: m[1] === "!" }));
+}
+
 /**
  * Extract relative markdown link targets — `[text](target.md)`,
  * `[text](target.mdx)`, or `[text](target.html)` — from raw page content. Wikis

@@ -47,6 +47,12 @@ const ALL_TABLES = [
   "jira_drafts",
   "summary_factchecks",
   "wiki_answers",
+  "wiki_stale_verdicts",
+  // Cleared before each test, so no test starts with another file's override.
+  // It does not stop a suite's last row outliving it: role-overrides.test.ts
+  // clears its own rows in afterAll, and the e2e spec deletes HAIKU_BACKEND
+  // before boot (A18: a leftover row routed the e2e server to the Claude CLI).
+  "role_overrides",
 ];
 
 let dbInitialized = false;

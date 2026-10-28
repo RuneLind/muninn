@@ -43,6 +43,7 @@ function recordingDeps(overrides: Partial<Record<keyof RetentionCleanupDeps, () 
     cleanupOldTraces: make("cleanupOldTraces"),
     cleanupOldSnapshots: make("cleanupOldSnapshots"),
     cleanupThreadCitations: make("cleanupThreadCitations"),
+    cleanupOldStaleVerdicts: make("cleanupOldStaleVerdicts"),
   } as unknown as RetentionCleanupDeps;
   return { deps, calls, args };
 }
@@ -61,10 +62,11 @@ describe("runRetentionCleanup", () => {
   test("harvests before the trace delete, then snapshots and citations, with the configured windows", async () => {
     const { deps, calls, args } = recordingDeps();
     await runRetentionCleanup(CONFIG, deps);
-    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
+    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations", "cleanupOldStaleVerdicts"]);
     expect(args.cleanupOldTraces).toBe(7);
     expect(args.cleanupOldSnapshots).toEqual({ chatDays: 3, captureDays: 90 });
     expect(args.cleanupThreadCitations).toBe(7);
+    expect(args.cleanupOldStaleVerdicts).toBe(90);
   });
 
   test("every statement is passed the Postgres statement timeout", async () => {
@@ -74,12 +76,13 @@ describe("runRetentionCleanup", () => {
       cleanupOldTraces: async (_d, opts) => ((seen.traces = opts), 0),
       cleanupOldSnapshots: async (_w, opts) => ((seen.snapshots = opts), 0),
       cleanupThreadCitations: async (_d, opts) => ((seen.citations = opts), 0),
+      cleanupOldStaleVerdicts: async (_d, opts) => ((seen.verdicts = opts), 0),
     };
     await runRetentionCleanup(CONFIG, deps);
     const bound = { statementTimeoutMs: RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS };
     // The deletes also get the stop flag, checked between their batches.
     const withStop = { ...bound, shouldStop: expect.any(Function) };
-    expect(seen).toEqual({ harvest: bound, traces: withStop, snapshots: withStop, citations: withStop });
+    expect(seen).toEqual({ harvest: bound, traces: withStop, snapshots: withStop, citations: withStop, verdicts: withStop });
     expect(RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS).toBe(300_000);
   });
 
@@ -91,7 +94,7 @@ describe("runRetentionCleanup", () => {
       },
     });
     await runRetentionCleanup(CONFIG, deps);
-    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
+    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations", "cleanupOldStaleVerdicts"]);
     expect(records.some((r) => r.level === "error" && r.properties.error === "harvest boom")).toBe(true);
   });
 
@@ -113,7 +116,7 @@ describe("runRetentionCleanup", () => {
       },
     });
     await runRetentionCleanup(CONFIG, deps);
-    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
+    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations", "cleanupOldStaleVerdicts"]);
   });
 
   test("a snapshot-delete failure is logged and still runs the citation delete", async () => {
@@ -124,7 +127,7 @@ describe("runRetentionCleanup", () => {
       },
     });
     await runRetentionCleanup(CONFIG, deps);
-    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
+    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations", "cleanupOldStaleVerdicts"]);
     expect(records.some((r) => r.level === "error" && r.properties.error === "snapshot boom")).toBe(true);
   });
 
@@ -148,13 +151,13 @@ describe("runRetentionCleanup", () => {
     const { deps } = recordingDeps();
     await runRetentionCleanup(CONFIG, deps);
     const lines = records.filter((r) => r.category.includes("retention"));
-    expect(lines.length).toBe(4);
+    expect(lines.length).toBe(5);
     for (const l of lines) expect(l.properties).toEqual({ count: 1 });
   });
 
   test("the boot line names every window", () => {
     expect(retentionCleanupBootLine(CONFIG)).toBe(
-      "Retention cleanup on (hourly): traces and thread citations 7 day(s), chat prompt snapshots 3, capture snapshots 90",
+      "Retention cleanup on (hourly): traces and thread citations 7 day(s), chat prompt snapshots 3, capture snapshots 90, stale verdicts 90",
     );
   });
 });
@@ -331,7 +334,7 @@ describe("startRetentionCleanup", () => {
     const second = recordingDeps();
     startRetentionCleanup(CONFIG, { deps: second.deps, firstDelayMs: 0, intervalMs: 60_000 });
     await Bun.sleep(30);
-    expect(second.calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
+    expect(second.calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations", "cleanupOldStaleVerdicts"]);
   });
 
   test("the stop waits at most a few seconds for a run in flight", () => {

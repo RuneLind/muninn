@@ -43,9 +43,9 @@ describe("parseStaleArgs", () => {
 });
 
 describe("runWikiStale", () => {
-  test("--pages: the page report, To-check passages, Moved with, and the PR 2a line for --check", async () => {
+  test("--pages: the page report, To-check passages, Moved with", async () => {
     const urls: string[] = [];
-    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--as-of", "2026-10-25", "--check", "--base-url", "http://m:1/"], {
+    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--as-of", "2026-10-25", "--base-url", "http://m:1/"], {
       fetchJson: fake(() => report, urls),
     });
     expect(urls).toEqual(["http://m:1/api/wiki/stale?wiki=w&asOf=2026-10-25&page=repos%2Fx.md"]);
@@ -56,7 +56,92 @@ describe("runWikiStale", () => {
     expect(text).toContain("repos/api.md — API (last change 2026-10-06)");
     expect(text).toContain("L59 [date] pin rule");
     expect(text).toContain("moved with: plans/p.mdx ×2");
-    expect(out.at(-1)).toBe("check: the model checks arrive with PR 2a — these are the free checks only");
+    expect(text).not.toContain("check repos/x.md");
+  });
+
+  test("PR 2a: a confirmed hit counts, an unconfirmed one is named apart, a passage verdict is printed", async () => {
+    const r2 = {
+      ...report,
+      staleLines: 1,
+      hits: [
+        { ...report.hits[0], confirmation: { verdict: "stale", reason: "the plan shipped 22.10" } },
+        { line: 128, target: "plans/q.mdx", said: ["proposed"], now: "in-flight", text: "q", confirmation: "unconfirmed" },
+      ],
+      buckets: { ...report.buckets, linking: [{ ...report.buckets.linking[0], verdict: { verdict: "true", reason: "still so" } }, report.buckets.linking[1]] },
+    };
+    const text = (await runWikiStale(["--wiki", "w", "--pages", "repos/x.md"], { fetchJson: fake(() => r2) })).join("\n");
+    expect(text).toContain("stale status lines: 1 (+ 1 unconfirmed hit)");
+    expect(text).toContain("plan_status shipped [stale: the plan shipped 22.10]");
+    expect(text).toContain("plan_status in-flight [unconfirmed]");
+    expect(text).toContain("repos/api.md — API (last change 2026-10-06) [still true: still so]");
+  });
+
+  test("--check posts the check route for a changed page and prints each streamed verdict", async () => {
+    const posts: { url: string; body: unknown }[] = [];
+    async function* events() {
+      yield { event: "start", data: { toCheck: 2, cached: 1, toCall: 1, left: 0 } };
+      yield { event: "verdict", data: { relPath: "repos/old.md", verdict: "true", reason: "fine", cached: true, edit: null } };
+      yield { event: "verdict", data: { relPath: "repos/api.md", verdict: "stale", reason: "misses the pin rule", cached: false, edit: { old: "a", new: "b" } } };
+      yield { event: "done", data: { calls: 1, verdicts: 2, errors: 0, left: 0 } };
+    }
+    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--as-of", "2026-10-25", "--check", "--base-url", "http://m:1"], {
+      fetchJson: fake(() => report),
+      postSse: async (url, body) => {
+        posts.push({ url, body });
+        return { status: 200, events: events() };
+      },
+    });
+    expect(posts).toEqual([{ url: "http://m:1/api/wiki/stale/check", body: { wiki: "w", page: "repos/x.md", asOf: "2026-10-25" } }]);
+    const text = out.join("\n");
+    expect(text).toContain("2 to check: 1 cached, 1 model call(s)");
+    expect(text).toContain("repos/old.md [still true: fine] (cached)");
+    expect(text).toContain("repos/api.md [stale: misses the pin rule] — edit: «a» → «b»");
+    expect(text).toContain("done: 1 call(s), 2 verdict(s), 0 error(s)");
+  });
+
+  test("--check skips a page that is not changed, and a refused check is one line", async () => {
+    let posted = 0;
+    const notChanged = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--check"], {
+      fetchJson: fake(() => ({ ...report, changed: false, buckets: null })),
+      postSse: async () => ((posted++), { status: 200 }),
+    });
+    expect(posted).toBe(0);
+    expect(notChanged.join("\n")).not.toContain("check repos/x.md");
+    const refused = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--check"], {
+      fetchJson: fake(() => report),
+      postSse: async () => ({ status: 409, body: { error: "No routing bot for this wiki" } }),
+    });
+    expect(refused).toContain("wiki-stale: check repos/x.md: No routing bot for this wiki");
+  });
+
+  test("each Check gets its own 5-minute bound, the free reports keep 25 s", async () => {
+    const { CHECK_PAGE_DEADLINE_MS, RUN_DEADLINE_MS } = await import("./wiki-stale.ts");
+    expect(RUN_DEADLINE_MS).toBe(25_000);
+    expect(CHECK_PAGE_DEADLINE_MS).toBe(300_000);
+    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--check"], {
+      checkDeadlineMs: 50,
+      fetchJson: fake(() => report),
+      postSse: () => new Promise(() => {}),
+    });
+    expect(out.at(-1)).toBe("wiki-stale: check repos/x.md did not finish in 0.05 s");
+  });
+
+  test("readSse parses event blocks across chunk boundaries", async () => {
+    const { readSse } = await import("./wiki-stale.ts");
+    const enc = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode('event: start\ndata: {"toCheck":1}\n\nevent: ver'));
+        c.enqueue(enc.encode('dict\ndata: {"relPath":"a.md"}\n\n'));
+        c.close();
+      },
+    });
+    const got: unknown[] = [];
+    for await (const e of readSse(body)) got.push(e);
+    expect(got).toEqual([
+      { event: "start", data: { toCheck: 1 } },
+      { event: "verdict", data: { relPath: "a.md" } },
+    ]);
   });
 
   test("a readonly instance prints the free checks plus one «check unavailable» line", async () => {
@@ -275,6 +360,131 @@ describe("R2-5: a wrong answer is one line for its page, and the run goes on", (
     expect(out[0]).toBe("wiki-stale: unexpected answer from http://127.0.0.1:3010 for page a.md: late");
     expect(out).toContain("b.md — T");
   });
+});
+
+describe("A10: --check streams, a slow page never starves the next, and an unavailable store is said", () => {
+  const verdictEvents = (relPath: string) =>
+    (async function* () {
+      yield { event: "start", data: { toCheck: 1, cached: 0, toCall: 1, left: 0 } };
+      yield { event: "verdict", data: { relPath, verdict: "stale", reason: "moved", cached: false, edit: null } };
+      yield { event: "done", data: { calls: 1, verdicts: 1, errors: 0, left: 0 } };
+    })();
+  const pageReport = (relPath: string) => ({ ...report, page: { relPath, title: relPath } });
+
+  test("a Check that hangs on page a ends at its own deadline, and page b is still checked", async () => {
+    const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "b.md", "--check"], {
+      deadlineMs: 2_000,
+      checkDeadlineMs: 100,
+      fetchJson: fake((q) => pageReport(q.get("page")!)),
+      postSse: async (_url, body) => (body.page === "a.md" ? new Promise(() => {}) : { status: 200, events: verdictEvents("linker-of-b.md") }),
+    });
+    expect(out).toContain("wiki-stale: check a.md did not finish in 0.1 s");
+    expect(out.join("\n")).toContain("linker-of-b.md [stale: moved]");
+  });
+
+  test("the free reports keep their own budget: a Check's time is not charged to it, nor bounded by it", async () => {
+    const t0 = Date.now();
+    const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "b.md", "--check"], {
+      deadlineMs: 200,
+      checkDeadlineMs: 5_000,
+      fetchJson: (url) => (new URL(url).searchParams.get("page") === "b.md" ? new Promise(() => {}) : Promise.resolve({ status: 200, body: pageReport("a.md") })),
+      postSse: async () => {
+        await Bun.sleep(300);
+        return { status: 200, events: verdictEvents("linker-of-a.md") };
+      },
+    });
+    expect(out.join("\n")).toContain("linker-of-a.md [stale: moved]");
+    expect(out).toContain("wiki-stale: muninn did not answer in 0.2 s — no stale report");
+    expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  test("--check --json: every line parses, each streamed event one line", async () => {
+    const lines: string[] = [];
+    await runWikiStale(["--wiki", "w", "--pages", "a.md", "--check", "--json"], {
+      fetchJson: fake(() => pageReport("a.md")),
+      postSse: async () => ({ status: 200, events: verdictEvents("linker-of-a.md") }),
+      write: (l) => lines.push(l),
+    });
+    for (const l of lines) expect(() => JSON.parse(l)).not.toThrow();
+    expect(lines.map((l) => JSON.parse(l).event).filter(Boolean)).toEqual(["start", "verdict", "done"]);
+  });
+
+  test("the free budget is shared: slow GETs on several pages spend one 25 s budget between them", async () => {
+    const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "b.md", "c.md"], {
+      deadlineMs: 200,
+      fetchJson: async (url) => {
+        await Bun.sleep(120);
+        return { status: 200, body: pageReport(new URL(url).searchParams.get("page")!) };
+      },
+    });
+    expect(out).toContain("a.md — a.md");
+    expect(out).toContain("wiki-stale: muninn did not answer in 0.2 s — no stale report");
+    expect(out.join("\n")).not.toContain("b.md — b.md");
+    expect(out.join("\n")).not.toContain("c.md — c.md");
+  });
+
+  test("verdicts: unavailable says the verdict store is unavailable, not zero stale lines", async () => {
+    const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md"], {
+      fetchJson: fake(() => ({ ...report, staleLines: 0, hits: report.hits.map((h) => ({ ...h, confirmation: "unconfirmed" })), verdicts: "unavailable" })),
+    });
+    const text = out.join("\n");
+    expect(text).not.toContain("stale status lines: 0");
+    expect(text).toContain("stale status lines: unknown — the verdict store is unavailable");
+    const summary = await runWikiStale(["--wiki", "w"], {
+      fetchJson: fake(() => ({ wiki: "w", verdicts: "unavailable", totals: { staleLines: 0, toCheck: 1, changedPages: 1, hits: 2 }, pages: [] })),
+    });
+    expect(summary.join("\n")).toContain("the verdict store is unavailable");
+    expect(summary.join("\n")).not.toContain("w: 0 stale status line(s)");
+  });
+
+  test("the script prints each verdict as its event arrives, not at exit", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let released = false;
+    const enc = new TextEncoder();
+    const frame = (event: string, data: unknown) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const server = Bun.serve({
+      port: 0,
+      idleTimeout: 30,
+      fetch(req) {
+        if (req.method === "GET") return Response.json(report);
+        return new Response(
+          new ReadableStream({
+            async start(ctrl) {
+              ctrl.enqueue(frame("start", { toCheck: 2, cached: 0, toCall: 2, left: 0 }));
+              ctrl.enqueue(frame("verdict", { relPath: "repos/api.md", verdict: "stale", reason: "early", cached: false, edit: null }));
+              await held;
+              ctrl.enqueue(frame("done", { calls: 2, verdicts: 1, errors: 0, left: 0 }));
+              ctrl.close();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    const timer = setTimeout(() => ((released = true), release()), 4_000);
+    try {
+      const proc = Bun.spawn(["bun", "--no-env-file", `${import.meta.dir}/wiki-stale.ts`, "--wiki", "w", "--pages", "repos/x.md", "--check", "--base-url", `http://127.0.0.1:${server.port}`], { stdout: "pipe", stderr: "pipe" });
+      const dec = new TextDecoder();
+      let seen = "";
+      let earlyBeforeRelease = false;
+      for await (const chunk of proc.stdout as unknown as AsyncIterable<Uint8Array>) {
+        seen += dec.decode(chunk, { stream: true });
+        if (seen.includes("repos/api.md [stale: early]") && !released) {
+          earlyBeforeRelease = true;
+          released = true;
+          release();
+        }
+      }
+      expect(await proc.exited).toBe(0);
+      expect(earlyBeforeRelease).toBe(true);
+      expect(seen).toContain("done: 2 call(s), 1 verdict(s), 0 error(s)");
+    } finally {
+      clearTimeout(timer);
+      release();
+      server.stop(true);
+    }
+  }, 15_000);
 });
 
 test("the script exits 0, even on a usage error", async () => {

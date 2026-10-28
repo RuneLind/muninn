@@ -47,6 +47,10 @@ export const WIKI_READ_SLICE_HIDDEN_SELECTOR = [
   '[data-conntab="ask"]',
   '[data-pane-open="ask"]',
   "#askBody",
+  // The STALE tab and its body: `/api/wiki/stale` and its check routes are
+  // tool-half routes (stale check PR 2a).
+  '[data-conntab="stale"]',
+  "#staleBody",
   // The issue board (`/wiki/issues`) and the gardener (`/wiki/gardener`).
   "#wikiBoardLink",
   ".wiki-gardener-icon",

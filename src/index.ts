@@ -24,6 +24,7 @@ import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
 import { answerRetentionBootLines, startAnswerRetentionSweep, stopAnswerRetentionSweep } from "./wiki/answer-retention.ts";
 import { retentionCleanupBootLine, startRetentionCleanup, stopRetentionCleanup } from "./scheduler/retention-cleanup.ts";
+import { startStaleConfirmLoop, stopStaleConfirmLoop } from "./wiki/stale-confirm.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
@@ -287,6 +288,15 @@ for (const line of config.wikiDefaultLens.warnings) log.warn("{line}", { line })
 // every profile — not inside the per-bot scheduler, which needs a Telegram bot.
 if (startRetentionCleanup(config)) {
   log.info("{line}", { line: retentionCleanupBootLine(config) });
+}
+
+// The Stale check's confirm loop (D16): beside the retention cleanup, on the
+// write owner only — off with SCHEDULER_ENABLED=false, on a readonly instance,
+// under MUNINN_PROFILE=nais and when WIKI_STALE_CONFIRM_WIKIS names no wiki it
+// can cover (each such name logs a warning).
+const staleConfirmWikis = startStaleConfirmLoop(config);
+if (staleConfirmWikis.length) {
+  log.info("Stale confirm loop on (every 5 min after a run ends): {wikis}", { wikis: staleConfirmWikis.join(", ") });
 }
 
 // Start research_knowledge MCP server. Bots opt in by adding the server to their
@@ -555,6 +565,7 @@ async function shutdown() {
   stopStaleHandoffSweep();
   const answerRetentionStopped = stopAnswerRetentionSweep();
   const retentionCleanupStopped = stopRetentionCleanup();
+  const staleConfirmStopped = stopStaleConfirmLoop();
   await wikiBucketMirrors?.stop();
   await waitForPendingTicks(10_000);
   // Let in-flight memory/goal/schedule extractions finish their DB writes
@@ -563,6 +574,7 @@ async function shutdown() {
   // A sweep in flight finishes its DB writes before the pool closes below.
   await answerRetentionStopped;
   await retentionCleanupStopped;
+  await staleConfirmStopped;
 
   for (const bot of telegramBotMap.values()) {
     bot.stop();

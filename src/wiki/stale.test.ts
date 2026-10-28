@@ -180,6 +180,39 @@ describe("statusLineCandidates (phase A)", () => {
     // A status word BEFORE the link names nothing about it.
     expect(statusLineCandidates("shipped: [[plan-a]]\n")).toEqual([]);
   });
+
+  // A1: a long line is cut around the hit, never at its head, so the model
+  // always sees the link and the status word it judges.
+  test("A1: a long line's text is a window that holds the link and the status word", () => {
+    const head = "Lead-in prose that runs on and on. ".repeat(14); // 490 chars before the link
+    const c = statusLineCandidates(`${head}[[plan-a]] is in-flight, two PRs open. ${"Tail text. ".repeat(40)}\n`);
+    expect(c).toHaveLength(1);
+    expect(c[0]!.text).toContain("[[plan-a]] is in-flight");
+    expect(c[0]!.text.length).toBeLessThanOrEqual(362);
+    expect(c[0]!.text.startsWith("…")).toBe(true);
+    expect(c[0]!.text.endsWith("…")).toBe(true);
+  });
+
+  test("A1: a link far from its status word keeps both, with a gap between", () => {
+    const c = statusLineCandidates(`[[plan-a]] ${"and then some filler ".repeat(30)}is now shipped. ${"x ".repeat(100)}\n`);
+    expect(c).toHaveLength(1);
+    expect(c[0]!.text).toContain("[[plan-a]]");
+    expect(c[0]!.text).toContain("is now shipped");
+    expect(c[0]!.text).toContain(" … ");
+  });
+
+  test("A1: status words spread over a very long segment keep the window bounded, on the nearest word", () => {
+    const c = statusLineCandidates(`${"Lead. ".repeat(70)}[[plan-a]] is proposed ${"filler ".repeat(800)}and later shipped.\n`);
+    expect(c).toHaveLength(1);
+    expect(c[0]!.said).toEqual(["proposed", "shipped"]);
+    expect(c[0]!.text).toContain("[[plan-a]] is proposed");
+    expect(c[0]!.text.length).toBeLessThanOrEqual(365);
+  });
+
+  test("A1: a short line's text is the whole trimmed line", () => {
+    const c = statusLineCandidates("  - [[plan-a]] is shipped  \n");
+    expect(c[0]!.text).toBe("- [[plan-a]] is shipped");
+  });
 });
 
 function meta(over: Partial<WikiPageMeta> & { relPath: string }): WikiPageMeta {
@@ -527,6 +560,7 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
   let index: WikiIndex;
   const asOfMs = Date.parse("2026-06-20T23:59:59.999Z");
   const long = "and its whole long description here";
+  const FILL = "lorem ipsum dolor sit amet ".repeat(16);
   const HEADINGS = [
     ["sources", "Sources"],
     ["see-also", "See also"],
@@ -570,6 +604,10 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
     await write("notes/quoted.md", page("Quoted", "Body.\n\n> The pin in [[hub]] landed on 23.05."));
     // B4-2: a frontmatter link is a Pointer, whatever its line says.
     await write("notes/fm.md", page("Fm", "Body.", 'up: "[[hub]] pinned 23.05"\n'));
+    // A17: a passage line past the cap keeps the link and the claim, whichever comes first.
+    await write("notes/longtail.md", page("Longtail", `${FILL}The pin in [[hub]] landed on 23.05, see the log.`));
+    await write("notes/longhead.md", page("Longhead", `Shown in PR #812, ${FILL}${FILL}and the fixtures sit in [[hub]].`));
+    await write("notes/longmd.md", page("Longmd", `Pinned 23.05: ${FILL}${FILL}the details sit in [Hub](../hub.md).`));
     await commitAt("2026-05-01T10:00:00Z", "seed");
     await write("hub.md", page("Hub", "Body two."));
     await write("notes/x,y.md", page("XY", "Body two."));
@@ -590,16 +628,94 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
       ...Object.fromEntries(HEADINGS.map(([slug]) => [`notes/h-${slug}.md`, "pointers"])),
       "notes/quoted.md": "mentions",
       "notes/fm.md": "pointers",
+      "notes/longtail.md": "toCheck",
+      "notes/longhead.md": "toCheck",
+      "notes/longmd.md": "toCheck",
     });
     expect(b!.linking.find((l) => l.relPath === "notes/quoted.md")!.passages).toEqual([]);
     const titled = b!.linking.find((l) => l.relPath === "notes/titled.md")!;
     expect(titled.passages.map((p) => [p.line, p.claim])).toEqual([[5, "date"]]);
   });
 
+  test("A17: a long passage line's text holds the link and the claim, each piece verbatim from the line", async () => {
+    const b = await linkingBuckets(index, "hub.md", { asOfMs });
+    const lines = (rel: string) => Bun.file(path.join(root, rel)).text().then((t) => t.split("\n"));
+    const cases = [
+      ["notes/longtail.md", "[[hub]]", "23.05", "date"],
+      ["notes/longhead.md", "[[hub]]", "PR #812", "PR"],
+      ["notes/longmd.md", "[Hub](../hub.md)", "23.05", "date"],
+    ] as const;
+    for (const [rel, link, claimText, claim] of cases) {
+      const [p] = b!.linking.find((l) => l.relPath === rel)!.passages;
+      expect(p!.claim).toBe(claim);
+      expect(p!.text).toContain(link);
+      expect(p!.text).toContain(claimText);
+      expect(p!.text.length).toBeLessThanOrEqual(365);
+      const source = (await lines(rel))[p!.line - 1]!;
+      for (const piece of p!.text.split("…")) expect(source).toContain(piece.trim());
+    }
+  });
+
   test("a %2C-escaped markdown link reaches its page", async () => {
     const b = await linkingBuckets(index, "notes/x,y.md", { asOfMs });
     const comma = b!.linking.find((l) => l.relPath === "notes/comma.md");
     expect(comma?.bucket).toBe("toCheck");
+  });
+
+  test("teardown", async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+});
+
+// Fix round 2 batch 1: the window's link is found with the backlink graph's
+// own grammar, so a link whose text holds inline code is found (mimir
+// `overview.md:15`), and on a line with several links it is the one to the
+// changed page, not the line's first link.
+describe("a passage line's window holds the link to the changed page (fix round 2)", () => {
+  let root = "";
+  let index: WikiIndex;
+  const asOfMs = Date.parse("2026-06-20T23:59:59.999Z");
+  const FILL = "lorem ipsum dolor sit amet ".repeat(16);
+  const CASES = [
+    // [page, line body, the link to hub as written]
+    ["code-text", `Pinned 23.05: ${FILL}${FILL}the details sit in [the \`ci_*\` tables](../hub.md).`, "[the `ci_*` tables](../hub.md)"],
+    ["code-title", `Pinned 23.05: ${FILL}${FILL}see [the \`hub\`](../hub.md "the \`hub\` page").`, '[the `hub`](../hub.md "the `hub` page")'],
+    ["other-first-md", `[[x,y]] pinned 23.05, ${FILL}${FILL}and the details sit in [the \`x\` table](../hub.md).`, "[the `x` table](../hub.md)"],
+    ["other-first-wiki", `[[x,y]] pinned 23.05, ${FILL}${FILL}and the details sit in [[hub|the hub]].`, "[[hub|the hub]]"],
+    ["other-md-first", `[the \`x\` notes](x%2Cy.md) pinned 23.05, ${FILL}${FILL}see [[hub#Body]].`, "[[hub#Body]]"],
+    ["two-to-hub", `[[x,y]] pinned 23.05, [[hub]] ${FILL}${FILL}and [Hub](../hub.md) again.`, "[[hub]]"],
+    ["embed", `Pinned 23.05: ${FILL}${FILL}![[hub]]`, "![[hub]]"],
+  ] as const;
+
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+
+  test("setup", async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-stale-span-"));
+    await git(root, "init", "-q", "-b", "main");
+    await write("hub.md", page("Hub", "## Body\n\nBody."));
+    await write("notes/x,y.md", page("XY", "Body."));
+    for (const [slug, body] of CASES) await write(`notes/${slug}.md`, page(slug, body));
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "--date", "2026-05-01T10:00:00Z", "-m", "seed");
+    await write("hub.md", page("Hub", "## Body\n\nBody two."));
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "--date", "2026-06-18T10:00:00Z", "-m", "hub");
+    index = await buildWikiIndex(root);
+  }, 30_000);
+
+  test("every case's window holds its link to the hub and the claim, each piece verbatim", async () => {
+    const b = await linkingBuckets(index, "hub.md", { asOfMs });
+    for (const [slug, body, link] of CASES) {
+      const lp = b!.linking.find((l) => l.relPath === `notes/${slug}.md`);
+      expect([slug, lp?.bucket]).toEqual([slug, "toCheck"]);
+      const [p] = lp!.passages;
+      expect([slug, p!.text.includes(link)]).toEqual([slug, true]);
+      expect([slug, p!.text.includes("23.05")]).toEqual([slug, true]);
+      for (const piece of p!.text.split("…")) expect([slug, body.includes(piece.trim())]).toEqual([slug, true]);
+    }
   });
 
   test("teardown", async () => {

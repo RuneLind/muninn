@@ -3,6 +3,7 @@ import { cleanupOldTraces } from "../db/traces.ts";
 import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
 import { cleanupThreadCitations } from "../db/research-citations.ts";
 import { harvestSearchSignals } from "../db/search-signals.ts";
+import { cleanupOldStaleVerdicts, STALE_VERDICT_RETENTION_DAYS } from "../db/wiki-stale-verdicts.ts";
 import { BatchedDeleteError } from "../db/batched-delete.ts";
 import { getLog } from "../logging.ts";
 
@@ -33,9 +34,10 @@ export interface RetentionCleanupDeps {
   cleanupOldTraces: typeof cleanupOldTraces;
   cleanupOldSnapshots: typeof cleanupOldSnapshots;
   cleanupThreadCitations: typeof cleanupThreadCitations;
+  cleanupOldStaleVerdicts: typeof cleanupOldStaleVerdicts;
 }
 
-const realDeps: RetentionCleanupDeps = { harvestSearchSignals, cleanupOldTraces, cleanupOldSnapshots, cleanupThreadCitations };
+const realDeps: RetentionCleanupDeps = { harvestSearchSignals, cleanupOldTraces, cleanupOldSnapshots, cleanupThreadCitations, cleanupOldStaleVerdicts };
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 /** Rows the committed batches of a failed batched delete removed. */
@@ -82,12 +84,21 @@ export async function runRetentionCleanup(
   } catch (err) {
     log.error("Thread citation cleanup failed after {count} rows: {error}", { count: deletedBefore(err), error: errText(err) });
   }
+  if (shouldStop()) return;
+  try {
+    // The Stale check's verdicts (D22): 90 days, fixed.
+    const deletedVerdicts = await deps.cleanupOldStaleVerdicts(STALE_VERDICT_RETENTION_DAYS, deleteOpts);
+    if (deletedVerdicts > 0) log.info("Cleaned up {count} old stale verdicts", { count: deletedVerdicts });
+  } catch (err) {
+    log.error("Stale verdict cleanup failed after {count} rows: {error}", { count: deletedBefore(err), error: errText(err) });
+  }
 }
 
 export function retentionCleanupBootLine(config: RetentionCleanupConfig): string {
   return (
     `Retention cleanup on (hourly): traces and thread citations ${config.tracingRetentionDays} day(s), ` +
-    `chat prompt snapshots ${config.promptSnapshotsRetentionDays}, capture snapshots ${config.promptSnapshotsCaptureRetentionDays}`
+    `chat prompt snapshots ${config.promptSnapshotsRetentionDays}, capture snapshots ${config.promptSnapshotsCaptureRetentionDays}, ` +
+    `stale verdicts ${STALE_VERDICT_RETENTION_DAYS}`
   );
 }
 
