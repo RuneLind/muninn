@@ -70,43 +70,30 @@ export const PALETTES: readonly Palette[] = [
     base: "dark",
     glyph: "❦",
     tokens: {
-      // Warm dark preset (owner pick, D5). Type stays 14px / 1.65 (D8).
-      "--bg-page": "#1e1c1a",
-      "--bg-panel": "#262422",
-      "--bg-surface": "#2b2826",
-      "--bg-deep": "#23211f",
-      "--bg-inset": "#211f1d",
-      "--bg-gradient-end": "#2a2725",
-      "--bg-card": "#2b2826",
+      // Theme lab 2026-10-27, from Reading mode: page L5.5 H20 S17, body L82 S6.5,
+      // lift 0.1 bolder, chip 8 edge 14 %. Card lifted to #1f1917 so --tint-neutral
+      // #1c1714 clears 1.02:1 on both panel (1.021) and card (1.023).
+      "--bg-page": "#100d0c",
+      "--bg-panel": "#191513",
+      "--bg-surface": "#1f1917",
+      "--bg-deep": "#161210",
+      "--bg-inset": "#14100e",
+      "--bg-gradient-end": "#1e1715",
+      "--bg-card": "#1f1917",
       "--bg-hover": "rgba(255, 255, 255, 0.04)",
-      "--graph-canvas": "#1e1c1a",
-
-      "--border-primary": "#33302e",
-      "--border-secondary": "#413d3a",
-      "--border-subtle": "#2c2927",
-      "--scrollbar-thumb": "#413d3a",
-
-      // Body and muted from the preset; the steps between are spaced like the
-      // dark ramp. Headings are #fdfcfb (L 0.992), not the preset's #f8f7f7
-      // (L 0.977): at 0.977 a heading's bold can only lift to white, a 1.07
-      // lead, while from 0.99 up it is at the ink limit and carries its bold
-      // by weight (the e2e bold property test). --text-disabled (L 0.44)
-      // stays above the 0.29 pivot, so its bold still lightens.
+      "--graph-canvas": "#100d0c",
+      "--border-primary": "#28201d",
+      "--border-secondary": "#372c28",
+      "--border-subtle": "#201917",
+      "--scrollbar-thumb": "#372c28",
       "--text-primary": "#fdfcfb",
-      "--text-secondary": "#d4d1ce",
-      "--text-tertiary": "#c4c0bc",
-      "--text-soft": "#aca7a2",
-      // #9a938c, not the preset's #918a83 (4.30:1 on the #2b2826 card):
-      // 4.83 on card/surface, 5.10 on panel, 5.60 on page.
-      "--text-muted": "#9a938c",
-      "--text-dim": "#7a746e",
-      "--text-faint": "#6a645f",
-      "--text-disabled": "#57524d",
-
-      // Text on an accent fill is dark ink (owner decision D17), not white:
-      // #fff on #c8875a is 2.97:1, #1e1c1a 5.72:1. So the hover fill lightens
-      // instead of darkening: #1e1c1a on #d4976a is 6.82:1 (on the old
-      // #9a5c36 it would be 3.20).
+      "--text-secondary": "#d4d0ce",
+      "--text-tertiary": "#c4bfbc",
+      "--text-soft": "#aca5a2",
+      "--text-muted": "#9a918c",
+      "--text-dim": "#7a726e",
+      "--text-faint": "#6a625f",
+      "--text-disabled": "#57504d",
       "--accent": "#c8875a",
       "--accent-hover": "#d4976a",
       "--accent-light": "#e3a87c",
@@ -114,12 +101,6 @@ export const PALETTES: readonly Palette[] = [
       "--on-accent": "#1e1c1a",
       "--on-accent-primary": "#1e1c1a",
       "--on-accent-inherit": "#1e1c1a",
-
-      // Every dark tint measured >= 4.5:1 under its text (status colour, or
-      // the accent for --tint-purple); kept. --tint-purple follows the accent's
-      // hue to copper (accent 4.81:1, accent-light 6.91:1 on it). --tint-neutral
-      // sits above the fields and below the card, as plain dark's does: 1.090
-      // on inset, 1.030 on card; --text-muted 4.97 on it.
       "--tint-success": "#1a3a2a",
       "--tint-error": "#3a1a1a",
       "--tint-warning": "#2a2a1a",
@@ -127,26 +108,16 @@ export const PALETTES: readonly Palette[] = [
       "--tint-purple": "#342820",
       "--tint-magenta": "#2a1a3a",
       "--tint-cyan": "#1a2e3a",
-      "--tint-neutral": "#282624",
-
-      // The dark-island badges take the dark base's tints (text on each, measured:
-      // deadline 8.59, Slack 8.14, GitHub 7.16, X 6.20). --island-info keeps
-      // the bases' #1a2a3e: Telegram's #54a9eb is 5.71:1 there, 4.52 on
-      // --tint-info. The shimmer #34322f is --border-primary #33302e plus 1/2/1 per
-      // channel.
+      "--tint-neutral": "#1c1714",
       "--island-warning": "#2a2a1a",
       "--island-magenta": "#2a1a3a",
       "--island-success": "#1a3a2a",
       "--island-neutral": "#1a1a1a",
-      "--skeleton-shine": "#34322f",
-
+      "--skeleton-shine": "#29231e",
       "--chat-user-bg": "#3a2f26",
       "--chat-user-text": "#ecdccb",
-      "--chat-assistant-bg": "#2b2826",
-      "--chat-assistant-text": "#d4d1ce",
-
-      // Against the #2b2826 fence: only --tok-com fell under 4.5:1 (4.04);
-      // #9a938c measures 4.83. The rest keep the dark ramp (4.53–8.77).
+      "--chat-assistant-bg": "#1f1917",
+      "--chat-assistant-text": "#d4d0ce",
       "--tok-com": "#9a938c",
       "--tok-str": "#4ade80",
       "--tok-kw": "#c084fc",
@@ -154,23 +125,15 @@ export const PALETTES: readonly Palette[] = [
       "--tok-fn": "#60a5fa",
       "--tok-typ": "#22d3ee",
       "--tok-pun": "#8e8e9c",
-
-      "--bg-code": "#2b2826",
-      "--bg-code-bar": "#33302e",
-
-      // Dark's values. Body #d4d1ce (L 0.862) + 0.1 lands at L 0.96, near the
-      // preset's #faf8f5 (L 0.98); 0.12 would hit it but turns an amber
-      // callout title's bold 15.x° in hue once clipped to sRGB. bolder takes
-      // the 400 body to 700. The pivot keeps 0.29: every text token sits
-      // above it and --on-warning (L 0.20) below.
+      "--bg-code": "#1f1917",
+      "--bg-code-bar": "#28201d",
       "--strong-lift": "0.1",
       "--strong-pivot": "0.29",
       "--strong-weight": "bolder",
-      "--bg-code-inline": "#33302e",
+      "--bg-code-inline": "#28201d",
       "--code-inline-border": "rgba(255, 255, 255, 0.14)",
-
-      "--bg-chat": "#1b1917",
-      "--bg-elevated": "#33302e",
+      "--bg-chat": "#0d0a09",
+      "--bg-elevated": "#28201d",
     },
   },
   {
