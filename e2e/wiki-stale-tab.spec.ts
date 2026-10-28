@@ -72,11 +72,15 @@ const MODEL_ANSWER = '{"verdict":"stale","reason":"E2E: the pin moved on","edit"
 /** The ways off a page other than opening another page (test 6b). */
 const LEAVE_ROUTES = ["ask", "graph", "fail"] as const;
 /** How a page left behind answers late (R2B4 1a): an error payload, a rejected
- *  fetch, a page after all, and an explainer's error payload. */
-const LATE_KINDS = ["error", "abort", "load", "explainer"] as const;
+ *  fetch, a page after all, and an explainer's error payload, rejected fetch
+ *  and page after all (each one of `loadExplainer`'s two `pageViewSeq` guards). */
+const LATE_KINDS = ["error", "abort", "load", "explainer", "explainer-abort", "explainer-load"] as const;
 /** Every way to change what the article pane shows, but a failed load (R2B4 1b). */
 const VIEW_ROUTES = ["ask", "graph", "start", "explainer", "page"] as const;
 const EXPLAINER = "docs/expl.html";
+
+/** The part of a `GET /api/wiki/stale` answer a route rewrites. */
+type StaleReportJson = { buckets?: { linking: { relPath: string; verdict?: Record<string, unknown> }[] } | null };
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
 
@@ -196,6 +200,8 @@ test.beforeAll(async () => {
     ["hub-notice", "The notice hub moved.", ["notes/notice-a", "notes/notice-b"]],
     ["hub-pin", "The pin hub moved.", ["notes/pin-link"]],
     ["hub-race", "The race hub moved.", ["notes/race-a", "notes/race-b"]],
+    ["hub-recon", "The recon hub moved.", ["notes/recon-a", "notes/recon-b"]],
+    ["hub-same", "The same hub moved.", ["notes/same-link"]],
   ];
   for (const [hub, , links] of hubs) {
     await write(`${hub}.md`, page(hub, "First."));
@@ -586,8 +592,10 @@ test("a page left behind that fails late leaves the next page's report and its C
     holdCalls = 0;
     try {
       await openPage(p, "hub-view.md", "The view hub moved.");
-      const lateRel = k === "explainer" ? "docs/late-expl.html" : `late-${k}.md`;
-      const late = await holdPageThenFail(p, lateRel, k === "explainer" ? "error" : k);
+      const expl = k.startsWith("explainer");
+      const lateRel = expl ? "docs/late-expl.html" : `late-${k}.md`;
+      const how = k === "explainer" ? "error" : expl ? (k.slice("explainer-".length) as "abort" | "load") : (k as "error" | "abort" | "load");
+      const late = await holdPageThenFail(p, lateRel, how);
       const checkFailed: string[] = [];
       p.on("requestfailed", (r) => {
         if (r.url().includes("/api/wiki/stale/check")) checkFailed.push(k);
@@ -733,12 +741,20 @@ test("an unsaved-verdict notice is inserted once and cleared by the next saved v
   const notice = p.locator("[data-stale-notice]");
   await expect(notice).toHaveText("The verdict was not saved: E2E store down.");
   await expect(notice).toHaveAttribute("role", "alert");
-  await notice.evaluate((el) => ((el as HTMLElement & { e2eMark?: number }).e2eMark = 1));
-  // Check repaints the tab several times: the alert node is the same one, never re-inserted.
+  await notice.evaluate((el) => {
+    const n = el as HTMLElement & { e2eMark?: number; e2eWrites?: number };
+    n.e2eMark = 1;
+    n.e2eWrites = 0;
+    new MutationObserver((recs) => (n.e2eWrites! += recs.length)).observe(n, { childList: true, characterData: true, subtree: true });
+  });
+  // Check repaints the tab several times: the alert node is the same one, never
+  // re-inserted, and its unchanged text is never written again (one announcement).
   await p.locator("#wikiStaleCheckBtn").click();
   await expect(p.locator('[data-stale-linking="notes/notice-a.md"] .wiki-stale-verdict')).toHaveCount(1, { timeout: 15_000 });
   await expect(p.locator("#wikiStaleCheckBtn")).toBeEnabled();
   expect(await notice.evaluate((el) => (el as HTMLElement & { e2eMark?: number }).e2eMark)).toBe(1);
+  await expect(notice).toHaveText("The verdict was not saved: E2E store down.");
+  expect(await notice.evaluate((el) => (el as HTMLElement & { e2eWrites?: number }).e2eWrites)).toBe(0);
   await p.unroute(verdictRoute);
   await p.locator('[data-stale-linking="notes/notice-b.md"] [data-stale-verdict="true"]').click();
   await expect(p.locator('[data-stale-linking="notes/notice-b.md"] .wiki-stale-verdict')).toContainText("Still true");
@@ -789,4 +805,96 @@ test("an older report that answers late does not replace a newer one (R2B4 1)", 
   release();
   await p.waitForTimeout(800);
   await expect(b.locator(".wiki-stale-verdict")).toContainText("Still true");
+});
+
+test("the reloaded report clears a failed Check row only where a reader gave the verdict (R2B4 3)", async ({ page: p }) => {
+  await openPage(p, "hub-recon.md", "The recon hub moved.");
+  const a = p.locator('[data-stale-linking="notes/recon-a.md"]');
+  const b = p.locator('[data-stale-linking="notes/recon-b.md"]');
+  await expect(b).toBeVisible();
+  // Check fails on both rows; the report read after it carries a reader verdict
+  // on one and a model verdict (another tab's Check) on the other.
+  let checked = false;
+  await p.route(
+    (u) => u.pathname === "/api/wiki/stale/check",
+    (r) => {
+      checked = true;
+      const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+      return r.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body:
+          frame("start", { changed: "hub-recon.md", toCheck: 2, cached: 0, toCall: 2, left: 0 }) +
+          frame("error", { relPath: "notes/recon-a.md", message: "E2E call failed" }) +
+          frame("error", { relPath: "notes/recon-b.md", message: "E2E call failed" }) +
+          frame("done", { left: 0 }),
+      });
+    },
+  );
+  await p.route(
+    (u) => u.pathname === "/api/wiki/stale",
+    async (r) => {
+      const res = await r.fetch();
+      if (!checked) return r.fulfill({ response: res });
+      const json = (await res.json()) as StaleReportJson;
+      for (const l of json.buckets?.linking ?? []) {
+        if (l.relPath === "notes/recon-a.md") l.verdict = { verdict: "true", checkedBy: "reader" };
+        if (l.relPath === "notes/recon-b.md") l.verdict = { verdict: "stale", reason: "E2E model verdict", checkedBy: "model:e2e" };
+      }
+      return r.fulfill({ response: res, json });
+    },
+  );
+  await p.locator("#wikiStaleCheckBtn").click();
+  await expect(a.locator(".wiki-stale-by")).toHaveText("by a reader");
+  await expect(b.locator(".wiki-stale-verdict")).toContainText("E2E model verdict");
+  await expect(a.locator("[data-stale-row-error]")).toHaveCount(0);
+  await expect(b.locator("[data-stale-row-error]")).toHaveText("Not checked: E2E call failed");
+  await p.unrouteAll({ behavior: "ignoreErrors" });
+});
+
+test("opening the page on screen again keeps its folds and its notice (R2B4)", async ({ page: p }) => {
+  await openPage(p, "hub-same.md", "The same hub moved.");
+  const verdictRoute = (u: URL) => u.pathname === "/api/wiki/stale/verdict";
+  await p.route(verdictRoute, (r) => r.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "E2E store down" }) }));
+  await p.locator('[data-stale-linking="notes/same-link.md"] [data-stale-verdict="true"]').click();
+  const notice = p.locator("[data-stale-notice]");
+  await expect(notice).toHaveText("The verdict was not saved: E2E store down.");
+  await p.unroute(verdictRoute);
+  const toCheck = p.locator('[data-bucket="toCheck"]');
+  await toCheck.locator("summary").click();
+  await expect(toCheck).not.toHaveAttribute("open", "");
+  // The rail row of the page on screen: a fresh page load of the same page.
+  const reloaded = p.waitForResponse((r) => r.url().includes("/api/wiki/page?") && r.url().includes("hub-same.md"));
+  const restale = p.waitForResponse((r) => r.url().includes("/api/wiki/stale?") && r.url().includes("hub-same.md"));
+  await p.locator('.wiki-list-item[data-relpath="hub-same.md"]').first().click();
+  await reloaded;
+  await restale;
+  await p.waitForTimeout(300);
+  await expect(p.locator('[data-stale-linking="notes/same-link.md"]')).toBeAttached();
+  await expect(notice).toHaveText("The verdict was not saved: E2E store down.");
+  await expect(toCheck).not.toHaveAttribute("open", "");
+});
+
+test("a page load left for the start view leaves no navigation in flight: a fresh listing lands there (R2B4)", async ({ page: p }) => {
+  await p.clock.install();
+  await openPage(p, "hub-view.md", "The view hub moved.");
+  const late = await holdPageThenFail(p, "late-load.md", "load");
+  await nav(p, "late-load.md");
+  await late.asked;
+  await nav(p, null);
+  await expect(p.locator(".wiki-start")).toBeVisible();
+  const landed = p.waitForResponse((r) => r.url().includes("/api/wiki/page?") && r.url().includes("late-load.md"));
+  late.release();
+  await landed;
+  await p.waitForTimeout(300);
+  await expect(p.locator(".wiki-start")).toBeVisible();
+  // A page written after load; past the refetch throttle the tab regains focus.
+  await write("notes/listed-late.md", page("Listed late", "Written after the reader loaded."));
+  const listed = p.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes("refresh=1"));
+  await p.clock.fastForward(31_000);
+  await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await listed;
+  // The start view adopts it; a navigation left in flight would stash it.
+  await expect(p.locator('.wiki-list-item[data-relpath="notes/listed-late.md"]').first()).toBeAttached();
+  await p.unrouteAll({ behavior: "ignoreErrors" });
 });
