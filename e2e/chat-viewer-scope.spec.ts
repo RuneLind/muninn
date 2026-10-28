@@ -50,7 +50,7 @@ function cannedEvents(run: Record<string, unknown>, status: Record<string, unkno
 /** Stub the page's three dependencies. Returns the `/chat/events` URLs requested. */
 async function stubChat(
   page: Page,
-  opts: { users?: unknown[]; status?: Record<string, unknown>; run?: Record<string, unknown> } = {},
+  opts: { users?: unknown[]; status?: Record<string, unknown>; run?: Record<string, unknown>; laterDefaultUserMs?: number } = {},
 ): Promise<string[]> {
   const eventUrls: string[] = [];
   page.on("request", (req) => {
@@ -63,6 +63,14 @@ async function stubChat(
   await page.route("**/api/users*", (route) =>
     route.fulfill({ json: { users: opts.users ?? [USER] } }),
   );
+  // The user list's other half. Every answer after the first waits
+  // `laterDefaultUserMs`: the late answer a just-booted server gives a second
+  // load (CI, PR #759: the spec ran second in its shard).
+  let defaultUserAnswers = 0;
+  await page.route("**/chat/bot-preferences/**", async (route) => {
+    if (defaultUserAnswers++ > 0 && opts.laterDefaultUserMs) await new Promise((r) => setTimeout(r, opts.laterDefaultUserMs));
+    await route.fulfill({ json: { userId: null } });
+  });
   await page.route("**/chat/events*", (route) =>
     route.fulfill({
       status: 200,
@@ -109,9 +117,13 @@ test.describe("Chat page: viewer-scoped progress", () => {
   });
 
   test("a viewer change re-opens the stream against the new id", async ({ page }) => {
-    const eventUrls = await stubChat(page);
+    const late = 1_000;
+    const eventUrls = await stubChat(page, { laterDefaultUserMs: late });
     await page.goto("/chat");
-    await selectBot(page);
+    // The page selects its only bot itself. A click here would start a second
+    // user load, whose late answer sets the viewer back to viewer-1 after the
+    // change below (red on CI, PR #759).
+    await expect(page.locator(`.bot-pill[data-bot="${BOT.name}"]`)).toHaveClass(/active/);
     await expect.poll(() => eventUrls.length, { timeout: 10_000 }).toBeGreaterThan(0);
 
     await page.evaluate(() => {
@@ -122,6 +134,10 @@ test.describe("Chat page: viewer-scoped progress", () => {
     await expect
       .poll(() => eventUrls.some((u) => u.includes("viewer=viewer-2")), { timeout: 10_000 })
       .toBe(true);
+    // And it stays there: nothing in flight re-opens it for viewer-1.
+    await page.waitForTimeout(late + 500);
+    expect(eventUrls.at(-1)).toContain("viewer=viewer-2");
+    expect(await page.evaluate(() => (window as unknown as { __muninnViewerId: string | null }).__muninnViewerId)).toBe("viewer-2");
   });
 
   test("with NO user to scope to, the page opens no stream at all", async ({ page }) => {

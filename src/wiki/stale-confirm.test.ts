@@ -591,6 +591,24 @@ describe("runStaleConfirm (D16)", () => {
     expect(Date.now() - t0).toBeLessThan(900);
   });
 
+  // Fix round 1 (CI): on the runner the budget timer fired while Date.now()
+  // still read short of the run's end, and a second call started past the bound.
+  test("A6: once the run's bound fires, no call starts, whatever the wall clock reads", async () => {
+    const realNow = Date.now;
+    let lagMs = 0;
+    Date.now = () => realNow() - lagMs;
+    try {
+      const store = memoryStaleVerdictStore();
+      // The wall clock falls behind the timers once the write hangs.
+      const hung = { ...store, upsert: () => (setTimeout(() => (lagMs = 200), 0), never<never>()) };
+      const { deps } = makeDeps({ store: () => hung, failures: new Map(), limits: { budgetMs: 400 } });
+      const r = await within(runStaleConfirm(["cw"], deps), 1_500);
+      expect(r).toMatchObject({ calls: 1, errors: 1, left: 1 });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   test("the loop starts only with the scheduler on, a writable instance and a registered wiki", async () => {
     const { deps } = makeDeps();
     expect(startStaleConfirmLoop({ schedulerEnabled: false, wikiStaleConfirmWikis: ["cw"], profile: "default" }, { deps })).toEqual([]);

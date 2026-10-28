@@ -707,12 +707,15 @@ function trackWrite<T>(p: Promise<T>): Promise<T> {
   return p;
 }
 
-/** `p`, or a rejection after `ms`; the timer is cleared either way. */
-async function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+/** `p`, or a rejection after `ms` (calling `onTimeout` first); the timer is cleared either way. */
+async function within<T>(p: Promise<T>, ms: number, what: string, onTimeout?: () => void): Promise<T> {
   let t: ReturnType<typeof setTimeout> | undefined;
   p.catch(() => {});
   try {
-    return await Promise.race([p, new Promise<never>((_, reject) => (t = setTimeout(() => reject(new ConfirmTimeout(what)), Math.max(0, ms))))]);
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => (t = setTimeout(() => (onTimeout?.(), reject(new ConfirmTimeout(what))), Math.max(0, ms)))),
+    ]);
   } finally {
     clearTimeout(t);
   }
@@ -747,7 +750,11 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
     else signal?.addEventListener("abort", () => reject(new ConfirmStopped()), { once: true });
   });
   stoppedRace.catch(() => {});
-  const inBudget = <T>(p: Promise<T>, what: string) => within(p, endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`);
+  // Set when the run's own timer fires: a timer can fire while Date.now() still
+  // reads short of `endsAt` (the CI runner's A6 red, PR #759), and no call starts after it.
+  let budgetSpent = false;
+  const inBudget = <T>(p: Promise<T>, what: string) =>
+    within(p, endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`, () => (budgetSpent = true));
   const bounded = <T>(p: Promise<T>, what: string) => {
     if (signal?.aborted) return Promise.reject(new ConfirmStopped());
     return Promise.race([inBudget(p, what), stoppedRace]);
@@ -824,7 +831,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   todo.sort((a, b) => (failures.get(a.key)?.at ?? 0) - (failures.get(b.key)?.at ?? 0));
   for (const t of todo) {
     const { row } = t;
-    if (signal?.aborted || out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || Date.now() >= endsAt) {
+    if (signal?.aborted || out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || budgetSpent || Date.now() >= endsAt) {
       row.left++;
       continue;
     }

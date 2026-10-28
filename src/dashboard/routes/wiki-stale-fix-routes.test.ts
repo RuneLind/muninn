@@ -70,6 +70,11 @@ describe("the Stale check's fix routes", () => {
     await mkdir(root, { recursive: true });
     const now = Date.now();
     await git(root, now, "init", "-q", "-b", "main");
+    // A repo-local identity: the Apply's commit tail runs plain `git commit`,
+    // and a runner has no global one (commit.test.ts does the same).
+    await git(root, now, "config", "user.email", "f@example.com");
+    await git(root, now, "config", "user.name", "f");
+    await git(root, now, "config", "commit.gpgsign", "false");
     await write("plans/p.md", page("P", "The plan.", "plan_status: shipped\n"));
     await write("hub.md", page("Hub", "First."));
     await write("notes/a.md", A_TEXT);
