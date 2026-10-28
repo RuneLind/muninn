@@ -956,6 +956,8 @@ function goToStart(): void {
     history.pushState({}, "", target);
   }
   renderStart();
+  // A visit to the home reads the summary afresh (D31).
+  loadStaleSummary();
 }
 let tagsExpanded = false;
 /** The Jira chip row's `+N` expander — `tagsExpanded`'s twin. */
@@ -3275,6 +3277,16 @@ function setAtlasFull(on: boolean): void {
   if (layout) layout.classList.toggle("atlas-full", on);
 }
 
+/** Show the home's `name` tab (a tab click, or the Stale line's Show). */
+function switchStartTab(name: string | null): void {
+  startTab = readSliceStartTab(resolveStartTab(name, null), wikiToolsFlag(), staleTabAvailable());
+  writeStartTab(WIKI, startTab);
+  // REPLACE, never push: Back from the overview should leave it, not walk
+  // through every tab the reader tried.
+  history.replaceState(history.state, "", currentStartUrl());
+  renderStart();
+}
+
 function renderStart(): void {
   // Returning to the browse view is the moment a page set stashed during reading
   // becomes safe to apply — before anything below reads `allPages`.
@@ -3321,8 +3333,8 @@ function renderStart(): void {
   // a tab switch, otherwise a single lazy fetch each, so neither ever blocks the
   // page list from rendering. Both routes are outside the read slice.
   if (wikiToolsFlag()) mountStartCards();
-  // The home reads the summary afresh on every visit (D31).
-  loadStaleSummary();
+  // No summary fetch here: a start-tab switch is no visit. The visits
+  // (goToStart, Back to the home, boot) fetch it themselves (D31).
   renderList();
 }
 
@@ -4041,7 +4053,8 @@ function paintStaleSurfaces(): void {
   const art = renderedArticle;
   if (art && art.el.isConnected) {
     const hits = shown && !shown.error && art.relPath === staleFor ? confirmedHits(shown) : [];
-    const sig = JSON.stringify(hits.map((h) => [h.line, h.target, h.text, h.said]));
+    // Everything a mark shows: its words, and the status its title names.
+    const sig = JSON.stringify(hits.map((h) => [h.line, h.target, h.text, h.said, h.now, h.frontmatter]));
     if (staleMarksFor?.el !== art.el || staleMarksFor.sig !== sig) {
       placeStaleMarks(art.el, hits);
       staleMarksFor = { el: art.el, sig };
@@ -5559,12 +5572,7 @@ document.body.addEventListener("click", (e) => {
   }
   const tab = target.closest ? target.closest(".wiki-tab") : null;
   if (tab) {
-    startTab = readSliceStartTab(resolveStartTab(tab.getAttribute("data-tab"), null), wikiToolsFlag(), staleTabAvailable());
-    writeStartTab(WIKI, startTab);
-    // REPLACE, never push: Back from the overview should leave it, not walk
-    // through every tab the reader tried.
-    history.replaceState(history.state, "", currentStartUrl());
-    renderStart();
+    switchStartTab(tab.getAttribute("data-tab"));
     return;
   }
   // Right rail Connections | Ask tab switch (manual — focus the Ask box).
@@ -5576,15 +5584,14 @@ document.body.addEventListener("click", (e) => {
   // The article pill opens the STALE tab; the home line opens the home's Stale tab.
   if (target.closest && target.closest("[data-stale-pill]")) {
     e.preventDefault();
+    // A collapsed pane hides the tab and focus mode hides the pane: show it first.
+    revealRightPane();
     switchConnTab("stale");
     return;
   }
   if (target.closest && target.closest("[data-stale-home-open]")) {
     e.preventDefault();
-    startTab = "stale";
-    writeStartTab(WIKI, startTab);
-    history.replaceState(history.state, "", currentStartUrl());
-    renderStart();
+    switchStartTab("stale");
     return;
   }
   // The STALE tab's buttons, before the nav-link branch below.
@@ -6923,6 +6930,7 @@ window.addEventListener("popstate", () => {
   else {
     syncStartTabFromUrl();
     renderStart();
+    loadStaleSummary();
   }
 });
 

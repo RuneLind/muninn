@@ -353,6 +353,129 @@ test("a read-only instance shows no pill, badge, mark or home line (D25)", async
   expect(staleGets).toEqual([]);
 });
 
+test("the pill reveals the right pane when it is collapsed or in focus mode", async ({ page: p }) => {
+  await open(p, "hub.md", "The pin moved.");
+  await expect(pill(p)).toHaveText(HUB_TEXT);
+  const layout = p.locator(".wiki-layout");
+  const staleTab = p.locator('.wiki-conn-tab[data-conntab="stale"]');
+  // Collapsed: the pane is a strip, so the tab and its body are hidden until revealed.
+  await p.keyboard.press("]");
+  await expect(layout).toHaveClass(/\bright-collapsed\b/);
+  await expect(staleTab).toBeHidden();
+  await pill(p).click();
+  await expect(layout).not.toHaveClass(/\bright-collapsed\b/);
+  await expect(staleTab).toHaveClass(/\bactive\b/);
+  await expect(staleTab).toBeVisible();
+  await expect(p.locator("#staleBody .wiki-stale-head")).toBeVisible();
+  // Focus mode hides the pane; the pill leaves it.
+  await p.locator('.wiki-conn-tab[data-conntab="conn"]').click();
+  await p.keyboard.press("f");
+  await expect(layout).toHaveClass(/\bfocus-mode\b/);
+  await expect(staleTab).toBeHidden();
+  await pill(p).click();
+  await expect(layout).not.toHaveClass(/\bfocus-mode\b/);
+  await expect(staleTab).toHaveClass(/\bactive\b/);
+  await expect(p.locator("#staleBody .wiki-stale-head")).toBeVisible();
+});
+
+test("a reloaded report whose target status moved re-titles the marks", async ({ page: p }) => {
+  // The reload after a verdict answers with the same lines, each target now `done`:
+  // the verdict POST is stubbed, so no row is written.
+  let moved = false;
+  await p.route((u) => u.pathname === "/api/wiki/stale" && u.searchParams.get("page") === "hub.md", async (route: Route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as { hits?: { now?: string }[] };
+    if (moved) for (const h of body.hits ?? []) h.now = "done";
+    await route.fulfill({ response: res, json: body });
+  });
+  await p.route("**/api/wiki/stale/verdict", (route: Route) => route.fulfill({ status: 200, json: { ok: true } }));
+  await open(p, "hub.md", "The pin moved.");
+  await expect(marks(p).first()).toHaveAttribute("title", /is shipped$/);
+  const placed = await marks(p).count();
+  moved = true;
+  await p.locator('.wiki-conn-tab[data-conntab="stale"]').click();
+  const reloaded = p.waitForResponse((r) => r.url().includes("/api/wiki/stale?") && r.url().includes("page=hub.md"));
+  await p.locator('[data-stale-hit="5"] [data-stale-verdict="not-status"]').click();
+  await reloaded;
+  // Same lines, so the same marks: only their status moved.
+  await expect(marks(p).first()).toHaveAttribute("title", /is done$/);
+  await expect(marks(p)).toHaveCount(placed);
+  for (const t of await marks(p).evaluateAll((els) => els.map((m) => m.getAttribute("title")))) expect(t).toMatch(/is done$/);
+});
+
+/** Every wiki-wide summary request the page makes (no `page=`). */
+function countSummaries(p: Page): string[] {
+  const seen: string[] = [];
+  p.on("request", (r) => {
+    const u = new URL(r.url());
+    if (u.pathname === "/api/wiki/stale" && !u.searchParams.has("page")) seen.push(r.url());
+  });
+  return seen;
+}
+
+test("the home asks for the summary once per visit, not per start-tab switch", async ({ page: p }) => {
+  const seen = countSummaries(p);
+  await p.goto(`${BASE}/wiki?wiki=${WIKI}`);
+  await expect(p.locator("#wikiStaleHome [data-stale-home-totals]")).toBeVisible();
+  await p.waitForTimeout(400);
+  expect(seen).toHaveLength(1);
+  // Start-tab switches and the line's Show are not visits.
+  await p.locator('.wiki-tab[data-tab="timeline"]').click();
+  await p.locator('.wiki-tab[data-tab="hubs"]').click();
+  await p.locator("#wikiStaleHome [data-stale-home-open]").click();
+  await expect(p.locator('.wiki-tab[data-tab="stale"]')).toHaveClass(/\bactive\b/);
+  await p.waitForTimeout(400);
+  expect(seen).toHaveLength(1);
+  // Opening a page and coming back home is a visit.
+  await p.locator('.wiki-list-item[data-relpath="hub2.md"]').click();
+  await expect(p.locator(".wiki-article")).toContainText("The second hub.");
+  await p.goBack();
+  await expect(p.locator("#wikiStaleHome [data-stale-home-totals]")).toBeVisible();
+  await expect.poll(() => seen.length).toBe(2);
+  // So is the breadcrumb's way home.
+  await p.locator('.wiki-list-item[data-relpath="hub2.md"]').click();
+  await expect(p.locator(".wiki-article")).toContainText("The second hub.");
+  await p.locator(".wiki-bc-wiki").click();
+  await expect(p.locator("#wikiStaleHome [data-stale-home-totals]")).toBeVisible();
+  await expect.poll(() => seen.length).toBe(3);
+});
+
+test("an older summary answering after a newer one does not repaint", async ({ page: p }) => {
+  // The boot summary is read at once (hub2 still stale) but held; the next
+  // visit's summary, read after hub2's row is gone, lands first.
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  let first = true;
+  await p.route((u) => u.pathname === "/api/wiki/stale" && !u.searchParams.has("page"), async (route: Route) => {
+    if (!first) return route.continue();
+    first = false;
+    const res = await route.fetch();
+    await gate;
+    await route.fulfill({ response: res }).catch(() => {});
+  });
+  await p.goto(`${BASE}/wiki?wiki=${WIKI}`);
+  await expect(p.locator(".wiki-list-item[data-relpath='hub2.md']")).toBeVisible();
+  const [row] = await sql!`DELETE FROM wiki_stale_verdicts WHERE wiki = ${WIKI} AND page = 'hub2.md' RETURNING *`;
+  try {
+    await p.locator('.wiki-list-item[data-relpath="hub2.md"]').click();
+    await expect(p.locator(".wiki-article")).toContainText("The second hub.");
+    const newer = p.waitForResponse((r) => r.url().includes("/api/wiki/stale?") && !r.url().includes("page="));
+    await p.goBack();
+    await newer;
+    const totals = p.locator("#wikiStaleHome [data-stale-home-totals]");
+    await expect(totals).toHaveText("⚠ 6 stale status lines · 1 linking page to check on 1 page");
+    await expect(railBadge(p, "hub2.md")).toHaveCount(0);
+    const late = p.waitForResponse((r) => r.url().includes("/api/wiki/stale?") && !r.url().includes("page="));
+    release();
+    await late;
+    await p.waitForTimeout(300);
+    await expect(totals).toHaveText("⚠ 6 stale status lines · 1 linking page to check on 1 page");
+    await expect(railBadge(p, "hub2.md")).toHaveCount(0);
+  } finally {
+    await sql!`INSERT INTO wiki_stale_verdicts ${sql!(row!)}`;
+  }
+});
+
 // Last: it writes a reader row the tests above must not see.
 test("Not a status drops the tab, the pill, the rail badge, the mark and the home together", async ({ page: p }) => {
   await open(p, "hub.md", "The pin moved.");
