@@ -385,8 +385,13 @@ describe("git teardown", () => {
   test("bg-held, SIGTERM while the sleep holds git's output: the sleep dies and the script exits", async () => {
     const { f, proc, markers } = await start("bg-held");
     const sleeps = await sleepsOf(markers);
-    process.kill(proc.pid, "SIGTERM");
     // The signal may land after the script has finished (0) or during it (143).
+    // Once Bun has reaped the finished script, kill() throws ESRCH (CI, 27.10).
+    try {
+      process.kill(proc.pid, "SIGTERM");
+    } catch (err) {
+      if ((err as { code?: string }).code !== "ESRCH") throw err;
+    }
     expect([0, 143] as (number | "hung")[]).toContain(await exitOrHang(proc));
     expect(await allGone(sleeps)).toBe(true);
     expect(await clonesIn(f.scriptTmp)).toEqual([]);
