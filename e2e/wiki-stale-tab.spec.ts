@@ -787,7 +787,8 @@ test("an older report that answers late does not replace a newer one (R2B4 1)", 
   const gate = new Promise<void>((r) => (release = r));
   let gets = 0;
   await p.route(
-    (u) => u.pathname === "/api/wiki/stale",
+    // The page report only: the wiki-wide summary (PR 2b) is another GET here.
+    (u) => u.pathname === "/api/wiki/stale" && u.searchParams.has("page"),
     async (r) => {
       if (++gets > 1) return r.continue();
       const res = await r.fetch();
@@ -832,7 +833,8 @@ test("the reloaded report clears a failed Check row only where a reader gave the
     },
   );
   await p.route(
-    (u) => u.pathname === "/api/wiki/stale",
+    // The page report only: the wiki-wide summary (PR 2b) is another GET here.
+    (u) => u.pathname === "/api/wiki/stale" && u.searchParams.has("page"),
     async (r) => {
       const res = await r.fetch();
       if (!checked) return r.fulfill({ response: res });

@@ -16,7 +16,9 @@
  */
 
 import { movedWithSectionHtml, type MovedWithListing } from "./wiki-moved-with.ts";
-import { STALE_SHELL_HTML, staleBodyHtml, staleTabBadge, type StaleReportView, type StaleVerdictView } from "./wiki-stale-tab.ts";
+import { confirmedHits, STALE_SHELL_HTML, staleBodyHtml, staleCounts, staleTabBadge, type StalePageCounts, type StaleReportView, type StaleVerdictView } from "./wiki-stale-tab.ts";
+import { placeStaleMarks } from "./wiki-stale-marks.ts";
+import { staleCountMap, staleHomeBodyHtml, staleHomeLineHtml, stalePillHtml, staleRailBadgeHtml, type StaleSummaryView } from "./wiki-stale-summary.ts";
 import { escHtml as esc } from "./escape.ts";
 import {
   installWikiReadonlyGuard,
@@ -840,6 +842,7 @@ function syncStartTabFromUrl(): void {
   startTab = readSliceStartTab(
     resolveStartTab(new URLSearchParams(location.search).get(START_VIEW_PARAM), readStartTab(WIKI)),
     wikiToolsFlag(),
+    staleTabAvailable(),
   );
 }
 /** The overview URL for the CURRENT wiki + tab — what the breadcrumb crumb links
@@ -947,7 +950,7 @@ function refreshCrumbHref(): void {
 function goToStart(): void {
   const target = currentStartUrl();
   if (
-    !sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI), wikiToolsFlag()) &&
+    !sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI), wikiToolsFlag(), staleTabAvailable()) &&
     location.pathname + location.search !== target
   ) {
     history.pushState({}, "", target);
@@ -1694,6 +1697,7 @@ let restoringRailFocus = false;
  *  threads) can land while a rail control holds focus. A handler that focuses
  *  something after its own render still wins. */
 function renderList(cause: "storage" | "local" = "local"): void {
+  staleRailPainted = staleRailSig();
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
@@ -2114,6 +2118,8 @@ function renderList(cause: "storage" | "local" = "local"): void {
       followupFlagHtml(p) +
       movesFlagHtml(p) +
       (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "") +
+      // The Stale check's two numbers (PR 2b, D26), off the summary route.
+      staleRailBadgeHtml(staleRailCounts(p.relPath)) +
       chipSlot;
     const sub = subItems ? `<div class="wiki-list-sub">${subItems}</div>` : "";
     html +=
@@ -3212,6 +3218,7 @@ function timelineHtml(): string {
 
 function startBodyHtml(): string {
   if (startTab === "atlas") return atlasBodyHtml();
+  if (startTab === "stale") return staleHomeBodyHtml(staleSummary);
   return startTab === "hubs" ? hubsHtml() : timelineHtml();
 }
 
@@ -3290,6 +3297,9 @@ function renderStart(): void {
     '<div class="wiki-meta-row"><span class="wiki-dates">Browse by search and filters on the left, or start from a hub below. Click any wikilink to follow connections.</span></div></div>' +
     '<div id="wikiWhatsNew" class="wiki-whatsnew" style="display:none"></div>' +
     '<div id="wikiIndexCard" class="wiki-index-card" style="display:none"></div>' +
+    // The Stale check's line (PR 2b), beside the Index card rather than in
+    // it: that card hides on a wiki with no search collections.
+    (staleTabAvailable() ? `<div id="wikiStaleHome" class="wiki-stale-home">${staleHomeLineHtml(staleSummary)}</div>` : "") +
     '<div class="wiki-start-stats" id="wikiStartStats">' +
     startStatsHtml();
   html +=
@@ -3298,6 +3308,7 @@ function renderStart(): void {
     `<button class="wiki-tab${startTab === "hubs" ? " active" : ""}" data-tab="hubs">Hubs</button>` +
     `<button class="wiki-tab${startTab === "timeline" ? " active" : ""}" data-tab="timeline">Timeline</button>` +
     (wikiToolsFlag() ? `<button class="wiki-tab${startTab === "atlas" ? " active" : ""}" data-tab="atlas">Atlas</button>` : "") +
+    (staleTabAvailable() ? `<button class="wiki-tab${startTab === "stale" ? " active" : ""}" data-tab="stale">Stale</button>` : "") +
     "</div>" +
     `<div id="startBody">${startBodyHtml()}</div></div>`;
   document.getElementById("articleWrap")!.innerHTML = html;
@@ -3310,6 +3321,8 @@ function renderStart(): void {
   // a tab switch, otherwise a single lazy fetch each, so neither ever blocks the
   // page list from rendering. Both routes are outside the read slice.
   if (wikiToolsFlag()) mountStartCards();
+  // The home reads the summary afresh on every visit (D31).
+  loadStaleSummary();
   renderList();
 }
 
@@ -3805,6 +3818,7 @@ function renderStale(): void {
     badge.textContent = b.text;
     badge.parentElement?.setAttribute("title", b.tabTitle);
   }
+  paintStaleSurfaces();
 }
 
 /** The `<details>` the reader folds: its state is the page's from then on. */
@@ -3929,7 +3943,87 @@ async function runStaleCheckClient(relPath: string): Promise<void> {
       renderStale();
       loadStale(relPath);
     }
+    // Check's verdicts can change other pages' rows too (PR 2b).
+    loadStaleSummary();
   }
+}
+
+// ── The counts everywhere (stale check PR 2b, `wiki-stale-summary.ts`) ──
+/** The wiki-wide summary (D31): the rail's badges and the home's line and tab. */
+let staleSummary: StaleSummaryView | null = null;
+let staleSummaryCounts = new Map<string, StalePageCounts>();
+/** The summary request in flight: an older one answering late is dropped. */
+let staleSummarySeq = 0;
+/** The open page's counts as the rail last painted them (`renderList`). */
+let staleRailPainted = "";
+/** The article and hits the marks were last placed for. */
+let staleMarksFor: { el: Element; sig: string } | null = null;
+
+/** A page's two numbers for its rail row: the open page's own report once it
+ *  has loaded (the numbers its pill and STALE tab show), else the summary's row. */
+function staleRailCounts(relPath: string): StalePageCounts | undefined {
+  if (!staleTabAvailable()) return undefined;
+  if (relPath === staleFor && staleReport && !staleReport.error) return staleCounts(staleReport);
+  return staleSummaryCounts.get(relPath);
+}
+
+/** Fetch the wiki-wide summary and repaint the rail and the home. */
+function loadStaleSummary(): void {
+  if (!staleTabAvailable()) return;
+  const seq = ++staleSummarySeq;
+  fetch(withWiki("/api/wiki/stale"))
+    .then((r) => r.json())
+    .then((data: StaleSummaryView) => {
+      if (seq !== staleSummarySeq) return;
+      staleSummary = data;
+      staleSummaryCounts = staleCountMap(data);
+      renderList();
+      renderStaleHome();
+    })
+    .catch(() => {
+      if (seq !== staleSummarySeq) return;
+      staleSummary = { error: "the summary could not be loaded" };
+      staleSummaryCounts = new Map();
+      renderList();
+      renderStaleHome();
+    });
+}
+
+/** The home's line, and its Stale tab when that is the one showing. */
+function renderStaleHome(): void {
+  if (currentName !== null) return;
+  const line = document.getElementById("wikiStaleHome");
+  if (line) line.innerHTML = staleHomeLineHtml(staleSummary);
+  const body = document.getElementById("startBody");
+  if (body && startTab === "stale") body.innerHTML = staleHomeBodyHtml(staleSummary);
+}
+
+/** The pill, the marks and the open page's rail row, from the report for the
+ *  page on screen only: a report for another page paints nothing (R2B4). */
+function paintStaleSurfaces(): void {
+  const shown = staleFor !== null && staleFor !== "" && staleFor === currentRelPath ? staleReport : null;
+  const pill = document.getElementById("wikiStalePill");
+  if (pill) {
+    const html = stalePillHtml(shown);
+    if (pill.innerHTML !== html) pill.innerHTML = html;
+  }
+  const art = renderedArticle;
+  if (art && art.el.isConnected) {
+    const hits = shown && !shown.error && art.relPath === staleFor ? confirmedHits(shown) : [];
+    const sig = JSON.stringify(hits.map((h) => [h.line, h.target, h.text, h.said]));
+    if (staleMarksFor?.el !== art.el || staleMarksFor.sig !== sig) {
+      placeStaleMarks(art.el, hits);
+      staleMarksFor = { el: art.el, sig };
+    }
+  }
+  // The open page's rail row follows its report.
+  if (staleRailSig() !== staleRailPainted) renderList();
+}
+
+/** What the rail shows for the open page: its relPath and two numbers. */
+function staleRailSig(): string {
+  const c = staleFor ? staleRailCounts(staleFor) : undefined;
+  return staleFor ? `${staleFor}\0${c?.staleLines ?? 0}\0${c?.toCheck ?? 0}` : "";
 }
 
 /** Still true / Not a status: one reader verdict row, then a reload. */
@@ -3967,6 +4061,8 @@ async function postStaleVerdict(btn: Element): Promise<void> {
     renderStale();
     loadStale(relPath);
   }
+  // The rail and the home drop with the tab (PR 2b).
+  loadStaleSummary();
 }
 
 /**
@@ -4696,6 +4792,8 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
     head += `<a class="wiki-source-url" href="${esc(m.url)}" target="_blank" rel="noopener">Open source ↗</a>`;
   }
   head += projectHubChipHtml(m);
+  // The Stale check's pill (PR 2b), painted from the open page's report.
+  if (staleTabAvailable()) head += `<span id="wikiStalePill" class="wiki-stale-pill-slot"></span>`;
   // Graph mode's toggle, on a wiki with a tracker only.
   if (hasTracker()) head += graphToggleHtml(displayState().graph);
   // The meta row closes first: the strip is a BLOCK under it (the Jira row plus
@@ -5031,6 +5129,9 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       }
       const renderedEl = articleRoot.querySelector(".wiki-article");
       renderedArticle = currentRelPath && renderedEl ? { relPath: currentRelPath, el: renderedEl } : null;
+      // The pill and marks from the report already held for this page (an
+      // in-place reload); the report this render loads repaints them.
+      paintStaleSurfaces();
       // `<Question>` cards: answers, composer and edit, on a wiki that takes
       // answers only. After the ref links, so an answer's text is never linked.
       // The registry name, not `WIKI`: under the `WIKI_DIR` override `WIKI` is
@@ -5425,7 +5526,7 @@ document.body.addEventListener("click", (e) => {
   }
   const tab = target.closest ? target.closest(".wiki-tab") : null;
   if (tab) {
-    startTab = readSliceStartTab(resolveStartTab(tab.getAttribute("data-tab"), null), wikiToolsFlag());
+    startTab = readSliceStartTab(resolveStartTab(tab.getAttribute("data-tab"), null), wikiToolsFlag(), staleTabAvailable());
     writeStartTab(WIKI, startTab);
     // REPLACE, never push: Back from the overview should leave it, not walk
     // through every tab the reader tried.
@@ -5437,6 +5538,20 @@ document.body.addEventListener("click", (e) => {
   const connTab = target.closest ? target.closest(".wiki-conn-tab") : null;
   if (connTab) {
     switchConnTab(connTab.getAttribute("data-conntab") || "conn", true);
+    return;
+  }
+  // The article pill opens the STALE tab; the home line opens the home's Stale tab.
+  if (target.closest && target.closest("[data-stale-pill]")) {
+    e.preventDefault();
+    switchConnTab("stale");
+    return;
+  }
+  if (target.closest && target.closest("[data-stale-home-open]")) {
+    e.preventDefault();
+    startTab = "stale";
+    writeStartTab(WIKI, startTab);
+    history.replaceState(history.state, "", currentStartUrl());
+    renderStart();
     return;
   }
   // The STALE tab's buttons, before the nav-link branch below.
@@ -9672,6 +9787,7 @@ function adoptPagesDataAndFacets(applied: PendingPages): void {
   renderPageFacets(false);
   refreshStartStats();
   loadCoverageFooter();
+  loadStaleSummary();
 }
 
 /** The boot-success render: facets, the coverage footer, and the one-time
@@ -9684,6 +9800,7 @@ function bootRender(applied: PendingPages): void {
   markApplied(pagesRefresh, applied);
   renderPageFacets(true);
   loadCoverageFooter();
+  loadStaleSummary();
   // The initial navigation is boot-only work. On a heal the reader may already be
   // somewhere (a wikilink click out of an Ask answer, an answer in the pane) —
   // re-reading `location.search` there would fight what is on screen, so just

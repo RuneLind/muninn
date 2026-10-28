@@ -140,6 +140,11 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   "#wikiFollowupInput",
 ].join(",");
 
+/** The Stale check's counts outside the STALE tab (PR 2b): the article pill,
+ *  the rail badge, the home line and the home's Stale tab. The client renders
+ *  none of them where the tab is absent; these hide any that a render left. */
+export const STALE_COUNT_SURFACES: readonly string[] = ["#wikiStalePill", ".wiki-stale-rail", "#wikiStaleHome", '.wiki-tab[data-tab="stale"]'];
+
 /**
  * Surfaces HIDDEN, not dimmed, on a read-only INSTANCE (D25 of plan
  * muninn-wiki-drift-check): the mini shows no stale marks or counts, because
@@ -149,7 +154,7 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
  * read-only ROOT on a writable instance keeps the tab (its buckets are free;
  * Check and the verdict buttons are dimmed and blocked by the lists above).
  */
-export const WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR = ['[data-conntab="stale"]', "#staleBody"].join(",");
+export const WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR = ['[data-conntab="stale"]', "#staleBody", ...STALE_COUNT_SURFACES].join(",");
 
 /** The body class for {@link WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR}. */
 export const WIKI_READONLY_INSTANCE_CLASS = "wiki-readonly-instance";

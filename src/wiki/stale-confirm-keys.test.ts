@@ -106,15 +106,36 @@ describe("passage keys across asOf, stamps and commits", () => {
     const plain = await keyOf(index);
     expect(await keyOf(index, asOfSame)).toBe(plain);
     expect(await keyOf(index, asOfCut)).toBe(plain);
-    // An asOf that cuts «hub: second» changes the prompt's subjects, not the key.
     const store = memoryStaleVerdictStore();
-    let prompt = "";
-    const model: StaleModel = async (p) => ((prompt = p), '{"verdict":"true","reason":"holds"}');
+    const model: StaleModel = async () => '{"verdict":"true","reason":"holds"}';
     await runStaleCheck({ wiki: "w", index, relPath: "docs/hub.md", asOfMs: asOfCut, bot: BOT, store, model, onEvent: () => {} });
-    expect(prompt).toContain("hub: first");
-    expect(prompt).not.toContain("hub: second");
     const plainBuckets = await toCheckOf(index);
     expect([...(await passageVerdicts("w", index, "docs/hub.md", plainBuckets.linking, { store })).values()].map((v) => v.verdict)).toEqual(["true"]);
+  });
+
+  test("asOf never cuts the prompt's evidence: a Check with and without it sends the same prompt (PR 2b)", async () => {
+    const index = await fresh();
+    const promptOf = async (asOfMs?: number) => {
+      let prompt = "";
+      const model: StaleModel = async (p) => ((prompt = p), '{"verdict":"true","reason":"holds"}');
+      await runStaleCheck({ wiki: "w", index, relPath: "docs/hub.md", ...(asOfMs !== undefined ? { asOfMs } : {}), bot: BOT, store: memoryStaleVerdictStore(), model, onEvent: () => {} });
+      return prompt;
+    };
+    const cut = await promptOf(asOfCut);
+    // The subjects run up to now: «hub: second» lies after asOfCut and stays.
+    expect(cut).toContain("- hub: first");
+    expect(cut).toContain("- hub: second");
+    expect(cut).toBe(await promptOf());
+  });
+
+  test("Check's subjects start after the linking page's last change (the lower bound)", async () => {
+    const index = await fresh();
+    let prompt = "";
+    const model: StaleModel = async (p) => ((prompt = p), '{"verdict":"true","reason":"holds"}');
+    await runStaleCheck({ wiki: "w", index, relPath: "docs/hub.md", bot: BOT, store: memoryStaleVerdictStore(), model, onEvent: () => {} });
+    // notes/old.md last changed in «seed»; that commit and older are not news.
+    expect(prompt).toContain("- hub: first");
+    expect(prompt).not.toContain("- seed");
   });
 
   test("a `sessions:` stamp or an `updated:` bump on the changed page resets no key, committed or not", async () => {

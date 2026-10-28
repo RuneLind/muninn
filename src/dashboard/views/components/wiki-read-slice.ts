@@ -26,6 +26,7 @@
  * flag, not on this class.
  */
 import {
+  STALE_COUNT_SURFACES,
   WIKI_READONLY_BLOCKED_SELECTOR,
   WIKI_READONLY_EGRESS_SELECTOR,
 } from "./wiki-readonly-client.ts";
@@ -51,6 +52,9 @@ export const WIKI_READ_SLICE_HIDDEN_SELECTOR = [
   // tool-half routes (stale check PR 2a).
   '[data-conntab="stale"]',
   "#staleBody",
+  // The Stale check's counts outside the tab (PR 2b): the article pill, the
+  // rail badge, the home line and the home's Stale tab.
+  ...STALE_COUNT_SURFACES,
   // The issue board (`/wiki/issues`) and the gardener (`/wiki/gardener`).
   "#wikiBoardLink",
   ".wiki-gardener-icon",
@@ -84,7 +88,10 @@ export function wikiToolsFlag(doc: unknown = (globalThis as { document?: unknown
 }
 
 /** The overview tab to show: Atlas fetches `/api/wiki/atlas`, which the read
- *  slice does not register, so a stored or linked `view=atlas` lands on Hubs. */
-export function readSliceStartTab<T extends string>(tab: T, tools: boolean): T | "hubs" {
-  return !tools && tab === "atlas" ? "hubs" : tab;
+ *  slice does not register, so a stored or linked `view=atlas` lands on Hubs.
+ *  So does `view=stale` where the Stale tab is absent (`stale` false: the read
+ *  slice, or a read-only instance, D25). */
+export function readSliceStartTab<T extends string>(tab: T, tools: boolean, stale = tools): T | "hubs" {
+  if (!tools && tab === "atlas") return "hubs";
+  return !(tools && stale) && tab === "stale" ? "hubs" : tab;
 }

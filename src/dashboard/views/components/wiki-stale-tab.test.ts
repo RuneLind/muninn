@@ -81,7 +81,7 @@ describe("the STALE tab", () => {
   });
 
   test("hidden on the read slice and on a read-only instance; Check is egress, the verdicts are writes", () => {
-    for (const sel of ['[data-conntab="stale"]', "#staleBody"]) {
+    for (const sel of ['[data-conntab="stale"]', "#staleBody", "#wikiStalePill", ".wiki-stale-rail", "#wikiStaleHome", '.wiki-tab[data-tab="stale"]']) {
       expect(WIKI_READ_SLICE_HIDDEN_SELECTOR.split(",")).toContain(sel);
       expect(WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR.split(",")).toContain(sel);
     }

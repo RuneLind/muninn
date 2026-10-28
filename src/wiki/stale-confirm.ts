@@ -521,8 +521,8 @@ const targetFacts = (meta: WikiPageMeta | undefined, relPath: string): StaleCall
 
 /** The commits a call carries about `target`: null while it has uncommitted
  *  edits (D29: they are its last change, and no subject describes them; A14),
- *  else the subjects between `sinceMs` and `untilMs` (the check's `asOf`,
- *  which the working tree postdates). */
+ *  else the subjects between `sinceMs` and `untilMs`. Check passes no
+ *  `untilMs`: `asOf` scopes only its window, never the prompt's evidence. */
 export async function commitsFor(index: Pick<WikiIndex, "root">, target: WikiPageMeta | undefined, sinceMs: number | undefined, untilMs?: number, memo?: SubjectsMemo) {
   if (!target) return undefined;
   if (untilMs === undefined && target.gitDirty === true) return null;
@@ -1144,8 +1144,10 @@ export async function runStaleCheck(opts: {
       page: i.l.relPath,
       passage: i.passage,
       target: i.ctx.target,
-      // Prompt evidence only: `asOf` cuts the subjects, the key reads none.
-      commits: await commitsFor(index, changedMeta, i.l.lastChangeMs, opts.asOfMs, subjects),
+      // `asOf` scopes only the window (which pages are To check); the subjects
+      // run up to now, so a Check with and without it sends one prompt and
+      // sharing the key is sound.
+      commits: await commitsFor(index, changedMeta, i.l.lastChangeMs, undefined, subjects),
       otherPlans: i.ctx.otherPlans,
       sourceLines: await sourceLinesOf(index.root, i.l.relPath, linkingPassageRows(i.l).map((p) => p.line)),
     };
