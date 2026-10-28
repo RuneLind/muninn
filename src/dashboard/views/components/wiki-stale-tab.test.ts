@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { CHAT_PALETTE_TOKENS, PALETTE_ONLY_TOKENS, PALETTE_REQUIRED_TOKENS } from "./palettes.ts";
-import { confirmedHits, draftFixHtml, STALE_TAB_TITLE, staleBodyHtml, staleCounts, staleTabBadge, wikiStaleTabStyles, type StaleReportView } from "./wiki-stale-tab.ts";
+import { confirmedHits, draftFixHtml, STALE_SHELL_HTML, STALE_TAB_TITLE, staleBodyHtml, staleCounts, staleTabBadge, wikiStaleTabStyles, type StaleReportView } from "./wiki-stale-tab.ts";
 import { WIKI_READ_SLICE_HIDDEN_SELECTOR } from "./wiki-read-slice.ts";
 import {
   WIKI_READONLY_BLOCKED_SELECTOR,
@@ -112,10 +112,10 @@ describe("the STALE tab", () => {
     expect(staleBodyHtml(report, { capLeft: 0 })).not.toContain("data-stale-cap");
   });
 
-  test("A12: a notice shows when the check bar does not", () => {
-    const html = staleBodyHtml({ ...report, buckets: null }, { notice: "The verdict was not saved: HTTP 500." });
-    expect(html).not.toContain("wikiStaleProgress");
-    expect(html).toContain('role="alert" data-stale-notice>The verdict was not saved: HTTP 500.</div>');
+  test("A12: the notice is the shell's one alert node, outside the report a repaint replaces", () => {
+    expect(STALE_SHELL_HTML).toBe('<div class="wiki-stale-error wiki-stale-notice" role="alert" data-stale-notice></div><div data-stale-content></div>');
+    expect(staleBodyHtml(report)).not.toContain("data-stale-notice");
+    expect(staleBodyHtml(report)).not.toContain('role="alert"');
   });
 
   test("A12: each details keeps the open state it was given", () => {
@@ -140,6 +140,7 @@ describe("the shown page's one writer (A9)", () => {
     const src = await Bun.file(new URL("./wiki-browser.ts", import.meta.url)).text();
     const writes = src.split("\n").filter((l) => /\bcurrentRelPath\s*=(?!=)/.test(l) && !/^\s*(\/\/|\*)/.test(l));
     expect(writes.map((l) => l.trim())).toEqual(["currentRelPath = relPath;"]);
-    expect(src).toMatch(/function setCurrentRelPath\(relPath: string \| null\): void \{\n  currentRelPath = relPath;\n  if \(staleCheckRun && staleCheckRun\.relPath !== relPath\) \{\n    abortStaleCheck\(\);/);
+    // Every view change also outdates a page response in flight and moves the STALE tab with it (R2B4).
+    expect(src).toMatch(/function setCurrentRelPath\(relPath: string \| null\): void \{\n  currentRelPath = relPath;\n  pageViewSeq\+\+;\n  if \(staleCheckRun && staleCheckRun\.relPath !== relPath\) abortStaleCheck\(\);\n  staleFollowPage\(relPath\);\n\}/);
   });
 });

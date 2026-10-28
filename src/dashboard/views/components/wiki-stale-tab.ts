@@ -81,8 +81,6 @@ export interface StaleBodyOpts {
   checking?: boolean;
   /** Check's live line while it runs, and its last line after. */
   progress?: string;
-  /** A failure the reader must see wherever the check bar is (a verdict that was not saved). */
-  notice?: string;
   /** Linking pages whose Check call failed, by relPath: shown on the row, never counted as checked. */
   rowErrors?: Record<string, string>;
   /** Pages the last Check left for the next one at its call limit. */
@@ -153,7 +151,15 @@ function verdictButtons(attrs: string): string {
   );
 }
 
-/** The tab's body. `progress` is Check's live line while it runs. */
+/**
+ * The tab's two parts, built once per tab: the unsaved-verdict notice and the
+ * report. A repaint replaces the report only, so the `role="alert"` node stays
+ * the same one and a screen reader announces a notice when its text changes,
+ * never again on a repaint (R2B4).
+ */
+export const STALE_SHELL_HTML = `<div class="wiki-stale-error wiki-stale-notice" role="alert" data-stale-notice></div><div data-stale-content></div>`;
+
+/** The tab's report (the notice lives in {@link STALE_SHELL_HTML}). `progress` is Check's live line while it runs. */
 export function staleBodyHtml(r: StaleReportView | null, opts: StaleBodyOpts = {}): string {
   if (!r) return `<div class="wiki-conn-empty">Loading…</div>`;
   if (r.error) return `<div class="wiki-conn-empty">Stale check unavailable: ${esc(r.error)}</div>`;
@@ -165,7 +171,6 @@ export function staleBodyHtml(r: StaleReportView | null, opts: StaleBodyOpts = {
       ? `⚠ ${staleLines} stale status line${staleLines === 1 ? "" : "s"} · ${toCheck} linking page${toCheck === 1 ? "" : "s"} to check`
       : "✓ nothing stale") +
     `</div>`;
-  if (opts.notice) html += `<div class="wiki-stale-error" role="alert" data-stale-notice>${esc(opts.notice)}</div>`;
   if (r.verdicts === "unavailable") html += `<div class="wiki-stale-note">Verdicts are unavailable right now, so no status line shows as confirmed.</div>`;
 
   const hits = confirmedHits(r);
@@ -230,6 +235,8 @@ export function wikiStaleTabStyles(): string {
     .wiki-stale-head { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); padding: 4px 4px 10px; }
     .wiki-stale-error { font-size: 12px; color: var(--status-error); padding: 3px 4px; line-height: 1.45; overflow-wrap: anywhere; }
     .wiki-stale-note { font-size: 12px; color: var(--text-dim); padding: 4px; line-height: 1.5; }
+    .wiki-stale-notice:empty { padding: 0; }
+    .wiki-stale-cap { color: var(--text-secondary); }
     .wiki-stale-item { padding: 7px 8px; margin: 4px 0; border-radius: 6px; background: var(--bg-surface); border: 1px solid var(--border-primary); }
     .wiki-stale-line { font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin: 2px 0; overflow-wrap: anywhere; }
     .wiki-stale-ln { font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }

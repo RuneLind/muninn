@@ -16,7 +16,7 @@
  */
 
 import { movedWithSectionHtml, type MovedWithListing } from "./wiki-moved-with.ts";
-import { staleBodyHtml, staleTabBadge, type StaleReportView, type StaleVerdictView } from "./wiki-stale-tab.ts";
+import { STALE_SHELL_HTML, staleBodyHtml, staleTabBadge, type StaleReportView, type StaleVerdictView } from "./wiki-stale-tab.ts";
 import { escHtml as esc } from "./escape.ts";
 import {
   installWikiReadonlyGuard,
@@ -723,15 +723,25 @@ let currentName: string | null = null;
  * page other than the one on screen. Written only through `setCurrentRelPath`.
  */
 let currentRelPath: string | null = null;
+/**
+ * Which view the article pane was last asked for. Raised by every view change
+ * (`setCurrentRelPath`) and by every page fetch (`fetchAndRenderPage`), so a
+ * page response compares the number it started with and drops itself once a
+ * later view has begun: a page left behind that fails late must not paint its
+ * error, or clear the STALE tab, over the page now on screen (R2B4).
+ */
+let pageViewSeq = 0;
+/** The `pageViewSeq` of the newest page fetch. */
+let pageFetchSeq = 0;
 /** The one writer of `currentRelPath`. The shown page changing is what ends a
  *  Check that belongs to another page (A9), on every route off it: another
- *  page, the start view, an Ask answer, an issue graph. */
+ *  page, an explainer, the start view, an Ask answer, an issue graph; the
+ *  STALE tab follows it (`staleFollowPage`). */
 function setCurrentRelPath(relPath: string | null): void {
   currentRelPath = relPath;
-  if (staleCheckRun && staleCheckRun.relPath !== relPath) {
-    abortStaleCheck();
-    renderStale();
-  }
+  pageViewSeq++;
+  if (staleCheckRun && staleCheckRun.relPath !== relPath) abortStaleCheck();
+  staleFollowPage(relPath);
 }
 /**
  * The open page's content hash, from the `/api/wiki/page` response that
@@ -3266,13 +3276,9 @@ function renderStart(): void {
   consumeUrlLens();
   abortAgentRuns();
   currentName = null;
-  setCurrentRelPath(null); // the two identities are cleared together, always
+  // The two identities are cleared together, always; the STALE tab and its count go with the page.
+  setCurrentRelPath(null);
   currentPageHash = null;
-  // No page, no stale report: the tab's count must not carry the last page's.
-  abortStaleCheck();
-  staleFor = null;
-  staleReport = null;
-  renderStale();
   // The overview has no graph, and its URL carries no `display=`: leaving an
   // article for it leaves graph mode too. Back restores it from the URL.
   graphMode = false;
@@ -3720,8 +3726,13 @@ let staleRowErrors: Record<string, string> = {};
 /** Pages the last Check left at its call limit (A12). */
 let staleCapLeft = 0;
 let staleCapCalls = 10;
-/** Each `<details>`'s open state by its `data-stale-open` key: a re-render keeps it (A12). */
+/** Each `<details>`'s open state by its `data-stale-open` key, for the page
+ *  in `staleFor` only: a repaint keeps it (A12), a new page starts clean.
+ *  Written by the tab's `toggle` listener as the reader folds, never read back
+ *  from the DOM at repaint, which may still be another page's (R2B4). */
 let staleOpen: Record<string, boolean> = {};
+/** The report request in flight: an older one answering late is dropped. */
+let staleLoadSeq = 0;
 /** The Check stream in flight: its page and its abort (A9). A Check belongs
  *  to the page it started on; leaving that page aborts it. */
 let staleCheckRun: { relPath: string; abort: AbortController } | null = null;
@@ -3736,6 +3747,18 @@ function abortStaleCheck(): void {
 /** The tab exists where the tool routes do and the instance writes (D25). */
 function staleTabAvailable(): boolean {
   return wikiToolsFlag() && !wikiReadonlyFlag();
+}
+
+/** The tab follows the page on screen: another page starts from no report
+ *  (its own loads next), a view that is not a page shows none (R2B4). */
+function staleFollowPage(relPath: string | null): void {
+  const next = relPath && staleTabAvailable() ? relPath : null;
+  if (staleFor === next) return;
+  abortStaleCheck();
+  staleFor = next;
+  staleReport = null;
+  resetStaleClientState();
+  renderStale();
 }
 
 /** Forget the page's client-side Check state: a new page starts clean. */
@@ -3760,15 +3783,16 @@ function staleForFailedPage(): void {
 function renderStale(): void {
   const body = document.getElementById("staleBody");
   if (body) {
-    body.querySelectorAll("details[data-stale-open]").forEach((d) => {
-      staleOpen[d.getAttribute("data-stale-open") || ""] = (d as HTMLDetailsElement).open;
-    });
-    body.innerHTML = staleFor === null
+    if (!body.querySelector(":scope > [data-stale-content]")) body.innerHTML = STALE_SHELL_HTML;
+    const notice = body.querySelector(":scope > [data-stale-notice]")!;
+    // Written only when it changes: the alert node announces its text once.
+    if (notice.textContent !== staleNotice) notice.textContent = staleNotice;
+    body.querySelector(":scope > [data-stale-content]")!.innerHTML = staleFor === null
       ? '<div class="wiki-conn-empty">Select a page to see what may be stale.</div>'
       : staleBodyHtml(staleReport, {
         checking: staleChecking,
-        progress: staleProgress,
-        notice: staleNotice,
+        // "" is no line of Check's: the report's own count shows.
+        progress: staleProgress || undefined,
         rowErrors: staleRowErrors,
         capLeft: staleCapLeft,
         capCalls: staleCapCalls,
@@ -3783,6 +3807,27 @@ function renderStale(): void {
   }
 }
 
+/** The `<details>` the reader folds: its state is the page's from then on. */
+document.getElementById("staleBody")?.addEventListener(
+  "toggle",
+  (e) => {
+    const d = e.target as HTMLElement;
+    const key = d.getAttribute?.("data-stale-open");
+    // A toggle queued by a body since replaced (another page's) is not this page's.
+    if (key && d.isConnected) staleOpen[key] = (d as HTMLDetailsElement).open;
+  },
+  true,
+);
+
+/** What the client holds beyond a freshly loaded report, made to agree with
+ *  it: a row a reader has judged is no longer a failed Check row, and no more
+ *  pages are left at Check's limit than the report has without a verdict (R2B4). */
+function reconcileStaleClientState(data: StaleReportView): void {
+  const rows = data.buckets?.linking.filter((l) => l.bucket === "toCheck") ?? [];
+  for (const l of rows) if (l.verdict?.checkedBy === "reader") delete staleRowErrors[l.relPath];
+  staleCapLeft = Math.min(staleCapLeft, rows.filter((l) => !l.verdict).length);
+}
+
 /** Fetch the open page's stale report (free hits, buckets, cached verdicts). */
 function loadStale(relPath: string): void {
   if (!staleTabAvailable()) return;
@@ -3793,15 +3838,19 @@ function loadStale(relPath: string): void {
     resetStaleClientState();
     renderStale();
   }
+  const seq = ++staleLoadSeq;
+  /** Still the latest request, and still for the page in the tab. */
+  const mine = () => seq === staleLoadSeq && staleFor === relPath;
   fetch(withWiki("/api/wiki/stale?page=" + encodeURIComponent(relPath)))
     .then((r) => r.json())
     .then((data: StaleReportView) => {
-      if (staleFor !== relPath) return;
+      if (!mine()) return;
       staleReport = data;
+      if (!data.error) reconcileStaleClientState(data);
       renderStale();
     })
     .catch(() => {
-      if (staleFor !== relPath) return;
+      if (!mine()) return;
       staleReport = { error: "the stale report could not be loaded" };
       renderStale();
     });
@@ -3912,6 +3961,10 @@ async function postStaleVerdict(btn: Element): Promise<void> {
   }
   if (staleFor === relPath) {
     staleNotice = "";
+    // The last Check's line counted this row as failed or unchecked; the
+    // reloaded report's own count replaces it (R2B4).
+    if (kind === "passage" && !staleChecking) staleProgress = "";
+    renderStale();
     loadStale(relPath);
   }
 }
@@ -4679,6 +4732,8 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   // The listing IS the identity here (no page response to wait for), so the
   // active-row test gets its relPath immediately.
   setCurrentRelPath(m.relPath);
+  /** This view's number: a later view drops this page's response (R2B4). */
+  const seq = pageViewSeq;
   navInFlight = false; // `currentName` now carries the "article" signal on its own
   if (push) {
     graphIssue = ""; // a click opens a page: graph mode re-roots on it
@@ -4698,7 +4753,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
       // A fast page flip may have moved on — don't clobber the new page's panel.
-      if (currentRelPath !== m.relPath) return;
+      if (seq !== pageViewSeq) return;
       if (data.error) {
         staleForFailedPage();
         return;
@@ -4717,7 +4772,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       loadStale(m.relPath);
     })
     .catch(() => {
-      if (currentRelPath !== m.relPath) return;
+      if (seq !== pageViewSeq) return;
       document.getElementById("connBody")!.innerHTML =
         '<div class="wiki-conn-empty">Connections unavailable.</div>';
       staleForFailedPage();
@@ -4824,9 +4879,21 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
   abortAgentRuns();
   // Taken now, so a load that fails cannot leave it for the next one.
   const inPlace = inPlaceLens;
+  // This load's number. A later view (another load, an explainer, the start
+  // view, an Ask answer, an issue graph) drops this response whatever it is:
+  // a page left behind paints nothing, a late failure clears nothing (R2B4).
+  let seq = ++pageViewSeq;
+  pageFetchSeq = seq;
+  const superseded = () => {
+    if (seq === pageViewSeq) return false;
+    // Left for a view that fetches nothing: no navigation is in flight now.
+    if (pageFetchSeq === seq) navInFlight = false;
+    return true;
+  };
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
+      if (superseded()) return;
       // Restore the 3-pane layout on every outcome — an error rendered into
       // #articleWrap has replaced the atlas, so the panes must come back too.
       setAtlasFull(false);
@@ -4855,6 +4922,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // resolves server-side, and the active row must key on the page that
       // actually came back.
       setCurrentRelPath(data.meta.relPath || null);
+      seq = pageViewSeq; // that view change is this load's own
       currentPageHash = typeof data.hash === "string" ? data.hash : null;
       currentNear = currentRelPath ? { relPath: currentRelPath, near: data.near ?? {} } : null;
       renderBreadcrumb(data.meta);
@@ -4997,6 +5065,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       renderList();
     })
     .catch((err: Error) => {
+      if (superseded()) return;
       setAtlasFull(false);
       navInFlight = false;
       removeGraph();
