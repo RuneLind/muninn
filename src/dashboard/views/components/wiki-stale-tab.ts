@@ -28,6 +28,8 @@ export interface StaleHitView {
   said: string[];
   now: string;
   text: string;
+  /** The hit's line is in the frontmatter: no mark in the article (D21). */
+  frontmatter?: boolean;
   confirmation?: StaleVerdictView | "unconfirmed";
 }
 

@@ -1,7 +1,7 @@
 /**
  * The pure halves of the stale marks (PR 2b, D21): the said word the server
  * would find, and the score that picks a hit's line. The DOM half runs in
- * `e2e/wiki-stale-counts.spec.ts` (no DOM shim in this repo).
+ * `wiki-stale-marks-dom.test.ts` (happy-dom) and `e2e/wiki-stale-counts.spec.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import { hitTokens, lineScore, MATCH_MIN, saidWordSpan, tokens } from "./wiki-stale-marks.ts";
