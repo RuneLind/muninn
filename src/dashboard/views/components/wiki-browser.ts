@@ -3860,7 +3860,10 @@ function loadStale(relPath: string): void {
     .then((data: StaleReportView) => {
       if (!mine()) return;
       staleReport = data;
-      if (!data.error) reconcileStaleClientState(data);
+      if (!data.error) {
+        reconcileStaleClientState(data);
+        foldStaleReportCounts(relPath, staleCounts(data));
+      }
       renderStale();
     })
     .catch(() => {
@@ -3954,6 +3957,10 @@ let staleSummary: StaleSummaryView | null = null;
 let staleSummaryCounts = new Map<string, StalePageCounts>();
 /** The summary request in flight: an older one answering late is dropped. */
 let staleSummarySeq = 0;
+/** Page reports folded into the summary's counts, each with the summary
+ *  request that was newest when it landed: a summary asked for before the
+ *  report keeps the report's counts, a later one replaces them. */
+const staleReportFolds = new Map<string, { counts: StalePageCounts; seq: number }>();
 /** Each rail row's badge as `renderList` last painted it, by relPath. */
 let staleRailPainted = new Map<string, string>();
 /** The article and hits the marks were last placed for. */
@@ -3976,25 +3983,41 @@ function loadStaleSummary(): void {
     .then((data: StaleSummaryView) => {
       if (seq !== staleSummarySeq) return;
       staleSummary = data;
-      adoptStaleSummaryCounts(staleCountMap(data));
+      adoptStaleSummaryCounts(staleCountMap(data), seq);
       renderStaleHome();
     })
     .catch(() => {
       if (seq !== staleSummarySeq) return;
       staleSummary = { error: "the summary could not be loaded" };
-      adoptStaleSummaryCounts(new Map());
+      adoptStaleSummaryCounts(new Map(), seq);
       renderStaleHome();
     });
 }
 
-/** Take the summary's counts, and repaint the rail only when a badge would
- *  change: a summary that says what the rail shows costs no row render. */
-function adoptStaleSummaryCounts(next: Map<string, StalePageCounts>): void {
-  const sig = (m: Map<string, StalePageCounts>) =>
-    [...m].filter(([, c]) => c.staleLines || c.toCheck).map(([r, c]) => `${r}\0${c.staleLines}\0${c.toCheck}`).sort().join("\n");
-  const changed = sig(next) !== sig(staleSummaryCounts);
+/** Take summary `seq`'s counts, keeping the page reports that landed after it
+ *  was asked for, and repaint the rail only when a badge would change. */
+function adoptStaleSummaryCounts(next: Map<string, StalePageCounts>, seq: number): void {
+  for (const [relPath, f] of staleReportFolds) {
+    if (f.seq >= seq) next.set(relPath, f.counts);
+    else staleReportFolds.delete(relPath);
+  }
   staleSummaryCounts = next;
-  if (changed) renderList();
+  repaintRailIfBadgeChanged();
+}
+
+/** A page report's counts become its summary row's, so the row keeps what the
+ *  pill showed after the reader leaves the page; no refetch. */
+function foldStaleReportCounts(relPath: string, counts: StalePageCounts): void {
+  staleReportFolds.set(relPath, { counts, seq: staleSummarySeq });
+  staleSummaryCounts.set(relPath, counts);
+}
+
+/** Repaint the rail when some painted row's badge would differ from what it
+ *  shows now; otherwise no row render. */
+function repaintRailIfBadgeChanged(): void {
+  for (const [relPath, html] of staleRailPainted) {
+    if (html !== staleRailBadgeHtml(staleRailCounts(relPath))) return renderList();
+  }
 }
 
 /** The home's line, and its Stale tab when that is the one showing. */
@@ -4024,10 +4047,9 @@ function paintStaleSurfaces(): void {
       staleMarksFor = { el: art.el, sig };
     }
   }
-  // The open page's rail row follows its report: repainted only when its
+  // The open page's rail row follows its report: repainted only when a
   // badge would change, so opening a page costs no extra row render.
-  const painted = staleFor ? staleRailPainted.get(staleFor) : undefined;
-  if (painted !== undefined && painted !== staleRailBadgeHtml(staleRailCounts(staleFor!))) renderList();
+  repaintRailIfBadgeChanged();
 }
 
 /** A rail row's badge, noted as painted. */

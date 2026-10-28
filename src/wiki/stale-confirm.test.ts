@@ -665,20 +665,16 @@ describe("commitsFor (A15)", () => {
     expect(await commitsFor({ root }, undefined, t0 - 7 * DAY)).toBeUndefined();
   });
 
-  test("the subjects after sinceMs, newest first, and none after untilMs", async () => {
+  test("the subjects after sinceMs, newest first", async () => {
     expect(await commitsFor({ root }, meta(), t0 - 7 * DAY)).toEqual(["three", "two"]);
-    expect(await commitsFor({ root }, meta(), t0 - 7 * DAY, t0 - 3 * DAY)).toEqual(["two"]);
     expect(await commitsFor({ root }, meta(), undefined)).toEqual(["three", "two", "one"]);
   });
 
-  test("an uncommitted change newer than every commit is null; under asOf the commits still count", async () => {
+  test("an uncommitted change is null", async () => {
     const dirty = meta({ gitDirty: true, gitTouchedMs: t0 - DAY });
     expect(await commitsFor({ root }, dirty, t0 - DAY)).toBeNull();
     expect(await commitsFor({ root }, meta({ gitDirty: true }), t0 - 7 * DAY)).toBeNull();
-    // The same uncommitted page judged as of a past day: its commits up to then count.
-    const dirtyOld = meta({ gitDirty: true, gitTouchedMs: t0 - 10 * DAY });
-    expect(await commitsFor({ root }, dirtyOld, t0 - 7 * DAY)).toBeNull();
-    expect(await commitsFor({ root }, dirtyOld, t0 - 7 * DAY, t0 - 3 * DAY)).toEqual(["two"]);
+    expect(await commitsFor({ root }, meta({ gitDirty: true, gitTouchedMs: t0 - 10 * DAY }), t0 - 7 * DAY)).toBeNull();
   });
 
   test("git unavailable for the root: no commit section, not an empty one", async () => {

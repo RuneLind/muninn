@@ -33,7 +33,7 @@ export interface StaleSummaryView {
 export function staleCountMap(s: StaleSummaryView | null | undefined): Map<string, StalePageCounts> {
   const out = new Map<string, StalePageCounts>();
   if (!s || s.error || !Array.isArray(s.pages)) return out;
-  for (const r of s.pages) out.set(r.relPath, { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0 });
+  for (const { r, c } of countedRows(s)) out.set(r.relPath, c);
   return out;
 }
 
@@ -59,20 +59,21 @@ export function stalePillHtml(r: StaleReportView | null | undefined): string {
   );
 }
 
-/** Rows with something stale, in the summary's order. */
-const staleRows = (s: StaleSummaryView) => (s.pages ?? []).filter((r) => (Number(r.staleLines) || 0) + (Number(r.toCheck) || 0) > 0);
+/** Every row with its two counts read as numbers once, in the summary's order. */
+const countedRows = (s: StaleSummaryView) =>
+  (s.pages ?? []).map((r) => ({ r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0 } }));
 
-function totalsOf(s: StaleSummaryView): StalePageCounts {
-  const rows = staleRows(s);
-  return { staleLines: rows.reduce((n, r) => n + (Number(r.staleLines) || 0), 0), toCheck: rows.reduce((n, r) => n + (Number(r.toCheck) || 0), 0) };
-}
+const isStale = (c: StalePageCounts) => c.staleLines + c.toCheck > 0;
+
+/** The wiki's totals as the route sends them (confirmed stale lines, D26). */
+const totalsOf = (s: StaleSummaryView): StalePageCounts => ({ staleLines: Number(s.totals?.staleLines) || 0, toCheck: Number(s.totals?.toCheck) || 0 });
 
 /** The wiki home's Index-card line: the wiki's totals and a way into the Stale tab. */
 export function staleHomeLineHtml(s: StaleSummaryView | null | undefined): string {
   if (!s) return `<span class="wiki-stale-home-k">Stale check</span> <span class="wiki-stale-home-v">Loading…</span>`;
   if (s.error) return `<span class="wiki-stale-home-k">Stale check</span> <span class="wiki-stale-home-v">unavailable</span>`;
   const t = totalsOf(s);
-  const pages = staleRows(s).length;
+  const pages = countedRows(s).filter((x) => isStale(x.c)).length;
   return (
     `<span class="wiki-stale-home-k">Stale check</span> ` +
     `<span class="wiki-stale-home-v" data-stale-home-totals="${t.staleLines}·${t.toCheck}">${esc(staleCountsText(t))}${pages ? ` on ${plural(pages, "page")}` : ""}</span>` +
@@ -85,11 +86,11 @@ export function staleHomeLineHtml(s: StaleSummaryView | null | undefined): strin
 export function staleHomeBodyHtml(s: StaleSummaryView | null | undefined): string {
   if (!s) return `<div class="wiki-conn-empty">Loading…</div>`;
   if (s.error) return `<div class="wiki-conn-empty">Stale check unavailable: ${esc(s.error)}</div>`;
-  const rows = staleRows(s);
+  const rows = countedRows(s);
   let html = `<div class="wiki-stale-home-head">${esc(staleCountsText(totalsOf(s)))}</div>`;
   if (s.verdicts === "unavailable") html += `<div class="wiki-stale-note">Verdicts are unavailable right now, so no status line shows as confirmed.</div>`;
-  for (const r of rows) {
-    const c = { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0 };
+  for (const { r, c } of rows) {
+    if (!isStale(c)) continue;
     html +=
       `<div class="wiki-stale-home-row" data-relpath="${esc(r.relPath)}" data-stale-home-row="${c.staleLines}·${c.toCheck}">` +
       `<span class="wiki-stale-home-title">${esc(r.title || r.relPath)}</span>` +
@@ -97,7 +98,8 @@ export function staleHomeBodyHtml(s: StaleSummaryView | null | undefined): strin
       `<span class="wiki-stale-home-path">${esc(r.relPath)}</span>` +
       `</div>`;
   }
-  const quiet = (s.pages ?? []).length - rows.length;
+  // An unchanged page with unconfirmed hits is a row too (`changed: false`).
+  const quiet = rows.filter((x) => x.r.changed && !isStale(x.c)).length;
   if (quiet > 0) html += `<div class="wiki-stale-note">+ ${plural(quiet, "changed page")} with nothing stale.</div>`;
   return html;
 }

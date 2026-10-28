@@ -70,4 +70,15 @@ describe("the counts everywhere (PR 2b)", () => {
     expect(body).toContain("+ 1 changed page with nothing stale.");
     expect(staleHomeBodyHtml({ ...summary, verdicts: "unavailable" })).toContain("Verdicts are unavailable");
   });
+
+  test("«+ N changed pages» counts changed pages only, not an unchanged page whose hits are unconfirmed", () => {
+    // The route sends an unchanged page with a hit as `changed: false`, its
+    // `staleLines` 0 until the hit is confirmed stale.
+    const withUnconfirmed: StaleSummaryView = {
+      ...summary,
+      pages: [...summary.pages!, { relPath: "u.md", title: "U", staleLines: 0, toCheck: 0, changed: false }],
+    };
+    expect(staleHomeBodyHtml(withUnconfirmed)).toContain("+ 1 changed page with nothing stale.");
+    expect(staleHomeBodyHtml({ ...withUnconfirmed, pages: withUnconfirmed.pages!.filter((r) => r.relPath !== "quiet.md") })).not.toContain("with nothing stale");
+  });
 });

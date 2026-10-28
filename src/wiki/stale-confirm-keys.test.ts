@@ -47,9 +47,10 @@ describe("passage keys across asOf, stamps and commits", () => {
     await git(root, "add", "-A");
     await git(root, "commit", "-q", "--date", iso(ms), "-m", msg);
   };
-  // asOf after every commit: the model sees the same subjects as without asOf.
+  // asOf after every commit: no page steps back.
   const asOfSame = t0 - DAY;
-  // asOf between the hub's two edits: it cuts «hub: second».
+  // asOf between the hub's two edits: the hub steps back to «hub: first»,
+  // and «hub: second» lies after it.
   const asOfCut = t0 - 4 * DAY;
 
   beforeAll(async () => {
@@ -101,7 +102,7 @@ describe("passage keys across asOf, stamps and commits", () => {
     expect([...(await passageVerdicts("w", index, "docs/hub.md", dated.linking, { store: other })).values()].map((v) => v.checkedBy)).toEqual(["reader"]);
   });
 
-  test("asOf is not a key input: a Check under an asOf that cuts a subject is seen by the GET without it", async () => {
+  test("asOf is not a key input: a Check under an asOf between the hub's edits is seen by the GET without it", async () => {
     const index = await fresh();
     const plain = await keyOf(index);
     expect(await keyOf(index, asOfSame)).toBe(plain);
@@ -113,7 +114,7 @@ describe("passage keys across asOf, stamps and commits", () => {
     expect([...(await passageVerdicts("w", index, "docs/hub.md", plainBuckets.linking, { store })).values()].map((v) => v.verdict)).toEqual(["true"]);
   });
 
-  test("asOf never cuts the prompt's evidence: a Check with and without it sends the same prompt (PR 2b)", async () => {
+  test("asOf never cuts the prompt's subjects: a Check with and without it sends the same prompt (PR 2b)", async () => {
     const index = await fresh();
     const promptOf = async (asOfMs?: number) => {
       let prompt = "";
@@ -253,5 +254,69 @@ describe("status-line keys read the target's own title, not its prompt evidence"
     } finally {
       await writeFile(path.join(root, "plans/p.md"), original);
     }
+  });
+});
+
+// Fix round 1 batch 2: under `asOf` the buckets step the linking page back to
+// its last edit before `asOf`, so a lower bound read from the buckets would
+// move with `asOf` and change the prompt under an unchanged key.
+describe("Check's prompt is the same with and without asOf when the linking page was edited since", () => {
+  let root = "";
+  const t0 = Date.now();
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  const commitAt = async (ms: number, msg: string) => {
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "--date", iso(ms), "-m", msg);
+  };
+  // As of −9 d, the hub last changed at −11 d and notes/old.md at −16 d; without
+  // asOf, at −3 d and −8 d. To check both ways, under one key.
+  const asOf = t0 - 9 * DAY;
+  const linking = (tail: string) => page("Old", `The pin in [[docs/hub]] landed on 23.05.\n\n${tail}`);
+
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-asof-bound-"));
+    await git(root, "init", "-q", "-b", "main");
+    await write("docs/hub.md", page("Hub", "Body one."));
+    await write("notes/old.md", linking("Tail one."));
+    await commitAt(t0 - 20 * DAY, "seed");
+    await write("notes/old.md", linking("Tail two."));
+    await commitAt(t0 - 16 * DAY, "old: first");
+    await write("docs/hub.md", page("Hub", "Body two."));
+    await commitAt(t0 - 11 * DAY, "hub: first");
+    await write("notes/old.md", linking("Tail three."));
+    await commitAt(t0 - 8 * DAY, "old: second");
+    await write("docs/hub.md", page("Hub", "Body three."));
+    await commitAt(t0 - 3 * DAY, "hub: second");
+  }, 30_000);
+  afterAll(async () => {
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("the subjects start after the linking page's current last change, whatever asOf says", async () => {
+    __resetWikiCacheForTest();
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    const keys: string[] = [];
+    const promptOf = async (asOfMs?: number) => {
+      const b = (await linkingBuckets(index, "docs/hub.md", asOfMs !== undefined ? { asOfMs } : {}))!;
+      const l = b.linking.find((x) => x.bucket === "toCheck")!;
+      expect(l.relPath).toBe("notes/old.md");
+      keys.push(passageVerdictKey(index, "docs/hub.md", (await changedHashOf(index, "docs/hub.md"))!, l));
+      let prompt = "";
+      const model: StaleModel = async (p) => ((prompt = p), '{"verdict":"true","reason":"holds"}');
+      await runStaleCheck({ wiki: "w", index, relPath: "docs/hub.md", ...(asOfMs !== undefined ? { asOfMs } : {}), bot: BOT, store: memoryStaleVerdictStore(), model, onEvent: () => {} });
+      return prompt;
+    };
+    const plain = await promptOf();
+    const dated = await promptOf(asOf);
+    expect(keys[1]).toBe(keys[0]!);
+    // notes/old.md last changed at −8 d: «hub: first» (−11 d) is older news.
+    expect(plain).toContain("- hub: second");
+    expect(plain).not.toContain("- hub: first");
+    expect(dated).toBe(plain);
   });
 });

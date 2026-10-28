@@ -324,6 +324,13 @@ test("the open page's rail row follows its own report when the summary is older"
     await expect(pill(p)).toHaveText("✓ nothing stale");
     await expect(railBadge(p, "hub2.md")).toHaveCount(0);
     await expect(railBadge(p, "hub.md")).toHaveText("⚠ 6 · 1");
+    // Leaving hub2 repaints the rail: its row keeps what its pill showed, not
+    // the boot summary's «⚠ 1 · 0» (fix round 1).
+    await p.locator('.wiki-list-item[data-relpath="hub.md"]').click();
+    await expect(p.locator(".wiki-article")).toContainText("The pin moved.");
+    await expect(pill(p)).toHaveText(HUB_TEXT);
+    await expect(railBadge(p, "hub.md")).toHaveText("⚠ 6 · 1");
+    await expect(railBadge(p, "hub2.md")).toHaveCount(0);
   } finally {
     await sql!`INSERT INTO wiki_stale_verdicts ${sql!(row!)}`;
   }
