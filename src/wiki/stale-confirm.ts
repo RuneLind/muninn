@@ -2,15 +2,15 @@
  * The Stale check's model half (plan muninn-wiki-drift-check, PR 2a): verdict
  * keys, the one model call, the confirm loop (D16) and Check (D6).
  *
- * - **Keys (D22)** hash content, never commits, and every other input the
- *   prompt carries: a status line on the page, the window the model saw, its
- *   status words and the target's facts; a passage on the linking page, its
- *   claim passages, the changed page's content hash (body, `plan_status` and
- *   `status_note` only, so a provenance stamp or an `updated:` bump resets
- *   nothing) and facts, the other plans' status and the commit subjects the
- *   call carries (what `asOf` changes, so a Check under `asOf` and the tab's
- *   GET without it share a key when the model saw the same subjects). Both
- *   read the target's own title, never its stem-collision `displayTitle`.
+ * - **Keys (D7, D22)** hash the verdict's validity inputs only, never
+ *   commits or `asOf`; the rest of the prompt is evidence and stays out. A
+ *   status line keys on the page, the window the model saw, its status words,
+ *   the target, its `plan_status` and its own title. A passage keys on the
+ *   linking page, its claim passages, the changed page, its content hash
+ *   (body, `plan_status`, `status_note`, so a provenance stamp or `updated:`
+ *   resets nothing) and own title, and the other linked plans with their
+ *   `plan_status`. Both read the own title, never the stem-collision
+ *   `displayTitle`. No `git log` runs to build a key.
  * - **The call (D17)** goes through the wiki's own bot
  *   (`resolveWikiSynthesisBot`) and its Haiku router (`callHaikuWithFallback`
  *   with the bot's connector and `haikuBackend`), tool-less, under a deadline
@@ -70,45 +70,37 @@ export function changedPageContentHash(content: string): string {
 
 /** The linked page's facts as the prompt carries them. */
 type TargetFacts = StaleCallInput["target"];
-/** A key's target facts: `title` is the page's own (`meta.title`), so a page
- *  that shares the stem elsewhere and relabels it resets nothing. */
-const targetParts = (t: TargetFacts) => [normalizeRelPath(t.relPath), t.title, t.planStatus ?? "", t.statusNote ?? "", t.description ?? ""];
-
-/** The commit subjects a call carries, as a key part: none read, uncommitted, or the list. */
-const commitsPart = (c: readonly string[] | null | undefined) => (c === undefined ? "-" : c === null ? "uncommitted" : JSON.stringify(c));
 
 /**
- * A status-line confirmation's key: what the call was judged on — the page,
- * the hit's text (the window the model saw), the status words it says, the
- * target plan and its `plan_status`, and the target facts the prompt carries
- * (title, `status_note`, `description`). No commits (D22), no line number.
+ * A status-line confirmation's key: the page, the hit's text (the window the
+ * model saw), the status words it says, the target plan, its `plan_status`
+ * (`hit.now`) and its own title (`meta.title`). The target's `status_note`
+ * and `description` are prompt evidence, not key inputs; no commits, no
+ * `asOf`, no line number.
  */
 export function statusLineKeyHash(page: string, hit: Pick<StatusLineHit, "text" | "target" | "now" | "said">, target: TargetFacts): string {
-  return sha(["status-line/v2", normalizeRelPath(page), hit.text, hit.said.join(","), normalizeRelPath(hit.target), hit.now, ...targetParts(target).slice(1)]);
+  return sha(["status-line/v3", normalizeRelPath(page), hit.text, hit.said.join(","), normalizeRelPath(hit.target), hit.now, target.title]);
 }
 
-/** What a passage prompt carries besides the passage. */
+/** What a passage prompt carries besides the passage and the commit subjects. */
 export interface PassageKeyContext {
   /** The changed page's facts as the prompt carries them. */
   target: TargetFacts;
   /** The page's own title, which the key reads instead of `target.title`. */
   keyTitle: string;
   otherPlans: NonNullable<StaleCallInput["otherPlans"]>;
-  /** The changed page's commit subjects the call carries (`commitsFor`):
-   *  `asOf` cuts them, so the key reads them instead of `asOf`. */
-  commits: readonly string[] | null | undefined;
 }
 
 /**
- * A passage verdict's key: the linking page, its passage, the changed page's
- * content hash, its facts the prompt carries (its own title), the other plans
- * the passage links to with their status, and the commit subjects the call
- * carries. No commit hashes and no `asOf` itself (D22).
+ * A passage verdict's key: the linking page, its passage, the changed page,
+ * its content hash and its own title, and the other plans the passage links
+ * to with their `plan_status`. The changed page's `description` and display
+ * title, the other plans' `status_note`, the commit subjects and `asOf` are
+ * prompt evidence, not key inputs (D7, D22).
  */
 export function passageKeyHash(linkingPage: string, passage: string, changedHash: string, ctx: PassageKeyContext): string {
-  const others = JSON.stringify(ctx.otherPlans.map((o) => [normalizeRelPath(o.relPath), o.planStatus, o.statusNote ?? ""]));
-  const target = targetParts({ ...ctx.target, title: ctx.keyTitle });
-  return sha(["passage/v3", normalizeRelPath(linkingPage), passage, changedHash, ...target, others, commitsPart(ctx.commits)]);
+  const others = JSON.stringify(ctx.otherPlans.map((o) => [normalizeRelPath(o.relPath), o.planStatus]));
+  return sha(["passage/v4", normalizeRelPath(linkingPage), passage, normalizeRelPath(ctx.target.relPath), changedHash, ctx.keyTitle, others]);
 }
 
 /** A status-line hit's key, its target facts read from the index. */
@@ -117,16 +109,10 @@ export function statusLineVerdictKey(index: Pick<WikiIndex, "resolveRelPath">, p
   return statusLineKeyHash(page, hit, { ...targetFacts(meta, hit.target), title: ownTitle(meta, hit.target) });
 }
 
-/** The key context of a To-check linking page's passage on `changedRelPath`:
- *  the same facts and commit subjects its call carries. `subjects` shares
- *  one `git log` across a request's linking pages. */
-export async function passageKeyContext(
-  index: Pick<WikiIndex, "root" | "resolve" | "resolveRelPath">,
-  changedRelPath: string,
-  l: Pick<LinkingPage, "passages" | "lastChangeMs">,
-  asOfMs?: number,
-  subjects?: SubjectsMemo,
-): Promise<PassageKeyContext & { passage: string }> {
+/** The facts a To-check linking page's passage call carries on
+ *  `changedRelPath`, read from the index; the commit subjects are read
+ *  separately, by the call only. */
+export function passageKeyContext(index: Pick<WikiIndex, "resolve" | "resolveRelPath">, changedRelPath: string, l: Pick<LinkingPage, "passages">): PassageKeyContext & { passage: string } {
   const passage = linkingPassage(l);
   const meta = index.resolveRelPath(changedRelPath);
   return {
@@ -134,20 +120,12 @@ export async function passageKeyContext(
     target: targetFacts(meta, changedRelPath),
     keyTitle: ownTitle(meta, changedRelPath),
     otherPlans: otherPlansIn(index, passage, changedRelPath),
-    commits: await commitsFor(index, meta, l.lastChangeMs, asOfMs, subjects),
   };
 }
 
-/** A To-check linking page's passage verdict key. */
-export async function passageVerdictKey(
-  index: Pick<WikiIndex, "root" | "resolve" | "resolveRelPath">,
-  changedRelPath: string,
-  changedHash: string,
-  l: Pick<LinkingPage, "relPath" | "passages" | "lastChangeMs">,
-  asOfMs?: number,
-  subjects?: SubjectsMemo,
-): Promise<string> {
-  const ctx = await passageKeyContext(index, changedRelPath, l, asOfMs, subjects);
+/** A To-check linking page's passage verdict key: the same under any `asOf`. */
+export function passageVerdictKey(index: Pick<WikiIndex, "resolve" | "resolveRelPath">, changedRelPath: string, changedHash: string, l: Pick<LinkingPage, "relPath" | "passages">): string {
+  const ctx = passageKeyContext(index, changedRelPath, l);
   return passageKeyHash(l.relPath, ctx.passage, changedHash, ctx);
 }
 
@@ -510,8 +488,8 @@ export async function commitSubjectsSince(root: string, relPath: string, sinceMs
   return out;
 }
 
-/** One request's `git log` reads, by root and page: the GET and Check key
- *  every linking page on the changed page's log, read once. */
+/** One request's `git log` reads, by root and page: Check reads the changed
+ *  page's log once for all its calls. */
 export type SubjectsMemo = Map<string, Promise<{ ms: number; subject: string }[] | null>>;
 
 async function readCommitLog(root: string, relPath: string): Promise<{ ms: number; subject: string }[] | null> {
@@ -1138,14 +1116,13 @@ export async function runStaleCheck(opts: {
   const changedHash = await changedHashOf(index, buckets.relPath);
   if (changedHash === null) throw new StaleChangedUnreadableError(buckets.relPath);
   const subjects: SubjectsMemo = new Map();
-  const items = await Promise.all(
-    buckets.linking
-      .filter((l) => l.bucket === "toCheck")
-      .map(async (l) => {
-        const ctx = await passageKeyContext(index, buckets.relPath, l, opts.asOfMs, subjects);
-        return { l, passage: ctx.passage, ctx, key: passageKeyHash(l.relPath, ctx.passage, changedHash, ctx) };
-      }),
-  );
+  const changedMeta = index.resolveRelPath(buckets.relPath);
+  const items = buckets.linking
+    .filter((l) => l.bucket === "toCheck")
+    .map((l) => {
+      const ctx = passageKeyContext(index, buckets.relPath, l);
+      return { l, passage: ctx.passage, ctx, key: passageKeyHash(l.relPath, ctx.passage, changedHash, ctx) };
+    });
   const cached = await store.get(wiki, "passage", items.map((i) => i.key));
   const fresh = items.filter((i) => !cached.has(i.key));
   const toCall = fresh.slice(0, CHECK_MAX_CALLS);
@@ -1167,8 +1144,8 @@ export async function runStaleCheck(opts: {
       page: i.l.relPath,
       passage: i.passage,
       target: i.ctx.target,
-      // The subjects the key was built on, so key and prompt cannot drift.
-      commits: i.ctx.commits,
+      // Prompt evidence only: `asOf` cuts the subjects, the key reads none.
+      commits: await commitsFor(index, changedMeta, i.l.lastChangeMs, opts.asOfMs, subjects),
       otherPlans: i.ctx.otherPlans,
       sourceLines: await sourceLinesOf(index.root, i.l.relPath, linkingPassageRows(i.l).map((p) => p.line)),
     };
@@ -1253,21 +1230,20 @@ export const hitKey = (relPath: string, h: Pick<StatusLineHit, "line" | "target"
 /** Is a hit a confirmed stale status line (D11, D26)? */
 export const isConfirmedStale = (v: VerdictView | undefined) => v?.verdict === "stale";
 
-/** The cached passage verdicts of a changed page's To-check pages under `asOfMs`, by linking relPath. */
+/** The cached passage verdicts of a changed page's To-check pages, by linking relPath. */
 export async function passageVerdicts(
   wiki: string,
   index: WikiIndex,
   changedRelPath: string,
   linking: readonly LinkingPage[],
-  opts: { asOfMs?: number; store?: StaleVerdictStore } = {},
+  opts: { store?: StaleVerdictStore } = {},
 ): Promise<Map<string, VerdictView>> {
   const store = opts.store ?? staleVerdictStore();
   const toCheck = linking.filter((l) => l.bucket === "toCheck");
   if (toCheck.length === 0) return new Map();
   const changedHash = await changedHashOf(index, changedRelPath);
   if (changedHash === null) return new Map();
-  const subjects: SubjectsMemo = new Map();
-  const keys = new Map(await Promise.all(toCheck.map(async (l) => [l.relPath, await passageVerdictKey(index, changedRelPath, changedHash, l, opts.asOfMs, subjects)] as const)));
+  const keys = new Map(toCheck.map((l) => [l.relPath, passageVerdictKey(index, changedRelPath, changedHash, l)] as const));
   const rows = await store.get(wiki, "passage", [...keys.values()]);
   const out = new Map<string, VerdictView>();
   for (const [rel, k] of keys) {

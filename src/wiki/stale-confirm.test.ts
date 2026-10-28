@@ -55,50 +55,46 @@ describe("changedPageContentHash (D22)", () => {
   });
 });
 
+// The class check on the keys (PR 2a, round 3): key inputs are validity
+// inputs, one assertion per input; prompt evidence stays out of the key.
 describe("verdict keys", () => {
   const hit = { text: "- [[p]] is in-flight", target: "plans/p.md", now: "shipped" as const, said: ["in-flight" as const] };
   const target = { relPath: "plans/p.md", title: "P", planStatus: "shipped", statusNote: "all PRs merged", description: "the plan" };
-  test("a status-line key ignores the line number and reads text, target and plan_status", () => {
+  test("a status-line key changes with each IN input alone", () => {
     const k = statusLineKeyHash("hub.md", hit, target);
     expect(statusLineKeyHash("hub.md", { ...hit }, { ...target })).toBe(k);
-    expect(statusLineKeyHash("hub.md", { ...hit, text: "- [[p]] is proposed" }, target)).not.toBe(k);
-    expect(statusLineKeyHash("hub.md", { ...hit, now: "in-flight" }, target)).not.toBe(k);
     expect(statusLineKeyHash("other.md", hit, target)).not.toBe(k);
-  });
-  // A1: the key hashes what the verdict was judged on — the status words too.
-  test("A1: a status-line key reads the status words the line says", () => {
-    const k = statusLineKeyHash("hub.md", hit, target);
+    expect(statusLineKeyHash("hub.md", { ...hit, text: "- [[p]] is proposed" }, target)).not.toBe(k);
     expect(statusLineKeyHash("hub.md", { ...hit, said: ["in-flight", "shipped"] }, target)).not.toBe(k);
     expect(statusLineKeyHash("hub.md", { ...hit, said: ["blocked"] }, target)).not.toBe(k);
-  });
-  test("A1: a status-line key reads the target facts the prompt carries", () => {
-    const k = statusLineKeyHash("hub.md", hit, target);
-    expect(statusLineKeyHash("hub.md", hit, { ...target, statusNote: "one PR left" })).not.toBe(k);
-    expect(statusLineKeyHash("hub.md", hit, { ...target, description: "another plan" })).not.toBe(k);
+    expect(statusLineKeyHash("hub.md", { ...hit, target: "plans/q.md" }, target)).not.toBe(k);
+    expect(statusLineKeyHash("hub.md", { ...hit, now: "in-flight" }, target)).not.toBe(k);
     expect(statusLineKeyHash("hub.md", hit, { ...target, title: "Q" })).not.toBe(k);
   });
-  const ctx = { target: { relPath: "x.md", title: "X", description: "d" }, keyTitle: "X", otherPlans: [{ relPath: "plans/q.md", planStatus: "in-flight" }], commits: ["one"] as readonly string[] | null | undefined };
-  test("a passage key reads the linking page, the passage and the changed page's hash", () => {
-    const k = passageKeyHash("a.md", "text", "h1", ctx);
-    expect(passageKeyHash("a.md", "text", "h2", ctx)).not.toBe(k);
-    expect(passageKeyHash("a.md", "text!", "h1", ctx)).not.toBe(k);
-    expect(passageKeyHash("b.md", "text", "h1", ctx)).not.toBe(k);
+  test("a status-line key ignores the target's status_note and description", () => {
+    const k = statusLineKeyHash("hub.md", hit, target);
+    expect(statusLineKeyHash("hub.md", hit, { ...target, statusNote: "one PR left" })).toBe(k);
+    expect(statusLineKeyHash("hub.md", hit, { ...target, description: "another plan" })).toBe(k);
   });
-  // A2: every prompt input that can change the verdict is in the key.
-  test("A2: a passage key reads the other plans' statuses and the commit subjects", () => {
+  const ctx = { target: { relPath: "x.md", title: "X", planStatus: "in-flight", statusNote: "n", description: "d" }, keyTitle: "X", otherPlans: [{ relPath: "plans/q.md", planStatus: "in-flight", statusNote: "T3 left" }] };
+  test("a passage key changes with each IN input alone", () => {
     const k = passageKeyHash("a.md", "text", "h1", ctx);
     expect(passageKeyHash("a.md", "text", "h1", { ...ctx })).toBe(k);
-    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [{ relPath: "plans/q.md", planStatus: "shipped" }] })).not.toBe(k);
-    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [{ relPath: "plans/q.md", planStatus: "in-flight", statusNote: "T4 left" }] })).not.toBe(k);
-    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [] })).not.toBe(k);
-    // The subjects stand in for asOf: none read, uncommitted, empty and each list are distinct keys.
-    const byCommits = [undefined, null, [], ["one"], ["two", "one"]].map((commits) => passageKeyHash("a.md", "text", "h1", { ...ctx, commits }));
-    expect(new Set(byCommits).size).toBe(5);
-    expect(byCommits[3]).toBe(k);
-    // The key reads keyTitle (the page's own title), not the prompt's display title.
-    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, target: { ...ctx.target, title: "Notes / X" } })).toBe(k);
+    expect(passageKeyHash("b.md", "text", "h1", ctx)).not.toBe(k);
+    expect(passageKeyHash("a.md", "text!", "h1", ctx)).not.toBe(k);
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, target: { ...ctx.target, relPath: "y.md" } })).not.toBe(k);
+    expect(passageKeyHash("a.md", "text", "h2", ctx)).not.toBe(k);
     expect(passageKeyHash("a.md", "text", "h1", { ...ctx, keyTitle: "Y" })).not.toBe(k);
-    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, target: { ...ctx.target, description: "e" } })).not.toBe(k);
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [{ ...ctx.otherPlans[0]!, relPath: "plans/r.md" }] })).not.toBe(k);
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [{ ...ctx.otherPlans[0]!, planStatus: "shipped" }] })).not.toBe(k);
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [] })).not.toBe(k);
+  });
+  test("a passage key ignores the prompt's display title, description, status_note and the other plans' status_note", () => {
+    const k = passageKeyHash("a.md", "text", "h1", ctx);
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, target: { ...ctx.target, title: "Notes / X" } })).toBe(k);
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, target: { ...ctx.target, description: "e" } })).toBe(k);
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, target: { ...ctx.target, statusNote: "m" } })).toBe(k);
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [{ ...ctx.otherPlans[0]!, statusNote: "T4 left" }] })).toBe(k);
   });
 });
 

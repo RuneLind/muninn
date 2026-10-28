@@ -349,12 +349,12 @@ describe("the call inputs on a git wiki (A14)", () => {
     expect(toCheck.map((l) => l.relPath)).toEqual(["notes/old.md"]);
     const store = memoryStaleVerdictStore();
     // A row under the old shared sentinel must not surface as this page's verdict.
-    await store.upsert({ wiki: "w", kind: "passage", page: "notes/old.md", keyHash: await passageVerdictKey(index, "hub.md", "unreadable", toCheck[0]!, asOfMs), verdict: "stale", reason: "another page's", edit: null, checkedBy: "model:x" });
+    await store.upsert({ wiki: "w", kind: "passage", page: "notes/old.md", keyHash: passageVerdictKey(index, "hub.md", "unreadable", toCheck[0]!), verdict: "stale", reason: "another page's", edit: null, checkedBy: "model:x" });
     let calls = 0;
     const model: StaleModel = async () => (calls++, '{"verdict":"true","reason":"ok"}');
     await chmod(path.join(root, "hub.md"), 0o000);
     try {
-      expect((await passageVerdicts("w", index, "hub.md", buckets.linking, { asOfMs, store })).size).toBe(0);
+      expect((await passageVerdicts("w", index, "hub.md", buckets.linking, { store })).size).toBe(0);
       const events: unknown[] = [];
       const run = runStaleCheck({ wiki: "w", index, relPath: "hub.md", asOfMs, bot: BOT, store, model, onEvent: (e) => void events.push(e) });
       await expect(run).rejects.toThrow(/cannot be read/);

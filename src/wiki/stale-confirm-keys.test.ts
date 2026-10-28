@@ -1,9 +1,9 @@
 /**
- * The passage verdict key across `asOf` (fix round 2 batch 2 of PR 2a): a
- * Check run with `asOf` and the STALE tab's GET without it share a key
- * whenever the model saw the same commit subjects, and a key reads the
- * page's own title, not the reader's stem-collision label. Check says when an
- * answer fails again. A git temp wiki, a fake model and an in-memory store.
+ * The verdict keys on real indexes (PR 2a, the round-3 class check): a Check
+ * run with `asOf` and the STALE tab's GET without it share a key, frontmatter
+ * stamps and content-neutral commits reset nothing (D7, D22), and a key reads
+ * the page's own title, not the reader's stem-collision label. Check says when
+ * an answer fails again. A git temp wiki, a fake model and an in-memory store.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -35,7 +35,7 @@ async function git(cwd: string, ...args: string[]): Promise<void> {
   if (code !== 0) throw new Error(`git ${args.join(" ")}: ${err}`);
 }
 
-describe("passage keys across asOf (fix round 2 batch 2)", () => {
+describe("passage keys across asOf, stamps and commits", () => {
   let root = "";
   const t0 = Date.now();
   const iso = (ms: number) => new Date(ms).toISOString();
@@ -81,7 +81,7 @@ describe("passage keys across asOf (fix round 2 batch 2)", () => {
   const keyOf = async (index: WikiIndex, asOfMs?: number) => {
     const b = await toCheckOf(index, asOfMs);
     const hash = (await changedHashOf(index, "docs/hub.md"))!;
-    return await passageVerdictKey(index, "docs/hub.md", hash, b.linking.find((l) => l.bucket === "toCheck")!, asOfMs);
+    return passageVerdictKey(index, "docs/hub.md", hash, b.linking.find((l) => l.bucket === "toCheck")!);
   };
 
   test("a Check under asOf is seen by the GET without it, and a reader verdict without asOf under it", async () => {
@@ -98,24 +98,52 @@ describe("passage keys across asOf (fix round 2 batch 2)", () => {
     const readerKey = await keyOf(index);
     await other.upsert({ wiki: "w", kind: "passage", page: "notes/old.md", keyHash: readerKey, verdict: "true", reason: "reader", edit: null, checkedBy: "reader" });
     const dated = await toCheckOf(index, asOfSame);
-    expect([...(await passageVerdicts("w", index, "docs/hub.md", dated.linking, { asOfMs: asOfSame, store: other })).values()].map((v) => v.checkedBy)).toEqual(["reader"]);
+    expect([...(await passageVerdicts("w", index, "docs/hub.md", dated.linking, { store: other })).values()].map((v) => v.checkedBy)).toEqual(["reader"]);
   });
 
-  test("an asOf that cuts a subject is another key; so is an uncommitted target without asOf", async () => {
+  test("asOf is not a key input: a Check under an asOf that cuts a subject is seen by the GET without it", async () => {
     const index = await fresh();
     const plain = await keyOf(index);
     expect(await keyOf(index, asOfSame)).toBe(plain);
-    expect(await keyOf(index, asOfCut)).not.toBe(plain);
-    // A frontmatter-only edit keeps the content hash; without asOf the call then carries «uncommitted».
-    await write("docs/hub.md", page(null, "Body three.", "updated: 2026-10-28\n"));
+    expect(await keyOf(index, asOfCut)).toBe(plain);
+    // An asOf that cuts «hub: second» changes the prompt's subjects, not the key.
+    const store = memoryStaleVerdictStore();
+    let prompt = "";
+    const model: StaleModel = async (p) => ((prompt = p), '{"verdict":"true","reason":"holds"}');
+    await runStaleCheck({ wiki: "w", index, relPath: "docs/hub.md", asOfMs: asOfCut, bot: BOT, store, model, onEvent: () => {} });
+    expect(prompt).toContain("hub: first");
+    expect(prompt).not.toContain("hub: second");
+    const plainBuckets = await toCheckOf(index);
+    expect([...(await passageVerdicts("w", index, "docs/hub.md", plainBuckets.linking, { store })).values()].map((v) => v.verdict)).toEqual(["true"]);
+  });
+
+  test("a `sessions:` stamp or an `updated:` bump on the changed page resets no key, committed or not", async () => {
+    const index = await fresh();
+    const plain = await keyOf(index);
+    await write("docs/hub.md", page(null, "Body three.", "sessions: [abc123]\nupdated: 2026-10-28\n"));
     try {
       const dirty = await fresh();
       expect(dirty.resolveRelPath("docs/hub.md")!.gitDirty).toBe(true);
-      expect(await keyOf(dirty)).not.toBe(plain);
-      // asOf reads committed history only, so it keys as the committed page did.
+      expect(await keyOf(dirty)).toBe(plain);
       expect(await keyOf(dirty, asOfSame)).toBe(plain);
     } finally {
       await git(root, "checkout", "-q", "--", "docs/hub.md");
+    }
+  });
+
+  test("a new commit to the changed page with its content unchanged resets no key", async () => {
+    const index = await fresh();
+    const plain = await keyOf(index);
+    const head = (await Bun.$`git -C ${root} rev-parse HEAD`.text()).trim();
+    await write("docs/hub.md", page(null, "Body three.", "sessions: [def456]\n"));
+    await commitAt(t0 - 2 * DAY, "wiki: stamp sessions");
+    try {
+      const after = await fresh();
+      expect(after.resolveRelPath("docs/hub.md")!.gitDirty).toBeFalsy();
+      expect(await keyOf(after)).toBe(plain);
+      expect(await keyOf(after, asOfSame)).toBe(plain);
+    } finally {
+      await git(root, "reset", "-q", "--hard", head);
     }
   });
 
@@ -161,7 +189,7 @@ describe("passage keys across asOf (fix round 2 batch 2)", () => {
   });
 });
 
-describe("status-line keys read the target's own title (fix round 2 batch 2)", () => {
+describe("status-line keys read the target's own title, not its prompt evidence", () => {
   let root = "";
   beforeAll(async () => {
     root = await testTempDir(path.join(tmpdir(), "stale-title-"));
@@ -188,5 +216,21 @@ describe("status-line keys read the target's own title (fix round 2 batch 2)", (
     const hit2 = after.statusLineHits!.get("hub.md")![0]!;
     expect(hit2.target).toBe("plans/p.md");
     expect(statusLineVerdictKey(after, "hub.md", hit2)).toBe(before);
+  });
+
+  test("a stamp, an `updated:` bump, a status_note or a description on the target keeps the confirmation key", async () => {
+    __resetWikiCacheForTest();
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    const before = statusLineVerdictKey(index, "hub.md", index.statusLineHits!.get("hub.md")![0]!);
+    const original = await Bun.file(path.join(root, "plans/p.md")).text();
+    await writeFile(path.join(root, "plans/p.md"), page(null, "Body.", "plan_status: shipped\nsessions: [abc123]\nupdated: 2026-10-28\nstatus_note: all merged\ndescription: The plan.\n"));
+    try {
+      __resetWikiCacheForTest();
+      const after = (await getWikiIndex({ root, refresh: true }))!;
+      expect(after.resolveRelPath("plans/p.md")!.status_note).toBe("all merged");
+      expect(statusLineVerdictKey(after, "hub.md", after.statusLineHits!.get("hub.md")![0]!)).toBe(before);
+    } finally {
+      await writeFile(path.join(root, "plans/p.md"), original);
+    }
   });
 });

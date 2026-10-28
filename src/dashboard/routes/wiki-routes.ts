@@ -2415,7 +2415,7 @@ export function registerWikiToolRoutes(
     let verdictsByLinking = new Map<string, VerdictView>();
     try {
       confirmations = await hitConfirmations(entry.name, index, [[meta.relPath, report.hits]]);
-      if (report.buckets) verdictsByLinking = await passageVerdicts(entry.name, index, report.buckets.relPath, report.buckets.linking, asOfMs !== undefined ? { asOfMs } : {});
+      if (report.buckets) verdictsByLinking = await passageVerdicts(entry.name, index, report.buckets.relPath, report.buckets.linking);
     } catch (err) {
       confirmations = null;
       log.warn("Stale verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
@@ -2571,7 +2571,7 @@ export function registerWikiToolRoutes(
         wiki: entry.name,
         kind: "passage",
         page: l.relPath,
-        keyHash: await passageVerdictKey(index, meta.relPath, changedHash, l, asOfMs),
+        keyHash: passageVerdictKey(index, meta.relPath, changedHash, l),
         verdict,
         reason: verdict === "true" ? "Marked still true by a reader" : "Marked not a status by a reader",
         edit: null,

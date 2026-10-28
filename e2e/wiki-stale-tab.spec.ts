@@ -33,10 +33,10 @@
  * goes to the Anthropic backend, and `ANTHROPIC_BASE_URL` points it at a
  * `node:http` fake on its own port. The confirm loop is not run (its first run
  * waits a minute after boot); its one output, a `status-line` verdict row, is
- * inserted under the key D22 defines — sha256 over `status-line/v2`, the
- * page, the line's text, its status words, the target, its `plan_status`,
- * title, `status_note` and `description`, joined by NUL — so this spec also
- * pins that key formula from outside the server.
+ * inserted under the key D22 defines — sha256 over `status-line/v3`, the
+ * page, the line's text, its status words, the target, its `plan_status` and
+ * its own title, joined by NUL — so this spec also pins that key formula from
+ * outside the server.
  *
  * Ports from `e2e/ports.ts`; `e2eEnv()` blanks the platform tokens and the
  * instance-profile flags; the bot lives under a temp `MUNINN_BOTS_DIR`.
@@ -124,9 +124,9 @@ async function write(rel: string, body: string): Promise<void> {
 }
 
 /** D22's status-line key, spelled out independently of the server. */
-const statusLineKey = (pageRel: string, text: string, said: string[], target: string, now: string, t: { title: string; statusNote?: string; description?: string }) =>
+const statusLineKey = (pageRel: string, text: string, said: string[], target: string, now: string, t: { title: string }) =>
   createHash("sha256")
-    .update(["status-line/v2", pageRel, text, said.join(","), target, now, t.title, now, t.statusNote ?? "", t.description ?? ""].join("\0"))
+    .update(["status-line/v3", pageRel, text, said.join(","), target, now, t.title].join("\0"))
     .digest("hex");
 
 function boot(port: number, extra: Record<string, string>): ChildProcess {
