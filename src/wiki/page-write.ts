@@ -100,6 +100,13 @@ export interface PageWriteCommonOptions {
    * the freshly-read body. Return `null` to abort cleanly (a `noop` outcome).
    */
   transform: (current: string) => string | null;
+  /**
+   * An async check INSIDE the critical section, after the CAS and before
+   * `transform`: false declines the write (a `noop`, nothing written or
+   * logged — the caller keeps its own reason, as with `transform`'s null).
+   * Optional; the Stale check's Apply declines a page with uncommitted edits.
+   */
+  proceed?: () => Promise<boolean>;
   /** Huginn collections to reindex. Empty ⇒ reindex skipped; write + log still happen. */
   collections: string[];
   now: () => number;
@@ -341,6 +348,14 @@ export async function writeWikiPage(
     if (current === null) return { outcome: "stale", reason: PAGE_GONE_REASON };
     if (!baseHash || sha256(current) !== baseHash) {
       return { outcome: "stale", reason: opts.staleReason ?? "page changed since the fact check" };
+    }
+
+    if (opts.proceed) {
+      try {
+        if (!(await opts.proceed())) return { outcome: "noop" };
+      } catch (err) {
+        return { outcome: "error", reason: `pre-write check failed: ${errMsg(err)}` };
+      }
     }
 
     let updated: string | null;

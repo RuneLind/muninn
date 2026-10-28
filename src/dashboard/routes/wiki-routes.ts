@@ -57,7 +57,15 @@ import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } f
 import { isReadonlyWikiRoot, isWikiReadonly, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { linkingBuckets, movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
 import { placeStaleEdit } from "../../wiki/stale-fix.ts";
-import { fixedLinkingPages, resolveStaleFix, writeFixedVerdicts, type StaleFixRequest } from "../../wiki/stale-fix-verdicts.ts";
+import {
+  carryPassageVerdicts,
+  fixedLinkingPages,
+  resolveStaleFix,
+  snapshotPassageKeys,
+  writeFixedVerdicts,
+  type PassageKeySnapshot,
+  type StaleFixRequest,
+} from "../../wiki/stale-fix-verdicts.ts";
 import { heldBy, heldMessage, inReviewByChanged, sendStaleFix, staleProposalStore, type StaleInReview } from "../../gardener/stale-proposals.ts";
 import {
   hitConfirmations,
@@ -144,7 +152,7 @@ import {
 import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "../views/components/wiki-activity-rank.ts";
 import { DEFAULT_CULL_LABELS } from "../views/components/wiki-cull-view.ts";
-import { commitWikiChange } from "../../wiki/commit.ts";
+import { commitWikiChange, pageHasUncommittedChanges } from "../../wiki/commit.ts";
 import { sha256, todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { capabilitiesForConnectorType } from "../../ai/connector-capabilities.ts";
@@ -2702,7 +2710,16 @@ export function registerWikiToolRoutes(
     if (current === null) return c.json({ error: `${target.relPath} cannot be read` }, 409);
     const owningBot = entry.source === "bot" ? discoverAllBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase()) : undefined;
     const push = owningBot?.wikiAutoCommit?.push ?? true;
+    // The written page's linking passages' keys under its current hash, so its
+    // verdicts follow it to the new hash (a fix is not a substantive edit).
+    let snapshots: PassageKeySnapshot[] = [];
+    try {
+      snapshots = await snapshotPassageKeys(index, [{ relPath: target.relPath, content: current }]);
+    } catch (err) {
+      log.warn("Stale apply: passage keys not read for {page}: {error}", { page: target.relPath, error: err instanceof Error ? err.message : String(err) });
+    }
     let refusal: string | null = null;
+    let dirty: string | null = null;
     let line = 0;
     const result = await writeWikiPage({
       wikiDir: entry.root,
@@ -2715,6 +2732,14 @@ export function registerWikiToolRoutes(
       logLine: () => `line ${line}, stale after [[${fix.edit.link.replace(/\.mdx?$/i, "")}]], fixed via the wiki reader's Stale check`,
       commitMessage: `[stale-check] apply: ${target.relPath}`,
       now: () => Date.now(),
+      // The fix commit is not a page change, so it must not carry a hand edit:
+      // a page with uncommitted changes is refused, under the section.
+      proceed: async () => {
+        const has = await pageHasUncommittedChanges(entry.root, target.relPath);
+        if (has === false) return true;
+        dirty = has === null ? `${target.relPath}: git status failed, so its uncommitted edits are unknown` : `${target.relPath} has uncommitted edits — commit them first`;
+        return false;
+      },
       transform: (raw) => {
         const placed = placeStaleEdit(raw, fix.edit, index);
         if (!placed.ok) {
@@ -2733,12 +2758,18 @@ export function registerWikiToolRoutes(
     if (result.outcome === "forbidden") return c.json({ error: result.reason, readonly: true }, 403);
     if (result.outcome === "stale") return c.json({ error: result.reason, stale: true }, 409);
     if (result.outcome === "locked") return c.json({ error: result.reason, locked: true }, 409);
+    if (dirty) return c.json({ error: dirty, dirty: true }, 409);
     if (refusal) return c.json({ error: refusal, refused: true }, 409);
     if (result.outcome !== "written") return c.json({ error: result.outcome === "error" ? result.reason : "nothing was written" }, 500);
     let fixedRows = 0;
     try {
-      const fresh = await getWikiIndex({ root: entry.root });
-      if (fresh) fixedRows = await writeFixedVerdicts({ wiki: entry.name, index: fresh, edits: [fix.edit] });
+      // Rebuilt AFTER the commit tail: the write's own refresh ran while the
+      // page was still uncommitted, which reads it as changed by its mtime.
+      const fresh = await getWikiIndex({ root: entry.root, refresh: true });
+      if (fresh) {
+        fixedRows = await writeFixedVerdicts({ wiki: entry.name, index: fresh, edits: [fix.edit] });
+        await carryPassageVerdicts({ wiki: entry.name, index: fresh, snapshots });
+      }
     } catch (err) {
       log.warn("Stale apply: the fixed verdict was not written for {page}: {error}", { page: target.relPath, error: err instanceof Error ? err.message : String(err) });
     }

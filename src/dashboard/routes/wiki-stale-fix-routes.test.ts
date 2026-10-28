@@ -93,13 +93,38 @@ describe("the Stale check's fix routes", () => {
     __setStaleProposalStoreForTest(proposals);
   }
 
-  /** Seed a model `stale` verdict with `edit` for a passage on hub.md, under the server's key. */
-  async function seedPassage(linking: string, edit: { old: string; new: string; home?: string }): Promise<void> {
+  /** Seed a model `stale` verdict with `edit` for a passage on `changed` (hub.md), under the server's key. */
+  async function seedPassage(linking: string, edit: { old: string; new: string; home?: string }, changed = "hub.md"): Promise<void> {
     const index = (await getWikiIndex({ root }))!;
-    const buckets = (await linkingBuckets(index, "hub.md"))!;
+    const buckets = (await linkingBuckets(index, changed))!;
     const l = buckets.linking.find((x) => x.relPath === linking)!;
-    const hash = (await changedHashOf(index, "hub.md"))!;
-    await verdicts.upsert({ wiki: "fixwiki", kind: "passage", page: linking, keyHash: passageVerdictKey(index, "hub.md", hash, l), verdict: "stale", reason: `${linking} is out of date`, edit, checkedBy: "model:e2e" });
+    const hash = (await changedHashOf(index, changed))!;
+    await verdicts.upsert({ wiki: "fixwiki", kind: "passage", page: linking, keyHash: passageVerdictKey(index, changed, hash, l), verdict: "stale", reason: `${linking} is out of date`, edit, checkedBy: "model:e2e" });
+  }
+
+  /** The subject and files of the newest commit. */
+  async function headCommit(): Promise<{ subject: string; files: string[]; count: number }> {
+    const run = async (...args: string[]) => {
+      const proc = Bun.spawn(["git", "-C", root, ...args], { stdout: "pipe", stderr: "pipe" });
+      return (await new Response(proc.stdout).text()).trim();
+    };
+    return {
+      subject: await run("log", "-1", "--format=%s"),
+      files: (await run("show", "--name-only", "--format=", "HEAD")).split("\n").filter(Boolean),
+      count: Number(await run("rev-list", "--count", "HEAD")),
+    };
+  }
+
+  /** A mutual pair beside the hub: xpage changed 5 days ago, ypage (30 days)
+   *  links back to it with a dated claim, so ypage is To check for xpage. */
+  async function seedPair(): Promise<void> {
+    await write("pair/xpage.md", page("X", "X first."));
+    await write("pair/ypage.md", page("Y", "Since [[xpage]] landed on 23.05 the pair is draft."));
+    await git(root, Date.now() - 30 * DAY, "add", "-A");
+    await git(root, Date.now() - 30 * DAY, "commit", "-q", "-m", "pair seed");
+    await write("pair/xpage.md", page("X", "X moved on 18.06; [[ypage]] was updated on 2.06."));
+    await git(root, Date.now() - 5 * DAY, "commit", "-q", "-am", "x moves");
+    __resetWikiCacheForTest();
   }
 
   async function seedHit(edit: { old: string; new: string; home?: string }): Promise<void> {
@@ -194,10 +219,76 @@ describe("the Stale check's fix routes", () => {
     expect((await get("wiki=fixwiki&page=hub.md")).buckets.counts.toCheck).toBe(3);
   });
 
+  test("a Stale check fix commit is not a page change: the wiki-wide total drops after an Apply on a mutual link", async () => {
+    await seedWiki();
+    await seedPair();
+    await seedPassage("pair/ypage.md", { old: "the pair is draft", new: "the pair is shipped" }, "pair/xpage.md");
+    const before = await get("wiki=fixwiki");
+    expect(before.totals.toCheck).toBe(4);
+    const res = await post("apply", { page: "pair/xpage.md", kind: "passage", linking: "pair/ypage.md", old: "the pair is draft" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ committed: true, fixed: 1 });
+    expect((await headCommit()).subject).toBe("[stale-check] apply: pair/ypage.md");
+    const after = await get("wiki=fixwiki");
+    // ypage's fix commit does not make it a changed page, so xpage is not To check for it.
+    expect(after.totals.toCheck).toBe(3);
+    expect((after.pages as Record<string, any>[]).find((r) => r.relPath === "pair/ypage.md")).toBeUndefined();
+    expect((after.pages as Record<string, any>[]).find((r) => r.relPath === "pair/xpage.md")).toMatchObject({ toCheck: 0 });
+  });
+
+  test("a status-line fix leaves the changed page's last change where it was", async () => {
+    await seedWiki();
+    await seedHit({ old: "is in-flight, two PRs open", new: "is shipped" });
+    const before = hubRow(await get("wiki=fixwiki")).lastChangeMs;
+    expect((await post("apply", { kind: "status-line", target: "plans/p.md", line: 5, old: "is in-flight, two PRs open" })).status).toBe(200);
+    expect(hubRow(await get("wiki=fixwiki")).lastChangeMs).toBe(before);
+  });
+
+  test("a fix to the changed page carries its linking pages' verdicts: `fixed` keeps a page out, drafts stay sendable", async () => {
+    await seedWiki();
+    await seedHit({ old: "is in-flight, two PRs open", new: "is shipped" });
+    await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
+    await seedPassage("notes/b.md", { old: "the pin is draft", new: "the pin is shipped" });
+    await seedPassage("notes/c.md", { old: "was set on 3.05", new: "was set on 18.06" });
+    expect((await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" })).status).toBe(200);
+    expect(hubRow(await get("wiki=fixwiki")).toCheck).toBe(2);
+    // The fix commit re-dated 8 days back, as the finder's repro did.
+    await git(root, Date.now() - 8 * DAY, "commit", "-q", "--amend", "--no-edit", "--reset-author");
+    __resetWikiCacheForTest();
+    // The hub's own status line is fixed: its content hash moves.
+    expect((await post("apply", { kind: "status-line", target: "plans/p.md", line: 5, old: "is in-flight, two PRs open" })).status).toBe(200);
+    const report = await get("wiki=fixwiki&page=hub.md");
+    expect(report.buckets.counts.toCheck).toBe(2);
+    expect(hubRow(await get("wiki=fixwiki")).toCheck).toBe(2);
+    const byRel = (rel: string) => report.buckets.linking.find((l: Record<string, any>) => l.relPath === rel);
+    expect(byRel("notes/a.md")).toMatchObject({ verdict: { verdict: "fixed" } });
+    expect(byRel("notes/b.md")).toMatchObject({ bucket: "toCheck", verdict: { verdict: "stale", edit: { old: "the pin is draft" } } });
+    // The carried rows keep who checked them.
+    expect([...verdicts.rows.values()].filter((r) => r.page === "notes/b.md").map((r) => r.checkedBy)).toEqual(["model:e2e", "model:e2e"]);
+    const sent = await post("send", { kind: "passage", linking: "notes/b.md", old: "the pin is draft" });
+    expect(sent.status).toBe(200);
+  });
+
+  test("Apply refuses a page with uncommitted edits, so the fix commit cannot carry them", async () => {
+    await seedWiki();
+    await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
+    const dirty = A_TEXT.replace("---\n\n", "---\n\nA hand edit.\nAnother one.\n\n");
+    await write("notes/a.md", dirty);
+    const commitsBefore = (await headCommit()).count;
+    const res = await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "notes/a.md has uncommitted edits — commit them first", dirty: true });
+    expect(await read("notes/a.md")).toBe(dirty);
+    expect((await headCommit()).count).toBe(commitsBefore);
+    await expect(read("log.md")).rejects.toThrow();
+  });
+
   test("a line shift between the draft and the apply still lands on the right line", async () => {
     await seedWiki();
     await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
     await write("notes/a.md", A_TEXT.replace("The pin", "A new first line.\n\nThe pin"));
+    // Committed: Apply refuses a page with uncommitted edits.
+    await git(root, Date.now() - 20 * DAY, "commit", "-q", "-am", "a: a new first line");
     const res = await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" });
     expect(res.status).toBe(200);
     expect((await res.json()).line).toBe(7);

@@ -20,7 +20,7 @@ import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
 import { applyWikiProposal, draftTitle, isMechanicalKind, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
-import { commitWikiChange } from "../../wiki/commit.ts";
+import { commitWikiChange, pageHasUncommittedChanges } from "../../wiki/commit.ts";
 import {
   approveWikiProposal,
   rejectWikiProposal,
@@ -50,7 +50,7 @@ import {
 } from "../../gardener/lint-proposals.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
 import { lintFindingPathOf } from "../../gardener/lint-markers.ts";
-import { keptAsWritten, writeFixedVerdicts } from "../../wiki/stale-fix-verdicts.ts";
+import { carryPassageVerdicts, keptAsWritten, snapshotPassageKeys, writeFixedVerdicts, type PassageKeySnapshot } from "../../wiki/stale-fix-verdicts.ts";
 import { invalidateSummariesStatsCache } from "./summaries-routes.ts";
 import { notifySummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
@@ -391,6 +391,7 @@ function applyDepsFor(
     },
     reindex: triggerReindex,
     commit: (paths, message) => commitWikiChange(wikiDir, paths, message, { push }),
+    hasUncommittedChanges: (relPath) => pageHasUncommittedChanges(wikiDir, relPath),
   };
 }
 
@@ -3078,6 +3079,9 @@ export function registerWikiGardenerRoutes(
     }
 
     const deps = applyDepsForWiki(wikiEntry, bot);
+    // A Stale check group: the written pages' linking passage keys before the
+    // write, so their verdicts follow the new content hashes after it.
+    const snapshots = await staleCheckSnapshots(wikiEntry, rows);
     const result = await applyWikiProposalGroup(rows, deps);
 
     const { actions, applied, noop } = groupApplyActions(rows, result);
@@ -3115,7 +3119,7 @@ export function registerWikiGardenerRoutes(
     log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
     // D29: a Stale check Accept writes a `fixed` verdict on each written
     // linking page's new passage, on the index the apply refreshed.
-    const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied);
+    const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots);
     return c.json({ outcome: "applied", applied, noop, skipped, ...(fixed !== null ? { fixed } : {}) });
   });
 
@@ -3197,16 +3201,47 @@ export function registerWikiGardenerRoutes(
   }
 }
 
+/** The passage keys a Stale check group's pages carry before the write
+ *  (`snapshotPassageKeys`), read off disk; empty for another kind. Best effort. */
+async function staleCheckSnapshots(entry: WikiRegistryEntry, rows: readonly WikiProposal[]): Promise<PassageKeySnapshot[]> {
+  const stale = rows.filter((r) => r.kind === "stale-check");
+  if (!stale.length) return [];
+  try {
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return [];
+    const pages: { relPath: string; content: string }[] = [];
+    for (const r of stale) {
+      const content = await readFileOrNull(path.join(entry.root, r.targetPath));
+      if (content !== null) pages.push({ relPath: r.targetPath, content });
+    }
+    return await snapshotPassageKeys(index, pages);
+  } catch (err) {
+    log.warn("Stale check accept: passage keys not read for {wiki}: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
+    return [];
+  }
+}
+
 /** D29: the `fixed` verdicts a Stale check Accept writes, or null for
- *  another kind. Best effort: a failed write is logged, never a failed Accept. */
-async function staleCheckFixedVerdicts(entry: WikiRegistryEntry, rows: readonly WikiProposal[], applied: readonly string[]): Promise<number | null> {
+ *  another kind, then the carry of the written pages' linking verdicts. Best
+ *  effort: a failed write is logged, never a failed Accept. */
+async function staleCheckFixedVerdicts(
+  entry: WikiRegistryEntry,
+  rows: readonly WikiProposal[],
+  applied: readonly string[],
+  snapshots: readonly PassageKeySnapshot[],
+): Promise<number | null> {
   const written = rows.filter((r) => r.kind === "stale-check" && applied.includes(r.targetPath));
   if (!rows.some((r) => r.kind === "stale-check")) return null;
   if (!written.length) return 0;
   try {
-    const index = await getWikiIndex({ root: entry.root });
+    // Rebuilt AFTER the commit tail: the apply's own refresh ran while the
+    // pages were still uncommitted, which reads them as changed by mtime.
+    const index = await getWikiIndex({ root: entry.root, refresh: true });
     if (!index) return 0;
-    return await writeFixedVerdicts({ wiki: entry.name, index, edits: written.flatMap((r) => r.staleMeta?.edits ?? []) });
+    const n = await writeFixedVerdicts({ wiki: entry.name, index, edits: written.flatMap((r) => r.staleMeta?.edits ?? []) });
+    const writtenPaths = new Set(written.map((r) => r.targetPath));
+    await carryPassageVerdicts({ wiki: entry.name, index, snapshots: snapshots.filter((s) => writtenPaths.has(s.page)) });
+    return n;
   } catch (err) {
     log.warn("Stale check accept: fixed verdicts not written for {wiki}: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
     return 0;

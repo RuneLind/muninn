@@ -612,6 +612,28 @@ export function linkingBuckets(
   return p;
 }
 
+/**
+ * Every linking page of `relPath` with its passages on it, read as the
+ * buckets read them, whether or not `relPath` is a changed page (and under
+ * any `asOf`): what a verdict carry across a Stale check fix reads
+ * (`carryPassageVerdicts`). Reserved pages are never changed pages, so none.
+ */
+export async function linkingPassagesOf(
+  index: WikiIndex,
+  relPath: string,
+  readFile: StaleReadFile = defaultReadFile,
+): Promise<Pick<LinkingPage, "relPath" | "passages">[]> {
+  const page = index.resolveRelPath(relPath);
+  if (!page || isReservedBasename(page.relPath)) return [];
+  const out: Pick<LinkingPage, "relPath" | "passages">[] = [];
+  for (const from of linkingPagesOf(index, normalizeRelPath(page.relPath))) {
+    const content = await readFile(path.join(index.root, from.relPath));
+    if (content === null) continue;
+    out.push({ relPath: from.relPath, passages: linkPassagesIn(content, from.relPath, page.relPath, index) });
+  }
+  return out;
+}
+
 /** The changed page behind a bucket request, or null when it is none. */
 async function changedPageOf(index: WikiIndex, relPath: string, nowMs: number, asOfMs: number | undefined) {
   const page = index.resolveRelPath(relPath);

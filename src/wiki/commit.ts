@@ -716,6 +716,23 @@ export async function listWikiSubtreeDirty(
   return { dirty, deletions, trackedModified };
 }
 
+/**
+ * Does one wiki page have uncommitted changes (modified, staged, untracked or
+ * deleted)? `false` outside a git repo — nothing is committed there, so there
+ * is nothing to hide — and `null` when `git status` fails. A Stale check write
+ * asks this inside the write section and refuses a dirty page: its fix commit
+ * is not a page change (`STALE_CHECK_COMMIT_PREFIX`), so committing a hand
+ * edit under it would hide that edit from the last-change rule.
+ */
+export async function pageHasUncommittedChanges(wikiDir: string, relPath: string): Promise<boolean | null> {
+  const top = await gitToplevel(wikiDir);
+  if (!top) return false;
+  const canonicalWiki = await realpath(wikiDir).catch(() => wikiDir);
+  const r = await git(top, [...STATUS_READONLY_ARGS, "--porcelain", "-z", "-uall", "--", path.join(canonicalWiki, relPath)], { raw: true });
+  if (r.code !== 0) return null;
+  return r.stdout.length > 0;
+}
+
 /** The dirty-state snapshot of a wiki's repo for the `/wiki` Index-card badge. */
 export interface WikiDirtyStat {
   /** Count of dirty files (tracked-modified + untracked + deleted) in the wiki

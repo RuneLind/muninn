@@ -42,7 +42,8 @@ import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 import { linkingBuckets } from "../../wiki/stale.ts";
 import { __setStaleVerdictStoreForTest, changedHashOf, memoryStaleVerdictStore, passageVerdictKey } from "../../wiki/stale-confirm.ts";
-import { sendStaleFix } from "../../gardener/stale-proposals.ts";
+import { __setStaleProposalStoreForTest, sendStaleFix } from "../../gardener/stale-proposals.ts";
+import { registerWikiRoutes } from "./wiki-routes.ts";
 import { memoryStaleProposalStore } from "../../test/stale-proposal-store.ts";
 import type { WikiProposal } from "../../db/wiki-proposals.ts";
 
@@ -3795,6 +3796,97 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     expect(log.split("## [").length - 1).toBe(1);
     expect(log).toContain("update | Stale check: hub.md\n- via stale-check, 2 pages: notes/a.md, notes/b.md");
     expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed").map((r) => r.page).sort()).toEqual(["notes/a.md", "notes/b.md"]);
+  });
+
+  /** One-row card for `changed` with `linking`'s edit, sent as the tab sends it. */
+  async function oneCard(changed: string, linking: string, old: string, text: string): Promise<WikiProposal[]> {
+    const index = (await getWikiIndex({ root }))!;
+    const l = (await linkingBuckets(index, changed))!.linking.find((x) => x.relPath === linking)!;
+    const hash = (await changedHashOf(index, changed))!;
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: linking, keyHash: passageVerdictKey(index, changed, hash, l), verdict: "stale", reason: "moved", edit: { old, new: text }, checkedBy: "model:e2e" });
+    const proposals = memoryStaleProposalStore();
+    const out = await sendStaleFix({ wiki: "stalegate", wikiDir: root, index, changed, edit: { kind: "passage", page: linking, link: changed, old, text, variant: "new" }, store: proposals });
+    expect(out.outcome).toBe("sent");
+    return proposals.rows.filter((r) => r.status === "draft");
+  }
+
+  /** The wiki routes beside the gate, for the Stale check's own counts. */
+  async function staleSummary(): Promise<Record<string, any>> {
+    return (await (await app.request("/api/wiki/stale?wiki=stalegate")).json()) as Record<string, any>;
+  }
+  const withWikiRoutes = () => {
+    __setStaleProposalStoreForTest(memoryStaleProposalStore());
+    registerWikiRoutes(app, { knowledgeApiUrl: "http://127.0.0.1:1" } as Parameters<typeof registerWikiRoutes>[1]);
+  };
+
+  test("an Accept's fix commit is not a page change: the wiki-wide total drops on a mutual link", async () => {
+    try {
+      await Bun.write(path.join(root, "pair/xpage.md"), page("X", "X first."));
+      await Bun.write(path.join(root, "pair/ypage.md"), page("Y", "Since [[xpage]] landed on 23.05 the pair is draft."));
+      await git(Date.now() - 30 * DAY, "add", "-A");
+      await git(Date.now() - 30 * DAY, "commit", "-q", "-m", "pair seed");
+      await Bun.write(path.join(root, "pair/xpage.md"), page("X", "X moved on 18.06; [[ypage]] was updated on 2.06."));
+      await git(Date.now() - 5 * DAY, "commit", "-q", "-am", "x moves");
+      __resetWikiCacheForTest();
+      const s = store(await oneCard("pair/xpage.md", "pair/ypage.md", "the pair is draft", "the pair is shipped"));
+      registerWikiGardenerRoutes(app, s.deps);
+      withWikiRoutes();
+      expect((await staleSummary()).totals.toCheck).toBe(3);
+      const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:pair/xpage.md:1")}/approve?wiki=stalegate`, JSON_POST);
+      expect(await res.json()).toMatchObject({ outcome: "applied", applied: ["pair/ypage.md"], fixed: 1 });
+      const after = await staleSummary();
+      expect(after.totals.toCheck).toBe(2);
+      expect((after.pages as Record<string, any>[]).find((r) => r.relPath === "pair/ypage.md")).toBeUndefined();
+    } finally {
+      __setStaleProposalStoreForTest(null);
+    }
+  });
+
+  test("Accept refuses a row whose page has uncommitted edits: nothing written, the rows back to draft", async () => {
+    const dirty = A_TEXT.replace("---\n\n", "---\n\nA hand edit.\nAnother one.\n\n");
+    await Bun.write(path.join(root, "notes/a.md"), dirty);
+    __resetWikiCacheForTest();
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ outcome: "stopped", applied: [], stoppedAt: "notes/a.md", stoppedOutcome: "collision", error: "notes/a.md has uncommitted edits — commit them first" });
+    expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(dirty);
+    expect(await Bun.file(path.join(root, "notes/b.md")).text()).toBe(B_TEXT);
+    expect(s.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
+  });
+
+  test("Accept carries the verdicts on a written page's own linking passages to its new content hash", async () => {
+    // notes/a.md is a changed page too (6 days), with notes/r.md To check on it.
+    await Bun.write(path.join(root, "notes/r.md"), page("R", "The note [[a]] said 23.05 on 1.05."));
+    // notes/b.md links notes/a.md on the very line the card rewrites.
+    await Bun.write(path.join(root, "notes/b.md"), B_TEXT.replace("draft.", "draft, as [[a]] said on 1.05."));
+    await git(Date.now() - 30 * DAY, "add", "-A");
+    await git(Date.now() - 30 * DAY, "commit", "-q", "-m", "r");
+    await Bun.write(path.join(root, "notes/a.md"), A_TEXT.replace("23.05.", "23.05. See the log."));
+    await git(Date.now() - 6 * DAY, "commit", "-q", "-am", "a grows");
+    __resetWikiCacheForTest();
+    let index = (await getWikiIndex({ root }))!;
+    const r = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/r.md")!;
+    expect(r.bucket).toBe("toCheck");
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: "notes/r.md", keyHash: passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, r), verdict: "stale", reason: "a moved", edit: { old: "said 23.05", new: "said 18.06" }, checkedBy: "model:e2e" });
+    const b = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/b.md")!;
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: "notes/b.md", keyHash: passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, b), verdict: "true", reason: "Marked still true by a reader", edit: null, checkedBy: "reader" });
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(await res.json()).toMatchObject({ outcome: "applied", applied: ["notes/a.md", "notes/b.md"] });
+    __resetWikiCacheForTest();
+    index = (await getWikiIndex({ root }))!;
+    const rNow = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/r.md")!;
+    const key = passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, rNow);
+    const row = (await verdicts.get("stalegate", "passage", [key])).get(key);
+    expect(row).toMatchObject({ verdict: "stale", edit: { old: "said 23.05", new: "said 18.06" }, checkedBy: "model:e2e" });
+    // notes/b.md's passage on notes/a.md changed with the write: its row stays behind.
+    const bNow = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/b.md")!;
+    expect(bNow.passages.map((x) => x.text).join(" ")).toContain("shipped");
+    const bKey = passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, bNow);
+    expect((await verdicts.get("stalegate", "passage", [bKey])).has(bKey)).toBe(false);
   });
 
   test("Dismiss turns the card's edits into reader «still true» rows, «kept as written», and writes no page", async () => {

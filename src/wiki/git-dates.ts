@@ -93,6 +93,14 @@ export const GIT_DATES_TIMEOUT_MS = 5_000;
  */
 export const SWEEP_THRESHOLD = 10;
 
+/**
+ * The subject prefix of a Stale check fix commit (Apply: `[stale-check] apply:
+ * <page>`; Accept: `[stale-check] fix: …`). Such a commit is not a page change
+ * (plan muninn-wiki-drift-check, D29): it contributes no update date and no
+ * touch, as a sweep does, so a fix never makes its page a changed page.
+ */
+export const STALE_CHECK_COMMIT_PREFIX = "[stale-check] ";
+
 /** The three durable per-page date signals a wiki's git history can supply. All
  *  maps/sets are keyed by WIKI-relative posix path, exactly as `WikiPageMeta.relPath`
  *  spells it. */
@@ -175,9 +183,11 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
   }
 }
 
-/** A commit line: `%H %at`. The bare-integer form (`%at` alone) is still read, so
- *  a hash-less log parses as before — it just records no {@link TouchRecord}s. */
-const COMMIT_LINE_RE = /^(?:([0-9a-f]{7,64}) )?(\d+)$/;
+/** A commit line: `%H %at`, then a TAB and the subject (`%x09%s`). The
+ *  bare-integer form (`%at` alone) and a subject-less line are still read, so a
+ *  hash-less log parses as before — it just records no {@link TouchRecord}s.
+ *  The TAB cannot open a file entry: those start with a capital status letter. */
+const COMMIT_LINE_RE = /^(?:([0-9a-f]{7,64}) )?(\d+)(?:\t(.*))?$/;
 
 /** One parsed `--name-status` file entry. `from` is set only for renames/copies. */
 interface FileEntry {
@@ -206,7 +216,7 @@ export interface TouchRecord {
  * spawn, no fs) so the rename/sweep semantics are unit-testable against literal git
  * output.
  *
- * Expects `--reverse --name-status -M --format=%H %at` — oldest commit first, which is
+ * Expects `--reverse --name-status -M --format=%H %at%x09%s` — oldest commit first, which is
  * what makes both maps single-pass: a rename's source is always already recorded
  * when the rename is read, and "last write wins" on `touched` lands on the newest
  * qualifying commit without a second sort.
@@ -250,10 +260,11 @@ export function parseGitLog(
   };
 
   /** Apply one commit's entries. Sweep-ness is a property of the whole commit, so
-   *  entries are buffered until the commit is complete before any is applied. */
-  const flush = (ts: number, commit: string, entries: FileEntry[]) => {
+   *  entries are buffered until the commit is complete before any is applied. A
+   *  Stale check fix commit is skipped like a sweep ({@link STALE_CHECK_COMMIT_PREFIX}). */
+  const flush = (ts: number, commit: string, entries: FileEntry[], subject: string) => {
     if (!ts || entries.length === 0) return;
-    const isSweep = entries.length >= sweepThreshold;
+    const isSweep = entries.length >= sweepThreshold || subject.startsWith(STALE_CHECK_COMMIT_PREFIX);
     for (const e of entries) {
       if (e.status === "R" && e.from !== undefined) {
         // A RENAME moves a page: the destination IS the source, so it inherits both
@@ -299,6 +310,7 @@ export function parseGitLog(
 
   let ts = 0;
   let commit = "";
+  let subject = "";
   let entries: FileEntry[] = [];
   for (const line of stdout.split("\n")) {
     if (!line) continue;
@@ -310,10 +322,11 @@ export function parseGitLog(
       // a commit.
       const c = COMMIT_LINE_RE.exec(line);
       if (!c) continue;
-      flush(ts, commit, entries);
+      flush(ts, commit, entries, subject);
       entries = [];
       commit = c[1] ?? "";
       ts = Number(c[2]) * 1000;
+      subject = c[3] ?? "";
       continue;
     }
     if (!ts) continue; // file entry before any stamp — malformed, ignore
@@ -331,7 +344,7 @@ export function parseGitLog(
     }
     entries.push({ status, path: rest });
   }
-  flush(ts, commit, entries); // the last commit has no following stamp to trigger its flush
+  flush(ts, commit, entries, subject); // the last commit has no following stamp to trigger its flush
 
   return { created, touched, touches };
 }
@@ -874,7 +887,8 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     // `-M90%` would therefore mis-date 6 real pages to prevent 1 hypothetical.
     "-M",
     "--diff-merges=first-parent",
-    "--format=%H %at",
+    // The subject after a TAB: a Stale check fix commit is skipped by it.
+    "--format=%H %at%x09%s",
   ];
   if (rel) args.push("--", rel);
 

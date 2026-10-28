@@ -19,6 +19,11 @@
  *      same number.
  *   6. **Dismiss keeps the text as written**: the passage reads «Still true».
  *   7. **A read-only instance shows no Apply or Send (D25)**: the tab is gone.
+ *   8. **A fix commit is not a page change (D29)**: the hub links back to
+ *      notes/d.md, so a fix commit that dated its page would make the hub To
+ *      check for it; the wiki-wide total drops after Apply and Accept instead,
+ *      and after the hub's own status-line fix the fixed pages stay out only
+ *      because their `fixed` rows followed its new content hash.
  *
  * **What is stubbed and why.** No model is called: the verdict rows Check would
  * write are inserted under keys the server's own key functions derive (a
@@ -53,7 +58,9 @@ const DAY = 86_400_000;
 const HUB = "repos/hub.md";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
-const HUB_TEXT = page("Hub", "- [[p]] is in-flight, two PRs open\n\nThe pin moved to 18.06.");
+/** The hub links back to notes/d.md with a dated claim: a mutual link, so a
+ *  fix commit that counted as a page change would make the hub To check for d. */
+const HUB_TEXT = page("Hub", "- [[p]] is in-flight, two PRs open\n\nThe pin moved to 18.06. The [[d]] note was moved on 12.05.");
 /** notes/a.md is also one end of a lint 8.1 pair (two shared PRs with notes/e.md, no link). */
 const A_TEXT = page("A", "The pin in [[hub]] landed on 23.05. Shipped RuneLind/muninn#901 and RuneLind/muninn#902.", "status_date: 2026-09-20\n");
 const E_TEXT = page("E", "Done in RuneLind/muninn#901 and RuneLind/muninn#902.", "status_date: 2026-09-10\n");
@@ -151,8 +158,9 @@ test.beforeAll(async () => {
   git(["add", "-A"], now - 30 * DAY);
   git(["commit", "-q", "-m", "seed"], now - 30 * DAY);
   await write(HUB, HUB_TEXT);
-  git(["add", "-A"], now - DAY);
-  git(["commit", "-q", "-m", "hub: the pin moves"], now - DAY);
+  // 5 days: older than a fix made now by more than the 2-day margin.
+  git(["add", "-A"], now - 5 * DAY);
+  git(["commit", "-q", "-m", "hub: the pin moves"], now - 5 * DAY);
 
   const keys = serverKeys();
   expect(Object.keys(keys.passages).sort()).toEqual(["notes/a.md", "notes/b.md", "notes/c.md", "notes/d.md"]);
@@ -207,6 +215,11 @@ async function fixButton(p: Page, rel: string, action: "apply" | "send") {
   if (!(await fix.evaluate((d) => (d as HTMLDetailsElement).open))) await fix.locator("summary").click();
   return item.locator(`[data-stale-${action}][data-variant="new"]`);
 }
+/** The wiki-wide Stale check summary: its total To check, and the changed pages. */
+async function wikiTotals(): Promise<{ toCheck: number; changed: string[] }> {
+  const s = (await (await fetch(`${BASE}/api/wiki/stale?wiki=${WIKI}`)).json()) as { totals: { toCheck: number }; pages: { relPath: string; changed: boolean }[] };
+  return { toCheck: s.totals.toCheck, changed: s.pages.filter((r) => r.changed).map((r) => r.relPath).sort() };
+}
 const liveRows = async () =>
   (await sql!`SELECT group_key, target_path, status FROM wiki_proposals WHERE wiki_name = ${WIKI} AND kind = 'stale-check' ORDER BY group_key, target_path`).map((r) => [r.group_key, r.target_path, r.status]);
 
@@ -215,6 +228,7 @@ test("Apply on a linking page writes it, and the tab, the pill and the rail drop
   await expect(head(p)).toHaveText("⚠ 1 stale status line · 4 linking pages to check");
   await expect(pill(p)).toHaveText("⚠ 1 stale status line · 4 linking pages to check");
   await expect(railBadge(p)).toHaveText("⚠ 1 · 4");
+  expect(await wikiTotals()).toEqual({ toCheck: 4, changed: [HUB] });
   const applied = p.waitForResponse((r) => r.url().endsWith("/api/wiki/stale/apply"));
   await (await fixButton(p, "notes/d.md", "apply")).click();
   expect((await applied).status()).toBe(200);
@@ -225,6 +239,9 @@ test("Apply on a linking page writes it, and the tab, the pill and the rail drop
   expect(await read("log.md")).toContain("stale-check | D");
   // D29: the `fixed` row on the new passage.
   expect((await sql!`SELECT page FROM wiki_stale_verdicts WHERE wiki = ${WIKI} AND kind = 'fixed'`).map((r) => r.page)).toEqual(["notes/d.md"]);
+  // The fix commit is not a page change: d is no changed page, so the hub's
+  // link back to it is not To check, and the wiki-wide total drops too.
+  expect(await wikiTotals()).toEqual({ toCheck: 3, changed: [HUB] });
 });
 
 test("Send on two linking pages leaves ONE live Stale check card holding both, and ⧗ 2 shows on the pill and the rail", async ({ page: p }) => {
@@ -303,6 +320,7 @@ test("Accept writes both pages in one section with one log.md entry, keeps the d
   await p.goto(`${BASE}/wiki?wiki=${WIKI}&view=stale`);
   await expect(p.locator(`.wiki-stale-home-row[data-relpath="${HUB}"] .wiki-stale-home-counts`)).toHaveText(words);
   await expect(p.locator("#wikiStaleHome [data-stale-home-totals]")).toHaveText(`${words} on 1 page`);
+  expect(await wikiTotals()).toEqual({ toCheck: 1, changed: [HUB] });
 });
 
 test("Dismiss keeps the text as written; Apply on the status line drops the stale line", async ({ page: p }) => {
@@ -324,7 +342,10 @@ test("Dismiss keeps the text as written; Apply on the status line drops the stal
   const applied = p.waitForResponse((r) => r.url().endsWith("/api/wiki/stale/apply"));
   await hit.locator('[data-stale-apply][data-variant="new"]').click();
   expect((await applied).status()).toBe(200);
+  // The hub's content hash moved: a, b and d stay out of To check only
+  // because their `fixed` rows followed it (their fix commits date nothing).
   await expect(head(p)).toHaveText("⚠ 0 stale status lines · 1 linking page to check");
+  expect(await wikiTotals()).toEqual({ toCheck: 1, changed: [HUB] });
   await expect(p.locator(".wiki-article")).toContainText("is shipped");
   expect(await read(HUB)).toBe(HUB_TEXT.replace("is in-flight, two PRs open", "is shipped"));
 });

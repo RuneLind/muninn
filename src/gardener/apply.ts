@@ -130,6 +130,13 @@ export interface ApplyDeps {
    * target against the FULL registry, so the picker exclusion is not a guard.
    */
   isReadonlyRoot?: (root: string) => boolean;
+  /**
+   * Does the page have uncommitted changes? Read for `stale-check` rows only,
+   * inside the write section: their fix commit is not a page change, so a
+   * dirty page is refused (`collision`, back to draft) rather than having a
+   * hand edit committed under it. Absent ⇒ no check (tests without git).
+   */
+  hasUncommittedChanges?: (relPath: string) => Promise<boolean | null>;
 }
 
 /**
@@ -800,6 +807,13 @@ async function checkBeforeWrite(
     if (!placed || placed.dropped.length > 0 || placed.content !== finalContent) {
       const why = placed?.dropped[0]?.reason ?? (edits.length ? "the index is unavailable" : "the row carries no edits");
       return { step: "refuse", outcome: { outcome: "stale", reason: `the drafted edits no longer place on ${proposal.targetPath}: ${why}` } };
+    }
+    // The commit is `[stale-check] fix: …`, which is not a page change: it must
+    // not carry an uncommitted hand edit. Retryable once committed.
+    const dirty = deps.hasUncommittedChanges ? await deps.hasUncommittedChanges(proposal.targetPath) : false;
+    if (dirty !== false) {
+      const reason = dirty === null ? `${proposal.targetPath}: git status failed, so its uncommitted edits are unknown` : `${proposal.targetPath} has uncommitted edits — commit them first`;
+      return { step: "refuse", outcome: { outcome: "collision", reason } };
     }
   }
 

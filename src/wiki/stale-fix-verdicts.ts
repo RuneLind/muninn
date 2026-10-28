@@ -12,9 +12,21 @@
  *   that row; the GET routes count them out of To check.
  * - {@link keptAsWritten} (D20): a rejected Stale check card's edits become
  *   reader «still true» rows, «kept as written».
+ * - {@link snapshotPassageKeys} + {@link carryPassageVerdicts}: a fix is not a
+ *   substantive edit, so the verdicts on a written page's linking passages
+ *   follow its new content hash instead of being orphaned.
  */
-import { linkingBuckets, type LinkingPage } from "./stale.ts";
-import { changedHashOf, passageVerdictKey, staleVerdictStore, statusLineVerdictKey, type StaleVerdictStore } from "./stale-confirm.ts";
+import { linkingBuckets, linkingPassagesOf, type LinkingPage } from "./stale.ts";
+import {
+  changedHashOf,
+  changedPageContentHash,
+  passageKeyContext,
+  passageKeyHash,
+  passageVerdictKey,
+  staleVerdictStore,
+  statusLineVerdictKey,
+  type StaleVerdictStore,
+} from "./stale-confirm.ts";
 import type { StaleFixEdit, StaleFixKind, StaleFixVariant } from "./stale-fix.ts";
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
 import { READER_CHECKED_BY } from "../db/wiki-stale-verdicts.ts";
@@ -206,6 +218,84 @@ export async function keptAsWritten(opts: {
     for (const key of keyed) {
       if (rows.get(key)?.edit?.old !== e.old) continue;
       await store.upsert({ wiki: opts.wiki, kind: "status-line", page: e.page, keyHash: key, verdict: "true", reason: KEPT_REASON, edit: null, checkedBy: READER_CHECKED_BY });
+      n++;
+    }
+  }
+  return n;
+}
+
+/** One page a Stale check write is about to rewrite: its content hash and its
+ *  linking pages' passage keys, taken from the index and bytes before the write. */
+export interface PassageKeySnapshot {
+  page: string;
+  hash: string;
+  entries: { linking: string; passage: string; key: string }[];
+}
+
+/**
+ * Before a Stale check write (Apply, or Accept of a `stale-check` group): for
+ * each page it rewrites, the passage keys its linking pages carry with it as
+ * the changed page. `content` is the page's bytes the write's CAS holds. A
+ * page the index does not know snapshots nothing.
+ */
+export async function snapshotPassageKeys(index: WikiIndex, pages: readonly { relPath: string; content: string }[]): Promise<PassageKeySnapshot[]> {
+  const out: PassageKeySnapshot[] = [];
+  for (const { relPath, content } of pages) {
+    const meta = index.resolveRelPath(relPath);
+    if (!meta) continue;
+    const hash = changedPageContentHash(content);
+    const entries = (await linkingPassagesOf(index, meta.relPath)).map((l) => {
+      const ctx = passageKeyContext(index, meta.relPath, l);
+      return { linking: l.relPath, passage: ctx.passage, key: passageKeyHash(l.relPath, ctx.passage, hash, ctx) };
+    });
+    out.push({ page: meta.relPath, hash, entries });
+  }
+  return out;
+}
+
+/** The verdict kinds a carry copies: drafts, model and reader verdicts, «kept
+ *  as written» (all `passage`), and D29's `fixed` rows. */
+const CARRIED_KINDS = ["passage", "fixed"] as const;
+
+/**
+ * After the write, on the index built after its commit: each snapshotted
+ * page whose content hash moved has its linking passages' rows copied from
+ * the old key to the new one — only where the linking passage itself is
+ * unchanged and the new key holds no row of that kind yet. `checked_by` and
+ * the rest of the row are kept. Returns how many rows were copied. A hand
+ * edit outside muninn still changes the keys (D22); only a fix carries them.
+ */
+export async function carryPassageVerdicts(opts: {
+  wiki: string;
+  index: WikiIndex;
+  snapshots: readonly PassageKeySnapshot[];
+  store?: StaleVerdictStore;
+}): Promise<number> {
+  const store = opts.store ?? staleVerdictStore();
+  const pairs: { page: string; from: string; to: string }[] = [];
+  for (const snap of opts.snapshots) {
+    const hash = await changedHashOf(opts.index, snap.page);
+    if (hash === null || hash === snap.hash) continue;
+    const before = new Map(snap.entries.map((e) => [e.linking, e] as const));
+    for (const l of await linkingPassagesOf(opts.index, snap.page)) {
+      const old = before.get(l.relPath);
+      if (!old) continue;
+      const ctx = passageKeyContext(opts.index, snap.page, l);
+      if (ctx.passage !== old.passage) continue;
+      const to = passageKeyHash(l.relPath, ctx.passage, hash, ctx);
+      if (to !== old.key) pairs.push({ page: l.relPath, from: old.key, to });
+    }
+  }
+  if (!pairs.length) return 0;
+  let n = 0;
+  for (const kind of CARRIED_KINDS) {
+    const from = await store.get(opts.wiki, kind, pairs.map((p) => p.from));
+    if (!from.size) continue;
+    const taken = await store.get(opts.wiki, kind, pairs.map((p) => p.to));
+    for (const p of pairs) {
+      const row = from.get(p.from);
+      if (!row || taken.has(p.to)) continue;
+      await store.upsert({ wiki: opts.wiki, kind, page: p.page, keyHash: p.to, verdict: row.verdict, reason: row.reason, edit: row.edit, checkedBy: row.checkedBy });
       n++;
     }
   }
