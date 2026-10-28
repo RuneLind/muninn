@@ -31,6 +31,7 @@ import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig } from "../bot
 import type { MuninnProfile } from "../config.ts";
 import {
   getStaleVerdicts,
+  getStaleVerdictPages,
   READER_CHECKED_BY,
   upsertStaleVerdict,
   type StaleEdit,
@@ -147,9 +148,12 @@ export function linkingPassage(lp: Pick<LinkingPage, "passages">): string {
 export interface StaleVerdictStore {
   get(wiki: string, kind: StaleVerdictKind, keys: readonly string[]): Promise<Map<string, StaleVerdictRow>>;
   upsert(v: StaleVerdictInput): Promise<StaleVerdictRow>;
+  /** The pages with a row of `kind` (PR 3's `fixed` pre-check). A store
+   *  without it reads as none. */
+  pages?(wiki: string, kind: StaleVerdictKind): Promise<Set<string>>;
 }
 
-export const dbStaleVerdictStore: StaleVerdictStore = { get: getStaleVerdicts, upsert: upsertStaleVerdict };
+export const dbStaleVerdictStore: StaleVerdictStore = { get: getStaleVerdicts, upsert: upsertStaleVerdict, pages: getStaleVerdictPages };
 
 let activeStore: StaleVerdictStore = dbStaleVerdictStore;
 export const staleVerdictStore = (): StaleVerdictStore => activeStore;
@@ -170,6 +174,9 @@ export function memoryStaleVerdictStore(): StaleVerdictStore & { rows: Map<strin
         if (r) out.set(key, r);
       }
       return out;
+    },
+    async pages(wiki, kind) {
+      return new Set([...rows.values()].filter((r) => r.wiki === wiki && r.kind === kind).map((r) => r.page));
     },
     async upsert(v) {
       const prev = rows.get(k(v.wiki, v.kind, v.keyHash));

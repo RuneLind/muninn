@@ -43,6 +43,7 @@ import {
 } from "../wiki/readonly.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { lintFindingPathOf, lintSeederOf } from "./lint-markers.ts";
+import { applyStaleEdits } from "../wiki/stale-fix.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "apply");
@@ -163,9 +164,14 @@ export function listingDrift(row: WikiProposal, current: string | null, index: W
   return judged.step === "refuse" ? judged.outcome.reason : null;
 }
 
+/** A MECHANICAL kind: the draft is the page's own bytes with an edit applied
+ *  (a lint fix, a Stale check fix), never model output to contain. */
+export const isMechanicalKind = (kind: WikiProposal["kind"]) => kind === "lint" || kind === "stale-check";
+
 export function commitMessageFor(proposal: WikiProposal): string {
   if (proposal.kind === "synthesis") return `[consolidation] apply: ${proposal.targetPath}`;
   if (proposal.kind === "lint") return `[lint] fix: ${proposal.targetPath}`;
+  if (proposal.kind === "stale-check") return `[stale-check] fix: ${proposal.targetPath}`;
   const writer = proposal.kind === "source" ? "source-drafter" : "gardener";
   const verb = proposal.kind === "source" ? "draft" : "apply";
   return `[${writer}] ${verb}: ${proposal.targetPath}`;
@@ -177,8 +183,9 @@ export function commitMessageFor(proposal: WikiProposal): string {
  *  `pages` is the number of PAGES in the commit — the staged path set minus the
  *  wiki-global `log.md` — never the number of rows the apply REACHED: a group
  *  that stopped at its second row staged one page and said "3 pages". */
-export function groupCommitMessageFor(groupKey: string, pages: number): string {
-  return `[lint] fix: ${pages} page${pages === 1 ? "" : "s"} (${groupKey})`;
+export function groupCommitMessageFor(groupKey: string, pages: number, kind: WikiProposal["kind"] = "lint"): string {
+  const tag = kind === "stale-check" ? "stale-check" : "lint";
+  return `[${tag}] fix: ${pages} page${pages === 1 ? "" : "s"} (${groupKey})`;
 }
 
 /** The wiki-global log file every apply appends to. Named once, because the
@@ -194,6 +201,8 @@ export function logWriterFor(proposal: WikiProposal): string {
   // watcher, or the gate's own `Propose fixes` button — because the two are the
   // reader's only way to tell an unattended proposal from one they asked for.
   if (proposal.kind === "lint") return lintSeederOf(proposal.lintMeta);
+  // A Stale check row is sent by a reader from the STALE tab, never seeded.
+  if (proposal.kind === "stale-check") return "stale-check";
   return "wiki-gardener";
 }
 
@@ -236,6 +245,9 @@ export function reindexCollectionFor(targetPath: string): "wiki" | "wiki-life" {
  *  falling back to the TARGET PATH on a `lint` row and to the topic key on every
  *  other kind. */
 export function draftTitle(proposal: WikiProposal): string {
+  // A Stale check row's draft is a LINKING page, whose title says nothing
+  // about the card: the card and the log name the changed page.
+  if (proposal.kind === "stale-check") return `Stale check: ${proposal.staleMeta?.changed ?? proposal.targetPath}`;
   const fm = parseFrontmatter(proposal.draft);
   const title = Array.isArray(fm.title) ? fm.title[0] : fm.title;
   if (title && title.trim()) return title.trim();
@@ -483,7 +495,7 @@ export async function applyWikiProposalGroup(
     const paths = [...new Set(tail.paths)];
     const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
     try {
-      await deps.commit(paths, groupCommitMessageFor(groupKey, pages));
+      await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
     } catch (err) {
       log.warn("Wiki-gardener group apply: commit failed for {group}: {error}", {
         group: groupKey,
@@ -516,6 +528,8 @@ async function writeGroupLogEntry(rows: readonly WikiProposal[], deps: ApplyDeps
   const findingPath = lintFindingPathOf(meta);
   const head = rows.find((r) => r.targetPath === findingPath) ?? rows[0]!;
   const paths = rows.map((r) => r.targetPath);
+  // A Stale check group's head is its changed page (`draftTitle`), which no
+  // row writes; the entry names every page the group wrote.
   try {
     const entry =
       `## [${todayOslo(deps.now())}] ${head.mode} | ${draftTitle(head)}\n` +
@@ -623,7 +637,7 @@ function containForWrite(proposal: WikiProposal, index: WikiIndex | null): Conta
   //
   //     The self path is the target path: in update mode it IS the indexed
   //     page's relPath (step 1a found it by equality).
-  const mechanical = proposal.kind === "lint";
+  const mechanical = isMechanicalKind(proposal.kind);
   const dealiased = mechanical
     ? { draft: proposal.draft, stripped: [] as string[] }
     : stripOwnedAliases(proposal.draft, { index, selfRelPath: proposal.targetPath });
@@ -773,6 +787,20 @@ async function checkBeforeWrite(
       });
     }
     return { step: "noop", absTarget };
+  }
+
+  // 2b'. A Stale check row: every drafted edit is placed again on the live
+  //      bytes under the CAS (`applyStaleEdits` recomputes the windows), and
+  //      the result must be the draft the reviewer saw. The CAS above makes
+  //      them the bytes the draft came from, so this refuses only a draft that
+  //      no longer follows from its own edits.
+  if (proposal.kind === "stale-check") {
+    const edits = proposal.staleMeta?.edits ?? [];
+    const placed = index && current !== null && edits.length ? applyStaleEdits(current, edits, index) : null;
+    if (!placed || placed.dropped.length > 0 || placed.content !== finalContent) {
+      const why = placed?.dropped[0]?.reason ?? (edits.length ? "the index is unavailable" : "the row carries no edits");
+      return { step: "refuse", outcome: { outcome: "stale", reason: `the drafted edits no longer place on ${proposal.targetPath}: ${why}` } };
+    }
   }
 
   // 2c. Stem collision, re-checked INSIDE the write queue. The approve route

@@ -566,6 +566,17 @@ function linkPassages(parsed: ParsedPage, fromRelPath: string, targetKey: string
   return out;
 }
 
+/** A linking page's passages on `targetRelPath`, read from `content` as the
+ *  buckets read them. PR 3's Apply, Send and Accept recompute the windows on
+ *  the live file under the write queue through this. */
+export function linkPassagesIn(content: string, fromRelPath: string, targetRelPath: string, index: Pick<WikiIndex, "resolve">): LinkPassage[] {
+  return linkPassages(stateExemptLines(content), fromRelPath, normalizeRelPath(targetRelPath), index).map(({ line, text, claim }) => ({
+    line,
+    text,
+    ...(claim ? { claim } : {}),
+  }));
+}
+
 export type StaleReadFile = (absPath: string) => Promise<string | null>;
 
 const defaultReadFile: StaleReadFile = async (abs) => {

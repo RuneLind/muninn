@@ -25,6 +25,10 @@ import {
   rejectWikiProposalGroup,
   listLintGroupRowsByWiki,
   markLintGroupStale,
+  listLiveGroupedRows,
+  listLiveStaleCheckRows,
+  listStaleCheckRowsByChanged,
+  supersedeStaleCheckGroup,
   type InsertWikiProposalParams,
 } from "./wiki-proposals.ts";
 
@@ -465,8 +469,8 @@ describe("lint groups", () => {
     const rows = await listLintGroupRowsByWiki("lintwiki");
     // A rejected group's key is still there, which is what makes Dismiss
     // durable — and the PAGE is there too, which is what the claim rule reads.
-    expect(rows).toContainEqual({ groupKey: GROUP, targetPath: "plans/a.mdx", status: "rejected" });
-    expect(rows).toContainEqual({ groupKey: OTHER, targetPath: "plans/z.mdx", status: "draft" });
+    expect(rows).toContainEqual({ groupKey: GROUP, targetPath: "plans/a.mdx", status: "rejected", kind: "lint" });
+    expect(rows).toContainEqual({ groupKey: OTHER, targetPath: "plans/z.mdx", status: "draft", kind: "lint" });
   });
 
   test("the self-heal stales a group's DRAFTS and leaves its other rows alone", async () => {
@@ -506,5 +510,68 @@ describe("lint groups", () => {
     expect(await insertWikiProposal(lintRow("plans/b.mdx"))).not.toBeNull();
     // …and re-seeding the same page IS refused by that index.
     expect(await insertWikiProposal(lintRow("plans/a.mdx"))).toBeNull();
+  });
+});
+
+describe("Stale check groups (D20)", () => {
+  const W = "stalewiki";
+  const row = (page: string, over: Partial<InsertWikiProposalParams> = {}): Omit<InsertWikiProposalParams, "groupKey"> => ({
+    botName: W,
+    wikiName: W,
+    topicKey: `stale-check:hub.md:${page}:abc`,
+    kind: "stale-check",
+    mode: "update",
+    targetPath: page,
+    baseHash: "h",
+    draft: "draft",
+    sourceDocs: [],
+    relatedPages: [],
+    staleMeta: { changed: "hub.md", edits: [{ kind: "passage", page, link: "hub.md", old: "a", text: "b", variant: "new" }], supersedes: null },
+    ...over,
+  });
+
+  test("the first send mints group 1; the next retires it (stale) and mints group 2 in one transaction", async () => {
+    const first = await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [row("notes/a.md")] });
+    expect(first).toMatchObject({ outcome: "sent", groupKey: "stale-check:hub.md:1", retired: 0 });
+    const ids = first.outcome === "sent" ? first.inserted.map((r) => r.id) : [];
+    const second = await supersedeStaleCheckGroup({
+      wikiName: W,
+      changed: "hub.md",
+      expectedLiveIds: ids,
+      rows: [row("notes/a.md", { staleMeta: { changed: "hub.md", edits: [], supersedes: "stale-check:hub.md:1" } }), row("notes/b.md")],
+    });
+    expect(second).toMatchObject({ outcome: "sent", groupKey: "stale-check:hub.md:2", retired: 1 });
+    const all = await listStaleCheckRowsByChanged(W, "hub.md");
+    expect(all.map((r) => [r.groupKey, r.targetPath, r.status])).toEqual([
+      ["stale-check:hub.md:1", "notes/a.md", "stale"],
+      ["stale-check:hub.md:2", "notes/a.md", "draft"],
+      ["stale-check:hub.md:2", "notes/b.md", "draft"],
+    ]);
+    expect(all[1]!.staleMeta?.supersedes).toBe("stale-check:hub.md:1");
+    expect(all[1]!.relatedPages).toEqual([]);
+    expect((await listLiveStaleCheckRows(W)).map((r) => r.targetPath)).toEqual(["notes/a.md", "notes/b.md"]);
+  });
+
+  test("a live set that moved since the redraft read it is a conflict, and nothing is written", async () => {
+    const first = await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [row("notes/a.md")] });
+    expect(first.outcome).toBe("sent");
+    const again = await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [row("notes/b.md")] });
+    expect(again.outcome).toBe("conflict");
+    expect((await listStaleCheckRowsByChanged(W, "hub.md")).map((r) => r.status)).toEqual(["draft"]);
+  });
+
+  test("a page a live group of another kind holds refuses, and nothing is written", async () => {
+    await insertWikiProposal({ botName: W, wikiName: W, topicKey: "lint:x:1:notes/a.md", groupKey: "lint:x:1", kind: "lint", mode: "update", targetPath: "notes/a.md", draft: "d", sourceDocs: [] });
+    const out = await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [row("notes/a.md")] });
+    expect(out).toEqual({ outcome: "held", targetPath: "notes/a.md", groupKey: "lint:x:1", kind: "lint" });
+    expect(await listStaleCheckRowsByChanged(W, "hub.md")).toEqual([]);
+    expect((await listLiveGroupedRows(W)).map((r) => [r.kind, r.targetPath])).toEqual([["lint", "notes/a.md"]]);
+  });
+
+  test("the group number never repeats: a rejected group 1 makes the next group 2", async () => {
+    const first = await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [row("notes/a.md")] });
+    await rejectWikiProposalGroup(W, first.outcome === "sent" ? first.groupKey : "");
+    const next = await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [row("notes/a.md")] });
+    expect(next).toMatchObject({ outcome: "sent", groupKey: "stale-check:hub.md:2", retired: 0 });
   });
 });

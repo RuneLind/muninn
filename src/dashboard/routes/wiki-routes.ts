@@ -55,7 +55,10 @@ import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
 import { isReadonlyWikiRoot, isWikiReadonly, wikiNoEgressReason } from "../../wiki/readonly.ts";
-import { movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
+import { linkingBuckets, movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
+import { placeStaleEdit } from "../../wiki/stale-fix.ts";
+import { fixedLinkingPages, resolveStaleFix, writeFixedVerdicts, type StaleFixRequest } from "../../wiki/stale-fix-verdicts.ts";
+import { heldBy, heldMessage, inReviewByChanged, sendStaleFix, staleProposalStore, type StaleInReview } from "../../gardener/stale-proposals.ts";
 import {
   hitConfirmations,
   hitKey,
@@ -2398,14 +2401,53 @@ export function registerWikiToolRoutes(
         const hits = index.statusLineHits?.get(r.relPath) ?? [];
         return { ...r, hits: hits.length, staleLines: confirmations ? hits.filter((h) => isConfirmedStale(confirmations!.get(hitKey(r.relPath, h)))).length : 0 };
       });
+      // PR 3 (D29): a To-check page whose current passage carries a `fixed`
+      // row is counted out, as the page report counts it out.
+      if (confirmations) {
+        try {
+          const fixedPages = (await staleVerdictStore().pages?.(entry.name, "fixed")) ?? new Set<string>();
+          const fixedKeys = new Set([...fixedPages].map((p) => normalizeRelPath(p)));
+          for (const r of fixedKeys.size ? pages : []) {
+            if (!r.toCheck || !(index.backlinks.get(normalizeRelPath(r.relPath)) ?? []).some((k) => fixedKeys.has(k))) continue;
+            const buckets = await linkingBuckets(index, r.relPath, { asOfMs });
+            if (!buckets) continue;
+            const fixed = await fixedLinkingPages({ wiki: entry.name, index, changed: buckets.relPath, linking: buckets.linking, fixedPages });
+            r.toCheck = Math.max(0, r.toCheck - fixed.size);
+          }
+        } catch (err) {
+          log.warn("Stale fixed verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      // PR 3 (D31): the fixes waiting in the Gardener, per changed page. A
+      // page with fixes in review is a row even when nothing else is.
+      const review = await inReviewFor(entry.name);
+      const rows: (typeof pages[number] & { inReview?: number })[] = pages;
+      if (review) {
+        for (const r of rows) {
+          const n = review.get(r.relPath)?.fixes;
+          if (n) r.inReview = n;
+        }
+        for (const [rel, rv] of review) {
+          if (rows.some((r) => r.relPath === rel)) continue;
+          const m = index.resolveRelPath(rel);
+          rows.push({ relPath: rel, title: m ? (m.displayTitle ?? m.title) : rel, staleLines: 0, toCheck: 0, changed: false, dirty: m?.gitDirty === true, hits: 0, inReview: rv.fixes });
+        }
+      }
       // The summary's order, on the confirmed count (`staleSummary` sorted on the free hits).
-      pages.sort((a, b) => b.staleLines + b.toCheck - (a.staleLines + a.toCheck) || (b.lastChangeMs ?? 0) - (a.lastChangeMs ?? 0) || a.relPath.localeCompare(b.relPath));
+      rows.sort((a, b) => b.staleLines + b.toCheck - (a.staleLines + a.toCheck) || (b.lastChangeMs ?? 0) - (a.lastChangeMs ?? 0) || a.relPath.localeCompare(b.relPath));
       return c.json({
         ...base,
         ...summary,
-        totals: { ...summary.totals, staleLines: pages.reduce((n, r) => n + r.staleLines, 0), hits: pages.reduce((n, r) => n + r.hits, 0) },
-        pages,
+        totals: {
+          ...summary.totals,
+          staleLines: rows.reduce((n, r) => n + r.staleLines, 0),
+          toCheck: rows.reduce((n, r) => n + r.toCheck, 0),
+          hits: rows.reduce((n, r) => n + r.hits, 0),
+          ...(review ? { inReview: rows.reduce((n, r) => n + (r.inReview ?? 0), 0) } : {}),
+        },
+        pages: rows,
         ...(confirmations ? {} : { verdicts: "unavailable" }),
+        ...(review ? {} : { inReview: "unavailable" }),
       });
     }
     const meta = resolvePageRef(index, pageRef, pageRef);
@@ -2421,6 +2463,17 @@ export function registerWikiToolRoutes(
       log.warn("Stale verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
     }
     const hits = report.hits.map((h) => ({ ...h, confirmation: confirmations?.get(hitKey(meta.relPath, h)) ?? ("unconfirmed" as const) }));
+    // PR 3 (D29): a To-check page whose current passage carries a `fixed` row
+    // was fixed through the Stale check; it counts as Changed since.
+    let fixed = new Set<string>();
+    if (report.buckets && confirmations) {
+      try {
+        fixed = await fixedLinkingPages({ wiki: entry.name, index, changed: report.buckets.relPath, linking: report.buckets.linking });
+      } catch (err) {
+        log.warn("Stale fixed verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    const review = (await inReviewFor(entry.name))?.get(meta.relPath);
     return c.json({
       ...base,
       ...report,
@@ -2429,15 +2482,31 @@ export function registerWikiToolRoutes(
       buckets: report.buckets
         ? {
             ...report.buckets,
+            counts: fixed.size
+              ? { ...report.buckets.counts, toCheck: report.buckets.counts.toCheck - fixed.size, changedSince: report.buckets.counts.changedSince + fixed.size }
+              : report.buckets.counts,
             linking: report.buckets.linking.map((l) => {
+              if (fixed.has(l.relPath)) return { ...l, bucket: "changedSince" as const, verdict: { verdict: "fixed" as const, reason: "Fixed through the Stale check", edit: null, checkedAt: 0, checkedBy: "reader" } };
               const v = verdictsByLinking.get(l.relPath);
               return v ? { ...l, verdict: v } : l;
             }),
           }
         : null,
+      ...(review ? { inReview: review } : {}),
       ...(confirmations ? {} : { verdicts: "unavailable" }),
     });
   });
+
+  /** PR 3 (D31): the live Stale check proposals per changed page, or null
+   *  when the proposals cannot be read (the ⧗ states then show nothing). */
+  async function inReviewFor(wiki: string): Promise<Map<string, StaleInReview> | null> {
+    try {
+      return inReviewByChanged(await staleProposalStore().liveStaleCheck(wiki));
+    } catch (err) {
+      log.warn("Stale check proposals unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  }
 
   // THE STALE CHECK'S MODEL HALF (PR 2a, `src/wiki/stale-confirm.ts`).
   // Both refuse on a readonly instance (D25) and on a readonly root (the
@@ -2580,6 +2649,117 @@ export function registerWikiToolRoutes(
       return c.json({ ok: true, verdict: row.verdict, checkedAt: row.checkedAt });
     }
     return c.json({ error: "kind must be status-line or passage" }, 400);
+  });
+
+  // THE STALE CHECK'S FIX PATHS (PR 3, `src/wiki/stale-fix.ts`). Both name a
+  // drafted fix on the open page's STALE tab — `kind: "status-line"` by
+  // `target` (+ `line`), `kind: "passage"` by its To-check `linking` page,
+  // `variant` new or home, `old` as the tab showed it — and read the edit off
+  // the stored verdict, never off the body. Both refuse like Check and the
+  // verdict route (readonly instance, readonly root, not JSON, unknown wiki or
+  // page).
+  const fixRequestOf = (body: Record<string, unknown>, asOfMs: number | undefined): StaleFixRequest => ({
+    kind: typeof body.kind === "string" ? body.kind : "",
+    variant: typeof body.variant === "string" ? body.variant : "new",
+    ...(typeof body.target === "string" ? { target: body.target } : {}),
+    ...(Number.isFinite(Number(body.line)) && body.line !== undefined ? { line: Number(body.line) } : {}),
+    ...(typeof body.linking === "string" ? { linking: body.linking } : {}),
+    ...(typeof body.old === "string" ? { old: body.old } : {}),
+    ...(asOfMs !== undefined ? { asOfMs } : {}),
+  });
+
+  // Apply (D9): one page write through the per-wiki write queue
+  // (`writeWikiPage`): read, CAS on the page's bytes, place the edit again on
+  // those bytes (`placeStaleEdit` recomputes the windows), write, `log.md`;
+  // the index refresh and the commit tail outside the section. Then a `fixed`
+  // verdict on the new passage (D29).
+  app.post("/api/wiki/stale/apply", async (c) => {
+    const r = await staleRequest(c);
+    if ("refusal" in r) return r.refusal;
+    const { entry, index, meta, asOfMs } = r;
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+    const fix = await resolveStaleFix({ wiki: entry.name, index, anchor: meta, req: fixRequestOf(body, asOfMs) });
+    if (!fix.ok) return c.json({ error: fix.error }, fix.status);
+    const target = index.resolveRelPath(fix.edit.page);
+    if (!target) return c.json({ error: `no page ${fix.edit.page}` }, 404);
+    // A page a live Gardener card holds: a write here would stale that card.
+    try {
+      const held = heldBy(await staleProposalStore().liveGrouped(entry.name), target.relPath);
+      if (held) return c.json({ error: heldMessage(held), held: true }, 409);
+    } catch (err) {
+      log.warn("Stale apply: Gardener cards unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "The Gardener's cards could not be read, so the page's claim is unknown." }, 503);
+    }
+    // The raw bytes, as the write seam reads them for its CAS.
+    const current = await defaultPageWriteIo(entry.root).readFile(path.join(entry.root, target.relPath));
+    if (current === null) return c.json({ error: `${target.relPath} cannot be read` }, 409);
+    const owningBot = entry.source === "bot" ? discoverAllBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase()) : undefined;
+    const push = owningBot?.wikiAutoCommit?.push ?? true;
+    let refusal: string | null = null;
+    let line = 0;
+    const result = await writeWikiPage({
+      wikiDir: entry.root,
+      relPath: target.relPath,
+      baseHash: sha256(current),
+      staleReason: "The page changed while the fix was applied. Reload and try again.",
+      collections: entry.collections ?? [],
+      logKind: "stale-check",
+      logTitle: target.title ?? target.relPath,
+      logLine: () => `line ${line}, stale after [[${fix.edit.link.replace(/\.mdx?$/i, "")}]], fixed via the wiki reader's Stale check`,
+      commitMessage: `[stale-check] apply: ${target.relPath}`,
+      now: () => Date.now(),
+      transform: (raw) => {
+        const placed = placeStaleEdit(raw, fix.edit, index);
+        if (!placed.ok) {
+          refusal = placed.reason;
+          return null;
+        }
+        line = placed.line;
+        return placed.content;
+      },
+      ...defaultPageWriteIo(entry.root),
+      reindex: async (collection) => {
+        await postCollectionUpdate(config.knowledgeApiUrl, collection);
+      },
+      commit: (paths, message) => commitWikiChange(entry.root, paths, message, { push }),
+    });
+    if (result.outcome === "forbidden") return c.json({ error: result.reason, readonly: true }, 403);
+    if (result.outcome === "stale") return c.json({ error: result.reason, stale: true }, 409);
+    if (result.outcome === "locked") return c.json({ error: result.reason, locked: true }, 409);
+    if (refusal) return c.json({ error: refusal, refused: true }, 409);
+    if (result.outcome !== "written") return c.json({ error: result.outcome === "error" ? result.reason : "nothing was written" }, 500);
+    let fixedRows = 0;
+    try {
+      const fresh = await getWikiIndex({ root: entry.root });
+      if (fresh) fixedRows = await writeFixedVerdicts({ wiki: entry.name, index: fresh, edits: [fix.edit] });
+    } catch (err) {
+      log.warn("Stale apply: the fixed verdict was not written for {page}: {error}", { page: target.relPath, error: err instanceof Error ? err.message : String(err) });
+    }
+    return c.json({ ok: true, page: target.relPath, line, fixed: fixedRows, committed: result.commit?.committed ?? false });
+  });
+
+  // Send to Gardener (D20): a Stale check proposal group for the open page,
+  // never an edit to an open one (`sendStaleFix`).
+  app.post("/api/wiki/stale/send", async (c) => {
+    const r = await staleRequest(c);
+    if ("refusal" in r) return r.refusal;
+    const { entry, index, meta, asOfMs } = r;
+    // The gate lists a wiki's proposals only where it has a bot or search
+    // collections (`isGardenerWiki`); a card sent elsewhere would be unreachable.
+    if (entry.source !== "bot" && !(entry.collections && entry.collections.length > 0)) {
+      return c.json({ error: "This wiki has no Gardener review page (no bot and no search collections). Apply the fix instead." }, 409);
+    }
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+    const fix = await resolveStaleFix({ wiki: entry.name, index, anchor: meta, req: fixRequestOf(body, asOfMs) });
+    if (!fix.ok) return c.json({ error: fix.error }, fix.status);
+    try {
+      const out = await sendStaleFix({ wiki: entry.name, wikiDir: entry.root, index, changed: meta.relPath, edit: fix.edit });
+      if (out.outcome === "refused") return c.json({ error: out.error }, out.status);
+      return c.json({ ok: true, ...out });
+    } catch (err) {
+      log.warn("Stale send failed for {page}: {error}", { page: meta.relPath, error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "The fix could not be sent to the Gardener. The server log has the details." }, 503);
+    }
   });
 
   app.get("/api/wiki/index-coverage", async (c) => {

@@ -249,6 +249,12 @@ export async function seedLintProposals(
     refusals: [],
   };
 
+  // D19: the read is split. The self-heal and the blocked keys read `lint`
+  // rows only, so a lint run never retires or blocks a Stale check card; the
+  // page claim reads every live grouped row of ANY kind, so a lint run skips a
+  // page a Stale check card holds.
+  const isLint = (r: LintGroupRow) => (r.kind ?? "lint") === "lint";
+  const lintRows = existing.filter(isLint);
   const fixable = findings.filter((f) => !!f.fix);
   const currentKeys = new Set(fixable.map((f) => f.fix!.groupKey));
 
@@ -259,7 +265,7 @@ export async function seedLintProposals(
   //    it, and do it BEFORE the claim pass so its pages are released in this
   //    same run rather than a week later.
   const vanished = new Set<string>();
-  for (const row of existing) {
+  for (const row of lintRows) {
     if (row.status === "draft" && !currentKeys.has(row.groupKey)) vanished.add(row.groupKey);
   }
   for (const key of vanished) {
@@ -280,6 +286,10 @@ export async function seedLintProposals(
   const blocked = new Set<string>();
   const claimedPaths = new Set<string>();
   for (const row of existing) {
+    if (!isLint(row)) {
+      if (row.status === "draft" || row.status === "approved") claimedPaths.add(row.targetPath);
+      continue;
+    }
     if (vanished.has(row.groupKey)) continue;
     if (row.status === "rejected") {
       blocked.add(row.groupKey);

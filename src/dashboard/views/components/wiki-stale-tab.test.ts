@@ -80,6 +80,24 @@ describe("the STALE tab", () => {
     expect(draftFixHtml(null)).toBe("");
   });
 
+  test("PR 3: a stale verdict's Draft fix carries Apply and Send per variant, naming the fix; a fix on a live card says so instead", () => {
+    const html = staleBodyHtml(report);
+    // The status-line hit's fix (its page and target) and the passage fix (its linking page).
+    expect(html).toContain('data-stale-apply data-kind="status-line" data-stale-page="repos/x.md" data-line="124" data-target="plans/p.mdx" data-variant="new" data-old="forslag 22.10"');
+    expect(html).toContain('data-stale-send data-kind="status-line" data-stale-page="repos/x.md" data-line="124" data-target="plans/p.mdx" data-variant="home" data-old="forslag 22.10"');
+    expect(html).toContain('data-stale-apply data-kind="passage" data-stale-page="repos/x.md" data-linking="repos/api.md" data-variant="new" data-old="merge queue"');
+    expect(html).not.toContain("come later");
+    const inReview = staleBodyHtml({ ...report, inReview: { fixes: 1, edits: [{ kind: "passage", page: "repos/api.md", link: "repos/x.md", old: "merge queue" }] } });
+    expect(inReview).not.toContain('data-stale-apply data-kind="passage"');
+    expect(inReview).toContain("data-stale-in-review");
+    // The status-line fix is not on the card, so it keeps its buttons.
+    expect(inReview).toContain('data-stale-apply data-kind="status-line"');
+  });
+
+  test("PR 3: Apply and Send are writes, dimmed and blocked on a read-only root", () => {
+    for (const sel of ["[data-stale-apply]", "[data-stale-send]"]) expect(WIKI_READONLY_BLOCKED_SELECTOR.split(",")).toContain(sel);
+  });
+
   test("hidden on the read slice and on a read-only instance; Check is egress, the verdicts are writes", () => {
     for (const sel of ['[data-conntab="stale"]', "#staleBody", "#wikiStalePill", ".wiki-stale-rail", "#wikiStaleHome", '.wiki-tab[data-tab="stale"]']) {
       expect(WIKI_READ_SLICE_HIDDEN_SELECTOR.split(",")).toContain(sel);

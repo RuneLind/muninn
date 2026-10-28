@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
+import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, kindMatches } from "./wiki-gardener-group.ts";
 
 describe("groupStatusSummary", () => {
   test("counts each status once, in the rows' own order of first appearance", () => {
@@ -101,5 +101,20 @@ describe("groupDriftNote", () => {
     expect(groupDriftNote([{ status: "draft", drifted: "x" }, { status: "draft", drifted: "y" }])).toBe(
       "2 pages changed since drafting — each Accept writes nothing and marks only one of them stale, returning the rest to draft. It takes 2 Accepts to mark all 2 stale.",
     );
+  });
+});
+
+describe("the kind filter and the card tag (PR 3, D28)", () => {
+  test("«Stale check» is a kind, «Drafted pages» the model-drafted kinds, «All kinds» everything", () => {
+    expect(["stale-check", "lint", "concept", "source"].filter((k) => kindMatches(k, "stale-check"))).toEqual(["stale-check"]);
+    expect(["stale-check", "lint", "concept", "entity", "source", "synthesis"].filter((k) => kindMatches(k, "pages"))).toEqual(["concept", "entity", "source", "synthesis"]);
+    expect(["stale-check", "lint"].filter((k) => kindMatches(k, ""))).toEqual(["stale-check", "lint"]);
+  });
+
+  test("the tag says «stale check» (CSS upper-cases it), and the group number is the key's tail", () => {
+    expect(groupKindTag("stale-check")).toBe("stale check");
+    expect(groupKindTag("lint")).toBe("lint");
+    expect(groupNumber("stale-check:repos/x.md:12")).toBe("12");
+    expect(groupNumber("lint:series-unnamed:abc")).toBe("");
   });
 });

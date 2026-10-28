@@ -300,6 +300,25 @@ describe("lint proposals", () => {
     expect(inserted).toHaveLength(2);
   });
 
+  test("D19: a lint run never retires a Stale check card, and skips a page one holds as claimed", async () => {
+    const { result, staled, inserted } = await seed(
+      [pairFinding("plans/a.mdx")],
+      [
+        // A live Stale check card on plans/a.mdx under a key no lint finding
+        // mints: the self-heal must leave it alone, and the page is claimed.
+        { groupKey: "stale-check:hub.md:1", targetPath: "plans/a.mdx", status: "draft", kind: "stale-check" },
+        // A rejected Stale check card blocks no lint key.
+        { groupKey: PAIR, targetPath: "plans/z.mdx", status: "rejected", kind: "stale-check" },
+      ],
+    );
+    expect(staled).toEqual([]);
+    expect(result).toMatchObject({ staled: 0, claimed: 1, proposed: 0, skipped: 0 });
+    expect(inserted).toEqual([]);
+    // Without the card on plans/a.mdx the same rejected row blocks nothing.
+    const free = await seed([pairFinding("plans/a.mdx")], [{ groupKey: PAIR, targetPath: "plans/z.mdx", status: "rejected", kind: "stale-check" }]);
+    expect(free.result).toMatchObject({ proposed: 1, skipped: 0, claimed: 0 });
+  });
+
   test("an APPROVED group is neither staled nor re-proposed", async () => {
     const { result, staled } = await seed(
       [seriesFinding([{ op: "frontmatter", relPath: "plans/a.mdx", key: "series", value: "a" }])],

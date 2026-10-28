@@ -73,3 +73,18 @@ export function groupDriftNote(rows: readonly { status: string; drifted?: string
     (rest === 0 ? "." : `, and one more to write the other ${rest}.`)
   );
 }
+
+/** Does a row of `kind` pass the gate's kind filter (D28)? `""` is every
+ *  kind, `"pages"` the drafted kinds, anything else one kind. */
+export function kindMatches(kind: string, filter: string): boolean {
+  if (!filter) return true;
+  if (filter === "pages") return kind !== "lint" && kind !== "stale-check";
+  return kind === filter;
+}
+
+/** A group card's kind tag: «stale check» for the Stale check (CSS upper-cases
+ *  it to STALE CHECK, D28), «lint» otherwise. */
+export const groupKindTag = (kind: string) => (kind === "stale-check" ? "stale check" : "lint");
+
+/** The group number in a `stale-check:<changed>:<n>` key, or "". */
+export const groupNumber = (key: string) => /:(\d+)$/.exec(key)?.[1] ?? "";

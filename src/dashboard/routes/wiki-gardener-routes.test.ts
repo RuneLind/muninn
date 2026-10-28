@@ -40,6 +40,11 @@ import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { linkingBuckets } from "../../wiki/stale.ts";
+import { __setStaleVerdictStoreForTest, changedHashOf, memoryStaleVerdictStore, passageVerdictKey } from "../../wiki/stale-confirm.ts";
+import { sendStaleFix } from "../../gardener/stale-proposals.ts";
+import { memoryStaleProposalStore } from "../../test/stale-proposal-store.ts";
+import type { WikiProposal } from "../../db/wiki-proposals.ts";
 
 /** The gated gardener POSTs take application/json (a 415 otherwise — `json-request.ts`). */
 const JSON_POST: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
@@ -3677,5 +3682,130 @@ describe("POST /api/wiki/proposals/:id/redraft — a disabled gardener", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "the wiki gardener is disabled for this bot" });
     expect(fetches).toBe(0);
+  });
+});
+
+// ── Stale check cards (kind `stale-check`, PR 3 of muninn-wiki-drift-check) ──
+describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps the text as written", () => {
+  const DAY = 86_400_000;
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+  let verdicts = memoryStaleVerdictStore();
+  const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
+  const A_TEXT = page("A", "The pin in [[hub]] landed on 23.05.");
+  const B_TEXT = page("B", "Since [[hub]] moved on 2.06 the pin is draft.");
+
+  async function git(atMs: number, ...args: string[]): Promise<void> {
+    const date = new Date(atMs).toISOString();
+    const proc = Bun.spawn(["git", "-C", root, "-c", "user.email=f@example.com", "-c", "user.name=f", "-c", "commit.gpgsign=false", ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+    });
+    if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`);
+  }
+
+  /** The card's two rows as Send makes them, with a model verdict per page. */
+  async function card(): Promise<WikiProposal[]> {
+    const index = (await getWikiIndex({ root }))!;
+    const buckets = (await linkingBuckets(index, "hub.md"))!;
+    const hash = (await changedHashOf(index, "hub.md"))!;
+    const proposals = memoryStaleProposalStore();
+    for (const [rel, old, text] of [["notes/a.md", "landed on 23.05", "landed on 18.06"], ["notes/b.md", "the pin is draft", "the pin is shipped"]] as const) {
+      const l = buckets.linking.find((x) => x.relPath === rel)!;
+      await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: rel, keyHash: passageVerdictKey(index, "hub.md", hash, l), verdict: "stale", reason: "moved", edit: { old, new: text }, checkedBy: "model:e2e" });
+      const out = await sendStaleFix({ wiki: "stalegate", wikiDir: root, index, changed: "hub.md", edit: { kind: "passage", page: rel, link: "hub.md", old, text, variant: "new" }, store: proposals });
+      expect(out.outcome).toBe("sent");
+    }
+    return proposals.rows.filter((r) => r.status === "draft");
+  }
+
+  function store(initial: WikiProposal[]) {
+    let state = initial;
+    const set = (id: string, status: string) => (state = state.map((r) => (r.id === id ? ({ ...r, status } as WikiProposal) : r)));
+    return {
+      rows: () => state,
+      deps: {
+        getConsumed: async () => new Set<string>(),
+        getPending: async () => new Set<string>(),
+        getWikiGardenerWatcher: async () => null,
+        getSnapshot: async () => null,
+        setSnapshot: async () => {},
+        listProposals: async () => [],
+        getProposalById: async () => null,
+        approveProposal: async () => null,
+        deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
+        ...lintGroupStubs,
+        listProposalsByGroup: async () => state,
+        approveProposalGroup: async () => (state = state.map((r) => (r.status === "draft" ? ({ ...r, status: "approved" } as WikiProposal) : r))).filter((r) => r.status === "approved"),
+        rejectProposalGroup: async () => {
+          const taken = state.filter((r) => r.status === "draft").map((r) => ({ ...r, status: "rejected" }) as WikiProposal);
+          state = state.map((r) => (r.status === "draft" ? ({ ...r, status: "rejected" } as WikiProposal) : r));
+          return taken;
+        },
+        markProposal: async (id: string, status: string) => (set(id, status), true),
+        revertProposal: async (id: string) => (set(id, "draft"), { id } as never),
+      } as unknown as Parameters<typeof registerWikiGardenerRoutes>[1],
+    };
+  }
+
+  beforeEach(async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-stale-gate-"));
+    const now = Date.now();
+    await git(now, "init", "-q", "-b", "main");
+    await Bun.write(path.join(root, "hub.md"), page("Hub", "First."));
+    await Bun.write(path.join(root, "notes/a.md"), A_TEXT);
+    await Bun.write(path.join(root, "notes/b.md"), B_TEXT);
+    await git(now - 30 * DAY, "add", "-A");
+    await git(now - 30 * DAY, "commit", "-q", "-m", "seed");
+    await Bun.write(path.join(root, "hub.md"), page("Hub", "The pin moved to 18.06."));
+    await git(now - DAY, "add", "-A");
+    await git(now - DAY, "commit", "-q", "-m", "hub moves");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `stalegate=${root}=stalegate`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    verdicts = memoryStaleVerdictStore();
+    __setStaleVerdictStoreForTest(verdicts);
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+  });
+
+  afterEach(async () => {
+    __setStaleVerdictStoreForTest(null);
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("Accept writes both pages and a `fixed` verdict on each new passage", async () => {
+    const rows = await card();
+    expect(rows.map((r) => r.groupKey)).toEqual(["stale-check:hub.md:2", "stale-check:hub.md:2"]);
+    const s = store(rows);
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ outcome: "applied", applied: ["notes/a.md", "notes/b.md"], fixed: 2 });
+    expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(A_TEXT.replace("landed on 23.05", "landed on 18.06"));
+    expect(await Bun.file(path.join(root, "notes/b.md")).text()).toBe(B_TEXT.replace("the pin is draft", "the pin is shipped"));
+    const log = await Bun.file(path.join(root, "log.md")).text();
+    expect(log.split("## [").length - 1).toBe(1);
+    expect(log).toContain("update | Stale check: hub.md\n- via stale-check, 2 pages: notes/a.md, notes/b.md");
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed").map((r) => r.page).sort()).toEqual(["notes/a.md", "notes/b.md"]);
+  });
+
+  test("Dismiss turns the card's edits into reader «still true» rows, «kept as written», and writes no page", async () => {
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 2 });
+    const passages = [...verdicts.rows.values()].filter((r) => r.kind === "passage");
+    expect(passages.map((r) => [r.page, r.verdict, r.checkedBy]).sort()).toEqual([["notes/a.md", "true", "reader"], ["notes/b.md", "true", "reader"]]);
+    expect(passages[0]!.reason).toContain("Kept as written");
+    expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(A_TEXT);
   });
 });

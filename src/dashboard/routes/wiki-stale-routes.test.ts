@@ -19,6 +19,8 @@ import { getWikiIndex } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import { runWikiStale } from "../../../scripts/wiki-stale.ts";
 import { __setStaleVerdictStoreForTest, memoryStaleVerdictStore } from "../../wiki/stale-confirm.ts";
+import { __setStaleProposalStoreForTest } from "../../gardener/stale-proposals.ts";
+import { memoryStaleProposalStore } from "../../test/stale-proposal-store.ts";
 import { __resetWorkSessionsForTest, refreshWorkSessions, workSessionsDepsFromEnv, workSessionsFor } from "../../wiki/work-sessions.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
@@ -67,10 +69,13 @@ describe("GET /api/wiki/stale", () => {
     // so every hit is unconfirmed (`wiki-stale-check-routes.test.ts` covers
     // the confirmed side).
     __setStaleVerdictStoreForTest(memoryStaleVerdictStore());
+    // PR 3: the ⧗ states read the Stale check proposals; none here, and no database.
+    __setStaleProposalStoreForTest(memoryStaleProposalStore());
   }, 30_000);
 
   afterAll(async () => {
     __setStaleVerdictStoreForTest(null);
+    __setStaleProposalStoreForTest(null);
     if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
     else process.env.WIKI_EXTRA = prevExtra;
     __resetWikiRegistryForTest();
@@ -106,7 +111,7 @@ describe("GET /api/wiki/stale", () => {
     const { status, body } = await get("wiki=stalewiki&asOf=2026-06-20");
     expect(status).toBe(200);
     // PR 2a: an unconfirmed hit is not a stale line (D11), but it is counted as a hit.
-    expect(body.totals).toEqual({ staleLines: 0, hits: 1, toCheck: 1, changedPages: 2 });
+    expect(body.totals).toEqual({ staleLines: 0, hits: 1, toCheck: 1, changedPages: 2, inReview: 0 });
     expect(body.pages[0]).toMatchObject({ relPath: "hub.md", staleLines: 0, hits: 1, toCheck: 1, changed: true, dirty: false });
   });
 

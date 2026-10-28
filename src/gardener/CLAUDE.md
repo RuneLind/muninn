@@ -1,6 +1,6 @@
 # Gardener — Wiki Page Drafting Pipelines
 
-Three drafting pipelines feed the human review gate at `/wiki/gardener` (approve/reject, CAS). Watcher-side scheduling detail: `src/watchers/CLAUDE.md`.
+Three drafting pipelines (and two mechanical fix kinds, lint and Stale check) feed the human review gate at `/wiki/gardener` (approve/reject, CAS). Watcher-side scheduling detail: `src/watchers/CLAUDE.md`.
 
 The gate's write verbs — `proposals/:id/{approve,reject}`, `proposals/group/:groupKey/{approve,reject}`, `lint-proposals`, the four backlog prune verbs, the five backlog run verbs (`backlog-{run,reset,cancel,recover,dismiss}`) and `source-draft-{run,backlog,doc}` — answer **415** to anything that is not `application/json` (`dashboard/routes/json-request.ts`), so a bodyless client sends `{}`. A `text/plain` or bodyless POST is a CORS *simple* request; the gate is defence in depth beside the origin guard (`src/auth/origin.ts`), which refuses a cross-site page in every mode. `dashboard/routes/write-route-json-gate.test.ts` walks every write route `createDashboardRoutes` registers and requires that 415 unless the route is on its reasoned allowlist, so a new write route starts red there.
 
@@ -334,6 +334,20 @@ A finding every page of which REFUSES the edit is counted once per pass
 
 Single-row Approve/Reject keep working unchanged for rows with `group_key IS
 NULL`, which is every other kind.
+
+## Stale check fixes (`kind: "stale-check"`, `src/gardener/stale-proposals.ts`)
+
+The fifth thing that fills the gate, plan `muninn-wiki-drift-check` PR 3 (D9, D19, D20, D28). The reader's **Send to Gardener** on the STALE tab turns one drafted edit into a card: one card per CHANGED page (the page whose tab sent it, `stale_meta.changed`), one row per page the edits write, one Accept (`applyWikiProposalGroup`). No model call anywhere on this path.
+
+- **Keys.** Topic `stale-check:<changed>:<page>:<12 hex of the row's edit list>`, group `stale-check:<changed>:<n>`. `n` is one past the highest number ever used for that changed page, in any status, so a key never names two groups.
+- **`stale_meta` (migration 086)** carries `changed`, the row's `edits` (each `{kind, page, link, old, text, variant, reason}`) and `supersedes`. A column, not `lint_meta`, whose shape the lint readers own.
+- **Send never edits an open group (D20).** `supersedeStaleCheckGroup` runs ONE transaction, serialized per wiki on `pg_advisory_xact_lock`: the live rows for `changed` must be exactly the ones the redraft read and all `draft` (`conflict` otherwise), no target page may be held by a live grouped row of any kind outside them (`held`), then group n goes `stale` (D28, the status a retired lint group takes, under that filter) and group n+1 is inserted. Each row is redrafted with no model call: its edits re-applied to the page's CURRENT bytes (`applyStaleEdits`, which recomputes the windows on the live file, `src/wiki/CLAUDE.md` «Stale check — the fix paths»), `base_hash` the sha256 of those bytes. An old edit that no longer places is dropped and reported (`dropped`); the new edit not placing refuses the Send. Two edits to one page merge into one row; a fix already on the live card refuses («already in review»); a group with an `approved` row (mid-apply) refuses.
+- **Mechanical, like `lint` (`isMechanicalKind`).** The gate listing skips the preview, the unresolved-link scan and the wiring preview; the apply skips `stripOwnedAliases`, `containDraftBodyLinks` and the trailing-newline normalisation, so a pre-existing dangling wikilink on the page survives an Accept byte-exact (pinned in `apply.test.ts` and `e2e/wiki-stale-fix.spec.ts`); `catalogPage` hard-skips the kind; rows carry `related_pages: []`, so the wire stage adds no See-also.
+- **Accept** runs `applyWikiProposalGroup`: one write section, every row's pre-write checks first. `checkBeforeWrite` adds one for this kind: after the CAS, the row's edits are placed again on the live bytes and must give the stored draft, else `stale` («the drafted edits no longer place»). ONE `log.md` entry, headed `update | Stale check: <changed>` (`draftTitle` names the changed page, never the linking page's title or the topic key), `- via stale-check, N pages: …`; ONE commit, `[stale-check] fix: N pages (<group key>)` (`groupCommitMessageFor`'s kind argument); a single row's subject is `[stale-check] fix: <page>`. After it, the route writes a `fixed` verdict on each written linking page's new passage (D29, `writeFixedVerdicts`, best effort) and answers `fixed: n`.
+- **Dismiss** (`proposals/group/:groupKey/reject`) turns the card's edits into «kept as written» verdicts (`keptAsWritten`): reader `true` rows on the keys they were drafted under, so the STALE tab reads Still true and Check skips them. Answers `kept: n`.
+- **The gate (D28).** A kind filter beside the status chips (All kinds · Stale check · Lint · Drafted pages; `kindMatches`); the card tag reads STALE CHECK (`badge-stale-check`, CSS upper-case) — «Stale check», because `stale` is already a status chip; a superseded group's card says «replaced by group n+1» (`replacedByGroup` on the listing, from group n+1's `supersedes`).
+
+**The lint seeder's read is split (D19).** `listLintGroupRowsByWiki` returns every grouped row with its `kind`. The self-heal and the blocked keys read `lint` rows only, so a lint run never retires or blocks a Stale check card; the page claim reads every live grouped row of any kind, so a lint run skips — as `claimed` — a finding on a page a Stale check card holds. Send refuses a page any other live group holds, and Apply refuses a page any live grouped row holds.
 
 ## Stem collisions — the apply path refuses, at approve time
 

@@ -154,6 +154,13 @@ export const E2E_PORTS = {
   // on which none of them shows (D25).
   "wiki-stale-counts": 3176,
   "wiki-stale-counts/readonly": 3177,
+  // The Stale check's fix paths (PR 3): Apply, Send to Gardener, the Stale
+  // check card's Accept and Dismiss, the ⧗ states, on a temp git wiki; a
+  // read-only instance on which Apply and Send are absent (D25), and a dead
+  // knowledge API so the post-write reindex is best effort.
+  "wiki-stale-fix": 3178,
+  "wiki-stale-fix/readonly": 3179,
+  "wiki-stale-fix/dead-huginn": 3180,
   // The reader's provenance strip and the chain it opens, end to end. ONE fake
   // `node:http` server plays claude-usage's `GET /api/sessions-by-id` and
   // `GET /api/merges` — pricing one of the fixture's two sessions and OMITTING

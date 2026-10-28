@@ -19,7 +19,7 @@ import { findWikiByRoot, getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
-import { applyWikiProposal, draftTitle, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
+import { applyWikiProposal, draftTitle, isMechanicalKind, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import {
   approveWikiProposal,
@@ -50,6 +50,7 @@ import {
 } from "../../gardener/lint-proposals.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
 import { lintFindingPathOf } from "../../gardener/lint-markers.ts";
+import { keptAsWritten, writeFixedVerdicts } from "../../wiki/stale-fix-verdicts.ts";
 import { invalidateSummariesStatsCache } from "./summaries-routes.ts";
 import { notifySummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
@@ -275,6 +276,11 @@ interface ProposalView {
    *  containment now changes the draft. The diff is against the page as it is
    *  now, not the page the draft was written on. */
   drifted: string | null;
+  /** `stale-check` rows only (PR 3): the changed page the card is about. */
+  staleChanged?: string | null;
+  /** A superseded `stale-check` group's row (D20, D28): the group that
+   *  replaced it, for the «replaced by group n+1» note. */
+  replacedByGroup?: string | null;
 }
 
 /** The two fact-check reads the gate makes; a module seam so a route test can
@@ -1382,6 +1388,9 @@ export function registerWikiGardenerRoutes(
     const resolve = index ? index.resolve : () => undefined;
     const { marks: factcheckMarks, unavailable: factcheckUnavailable } = await loadFactcheckMarks();
     const replacements = redraftReplacements(rows);
+    // D20: group n+1 names the group it replaced, so group n's rows can say so.
+    const replacedByGroup = new Map<string, string>();
+    for (const r of rows) if (r.kind === "stale-check" && r.staleMeta?.supersedes && r.groupKey) replacedByGroup.set(r.staleMeta.supersedes, r.groupKey);
 
     const proposals: ProposalView[] = await Promise.all(
       rows.map(async (p) => {
@@ -1393,7 +1402,8 @@ export function registerWikiGardenerRoutes(
         // expensive read-time passes below are skipped for it. Measured on a
         // mimir clone: 183 lint rows rendered a 10.3 MB payload, almost all of
         // it `previewHtml` for a page the reviewer can open in the reader.
-        const mechanical = p.kind === "lint";
+        // A Stale check row is mechanical the same way (PR 3).
+        const mechanical = isMechanicalKind(p.kind);
         let diff: DiffLine[] | null = null;
         let drifted: string | null = null;
         if (reviewable && p.mode === "update" && root) {
@@ -1487,6 +1497,9 @@ export function registerWikiGardenerRoutes(
           ),
           replacedBy: replacements.get(p.id) ?? null,
           drifted,
+          ...(p.kind === "stale-check"
+            ? { staleChanged: p.staleMeta?.changed ?? null, replacedByGroup: (p.groupKey && replacedByGroup.get(p.groupKey)) || null }
+            : {}),
           ...(factcheckUnavailable && factcheckLockApplies(p) ? { factcheckUnknown: true as const } : {}),
         };
       }),
@@ -3100,7 +3113,10 @@ export function registerWikiGardenerRoutes(
       );
     }
     log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
-    return c.json({ outcome: "applied", applied, noop, skipped });
+    // D29: a Stale check Accept writes a `fixed` verdict on each written
+    // linking page's new passage, on the index the apply refreshed.
+    const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied);
+    return c.json({ outcome: "applied", applied, noop, skipped, ...(fixed !== null ? { fixed } : {}) });
   });
 
   /**
@@ -3132,7 +3148,10 @@ export function registerWikiGardenerRoutes(
     if (rejected.length === 0) {
       return c.json({ error: "group is no longer a draft", statuses: statusCounts(existing) }, 409);
     }
-    return c.json({ outcome: "rejected", rejected: rejected.length });
+    // D20: a rejected Stale check card's edits are «kept as written»: reader
+    // «still true» rows on the keys they were drafted under.
+    const kept = await staleCheckKeptVerdicts(scope.wikiEntry, rejected);
+    return c.json({ outcome: "rejected", rejected: rejected.length, ...(kept !== null ? { kept } : {}) });
   });
 
   /**
@@ -3175,6 +3194,37 @@ export function registerWikiGardenerRoutes(
       (b) => b.name.toLowerCase() === wikiEntry.name.toLowerCase() && !!b.wikiDir,
     );
     return { wikiEntry, wikiName: wikiEntry.name, bot };
+  }
+}
+
+/** D29: the `fixed` verdicts a Stale check Accept writes, or null for
+ *  another kind. Best effort: a failed write is logged, never a failed Accept. */
+async function staleCheckFixedVerdicts(entry: WikiRegistryEntry, rows: readonly WikiProposal[], applied: readonly string[]): Promise<number | null> {
+  const written = rows.filter((r) => r.kind === "stale-check" && applied.includes(r.targetPath));
+  if (!rows.some((r) => r.kind === "stale-check")) return null;
+  if (!written.length) return 0;
+  try {
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return 0;
+    return await writeFixedVerdicts({ wiki: entry.name, index, edits: written.flatMap((r) => r.staleMeta?.edits ?? []) });
+  } catch (err) {
+    log.warn("Stale check accept: fixed verdicts not written for {wiki}: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
+    return 0;
+  }
+}
+
+/** D20: the «kept as written» verdicts a rejected Stale check card writes, or
+ *  null for another kind. Best effort, like the fixed verdicts. */
+async function staleCheckKeptVerdicts(entry: WikiRegistryEntry, rejected: readonly WikiProposal[]): Promise<number | null> {
+  const stale = rejected.filter((r) => r.kind === "stale-check");
+  if (!stale.length) return null;
+  try {
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return 0;
+    return await keptAsWritten({ wiki: entry.name, index, edits: stale.flatMap((r) => r.staleMeta?.edits ?? []) });
+  } catch (err) {
+    log.warn("Stale check reject: kept verdicts not written for {wiki}: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
+    return 0;
   }
 }
 

@@ -10,6 +10,7 @@ import {
   draftTitle,
   commitMessageFor,
   logWriterFor,
+  groupCommitMessageFor,
   updateBaseDrift,
   type ApplyDeps,
 } from "./apply.ts";
@@ -1254,5 +1255,102 @@ describe("updateBaseDrift", () => {
   });
   test("a row with no base hash cannot prove anything, so it is drift", () => {
     expect(updateBaseDrift(null, page)).toBe("target file changed since drafting");
+  });
+});
+
+// ── Stale check groups (kind `stale-check`, PR 3 of muninn-wiki-drift-check) ──
+describe("applyWikiProposalGroup — a Stale check card", () => {
+  let wikiDir: string;
+  const A = "notes/a.md";
+  const B = "notes/b.md";
+  // A dangling wikilink already on page A: a Stale check Accept must leave it.
+  const A_TEXT = "---\ntitle: A\n---\n\nThe pin in [[hub]] landed on 23.05.\n\nSee [[No Such Page]] too.\n";
+  const B_TEXT = "---\ntitle: B\n---\n\nSince [[hub]] moved on 2.06 the pin is draft.\n";
+  const HUB = "---\ntitle: Hub\n---\n\nThe hub.\n";
+
+  const editOf = (page: string, old: string, text: string) => ({ kind: "passage" as const, page, link: "hub.md", old, text, variant: "new" as const });
+  function staleRow(id: string, page: string, current: string, old: string, text: string): WikiProposal {
+    return makeProposal({
+      id,
+      wikiName: "w",
+      botName: "w",
+      kind: "stale-check",
+      mode: "update",
+      groupKey: "stale-check:hub.md:2",
+      topicKey: `stale-check:hub.md:${page}:x`,
+      targetPath: page,
+      baseHash: sha256(current),
+      draft: current.replace(old, text),
+      sourceDocs: [],
+      relatedPages: [],
+      staleMeta: { changed: "hub.md", edits: [editOf(page, old, text)], supersedes: "stale-check:hub.md:1" },
+    });
+  }
+
+  function deps(overrides: Partial<ApplyDeps> = {}): ApplyDeps {
+    return {
+      wikiDir,
+      now: () => Date.parse("2026-10-28T10:00:00Z"),
+      readFile: async (absPath) => {
+        try {
+          return await readFile(absPath, "utf8");
+        } catch {
+          return null;
+        }
+      },
+      writeFile: async (absPath, content) => {
+        await mkdir(path.dirname(absPath), { recursive: true });
+        await writeFile(absPath, content);
+      },
+      getWikiIndex: () => buildWikiIndex(wikiDir),
+      refreshIndex: async () => {},
+      reindex: async () => {},
+      ...overrides,
+    };
+  }
+
+  beforeEach(async () => {
+    wikiDir = await testTempDir(path.join(tmpdir(), "gardener-stale-"));
+    __resetWikiWriteQueueForTest();
+    await mkdir(path.join(wikiDir, "notes"), { recursive: true });
+    await writeFile(path.join(wikiDir, "hub.md"), HUB);
+    await writeFile(path.join(wikiDir, A), A_TEXT);
+    await writeFile(path.join(wikiDir, B), B_TEXT);
+  });
+  afterEach(async () => {
+    await rm(wikiDir, { recursive: true, force: true });
+  });
+
+  test("Accept writes both pages byte-exact, one log.md entry naming both under the changed page, one commit", async () => {
+    const commits: [string[], string][] = [];
+    const rows = [staleRow("r1", A, A_TEXT, "landed on 23.05", "landed on 18.06"), staleRow("r2", B, B_TEXT, "the pin is draft", "the pin is shipped")];
+    const res = await applyWikiProposalGroup(rows, deps({ commit: async (paths, message) => void commits.push([paths, message]) }));
+    expect(res.stoppedAt).toBeUndefined();
+    // Mechanical: the pre-existing dangling [[No Such Page]] is untouched, and
+    // no trailing-newline normalisation or alias strip runs.
+    expect(await readFile(path.join(wikiDir, A), "utf8")).toBe(A_TEXT.replace("landed on 23.05", "landed on 18.06"));
+    expect(await readFile(path.join(wikiDir, B), "utf8")).toBe(B_TEXT.replace("the pin is draft", "the pin is shipped"));
+    const log = await readFile(path.join(wikiDir, "log.md"), "utf8");
+    expect(log.match(/^## \[/gm)).toHaveLength(1);
+    expect(log).toContain("## [2026-10-28] update | Stale check: hub.md\n- via stale-check, 2 pages: notes/a.md, notes/b.md");
+    expect(commits).toEqual([[[A, "log.md", B], "[stale-check] fix: 2 pages (stale-check:hub.md:2)"]]);
+  });
+
+  test("a row whose edits no longer follow from the page stops the group with nothing written", async () => {
+    // The CAS holds (same bytes) but the stored draft is not what the edit makes.
+    const bad = { ...staleRow("r2", B, B_TEXT, "the pin is draft", "the pin is shipped"), draft: B_TEXT.replace("the pin is draft", "something else") };
+    const res = await applyWikiProposalGroup([staleRow("r1", A, A_TEXT, "landed on 23.05", "landed on 18.06"), bad], deps());
+    expect(res.stoppedAt?.id).toBe("r2");
+    expect(res.stoppedAt?.outcome).toMatchObject({ outcome: "stale", reason: expect.stringContaining("no longer place") });
+    expect(await readFile(path.join(wikiDir, A), "utf8")).toBe(A_TEXT);
+  });
+
+  test("commit subject, log writer and title by kind", () => {
+    const row = staleRow("r1", A, A_TEXT, "landed on 23.05", "landed on 18.06");
+    expect(commitMessageFor(row)).toBe("[stale-check] fix: notes/a.md");
+    expect(logWriterFor(row)).toBe("stale-check");
+    expect(draftTitle(row)).toBe("Stale check: hub.md");
+    expect(groupCommitMessageFor("stale-check:hub.md:2", 2, "stale-check")).toBe("[stale-check] fix: 2 pages (stale-check:hub.md:2)");
+    expect(groupCommitMessageFor("lint:x:1", 1)).toBe("[lint] fix: 1 page (lint:x:1)");
   });
 });

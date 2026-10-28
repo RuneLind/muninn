@@ -89,6 +89,10 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   // refuse on a read-only instance and root. On the instance the whole tab is
   // hidden (WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR); this is the backstop.
   "[data-stale-verdict]",
+  // PR 3's Apply (a page write) and Send to Gardener (a proposal row): both
+  // routes refuse on a read-only instance and root.
+  "[data-stale-apply]",
+  "[data-stale-send]",
   "#wikiFcIntAccept",
   ".wiki-atlas-cdraft",
 ].join(",");

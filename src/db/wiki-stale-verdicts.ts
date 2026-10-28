@@ -101,6 +101,13 @@ export async function getStaleVerdicts(
   return out;
 }
 
+/** The pages that carry at least one row of `kind`: a cheap pre-check before
+ *  computing keys (PR 3 reads it for `fixed`). */
+export async function getStaleVerdictPages(wiki: string, kind: StaleVerdictKind): Promise<Set<string>> {
+  const rows = await getDb()`SELECT DISTINCT page FROM wiki_stale_verdicts WHERE wiki = ${wiki} AND kind = ${kind}`;
+  return new Set(rows.map((r) => r.page as string));
+}
+
 /** Model rows checked more than `retentionDays` ago, batched, oldest first,
  *  on `idx_wiki_stale_verdicts_checked`. A reader's row is never aged out
  *  (A5): its key changes when what it judged does, so a row whose key no page

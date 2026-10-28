@@ -1,6 +1,7 @@
 import type { Sql } from "postgres";
 import { getDb } from "./client.ts";
 import type { LintMeta } from "../gardener/lint-markers.ts";
+import type { StaleFixEdit } from "../wiki/stale-fix.ts";
 import {
   recordSourceDraftAttemptIn,
   type RecordSourceDraftAttemptParams,
@@ -63,9 +64,25 @@ export interface WikiProposalRelatedPage {
  * `lint` is the odd one out: it is not a DRAFTED page but a mechanical edit the
  * wiki linter computed (`src/gardener/lint-proposals.ts`) — always `update`
  * mode, always `source_docs: []`, never cataloged and never wired, because it IS
- * the wire. It is also the only kind whose rows come in GROUPS (`group_key`).
+ * the wire. Its rows come in GROUPS (`group_key`).
+ *
+ * `stale-check` is the Stale check's fix (plan muninn-wiki-drift-check, PR 3,
+ * `src/gardener/stale-proposals.ts`): drafted edits the reader sent from the
+ * STALE tab, one row per page they write, grouped per changed page. Mechanical
+ * like `lint` — never cataloged, never wired, no containment — but its own
+ * kind and group scheme (D9, D19).
  */
-export type WikiProposalKind = "concept" | "entity" | "source" | "synthesis" | "lint";
+export type WikiProposalKind = "concept" | "entity" | "source" | "synthesis" | "lint" | "stale-check";
+
+/** `stale-check` rows only (`stale_meta`, migration 086): the changed page the
+ *  card is about, the edits this row's draft applies (each re-applied to the
+ *  page's live bytes when a later Send redrafts the group, D20), and the group
+ *  this one replaced. */
+export interface StaleCheckMeta {
+  changed: string;
+  edits: StaleFixEdit[];
+  supersedes?: string | null;
+}
 export type WikiProposalMode = "create" | "update";
 export type WikiProposalStatus =
   | "draft"
@@ -97,6 +114,8 @@ export interface WikiProposal {
    *  against. NULL on every other kind, and on lint rows written before
    *  migration 078 — both readers degrade, see `src/gardener/lint-markers.ts`. */
   lintMeta: LintMeta | null;
+  /** `stale-check` rows only; NULL (or absent) on every other kind. */
+  staleMeta?: StaleCheckMeta | null;
   kind: WikiProposalKind;
   mode: WikiProposalMode;
   targetPath: string;
@@ -121,6 +140,8 @@ export interface InsertWikiProposalParams {
   groupKey?: string | null;
   /** See {@link WikiProposal.lintMeta}; omit for every kind but `lint`. */
   lintMeta?: LintMeta | null;
+  /** See {@link WikiProposal.staleMeta}; omit for every kind but `stale-check`. */
+  staleMeta?: StaleCheckMeta | null;
   kind: WikiProposalKind;
   mode: WikiProposalMode;
   targetPath: string;
@@ -152,13 +173,14 @@ async function insertWikiProposalWith(
 ): Promise<WikiProposal | null> {
   const [row] = await sql`
     INSERT INTO wiki_proposals (
-      bot_name, wiki_name, topic_key, group_key, lint_meta, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
+      bot_name, wiki_name, topic_key, group_key, lint_meta, stale_meta, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
     ) VALUES (
       ${params.botName},
       ${params.wikiName ?? null},
       ${params.topicKey},
       ${params.groupKey ?? null},
       ${params.lintMeta ? sql.json(params.lintMeta as any) : null},
+      ${params.staleMeta ? sql.json(params.staleMeta as any) : null},
       ${params.kind},
       ${params.mode},
       ${params.targetPath},
@@ -687,10 +709,15 @@ export interface LintGroupRow {
   groupKey: string;
   targetPath: string;
   status: WikiProposalStatus;
+  /** The row's kind. The seeder's self-heal and blocked keys read `lint` rows
+   *  only; its page claims read every kind (D19), so a lint run never retires a
+   *  Stale check card and skips a page one holds. Absent reads as `lint`. */
+  kind?: WikiProposalKind;
 }
 
 /**
- * Every lint row this wiki holds, in every status — the seeder's whole input for
+ * Every GROUPED row this wiki holds (lint and Stale check), in every status,
+ * with its kind — the seeder's whole input for
  * "what may I propose".
  *
  * It returns ROWS rather than a set of keys because the seeder now asks three
@@ -712,13 +739,14 @@ export interface LintGroupRow {
 export async function listLintGroupRowsByWiki(wikiName: string): Promise<LintGroupRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT group_key, target_path, status FROM wiki_proposals
+    SELECT group_key, target_path, status, kind FROM wiki_proposals
     WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND group_key IS NOT NULL
   `;
   return rows.map((r) => ({
     groupKey: r.group_key as string,
     targetPath: r.target_path as string,
     status: r.status as WikiProposalStatus,
+    kind: r.kind as WikiProposalKind,
   }));
 }
 
@@ -745,6 +773,123 @@ export async function markLintGroupStale(wikiName: string, groupKey: string): Pr
   return rows.length;
 }
 
+// ── Stale check proposals (kind `stale-check`, PR 3 of muninn-wiki-drift-check) ──
+
+/** Every `stale-check` row about one changed page, in every status, oldest
+ *  first. Send reads the live group off it, and the group number. */
+export async function listStaleCheckRowsByChanged(wikiName: string, changed: string): Promise<WikiProposal[]> {
+  const rows = await getDb()`
+    SELECT * FROM wiki_proposals
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND kind = 'stale-check' AND stale_meta->>'changed' = ${changed}
+    ORDER BY created_at ASC, target_path ASC
+  `;
+  return rows.map(mapRow);
+}
+
+/** Every live (`draft`/`approved`) `stale-check` row of a wiki: the ⧗ «in
+ *  review» states read them (D31). */
+export async function listLiveStaleCheckRows(wikiName: string): Promise<WikiProposal[]> {
+  const rows = await getDb()`
+    SELECT * FROM wiki_proposals
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND kind = 'stale-check' AND status IN ('draft', 'approved')
+    ORDER BY created_at ASC, target_path ASC
+  `;
+  return rows.map(mapRow);
+}
+
+/** One live grouped row, any kind: the page claim Send and Apply read. */
+export interface LiveGroupedRow {
+  id: string;
+  groupKey: string;
+  targetPath: string;
+  kind: WikiProposalKind;
+  status: WikiProposalStatus;
+}
+
+export async function listLiveGroupedRows(wikiName: string): Promise<LiveGroupedRow[]> {
+  const rows = await getDb()`
+    SELECT id, group_key, target_path, kind, status FROM wiki_proposals
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND group_key IS NOT NULL AND status IN ('draft', 'approved')
+  `;
+  return rows.map((r) => ({
+    id: r.id as string,
+    groupKey: r.group_key as string,
+    targetPath: r.target_path as string,
+    kind: r.kind as WikiProposalKind,
+    status: r.status as WikiProposalStatus,
+  }));
+}
+
+/** The group number in a `stale-check:<changed>:<n>` key, or 0. */
+export function staleCheckGroupNumber(groupKey: string | null | undefined): number {
+  const m = /:(\d+)$/.exec(groupKey ?? "");
+  return m ? Number(m[1]) : 0;
+}
+
+export type SupersedeStaleCheckOutcome =
+  | { outcome: "sent"; groupKey: string; inserted: WikiProposal[]; retired: number }
+  /** The live group is not the one the redraft read: another Send or an
+   *  Accept moved it. Nothing was written. */
+  | { outcome: "conflict"; reason: string }
+  /** A page another live group (any kind) holds. Nothing was written. */
+  | { outcome: "held"; targetPath: string; groupKey: string; kind: WikiProposalKind };
+
+/**
+ * D20, in ONE transaction: retire the live group n (status `stale`, D28) and
+ * insert group n+1 with `rows`. Send never edits an open group.
+ *
+ * Serialized per wiki on a transaction advisory lock, so two Sends cannot both
+ * mint group n+1. Inside it: the live rows for `changed` must be exactly
+ * `expectedLiveIds`, all `draft` (`conflict` otherwise), and no target page may
+ * be held by a live grouped row outside that set (`held`). `n` is one past the
+ * highest group number ever used for `changed`, whatever its status, so a key
+ * never names two groups.
+ */
+export async function supersedeStaleCheckGroup(params: {
+  wikiName: string;
+  changed: string;
+  expectedLiveIds: readonly string[];
+  rows: readonly Omit<InsertWikiProposalParams, "groupKey">[];
+}): Promise<SupersedeStaleCheckOutcome> {
+  const sql = getDb();
+  return sql.begin(async (_tx) => {
+    const tx = _tx as unknown as Sql;
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${"stale-check:" + params.wikiName}))`;
+    const mine = await tx`
+      SELECT id, group_key, status FROM wiki_proposals
+      WHERE COALESCE(wiki_name, bot_name) = ${params.wikiName} AND kind = 'stale-check' AND stale_meta->>'changed' = ${params.changed}
+      FOR UPDATE
+    `;
+    const live = mine.filter((r) => r.status === "draft" || r.status === "approved");
+    const expected = new Set(params.expectedLiveIds);
+    if (live.length !== expected.size || live.some((r) => !expected.has(r.id as string) || r.status !== "draft")) {
+      return { outcome: "conflict" as const, reason: "the Stale check card for this page changed meanwhile; reload and send again" };
+    }
+    const targets = params.rows.map((r) => r.targetPath);
+    if (targets.length) {
+      const holders = await tx`
+        SELECT id, group_key, target_path, kind FROM wiki_proposals
+        WHERE COALESCE(wiki_name, bot_name) = ${params.wikiName} AND group_key IS NOT NULL
+          AND status IN ('draft', 'approved') AND target_path = ANY(${targets as string[]}::text[])
+      `;
+      const held = holders.find((h) => !expected.has(h.id as string));
+      if (held) return { outcome: "held" as const, targetPath: held.target_path as string, groupKey: held.group_key as string, kind: held.kind as WikiProposalKind };
+    }
+    const n = Math.max(0, ...mine.map((r) => staleCheckGroupNumber(r.group_key as string))) + 1;
+    const groupKey = `stale-check:${params.changed}:${n}`;
+    const retired = live.length
+      ? await tx`UPDATE wiki_proposals SET status = 'stale', resolved_at = now() WHERE id = ANY(${[...expected]}::uuid[]) AND status = 'draft' RETURNING id`
+      : [];
+    const inserted: WikiProposal[] = [];
+    for (const r of params.rows) {
+      const row = await insertWikiProposalWith(tx, { ...r, groupKey });
+      if (!row) throw new Error(`stale-check insert collided on ${r.topicKey}`);
+      inserted.push(row);
+    }
+    return { outcome: "sent" as const, groupKey, inserted, retired: retired.length };
+  });
+}
+
 function mapRow(r: Record<string, any>): WikiProposal {
   return {
     id: r.id,
@@ -753,6 +898,7 @@ function mapRow(r: Record<string, any>): WikiProposal {
     topicKey: r.topic_key,
     groupKey: r.group_key ?? null,
     lintMeta: (r.lint_meta ?? null) as LintMeta | null,
+    staleMeta: r.stale_meta && typeof r.stale_meta.changed === "string" && Array.isArray(r.stale_meta.edits) ? (r.stale_meta as StaleCheckMeta) : null,
     kind: r.kind as WikiProposalKind,
     mode: r.mode as WikiProposalMode,
     targetPath: r.target_path,

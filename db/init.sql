@@ -777,7 +777,7 @@ CREATE TABLE wiki_proposals (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   bot_name      TEXT NOT NULL,
   topic_key     TEXT NOT NULL,           -- stable slug for dedup across runs
-  kind          TEXT NOT NULL,           -- concept | entity | source | synthesis
+  kind          TEXT NOT NULL,           -- concept | entity | source | synthesis | lint | stale-check
   mode          TEXT NOT NULL,           -- create | update
   target_path   TEXT NOT NULL,           -- wiki-relative, e.g. concepts/Context Compaction.md
   base_hash     TEXT,                    -- sha256 of target file at draft time (update mode)
@@ -789,6 +789,7 @@ CREATE TABLE wiki_proposals (
   wiki_name     TEXT,                    -- consolidation gardener: keys a row to a standalone wiki (NULL = legacy bot-keyed) (migration 065)
   group_key     TEXT,                    -- lint fixes: the id the rows of ONE finding share (NULL = single-row proposal) (migration 077)
   lint_meta     JSONB,                   -- lint fixes: {seededBy, findingRelPath} — the seeder and the page the finding was filed against (migration 078)
+  stale_meta    JSONB,                   -- Stale check fixes: {changed, edits, supersedes} (migration 086)
   status        TEXT NOT NULL DEFAULT 'draft',  -- draft|approved|applied|rejected|stale|error
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   resolved_at   TIMESTAMPTZ

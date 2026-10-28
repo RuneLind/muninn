@@ -4113,6 +4113,56 @@ async function postStaleVerdict(btn: Element): Promise<void> {
 }
 
 /**
+ * Apply / Send to Gardener on a Draft fix (PR 3): the button names the fix
+ * (its kind, page, line + target or linking page, variant and `old`); the
+ * server reads the edit off the stored verdict. Then the report and the
+ * summary reload, and an Apply that wrote the page on screen reloads it.
+ */
+async function postStaleFix(btn: Element, action: "apply" | "send"): Promise<void> {
+  const relPath = btn.getAttribute("data-stale-page") || "";
+  const kind = btn.getAttribute("data-kind") || "";
+  const payload: Record<string, unknown> = {
+    wiki: WIKI,
+    page: relPath,
+    kind,
+    variant: btn.getAttribute("data-variant") || "new",
+    old: btn.getAttribute("data-old") ?? "",
+  };
+  if (kind === "status-line") {
+    payload.line = Number(btn.getAttribute("data-line"));
+    payload.target = btn.getAttribute("data-target") || "";
+  } else payload.linking = btn.getAttribute("data-linking") || "";
+  btn.parentElement?.querySelectorAll("button").forEach((b) => ((b as HTMLButtonElement).disabled = true));
+  const what = action === "apply" ? "The fix was not applied" : "The fix was not sent to the Gardener";
+  const fail = (msg: string) => {
+    if (staleFor !== relPath) return;
+    staleNotice = msg;
+    renderStale();
+  };
+  let wrote = "";
+  try {
+    const res = await fetch(`/api/wiki/stale/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    const b = (await res.json().catch(() => ({}))) as { error?: unknown; page?: unknown };
+    if (!res.ok) {
+      fail(`${what}: ${typeof b.error === "string" ? b.error : "HTTP " + res.status}`);
+      return;
+    }
+    if (action === "apply" && typeof b.page === "string") wrote = b.page;
+  } catch {
+    fail(`${what}: could not reach the server.`);
+    return;
+  }
+  if (staleFor === relPath) {
+    staleNotice = "";
+    renderStale();
+    loadStale(relPath);
+  }
+  // The rail, the head and the home drop with the tab; ⧗ appears on a Send.
+  loadStaleSummary();
+  if (wrote && wrote === currentRelPath) loadPageByRelPath(wrote, false, false);
+}
+
+/**
  * The article header's one project affordance: on a project's own hub page,
  * "N pages about <project>" — a way into the rest of it from the page a reader
  * most often lands on first.
@@ -5604,6 +5654,16 @@ document.body.addEventListener("click", (e) => {
   const staleVerdict = target.closest ? target.closest("[data-stale-verdict]") : null;
   if (staleVerdict) {
     void postStaleVerdict(staleVerdict);
+    return;
+  }
+  const staleApply = target.closest ? target.closest("[data-stale-apply]") : null;
+  if (staleApply) {
+    void postStaleFix(staleApply, "apply");
+    return;
+  }
+  const staleSend = target.closest ? target.closest("[data-stale-send]") : null;
+  if (staleSend) {
+    void postStaleFix(staleSend, "send");
     return;
   }
   // The rail's ★ lives inside a `[data-relpath]` row; it is the list's own

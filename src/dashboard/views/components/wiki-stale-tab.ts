@@ -10,8 +10,9 @@
  *   in the linter until the confirm loop has read it.
  * - Linking pages: the five buckets, To check open, each page's verdict when
  *   Check has one; the others folded.
- * - Draft fix shows the model's edit read-only (D8: update the text, or point
- *   to the home); Apply and Send to Gardener are PR 3.
+ * - Draft fix shows the model's edit (D8: update the text, or point to the
+ *   home), each variant with Apply (one page write) and Send to Gardener (a
+ *   Stale check card), PR 3. A fix already on a live card says so instead.
  */
 import { escHtml as esc } from "./escape.ts";
 
@@ -51,19 +52,31 @@ export interface StaleReportView {
   buckets?: { counts: Record<string, number>; linking: StaleLinkingView[] } | null;
   verdicts?: "unavailable";
   readonly?: "instance" | "root" | false;
+  /** PR 3 (D31): the fixes this page's live Stale check card holds. */
+  inReview?: StaleInReviewView;
   error?: string;
+}
+
+/** The fixes a page's live Stale check card holds (`GET /api/wiki/stale?page=`). */
+export interface StaleInReviewView {
+  fixes: number;
+  groupKey?: string;
+  edits?: { kind: string; page: string; link: string; old: string }[];
 }
 
 /** The two numbers (D26): confirmed stale status lines, linking pages to check. */
 export function staleCounts(r: StaleReportView | null | undefined): StalePageCounts {
   if (!r || r.error) return { staleLines: 0, toCheck: 0 };
   const staleLines = confirmedHits(r).length;
-  return { staleLines, toCheck: r.buckets?.counts?.toCheck ?? 0 };
+  const inReview = Number(r.inReview?.fixes) || 0;
+  return { staleLines, toCheck: r.buckets?.counts?.toCheck ?? 0, ...(inReview ? { inReview } : {}) };
 }
 
 export interface StalePageCounts {
   staleLines: number;
   toCheck: number;
+  /** PR 3 (D31): fixes waiting in the Gardener, shown as ⧗. */
+  inReview?: number;
 }
 
 /** The two numbers in words (D26): «⚠ N stale status lines · M linking pages
@@ -132,28 +145,53 @@ function pageLink(relPath: string, title: string): string {
   return `<span class="wiki-stale-link" data-page="${esc(stem(relPath))}" data-relpath="${esc(relPath)}">${esc(title)}</span>`;
 }
 
-/** The model's drafted fix, read-only: old → new, and the point-to-the-home variant (D8). */
-export function draftFixHtml(edit: StaleVerdictView["edit"], opts: StaleBodyOpts = {}, key = ""): string {
-  if (!edit) return "";
-  const home = typeof edit.home === "string"
-    ? `<div class="wiki-stale-fix-row"><span class="wiki-stale-fix-k">Point to the home</span><del>${esc(edit.old)}</del> → <ins>${edit.home ? esc(edit.home) : "<em>(removed)</em>"}</ins></div>`
-    : "";
+/** Which fix a Draft fix's buttons name: the data attributes the Apply and
+ *  Send handlers post, and whether a live Stale check card already holds it. */
+export interface StaleFixTarget {
+  attrs: string;
+  inReview?: boolean;
+}
+
+/** One variant's Apply and Send buttons (PR 3). */
+function fixButtons(target: StaleFixTarget | undefined, variant: "new" | "home", old: string): string {
+  if (!target || target.inReview) return "";
+  const attrs = `${target.attrs} data-variant="${variant}" data-old="${esc(old)}"`;
   return (
-    `<details class="wiki-stale-fix"${key ? openAttr(opts, key, false) : ""}><summary>Draft fix</summary>` +
-    `<div class="wiki-stale-fix-row"><span class="wiki-stale-fix-k">Update the text</span><del>${esc(edit.old)}</del> → <ins>${esc(edit.new)}</ins></div>` +
-    home +
-    `<div class="wiki-stale-fix-note">Read-only: Apply and Send to Gardener come later.</div></details>`
+    `<span class="wiki-stale-fix-actions">` +
+    `<button type="button" class="wiki-stale-btn" data-stale-apply ${attrs}>Apply</button>` +
+    `<button type="button" class="wiki-stale-btn" data-stale-send ${attrs}>Send to Gardener</button>` +
+    `</span>`
   );
 }
 
-function verdictHtml(v: StaleVerdictView | undefined, opts: StaleBodyOpts, fixKey: string): string {
+/** The model's drafted fix (D8): old → new, and the point-to-the-home variant,
+ *  each with Apply and Send to Gardener when `target` names it (PR 3). */
+export function draftFixHtml(edit: StaleVerdictView["edit"], opts: StaleBodyOpts = {}, key = "", target?: StaleFixTarget): string {
+  if (!edit) return "";
+  const home = typeof edit.home === "string"
+    ? `<div class="wiki-stale-fix-row"><span class="wiki-stale-fix-k">Point to the home</span><del>${esc(edit.old)}</del> → <ins>${edit.home ? esc(edit.home) : "<em>(removed)</em>"}</ins>${fixButtons(target, "home", edit.old)}</div>`
+    : "";
+  return (
+    `<details class="wiki-stale-fix"${key ? openAttr(opts, key, false) : ""}><summary>Draft fix</summary>` +
+    `<div class="wiki-stale-fix-row"><span class="wiki-stale-fix-k">Update the text</span><del>${esc(edit.old)}</del> → <ins>${esc(edit.new)}</ins>${fixButtons(target, "new", edit.old)}</div>` +
+    home +
+    (target?.inReview ? `<div class="wiki-stale-fix-note" data-stale-in-review>⧗ In review in the Gardener.</div>` : "") +
+    `</details>`
+  );
+}
+
+/** Is the fix with `old`, writing `page` after `link`, on the page's live card? */
+const fixInReview = (r: StaleReportView, page: string, link: string, old: string | undefined) =>
+  old !== undefined && (r.inReview?.edits ?? []).some((e) => e.page === page && e.link === link && e.old === old);
+
+function verdictHtml(v: StaleVerdictView | undefined, opts: StaleBodyOpts, fixKey: string, target?: StaleFixTarget): string {
   if (!v) return "";
   return (
     `<div class="wiki-stale-verdict v-${esc(v.verdict)}"><span class="wiki-stale-vlabel">${esc(VERDICT_LABEL[v.verdict] ?? v.verdict)}</span>` +
     (v.checkedBy === "reader" ? `<span class="wiki-stale-by">by a reader</span>` : "") +
     (v.reason ? ` <span class="wiki-stale-reason">${esc(v.reason)}</span>` : "") +
     `</div>` +
-    (v.verdict === "stale" || v.verdict === "unsure" ? draftFixHtml(v.edit, opts, fixKey) : "")
+    (v.verdict === "stale" || v.verdict === "unsure" ? draftFixHtml(v.edit, opts, fixKey, v.verdict === "stale" ? target : undefined) : "")
   );
 }
 
@@ -195,7 +233,10 @@ export function staleBodyHtml(r: StaleReportView | null, opts: StaleBodyOpts = {
         `<div class="wiki-stale-item" data-stale-hit="${h.line}">` +
         `<div class="wiki-stale-line"><span class="wiki-stale-ln">L${h.line}</span> ${esc(h.text)}</div>` +
         `<div class="wiki-stale-target">${pageLink(h.target, stem(h.target))} is <code>${esc(h.now)}</code></div>` +
-        verdictHtml(c, opts, `fix:hit:${h.line}:${h.target}`) +
+        verdictHtml(c, opts, `fix:hit:${h.line}:${h.target}`, {
+          attrs: `data-kind="status-line" data-stale-page="${esc(page)}" data-line="${h.line}" data-target="${esc(h.target)}"`,
+          inReview: fixInReview(r, page, h.target, c.edit?.old),
+        }) +
         verdictButtons(`data-kind="status-line" data-stale-page="${esc(page)}" data-line="${h.line}" data-target="${esc(h.target)}"`) +
         `</div>`;
     }
@@ -230,7 +271,10 @@ export function staleBodyHtml(r: StaleReportView | null, opts: StaleBodyOpts = {
         for (const p of l.passages.filter((x) => x.claim)) html += `<div class="wiki-stale-line"><span class="wiki-stale-ln">L${p.line}</span> ${esc(p.text)}</div>`;
         const failed = opts.rowErrors?.[l.relPath];
         if (failed) html += `<div class="wiki-stale-error" data-stale-row-error>Not checked: ${esc(failed)}</div>`;
-        html += verdictHtml(l.verdict, opts, `fix:linking:${l.relPath}`);
+        html += verdictHtml(l.verdict, opts, `fix:linking:${l.relPath}`, {
+          attrs: `data-kind="passage" data-stale-page="${esc(page)}" data-linking="${esc(l.relPath)}"`,
+          inReview: fixInReview(r, l.relPath, page, l.verdict?.edit?.old ?? undefined),
+        });
         if (l.verdict?.checkedBy !== "reader") html += verdictButtons(`data-kind="passage" data-stale-page="${esc(page)}" data-linking="${esc(l.relPath)}"`);
       }
       html += `</div>`;
@@ -268,6 +312,7 @@ export function wikiStaleTabStyles(): string {
     .wiki-stale-fix del { color: var(--status-error); }
     .wiki-stale-fix ins { color: var(--status-success); text-decoration: none; }
     .wiki-stale-fix-note { font-size: 11px; color: var(--text-faint); }
+    .wiki-stale-fix-actions { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle; }
     .wiki-stale-actions { display: flex; gap: 6px; margin-top: 5px; }
     .wiki-stale-btn { font: inherit; font-size: 11.5px; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--border-secondary); background: var(--bg-panel); color: var(--text-secondary); cursor: pointer; }
     .wiki-stale-btn:hover { border-color: var(--accent); color: var(--text-primary); }

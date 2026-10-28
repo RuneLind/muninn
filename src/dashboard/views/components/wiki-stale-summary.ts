@@ -20,12 +20,15 @@ export interface StaleSummaryRow {
   staleLines: number;
   toCheck: number;
   changed?: boolean;
+  /** PR 3 (D31): fixes for this page waiting in the Gardener. */
+  inReview?: number;
 }
 
 export interface StaleSummaryView {
   pages?: StaleSummaryRow[];
-  totals?: { staleLines: number; toCheck: number; changedPages?: number };
+  totals?: { staleLines: number; toCheck: number; changedPages?: number; inReview?: number };
   verdicts?: "unavailable";
+  inReview?: "unavailable";
   error?: string;
 }
 
@@ -39,11 +42,22 @@ export function staleCountMap(s: StaleSummaryView | null | undefined): Map<strin
 
 const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 
-/** The rail row's badge: «⚠ N · M» with the words on hover, "" when both are 0. */
+/** «N fixes in review» (PR 3, D31). */
+export const inReviewText = (n: number) => `${plural(n, "fix", "fixes")} in review`;
+
+/** The rail row's badge: «⚠ N · M» with the words on hover, then «⧗ K» while
+ *  K fixes wait in the Gardener (PR 3); "" when all are 0. */
 export function staleRailBadgeHtml(c: StalePageCounts | undefined): string {
-  if (!c || (!c.staleLines && !c.toCheck)) return "";
-  const words = staleCountsText(c).replace(/^⚠ /, "");
-  return `<span class="wiki-stale-rail" data-stale-rail="${c.staleLines}·${c.toCheck}" title="${esc(words)}">⚠ ${c.staleLines} · ${c.toCheck}</span>`;
+  const review = Number(c?.inReview) || 0;
+  if (!c || (!c.staleLines && !c.toCheck && !review)) return "";
+  const stale = c.staleLines || c.toCheck;
+  const words = [stale ? staleCountsText(c).replace(/^⚠ /, "") : "", review ? `${inReviewText(review)} in the Gardener` : ""].filter(Boolean).join(" · ");
+  return (
+    `<span class="wiki-stale-rail${stale ? "" : " review-only"}" data-stale-rail="${c.staleLines}·${c.toCheck}"${review ? ` data-stale-review="${review}"` : ""} title="${esc(words)}">` +
+    (stale ? `⚠ ${c.staleLines} · ${c.toCheck}` : "") +
+    (review ? `${stale ? " " : ""}<span class="wiki-stale-rail-review">⧗ ${review}</span>` : "") +
+    `</span>`
+  );
 }
 
 /** The article head's pill, from the open page's report: "" until it loads
@@ -52,16 +66,21 @@ export function stalePillHtml(r: StaleReportView | null | undefined): string {
   if (!r || r.error) return "";
   const c = staleCounts(r);
   const none = !c.staleLines && !c.toCheck;
+  const review = Number(c.inReview) || 0;
   return (
     `<button type="button" class="wiki-stale-pill${none ? " none" : ""}" data-stale-pill="${c.staleLines}·${c.toCheck}" title="Open the STALE tab">` +
     esc(staleCountsText(c)) +
+    (review ? ` <span class="wiki-stale-pill-review" data-stale-pill-review="${review}">⧗ ${esc(inReviewText(review))}</span>` : "") +
     `</button>`
   );
 }
 
 /** Every row with its two counts read as numbers once, in the summary's order. */
 const countedRows = (s: StaleSummaryView) =>
-  (s.pages ?? []).map((r) => ({ r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0 } }));
+  (s.pages ?? []).map((r) => {
+    const inReview = Number(r.inReview) || 0;
+    return { r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0, ...(inReview ? { inReview } : {}) } as StalePageCounts };
+  });
 
 const isStale = (c: StalePageCounts) => c.staleLines + c.toCheck > 0;
 
@@ -108,6 +127,8 @@ export function staleHomeBodyHtml(s: StaleSummaryView | null | undefined): strin
 export function wikiStaleSummaryStyles(): string {
   return `
     .wiki-stale-rail { font-size: 10px; line-height: 1.5; padding: 0 5px; border-radius: 8px; white-space: nowrap; background: color-mix(in srgb, var(--status-warning) 22%, transparent); color: var(--text-primary); }
+    .wiki-stale-rail.review-only { background: color-mix(in srgb, var(--status-info) 18%, transparent); }
+    .wiki-stale-rail-review, .wiki-stale-pill-review { white-space: nowrap; }
     .wiki-stale-pill-slot:empty { display: none; }
     .wiki-stale-pill { font: inherit; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; cursor: pointer; border: 1px solid color-mix(in srgb, var(--status-warning) 55%, transparent); background: color-mix(in srgb, var(--status-warning) 14%, transparent); color: var(--text-primary); }
     .wiki-stale-pill.none { border-color: var(--border-primary); background: transparent; color: var(--text-dim); }

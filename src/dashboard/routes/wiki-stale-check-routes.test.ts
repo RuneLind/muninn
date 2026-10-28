@@ -26,6 +26,8 @@ import {
 } from "../../wiki/stale-confirm.ts";
 import * as confirmModule from "../../wiki/stale-confirm.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { __setStaleProposalStoreForTest } from "../../gardener/stale-proposals.ts";
+import { memoryStaleProposalStore } from "../../test/stale-proposal-store.ts";
 
 // Fixed error copy (A11); spelled out so the test reads without the fix in place.
 const CHECK_CALL_FAILED = "The check call failed or timed out.";
@@ -98,11 +100,14 @@ describe("the Stale check's verdict routes", () => {
     app.onError((err, c) => c.json({ error: String(err) }, 500));
     registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
     __setStaleModelForTest(model);
+    // PR 3: the ⧗ states read the Stale check proposals; none here, and no database.
+    __setStaleProposalStoreForTest(memoryStaleProposalStore());
   }, 30_000);
 
   afterAll(async () => {
     __setStaleModelForTest(null);
     __setStaleVerdictStoreForTest(null);
+    __setStaleProposalStoreForTest(null);
     if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
     else process.env.WIKI_EXTRA = prevExtra;
     if (prevBots === undefined) delete process.env.MUNINN_BOTS_DIR;
