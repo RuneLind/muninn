@@ -8,6 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { renderWikiHtml } from "../../../wiki/render.ts";
+import { statusLineCandidates } from "../../../wiki/stale.ts";
 import type { WikiPageMeta } from "../../../wiki/store.ts";
 import { placeStaleMarks, STALE_MARK_CLASS } from "./wiki-stale-marks.ts";
 import type { StaleHitView } from "./wiki-stale-tab.ts";
@@ -34,6 +35,47 @@ describe("stale marks on the rendered page (PR 2b, D21)", () => {
     expect(marks("| Plan | Status | n |\n|---|---|---|\n| [[p]] | done | 12 |\n", [{ line: 3, text: "| [[p]] | done | 12 |", said: ["shipped"] }]).marked).toEqual([["done", "3"]]);
     expect(marks("| Plan | Status | Note |\n|---|---|---|\n| [[p]] | blocked | waiting |\n", [{ line: 3, text: "| [[p]] | blocked | waiting |", said: ["blocked"] }]).marked).toEqual([["blocked", "3"]]);
     expect(marks("| Plan | Status |\n|---|---|\n| [[p]] v2 | done |\n", [{ line: 3, text: "| [[p]] v2 | done |", said: ["shipped"] }]).marked).toEqual([["done", "3"]]);
+  });
+
+  // The server reads a row's source, `|` between cells, so a phrase never
+  // spans a cell edge there.
+  test("«open | PR» across cells is no «open PR»", () => {
+    const md = "| Plan | a | b | c |\n|---|---|---|---|\n| [[p]] | open | PR | in-flight |\n";
+    expect(marks(md, [{ line: 3, text: "| [[p]] | open | PR | in-flight |", said: ["in-flight"] }]).marked).toEqual([["in-flight", "3"]]);
+  });
+
+  test("«not | merged» across cells is a shipped word, not a negated one", () => {
+    const md = "| Plan | a | b |\n|---|---|---|\n| [[p]] | not | merged |\n";
+    expect(marks(md, [{ line: 3, text: "| [[p]] | not | merged |", said: ["shipped"], now: "proposed" }]).marked).toEqual([["merged", "3"]]);
+  });
+
+  test("an element edge inside one cell is no cell edge: the phrase still reads", () => {
+    // The server reads «open PRs» here; the client's text runs are «open PR» and «s».
+    const md = "| Plan | a |\n|---|---|\n| [[p]] | open PR**s** |\n";
+    expect(marks(md, [{ line: 3, text: "| [[p]] | open PR**s** |", said: ["in-flight"] }]).marked).toEqual([["open PR", "3"], ["s", "3"]]);
+  });
+
+  test("one hit on two lines with the same words and no more takes no mark", () => {
+    // The blockquote is no hit on the server, yet it holds the hit's words
+    // exactly: score and fit tie, so no line is the hit's.
+    const md = "> [[p]] in-flight\n\n- [[p]] in-flight\n";
+    const hits = statusLineCandidates(md);
+    expect(hits.map((h) => [h.line, h.text])).toEqual([[3, "- [[p]] in-flight"]]);
+    expect(marks(md, [{ ...hits[0]!, target: "p.md" }])).toEqual({ placed: 0, marked: [] });
+  });
+
+  test("a cut window's hit takes no mark when another line holds its words as well", () => {
+    // Over the cap the server cuts the line, so the hit's own line holds more
+    // words than the window; the blockquote above (no hit on the server)
+    // holds exactly the window's. Same score: a tie, so no mark.
+    const w = (n: number) => Array.from({ length: n }, (_, i) => `w${i}`).join(" ");
+    const md = `> [[p]] in-flight ${w(88)}\n\n- [[p]] in-flight ${w(90)}\n`;
+    const hits = statusLineCandidates(md);
+    expect(hits.map((h) => [h.line, h.text.endsWith("…")])).toEqual([[3, true]]);
+    const hit = { ...hits[0]!, target: "p.md" };
+    expect(marks(md, [hit])).toEqual({ placed: 0, marked: [] });
+    // Alone, the cut hit's line takes its mark.
+    expect(marks(`- [[p]] in-flight ${w(90)}\n`, [{ ...hit, line: 1 }]).marked).toEqual([["in-flight", "1"]]);
   });
 
   test("an exact line beats a line that holds more words", () => {

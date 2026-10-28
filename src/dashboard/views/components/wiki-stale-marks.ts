@@ -15,9 +15,10 @@
  * candidate line is scored against the hit's text (its words in order, links
  * left out on both sides, {@link lineScore}), at or above {@link MATCH_MIN};
  * a tie goes to the line with the fewest words the hit does not hold, so an
- * exact line beats a longer one. A mark lands only on a unique best
- * candidate; with none, or a tie on both, there is no mark and the STALE tab
- * still lists the hit. A hit on a frontmatter line has no rendered line and
+ * exact line beats a longer one, unless the hit's text is a cut window (`…`):
+ * then the hit's own line holds more than the window, and a score tie stays a
+ * tie. A mark lands only on a unique best candidate; with none, or a tie,
+ * there is no mark and the STALE tab still lists the hit. A hit on a frontmatter line has no rendered line and
  * no mark.
  *
  * DOM-free at import time; the pure halves are exported for the unit test,
@@ -43,6 +44,8 @@ const BLOCK_TAGS = new Set([
 const MASKED_TAGS = new Set(["CODE", "PRE", "DEL", "S", "STRIKE", "KBD", "SAMP"]);
 
 const CELL_TAGS = new Set(["TD", "TH"]);
+/** What a cell edge reads as: neither a space nor a word character. */
+const CELL_EDGE = " | ";
 
 const isLink = (el: Element) => el.classList.contains("wiki-link") || el.classList.contains("wiki-link-missing");
 
@@ -78,6 +81,11 @@ export function lineScore(hit: readonly string[], line: readonly string[]): numb
     prev = cur;
   }
   return prev[line.length]! / hit.length;
+}
+
+/** Candidate order for a hit cut to a window: {@link lineScore} alone. */
+export function compareScore(x: { score: number }, y: { score: number }): number {
+  return y.score - x.score;
 }
 
 /** Candidate order: the higher {@link lineScore} first, then the higher share
@@ -184,12 +192,13 @@ function candidateFor(a: Element, container: Element, hit: StaleHitView, want: r
     if (p.link) break;
     seg.push(p);
   }
-  // Masked runs keep their length, so offsets map back, but hold no word; a
-  // space stands for each cell edge, which the rendered text has none of.
+  // Masked runs keep their length, so offsets map back, but hold no word. A
+  // cell edge reads as ` | `, as in the row's source the server read, so a
+  // phrase (`open PR`, `not merged`) never spans two cells.
   let text = "";
   const at: number[] = [];
   seg.forEach((p, i) => {
-    if (i > 0 && p.cell !== seg[i - 1]!.cell) text += " ";
+    if (i > 0 && p.cell !== seg[i - 1]!.cell) text += CELL_EDGE;
     at.push(text.length);
     text += p.masked ? " ".repeat(p.text.length) : p.text;
   });
@@ -241,9 +250,12 @@ export function placeStaleMarks(container: Element, hits: readonly StaleHitView[
     const want = hitTokens(hit.text);
     const anchors = byTarget.get(hit.target) ?? [];
     const found = anchors.map((a) => candidateFor(a, container, hit, want, memo)).filter((c): c is Candidate => !!c && c.score >= MATCH_MIN);
-    found.sort(compareFit);
+    // A cut window (`…`) holds only part of its line, so the hit's own line
+    // fits it worse than a line holding just the window: fit decides nothing.
+    const cmp = hit.text.includes("…") ? compareScore : compareFit;
+    found.sort(cmp);
     // A tie at the top is no unique match.
-    if (!found.length || (found.length > 1 && compareFit(found[0]!, found[1]!) === 0)) continue;
+    if (!found.length || (found.length > 1 && cmp(found[0]!, found[1]!) === 0)) continue;
     plans.push({ hit, c: found[0]! });
   }
   // A link two hits both claim is not unique either.

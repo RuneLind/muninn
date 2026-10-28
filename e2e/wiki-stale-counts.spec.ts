@@ -10,9 +10,9 @@
  *      them equal what the tab shows.
  *   2. **Marks land in the browser on the said words (D21)**: in a list item,
  *      in a paragraph line (bare text: the reader emits no `<p>`) and in a
- *      table row (the link in one cell, the word in the next). A hit two
- *      identical lines share, and a hit whose words another line also holds,
- *      get no mark while the tab still lists them.
+ *      table row (the link in one cell, the word in the next). A confirmed
+ *      line beats a longer line that holds all its words; a hit two identical
+ *      lines share gets no mark while the tab still lists it.
  *   3. **Navigation paints no other page's counts**: a page's report that is
  *      still in flight shows no pill and no marks, and a report for a page
  *      the reader left that answers late paints nothing.
@@ -56,8 +56,9 @@ const ROW_LINE = "| [[p]] | blokkert |";
 /** Two identical lines: one key, two hits, no unique mark for either. */
 const TWIN_LINE = "- [[q]] is a draft still";
 const UNCONFIRMED_LINE = "- [[p]] is proposed per the old note";
-/** A confirmed line and, before it, an unconfirmed line holding all its words:
- *  two candidates that tie, so no mark (the first in the page is the wrong one). */
+/** A confirmed line and, before it, an unconfirmed line holding all its words
+ *  and more: both score 1, the exact line fits better, so the mark lands on
+ *  NEAR_LINE and never on the decoy above it. */
 const NEAR_DECOY_LINE = "- [[p]] is a draft still, per the review";
 const NEAR_LINE = "- [[p]] is a draft still";
 const HUB2_LINE = "- [[p]] is blocked now";
@@ -228,6 +229,17 @@ async function markPlaces(p: Page): Promise<string[]> {
   );
 }
 
+/** The near pair and the twins: the draft mark sits on NEAR_LINE, not on its
+ *  decoy, and neither twin (target q) holds a mark. */
+async function expectDraftMarks(p: Page): Promise<void> {
+  const items = await marks(p).evaluateAll((els) =>
+    els.filter((m) => m.textContent === "draft").map((m) => m.closest("li")?.textContent?.trim() ?? ""),
+  );
+  expect(items).toHaveLength(1);
+  expect(items[0]).toMatch(/is a draft still$/);
+  await expect(p.locator('.wiki-article li:has(a[data-relpath="plans/q.md"]) mark.wiki-stale-mark')).toHaveCount(0);
+}
+
 /** Hold the page report for `rel` until the returned release is called. */
 async function holdReport(p: Page, rel: string): Promise<() => void> {
   let release: () => void = () => {};
@@ -253,10 +265,12 @@ test("the pill, the rail badge, the marks and the home show the STALE tab's numb
   await expect(pill(p)).toHaveText(HUB_TEXT);
   await expect(railBadge(p, "hub.md")).toHaveText("⚠ 6 · 1");
   await expect(railBadge(p, "hub2.md")).toHaveText("⚠ 1 · 0");
-  // Three marks: a list item, a paragraph line and a table row. The twins and
-  // the near line tie, so none of them is marked; nor are unconfirmed lines.
-  await expect(marks(p)).toHaveCount(3);
-  expect((await markPlaces(p)).sort()).toEqual(["blokkert@tr", "in-flight@li", "pågår@text"]);
+  // Four marks: two list items, a paragraph line and a table row. The near
+  // line beats its decoy (exact over superset); the twins tie, so neither is
+  // marked; nor are unconfirmed lines.
+  await expect(marks(p)).toHaveCount(4);
+  expect((await markPlaces(p)).sort()).toEqual(["blokkert@tr", "draft@li", "in-flight@li", "pågår@text"]);
+  await expectDraftMarks(p);
   // The pill opens the tab.
   await p.locator('.wiki-conn-tab[data-conntab="conn"]').click();
   await pill(p).click();
@@ -280,7 +294,7 @@ test("the pill, the rail badge, the marks and the home show the STALE tab's numb
 test("navigating away and back paints no other page's counts or marks", async ({ page: p }) => {
   await open(p, "hub.md", "The pin moved.");
   await expect(pill(p)).toHaveText(HUB_TEXT);
-  await expect(marks(p)).toHaveCount(3);
+  await expect(marks(p)).toHaveCount(4);
 
   // hub2's report is in flight: no pill, no marks, never hub's.
   const releaseHub2 = await holdReport(p, "hub2.md");
@@ -481,15 +495,17 @@ test("Not a status drops the tab, the pill, the rail badge, the mark and the hom
   await open(p, "hub.md", "The pin moved.");
   await p.locator('.wiki-conn-tab[data-conntab="stale"]').click();
   await expect(pill(p)).toHaveText(HUB_TEXT);
-  await expect(marks(p)).toHaveCount(3);
+  await expect(marks(p)).toHaveCount(4);
   await p.locator('[data-stale-hit="5"] [data-stale-verdict="not-status"]').click();
   const dropped = "⚠ 5 stale status lines · 1 linking page to check";
   await expect(p.locator("#staleBody .wiki-stale-head")).toHaveText(dropped);
   await expect(p.locator("#wikiStaleCount")).toHaveText("5 · 1");
   await expect(pill(p)).toHaveText(dropped);
   await expect(railBadge(p, "hub.md")).toHaveText("⚠ 5 · 1");
-  await expect(marks(p)).toHaveCount(2);
-  expect((await markPlaces(p)).sort()).toEqual(["blokkert@tr", "pågår@text"]);
+  // Line 5 is LI_LINE: its mark goes, the other three stay.
+  await expect(marks(p)).toHaveCount(3);
+  expect((await markPlaces(p)).sort()).toEqual(["blokkert@tr", "draft@li", "pågår@text"]);
+  await expectDraftMarks(p);
   // Off the page, its row reads the summary again: refreshed, not the old count.
   await p.locator('.wiki-list-item[data-relpath="hub2.md"]').click();
   await expect(pill(p)).toHaveText(HUB2_TEXT);
