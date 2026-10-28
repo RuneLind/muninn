@@ -151,6 +151,20 @@ describe("GET /api/wiki/stale", () => {
     expect((await get("wiki=stalewiki&asOf=yesterday")).body).toMatchObject({ readonly: false });
   });
 
+  test("refresh=1 rebuilds the index: a page written after the cache warmed is in the report", async () => {
+    const linking = async (q: string) => ((await get(`wiki=stalewiki&page=hub.md&asOf=2026-06-20${q}`)).body.buckets.linking as { relPath: string }[]).map((l) => l.relPath);
+    await linking(""); // warm the cache
+    const extra = path.join(root, "notes", "late.md");
+    await writeFile(extra, page("Late", "The lock in [[hub]] landed on 02.06."));
+    try {
+      expect(await linking("")).not.toContain("notes/late.md");
+      expect(await linking("&refresh=1")).toContain("notes/late.md");
+    } finally {
+      await rm(extra, { force: true });
+      __resetWikiCacheForTest();
+    }
+  });
+
   test("refusals: an unknown wiki, a bad asOf, an unknown page", async () => {
     expect((await get("wiki=nope")).status).toBe(404);
     expect((await get("wiki=stalewiki&asOf=yesterday")).status).toBe(400);

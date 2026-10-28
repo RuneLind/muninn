@@ -129,3 +129,14 @@ describe("applyStaleEdits", () => {
     expect(r.content).toBe(page("The pin in [[hub]] landed on 18.06.\n\nThe lock in [[hub]] is merged."));
   });
 });
+
+describe("placeStaleEdit — a blank old", () => {
+  test("an empty old is refused, not counted forever", () => {
+    // Unguarded, `indexOf("", len + 1)` returns `len` and the count loop never ends.
+    expect(placeStaleEdit(page("The pin in [[hub]] landed on 23.05."), passage("", "x"), index)).toEqual({ ok: false, reason: STALE_FIX_NOT_IN_PASSAGE });
+  });
+
+  test("a whitespace-only old is refused, even where it would place once", () => {
+    expect(placeStaleEdit(page("[[hub]] landed"), passage(" ", "_"), index)).toEqual({ ok: false, reason: STALE_FIX_NOT_IN_PASSAGE });
+  });
+});

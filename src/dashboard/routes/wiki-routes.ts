@@ -2326,7 +2326,11 @@ export function registerWikiToolRoutes(
   // (`parseStaleAsOf`); `session` names an agent session in the warm work
   // memo and answers the pages it wrote. Spends and writes nothing: the hits
   // come off the cached index, the buckets read the linking pages from disk
-  // and are cached on that index. Tool half: `MUNINN_PROFILE=nais` drops it.
+  // and are cached on that index. `refresh=1` rebuilds the index first, so a
+  // report right after a git or editor write judges the new text (the CLI
+  // `scripts/wiki-stale.ts` always sends it; the reader never does). Tool
+  // half: `MUNINN_PROFILE=nais` drops it, so the read slice's refresh
+  // throttle does not apply.
   app.get("/api/wiki/stale", async (c) => {
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
@@ -2341,7 +2345,7 @@ export function registerWikiToolRoutes(
     const readonly = isWikiReadonly() ? "instance" : isReadonlyWikiRoot(entry.root) ? "root" : false;
     const asOfMs = parseStaleAsOf(c.req.query("asOf"));
     if (asOfMs === null) return c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms", readonly }, 400);
-    const index = await getWikiIndex({ root: entry.root });
+    const index = await getWikiIndex({ root: entry.root, refresh: c.req.query("refresh") === "1" });
     if (!index) return c.json({ error: "wiki directory not found", readonly }, 503);
     const base = { wiki: entry.name, readonly };
     const session = (c.req.query("session") ?? "").trim();
@@ -2511,7 +2515,9 @@ export function registerWikiToolRoutes(
   // THE STALE CHECK'S MODEL HALF (PR 2a, `src/wiki/stale-confirm.ts`).
   // Both refuse on a readonly instance (D25) and on a readonly root (the
   // egress guard, which reads the root), take JSON only and resolve the wiki
-  // like the GET above.
+  // like the GET above. `refresh` (body `true`/`"1"`, or `?refresh=1`)
+  // rebuilds the index first, as on the GET: Check's buckets then come off
+  // the text on disk, the text its passage key (`changedHashOf`) reads.
   const staleRequest = async (c: Context) => {
     const notJson = requireJsonRequest(c);
     if (notJson) return { refusal: notJson } as const;
@@ -2525,7 +2531,8 @@ export function registerWikiToolRoutes(
     if (egress) return { refusal: egress } as const;
     const asOfMs = parseStaleAsOf(str("asOf") || undefined);
     if (asOfMs === null) return { refusal: c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms" }, 400) } as const;
-    const index = await getWikiIndex({ root: entry.root });
+    const refresh = body.refresh === true || body.refresh === "1" || c.req.query("refresh") === "1";
+    const index = await getWikiIndex({ root: entry.root, refresh });
     if (!index) return { refusal: c.json({ error: "wiki directory not found" }, 503) } as const;
     const pageRef = str("page");
     if (!pageRef) return { refusal: c.json({ error: "page is required" }, 400) } as const;

@@ -158,6 +158,27 @@ describe("the Stale check's verdict routes", () => {
     expect(prompts).toHaveLength(toCheck);
   });
 
+  test("refresh (body or query) rebuilds the index, so Check judges the pages on disk, not a cached index", async () => {
+    fresh();
+    const toCheck = EXTRA_LINKERS + 1;
+    const startOf = async (body: Record<string, unknown>, query = "") =>
+      sseEvents(await (await app.request(`/api/wiki/stale/check${query}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).text())[0]![1];
+    const at = { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" };
+    await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20"); // warm the cache
+    const extra = path.join(root, "notes", "late.md");
+    await writeFile(extra, page("Late", "See [[hub]], updated 21.04."));
+    try {
+      expect((await startOf(at)).toCheck).toBe(toCheck);
+      expect((await startOf({ ...at, refresh: true })).toCheck).toBe(toCheck + 1);
+      await rm(extra);
+      expect((await startOf(at)).toCheck).toBe(toCheck + 1); // still the refreshed cache
+      expect((await startOf(at, "?refresh=1")).toCheck).toBe(toCheck);
+    } finally {
+      await rm(extra, { force: true });
+      __resetWikiCacheForTest();
+    }
+  });
+
   // A2, as the round-3 class check left it: neither asOf nor the commit
   // subjects are key inputs, so a Check under one asOf reuses the verdicts of
   // another, and the GET reads them under either.

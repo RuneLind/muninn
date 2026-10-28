@@ -2,9 +2,12 @@
  * The Stale check's fix paths (plan muninn-wiki-drift-check, PR 3): placing a
  * drafted edit (`old` → `new` or `home`) on the LIVE file.
  *
- * Every write path runs this under its own CAS, inside the per-wiki write
- * queue: Apply (`POST /api/wiki/stale/apply`), Send's redraft
- * (`src/gardener/stale-proposals.ts`) and Accept's preflight (`apply.ts`).
+ * Apply (`POST /api/wiki/stale/apply`) runs this inside the per-wiki write
+ * queue, under a byte CAS on the page. Send's redraft
+ * (`src/gardener/stale-proposals.ts`) runs it OUTSIDE any queue and with no
+ * byte CAS: it only builds a draft, stamped with the `baseHash` of the bytes
+ * it read, and Accept's CAS on that `baseHash` (`apply.ts`) refuses the card
+ * if the page moved since. Accept's preflight places it again.
  * The draft was validated when the model answered (`parseStaleAnswer`), but
  * the page may have moved since, so the edit is placed again from scratch:
  *
@@ -121,6 +124,9 @@ export function staleFixRows(content: string, edit: Pick<StaleFixEdit, "kind" | 
 
 /** Place one edit on `content`, or say why it does not place. */
 export function placeStaleEdit(content: string, edit: StaleFixEdit, index: Pick<WikiIndex, "resolve">): StalePlaceResult {
+  // A blank `old` would never place, and `indexOf("", i)` never moves past
+  // the end, so the count loop below would not end.
+  if (!edit.old.trim()) return { ok: false, reason: STALE_FIX_NOT_IN_PASSAGE };
   if (edit.text === edit.old || edit.text.length > EDIT_TEXT_CAP || /[\r\n]/.test(edit.text)) return { ok: false, reason: STALE_FIX_BAD_TEXT };
   const rows = staleFixRows(content, edit, index);
   let found: number | null = null;

@@ -48,7 +48,7 @@ describe("runWikiStale", () => {
     const out = await runWikiStale(["--wiki", "w", "--pages", "repos/x.md", "--as-of", "2026-10-25", "--base-url", "http://m:1/"], {
       fetchJson: fake(() => report, urls),
     });
-    expect(urls).toEqual(["http://m:1/api/wiki/stale?wiki=w&asOf=2026-10-25&page=repos%2Fx.md"]);
+    expect(urls).toEqual(["http://m:1/api/wiki/stale?wiki=w&asOf=2026-10-25&page=repos%2Fx.md&refresh=1"]);
     const text = out.join("\n");
     expect(text).toContain("stale status lines: 1");
     expect(text).toContain("L124  «proposed» after [[plans/p.mdx]] — plan_status shipped");
@@ -208,7 +208,7 @@ describe("runWikiStale", () => {
     const out = await runWikiStale(["--wiki", "w", "--session", "claude-code:abc"], {
       fetchJson: fake((q) => (q.has("session") ? { session: { id: "claude-code:abc", found: true, pages: ["repos/x.md"] } } : report), urls),
     });
-    expect(urls.map((u) => new URL(u).searchParams.toString())).toEqual(["wiki=w&session=claude-code%3Aabc", "wiki=w&page=repos%2Fx.md"]);
+    expect(urls.map((u) => new URL(u).searchParams.toString())).toEqual(["wiki=w&session=claude-code%3Aabc&refresh=1", "wiki=w&page=repos%2Fx.md"]);
     expect(out[0]).toBe("session claude-code:abc: 1 page(s) in w");
   });
 
@@ -283,9 +283,9 @@ describe("R2-5: a wrong answer is one line for its page, and the run goes on", (
     try {
       const base = `http://127.0.0.1:${server.port}`;
       const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "--base-url", base], { env: {} });
-      expect(out).toEqual([`wiki-stale: unexpected answer (not JSON) from ${base}/api/wiki/stale?wiki=w&page=a.md`]);
+      expect(out).toEqual([`wiki-stale: unexpected answer (not JSON) from ${base}/api/wiki/stale?wiki=w&page=a.md&refresh=1`]);
       const json = await runWikiStale(["--wiki", "w", "--base-url", base, "--json"], { env: {} });
-      expect(json.map((l) => JSON.parse(l))).toEqual([{ notice: `wiki-stale: unexpected answer (not JSON) from ${base}/api/wiki/stale?wiki=w` }]);
+      expect(json.map((l) => JSON.parse(l))).toEqual([{ notice: `wiki-stale: unexpected answer (not JSON) from ${base}/api/wiki/stale?wiki=w&refresh=1` }]);
     } finally {
       server.stop(true);
     }
@@ -492,4 +492,189 @@ test("the script exits 0, even on a usage error", async () => {
   const [code, out] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
   expect(code).toBe(0);
   expect(out).toContain("unknown argument --bogus");
+});
+
+describe("a fresh index: the run's first answered report asks muninn to rebuild it", () => {
+  test("only the first GET carries refresh=1 once it is answered; after a failed one the next asks again", async () => {
+    const urls: string[] = [];
+    await runWikiStale(["--wiki", "w", "--pages", "a.md", "b.md", "c.md"], { env: {}, fetchJson: fake(() => report, urls) });
+    expect(urls.map((u) => new URL(u).searchParams.get("refresh"))).toEqual(["1", null, null]);
+    const tried: string[] = [];
+    await runWikiStale(["--wiki", "w", "--pages", "a.md", "b.md", "c.md"], {
+      env: {},
+      fetchJson: async (url) => {
+        tried.push(url);
+        return new URL(url).searchParams.get("page") === "a.md" ? { status: 503, body: { error: "wiki directory not found" } } : { status: 200, body: report };
+      },
+    });
+    expect(tried.map((u) => new URL(u).searchParams.get("refresh"))).toEqual(["1", "1", null]);
+  });
+});
+
+describe("--send: drafted edits for other pages go to the Gardener, the run's own pages never do (D12)", () => {
+  const TRICKY = `it's "quoted", \`ticked\`, $HOME and $(rm -rf x) — ünïcødé ✓ 23.05`;
+  type Verdict = { relPath: string; verdict: string; reason?: string; edit: { old: string; new: string } | null };
+  /** A stub muninn on a real port: the page report, Check's SSE stream and the send route, recording each send. */
+  function stub(opts: { verdicts: Record<string, Verdict[]>; send?: (body: Record<string, any>) => Response; readonly?: string | false; resolve?: (ref: string) => string }) {
+    const sends: { raw: string; body: Record<string, any>; contentType: string | null }[] = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(req) {
+        const u = new URL(req.url);
+        if (req.method === "GET" && u.pathname === "/api/wiki/stale") {
+          const rel = (opts.resolve ?? ((r: string) => r))(u.searchParams.get("page") ?? "");
+          return Response.json({ ...report, readonly: opts.readonly ?? false, page: { relPath: rel, title: rel } });
+        }
+        if (req.method === "POST" && u.pathname === "/api/wiki/stale/check") {
+          const { page } = (await req.json()) as { page: string };
+          const vs = opts.verdicts[page] ?? [];
+          const frames = [
+            ["start", { type: "start", changed: page, toCheck: vs.length, cached: 0, toCall: vs.length, left: 0 }],
+            ...vs.map((v) => ["verdict", { type: "verdict", reason: "r", cached: false, ...v }]),
+            ["done", { type: "done", calls: vs.length, joined: 0, verdicts: vs.length, errors: 0, left: 0 }],
+          ];
+          return new Response(frames.map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+        }
+        if (req.method === "POST" && u.pathname === "/api/wiki/stale/send") {
+          const raw = await req.text();
+          const body = JSON.parse(raw) as Record<string, any>;
+          sends.push({ raw, body, contentType: req.headers.get("content-type") });
+          return opts.send ? opts.send(body) : Response.json({ ok: true, outcome: "sent", groupKey: `stale-check:${body.page}:1`, supersedes: null, pages: [body.linking], fixes: 1, dropped: [] });
+        }
+        return new Response("404 Not Found", { status: 404 });
+      },
+    });
+    return { sends, base: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) };
+  }
+  const edit = (old: string) => ({ old, new: "x" });
+
+  test("own pages (by path without extension, and by the relPath the route resolved) are «yours»; others are sent with old exactly as drafted", async () => {
+    const s = stub({
+      resolve: (ref) => (ref === "Own Title" ? "notes/titled.md" : ref),
+      verdicts: {
+        "a.md": [
+          { relPath: "notes/own.md", verdict: "stale", edit: edit("own text") },
+          { relPath: "notes/titled.md", verdict: "stale", edit: edit("titled text") },
+          { relPath: "notes/other.md", verdict: "stale", edit: edit(TRICKY) },
+          { relPath: "notes/noedit.md", verdict: "stale", edit: null },
+          { relPath: "notes/fine.md", verdict: "true", edit: null },
+        ],
+      },
+    });
+    try {
+      // `Own Title` is reported after a.md's Check: the sends wait for its relPath.
+      const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "notes/own", "Own Title", "--check", "--send", "--base-url", s.base], { env: {} });
+      expect(s.sends).toHaveLength(1);
+      expect(s.sends[0]!.contentType).toBe("application/json");
+      expect(s.sends[0]!.body).toEqual({ wiki: "w", page: "a.md", kind: "passage", linking: "notes/other.md", variant: "new", old: TRICKY });
+      expect(JSON.parse(s.sends[0]!.raw).old).toBe(TRICKY);
+      const sendLines = out.slice(out.indexOf("send to the Gardener:") + 1);
+      expect(sendLines).toEqual([
+        "  notes/own.md (after a.md): yours — fix it by hand",
+        "  notes/titled.md (after a.md): yours — fix it by hand",
+        "  notes/other.md (after a.md): sent — group stale-check:a.md:1, card pages notes/other.md",
+        "  notes/noedit.md (after a.md): stale, no drafted edit — fix by hand",
+      ]);
+    } finally {
+      s.stop();
+    }
+  });
+
+  test("a JSON refusal is one line with its status and error, and the next page is still sent", async () => {
+    const held = "notes/held.md is held by another Gardener card (Lint, lint:1): accept or dismiss it first.";
+    const s = stub({
+      verdicts: { "a.md": [{ relPath: "notes/held.md", verdict: "stale", edit: edit("h") }, { relPath: "notes/other.md", verdict: "stale", edit: edit("o") }] },
+      send: (b) => (b.linking === "notes/held.md" ? Response.json({ error: held }, { status: 409 }) : Response.json({ ok: true, outcome: "sent", groupKey: "g:2", supersedes: "g:1", pages: ["notes/held.md", "notes/other.md"], fixes: 2, dropped: [] })),
+    });
+    try {
+      const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "--check", "--send", "--base-url", s.base], { env: {} });
+      expect(s.sends.map((x) => x.body.linking)).toEqual(["notes/held.md", "notes/other.md"]);
+      expect(out).toContain(`  notes/held.md (after a.md): refused — HTTP 409: ${held}`);
+      expect(out).toContain("  notes/other.md (after a.md): sent — group g:2, card pages notes/held.md, notes/other.md (replaces g:1)");
+    } finally {
+      s.stop();
+    }
+  });
+
+  test("a muninn without the send route (a non-JSON 404) is said once, and nothing more is sent", async () => {
+    const s = stub({
+      verdicts: { "a.md": [{ relPath: "notes/b.md", verdict: "stale", edit: edit("b") }, { relPath: "notes/c.md", verdict: "stale", edit: edit("c") }] },
+      send: () => new Response("404 Not Found", { status: 404 }),
+    });
+    try {
+      const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "--check", "--send", "--base-url", s.base], { env: {} });
+      expect(s.sends).toHaveLength(1);
+      expect(out.filter((l) => l.includes("no send route"))).toEqual([`wiki-stale: ${s.base} has no send route (POST /api/wiki/stale/send) — nothing was sent to the Gardener`]);
+      expect(out.join("\n")).not.toContain("notes/c.md (after");
+    } finally {
+      s.stop();
+    }
+  });
+
+  test("readonly: no Check and no send, one notice each; a readonly refusal from the send route stops the rest", async () => {
+    const ro = stub({ readonly: "instance", verdicts: { "a.md": [{ relPath: "notes/b.md", verdict: "stale", edit: edit("b") }] } });
+    try {
+      const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "--check", "--send", "--base-url", ro.base], { env: {} });
+      expect(ro.sends).toHaveLength(0);
+      expect(out.slice(-2)).toEqual(["check unavailable: readonly instance", "send unavailable: readonly instance — nothing was sent to the Gardener"]);
+    } finally {
+      ro.stop();
+    }
+    const refuses = stub({
+      verdicts: { "a.md": [{ relPath: "notes/b.md", verdict: "stale", edit: edit("b") }, { relPath: "notes/c.md", verdict: "stale", edit: edit("c") }] },
+      send: () => Response.json({ error: "this wiki is registered read-only (WIKI_READONLY_ROOTS) — muninn only reads it", readonly: true }, { status: 403 }),
+    });
+    try {
+      const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "--check", "--send", "--base-url", refuses.base], { env: {} });
+      expect(refuses.sends).toHaveLength(1);
+      expect(out.some((l) => l.startsWith("  notes/b.md (after a.md): refused — HTTP 403: this wiki is registered read-only"))).toBe(true);
+      expect(out.slice(-2)).toEqual(["check unavailable: readonly wiki", "send unavailable: readonly wiki — nothing was sent to the Gardener"]);
+    } finally {
+      refuses.stop();
+    }
+  });
+
+  test("--json: one send event per outcome, every line parses", async () => {
+    const s = stub({
+      verdicts: { "a.md": [{ relPath: "a2.md", verdict: "stale", edit: edit("own") }, { relPath: "notes/b.md", verdict: "stale", edit: edit(TRICKY) }, { relPath: "notes/c.md", verdict: "stale", edit: null }] },
+    });
+    try {
+      const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "a2", "--check", "--send", "--json", "--base-url", s.base], { env: {} });
+      const parsed = out.map((l) => JSON.parse(l));
+      expect(parsed.filter((o) => o.event === "send").map((o) => [o.linking, o.outcome])).toEqual([
+        ["a2.md", "own"],
+        ["notes/b.md", "sent"],
+        ["notes/c.md", "no-edit"],
+      ]);
+      expect(s.sends.map((x) => x.body.old)).toEqual([TRICKY]);
+    } finally {
+      s.stop();
+    }
+  });
+
+  test("--send without --check sends nothing and says so; the sends have their own bound", async () => {
+    const s = stub({ verdicts: { "a.md": [{ relPath: "notes/b.md", verdict: "stale", edit: edit("b") }] } });
+    try {
+      const out = await runWikiStale(["--wiki", "w", "--pages", "a.md", "--send", "--base-url", s.base], { env: {} });
+      expect(out[0]).toBe("send: --send works only with --check; nothing is sent");
+      expect(s.sends).toHaveLength(0);
+      const hung = await runWikiStale(["--wiki", "w", "--pages", "a.md", "--check", "--send", "--base-url", s.base], { env: {}, sendDeadlineMs: 50, postJson: () => new Promise(() => {}) });
+      expect(hung).toContain("wiki-stale: the sends did not finish in 0.05 s — the rest were not sent");
+    } finally {
+      s.stop();
+    }
+  });
+});
+
+describe("isOwnPage", () => {
+  test("matches the route's resolved relPath, a path with or without its extension, and a bare stem", async () => {
+    const { isOwnPage } = await import("./wiki-stale.ts");
+    expect(isOwnPage("notes/A.md", new Set(["notes/a.md"]), [])).toBe(true);
+    expect(isOwnPage("notes/a.mdx", new Set(), ["./notes/a"])).toBe(true);
+    expect(isOwnPage("notes/a.md", new Set(), ["/notes/a.md"])).toBe(true);
+    expect(isOwnPage("notes/a.md", new Set(), ["a"])).toBe(true);
+    expect(isOwnPage("notes/a.md", new Set(), ["notes/a.mdx"])).toBe(false);
+    expect(isOwnPage("notes/ab.md", new Set(["notes/a.md"]), ["notes/a", "a"])).toBe(false);
+  });
 });

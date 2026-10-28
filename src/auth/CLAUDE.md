@@ -354,8 +354,8 @@ search/similarity/embedding amplifiers (`/api/search/search`, `/api/memsearch`,
 the `*/similar` proxies, `/api/graph/{similarity,author}`, same-story, the
 atlas), the MCP-status probe and the two WS upgrade paths. A second list,
 `REFRESH_SIDE_EFFECTING_GETS`, holds the GETs whose plain read stays open but
-whose `?refresh=1` forces a rebuild — `/api/wiki/pages` and
-`/api/wiki/index-coverage` (a full index build with its git reads),
+whose `?refresh=1` forces a rebuild — `/api/wiki/pages`,
+`/api/wiki/index-coverage` and `/api/wiki/stale` (a full index build with its git reads),
 `/api/wiki/ingest-backlog` and `/api/summaries/stats` (an uncached recompute
 over every summary collection); those count as side-effecting only when a
 `refresh` value is `"1"`, HEAD included. `/api/wiki/page` reads no `refresh`
