@@ -268,16 +268,29 @@ export function paletteBaseMap(): Record<string, PaletteBase> {
 }
 
 /**
- * `html[data-palette="<id>"] { … }` for every palette. Specificity (0,1,1)
- * equals `html[data-theme="dark"]`'s, so the caller emits this AFTER the base
- * blocks and it wins on source order. `only` narrows the tokens emitted (the
- * chat page re-emits its own after its base blocks).
+ * The palette System shows for each OS scheme. System sets no `data-theme`, so
+ * the two blocks key on `html:not([data-theme])` inside the scheme's media
+ * query: an explicit Light or Dark pick still shows the plain base.
+ */
+export const SYSTEM_PALETTES: Readonly<Record<PaletteBase, string>> = { dark: "reading", light: "paper-light" };
+
+/**
+ * `html[data-palette="<id>"] { … }` for every palette, then System's two
+ * defaults. Specificity (0,1,1) equals `html[data-theme="dark"]`'s and beats
+ * the media-query `:root`, so the caller emits this AFTER the base blocks and
+ * it wins on source order. `only` narrows the tokens emitted (the chat page
+ * re-emits its own after its base blocks).
  */
 export function paletteTokenStyles(only?: readonly string[]): string {
-  return PALETTES.map((p) => {
-    const lines = Object.entries(p.tokens)
+  const body = (p: Palette, indent: string) =>
+    Object.entries(p.tokens)
       .filter(([name]) => !only || only.includes(name))
-      .map(([name, value]) => `      ${name}: ${value};`);
-    return `    html[data-palette="${p.id}"] {\n${lines.join("\n")}\n    }`;
-  }).join("\n");
+      .map(([name, value]) => `${indent}${name}: ${value};`)
+      .join("\n");
+  const explicit = PALETTES.map((p) => `    html[data-palette="${p.id}"] {\n${body(p, "      ")}\n    }`);
+  const system = (Object.keys(SYSTEM_PALETTES) as PaletteBase[]).map((base) => {
+    const p = PALETTES.find((x) => x.id === SYSTEM_PALETTES[base])!;
+    return `    @media (prefers-color-scheme: ${base}) {\n      html:not([data-theme]) {\n${body(p, "        ")}\n      }\n    }`;
+  });
+  return [...explicit, ...system].join("\n");
 }

@@ -14,6 +14,9 @@
  *  3. **The picker.** Menu order, keyboard, Escape from anywhere, outside
  *     click and Tools ▾ closing each other, System
  *     clearing both attributes, and `t` cycling the same list.
+ *  3b. **System shows a palette.** With nothing stored, a dark OS shows
+ *     Reading mode and a light OS Light reading mode, on the dashboard and on
+ *     chat, while an explicit Light or Dark pick still shows the plain base.
  *  4. **Mermaid follows the base.** A palette is a layer, never a third base:
  *     the diagram renders mermaid's theme for the palette's base.
  *
@@ -29,7 +32,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { PALETTES } from "../src/dashboard/views/components/palettes.ts";
+import { PALETTES, SYSTEM_PALETTES } from "../src/dashboard/views/components/palettes.ts";
 import { paintedContrast, token } from "./contrast.ts";
 
 const PORT = e2ePort("theme-palettes");
@@ -175,6 +178,25 @@ test.describe("A palette is applied before first paint", () => {
         elevated: p.tokens["--bg-elevated"],
         painted: hexToRgb(p.tokens["--bg-chat"]!),
       });
+    });
+  }
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`System (OS ${scheme}) shows ${SYSTEM_PALETTES[scheme]}; an explicit ${scheme} pick shows the plain base`, async ({ page }) => {
+      const p = PALETTES.find((x) => x.id === SYSTEM_PALETTES[scheme])!;
+      await page.emulateMedia({ colorScheme: scheme });
+      await storeChoice(page, null);
+      await page.goto(BASE + "/");
+      expect(await attrs(page)).toEqual({ theme: null, palette: null, stored: null });
+      const bg = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+      expect(await bg(), "dashboard").toBe(hexToRgb(p.tokens["--bg-page"]!));
+      await page.goto(BASE + "/chat");
+      expect(await page.evaluate(() => getComputedStyle(document.querySelector(".sim-chat")!).backgroundColor), "chat")
+        .toBe(hexToRgb(p.tokens["--bg-chat"]!));
+      await page.goto(BASE + "/");
+      await page.evaluate((x) => localStorage.setItem("muninn-theme", x), scheme);
+      await page.reload();
+      expect(await bg(), `explicit ${scheme}`).not.toBe(hexToRgb(p.tokens["--bg-page"]!));
     });
   }
 
@@ -822,8 +844,8 @@ test.describe("The theme lab", () => {
 
     await page.emulateMedia({ colorScheme: "dark" });
     await expect(page.locator("#themeLab .theme-lab-title")).toContainText("System (dark)");
-    const dark = (await pageBg(page)).match(/\d+/g)!.map(Number);
-    [10, 10, 15].forEach((v, i) => expect(Math.abs(dark[i]! - v), `dark page channel ${i}`).toBeLessThanOrEqual(2));
+    // System on a dark OS is Reading mode, untouched by the light sliders.
+    await expect.poll(() => pageBg(page)).toBe(hexToRgb(READING.tokens["--bg-page"]!));
 
     await page.reload();
     expect((await pageBg(page)).match(/\d+/g)!.map(Number)[0]!, "a dark load keeps the dark state").toBeLessThan(20);

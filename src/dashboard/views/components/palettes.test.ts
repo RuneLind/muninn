@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CHAT_PALETTE_TOKENS, PALETTES, PALETTE_ONLY_TOKENS, PALETTE_REQUIRED_TOKENS, paletteBaseMap, paletteTokenStyles } from "./palettes.ts";
+import { CHAT_PALETTE_TOKENS, PALETTES, PALETTE_ONLY_TOKENS, PALETTE_REQUIRED_TOKENS, SYSTEM_PALETTES, paletteBaseMap, paletteTokenStyles, type PaletteBase } from "./palettes.ts";
 import { THEME_KEY, themeChoices, themeInitScript, themeToggleHtml, themeToggleScript } from "./theme.ts";
 import { baseTokenNames, SHARED_STYLES, themeTokenStyles } from "../shared-styles.ts";
 import { chatStyles } from "../../../chat/views/components/chat-styles.ts";
@@ -84,6 +84,20 @@ describe("palette registry", () => {
 
   test("the summary export's token styles stay on the two bases", () => {
     expect(themeTokenStyles()).not.toContain("data-palette");
+  });
+
+  test("System shows Reading mode on a dark OS and Light reading mode on a light one", () => {
+    expect(SYSTEM_PALETTES).toEqual({ dark: "reading", light: "paper-light" });
+    for (const [base, id] of Object.entries(SYSTEM_PALETTES)) {
+      const p = PALETTES.find((x) => x.id === id)!;
+      expect(p.base, id).toBe(base as PaletteBase);
+      const css = paletteTokenStyles();
+      const at = css.indexOf(`@media (prefers-color-scheme: ${base}) {\n      html:not([data-theme]) {`);
+      expect(at, `${base} block`).toBeGreaterThan(0);
+      expect(css.slice(at, css.indexOf("\n    }", at))).toContain(`--bg-page: ${p.tokens["--bg-page"]};`);
+      // After every explicit palette block, so source order cannot let one shadow it.
+      for (const q of PALETTES) expect(css.indexOf(`html[data-palette="${q.id}"] {`)).toBeLessThan(at);
+    }
   });
 
   test("paletteTokenStyles(only) narrows the emitted tokens", () => {

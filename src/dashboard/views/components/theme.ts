@@ -3,8 +3,9 @@
  * The choices, in picker and `t`-cycle order:
  *
  *   - `system` (default) — no `data-theme` and no `data-palette` on <html>; the
- *     `prefers-color-scheme` media queries in SHARED_STYLES / chatStyles govern.
- *     True OS-follow with zero JS and zero flash.
+ *     `prefers-color-scheme` media queries in SHARED_STYLES / chatStyles govern,
+ *     showing each scheme's `SYSTEM_PALETTES` entry (Reading mode on dark, Light
+ *     reading mode on light). True OS-follow with zero JS and zero flash.
  *   - `light` / `dark` — an explicit base; persisted in localStorage and applied
  *     as `<html data-theme="…">`, whose `html[data-theme=…]` selectors
  *     (specificity 0,1,1) outrank the media-query `:root` rules (0,1,0).
