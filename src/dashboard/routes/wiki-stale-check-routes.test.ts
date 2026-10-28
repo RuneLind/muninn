@@ -153,11 +153,10 @@ describe("the Stale check's verdict routes", () => {
     expect(prompts).toHaveLength(toCheck);
   });
 
-  // A2: asOf cuts the commit subjects the call reads, so a verdict judged
-  // under one asOf is not reused under another.
-  // Fix round 2 batch 2: the key reads the commit subjects the call carries, not
-  // asOf itself; 06-20 and 06-25 both see «hub: the pin moves to 18.06» only.
-  test("A2: a Check under another asOf with the same subjects reuses the verdicts, and the GET reads them under either", async () => {
+  // A2, as the round-3 class check left it: neither asOf nor the commit
+  // subjects are key inputs, so a Check under one asOf reuses the verdicts of
+  // another, and the GET reads them under either.
+  test("A2: a Check under another asOf reuses the verdicts, and the GET reads them under either", async () => {
     fresh();
     await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text();
     expect(prompts).toHaveLength(CHECK_MAX_CALLS);
