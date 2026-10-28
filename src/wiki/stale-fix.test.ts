@@ -304,3 +304,86 @@ describe("placeStaleEdit — old may not cut other inline constructs", () => {
     expect(placeStaleEdit(page("The pin in [[hub]] set my_flag_name on 23.05."), passage("flag_name on 23.05", "flag_name on 18.06"), index).ok).toBe(true);
   });
 });
+
+// Fix round 2 batch 2: placement is total — a check that fails to parse or
+// convert refuses, never throws out of Apply, Send or Accept's preflight.
+describe("placeStaleEdit — never throws (R2B2-1)", () => {
+  const fm = '---\ntitle: Note\nrel: {a: "[[hub]]", b: landed on 23.05}\n---\n\nBody.\n';
+
+  test("an unresolved YAML alias on a front-matter line is a front-matter refusal", () => {
+    expect(placeStaleEdit(fm, passage("landed on 23.05", "*nope"), index)).toEqual({ ok: false, reason: fix.STALE_FIX_FRONTMATTER });
+    const r = applyStaleEdits(fm, [passage("landed on 23.05", "*nope")], index);
+    expect(r.dropped.map((d) => d.reason)).toEqual([fix.STALE_FIX_FRONTMATTER]);
+    expect(r.content).toBe(fm);
+  });
+
+  test("a key added to a flow mapping is refused by the verbatim-value rule", () => {
+    // `b: landed, c: 1}` parses: no YAML error, but no value holds the text.
+    expect(placeStaleEdit(fm, passage("landed on 23.05", "landed, c: 1"), index)).toEqual({ ok: false, reason: fix.STALE_FIX_FRONTMATTER });
+    const ok = placeStaleEdit(fm, passage("landed on 23.05", "landed on 18.06"), index);
+    expect(ok.ok && ok.content).toContain("b: landed on 18.06}");
+  });
+
+  test("a malformed stored edit refuses as unchecked", () => {
+    const content = page("The pin in [[hub]] landed on 23.05.");
+    const bad = { ...passage("landed on 23.05", "x"), old: null } as unknown as StaleFixEdit;
+    expect(placeStaleEdit(content, bad, index)).toEqual({ ok: false, reason: fix.STALE_FIX_UNCHECKED });
+    const noText = { old: "landed on 23.05", text: null, variant: "new", page: "notes/a.md" } as unknown as StaleFixEdit;
+    expect(fix.staleEditOnLine("The pin in [[hub]] landed on 23.05.", noText)).toEqual({ ok: false, reason: fix.STALE_FIX_UNCHECKED });
+  });
+});
+
+// Fix round 2 batch 2: each rule below is pinned by a line where it alone
+// decides the outcome.
+describe("placeStaleEdit — the placement rules, one pin each (R2B2-3)", () => {
+  const refuse = (content: string, edit: StaleFixEdit, reason: string) => expect(placeStaleEdit(content, edit, index)).toEqual({ ok: false, reason });
+  const places = (content: string, edit: StaleFixEdit) => expect(placeStaleEdit(content, edit, index).ok).toBe(true);
+
+  test("a URL inside a markdown link is that link, not a bare URL running past it", () => {
+    places(page("The pin in [[hub]] per [doc](https://e.com/x),landed on 23.05."), passage("landed on 23.05", "landed on 18.06"));
+  });
+
+  test("an unclosed tag runs to the line's end", () => {
+    refuse(page('The pin in [[hub]] <span title="landed on 23.05'), passage("landed on 23.05", "landed on 18.06"), fix.STALE_FIX_CUTS_TAG);
+    refuse(page("The pin in [[hub]] <?x landed on 23.05"), passage("landed on 23.05", "landed on 18.06"), fix.STALE_FIX_CUTS_TAG);
+  });
+
+  test("a self-closing tag opens no element", () => {
+    places(page("The pin in [[hub]] <Pill /> landed on 23.05 </Pill> now."), passage("<Pill /> landed on 23.05", "landed on 18.06"));
+  });
+
+  test("a link the replacement keeps is no tag or brace, even an autolink", () => {
+    const line = "The pin in [[hub]] landed on 23.05 at <https://e.com/a>.";
+    places(page(line), passage("landed on 23.05 at <https://e.com/a>", "landed on 18.06 at <https://e.com/a>"));
+    places(page(line), passage("landed on 23.05 at <https://e.com/a>", "landed on 18.06 at <https://e.com/a>", { page: "notes/a.mdx" }));
+  });
+
+  test("a link next to the replacement keeps its place, not only the line's link count", () => {
+    // `23.06https://…` is no URL (no word boundary), so `[x]` inside it
+    // becomes a bracket link: one link before, one after, in another place.
+    refuse(page("The pin in [[hub]] landed on 23.05 https://e.com/[x] now."), passage("on 23.05 ", "on 23.06"), fix.STALE_FIX_ADDS_LINK);
+  });
+
+  test("a `<` that opens a tag with the text after the replacement is refused", () => {
+    refuse(page("The pin in [[hub]] landed on 23.05now here."), passage("landed on 23.05", "landed <"), fix.STALE_FIX_TEXT_TAG);
+  });
+
+  test("a list marker, an ordered marker or a tag at the line start stays", () => {
+    refuse(page("- Landed on 23.05 per [[hub]]."), passage("- Landed on 23.05", "Landed on 18.06"), fix.STALE_FIX_TEXT_BLOCK);
+    refuse(page("1. Landed on 23.05 per [[hub]]."), passage("1. Landed on 23.05", "Landed on 18.06"), fix.STALE_FIX_TEXT_BLOCK);
+    refuse(page("<b>Landed</b> on 23.05 per [[hub]]."), passage("<b>Landed</b> on 23.05", "Landed on 18.06"), fix.STALE_FIX_TEXT_BLOCK);
+  });
+
+  test("front matter broken before the edit is refused, even when the edit would mend it", () => {
+    const broken = "---\ntitle: Note\nnote: see [[hub]] landed: on 23.05\n---\n\nBody.\n";
+    refuse(broken, passage("landed: on 23.05", "landed on 18.06"), fix.STALE_FIX_FRONTMATTER);
+  });
+
+  test("the closing fence line is front matter, the line after it is body", () => {
+    const status = (old: string, text: string): StaleFixEdit => ({ kind: "status-line", page: "notes/a.md", link: "plans/p.md", old, text, variant: "new" });
+    // `\n---foo …` closes the front matter; an edit there is no YAML value.
+    refuse("---\ntitle: Note\n---foo [[p]] is shipped\n\nBody.\n", status("is shipped", "is in flight"), fix.STALE_FIX_FRONTMATTER);
+    const body = placeStaleEdit("---\ntitle: Note\n---\n[[p]] is shipped\n", status("is shipped", "is in flight"), index);
+    expect(body).toEqual({ ok: true, content: "---\ntitle: Note\n---\n[[p]] is in flight\n", line: 4 });
+  });
+});

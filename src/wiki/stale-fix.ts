@@ -41,16 +41,23 @@
  *   `.mdx` page (an MDX expression);
  * - the line starts the same way (fence, heading, quote, list, rule, table,
  *   tag), and a table row keeps its `|` count;
- * - on a front-matter line the YAML parses before and after, and a value
- *   holds the replacement verbatim (no `#` comment cut, no `[` flow list).
+ * - on a front-matter line the YAML parses and converts before and after,
+ *   and a value holds the replacement verbatim (no `#` comment cut, no `[`
+ *   flow list, no key added to a flow mapping);
+ * - a check that throws refuses (`STALE_FIX_UNCHECKED`), never throws out.
+ *
+ * The line rules are `staleEditOnLine`, which `parseStaleAnswer` runs too, so
+ * an edit placement would refuse is never stored as a draft.
  */
 import { parseDocument } from "yaml";
 import { lineCodeSpanRanges, maskLineCodeSpans } from "../format/code-spans.ts";
 import { frontmatterBodyLine, splitFrontmatter } from "./page-text.ts";
-import { EDIT_TEXT_CAP, linkingPassageRows } from "./stale-confirm.ts";
-import { lineLinks, linkPassagesIn, statusLineCandidates } from "./stale.ts";
+import { lineLinks, linkingPassageRows, linkPassagesIn, statusLineCandidates } from "./stale.ts";
 import { normalizeRelPath } from "./rel-path.ts";
 import type { WikiIndex } from "./store.ts";
+
+/** An edit's `new` or `home` is at most this long (the prompt says 400 too). */
+export const EDIT_TEXT_CAP = 400;
 
 export type StaleFixKind = "status-line" | "passage";
 export type StaleFixVariant = "new" | "home";
@@ -85,6 +92,7 @@ export const STALE_FIX_TEXT_TAG = "The replacement adds an HTML or MDX tag or co
 export const STALE_FIX_TEXT_MDX_EXPR = "The replacement adds a { or } outside code on an MDX page.";
 export const STALE_FIX_TEXT_BLOCK = "The replacement changes how its line starts, or a table row's cells.";
 export const STALE_FIX_FRONTMATTER = "The replacement would change the front matter's YAML beyond the text.";
+export const STALE_FIX_UNCHECKED = "The edit could not be checked.";
 
 export type StalePlaceResult = { ok: true; content: string; line: number } | { ok: false; reason: string };
 
@@ -265,7 +273,7 @@ const blockStart = (line: string) => BLOCK_START.exec(line)?.[0].trim() ?? "";
  * replacement unchanged; inside it exactly `old`'s links and no tag; no MDX
  * brace on an `.mdx` page; the same line start.
  */
-function textOnLineRefusal(line: string, at: number, old: string, text: string, after: string, edit: StaleFixEdit): string | null {
+function textOnLineRefusal(line: string, at: number, old: string, text: string, after: string, edit: Pick<StaleFixEdit, "variant" | "page">): string | null {
   const textEnd = at + text.length;
   // Code first: a code span that moves masks or unmasks the links around it.
   if (!outsideKept(lineCodeSpanRanges(line), lineCodeSpanRanges(after), at, old.length, text.length)) return STALE_FIX_TEXT_CODE;
@@ -300,23 +308,27 @@ function yamlStrings(v: unknown): string[] {
  * Does an edit on a front-matter line keep the YAML whole? Both front
  * matters parse without error, and some string value of the edited one holds
  * the replacement verbatim — a ` #` that turns the rest of the value into a
- * comment, or a `[` that turns it into a list, fails that. (A one-line edit
- * cannot add a key without a parse error, nor move the closing fence without
- * changing how its line starts.)
+ * comment, a `[` that turns it into a list, or a `, c: 1` that adds a key to
+ * a flow mapping fails that. A value that does not convert (`toJS` throws on
+ * an unresolved alias such as `*nope`) fails too.
  */
 function frontmatterKept(before: string, after: string, text: string): boolean {
   const [fb, fa] = [splitFrontmatter(before).frontmatter, splitFrontmatter(after).frontmatter];
   if (fb === null || fa === null) return false;
-  const [db, da] = [parseDocument(fb), parseDocument(fa)];
-  if (db.errors.length || da.errors.length) return false;
-  const want = text.trim();
-  return !want || yamlStrings(da.toJS()).some((s) => s.includes(want));
+  try {
+    const [db, da] = [parseDocument(fb), parseDocument(fa)];
+    if (db.errors.length || da.errors.length) return false;
+    const want = text.trim();
+    return !want || yamlStrings(da.toJS()).some((s) => s.includes(want));
+  } catch {
+    return false;
+  }
 }
 
 /** The verbatim pieces of a window row: the row split at `…`, each piece
  *  without the whitespace next to a `…` — that may be the ` … ` join's own
  *  space, which the line does not hold there. */
-function windowPieces(row: string): string[] {
+export function windowPieces(row: string): string[] {
   const parts = row.split("…");
   return parts.map((p, i) => {
     let s = i > 0 ? p.trimStart() : p;
@@ -342,8 +354,49 @@ export function staleFixRows(content: string, edit: Pick<StaleFixEdit, "kind" | 
   return out;
 }
 
-/** Place one edit on `content`, or say why it does not place. */
+/**
+ * Why `edit` may not replace its `old` on `line`, or the edited line. `line`
+ * is a full file line, its CR stripped; given `file` — the page's content,
+ * CRLF folded, and the line's 0-based index in it — an edit on a
+ * front-matter line is checked against the YAML too. Placement and
+ * `parseStaleAnswer` both run this, so a draft the parse keeps is one
+ * placement would write. Total: a check that throws refuses.
+ */
+export function staleEditOnLine(
+  line: string,
+  edit: Pick<StaleFixEdit, "old" | "text" | "variant" | "page">,
+  file?: { content: string; idx: number },
+): { ok: true; after: string } | { ok: false; reason: string } {
+  try {
+    if (edit.text === edit.old || edit.text.length > EDIT_TEXT_CAP || /[\r\n]/.test(edit.text)) return { ok: false, reason: STALE_FIX_BAD_TEXT };
+    const refused = oldOnLineRefusal(line, edit.old);
+    if (refused) return { ok: false, reason: refused };
+    const at = line.indexOf(edit.old);
+    const after = line.slice(0, at) + edit.text + line.slice(at + edit.old.length);
+    const textRefused = textOnLineRefusal(line, at, edit.old, edit.text, after, edit);
+    if (textRefused) return { ok: false, reason: textRefused };
+    if (file && file.idx < frontmatterBodyLine(file.content)) {
+      const lines = file.content.split("\n");
+      lines[file.idx] = after;
+      if (!frontmatterKept(file.content, lines.join("\n"), edit.text)) return { ok: false, reason: STALE_FIX_FRONTMATTER };
+    }
+    return { ok: true, after };
+  } catch {
+    return { ok: false, reason: STALE_FIX_UNCHECKED };
+  }
+}
+
+/** Place one edit on `content`, or say why it does not place. Total: a
+ *  check that throws refuses ({@link STALE_FIX_UNCHECKED}). */
 export function placeStaleEdit(content: string, edit: StaleFixEdit, index: Pick<WikiIndex, "resolve">): StalePlaceResult {
+  try {
+    return placeOn(content, edit, index);
+  } catch {
+    return { ok: false, reason: STALE_FIX_UNCHECKED };
+  }
+}
+
+function placeOn(content: string, edit: StaleFixEdit, index: Pick<WikiIndex, "resolve">): StalePlaceResult {
   // A blank `old` would never place, and `indexOf("", i)` never moves past
   // the end, so the count loop below would not end.
   if (!edit.old.trim()) return { ok: false, reason: STALE_FIX_NOT_IN_PASSAGE };
@@ -359,17 +412,10 @@ export function placeStaleEdit(content: string, edit: StaleFixEdit, index: Pick<
   // The index counts lines with CRLF folded; the CR stays on the line we write.
   const cr = rawLine.endsWith("\r") ? "\r" : "";
   const line = cr ? rawLine.slice(0, -1) : rawLine;
-  const refused = oldOnLineRefusal(line, edit.old);
-  if (refused) return { ok: false, reason: refused };
-  const at = line.indexOf(edit.old);
-  const after = line.slice(0, at) + edit.text + line.slice(at + edit.old.length);
-  const textRefused = textOnLineRefusal(line, at, edit.old, edit.text, after, edit);
-  if (textRefused) return { ok: false, reason: textRefused };
-  raw[found - 1] = after + cr;
-  const out = raw.join("\n");
-  const folded = (s: string) => s.replace(/\r\n/g, "\n");
-  if (found - 1 < frontmatterBodyLine(folded(content)) && !frontmatterKept(folded(content), folded(out), edit.text)) return { ok: false, reason: STALE_FIX_FRONTMATTER };
-  return { ok: true, content: out, line: found };
+  const r = staleEditOnLine(line, edit, { content: content.replace(/\r\n/g, "\n"), idx: found - 1 });
+  if (!r.ok) return r;
+  raw[found - 1] = r.after + cr;
+  return { ok: true, content: raw.join("\n"), line: found };
 }
 
 /** Place `edits` in order, each against the content the ones before it left.

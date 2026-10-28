@@ -340,6 +340,13 @@ export interface LinkingPage {
   passages: LinkPassage[];
 }
 
+/** The passage lines a To-check linking page is judged on: those that make
+ *  a claim, else all, in line order. */
+export function linkingPassageRows(lp: Pick<LinkingPage, "passages">): LinkingPage["passages"] {
+  const claims = lp.passages.filter((p) => p.claim !== undefined);
+  return claims.length ? claims : lp.passages;
+}
+
 export interface StaleBuckets {
   relPath: string;
   changedAtMs: number;
