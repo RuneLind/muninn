@@ -55,7 +55,7 @@ export interface StaleReportView {
 }
 
 /** The two numbers (D26): confirmed stale status lines, linking pages to check. */
-export function staleCounts(r: StaleReportView | null | undefined): { staleLines: number; toCheck: number } {
+export function staleCounts(r: StaleReportView | null | undefined): StalePageCounts {
   if (!r || r.error) return { staleLines: 0, toCheck: 0 };
   const staleLines = confirmedHits(r).length;
   return { staleLines, toCheck: r.buckets?.counts?.toCheck ?? 0 };

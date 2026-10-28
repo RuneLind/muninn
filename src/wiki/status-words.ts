@@ -28,3 +28,17 @@ export const STATUS_WORDS: readonly (readonly [StatusKind, RegExp])[] = [
   ["shipped", new RegExp(`(?<!${NEGATION})${L}(?:shipped|levert|landet|ferdig|done|merget|merged)${R}`, "iu")],
   ["blocked", words("blocked|blokkert")],
 ];
+
+/** The status word of `text` nearest its start: the earliest first match of a
+ *  kind in `said`, as `[start, end]`, or `null` when none matches. The server
+ *  windows a hit on it (`stale.ts`) and the reader marks it
+ *  (`wiki-stale-marks.ts`), so a mark lands on the word the hit was found on. */
+export function saidSpan(text: string, said: readonly string[]): [number, number] | null {
+  let best: [number, number] | null = null;
+  for (const [kind, re] of STATUS_WORDS) {
+    if (!said.includes(kind)) continue;
+    const m = re.exec(text);
+    if (m && (!best || m.index < best[0])) best = [m.index, m.index + m[0].length];
+  }
+  return best;
+}

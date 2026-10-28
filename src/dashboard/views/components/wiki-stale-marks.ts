@@ -8,7 +8,7 @@
  * (`a.wiki-link[data-relpath]`) in a list item, a paragraph line or a table
  * row, then the said words after it: the first status word of a kind in
  * `said` between the link and the next wikilink on the line, the segment the
- * server read (`stale.ts`, the same {@link STATUS_WORDS}). Inline code and
+ * server read (`stale.ts`, the same {@link saidSpan}). Inline code and
  * struck text hold no status word there, as on the server.
  *
  * Which line is the hit's: the rendered text carries no line numbers, so each
@@ -24,7 +24,7 @@
  * and `wiki-stale-marks-dom.test.ts` (happy-dom) and
  * `e2e/wiki-stale-counts.spec.ts` drive the DOM half.
  */
-import { STATUS_WORDS } from "../../../wiki/status-words.ts";
+import { saidSpan } from "../../../wiki/status-words.ts";
 import type { StaleHitView } from "./wiki-stale-tab.ts";
 
 export const STALE_MARK_CLASS = "wiki-stale-mark";
@@ -45,18 +45,6 @@ const MASKED_TAGS = new Set(["CODE", "PRE", "DEL", "S", "STRIKE", "KBD", "SAMP"]
 const CELL_TAGS = new Set(["TD", "TH"]);
 
 const isLink = (el: Element) => el.classList.contains("wiki-link") || el.classList.contains("wiki-link-missing");
-
-/** The earliest status word in `text` of a kind in `said`, as `[start, end]`
- *  — the server's `saidSpan` rule. */
-export function saidWordSpan(text: string, said: readonly string[]): [number, number] | null {
-  let best: [number, number] | null = null;
-  for (const [kind, re] of STATUS_WORDS) {
-    if (!said.includes(kind)) continue;
-    const m = re.exec(text);
-    if (m && (!best || m.index < best[0])) best = [m.index, m.index + m[0].length];
-  }
-  return best;
-}
 
 /** Lowercased letter-and-digit runs. */
 export function tokens(text: string): string[] {
@@ -111,17 +99,10 @@ interface Piece {
   cell: Element | null;
 }
 
-/** The element a link's line lives in: its list item, table row or block,
- *  else the article container (a paragraph is bare text there). */
-function lineRootOf(a: Element, container: Element): Element {
-  for (let el = a.parentElement; el && el !== container; el = el.parentElement) {
-    if (el.tagName === "TR" || el.tagName === "LI" || (BLOCK_TAGS.has(el.tagName) && el.tagName !== "TBODY" && el.tagName !== "THEAD")) return el;
-  }
-  return container;
-}
-
-/** The nearest line-starting block of `node` below `root`, else `root`. */
-function blockOf(node: Node, root: Element): Node {
+/** The nearest line-starting block of `node` below `root`, else `root`. For a
+ *  link that is its line's root: its list item, table row (a cell is not a
+ *  block) or block, else the article container (bare text there). */
+function blockOf(node: Node, root: Element): Element {
   for (let el = node.parentElement; el && el !== root; el = el.parentElement) {
     if (BLOCK_TAGS.has(el.tagName)) return el;
   }
@@ -149,7 +130,7 @@ function linesOf(root: Element): Piece[][] {
     let link: Element | null = null;
     let masked = false;
     let cell: Element | null = null;
-    for (let el = t.parentElement; el && el !== root.parentElement; el = el.parentElement) {
+    for (let el = t.parentElement; el; el = el.parentElement) {
       if (!link && isLink(el)) link = el;
       if (MASKED_TAGS.has(el.tagName)) masked = true;
       if (!cell && CELL_TAGS.has(el.tagName)) cell = el;
@@ -166,6 +147,23 @@ function linesOf(root: Element): Piece[][] {
   return lines.filter((l) => l.length);
 }
 
+/** Per line root, the first of its {@link linesOf} each link sits on, kept
+ *  for one {@link placeStaleMarks} call: a link in bare text has the whole
+ *  article as its root, so walking it per anchor and per hit cost seconds on
+ *  a long log page. A wrap splits text nodes, so the caller clears it after
+ *  each one. */
+type LinesMemo = Map<Element, Map<Element, Piece[]>>;
+
+function lineOfLinks(root: Element, memo: LinesMemo): Map<Element, Piece[]> {
+  let lineOf = memo.get(root);
+  if (!lineOf) {
+    lineOf = new Map();
+    for (const l of linesOf(root)) for (const p of l) if (p.link && !lineOf.has(p.link)) lineOf.set(p.link, l);
+    memo.set(root, lineOf);
+  }
+  return lineOf;
+}
+
 interface Candidate {
   anchor: Element;
   score: number;
@@ -176,9 +174,8 @@ interface Candidate {
 }
 
 /** One link's candidate: its line's score against the hit, and the said word after it. */
-function candidateFor(a: Element, container: Element, hit: StaleHitView, want: readonly string[]): Candidate | null {
-  const root = lineRootOf(a, container);
-  const line = linesOf(root).find((l) => l.some((p) => p.link === a));
+function candidateFor(a: Element, container: Element, hit: StaleHitView, want: readonly string[], memo: LinesMemo): Candidate | null {
+  const line = lineOfLinks(blockOf(a, container), memo).get(a);
   if (!line) return null;
   const lastOwn = line.map((p) => p.link === a).lastIndexOf(true);
   // The segment: after the link, to the next wikilink on the line.
@@ -196,7 +193,7 @@ function candidateFor(a: Element, container: Element, hit: StaleHitView, want: r
     at.push(text.length);
     text += p.masked ? " ".repeat(p.text.length) : p.text;
   });
-  const span = saidWordSpan(text, hit.said);
+  const span = saidSpan(text, hit.said);
   if (!span) return null;
   const runs: Candidate["runs"] = [];
   seg.forEach((p, i) => {
@@ -230,12 +227,20 @@ export function clearStaleMarks(container: Element): void {
 export function placeStaleMarks(container: Element, hits: readonly StaleHitView[]): number {
   clearStaleMarks(container);
   const plans: { hit: StaleHitView; c: Candidate }[] = [];
+  const memo: LinesMemo = new Map();
+  const byTarget = new Map<string, Element[]>();
+  for (const a of Array.from(container.querySelectorAll("a.wiki-link[data-relpath]"))) {
+    const t = a.getAttribute("data-relpath")!;
+    const list = byTarget.get(t);
+    if (list) list.push(a);
+    else byTarget.set(t, [a]);
+  }
   for (const hit of hits) {
     // A frontmatter line is not rendered: no line of the article is the hit's.
     if (hit.frontmatter) continue;
     const want = hitTokens(hit.text);
-    const anchors = Array.from(container.querySelectorAll("a.wiki-link[data-relpath]")).filter((a) => a.getAttribute("data-relpath") === hit.target);
-    const found = anchors.map((a) => candidateFor(a, container, hit, want)).filter((c): c is Candidate => !!c && c.score >= MATCH_MIN);
+    const anchors = byTarget.get(hit.target) ?? [];
+    const found = anchors.map((a) => candidateFor(a, container, hit, want, memo)).filter((c): c is Candidate => !!c && c.score >= MATCH_MIN);
     found.sort(compareFit);
     // A tie at the top is no unique match.
     if (!found.length || (found.length > 1 && compareFit(found[0]!, found[1]!) === 0)) continue;
@@ -248,7 +253,7 @@ export function placeStaleMarks(container: Element, hits: readonly StaleHitView[
   for (const { hit, c } of plans) {
     if (claims.get(c.anchor)! > 1) continue;
     // Read again: a mark placed for an earlier hit split text nodes.
-    const runs = candidateFor(c.anchor, container, hit, [])?.runs ?? [];
+    const runs = candidateFor(c.anchor, container, hit, [], memo)?.runs ?? [];
     if (!runs.length) continue;
     // Wrap the runs last first, so an earlier run's offsets stay valid.
     for (const r of [...runs].reverse()) {
@@ -261,6 +266,7 @@ export function placeStaleMarks(container: Element, hits: readonly StaleHitView[
       tail.parentNode!.insertBefore(mark, tail);
       mark.appendChild(tail);
     }
+    memo.clear();
     placed++;
   }
   return placed;

@@ -9,8 +9,8 @@ import {
 
 /**
  * The readonly guard's LISTENER SET, driven through `installWikiReadonlyGuard`
- * against a hand-rolled DOM (the `code-tabs.test.ts` idiom — the repo has no
- * jsdom/happy-dom).
+ * against a hand-rolled DOM (the `code-tabs.test.ts` idiom; these tests do not
+ * use happy-dom).
  *
  * The regression this exists for: the guard installed its `mousedown` and
  * `keydown` cancels unconditionally, so on a read-only INSTANCE a mousedown on

@@ -70,4 +70,21 @@ describe("stale marks on the rendered page (PR 2b, D21)", () => {
     expect(marks(md, [{ line: 1, text: "- [[p]] in-flight", said: ["in-flight"] }]).marked).toEqual([["in-flight", "1"]]);
     expect(marks(md, [{ line: 1, text: "- [[p]] in-flight", said: ["in-flight"] }, { line: 9, text: "- [[p]] in-flight", said: ["in-flight"] }]).placed).toBe(0);
   });
+
+  test("hits whose links share one line root each take their mark", () => {
+    // One paragraph (soft breaks) and one list item hold both links, so the
+    // second hit reads the root again after the first hit's wrap.
+    const para = "[[p]] is in-flight and\n[[q]] is proposed\n";
+    const hits = [
+      { line: 1, text: "[[p]] is in-flight and", said: ["in-flight"] },
+      { line: 2, text: "[[q]] is proposed", said: ["proposed"], target: "q.md" },
+    ];
+    expect(marks(para, hits)).toEqual({ placed: 2, marked: [["in-flight", "1"], ["proposed", "2"]] });
+    expect(marks(para, [...hits].reverse())).toEqual({ placed: 2, marked: [["in-flight", "1"], ["proposed", "2"]] });
+    const item = "- [[p]] in-flight, [[q]] proposed\n";
+    expect(marks(item, [
+      { line: 1, text: "- [[p]] in-flight, [[q]] proposed", said: ["in-flight"] },
+      { line: 1, text: "- [[p]] in-flight, [[q]] proposed", said: ["proposed"], target: "q.md" },
+    ])).toEqual({ placed: 2, marked: [["in-flight", "1"], ["proposed", "1"]] });
+  });
 });

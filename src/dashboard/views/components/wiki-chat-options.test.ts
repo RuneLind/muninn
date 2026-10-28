@@ -7,7 +7,7 @@ import {
 import { CHAT_OPT_ESC_CONFIRM } from "./wiki-chat-target.ts";
 
 /**
- * The repo has no browser test env (no jsdom/happy-dom), so — like the sibling
+ * These tests do not use happy-dom, so — like the sibling
  * `wiki-start-cards.test.ts` / `wiki-factcheck-reader.test.ts` — the DOM here is a
  * minimal hand-rolled shim and the real render path is left to
  * `e2e/wiki-chat-dialog.spec.ts`.

@@ -1,7 +1,7 @@
 /**
  * The Stale check's counts outside the STALE tab (plan muninn-wiki-drift-check,
- * PR 2b): the rail badge, the article head's pill, the wiki home's Index-card
- * line and its Stale tab. Pure and DOM-free; `wiki-browser.ts` fetches and
+ * PR 2b): the rail badge, the article head's pill, the wiki home's line
+ * beside the Index card and its Stale tab. Pure and DOM-free; `wiki-browser.ts` fetches and
  * paints.
  *
  * One source each, so every surface shows the tab's two numbers (D26):
@@ -68,7 +68,7 @@ const isStale = (c: StalePageCounts) => c.staleLines + c.toCheck > 0;
 /** The wiki's totals as the route sends them (confirmed stale lines, D26). */
 const totalsOf = (s: StaleSummaryView): StalePageCounts => ({ staleLines: Number(s.totals?.staleLines) || 0, toCheck: Number(s.totals?.toCheck) || 0 });
 
-/** The wiki home's Index-card line: the wiki's totals and a way into the Stale tab. */
+/** The wiki home line: the wiki's totals and a way into the Stale tab. */
 export function staleHomeLineHtml(s: StaleSummaryView | null | undefined): string {
   if (!s) return `<span class="wiki-stale-home-k">Stale check</span> <span class="wiki-stale-home-v">Loading…</span>`;
   if (s.error) return `<span class="wiki-stale-home-k">Stale check</span> <span class="wiki-stale-home-v">unavailable</span>`;

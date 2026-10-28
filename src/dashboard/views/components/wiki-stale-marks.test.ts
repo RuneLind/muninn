@@ -4,18 +4,19 @@
  * `wiki-stale-marks-dom.test.ts` (happy-dom) and `e2e/wiki-stale-counts.spec.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { hitTokens, lineScore, MATCH_MIN, saidWordSpan, tokens } from "./wiki-stale-marks.ts";
+import { saidSpan } from "../../../wiki/status-words.ts";
+import { hitTokens, lineScore, MATCH_MIN, tokens } from "./wiki-stale-marks.ts";
 
 describe("stale marks (PR 2b)", () => {
   test("the said word is the earliest word of a said kind, edged on æøå", () => {
-    expect(saidWordSpan(" is in-flight and done", ["in-flight"])).toEqual([4, 13]);
-    expect(saidWordSpan(" pågår fortsatt", ["in-flight"])).toEqual([1, 6]);
+    expect(saidSpan(" is in-flight and done", ["in-flight"])).toEqual([4, 13]);
+    expect(saidSpan(" pågår fortsatt", ["in-flight"])).toEqual([1, 6]);
     // A kind not said is not marked, and a word inside another word is no word.
-    expect(saidWordSpan(" is done", ["in-flight"])).toBeNull();
-    expect(saidWordSpan(" uferdig", ["shipped"])).toBeNull();
+    expect(saidSpan(" is done", ["in-flight"])).toBeNull();
+    expect(saidSpan(" uferdig", ["shipped"])).toBeNull();
     // The negated merget is in-flight, with its negation.
     const s = " er ikke merget";
-    const span = saidWordSpan(s, ["in-flight"])!;
+    const span = saidSpan(s, ["in-flight"])!;
     expect(s.slice(span[0], span[1])).toBe("ikke merget");
   });
 

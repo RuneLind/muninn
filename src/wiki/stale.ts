@@ -41,8 +41,12 @@ export const MOVED_WITH_WINDOW_MS = 28 * DAY_MS;
 /** At most this many *Moved with* rows per page. */
 export const MOVED_WITH_MAX = 10;
 
-export { STATUS_WORDS, type StatusKind } from "./status-words.ts";
-import { STATUS_WORDS, type StatusKind } from "./status-words.ts";
+import { saidSpan as sharedSaidSpan, STATUS_WORDS, type StatusKind } from "./status-words.ts";
+
+/** {@link sharedSaidSpan} with `[0, 0]` for no match. A segment can run for
+ *  thousands of characters (one HTML line), so the window anchors on one
+ *  word, not all. */
+const saidSpan = (seg: string, said: readonly StatusKind[]): [number, number] => sharedSaidSpan(seg, said) ?? [0, 0];
 
 /** The prefilter: a plain, edge-free alternation over every status word's
  *  stem — a superset of {@link STATUS_WORDS}, and ~8× cheaper per line than
@@ -122,18 +126,6 @@ export function hitWindow(source: string, linkStart: number, linkEnd: number, wo
   return cut(s, e, `${t.slice(s, left)} … ${t.slice(right, e)}`);
 }
 
-/** The status word of `seg` nearest its link: the earliest first match of
- *  a kind in `said`, as `[start, end]`. A segment can run for thousands of
- *  characters (one HTML line), so the window anchors on one word, not all. */
-function saidSpan(seg: string, said: readonly StatusKind[]): [number, number] {
-  let best: [number, number] | null = null;
-  for (const [kind, re] of STATUS_WORDS) {
-    if (!said.includes(kind)) continue;
-    const m = re.exec(seg);
-    if (m && (!best || m.index < best[0])) best = [m.index, m.index + m[0].length];
-  }
-  return best ?? [0, 0];
-}
 
 /** The `[[link]] … status word` segments of one line (1-based `line`). */
 function lineSegments(lineText: string, line: number, sourceText: string): StatusLineCandidate[] {
