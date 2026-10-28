@@ -667,6 +667,62 @@ describe("pointer headings and markdown links, as the backlink graph reads them 
   });
 });
 
+// Fix round 2 batch 1: the window's link is found with the backlink graph's
+// own grammar, so a link whose text holds inline code is found (mimir
+// `overview.md:15`), and on a line with several links it is the one to the
+// changed page, not the line's first link.
+describe("a passage line's window holds the link to the changed page (fix round 2)", () => {
+  let root = "";
+  let index: WikiIndex;
+  const asOfMs = Date.parse("2026-06-20T23:59:59.999Z");
+  const FILL = "lorem ipsum dolor sit amet ".repeat(16);
+  const CASES = [
+    // [page, line body, the link to hub as written]
+    ["code-text", `Pinned 23.05: ${FILL}${FILL}the details sit in [the \`ci_*\` tables](../hub.md).`, "[the `ci_*` tables](../hub.md)"],
+    ["code-title", `Pinned 23.05: ${FILL}${FILL}see [the \`hub\`](../hub.md "the \`hub\` page").`, '[the `hub`](../hub.md "the `hub` page")'],
+    ["other-first-md", `[[x,y]] pinned 23.05, ${FILL}${FILL}and the details sit in [the \`x\` table](../hub.md).`, "[the `x` table](../hub.md)"],
+    ["other-first-wiki", `[[x,y]] pinned 23.05, ${FILL}${FILL}and the details sit in [[hub|the hub]].`, "[[hub|the hub]]"],
+    ["other-md-first", `[the \`x\` notes](x%2Cy.md) pinned 23.05, ${FILL}${FILL}see [[hub#Body]].`, "[[hub#Body]]"],
+    ["two-to-hub", `[[x,y]] pinned 23.05, [[hub]] ${FILL}${FILL}and [Hub](../hub.md) again.`, "[[hub]]"],
+    ["embed", `Pinned 23.05: ${FILL}${FILL}![[hub]]`, "![[hub]]"],
+  ] as const;
+
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+
+  test("setup", async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-stale-span-"));
+    await git(root, "init", "-q", "-b", "main");
+    await write("hub.md", page("Hub", "## Body\n\nBody."));
+    await write("notes/x,y.md", page("XY", "Body."));
+    for (const [slug, body] of CASES) await write(`notes/${slug}.md`, page(slug, body));
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "--date", "2026-05-01T10:00:00Z", "-m", "seed");
+    await write("hub.md", page("Hub", "## Body\n\nBody two."));
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "--date", "2026-06-18T10:00:00Z", "-m", "hub");
+    index = await buildWikiIndex(root);
+  }, 30_000);
+
+  test("every case's window holds its link to the hub and the claim, each piece verbatim", async () => {
+    const b = await linkingBuckets(index, "hub.md", { asOfMs });
+    for (const [slug, body, link] of CASES) {
+      const lp = b!.linking.find((l) => l.relPath === `notes/${slug}.md`);
+      expect([slug, lp?.bucket]).toEqual([slug, "toCheck"]);
+      const [p] = lp!.passages;
+      expect([slug, p!.text.includes(link)]).toEqual([slug, true]);
+      expect([slug, p!.text.includes("23.05")]).toEqual([slug, true]);
+      for (const piece of p!.text.split("…")) expect([slug, body.includes(piece.trim())]).toEqual([slug, true]);
+    }
+  });
+
+  test("teardown", async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+});
+
 describe("asOf steps back past metadata-only commits (D29, F3)", () => {
   let root = "";
   let index: WikiIndex;

@@ -45,7 +45,8 @@ import { getWikiRegistry } from "./registry-memo.ts";
 import type { WikiRegistryEntry } from "./registry.ts";
 import { normalizeRelPath } from "./rel-path.ts";
 import { extractWikilinks } from "./wikilinks.ts";
-import { linkingBuckets, type LinkingPage, type StatusLineHit } from "./stale.ts";
+import { maskLineCodeSpans } from "../format/code-spans.ts";
+import { lineLinks, linkingBuckets, type LinkingPage, type StatusLineHit } from "./stale.ts";
 import { getWikiIndex, parseFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
 
 const log = getLog("wiki", "stale-confirm");
@@ -122,11 +123,17 @@ export function passageVerdictKey(
   return passageKeyHash(l.relPath, passage, changedHash, passageKeyContext(index, changedRelPath, passage, asOfMs));
 }
 
-/** The passage a To-check linking page is judged on: its lines that make a
- *  claim, in line order, joined by newlines. One verdict covers them. */
-export function linkingPassage(lp: Pick<LinkingPage, "passages">): string {
+/** The passage lines a To-check linking page is judged on: those that make
+ *  a claim, else all, in line order. */
+export function linkingPassageRows(lp: Pick<LinkingPage, "passages">): LinkingPage["passages"] {
   const claims = lp.passages.filter((p) => p.claim !== undefined);
-  return (claims.length ? claims : lp.passages).map((p) => p.text).join("\n");
+  return claims.length ? claims : lp.passages;
+}
+
+/** The passage a To-check linking page is judged on: its
+ *  {@link linkingPassageRows}, joined by newlines. One verdict covers them. */
+export function linkingPassage(lp: Pick<LinkingPage, "passages">): string {
+  return linkingPassageRows(lp).map((p) => p.text).join("\n");
 }
 
 // ── The verdict store (a seam, so the routes run without a database) ───────
@@ -184,6 +191,9 @@ export interface StaleCallInput {
   commits?: readonly string[] | null;
   /** For a passage: the other plans it links to, with their status today. */
   otherPlans?: readonly { relPath: string; planStatus: string; statusNote?: string }[];
+  /** The full file line of each `\n`-separated passage row, undefined when
+   *  unreadable: {@link parseStaleAnswer} checks `old` against it. Never in the prompt. */
+  sourceLines?: readonly (string | undefined)[];
 }
 
 const PASSAGE_CAP = 2_000;
@@ -249,7 +259,7 @@ export function buildStalePrompt(input: StaleCallInput): string {
     '- "unsure": you cannot tell from what is here.',
     "",
     'Shape: {"verdict":"stale|true|not-status|unsure","reason":"one sentence","edit":null}',
-    'When the verdict is "stale", set "edit" to {"old":"…","new":"…","home":"…"}: "old" is the shortest span copied VERBATIM from ONE line of the passage that holds the stale claim and occurs on it once, "new" replaces it with the current fact, and "home" replaces it with text that drops the copied status but keeps every link, so the linked page stays the one place the status lives. Write "new" and "home" in the passage\'s language, one line each, at most 400 characters.',
+    'When the verdict is "stale", set "edit" to {"old":"…","new":"…","home":"…"}: "old" is the shortest span copied VERBATIM from ONE line of the passage that holds the stale claim and occurs exactly once in the whole passage — when the same words appear again, on that line or another, copy more of the line until the span is unique. «…» marks text cut from a line or a gap inside it: never copy «…» into "old", and never let "old" cross a line break, cut into a link or sit inside one. "new" replaces it with the current fact, and "home" replaces it with text that drops the copied status but keeps every link, so the linked page stays the one place the status lives. Write "new" and "home" in the passage\'s language, one line each, at most 400 characters.',
     '"new" may restate only facts stated above: the linked page\'s plan_status, status_note and description, the commit subjects and the other plans\' status. Never add a date, number, name, PR or outcome that is not stated above. A commit subject names a change, not how it works: never say how, when or by whom something happens beyond the subject\'s own words. When the inputs do not say what the current fact is, make "new" the same as "home".',
   ].join("\n");
 }
@@ -271,8 +281,42 @@ const occurrences = (hay: string, needle: string) => {
   return n;
 };
 const fitsEdit = (s: string) => s.length <= EDIT_TEXT_CAP && !/[\r\n]/.test(s);
-/** The links a text holds: wikilink targets and markdown link URLs. */
-const linksIn = (s: string) => [...extractWikilinks(s).map((t) => `[[${t}]]`), ...[...s.matchAll(/\]\(([^)\s]+)/g)].map((m) => m[1]!)];
+/** The links a text holds as written: each whole `[[…]]` (an embed's `!`
+ *  included) or `[text](url)` source span, read as `lineLinks` reads a line. */
+const linksIn = (s: string) => lineLinks(maskLineCodeSpans(s)).map((l) => s.slice(l.start, l.end));
+/** Does `home` hold every link `old` holds, as written and as often? */
+function keepsLinks(old: string, home: string): boolean {
+  const have = new Map<string, number>();
+  for (const l of linksIn(home)) have.set(l, (have.get(l) ?? 0) + 1);
+  for (const l of linksIn(old)) {
+    const n = have.get(l) ?? 0;
+    if (n === 0) return false;
+    have.set(l, n - 1);
+  }
+  return true;
+}
+/** Does `at`–`at + len` on `text` cut into a link, or lie inside one? A
+ *  replacement there would break the link or retarget it. */
+const cutsLink = (text: string, at: number, len: number) =>
+  lineLinks(maskLineCodeSpans(text)).some((l) => l.start < at + len && l.end > at && !(at <= l.start && l.end <= at + len));
+/** Does `old`, its whole links blanked, still hold a piece of one (`[[`,
+ *  `]]`, `](`)? A window's cut end can hide the rest of the link. */
+function holdsLinkPiece(old: string): boolean {
+  let m = maskLineCodeSpans(old);
+  for (const l of lineLinks(m)) m = m.slice(0, l.start) + " ".repeat(l.end - l.start) + m.slice(l.end);
+  return /\[\[|\]\]|\]\(/.test(m);
+}
+
+/** Where `old` sits in the passage: the one row and piece that hold it,
+ *  or null unless it occurs exactly once across every row's pieces. */
+function placeOld(passage: string, old: string): { row: number; piece: string; at: number } | null {
+  let found: { row: number; piece: string; at: number } | null = null;
+  let n = 0;
+  passage.split("\n").forEach((r, row) => {
+    for (const piece of r.split("…")) for (let at = piece.indexOf(old); at >= 0; at = piece.indexOf(old, at + 1)) (n++, (found = { row, piece, at }));
+  });
+  return n === 1 ? found : null;
+}
 
 /** An answer that names no known verdict (A4): the call failed, so nothing
  *  is cached and the next run or Check asks again. */
@@ -315,14 +359,18 @@ export function repairDanglingKey(raw: string): unknown {
  * The model's answer, validated strictly: an unreadable answer or one with
  * no known verdict throws {@link StaleAnswerUnreadableError} (A4), after one
  * repair ({@link repairDanglingKey}). An edit survives only on a stale verdict (else it is
- * dropped and the verdict kept), and only when (A3, A17): `old` occurs
- * exactly once across the passage's source pieces — its `\n`-joined lines,
- * each cut at a window's `…` (a status-line hit and a long passage line are
- * both windows) — so it never spans a join and is verbatim on its line; `new` is one line of at most {@link EDIT_TEXT_CAP} characters and
- * differs from `old`. `home` is kept only when it fits the same bound,
- * differs from `old` and keeps every link `old` holds.
+ * dropped and the verdict kept), and only when (A3, A17, fix round 2):
+ * `old` occurs exactly once across the passage's source pieces — its
+ * `\n`-joined rows, each cut at a window's `…` (a status-line hit and a long
+ * passage line are both windows) — the rule the prompt states; it neither
+ * cuts into nor lies inside a link; given `sourceLines` (each row's full
+ * file line), it occurs exactly once on its row's full line too, so PR 3's
+ * Apply finds one line and one position; `new` is one line of at most
+ * {@link EDIT_TEXT_CAP} characters and differs from `old`. `home` is kept
+ * only when it fits the same bound, differs from `old` and holds every link
+ * `old` holds as written (alias, anchor, title, embed `!`), as often.
  */
-export function parseStaleAnswer(raw: string, passage: string): StaleAnswer {
+export function parseStaleAnswer(raw: string, passage: string, sourceLines?: readonly (string | undefined)[]): StaleAnswer {
   const verdictOf = (x: unknown) => {
     const v = x && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>).verdict : undefined;
     const t = typeof v === "string" ? v.trim().toLowerCase() : "";
@@ -345,11 +393,15 @@ export function parseStaleAnswer(raw: string, passage: string): StaleAnswer {
   const e = obj.edit as Record<string, unknown> | null | undefined;
   if (verdict === "stale" && e && typeof e === "object" && typeof e.old === "string" && typeof e.new === "string") {
     const old = e.old;
-    const sources = passage.split(/\n|…/);
-    const once = sources.reduce((n, src) => n + occurrences(src, old), 0) === 1;
-    if (old.trim() && once && fitsEdit(e.new) && e.new !== old) {
+    const at = old.trim() ? placeOld(passage, old) : null;
+    let placed = !!at && !cutsLink(at.piece, at.at, old.length) && !holdsLinkPiece(old);
+    if (placed && sourceLines) {
+      const full = sourceLines[at!.row];
+      placed = typeof full === "string" && occurrences(full, old) === 1 && !cutsLink(full, full.indexOf(old), old.length);
+    }
+    if (placed && fitsEdit(e.new) && e.new !== old) {
       const home = e.home;
-      const homeOk = typeof home === "string" && home !== old && fitsEdit(home) && linksIn(old).every((l) => home.includes(l));
+      const homeOk = typeof home === "string" && home !== old && fitsEdit(home) && keepsLinks(old, home);
       edit = { old, new: e.new, ...(homeOk ? { home } : {}) };
     }
   }
@@ -464,6 +516,18 @@ export function otherPlansIn(index: Pick<WikiIndex, "resolve">, passage: string,
   return out;
 }
 
+/** The full file lines `lines` (1-based) of `relPath`, CRLF folded as the
+ *  index counts them; each undefined when the page cannot be read. */
+export async function sourceLinesOf(root: string, relPath: string, lines: readonly number[]): Promise<(string | undefined)[]> {
+  let all: string[] = [];
+  try {
+    all = (await Bun.file(path.join(root, relPath)).text()).replace(/\r\n/g, "\n").split("\n");
+  } catch {
+    // Unreadable: every line undefined, so no edit survives.
+  }
+  return lines.map((n) => all[n - 1]);
+}
+
 /** The call input for a status-line hit. */
 export async function statusLineCallInput(index: WikiIndex, page: WikiPageMeta, hit: StatusLineHit): Promise<StaleCallInput> {
   const target = index.resolveRelPath(hit.target);
@@ -474,6 +538,7 @@ export async function statusLineCallInput(index: WikiIndex, page: WikiPageMeta, 
     target: targetFacts(target, hit.target),
     said: hit.said,
     commits: await commitsFor(index, target, page.gitTouchedMs ?? page.workedMs),
+    sourceLines: await sourceLinesOf(index.root, page.relPath, [hit.line]),
   };
 }
 
@@ -680,7 +745,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         ),
         "model call",
       );
-      const answer = parseStaleAnswer(raw, input.passage);
+      const answer = parseStaleAnswer(raw, input.passage, input.sourceLines);
       // An answer that resolved as the loop stopped is dropped, not written.
       if (signal?.aborted) throw new ConfirmStopped();
       const stored = await bounded(
@@ -959,9 +1024,10 @@ export async function runStaleCheck(opts: {
       target: i.ctx.target,
       commits: await commitsFor(index, changedMeta, i.l.lastChangeMs, opts.asOfMs),
       otherPlans: i.ctx.otherPlans,
+      sourceLines: await sourceLinesOf(index.root, i.l.relPath, linkingPassageRows(i.l).map((p) => p.line)),
     };
     const raw = await model(buildStalePrompt(input), { bot, deadlineAt, source: "wiki_stale_check" });
-    const a = parseStaleAnswer(raw, i.passage);
+    const a = parseStaleAnswer(raw, i.passage, input.sourceLines);
     // The stored row: a reader's verdict that landed during the call stays (A5).
     return store.upsert({ wiki, kind: "passage", page: i.l.relPath, keyHash: i.key, verdict: a.verdict, reason: a.reason, edit: a.edit, checkedBy: `model:${bot.name}` });
   };

@@ -26,7 +26,7 @@ import { isReservedBasename } from "./frontmatter-lists.ts";
 import { stateExemptLines } from "./lint-state.ts";
 import { normalizeRelPath } from "./rel-path.ts";
 import { extractWikilinks, WIKILINK_RE, wikilinkTarget } from "./wikilinks.ts";
-import { extractMarkdownLinks, resolveMarkdownTargets, type PlanStatus, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import { extractMarkdownLinks, markdownLinkSpans, resolveMarkdownTargets, type PlanStatus, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 
 export const STALE_LINT_CHECKS = ["status-line"] as const;
@@ -480,24 +480,45 @@ function linksTo(line: string, targetKey: string, fromRelPath: string, index: Pi
   return resolveMarkdownTargets(fromRelPath, extractMarkdownLinks(line)).includes(targetKey);
 }
 
-const MD_LINK_RE = /!?\[[^\]\n]*\]\([^)\n]*\)/g;
+/** One link on a code-masked line, `start`–`end` on the line itself. */
+export interface LineLink {
+  start: number;
+  end: number;
+  /** A wikilink's raw target capture; absent on a markdown link. */
+  wiki?: string;
+  /** An embed `![[x]]` (its `!` inside the span) or an image `![x](y)`. */
+  bang: boolean;
+}
+
+/**
+ * Every link on one line, read with the backlink graph's own grammar:
+ * `WIKILINK_RE` (an embed's `!` joins its span) and `store.ts`'s markdown
+ * link match (`markdownLinkSpans`, images included). Mask the line with
+ * `maskLineCodeSpans` first: a code span is no link, and a masked span in a
+ * link's text (`[the \`x\` table](t.md)`) leaves the link one.
+ */
+export function lineLinks(masked: string): LineLink[] {
+  const out: LineLink[] = [];
+  for (const m of masked.matchAll(WIKILINK_RE)) {
+    const bang = m.index! > 0 && masked[m.index! - 1] === "!";
+    out.push({ start: m.index! - (bang ? 1 : 0), end: m.index! + m[0].length, wiki: m[1]!, bang });
+  }
+  for (const s of markdownLinkSpans(masked)) out.push({ start: s.start, end: s.end, bang: s.image });
+  return out.sort((a, b) => a.start - b.start);
+}
 
 /** Where the first link to `targetKey` sits on `line` (masked, so positions
- *  are the line's), read as {@link linksTo} reads it; the first link of any
- *  kind when none resolves one by one. */
+ *  are the line's), each link read as {@link linksTo} reads it, so every
+ *  line `linksTo` accepts has one; `[0, 0]` only on a line it refuses. */
 function linkSpanTo(line: string, targetKey: string, fromRelPath: string, index: Pick<WikiIndex, "resolve">): [number, number] {
-  const spans: [number, number, boolean][] = [];
-  for (const m of line.matchAll(WIKILINK_RE)) {
-    const meta = index.resolve(wikilinkTarget(m[1]!) ?? "");
-    spans.push([m.index!, m.index! + m[0].length, !!meta && normalizeRelPath(meta.relPath) === targetKey]);
-  }
-  for (const m of line.matchAll(MD_LINK_RE)) {
-    if (m[0].startsWith("!")) continue;
-    spans.push([m.index!, m.index! + m[0].length, resolveMarkdownTargets(fromRelPath, extractMarkdownLinks(m[0])).includes(targetKey)]);
-  }
-  spans.sort((a, b) => a[0] - b[0]);
-  const hit = spans.find((x) => x[2]) ?? spans[0];
-  return hit ? [hit[0], hit[1]] : [0, 0];
+  const hit = lineLinks(line).find((l) => {
+    if (l.wiki !== undefined) {
+      const meta = index.resolve(wikilinkTarget(l.wiki) ?? "");
+      return !!meta && normalizeRelPath(meta.relPath) === targetKey;
+    }
+    return !l.bang && resolveMarkdownTargets(fromRelPath, extractMarkdownLinks(line.slice(l.start, l.end))).includes(targetKey);
+  });
+  return hit ? [hit.start, hit.end] : [0, 0];
 }
 
 /**
@@ -556,8 +577,9 @@ function linkPassages(parsed: ParsedPage, fromRelPath: string, targetKey: string
     if (body > 0 && (i === 0 || i === body - 1)) continue;
     const masked = maskLineCodeSpans(l);
     if (!linksTo(masked, targetKey, fromRelPath, index)) continue;
-    // A17: a long line is a window holding the link and the claim (or the
-    // line's head, which it holds, when it makes none), never a head cut.
+    // A17: a long line is a window holding the link to the changed page and
+    // the claim, or centred on that link when the line makes none; never a
+    // head cut.
     const c = inFrontmatter ? undefined : passageClaimSpan(l);
     const [ls, le] = linkSpanTo(masked, targetKey, fromRelPath, index);
     const [cs, ce] = c?.span ?? [ls, le];

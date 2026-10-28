@@ -22,6 +22,7 @@ import {
   otherPlansIn,
   parseStaleAnswer,
   passageKeyHash,
+  runStaleCheck,
   runStaleConfirm,
   startStaleConfirmLoop,
   statusLineKeyHash,
@@ -173,6 +174,96 @@ describe("parseStaleAnswer: the edit (A3)", () => {
     const passage = "- [[p]] er i gang";
     expect(parseStaleAnswer(ans({ old: "[[p]] er i gang", new: "[[p]] er levert", home: "planen har status" }), passage).edit).toEqual({ old: "[[p]] er i gang", new: "[[p]] er levert" });
     expect(parseStaleAnswer(ans({ old: "[[p]] er i gang", new: "[[p]] er levert", home: "se [[p]]" }), passage).edit?.home).toBe("se [[p]]");
+  });
+});
+
+// Fix round 2 batch 1: `home` keeps every link `old` holds AS WRITTEN — the
+// whole `[[…]]` or `[text](url)` source span, alias, anchor, embed bang,
+// title and code included — and `old` never cuts into a link.
+describe("parseStaleAnswer: home keeps old's links as written (fix round 2)", () => {
+  const ans = (edit: Record<string, unknown>) => JSON.stringify({ verdict: "stale", reason: "r", edit });
+  // [link as written, a home that keeps it, a home that changes it]
+  const LINKS = [
+    ["[[plans/p]]", "se [[plans/p]]", "se [[plans/p|Planen]]"],
+    ["[[plans/p|Planen]]", "se [[plans/p|Planen]]", "se [[plans/p]]"],
+    ["[[plans/p#Status]]", "se [[plans/p#Status]]", "se [[plans/p]]"],
+    ["[[plans/p#Status|Planen]]", "se [[plans/p#Status|Planen]]", "se [[plans/p|Planen]]"],
+    ["![[plans/p]]", "se ![[plans/p]]", "se [[plans/p]]"],
+    ["[Planen](../plans/p.md)", "se [Planen](../plans/p.md)", "se [planen](../plans/p.md)"],
+    ['[Planen](../plans/p.md "tittel")', 'se [Planen](../plans/p.md "tittel")', "se [Planen](../plans/p.md)"],
+    ["[Planen](<../plans/p q.md>)", "se [Planen](<../plans/p q.md>)", "se [Planen](../plans/p q.md)"],
+    ["[the `ci_*` tables](../hub.md)", "se [the `ci_*` tables](../hub.md)", "se [the `ci` tables](../hub.md)"],
+    ["[Planen](../plans/p.md#status)", "se [Planen](../plans/p.md#status)", "se [Planen](../plans/p.md)"],
+  ] as const;
+  for (const [link, keeps, changes] of LINKS) {
+    test(`${link}: a home that keeps it is kept, one that changes it is dropped`, () => {
+      const passage = `- ${link} er i gang`;
+      const old = `${link} er i gang`;
+      expect(parseStaleAnswer(ans({ old, new: `${link} er levert`, home: keeps }), passage).edit).toEqual({ old, new: `${link} er levert`, home: keeps });
+      expect(parseStaleAnswer(ans({ old, new: `${link} er levert`, home: changes }), passage).edit).toEqual({ old, new: `${link} er levert` });
+    });
+  }
+  test("a link twice in old must be twice in home", () => {
+    const passage = "- [[p]] og [[p]] er i gang";
+    const old = "[[p]] og [[p]] er i gang";
+    expect(parseStaleAnswer(ans({ old, new: "x", home: "se [[p]]" }), passage).edit).toEqual({ old, new: "x" });
+    expect(parseStaleAnswer(ans({ old, new: "x", home: "se [[p]] og [[p]]" }), passage).edit?.home).toBe("se [[p]] og [[p]]");
+  });
+  test("a link inside inline code is not a link: home may drop it", () => {
+    const passage = "- the `[[p]]` form er i gang";
+    expect(parseStaleAnswer(ans({ old: "`[[p]]` form er i gang", new: "x", home: "form er omtalt" }), passage).edit?.home).toBe("form er omtalt");
+  });
+  test("an old text that cuts into a link, or lies inside one, drops the edit", () => {
+    const passage = "- [[plans/p|Planen]] er i gang, se [Planen](../plans/p.md) også, [[q|i drift]] nå";
+    for (const old of ["Planen]] er i gang", "[[plans/p|Planen", "- [[plans/p", "se [Planen](../plans", "p.md) også", "i drift", "plans/p|Planen"]) {
+      expect([old, parseStaleAnswer(ans({ old, new: "x", home: "y" }), passage).edit]).toEqual([old, null]);
+    }
+    expect(parseStaleAnswer(ans({ old: "er i gang", new: "er levert" }), passage).edit).toEqual({ old: "er i gang", new: "er levert" });
+  });
+  test("an old text that cuts a link at a window's cut end drops the edit", () => {
+    expect(parseStaleAnswer(ans({ old: "Planen]] er i gang", new: "x" }), "…Planen]] er i gang nå").edit).toBeNull();
+  });
+});
+
+// Fix round 2 batch 1: one rule for «once», said the same way in the prompt
+// and the parse — `old` occurs exactly once in the whole passage, and, when
+// the call site passes the passage's full source lines, exactly once on its
+// full line too (PR 3's Apply checks `old` there).
+describe("parseStaleAnswer: old is unique in the passage and on its full line (fix round 2)", () => {
+  const ans = (edit: Record<string, unknown>) => JSON.stringify({ verdict: "stale", reason: "r", edit });
+  test("the prompt says the parse's rule: once in the whole passage, never «…»", () => {
+    const p = buildStalePrompt({ kind: "passage", page: "a.md", passage: "- [[a]] er i gang\n- [[b]] er i gang", target: { relPath: "a.md", title: "A" } });
+    expect(p).toContain("occurs exactly once in the whole passage");
+    expect(p).toContain("«…» marks text cut from a line or a gap inside it");
+    expect(p).toContain("never copy «…» into \"old\"");
+    expect(p).not.toContain("occurs on it once");
+  });
+  test("two lines with the same words: the bare words are dropped, the span with its link is kept", () => {
+    const passage = "- [[a]] er i gang\n- [[b]] er i gang";
+    expect(parseStaleAnswer(ans({ old: "er i gang", new: "er levert" }), passage).edit).toBeNull();
+    expect(parseStaleAnswer(ans({ old: "[[a]] er i gang", new: "[[a]] er levert" }), passage).edit).toEqual({ old: "[[a]] er i gang", new: "[[a]] er levert" });
+  });
+  test("an old text once in the window but twice on its full line is dropped", () => {
+    const passage = "…lead [[p]] er i gang…";
+    const full = "x er i gang, lead [[p]] er i gang, y";
+    expect(parseStaleAnswer(ans({ old: "er i gang", new: "er levert" }), passage, [full]).edit).toBeNull();
+    expect(parseStaleAnswer(ans({ old: "[[p]] er i gang", new: "[[p]] er levert" }), passage, [full]).edit).toEqual({ old: "[[p]] er i gang", new: "[[p]] er levert" });
+  });
+  test("the full line checked is the one of the row that holds old", () => {
+    const passage = "- [[a]] er i gang\n…[[b]] er levert…";
+    const lines = ["- [[a]] er i gang", "z [[b]] er levert, og [[a]] er i gang"];
+    // Once in the passage and once on its own row's full line: kept, though row 2's hidden part repeats it.
+    expect(parseStaleAnswer(ans({ old: "[[a]] er i gang", new: "x" }), passage, lines).edit).toEqual({ old: "[[a]] er i gang", new: "x" });
+    expect(parseStaleAnswer(ans({ old: "[[b]] er levert", new: "x" }), passage, lines).edit).toEqual({ old: "[[b]] er levert", new: "x" });
+  });
+  test("a full line that is unreadable or no longer holds old drops the edit", () => {
+    const passage = "- [[p]] er i gang";
+    expect(parseStaleAnswer(ans({ old: "er i gang", new: "x" }), passage, [undefined]).edit).toBeNull();
+    expect(parseStaleAnswer(ans({ old: "er i gang", new: "x" }), passage, ["- [[p]] er levert"]).edit).toBeNull();
+    expect(parseStaleAnswer(ans({ old: "er i gang", new: "x" }), passage, []).edit).toBeNull();
+  });
+  test("an old text inside a link on the full line, hidden by the window's cut, drops the edit", () => {
+    expect(parseStaleAnswer(ans({ old: "i gang", new: "x" }), "…i gang](../p.md) nå", ["- [Planen er i gang](../p.md) nå"]).edit).toBeNull();
   });
 });
 
@@ -353,6 +444,24 @@ describe("runStaleConfirm (D16)", () => {
       expect(rows.map((r) => [r.verdict, r.edit])).toEqual([["stale", null]]);
     } finally {
       await rm(path.join(root, "gap.md"));
+    }
+  });
+
+  // Fix round 2 batch 1: the loop checks `old` against the hit's FULL line,
+  // which the window hides part of.
+  test("the loop drops an edit whose old text the window shows once but the full line holds twice", async () => {
+    await write("twice.md", page("Twice", `[[p]] is in-flight, ${"and then some filler ".repeat(30)}and it is in-flight still.`));
+    try {
+      const model: StaleModel = async () => JSON.stringify({ verdict: "stale", reason: "shipped", edit: { old: "is in-flight", new: "is shipped" } });
+      const { deps, store, prompts } = makeDeps({ model: () => async (p, c) => (prompts.push(p), model(p, c)) });
+      await runStaleConfirm(["cw"], deps);
+      const mine = prompts.find((p) => p.includes("Wiki page: twice.md"))!;
+      const passage = /<<<\n([\s\S]*?)\n>>>/.exec(mine)![1]!;
+      expect(passage.split("is in-flight")).toHaveLength(2);
+      const rows = [...store.rows.values()].filter((r) => r.page === "twice.md");
+      expect(rows.map((r) => [r.verdict, r.edit])).toEqual([["stale", null]]);
+    } finally {
+      await rm(path.join(root, "twice.md"));
     }
   });
 
@@ -575,5 +684,57 @@ describe("commitsFor (A15)", () => {
     } finally {
       await rm(plain, { recursive: true, force: true });
     }
+  });
+});
+
+// Fix round 2 batch 1: Check checks `old` against the linking page's FULL
+// line, which the passage window hides part of.
+describe("Check drops an edit the full line holds twice (fix round 2)", () => {
+  let root = "";
+  const git = async (...args: string[]) => {
+    const proc = Bun.spawn(["git", "-C", root, "-c", "user.email=f@example.com", "-c", "user.name=f", "-c", "commit.gpgsign=false", ...args], { stdout: "pipe", stderr: "pipe" });
+    const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    if (code !== 0) throw new Error(`git ${args.join(" ")}: ${err}`);
+  };
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-check-full-"));
+    await git("init", "-q", "-b", "main");
+    await write("hub.md", page("Hub", "Body."));
+    await write("notes/old.md", page("Old", `The pin in [[hub]] landed on 23.05, ${"and then some filler ".repeat(30)}and it landed on 23.05 again.`));
+    // A line with no claim before the claim line: the passage is the claim
+    // line alone, so its full line is the page's second linking line.
+    await write("notes/two.md", page("Two", "See [[hub]] for more.\n\nThe pin in [[hub]] landed on 23.05."));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-05-01T10:00:00Z", "-m", "seed");
+    await write("hub.md", page("Hub", "Body two."));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-06-18T10:00:00Z", "-m", "hub: the pin moves");
+  }, 30_000);
+  afterAll(async () => {
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("the window shows «landed on 23.05» once, the full line twice: the verdict is kept, the edit dropped; a claim row's own line keeps it", async () => {
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    const prompts: string[] = [];
+    const model: StaleModel = async (p) => (prompts.push(p), JSON.stringify({ verdict: "stale", reason: "moved", edit: { old: "landed on 23.05", new: "landed on 18.06" } }));
+    const store = memoryStaleVerdictStore();
+    const events: { type: string; edit?: unknown; verdict?: string }[] = [];
+    const ok = await runStaleCheck({ wiki: "w", index, relPath: "hub.md", asOfMs: Date.parse("2026-06-20T00:00:00Z"), bot: BOT, store, model, onEvent: (e) => void events.push(e as never) });
+    expect(ok).toBe(true);
+    expect(prompts).toHaveLength(2);
+    const mine = prompts.find((p) => p.includes("Wiki page: notes/old.md"))!;
+    const passage = /<<<\n([\s\S]*?)\n>>>/.exec(mine)![1]!;
+    expect(passage.split("landed on 23.05")).toHaveLength(2);
+    const by = Object.fromEntries(events.filter((e) => e.type === "verdict").map((e) => [(e as { relPath?: string }).relPath, [e.verdict, e.edit]]));
+    expect(by).toEqual({
+      "notes/old.md": ["stale", null],
+      "notes/two.md": ["stale", { old: "landed on 23.05", new: "landed on 18.06" }],
+    });
   });
 });
