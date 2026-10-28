@@ -1113,6 +1113,20 @@ describe("applyWikiProposalGroup", () => {
     expect(commits[0]!.message).toContain("2 pages");
   });
 
+  test("flags a commit that throws or answers `reason: \"error\"`, and no other answer", async () => {
+    const run = async (commit: ApplyDeps["commit"]) => {
+      // Each run writes the pages afresh, so every row writes and the commit runs.
+      await writeFile(path.join(wikiDir, PAGE_A), pageBody("A"));
+      await writeFile(path.join(wikiDir, PAGE_B), pageBody("B"));
+      const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+      return (await applyWikiProposalGroup(rows, deps({ commit }))).commitFailed;
+    };
+    expect(await run(async () => { throw new Error("index.lock"); })).toBe(true);
+    expect(await run(async () => ({ committed: false, reason: "error" }))).toBe(true);
+    expect(await run(async () => ({ committed: true }))).toBeUndefined();
+    expect(await run(async () => ({ committed: false, reason: "not-default-branch" }))).toBeUndefined();
+  });
+
   test("a NOOP row stages nothing, so the commit subject counts the pages it wrote", async () => {
     const commits: Array<{ paths: string[]; message: string }> = [];
     const rowA = lintRow("r1", PAGE_A, pageBody("A"));

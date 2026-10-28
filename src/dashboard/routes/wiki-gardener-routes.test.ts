@@ -3208,6 +3208,30 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(actions.noop).toEqual([]);
   });
 
+  test("a write error ends a lint row in `error`, and a Stale check row back in `draft` with its edits", () => {
+    const failed = { outcome: "error", reason: "write failed: EACCES" } as const;
+    const applied = { outcome: "applied", writtenPath: PAGE_A } as const;
+    const decide = (kind: string) => {
+      const rows = [
+        { id: "r1", targetPath: PAGE_A, kind },
+        { id: "r2", targetPath: PAGE_B, kind },
+      ] as unknown as Parameters<typeof groupApplyActions>[0];
+      const results = [
+        { id: "r1", targetPath: PAGE_A, outcome: applied },
+        { id: "r2", targetPath: PAGE_B, outcome: failed },
+      ];
+      return groupApplyActions(rows, { results, stoppedAt: results[1] } as unknown as Parameters<typeof groupApplyActions>[1]).actions;
+    };
+    expect(decide("lint")).toEqual([
+      { id: "r1", status: "applied" },
+      { id: "r2", status: "error" },
+    ]);
+    expect(decide("stale-check")).toEqual([
+      { id: "r1", status: "applied" },
+      { id: "r2", status: "draft" },
+    ]);
+  });
+
   test("group approve STOPS at a stale row, names it, and puts the untouched rows back to DRAFT", async () => {
     const stale = { ...((await lintRow("r2", PAGE_B, "prov")) as object), baseHash: "0".repeat(64) };
     await Bun.write(path.join(root, "plans/c.mdx"), body("C"));
@@ -3859,6 +3883,60 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(dirty);
     expect(await Bun.file(path.join(root, "notes/b.md")).text()).toBe(B_TEXT);
     expect(s.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
+  });
+
+  /** A pre-commit hook that refuses every commit, so `commitWikiChange` fails. */
+  const failCommits = async () => {
+    const hook = path.join(root, ".git/hooks/pre-commit");
+    await Bun.write(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+  };
+
+  test("a stopped Accept writes `fixed` for the rows it applied, keeps the stopped row's edits on the card and names them", async () => {
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    // notes/b.md passes every pre-write check and then cannot be written.
+    await chmod(path.join(root, "notes/b.md"), 0o444);
+    try {
+      const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        outcome: "stopped",
+        applied: ["notes/a.md"],
+        stoppedAt: "notes/b.md",
+        stoppedOutcome: "error",
+        fixed: 1,
+        notLanded: [{ page: "notes/b.md", status: "draft", edits: [{ old: "the pin is draft", text: "the pin is shipped" }] }],
+      });
+    } finally {
+      await chmod(path.join(root, "notes/b.md"), 0o644);
+    }
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed").map((r) => r.page)).toEqual(["notes/a.md"]);
+    // The stopped row is a draft again, its edits intact: the card can Accept it.
+    expect(s.rows().map((r) => [r.targetPath, r.status])).toEqual([["notes/a.md", "applied"], ["notes/b.md", "draft"]]);
+  });
+
+  test("an Accept whose commit fails writes no `fixed` verdict", async () => {
+    await failCommits();
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(await res.json()).toMatchObject({ outcome: "applied", applied: ["notes/a.md", "notes/b.md"], fixed: 0 });
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed")).toEqual([]);
+  });
+
+  test("a stopped Accept whose commit fails writes no `fixed` verdict either", async () => {
+    await failCommits();
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    await chmod(path.join(root, "notes/b.md"), 0o444);
+    try {
+      const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+      expect(await res.json()).toMatchObject({ outcome: "stopped", applied: ["notes/a.md"], stoppedAt: "notes/b.md" });
+    } finally {
+      await chmod(path.join(root, "notes/b.md"), 0o644);
+    }
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed")).toEqual([]);
   });
 
   test("Accept carries the verdicts on a written page's own linking passages to its new content hash", async () => {

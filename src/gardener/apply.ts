@@ -407,6 +407,9 @@ export interface GroupApplyResult {
   /** The row that stopped the group, when one did. Rows before it are already
    *  written and stay written. */
   stoppedAt?: GroupRowOutcome;
+  /** The group's one commit threw or answered `reason: "error"`: the written
+   *  pages are on disk but not committed, so no `fixed` verdict may claim them. */
+  commitFailed?: true;
 }
 
 /**
@@ -502,8 +505,10 @@ export async function applyWikiProposalGroup(
     const paths = [...new Set(tail.paths)];
     const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
     try {
-      await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
+      const res = await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
+      if ((res as { reason?: string } | undefined)?.reason === "error") result.commitFailed = true;
     } catch (err) {
+      result.commitFailed = true;
       log.warn("Wiki-gardener group apply: commit failed for {group}: {error}", {
         group: groupKey,
         error: errMsg(err),

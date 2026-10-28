@@ -3100,6 +3100,10 @@ export function registerWikiGardenerRoutes(
         outcome: outcome.outcome,
         reason,
       });
+      // A Stale check card: `fixed` for the rows written before the stop, and
+      // the edits that did not land, each with the status its row now has.
+      const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots, result.commitFailed);
+      const notLanded = staleCheckNotLanded(rows, actions);
       return c.json(
         {
           outcome: "stopped",
@@ -3112,6 +3116,7 @@ export function registerWikiGardenerRoutes(
           stoppedOutcome: outcome.outcome,
           error: reason,
           ...(outcome.outcome === "forbidden" ? { readonly: true } : {}),
+          ...(fixed !== null ? { fixed, notLanded } : {}),
         },
         outcome.outcome === "forbidden" ? 403 : 409,
       );
@@ -3119,7 +3124,7 @@ export function registerWikiGardenerRoutes(
     log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
     // D29: a Stale check Accept writes a `fixed` verdict on each written
     // linking page's new passage, on the index the apply refreshed.
-    const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots);
+    const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots, result.commitFailed);
     return c.json({ outcome: "applied", applied, noop, skipped, ...(fixed !== null ? { fixed } : {}) });
   });
 
@@ -3222,17 +3227,19 @@ async function staleCheckSnapshots(entry: WikiRegistryEntry, rows: readonly Wiki
 }
 
 /** D29: the `fixed` verdicts a Stale check Accept writes, or null for
- *  another kind, then the carry of the written pages' linking verdicts. Best
- *  effort: a failed write is logged, never a failed Accept. */
+ *  another kind, then the carry of the written pages' linking verdicts. None
+ *  when the group's commit failed: the pages are not committed. Best effort: a
+ *  failed write is logged, never a failed Accept. */
 async function staleCheckFixedVerdicts(
   entry: WikiRegistryEntry,
   rows: readonly WikiProposal[],
   applied: readonly string[],
   snapshots: readonly PassageKeySnapshot[],
+  commitFailed: boolean | undefined,
 ): Promise<number | null> {
   const written = rows.filter((r) => r.kind === "stale-check" && applied.includes(r.targetPath));
   if (!rows.some((r) => r.kind === "stale-check")) return null;
-  if (!written.length) return 0;
+  if (!written.length || commitFailed) return 0;
   try {
     // Rebuilt AFTER the commit tail: the apply's own refresh ran while the
     // pages were still uncommitted, which reads them as changed by mtime.
@@ -3246,6 +3253,22 @@ async function staleCheckFixedVerdicts(
     log.warn("Stale check accept: fixed verdicts not written for {wiki}: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
     return 0;
   }
+}
+
+/** A stopped Stale check Accept's rows that wrote nothing: each page, the
+ *  status its row ends in (`groupApplyActions`) and its edits. */
+function staleCheckNotLanded(
+  rows: readonly WikiProposal[],
+  actions: readonly GroupRowAction[],
+): { page: string; status: string; edits: { old: string; text: string }[] }[] {
+  const status = new Map(actions.map((a) => [a.id, a.status]));
+  return rows
+    .filter((r) => r.kind === "stale-check" && status.get(r.id) !== "applied")
+    .map((r) => ({
+      page: r.targetPath,
+      status: status.get(r.id) ?? r.status,
+      edits: (r.staleMeta?.edits ?? []).map((e) => ({ old: e.old, text: e.text })),
+    }));
 }
 
 /** D20: the «kept as written» verdicts a rejected Stale check card writes
@@ -3341,6 +3364,7 @@ export function groupApplyActions(
   // refused — is still `approved`, which the gate renders with NO buttons at
   // all, so on a stop it goes back to `draft`.
   const settled = new Set<string>();
+  const staleCheckIds = new Set(rows.filter((r) => r.kind === "stale-check").map((r) => r.id));
   for (const row of result.results) {
     if (row.outcome.outcome === "applied") {
       actions.push({ id: row.id, status: "applied" });
@@ -3359,7 +3383,10 @@ export function groupApplyActions(
       actions.push({ id: row.id, status: "draft" });
       settled.add(row.id);
     } else if (row.outcome.outcome === "error") {
-      actions.push({ id: row.id, status: "error" });
+      // A Stale check row whose write failed goes back to `draft`: `error`
+      // renders no diff and no verb, and a later Send carries only live rows,
+      // so its edits would be lost. A lint row keeps `error`.
+      actions.push({ id: row.id, status: staleCheckIds.has(row.id) ? "draft" : "error" });
       settled.add(row.id);
     }
   }

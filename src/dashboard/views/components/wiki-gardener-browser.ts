@@ -538,10 +538,15 @@ async function actOnGroup(
     const data = await res.json();
     if (!res.ok) {
       const applied: string[] = data.applied || [];
+      // A Stale check card names the edits that did not land and where they are now.
+      const notLanded: { page: string; status: string; edits: unknown[] }[] = data.notLanded || [];
       const note = data.outcome === "stopped"
         ? "Stopped at " + data.stoppedAt + " (" + data.stoppedOutcome + ")" +
           (applied.length ? " — " + applied.length + " page(s) already written" : "") +
-          (data.error ? ": " + data.error : "")
+          (data.error ? ": " + data.error : "") +
+          (notLanded.length
+            ? ". Not written: " + notLanded.map((n) => n.page + " (" + n.edits.length + " edit(s), " + n.status + ")").join(", ")
+            : "")
         : data.error || "Failed (" + res.status + ")";
       // Stored BEFORE the reload, because `render()` replaces the card element
       // this note is painted on.
