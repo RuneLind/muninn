@@ -3751,8 +3751,16 @@ let staleProgress = "";
 let staleNotice = "";
 let staleNoticeTone: StaleNotice["tone"] = "error";
 /** Fixes whose Apply or Send is in flight, by `staleFixKey`: every repaint
- *  draws their buttons disabled, so no fix is posted twice. */
-const staleFixPending = new Set<string>();
+ *  draws their buttons disabled, so no fix is posted twice. The value is the
+ *  last report request issued when the POST answered (Infinity until then):
+ *  only a report requested after it can drop the fix, so only such a report
+ *  clears the key, never an earlier one landing late or a superseded one. */
+const staleFixPending = new Map<string, number>();
+/** A report from request `seq` landed: fixes answered before it was asked for
+ *  are no longer in flight. */
+function settleStaleFixes(seq: number): void {
+  for (const [key, answeredAt] of staleFixPending) if (answeredAt < seq) staleFixPending.delete(key);
+}
 /** Linking pages whose last Check call failed: shown per row, not counted (A12). */
 let staleRowErrors: Record<string, string> = {};
 /** Pages the last Check left at its call limit (A12). */
@@ -3830,7 +3838,7 @@ function renderStale(): void {
         capLeft: staleCapLeft,
         capCalls: staleCapCalls,
         open: staleOpen,
-        pendingFixes: staleFixPending,
+        pendingFixes: new Set(staleFixPending.keys()),
       });
   }
   const badge = document.getElementById("wikiStaleCount");
@@ -3870,10 +3878,9 @@ function setStaleNotice(text: string, tone: StaleNotice["tone"] = "error"): void
   renderStale();
 }
 
-/** Fetch the open page's stale report (free hits, buckets, cached verdicts).
- *  Resolves when the report has landed (or was dropped as outdated). */
-function loadStale(relPath: string): Promise<void> {
-  if (!staleTabAvailable()) return Promise.resolve();
+/** Fetch the open page's stale report (free hits, buckets, cached verdicts). */
+function loadStale(relPath: string): void {
+  if (!staleTabAvailable()) return;
   if (staleFor !== relPath) {
     abortStaleCheck();
     staleFor = relPath;
@@ -3884,11 +3891,12 @@ function loadStale(relPath: string): Promise<void> {
   const seq = ++staleLoadSeq;
   /** Still the latest request, and still for the page in the tab. */
   const mine = () => seq === staleLoadSeq && staleFor === relPath;
-  return fetch(withWiki("/api/wiki/stale?page=" + encodeURIComponent(relPath)))
+  fetch(withWiki("/api/wiki/stale?page=" + encodeURIComponent(relPath)))
     .then((r) => r.json())
     .then((data: StaleReportView) => {
       if (!mine()) return;
       staleReport = data;
+      settleStaleFixes(seq);
       if (!data.error) {
         reconcileStaleClientState(data);
         foldStaleReportCounts(relPath, staleCounts(data));
@@ -3898,6 +3906,7 @@ function loadStale(relPath: string): Promise<void> {
     .catch(() => {
       if (!mine()) return;
       staleReport = { error: "the stale report could not be loaded" };
+      settleStaleFixes(seq);
       renderStale();
     });
 }
@@ -4151,7 +4160,7 @@ async function postStaleFix(btn: Element, action: "apply" | "send"): Promise<voi
   const key = staleFixKey({ kind, page: relPath, line: btn.getAttribute("data-line"), target: btn.getAttribute("data-target"), linking: btn.getAttribute("data-linking") });
   // One request per fix: a click on a button a repaint has not yet disabled sends nothing.
   if (staleFixPending.has(key)) return;
-  staleFixPending.add(key);
+  staleFixPending.set(key, Infinity);
   // The fix's buttons repaint disabled; the last notice stands until this answer replaces it.
   renderStale();
   let result: StaleNotice;
@@ -4164,18 +4173,18 @@ async function postStaleFix(btn: Element, action: "apply" | "send"): Promise<voi
   } catch {
     result = { tone: "error", text: `${action === "apply" ? "The fix was not applied" : "The fix was not sent to the Gardener"}: could not reach the server.` };
   }
-  try {
-    if (result.tone !== "error") {
-      // The rail, the head and the home drop with the tab; ⧗ appears on a Send.
-      loadStaleSummary();
-      if (wrote && wrote === currentRelPath) loadPageByRelPath(wrote, false, false);
-      // The buttons stay disabled until the report that drops the fix lands.
-      if (staleFor === relPath) await loadStale(relPath);
-    }
-  } finally {
-    staleFixPending.delete(key);
-    if (staleFor === relPath) setStaleNotice(result.text, result.tone);
+  if (result.tone === "error") staleFixPending.delete(key);
+  else {
+    // The buttons stay disabled until a report asked for after this answer
+    // lands (`settleStaleFixes`): an earlier one still offers the fix.
+    staleFixPending.set(key, staleLoadSeq);
+    // The rail, the head and the home drop with the tab; ⧗ appears on a Send.
+    loadStaleSummary();
+    if (wrote && wrote === currentRelPath) loadPageByRelPath(wrote, false, false);
+    if (staleFor === relPath) loadStale(relPath);
   }
+  // A page opened meanwhile is not the fix's: its tab gets no notice.
+  if (staleFor === relPath) setStaleNotice(result.text, result.tone);
 }
 
 /**

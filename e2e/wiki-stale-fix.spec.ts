@@ -29,6 +29,10 @@
  *      a repaint while the request is held; Apply's and Send's results (the
  *      group, a dropped edit) show in the notice, in the token colour of their
  *      tone; the next answer replaces an error notice.
+ *  10. **The buttons stay disabled until a report asked for after the answer
+ *      lands** (fix round 2 batch 3): not on the POST's answer, not on an older
+ *      report landing late; an answer after the reader left the page leaves the
+ *      new page's tab alone, and an error answer reloads no report.
  *
  * **What is stubbed and why.** No model is called: the verdict rows Check would
  * write are inserted under keys the server's own key functions derive (a
@@ -246,6 +250,10 @@ async function reopenHub(p: Page): Promise<void> {
   await p.locator(`.wiki-list-item[data-relpath="${HUB}"]`).click();
   await reloaded;
 }
+/** The page report GET (`/api/wiki/stale?page=`), not the wiki-wide summary. */
+const isReportGet = (u: URL) => u.pathname === "/api/wiki/stale" && u.searchParams.has("page");
+/** Let the client finish what a response it was handed sets off. */
+const settle = (p: Page) => p.evaluate(() => new Promise((r) => setTimeout(r, 150)));
 /** The wiki-wide Stale check summary: its total To check, and the changed pages. */
 async function wikiTotals(): Promise<{ toCheck: number; changed: string[] }> {
   const s = (await (await fetch(`${BASE}/api/wiki/stale?wiki=${WIKI}`)).json()) as { totals: { toCheck: number }; pages: { relPath: string; changed: boolean }[] };
@@ -273,12 +281,36 @@ test("Apply on a linking page writes it, and the tab, the pill and the rail drop
   await (await fixButton(p, "notes/d.md", "apply")).click();
   await expect.poll(() => posts).toBe(1);
   const dButtons = p.locator('#staleBody [data-stale-linking="notes/d.md"] :is([data-stale-apply], [data-stale-send])');
+  // Round 2 batch 3: the click itself repaints them disabled, before any reload.
+  await expect(dButtons).toHaveCount(2);
+  for (const b of await dButtons.all()) await expect(b).toBeDisabled();
   await reopenHub(p);
   // The repaint drew the buttons anew: both are still disabled, so a second click sends nothing.
   await expect(dButtons).toHaveCount(2);
   for (const b of await dButtons.all()) await expect(b).toBeDisabled();
+  // Even a click that reaches a re-enabled button posts nothing while the fix is in flight.
+  await p.locator('#staleBody [data-stale-linking="notes/d.md"] [data-stale-apply][data-variant="new"]').evaluate((b) => {
+    (b as HTMLButtonElement).disabled = false;
+    (b as HTMLButtonElement).click();
+  });
+  await settle(p);
+  expect(posts).toBe(1);
+  // Undo the tampering: what follows asserts the client's own repaints.
+  await p.locator('#staleBody [data-stale-linking="notes/d.md"] [data-stale-apply][data-variant="new"]').evaluate((b) => {
+    (b as HTMLButtonElement).disabled = true;
+  });
+  // Round 2 batch 3: the report after the answer is held, so the answer has
+  // landed and the report that drops the fix has not.
+  const heldGets: (() => Promise<void>)[] = [];
+  await p.route(isReportGet, (route) => void heldGets.push(() => route.continue()));
+  const reloadAsked = p.waitForRequest((r) => isReportGet(new URL(r.url())));
   release();
   expect((await applied).status()).toBe(200);
+  await reloadAsked;
+  await settle(p);
+  for (const b of await dButtons.all()) await expect(b).toBeDisabled();
+  await p.unroute(isReportGet);
+  for (const go of heldGets) await go();
   expect(posts).toBe(1);
   await p.unroute("**/api/wiki/stale/apply");
   await expect(notice(p)).toHaveText("Applied to notes/d.md.");
@@ -297,11 +329,37 @@ test("Apply on a linking page writes it, and the tab, the pill and the rail drop
 
 test("Send on two linking pages leaves ONE live Stale check card holding both, and ⧗ 2 shows on the pill and the rail", async ({ page: p }) => {
   await openTab(p);
+  // Round 2 batch 3: an answer that lands after the reader opened another page
+  // tells nothing on that page's tab.
+  let answer!: () => void;
+  const answered = new Promise<void>((r) => (answer = r));
+  await p.route("**/api/wiki/stale/send", async (route) => {
+    await answered;
+    await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "E2E: answered elsewhere" }) });
+  }, { times: 1 });
+  const lateSend = p.waitForResponse((r) => r.url().endsWith("/api/wiki/stale/send"));
+  await (await fixButton(p, "notes/a.md", "send")).click();
+  const aReport = p.waitForResponse((r) => r.url().includes("/api/wiki/stale?page=notes%2Fa.md"));
+  await p.locator('.wiki-list-item[data-relpath="notes/a.md"]').click();
+  await aReport;
+  await expect(p.locator(".wiki-article")).toContainText("The pin in");
+  answer();
+  await lateSend;
+  await settle(p);
+  await expect(notice(p)).toHaveText("");
+  await openTab(p);
   // Batch 6: a refused Send shows its error; it stands through a reload of the
   // page (R2B4), and the next answer replaces it.
   await p.route("**/api/wiki/stale/send", (route) => route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "E2E: refused once" }) }), { times: 1 });
+  // Round 2 batch 3: an error answer asks for no report (nothing changed).
+  let reportGets = 0;
+  const countGets = (r: { url(): string }) => void (isReportGet(new URL(r.url())) && reportGets++);
+  p.on("request", countGets);
   await (await fixButton(p, "notes/a.md", "send")).click();
   await expect(notice(p)).toHaveText("The fix was not sent to the Gardener: E2E: refused once");
+  await settle(p);
+  p.off("request", countGets);
+  expect(reportGets).toBe(0);
   await expectNoticeTone(p, "--status-error");
   await reopenHub(p);
   await expect(notice(p)).toHaveText("The fix was not sent to the Gardener: E2E: refused once");
@@ -420,9 +478,41 @@ test("Dismiss keeps the text as written; Apply on the status line drops the stal
   // The status-line hit's Apply: the line is rewritten and the stale line goes.
   const hit = p.locator("#staleBody [data-stale-hit]");
   await hit.locator(".wiki-stale-fix summary").click();
+  // Round 2 batch 3: the Apply writes the open page, so two reports are asked
+  // for (the tab's and the page reload's). The first lands after the second
+  // was asked for and is dropped as outdated: the hit's buttons stay disabled
+  // over the report that still offers the fix, until the second lands.
+  const heldGets: { url: string; go: () => Promise<void> }[] = [];
+  await p.route(isReportGet, (route) => void heldGets.push({ url: route.request().url(), go: () => route.continue() }));
+  let applyPosts = 0;
+  await p.route("**/api/wiki/stale/apply", (route) => {
+    applyPosts++;
+    return route.continue();
+  });
   const applied = p.waitForResponse((r) => r.url().endsWith("/api/wiki/stale/apply"));
+  const hitButtons = hit.locator(":is([data-stale-apply], [data-stale-send])");
   await hit.locator('[data-stale-apply][data-variant="new"]').click();
   expect((await applied).status()).toBe(200);
+  await expect.poll(() => heldGets.length).toBe(2);
+  const first = p.waitForResponse((r) => r.request().url() === heldGets[0]!.url);
+  await heldGets[0]!.go();
+  await first;
+  await settle(p);
+  // Both variants' Apply and Send: the old report still offers the fix.
+  await expect(hitButtons).toHaveCount(4);
+  for (const b of await hitButtons.all()) await expect(b).toBeDisabled();
+  await expect(notice(p)).toHaveText("Applied to repos/hub.md.");
+  // A repaint before the second report lands (a refused verdict here) still
+  // draws them disabled: the dropped report settled nothing.
+  await p.route("**/api/wiki/stale/verdict", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "E2E: refused" }) }), { times: 1 });
+  await hit.locator('[data-stale-verdict="true"]').click();
+  await expect(notice(p)).toHaveText("The verdict was not saved: E2E: refused.");
+  for (const b of await hitButtons.all()) await expect(b).toBeDisabled();
+  await p.unroute(isReportGet);
+  for (const g of heldGets.slice(1)) await g.go();
+  await expect(head(p)).toHaveText("⚠ 0 stale status lines · 1 linking page to check");
+  expect(applyPosts).toBe(1);
+  await p.unroute("**/api/wiki/stale/apply");
   // The hub's content hash moved: a, b and d stay out of To check only
   // because their `fixed` rows followed it (their fix commits date nothing).
   await expect(head(p)).toHaveText("⚠ 0 stale status lines · 1 linking page to check");
