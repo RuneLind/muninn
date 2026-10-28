@@ -88,3 +88,31 @@ export const groupKindTag = (kind: string) => (kind === "stale-check" ? "stale c
 
 /** The group number in a `stale-check:<changed>:<n>` key, or "". */
 export const groupNumber = (key: string) => /:(\d+)$/.exec(key)?.[1] ?? "";
+
+/** What a group verb's failed answer says on the card (painted as
+ *  `textContent`). A `stopped` Accept names its stop, the pages already written
+ *  and, on a Stale check card, each row that wrote nothing: its edit count and
+ *  the status its row now has. */
+export function groupStopNote(
+  data: {
+    outcome?: string;
+    stoppedAt?: string;
+    stoppedOutcome?: string;
+    applied?: string[];
+    error?: string;
+    notLanded?: { page: string; status: string; edits: unknown[] }[];
+  },
+  httpStatus: number,
+): string {
+  if (data.outcome !== "stopped") return data.error || "Failed (" + httpStatus + ")";
+  const applied = data.applied || [];
+  const notLanded = data.notLanded || [];
+  return (
+    "Stopped at " + data.stoppedAt + " (" + data.stoppedOutcome + ")" +
+    (applied.length ? " — " + applied.length + " page(s) already written" : "") +
+    (data.error ? ": " + data.error : "") +
+    (notLanded.length
+      ? ". Not written: " + notLanded.map((n) => n.page + " (" + n.edits.length + " edit(s), " + n.status + ")").join(", ")
+      : "")
+  );
+}

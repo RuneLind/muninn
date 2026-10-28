@@ -35,7 +35,7 @@ import {
   type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
-import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, kindMatches } from "./wiki-gardener-group.ts";
+import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
 import { approveButtonFor, FACTCHECK_UNKNOWN_NOTE, singleDriftNote } from "./wiki-gardener-drift.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
@@ -537,17 +537,7 @@ async function actOnGroup(
     );
     const data = await res.json();
     if (!res.ok) {
-      const applied: string[] = data.applied || [];
-      // A Stale check card names the edits that did not land and where they are now.
-      const notLanded: { page: string; status: string; edits: unknown[] }[] = data.notLanded || [];
-      const note = data.outcome === "stopped"
-        ? "Stopped at " + data.stoppedAt + " (" + data.stoppedOutcome + ")" +
-          (applied.length ? " — " + applied.length + " page(s) already written" : "") +
-          (data.error ? ": " + data.error : "") +
-          (notLanded.length
-            ? ". Not written: " + notLanded.map((n) => n.page + " (" + n.edits.length + " edit(s), " + n.status + ")").join(", ")
-            : "")
-        : data.error || "Failed (" + res.status + ")";
+      const note = groupStopNote(data, res.status);
       // Stored BEFORE the reload, because `render()` replaces the card element
       // this note is painted on.
       groupOutcomes.set(groupKey, { text: note, kind: "err" });

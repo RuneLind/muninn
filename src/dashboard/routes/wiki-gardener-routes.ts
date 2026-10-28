@@ -3102,7 +3102,7 @@ export function registerWikiGardenerRoutes(
       });
       // A Stale check card: `fixed` for the rows written before the stop, and
       // the edits that did not land, each with the status its row now has.
-      const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots, result.commitFailed);
+      const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots);
       const notLanded = staleCheckNotLanded(rows, actions);
       return c.json(
         {
@@ -3124,7 +3124,7 @@ export function registerWikiGardenerRoutes(
     log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
     // D29: a Stale check Accept writes a `fixed` verdict on each written
     // linking page's new passage, on the index the apply refreshed.
-    const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots, result.commitFailed);
+    const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots);
     return c.json({ outcome: "applied", applied, noop, skipped, ...(fixed !== null ? { fixed } : {}) });
   });
 
@@ -3227,19 +3227,19 @@ async function staleCheckSnapshots(entry: WikiRegistryEntry, rows: readonly Wiki
 }
 
 /** D29: the `fixed` verdicts a Stale check Accept writes, or null for
- *  another kind, then the carry of the written pages' linking verdicts. None
- *  when the group's commit failed: the pages are not committed. Best effort: a
- *  failed write is logged, never a failed Accept. */
+ *  another kind, then the carry of the written pages' linking verdicts. Written
+ *  whether or not the group's commit landed: the keys hash the page content, as
+ *  on the single-row Apply. Best effort: a failed write is logged, never a
+ *  failed Accept. */
 async function staleCheckFixedVerdicts(
   entry: WikiRegistryEntry,
   rows: readonly WikiProposal[],
   applied: readonly string[],
   snapshots: readonly PassageKeySnapshot[],
-  commitFailed: boolean | undefined,
 ): Promise<number | null> {
   const written = rows.filter((r) => r.kind === "stale-check" && applied.includes(r.targetPath));
   if (!rows.some((r) => r.kind === "stale-check")) return null;
-  if (!written.length || commitFailed) return 0;
+  if (!written.length) return 0;
   try {
     // Rebuilt AFTER the commit tail: the apply's own refresh ran while the
     // pages were still uncommitted, which reads them as changed by mtime.
@@ -3385,8 +3385,10 @@ export function groupApplyActions(
     } else if (row.outcome.outcome === "error") {
       // A Stale check row whose write failed goes back to `draft`: `error`
       // renders no diff and no verb, and a later Send carries only live rows,
-      // so its edits would be lost. A lint row keeps `error`.
-      actions.push({ id: row.id, status: staleCheckIds.has(row.id) ? "draft" : "error" });
+      // so its edits would be lost. A pre-write refusal (a deleted or moved
+      // page) keeps `error`, or every later Accept stops at it again. A lint
+      // row keeps `error`.
+      actions.push({ id: row.id, status: staleCheckIds.has(row.id) && row.writeFailed ? "draft" : "error" });
       settled.add(row.id);
     }
   }

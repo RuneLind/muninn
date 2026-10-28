@@ -397,6 +397,9 @@ export interface GroupRowOutcome {
   id: string;
   targetPath: string;
   outcome: ApplyOutcome;
+  /** The pre-write checks passed and the page write threw. Every other `error`
+   *  is a refusal that the next apply would make again. */
+  writeFailed?: true;
 }
 
 export interface GroupApplyResult {
@@ -407,9 +410,6 @@ export interface GroupApplyResult {
   /** The row that stopped the group, when one did. Rows before it are already
    *  written and stay written. */
   stoppedAt?: GroupRowOutcome;
-  /** The group's one commit threw or answered `reason: "error"`: the written
-   *  pages are on disk but not committed, so no `fixed` verdict may claim them. */
-  commitFailed?: true;
 }
 
 /**
@@ -468,13 +468,14 @@ export async function applyWikiProposalGroup(
       // difference is which frontmatter line moved, burying the curated ones the
       // log is for. The entry is written below, still inside this section.
       let rowPaths: string[] = [];
+      const write = { failed: false };
       const outcome = await applyInner(
         row,
         deps,
         (_commit, paths) => {
           rowPaths = paths;
         },
-        { skipLog: true },
+        { skipLog: true, onWriteFailed: () => (write.failed = true) },
       );
       // A NOOP row wrote nothing — `applyInner` short-circuited at step 2a
       // because the page already WAS the draft — so staging its own path (and
@@ -489,7 +490,7 @@ export async function applyWikiProposalGroup(
           ? rowPaths.filter((p) => p !== row.targetPath && p !== WIKI_LOG_FILE)
           : rowPaths),
       );
-      const entry: GroupRowOutcome = { id: row.id, targetPath: row.targetPath, outcome };
+      const entry: GroupRowOutcome = { id: row.id, targetPath: row.targetPath, outcome, ...(write.failed ? { writeFailed: true as const } : {}) };
       out.results.push(entry);
       if (outcome.outcome !== "applied") {
         out.stoppedAt = entry;
@@ -505,10 +506,8 @@ export async function applyWikiProposalGroup(
     const paths = [...new Set(tail.paths)];
     const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
     try {
-      const res = await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
-      if ((res as { reason?: string } | undefined)?.reason === "error") result.commitFailed = true;
+      await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
     } catch (err) {
-      result.commitFailed = true;
       log.warn("Wiki-gardener group apply: commit failed for {group}: {error}", {
         group: groupKey,
         error: errMsg(err),
@@ -609,6 +608,8 @@ interface ApplyInnerOptions {
   /** Do not write this row's own `log.md` entry — the caller writes ONE for the
    *  whole group, inside the same write section. */
   skipLog?: boolean;
+  /** Called when the pre-write checks passed and the page write threw. */
+  onWriteFailed?: () => void;
 }
 
 /** What the pre-write checks decided for one row (`checkBeforeWrite`). */
@@ -909,6 +910,7 @@ async function applyInner(
   try {
     await deps.writeFile(absTarget, finalContent);
   } catch (err) {
+    opts.onWriteFailed?.();
     return { outcome: "error", reason: `write failed: ${errMsg(err)}` };
   }
 

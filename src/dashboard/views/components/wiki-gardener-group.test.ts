@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, kindMatches } from "./wiki-gardener-group.ts";
+import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
 import { renderWikiGardenerPage } from "../wiki-gardener-page.ts";
 import { themeTokenStyles } from "../shared-styles.ts";
 
@@ -146,5 +146,32 @@ describe("the STALE CHECK tag's own look (fix round 1 batch 6)", () => {
       const block = tokens.match(new RegExp(`html\\[data-theme="${theme}"\\] \\{([^}]*)\\}`))![1]!;
       for (const v of vars) expect(`${theme}: ${v} ${block.includes(`${v}:`)}`).toBe(`${theme}: ${v} true`);
     }
+  });
+});
+
+describe("groupStopNote", () => {
+  const stopped = { outcome: "stopped", stoppedAt: "notes/b.md", stoppedOutcome: "error", applied: ["notes/a.md"], error: "write failed: EACCES" };
+
+  test("a stopped Stale check Accept names each edit that did not land, its count and its row's status", () => {
+    const note = groupStopNote(
+      {
+        ...stopped,
+        notLanded: [
+          { page: "notes/b.md", status: "draft", edits: [{ old: "x", text: "y" }, { old: "p", text: "q" }] },
+          { page: "notes/c.md", status: "error", edits: [{ old: "x", text: "y" }] },
+        ],
+      },
+      409,
+    );
+    expect(note).toBe(
+      "Stopped at notes/b.md (error) — 1 page(s) already written: write failed: EACCES. Not written: notes/b.md (2 edit(s), draft), notes/c.md (1 edit(s), error)",
+    );
+  });
+
+  test("a lint stop has no «Not written» part, and a refusal that is not a stop reads its error", () => {
+    expect(groupStopNote(stopped, 409)).toBe("Stopped at notes/b.md (error) — 1 page(s) already written: write failed: EACCES");
+    expect(groupStopNote({ ...stopped, applied: [], notLanded: [] }, 409)).toBe("Stopped at notes/b.md (error): write failed: EACCES");
+    expect(groupStopNote({ outcome: "mixed", error: "an approved or rejected row blocks the group" }, 409)).toBe("an approved or rejected row blocks the group");
+    expect(groupStopNote({}, 500)).toBe("Failed (500)");
   });
 });
