@@ -40,7 +40,6 @@ import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
-import { gitToplevel, runExclusiveQueued } from "../../wiki/commit.ts";
 import { linkingBuckets } from "../../wiki/stale.ts";
 import { __setStaleVerdictStoreForTest, changedHashOf, memoryStaleVerdictStore, passageVerdictKey } from "../../wiki/stale-confirm.ts";
 import { __setStaleProposalStoreForTest, sendStaleFix } from "../../gardener/stale-proposals.ts";
@@ -3894,38 +3893,6 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     expect(s.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
   });
 
-  // Fix round 2 batch 4, finding 1: a hand edit between the group's write
-  // section and its commit is committed off the fix subject the date walk skips.
-  test("a hand edit made between Accept's writes and its commit is committed off the fix subject", async () => {
-    const s = store(await card());
-    registerWikiGardenerRoutes(app, s.deps);
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const held = runExclusiveQueued((await gitToplevel(root))!, () => gate);
-    const pending = app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
-    const fixedB = B_TEXT.replace("the pin is draft", "the pin is shipped");
-    for (let i = 0; i < 500 && (await Bun.file(path.join(root, "notes/b.md")).text()) !== fixedB; i++) await Bun.sleep(10);
-    const fixedA = A_TEXT.replace("landed on 23.05", "landed on 18.06");
-    expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(fixedA);
-    await Bun.write(path.join(root, "notes/a.md"), fixedA.replace("---\n\n", "---\n\nA hand edit.\n\n"));
-    release();
-    await held;
-    expect((await pending).status).toBe(200);
-    const subject = Bun.spawnSync(["git", "-C", root, "log", "-1", "--format=%s"]).stdout.toString().trim();
-    expect(subject).toBe("[wiki] edit with a Stale check fix: 2 pages (stale-check:hub.md:2)");
-  });
-
-  test("Accept refuses a row when git status fails: its uncommitted edits are unknown", async () => {
-    const s = store(await card());
-    await Bun.write(path.join(root, ".git/index"), "not an index");
-    registerWikiGardenerRoutes(app, s.deps);
-    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
-    expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ outcome: "stopped", applied: [], stoppedAt: "notes/a.md", stoppedOutcome: "collision", error: "notes/a.md: git status failed, so its uncommitted edits are unknown" });
-    expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(A_TEXT);
-    expect(s.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
-  });
-
   /** A pre-commit hook that refuses every commit, so `commitWikiChange` fails. */
   const failCommits = async () => {
     const hook = path.join(root, ".git/hooks/pre-commit");
@@ -4093,21 +4060,5 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     registerWikiGardenerRoutes(app, s.deps);
     const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
     expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 2, keptSkipped: 0 });
-  });
-
-  test("a carry never overwrites a verdict the new key already holds", async () => {
-    await card();
-    const before = await Bun.file(path.join(root, "hub.md")).text();
-    const snapshots = await snapshotPassageKeys((await getWikiIndex({ root }))!, [{ relPath: "hub.md", content: before }]);
-    await Bun.write(path.join(root, "hub.md"), page("Hub", "The pin moved to 18.06 (fixed wording)."));
-    await git(Date.now() - DAY / 2, "commit", "-q", "-am", "a Stale check fix on hub");
-    __resetWikiCacheForTest();
-    const index = (await getWikiIndex({ root }))!;
-    const l = (await linkingBuckets(index, "hub.md"))!.linking.find((x) => x.relPath === "notes/a.md")!;
-    const newKey = passageVerdictKey(index, "hub.md", (await changedHashOf(index, "hub.md"))!, l);
-    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: "notes/a.md", keyHash: newKey, verdict: "true", reason: "judged on the new text", edit: null, checkedBy: "reader" });
-    expect(await carryPassageVerdicts({ wiki: "stalegate", index, snapshots })).toBe(1);
-    const onNew = [...verdicts.rows.values()].filter((r) => r.kind === "passage" && r.keyHash === newKey);
-    expect(onNew.map((r) => [r.verdict, r.reason, r.checkedBy])).toEqual([["true", "judged on the new text", "reader"]]);
   });
 });

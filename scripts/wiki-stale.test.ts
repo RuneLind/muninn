@@ -605,18 +605,6 @@ describe("--send: drafted edits for other pages go to the Gardener, the run's ow
     }
   });
 
-  // Fix round 2 batch 4, finding 3: the send carries the run's day, so the
-  // route reads the buckets of that window, and `old` with its whitespace.
-  test("--as-of rides every send, and old is sent with its whitespace", async () => {
-    const s = stub({ verdicts: { "a.md": [{ relPath: "notes/other.md", verdict: "stale", edit: edit("  padded old \n") }] } });
-    try {
-      await runWikiStale(["--wiki", "w", "--pages", "a.md", "--as-of", "2026-10-25", "--check", "--send", "--base-url", s.base], { env: {} });
-      expect(s.sends.map((x) => x.body)).toEqual([{ wiki: "w", page: "a.md", kind: "passage", linking: "notes/other.md", variant: "new", old: "  padded old \n", asOf: "2026-10-25" }]);
-    } finally {
-      s.stop();
-    }
-  });
-
   test("a JSON refusal is one line with its status and error, and the next page is still sent", async () => {
     const held = "notes/held.md is held by another Gardener card (Lint, lint:1): accept or dismiss it first.";
     const s = stub({

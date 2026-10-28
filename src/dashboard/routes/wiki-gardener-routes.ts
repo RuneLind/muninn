@@ -390,7 +390,7 @@ function applyDepsFor(
       await getWikiIndex({ root: wikiDir, refresh: true });
     },
     reindex: triggerReindex,
-    commit: (paths, message, written) => commitWikiChange(wikiDir, paths, message, { push, ...(written ? { written } : {}) }),
+    commit: (paths, message) => commitWikiChange(wikiDir, paths, message, { push }),
     hasUncommittedChanges: (relPath) => pageHasUncommittedChanges(wikiDir, relPath),
   };
 }

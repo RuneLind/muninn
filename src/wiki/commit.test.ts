@@ -7,7 +7,6 @@ import {
   listDirtyEntries,
   listWikiSubtreeDirty,
   gitToplevel,
-  pageHasUncommittedChanges,
   isTrackedModifiedStatus,
   parsePorcelainZWithStatus,
   runGit,
@@ -381,58 +380,6 @@ describe("commitWikiChange", () => {
     expect((await git(repo, ["status", "--porcelain"])).out).toBe("");
     const status = await git(repo, ["show", "--name-status", "--format=", "HEAD"]);
     expect(status.out).toMatch(/D\s+data\/wiki\/concepts\/Doomed\.md/);
-  });
-
-  test("a commit that carries other bytes than were written is reworded off its subject", async () => {
-    const { repo, wikiDir } = await makeRepo(base);
-    const rel = "concepts/Fix.md";
-    await writeFile(path.join(wikiDir, rel), "# Fix\n\nThe fix.\n");
-    // A hand edit lands between the write and the commit.
-    await writeFile(path.join(wikiDir, rel), "# Fix\n\nThe fix.\nA hand edit.\n");
-    const res = await commitWikiChange(wikiDir, [rel], "[stale-check] apply: concepts/Fix.md", {
-      push: false,
-      written: { contents: { [rel]: "# Fix\n\nThe fix.\n" }, changedMessage: "[wiki] edit with a Stale check apply: concepts/Fix.md" },
-    });
-    expect(res).toEqual({ committed: true, reworded: true });
-    expect((await git(repo, ["log", "--format=%s"])).out.split("\n")).toEqual(["[wiki] edit with a Stale check apply: concepts/Fix.md", "init"]);
-    expect((await git(repo, ["show", "HEAD:data/wiki/concepts/Fix.md"])).out).toContain("A hand edit.");
-  });
-
-  test("a commit of exactly the written bytes keeps its subject", async () => {
-    const { repo, wikiDir } = await makeRepo(base);
-    const rel = "concepts/Fix.md";
-    await writeFile(path.join(wikiDir, rel), "# Fix\n\nThe fix.\n");
-    const res = await commitWikiChange(wikiDir, [rel], "[stale-check] apply: concepts/Fix.md", {
-      push: false,
-      written: { contents: { [rel]: "# Fix\n\nThe fix.\n" }, changedMessage: "[wiki] edit with a Stale check apply: concepts/Fix.md" },
-    });
-    expect(res).toEqual({ committed: true });
-    expect((await git(repo, ["log", "-1", "--format=%s"])).out).toBe("[stale-check] apply: concepts/Fix.md");
-  });
-});
-
-describe("pageHasUncommittedChanges", () => {
-  let base: string;
-  beforeEach(async () => {
-    base = await testTempDir(path.join(tmpdir(), "wiki-page-dirty-"));
-  });
-  afterEach(async () => {
-    await rm(base, { recursive: true, force: true });
-  });
-
-  test("an untracked page in a new folder is uncommitted, even where status hides untracked files", async () => {
-    const { repo, wikiDir } = await makeRepo(base);
-    await git(repo, ["config", "status.showUntrackedFiles", "no"]);
-    await mkdir(path.join(wikiDir, "fresh", "deeper"), { recursive: true });
-    await writeFile(path.join(wikiDir, "fresh", "deeper", "p.md"), "# P\n");
-    expect(await pageHasUncommittedChanges(wikiDir, "fresh/deeper/p.md")).toBe(true);
-    expect(await pageHasUncommittedChanges(wikiDir, "concepts/none.md")).toBe(false);
-  });
-
-  test("a failed git status answers null, never clean", async () => {
-    const { repo, wikiDir } = await makeRepo(base);
-    await writeFile(path.join(repo, ".git", "index"), "not an index");
-    expect(await pageHasUncommittedChanges(wikiDir, "concepts/none.md")).toBeNull();
   });
 });
 

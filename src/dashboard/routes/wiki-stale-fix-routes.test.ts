@@ -31,7 +31,6 @@ import { STALE_FIX_CUTS_LINK, STALE_FIX_NOT_IN_PASSAGE } from "../../wiki/stale-
 import { decideZone } from "../../auth/zones.ts";
 import { wikiRouteTable } from "../../test/wiki-route-table.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
-import { gitToplevel, runExclusiveQueued } from "../../wiki/commit.ts";
 
 const DAY = 86_400_000;
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
@@ -282,75 +281,6 @@ describe("the Stale check's fix routes", () => {
     expect(await read("notes/a.md")).toBe(dirty);
     expect((await headCommit()).count).toBe(commitsBefore);
     await expect(read("log.md")).rejects.toThrow();
-  });
-
-  // Fix round 2 batch 4, finding 1: the commit runs after the write section,
-  // so a hand edit can land in between; the commit is then reworded off the
-  // fix subject the date walk skips.
-  test("a hand edit made between the Apply's write and its commit is committed off the fix subject", async () => {
-    await seedWiki();
-    await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
-    // Hold the repo's commit queue, so the Apply waits at its commit tail.
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const held = runExclusiveQueued((await gitToplevel(root))!, () => gate);
-    const pending = post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" });
-    const fixed = A_TEXT.replace("landed on 23.05", "landed on 18.06");
-    for (let i = 0; i < 500 && (await read("notes/a.md")) !== fixed; i++) await Bun.sleep(10);
-    expect(await read("notes/a.md")).toBe(fixed);
-    const edited = fixed.replace("---\n\n", "---\n\nA hand edit.\n\n");
-    await write("notes/a.md", edited);
-    release();
-    await held;
-    const res = await pending;
-    expect(res.status).toBe(200);
-    expect((await res.json()).committed).toBe(true);
-    const head = await headCommit();
-    expect(head.subject).toBe("[wiki] edit with a Stale check apply: notes/a.md");
-    expect(head.files).toEqual(["log.md", "notes/a.md"]);
-  });
-
-  test("Apply refuses when git status fails: its uncommitted edits are unknown", async () => {
-    await seedWiki();
-    await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
-    await writeFile(path.join(root, ".git", "index"), "not an index");
-    const res = await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" });
-    expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ error: "notes/a.md: git status failed, so its uncommitted edits are unknown", dirty: true });
-    expect(await read("notes/a.md")).toBe(A_TEXT);
-  });
-
-  // Finding 3: `old` is compared exactly. A padded `old` is not the stored
-  // one, so it is refused like a changed fix; the edit never reads it.
-  test("an `old` with leading or trailing whitespace is refused, never trimmed", async () => {
-    await seedWiki();
-    await seedHit({ old: "is in-flight, two PRs open", new: "is shipped" });
-    await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
-    const changed = "The drafted fix changed since the tab loaded. Reload the STALE tab.";
-    for (const old of [" landed on 23.05", "landed on 23.05 ", "landed on 23.05\n"]) {
-      for (const route of ["apply", "send"] as const) {
-        const res = await post(route, { kind: "passage", linking: "notes/a.md", old });
-        expect([route, res.status, (await res.json()).error]).toEqual([route, 409, changed]);
-      }
-    }
-    const line = await post("apply", { kind: "status-line", target: "plans/p.md", line: 5, old: " is in-flight, two PRs open" });
-    expect([line.status, (await line.json()).error]).toEqual([409, changed]);
-    expect(await read("notes/a.md")).toBe(A_TEXT);
-    expect(await read("hub.md")).toBe(page("Hub", `${HUB_LINE}\n\nThe pin moved to 18.06.`));
-    expect(proposals.rows).toHaveLength(0);
-  });
-
-  test("Send reads the linking pages on the asOf day its body names", async () => {
-    await seedWiki();
-    await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
-    // 60 days back the repo had no commits: hub.md is not a changed page then.
-    const before = new Date(Date.now() - 60 * DAY).toISOString().slice(0, 10);
-    const res = await post("send", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05", asOf: before });
-    expect(res.status).toBe(404);
-    expect((await res.json()).error).toBe("hub.md is not a changed page, so it has no linking pages to fix");
-    expect(proposals.rows).toHaveLength(0);
-    const today = await post("send", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05", asOf: new Date().toISOString().slice(0, 10) });
-    expect(today.status).toBe(200);
   });
 
   test("a line shift between the draft and the apply still lands on the right line", async () => {

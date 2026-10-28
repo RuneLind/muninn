@@ -101,14 +101,6 @@ export const SWEEP_THRESHOLD = 10;
  */
 export const STALE_CHECK_COMMIT_PREFIX = "[stale-check] ";
 
-/** A fix commit's subject once it carries a hand edit (`commitWikiChange`'s
- *  `written` guard): `[wiki] edit with a Stale check apply: <page>`. It does
- *  not start with the prefix, so the date walk counts it as a page change. */
-export function staleCheckWithEditsSubject(message: string): string {
-  const rest = message.startsWith(STALE_CHECK_COMMIT_PREFIX) ? message.slice(STALE_CHECK_COMMIT_PREFIX.length) : message;
-  return `[wiki] edit with a Stale check ${rest}`;
-}
-
 /** The three durable per-page date signals a wiki's git history can supply. All
  *  maps/sets are keyed by WIKI-relative posix path, exactly as `WikiPageMeta.relPath`
  *  spells it. */
