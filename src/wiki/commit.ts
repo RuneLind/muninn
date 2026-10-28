@@ -78,6 +78,22 @@ export interface CommitWikiOpts {
    * failure is a warn, not a caller-visible error).
    */
   onPushSettled?: () => void;
+  /**
+   * The bytes the caller wrote, by wiki-relative path, and the subject to use
+   * when the commit recorded other bytes for any of them. The commit runs after
+   * the write section, so a hand edit can land in between; checking what the
+   * commit recorded, after it lands, leaves no window. A Stale check fix uses
+   * it: its subject is not a page change (`STALE_CHECK_COMMIT_PREFIX`), so a
+   * commit that carries a hand edit is reworded (`--amend --only`, before the
+   * push) to one the date walk counts.
+   */
+  written?: CommitWritten;
+}
+
+/** See {@link CommitWikiOpts.written}. */
+export interface CommitWritten {
+  contents: Record<string, string>;
+  changedMessage: string;
 }
 
 /**
@@ -89,6 +105,9 @@ export interface CommitWikiOpts {
 export interface CommitWikiResult {
   committed: boolean;
   reason?: "not-a-repo" | "not-default-branch" | "nothing-to-commit" | "error";
+  /** The commit recorded other bytes than `written` named, so it carries the
+   *  `changedMessage` subject. */
+  reworded?: true;
 }
 
 /** Result of one git invocation. */
@@ -344,6 +363,7 @@ export async function commitWikiChange(
       commitInner(top, wikiDir, staged, message, {
         bodyLines: opts.bodyLines,
         deletions: new Set(opts.deletions ?? []),
+        written: opts.written,
       }),
     );
 
@@ -379,7 +399,7 @@ async function commitInner(
   wikiDir: string,
   paths: string[],
   message: string,
-  opts: { bodyLines?: string[]; deletions: Set<string> } = { deletions: new Set() },
+  opts: { bodyLines?: string[]; deletions: Set<string>; written?: CommitWritten } = { deletions: new Set() },
 ): Promise<CommitWikiResult> {
   if (!(await onDefaultBranch(top))) {
     log.warn(
@@ -477,7 +497,28 @@ async function commitInner(
     return { committed: false, reason: "error" };
   }
   log.info("Wiki commit: {message} in {top}", { message, top });
+  if (opts.written && (await committedOtherBytes(top, canonicalWiki, opts.written.contents))) {
+    const reworded = await git(top, ["commit", "--amend", "--only", "-m", opts.written.changedMessage, ...bodyArgs]);
+    if (reworded.code !== 0) {
+      log.warn("Wiki commit: '{message}' carries other bytes than were written, and the reword failed in {top}: {error}", { message, top, error: reworded.stderr });
+      return { committed: true };
+    }
+    log.info("Wiki commit: reworded to '{changed}' — it carries other bytes than were written, in {top}", { changed: opts.written.changedMessage, top });
+    return { committed: true, reworded: true };
+  }
   return { committed: true };
+}
+
+/** Does HEAD hold other bytes than `contents` for any of its paths? A path
+ *  HEAD cannot show counts as other bytes. `--filters` gives the working-tree
+ *  form, the one the caller wrote. */
+async function committedOtherBytes(top: string, canonicalWiki: string, contents: Record<string, string>): Promise<boolean> {
+  for (const [rel, content] of Object.entries(contents)) {
+    const repoRel = path.relative(top, path.join(canonicalWiki, rel)).split(path.sep).join("/");
+    const shown = await git(top, ["cat-file", "--filters", `HEAD:${repoRel}`], { raw: true });
+    if (shown.code !== 0 || shown.stdout !== content) return true;
+  }
+  return false;
 }
 
 /**

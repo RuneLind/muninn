@@ -153,6 +153,7 @@ import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "../views/components/wiki-activity-rank.ts";
 import { DEFAULT_CULL_LABELS } from "../views/components/wiki-cull-view.ts";
 import { commitWikiChange, pageHasUncommittedChanges } from "../../wiki/commit.ts";
+import { staleCheckWithEditsSubject } from "../../wiki/git-dates.ts";
 import { sha256, todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { capabilitiesForConnectorType } from "../../ai/connector-capabilities.ts";
@@ -2722,6 +2723,7 @@ export function registerWikiToolRoutes(
     let refusal: string | null = null;
     let dirty: string | null = null;
     let line = 0;
+    let written = "";
     const result = await writeWikiPage({
       wikiDir: entry.root,
       relPath: target.relPath,
@@ -2748,13 +2750,16 @@ export function registerWikiToolRoutes(
           return null;
         }
         line = placed.line;
+        written = placed.content;
         return placed.content;
       },
       ...defaultPageWriteIo(entry.root),
       reindex: async (collection) => {
         await postCollectionUpdate(config.knowledgeApiUrl, collection);
       },
-      commit: (paths, message) => commitWikiChange(entry.root, paths, message, { push }),
+      // A hand edit made after the section is reworded off the fix subject.
+      commit: (paths, message) =>
+        commitWikiChange(entry.root, paths, message, { push, written: { contents: { [target.relPath]: written }, changedMessage: staleCheckWithEditsSubject(message) } }),
     });
     if (result.outcome === "forbidden") return c.json({ error: result.reason, readonly: true }, 403);
     if (result.outcome === "stale") return c.json({ error: result.reason, stale: true }, 409);

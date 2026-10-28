@@ -44,6 +44,8 @@ import {
 import { sha256, todayOslo } from "./util.ts";
 import { lintFindingPathOf, lintSeederOf } from "./lint-markers.ts";
 import { applyStaleEdits } from "../wiki/stale-fix.ts";
+import { staleCheckWithEditsSubject } from "../wiki/git-dates.ts";
+import type { CommitWritten } from "../wiki/commit.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "apply");
@@ -109,7 +111,7 @@ export interface ApplyDeps {
    * wired index/backlinks). Optional — absent in tests that don't exercise the
    * commit seam. Wired to `commitWikiChange` at the route; never throws.
    */
-  commit?: (paths: string[], message: string) => Promise<unknown>;
+  commit?: (paths: string[], message: string, written?: CommitWritten) => Promise<unknown>;
   /**
    * Per-wiki cataloging policy — which page kinds get an index.md catalog line
    * (`buildIndexEntry`). Absent ⇒ the default `["concept"]` (today's behavior).
@@ -223,17 +225,31 @@ async function commitApply(
   proposal: WikiProposal,
   deps: ApplyDeps,
   modified: Set<string>,
+  finalContent: string,
 ): Promise<void> {
   if (!deps.commit) return;
   const paths = commitPaths(proposal, modified);
+  const message = commitMessageFor(proposal);
   try {
-    await deps.commit(paths, commitMessageFor(proposal));
+    await deps.commit(paths, message, staleWritten(writtenBy(proposal, finalContent), message));
   } catch (err) {
     log.warn("Wiki-gardener apply: commit failed for {path}: {error}", {
       path: proposal.targetPath,
       error: errMsg(err),
     });
   }
+}
+
+/** The page bytes a Stale check row wrote, by path; empty for other kinds. */
+function writtenBy(proposal: WikiProposal, finalContent: string): Record<string, string> {
+  return proposal.kind === "stale-check" ? { [proposal.targetPath]: finalContent } : {};
+}
+
+/** The commit guard for a Stale check fix: its subject is not a page change,
+ *  so a commit that carries a hand edit made after the write section is
+ *  reworded (`commitWikiChange`'s `written`). Undefined when nothing to guard. */
+function staleWritten(contents: Record<string, string>, message: string): CommitWritten | undefined {
+  return Object.keys(contents).length ? { contents, changedMessage: staleCheckWithEditsSubject(message) } : undefined;
 }
 
 /** The files one apply touched: the page, the wiki-global `log.md`, and whatever
@@ -449,7 +465,7 @@ export async function applyWikiProposalGroup(
   }
 
   const groupKey = rows[0]?.groupKey ?? "(no group)";
-  const tail: { paths: string[] } = { paths: [] };
+  const tail: { paths: string[]; written: Record<string, string> } = { paths: [], written: {} };
   const result = await runWikiWriteExclusive(deps.wikiDir, async () => {
     const out: GroupApplyResult = { results: [] };
     // Every member's pre-write checks BEFORE the first write, so a stale or
@@ -472,8 +488,9 @@ export async function applyWikiProposalGroup(
       const outcome = await applyInner(
         row,
         deps,
-        (_commit, paths) => {
+        (_commit, paths, written) => {
           rowPaths = paths;
+          Object.assign(tail.written, written);
         },
         { skipLog: true, onWriteFailed: () => (write.failed = true) },
       );
@@ -505,8 +522,9 @@ export async function applyWikiProposalGroup(
   if (deps.commit && tail.paths.length > 0) {
     const paths = [...new Set(tail.paths)];
     const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
+    const message = groupCommitMessageFor(groupKey, pages, rows[0]?.kind);
     try {
-      await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
+      await deps.commit(paths, message, staleWritten(tail.written, message));
     } catch (err) {
       log.warn("Wiki-gardener group apply: commit failed for {group}: {error}", {
         group: groupKey,
@@ -601,7 +619,7 @@ function readonlyRefusalFor(deps: ApplyDeps, forPath: string): ApplyOutcome | nu
  *  and runs the closure; a GROUP apply collects the paths of every row and makes
  *  ONE commit out of them instead of N — a twelve-member series otherwise lands
  *  as twelve commits whose only difference is which frontmatter line moved. */
-type DeferCommit = (commit: () => Promise<void>, paths: string[]) => void;
+type DeferCommit = (commit: () => Promise<void>, paths: string[], written: Record<string, string>) => void;
 
 /** Per-apply switches the GROUP path sets and the single-row path does not. */
 interface ApplyInnerOptions {
@@ -615,7 +633,7 @@ interface ApplyInnerOptions {
 /** What the pre-write checks decided for one row (`checkBeforeWrite`). */
 type PreWrite =
   | { step: "refuse"; outcome: ApplyOutcome }
-  | { step: "noop"; absTarget: string }
+  | { step: "noop"; absTarget: string; finalContent: string }
   | { step: "write"; absTarget: string; finalContent: string };
 
 /** What `containForWrite` makes of a draft: the bytes the apply writes, and
@@ -799,7 +817,7 @@ async function checkBeforeWrite(
         path: proposal.targetPath,
       });
     }
-    return { step: "noop", absTarget };
+    return { step: "noop", absTarget, finalContent };
   }
 
   // 2b'. A Stale check row: every drafted edit is placed again on the live
@@ -901,7 +919,7 @@ async function applyInner(
     // Commit is the last step, and runs OUTSIDE the write section (see
     // `applyWikiProposal`) — a re-run that changed nothing on disk stages an
     // empty diff and the helper skips the commit quietly.
-    deferCommit(() => commitApply(proposal, deps, modified), commitPaths(proposal, modified));
+    deferCommit(() => commitApply(proposal, deps, modified, pre.finalContent), commitPaths(proposal, modified), writtenBy(proposal, pre.finalContent));
     return { outcome: "applied", writtenPath: proposal.targetPath, noop: true };
   }
   const { finalContent } = pre;
@@ -948,7 +966,7 @@ async function applyInner(
   //    back to `applyWikiProposal` to await after the per-wiki write section
   //    releases (a stalled push must not park the other wiki writers; see there).
   //    Non-fatal — a commit failure never undoes the applied page.
-  deferCommit(() => commitApply(proposal, deps, modified), commitPaths(proposal, modified));
+  deferCommit(() => commitApply(proposal, deps, modified, pre.finalContent), commitPaths(proposal, modified), writtenBy(proposal, pre.finalContent));
 
   return { outcome: "applied", writtenPath: proposal.targetPath };
 }
