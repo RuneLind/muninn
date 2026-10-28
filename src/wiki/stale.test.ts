@@ -239,6 +239,12 @@ describe("resolveStatusLineHits (phase B)", () => {
     expect(resolveStatusLineHits("notes/x.md", [cand("r", ["shipped"])], resolve)).toHaveLength(1);
   });
 
+  test("a frontmatter line's hit says so, for the reader's marks (D21); a body line's does not", () => {
+    const page = `---\ntitle: T\nrelated:\n  - "[[a]] shipped"\n---\n\n- [[a]] shipped in May\n`;
+    const hits = resolveStatusLineHits("notes/x.md", statusLineCandidates(page), resolve);
+    expect(hits.map((h) => [h.line, h.frontmatter])).toEqual([[4, true], [7, undefined]]);
+  });
+
   test("a page's line about itself is no hit, and one hit per line and target", () => {
     expect(resolveStatusLineHits("plans/a.md", [cand("a", ["shipped"])], resolve)).toEqual([]);
     expect(resolveStatusLineHits("notes/x.md", [cand("a", ["shipped"]), cand("a", ["blocked"])], resolve)).toHaveLength(1);

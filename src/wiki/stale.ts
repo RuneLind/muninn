@@ -83,6 +83,9 @@ export interface StatusLineCandidate {
   /** The source line, trimmed; a long one is cut to a window around the
    *  segment ({@link hitWindow}). */
   text: string;
+  /** The line is in the frontmatter, which the reader does not render, so
+   *  the reader places no mark for it (D21). */
+  frontmatter?: true;
 }
 
 const TEXT_CAP = 360;
@@ -201,7 +204,8 @@ export function statusLineCandidates(content: string): StatusLineCandidate[] {
   const out: StatusLineCandidate[] = [];
   for (const i of probe) {
     if (exempt.has(i)) continue;
-    out.push(...lineSegments(maskLine(lines[i]!), i + 1, lines[i]!));
+    const segs = lineSegments(maskLine(lines[i]!), i + 1, lines[i]!);
+    out.push(...(i < body ? segs.map((c) => ({ ...c, frontmatter: true as const })) : segs));
   }
   return out;
 }
@@ -215,6 +219,8 @@ export interface StatusLineHit {
   /** The target's `plan_status` as the index keeps it. */
   now: PlanStatus;
   text: string;
+  /** As on {@link StatusLineCandidate}. */
+  frontmatter?: true;
 }
 
 /** `plan_status` as a status word reads it: ready is proposed; superseded and
@@ -246,7 +252,7 @@ export function resolveStatusLineHits(
     const key = `${c.line}\0${t.relPath}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ line: c.line, target: t.relPath, said: c.said, now: t.plan_status, text: c.text });
+    out.push({ line: c.line, target: t.relPath, said: c.said, now: t.plan_status, text: c.text, ...(c.frontmatter ? { frontmatter: true as const } : {}) });
   }
   return out;
 }
