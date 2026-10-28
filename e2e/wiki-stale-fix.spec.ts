@@ -148,6 +148,9 @@ test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-stale-fix-"));
   const now = Date.now();
   git(["init", "-q", "-b", "main"], now);
+  // The server commits Apply and Accept with no `-c`; a CI runner has no global identity.
+  git(["config", "user.email", "e2e@example.invalid"], now);
+  git(["config", "user.name", "e2e"], now);
   await write("plans/p.md", page("P", "The plan.", "plan_status: shipped\n"));
   await write(HUB, page("Hub", "First."));
   await write("notes/a.md", A_TEXT);

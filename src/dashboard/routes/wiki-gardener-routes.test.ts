@@ -3756,6 +3756,10 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     root = await testTempDir(path.join(tmpdir(), "wiki-stale-gate-"));
     const now = Date.now();
     await git(now, "init", "-q", "-b", "main");
+    // The repo's own identity: Accept commits through `commitWikiChanges`, which
+    // passes no `-c`, and a CI runner has no global one (the commit fails, the page stays dirty).
+    await git(now, "config", "user.email", "f@example.com");
+    await git(now, "config", "user.name", "f");
     await Bun.write(path.join(root, "hub.md"), page("Hub", "First."));
     await Bun.write(path.join(root, "notes/a.md"), A_TEXT);
     await Bun.write(path.join(root, "notes/b.md"), B_TEXT);
