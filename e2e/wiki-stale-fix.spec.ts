@@ -24,6 +24,11 @@
  *      check for it; the wiki-wide total drops after Apply and Accept instead,
  *      and after the hub's own status-line fix the fixed pages stay out only
  *      because their `fixed` rows followed its new content hash.
+ *   9. **A fix in flight cannot be sent twice, and the tab tells the answer**
+ *      (fix round 1 batch 6): Apply's and Send's buttons stay disabled through
+ *      a repaint while the request is held; Apply's and Send's results (the
+ *      group, a dropped edit) show in the notice, in the token colour of their
+ *      tone; the next answer replaces an error notice.
  *
  * **What is stubbed and why.** No model is called: the verdict rows Check would
  * write are inserted under keys the server's own key functions derive (a
@@ -218,6 +223,29 @@ async function fixButton(p: Page, rel: string, action: "apply" | "send") {
   if (!(await fix.evaluate((d) => (d as HTMLDetailsElement).open))) await fix.locator("summary").click();
   return item.locator(`[data-stale-${action}][data-variant="new"]`);
 }
+/** The tab's one notice line (an action's outcome). */
+const notice = (p: Page) => p.locator("#staleBody [data-stale-notice]");
+/** A theme token's colour as the page resolves it, on a body probe. */
+const tokenColor = (p: Page, token: string) =>
+  p.evaluate((t) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${t})`;
+    document.body.appendChild(probe);
+    const c = getComputedStyle(probe).color;
+    probe.remove();
+    return c;
+  }, token);
+async function expectNoticeTone(p: Page, token: string): Promise<void> {
+  const want = await tokenColor(p, token);
+  expect(want).not.toBe(await tokenColor(p, "--text-primary"));
+  expect(await notice(p).evaluate((e) => getComputedStyle(e).color)).toBe(want);
+}
+/** Reopen the hub from the rail (a page load, so the tab repaints) and wait for its report. */
+async function reopenHub(p: Page): Promise<void> {
+  const reloaded = p.waitForResponse((r) => r.url().includes("/api/wiki/stale?page="));
+  await p.locator(`.wiki-list-item[data-relpath="${HUB}"]`).click();
+  await reloaded;
+}
 /** The wiki-wide Stale check summary: its total To check, and the changed pages. */
 async function wikiTotals(): Promise<{ toCheck: number; changed: string[] }> {
   const s = (await (await fetch(`${BASE}/api/wiki/stale?wiki=${WIKI}`)).json()) as { totals: { toCheck: number }; pages: { relPath: string; changed: boolean }[] };
@@ -232,9 +260,29 @@ test("Apply on a linking page writes it, and the tab, the pill and the rail drop
   await expect(pill(p)).toHaveText("⚠ 1 stale status line · 4 linking pages to check");
   await expect(railBadge(p)).toHaveText("⚠ 1 · 4");
   expect(await wikiTotals()).toEqual({ toCheck: 4, changed: [HUB] });
+  // Batch 6: the request is held, so the fix is in flight while the tab repaints.
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let posts = 0;
+  await p.route("**/api/wiki/stale/apply", async (route) => {
+    posts++;
+    await held;
+    await route.continue();
+  });
   const applied = p.waitForResponse((r) => r.url().endsWith("/api/wiki/stale/apply"));
   await (await fixButton(p, "notes/d.md", "apply")).click();
+  await expect.poll(() => posts).toBe(1);
+  const dButtons = p.locator('#staleBody [data-stale-linking="notes/d.md"] :is([data-stale-apply], [data-stale-send])');
+  await reopenHub(p);
+  // The repaint drew the buttons anew: both are still disabled, so a second click sends nothing.
+  await expect(dButtons).toHaveCount(2);
+  for (const b of await dButtons.all()) await expect(b).toBeDisabled();
+  release();
   expect((await applied).status()).toBe(200);
+  expect(posts).toBe(1);
+  await p.unroute("**/api/wiki/stale/apply");
+  await expect(notice(p)).toHaveText("Applied to notes/d.md.");
+  await expectNoticeTone(p, "--status-success");
   await expect(head(p)).toHaveText("⚠ 1 stale status line · 3 linking pages to check");
   await expect(pill(p)).toHaveText("⚠ 1 stale status line · 3 linking pages to check");
   await expect(railBadge(p)).toHaveText("⚠ 1 · 3");
@@ -249,11 +297,37 @@ test("Apply on a linking page writes it, and the tab, the pill and the rail drop
 
 test("Send on two linking pages leaves ONE live Stale check card holding both, and ⧗ 2 shows on the pill and the rail", async ({ page: p }) => {
   await openTab(p);
-  for (const rel of ["notes/a.md", "notes/b.md"]) {
+  // Batch 6: a refused Send shows its error; it stands through a reload of the
+  // page (R2B4), and the next answer replaces it.
+  await p.route("**/api/wiki/stale/send", (route) => route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "E2E: refused once" }) }), { times: 1 });
+  await (await fixButton(p, "notes/a.md", "send")).click();
+  await expect(notice(p)).toHaveText("The fix was not sent to the Gardener: E2E: refused once");
+  await expectNoticeTone(p, "--status-error");
+  await reopenHub(p);
+  await expect(notice(p)).toHaveText("The fix was not sent to the Gardener: E2E: refused once");
+  // The server drops no edit on this first Send, so the answer is given one,
+  // as a Send over a moved page answers: the tab tells it, reason and all.
+  await p.route(
+    "**/api/wiki/stale/send",
+    async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as Record<string, unknown>;
+      await route.fulfill({ response: res, json: { ...body, dropped: [{ page: "notes/z.md", old: "E2E old text", reason: "E2E: no longer on the page" }] } });
+    },
+    { times: 1 },
+  );
+  const told = {
+    "notes/a.md": ["Sent to the Gardener as group 1: 1 fix on 1 page. Dropped 1 earlier fix that no longer fits: «E2E old text» on notes/z.md (E2E: no longer on the page).", "--status-warning"],
+    "notes/b.md": ["Sent to the Gardener as group 2 (replaces group 1): 2 fixes on 2 pages.", "--status-success"],
+  } as const;
+  for (const rel of ["notes/a.md", "notes/b.md"] as const) {
     const sent = p.waitForResponse((r) => r.url().endsWith("/api/wiki/stale/send"));
     await (await fixButton(p, rel, "send")).click();
     expect((await sent).status()).toBe(200);
     await expect(p.locator(`#staleBody [data-stale-linking="${rel}"] [data-stale-in-review]`)).toBeVisible();
+    // The later success replaces the earlier notice.
+    await expect(notice(p)).toHaveText(told[rel][0]);
+    await expectNoticeTone(p, told[rel][1]);
   }
   expect(await liveRows()).toEqual([
     [`stale-check:${HUB}:1`, "notes/a.md", "stale"],
@@ -286,6 +360,10 @@ test("the Gardener: a kind filter beside the status chips, the STALE CHECK tag, 
   await expect(live).toBeVisible();
   // The tag reads STALE CHECK on screen (the badge CSS upper-cases its text).
   expect(await live.locator(".gard-badge.badge-stale-check").evaluate((e) => (e as HTMLElement).innerText)).toBe("STALE CHECK");
+  // Batch 6: the tag has its own look — outlined in the accent, not the stale chip's warning fill.
+  const tagLook = await live.locator(".gard-badge.badge-stale-check").evaluate((e) => ({ color: getComputedStyle(e).color, fill: getComputedStyle(e).backgroundColor }));
+  expect(tagLook).toEqual({ color: await tokenColor(p, "--accent-light"), fill: "rgba(0, 0, 0, 0)" });
+  expect(tagLook.color).not.toBe(await tokenColor(p, "--status-warning"));
   await expect(live.locator(".gard-title")).toHaveText(`Stale check: ${HUB}`);
   await expect(live.locator(".gard-group-diff")).toHaveCount(2);
   await p.locator('#gardFilters [data-kind="lint"]').click();

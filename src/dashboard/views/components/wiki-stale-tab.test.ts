@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { CHAT_PALETTE_TOKENS, PALETTE_ONLY_TOKENS, PALETTE_REQUIRED_TOKENS } from "./palettes.ts";
-import { confirmedHits, draftFixHtml, STALE_SHELL_HTML, STALE_TAB_TITLE, staleBodyHtml, staleCounts, staleTabBadge, wikiStaleTabStyles, type StaleReportView } from "./wiki-stale-tab.ts";
+import { confirmedHits, draftFixHtml, STALE_SHELL_HTML, STALE_TAB_TITLE, staleBodyHtml, staleCounts, staleFixKey, staleFixResultNotice, staleTabBadge, wikiStaleTabStyles, type StaleReportView } from "./wiki-stale-tab.ts";
 import { WIKI_READ_SLICE_HIDDEN_SELECTOR } from "./wiki-read-slice.ts";
 import {
   WIKI_READONLY_BLOCKED_SELECTOR,
@@ -92,6 +92,72 @@ describe("the STALE tab", () => {
     expect(inReview).toContain("data-stale-in-review");
     // The status-line fix is not on the card, so it keeps its buttons.
     expect(inReview).toContain('data-stale-apply data-kind="status-line"');
+  });
+
+  test("fix round 1 batch 6: a fix whose Apply or Send is in flight renders both its buttons disabled, every repaint, and no other fix's", () => {
+    // The key is read off the button's own data attributes, as the click handler reads it.
+    const hitKey = staleFixKey({ kind: "status-line", page: "repos/x.md", line: "124", target: "plans/p.mdx" });
+    const html = staleBodyHtml(report, { pendingFixes: new Set([hitKey]) });
+    const buttons = [...html.matchAll(/<button [^>]*data-stale-(?:apply|send) [^>]*>/g)].map((m) => m[0]);
+    const hit = buttons.filter((b) => b.includes('data-kind="status-line"'));
+    const passage = buttons.filter((b) => b.includes('data-kind="passage"'));
+    // Two variants (new, home) × Apply and Send on the hit; Apply and Send on the passage.
+    expect(hit).toHaveLength(4);
+    expect(passage).toHaveLength(2);
+    for (const b of hit) expect(b).toMatch(/ disabled>$/);
+    for (const b of passage) expect(b).not.toContain("disabled");
+    // Nothing in flight: nothing disabled.
+    expect(staleBodyHtml(report)).not.toMatch(/data-stale-(?:apply|send) [^>]* disabled>/);
+    // A passage key names its linking page, not the hit's target.
+    const passageKey = staleFixKey({ kind: "passage", page: "repos/x.md", linking: "repos/api.md" });
+    expect(passageKey).not.toBe(hitKey);
+    // Each field names the fix: another line, target, linking page or page is another fix.
+    expect(staleFixKey({ kind: "status-line", page: "repos/x.md", line: "125", target: "plans/p.mdx" })).not.toBe(hitKey);
+    expect(staleFixKey({ kind: "status-line", page: "repos/x.md", line: "124", target: "plans/q.mdx" })).not.toBe(hitKey);
+    expect(staleFixKey({ kind: "status-line", page: "repos/y.md", line: "124", target: "plans/p.mdx" })).not.toBe(hitKey);
+    expect(staleFixKey({ kind: "passage", page: "repos/x.md", linking: "repos/console.md" })).not.toBe(passageKey);
+    expect(staleFixKey({ kind: "passage", page: "repos/y.md", linking: "repos/api.md" })).not.toBe(passageKey);
+    const onPassage = [...staleBodyHtml(report, { pendingFixes: new Set([passageKey]) }).matchAll(/<button [^>]*data-stale-(?:apply|send) [^>]*>/g)].map((m) => m[0]);
+    expect(onPassage.filter((b) => b.includes(" disabled>")).every((b) => b.includes('data-linking="repos/api.md"'))).toBe(true);
+    expect(onPassage.filter((b) => b.includes(" disabled>"))).toHaveLength(2);
+  });
+
+  test("fix round 1 batch 6: Send's answer is told — its group, the dropped edits with their reasons, an uncommitted write; Apply's too", () => {
+    expect(staleFixResultNotice("send", 200, { ok: true, outcome: "sent", groupKey: "stale-check:repos/x.md:2", supersedes: "stale-check:repos/x.md:1", pages: ["a.md", "b.md"], fixes: 2, dropped: [] })).toEqual({
+      tone: "ok",
+      text: "Sent to the Gardener as group 2 (replaces group 1): 2 fixes on 2 pages.",
+    });
+    expect(staleFixResultNotice("send", 200, { ok: true, outcome: "sent", groupKey: "stale-check:repos/x.md:1", supersedes: null, pages: ["a.md"], fixes: 1, dropped: [] })).toEqual({
+      tone: "ok",
+      text: "Sent to the Gardener as group 1: 1 fix on 1 page.",
+    });
+    const dropped = staleFixResultNotice("send", 200, {
+      ok: true, outcome: "sent", groupKey: "stale-check:repos/x.md:3", supersedes: "stale-check:repos/x.md:2", pages: ["b.md"], fixes: 1,
+      dropped: [{ page: "a.md", old: "landed on 23.05", reason: "the text is no longer on the page" }],
+    });
+    expect(dropped.tone).toBe("warn");
+    expect(dropped.text).toBe("Sent to the Gardener as group 3 (replaces group 2): 1 fix on 1 page. Dropped 1 earlier fix that no longer fits: «landed on 23.05» on a.md (the text is no longer on the page).");
+    expect(staleFixResultNotice("apply", 200, { ok: true, page: "notes/d.md", committed: true })).toEqual({ tone: "ok", text: "Applied to notes/d.md." });
+    expect(staleFixResultNotice("apply", 200, { ok: true, page: "notes/d.md", committed: false })).toEqual({
+      tone: "warn",
+      text: "Applied to notes/d.md, but the change is not committed: commit it by hand.",
+    });
+    // A failure names the action and the server's reason, or the status.
+    expect(staleFixResultNotice("send", 409, { error: "This fix is already in review in the Gardener." })).toEqual({
+      tone: "error",
+      text: "The fix was not sent to the Gardener: This fix is already in review in the Gardener.",
+    });
+    expect(staleFixResultNotice("apply", 500, {})).toEqual({ tone: "error", text: "The fix was not applied: HTTP 500" });
+    // An ok status with an answer that is not a success is not told as one:
+    // no `ok`, or a Send answer that is not `sent`.
+    expect(staleFixResultNotice("send", 200, { outcome: "sent" }).tone).toBe("error");
+    expect(staleFixResultNotice("send", 200, { ok: true, outcome: "refused" }).tone).toBe("error");
+  });
+
+  test("fix round 1 batch 6: the notice's ok and warn tones have their own colours, from tokens both themes define", () => {
+    const css = wikiStaleTabStyles();
+    expect(css).toContain('.wiki-stale-notice[data-tone="ok"] { color: var(--status-success); }');
+    expect(css).toContain('.wiki-stale-notice[data-tone="warn"] { color: var(--status-warning); }');
   });
 
   test("PR 3: Apply and Send are writes, dimmed and blocked on a read-only root", () => {

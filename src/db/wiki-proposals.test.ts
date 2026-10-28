@@ -695,7 +695,7 @@ describe("page claims across writers", () => {
       // The seeder's transaction must block on the lock, not race past it.
       let waiting = 0;
       for (let i = 0; i < 100 && waiting === 0; i++) {
-        waiting = (await getDb()`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0]!.n as number;
+        waiting = (await getDb()`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)[0]!.n as number;
         if (!waiting) await Bun.sleep(20);
       }
       release();
@@ -720,7 +720,7 @@ describe("page claims across writers", () => {
       const send = supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [staleRow("plans/a.mdx")] });
       let waiting = 0;
       for (let i = 0; i < 100 && waiting === 0; i++) {
-        waiting = (await getDb()`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0]!.n as number;
+        waiting = (await getDb()`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)[0]!.n as number;
         if (!waiting) await Bun.sleep(20);
       }
       release();

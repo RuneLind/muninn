@@ -325,7 +325,8 @@ export async function renderWikiGardenerPage(opts?: {
     .badge-entity { background: var(--tint-cyan); color: var(--status-cyan); }
     .badge-source { background: var(--tint-warning); color: var(--status-warning); }
     .badge-lint { background: var(--tint-cyan); color: var(--status-cyan); }
-    .badge-stale-check { background: var(--tint-warning); color: var(--status-warning); }
+    /* Outlined, in the accent: the warning fill is the stale status chip's, and a kind tag is not a status. */
+    .badge-stale-check { background: transparent; color: var(--accent-light); box-shadow: inset 0 0 0 1px var(--accent); }
     .gard-filter-sep { width: 1px; align-self: stretch; background: var(--border-secondary); margin: 2px 6px; }
     .badge-group { background: var(--tint-neutral); color: var(--text-muted); }
     .badge-create { background: var(--tint-success); color: var(--status-success); }

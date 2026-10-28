@@ -1,5 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, kindMatches } from "./wiki-gardener-group.ts";
+import { renderWikiGardenerPage } from "../wiki-gardener-page.ts";
+import { themeTokenStyles } from "../shared-styles.ts";
 
 describe("groupStatusSummary", () => {
   test("counts each status once, in the rows' own order of first appearance", () => {
@@ -116,5 +118,33 @@ describe("the kind filter and the card tag (PR 3, D28)", () => {
     expect(groupKindTag("lint")).toBe("lint");
     expect(groupNumber("stale-check:repos/x.md:12")).toBe("12");
     expect(groupNumber("lint:series-unnamed:abc")).toBe("");
+  });
+});
+
+describe("the STALE CHECK tag's own look (fix round 1 batch 6)", () => {
+  /** One rule's declarations as `prop → value`, read off the rendered page's CSS. */
+  const rule = (css: string, selector: string): Record<string, string> => {
+    const m = css.match(new RegExp(`\\n\\s*${selector.replace(/[.]/g, "\\.")} \\{([^}]*)\\}`));
+    if (!m) throw new Error(`no rule for ${selector}`);
+    return Object.fromEntries(m[1]!.split(";").map((d) => d.trim()).filter(Boolean).map((d) => [d.slice(0, d.indexOf(":")).trim(), d.slice(d.indexOf(":") + 1).trim()]));
+  };
+
+  test("the tag shares neither its fill nor its text colour with the `stale` status chip, and every token it reads is in both themes", async () => {
+    const css = await renderWikiGardenerPage();
+    const tag = rule(css, ".badge-stale-check");
+    const chip = rule(css, ".chip-stale");
+    // A card's tag (its kind) and its status chip sit side by side: the same
+    // colours read as the same thing, so a Stale check card looked stale.
+    // Compared by the token each value resolves through first: `var(--x, fallback)` is `--x`.
+    const token = (v: string | undefined) => v?.match(/var\((--[a-z0-9-]+)/)?.[1] ?? v;
+    expect(token(tag.background)).not.toBe(token(chip.background));
+    expect(token(tag.color)).not.toBe(token(chip.color));
+    const vars = [...Object.values(tag).join(" ").matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]!);
+    expect(vars.length).toBeGreaterThan(0);
+    const tokens = themeTokenStyles();
+    for (const theme of ["dark", "light"]) {
+      const block = tokens.match(new RegExp(`html\\[data-theme="${theme}"\\] \\{([^}]*)\\}`))![1]!;
+      for (const v of vars) expect(`${theme}: ${v} ${block.includes(`${v}:`)}`).toBe(`${theme}: ${v} true`);
+    }
   });
 });
