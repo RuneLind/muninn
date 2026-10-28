@@ -14,8 +14,10 @@ import {
   STALE_FIX_HOME_DROPS_LINK,
   STALE_FIX_NOT_IN_PASSAGE,
   STALE_FIX_NOT_ON_LINE,
+  staleFixRows,
   type StaleFixEdit,
 } from "./stale-fix.ts";
+import * as fix from "./stale-fix.ts";
 import type { WikiPageMeta } from "./store.ts";
 
 const PAGES: Record<string, string> = { hub: "hub.md", p: "plans/p.md", other: "notes/other.md" };
@@ -94,8 +96,8 @@ describe("placeStaleEdit — a passage edit", () => {
     expect(placeStaleEdit(content, passage(old, "the hub", { variant: "home" }), index)).toEqual({ ok: false, reason: STALE_FIX_HOME_DROPS_LINK });
     const ok = placeStaleEdit(content, passage(old, "[[hub]]", { variant: "home" }), index);
     expect(ok.ok && ok.content).toContain("Status: [[hub]], see [[other]].");
-    // The update variant may restate the fact without the link.
-    expect(placeStaleEdit(content, passage(old, "the hub landed on 18.06"), index).ok).toBe(true);
+    // The update variant may not drop the link either (fix round 1 batch 5).
+    expect(placeStaleEdit(content, passage(old, "the hub landed on 18.06"), index)).toEqual({ ok: false, reason: fix.STALE_FIX_DROPS_LINK! });
   });
 
   test("CRLF stays on the line it writes", () => {
@@ -138,5 +140,167 @@ describe("placeStaleEdit — a blank old", () => {
 
   test("a whitespace-only old is refused, even where it would place once", () => {
     expect(placeStaleEdit(page("[[hub]] landed"), passage(" ", "_"), index)).toEqual({ ok: false, reason: STALE_FIX_NOT_IN_PASSAGE });
+  });
+});
+
+// ── Fix round 1 batch 5: placement safety ───────────────────────────────────
+// The new reason constants are read through the namespace so a missing one is
+// `undefined`, not a link error: each test first asserts the edit does not
+// place, which is the behaviour the finding claims.
+
+describe("placeStaleEdit — only text the model was shown is replaced (the ` … ` join)", () => {
+  test("old ending in the space the join adds does not place on a gap spot the window never showed", () => {
+    // The left piece ends «…worzeta» + the join's « », so «zeta » occurs once
+    // in the pieces, but on the line it occurs only inside the gap.
+    const line = `${("The pin in [[hub]] " + "word ".repeat(40)).slice(0, 187)}zetaq ${"fill ".repeat(30)}zeta ${"more ".repeat(50)}and it landed on 23.05 now.`;
+    const content = page(line);
+    const [row] = staleFixRows(content, passage("x", "y"), index);
+    expect(row!.text).toContain("zeta … ");
+    const r = placeStaleEdit(content, passage("zeta ", "ZETA "), index);
+    expect(r.ok).toBe(false);
+    expect(r).toEqual({ ok: false, reason: STALE_FIX_NOT_IN_PASSAGE });
+  });
+
+  test("old starting with the join's space does not place on a gap spot either", () => {
+    const tail = ("more ".repeat(60) + "it landed on 23.05").slice(-175);
+    const line = `The pin in [[hub]] ${"word ".repeat(40)}fill omega fill ${"fill ".repeat(30)}Xomega${tail} now.`;
+    const content = page(line);
+    const [row] = staleFixRows(content, passage("x", "y"), index);
+    expect(row!.text).toContain(" … omega");
+    const r = placeStaleEdit(content, passage(" omega", " OMEGA"), index);
+    expect(r.ok).toBe(false);
+    expect(r).toEqual({ ok: false, reason: STALE_FIX_NOT_IN_PASSAGE });
+  });
+
+  test("text inside a piece of a gapped window still places", () => {
+    const line = `The pin in [[hub]] ${"word ".repeat(40)}fill ${"fill ".repeat(30)}${"more ".repeat(50)}and it landed on 23.05 now.`;
+    const r = placeStaleEdit(page(line), passage("landed on 23.05", "landed on 18.06"), index);
+    expect(r.ok && r.content).toContain("it landed on 18.06 now.");
+  });
+});
+
+describe("placeStaleEdit — the replacement text is checked", () => {
+  const LINE = "The pin in [[hub]] landed on 23.05.";
+  const refuse = (content: string, edit: StaleFixEdit, reason: string | undefined) => {
+    const r = placeStaleEdit(content, edit, index);
+    expect(r.ok).toBe(false);
+    expect(r).toEqual({ ok: false, reason: reason! });
+  };
+
+  test("a replacement that adds a link of any kind is refused", () => {
+    for (const text of [
+      "landed, see [[other]]",
+      "landed [here](https://e.com)",
+      "landed <https://e.com/x>",
+      "landed, see https://e.com/x",
+      "landed, see www.e.com",
+      "landed per [the doc][ref]",
+      "landed per [ref]",
+      "landed per [ref][]",
+    ]) refuse(page(LINE), passage("landed on 23.05", text), fix.STALE_FIX_ADDS_LINK);
+    // A `[` that pairs with a `]` later on the line makes a link outside the text.
+    refuse(page("The pin in [[hub]] landed on 23.05 and x] here."), passage("landed on 23.05", "landed [on 18.06"), fix.STALE_FIX_ADDS_LINK);
+    // home too: it may keep the links old holds, never add one.
+    refuse(page(LINE), passage("[[hub]] landed on 23.05", "[[hub]], see [[other]]", { variant: "home" }), fix.STALE_FIX_ADDS_LINK);
+  });
+
+  test("an update text that drops a link old holds is refused, like a home text", () => {
+    const content = page("Status: [[hub]] landed on 23.05, see [[other]].");
+    refuse(content, passage("[[hub]] landed on 23.05", "the hub landed on 18.06"), fix.STALE_FIX_DROPS_LINK);
+    const ok = placeStaleEdit(content, passage("[[hub]] landed on 23.05", "[[hub]] landed on 18.06"), index);
+    expect(ok.ok && ok.content).toContain("Status: [[hub]] landed on 18.06, see [[other]].");
+  });
+
+  test("a replacement that adds an HTML or JSX tag or an HTML comment is refused", () => {
+    for (const text of ["landed <b>18.06</b>", "landed <Callout>", "landed </div>", "landed <!-- 18.06", "landed <br/>"]) {
+      refuse(page(LINE), passage("landed on 23.05", text), fix.STALE_FIX_TEXT_TAG);
+    }
+  });
+
+  test("an MDX expression brace is refused on an .mdx page, kept on a .md page", () => {
+    refuse(page(LINE), passage("landed on 23.05", "landed on {date}", { page: "notes/a.mdx" }), fix.STALE_FIX_TEXT_MDX_EXPR);
+    refuse(page(LINE), passage("landed on 23.05", "landed on 18.06 }", { page: "notes/a.mdx" }), fix.STALE_FIX_TEXT_MDX_EXPR);
+    expect(placeStaleEdit(page(LINE), passage("landed on 23.05", "landed on {18.06}"), index).ok).toBe(true);
+    // On an .mdx page any `<` may open JSX.
+    refuse(page(LINE), passage("landed on 23.05", "landed in < 2 days", { page: "notes/a.mdx" }), fix.STALE_FIX_TEXT_TAG);
+    expect(placeStaleEdit(page(LINE), passage("landed on 23.05", "landed in < 2 days"), index).ok).toBe(true);
+    // Inside a code span the brace is not an expression.
+    expect(placeStaleEdit(page(LINE), passage("landed on 23.05", "landed on `{x}`", { page: "notes/a.mdx" }), index).ok).toBe(true);
+  });
+
+  test("a replacement that changes how its line starts (a fence, heading, quote) is refused", () => {
+    const content = page("Landed on 23.05 per [[hub]].");
+    for (const text of ["```js", "~~~", "# Landed", "> Landed"]) refuse(content, passage("Landed on 23.05", text), fix.STALE_FIX_TEXT_BLOCK);
+    // On a table row a `|` is a cell border.
+    refuse(page("| [[hub]] | landed on 23.05 |"), passage("landed on 23.05", "landed | 18.06"), fix.STALE_FIX_TEXT_BLOCK);
+    expect(placeStaleEdit(page("| [[hub]] | landed on 23.05 |"), passage("landed on 23.05", "landed on 18.06"), index).ok).toBe(true);
+    expect(placeStaleEdit(content, passage("Landed on 23.05", "Landed on 18.06"), index).ok).toBe(true);
+  });
+
+  test("a stray backtick that would pair with one later on the line is refused", () => {
+    const content = page("The pin in [[hub]] landed on 23.05, see [[other]] ` here.");
+    refuse(content, passage("landed on 23.05", "landed `on 18.06"), fix.STALE_FIX_TEXT_CODE);
+    // A whole code span swapped for a whole code span keeps the pairing.
+    const code = page("The pin in [[hub]] is `v1.2` now.");
+    expect(placeStaleEdit(code, passage("is `v1.2` now", "is `v1.3` now"), index).ok).toBe(true);
+  });
+
+  test("an edit on a front-matter line that breaks the YAML or adds a key is refused", () => {
+    const fm = "---\ntitle: Note\nnote: see [[hub]] landed on 23.05\n---\n\nBody.\n";
+    refuse(fm, passage("landed on 23.05", "landed: 18.06"), fix.STALE_FIX_FRONTMATTER);
+    refuse(fm, passage("landed on 23.05", "landed on 18.06 # shipped"), fix.STALE_FIX_FRONTMATTER);
+    // A value that now starts with `[` is a flow sequence: the YAML breaks.
+    refuse(fm, passage("see [[hub]] landed on 23.05", "[[hub]] landed on 18.06"), fix.STALE_FIX_FRONTMATTER);
+    // Front matter that does not parse already cannot be shown to stay whole.
+    refuse(fm.replace("---\n\nBody", 'other: "unclosed\n---\n\nBody'), passage("landed on 23.05", "landed on 18.06"), fix.STALE_FIX_FRONTMATTER);
+    const ok = placeStaleEdit(fm, passage("landed on 23.05", "landed on 18.06"), index);
+    expect(ok.ok && ok.content).toBe("---\ntitle: Note\nnote: see [[hub]] landed on 18.06\n---\n\nBody.\n");
+  });
+});
+
+describe("placeStaleEdit — old may not cut other inline constructs", () => {
+  const refuse = (line: string, old: string, reason: string | undefined) => {
+    const r = placeStaleEdit(page(line), passage(old, "X"), index);
+    expect(r.ok).toBe(false);
+    expect(r).toEqual({ ok: false, reason: reason! });
+  };
+
+  test("an autolink or a bare URL", () => {
+    refuse("The pin in [[hub]] landed on 23.05 at <https://e.com/a> today.", "e.com/a> today", STALE_FIX_CUTS_LINK);
+    refuse("The pin in [[hub]] landed on 23.05 at <https://e.com/a> today.", "e.com/a", STALE_FIX_CUTS_LINK);
+    refuse("The pin in [[hub]] landed on 23.05 at https://e.com/a/b today.", "a/b today", STALE_FIX_CUTS_LINK);
+    // An email autolink: no bare URL, and a link rather than a tag.
+    refuse("The pin in [[hub]] landed on 23.05 at <ops@e.com> today.", "e.com> today", STALE_FIX_CUTS_LINK);
+  });
+
+  test("a reference link or a reference definition", () => {
+    refuse("The pin in [[hub]] landed on 23.05 per [the doc][ref] today.", "doc][ref] today", STALE_FIX_CUTS_LINK);
+    refuse("The pin in [[hub]] landed on 23.05 per [the doc][ref] today.", "doc", STALE_FIX_CUTS_LINK);
+    // Its first half alone would leave «X[ref]», a shortcut reference.
+    refuse("The pin in [[hub]] landed on 23.05 per [the doc][ref] today.", "per [the doc]", STALE_FIX_CUTS_LINK);
+    refuse("The pin in [[hub]] landed on 23.05 per [the doc] today.", "doc] today", STALE_FIX_CUTS_LINK);
+    refuse('[ref]: https://e.com "[[hub]] landed on 23.05"', "landed on 23.05", STALE_FIX_CUTS_LINK);
+  });
+
+  test("an HTML or MDX tag", () => {
+    refuse('The pin in [[hub]] <span title="landed on 23.05">x</span> now.', "landed on 23.05", fix.STALE_FIX_CUTS_TAG);
+    refuse('The pin in [[hub]] <span title="x">landed on 23.05</span> now.', "23.05</span> now", fix.STALE_FIX_CUTS_TAG);
+    refuse("The pin in [[hub]] <Pill tone=\"ok\" /> landed on 23.05.", "ok\" /> landed", fix.STALE_FIX_CUTS_TAG);
+    // A comment runs to its `-->`, past a `>` inside it.
+    refuse("The pin in [[hub]] <!-- landed > on 23.05 --> now.", "on 23.05", fix.STALE_FIX_CUTS_TAG);
+  });
+
+  test("emphasis: cutting a delimiter is refused, text inside or the whole span is not", () => {
+    refuse("The pin in [[hub]] **landed on 23.05** now.", "23.05** now", fix.STALE_FIX_CUTS_EMPHASIS);
+    refuse("The pin in [[hub]] *landed on 23.05* now.", "on 23.05* now", fix.STALE_FIX_CUTS_EMPHASIS);
+    refuse("The pin in [[hub]] _landed on 23.05_ now.", "_landed on", fix.STALE_FIX_CUTS_EMPHASIS);
+    refuse("The pin in [[hub]] __landed on 23.05__ now.", "23.05__ now", fix.STALE_FIX_CUTS_EMPHASIS);
+    refuse("The pin in [[hub]] ~~landed on 23.05~~ now.", "landed on 23.05~~", fix.STALE_FIX_CUTS_EMPHASIS);
+    const inside = placeStaleEdit(page("The pin in [[hub]] **landed on 23.05** now."), passage("landed on 23.05", "landed on 18.06"), index);
+    expect(inside.ok && inside.content).toContain("**landed on 18.06** now.");
+    const whole = placeStaleEdit(page("The pin in [[hub]] **landed on 23.05** now."), passage("**landed on 23.05**", "landed on 18.06"), index);
+    expect(whole.ok && whole.content).toContain("[[hub]] landed on 18.06 now.");
+    // snake_case is not emphasis.
+    expect(placeStaleEdit(page("The pin in [[hub]] set my_flag_name on 23.05."), passage("flag_name on 23.05", "flag_name on 18.06"), index).ok).toBe(true);
   });
 });
