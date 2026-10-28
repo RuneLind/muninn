@@ -265,6 +265,8 @@ test("the pill, the rail badge, the marks and the home show the STALE tab's numb
   // The home: the line's totals and the Stale tab's rows say the same.
   await p.goto(`${BASE}/wiki?wiki=${WIKI}`);
   await expect(p.locator("#wikiStaleHome [data-stale-home-totals]")).toHaveText("⚠ 7 stale status lines · 1 linking page to check on 2 pages");
+  // On the home no page report exists: the rail's badges come from the summary alone.
+  await expect(railBadge(p, "hub.md")).toHaveText("⚠ 6 · 1");
   await p.locator("#wikiStaleHome [data-stale-home-open]").click();
   await expect(p.locator('.wiki-tab[data-tab="stale"]')).toHaveClass(/\bactive\b/);
   await expect(p.locator('.wiki-stale-home-row[data-relpath="hub.md"] .wiki-stale-home-counts')).toHaveText(HUB_TEXT);

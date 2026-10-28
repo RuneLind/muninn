@@ -1697,7 +1697,7 @@ let restoringRailFocus = false;
  *  threads) can land while a rail control holds focus. A handler that focuses
  *  something after its own render still wins. */
 function renderList(cause: "storage" | "local" = "local"): void {
-  staleRailPainted = staleRailSig();
+  staleRailPainted = new Map();
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
@@ -2119,7 +2119,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
       movesFlagHtml(p) +
       (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "") +
       // The Stale check's two numbers (PR 2b, D26), off the summary route.
-      staleRailBadgeHtml(staleRailCounts(p.relPath)) +
+      railStaleBadge(p.relPath) +
       chipSlot;
     const sub = subItems ? `<div class="wiki-list-sub">${subItems}</div>` : "";
     html +=
@@ -3954,8 +3954,8 @@ let staleSummary: StaleSummaryView | null = null;
 let staleSummaryCounts = new Map<string, StalePageCounts>();
 /** The summary request in flight: an older one answering late is dropped. */
 let staleSummarySeq = 0;
-/** The open page's counts as the rail last painted them (`renderList`). */
-let staleRailPainted = "";
+/** Each rail row's badge as `renderList` last painted it, by relPath. */
+let staleRailPainted = new Map<string, string>();
 /** The article and hits the marks were last placed for. */
 let staleMarksFor: { el: Element; sig: string } | null = null;
 
@@ -3976,17 +3976,25 @@ function loadStaleSummary(): void {
     .then((data: StaleSummaryView) => {
       if (seq !== staleSummarySeq) return;
       staleSummary = data;
-      staleSummaryCounts = staleCountMap(data);
-      renderList();
+      adoptStaleSummaryCounts(staleCountMap(data));
       renderStaleHome();
     })
     .catch(() => {
       if (seq !== staleSummarySeq) return;
       staleSummary = { error: "the summary could not be loaded" };
-      staleSummaryCounts = new Map();
-      renderList();
+      adoptStaleSummaryCounts(new Map());
       renderStaleHome();
     });
+}
+
+/** Take the summary's counts, and repaint the rail only when a badge would
+ *  change: a summary that says what the rail shows costs no row render. */
+function adoptStaleSummaryCounts(next: Map<string, StalePageCounts>): void {
+  const sig = (m: Map<string, StalePageCounts>) =>
+    [...m].filter(([, c]) => c.staleLines || c.toCheck).map(([r, c]) => `${r}\0${c.staleLines}\0${c.toCheck}`).sort().join("\n");
+  const changed = sig(next) !== sig(staleSummaryCounts);
+  staleSummaryCounts = next;
+  if (changed) renderList();
 }
 
 /** The home's line, and its Stale tab when that is the one showing. */
@@ -4016,14 +4024,17 @@ function paintStaleSurfaces(): void {
       staleMarksFor = { el: art.el, sig };
     }
   }
-  // The open page's rail row follows its report.
-  if (staleRailSig() !== staleRailPainted) renderList();
+  // The open page's rail row follows its report: repainted only when its
+  // badge would change, so opening a page costs no extra row render.
+  const painted = staleFor ? staleRailPainted.get(staleFor) : undefined;
+  if (painted !== undefined && painted !== staleRailBadgeHtml(staleRailCounts(staleFor!))) renderList();
 }
 
-/** What the rail shows for the open page: its relPath and two numbers. */
-function staleRailSig(): string {
-  const c = staleFor ? staleRailCounts(staleFor) : undefined;
-  return staleFor ? `${staleFor}\0${c?.staleLines ?? 0}\0${c?.toCheck ?? 0}` : "";
+/** A rail row's badge, noted as painted. */
+function railStaleBadge(relPath: string): string {
+  const html = staleRailBadgeHtml(staleRailCounts(relPath));
+  staleRailPainted.set(relPath, html);
+  return html;
 }
 
 /** Still true / Not a status: one reader verdict row, then a reload. */
