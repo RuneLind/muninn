@@ -3969,9 +3969,10 @@ let staleSummary: StaleSummaryView | null = null;
 let staleSummaryCounts = new Map<string, StalePageCounts>();
 /** The summary request in flight: an older one answering late is dropped. */
 let staleSummarySeq = 0;
-/** Page reports folded into the summary's counts, each with the summary
- *  request that was newest when it landed: a summary asked for before the
- *  report keeps the report's counts, a later one replaces them. */
+/** Page reports folded into the summary's counts, each stamped when the report
+ *  LANDS with the newest summary request at that moment: a summary asked for
+ *  before the report landed keeps the report's counts, one asked for after it
+ *  landed replaces them. */
 const staleReportFolds = new Map<string, { counts: StalePageCounts; seq: number }>();
 /** Each rail row's badge as `renderList` last painted it, by relPath. */
 let staleRailPainted = new Map<string, string>();

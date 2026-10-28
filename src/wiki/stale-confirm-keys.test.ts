@@ -320,3 +320,60 @@ describe("Check's prompt is the same with and without asOf when the linking page
     expect(dated).toBe(plain);
   });
 });
+
+// Fix round 2 batch 2: the lower bound is the linking page's current last
+// change (D29), which for a page with uncommitted body edits is its mtime, not
+// its newest commit.
+describe("Check's lower bound counts the linking page's uncommitted edits", () => {
+  let root = "";
+  const t0 = Date.now();
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  const commitAt = async (ms: number, msg: string) => {
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "--date", iso(ms), "-m", msg);
+  };
+  // As of −13 d, notes/old.md (committed at −17 d) is To check against the
+  // hub's −14 d edit; its uncommitted edit lies after asOf.
+  const asOf = t0 - 13 * DAY;
+  const linking = (tail: string) => page("Old", `The pin in [[docs/hub]] landed on 23.05.\n\n${tail}`);
+
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-dirty-bound-"));
+    await git(root, "init", "-q", "-b", "main");
+    await write("docs/hub.md", page("Hub", "Body one."));
+    await write("notes/old.md", linking("Tail one."));
+    await commitAt(t0 - 20 * DAY, "seed");
+    await write("notes/old.md", linking("Tail two."));
+    await commitAt(t0 - 17 * DAY, "old: first");
+    await write("docs/hub.md", page("Hub", "Body two."));
+    await commitAt(t0 - 14 * DAY, "hub: first");
+    await write("docs/hub.md", page("Hub", "Body three."));
+    await commitAt(t0 - 10 * DAY, "hub: second");
+    await write("docs/hub.md", page("Hub", "Body four."));
+    await commitAt(t0 - 5 * DAY, "hub: third");
+    // A body edit, not committed: notes/old.md's last change is now.
+    await write("notes/old.md", linking("Tail three, uncommitted."));
+  }, 30_000);
+  afterAll(async () => {
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a linking page with uncommitted body edits sees no hub commits since its last change", async () => {
+    __resetWikiCacheForTest();
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    expect(index.resolveRelPath("notes/old.md")?.gitDirty).toBe(true);
+    const b = (await linkingBuckets(index, "docs/hub.md", { asOfMs: asOf }))!;
+    expect(b.linking.find((x) => x.relPath === "notes/old.md")?.bucket).toBe("toCheck");
+    let prompt = "";
+    const model: StaleModel = async (p) => ((prompt = p), '{"verdict":"true","reason":"holds"}');
+    await runStaleCheck({ wiki: "w", index, relPath: "docs/hub.md", asOfMs: asOf, bot: BOT, store: memoryStaleVerdictStore(), model, onEvent: () => {} });
+    expect(prompt).toContain("The linked page has no commits since the passage's page last changed.");
+    expect(prompt).not.toContain("- hub: third");
+    expect(prompt).not.toContain("- hub: second");
+  });
+});
