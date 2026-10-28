@@ -49,7 +49,7 @@ import type { WikiRegistryEntry } from "./registry.ts";
 import { normalizeRelPath } from "./rel-path.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { maskLineCodeSpans } from "../format/code-spans.ts";
-import { lineLinks, linkingBuckets, type LinkingPage, type StatusLineHit } from "./stale.ts";
+import { lineLinks, linkingBuckets, pageStaleFacts, type LinkingPage, type StatusLineHit } from "./stale.ts";
 import { getWikiIndex, parseFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
 
 const log = getLog("wiki", "stale-confirm");
@@ -467,10 +467,10 @@ export const COMMIT_SUBJECTS_TIMEOUT_MS = 5_000;
  *  and the index dates a page by its author date (`%at`), so the filter is ours. */
 const COMMIT_SCAN_MAX = 200;
 
-/** Subjects of `relPath`'s commits authored after `sinceMs` and at or before
- *  `untilMs`, newest first, at most {@link COMMIT_SUBJECTS_MAX}; null when git
- *  is unavailable or the call fails (the prompt then carries no section). */
-export async function commitSubjectsSince(root: string, relPath: string, sinceMs: number | undefined, untilMs?: number, memo?: SubjectsMemo): Promise<string[] | null> {
+/** Subjects of `relPath`'s commits authored after `sinceMs`, newest first,
+ *  at most {@link COMMIT_SUBJECTS_MAX}; null when git is unavailable or the
+ *  call fails (the prompt then carries no section). */
+export async function commitSubjectsSince(root: string, relPath: string, sinceMs: number | undefined, memo?: SubjectsMemo): Promise<string[] | null> {
   const memoKey = `${root}\0${relPath}`;
   let log = memo?.get(memoKey);
   if (!log) {
@@ -481,7 +481,7 @@ export async function commitSubjectsSince(root: string, relPath: string, sinceMs
   if (all === null) return null;
   const out: string[] = [];
   for (const c of all) {
-    if ((sinceMs !== undefined && c.ms <= sinceMs) || (untilMs !== undefined && c.ms > untilMs)) continue;
+    if (sinceMs !== undefined && c.ms <= sinceMs) continue;
     out.push(c.subject);
     if (out.length >= COMMIT_SUBJECTS_MAX) break;
   }
@@ -521,12 +521,17 @@ const targetFacts = (meta: WikiPageMeta | undefined, relPath: string): StaleCall
 
 /** The commits a call carries about `target`: null while it has uncommitted
  *  edits (D29: they are its last change, and no subject describes them; A14),
- *  else the subjects between `sinceMs` and `untilMs` (the check's `asOf`,
- *  which the working tree postdates). */
-export async function commitsFor(index: Pick<WikiIndex, "root">, target: WikiPageMeta | undefined, sinceMs: number | undefined, untilMs?: number, memo?: SubjectsMemo) {
+ *  else the subjects after `sinceMs`, up to now. */
+export async function commitsFor(index: Pick<WikiIndex, "root">, target: WikiPageMeta | undefined, sinceMs: number | undefined, memo?: SubjectsMemo) {
   if (!target) return undefined;
-  if (untilMs === undefined && target.gitDirty === true) return null;
-  return (await commitSubjectsSince(index.root, target.relPath, sinceMs, untilMs, memo)) ?? undefined;
+  if (target.gitDirty === true) return null;
+  return (await commitSubjectsSince(index.root, target.relPath, sinceMs, memo)) ?? undefined;
+}
+
+/** A linking page's last change as the GET without `asOf` reads it. */
+async function currentLastChangeOf(index: WikiIndex, relPath: string): Promise<number | undefined> {
+  const meta = index.resolveRelPath(relPath);
+  return meta ? (await pageStaleFacts(index, meta)).lastChangeMs : undefined;
 }
 
 /** The plans a passage links to other than `exclude`, with their status, at most 5. */
@@ -1144,8 +1149,10 @@ export async function runStaleCheck(opts: {
       page: i.l.relPath,
       passage: i.passage,
       target: i.ctx.target,
-      // Prompt evidence only: `asOf` cuts the subjects, the key reads none.
-      commits: await commitsFor(index, changedMeta, i.l.lastChangeMs, opts.asOfMs, subjects),
+      // `asOf` scopes only the window (which pages are To check). The
+      // subjects run from the linking page's current last change to now, not
+      // from `i.l.lastChangeMs`, which `asOf` steps back: one key, one prompt.
+      commits: await commitsFor(index, changedMeta, await currentLastChangeOf(index, i.l.relPath), subjects),
       otherPlans: i.ctx.otherPlans,
       sourceLines: await sourceLinesOf(index.root, i.l.relPath, linkingPassageRows(i.l).map((p) => p.line)),
     };

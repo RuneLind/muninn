@@ -57,6 +57,8 @@ import {
 import { isWikiReadonly } from "../../wiki/readonly.ts";
 import { WIKI_READ_SLICE_CLASS, wikiReadSliceStyles } from "./components/wiki-read-slice.ts";
 import { STALE_TAB_TITLE, wikiStaleTabStyles } from "./components/wiki-stale-tab.ts";
+import { wikiStaleSummaryStyles } from "./components/wiki-stale-summary.ts";
+import { wikiStaleMarkStyles } from "./components/wiki-stale-marks.ts";
 import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
 import { FACTCHECK_CONF_CHIP_CSS } from "./components/factcheck-conf-chip-styles.ts";
 import type { AuthRole } from "../../auth/role.ts";
@@ -3128,6 +3130,8 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     ${wikiReadonlyStyles()}
     ${wikiReadSliceStyles()}
     ${wikiStaleTabStyles()}
+    ${wikiStaleSummaryStyles()}
+    ${wikiStaleMarkStyles()}
   </style>
 </head>
 <body${tools ? "" : ` class="${WIKI_READ_SLICE_CLASS}"`}>

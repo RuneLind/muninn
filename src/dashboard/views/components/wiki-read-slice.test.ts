@@ -23,6 +23,14 @@ describe("the reader under the read slice", () => {
     expect(readSliceStartTab("timeline", false)).toBe("timeline");
   });
 
+  test("a stored or linked Stale tab lands on Hubs wherever the tab is absent (PR 2b)", () => {
+    expect(readSliceStartTab("stale", true)).toBe("stale");
+    expect(readSliceStartTab("stale", false)).toBe("hubs");
+    // A read-only instance: the tools are there, the Stale tab is not (D25).
+    expect(readSliceStartTab("stale", true, false)).toBe("hubs");
+    expect(readSliceStartTab("atlas", true, false)).toBe("atlas");
+  });
+
   test("the hidden set names every control that reaches a dropped route", () => {
     const hidden = WIKI_READ_SLICE_HIDDEN_SELECTOR.split(",");
     for (const sel of [

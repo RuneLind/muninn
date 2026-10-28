@@ -28,6 +28,8 @@ export interface StaleHitView {
   said: string[];
   now: string;
   text: string;
+  /** The hit's line is in the frontmatter: no mark in the article (D21). */
+  frontmatter?: boolean;
   confirmation?: StaleVerdictView | "unconfirmed";
 }
 
@@ -53,10 +55,23 @@ export interface StaleReportView {
 }
 
 /** The two numbers (D26): confirmed stale status lines, linking pages to check. */
-export function staleCounts(r: StaleReportView | null | undefined): { staleLines: number; toCheck: number } {
+export function staleCounts(r: StaleReportView | null | undefined): StalePageCounts {
   if (!r || r.error) return { staleLines: 0, toCheck: 0 };
   const staleLines = confirmedHits(r).length;
   return { staleLines, toCheck: r.buckets?.counts?.toCheck ?? 0 };
+}
+
+export interface StalePageCounts {
+  staleLines: number;
+  toCheck: number;
+}
+
+/** The two numbers in words (D26): «⚠ N stale status lines · M linking pages
+ *  to check», or «✓ nothing stale». The tab's head, the article pill and the
+ *  wiki home all read it. */
+export function staleCountsText(c: StalePageCounts): string {
+  if (!c.staleLines && !c.toCheck) return "✓ nothing stale";
+  return `⚠ ${c.staleLines} stale status line${c.staleLines === 1 ? "" : "s"} · ${c.toCheck} linking page${c.toCheck === 1 ? "" : "s"} to check`;
 }
 
 /** The hits a reader sees: confirmed stale only (D11). */
@@ -167,9 +182,7 @@ export function staleBodyHtml(r: StaleReportView | null, opts: StaleBodyOpts = {
   const { staleLines, toCheck } = staleCounts(r);
   let html =
     `<div class="wiki-stale-head" data-stale-lines="${staleLines}" data-stale-tocheck="${toCheck}">` +
-    (staleLines || toCheck
-      ? `⚠ ${staleLines} stale status line${staleLines === 1 ? "" : "s"} · ${toCheck} linking page${toCheck === 1 ? "" : "s"} to check`
-      : "✓ nothing stale") +
+    esc(staleCountsText({ staleLines, toCheck })) +
     `</div>`;
   if (r.verdicts === "unavailable") html += `<div class="wiki-stale-note">Verdicts are unavailable right now, so no status line shows as confirmed.</div>`;
 

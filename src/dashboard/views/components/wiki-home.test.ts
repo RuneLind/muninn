@@ -55,10 +55,11 @@ describe("urlNamesWiki", () => {
 });
 
 describe("start tab", () => {
-  test("parseStartTab accepts the three names only", () => {
+  test("parseStartTab accepts the four names only", () => {
     expect(parseStartTab("hubs")).toBe("hubs");
     expect(parseStartTab("timeline")).toBe("timeline");
     expect(parseStartTab("atlas")).toBe("atlas");
+    expect(parseStartTab("stale")).toBe("stale");
     expect(parseStartTab("Atlas")).toBeNull();
     expect(parseStartTab("")).toBeNull();
     expect(parseStartTab(null)).toBeNull();

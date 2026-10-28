@@ -118,6 +118,13 @@ describe("statusLineCandidates (phase A)", () => {
     expect(c).toHaveLength(1);
   });
 
+  test("the first body line straight after the closing fence is body, not frontmatter, LF and CRLF alike", () => {
+    for (const page of ["---\ntitle: T\n---\n- [[p]] proposed\n", "---\r\ntitle: T\r\n---\r\n- [[p]] proposed\r\n"]) {
+      const c = statusLineCandidates(page);
+      expect(c.map((x) => [x.line, x.target, x.said, x.frontmatter])).toEqual([[4, "p", ["proposed"], undefined]]);
+    }
+  });
+
   test("this check's own exemptions: inline code, strikethrough, title/description/status_note, a markdown link in the segment", () => {
     const body = [
       "---",
@@ -237,6 +244,12 @@ describe("resolveStatusLineHits (phase B)", () => {
   test("ready reads as proposed; superseded targets and pages without plan_status are skipped", () => {
     expect(resolveStatusLineHits("notes/x.md", [cand("r", ["proposed"]), cand("s", ["shipped"]), cand("n", ["shipped"])], resolve)).toEqual([]);
     expect(resolveStatusLineHits("notes/x.md", [cand("r", ["shipped"])], resolve)).toHaveLength(1);
+  });
+
+  test("a frontmatter line's hit says so, for the reader's marks (D21); a body line's does not", () => {
+    const page = `---\ntitle: T\nrelated:\n  - "[[a]] shipped"\n---\n\n- [[a]] shipped in May\n`;
+    const hits = resolveStatusLineHits("notes/x.md", statusLineCandidates(page), resolve);
+    expect(hits.map((h) => [h.line, h.frontmatter])).toEqual([[4, true], [7, undefined]]);
   });
 
   test("a page's line about itself is no hit, and one hit per line and target", () => {

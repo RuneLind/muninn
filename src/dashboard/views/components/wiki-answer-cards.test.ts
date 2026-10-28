@@ -3,7 +3,7 @@ import { ANSWER_CARD_WIRED_ATTR, enhanceAnswerCards } from "./wiki-answer-cards.
 
 /**
  * The wiring half of the answer card, over a minimal hand-rolled stand-in for
- * the card sections: the repo has no browser test env, and these cases need no
+ * the card sections: these tests do not use happy-dom, and these cases need no
  * rendering (a section that is not connected is never painted). What a card
  * looks like and does is `e2e/wiki-answer-card.spec.ts`.
  */

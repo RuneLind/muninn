@@ -149,6 +149,11 @@ export const E2E_PORTS = {
   "wiki-stale-tab": 3173,
   "wiki-stale-tab/readonly": 3174,
   "wiki-stale-tab/fake": 3175,
+  // The Stale check's counts everywhere (PR 2b): the rail badge, the article
+  // pill, the marks and the home on a temp git wiki, and a read-only instance
+  // on which none of them shows (D25).
+  "wiki-stale-counts": 3176,
+  "wiki-stale-counts/readonly": 3177,
   // The reader's provenance strip and the chain it opens, end to end. ONE fake
   // `node:http` server plays claude-usage's `GET /api/sessions-by-id` and
   // `GET /api/merges` — pricing one of the fixture's two sessions and OMITTING

@@ -6,7 +6,7 @@ import { exportStamp } from "../../../wiki/answer-export.ts";
 
 /**
  * The export controls' click and fetch sequence (answer cards PR 4, fix round
- * 1), over a minimal hand-rolled DOM: the repo has no browser test env. What
+ * 1), over a minimal hand-rolled DOM: these tests do not use happy-dom. What
  * the button looks like and the real clipboard are
  * `e2e/wiki-answer-export.spec.ts`; these cases pin the orderings a browser run
  * cannot hold still — a prefetch landing during a confirm, a refresh that

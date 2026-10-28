@@ -40,7 +40,8 @@
   },
   "devDependencies": {
     "@playwright/test": "1.58.2",
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "happy-dom": "21.0.4"
   },
   "peerDependencies": {
     "typescript": "^5"
