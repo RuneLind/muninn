@@ -25,6 +25,7 @@ import {
   statusLineCallInput,
   stopStaleConfirmLoop,
   type ConfirmDeps,
+  type FailureMark,
   type StaleModel,
 } from "./stale-confirm.ts";
 import { linkingBuckets } from "./stale.ts";
@@ -214,7 +215,7 @@ describe("the confirm loop's start and stop (A8, A13)", () => {
 
   test("a verdict write that stop catches in flight lands, counts as written and clears its failure", async () => {
     const t = traced();
-    const failures = new Map<string, number>();
+    const failures = new Map<string, FailureMark>();
     // A first run whose calls all fail, so every hit has a failure on record.
     const failing = slowDeps(0, { failures, model: () => async () => Promise.reject(new Error("backend down")) });
     expect((await runStaleConfirm(["cw"], failing.deps)).errors).toBe(3);
@@ -348,7 +349,7 @@ describe("the call inputs on a git wiki (A14)", () => {
     expect(toCheck.map((l) => l.relPath)).toEqual(["notes/old.md"]);
     const store = memoryStaleVerdictStore();
     // A row under the old shared sentinel must not surface as this page's verdict.
-    await store.upsert({ wiki: "w", kind: "passage", page: "notes/old.md", keyHash: passageVerdictKey(index, "hub.md", "unreadable", toCheck[0]!, asOfMs), verdict: "stale", reason: "another page's", edit: null, checkedBy: "model:x" });
+    await store.upsert({ wiki: "w", kind: "passage", page: "notes/old.md", keyHash: await passageVerdictKey(index, "hub.md", "unreadable", toCheck[0]!, asOfMs), verdict: "stale", reason: "another page's", edit: null, checkedBy: "model:x" });
     let calls = 0;
     const model: StaleModel = async () => (calls++, '{"verdict":"true","reason":"ok"}');
     await chmod(path.join(root, "hub.md"), 0o000);

@@ -7,7 +7,10 @@
  *   status words and the target's facts; a passage on the linking page, its
  *   claim passages, the changed page's content hash (body, `plan_status` and
  *   `status_note` only, so a provenance stamp or an `updated:` bump resets
- *   nothing) and facts, the other plans' status and `asOf`.
+ *   nothing) and facts, the other plans' status and the commit subjects the
+ *   call carries (what `asOf` changes, so a Check under `asOf` and the tab's
+ *   GET without it share a key when the model saw the same subjects). Both
+ *   read the target's own title, never its stem-collision `displayTitle`.
  * - **The call (D17)** goes through the wiki's own bot
  *   (`resolveWikiSynthesisBot`) and its Haiku router (`callHaikuWithFallback`
  *   with the bot's connector and `haikuBackend`), tool-less, under a deadline
@@ -67,7 +70,12 @@ export function changedPageContentHash(content: string): string {
 
 /** The linked page's facts as the prompt carries them. */
 type TargetFacts = StaleCallInput["target"];
+/** A key's target facts: `title` is the page's own (`meta.title`), so a page
+ *  that shares the stem elsewhere and relabels it resets nothing. */
 const targetParts = (t: TargetFacts) => [normalizeRelPath(t.relPath), t.title, t.planStatus ?? "", t.statusNote ?? "", t.description ?? ""];
+
+/** The commit subjects a call carries, as a key part: none read, uncommitted, or the list. */
+const commitsPart = (c: readonly string[] | null | undefined) => (c === undefined ? "-" : c === null ? "uncommitted" : JSON.stringify(c));
 
 /**
  * A status-line confirmation's key: what the call was judged on — the page,
@@ -79,48 +87,68 @@ export function statusLineKeyHash(page: string, hit: Pick<StatusLineHit, "text" 
   return sha(["status-line/v2", normalizeRelPath(page), hit.text, hit.said.join(","), normalizeRelPath(hit.target), hit.now, ...targetParts(target).slice(1)]);
 }
 
-/** What a passage prompt carries besides the passage and the commit subjects. */
+/** What a passage prompt carries besides the passage. */
 export interface PassageKeyContext {
+  /** The changed page's facts as the prompt carries them. */
   target: TargetFacts;
+  /** The page's own title, which the key reads instead of `target.title`. */
+  keyTitle: string;
   otherPlans: NonNullable<StaleCallInput["otherPlans"]>;
-  /** The check's `asOf`: it cuts the commit subjects the call reads. */
-  asOfMs?: number;
+  /** The changed page's commit subjects the call carries (`commitsFor`):
+   *  `asOf` cuts them, so the key reads them instead of `asOf`. */
+  commits: readonly string[] | null | undefined;
 }
 
 /**
  * A passage verdict's key: the linking page, its passage, the changed page's
- * content hash, the changed page's facts the prompt carries, the other plans
- * the passage links to with their status, and `asOf`. No commits (D22).
+ * content hash, its facts the prompt carries (its own title), the other plans
+ * the passage links to with their status, and the commit subjects the call
+ * carries. No commit hashes and no `asOf` itself (D22).
  */
 export function passageKeyHash(linkingPage: string, passage: string, changedHash: string, ctx: PassageKeyContext): string {
   const others = JSON.stringify(ctx.otherPlans.map((o) => [normalizeRelPath(o.relPath), o.planStatus, o.statusNote ?? ""]));
-  return sha(["passage/v2", normalizeRelPath(linkingPage), passage, changedHash, ...targetParts(ctx.target), others, ctx.asOfMs === undefined ? "" : String(ctx.asOfMs)]);
+  const target = targetParts({ ...ctx.target, title: ctx.keyTitle });
+  return sha(["passage/v3", normalizeRelPath(linkingPage), passage, changedHash, ...target, others, commitsPart(ctx.commits)]);
 }
 
 /** A status-line hit's key, its target facts read from the index. */
 export function statusLineVerdictKey(index: Pick<WikiIndex, "resolveRelPath">, page: string, hit: StatusLineHit): string {
-  return statusLineKeyHash(page, hit, targetFacts(index.resolveRelPath(hit.target), hit.target));
+  const meta = index.resolveRelPath(hit.target);
+  return statusLineKeyHash(page, hit, { ...targetFacts(meta, hit.target), title: ownTitle(meta, hit.target) });
 }
 
-/** The key context of a passage on a page linking to `changedRelPath`. */
-export function passageKeyContext(index: Pick<WikiIndex, "resolve" | "resolveRelPath">, changedRelPath: string, passage: string, asOfMs?: number): PassageKeyContext {
+/** The key context of a To-check linking page's passage on `changedRelPath`:
+ *  the same facts and commit subjects its call carries. `subjects` shares
+ *  one `git log` across a request's linking pages. */
+export async function passageKeyContext(
+  index: Pick<WikiIndex, "root" | "resolve" | "resolveRelPath">,
+  changedRelPath: string,
+  l: Pick<LinkingPage, "passages" | "lastChangeMs">,
+  asOfMs?: number,
+  subjects?: SubjectsMemo,
+): Promise<PassageKeyContext & { passage: string }> {
+  const passage = linkingPassage(l);
+  const meta = index.resolveRelPath(changedRelPath);
   return {
-    target: targetFacts(index.resolveRelPath(changedRelPath), changedRelPath),
+    passage,
+    target: targetFacts(meta, changedRelPath),
+    keyTitle: ownTitle(meta, changedRelPath),
     otherPlans: otherPlansIn(index, passage, changedRelPath),
-    ...(asOfMs !== undefined ? { asOfMs } : {}),
+    commits: await commitsFor(index, meta, l.lastChangeMs, asOfMs, subjects),
   };
 }
 
 /** A To-check linking page's passage verdict key. */
-export function passageVerdictKey(
-  index: Pick<WikiIndex, "resolve" | "resolveRelPath">,
+export async function passageVerdictKey(
+  index: Pick<WikiIndex, "root" | "resolve" | "resolveRelPath">,
   changedRelPath: string,
   changedHash: string,
-  l: Pick<LinkingPage, "relPath" | "passages">,
+  l: Pick<LinkingPage, "relPath" | "passages" | "lastChangeMs">,
   asOfMs?: number,
-): string {
-  const passage = linkingPassage(l);
-  return passageKeyHash(l.relPath, passage, changedHash, passageKeyContext(index, changedRelPath, passage, asOfMs));
+  subjects?: SubjectsMemo,
+): Promise<string> {
+  const ctx = await passageKeyContext(index, changedRelPath, l, asOfMs, subjects);
+  return passageKeyHash(l.relPath, ctx.passage, changedHash, ctx);
 }
 
 /** The passage lines a To-check linking page is judged on: those that make
@@ -464,25 +492,46 @@ const COMMIT_SCAN_MAX = 200;
 /** Subjects of `relPath`'s commits authored after `sinceMs` and at or before
  *  `untilMs`, newest first, at most {@link COMMIT_SUBJECTS_MAX}; null when git
  *  is unavailable or the call fails (the prompt then carries no section). */
-export async function commitSubjectsSince(root: string, relPath: string, sinceMs: number | undefined, untilMs?: number): Promise<string[] | null> {
+export async function commitSubjectsSince(root: string, relPath: string, sinceMs: number | undefined, untilMs?: number, memo?: SubjectsMemo): Promise<string[] | null> {
+  const memoKey = `${root}\0${relPath}`;
+  let log = memo?.get(memoKey);
+  if (!log) {
+    log = readCommitLog(root, relPath);
+    memo?.set(memoKey, log);
+  }
+  const all = await log;
+  if (all === null) return null;
+  const out: string[] = [];
+  for (const c of all) {
+    if ((sinceMs !== undefined && c.ms <= sinceMs) || (untilMs !== undefined && c.ms > untilMs)) continue;
+    out.push(c.subject);
+    if (out.length >= COMMIT_SUBJECTS_MAX) break;
+  }
+  return out;
+}
+
+/** One request's `git log` reads, by root and page: the GET and Check key
+ *  every linking page on the changed page's log, read once. */
+export type SubjectsMemo = Map<string, Promise<{ ms: number; subject: string }[] | null>>;
+
+async function readCommitLog(root: string, relPath: string): Promise<{ ms: number; subject: string }[] | null> {
   const args = ["git", "-C", root, "log", `--max-count=${COMMIT_SCAN_MAX}`, "--format=%at %s", "--", relPath];
   try {
     const r = await runProc(args, COMMIT_SUBJECTS_TIMEOUT_MS, "stale-commit-subjects", { quietTimeout: true });
     if (r.exitCode !== 0) return null;
-    const out: string[] = [];
+    const out: { ms: number; subject: string }[] = [];
     for (const line of r.stdout.split("\n")) {
       const m = /^(\d+) (.*)$/.exec(line.trim());
-      if (!m) continue;
-      const ms = Number(m[1]) * 1000;
-      if ((sinceMs !== undefined && ms <= sinceMs) || (untilMs !== undefined && ms > untilMs)) continue;
-      out.push(m[2]!.trim());
-      if (out.length >= COMMIT_SUBJECTS_MAX) break;
+      if (m) out.push({ ms: Number(m[1]) * 1000, subject: m[2]!.trim() });
     }
     return out;
   } catch {
     return null;
   }
 }
+
+/** A page's own title for a key: its frontmatter/H1 title, never `displayTitle`. */
+const ownTitle = (meta: WikiPageMeta | undefined, relPath: string) => meta?.title ?? relPath;
 
 const targetFacts = (meta: WikiPageMeta | undefined, relPath: string): StaleCallInput["target"] => ({
   relPath: meta?.relPath ?? relPath,
@@ -496,10 +545,10 @@ const targetFacts = (meta: WikiPageMeta | undefined, relPath: string): StaleCall
  *  edits (D29: they are its last change, and no subject describes them; A14),
  *  else the subjects between `sinceMs` and `untilMs` (the check's `asOf`,
  *  which the working tree postdates). */
-export async function commitsFor(index: Pick<WikiIndex, "root">, target: WikiPageMeta | undefined, sinceMs: number | undefined, untilMs?: number) {
+export async function commitsFor(index: Pick<WikiIndex, "root">, target: WikiPageMeta | undefined, sinceMs: number | undefined, untilMs?: number, memo?: SubjectsMemo) {
   if (!target) return undefined;
   if (untilMs === undefined && target.gitDirty === true) return null;
-  return (await commitSubjectsSince(index.root, target.relPath, sinceMs, untilMs)) ?? undefined;
+  return (await commitSubjectsSince(index.root, target.relPath, sinceMs, untilMs, memo)) ?? undefined;
 }
 
 /** The plans a passage links to other than `exclude`, with their status, at most 5. */
@@ -557,6 +606,36 @@ export const CONFIRM_CALL_MAX_MS = 60_000;
 export const CONFIRM_MAX_CALLS = 20;
 /** The next run starts this long after the previous one ended. */
 export const CONFIRM_INTERVAL_MS = 5 * 60_000;
+/** One wiki's index rebuild races at most this long, so a hung rebuild costs
+ *  the run this much and the next wiki still rebuilds. */
+export const CONFIRM_REBUILD_MAX_MS = 60_000;
+/** A key that failed this many times in a row waits before its next call. */
+export const CONFIRM_BACKOFF_AFTER = 2;
+/** The longest a failing key waits between calls. */
+export const CONFIRM_BACKOFF_CAP_MS = 6 * 60 * 60_000;
+
+/** How long a key waits after its `count`-th failure in a row: none after the
+ *  first (a blip is retried next run), then 10, 20, 40 … minutes, at most 6 h. */
+export function confirmBackoffMs(count: number): number {
+  if (count < CONFIRM_BACKOFF_AFTER) return 0;
+  return Math.min(CONFIRM_INTERVAL_MS * 2 ** (count - 1), CONFIRM_BACKOFF_CAP_MS);
+}
+
+/** A key's failures in a row and when the last one came. */
+export interface FailureMark {
+  count: number;
+  at: number;
+}
+
+/** Record one more failure of `key` at `now`; returns the count in a row. */
+function markFailure(failures: Map<string, FailureMark>, key: string, now: number): number {
+  const count = (failures.get(key)?.count ?? 0) + 1;
+  failures.set(key, { count, at: now });
+  return count;
+}
+
+/** Is `key` inside its backoff at `now`? */
+const inBackoff = (m: FailureMark | undefined, now: number) => m !== undefined && now - m.at < confirmBackoffMs(m.count);
 /** The first run comes this long after boot. */
 export const CONFIRM_FIRST_DELAY_MS = 60_000;
 
@@ -565,6 +644,7 @@ export interface ConfirmLimits {
   startCutoffMs: number;
   callMaxMs: number;
   maxCalls: number;
+  rebuildMaxMs: number;
 }
 
 const CONFIRM_LIMITS: ConfirmLimits = {
@@ -572,12 +652,17 @@ const CONFIRM_LIMITS: ConfirmLimits = {
   startCutoffMs: CONFIRM_START_CUTOFF_MS,
   callMaxMs: CONFIRM_CALL_MAX_MS,
   maxCalls: CONFIRM_MAX_CALLS,
+  rebuildMaxMs: CONFIRM_REBUILD_MAX_MS,
 };
 
-/** When each key's call last failed, kept for a day: a run calls never-failed
- *  hits first, then failed ones oldest failure first (A6). */
-const confirmFailures = new Map<string, number>();
+/** Each key's failures in a row, dropped a day after the last: a run skips a
+ *  key inside its backoff ({@link confirmBackoffMs}), calls never-failed hits
+ *  first, then failed ones oldest failure first (A6). */
+const confirmFailures = new Map<string, FailureMark>();
 const FAILURE_MEMORY_MS = 24 * 60 * 60_000;
+/** When each wiki's index rebuild last failed (timed out or threw), by
+ *  lowercased name: a run rebuilds those wikis last, oldest failure first. */
+const rebuildFailures = new Map<string, number>();
 
 export interface ConfirmDeps {
   registry: () => WikiRegistryEntry[];
@@ -590,8 +675,10 @@ export interface ConfirmDeps {
   span: (attrs: Record<string, unknown>, tracer: Tracer | null) => void;
   /** The run's tracer, for the calls' `haiku_usage` join. Null in tests. */
   tracer: () => Tracer | null;
-  /** Key → when its call last failed. Defaults to the process's own map. */
-  failures?: Map<string, number>;
+  /** Key → its failures in a row. Defaults to the process's own map. */
+  failures?: Map<string, FailureMark>;
+  /** Wiki → when its rebuild last failed. Defaults to the process's own map. */
+  rebuildFailures?: Map<string, number>;
   /** Overrides of the run's limits; tests shrink them. */
   limits?: Partial<ConfirmLimits>;
 }
@@ -608,7 +695,8 @@ const realConfirmDeps: ConfirmDeps = {
 };
 
 export interface ConfirmRunSummary {
-  wikis: { wiki: string; skipped?: string; hits: number; cached: number; calls: number; stale: number; errors: number; left: number }[];
+  /** `backoff`: hits not called because their key is inside its backoff. */
+  wikis: { wiki: string; skipped?: string; hits: number; cached: number; calls: number; stale: number; errors: number; left: number; backoff: number }[];
   calls: number;
   errors: number;
   left: number;
@@ -641,13 +729,16 @@ async function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 }
 
 /**
- * One confirm run over the named wikis: rebuild each index once, then confirm
- * the status-line hits with no verdict yet across all of them, never-failed
- * hits first, at most {@link CONFIRM_MAX_CALLS} calls, none started after
+ * One confirm run over the named wikis: rebuild each index once (each within
+ * {@link CONFIRM_REBUILD_MAX_MS}; wikis whose rebuild failed last), then
+ * confirm the status-line hits with no verdict yet across all of them, keys
+ * inside their backoff left out, never-failed hits first, at most
+ * {@link CONFIRM_MAX_CALLS} calls, none started after
  * {@link CONFIRM_START_CUTOFF_MS}, each call's deadline at most
  * {@link CONFIRM_CALL_MAX_MS} out. The rebuilds, the store and the calls all
  * race the run's {@link CONFIRM_RUN_BUDGET_MS}, so the run returns within it.
- * A failed call writes nothing, so a later run retries it. Never rejects.
+ * A failed call writes nothing, so a later run retries it once its backoff
+ * ({@link confirmBackoffMs}) is over. Never rejects.
  * Once `signal` aborts (the loop's stop, A8) no rebuild, call or write starts,
  * and every await the run is in rejects except a verdict write already sent:
  * the run waits for that one (within its bound) and counts it. A run that
@@ -656,6 +747,7 @@ async function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 export async function runStaleConfirm(wikiNames: readonly string[], deps: ConfirmDeps = realConfirmDeps, signal?: AbortSignal): Promise<ConfirmRunSummary> {
   const lim = { ...CONFIRM_LIMITS, ...deps.limits };
   const failures = deps.failures ?? confirmFailures;
+  const rebuildFailed = deps.rebuildFailures ?? rebuildFailures;
   const started = deps.now();
   const deadlineAt = started + lim.budgetMs;
   // Real time, whatever `deps.now` says: this is the bound the run returns within.
@@ -676,22 +768,34 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   let tracer: Tracer | null = null;
   const tracerOnce = () => (tracer ??= deps.tracer());
   const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
-  for (const [k, at] of failures) if (started - at > FAILURE_MEMORY_MS) failures.delete(k);
+  for (const [k, m] of failures) if (started - m.at > FAILURE_MEMORY_MS) failures.delete(k);
 
   type Row = ConfirmRunSummary["wikis"][number];
   const todo: { row: Row; entry: WikiRegistryEntry; index: WikiIndex; bot: BotConfig; page: WikiPageMeta; hit: StatusLineHit; key: string }[] = [];
   const wanted = new Set(wikiNames.map((n) => n.toLowerCase()));
-  for (const entry of deps.registry()) {
+  // Wikis whose rebuild last failed go last, oldest failure first (stable sort),
+  // so a wiki that keeps hanging costs each run one bounded rebuild, after the rest.
+  const entries = deps
+    .registry()
+    .filter((e) => wanted.has(e.name.toLowerCase()))
+    .sort((a, b) => (rebuildFailed.get(a.name.toLowerCase()) ?? 0) - (rebuildFailed.get(b.name.toLowerCase()) ?? 0));
+  for (const entry of entries) {
     if (signal?.aborted) break;
-    if (!wanted.has(entry.name.toLowerCase())) continue;
-    const row: Row = { wiki: entry.name, hits: 0, cached: 0, calls: 0, stale: 0, errors: 0, left: 0 };
+    const row: Row = { wiki: entry.name, hits: 0, cached: 0, calls: 0, stale: 0, errors: 0, left: 0, backoff: 0 };
     out.wikis.push(row);
+    let rebuilding = false;
     try {
       if (isReadonlyWikiRoot(entry.root)) {
         row.skipped = "readonly root";
         continue;
       }
-      const index = await bounded(deps.index(entry.root), `index rebuild of ${entry.name}`);
+      rebuilding = true;
+      const index = await bounded(
+        within(deps.index(entry.root), Math.min(lim.rebuildMaxMs, endsAt - Date.now()), `index rebuild of ${entry.name} passed its ${lim.rebuildMaxMs} ms bound`),
+        `index rebuild of ${entry.name}`,
+      );
+      rebuilding = false;
+      rebuildFailed.delete(entry.name.toLowerCase());
       if (!index) {
         row.skipped = "no index";
         continue;
@@ -715,17 +819,19 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       const cached = await bounded(deps.store().get(entry.name, "status-line", mine.map((t) => t.key)), `verdict read for ${entry.name}`);
       for (const t of mine) {
         if (cached.has(t.key)) row.cached++;
+        else if (inBackoff(failures.get(t.key), started)) row.backoff++;
         else todo.push(t);
       }
     } catch (err) {
       if (err instanceof ConfirmStopped) break;
+      if (rebuilding) rebuildFailed.set(entry.name.toLowerCase(), started);
       row.errors++;
       log.warn("Stale confirm: wiki {wiki} failed: {error}", { wiki: entry.name, error: errText(err) });
     }
   }
 
   // Never-failed hits keep their order; failed ones follow, oldest failure first (stable sort).
-  todo.sort((a, b) => (failures.get(a.key) ?? 0) - (failures.get(b.key) ?? 0));
+  todo.sort((a, b) => (failures.get(a.key)?.at ?? 0) - (failures.get(b.key)?.at ?? 0));
   for (const t of todo) {
     const { row } = t;
     if (signal?.aborted || out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || Date.now() >= endsAt) {
@@ -782,11 +888,13 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         continue;
       }
       row.errors++;
-      failures.set(t.key, deps.now());
-      log.warn("Stale confirm: call for {page}:{line} failed: {error}", {
+      const count = markFailure(failures, t.key, deps.now());
+      log.warn("Stale confirm: call for {page}:{line} failed ({count} in a row, next try in {waitMs} ms or later): {error}", {
         wiki: t.entry.name,
         page: t.page.relPath,
         line: t.hit.line,
+        count,
+        waitMs: confirmBackoffMs(count),
         error: errText(err),
       });
     }
@@ -952,6 +1060,9 @@ export const CHECK_CALL_FAILED = "The check call failed or timed out.";
 export const CHECK_ANSWER_UNREADABLE = "The model's answer could not be read.";
 export const CHECK_FAILED = "The check failed. The server log has the details.";
 export const CHECK_TIMED_OUT = "The check ran out of time. Check again for the pages it did not reach.";
+/** The note an error event gains when its key failed before: Check calls on
+ *  every click, so a reader sees that this answer keeps failing. */
+export const checkRepeatNote = (count: number) => ` It failed ${count} times in a row.`;
 
 export type StaleCheckEvent =
   | { type: "start"; changed: string; toCheck: number; cached: number; toCall: number; left: number }
@@ -963,6 +1074,12 @@ export type StaleCheckEvent =
 /** Check's calls in flight, by wiki, kind and key (A9): a second Check on the
  *  same page waits for the first call's row instead of buying it again. */
 const checkFlights = new Map<string, Promise<StaleVerdictRow>>();
+/** Check's failures in a row, by flight key; a success clears its key. Dropped
+ *  a day after the last failure, as the loop's are. */
+const checkFailures = new Map<string, FailureMark>();
+export function __resetStaleCheckFailuresForTest(): void {
+  checkFailures.clear();
+}
 const checkFlightKey = (wiki: string, kind: StaleVerdictKind, key: string) => `${wiki}\0${kind}\0${key}`;
 
 const readText = async (abs: string): Promise<string | null> => {
@@ -1007,23 +1124,28 @@ export async function runStaleCheck(opts: {
   isGone?: () => boolean;
   /** Every call's deadline: the route takes it at the request's arrival (A11). */
   deadlineAt?: number;
+  /** Flight key → failures in a row. Defaults to the process's own map. */
+  failures?: Map<string, FailureMark>;
 }): Promise<boolean> {
   const deadlineAt = opts.deadlineAt ?? Date.now() + CHECK_BUDGET_MS;
   const { wiki, index, bot, onEvent } = opts;
   const store = opts.store ?? staleVerdictStore();
   const model = opts.model ?? staleModel();
+  const failures = opts.failures ?? checkFailures;
+  for (const [k, m] of failures) if (Date.now() - m.at > FAILURE_MEMORY_MS) failures.delete(k);
   const buckets = await linkingBuckets(index, opts.relPath, opts.asOfMs !== undefined ? { asOfMs: opts.asOfMs } : {});
   if (!buckets) return false;
-  const changedMeta = index.resolveRelPath(buckets.relPath);
   const changedHash = await changedHashOf(index, buckets.relPath);
   if (changedHash === null) throw new StaleChangedUnreadableError(buckets.relPath);
-  const items = buckets.linking
-    .filter((l) => l.bucket === "toCheck")
-    .map((l) => {
-      const passage = linkingPassage(l);
-      const ctx = passageKeyContext(index, buckets.relPath, passage, opts.asOfMs);
-      return { l, passage, ctx, key: passageKeyHash(l.relPath, passage, changedHash, ctx) };
-    });
+  const subjects: SubjectsMemo = new Map();
+  const items = await Promise.all(
+    buckets.linking
+      .filter((l) => l.bucket === "toCheck")
+      .map(async (l) => {
+        const ctx = await passageKeyContext(index, buckets.relPath, l, opts.asOfMs, subjects);
+        return { l, passage: ctx.passage, ctx, key: passageKeyHash(l.relPath, ctx.passage, changedHash, ctx) };
+      }),
+  );
   const cached = await store.get(wiki, "passage", items.map((i) => i.key));
   const fresh = items.filter((i) => !cached.has(i.key));
   const toCall = fresh.slice(0, CHECK_MAX_CALLS);
@@ -1045,7 +1167,8 @@ export async function runStaleCheck(opts: {
       page: i.l.relPath,
       passage: i.passage,
       target: i.ctx.target,
-      commits: await commitsFor(index, changedMeta, i.l.lastChangeMs, opts.asOfMs),
+      // The subjects the key was built on, so key and prompt cannot drift.
+      commits: i.ctx.commits,
       otherPlans: i.ctx.otherPlans,
       sourceLines: await sourceLinesOf(index.root, i.l.relPath, linkingPassageRows(i.l).map((p) => p.line)),
     };
@@ -1064,7 +1187,13 @@ export async function runStaleCheck(opts: {
       if (flight) joined++;
       else {
         calls++;
-        const p = call(i);
+        const p = call(i).then(
+          (row) => (failures.delete(fk), row),
+          (err: unknown) => {
+            markFailure(failures, fk, Date.now());
+            throw err;
+          },
+        );
         flight = p;
         checkFlights.set(fk, p);
         void p.then(
@@ -1079,7 +1208,9 @@ export async function runStaleCheck(opts: {
       } catch (err) {
         errors++;
         log.warn("Stale check call failed for {page} (linking {linking}): {error}", { wiki, page: buckets.relPath, linking: i.l.relPath, error: err instanceof Error ? err.message : String(err) });
-        await onEvent({ type: "error", relPath: i.l.relPath, message: err instanceof StaleAnswerUnreadableError ? CHECK_ANSWER_UNREADABLE : CHECK_CALL_FAILED });
+        const count = failures.get(fk)?.count ?? 1;
+        const base = err instanceof StaleAnswerUnreadableError ? CHECK_ANSWER_UNREADABLE : CHECK_CALL_FAILED;
+        await onEvent({ type: "error", relPath: i.l.relPath, message: count >= 2 ? base + checkRepeatNote(count) : base });
       }
     }
   };
@@ -1135,7 +1266,8 @@ export async function passageVerdicts(
   if (toCheck.length === 0) return new Map();
   const changedHash = await changedHashOf(index, changedRelPath);
   if (changedHash === null) return new Map();
-  const keys = new Map(toCheck.map((l) => [l.relPath, passageVerdictKey(index, changedRelPath, changedHash, l, opts.asOfMs)]));
+  const subjects: SubjectsMemo = new Map();
+  const keys = new Map(await Promise.all(toCheck.map(async (l) => [l.relPath, await passageVerdictKey(index, changedRelPath, changedHash, l, opts.asOfMs, subjects)] as const)));
   const rows = await store.get(wiki, "passage", [...keys.values()]);
   const out = new Map<string, VerdictView>();
   for (const [rel, k] of keys) {

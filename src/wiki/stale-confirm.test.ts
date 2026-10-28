@@ -77,7 +77,7 @@ describe("verdict keys", () => {
     expect(statusLineKeyHash("hub.md", hit, { ...target, description: "another plan" })).not.toBe(k);
     expect(statusLineKeyHash("hub.md", hit, { ...target, title: "Q" })).not.toBe(k);
   });
-  const ctx = { target: { relPath: "x.md", title: "X", description: "d" }, otherPlans: [{ relPath: "plans/q.md", planStatus: "in-flight" }], asOfMs: undefined as number | undefined };
+  const ctx = { target: { relPath: "x.md", title: "X", description: "d" }, keyTitle: "X", otherPlans: [{ relPath: "plans/q.md", planStatus: "in-flight" }], commits: ["one"] as readonly string[] | null | undefined };
   test("a passage key reads the linking page, the passage and the changed page's hash", () => {
     const k = passageKeyHash("a.md", "text", "h1", ctx);
     expect(passageKeyHash("a.md", "text", "h2", ctx)).not.toBe(k);
@@ -85,14 +85,19 @@ describe("verdict keys", () => {
     expect(passageKeyHash("b.md", "text", "h1", ctx)).not.toBe(k);
   });
   // A2: every prompt input that can change the verdict is in the key.
-  test("A2: a passage key reads the other plans' statuses and asOf", () => {
+  test("A2: a passage key reads the other plans' statuses and the commit subjects", () => {
     const k = passageKeyHash("a.md", "text", "h1", ctx);
     expect(passageKeyHash("a.md", "text", "h1", { ...ctx })).toBe(k);
     expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [{ relPath: "plans/q.md", planStatus: "shipped" }] })).not.toBe(k);
     expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [{ relPath: "plans/q.md", planStatus: "in-flight", statusNote: "T4 left" }] })).not.toBe(k);
     expect(passageKeyHash("a.md", "text", "h1", { ...ctx, otherPlans: [] })).not.toBe(k);
-    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, asOfMs: Date.UTC(2026, 9, 25) })).not.toBe(k);
-    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, asOfMs: Date.UTC(2026, 9, 25) })).not.toBe(passageKeyHash("a.md", "text", "h1", { ...ctx, asOfMs: Date.UTC(2026, 9, 26) }));
+    // The subjects stand in for asOf: none read, uncommitted, empty and each list are distinct keys.
+    const byCommits = [undefined, null, [], ["one"], ["two", "one"]].map((commits) => passageKeyHash("a.md", "text", "h1", { ...ctx, commits }));
+    expect(new Set(byCommits).size).toBe(5);
+    expect(byCommits[3]).toBe(k);
+    // The key reads keyTitle (the page's own title), not the prompt's display title.
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, target: { ...ctx.target, title: "Notes / X" } })).toBe(k);
+    expect(passageKeyHash("a.md", "text", "h1", { ...ctx, keyTitle: "Y" })).not.toBe(k);
     expect(passageKeyHash("a.md", "text", "h1", { ...ctx, target: { ...ctx.target, description: "e" } })).not.toBe(k);
   });
 });
@@ -362,6 +367,9 @@ describe("runStaleConfirm (D16)", () => {
       now: Date.now,
       span: (attrs) => spans.push(attrs),
       tracer: () => null,
+      // Each test its own failure memory: a failing test must not back off the next one's keys.
+      failures: new Map(),
+      rebuildFailures: new Map(),
       ...over,
     };
     return { deps, store, prompts, spans };

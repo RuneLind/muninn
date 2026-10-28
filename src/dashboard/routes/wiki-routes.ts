@@ -2571,7 +2571,7 @@ export function registerWikiToolRoutes(
         wiki: entry.name,
         kind: "passage",
         page: l.relPath,
-        keyHash: passageVerdictKey(index, meta.relPath, changedHash, l, asOfMs),
+        keyHash: await passageVerdictKey(index, meta.relPath, changedHash, l, asOfMs),
         verdict,
         reason: verdict === "true" ? "Marked still true by a reader" : "Marked not a status by a reader",
         edit: null,

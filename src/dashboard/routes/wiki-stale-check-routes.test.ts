@@ -17,6 +17,7 @@ import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import {
   __setStaleModelForTest,
+  __resetStaleCheckFailuresForTest,
   __setStaleVerdictStoreForTest,
   CHECK_BUDGET_MS,
   CHECK_MAX_CALLS,
@@ -120,6 +121,8 @@ describe("the Stale check's verdict routes", () => {
   const fresh = () => {
     store = memoryStaleVerdictStore();
     __setStaleVerdictStoreForTest(store);
+    // Check's failure memory is process-wide: a test's failures must not note the next test's errors as repeats.
+    __resetStaleCheckFailuresForTest();
     prompts.length = 0;
   };
   const get = async (query: string) => (await (await app.request(`/api/wiki/stale?${query}`)).json()) as Record<string, any>;
@@ -152,22 +155,25 @@ describe("the Stale check's verdict routes", () => {
 
   // A2: asOf cuts the commit subjects the call reads, so a verdict judged
   // under one asOf is not reused under another.
-  test("A2: a Check under another asOf calls again, and the GET reads the verdicts of its own asOf", async () => {
+  // Fix round 2 batch 2: the key reads the commit subjects the call carries, not
+  // asOf itself; 06-20 and 06-25 both see «hub: the pin moves to 18.06» only.
+  test("A2: a Check under another asOf with the same subjects reuses the verdicts, and the GET reads them under either", async () => {
     fresh();
     await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" })).text();
     expect(prompts).toHaveLength(CHECK_MAX_CALLS);
     const later = sseEvents(await (await post("check", { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-25" })).text());
-    expect(later[0]![1]).toMatchObject({ cached: 0, toCall: CHECK_MAX_CALLS });
-    expect(prompts).toHaveLength(2 * CHECK_MAX_CALLS);
+    expect(later[0]![1]).toMatchObject({ cached: CHECK_MAX_CALLS });
+    expect(prompts).toHaveLength(CHECK_MAX_CALLS + later[0]![1].toCall);
     const at20 = await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20");
     const at25 = await get("wiki=checkwiki&page=hub.md&asOf=2026-06-25");
     const n = (b: Record<string, any>) => b.buckets.linking.filter((l: any) => l.verdict).length;
-    expect([n(at20), n(at25)]).toEqual([CHECK_MAX_CALLS, CHECK_MAX_CALLS]);
-    // The reader's verdict is keyed under the request's asOf too.
+    expect(n(at20)).toBe(n(at25));
+    expect(n(at20)).toBeGreaterThanOrEqual(CHECK_MAX_CALLS);
+    // A reader's verdict under one asOf is seen under the other.
     fresh();
     expect((await post("verdict", { wiki: "checkwiki", page: "hub.md", kind: "passage", linking: "notes/n3.md", verdict: "true", asOf: "2026-06-25" })).status).toBe(200);
     expect(n(await get("wiki=checkwiki&page=hub.md&asOf=2026-06-25"))).toBe(1);
-    expect(n(await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20"))).toBe(0);
+    expect(n(await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20"))).toBe(1);
   });
 
   // A4: an answer that cannot be read is a failed call on the stream, never a cached unsure.
