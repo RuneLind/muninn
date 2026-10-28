@@ -696,6 +696,8 @@ export interface ConfirmRunSummary {
 }
 
 class ConfirmTimeout extends Error {}
+/** A step the run did not start: its budget was already spent. */
+class ConfirmBudgetSpent extends ConfirmTimeout {}
 /** The loop was stopped (A8): the run starts nothing more and writes nothing more. */
 class ConfirmStopped extends Error {}
 
@@ -755,11 +757,16 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   // Set when the run's own timer fires: a timer can fire while Date.now() still
   // reads short of `endsAt` (the CI runner's A6 red, PR #759), and no call starts after it.
   let budgetSpent = false;
-  const inBudget = <T>(p: Promise<T>, what: string) =>
-    within(p, endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`, () => (budgetSpent = true));
-  const bounded = <T>(p: Promise<T>, what: string) => {
+  const spent = () => budgetSpent || Date.now() >= endsAt;
+  // Every budgeted step (rebuild, store read, call input, call, write) starts
+  // through these, and only while the budget is unspent.
+  const inBudget = <T>(start: () => Promise<T>, what: string) => {
+    if (spent()) return Promise.reject(new ConfirmBudgetSpent(`${what}: not started, the run's ${lim.budgetMs} ms bound is spent`));
+    return within(start(), endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`, () => (budgetSpent = true));
+  };
+  const bounded = <T>(start: () => Promise<T>, what: string) => {
     if (signal?.aborted) return Promise.reject(new ConfirmStopped());
-    return Promise.race([inBudget(p, what), stoppedRace]);
+    return Promise.race([inBudget(start, what), stoppedRace]);
   };
   const out: ConfirmRunSummary = { wikis: [], calls: 0, errors: 0, left: 0, elapsedMs: 0 };
   /** Calls sent whose answer stop dropped: not counted as calls, but on the trace. */
@@ -790,7 +797,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       }
       rebuilding = true;
       const index = await bounded(
-        within(deps.index(entry.root), Math.min(lim.rebuildMaxMs, endsAt - Date.now()), `index rebuild of ${entry.name} passed its ${lim.rebuildMaxMs} ms bound`),
+        () => within(deps.index(entry.root), Math.min(lim.rebuildMaxMs, endsAt - Date.now()), `index rebuild of ${entry.name} passed its ${lim.rebuildMaxMs} ms bound`),
         `index rebuild of ${entry.name}`,
       );
       rebuilding = false;
@@ -815,7 +822,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         for (const hit of hits) mine.push({ row, entry, index, bot, page, hit, key: statusLineVerdictKey(index, page.relPath, hit) });
       }
       row.hits = mine.length;
-      const cached = await bounded(deps.store().get(entry.name, "status-line", mine.map((t) => t.key)), `verdict read for ${entry.name}`);
+      const cached = await bounded(() => deps.store().get(entry.name, "status-line", mine.map((t) => t.key)), `verdict read for ${entry.name}`);
       for (const t of mine) {
         if (cached.has(t.key)) row.cached++;
         else if (inBackoff(failures.get(t.key), started)) row.backoff++;
@@ -823,6 +830,11 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       }
     } catch (err) {
       if (err instanceof ConfirmStopped) break;
+      // Not started: the run's budget was spent before this wiki's turn.
+      if (err instanceof ConfirmBudgetSpent) {
+        row.skipped = "run budget spent";
+        continue;
+      }
       if (rebuilding) rebuildFailed.set(entry.name.toLowerCase(), started);
       row.errors++;
       log.warn("Stale confirm: wiki {wiki} failed: {error}", { wiki: entry.name, error: errText(err) });
@@ -833,7 +845,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   todo.sort((a, b) => (failures.get(a.key)?.at ?? 0) - (failures.get(b.key)?.at ?? 0));
   for (const t of todo) {
     const { row } = t;
-    if (signal?.aborted || out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || budgetSpent || Date.now() >= endsAt) {
+    if (signal?.aborted || out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || spent()) {
       row.left++;
       continue;
     }
@@ -841,11 +853,13 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
     row.calls++;
     let sent = false;
     try {
-      const input = await bounded(statusLineCallInput(t.index, t.page, t.hit), "call input");
+      const input = await bounded(() => statusLineCallInput(t.index, t.page, t.hit), "call input");
       const callDeadline = Math.min(deadlineAt, deps.now() + lim.callMaxMs);
-      sent = true;
-      const raw = await bounded(
-        within(
+      // The input took its time: a call whose deadline has already passed is not started.
+      if (callDeadline <= deps.now()) throw new ConfirmBudgetSpent("model call: not started, its deadline has passed");
+      const raw = await bounded(() => {
+        sent = true;
+        return within(
           deps.model()(buildStalePrompt(input), {
             bot: t.bot,
             deadlineAt: callDeadline,
@@ -854,16 +868,15 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
           }),
           callDeadline - deps.now(),
           `the call passed its ${lim.callMaxMs} ms bound`,
-        ),
-        "model call",
-      );
+        );
+      }, "model call");
       const answer = parseStaleAnswer(raw, input.passage, input.sourceLines, answerSource(input));
       // An answer that resolved as the loop stopped is dropped, not written.
       if (signal?.aborted) throw new ConfirmStopped();
       // A write once sent is waited for through a stop, so it is counted as it
       // lands; only the run's bound abandons it, and shutdown still waits (A8).
       const stored = await inBudget(
-        (signal ? trackWrite : <T>(p: Promise<T>) => p)(deps.store().upsert({
+        () => (signal ? trackWrite : <T>(p: Promise<T>) => p)(deps.store().upsert({
           wiki: t.entry.name,
           kind: "status-line",
           page: t.page.relPath,
@@ -879,7 +892,8 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       if (stored.verdict === "stale") row.stale++;
     } catch (err) {
       // Stopped mid-call: the answer is dropped and the hit waits for the next run, not counted as failed.
-      if (err instanceof ConfirmStopped) {
+      // Not sent because the budget is spent: the hit waits for the next run, not counted as failed.
+      if (err instanceof ConfirmStopped || (err instanceof ConfirmBudgetSpent && !sent)) {
         out.calls--;
         row.calls--;
         row.left++;
@@ -1138,12 +1152,16 @@ export async function runStaleCheck(opts: {
   if (changedHash === null) throw new StaleChangedUnreadableError(buckets.relPath);
   const subjects: SubjectsMemo = new Map();
   const changedMeta = index.resolveRelPath(buckets.relPath);
-  const items = buckets.linking
+  const keyed = buckets.linking
     .filter((l) => l.bucket === "toCheck")
     .map((l) => {
       const ctx = passageKeyContext(index, buckets.relPath, l);
       return { l, passage: ctx.passage, ctx, key: passageKeyHash(l.relPath, ctx.passage, changedHash, ctx) };
     });
+  // A page whose current passage carries a `fixed` row (D29) is Changed since
+  // on the GET, so Check neither counts nor calls it.
+  const fixed = keyed.length ? await store.get(wiki, "fixed", keyed.map((i) => i.key)) : new Map<string, StaleVerdictRow>();
+  const items = keyed.filter((i) => !fixed.has(i.key));
   const cached = await store.get(wiki, "passage", items.map((i) => i.key));
   const fresh = items.filter((i) => !cached.has(i.key));
   const toCall = fresh.slice(0, CHECK_MAX_CALLS);

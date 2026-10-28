@@ -164,19 +164,21 @@ const relKey = (p: string) => path.posix.normalize(p.trim().replace(/^\/+/, ""))
 const EXT = /\.mdx?$/i;
 /**
  * Is `linking` one of the run's own pages? `resolved` holds the relPaths the
- * route answered for them; `refs` the names as given, matched as the route
- * resolves a ref: the path itself, a path without an extension as its
- * `.md`/`.mdx` page, a bare stem as any page with that file stem.
+ * route answered for them, matched by full path. `unresolved` holds the names
+ * the route gave no answer for, matched as the route would resolve them: the
+ * path itself, a path without an extension as its `.md`/`.mdx` page, and a
+ * bare stem as any page with that file stem. A bare stem the route resolved
+ * goes in `resolved` only, so a same-stem page in another folder is not own.
  */
-export function isOwnPage(linking: string, resolved: ReadonlySet<string>, refs: readonly string[]): boolean {
+export function isOwnPage(linking: string, resolved: ReadonlySet<string>, unresolved: readonly string[]): boolean {
   const l = relKey(linking);
-  if ([...resolved].some((r) => relKey(r) === l)) return true;
   const lNoExt = l.replace(EXT, "");
-  return refs.some((ref) => {
+  const samePath = (r: string) => r === l || (!EXT.test(r) && r === lNoExt);
+  if ([...resolved].some((r) => samePath(relKey(r)))) return true;
+  return unresolved.some((ref) => {
     const r = relKey(ref);
     if (!r || r === ".") return false;
-    if (r === l) return true;
-    if (!EXT.test(r) && r === lNoExt) return true;
+    if (samePath(r)) return true;
     return !r.includes("/") && r.replace(EXT, "") === lNoExt.slice(lNoExt.lastIndexOf("/") + 1);
   });
 }
@@ -355,7 +357,8 @@ export async function runWikiStale(
   const staleFound: { changed: string; linking: string; edit: Json | null }[] = [];
   /** The relPaths the route answered for the run's own pages. */
   const ownResolved = new Set<string>();
-  let ownRefs: string[] = [];
+  /** The run's own page names the route gave no answer for. */
+  const ownUnresolved = new Set<string>();
   /** A bound of its own for one request: its signal and a promise that settles on expiry. */
   const bounded = <T>(ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T | "deadline"> => {
     const ac = new AbortController();
@@ -427,13 +430,16 @@ export async function runWikiStale(
       }
     }
 
-    ownRefs = pages;
+    for (const page of pages) ownUnresolved.add(page);
     if (pages.length) {
       for (const page of pages) {
         // Per page: a throw the shape guards miss ends this page's report only.
         try {
           const r = await ask({ page }, isPageReport, `page ${page}`);
-          if (r) ownResolved.add(r.page.relPath);
+          if (r) {
+            ownResolved.add(r.page.relPath);
+            ownUnresolved.delete(page);
+          }
           if (r && !args.json) out.push(...formatPageReport(r), "");
           if (r && args.check && !readonly && r.buckets) await check(r.page.relPath);
         } catch (err) {
@@ -462,7 +468,7 @@ export async function runWikiStale(
     const started = Date.now();
     let stopped = false;
     for (const s of staleFound) {
-      if (isOwnPage(s.linking, ownResolved, ownRefs)) {
+      if (isOwnPage(s.linking, ownResolved, [...ownUnresolved])) {
         if (s.edit) line(s, "own", "yours — fix it by hand");
         else line(s, "no-edit", "stale, no drafted edit — fix by hand");
         continue;

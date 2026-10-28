@@ -158,6 +158,26 @@ describe("the Stale check's verdict routes", () => {
     expect(prompts).toHaveLength(toCheck);
   });
 
+  // Fix round 2 batch 5, finding 3: a page a `fixed` row hides from To check
+  // costs no call and is not counted.
+  test("Check skips a To-check page whose current passage carries a fixed row: no call, the count unchanged", async () => {
+    fresh();
+    const at = { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" };
+    const baseline = sseEvents(await (await post("check", at)).text());
+    const fixedPage = baseline.find(([e]) => e === "verdict")![1].relPath as string;
+    const key = [...store.rows.values()].find((r) => r.page === fixedPage)!.keyHash;
+    fresh();
+    await store.upsert({ wiki: "checkwiki", kind: "fixed", page: fixedPage, keyHash: key, verdict: "fixed", reason: "Fixed through the Stale check", edit: null, checkedBy: "reader" });
+    const before = (await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20")).buckets.counts.toCheck;
+    const events = sseEvents(await (await post("check", at)).text());
+    expect(prompts.some((p) => p.includes(fixedPage))).toBe(false);
+    expect(events.some(([, d]) => d.relPath === fixedPage)).toBe(false);
+    expect(events[0]![1].toCheck).toBe(before);
+    expect(before).toBe(EXTRA_LINKERS);
+    expect([...store.rows.values()].filter((r) => r.page === fixedPage).map((r) => r.kind)).toEqual(["fixed"]);
+    expect((await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20")).buckets.counts.toCheck).toBe(before);
+  });
+
   test("refresh (body or query) rebuilds the index, so Check judges the pages on disk, not a cached index", async () => {
     fresh();
     const toCheck = EXTRA_LINKERS + 1;

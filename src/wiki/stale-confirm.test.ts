@@ -630,6 +630,62 @@ describe("runStaleConfirm (D16)", () => {
     }
   });
 
+  // Fix round 2 batch 5, finding 1: every budgeted step checks the run's
+  // deadline before it starts, not only the loop's guard.
+  test("A6: a rebuild is not started once the run's bound is spent", async () => {
+    const started: string[] = [];
+    const twin = { ...entry, name: "cw-twin" } as WikiRegistryEntry;
+    const index: ConfirmDeps["index"] = () => (started.push("rebuild"), started.length === 1 ? never() : getWikiIndex({ root: entry.root, refresh: true }));
+    const { deps } = makeDeps({ registry: () => [entry, twin], index, failures: new Map(), limits: { budgetMs: 300 } });
+    const r = await runStaleConfirm(["cw", "cw-twin"], deps);
+    expect(started).toEqual(["rebuild"]);
+    expect(r).toMatchObject({ calls: 0, errors: 1 });
+    expect(r.wikis[1]).toMatchObject({ wiki: "cw-twin", skipped: "run budget spent" });
+  });
+
+  test("A6: a call whose deadline passed while its input was read is not started", async () => {
+    let t = Date.UTC(2026, 9, 28, 8);
+    let armed = false;
+    const prompts: string[] = [];
+    // The clock passes the run's deadline as the call input is read.
+    const index: ConfirmDeps["index"] = async (r) => {
+      const ix = (await getWikiIndex({ root: r, refresh: true }))!;
+      return new Proxy(ix, {
+        get(target, p) {
+          const v = Reflect.get(target, p);
+          if (p === "resolveRelPath" && typeof v === "function") return (...a: unknown[]) => (armed && (t += 10 * 60_000), (v as (...x: unknown[]) => unknown).apply(target, a));
+          return typeof v === "function" ? v.bind(target) : v;
+        },
+      });
+    };
+    const store = memoryStaleVerdictStore();
+    const arming = { ...store, get: (...a: Parameters<typeof store.get>) => ((armed = true), store.get(...a)) };
+    const model: StaleModel = async (prompt) => (prompts.push(prompt), '{"verdict":"true","reason":"ok"}');
+    const { deps } = makeDeps({ index, store: () => arming, model: () => model, now: () => t, failures: new Map() });
+    const r = await runStaleConfirm(["cw"], deps);
+    expect(prompts).toEqual([]);
+    expect(r).toMatchObject({ calls: 0, errors: 0, left: 2 });
+  });
+
+  test("A6: a verdict write is not started once the run's bound is spent", async () => {
+    const realNow = Date.now;
+    let jumpMs = 0;
+    Date.now = () => realNow() + jumpMs;
+    try {
+      const store = memoryStaleVerdictStore();
+      const upserts: unknown[] = [];
+      const counting = { ...store, upsert: (v: Parameters<typeof store.upsert>[0]) => (upserts.push(v), store.upsert(v)) };
+      // The clock passes the run's end while the model answers.
+      const model: StaleModel = async () => ((jumpMs = 10 * 60_000), '{"verdict":"true","reason":"ok"}');
+      const { deps } = makeDeps({ store: () => counting, model: () => model, failures: new Map() });
+      const r = await runStaleConfirm(["cw"], deps);
+      expect(upserts).toEqual([]);
+      expect(r).toMatchObject({ calls: 1, errors: 1, left: 1 });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   test("the loop starts only with the scheduler on, a writable instance and a registered wiki", async () => {
     const { deps } = makeDeps();
     expect(startStaleConfirmLoop({ schedulerEnabled: false, wikiStaleConfirmWikis: ["cw"], profile: "default" }, { deps })).toEqual([]);

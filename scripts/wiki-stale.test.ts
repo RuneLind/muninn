@@ -581,6 +581,30 @@ describe("--send: drafted edits for other pages go to the Gardener, the run's ow
     }
   });
 
+  // Fix round 2 batch 5, finding 2: `--pages foo` resolved to plans/foo.md
+  // owns that page only; archive/foo.md shares the stem and is sent.
+  test("a bare stem the route resolved owns its resolved page, not a same-stem page in another folder", async () => {
+    const s = stub({
+      resolve: (ref) => (ref === "foo" ? "plans/foo.md" : ref),
+      verdicts: {
+        "plans/foo.md": [
+          { relPath: "plans/foo.md", verdict: "stale", edit: edit("self") },
+          { relPath: "archive/foo.md", verdict: "stale", edit: edit("archived") },
+        ],
+      },
+    });
+    try {
+      const out = await runWikiStale(["--wiki", "w", "--pages", "foo", "--check", "--send", "--base-url", s.base], { env: {} });
+      expect(s.sends.map((x) => x.body.linking)).toEqual(["archive/foo.md"]);
+      expect(out.slice(out.indexOf("send to the Gardener:") + 1)).toEqual([
+        "  plans/foo.md (after plans/foo.md): yours — fix it by hand",
+        "  archive/foo.md (after plans/foo.md): sent — group stale-check:plans/foo.md:1, card pages archive/foo.md",
+      ]);
+    } finally {
+      s.stop();
+    }
+  });
+
   // Fix round 2 batch 4, finding 3: the send carries the run's day, so the
   // route reads the buckets of that window, and `old` with its whitespace.
   test("--as-of rides every send, and old is sent with its whitespace", async () => {
