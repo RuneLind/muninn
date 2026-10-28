@@ -3153,9 +3153,9 @@ export function registerWikiGardenerRoutes(
       return c.json({ error: "group is no longer a draft", statuses: statusCounts(existing) }, 409);
     }
     // D20: a rejected Stale check card's edits are «kept as written»: reader
-    // «still true» rows on the keys they were drafted under.
+    // «still true» rows where the stored verdict still carries the edit.
     const kept = await staleCheckKeptVerdicts(scope.wikiEntry, rejected);
-    return c.json({ outcome: "rejected", rejected: rejected.length, ...(kept !== null ? { kept } : {}) });
+    return c.json({ outcome: "rejected", rejected: rejected.length, ...(kept ?? {}) });
   });
 
   /**
@@ -3248,18 +3248,21 @@ async function staleCheckFixedVerdicts(
   }
 }
 
-/** D20: the «kept as written» verdicts a rejected Stale check card writes, or
- *  null for another kind. Best effort, like the fixed verdicts. */
-async function staleCheckKeptVerdicts(entry: WikiRegistryEntry, rejected: readonly WikiProposal[]): Promise<number | null> {
+/** D20: the «kept as written» verdicts a rejected Stale check card writes
+ *  (`kept`) and the edits it wrote none for (`keptSkipped`), or null for
+ *  another kind. Best effort, like the fixed verdicts. */
+async function staleCheckKeptVerdicts(entry: WikiRegistryEntry, rejected: readonly WikiProposal[]): Promise<{ kept: number; keptSkipped: number } | null> {
   const stale = rejected.filter((r) => r.kind === "stale-check");
   if (!stale.length) return null;
+  const edits = stale.flatMap((r) => r.staleMeta?.edits ?? []);
   try {
     const index = await getWikiIndex({ root: entry.root });
-    if (!index) return 0;
-    return await keptAsWritten({ wiki: entry.name, index, edits: stale.flatMap((r) => r.staleMeta?.edits ?? []) });
+    if (!index) return { kept: 0, keptSkipped: edits.length };
+    const { kept, skipped } = await keptAsWritten({ wiki: entry.name, index, edits });
+    return { kept, keptSkipped: skipped };
   } catch (err) {
     log.warn("Stale check reject: kept verdicts not written for {wiki}: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
-    return 0;
+    return { kept: 0, keptSkipped: edits.length };
   }
 }
 

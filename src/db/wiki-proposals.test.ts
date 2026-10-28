@@ -1,4 +1,12 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { testTempDir } from "../test/temp-dir.ts";
+import { sendStaleFix } from "../gardener/stale-proposals.ts";
+import { seedLintProposals } from "../gardener/lint-proposals.ts";
+import type { LintFinding } from "../wiki/lint.ts";
+import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
 import {
@@ -25,7 +33,7 @@ import {
   rejectWikiProposalGroup,
   listLintGroupRowsByWiki,
   markLintGroupStale,
-  listLiveGroupedRows,
+  listLivePageHolders,
   listLiveStaleCheckRows,
   listStaleCheckRowsByChanged,
   supersedeStaleCheckGroup,
@@ -563,9 +571,9 @@ describe("Stale check groups (D20)", () => {
   test("a page a live group of another kind holds refuses, and nothing is written", async () => {
     await insertWikiProposal({ botName: W, wikiName: W, topicKey: "lint:x:1:notes/a.md", groupKey: "lint:x:1", kind: "lint", mode: "update", targetPath: "notes/a.md", draft: "d", sourceDocs: [] });
     const out = await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [row("notes/a.md")] });
-    expect(out).toEqual({ outcome: "held", targetPath: "notes/a.md", groupKey: "lint:x:1", kind: "lint" });
+    expect(out).toEqual({ outcome: "held", targetPath: "notes/a.md", groupKey: "lint:x:1", topicKey: "lint:x:1:notes/a.md", kind: "lint" });
     expect(await listStaleCheckRowsByChanged(W, "hub.md")).toEqual([]);
-    expect((await listLiveGroupedRows(W)).map((r) => [r.kind, r.targetPath])).toEqual([["lint", "notes/a.md"]]);
+    expect((await listLivePageHolders(W)).map((r) => [r.kind, r.targetPath])).toEqual([["lint", "notes/a.md"]]);
   });
 
   test("the group number never repeats: a rejected group 1 makes the next group 2", async () => {
@@ -573,5 +581,159 @@ describe("Stale check groups (D20)", () => {
     await rejectWikiProposalGroup(W, first.outcome === "sent" ? first.groupKey : "");
     const next = await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [row("notes/a.md")] });
     expect(next).toMatchObject({ outcome: "sent", groupKey: "stale-check:hub.md:2", retired: 0 });
+  });
+});
+
+// Fix round 1 batch 4: what holds a page for Send and Apply (finding 2), and
+// a Send racing a lint seed (finding 3), against the real transactions.
+describe("page claims across writers", () => {
+  const W = "claimwiki";
+  const LINT_GROUP = "lint:series-unnamed:0123456789ab";
+  const staleRow = (page: string): Omit<InsertWikiProposalParams, "groupKey"> => ({
+    botName: W,
+    wikiName: W,
+    topicKey: `stale-check:hub.md:${page}:abc`,
+    kind: "stale-check",
+    mode: "update",
+    targetPath: page,
+    baseHash: "h",
+    draft: "draft",
+    sourceDocs: [],
+    relatedPages: [],
+    staleMeta: { changed: "hub.md", edits: [{ kind: "passage", page, link: "hub.md", old: "a", text: "b", variant: "new" }], supersedes: null },
+  });
+  const ungrouped = (topicKey: string, mode: "update" | "create", status: "draft" | "rejected" = "draft"): InsertWikiProposalParams =>
+    makeProposal({ botName: W, wikiName: W, topicKey, kind: "concept", mode, targetPath: "plans/a.mdx", baseHash: "h", status });
+
+  test("an ungrouped live update draft holds its page for Send's transaction; create and rejected rows do not", async () => {
+    await insertWikiProposal(ungrouped("concept-a-new", "create"));
+    await insertWikiProposal(ungrouped("concept-a-old", "update", "rejected"));
+    await insertWikiProposal(ungrouped("concept-a", "update"));
+    const out = await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [staleRow("plans/a.mdx")] });
+    expect(out).toEqual({ outcome: "held", targetPath: "plans/a.mdx", groupKey: null, topicKey: "concept-a", kind: "concept" });
+    expect(await listStaleCheckRowsByChanged(W, "hub.md")).toEqual([]);
+    expect((await listLivePageHolders(W)).map((h) => [h.topicKey, h.groupKey])).toEqual([["concept-a", null]]);
+  });
+
+  test("Send refuses a page an ungrouped live update draft holds, naming that card, and writes nothing", async () => {
+    const root = await testTempDir(path.join(tmpdir(), "claim-send-"));
+    try {
+      await Bun.write(path.join(root, "plans/a.mdx"), "---\ntitle: A\n---\n\nThe pin in [[hub]] landed on 23.05.\n");
+      await insertWikiProposal(ungrouped("concept-a", "update"));
+      const index = { resolve: (t: string) => (t === "hub" ? ({ relPath: "hub.md" } as WikiPageMeta) : undefined) } as unknown as WikiIndex;
+      const out = await sendStaleFix({
+        wiki: W,
+        wikiDir: root,
+        index,
+        changed: "hub.md",
+        edit: { kind: "passage", page: "plans/a.mdx", link: "hub.md", old: "landed on 23.05", text: "landed on 18.06", variant: "new" },
+      });
+      expect(await listStaleCheckRowsByChanged(W, "hub.md")).toEqual([]);
+      expect(out).toEqual({ outcome: "refused", status: 409, error: "plans/a.mdx is held by another Gardener card (concept update draft, concept-a): accept or dismiss it first." });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  describe("a Send racing a lint seed", () => {
+    let root = "";
+    const finding: LintFinding = {
+      check: "series-unnamed",
+      relPath: "plans/a.mdx",
+      message: "2 linked pages declare no series: — propose series: a",
+      detail: "members: plans/a.mdx, plans/b.mdx",
+      fix: {
+        groupKey: LINT_GROUP,
+        edits: [
+          { op: "frontmatter", relPath: "plans/a.mdx", key: "series", value: "a" },
+          { op: "frontmatter", relPath: "plans/b.mdx", key: "series", value: "a" },
+        ],
+      },
+    };
+    const seedDeps = () => ({ wikiDir: root, wikiName: W, readFile: async (abs: string) => Bun.file(abs).text().catch(() => null) });
+    const liveOn = async (page: string) =>
+      (await getDb()`SELECT kind FROM wiki_proposals WHERE wiki_name = ${W} AND target_path = ${page} AND status IN ('draft', 'approved') ORDER BY kind`).map((r) => r.kind as string);
+
+    beforeEach(async () => {
+      root = await testTempDir(path.join(tmpdir(), "claim-race-"));
+      await Bun.write(path.join(root, "plans/a.mdx"), "---\ntitle: A\n---\n\nBody.\n");
+      await Bun.write(path.join(root, "plans/b.mdx"), "---\ntitle: B\n---\n\nBody.\n");
+    });
+    afterEach(async () => {
+      await rm(root, { recursive: true, force: true });
+    });
+
+    test("a Send that commits after the seeder read its claims wins the page; the lint insert writes nothing", async () => {
+      const out = await seedLintProposals([finding], {
+        ...seedDeps(),
+        // The barrier: the seeder's one read sees no rows, then a Send commits on plans/a.mdx.
+        listGroupRows: async (wiki) => {
+          const rows = await listLintGroupRowsByWiki(wiki);
+          expect((await supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [staleRow("plans/a.mdx")] })).outcome).toBe("sent");
+          return rows;
+        },
+      });
+      expect(await liveOn("plans/a.mdx")).toEqual(["stale-check"]);
+      expect(await liveOn("plans/b.mdx")).toEqual([]);
+      expect(out).toMatchObject({ proposed: 0, rows: 0, claimed: 1 });
+    });
+
+    test("the lint insert waits on a Send's open transaction, then sees its page and writes nothing", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let sendInserted!: () => void;
+      const inserted = new Promise<void>((r) => (sendInserted = r));
+      // A Send mid-transaction: it holds the page-claims lock and has inserted, uncommitted.
+      const send = getDb().begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${"wiki-page-claims:" + W}))`;
+        await tx`INSERT INTO wiki_proposals (bot_name, wiki_name, topic_key, group_key, kind, mode, target_path, draft, source_docs) VALUES (${W}, ${W}, 'stale-check:hub.md:plans/a.mdx:abc', 'stale-check:hub.md:1', 'stale-check', 'update', 'plans/a.mdx', 'd', '[]'::jsonb)`;
+        sendInserted();
+        await gate;
+      });
+      await inserted;
+      const seed = seedLintProposals([finding], seedDeps());
+      // The seeder's transaction must block on the lock, not race past it.
+      let waiting = 0;
+      for (let i = 0; i < 100 && waiting === 0; i++) {
+        waiting = (await getDb()`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0]!.n as number;
+        if (!waiting) await Bun.sleep(20);
+      }
+      release();
+      await send;
+      const out = await seed;
+      expect(waiting).toBe(1);
+      expect(await liveOn("plans/a.mdx")).toEqual(["stale-check"]);
+      expect(out).toMatchObject({ proposed: 0, rows: 0, claimed: 1 });
+    });
+
+    test("Send's transaction waits on the same per-wiki lock the lint insert takes", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let locked!: () => void;
+      const held = new Promise<void>((r) => (locked = r));
+      const holder = getDb().begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${"wiki-page-claims:" + W}))`;
+        locked();
+        await gate;
+      });
+      await held;
+      const send = supersedeStaleCheckGroup({ wikiName: W, changed: "hub.md", expectedLiveIds: [], rows: [staleRow("plans/a.mdx")] });
+      let waiting = 0;
+      for (let i = 0; i < 100 && waiting === 0; i++) {
+        waiting = (await getDb()`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0]!.n as number;
+        if (!waiting) await Bun.sleep(20);
+      }
+      release();
+      await holder;
+      expect((await send).outcome).toBe("sent");
+      expect(waiting).toBe(1);
+    });
+
+    test("a lint seed with no competing Send still inserts the finding's rows (behaviour unchanged)", async () => {
+      const out = await seedLintProposals([finding], seedDeps());
+      expect(out).toMatchObject({ proposed: 1, rows: 2, claimed: 0 });
+      expect(await liveOn("plans/a.mdx")).toEqual(["lint"]);
+      expect(await liveOn("plans/b.mdx")).toEqual(["lint"]);
+    });
   });
 });

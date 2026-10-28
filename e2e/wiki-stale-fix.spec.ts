@@ -330,7 +330,7 @@ test("Dismiss keeps the text as written; Apply on the status line drops the stal
   expect((await sent).status()).toBe(200);
   expect((await liveRows()).filter((r) => r[2] === "draft")).toEqual([[`stale-check:${HUB}:3`, "notes/c.md", "draft"]]);
   const res = await fetch(`${BASE}/api/wiki/proposals/group/${encodeURIComponent(`stale-check:${HUB}:3`)}/reject?wiki=${WIKI}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-  expect(await res.json()).toEqual({ outcome: "rejected", rejected: 1, kept: 1 });
+  expect(await res.json()).toEqual({ outcome: "rejected", rejected: 1, kept: 1, keptSkipped: 0 });
   expect(await read("notes/c.md")).toBe(C_TEXT);
   await openTab(p);
   await expect(p.locator('#staleBody [data-stale-linking="notes/c.md"] .wiki-stale-verdict')).toContainText("Still true");

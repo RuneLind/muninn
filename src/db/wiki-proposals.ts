@@ -750,6 +750,38 @@ export async function listLintGroupRowsByWiki(wikiName: string): Promise<LintGro
   }));
 }
 
+export type InsertLintGroupOutcome =
+  | { outcome: "inserted"; inserted: number }
+  /** A live grouped row committed on a target page since the seeder's read. Nothing was written. */
+  | { outcome: "held"; targetPath: string; groupKey: string };
+
+/**
+ * The lint seeder's insert of ONE finding's rows: one transaction under the
+ * page-claims lock (`lockWikiPageClaims`, the lock Send's supersede takes). It
+ * re-checks lint's own claim rule — any live GROUPED row on a target page,
+ * the rule `seedLintProposals` read before it built the rows — and inserts
+ * nothing when one holds a page, so a Send that committed after the seeder's
+ * read cannot end with two live groups on one page. A row whose topic key is
+ * already live is skipped as before (`ON CONFLICT DO NOTHING`).
+ */
+export async function insertLintGroupRows(wikiName: string, rows: readonly InsertWikiProposalParams[]): Promise<InsertLintGroupOutcome> {
+  if (!rows.length) return { outcome: "inserted", inserted: 0 };
+  return getDb().begin(async (_tx) => {
+    const tx = _tx as unknown as Sql;
+    await lockWikiPageClaims(tx, wikiName);
+    const [held] = await tx`
+      SELECT group_key, target_path FROM wiki_proposals
+      WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND group_key IS NOT NULL
+        AND status IN ('draft', 'approved') AND target_path = ANY(${rows.map((r) => r.targetPath)}::text[])
+      LIMIT 1
+    `;
+    if (held) return { outcome: "held" as const, targetPath: held.target_path as string, groupKey: held.group_key as string };
+    let inserted = 0;
+    for (const r of rows) if (await insertWikiProposalWith(tx, r)) inserted += 1;
+    return { outcome: "inserted" as const, inserted };
+  });
+}
+
 /**
  * Retire every `draft` row of one lint group — the self-heal's write.
  *
@@ -797,27 +829,54 @@ export async function listLiveStaleCheckRows(wikiName: string): Promise<WikiProp
   return rows.map(mapRow);
 }
 
-/** One live grouped row, any kind: the page claim Send and Apply read. */
-export interface LiveGroupedRow {
+/**
+ * One live row that holds its page for Send and Apply: a grouped row of any
+ * kind (lint, Stale check), or an ungrouped `update` row (a wiki-gardener
+ * concept/entity update, a consolidation update). A write to the page would
+ * stale either one, and a second live row on it would race its CAS. Ungrouped
+ * `create` rows hold nothing: they name a page that does not exist yet.
+ */
+export interface LivePageHolder {
   id: string;
-  groupKey: string;
+  /** Null for an ungrouped `update` row. */
+  groupKey: string | null;
+  topicKey: string;
   targetPath: string;
   kind: WikiProposalKind;
   status: WikiProposalStatus;
 }
 
-export async function listLiveGroupedRows(wikiName: string): Promise<LiveGroupedRow[]> {
-  const rows = await getDb()`
-    SELECT id, group_key, target_path, kind, status FROM wiki_proposals
-    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND group_key IS NOT NULL AND status IN ('draft', 'approved')
-  `;
-  return rows.map((r) => ({
+function mapHolder(r: Record<string, unknown>): LivePageHolder {
+  return {
     id: r.id as string,
-    groupKey: r.group_key as string,
+    groupKey: (r.group_key as string | null) ?? null,
+    topicKey: r.topic_key as string,
     targetPath: r.target_path as string,
     kind: r.kind as WikiProposalKind,
     status: r.status as WikiProposalStatus,
-  }));
+  };
+}
+
+/** Every live page holder of a wiki: the page claim Send and Apply read. The
+ *  lint seeder reads its own claims (`listLintGroupRowsByWiki`, grouped rows only). */
+export async function listLivePageHolders(wikiName: string): Promise<LivePageHolder[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT id, group_key, topic_key, target_path, kind, status FROM wiki_proposals
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND status IN ('draft', 'approved') AND (group_key IS NOT NULL OR mode = 'update')
+  `;
+  return rows.map(mapHolder);
+}
+
+/**
+ * The per-wiki lock the two writers that put grouped rows on pages take inside
+ * their transaction: Send's supersede and the lint seeder's insert. Each
+ * re-checks the page claims under it, so neither can insert over a row the
+ * other committed after its first read. Transaction-scoped: released at
+ * commit, never held across a model or network call.
+ */
+async function lockWikiPageClaims(tx: Sql, wikiName: string): Promise<void> {
+  await tx`SELECT pg_advisory_xact_lock(hashtext(${"wiki-page-claims:" + wikiName}))`;
 }
 
 /** The group number in a `stale-check:<changed>:<n>` key, or 0. */
@@ -831,17 +890,18 @@ export type SupersedeStaleCheckOutcome =
   /** The live group is not the one the redraft read: another Send or an
    *  Accept moved it. Nothing was written. */
   | { outcome: "conflict"; reason: string }
-  /** A page another live group (any kind) holds. Nothing was written. */
-  | { outcome: "held"; targetPath: string; groupKey: string; kind: WikiProposalKind };
+  /** A page another live holder ({@link LivePageHolder}) holds. Nothing was written. */
+  | { outcome: "held"; targetPath: string; groupKey: string | null; topicKey: string; kind: WikiProposalKind };
 
 /**
  * D20, in ONE transaction: retire the live group n (status `stale`, D28) and
  * insert group n+1 with `rows`. Send never edits an open group.
  *
- * Serialized per wiki on a transaction advisory lock, so two Sends cannot both
- * mint group n+1. Inside it: the live rows for `changed` must be exactly
- * `expectedLiveIds`, all `draft` (`conflict` otherwise), and no target page may
- * be held by a live grouped row outside that set (`held`). `n` is one past the
+ * Serialized per wiki on the page-claims lock ({@link lockWikiPageClaims}), so
+ * two Sends cannot both mint group n+1 and a lint seed cannot insert on a page
+ * between this check and the commit. Inside it: the live rows for `changed`
+ * must be exactly `expectedLiveIds`, all `draft` (`conflict` otherwise), and no
+ * target page may be held by a live page holder outside that set (`held`). `n` is one past the
  * highest group number ever used for `changed`, whatever its status, so a key
  * never names two groups.
  */
@@ -854,7 +914,7 @@ export async function supersedeStaleCheckGroup(params: {
   const sql = getDb();
   return sql.begin(async (_tx) => {
     const tx = _tx as unknown as Sql;
-    await tx`SELECT pg_advisory_xact_lock(hashtext(${"stale-check:" + params.wikiName}))`;
+    await lockWikiPageClaims(tx, params.wikiName);
     const mine = await tx`
       SELECT id, group_key, status FROM wiki_proposals
       WHERE COALESCE(wiki_name, bot_name) = ${params.wikiName} AND kind = 'stale-check' AND stale_meta->>'changed' = ${params.changed}
@@ -868,12 +928,13 @@ export async function supersedeStaleCheckGroup(params: {
     const targets = params.rows.map((r) => r.targetPath);
     if (targets.length) {
       const holders = await tx`
-        SELECT id, group_key, target_path, kind FROM wiki_proposals
-        WHERE COALESCE(wiki_name, bot_name) = ${params.wikiName} AND group_key IS NOT NULL
-          AND status IN ('draft', 'approved') AND target_path = ANY(${targets as string[]}::text[])
+        SELECT id, group_key, topic_key, target_path, kind, status FROM wiki_proposals
+        WHERE COALESCE(wiki_name, bot_name) = ${params.wikiName} -- the LivePageHolder predicate, as listLivePageHolders reads it
+          AND status IN ('draft', 'approved') AND (group_key IS NOT NULL OR mode = 'update')
+          AND target_path = ANY(${targets as string[]}::text[])
       `;
-      const held = holders.find((h) => !expected.has(h.id as string));
-      if (held) return { outcome: "held" as const, targetPath: held.target_path as string, groupKey: held.group_key as string, kind: held.kind as WikiProposalKind };
+      const held = holders.map(mapHolder).find((h) => !expected.has(h.id));
+      if (held) return { outcome: "held" as const, targetPath: held.targetPath, groupKey: held.groupKey, topicKey: held.topicKey, kind: held.kind };
     }
     const n = Math.max(0, ...mine.map((r) => staleCheckGroupNumber(r.group_key as string))) + 1;
     const groupKey = `stale-check:${params.changed}:${n}`;

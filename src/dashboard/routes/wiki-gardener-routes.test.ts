@@ -44,6 +44,7 @@ import { linkingBuckets } from "../../wiki/stale.ts";
 import { __setStaleVerdictStoreForTest, changedHashOf, memoryStaleVerdictStore, passageVerdictKey } from "../../wiki/stale-confirm.ts";
 import { __setStaleProposalStoreForTest, sendStaleFix } from "../../gardener/stale-proposals.ts";
 import { registerWikiRoutes } from "./wiki-routes.ts";
+import { carryPassageVerdicts, snapshotPassageKeys } from "../../wiki/stale-fix-verdicts.ts";
 import { memoryStaleProposalStore } from "../../test/stale-proposal-store.ts";
 import type { WikiProposal } from "../../db/wiki-proposals.ts";
 
@@ -3894,10 +3895,57 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     registerWikiGardenerRoutes(app, s.deps);
     const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 2 });
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 2, keptSkipped: 0 });
     const passages = [...verdicts.rows.values()].filter((r) => r.kind === "passage");
     expect(passages.map((r) => [r.page, r.verdict, r.checkedBy]).sort()).toEqual([["notes/a.md", "true", "reader"], ["notes/b.md", "true", "reader"]]);
     expect(passages[0]!.reason).toContain("Kept as written");
     expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(A_TEXT);
+  });
+
+  // Fix round 1 batch 4, finding 1: «kept» lands only where the stored verdict
+  // still carries the card's edit, never on a key nobody judged.
+  test("Dismiss after the changed page moved again writes no «kept» row on the new keys", async () => {
+    const s = store(await card());
+    await Bun.write(path.join(root, "hub.md"), page("Hub", "The pin moved to 18.06, then to 25.06."));
+    await git(Date.now() - DAY / 2, "commit", "-q", "-am", "hub moves again");
+    __resetWikiCacheForTest();
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect([...verdicts.rows.values()].filter((r) => r.checkedBy === "reader").map((r) => r.page)).toEqual([]);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 0, keptSkipped: 2 });
+  });
+
+  test("Dismiss after a linking passage changed skips that page and keeps the other", async () => {
+    const s = store(await card());
+    await Bun.write(path.join(root, "notes/a.md"), A_TEXT.replace("landed on 23.05.", "landed on 23.05, says the log."));
+    __resetWikiCacheForTest();
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect([...verdicts.rows.values()].filter((r) => r.checkedBy === "reader").map((r) => r.page)).toEqual(["notes/b.md"]);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 1, keptSkipped: 1 });
+  });
+
+  test("Dismiss skips a page whose verdict was re-judged with another edit since the Send", async () => {
+    const s = store(await card());
+    const index = (await getWikiIndex({ root }))!;
+    const l = (await linkingBuckets(index, "hub.md"))!.linking.find((x) => x.relPath === "notes/a.md")!;
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: "notes/a.md", keyHash: passageVerdictKey(index, "hub.md", (await changedHashOf(index, "hub.md"))!, l), verdict: "stale", reason: "moved twice", edit: { old: "The pin", new: "The lock" }, checkedBy: "model:e2e" });
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect([...verdicts.rows.values()].filter((r) => r.checkedBy === "reader").map((r) => r.page)).toEqual(["notes/b.md"]);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 1, keptSkipped: 1 });
+  });
+
+  test("Dismiss after a fix carried the verdicts to the changed page's new hash still keeps both", async () => {
+    const s = store(await card());
+    const before = await Bun.file(path.join(root, "hub.md")).text();
+    const snapshots = await snapshotPassageKeys((await getWikiIndex({ root }))!, [{ relPath: "hub.md", content: before }]);
+    await Bun.write(path.join(root, "hub.md"), page("Hub", "The pin moved to 18.06 (fixed wording)."));
+    await git(Date.now() - DAY / 2, "commit", "-q", "-am", "a Stale check fix on hub");
+    __resetWikiCacheForTest();
+    expect(await carryPassageVerdicts({ wiki: "stalegate", index: (await getWikiIndex({ root }))!, snapshots })).toBe(2);
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 2, keptSkipped: 0 });
   });
 });

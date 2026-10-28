@@ -14,19 +14,20 @@
  * page's CURRENT bytes (`applyStaleEdits`, which recomputes the windows on the
  * live file); an old edit that no longer places is dropped and reported. Two
  * edits to one page merge into one row, keyed by the hash of its edit list. A
- * page another live group of any kind holds refuses the send.
+ * page another live group of any kind, or a live ungrouped update draft,
+ * holds refuses the send (`listLivePageHolders`).
  *
  * Keys: topic `stale-check:<changed>:<page>:<edit hash>`, group
  * `stale-check:<changed>:<n>`.
  */
 import path from "node:path";
 import {
-  listLiveGroupedRows,
+  listLivePageHolders,
   listLiveStaleCheckRows,
   listStaleCheckRowsByChanged,
   supersedeStaleCheckGroup,
   type InsertWikiProposalParams,
-  type LiveGroupedRow,
+  type LivePageHolder,
   type SupersedeStaleCheckOutcome,
   type WikiProposal,
 } from "../db/wiki-proposals.ts";
@@ -37,14 +38,14 @@ import { sha256 } from "./util.ts";
 /** The DB half, a seam so the route tests run without a database. */
 export interface StaleProposalStore {
   byChanged(wiki: string, changed: string): Promise<WikiProposal[]>;
-  liveGrouped(wiki: string): Promise<LiveGroupedRow[]>;
+  liveHolders(wiki: string): Promise<LivePageHolder[]>;
   liveStaleCheck(wiki: string): Promise<WikiProposal[]>;
   supersede(params: Parameters<typeof supersedeStaleCheckGroup>[0]): Promise<SupersedeStaleCheckOutcome>;
 }
 
 export const dbStaleProposalStore: StaleProposalStore = {
   byChanged: listStaleCheckRowsByChanged,
-  liveGrouped: listLiveGroupedRows,
+  liveHolders: listLivePageHolders,
   liveStaleCheck: listLiveStaleCheckRows,
   supersede: supersedeStaleCheckGroup,
 };
@@ -69,13 +70,14 @@ function rationaleFor(changed: string, edits: readonly StaleFixEdit[]): string {
   return text.length > RATIONALE_CAP ? `${text.slice(0, RATIONALE_CAP)}…` : text;
 }
 
-/** A page a live grouped row outside `mine` holds, when one does. */
-export function heldBy(rows: readonly LiveGroupedRow[], page: string, mine: ReadonlySet<string> = new Set()): LiveGroupedRow | undefined {
+/** A page a live page holder outside `mine` holds, when one does. */
+export function heldBy(rows: readonly LivePageHolder[], page: string, mine: ReadonlySet<string> = new Set()): LivePageHolder | undefined {
   return rows.find((r) => r.targetPath === page && !mine.has(r.id));
 }
 
-export const heldMessage = (h: Pick<LiveGroupedRow, "targetPath" | "groupKey" | "kind">) =>
-  `${h.targetPath} is held by another Gardener card (${h.kind === "stale-check" ? "Stale check" : h.kind}, ${h.groupKey}): accept or dismiss it first.`;
+/** Names the holding card: a group by its key, an ungrouped update draft by its topic key. */
+export const heldMessage = (h: Pick<LivePageHolder, "targetPath" | "groupKey" | "topicKey" | "kind">) =>
+  `${h.targetPath} is held by another Gardener card (${h.kind === "stale-check" ? "Stale check" : h.kind}${h.groupKey ? `, ${h.groupKey}` : ` update draft, ${h.topicKey}`}): accept or dismiss it first.`;
 
 export type SendStaleFixOutcome =
   | {
@@ -121,7 +123,7 @@ export async function sendStaleFix(opts: {
   const already = mine.some((r) => (r.staleMeta?.edits ?? []).some((e) => sameStaleEdit(e, edit) && e.text === edit.text));
   if (already) return { outcome: "refused", status: 409, error: "This fix is already in review in the Gardener." };
   const mineIds = new Set(mine.map((r) => r.id));
-  const held = heldBy(await store.liveGrouped(wiki), edit.page, mineIds);
+  const held = heldBy(await store.liveHolders(wiki), edit.page, mineIds);
   if (held) return { outcome: "refused", status: 409, error: heldMessage(held) };
 
   // The edit lists per page: the open group's, then the new edit (which

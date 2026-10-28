@@ -181,47 +181,62 @@ export async function fixedLinkingPages(opts: {
 
 export const KEPT_REASON = "Kept as written: its Stale check fix was rejected in the Gardener";
 
+/** What {@link keptAsWritten} wrote, and how many edits it wrote nothing for. */
+export interface KeptAsWrittenResult {
+  kept: number;
+  skipped: number;
+}
+
 /**
- * D20: a rejected card's edits become reader «still true» rows on the keys
- * they were drafted under, as the pages are now. A status-line edit names the
- * hit by its target and `old`; a passage edit by its linking page. An edit
- * whose hit or passage is gone writes nothing. Returns how many rows were written.
+ * D20: a rejected card's edits become reader «still true» rows, «kept as
+ * written». A row is written only on a key whose stored verdict still carries
+ * the card's edit (`edit.old` equal): that is the passage, or the status line,
+ * the reader saw judged and chose to keep. The key is derived from the pages
+ * as they are now, so a key that moved since the Send (the changed page or the
+ * linking passage changed, the target plan's status moved) holds no such row,
+ * and a reader row there would claim a pair nobody judged — reader rows never
+ * age out and a model upsert never overwrites them. A fix carries the stored
+ * verdict to the page's new key (`carryPassageVerdicts`), so a fix alone does
+ * not skip an edit.
+ *
+ * Skipped, and counted: an edit whose hit or passage is gone, whose key moved,
+ * or whose model row aged out (the 90-day cleanup). Its line is left as Check
+ * finds it next time.
  */
 export async function keptAsWritten(opts: {
   wiki: string;
   index: WikiIndex;
   edits: readonly StaleFixEdit[];
   store?: StaleVerdictStore;
-}): Promise<number> {
+}): Promise<KeptAsWrittenResult> {
   const store = opts.store ?? staleVerdictStore();
-  let n = 0;
+  const out: KeptAsWrittenResult = { kept: 0, skipped: 0 };
   for (const e of opts.edits) {
+    let written = 0;
     if (e.kind === "passage") {
       const entry = await linkingEntry(opts.index, e.link, e.page);
-      if (!entry) continue;
-      await store.upsert({
-        wiki: opts.wiki,
-        kind: "passage",
-        page: entry.l.relPath,
-        keyHash: passageVerdictKey(opts.index, entry.changed, entry.hash, entry.l),
-        verdict: "true",
-        reason: KEPT_REASON,
-        edit: null,
-        checkedBy: READER_CHECKED_BY,
-      });
-      n++;
-      continue;
+      if (entry) {
+        const key = passageVerdictKey(opts.index, entry.changed, entry.hash, entry.l);
+        const row = (await store.get(opts.wiki, "passage", [key])).get(key);
+        if (row?.edit?.old === e.old) {
+          await store.upsert({ wiki: opts.wiki, kind: "passage", page: entry.l.relPath, keyHash: key, verdict: "true", reason: KEPT_REASON, edit: null, checkedBy: READER_CHECKED_BY });
+          written++;
+        }
+      }
+    } else {
+      const hits = (opts.index.statusLineHits?.get(e.page) ?? []).filter((h) => normalizeRelPath(h.target) === normalizeRelPath(e.link));
+      const keyed = hits.map((h) => statusLineVerdictKey(opts.index, e.page, h));
+      const rows = await store.get(opts.wiki, "status-line", keyed);
+      for (const key of keyed) {
+        if (rows.get(key)?.edit?.old !== e.old) continue;
+        await store.upsert({ wiki: opts.wiki, kind: "status-line", page: e.page, keyHash: key, verdict: "true", reason: KEPT_REASON, edit: null, checkedBy: READER_CHECKED_BY });
+        written++;
+      }
     }
-    const hits = (opts.index.statusLineHits?.get(e.page) ?? []).filter((h) => normalizeRelPath(h.target) === normalizeRelPath(e.link));
-    const keyed = hits.map((h) => statusLineVerdictKey(opts.index, e.page, h));
-    const rows = await store.get(opts.wiki, "status-line", keyed);
-    for (const key of keyed) {
-      if (rows.get(key)?.edit?.old !== e.old) continue;
-      await store.upsert({ wiki: opts.wiki, kind: "status-line", page: e.page, keyHash: key, verdict: "true", reason: KEPT_REASON, edit: null, checkedBy: READER_CHECKED_BY });
-      n++;
-    }
+    if (written) out.kept += written;
+    else out.skipped++;
   }
-  return n;
+  return out;
 }
 
 /** One page a Stale check write is about to rewrite: its content hash and its

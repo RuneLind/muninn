@@ -2697,9 +2697,10 @@ export function registerWikiToolRoutes(
     if (!fix.ok) return c.json({ error: fix.error }, fix.status);
     const target = index.resolveRelPath(fix.edit.page);
     if (!target) return c.json({ error: `no page ${fix.edit.page}` }, 404);
-    // A page a live Gardener card holds: a write here would stale that card.
+    // A page a live Gardener card holds (a group, or an ungrouped update
+    // draft): a write here would stale that card.
     try {
-      const held = heldBy(await staleProposalStore().liveGrouped(entry.name), target.relPath);
+      const held = heldBy(await staleProposalStore().liveHolders(entry.name), target.relPath);
       if (held) return c.json({ error: heldMessage(held), held: true }, 409);
     } catch (err) {
       log.warn("Stale apply: Gardener cards unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });

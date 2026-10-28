@@ -335,6 +335,22 @@ describe("the Stale check's fix routes", () => {
     expect(plain.status).toBe(415);
   });
 
+  // Fix round 1 batch 4, finding 2: an ungrouped `update` draft (wiki-gardener,
+  // consolidation) holds its page too; a `create` draft holds nothing.
+  test("Apply refuses a page a live ungrouped update draft holds, naming that card", async () => {
+    await seedWiki();
+    await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
+    const ungrouped = { botName: "fixwiki", wikiName: null, groupKey: null, lintMeta: null, kind: "concept" as const, targetPath: "notes/a.md", baseHash: "h", draft: "", sourceDocs: [], rationale: null, containedLinks: null, relatedPages: null, status: "draft" as const, createdAt: 0, resolvedAt: null };
+    proposals.rows.push({ ...ungrouped, id: "u1", topicKey: "concept-a", mode: "update", wikiName: "fixwiki" });
+    const held = await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" });
+    expect(held.status).toBe(409);
+    expect((await held.json()).error).toBe("notes/a.md is held by another Gardener card (concept update draft, concept-a): accept or dismiss it first.");
+    expect(await read("notes/a.md")).toBe(A_TEXT);
+    proposals.rows.length = 0;
+    proposals.rows.push({ ...ungrouped, id: "c1", topicKey: "concept-a-new", mode: "create", wikiName: "fixwiki" });
+    expect((await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" })).status).toBe(200);
+  });
+
   test("Send on two linking pages leaves ONE live card holding both; the page and summary show ⧗ 2 in review", async () => {
     await seedWiki();
     await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });

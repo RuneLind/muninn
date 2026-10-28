@@ -35,7 +35,8 @@ import type { LintPageEdit } from "../wiki/lint-series.ts";
 import {
   listLintGroupRowsByWiki,
   markLintGroupStale,
-  insertWikiProposal,
+  insertLintGroupRows,
+  type InsertLintGroupOutcome,
   type InsertWikiProposalParams,
   type LintGroupRow,
   type WikiProposal,
@@ -216,6 +217,10 @@ export interface SeedLintProposalsDeps extends LintProposalDeps {
   listGroupRows?: (wikiName: string) => Promise<LintGroupRow[]>;
   markGroupStale?: (wikiName: string, groupKey: string) => Promise<number>;
   insert?: (params: InsertWikiProposalParams) => Promise<WikiProposal | null>;
+  /** One finding's rows in one go, re-checking the page claims under the lock
+   *  Send takes. Defaults to `insertLintGroupRows`; when only `insert` is given
+   *  (the unit tests' seam) the rows go through it one by one, unchecked. */
+  insertGroup?: (wikiName: string, rows: readonly InsertWikiProposalParams[]) => Promise<InsertLintGroupOutcome>;
 }
 
 export type { LintSeeder };
@@ -235,7 +240,16 @@ export async function seedLintProposals(
 ): Promise<SeedLintProposalsResult> {
   const listGroupRows = deps.listGroupRows ?? listLintGroupRowsByWiki;
   const markGroupStale = deps.markGroupStale ?? markLintGroupStale;
-  const insert = deps.insert ?? insertWikiProposal;
+  const insert = deps.insert;
+  const insertGroup =
+    deps.insertGroup ??
+    (insert
+      ? async (_wiki: string, rows: readonly InsertWikiProposalParams[]): Promise<InsertLintGroupOutcome> => {
+          let inserted = 0;
+          for (const row of rows) if (await insert(row)) inserted += 1;
+          return { outcome: "inserted", inserted };
+        }
+      : insertLintGroupRows);
   const existing = await listGroupRows(deps.wikiName);
   const seededBy: LintSeeder = deps.seededBy ?? "wiki-linter";
 
@@ -333,10 +347,11 @@ export async function seedLintProposals(
       continue;
     }
     seen.add(groupKey);
-    for (const row of rows) claimedPaths.add(row.targetPath);
-    let inserted = 0;
-    for (const row of rows) {
-      const created = await insert({
+    // The claims above were read once, before the rows were built: a Send can
+    // commit a page since. `insertGroup` re-checks under the lock Send takes.
+    const outcome = await insertGroup(
+      deps.wikiName,
+      rows.map((row) => ({
         botName: deps.wikiName,
         wikiName: deps.wikiName,
         topicKey: row.topicKey,
@@ -349,9 +364,15 @@ export async function seedLintProposals(
         sourceDocs: [],
         lintMeta: lintMeta(seededBy, row.findingRelPath),
         rationale: row.rationale,
-      });
-      if (created) inserted += 1;
+      })),
+    );
+    if (outcome.outcome === "held") {
+      claimedPaths.add(outcome.targetPath);
+      result.claimed += 1;
+      continue;
     }
+    for (const row of rows) claimedPaths.add(row.targetPath);
+    const inserted = outcome.inserted;
     if (inserted > 0) {
       result.proposed += 1;
       result.rows += inserted;
