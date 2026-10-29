@@ -72,6 +72,20 @@ let deps: StartCardsDeps = {
 /** Wire the cards to the shell. Called once, at `wiki-browser.ts` module scope. */
 export function initStartCards(d: StartCardsDeps): void {
   deps = d;
+  // `toggle` does not bubble: capture it, so a lane the reader opens or closes
+  // is remembered across the card's repaints and the start view's rebuilds.
+  if (!laneListening && typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    laneListening = true;
+    document.addEventListener(
+      "toggle",
+      (e) => {
+        const t = e.target as HTMLElement | null;
+        const lane = t && typeof t.closest === "function" && t.closest("#wikiWorkCard") ? t.getAttribute("data-wm-lane") : null;
+        if (lane) laneOpen.set(lane, (t as HTMLDetailsElement).open);
+      },
+      true,
+    );
+  }
 }
 
 /** Append the active `wiki` param to a URL — the shell's helper, via the deps. */
@@ -703,10 +717,20 @@ let workRefresh: RefreshView = { phase: "idle" };
  *  the slot for the rest of the page's life. */
 let workMapFallback = false;
 let workPollTimer: ReturnType<typeof setTimeout> | null = null;
+/** The listing `runAt` the card was last mounted for. */
+let workMountedFor: number | null = null;
+/** Lanes the reader opened or closed, by lane id; for the page's life. */
+const laneOpen = new Map<string, boolean>();
+let laneListening = false;
+/** A control that could not take focus back (↻ disabled while running): retried
+ *  on the next paint while focus is still nowhere. */
+let pendingFocus: string | null = null;
 
 /** How often ↻ polls the GET, and for how long before it stops waiting. */
 const WORK_POLL_MS = 5_000;
 const WORK_POLL_MAX_MS = 20 * 60_000;
+/** Consecutive failed poll GETs before ↻ stops waiting. */
+const WORK_POLL_MAX_FAILURES = 3;
 
 function doneStorageKey(): string {
   return WORK_MAP_DONE_KEY_PREFIX + readActiveWikiName();
@@ -728,15 +752,40 @@ function writeDoneRaw(v: string | null): void {
 }
 
 function mountWorkCard(runAt: number): void {
+  workMountedFor = runAt;
   if (workBody && workBody.map.runAtMs >= runAt) return paintWorkCard();
   if (workBody) paintWorkCard(); // the older map, until the newer one lands
   loadWorkMap();
+}
+
+/** The adopt path's half of `mountStartCards`: only the Your work card, only
+ *  on a wiki with a map, and only when the listing's `runAt` moved. What's new
+ *  and the Index card are left as they are. */
+export function refreshWorkCardFromListing(): void {
+  const runAt = deps.workMapRunAt ? deps.workMapRunAt() : null;
+  if (runAt === null || workMapFallback || runAt === workMountedFor) return;
+  if (!document.getElementById("wikiWorkCard")) return;
+  const wn = document.getElementById("wikiWhatsNew");
+  if (wn) wn.style.display = "none";
+  mountWorkCard(runAt);
+}
+
+/** A selector for the focused control inside the card, to re-focus after a repaint. */
+function focusedCardControl(el: HTMLElement): string | null {
+  const active = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
+  if (!active || active === el || typeof el.contains !== "function" || !el.contains(active)) return null;
+  if (active.id) return "#" + active.id;
+  const lane = active.tagName === "SUMMARY" ? active.parentElement?.getAttribute("data-wm-lane") : null;
+  return lane ? `[data-wm-lane="${lane}"] > summary` : null;
 }
 
 function paintWorkCard(): void {
   const el = document.getElementById("wikiWorkCard");
   if (!el || !workBody) return;
   const runAt = workBody.map.runAtMs;
+  const lost = !document.activeElement || document.activeElement === document.body;
+  const refocus = focusedCardControl(el) ?? (lost ? pendingFocus : null);
+  pendingFocus = null;
   el.innerHTML = workCardHtml({
     body: workBody,
     pages: deps.pages ? deps.pages() : [],
@@ -745,7 +794,18 @@ function paintWorkCard(): void {
     hrefFor: deps.hrefFor ?? ((rel) => withWiki("/wiki?relPath=" + encodeURIComponent(rel))),
     refresh: workRefresh,
   });
+  if (typeof el.querySelectorAll === "function") {
+    el.querySelectorAll<HTMLDetailsElement>("details[data-wm-lane]").forEach((d) => {
+      const open = laneOpen.get(d.getAttribute("data-wm-lane") ?? "");
+      if (open !== undefined) d.open = open;
+    });
+  }
   el.style.display = "";
+  if (refocus) {
+    const t = el.querySelector(refocus) as HTMLElement | null;
+    t?.focus({ preventScroll: true });
+    if (t && document.activeElement !== t) pendingFocus = refocus;
+  }
 }
 
 function fallBackToWhatsNew(): void {
@@ -815,7 +875,7 @@ function startWorkMapRefresh(): void {
     });
 }
 
-function pollWorkMap(prevRunAt: number, startedAt: number, since: number): void {
+function pollWorkMap(prevRunAt: number, startedAt: number, since: number, failures = 0): void {
   if (workPollTimer) clearTimeout(workPollTimer);
   workPollTimer = setTimeout(() => {
     workPollTimer = null;
@@ -840,8 +900,12 @@ function pollWorkMap(prevRunAt: number, startedAt: number, since: number): void 
         paintWorkCard();
       })
       .catch(() => {
-        if (Date.now() - since > WORK_POLL_MAX_MS) return;
-        pollWorkMap(prevRunAt, startedAt, since);
+        if (failures + 1 >= WORK_POLL_MAX_FAILURES || Date.now() - since > WORK_POLL_MAX_MS) {
+          workRefresh = { phase: "message", text: "Couldn’t check on the re-organize — reload to see the new map.", tone: "warn" };
+          paintWorkCard();
+          return;
+        }
+        pollWorkMap(prevRunAt, startedAt, since, failures + 1);
       });
   }, WORK_POLL_MS);
 }

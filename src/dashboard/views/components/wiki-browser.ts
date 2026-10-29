@@ -109,6 +109,7 @@ import {
   loadDigest,
   loadIndexCoverage,
   mountStartCards,
+  refreshWorkCardFromListing,
   startReindex,
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
@@ -9917,9 +9918,9 @@ function adoptPagesAndRender(applied: PendingPages): void {
   adoptPagesDataAndFacets(applied);
   renderList();
   refreshStartBody();
-  // A run that finished since the last listing shows at once: the card
-  // re-fetches when the listing's `workMap.runAt` moved past its own.
-  if (currentName === null && wikiToolsFlag() && document.getElementById("wikiWorkCard")) mountStartCards();
+  // A run that finished since the last listing shows at once. Only the Your
+  // work card: What's new and the Index card are not re-mounted on an adopt.
+  if (currentName === null && wikiToolsFlag()) refreshWorkCardFromListing();
 }
 
 /** Everything an adopt does EXCEPT painting the row list and the start body — the

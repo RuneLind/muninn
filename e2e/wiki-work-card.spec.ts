@@ -15,7 +15,11 @@
  *     the localStorage half and the listing's mtime-cached `runAt`.
  *  4. **↻'s refusal copy**, against a stubbed GET (`organizable: true`) and a
  *     stubbed 429: no run is started, so no model call.
- *  5. **Legible in both themes**: text colours resolve to their tokens (read on
+ *  5. **A background adopt leaves the start cards alone**: a no-map wiki's
+ *     digest is asked for no more often than before and its in-flight ↻ stays
+ *     disabled; a lane the reader opened stays open across a repaint.
+ *  6. **A ↻ poll whose GET keeps failing settles** and re-enables ↻.
+ *  7. **Legible in both themes**: text colours resolve to their tokens (read on
  *     a body probe) and clear 4.5:1 against what is painted behind them.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
@@ -30,6 +34,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { paintedContrast, token } from "./contrast.ts";
+import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-work-card");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -191,6 +196,105 @@ test("a wiki without a map still renders What's new", async ({ page }) => {
   expect(digests.length).toBeGreaterThan(0);
 });
 
+let lateN = 0;
+/** Force a background listing adopt: a page lands on disk, the client throttle
+ *  passes, the tab regains focus — an unchanged listing is never adopted. */
+async function forceAdopt(page: Page, wiki: string): Promise<void> {
+  const title = `Late page ${++lateN}`;
+  await writeFile(path.join(roots[wiki]!, `late-${lateN}.md`), md(title), "utf8");
+  await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.locator("#wikiList")).toContainText(title);
+  await page.waitForTimeout(300);
+}
+
+test("a no-map wiki asks for the digest no more often across adopts after a digest error", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: { digest: null, error: "connector busy" } }));
+  await page.clock.install();
+  const digests = await openStart(page, NONE);
+  const wn = page.locator("#wikiWhatsNew");
+  await expect(wn).toContainText("connector busy");
+  expect(digests).toHaveLength(1);
+  await forceAdopt(page, NONE);
+  await forceAdopt(page, NONE);
+  expect(digests).toHaveLength(1);
+  await expect(wn).toContainText("connector busy");
+  await expect(wn.locator("#wikiWhatsNewRetry")).toBeVisible();
+});
+
+test("What's new's in-flight ↻ stays disabled across an adopt", async ({ page }) => {
+  const digest = { bullets: "- x", html: "<ul><li>Something changed</li></ul>", generatedAt: Date.now(), logMtimeMs: 0, entryCount: 1, fromDate: "2026-10-28", toDate: "2026-10-29" };
+  let release: (() => Promise<void>) | null = null;
+  await page.route("**/api/wiki/digest*", (route) => {
+    if (!route.request().url().includes("refresh=1")) return route.fulfill({ json: { digest } });
+    release = () => route.fulfill({ json: { digest } });
+  });
+  await page.clock.install();
+  await openStart(page, NONE);
+  const spin = page.locator("#wikiWhatsNewRefresh");
+  await expect(spin).toBeEnabled();
+  await spin.click();
+  await expect(spin).toBeDisabled();
+  await expect.poll(() => release !== null).toBe(true);
+  await forceAdopt(page, NONE);
+  await expect(spin).toBeDisabled();
+  await expect(spin).toHaveClass(/spinning/);
+  await release!();
+  await expect(spin).toBeEnabled();
+});
+
+test("a lane the reader opened stays open across a repaint", async ({ page }) => {
+  await openStart(page, FRESH);
+  const card = page.locator("#wikiWorkCard");
+  const cooling = card.locator('[data-wm-lane="cooling"]');
+  await cooling.locator("summary").click();
+  await expect(cooling).toHaveAttribute("open", "");
+  // ✓ repaints the card.
+  await card.locator('[data-wm-done="0"]').click();
+  await expect(card.locator("[data-wm-need]")).toHaveCount(1);
+  await expect(cooling).toHaveAttribute("open", "");
+  // A start-tab switch rebuilds the card's slot.
+  await page.locator('.wiki-tab[data-tab="timeline"]').click();
+  await page.locator('.wiki-tab[data-tab="hubs"]').click();
+  await expect(cooling).toHaveAttribute("open", "");
+  await expect(card.locator('[data-wm-lane="quiet"]')).not.toHaveAttribute("open", "");
+  // The reader can close the lane that starts open, and it stays closed.
+  await card.locator('[data-wm-lane="moving"] summary').click();
+  await card.locator("#wikiWorkMapRestore").click();
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await expect(card.locator('[data-wm-lane="moving"]')).not.toHaveAttribute("open", "");
+});
+
+test("a ↻ poll whose GET keeps failing settles and re-enables ↻", async ({ page }) => {
+  let failing = false;
+  let fails = 0;
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    if (failing) {
+      fails++;
+      return route.fulfill({ status: 500, json: { error: "boom" } });
+    }
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - 60 * 60_000 } });
+  });
+  await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
+  await page.clock.install();
+  await openStart(page, FRESH);
+  const btn = page.locator("#wikiWorkMapRefresh");
+  await btn.click();
+  await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
+  failing = true;
+  // Advance in small steps: a poll is scheduled only once the POST's body is read.
+  await expect
+    .poll(async () => {
+      await page.clock.runFor(2_500);
+      return fails;
+    }, { timeout: 20_000 })
+    .toBeGreaterThanOrEqual(3);
+  await expect(page.locator("#wikiWorkMapStatus")).toHaveText("Couldn’t check on the re-organize — reload to see the new map.");
+  await expect(btn).toBeEnabled();
+});
+
 test("✓ dismiss survives a reload and clears when the run time changes", async ({ page }) => {
   await openStart(page, DONE);
   const card = page.locator("#wikiWorkCard");
@@ -224,6 +328,8 @@ test("↻ shows when organizable and states a 429 refusal", async ({ page }) => 
   await expect(btn).toHaveAttribute("title", "Re-organize — last run 5 min ago");
   await btn.click();
   await expect(page.locator("#wikiWorkMapStatus")).toHaveText("Ran 5 min ago — try again in 5 min.");
+  // The repaint keeps focus on ↻.
+  await expect(btn).toBeFocused();
   expect(posted).not.toBeNull();
   expect(posted!.contentType).toContain("application/json");
   expect(posted!.url).not.toContain("force");
