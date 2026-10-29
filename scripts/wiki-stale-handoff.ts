@@ -19,13 +19,15 @@
  *   --ff-only <remote> <default>`, never a stash, reset or switch; each page
  *   committed / uncommitted / carried / NOT carried / deleted), the fix path
  *   that fits the gate, the free report, then «fix by hand»: the hits and the
- *   To-check pages on the session's own pages, and nothing else. That list is
- *   saved, so the second call can count what was fixed.
+ *   To-check pages on the session's own pages, and nothing else. Nothing is
+ *   saved between the calls.
  * - `--check`: the gate again, the reports (not printed), then Check and the
  *   sends when the gate passes and at most {@link COSTED_PAGE_CAP} pages would
  *   spend model calls (a page whose To-check verdicts are all cached costs
  *   nothing and is checked whatever the count), then one `Stale:` line per
- *   wiki, ready to paste, its `to check:` part with each reason in brackets.
+ *   wiki, ready to paste, its `to check:` part with each reason in brackets:
+ *   what is open now (own items still not settled, own pages the reports did
+ *   not read the session's text of, To-check pages), never what was fixed.
  *   Once the reports hit their deadline only the cached pages Check (the cap
  *   cannot be counted on missing reports), and no Check starts that could run
  *   past the printed bound.
@@ -35,9 +37,8 @@
  * shell, a bound per call, no prompt (`GIT_TERMINAL_PROMPT=0`; ssh in batch
  * mode unless the user configured their own ssh command).
  */
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   CHECK_PAGE_DEADLINE_MS,
@@ -63,8 +64,6 @@ const CALLS_PER_PAGE = 10;
 /** `git pull`: a network call. Every other git call reads local files. */
 export const PULL_TIMEOUT_MS = 30_000;
 const GIT_TIMEOUT_MS = 10_000;
-/** A first call's fix list older than this is not the same handoff. */
-const STATE_MAX_AGE_MS = 24 * 3600_000;
 
 export interface GitResult {
   code: number;
@@ -386,7 +385,6 @@ export interface OwnItem {
   /** What the reports, and on `--check` this run's Check, say of it. `settled` asks nothing of the session. */
   state: "stale" | "unconfirmed" | "unsure" | "unchecked" | "settled";
 }
-const itemKey = (i: OwnItem) => `${i.kind}\u0001${i.page.toLowerCase()}\u0001${i.target}\u0001${i.kind === "hit" ? i.text : ""}`;
 /** Tags that ask nothing of the session. */
 const SETTLED = new Set(["true", "not-status", "fixed"]);
 const stateOf = (verdict: unknown, none: OwnItem["state"]): OwnItem["state"] =>
@@ -429,17 +427,6 @@ export function planChecks(reports: Json[], cap = COSTED_PAGE_CAP): { check: str
   return { check: overCap ? free : [...free, ...costed], costed, free, overCap };
 }
 
-interface SavedState {
-  at: number;
-  items: OwnItem[];
-}
-const dropState = (file: string) => {
-  try {
-    rmSync(file, { force: true });
-  } catch {
-    // Unremovable: the next --check counts this list again.
-  }
-};
 const MISSING = "not in the main checkout";
 /** A report error as the session reads it. */
 const pageErrorWhy = (error: string) => (error.startsWith("no page ") ? MISSING : error);
@@ -454,8 +441,6 @@ const UNREAD: Partial<Record<PageState, string>> = {
 };
 /** The gate states the session must act on before Check reads its text. */
 const ACT_ON = new Set<PageState>(["uncommitted", "not-carried", "main-uncommitted", "deleted-uncommitted", "missing"]);
-const stateFile = (dir: string, wiki: string, main: string, key: string) =>
-  path.join(dir, `${createHash("sha256").update(`${main}\n${wiki}\n${key}`).digest("hex").slice(0, 24)}.json`);
 
 /**
  * The `Stale:` line for one wiki, from what the second call got. Every
@@ -467,8 +452,6 @@ export function staleLine(o: {
   /** Pages the run asked a report for. */
   asked: string[];
   isOwn: (rel: string) => boolean;
-  /** The first call's own items, when saved. */
-  before?: OwnItem[];
   /** Why Check did not run at all (the gate, readonly, no muninn). */
   checkSkipped?: string;
   /** Pages left unchecked because they are over the cap. */
@@ -477,11 +460,9 @@ export function staleLine(o: {
   checkSkips?: Record<string, string>;
   /** Pages the gate dropped: deleted, missing. */
   missing: string[];
-  /** Why the reports do not read the session's text of a page (lower-cased relPath → reason): the gate's page states. */
-  unread?: Record<string, string>;
   /** A gate skip for the whole checkout: no report reads the session's text. */
   wideSkip?: string;
-  /** Pages the gate says the session must act on, and why, in gate order: kept when no report came. */
+  /** Pages the gate says the session must act on, and why, in gate order: the reports do not read the session's text of them. */
   actOn?: [string, string][];
 }): string {
   const { ledger: L, wiki } = o;
@@ -495,29 +476,12 @@ export function staleLine(o: {
     if (!list.has(page)) list.set(page, why);
   };
 
-  // Own fixes: what the first call listed and a report that read the session's text no longer shows.
+  // Own pages whose report did not read the session's text: their items say nothing of its edits.
   const reported = new Set(L.reports.map((r) => String(r.page.relPath).toLowerCase()));
-  const notReRead = (i: OwnItem): string | undefined => {
-    if (o.wideSkip) return o.wideSkip;
-    // A hit is on its report's page; an own To-check page is in the changed page's report.
-    const from = i.kind === "hit" ? i.page : i.target;
-    for (const p of new Set([from, i.page])) {
-      const why = o.unread?.[p.toLowerCase()];
-      if (why) return why;
-    }
-    if (reported.has(from.toLowerCase())) return undefined;
-    const e = L.pageErrors.find((x) => x.page.toLowerCase() === from.toLowerCase());
-    return e ? pageErrorWhy(e.error) : (L.stopped ?? "not reported");
-  };
-  const now = ownItems(L.reports, o.isOwn, L.checks);
-  const nowKeys = new Set(now.map(itemKey));
-  const fixed: OwnItem[] = [];
-  for (const i of o.before ?? []) {
-    const why = notReRead(i);
-    if (why) add(i.page, `not re-read: ${why}`);
-    else if (!nowKeys.has(itemKey(i))) fixed.push(i);
-  }
-  for (const i of now) if (i.state !== "settled") add(i.page, ownLabel(i));
+  const missing = new Set(o.missing.map((m) => m.toLowerCase()));
+  if (o.wideSkip) for (const p of o.asked) add(p, `not re-read: ${o.wideSkip}`);
+  for (const [p, why] of o.actOn ?? []) if (!missing.has(p.toLowerCase())) add(p, `not re-read: ${why}`);
+  for (const i of ownItems(L.reports, o.isOwn, L.checks)) if (i.state !== "settled") add(i.page, ownLabel(i));
 
   for (const e of L.pageErrors) add(e.page, pageErrorWhy(e.error));
   for (const m of o.missing) add(m, MISSING);
@@ -575,11 +539,9 @@ export function staleLine(o: {
   }
 
   const parts: string[] = [];
-  if (fixed.length) parts.push(`${fixed.length} status lines fixed on ${[...new Set(fixed.map((i) => i.page))].join(", ")}`);
   if (sent) parts.push(`${sent} fixes sent to the Gardener`);
   if (list.size) parts.push(`to check: ${[...list].map(([p, why]) => `${p} (${why})`).join(", ")}`);
   if (!parts.length) parts.push(L.stopped ? `not checked (${L.stopped})` : "nothing stale on the changed pages");
-  if (o.before === undefined && L.reports.length) parts.push("own fixes not counted (no first --handoff call saved)");
   if (L.readonly) parts.push(`check unavailable: readonly ${L.readonly}`);
   return head + parts.join("; ");
 }
@@ -591,8 +553,6 @@ export interface HandoffDeps {
   postJson?: PostJson;
   env?: Record<string, string | undefined>;
   write?: (line: string) => void;
-  /** Where the first call saves its fix list (default: the OS temp dir). */
-  stateDir?: string;
   deadlineMs?: number;
   checkDeadlineMs?: number;
   sendDeadlineMs?: number;
@@ -731,14 +691,11 @@ async function oneWiki(
   };
   const ownRels = new Set([...reportable, ...dropped]);
   const isOwn = (rel: string) => isOwnPage(rel, new Set([...ownRels, ...ledger.reports.map((r) => r.page.relPath as string)]), []);
-  const stateDir = deps.stateDir ?? path.join(tmpdir(), "muninn-wiki-stale-handoff");
-  const file = stateFile(stateDir, wiki, main, args.session || [...reportable].sort().join("\n"));
 
   if (!second) {
     await runWikiStale(common, runDeps);
     if (ledger.stopped && !ledger.reports.length) {
-      // No report: there is nothing for a --check call to add (D13), and an earlier handoff's list must not count for it.
-      dropState(file);
+      // No report: there is nothing for a --check call to add (D13).
       say(`fix by hand: no report (${ledger.stopped}) — read your own pages for status lines yourself`);
       return void say(`Stale: ${wiki} — not checked (${ledger.stopped})`);
     }
@@ -757,27 +714,10 @@ async function oneWiki(
       say(i.kind === "hit" ? `  ${i.page} L${i.line} after [[${i.target}]]: ${i.text.slice(0, 160)}` : `  ${i.page} L${i.line} — to check after ${i.target}: read it against the change`);
     }
     if (noReport.length) say(`  not complete — no report for ${noReport.join(", ")}: read those pages for status lines yourself`);
-    // Written whole and renamed into place, so --check never reads half a list.
-    try {
-      mkdirSync(stateDir, { recursive: true });
-      const part = `${file}.${process.pid}.part`;
-      writeFileSync(part, JSON.stringify({ at: Date.now(), items } satisfies SavedState));
-      renameSync(part, file);
-    } catch {
-      // Not saved: the second call counts no fixes, or an earlier list this write could not replace.
-    }
     say(`then: commit (and push) those fixes by the fix path, then run the same command with --check`);
     return;
   }
 
-  // Second call: the first call's list, if this handoff made one. It counts once: the file goes once the line is printed.
-  let before: OwnItem[] | undefined;
-  try {
-    const s = JSON.parse(readFileSync(file, "utf8")) as SavedState;
-    if (Date.now() - s.at < STATE_MAX_AGE_MS && Array.isArray(s.items)) before = s.items;
-  } catch {
-    before = undefined;
-  }
   let plan: ReturnType<typeof planChecks> | undefined;
   /** Changed pages whose Check this run did not start, and why. */
   const checkSkips: Record<string, string> = {};
@@ -814,11 +754,9 @@ async function oneWiki(
       return false;
     },
   });
-  const unread: Record<string, string> = {};
   const actOn = new Map<string, string>();
   for (const p of gate.pages) {
     const why = UNREAD[p.state];
-    if (why) unread[p.rel.toLowerCase()] ??= why;
     if (why && ACT_ON.has(p.state) && !actOn.has(p.rel)) actOn.set(p.rel, why);
   }
   const checkSkipped = gate.skip ?? (ledger.readonly ? `readonly ${ledger.readonly}` : undefined);
@@ -828,15 +766,12 @@ async function oneWiki(
       ledger,
       asked: reportable,
       isOwn,
-      ...(before ? { before } : {}),
       ...(checkSkipped ? { checkSkipped } : {}),
       overCap: plan?.overCap ? plan.costed : [],
       checkSkips,
       missing,
-      unread,
       actOn: [...actOn],
       ...(gate.wideSkip ? { wideSkip: gate.wideSkip } : {}),
     }),
   );
-  dropState(file);
 }
