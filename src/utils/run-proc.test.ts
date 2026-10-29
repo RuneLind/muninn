@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -246,6 +246,60 @@ describe("runProc: the timeout's kill", () => {
     }
   });
 
+  test("processGroup + groupGrace: a member that traps SIGTERM keeps the grace after its leader died, then gets SIGKILL", async () => {
+    const dir = testTempDirSync(path.join(tmpdir(), "run-proc-group-grace-"));
+    const pidFile = path.join(dir, "pid");
+    try {
+      const t0 = performance.now();
+      const err = await runProc(
+        ["/bin/bash", "-c", `bash -c "trap 'sleep 0.3; touch ${dir}/cleaned' TERM; while :; do sleep 0.05; done" & echo $! > ${pidFile}; wait`],
+        200,
+        "group-grace",
+        { processGroup: true, groupGrace: true, killGraceMs: 800 },
+      ).catch((e) => e);
+      const ms = performance.now() - t0;
+      expect(err).toBeInstanceOf(ProcTimeoutError);
+      expect(existsSync(path.join(dir, "cleaned"))).toBe(true);
+      expect(ms).toBeGreaterThanOrEqual(200 + 800 - 30);
+      expect(ms).toBeLessThan(200 + 800 + 1_000);
+      const member = pidAt(pidFile);
+      const deadline = performance.now() + 1_000;
+      while (alive(member) && performance.now() < deadline) await Bun.sleep(20);
+      expect(alive(member)).toBe(false);
+    } finally {
+      try {
+        process.kill(pidAt(pidFile), "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a timed-out call leaves nothing that holds the event loop: no timer, no pipe a setsid grandchild keeps open", async () => {
+    const dir = testTempDirSync(path.join(tmpdir(), "run-proc-hold-"));
+    const pidFile = path.join(dir, "outside");
+    const script = path.join(dir, "hold.ts");
+    await Bun.write(
+      script,
+      `import { runProc } from ${JSON.stringify(path.resolve(import.meta.dir, "run-proc.ts"))};
+const t0 = performance.now();
+await runProc(["/bin/sh", "-c", "perl -MPOSIX -e 'POSIX::setsid(); sleep 6' & echo $! > ${pidFile}; exec sleep 30"], 150, "hold", { processGroup: true, quietTimeout: true }).catch(() => {});
+process.on("exit", () => console.log(Math.round(performance.now() - t0)));
+`,
+    );
+    try {
+      const t0 = performance.now();
+      const out = await Bun.$`bun ${script}`.quiet().text();
+      // Returned at the bound, and the process ended with it: not after the kill timers or the grandchild's 6 s.
+      expect(Number(out.trim())).toBeLessThan(150 + 500);
+      expect(performance.now() - t0).toBeLessThan(150 + 1_500);
+    } finally {
+      try {
+        process.kill(pidAt(pidFile), "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("cwd: the child runs where it is told", async () => {
     const dir = testTempDirSync(path.join(tmpdir(), "run-proc-cwd-"));
     try {
@@ -364,24 +418,44 @@ describe("runProc: live process groups die with the parent", () => {
 
   /** A bun parent that runs `head`, starts a group, then does `tail`. Returns
    *  the parent and the group member's pid. */
-  async function parentWithGroup(name: string, tail: string, head = "") {
+  async function parentWithGroup(
+    name: string,
+    tail: string,
+    head = "",
+    opts: { cmd?: (pidFile: string, dir: string) => string[]; wrap?: string[]; timeoutMs?: number; groupGrace?: boolean } = {},
+  ) {
     const dir = testTempDirSync(path.join(tmpdir(), `run-proc-${name}-`));
     const pidFile = path.join(dir, "pid");
     const script = path.join(dir, "parent.ts");
+    const cmd = (opts.cmd ?? groupCmd)(pidFile, dir);
     await Bun.write(
       script,
       [
         `import { runProc } from ${JSON.stringify(RUN_PROC)};`,
         head,
-        `void runProc(${JSON.stringify(groupCmd(pidFile))}, 60_000, "parent", { processGroup: true }).catch(() => {});`,
+        `void runProc(${JSON.stringify(cmd)}, ${opts.timeoutMs ?? 60_000}, "parent", { processGroup: true, quietTimeout: true, groupGrace: ${!!opts.groupGrace} }).catch(() => {});`,
         tail,
         `setInterval(() => {}, 1_000);`,
       ].join("\n"),
     );
-    const parent = Bun.spawn(["bun", script], { stdout: "ignore", stderr: "pipe" });
+    const parent = Bun.spawn([...(opts.wrap ?? []), "bun", script], { stdout: "ignore", stderr: "pipe" });
     const member = await waitForPid(pidFile);
     return { dir, parent, member };
   }
+  /** A member that writes `term` in `dir` when SIGTERM reaches it, then lives on until SIGKILL. */
+  const termRecorder = (pidFile: string, dir: string) => [
+    "/bin/bash",
+    "-c",
+    // The member writes its pid once its trap is set, so no signal can beat the trap.
+    `bash -c "trap 'touch ${dir}/term' TERM; echo \\$\\$ > ${pidFile}; while :; do sleep 0.05; done" & wait`,
+  ];
+  /** A test's own cleanup, red or green: the bun parent, then the member (its leader only waits on it). */
+  const reapAll = (parent: { kill(sig?: NodeJS.Signals | number): void }, member: number) => {
+    parent.kill("SIGKILL");
+    try {
+      process.kill(member, "SIGKILL");
+    } catch {}
+  };
 
   test("SIGINT to a parent with no handler of its own: the parent still dies on it, and the group with it", async () => {
     const { dir, parent, member } = await parentWithGroup("sigint", "");
@@ -393,9 +467,7 @@ describe("runProc: live process groups die with the parent", () => {
       expect(parent.signalCode).toBe("SIGINT");
       expect(await goneWithin(member, 2_000)).toBe(true);
     } finally {
-      try {
-        process.kill(member, "SIGKILL");
-      } catch {}
+      reapAll(parent, member);
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -410,9 +482,7 @@ describe("runProc: live process groups die with the parent", () => {
       expect(await parent.exited).toBe(7);
       expect(await goneWithin(member, 2_000)).toBe(true);
     } finally {
-      try {
-        process.kill(member, "SIGKILL");
-      } catch {}
+      reapAll(parent, member);
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -430,9 +500,96 @@ describe("runProc: live process groups die with the parent", () => {
       expect(await parent.exited).toBe(5);
       expect(await goneWithin(member, 2_000)).toBe(true);
     } finally {
+      reapAll(parent, member);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("SIGHUP to a parent with no handler: the parent dies on it, and the group with it", async () => {
+    const { dir, parent, member } = await parentWithGroup("sighup", "");
+    try {
+      parent.kill("SIGHUP");
+      await parent.exited;
+      expect(parent.signalCode).toBe("SIGHUP");
+      expect(await goneWithin(member, 2_000)).toBe(true);
+    } finally {
+      reapAll(parent, member);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const [sig, wrap] of [
+    ["SIGHUP", ["nohup"]],
+    ["SIGINT", ["/bin/sh", "-c", `trap '' INT; exec "$@"`, "sh"]],
+  ] as const) {
+    test(`${sig} inherited as ignored (${wrap[0]}) stays ignored: the parent and its group live on`, async () => {
+      const { dir, parent, member } = await parentWithGroup(`ign-${sig}`, "", "", { wrap: [...wrap] });
       try {
-        process.kill(member, "SIGKILL");
-      } catch {}
+        parent.kill(sig);
+        const r = await Promise.race([parent.exited, Bun.sleep(1_000).then(() => "alive")]);
+        expect(r).toBe("alive");
+        expect(alive(member)).toBe(true);
+      } finally {
+        reapAll(parent, member);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("inheritedIgnore reads this process's own dispositions", async () => {
+    const { inheritedIgnore } = await import("./run-proc.ts");
+    const probe = `import { inheritedIgnore } from ${JSON.stringify(RUN_PROC)}; console.log(["SIGHUP","SIGINT","SIGTERM"].map((s) => inheritedIgnore(s as any)).join(","));`;
+    const run = async (wrap: string[]) => (await Bun.$`${wrap} bun -e ${probe}`.quiet().text()).trim();
+    expect(await run([])).toBe("false,false,false");
+    expect(await run(["nohup"])).toBe("true,false,false");
+    expect(await run(["/bin/sh", "-c", `trap '' INT TERM; exec "$@"`, "sh"])).toBe("false,true,true");
+    expect(typeof inheritedIgnore("SIGHUP")).toBe("boolean");
+  });
+
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    test(`${sig} to a parent with no handler reaches the group as SIGTERM first, then SIGKILL within the grace`, async () => {
+      const { RUN_PROC_EXIT_TERM_GRACE_MS } = await import("./run-proc.ts");
+      const { dir, parent, member } = await parentWithGroup(`term-first-${sig}`, "", "", { cmd: termRecorder });
+      try {
+        const t0 = performance.now();
+        parent.kill(sig);
+        await parent.exited;
+        expect(parent.signalCode).toBe(sig);
+        expect(await goneWithin(member, 1_000)).toBe(true);
+        expect(existsSync(path.join(dir, "term"))).toBe(true);
+        expect(performance.now() - t0).toBeGreaterThanOrEqual(RUN_PROC_EXIT_TERM_GRACE_MS - 50);
+        expect(performance.now() - t0).toBeLessThan(RUN_PROC_EXIT_TERM_GRACE_MS + 1_500);
+      } finally {
+        reapAll(parent, member);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("process.exit() reaches a live group as SIGTERM first, then SIGKILL", async () => {
+    const { dir, parent, member } = await parentWithGroup("exit-term", `setTimeout(() => process.exit(0), 300);`, "", { cmd: termRecorder });
+    try {
+      expect(await parent.exited).toBe(0);
+      expect(await goneWithin(member, 1_000)).toBe(true);
+      expect(existsSync(path.join(dir, "term"))).toBe(true);
+    } finally {
+      reapAll(parent, member);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a signal inside a timeout's grace still ends a member the timeout has not killed yet", async () => {
+    // The leader dies on the timeout's SIGTERM; the member traps it and, with groupGrace, keeps the grace.
+    // Forgetting the group when its leader died would leave the member to a SIGKILL the dead parent never sends.
+    const { dir, parent, member } = await parentWithGroup("grace-signal", "", "", { cmd: termRecorder, timeoutMs: 200, groupGrace: true });
+    try {
+      for (const end = performance.now() + 3_000; !existsSync(path.join(dir, "term")) && performance.now() < end; ) await Bun.sleep(10);
+      expect(existsSync(path.join(dir, "term"))).toBe(true);
+      parent.kill("SIGINT");
+      await parent.exited;
+      expect(await goneWithin(member, 1_500)).toBe(true);
+    } finally {
+      reapAll(parent, member);
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -446,9 +603,7 @@ describe("runProc: live process groups die with the parent", () => {
       expect(await parent.exited).toBe(0);
       expect(await goneWithin(member, 2_000)).toBe(true);
     } finally {
-      try {
-        process.kill(member, "SIGKILL");
-      } catch {}
+      reapAll(parent, member);
       rmSync(dir, { recursive: true, force: true });
     }
   });

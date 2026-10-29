@@ -219,12 +219,14 @@ async function diesWithin(pid: number, ms: number): Promise<boolean> {
   }
   return false;
 }
-/** A test's own cleanup: no stub process outlives it. */
+/** A test's own cleanup: no stub process outlives it, nor any process of a group one of them leads. */
 const reap = (...pids: number[]) => {
   for (const pid of pids) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {}
+    for (const target of [-pid, pid]) {
+      try {
+        process.kill(target, "SIGKILL");
+      } catch {}
+    }
   }
 };
 async function waitFor(file: string, ms: number): Promise<void> {
@@ -362,6 +364,195 @@ await call;
     const out = await runHandoff(["--handoff", "--pages", "/x/plans/a.md"], { git: gitRunner("/nonexistent/bin/git") });
     expect(out).toEqual(["skipped /x/plans/a.md — git not found", "Stale: not checked (git not found — fix your own lines by hand)"]);
   });
+});
+
+/**
+ * Class check (round 3 on the runner): the runner's state space, enumerated.
+ * Rows are what git's group does when its time is up, columns what happens to
+ * this process meanwhile. Each cell runs a real `git commit -a` (which holds
+ * index.lock while its pre-commit hook runs) in a bun parent, and checks: the
+ * call or the parent ends within its bound plus run-proc's grace, nothing is
+ * left in git's process group, no index.lock is left, and the parent's exit.
+ */
+describe("class check: gitRunner's state space through run-proc", () => {
+  const BOUND = 2_500;
+  /** TERM_GRACE_MS (1 s) + run-proc's post-kill wait (1 s) + slack for a loaded machine. */
+  const SLACK = 2_000 + 1_500;
+  /** run-proc's exit/signal grace (1 s) + slack. */
+  const END_SLACK = 1_000 + 1_500;
+  type Child = "normal" | "dies-on-term" | "ignores-term" | "setsid-holds-pipe";
+  type Event = "none" | "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGHUP under nohup" | "SIGINT inherited-ignored" | "exit";
+  const CHILDREN: Child[] = ["normal", "dies-on-term", "ignores-term", "setsid-holds-pipe"];
+  const EVENTS: Event[] = ["none", "SIGINT", "SIGTERM", "SIGHUP", "SIGHUP under nohup", "SIGINT inherited-ignored", "exit"];
+  const SIG_CODE = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 } as const;
+
+  /** The pre-commit hook: writes `ready` as «pgid», «pids in the group», «pid outside it», then behaves as `child`. */
+  const hook = (child: Child, ready: string) => {
+    const report = (pids: string, outside = "") =>
+      `printf '%s\\n%s\\n%s\\n' "$(ps -o pgid= -p $$ | tr -d ' ')" "${pids}" "${outside}" > ${ready}.tmp && mv ${ready}.tmp ${ready}\n`;
+    switch (child) {
+      case "normal":
+        return `#!/bin/sh\n${report("$$")}exit 0\n`;
+      case "dies-on-term":
+        return `#!/bin/sh\n${report("$$")}exec sleep 30\n`;
+      case "ignores-term":
+        // The report waits for the child's trap, so no signal can beat it.
+        return `#!/bin/sh\n(trap '' TERM; touch ${ready}.trap; exec sleep 30) &\nwhile [ ! -e ${ready}.trap ]; do sleep 0.01; done\n${report("$$ $!")}sleep 30\n`;
+      case "setsid-holds-pipe":
+        return `#!/bin/sh\nperl -MPOSIX -e 'POSIX::setsid(); sleep 5' &\n${report("$$", "$!")}exec sleep 30\n`;
+    }
+  };
+  const groupGone = async (pgid: number, ms: number) => {
+    for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(20)) {
+      try {
+        process.kill(-pgid, 0);
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  };
+  const driverSrc = (dir: string) => {
+    const driver = path.join(dir, "driver.ts");
+    writeFileSync(
+      driver,
+      `import { existsSync, writeFileSync } from "node:fs";
+import { gitRunner } from ${JSON.stringify(path.join(import.meta.dir, "wiki-stale-handoff.ts"))};
+const [event, main, bound, out, ready, linger] = process.argv.slice(2);
+const t0 = performance.now();
+const call = gitRunner()(["commit", "-a", "-q", "-m", "x"], main, Number(bound)).then((r) => {
+  writeFileSync(out, JSON.stringify({ ms: performance.now() - t0, timedOut: !!r.timedOut, code: r.code, at: Date.now() }));
+});
+if (event === "exit") {
+  while (!existsSync(ready)) await Bun.sleep(10);
+  process.exit(0);
+}
+await call;
+if (linger === "1") await Bun.sleep(5_000);
+`,
+    );
+    return driver;
+  };
+
+  interface Cell {
+    child: Child;
+    event: Event;
+    errors: string[];
+    /** What was measured, printed with WIKI_STALE_RUNNER_TABLE=1. */
+    seen: string;
+  }
+  async function runCell(child: Child, event: Event, driver: string): Promise<Cell> {
+    const errors: string[] = [];
+    const fail = (m: string) => errors.push(m);
+    const seen: string[] = [];
+    const main = await repo();
+    const ready = path.join(main, "ready");
+    const out = path.join(main, "out.json");
+    writeFileSync(path.join(main, ".git/hooks/pre-commit"), hook(child, ready));
+    chmodSync(path.join(main, ".git/hooks/pre-commit"), 0o755);
+    write(main, "plans/a.md", "# A, edited\n");
+    const signal = event === "none" || event === "exit" ? undefined : (event.split(" ")[0] as keyof typeof SIG_CODE);
+    const ignored = event === "SIGHUP under nohup" || event === "SIGINT inherited-ignored";
+    // The timeout is the event in the rows where the parent lives on; elsewhere the parent's own end is.
+    const bound = event === "none" || ignored ? BOUND : 60_000;
+    // A normal call is over before any signal: the parent lingers to take it with no group live.
+    const linger = child === "normal" && signal && !ignored ? "1" : "0";
+    const base = [process.execPath, "--no-env-file", driver, event, main, String(bound), out, ready, linger];
+    const argv = event === "SIGHUP under nohup" ? ["nohup", ...base] : event === "SIGINT inherited-ignored" ? ["/bin/sh", "-c", `trap '' INT; exec "$@"`, "sh", ...base] : base;
+    const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    let pgid = 0;
+    let pids: number[] = [];
+    let outside = 0;
+    try {
+      await waitFor(ready, 15_000);
+      const [g, p, o] = readFileSync(ready, "utf8").split("\n");
+      pgid = Number(g);
+      pids = p!.trim().split(" ").map(Number);
+      outside = Number(o) || 0;
+      if (child === "normal" && signal && !ignored) await waitFor(out, 10_000);
+      const t0 = Date.now();
+      if (signal) proc.kill(signal);
+      const code = await Promise.race([proc.exited, Bun.sleep(BOUND + SLACK + 5_000).then(() => "hung" as const)]);
+      const endedMs = Date.now() - t0;
+      seen.push(`exit ${code} after ${endedMs} ms`);
+      const want = signal && !ignored ? SIG_CODE[signal] : 0;
+      if (code !== want) fail(`parent exit ${code}, want ${want}`);
+      if (signal && !ignored && endedMs > END_SLACK) fail(`parent took ${endedMs} ms to die after ${signal}`);
+      if (event === "exit" && endedMs > END_SLACK) fail(`parent took ${endedMs} ms to exit`);
+      if (event === "none" || ignored) {
+        if (!existsSync(out)) fail("the call never returned");
+        else {
+          const r = JSON.parse(readFileSync(out, "utf8"));
+          seen.push(`call ${Math.round(r.ms)} ms timedOut=${r.timedOut}`);
+          const wantTimeout = child !== "normal";
+          if (r.timedOut !== wantTimeout) fail(`timedOut ${r.timedOut}, want ${wantTimeout}`);
+          if (wantTimeout && r.ms > BOUND + SLACK) fail(`the call took ${Math.round(r.ms)} ms`);
+          if (!wantTimeout && r.code !== 0) fail(`commit code ${r.code}`);
+          // No timer or pipe holds the event loop once the call returned: the parent ends right after it.
+          const lag = t0 + endedMs - r.at;
+          if (lag > 700) fail(`the parent lived ${lag} ms past the call's return`);
+        }
+      }
+      if (!(await groupGone(pgid, 2_000))) fail(`git's group ${pgid} still has members`);
+      if (outside) {
+        // Outside the group by construction: not ours to kill, and not in the group either.
+        let g = -1;
+        try {
+          g = Number((await Bun.$`ps -o pgid= -p ${outside}`.quiet().nothrow().text()).trim());
+        } catch {}
+        if (g === pgid) fail("the setsid grandchild is still in git's group");
+      }
+      if (existsSync(path.join(main, ".git/index.lock"))) fail("index.lock left behind");
+    } finally {
+      proc.kill("SIGKILL");
+      reap(...(pgid ? [pgid] : []), ...pids, ...(outside ? [outside] : []));
+    }
+    return { child, event, errors, seen: seen.join(", ") };
+  }
+
+  for (const child of CHILDREN) {
+    test(`${child}: every parent event`, async () => {
+      const driver = driverSrc(tmp());
+      const cells = await Promise.all(EVENTS.map((event) => runCell(child, event, driver)));
+      if (process.env.WIKI_STALE_RUNNER_TABLE === "1") for (const c of cells) process.stderr.write(`| ${c.child} | ${c.event} | ${c.seen} | ${c.errors.join("; ") || "ok"} |\n`);
+      expect(cells.filter((c) => c.errors.length).map((c) => `${c.child} × ${c.event}: ${c.errors.join("; ")}`)).toEqual([]);
+    }, 60_000);
+  }
+
+  test("a parent SIGINT inside a timeout's grace still ends a member that ignores SIGTERM", async () => {
+    // The group stays registered until the timeout's kill is done: forgetting it when git (the leader) dies
+    // would leave the member to the SIGKILL of a parent that is already gone.
+    const driver = driverSrc(tmp());
+    const main = await repo();
+    const ready = path.join(main, "ready");
+    writeFileSync(path.join(main, ".git/hooks/pre-commit"), hook("ignores-term", ready));
+    chmodSync(path.join(main, ".git/hooks/pre-commit"), 0o755);
+    write(main, "plans/a.md", "# A, edited\n");
+    const proc = Bun.spawn([process.execPath, "--no-env-file", driver, "SIGINT", main, "600", path.join(main, "out.json"), ready, "0"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    let pgid = 0;
+    let pids: number[] = [];
+    try {
+      await waitFor(ready, 15_000);
+      const [g, p] = readFileSync(ready, "utf8").split("\n");
+      pgid = Number(g);
+      pids = p!.trim().split(" ").map(Number);
+      // git dies on the timeout's SIGTERM at once; its member ignores it and the grace (1 s) runs.
+      for (const end = Date.now() + 5_000; Date.now() < end; await Bun.sleep(10)) {
+        try {
+          process.kill(pgid, 0);
+        } catch {
+          break;
+        }
+      }
+      await Bun.sleep(100);
+      proc.kill("SIGINT");
+      expect(await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "hung")])).toBe(130);
+      expect(await groupGone(pgid, 2_000)).toBe(true);
+    } finally {
+      proc.kill("SIGKILL");
+      reap(...(pgid ? [pgid] : []), ...pids);
+    }
+  }, 30_000);
 });
 
 // A stub muninn: page reports by relPath, Check streams, sends recorded.
