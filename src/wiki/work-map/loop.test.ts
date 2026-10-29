@@ -119,6 +119,36 @@ describe("workMapDue", () => {
     expect(todaysHourMs(MORNING + 30 * MIN, 5)).toBe(Date.parse("2026-10-20T03:00:00Z"));
     expect(todaysHourMs(Date.parse("2026-10-20T01:00:00Z"), 5)).toBeNull();
   });
+  // 2026-10-25: Oslo falls back 03:00 CEST -> 02:00 CET (01:00Z); 02:00 happens twice.
+  // 2026-03-29: Oslo springs forward 02:00 CET -> 03:00 CEST (01:00Z); 02:00 never happens.
+  test.each([
+    ["fall-back, hour 2: the first 02:00", "2026-10-25T01:30:00Z", 2, "2026-10-25T00:00:00Z"],
+    ["fall-back, hour 2: during the first 02:00", "2026-10-25T00:10:00Z", 2, "2026-10-25T00:00:00Z"],
+    ["fall-back, hour 1", "2026-10-25T02:30:00Z", 1, "2026-10-24T23:00:00Z"],
+    ["fall-back, default hour 5", "2026-10-25T04:30:00Z", 5, "2026-10-25T04:00:00Z"],
+    ["spring-forward, hour 2: when the clock reaches 03:00", "2026-03-29T02:00:00Z", 2, "2026-03-29T01:00:00Z"],
+    ["spring-forward, default hour 5", "2026-03-29T03:30:00Z", 5, "2026-03-29T03:00:00Z"],
+  ])("todaysHourMs across DST: %s", (_name, now, hour, want) => {
+    expect(todaysHourMs(Date.parse(now), hour)).toBe(Date.parse(want));
+  });
+  test.each([
+    ["2026-10-24T23:59:00Z", 2, null],
+    ["2026-03-29T00:59:59Z", 2, null],
+    ["2026-10-25T03:59:00Z", 5, null],
+    ["2026-03-29T02:59:00Z", 5, null],
+  ])("todaysHourMs across DST: %s is before hour %d", (now, hour) => {
+    expect(todaysHourMs(Date.parse(now), hour as number)).toBeNull();
+  });
+  test("fall-back day, hour 2: two failures in the first 02:00 hour still block in the second", () => {
+    const state = {
+      wiki: "m",
+      attempts: [
+        { at: Date.parse("2026-10-25T00:40:00Z"), outcome: "failed" as const },
+        { at: Date.parse("2026-10-25T00:10:00Z"), outcome: "failed" as const },
+      ],
+    };
+    expect(workMapDue(state, Date.parse("2026-10-25T01:30:00Z"), 2).due).toBe(false);
+  });
 });
 
 describe("the loop", () => {
@@ -170,6 +200,29 @@ describe("the loop", () => {
     expect(h.runs).toHaveLength(5);
     await h.advance(6 * MIN);
     expect(h.runs).toHaveLength(6);
+  });
+
+  test("a wake during an in-flight check is not lost: a refused check then starts the wake retries", async () => {
+    const h = harness({ outcomes: Array(10).fill("refused") });
+    let release: ((r: WorkMapRunResult) => void) | null = null;
+    const run = h.deps.run;
+    let calls = 0;
+    startWorkMapLoop(config, {
+      deps: {
+        ...h.deps,
+        run: (w, s) => (++calls === 1 ? new Promise((r) => (release = r)) : run(w, s)),
+      },
+    });
+    await h.advance(WORK_MAP_TICK_MS);
+    expect(calls).toBe(1);
+    await h.jump(3 * HOUR);
+    expect(calls).toBe(1);
+    release!({ outcome: "refused", reason: "x" });
+    await Bun.sleep(0);
+    const releasedAt = h.now();
+    await h.advance(20 * MIN);
+    // The remembered wake checks on the next tick, then retries three times.
+    expect(h.runs.map((r) => Math.round((r.at - releasedAt) / MIN))).toEqual([1, 6, 11, 16]);
   });
 
   test("the stop hook: no tick schedules or runs after it, and the run gets an aborted signal", async () => {

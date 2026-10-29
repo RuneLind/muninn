@@ -32,7 +32,7 @@ import {
   type WorkMapRunDeps,
   type WorkMapRunResult,
 } from "./run.ts";
-import { fileStateStore, type WorkMapState } from "./state.ts";
+import { fileStateStore, WORK_MAP_MODEL_FAILURES_PER_DAY, type WorkMapState } from "./state.ts";
 
 const log = getLog("wiki", "work-map");
 
@@ -44,26 +44,39 @@ export const WORK_MAP_WAKE_RETRY_MS = 5 * 60_000;
 export const WORK_MAP_WAKE_RETRIES = 3;
 /** A success this recent means the wiki is done for the day. */
 export const WORK_MAP_FRESH_MS = 20 * 60 * 60_000;
-/** Runs failed after the model call, since the day's hour, before the loop
- *  waits for the next day. */
-export const WORK_MAP_MODEL_FAILURES_PER_DAY = 2;
 
 const OSLO_CLOCK = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/Oslo",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
   hour: "2-digit",
   minute: "2-digit",
-  second: "2-digit",
   hourCycle: "h23",
 });
 
-/** The most recent instant at `hour`:00 Europe/Oslo at or before `nowMs`,
- *  or null when today's hour has not come yet. */
+function osloWall(ms: number): { date: string; minutes: number } {
+  const p = Object.fromEntries(OSLO_CLOCK.formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, minutes: Number(p.hour) * 60 + Number(p.minute) };
+}
+
+/**
+ * The first instant of today's Oslo date whose wall clock reads `hour`:00 or
+ * later, or null when that is after `nowMs`. On the fall-back day an hour that
+ * happens twice resolves to its first occurrence; on the spring-forward day an
+ * hour that never happens resolves to the moment the clock skips past it.
+ */
 export function todaysHourMs(nowMs: number, hour: number): number | null {
-  const parts = Object.fromEntries(OSLO_CLOCK.formatToParts(new Date(nowMs)).map((p) => [p.type, p.value]));
-  const h = Number(parts.hour);
-  if (h < hour) return null;
-  const into = ((h - hour) * 3600 + Number(parts.minute) * 60 + Number(parts.second)) * 1000 + (nowMs % 1000);
-  return nowMs - into;
+  const today = osloWall(nowMs).date;
+  const [y, m, d] = today.split("-").map(Number) as [number, number, number];
+  const wallAsUtc = Date.UTC(y, m - 1, d, hour);
+  // Oslo is UTC+1 or UTC+2, so the boundary is one of these two instants.
+  const boundary = [wallAsUtc - 2 * 3_600_000, wallAsUtc - 3_600_000].find((ms) => {
+    const w = osloWall(ms);
+    return w.date === today && w.minutes >= hour * 60;
+  });
+  if (boundary === undefined || boundary > nowMs) return null;
+  return boundary;
 }
 
 /** Is `wiki` due for a run now, given its state file? */
@@ -192,6 +205,7 @@ export function startWorkMapLoop(
   let lastCheck: number | null = null;
   let wakeRetriesLeft = 0;
   let nextWakeRetryAt: number | null = null;
+  let pendingWake = false;
 
   const schedule = () => {
     if (!live()) return;
@@ -221,9 +235,13 @@ export function startWorkMapLoop(
     timer = null;
     if (!live()) return;
     const now = deps.now();
-    const woke = lastTick !== null && now - lastTick > WORK_MAP_WAKE_GAP_MS;
+    const woke = pendingWake || (lastTick !== null && now - lastTick > WORK_MAP_WAKE_GAP_MS);
     lastTick = now;
-    if (checking) return schedule();
+    pendingWake = false;
+    if (checking) {
+      pendingWake = woke;
+      return schedule();
+    }
     let reason: "boot" | "wake" | "hourly" | "wake-retry" | null = null;
     if (lastCheck === null) reason = "boot";
     else if (woke) reason = "wake";

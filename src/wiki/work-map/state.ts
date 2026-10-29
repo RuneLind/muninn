@@ -34,8 +34,25 @@ const stateSchema = z.object({
 export type WorkMapAttempt = z.infer<typeof attempt>;
 export type WorkMapState = z.infer<typeof stateSchema>;
 
-/** Attempts kept per wiki: enough for the retry gate and a glance. */
+/** Attempts kept per wiki, for a glance. */
 const ATTEMPTS_KEPT = 10;
+/** Runs failed after the model call, since the day's hour, before the loop
+ *  waits for the next day. The store keeps this many failures past
+ *  `ATTEMPTS_KEPT`, so hourly refusals cannot evict them and reopen the gate. */
+export const WORK_MAP_MODEL_FAILURES_PER_DAY = 2;
+
+/** The newest `ATTEMPTS_KEPT` attempts, plus older failures up to the gate's count. */
+function keptAttempts(attempts: WorkMapAttempt[]): WorkMapAttempt[] {
+  const kept = attempts.slice(0, ATTEMPTS_KEPT);
+  let failures = kept.filter((x) => x.outcome === "failed").length;
+  for (const older of attempts.slice(ATTEMPTS_KEPT)) {
+    if (failures >= WORK_MAP_MODEL_FAILURES_PER_DAY) break;
+    if (older.outcome !== "failed") continue;
+    kept.push(older);
+    failures++;
+  }
+  return kept;
+}
 
 export interface WorkMapStateStore {
   read(wiki: string): Promise<WorkMapState | null>;
@@ -79,7 +96,7 @@ export function fileStateStore(dir: string = WORK_MAP_STATE_DIR): WorkMapStateSt
         const next: WorkMapState = {
           wiki,
           ...(a.outcome === "ok" ? { lastSuccessAt: a.at } : prev.lastSuccessAt !== undefined ? { lastSuccessAt: prev.lastSuccessAt } : {}),
-          attempts: [a, ...prev.attempts].slice(0, ATTEMPTS_KEPT),
+          attempts: keptAttempts([a, ...prev.attempts]),
         };
         memory.set(key, { state: next, dirty: true });
         await mkdir(dir, { recursive: true });
