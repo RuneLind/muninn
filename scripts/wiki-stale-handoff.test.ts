@@ -1128,6 +1128,17 @@ describe("fix round 2 batch 3: index flags and ignore rules cannot hide a page's
     expect((await runGate(m2, [await page(path.join(wt, "plans/a.md"))], git)).pages[0]!.state).toBe("uncommitted");
   });
 
+  test("a page new in the worktree's commit and absent from the main checkout is not carried, not a main-copy edit", async () => {
+    const main = await repo();
+    await g(main, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "fix");
+    write(wt, "plans/new.md", "# New\n");
+    await g(wt, "add", ".");
+    await g(wt, "commit", "-qm", "new");
+    expect((await runGate(main, [await page(path.join(wt, "plans/new.md"))], git)).pages[0]!.state).toBe("not-carried");
+  });
+
   test("an ignored page git cannot read is not clean", async () => {
     const main = await repo();
     write(main, ".gitignore", "plans/ign.md\n");
