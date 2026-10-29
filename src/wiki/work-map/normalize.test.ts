@@ -236,6 +236,13 @@ describe("normalizeWorkMapAnswer, step by step", () => {
     expect(daily).toEqual([{ day: osloDay(t), commits: 0, sessions: 2 }]);
   });
 
+  test("dailyActivity: two events with no session id, at different times on two pages, count as two", () => {
+    const t = NOW - 2 * DAY;
+    const events: Record<string, WorkEvent[]> = { "a.md": [[t, 1, "focus"]], "b.md": [[t + 60_000, 1, "touch"]] };
+    const daily = dailyActivity(["a.md", "b.md"], { nowMs: NOW, sessionsSinceMs: NOW - 8 * DAY, gitTouches: new Map(), workEvents: (r) => events[r] });
+    expect(daily).toEqual([{ day: osloDay(t), commits: 0, sessions: 2 }]);
+  });
+
   test("dailyActivity: days 9–28 count commits, sessions only inside the window", () => {
     const old = NOW - 15 * DAY;
     const daily = dailyActivity(["x.md"], {
@@ -374,6 +381,35 @@ describe("workMapAnswerSchema", () => {
     // An empty list is a valid (empty) answer.
     expect(workMapAnswerSchema.safeParse({ ...base, efforts: [] }).success).toBe(true);
   });
+  test("a null or missing related why, needsYou action or theme efforts list reads as empty", () => {
+    const base = { summary: "s", needsYou: [], themes: [], loose: [] };
+    const a = effort("a", [{ id: "p1", role: "plan" }]);
+    const parsed = workMapAnswerSchema.parse({
+      ...base,
+      efforts: [{ ...a, related: [{ id: "b", why: null }, { id: "c" }] }],
+      needsYou: [
+        { title: "t1", kind: "decision", why: "w", action: null },
+        { title: "t2", kind: "decision", why: "w" },
+      ],
+      themes: [
+        { name: "T1", efforts: null },
+        { name: "T2" },
+      ],
+    });
+    expect(parsed.efforts[0]!.related).toEqual([
+      { id: "b", why: "" },
+      { id: "c", why: "" },
+    ]);
+    expect(parsed.needsYou.map((n) => [n.title, n.action])).toEqual([
+      ["t1", ""],
+      ["t2", ""],
+    ]);
+    expect(parsed.themes).toEqual([
+      { name: "T1", efforts: [] },
+      { name: "T2", efforts: [] },
+    ]);
+  });
+
   test("a null parent or derivedFrom reads as absent", () => {
     const parsed = workMapAnswerSchema.parse({
       summary: "s",

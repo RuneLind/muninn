@@ -229,6 +229,22 @@ describe("startWorkMapRun", () => {
     expect(state.attempts).toHaveLength(0);
   });
 
+  test("a throw while the stop hook fires records no attempt, before or after the model call", async () => {
+    const stopThenThrow = async (): Promise<never> => {
+      abortWorkMapRuns();
+      throw new Error("EIO");
+    };
+    const pre = deps({ inputs: { ...warm, rebuildIndex: stopThenThrow } });
+    expect(await startWorkMapRun("mimir", pre.d).promise).toEqual({ outcome: "aborted" });
+    expect(pre.models).toHaveLength(0);
+    expect(pre.state.attempts).toHaveLength(0);
+    __resetWorkMapRunsForTest();
+    const post = deps({ write: stopThenThrow });
+    expect(await startWorkMapRun("mimir", post.d).promise).toEqual({ outcome: "aborted" });
+    expect(post.models).toHaveLength(1);
+    expect(post.state.attempts).toHaveLength(0);
+  });
+
   test("a sharp drop in active pages is a coverage warning, not a refusal", async () => {
     const prevMap = {
       version: 1,
