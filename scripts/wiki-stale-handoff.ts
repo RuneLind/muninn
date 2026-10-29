@@ -29,8 +29,8 @@
  *
  * Exits 0 always (D13): every outcome, a usage error and a missing git
  * included, ends in a `Stale:` line. git runs through {@link runGit}: no
- * shell, a bound per call, no prompt (`GIT_TERMINAL_PROMPT=0`, ssh in batch
- * mode).
+ * shell, a bound per call, no prompt (`GIT_TERMINAL_PROMPT=0`; ssh in batch
+ * mode unless the user configured their own ssh command).
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -77,6 +77,17 @@ export type Git = (args: string[], cwd: string, timeoutMs?: number) => Promise<G
 const REPO_ENV = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX"];
 /** After the kill, how long the pipes may take to close before the call returns without the rest. */
 const PIPE_GRACE_MS = 500;
+/** The ssh a network call gets when the user configured none. */
+const BATCH_SSH = "ssh -o BatchMode=yes -o ConnectTimeout=10";
+const NETWORK_VERBS = new Set(["pull", "fetch", "push", "ls-remote", "clone"]);
+/** The subcommand, past any leading `-c k=v` / `-C dir` options. */
+function verbOf(args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-c" || args[i] === "-C") i++;
+    else if (!args[i]!.startsWith("-")) return args[i];
+  }
+  return undefined;
+}
 
 /**
  * Run git without a shell, bounded, and never waiting on a prompt. git runs
@@ -85,9 +96,14 @@ const PIPE_GRACE_MS = 500;
  * holds a pipe open.
  */
 export function gitRunner(bin = "git", baseEnv: Record<string, string | undefined> = process.env): Git {
-  return async (args, cwd, timeoutMs = GIT_TIMEOUT_MS) => {
-    const env: Record<string, string | undefined> = { ...baseEnv, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=10", LC_ALL: "C" };
+  const run: Git = async (args, cwd, timeoutMs = GIT_TIMEOUT_MS) => {
+    const env: Record<string, string | undefined> = { ...baseEnv, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
     for (const k of REPO_ENV) delete env[k];
+    // The user's own ssh (GIT_SSH_COMMAND, core.sshCommand, GIT_SSH) wins and runs as configured; only plain ssh gets batch mode.
+    if (NETWORK_VERBS.has(verbOf(args) ?? "") && !env.GIT_SSH_COMMAND && !env.GIT_SSH) {
+      const cfg = await run(["config", "--get", "core.sshCommand"], cwd);
+      if (cfg.code !== 0 || !cfg.stdout.trim()) env.GIT_SSH_COMMAND = BATCH_SSH;
+    }
     let proc: ReturnType<typeof Bun.spawn>;
     try {
       proc = Bun.spawn([bin, ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env, detached: true });
@@ -129,6 +145,7 @@ export function gitRunner(bin = "git", baseEnv: Record<string, string | undefine
       clearTimeout(timer);
     }
   };
+  return run;
 }
 
 const home = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? path.join(homedir(), p.slice(2)) : p);
@@ -173,7 +190,7 @@ export async function resolvePage(given: string, git: Git): Promise<PageRef | { 
   return { given, abs, rel, main, ...(topReal !== main ? { worktree: topReal } : {}), exists: existsSync(abs) && statSync(abs).isFile() };
 }
 
-export type PageState = "committed" | "uncommitted" | "carried" | "not-carried" | "deleted" | "deleted-uncommitted" | "missing";
+export type PageState = "committed" | "uncommitted" | "carried" | "not-carried" | "main-uncommitted" | "deleted" | "deleted-uncommitted" | "missing";
 export interface Gate {
   main: string;
   branch?: string;
@@ -185,6 +202,8 @@ export interface Gate {
   skip?: string;
   /** What the session does to land its fixes. */
   fixPath: string;
+  /** The worktree the fix path carries from, and its branch (undefined: detached HEAD). */
+  carry?: { worktree: string; branch?: string; sha?: string };
   lines: string[];
   pages: (PageRef & { state: PageState })[];
 }
@@ -238,7 +257,9 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     if (r.code === 0) {
       const n = before ? Number(await out(["rev-list", "--count", `${before}..HEAD`])) || 0 : 0;
       g.note = n ? `pulled ${n} commit(s) from ${g.remote}/${def}` : `up to date with ${g.remote}/${def}`;
-    } else if (r.timedOut || /could not resolve|unable to access|could not read from remote|connection (refused|timed out)|network is unreachable|operation timed out|host key verification|permission denied \(publickey/i.test(r.stderr)) {
+    } else if (!r.timedOut && AUTH_FAILURE.test(r.stderr)) {
+      g.note = `not authorized — could not authenticate to ${g.remote} (${err}); the main checkout is as last pulled`;
+    } else if (r.timedOut || /could not resolve|unable to access|could not read from remote|connection (refused|timed out)|network is unreachable|operation timed out/i.test(r.stderr)) {
       g.note = `offline — could not reach ${g.remote} (${r.timedOut ? `no answer in ${PULL_TIMEOUT_MS / 1000} s` : err}); the main checkout is as last pulled`;
     } else if (/couldn't find remote ref|no such ref/i.test(r.stderr)) {
       g.note = `no upstream — ${g.remote} has no branch ${def}; nothing to pull`;
@@ -257,26 +278,42 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
       else if (dirty) state = "deleted-uncommitted";
       else state = (await out(["log", "-1", "--format=%h", "--", p.rel])) ? "deleted" : "missing";
     } else {
-      const mainCopy = path.join(main, p.rel);
-      const mainHas = existsSync(mainCopy);
-      if (!p.exists && mainHas) state = "not-carried";
-      else if (!p.exists) state = (await git(["log", "-1", "--format=%h", "--", p.rel], p.worktree)).stdout.trim() ? "deleted" : "missing";
-      else state = mainHas && Bun.hash(readFileSync(p.abs)) === Bun.hash(readFileSync(mainCopy)) ? "carried" : "not-carried";
+      // Carried means the worktree's committed text is the main checkout's clean, committed text: what Check reads.
+      const wtOut = async (args: string[]) => {
+        const r = await git(args, p.worktree!);
+        return r.code === 0 ? r.stdout.trim() : "";
+      };
+      const wtDirty = (await wtOut(["status", "--porcelain", "--", p.rel])) !== "";
+      const mainDirty = (await out(["status", "--porcelain", "--", p.rel])) !== "";
+      const wtBlob = await wtOut(["rev-parse", "-q", "--verify", `HEAD:${p.rel}`]);
+      const mainBlob = await out(["rev-parse", "-q", "--verify", `HEAD:${p.rel}`]);
+      if (wtDirty) state = p.exists ? "uncommitted" : "deleted-uncommitted";
+      else if (!p.exists) state = mainBlob || existsSync(path.join(main, p.rel)) ? "not-carried" : (await wtOut(["log", "-1", "--format=%h", "--", p.rel])) ? "deleted" : "missing";
+      else if (mainDirty) state = "main-uncommitted";
+      else state = wtBlob && wtBlob === mainBlob ? "carried" : "not-carried";
     }
     g.pages.push({ ...p, state });
     const where = p.worktree ? ` (worktree ${p.worktree})` : "";
     const say: Record<PageState, string> = {
       committed: `committed ${p.rel}`,
-      uncommitted: `uncommitted ${p.rel} — commit it before --check`,
+      uncommitted: `uncommitted ${p.rel}${where} — commit it before --check`,
       carried: `carried ${p.rel}${where}`,
       "not-carried": `NOT carried ${p.rel}${where} — the main checkout lacks your text`,
+      "main-uncommitted": `NOT carried ${p.rel}${where} — the main copy has uncommitted edits, which Check would read instead of your commit`,
       deleted: `deleted ${p.rel}${where} — not a page to Check`,
-      "deleted-uncommitted": `deleted ${p.rel}, uncommitted — commit the deletion before --check`,
+      "deleted-uncommitted": `deleted ${p.rel}${where}, uncommitted — commit the deletion before --check`,
       missing: `no such page ${p.rel} — not in the checkout or its history`,
     };
     lines.push(`gate: ${say[state]}`);
     if (state === "uncommitted" || state === "deleted-uncommitted") skip(`uncommitted edits on ${p.rel}`);
     if (state === "not-carried") skip(`the main checkout lacks your text of ${p.rel}`);
+    if (state === "main-uncommitted") skip(`uncommitted edits on the main copy of ${p.rel}`);
+  }
+  const from = g.pages.find((p) => p.worktree && ["not-carried", "main-uncommitted", "uncommitted", "deleted-uncommitted"].includes(p.state))?.worktree;
+  if (from) {
+    const b = (await git(["symbolic-ref", "--short", "-q", "HEAD"], from)).stdout.trim();
+    const sha = b ? "" : (await git(["rev-parse", "--short", "HEAD"], from)).stdout.trim();
+    g.carry = { worktree: from, ...(b ? { branch: b } : {}), ...(sha ? { sha } : {}) };
   }
   g.fixPath = fixPath(g);
   lines.push(g.skip ? `gate: Check skip — ${g.skip}` : "gate: Check may run");
@@ -284,11 +321,16 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
   return g;
 }
 
-/** Where the session lands its own fixes, given the gate. */
+/** A pull failure that is the credentials, not the network: ssh keys, host keys, https logins, a 401/403. */
+const AUTH_FAILURE = /permission denied|host key verification failed|authentication failed|could not read (username|password)|returned error: 40[13]|denied to /i;
+
+/** Quote a word for a POSIX shell when it needs it. */
+export const shq = (s: string) => (/^[A-Za-z0-9_\/.@%+=:,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+
+/** Where the session lands its own fixes, given the gate. Every printed command runs as printed, in order. */
 function fixPath(g: Gate): string {
   const def = g.defaultBranch ?? "main";
-  const m = g.main;
-  const worktree = g.pages.find((p) => p.state === "not-carried" && p.worktree)?.worktree;
+  const m = shq(g.main);
   if (g.branch !== def) {
     // Check reads the main checkout, which stays where it is; the fixes still land on the default branch.
     return g.remote
@@ -298,10 +340,24 @@ function fixPath(g: Gate): string {
   if (g.remote && g.skip?.startsWith("git pull")) {
     return `fix in a worktree: git -C ${m} worktree add <dir> ${g.remote}/${def}; commit there, git push ${g.remote} HEAD:${def}. Check skips until ${m} pulls cleanly`;
   }
-  if (worktree) {
+  if (g.carry) {
+    const w = shq(g.carry.worktree);
+    // A detached worktree's HEAD moves when the session commits its fixes, so the merge reads it at run time.
+    const head = g.carry.branch ? shq(g.carry.branch) : `"$(git -C ${w} rev-parse HEAD)"`;
+    const named = g.carry.branch ? `branch ${g.carry.branch}` : `detached HEAD: ${g.carry.sha ?? "?"}`;
+    const pre = g.pages
+      .filter((p) => p.state === "main-uncommitted")
+      .map((p) => `the main copy of ${p.rel} has uncommitted edits: commit or settle them in ${m} first; `)
+      .join("");
+    // Pages in the main checkout too: main goes first, and the worktree's commit is rebased on it, or the --check pull diverges.
+    if (g.pages.some((p) => !p.worktree)) {
+      return g.remote
+        ? `${pre}main checkout first, then the worktree (${named}): commit your fixes path-scoped in each; git -C ${m} push ${g.remote} ${def}; git -C ${w} rebase --no-autostash ${g.remote}/${def}; git -C ${w} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
+        : `${pre}main checkout first, then the worktree (${named}): commit your fixes path-scoped in each; git -C ${w} rebase --no-autostash ${def}; git -C ${m} merge --ff-only --no-autostash ${head}`;
+    }
     return g.remote
-      ? `push your worktree's commit: git -C ${worktree} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
-      : `carry your worktree's commit: git -C ${m} merge --ff-only --no-autostash <your worktree's branch> (no remote to push to)`;
+      ? `${pre}push your worktree's commit (${named}): git -C ${w} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
+      : `${pre}carry your worktree's commit (${named}): git -C ${m} merge --ff-only --no-autostash ${head}`;
   }
   return g.remote ? `edit in ${m}, commit path-scoped, git push` : `edit in ${m}, commit path-scoped (no remote, nothing to push)`;
 }

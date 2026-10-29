@@ -169,10 +169,11 @@ describe("the gate", () => {
     expect(carried.pages[0]!.state).toBe("carried");
     expect(carried.skip).toBeUndefined();
     write(wt, "plans/a.md", "# A\nfixed in the worktree\n");
+    await g(wt, "commit", "-qam", "fix"); // batch 2: an uncommitted worktree edit is «uncommitted», not «NOT carried»
     const not = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
     expect(not.pages[0]!.state).toBe("not-carried");
     expect(not.skip).toBe("the main checkout lacks your text of plans/a.md");
-    expect(not.fixPath).toBe(`carry your worktree's commit: git -C ${main} merge --ff-only --no-autostash <your worktree's branch> (no remote to push to)`);
+    expect(not.fixPath).toBe(`carry your worktree's commit (branch fix): git -C ${main} merge --ff-only --no-autostash fix`);
   });
 
   test("fix round 1: the pull never autostashes or rebases, whatever the repo's config says", async () => {
@@ -208,10 +209,11 @@ describe("the gate", () => {
 });
 
 describe("gitRunner: bounded, no shell, no prompt", () => {
-  test("gap: ssh and https never prompt — the env every git call gets", async () => {
-    const r = await gitRunner("env")([], tmpdir());
+  test("gap: https never prompts — the env every git call gets; a local call gets no ssh command (batch 2: network calls only)", async () => {
+    const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_SSH")));
+    const r = await gitRunner("env", base)([], tmpdir());
     expect(r.stdout).toContain("GIT_TERMINAL_PROMPT=0");
-    expect(r.stdout).toContain("GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10");
+    expect(r.stdout).not.toContain("GIT_SSH_COMMAND=");
   });
 
   test("a call past its bound is killed and says so", async () => {
@@ -462,5 +464,220 @@ describe("runHandoff: two calls", () => {
     const [code, out] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
     expect(code).toBe(0);
     expect(out.trim().split("\n").at(-1)).toBe("Stale: not checked (no page could be mapped to a wiki)");
+  });
+});
+
+// Fix round 1 batch 2: the user's ssh, worktree dirt, fix paths that run.
+/** Run a printed fix-path command in a shell, as the user would paste it. */
+async function sh(cmd: string): Promise<{ code: number; err: string }> {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_(DIR|WORK_TREE|INDEX_FILE)$/.test(k)));
+  const p = Bun.spawn(["sh", "-c", cmd], { stdout: "pipe", stderr: "pipe", env });
+  const [code, err] = await Promise.all([p.exited, new Response(p.stderr).text()]);
+  return { code, err };
+}
+/** The `git -C …` commands a fix path prints, in order. */
+const commandsOf = (fixPath: string) => fixPath.match(/git -C [^;]+/g)?.map((c) => c.trim()) ?? [];
+async function runAll(fixPath: string) {
+  const cmds = commandsOf(fixPath);
+  expect(cmds.length).toBeGreaterThan(0);
+  for (const c of cmds) {
+    const r = await sh(c);
+    if (r.code !== 0) throw new Error(`${c}: ${r.err}`);
+  }
+}
+
+describe("fix round 1 batch 2: the user's ssh command is kept, and an auth failure is not «offline»", () => {
+  const noSshEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_SSH")));
+  /** A main checkout whose origin is an ssh URL; `ssh` on PATH and a user's own ssh, both local stubs that log their argv. */
+  async function sshSetup() {
+    const { main } = await withRemote();
+    await g(main, "remote", "set-url", "origin", "ssh://git@example.invalid/wiki.git");
+    const bin = tmp();
+    const log = path.join(bin, "ssh.log");
+    writeFileSync(path.join(bin, "ssh"), `#!/bin/sh\necho "default $*" >> '${log}'\necho "ssh: Could not resolve hostname example.invalid: nodename nor servname provided, or not known" >&2\nexit 255\n`);
+    writeFileSync(path.join(bin, "userssh"), `#!/bin/sh\necho "user $*" >> '${log}'\necho "git@example.invalid: Permission denied (publickey)." >&2\nexit 255\n`);
+    chmodSync(path.join(bin, "ssh"), 0o755);
+    chmodSync(path.join(bin, "userssh"), 0o755);
+    const env = { ...noSshEnv(), PATH: `${bin}:${process.env.PATH}` };
+    const logged = () => (existsSync(log) ? readFileSync(log, "utf8") : "");
+    return { main, bin, env, logged, user: path.join(bin, "userssh") };
+  }
+  const authNote = "not authorized — could not authenticate to origin (git@example.invalid: Permission denied (publickey).); the main checkout is as last pulled";
+
+  test("nothing configured: the pull's ssh runs in batch mode, and a host it cannot reach is offline", async () => {
+    const s = await sshSetup();
+    const gate = await runGate(s.main, [], gitRunner("git", s.env));
+    expect(s.logged()).toContain("default -o BatchMode=yes -o ConnectTimeout=10");
+    expect(gate.note).toStartWith("offline — could not reach origin (ssh: Could not resolve hostname");
+    expect(gate.skip).toBeUndefined();
+  });
+
+  test("the repo's core.sshCommand is used as configured", async () => {
+    const s = await sshSetup();
+    await g(s.main, "config", "core.sshCommand", s.user);
+    const gate = await runGate(s.main, [], gitRunner("git", s.env));
+    expect(s.logged()).toContain("user ");
+    expect(s.logged()).not.toContain("default ");
+    expect(gate.note).toBe(authNote);
+  });
+
+  test("a GIT_SSH_COMMAND or GIT_SSH in the environment is used as configured", async () => {
+    for (const k of ["GIT_SSH_COMMAND", "GIT_SSH"]) {
+      const s = await sshSetup();
+      const gate = await runGate(s.main, [], gitRunner("git", { ...s.env, [k]: s.user }));
+      expect([k, s.logged().includes("user "), s.logged().includes("default ")]).toEqual([k, true, false]);
+      expect(gate.note).toBe(authNote);
+    }
+  });
+
+  test("auth and permission failures are their own note; network failures stay offline", async () => {
+    const { main } = await withRemote();
+    const pullSays = (stderr: string): Git => (args, cwd, ms) => (args.includes("pull") ? Promise.resolve({ code: 128, stdout: "", stderr }) : git(args, cwd, ms));
+    const cases: [string, "auth" | "offline"][] = [
+      ["git@h: Permission denied (publickey).\nfatal: Could not read from remote repository.", "auth"],
+      ["Host key verification failed.\nfatal: Could not read from remote repository.", "auth"],
+      ["fatal: could not read Username for 'https://h': terminal prompts disabled", "auth"],
+      ["remote: Invalid username or password.\nfatal: Authentication failed for 'https://h/'", "auth"],
+      ["fatal: unable to access 'https://h/': The requested URL returned error: 403", "auth"],
+      ["ERROR: Permission to o/w.git denied to someone.\nfatal: Could not read from remote repository.", "auth"],
+      ["ssh: Could not resolve hostname h: nodename nor servname provided\nfatal: Could not read from remote repository.", "offline"],
+      ["fatal: unable to access 'https://h/': Could not resolve host: h", "offline"],
+      ["ssh: connect to host h port 22: Connection refused\nfatal: Could not read from remote repository.", "offline"],
+    ];
+    for (const [stderr, kind] of cases) {
+      const gate = await runGate(main, [], pullSays(stderr));
+      expect([stderr, gate.note?.split(" — ")[0], gate.skip]).toEqual([stderr, kind === "auth" ? "not authorized" : "offline", undefined]);
+    }
+  });
+});
+
+describe("fix round 1 batch 2: a worktree page is carried only when its committed text is the main checkout's clean copy", () => {
+  async function wtSetup() {
+    const main = await repo();
+    await g(main, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "fix");
+    return { main, wt };
+  }
+
+  test("uncommitted edits in the worktree are uncommitted, even when the main copy has the same uncommitted bytes", async () => {
+    const { main, wt } = await wtSetup();
+    write(wt, "plans/a.md", "# A\nsame edit\n");
+    write(main, "plans/a.md", "# A\nsame edit\n");
+    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect(gate.pages[0]!.state).toBe("uncommitted");
+    expect(gate.lines).toContain(`gate: uncommitted plans/a.md (worktree ${realpathSync(wt)}) — commit it before --check`);
+    expect(gate.skip).toBe("uncommitted edits on plans/a.md");
+  });
+
+  test("an uncommitted new page in the worktree is uncommitted", async () => {
+    const { main, wt } = await wtSetup();
+    write(wt, "plans/new.md", "# New\n");
+    const gate = await runGate(main, [await page(path.join(wt, "plans/new.md"))], git);
+    expect(gate.pages[0]!.state).toBe("uncommitted");
+  });
+
+  test("the main copy holding the worktree's text as an uncommitted edit is not carried", async () => {
+    const { main, wt } = await wtSetup();
+    write(wt, "plans/a.md", "# A\nfixed\n");
+    await g(wt, "commit", "-qam", "fix");
+    write(main, "plans/a.md", "# A\nfixed\n");
+    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect(gate.pages[0]!.state).toBe("main-uncommitted");
+    expect(gate.lines).toContain(`gate: NOT carried plans/a.md (worktree ${realpathSync(wt)}) — the main copy has uncommitted edits, which Check would read instead of your commit`);
+    expect(gate.skip).toBe("uncommitted edits on the main copy of plans/a.md");
+  });
+
+  test("committed in the worktree and merged into a clean main: carried", async () => {
+    const { main, wt } = await wtSetup();
+    write(wt, "plans/a.md", "# A\nfixed\n");
+    await g(wt, "commit", "-qam", "fix");
+    await g(main, "merge", "-q", "--ff-only", "fix");
+    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect(gate.pages[0]!.state).toBe("carried");
+    expect(gate.skip).toBeUndefined();
+  });
+});
+
+describe("fix round 1 batch 2: printed fix paths name the branch, quote paths and run as printed", () => {
+  test("no remote: the merge names the worktree's branch, and running it carries the page", async () => {
+    const main = await repo();
+    await g(main, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "fix");
+    write(wt, "plans/a.md", "# A\nfixed\n");
+    await g(wt, "commit", "-qam", "fix");
+    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect(gate.fixPath).toBe(`carry your worktree's commit (branch fix): git -C ${main} merge --ff-only --no-autostash fix`);
+    await runAll(gate.fixPath);
+    expect((await runGate(main, [await page(path.join(wt, "plans/a.md"))], git)).pages[0]!.state).toBe("carried");
+  });
+
+  test("no remote, detached worktree: the printed merge takes the worktree's HEAD at run time, a commit made after printing included", async () => {
+    const main = await repo();
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", "--detach", wt, "main");
+    write(wt, "plans/a.md", "# A\nfirst\n");
+    await g(wt, "commit", "-qam", "first");
+    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect(gate.fixPath).toContain("(detached HEAD: ");
+    // The session fixes its lines after the first call printed the path.
+    write(wt, "plans/a.md", "# A\nsecond\n");
+    await g(wt, "commit", "-qam", "second");
+    await runAll(gate.fixPath);
+    expect(readFileSync(path.join(main, "plans/a.md"), "utf8")).toBe("# A\nsecond\n");
+  });
+
+  test("paths with spaces are quoted, so the printed push runs", async () => {
+    const { main: m0 } = await withRemote();
+    const main = path.join(path.dirname(m0), "my wiki");
+    await g(path.dirname(m0), "clone", "-q", await g(m0, "remote", "get-url", "origin"), main);
+    await g(main, "config", "user.name", "T");
+    await g(main, "config", "user.email", "t@example.com");
+    const wt = path.join(tmp(), "my wt");
+    await g(main, "worktree", "add", "-q", "-b", "fix", wt, "origin/main");
+    write(wt, "plans/a.md", "# A\nfixed\n");
+    await g(wt, "commit", "-qam", "fix");
+    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect(gate.fixPath).toBe(`push your worktree's commit (branch fix): git -C '${realpathSync(wt)}' push origin HEAD:main; the --check call pulls it into '${main}'`);
+    await runAll(gate.fixPath);
+    const after = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect([after.pages[0]!.state, after.skip]).toEqual(["carried", undefined]);
+  });
+
+  test("a session that edited the main checkout and a worktree: main first, then the worktree rebased on it, and the --check gate passes", async () => {
+    const { main } = await withRemote();
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", "-b", "fix", wt, "origin/main");
+    write(main, "repos/b.md", "# B\nfixed in main\n");
+    await g(main, "commit", "-qam", "main fix");
+    write(wt, "plans/a.md", "# A\nfixed in the worktree\n");
+    await g(wt, "commit", "-qam", "worktree fix");
+    const pages = async () => [await page(path.join(main, "repos/b.md")), await page(path.join(wt, "plans/a.md"))];
+    const gate = await runGate(main, await pages(), git);
+    expect(gate.fixPath).toBe(
+      `main checkout first, then the worktree (branch fix): commit your fixes path-scoped in each; git -C ${main} push origin main; git -C ${realpathSync(wt)} rebase --no-autostash origin/main; git -C ${realpathSync(wt)} push origin HEAD:main; the --check call pulls it into ${main}`,
+    );
+    await runAll(gate.fixPath);
+    const after = await runGate(main, await pages(), git);
+    expect([after.skip, after.pages.map((p) => p.state)]).toEqual([undefined, ["committed", "carried"]]);
+  });
+
+  test("the same without a remote: rebase the worktree on main, then merge it", async () => {
+    const main = await repo();
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", "-b", "fix", wt, "main");
+    write(main, "repos/b.md", "# B\nfixed in main\n");
+    await g(main, "commit", "-qam", "main fix");
+    write(wt, "plans/a.md", "# A\nfixed in the worktree\n");
+    await g(wt, "commit", "-qam", "worktree fix");
+    const pages = async () => [await page(path.join(main, "repos/b.md")), await page(path.join(wt, "plans/a.md"))];
+    const gate = await runGate(main, await pages(), git);
+    expect(gate.fixPath).toBe(
+      `main checkout first, then the worktree (branch fix): commit your fixes path-scoped in each; git -C ${realpathSync(wt)} rebase --no-autostash main; git -C ${main} merge --ff-only --no-autostash fix`,
+    );
+    await runAll(gate.fixPath);
+    const after = await runGate(main, await pages(), git);
+    expect([after.skip, after.pages.map((p) => p.state)]).toEqual([undefined, ["committed", "carried"]]);
   });
 });
