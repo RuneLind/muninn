@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../src/test/temp-dir.ts";
@@ -106,7 +106,7 @@ describe("the gate", () => {
     expect(gate.note).toStartWith("offline — could not reach origin (");
     expect(gate.lines.at(-2)).toBe("gate: Check may run");
     // A pull that never answers is the same, bounded.
-    const hung: Git = (args, cwd, ms) => (args[0] === "pull" ? Promise.resolve({ code: -1, stdout: "", stderr: "", timedOut: true }) : git(args, cwd, ms));
+    const hung: Git = (args, cwd, ms) => (args.includes("pull") ? Promise.resolve({ code: -1, stdout: "", stderr: "", timedOut: true }) : git(args, cwd, ms));
     expect((await runGate(main, [], hung)).note).toBe("offline — could not reach origin (no answer in 30 s); the main checkout is as last pulled");
   });
 
@@ -172,7 +172,25 @@ describe("the gate", () => {
     const not = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
     expect(not.pages[0]!.state).toBe("not-carried");
     expect(not.skip).toBe("the main checkout lacks your text of plans/a.md");
-    expect(not.fixPath).toBe(`carry your worktree's commit: git -C ${main} merge --ff-only <your worktree's branch> (no remote to push to)`);
+    expect(not.fixPath).toBe(`carry your worktree's commit: git -C ${main} merge --ff-only --no-autostash <your worktree's branch> (no remote to push to)`);
+  });
+
+  test("fix round 1: the pull never autostashes or rebases, whatever the repo's config says", async () => {
+    for (const cfg of [["merge.autoStash", "true"], ["pull.rebase", "true"], ["rebase.autoStash", "true"]] as const) {
+      const { up, main } = await withRemote();
+      write(up, "plans/a.md", "# A\nupstream\n");
+      await g(up, "commit", "-qam", "upstream");
+      await g(up, "push", "-q", "origin", "main");
+      await g(main, "config", "merge.autoStash", "true");
+      await g(main, "config", "rebase.autoStash", "true");
+      await g(main, "config", cfg[0], cfg[1]);
+      // Another session's uncommitted edit on the page the pull would change.
+      write(main, "plans/a.md", "# A\nanother session's edit\n");
+      const gate = await runGate(main, [], git);
+      expect(readFileSync(path.join(main, "plans/a.md"), "utf8")).toBe("# A\nanother session's edit\n");
+      expect(await g(main, "stash", "list")).toBe("");
+      expect(gate.skip).toStartWith("git pull --ff-only refused (");
+    }
   });
 
   test("defect 3: a deleted page is a state, not a skip; an uncommitted deletion asks for its commit", async () => {
@@ -201,6 +219,55 @@ describe("gitRunner: bounded, no shell, no prompt", () => {
     const r = await gitRunner("sleep")(["5"], tmpdir(), 100);
     expect(r.timedOut).toBe(true);
     expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  test("fix round 1: a stalled remote whose helper's child holds the pipes still returns within the bound, the whole group killed", async () => {
+    // A fake `stall::` remote helper: a child that keeps git's stderr (our pipe) open, then it waits too.
+    const bin = tmp();
+    const pidFile = path.join(bin, "child.pid");
+    writeFileSync(path.join(bin, "git-remote-stall"), `#!/bin/sh\nsleep 30 &\necho $! > ${pidFile}\nsleep 30\n`);
+    chmodSync(path.join(bin, "git-remote-stall"), 0o755);
+    const main = await repo();
+    const stallGit = gitRunner("git", { ...process.env, PATH: `${bin}:${process.env.PATH}` });
+    const t0 = Date.now();
+    const r = await stallGit(["fetch", "stall::x"], main, 500);
+    const took = Date.now() - t0;
+    expect(r.timedOut).toBe(true);
+    expect(took).toBeLessThan(3_000);
+    const child = Number(readFileSync(pidFile, "utf8"));
+    let alive = true;
+    for (let i = 0; i < 20 && alive; i++) {
+      try {
+        process.kill(child, 0);
+        await Bun.sleep(50);
+      } catch {
+        alive = false;
+      }
+    }
+    expect(alive).toBe(false);
+  }, 15_000);
+
+  test("fix round 1: a grandchild that leaves the group and keeps the pipe open does not hold the call past the bound", async () => {
+    const bin = tmp();
+    writeFileSync(path.join(bin, "git-remote-stall"), `#!/bin/sh\nperl -MPOSIX -e 'POSIX::setsid(); sleep 5' &\nsleep 30\n`);
+    chmodSync(path.join(bin, "git-remote-stall"), 0o755);
+    const main = await repo();
+    const t0 = Date.now();
+    const r = await gitRunner("git", { ...process.env, PATH: `${bin}:${process.env.PATH}` })(["fetch", "stall::x"], main, 500);
+    expect(r.timedOut).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(3_000);
+  }, 15_000);
+
+  test("fix round 1: an inherited GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE never aims a call at another repo", async () => {
+    const other = await repo();
+    await g(other, "commit", "-q", "--allow-empty", "-m", "the other repo");
+    const main = await repo();
+    const leaked = { GIT_DIR: path.join(other, ".git"), GIT_WORK_TREE: other, GIT_INDEX_FILE: path.join(other, ".git/index"), GIT_COMMON_DIR: path.join(other, ".git"), GIT_OBJECT_DIRECTORY: path.join(other, ".git/objects"), GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(other, ".git/objects"), GIT_NAMESPACE: "x", GIT_PREFIX: "repos/" };
+    const r = await gitRunner("git", { ...process.env, ...leaked })(["log", "-1", "--format=%s"], main);
+    expect(r.stdout.trim()).toBe("init");
+    const env = (await gitRunner("env", { ...process.env, ...leaked })([], tmpdir())).stdout;
+    for (const k of Object.keys(leaked)) expect(env).not.toContain(`\n${k}=`);
+    expect(existsSync(path.join(main, ".git"))).toBe(true);
   });
 
   test("gap: git missing — every page is a line and the run ends in a Stale line", async () => {

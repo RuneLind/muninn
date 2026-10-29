@@ -73,30 +73,58 @@ export interface GitResult {
 }
 export type Git = (args: string[], cwd: string, timeoutMs?: number) => Promise<GitResult>;
 
-/** Run git without a shell, bounded, and never waiting on a prompt. */
+/** Repo-aiming variables a caller (a git hook, another repo's shell) can leak; each call finds its repo from `cwd`. */
+const REPO_ENV = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX"];
+/** After the kill, how long the pipes may take to close before the call returns without the rest. */
+const PIPE_GRACE_MS = 500;
+
+/**
+ * Run git without a shell, bounded, and never waiting on a prompt. git runs
+ * in its own process group, so a timeout kills `git fetch`, a remote helper
+ * and ssh with it; the call returns at the bound even if one of them still
+ * holds a pipe open.
+ */
 export function gitRunner(bin = "git", baseEnv: Record<string, string | undefined> = process.env): Git {
   return async (args, cwd, timeoutMs = GIT_TIMEOUT_MS) => {
+    const env: Record<string, string | undefined> = { ...baseEnv, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=10", LC_ALL: "C" };
+    for (const k of REPO_ENV) delete env[k];
     let proc: ReturnType<typeof Bun.spawn>;
     try {
-      proc = Bun.spawn([bin, ...args], {
-        cwd,
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...baseEnv, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=10", LC_ALL: "C" },
-      });
+      proc = Bun.spawn([bin, ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env, detached: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { code: -1, stdout: "", stderr: msg, missing: /ENOENT|not found|No such file/i.test(msg) };
     }
+    const killGroup = () => {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        proc.kill("SIGKILL");
+      }
+    };
     let timedOut = false;
+    let release: () => void = () => {};
+    const released = new Promise<void>((r) => (release = r));
     const timer = setTimeout(() => {
       timedOut = true;
-      proc.kill();
+      killGroup();
+      setTimeout(release, PIPE_GRACE_MS);
     }, timeoutMs);
+    const chunks = { stdout: "", stderr: "" };
+    const drain = async (name: "stdout" | "stderr") => {
+      const dec = new TextDecoder();
+      try {
+        const reader = (proc[name] as ReadableStream<Uint8Array>).getReader();
+        for (let r = await reader.read(); !r.done; r = await reader.read()) chunks[name] += dec.decode(r.value, { stream: true });
+      } catch {
+        // A pipe torn down by the kill: keep what arrived.
+      }
+    };
     try {
-      const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), new Response(proc.stderr as ReadableStream).text(), proc.exited]);
-      return { code: timedOut ? -1 : code, stdout, stderr, ...(timedOut ? { timedOut } : {}) };
+      const drained = Promise.all([drain("stdout"), drain("stderr")]);
+      const code = await proc.exited;
+      await Promise.race([drained, released]);
+      return { code: timedOut ? -1 : code, stdout: chunks.stdout, stderr: chunks.stderr, ...(timedOut ? { timedOut } : {}) };
     } finally {
       clearTimeout(timer);
     }
@@ -204,7 +232,8 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     g.note = "no remote, nothing to pull";
   } else if (opts.pull !== false) {
     const before = await out(["rev-parse", "HEAD"]);
-    const r = await git(["pull", "--ff-only", "--quiet", g.remote, def], main, PULL_TIMEOUT_MS);
+    // Never stash another session's edits, never rebase: the flags beat merge.autoStash, rebase.autoStash and pull.rebase.
+    const r = await git(["-c", "merge.autoStash=false", "-c", "rebase.autoStash=false", "pull", "--ff-only", "--no-rebase", "--no-autostash", "--quiet", g.remote, def], main, PULL_TIMEOUT_MS);
     const err = firstLine(r.stderr);
     if (r.code === 0) {
       const n = before ? Number(await out(["rev-list", "--count", `${before}..HEAD`])) || 0 : 0;
@@ -272,7 +301,7 @@ function fixPath(g: Gate): string {
   if (worktree) {
     return g.remote
       ? `push your worktree's commit: git -C ${worktree} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
-      : `carry your worktree's commit: git -C ${m} merge --ff-only <your worktree's branch> (no remote to push to)`;
+      : `carry your worktree's commit: git -C ${m} merge --ff-only --no-autostash <your worktree's branch> (no remote to push to)`;
   }
   return g.remote ? `edit in ${m}, commit path-scoped, git push` : `edit in ${m}, commit path-scoped (no remote, nothing to push)`;
 }
