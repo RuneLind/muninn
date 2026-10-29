@@ -124,6 +124,7 @@ export async function executeClaudePrompt(
   if (botConfig.thinkingMaxTokens !== undefined) {
     env.MAX_THINKING_TOKENS = String(botConfig.thinkingMaxTokens);
   }
+  for (const name of botConfig.spawnEnvOmit ?? []) delete env[name];
 
   const proc = Bun.spawn(
     args,

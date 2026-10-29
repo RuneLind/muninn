@@ -19,12 +19,14 @@ let saved: { cwd?: string; mtt?: string };
 beforeEach(() => {
   saved = { cwd: process.env.MUNINN_AGENT_CWD, mtt: process.env.MAX_THINKING_TOKENS };
   process.env.MUNINN_AGENT_CWD = testTempDirSync(path.join(tmpdir(), "work-map-agent-"));
-  delete process.env.MAX_THINKING_TOKENS;
+  // Set, as on a host whose shell exports a budget: the spawn must still carry none.
+  process.env.MAX_THINKING_TOKENS = "31999";
 });
 afterEach(() => {
   if (saved.cwd === undefined) delete process.env.MUNINN_AGENT_CWD;
   else process.env.MUNINN_AGENT_CWD = saved.cwd;
-  if (saved.mtt !== undefined) process.env.MAX_THINKING_TOKENS = saved.mtt;
+  if (saved.mtt === undefined) delete process.env.MAX_THINKING_TOKENS;
+  else process.env.MAX_THINKING_TOKENS = saved.mtt;
 });
 
 function fakeProc() {
@@ -82,5 +84,6 @@ test("the BotConfig is built from scratch: nothing from a synthesis bot that set
     toolSurface: "none",
     timeoutMs: WORK_MAP_TIMEOUT_MS,
     spawnArgs: [...WORK_MAP_SPAWN_ARGS],
+    spawnEnvOmit: ["MAX_THINKING_TOKENS"],
   });
 });

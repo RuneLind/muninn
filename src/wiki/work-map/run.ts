@@ -53,7 +53,8 @@ export const WORK_MAP_SPAWN_ARGS = [
  * The run's `BotConfig`, built from scratch rather than cloned from a bot: a
  * clone would carry that bot's `effort`, thinking budget, `spawnArgs` and tool
  * settings, and would need a bot to exist. `effort` only when
- * `WORK_MAP_EFFORT` names one; no thinking budget at all.
+ * `WORK_MAP_EFFORT` names one; no thinking budget at all, not even one
+ * inherited from muninn's own env.
  */
 export function workMapBotConfig(opts: { model: string; effort?: WorkMapEffort; dir: string }): BotConfig {
   return {
@@ -67,6 +68,7 @@ export function workMapBotConfig(opts: { model: string; effort?: WorkMapEffort; 
     toolSurface: "none",
     timeoutMs: WORK_MAP_TIMEOUT_MS,
     spawnArgs: [...WORK_MAP_SPAWN_ARGS],
+    spawnEnvOmit: ["MAX_THINKING_TOKENS"],
     ...(opts.effort ? { effort: opts.effort } : {}),
   };
 }

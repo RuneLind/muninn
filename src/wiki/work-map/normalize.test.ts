@@ -76,12 +76,30 @@ describe("normalizeWorkMapAnswer, step by step", () => {
     expect(out.efforts.map((e) => e.id)).toEqual(["ok"]);
   });
 
+  test("1: the pages of an effort dropped as invalid go to loose", () => {
+    const out = normalizeWorkMapAnswer(
+      answer([effort("日本", [{ id: "p1", role: "plan" }]), effort("x".repeat(80), [{ id: "p2", role: "plan" }, { id: "p3", role: "report" }]), effort("ok", [{ id: "p3", role: "report" }])]),
+      ctx(),
+    );
+    expect(out.efforts.map((e) => [e.id, e.pages.map((p) => p.id)])).toEqual([["ok", ["archive/alpha-report.mdx"]]]);
+    expect(out.loose).toEqual(["plans/alpha.mdx", "plans/beta.mdx"]);
+  });
+
   test("2: a duplicate id keeps the first effort", () => {
     const out = normalizeWorkMapAnswer(
       answer([effort("a", [{ id: "p1", role: "plan" }], { name: "first" }), effort("A", [{ id: "p2", role: "plan" }], { name: "second" })]),
       ctx(),
     );
     expect(out.efforts.map((e) => [e.id, e.name])).toEqual([["a", "first"]]);
+  });
+
+  test("2: the pages of a dropped duplicate go to loose unless placed elsewhere", () => {
+    const out = normalizeWorkMapAnswer(
+      answer([effort("a", [{ id: "p1", role: "plan" }]), effort("A", [{ id: "p1", role: "plan" }, { id: "p2", role: "plan" }])], { loose: ["p4"] }),
+      ctx(),
+    );
+    expect(out.efforts.map((e) => [e.id, e.pages.map((p) => p.id)])).toEqual([["a", ["plans/alpha.mdx"]]]);
+    expect(out.loose).toEqual(["blogs/alpha.mdx", "plans/beta.mdx"]);
   });
 
   test("3: the id fields are remapped to relPaths; unknown page ids drop", () => {

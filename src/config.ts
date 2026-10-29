@@ -844,10 +844,12 @@ export const WORK_MAP_DEFAULT_MODEL = "claude-opus-5-5";
 export const WORK_MAP_DEFAULT_HOUR = 5;
 
 /**
- * `WORK_MAP_WIKIS` (comma-separated wiki names), `WORK_MAP_HOUR` (0–23, local
- * hour from which a day's run may start, default 5), `WORK_MAP_MODEL` (default
- * {@link WORK_MAP_DEFAULT_MODEL}) and `WORK_MAP_EFFORT` (unset ⇒ the CLI's own
- * default). An hour outside 0–23 or an unknown effort throws `ConfigError`.
+ * `WORK_MAP_WIKIS` (comma-separated wiki names), `WORK_MAP_HOUR` (0–23, the
+ * Europe/Oslo hour from which a day's run may start, whatever the host's time
+ * zone; default 5), `WORK_MAP_MODEL` (default {@link WORK_MAP_DEFAULT_MODEL}) and
+ * `WORK_MAP_EFFORT` (unset ⇒ the CLI's own default). `loadConfig` parses these on
+ * every instance, so a bad hour or an unknown effort warns once and falls back
+ * (hour 5, no effort) instead of failing boot.
  */
 export function workMapEnv(env: Record<string, string | undefined> = process.env): {
   workMapWikis: string[];
@@ -855,17 +857,22 @@ export function workMapEnv(env: Record<string, string | undefined> = process.env
   workMapModel: string;
   workMapEffort: WorkMapEffort | undefined;
 } {
+  const warnOnce = (name: string, raw: string, fallback: string) => {
+    if (warnedEnvFlagValues.has(`${name}=${raw}`)) return;
+    warnedEnvFlagValues.add(`${name}=${raw}`);
+    log.warn("Invalid {name}: \"{value}\" — using {fallback}", { name, value: raw, fallback });
+  };
   const wikis = (env.WORK_MAP_WIKIS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const rawHour = (env.WORK_MAP_HOUR ?? "").trim();
-  const hour = rawHour === "" ? WORK_MAP_DEFAULT_HOUR : Number(rawHour);
-  if (!/^\d{1,2}$/.test(rawHour === "" ? "5" : rawHour) || !Number.isInteger(hour) || hour < 0 || hour > 23) {
-    throw new ConfigError(`Environment variable WORK_MAP_HOUR must be a whole hour 0–23, got: "${env.WORK_MAP_HOUR}"`);
+  let hour = WORK_MAP_DEFAULT_HOUR;
+  if (rawHour !== "") {
+    if (/^\d{1,2}$/.test(rawHour) && Number(rawHour) <= 23) hour = Number(rawHour);
+    else warnOnce("WORK_MAP_HOUR", rawHour, `hour ${WORK_MAP_DEFAULT_HOUR}`);
   }
-  const rawEffort = (env.WORK_MAP_EFFORT ?? "").trim();
+  let rawEffort = (env.WORK_MAP_EFFORT ?? "").trim();
   if (rawEffort !== "" && !(WORK_MAP_EFFORT_VALUES as readonly string[]).includes(rawEffort)) {
-    throw new ConfigError(
-      `Environment variable WORK_MAP_EFFORT must be one of ${WORK_MAP_EFFORT_VALUES.join(", ")}, got: "${rawEffort}"`,
-    );
+    warnOnce("WORK_MAP_EFFORT", rawEffort, "the CLI's default effort");
+    rawEffort = "";
   }
   return {
     workMapWikis: wikis,
@@ -998,7 +1005,7 @@ export function loadConfig() {
     // warning, not a boot failure (as WIKI_READONLY_ROOTS treats its entries).
     wikiStaleConfirmWikis: optionalEnv("WIKI_STALE_CONFIRM_WIKIS", "").split(",").map((s) => s.trim()).filter(Boolean),
     // The work map's nightly organize (`src/wiki/work-map/`): which wikis, the
-    // local hour it may run from, and the model. Unset WORK_MAP_WIKIS means off.
+    // Europe/Oslo hour it may run from, and the model. Unset WORK_MAP_WIKIS means off.
     ...workMapEnv(),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
