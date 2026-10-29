@@ -139,10 +139,21 @@ export const WORK_MAP_LANES = [
   { id: "quiet", label: "Quiet and shipped", states: ["quiet", "shipped"], open: false },
 ] as const;
 
-/** Efforts per lane, sub-efforts nested under a parent the map still holds
- *  (and rendered in the parent's lane); map order otherwise. */
+const MOVING_STATES: readonly string[] = WORK_MAP_LANES[0].states;
+
+/** True when `e` renders under its parent: nested, and not a Moving effort
+ *  whose parent sits in a closed lane (that one renders in Moving instead). */
+export function rendersUnderParent(e: { id: string; parent?: string; state: string }, efforts: readonly { id: string; parent?: string; state: string }[]): boolean {
+  if (!isNestedEffort(e, efforts)) return false;
+  const parent = efforts.findLast((x) => x.id === e.parent);
+  return !(MOVING_STATES.includes(e.state) && parent && !MOVING_STATES.includes(parent.state));
+}
+
+/** Top-level efforts per lane, map order. A sub-effort renders under its
+ *  parent, except a Moving one under a closed-lane parent, which is top-level
+ *  in Moving. */
 export function laneEfforts<P>(efforts: readonly JoinedEffort<P>[]): { lane: (typeof WORK_MAP_LANES)[number]; efforts: JoinedEffort<P>[] }[] {
-  const top = efforts.filter((e) => !isNestedEffort(e, efforts));
+  const top = efforts.filter((e) => !rendersUnderParent(e, efforts));
   return WORK_MAP_LANES.map((lane) => ({
     lane,
     efforts: top.filter((e) => (lane.states as readonly string[]).includes(e.state)),
@@ -279,6 +290,7 @@ function effortHtml<P>(
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
   shown: Set<string> = new Set(),
+  partOf?: string,
 ): string {
   shown.add(e.id);
   const active = activeLabel(lastActiveDays(e, now));
@@ -295,6 +307,7 @@ function effortHtml<P>(
     `<span class="wiki-wm-effort-name">${esc(e.name)}</span>` +
     `<span class="wiki-wm-state wm-state-${esc(e.state)}">${esc(e.state)}</span>` +
     (active ? `<span class="wiki-wm-active">${esc(active)}</span>` : "") +
+    (partOf ? `<span class="wiki-wm-partof">part of ${esc(partOf)}</span>` : "") +
     "</div>" +
     (e.oneLine ? `<div class="wiki-wm-oneline">${prose(e.oneLine)}</div>` : "") +
     pagesHtml(
@@ -315,15 +328,22 @@ function lanesHtml<P>(
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
 ): string {
-  const childrenOf = (id: string) => map.efforts.filter((x) => x.parent === id && isNestedEffort(x, map.efforts));
+  const childrenOf = (id: string) => map.efforts.filter((x) => x.parent === id && rendersUnderParent(x, map.efforts));
+  const parentName = (e: JoinedEffort<P>) => (isNestedEffort(e, map.efforts) ? map.efforts.find((x) => x.id === e.parent)?.name : undefined);
   const shown = new Set<string>();
   return laneEfforts(map.efforts)
     .map(({ lane, efforts }) => {
-      if (!efforts.length) return "";
-      const items = efforts.map((e) => effortHtml(e, childrenOf, now, prose, byKey, hrefFor, shown)).join("");
+      const before = shown.size;
+      const items = efforts
+        .filter((e) => !shown.has(e.id))
+        .map((e) => effortHtml(e, childrenOf, now, prose, byKey, hrefFor, shown, parentName(e)))
+        .join("");
+      // Every effort rendered in this lane, sub-efforts included.
+      const count = shown.size - before;
+      if (!count) return "";
       return (
         `<details class="wiki-wm-lane" data-wm-lane="${lane.id}"${lane.open ? " open" : ""}>` +
-        `<summary class="wiki-wm-lane-title">${esc(lane.label)} <span class="wiki-wm-count">${efforts.length}</span></summary>` +
+        `<summary class="wiki-wm-lane-title">${esc(lane.label)} <span class="wiki-wm-count">${count}</span></summary>` +
         `<ul class="wiki-wm-efforts">${items}</ul></details>`
       );
     })
@@ -341,17 +361,8 @@ function coverageHtml<P>(map: JoinedWorkMap<P>): string {
   if (c.logEntriesInWindow !== undefined && c.logEntriesInWindow > c.logEntries) {
     parts.push(`log: the newest ${c.logEntries} of ${c.logEntriesInWindow} shown`);
   }
-  const warns = [...c.warnings];
-  const mf = c.metadataFilter;
-  if (mf?.degraded) {
-    warns.push(
-      mf.reason === "budget"
-        ? "The git metadata filter ran out of time, so stamp-only commits may count as activity."
-        : `The git metadata filter gave up on ${mf.pages} page${mf.pages === 1 ? "" : "s"}, so stamp-only commits may count as activity.`,
-    );
-  }
-  // De-duplicate: P1 already words the degraded filter as a warning.
-  const uniq = [...new Set(warns)];
+  // P1 writes the degraded-filter warning into `warnings` itself.
+  const uniq = [...new Set(c.warnings)];
   return (
     `<div class="wiki-wm-coverage">Covers ${esc(parts.join(" · "))}</div>` +
     (uniq.length ? `<ul class="wiki-wm-warnings">${uniq.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : "")

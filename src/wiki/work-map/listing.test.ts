@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { rm, utimes, writeFile } from "node:fs/promises";
+import { rename, rm, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { __resetWorkMapListingCacheForTest, workMapListingField, workMapRunAt } from "./listing.ts";
 import { WORK_MAP_VERSION } from "./schema.ts";
@@ -43,16 +43,29 @@ describe("workMapRunAt", () => {
     expect(await workMapRunAt(root)).toBe(2000);
   });
 
-  test("an unchanged mtime and size answers from the cache", async () => {
+  test("an unchanged stat answers from the cache", async () => {
+    root = await testTempDir("muninn-wm-listing-");
+    const file = path.join(root, ".work-map.json");
+    await writeFile(file, mapText(1000));
+    expect(await workMapRunAt(root)).toBe(1000);
+    expect(await workMapRunAt(root)).toBe(1000);
+  });
+
+  test("a same-size rewrite with a preserved mtime still shows (in place, and renamed over)", async () => {
     root = await testTempDir("muninn-wm-listing-");
     const file = path.join(root, ".work-map.json");
     await writeFile(file, mapText(1000));
     await utimes(file, 5, 5);
     expect(await workMapRunAt(root)).toBe(1000);
-    // Same size, same mtime, different bytes: the cache is what answers.
+    await Bun.sleep(5);
     await writeFile(file, mapText(9000));
     await utimes(file, 5, 5);
-    expect(await workMapRunAt(root)).toBe(1000);
+    expect(await workMapRunAt(root)).toBe(9000);
+    const tmp = path.join(root, "next.json");
+    await writeFile(tmp, mapText(7000));
+    await utimes(tmp, 5, 5);
+    await rename(tmp, file);
+    expect(await workMapRunAt(root)).toBe(7000);
   });
 
   test("an unreadable map: no field", async () => {

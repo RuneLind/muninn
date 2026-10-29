@@ -305,13 +305,8 @@ async function organizeSteps(
 
   const warnings: string[] = [];
   const filter = index.gitMetadataFilter;
-  if (filter?.degraded) {
-    warnings.push(
-      filter.reason === "steps"
-        ? `The git walk left ${filter.pages} page(s) with only metadata-only commits unverified; a stamp burst may count as recent work.`
-        : "The git walk ran out of time filtering metadata-only commits; a stamp burst may count as recent work.",
-    );
-  }
+  const filterWarning = metadataFilterWarning(filter);
+  if (filterWarning) warnings.push(filterWarning);
   const prevActive = previous?.coverage.activePages;
   if (prevActive && digest.active.length < prevActive * WORK_MAP_DROP_WARN_RATIO) {
     warnings.push(`Active pages fell from ${prevActive} to ${digest.active.length} since the previous run.`);
@@ -412,4 +407,12 @@ async function organizeSteps(
     pages: digest.active.length,
   });
   return { outcome: "ok", map, written: wrote.outcome === "written" };
+}
+
+/** The coverage warning for a degraded git metadata filter (the card shows it as written). */
+export function metadataFilterWarning(filter: { degraded: boolean; reason?: string; pages?: number } | undefined): string | null {
+  if (!filter?.degraded) return null;
+  return filter.reason === "steps"
+    ? `The git walk left ${filter.pages} page(s) with only metadata-only commits unverified; a stamp burst may count as recent work.`
+    : "The git walk ran out of time filtering metadata-only commits; a stamp burst may count as recent work.";
 }

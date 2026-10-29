@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { WORK_MAP_VERSION, type WorkMap } from "../../../wiki/work-map/schema.ts";
+import { metadataFilterWarning } from "../../../wiki/work-map/run.ts";
 import {
   formatAge,
   isNestedEffort,
@@ -108,12 +109,13 @@ describe("workCardHtml", () => {
     expect(html).toContain("1 done · show");
   });
 
-  test("reports a degraded metadata filter and the map's warnings", () => {
+  test("the degraded-filter warning P1 wrote shows once", () => {
     const m = map();
     m.coverage.metadataFilter = { degraded: true, reason: "steps", pages: 4 };
-    m.coverage.warnings = ["Active pages fell from 90 to 30."];
+    m.coverage.warnings = [metadataFilterWarning(m.coverage.metadataFilter)!, "Active pages fell from 90 to 30."];
     const html = card(m);
-    expect(html).toContain("gave up on 4 pages");
+    expect(html.match(/<li>/g)).toHaveLength(2);
+    expect(html).toContain("4 page(s)");
     expect(html).toContain("Active pages fell from 90 to 30.");
   });
 
@@ -126,6 +128,26 @@ describe("workCardHtml", () => {
 });
 
 describe("lanes and nesting", () => {
+  test("a Moving sub-effort of a closed-lane parent renders in Moving, naming its parent", () => {
+    const m = map({ efforts: [effort("p", "shipped", ["plans/a.mdx"]), effort("k", "active", ["plans/b.mdx"], { parent: "p" }), effort("q", "cooling", [], { parent: "p" })] });
+    const html = card(m);
+    const lane = (id: string) => html.slice(html.indexOf(`data-wm-lane="${id}"`), html.indexOf("</details>", html.indexOf(`data-wm-lane="${id}"`)));
+    expect(lane("moving")).toContain('data-effort-id="k"');
+    expect(lane("moving")).toContain("part of Effort p");
+    expect(lane("moving")).toContain('wiki-wm-count">1<');
+    expect(lane("quiet")).not.toContain('data-effort-id="k"');
+    // A closed child of a closed parent stays nested, and counts in the lane it renders in.
+    expect(lane("quiet")).toContain('data-effort-id="q"');
+    expect(lane("quiet")).toContain('wiki-wm-count">2<');
+    expect(html.match(/data-effort-id="k"/g)).toHaveLength(1);
+  });
+  test("a Moving sub-effort of a Moving parent stays nested and counts in Moving", () => {
+    const m = map({ efforts: [effort("p", "active", []), effort("k", "blocked", [], { parent: "p" })] });
+    const html = card(m);
+    expect(html).toMatch(/data-effort-id="p">[\s\S]*wiki-wm-sub[\s\S]*data-effort-id="k"/);
+    expect(html).not.toContain("part of");
+    expect(html).toContain('wiki-wm-count">2<');
+  });
   test("duplicate effort ids that cross-parent render once each, without overflowing", () => {
     const m = map({ efforts: [effort("a", "active", [], { parent: "b" }), effort("a", "active", []), effort("b", "active", [], { parent: "a" }), effort("b", "active", [])] });
     const html = card(m);

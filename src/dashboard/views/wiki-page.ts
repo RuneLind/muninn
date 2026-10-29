@@ -2586,6 +2586,7 @@ export async function renderWikiPage(opts?: {
     .wm-state-blocked { background: var(--tint-warning); color: var(--status-warning); }
     .wm-state-shipped { background: var(--tint-success); color: var(--status-success); }
     .wiki-wm-active { font-size: 11px; color: var(--text-dim); }
+    .wiki-wm-partof { font-size: 11px; color: var(--text-dim); font-style: italic; }
     .wiki-wm-oneline { color: var(--text-secondary); margin-top: 2px; line-height: 1.5; overflow-wrap: anywhere; }
     .wiki-wm-pages { margin-top: 3px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
     .wiki-wm-sep, .wiki-wm-more { color: var(--text-dim); }
