@@ -1,0 +1,399 @@
+import { test, expect, describe } from "bun:test";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { testTempDirSync } from "../src/test/temp-dir.ts";
+import { COSTED_PAGE_CAP, gitRunner, planChecks, resolvePage, runGate, runHandoff, type Git, type PageRef } from "./wiki-stale-handoff.ts";
+import type { FetchJson, PostJson, PostSse } from "./wiki-stale.ts";
+
+/** Fixture repos get a repo-local identity: CI has no global one. */
+const git = gitRunner();
+async function g(cwd: string, ...args: string[]): Promise<string> {
+  const r = await git(args, cwd, 20_000);
+  if (r.code !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+  return r.stdout.trim();
+}
+const tmp = () => realpathSync(testTempDirSync(path.join(tmpdir(), "wiki-stale-handoff-")));
+function write(root: string, rel: string, text: string) {
+  mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+  writeFileSync(path.join(root, rel), text);
+}
+/** A repo with `plans/a.md` and `repos/b.md` committed on `branch`. */
+async function repo(branch = "main"): Promise<string> {
+  const dir = tmp();
+  await g(dir, "init", "-q", "-b", branch);
+  await g(dir, "config", "user.name", "T");
+  await g(dir, "config", "user.email", "t@example.com");
+  write(dir, "plans/a.md", "# A\n");
+  write(dir, "repos/b.md", "# B\n");
+  await g(dir, "add", ".");
+  await g(dir, "commit", "-q", "-m", "init");
+  return dir;
+}
+/** A bare remote, a pushing clone and the main checkout cloned from it. */
+async function withRemote(branch = "main"): Promise<{ bare: string; up: string; main: string }> {
+  const up = await repo(branch);
+  const bare = path.join(tmp(), "w.git");
+  await g(path.dirname(bare), "clone", "-q", "--bare", up, bare);
+  await g(up, "remote", "add", "origin", bare);
+  await g(up, "fetch", "-q", "origin");
+  const main = path.join(tmp(), "wiki");
+  await g(path.dirname(main), "clone", "-q", bare, main);
+  await g(main, "config", "user.name", "T");
+  await g(main, "config", "user.email", "t@example.com");
+  return { bare, up, main };
+}
+async function page(abs: string): Promise<PageRef> {
+  const r = await resolvePage(abs, git);
+  if ("skip" in r) throw new Error(r.skip);
+  return r;
+}
+
+describe("resolvePage: absolute paths only, worktree paths mapped to the main checkout's relPath", () => {
+  test("a relative path is refused; a worktree page and its main copy are one page", async () => {
+    expect(await resolvePage("plans/a.md", git)).toEqual({ given: "plans/a.md", skip: "not an absolute path" });
+    const main = await repo();
+    await g(main, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "fix");
+    const inMain = await page(path.join(main, "plans/a.md"));
+    const inWt = await page(path.join(wt, "plans/a.md"));
+    expect(inMain).toMatchObject({ rel: "plans/a.md", main, exists: true });
+    expect(inMain.worktree).toBeUndefined();
+    expect(inWt).toMatchObject({ rel: "plans/a.md", main, worktree: realpathSync(wt), exists: true });
+  });
+
+  test("a deleted page, its folder gone too, still maps", async () => {
+    const main = await repo();
+    rmSync(path.join(main, "repos"), { recursive: true });
+    expect(await page(path.join(main, "repos/b.md"))).toMatchObject({ rel: "repos/b.md", main, exists: false });
+  });
+});
+
+describe("the gate", () => {
+  test("a clone on its default branch pulls fast-forward; committed and uncommitted pages", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nnew\n");
+    await g(up, "commit", "-qam", "upstream");
+    await g(up, "push", "-q", "origin", "main");
+    write(main, "repos/b.md", "# B\ndirty\n");
+    const gate = await runGate(main, [await page(path.join(main, "plans/a.md")), await page(path.join(main, "repos/b.md"))], git);
+    expect(gate.lines).toEqual([
+      "gate: pulled 1 commit(s) from origin/main",
+      "gate: committed plans/a.md",
+      "gate: uncommitted repos/b.md — commit it before --check",
+      "gate: Check skip — uncommitted edits on repos/b.md",
+      `fix path: edit in ${main}, commit path-scoped, git push`,
+    ]);
+  });
+
+  test("gap: no upstream — a default branch with no tracking info still pulls, a remote without the branch is a note, not a skip", async () => {
+    const { main } = await withRemote();
+    await g(main, "branch", "--unset-upstream");
+    expect((await runGate(main, [], git)).lines[0]).toBe("gate: up to date with origin/main");
+    const { main: m2, bare } = await withRemote();
+    await g(bare, "branch", "-m", "main", "trunk");
+    const gate = await runGate(m2, [], git);
+    expect(gate.skip).toBeUndefined();
+    expect(gate.note).toBe("no upstream — origin has no branch main; nothing to pull");
+  });
+
+  test("gap: offline — the remote cannot be reached; a note, Check may still run", async () => {
+    const { main } = await withRemote();
+    await g(main, "remote", "set-url", "origin", "/nonexistent/wiki.git");
+    const gate = await runGate(main, [await page(path.join(main, "plans/a.md"))], git);
+    expect(gate.skip).toBeUndefined();
+    expect(gate.note).toStartWith("offline — could not reach origin (");
+    expect(gate.lines.at(-2)).toBe("gate: Check may run");
+    // A pull that never answers is the same, bounded.
+    const hung: Git = (args, cwd, ms) => (args[0] === "pull" ? Promise.resolve({ code: -1, stdout: "", stderr: "", timedOut: true }) : git(args, cwd, ms));
+    expect((await runGate(main, [], hung)).note).toBe("offline — could not reach origin (no answer in 30 s); the main checkout is as last pulled");
+  });
+
+  test("a pull that refuses (diverged) skips, with the worktree fix path", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nup\n");
+    await g(up, "commit", "-qam", "up");
+    await g(up, "push", "-q", "origin", "main");
+    write(main, "plans/a.md", "# A\nlocal\n");
+    await g(main, "commit", "-qam", "local");
+    const gate = await runGate(main, [], git);
+    expect(gate.skip).toStartWith("git pull --ff-only refused");
+    expect(gate.fixPath).toBe(`fix in a worktree: git -C ${main} worktree add <dir> origin/main; commit there, git push origin HEAD:main. Check skips until ${main} pulls cleanly`);
+  });
+
+  test("defect 1: no remote and the main checkout on another branch — a fix path that needs no push", async () => {
+    const main = await repo();
+    await g(main, "checkout", "-q", "-b", "feature");
+    const gate = await runGate(main, [], git);
+    expect(gate.skip).toBe("main checkout on feature, not main");
+    expect(gate.fixPath).toBe(`fix in a worktree on main: git -C ${main} worktree add <dir> main; commit there (no remote: the commit moves main itself). Check skips until ${main} is back on main`);
+    expect(gate.fixPath).not.toContain("push");
+    // The path works: a worktree on main, a commit there, and main moved.
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "main");
+    write(wt, "plans/a.md", "# A\nfixed\n");
+    await g(wt, "commit", "-qam", "fix");
+    expect(await g(main, "log", "-1", "--format=%s", "main")).toBe("fix");
+  });
+
+  test("no remote, on the default branch: nothing to pull, fix in place", async () => {
+    const main = await repo();
+    const gate = await runGate(main, [await page(path.join(main, "plans/a.md"))], git);
+    expect(gate.lines[0]).toBe("gate: no remote, nothing to pull");
+    expect(gate.skip).toBeUndefined();
+    expect(gate.fixPath).toBe(`edit in ${main}, commit path-scoped (no remote, nothing to push)`);
+  });
+
+  test("gap: a master default branch, with and without a remote", async () => {
+    const local = await repo("master");
+    const a = await runGate(local, [], git);
+    expect([a.defaultBranch, a.skip]).toEqual(["master", undefined]);
+    const { main } = await withRemote("master");
+    const b = await runGate(main, [], git);
+    expect([b.defaultBranch, b.skip, b.note]).toEqual(["master", undefined, "up to date with origin/master"]);
+  });
+
+  test("a detached HEAD skips and is named", async () => {
+    const main = await repo();
+    await g(main, "checkout", "-q", "--detach");
+    expect((await runGate(main, [], git)).skip).toBe("main checkout on a detached HEAD, not main");
+  });
+
+  test("a worktree page: carried when the bytes match, NOT carried otherwise, with the merge fix path when there is no remote", async () => {
+    const main = await repo();
+    await g(main, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "fix");
+    const carried = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect(carried.pages[0]!.state).toBe("carried");
+    expect(carried.skip).toBeUndefined();
+    write(wt, "plans/a.md", "# A\nfixed in the worktree\n");
+    const not = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect(not.pages[0]!.state).toBe("not-carried");
+    expect(not.skip).toBe("the main checkout lacks your text of plans/a.md");
+    expect(not.fixPath).toBe(`carry your worktree's commit: git -C ${main} merge --ff-only <your worktree's branch> (no remote to push to)`);
+  });
+
+  test("defect 3: a deleted page is a state, not a skip; an uncommitted deletion asks for its commit", async () => {
+    const main = await repo();
+    rmSync(path.join(main, "repos/b.md"));
+    const uncommitted = await runGate(main, [await page(path.join(main, "repos/b.md"))], git);
+    expect(uncommitted.pages[0]!.state).toBe("deleted-uncommitted");
+    expect(uncommitted.skip).toBe("uncommitted edits on repos/b.md");
+    await g(main, "commit", "-qam", "delete b");
+    const committed = await runGate(main, [await page(path.join(main, "repos/b.md")), await page(path.join(main, "nope/never.md"))], git);
+    expect(committed.pages.map((p) => p.state)).toEqual(["deleted", "missing"]);
+    expect(committed.skip).toBeUndefined();
+    expect(committed.lines).toContain("gate: deleted repos/b.md — not a page to Check");
+  });
+});
+
+describe("gitRunner: bounded, no shell, no prompt", () => {
+  test("gap: ssh and https never prompt — the env every git call gets", async () => {
+    const r = await gitRunner("env")([], tmpdir());
+    expect(r.stdout).toContain("GIT_TERMINAL_PROMPT=0");
+    expect(r.stdout).toContain("GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10");
+  });
+
+  test("a call past its bound is killed and says so", async () => {
+    const t0 = Date.now();
+    const r = await gitRunner("sleep")(["5"], tmpdir(), 100);
+    expect(r.timedOut).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  test("gap: git missing — every page is a line and the run ends in a Stale line", async () => {
+    const out = await runHandoff(["--handoff", "--pages", "/x/plans/a.md"], { git: gitRunner("/nonexistent/bin/git") });
+    expect(out).toEqual(["skipped /x/plans/a.md — git not found", "Stale: not checked (git not found — fix your own lines by hand)"]);
+  });
+});
+
+// A stub muninn: page reports by relPath, Check streams, sends recorded.
+type Linking = { relPath: string; verdict?: { verdict: string; reason?: string } };
+type Page = { hits?: { line: number; target: string; text: string; confirmation?: unknown }[]; toCheck?: Linking[]; readonly?: string | false };
+function muninn(pages: Record<string, Page>, opts: { verdicts?: Record<string, { relPath: string; verdict: string; edit?: { old: string; new: string } | null }[]>; failGet?: string[]; failCheck?: string[] } = {}) {
+  const asked: string[] = [];
+  const checked: string[] = [];
+  const sent: string[] = [];
+  const fetchJson: FetchJson = async (url) => {
+    const q = new URL(url).searchParams;
+    const rel = q.get("page") ?? "";
+    asked.push(rel);
+    if (opts.failGet?.includes(rel)) throw new Error("connection refused");
+    const p = pages[rel];
+    if (!p) return { status: 404, body: { error: `no page ${rel}`, readonly: false } };
+    const toCheck = p.toCheck ?? [];
+    return {
+      status: 200,
+      body: {
+        wiki: "w",
+        readonly: p.readonly ?? false,
+        page: { relPath: rel, title: rel },
+        lastChangeMs: Date.parse("2026-10-28T00:00:00Z"),
+        hits: (p.hits ?? []).map((h) => ({ said: ["proposed"], now: "shipped", confirmation: "unconfirmed", ...h })),
+        buckets: toCheck.length
+          ? { counts: { toCheck: toCheck.length }, linking: toCheck.map((l) => ({ ...l, title: l.relPath, bucket: "toCheck", passages: [{ line: 3, text: "t", claim: "date" }] })) }
+          : null,
+      },
+    };
+  };
+  const postSse: PostSse = async (_url, body) => {
+    const page = String(body.page);
+    checked.push(page);
+    if (opts.failCheck?.includes(page)) throw new Error("connection refused");
+    const vs = opts.verdicts?.[page] ?? [];
+    return {
+      status: 200,
+      events: (async function* () {
+        yield { event: "start", data: { toCheck: vs.length, cached: 0, toCall: vs.length, left: 0 } };
+        for (const v of vs) yield { event: "verdict", data: { reason: "r", cached: false, edit: null, ...v } };
+        yield { event: "done", data: { calls: vs.length, verdicts: vs.length, errors: 0 } };
+      })(),
+    };
+  };
+  const postJson: PostJson = async (_url, body) => {
+    sent.push(String(body.linking));
+    return { status: 200, body: { ok: true, outcome: "sent", groupKey: "g", pages: [body.linking] } };
+  };
+  return { asked, checked, sent, deps: { fetchJson, postSse, postJson, env: {} } };
+}
+
+describe("runHandoff: two calls", () => {
+  test("first call: gate, report, and only the session's own lines to fix; second call counts them fixed and sends the rest", async () => {
+    const main = await repo();
+    const stateDir = tmp();
+    const pages = ["--pages", path.join(main, "plans/a.md"), path.join(main, "repos/b.md")];
+    const first = muninn({
+      "plans/a.md": { hits: [{ line: 7, target: "plans/x.mdx", text: "- [[plans/x]] in-flight" }, { line: 9, target: "plans/y.mdx", text: "fine", confirmation: { verdict: "true" } }], toCheck: [{ relPath: "repos/b.md" }, { relPath: "repos/other.md" }] },
+      "repos/b.md": {},
+    });
+    const out1 = await runHandoff(["--handoff", ...pages], { ...first.deps, git, stateDir });
+    const fix = out1.slice(out1.indexOf("fix by hand (your own pages; every other page goes through --check's sends):") + 1);
+    expect(fix).toEqual([
+      "  plans/a.md L7 after [[plans/x.mdx]]: - [[plans/x]] in-flight",
+      "  repos/b.md L3 — to check after plans/a.md: read it against the change",
+      "then: commit (and push) those fixes by the fix path, then run the same command with --check",
+    ]);
+    expect(out1.at(0)).toBe(`== ${path.basename(main)} (${main})`);
+    expect(first.checked).toEqual([]);
+
+    // The session fixed both; repos/other.md is stale with a drafted edit.
+    const second = muninn(
+      { "plans/a.md": { toCheck: [{ relPath: "repos/other.md" }] }, "repos/b.md": {} },
+      { verdicts: { "plans/a.md": [{ relPath: "repos/other.md", verdict: "stale", edit: { old: "o", new: "n" } }] } },
+    );
+    const out2 = await runHandoff(["--handoff", "--check", ...pages], { ...second.deps, git, stateDir });
+    expect(second.sent).toEqual(["repos/other.md"]);
+    expect(out2.at(-1)).toBe(`Stale: ${path.basename(main)} — 2 status lines fixed on plans/a.md, repos/b.md; 1 fixes sent to the Gardener`);
+    expect(out2.join("\n")).not.toContain("plans/a.md — plans/a.md"); // reports read, not printed
+  });
+
+  test("defect 3: a deleted page does not block Check and is never asked for", async () => {
+    const main = await repo();
+    rmSync(path.join(main, "repos/b.md"));
+    await g(main, "commit", "-qam", "delete b");
+    const m = muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/c.md" }] } }, { verdicts: { "plans/a.md": [{ relPath: "repos/c.md", verdict: "true" }] } });
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), path.join(main, "repos/b.md")], { ...m.deps, git, stateDir: tmp() });
+    expect(m.asked).toEqual(["plans/a.md"]);
+    expect(m.checked).toEqual(["plans/a.md"]);
+    expect(out).toContain("gate: Check may run");
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — nothing stale on the changed pages; own fixes not counted (no first --handoff call saved)`);
+  });
+
+  test("defect 2: a muninn that fails mid-run keeps every verdict and send before it", async () => {
+    const main = await repo();
+    write(main, "plans/c.md", "# C\n");
+    await g(main, "add", ".");
+    await g(main, "commit", "-qm", "c");
+    const m = muninn(
+      { "plans/a.md": { toCheck: [{ relPath: "repos/x.md" }] }, "repos/b.md": { toCheck: [{ relPath: "repos/y.md" }] } },
+      { failGet: ["plans/c.md"], failCheck: ["repos/b.md"], verdicts: { "plans/a.md": [{ relPath: "repos/x.md", verdict: "stale", edit: { old: "o", new: "n" } }] } },
+    );
+    const out = await runHandoff(["--handoff", "--check", "--pages", ...["plans/a.md", "repos/b.md", "plans/c.md"].map((r) => path.join(main, r))], { ...m.deps, git, stateDir: tmp() });
+    expect(m.sent).toEqual(["repos/x.md"]);
+    expect(out.at(-1)).toBe(
+      `Stale: ${path.basename(main)} — 1 fixes sent to the Gardener; to check: plans/c.md (not reported: muninn not reachable), repos/y.md (connection refused); own fixes not counted (no first --handoff call saved)`,
+    );
+  });
+
+  test("defect 4 and tag counting: the cap counts only pages that will spend model calls", async () => {
+    const reports = (spec: [string, Linking[]][]) => spec.map(([rel, linking]) => ({ page: { relPath: rel }, buckets: { linking: linking.map((l) => ({ ...l, bucket: "toCheck" })) } }));
+    const cached = (r: string): Linking => ({ relPath: r, verdict: { verdict: "stale" } });
+    // 3 costed + 2 whose To-check verdicts are all cached (a [stale] tag included): every page runs.
+    const fits = planChecks(reports([["a", [{ relPath: "x" }]], ["b", [{ relPath: "y" }, cached("z")]], ["c", [{ relPath: "w" }]], ["d", [cached("v")]], ["e", [cached("u"), { relPath: "t", verdict: { verdict: "true" } }]]]));
+    expect(fits).toEqual({ check: ["d", "e", "a", "b", "c"], costed: ["a", "b", "c"], free: ["d", "e"], overCap: false });
+    // One costed page over the cap: only the free ones run.
+    const over = planChecks(reports([["a", [{ relPath: "x" }]], ["b", [{ relPath: "y" }]], ["c", [{ relPath: "w" }]], ["f", [{ relPath: "s" }]], ["d", [cached("v")]]]));
+    expect(over).toMatchObject({ check: ["d"], overCap: true });
+    expect(COSTED_PAGE_CAP).toBe(3);
+  });
+
+  test("over the cap, the skipped pages are listed with the reason and the bound is printed", async () => {
+    const main = await repo();
+    const rels = ["p1.md", "p2.md", "p3.md", "p4.md"];
+    for (const r of rels) write(main, r, "x\n");
+    await g(main, "add", ".");
+    await g(main, "commit", "-qm", "pages");
+    const m = muninn(Object.fromEntries(rels.map((r, i) => [r, { toCheck: [{ relPath: `o${i}.md` }] }])));
+    const out = await runHandoff(["--handoff", "--check", "--pages", ...rels.map((r) => path.join(main, r))], { ...m.deps, git, stateDir: tmp() });
+    expect(m.checked).toEqual([]);
+    expect(out).toContain("Check: 4 page(s) spend model calls — over 3, so only the 0 cached one(s) run, 0 cached only; bound ≤ 0 model calls, ≤ 2 min for the whole run");
+    expect(out.at(-1)).toContain("to check: o0.md (Check skipped: over 3 pages), o1.md (Check skipped: over 3 pages)");
+  });
+
+  test("gap: a readonly wiki says so, and its To-check pages are listed as Check skipped", async () => {
+    const main = await repo();
+    const m = muninn({ "plans/a.md": { readonly: "root", toCheck: [{ relPath: "repos/z.md" }] } });
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md")], { ...m.deps, git, stateDir: tmp() });
+    expect(m.checked).toEqual([]);
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: repos/z.md (Check skipped: readonly wiki); own fixes not counted (no first --handoff call saved); check unavailable: readonly wiki`);
+  });
+
+  test("a gate skip (no remote, feature branch) reads the reports, runs no Check, and names the reason", async () => {
+    const main = await repo();
+    await g(main, "checkout", "-q", "-b", "feature");
+    const m = muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/z.md" }] } });
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md")], { ...m.deps, git, stateDir: tmp() });
+    expect(m.checked).toEqual([]);
+    expect(out.at(-1)).toStartWith(`Stale: ${path.basename(main)} — to check: repos/z.md (Check skipped: main checkout on feature, not main)`);
+  });
+
+  test("muninn not reachable on the first call: a Stale line at once, nothing for --check to add", async () => {
+    const main = await repo();
+    const out = await runHandoff(["--handoff", "--pages", path.join(main, "plans/a.md"), "--base-url", "http://127.0.0.1:9"], { git, env: {}, stateDir: tmp() });
+    expect(out.slice(-2)).toEqual([
+      "fix by hand: no report (muninn not reachable) — read your own pages for status lines yourself",
+      `Stale: ${path.basename(main)} — not checked (muninn not reachable)`,
+    ]);
+  });
+
+  test("a page named by its main copy and its worktree copy is reported once", async () => {
+    const main = await repo();
+    await g(main, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "fix");
+    const m = muninn({ "plans/a.md": {} });
+    await runHandoff(["--handoff", "--pages", path.join(main, "plans/a.md"), path.join(wt, "plans/a.md")], { ...m.deps, git, stateDir: tmp() });
+    expect(m.asked).toEqual(["plans/a.md"]);
+  });
+
+  test("usage: a relative page, a relative --main, --wiki over two repos — each a line and a Stale line", async () => {
+    expect(await runHandoff(["--handoff", "--pages", "plans/a.md"], { git })).toEqual(["skipped plans/a.md — not an absolute path", "Stale: not checked (no page could be mapped to a wiki)"]);
+    expect(await runHandoff(["--handoff", "--main", "wiki", "--pages", "/a.md"], { git })).toEqual([
+      "wiki-stale: --main must be an absolute path (or ~/…), not wiki",
+      "Stale: not checked (--main is not an absolute path)",
+    ]);
+    const [a, b] = [await repo(), await repo()];
+    const out = await runHandoff(["--handoff", "--wiki", "w", "--pages", path.join(a, "plans/a.md"), path.join(b, "plans/a.md")], { git });
+    expect(out.at(-1)).toBe("Stale: not checked (--wiki with pages in several repos)");
+    expect(await runHandoff(["--handoff"], { git })).toEqual(["Stale: not checked (no wiki page changed)"]);
+  });
+
+  test("the script exits 0 with --handoff and its last line is a Stale line", async () => {
+    const proc = Bun.spawn(["bun", "--no-env-file", `${import.meta.dir}/wiki-stale.ts`, "--handoff", "--pages", "relative.md"], { stdout: "pipe", stderr: "pipe" });
+    const [code, out] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+    expect(code).toBe(0);
+    expect(out.trim().split("\n").at(-1)).toBe("Stale: not checked (no page could be mapped to a wiki)");
+  });
+});
