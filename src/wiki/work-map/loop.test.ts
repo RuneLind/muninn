@@ -128,6 +128,8 @@ describe("workMapDue", () => {
     ["fall-back, default hour 5", "2026-10-25T04:30:00Z", 5, "2026-10-25T04:00:00Z"],
     ["spring-forward, hour 2: when the clock reaches 03:00", "2026-03-29T02:00:00Z", 2, "2026-03-29T01:00:00Z"],
     ["spring-forward, default hour 5", "2026-03-29T03:30:00Z", 5, "2026-03-29T03:00:00Z"],
+    ["winter, hour 0: Oslo midnight, not the evening before", "2026-01-15T10:00:00Z", 0, "2026-01-14T23:00:00Z"],
+    ["summer, hour 0", "2026-07-15T10:00:00Z", 0, "2026-07-14T22:00:00Z"],
   ])("todaysHourMs across DST: %s", (_name, now, hour, want) => {
     expect(todaysHourMs(Date.parse(now), hour)).toBe(Date.parse(want));
   });

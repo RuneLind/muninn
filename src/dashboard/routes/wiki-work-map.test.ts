@@ -121,6 +121,21 @@ describe("POST cooldown after a failed run", () => {
     s.release();
   });
 
+  test("a recent failure behind a newer refusal still cools down", async () => {
+    const state: WorkMapState = {
+      wiki: "mimir",
+      attempts: [
+        { at: NOW - 30_000, outcome: "refused", error: "cold" },
+        { at: NOW - 120_000, outcome: "failed", error: "zod" },
+      ],
+    };
+    const s = setup({}, state);
+    const res = await s.post("wiki=mimir");
+    expect(res.status).toBe(429);
+    expect(await res.json()).toMatchObject({ lastFailedAt: NOW - 120_000 });
+    expect(s.modelCalls()).toBe(0);
+  });
+
   test("a failure older than 10 minutes, or a refusal, does not cool down", async () => {
     const cases: WorkMapState[] = [
       { wiki: "mimir", attempts: [{ at: NOW - WORK_MAP_REFRESH_COOLDOWN_MS - 1, outcome: "failed", error: "zod" }] },

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
@@ -28,5 +29,18 @@ describe("fileStateStore", () => {
     expect(ats).toHaveLength(12);
     expect(ats).toEqual([...ats].sort((a, b) => b - a));
     expect(ats.slice(-2)).toEqual([MORNING + 4, MORNING + 3]);
+  });
+
+  test("a failed write answers from memory, not the older state file", async () => {
+    const dir = testTempDirSync(path.join(tmpdir(), "work-map-state-"));
+    const store = fileStateStore(dir);
+    await store.record("mimir", { at: MORNING, outcome: "ok" });
+    chmodSync(dir, 0o500);
+    try {
+      await expect(store.record("mimir", { at: MORNING + HOUR, outcome: "ok" })).rejects.toThrow();
+      expect((await store.read("mimir"))?.lastSuccessAt).toBe(MORNING + HOUR);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
   });
 });
