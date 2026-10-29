@@ -249,8 +249,8 @@ export interface Gate {
   wideSkip?: string;
   /** What the session does to land its fixes. */
   fixPath: string;
-  /** The worktree the fix path carries from, and its branch (undefined: detached HEAD). */
-  carry?: { worktree: string; branch?: string; sha?: string };
+  /** Each worktree the fix path carries from, and its branch (undefined: detached HEAD, named by its short sha). */
+  carries?: { worktree: string; branch?: string; sha?: string }[];
   lines: string[];
   pages: (PageRef & { state: PageState })[];
 }
@@ -372,11 +372,12 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     if (state === "not-carried") skip(`the main checkout lacks your text of ${p.rel}`);
     if (state === "main-uncommitted") skip(`uncommitted edits on the main copy of ${p.rel}`);
   }
-  const from = g.pages.find((p) => p.worktree && ["not-carried", "main-uncommitted", "uncommitted", "deleted-uncommitted"].includes(p.state))?.worktree;
-  if (from) {
+  // A worktree whose only open pages have a dirty main copy gets no carry: the merge would refuse, and a push would land past that copy.
+  const froms = [...new Set(g.pages.filter((p) => p.worktree && ["not-carried", "uncommitted", "deleted-uncommitted"].includes(p.state)).map((p) => p.worktree!))];
+  for (const from of froms) {
     const b = (await git(["symbolic-ref", "--short", "-q", "HEAD"], from)).stdout.trim();
     const sha = b ? "" : (await git(["rev-parse", "--short", "HEAD"], from)).stdout.trim();
-    g.carry = { worktree: from, ...(b ? { branch: b } : {}), ...(sha ? { sha } : {}) };
+    (g.carries ??= []).push({ worktree: from, ...(b ? { branch: b } : {}), ...(sha ? { sha } : {}) });
   }
   g.fixPath = fixPath(g);
   lines.push(g.skip ? `gate: Check skip — ${g.skip}` : "gate: Check may run");
@@ -393,7 +394,11 @@ const AUTH_FAILURE = /permission denied \(|permission denied, please try again|h
 /** Quote a word for a POSIX shell when it needs it. */
 export const shq = (s: string) => (/^[A-Za-z0-9_\/.@%+=:,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
-/** Where the session lands its own fixes, given the gate. Every printed command runs as printed, in order. */
+/**
+ * Where the session lands its own fixes, given the gate. Each printed command fails safe: it moves no branch but the
+ * default one, never rebases, stashes or resets, and git itself refuses a push or merge that is not a fast-forward,
+ * which leaves the by-hand line. Edits in the main checkout the session did not make are never its to commit.
+ */
 function fixPath(g: Gate): string {
   const def = g.defaultBranch ?? "main";
   const m = shq(g.main);
@@ -406,26 +411,31 @@ function fixPath(g: Gate): string {
   if (g.remote && g.skip?.startsWith("git pull")) {
     return `fix in a worktree: git -C ${m} worktree add <dir> ${g.remote}/${def}; commit there, git push ${g.remote} HEAD:${def}. Check skips until ${m} pulls cleanly`;
   }
-  if (g.carry) {
-    const w = shq(g.carry.worktree);
-    // A detached worktree's HEAD moves when the session commits its fixes, so the merge reads it at run time.
-    const head = g.carry.branch ? shq(g.carry.branch) : `"$(git -C ${w} rev-parse HEAD)"`;
-    const named = g.carry.branch ? `branch ${g.carry.branch}` : `detached HEAD: ${g.carry.sha ?? "?"}`;
-    const pre = g.pages
-      .filter((p) => p.state === "main-uncommitted")
-      .map((p) => `the main copy of ${p.rel} has uncommitted edits: commit or settle them in ${m} first; `)
-      .join("");
-    // Pages in the main checkout too: main goes first, and the worktree's commit is rebased on it, or the --check pull diverges.
-    if (g.pages.some((p) => !p.worktree)) {
-      return g.remote
-        ? `${pre}main checkout first, then the worktree (${named}): commit your fixes path-scoped in each; git -C ${m} push ${g.remote} ${def}; git -C ${w} rebase --no-autostash ${g.remote}/${def}; git -C ${w} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
-        : `${pre}main checkout first, then the worktree (${named}): commit your fixes path-scoped in each; git -C ${w} rebase --no-autostash ${def}; git -C ${m} merge --ff-only --no-autostash ${head}`;
-    }
-    return g.remote
-      ? `${pre}push your worktree's commit (${named}): git -C ${w} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
-      : `${pre}carry your worktree's commit (${named}): git -C ${m} merge --ff-only --no-autostash ${head}`;
+  const dirtyMain = g.pages.filter((p) => p.state === "main-uncommitted");
+  if (!g.carries?.length && !dirtyMain.length) {
+    return g.remote ? `edit in ${m}, commit path-scoped, git push` : `edit in ${m}, commit path-scoped (no remote, nothing to push)`;
   }
-  return g.remote ? `edit in ${m}, commit path-scoped, git push` : `edit in ${m}, commit path-scoped (no remote, nothing to push)`;
+  const steps: string[] = [];
+  // Each page's own path in order, main first; no combined sequence, so nothing is rebased onto anything.
+  if (g.pages.some((p) => !p.worktree)) {
+    steps.push(`main checkout ${m}: commit your fixes path-scoped there${g.remote ? `, then git -C ${m} push ${g.remote} ${def}` : ""}`);
+  }
+  for (const c of g.carries ?? []) {
+    const w = shq(c.worktree);
+    // A detached worktree's HEAD moves when the session commits its fixes, so the merge reads it at run time.
+    const head = c.branch ? shq(c.branch) : `"$(git -C ${w} rev-parse HEAD)"`;
+    const named = c.branch ? `branch ${c.branch}` : `detached HEAD: ${c.sha ?? "?"}`;
+    steps.push(
+      g.remote
+        ? `worktree ${w} (${named}): commit your fixes path-scoped there, then git -C ${w} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
+        : `worktree ${w} (${named}): commit your fixes path-scoped there, then git -C ${m} merge --ff-only --no-autostash ${head}`,
+    );
+  }
+  for (const p of dirtyMain) {
+    steps.push(`the main copy of ${p.rel} holds uncommitted edits, probably another session's: Check skips it; leave them, and rerun once that session has committed, or list ${p.rel} in your resume prompt`);
+  }
+  if (g.carries?.length) steps.push(`if git refuses a push or merge (not a fast-forward: ${def} moved), carry your commit by hand (merge or cherry-pick) and rerun`);
+  return steps.join("; ");
 }
 
 /** One thing the session fixes by hand on its own pages. */
