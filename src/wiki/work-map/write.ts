@@ -11,12 +11,17 @@
  *   - the **per-wiki write queue**, then the cross-process `.wiki-write.lock`
  *     inside it, held for the read→write span only;
  *   - the **commit tail OUTSIDE** both, pushing where the repo has an upstream
- *     (`commitWikiChange`), since the write owner may run no sync loop.
+ *     (`commitWikiChange`), since the write owner may run no sync loop — and
+ *     skipped when the stop signal fired during the write: the landed file
+ *     stays uncommitted for the next run or the wiki-committer sweep;
+ *   - the write itself is a temp file in the root plus a rename, so a reader
+ *     never sees a half-written map.
  *
  * **No `log.md` entry**: a nightly line would feed the next digest and What's
  * new. No reindex either: the map is not a page (the index skips dot files).
  */
 
+import { rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getLog } from "../../logging.ts";
 import { commitWikiChange, type CommitWikiResult } from "../commit.ts";
@@ -41,8 +46,8 @@ export interface WorkMapWriteOptions {
   wikiDir: string;
   content: string;
   commitMessage: string;
-  /** Called inside the section, right before the write; false skips it (the
-   *  loop's stop hook fired while the write waited for the queue). */
+  /** Called inside the section, right before the write, and again before the
+   *  commit tail; false skips what follows (the loop's stop hook fired). */
   proceed?: () => boolean;
   isReadonly?: () => boolean;
   isReadonlyRoot?: (root: string) => boolean;
@@ -58,6 +63,18 @@ async function defaultRead(absPath: string): Promise<string | null> {
     return await Bun.file(absPath).text();
   } catch {
     return null;
+  }
+}
+
+/** Temp file in the same dir (a dot file, so the index never lists it), then rename. */
+async function atomicWrite(absPath: string, content: string): Promise<void> {
+  const tmp = path.join(path.dirname(absPath), `.${path.basename(absPath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  try {
+    await writeFile(tmp, content);
+    await rename(tmp, absPath);
+  } catch (err) {
+    await unlink(tmp).catch(() => {});
+    throw err;
   }
 }
 
@@ -81,7 +98,7 @@ export async function writeWorkMapFile(opts: WorkMapWriteOptions): Promise<WorkM
       if (opts.proceed && !opts.proceed()) return { outcome: "noop" };
       const current = await (opts.readFile ?? defaultRead)(abs);
       if (current === opts.content) return { outcome: "noop" };
-      await (opts.writeFile ?? ((p: string, c: string) => Bun.write(p, c).then(() => undefined)))(abs, opts.content);
+      await (opts.writeFile ?? atomicWrite)(abs, opts.content);
       return { outcome: "written" };
     } catch (err) {
       return { outcome: "error", reason: `writing ${WORK_MAP_FILE} failed: ${errMsg(err)}` };
@@ -92,6 +109,10 @@ export async function writeWorkMapFile(opts: WorkMapWriteOptions): Promise<WorkM
   if (section.outcome !== "written") return section;
   const commit = opts.commit === undefined ? commitWikiChange : opts.commit;
   if (!commit) return section;
+  if (opts.proceed && !opts.proceed()) {
+    log.info("Work map for {root} written; commit skipped — the stop signal fired", { root: opts.wikiDir });
+    return section;
+  }
   try {
     return { outcome: "written", commit: await commit(opts.wikiDir, [WORK_MAP_FILE], opts.commitMessage) };
   } catch (err) {

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, linkSync, readdirSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { testTempDir } from "../../test/temp-dir.ts";
+import { testTempDir, testTempDirSync } from "../../test/temp-dir.ts";
 import { WIKI_LOCK_BASENAME } from "../lockfile.ts";
 import { WIKI_READONLY_REASON } from "../readonly.ts";
 import { joinWorkMap } from "./join.ts";
@@ -77,6 +77,53 @@ describe("writeWorkMapFile", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("writeWorkMapFile — stop signal and atomic write", () => {
+  function syncWikiDir(): string {
+    const dir = testTempDirSync(path.join(tmpdir(), "work-map-write-"));
+    writeFileSync(path.join(dir, "log.md"), "# Activity Log\n");
+    return dir;
+  }
+
+  test("a stop that fires while the write is in its section commits nothing", async () => {
+    const dir = syncWikiDir();
+    let stopped = false;
+    let commits = 0;
+    const out = await writeWorkMapFile({
+      wikiDir: dir,
+      content: '{"a":1}\n',
+      commitMessage: "m",
+      isReadonly: () => false,
+      isReadonlyRoot: () => false,
+      proceed: () => !stopped,
+      writeFile: async (p, c) => {
+        await Bun.write(p, c);
+        stopped = true;
+      },
+      commit: async () => {
+        commits++;
+        return { committed: true };
+      },
+    });
+    expect(commits).toBe(0);
+    expect(out).toEqual({ outcome: "written" });
+    expect(await readFile(path.join(dir, WORK_MAP_FILE), "utf8")).toBe('{"a":1}\n');
+  });
+
+  test("the default writer replaces the file by rename and leaves no temp file", async () => {
+    const dir = syncWikiDir();
+    const target = path.join(dir, WORK_MAP_FILE);
+    writeFileSync(target, "old\n");
+    // A second name for the old inode: an in-place write changes it, a rename does not.
+    const witness = path.join(dir, "witness");
+    linkSync(target, witness);
+    const out = await writeWorkMapFile({ wikiDir: dir, content: "new\n", commitMessage: "m", isReadonly: () => false, isReadonlyRoot: () => false, commit: null });
+    expect(out.outcome).toBe("written");
+    expect(await readFile(target, "utf8")).toBe("new\n");
+    expect(await readFile(witness, "utf8")).toBe("old\n");
+    expect(readdirSync(dir).sort()).toEqual([WORK_MAP_FILE, "log.md", "witness"].sort());
   });
 });
 

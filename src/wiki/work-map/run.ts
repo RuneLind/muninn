@@ -6,9 +6,10 @@
  *
  * One run per wiki is in flight at a time, shared by the loop and
  * `POST /api/wiki/work-map/refresh`. `runFencedOneShot` takes no abort signal,
- * so the stop hook cannot kill a model call in flight: the run stops waiting
- * for nothing, but writes and commits nothing once the signal fired, and the
- * stop waits for a write already in its section.
+ * so the stop hook cannot kill a model call in flight: once the signal fired
+ * the run writes and commits nothing, and the stop waits for a write already
+ * in its section. That write lands, but its commit is skipped; the file stays
+ * uncommitted for the next run or the wiki-committer sweep.
  */
 
 import { extractJson } from "../../ai/json-extract.ts";

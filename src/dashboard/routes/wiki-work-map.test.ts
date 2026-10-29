@@ -108,6 +108,33 @@ describe("POST /api/wiki/work-map/refresh", () => {
   });
 });
 
+describe("POST cooldown after a failed run", () => {
+  test("429 within 10 minutes of a post-model failure unless force=1; not an attempt", async () => {
+    const failed: WorkMapState = { wiki: "mimir", attempts: [{ at: NOW - 120_000, outcome: "failed", error: "zod" }] };
+    const s = setup({}, failed);
+    const res = await s.post("wiki=mimir");
+    expect(res.status).toBe(429);
+    expect(await res.json()).toMatchObject({ lastFailedAt: NOW - 120_000, retryAfterMs: WORK_MAP_REFRESH_COOLDOWN_MS - 120_000 });
+    expect(s.recorded).toEqual([]);
+    expect(s.modelCalls()).toBe(0);
+    expect((await s.post("wiki=mimir&force=1")).status).toBe(202);
+    s.release();
+  });
+
+  test("a failure older than 10 minutes, or a refusal, does not cool down", async () => {
+    const cases: WorkMapState[] = [
+      { wiki: "mimir", attempts: [{ at: NOW - WORK_MAP_REFRESH_COOLDOWN_MS - 1, outcome: "failed", error: "zod" }] },
+      { wiki: "mimir", attempts: [{ at: NOW - 60_000, outcome: "refused", error: "cold" }] },
+    ];
+    for (const state of cases) {
+      const s = setup({}, state);
+      expect((await s.post("wiki=mimir")).status).toBe(202);
+      s.release();
+      __resetWorkMapRunsForTest();
+    }
+  });
+});
+
 describe("POST cooldown with an unwritable state dir", () => {
   test("a success the store could not write still answers 429", async () => {
     const blocker = path.join(testTempDirSync("work-map-state-"), "file");

@@ -12,9 +12,9 @@
  *    `idleTimeout`, so the card polls the GET. It refuses with 403, before any
  *    model call, unless the `organizable` predicate holds here (the per-wiki
  *    egress guard alone checks only readonly roots), and with 429 when the last
- *    success is under 10 minutes old and the request does not say `force=1`.
- *    The 429 is not recorded as an attempt, so it never touches the loop's
- *    retry gate.
+ *    success, or the newest post-model failure, is under 10 minutes old and
+ *    the request does not say `force=1`. The 429 is not recorded as an
+ *    attempt, so it never touches the loop's retry gate.
  */
 
 import type { Context, Hono } from "hono";
@@ -33,7 +33,8 @@ import { readonlyRefusal } from "./route-utils.ts";
 
 const log = getLog("dashboard", "wiki-work-map");
 
-/** The ↻ cooldown: a POST under this long after the last success needs `force=1`. */
+/** The ↻ cooldown: a POST under this long after the last success, or the last
+ *  post-model failure, needs `force=1`. */
 export const WORK_MAP_REFRESH_COOLDOWN_MS = 10 * 60_000;
 
 function resolve(c: Context, deps: WorkMapRunDeps) {
@@ -101,6 +102,17 @@ export function registerWikiWorkMapRoutes(
             error: "the work map ran less than 10 minutes ago",
             lastSuccessAt: last,
             retryAfterMs: WORK_MAP_REFRESH_COOLDOWN_MS - (now - last),
+          },
+          429,
+        );
+      }
+      const failedAt = state?.attempts.find((a) => a.outcome === "failed")?.at;
+      if (failedAt !== undefined && now - failedAt < WORK_MAP_REFRESH_COOLDOWN_MS) {
+        return c.json(
+          {
+            error: "the last work map run failed less than 10 minutes ago",
+            lastFailedAt: failedAt,
+            retryAfterMs: WORK_MAP_REFRESH_COOLDOWN_MS - (now - failedAt),
           },
           429,
         );
