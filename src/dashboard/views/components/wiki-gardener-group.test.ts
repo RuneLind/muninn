@@ -1,5 +1,7 @@
 import { test, expect, describe } from "bun:test";
-import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
+import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
+import { renderWikiGardenerPage } from "../wiki-gardener-page.ts";
+import { themeTokenStyles } from "../shared-styles.ts";
 
 describe("groupStatusSummary", () => {
   test("counts each status once, in the rows' own order of first appearance", () => {
@@ -101,5 +103,75 @@ describe("groupDriftNote", () => {
     expect(groupDriftNote([{ status: "draft", drifted: "x" }, { status: "draft", drifted: "y" }])).toBe(
       "2 pages changed since drafting — each Accept writes nothing and marks only one of them stale, returning the rest to draft. It takes 2 Accepts to mark all 2 stale.",
     );
+  });
+});
+
+describe("the kind filter and the card tag (PR 3, D28)", () => {
+  test("«Stale check» is a kind, «Drafted pages» the model-drafted kinds, «All kinds» everything", () => {
+    expect(["stale-check", "lint", "concept", "source"].filter((k) => kindMatches(k, "stale-check"))).toEqual(["stale-check"]);
+    expect(["stale-check", "lint", "concept", "entity", "source", "synthesis"].filter((k) => kindMatches(k, "pages"))).toEqual(["concept", "entity", "source", "synthesis"]);
+    expect(["stale-check", "lint"].filter((k) => kindMatches(k, ""))).toEqual(["stale-check", "lint"]);
+  });
+
+  test("the tag says «stale check» (CSS upper-cases it), and the group number is the key's tail", () => {
+    expect(groupKindTag("stale-check")).toBe("stale check");
+    expect(groupKindTag("lint")).toBe("lint");
+    expect(groupNumber("stale-check:repos/x.md:12")).toBe("12");
+    expect(groupNumber("lint:series-unnamed:abc")).toBe("");
+  });
+});
+
+describe("the STALE CHECK tag's own look (fix round 1 batch 6)", () => {
+  /** One rule's declarations as `prop → value`, read off the rendered page's CSS. */
+  const rule = (css: string, selector: string): Record<string, string> => {
+    const m = css.match(new RegExp(`\\n\\s*${selector.replace(/[.]/g, "\\.")} \\{([^}]*)\\}`));
+    if (!m) throw new Error(`no rule for ${selector}`);
+    return Object.fromEntries(m[1]!.split(";").map((d) => d.trim()).filter(Boolean).map((d) => [d.slice(0, d.indexOf(":")).trim(), d.slice(d.indexOf(":") + 1).trim()]));
+  };
+
+  test("the tag shares neither its fill nor its text colour with the `stale` status chip, and every token it reads is in both themes", async () => {
+    const css = await renderWikiGardenerPage();
+    const tag = rule(css, ".badge-stale-check");
+    const chip = rule(css, ".chip-stale");
+    // A card's tag (its kind) and its status chip sit side by side: the same
+    // colours read as the same thing, so a Stale check card looked stale.
+    // Compared by the token each value resolves through first: `var(--x, fallback)` is `--x`.
+    const token = (v: string | undefined) => v?.match(/var\((--[a-z0-9-]+)/)?.[1] ?? v;
+    expect(token(tag.background)).not.toBe(token(chip.background));
+    expect(token(tag.color)).not.toBe(token(chip.color));
+    const vars = [...Object.values(tag).join(" ").matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]!);
+    expect(vars.length).toBeGreaterThan(0);
+    const tokens = themeTokenStyles();
+    for (const theme of ["dark", "light"]) {
+      const block = tokens.match(new RegExp(`html\\[data-theme="${theme}"\\] \\{([^}]*)\\}`))![1]!;
+      for (const v of vars) expect(`${theme}: ${v} ${block.includes(`${v}:`)}`).toBe(`${theme}: ${v} true`);
+    }
+  });
+});
+
+describe("groupStopNote", () => {
+  const stopped = { outcome: "stopped", stoppedAt: "notes/b.md", stoppedOutcome: "error", applied: ["notes/a.md"], error: "write failed: EACCES" };
+
+  test("a stopped Stale check Accept names each edit that did not land, its count and its row's status", () => {
+    const note = groupStopNote(
+      {
+        ...stopped,
+        notLanded: [
+          { page: "notes/b.md", status: "draft", edits: [{ old: "x", text: "y" }, { old: "p", text: "q" }] },
+          { page: "notes/c.md", status: "error", edits: [{ old: "x", text: "y" }] },
+        ],
+      },
+      409,
+    );
+    expect(note).toBe(
+      "Stopped at notes/b.md (error) — 1 page(s) already written: write failed: EACCES. Not written: notes/b.md (2 edit(s), draft), notes/c.md (1 edit(s), error)",
+    );
+  });
+
+  test("a lint stop has no «Not written» part, and a refusal that is not a stop reads its error", () => {
+    expect(groupStopNote(stopped, 409)).toBe("Stopped at notes/b.md (error) — 1 page(s) already written: write failed: EACCES");
+    expect(groupStopNote({ ...stopped, applied: [], notLanded: [] }, 409)).toBe("Stopped at notes/b.md (error): write failed: EACCES");
+    expect(groupStopNote({ outcome: "mixed", error: "an approved or rejected row blocks the group" }, 409)).toBe("an approved or rejected row blocks the group");
+    expect(groupStopNote({}, 500)).toBe("Failed (500)");
   });
 });

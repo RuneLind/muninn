@@ -207,8 +207,9 @@ describe("parseStaleAnswer: home keeps old's links as written (fix round 2)", ()
   test("a link twice in old must be twice in home", () => {
     const passage = "- [[p]] og [[p]] er i gang";
     const old = "[[p]] og [[p]] er i gang";
-    expect(parseStaleAnswer(ans({ old, new: "x", home: "se [[p]]" }), passage).edit).toEqual({ old, new: "x" });
-    expect(parseStaleAnswer(ans({ old, new: "x", home: "se [[p]] og [[p]]" }), passage).edit?.home).toBe("se [[p]] og [[p]]");
+    const keep = "[[p]] og [[p]] er levert";
+    expect(parseStaleAnswer(ans({ old, new: keep, home: "se [[p]]" }), passage).edit).toEqual({ old, new: keep });
+    expect(parseStaleAnswer(ans({ old, new: keep, home: "se [[p]] og [[p]]" }), passage).edit?.home).toBe("se [[p]] og [[p]]");
   });
   test("a link inside inline code is not a link: home may drop it", () => {
     const passage = "- the `[[p]]` form er i gang";
@@ -254,8 +255,8 @@ describe("parseStaleAnswer: old is unique in the passage and on its full line (f
     const passage = "- [[a]] er i gang\n…[[b]] er levert…";
     const lines = ["- [[a]] er i gang", "z [[b]] er levert, og [[a]] er i gang"];
     // Once in the passage and once on its own row's full line: kept, though row 2's hidden part repeats it.
-    expect(parseStaleAnswer(ans({ old: "[[a]] er i gang", new: "x" }), passage, lines).edit).toEqual({ old: "[[a]] er i gang", new: "x" });
-    expect(parseStaleAnswer(ans({ old: "[[b]] er levert", new: "x" }), passage, lines).edit).toEqual({ old: "[[b]] er levert", new: "x" });
+    expect(parseStaleAnswer(ans({ old: "[[a]] er i gang", new: "[[a]] x" }), passage, lines).edit).toEqual({ old: "[[a]] er i gang", new: "[[a]] x" });
+    expect(parseStaleAnswer(ans({ old: "[[b]] er levert", new: "[[b]] x" }), passage, lines).edit).toEqual({ old: "[[b]] er levert", new: "[[b]] x" });
   });
   test("a full line that is unreadable or no longer holds old drops the edit", () => {
     const passage = "- [[p]] er i gang";
@@ -469,6 +470,26 @@ describe("runStaleConfirm (D16)", () => {
     }
   });
 
+  // Fix round 2 batch 2: the loop passes the page, so an edit placement
+  // would refuse on an .mdx page is dropped at parse time.
+  test("the loop drops an edit with an MDX brace on an .mdx page, or an alias on a front-matter line", async () => {
+    await write("brace.mdx", page("Brace", "[[p]] is in-flight now."));
+    await write("fmline.md", page("Fmline", "Body.", 'rel: {a: "[[p]]", b: is in-flight}\n'));
+    try {
+      const model: StaleModel = async (p) => {
+        const n = p.includes("Wiki page: fmline.md") ? "*nope" : "is shipped {soon}";
+        return JSON.stringify({ verdict: "stale", reason: "shipped", edit: { old: "is in-flight", new: n } });
+      };
+      const { deps, store } = makeDeps({ model: () => model });
+      await runStaleConfirm(["cw"], deps);
+      const rows = [...store.rows.values()].filter((r) => r.page === "brace.mdx" || r.page === "fmline.md").map((r) => [r.page, r.verdict, r.edit]);
+      expect(rows.sort()).toEqual([["brace.mdx", "stale", null], ["fmline.md", "stale", null]]);
+    } finally {
+      await rm(path.join(root, "brace.mdx"));
+      await rm(path.join(root, "fmline.md"));
+    }
+  });
+
   test("A4: an unreadable answer writes nothing and counts as an error, so the next run asks again", async () => {
     let calls = 0;
     const { deps, store } = makeDeps({ model: () => async () => (calls++, "Sorry, I cannot answer in JSON.") });
@@ -589,6 +610,90 @@ describe("runStaleConfirm (D16)", () => {
     const r = await within(runStaleConfirm(["cw"], deps), 1_500);
     expect(r).toMatchObject({ errors: 1, left: 1 });
     expect(Date.now() - t0).toBeLessThan(900);
+  });
+
+  // Fix round 1 (CI): on the runner the budget timer fired while Date.now()
+  // still read short of the run's end, and a second call started past the bound.
+  test("A6: once the run's bound fires, no call starts, whatever the wall clock reads", async () => {
+    const realNow = Date.now;
+    let lagMs = 0;
+    Date.now = () => realNow() - lagMs;
+    try {
+      const store = memoryStaleVerdictStore();
+      // The wall clock falls behind the timers once the write hangs.
+      const hung = { ...store, upsert: () => (setTimeout(() => (lagMs = 200), 0), never<never>()) };
+      const { deps } = makeDeps({ store: () => hung, failures: new Map(), limits: { budgetMs: 400 } });
+      const r = await within(runStaleConfirm(["cw"], deps), 1_500);
+      expect(r).toMatchObject({ calls: 1, errors: 1, left: 1 });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  // Fix round 2 batch 5, finding 1: every budgeted step checks the run's
+  // deadline before it starts, not only the loop's guard.
+  test("A6: a rebuild is not started once the run's bound is spent", async () => {
+    const started: string[] = [];
+    const twin = { ...entry, name: "cw-twin" } as WikiRegistryEntry;
+    // The first rebuild hangs while the clock passes the budget. Two real 300 ms
+    // timers raced the wall clock, and on CI a timer fired just before
+    // `Date.now()` reached the deadline, so the twin's rebuild started.
+    const realNow = Date.now;
+    let jumpMs = 0;
+    Date.now = () => realNow() + jumpMs;
+    try {
+      const index: ConfirmDeps["index"] = () => (started.push("rebuild"), started.length === 1 ? ((jumpMs = 10 * 60_000), never()) : getWikiIndex({ root: entry.root, refresh: true }));
+      const { deps } = makeDeps({ registry: () => [entry, twin], index, failures: new Map(), limits: { budgetMs: 300 } });
+      const r = await runStaleConfirm(["cw", "cw-twin"], deps);
+      expect(started).toEqual(["rebuild"]);
+      expect(r).toMatchObject({ calls: 0, errors: 1 });
+      expect(r.wikis[1]).toMatchObject({ wiki: "cw-twin", skipped: "run budget spent" });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  test("A6: a call whose deadline passed while its input was read is not started", async () => {
+    let t = Date.UTC(2026, 9, 28, 8);
+    let armed = false;
+    const prompts: string[] = [];
+    // The clock passes the run's deadline as the call input is read.
+    const index: ConfirmDeps["index"] = async (r) => {
+      const ix = (await getWikiIndex({ root: r, refresh: true }))!;
+      return new Proxy(ix, {
+        get(target, p) {
+          const v = Reflect.get(target, p);
+          if (p === "resolveRelPath" && typeof v === "function") return (...a: unknown[]) => (armed && (t += 10 * 60_000), (v as (...x: unknown[]) => unknown).apply(target, a));
+          return typeof v === "function" ? v.bind(target) : v;
+        },
+      });
+    };
+    const store = memoryStaleVerdictStore();
+    const arming = { ...store, get: (...a: Parameters<typeof store.get>) => ((armed = true), store.get(...a)) };
+    const model: StaleModel = async (prompt) => (prompts.push(prompt), '{"verdict":"true","reason":"ok"}');
+    const { deps } = makeDeps({ index, store: () => arming, model: () => model, now: () => t, failures: new Map() });
+    const r = await runStaleConfirm(["cw"], deps);
+    expect(prompts).toEqual([]);
+    expect(r).toMatchObject({ calls: 0, errors: 0, left: 2 });
+  });
+
+  test("A6: a verdict write is not started once the run's bound is spent", async () => {
+    const realNow = Date.now;
+    let jumpMs = 0;
+    Date.now = () => realNow() + jumpMs;
+    try {
+      const store = memoryStaleVerdictStore();
+      const upserts: unknown[] = [];
+      const counting = { ...store, upsert: (v: Parameters<typeof store.upsert>[0]) => (upserts.push(v), store.upsert(v)) };
+      // The clock passes the run's end while the model answers.
+      const model: StaleModel = async () => ((jumpMs = 10 * 60_000), '{"verdict":"true","reason":"ok"}');
+      const { deps } = makeDeps({ store: () => counting, model: () => model, failures: new Map() });
+      const r = await runStaleConfirm(["cw"], deps);
+      expect(upserts).toEqual([]);
+      expect(r).toMatchObject({ calls: 1, errors: 1, left: 1 });
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   test("the loop starts only with the scheduler on, a writable instance and a registered wiki", async () => {
@@ -736,5 +841,97 @@ describe("Check drops an edit the full line holds twice (fix round 2)", () => {
       "notes/old.md": ["stale", null],
       "notes/two.md": ["stale", { old: "landed on 23.05", new: "landed on 18.06" }],
     });
+  });
+});
+
+// Fix round 2 batch 2: Check passes the page, so an edit placement would
+// refuse on an .mdx page is dropped when the answer is read.
+describe("Check drops an edit placement would refuse (R2B2-2)", () => {
+  let root = "";
+  const git = async (...args: string[]) => {
+    const proc = Bun.spawn(["git", "-C", root, "-c", "user.email=f@example.com", "-c", "user.name=f", "-c", "commit.gpgsign=false", ...args], { stdout: "pipe", stderr: "pipe" });
+    const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    if (code !== 0) throw new Error(`git ${args.join(" ")}: ${err}`);
+  };
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-check-rule-"));
+    await git("init", "-q", "-b", "main");
+    await write("hub.md", page("Hub", "Body."));
+    await write("notes/brace.mdx", page("Brace", "The pin in [[hub]] landed on 23.05."));
+    await write("notes/plain.md", page("Plain", "The pin in [[hub]] landed on 23.05."));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-05-01T10:00:00Z", "-m", "seed");
+    await write("hub.md", page("Hub", "Body two."));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-06-18T10:00:00Z", "-m", "hub: the pin moves");
+  }, 30_000);
+  afterAll(async () => {
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a brace on the .mdx page drops the edit; the .md page keeps it", async () => {
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    const model: StaleModel = async () => JSON.stringify({ verdict: "stale", reason: "moved", edit: { old: "landed on 23.05", new: "landed on {18.06}" } });
+    const events: { type: string; edit?: unknown; verdict?: string }[] = [];
+    const ok = await runStaleCheck({ wiki: "w", index, relPath: "hub.md", asOfMs: Date.parse("2026-06-20T00:00:00Z"), bot: BOT, store: memoryStaleVerdictStore(), model, onEvent: (e) => void events.push(e as never) });
+    expect(ok).toBe(true);
+    const by = Object.fromEntries(events.filter((e) => e.type === "verdict").map((e) => [(e as { relPath?: string }).relPath, [e.verdict, e.edit]]));
+    expect(by).toEqual({
+      "notes/brace.mdx": ["stale", null],
+      "notes/plain.md": ["stale", { old: "landed on 23.05", new: "landed on {18.06}" }],
+    });
+  });
+});
+
+// Fix round 2 batch 2: the parse runs placement's own rule on the row's
+// line, so a draft the STALE tab offers is one Apply can write.
+describe("parseStaleAnswer: an edit placement would refuse is dropped (R2B2-2)", () => {
+  const ans = (edit: Record<string, unknown>) => JSON.stringify({ verdict: "stale", reason: "r", edit });
+  const editOf = (edit: Record<string, unknown>, passage: string, page = "notes/a.md") => parseStaleAnswer(ans(edit), passage, [passage], { page }).edit;
+
+  test("a new that drops a link of any kind drops the edit", () => {
+    expect(editOf({ old: "[[p]] er i gang", new: "p er levert" }, "- [[p]] er i gang")).toBeNull();
+    expect(editOf({ old: "[the doc] er i gang", new: "the doc er levert" }, "- [[p]] per [the doc] er i gang")).toBeNull();
+    expect(editOf({ old: "i gang[^1]", new: "levert" }, "- [[p]] er i gang[^1]")).toBeNull();
+    expect(editOf({ old: "[[p]] er i gang", new: "[[p]] er levert" }, "- [[p]] er i gang")).toEqual({ old: "[[p]] er i gang", new: "[[p]] er levert" });
+  });
+
+  test("a new that adds a link, or a home that does, is dropped", () => {
+    expect(editOf({ old: "er i gang", new: "er levert, se [[q]]" }, "- [[p]] er i gang")).toBeNull();
+    expect(editOf({ old: "er i gang", new: "er levert", home: "se [[q]]" }, "- [[p]] er i gang")).toEqual({ old: "er i gang", new: "er levert" });
+  });
+
+  test("a tag, or on an .mdx page a `<` or a brace, drops the edit", () => {
+    expect(editOf({ old: "er i gang", new: "er <b>levert</b>" }, "- [[p]] er i gang")).toBeNull();
+    expect(editOf({ old: "er i gang", new: "er levert {x}" }, "- [[p]] er i gang", "notes/a.mdx")).toBeNull();
+    expect(editOf({ old: "er i gang", new: "er levert < 2 dager" }, "- [[p]] er i gang", "notes/a.mdx")).toBeNull();
+    // The same text on a .md page places, so it is kept.
+    expect(editOf({ old: "er i gang", new: "er levert {x}" }, "- [[p]] er i gang")).toEqual({ old: "er i gang", new: "er levert {x}" });
+  });
+
+  test("a new that changes how the line starts drops the edit", () => {
+    expect(editOf({ old: "- [[p]] er i gang", new: "[[p]] er levert" }, "- [[p]] er i gang")).toBeNull();
+  });
+
+  test("old is found in the window's pieces as placement cuts them: the join's space is not text", () => {
+    const text = "[[p]] lead … then shipped…";
+    const line = "[[p]] lead x then shipped now";
+    expect(parseStaleAnswer(ans({ old: "lead ", new: "led " }), text, [line], { page: "notes/a.md" }).edit).toBeNull();
+    expect(parseStaleAnswer(ans({ old: "then shipped", new: "then in-flight" }), text, [line], { page: "notes/a.md" }).edit).toEqual({ old: "then shipped", new: "then in-flight" });
+  });
+
+  test("an edit on a front-matter line is checked against the YAML, and never throws", () => {
+    const content = 'title: Note\nrel: {a: "[[hub]]", b: landed on 23.05}';
+    const fm = `---\n${content}\n---\n\nBody.\n`;
+    const row = 'rel: {a: "[[hub]]", b: landed on 23.05}';
+    const parse = (n: string) => parseStaleAnswer(ans({ old: "landed on 23.05", new: n }), row, [row], { page: "notes/a.md", file: { content: fm, lines: [3] } }).edit;
+    expect(parse("*nope")).toBeNull();
+    expect(parse("landed, c: 1")).toBeNull();
+    expect(parse("landed on 18.06")).toEqual({ old: "landed on 23.05", new: "landed on 18.06" });
   });
 });

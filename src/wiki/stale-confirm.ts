@@ -31,6 +31,7 @@ import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig } from "../bot
 import type { MuninnProfile } from "../config.ts";
 import {
   getStaleVerdicts,
+  getStaleVerdictPages,
   READER_CHECKED_BY,
   upsertStaleVerdict,
   type StaleEdit,
@@ -49,7 +50,10 @@ import type { WikiRegistryEntry } from "./registry.ts";
 import { normalizeRelPath } from "./rel-path.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { maskLineCodeSpans } from "../format/code-spans.ts";
-import { lineLinks, linkingBuckets, pageStaleFacts, type LinkingPage, type StatusLineHit } from "./stale.ts";
+import { lineLinks, linkingBuckets, linkingPassageRows, pageStaleFacts, type LinkingPage, type StatusLineHit } from "./stale.ts";
+import { EDIT_TEXT_CAP, staleEditOnLine, windowPieces, type StaleFixVariant } from "./stale-fix.ts";
+
+export { EDIT_TEXT_CAP, linkingPassageRows };
 import { getWikiIndex, parseFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
 
 const log = getLog("wiki", "stale-confirm");
@@ -129,13 +133,6 @@ export function passageVerdictKey(index: Pick<WikiIndex, "resolve" | "resolveRel
   return passageKeyHash(l.relPath, ctx.passage, changedHash, ctx);
 }
 
-/** The passage lines a To-check linking page is judged on: those that make
- *  a claim, else all, in line order. */
-export function linkingPassageRows(lp: Pick<LinkingPage, "passages">): LinkingPage["passages"] {
-  const claims = lp.passages.filter((p) => p.claim !== undefined);
-  return claims.length ? claims : lp.passages;
-}
-
 /** The passage a To-check linking page is judged on: its
  *  {@link linkingPassageRows}, joined by newlines. One verdict covers them. */
 export function linkingPassage(lp: Pick<LinkingPage, "passages">): string {
@@ -147,9 +144,12 @@ export function linkingPassage(lp: Pick<LinkingPage, "passages">): string {
 export interface StaleVerdictStore {
   get(wiki: string, kind: StaleVerdictKind, keys: readonly string[]): Promise<Map<string, StaleVerdictRow>>;
   upsert(v: StaleVerdictInput): Promise<StaleVerdictRow>;
+  /** The pages with a row of `kind` (PR 3's `fixed` pre-check). A store
+   *  without it reads as none. */
+  pages?(wiki: string, kind: StaleVerdictKind): Promise<Set<string>>;
 }
 
-export const dbStaleVerdictStore: StaleVerdictStore = { get: getStaleVerdicts, upsert: upsertStaleVerdict };
+export const dbStaleVerdictStore: StaleVerdictStore = { get: getStaleVerdicts, upsert: upsertStaleVerdict, pages: getStaleVerdictPages };
 
 let activeStore: StaleVerdictStore = dbStaleVerdictStore;
 export const staleVerdictStore = (): StaleVerdictStore => activeStore;
@@ -170,6 +170,9 @@ export function memoryStaleVerdictStore(): StaleVerdictStore & { rows: Map<strin
         if (r) out.set(key, r);
       }
       return out;
+    },
+    async pages(wiki, kind) {
+      return new Set([...rows.values()].filter((r) => r.wiki === wiki && r.kind === kind).map((r) => r.page));
     },
     async upsert(v) {
       const prev = rows.get(k(v.wiki, v.kind, v.keyHash));
@@ -200,6 +203,9 @@ export interface StaleCallInput {
   /** The full file line of each `\n`-separated passage row, undefined when
    *  unreadable: {@link parseStaleAnswer} checks `old` against it. Never in the prompt. */
   sourceLines?: readonly (string | undefined)[];
+  /** The page's content (CRLF folded) and each row's 1-based line, for
+   *  {@link parseStaleAnswer}'s front-matter rule. Never in the prompt. */
+  sourceFile?: { content: string; lines: readonly number[] };
 }
 
 const PASSAGE_CAP = 2_000;
@@ -278,29 +284,7 @@ export interface StaleAnswer {
 
 const MODEL_VERDICTS = ["stale", "unsure", "true", "not-status"] as const;
 const REASON_CAP = 500;
-/** An edit's `new` or `home` is at most this long (the prompt says 400 too). */
-export const EDIT_TEXT_CAP = 400;
 
-const occurrences = (hay: string, needle: string) => {
-  let n = 0;
-  for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + 1)) n++;
-  return n;
-};
-const fitsEdit = (s: string) => s.length <= EDIT_TEXT_CAP && !/[\r\n]/.test(s);
-/** The links a text holds as written: each whole `[[…]]` (an embed's `!`
- *  included) or `[text](url)` source span, read as `lineLinks` reads a line. */
-const linksIn = (s: string) => lineLinks(maskLineCodeSpans(s)).map((l) => s.slice(l.start, l.end));
-/** Does `home` hold every link `old` holds, as written and as often? */
-function keepsLinks(old: string, home: string): boolean {
-  const have = new Map<string, number>();
-  for (const l of linksIn(home)) have.set(l, (have.get(l) ?? 0) + 1);
-  for (const l of linksIn(old)) {
-    const n = have.get(l) ?? 0;
-    if (n === 0) return false;
-    have.set(l, n - 1);
-  }
-  return true;
-}
 /** Does `at`–`at + len` on `text` cut into a link, or lie inside one? A
  *  replacement there would break the link or retarget it. */
 const cutsLink = (text: string, at: number, len: number) =>
@@ -314,14 +298,24 @@ function holdsLinkPiece(old: string): boolean {
 }
 
 /** Where `old` sits in the passage: the one row and piece that hold it,
- *  or null unless it occurs exactly once across every row's pieces. */
+ *  or null unless it occurs exactly once across every row's pieces — the
+ *  pieces placement reads ({@link windowPieces}). */
 function placeOld(passage: string, old: string): { row: number; piece: string; at: number } | null {
   let found: { row: number; piece: string; at: number } | null = null;
   let n = 0;
   passage.split("\n").forEach((r, row) => {
-    for (const piece of r.split("…")) for (let at = piece.indexOf(old); at >= 0; at = piece.indexOf(old, at + 1)) (n++, (found = { row, piece, at }));
+    for (const piece of windowPieces(r)) for (let at = piece.indexOf(old); at >= 0; at = piece.indexOf(old, at + 1)) (n++, (found = { row, piece, at }));
   });
   return n === 1 ? found : null;
+}
+
+/** What `parseStaleAnswer` reads besides the passage: the page (its
+ *  extension decides the MDX rules) and, when the page was read, its content
+ *  (CRLF folded) with each row's 1-based line, so an edit on a front-matter
+ *  line is checked against the YAML as placement checks it. */
+export interface StaleAnswerSource {
+  page: string;
+  file?: { content: string; lines: readonly number[] };
 }
 
 /** An answer that names no known verdict (A4): the call failed, so nothing
@@ -367,16 +361,18 @@ export function repairDanglingKey(raw: string): unknown {
  * repair ({@link repairDanglingKey}). An edit survives only on a stale verdict (else it is
  * dropped and the verdict kept), and only when (A3, A17, fix round 2):
  * `old` occurs exactly once across the passage's source pieces — its
- * `\n`-joined rows, each cut at a window's `…` (a status-line hit and a long
- * passage line are both windows) — the rule the prompt states; it neither
- * cuts into nor lies inside a link; given `sourceLines` (each row's full
- * file line), it occurs exactly once on its row's full line too, so PR 3's
- * Apply finds one line and one position; `new` is one line of at most
- * {@link EDIT_TEXT_CAP} characters and differs from `old`. `home` is kept
- * only when it fits the same bound, differs from `old` and holds every link
- * `old` holds as written (alias, anchor, title, embed `!`), as often.
+ * `\n`-joined rows, each cut at a window's `…` ({@link windowPieces}, as
+ * placement cuts them; a status-line hit and a long passage line are both
+ * windows) — the rule the prompt states; it neither cuts into nor lies
+ * inside a link on its piece; and `new` passes placement's own rule
+ * ({@link staleEditOnLine}) on the row's full file line (`sourceLines`,
+ * else the piece), with `source`'s page and content: once on the line, no
+ * construct cut, the replacement one line of at most {@link EDIT_TEXT_CAP}
+ * characters that keeps the links, tags, line start and front matter as
+ * placement requires. An edit placement would refuse is dropped here. `home`
+ * is kept only when it passes the same rule as the `home` variant.
  */
-export function parseStaleAnswer(raw: string, passage: string, sourceLines?: readonly (string | undefined)[]): StaleAnswer {
+export function parseStaleAnswer(raw: string, passage: string, sourceLines?: readonly (string | undefined)[], source?: StaleAnswerSource): StaleAnswer {
   const verdictOf = (x: unknown) => {
     const v = x && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>).verdict : undefined;
     const t = typeof v === "string" ? v.trim().toLowerCase() : "";
@@ -400,14 +396,19 @@ export function parseStaleAnswer(raw: string, passage: string, sourceLines?: rea
   if (verdict === "stale" && e && typeof e === "object" && typeof e.old === "string" && typeof e.new === "string") {
     const old = e.old;
     const at = old.trim() ? placeOld(passage, old) : null;
-    let placed = !!at && !cutsLink(at.piece, at.at, old.length) && !holdsLinkPiece(old);
-    if (placed && sourceLines) {
-      const full = sourceLines[at!.row];
-      placed = typeof full === "string" && occurrences(full, old) === 1 && !cutsLink(full, full.indexOf(old), old.length);
+    // The line the rules read: the row's full file line, else the piece.
+    let line: string | undefined = at && !cutsLink(at.piece, at.at, old.length) && !holdsLinkPiece(old) ? at.piece : undefined;
+    let file: { content: string; idx: number } | undefined;
+    if (line !== undefined && at && sourceLines) {
+      line = sourceLines[at.row];
+      const n = source?.file?.lines[at.row];
+      if (source?.file && n !== undefined) file = { content: source.file.content, idx: n - 1 };
     }
-    if (placed && fitsEdit(e.new) && e.new !== old) {
+    const places = (text: string, variant: StaleFixVariant) =>
+      line !== undefined && staleEditOnLine(line, { old, text, variant, page: source?.page ?? "" }, file).ok;
+    if (places(e.new, "new")) {
       const home = e.home;
-      const homeOk = typeof home === "string" && home !== old && fitsEdit(home) && keepsLinks(old, home);
+      const homeOk = typeof home === "string" && places(home, "home");
       edit = { old, new: e.new, ...(homeOk ? { home } : {}) };
     }
   }
@@ -549,16 +550,24 @@ export function otherPlansIn(index: Pick<WikiIndex, "resolve">, passage: string,
 }
 
 /** The full file lines `lines` (1-based) of `relPath`, CRLF folded as the
- *  index counts them; each undefined when the page cannot be read. */
-export async function sourceLinesOf(root: string, relPath: string, lines: readonly number[]): Promise<(string | undefined)[]> {
-  let all: string[] = [];
+ *  index counts them, each undefined when the page cannot be read; and,
+ *  when it was read, the content they came from as `sourceFile`. */
+export async function sourceOf(root: string, relPath: string, lines: readonly number[]): Promise<Required<Pick<StaleCallInput, "sourceLines">> & Pick<StaleCallInput, "sourceFile">> {
+  let content: string | null = null;
   try {
-    all = (await Bun.file(path.join(root, relPath)).text()).replace(/\r\n/g, "\n").split("\n");
+    content = (await Bun.file(path.join(root, relPath)).text()).replace(/\r\n/g, "\n");
   } catch {
     // Unreadable: every line undefined, so no edit survives.
   }
-  return lines.map((n) => all[n - 1]);
+  const all = content === null ? [] : content.split("\n");
+  return { sourceLines: lines.map((n) => all[n - 1]), ...(content === null ? {} : { sourceFile: { content, lines } }) };
 }
+
+/** What {@link parseStaleAnswer} checks an edit against, from a call's input. */
+const answerSource = (input: Pick<StaleCallInput, "page" | "sourceFile">): StaleAnswerSource => ({
+  page: input.page,
+  ...(input.sourceFile ? { file: input.sourceFile } : {}),
+});
 
 /** The call input for a status-line hit. */
 export async function statusLineCallInput(index: WikiIndex, page: WikiPageMeta, hit: StatusLineHit): Promise<StaleCallInput> {
@@ -570,7 +579,7 @@ export async function statusLineCallInput(index: WikiIndex, page: WikiPageMeta, 
     target: targetFacts(target, hit.target),
     said: hit.said,
     commits: await commitsFor(index, target, page.gitTouchedMs ?? page.workedMs),
-    sourceLines: await sourceLinesOf(index.root, page.relPath, [hit.line]),
+    ...(await sourceOf(index.root, page.relPath, [hit.line])),
   };
 }
 
@@ -687,6 +696,8 @@ export interface ConfirmRunSummary {
 }
 
 class ConfirmTimeout extends Error {}
+/** A step the run did not start: its budget was already spent. */
+class ConfirmBudgetSpent extends ConfirmTimeout {}
 /** The loop was stopped (A8): the run starts nothing more and writes nothing more. */
 class ConfirmStopped extends Error {}
 
@@ -700,12 +711,15 @@ function trackWrite<T>(p: Promise<T>): Promise<T> {
   return p;
 }
 
-/** `p`, or a rejection after `ms`; the timer is cleared either way. */
-async function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+/** `p`, or a rejection after `ms` (calling `onTimeout` first); the timer is cleared either way. */
+async function within<T>(p: Promise<T>, ms: number, what: string, onTimeout?: () => void): Promise<T> {
   let t: ReturnType<typeof setTimeout> | undefined;
   p.catch(() => {});
   try {
-    return await Promise.race([p, new Promise<never>((_, reject) => (t = setTimeout(() => reject(new ConfirmTimeout(what)), Math.max(0, ms))))]);
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => (t = setTimeout(() => (onTimeout?.(), reject(new ConfirmTimeout(what))), Math.max(0, ms)))),
+    ]);
   } finally {
     clearTimeout(t);
   }
@@ -740,10 +754,19 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
     else signal?.addEventListener("abort", () => reject(new ConfirmStopped()), { once: true });
   });
   stoppedRace.catch(() => {});
-  const inBudget = <T>(p: Promise<T>, what: string) => within(p, endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`);
-  const bounded = <T>(p: Promise<T>, what: string) => {
+  // Set when the run's own timer fires: a timer can fire while Date.now() still
+  // reads short of `endsAt` (the CI runner's A6 red, PR #759), and no call starts after it.
+  let budgetSpent = false;
+  const spent = () => budgetSpent || Date.now() >= endsAt;
+  // Every budgeted step (rebuild, store read, call input, call, write) starts
+  // through these, and only while the budget is unspent.
+  const inBudget = <T>(start: () => Promise<T>, what: string) => {
+    if (spent()) return Promise.reject(new ConfirmBudgetSpent(`${what}: not started, the run's ${lim.budgetMs} ms bound is spent`));
+    return within(start(), endsAt - Date.now(), `${what}: the run passed its ${lim.budgetMs} ms bound`, () => (budgetSpent = true));
+  };
+  const bounded = <T>(start: () => Promise<T>, what: string) => {
     if (signal?.aborted) return Promise.reject(new ConfirmStopped());
-    return Promise.race([inBudget(p, what), stoppedRace]);
+    return Promise.race([inBudget(start, what), stoppedRace]);
   };
   const out: ConfirmRunSummary = { wikis: [], calls: 0, errors: 0, left: 0, elapsedMs: 0 };
   /** Calls sent whose answer stop dropped: not counted as calls, but on the trace. */
@@ -774,7 +797,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       }
       rebuilding = true;
       const index = await bounded(
-        within(deps.index(entry.root), Math.min(lim.rebuildMaxMs, endsAt - Date.now()), `index rebuild of ${entry.name} passed its ${lim.rebuildMaxMs} ms bound`),
+        () => within(deps.index(entry.root), Math.min(lim.rebuildMaxMs, endsAt - Date.now()), `index rebuild of ${entry.name} passed its ${lim.rebuildMaxMs} ms bound`),
         `index rebuild of ${entry.name}`,
       );
       rebuilding = false;
@@ -799,7 +822,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         for (const hit of hits) mine.push({ row, entry, index, bot, page, hit, key: statusLineVerdictKey(index, page.relPath, hit) });
       }
       row.hits = mine.length;
-      const cached = await bounded(deps.store().get(entry.name, "status-line", mine.map((t) => t.key)), `verdict read for ${entry.name}`);
+      const cached = await bounded(() => deps.store().get(entry.name, "status-line", mine.map((t) => t.key)), `verdict read for ${entry.name}`);
       for (const t of mine) {
         if (cached.has(t.key)) row.cached++;
         else if (inBackoff(failures.get(t.key), started)) row.backoff++;
@@ -807,6 +830,11 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       }
     } catch (err) {
       if (err instanceof ConfirmStopped) break;
+      // Not started: the run's budget was spent before this wiki's turn.
+      if (err instanceof ConfirmBudgetSpent) {
+        row.skipped = "run budget spent";
+        continue;
+      }
       if (rebuilding) rebuildFailed.set(entry.name.toLowerCase(), started);
       row.errors++;
       log.warn("Stale confirm: wiki {wiki} failed: {error}", { wiki: entry.name, error: errText(err) });
@@ -817,7 +845,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   todo.sort((a, b) => (failures.get(a.key)?.at ?? 0) - (failures.get(b.key)?.at ?? 0));
   for (const t of todo) {
     const { row } = t;
-    if (signal?.aborted || out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || Date.now() >= endsAt) {
+    if (signal?.aborted || out.calls >= lim.maxCalls || deps.now() - started >= lim.startCutoffMs || spent()) {
       row.left++;
       continue;
     }
@@ -825,11 +853,13 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
     row.calls++;
     let sent = false;
     try {
-      const input = await bounded(statusLineCallInput(t.index, t.page, t.hit), "call input");
+      const input = await bounded(() => statusLineCallInput(t.index, t.page, t.hit), "call input");
       const callDeadline = Math.min(deadlineAt, deps.now() + lim.callMaxMs);
-      sent = true;
-      const raw = await bounded(
-        within(
+      // The input took its time: a call whose deadline has already passed is not started.
+      if (callDeadline <= deps.now()) throw new ConfirmBudgetSpent("model call: not started, its deadline has passed");
+      const raw = await bounded(() => {
+        sent = true;
+        return within(
           deps.model()(buildStalePrompt(input), {
             bot: t.bot,
             deadlineAt: callDeadline,
@@ -838,16 +868,15 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
           }),
           callDeadline - deps.now(),
           `the call passed its ${lim.callMaxMs} ms bound`,
-        ),
-        "model call",
-      );
-      const answer = parseStaleAnswer(raw, input.passage, input.sourceLines);
+        );
+      }, "model call");
+      const answer = parseStaleAnswer(raw, input.passage, input.sourceLines, answerSource(input));
       // An answer that resolved as the loop stopped is dropped, not written.
       if (signal?.aborted) throw new ConfirmStopped();
       // A write once sent is waited for through a stop, so it is counted as it
       // lands; only the run's bound abandons it, and shutdown still waits (A8).
       const stored = await inBudget(
-        (signal ? trackWrite : <T>(p: Promise<T>) => p)(deps.store().upsert({
+        () => (signal ? trackWrite : <T>(p: Promise<T>) => p)(deps.store().upsert({
           wiki: t.entry.name,
           kind: "status-line",
           page: t.page.relPath,
@@ -863,7 +892,8 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       if (stored.verdict === "stale") row.stale++;
     } catch (err) {
       // Stopped mid-call: the answer is dropped and the hit waits for the next run, not counted as failed.
-      if (err instanceof ConfirmStopped) {
+      // Not sent because the budget is spent: the hit waits for the next run, not counted as failed.
+      if (err instanceof ConfirmStopped || (err instanceof ConfirmBudgetSpent && !sent)) {
         out.calls--;
         row.calls--;
         row.left++;
@@ -1122,12 +1152,16 @@ export async function runStaleCheck(opts: {
   if (changedHash === null) throw new StaleChangedUnreadableError(buckets.relPath);
   const subjects: SubjectsMemo = new Map();
   const changedMeta = index.resolveRelPath(buckets.relPath);
-  const items = buckets.linking
+  const keyed = buckets.linking
     .filter((l) => l.bucket === "toCheck")
     .map((l) => {
       const ctx = passageKeyContext(index, buckets.relPath, l);
       return { l, passage: ctx.passage, ctx, key: passageKeyHash(l.relPath, ctx.passage, changedHash, ctx) };
     });
+  // A page whose current passage carries a `fixed` row (D29) is Changed since
+  // on the GET, so Check neither counts nor calls it.
+  const fixed = keyed.length ? await store.get(wiki, "fixed", keyed.map((i) => i.key)) : new Map<string, StaleVerdictRow>();
+  const items = keyed.filter((i) => !fixed.has(i.key));
   const cached = await store.get(wiki, "passage", items.map((i) => i.key));
   const fresh = items.filter((i) => !cached.has(i.key));
   const toCall = fresh.slice(0, CHECK_MAX_CALLS);
@@ -1154,10 +1188,10 @@ export async function runStaleCheck(opts: {
       // from `i.l.lastChangeMs`, which `asOf` steps back: one key, one prompt.
       commits: await commitsFor(index, changedMeta, await currentLastChangeOf(index, i.l.relPath), subjects),
       otherPlans: i.ctx.otherPlans,
-      sourceLines: await sourceLinesOf(index.root, i.l.relPath, linkingPassageRows(i.l).map((p) => p.line)),
+      ...(await sourceOf(index.root, i.l.relPath, linkingPassageRows(i.l).map((p) => p.line))),
     };
     const raw = await model(buildStalePrompt(input), { bot, deadlineAt, source: "wiki_stale_check" });
-    const a = parseStaleAnswer(raw, i.passage, input.sourceLines);
+    const a = parseStaleAnswer(raw, i.passage, input.sourceLines, answerSource(input));
     // The stored row: a reader's verdict that landed during the call stays (A5).
     return store.upsert({ wiki, kind: "passage", page: i.l.relPath, keyHash: i.key, verdict: a.verdict, reason: a.reason, edit: a.edit, checkedBy: `model:${bot.name}` });
   };

@@ -340,6 +340,13 @@ export interface LinkingPage {
   passages: LinkPassage[];
 }
 
+/** The passage lines a To-check linking page is judged on: those that make
+ *  a claim, else all, in line order. */
+export function linkingPassageRows(lp: Pick<LinkingPage, "passages">): LinkingPage["passages"] {
+  const claims = lp.passages.filter((p) => p.claim !== undefined);
+  return claims.length ? claims : lp.passages;
+}
+
 export interface StaleBuckets {
   relPath: string;
   changedAtMs: number;
@@ -566,6 +573,17 @@ function linkPassages(parsed: ParsedPage, fromRelPath: string, targetKey: string
   return out;
 }
 
+/** A linking page's passages on `targetRelPath`, read from `content` as the
+ *  buckets read them. PR 3's Apply, Send and Accept recompute the windows on
+ *  the live file under the write queue through this. */
+export function linkPassagesIn(content: string, fromRelPath: string, targetRelPath: string, index: Pick<WikiIndex, "resolve">): LinkPassage[] {
+  return linkPassages(stateExemptLines(content), fromRelPath, normalizeRelPath(targetRelPath), index).map(({ line, text, claim }) => ({
+    line,
+    text,
+    ...(claim ? { claim } : {}),
+  }));
+}
+
 export type StaleReadFile = (absPath: string) => Promise<string | null>;
 
 const defaultReadFile: StaleReadFile = async (abs) => {
@@ -599,6 +617,28 @@ export function linkingBuckets(
   const p = computeBuckets(index, relPath, nowMs, opts.asOfMs, opts.readFile ?? defaultReadFile);
   if (!opts.readFile) cache.set(key, p);
   return p;
+}
+
+/**
+ * Every linking page of `relPath` with its passages on it, read as the
+ * buckets read them, whether or not `relPath` is a changed page (and under
+ * any `asOf`): what a verdict carry across a Stale check fix reads
+ * (`carryPassageVerdicts`). Reserved pages are never changed pages, so none.
+ */
+export async function linkingPassagesOf(
+  index: WikiIndex,
+  relPath: string,
+  readFile: StaleReadFile = defaultReadFile,
+): Promise<Pick<LinkingPage, "relPath" | "passages">[]> {
+  const page = index.resolveRelPath(relPath);
+  if (!page || isReservedBasename(page.relPath)) return [];
+  const out: Pick<LinkingPage, "relPath" | "passages">[] = [];
+  for (const from of linkingPagesOf(index, normalizeRelPath(page.relPath))) {
+    const content = await readFile(path.join(index.root, from.relPath));
+    if (content === null) continue;
+    out.push({ relPath: from.relPath, passages: linkPassagesIn(content, from.relPath, page.relPath, index) });
+  }
+  return out;
 }
 
 /** The changed page behind a bucket request, or null when it is none. */

@@ -26,6 +26,8 @@ import {
 } from "../../wiki/stale-confirm.ts";
 import * as confirmModule from "../../wiki/stale-confirm.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { __setStaleProposalStoreForTest } from "../../gardener/stale-proposals.ts";
+import { memoryStaleProposalStore } from "../../test/stale-proposal-store.ts";
 
 // Fixed error copy (A11); spelled out so the test reads without the fix in place.
 const CHECK_CALL_FAILED = "The check call failed or timed out.";
@@ -98,11 +100,14 @@ describe("the Stale check's verdict routes", () => {
     app.onError((err, c) => c.json({ error: String(err) }, 500));
     registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
     __setStaleModelForTest(model);
+    // PR 3: the ⧗ states read the Stale check proposals; none here, and no database.
+    __setStaleProposalStoreForTest(memoryStaleProposalStore());
   }, 30_000);
 
   afterAll(async () => {
     __setStaleModelForTest(null);
     __setStaleVerdictStoreForTest(null);
+    __setStaleProposalStoreForTest(null);
     if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
     else process.env.WIKI_EXTRA = prevExtra;
     if (prevBots === undefined) delete process.env.MUNINN_BOTS_DIR;
@@ -151,6 +156,47 @@ describe("the Stale check's verdict routes", () => {
     expect(again[0]![1]).toMatchObject({ cached: CHECK_MAX_CALLS, toCall: toCheck - CHECK_MAX_CALLS, left: 0 });
     expect(again.filter(([e, d]) => e === "verdict" && d.cached)).toHaveLength(CHECK_MAX_CALLS);
     expect(prompts).toHaveLength(toCheck);
+  });
+
+  // Fix round 2 batch 5, finding 3: a page a `fixed` row hides from To check
+  // costs no call and is not counted.
+  test("Check skips a To-check page whose current passage carries a fixed row: no call, the count unchanged", async () => {
+    fresh();
+    const at = { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" };
+    const baseline = sseEvents(await (await post("check", at)).text());
+    const fixedPage = baseline.find(([e]) => e === "verdict")![1].relPath as string;
+    const key = [...store.rows.values()].find((r) => r.page === fixedPage)!.keyHash;
+    fresh();
+    await store.upsert({ wiki: "checkwiki", kind: "fixed", page: fixedPage, keyHash: key, verdict: "fixed", reason: "Fixed through the Stale check", edit: null, checkedBy: "reader" });
+    const before = (await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20")).buckets.counts.toCheck;
+    const events = sseEvents(await (await post("check", at)).text());
+    expect(prompts.some((p) => p.includes(fixedPage))).toBe(false);
+    expect(events.some(([, d]) => d.relPath === fixedPage)).toBe(false);
+    expect(events[0]![1].toCheck).toBe(before);
+    expect(before).toBe(EXTRA_LINKERS);
+    expect([...store.rows.values()].filter((r) => r.page === fixedPage).map((r) => r.kind)).toEqual(["fixed"]);
+    expect((await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20")).buckets.counts.toCheck).toBe(before);
+  });
+
+  test("refresh (body or query) rebuilds the index, so Check judges the pages on disk, not a cached index", async () => {
+    fresh();
+    const toCheck = EXTRA_LINKERS + 1;
+    const startOf = async (body: Record<string, unknown>, query = "") =>
+      sseEvents(await (await app.request(`/api/wiki/stale/check${query}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).text())[0]![1];
+    const at = { wiki: "checkwiki", page: "hub.md", asOf: "2026-06-20" };
+    await get("wiki=checkwiki&page=hub.md&asOf=2026-06-20"); // warm the cache
+    const extra = path.join(root, "notes", "late.md");
+    await writeFile(extra, page("Late", "See [[hub]], updated 21.04."));
+    try {
+      expect((await startOf(at)).toCheck).toBe(toCheck);
+      expect((await startOf({ ...at, refresh: true })).toCheck).toBe(toCheck + 1);
+      await rm(extra);
+      expect((await startOf(at)).toCheck).toBe(toCheck + 1); // still the refreshed cache
+      expect((await startOf(at, "?refresh=1")).toCheck).toBe(toCheck);
+    } finally {
+      await rm(extra, { force: true });
+      __resetWikiCacheForTest();
+    }
   });
 
   // A2, as the round-3 class check left it: neither asOf nor the commit

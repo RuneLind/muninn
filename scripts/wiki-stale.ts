@@ -5,7 +5,7 @@
  * never a DB or model caller of its own (D23).
  *
  *   bun --no-env-file scripts/wiki-stale.ts --wiki <name> [--pages <relPath>…] [--session <id>]
- *       [--as-of YYYY-MM-DD] [--check] [--base-url <url>] [--json]
+ *       [--as-of YYYY-MM-DD] [--check [--send]] [--base-url <url>] [--json]
  *
  * - `--pages` (one or several, space- or comma-separated): each page's stale
  *   status lines, and, when it changed in the 14 days to «now», its linking
@@ -23,6 +23,28 @@
  *   hit line says whether the confirm loop confirmed it. `--json` prints the route's answers as JSON lines, and
  *   every notice (errors, the session line, the readonly line) as a
  *   `{"notice": …}` line, so each stdout line parses.
+ * - `--send` (with `--check` only): once every page is checked, each
+ *   `stale` verdict with a drafted edit on a To-check page OUTSIDE the run's
+ *   own pages (`--pages` ∪ `--session`) goes to the Gardener (`POST
+ *   /api/wiki/stale/send`, variant `new`, `old` exactly as the verdict
+ *   drafted it, as JSON through `fetch`, never through a shell), so every
+ *   edit to another page is reviewed (D12). One line per such page: sent
+ *   (its group and the card's pages), refused (HTTP status and the route's
+ *   error: held by a card, already in review, no Gardener page, readonly),
+ *   «yours — fix it by hand» for an own page, «stale, no drafted edit — fix
+ *   by hand» when the verdict drafted none. The sends wait for the last
+ *   page's report, so a page named by stem is known by its relPath before
+ *   any send. A muninn without the send route (a non-JSON 404) is said once
+ *   and nothing more is sent; a readonly instance or root sends nothing, with
+ *   one notice (D25). With `--json` each outcome is one `{"event": "send", …}`
+ *   line. All sends share one {@link SEND_DEADLINE_MS} bound of their own.
+ * - The run's first report asks for a fresh index (`refresh=1`): muninn's
+ *   index caches 5 minutes, and a handoff runs this right after the
+ *   session's own edits. Each GET asks until one is answered; the rest of
+ *   the run (reports, Checks, sends) reads the index that one rebuilt. Not
+ *   every request: a rebuild costs ~1.0 s on mimir's 629 pages and ~0.56 s on
+ *   the kode-wiki's 475 (measured 2026-10-28), so a 20-page session would
+ *   spend most of the 25 s budget rebuilding.
  * - Base URL: `--base-url`, else `WIKI_STALE_MUNINN_URL`, else
  *   http://127.0.0.1:3010.
  *
@@ -37,10 +59,11 @@
  * «check unavailable: readonly instance» line; on a writable instance whose
  * wiki root is readonly (`WIKI_READONLY_ROOTS`), «… readonly wiki».
  */
+import path from "node:path";
 
 export const DEFAULT_BASE_URL = "http://127.0.0.1:3010";
 export const USAGE =
-  "usage: bun --no-env-file scripts/wiki-stale.ts --wiki <name> [--pages <relPath>…] [--session <id>] [--as-of YYYY-MM-DD] [--check] [--base-url <url>] [--json]";
+  "usage: bun --no-env-file scripts/wiki-stale.ts --wiki <name> [--pages <relPath>…] [--session <id>] [--as-of YYYY-MM-DD] [--check [--send]] [--base-url <url>] [--json]";
 
 export interface StaleArgs {
   wiki?: string;
@@ -48,13 +71,14 @@ export interface StaleArgs {
   session?: string;
   asOf?: string;
   check: boolean;
+  send: boolean;
   json: boolean;
   baseUrl?: string;
 }
 
 /** Parse argv (after the script path). Unknown flags are reported, not fatal. */
 export function parseStaleArgs(argv: readonly string[]): { args: StaleArgs; errors: string[] } {
-  const args: StaleArgs = { pages: [], check: false, json: false };
+  const args: StaleArgs = { pages: [], check: false, send: false, json: false };
   const errors: string[] = [];
   const value = (i: number, flag: string): string | undefined => {
     const v = argv[i + 1];
@@ -96,6 +120,9 @@ export function parseStaleArgs(argv: readonly string[]): { args: StaleArgs; erro
       case "--check":
         args.check = true;
         break;
+      case "--send":
+        args.send = true;
+        break;
       case "--json":
         args.json = true;
         break;
@@ -117,6 +144,8 @@ export interface SseEvent {
 /** POST a JSON body and read the answer: a refusal is JSON (`status` ≥ 400,
  *  `body`), a stream is its events. */
 export type PostSse = (url: string, body: Json, signal?: AbortSignal) => Promise<{ status: number; body?: Json; events?: AsyncIterable<SseEvent> }>;
+/** POST a JSON body and read a JSON answer; `body` is undefined when the answer is not JSON. */
+export type PostJson = (url: string, body: Json, signal?: AbortSignal) => Promise<{ status: number; body?: Json }>;
 
 /** The whole run's deadline (D13): a handoff waits on this script at most
  *  this long, however many calls a session report makes. The route's own
@@ -125,6 +154,34 @@ export const RUN_DEADLINE_MS = 25_000;
 /** One page's Check deadline: the check route's own budget (4 min) plus a
  *  margin. Each page has its own (A10). */
 export const CHECK_PAGE_DEADLINE_MS = 5 * 60_000;
+/** All of a run's sends together: each is one transaction and a few file
+ *  reads, so 30 s is far more than ten take. Past it the rest are not sent. */
+export const SEND_DEADLINE_MS = 30_000;
+
+/** A page path in the spelling the run compares on: posix-normalized,
+ *  lower-cased, no leading `/` or `./` (as the route's `resolveRelPath` keys). */
+const relKey = (p: string) => path.posix.normalize(p.trim().replace(/^\/+/, "")).replace(/^\.\//, "").toLowerCase();
+const EXT = /\.mdx?$/i;
+/**
+ * Is `linking` one of the run's own pages? `resolved` holds the relPaths the
+ * route answered for them, matched by full path. `unresolved` holds the names
+ * the route gave no answer for, matched as the route would resolve them: the
+ * path itself, a path without an extension as its `.md`/`.mdx` page, and a
+ * bare stem as any page with that file stem. A bare stem the route resolved
+ * goes in `resolved` only, so a same-stem page in another folder is not own.
+ */
+export function isOwnPage(linking: string, resolved: ReadonlySet<string>, unresolved: readonly string[]): boolean {
+  const l = relKey(linking);
+  const lNoExt = l.replace(EXT, "");
+  const samePath = (r: string) => r === l || (!EXT.test(r) && r === lNoExt);
+  if ([...resolved].some((r) => samePath(relKey(r)))) return true;
+  return unresolved.some((ref) => {
+    const r = relKey(ref);
+    if (!r || r === ".") return false;
+    if (samePath(r)) return true;
+    return !r.includes("/") && r.replace(EXT, "") === lNoExt.slice(lNoExt.lastIndexOf("/") + 1);
+  });
+}
 
 const day = (ms: number | undefined) => (ms === undefined ? "never" : new Date(ms).toISOString().slice(0, 10));
 const minute = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")}Z`;
@@ -245,11 +302,14 @@ export async function runWikiStale(
   deps: {
     fetchJson?: FetchJson;
     postSse?: PostSse;
+    postJson?: PostJson;
     env?: Record<string, string | undefined>;
     /** The free reports' shared budget ({@link RUN_DEADLINE_MS}). */
     deadlineMs?: number;
     /** Each page's Check bound ({@link CHECK_PAGE_DEADLINE_MS}). */
     checkDeadlineMs?: number;
+    /** The sends' shared bound ({@link SEND_DEADLINE_MS}). */
+    sendDeadlineMs?: number;
     /** Called with each line as it is made (the script prints through it). */
     write?: (line: string) => void;
   } = {},
@@ -274,11 +334,14 @@ export async function runWikiStale(
         throw new NotJson(res.status === 200 ? "" : ` — HTTP ${res.status}`);
       }
     });
+  /** Has a report been answered, so muninn's cached index postdates this run's start? */
+  let fresh = false;
   const url = (extra: Record<string, string>) => {
-    const q = new URLSearchParams({ wiki: args.wiki!, ...(args.asOf ? { asOf: args.asOf } : {}), ...extra });
+    const q = new URLSearchParams({ wiki: args.wiki!, ...(args.asOf ? { asOf: args.asOf } : {}), ...extra, ...(fresh ? {} : { refresh: "1" }) });
     return `${base}/api/wiki/stale?${q}`;
   };
   const postSse: PostSse = deps.postSse ?? defaultPostSse;
+  const postJson: PostJson = deps.postJson ?? defaultPostJson;
   const out: string[] = [];
   if (deps.write) {
     const write = deps.write;
@@ -289,6 +352,13 @@ export async function runWikiStale(
   }
   const deadlineMs = deps.deadlineMs ?? RUN_DEADLINE_MS;
   const checkDeadlineMs = deps.checkDeadlineMs ?? CHECK_PAGE_DEADLINE_MS;
+  const sendDeadlineMs = deps.sendDeadlineMs ?? SEND_DEADLINE_MS;
+  /** The `stale` verdicts the Checks streamed, for `--send`. */
+  const staleFound: { changed: string; linking: string; edit: Json | null }[] = [];
+  /** The relPaths the route answered for the run's own pages. */
+  const ownResolved = new Set<string>();
+  /** The run's own page names the route gave no answer for. */
+  const ownUnresolved = new Set<string>();
   /** A bound of its own for one request: its signal and a promise that settles on expiry. */
   const bounded = <T>(ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T | "deadline"> => {
     const ac = new AbortController();
@@ -309,14 +379,16 @@ export async function runWikiStale(
   const ask = async (extra: Record<string, string>, valid: (r: Json) => boolean, what: string): Promise<Json | null> => {
     if (late) return null;
     const t0 = Date.now();
+    const u = url(extra);
     try {
-      const got = await bounded(freeLeftMs, (signal) => fetchJson(url(extra), signal)).finally(() => (freeLeftMs -= Date.now() - t0));
+      const got = await bounded(freeLeftMs, (signal) => fetchJson(u, signal)).finally(() => (freeLeftMs -= Date.now() - t0));
       if (got === "deadline") {
         late = true;
         out.push(notice(`wiki-stale: muninn did not answer in ${deadlineMs / 1000} s — no stale report`));
         return null;
       }
       const { status, body } = got;
+      if (status < 400) fresh = true;
       if (body?.readonly) readonly = body.readonly === "root" ? "wiki" : "instance";
       if (args.json) out.push(JSON.stringify(body));
       if (status >= 400 || body?.error) {
@@ -330,7 +402,7 @@ export async function runWikiStale(
       return body;
     } catch (err) {
       if (err instanceof NotJson) {
-        out.push(notice(`wiki-stale: unexpected answer (not JSON) from ${url(extra)}${err.message}`));
+        out.push(notice(`wiki-stale: unexpected answer (not JSON) from ${u}${err.message}`));
       } else {
         out.push(notice(`wiki-stale: cannot reach muninn at ${base}: ${err instanceof Error ? err.message : String(err)}`));
       }
@@ -339,6 +411,7 @@ export async function runWikiStale(
   };
 
   try {
+    if (args.send && !args.check) out.push(notice("send: --send works only with --check; nothing is sent"));
     let pages = args.pages;
     if (args.session) {
       const s = await ask({ session: args.session }, isSession, `session ${args.session}`);
@@ -357,11 +430,16 @@ export async function runWikiStale(
       }
     }
 
+    for (const page of pages) ownUnresolved.add(page);
     if (pages.length) {
       for (const page of pages) {
         // Per page: a throw the shape guards miss ends this page's report only.
         try {
           const r = await ask({ page }, isPageReport, `page ${page}`);
+          if (r) {
+            ownResolved.add(r.page.relPath);
+            ownUnresolved.delete(page);
+          }
           if (r && !args.json) out.push(...formatPageReport(r), "");
           if (r && args.check && !readonly && r.buckets) await check(r.page.relPath);
         } catch (err) {
@@ -373,11 +451,74 @@ export async function runWikiStale(
       if (r && !args.json) out.push(...formatSummary(r));
       if (args.check && !readonly) out.push(notice("check: name the pages to check with --pages or --session"));
     }
+    if (args.send && args.check && !readonly) await sendAll();
   } catch (err) {
     out.push(notice(`wiki-stale: ${err instanceof Error ? err.message : String(err)}`));
   }
   if (readonly) out.push(notice(`check unavailable: readonly ${readonly}`));
+  if (readonly && args.send && args.check) out.push(notice(`send unavailable: readonly ${readonly} — nothing was sent to the Gardener`));
   return out;
+
+  /** `--send`: each stale verdict's outcome, one line each (D12). */
+  async function sendAll(): Promise<void> {
+    if (!staleFound.length) return;
+    const line = (s: { changed: string; linking: string }, outcome: string, text: string, extra: Json = {}) =>
+      out.push(args.json ? JSON.stringify({ event: "send", changed: s.changed, linking: s.linking, outcome, ...extra }) : `  ${s.linking} (after ${s.changed}): ${text}`);
+    if (!args.json) out.push("send to the Gardener:");
+    const started = Date.now();
+    let stopped = false;
+    for (const s of staleFound) {
+      if (isOwnPage(s.linking, ownResolved, [...ownUnresolved])) {
+        if (s.edit) line(s, "own", "yours — fix it by hand");
+        else line(s, "no-edit", "stale, no drafted edit — fix by hand");
+        continue;
+      }
+      if (!s.edit) {
+        line(s, "no-edit", "stale, no drafted edit — fix by hand");
+        continue;
+      }
+      if (stopped) continue;
+      const body = { wiki: args.wiki, page: s.changed, kind: "passage", linking: s.linking, variant: "new", old: s.edit.old, ...(args.asOf ? { asOf: args.asOf } : {}) };
+      let got: Awaited<ReturnType<PostJson>> | "deadline";
+      try {
+        got = await bounded(sendDeadlineMs - (Date.now() - started), (signal) => postJson(`${base}/api/wiki/stale/send`, body, signal));
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        line(s, "error", `not sent — cannot reach muninn: ${error}`, { error });
+        continue;
+      }
+      if (got === "deadline") {
+        stopped = true;
+        out.push(notice(`wiki-stale: the sends did not finish in ${sendDeadlineMs / 1000} s — the rest were not sent`));
+        continue;
+      }
+      if (got.body === undefined) {
+        if (got.status === 404) {
+          stopped = true;
+          out.push(notice(`wiki-stale: ${base} has no send route (POST /api/wiki/stale/send) — nothing was sent to the Gardener`));
+        } else line(s, "refused", `refused — HTTP ${got.status} (not JSON)`, { status: got.status });
+        continue;
+      }
+      const b = got.body;
+      if (got.status < 400 && b.ok === true && b.outcome === "sent") {
+        const onCard = Array.isArray(b.pages) ? b.pages.filter(isStr) : [];
+        line(s, "sent", `sent — group ${String(b.groupKey)}, card pages ${onCard.join(", ") || "?"}${b.supersedes ? ` (replaces ${String(b.supersedes)})` : ""}`, {
+          groupKey: b.groupKey,
+          pages: onCard,
+          ...(b.supersedes ? { supersedes: b.supersedes } : {}),
+          ...(Array.isArray(b.dropped) && b.dropped.length ? { dropped: b.dropped } : {}),
+        });
+        continue;
+      }
+      const error = typeof b.error === "string" ? b.error : got.status < 400 ? "unexpected answer" : `HTTP ${got.status}`;
+      line(s, "refused", `refused — HTTP ${got.status}: ${cap(error, 200)}`, { status: got.status, error });
+      // A readonly refusal holds for every send after it.
+      if (b.readonly) {
+        stopped = true;
+        readonly = b.readonly === "root" || /WIKI_READONLY_ROOTS/.test(error) ? "wiki" : "instance";
+      }
+    }
+  }
 
   /** Check one changed page and print each verdict as it arrives. */
   async function check(page: string): Promise<void> {
@@ -402,11 +543,14 @@ export async function runWikiStale(
     for await (const e of got.events) {
       // Past this page's bound its lines are no longer this run's.
       if (signal.aborted) return;
+      const d = e.data;
+      if (e.event === "verdict" && isObj(d) && d.verdict === "stale" && typeof d.relPath === "string") {
+        staleFound.push({ changed: page, linking: d.relPath, edit: isObj(d.edit) && typeof d.edit.old === "string" ? d.edit : null });
+      }
       if (args.json) {
         out.push(JSON.stringify({ event: e.event, ...e.data }));
         continue;
       }
-      const d = e.data;
       if (e.event === "start") out.push(`    ${d.toCheck} to check: ${d.cached} cached, ${d.toCall} model call(s)${d.left ? `, ${d.left} left for another Check` : ""}`);
       else if (e.event === "verdict") out.push(`    ${label(d.relPath)} ${verdictTag(d)}${d.cached ? " (cached)" : ""}${isObj(d.edit) ? ` — edit: «${cap(String(d.edit.old), 80)}» → «${cap(String(d.edit.new), 80)}»` : ""}`);
       else if (e.event === "error") out.push(`    ${label(d.relPath)} [error: ${cap(String(d.message ?? ""), 140)}]`);
@@ -429,6 +573,17 @@ const defaultPostSse: PostSse = async (url, body, signal) => {
     }
   }
   return { status: res.status, events: readSse(res.body!) };
+};
+
+/** The real JSON POST: the body goes as JSON bytes, never through a shell. */
+const defaultPostJson: PostJson = async (url, body, signal) => {
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal });
+  const text = await res.text();
+  try {
+    return { status: res.status, body: JSON.parse(text) as Json };
+  } catch {
+    return { status: res.status };
+  }
 };
 
 /** Parse a `text/event-stream` body into events (`event:` + one `data:` line each). */

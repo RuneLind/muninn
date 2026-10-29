@@ -35,7 +35,7 @@ import {
   type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
-import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
+import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
 import { approveButtonFor, FACTCHECK_UNKNOWN_NOTE, singleDriftNote } from "./wiki-gardener-drift.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
@@ -86,6 +86,10 @@ interface ProposalView {
   replacedBy?: string | null;
   /** Why Approve would be refused: the page changed since drafting. */
   drifted?: string | null;
+  /** `stale-check` rows: the changed page the card is about. */
+  staleChanged?: string | null;
+  /** A superseded `stale-check` group's row: the group that replaced it. */
+  replacedByGroup?: string | null;
 }
 interface ProposalsResponse {
   proposals: ProposalView[];
@@ -118,6 +122,11 @@ function withBot(url: string): string {
 
 let allProposals: ProposalView[] = [];
 let statusFilter = "";
+/** The kind filter beside the status chips (D28): "", a kind, or "pages"
+ *  for the drafted kinds. */
+let kindFilter = "";
+
+
 
 function fmtDate(ms: number): string {
   try {
@@ -247,7 +256,7 @@ function groupCardHtml(rows: ProposalView[]): string {
 
   html += '<div class="gard-card-head"><div class="gard-title-row">';
   html += `<span class="gard-title">${esc(head.title)}</span>`;
-  html += `<span class="gard-badge badge-lint">lint</span>`;
+  html += `<span class="gard-badge badge-${esc(head.kind)}">${esc(groupKindTag(head.kind))}</span>`;
   html += `<span class="gard-badge badge-group">${rows.length} page${rows.length === 1 ? "" : "s"}</span>`;
   // Both halves of the chip read the SET. The class used to come off `head`,
   // which on a stopped group rendered `chip-applied` over text saying otherwise.
@@ -258,6 +267,9 @@ function groupCardHtml(rows: ProposalView[]): string {
   html += "</div>";
 
   html += '<div class="gard-body">';
+  // D20: a later Send replaced this group with group n+1.
+  const replacedBy = rows.find((r) => r.replacedByGroup)?.replacedByGroup;
+  if (replacedBy) html += `<div class="gard-stale-note" data-replaced-by-group="${esc(replacedBy)}">replaced by group ${esc(groupNumber(replacedBy))}</div>`;
   if (head.rationale) html += `<div class="gard-rationale">${esc(head.rationale)}</div>`;
   const driftNote = groupDriftNote(rows);
   if (driftNote) html += `<div class="gard-stale-note" data-drifted>${esc(driftNote)}</div>`;
@@ -303,9 +315,7 @@ function factcheckNoteHtml(p: ProposalView): string {
 
 function render(): void {
   const list = document.getElementById("gardList")!;
-  const shown = statusFilter
-    ? allProposals.filter((p) => p.status === statusFilter)
-    : allProposals;
+  const shown = allProposals.filter((p) => (!statusFilter || p.status === statusFilter) && kindMatches(p.kind, kindFilter));
   if (!shown.length) {
     list.innerHTML =
       '<div class="gard-empty">' +
@@ -527,12 +537,7 @@ async function actOnGroup(
     );
     const data = await res.json();
     if (!res.ok) {
-      const applied: string[] = data.applied || [];
-      const note = data.outcome === "stopped"
-        ? "Stopped at " + data.stoppedAt + " (" + data.stoppedOutcome + ")" +
-          (applied.length ? " — " + applied.length + " page(s) already written" : "") +
-          (data.error ? ": " + data.error : "")
-        : data.error || "Failed (" + res.status + ")";
+      const note = groupStopNote(data, res.status);
       // Stored BEFORE the reload, because `render()` replaces the card element
       // this note is painted on.
       groupOutcomes.set(groupKey, { text: note, kind: "err" });
@@ -575,8 +580,14 @@ async function actOnGroup(
 document.getElementById("gardFilters")!.addEventListener("click", (e) => {
   const chipEl = (e.target as HTMLElement).closest(".gard-filter");
   if (!chipEl) return;
-  statusFilter = chipEl.getAttribute("data-status") || "";
-  document.querySelectorAll("#gardFilters .gard-filter").forEach((c) => c.classList.remove("active"));
+  // Two filters in one row: the status chips and the kind chips, each with
+  // its own active chip.
+  const isKind = chipEl.hasAttribute("data-kind");
+  if (isKind) kindFilter = chipEl.getAttribute("data-kind") || "";
+  else statusFilter = chipEl.getAttribute("data-status") || "";
+  document
+    .querySelectorAll(`#gardFilters .gard-filter[${isKind ? "data-kind" : "data-status"}]`)
+    .forEach((c) => c.classList.remove("active"));
   chipEl.classList.add("active");
   render();
 });

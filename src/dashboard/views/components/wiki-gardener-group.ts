@@ -73,3 +73,46 @@ export function groupDriftNote(rows: readonly { status: string; drifted?: string
     (rest === 0 ? "." : `, and one more to write the other ${rest}.`)
   );
 }
+
+/** Does a row of `kind` pass the gate's kind filter (D28)? `""` is every
+ *  kind, `"pages"` the drafted kinds, anything else one kind. */
+export function kindMatches(kind: string, filter: string): boolean {
+  if (!filter) return true;
+  if (filter === "pages") return kind !== "lint" && kind !== "stale-check";
+  return kind === filter;
+}
+
+/** A group card's kind tag: «stale check» for the Stale check (CSS upper-cases
+ *  it to STALE CHECK, D28), «lint» otherwise. */
+export const groupKindTag = (kind: string) => (kind === "stale-check" ? "stale check" : "lint");
+
+/** The group number in a `stale-check:<changed>:<n>` key, or "". */
+export const groupNumber = (key: string) => /:(\d+)$/.exec(key)?.[1] ?? "";
+
+/** What a group verb's failed answer says on the card (painted as
+ *  `textContent`). A `stopped` Accept names its stop, the pages already written
+ *  and, on a Stale check card, each row that wrote nothing: its edit count and
+ *  the status its row now has. */
+export function groupStopNote(
+  data: {
+    outcome?: string;
+    stoppedAt?: string;
+    stoppedOutcome?: string;
+    applied?: string[];
+    error?: string;
+    notLanded?: { page: string; status: string; edits: unknown[] }[];
+  },
+  httpStatus: number,
+): string {
+  if (data.outcome !== "stopped") return data.error || "Failed (" + httpStatus + ")";
+  const applied = data.applied || [];
+  const notLanded = data.notLanded || [];
+  return (
+    "Stopped at " + data.stoppedAt + " (" + data.stoppedOutcome + ")" +
+    (applied.length ? " — " + applied.length + " page(s) already written" : "") +
+    (data.error ? ": " + data.error : "") +
+    (notLanded.length
+      ? ". Not written: " + notLanded.map((n) => n.page + " (" + n.edits.length + " edit(s), " + n.status + ")").join(", ")
+      : "")
+  );
+}

@@ -16,7 +16,7 @@
  */
 
 import { movedWithSectionHtml, type MovedWithListing } from "./wiki-moved-with.ts";
-import { confirmedHits, STALE_SHELL_HTML, staleBodyHtml, staleCounts, staleTabBadge, type StalePageCounts, type StaleReportView, type StaleVerdictView } from "./wiki-stale-tab.ts";
+import { confirmedHits, STALE_SHELL_HTML, staleBodyHtml, staleCounts, staleFixKey, staleFixResultNotice, staleTabBadge, type StaleNotice, type StalePageCounts, type StaleReportView, type StaleVerdictView } from "./wiki-stale-tab.ts";
 import { placeStaleMarks } from "./wiki-stale-marks.ts";
 import { staleCountMap, staleHomeBodyHtml, staleHomeLineHtml, stalePillHtml, staleRailBadgeHtml, type StaleSummaryView } from "./wiki-stale-summary.ts";
 import { escHtml as esc } from "./escape.ts";
@@ -3744,8 +3744,23 @@ let staleReport: StaleReportView | null = null;
 let staleFor: string | null = null;
 let staleChecking = false;
 let staleProgress = "";
-/** A failure shown above the report whatever else renders (a verdict not saved, A12). */
+/** The outcome of the reader's last action, shown above the report whatever
+ *  else renders (a verdict not saved, A12; Apply's and Send's answers): a
+ *  repaint, Check and a reload of the same page keep it (R2B4); the next
+ *  answer replaces it, another page clears it. */
 let staleNotice = "";
+let staleNoticeTone: StaleNotice["tone"] = "error";
+/** Fixes whose Apply or Send is in flight, by `staleFixKey`: every repaint
+ *  draws their buttons disabled, so no fix is posted twice. The value is the
+ *  last report request issued when the POST answered (Infinity until then):
+ *  only a report requested after it can drop the fix, so only such a report
+ *  clears the key, never an earlier one landing late or a superseded one. */
+const staleFixPending = new Map<string, number>();
+/** A report from request `seq` landed: fixes answered before it was asked for
+ *  are no longer in flight. */
+function settleStaleFixes(seq: number): void {
+  for (const [key, answeredAt] of staleFixPending) if (answeredAt < seq) staleFixPending.delete(key);
+}
 /** Linking pages whose last Check call failed: shown per row, not counted (A12). */
 let staleRowErrors: Record<string, string> = {};
 /** Pages the last Check left at its call limit (A12). */
@@ -3812,6 +3827,7 @@ function renderStale(): void {
     const notice = body.querySelector(":scope > [data-stale-notice]")!;
     // Written only when it changes: the alert node announces its text once.
     if (notice.textContent !== staleNotice) notice.textContent = staleNotice;
+    notice.setAttribute("data-tone", staleNotice ? staleNoticeTone : "");
     body.querySelector(":scope > [data-stale-content]")!.innerHTML = staleFor === null
       ? '<div class="wiki-conn-empty">Select a page to see what may be stale.</div>'
       : staleBodyHtml(staleReport, {
@@ -3822,6 +3838,7 @@ function renderStale(): void {
         capLeft: staleCapLeft,
         capCalls: staleCapCalls,
         open: staleOpen,
+        pendingFixes: new Set(staleFixPending.keys()),
       });
   }
   const badge = document.getElementById("wikiStaleCount");
@@ -3854,6 +3871,13 @@ function reconcileStaleClientState(data: StaleReportView): void {
   staleCapLeft = Math.min(staleCapLeft, rows.filter((l) => !l.verdict).length);
 }
 
+/** Set (or with "" clear) the tab's notice and repaint. */
+function setStaleNotice(text: string, tone: StaleNotice["tone"] = "error"): void {
+  staleNotice = text;
+  staleNoticeTone = tone;
+  renderStale();
+}
+
 /** Fetch the open page's stale report (free hits, buckets, cached verdicts). */
 function loadStale(relPath: string): void {
   if (!staleTabAvailable()) return;
@@ -3872,6 +3896,7 @@ function loadStale(relPath: string): void {
     .then((data: StaleReportView) => {
       if (!mine()) return;
       staleReport = data;
+      settleStaleFixes(seq);
       if (!data.error) {
         reconcileStaleClientState(data);
         foldStaleReportCounts(relPath, staleCounts(data));
@@ -3881,6 +3906,7 @@ function loadStale(relPath: string): void {
     .catch(() => {
       if (!mine()) return;
       staleReport = { error: "the stale report could not be loaded" };
+      settleStaleFixes(seq);
       renderStale();
     });
 }
@@ -4086,8 +4112,7 @@ async function postStaleVerdict(btn: Element): Promise<void> {
   // The notice renders above the report, check bar or not (A12).
   const fail = (msg: string) => {
     if (staleFor !== relPath) return;
-    staleNotice = msg;
-    renderStale();
+    setStaleNotice(msg);
   };
   try {
     const res = await fetch("/api/wiki/stale/verdict", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
@@ -4110,6 +4135,56 @@ async function postStaleVerdict(btn: Element): Promise<void> {
   }
   // The rail and the home drop with the tab (PR 2b).
   loadStaleSummary();
+}
+
+/**
+ * Apply / Send to Gardener on a Draft fix (PR 3): the button names the fix
+ * (its kind, page, line + target or linking page, variant and `old`); the
+ * server reads the edit off the stored verdict. Then the report and the
+ * summary reload, and an Apply that wrote the page on screen reloads it.
+ */
+async function postStaleFix(btn: Element, action: "apply" | "send"): Promise<void> {
+  const relPath = btn.getAttribute("data-stale-page") || "";
+  const kind = btn.getAttribute("data-kind") || "";
+  const payload: Record<string, unknown> = {
+    wiki: WIKI,
+    page: relPath,
+    kind,
+    variant: btn.getAttribute("data-variant") || "new",
+    old: btn.getAttribute("data-old") ?? "",
+  };
+  if (kind === "status-line") {
+    payload.line = Number(btn.getAttribute("data-line"));
+    payload.target = btn.getAttribute("data-target") || "";
+  } else payload.linking = btn.getAttribute("data-linking") || "";
+  const key = staleFixKey({ kind, page: relPath, line: btn.getAttribute("data-line"), target: btn.getAttribute("data-target"), linking: btn.getAttribute("data-linking") });
+  // One request per fix: a click on a button a repaint has not yet disabled sends nothing.
+  if (staleFixPending.has(key)) return;
+  staleFixPending.set(key, Infinity);
+  // The fix's buttons repaint disabled; the last notice stands until this answer replaces it.
+  renderStale();
+  let result: StaleNotice;
+  let wrote = "";
+  try {
+    const res = await fetch(`/api/wiki/stale/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    const b = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    result = staleFixResultNotice(action, res.status, b);
+    if (result.tone !== "error" && action === "apply" && typeof b.page === "string") wrote = b.page;
+  } catch {
+    result = { tone: "error", text: `${action === "apply" ? "The fix was not applied" : "The fix was not sent to the Gardener"}: could not reach the server.` };
+  }
+  if (result.tone === "error") staleFixPending.delete(key);
+  else {
+    // The buttons stay disabled until a report asked for after this answer
+    // lands (`settleStaleFixes`): an earlier one still offers the fix.
+    staleFixPending.set(key, staleLoadSeq);
+    // The rail, the head and the home drop with the tab; ⧗ appears on a Send.
+    loadStaleSummary();
+    if (wrote && wrote === currentRelPath) loadPageByRelPath(wrote, false, false);
+    if (staleFor === relPath) loadStale(relPath);
+  }
+  // A page opened meanwhile is not the fix's: its tab gets no notice.
+  if (staleFor === relPath) setStaleNotice(result.text, result.tone);
 }
 
 /**
@@ -5604,6 +5679,16 @@ document.body.addEventListener("click", (e) => {
   const staleVerdict = target.closest ? target.closest("[data-stale-verdict]") : null;
   if (staleVerdict) {
     void postStaleVerdict(staleVerdict);
+    return;
+  }
+  const staleApply = target.closest ? target.closest("[data-stale-apply]") : null;
+  if (staleApply) {
+    void postStaleFix(staleApply, "apply");
+    return;
+  }
+  const staleSend = target.closest ? target.closest("[data-stale-send]") : null;
+  if (staleSend) {
+    void postStaleFix(staleSend, "send");
     return;
   }
   // The rail's ★ lives inside a `[data-relpath]` row; it is the list's own

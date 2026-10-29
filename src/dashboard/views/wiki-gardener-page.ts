@@ -325,6 +325,9 @@ export async function renderWikiGardenerPage(opts?: {
     .badge-entity { background: var(--tint-cyan); color: var(--status-cyan); }
     .badge-source { background: var(--tint-warning); color: var(--status-warning); }
     .badge-lint { background: var(--tint-cyan); color: var(--status-cyan); }
+    /* Outlined, in the accent: the warning fill is the stale status chip's, and a kind tag is not a status. */
+    .badge-stale-check { background: transparent; color: var(--accent-light); box-shadow: inset 0 0 0 1px var(--accent); }
+    .gard-filter-sep { width: 1px; align-self: stretch; background: var(--border-secondary); margin: 2px 6px; }
     .badge-group { background: var(--tint-neutral); color: var(--text-muted); }
     .badge-create { background: var(--tint-success); color: var(--status-success); }
     .badge-update { background: var(--tint-info); color: var(--status-info); }
@@ -481,6 +484,13 @@ ${readonly ? `    <div class="gard-readonly">This muninn instance is <strong>wik
       <button class="gard-filter" data-status="applied">Applied</button>
       <button class="gard-filter" data-status="rejected">Rejected</button>
       <button class="gard-filter" data-status="stale">Stale</button>
+      <span class="gard-filter-sep" aria-hidden="true"></span>
+      <!-- The KIND filter (PR 3 of muninn-wiki-drift-check, D28): «Stale check»
+           is the kind, not the stale status chip beside it. -->
+      <button class="gard-filter active" data-kind="">All kinds</button>
+      <button class="gard-filter" data-kind="stale-check">Stale check</button>
+      <button class="gard-filter" data-kind="lint">Lint</button>
+      <button class="gard-filter" data-kind="pages">Drafted pages</button>
     </div>
     <div id="gardList">${gardListInit}</div>
 

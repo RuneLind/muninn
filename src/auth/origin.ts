@@ -169,8 +169,8 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
 /**
  * GET paths whose plain read is the reader's own and stays open, but whose
  * `?refresh=1` forces a rebuild: a full wiki index build with its git reads
- * (`pages`, `index-coverage`), or an uncached recompute over every summary
- * collection (`ingest-backlog`, `stats`). Exact paths. Each route reads
+ * (`pages`, `index-coverage`, `stale`), or an uncached recompute over every
+ * summary collection (`ingest-backlog`, `stats`). Exact paths. Each route reads
  * `c.req.query("refresh") === "1"`, which is Hono's FIRST value of a repeated
  * parameter; {@link refreshRequested} matches ANY `refresh` value equal to
  * `"1"`, a superset of whichever one the route reads.
@@ -184,6 +184,7 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
 export const REFRESH_SIDE_EFFECTING_GETS: readonly string[] = [
   "/api/wiki/pages",
   "/api/wiki/index-coverage",
+  "/api/wiki/stale",
   "/api/wiki/ingest-backlog",
   "/api/summaries/stats",
 ];

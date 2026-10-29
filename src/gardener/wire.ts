@@ -156,7 +156,8 @@ export function catalogPage(kind: WikiProposalKind, catalogKinds: string[] = DEF
   // entry for a page nobody created. Implied today by every lint row being
   // `mode: "update"`, which `indexSkipFor` answers first — stated here so a
   // policy that opts the kind in cannot reach the index.
-  if (kind === "entity" || kind === "synthesis" || kind === "lint") return false;
+  // `stale-check` (the Stale check's fix) skips for the same reason.
+  if (kind === "entity" || kind === "synthesis" || kind === "lint" || kind === "stale-check") return false;
   return catalogKinds.includes(kind);
 }
 

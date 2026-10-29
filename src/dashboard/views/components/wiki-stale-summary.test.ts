@@ -82,3 +82,30 @@ describe("the counts everywhere (PR 2b)", () => {
     expect(staleHomeBodyHtml({ ...withUnconfirmed, pages: withUnconfirmed.pages!.filter((r) => r.relPath !== "quiet.md") })).not.toContain("with nothing stale");
   });
 });
+
+describe("PR 3: the ⧗ «in review» states (D31)", () => {
+  test("the rail badge adds ⧗ K beside the counts, and shows ⧗ K alone on a page with nothing else stale", () => {
+    expect(staleRailBadgeHtml({ staleLines: 1, toCheck: 2, inReview: 3 })).toContain('data-stale-review="3"');
+    expect(staleRailBadgeHtml({ staleLines: 1, toCheck: 2, inReview: 3 })).toContain("⚠ 1 · 2 <span class=\"wiki-stale-rail-review\">⧗ 3</span>");
+    const alone = staleRailBadgeHtml({ staleLines: 0, toCheck: 0, inReview: 2 });
+    expect(alone).toContain("review-only");
+    expect(alone).toContain("⧗ 2");
+    expect(alone).not.toContain("⚠");
+    expect(alone).toContain('title="2 fixes in review in the Gardener"');
+    // No fixes in review: the PR 2b badge, unchanged.
+    expect(staleRailBadgeHtml({ staleLines: 1, toCheck: 2 })).not.toContain("⧗");
+  });
+
+  test("the pill gains «⧗ N fixes in review» from the page report", () => {
+    const html = stalePillHtml({ ...report, inReview: { fixes: 2 } });
+    expect(html).toContain('data-stale-pill-review="2"');
+    expect(html).toContain("⧗ 2 fixes in review");
+    expect(stalePillHtml({ ...report, inReview: { fixes: 1 } })).toContain("⧗ 1 fix in review");
+    expect(stalePillHtml(report)).not.toContain("⧗");
+  });
+
+  test("the summary's count map carries each row's fixes in review", () => {
+    const m = staleCountMap({ pages: [{ relPath: "hub.md", title: "Hub", staleLines: 0, toCheck: 1, inReview: 2 }] });
+    expect(m.get("hub.md")).toEqual({ staleLines: 0, toCheck: 1, inReview: 2 });
+  });
+});

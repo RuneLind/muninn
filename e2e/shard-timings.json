@@ -40,6 +40,7 @@
     "wiki-code-highlight.spec.ts": 5.7,
     "theme-palettes.spec.ts": 6.4,
     "wiki-stale-counts.spec.ts": 6.0,
+    "wiki-stale-fix.spec.ts": 6.0,
     "wiki-stale-tab.spec.ts": 6.4,
     "wiki-compact-lists.spec.ts": 18.2,
     "wiki-copy-path.spec.ts": 8,
