@@ -159,7 +159,14 @@ const real = (p: string) => {
     return path.resolve(p);
   }
 };
-const firstLine = (s: string) => s.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+/**
+ * Git's error in its stderr: the error:/fatal: line, else the first line that is not a hint.
+ * Git's generic «could not read from remote» epilogue is no error line: ssh's own line before it names the cause.
+ */
+const gitError = (s: string) => {
+  const ls = s.split("\n").map((l) => l.trim()).filter(Boolean);
+  return ls.find((l) => /^(error|fatal):/i.test(l) && !/^fatal: could not read from remote repository/i.test(l)) ?? ls.find((l) => !/^hint:/i.test(l)) ?? "";
+};
 
 /** One page the session names, mapped through git. */
 export interface PageRef {
@@ -258,7 +265,7 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     const before = await out(["rev-parse", "HEAD"]);
     // Never stash another session's edits, never rebase: the flags beat merge.autoStash, rebase.autoStash and pull.rebase.
     const r = await git(["-c", "merge.autoStash=false", "-c", "rebase.autoStash=false", "pull", "--ff-only", "--no-rebase", "--no-autostash", "--quiet", g.remote, def], main, PULL_TIMEOUT_MS);
-    const err = firstLine(r.stderr);
+    const err = gitError(r.stderr) || `exit ${r.code}`;
     if (r.code === 0) {
       const n = before ? Number(await out(["rev-list", "--count", `${before}..HEAD`])) || 0 : 0;
       g.note = n ? `pulled ${n} commit(s) from ${g.remote}/${def}` : `up to date with ${g.remote}/${def}`;
@@ -269,7 +276,7 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     } else if (/couldn't find remote ref|no such ref/i.test(r.stderr)) {
       g.note = `no upstream — ${g.remote} has no branch ${def}; nothing to pull`;
     } else {
-      skip(`git pull --ff-only refused (${err || `exit ${r.code}`})`);
+      skip(`git pull --ff-only refused (${err})`);
       g.note = g.skip;
     }
   }
@@ -302,7 +309,7 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     const where = p.worktree ? ` (worktree ${p.worktree})` : "";
     const say: Record<PageState, string> = {
       committed: `committed ${p.rel}`,
-      uncommitted: `uncommitted ${p.rel}${where} — commit it before --check`,
+      uncommitted: `uncommitted ${p.rel}${where} — commit your own edits to it path-scoped before --check, never hunks you did not make`,
       carried: `carried ${p.rel}${where}`,
       "not-carried": `NOT carried ${p.rel}${where} — the main checkout lacks your text`,
       "main-uncommitted": `NOT carried ${p.rel}${where} — the main copy has uncommitted edits, which Check would read instead of your commit`,
@@ -433,8 +440,9 @@ const dropState = (file: string) => {
     // Unremovable: the next --check counts this list again.
   }
 };
+const MISSING = "not in the main checkout";
 /** A report error as the session reads it. */
-const pageErrorWhy = (error: string) => (error.startsWith("no page ") ? "not in the main checkout" : error);
+const pageErrorWhy = (error: string) => (error.startsWith("no page ") ? MISSING : error);
 /** The page states whose report does not read the session's committed text. */
 const UNREAD: Partial<Record<PageState, string>> = {
   uncommitted: "uncommitted",
@@ -442,8 +450,10 @@ const UNREAD: Partial<Record<PageState, string>> = {
   "main-uncommitted": "the main copy has uncommitted edits",
   deleted: "deleted",
   "deleted-uncommitted": "deleted, uncommitted",
-  missing: "no such page",
+  missing: MISSING,
 };
+/** The gate states the session must act on before Check reads its text. */
+const ACT_ON = new Set<PageState>(["uncommitted", "not-carried", "main-uncommitted", "deleted-uncommitted", "missing"]);
 const stateFile = (dir: string, wiki: string, main: string, key: string) =>
   path.join(dir, `${createHash("sha256").update(`${main}\n${wiki}\n${key}`).digest("hex").slice(0, 24)}.json`);
 
@@ -471,10 +481,15 @@ export function staleLine(o: {
   unread?: Record<string, string>;
   /** A gate skip for the whole checkout: no report reads the session's text. */
   wideSkip?: string;
+  /** Pages the gate says the session must act on, and why, in gate order: kept when no report came. */
+  actOn?: [string, string][];
 }): string {
   const { ledger: L, wiki } = o;
   const head = `Stale: ${wiki} — `;
-  if (!L.reports.length && L.stopped) return `${head}not checked (${L.stopped})${L.readonly ? `; check unavailable: readonly ${L.readonly}` : ""}`;
+  if (!L.reports.length && L.stopped) {
+    const named = (o.actOn ?? []).map(([p, why]) => `${p} (${why})`);
+    return `${head}not checked (${L.stopped})${named.length ? `; to check: ${named.join(", ")}` : ""}${L.readonly ? `; check unavailable: readonly ${L.readonly}` : ""}`;
+  }
   const list = new Map<string, string>();
   const add = (page: string, why: string) => {
     if (!list.has(page)) list.set(page, why);
@@ -505,7 +520,7 @@ export function staleLine(o: {
   for (const i of now) if (i.state !== "settled") add(i.page, ownLabel(i));
 
   for (const e of L.pageErrors) add(e.page, pageErrorWhy(e.error));
-  for (const m of o.missing) add(m, "no such page");
+  for (const m of o.missing) add(m, MISSING);
   if (L.stopped) {
     for (const p of o.asked) if (!reported.has(p.toLowerCase()) && !L.pageErrors.some((e) => e.page === p)) add(p, `not reported: ${L.stopped} — Check skipped`);
   }
@@ -689,7 +704,7 @@ async function oneWiki(
     // Nothing for muninn to read: deleted pages only, or none mapped.
     const parts = [
       ...(dropped.length ? [`deleted only: ${dropped.join(", ")} — nothing to check`] : []),
-      ...(missing.length ? [`to check: ${missing.map((m) => `${m} (no such page)`).join(", ")}`] : []),
+      ...(missing.length ? [`to check: ${missing.map((m) => `${m} (${MISSING})`).join(", ")}`] : []),
     ];
     if (!second) say("fix by hand: nothing");
     return void say(`Stale: ${wiki} — ${parts.join("; ") || "nothing stale on the changed pages"}`);
@@ -800,9 +815,11 @@ async function oneWiki(
     },
   });
   const unread: Record<string, string> = {};
+  const actOn = new Map<string, string>();
   for (const p of gate.pages) {
     const why = UNREAD[p.state];
     if (why) unread[p.rel.toLowerCase()] ??= why;
+    if (why && ACT_ON.has(p.state) && !actOn.has(p.rel)) actOn.set(p.rel, why);
   }
   const checkSkipped = gate.skip ?? (ledger.readonly ? `readonly ${ledger.readonly}` : undefined);
   say(
@@ -817,6 +834,7 @@ async function oneWiki(
       checkSkips,
       missing,
       unread,
+      actOn: [...actOn],
       ...(gate.wideSkip ? { wideSkip: gate.wideSkip } : {}),
     }),
   );

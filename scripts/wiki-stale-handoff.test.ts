@@ -81,7 +81,7 @@ describe("the gate", () => {
     expect(gate.lines).toEqual([
       "gate: pulled 1 commit(s) from origin/main",
       "gate: committed plans/a.md",
-      "gate: uncommitted repos/b.md — commit it before --check",
+      "gate: uncommitted repos/b.md — commit your own edits to it path-scoped before --check, never hunks you did not make",
       "gate: Check skip — uncommitted edits on repos/b.md",
       `fix path: edit in ${main}, commit path-scoped, git push`,
     ]);
@@ -568,7 +568,7 @@ describe("fix round 1 batch 2: a worktree page is carried only when its committe
     write(main, "plans/a.md", "# A\nsame edit\n");
     const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
     expect(gate.pages[0]!.state).toBe("uncommitted");
-    expect(gate.lines).toContain(`gate: uncommitted plans/a.md (worktree ${realpathSync(wt)}) — commit it before --check`);
+    expect(gate.lines).toContain(`gate: uncommitted plans/a.md (worktree ${realpathSync(wt)}) — commit your own edits to it path-scoped before --check, never hunks you did not make`);
     expect(gate.skip).toBe("uncommitted edits on plans/a.md");
   });
 
@@ -912,5 +912,56 @@ describe("fix round 1 batch 4: a failed Check falls back to the cached verdict",
     expect(out.at(-1)).toBe(
       `Stale: ${path.basename(main)} — to check: repos/y.md (connection refused), repos/w.md (stale, not sent: connection refused), repos/u.md (unsure); own fixes not counted (no first --handoff call saved)`,
     );
+  });
+});
+
+describe("fix round 1 batch 5: the Stale line and the gate's wording", () => {
+  test("muninn not reachable on --check: the Stale line still names the pages the gate says the session must act on", async () => {
+    const main = await repo();
+    // A committed deletion needs nothing from the session, so it is not listed.
+    write(main, "plans/gone.md", "# Gone\n");
+    await g(main, "add", ".");
+    await g(main, "commit", "-qm", "gone");
+    rmSync(path.join(main, "plans/gone.md"));
+    await g(main, "commit", "-qam", "delete gone");
+    write(main, "repos/b.md", "# B\ndirty\n");
+    const pages = ["--pages", path.join(main, "plans/a.md"), path.join(main, "plans/gone.md"), path.join(main, "repos/b.md"), path.join(main, "nope/never.md")];
+    const out = await runHandoff(["--handoff", "--check", ...pages, "--base-url", "http://127.0.0.1:9"], { git, env: {}, stateDir: tmp() });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — not checked (muninn not reachable); to check: repos/b.md (uncommitted), nope/never.md (not in the main checkout)`);
+  });
+
+  test("a missing page reads «not in the main checkout» when muninn answers too", async () => {
+    const main = await repo();
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), path.join(main, "nope/never.md")], { ...muninn({ "plans/a.md": {} }).deps, git, stateDir: tmp() });
+    expect(out.at(-1)).toStartWith(`Stale: ${path.basename(main)} — to check: nope/never.md (not in the main checkout)`);
+  });
+
+  test("a refused pull names git's error, not its first hint", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nup\n");
+    await g(up, "commit", "-qam", "up");
+    await g(up, "push", "-q", "origin", "main");
+    write(main, "plans/a.md", "# A\nlocal\n");
+    await g(main, "commit", "-qam", "local");
+    // Hints on, whatever the developer's config says.
+    await g(main, "config", "advice.diverging", "true");
+    const gate = await runGate(main, [], git);
+    expect(gate.skip).toBe("git pull --ff-only refused (fatal: Not possible to fast-forward, aborting.)");
+  });
+
+  test("every pull note takes the error: or fatal: line, else the first non-hint line, else the exit code", async () => {
+    const { main } = await withRemote();
+    const pulling = (code: number, stderr: string): Git => (args, cwd, ms) => (args.includes("pull") ? Promise.resolve({ code, stdout: "", stderr }) : git(args, cwd, ms));
+    const hints = "hint: one\nhint: two\n";
+    expect((await runGate(main, [], pulling(1, `${hints}remote: noise\nfatal: Authentication failed for 'https://x/'`))).note).toBe(
+      "not authorized — could not authenticate to origin (fatal: Authentication failed for 'https://x/'); the main checkout is as last pulled",
+    );
+    expect((await runGate(main, [], pulling(1, `${hints}error: could not resolve host x`))).note).toBe("offline — could not reach origin (error: could not resolve host x); the main checkout is as last pulled");
+    // ssh names the cause; git's «could not read from remote» after it does not.
+    expect((await runGate(main, [], pulling(1, "git@h: Permission denied (publickey).\nfatal: Could not read from remote repository.\n\nPlease make sure"))).note).toBe(
+      "not authorized — could not authenticate to origin (git@h: Permission denied (publickey).); the main checkout is as last pulled",
+    );
+    expect((await runGate(main, [], pulling(1, `${hints}something odd\nelse`))).skip).toBe("git pull --ff-only refused (something odd)");
+    expect((await runGate(main, [], pulling(2, hints))).skip).toBe("git pull --ff-only refused (exit 2)");
   });
 });
