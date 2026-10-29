@@ -285,10 +285,13 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     const hash = await run(["hash-object", "--", rel]);
     return !hash || hash !== blob;
   };
+  /** Any uncommitted tracked edit in the main checkout, or a page's main copy that differs from HEAD. */
+  let mainEdits = (await out(["status", "--porcelain", "--untracked-files=no"])) !== "";
   for (const p of pages) {
     let state: PageState;
     if (!p.worktree) {
       const dirty = await dirtyIn(main, p.rel, p.exists);
+      mainEdits ||= dirty;
       if (p.exists) state = dirty ? "uncommitted" : "committed";
       else if (dirty) state = "deleted-uncommitted";
       else state = (await out(["log", "-1", "--format=%h", "--", p.rel])) ? "deleted" : "missing";
@@ -300,6 +303,7 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
       };
       const wtDirty = await dirtyIn(p.worktree, p.rel, p.exists);
       const mainDirty = await dirtyIn(main, p.rel, existsSync(path.join(main, p.rel)));
+      mainEdits ||= mainDirty;
       const wtBlob = await wtOut(["rev-parse", "-q", "--verify", `HEAD:${p.rel}`]);
       const mainBlob = await out(["rev-parse", "-q", "--verify", `HEAD:${p.rel}`]);
       if (wtDirty) state = p.exists ? "uncommitted" : "deleted-uncommitted";
@@ -324,14 +328,15 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     if (state === "not-carried") skip(`the main checkout lacks your text of ${p.rel}`);
     if (state === "main-uncommitted") skip(`uncommitted edits on the main copy of ${p.rel}`);
   }
-  // A worktree whose only open pages have a dirty main copy gets no carry: the merge would refuse, and a push would land past that copy.
   const froms = [...new Set(g.pages.filter((p) => p.worktree && ["not-carried", "uncommitted", "deleted-uncommitted"].includes(p.state)).map((p) => p.worktree!))];
   for (const from of froms) {
     const b = (await git(["symbolic-ref", "--short", "-q", "HEAD"], from)).stdout.trim();
     const sha = b ? "" : (await git(["rev-parse", "--short", "HEAD"], from)).stdout.trim();
     (g.carries ??= []).push({ worktree: from, ...(b ? { branch: b } : {}), ...(sha ? { sha } : {}) });
   }
-  g.fixPath = fixPath(g);
+  // Commits on the default branch not on the remote: a worktree's push would leave the main checkout unable to pull.
+  const ahead = g.remote && onDefault ? Number(await out(["rev-list", "--count", `refs/remotes/${g.remote}/${def}..HEAD`])) || 0 : 0;
+  g.fixPath = fixPath(g, mainEdits, ahead > 0);
   lines.push(g.skip ? `gate: Check skip — ${g.skip}` : "gate: Check may run");
   lines.push(`fix path: ${g.fixPath}`);
   return g;
@@ -346,12 +351,24 @@ const AUTH_FAILURE = /permission denied \(|permission denied, please try again|h
 /** Quote a word for a POSIX shell when it needs it. */
 export const shq = (s: string) => (/^[A-Za-z0-9_\/.@%+=:,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
+const LABEL: Record<PageState, string> = {
+  committed: "committed",
+  uncommitted: "uncommitted",
+  carried: "carried",
+  "not-carried": "not carried",
+  "main-uncommitted": "main copy uncommitted",
+  deleted: "deleted",
+  "deleted-uncommitted": "deleted, uncommitted",
+  missing: "missing",
+};
+
 /**
- * Where the session lands its own fixes, given the gate. Each printed command fails safe: it moves no branch but the
- * default one, never rebases, stashes or resets, and git itself refuses a push or merge that is not a fast-forward,
- * which leaves the by-hand line. Edits in the main checkout the session did not make are never its to commit.
+ * Where the session lands its own fixes, given the gate. A runnable carry is printed in one cell only: the main
+ * checkout has no uncommitted tracked edit and no unpushed commit, no session page is in it, and exactly one
+ * worktree needs a carry. Every other cell lists the pages' states and the by-hand line. No printed text rebases,
+ * stashes, resets or forces, and none tells the session to commit edits it did not make.
  */
-function fixPath(g: Gate): string {
+function fixPath(g: Gate, mainEdits: boolean, mainAhead: boolean): string {
   const def = g.defaultBranch ?? "main";
   const m = shq(g.main);
   if (g.branch !== def) {
@@ -363,30 +380,42 @@ function fixPath(g: Gate): string {
   if (g.remote && g.skip?.startsWith("git pull")) {
     return `fix in a worktree: git -C ${m} worktree add <dir> ${g.remote}/${def}; commit there, git push ${g.remote} HEAD:${def}. Check skips until ${m} pulls cleanly`;
   }
-  const dirtyMain = g.pages.filter((p) => p.state === "main-uncommitted");
-  if (!g.carries?.length && !dirtyMain.length) {
-    return g.remote ? `edit in ${m}, commit path-scoped, git push` : `edit in ${m}, commit path-scoped (no remote, nothing to push)`;
+  const byHand = `carry your commits into ${m} by hand (merge or cherry-pick), commit only your own edits, then rerun --handoff`;
+  const notes = g.pages
+    .filter((p) => p.state === "main-uncommitted")
+    .map((p) => `the main copy of ${p.rel} holds uncommitted edits, probably another session's: Check skips it; leave them, and rerun once that session has committed, or list ${p.rel} in your resume prompt`);
+  const carries = g.carries ?? [];
+  const mainPages = g.pages.filter((p) => !p.worktree);
+  if (!carries.length) {
+    if (!mainPages.length && g.pages.length) return notes.length ? notes.join("; ") : `nothing to carry into ${m}`;
+    const base = g.remote
+      ? `commit your fixes path-scoped in ${m}, then push ${def}; this also pushes any other commits on ${def} that are not pushed yet — check git -C ${m} log ${g.remote}/${def}..${def} first`
+      : `commit your fixes path-scoped in ${m} (no remote, nothing to push)`;
+    return [base, ...notes].join("; ");
   }
-  const steps: string[] = [];
-  // Each page's own path in order, main first; no combined sequence, so nothing is rebased onto anything.
-  if (g.pages.some((p) => !p.worktree)) {
-    steps.push(`main checkout ${m}: commit your fixes path-scoped there${g.remote ? `, then git -C ${m} push ${g.remote} ${def}` : ""}`);
-  }
-  for (const c of g.carries ?? []) {
+  const named = (c: (typeof carries)[number]) => `worktree ${shq(c.worktree)} (${c.branch ? `branch ${c.branch}` : `detached HEAD: ${c.sha ?? "?"}`})`;
+  if (carries.length === 1 && !mainEdits && !mainAhead && !mainPages.length) {
+    const c = carries[0]!;
     const w = shq(c.worktree);
     // A detached worktree's HEAD moves when the session commits its fixes, so the merge reads it at run time.
     const head = c.branch ? shq(c.branch) : `"$(git -C ${w} rev-parse HEAD)"`;
-    const named = c.branch ? `branch ${c.branch}` : `detached HEAD: ${c.sha ?? "?"}`;
-    steps.push(
-      g.remote
-        ? `worktree ${w} (${named}): commit your fixes path-scoped there, then git -C ${w} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
-        : `worktree ${w} (${named}): commit your fixes path-scoped there, then git -C ${m} merge --ff-only --no-autostash ${head}`,
-    );
+    const carry = g.remote
+      ? `${named(c)}: commit your fixes path-scoped there, then git -C ${w} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
+      : `${named(c)}: commit your fixes path-scoped there, then git -C ${m} merge --ff-only --no-autostash ${head}`;
+    return `${carry}; if git refuses (any reason: not a fast-forward, a hook, a protected branch, local edits), ${byHand}`;
   }
-  for (const p of dirtyMain) {
-    steps.push(`the main copy of ${p.rel} holds uncommitted edits, probably another session's: Check skips it; leave them, and rerun once that session has committed, or list ${p.rel} in your resume prompt`);
+  // Any other cell has no carry that is safe to print: list what is where, then the by-hand line.
+  const list = (ps: typeof g.pages) => ps.map((p) => `${p.rel} ${LABEL[p.state]}`).join(", ");
+  const steps: string[] = [];
+  if (mainPages.length) steps.push(`main checkout ${m}: ${list(mainPages)}`);
+  const wts = [...new Set(g.pages.filter((p) => p.worktree).map((p) => p.worktree!))];
+  for (const w of wts) {
+    const c = carries.find((x) => x.worktree === w);
+    steps.push(`${c ? named(c) : `worktree ${shq(w)}`}: ${list(g.pages.filter((p) => p.worktree === w))}`);
   }
-  if (g.carries?.length) steps.push(`if git refuses a push or merge (not a fast-forward: ${def} moved), carry your commit by hand (merge or cherry-pick) and rerun`);
+  if (mainEdits && !notes.length) steps.push(`${m} holds uncommitted edits: leave any you did not make`);
+  if (mainAhead) steps.push(`${def} in ${m} has commits not on ${g.remote}`);
+  steps.push(...notes, byHand);
   return steps.join("; ");
 }
 

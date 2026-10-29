@@ -83,7 +83,7 @@ describe("the gate", () => {
       "gate: committed plans/a.md",
       "gate: uncommitted repos/b.md — commit your own edits to it path-scoped before --check, never hunks you did not make",
       "gate: Check skip — uncommitted edits on repos/b.md",
-      `fix path: edit in ${main}, commit path-scoped, git push`,
+      `fix path: commit your fixes path-scoped in ${main}, then push main; this also pushes any other commits on main that are not pushed yet — check git -C ${main} log origin/main..main first`,
     ]);
   });
 
@@ -142,7 +142,7 @@ describe("the gate", () => {
     const gate = await runGate(main, [await page(path.join(main, "plans/a.md"))], git);
     expect(gate.lines[0]).toBe("gate: no remote, nothing to pull");
     expect(gate.skip).toBeUndefined();
-    expect(gate.fixPath).toBe(`edit in ${main}, commit path-scoped (no remote, nothing to push)`);
+    expect(gate.fixPath).toBe(`commit your fixes path-scoped in ${main} (no remote, nothing to push)`);
   });
 
   test("gap: a master default branch, with and without a remote", async () => {
@@ -173,7 +173,7 @@ describe("the gate", () => {
     const not = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
     expect(not.pages[0]!.state).toBe("not-carried");
     expect(not.skip).toBe("the main checkout lacks your text of plans/a.md");
-    expect(not.fixPath).toBe(`worktree ${realpathSync(wt)} (branch fix): commit your fixes path-scoped there, then git -C ${main} merge --ff-only --no-autostash fix; if git refuses a push or merge (not a fast-forward: main moved), carry your commit by hand (merge or cherry-pick) and rerun`);
+    expect(not.fixPath).toBe(`worktree ${realpathSync(wt)} (branch fix): commit your fixes path-scoped there, then git -C ${main} merge --ff-only --no-autostash fix; ${fallback(main)}`);
   });
 
   test("fix round 1: the pull never autostashes or rebases, whatever the repo's config says", async () => {
@@ -869,9 +869,12 @@ describe("fix round 1 batch 2: a worktree page is carried only when its committe
   });
 });
 
-// Fix round 2 batch 4: the printed paths never rebase, never push a branch but the default one, never touch main's other edits.
+// Class check (round 3 on the printed fix paths): a runnable carry is printed in one cell only; every other cell is by hand.
 const FORBIDDEN = /\brebase\b|\bstash\b|\breset\b|--force|commit or settle/;
-const byHand = (def = "main") => `if git refuses a push or merge (not a fast-forward: ${def} moved), carry your commit by hand (merge or cherry-pick) and rerun`;
+const byHand = (main: string) => `carry your commits into ${main} by hand (merge or cherry-pick), commit only your own edits, then rerun --handoff`;
+const fallback = (main: string) => `if git refuses (any reason: not a fast-forward, a hook, a protected branch, local edits), ${byHand(main)}`;
+/** The push and merge commands a fix path prints: the only ones that move a ref. */
+const carriesOf = (fixPath: string) => commandsOf(fixPath).filter((c) => / (push|merge) /.test(c));
 /** Every ref but the default branch's, the stash list, any rebase in progress, and the bytes and status of the watched files. */
 async function snapshot(main: string, wts: string[], watch: [string, string][], def = "main") {
   const refs = (await g(main, "for-each-ref", "--format=%(refname) %(objectname)"))
@@ -888,8 +891,142 @@ async function runPrinted(fixPath: string): Promise<number> {
   for (const [i, c] of cmds.entries()) if ((await sh(c)).code !== 0) return i;
   return -1;
 }
+const stateOf = async (main: string, abs: string[]) => (await runGate(main, await Promise.all(abs.map(page)), git)).pages.map((p) => p.state);
+async function identity(dir: string) {
+  await g(dir, "config", "user.name", "T");
+  await g(dir, "config", "user.email", "t@example.com");
+}
 
-describe("fix round 2 batch 4: fix paths fail safe — carried on rerun, or refused with only the default branch moved", () => {
+describe("class check: the fix path's cells — one prints a carry, every other is by hand", () => {
+  type Dirty = "clean" | "session page" | "unrelated file";
+  interface Cell { dirty: Dirty; wts: 0 | 1 | 2; remote: boolean; detached: boolean; mainPage: boolean }
+  const cells: Cell[] = [];
+  for (const dirty of ["clean", "session page", "unrelated file"] as Dirty[])
+    for (const wts of [0, 1, 2] as const)
+      for (const remote of [true, false])
+        // No worktree: detached has no meaning. No page at all: no session page to dirty.
+        for (const detached of wts ? [false, true] : [false])
+          for (const mainPage of [true, false]) if (dirty !== "session page" || mainPage || wts) cells.push({ dirty, wts, remote, detached, mainPage });
+
+  /**
+   * The repo has plans/a.md, plans/c.md, plans/s.md, repos/b.md and notes/u.md. The main page is repos/b.md; worktree 1
+   * commits plans/a.md and lists plans/s.md (carried); worktree 2 commits plans/c.md. Each worktree has notes/u.md dirty.
+   * «session page» dirties repos/b.md in main, or the main copy of plans/s.md when no main page is listed.
+   */
+  async function build(c: Cell) {
+    let main: string;
+    if (c.remote) main = (await withRemote()).main;
+    else main = await repo();
+    for (const rel of ["plans/c.md", "plans/s.md", "notes/u.md"]) write(main, rel, `# ${rel}\n`);
+    await g(main, "add", ".");
+    await g(main, "commit", "-qm", "more pages");
+    if (c.remote) await g(main, "push", "-q", "origin", "main");
+    const wts: string[] = [];
+    for (let k = 1; k <= c.wts; k++) {
+      const wt = path.join(tmp(), `wt${k}`);
+      await g(main, "worktree", "add", "-q", ...(c.detached ? ["--detach"] : ["-b", `fix${k}`]), wt, c.remote ? "origin/main" : "main");
+      const rel = k === 1 ? "plans/a.md" : "plans/c.md";
+      write(wt, rel, `# fixed in worktree ${k}\n`);
+      await g(wt, "commit", "-qm", `worktree ${k}`, "--", rel);
+      write(wt, "notes/u.md", `# another edit in worktree ${k}\n`);
+      wts.push(realpathSync(wt));
+    }
+    if (c.dirty === "session page") write(main, c.mainPage ? "repos/b.md" : "plans/s.md", "# another session's edit\n");
+    if (c.dirty === "unrelated file") write(main, "notes/u.md", "# another session's edit\n");
+    const pages = [
+      ...(c.mainPage ? [path.join(main, "repos/b.md")] : []),
+      ...(wts[0] ? [path.join(wts[0], "plans/a.md"), path.join(wts[0], "plans/s.md")] : []),
+      ...(wts[1] ? [path.join(wts[1], "plans/c.md")] : []),
+    ];
+    return { main, wts, pages };
+  }
+  const name = (c: Cell) => `main ${c.dirty}, ${c.wts} worktree(s) to carry, ${c.remote ? "remote" : "no remote"}${c.wts ? (c.detached ? ", detached" : ", on a branch") : ""}, main page ${c.mainPage ? "listed" : "absent"}`;
+
+  for (const c of cells) {
+    const printed = c.wts === 1 && c.dirty === "clean" && !c.mainPage;
+    test(`${printed ? "PRINTS" : "by hand"}: ${name(c)}`, async () => {
+      const { main, wts, pages } = await build(c);
+      const gate = await runGate(main, await Promise.all(pages.map(page)), git);
+      const fp = gate.fixPath;
+      expect(fp).not.toMatch(FORBIDDEN);
+      // Without a main page of its own, the session is never told to commit anything in the main checkout.
+      if (c.wts) expect(fp).not.toMatch(new RegExp(`commit (them|your)\\b[^;]*\\bin ${main.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      expect(carriesOf(fp)).toHaveLength(printed ? 1 : 0);
+      if (printed) {
+        const wt = wts[0]!;
+        const named = c.detached ? `detached HEAD: ${await g(wt, "rev-parse", "--short", "HEAD")}` : "branch fix1";
+        const carry = c.remote
+          ? `git -C ${wt} push origin HEAD:main; the --check call pulls it into ${main}`
+          : `git -C ${main} merge --ff-only --no-autostash ${c.detached ? `"$(git -C ${wt} rev-parse HEAD)"` : "fix1"}`;
+        expect(fp).toBe(`worktree ${wt} (${named}): commit your fixes path-scoped there, then ${carry}; ${fallback(main)}`);
+        const watch: [string, string][] = [[wt, "notes/u.md"]];
+        const before = await snapshot(main, wts, watch);
+        expect(await runPrinted(fp)).toBe(-1);
+        expect(await snapshot(main, wts, watch)).toEqual(before);
+        expect(await stateOf(main, [path.join(wt, "plans/a.md")])).toEqual(["carried"]);
+      } else if (c.wts) {
+        expect(fp.endsWith(`; ${byHand(main)}`)).toBe(true);
+        expect(fp.split(byHand(main))).toHaveLength(2);
+        expect(fp).not.toContain("if git refuses");
+        for (const p of gate.pages) expect(fp).toContain(p.rel);
+        if (c.dirty !== "clean") expect(fp).toMatch(/holds uncommitted edits|main checkout [^;]*: repos\/b\.md uncommitted/);
+      } else {
+        const base = c.remote
+          ? `commit your fixes path-scoped in ${main}, then push main; this also pushes any other commits on main that are not pushed yet — check git -C ${main} log origin/main..main first`
+          : `commit your fixes path-scoped in ${main} (no remote, nothing to push)`;
+        expect(fp).toBe(base);
+      }
+    }, 30_000);
+  }
+
+  test("the reviewer's cell: a dirty main copy of one worktree page beside another to carry prints no push, so nothing lands past the dirty copy", async () => {
+    const { main, wts, pages } = await build({ dirty: "session page", wts: 1, remote: true, detached: false, mainPage: false });
+    const gate = await runGate(main, await Promise.all(pages.map(page)), git);
+    expect(gate.pages.map((p) => p.state)).toEqual(["not-carried", "main-uncommitted"]);
+    expect(gate.fixPath).toBe(
+      `worktree ${wts[0]} (branch fix1): plans/a.md not carried, plans/s.md main copy uncommitted; the main copy of plans/s.md holds uncommitted edits, probably another session's: Check skips it; leave them, and rerun once that session has committed, or list plans/s.md in your resume prompt; ${byHand(main)}`,
+    );
+  });
+
+  test("a main copy edit that status cannot see (skip-worktree) still makes the cell by hand", async () => {
+    const { main, pages } = await build({ dirty: "clean", wts: 1, remote: true, detached: false, mainPage: false });
+    await g(main, "update-index", "--skip-worktree", "plans/s.md");
+    write(main, "plans/s.md", "# another session's hidden edit\n");
+    expect(await g(main, "status", "--porcelain", "--untracked-files=no")).toBe("");
+    const gate = await runGate(main, await Promise.all(pages.map(page)), git);
+    expect(carriesOf(gate.fixPath)).toEqual([]);
+    expect(gate.fixPath.endsWith(byHand(main))).toBe(true);
+  });
+
+  test("two worktrees: neither carry is printed, both are listed", async () => {
+    const { main, wts, pages } = await build({ dirty: "clean", wts: 2, remote: false, detached: false, mainPage: false });
+    const gate = await runGate(main, await Promise.all(pages.map(page)), git);
+    expect(gate.fixPath).toBe(`worktree ${wts[0]} (branch fix1): plans/a.md not carried, plans/s.md carried; worktree ${wts[1]} (branch fix2): plans/c.md not carried; ${byHand(main)}`);
+  });
+
+  test("a main checkout with commits not on the remote prints no push: the main checkout could not pull it", async () => {
+    const { main, wts, pages } = await build({ dirty: "clean", wts: 1, remote: true, detached: false, mainPage: false });
+    write(main, "notes/n.md", "# another session's commit\n");
+    await g(main, "add", "notes/n.md");
+    await g(main, "commit", "-qm", "unpushed");
+    const gate = await runGate(main, await Promise.all(pages.map(page)), git);
+    expect(gate.fixPath).toBe(`worktree ${wts[0]} (branch fix1): plans/a.md not carried, plans/s.md carried; main in ${main} has commits not on origin; ${byHand(main)}`);
+  });
+
+  test("a detached worktree without a remote: the printed merge reads HEAD at run time, so a commit made after printing lands", async () => {
+    const { main, wts, pages } = await build({ dirty: "clean", wts: 1, remote: false, detached: true, mainPage: false });
+    const wt = wts[0]!;
+    const gate = await runGate(main, await Promise.all(pages.map(page)), git);
+    write(wt, "plans/a.md", "# fixed again after the first call\n");
+    await g(wt, "commit", "-qm", "later fix", "--", "plans/a.md");
+    const later = await g(wt, "rev-parse", "HEAD");
+    expect(await runPrinted(gate.fixPath)).toBe(-1);
+    expect(await g(main, "rev-parse", "HEAD")).toBe(later);
+    expect(await stateOf(main, [path.join(wt, "plans/a.md")])).toEqual(["carried"]);
+  });
+});
+
+describe("class check: the printed cell fails safe — carried on rerun, or refused with only the default branch moved", () => {
   /** A clone with a worktree on `fix` from origin/main; the worktree's page committed there. */
   async function remoteWt(opts: { mainName?: string; wtName?: string } = {}) {
     const { main: m0, bare } = await withRemote();
@@ -897,8 +1034,7 @@ describe("fix round 2 batch 4: fix paths fail safe — carried on rerun, or refu
     if (opts.mainName) {
       main = path.join(path.dirname(m0), opts.mainName);
       await g(path.dirname(m0), "clone", "-q", bare, main);
-      await g(main, "config", "user.name", "T");
-      await g(main, "config", "user.email", "t@example.com");
+      await identity(main);
     }
     const wt = path.join(tmp(), opts.wtName ?? "wt");
     await g(main, "worktree", "add", "-q", "-b", "fix", wt, "origin/main");
@@ -910,163 +1046,61 @@ describe("fix round 2 batch 4: fix paths fail safe — carried on rerun, or refu
   async function moveOrigin(bare: string) {
     const other = path.join(tmp(), "other");
     await g(path.dirname(other), "clone", "-q", bare, other);
-    await g(other, "config", "user.name", "T");
-    await g(other, "config", "user.email", "t@example.com");
+    await identity(other);
     write(other, "notes/n.md", "# N\n");
     await g(other, "add", ".");
     await g(other, "commit", "-qm", "elsewhere");
     await g(other, "push", "-q", "origin", "main");
   }
-  const state = async (main: string, abs: string[]) => (await runGate(main, await Promise.all(abs.map(page)), git)).pages.map((p) => p.state);
-
-  test("worktree with a remote, other tracked edits dirty in the worktree: the push carries the page, the dirty file and the branch untouched", async () => {
-    const { main, wt } = await remoteWt();
-    write(wt, "repos/b.md", "# B\nunrelated, uncommitted\n");
-    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
-    expect(gate.fixPath).toBe(`worktree ${wt} (branch fix): commit your fixes path-scoped there, then git -C ${wt} push origin HEAD:main; the --check call pulls it into ${main}; ${byHand()}`);
-    expect(gate.fixPath).not.toMatch(FORBIDDEN);
-    const before = await snapshot(main, [wt], [[wt, "repos/b.md"]]);
-    expect(await runPrinted(gate.fixPath)).toBe(-1);
-    expect(await snapshot(main, [wt], [[wt, "repos/b.md"]])).toEqual(before);
-    expect(await state(main, [path.join(wt, "plans/a.md")])).toEqual(["carried"]);
-  });
 
   test("worktree branch already pushed as -u origin fix: carried, and fix and origin/fix are not rewritten", async () => {
     const { main, wt } = await remoteWt();
     await g(wt, "push", "-q", "-u", "origin", "fix");
     const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
-    expect(gate.fixPath).not.toMatch(FORBIDDEN);
+    expect(carriesOf(gate.fixPath)).toEqual([`git -C ${wt} push origin HEAD:main`]);
     const before = await snapshot(main, [wt], []);
     expect(await runPrinted(gate.fixPath)).toBe(-1);
     expect(await snapshot(main, [wt], [])).toEqual(before);
-    expect(await state(main, [path.join(wt, "plans/a.md")])).toEqual(["carried"]);
+    expect(await stateOf(main, [path.join(wt, "plans/a.md")])).toEqual(["carried"]);
     expect(await g(wt, "status", "-sb")).toBe("## fix...origin/fix");
   });
 
-  test("main moved on the remote: git refuses the push, nothing but the default branch moves, and the path says carry by hand", async () => {
+  test("main moved on the remote: git refuses the push, nothing but the default branch moves, and the fallback is left", async () => {
     const { main, wt, bare } = await remoteWt();
     await moveOrigin(bare);
     const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
-    expect(gate.fixPath.endsWith(byHand())).toBe(true);
+    expect(gate.fixPath.endsWith(fallback(main))).toBe(true);
     const before = await snapshot(main, [wt], []);
     expect(await runPrinted(gate.fixPath)).toBe(0);
     expect(await snapshot(main, [wt], [])).toEqual(before);
-    expect(await state(main, [path.join(wt, "plans/a.md")])).toEqual(["not-carried"]);
+    expect(await stateOf(main, [path.join(wt, "plans/a.md")])).toEqual(["not-carried"]);
   });
 
-  test("no remote: the merge carries the page, main's other dirty file untouched; once main moved, git refuses it and only the by-hand line is left", async () => {
+  test("no remote, main moved since the worktree branched: git refuses the merge, main and the worktree untouched", async () => {
     const main = await repo();
     const wt = path.join(tmp(), "wt");
     await g(main, "worktree", "add", "-q", "-b", "fix", wt, "main");
     write(wt, "plans/a.md", "# A\nfixed\n");
     await g(wt, "commit", "-qam", "fix");
-    write(main, "repos/b.md", "# B\nanother session's edit\n");
-    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
-    expect(gate.fixPath).toBe(`worktree ${realpathSync(wt)} (branch fix): commit your fixes path-scoped there, then git -C ${main} merge --ff-only --no-autostash fix; ${byHand()}`);
-    const before = await snapshot(main, [wt], [[main, "repos/b.md"]]);
-    expect(await runPrinted(gate.fixPath)).toBe(-1);
-    expect(await snapshot(main, [wt], [[main, "repos/b.md"]])).toEqual(before);
-    expect(await state(main, [path.join(wt, "plans/a.md")])).toEqual(["carried"]);
-
-    write(wt, "plans/a.md", "# A\nfixed again\n");
-    await g(wt, "commit", "-qam", "again");
+    write(wt, "repos/b.md", "# B\nunrelated, uncommitted in the worktree\n");
     write(main, "notes/m.md", "# M\n");
     await g(main, "add", "notes/m.md");
     await g(main, "commit", "-qm", "main moved");
-    const moved = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
-    const head = await g(main, "rev-parse", "HEAD");
-    const before2 = await snapshot(main, [wt], [[main, "repos/b.md"]]);
-    expect(await runPrinted(moved.fixPath)).toBe(0);
-    expect([await g(main, "rev-parse", "HEAD"), await snapshot(main, [wt], [[main, "repos/b.md"]])]).toEqual([head, before2]);
-  });
-
-  test("detached worktree with a remote: the push takes the worktree's HEAD and carries the page", async () => {
-    const { main } = await withRemote();
-    const wt = path.join(tmp(), "wt");
-    await g(main, "worktree", "add", "-q", "--detach", wt, "origin/main");
-    write(wt, "plans/a.md", "# A\nfixed\n");
-    await g(wt, "commit", "-qam", "fix");
     const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
-    const sha = await g(wt, "rev-parse", "--short", "HEAD");
-    expect(gate.fixPath).toBe(`worktree ${realpathSync(wt)} (detached HEAD: ${sha}): commit your fixes path-scoped there, then git -C ${realpathSync(wt)} push origin HEAD:main; the --check call pulls it into ${main}; ${byHand()}`);
-    const before = await snapshot(main, [wt], []);
-    expect(await runPrinted(gate.fixPath)).toBe(-1);
-    expect(await snapshot(main, [wt], [])).toEqual(before);
-    expect(await state(main, [path.join(wt, "plans/a.md")])).toEqual(["carried"]);
+    expect(carriesOf(gate.fixPath)).toEqual([`git -C ${main} merge --ff-only --no-autostash fix`]);
+    const head = await g(main, "rev-parse", "HEAD");
+    const before = await snapshot(main, [wt], [[wt, "repos/b.md"]]);
+    expect(await runPrinted(gate.fixPath)).toBe(0);
+    expect([await g(main, "rev-parse", "HEAD"), await snapshot(main, [wt], [[wt, "repos/b.md"]])]).toEqual([head, before]);
   });
 
   test("paths with spaces and a quote are quoted, so the printed push runs and carries the page", async () => {
     const { main, wt } = await remoteWt({ mainName: "my wiki's", wtName: "my wt" });
     const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
-    expect(gate.fixPath).toBe(`worktree '${wt}' (branch fix): commit your fixes path-scoped there, then git -C '${wt}' push origin HEAD:main; the --check call pulls it into '${main.replace(/'/g, `'\\''`)}'; ${byHand()}`);
+    const q = `'${main.replace(/'/g, `'\\''`)}'`;
+    expect(gate.fixPath).toBe(`worktree '${wt}' (branch fix): commit your fixes path-scoped there, then git -C '${wt}' push origin HEAD:main; the --check call pulls it into ${q}; ${fallback(q)}`);
     expect(await runPrinted(gate.fixPath)).toBe(-1);
-    expect(await state(main, [path.join(wt, "plans/a.md")])).toEqual(["carried"]);
-  });
-
-  test("main checkout and a worktree, with a remote: each its own path, no rebase; the pushed, dirty worktree branch is untouched when git refuses", async () => {
-    const { main, wt } = await remoteWt();
-    await g(wt, "push", "-q", "-u", "origin", "fix");
-    write(wt, "repos/b.md", "# B\nunrelated, uncommitted in the worktree\n");
-    write(main, "repos/b.md", "# B\nfixed in main\n");
-    await g(main, "commit", "-qm", "main fix", "--", "repos/b.md");
-    const pages = [path.join(main, "repos/b.md"), path.join(wt, "plans/a.md")];
-    const gate = await runGate(main, await Promise.all(pages.map(page)), git);
-    expect(gate.fixPath).not.toMatch(FORBIDDEN);
-    const before = await snapshot(main, [wt], [[wt, "repos/b.md"]]);
-    expect(await runPrinted(gate.fixPath)).toBe(1); // main's push lands; the worktree's is no longer a fast-forward
-    expect(await snapshot(main, [wt], [[wt, "repos/b.md"]])).toEqual(before);
-    expect(await g(wt, "status", "-sb", "--", "plans/a.md")).toBe("## fix...origin/fix");
-    expect(await state(main, pages)).toEqual(["committed", "not-carried"]);
-    expect(gate.fixPath).toBe(
-      `main checkout ${main}: commit your fixes path-scoped there, then git -C ${main} push origin main; worktree ${wt} (branch fix): commit your fixes path-scoped there, then git -C ${wt} push origin HEAD:main; the --check call pulls it into ${main}; ${byHand()}`,
-    );
-  });
-
-  test("main checkout and a clean worktree whose branch is pushed: running the printed path never rewrites fix or leaves it behind origin/fix", async () => {
-    const { main, wt } = await remoteWt();
-    await g(wt, "push", "-q", "-u", "origin", "fix");
-    write(main, "repos/b.md", "# B\nfixed in main\n");
-    await g(main, "commit", "-qm", "main fix", "--", "repos/b.md");
-    const pages = [path.join(main, "repos/b.md"), path.join(wt, "plans/a.md")];
-    const gate = await runGate(main, await Promise.all(pages.map(page)), git);
-    const before = await snapshot(main, [wt], []);
-    await runPrinted(gate.fixPath);
-    expect(await snapshot(main, [wt], [])).toEqual(before);
-    expect(await g(wt, "status", "-sb")).toBe("## fix...origin/fix");
-  });
-
-  test("main checkout and a worktree, no remote: main's commit stays, git refuses the non-fast-forward merge, nothing else moves", async () => {
-    const main = await repo();
-    const wt = path.join(tmp(), "wt");
-    await g(main, "worktree", "add", "-q", "-b", "fix", wt, "main");
-    write(main, "repos/b.md", "# B\nfixed in main\n");
-    await g(main, "commit", "-qam", "main fix");
-    write(wt, "plans/a.md", "# A\nfixed in the worktree\n");
-    await g(wt, "commit", "-qam", "worktree fix");
-    write(wt, "repos/b.md", "# B\nunrelated, uncommitted in the worktree\n");
-    const pages = [path.join(main, "repos/b.md"), path.join(wt, "plans/a.md")];
-    const gate = await runGate(main, await Promise.all(pages.map(page)), git);
-    expect(gate.fixPath).not.toMatch(FORBIDDEN);
-    const head = await g(main, "rev-parse", "HEAD");
-    const before = await snapshot(main, [wt], [[wt, "repos/b.md"]]);
-    expect(await runPrinted(gate.fixPath)).toBe(0);
-    expect([await g(main, "rev-parse", "HEAD"), await snapshot(main, [wt], [[wt, "repos/b.md"]])]).toEqual([head, before]);
-    expect(gate.fixPath).toBe(
-      `main checkout ${main}: commit your fixes path-scoped there; worktree ${realpathSync(wt)} (branch fix): commit your fixes path-scoped there, then git -C ${main} merge --ff-only --no-autostash fix; ${byHand()}`,
-    );
-  });
-
-  test("main-uncommitted: the main copy's edits are called another session's, the session is never told to commit them, and no carry runs", async () => {
-    const { main, wt } = await remoteWt();
-    write(main, "plans/a.md", "# A\nanother session's edit\n");
-    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
-    const before = await snapshot(main, [wt], [[main, "plans/a.md"]]);
-    expect(await runPrinted(gate.fixPath)).toBe(-1);
-    expect(await snapshot(main, [wt], [[main, "plans/a.md"]])).toEqual(before);
-    expect(await g(main, "rev-parse", "origin/main")).toBe(await g(main, "rev-parse", "HEAD")); // nothing pushed past the dirty copy
-    expect(gate.fixPath).not.toMatch(FORBIDDEN);
-    expect(gate.fixPath).not.toMatch(/commit (them|your)/);
-    expect(gate.fixPath).toBe(`the main copy of plans/a.md holds uncommitted edits, probably another session's: Check skips it; leave them, and rerun once that session has committed, or list plans/a.md in your resume prompt`);
+    expect(await stateOf(main, [path.join(wt, "plans/a.md")])).toEqual(["carried"]);
   });
 
   test("two pages to carry in one worktree: one push for that worktree, and running it carries both", async () => {
@@ -1075,24 +1109,9 @@ describe("fix round 2 batch 4: fix paths fail safe — carried on rerun, or refu
     await g(wt, "commit", "-qm", "b", "--", "repos/b.md");
     const pages = [path.join(wt, "plans/a.md"), path.join(wt, "repos/b.md")];
     const gate = await runGate(main, await Promise.all(pages.map(page)), git);
-    expect(commandsOf(gate.fixPath)).toEqual([`git -C ${wt} push origin HEAD:main`]);
+    expect(carriesOf(gate.fixPath)).toEqual([`git -C ${wt} push origin HEAD:main`]);
     expect(await runPrinted(gate.fixPath)).toBe(-1);
-    expect(await state(main, pages)).toEqual(["carried", "carried"]);
-  });
-
-  test("main-uncommitted beside a page to carry: the carry is printed for the worktree, the note for the dirty main copy", async () => {
-    const { main, wt } = await remoteWt();
-    write(wt, "repos/b.md", "# B\nfixed in the worktree\n");
-    await g(wt, "commit", "-qm", "b", "--", "repos/b.md");
-    await g(main, "merge", "-q", "--ff-only", "fix"); // a.md and b.md carried
-    write(wt, "plans/a.md", "# A\nfixed again\n");
-    await g(wt, "commit", "-qm", "a again", "--", "plans/a.md");
-    write(main, "repos/b.md", "# B\nanother session's edit\n");
-    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md")), await page(path.join(wt, "repos/b.md"))], git);
-    expect(gate.pages.map((p) => p.state)).toEqual(["not-carried", "main-uncommitted"]);
-    expect(gate.fixPath).toContain(`then git -C ${wt} push origin HEAD:main`);
-    expect(gate.fixPath).toContain(`the main copy of repos/b.md holds uncommitted edits, probably another session's`);
-    expect(gate.fixPath).not.toMatch(FORBIDDEN);
+    expect(await stateOf(main, pages)).toEqual(["carried", "carried"]);
   });
 });
 // Fix round 2 batch 1: call 2's Stale line lists what is open now. No fixed count, and nothing is saved between the calls.
