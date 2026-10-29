@@ -492,9 +492,9 @@ describe("runHandoff: two calls", () => {
     await g(main, "add", ".");
     await g(main, "commit", "-qm", "pages");
     const m = muninn(Object.fromEntries(rels.map((r, i) => [r, { toCheck: [{ relPath: `o${i}.md` }] }])));
-    const out = await runHandoff(["--handoff", "--check", "--pages", ...rels.map((r) => path.join(main, r))], { ...m.deps, git });
+    const out = await runHandoff(["--handoff", "--check", "--pages", ...rels.map((r) => path.join(main, r))], { ...m.deps, git, now: () => 0 });
     expect(m.checked).toEqual([]);
-    expect(out).toContain("Check: 4 page(s) spend model calls — over 3, so only the 0 cached one(s) run, 0 cached only; bound ≤ 0 model calls, ≤ 2 min for the whole run");
+    expect(out).toContain("Check: 4 page(s) spend model calls — over 3, so only the 0 cached one(s) run, 0 cached only; bound ≤ 0 model calls, ≤ 1 min for the whole run (the gate took 0 s)");
     expect(out.at(-1)).toContain("to check: o0.md (Check skipped: over 3 pages), o1.md (Check skipped: over 3 pages)");
   });
 
@@ -892,9 +892,9 @@ describe("fix round 1 batch 4: Check after a stopped report stage, and the run's
       { "p1.md": { toCheck: [{ relPath: "o1.md" }] }, "p2.md": { toCheck: [{ relPath: "o2.md", verdict: { verdict: "true" } }] }, "p3.md": { toCheck: [{ relPath: "o3.md" }] } },
       { hangGet: ["p3.md"], verdicts: { "p2.md": [{ relPath: "o2.md", verdict: "true" }], "p1.md": [{ relPath: "o1.md", verdict: "stale" }] } },
     );
-    const out = await runHandoff(["--handoff", "--check", "--pages", ...rels.map((r) => path.join(main, r))], { ...m.deps, git, deadlineMs: 1000 });
+    const out = await runHandoff(["--handoff", "--check", "--pages", ...rels.map((r) => path.join(main, r))], { ...m.deps, git, deadlineMs: 1000, now: () => 0 });
     expect(m.checked).toEqual(["p2.md"]);
-    expect(out.find((l) => l.startsWith("Check: "))).toBe("Check: 1 page(s) spend model calls — the reports stopped (muninn did not answer in 1 s), so only the 1 cached one(s) run, 1 cached only; bound ≤ 0 model calls, ≤ 7 min for the whole run");
+    expect(out.find((l) => l.startsWith("Check: "))).toBe("Check: 1 page(s) spend model calls — the reports stopped (muninn did not answer in 1 s), so only the 1 cached one(s) run, 1 cached only; bound ≤ 0 model calls, ≤ 6 min for the whole run (the gate took 0 s)");
     expect(out.at(-1)).toBe(
       `Stale: ${path.basename(main)} — to check: p3.md (not reported: muninn did not answer in 1 s — Check skipped), o1.md (Check skipped: muninn did not answer in 1 s)`,
     );
@@ -904,23 +904,24 @@ describe("fix round 1 batch 4: Check after a stopped report stage, and the run's
     const main = await repo();
     let off = 0;
     const m = muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/z.md" }] } });
-    // The gate and the report took 10 min of the clock: more than the pull's and the reports' share of the bound.
+    // The report stage took 10 min of the clock: more than the reports' share of the bound.
     const fetchJson: FetchJson = async (url, signal) => {
       off = 10 * 60_000;
       return m.deps.fetchJson(url, signal);
     };
-    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md")], { ...m.deps, fetchJson, git, now: () => Date.now() + off });
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md")], { ...m.deps, fetchJson, git, now: () => off });
     expect(m.checked).toEqual([]);
-    expect(out).toContain("wiki-stale: check plans/a.md not started — it could run past the 7-min bound");
-    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: repos/z.md (Check skipped: past the 7-min bound)`);
+    expect(out).toContain("wiki-stale: check plans/a.md not started — it could run past the 6-min bound");
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: repos/z.md (Check skipped: past the 6-min bound)`);
   });
 
   test("the same run inside its bound starts the Check", async () => {
     const main = await repo();
     const m = muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/z.md" }] } }, { verdicts: { "plans/a.md": [{ relPath: "repos/z.md", verdict: "true" }] } });
-    // The clock reads 55 s after the start: exactly the pull's and the reports' share of the bound, which still holds.
+    // The gate took 55 s of the clock: measured, it does not eat the Check's share of the bound.
     let reads = 0;
     const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md")], { ...m.deps, git, now: () => (reads++ ? 55_000 : 0) });
+    expect(out.find((l) => l.startsWith("Check: "))).toEndWith("≤ 7 min for the whole run (the gate took 55 s)");
     expect(m.checked).toEqual(["plans/a.md"]);
     expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — nothing stale on the changed pages`);
   });
@@ -1025,5 +1026,179 @@ describe("fix round 1 batch 5: the Stale line and the gate's wording", () => {
     );
     expect((await runGate(main, [], pulling(1, `${hints}something odd\nelse`))).skip).toBe("git pull --ff-only refused (something odd)");
     expect((await runGate(main, [], pulling(2, hints))).skip).toBe("git pull --ff-only refused (exit 2)");
+  });
+});
+
+describe("fix round 2 batch 3: a local «Permission denied» is a refused pull, not «not authorized»", () => {
+  /** Upstream changes plans/a.md; the main checkout has not pulled it. */
+  async function behind() {
+    const r = await withRemote();
+    write(r.up, "plans/a.md", "# A\nup\n");
+    await g(r.up, "commit", "-qam", "up");
+    await g(r.up, "push", "-q", "origin", "main");
+    return r;
+  }
+  test("real git: a read-only page folder or .git refuses the pull, and Check skips", async () => {
+    for (const dir of ["plans", ".git"]) {
+      const { main } = await behind();
+      chmodSync(path.join(main, dir), 0o555);
+      try {
+        const gate = await runGate(main, [await page(path.join(main, "plans/a.md"))], git);
+        expect([dir, gate.note?.startsWith("git pull --ff-only refused ("), gate.note, gate.skip]).toEqual([dir, true, gate.skip, gate.skip]);
+        expect(gate.note).toContain("Permission denied");
+        expect(gate.lines).toContain(`gate: Check skip — ${gate.skip}`);
+      } finally {
+        chmodSync(path.join(main, dir), 0o755);
+      }
+    }
+  });
+
+  test("stubbed: local EACCES shapes refuse; remote auth shapes are «not authorized»", async () => {
+    const { main } = await withRemote();
+    const pullSays = (stderr: string): Git => (args, cwd, ms) => (args.includes("pull") ? Promise.resolve({ code: 128, stdout: "", stderr }) : git(args, cwd, ms));
+    const cases: [string, "auth" | "refused"][] = [
+      ["error: unable to unlink old 'plans/a.md': Permission denied", "refused"],
+      ["error: cannot open .git/FETCH_HEAD: Permission denied", "refused"],
+      ["fatal: Unable to create '/w/.git/index.lock': Permission denied", "refused"],
+      ["git@h: Permission denied (publickey,password).\nfatal: Could not read from remote repository.", "auth"],
+      ["git@h: Permission denied, please try again.\nfatal: Could not read from remote repository.", "auth"],
+      ["ERROR: Repository not found.\nfatal: Could not read from remote repository.", "auth"],
+      ["remote: Repository not found.\nfatal: repository 'https://h/o/w.git/' not found", "auth"],
+      ["remote: Permission to o/w.git denied to someone.\nfatal: unable to access 'https://h/o/w.git/': The requested URL returned error: 403", "auth"],
+      ["fatal: unable to access 'https://h/': The requested URL returned error: 401", "auth"],
+    ];
+    for (const [stderr, kind] of cases) {
+      const gate = await runGate(main, [], pullSays(stderr));
+      const want = kind === "auth" ? ["not authorized", undefined] : ["git pull --ff-only refused (", true];
+      expect([stderr, gate.note?.split(" — ")[0]!.slice(0, kind === "auth" ? undefined : 28), kind === "auth" ? gate.skip : gate.skip === gate.note]).toEqual([stderr, ...want]);
+    }
+  });
+});
+
+describe("fix round 2 batch 3: index flags and ignore rules cannot hide a page's working bytes from the gate", () => {
+  test("skip-worktree and assume-unchanged on an edited main copy: uncommitted, Check skips", async () => {
+    for (const flag of ["--skip-worktree", "--assume-unchanged"]) {
+      const main = await repo();
+      await g(main, "update-index", flag, "plans/a.md");
+      write(main, "plans/a.md", "# A\nhidden edit\n");
+      expect(await g(main, "status", "--porcelain")).toBe("");
+      const gate = await runGate(main, [await page(path.join(main, "plans/a.md"))], git);
+      expect([flag, gate.pages[0]!.state, gate.skip]).toEqual([flag, "uncommitted", "uncommitted edits on plans/a.md"]);
+    }
+  });
+
+  test("a flagged main copy behind a worktree's commit: not carried", async () => {
+    const main = await repo();
+    await g(main, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "fix");
+    write(wt, "plans/a.md", "# A\nfixed\n");
+    await g(wt, "commit", "-qam", "fix");
+    await g(main, "merge", "-q", "--ff-only", "fix");
+    await g(main, "update-index", "--skip-worktree", "plans/a.md");
+    write(main, "plans/a.md", "# A\nsomeone else's hidden edit\n");
+    const gate = await runGate(main, [await page(path.join(wt, "plans/a.md"))], git);
+    expect(gate.pages[0]!.state).toBe("main-uncommitted");
+    expect(gate.skip).toBe("uncommitted edits on the main copy of plans/a.md");
+  });
+
+  test("a gitignored page was never committed: uncommitted, Check skips", async () => {
+    const main = await repo();
+    write(main, ".gitignore", "plans/ign.md\n");
+    await g(main, "add", ".gitignore");
+    await g(main, "commit", "-qm", "ignore");
+    write(main, "plans/ign.md", "# Ignored\n");
+    expect(await g(main, "status", "--porcelain")).toBe("");
+    const gate = await runGate(main, [await page(path.join(main, "plans/ign.md"))], git);
+    expect([gate.pages[0]!.state, gate.skip]).toEqual(["uncommitted", "uncommitted edits on plans/ign.md"]);
+  });
+
+  test("a deletion hidden by skip-worktree is uncommitted; a hidden edit in the worktree is uncommitted too", async () => {
+    const main = await repo();
+    await g(main, "update-index", "--skip-worktree", "plans/a.md");
+    rmSync(path.join(main, "plans/a.md"));
+    expect(await g(main, "status", "--porcelain")).toBe("");
+    expect((await runGate(main, [await page(path.join(main, "plans/a.md"))], git)).pages[0]!.state).toBe("deleted-uncommitted");
+    const m2 = await repo();
+    await g(m2, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(m2, "worktree", "add", "-q", wt, "fix");
+    await g(wt, "update-index", "--assume-unchanged", "plans/a.md");
+    write(wt, "plans/a.md", "# A\nthe session's unsaved fix\n");
+    expect((await runGate(m2, [await page(path.join(wt, "plans/a.md"))], git)).pages[0]!.state).toBe("uncommitted");
+  });
+
+  test("an ignored page git cannot read is not clean", async () => {
+    const main = await repo();
+    write(main, ".gitignore", "plans/ign.md\n");
+    await g(main, "add", ".gitignore");
+    await g(main, "commit", "-qm", "ignore");
+    write(main, "plans/ign.md", "# Ignored\n");
+    chmodSync(path.join(main, "plans/ign.md"), 0o000);
+    try {
+      expect((await runGate(main, [await page(path.join(main, "plans/ign.md"))], git)).pages[0]!.state).toBe("uncommitted");
+    } finally {
+      chmodSync(path.join(main, "plans/ign.md"), 0o644);
+    }
+  });
+
+  test("a clean page whose working bytes differ from the blob only by its eol filter stays committed", async () => {
+    const main = await repo();
+    write(main, ".gitattributes", "*.md text eol=crlf\n");
+    write(main, "plans/crlf.md", "# C\r\nline\r\n");
+    await g(main, "add", ".");
+    await g(main, "commit", "-qm", "crlf");
+    const gate = await runGate(main, [await page(path.join(main, "plans/crlf.md"))], git);
+    expect([gate.pages[0]!.state, gate.skip]).toEqual(["committed", undefined]);
+  });
+});
+
+describe("fix round 2 batch 3: the run's bound starts after the gate and uses the injected deadlines", () => {
+  test("verifier's scenario: the pull times out, a report hits its deadline, the cached Check still runs and sends", async () => {
+    const { main } = await withRemote();
+    let off = 0;
+    // The runner returns a timed-out pull by its bound plus its 1.5 s of graces.
+    const slowPull: Git = (args, cwd, ms) => {
+      if (!args.includes("pull")) return git(args, cwd, ms);
+      off += 31_500;
+      return Promise.resolve({ code: -1, stdout: "", stderr: "", timedOut: true });
+    };
+    const m = muninn(
+      { "plans/a.md": { toCheck: [{ relPath: "repos/z.md", verdict: { verdict: "stale" } }] }, "repos/b.md": { toCheck: [{ relPath: "repos/y.md" }] } },
+      { hangGet: ["repos/b.md"], verdicts: { "plans/a.md": [{ relPath: "repos/z.md", verdict: "stale", edit: { old: "o", new: "n" } }] } },
+    );
+    const fetchJson: FetchJson = async (url, signal) => {
+      signal?.addEventListener("abort", () => (off += 1_000));
+      return m.deps.fetchJson(url, signal);
+    };
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), path.join(main, "repos/b.md")], { ...m.deps, fetchJson, git: slowPull, deadlineMs: 1000, now: () => off });
+    expect(out).toContain("gate: offline — could not reach origin (no answer in 30 s); the main checkout is as last pulled");
+    expect(out.filter((l) => l.includes("not started"))).toEqual([]);
+    expect(m.checked).toEqual(["plans/a.md"]);
+    expect(m.sent).toEqual(["repos/z.md"]);
+    expect(out.find((l) => l.startsWith("Check: "))).toBe(
+      "Check: 0 page(s) spend model calls — the reports stopped (muninn did not answer in 1 s), so only the 1 cached one(s) run, 1 cached only; bound ≤ 0 model calls, ≤ 7 min for the whole run (the gate took 32 s)",
+    );
+  });
+
+  test("the guard budgets the Check and the sends from the injected deadlines: the edge starts, one ms past it does not", async () => {
+    const lines: (string | undefined)[] = [];
+    for (const [late, runs] of [[3_000, true], [3_001, false]] as const) {
+      const main = await repo();
+      let off = 0;
+      const m = muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/z.md" }] } }, { verdicts: { "plans/a.md": [{ relPath: "repos/z.md", verdict: "true" }] } });
+      // The report stage reads `late` ms on the clock: bound = 1 s reports + 2 s margin + 60 s Check + 60 s sends.
+      const fetchJson: FetchJson = async (url, signal) => {
+        off = late;
+        return m.deps.fetchJson(url, signal);
+      };
+      const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md")], {
+        ...m.deps, fetchJson, git, now: () => off, deadlineMs: 1000, checkDeadlineMs: 60_000, sendDeadlineMs: 60_000,
+      });
+      expect([late, m.checked]).toEqual([late, runs ? ["plans/a.md"] : []]);
+      if (!runs) expect(out).toContain("wiki-stale: check plans/a.md not started — it could run past the 3-min bound");
+      lines.push(out.find((l) => l.startsWith("Check: ")));
+    }
+    expect(lines).toEqual(Array(2).fill("Check: 1 page(s) spend model calls, 0 cached only; bound ≤ 10 model calls, ≤ 3 min for the whole run (the gate took 0 s)"));
   });
 });

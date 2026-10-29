@@ -65,6 +65,8 @@ const CALLS_PER_PAGE = 10;
 /** `git pull`: a network call. Every other git call reads local files. */
 export const PULL_TIMEOUT_MS = 30_000;
 const GIT_TIMEOUT_MS = 10_000;
+/** The run bound's margin for local work between its timed steps (parsing, printing): a choice, not a measurement. */
+const STEP_MARGIN_MS = 2_000;
 
 export interface GitResult {
   code: number;
@@ -316,10 +318,25 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
   if (g.skip) g.wideSkip = g.skip;
   lines.push(`gate: ${g.note ?? `on ${def}`}`);
 
+  /**
+   * Status, and the working bytes against HEAD's blob: skip-worktree, assume-unchanged and an ignore rule hide an
+   * edit from status, not from Check. `hash-object` applies the path's clean filters, as `git add` would.
+   */
+  const dirtyIn = async (cwd: string, rel: string, exists: boolean) => {
+    const run = async (args: string[]) => {
+      const r = await git(args, cwd);
+      return r.code === 0 ? r.stdout.trim() : "";
+    };
+    if ((await run(["status", "--porcelain", "--", rel])) !== "") return true;
+    const blob = await run(["rev-parse", "-q", "--verify", `HEAD:${rel}`]);
+    if (!exists) return blob !== "";
+    const hash = await run(["hash-object", "--", rel]);
+    return !hash || hash !== blob;
+  };
   for (const p of pages) {
     let state: PageState;
     if (!p.worktree) {
-      const dirty = (await out(["status", "--porcelain", "--", p.rel])) !== "";
+      const dirty = await dirtyIn(main, p.rel, p.exists);
       if (p.exists) state = dirty ? "uncommitted" : "committed";
       else if (dirty) state = "deleted-uncommitted";
       else state = (await out(["log", "-1", "--format=%h", "--", p.rel])) ? "deleted" : "missing";
@@ -329,8 +346,8 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
         const r = await git(args, p.worktree!);
         return r.code === 0 ? r.stdout.trim() : "";
       };
-      const wtDirty = (await wtOut(["status", "--porcelain", "--", p.rel])) !== "";
-      const mainDirty = (await out(["status", "--porcelain", "--", p.rel])) !== "";
+      const wtDirty = await dirtyIn(p.worktree, p.rel, p.exists);
+      const mainDirty = await dirtyIn(main, p.rel, existsSync(path.join(main, p.rel)));
       const wtBlob = await wtOut(["rev-parse", "-q", "--verify", `HEAD:${p.rel}`]);
       const mainBlob = await out(["rev-parse", "-q", "--verify", `HEAD:${p.rel}`]);
       if (wtDirty) state = p.exists ? "uncommitted" : "deleted-uncommitted";
@@ -367,8 +384,11 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
   return g;
 }
 
-/** A pull failure that is the credentials, not the network: ssh keys, host keys, https logins, a 401/403. */
-const AUTH_FAILURE = /permission denied|host key verification failed|authentication failed|could not read (username|password)|returned error: 40[13]|denied to /i;
+/**
+ * A pull failure that is the credentials, not the network: ssh's key or password refusal, host keys, https logins,
+ * a 401/403, a repository the login cannot see. A bare «Permission denied» is a local file git cannot write: refused.
+ */
+const AUTH_FAILURE = /permission denied \(|permission denied, please try again|host key verification failed|authentication failed|could not read (username|password)|returned error: 40[13]|repository not found|permission to \S+ denied to /i;
 
 /** Quote a word for a POSIX shell when it needs it. */
 export const shq = (s: string) => (/^[A-Za-z0-9_\/.@%+=:,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
@@ -688,6 +708,8 @@ async function oneWiki(
   const now = deps.now ?? Date.now;
   const started = now();
   const gate = await runGate(main, pages, git);
+  // The run's bound counts from here: the gate's git calls are bounded one by one, not together, so its time is measured.
+  const gated = now();
   say(...gate.lines);
   if (!second && gate.skip) say(`  (a --check call now would skip Check: ${gate.skip})`);
   // A page named by its main copy and its worktree copy is one page to report.
@@ -758,7 +780,9 @@ async function oneWiki(
   const reportMs = deps.deadlineMs ?? RUN_DEADLINE_MS;
   const checkMs = deps.checkDeadlineMs ?? CHECK_PAGE_DEADLINE_MS;
   const sendMs = deps.sendDeadlineMs ?? SEND_DEADLINE_MS;
+  /** Measured from the gate's end; the printed minutes add the gate's measured time. */
   let boundMs = Infinity;
+  const runMin = () => Math.ceil((gated - started + boundMs) / 60_000);
   const checkArgs = gate.skip ? [] : ["--check", "--send"];
   await runWikiStale([...common, ...checkArgs], {
     ...runDeps,
@@ -771,18 +795,18 @@ async function oneWiki(
       if (cut) for (const p of plan.costed) checkSkips[p] = cut;
       const check = cut ? plan.free : plan.check;
       const costed = cut || plan.overCap ? 0 : plan.costed.length;
-      boundMs = PULL_TIMEOUT_MS + reportMs + check.length * checkMs + sendMs;
+      boundMs = reportMs + STEP_MARGIN_MS + check.length * checkMs + sendMs;
       const why = cut ? ` — the reports stopped (${cut}), so only the ${plan.free.length} cached one(s) run` : plan.overCap ? ` — over ${COSTED_PAGE_CAP}, so only the ${plan.free.length} cached one(s) run` : "";
       say(
         `Check: ${plan.costed.length} page(s) spend model calls${why}, ${plan.free.length} cached only; ` +
-          `bound ≤ ${costed * CALLS_PER_PAGE} model calls, ≤ ${Math.ceil(boundMs / 60_000)} min for the whole run`,
+          `bound ≤ ${costed * CALLS_PER_PAGE} model calls, ≤ ${runMin()} min for the whole run (the gate took ${Math.ceil((gated - started) / 1000)} s)`,
       );
       return check;
     },
     // No Check starts that could end, with the sends after it, past the printed bound.
     beforeCheck: (p) => {
-      if (now() - started + checkMs + sendMs <= boundMs) return true;
-      const min = Math.ceil(boundMs / 60_000);
+      if (now() - gated + checkMs + sendMs <= boundMs) return true;
+      const min = runMin();
       checkSkips[p] = `past the ${min}-min bound`;
       say(`wiki-stale: check ${p} not started — it could run past the ${min}-min bound`);
       return false;
