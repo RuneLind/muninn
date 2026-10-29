@@ -27,7 +27,9 @@ export type AgentPhase =
   // Fact-check phases — Phase 1 claim extraction, then Phase 2 bounded-parallel
   // per-claim web verification. Additive: no consumer switches exhaustively.
   | "extracting_claims"
-  | "verifying_claims";
+  | "verifying_claims"
+  // The work map's organize run: awaiting warm inputs, then the model call.
+  | "organizing";
 
 export interface AgentStatus {
   phase: AgentPhase;
@@ -72,7 +74,9 @@ export type AgentKind =
   | "digest"
   | "factcheck"
   | "extractor"
-  | "profile";
+  | "profile"
+  /** The work map's nightly organize (`src/wiki/work-map/`). */
+  | "work_map";
 
 /**
  * Kinds eligible for the single-pane waterfall (`getProgress`/`subscribeProgress`

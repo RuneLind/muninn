@@ -836,6 +836,45 @@ export function schedulerEnabledFromEnv(): boolean {
   return optionalEnv("SCHEDULER_ENABLED", optionalEnv("GOAL_CHECK_ENABLED", "true")) === "true";
 }
 
+/** Effort levels `WORK_MAP_EFFORT` accepts — `EFFORT_VALUES` (`src/bots/config.ts`)
+ *  spelled again so this file imports no bot discovery; a test pins the two equal. */
+export const WORK_MAP_EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"] as const;
+export type WorkMapEffort = (typeof WORK_MAP_EFFORT_VALUES)[number];
+export const WORK_MAP_DEFAULT_MODEL = "claude-opus-5-5";
+export const WORK_MAP_DEFAULT_HOUR = 5;
+
+/**
+ * `WORK_MAP_WIKIS` (comma-separated wiki names), `WORK_MAP_HOUR` (0–23, local
+ * hour from which a day's run may start, default 5), `WORK_MAP_MODEL` (default
+ * {@link WORK_MAP_DEFAULT_MODEL}) and `WORK_MAP_EFFORT` (unset ⇒ the CLI's own
+ * default). An hour outside 0–23 or an unknown effort throws `ConfigError`.
+ */
+export function workMapEnv(env: Record<string, string | undefined> = process.env): {
+  workMapWikis: string[];
+  workMapHour: number;
+  workMapModel: string;
+  workMapEffort: WorkMapEffort | undefined;
+} {
+  const wikis = (env.WORK_MAP_WIKIS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const rawHour = (env.WORK_MAP_HOUR ?? "").trim();
+  const hour = rawHour === "" ? WORK_MAP_DEFAULT_HOUR : Number(rawHour);
+  if (!/^\d{1,2}$/.test(rawHour === "" ? "5" : rawHour) || !Number.isInteger(hour) || hour < 0 || hour > 23) {
+    throw new ConfigError(`Environment variable WORK_MAP_HOUR must be a whole hour 0–23, got: "${env.WORK_MAP_HOUR}"`);
+  }
+  const rawEffort = (env.WORK_MAP_EFFORT ?? "").trim();
+  if (rawEffort !== "" && !(WORK_MAP_EFFORT_VALUES as readonly string[]).includes(rawEffort)) {
+    throw new ConfigError(
+      `Environment variable WORK_MAP_EFFORT must be one of ${WORK_MAP_EFFORT_VALUES.join(", ")}, got: "${rawEffort}"`,
+    );
+  }
+  return {
+    workMapWikis: wikis,
+    workMapHour: hour,
+    workMapModel: (env.WORK_MAP_MODEL ?? "").trim() || WORK_MAP_DEFAULT_MODEL,
+    workMapEffort: rawEffort === "" ? undefined : (rawEffort as WorkMapEffort),
+  };
+}
+
 export function optionalEnvInt(name: string, defaultValue: number): number {
   const raw = process.env[name];
   if (!raw) return defaultValue;
@@ -958,6 +997,9 @@ export function loadConfig() {
     // registry when the loop starts; an unregistered name is skipped with a
     // warning, not a boot failure (as WIKI_READONLY_ROOTS treats its entries).
     wikiStaleConfirmWikis: optionalEnv("WIKI_STALE_CONFIRM_WIKIS", "").split(",").map((s) => s.trim()).filter(Boolean),
+    // The work map's nightly organize (`src/wiki/work-map/`): which wikis, the
+    // local hour it may run from, and the model. Unset WORK_MAP_WIKIS means off.
+    ...workMapEnv(),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
