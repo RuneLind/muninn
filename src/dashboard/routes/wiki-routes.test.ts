@@ -641,6 +641,54 @@ describe("GET /api/wiki/html", () => {
 });
 
 /**
+ * The listing's `workMap` field under the `WIKI_DIR` env override: the
+ * work-map GET is bound to a registry name (its state and `organizable` are
+ * keyed by it), so a nameless root must not advertise a card that GET refuses.
+ */
+describe("GET /api/wiki/pages — workMap under the WIKI_DIR override", () => {
+  let root: string;
+  let prevWikiDir: string | undefined;
+
+  beforeEach(async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-workmap-envdir-"));
+    await Bun.write(path.join(root, "notes/a.md"), "---\ntitle: A\n---\n\nBody.");
+    await Bun.write(
+      path.join(root, ".work-map.json"),
+      JSON.stringify({
+        version: 1,
+        wiki: "",
+        runAtMs: 1234,
+        model: "m",
+        coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+        summary: "",
+        needsYou: [],
+        themes: [],
+        efforts: [],
+        loose: [],
+      }),
+    );
+    prevWikiDir = process.env.WIKI_DIR;
+    process.env.WIKI_DIR = root;
+    __resetWikiCacheForTest();
+  });
+
+  afterEach(async () => {
+    if (prevWikiDir === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prevWikiDir;
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a bare listing omits workMap: the GET has no wiki name to serve it under", async () => {
+    const app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+    const body = (await (await app.request("/api/wiki/pages")).json()) as Record<string, unknown>;
+    expect((body.pages as unknown[]).length).toBeGreaterThan(0);
+    expect("workMap" in body).toBe(false);
+  });
+});
+
+/**
  * Wiki Ask route resolution. Exercises only the branches that never reach
  * `streamResearchAnswer` (no Huginn / no `claude` spawn): an unknown wiki and a
  * registered wiki with no search collections both emit a clean `app_error` SSE

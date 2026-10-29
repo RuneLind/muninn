@@ -18,7 +18,9 @@
  *  5. **A background adopt leaves the start cards alone**: a no-map wiki's
  *     digest is asked for no more often than before and its in-flight ↻ stays
  *     disabled; a lane the reader opened stays open across a repaint.
- *  6. **A ↻ poll whose GET keeps failing settles** and re-enables ↻.
+ *  6. **A ↻ poll whose GET keeps failing settles** and re-enables ↻; a first
+ *     GET answered 4xx, or failing on the network twice, yields What's new.
+ *     ✓ lasts the page's life when localStorage throws.
  *  7. **Legible in both themes**: text colours resolve to their tokens (read on
  *     a body probe) and clear 4.5:1 against what is painted behind them.
  *
@@ -333,6 +335,51 @@ test("↻ shows when organizable and states a 429 refusal", async ({ page }) => 
   expect(posted).not.toBeNull();
   expect(posted!.contentType).toContain("application/json");
   expect(posted!.url).not.toContain("force");
+});
+
+const DIGEST_OK = { digest: { bullets: "- x", html: "<ul><li>Something changed</li></ul>", generatedAt: Date.now(), logMtimeMs: 0, entryCount: 1, fromDate: "2026-10-28", toDate: "2026-10-29" } };
+
+test("a work-map GET the instance refuses (4xx) falls back to What's new", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  await page.route("**/api/wiki/work-map?*", (route) => route.fulfill({ status: 400, json: { error: "wiki is required" } }));
+  await openStart(page, FRESH);
+  await expect(page.locator("#wikiWhatsNew")).toContainText("Something changed");
+  await expect(page.locator("#wikiWorkCard")).toBeHidden();
+});
+
+test("a work-map GET that fails on the network twice falls back to What's new", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", (route) => {
+    gets++;
+    return route.abort();
+  });
+  await openStart(page, FRESH);
+  await expect(page.locator("#wikiWhatsNew")).toContainText("Something changed");
+  await expect(page.locator("#wikiWorkCard")).toBeHidden();
+  expect(gets).toBe(2);
+});
+
+test("✓ dismiss lasts the page's life when storage throws", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get() {
+        throw new DOMException("blocked", "SecurityError");
+      },
+    });
+  });
+  await openStart(page, FRESH);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await card.locator('[data-wm-done="0"]').click();
+  await expect(card.locator("[data-wm-need]")).toHaveCount(1);
+  // A start-tab switch repaints the card from the done store.
+  await page.locator('.wiki-tab[data-tab="timeline"]').click();
+  await page.locator('.wiki-tab[data-tab="hubs"]').click();
+  await expect(card.locator("[data-wm-need]")).toHaveCount(1);
+  await card.locator("#wikiWorkMapRestore").click();
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
 });
 
 for (const scheme of ["light", "dark"] as const) {

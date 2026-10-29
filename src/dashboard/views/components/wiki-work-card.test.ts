@@ -126,6 +126,12 @@ describe("workCardHtml", () => {
 });
 
 describe("lanes and nesting", () => {
+  test("duplicate effort ids that cross-parent render once each, without overflowing", () => {
+    const m = map({ efforts: [effort("a", "active", [], { parent: "b" }), effort("a", "active", []), effort("b", "active", [], { parent: "a" }), effort("b", "active", [])] });
+    const html = card(m);
+    expect(html.match(/data-effort-id="a"/g)).toHaveLength(1);
+    expect(html.match(/data-effort-id="b"/g)).toHaveLength(1);
+  });
   test("a parent cycle leaves both efforts top-level", () => {
     const es = [effort("a", "active", [], { parent: "b" }), effort("b", "active", [], { parent: "a" })];
     expect(es.map((e) => isNestedEffort(e, es))).toEqual([false, false]);

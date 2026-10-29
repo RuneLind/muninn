@@ -1676,8 +1676,10 @@ export function registerWikiReadRoutes(
       ...bucketMirrorPayloadField(resolveWikiRoot(root)),
       // `{runAt}` only when the wiki has a readable `.work-map.json`, so the
       // start view picks the Your work card over What's new without a second
-      // fetch. Absent on the read slice, which serves no work-map route.
-      ...(readSliceOnly ? {} : await workMapListingField(resolveWikiRoot(root))),
+      // fetch. Absent on the read slice, which serves no work-map route, and
+      // without a registry entry (the `WIKI_DIR` override): the GET is keyed
+      // by wiki name, like ⇪ Felles above.
+      ...(readSliceOnly || !entry ? {} : await workMapListingField(resolveWikiRoot(entry.root))),
     });
   });
 

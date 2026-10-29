@@ -30,6 +30,7 @@ export type JoinedWorkMap<P> = Omit<WorkMap, "efforts" | "loose" | "needsYou"> &
  * no pages stays (the card can still say it existed); a page's relPath is
  * rewritten to the listing's spelling. A prose marker `⟦relPath⟧` to a page
  * the listing no longer holds becomes its file stem (the map keeps no titles).
+ * A duplicate effort id keeps the first effort, so every surface sees unique ids.
  */
 export function joinWorkMap<P extends { relPath: string }>(map: WorkMap, pages: readonly P[]): JoinedWorkMap<P> {
   const byKey = new Map(pages.map((p) => [normalizeRelPath(p.relPath), p]));
@@ -42,7 +43,7 @@ export function joinWorkMap<P extends { relPath: string }>(map: WorkMap, pages: 
   return {
     ...map,
     summary: text(map.summary),
-    efforts: map.efforts.map((e) => {
+    efforts: map.efforts.filter((e, i, all) => all.findIndex((x) => x.id === e.id) === i).map((e) => {
       const joined: JoinedEffortPage<P>[] = [];
       for (const pg of e.pages) {
         const page = find(pg.id);

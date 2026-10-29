@@ -278,12 +278,16 @@ function effortHtml<P>(
   prose: (s: string) => string,
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
+  shown: Set<string> = new Set(),
 ): string {
+  shown.add(e.id);
   const active = activeLabel(lastActiveDays(e, now));
-  // Sub-efforts render under their parent; `isNestedEffort` keeps a cycle top-level.
-  const children = childrenOf(e.id);
+  // Sub-efforts render under their parent; `isNestedEffort` keeps a cycle
+  // top-level, and `shown` stops the walk at an id already rendered.
+  const children = childrenOf(e.id).filter((c) => !shown.has(c.id));
+  for (const c of children) shown.add(c.id);
   const subs = children.length
-    ? `<ul class="wiki-wm-sub">${children.map((c) => effortHtml(c, childrenOf, now, prose, byKey, hrefFor)).join("")}</ul>`
+    ? `<ul class="wiki-wm-sub">${children.map((c) => effortHtml(c, childrenOf, now, prose, byKey, hrefFor, shown)).join("")}</ul>`
     : "";
   return (
     `<li class="wiki-wm-effort" data-effort-id="${esc(e.id)}">` +
@@ -312,10 +316,11 @@ function lanesHtml<P>(
   hrefFor: (rel: string) => string,
 ): string {
   const childrenOf = (id: string) => map.efforts.filter((x) => x.parent === id && isNestedEffort(x, map.efforts));
+  const shown = new Set<string>();
   return laneEfforts(map.efforts)
     .map(({ lane, efforts }) => {
       if (!efforts.length) return "";
-      const items = efforts.map((e) => effortHtml(e, childrenOf, now, prose, byKey, hrefFor)).join("");
+      const items = efforts.map((e) => effortHtml(e, childrenOf, now, prose, byKey, hrefFor, shown)).join("");
       return (
         `<details class="wiki-wm-lane" data-wm-lane="${lane.id}"${lane.open ? " open" : ""}>` +
         `<summary class="wiki-wm-lane-title">${esc(lane.label)} <span class="wiki-wm-count">${efforts.length}</span></summary>` +

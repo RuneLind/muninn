@@ -22,6 +22,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
+import { localStore } from "./wiki-local-store.ts";
 import {
   needKey,
   parseDone,
@@ -735,19 +736,27 @@ const WORK_POLL_MAX_FAILURES = 3;
 function doneStorageKey(): string {
   return WORK_MAP_DONE_KEY_PREFIX + readActiveWikiName();
 }
+/** The done store per key when storage fails: a dismiss then lasts the page's life. */
+const doneMemory = new Map<string, string | null>();
 function readDoneRaw(): string | null {
+  const key = doneStorageKey();
+  if (doneMemory.has(key)) return doneMemory.get(key)!;
   try {
-    return localStorage.getItem(doneStorageKey());
+    return localStore()?.getItem(key) ?? null;
   } catch {
     return null;
   }
 }
 function writeDoneRaw(v: string | null): void {
+  const key = doneStorageKey();
   try {
-    if (v === null) localStorage.removeItem(doneStorageKey());
-    else localStorage.setItem(doneStorageKey(), v);
+    const store = localStore();
+    if (!store) throw new Error("no storage");
+    if (v === null) store.removeItem(key);
+    else store.setItem(key, v);
+    doneMemory.delete(key);
   } catch {
-    /* storage blocked: the dismiss lasts for this render only */
+    doneMemory.set(key, v);
   }
 }
 
@@ -815,16 +824,32 @@ function fallBackToWhatsNew(): void {
   mountStartCards();
 }
 
+class WorkMapHttpError extends Error {
+  constructor(readonly status: number) {
+    super("HTTP " + status);
+  }
+}
+
 async function fetchWorkMapBody(): Promise<WorkMapGetBody> {
   const r = await fetch(withWiki("/api/wiki/work-map"));
-  if (!r.ok) throw new Error("HTTP " + r.status);
+  if (!r.ok) throw new WorkMapHttpError(r.status);
   return (await r.json()) as WorkMapGetBody;
+}
+
+/** One GET, retried once on a network error (not on an HTTP status). */
+async function fetchWorkMapBodyRetry(): Promise<WorkMapGetBody> {
+  try {
+    return await fetchWorkMapBody();
+  } catch (err) {
+    if (err instanceof WorkMapHttpError) throw err;
+    return fetchWorkMapBody();
+  }
 }
 
 function loadWorkMap(): void {
   if (workLoading) return;
   workLoading = true;
-  fetchWorkMapBody()
+  fetchWorkMapBodyRetry()
     .then((body) => {
       workLoading = false;
       if (!body.map) {
@@ -834,10 +859,13 @@ function loadWorkMap(): void {
       workBody = body as WorkMapGetBody & { map: WorkMap };
       paintWorkCard();
     })
-    .catch(() => {
+    .catch((err) => {
       workLoading = false;
       const el = document.getElementById("wikiWorkCard");
       if (!el || workBody) return;
+      // The instance will not serve this map (4xx), or the network failed twice:
+      // What's new takes the slot. A 5xx keeps the card's Retry.
+      if (!(err instanceof WorkMapHttpError) || err.status < 500) return fallBackToWhatsNew();
       el.innerHTML =
         '<div class="wiki-wn-head"><span class="wiki-wn-title">Your work</span></div>' +
         '<div class="wiki-wn-error"><span>Couldn’t load the work map.</span>' +
