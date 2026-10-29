@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { EFFORT_VALUES } from "../../bots/config.ts";
-import { WORK_MAP_DEFAULT_MODEL, WORK_MAP_EFFORT_VALUES, workMapEnv } from "../../config.ts";
+import { __resetEnvFlagWarningsForTest, WORK_MAP_DEFAULT_MODEL, WORK_MAP_EFFORT_VALUES, workMapEnv } from "../../config.ts";
 import { AMBIENT_INSTANCE_ENV } from "../../test/ambient-env.ts";
 
 test("WORK_MAP_* defaults: off, 05:00, Opus 5.5, no effort", () => {
@@ -22,6 +23,30 @@ test("a bad WORK_MAP_HOUR or WORK_MAP_EFFORT falls back instead of failing boot"
     expect(workMapEnv({ WORK_MAP_WIKIS: "mimir", WORK_MAP_HOUR: bad })).toMatchObject({ workMapWikis: ["mimir"], workMapHour: 5 });
   }
   expect(workMapEnv({ WORK_MAP_HOUR: "3", WORK_MAP_EFFORT: "turbo" })).toMatchObject({ workMapHour: 3, workMapEffort: undefined });
+});
+
+test("WORK_MAP_HOUR takes two-digit hours up to 23", () => {
+  for (const ok of ["10", "22", "23"]) expect(workMapEnv({ WORK_MAP_HOUR: ok }).workMapHour).toBe(Number(ok));
+});
+
+afterEach(async () => {
+  __resetEnvFlagWarningsForTest();
+  await reset();
+});
+
+test("a bad WORK_MAP_HOUR or WORK_MAP_EFFORT warns once per value", async () => {
+  __resetEnvFlagWarningsForTest();
+  const records: LogRecord[] = [];
+  await configure({
+    sinks: { capture: (r: LogRecord) => records.push(r) },
+    loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+    reset: true,
+  });
+  workMapEnv({ WORK_MAP_HOUR: "24", WORK_MAP_EFFORT: "turbo" });
+  workMapEnv({ WORK_MAP_HOUR: "24", WORK_MAP_EFFORT: "turbo" });
+  workMapEnv({ WORK_MAP_HOUR: "25" });
+  const warned = records.filter((r) => r.level === "warning").map((r) => `${r.properties.name}=${r.properties.value}`);
+  expect(warned).toEqual(["WORK_MAP_HOUR=24", "WORK_MAP_EFFORT=turbo", "WORK_MAP_HOUR=25"]);
 });
 
 test("the effort list is the bots' list, and the four names are ambient-blanked", () => {

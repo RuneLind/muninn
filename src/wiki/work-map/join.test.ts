@@ -55,4 +55,9 @@ describe("joinWorkMap prose markers", () => {
     const j = joinWorkMap(mapCiting("⟦archive/gone.md⟧ after ⟦notes/kept.md⟧", ["notes/kept.md"]), [{ relPath: "notes/kept.md" }]);
     expect(prose(j).map((s) => s.slice(2))).toEqual(Array(8).fill("gone after ⟦notes/kept.md⟧"));
   });
+
+  test("every gone marker is rewritten: two in a row, and one after a live marker", () => {
+    const j = joinWorkMap(mapCiting("⟦archive/a.md⟧ ⟦archive/b.md⟧ ⟦notes/kept.md⟧ ⟦archive/c.md⟧", ["notes/kept.md"]), [{ relPath: "notes/kept.md" }]);
+    expect(prose(j).map((s) => s.slice(2))).toEqual(Array(8).fill("a b ⟦notes/kept.md⟧ c"));
+  });
 });
