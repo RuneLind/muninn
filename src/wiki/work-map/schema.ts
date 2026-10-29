@@ -5,6 +5,11 @@
  * Effort ids are plain strings in the answer schema, so one odd id cannot
  * reject a night's run; `normalize.ts` slugifies them and drops what is still
  * invalid. The stored schema holds only ids that pass {@link EFFORT_ID_RE}.
+ *
+ * Every list drops a member that fails its own schema instead of rejecting the
+ * answer. Required: the `efforts` array (with at least one valid member when it
+ * is not empty), an effort's id, name, state and `pages` array, a page's id and
+ * role, a needs-you item's title and kind.
  */
 
 import { z } from "zod";
@@ -20,15 +25,31 @@ export const PAGE_ROLES = ["plan", "report", "explainer", "prototype", "referenc
 export type EffortState = (typeof EFFORT_STATES)[number];
 export type PageRole = (typeof PAGE_ROLES)[number];
 
-/** Optional on the wire: a model that writes `null` means "none". */
+/** Optional on the wire: `null`, a blank or a non-string means "none". */
 const optionalString = z
   .string()
   .nullish()
+  .catch(undefined)
   .transform((v) => (v == null || v.trim() === "" ? undefined : v));
-/** Prose a model may omit or null: reads as "". */
-const prose = z.string().nullish().transform((v) => v ?? "");
-/** A list a model may omit or null: reads as empty. */
-const list = <T extends z.ZodTypeAny>(item: T) => z.array(item).nullish().transform((v): z.infer<T>[] => v ?? []);
+/** Prose a model may omit, null or mistype: reads as "". */
+const prose = z.string().nullish().catch("").transform((v) => v ?? "");
+
+/** The members of `arr` that pass `item`; the rest are dropped. */
+function validMembers<T extends z.ZodTypeAny>(item: T, arr: unknown[]): z.output<T>[] {
+  return arr.flatMap((m) => {
+    const r = item.safeParse(m);
+    return r.success ? [r.data as z.output<T>] : [];
+  });
+}
+/** A required array whose odd members are dropped. */
+const members = <T extends z.ZodTypeAny>(item: T) =>
+  z.array(z.unknown()).transform((arr) => validMembers(item, arr)) as unknown as z.ZodType<z.output<T>[], z.input<T>[]>;
+/** A list a model may omit or null (reads as empty); odd members are dropped. */
+const list = <T extends z.ZodTypeAny>(item: T) =>
+  z
+    .array(z.unknown())
+    .nullish()
+    .transform((v) => validMembers(item, v ?? [])) as unknown as z.ZodType<z.output<T>[], z.input<T>[] | null | undefined>;
 
 const answerPage = z.object({
   id: z.string(),
@@ -44,9 +65,9 @@ const answerEffort = z.object({
   oneLine: prose,
   state: z.enum(EFFORT_STATES),
   parent: optionalString,
-  pages: z.array(answerPage),
+  pages: members(answerPage),
   why: prose,
-  confidence: z.number().nullish().transform((v) => v ?? 0),
+  confidence: z.number().nullish().catch(0).transform((v) => v ?? 0),
   next: prose,
   related: list(z.object({ id: z.string(), why: prose })),
 });
@@ -62,12 +83,23 @@ const answerNeedsYou = z.object({
 
 /** The organize model's answer, after `extractJson`. Unknown keys (the
  *  prototype's `corrections` and `views`) are stripped. Only `efforts` is
- *  required at the top level, so one omitted list cannot reject a night. */
+ *  required at the top level, so one omitted list cannot reject a night; a
+ *  non-empty `efforts` with no valid member rejects, so the run keeps the
+ *  previous map. */
 export const workMapAnswerSchema = z.object({
   summary: prose,
   needsYou: list(answerNeedsYou),
   themes: list(z.object({ name: z.string(), efforts: list(z.string()) })),
-  efforts: z.array(answerEffort),
+  efforts: z.array(z.unknown()).transform((arr, ctx) => {
+    const valid = validMembers(answerEffort, arr);
+    if (arr.length > 0 && valid.length === 0) {
+      const first = answerEffort.safeParse(arr[0]);
+      const issue = first.success ? undefined : first.error.issues[0];
+      ctx.addIssue({ code: "custom", message: `no effort matched the schema${issue ? ` (efforts.0.${issue.path.join(".")}: ${issue.message})` : ""}` });
+      return z.NEVER;
+    }
+    return valid;
+  }) as unknown as z.ZodType<z.output<typeof answerEffort>[], z.input<typeof answerEffort>[]>,
   loose: list(z.string()),
 });
 
@@ -82,8 +114,8 @@ const dailyActivity = z.object({
   day: z.string(),
   /** Distinct commits that touched the effort's pages that day. */
   commits: z.number().int().nonnegative(),
-  /** Distinct session events on the effort's pages that day (inside the
-   *  sessions window only). */
+  /** Distinct sessions on the effort's pages that day, by session id (an
+   *  event with no session id counts alone; inside the sessions window only). */
   sessions: z.number().int().nonnegative(),
 });
 

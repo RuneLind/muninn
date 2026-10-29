@@ -13,7 +13,7 @@
  *   - the **commit tail OUTSIDE** both, pushing where the repo has an upstream
  *     (`commitWikiChange`), since the write owner may run no sync loop — and
  *     skipped when the stop signal fired during the write: the landed file
- *     stays uncommitted for the next run or the wiki-committer sweep;
+ *     stays uncommitted until the next successful run commits it;
  *   - the write itself is a temp file in the root plus a rename, so a reader
  *     never sees a half-written map.
  *
@@ -25,7 +25,7 @@ import { rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getLog } from "../../logging.ts";
 import { commitWikiChange, type CommitWikiResult } from "../commit.ts";
-import { takeWikiWriteLock } from "../lockfile.ts";
+import { takeWikiWriteLock, WORK_MAP_TMP_PREFIX } from "../lockfile.ts";
 import { runWikiWriteExclusive } from "../queue.ts";
 import { isReadonlyWikiRoot, isWikiReadonly, WIKI_READONLY_REASON, wikiReadonlyRootReason } from "../readonly.ts";
 
@@ -66,9 +66,15 @@ async function defaultRead(absPath: string): Promise<string | null> {
   }
 }
 
-/** Temp file in the same dir (a dot file, so the index never lists it), then rename. */
+/** The temp file beside the map: a dot file, so the index never lists it, and a
+ *  write artifact (`isWikiWriteArtifact`), so a crash's leftover is never committed. */
+export function workMapTmpPath(wikiDir: string): string {
+  return path.join(wikiDir, `${WORK_MAP_TMP_PREFIX}${process.pid}.${crypto.randomUUID()}.tmp`);
+}
+
+/** Write the temp file, then rename it over the map. */
 async function atomicWrite(absPath: string, content: string): Promise<void> {
-  const tmp = path.join(path.dirname(absPath), `.${path.basename(absPath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  const tmp = workMapTmpPath(path.dirname(absPath));
   try {
     await writeFile(tmp, content);
     await rename(tmp, absPath);

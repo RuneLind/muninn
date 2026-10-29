@@ -76,8 +76,13 @@ export const WIKI_LOCK_BASENAME = ".wiki-write.lock";
  *  here because everything that must ignore the lockfile must ignore this too. */
 export const WIKI_STAMP_TMP_PREFIX = ".wiki-stamp.";
 
+/** The work map writer's temp file (`work-map/write.ts`), renamed over
+ *  `.work-map.json`; a crash between write and rename leaves it. */
+export const WORK_MAP_TMP_PREFIX = ".work-map.json.";
+
 /**
- * Is this basename one of the two files the write interlock leaves in a wiki?
+ * Is this basename one of the transient files the wiki writers leave in a wiki
+ * (the lockfile and the stamper's and work map's temp files)?
  *
  * Both are transient by construction and neither is content, so nothing that
  * enumerates a wiki's dirty files may treat them as work: the daily
@@ -97,7 +102,8 @@ export const WIKI_STAMP_TMP_PREFIX = ".wiki-stamp.";
 export function isWikiWriteArtifact(basename: string): boolean {
   return (
     basename === WIKI_LOCK_BASENAME ||
-    (basename.startsWith(WIKI_STAMP_TMP_PREFIX) && basename.endsWith(".tmp"))
+    (basename.startsWith(WIKI_STAMP_TMP_PREFIX) && basename.endsWith(".tmp")) ||
+    (basename.startsWith(WORK_MAP_TMP_PREFIX) && basename.endsWith(".tmp"))
   );
 }
 

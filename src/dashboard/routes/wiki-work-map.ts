@@ -33,8 +33,9 @@ import { readonlyRefusal } from "./route-utils.ts";
 
 const log = getLog("dashboard", "wiki-work-map");
 
-/** The ↻ cooldown: a POST under this long after the last success, or the last
- *  post-model failure, needs `force=1`. */
+/** The ↻ cooldown: a POST under this long after the last success, or after
+ *  the START of the last post-model failure (an attempt's `at` is its start),
+ *  needs `force=1`. */
 export const WORK_MAP_REFRESH_COOLDOWN_MS = 10 * 60_000;
 
 function resolve(c: Context, deps: WorkMapRunDeps) {
@@ -110,7 +111,7 @@ export function registerWikiWorkMapRoutes(
       if (failedAt !== undefined && now - failedAt < WORK_MAP_REFRESH_COOLDOWN_MS) {
         return c.json(
           {
-            error: "the last work map run failed less than 10 minutes ago",
+            error: "a work map run that failed started less than 10 minutes ago",
             lastFailedAt: failedAt,
             retryAfterMs: WORK_MAP_REFRESH_COOLDOWN_MS - (now - failedAt),
           },

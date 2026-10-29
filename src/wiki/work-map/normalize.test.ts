@@ -274,7 +274,9 @@ describe("workMapAnswerSchema", () => {
     expect(ok.success).toBe(true);
     expect(ok.success && "corrections" in ok.data).toBe(false);
     expect(workMapAnswerSchema.safeParse({ ...base, efforts: [effort("a", [{ id: "p1", role: "plan" }], { state: "done" as never })] }).success).toBe(false);
-    expect(workMapAnswerSchema.safeParse({ ...base, efforts: [effort("a", [{ id: "p1", role: "draft" as never }])] }).success).toBe(false);
+    // An unknown role drops that page; the effort parses and step 8 drops it if left empty.
+    const role = workMapAnswerSchema.safeParse({ ...base, efforts: [effort("a", [{ id: "p1", role: "draft" as never }, { id: "p2", role: "plan" }])] });
+    expect(role.success && role.data.efforts[0]!.pages.map((p) => p.id)).toEqual(["p2"]);
   });
   test("a null or missing optional field does not reject the answer", () => {
     const raw = {
@@ -314,6 +316,63 @@ describe("workMapAnswerSchema", () => {
     expect(workMapAnswerSchema.safeParse({ ...raw, efforts: null }).success).toBe(false);
     expect(workMapAnswerSchema.safeParse({ ...raw, efforts: [{ id: "a", name: "A", state: "active" }] }).success).toBe(false);
     expect(workMapAnswerSchema.safeParse({ ...raw, efforts: [{ name: "A", state: "active", pages: [] }] }).success).toBe(false);
+  });
+  test("an odd list member is dropped, never rejects the answer", () => {
+    const good = (over: Record<string, unknown> = {}) => ({ ...effort("a", [{ id: "p1", role: "plan" }]), ...over });
+    const raw = {
+      summary: "s",
+      needsYou: [
+        { title: "t", kind: "decision", why: "w", action: "a", pages: [null, "p1", 7], effort: "a" },
+        { title: null, kind: "decision" },
+        null,
+      ],
+      themes: [{ name: null, efforts: ["a"] }, { name: "T", efforts: [null, "a"] }, "x"],
+      efforts: [
+        good({ aliases: [null, "A2", 3], related: [{ id: null, why: "w" }, { why: "w" }, null, { id: "b", why: "w" }], pages: [null, { id: "p1", role: "plan" }, { id: "p2" }] }),
+        { id: "bad", name: "Bad", state: "done", pages: [] },
+        null,
+        good({ id: "b", name: "B", pages: [{ id: "p2", role: "plan" }] }),
+      ],
+      loose: [null, "p3", 5],
+    };
+    const parsed = workMapAnswerSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.efforts.map((e) => e.id)).toEqual(["a", "b"]);
+    expect(parsed.data.efforts[0]!.aliases).toEqual(["A2"]);
+    expect(parsed.data.efforts[0]!.pages).toEqual([{ id: "p1", role: "plan", derivedFrom: undefined }]);
+    expect(parsed.data.themes.map((t) => [t.name, t.efforts])).toEqual([["T", ["a"]]]);
+    expect(parsed.data.needsYou.map((n) => [n.title, n.pages])).toEqual([["t", ["p1"]]]);
+    expect(parsed.data.loose).toEqual(["p3"]);
+    const out = normalizeWorkMapAnswer(parsed.data, ctx());
+    expect(out.efforts.map((e) => [e.id, e.related.map((r) => r.id)])).toEqual([["a", ["b"]], ["b", []]]);
+    expect(out.loose).toEqual(["archive/alpha-report.mdx"]);
+    // Each shape the finding named, alone.
+    const base = { summary: "s", needsYou: [], themes: [], loose: [], efforts: [good()] };
+    const variants: [string, unknown][] = [
+      ["related id null", { ...base, efforts: [good({ related: [{ id: null, why: "w" }] })] }],
+      ["theme name null", { ...base, themes: [{ name: null, efforts: ["a"] }] }],
+      ["loose null", { ...base, loose: [null] }],
+      ["aliases null", { ...base, efforts: [good({ aliases: [null] })] }],
+      ["needsYou pages null", { ...base, needsYou: [{ title: "t", kind: "decision", pages: [null] }] }],
+      ["one bad effort", { ...base, efforts: [good(), { id: "x", name: "X", state: "done", pages: [] }] }],
+      ["one bad page", { ...base, efforts: [good({ pages: [{ id: "p1", role: "plan" }, { id: "p2", role: "draft" }] })] }],
+      ["one bad needsYou", { ...base, needsYou: [{ title: "t", kind: "nope" }] }],
+    ];
+    const scalars = workMapAnswerSchema.safeParse({ ...base, efforts: [good({ parent: 5, why: 3, confidence: "high", pages: [{ id: "p1", role: "plan", derivedFrom: 2 }] })] });
+    expect(scalars.success && [scalars.data.efforts[0]!.parent, scalars.data.efforts[0]!.why, scalars.data.efforts[0]!.confidence, scalars.data.efforts[0]!.pages[0]!.derivedFrom]).toEqual([undefined, "", 0, undefined]);
+    for (const [name, v] of variants) expect([name, workMapAnswerSchema.safeParse(v).success]).toEqual([name, true]);
+  });
+  test("a genuinely malformed answer still rejects", () => {
+    const base = { summary: "s", needsYou: [], themes: [], loose: [] };
+    expect(workMapAnswerSchema.safeParse({ ...base }).success).toBe(false);
+    expect(workMapAnswerSchema.safeParse({ ...base, efforts: null }).success).toBe(false);
+    expect(workMapAnswerSchema.safeParse({ ...base, efforts: { a: 1 } }).success).toBe(false);
+    expect(workMapAnswerSchema.safeParse({ ...base, efforts: "a" }).success).toBe(false);
+    // Every effort odd: nothing usable, so the run keeps the previous map.
+    expect(workMapAnswerSchema.safeParse({ ...base, efforts: [null, { name: "A", state: "active", pages: [] }] }).success).toBe(false);
+    // An empty list is a valid (empty) answer.
+    expect(workMapAnswerSchema.safeParse({ ...base, efforts: [] }).success).toBe(true);
   });
   test("a null parent or derivedFrom reads as absent", () => {
     const parsed = workMapAnswerSchema.parse({

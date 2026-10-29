@@ -9,7 +9,9 @@
  * so the stop hook cannot kill a model call in flight: once the signal fired
  * the run writes and commits nothing, and the stop waits for a write already
  * in its section. That write lands, but its commit is skipped; the file stays
- * uncommitted for the next run or the wiki-committer sweep.
+ * uncommitted until the next successful run commits it, about a day later,
+ * since the stopped run still records ok. No wiki-committer sweep reaches it:
+ * the sweep covers a bot's `wikiDir` only.
  */
 
 import { extractJson } from "../../ai/json-extract.ts";
