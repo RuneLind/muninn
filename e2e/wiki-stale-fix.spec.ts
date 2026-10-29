@@ -208,6 +208,13 @@ test.afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+// When a page's last route expires (`times: 1`, `unroute`), Playwright turns
+// request interception off, and a request sent in that moment can stay paused:
+// the report after a Send never landed in ~10% of runs on a loaded host.
+test.beforeEach(async ({ page }) => {
+  await page.route("**/__e2e-keep-interception__", (route) => route.continue());
+});
+
 async function openHub(p: Page, base = BASE): Promise<void> {
   await p.goto(`${base}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(HUB)}`);
   await expect(p.locator(".wiki-article")).toContainText("The pin moved");
