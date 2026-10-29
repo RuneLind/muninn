@@ -249,7 +249,7 @@ export interface Gate {
   wideSkip?: string;
   /** What the session does to land its fixes. */
   fixPath: string;
-  /** Each worktree the fix path carries from, and its branch (undefined: detached HEAD, named by its short sha). */
+  /** Each worktree with a page not ready, and its branch (undefined: detached HEAD, named by its short sha); the fix path names it. */
   carries?: { worktree: string; branch?: string; sha?: string }[];
   lines: string[];
   pages: (PageRef & { state: PageState })[];
@@ -376,15 +376,18 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     if (state === "not-carried") skip(`the main checkout lacks your text of ${p.rel}`);
     if (state === "main-uncommitted") skip(`uncommitted edits on the main copy of ${p.rel}`);
   }
-  const froms = [...new Set(g.pages.filter((p) => p.worktree && ["not-carried", "uncommitted", "deleted-uncommitted"].includes(p.state)).map((p) => p.worktree!))];
+  const froms = [...new Set(g.pages.filter((p) => p.worktree && !READY.has(p.state)).map((p) => p.worktree!))];
   for (const from of froms) {
     const b = (await git(["symbolic-ref", "--short", "-q", "HEAD"], from)).stdout.trim();
     const sha = b ? "" : (await git(["rev-parse", "--short", "HEAD"], from)).stdout.trim();
     (g.carries ??= []).push({ worktree: from, ...(b ? { branch: b } : {}), ...(sha ? { sha } : {}) });
   }
-  // Commits on the default branch not on the remote: a worktree's push would leave the main checkout unable to pull.
-  const ahead = g.remote && onDefault ? Number(await out(["rev-list", "--count", `refs/remotes/${g.remote}/${def}..HEAD`])) || 0 : 0;
-  g.fixPath = fixPath(g, mainEdits, ahead > 0);
+  // Commits on the default branch not on the remote. No remote-tracking ref (the remote lacks the branch, or was never
+  // fetched) means every commit is unpushed, never «not ahead».
+  const tracking = `refs/remotes/${g.remote}/${def}`;
+  const ahead =
+    !!g.remote && onDefault && ((await ok(["rev-parse", "-q", "--verify", tracking])) ? Number(await out(["rev-list", "--count", `${tracking}..HEAD`])) > 0 : await ok(["rev-parse", "-q", "--verify", "HEAD"]));
+  g.fixPath = fixPath(g, mainEdits, ahead);
   lines.push(g.skip ? `gate: Check skip — ${g.skip}` : "gate: Check may run");
   lines.push(`fix path: ${g.fixPath}`);
   return g;
@@ -410,11 +413,15 @@ const LABEL: Record<PageState, string> = {
   missing: "missing",
 };
 
+/** States that ask nothing of the session before Check: a deleted or missing page is never a page to Check. */
+const READY = new Set<PageState>(["committed", "carried", "deleted", "missing"]);
+
 /**
- * Where the session lands its own fixes, given the gate. A runnable carry is printed in one cell only: the main
- * checkout has no uncommitted tracked edit and no unpushed commit, no session page is in it, and exactly one
- * worktree needs a carry. Every other cell lists the pages' states and the by-hand line. No printed text rebases,
- * stashes, resets or forces, and none tells the session to commit edits it did not make.
+ * Where the session lands its own fixes, given the gate: text only, no git command to paste (Rune, 29.10). Each page
+ * not ready, by checkout with its state; a note when the main checkout holds uncommitted edits; then one by-hand
+ * line, or, with unpushed commits on the default branch and no page to carry, a push line. The two early returns
+ * (main checkout off the default branch, a refused pull) keep their worktree commands. No text rebases, stashes,
+ * resets or forces, and none tells the session to commit or discard edits it did not make.
  */
 function fixPath(g: Gate, mainEdits: boolean, mainAhead: boolean): string {
   const def = g.defaultBranch ?? "main";
@@ -428,42 +435,27 @@ function fixPath(g: Gate, mainEdits: boolean, mainAhead: boolean): string {
   if (g.remote && g.skip?.startsWith("git pull")) {
     return `fix in a worktree: git -C ${m} worktree add <dir> ${g.remote}/${def}; commit there, git push ${g.remote} HEAD:${def}. Check skips until ${m} pulls cleanly`;
   }
-  const byHand = `carry your commits into ${m} by hand (merge or cherry-pick), commit only your own edits, then rerun --handoff`;
-  const notes = g.pages
-    .filter((p) => p.state === "main-uncommitted")
-    .map((p) => `the main copy of ${p.rel} holds uncommitted edits, probably another session's: Check skips it; leave them, and rerun once that session has committed, or list ${p.rel} in your resume prompt`);
-  const carries = g.carries ?? [];
-  const mainPages = g.pages.filter((p) => !p.worktree);
-  if (!carries.length) {
-    if (!mainPages.length && g.pages.length) return notes.length ? notes.join("; ") : `nothing to carry into ${m}`;
-    const base = g.remote
-      ? `commit your fixes path-scoped in ${m}, then push ${def}; this also pushes any other commits on ${def} that are not pushed yet — check git -C ${m} log ${g.remote}/${def}..${def} first`
-      : `commit your fixes path-scoped in ${m} (no remote, nothing to push)`;
-    return [base, ...notes].join("; ");
-  }
-  const named = (c: (typeof carries)[number]) => `worktree ${shq(c.worktree)} (${c.branch ? `branch ${c.branch}` : `detached HEAD: ${c.sha ?? "?"}`})`;
-  if (carries.length === 1 && !mainEdits && !mainAhead && !mainPages.length) {
-    const c = carries[0]!;
-    const w = shq(c.worktree);
-    // A detached worktree's HEAD moves when the session commits its fixes, so the merge reads it at run time.
-    const head = c.branch ? shq(c.branch) : `"$(git -C ${w} rev-parse HEAD)"`;
-    const carry = g.remote
-      ? `${named(c)}: commit your fixes path-scoped there, then git -C ${w} push ${g.remote} HEAD:${def}; the --check call pulls it into ${m}`
-      : `${named(c)}: commit your fixes path-scoped there, then git -C ${m} merge --ff-only --no-autostash ${head}`;
-    return `${carry}; if git refuses (any reason: not a fast-forward, a hook, a protected branch, local edits), ${byHand}`;
-  }
-  // Any other cell has no carry that is safe to print: list what is where, then the by-hand line.
-  const list = (ps: typeof g.pages) => ps.map((p) => `${p.rel} ${LABEL[p.state]}`).join(", ");
+  const open = g.pages.filter((p) => !READY.has(p.state));
+  const list = (ps: typeof open) => ps.map((p) => `${shq(p.rel)} ${LABEL[p.state]}`).join(", ");
   const steps: string[] = [];
-  if (mainPages.length) steps.push(`main checkout ${m}: ${list(mainPages)}`);
-  const wts = [...new Set(g.pages.filter((p) => p.worktree).map((p) => p.worktree!))];
-  for (const w of wts) {
-    const c = carries.find((x) => x.worktree === w);
-    steps.push(`${c ? named(c) : `worktree ${shq(w)}`}: ${list(g.pages.filter((p) => p.worktree === w))}`);
+  const mainOpen = open.filter((p) => !p.worktree);
+  if (mainOpen.length) steps.push(`main checkout ${m}: ${list(mainOpen)}`);
+  for (const w of new Set(open.filter((p) => p.worktree).map((p) => p.worktree!))) {
+    const c = g.carries?.find((x) => x.worktree === w);
+    const head = c?.branch ? `branch ${c.branch}` : `detached HEAD${c?.sha ? ` ${c.sha}` : ""}`;
+    steps.push(`worktree ${shq(w)} (${head}): ${list(open.filter((p) => p.worktree === w))}`);
   }
-  if (mainEdits && !notes.length) steps.push(`${m} holds uncommitted edits: leave any you did not make`);
+  if (mainEdits) steps.push(`${m} holds uncommitted edits: leave any you did not make`);
+  for (const p of open.filter((x) => x.state === "main-uncommitted")) {
+    steps.push(`the main copy of ${shq(p.rel)} is probably another session's: Check skips it; rerun once that session has committed, or list ${shq(p.rel)} in your resume prompt`);
+  }
+  if (mainAhead && !open.length) {
+    steps.push(`push ${def} from ${m} to ${g.remote} (check its unpushed commits are yours first), then rerun --handoff`);
+    return steps.join("; ");
+  }
   if (mainAhead) steps.push(`${def} in ${m} has commits not on ${g.remote}`);
-  steps.push(...notes, byHand);
+  const push = g.remote ? `, push ${def} to ${g.remote} — first check that the unpushed commits in ${m} are yours to push —` : "";
+  steps.push(`carry your commits into ${m} by hand (merge or cherry-pick), commit only your own edits${push}, then rerun --handoff`);
   return steps.join("; ");
 }
 
