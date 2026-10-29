@@ -240,6 +240,45 @@ describe("workMapAnswerSchema", () => {
     expect(workMapAnswerSchema.safeParse({ ...base, efforts: [effort("a", [{ id: "p1", role: "plan" }], { state: "done" as never })] }).success).toBe(false);
     expect(workMapAnswerSchema.safeParse({ ...base, efforts: [effort("a", [{ id: "p1", role: "draft" as never }])] }).success).toBe(false);
   });
+  test("a null or missing optional field does not reject the answer", () => {
+    const raw = {
+      summary: null,
+      needsYou: [
+        { title: "Decide", kind: "decision", why: "w", action: "a", pages: ["p1"], effort: null },
+        { title: "Resume", kind: "resume", why: null, action: "a" },
+      ],
+      themes: null,
+      efforts: [{ id: "a", name: "A", state: "active", pages: [{ id: "p1", role: "plan" }], oneLine: null, why: null, next: null, confidence: null }],
+    };
+    const parsed = workMapAnswerSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    const out = normalizeWorkMapAnswer(parsed.success ? parsed.data : (null as never), ctx());
+    expect(out.summary).toBe("");
+    expect(out.themes).toEqual([]);
+    expect(out.loose).toEqual([]);
+    expect(out.needsYou.map((n) => [n.title, n.effort, n.pages, n.why])).toEqual([
+      ["Decide", undefined, ["plans/alpha.mdx"], "w"],
+      ["Resume", undefined, [], ""],
+    ]);
+    expect(out.efforts[0]).toMatchObject({ id: "a", aliases: [], related: [], oneLine: "", why: "", next: "", confidence: 0 });
+    // Each field alone.
+    const good = { summary: "s", needsYou: [{ title: "t", kind: "decision", why: "w", action: "a", pages: [], effort: "a" }], themes: [], efforts: [effort("a", [{ id: "p1", role: "plan" }])], loose: [] };
+    const variants: [string, unknown][] = [
+      ["null effort", { ...good, needsYou: [{ ...good.needsYou[0], effort: null }] }],
+      ["missing effort", { ...good, needsYou: [{ ...good.needsYou[0], effort: undefined }] }],
+      ["missing needsYou pages", { ...good, needsYou: [{ ...good.needsYou[0], pages: undefined }] }],
+      ["missing related", { ...good, efforts: [{ ...good.efforts[0], related: undefined }] }],
+      ["null related", { ...good, efforts: [{ ...good.efforts[0], related: null }] }],
+      ["null themes", { ...good, themes: null }],
+      ["null loose", { ...good, loose: null }],
+      ["missing needsYou", { ...good, needsYou: undefined }],
+    ];
+    for (const [name, v] of variants) expect([name, workMapAnswerSchema.safeParse(v).success]).toEqual([name, true]);
+    // Still required: the efforts list, an effort's id, name and pages.
+    expect(workMapAnswerSchema.safeParse({ ...raw, efforts: null }).success).toBe(false);
+    expect(workMapAnswerSchema.safeParse({ ...raw, efforts: [{ id: "a", name: "A", state: "active" }] }).success).toBe(false);
+    expect(workMapAnswerSchema.safeParse({ ...raw, efforts: [{ name: "A", state: "active", pages: [] }] }).success).toBe(false);
+  });
   test("a null parent or derivedFrom reads as absent", () => {
     const parsed = workMapAnswerSchema.parse({
       summary: "s",

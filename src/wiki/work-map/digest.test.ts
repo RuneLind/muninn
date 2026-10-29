@@ -99,6 +99,22 @@ describe("buildWorkMapDigest", () => {
     expect(d.text).not.toContain("## The previous map");
   });
 
+  test("the log cap keeps the newest entries even when they are appended at the bottom", () => {
+    const old = Array.from({ length: 120 }, (_, i) => `## [2026-10-10] build | Old entry ${i}`);
+    const appended = Array.from({ length: 10 }, (_, i) => `## [2026-10-19] fix | Appended entry ${i}`);
+    const d = buildWorkMapDigest(fixture({ logText: ["# Activity Log", ...old, ...appended].join("\n") }));
+    for (let i = 0; i < 10; i++) expect(d.text).toContain(`2026-10-19 fix: Appended entry ${i} →`);
+    expect(d.text).not.toContain("Old entry 119 →");
+    expect(d.text).toContain("Old entry 0 →");
+    expect(d.logEntries).toBe(120);
+    expect(d.logEntriesInWindow).toBe(130);
+    expect(d.text.split("\n")[0]).toContain("log.md entries 15 days (the newest 120 of 130 shown)");
+    // Newest first in the log section.
+    const logSection = d.text.slice(d.text.indexOf("## log.md"));
+    expect(logSection.indexOf("Appended entry 0")).toBeLessThan(logSection.indexOf("Old entry 0"));
+    expect(buildWorkMapDigest(fixture()).logEntriesInWindow).toBe(1);
+  });
+
   test("a degraded metadata filter is stated in the coverage line", () => {
     const d = buildWorkMapDigest(fixture({ metadataFilter: { degraded: true, reason: "budget" } }));
     expect(d.text.split("\n")[0]).toContain("could not filter out every metadata-only commit (it ran out of time)");

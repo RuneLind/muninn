@@ -4,6 +4,10 @@ import type { Config } from "../../config.ts";
 import { __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import { __resetWorkMapRunsForTest, type WorkMapRunDeps } from "../../wiki/work-map/run.ts";
 import type { WorkMapAttempt, WorkMapState } from "../../wiki/work-map/state.ts";
+import { fileStateStore } from "../../wiki/work-map/state.ts";
+import { writeFileSync } from "node:fs";
+import { testTempDirSync } from "../../test/temp-dir.ts";
+import path from "node:path";
 import { registerWikiWorkMapRoutes, WORK_MAP_REFRESH_COOLDOWN_MS } from "./wiki-work-map.ts";
 
 const NOW = 1_800_000_000_000;
@@ -101,6 +105,19 @@ describe("POST /api/wiki/work-map/refresh", () => {
     const forced = await s.post("wiki=mimir&force=1");
     expect(forced.status).toBe(202);
     s.release();
+  });
+});
+
+describe("POST cooldown with an unwritable state dir", () => {
+  test("a success the store could not write still answers 429", async () => {
+    const blocker = path.join(testTempDirSync("work-map-state-"), "file");
+    writeFileSync(blocker, "x");
+    const store = fileStateStore(path.join(blocker, "sub"));
+    await expect(store.record("mimir", { at: NOW - 60_000, outcome: "ok" })).rejects.toThrow();
+    const s = setup({ state: store });
+    const res = await s.post("wiki=mimir");
+    expect(res.status).toBe(429);
+    expect(s.modelCalls()).toBe(0);
   });
 });
 

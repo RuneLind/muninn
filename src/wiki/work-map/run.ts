@@ -245,6 +245,32 @@ async function organizeWorkMap(wiki: string, deps: WorkMapRunDeps, runStart: num
     return { outcome: "failed", reason };
   };
 
+  // A throw anywhere below is recorded too: `failed` once the model was
+  // called (it counts toward the day's gate), `refused` before.
+  const progress = { modelCalled: false };
+  try {
+    return await organizeSteps(wiki, deps, runStart, signal, { refuse, fail, record }, progress);
+  } catch (err) {
+    if (signal?.aborted) return { outcome: "aborted" };
+    const reason = `the run threw: ${err instanceof Error ? err.message : String(err)}`;
+    return progress.modelCalled ? fail(reason) : refuse(reason);
+  }
+}
+
+interface RunOutcomes {
+  refuse: (reason: string) => Promise<WorkMapRunResult>;
+  fail: (reason: string) => Promise<WorkMapRunResult>;
+  record: (outcome: "ok" | "refused" | "failed", error?: string) => Promise<void>;
+}
+
+async function organizeSteps(
+  wiki: string,
+  deps: WorkMapRunDeps,
+  runStart: number,
+  signal: AbortSignal | undefined,
+  { refuse, fail, record }: RunOutcomes,
+  progress: { modelCalled: boolean },
+): Promise<WorkMapRunResult> {
   const org = workMapOrganizable(wiki, deps);
   if (!org.ok) return refuse(org.reason);
   const { entry } = org;
@@ -288,6 +314,7 @@ async function organizeWorkMap(wiki: string, deps: WorkMapRunDeps, runStart: num
 
   if (signal?.aborted) return { outcome: "aborted" };
   let reply: ModelReply;
+  progress.modelCalled = true;
   try {
     reply = await deps.model({
       wiki: entry.name,
@@ -335,6 +362,7 @@ async function organizeWorkMap(wiki: string, deps: WorkMapRunDeps, runStart: num
       activePages: digest.active.length,
       threads: digest.threads,
       logEntries: digest.logEntries,
+      logEntriesInWindow: digest.logEntriesInWindow,
       digestChars: digest.text.length,
       ...(filter ? { metadataFilter: filter } : {}),
       warnings,

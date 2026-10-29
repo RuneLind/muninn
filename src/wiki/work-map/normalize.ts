@@ -87,7 +87,7 @@ export function normalizeWorkMapAnswer(answer: WorkMapAnswer, ctx: NormalizeCont
     }))
     .filter((e) => EFFORT_ID_RE.test(e.id));
   let themes = answer.themes.map((t) => ({ name: t.name, efforts: t.efforts.map(slugifyEffortId) }));
-  let needsYou = answer.needsYou.map((n) => ({ ...n, effort: slugifyEffortId(n.effort) as string | undefined }));
+  let needsYou = answer.needsYou.map((n) => ({ ...n, effort: n.effort === undefined ? undefined : slugifyEffortId(n.effort) }));
 
   // 2. A second effort with a used id goes.
   const seen = new Set<string>();

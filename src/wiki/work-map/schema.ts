@@ -25,6 +25,10 @@ const optionalString = z
   .string()
   .nullish()
   .transform((v) => (v == null || v.trim() === "" ? undefined : v));
+/** Prose a model may omit or null: reads as "". */
+const prose = z.string().nullish().transform((v) => v ?? "");
+/** A list a model may omit or null: reads as empty. */
+const list = <T extends z.ZodTypeAny>(item: T) => z.array(item).nullish().transform((v): z.infer<T>[] => v ?? []);
 
 const answerPage = z.object({
   id: z.string(),
@@ -32,37 +36,39 @@ const answerPage = z.object({
   derivedFrom: optionalString,
 });
 
+/** Required: what the map cannot work without (id, name, state, pages). */
 const answerEffort = z.object({
   id: z.string(),
   name: z.string(),
-  aliases: z.array(z.string()).nullish().transform((v) => v ?? []),
-  oneLine: z.string(),
+  aliases: list(z.string()),
+  oneLine: prose,
   state: z.enum(EFFORT_STATES),
   parent: optionalString,
   pages: z.array(answerPage),
-  why: z.string(),
-  confidence: z.number(),
-  next: z.string(),
-  related: z.array(z.object({ id: z.string(), why: z.string() })),
+  why: prose,
+  confidence: z.number().nullish().transform((v) => v ?? 0),
+  next: prose,
+  related: list(z.object({ id: z.string(), why: prose })),
 });
 
 const answerNeedsYou = z.object({
   title: z.string(),
   kind: z.enum(NEEDS_YOU_KINDS),
-  why: z.string(),
-  action: z.string(),
-  pages: z.array(z.string()),
-  effort: z.string(),
+  why: prose,
+  action: prose,
+  pages: list(z.string()),
+  effort: optionalString,
 });
 
 /** The organize model's answer, after `extractJson`. Unknown keys (the
- *  prototype's `corrections` and `views`) are stripped. */
+ *  prototype's `corrections` and `views`) are stripped. Only `efforts` is
+ *  required at the top level, so one omitted list cannot reject a night. */
 export const workMapAnswerSchema = z.object({
-  summary: z.string(),
-  needsYou: z.array(answerNeedsYou),
-  themes: z.array(z.object({ name: z.string(), efforts: z.array(z.string()) })),
+  summary: prose,
+  needsYou: list(answerNeedsYou),
+  themes: list(z.object({ name: z.string(), efforts: list(z.string()) })),
   efforts: z.array(answerEffort),
-  loose: z.array(z.string()),
+  loose: list(z.string()),
 });
 
 export type WorkMapAnswer = z.infer<typeof workMapAnswerSchema>;
@@ -112,6 +118,8 @@ const coverage = z.object({
   activePages: z.number(),
   threads: z.number(),
   logEntries: z.number(),
+  /** Entries inside the window before the cap; above `logEntries` when capped. */
+  logEntriesInWindow: z.number().optional(),
   digestChars: z.number(),
   /** The git walk's metadata-only filter; absent without git. */
   metadataFilter: metadataFilter.optional(),

@@ -13,6 +13,11 @@ import {
 import { parseWorkMap } from "./schema.ts";
 import type { WorkMapAttempt, WorkMapState, WorkMapStateStore } from "./state.ts";
 import type { WorkMapWriteOptions } from "./write.ts";
+import { fileStateStore } from "./state.ts";
+import { workMapDue } from "./loop.ts";
+import { writeFileSync } from "node:fs";
+import { testTempDirSync } from "../../test/temp-dir.ts";
+import path from "node:path";
 
 const NOW = Date.parse("2026-10-20T12:00:00Z");
 const DAY = 86_400_000;
@@ -228,5 +233,35 @@ describe("startWorkMapRun", () => {
     const res = await startWorkMapRun("mimir", d).promise;
     expect(res.outcome).toBe("ok");
     expect(parseWorkMap(writes[0]!.content)!.coverage.warnings).toEqual(["Active pages fell from 10 to 2 since the previous run."]);
+  });
+
+  test("a throw after the model call is recorded as `failed` and counts toward the day's gate", async () => {
+    const { d, models, state } = deps({ write: async () => Promise.reject(new Error("ENOTDIR: not a directory, open '.wiki-write.lock'")) });
+    const first = await startWorkMapRun("mimir", d).promise;
+    expect(first.outcome).toBe("failed");
+    expect(models).toHaveLength(1);
+    expect(state.attempts).toEqual([{ at: NOW, outcome: "failed", error: expect.stringContaining("ENOTDIR") }]);
+    await startWorkMapRun("mimir", d).promise;
+    expect(workMapDue(await state.read("mimir"), NOW + 3_600_000, 5)).toEqual({ due: false, why: "failed twice after the model call today" });
+  });
+
+  test("a throw before the model call is recorded as `refused`", async () => {
+    const { d, models, state } = deps({ inputs: { ...warm, rebuildIndex: async () => Promise.reject(new Error("EIO")) } });
+    const res = await startWorkMapRun("mimir", d).promise;
+    expect(res.outcome).toBe("refused");
+    expect(models).toHaveLength(0);
+    expect(state.attempts).toEqual([{ at: NOW, outcome: "refused", error: expect.stringContaining("EIO") }]);
+  });
+
+  test("an unwritable state dir: a success still gates the next hourly check", async () => {
+    const blocker = path.join(testTempDirSync("work-map-state-"), "file");
+    writeFileSync(blocker, "x");
+    const store = fileStateStore(path.join(blocker, "sub"));
+    const { d, models } = deps({ state: store });
+    expect((await startWorkMapRun("mimir", d).promise).outcome).toBe("ok");
+    expect(models).toHaveLength(1);
+    const st = await store.read("mimir");
+    expect(st?.lastSuccessAt).toBe(NOW);
+    expect(workMapDue(st, NOW + 3_600_000, 5).due).toBe(false);
   });
 });

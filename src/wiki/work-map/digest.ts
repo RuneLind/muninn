@@ -73,7 +73,10 @@ export interface WorkMapDigest {
   /** The active pages, newest work first. */
   active: string[];
   threads: number;
+  /** log.md entries in the digest, after the cap. */
   logEntries: number;
+  /** log.md entries inside the window, before the cap. */
+  logEntriesInWindow: number;
 }
 
 /** Newest of the page's worked and touched times. */
@@ -241,9 +244,14 @@ export function buildWorkMapDigest(input: DigestInput): WorkMapDigest {
         .join(""),
   );
 
-  const log = input.logText
-    ? parseLogEntries(input.logText, now - WORK_MAP_LOG_WINDOW_DAYS * DAY, input.resolveLink).slice(0, LOG_ENTRIES_MAX)
+  // Newest first before the cap: log.md is mostly prepended, but not always.
+  const inWindow = input.logText
+    ? parseLogEntries(input.logText, now - WORK_MAP_LOG_WINDOW_DAYS * DAY, input.resolveLink)
+        .map((e, i) => ({ e, i }))
+        .sort((a, b) => b.e.day.localeCompare(a.e.day) || a.i - b.i)
+        .map(({ e }) => e)
     : [];
+  const log = inWindow.slice(0, LOG_ENTRIES_MAX);
   const logLines = log.map((e) => `${e.day} ${e.kind}: ${clip(e.title, 120)} → [${listIds(e.pages)}]`);
 
   const keyToRel = new Map(input.pages.map((p) => [normalizeRelPath(p.relPath), p.relPath]));
@@ -272,7 +280,9 @@ export function buildWorkMapDigest(input: DigestInput): WorkMapDigest {
   const coverageLine =
     `WIKI: ${input.wiki}. Now = ${new Date(now).toISOString().slice(0, 16)}Z. ` +
     `Work threads and session events cover the last ${days(input.sessionsAsOfMs - input.sessionsSinceMs)} days; ` +
-    `worked times are all-time; commit times reach back ${WORK_MAP_TOUCH_WINDOW_DAYS} days; log.md entries ${WORK_MAP_LOG_WINDOW_DAYS} days. ` +
+    `worked times are all-time; commit times reach back ${WORK_MAP_TOUCH_WINDOW_DAYS} days; log.md entries ${WORK_MAP_LOG_WINDOW_DAYS} days` +
+    (inWindow.length > log.length ? ` (the newest ${log.length} of ${inWindow.length} shown)` : "") +
+    ". " +
     `Older work shows only as commits and log entries.${filterLine}`;
 
   const sections = [
@@ -287,5 +297,5 @@ export function buildWorkMapDigest(input: DigestInput): WorkMapDigest {
       `\n## The previous map (${new Date(input.previous!.runAtMs).toISOString().slice(0, 10)}) — keep an id while its pages overlap\n${prevLines.join("\n")}`,
     );
   }
-  return { text: sections.join("\n"), ids, rel, active: active.map((p) => p.relPath), threads: input.threads.length, logEntries: log.length };
+  return { text: sections.join("\n"), ids, rel, active: active.map((p) => p.relPath), threads: input.threads.length, logEntries: log.length, logEntriesInWindow: inWindow.length };
 }

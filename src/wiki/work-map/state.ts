@@ -47,17 +47,28 @@ function fileFor(dir: string, wiki: string): string {
   return path.join(dir, `${wiki.toLowerCase().replace(/[^a-z0-9._-]/g, "_")}.json`);
 }
 
-/** The state store over `dir` (tests pass their own). Writes go through a
- *  temp file and a rename; a missing or unreadable file reads as null. */
+/**
+ * The state store over `dir` (tests pass their own). Writes go through a temp
+ * file and a rename. The store also keeps each wiki's last recorded state in
+ * memory, ahead of the write: while the file cannot be read or the last write
+ * failed (an unwritable `~/.muninn`), `read` answers from that copy, so the
+ * loop's gates and the POST's cooldown hold for the process lifetime.
+ */
 export function fileStateStore(dir: string = WORK_MAP_STATE_DIR): WorkMapStateStore {
   const chains = new Map<string, Promise<unknown>>();
-  const read = async (wiki: string): Promise<WorkMapState | null> => {
+  const memory = new Map<string, { state: WorkMapState; dirty: boolean }>();
+  const readFileState = async (wiki: string): Promise<WorkMapState | null> => {
     try {
       const parsed = stateSchema.safeParse(JSON.parse(await readFile(fileFor(dir, wiki), "utf8")));
       return parsed.success ? parsed.data : null;
     } catch {
       return null;
     }
+  };
+  const read = async (wiki: string): Promise<WorkMapState | null> => {
+    const mem = memory.get(wiki.toLowerCase());
+    if (mem?.dirty) return mem.state;
+    return (await readFileState(wiki)) ?? mem?.state ?? null;
   };
   return {
     read,
@@ -70,11 +81,13 @@ export function fileStateStore(dir: string = WORK_MAP_STATE_DIR): WorkMapStateSt
           ...(a.outcome === "ok" ? { lastSuccessAt: a.at } : prev.lastSuccessAt !== undefined ? { lastSuccessAt: prev.lastSuccessAt } : {}),
           attempts: [a, ...prev.attempts].slice(0, ATTEMPTS_KEPT),
         };
+        memory.set(key, { state: next, dirty: true });
         await mkdir(dir, { recursive: true });
         const file = fileFor(dir, wiki);
         const tmp = `${file}.${process.pid}.tmp`;
         await writeFile(tmp, JSON.stringify(next, null, 1));
         await rename(tmp, file);
+        memory.set(key, { state: next, dirty: false });
         return next;
       });
       chains.set(key, run.catch(() => undefined));
