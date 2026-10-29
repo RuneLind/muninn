@@ -681,3 +681,132 @@ describe("fix round 1 batch 2: printed fix paths name the branch, quote paths an
     expect([after.skip, after.pages.map((p) => p.state)]).toEqual([undefined, ["committed", "carried"]]);
   });
 });
+
+// Fix round 1 batch 3: what the Stale line counts as fixed, and how it labels the session's own items.
+describe("fix round 1 batch 3: the fixed count", () => {
+  const hit = (line: number, target: string) => ({ line, target, text: `- [[${target}]] in-flight` });
+  const pagesOf = (root: string, rels: string[]) => ["--pages", ...rels.map((r) => path.join(root, r))];
+  async function commitPages(main: string, rels: string[]) {
+    for (const r of rels) write(main, r, `# ${r}\n`);
+    await g(main, "add", ".");
+    await g(main, "commit", "-qm", "pages");
+  }
+
+  test("a page call 2 could not read keeps its first-call items, with the reason, and adds nothing to N", async () => {
+    const main = await repo();
+    const stateDir = tmp();
+    const pages = pagesOf(main, ["plans/a.md", "repos/b.md"]);
+    const first = muninn({ "plans/a.md": { hits: [hit(7, "plans/x.mdx")] }, "repos/b.md": { hits: [hit(4, "plans/y.mdx")] } });
+    await runHandoff(["--handoff", ...pages], { ...first.deps, git, stateDir });
+    // plans/a.md is fixed and read; repos/b.md's report never comes back.
+    const second = muninn({ "plans/a.md": {}, "repos/b.md": {} }, { failGet: ["repos/b.md"] });
+    const out = await runHandoff(["--handoff", "--check", ...pages], { ...second.deps, git, stateDir });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — 1 status lines fixed on plans/a.md; to check: repos/b.md (not re-read: muninn not reachable)`);
+  });
+
+  test("a worktree page whose text is not carried, and every page under a gate-wide skip, are not re-read", async () => {
+    const main = await repo();
+    await g(main, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "fix");
+    const stateDir = tmp();
+    const pages = ["--pages", path.join(wt, "plans/a.md"), path.join(main, "repos/b.md")];
+    const first = muninn({ "plans/a.md": { hits: [hit(7, "plans/x.mdx")] }, "repos/b.md": { hits: [hit(4, "plans/y.mdx")] } });
+    await runHandoff(["--handoff", ...pages], { ...first.deps, git, stateDir });
+    // Both fixed: repos/b.md committed in main, plans/a.md committed in the worktree only.
+    write(wt, "plans/a.md", "# A\nfixed\n");
+    await g(wt, "commit", "-qam", "fix a");
+    write(main, "repos/b.md", "# B\nfixed\n");
+    await g(main, "commit", "-qam", "fix b");
+    const second = muninn({ "plans/a.md": {}, "repos/b.md": {} });
+    const out = await runHandoff(["--handoff", "--check", ...pages], { ...second.deps, git, stateDir });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — 1 status lines fixed on repos/b.md; to check: plans/a.md (not re-read: not carried)`);
+
+    // The main checkout on another branch: no page reads the session's text.
+    const m2 = await repo();
+    const s2 = tmp();
+    const p2 = pagesOf(m2, ["plans/a.md"]);
+    await runHandoff(["--handoff", ...p2], { ...muninn({ "plans/a.md": { hits: [hit(7, "plans/x.mdx")] } }).deps, git, stateDir: s2 });
+    await g(m2, "checkout", "-q", "-b", "feature");
+    const out2 = await runHandoff(["--handoff", "--check", ...p2], { ...muninn({ "plans/a.md": {} }).deps, git, stateDir: s2 });
+    expect(out2.at(-1)).toBe(`Stale: ${path.basename(m2)} — to check: plans/a.md (not re-read: main checkout on feature, not main)`);
+  });
+
+  test("call 2 consumes the first call's list: a second --check counts nothing again", async () => {
+    const main = await repo();
+    const stateDir = tmp();
+    const pages = pagesOf(main, ["plans/a.md"]);
+    await runHandoff(["--handoff", ...pages], { ...muninn({ "plans/a.md": { hits: [hit(7, "plans/x.mdx")] } }).deps, git, stateDir });
+    const fixed = muninn({ "plans/a.md": {} });
+    expect((await runHandoff(["--handoff", "--check", ...pages], { ...fixed.deps, git, stateDir })).at(-1)).toBe(`Stale: ${path.basename(main)} — 1 status lines fixed on plans/a.md`);
+    expect((await runHandoff(["--handoff", "--check", ...pages], { ...fixed.deps, git, stateDir })).at(-1)).toBe(
+      `Stale: ${path.basename(main)} — nothing stale on the changed pages; own fixes not counted (no first --handoff call saved)`,
+    );
+  });
+
+  test("a first call that got no report clears an earlier list instead of leaving it for --check", async () => {
+    const main = await repo();
+    const stateDir = tmp();
+    const pages = pagesOf(main, ["plans/a.md"]);
+    await runHandoff(["--handoff", ...pages], { ...muninn({ "plans/a.md": { hits: [hit(7, "plans/x.mdx")] } }).deps, git, stateDir });
+    // A later handoff's first call: muninn is down.
+    const down = await runHandoff(["--handoff", ...pages], { ...muninn({}, { failGet: ["plans/a.md"] }).deps, git, stateDir });
+    expect(down.at(-1)).toBe(`Stale: ${path.basename(main)} — not checked (muninn not reachable)`);
+    const out = await runHandoff(["--handoff", "--check", ...pages], { ...muninn({ "plans/a.md": {} }).deps, git, stateDir });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — nothing stale on the changed pages; own fixes not counted (no first --handoff call saved)`);
+  });
+});
+
+describe("fix round 1 batch 3: own To-check pages are re-read through their changed page", () => {
+  test("an own To-check page whose changed page was not reported, or a page muninn does not know, is not counted fixed", async () => {
+    const main = await repo();
+    const stateDir = tmp();
+    // repos/b.md is reported first; plans/a.md, the changed page that lists it, fails after.
+    const pages = ["--pages", path.join(main, "repos/b.md"), path.join(main, "plans/a.md")];
+    await runHandoff(["--handoff", ...pages], { ...muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/b.md" }] }, "repos/b.md": {} }).deps, git, stateDir });
+    const out = await runHandoff(["--handoff", "--check", ...pages], { ...muninn({ "repos/b.md": {} }, { failGet: ["plans/a.md"] }).deps, git, stateDir });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: repos/b.md (not re-read: muninn not reachable), plans/a.md (not reported: muninn not reachable)`);
+
+    // A page the route answers «no page» for is not read either.
+    const s2 = tmp();
+    const p2 = ["--pages", path.join(main, "plans/a.md")];
+    await runHandoff(["--handoff", ...p2], { ...muninn({ "plans/a.md": { hits: [{ line: 7, target: "plans/x.mdx", text: "x" }] } }).deps, git, stateDir: s2 });
+    const out2 = await runHandoff(["--handoff", "--check", ...p2], { ...muninn({}).deps, git, stateDir: s2 });
+    expect(out2.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: plans/a.md (not re-read: not in the main checkout)`);
+  });
+
+  test("an own To-check page Check never looked at is unchecked, not stale", async () => {
+    const main = await repo();
+    const m = muninn({ "plans/a.md": { readonly: "root", toCheck: [{ relPath: "repos/b.md" }] }, "repos/b.md": {} });
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), path.join(main, "repos/b.md")], { ...m.deps, git, stateDir: tmp() });
+    expect(out.at(-1)).toStartWith(`Stale: ${path.basename(main)} — to check: repos/b.md (unchecked, yours)`);
+  });
+});
+
+describe("fix round 1 batch 3: own items are labelled by their state", () => {
+  test("unconfirmed and stale hits say which; an own To-check page that Check or the cache settled is neither listed nor counted", async () => {
+    const main = await repo();
+    for (const r of ["plans/c.md", "repos/d.md", "repos/e.md", "repos/f.md", "repos/g.md"]) write(main, r, `# ${r}\n`);
+    await g(main, "add", ".");
+    await g(main, "commit", "-qm", "pages");
+    const stateDir = tmp();
+    const pages = ["--pages", ...["plans/a.md", "repos/b.md", "plans/c.md", "repos/d.md", "repos/e.md", "repos/f.md", "repos/g.md"].map((r) => path.join(main, r))];
+    const spec = (f?: Linking["verdict"]): Record<string, Page> => ({
+      "plans/a.md": { hits: [{ line: 7, target: "plans/x.mdx", text: "x in-flight" }] },
+      "repos/b.md": { hits: [{ line: 4, target: "plans/y.mdx", text: "y in-flight", confirmation: { verdict: "stale" } }] },
+      "plans/c.md": { toCheck: [{ relPath: "repos/d.md" }, { relPath: "repos/e.md" }, { relPath: "repos/f.md", ...(f ? { verdict: f } : {}) }, { relPath: "repos/g.md" }] },
+      "repos/d.md": {},
+      "repos/e.md": {},
+      "repos/f.md": {},
+      "repos/g.md": {},
+    });
+    await runHandoff(["--handoff", ...pages], { ...muninn(spec()).deps, git, stateDir });
+    // Nothing fixed by hand. Check settles repos/d.md (still true) and finds repos/e.md stale; repos/f.md comes back with a cached «fixed».
+    const second = muninn(spec({ verdict: "fixed" }), { verdicts: { "plans/c.md": [{ relPath: "repos/d.md", verdict: "true" }, { relPath: "repos/e.md", verdict: "stale" }, { relPath: "repos/g.md", verdict: "unsure" }] } });
+    const out = await runHandoff(["--handoff", "--check", ...pages], { ...second.deps, git, stateDir });
+    expect(second.checked).toEqual(["plans/c.md"]);
+    expect(out.at(-1)).toBe(
+      `Stale: ${path.basename(main)} — to check: plans/a.md (unconfirmed status line L7, yours), repos/b.md (stale status line L4, yours), repos/e.md (stale, yours), repos/g.md (unsure, yours)`,
+    );
+  });
+});

@@ -33,7 +33,7 @@
  * mode unless the user configured their own ssh command).
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -200,6 +200,8 @@ export interface Gate {
   note?: string;
   /** Why Check may not run; undefined when it may. */
   skip?: string;
+  /** A skip for the whole checkout (branch, pull, not a checkout): no page's report reads the session's text. */
+  wideSkip?: string;
   /** What the session does to land its fixes. */
   fixPath: string;
   /** The worktree the fix path carries from, and its branch (undefined: detached HEAD). */
@@ -218,13 +220,13 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
   const skip = (why: string) => (g.skip ??= why);
   const top = await git(["rev-parse", "--show-toplevel"], main);
   if (top.missing) {
-    skip("git not found");
+    g.wideSkip = skip("git not found");
     g.fixPath = `fix your own lines by hand in ${main} and commit them with your own git`;
     lines.push("gate: git not found — Check skip");
     return g;
   }
   if (top.code !== 0) {
-    skip(`${main} is not a git checkout`);
+    g.wideSkip = skip(`${main} is not a git checkout`);
     g.fixPath = "fix your own lines by hand";
     lines.push(`gate: Check skip — ${g.skip}`);
     return g;
@@ -268,6 +270,7 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
       g.note = g.skip;
     }
   }
+  if (g.skip) g.wideSkip = g.skip;
   lines.push(`gate: ${g.note ?? `on ${def}`}`);
 
   for (const p of pages) {
@@ -370,28 +373,38 @@ export interface OwnItem {
   text: string;
   target: string;
   line: number;
+  /** What the reports, and on `--check` this run's Check, say of it. `settled` asks nothing of the session. */
+  state: "stale" | "unconfirmed" | "unsure" | "unchecked" | "settled";
 }
 const itemKey = (i: OwnItem) => `${i.kind}\u0001${i.page.toLowerCase()}\u0001${i.target}\u0001${i.kind === "hit" ? i.text : ""}`;
 /** Tags that ask nothing of the session. */
 const SETTLED = new Set(["true", "not-status", "fixed"]);
+const stateOf = (verdict: unknown, none: OwnItem["state"]): OwnItem["state"] =>
+  typeof verdict !== "string" ? none : SETTLED.has(verdict) ? "settled" : verdict === "unsure" ? "unsure" : "stale";
 
-/** The hits and To-check pages on the run's own pages that are the session's to fix (D12). */
-export function ownItems(reports: Json[], isOwn: (rel: string) => boolean): OwnItem[] {
+/**
+ * The hits and To-check pages on the run's own pages (D12), settled ones
+ * included. A hit with no confirmation is stale; an own To-check page takes
+ * this run's Check verdict over the report's cached one.
+ */
+export function ownItems(reports: Json[], isOwn: (rel: string) => boolean, checks: StaleLedger["checks"] = {}): OwnItem[] {
   const items: OwnItem[] = [];
   for (const r of reports) {
     for (const h of r.hits ?? []) {
       const c = h.confirmation;
-      if (c && typeof c === "object" && SETTLED.has(c.verdict)) continue;
-      items.push({ kind: "hit", page: r.page.relPath, text: String(h.text ?? ""), target: h.target, line: h.line });
+      const state = c === "unconfirmed" ? "unconfirmed" : stateOf(c && typeof c === "object" ? c.verdict : undefined, "stale");
+      items.push({ kind: "hit", page: r.page.relPath, text: String(h.text ?? ""), target: h.target, line: h.line, state });
     }
     for (const l of r.buckets?.linking ?? []) {
       if (l.bucket !== "toCheck" || !isOwn(l.relPath)) continue;
-      if (l.verdict && SETTLED.has(l.verdict.verdict)) continue;
-      items.push({ kind: "toCheck", page: l.relPath, text: "", target: r.page.relPath, line: l.passages?.find((p: Json) => p.claim)?.line ?? 0 });
+      const checked = checks[r.page.relPath]?.verdicts.find((v) => v.relPath === l.relPath)?.verdict;
+      const state = stateOf(checked ?? l.verdict?.verdict, "unchecked");
+      items.push({ kind: "toCheck", page: l.relPath, text: "", target: r.page.relPath, line: l.passages?.find((p: Json) => p.claim)?.line ?? 0, state });
     }
   }
   return items;
 }
+const ownLabel = (i: OwnItem) => (i.kind === "hit" ? `${i.state} status line L${i.line}, yours` : `${i.state}, yours`);
 
 /** A To-check page Check would call the model for: no verdict on its current passage. */
 const uncached = (r: Json) => (r.buckets?.linking ?? []).filter((l: Json) => l.bucket === "toCheck" && !l.verdict);
@@ -410,6 +423,22 @@ interface SavedState {
   at: number;
   items: OwnItem[];
 }
+const dropState = (file: string) => {
+  try {
+    rmSync(file, { force: true });
+  } catch {
+    // Unremovable: the next --check counts this list again.
+  }
+};
+/** The page states whose report does not read the session's committed text. */
+const UNREAD: Partial<Record<PageState, string>> = {
+  uncommitted: "uncommitted",
+  "not-carried": "not carried",
+  "main-uncommitted": "the main copy has uncommitted edits",
+  deleted: "deleted",
+  "deleted-uncommitted": "deleted, uncommitted",
+  missing: "no such page",
+};
 const stateFile = (dir: string, wiki: string, main: string, key: string) =>
   path.join(dir, `${createHash("sha256").update(`${main}\n${wiki}\n${key}`).digest("hex").slice(0, 24)}.json`);
 
@@ -431,6 +460,10 @@ export function staleLine(o: {
   overCap: string[];
   /** Pages the gate dropped: deleted, missing. */
   missing: string[];
+  /** Why the reports do not read the session's text of a page (lower-cased relPath → reason): the gate's page states. */
+  unread?: Record<string, string>;
+  /** A gate skip for the whole checkout: no report reads the session's text. */
+  wideSkip?: string;
 }): string {
   const { ledger: L, wiki } = o;
   const head = `Stale: ${wiki} — `;
@@ -440,16 +473,33 @@ export function staleLine(o: {
     if (!list.has(page)) list.set(page, why);
   };
 
-  // Own fixes: what the first call listed and the reports no longer show.
-  const now = ownItems(L.reports, o.isOwn);
+  // Own fixes: what the first call listed and a report that read the session's text no longer shows.
+  const reported = new Set(L.reports.map((r) => String(r.page.relPath).toLowerCase()));
+  const notReRead = (i: OwnItem): string | undefined => {
+    if (o.wideSkip) return o.wideSkip;
+    // A hit is on its report's page; an own To-check page is in the changed page's report.
+    const from = i.kind === "hit" ? i.page : i.target;
+    for (const p of new Set([from, i.page])) {
+      const why = o.unread?.[p.toLowerCase()];
+      if (why) return why;
+    }
+    if (reported.has(from.toLowerCase())) return undefined;
+    const e = L.pageErrors.find((x) => x.page.toLowerCase() === from.toLowerCase());
+    return e ? (e.error.startsWith("no page ") ? "not in the main checkout" : e.error) : (L.stopped ?? "not reported");
+  };
+  const now = ownItems(L.reports, o.isOwn, L.checks);
   const nowKeys = new Set(now.map(itemKey));
-  const fixed = (o.before ?? []).filter((i) => !nowKeys.has(itemKey(i)));
-  for (const i of now) add(i.page, i.kind === "hit" ? `stale status line L${i.line}, yours` : `stale, yours`);
+  const fixed: OwnItem[] = [];
+  for (const i of o.before ?? []) {
+    const why = notReRead(i);
+    if (why) add(i.page, `not re-read: ${why}`);
+    else if (!nowKeys.has(itemKey(i))) fixed.push(i);
+  }
+  for (const i of now) if (i.state !== "settled") add(i.page, ownLabel(i));
 
   for (const e of L.pageErrors) add(e.page, e.error.startsWith("no page ") ? "not in the main checkout" : e.error);
   for (const m of o.missing) add(m, "no such page");
   if (L.stopped) {
-    const reported = new Set(L.reports.map((r) => String(r.page.relPath).toLowerCase()));
     for (const p of o.asked) if (!reported.has(p.toLowerCase()) && !L.pageErrors.some((e) => e.page === p)) add(p, `not reported: ${L.stopped}`);
   }
 
@@ -652,27 +702,31 @@ async function oneWiki(
   if (!second) {
     await runWikiStale(common, runDeps);
     if (ledger.stopped && !ledger.reports.length) {
-      // No report: there is nothing for a --check call to add (D13).
+      // No report: there is nothing for a --check call to add (D13), and an earlier handoff's list must not count for it.
+      dropState(file);
       say(`fix by hand: no report (${ledger.stopped}) — read your own pages for status lines yourself`);
       return void say(`Stale: ${wiki} — not checked (${ledger.stopped})`);
     }
-    const items = ownItems(ledger.reports, isOwn);
+    const items = ownItems(ledger.reports, isOwn).filter((i) => i.state !== "settled");
     say("fix by hand (your own pages; every other page goes through --check's sends):");
     if (!items.length) say("  nothing");
     for (const i of items) {
       say(i.kind === "hit" ? `  ${i.page} L${i.line} after [[${i.target}]]: ${i.text.slice(0, 160)}` : `  ${i.page} L${i.line} — to check after ${i.target}: read it against the change`);
     }
+    // Written whole and renamed into place, so --check never reads half a list.
     try {
       mkdirSync(stateDir, { recursive: true });
-      writeFileSync(file, JSON.stringify({ at: Date.now(), items } satisfies SavedState));
+      const part = `${file}.${process.pid}.part`;
+      writeFileSync(part, JSON.stringify({ at: Date.now(), items } satisfies SavedState));
+      renameSync(part, file);
     } catch {
-      // The second call then says the fixes were not counted.
+      // Not saved: the second call counts no fixes, or an earlier list this write could not replace.
     }
     say(`then: commit (and push) those fixes by the fix path, then run the same command with --check`);
     return;
   }
 
-  // Second call: the first call's list, if this handoff made one.
+  // Second call: the first call's list, if this handoff made one. It counts once: the file goes once the line is printed.
   let before: OwnItem[] | undefined;
   try {
     const s = JSON.parse(readFileSync(file, "utf8")) as SavedState;
@@ -697,6 +751,11 @@ async function oneWiki(
       return plan.check;
     },
   });
+  const unread: Record<string, string> = {};
+  for (const p of gate.pages) {
+    const why = UNREAD[p.state];
+    if (why) unread[p.rel.toLowerCase()] ??= why;
+  }
   const checkSkipped = gate.skip ?? (ledger.readonly ? `readonly ${ledger.readonly}` : undefined);
   say(
     staleLine({
@@ -708,6 +767,9 @@ async function oneWiki(
       ...(checkSkipped ? { checkSkipped } : {}),
       overCap: plan?.overCap ? plan.costed : [],
       missing,
+      unread,
+      ...(gate.wideSkip ? { wideSkip: gate.wideSkip } : {}),
     }),
   );
+  dropState(file);
 }
