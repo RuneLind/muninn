@@ -817,7 +817,7 @@ async function oneWiki(
     ledger,
   };
   const ownRels = new Set([...reportable, ...dropped]);
-  const isOwn = (rel: string) => isOwnPage(rel, new Set([...ownRels, ...(ledger.sessionPages ?? []), ...ledger.reports.map((r) => r.page.relPath as string)]), []);
+  const isOwn = (rel: string) => isOwnPage(rel, new Set([...ownRels, ...ledger.reports.map((r) => r.page.relPath as string)]), []);
 
   if (!second) {
     await runWikiStale(common, runDeps);
