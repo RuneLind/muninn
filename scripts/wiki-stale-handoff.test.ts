@@ -367,14 +367,32 @@ await call;
 // A stub muninn: page reports by relPath, Check streams, sends recorded.
 type Linking = { relPath: string; verdict?: { verdict: string; reason?: string } };
 type Page = { hits?: { line: number; target: string; text: string; confirmation?: unknown }[]; toCheck?: Linking[]; readonly?: string | false };
-function muninn(pages: Record<string, Page>, opts: { verdicts?: Record<string, { relPath: string; verdict: string; edit?: { old: string; new: string } | null }[]>; failGet?: string[]; failCheck?: string[]; hangGet?: string[] } = {}) {
+function muninn(
+  pages: Record<string, Page>,
+  opts: {
+    verdicts?: Record<string, { relPath: string; verdict: string; edit?: { old: string; new: string } | null }[]>;
+    failGet?: string[];
+    failCheck?: string[];
+    hangGet?: string[];
+    /** The work memo's pages for any `--session`; `failSession` makes that ask unreachable. */
+    session?: string[];
+    failSession?: boolean;
+    /** Pages answered with a body the shape guard refuses: a page error, «unexpected answer». */
+    badGet?: string[];
+  } = {},
+) {
   const asked: string[] = [];
   const checked: string[] = [];
   const sent: string[] = [];
   const fetchJson: FetchJson = async (url, signal) => {
     const q = new URL(url).searchParams;
+    if (q.get("session")) {
+      if (opts.failSession) throw new Error("connection refused");
+      return { status: 200, body: { wiki: "w", readonly: false, session: { found: (opts.session ?? []).length > 0, pages: opts.session ?? [] } } };
+    }
     const rel = q.get("page") ?? "";
     asked.push(rel);
+    if (opts.badGet?.includes(rel)) return { status: 200, body: { wiki: "w" } };
     if (opts.failGet?.includes(rel)) throw new Error("connection refused");
     // A muninn that never answers this page: the run's deadline aborts it.
     if (opts.hangGet?.includes(rel)) return new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted"))));
@@ -469,7 +487,7 @@ describe("runHandoff: two calls", () => {
     const out = await runHandoff(["--handoff", "--check", "--pages", ...["plans/a.md", "repos/b.md", "plans/c.md"].map((r) => path.join(main, r))], { ...m.deps, git });
     expect(m.sent).toEqual(["repos/x.md"]);
     expect(out.at(-1)).toBe(
-      `Stale: ${path.basename(main)} — 1 fixes sent to the Gardener; to check: plans/c.md (not reported: muninn not reachable — Check skipped), repos/y.md (connection refused)`,
+      `Stale: ${path.basename(main)} — 1 fixes sent to the Gardener; to check: plans/c.md (not reported: muninn not reachable), repos/y.md (connection refused)`,
     );
   });
 
@@ -967,16 +985,16 @@ describe("fix round 2 batch 1: the Stale line lists what is open, and nothing is
     // The reports read the main checkout's text, so they still show the hits the session fixed.
     const stale = { "plans/a.md": { hits: [hit(7, "plans/x.mdx")] }, "repos/b.md": { hits: [hit(4, "plans/y.mdx")] } };
     const out = await runHandoff(["--handoff", "--check", "--pages", path.join(wt, "plans/a.md"), path.join(main, "repos/b.md"), path.join(main, "plans/c.md")], { ...muninn(stale).deps, git });
-    expect(out.at(-1)).toBe(`Stale: ${name} — to check: plans/a.md (not re-read: not carried), repos/b.md (not re-read: uncommitted), plans/c.md (not in the main checkout)`);
+    expect(out.at(-1)).toBe(`Stale: ${name} — to check: plans/a.md (not re-read: not carried), repos/b.md (not re-read: uncommitted), plans/c.md (not re-read: not in the main checkout)`);
 
     // A clean checkout: the report stops at an unreachable muninn, or at the deadline.
     const m2 = await repo();
     const p2 = pagesOf(m2, ["plans/a.md", "repos/b.md"]);
     const n2 = path.basename(m2);
     const down = await runHandoff(["--handoff", "--check", ...p2], { ...muninn(stale, { failGet: ["repos/b.md"] }).deps, git });
-    expect(down.at(-1)).toBe(`Stale: ${n2} — to check: plans/a.md (unconfirmed status line L7, yours), repos/b.md (not reported: muninn not reachable — Check skipped)`);
+    expect(down.at(-1)).toBe(`Stale: ${n2} — to check: plans/a.md (unconfirmed status line L7, yours), repos/b.md (not reported: muninn not reachable)`);
     const slow = await runHandoff(["--handoff", "--check", ...p2], { ...muninn(stale, { hangGet: ["repos/b.md"] }).deps, git, deadlineMs: 1000 });
-    expect(slow.at(-1)).toBe(`Stale: ${n2} — to check: plans/a.md (unconfirmed status line L7, yours), repos/b.md (not reported: muninn did not answer in 1 s — Check skipped)`);
+    expect(slow.at(-1)).toBe(`Stale: ${n2} — to check: plans/a.md (unconfirmed status line L7, yours), repos/b.md (not reported: muninn did not answer in 1 s)`);
 
     // The main checkout on another branch: no page reads the session's text.
     await g(m2, "checkout", "-q", "-b", "feature");
@@ -1050,7 +1068,7 @@ describe("fix round 1 batch 4: Check after a stopped report stage, and the run's
     expect(m.checked).toEqual(["p2.md"]);
     expect(out.find((l) => l.startsWith("Check: "))).toBe("Check: 1 page(s) spend model calls — the reports stopped (muninn did not answer in 1 s), so only the 1 cached one(s) run, 1 cached only; bound ≤ 0 model calls, ≤ 6 min for the whole run (the gate took 0 s)");
     expect(out.at(-1)).toBe(
-      `Stale: ${path.basename(main)} — to check: p3.md (not reported: muninn did not answer in 1 s — Check skipped), o1.md (Check skipped: muninn did not answer in 1 s)`,
+      `Stale: ${path.basename(main)} — to check: p3.md (not reported: muninn did not answer in 1 s), o1.md (Check skipped: muninn did not answer in 1 s)`,
     );
   });
 
@@ -1133,7 +1151,7 @@ describe("fix round 1 batch 4: a failed Check falls back to the cached verdict",
 });
 
 describe("fix round 1 batch 5: the Stale line and the gate's wording", () => {
-  test("muninn not reachable on --check: the Stale line still names the pages the gate says the session must act on", async () => {
+  test("muninn not reachable on --check: the Stale line names every page — the ones to act on with the gate's reason, the rest not reported", async () => {
     const main = await repo();
     // A committed deletion needs nothing from the session, so it is not listed.
     write(main, "plans/gone.md", "# Gone\n");
@@ -1144,13 +1162,13 @@ describe("fix round 1 batch 5: the Stale line and the gate's wording", () => {
     write(main, "repos/b.md", "# B\ndirty\n");
     const pages = ["--pages", path.join(main, "plans/a.md"), path.join(main, "plans/gone.md"), path.join(main, "repos/b.md"), path.join(main, "nope/never.md")];
     const out = await runHandoff(["--handoff", "--check", ...pages, "--base-url", "http://127.0.0.1:9"], { git, env: {} });
-    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — not checked (muninn not reachable); to check: repos/b.md (uncommitted), nope/never.md (not in the main checkout)`);
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: plans/a.md (not reported: muninn not reachable), repos/b.md (not re-read: uncommitted), nope/never.md (not re-read: not in the main checkout)`);
   });
 
-  test("a missing page reads «not in the main checkout» when muninn answers too", async () => {
+  test("a missing page reads «not re-read: not in the main checkout» when muninn answers too", async () => {
     const main = await repo();
     const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), path.join(main, "nope/never.md")], { ...muninn({ "plans/a.md": {} }).deps, git });
-    expect(out.at(-1)).toStartWith(`Stale: ${path.basename(main)} — to check: nope/never.md (not in the main checkout)`);
+    expect(out.at(-1)).toStartWith(`Stale: ${path.basename(main)} — to check: nope/never.md (not re-read: not in the main checkout)`);
   });
 
   test("a refused pull names git's error, not its first hint", async () => {
@@ -1365,5 +1383,215 @@ describe("fix round 2 batch 3: the run's bound starts after the gate and uses th
       lines.push(out.find((l) => l.startsWith("Check: ")));
     }
     expect(lines).toEqual(Array(2).fill("Check: 1 page(s) spend model calls, 0 cached only; bound ≤ 10 model calls, ≤ 3 min for the whole run (the gate took 0 s)"));
+  });
+});
+
+/*
+ * Class check (round 3, the `Stale:` line): every session page gets exactly one entry, from one precedence —
+ * wide gate skip → gate state to act on → no report → Check skipped → own item → To-check verdict → nothing.
+ * The cells: page origin {--pages, memo only, both} × gate state × run × own-item state, every one run through
+ * `runHandoff` on real git and the stub muninn, so `oneWiki`'s assembly is in the cell, not only `staleLine`.
+ * Collapsed: a memo-only page has no gate state (runGate sees only `--pages`), so it is one column, not eight.
+ */
+describe("class check: the Stale line's cells — origin × gate state × run × own item", () => {
+  const STATES = ["committed", "uncommitted", "carried", "not-carried", "main-uncommitted", "deleted", "deleted-uncommitted", "missing"] as const;
+  type State = (typeof STATES)[number];
+  const OWN = ["none", "stale", "unconfirmed", "unsure", "unchecked", "settled"] as const;
+  type Own = (typeof OWN)[number];
+  const RUNS = ["wide", "wide-refused", "ok", "error", "nopage", "refused", "deadline"] as const;
+  type Run = (typeof RUNS)[number];
+  const WIDE = "main checkout on feature, not main";
+  const rel = (s: State) => `s/${s}.md`;
+  const Q = "s/q.md";
+  const MEMO = "s/memo.md";
+  const IN_WORKTREE = new Set<State>(["carried", "not-carried", "main-uncommitted"]);
+  const ACT: Partial<Record<State, string>> = {
+    uncommitted: "uncommitted",
+    "not-carried": "not carried",
+    "main-uncommitted": "the main copy has uncommitted edits",
+    "deleted-uncommitted": "deleted, uncommitted",
+    missing: "not in the main checkout",
+  };
+  const ASKED = new Set<State>(["committed", "uncommitted", "carried", "not-carried", "main-uncommitted"]);
+
+  /** One checkout with a page in each gate state, Q (whose report carries the own To-check items) and the memo-only page. */
+  async function fixture(wide: boolean) {
+    const main = await repo();
+    for (const s of STATES) if (s !== "missing") write(main, rel(s), `# ${s}\n`);
+    write(main, Q, "# q\n");
+    write(main, MEMO, "# memo\n");
+    await g(main, "add", ".");
+    await g(main, "commit", "-qm", "pages");
+    rmSync(path.join(main, rel("deleted")));
+    await g(main, "commit", "-qam", "delete");
+    await g(main, "branch", "fix");
+    const wt = path.join(tmp(), "wt");
+    await g(main, "worktree", "add", "-q", wt, "fix");
+    write(wt, rel("not-carried"), "# not carried, committed in the worktree\n");
+    await g(wt, "commit", "-qam", "wt edit");
+    write(main, rel("uncommitted"), "# uncommitted edit\n");
+    write(main, rel("main-uncommitted"), "# main copy edit\n");
+    rmSync(path.join(main, rel("deleted-uncommitted")));
+    if (wide) await g(main, "checkout", "-q", "-b", "feature");
+    const abs = (s: State) => path.join(IN_WORKTREE.has(s) ? wt : main, rel(s));
+    return { main, pages: [path.join(main, Q), ...STATES.map(abs)] };
+  }
+
+  /** The cell's single entry, or null: the precedence spelled out from the spec, not from the code. */
+  function expected(state: State | "memo", origin: "pages" | "both", run: Run, own: Own): string | null {
+    if (run === "wide" || run === "wide-refused") return `not re-read: ${WIDE}`;
+    const act = state === "memo" ? undefined : ACT[state];
+    if (act) return `not re-read: ${act}`;
+    const asked = state === "memo" || origin === "both" || ASKED.has(state);
+    if (asked && run === "error") return "not reported: unexpected answer";
+    if (asked && run === "nopage") return "not re-read: not in the main checkout";
+    if (asked && run === "refused") return "not reported: muninn not reachable";
+    if (asked && run === "deadline") return "not reported: muninn did not answer in 0.3 s";
+    if (own === "unchecked") return "unchecked, yours";
+    if (asked && (own === "stale" || own === "unconfirmed" || own === "unsure")) return `${own} status line L5, yours`;
+    return null;
+  }
+
+  const report = (own: Own): Page => {
+    const confirmation = own === "stale" ? { verdict: "stale" } : own === "unsure" ? { verdict: "unsure" } : own === "settled" ? { verdict: "true" } : "unconfirmed";
+    return own === "none" || own === "unchecked" ? {} : { hits: [{ line: 5, target: "plans/x.mdx", text: "x in-flight", confirmation }] };
+  };
+
+  /** The `to check:` list split at the known page names. */
+  function entries(line: string, rels: string[]): Map<string, string> {
+    const list = line.match(/to check: (.*?)(?:; check unavailable.*)?$/)?.[1] ?? "";
+    const start = (r: string) => {
+      for (let i = list.indexOf(`${r} (`); i >= 0; i = list.indexOf(`${r} (`, i + 1)) if (i === 0 || list.slice(i - 2, i) === ", ") return i;
+      return -1;
+    };
+    const at = rels.map((r) => ({ r, i: start(r) })).filter((x) => x.i >= 0).sort((a, b) => a.i - b.i);
+    const out = new Map<string, string>();
+    at.forEach(({ r, i }, n) => {
+      const end = n + 1 < at.length ? at[n + 1]!.i - 2 : list.length;
+      out.set(r, list.slice(i + r.length + 2, end - 1));
+    });
+    return out;
+  }
+
+  const fixtures: Partial<Record<"wide" | "narrow", Promise<Awaited<ReturnType<typeof fixture>>>>> = {};
+  const fx = (wide: boolean) => (fixtures[wide ? "wide" : "narrow"] ??= fixture(wide));
+
+  test("the fixture's gate states are the eight the table names", async () => {
+    for (const wide of [false, true]) {
+      const { main, pages } = await fx(wide);
+      const gate = await runGate(main, await Promise.all(pages.map(page)), git, { pull: false });
+      expect(gate.pages.map((p) => p.state)).toEqual(["committed", ...STATES]);
+      expect(gate.wideSkip).toBe(wide ? WIDE : undefined);
+    }
+  });
+
+  for (const origin of ["pages", "both"] as const) {
+    for (const run of RUNS) {
+      test(`origin ${origin}, run ${run}: each page's one entry, for every own-item state`, async () => {
+        const { main, pages } = await fx(run.startsWith("wide"));
+        const P = [...STATES.map(rel), ...(origin === "both" ? [MEMO] : [])];
+        const bad: string[] = [];
+        for (const own of OWN) {
+          const spec: Record<string, Page> = { [Q]: own === "unchecked" ? { toCheck: P.map((relPath) => ({ relPath })) } : {} };
+          if (run !== "nopage") for (const p of P) spec[p] = report(own);
+          const firstAsked = rel("committed");
+          const m = muninn(spec, {
+            ...(origin === "both" ? { session: P } : {}),
+            ...(run === "error" ? { badGet: P } : {}),
+            ...(run === "refused" || run === "wide-refused" ? { failGet: P } : {}),
+            ...(run === "deadline" ? { hangGet: [firstAsked] } : {}),
+          });
+          const argv = ["--handoff", "--check", "--pages", ...pages, ...(origin === "both" ? ["--session", "S1"] : [])];
+          const line = (await runHandoff(argv, { ...m.deps, git, ...(run === "deadline" ? { deadlineMs: 300 } : {}) })).at(-1)!;
+          const got = entries(line, [Q, ...P]);
+          const cells: [string, State | "memo"][] = [...STATES.map((s): [string, State] => [rel(s), s]), ...(origin === "both" ? [[MEMO, "memo"] as [string, "memo"]] : [])];
+          for (const [r, state] of cells) {
+            const want = expected(state, origin, run, own);
+            const have = got.get(r) ?? null;
+            if (want !== have) bad.push(`${origin} × ${state} × ${run} × ${own}: want ${JSON.stringify(want)}, got ${JSON.stringify(have)}`);
+          }
+          // Q has no item of its own: listed only under the wide skip.
+          const qWant = run.startsWith("wide") ? `not re-read: ${WIDE}` : null;
+          if ((got.get(Q) ?? null) !== qWant) bad.push(`${origin} × Q × ${run} × ${own}: want ${JSON.stringify(qWant)}, got ${JSON.stringify(got.get(Q) ?? null)}`);
+          // Every listed name is a cell: no entry the table did not ask for, and an act-on page always makes «nothing stale» false.
+          if (line.includes("nothing stale")) bad.push(`${origin} × ${run} × ${own}: «nothing stale» with act-on pages`);
+          if (!line.startsWith(`Stale: ${path.basename(main)} — to check: `)) bad.push(`${origin} × ${run} × ${own}: line shape ${line}`);
+        }
+        expect(bad).toEqual([]);
+      }, 60_000);
+    }
+  }
+});
+
+describe("class check: the Stale line's coverage set and the «nothing stale» rule", () => {
+  const hitOn = (line: number) => ({ hits: [{ line, target: "plans/x.mdx", text: "x in-flight" }] });
+
+  test("verifier's repro: main checkout on feature, --session only, a memo page with a hit in call 1 and none in call 2 is listed", async () => {
+    const main = await repo();
+    await g(main, "checkout", "-q", "-b", "feature");
+    const argv = ["--handoff", "--session", "S1", "--main", main];
+    await runHandoff(argv, { ...muninn({ "plans/a.md": hitOn(7) }, { session: ["plans/a.md"] }).deps, git });
+    const out = await runHandoff([...argv, "--check"], { ...muninn({ "plans/a.md": {} }, { session: ["plans/a.md"] }).deps, git });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: plans/a.md (not re-read: ${"main checkout on feature, not main"})`);
+  });
+
+  test("--pages a --session with memo page b under a wide skip: both listed with the reason", async () => {
+    const main = await repo();
+    await g(main, "checkout", "-q", "-b", "feature");
+    const m = muninn({ "plans/a.md": {}, "repos/b.md": {} }, { session: ["repos/b.md"] });
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), "--session", "S1"], { ...m.deps, git });
+    const why = "not re-read: main checkout on feature, not main";
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: plans/a.md (${why}), repos/b.md (${why})`);
+  });
+
+  test("a wide skip with no session page says «not checked», never «nothing stale»", async () => {
+    const main = await repo();
+    await g(main, "checkout", "-q", "-b", "feature");
+    const out = await runHandoff(["--handoff", "--check", "--session", "S1", "--main", main], { ...muninn({}, { session: [] }).deps, git });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — not checked (main checkout on feature, not main)`);
+  });
+
+  test("a --main that is not a git checkout: the memo's pages are listed with that reason", async () => {
+    const dir = tmp();
+    const out = await runHandoff(["--handoff", "--check", "--session", "S1", "--main", dir], { ...muninn({ "plans/a.md": {} }, { session: ["plans/a.md"] }).deps, git });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(dir)} — to check: plans/a.md (not re-read: ${dir} is not a git checkout)`);
+  });
+
+  test("a memo muninn did not answer: the line says the session's pages are not known, never «nothing stale»", async () => {
+    const main = await repo();
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), "--session", "S1"], { ...muninn({ "plans/a.md": {} }, { failSession: true }).deps, git });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — session S1's pages not known (muninn not reachable)`);
+  });
+
+  test("a memo-only page another page lists To check is the session's own: unchecked, yours — not sent, not Check's", async () => {
+    const main = await repo();
+    const m = muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/b.md" }] }, "repos/b.md": {} }, { session: ["repos/b.md"] });
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), "--session", "S1"], { ...m.deps, git });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: repos/b.md (unchecked, yours)`);
+  });
+
+  test("an uncommitted deletion alone is listed with its reason, not «deleted only — nothing to check»", async () => {
+    const main = await repo();
+    rmSync(path.join(main, "repos/b.md"));
+    const m = muninn({});
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "repos/b.md")], { ...m.deps, git });
+    expect(m.asked).toEqual([]);
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: repos/b.md (not re-read: deleted, uncommitted)`);
+  });
+
+  test("a committed deletion alone has no report read: «deleted only», not «nothing stale»", async () => {
+    const main = await repo();
+    rmSync(path.join(main, "repos/b.md"));
+    await g(main, "commit", "-qam", "delete b");
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "repos/b.md")], { ...muninn({}).deps, git });
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — deleted only: repos/b.md — nothing to check`);
+  });
+
+  test("«nothing stale» when every session page, memo included, was read and nothing is open", async () => {
+    const main = await repo();
+    const m = muninn({ "plans/a.md": {}, "repos/b.md": {} }, { session: ["repos/b.md"] });
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), "--session", "S1"], { ...m.deps, git });
+    expect(m.asked).toEqual(["plans/a.md", "repos/b.md"]);
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — nothing stale on the changed pages`);
   });
 });

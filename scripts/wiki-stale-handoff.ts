@@ -523,27 +523,39 @@ export function planChecks(reports: Json[], cap = COSTED_PAGE_CAP): { check: str
 const MISSING = "not in the main checkout";
 /** A report error as the session reads it. */
 const pageErrorWhy = (error: string) => (error.startsWith("no page ") ? MISSING : error);
-/** The page states whose report does not read the session's committed text. */
-const UNREAD: Partial<Record<PageState, string>> = {
+/** The gate states the session must act on before a report reads its text, and the reason the line gives. */
+const ACT_ON: Partial<Record<PageState, string>> = {
   uncommitted: "uncommitted",
   "not-carried": "not carried",
   "main-uncommitted": "the main copy has uncommitted edits",
-  deleted: "deleted",
   "deleted-uncommitted": "deleted, uncommitted",
   missing: MISSING,
 };
-/** The gate states the session must act on before Check reads its text. */
-const ACT_ON = new Set<PageState>(["uncommitted", "not-carried", "main-uncommitted", "deleted-uncommitted", "missing"]);
+/** The gate states no report is asked for. */
+const NOT_ASKED = new Set<PageState>(["deleted", "deleted-uncommitted", "missing"]);
+
+/**
+ * The `Stale:` line's precedence: each page gets the entry of its lowest level, one wording per state.
+ * 1 wide gate skip, 2 gate state to act on, 3 no report, 4 Check skipped (To-check pages not the session's),
+ * 5 own items, 6 To-check verdicts. 4 and 6 apply to pages that are not the session's, 5 to its own, so
+ * their relative order never decides an entry.
+ */
+const WIDE = 1, GATE = 2, UNREPORTED = 3, SKIPPED = 4, OWN = 5, VERDICT = 6;
 
 /**
  * The `Stale:` line for one wiki, from what the second call got. Every
- * completed part counts, whatever failed after it.
+ * completed part counts, whatever failed after it. It covers every session
+ * page (`--pages` and the work memo's) and every To-check page with an open
+ * outcome; «nothing stale» only when none is open, a report was read and no
+ * gate skip held for the whole checkout.
  */
 export function staleLine(o: {
   wiki: string;
   ledger: StaleLedger;
-  /** Pages the run asked a report for. */
-  asked: string[];
+  /** The `--pages` pages in gate order; no `state` when the gate stopped before reading the pages. */
+  pages: { rel: string; state?: PageState }[];
+  /** `--session`'s id: its pages are `ledger.sessionPages`, unknown when the memo was not answered. */
+  session?: string;
   isOwn: (rel: string) => boolean;
   /** Why Check did not run at all (the gate, readonly, no muninn). */
   checkSkipped?: string;
@@ -551,36 +563,36 @@ export function staleLine(o: {
   overCap: string[];
   /** Changed pages whose Check the run did not start, and why (the reports' deadline, the run's bound). */
   checkSkips?: Record<string, string>;
-  /** Pages the gate dropped: deleted, missing. */
-  missing: string[];
   /** A gate skip for the whole checkout: no report reads the session's text. */
   wideSkip?: string;
-  /** Pages the gate says the session must act on, and why, in gate order: the reports do not read the session's text of them. */
-  actOn?: [string, string][];
 }): string {
   const { ledger: L, wiki } = o;
-  const head = `Stale: ${wiki} — `;
-  if (!L.reports.length && L.stopped) {
-    const named = (o.actOn ?? []).map(([p, why]) => `${p} (${why})`);
-    return `${head}not checked (${L.stopped})${named.length ? `; to check: ${named.join(", ")}` : ""}${L.readonly ? `; check unavailable: readonly ${L.readonly}` : ""}`;
-  }
-  const list = new Map<string, string>();
-  const add = (page: string, why: string) => {
-    if (!list.has(page)) list.set(page, why);
+  const key = (p: string) => p.toLowerCase();
+  const memo = L.sessionPages ?? [];
+  /** Session pages in order: `--pages`, then the memo's. */
+  const order = new Map<string, number>();
+  for (const p of [...o.pages.map((x) => x.rel), ...memo]) if (!order.has(key(p))) order.set(key(p), order.size);
+  const list = new Map<string, { page: string; level: number; why: string }>();
+  const add = (level: number, page: string, why: string) => {
+    const cur = list.get(key(page));
+    if (!cur || level < cur.level) list.set(key(page), { page: cur?.page ?? page, level, why });
   };
 
-  // Own pages whose report did not read the session's text: their items say nothing of its edits.
-  const reported = new Set(L.reports.map((r) => String(r.page.relPath).toLowerCase()));
-  const missing = new Set(o.missing.map((m) => m.toLowerCase()));
-  if (o.wideSkip) for (const p of o.asked) add(p, `not re-read: ${o.wideSkip}`);
-  for (const [p, why] of o.actOn ?? []) if (!missing.has(p.toLowerCase())) add(p, `not re-read: ${why}`);
-  for (const i of ownItems(L.reports, o.isOwn, L.checks)) if (i.state !== "settled") add(i.page, ownLabel(i));
-
-  for (const e of L.pageErrors) add(e.page, pageErrorWhy(e.error));
-  for (const m of o.missing) add(m, MISSING);
-  if (L.stopped) {
-    for (const p of o.asked) if (!reported.has(p.toLowerCase()) && !L.pageErrors.some((e) => e.page === p)) add(p, `not reported: ${L.stopped} — Check skipped`);
+  const session = [...o.pages.map((p) => p.rel), ...memo];
+  if (o.wideSkip) for (const p of session) add(WIDE, p, `not re-read: ${o.wideSkip}`);
+  for (const p of o.pages) {
+    const why = p.state && ACT_ON[p.state];
+    if (why) add(GATE, p.rel, `not re-read: ${why}`);
   }
+  const reported = new Set(L.reports.map((r) => key(String(r.page.relPath))));
+  const asked = [...o.pages.filter((p) => p.state && !NOT_ASKED.has(p.state)).map((p) => p.rel), ...memo];
+  for (const p of asked) {
+    if (reported.has(key(p))) continue;
+    const e = L.pageErrors.find((x) => key(x.page) === key(p));
+    const why = e ? pageErrorWhy(e.error) : (L.stopped ?? "no report");
+    add(UNREPORTED, p, why === MISSING ? `not re-read: ${MISSING}` : `not reported: ${why}`);
+  }
+  for (const i of ownItems(L.reports, o.isOwn, L.checks)) if (i.state !== "settled") add(OWN, i.page, ownLabel(i));
 
   let sent = 0;
   const sendOf = new Map(L.sends.map((s) => [`${s.changed}\u0001${s.linking}`, s]));
@@ -594,7 +606,7 @@ export function staleLine(o: {
       if (!rec) {
         if (tag && SETTLED.has(tag)) continue;
         const why = o.checkSkipped ?? o.checkSkips?.[changed] ?? (overCap ? `over ${COSTED_PAGE_CAP} pages` : L.readonly ? `readonly ${L.readonly}` : "no Check");
-        add(l.relPath, `Check skipped: ${why}`);
+        add(SKIPPED, l.relPath, `Check skipped: ${why}`);
         continue;
       }
       let v = rec.verdicts.find((x) => x.relPath === l.relPath);
@@ -603,40 +615,52 @@ export function staleLine(o: {
         const err = rec.errors.find((x) => x.relPath === l.relPath);
         const failed = err ? "check error" : rec.failure ? rec.failure : rec.start?.left ? "left for another Check" : "no verdict";
         if (!tag) {
-          add(l.relPath, failed);
+          add(VERDICT, l.relPath, failed);
           continue;
         }
         if (tag === "stale") {
-          add(l.relPath, `stale, not sent: ${failed}`);
+          add(VERDICT, l.relPath, `stale, not sent: ${failed}`);
           continue;
         }
         v = l.verdict as Json;
       }
       if (SETTLED.has(v.verdict)) continue;
       if (v.verdict === "unsure") {
-        add(l.relPath, "unsure");
+        add(VERDICT, l.relPath, "unsure");
         continue;
       }
       if (v.verdict !== "stale") {
-        add(l.relPath, verdictTag(v).slice(1, -1));
+        add(VERDICT, l.relPath, verdictTag(v).slice(1, -1));
         continue;
       }
       const s = sendOf.get(`${changed}\u0001${l.relPath}`);
       if (s?.outcome === "sent") sent++;
-      else if (s?.outcome === "no-edit") add(l.relPath, "stale, no drafted edit — fix in the reader");
-      else if (s?.outcome === "refused") add(l.relPath, `refused: ${s.error ?? "?"}`);
-      else if (s?.outcome === "error") add(l.relPath, "not sent: muninn not reachable");
-      else if (s?.outcome === "own") add(l.relPath, "stale, yours");
-      else add(l.relPath, `not sent: ${L.sendsStopped ?? (L.readonly ? "readonly" : "no send")}`);
+      else if (s?.outcome === "no-edit") add(VERDICT, l.relPath, "stale, no drafted edit — fix in the reader");
+      else if (s?.outcome === "refused") add(VERDICT, l.relPath, `refused: ${s.error ?? "?"}`);
+      else if (s?.outcome === "error") add(VERDICT, l.relPath, "not sent: muninn not reachable");
+      else if (s?.outcome === "own") add(VERDICT, l.relPath, "stale, yours");
+      else add(VERDICT, l.relPath, `not sent: ${L.sendsStopped ?? (L.readonly ? "readonly" : "no send")}`);
     }
   }
 
+  const rank = (k: string, i: number) => order.get(k) ?? order.size + i;
+  const entries = [...list].map(([k, e], i) => ({ ...e, at: rank(k, i) })).sort((a, b) => a.at - b.at);
   const parts: string[] = [];
   if (sent) parts.push(`${sent} fixes sent to the Gardener`);
-  if (list.size) parts.push(`to check: ${[...list].map(([p, why]) => `${p} (${why})`).join(", ")}`);
-  if (!parts.length) parts.push(L.stopped ? `not checked (${L.stopped})` : "nothing stale on the changed pages");
+  if (o.session && !L.sessionPages) parts.push(`session ${o.session}'s pages not known (${L.stopped ?? "no answer"})`);
+  if (entries.length) parts.push(`to check: ${entries.map((e) => `${e.page} (${e.why})`).join(", ")}`);
+  if (!parts.length) {
+    const deleted = o.pages.filter((p) => p.state === "deleted").map((p) => p.rel);
+    parts.push(
+      o.wideSkip ? `not checked (${o.wideSkip})`
+      : L.stopped ? `not checked (${L.stopped})`
+      : L.reports.length ? "nothing stale on the changed pages"
+      : deleted.length ? `deleted only: ${deleted.join(", ")} — nothing to check`
+      : "nothing to check: no page changed",
+    );
+  }
   if (L.readonly) parts.push(`check unavailable: readonly ${L.readonly}`);
-  return head + parts.join("; ");
+  return `Stale: ${wiki} — ${parts.join("; ")}`;
 }
 
 export interface HandoffDeps {
@@ -752,17 +776,25 @@ async function oneWiki(
   say(...gate.lines);
   if (!second && gate.skip) say(`  (a --check call now would skip Check: ${gate.skip})`);
   // A page named by its main copy and its worktree copy is one page to report.
-  const reportable = [...new Set(gate.pages.filter((p) => !["deleted", "deleted-uncommitted", "missing"].includes(p.state)).map((p) => p.rel))];
-  const missing = gate.pages.filter((p) => p.state === "missing").map((p) => p.rel);
+  const reportable = [...new Set(gate.pages.filter((p) => !NOT_ASKED.has(p.state)).map((p) => p.rel))];
   const dropped = gate.pages.filter((p) => p.state === "deleted" || p.state === "deleted-uncommitted").map((p) => p.rel);
+  // The session's `--pages` for the Stale line; a gate that stopped before the pages leaves them without a state.
+  const linePages: { rel: string; state?: PageState }[] = gate.pages.length ? gate.pages : pages;
+  const line = (ledger: StaleLedger, extra: Partial<Parameters<typeof staleLine>[0]> = {}) =>
+    staleLine({
+      wiki,
+      ledger,
+      pages: linePages,
+      isOwn: () => true,
+      overCap: [],
+      ...(args.session ? { session: args.session } : {}),
+      ...(gate.wideSkip ? { wideSkip: gate.wideSkip } : {}),
+      ...extra,
+    });
   if (!reportable.length && !args.session) {
-    // Nothing for muninn to read: deleted pages only, or none mapped.
-    const parts = [
-      ...(dropped.length ? [`deleted only: ${dropped.join(", ")} — nothing to check`] : []),
-      ...(missing.length ? [`to check: ${missing.map((m) => `${m} (${MISSING})`).join(", ")}`] : []),
-    ];
+    // Nothing for muninn to read: deleted or missing pages only, or a gate that stopped before the pages.
     if (!second) say("fix by hand: nothing");
-    return void say(`Stale: ${wiki} — ${parts.join("; ") || "nothing stale on the changed pages"}`);
+    return void say(line(newLedger()));
   }
 
   const ledger = newLedger();
@@ -785,7 +817,7 @@ async function oneWiki(
     ledger,
   };
   const ownRels = new Set([...reportable, ...dropped]);
-  const isOwn = (rel: string) => isOwnPage(rel, new Set([...ownRels, ...ledger.reports.map((r) => r.page.relPath as string)]), []);
+  const isOwn = (rel: string) => isOwnPage(rel, new Set([...ownRels, ...(ledger.sessionPages ?? []), ...ledger.reports.map((r) => r.page.relPath as string)]), []);
 
   if (!second) {
     await runWikiStale(common, runDeps);
@@ -851,24 +883,6 @@ async function oneWiki(
       return false;
     },
   });
-  const actOn = new Map<string, string>();
-  for (const p of gate.pages) {
-    const why = UNREAD[p.state];
-    if (why && ACT_ON.has(p.state) && !actOn.has(p.rel)) actOn.set(p.rel, why);
-  }
   const checkSkipped = gate.skip ?? (ledger.readonly ? `readonly ${ledger.readonly}` : undefined);
-  say(
-    staleLine({
-      wiki,
-      ledger,
-      asked: reportable,
-      isOwn,
-      ...(checkSkipped ? { checkSkipped } : {}),
-      overCap: plan?.overCap ? plan.costed : [],
-      checkSkips,
-      missing,
-      actOn: [...actOn],
-      ...(gate.wideSkip ? { wideSkip: gate.wideSkip } : {}),
-    }),
-  );
+  say(line(ledger, { isOwn, ...(checkSkipped ? { checkSkipped } : {}), overCap: plan?.overCap ? plan.costed : [], checkSkips }));
 }

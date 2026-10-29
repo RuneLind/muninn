@@ -336,6 +336,8 @@ export interface StaleLedger {
   /** Why the sends stopped: «sends timed out», «no send route», «readonly». */
   sendsStopped?: string;
   readonly: "instance" | "wiki" | null;
+  /** The pages muninn's work memo lists for `--session`; absent when the memo was not answered. */
+  sessionPages?: string[];
 }
 
 export const newLedger = (): StaleLedger => ({ reports: [], pageErrors: [], checks: {}, sends: [], readonly: null });
@@ -498,7 +500,9 @@ export async function runWikiStale(
         const tail = memo.length ? ` (${memo.join("; ")})` : "";
         if (!sess.found) out.push(notice(`wiki-stale: session ${args.session} wrote nothing in ${args.wiki} in the work memo's window${sess.error ? ` (${sess.error})` : ""}${tail}`));
         else out.push(notice(`session ${args.session}: ${sess.pages.length} page(s) in ${args.wiki}${tail}`));
-        pages = [...new Set([...pages, ...sess.pages.filter((p: unknown): p is string => typeof p === "string")])];
+        const listed: string[] = sess.pages.filter((p: unknown): p is string => typeof p === "string");
+        ledger.sessionPages = listed;
+        pages = [...new Set([...pages, ...listed])];
       }
     }
 
