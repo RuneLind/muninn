@@ -22,6 +22,19 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
+import {
+  needKey,
+  parseDone,
+  writeDone,
+  pollState,
+  refreshRefusalText,
+  WORK_MAP_DONE_KEY_PREFIX,
+  workCardHtml,
+  type CardPage,
+  type RefreshView,
+  type WorkMapGetBody,
+} from "./wiki-work-card.ts";
+import type { WorkMap } from "../../../wiki/work-map/schema.ts";
 
 export interface StartCardsDeps {
   /** The shell's `withWiki`: append the active `wiki` param to a URL so every
@@ -30,6 +43,13 @@ export interface StartCardsDeps {
   /** Map a coverage relPath back to a wiki page name (or null when it doesn't
    *  resolve). A callback, not a copy: it reads the shell's live page listing. */
   resolvePageName(relPath: string): string | null;
+  /** The listing's `workMap.runAt`, or null when the wiki has no work map —
+   *  then the start view shows What's new. */
+  workMapRunAt?(): number | null;
+  /** The live listing the Your work card joins the map to. */
+  pages?(): readonly CardPage[];
+  /** The reader URL of a page, for a link's `href`. */
+  hrefFor?(relPath: string): string;
 }
 
 /** Injected at boot by `initStartCards`.
@@ -643,7 +663,16 @@ export function startReindex(): void {
  */
 export function mountStartCards(): void {
   const wn = document.getElementById("wikiWhatsNew");
-  if (wn) {
+  const wc = document.getElementById("wikiWorkCard");
+  const runAt = deps.workMapRunAt ? deps.workMapRunAt() : null;
+  // A wiki with a work map shows the Your work card and never asks for the
+  // digest, so What's new's model call stops there (D1: no map ⇒ What's new).
+  const useWorkCard = runAt !== null && !!wc && !workMapFallback;
+  if (wc && !useWorkCard) wc.style.display = "none";
+  if (useWorkCard) {
+    if (wn) wn.style.display = "none";
+    mountWorkCard(runAt);
+  } else if (wn) {
     if (whatsNewHtml) {
       wn.innerHTML = whatsNewHtml;
       wn.style.display = "";
@@ -663,4 +692,184 @@ export function mountStartCards(): void {
       loadIndexCoverage(false);
     }
   }
+}
+
+// ── Your work card (start view, plan muninn-wiki-work-map P2) ─────────
+/** The last GET body with a map; reused across start-view renders. */
+let workBody: (WorkMapGetBody & { map: WorkMap }) | null = null;
+let workLoading = false;
+let workRefresh: RefreshView = { phase: "idle" };
+/** Set when the listing said "map" but the GET found none: What's new takes
+ *  the slot for the rest of the page's life. */
+let workMapFallback = false;
+let workPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** How often ↻ polls the GET, and for how long before it stops waiting. */
+const WORK_POLL_MS = 5_000;
+const WORK_POLL_MAX_MS = 20 * 60_000;
+
+function doneStorageKey(): string {
+  return WORK_MAP_DONE_KEY_PREFIX + readActiveWikiName();
+}
+function readDoneRaw(): string | null {
+  try {
+    return localStorage.getItem(doneStorageKey());
+  } catch {
+    return null;
+  }
+}
+function writeDoneRaw(v: string | null): void {
+  try {
+    if (v === null) localStorage.removeItem(doneStorageKey());
+    else localStorage.setItem(doneStorageKey(), v);
+  } catch {
+    /* storage blocked: the dismiss lasts for this render only */
+  }
+}
+
+function mountWorkCard(runAt: number): void {
+  if (workBody && workBody.map.runAtMs >= runAt) return paintWorkCard();
+  if (workBody) paintWorkCard(); // the older map, until the newer one lands
+  loadWorkMap();
+}
+
+function paintWorkCard(): void {
+  const el = document.getElementById("wikiWorkCard");
+  if (!el || !workBody) return;
+  const runAt = workBody.map.runAtMs;
+  el.innerHTML = workCardHtml({
+    body: workBody,
+    pages: deps.pages ? deps.pages() : [],
+    now: Date.now(),
+    done: parseDone(readDoneRaw(), runAt),
+    hrefFor: deps.hrefFor ?? ((rel) => withWiki("/wiki?relPath=" + encodeURIComponent(rel))),
+    refresh: workRefresh,
+  });
+  el.style.display = "";
+}
+
+function fallBackToWhatsNew(): void {
+  workMapFallback = true;
+  const wc = document.getElementById("wikiWorkCard");
+  if (wc) wc.style.display = "none";
+  mountStartCards();
+}
+
+async function fetchWorkMapBody(): Promise<WorkMapGetBody> {
+  const r = await fetch(withWiki("/api/wiki/work-map"));
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return (await r.json()) as WorkMapGetBody;
+}
+
+function loadWorkMap(): void {
+  if (workLoading) return;
+  workLoading = true;
+  fetchWorkMapBody()
+    .then((body) => {
+      workLoading = false;
+      if (!body.map) {
+        if (!workBody) fallBackToWhatsNew();
+        return;
+      }
+      workBody = body as WorkMapGetBody & { map: WorkMap };
+      paintWorkCard();
+    })
+    .catch(() => {
+      workLoading = false;
+      const el = document.getElementById("wikiWorkCard");
+      if (!el || workBody) return;
+      el.innerHTML =
+        '<div class="wiki-wn-head"><span class="wiki-wn-title">Your work</span></div>' +
+        '<div class="wiki-wn-error"><span>Couldn’t load the work map.</span>' +
+        '<button class="wiki-wn-retry" id="wikiWorkMapRetry">Retry</button></div>';
+      el.style.display = "";
+    });
+}
+
+function startWorkMapRefresh(): void {
+  if (!workBody || workRefresh.phase === "running") return;
+  const prevRunAt = workBody.map.runAtMs;
+  workRefresh = { phase: "running", startedAt: Date.now() };
+  paintWorkCard();
+  // Never `force`: the route's 10-minute cooldown answers a second click.
+  fetch(withWiki("/api/wiki/work-map/refresh"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  })
+    .then(async (r) => {
+      const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+      if (r.status !== 202) {
+        workRefresh = { phase: "message", text: refreshRefusalText(r.status, body, Date.now()), tone: "warn" };
+        paintWorkCard();
+        return;
+      }
+      const startedAt = typeof body.startedAt === "number" ? body.startedAt : Date.now();
+      workRefresh = { phase: "running", startedAt };
+      paintWorkCard();
+      pollWorkMap(prevRunAt, startedAt, Date.now());
+    })
+    .catch(() => {
+      workRefresh = { phase: "message", text: "Re-organize failed: the server did not answer.", tone: "warn" };
+      paintWorkCard();
+    });
+}
+
+function pollWorkMap(prevRunAt: number, startedAt: number, since: number): void {
+  if (workPollTimer) clearTimeout(workPollTimer);
+  workPollTimer = setTimeout(() => {
+    workPollTimer = null;
+    fetchWorkMapBody()
+      .then((body) => {
+        const st = pollState(body, prevRunAt, startedAt);
+        if (body.map) workBody = body as WorkMapGetBody & { map: WorkMap };
+        if (st.state === "updated") {
+          workRefresh = { phase: "idle" };
+        } else if (st.state === "settled") {
+          const a = st.attempt;
+          workRefresh =
+            a.outcome === "ok"
+              ? { phase: "message", text: "Re-organized — nothing changed.", tone: "info" }
+              : { phase: "message", text: `Re-organize ${a.outcome}${a.error ? ": " + a.error : ""}.`, tone: "warn" };
+        } else if (Date.now() - since > WORK_POLL_MAX_MS) {
+          workRefresh = { phase: "message", text: "Still organizing — reload later to see the new map.", tone: "info" };
+        } else {
+          paintWorkCard();
+          return pollWorkMap(prevRunAt, startedAt, since);
+        }
+        paintWorkCard();
+      })
+      .catch(() => {
+        if (Date.now() - since > WORK_POLL_MAX_MS) return;
+        pollWorkMap(prevRunAt, startedAt, since);
+      });
+  }, WORK_POLL_MS);
+}
+
+/** The Your work card's clicks, from the shell's click delegate. True when
+ *  the click was the card's. */
+export function handleWorkCardClick(target: Element): boolean {
+  if (target.closest("#wikiWorkMapRefresh")) {
+    startWorkMapRefresh();
+    return true;
+  }
+  if (target.closest("#wikiWorkMapRetry")) {
+    loadWorkMap();
+    return true;
+  }
+  const done = target.closest("[data-wm-done]");
+  if (done && workBody) {
+    const item = workBody.map.needsYou[Number(done.getAttribute("data-wm-done"))];
+    if (item) {
+      writeDoneRaw(writeDone(readDoneRaw(), workBody.map.runAtMs, needKey(item), true));
+      paintWorkCard();
+    }
+    return true;
+  }
+  if (target.closest("#wikiWorkMapRestore")) {
+    writeDoneRaw(null);
+    paintWorkCard();
+    return true;
+  }
+  return false;
 }

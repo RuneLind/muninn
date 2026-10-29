@@ -1540,6 +1540,28 @@ describe("GET /api/wiki/similar", () => {
     expect(ex.description).toBe("Head meta description prose.");
   });
 
+  test("page-list payload carries workMap.runAt only when the wiki has a work map", async () => {
+    const before = (await (await app.request("/api/wiki/pages?wiki=simwiki")).json()) as Record<string, unknown>;
+    expect("workMap" in before).toBe(false);
+    await Bun.write(
+      path.join(root, ".work-map.json"),
+      JSON.stringify({
+        version: 1,
+        wiki: "simwiki",
+        runAtMs: 1234,
+        model: "m",
+        coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+        summary: "",
+        needsYou: [],
+        themes: [],
+        efforts: [],
+        loose: [],
+      }),
+    );
+    const after = (await (await app.request("/api/wiki/pages?wiki=simwiki")).json()) as { workMap?: unknown };
+    expect(after.workMap).toEqual({ runAt: 1234 });
+  });
+
   test("huginn down → 200 with empty similar (section hides, page never errors)", async () => {
     __setSimilarSearchForTest(async () => {
       throw new Error("Knowledge API unreachable");

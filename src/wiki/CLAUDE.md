@@ -2256,7 +2256,7 @@ Acceptance: `stale-fix.test.ts`, `wiki-stale-fix-routes.test.ts`, `src/gardener/
 
 ## Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`)
 
-A nightly, tool-less model run groups a wiki's recent activity into EFFORTS and writes them to `.work-map.json` at the wiki root, so every reader of the wiki reads one map (plan `muninn-wiki-work-map`, P1). No surface renders it yet: P2 adds the card, P3 the effort page.
+A nightly, tool-less model run groups a wiki's recent activity into EFFORTS and writes them to `.work-map.json` at the wiki root, so every reader of the wiki reads one map (plan `muninn-wiki-work-map`, P1). P2 renders it as the start view's Your work card; P3 adds the effort page.
 
 | File | What it owns |
 |---|---|
@@ -2267,6 +2267,7 @@ A nightly, tool-less model run groups a wiki's recent activity into EFFORTS and 
 | `inputs.ts` | the warm-input gate |
 | `run.ts` | the run, its `BotConfig`, the `organizable` predicate, the per-wiki single-flight |
 | `write.ts` | the JSON write seam |
+| `listing.ts` | the listing's `workMap: {runAt}` field, mtime-cached |
 | `state.ts` | the attempt record, `~/.muninn/work-map/<wiki>.json` |
 | `loop.ts` | the process loop and its stop hook, wired in `src/index.ts` beside the stale confirm loop's |
 
@@ -2279,6 +2280,7 @@ Rules a caller can get wrong from outside:
 - **The write is a seam, not a page write.** `writeWorkMapFile` refuses on a readonly instance or root before opening anything, joins the per-wiki write queue and the cross-process `.wiki-write.lock`, commits `.work-map.json` alone OUTSIDE both (pushing where the repo has an upstream), and writes NO `log.md` entry: a nightly line would feed the next digest and What's new. The index skips dot files, so the map never lists as a page.
 - **The loop** starts only when `WORK_MAP_WIKIS` names a covered wiki, the scheduler is on, the instance is not readonly and the profile is not `nais`. A 60 s tick compares the clock with the previous tick (timers stop while a Mac sleeps); it checks on the first tick, hourly, and at once after a wake, retrying a post-wake refusal every 5 minutes up to three times. A wiki is due past `WORK_MAP_HOUR` (Europe/Oslo) with no success in 20 h; two failures after the model call since the day's hour wait for the next day. The stop hook writes and commits nothing after it fires (a model call in flight is not cancelled, its answer is dropped) and waits for a write already in its section.
 - **The routes** (`dashboard/routes/wiki-work-map.ts`, `wiki` tool group): `GET /api/wiki/work-map?wiki=` reads the file and adds `organizable` and, on that instance, the last attempt (`LOCAL` in `side-effecting-gets.test.ts`). `POST /api/wiki/work-map/refresh?wiki=[&force=1]` is JSON-gated, refuses 403 before any model call unless `organizable` holds here (a readonly root answers the egress body), joins a run in flight, answers 429 without `force=1` when a run succeeded less than 10 minutes ago (`lastSuccessAt`) or a run that failed started less than 10 minutes ago (`lastFailedAt`; an attempt's time is its start), neither recorded as an attempt, and otherwise starts the run and answers 202 at once: a run outlasts Bun's 255 s `idleTimeout`, so the card polls the GET.
+- **The Your work card (P2)** takes What's new's slot on a wiki with a map (`views/components/wiki-work-card.ts` renders, `wiki-start-cards.ts` fetches and polls). The choice needs no serial fetch: `/api/wiki/pages` carries `workMap: {runAt}` only when `.work-map.json` parses (`listing.ts`, read per request and cached on the file's mtime and size; absent on the read slice), and the start view then never requests `/api/wiki/digest`. A GET that finds no map after all falls back to What's new for the page's life. The card joins the map to the live listing through `joinWorkMap` and escapes every map string; a `⟦relPath⟧` marker links (`data-relpath`) only to a listed page. Stale past 26 h (`WORK_MAP_STALE_MS`). A ✓ on a Needs-you item is stored in `muninn.wiki.workMapDone.v1:<wiki>` as `{runAt, items}`, keyed on the STORED item's `kind|title`, so a new run reads empty. ↻ renders only when the GET says `organizable`, never sends `force`, and polls the GET every 5 s (up to 20 min) until `runAtMs` moves or the attempt it started resolves (`pollState`: `lastAttempt.at ≥ startedAt`, nothing running). Effort names render plain, with `data-effort-id`; P3 makes them links. Acceptance: `wiki-work-card.test.ts`, `listing.test.ts`, `e2e/wiki-work-card.spec.ts`.
 - **P6 seams:** normalization step 4 is the `declared` hook (a no-op until P6), and `retired[]` is not in the schema yet.
 
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)

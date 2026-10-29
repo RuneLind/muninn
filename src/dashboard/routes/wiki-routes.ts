@@ -50,6 +50,7 @@ import { registerWikiFellesPublishRoute } from "./wiki-felles-publish.ts";
 import { registerWikiPlanCardRoute } from "./wiki-plan-card.ts";
 import { agentLensFor, planCardConfigFromEnv } from "../../wiki/plan-card.ts";
 import { fellesPublishPayloadField } from "../../wiki/felles-publish.ts";
+import { workMapListingField } from "../../wiki/work-map/listing.ts";
 import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
@@ -1673,6 +1674,10 @@ export function registerWikiReadRoutes(
       // A bucket-mirrored root's health, present only while the mirror is not
       // up to date (finding 32): no object names, paths or error text.
       ...bucketMirrorPayloadField(resolveWikiRoot(root)),
+      // `{runAt}` only when the wiki has a readable `.work-map.json`, so the
+      // start view picks the Your work card over What's new without a second
+      // fetch. Absent on the read slice, which serves no work-map route.
+      ...(readSliceOnly ? {} : await workMapListingField(resolveWikiRoot(root))),
     });
   });
 
