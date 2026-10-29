@@ -15,7 +15,7 @@ function page(relPath: string, over: Partial<DigestPage> = {}): DigestPage {
  *  bookkeeping page, an attachment child and an old page. */
 function fixture(over: Partial<DigestInput> = {}): DigestInput {
   const pages = [
-    page("plans/rail-groups.mdx", { workedMs: NOW - 1 * DAY, plan_status: "in-flight", description: "Group the rail by effort.", series: "rail" }),
+    page("plans/rail-groups.mdx", { workedMs: NOW - 1 * DAY, gitTouchedMs: NOW - 1 * DAY, plan_status: "in-flight", description: "Group the rail by effort.", series: "rail" }),
     page("archive/rail-groups-report.mdx", { type: "report", gitTouchedMs: NOW - 3 * DAY }),
     page("plans/dark-mode.mdx", { workedMs: NOW - 2 * DAY, movesYou: 2, status_note: "waits on the palette" }),
     page("blogs/dark-mode.mdx", { type: "blog", gitTouchedMs: NOW - 40 * DAY }),
@@ -113,6 +113,15 @@ describe("buildWorkMapDigest", () => {
     const logSection = d.text.slice(d.text.indexOf("## log.md"));
     expect(logSection.indexOf("Appended entry 0")).toBeLessThan(logSection.indexOf("Old entry 0"));
     expect(buildWorkMapDigest(fixture()).logEntriesInWindow).toBe(1);
+  });
+
+  test("commit= is the page's filtered touch time, not a newer metadata stamp", () => {
+    const rel = "archive/rail-groups-report.mdx";
+    const stamp: TouchRecord = { ts: NOW - 17.1 * DAY, commit: "stamp", path: rel };
+    const pages = fixture().pages.map((p) => (p.relPath === rel ? { ...p, gitTouchedMs: NOW - 21.5 * DAY } : p));
+    const d = buildWorkMapDigest(fixture({ pages, gitTouches: new Map([[rel, [stamp]]]) }));
+    const line = d.text.split("\n").find((l) => l.includes(`path=${rel}`))!;
+    expect(line).toContain("commit=21.5d");
   });
 
   test("a degraded metadata filter is stated in the coverage line", () => {

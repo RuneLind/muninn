@@ -57,6 +57,9 @@ export interface NormalizeContext {
   gitTouches: ReadonlyMap<string, readonly TouchRecord[]>;
   /** A page's session events (`WikiPageMeta.work.events`). */
   workEvents: (relPath: string) => readonly WorkEvent[] | undefined;
+  /** The session behind a page's event, where the index names one
+   *  (`WorkEvidence.contributions`); absent ⇒ the event counts alone. */
+  sessionOf?: (relPath: string, lastMs: number) => string | undefined;
   declared?: DeclaredEffortsHook;
 }
 
@@ -208,16 +211,17 @@ export function normalizeWorkMapAnswer(answer: WorkMapAnswer, ctx: NormalizeCont
 /**
  * Per day of the last 28 (Europe/Oslo), the distinct commits touching the
  * effort's pages — one commit on three of them counts once, metadata stamps
- * included — and the distinct session events on them inside the sessions
- * window. Only days with activity are listed, oldest first.
+ * included — and the distinct sessions on them inside the sessions window,
+ * by session id where `sessionOf` names one. Only days with activity are
+ * listed, oldest first.
  */
 export function dailyActivity(
   pages: readonly string[],
-  ctx: Pick<NormalizeContext, "nowMs" | "sessionsSinceMs" | "gitTouches" | "workEvents">,
+  ctx: Pick<NormalizeContext, "nowMs" | "sessionsSinceMs" | "gitTouches" | "workEvents" | "sessionOf">,
 ): WorkMapDaily[] {
   const since = ctx.nowMs - 28 * DAY;
   const commits = new Map<string, Set<string>>();
-  const sessions = new Map<string, Set<number>>();
+  const sessions = new Map<string, Set<string>>();
   const add = <T>(m: Map<string, Set<T>>, day: string, v: T) => {
     let s = m.get(day);
     if (!s) m.set(day, (s = new Set()));
@@ -229,7 +233,9 @@ export function dailyActivity(
     }
     for (const [lastMs, , kind] of ctx.workEvents(rel) ?? []) {
       if (kind === "pass") continue;
-      if (lastMs >= Math.max(since, ctx.sessionsSinceMs) && lastMs <= ctx.nowMs) add(sessions, osloDay(lastMs), lastMs);
+      if (lastMs >= Math.max(since, ctx.sessionsSinceMs) && lastMs <= ctx.nowMs) {
+        add(sessions, osloDay(lastMs), ctx.sessionOf?.(rel, lastMs) ?? `t:${lastMs}`);
+      }
     }
   }
   const days = [...new Set([...commits.keys(), ...sessions.keys()])].sort();

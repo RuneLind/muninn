@@ -218,6 +218,24 @@ describe("normalizeWorkMapAnswer, step by step", () => {
     expect(out.efforts[0]!.daily).toEqual([{ day: osloDay(t), commits: 2, sessions: 1 }]);
   });
 
+  test("dailyActivity: one session on two pages counts once; an event with no session id counts alone", () => {
+    const t = NOW - 2 * DAY;
+    const events: Record<string, WorkEvent[]> = {
+      "a.md": [[t, 3, "focus"]],
+      "b.md": [[t + 60_000, 1, "touch"]],
+      "c.md": [[t + 120_000, 1, "touch"]],
+    };
+    const refs = new Map([[`a.md\0${t}`, "claude-code:s1"], [`b.md\0${t + 60_000}`, "claude-code:s1"]]);
+    const daily = dailyActivity(["a.md", "b.md", "c.md"], {
+      nowMs: NOW,
+      sessionsSinceMs: NOW - 8 * DAY,
+      gitTouches: new Map(),
+      workEvents: (r) => events[r],
+      sessionOf: (r, lastMs) => refs.get(`${r}\0${lastMs}`),
+    } as Parameters<typeof dailyActivity>[1]);
+    expect(daily).toEqual([{ day: osloDay(t), commits: 0, sessions: 2 }]);
+  });
+
   test("dailyActivity: days 9–28 count commits, sessions only inside the window", () => {
     const old = NOW - 15 * DAY;
     const daily = dailyActivity(["x.md"], {

@@ -132,6 +132,19 @@ describe("startWorkMapRun", () => {
     expect(state.attempts.map((a) => a.outcome)).toEqual(["ok"]);
   });
 
+  test("daily sessions dedupe one session across an effort's pages by the evidence's session id", async () => {
+    const t = NOW - 2 * DAY;
+    const withWork = pages.map((p, i) => ({ ...p, work: { sinceMs: NOW - 8 * DAY, state: "F", events: [[t + i * 60_000, 2, "focus"]] } }));
+    const rows = [
+      ["claude-code:s1", "plans/a.mdx", "plans/a.mdx", "focus", 2, t - 1, t],
+      ["claude-code:s1", "plans/b.mdx", "plans/a.mdx", "focus", 2, t - 1, t + 60_000],
+    ];
+    const index = { ...fakeIndex, pages: withWork, work: { ...fakeIndex.work, evidence: { contributions: { complete: true, reasons: [], cut: [], rows } } } } as unknown as WikiIndex;
+    const { d, writes } = deps({ inputs: { ...warm, rebuildIndex: async () => index } });
+    expect((await startWorkMapRun("mimir", d).promise).outcome).toBe("ok");
+    expect(parseWorkMap(writes[0]!.content)!.efforts[0]!.daily).toEqual([{ day: "2026-10-18", commits: 0, sessions: 1 }]);
+  });
+
   test("WORK_MAP_EFFORT reaches the model request when set", async () => {
     const { d, models } = deps();
     await startWorkMapRun("mimir", { ...d, config: { ...d.config, workMapEffort: "high" } }).promise;

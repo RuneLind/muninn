@@ -223,7 +223,7 @@ export function buildWorkMapDigest(input: DigestInput): WorkMapDigest {
       p.movesYou && `waits-on-owner=${p.movesYou}`,
       p.culled && "retired",
       `worked=${ago(p.workedMs)}`,
-      `commit=${ago(commits.length ? commits[commits.length - 1]!.ts : p.gitTouchedMs)}`,
+      `commit=${ago(p.gitTouchedMs)}`,
       commits.length && `commits28d=${commits.length}`,
       focus && `focusEvents=${focus}`,
       p.series && `series=${p.series}`,

@@ -345,12 +345,14 @@ async function organizeSteps(
   }
   const answer: WorkMapAnswer = parsed.data;
   const byRel = new Map(index.pages.map((p) => [p.relPath, p]));
+  const sessionRefs = new Map((work.evidence?.contributions.rows ?? []).map((r) => [`${r[1]}\0${r[6]}`, r[0]]));
   const normalized = normalizeWorkMapAnswer(answer, {
     rel: digest.rel,
     nowMs: runStart,
     sessionsSinceMs: work.sinceMs,
     gitTouches: index.gitTouches!,
     workEvents: (rel) => byRel.get(rel)?.work?.events,
+    sessionOf: (rel, lastMs) => sessionRefs.get(`${rel}\0${lastMs}`),
     ...(deps.declared ? { declared: deps.declared } : {}),
   });
   const map: WorkMap = {
