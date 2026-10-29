@@ -208,6 +208,29 @@ describe("the gate", () => {
   });
 });
 
+/** Whether `pid` is gone within `ms`. */
+async function diesWithin(pid: number, ms: number): Promise<boolean> {
+  for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(50)) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+/** A test's own cleanup: no stub process outlives it. */
+const reap = (...pids: number[]) => {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {}
+  }
+};
+async function waitFor(file: string, ms: number): Promise<void> {
+  for (const end = Date.now() + ms; !existsSync(file); await Bun.sleep(20)) if (Date.now() > end) throw new Error(`no ${file} in ${ms} ms`);
+}
+
 describe("gitRunner: bounded, no shell, no prompt", () => {
   test("gap: https never prompts — the env every git call gets; a local call gets no ssh command (batch 2: network calls only)", async () => {
     const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_SSH")));
@@ -225,29 +248,28 @@ describe("gitRunner: bounded, no shell, no prompt", () => {
 
   test("fix round 1: a stalled remote whose helper's child holds the pipes still returns within the bound, the whole group killed", async () => {
     // A fake `stall::` remote helper: a child that keeps git's stderr (our pipe) open, then it waits too.
+    // Fix round 2 batch 2: the child ignores SIGTERM, so only the SIGKILL after it ends the child; git may not start the helper
+    // inside a short bound on a loaded machine, so the bound doubles until it has.
     const bin = tmp();
     const pidFile = path.join(bin, "child.pid");
-    writeFileSync(path.join(bin, "git-remote-stall"), `#!/bin/sh\nsleep 30 &\necho $! > ${pidFile}\nsleep 30\n`);
+    writeFileSync(path.join(bin, "git-remote-stall"), `#!/bin/sh\n(trap '' TERM; exec sleep 30) &\necho $! > ${pidFile}.tmp && mv ${pidFile}.tmp ${pidFile}\nsleep 30\n`);
     chmodSync(path.join(bin, "git-remote-stall"), 0o755);
     const main = await repo();
     const stallGit = gitRunner("git", { ...process.env, PATH: `${bin}:${process.env.PATH}` });
-    const t0 = Date.now();
-    const r = await stallGit(["fetch", "stall::x"], main, 500);
-    const took = Date.now() - t0;
-    expect(r.timedOut).toBe(true);
-    expect(took).toBeLessThan(3_000);
-    const child = Number(readFileSync(pidFile, "utf8"));
-    let alive = true;
-    for (let i = 0; i < 20 && alive; i++) {
-      try {
-        process.kill(child, 0);
-        await Bun.sleep(50);
-      } catch {
-        alive = false;
-      }
+    for (let bound = 1_000; !existsSync(pidFile); bound *= 2) {
+      if (bound > 8_000) throw new Error("git never started the stub helper");
+      const t0 = Date.now();
+      const r = await stallGit(["fetch", "stall::x"], main, bound);
+      expect(r.timedOut).toBe(true);
+      expect(Date.now() - t0).toBeLessThan(bound + 3_000);
     }
-    expect(alive).toBe(false);
-  }, 15_000);
+    const child = Number(readFileSync(pidFile, "utf8"));
+    try {
+      expect(await diesWithin(child, 2_000)).toBe(true);
+    } finally {
+      reap(child);
+    }
+  }, 40_000);
 
   test("fix round 1: a grandchild that leaves the group and keeps the pipe open does not hold the call past the bound", async () => {
     const bin = tmp();
@@ -259,6 +281,70 @@ describe("gitRunner: bounded, no shell, no prompt", () => {
     expect(r.timedOut).toBe(true);
     expect(Date.now() - t0).toBeLessThan(3_000);
   }, 15_000);
+
+  test("fix round 2 batch 2: a timed-out call that holds index.lock leaves no lock behind", async () => {
+    // git removes its lock files on SIGTERM, not on SIGKILL: a pre-commit hook that sleeps holds index.lock past the bound.
+    const main = await repo();
+    const hookPid = path.join(main, "hook.pid");
+    // The hook's own SIGTERM cleanup takes 0.3 s, as git's lock removal takes its time: the SIGKILL must wait for it.
+    const cleaned = path.join(main, "hook.cleaned");
+    writeFileSync(path.join(main, ".git/hooks/pre-commit"), `#!/bin/sh\n(trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 &\necho "$$ $!" > ${hookPid}\ntrap 'sleep 0.3; touch ${cleaned}; exit 1' TERM\nsleep 30\n`);
+    chmodSync(path.join(main, ".git/hooks/pre-commit"), 0o755);
+    write(main, "plans/a.md", "# A, edited\n");
+    const r = await git(["commit", "-a", "-q", "-m", "x"], main, 700);
+    // The hook, and a child of it that ignores SIGTERM and closed its pipes, so the call returns before the SIGKILL is due.
+    const pids = existsSync(hookPid) ? readFileSync(hookPid, "utf8").trim().split(" ").map(Number) : [];
+    try {
+      expect(r.timedOut).toBe(true);
+      expect(pids.length).toBe(2);
+      expect(existsSync(path.join(main, ".git/index.lock"))).toBe(false);
+      for (const pid of pids) expect([pid, await diesWithin(pid, 3_000)]).toEqual([pid, true]);
+      expect(existsSync(cleaned)).toBe(true);
+    } finally {
+      reap(...pids);
+    }
+  }, 15_000);
+
+  test("fix round 2 batch 2: SIGINT, SIGTERM, SIGHUP or an exit while a call stalls kills the call's whole group", async () => {
+    // The helper's child ignores SIGTERM: only the SIGKILL that follows ends it.
+    const bin = tmp();
+    const helperPid = path.join(bin, "helper.pid");
+    const childPid = path.join(bin, "child.pid");
+    writeFileSync(path.join(bin, "git-remote-stall"), `#!/bin/sh\necho $$ > ${helperPid}\n(trap '' TERM; exec sleep 30) &\necho $! > ${childPid}.tmp && mv ${childPid}.tmp ${childPid}\nsleep 30\n`);
+    chmodSync(path.join(bin, "git-remote-stall"), 0o755);
+    const driver = path.join(bin, "driver.ts");
+    writeFileSync(
+      driver,
+      `import { existsSync } from "node:fs";
+import { gitRunner } from ${JSON.stringify(path.join(import.meta.dir, "wiki-stale-handoff.ts"))};
+const [mode, main, bin] = process.argv.slice(2);
+const call = gitRunner("git", { ...process.env, PATH: bin + ":" + process.env.PATH })(["fetch", "stall::x"], main, 60_000);
+if (mode === "exit") {
+  while (!existsSync(${JSON.stringify(childPid)})) await Bun.sleep(20);
+  process.exit(0);
+}
+await call;
+`,
+    );
+    const main = await repo();
+    for (const [mode, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129], ["exit", 0]] as const) {
+      rmSync(childPid, { force: true });
+      rmSync(helperPid, { force: true });
+      const proc = Bun.spawn([process.execPath, "--no-env-file", driver, mode, main, bin], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      let pids: number[] = [];
+      try {
+        await waitFor(childPid, 15_000);
+        pids = [Number(readFileSync(helperPid, "utf8")), Number(readFileSync(childPid, "utf8"))];
+        if (mode !== "exit") proc.kill(mode);
+        const exited = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "hung")]);
+        expect([mode, exited]).toEqual([mode, code]);
+        for (const pid of pids) expect([mode, pid, await diesWithin(pid, 2_000)]).toEqual([mode, pid, true]);
+      } finally {
+        proc.kill("SIGKILL");
+        reap(...pids);
+      }
+    }
+  }, 90_000);
 
   test("fix round 1: an inherited GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE never aims a call at another repo", async () => {
     const other = await repo();

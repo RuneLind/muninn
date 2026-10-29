@@ -32,7 +32,8 @@
  *   cannot be counted on missing reports), and no Check starts that could run
  *   past the printed bound.
  *
- * Exits 0 always (D13): every outcome, a usage error and a missing git
+ * Exits 0 always (D13), unless a SIGINT, SIGTERM or SIGHUP stops it (128 +
+ * the signal, its git calls ended first): every outcome, a usage error and a missing git
  * included, ends in a `Stale:` line. git runs through {@link runGit}: no
  * shell, a bound per call, no prompt (`GIT_TERMINAL_PROMPT=0`; ssh in batch
  * mode unless the user configured their own ssh command).
@@ -77,8 +78,36 @@ export type Git = (args: string[], cwd: string, timeoutMs?: number) => Promise<G
 
 /** Repo-aiming variables a caller (a git hook, another repo's shell) can leak; each call finds its repo from `cwd`. */
 const REPO_ENV = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX"];
-/** After the kill, how long the pipes may take to close before the call returns without the rest. */
+/** After the SIGTERM, how long git may take to remove its lock files and exit before the group gets SIGKILL. */
+const TERM_GRACE_MS = 1_000;
+/** After the SIGKILL, how long the pipes may take to close before the call returns without the rest. */
 const PIPE_GRACE_MS = 500;
+/** Process groups of the git calls still running: a signal or exit of this process ends them too. */
+const liveGroups = new Set<number>();
+const signalGroup = (pgid: number, sig: NodeJS.Signals) => {
+  try {
+    process.kill(-pgid, sig);
+    return true;
+  } catch {
+    return false;
+  }
+};
+/** SIGTERM every live group, wait up to TERM_GRACE_MS for them to go (synchronously: an exit handler cannot await), then SIGKILL the rest. */
+function endLiveGroups() {
+  const groups = [...liveGroups];
+  liveGroups.clear();
+  for (const g of groups) signalGroup(g, "SIGTERM");
+  const tick = new Int32Array(new SharedArrayBuffer(4));
+  for (const end = Date.now() + TERM_GRACE_MS; Date.now() < end && groups.some((g) => signalGroup(g, 0 as any)); ) Atomics.wait(tick, 0, 0, 20);
+  for (const g of groups) signalGroup(g, "SIGKILL");
+}
+let exitHooked = false;
+function hookExit() {
+  if (exitHooked) return;
+  exitHooked = true;
+  process.on("exit", endLiveGroups);
+  for (const [sig, n] of [["SIGINT", 2], ["SIGTERM", 15], ["SIGHUP", 1]] as const) process.on(sig, () => process.exit(128 + n));
+}
 /** The ssh a network call gets when the user configured none. */
 const BATCH_SSH = "ssh -o BatchMode=yes -o ConnectTimeout=10";
 const NETWORK_VERBS = new Set(["pull", "fetch", "push", "ls-remote", "clone"]);
@@ -93,9 +122,12 @@ function verbOf(args: readonly string[]): string | undefined {
 
 /**
  * Run git without a shell, bounded, and never waiting on a prompt. git runs
- * in its own process group, so a timeout kills `git fetch`, a remote helper
- * and ssh with it; the call returns at the bound even if one of them still
- * holds a pipe open.
+ * in its own process group, so a timeout ends `git fetch`, a remote helper
+ * and ssh with it: SIGTERM first, so git removes its lock files, then SIGKILL
+ * after {@link TERM_GRACE_MS}. The call returns by the bound plus both graces
+ * even if a process that left the group still holds a pipe open. A SIGINT,
+ * SIGTERM or SIGHUP to this process, or its exit, ends every running call's
+ * group the same way first.
  */
 export function gitRunner(bin = "git", baseEnv: Record<string, string | undefined> = process.env): Git {
   const run: Git = async (args, cwd, timeoutMs = GIT_TIMEOUT_MS) => {
@@ -106,6 +138,7 @@ export function gitRunner(bin = "git", baseEnv: Record<string, string | undefine
       const cfg = await run(["config", "--get", "core.sshCommand"], cwd);
       if (cfg.code !== 0 || !cfg.stdout.trim()) env.GIT_SSH_COMMAND = BATCH_SSH;
     }
+    hookExit();
     let proc: ReturnType<typeof Bun.spawn>;
     try {
       proc = Bun.spawn([bin, ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env, detached: true });
@@ -113,20 +146,20 @@ export function gitRunner(bin = "git", baseEnv: Record<string, string | undefine
       const msg = err instanceof Error ? err.message : String(err);
       return { code: -1, stdout: "", stderr: msg, missing: /ENOENT|not found|No such file/i.test(msg) };
     }
-    const killGroup = () => {
-      try {
-        process.kill(-proc.pid, "SIGKILL");
-      } catch {
-        proc.kill("SIGKILL");
-      }
-    };
+    const pgid = proc.pid;
+    liveGroups.add(pgid);
+    const kill = (sig: NodeJS.Signals) => signalGroup(pgid, sig) || proc.kill(sig);
     let timedOut = false;
     let release: () => void = () => {};
     const released = new Promise<void>((r) => (release = r));
     const timer = setTimeout(() => {
       timedOut = true;
-      killGroup();
-      setTimeout(release, PIPE_GRACE_MS);
+      kill("SIGTERM");
+      // Not cleared when the call returns: a group member that outlived git's exit still gets the SIGKILL.
+      setTimeout(() => {
+        if (liveGroups.delete(pgid)) kill("SIGKILL");
+        setTimeout(release, PIPE_GRACE_MS);
+      }, TERM_GRACE_MS);
     }, timeoutMs);
     const chunks = { stdout: "", stderr: "" };
     const drain = async (name: "stdout" | "stderr") => {
@@ -145,6 +178,7 @@ export function gitRunner(bin = "git", baseEnv: Record<string, string | undefine
       return { code: timedOut ? -1 : code, stdout: chunks.stdout, stderr: chunks.stderr, ...(timedOut ? { timedOut } : {}) };
     } finally {
       clearTimeout(timer);
+      if (!timedOut) liveGroups.delete(pgid);
     }
   };
   return run;
