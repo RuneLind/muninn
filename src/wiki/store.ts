@@ -39,7 +39,7 @@ import {
 } from "../format/markdown-ast.ts";
 import { diagramSiblingRelPath, pageFileRefKinds } from "../format/query-block.ts";
 import { parseEmbedAttrs, resolveEmbedRelPath } from "../format/embed.ts";
-import { buildWikiGitDates, type TouchRecord } from "./git-dates.ts";
+import { buildWikiGitDates, type MetadataFilterOutcome, type TouchRecord } from "./git-dates.ts";
 import { isLivingPage, resolveStatusLineHits, statusLineCandidates, type StatusLineCandidate, type StatusLineHit } from "./stale.ts";
 import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
@@ -1043,6 +1043,12 @@ export interface WikiIndex {
    * rules' `asOf` steps back through. Absent without git.
    */
   gitTouches?: Map<string, TouchRecord[]>;
+  /**
+   * Whether the metadata-only filter behind each page's `gitTouchedMs` ran to
+   * completion on this build (`WikiGitDates.metadataFilter`). Absent without
+   * git. The work map records a degraded walk in its coverage.
+   */
+  gitMetadataFilter?: MetadataFilterOutcome;
 }
 
 /** A page the same-stem precedence rule dropped, and the page that displaced it. */
@@ -4228,7 +4234,7 @@ export async function buildWikiIndex(
     ...(work ? { work } : {}),
     issueKeys: buildIssueKeyIndex(pages, trackers),
     statusLineHits,
-    ...(gitDates ? { gitTouches: gitDates.touchCommits } : {}),
+    ...(gitDates ? { gitTouches: gitDates.touchCommits, gitMetadataFilter: gitDates.metadataFilter } : {}),
   };
 }
 

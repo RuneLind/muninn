@@ -51,6 +51,7 @@ export const KIND_CHIP_CLASS: Record<string, string> = {
   RESEARCH: "kind-research",
   EXTRACTOR: "kind-extractor",
   PROFILE: "kind-profile",
+  WORKMAP: "kind-digest",
 };
 
 /**
@@ -124,7 +125,7 @@ export function statusChipsScript(): string {
       window.__statusChips = true;
       var _e = window.esc || function(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
       var KIND = { WATCHER:'kind-watcher', TASK:'kind-task', CAPTURE:'kind-capture', DIGEST:'kind-digest',
-        FACTCHECK:'kind-factcheck', CHAT:'kind-chat', GARDENER:'kind-gardener', RESEARCH:'kind-research', EXTRACTOR:'kind-extractor', PROFILE:'kind-profile' };
+        FACTCHECK:'kind-factcheck', CHAT:'kind-chat', GARDENER:'kind-gardener', RESEARCH:'kind-research', EXTRACTOR:'kind-extractor', PROFILE:'kind-profile', WORKMAP:'kind-digest' };
       var RUN_TONE = {
         succeeded:'run-success', success:'run-success',
         degraded:'run-warning', warning:'run-warning', stale:'run-warning',

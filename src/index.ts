@@ -25,6 +25,7 @@ import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-swee
 import { answerRetentionBootLines, startAnswerRetentionSweep, stopAnswerRetentionSweep } from "./wiki/answer-retention.ts";
 import { retentionCleanupBootLine, startRetentionCleanup, stopRetentionCleanup } from "./scheduler/retention-cleanup.ts";
 import { startStaleConfirmLoop, stopStaleConfirmLoop } from "./wiki/stale-confirm.ts";
+import { startWorkMapLoop, stopWorkMapLoop } from "./wiki/work-map/loop.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
@@ -299,6 +300,16 @@ if (staleConfirmWikis.length) {
   log.info("Stale confirm loop on (every 5 min after a run ends): {wikis}", { wikis: staleConfirmWikis.join(", ") });
 }
 
+// The work map's nightly organize (`src/wiki/work-map/`): beside the stale
+// loop, on the write owner only, for the wikis WORK_MAP_WIKIS names.
+const workMapWikis = startWorkMapLoop(config);
+if (workMapWikis.length) {
+  log.info("Work map loop on (daily from {hour}:00 Europe/Oslo): {wikis}", {
+    hour: config.workMapHour,
+    wikis: workMapWikis.join(", "),
+  });
+}
+
 // Start research_knowledge MCP server. Bots opt in by adding the server to their
 // .mcp.json — bots without it just don't see the tool.
 try {
@@ -566,6 +577,7 @@ async function shutdown() {
   const answerRetentionStopped = stopAnswerRetentionSweep();
   const retentionCleanupStopped = stopRetentionCleanup();
   const staleConfirmStopped = stopStaleConfirmLoop();
+  const workMapStopped = stopWorkMapLoop();
   await wikiBucketMirrors?.stop();
   await waitForPendingTicks(10_000);
   // Let in-flight memory/goal/schedule extractions finish their DB writes
@@ -575,6 +587,7 @@ async function shutdown() {
   await answerRetentionStopped;
   await retentionCleanupStopped;
   await staleConfirmStopped;
+  await workMapStopped;
 
   for (const bot of telegramBotMap.values()) {
     bot.stop();

@@ -167,6 +167,9 @@ export interface BotConfig {
    * isolation. Prod bots leave this unset.
    */
   spawnArgs?: string[];
+  /** Env var names removed from the claude-cli spawn env, inherited ones
+   *  included. The work map omits `MAX_THINKING_TOKENS`. Prod bots leave this unset. */
+  spawnEnvOmit?: string[];
   /**
    * Tool names to exclude from the AI session. Set dynamically per-request
    * (e.g. for jira-analysis flows to block native tools and force MCP usage).

@@ -2254,6 +2254,33 @@ PR 3 of plan `muninn-wiki-drift-check`: a drafted fix (D8) lands through the exi
 
 Acceptance: `stale-fix.test.ts`, `wiki-stale-fix-routes.test.ts`, `src/gardener/stale-proposals.test.ts`, `e2e/wiki-stale-fix.spec.ts`.
 
+## Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`)
+
+A nightly, tool-less model run groups a wiki's recent activity into EFFORTS and writes them to `.work-map.json` at the wiki root, so every reader of the wiki reads one map (plan `muninn-wiki-work-map`, P1). No surface renders it yet: P2 adds the card, P3 the effort page.
+
+| File | What it owns |
+|---|---|
+| `schema.ts` | the zod schemas: the model's answer (`workMapAnswerSchema`, effort ids plain strings) and the stored map (`workMapSchema`, ids matching `EFFORT_ID_RE` = `^[a-z0-9][a-z0-9-]{0,63}$`, exported for the `?effort=` URL and lint) |
+| `digest.ts` | pure: the prompt from the rebuilt index, `log.md` and the previous map; short page ids (`p1`…) and the system prompt |
+| `normalize.ts` | pure: the nine ordered steps after validation (its docblock), the `⟨p12⟩` → `⟦relPath⟧` sigil rewrite, daily activity |
+| `join.ts` | `joinWorkMap(map, pages)`: every surface joins the map to the live listing by relPath through it |
+| `inputs.ts` | the warm-input gate |
+| `run.ts` | the run, its `BotConfig`, the `organizable` predicate, the per-wiki single-flight |
+| `write.ts` | the JSON write seam |
+| `state.ts` | the attempt record, `~/.muninn/work-map/<wiki>.json` |
+| `loop.ts` | the process loop and its stop hook, wired in `src/index.ts` beside the stale confirm loop's |
+
+Rules a caller can get wrong from outside:
+
+- **Inputs must be warm, or the run refuses.** The run awaits a worked-ledger answer from a refresh that STARTED after it (`workedLedgerStartedAfter`: an older in-flight refresh is waited out, not joined), then the sessions (`workSessionsForSession`, 15 s, checked `memo.asOfMs ≥ runStart`), then rebuilds the index (`getWikiIndex({ refresh: true })`) and checks the rebuild folded both in and carries `gitTouches`. Any miss refuses with a reason and keeps the previous map; an unset `CLAUDE_USAGE_URL` refuses as «claude-usage not configured». A refusal costs no model call.
+- **The active list reads `gitTouchedMs`, not raw commits.** A lint-accept or stamp burst on fewer than 10 pages is not a sweep, so only the metadata-only filter keeps it out. The walk now reports when that filter degraded (`WikiGitDates.metadataFilter` → `WikiIndex.gitMetadataFilter`: the 5 s budget, or a page whose last 8 touches are all metadata-only), and the map records it in `coverage` with a warning. Per-day commit counts come from `gitTouches`, which skips sweeps but not metadata-only commits.
+- **The run's `BotConfig` is built from scratch** (`workMapBotConfig`): `claude-cli`, `WORK_MAP_MODEL`, `toolSurface: "none"`, the empty `.fenced` agent home as `dir`, and `spawnArgs` `--setting-sources "" --no-session-persistence --settings {"autoMemoryEnabled":false}`. `runFencedOneShot` gets `thinkingMaxTokens: null`, so no budget and no `--effort` is sent unless `WORK_MAP_EFFORT` names one; `spawnEnvOmit` removes a `MAX_THINKING_TOKENS` muninn inherited from its own env. `argv.test.ts` pins the spawned argv.
+- **A failed or invalid run keeps the previous map.** Invalid JSON, a zod mismatch, a thrown model call or a write that did not land records a `failed` attempt and writes nothing. Every attempt lives in the state file, never in the committed map, so a failing hour makes no commit.
+- **The write is a seam, not a page write.** `writeWorkMapFile` refuses on a readonly instance or root before opening anything, joins the per-wiki write queue and the cross-process `.wiki-write.lock`, commits `.work-map.json` alone OUTSIDE both (pushing where the repo has an upstream), and writes NO `log.md` entry: a nightly line would feed the next digest and What's new. The index skips dot files, so the map never lists as a page.
+- **The loop** starts only when `WORK_MAP_WIKIS` names a covered wiki, the scheduler is on, the instance is not readonly and the profile is not `nais`. A 60 s tick compares the clock with the previous tick (timers stop while a Mac sleeps); it checks on the first tick, hourly, and at once after a wake, retrying a post-wake refusal every 5 minutes up to three times. A wiki is due past `WORK_MAP_HOUR` (Europe/Oslo) with no success in 20 h; two failures after the model call since the day's hour wait for the next day. The stop hook writes and commits nothing after it fires (a model call in flight is not cancelled, its answer is dropped) and waits for a write already in its section.
+- **The routes** (`dashboard/routes/wiki-work-map.ts`, `wiki` tool group): `GET /api/wiki/work-map?wiki=` reads the file and adds `organizable` and, on that instance, the last attempt (`LOCAL` in `side-effecting-gets.test.ts`). `POST /api/wiki/work-map/refresh?wiki=[&force=1]` is JSON-gated, refuses 403 before any model call unless `organizable` holds here (a readonly root answers the egress body), joins a run in flight, answers 429 without `force=1` when a run succeeded less than 10 minutes ago (`lastSuccessAt`) or a run that failed started less than 10 minutes ago (`lastFailedAt`; an attempt's time is its start), neither recorded as an attempt, and otherwise starts the run and answers 202 at once: a run outlasts Bun's 255 s `idleTimeout`, so the card polls the GET.
+- **P6 seams:** normalization step 4 is the `declared` hook (a no-op until P6), and `retired[]` is not in the schema yet.
+
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 
 The Connections panel's first section: the pages one hop from the open page,
@@ -4381,11 +4408,12 @@ There are **two** read-only switches, and they answer different questions. Neith
 
 `MUNINN_WIKI_READONLY=1` marks an instance as NOT the wiki write owner. Muninn runs on two machines against the same wiki working trees, and `SCHEDULER_ENABLED=false` closes only the scheduler — on the default profile `createDashboardRoutes` registers every route group (only `MUNINN_PROFILE=nais` drops some), so the whole HTTP write surface stays live on the non-owner.
 
-**It forbids page CONTENT writes, not git.** Enforced at exactly three seams, each taking an injectable `isReadonly` that defaults to `isWikiReadonly()` (so a call site added later is guarded by default, and a test drives one seam without touching the process env):
+**It forbids page CONTENT writes, not git.** Enforced at exactly four seams, each taking an injectable `isReadonly` that defaults to `isWikiReadonly()` (so a call site added later is guarded by default, and a test drives one seam without touching the process env):
 
 - `writeWikiPage` → new `forbidden` outcome variant, returned BEFORE the read (nothing is opened, no `log.md` is created). `appendBlockToPage` propagates it.
 - `applyWikiProposal` → same variant, returned before the write queue is entered.
 - `writePlanQueue` (`src/plans/write.ts`) → same variant, before the file is opened. It is the third content seam because `writeWikiPage` cannot carry `plans/queue.yaml` (path confinement admits `.md`/`.mdx` only, correctly), so it repeats the guard, the per-wiki queue and the sha256 CAS rather than routing around them.
+- `writeWorkMapFile` (`src/wiki/work-map/write.ts`) → same variant, before anything is opened, for `.work-map.json` (the same `.md`/`.mdx` reason). It also refuses a `WIKI_READONLY_ROOTS` root.
 
 All three map to **403** with the SAME body everywhere — `{error, readonly: true}` — deliberately not collapsed into the generic `error` (⇒ 500), since a refusal is not a failure.
 

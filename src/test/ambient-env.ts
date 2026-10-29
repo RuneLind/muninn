@@ -206,6 +206,12 @@ const WIKI_LENS_FLAGS = ["WIKI_DEFAULT_LENS"];
  *  server on that machine only. The loop's tests pass the list explicitly. */
 const WIKI_STALE_FLAGS = ["WIKI_STALE_CONFIRM_WIKIS"];
 
+/** The work map's nightly organize (`src/wiki/work-map/`): `WORK_MAP_WIKIS`
+ *  would start a background Opus loop in every spawned server on that machine
+ *  only, and the other three change what it runs. The loop's tests pass their
+ *  config explicitly. */
+const WORK_MAP_FLAGS = ["WORK_MAP_WIKIS", "WORK_MAP_HOUR", "WORK_MAP_MODEL", "WORK_MAP_EFFORT"];
+
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.
  *
@@ -235,6 +241,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...WIKI_BUCKET_MIRROR_FLAGS,
   ...WIKI_LENS_FLAGS,
   ...WIKI_STALE_FLAGS,
+  ...WORK_MAP_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
   // fourteen route groups and turns every Claude-CLI spawn into a throw, so the

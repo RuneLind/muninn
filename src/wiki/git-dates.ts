@@ -143,7 +143,23 @@ export interface WikiGitDates {
    * on a hash-less log.
    */
   touchCommits: Map<string, TouchRecord[]>;
+  /**
+   * Whether the metadata-only filter behind `touched` ran to completion. The
+   * filter gives up past {@link GIT_DATES_CLASSIFY_TIMEOUT_MS} (or on a failed
+   * read) and answers `touched` unfiltered, and a page whose newest
+   * {@link METADATA_TOUCH_MAX_STEPS} touches are all metadata-only keeps the
+   * one it reached, unverified. Either way a lint-accept burst can read as
+   * edits; the work map records this in its coverage.
+   */
+  metadataFilter: MetadataFilterOutcome;
 }
+
+/** How {@link resolveMetadataOnlyTouches} ended. `steps` counts the pages still
+ *  unresolved after the last step; `budget` covers a failed read too. */
+export type MetadataFilterOutcome =
+  | { degraded: false }
+  | { degraded: true; reason: "budget" }
+  | { degraded: true; reason: "steps"; pages: number };
 
 /** A file entry from `--name-status`: a status letter, optional similarity score,
  *  then a TAB. Commit lines (`--format=%H %at`, hex and digits) can never match it,
@@ -733,9 +749,10 @@ async function resolveMetadataOnlyTouches(
   prefix: string,
   touched: Map<string, number>,
   touches: Map<string, TouchRecord[]>,
-): Promise<Map<string, number>> {
+): Promise<{ touched: Map<string, number>; outcome: MetadataFilterOutcome }> {
   // Set when the budget race is lost, so the loser spawns no further rounds.
   let aborted = false;
+  let unresolved = 0;
   const run = async (): Promise<Map<string, number>> => {
     const out = new Map(touched);
     let pending: { key: string; list: TouchRecord[]; i: number }[] = [];
@@ -776,6 +793,7 @@ async function resolveMetadataOnlyTouches(
       });
       pending = next;
     }
+    unresolved = pending.length;
     if (moved > 0) {
       log.debug("wiki {root}: {n} metadata-only commit touch(es) set aside", { root, n: moved });
     }
@@ -796,9 +814,12 @@ async function resolveMetadataOnlyTouches(
       "wiki {root}: metadata-only commit classification failed or exceeded its budget — touch dates unfiltered",
       { root },
     );
-    return touched;
+    return { touched, outcome: { degraded: true, reason: "budget" } };
   }
-  return resolved;
+  return {
+    touched: resolved,
+    outcome: unresolved > 0 ? { degraded: true, reason: "steps", pages: unresolved } : { degraded: false },
+  };
 }
 
 /**
@@ -826,7 +847,7 @@ export async function newestEditAtOrBefore(
   if (cut.size === 0) return touched;
   const top = (await git(root, ["rev-parse", "--show-toplevel"]))?.trim();
   if (!top) return touched;
-  return resolveMetadataOnlyTouches(root, top, "", touched, cut);
+  return (await resolveMetadataOnlyTouches(root, top, "", touched, cut)).touched;
 }
 
 /**
@@ -930,7 +951,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
 
   const parsed = parseGitLog(stdout);
   const created = parsed.created;
-  const touched = await resolveMetadataOnlyTouches(
+  const { touched, outcome: metadataFilter } = await resolveMetadataOnlyTouches(
     root,
     toplevel,
     prefix,
@@ -946,7 +967,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     touchTimes.set(p.slice(prefix.length), list.map((r) => r.ts));
     touchCommits.set(p.slice(prefix.length), list);
   }
-  if (!rel) return { created, touched, dirty, touchTimes, touchCommits };
+  if (!rel) return { created, touched, dirty, touchTimes, touchCommits, metadataFilter };
 
   // Translate repo-relative → wiki-relative, dropping anything outside the subtree
   // (the pathspec makes that rare, but a rename's SOURCE can legitimately sit
@@ -956,7 +977,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     for (const [p, ms] of m) if (p.startsWith(prefix)) out.set(p.slice(prefix.length), ms);
     return out;
   };
-  const out = { created: strip(created), touched: strip(touched), dirty, touchTimes, touchCommits };
+  const out = { created: strip(created), touched: strip(touched), dirty, touchTimes, touchCommits, metadataFilter };
   // The strip is the one step that can throw away EVERYTHING while git reported
   // success — a wrong prefix, or paths in a spelling the prefix can't match (the
   // `core.quotePath` class of bug). Distinguished here from the innocent
