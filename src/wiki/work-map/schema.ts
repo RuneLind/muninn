@@ -6,10 +6,18 @@
  * reject a night's run; `normalize.ts` slugifies them and drops what is still
  * invalid. The stored schema holds only ids that pass {@link EFFORT_ID_RE}.
  *
- * Every list drops a member that fails its own schema instead of rejecting the
- * answer. Required: the `efforts` array (with at least one valid member when it
- * is not empty), an effort's id, name, state and `pages` array, a page's id and
- * role, a needs-you item's title and kind.
+ * One tolerance rule for the whole answer (enumerated by `schema-state.test.ts`):
+ * - an OPTIONAL field of the wrong type reads as its default: `""` for prose,
+ *   `[]` for a list, `0` for confidence, absent for a reference;
+ * - a member failing a REQUIRED field is dropped alone. Required: an effort's
+ *   id, name, state and `pages` array; a page's id and role; a needs-you
+ *   item's title and kind; a theme's name; a related entry's id;
+ * - an effort id given as a JSON number (effort, related, theme member) reads
+ *   as its string form;
+ * - the night rejects only when `efforts` is not an array, or is non-empty
+ *   with no valid member. `efforts: []` is accepted.
+ * A page a dropped member named still reaches loose: `normalize.ts` puts every
+ * active page in no effort into loose.
  */
 
 import { z } from "zod";
@@ -41,14 +49,17 @@ function validMembers<T extends z.ZodTypeAny>(item: T, arr: unknown[]): z.output
     return r.success ? [r.data as z.output<T>] : [];
   });
 }
+/** A required string id that also takes a JSON number. */
+const effortRef = z.union([z.string(), z.number().transform(String)]);
 /** A required array whose odd members are dropped. */
 const members = <T extends z.ZodTypeAny>(item: T) =>
   z.array(z.unknown()).transform((arr) => validMembers(item, arr)) as unknown as z.ZodType<z.output<T>[], z.input<T>[]>;
-/** A list a model may omit or null (reads as empty); odd members are dropped. */
+/** An optional list: absent or not an array reads as empty; odd members are dropped. */
 const list = <T extends z.ZodTypeAny>(item: T) =>
   z
     .array(z.unknown())
     .nullish()
+    .catch(undefined)
     .transform((v) => validMembers(item, v ?? [])) as unknown as z.ZodType<z.output<T>[], z.input<T>[] | null | undefined>;
 
 const answerPage = z.object({
@@ -57,9 +68,11 @@ const answerPage = z.object({
   derivedFrom: optionalString,
 });
 
+const answerRelated = z.object({ id: effortRef, why: prose });
+
 /** Required: what the map cannot work without (id, name, state, pages). */
 const answerEffort = z.object({
-  id: z.string(),
+  id: effortRef,
   name: z.string(),
   aliases: list(z.string()),
   oneLine: prose,
@@ -69,7 +82,7 @@ const answerEffort = z.object({
   why: prose,
   confidence: z.number().nullish().catch(0).transform((v) => v ?? 0),
   next: prose,
-  related: list(z.object({ id: z.string(), why: prose })),
+  related: list(answerRelated),
 });
 
 const answerNeedsYou = z.object({
@@ -81,27 +94,38 @@ const answerNeedsYou = z.object({
   effort: optionalString,
 });
 
+const answerTheme = z.object({ name: z.string(), efforts: list(effortRef) });
+
 /** The organize model's answer, after `extractJson`. Unknown keys (the
  *  prototype's `corrections` and `views`) are stripped. Only `efforts` is
- *  required at the top level, so one omitted list cannot reject a night; a
- *  non-empty `efforts` with no valid member rejects, so the run keeps the
- *  previous map. */
+ *  required at the top level; a non-empty `efforts` with no valid member
+ *  rejects, so the run keeps the previous map. */
 export const workMapAnswerSchema = z.object({
   summary: prose,
   needsYou: list(answerNeedsYou),
-  themes: list(z.object({ name: z.string(), efforts: list(z.string()) })),
+  themes: list(answerTheme),
   efforts: z.array(z.unknown()).transform((arr, ctx) => {
     const valid = validMembers(answerEffort, arr);
     if (arr.length > 0 && valid.length === 0) {
       const first = answerEffort.safeParse(arr[0]);
       const issue = first.success ? undefined : first.error.issues[0];
-      ctx.addIssue({ code: "custom", message: `no effort matched the schema${issue ? ` (efforts.0.${issue.path.join(".")}: ${issue.message})` : ""}` });
+      ctx.addIssue({ code: "custom", message: `no effort matched the schema${issue ? ` (${["efforts", 0, ...issue.path].join(".")}: ${issue.message})` : ""}` });
       return z.NEVER;
     }
     return valid;
   }) as unknown as z.ZodType<z.output<typeof answerEffort>[], z.input<typeof answerEffort>[]>,
   loose: list(z.string()),
 });
+
+/** Each level's fields, for the state-space test. */
+export const ANSWER_SHAPES = {
+  top: workMapAnswerSchema.shape,
+  effort: answerEffort.shape,
+  page: answerPage.shape,
+  related: answerRelated.shape,
+  needsYou: answerNeedsYou.shape,
+  theme: answerTheme.shape,
+};
 
 export type WorkMapAnswer = z.infer<typeof workMapAnswerSchema>;
 /** The answer as the model may write it (optional fields absent). */

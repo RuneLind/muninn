@@ -4,8 +4,7 @@
  *
  *  1. Slugify every effort id and every reference to one, then drop an effort
  *     whose id still fails `EFFORT_ID_RE`.
- *  2. Drop a second effort with an id already used. A page of an effort
- *     dropped at step 1 or 2 goes to loose unless step 5 places it.
+ *  2. Drop a second effort with an id already used.
  *  3. Map short page ids to relPaths; drop an unknown page id and a reference
  *     to an effort that does not exist.
  *  4. Apply declared efforts (P6) — an ordered hook, a no-op until then.
@@ -14,6 +13,8 @@
  *  7. Clear a `parent` naming no effort (or closing a cycle).
  *  8. Drop an effort left with no pages.
  *  9. Compute daily activity.
+ * 10. Put every active page (the digest's id map) that no effort holds into
+ *     loose, wherever its member was dropped: schema, step 1, 2, 3, 5 or 8.
  *
  * Steps 3 and 7 run again after step 8, since a dropped effort can leave a
  * reference to it. The model is never asked for numbers: step 9 counts them.
@@ -74,10 +75,6 @@ export function linkifySigils(text: string, rel: ReadonlyMap<string, string>): s
 export function normalizeWorkMapAnswer(answer: WorkMapAnswer, ctx: NormalizeContext): NormalizedMap {
   const link = (s: string) => linkifySigils(s, ctx.rel);
 
-  // Steps 1 and 2 drop an effort but not its pages: those go to loose.
-  const dropped: string[] = [];
-  const keep = (e: NormalEffort, ok: boolean) => (ok ? true : (dropped.push(...e.pages.map((p) => p.id)), false));
-
   // 1. Slugify ids and references; drop what is still invalid.
   let efforts: NormalEffort[] = answer.efforts
     .map((e) => ({
@@ -93,13 +90,13 @@ export function normalizeWorkMapAnswer(answer: WorkMapAnswer, ctx: NormalizeCont
       next: e.next,
       related: e.related.map((r) => ({ id: slugifyEffortId(r.id), why: r.why })),
     }))
-    .filter((e) => keep(e, EFFORT_ID_RE.test(e.id)));
+    .filter((e) => EFFORT_ID_RE.test(e.id));
   let themes = answer.themes.map((t) => ({ name: t.name, efforts: t.efforts.map(slugifyEffortId) }));
   let needsYou = answer.needsYou.map((n) => ({ ...n, effort: n.effort === undefined ? undefined : slugifyEffortId(n.effort) }));
 
   // 2. A second effort with a used id goes.
   const seen = new Set<string>();
-  efforts = efforts.filter((e) => keep(e, seen.has(e.id) ? false : (seen.add(e.id), true)));
+  efforts = efforts.filter((e) => (seen.has(e.id) ? false : (seen.add(e.id), true)));
 
   // 3. Short page ids → relPaths; unknown ids and dangling effort references go.
   const toRel = (id: string) => ctx.rel.get(id);
@@ -113,7 +110,7 @@ export function normalizeWorkMapAnswer(answer: WorkMapAnswer, ctx: NormalizeCont
     }),
   }));
   needsYou = needsYou.map((n) => ({ ...n, pages: n.pages.map(toRel).filter((r): r is string => !!r) }));
-  let loose = [...answer.loose, ...dropped].map(toRel).filter((r): r is string => !!r);
+  let loose = answer.loose.map(toRel).filter((r): r is string => !!r);
   const dropDangling = () => {
     const known = new Set(efforts.map((e) => e.id));
     efforts = efforts.map((e) => ({ ...e, related: e.related.filter((r) => known.has(r.id) && r.id !== e.id) }));
@@ -179,6 +176,10 @@ export function normalizeWorkMapAnswer(answer: WorkMapAnswer, ctx: NormalizeCont
   efforts = efforts.filter((e) => e.pages.length > 0);
   dropDangling();
   clearParents();
+
+  // 10. Every active page sits in one effort or in loose.
+  const held = new Set([...efforts.flatMap((e) => e.pages.map((p) => p.id)), ...loose]);
+  for (const r of ctx.rel.values()) if (!held.has(r)) (held.add(r), loose.push(r));
 
   // 9. Daily activity, and the prose sigils.
   const out: WorkMapEffort[] = efforts.map((e) => ({

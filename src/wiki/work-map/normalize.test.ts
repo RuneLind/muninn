@@ -82,7 +82,7 @@ describe("normalizeWorkMapAnswer, step by step", () => {
       ctx(),
     );
     expect(out.efforts.map((e) => [e.id, e.pages.map((p) => p.id)])).toEqual([["ok", ["archive/alpha-report.mdx"]]]);
-    expect(out.loose).toEqual(["plans/alpha.mdx", "plans/beta.mdx"]);
+    expect(out.loose).toEqual(["plans/alpha.mdx", "plans/beta.mdx", "blogs/alpha.mdx"]);
   });
 
   test("2: a duplicate id keeps the first effort", () => {
@@ -99,7 +99,7 @@ describe("normalizeWorkMapAnswer, step by step", () => {
       ctx(),
     );
     expect(out.efforts.map((e) => [e.id, e.pages.map((p) => p.id)])).toEqual([["a", ["plans/alpha.mdx"]]]);
-    expect(out.loose).toEqual(["blogs/alpha.mdx", "plans/beta.mdx"]);
+    expect(out.loose).toEqual(["blogs/alpha.mdx", "plans/beta.mdx", "archive/alpha-report.mdx"]);
   });
 
   test("3: the id fields are remapped to relPaths; unknown page ids drop", () => {
@@ -115,7 +115,7 @@ describe("normalizeWorkMapAnswer, step by step", () => {
       { id: "archive/alpha-report.mdx", role: "report", derivedFrom: "plans/alpha.mdx" },
     ]);
     expect(out.needsYou[0]!.pages).toEqual(["archive/alpha-report.mdx"]);
-    expect(out.loose).toEqual(["plans/beta.mdx"]);
+    expect(out.loose).toEqual(["plans/beta.mdx", "blogs/alpha.mdx"]);
   });
 
   test("3: dangling effort references drop, including ones to an effort step 8 removed", () => {
@@ -161,7 +161,7 @@ describe("normalizeWorkMapAnswer, step by step", () => {
     );
     expect(out.efforts[0]!.pages.map((p) => p.id)).toEqual(["plans/alpha.mdx"]);
     expect(out.efforts[1]!.pages.map((p) => p.id)).toEqual(["plans/beta.mdx"]);
-    expect(out.loose).toEqual(["blogs/alpha.mdx"]);
+    expect(out.loose).toEqual(["blogs/alpha.mdx", "archive/alpha-report.mdx"]);
   });
 
   test("6: a derivedFrom outside its effort, on itself, or closing a cycle is cleared", () => {
@@ -300,7 +300,8 @@ describe("workMapAnswerSchema", () => {
     const out = normalizeWorkMapAnswer(parsed.success ? parsed.data : (null as never), ctx());
     expect(out.summary).toBe("");
     expect(out.themes).toEqual([]);
-    expect(out.loose).toEqual([]);
+    // An omitted loose: every page no effort holds lands there anyway.
+    expect(out.loose).toEqual(["plans/beta.mdx", "archive/alpha-report.mdx", "blogs/alpha.mdx"]);
     expect(out.needsYou.map((n) => [n.title, n.effort, n.pages, n.why])).toEqual([
       ["Decide", undefined, ["plans/alpha.mdx"], "w"],
       ["Resume", undefined, [], ""],
@@ -353,7 +354,7 @@ describe("workMapAnswerSchema", () => {
     expect(parsed.data.loose).toEqual(["p3"]);
     const out = normalizeWorkMapAnswer(parsed.data, ctx());
     expect(out.efforts.map((e) => [e.id, e.related.map((r) => r.id)])).toEqual([["a", ["b"]], ["b", []]]);
-    expect(out.loose).toEqual(["archive/alpha-report.mdx"]);
+    expect(out.loose).toEqual(["archive/alpha-report.mdx", "blogs/alpha.mdx"]);
     // Each shape the finding named, alone.
     const base = { summary: "s", needsYou: [], themes: [], loose: [], efforts: [good()] };
     const variants: [string, unknown][] = [
