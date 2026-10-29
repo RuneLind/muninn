@@ -527,7 +527,8 @@ test("Check says when it stopped at its call limit and how many pages remain (A1
     probe.remove();
     return c;
   });
-  expect(await p.locator("[data-stale-cap]").evaluate((el) => getComputedStyle(el).color)).toBe(tokenColor);
+  // Retrying: the tab re-renders after the stream ends, and a detached node reads color "".
+  await expect(p.locator("[data-stale-cap]")).toHaveCSS("color", tokenColor);
   await expect(p.locator("#wikiStaleCheckBtn")).toHaveText("Check 1 page");
   await expect(p.locator("#wikiStaleProgress")).toHaveText("10 of 11 checked");
 });

@@ -47,6 +47,13 @@
  *   spend most of the 25 s budget rebuilding.
  * - Base URL: `--base-url`, else `WIKI_STALE_MUNINN_URL`, else
  *   http://127.0.0.1:3010.
+ * - `--handoff [--check]` (`wiki-stale-handoff.ts`): checkpoint-handoff's
+ *   Stale step as two calls. Pages are absolute paths (main checkout or a
+ *   worktree), mapped through git; the first call gates the wiki's main
+ *   checkout (pull on its default branch), prints the free report and the
+ *   session's own lines to fix; the second, after those fixes are committed,
+ *   gates again, runs Check and the sends within the cap (≤3 pages that spend
+ *   model calls) and prints one `Stale:` line per wiki for the resume prompt.
  *
  * It reports and exits 0 always (D13), a usage error, an unreachable muninn
  * and an answer of the wrong shape included. The free reports share one
@@ -63,7 +70,8 @@ import path from "node:path";
 
 export const DEFAULT_BASE_URL = "http://127.0.0.1:3010";
 export const USAGE =
-  "usage: bun --no-env-file scripts/wiki-stale.ts --wiki <name> [--pages <relPath>…] [--session <id>] [--as-of YYYY-MM-DD] [--check [--send]] [--base-url <url>] [--json]";
+  "usage: bun --no-env-file scripts/wiki-stale.ts --wiki <name> [--pages <relPath>…] [--session <id>] [--as-of YYYY-MM-DD] [--check [--send]] [--base-url <url>] [--json]\n" +
+  "       bun --no-env-file scripts/wiki-stale.ts --handoff --pages <abs path>… [--session <id>] [--wiki <name>] [--main <abs dir>] [--as-of …] [--base-url <url>] [--check]";
 
 export interface StaleArgs {
   wiki?: string;
@@ -74,11 +82,15 @@ export interface StaleArgs {
   send: boolean;
   json: boolean;
   baseUrl?: string;
+  /** `--handoff`: the checkpoint-handoff step (`wiki-stale-handoff.ts`). */
+  handoff: boolean;
+  /** `--main` (with `--handoff`): the wiki's main checkout. */
+  main?: string;
 }
 
 /** Parse argv (after the script path). Unknown flags are reported, not fatal. */
 export function parseStaleArgs(argv: readonly string[]): { args: StaleArgs; errors: string[] } {
-  const args: StaleArgs = { pages: [], check: false, send: false, json: false };
+  const args: StaleArgs = { pages: [], check: false, send: false, json: false, handoff: false };
   const errors: string[] = [];
   const value = (i: number, flag: string): string | undefined => {
     const v = argv[i + 1];
@@ -125,6 +137,12 @@ export function parseStaleArgs(argv: readonly string[]): { args: StaleArgs; erro
         break;
       case "--json":
         args.json = true;
+        break;
+      case "--handoff":
+        args.handoff = true;
+        break;
+      case "--main":
+        args.main = take();
         break;
       default:
         errors.push(`unknown argument ${a}`);
@@ -291,6 +309,39 @@ export function formatSummary(r: Json): string[] {
   return out;
 }
 
+/** One page's Check, as it streamed (for `--handoff`). */
+export interface CheckRecord {
+  start?: Json;
+  verdicts: Json[];
+  errors: Json[];
+  /** Why the Check ended without its `done`: a refusal, an `app_error`, the 5-min bound. */
+  failure?: string;
+}
+
+/**
+ * What a run got, as data rather than lines, so `--handoff` composes its
+ * `Stale:` line from every part that completed (a muninn that fails mid-run
+ * keeps the reports, verdicts and sends before it).
+ */
+export interface StaleLedger {
+  /** The first reason no further report could be read (muninn not reachable, …). */
+  stopped?: string;
+  /** The reports' shared deadline ran out: no report after it was asked for. */
+  reportDeadline?: boolean;
+  reports: Json[];
+  /** A page the route answered with an error or a wrong shape. */
+  pageErrors: { page: string; error: string }[];
+  checks: Record<string, CheckRecord>;
+  sends: { changed: string; linking: string; outcome: string; error?: string }[];
+  /** Why the sends stopped: «sends timed out», «no send route», «readonly». */
+  sendsStopped?: string;
+  readonly: "instance" | "wiki" | null;
+  /** The pages muninn's work memo lists for `--session`; absent when the memo was not answered. */
+  sessionPages?: string[];
+}
+
+export const newLedger = (): StaleLedger => ({ reports: [], pageErrors: [], checks: {}, sends: [], readonly: null });
+
 /**
  * Run the script: returns the lines to print. Never throws — every failure
  * is a line — so the caller always exits 0, and the whole run ends within
@@ -312,10 +363,22 @@ export async function runWikiStale(
     sendDeadlineMs?: number;
     /** Called with each line as it is made (the script prints through it). */
     write?: (line: string) => void;
+    /** Filled as the run goes (`--handoff`). */
+    ledger?: StaleLedger;
+    /** With `--check`: called once every report is in, it names the pages to
+     *  Check (`--handoff`'s cap); without it each changed page is checked as
+     *  its report arrives. */
+    planChecks?: (reports: Json[]) => string[];
+    /** With `planChecks`: asked before each planned page's Check; false skips it (`--handoff`'s run bound). */
+    beforeCheck?: (page: string) => boolean;
+    /** False: the page reports are read, not printed (`--handoff --check`). */
+    printReports?: boolean;
   } = {},
 ): Promise<string[]> {
   const { args, errors } = parseStaleArgs(argv);
   const notice = (text: string) => (args.json ? JSON.stringify({ notice: text }) : text);
+  if (args.handoff) errors.push("--handoff runs through runHandoff (scripts/wiki-stale-handoff.ts)");
+  if (args.main !== undefined && !args.handoff) errors.push("--main works only with --handoff");
   if (errors.length || !args.wiki) {
     const usage = [...errors.map((e) => `wiki-stale: ${e}`), ...(args.wiki ? [] : ["wiki-stale: --wiki is required"]), USAGE].map(notice);
     for (const l of usage) deps.write?.(l);
@@ -353,6 +416,8 @@ export async function runWikiStale(
   const deadlineMs = deps.deadlineMs ?? RUN_DEADLINE_MS;
   const checkDeadlineMs = deps.checkDeadlineMs ?? CHECK_PAGE_DEADLINE_MS;
   const sendDeadlineMs = deps.sendDeadlineMs ?? SEND_DEADLINE_MS;
+  const ledger = deps.ledger ?? newLedger();
+  const stop = (why: string) => (ledger.stopped ??= why);
   /** The `stale` verdicts the Checks streamed, for `--send`. */
   const staleFound: { changed: string; linking: string; edit: Json | null }[] = [];
   /** The relPaths the route answered for the run's own pages. */
@@ -383,7 +448,8 @@ export async function runWikiStale(
     try {
       const got = await bounded(freeLeftMs, (signal) => fetchJson(u, signal)).finally(() => (freeLeftMs -= Date.now() - t0));
       if (got === "deadline") {
-        late = true;
+        late = ledger.reportDeadline = true;
+        stop(`muninn did not answer in ${deadlineMs / 1000} s`);
         out.push(notice(`wiki-stale: muninn did not answer in ${deadlineMs / 1000} s — no stale report`));
         return null;
       }
@@ -392,18 +458,26 @@ export async function runWikiStale(
       if (body?.readonly) readonly = body.readonly === "root" ? "wiki" : "instance";
       if (args.json) out.push(JSON.stringify(body));
       if (status >= 400 || body?.error) {
-        out.push(notice(`wiki-stale: ${body?.error ?? `HTTP ${status}`}${extra.page ? ` (${extra.page})` : ""}`));
+        const error = String(body?.error ?? `HTTP ${status}`);
+        // A page the index lacks is that page's; any other refusal holds for the run.
+        if (extra.page && error.startsWith("no page ")) ledger.pageErrors.push({ page: extra.page, error });
+        else stop(error);
+        out.push(notice(`wiki-stale: ${error}${extra.page ? ` (${extra.page})` : ""}`));
         return null;
       }
       if (!isObj(body) || !valid(body)) {
+        if (extra.page) ledger.pageErrors.push({ page: extra.page, error: "unexpected answer" });
+        else stop("unexpected answer from muninn");
         out.push(notice(`wiki-stale: unexpected answer from ${base} for ${what} — is --base-url a muninn of this version?`));
         return null;
       }
       return body;
     } catch (err) {
       if (err instanceof NotJson) {
+        stop("muninn has no Stale check");
         out.push(notice(`wiki-stale: unexpected answer (not JSON) from ${u}${err.message}`));
       } else {
+        stop("muninn not reachable");
         out.push(notice(`wiki-stale: cannot reach muninn at ${base}: ${err instanceof Error ? err.message : String(err)}`));
       }
       return null;
@@ -426,7 +500,9 @@ export async function runWikiStale(
         const tail = memo.length ? ` (${memo.join("; ")})` : "";
         if (!sess.found) out.push(notice(`wiki-stale: session ${args.session} wrote nothing in ${args.wiki} in the work memo's window${sess.error ? ` (${sess.error})` : ""}${tail}`));
         else out.push(notice(`session ${args.session}: ${sess.pages.length} page(s) in ${args.wiki}${tail}`));
-        pages = [...new Set([...pages, ...sess.pages.filter((p: unknown): p is string => typeof p === "string")])];
+        const listed: string[] = sess.pages.filter((p: unknown): p is string => typeof p === "string");
+        ledger.sessionPages = listed;
+        pages = [...new Set([...pages, ...listed])];
       }
     }
 
@@ -440,12 +516,15 @@ export async function runWikiStale(
             ownResolved.add(r.page.relPath);
             ownUnresolved.delete(page);
           }
-          if (r && !args.json) out.push(...formatPageReport(r), "");
-          if (r && args.check && !readonly && r.buckets) await check(r.page.relPath);
+          if (r && !args.json && deps.printReports !== false) out.push(...formatPageReport(r), "");
+          if (r) ledger.reports.push(r);
+          if (r && args.check && !readonly && r.buckets && !deps.planChecks) await check(r.page.relPath);
         } catch (err) {
+          ledger.pageErrors.push({ page, error: "unexpected answer" });
           out.push(notice(`wiki-stale: unexpected answer from ${base} for page ${page}: ${err instanceof Error ? err.message : String(err)}`));
         }
       }
+      if (args.check && deps.planChecks && !readonly) for (const p of deps.planChecks(ledger.reports)) if (deps.beforeCheck?.(p) !== false) await check(p);
     } else if (!args.session) {
       const r = await ask({}, isSummary, "the summary");
       if (r && !args.json) out.push(...formatSummary(r));
@@ -455,6 +534,7 @@ export async function runWikiStale(
   } catch (err) {
     out.push(notice(`wiki-stale: ${err instanceof Error ? err.message : String(err)}`));
   }
+  ledger.readonly = readonly;
   if (readonly) out.push(notice(`check unavailable: readonly ${readonly}`));
   if (readonly && args.send && args.check) out.push(notice(`send unavailable: readonly ${readonly} — nothing was sent to the Gardener`));
   return out;
@@ -462,8 +542,10 @@ export async function runWikiStale(
   /** `--send`: each stale verdict's outcome, one line each (D12). */
   async function sendAll(): Promise<void> {
     if (!staleFound.length) return;
-    const line = (s: { changed: string; linking: string }, outcome: string, text: string, extra: Json = {}) =>
-      out.push(args.json ? JSON.stringify({ event: "send", changed: s.changed, linking: s.linking, outcome, ...extra }) : `  ${s.linking} (after ${s.changed}): ${text}`);
+    const line = (s: { changed: string; linking: string }, outcome: string, text: string, extra: Json = {}) => (
+      ledger.sends.push({ changed: s.changed, linking: s.linking, outcome, ...(typeof extra.error === "string" ? { error: extra.error } : {}) }),
+      out.push(args.json ? JSON.stringify({ event: "send", changed: s.changed, linking: s.linking, outcome, ...extra }) : `  ${s.linking} (after ${s.changed}): ${text}`)
+    );
     if (!args.json) out.push("send to the Gardener:");
     const started = Date.now();
     let stopped = false;
@@ -489,14 +571,16 @@ export async function runWikiStale(
       }
       if (got === "deadline") {
         stopped = true;
+        ledger.sendsStopped = "sends timed out";
         out.push(notice(`wiki-stale: the sends did not finish in ${sendDeadlineMs / 1000} s — the rest were not sent`));
         continue;
       }
       if (got.body === undefined) {
         if (got.status === 404) {
           stopped = true;
+          ledger.sendsStopped = "no send route";
           out.push(notice(`wiki-stale: ${base} has no send route (POST /api/wiki/stale/send) — nothing was sent to the Gardener`));
-        } else line(s, "refused", `refused — HTTP ${got.status} (not JSON)`, { status: got.status });
+        } else line(s, "refused", `refused — HTTP ${got.status} (not JSON)`, { status: got.status, error: `HTTP ${got.status}` });
         continue;
       }
       const b = got.body;
@@ -515,6 +599,7 @@ export async function runWikiStale(
       // A readonly refusal holds for every send after it.
       if (b.readonly) {
         stopped = true;
+        ledger.sendsStopped = "readonly";
         readonly = b.readonly === "root" || /WIKI_READONLY_ROOTS/.test(error) ? "wiki" : "instance";
       }
     }
@@ -523,20 +608,26 @@ export async function runWikiStale(
   /** Check one changed page and print each verdict as it arrives. */
   async function check(page: string): Promise<void> {
     const label = (rel: unknown) => (typeof rel === "string" ? rel : "?");
-    const timedOut = () => out.push(notice(`wiki-stale: check ${page} did not finish in ${checkDeadlineMs / 1000} s`));
+    const rec: CheckRecord = (ledger.checks[page] = { verdicts: [], errors: [] });
+    const timedOut = () => {
+      rec.failure = `check did not finish in ${checkDeadlineMs / 1000} s`;
+      out.push(notice(`wiki-stale: check ${page} did not finish in ${checkDeadlineMs / 1000} s`));
+    };
     // The whole Check, its stream included, runs under this page's own bound.
-    const ran = await bounded(checkDeadlineMs, (signal) => checkStream(page, label, signal)).catch((err) => {
-      out.push(notice(`wiki-stale: check ${page}: ${err instanceof Error ? err.message : String(err)}`));
+    const ran = await bounded(checkDeadlineMs, (signal) => checkStream(page, label, signal, rec)).catch((err) => {
+      rec.failure = err instanceof Error ? err.message : String(err);
+      out.push(notice(`wiki-stale: check ${page}: ${rec.failure}`));
     });
     if (ran === "deadline") timedOut();
   }
 
-  async function checkStream(page: string, label: (rel: unknown) => string, signal: AbortSignal): Promise<void> {
+  async function checkStream(page: string, label: (rel: unknown) => string, signal: AbortSignal, rec: CheckRecord): Promise<void> {
     const got = await postSse(`${base}/api/wiki/stale/check`, { wiki: args.wiki, page, ...(args.asOf ? { asOf: args.asOf } : {}) }, signal);
     if (!got.events) {
       if (got.body?.readonly) readonly = got.body.readonly === "root" || /WIKI_READONLY_ROOTS/.test(String(got.body.error)) ? "wiki" : "instance";
       if (args.json && got.body) out.push(JSON.stringify(got.body));
-      if (!readonly) out.push(notice(`wiki-stale: check ${page}: ${got.body?.error ?? `HTTP ${got.status}`}`));
+      rec.failure = readonly ? `readonly ${readonly}` : String(got.body?.error ?? `HTTP ${got.status}`);
+      if (!readonly) out.push(notice(`wiki-stale: check ${page}: ${rec.failure}`));
       return;
     }
     if (!args.json) out.push(`  check ${page}:`);
@@ -544,6 +635,10 @@ export async function runWikiStale(
       // Past this page's bound its lines are no longer this run's.
       if (signal.aborted) return;
       const d = e.data;
+      if (e.event === "start" && isObj(d)) rec.start = d;
+      else if (e.event === "verdict" && isObj(d) && typeof d.relPath === "string") rec.verdicts.push(d);
+      else if (e.event === "error" && isObj(d)) rec.errors.push(d);
+      else if (e.event === "app_error") rec.failure = String(isObj(d) ? (d.message ?? "failed") : "failed");
       if (e.event === "verdict" && isObj(d) && d.verdict === "stale" && typeof d.relPath === "string") {
         staleFound.push({ changed: page, linking: d.relPath, edit: isObj(d.edit) && typeof d.edit.old === "string" ? d.edit : null });
       }
@@ -614,7 +709,10 @@ export async function* readSse(body: ReadableStream<Uint8Array>): AsyncIterable<
 if (import.meta.main) {
   try {
     // Each line as it is made: a Check's verdicts print as they stream in (A10).
-    await runWikiStale(process.argv.slice(2), { write: (line) => console.log(line) });
+    const argv = process.argv.slice(2);
+    const write = (line: string) => console.log(line);
+    if (argv.includes("--handoff")) await (await import("./wiki-stale-handoff.ts")).runHandoff(argv, { write });
+    else await runWikiStale(argv, { write });
   } catch (err) {
     console.log(`wiki-stale: ${err instanceof Error ? err.message : String(err)}`);
   }
