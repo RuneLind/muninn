@@ -281,15 +281,17 @@ describe("gitRunner: bounded, no shell, no prompt", () => {
 // A stub muninn: page reports by relPath, Check streams, sends recorded.
 type Linking = { relPath: string; verdict?: { verdict: string; reason?: string } };
 type Page = { hits?: { line: number; target: string; text: string; confirmation?: unknown }[]; toCheck?: Linking[]; readonly?: string | false };
-function muninn(pages: Record<string, Page>, opts: { verdicts?: Record<string, { relPath: string; verdict: string; edit?: { old: string; new: string } | null }[]>; failGet?: string[]; failCheck?: string[] } = {}) {
+function muninn(pages: Record<string, Page>, opts: { verdicts?: Record<string, { relPath: string; verdict: string; edit?: { old: string; new: string } | null }[]>; failGet?: string[]; failCheck?: string[]; hangGet?: string[] } = {}) {
   const asked: string[] = [];
   const checked: string[] = [];
   const sent: string[] = [];
-  const fetchJson: FetchJson = async (url) => {
+  const fetchJson: FetchJson = async (url, signal) => {
     const q = new URL(url).searchParams;
     const rel = q.get("page") ?? "";
     asked.push(rel);
     if (opts.failGet?.includes(rel)) throw new Error("connection refused");
+    // A muninn that never answers this page: the run's deadline aborts it.
+    if (opts.hangGet?.includes(rel)) return new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted"))));
     const p = pages[rel];
     if (!p) return { status: 404, body: { error: `no page ${rel}`, readonly: false } };
     const toCheck = p.toCheck ?? [];
@@ -382,7 +384,7 @@ describe("runHandoff: two calls", () => {
     const out = await runHandoff(["--handoff", "--check", "--pages", ...["plans/a.md", "repos/b.md", "plans/c.md"].map((r) => path.join(main, r))], { ...m.deps, git, stateDir: tmp() });
     expect(m.sent).toEqual(["repos/x.md"]);
     expect(out.at(-1)).toBe(
-      `Stale: ${path.basename(main)} — 1 fixes sent to the Gardener; to check: plans/c.md (not reported: muninn not reachable), repos/y.md (connection refused); own fixes not counted (no first --handoff call saved)`,
+      `Stale: ${path.basename(main)} — 1 fixes sent to the Gardener; to check: plans/c.md (not reported: muninn not reachable — Check skipped), repos/y.md (connection refused); own fixes not counted (no first --handoff call saved)`,
     );
   });
 
@@ -765,7 +767,7 @@ describe("fix round 1 batch 3: own To-check pages are re-read through their chan
     const pages = ["--pages", path.join(main, "repos/b.md"), path.join(main, "plans/a.md")];
     await runHandoff(["--handoff", ...pages], { ...muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/b.md" }] }, "repos/b.md": {} }).deps, git, stateDir });
     const out = await runHandoff(["--handoff", "--check", ...pages], { ...muninn({ "repos/b.md": {} }, { failGet: ["plans/a.md"] }).deps, git, stateDir });
-    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: repos/b.md (not re-read: muninn not reachable), plans/a.md (not reported: muninn not reachable)`);
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: repos/b.md (not re-read: muninn not reachable), plans/a.md (not reported: muninn not reachable — Check skipped)`);
 
     // A page the route answers «no page» for is not read either.
     const s2 = tmp();
@@ -807,6 +809,108 @@ describe("fix round 1 batch 3: own items are labelled by their state", () => {
     expect(second.checked).toEqual(["plans/c.md"]);
     expect(out.at(-1)).toBe(
       `Stale: ${path.basename(main)} — to check: plans/a.md (unconfirmed status line L7, yours), repos/b.md (stale status line L4, yours), repos/e.md (stale, yours), repos/g.md (unsure, yours)`,
+    );
+  });
+});
+
+// Fix round 1 batch 4: the run flow when the reports stop early or a Check fails.
+describe("fix round 1 batch 4: Check after a stopped report stage, and the run's bound", () => {
+  async function commitPages(main: string, rels: string[]) {
+    for (const r of rels) write(main, r, `# ${r}\n`);
+    await g(main, "add", ".");
+    await g(main, "commit", "-qm", "pages");
+  }
+
+  test("the reports stop at their deadline: no Check on an unreported page, none on a costed one, the cached one still runs", async () => {
+    const main = await repo();
+    const rels = ["p1.md", "p2.md", "p3.md"];
+    await commitPages(main, rels);
+    // p1 needs model calls, p2's To-check verdict is cached, p3's report never comes back.
+    const m = muninn(
+      { "p1.md": { toCheck: [{ relPath: "o1.md" }] }, "p2.md": { toCheck: [{ relPath: "o2.md", verdict: { verdict: "true" } }] }, "p3.md": { toCheck: [{ relPath: "o3.md" }] } },
+      { hangGet: ["p3.md"], verdicts: { "p2.md": [{ relPath: "o2.md", verdict: "true" }], "p1.md": [{ relPath: "o1.md", verdict: "stale" }] } },
+    );
+    const out = await runHandoff(["--handoff", "--check", "--pages", ...rels.map((r) => path.join(main, r))], { ...m.deps, git, stateDir: tmp(), deadlineMs: 1000 });
+    expect(m.checked).toEqual(["p2.md"]);
+    expect(out.find((l) => l.startsWith("Check: "))).toBe("Check: 1 page(s) spend model calls — the reports stopped (muninn did not answer in 1 s), so only the 1 cached one(s) run, 1 cached only; bound ≤ 0 model calls, ≤ 7 min for the whole run");
+    expect(out.at(-1)).toBe(
+      `Stale: ${path.basename(main)} — to check: p3.md (not reported: muninn did not answer in 1 s — Check skipped), o1.md (Check skipped: muninn did not answer in 1 s); own fixes not counted (no first --handoff call saved)`,
+    );
+  });
+
+  test("a Check that could run past the run's printed bound is not started", async () => {
+    const main = await repo();
+    let off = 0;
+    const m = muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/z.md" }] } });
+    // The gate and the report took 10 min of the clock: more than the pull's and the reports' share of the bound.
+    const fetchJson: FetchJson = async (url, signal) => {
+      off = 10 * 60_000;
+      return m.deps.fetchJson(url, signal);
+    };
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md")], { ...m.deps, fetchJson, git, stateDir: tmp(), now: () => Date.now() + off });
+    expect(m.checked).toEqual([]);
+    expect(out).toContain("wiki-stale: check plans/a.md not started — it could run past the 7-min bound");
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — to check: repos/z.md (Check skipped: past the 7-min bound); own fixes not counted (no first --handoff call saved)`);
+  });
+
+  test("the same run inside its bound starts the Check", async () => {
+    const main = await repo();
+    const m = muninn({ "plans/a.md": { toCheck: [{ relPath: "repos/z.md" }] } }, { verdicts: { "plans/a.md": [{ relPath: "repos/z.md", verdict: "true" }] } });
+    // The clock reads 55 s after the start: exactly the pull's and the reports' share of the bound, which still holds.
+    let reads = 0;
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md")], { ...m.deps, git, stateDir: tmp(), now: () => (reads++ ? 55_000 : 0) });
+    expect(m.checked).toEqual(["plans/a.md"]);
+    expect(out.at(-1)).toBe(`Stale: ${path.basename(main)} — nothing stale on the changed pages; own fixes not counted (no first --handoff call saved)`);
+  });
+});
+
+describe("fix round 1 batch 4: a first call with a page unreported says its fix list is partial", () => {
+  test("a page whose report failed is named with its reason", async () => {
+    const main = await repo();
+    const m = muninn({ "plans/a.md": { hits: [{ line: 7, target: "plans/x.mdx", text: "x in-flight" }] }, "repos/b.md": {} }, { failGet: ["repos/b.md"] });
+    const out = await runHandoff(["--handoff", "--pages", path.join(main, "plans/a.md"), path.join(main, "repos/b.md")], { ...m.deps, git, stateDir: tmp() });
+    const fix = out.slice(out.indexOf("fix by hand (your own pages; every other page goes through --check's sends):") + 1);
+    expect(fix).toEqual([
+      "  plans/a.md L7 after [[plans/x.mdx]]: x in-flight",
+      "  not complete — no report for repos/b.md (muninn not reachable): read those pages for status lines yourself",
+      "then: commit (and push) those fixes by the fix path, then run the same command with --check",
+    ]);
+  });
+
+  test("a run the deadline stopped mid-list names the pages it did not reach, and says no «nothing»", async () => {
+    const main = await repo();
+    const m = muninn({ "plans/a.md": {}, "repos/b.md": {} }, { hangGet: ["repos/b.md"] });
+    const out = await runHandoff(["--handoff", "--pages", path.join(main, "plans/a.md"), path.join(main, "repos/b.md")], { ...m.deps, git, stateDir: tmp(), deadlineMs: 1000 });
+    const fix = out.slice(out.indexOf("fix by hand (your own pages; every other page goes through --check's sends):") + 1);
+    expect(fix).toEqual([
+      "  not complete — no report for repos/b.md (muninn did not answer in 1 s): read those pages for status lines yourself",
+      "then: commit (and push) those fixes by the fix path, then run the same command with --check",
+    ]);
+  });
+});
+
+describe("fix round 1 batch 4: a failed Check falls back to the cached verdict", () => {
+  test("a cached settled verdict is not listed, a cached stale or unsure one as such, only an uncached page as failed", async () => {
+    const main = await repo();
+    const m = muninn(
+      {
+        "plans/a.md": {
+          toCheck: [
+            { relPath: "repos/x.md", verdict: { verdict: "true" } },
+            { relPath: "repos/y.md" },
+            { relPath: "repos/w.md", verdict: { verdict: "stale" } },
+            { relPath: "repos/u.md", verdict: { verdict: "unsure" } },
+            { relPath: "repos/b.md", verdict: { verdict: "fixed" } },
+          ],
+        },
+        "repos/b.md": {},
+      },
+      { failCheck: ["plans/a.md"] },
+    );
+    const out = await runHandoff(["--handoff", "--check", "--pages", path.join(main, "plans/a.md"), path.join(main, "repos/b.md")], { ...m.deps, git, stateDir: tmp() });
+    expect(m.checked).toEqual(["plans/a.md"]);
+    expect(out.at(-1)).toBe(
+      `Stale: ${path.basename(main)} — to check: repos/y.md (connection refused), repos/w.md (stale, not sent: connection refused), repos/u.md (unsure); own fixes not counted (no first --handoff call saved)`,
     );
   });
 });

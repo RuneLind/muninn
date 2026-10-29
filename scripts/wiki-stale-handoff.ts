@@ -26,6 +26,9 @@
  *   spend model calls (a page whose To-check verdicts are all cached costs
  *   nothing and is checked whatever the count), then one `Stale:` line per
  *   wiki, ready to paste, its `to check:` part with each reason in brackets.
+ *   Once the reports hit their deadline only the cached pages Check (the cap
+ *   cannot be counted on missing reports), and no Check starts that could run
+ *   past the printed bound.
  *
  * Exits 0 always (D13): every outcome, a usage error and a missing git
  * included, ends in a `Stale:` line. git runs through {@link runGit}: no
@@ -430,6 +433,8 @@ const dropState = (file: string) => {
     // Unremovable: the next --check counts this list again.
   }
 };
+/** A report error as the session reads it. */
+const pageErrorWhy = (error: string) => (error.startsWith("no page ") ? "not in the main checkout" : error);
 /** The page states whose report does not read the session's committed text. */
 const UNREAD: Partial<Record<PageState, string>> = {
   uncommitted: "uncommitted",
@@ -458,6 +463,8 @@ export function staleLine(o: {
   checkSkipped?: string;
   /** Pages left unchecked because they are over the cap. */
   overCap: string[];
+  /** Changed pages whose Check the run did not start, and why (the reports' deadline, the run's bound). */
+  checkSkips?: Record<string, string>;
   /** Pages the gate dropped: deleted, missing. */
   missing: string[];
   /** Why the reports do not read the session's text of a page (lower-cased relPath → reason): the gate's page states. */
@@ -485,7 +492,7 @@ export function staleLine(o: {
     }
     if (reported.has(from.toLowerCase())) return undefined;
     const e = L.pageErrors.find((x) => x.page.toLowerCase() === from.toLowerCase());
-    return e ? (e.error.startsWith("no page ") ? "not in the main checkout" : e.error) : (L.stopped ?? "not reported");
+    return e ? pageErrorWhy(e.error) : (L.stopped ?? "not reported");
   };
   const now = ownItems(L.reports, o.isOwn, L.checks);
   const nowKeys = new Set(now.map(itemKey));
@@ -497,10 +504,10 @@ export function staleLine(o: {
   }
   for (const i of now) if (i.state !== "settled") add(i.page, ownLabel(i));
 
-  for (const e of L.pageErrors) add(e.page, e.error.startsWith("no page ") ? "not in the main checkout" : e.error);
+  for (const e of L.pageErrors) add(e.page, pageErrorWhy(e.error));
   for (const m of o.missing) add(m, "no such page");
   if (L.stopped) {
-    for (const p of o.asked) if (!reported.has(p.toLowerCase()) && !L.pageErrors.some((e) => e.page === p)) add(p, `not reported: ${L.stopped}`);
+    for (const p of o.asked) if (!reported.has(p.toLowerCase()) && !L.pageErrors.some((e) => e.page === p)) add(p, `not reported: ${L.stopped} — Check skipped`);
   }
 
   let sent = 0;
@@ -514,15 +521,24 @@ export function staleLine(o: {
       const tag = l.verdict?.verdict as string | undefined;
       if (!rec) {
         if (tag && SETTLED.has(tag)) continue;
-        const why = o.checkSkipped ?? (overCap ? `over ${COSTED_PAGE_CAP} pages` : L.readonly ? `readonly ${L.readonly}` : "no Check");
+        const why = o.checkSkipped ?? o.checkSkips?.[changed] ?? (overCap ? `over ${COSTED_PAGE_CAP} pages` : L.readonly ? `readonly ${L.readonly}` : "no Check");
         add(l.relPath, `Check skipped: ${why}`);
         continue;
       }
-      const v = rec.verdicts.find((x) => x.relPath === l.relPath);
-      const err = rec.errors.find((x) => x.relPath === l.relPath);
+      let v = rec.verdicts.find((x) => x.relPath === l.relPath);
       if (!v) {
-        add(l.relPath, err ? "check error" : rec.failure ? rec.failure : rec.start?.left ? "left for another Check" : "no verdict");
-        continue;
+        // No verdict this run: the cached one stands; only an uncached page is a failure.
+        const err = rec.errors.find((x) => x.relPath === l.relPath);
+        const failed = err ? "check error" : rec.failure ? rec.failure : rec.start?.left ? "left for another Check" : "no verdict";
+        if (!tag) {
+          add(l.relPath, failed);
+          continue;
+        }
+        if (tag === "stale") {
+          add(l.relPath, `stale, not sent: ${failed}`);
+          continue;
+        }
+        v = l.verdict as Json;
       }
       if (SETTLED.has(v.verdict)) continue;
       if (v.verdict === "unsure") {
@@ -567,6 +583,8 @@ export interface HandoffDeps {
   sendDeadlineMs?: number;
   /** The script path printed in the «then run» line. */
   scriptPath?: string;
+  /** The clock the run's bound is measured on. */
+  now?: () => number;
 }
 
 /** `--handoff [--check]`: never throws; the last line of each wiki is its `Stale:` line. */
@@ -658,6 +676,8 @@ async function oneWiki(
   say: (...l: string[]) => void,
 ): Promise<void> {
   const second = args.check;
+  const now = deps.now ?? Date.now;
+  const started = now();
   const gate = await runGate(main, pages, git);
   say(...gate.lines);
   if (!second && gate.skip) say(`  (a --check call now would skip Check: ${gate.skip})`);
@@ -708,11 +728,20 @@ async function oneWiki(
       return void say(`Stale: ${wiki} — not checked (${ledger.stopped})`);
     }
     const items = ownItems(ledger.reports, isOwn).filter((i) => i.state !== "settled");
+    // A page with no report has no items: the list is partial, and says which pages it lacks.
+    const reported = new Set(ledger.reports.map((r) => String(r.page.relPath).toLowerCase()));
+    const noReport = reportable
+      .filter((p) => !reported.has(p.toLowerCase()))
+      .map((p) => {
+        const e = ledger.pageErrors.find((x) => x.page.toLowerCase() === p.toLowerCase());
+        return `${p} (${e ? pageErrorWhy(e.error) : (ledger.stopped ?? "not reported")})`;
+      });
     say("fix by hand (your own pages; every other page goes through --check's sends):");
-    if (!items.length) say("  nothing");
+    if (!items.length && !noReport.length) say("  nothing");
     for (const i of items) {
       say(i.kind === "hit" ? `  ${i.page} L${i.line} after [[${i.target}]]: ${i.text.slice(0, 160)}` : `  ${i.page} L${i.line} — to check after ${i.target}: read it against the change`);
     }
+    if (noReport.length) say(`  not complete — no report for ${noReport.join(", ")}: read those pages for status lines yourself`);
     // Written whole and renamed into place, so --check never reads half a list.
     try {
       mkdirSync(stateDir, { recursive: true });
@@ -735,6 +764,12 @@ async function oneWiki(
     before = undefined;
   }
   let plan: ReturnType<typeof planChecks> | undefined;
+  /** Changed pages whose Check this run did not start, and why. */
+  const checkSkips: Record<string, string> = {};
+  const reportMs = deps.deadlineMs ?? RUN_DEADLINE_MS;
+  const checkMs = deps.checkDeadlineMs ?? CHECK_PAGE_DEADLINE_MS;
+  const sendMs = deps.sendDeadlineMs ?? SEND_DEADLINE_MS;
+  let boundMs = Infinity;
   const checkArgs = gate.skip ? [] : ["--check", "--send"];
   await runWikiStale([...common, ...checkArgs], {
     ...runDeps,
@@ -742,13 +777,26 @@ async function oneWiki(
     planChecks: (reports) => {
       plan = planChecks(reports);
       if (!reports.length) return [];
-      const n = plan.check.length;
-      const costed = plan.overCap ? 0 : plan.costed.length;
+      // Past the reports' deadline the cap cannot be counted: the reported pages that spend model calls skip, the cached ones run.
+      const cut = ledger.reportDeadline ? `muninn did not answer in ${reportMs / 1000} s` : undefined;
+      if (cut) for (const p of plan.costed) checkSkips[p] = cut;
+      const check = cut ? plan.free : plan.check;
+      const costed = cut || plan.overCap ? 0 : plan.costed.length;
+      boundMs = PULL_TIMEOUT_MS + reportMs + check.length * checkMs + sendMs;
+      const why = cut ? ` — the reports stopped (${cut}), so only the ${plan.free.length} cached one(s) run` : plan.overCap ? ` — over ${COSTED_PAGE_CAP}, so only the ${plan.free.length} cached one(s) run` : "";
       say(
-        `Check: ${plan.costed.length} page(s) spend model calls${plan.overCap ? ` — over ${COSTED_PAGE_CAP}, so only the ${plan.free.length} cached one(s) run` : ""}, ${plan.free.length} cached only; ` +
-          `bound ≤ ${costed * CALLS_PER_PAGE} model calls, ≤ ${Math.ceil((PULL_TIMEOUT_MS + RUN_DEADLINE_MS + n * CHECK_PAGE_DEADLINE_MS + SEND_DEADLINE_MS) / 60_000)} min for the whole run`,
+        `Check: ${plan.costed.length} page(s) spend model calls${why}, ${plan.free.length} cached only; ` +
+          `bound ≤ ${costed * CALLS_PER_PAGE} model calls, ≤ ${Math.ceil(boundMs / 60_000)} min for the whole run`,
       );
-      return plan.check;
+      return check;
+    },
+    // No Check starts that could end, with the sends after it, past the printed bound.
+    beforeCheck: (p) => {
+      if (now() - started + checkMs + sendMs <= boundMs) return true;
+      const min = Math.ceil(boundMs / 60_000);
+      checkSkips[p] = `past the ${min}-min bound`;
+      say(`wiki-stale: check ${p} not started — it could run past the ${min}-min bound`);
+      return false;
     },
   });
   const unread: Record<string, string> = {};
@@ -766,6 +814,7 @@ async function oneWiki(
       ...(before ? { before } : {}),
       ...(checkSkipped ? { checkSkipped } : {}),
       overCap: plan?.overCap ? plan.costed : [],
+      checkSkips,
       missing,
       unread,
       ...(gate.wideSkip ? { wideSkip: gate.wideSkip } : {}),

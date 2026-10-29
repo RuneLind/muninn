@@ -326,6 +326,8 @@ export interface CheckRecord {
 export interface StaleLedger {
   /** The first reason no further report could be read (muninn not reachable, …). */
   stopped?: string;
+  /** The reports' shared deadline ran out: no report after it was asked for. */
+  reportDeadline?: boolean;
   reports: Json[];
   /** A page the route answered with an error or a wrong shape. */
   pageErrors: { page: string; error: string }[];
@@ -365,6 +367,8 @@ export async function runWikiStale(
      *  Check (`--handoff`'s cap); without it each changed page is checked as
      *  its report arrives. */
     planChecks?: (reports: Json[]) => string[];
+    /** With `planChecks`: asked before each planned page's Check; false skips it (`--handoff`'s run bound). */
+    beforeCheck?: (page: string) => boolean;
     /** False: the page reports are read, not printed (`--handoff --check`). */
     printReports?: boolean;
   } = {},
@@ -442,7 +446,7 @@ export async function runWikiStale(
     try {
       const got = await bounded(freeLeftMs, (signal) => fetchJson(u, signal)).finally(() => (freeLeftMs -= Date.now() - t0));
       if (got === "deadline") {
-        late = true;
+        late = ledger.reportDeadline = true;
         stop(`muninn did not answer in ${deadlineMs / 1000} s`);
         out.push(notice(`wiki-stale: muninn did not answer in ${deadlineMs / 1000} s — no stale report`));
         return null;
@@ -516,7 +520,7 @@ export async function runWikiStale(
           out.push(notice(`wiki-stale: unexpected answer from ${base} for page ${page}: ${err instanceof Error ? err.message : String(err)}`));
         }
       }
-      if (args.check && deps.planChecks && !readonly) for (const p of deps.planChecks(ledger.reports)) await check(p);
+      if (args.check && deps.planChecks && !readonly) for (const p of deps.planChecks(ledger.reports)) if (deps.beforeCheck?.(p) !== false) await check(p);
     } else if (!args.session) {
       const r = await ask({}, isSummary, "the summary");
       if (r && !args.json) out.push(...formatSummary(r));
