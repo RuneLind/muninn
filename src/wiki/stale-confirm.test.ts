@@ -635,12 +635,22 @@ describe("runStaleConfirm (D16)", () => {
   test("A6: a rebuild is not started once the run's bound is spent", async () => {
     const started: string[] = [];
     const twin = { ...entry, name: "cw-twin" } as WikiRegistryEntry;
-    const index: ConfirmDeps["index"] = () => (started.push("rebuild"), started.length === 1 ? never() : getWikiIndex({ root: entry.root, refresh: true }));
-    const { deps } = makeDeps({ registry: () => [entry, twin], index, failures: new Map(), limits: { budgetMs: 300 } });
-    const r = await runStaleConfirm(["cw", "cw-twin"], deps);
-    expect(started).toEqual(["rebuild"]);
-    expect(r).toMatchObject({ calls: 0, errors: 1 });
-    expect(r.wikis[1]).toMatchObject({ wiki: "cw-twin", skipped: "run budget spent" });
+    // The first rebuild hangs while the clock passes the budget. Two real 300 ms
+    // timers raced the wall clock, and on CI a timer fired just before
+    // `Date.now()` reached the deadline, so the twin's rebuild started.
+    const realNow = Date.now;
+    let jumpMs = 0;
+    Date.now = () => realNow() + jumpMs;
+    try {
+      const index: ConfirmDeps["index"] = () => (started.push("rebuild"), started.length === 1 ? ((jumpMs = 10 * 60_000), never()) : getWikiIndex({ root: entry.root, refresh: true }));
+      const { deps } = makeDeps({ registry: () => [entry, twin], index, failures: new Map(), limits: { budgetMs: 300 } });
+      const r = await runStaleConfirm(["cw", "cw-twin"], deps);
+      expect(started).toEqual(["rebuild"]);
+      expect(r).toMatchObject({ calls: 0, errors: 1 });
+      expect(r.wikis[1]).toMatchObject({ wiki: "cw-twin", skipped: "run budget spent" });
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   test("A6: a call whose deadline passed while its input was read is not started", async () => {
