@@ -10,8 +10,8 @@
  */
 
 import { joinWorkMap, type JoinedEffort, type JoinedEffortPage, type JoinedWorkMap } from "../../../wiki/work-map/join.ts";
-import { EFFORT_ID_RE, osloDay, slugifyEffortId } from "../../../wiki/work-map/ids.ts";
-import type { WorkMap, WorkMapDaily } from "../../../wiki/work-map/schema.ts";
+import { declaredEffortOf, EFFORT_ID_RE, osloDay, slugifyEffortId } from "../../../wiki/work-map/ids.ts";
+import type { WorkMap, WorkMapDaily, WorkMapRetired } from "../../../wiki/work-map/schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { escHtml as esc } from "./escape.ts";
 import { isNestedEffort, lastActiveDays, needKey, proseHtml, type CardPage } from "./wiki-work-card.ts";
@@ -31,6 +31,8 @@ const MAX_INDENT = 4;
 /** The listing fields the page reads. */
 export interface EffortPageListing extends CardPage {
   plan_status?: string;
+  /** The page's declared effort (frontmatter `effort:`, P6). */
+  effort?: string;
 }
 
 export interface EffortViewInput<P extends EffortPageListing> {
@@ -65,7 +67,7 @@ export function canonicalEffortParam(raw: string | null): string | null {
 
 export type EffortLookup<P> =
   | { kind: "found"; effort: JoinedEffort<P> }
-  // P6 adds `{ kind: "retired"; … }` here, read off the map's `retired` list.
+  | { kind: "retired"; retired: WorkMapRetired }
   | { kind: "dropped"; matches: JoinedEffort<P>[] };
 
 /**
@@ -74,9 +76,12 @@ export type EffortLookup<P> =
  * only when one of that effort's aliases, or its name, slugifies to the id.
  */
 export function lookupEffort<P>(map: JoinedWorkMap<P>, id: string): EffortLookup<P> {
+  const retired = (rid: string) => map.retired?.find((r) => r.id === rid);
   // An exact id wins: the schema accepts ids the slug changes (`a--b`).
   const exact = map.efforts.find((e) => e.id === id);
   if (exact) return { kind: "found", effort: exact };
+  const retiredExact = retired(id);
+  if (retiredExact) return { kind: "retired", retired: retiredExact };
   // Otherwise `id` is compared as its slug; one that is no valid effort id
   // (empty slug, too long) is dropped with no match, so an empty name slug
   // never matches.
@@ -84,8 +89,9 @@ export function lookupEffort<P>(map: JoinedWorkMap<P>, id: string): EffortLookup
   if (!EFFORT_ID_RE.test(key)) return { kind: "dropped", matches: [] };
   const effort = map.efforts.find((e) => e.id === key);
   if (effort) return { kind: "found", effort };
-  // The one branch point for P6's retired ids: a `retired` entry for `id`
-  // answers here, before the dropped fallback.
+  // A retired id (P6) answers before the dropped fallback.
+  const retiredSlug = retired(key);
+  if (retiredSlug) return { kind: "retired", retired: retiredSlug };
   const matches = map.efforts.filter((e) => slugifyEffortId(e.name) === key || e.aliases.some((a) => slugifyEffortId(a) === key));
   return { kind: "dropped", matches };
 }
@@ -276,6 +282,7 @@ export function effortView<P extends EffortPageListing>(input: EffortViewInput<P
   const prose = (s: string) => proseHtml(s, byKey, input.hrefFor);
   const found = lookupEffort(joined, input.id);
   if (found.kind === "dropped") return droppedView(input, found.matches);
+  if (found.kind === "retired") return retiredView(input, found.retired);
   const e = found.effort;
   const efforts = joined.efforts;
   // The card's rule: a parent chain that cycles or dangles leaves the effort top-level.
@@ -481,6 +488,47 @@ function droppedView<P extends EffortPageListing>(input: EffortViewInput<P>, mat
   return {
     article: withFocusKeys(article, "a"),
     connections: '<div class="wiki-ef-conn-empty">This effort is no longer in the map.</div>',
+  };
+}
+
+/**
+ * A retired effort (P6): its name, its last-active date and the live
+ * listing's pages that declare it. The map stores no pages for it, so the
+ * listing is the only page list there is.
+ */
+function retiredView<P extends EffortPageListing>(input: EffortViewInput<P>, r: WorkMapRetired): EffortView {
+  const declaring = input.pages
+    .filter((p) => declaredEffortOf(p) === r.id)
+    .sort((a, b) => pageTitle(a).localeCompare(pageTitle(b)));
+  const last = r.lastActive > 0 ? osloDay(r.lastActive) : null;
+  const pages = declaring.length
+    ? `<section class="wiki-ef-section"><h2 class="wiki-ef-h">Pages that declare it <span class="wiki-ef-count">${declaring.length}</span></h2><ol class="wiki-ef-pages">` +
+      declaring
+        .map(
+          (p) =>
+            '<li class="wiki-ef-page" style="--ef-depth:0" data-depth="0">' +
+            `<a class="wiki-ef-plink" href="${esc(input.hrefFor(p.relPath))}" data-relpath="${esc(p.relPath)}">${esc(pageTitle(p))}</a>` +
+            (input.pill ? input.pill(p) : "") +
+            "</li>",
+        )
+        .join("") +
+      "</ol></section>"
+    : '<section class="wiki-ef-section"><h2 class="wiki-ef-h">Pages that declare it</h2><div class="wiki-ef-note">No page in the wiki declares it any more.</div></section>';
+  const article =
+    `<div class="wiki-effort wiki-effort-retired" id="wikiEffortPage" data-effort="${esc(r.id)}">` +
+    '<div class="wiki-article-head">' +
+    crumbsHtml(input, ['<span class="wiki-ef-crumb-theme">Retired</span>']) +
+    `<h1>${esc(r.name)}</h1>` +
+    `<div class="wiki-meta-row wiki-ef-metarow">${stateHtml("retired")}` +
+    `<span class="wiki-ef-meta" data-effort-last-active>${esc(last ? `last active ${last}` : "no recorded activity")}</span></div>` +
+    "</div>" +
+    '<p class="wiki-ef-gone">This effort is retired: pages declare it, but none of them has been active lately. It comes back when one of them is.</p>' +
+    pages +
+    `<div class="wiki-ef-foot">From the work map organized ${esc(new Date(input.map.runAtMs).toLocaleString())}.</div>` +
+    "</div>";
+  return {
+    article: withFocusKeys(article, "a"),
+    connections: '<div class="wiki-ef-conn-empty">A retired effort has no connections in the map.</div>',
   };
 }
 

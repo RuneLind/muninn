@@ -560,3 +560,33 @@ describe("focus keys", () => {
     expect(faceted.map(keys)).toEqual(panes().map(keys));
   });
 });
+
+describe("the retired effort page (P6)", () => {
+  const m = map({ efforts: [effort("live", ["plans/a.mdx"])], retired: [{ id: "drift", name: "Drift <old>", lastActive: Date.parse("2026-09-14T10:00:00Z") }] });
+  const pages: EffortPageListing[] = [
+    ...PAGES.slice(0, 2),
+    { relPath: "plans/c.mdx", title: "Plan C", effort: "drift" },
+    { relPath: "plans/d.mdx", title: "Plan D", effort: "other" },
+  ];
+
+  test("lookupEffort answers a retired id, exact or as its slug, before the dropped fallback", () => {
+    const joined = joinWorkMap(m, pages);
+    expect(lookupEffort(joined, "drift").kind).toBe("retired");
+    expect(lookupEffort(joined, "Drift").kind).toBe("retired");
+    expect(lookupEffort(joined, "gone").kind).toBe("dropped");
+  });
+
+  test("shows the name, the last-active date and the listing's pages that declare it", () => {
+    const v = effortView({ map: m, pages, id: "drift", wiki: "w", startHref: "/wiki", hrefFor: href, effortHref, now: NOW });
+    expect(v.article).toContain("wiki-effort-retired");
+    expect(v.article).toContain("<h1>Drift &lt;old&gt;</h1>");
+    expect(v.article).toContain("last active 2026-09-14");
+    expect(v.article).toContain('data-relpath="plans/c.mdx"');
+    expect(v.article).not.toContain('data-relpath="plans/d.mdx"');
+  });
+
+  test("a map written before P6 (no `retired`) still parses and an id is dropped", () => {
+    const old = map({ efforts: [effort("live", ["plans/a.mdx"])] });
+    expect(lookupEffort(joinWorkMap(old, pages), "drift").kind).toBe("dropped");
+  });
+});

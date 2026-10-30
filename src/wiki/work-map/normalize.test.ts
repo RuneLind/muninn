@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { TouchRecord } from "../git-dates.ts";
 import type { WorkEvent } from "../work-focus.ts";
 import { dailyActivity, linkifySigils, normalizeWorkMapAnswer, osloDay, slugifyEffortId, type NormalizeContext } from "./normalize.ts";
-import { EFFORT_ID_RE, workMapAnswerSchema, type WorkMapAnswer, type WorkMapAnswerInput } from "./schema.ts";
+import { EFFORT_ID_RE, workMapAnswerSchema, type WorkMap, type WorkMapAnswer, type WorkMapAnswerInput, type WorkMapEffort } from "./schema.ts";
+import type { DeclaredEfforts } from "./normalize.ts";
 
 const NOW = Date.parse("2026-10-20T12:00:00Z");
 const DAY = 86_400_000;
@@ -32,6 +33,30 @@ function effort(id: string, pages: Effort["pages"], over: Partial<Effort> = {}):
 /** Built through the schema, as the runner does. */
 function answer(efforts: Effort[], over: Partial<WorkMapAnswerInput> = {}): WorkMapAnswer {
   return workMapAnswerSchema.parse({ summary: "", needsYou: [], themes: [], efforts, loose: [], ...over });
+}
+
+/** A stored effort for a previous map. */
+function stored(id: string, pages: string[], over: Partial<WorkMapEffort> = {}): WorkMapEffort {
+  return {
+    id,
+    name: `${id} name`,
+    aliases: [`${id}-alias`],
+    oneLine: `${id} one line`,
+    state: "active",
+    pages: pages.map((rel) => ({ id: rel, role: "plan" as const })),
+    why: `${id} why`,
+    confidence: 0.9,
+    next: `${id} next`,
+    related: [],
+    daily: [],
+    ...over,
+  };
+}
+function prevMap(efforts: WorkMapEffort[], retired: NonNullable<WorkMap["retired"]> = []): Pick<WorkMap, "efforts" | "retired"> {
+  return { efforts, retired };
+}
+function declaredCtx(pages: Record<string, string>, previous: Pick<WorkMap, "efforts" | "retired"> | null, last: Record<string, number> = {}): DeclaredEfforts {
+  return { pages: new Map(Object.entries(pages)), previous, lastWorkMs: (rel) => last[rel] ?? 0 };
 }
 
 describe("slugifyEffortId", () => {
@@ -140,18 +165,17 @@ describe("normalizeWorkMapAnswer, step by step", () => {
     expect(out.needsYou[0]!.effort).toBeUndefined();
   });
 
-  test("4: the declared-efforts hook runs after step 3 and before step 5", () => {
-    const seen: string[][] = [];
-    const out = normalizeWorkMapAnswer(answer([effort("a", [{ id: "p1", role: "plan" }]), effort("b", [{ id: "p1", role: "plan" }, { id: "p2", role: "plan" }])]), {
-      ...ctx(),
-      declared: (efforts) => {
-        seen.push(efforts.flatMap((e) => e.pages.map((p) => p.id)));
-        // Move p1 into b first: step 5 then keeps it in b only.
-        return [efforts[1]!, efforts[0]!];
-      },
-    });
-    expect(seen[0]).toEqual(["plans/alpha.mdx", "plans/alpha.mdx", "plans/beta.mdx"]);
-    expect(out.efforts.map((e) => [e.id, e.pages.map((p) => p.id)])).toEqual([["b", ["plans/alpha.mdx", "plans/beta.mdx"]]]);
+  test("4: declared efforts apply after step 3 and before step 5", () => {
+    // p1 declares b; the model puts it in a (twice). Step 4 moves it into b
+    // before step 5 could keep a's copy.
+    const out = normalizeWorkMapAnswer(
+      answer([effort("a", [{ id: "p1", role: "plan" }, { id: "p3", role: "report" }]), effort("b", [{ id: "p2", role: "plan" }])]),
+      ctx({ declared: declaredCtx({ "plans/alpha.mdx": "b" }, prevMap([])) }),
+    );
+    expect(out.efforts.map((e) => [e.id, e.pages.map((p) => p.id)])).toEqual([
+      ["a", ["archive/alpha-report.mdx"]],
+      ["b", ["plans/beta.mdx", "plans/alpha.mdx"]],
+    ]);
   });
 
   test("5: a page in two efforts stays in the first; loose loses placed pages", () => {
@@ -422,5 +446,165 @@ describe("workMapAnswerSchema", () => {
     expect(parsed.efforts[0]!.parent).toBeUndefined();
     expect(parsed.efforts[0]!.aliases).toEqual([]);
     expect(parsed.efforts[0]!.pages[0]!.derivedFrom).toBeUndefined();
+  });
+});
+
+describe("declared efforts (P6)", () => {
+  const ids = (out: { efforts: { id: string; pages: { id: string }[] }[] }) => out.efforts.map((e) => [e.id, e.pages.map((p) => p.id)]);
+
+  test("a declared page stays in its effort when the model returns it elsewhere", () => {
+    const out = normalizeWorkMapAnswer(
+      answer([effort("a", [{ id: "p1", role: "plan" }]), effort("b", [{ id: "p2", role: "plan" }, { id: "p4", role: "explainer" }])]),
+      ctx({ declared: declaredCtx({ "blogs/alpha.mdx": "a" }, prevMap([stored("a", ["plans/alpha.mdx"])])) }),
+    );
+    expect(ids(out)).toEqual([
+      ["a", ["plans/alpha.mdx", "blogs/alpha.mdx"]],
+      ["b", ["plans/beta.mdx"]],
+    ]);
+    // It keeps the role the model gave it.
+    expect(out.efforts[0]!.pages[1]!.role).toBe("explainer");
+  });
+
+  test("a declared effort the model dropped is restored as quiet with its previous name and text", () => {
+    const prev = prevMap([stored("drift", ["plans/alpha.mdx"], { parent: "gone", related: [{ id: "b", why: "r" }] })]);
+    const out = normalizeWorkMapAnswer(
+      answer([effort("b", [{ id: "p1", role: "plan" }, { id: "p2", role: "plan" }])]),
+      ctx({ declared: declaredCtx({ "plans/alpha.mdx": "drift" }, prev) }),
+    );
+    expect(ids(out)).toEqual([
+      ["b", ["plans/beta.mdx"]],
+      ["drift", ["plans/alpha.mdx"]],
+    ]);
+    const d = out.efforts[1]!;
+    expect(d).toMatchObject({ name: "drift name", aliases: ["drift-alias"], oneLine: "drift one line", why: "drift why", next: "drift next", state: "quiet", confidence: 0.9 });
+    // Step 7 clears the dangling parent; the related effort still exists.
+    expect(d.parent).toBeUndefined();
+    expect(d.related).toEqual([{ id: "b", why: "r" }]);
+    expect(out.retired).toEqual([]);
+  });
+
+  test("a declared effort the model returned EMPTY is restored from the previous map too", () => {
+    const out = normalizeWorkMapAnswer(
+      answer([effort("drift", [], { name: "Model's new name", state: "active" }), effort("b", [{ id: "p1", role: "plan" }])]),
+      ctx({ declared: declaredCtx({ "plans/alpha.mdx": "drift" }, prevMap([stored("drift", ["plans/alpha.mdx"])])) }),
+    );
+    expect(ids(out)).toEqual([["drift", ["plans/alpha.mdx"]]]);
+    expect(out.efforts[0]).toMatchObject({ name: "drift name", state: "quiet" });
+  });
+
+  test("a declared effort whose declared page went quiet, kept by the model with active undeclared pages, stays in efforts", () => {
+    // plans/old.mdx declares a and is outside the active set.
+    const out = normalizeWorkMapAnswer(
+      answer([effort("a", [{ id: "p1", role: "plan" }], { name: "A tonight" })]),
+      ctx({ declared: declaredCtx({ "plans/old.mdx": "a" }, prevMap([stored("a", ["plans/old.mdx", "plans/alpha.mdx"])]), { "plans/old.mdx": NOW - 40 * DAY }) }),
+    );
+    expect(ids(out)).toEqual([["a", ["plans/alpha.mdx"]]]);
+    expect(out.efforts[0]!.name).toBe("A tonight");
+    expect(out.retired).toEqual([]);
+  });
+
+  test("a declared page outside the active set is not moved into the map", () => {
+    const out = normalizeWorkMapAnswer(
+      answer([effort("a", [{ id: "p1", role: "plan" }])]),
+      ctx({ declared: declaredCtx({ "plans/old.mdx": "a" }, prevMap([stored("a", ["plans/alpha.mdx"])])) }),
+    );
+    expect(out.efforts.flatMap((e) => e.pages.map((p) => p.id))).not.toContain("plans/old.mdx");
+    expect(out.loose).not.toContain("plans/old.mdx");
+  });
+
+  test("dropped with no active declared page: retires; a declared page returning revives it with the fill values", () => {
+    const old = NOW - 30 * DAY;
+    // Night 1: plans/old.mdx (inactive) declares drift; the model drops drift.
+    const night1 = normalizeWorkMapAnswer(
+      answer([effort("b", [{ id: "p1", role: "plan" }])]),
+      ctx({ declared: declaredCtx({ "plans/old.mdx": "drift" }, prevMap([stored("drift", ["plans/old.mdx"])]), { "plans/old.mdx": old }) }),
+    );
+    expect(night1.efforts.map((e) => e.id)).toEqual(["b"]);
+    expect(night1.retired).toEqual([{ id: "drift", name: "drift name", lastActive: old }]);
+
+    // Night 2: plans/alpha.mdx now declares drift and is active; the model
+    // still does not return drift. It revives from `retired` with fill values.
+    const night2 = normalizeWorkMapAnswer(
+      answer([effort("b", [{ id: "p1", role: "plan" }, { id: "p2", role: "plan" }])]),
+      ctx({ declared: declaredCtx({ "plans/old.mdx": "drift", "plans/alpha.mdx": "drift" }, prevMap(night1.efforts, night1.retired)) }),
+    );
+    expect(ids(night2)).toEqual([
+      ["b", ["plans/beta.mdx"]],
+      ["drift", ["plans/alpha.mdx"]],
+    ]);
+    expect(night2.efforts[1]).toMatchObject({ id: "drift", name: "drift name", oneLine: "drift name", why: "", next: "", confidence: 0, aliases: [], related: [], state: "quiet" });
+    expect(night2.efforts[1]!.pages[0]!.role).toBe("plan");
+    expect(night2.retired).toEqual([]);
+  });
+
+  test("a retired id leaves `retired` when no page declares it", () => {
+    const out = normalizeWorkMapAnswer(
+      answer([effort("b", [{ id: "p1", role: "plan" }])]),
+      ctx({ declared: declaredCtx({}, prevMap([], [{ id: "drift", name: "Drift", lastActive: 1 }])) }),
+    );
+    expect(out.retired).toEqual([]);
+  });
+
+  test("an unknown slug is ignored: the page stays where the model put it, and nothing retires", () => {
+    const out = normalizeWorkMapAnswer(
+      answer([effort("a", [{ id: "p1", role: "plan" }])]),
+      ctx({ declared: declaredCtx({ "plans/alpha.mdx": "typo-effort" }, prevMap([stored("a", ["plans/alpha.mdx"])])) }),
+    );
+    expect(ids(out)).toEqual([["a", ["plans/alpha.mdx"]]]);
+    expect(out.retired).toEqual([]);
+  });
+
+  test("a series spanning two model efforts leaves both in place (no series rule)", () => {
+    // The normalizer never reads `series:`; two efforts sharing a series stay two.
+    const out = normalizeWorkMapAnswer(
+      answer([effort("a", [{ id: "p1", role: "plan" }]), effort("b", [{ id: "p2", role: "plan" }])]),
+      ctx({ declared: declaredCtx({}, prevMap([])) }),
+    );
+    expect(ids(out)).toEqual([
+      ["a", ["plans/alpha.mdx"]],
+      ["b", ["plans/beta.mdx"]],
+    ]);
+  });
+
+  test("a numeric slug is a valid declared effort", () => {
+    const out = normalizeWorkMapAnswer(
+      answer([effort("42", [{ id: "p2", role: "plan" }]), effort("a", [{ id: "p1", role: "plan" }])]),
+      ctx({ declared: declaredCtx({ "plans/alpha.mdx": "42" }, prevMap([])) }),
+    );
+    expect(ids(out)).toEqual([["42", ["plans/beta.mdx", "plans/alpha.mdx"]]]);
+  });
+
+  test("two simulated nights cover all four rows of the state table", () => {
+    // Previous: kept (model returns it), restored (dropped, active declared page),
+    // retiring (dropped, declared page inactive), and an unknown slug.
+    const prev = prevMap([stored("kept", ["plans/alpha.mdx"]), stored("restored", ["plans/beta.mdx"]), stored("retiring", ["plans/old.mdx"])]);
+    const pages = { "plans/alpha.mdx": "kept", "plans/beta.mdx": "restored", "plans/old.mdx": "retiring", "blogs/alpha.mdx": "unknown-x" };
+    const n1 = normalizeWorkMapAnswer(
+      answer([effort("kept", [{ id: "p1", role: "plan" }]), effort("other", [{ id: "p2", role: "plan" }, { id: "p4", role: "explainer" }])]),
+      ctx({ declared: declaredCtx(pages, prev, { "plans/old.mdx": 5 }) }),
+    );
+    expect(ids(n1)).toEqual([
+      ["kept", ["plans/alpha.mdx"]],
+      ["other", ["blogs/alpha.mdx"]],
+      ["restored", ["plans/beta.mdx"]],
+    ]);
+    expect(n1.efforts.find((e) => e.id === "restored")!.state).toBe("quiet");
+    expect(n1.retired).toEqual([{ id: "retiring", name: "retiring name", lastActive: 5 }]);
+
+    // Night 2: plans/old.mdx's work moves to archive/alpha-report.mdx (active),
+    // which now declares `retiring`: it revives with the fill values.
+    const n2 = normalizeWorkMapAnswer(
+      answer([effort("kept", [{ id: "p1", role: "plan" }, { id: "p3", role: "report" }]), effort("restored", [{ id: "p2", role: "plan" }])]),
+      ctx({ declared: declaredCtx({ ...pages, "archive/alpha-report.mdx": "retiring" }, prevMap(n1.efforts, n1.retired), { "plans/old.mdx": 5 }) }),
+    );
+    expect(ids(n2)).toEqual([
+      ["kept", ["plans/alpha.mdx"]],
+      ["restored", ["plans/beta.mdx"]],
+      ["retiring", ["archive/alpha-report.mdx"]],
+    ]);
+    expect(n2.efforts[2]).toMatchObject({ name: "retiring name", oneLine: "retiring name", confidence: 0, state: "quiet" });
+    expect(n2.efforts[2]!.pages[0]!.role).toBe("report");
+    expect(n2.retired).toEqual([]);
+    expect(n2.loose).toContain("blogs/alpha.mdx");
   });
 });

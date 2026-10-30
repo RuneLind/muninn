@@ -7,11 +7,14 @@
  *  2. Drop a second effort with an id already used.
  *  3. Map short page ids to relPaths; drop an unknown page id and a reference
  *     to an effort that does not exist.
- *  4. Apply declared efforts (P6) — an ordered hook, a no-op until then.
+ *  4. Apply declared efforts (P6, {@link applyDeclaredEfforts}): a page in the
+ *     active set that declares a known effort moves into it; a declared effort
+ *     the model dropped or emptied comes back as `quiet`.
  *  5. A page in two efforts stays in the first and leaves the rest.
  *  6. Clear a `derivedFrom` naming a page outside its effort, or closing a cycle.
  *  7. Clear a `parent` naming no effort (or closing a cycle).
- *  8. Drop an effort left with no pages.
+ *  8. Drop an effort left with no pages; a declared one is retired instead
+ *     ({@link retiredEfforts}).
  *  9. Compute daily activity.
  * 10. Put every active page (the digest's id map) that no effort holds into
  *     loose, wherever its member was dropped: schema, step 1, 2, 3, 5 or 8.
@@ -22,16 +25,24 @@
 
 import type { TouchRecord } from "../git-dates.ts";
 import type { WorkEvent } from "../work-focus.ts";
-import { EFFORT_ID_RE, type WorkMap, type WorkMapAnswer, type WorkMapDaily, type WorkMapEffort } from "./schema.ts";
+import { EFFORT_ID_RE, type WorkMap, type WorkMapAnswer, type WorkMapDaily, type WorkMapEffort, type WorkMapRetired } from "./schema.ts";
 
-import { osloDay, slugifyEffortId } from "./ids.ts";
+import { osloDay, roleFromFolder, slugifyEffortId } from "./ids.ts";
 
 export { osloDay, slugifyEffortId };
 
 const DAY = 86_400_000;
 
-/** Step 4's seam: P6 moves declared pages into their declared efforts here. */
-export type DeclaredEffortsHook = (efforts: NormalEffort[]) => NormalEffort[];
+/** What steps 4 and 8 read about declared efforts (P6). */
+export interface DeclaredEfforts {
+  /** relPath → declared effort id, for every indexed page whose `effort:`
+   *  passes `EFFORT_ID_RE` as written (`declaredEffortOf`), active or not. */
+  pages: ReadonlyMap<string, string>;
+  /** The previous map's efforts and retired list; null on a first run. */
+  previous: Pick<WorkMap, "efforts" | "retired"> | null;
+  /** A page's newest `gitTouchedMs` or `workedMs`; 0 when it has neither. */
+  lastWorkMs: (relPath: string) => number;
+}
 
 /** An effort mid-normalization: page ids are relPaths after step 3. */
 export type NormalEffort = Omit<WorkMapEffort, "daily">;
@@ -47,10 +58,10 @@ export interface NormalizeContext {
   /** The session behind a page's event, where the index names one
    *  (`WorkEvidence.contributions`); absent ⇒ the event counts alone. */
   sessionOf?: (relPath: string, lastMs: number) => string | undefined;
-  declared?: DeclaredEffortsHook;
+  declared?: DeclaredEfforts;
 }
 
-export type NormalizedMap = Pick<WorkMap, "summary" | "needsYou" | "themes" | "efforts" | "loose">;
+export type NormalizedMap = Pick<WorkMap, "summary" | "needsYou" | "themes" | "efforts" | "loose"> & { retired: WorkMapRetired[] };
 
 /** Rewrite `⟨p12⟩` to the reader's `⟦relPath⟧` marker; an unknown id loses
  *  its brackets. Only that sigil is touched, so a bare `p12` in prose stays. */
@@ -106,7 +117,7 @@ export function normalizeWorkMapAnswer(answer: WorkMapAnswer, ctx: NormalizeCont
   dropDangling();
 
   // 4. Declared efforts (P6).
-  if (ctx.declared) efforts = ctx.declared(efforts);
+  if (ctx.declared) efforts = applyDeclaredEfforts(efforts, new Set(ctx.rel.values()), ctx.declared);
 
   // 5. A page sits in one effort: the first that names it.
   const placed = new Set<string>();
@@ -158,8 +169,10 @@ export function normalizeWorkMapAnswer(answer: WorkMapAnswer, ctx: NormalizeCont
   };
   clearParents();
 
-  // 8. An effort with no pages goes; then the references to it.
+  // 8. An effort with no pages goes; then the references to it. A declared
+  // one the previous map knew is retired instead.
   efforts = efforts.filter((e) => e.pages.length > 0);
+  const retired = ctx.declared ? retiredEfforts(efforts, ctx.declared) : [];
   dropDangling();
   clearParents();
 
@@ -191,8 +204,93 @@ export function normalizeWorkMapAnswer(answer: WorkMapAnswer, ctx: NormalizeCont
     })),
     themes,
     efforts: out,
+    retired,
     loose,
   };
+}
+
+/**
+ * Step 4. For each page in the run's active set that declares effort S:
+ * - S is among the model's efforts with pages of its own: the page moves into
+ *   S, whatever effort the model put it in;
+ * - the model dropped S, or returned it with no pages, and the previous map
+ *   holds S in `efforts` or `retired`: S is restored with its declared active
+ *   pages and `state: quiet` — name, aliases and text from the previous
+ *   entry, or for an id coming back from `retired` the fill values
+ *   (`oneLine` = name, `why` = `next` = "", `confidence` 0, no aliases or
+ *   related);
+ * - otherwise S is unknown and the page stays where the model put it.
+ * A declared page outside the active set is never moved into the map. A moved
+ * page keeps the role the model gave it, else the previous map's, else its
+ * folder's ({@link roleFromFolder}).
+ */
+export function applyDeclaredEfforts(efforts: NormalEffort[], active: ReadonlySet<string>, declared: DeclaredEfforts): NormalEffort[] {
+  const prevEffort = new Map((declared.previous?.efforts ?? []).map((e) => [e.id, e]));
+  const prevRetired = new Map((declared.previous?.retired ?? []).map((r) => [r.id, r]));
+  const modelRole = new Map<string, NormalEffort["pages"][number]["role"]>();
+  for (const e of efforts) for (const p of e.pages) if (!modelRole.has(p.id)) modelRole.set(p.id, p.role);
+  const prevRole = new Map<string, NormalEffort["pages"][number]["role"]>();
+  for (const e of declared.previous?.efforts ?? []) for (const p of e.pages) if (!prevRole.has(p.id)) prevRole.set(p.id, p.role);
+
+  // The pages each known slug takes tonight, in active-set order.
+  const moving = new Map<string, string[]>();
+  for (const rel of active) {
+    const slug = declared.pages.get(rel);
+    if (slug === undefined) continue;
+    const known = efforts.some((e) => e.id === slug) || prevEffort.has(slug) || prevRetired.has(slug);
+    if (!known) continue;
+    moving.set(slug, [...(moving.get(slug) ?? []), rel]);
+  }
+  if (moving.size === 0) return efforts;
+
+  const moved = new Set([...moving.values()].flat());
+  const roleOf = (rel: string) => modelRole.get(rel) ?? prevRole.get(rel) ?? roleFromFolder(rel);
+  const restore = (slug: string): NormalEffort => {
+    const prev = prevEffort.get(slug);
+    if (prev) {
+      const { daily: _daily, pages: _pages, ...rest } = prev;
+      return { ...rest, state: "quiet", pages: [] };
+    }
+    const r = prevRetired.get(slug)!;
+    return { id: slug, name: r.name, aliases: [], oneLine: r.name, state: "quiet", pages: [], why: "", confidence: 0, next: "", related: [] };
+  };
+
+  // Emptied counts before the move: the model's own pages for S.
+  const out = efforts.map((e) => {
+    const own = e.pages.filter((p) => !moved.has(p.id));
+    if (!moving.has(e.id)) return { ...e, pages: own };
+    const base = e.pages.length === 0 && (prevEffort.has(e.id) || prevRetired.has(e.id)) ? restore(e.id) : e;
+    const declaredPages = moving.get(e.id)!.map((rel) => {
+      const mine = e.pages.find((p) => p.id === rel);
+      return mine ?? { id: rel, role: roleOf(rel) };
+    });
+    return { ...base, pages: [...own, ...declaredPages] };
+  });
+  for (const [slug, rels] of moving) {
+    if (out.some((e) => e.id === slug)) continue;
+    out.push({ ...restore(slug), pages: rels.map((rel) => ({ id: rel, role: roleOf(rel) })) });
+  }
+  return out;
+}
+
+/**
+ * Step 8's retire half: `retired` = (previous `efforts` ∪ previous `retired`)
+ * ∩ declared slugs, minus tonight's efforts. An id leaves it when no page
+ * declares it any more, and a slug the previous map never held (a typo) never
+ * enters it. `lastActive` is the newest `gitTouchedMs` or `workedMs` among
+ * every page declaring the id, active or not.
+ */
+export function retiredEfforts(efforts: readonly NormalEffort[], declared: DeclaredEfforts): WorkMapRetired[] {
+  const tonight = new Set(efforts.map((e) => e.id));
+  const names = new Map<string, string>();
+  for (const r of declared.previous?.retired ?? []) names.set(r.id, r.name);
+  for (const e of declared.previous?.efforts ?? []) names.set(e.id, e.name);
+  const lastActive = new Map<string, number>();
+  for (const [rel, slug] of declared.pages) lastActive.set(slug, Math.max(lastActive.get(slug) ?? 0, declared.lastWorkMs(rel)));
+  return [...names]
+    .filter(([id]) => lastActive.has(id) && !tonight.has(id))
+    .map(([id, name]) => ({ id, name, lastActive: lastActive.get(id)! }))
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 /**

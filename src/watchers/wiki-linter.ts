@@ -43,6 +43,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "question-block": { one: "question block problem", many: "question block problems" },
   "role-key": { one: "unknown role key", many: "unknown role keys" },
   "case-board-labels": { one: "unusable CaseBoard label", many: "unusable CaseBoard labels" },
+  "effort-unknown": { one: "unknown declared effort", many: "unknown declared efforts" },
   "ledger-row-state": { one: "PR ledger row with no readable state", many: "PR ledger rows with no readable state" },
   "chain-close-conflict": { one: "contradicted «Lukker» close", many: "contradicted «Lukker» closes" },
   "chart-table": { one: "chart table problem", many: "chart table problems" },

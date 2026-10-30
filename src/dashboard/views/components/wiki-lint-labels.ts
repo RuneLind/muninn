@@ -22,6 +22,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "question-block": "Question blocks the DecisionLog cannot close",
   "role-key": "Lane roles and question targets outside roleKeys",
   "case-board-labels": "<CaseBoard labels=> entries that name no case status",
+  "effort-unknown": "effort: values that name no effort in the work map",
   "ledger-row-state": "PR ledger rows the strip cannot read a state from",
   "chain-close-conflict": "Decisions whose «Lukker» the question's own close contradicts",
   "chart-table": "<Chart> tables the chart cannot draw, or draws with a note",

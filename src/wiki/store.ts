@@ -869,6 +869,14 @@ export interface WikiPageMeta {
    */
   seriesLabel?: string;
   /**
+   * DECLARED EFFORT — the work-map effort this page names in frontmatter
+   * `effort:` (plan `muninn-wiki-work-map`, P6). Read with `series:`'
+   * tolerance (a list reads as its first entry); kept as written, so the work
+   * map's run and lint judge it against `EFFORT_ID_RE` themselves. Rides the
+   * listing, so the reader's `joinWorkMap` places a page declared after the run.
+   */
+  effort?: string;
+  /**
    * ATTACHMENTS — the pages that fold under this one in the reader's rail, as
    * wiki-relative paths in the order the pairing pass found them. Absent (never
    * `[]`) on a page that adopted nothing, which is almost every page of every
@@ -3599,6 +3607,7 @@ export async function buildWikiIndex(
         // else can join.
         series: asOptionalScalar(fm.series),
         seriesLabel: asOptionalScalar(fm.series_label),
+        effort: asOptionalScalar(fm.effort),
         // Plan lifecycle fields. Wiki-agnostic (any page may declare them) and
         // strictly validated — an invalid value is dropped here and only ever
         // surfaces as a count in the aggregated warn below.

@@ -70,3 +70,57 @@ describe("joinWorkMap effort ids", () => {
     expect(joinWorkMap(m, []).efforts.map((x) => x.name)).toEqual(["A1", "B1"]);
   });
 });
+
+describe("declared pages join at once (P6)", () => {
+  const base = mapCiting("x", ["plans/a.mdx", "plans/b.mdx"]);
+  const m: WorkMap = {
+    ...base,
+    efforts: [
+      { ...base.efforts[0]!, pages: [{ id: "plans/a.mdx", role: "plan" }, { id: "plans/b.mdx", role: "report", derivedFrom: "plans/a.mdx" }] },
+      { ...base.efforts[0]!, id: "f", name: "F", pages: [{ id: "plans/c.mdx", role: "plan" }] },
+    ],
+    retired: [{ id: "gone", name: "Gone", lastActive: 1 }],
+    loose: ["blogs/loose.mdx"],
+  };
+
+  test("a page declared after the run joins its effort with its folder's role and no derivedFrom", () => {
+    const j = joinWorkMap(m, [
+      { relPath: "plans/a.mdx" },
+      { relPath: "plans/b.mdx" },
+      { relPath: "plans/c.mdx" },
+      { relPath: "plans/new.mdx", effort: "f" },
+      { relPath: "archive/new-report.mdx", effort: "f" },
+    ]);
+    expect(j.efforts[1]!.pages.map((p) => [p.id, p.role, p.derivedFrom])).toEqual([
+      ["plans/c.mdx", "plan", undefined],
+      ["plans/new.mdx", "plan", undefined],
+      ["archive/new-report.mdx", "report", undefined],
+    ]);
+  });
+
+  test("a mapped page re-declared elsewhere moves, keeping its role; a loose one leaves loose", () => {
+    const j = joinWorkMap(m, [
+      { relPath: "plans/a.mdx" },
+      { relPath: "plans/b.mdx", effort: "f" },
+      { relPath: "plans/c.mdx" },
+      { relPath: "blogs/loose.mdx", effort: "e" },
+    ]);
+    expect(j.efforts[0]!.pages.map((p) => p.id)).toEqual(["plans/a.mdx", "blogs/loose.mdx"]);
+    expect(j.efforts[1]!.pages.map((p) => [p.id, p.role, p.derivedFrom])).toEqual([
+      ["plans/c.mdx", "plan", undefined],
+      ["plans/b.mdx", "report", undefined],
+    ]);
+    expect(j.loose).toEqual([]);
+  });
+
+  test("an id only in `retired`, unknown or invalid moves nothing", () => {
+    const j = joinWorkMap(m, [
+      { relPath: "plans/a.mdx", effort: "gone" },
+      { relPath: "plans/b.mdx", effort: "nope" },
+      { relPath: "plans/c.mdx", effort: "Bad Id" },
+      { relPath: "blogs/loose.mdx", effort: "gone" },
+    ]);
+    expect(j.efforts.map((e) => e.pages.map((p) => p.id))).toEqual([["plans/a.mdx", "plans/b.mdx"], ["plans/c.mdx"]]);
+    expect(j.loose.map((p) => p.relPath)).toEqual(["blogs/loose.mdx"]);
+  });
+});

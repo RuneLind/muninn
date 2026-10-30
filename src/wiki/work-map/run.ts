@@ -24,7 +24,8 @@ import type { WikiRegistryEntry } from "../registry.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../readonly.ts";
 import { buildWorkMapDigest, WORK_MAP_SYSTEM_PROMPT, WORK_MAP_TOUCH_WINDOW_DAYS } from "./digest.ts";
 import { gatherWarmInputs, type WarmInputDeps } from "./inputs.ts";
-import { normalizeWorkMapAnswer, type DeclaredEffortsHook } from "./normalize.ts";
+import { declaredEffortOf } from "./ids.ts";
+import { normalizeWorkMapAnswer } from "./normalize.ts";
 import { parseWorkMap, WORK_MAP_VERSION, workMapAnswerSchema, type WorkMap, type WorkMapAnswer } from "./schema.ts";
 import type { WorkMapStateStore } from "./state.ts";
 import { WORK_MAP_FILE, writeWorkMapFile, type WorkMapWriteOptions, type WorkMapWriteOutcome } from "./write.ts";
@@ -147,7 +148,6 @@ export interface WorkMapRunDeps {
   /** The commit tail handed to the write seam; `null` commits nothing. */
   commit?: WorkMapWriteOptions["commit"];
   state: WorkMapStateStore;
-  declared?: DeclaredEffortsHook;
 }
 
 export type Organizable = { ok: true; entry: WikiRegistryEntry } | { ok: false; reason: string };
@@ -350,7 +350,14 @@ async function organizeSteps(
     gitTouches: index.gitTouches!,
     workEvents: (rel) => byRel.get(rel)?.work?.events,
     sessionOf: (rel, lastMs) => sessionRefs.get(`${rel}\0${lastMs}`),
-    ...(deps.declared ? { declared: deps.declared } : {}),
+    declared: {
+      pages: new Map(index.pages.flatMap((p) => {
+        const slug = declaredEffortOf(p);
+        return slug === undefined ? [] : [[p.relPath, slug] as const];
+      })),
+      previous,
+      lastWorkMs: (rel) => Math.max(byRel.get(rel)?.gitTouchedMs ?? 0, byRel.get(rel)?.workedMs ?? 0),
+    },
   });
   const map: WorkMap = {
     version: WORK_MAP_VERSION,

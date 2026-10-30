@@ -29,3 +29,22 @@ export function slugifyEffortId(raw: string): string {
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
+
+/** The role a declared page gets where no model answer names one (P6): from
+ *  its folder — `plans/` a plan, `archive/` a report — an `.html` page an
+ *  explainer, anything else a reference. */
+export function roleFromFolder(relPath: string): "plan" | "report" | "explainer" | "reference" {
+  if (/\.html?$/i.test(relPath)) return "explainer";
+  const first = relPath.split("/")[0]!.toLowerCase();
+  if (first === "plans") return "plan";
+  if (first === "archive") return "report";
+  return "reference";
+}
+
+/** A page's declared effort as the run and the reader read it: the
+ *  frontmatter value when it passes {@link EFFORT_ID_RE} as written, else
+ *  none (lint warns about it; the run never slugs a declaration). */
+export function declaredEffortOf(page: { effort?: string }): string | undefined {
+  const v = page.effort;
+  return v !== undefined && EFFORT_ID_RE.test(v) ? v : undefined;
+}

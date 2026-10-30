@@ -98,3 +98,36 @@ test("the walk reports a degraded filter when a page's metadata-only run outlast
     await rm(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("a commit that only adds `effort:` does not move gitTouchedMs; the index reads the key ([a, b] → a, 42 valid)", async () => {
+  const dir = await testTempDir(path.join(tmpdir(), "work-map-git-effort-"));
+  const now = Date.now();
+  const withEffort = (title: string, effort: string, prose: string) =>
+    `---\ntitle: ${title}\nplan_status: in-flight\neffort: ${effort}\n---\n\n# ${title}\n\n${prose}\n`;
+  try {
+    await mkdir(path.join(dir, "plans"), { recursive: true });
+    const write = (rel: string, text: string) => writeFile(path.join(dir, rel), text);
+    await write("plans/a.mdx", page("a", "in-flight", "Prose of a."));
+    await write("plans/b.mdx", page("b", "in-flight", "Prose of b."));
+    await git(dir, "init", "-q", "-b", "main");
+    // Whole seconds: git stores the commit date at second precision.
+    const seedAt = Math.floor((now - 40 * DAY) / 1000) * 1000;
+    await commitAt(dir, seedAt, "seed");
+    // Stamp `effort:` alone on a and b.
+    await write("plans/a.mdx", withEffort("a", "[drift, other]", "Prose of a."));
+    await write("plans/b.mdx", withEffort("b", "42", "Prose of b."));
+    await commitAt(dir, now - 1 * DAY, "place pages");
+    // And a dirty, uncommitted effort-only change keeps its git date too.
+    await write("plans/b.mdx", withEffort("b", "43", "Prose of b."));
+
+    const index = await buildWikiIndex(dir);
+    const byRel = new Map(index.pages.map((p) => [p.relPath, p]));
+    expect(byRel.get("plans/a.mdx")!.effort).toBe("drift");
+    expect(byRel.get("plans/b.mdx")!.effort).toBe("43");
+    expect(byRel.get("plans/a.mdx")!.gitTouchedMs).toBe(seedAt);
+    expect(byRel.get("plans/b.mdx")!.gitTouchedMs).toBe(seedAt);
+    expect(byRel.get("plans/b.mdx")!.gitDirty).toBeFalsy();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 20_000);

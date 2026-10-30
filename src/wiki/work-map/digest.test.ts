@@ -179,3 +179,42 @@ describe("helpers", () => {
     expect(e).toEqual([{ day: "2026-10-19", kind: "fix", title: "Title", pages: ["a.md", "b.md"] }]);
   });
 });
+
+describe("declared efforts in the digest (P6)", () => {
+  const prev: WorkMap = {
+    version: WORK_MAP_VERSION,
+    wiki: "fixture",
+    runAtMs: NOW - DAY,
+    model: "m",
+    coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 1, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+    summary: "",
+    needsYou: [],
+    themes: [],
+    efforts: [{ id: "rail", name: "Rail", aliases: [], oneLine: "", state: "active", pages: [], why: "", confidence: 1, next: "", related: [], daily: [] }],
+    retired: [{ id: "palette", name: "Palette work", lastActive: Date.parse("2026-09-01T10:00:00Z") }],
+    loose: [],
+  };
+
+  test("marks a declared page with a known slug as fixed, passes supersededBy, and lists retired ids", () => {
+    const base = fixture();
+    const pages = base.pages.map((p) =>
+      p.relPath === "plans/rail-groups.mdx"
+        ? { ...p, effort: "rail" }
+        : p.relPath === "plans/dark-mode.mdx"
+          ? { ...p, effort: "typo-slug", supersededBy: "plans/rail-groups.mdx" }
+          : p,
+    );
+    const d = buildWorkMapDigest({ ...base, pages, previous: prev });
+    const line = (rel: string) => d.text.split("\n").find((l) => l.includes(`path=${rel}`))!;
+    expect(line("plans/rail-groups.mdx")).toContain("effort=rail (declared, fixed)");
+    // An unknown slug is not marked: the run ignores it.
+    expect(line("plans/dark-mode.mdx")).not.toContain("effort=");
+    expect(line("plans/dark-mode.mdx")).toContain(`supersededBy=${d.ids.get("plans/rail-groups.mdx")}`);
+    expect(d.text).toContain("## Retired efforts");
+    expect(d.text).toContain("palette: Palette work — last active 2026-09-01");
+  });
+
+  test("no retired section without a retired list", () => {
+    expect(buildWorkMapDigest(fixture()).text).not.toContain("## Retired efforts");
+  });
+});

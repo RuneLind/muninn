@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Forty check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Forty-one check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -140,6 +140,10 @@
  *                      no verdicts here, so a not-a-status hit never alerts).
  *                      Reads the target's status, so `lintWiki` only. Rules:
  *                      `stale.ts`.
+ * 25. effort-unknown — a page whose `effort:` (work-map P6) fails
+ *                      `EFFORT_ID_RE`, or names an id in neither `efforts` nor
+ *                      `retired` of the wiki's `.work-map.json` (warning). Silent
+ *                      on a wiki without a map; culled pages are not subjects.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -185,6 +189,8 @@ import { checkDiagrams, DIAGRAM_LINT_CHECKS } from "./lint-diagram.ts";
 import { checkSteps, STEPS_LINT_CHECKS } from "./lint-steps.ts";
 import { checkSystemMapDrift, checkSystemMaps, SYSTEM_MAP_DRIFT_LINT_CHECKS, SYSTEM_MAP_LINT_CHECKS, type SystemMapPage } from "./lint-system-map.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
+import { EFFORT_ID_RE } from "./work-map/ids.ts";
+import { parseWorkMap } from "./work-map/schema.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
   closeNearMisses,
@@ -211,6 +217,7 @@ export const LINT_CHECKS = [
   "question-block",
   "role-key",
   "case-board-labels",
+  "effort-unknown",
   ...SERIES_LINT_CHECKS,
   ...DRIFT_LINT_CHECKS,
   ...REPORT_TOP_LINT_CHECKS,
@@ -905,6 +912,28 @@ function checkOrphans(index: WikiIndex): LintFinding[] {
  * The finding is filed against the SHADOWED page — the one that vanished — because
  * that is the file whose owner needs to act.
  */
+/**
+ * Check 25: a page's `effort:` must be a valid effort id the map holds in
+ * `efforts` or `retired`. The run ignores any other value, so a typo would
+ * otherwise leave the page silently unplaced.
+ */
+export function checkDeclaredEfforts(
+  pages: readonly Pick<WikiPageMeta, "relPath" | "effort" | "culled">[],
+  map: { efforts: readonly { id: string }[]; retired?: readonly { id: string }[] },
+): LintFinding[] {
+  const known = new Set([...map.efforts.map((e) => e.id), ...(map.retired ?? []).map((r) => r.id)]);
+  const out: LintFinding[] = [];
+  for (const p of pages) {
+    if (p.effort === undefined || p.culled) continue;
+    if (!EFFORT_ID_RE.test(p.effort)) {
+      out.push({ check: "effort-unknown", relPath: p.relPath, message: `effort: "${p.effort}" is not a valid effort id (lowercase a–z, 0–9 and "-")`, detail: p.effort });
+    } else if (!known.has(p.effort)) {
+      out.push({ check: "effort-unknown", relPath: p.relPath, message: `effort: "${p.effort}" names no effort in the work map; the organize run ignores it`, detail: p.effort });
+    }
+  }
+  return out;
+}
+
 function checkStemCollisions(index: WikiIndex): LintFinding[] {
   const out: LintFinding[] = [];
   for (const s of index.shadowed ?? []) {
@@ -1156,6 +1185,11 @@ export async function lintWiki(
   // Check 8 — index-level for the same reason, and the only checks whose
   // findings carry a `fix`. Its rules and cuts: `lint-series.ts`.
   findings.push(...checkSeries(index));
+  // Check 25 — declared efforts against the wiki's work map.
+  // `WORK_MAP_FILE` (work-map/write.ts), spelled here so lint does not import the write seam.
+  const mapText = await readFile(path.join(index.root, ".work-map.json"));
+  const map = mapText === null ? null : parseWorkMap(mapText);
+  if (map) findings.push(...checkDeclaredEfforts(index.pages, map));
 
   // Pre-seeded by a typed loop rather than `Object.fromEntries(...) as Record<…>`
   // — the cast is what let a partially-seeded map type-check as complete.
