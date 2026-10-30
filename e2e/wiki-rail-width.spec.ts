@@ -216,6 +216,31 @@ const CLOSED_ROWS = 2 + 7 + 1 + 12;
 let server: ChildProcess | undefined;
 let root = "";
 
+/** A second wiki, with a work map (P4): one effort fold row at its widest — a
+ *  name far past any rail, the longest state word, ✋ 12 and a four-status
+ *  roll-up — and a short-named one beside it. Its pages are new, so Activity
+ *  holds them. */
+const EF_WIKI = "e2e-rail-efforts-width";
+let efRoot = "";
+const EF_LONG_NAME = "An effort whose name runs far past the widest rail the reader allows — the plan, its follow-up, the report and the explainer";
+const EF_PAGES: Array<[string, string, string]> = [
+  ["plans/ef-a.md", "Effort page A", "in-flight"],
+  ["plans/ef-b.md", "Effort page B", "shipped"],
+  ["plans/ef-c.md", "Effort page C", "proposed"],
+  ["plans/ef-d.md", "Effort page D", "superseded"],
+  ["plans/ef-short.md", "Short effort page", "in-flight"],
+];
+const efMap = (runAtMs: number) =>
+  JSON.stringify({
+    version: 1, wiki: EF_WIKI, runAtMs, model: "test-model",
+    coverage: { sessionsSinceMs: runAtMs, sessionsAsOfMs: runAtMs, touchWindowDays: 28, activePages: 5, threads: 0, logEntries: 0, digestChars: 1, warnings: [] },
+    summary: "", needsYou: [], themes: [], loose: [],
+    efforts: [
+      { id: "long", name: EF_LONG_NAME, aliases: [], oneLine: "", state: "proposed", pages: EF_PAGES.slice(0, 4).map(([id]) => ({ id, role: "plan" })), why: "", confidence: 1, next: "", related: [], daily: [] },
+      { id: "short", name: "Short", aliases: [], oneLine: "", state: "active", pages: [{ id: "plans/ef-short.md", role: "plan" }], why: "", confidence: 1, next: "", related: [], daily: [] },
+    ],
+  });
+
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-"));
   await writeFile(
@@ -238,6 +263,16 @@ test.beforeAll(async () => {
   await rm(path.join(root, NEW_FLIGHT));
   await writeFile(path.join(root, NEW_FLIGHT), fresh, "utf8");
 
+  efRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-ef-"));
+  await mkdir(path.join(efRoot, "plans"), { recursive: true });
+  for (const [rel, title, status] of EF_PAGES) {
+    const moves = rel === "plans/ef-a.md"
+      ? ["<NextMoves>", "", '<Lane kind="you" who="Du">', "", ...Array.from({ length: 12 }, (_, i) => `${i + 1}. **Step ${i + 1}.**`), "", "</Lane>", "", "</NextMoves>", ""]
+      : [];
+    await writeFile(path.join(efRoot, rel), ["---", `title: ${title}`, `plan_status: ${status}`, "---", "", `# ${title}`, "", ...moves].join("\n"), "utf8");
+  }
+  await writeFile(path.join(efRoot, ".work-map.json"), efMap(Date.now()), "utf8");
+
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -246,7 +281,7 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root}`,
+      WIKI_EXTRA: `${WIKI}=${root},${EF_WIKI}=${efRoot}`,
     },
     stdio: "ignore",
   });
@@ -267,6 +302,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
+  if (efRoot) await rm(efRoot, { recursive: true, force: true });
 });
 
 const RAIL = ".wiki-layout > .wiki-pane:first-child";
@@ -839,5 +875,56 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     await expect(row.locator(".wiki-list-sub .wiki-new-tag")).toHaveText("NEW");
     await expect(row.locator(".wiki-list-end .wiki-new-tag")).toHaveCount(0);
     await expect(row.locator(".wiki-list-end .wiki-list-meta")).toHaveClass(/\bnew\b/);
+  });
+});
+
+test.describe("Wiki rail: effort fold rows at the width budgets (work map P4)", () => {
+  type Page = import("@playwright/test").Page;
+  async function openEf(page: Page, width: number): Promise<void> {
+    await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${EF_WIKI}`);
+    await expect(page.locator('#wikiList .wiki-list-group.effort[data-effort="long"]')).toHaveCount(1);
+    expect(await railWidth(page)).toBe(width);
+  }
+
+  test("from 260 to 400px: a long name ellipsizes inside the row, the age stays on line one, and no meta part clips or leaves the row", async ({ page }) => {
+    const bad: string[] = [];
+    for (let width = 260; width <= 400; width += 10) {
+      await openEf(page, width);
+      for (const id of ["long", "short"]) {
+        const g = await page.locator(`#wikiList .wiki-list-group.effort[data-effort="${id}"]`).evaluate((el) => {
+          const r = (e: Element) => e.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          const right = r(el).right - parseFloat(cs.paddingRight) + 0.5;
+          const name = el.querySelector(".wiki-effort-name") as HTMLElement;
+          const age = el.querySelector(".wiki-effort-age") as HTMLElement;
+          const caret = el.querySelector(".wiki-effort-fold") as HTMLElement;
+          const parts = Array.from(el.querySelectorAll(".wiki-effort-meta .wiki-rollup-part")) as HTMLElement[];
+          const list = document.getElementById("wikiList")!;
+          return {
+            rowOverflow: el.scrollWidth - el.clientWidth,
+            listOverflow: list.scrollWidth - list.clientWidth,
+            nameClipped: name.scrollWidth > name.clientWidth + 1,
+            nameIntoAge: r(name).right - r(age).left,
+            ageOnNameLine: Math.abs(r(age).top - r(name).top) < 6,
+            agePastRow: r(age).right > right,
+            caretVisible: r(caret).width >= 16 && r(caret).left >= r(el).left,
+            parts: parts.map((p) => p.textContent),
+            partsClipped: parts.filter((p) => p.scrollWidth > p.clientWidth + 1 || r(p).right > right).map((p) => p.textContent),
+            partsTwoLines: parts.filter((p) => r(p).height > 20).map((p) => p.textContent),
+          };
+        });
+        const at = `${id} at ${width}: ${JSON.stringify(g)}`;
+        if (g.rowOverflow > 0 || g.listOverflow > 0) bad.push(`overflow ${at}`);
+        if (id === "long" && !g.nameClipped) bad.push(`long name not ellipsized ${at}`);
+        if (id === "short" && g.nameClipped) bad.push(`short name clipped ${at}`);
+        if (g.nameIntoAge > 0.5 || !g.ageOnNameLine || g.agePastRow) bad.push(`age ${at}`);
+        if (!g.caretVisible) bad.push(`caret ${at}`);
+        if (g.partsClipped.length || g.partsTwoLines.length) bad.push(`meta ${at}`);
+        if (id === "long" && g.parts.join("|") !== "proposed ·|✋ 12 ·|1 proposed ·|1 in-flight ·|1 shipped ·|1 superseded") bad.push(`meta text ${at}`);
+      }
+    }
+    expect(bad).toEqual([]);
   });
 });

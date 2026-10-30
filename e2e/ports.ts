@@ -383,6 +383,10 @@ export const E2E_PORTS = {
   "wiki-agent-lens/real": 3148,
   "wiki-agent-lens/nais-user": 3149,
   "wiki-agent-lens/nais-admin": 3150,
+  // Work map P4: the rail's effort folds, over a seeded map, with a fake
+  // claude-usage so Work threads and Pick up are on screen too.
+  "wiki-rail-efforts": 3192,
+  "wiki-rail-efforts/ledger": 3193,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

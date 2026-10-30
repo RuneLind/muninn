@@ -38,6 +38,7 @@ import type { WorkThreadSession } from "../../../wiki/work-focus.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
 import type { SaveSeriesPlan } from "./wiki-work-series.ts";
 import type { PickUpRow } from "./wiki-pick-up.ts";
+import { EFFORTS_OPEN_DEFAULT, effortFoldKey, type RailEffort } from "./wiki-effort-rail.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
  *  wiki) is appended, so two wikis in one browser never share a list. Versioned
@@ -270,7 +271,8 @@ export function isFoldOpen(open: readonly string[], key: string): boolean {
 
 /**
  * Is this a MODE key rather than one of the fold exceptions `FOLDS_MAX` bounds?
- * Today two: `toggle:families` and `toggle:retired`.
+ * Today three: `toggle:families`, `toggle:retired` and `toggle:no-efforts`
+ * (the one stored as an exception to an ON default, P4).
  *
  * A mode says how the whole rail is arranged; a fold key says which single group
  * this reader opened. Capping them together meant the sentinel was evicted after
@@ -1013,7 +1015,7 @@ export type RailEntry =
        *  lifted into Activity or Pinned does not carry it — it is not in the
        *  group's body there, exactly as a lifted attachment child loses its
        *  indent. */
-      member?: { label: string; kind: RailGroupKind };
+      member?: { label: string; kind: RailGroupKind | "effort" };
       /** Set on a focus row drawn inside an OPEN work-thread card: the card's
        *  name, for the painter's hover and the card's left rule; `session` on
        *  a row of a Sessions-stop card, whose ⋯ holds no Make own thread. */
@@ -1179,6 +1181,27 @@ export type RailEntry =
     }
   | {
       /**
+       * An EFFORT fold row in Activity (work map P4): the effort's name (a
+       * link to its page, D2), a caret that folds it, and the Activity rows
+       * it holds. Not a page: no relPath, `shown` does not count it.
+       */
+      kind: "effort";
+      section: RailSection;
+      effort: RailEffort;
+      /** `effort:<id>`, normalized: what the row is addressed by. */
+      foldKey: string;
+      /** What a click flips: the `closed:` spelling for a fold that defaults open. */
+      toggleKey: string;
+      /** The Activity rows this fold holds, in rank order. */
+      members: WikiListing[];
+      /** The newest member's Activity age. */
+      ageMs: number;
+      folded: boolean;
+      /** Open because the reader is on a page inside it (or a Jira filter). */
+      forcedOpen?: boolean;
+    }
+  | {
+      /**
        * The `+N more` row under a CLOSED series in Activity, after its peek rows.
        * A second control for the same fold — a click flips `toggleKey` exactly
        * as the series row does — and, like a group row, not a page: `shown`
@@ -1279,6 +1302,13 @@ export interface RailInput {
   threads?: readonly RailWorkCard[];
   /** The Group control for the Work threads label; absent ⇒ today's label. */
   workControl?: RailWorkControl;
+  /**
+   * Work map P4: page key (normalized relPath) → its effort, handed in only
+   * while `group by effort` is on and the wiki has a map. Activity rows of one
+   * effort fold under one row, placed at the best-ranked one's slot; a page
+   * with no effort stays an ordinary Activity row. Absent ⇒ plain Activity.
+   */
+  efforts?: ReadonlyMap<string, RailEffort>;
   /** The Pick up strip's rows (`pickUpRows`), newest first; absent or empty ⇒
    *  no strip. */
   pickUp?: readonly PickUpRow[];
@@ -1644,6 +1674,8 @@ export function buildRail(input: RailInput): RailModel {
        *  inside that group's body. A member lifted into Activity or Pinned is
        *  emitted without it, and so without the indent. */
       inGroup?: RailGroup;
+      /** Set only by an open effort fold (P4): the row is drawn in its body. */
+      inEffort?: RailEffort;
       /** Set only by the work-thread block: the open card's name. */
       thread?: string;
       /** The open card is a Sessions-stop card (no Make own thread on its rows). */
@@ -1681,7 +1713,9 @@ export function buildRail(input: RailInput): RailModel {
         : {}),
       ...(extra.inGroup
         ? { member: { label: extra.inGroup.label, kind: extra.inGroup.kind } }
-        : {}),
+        : extra.inEffort
+          ? { member: { label: extra.inEffort.name, kind: "effort" as const } }
+          : {}),
       ...(latestRels.has(key) ? { latest: true as const } : {}),
       ...(extra.thread !== undefined ? { thread: { name: extra.thread, ...(extra.session ? { session: true as const } : {}) } } : {}),
       ...(extra.created ? { created: true as const } : {}),
@@ -1691,7 +1725,7 @@ export function buildRail(input: RailInput): RailModel {
       // inherits the membership, so the painter can indent it one level further
       // rather than drawing it at the family's own depth — where it would read
       // as a sibling of the page it belongs to.
-      for (const c of mine) emitRow(c, section, { underParent: true, inGroup: extra.inGroup });
+      for (const c of mine) emitRow(c, section, { underParent: true, inGroup: extra.inGroup, inEffort: extra.inEffort });
     }
   };
 
@@ -1724,7 +1758,7 @@ export function buildRail(input: RailInput): RailModel {
   // known: a series Activity ranked renders at its Activity slot, and whether
   // that row is open depends on the lift both sections make.
   /** One Activity slot: a page, or a series one of its pages earned. */
-  type ActivityItem = { row: ActivityRow } | { seriesKey: string };
+  type ActivityItem = { row: ActivityRow } | { seriesKey: string } | { effortId: string };
   const activityItems: ActivityItem[] = [];
   const activityRows: ActivityRow[] = [];
   /**
@@ -1733,6 +1767,14 @@ export function buildRail(input: RailInput): RailModel {
    * the child renders under that parent, never as a loose Activity row.
    */
   const activitySeries = new Map<string, { group: RailGroup; ranked: WikiListing[] }>();
+  /**
+   * P4: the effort folds Activity holds, by effort id, each with its rows in
+   * rank order. A row lands here only after Work threads and the series took
+   * theirs, so a fold holds only the Activity rows left (the one-row rule).
+   */
+  const activityEfforts = new Map<string, { effort: RailEffort; rows: ActivityRow[] }>();
+  /** Every page an effort fold holds, open or closed: the remainder skips them. */
+  const effortHeld = new Set<string>();
   /** page key → the Activity row that ranked it, for the date cell of a series
    *  member drawn in Activity. */
   const activityOf = new Map<string, ActivityRow>();
@@ -1806,6 +1848,22 @@ export function buildRail(input: RailInput): RailModel {
         if (held.holder === row.page && (!row.via || row.ownRanked)) selfRanked.add(holderKey);
         continue;
       }
+      // P4: a page in an effort folds under that effort's row, placed at the
+      // slot of its best-ranked page. It is still an Activity row for the
+      // claims below, so a pin on it does not draw it twice.
+      const effort = input.efforts?.get(rel);
+      if (effort) {
+        let bucket = activityEfforts.get(effort.id);
+        if (!bucket) {
+          bucket = { effort, rows: [] };
+          activityEfforts.set(effort.id, bucket);
+          activityItems.push({ effortId: effort.id });
+        }
+        bucket.rows.push(row);
+        effortHeld.add(rel);
+        activityRows.push(row);
+        continue;
+      }
       activityRows.push(row);
       activityItems.push({ row });
     }
@@ -1843,6 +1901,55 @@ export function buildRail(input: RailInput): RailModel {
     const openParent = parentOf.get(openKey);
     if (openParent && !lifted.has(openKey)) forced.add(normalizeRel(openParent.relPath));
   }
+  // P4: the effort folds that start open — the EFFORTS_OPEN_DEFAULT most
+  // recently active (newest Activity age; a tie keeps rank order) — and the one
+  // the open page forces open (it, or the parent it is attached to, is a row
+  // of that fold).
+  const effortAge = (b: { rows: ActivityRow[] }): number => Math.min(...b.rows.map((r) => r.ageMs));
+  const effortDefaultOpen = new Set(
+    [...activityEfforts.values()]
+      .map((b, i) => ({ id: b.effort.id, age: effortAge(b), i }))
+      .sort((a, b) => a.age - b.age || a.i - b.i)
+      .slice(0, EFFORTS_OPEN_DEFAULT)
+      .map((x) => x.id),
+  );
+  let forcedEffortId: string | null = null;
+  if (input.openRelPath && activityEfforts.size) {
+    const openKey = normalizeRel(input.openRelPath);
+    const parent = parentOf.get(openKey);
+    const holders = new Set([openKey, ...(parent ? [normalizeRel(parent.relPath)] : [])]);
+    for (const b of activityEfforts.values()) {
+      if (b.rows.some((r) => holders.has(normalizeRel(r.page.relPath)))) forcedEffortId = b.effort.id;
+    }
+  }
+  let effortEmitted = false;
+  /** Emit one effort fold: its row, then (open) its rows under it. */
+  const emitEffort = (b: { effort: RailEffort; rows: ActivityRow[] }): void => {
+    const rows = b.rows.filter((r) => !claimed.has(normalizeRel(r.page.relPath)));
+    if (!rows.length) return;
+    const foldKey = normalizeFoldKey(effortFoldKey(b.effort.id));
+    const defaultsOpen = effortDefaultOpen.has(b.effort.id);
+    const forcedHere = !!input.expandAll || forcedEffortId === b.effort.id;
+    const stored = groupFoldState(open, foldKey);
+    const expanded = forcedHere || (stored ? stored === "open" : defaultsOpen);
+    effortEmitted = true;
+    entries.push({
+      kind: "effort",
+      section: "activity",
+      effort: b.effort,
+      foldKey,
+      toggleKey: defaultsOpen ? closedFoldKey(foldKey) : foldKey,
+      members: rows.map((r) => r.page),
+      ageMs: effortAge({ rows }),
+      folded: !expanded,
+      ...(forcedHere ? { forcedOpen: true } : {}),
+    });
+    if (!expanded) return;
+    for (const r of rows) {
+      if (claimed.has(normalizeRel(r.page.relPath))) continue;
+      emitRow(r.page, "activity", { activity: railActivityOf(r), newerChildren: r.newerChildren, inEffort: b.effort });
+    }
+  };
   /** The ranked members a CLOSED series row in Activity shows under it — never
    *  one a pin lifted to `Pinned`, which is on screen there already. */
   const peekOf = (foldKey: string): WikiListing[] => {
@@ -2106,6 +2213,10 @@ export function buildRail(input: RailInput): RailModel {
           emitSeries(activitySeries.get(item.seriesKey)!.group, "activity");
           continue;
         }
+        if ("effortId" in item) {
+          emitEffort(activityEfforts.get(item.effortId)!);
+          continue;
+        }
         const row = item.row;
         // ⚠️ Re-tested against `claimed` HERE, not only at collection time: a
         // PARENT emitted earlier in this same section takes its open group's
@@ -2156,7 +2267,9 @@ export function buildRail(input: RailInput): RailModel {
     // A series member is accounted for by the block above whether that fold is
     // open or closed, so it never falls through to the listing — the rule the
     // family loop gets for free by emitting its groups from inside this list.
-    return !claimed.has(key) && !parentOf.has(key) && !inSeries(p);
+    // Same for an effort fold's pages, which a CLOSED fold holds without
+    // drawing (P4).
+    return !claimed.has(key) && !parentOf.has(key) && !inSeries(p) && !effortHeld.has(key);
   });
   // The Bookkeeping split is a recency-list affordance and nothing else: under
   // a query the rows are exactly as today (a result list grows no furniture),
@@ -2167,7 +2280,7 @@ export function buildRail(input: RailInput): RailModel {
   // remainder fell through to the `Other pages` header instead — labelled, and
   // wrongly. `seriesEmitted` joins `claimed` because a CLOSED series draws a row
   // and claims no page, so the count alone would report an empty rail above.
-  const above = claimed.size > 0 || seriesEmitted || cards.length > 0;
+  const above = claimed.size > 0 || seriesEmitted || effortEmitted || cards.length > 0;
   const split = !!metaTail && grouped && (above || remainder.some((p) => !isMetaPage(p)));
   const rest = split ? remainder.filter((p) => !isMetaPage(p)) : remainder;
   const meta = split ? remainder.filter((p) => isMetaPage(p)) : [];

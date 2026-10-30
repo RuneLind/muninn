@@ -49,6 +49,10 @@ export interface StartCardsDeps {
   /** The listing's `workMap.runAt`, or null when the wiki has no work map —
    *  then the start view shows What's new. */
   workMapRunAt?(): number | null;
+  /** The map GET, shared with the rail and the effort page (P4) so the start
+   *  view sends one request per run time; absent, the card fetches itself.
+   *  `body` is the parsed JSON, or null when it was not JSON. */
+  fetchWorkMap?(): Promise<{ ok: boolean; status: number; body: unknown }>;
   /** The live listing the Your work card joins the map to. */
   pages?(): readonly CardPage[];
   /** The reader URL of a page, for a link's `href`. */
@@ -1004,9 +1008,11 @@ class WorkMapHttpError extends Error {
 }
 
 async function fetchWorkMapBody(): Promise<WorkMapGetBody> {
-  const r = await fetch(withWiki("/api/wiki/work-map"));
+  const r = deps.fetchWorkMap
+    ? await deps.fetchWorkMap()
+    : await fetch(withWiki("/api/wiki/work-map")).then(async (res) => ({ ok: res.ok, status: res.status, body: (await res.json().catch(() => null)) as unknown }));
   if (!r.ok) throw new WorkMapHttpError(r.status);
-  const body: unknown = await r.json().catch(() => null);
+  const body = r.body;
   if (!body || typeof body !== "object") throw new WorkMapHttpError(r.status);
   return body as WorkMapGetBody;
 }
