@@ -14,7 +14,7 @@ import { EFFORT_ID_RE, osloDay, slugifyEffortId } from "../../../wiki/work-map/i
 import type { WorkMap, WorkMapDaily } from "../../../wiki/work-map/schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { escHtml as esc } from "./escape.ts";
-import { lastActiveDays, needKey, proseHtml, type CardPage } from "./wiki-work-card.ts";
+import { isNestedEffort, lastActiveDays, needKey, proseHtml, rendersUnderParent, type CardPage } from "./wiki-work-card.ts";
 
 /** The URL parameter that names an effort. */
 export const EFFORT_PARAM = "effort";
@@ -221,8 +221,6 @@ export interface EffortView {
   article: string;
   /** The Connections pane's HTML. */
   connections: string;
-  /** The document title's lead. */
-  title: string;
 }
 
 function pageTitle(page: CardPage): string {
@@ -263,11 +261,12 @@ export function effortView<P extends EffortPageListing>(input: EffortViewInput<P
   if (found.kind === "dropped") return droppedView(input, found.matches);
   const e = found.effort;
   const efforts = joined.efforts;
-  const parent = e.parent !== undefined ? efforts.find((x) => x.id === e.parent) : undefined;
+  // The card's rule: a parent chain that cycles or dangles leaves the effort top-level.
+  const parent = isNestedEffort(e, efforts) ? efforts.find((x) => x.id === e.parent) : undefined;
   const themes = joined.themes.filter((t) => t.efforts.includes(e.id));
   const tail: string[] = [];
   tail.push(themes[0] ? `<span class="wiki-ef-crumb-theme">${esc(themes[0].name)}</span>` : '<span class="wiki-ef-crumb-theme">No theme</span>');
-  if (parent && parent.id !== e.id) tail.push(effortLinkHtml(parent, input.effortHref, "wiki-ef-crumb"));
+  if (parent) tail.push(effortLinkHtml(parent, input.effortHref, "wiki-ef-crumb"));
 
   const stored = input.map.efforts.find((x) => x.id === e.id);
   const gone = (stored?.pages.length ?? e.pages.length) - e.pages.length;
@@ -301,7 +300,7 @@ export function effortView<P extends EffortPageListing>(input: EffortViewInput<P
     `<div class="wiki-ef-foot">From the work map organized ${esc(new Date(input.map.runAtMs).toLocaleString())}.</div>` +
     "</div>";
 
-  return { article, connections: connectionsHtml(e, joined, themes, input, prose), title: e.name };
+  return { article, connections: connectionsHtml(e, joined, themes, input, prose) };
 }
 
 function confidenceLabel(c: number): string {
@@ -336,9 +335,8 @@ function needsHtml<P>(map: JoinedWorkMap<P>, raw: WorkMap, id: string, done: Rea
 }
 
 function subEffortsHtml<P>(e: JoinedEffort<P>, efforts: readonly JoinedEffort<P>[], href: (id: string) => string): string {
-  // Every child, including a Moving one the card lifts top-level under a
-  // closed-lane parent: it is still this effort's sub-effort.
-  const all = efforts.filter((x) => x.parent === e.id && x.id !== e.id);
+  // Exactly the efforts the card nests under this one (`rendersUnderParent`).
+  const all = efforts.filter((x) => x.parent === e.id && rendersUnderParent(x, efforts));
   if (!all.length) return "";
   return (
     `<section class="wiki-ef-section"><h2 class="wiki-ef-h">Sub-efforts <span class="wiki-ef-count">${all.length}</span></h2><ul class="wiki-ef-subs">` +
@@ -438,7 +436,6 @@ function droppedView<P extends EffortPageListing>(input: EffortViewInput<P>, mat
   return {
     article,
     connections: '<div class="wiki-ef-conn-empty">This effort is no longer in the map.</div>',
-    title: input.id,
   };
 }
 
@@ -461,7 +458,8 @@ export function effortStatusHtml(input: { wiki: string; startHref: string; id: s
   );
 }
 
-/** `/wiki?wiki=<w>&effort=<id>`, carrying the facets an article URL carries. */
+/** `/wiki?wiki=<w>&effort=<id>`, carrying the wiki only; `effortHrefFor` in
+ *  `wiki-browser.ts` adds the project and Jira facets. */
 export function effortUrl(wiki: string, id: string): string {
   const w = wiki ? "wiki=" + encodeURIComponent(wiki) + "&" : "";
   return "/wiki?" + w + EFFORT_PARAM + "=" + encodeURIComponent(id);

@@ -113,6 +113,12 @@ test.beforeAll(async () => {
     await writeFile(path.join(root, "plans/visuals.mdx"), md("Visuals plan", "shipped"), "utf8");
   }
   await writeFile(path.join(roots[WIKI]!, ".work-map.json"), mapJson(now - 2 * HOUR), "utf8");
+  // A project facet on the map wiki, for the facet-change test: two pages name
+  // the project in frontmatter.
+  await writeFile(path.join(roots[WIKI]!, ".wiki-reader.json"), JSON.stringify({ project: { frontmatter: ["project"] } }), "utf8");
+  for (const [rel, title] of [["plans/drift-ui.mdx", "Drift UI plan"], ["plans/grocery.mdx", "Grocery plan"]] as const) {
+    await writeFile(path.join(roots[WIKI]!, rel), `---\ntitle: ${title}\nproject: reader\n---\n\nBody of ${title}.\n`, "utf8");
+  }
   await writeFile(path.join(roots[LIVE]!, ".work-map.json"), mapJson(now - 2 * HOUR, LIVE), "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -228,6 +234,25 @@ test("sub-efforts and page links navigate in the reader", async ({ page }) => {
   await page.locator("#wikiEffortPage [data-effort-home]").first().click();
   await expect(page.locator("#wikiWorkCard")).toBeVisible();
   expect(effortParam(page)).toBeNull();
+});
+
+test("a project chip clicked on the effort page rewrites its links to carry the new facet", async ({ page }) => {
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=drift`);
+  const ef = page.locator("#wikiEffortPage");
+  await expect(ef.locator("h1")).toHaveText("Drift check");
+  const home = ef.locator("[data-effort-home]").first();
+  const sibling = page.locator('#connBody [data-effort-link="grocery"]');
+  const sub = ef.locator('.wiki-ef-subs [data-effort-link="drift-ui"]');
+  const wikiCrumb = ef.locator(".wiki-ef-crumbs .wiki-bc-wiki");
+  await expect(home).not.toHaveAttribute("href", /project=/);
+  await page.locator("#wikiFiltersBtn").click();
+  await page.locator('#projectChips [data-project="reader"]').click();
+  await expect.poll(() => new URL(page.url()).searchParams.get("project")).toBe("reader");
+  await expect(ef).toHaveAttribute("data-effort", "drift");
+  for (const link of [home, sibling, sub, wikiCrumb]) await expect(link).toHaveAttribute("href", /[?&]project=reader(&|$)/);
+  // Clearing the chip takes the facet off again.
+  await page.locator('#projectChips [data-project=""]').click();
+  for (const link of [home, sibling, sub, wikiCrumb]) await expect(link).not.toHaveAttribute("href", /project=/);
 });
 
 test("an unknown id says it is no longer in the map and links the alias match", async ({ page }) => {

@@ -933,12 +933,12 @@ function adoptJiraFilter(boot: boolean): void {
   writeJiraParam();
 }
 
-/** Keep the breadcrumb's wiki-crumb href in step with the project filter. It is
- *  built once per ARTICLE render, so after a chip click a middle-click or
- *  copy-link would hand over the filter the reader had before it. */
+/** Keep the wiki-crumb hrefs in step with the facets. They are built once per
+ *  render, so after a chip click a middle-click or copy-link would hand over
+ *  the filter the reader had before it. Every crumb: the hidden breadcrumb
+ *  keeps its old one while the effort page shows its own. */
 function refreshCrumbHref(): void {
-  const crumb = document.querySelector(".wiki-bc-wiki");
-  if (crumb) crumb.setAttribute("href", currentStartUrl());
+  document.querySelectorAll(".wiki-bc-wiki").forEach((crumb) => crumb.setAttribute("href", currentStartUrl()));
 }
 /**
  * Return to the overview from wherever the reader is — the breadcrumb's wiki
@@ -1294,6 +1294,8 @@ function renderProjectChips(): void {
 function repaintForProject(autoOpen = true): void {
   renderProjectChips();
   refreshCrumbHref();
+  // The effort page builds every href with the facets; re-paint it in place.
+  refreshEffortFromListing();
   renderList();
   refreshStartBody();
   syncFilters(autoOpen);
@@ -1369,6 +1371,7 @@ function renderJiraChips(): void {
 function repaintForJira(autoOpen = true): void {
   renderJiraChips();
   refreshCrumbHref();
+  refreshEffortFromListing();
   renderList();
   refreshStartBody();
   syncFilters(autoOpen);
@@ -5716,9 +5719,10 @@ function paintEffort(id: string, background: boolean): void {
     });
 }
 
-/** A listing adopted while the effort page is open: re-join it (a page may
- *  have been renamed, or a new run landed). Paint only: no navigation side
- *  effects, and nothing written when the markup is unchanged. */
+/** A listing adopted, or a facet changed, while the effort page is open:
+ *  re-join it (a page may have been renamed, a new run landed, or the hrefs
+ *  carry another facet). Paint only: no navigation side effects, and nothing
+ *  written when the markup is unchanged. */
 function refreshEffortFromListing(): void {
   if (effortOpen === null || !document.getElementById("wikiEffortPage")) return;
   paintEffort(effortOpen, true);

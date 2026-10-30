@@ -16,7 +16,7 @@ import {
   STRIP_SESSION_DAYS,
   type EffortPageListing,
 } from "./wiki-effort-page.ts";
-import { workCardHtml } from "./wiki-work-card.ts";
+import { rendersUnderParent, workCardHtml } from "./wiki-work-card.ts";
 
 const NOW = Date.parse("2026-10-29T12:00:00Z");
 const HOUR = 3_600_000;
@@ -297,8 +297,7 @@ describe("effortView", () => {
   });
 
   test("head: crumbs with the theme, name, state, page count with gone pages, confidence", () => {
-    const { article, title } = view(m, "main");
-    expect(title).toBe("Main <work>");
+    const { article } = view(m, "main");
     expect(article).toContain("<h1>Main &lt;work&gt;</h1>");
     expect(article).toMatch(/wiki-bc-wiki[\s\S]*Efforts[\s\S]*wiki-ef-crumb-theme">Reader</);
     expect(article).toContain("wm-state-active");
@@ -369,4 +368,25 @@ test("the Your work card links effort names when given effortHref, and keeps tex
   expect(linked).toContain('<a class="wiki-wm-effort-name" href="/wiki?effort=p" data-effort-link="p">');
   expect(linked).toContain('data-effort-link="k"');
   expect(workCardHtml(base)).not.toContain("data-effort-link");
+});
+
+test("a parent cycle reads as the card reads it: no parent crumb, sub-efforts only what the card nests", () => {
+  // Normalize clears parent cycles, so this map is hand-edited.
+  const efforts = [
+    effort("x", ["plans/a.mdx"], { parent: "y" }),
+    effort("y", ["plans/b.mdx"], { parent: "x" }),
+    effort("k", ["plans/c.mdx"], { parent: "y", state: "cooling" }),
+    effort("lift", ["plans/d.mdx"], { parent: "q", state: "active" }),
+    effort("q", ["plans/e.mdx"], { state: "shipped" }),
+  ];
+  const m = map({ efforts });
+  const crumbLinks = (id: string) => [...(view(m, id).article.match(/<nav class="wiki-ef-crumbs"[\s\S]*?<\/nav>/)?.[0] ?? "").matchAll(/data-effort-link="([^"]+)"/g)].map((x) => x[1]);
+  const subs = (id: string) => [...(view(m, id).article.match(/<ul class="wiki-ef-subs">[\s\S]*?<\/ul>/)?.[0] ?? "").matchAll(/data-effort-link="([^"]+)"/g)].map((x) => x[1]);
+  const joined = joinWorkMap(m, PAGES).efforts;
+  const nested = (id: string) => joined.filter((x) => x.parent === id && rendersUnderParent(x, joined)).map((x) => x.id);
+  expect(crumbLinks("x")).toEqual([]);
+  expect(crumbLinks("y")).toEqual([]);
+  for (const id of ["x", "y", "k", "lift", "q"]) expect(subs(id)).toEqual(nested(id));
+  // `k` hangs off a cycle member, so its chain never reaches a root: top-level.
+  expect(crumbLinks("k")).toEqual([]);
 });
