@@ -393,6 +393,16 @@ export function pairedByWhy(pairedBy: string, parentTitle: string): string {
   }
 }
 
+/** A row drawn inside a group's body says which group on hover: the group's
+ *  own row carries the label, and a reader scrolled past the top of a long
+ *  open group has nothing else to read it from. */
+export function railMemberWhy(member: { label: string; kind: RailGroupKind | "effort" } | undefined): string {
+  if (!member) return "";
+  if (member.kind === "month") return `In ${member.label}`;
+  if (member.kind === "effort") return `In the ${member.label} effort`;
+  return `In the ${member.label} ${member.kind === "series" ? "series" : "family"}`;
+}
+
 /**
  * The two numbers both chip labels are built from — the rows the chip stands
  * for, split by kind. A child lifted into Activity or Pinned has already been
@@ -1922,18 +1932,41 @@ export function buildRail(input: RailInput): RailModel {
     const openParent = parentOf.get(openKey);
     if (openParent && !lifted.has(openKey)) forced.add(normalizeRel(openParent.relPath));
   }
-  // P4: the effort folds that start open — the EFFORTS_OPEN_DEFAULT most
-  // recently active (newest Activity age; a tie keeps rank order) — and the one
-  // the open page forces open (it, or the parent it is attached to, is a row
-  // of that fold).
-  const effortAge = (b: { rows: ActivityRow[] }): number => Math.min(...b.rows.map((r) => r.ageMs));
+  // P4: what each effort fold DRAWS, settled before any fold is emitted, so
+  // the default-open choice, the age and the painted rows read one list. Its
+  // rows are its Activity rows minus the pages a pin lifted (those are its
+  // ghosts). No `claimed` test: Work threads and series already took theirs at
+  // collection, and nothing emitted in Activity can claim a fold's page (an
+  // attachment child Activity ranked is `lifted`, so its parent's row does not
+  // take it) — measured by a 20,000-input fuzz over parents, `via` rows, pins,
+  // series, families and open cards, with the old emit-time filters removed.
+  const pinnedKeys = new Set(pinned.map((p) => normalizeRel(p.relPath)));
+  const effortDraws = new Map<string, { rows: ActivityRow[]; ghosts: WikiListing[] }>();
+  for (const [id, b] of activityEfforts) {
+    const isPinnedRow = (r: ActivityRow) => pinnedKeys.has(normalizeRel(r.page.relPath));
+    effortDraws.set(id, { rows: b.rows.filter((r) => !isPinnedRow(r)), ghosts: b.rows.filter(isPinnedRow).map((r) => r.page) });
+  }
+  const minAge = (rs: readonly ActivityRow[]): number => Math.min(...rs.map((r) => r.ageMs));
+  /** Recency over the rows the fold draws; a ghost-only fold falls back to its
+   *  pinned pages' age, so the cell never reads Infinity. */
+  const effortAge = (id: string): number => {
+    const d = effortDraws.get(id)!;
+    return minAge(d.rows.length ? d.rows : activityEfforts.get(id)!.rows);
+  };
+  // The folds that start open: the EFFORTS_OPEN_DEFAULT most recently active
+  // among those that draw at least one row (a tie keeps rank order). A
+  // ghost-only fold renders, but closed by default — its pages are under Pinned.
   const effortDefaultOpen = new Set(
-    [...activityEfforts.values()]
-      .map((b, i) => ({ id: b.effort.id, age: effortAge(b), i }))
+    [...activityEfforts.keys()]
+      .map((id, i) => ({ id, i }))
+      .filter((x) => effortDraws.get(x.id)!.rows.length > 0)
+      .map((x) => ({ ...x, age: effortAge(x.id) }))
       .sort((a, b) => a.age - b.age || a.i - b.i)
       .slice(0, EFFORTS_OPEN_DEFAULT)
       .map((x) => x.id),
   );
+  // The fold the open page forces open: it, or the parent it is attached to,
+  // is a row of that fold.
   let forcedEffortId: string | null = null;
   if (input.openRelPath && activityEfforts.size) {
     const openKey = normalizeRel(input.openRelPath);
@@ -1946,11 +1979,8 @@ export function buildRail(input: RailInput): RailModel {
   }
   let effortEmitted = false;
   /** Emit one effort fold: its row, then (open) its rows under it. */
-  const pinnedKeys = new Set(pinned.map((p) => normalizeRel(p.relPath)));
   const emitEffort = (b: { effort: RailEffort; rows: ActivityRow[] }): void => {
-    const rows = b.rows.filter((r) => !claimed.has(normalizeRel(r.page.relPath)) && !pinnedKeys.has(normalizeRel(r.page.relPath)));
-    const ghosts = b.rows.filter((r) => pinnedKeys.has(normalizeRel(r.page.relPath))).map((r) => r.page);
-    if (!rows.length && !ghosts.length) return;
+    const { rows, ghosts } = effortDraws.get(b.effort.id)!;
     const foldKey = normalizeFoldKey(effortFoldKey(b.effort.id));
     const defaultsOpen = effortDefaultOpen.has(b.effort.id);
     const forcedHere = !!input.expandAll || forcedEffortId === b.effort.id;
@@ -1965,13 +1995,12 @@ export function buildRail(input: RailInput): RailModel {
       toggleKey: defaultsOpen ? closedFoldKey(foldKey) : foldKey,
       members: rows.map((r) => r.page),
       ...(ghosts.length ? { ghosts } : {}),
-      ageMs: effortAge({ rows: b.rows.filter((r) => !claimed.has(normalizeRel(r.page.relPath))) }),
+      ageMs: effortAge(b.effort.id),
       folded: !expanded,
       ...(forcedHere ? { forcedOpen: true } : {}),
     });
     if (!expanded) return;
     for (const r of rows) {
-      if (claimed.has(normalizeRel(r.page.relPath))) continue;
       emitRow(r.page, "activity", { activity: railActivityOf(r), newerChildren: r.newerChildren, inEffort: b.effort });
     }
     for (const p of ghosts) entries.push({ kind: "ghost", section: "activity", page: p, reason: "pinned" });

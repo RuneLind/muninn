@@ -13,7 +13,7 @@ import {
   railEffortIndex,
   type RailEffort,
 } from "./wiki-effort-rail.ts";
-import { buildRail, capFolds, isModeFoldKey, toggleFold, type RailEntry, type RailThreadCard } from "./wiki-recents.ts";
+import { buildRail, capFolds, isModeFoldKey, railMemberWhy, toggleFold, type RailEntry, type RailThreadCard } from "./wiki-recents.ts";
 import { closedFoldKey } from "./wiki-groups.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { ActivityRow } from "./wiki-activity-rank.ts";
@@ -276,6 +276,55 @@ describe("buildRail — effort folds (P4)", () => {
     expect(es.find((e) => e.effort.id === "k")!.forcedOpen).toBe(true);
     expect(es.find((e) => e.effort.id === "p")!.forcedOpen).toBeUndefined();
     expect(rows(m.entries).filter((r) => r.page.relPath === "plans/kid.mdx").map((r) => r.section)).toEqual(["activity"]);
+  });
+
+  test("fix D: a fold whose every page is pinned draws only ghosts, so it takes no default-open slot", () => {
+    // a holds a1 + a2, both pinned: a renders, ghost-only, and d (the 4th
+    // newest effort) inherits the third open slot.
+    const m = build({ pins: ["plans/a1.mdx", "plans/a2.mdx"] });
+    const es = efforts(m.entries);
+    expect(es.map((e) => [e.effort.id, e.folded])).toEqual([["a", true], ["b", false], ["c", false], ["d", false]]);
+    const a = es.find((e) => e.effort.id === "a")!;
+    expect(a.members).toEqual([]);
+    expect(a.ghosts!.map((p) => p.relPath)).toEqual(["plans/a1.mdx", "plans/a2.mdx"]);
+    // A ghost-only fold still carries a finite age: its pages' own.
+    expect(a.ageMs).toBe(1 * HOUR);
+    expect(a.toggleKey).toBe("effort:a");
+  });
+
+  test("fix D: recency is measured over the rows the fold DRAWS — a pinned newest page does not count", () => {
+    // a1 (1h) is pinned, so fold a draws only a2 (5h): b, c, d are newer.
+    const m = build({ pins: ["plans/a1.mdx"] });
+    const es = efforts(m.entries);
+    expect(es.map((e) => [e.effort.id, e.folded])).toEqual([["a", true], ["b", false], ["c", false], ["d", false]]);
+    expect(es.find((e) => e.effort.id === "a")!.ageMs).toBe(5 * HOUR);
+  });
+
+  test("fix D: a parent row emitted earlier in Activity does not take an effort fold's attachment child (one row)", () => {
+    // PAR is a plain Activity row ranked first; its attachment KID sits in
+    // effort k. KID is lifted, so PAR's group does not claim it and the fold
+    // draws it exactly once.
+    const PAR = page({ relPath: "plans/par.mdx" });
+    const KID = page({ relPath: "plans/par.html", parent: "plans/par.mdx" });
+    const pages = [...ALL, PAR, KID];
+    const m = buildRail({
+      filtered: pages, facetOnly: pages, filters: INERT, pins: [],
+      activity: [act(PAR, 20, 0.1), act(KID, 1, 0.2), ...ACTIVITY],
+      efforts: new Map([...EFFORTS, ["plans/par.html", eff("k")]]),
+      openFolds: ["plans/par.mdx"],
+    });
+    const k = efforts(m.entries).find((e) => e.effort.id === "k")!;
+    expect([k.folded, k.members.map((p) => p.relPath)]).toEqual([false, ["plans/par.html"]]);
+    expect(rows(m.entries).filter((r) => r.page.relPath === "plans/par.html").map((r) => r.member?.kind)).toEqual(["effort"]);
+    expectOneRowPerPage(m.entries);
+  });
+
+  test("fix E: a row inside an effort fold hovers as the effort, not as a family", () => {
+    expect(railMemberWhy({ label: "Wiki drift", kind: "effort" })).toBe("In the Wiki drift effort");
+    expect(railMemberWhy({ label: "S", kind: "series" })).toBe("In the S series");
+    expect(railMemberWhy({ label: "F", kind: "family" })).toBe("In the F family");
+    expect(railMemberWhy({ label: "October 2026", kind: "month" })).toBe("In October 2026");
+    expect(railMemberWhy(undefined)).toBe("");
   });
 
   test("effortFoldKey", () => {

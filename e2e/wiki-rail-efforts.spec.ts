@@ -9,6 +9,8 @@
  *     card claims its page first, the fold holds what is left.
  *  3. The name opens `?effort=<id>` (and clears the active row); the caret
  *     folds without navigating; both are keyboard stops with a focus ring.
+ *     The open page inside a closed fold forces it open (caret disabled) until
+ *     the reader leaves the page.
  *  4. Unchecking `group by effort` draws plain Activity and stores
  *     `toggle:no-efforts`, through a reload; re-checking removes it.
  *  5. A wiki with no map draws plain Activity, with no checkbox.
@@ -234,6 +236,24 @@ test.describe("Wiki rail: group by effort", () => {
     await expect(page.locator("#wikiList .wiki-list-item.active")).toHaveCount(0);
   });
 
+  test("the open page inside a CLOSED fold forces it open, caret disabled; leaving the page lets it close again", async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    // delta is the 4th newest effort, so it starts closed.
+    await page.goto(`${BASE}/wiki?wiki=${MAP}&relPath=${encodeURIComponent("plans/delta-one.md")}`);
+    await expect(caret(page, "delta")).toHaveAttribute("aria-expanded", "true");
+    await expect(caret(page, "delta")).toBeDisabled();
+    await expect(pageRow(page, "plans/delta-one.md")).toBeVisible();
+    await expect(pageRow(page, "plans/delta-one.md")).toHaveClass(/active/);
+    await expect(pageRow(page, "plans/delta-one.md")).toHaveClass(/member/);
+    // A fold the open page does not force keeps its own caret.
+    await expect(caret(page, "alpha")).toBeEnabled();
+    await pageRow(page, "plans/gamma-one.md").click();
+    await expect(pageRow(page, "plans/gamma-one.md")).toHaveClass(/active/);
+    await expect(caret(page, "delta")).toHaveAttribute("aria-expanded", "false");
+    await expect(caret(page, "delta")).toBeEnabled();
+    await expect(pageRow(page, "plans/delta-one.md")).toHaveCount(0);
+  });
+
   test("keyboard: the caret and the name are separate stops with a visible ring; Enter and Space toggle the caret", async ({ page }) => {
     await open(page);
     await caret(page, "gamma").focus();
@@ -280,7 +300,12 @@ test.describe("Wiki rail: group by effort", () => {
       await open(page, NOMAP, folds);
       await expect(pageRow(page, "plans/alpha-one.md")).toHaveAttribute("data-section", "activity");
       await expect(effortRows(page)).toHaveCount(0);
+      // Open the options pane first: a closed pane hides the label whatever
+      // the toggle's own `hidden` says.
+      await page.locator("#wikiOptionsBtn").click();
+      await expect(page.locator("#wikiGroupFamilies")).toBeVisible();
       await expect(page.locator("#wikiEffortsToggle")).toBeHidden();
+      await page.locator("#wikiOptionsBtn").click();
       const rels = await relPathsOnRail(page);
       expect(rels.length).toBe(new Set(rels).size);
     }

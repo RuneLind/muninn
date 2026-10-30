@@ -158,6 +158,7 @@ import {
   isPinnedRelPath,
   pairedByWhy,
   parseRelatedOrder,
+  railMemberWhy,
   storageEventTouchesThreadPin,
   threadPinSettle,
   threadPinStep,
@@ -2142,14 +2143,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
     const childWhy = entry.child
       ? pairedByWhy(entry.child.pairedBy, displayTitleOf(entry.child.parent))
       : "";
-    // A row inside a family, month or series says which one on hover — the
-    // group's own row carries the label, and a reader scrolling past the top of
-    // a long open group has nothing else to read it from.
-    const memberWhy = entry.member
-      ? entry.member.kind === "month"
-        ? `In ${entry.member.label}`
-        : `In the ${entry.member.label} ${entry.member.kind === "series" ? "series" : "family"}`
-      : "";
+    const memberWhy = railMemberWhy(entry.member);
     // The latest dot (a pseudo-element on the series rail) says WHAT it is here,
     // because a dot cannot: the words live in the reader header.
     const latestWhy = entry.latest ? "newest plan in this series that is not retired" : "";
