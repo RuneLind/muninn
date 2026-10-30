@@ -52,6 +52,8 @@ export interface StartCardsDeps {
   pages?(): readonly CardPage[];
   /** The reader URL of a page, for a link's `href`. */
   hrefFor?(relPath: string): string;
+  /** The reader URL of an effort page (P3); absent, effort names are text. */
+  effortHref?(id: string): string;
 }
 
 /** Injected at boot by `initStartCards`.
@@ -825,6 +827,12 @@ export function refreshWorkCardFromListing(): void {
   syncCard({ type: "adopt", runAt: deps.workMapRunAt ? deps.workMapRunAt() : null, hasBody: workBody !== null });
 }
 
+/** The Needs-you keys marked done on the card for run `runAt` (the effort
+ *  page shows the same items, so it reads the same store). */
+export function workMapDoneSet(runAt: number): Set<string> {
+  return parseDone(readDoneRaw(), runAt);
+}
+
 // ── Focus: one resolver, an ordered chain of visible, focusable targets ──
 function focusable(t: HTMLElement | null | undefined): t is HTMLElement {
   return !!t && t.isConnected && !t.hidden && !(t as HTMLButtonElement).disabled && t.getClientRects().length > 0;
@@ -887,6 +895,9 @@ function focusedCardControl(el: HTMLElement): FocusKey | null {
   if (doneAt !== null) return { doneAt: Number(doneAt) };
   const whyKey = active.getAttribute("data-wm-why") ?? (active.classList.contains("wiki-wm-why-text") ? active.parentElement?.querySelector("[data-wm-why]")?.getAttribute("data-wm-why") : null);
   if (whyKey != null) return { why: whyKey };
+  // An effort id matches EFFORT_ID_RE, so it needs no escaping in a selector.
+  const effort = active.getAttribute("data-effort-link");
+  if (effort !== null) return { sel: `[data-effort-link="${effort}"]` };
   const rel = active.getAttribute("data-relpath");
   if (rel !== null) return { link: rel, nth: cardLinks(el, rel).indexOf(active) };
   if (active.classList.contains("wiki-wn-title")) return { heading: true };
@@ -925,6 +936,7 @@ function paintWorkCard(override?: FocusKey): void {
     done: parseDone(readDoneRaw(), runAt),
     openWhy: whyOpen,
     hrefFor: deps.hrefFor ?? ((rel) => withWiki("/wiki?relPath=" + encodeURIComponent(rel))),
+    ...(deps.effortHref ? { effortHref: deps.effortHref } : {}),
     refresh: workRefresh,
   });
   if (typeof el.querySelectorAll === "function") {

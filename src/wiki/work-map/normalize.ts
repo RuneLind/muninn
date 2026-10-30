@@ -24,25 +24,11 @@ import type { TouchRecord } from "../git-dates.ts";
 import type { WorkEvent } from "../work-focus.ts";
 import { EFFORT_ID_RE, type WorkMap, type WorkMapAnswer, type WorkMapDaily, type WorkMapEffort } from "./schema.ts";
 
-const DAY = 86_400_000;
-const OSLO_DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit" });
-export const osloDay = (ms: number) => OSLO_DAY.format(new Date(ms));
+import { osloDay, slugifyEffortId } from "./ids.ts";
 
-/** NFKD, `å`→`aa`, `ø`→`o`, `æ`→`ae`, lowercase, `_` and spaces → `-`, other
- *  marks and characters dropped, dashes collapsed and trimmed. */
-export function slugifyEffortId(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/å/g, "aa")
-    .replace(/ø/g, "o")
-    .replace(/æ/g, "ae")
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[_\s]+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
+export { osloDay, slugifyEffortId };
+
+const DAY = 86_400_000;
 
 /** Step 4's seam: P6 moves declared pages into their declared efforts here. */
 export type DeclaredEffortsHook = (efforts: NormalEffort[]) => NormalEffort[];

@@ -111,8 +111,13 @@ import {
   mountStartCards,
   refreshWorkCardFromListing,
   startReindex,
+  workMapDoneSet,
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
+// The effort page (work map P3): pure HTML, wired by `renderEffort` below.
+import { EFFORT_PARAM, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
+import type { WorkMapGetBody } from "./wiki-work-card.ts";
+import type { WorkMap } from "../../../wiki/work-map/schema.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
@@ -951,9 +956,13 @@ function refreshCrumbHref(): void {
  */
 function goToStart(): void {
   const target = currentStartUrl();
+  // `sameStartUrl` reads an `?effort=` URL as the overview it sits on, so the
+  // effort page's way home must push explicitly.
+  const onEffort = new URLSearchParams(location.search).has(EFFORT_PARAM);
   if (
-    !sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI), wikiToolsFlag(), staleTabAvailable()) &&
-    location.pathname + location.search !== target
+    onEffort ||
+    (!sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI), wikiToolsFlag(), staleTabAvailable()) &&
+      location.pathname + location.search !== target)
   ) {
     history.pushState({}, "", target);
   }
@@ -987,6 +996,7 @@ initStartCards({
   workMapRunAt: () => workMapRunAt,
   pages: () => allPages,
   hrefFor: pageUrlByRelPath,
+  effortHref: effortHrefFor,
 });
 initWikiVisuals();
 initRailResize();
@@ -5553,6 +5563,108 @@ function renderIssueGraph(): void {
   applyDisplay();
 }
 
+// ── Effort page (work map P3) ─────────────────────────────────────────
+/** The effort the article pane shows, or null. Read only while
+ *  `#wikiEffortPage` is in the pane: every other view replaces it. */
+let effortOpen: string | null = null;
+/** The last map the effort page fetched, kept while the listing's run time
+ *  matches it. */
+let effortMapCache: WorkMap | null = null;
+
+/** An effort's reader URL, carrying the facets an article URL carries. */
+function effortHrefFor(id: string): string {
+  return urlWithJira(urlWithProject(effortUrl(WIKI, id), filters.project), filters.jira);
+}
+
+/** Open an effort from a link: push its URL (unless already there), render. */
+function openEffort(id: string): void {
+  const target = effortHrefFor(id);
+  if (location.pathname + location.search !== target) history.pushState({}, "", target);
+  renderEffort(id);
+}
+
+/** `?effort=<id>`: the effort page fills the article pane, as the issue graph
+ *  does, with no page behind it. A loading state paints first; the map comes
+ *  from the cache when the listing's run time still matches it. */
+function renderEffort(id: string, keepScroll = false): void {
+  consumeUrlLens();
+  abortAgentRuns();
+  const wrap = document.getElementById("articleWrap");
+  if (!wrap) return;
+  const scroll = keepScroll ? wrap.scrollTop : 0;
+  setAtlasFull(false);
+  currentName = null;
+  setCurrentRelPath(null);
+  currentPageHash = null;
+  graphMode = false;
+  graphIssue = "";
+  removeGraph();
+  hideBreadcrumb();
+  effortOpen = id;
+  const seq = pageViewSeq;
+  const head = { wiki: WIKI, startHref: currentStartUrl(), id };
+  const conn = document.getElementById("connBody");
+  const paint = (map: WorkMap) => {
+    const view = effortView({
+      map,
+      pages: allPages,
+      id,
+      wiki: WIKI,
+      startHref: currentStartUrl(),
+      hrefFor: pageUrlByRelPath,
+      effortHref: effortHrefFor,
+      pill: statusPillHtml,
+      done: workMapDoneSet(map.runAtMs),
+      now: Date.now(),
+    });
+    wrap.innerHTML = view.article;
+    wrap.scrollTop = scroll;
+    if (conn) conn.innerHTML = view.connections;
+  };
+  const runAt = workMapRunAt;
+  if (runAt === null) {
+    effortMapCache = null;
+    wrap.innerHTML = effortStatusHtml(head, "no-map");
+    if (conn) conn.innerHTML = '<div class="wiki-ef-conn-empty">No work map.</div>';
+    return;
+  }
+  if (effortMapCache && effortMapCache.runAtMs === runAt) {
+    paint(effortMapCache);
+    return;
+  }
+  if (!keepScroll || !document.getElementById("wikiEffortPage")) {
+    wrap.innerHTML = effortStatusHtml(head, "loading");
+    wrap.scrollTop = 0;
+    if (conn) conn.innerHTML = '<div class="wiki-ef-conn-empty">Loading…</div>';
+  }
+  const current = () => effortOpen === id && pageViewSeq === seq && !!document.getElementById("wikiEffortPage");
+  fetch(withWiki("/api/wiki/work-map"))
+    .then(async (r) => {
+      const body = (await r.json().catch(() => null)) as WorkMapGetBody | null;
+      if (!current()) return;
+      if (!r.ok || !body || typeof body !== "object") throw new Error(r.ok ? "malformed response" : `HTTP ${r.status}`);
+      if (!body.map) {
+        wrap.innerHTML = effortStatusHtml(head, "no-map");
+        if (conn) conn.innerHTML = '<div class="wiki-ef-conn-empty">No work map.</div>';
+        return;
+      }
+      effortMapCache = body.map;
+      paint(body.map);
+    })
+    .catch((err: Error) => {
+      if (!current()) return;
+      wrap.innerHTML = effortStatusHtml(head, "error", err.message);
+      if (conn) conn.innerHTML = '<div class="wiki-ef-conn-empty">No work map.</div>';
+    });
+}
+
+/** A listing adopted while the effort page is open: re-join it (a page may
+ *  have been renamed, or a new run landed), keeping the scroll. */
+function refreshEffortFromListing(): void {
+  if (effortOpen === null || !document.getElementById("wikiEffortPage")) return;
+  renderEffort(effortOpen, true);
+}
+
 const GRAPH_NODE_SEL = `#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`;
 document.addEventListener("mouseover", (e) => {
   const t = e.target as HTMLElement | null;
@@ -5635,6 +5747,22 @@ document.body.addEventListener("click", (e) => {
   if (typeof target.closest === "function" && handleWorkCardClick(target)) return;
   if (target.closest && target.closest("#wikiIndexReindex")) {
     startReindex();
+    return;
+  }
+  // Effort links (the Your work card, the effort page) open in the reader;
+  // a modifier or middle click keeps the anchor's own href.
+  const effortLink = target.closest ? target.closest("[data-effort-link]") : null;
+  const effortHome = target.closest ? target.closest("[data-effort-home]") : null;
+  const effortRetry = target.closest ? target.closest("#wikiEffortRetry") : null;
+  if (effortLink || effortHome || effortRetry) {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    e.preventDefault();
+    if (effortLink) openEffort(effortLink.getAttribute("data-effort-link") || "");
+    else if (effortRetry && effortOpen !== null) renderEffort(effortOpen);
+    else if (effortHome) {
+      goToStart();
+      document.getElementById("wikiWorkCard")?.scrollIntoView({ block: "start" });
+    }
     return;
   }
   const crumb = target.closest ? target.closest(".wiki-bc-wiki") : null;
@@ -7024,7 +7152,9 @@ window.addEventListener("popstate", () => {
     return;
   }
   const page = params.get("page");
+  const effort = params.get(EFFORT_PARAM);
   if (page) loadPage(page, false);
+  else if (effort !== null) renderEffort(effort);
   else if (graphMode && graphIssue && hasTracker()) renderIssueGraph();
   else {
     syncStartTabFromUrl();
@@ -9921,6 +10051,7 @@ function adoptPagesAndRender(applied: PendingPages): void {
   // A run that finished since the last listing shows at once. Only the Your
   // work card: What's new and the Index card are not re-mounted on an adopt.
   if (currentName === null && wikiToolsFlag()) refreshWorkCardFromListing();
+  refreshEffortFromListing();
 }
 
 /** Everything an adopt does EXCEPT painting the row list and the start body — the
@@ -9962,7 +10093,13 @@ function bootRender(applied: PendingPages): void {
     loadPageByRelPath(relPath, false);
   } else {
     const page = params.get("page");
+    const effort = params.get(EFFORT_PARAM);
     if (page) loadPage(page, false);
+    // `?effort=<id>`: the effort page (work map P3), with no page behind it.
+    else if (effort !== null) {
+      renderEffort(effort);
+      renderList();
+    }
     // `?display=graph&issue=jira:KEY` with no page: the issue's graph alone.
     else if (graphMode && graphIssue && hasTracker()) {
       renderIssueGraph();
