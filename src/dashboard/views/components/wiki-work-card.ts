@@ -9,7 +9,7 @@
  * of its effort and its marker reads as plain text).
  */
 
-import { joinWorkMap, type JoinedEffort, type JoinedWorkMap } from "../../../wiki/work-map/join.ts";
+import { joinWorkMap, type JoinablePage, type JoinedEffort, type JoinedWorkMap } from "../../../wiki/work-map/join.ts";
 import type { WorkMap } from "../../../wiki/work-map/schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { escHtml as esc } from "./escape.ts";
@@ -37,8 +37,9 @@ export interface WorkMapGetBody {
   running?: { startedAt: number };
 }
 
-/** Just the listing fields the card reads. */
-export interface CardPage {
+/** Just the listing fields the card reads: the title, and what `joinWorkMap`
+ *  reads to place a page declared after the run (P6). */
+export interface CardPage extends JoinablePage {
   relPath: string;
   title: string;
   displayTitle?: string;
@@ -358,6 +359,13 @@ function effortHtml<P>(
   );
 }
 
+/** The efforts the card lists: every joined effort except one that declared
+ *  pages moving elsewhere left empty (P6). An effort emptied by deletions
+ *  stays, so the card can still say it existed. */
+export function cardEfforts<P>(efforts: readonly JoinedEffort<P>[]): JoinedEffort<P>[] {
+  return efforts.filter((e) => e.pages.length > 0 || e.movedOut.length === 0);
+}
+
 function lanesHtml<P>(
   map: JoinedWorkMap<P>,
   now: number,
@@ -366,10 +374,11 @@ function lanesHtml<P>(
   hrefFor: (rel: string) => string,
   effortHref?: (id: string) => string,
 ): string {
-  const childrenOf = (id: string) => map.efforts.filter((x) => x.parent === id && rendersUnderParent(x, map.efforts));
-  const parentName = (e: JoinedEffort<P>) => (isNestedEffort(e, map.efforts) ? map.efforts.find((x) => x.id === e.parent)?.name : undefined);
+  const listed = cardEfforts(map.efforts);
+  const childrenOf = (id: string) => listed.filter((x) => x.parent === id && rendersUnderParent(x, listed));
+  const parentName = (e: JoinedEffort<P>) => (isNestedEffort(e, listed) ? listed.find((x) => x.id === e.parent)?.name : undefined);
   const shown = new Set<string>();
-  return laneEfforts(map.efforts)
+  return laneEfforts(listed)
     .map(({ lane, efforts }) => {
       const before = shown.size;
       const items = efforts

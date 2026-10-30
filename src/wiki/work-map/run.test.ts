@@ -294,3 +294,42 @@ describe("startWorkMapRun", () => {
     expect(workMapDue(st, NOW + 3_600_000, 5).due).toBe(false);
   });
 });
+
+describe("declared efforts through the run (P6)", () => {
+  test("the run reads `effort:` off the index: a declared page leaves the model's effort, a dropped declared effort restores, an inactive one retires", async () => {
+    const declaredPages = [
+      { relPath: "plans/a.mdx", title: "A", type: "plan", workedMs: NOW - DAY, aliases: [] },
+      { relPath: "plans/b.mdx", title: "B", type: "plan", workedMs: NOW - 2 * DAY, aliases: [], effort: "beta" },
+      { relPath: "plans/old.mdx", title: "Old", type: "plan", workedMs: NOW - 90 * DAY, gitTouchedMs: NOW - 80 * DAY, aliases: [], effort: "gamma" },
+      { relPath: "plans/typo.mdx", title: "Typo", type: "plan", workedMs: NOW - 90 * DAY, aliases: [], effort: "Not A Slug" },
+    ] as unknown as WikiPageMeta[];
+    const index = { ...fakeIndex, pages: declaredPages } as unknown as WikiIndex;
+    const previous = {
+      version: 1,
+      wiki: "mimir",
+      runAtMs: NOW - DAY,
+      model: "m",
+      coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 2, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+      summary: "",
+      needsYou: [],
+      themes: [],
+      efforts: ["beta", "gamma"].map((id) => ({ id, name: `${id} name`, aliases: [], oneLine: "", state: "active", pages: [], why: "", confidence: 1, next: "", related: [], daily: [] })),
+      loose: [],
+    };
+    const { d, models } = deps({
+      inputs: { ...warm, rebuildIndex: async () => index },
+      readText: async (p) => (p.endsWith(".work-map.json") ? JSON.stringify(previous) : null),
+    });
+    const res = await startWorkMapRun("mimir", d).promise;
+    expect(res.outcome).toBe("ok");
+    const map = res.outcome === "ok" ? res.map : null;
+    expect(map!.efforts.map((e) => [e.id, e.state, e.pages.map((p) => p.id)])).toEqual([
+      ["alpha", "active", ["plans/a.mdx"]],
+      ["beta", "quiet", ["plans/b.mdx"]],
+    ]);
+    expect(map!.retired).toEqual([{ id: "gamma", name: "gamma name", lastActive: NOW - 80 * DAY }]);
+    expect(models[0]!.prompt).toContain("effort=beta (declared, fixed)");
+    // The written JSON round-trips through the stored schema.
+    expect(parseWorkMap(JSON.stringify(map))?.retired?.length).toBe(1);
+  });
+});

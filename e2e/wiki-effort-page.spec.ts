@@ -13,7 +13,10 @@
  *  3. **Sub-efforts and page links** navigate in the reader.
  *  4. **An id the map does not hold** shows «no longer in the map», linking the
  *     effort whose alias slugifies to it; a wiki with no map says so.
- *  5. **Legible in every theme**: every element of the effort page and its
+ *  5. **Declared efforts (P6)**: a page declared after the run lists first
+ *     under its effort on the card and the effort page; a retired id opens
+ *     its retired view with the pages that declare it.
+ *  6. **Legible in every theme**: every element of the effort page and its
  *     Connections pane that paints text clears 4.5:1.
  *
  * One muninn on its own port over two temp wikis. `SCHEDULER_ENABLED=false`
@@ -40,6 +43,8 @@ const WIKI = "e2e-ef-map";
 const NOMAP = "e2e-ef-nomap";
 /** A third wiki whose map the listing-refresh tests rewrite mid-test. */
 const LIVE = "e2e-ef-live";
+/** P6: a wiki whose pages declare `effort:` after the run, and a retired id. */
+const DECLARED = "e2e-ef-declared";
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
@@ -106,6 +111,25 @@ function mapJson(runAtMs: number, wiki = WIKI, driftName = "Drift check"): strin
   });
 }
 
+/** One effort, one retired id (P6). */
+function declaredMapJson(runAtMs: number): string {
+  return JSON.stringify({
+    version: 1,
+    wiki: DECLARED,
+    runAtMs,
+    model: "test-model",
+    coverage: { sessionsSinceMs: runAtMs - 8 * DAY, sessionsAsOfMs: runAtMs, touchWindowDays: 28, activePages: 1, threads: 0, logEntries: 0, digestChars: 1, warnings: [] },
+    summary: "",
+    needsYou: [],
+    themes: [],
+    efforts: [
+      { id: "drift", name: "Drift check", aliases: [], oneLine: "", state: "active", pages: [{ id: "plans/drift.mdx", role: "plan" }], why: "", confidence: 0.9, next: "", related: [], daily: [] },
+    ],
+    retired: [{ id: "parked", name: "Parked work", lastActive: Date.parse("2026-09-14T10:00:00Z") }],
+    loose: [],
+  });
+}
+
 let server: ChildProcess | undefined;
 const roots: Record<string, string> = {};
 
@@ -132,6 +156,13 @@ test.beforeAll(async () => {
     await writeFile(path.join(roots[WIKI]!, rel), `---\ntitle: ${title}\nproject: reader\n---\n\nBody of ${title}.\n`, "utf8");
   }
   await writeFile(path.join(roots[LIVE]!, ".work-map.json"), mapJson(now - 2 * HOUR, LIVE), "utf8");
+  roots[DECLARED] = await mkdtemp(path.join(tmpdir(), `muninn-e2e-${DECLARED}-`));
+  await mkdir(path.join(roots[DECLARED]!, "plans"), { recursive: true });
+  await writeFile(path.join(roots[DECLARED]!, "plans/drift.mdx"), md("Drift plan", "in-flight"), "utf8");
+  // Written after the run: not in the map, but declares the drift effort.
+  await writeFile(path.join(roots[DECLARED]!, "plans/drift-today.mdx"), `---\ntitle: Drift today\neffort: drift\n---\n\nBody.\n`, "utf8");
+  await writeFile(path.join(roots[DECLARED]!, "plans/parked.mdx"), `---\ntitle: Parked plan\neffort: parked\n---\n\nBody.\n`, "utf8");
+  await writeFile(path.join(roots[DECLARED]!, ".work-map.json"), declaredMapJson(now - 2 * HOUR), "utf8");
   await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -143,7 +174,7 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_EXTRA: [WIKI, NOMAP, LIVE].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [WIKI, NOMAP, LIVE, DECLARED].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -309,6 +340,34 @@ test("an unknown id says it is no longer in the map and links the alias match", 
   await expect(ef.locator("[data-effort-link]")).toHaveCount(0);
   await ef.locator(".wiki-ef-gone-home [data-effort-home]").click();
   await expect(page.locator("#wikiWorkCard")).toBeVisible();
+});
+
+test("a page declared after the run shows under its effort on the card and on the effort page (P6)", async ({ page }) => {
+  await page.goto(`${BASE}/wiki?wiki=${DECLARED}`);
+  const card = page.locator("#wikiWorkCard");
+  const drift = card.locator('.wiki-wm-effort[data-effort-id="drift"]');
+  await expect(drift.locator('.wiki-wm-link[data-relpath="plans/drift-today.mdx"]')).toHaveText("Drift today");
+  // A retired effort is not on the card.
+  await expect(card.locator('[data-effort-id="parked"]')).toHaveCount(0);
+  await drift.locator('a.wiki-wm-effort-name[data-effort-link="drift"]').click();
+  const ef = page.locator("#wikiEffortPage");
+  await expect(ef).toHaveAttribute("data-effort", "drift");
+  // The joined page lists first.
+  await expect(ef.locator(".wiki-ef-plink")).toHaveText(["Drift today", "Drift plan"]);
+  await expect(ef.locator('.wiki-ef-page:has([data-relpath="plans/drift-today.mdx"]) .wiki-ef-role')).toHaveText("plan");
+});
+
+test("a retired id shows its name, last-active date and the pages that declare it (P6)", async ({ page }) => {
+  await page.goto(`${BASE}/wiki?wiki=${DECLARED}&effort=parked`);
+  const ef = page.locator("#wikiEffortPage");
+  await expect(ef).toHaveAttribute("data-effort", "parked");
+  await expect(ef.locator("h1")).toHaveText("Parked work");
+  await expect(ef.locator("[data-effort-last-active]")).toHaveText("last active 2026-09-14");
+  await expect(ef.locator(".wiki-ef-plink")).toHaveText(["Parked plan"]);
+  await expect(ef.locator(".wiki-ef-gone")).toContainText("retired");
+  await ef.locator('.wiki-ef-plink[data-relpath="plans/parked.mdx"]').click();
+  await expect(page.locator("#wikiEffortPage")).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.get("relPath")).toBe("plans/parked.mdx");
 });
 
 test("an empty or blank ?effort= opens the start view and drops the param in place", async ({ page }) => {

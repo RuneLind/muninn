@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { joinWorkMap } from "./join.ts";
+import { declarationKey, joinWorkMap } from "./join.ts";
 import { WORK_MAP_VERSION, type WorkMap } from "./schema.ts";
 
 /** Every prose field the map carries cites `m` once. */
@@ -68,5 +68,96 @@ describe("joinWorkMap effort ids", () => {
     const e = base.efforts[0]!;
     const m = { ...base, efforts: [{ ...e, id: "a", name: "A1", parent: "b" }, { ...e, id: "a", name: "A2" }, { ...e, id: "b", name: "B1", parent: "a" }, { ...e, id: "b", name: "B2" }] };
     expect(joinWorkMap(m, []).efforts.map((x) => x.name)).toEqual(["A1", "B1"]);
+  });
+});
+
+describe("declared pages join at once (P6)", () => {
+  const RUN = Date.parse("2026-10-29T05:00:00Z");
+  const HOUR = 3_600_000;
+  const base = mapCiting("x", ["plans/a.mdx", "plans/b.mdx"]);
+  const m: WorkMap = {
+    ...base,
+    runAtMs: RUN,
+    efforts: [
+      { ...base.efforts[0]!, pages: [{ id: "plans/a.mdx", role: "plan" }, { id: "plans/b.mdx", role: "report", derivedFrom: "plans/a.mdx" }] },
+      { ...base.efforts[0]!, id: "f", name: "F", pages: [{ id: "plans/c.mdx", role: "plan" }] },
+    ],
+    retired: [{ id: "gone", name: "Gone", lastActive: 1 }],
+    loose: ["blogs/loose.mdx"],
+  };
+  const old = { gitCreatedMs: RUN - 900 * HOUR, gitTouchedMs: RUN - 800 * HOUR };
+  const listed = [{ relPath: "plans/a.mdx", ...old }, { relPath: "plans/b.mdx", ...old }, { relPath: "plans/c.mdx", ...old }, { relPath: "blogs/loose.mdx", ...old }];
+  const ids = (j: ReturnType<typeof joinWorkMap>) => j.efforts.map((e) => e.pages.map((p) => p.id));
+
+  test("a page declared after the run joins its effort first, with its folder's role and no derivedFrom", () => {
+    const j = joinWorkMap(m, [
+      ...listed,
+      { relPath: "plans/new.mdx", effort: "f", gitDirty: true, mtimeMs: RUN + HOUR },
+      { relPath: "archive/new-report.mdx", effort: "f", gitCreatedMs: RUN + 2 * HOUR, gitTouchedMs: RUN + 2 * HOUR },
+    ]);
+    // Newest first: the report (created run + 2 h) before the dirty plan (mtime run + 1 h).
+    expect(j.efforts[1]!.pages.map((p) => [p.id, p.role, p.derivedFrom, p.joined])).toEqual([
+      ["archive/new-report.mdx", "report", undefined, true],
+      ["plans/new.mdx", "plan", undefined, true],
+      ["plans/c.mdx", "plan", undefined, undefined],
+    ]);
+  });
+
+  test("a declared page the map does not hold and older than the run is NOT joined", () => {
+    const j = joinWorkMap(m, [...listed, { relPath: "plans/older.mdx", effort: "f", ...old, workedMs: RUN - HOUR }]);
+    expect(ids(j)).toEqual([["plans/a.mdx", "plans/b.mdx"], ["plans/c.mdx"]]);
+  });
+
+  test("worked on after the run counts as newer; so does an untracked page's birthtime", () => {
+    const j = joinWorkMap(m, [
+      ...listed,
+      { relPath: "plans/worked.mdx", effort: "f", ...old, workedMs: RUN + HOUR },
+      { relPath: "notes/no-git.md", effort: "f", birthtimeMs: RUN + 3 * HOUR, mtimeMs: RUN + 3 * HOUR },
+    ]);
+    expect(ids(j)[1]).toEqual(["notes/no-git.md", "plans/worked.mdx", "plans/c.mdx"]);
+  });
+
+  test("a mapped page re-declared elsewhere moves, keeping its role, and is recorded as moved out; a loose one leaves loose", () => {
+    const j = joinWorkMap(m, [
+      { relPath: "plans/a.mdx", ...old },
+      { relPath: "plans/b.mdx", effort: "f", ...old },
+      { relPath: "plans/c.mdx", ...old },
+      { relPath: "blogs/loose.mdx", effort: "e", ...old },
+    ]);
+    expect(j.efforts[0]!.pages.map((p) => p.id)).toEqual(["blogs/loose.mdx", "plans/a.mdx"]);
+    expect(j.efforts[0]!.movedOut).toEqual([{ id: "plans/b.mdx", to: "f" }]);
+    expect(j.efforts[1]!.pages.map((p) => [p.id, p.role, p.derivedFrom])).toEqual([
+      ["plans/b.mdx", "report", undefined],
+      ["plans/c.mdx", "plan", undefined],
+    ]);
+    expect(j.loose).toEqual([]);
+  });
+
+  test("a mapped page declaring a retired id leaves its effort and joins none; an unknown or invalid id moves nothing", () => {
+    const j = joinWorkMap(m, [
+      { relPath: "plans/a.mdx", effort: "gone", ...old },
+      { relPath: "plans/b.mdx", effort: "nope", ...old },
+      { relPath: "plans/c.mdx", effort: "Bad Id", ...old },
+      { relPath: "blogs/loose.mdx", effort: "nope", ...old },
+    ]);
+    expect(ids(j)).toEqual([["plans/b.mdx"], ["plans/c.mdx"]]);
+    expect(j.efforts[0]!.movedOut).toEqual([{ id: "plans/a.mdx", to: "gone" }]);
+    expect(j.loose.map((p) => p.relPath)).toEqual(["blogs/loose.mdx"]);
+  });
+
+  test("a page declaring the effort it already sits in stays in place", () => {
+    const j = joinWorkMap(m, [{ relPath: "plans/a.mdx", effort: "e", ...old }, { relPath: "plans/b.mdx", effort: "e", ...old }, { relPath: "plans/c.mdx", ...old }]);
+    expect(j.efforts[0]!.pages.map((p) => [p.id, p.joined])).toEqual([["plans/a.mdx", undefined], ["plans/b.mdx", undefined]]);
+    expect(j.efforts[0]!.pages[1]!.derivedFrom).toBe("plans/a.mdx");
+  });
+});
+
+describe("declarationKey", () => {
+  test("changes when a declaration appears, changes or becomes newer; not for undeclared pages", () => {
+    const a = declarationKey([{ relPath: "x.md" }, { relPath: "y.md", effort: "e", gitTouchedMs: 1 }], 10);
+    expect(declarationKey([{ relPath: "x.md", gitTouchedMs: 99 }, { relPath: "y.md", effort: "e", gitTouchedMs: 1 }], 10)).toBe(a);
+    expect(declarationKey([{ relPath: "x.md", effort: "e" }, { relPath: "y.md", effort: "e", gitTouchedMs: 1 }], 10)).not.toBe(a);
+    expect(declarationKey([{ relPath: "y.md", effort: "f", gitTouchedMs: 1 }], 10)).not.toBe(a);
+    expect(declarationKey([{ relPath: "y.md", effort: "e", gitTouchedMs: 1, gitDirty: true }], 10)).not.toBe(a);
   });
 });

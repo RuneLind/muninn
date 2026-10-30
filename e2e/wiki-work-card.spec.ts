@@ -25,6 +25,9 @@
  *     Light reading) and System under both OS schemes: every element that
  *     paints text, in every state (map, refusal, running, all done, error),
  *     clears 4.5:1 against what is painted behind it.
+ *  8. **A page declared after the run (P6)** joins its effort on a listing
+ *     refresh though the run did not move, first in the effort and not behind
+ *     «+N more».
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -67,6 +70,8 @@ const P_DUP = "e2e-wm-p-dup";
 const P_WHY = "e2e-wm-p-why";
 /** Paints every element the card has: the contrast sweep's wiki. */
 const SWEEP = "e2e-wm-sweep";
+/** P6: a seven-page effort a page declared after the load must join on a listing refresh. */
+const DECL = "e2e-wm-decl";
 const LONG_WHY =
   "The two drafts of ⟦plans/alpha.mdx⟧ disagree on the name, the scope and the owner, and the review thread under the second draft has gone quiet for a week, so nobody has decided which of them the next slice builds on.";
 /** Clamps to two lines in a narrow card and fits them in a wide one. */
@@ -178,6 +183,14 @@ test.beforeAll(async () => {
     { title: "Other", kind: "resume", why: "", action: "", pages: [] },
   ]);
   await seedWiki(P_WHY, now - 2 * HOUR, [{ title: "Settle alpha", kind: "decision", why: MID_WHY, action: "", pages: [] }]);
+  await seedWiki(DECL, null);
+  {
+    const m = JSON.parse(mapJson(DECL, now - 2 * HOUR, [])) as { efforts: { id: string; pages: { id: string; role: string }[] }[] };
+    const seven = ["plans/alpha.mdx", ...[1, 2, 3, 4, 5, 6].map((i) => `plans/d${i}.mdx`)];
+    for (let i = 1; i <= 6; i++) await writeFile(path.join(roots[DECL]!, `plans/d${i}.mdx`), md(`Decl page ${i}`), "utf8");
+    m.efforts[0]!.pages = seven.map((id) => ({ id, role: "plan" }));
+    await writeFile(path.join(roots[DECL]!, ".work-map.json"), JSON.stringify(m), "utf8");
+  }
   await seedWiki(SWEEP, null);
   for (let i = 1; i <= 6; i++) await writeFile(path.join(roots[SWEEP]!, `plans/p${i}.mdx`), md(`Page ${i}`), "utf8");
   await writeFile(path.join(roots[SWEEP]!, ".work-map.json"), sweepMapJson(now - 30 * HOUR), "utf8");
@@ -192,7 +205,7 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -369,6 +382,23 @@ async function forceAdopt(page: Page, wiki: string): Promise<void> {
   await expect(page.locator("#wikiList")).toContainText(title);
   await page.waitForTimeout(300);
 }
+
+test("a page declared after the load joins its seven-page effort on a listing refresh, among the first six (P6)", async ({ page }) => {
+  await page.clock.install();
+  await openStart(page, DECL);
+  const alpha = page.locator('#wikiWorkCard .wiki-wm-effort[data-effort-id="alpha"]');
+  await expect(alpha.locator(".wiki-wm-more")).toHaveText(" +1 more");
+  // The run does not move: only the listing learns of the declaration.
+  await writeFile(path.join(roots[DECL]!, "plans/declared-today.mdx"), `---\ntitle: Declared today\neffort: alpha\n---\n\nWritten after the run.\n`, "utf8");
+  await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.locator("#wikiList")).toContainText("Declared today");
+  // On the card without a reload, first in the effort, not behind «+N more».
+  const links = alpha.locator(".wiki-wm-pages .wiki-wm-link");
+  await expect(links.first()).toHaveText("Declared today");
+  await expect(links).toHaveCount(6);
+  await expect(alpha.locator(".wiki-wm-more")).toHaveText(" +2 more");
+});
 
 test("a no-map wiki asks for the digest no more often across adopts after a digest error", async ({ page }) => {
   await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: { digest: null, error: "connector busy" } }));

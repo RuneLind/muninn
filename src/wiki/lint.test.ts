@@ -865,3 +865,47 @@ describe("lintWiki — stem-collision", () => {
     expect(counts["stem-collision"]).toBe(0);
   });
 });
+
+describe("effort-unknown (check 25)", () => {
+  let root: string;
+  const write = (rel: string, content: string) => Bun.write(path.join(root, rel), content);
+  const page = (title: string, effort: string) => `---\ntitle: ${title}\neffort: ${effort}\nupdated: 2026-10-01\n---\n\n# ${title}\n\nBody.\n`;
+  const workMap = JSON.stringify({
+    version: 1,
+    wiki: "w",
+    runAtMs: 1,
+    model: "m",
+    coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+    summary: "",
+    needsYou: [],
+    themes: [],
+    efforts: [{ id: "live", name: "Live", aliases: [], oneLine: "", state: "active", pages: [], why: "", confidence: 1, next: "", related: [], daily: [] }],
+    retired: [{ id: "old", name: "Old", lastActive: 0 }],
+    loose: [],
+  });
+  async function effortFindings(): Promise<string[]> {
+    const report = await lintWiki(await buildWikiIndex(root));
+    return report.findings.filter((f) => f.check === "effort-unknown").map((f) => `${f.relPath}:${f.detail}`).sort();
+  }
+
+  beforeEach(async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-lint-effort-"));
+    await write("plans/live.md", page("Live", "live"));
+    await write("plans/old.md", page("Old", "old"));
+    await write("plans/num.md", page("Num", "42"));
+    await write("plans/typo.md", page("Typo", "liv"));
+    await write("plans/bad.md", page("Bad", "Not A Slug"));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("warns an unknown or invalid slug; silent on an effort or a retired id", async () => {
+    await write(".work-map.json", workMap);
+    expect(await effortFindings()).toEqual(["plans/bad.md:Not A Slug", "plans/num.md:42", "plans/typo.md:liv"]);
+  });
+
+  test("silent on a wiki without a map", async () => {
+    expect(await effortFindings()).toEqual([]);
+  });
+});

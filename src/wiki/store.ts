@@ -869,6 +869,14 @@ export interface WikiPageMeta {
    */
   seriesLabel?: string;
   /**
+   * DECLARED EFFORT — the work-map effort this page names in frontmatter
+   * `effort:` (plan `muninn-wiki-work-map`, P6). Read with `series:`'
+   * tolerance (a list reads as its first entry); kept as written, so the work
+   * map's run and lint judge it against `EFFORT_ID_RE` themselves. Rides the
+   * listing, so the reader's `joinWorkMap` places a page declared after the run.
+   */
+  effort?: string;
+  /**
    * ATTACHMENTS — the pages that fold under this one in the reader's rail, as
    * wiki-relative paths in the order the pairing pass found them. Absent (never
    * `[]`) on a page that adopted nothing, which is almost every page of every
@@ -2784,6 +2792,15 @@ function asOptionalScalar(v: unknown): string | undefined {
   return raw.trim() || undefined;
 }
 
+/** A page's declared work-map effort (`effort:`, P6): `series:`' tolerance (a
+ *  list reads as its first entry), a trailing `# comment` and wrapping quotes
+ *  dropped as `readCull` drops them. Kept otherwise as written: the run, the
+ *  reader and lint judge it against `EFFORT_ID_RE` themselves. */
+export function readEffort(v: unknown): string | undefined {
+  const value = asOptionalScalar(v);
+  return value ? unquote(stripTrailingComment(value)).trim() || undefined : undefined;
+}
+
 /**
  * The cull bit off one page's signal pair — frontmatter `signal` +
  * `signal-reason`, or an explainer's two head metas. Only `none` culls (case
@@ -3599,6 +3616,7 @@ export async function buildWikiIndex(
         // else can join.
         series: asOptionalScalar(fm.series),
         seriesLabel: asOptionalScalar(fm.series_label),
+        effort: readEffort(fm.effort),
         // Plan lifecycle fields. Wiki-agnostic (any page may declare them) and
         // strictly validated — an invalid value is dropped here and only ever
         // surfaces as a count in the aggregated warn below.

@@ -29,3 +29,47 @@ export function slugifyEffortId(raw: string): string {
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
+
+/** The role a declared page gets where no model answer names one (P6): from
+ *  its folder — `plans/` a plan, `archive/` a report — an `.html` page an
+ *  explainer, anything else a reference. */
+export function roleFromFolder(relPath: string): "plan" | "report" | "explainer" | "reference" {
+  if (/\.html?$/i.test(relPath)) return "explainer";
+  const first = relPath.split("/")[0]!.toLowerCase();
+  if (first === "plans") return "plan";
+  if (first === "archive") return "report";
+  return "reference";
+}
+
+/** A page's declared effort as the run and the reader read it: the
+ *  frontmatter value when it passes {@link EFFORT_ID_RE} as written, else
+ *  none (lint warns about it; the run never slugs a declaration). */
+export function declaredEffortOf(page: { effort?: string }): string | undefined {
+  const v = page.effort;
+  return v !== undefined && EFFORT_ID_RE.test(v) ? v : undefined;
+}
+
+/** The listing date fields the reader's same-day join reads (all optional on
+ *  the listing; see `WikiPageMeta`). */
+export interface DatedPage {
+  gitDirty?: boolean;
+  gitCreatedMs?: number;
+  gitTouchedMs?: number;
+  workedMs?: number;
+  mtimeMs?: number;
+  birthtimeMs?: number;
+}
+
+/** A page's newest creation, touch or worked-on date. Where git knows nothing
+ *  about the page (`gitCreatedMs` absent), the file's own birth and mtime
+ *  stand in, as they do for the reader's update signal. */
+export function pageNewestMs(p: DatedPage): number {
+  const fileTimes = p.gitCreatedMs === undefined ? [p.birthtimeMs ?? 0, p.mtimeMs ?? 0] : [];
+  return Math.max(p.gitCreatedMs ?? 0, p.gitTouchedMs ?? 0, p.workedMs ?? 0, ...fileTimes);
+}
+
+/** True when the page is newer than a run at `runAtMs`: uncommitted, or
+ *  created, touched or worked on after it. */
+export function pageNewerThanRun(p: DatedPage, runAtMs: number): boolean {
+  return p.gitDirty === true || pageNewestMs(p) > runAtMs;
+}

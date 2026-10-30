@@ -157,6 +157,13 @@ const storedEffort = z.object({
   daily: z.array(dailyActivity),
 });
 
+const retiredEffort = z.object({
+  id: effortId,
+  name: z.string(),
+  /** Newest `gitTouchedMs` or `workedMs` among the pages declaring it; 0 when none has one. */
+  lastActive: z.number(),
+});
+
 const metadataFilter = z.union([
   z.object({ degraded: z.literal(false) }),
   z.object({ degraded: z.literal(true), reason: z.literal("budget") }),
@@ -206,6 +213,10 @@ export const workMapSchema = z.object({
   ),
   themes: z.array(z.object({ name: z.string(), efforts: z.array(effortId) })),
   efforts: z.array(storedEffort),
+  /** Declared efforts (P6) with no pages tonight: (previous `efforts` ∪
+   *  previous `retired`) ∩ declared slugs, minus tonight's `efforts`. Optional,
+   *  so a map written before P6 still parses. */
+  retired: z.array(retiredEffort).optional(),
   loose: z.array(z.string()),
   usage: z
     .object({
@@ -221,6 +232,7 @@ export type WorkMap = z.infer<typeof workMapSchema>;
 export type WorkMapEffort = WorkMap["efforts"][number];
 export type WorkMapCoverage = WorkMap["coverage"];
 export type WorkMapDaily = z.infer<typeof dailyActivity>;
+export type WorkMapRetired = z.infer<typeof retiredEffort>;
 
 /** Parse stored JSON text; null on any mismatch. */
 export function parseWorkMap(text: string): WorkMap | null {

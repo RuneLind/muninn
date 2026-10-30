@@ -15,6 +15,7 @@ import { normalizeRelPath } from "../rel-path.ts";
 import type { TouchRecord, MetadataFilterOutcome } from "../git-dates.ts";
 import type { WikiPageMeta } from "../store.ts";
 import type { WorkThread } from "../work-focus.ts";
+import { declaredEffortOf } from "./ids.ts";
 import type { WorkMap } from "./schema.ts";
 
 const DAY = 86_400_000;
@@ -44,6 +45,8 @@ export type DigestPage = Pick<
   | "parent"
   | "culled"
   | "work"
+  | "effort"
+  | "supersededBy"
 > & { displayTitle?: string };
 
 export interface DigestInput {
@@ -161,6 +164,9 @@ Rules:
 - Every active page goes to exactly one effort or to "loose". Prefer 6–16 efforts. Small one-page efforts are fine when the page is truly separate. Use parent for sub-efforts.
 - needsYou is ONLY for things that genuinely wait on the owner: an open decision/owner question, a plan marked waits-on-owner, follow-ups open after shipping, in-progress work gone quiet 5+ days, a page that probably drifted because a linked page changed after it. Cite the evidence. No filler; fewer is better; at most 6.
 - Stability: when the previous map is given, keep an effort's id (and usually its name) while its pages overlap with what you group now. Mint a new id only for new work.
+- A page marked effort=<id> (declared, fixed) has declared its effort in its own frontmatter: put it in that effort, and keep that effort's id. Pages that declare nothing are yours to group; a declared page's effort may hold them too.
+- series= and supersededBy= are hints, not rules: a series can be a topic bucket that spans several efforts.
+- Retired efforts are listed by id and name: when tonight's work continues one, reuse its id rather than minting a new one.
 - Write names and prose in the language the wiki's titles use (Norwegian for a Norwegian wiki). Be concrete; never invent dates, statuses or numbers.
 
 Page ids: pages are given short ids (p1, p2, …). In the id fields — efforts[].pages[].id, efforts[].pages[].derivedFrom, needsYou[].pages and loose — write the bare id exactly as given ("p12"). In prose fields (summary, oneLine, why, next, title, action, related[].why) cite a page ONLY as ⟨p12⟩, with those angle brackets; never write a bare page id in prose.
@@ -211,6 +217,13 @@ export function buildWorkMapDigest(input: DigestInput): WorkMapDigest {
   const ago = (ms?: number) => (ms ? `${Math.max(0, Math.round(((now - ms) / DAY) * 10) / 10)}d` : "–");
   const touchSince = now - WORK_MAP_TOUCH_WINDOW_DAYS * DAY;
 
+  // Only an id the previous map holds is marked: an unknown slug is ignored by
+  // the run (lint warns), so the prompt must not invite the model to mint it.
+  const knownIds = new Set([...(input.previous?.efforts ?? []).map((e) => e.id), ...(input.previous?.retired ?? []).map((r) => r.id)]);
+  const knownDeclared = (p: DigestPage) => {
+    const slug = declaredEffortOf(p);
+    return slug !== undefined && knownIds.has(slug) ? slug : undefined;
+  };
   const pageLines = active.map((p) => {
     const commits = commitsSince(input.gitTouches.get(p.relPath), touchSince);
     const focus = (p.work?.events ?? []).filter((e) => e[2] === "focus").length;
@@ -227,6 +240,9 @@ export function buildWorkMapDigest(input: DigestInput): WorkMapDigest {
       commits.length && `commits28d=${commits.length}`,
       focus && `focusEvents=${focus}`,
       p.series && `series=${p.series}`,
+      // A short id only: a successor outside the active set is left out, so no raw relPath reaches the digest.
+      p.supersededBy && idOf(p.supersededBy) && `supersededBy=${idOf(p.supersededBy)}`,
+      knownDeclared(p) && `effort=${knownDeclared(p)} (declared, fixed)`,
       p.status_date && `statusDate=${p.status_date}`,
       p.status_note && `note: ${clip(p.status_note, 180)}`,
       p.description && `desc: ${clip(p.description, 200)}`,
@@ -271,6 +287,8 @@ export function buildWorkMapDigest(input: DigestInput): WorkMapDigest {
     return `${e.id}: ${e.name}${aliases}${e.parent ? ` parent=${e.parent}` : ""} — pages [${inSet.join(",")}]${outside ? ` +${outside} not active now` : ""}`;
   });
 
+  const retiredLines = (input.previous?.retired ?? []).map((r) => `${r.id}: ${r.name} — last active ${r.lastActive ? new Date(r.lastActive).toISOString().slice(0, 10) : "–"}`);
+
   const days = (ms: number) => Math.round(ms / DAY);
   const filter = input.metadataFilter;
   const filterLine =
@@ -296,6 +314,9 @@ export function buildWorkMapDigest(input: DigestInput): WorkMapDigest {
     sections.push(
       `\n## The previous map (${new Date(input.previous!.runAtMs).toISOString().slice(0, 10)}) — keep an id while its pages overlap\n${prevLines.join("\n")}`,
     );
+  }
+  if (retiredLines.length) {
+    sections.push(`\n## Retired efforts — declared by some page, with no active pages; reuse an id when its work returns\n${retiredLines.join("\n")}`);
   }
   return { text: sections.join("\n"), ids, rel, active: active.map((p) => p.relPath), threads: input.threads.length, logEntries: log.length, logEntriesInWindow: inWindow.length };
 }

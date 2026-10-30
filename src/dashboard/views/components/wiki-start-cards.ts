@@ -36,6 +36,7 @@ import {
   type WorkMapGetBody,
 } from "./wiki-work-card.ts";
 import type { WorkMap } from "../../../wiki/work-map/schema.ts";
+import { declarationKey } from "../../../wiki/work-map/join.ts";
 import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
 
 export interface StartCardsDeps {
@@ -815,9 +816,21 @@ function applySlot(): void {
 function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
   const prev = slot;
   transition(e);
-  if (e.type === "adopt" && slot === prev) return;
+  if (e.type === "adopt" && slot === prev) {
+    // The run did not move, but a page may have declared an effort since it
+    // (P6): re-join, and only when something a join reads changed, so an
+    // ordinary adopt leaves the card's markup alone.
+    if (slot.kind === "card" && workBody && currentDeclarationKey(workBody.map.runAtMs) !== paintedDeclarationKey) paintWorkCard();
+    return;
+  }
   if (slot.kind === "card") paintWorkCard();
   if ((slot.kind === "card" || slot.kind === "card-loading") && (!workBody || workBody.map.runAtMs < slot.runAt!)) loadWorkMap();
+}
+
+/** `declarationKey` of the listing the card last painted from (P6). */
+let paintedDeclarationKey: string | null = null;
+function currentDeclarationKey(runAt: number): string {
+  return declarationKey(deps.pages ? deps.pages() : [], runAt);
 }
 
 /** The adopt path's half of `mountStartCards`: the card follows the listing,
@@ -929,9 +942,11 @@ function paintWorkCard(override?: FocusKey): void {
   const parked = !!active && active.hasAttribute(PARKED_ATTR) && el.contains(active);
   const refocus = override ?? (parked ? pendingFocus : null) ?? focusedCardControl(el) ?? (lost ? pendingFocus : null);
   pendingFocus = null;
+  const pages = deps.pages ? deps.pages() : [];
+  paintedDeclarationKey = declarationKey(pages, runAt);
   el.innerHTML = workCardHtml({
     body: workBody,
-    pages: deps.pages ? deps.pages() : [],
+    pages,
     now: Date.now(),
     done: parseDone(readDoneRaw(), runAt),
     openWhy: whyOpen,

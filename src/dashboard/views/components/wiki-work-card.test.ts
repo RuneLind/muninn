@@ -180,7 +180,7 @@ describe("lanes and nesting", () => {
   test("a parent cycle leaves both efforts top-level", () => {
     const es = [effort("a", "active", [], { parent: "b" }), effort("b", "active", [], { parent: "a" })];
     expect(es.map((e) => isNestedEffort(e, es))).toEqual([false, false]);
-    expect(laneEfforts(es.map((e) => ({ ...e, pages: [] })))[0]!.efforts.map((e) => e.id)).toEqual(["a", "b"]);
+    expect(laneEfforts(es.map((e) => ({ ...e, pages: [], movedOut: [] })))[0]!.efforts.map((e) => e.id)).toEqual(["a", "b"]);
   });
   test("a missing parent leaves the effort top-level", () => {
     const es = [effort("a", "cooling", [], { parent: "zz" })];
