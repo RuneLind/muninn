@@ -163,6 +163,14 @@ describe("lanes and nesting", () => {
     expect(html).not.toContain("part of");
     expect(html).toContain('wiki-wm-count">2<');
   });
+  test("a Moving grandchild under a closed-state child of a Moving effort renders once, top-level in Moving", () => {
+    const m = map({ efforts: [effort("g", "active", []), effort("c", "cooling", [], { parent: "g" }), effort("k", "active", [], { parent: "c" })] });
+    const html = card(m);
+    expect(html.match(/data-effort-id="k"/g)).toHaveLength(1);
+    expect(html).toContain("part of Effort c");
+    expect(html).toContain('data-wm-lane="moving"');
+    expect(html).toContain('wiki-wm-count">3<');
+  });
   test("duplicate effort ids that cross-parent render once each, without overflowing", () => {
     const m = map({ efforts: [effort("a", "active", [], { parent: "b" }), effort("a", "active", []), effort("b", "active", [], { parent: "a" }), effort("b", "active", [])] });
     const html = card(m);

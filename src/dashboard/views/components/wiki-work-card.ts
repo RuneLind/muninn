@@ -160,7 +160,8 @@ export const WORK_MAP_LANES = [
 const MOVING_STATES: readonly string[] = WORK_MAP_LANES[0].states;
 
 /** True when `e` renders under its parent: nested, and not a Moving effort
- *  whose parent sits in a closed lane (that one renders in Moving instead). */
+ *  whose parent's own state is a closed-lane one (cooling, quiet, shipped),
+ *  wherever that parent renders; that one renders in Moving instead. */
 export function rendersUnderParent(e: { id: string; parent?: string; state: string }, efforts: readonly { id: string; parent?: string; state: string }[]): boolean {
   if (!isNestedEffort(e, efforts)) return false;
   const parent = efforts.findLast((x) => x.id === e.parent);

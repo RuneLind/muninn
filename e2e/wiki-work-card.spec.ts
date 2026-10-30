@@ -438,6 +438,41 @@ test("a ↻ poll whose GET keeps failing settles and re-enables ↻", async ({ p
   await expect(btn).toBeEnabled();
 });
 
+test("a ↻ poll GET that succeeds resets the failure count", async ({ page }) => {
+  let polling = false;
+  let polls = 0;
+  // fail, fail, ok (still pending), fail, fail, then pending for good.
+  const plan = ["fail", "fail", "ok", "fail", "fail"];
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    const step = polling ? (plan[polls++] ?? "ok") : "ok";
+    if (step === "fail") return route.fulfill({ status: 500, json: { error: "boom" } });
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: true, running: false, lastSuccessAt: Date.now() - 60 * 60_000 } });
+  });
+  await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
+  await page.clock.install();
+  await openStart(page, FRESH);
+  const btn = page.locator("#wikiWorkMapRefresh");
+  await btn.click();
+  await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
+  polling = true;
+  await expect
+    .poll(async () => {
+      await page.clock.runFor(2_500);
+      return polls;
+    }, { timeout: 20_000 })
+    .toBeGreaterThanOrEqual(plan.length);
+  // Let the fifth answer settle; on the fixed code the next poll starts.
+  for (let i = 0; i < 4; i++) {
+    await page.waitForTimeout(100);
+    await page.clock.runFor(2_500);
+  }
+  await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
+  await expect(btn).toBeDisabled();
+  expect(polls).toBeGreaterThan(plan.length);
+});
+
 test("✓ dismiss survives a reload and clears when the run time changes", async ({ page }) => {
   await openStart(page, DONE);
   const card = page.locator("#wikiWorkCard");
