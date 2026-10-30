@@ -1758,7 +1758,7 @@ function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: numbe
     `<div class="wiki-effort-body">` +
     `<div class="wiki-effort-line">` +
     `<a class="wiki-effort-name" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}" title="${esc(`Open the effort page: ${effort.name}`)}">${esc(effort.name)}</a>` +
-    (age ? `<span class="wiki-effort-age" title="${esc(`newest page ${age}`)}">${esc(age)}</span>` : "") +
+    (age ? `<span class="wiki-effort-age" title="${esc(`${entry.members.length ? "newest page drawn here" : "newest pinned page"} ${age}`)}">${esc(age)}</span>` : "") +
     `</div>` +
     `<small class="wiki-group-rollup wiki-effort-meta">${meta}</small>` +
     `</div></div>`
@@ -6291,9 +6291,10 @@ function refocusRailControl(selector: string, pressed: Element): void {
 }
 
 /** The rail control `el` is, as a selector by its own key that finds it again
- *  after a repaint; null for anything else (a page row, a link). Covers the
- *  Group button and its menu items, `+ N more threads`, the shared context's
- *  `+N`, a 📌 (by its card's key, never by position), and every
+ *  after a repaint; null for anything else (a page row, a link other than an
+ *  effort fold's name). Covers the Group button and its menu items, `+ N more
+ *  threads`, the shared context's `+N`, a 📌 (by its card's key, never by
+ *  position), an effort fold's name (by effort id), and every
  *  `[data-fold-key]` fold in the rail: thread, group and child cards, series
  *  and folder groups, Bookkeeping, under either spelling. */
 function railControlSelector(el: Element | null): string | null {
@@ -6312,6 +6313,8 @@ function railControlSelector(el: Element | null): string | null {
     "data-work-reset",
     // A Pick up row, by its page: kept through the renders a jump runs.
     "data-pickup",
+    // An effort fold's name, by effort id: opening the effort repaints the rail.
+    "data-effort-link",
   ]) {
     const v = el.getAttribute(attr);
     if (v !== null) return at(attr, v);

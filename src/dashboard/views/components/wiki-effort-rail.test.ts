@@ -293,10 +293,11 @@ describe("buildRail — effort folds (P4)", () => {
   });
 
   test("fix D: recency is measured over the rows the fold DRAWS — a pinned newest page does not count", () => {
-    // a1 (1h) is pinned, so fold a draws only a2 (5h): b, c, d are newer.
+    // a1 (1h) is pinned, so fold a draws only a2 (5h): b, c, d are newer, and
+    // a sits at a2's slot, below them (R2-2).
     const m = build({ pins: ["plans/a1.mdx"] });
     const es = efforts(m.entries);
-    expect(es.map((e) => [e.effort.id, e.folded])).toEqual([["a", true], ["b", false], ["c", false], ["d", false]]);
+    expect(es.map((e) => [e.effort.id, e.folded])).toEqual([["b", false], ["c", false], ["d", false], ["a", true]]);
     expect(es.find((e) => e.effort.id === "a")!.ageMs).toBe(5 * HOUR);
   });
 
@@ -325,6 +326,39 @@ describe("buildRail — effort folds (P4)", () => {
     expect(railMemberWhy({ label: "F", kind: "family" })).toBe("In the F family");
     expect(railMemberWhy({ label: "October 2026", kind: "month" })).toBe("In October 2026");
     expect(railMemberWhy(undefined)).toBe("");
+  });
+
+  test("R2-1: a pinned open page does not force its fold open — it is drawn under Pinned; same for the parent fallback", () => {
+    // d (4th newest, closed by default) holds d1 and d2; d1 is pinned and open.
+    const D2 = page({ relPath: "plans/d2.mdx" });
+    const pages = [...ALL, D2];
+    const base = {
+      filtered: pages, facetOnly: pages, filters: INERT,
+      activity: [...ACTIVITY, act(D2, 2, 7)],
+      efforts: new Map([...EFFORTS, ["plans/d2.mdx", eff("d")]]),
+    };
+    const m = buildRail({ ...base, pins: ["plans/d1.mdx"], openRelPath: "plans/d1.mdx" });
+    const d = efforts(m.entries).find((e) => e.effort.id === "d")!;
+    expect([d.folded, d.forcedOpen]).toEqual([true, undefined]);
+    expect(rows(m.entries).filter((r) => r.page.relPath === "plans/d1.mdx").map((r) => r.section)).toEqual(["pinned"]);
+    // Unpinned, the same open page still forces its fold open.
+    const un = buildRail({ ...base, pins: [], openRelPath: "plans/d1.mdx" });
+    expect(efforts(un.entries).find((e) => e.effort.id === "d")!.forcedOpen).toBe(true);
+    // Parent fallback: the open child is in no effort and its parent d1 is pinned.
+    const KID = page({ relPath: "plans/d1.html", parent: "plans/d1.mdx" });
+    const withKid = [...pages, KID];
+    const pk = buildRail({ ...base, filtered: withKid, facetOnly: withKid, pins: ["plans/d1.mdx"], openRelPath: "plans/d1.html" });
+    expect(efforts(pk.entries).find((e) => e.effort.id === "d")!.forcedOpen).toBeUndefined();
+  });
+
+  test("R2-2: the fold sits at the slot of its newest DRAWN row, not a pinned one; a ghost-only fold at its newest ghost", () => {
+    // a1 (1h) is pinned, a2 (50h) is the only row fold a draws; p1 2h, b1 3h.
+    const m = build({ pins: ["plans/a1.mdx"], activity: [act(A1, 9, 1), act(P1, 8, 2), act(B1, 7, 3), act(A2, 4, 50)] });
+    expect(activitySeq(m.entries)).toEqual(["notes/p1.md", "effort:b", "plans/b1.mdx", "effort:a", "plans/a2.mdx"]);
+    expect(efforts(m.entries).find((e) => e.effort.id === "a")!.ageMs).toBe(50 * HOUR);
+    // Both a1 and a2 pinned: ghost-only fold a keeps a1's slot (its newest ghost), closed.
+    const g = build({ pins: ["plans/a1.mdx", "plans/a2.mdx"], activity: [act(A1, 9, 1), act(P1, 8, 2), act(B1, 7, 3), act(A2, 4, 50)] });
+    expect(activitySeq(g.entries)).toEqual(["effort:a", "notes/p1.md", "effort:b", "plans/b1.mdx"]);
   });
 
   test("effortFoldKey", () => {

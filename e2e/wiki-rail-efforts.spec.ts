@@ -3,12 +3,13 @@
  * Activity folds under the work map's efforts.
  *
  * What only a real page holds (the rule itself is `wiki-effort-rail.test.ts`):
- *  1. Activity shows one fold row per effort, at its newest page's slot; the
+ *  1. Activity shows one fold row per effort, at its newest drawn page's slot; the
  *     three most recently active start open; pages in no effort stay rows.
  *  2. Each page is ONE row across Pick up, Work threads and Activity — an open
  *     card claims its page first, the fold holds what is left.
  *  3. The name opens `?effort=<id>` (and clears the active row); the caret
- *     folds without navigating; both are keyboard stops with a focus ring.
+ *     folds without navigating; both are keyboard stops with a focus ring,
+ *     and Enter on the name keeps focus on it through the rail's repaint.
  *     The open page inside a closed fold forces it open (caret disabled) until
  *     the reader leaves the page.
  *  4. Unchecking `group by effort` draws plain Activity and stores
@@ -274,6 +275,19 @@ test.describe("Wiki rail: group by effort", () => {
     await expect(caret(page, "gamma")).toHaveAttribute("aria-expanded", "true");
     await expect(caret(page, "gamma")).toBeFocused();
     expect(new URL(page.url()).searchParams.get("effort")).toBeNull();
+  });
+
+  test("keyboard: Enter on an effort name opens the effort page and keeps focus on that name", async ({ page }) => {
+    await open(page);
+    await caret(page, "gamma").focus();
+    await page.keyboard.press("Tab");
+    await expect(nameLink(page, "gamma")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#wikiEffortPage")).toHaveAttribute("data-effort", "gamma");
+    expect(await page.evaluate(() => {
+      const a = document.activeElement;
+      return a ? `${a.tagName}:${a.className}:${a.getAttribute("data-effort-link")}` : null;
+    })).toBe("A:wiki-effort-name:gamma");
   });
 
   test("unchecking group by effort draws plain Activity and stores toggle:no-efforts through a reload; re-checking removes it", async ({ page }) => {

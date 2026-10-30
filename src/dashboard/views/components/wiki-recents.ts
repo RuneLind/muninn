@@ -1202,13 +1202,14 @@ export type RailEntry =
       foldKey: string;
       /** What a click flips: the `closed:` spelling for a fold that defaults open. */
       toggleKey: string;
-      /** The Activity rows this fold holds, in rank order. */
+      /** The Activity rows this fold DRAWS, in rank order: its pages minus
+       *  the pinned ones (those are `ghosts`). */
       members: WikiListing[];
       /** The pages of this fold the reader PINNED: real rows under `Pinned`,
        *  ghost rows here when the fold is open (the series rule). Absent
        *  (never `[]`) when none. */
       ghosts?: WikiListing[];
-      /** The newest member's Activity age. */
+      /** The newest member's Activity age; a ghost-only fold's newest ghost. */
       ageMs: number;
       folded: boolean;
       /** Open because the reader is on a page inside it (or a Jira filter). */
@@ -1863,9 +1864,9 @@ export function buildRail(input: RailInput): RailModel {
         continue;
       }
       // P4: a page in an effort folds under that effort's row. Every row
-      // leaves a slot candidate here; the fold keeps only its NEWEST page's
-      // slot (pruned after this loop), the same age the default-open three
-      // are chosen by.
+      // leaves a slot candidate here; the fold keeps only the slot of its
+      // newest DRAWN row (pruned once the pins are resolved, below) — the same
+      // rows its age and the default-open three are read from.
       const effort = input.efforts?.get(rel);
       if (effort) {
         let bucket = activityEfforts.get(effort.id);
@@ -1881,16 +1882,6 @@ export function buildRail(input: RailInput): RailModel {
       }
       activityRows.push(row);
       activityItems.push({ row });
-    }
-    // The fold's slot: its newest row (smallest age; a tie keeps rank order).
-    const effortSlot = new Map<string, string>();
-    for (const [id, b] of activityEfforts) {
-      const newest = b.rows.reduce((best, r) => (r.ageMs < best.ageMs ? r : best));
-      effortSlot.set(id, normalizeRel(newest.page.relPath));
-    }
-    for (let i = activityItems.length - 1; i >= 0; i--) {
-      const item = activityItems[i]!;
-      if ("effortId" in item && effortSlot.get(item.effortId) !== item.rel) activityItems.splice(i, 1);
     }
     // Activity wins the overlap because the SEEN set is shared: a page it already
     // took is skipped here, whatever spelling the pin list holds it under. There
@@ -1946,6 +1937,19 @@ export function buildRail(input: RailInput): RailModel {
     const isPinnedRow = (r: ActivityRow) => pinnedKeys.has(normalizeRel(r.page.relPath));
     effortDraws.set(id, { rows: b.rows.filter((r) => !isPinnedRow(r)), ghosts: b.rows.filter(isPinnedRow).map((r) => r.page) });
   }
+  // The fold's slot: its newest DRAWN row (smallest age; a tie keeps rank
+  // order). A ghost-only fold renders closed, so it takes the slot of its
+  // newest ghost — the age its cell shows.
+  const effortSlot = new Map<string, string>();
+  for (const [id, b] of activityEfforts) {
+    const drawn = effortDraws.get(id)!.rows;
+    const newest = (drawn.length ? drawn : b.rows).reduce((best, r) => (r.ageMs < best.ageMs ? r : best));
+    effortSlot.set(id, normalizeRel(newest.page.relPath));
+  }
+  for (let i = activityItems.length - 1; i >= 0; i--) {
+    const item = activityItems[i]!;
+    if ("effortId" in item && effortSlot.get(item.effortId) !== item.rel) activityItems.splice(i, 1);
+  }
   const minAge = (rs: readonly ActivityRow[]): number => Math.min(...rs.map((r) => r.ageMs));
   /** Recency over the rows the fold draws; a ghost-only fold falls back to its
    *  pinned pages' age, so the cell never reads Infinity. */
@@ -1966,7 +1970,8 @@ export function buildRail(input: RailInput): RailModel {
       .map((x) => x.id),
   );
   // The fold the open page forces open: it, or the parent it is attached to,
-  // is a row of that fold.
+  // is a DRAWN row of that fold. A pinned page is a ghost there and renders
+  // under Pinned, so it forces nothing (the finding-72 rule for parents).
   let forcedEffortId: string | null = null;
   if (input.openRelPath && activityEfforts.size) {
     const openKey = normalizeRel(input.openRelPath);
@@ -1974,7 +1979,7 @@ export function buildRail(input: RailInput): RailModel {
     // The fold holding the open page itself wins; its parent's fold only when
     // no fold holds the page.
     const holding = (key: string) =>
-      [...activityEfforts.values()].find((b) => b.rows.some((r) => normalizeRel(r.page.relPath) === key))?.effort.id ?? null;
+      [...effortDraws].find(([, d]) => d.rows.some((r) => normalizeRel(r.page.relPath) === key))?.[0] ?? null;
     forcedEffortId = holding(openKey) ?? (parent ? holding(normalizeRel(parent.relPath)) : null);
   }
   let effortEmitted = false;
