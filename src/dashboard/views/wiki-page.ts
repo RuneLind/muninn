@@ -2534,6 +2534,9 @@ export async function renderWikiPage(opts?: {
        inks, which clear 4.5:1 in every palette (the e2e measures each). */
     .wiki-workcard .wiki-wn-head { flex-wrap: wrap; row-gap: 4px; }
     .wiki-workcard .wiki-wn-error, .wiki-workcard .wiki-wn-retry, .wiki-workcard .wiki-wn-refresh { color: var(--text-soft); }
+    /* The override above outranks the shared :hover rules; restate them, and the keyboard's twin. */
+    .wiki-workcard .wiki-wn-refresh:not(:disabled):hover, .wiki-workcard .wiki-wn-refresh:not(:disabled):focus-visible,
+    .wiki-workcard .wiki-wn-retry:hover, .wiki-workcard .wiki-wn-retry:focus-visible { color: var(--accent-light); border-color: var(--accent); }
     .wiki-wm-age, .wiki-wm-model { font-size: 11.5px; color: var(--text-soft); }
     .wiki-wm-stale {
       font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 999px;

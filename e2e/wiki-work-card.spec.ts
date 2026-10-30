@@ -55,11 +55,28 @@ const GROW = "e2e-wm-grow";
 const GROW_ERR = "e2e-wm-grow-err";
 const GROW_LATE = "e2e-wm-grow-late";
 const FB = "e2e-wm-fb";
+/** Class-check (round 3) fixtures: one wiki per case, so no case inherits another's state. */
+const P_LOAD = "e2e-wm-p-load";
+const P_LATE = "e2e-wm-p-late";
+const P_LATE5 = "e2e-wm-p-late5";
+const P_POST = "e2e-wm-p-post";
+const P_POLL = "e2e-wm-p-poll";
+const P_FOCUS = "e2e-wm-p-focus";
+const P_DUP = "e2e-wm-p-dup";
+const P_WHY = "e2e-wm-p-why";
 /** Paints every element the card has: the contrast sweep's wiki. */
 const SWEEP = "e2e-wm-sweep";
 const LONG_WHY =
   "The two drafts of ⟦plans/alpha.mdx⟧ disagree on the name, the scope and the owner, and the review thread under the second draft has gone quiet for a week, so nobody has decided which of them the next slice builds on.";
+/** Clamps to two lines in a narrow card and fits them in a wide one. */
+const MID_WHY =
+  "The two drafts disagree on the name and the scope, and the review thread under the second draft has gone quiet for a week now.";
 const HOUR = 3_600_000;
+/** Viewports where MID_WHY clamps and where it fits its two lines: below
+ *  1000 px the rail folds away and the card widens (measured: 224 px of text
+ *  at 1280, 454 px at 900). */
+const WHY_CLAMPED_AT = 1280;
+const WHY_FITS_AT = 900;
 
 function md(title: string): string {
   return `---\ntitle: ${title}\n---\n\nBody of ${title}.\n`;
@@ -152,6 +169,14 @@ test.beforeAll(async () => {
   await seedWiki(GROW_ERR, null);
   await seedWiki(GROW_LATE, null);
   await seedWiki(FB, now - 2 * HOUR);
+  for (const n of [P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS]) await seedWiki(n, now - 2 * HOUR);
+  await seedWiki(P_LOAD, null);
+  await seedWiki(P_DUP, now - 2 * HOUR, [
+    { title: "Same", kind: "decision", why: "", action: "", pages: [] },
+    { title: "Same", kind: "decision", why: "", action: "", pages: [] },
+    { title: "Other", kind: "resume", why: "", action: "", pages: [] },
+  ]);
+  await seedWiki(P_WHY, now - 2 * HOUR, [{ title: "Settle alpha", kind: "decision", why: MID_WHY, action: "", pages: [] }]);
   await seedWiki(SWEEP, null);
   for (let i = 1; i <= 6; i++) await writeFile(path.join(roots[SWEEP]!, `plans/p${i}.mdx`), md(`Page ${i}`), "utf8");
   await writeFile(path.join(roots[SWEEP]!, ".work-map.json"), sweepMapJson(now - 30 * HOUR), "utf8");
@@ -165,7 +190,7 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -769,6 +794,248 @@ test("a ✓ pressed from the keyboard moves focus to the next ✓, then to the r
   await expect(card.locator("#wikiWorkMapRestore")).toBeFocused();
 });
 
+// ── Class check (round 3): one slot state, one focus resolver, card CSS keeps
+// its interactive states. The slot transitions are unit-tested in
+// `wiki-start-slot.test.ts`; these pin the wiring.
+
+/** Hold the first `/api/wiki/work-map` GET until `release` is called. */
+async function holdFirstGet(page: Page, opts: { status?: number } = {}) {
+  const st = { gets: 0, release: null as null | (() => Promise<void>) };
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    st.gets++;
+    if (st.gets !== 1) return route.continue();
+    if (opts.status) {
+      st.release = () => route.fulfill({ status: opts.status!, json: { error: "x" } });
+      return;
+    }
+    const body = await (await route.fetch()).json();
+    st.release = () => route.fulfill({ json: body });
+  });
+  return st;
+}
+
+/** Answer every work-map GET as organizable, so the card offers ↻. */
+async function organizable(page: Page, hold?: (n: number, fulfill: () => Promise<void>) => boolean) {
+  const st = { gets: 0 };
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    const n = ++st.gets;
+    const body = (await (await route.fetch()).json()) as Record<string, unknown>;
+    const f = () => route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - 60 * 60_000 } });
+    if (hold?.(n, f)) return;
+    await f();
+  });
+  return st;
+}
+
+const activeDesc = (page: Page) =>
+  page.evaluate(() => {
+    const a = document.activeElement as HTMLElement | null;
+    return !a || a === document.body ? "body" : `${a.tagName.toLowerCase()}${a.id ? "#" + a.id : ""}.${a.className}`;
+  });
+
+test("an adopt that brings a map hides What's new while the card's GET is held, and sends no digest", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  const st = await holdFirstGet(page);
+  await page.clock.install();
+  const digests = await openStart(page, P_LOAD);
+  const wn = page.locator("#wikiWhatsNew");
+  const card = page.locator("#wikiWorkCard");
+  await expect(wn).toContainText("Something changed");
+  expect(digests).toHaveLength(1);
+  await writeFile(path.join(roots[P_LOAD]!, ".work-map.json"), mapJson(P_LOAD, Date.now() - HOUR), "utf8");
+  await forceAdopt(page, P_LOAD);
+  await expect.poll(() => st.release !== null).toBe(true);
+  await expect(wn).toBeHidden();
+  await expect(card).toBeHidden();
+  // What's new's ↻ is still in the DOM: a click on it sends nothing.
+  await page.evaluate(() => document.getElementById("wikiWhatsNewRefresh")!.click());
+  // A tab switch while the GET is held keeps both hidden.
+  await page.locator('.wiki-tab[data-tab="timeline"]').click();
+  await page.locator('.wiki-tab[data-tab="hubs"]').click();
+  await expect(wn).toBeHidden();
+  await expect(card).toBeHidden();
+  await page.waitForTimeout(300);
+  expect(digests).toHaveLength(1);
+  await st.release!();
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await expect(wn).toBeHidden();
+  expect(digests).toHaveLength(1);
+});
+
+test("a map GET answered after the map dropped does not repaint the card", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  const st = await holdFirstGet(page);
+  await page.clock.install();
+  await openStart(page, P_LATE);
+  const card = page.locator("#wikiWorkCard");
+  const wn = page.locator("#wikiWhatsNew");
+  await expect.poll(() => st.release !== null).toBe(true);
+  await rm(path.join(roots[P_LATE]!, ".work-map.json"));
+  await forceAdopt(page, P_LATE);
+  await expect(wn).toContainText("Something changed");
+  await st.release!();
+  await page.waitForTimeout(500);
+  await expect(card).toBeHidden();
+  await expect(wn).toBeVisible();
+  // The map comes back with a new run time: one fresh GET paints the card.
+  await writeFile(path.join(roots[P_LATE]!, ".work-map.json"), mapJson(P_LATE, Date.now() - HOUR), "utf8");
+  await forceAdopt(page, P_LATE);
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await expect(wn).toBeHidden();
+  expect(st.gets).toBe(2);
+});
+
+test("a 5xx GET answered after the map dropped does not show the card's Retry", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  const st = await holdFirstGet(page, { status: 503 });
+  await page.clock.install();
+  await openStart(page, P_LATE5);
+  const card = page.locator("#wikiWorkCard");
+  const wn = page.locator("#wikiWhatsNew");
+  await expect.poll(() => st.release !== null).toBe(true);
+  await rm(path.join(roots[P_LATE5]!, ".work-map.json"));
+  await forceAdopt(page, P_LATE5);
+  await expect(wn).toContainText("Something changed");
+  await st.release!();
+  await page.waitForTimeout(500);
+  await expect(card).toBeHidden();
+  await expect(wn).toBeVisible();
+});
+
+test("a ↻ POST answered after the map dropped starts no poll", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  const st = await organizable(page);
+  let releasePost: null | (() => Promise<void>) = null;
+  await page.route("**/api/wiki/work-map/refresh*", (route) => {
+    releasePost = () => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } });
+  });
+  await page.clock.install();
+  await openStart(page, P_POST);
+  const card = page.locator("#wikiWorkCard");
+  const wn = page.locator("#wikiWhatsNew");
+  await card.locator("#wikiWorkMapRefresh").click();
+  await expect.poll(() => releasePost !== null).toBe(true);
+  await rm(path.join(roots[P_POST]!, ".work-map.json"));
+  await forceAdopt(page, P_POST);
+  await expect(card).toBeHidden();
+  await expect(wn).toContainText("Something changed");
+  const n = st.gets;
+  await releasePost!();
+  for (let i = 0; i < 6; i++) await page.clock.runFor(5_000);
+  await page.waitForTimeout(300);
+  expect(st.gets).toBe(n);
+  await expect(card).toBeHidden();
+});
+
+test("a ↻ poll in flight when the map drops stops and paints nothing", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  let hold: null | (() => Promise<void>) = null;
+  const st = await organizable(page, (n, f) => {
+    if (n !== 2) return false;
+    hold = f;
+    return true;
+  });
+  await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
+  await page.clock.install();
+  await openStart(page, P_POLL);
+  const card = page.locator("#wikiWorkCard");
+  const wn = page.locator("#wikiWhatsNew");
+  await card.locator("#wikiWorkMapRefresh").click();
+  await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
+  await expect
+    .poll(async () => {
+      await page.clock.runFor(1_000);
+      return hold !== null;
+    })
+    .toBe(true);
+  await rm(path.join(roots[P_POLL]!, ".work-map.json"));
+  await forceAdopt(page, P_POLL);
+  await expect(card).toBeHidden();
+  const n = st.gets;
+  await hold!();
+  for (let i = 0; i < 6; i++) await page.clock.runFor(5_000);
+  await page.waitForTimeout(300);
+  expect(st.gets).toBe(n);
+  await expect(card).toBeHidden();
+  await expect(wn).toBeVisible();
+});
+
+test("a ✓ whose next sibling shares its key moves focus past it, to the next remaining ✓", async ({ page }) => {
+  await openStart(page, P_DUP);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator("[data-wm-need]")).toHaveCount(3);
+  await card.locator('[data-wm-done="0"]').focus();
+  await page.keyboard.press("Enter");
+  // Both "Same" items share one key, so one ✓ dismisses both.
+  await expect(card.locator("[data-wm-need]")).toHaveCount(1);
+  await expect(card.locator('[data-wm-done="2"]')).toBeFocused();
+});
+
+test("focus inside the card moves to What's new's heading when an adopt drops the map", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  await page.clock.install();
+  await openStart(page, P_FOCUS);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await card.locator('[data-wm-done="0"]').focus();
+  await rm(path.join(roots[P_FOCUS]!, ".work-map.json"));
+  await forceAdopt(page, P_FOCUS);
+  await expect(card).toBeHidden();
+  await expect(page.locator("#wikiWhatsNew")).toContainText("Something changed");
+  await expect.poll(() => activeDesc(page)).toBe("span.wiki-wn-title");
+  await expect(page.locator("#wikiWhatsNew .wiki-wn-title")).toBeFocused();
+});
+
+test("'less' on a why that no longer clamps keeps focus in the card", async ({ page }) => {
+  await page.setViewportSize({ width: WHY_CLAMPED_AT, height: 844 });
+  await openStart(page, P_WHY);
+  const card = page.locator("#wikiWorkCard");
+  const text = card.locator(".wiki-wm-why-text");
+  const more = card.locator(".wiki-wm-why-more");
+  await expect(more).toBeVisible();
+  await more.focus();
+  await page.keyboard.press("Enter");
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await page.setViewportSize({ width: WHY_FITS_AT, height: 844 });
+  // The card is wide enough now that the closed text fits its two lines.
+  await expect.poll(() => text.evaluate((el) => el.scrollHeight <= Math.ceil(2 * parseFloat(getComputedStyle(el).lineHeight)) + 1)).toBe(true);
+  await expect(more).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(card.locator(".wiki-wm-why")).not.toHaveClass(/\bopen\b/);
+  await expect(more).toBeHidden();
+  expect(await activeDesc(page)).not.toBe("body");
+  await expect(text).toBeFocused();
+});
+
+for (const theme of [
+  { label: "Light", stored: "light", scheme: "dark" as const },
+  { label: "Dark", stored: "dark", scheme: "light" as const },
+]) {
+  test(`↻ and Retry inside the card change colour on hover in the ${theme.label} theme`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: theme.scheme });
+    await page.addInitScript((v) => localStorage.setItem("muninn-theme", v), theme.stored);
+    await organizable(page);
+    await openStart(page, FRESH);
+    const color = (sel: string) => page.locator(sel).evaluate((el) => getComputedStyle(el).color);
+    const accent = await token(page, "--accent-light");
+    const btn = page.locator("#wikiWorkMapRefresh");
+    const rest = await color("#wikiWorkMapRefresh");
+    expect(rest).not.toBe(accent);
+    await btn.hover();
+    await expect.poll(() => color("#wikiWorkMapRefresh")).toBe(accent);
+    await page.unroute("**/api/wiki/work-map?*");
+    await page.route("**/api/wiki/work-map?*", (route) => route.fulfill({ status: 503, json: { error: "down" } }));
+    await page.reload();
+    const retry = page.locator("#wikiWorkMapRetry");
+    await expect(retry).toBeVisible();
+    await page.mouse.move(0, 0);
+    const retryRest = await color("#wikiWorkMapRetry");
+    expect(retryRest).not.toBe(accent);
+    await retry.hover();
+    await expect.poll(() => color("#wikiWorkMapRetry")).toBe(accent);
+  });
+}
+
 /** Every theme a reader can end up in: an explicit pick stored under
  *  `muninn-theme` (a base or a palette), or nothing stored and the OS scheme. */
 const THEMES: { label: string; stored: string | null; scheme: "light" | "dark" }[] = [
@@ -805,15 +1072,18 @@ async function sweepCard(page: Page, label: string): Promise<{ low: string[]; mi
   return { low, min, classes };
 }
 
-/** The `.wiki-wm-*` / `.wm-state-*` classes the stylesheet styles: each must be
- *  painted in some swept state, or the sweep never measured it. */
+/** The `.wiki-wm-*` / `.wm-state-*` classes the stylesheet styles, and the
+ *  shared `.wiki-wn-*` ones it restyles inside the card: each must be painted
+ *  in some swept state, or the sweep never measured it. */
 async function styledCardClasses(page: Page): Promise<string[]> {
   return page.evaluate(() => {
     const out = new Set<string>();
     for (const sheet of Array.from(document.styleSheets)) {
       for (const rule of Array.from(sheet.cssRules)) {
         const sel = (rule as CSSStyleRule).selectorText;
-        if (sel) for (const m of sel.matchAll(/\.((?:wiki-wm|wm-state)-[\w-]+)/g)) out.add(m[1]!);
+        if (!sel) continue;
+        for (const m of sel.matchAll(/\.((?:wiki-wm|wm-state)-[\w-]+)/g)) out.add(m[1]!);
+        for (const part of sel.split(",")) if (part.includes(".wiki-workcard")) for (const m of part.matchAll(/\.(wiki-wn-[\w-]+)/g)) out.add(m[1]!);
       }
     }
     return [...out].sort();
@@ -848,10 +1118,12 @@ for (const theme of THEMES) {
     const low: string[] = [];
     const seen = new Set<string>();
     const mins: number[] = [];
+    const labels: string[] = [];
     const sweep = async (label: string) => {
       const r = await sweepCard(page, label);
       low.push(...r.low);
       mins.push(r.min);
+      labels.push(label);
       r.classes.forEach((c) => seen.add(c));
     };
     // The map: every lane open, the long why opened, the last attempt's warning.
@@ -860,6 +1132,15 @@ for (const theme of THEMES) {
     await expect(card.locator(".wiki-wm-why.open")).toHaveCount(1);
     await expect(card.locator("#wikiWorkMapStatus.warn")).toBeVisible();
     await sweep("map");
+    // ↻ hovered, then focused from the keyboard.
+    await card.locator("#wikiWorkMapRefresh").hover();
+    await expect.poll(async () => card.locator("#wikiWorkMapRefresh").evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
+    await sweep("↻ hover");
+    await page.mouse.move(0, 0);
+    await page.keyboard.press("Shift");
+    await card.locator("#wikiWorkMapRefresh").focus();
+    expect(await card.locator("#wikiWorkMapRefresh").evaluate((el) => el.matches(":focus-visible"))).toBe(true);
+    await sweep("↻ focus-visible");
     // ↻ refused (warn), then running (plain), ↻ disabled.
     await card.locator("#wikiWorkMapRefresh").click();
     await expect(card.locator("#wikiWorkMapStatus")).toHaveText("Ran 5 min ago — try again in 5 min.");
@@ -881,8 +1162,11 @@ for (const theme of THEMES) {
     await page.reload();
     await expect(card.locator("#wikiWorkMapRetry")).toBeVisible();
     await sweep("error");
+    await card.locator("#wikiWorkMapRetry").hover();
+    await expect.poll(async () => card.locator("#wikiWorkMapRetry").evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
+    await sweep("Retry hover");
     expect((await styledCardClasses(page)).filter((c) => !seen.has(c))).toEqual([]);
-    console.log(`contrast min ${theme.label}: ${Math.min(...mins).toFixed(2)} (${["map", "refusal", "running", "empty", "error"].map((l, i) => `${l} ${mins[i]!.toFixed(2)}`).join(", ")})`);
+    console.log(`contrast min ${theme.label}: ${Math.min(...mins).toFixed(2)} (${labels.map((l, i) => `${l} ${mins[i]!.toFixed(2)}`).join(", ")})`);
     expect(low).toEqual([]);
   });
 }
