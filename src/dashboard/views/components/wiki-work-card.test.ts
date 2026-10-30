@@ -109,6 +109,21 @@ describe("workCardHtml", () => {
     expect(html).toContain("1 done · show");
   });
 
+  test("a why carries a keyboard control for its clamp, hidden until the client finds it clamped", () => {
+    const html = card(map());
+    const why = html.slice(html.indexOf('class="wiki-wm-why'), html.indexOf('class="wiki-wm-action'));
+    expect(why).toContain('<div class="wiki-wm-why-text" id="wikiWmWhy0"');
+    expect(why).toMatch(/<button type="button" class="wiki-wm-why-more" data-wm-why="decision\|Decide ⟦plans\/a.mdx⟧" aria-controls="wikiWmWhy0" aria-expanded="false" hidden>more<\/button>/);
+    expect(why).not.toContain("wiki-wm-why open");
+  });
+
+  test("a why the reader opened renders open, its control shown and expanded", () => {
+    const m = map();
+    const html = workCardHtml({ body: { map: m, organizable: false }, pages: PAGES, now: NOW, done: new Set(), openWhy: new Set([needKey(m.needsYou[0]!)]), hrefFor: href, refresh: { phase: "idle" } });
+    expect(html).toContain('class="wiki-wm-why open"');
+    expect(html).toMatch(/aria-expanded="true">less<\/button>/);
+  });
+
   test("the degraded-filter warning P1 wrote shows once", () => {
     const m = map();
     m.coverage.metadataFilter = { degraded: true, reason: "steps", pages: 4 };

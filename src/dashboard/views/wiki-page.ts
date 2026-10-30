@@ -2533,6 +2533,7 @@ export async function renderWikiPage(opts?: {
        every colour is a theme token; text uses --text-soft and the --tone-*
        inks, which clear 4.5:1 in every palette (the e2e measures each). */
     .wiki-workcard .wiki-wn-head { flex-wrap: wrap; row-gap: 4px; }
+    .wiki-workcard .wiki-wn-error, .wiki-workcard .wiki-wn-retry, .wiki-workcard .wiki-wn-refresh { color: var(--text-soft); }
     .wiki-wm-age, .wiki-wm-model { font-size: 11.5px; color: var(--text-soft); }
     .wiki-wm-stale {
       font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 999px;
@@ -2564,8 +2565,13 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wm-why, .wiki-wm-action { color: var(--text-secondary); margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
     .wiki-wm-action { color: var(--text-primary); }
-    .wiki-wm-why { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; cursor: pointer; }
-    .wiki-wm-why.open { display: block; }
+    .wiki-wm-why-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+    .wiki-wm-why.open .wiki-wm-why-text { display: block; }
+    .wiki-wm-why-more {
+      background: none; border: none; padding: 0; margin-top: 2px; font: inherit; font-size: 11.5px;
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+    }
+    .wiki-wm-why-more[hidden] { display: none; }
     .wiki-wm-done, .wiki-wm-restore {
       background: transparent; border: 1px solid var(--border-secondary); border-radius: 6px;
       color: var(--text-soft); font-size: 11px; line-height: 1; padding: 3px 7px;

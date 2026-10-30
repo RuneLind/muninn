@@ -22,8 +22,9 @@
  *     GET answered 4xx, or failing on the network twice, yields What's new.
  *     ✓ lasts the page's life when localStorage throws.
  *  7. **Legible in every theme** — each explicit pick (Light, Dark, Reading,
- *     Light reading) and System under both OS schemes: every text class the
- *     card paints, chips included, clears 4.5:1 against what is painted behind it.
+ *     Light reading) and System under both OS schemes: every element that
+ *     paints text, in every state (map, refusal, running, all done, error),
+ *     clears 4.5:1 against what is painted behind it.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -36,7 +37,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { paintedContrast, token } from "./contrast.ts";
+import { paintedMeasure, token } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-work-card");
@@ -54,6 +55,8 @@ const GROW = "e2e-wm-grow";
 const GROW_ERR = "e2e-wm-grow-err";
 const GROW_LATE = "e2e-wm-grow-late";
 const FB = "e2e-wm-fb";
+/** Paints every element the card has: the contrast sweep's wiki. */
+const SWEEP = "e2e-wm-sweep";
 const LONG_WHY =
   "The two drafts of ⟦plans/alpha.mdx⟧ disagree on the name, the scope and the owner, and the review thread under the second draft has gone quiet for a week, so nobody has decided which of them the next slice builds on.";
 const HOUR = 3_600_000;
@@ -99,6 +102,31 @@ function mapJson(wiki: string, runAtMs: number, needsYou: NeedFixture[] = DEFAUL
   });
 }
 
+/** A stale map that renders every part of the card: all six states, a nested
+ *  and a part-of sub-effort, an active day, `+N more`, a next step, a
+ *  coverage warning, a clamped why and a Needs-you item with page links. */
+function sweepMapJson(runAtMs: number): string {
+  const m = JSON.parse(mapJson(SWEEP, runAtMs, [
+    { title: "Settle ⟦plans/alpha.mdx⟧", kind: "decision", why: LONG_WHY, action: "Pick one draft.", pages: ["plans/beta.mdx", "plans/gamma.mdx"] },
+    { title: "Resume beta", kind: "resume", why: "Quiet a week.", action: "", pages: [] },
+  ])) as Record<string, unknown> & { coverage: Record<string, unknown> };
+  m.coverage.warnings = ["Active pages fell from 90 to 30."];
+  const today = new Date().toISOString().slice(0, 10);
+  const e = (id: string, state: string, pages: string[], extra: Record<string, unknown> = {}) => ({
+    id, name: `${id} work`, aliases: [], oneLine: `The ${id} effort.`, state, pages: pages.map((p) => ({ id: p, role: "plan" })), why: "", confidence: 1, next: "", related: [], daily: [], ...extra,
+  });
+  m.efforts = [
+    e("active", "active", ["plans/alpha.mdx", "plans/p1.mdx", "plans/p2.mdx", "plans/p3.mdx", "plans/p4.mdx", "plans/p5.mdx", "plans/p6.mdx"], { next: "Ship ⟦plans/alpha.mdx⟧.", daily: [{ day: today, commits: 2, sessions: 1 }] }),
+    e("nested", "proposed", ["plans/p1.mdx"], { parent: "active" }),
+    e("blocked", "blocked", ["plans/beta.mdx"]),
+    e("cooling", "cooling", ["plans/beta.mdx"]),
+    e("partof", "active", ["plans/gamma.mdx"], { parent: "cooling" }),
+    e("quiet", "quiet", ["plans/gamma.mdx"]),
+    e("shipped", "shipped", ["plans/gamma.mdx"]),
+  ];
+  return JSON.stringify(m);
+}
+
 let server: ChildProcess | undefined;
 const roots: Record<string, string> = {};
 
@@ -124,6 +152,9 @@ test.beforeAll(async () => {
   await seedWiki(GROW_ERR, null);
   await seedWiki(GROW_LATE, null);
   await seedWiki(FB, now - 2 * HOUR);
+  await seedWiki(SWEEP, null);
+  for (let i = 1; i <= 6; i++) await writeFile(path.join(roots[SWEEP]!, `plans/p${i}.mdx`), md(`Page ${i}`), "utf8");
+  await writeFile(path.join(roots[SWEEP]!, ".work-map.json"), sweepMapJson(now - 30 * HOUR), "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -134,7 +165,7 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -197,19 +228,92 @@ test("a wiki with a map shows the card and never asks for the digest", async ({ 
   expect(new URL(page.url()).searchParams.get("relPath")).toBe("plans/alpha.mdx");
 });
 
-test("a long Needs-you why is clamped to two lines and opens on a click", async ({ page }) => {
+test("a long Needs-you why is clamped to two lines and opens from its keyboard control", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
   await openStart(page, LONG);
   const card = page.locator("#wikiWorkCard");
-  const why = card.locator(".wiki-wm-why");
-  const lines = () => why.evaluate((el) => Math.round(el.clientHeight / parseFloat(getComputedStyle(el).lineHeight)));
+  const text = card.locator(".wiki-wm-why-text");
+  const more = card.locator(".wiki-wm-why-more");
+  const lines = () => text.evaluate((el) => Math.round(el.clientHeight / parseFloat(getComputedStyle(el).lineHeight)));
   expect(await lines()).toBe(2);
-  expect(await why.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
-  await expect(why).toHaveAttribute("title", LONG_WHY.replace("⟦plans/alpha.mdx⟧", "Alpha plan"));
+  expect(await text.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  await expect(text).toHaveAttribute("title", LONG_WHY.replace("⟦plans/alpha.mdx⟧", "Alpha plan"));
   await expect(card.locator(".wiki-wm-action")).toBeVisible();
-  await why.click({ position: { x: 4, y: 4 } });
-  await expect.poll(() => why.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
+  await expect(more).toBeVisible();
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  await expect(more).toHaveAttribute("aria-controls", (await text.getAttribute("id"))!);
+  await expect(more).toHaveCSS("cursor", "pointer");
+  await more.focus();
+  await page.keyboard.press("Enter");
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await expect.poll(() => text.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
   expect(await lines()).toBeGreaterThan(2);
+  await expect(more).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  expect(await lines()).toBe(2);
+});
+
+test("a why that fits its two lines offers no expand control", async ({ page }) => {
+  await openStart(page, FRESH);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator(".wiki-wm-why-text")).toHaveText("Two drafts disagree.");
+  await expect(card.locator(".wiki-wm-why-more")).toBeHidden();
+  await expect(card.locator(".wiki-wm-why-text")).not.toHaveCSS("cursor", "pointer");
+  await expect(card.locator(".wiki-wm-why")).not.toHaveCSS("cursor", "pointer");
+});
+
+test("selecting text in an opened why leaves it open", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  await openStart(page, LONG);
+  const card = page.locator("#wikiWorkCard");
+  const text = card.locator(".wiki-wm-why-text");
+  await card.locator(".wiki-wm-why-more").click();
+  await expect(card.locator(".wiki-wm-why")).toHaveClass(/\bopen\b/);
+  const box = (await text.boundingBox())!;
+  await page.mouse.move(box.x + 2, box.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height - 4, { steps: 8 });
+  await page.mouse.up();
+  expect((await page.evaluate(() => String(getSelection()))).length).toBeGreaterThan(20);
+  await expect(card.locator(".wiki-wm-why")).toHaveClass(/\bopen\b/);
+  await expect(card.locator(".wiki-wm-why-more")).toHaveAttribute("aria-expanded", "true");
+  // A plain click on the text does not toggle it either.
+  await text.click({ position: { x: 4, y: 4 } });
+  await expect(card.locator(".wiki-wm-why")).toHaveClass(/\bopen\b/);
+});
+
+test("an opened why and focus on its control survive a ↻ poll repaint", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    gets++;
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - 60 * 60_000 } });
+  });
+  await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
+  await page.clock.install();
+  await openStart(page, LONG);
+  const card = page.locator("#wikiWorkCard");
+  await card.locator("#wikiWorkMapRefresh").click();
+  await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
+  const more = card.locator(".wiki-wm-why-more");
+  await more.focus();
+  await page.keyboard.press("Enter");
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await page.evaluate(() => document.querySelector("#wikiWorkCard .wiki-wm-summary")!.setAttribute("data-before-repaint", ""));
+  const n = gets;
+  await expect
+    .poll(async () => {
+      await page.clock.runFor(1_000);
+      return gets;
+    })
+    .toBeGreaterThan(n);
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  await expect(more).toBeFocused();
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await expect(card.locator(".wiki-wm-why")).toHaveClass(/\bopen\b/);
 });
 
 test("a map older than 26 h carries the stale mark", async ({ page }) => {
@@ -641,68 +745,109 @@ const THEMES: { label: string; stored: string | null; scheme: "light" | "dark" }
   { label: "System dark", stored: null, scheme: "dark" },
 ];
 
-/** Every text class the card paints, by the box that sits behind it. A class
- *  the fixture does not render is measured on a probe in that box. */
-const TEXT_CLASSES: Record<string, string[]> = {
-  ".wiki-wn-head": ["wiki-wm-age", "wiki-wm-model", "wiki-wm-stale"],
-  ".wiki-workcard": ["wiki-wm-status", "wiki-wm-status warn", "wiki-wm-summary", "wiki-wm-link", "wiki-wm-empty", "wiki-wm-coverage", "wiki-wm-warnings"],
-  ".wiki-wm-section-title": ["wiki-wm-restore"],
-  ".wiki-wm-section": ["wiki-wm-section-title"],
-  ".wiki-wm-lane": ["wiki-wm-lane-title"],
-  ".wiki-wm-lane-title": ["wiki-wm-count"],
-  ".wiki-wm-need-head": ["wiki-wm-kind", "wiki-wm-need-title", "wiki-wm-done"],
-  ".wiki-wm-need": ["wiki-wm-why", "wiki-wm-action"],
-  ".wiki-wm-effort-head": [
-    "wiki-wm-effort-name",
-    ...["active", "proposed", "blocked", "cooling", "quiet", "shipped"].map((s) => `wiki-wm-state wm-state-${s}`),
-    "wiki-wm-active",
-    "wiki-wm-partof",
-  ],
-  ".wiki-wm-effort": ["wiki-wm-oneline", "wiki-wm-pages", "wiki-wm-next"],
-  ".wiki-wm-pages": ["wiki-wm-sep", "wiki-wm-more"],
-  ".wiki-wm-next": ["wiki-wm-next-label"],
-};
+/** Every element in the card that paints its own text, measured where it sits
+ *  (no `.first()`: one class can sit on two boxes). Returns the ratios and the
+ *  classes of every visible element, for the coverage check. */
+async function sweepCard(page: Page, label: string): Promise<{ low: string[]; min: number; classes: string[] }> {
+  const card = page.locator("#wikiWorkCard");
+  const measure = await paintedMeasure(page);
+  const { what, ratios, classes } = await card.evaluate((root, measure) => {
+    const what: string[] = [];
+    const ratios: number[] = [];
+    const classes: string[] = [];
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
+      if (!el.checkVisibility({ visibilityProperty: true })) continue;
+      classes.push(...Array.from(el.classList));
+      if (!Array.from(el.childNodes).some((n) => n.nodeType === Node.TEXT_NODE && n.textContent!.trim())) continue;
+      what.push(`${el.tagName.toLowerCase()}.${Array.from(el.classList).join(".")} "${el.textContent!.trim().slice(0, 30)}"`);
+      ratios.push(measure(el, false, false));
+    }
+    return { what, ratios, classes };
+  }, measure);
+  expect(what.length, `${label}: nothing to measure`).toBeGreaterThan(0);
+  const low = ratios.flatMap((r, i) => (r < 4.5 ? [`${label}: ${what[i]} ${r.toFixed(2)}`] : []));
+  const min = Math.min(...ratios);
+  return { low, min, classes };
+}
+
+/** The `.wiki-wm-*` / `.wm-state-*` classes the stylesheet styles: each must be
+ *  painted in some swept state, or the sweep never measured it. */
+async function styledCardClasses(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const out = new Set<string>();
+    for (const sheet of Array.from(document.styleSheets)) {
+      for (const rule of Array.from(sheet.cssRules)) {
+        const sel = (rule as CSSStyleRule).selectorText;
+        if (sel) for (const m of sel.matchAll(/\.((?:wiki-wm|wm-state)-[\w-]+)/g)) out.add(m[1]!);
+      }
+    }
+    return [...out].sort();
+  });
+}
 
 for (const theme of THEMES) {
-  test(`legible in the ${theme.label} theme`, async ({ page }) => {
+  test(`legible in the ${theme.label} theme, in every state the card paints`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
     await page.emulateMedia({ colorScheme: theme.scheme });
     await page.addInitScript((v) => {
       if (v === null) localStorage.removeItem("muninn-theme");
       else localStorage.setItem("muninn-theme", v);
     }, theme.stored);
-    await openStart(page, STALE);
+    await page.route("**/api/wiki/work-map?*", async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as Record<string, unknown>;
+      await route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - 31 * HOUR, lastAttempt: { at: Date.now() - 10 * 60_000, outcome: "failed", error: "model timed out" } } });
+    });
+    let posts = 0;
+    await page.route("**/api/wiki/work-map/refresh*", (route) =>
+      ++posts === 1
+        ? route.fulfill({ status: 429, json: { error: "ran recently", lastSuccessAt: Date.now() - 5 * 60_000, retryAfterMs: 5 * 60_000 } })
+        : route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }),
+    );
+    await page.clock.install();
+    await openStart(page, SWEEP);
     const card = page.locator("#wikiWorkCard");
     await expect(card.locator(".wiki-wm-stale")).toBeVisible();
-    const name = card.locator(".wiki-wm-effort-name").first();
-    const link = card.locator(".wiki-wm-summary a").first();
-    expect(await name.evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--text-primary"));
-    expect(await link.evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
-    // Real elements first; a missing class gets a probe in its own box.
-    const probed = await card.evaluate((root, classes) => {
-      root.querySelectorAll("details").forEach((d) => (d.open = true));
-      const out: string[] = [];
-      for (const [box, list] of Object.entries(classes)) {
-        const host = root.matches(box) ? root : root.querySelector(box);
-        if (!host) throw new Error(`no ${box} in the card`);
-        for (const cls of list) {
-          const sel = "." + cls.split(" ").join(".");
-          if (root.querySelector(sel)) continue;
-          const probe = document.createElement("span");
-          probe.className = cls;
-          probe.textContent = "probe";
-          host.appendChild(probe);
-          out.push(cls);
-        }
-      }
-      return out;
-    }, TEXT_CLASSES);
-    expect(probed).not.toContain("wiki-wm-stale");
-    // Every one of these is ≤ 13 px text, so the normal-text floor holds.
+    expect(await card.locator(".wiki-wm-effort-name").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--text-primary"));
+    expect(await card.locator(".wiki-wm-summary a").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
     const low: string[] = [];
-    for (const cls of Object.values(TEXT_CLASSES).flat()) {
-      const ratio = await paintedContrast(card.locator("." + cls.split(" ").join(".")).first());
-      if (ratio < 4.5) low.push(`${cls} ${ratio.toFixed(2)}`);
-    }
+    const seen = new Set<string>();
+    const mins: number[] = [];
+    const sweep = async (label: string) => {
+      const r = await sweepCard(page, label);
+      low.push(...r.low);
+      mins.push(r.min);
+      r.classes.forEach((c) => seen.add(c));
+    };
+    // The map: every lane open, the long why opened, the last attempt's warning.
+    await card.evaluate((root) => root.querySelectorAll("details").forEach((d) => (d.open = true)));
+    await card.locator(".wiki-wm-why-more:visible").click();
+    await expect(card.locator(".wiki-wm-why.open")).toHaveCount(1);
+    await expect(card.locator("#wikiWorkMapStatus.warn")).toBeVisible();
+    await sweep("map");
+    // ↻ refused (warn), then running (plain), ↻ disabled.
+    await card.locator("#wikiWorkMapRefresh").click();
+    await expect(card.locator("#wikiWorkMapStatus")).toHaveText("Ran 5 min ago — try again in 5 min.");
+    await sweep("refusal");
+    const posted = page.waitForResponse("**/api/wiki/work-map/refresh*");
+    await card.locator("#wikiWorkMapRefresh").click();
+    await posted;
+    await expect(card.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
+    await page.waitForTimeout(200);
+    await sweep("running");
+    // Every item done: the restore control and the empty line.
+    while ((await card.locator("[data-wm-done]").count()) > 0) await card.locator("[data-wm-done]").first().click();
+    await expect(card.locator(".wiki-wm-empty")).toBeVisible();
+    await expect(card.locator("#wikiWorkMapRestore")).toBeVisible();
+    await sweep("empty");
+    // The GET answered 5xx: the card's error and Retry.
+    await page.unroute("**/api/wiki/work-map?*");
+    await page.route("**/api/wiki/work-map?*", (route) => route.fulfill({ status: 503, json: { error: "down" } }));
+    await page.reload();
+    await expect(card.locator("#wikiWorkMapRetry")).toBeVisible();
+    await sweep("error");
+    expect((await styledCardClasses(page)).filter((c) => !seen.has(c))).toEqual([]);
+    console.log(`contrast min ${theme.label}: ${Math.min(...mins).toFixed(2)} (${["map", "refusal", "running", "empty", "error"].map((l, i) => `${l} ${mins[i]!.toFixed(2)}`).join(", ")})`);
     expect(low).toEqual([]);
   });
 }

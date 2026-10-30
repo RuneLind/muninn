@@ -56,6 +56,8 @@ export interface WorkCardInput<P extends CardPage> {
   now: number;
   /** Needs-you keys marked done for this run. */
   done: ReadonlySet<string>;
+  /** Needs-you keys whose clamped why the reader opened. */
+  openWhy?: ReadonlySet<string>;
   hrefFor(relPath: string): string;
   refresh: RefreshView;
 }
@@ -217,7 +219,7 @@ export function workCardHtml<P extends CardPage>(input: WorkCardInput<P>): strin
   return (
     headHtml(joined, body, now, input.refresh) +
     (joined.summary.trim() ? `<div class="wiki-wm-summary">${prose(joined.summary)}</div>` : "") +
-    needsYouHtml(joined, body.map.needsYou, input.done, prose, byKey, hrefFor) +
+    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor) +
     lanesHtml(joined, now, prose, byKey, hrefFor) +
     coverageHtml(joined)
   );
@@ -263,6 +265,7 @@ function needsYouHtml<P>(
   map: JoinedWorkMap<P>,
   raw: WorkMap["needsYou"],
   done: ReadonlySet<string>,
+  openWhy: ReadonlySet<string>,
   prose: (s: string) => string,
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
@@ -278,7 +281,7 @@ function needsYouHtml<P>(
         `<div class="wiki-wm-need-head"><span class="wiki-wm-kind">${esc(n.kind)}</span>` +
         `<span class="wiki-wm-need-title">${prose(n.title)}</span>` +
         `<button class="wiki-wm-done" data-wm-done="${i}" data-wm-key="${esc(needKey(raw[i]!))}" title="Mark done" aria-label="Mark done">✓</button></div>` +
-        (n.why ? `<div class="wiki-wm-why" title="${esc(proseText(n.why, byKey))}">${prose(n.why)}</div>` : "") +
+        (n.why ? whyHtml(i, needKey(raw[i]!), openWhy.has(needKey(raw[i]!)), n.why, prose, byKey) : "") +
         (n.action ? `<div class="wiki-wm-action">${prose(n.action)}</div>` : "") +
         // Pages the item's own prose already links are not repeated.
         pagesHtml(
@@ -294,6 +297,18 @@ function needsYouHtml<P>(
     (doneCount ? ` <button class="wiki-wm-restore" id="wikiWorkMapRestore" title="Show the items marked done">${doneCount} done · show</button>` : "") +
     "</div>" +
     (cards ? `<div class="wiki-wm-needs">${cards}</div>` : '<div class="wiki-wm-empty">Nothing left for this run.</div>') +
+    "</div>"
+  );
+}
+
+/** A Needs-you why, clamped to two lines. Its expand control renders hidden
+ *  unless open; the client shows it once it finds the text clamped. */
+function whyHtml(i: number, key: string, open: boolean, why: string, prose: (s: string) => string, byKey: ReadonlyMap<string, CardPage>): string {
+  const id = `wikiWmWhy${i}`;
+  return (
+    `<div class="wiki-wm-why${open ? " open" : ""}">` +
+    `<div class="wiki-wm-why-text" id="${id}" title="${esc(proseText(why, byKey))}">${prose(why)}</div>` +
+    `<button type="button" class="wiki-wm-why-more" data-wm-why="${esc(key)}" aria-controls="${id}" aria-expanded="${open}"${open ? "" : " hidden"}>${open ? "less" : "more"}</button>` +
     "</div>"
   );
 }

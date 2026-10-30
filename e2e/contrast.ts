@@ -92,8 +92,16 @@ export async function paintedContrast(
   locator: Locator,
   opts?: { withOpacity?: boolean; fill?: boolean },
 ): Promise<number> {
-  const parse = await colorParser(locator.page());
-  return locator.evaluate((el, [withOpacity, fill, parse]) => {
+  const measure = await paintedMeasure(locator.page());
+  return locator.evaluate((el, [withOpacity, fill, measure]) => measure(el, withOpacity, fill), [opts?.withOpacity ?? false, opts?.fill ?? false, measure] as const);
+}
+
+/** `paintedContrast`'s in-page half, `(el, withOpacity, fill) => ratio`: pass
+ *  it into an `evaluate` to find and measure elements in one synchronous pass,
+ *  which a repaint cannot split. */
+export async function paintedMeasure(page: Page): Promise<JSHandle<(el: Element, withOpacity: boolean, fill: boolean) => number>> {
+  const parse = await colorParser(page);
+  return page.evaluateHandle((parse) => (el: Element, withOpacity: boolean, fill: boolean): number => {
     const rgba = (c: string) => {
       const [r, g, b, a] = parse(c);
       return { r, g, b, a };
@@ -130,7 +138,7 @@ export async function paintedContrast(
     const a = lum(fg);
     const b = lum(bg);
     return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  }, [opts?.withOpacity ?? false, opts?.fill ?? false, parse] as const);
+  }, parse);
 }
 
 /** A token's computed value, read off a probe on `body`: what a rule written

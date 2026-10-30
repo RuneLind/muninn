@@ -727,9 +727,13 @@ let workLoadGen: number | null = null;
 /** Lanes the reader opened or closed, by lane id; for the page's life. */
 const laneOpen = new Map<string, boolean>();
 let laneListening = false;
+/** Needs-you items whose why the reader opened, by `needKey`; for the page's life. */
+const whyOpen = new Set<string>();
+/** Cards whose resize re-checks which whys are clamped. */
+const whyObserved = new WeakSet<HTMLElement>();
 
 /** A card control to re-focus after a repaint, by what survives one. */
-type FocusKey = { sel: string } | { done: string } | { link: string; nth: number };
+type FocusKey = { sel: string } | { done: string } | { why: string } | { link: string; nth: number };
 /** A control that could not take focus back (↻ disabled while running): retried
  *  on the next paint while focus is still nowhere. */
 let pendingFocus: FocusKey | null = null;
@@ -836,6 +840,8 @@ function focusedCardControl(el: HTMLElement): FocusKey | null {
   if (active.id) return { sel: "#" + active.id };
   const doneKey = active.getAttribute("data-wm-key");
   if (doneKey !== null && active.hasAttribute("data-wm-done")) return { done: doneKey };
+  const whyKey = active.getAttribute("data-wm-why");
+  if (whyKey !== null) return { why: whyKey };
   const rel = active.getAttribute("data-relpath");
   if (rel !== null) return { link: rel, nth: cardLinks(el, rel).indexOf(active) };
   const lane = active.tagName === "SUMMARY" ? active.parentElement?.getAttribute("data-wm-lane") : null;
@@ -849,6 +855,7 @@ function cardLinks(el: HTMLElement, rel: string): HTMLElement[] {
 function findFocusTarget(el: HTMLElement, key: FocusKey): HTMLElement | null {
   if ("sel" in key) return el.querySelector<HTMLElement>(key.sel);
   if ("done" in key) return Array.from(el.querySelectorAll<HTMLElement>("[data-wm-done]")).find((b) => b.getAttribute("data-wm-key") === key.done) ?? null;
+  if ("why" in key) return Array.from(el.querySelectorAll<HTMLElement>("[data-wm-why]")).find((b) => b.getAttribute("data-wm-why") === key.why) ?? null;
   return cardLinks(el, key.link)[key.nth] ?? null;
 }
 
@@ -864,6 +871,7 @@ function paintWorkCard(override?: FocusKey): void {
     pages: deps.pages ? deps.pages() : [],
     now: Date.now(),
     done: parseDone(readDoneRaw(), runAt),
+    openWhy: whyOpen,
     hrefFor: deps.hrefFor ?? ((rel) => withWiki("/wiki?relPath=" + encodeURIComponent(rel))),
     refresh: workRefresh,
   });
@@ -874,11 +882,26 @@ function paintWorkCard(override?: FocusKey): void {
     });
   }
   showWorkCardSlot(el);
+  syncWhyControls(el);
+  if (typeof ResizeObserver !== "undefined" && !whyObserved.has(el)) {
+    whyObserved.add(el);
+    new ResizeObserver(() => syncWhyControls(el)).observe(el);
+  }
   if (refocus) {
     const t = findFocusTarget(el, refocus) ?? (override ? el.querySelector<HTMLElement>("#wikiWorkMapRestore") : null);
     t?.focus({ preventScroll: true });
     if (t && document.activeElement !== t) pendingFocus = refocus;
   }
+}
+
+/** Shows a closed why's expand control only while its text is clamped. */
+function syncWhyControls(el: HTMLElement): void {
+  if (typeof el.querySelectorAll !== "function") return;
+  el.querySelectorAll<HTMLElement>(".wiki-wm-why:not(.open)").forEach((why) => {
+    const text = why.querySelector<HTMLElement>(".wiki-wm-why-text");
+    const more = why.querySelector<HTMLElement>(".wiki-wm-why-more");
+    if (text && more) more.hidden = text.scrollHeight <= text.clientHeight;
+  });
 }
 
 /** The card takes the slot: What's new hides, its content kept for a later hand-back. */
@@ -1052,9 +1075,12 @@ export function handleWorkCardClick(target: Element): boolean {
     }
     return true;
   }
-  const why = target.closest(".wiki-wm-why");
-  if (why && !target.closest("a")) {
-    why.classList.toggle("open");
+  const why = target.closest("[data-wm-why]");
+  if (why) {
+    const key = why.getAttribute("data-wm-why") ?? "";
+    if (whyOpen.has(key)) whyOpen.delete(key);
+    else whyOpen.add(key);
+    paintWorkCard({ why: key });
     return true;
   }
   if (target.closest("#wikiWorkMapRestore")) {
