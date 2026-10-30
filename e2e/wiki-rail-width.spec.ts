@@ -217,9 +217,11 @@ let server: ChildProcess | undefined;
 let root = "";
 
 /** A second wiki, with a work map (P4): one effort fold row at its widest — a
- *  name far past any rail, the longest state word, ✋ 12 and a four-status
- *  roll-up — and a short-named one beside it. Its pages are new, so Activity
- *  holds them. */
+ *  name far past any rail, the longest state word, ✋ 12 (twelve Needs-you
+ *  items) and a four-status roll-up — and a short-named one beside it. Its
+ *  pages are new, so Activity holds them. D14: the long fold's body carries a
+ *  one-line summary far past the rail with a page link in it, the longest
+ *  role words, and «+1 more» (five pages). */
 const EF_WIKI = "e2e-rail-efforts-width";
 let efRoot = "";
 const EF_LONG_NAME = "An effort whose name runs far past the widest rail the reader allows — the plan, its follow-up, the report and the explainer";
@@ -229,14 +231,25 @@ const EF_PAGES: Array<[string, string, string]> = [
   ["plans/ef-c.md", "Effort page C", "proposed"],
   ["plans/ef-d.md", "Effort page D", "superseded"],
   ["plans/ef-short.md", "Short effort page", "in-flight"],
+  ["plans/ef-e.md", "Effort page E with a title long enough to wrap inside the fold", "in-flight"],
 ];
+// ~300 chars: long enough that an unclamped summary runs to 8 lines at 260 px (measured).
+const EF_ONELINE =
+  "Carry ⟦plans/ef-a.md⟧ through review, then fold the follow-up, the report and the explainer into one long-running piece of work that keeps going " +
+  "until every open question is settled, every reviewer has signed off, the explainer matches the code and the report records what the campaign measured.";
+const EF_ROLES = ["prototype", "explainer", "spin-off", "followup", "reference"];
 const efMap = (runAtMs: number) =>
   JSON.stringify({
     version: 1, wiki: EF_WIKI, runAtMs, model: "test-model",
     coverage: { sessionsSinceMs: runAtMs, sessionsAsOfMs: runAtMs, touchWindowDays: 28, activePages: 5, threads: 0, logEntries: 0, digestChars: 1, warnings: [] },
-    summary: "", needsYou: [], themes: [], loose: [],
+    summary: "", themes: [], loose: [],
+    needsYou: Array.from({ length: 12 }, (_, i) => ({ title: `Step ${i + 1}`, kind: "decision", why: "", action: "", pages: [], effort: "long" })),
     efforts: [
-      { id: "long", name: EF_LONG_NAME, aliases: [], oneLine: "", state: "proposed", pages: EF_PAGES.slice(0, 4).map(([id]) => ({ id, role: "plan" })), why: "", confidence: 1, next: "", related: [], daily: [] },
+      {
+        id: "long", name: EF_LONG_NAME, aliases: [], oneLine: EF_ONELINE, state: "proposed",
+        pages: [...EF_PAGES.slice(0, 4), EF_PAGES[5]!].map(([id], i) => ({ id, role: EF_ROLES[i]! })),
+        why: "", confidence: 1, next: "", related: [], daily: [],
+      },
       { id: "short", name: "Short", aliases: [], oneLine: "", state: "active", pages: [{ id: "plans/ef-short.md", role: "plan" }], why: "", confidence: 1, next: "", related: [], daily: [] },
     ],
   });
@@ -266,10 +279,7 @@ test.beforeAll(async () => {
   efRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-ef-"));
   await mkdir(path.join(efRoot, "plans"), { recursive: true });
   for (const [rel, title, status] of EF_PAGES) {
-    const moves = rel === "plans/ef-a.md"
-      ? ["<NextMoves>", "", '<Lane kind="you" who="Du">', "", ...Array.from({ length: 12 }, (_, i) => `${i + 1}. **Step ${i + 1}.**`), "", "</Lane>", "", "</NextMoves>", ""]
-      : [];
-    await writeFile(path.join(efRoot, rel), ["---", `title: ${title}`, `plan_status: ${status}`, "---", "", `# ${title}`, "", ...moves].join("\n"), "utf8");
+    await writeFile(path.join(efRoot, rel), ["---", `title: ${title}`, `plan_status: ${status}`, "---", "", `# ${title}`, ""].join("\n"), "utf8");
   }
   await writeFile(path.join(efRoot, ".work-map.json"), efMap(Date.now()), "utf8");
 
@@ -922,8 +932,75 @@ test.describe("Wiki rail: effort fold rows at the width budgets (work map P4)", 
         if (g.nameIntoAge > 0.5 || !g.ageOnNameLine || g.agePastRow) bad.push(`age ${at}`);
         if (!g.caretVisible) bad.push(`caret ${at}`);
         if (g.partsClipped.length || g.partsTwoLines.length) bad.push(`meta ${at}`);
-        if (id === "long" && g.parts.join("|") !== "proposed ·|✋ 12 ·|1 proposed ·|1 in-flight ·|1 shipped ·|1 superseded") bad.push(`meta text ${at}`);
+        if (id === "long" && g.parts.join("|") !== "proposed ·|✋ 12 ·|1 proposed ·|2 in-flight ·|1 shipped ·|1 superseded") bad.push(`meta text ${at}`);
       }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  test("B1: at 260px a ~300-char summary is plain text clamped to three lines, its title holds the whole text, it holds no link or Tab stop, and «Open effort →» shows whole below it and stays put when Tab reaches it", async ({ page }) => {
+    expect(EF_ONELINE.length).toBeGreaterThanOrEqual(290);
+    await openEf(page, 260);
+    const intro = page.locator('#wikiList .wiki-effort-intro[data-effort="long"]');
+    const line = intro.locator(".wiki-effort-oneline");
+    const open = intro.locator("a.wiki-effort-open");
+    const lines = () => line.evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
+    expect(await lines()).toBe(3);
+    expect(await line.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+    const full = EF_ONELINE.replace("⟦plans/ef-a.md⟧", "Effort page A");
+    await expect(line).toHaveAttribute("title", full);
+    await expect(line).toHaveText(full);
+    expect(await line.evaluate((el) => el.querySelectorAll("a, button, [tabindex], input, select, textarea").length)).toBe(0);
+    const g = await intro.evaluate((el) => {
+      const o = el.querySelector(".wiki-effort-open") as HTMLElement;
+      const one = el.querySelector(".wiki-effort-oneline") as HTMLElement;
+      const ir = el.getBoundingClientRect();
+      const or = o.getBoundingClientRect();
+      return { below: or.top >= one.getBoundingClientRect().bottom - 0.5, inside: or.left >= ir.left && or.right <= ir.right + 0.5 && or.bottom <= ir.bottom + 0.5, oneLine: or.height < 20 };
+    });
+    expect(g).toEqual({ below: true, inside: true, oneLine: true });
+    // Tab from the effort's name lands on «Open effort →» next, and nothing moves.
+    const top = () => open.evaluate((el) => el.getBoundingClientRect().top);
+    const before = await top();
+    await page.locator('#wikiList .wiki-list-group.effort[data-effort="long"] .wiki-effort-name').focus();
+    await page.keyboard.press("Tab");
+    expect(await open.evaluate((el) => el === document.activeElement)).toBe(true);
+    expect(await lines()).toBe(3);
+    expect(await top()).toBe(before);
+  });
+
+  test("D14: from 260 to 400px the open fold's body — a long summary, role chips, «+1 more» — stays inside the rail", async ({ page }) => {
+    const bad: string[] = [];
+    for (let width = 260; width <= 400; width += 10) {
+      await openEf(page, width);
+      const g = await page.evaluate(() => {
+        const list = document.getElementById("wikiList")!;
+        const lr = list.getBoundingClientRect();
+        const intro = list.querySelector('.wiki-effort-intro[data-effort="long"]') as HTMLElement | null;
+        const open = intro?.querySelector(".wiki-effort-open") as HTMLElement | null;
+        const more = list.querySelector('.wiki-effort-more[data-fold-key="effort-all:long"]') as HTMLElement | null;
+        const chips = Array.from(list.querySelectorAll(".wiki-effort-role")) as HTMLElement[];
+        const inside = (e: HTMLElement) => {
+          const r = e.getBoundingClientRect();
+          return r.left >= lr.left - 0.5 && r.right <= lr.right + 0.5;
+        };
+        return {
+          listOverflow: list.scrollWidth - list.clientWidth,
+          intro: !!intro,
+          introOverflow: intro ? intro.scrollWidth - intro.clientWidth : -1,
+          introText: intro?.textContent ?? "",
+          openInside: open ? inside(open) : false,
+          moreText: more?.textContent ?? "",
+          moreInside: more ? inside(more) : false,
+          chips: chips.map((c) => c.textContent),
+          chipsBad: chips.filter((c) => c.scrollWidth > c.clientWidth + 1 || !inside(c) || c.getBoundingClientRect().height > 20).map((c) => c.textContent),
+        };
+      });
+      const at = `at ${width}: ${JSON.stringify(g)}`;
+      if (g.listOverflow > 0) bad.push(`overflow ${at}`);
+      if (!g.intro || g.introOverflow > 0 || g.introText.includes("⟦") || !g.openInside) bad.push(`intro ${at}`);
+      if (g.moreText !== "+1 more" || !g.moreInside) bad.push(`more ${at}`);
+      if (g.chips.length !== 5 || g.chipsBad.length) bad.push(`chips ${at}`);
     }
     expect(bad).toEqual([]);
   });

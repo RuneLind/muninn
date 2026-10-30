@@ -14,7 +14,7 @@ import { declaredEffortOf, EFFORT_ID_RE, osloDay, slugifyEffortId } from "../../
 import type { WorkMap, WorkMapDaily, WorkMapRetired } from "../../../wiki/work-map/schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { escHtml as esc } from "./escape.ts";
-import { isNestedEffort, lastActiveDays, needKey, proseHtml, type CardPage } from "./wiki-work-card.ts";
+import { effortNeedItems, isNestedEffort, lastActiveDays, openNeeds, proseHtml, type CardPage } from "./wiki-work-card.ts";
 
 /** The URL parameter that names an effort. */
 export const EFFORT_PARAM = "effort";
@@ -361,9 +361,11 @@ function confidenceLabel(c: number): string {
 }
 
 function needsHtml<P>(map: JoinedWorkMap<P>, raw: WorkMap, id: string, done: ReadonlySet<string>, prose: (s: string) => string): string {
-  const items = map.needsYou.map((n, i) => ({ n, key: needKey(raw.needsYou[i]!) })).filter(({ n }) => n.effort === id);
+  // Keys from the raw map: `joinWorkMap` rewrites titles. Same selection and
+  // done filter as the rail's ✋ (`effortNeedsOpen`).
+  const items = effortNeedItems(raw.needsYou, id).map(({ i, key }) => ({ n: map.needsYou[i]!, key }));
   if (!items.length) return "";
-  const open = items.filter(({ key }) => !done.has(key));
+  const open = openNeeds(items, done);
   const doneCount = items.length - open.length;
   return (
     '<section class="wiki-ef-section"><h2 class="wiki-ef-h">Needs you</h2>' +

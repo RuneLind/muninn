@@ -9,11 +9,12 @@
 import { describe, expect, test } from "bun:test";
 import { openWorkCards, railInputFor, threadPinAnchor, workBoundariesOf, type RailWikiFacts, type RailWorkGroupView } from "./wiki-rail-input.ts";
 import { buildRail, isRailGroupCard, openWorkThreadCards, threadPinStep, type RailGroupCard, type RailThreadCard, type RailWorkCard } from "./wiki-recents.ts";
-import { DEFAULT_ACTIVITY_WEIGHTS } from "./wiki-activity-rank.ts";
+import { DEFAULT_ACTIVITY_WEIGHTS, rankActivity } from "./wiki-activity-rank.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupSplit } from "./wiki-work-group-prefs.ts";
 import { WORK_EVIDENCE_VERSION, type IndexWork, type WorkContribution, type WorkThread } from "../../../wiki/work-focus.ts";
 import { CAP_NOW, CapRandom, nextCapScenario } from "./wiki-rail-work-cap-gen.ts";
+import type { RailEffort } from "./wiki-effort-rail.ts";
 
 const NOW = Date.UTC(2026, 9, 17, 20, 0);
 const H = 3_600_000;
@@ -606,3 +607,157 @@ describe("D20 fix round 2: fold keys, the pin and + N more across broken base ca
   });
 });
 const K_SPLIT: WorkGroupSplit = { id: "sk2", page: "plans/k.md" };
+
+describe("railInputFor in `group by effort` (work map D14)", () => {
+  const effort = (id: string): RailEffort => ({ id, name: `E ${id}`, state: "active", oneLine: "", needs: [], roles: new Map() });
+  const e1 = effort("e1");
+  const efforts = new Map<string, RailEffort>([
+    ["plans/k.md", e1],
+    ["plans/p.md", e1],
+    ["plans/a.md", e1],
+  ]);
+  const viewer = { mode: "updated" as const, now: NOW, filters: INERT, showRetired: false, familiesOn: false, pins: [], openFolds: [], workGroup: { stop: "threads" as const, evidence: ALL } };
+  const facts = (fx = fixture()): RailWikiFacts => ({ allPages: fx.pages, projects: {}, activityWeights: DEFAULT_ACTIVITY_WEIGHTS, workedGate: { open: true, why: "" } as never, work: fx.work, efforts });
+
+  test("the mode draws no Work threads: no cards, no Group control, no page left out of Activity, Pick up points at no card", () => {
+    const input = railInputFor(facts(), { ...viewer, effortsOn: true });
+    expect(input.threads).toBeUndefined();
+    expect(input.workControl).toBeUndefined();
+    // The open k card would have lifted k, p and q out of the ranking.
+    expect(input.activity!.map((r) => r.page.relPath)).toEqual(expect.arrayContaining(["plans/k.md", "plans/p.md", "plans/q.md"]));
+    expect((input.pickUp ?? []).every((r) => r.target === null)).toBe(true);
+    // The fold claims the series member a ahead of its series; b keeps the series.
+    expect(input.seriesGroups!.flatMap((g) => g.members.map((m) => m.relPath))).not.toContain("plans/a.md");
+    const rail = buildRail(input);
+    expect(rail.entries.some((e) => e.section === "threads")).toBe(false);
+    const fold = rail.entries.find((e) => e.kind === "effort") as Extract<ReturnType<typeof buildRail>["entries"][number], { kind: "effort" }>;
+    expect(fold.members.map((p) => p.relPath).sort()).toEqual(["plans/a.md", "plans/k.md", "plans/p.md"]);
+    expect(input.pageAgeMs).toBeDefined();
+  });
+
+  test("before the map lands (no index yet) the mode still draws no Work threads, and Activity is plain", () => {
+    const input = railInputFor({ ...facts(), efforts: null }, { ...viewer, effortsOn: true });
+    expect(input.threads).toBeUndefined();
+    expect(input.efforts).toBeUndefined();
+  });
+
+  test("unchecked, the rail is the pre-P4 rail: Work threads with the Group control, no folds", () => {
+    const off = railInputFor(facts(), { ...viewer, effortsOn: false });
+    const plain = railInputFor({ ...facts(), efforts: null }, { ...viewer });
+    expect(off.threads!.length).toBeGreaterThan(0);
+    expect(off.workControl).toBeDefined();
+    expect(off.efforts).toBeUndefined();
+    expect(JSON.stringify(buildRail(off).entries)).toBe(JSON.stringify(buildRail(plain).entries));
+  });
+
+  test("X1: a failed map GET, an empty joined index, or an index no Activity page is in draws Work threads, as with the box off", () => {
+    const off = JSON.stringify(buildRail(railInputFor(facts(), { ...viewer, effortsOn: false })).entries);
+    const cases: [string, RailWikiFacts][] = [
+      ["failed", { ...facts(), efforts: null, effortMapFailed: true }],
+      ["empty", { ...facts(), efforts: new Map() }],
+      ["no fold", { ...facts(), efforts: new Map([["plans/unlisted.md", e1]]) }],
+    ];
+    for (const [why, f] of cases) {
+      const input = railInputFor(f, { ...viewer, effortsOn: true });
+      expect([why, input.threads?.length ?? 0]).not.toEqual([why, 0]);
+      expect([why, JSON.stringify(buildRail(input).entries)]).toEqual([why, off]);
+    }
+  });
+
+  test("X2: with retired pages shown, a culled page of a folded effort stays out of the fold and keeps its series", () => {
+    const fx = fixture();
+    fx.pages[3] = { ...fx.pages[3]!, culled: true }; // plans/a.md: e1, series alpha
+    const input = railInputFor(facts(fx), { ...viewer, showRetired: true, effortsOn: true });
+    expect(input.seriesGroups!.flatMap((g) => g.members.map((m) => m.relPath))).toContain("plans/a.md");
+    const rail = buildRail(input);
+    const fold = rail.entries.find((e) => e.kind === "effort") as Extract<ReturnType<typeof buildRail>["entries"][number], { kind: "effort" }>;
+    expect(fold.members.map((p) => p.relPath).sort()).toEqual(["plans/k.md", "plans/p.md"]);
+    expect(rail.entries.filter((e) => e.kind === "row" && e.section === "activity" && e.page.relPath === "plans/a.md")).toHaveLength(0);
+  });
+
+  test("X3: an attachment child places its effort's fold; the parent keeps an Activity row only on its own signal", () => {
+    const e2 = effort("e2");
+    const quiet = { work: undefined, gitCreatedMs: NOW - 400 * DAY } as Partial<WikiListing>;
+    const kid = { ...page("plans/kid.html", { edits: 60, focusAgo: 0.5, parent: "notes/par.md", type: "explainer" }) };
+    const sib = { ...page("plans/sib.md"), ...quiet };
+    const idx = new Map<string, RailEffort>([...efforts, ["plans/kid.html", e2], ["plans/sib.md", e2]]);
+    const build = (par: WikiListing) => {
+      const fx = fixture();
+      const pages = [...fx.pages, par, kid, sib];
+      return buildRail(railInputFor({ ...facts({ ...fx, pages }), efforts: idx }, { ...viewer, effortsOn: true }));
+    };
+    type Row = Extract<ReturnType<typeof buildRail>["entries"][number], { kind: "row" }>;
+    type Fold = Extract<ReturnType<typeof buildRail>["entries"][number], { kind: "effort" }>;
+    // No signal of its own: e2 folds through the child, the parent is a plain remainder row.
+    const silent = build({ ...page("notes/par.md", { type: "note" }), ...quiet });
+    const f2 = silent.entries.find((e) => e.kind === "effort" && e.effort.id === "e2") as Fold | undefined;
+    expect(f2?.members.map((p) => p.relPath).sort()).toEqual(["plans/kid.html", "plans/sib.md"]);
+    const parRows = silent.entries.filter((e) => e.kind === "row" && e.page.relPath === "notes/par.md") as Row[];
+    expect(parRows.map((r) => r.section)).toEqual(["all"]);
+    // A signal of its own: the parent keeps an Activity row dated by its OWN change, not the child's.
+    const busy = build(page("notes/par.md", { type: "note", edits: 20, focusAgo: 6 }));
+    const own = busy.entries.find((e) => e.kind === "row" && e.section === "activity" && e.page.relPath === "notes/par.md") as Row | undefined;
+    expect(own?.activity?.via).toBeUndefined();
+    expect(own!.activity!.ageMs).toBeGreaterThan(5 * H);
+    const kidRow = busy.entries.find((e) => e.kind === "row" && e.page.relPath === "plans/kid.html") as Row | undefined;
+    expect(kidRow?.member).toEqual({ label: "E e2", kind: "effort" });
+    expect(kidRow!.activity!.ageMs).toBeLessThan(H);
+  });
+
+  describe("X3: every child of a family in an effort gets its own Activity row", () => {
+    type Fold = Extract<ReturnType<typeof buildRail>["entries"][number], { kind: "effort" }>;
+    const quiet = { work: undefined, gitCreatedMs: NOW - 400 * DAY } as Partial<WikiListing>;
+    const par = (own?: { edits: number; focusAgo: number }) =>
+      own ? page("notes/par.md", { type: "note", ...own }) : { ...page("notes/par.md", { type: "note" }), ...quiet };
+    const k1 = page("plans/k1.html", { edits: 60, focusAgo: 0.5, parent: "notes/par.md", type: "explainer" });
+    const k2 = page("plans/k2.html", { edits: 4, focusAgo: 7, parent: "notes/par.md", type: "explainer" });
+    const run = (parent: WikiListing, listed: [string, string][]) => {
+      const fx = fixture();
+      const idx = new Map<string, RailEffort>([...efforts, ...listed.map(([rel, id]): [string, RailEffort] => [rel, effort(id)])]);
+      const input = railInputFor({ ...facts({ ...fx, pages: [...fx.pages, parent, k1, k2] }), efforts: idx }, { ...viewer, effortsOn: true });
+      const rows = input.activity!;
+      const rowOf = (rel: string) => rows.find((r) => r.page.relPath === rel);
+      const fold = (id: string) => buildRail(input).entries.find((e) => e.kind === "effort" && e.effort.id === id) as Fold | undefined;
+      return { rows, rowOf, fold, rail: buildRail(input) };
+    };
+    /** The child's row as Activity ranks it with no parent in the listing. */
+    const alone = (child: WikiListing) => rankActivity([{ ...child, parent: undefined }], DEFAULT_ACTIVITY_WEIGHTS, NOW, { open: true, why: "" } as never)[0]!;
+
+    test("A: a quiet parent whose two children are in two efforts: both efforts fold, the parent leaves Activity, the rows are re-sorted", () => {
+      const r = run(par(), [["plans/k1.html", "e2"], ["plans/k2.html", "e3"]]);
+      expect(r.fold("e2")?.members.map((p) => p.relPath)).toEqual(["plans/k1.html"]);
+      expect(r.fold("e3")?.members.map((p) => p.relPath)).toEqual(["plans/k2.html"]);
+      expect(r.rowOf("notes/par.md")).toBeUndefined();
+      expect(r.rail.entries.filter((e) => e.kind === "row" && e.page.relPath === "plans/k2.html" && e.section !== "activity")).toHaveLength(0);
+      // m10: the split rows take their own places in the score order.
+      const scores = r.rows.map((x) => x.score);
+      expect(scores).toEqual([...scores].sort((a, b) => b - a));
+      // m13: a split child's row is its OWN row — its why and age, no roll-up fields.
+      for (const k of [k1, k2]) {
+        const own = r.rowOf(k.relPath)!;
+        const solo = alone(k);
+        expect([k.relPath, own.why, own.ageMs, own.score]).toEqual([k.relPath, solo.why, solo.ageMs, solo.score]);
+        expect([own.via, own.ownRanked, own.newerChildren]).toEqual([undefined, undefined, undefined]);
+      }
+    });
+
+    test("G: only the weaker child is in an effort: it gets its own row and fold, the stronger child stays under its parent", () => {
+      const r = run(par(), [["plans/k2.html", "e3"]]);
+      expect(r.fold("e3")?.members.map((p) => p.relPath)).toEqual(["plans/k2.html"]);
+      const p = r.rowOf("notes/par.md")!;
+      expect(p.via?.relPath).toBe("plans/k1.html");
+      // m9: the split child leaves the parent's «newer inside» list.
+      expect(p.newerChildren).toEqual(["plans/k1.html"]);
+      expect(r.rowOf("plans/k1.html")).toBeUndefined();
+    });
+
+    test("B: the parent outranks its child in an effort: the child still gets its own row and fold, the parent keeps its own row", () => {
+      const r = run(par({ edits: 90, focusAgo: 2 }), [["plans/k2.html", "e3"]]);
+      expect(r.fold("e3")?.members.map((p) => p.relPath)).toEqual(["plans/k2.html"]);
+      const p = r.rowOf("notes/par.md")!;
+      expect(p.via).toBeUndefined();
+      expect(p.newerChildren).toEqual(["plans/k1.html"]);
+      expect(r.rowOf("plans/k2.html")?.via).toBeUndefined();
+    });
+  });
+});

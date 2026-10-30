@@ -84,6 +84,17 @@ export function needKey(n: { kind: string; title: string }): string {
   return `${n.kind}|${n.title}`;
 }
 
+/** The map's Needs-you items for effort `id`: index into `needsYou` and key. */
+export function effortNeedItems(needsYou: readonly { kind: string; title: string; effort?: string }[], id: string): { i: number; key: string }[] {
+  return needsYou.flatMap((n, i) => (n.effort === id ? [{ i, key: needKey(n) }] : []));
+}
+
+/** The items not ✓ on the card. The effort page's Needs you and the rail's ✋
+ *  both count through this and {@link effortNeedItems}. */
+export function openNeeds<T extends { key: string }>(items: readonly T[], done: ReadonlySet<string>): T[] {
+  return items.filter(({ key }) => !done.has(key));
+}
+
 // ── Done store (per wiki, keyed by run time) ──────────────────────────
 export const WORK_MAP_DONE_KEY_PREFIX = "muninn.wiki.workMapDone.v1:";
 
@@ -125,13 +136,20 @@ export function proseHtml(text: string, byKey: ReadonlyMap<string, CardPage>, hr
   return out + esc(text.slice(last));
 }
 
-/** `text` as plain text, each marker read as its page title: a `title=`
- *  value for prose the card clamps. */
-function proseText(text: string, byKey: ReadonlyMap<string, CardPage>): string {
-  return text.replace(/⟦([^⟧]+)⟧/g, (_, rel: string) => {
-    const page = byKey.get(normalizeRelPath(rel));
-    return page ? pageTitle(page) : stemOf(rel);
-  });
+/** `text` as plain text, each marker read as its page title, with the same
+ *  ` · ` between back-to-back markers as {@link proseHtml}: prose the card
+ *  clamps (a `title=` value) and the rail's effort summary. */
+export function proseText(text: string, byKey: ReadonlyMap<string, CardPage>): string {
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(/⟦([^⟧]+)⟧/g)) {
+    const gap = text.slice(last, m.index);
+    out += last > 0 && gap.trim() === "" ? " · " : gap;
+    const page = byKey.get(normalizeRelPath(m[1]!));
+    out += page ? pageTitle(page) : stemOf(m[1]!);
+    last = m.index! + m[0].length;
+  }
+  return out + text.slice(last);
 }
 
 function pageTitle(page: CardPage): string {

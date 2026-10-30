@@ -854,6 +854,26 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-effort-meta { margin-top: 0; }
     .wiki-effort-state { color: var(--text-secondary); }
+    /* An OPEN effort fold's head (D14): the map's one-line summary, then
+       «Open effort →». Indented to the member rows' depth. The summary is
+       plain text clamped to three lines (full text in its title), and
+       «Open effort →» sits outside the clamp on its own line. */
+    .wiki-effort-intro {
+      padding: 0 10px 4px 20px; font-size: 11.5px; line-height: 1.45;
+      color: var(--text-secondary); overflow-wrap: anywhere;
+    }
+    .wiki-effort-oneline {
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .wiki-effort-open { color: var(--accent-light); text-decoration: none; white-space: nowrap; border-radius: 2px; }
+    .wiki-effort-open:hover { text-decoration: underline; }
+    .wiki-effort-open:focus-visible, .wiki-effort-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    /* A row's role in its effort, on the meta line of a row in an open fold. */
+    .wiki-effort-role {
+      flex-shrink: 0; font-size: 10.5px; line-height: 14px; padding: 0 4px;
+      border: 1px solid var(--border-secondary); border-radius: 4px; color: var(--text-muted);
+    }
+    .wiki-list-more.wiki-effort-more { padding-left: 20px; }
     /* \`N of M shown\` — a facet is hiding part of the series. Its OWN line under
        the name, because the census is the one thing on a group row a reader has
        to READ and the name is allowed to take the rest. */
