@@ -652,3 +652,40 @@ describe("moved and gone pages after a declaration (P6)", () => {
     expect(list).toContain("+2 more");
   });
 });
+
+describe("the Pages note over every (joined, moved, gone, remaining) combination", () => {
+  const RUN = NOW - 2 * HOUR;
+  const old = { gitCreatedMs: RUN - 40 * DAY, gitTouchedMs: RUN - 30 * DAY };
+  const NOTE_RE = /<h2 class="wiki-ef-h">Pages<\/h2><div class="wiki-ef-note">([^<]*)<\/div>/;
+  const pagesWord = (n: number) => `${n} ${n === 1 ? "page" : "pages"}`;
+  /** The one true note for an effort that shows no rows, or none when it shows any. */
+  const expected = (rows: number, moved: number, gone: number): string | null => {
+    if (rows > 0) return null;
+    if (moved > 0 && gone > 0) return `None of this effort’s pages are here now: ${moved} moved to another effort, ${gone} no longer in the wiki.`;
+    if (moved > 0) return "Every page of this effort moved to another effort since the run.";
+    if (gone > 0) return "None of this effort’s pages are in the wiki any more.";
+    return "This effort has no pages.";
+  };
+  const counts = [0, 1, 2];
+  for (const joined of counts)
+    for (const moved of counts)
+      for (const gone of counts)
+        for (const remaining of counts) {
+          test(`joined ${joined}, moved ${moved}, gone ${gone}, remaining ${remaining}`, () => {
+            const ids = (kind: string, n: number) => Array.from({ length: n }, (_, i) => `plans/${kind}${i}.mdx`);
+            const m = map({ runAtMs: RUN, efforts: [effort("a", [...ids("r", remaining), ...ids("m", moved), ...ids("g", gone)]), effort("b", [])] });
+            const pages: EffortPageListing[] = [
+              ...ids("r", remaining).map((relPath) => ({ relPath, title: relPath, ...old })),
+              ...ids("m", moved).map((relPath) => ({ relPath, title: relPath, effort: "b", ...old })),
+              ...ids("j", joined).map((relPath) => ({ relPath, title: relPath, effort: "a", gitDirty: true, mtimeMs: NOW })),
+            ];
+            const { article } = view(m, "a", { pages });
+            const rows = joined + remaining;
+            expect(article).toContain(`${pagesWord(rows)}${gone > 0 ? ` (${gone} no longer in the wiki)` : ""}<`);
+            const note = article.match(NOTE_RE)?.[1] ?? null;
+            expect(note).toBe(expected(rows, moved, gone));
+            expect(article.includes("Moved to another effort")).toBe(moved > 0);
+            if (moved > 0) expect(article).toContain(`Moved to another effort <span class="wiki-ef-count">${moved}</span>`);
+          });
+        }
+});

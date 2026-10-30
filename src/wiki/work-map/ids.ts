@@ -1,8 +1,11 @@
 /**
- * The work map's two dependency-free helpers: the effort-id slug and the Oslo
- * day. Kept apart from `normalize.ts` (which imports the zod schema) so the
- * /wiki client bundle can read them without pulling zod in.
+ * The work map's dependency-light helpers: the effort-id slug, the Oslo day
+ * and the reader's newness test. Kept apart from `normalize.ts` (which imports
+ * the zod schema) so the /wiki client bundle can read them without pulling zod
+ * in; the one import is the reader's own future-date rule.
  */
+
+import { isImplausibleFutureDate } from "../../dashboard/views/components/wiki-filter.ts";
 
 const OSLO_DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit" });
 /** `YYYY-MM-DD` of `ms` in Europe/Oslo: the day key of an effort's `daily`. */
@@ -57,19 +60,31 @@ export interface DatedPage {
   gitTouchedMs?: number;
   workedMs?: number;
   mtimeMs?: number;
+  /** Not read: never newer than the mtime. Kept so a listing row type-checks. */
   birthtimeMs?: number;
 }
 
-/** A page's newest creation, touch or worked-on date. Where git knows nothing
- *  about the page (`gitCreatedMs` absent), the file's own birth and mtime
- *  stand in, as they do for the reader's update signal. */
-export function pageNewestMs(p: DatedPage): number {
-  const fileTimes = p.gitCreatedMs === undefined ? [p.birthtimeMs ?? 0, p.mtimeMs ?? 0] : [];
-  return Math.max(p.gitCreatedMs ?? 0, p.gitTouchedMs ?? 0, p.workedMs ?? 0, ...fileTimes);
+/** A page's newest creation, touch, worked-on or uncommitted-edit date, on
+ *  the reader's update rules (`updatedSignal`, `wiki-filter.ts`): the mtime
+ *  counts only when the index marks the page dirty (a clean file's mtime is
+ *  checkout or pull time). A date past `now` + 48 h is ignored
+ *  (`isImplausibleFutureDate`). */
+export function pageNewestMs(p: DatedPage, now: number = Date.now()): number {
+  const dates = [p.gitCreatedMs, p.gitTouchedMs, p.workedMs];
+  if (p.gitDirty === true) dates.push(p.mtimeMs);
+  let best = 0;
+  for (const ms of dates) {
+    if (ms === undefined || !Number.isFinite(ms) || ms <= 0 || isImplausibleFutureDate(ms, now)) continue;
+    if (ms > best) best = ms;
+  }
+  return best;
 }
 
-/** True when the page is newer than a run at `runAtMs`: uncommitted, or
- *  created, touched or worked on after it. */
-export function pageNewerThanRun(p: DatedPage, runAtMs: number): boolean {
-  return p.gitDirty === true || pageNewestMs(p) > runAtMs;
+/** True when the page is newer than a run at `runAtMs`: uncommitted or
+ *  untracked (`gitDirty`), or created, touched or worked on after it. A page
+ *  with no git dates (no history, or a degraded git walk) is newer only when
+ *  dirty. `now` is anchored to the run, so a slow viewer clock cannot judge a
+ *  real post-run date implausible. */
+export function pageNewerThanRun(p: DatedPage, runAtMs: number, now: number = Date.now()): boolean {
+  return p.gitDirty === true || pageNewestMs(p, Math.max(now, runAtMs)) > runAtMs;
 }

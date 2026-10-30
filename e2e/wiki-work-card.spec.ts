@@ -34,7 +34,7 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -153,6 +153,16 @@ function sweepMapJson(runAtMs: number): string {
 let server: ChildProcess | undefined;
 const roots: Record<string, string> = {};
 
+/** Commits everything in `root` at `atMs`, so a page written later is the one
+ *  untracked (dirty) page: a declared page joins its effort only when dirty or
+ *  dated after the run, never on a clean file's mtime. Identity and both dates
+ *  are passed per command. */
+function commitAll(root: string, atMs: number): void {
+  const date = new Date(atMs).toISOString();
+  const env = { ...process.env, GIT_AUTHOR_NAME: "e2e", GIT_AUTHOR_EMAIL: "e2e@example.invalid", GIT_COMMITTER_NAME: "e2e", GIT_COMMITTER_EMAIL: "e2e@example.invalid", GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date };
+  for (const args of [["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "fixture"]]) execFileSync("git", ["-C", root, ...args], { stdio: "ignore", env });
+}
+
 async function seedWiki(name: string, runAtMs: number | null, needsYou?: NeedFixture[]): Promise<void> {
   const root = await mkdtemp(path.join(tmpdir(), `muninn-e2e-${name}-`));
   roots[name] = root;
@@ -190,6 +200,7 @@ test.beforeAll(async () => {
     for (let i = 1; i <= 6; i++) await writeFile(path.join(roots[DECL]!, `plans/d${i}.mdx`), md(`Decl page ${i}`), "utf8");
     m.efforts[0]!.pages = seven.map((id) => ({ id, role: "plan" }));
     await writeFile(path.join(roots[DECL]!, ".work-map.json"), JSON.stringify(m), "utf8");
+    commitAll(roots[DECL]!, now - 3 * HOUR);
   }
   await seedWiki(SWEEP, null);
   for (let i = 1; i <= 6; i++) await writeFile(path.join(roots[SWEEP]!, `plans/p${i}.mdx`), md(`Page ${i}`), "utf8");

@@ -112,9 +112,58 @@ describe("declared pages join at once (P6)", () => {
     const j = joinWorkMap(m, [
       ...listed,
       { relPath: "plans/worked.mdx", effort: "f", ...old, workedMs: RUN + HOUR },
-      { relPath: "notes/no-git.md", effort: "f", birthtimeMs: RUN + 3 * HOUR, mtimeMs: RUN + 3 * HOUR },
+      { relPath: "notes/no-git.md", effort: "f", gitDirty: true, birthtimeMs: RUN + 3 * HOUR, mtimeMs: RUN + 3 * HOUR },
     ]);
     expect(ids(j)[1]).toEqual(["notes/no-git.md", "plans/worked.mdx", "plans/c.mdx"]);
+  });
+
+  test("a degraded git walk (no git dates on any page) never joins a clean page on its checkout mtime", () => {
+    const pulled = { mtimeMs: RUN + HOUR, birthtimeMs: RUN + HOUR, gitDirty: false };
+    const j = joinWorkMap(
+      m,
+      [
+        ...listed.map((p) => ({ relPath: p.relPath, ...pulled })),
+        { relPath: "plans/declared-1.mdx", effort: "f", ...pulled },
+        { relPath: "notes/declared-2.md", effort: "e", mtimeMs: RUN + HOUR },
+        { relPath: "notes/untracked.md", effort: "f", gitDirty: true, mtimeMs: RUN - HOUR },
+      ],
+      RUN + 2 * HOUR,
+    );
+    expect(ids(j)).toEqual([["plans/a.mdx", "plans/b.mdx"], ["notes/untracked.md", "plans/c.mdx"]]);
+  });
+
+  test("a declared page whose commit is dated in the future does not join", () => {
+    const j = joinWorkMap(m, [...listed, { relPath: "plans/skewed.mdx", effort: "f", gitCreatedMs: RUN - 900 * HOUR, gitTouchedMs: RUN + 9000 * HOUR }], RUN + 2 * HOUR);
+    expect(ids(j)[1]).toEqual(["plans/c.mdx"]);
+  });
+
+  test("newest first counts an uncommitted edit's time: a dirty old page edited at run + 5 h sorts before one committed at run + 1 h", () => {
+    const j = joinWorkMap(
+      m,
+      [
+        ...listed,
+        { relPath: "plans/committed.mdx", effort: "f", gitCreatedMs: RUN + HOUR, gitTouchedMs: RUN + HOUR },
+        { relPath: "plans/dirty-old.mdx", effort: "f", ...old, gitDirty: true, mtimeMs: RUN + 5 * HOUR },
+      ],
+      RUN + 6 * HOUR,
+    );
+    expect(ids(j)[1]).toEqual(["plans/dirty-old.mdx", "plans/committed.mdx", "plans/c.mdx"]);
+  });
+
+  test("newest first reads its future-date guard off `now`, anchored to the run", () => {
+    const pair = (run: number) => [
+      { relPath: "plans/one-hour.mdx", effort: "f", gitCreatedMs: run + HOUR, gitTouchedMs: run + HOUR },
+      { relPath: "plans/three-hours.mdx", effort: "f", gitCreatedMs: run + 3 * HOUR, gitTouchedMs: run + 3 * HOUR },
+    ];
+    // A viewer clock 10 days behind the run still sorts post-run commits.
+    expect(ids(joinWorkMap(m, [...listed, ...pair(RUN)], RUN - 240 * HOUR))[1]).toEqual(["plans/three-hours.mdx", "plans/one-hour.mdx", "plans/c.mdx"]);
+    // The `now` passed in is the clock, not the process's own.
+    const later = Date.parse("2031-01-01T00:00:00Z");
+    expect(ids(joinWorkMap({ ...m, runAtMs: later }, [...listed, ...pair(later)], later + 6 * HOUR))[1]).toEqual([
+      "plans/three-hours.mdx",
+      "plans/one-hour.mdx",
+      "plans/c.mdx",
+    ]);
   });
 
   test("a mapped page re-declared elsewhere moves, keeping its role, and is recorded as moved out; a loose one leaves loose", () => {

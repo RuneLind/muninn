@@ -275,7 +275,7 @@ function activeLabel(days: number | null): string {
 /** The effort page, or the «no longer in the map» page for an id the map
  *  does not hold. */
 export function effortView<P extends EffortPageListing>(input: EffortViewInput<P>): EffortView {
-  const joined = joinWorkMap(input.map, input.pages);
+  const joined = joinWorkMap(input.map, input.pages, input.now);
   const byKey = new Map<string, CardPage>(input.pages.map((p) => [normalizeRelPath(p.relPath), p]));
   const prose = (s: string) => proseHtml(s, byKey, input.hrefFor);
   const found = lookupEffort(joined, input.id);
@@ -318,7 +318,7 @@ export function effortView<P extends EffortPageListing>(input: EffortViewInput<P
     inShort +
     needsHtml(joined, input.map, e.id, input.done ?? new Set(), prose) +
     subEffortsHtml(e, efforts, input.effortHref) +
-    pagesHtml(e, input) +
+    pagesHtml(e, input, gone) +
     movedHtml(e, joined, input, byKey) +
     activityStripHtml(e.daily, input.map.runAtMs, input.map.coverage.sessionsSinceMs) +
     (e.why ? `<section class="wiki-ef-section"><h2 class="wiki-ef-h">Why together</h2><p class="wiki-ef-why">${prose(e.why)}</p></section>` : "") +
@@ -424,10 +424,19 @@ function movedHtml<P extends EffortPageListing>(e: JoinedEffort<P>, joined: Join
   );
 }
 
-function pagesHtml<P extends EffortPageListing>(e: JoinedEffort<P>, input: EffortViewInput<P>): string {
+/** The Pages section's note when the effort shows no page: true for every
+ *  mix of moved and gone map pages, including an effort the run gave none. */
+export function emptyPagesNote(moved: number, gone: number): string {
+  if (moved > 0 && gone > 0) return `None of this effort’s pages are here now: ${moved} moved to another effort, ${gone} no longer in the wiki.`;
+  if (moved > 0) return "Every page of this effort moved to another effort since the run.";
+  if (gone > 0) return "None of this effort’s pages are in the wiki any more.";
+  return "This effort has no pages.";
+}
+
+function pagesHtml<P extends EffortPageListing>(e: JoinedEffort<P>, input: EffortViewInput<P>, gone: number): string {
   const rows = lineageOrder(e.pages);
   if (!rows.length) {
-    const note = e.movedOut.length ? "Every page of this effort moved to another effort since the run." : "None of this effort’s pages are in the wiki any more.";
+    const note = emptyPagesNote(e.movedOut.length, gone);
     return `<section class="wiki-ef-section"><h2 class="wiki-ef-h">Pages</h2><div class="wiki-ef-note">${esc(note)}</div></section>`;
   }
   const titleOf = new Map(e.pages.map((p) => [normalizeRelPath(p.id), pageTitle(p.page)]));

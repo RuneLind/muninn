@@ -24,7 +24,7 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -50,6 +50,16 @@ const DAY = 24 * HOUR;
 
 function md(title: string, status?: string): string {
   return `---\ntitle: ${title}\n${status ? `plan_status: ${status}\n` : ""}---\n\nBody of ${title}.\n`;
+}
+
+/** Commits everything in `root` at `atMs`, so a page written later is the one
+ *  untracked (dirty) page: a declared page joins its effort only when dirty or
+ *  dated after the run, never on a clean file's mtime. Identity and both dates
+ *  are passed per command. */
+function commitAll(root: string, atMs: number): void {
+  const date = new Date(atMs).toISOString();
+  const env = { ...process.env, GIT_AUTHOR_NAME: "e2e", GIT_AUTHOR_EMAIL: "e2e@example.invalid", GIT_COMMITTER_NAME: "e2e", GIT_COMMITTER_EMAIL: "e2e@example.invalid", GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date };
+  for (const args of [["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "fixture"]]) execFileSync("git", ["-C", root, ...args], { stdio: "ignore", env });
 }
 
 function osloDay(ms: number): string {
@@ -159,10 +169,11 @@ test.beforeAll(async () => {
   roots[DECLARED] = await mkdtemp(path.join(tmpdir(), `muninn-e2e-${DECLARED}-`));
   await mkdir(path.join(roots[DECLARED]!, "plans"), { recursive: true });
   await writeFile(path.join(roots[DECLARED]!, "plans/drift.mdx"), md("Drift plan", "in-flight"), "utf8");
-  // Written after the run: not in the map, but declares the drift effort.
-  await writeFile(path.join(roots[DECLARED]!, "plans/drift-today.mdx"), `---\ntitle: Drift today\neffort: drift\n---\n\nBody.\n`, "utf8");
   await writeFile(path.join(roots[DECLARED]!, "plans/parked.mdx"), `---\ntitle: Parked plan\neffort: parked\n---\n\nBody.\n`, "utf8");
   await writeFile(path.join(roots[DECLARED]!, ".work-map.json"), declaredMapJson(now - 2 * HOUR), "utf8");
+  commitAll(roots[DECLARED]!, now - 3 * HOUR);
+  // Written after the run, untracked: not in the map, but declares the drift effort.
+  await writeFile(path.join(roots[DECLARED]!, "plans/drift-today.mdx"), `---\ntitle: Drift today\neffort: drift\n---\n\nBody.\n`, "utf8");
   await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,

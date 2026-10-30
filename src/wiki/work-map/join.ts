@@ -52,10 +52,13 @@ export type JoinablePage = { relPath: string; effort?: string } & DatedPage;
  *   ({@link pageNewerThanRun}), with its folder's role; older declared pages
  *   stay out of the reader as they stay out of the map;
  * - a page declaring a retired id shows on that id's effort page only.
- * Joined pages list first in their effort, newest first. An unknown or invalid
- * id moves nothing.
+ * Joined pages list first in their effort, newest first ({@link pageNewestMs}:
+ * an uncommitted edit counts its mtime). `now` is the future-date guard's
+ * clock. An unknown or invalid id moves nothing.
  */
-export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonly P[]): JoinedWorkMap<P> {
+export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonly P[], now: number = Date.now()): JoinedWorkMap<P> {
+  // Anchored to the run: a viewer clock behind it must not make post-run dates look future.
+  const clock = Math.max(now, map.runAtMs);
   const byKey = new Map(pages.map((p) => [normalizeRelPath(p.relPath), p]));
   const find = (rel: string) => byKey.get(normalizeRelPath(rel));
   const text = (s: string) =>
@@ -96,7 +99,7 @@ export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonl
     const home = efforts.find((e) => e.pages.some((p) => normalizeRelPath(p.id) === key));
     if (home?.id === slug) continue;
     const inMap = home !== undefined || looseKeys.has(key);
-    if (!inMap && !pageNewerThanRun(page, map.runAtMs)) continue;
+    if (!inMap && !pageNewerThanRun(page, map.runAtMs, clock)) continue;
     let role: JoinedEffortPage<P>["role"] = roleFromFolder(page.relPath);
     if (home) {
       const at = home.pages.findIndex((p) => normalizeRelPath(p.id) === key);
@@ -110,7 +113,7 @@ export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonl
   }
   for (const [slug, list] of arrivals) {
     const target = byId.get(slug)!;
-    list.sort((a, b) => pageNewestMs(b.page) - pageNewestMs(a.page));
+    list.sort((a, b) => pageNewestMs(b.page, clock) - pageNewestMs(a.page, clock));
     target.pages = [...list, ...target.pages];
   }
 
@@ -134,11 +137,12 @@ export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonl
  * declaration with whether the page is newer than the run. The card re-joins
  * when this changes though the run did not.
  */
-export function declarationKey(pages: readonly JoinablePage[], runAtMs: number): string {
+export function declarationKey(pages: readonly JoinablePage[], runAtMs: number, now: number = Date.now()): string {
+  const at = Math.max(now, runAtMs);
   return pages
     .flatMap((p) => {
       const slug = declaredEffortOf(p);
-      return slug === undefined ? [] : [`${normalizeRelPath(p.relPath)}\u0000${slug}\u0000${pageNewerThanRun(p, runAtMs) ? 1 : 0}\u0000${pageNewestMs(p)}`];
+      return slug === undefined ? [] : [`${normalizeRelPath(p.relPath)}\u0000${slug}\u0000${pageNewerThanRun(p, runAtMs, at) ? 1 : 0}\u0000${pageNewestMs(p, at)}`];
     })
     .sort()
     .join("\u0001");

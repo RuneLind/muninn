@@ -217,7 +217,7 @@ function activeLabel(days: number | null): string {
 // ── The card ──────────────────────────────────────────────────────────
 export function workCardHtml<P extends CardPage>(input: WorkCardInput<P>): string {
   const { body, now, hrefFor } = input;
-  const joined = joinWorkMap(body.map, input.pages);
+  const joined = joinWorkMap(body.map, input.pages, now);
   const byKey = new Map<string, CardPage>(input.pages.map((p) => [normalizeRelPath(p.relPath), p]));
   const prose = (s: string) => proseHtml(s, byKey, hrefFor);
   return (
