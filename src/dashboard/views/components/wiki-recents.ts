@@ -2056,6 +2056,13 @@ export function buildRail(input: RailInput): RailModel {
     const item = activityItems[i]!;
     if ("effortId" in item && effortSlot.get(item.effortId) !== item.rel) activityItems.splice(i, 1);
   }
+  // Effort folds lead Activity, in their slot order; series, families and
+  // loose rows follow in rank order. Interleaved by slot, a series with one
+  // fresh page split the efforts (Rune, 2026-10-30).
+  if (effortMode) {
+    const isEffort = (x: ActivityItem) => "effortId" in x;
+    activityItems.splice(0, activityItems.length, ...activityItems.filter(isEffort), ...activityItems.filter((x) => !isEffort(x)));
+  }
   /** The fold's age: its newest drawn page; a ghost-only fold falls back to
    *  its pinned pages' age, so the cell never reads Infinity. */
   const effortAge = (id: string): number => {

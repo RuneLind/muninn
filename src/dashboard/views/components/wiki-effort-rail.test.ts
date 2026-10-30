@@ -158,14 +158,14 @@ describe("buildRail — effort folds (P4)", () => {
     expect(activitySeq(m.entries)).toEqual(ACTIVITY.map((r) => r.page.relPath));
   });
 
-  test("each effort is one fold at its newest page's slot; pages in no effort stay ordinary rows", () => {
+  test("each effort is one fold, the folds first in slot order; pages in no effort stay ordinary rows below them", () => {
     const m = build();
     expect(activitySeq(m.entries)).toEqual([
       "effort:a", "plans/a1.mdx", "plans/a2.mdx",
-      "notes/p1.md",
       "effort:b", "plans/b1.mdx", "plans/b2.mdx",
       "effort:c", "plans/c1.mdx",
       "effort:d",
+      "notes/p1.md",
     ]);
     const a = efforts(m.entries)[0]!;
     expect(a.members.map((p) => p.relPath)).toEqual(["plans/a1.mdx", "plans/a2.mdx"]);
@@ -279,6 +279,26 @@ describe("buildRail — effort folds (P4)", () => {
     expectOneRowPerPage(m.entries);
   });
 
+  test("a series Activity ranked above every effort page draws BELOW the effort folds", () => {
+    const S1 = page({ relPath: "plans/s1.mdx", series: "s" });
+    const pages = [...ALL, S1];
+    const series = { kind: "series" as const, key: "series:s", label: "S", members: [S1], supersededChildren: [], total: 1 };
+    const m = buildRail({
+      filtered: pages, facetOnly: pages, filters: INERT, pins: [],
+      activity: [act(S1, 10, 0.2), ...ACTIVITY],
+      efforts: EFFORTS,
+      seriesGroups: [series],
+    });
+    const seq = m.entries
+      .filter((e) => e.section === "activity" && (e.kind === "effort" || (e.kind === "group" && e.group.kind === "series")))
+      .map((e) => (e.kind === "effort" ? e.foldKey : "series"));
+    expect(seq).toEqual(["effort:a", "effort:b", "effort:c", "effort:d", "series"]);
+    // Off, the series keeps its rank slot at the top of Activity.
+    const off = buildRail({ filtered: pages, facetOnly: pages, filters: INERT, pins: [], activity: [act(S1, 10, 0.2), ...ACTIVITY], seriesGroups: [series] });
+    expect(off.entries.find((e) => e.section === "activity" && e.kind !== "header")).toMatchObject({ kind: "group" });
+    expectOneRowPerPage(m.entries);
+  });
+
   test("fix A: a pinned page in a CLOSED effort fold goes under Pinned, and the fold names it as a ghost (the series rule)", () => {
     // d is the 4th most recent effort, so it starts closed.
     const m = build({ pins: ["plans/d1.mdx"] });
@@ -301,7 +321,7 @@ describe("buildRail — effort folds (P4)", () => {
     const m = build({ activity: [act(A2, 9, 40), act(P1, 8, 1.5), act(A1, 7, 1), act(B1, 6, 2)] });
     // Inside the fold the pages run newest first (D14); b lists b2 too, which
     // Activity did not rank. c and d have no Activity page: no fold, plain rows.
-    expect(activitySeq(m.entries)).toEqual(["notes/p1.md", "effort:a", "plans/a1.mdx", "plans/a2.mdx", "effort:b", "plans/b1.mdx", "plans/b2.mdx"]);
+    expect(activitySeq(m.entries)).toEqual(["effort:a", "plans/a1.mdx", "plans/a2.mdx", "effort:b", "plans/b1.mdx", "plans/b2.mdx", "notes/p1.md"]);
     expect(rows(m.entries).filter((r) => r.section === "all").map((r) => r.page.relPath)).toEqual(["plans/c1.mdx", "plans/d1.mdx", "notes/old.md"]);
   });
 
@@ -398,11 +418,11 @@ describe("buildRail — effort folds (P4)", () => {
   test("R2-2: the fold sits at the slot of its newest DRAWN row, not a pinned one; a ghost-only fold at its newest ghost", () => {
     // a1 (1h) is pinned, a2 (50h) is the only row fold a draws; p1 2h, b1 3h.
     const m = build({ pins: ["plans/a1.mdx"], activity: [act(A1, 9, 1), act(P1, 8, 2), act(B1, 7, 3), act(A2, 4, 50)] });
-    expect(activitySeq(m.entries)).toEqual(["notes/p1.md", "effort:b", "plans/b1.mdx", "plans/b2.mdx", "effort:a", "plans/a2.mdx"]);
+    expect(activitySeq(m.entries)).toEqual(["effort:b", "plans/b1.mdx", "plans/b2.mdx", "effort:a", "plans/a2.mdx", "notes/p1.md"]);
     expect(efforts(m.entries).find((e) => e.effort.id === "a")!.ageMs).toBe(50 * HOUR);
     // Both a1 and a2 pinned: ghost-only fold a keeps a1's slot (its newest ghost), closed.
     const g = build({ pins: ["plans/a1.mdx", "plans/a2.mdx"], activity: [act(A1, 9, 1), act(P1, 8, 2), act(B1, 7, 3), act(A2, 4, 50)] });
-    expect(activitySeq(g.entries)).toEqual(["effort:a", "notes/p1.md", "effort:b", "plans/b1.mdx", "plans/b2.mdx"]);
+    expect(activitySeq(g.entries)).toEqual(["effort:a", "effort:b", "plans/b1.mdx", "plans/b2.mdx", "notes/p1.md"]);
   });
 
   describe("class check: which fold the open page forces open", () => {
