@@ -28,6 +28,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { paintedMeasure } from "./contrast.ts";
+import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-effort-page");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -35,6 +36,8 @@ const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 
 const WIKI = "e2e-ef-map";
 const NOMAP = "e2e-ef-nomap";
+/** A third wiki whose map the listing-refresh tests rewrite mid-test. */
+const LIVE = "e2e-ef-live";
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
@@ -46,13 +49,13 @@ function osloDay(ms: number): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
 }
 
-function mapJson(runAtMs: number): string {
+function mapJson(runAtMs: number, wiki = WIKI, driftName = "Drift check"): string {
   const e = (id: string, name: string, pages: { id: string; role: string; derivedFrom?: string }[], extra: Record<string, unknown> = {}) => ({
     id, name, aliases: [], oneLine: "", state: "active", pages, why: "", confidence: 0.9, next: "", related: [], daily: [], ...extra,
   });
   return JSON.stringify({
     version: 1,
-    wiki: WIKI,
+    wiki,
     runAtMs,
     model: "test-model",
     coverage: { sessionsSinceMs: runAtMs - 8 * DAY, sessionsAsOfMs: runAtMs, touchWindowDays: 28, activePages: 5, threads: 1, logEntries: 1, digestChars: 1, warnings: [] },
@@ -63,7 +66,7 @@ function mapJson(runAtMs: number): string {
     ],
     themes: [{ name: "Reader", efforts: ["drift", "grocery", "visuals"] }],
     efforts: [
-      e("drift", "Drift check", [
+      e("drift", driftName, [
         { id: "plans/drift.mdx", role: "plan" },
         { id: "archive/drift-report.mdx", role: "report", derivedFrom: "plans/drift.mdx" },
         { id: "plans/drift-followup.mdx", role: "followup", derivedFrom: "archive/drift-report.mdx" },
@@ -97,7 +100,7 @@ const roots: Record<string, string> = {};
 
 test.beforeAll(async () => {
   const now = Date.now();
-  for (const name of [WIKI, NOMAP]) {
+  for (const name of [WIKI, NOMAP, LIVE]) {
     const root = await mkdtemp(path.join(tmpdir(), `muninn-e2e-${name}-`));
     roots[name] = root;
     await mkdir(path.join(root, "plans"), { recursive: true });
@@ -110,6 +113,7 @@ test.beforeAll(async () => {
     await writeFile(path.join(root, "plans/visuals.mdx"), md("Visuals plan", "shipped"), "utf8");
   }
   await writeFile(path.join(roots[WIKI]!, ".work-map.json"), mapJson(now - 2 * HOUR), "utf8");
+  await writeFile(path.join(roots[LIVE]!, ".work-map.json"), mapJson(now - 2 * HOUR, LIVE), "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -120,7 +124,7 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_EXTRA: [WIKI, NOMAP].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [WIKI, NOMAP, LIVE].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -301,6 +305,109 @@ test("the activity strip paints its session dots, clips no label, and fits at de
   expect(narrow.clippedLabels).toEqual([]);
   expect(narrow.tabindex).toBe("0");
   expect(narrow.name).toMatch(/\. Days before the last 8 count commits only\.$/);
+});
+
+// ── The effort page against a background listing refresh ──────────────
+// Each test starts the LIVE wiki from the base map, then rewrites the map
+// and/or adds a page on disk and forces a listing refetch (throttle passed,
+// tab focus), the way an organize run or a page edit lands under a reader.
+
+let liveN = 0;
+async function writeLiveMap(runAtMs: number, driftName = "Drift check"): Promise<void> {
+  await writeFile(path.join(roots[LIVE]!, ".work-map.json"), mapJson(runAtMs, LIVE, driftName), "utf8");
+}
+async function addLivePage(): Promise<string> {
+  const title = `Live page ${++liveN}`;
+  await writeFile(path.join(roots[LIVE]!, `live-${liveN}.md`), md(title), "utf8");
+  return title;
+}
+/** Pass the client throttle and focus the tab; resolves once the listing GET answered. */
+async function refetchListing(page: Page): Promise<void> {
+  const answered = page.waitForResponse((r) => r.url().includes("/api/wiki/pages"));
+  await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await answered;
+}
+async function openLiveDrift(page: Page, name = "Drift check"): Promise<void> {
+  await writeLiveMap(Date.now() - 2 * HOUR);
+  await page.clock.install();
+  await page.goto(`${BASE}/wiki?wiki=${LIVE}&effort=drift`);
+  await expect(page.locator("#wikiEffortPage h1")).toHaveText(name);
+}
+
+test("Back to an effort page after a run landed under an open page shows the new run", async ({ page }) => {
+  await openLiveDrift(page);
+  await page.locator('#wikiEffortPage .wiki-ef-plink[data-relpath="archive/drift-report.mdx"]').click();
+  await expect(page.locator("#wikiEffortPage")).toHaveCount(0);
+  await expect.poll(() => new URL(page.url()).searchParams.get("relPath")).toBe("archive/drift-report.mdx");
+  await expect(page.locator("#articleWrap")).toContainText("Body of Drift report.");
+  // The run lands while the page is open: the listing is stashed, not adopted.
+  await writeLiveMap(Date.now() - 1 * HOUR, "Drift check v2");
+  await refetchListing(page);
+  await page.goBack();
+  await expect(page.locator("#wikiEffortPage h1")).toHaveText("Drift check v2");
+});
+
+test("an adopt that changes nothing on the effort page keeps its DOM and the focus on a page link", async ({ page }) => {
+  await openLiveDrift(page);
+  const link = page.locator("#wikiEffortPage .wiki-ef-plink").first();
+  await link.focus();
+  await page.evaluate(() => document.querySelector("#wikiEffortPage")!.setAttribute("data-before-adopt", ""));
+  const title = await addLivePage();
+  await refetchListing(page);
+  // The adopt landed (the list carries the new page) …
+  await expect(page.locator("#wikiList")).toContainText(title);
+  await page.waitForTimeout(300);
+  // … and wrote nothing over the effort page.
+  await expect(page.locator("#wikiEffortPage[data-before-adopt]")).toHaveCount(1);
+  await expect(link).toBeFocused();
+});
+
+test("an adopt that brings a new run repaints the effort page and keeps focus on the same page link", async ({ page }) => {
+  await openLiveDrift(page);
+  const link = page.locator('#wikiEffortPage .wiki-ef-plink[data-relpath="archive/drift-report.mdx"]');
+  await link.focus();
+  await writeLiveMap(Date.now() - 1 * HOUR, "Drift check v2");
+  await refetchListing(page);
+  await expect(page.locator("#wikiEffortPage h1")).toHaveText("Drift check v2");
+  await expect(link).toBeFocused();
+});
+
+test("a failed map GET during a background re-join keeps the effort on screen", async ({ page }) => {
+  await openLiveDrift(page);
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", (route) => {
+    gets++;
+    return route.fulfill({ status: 503, json: { error: "down" } });
+  });
+  await writeLiveMap(Date.now() - 1 * HOUR, "Drift check v2");
+  await refetchListing(page);
+  await expect.poll(() => gets).toBeGreaterThan(0);
+  await page.waitForTimeout(300);
+  await expect(page.locator("#wikiEffortPage h1")).toHaveText("Drift check");
+  await expect(page.locator("#wikiEffortRetry")).toHaveCount(0);
+});
+
+test("scrolling during a slow background map GET is kept when the new run paints", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await openLiveDrift(page);
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    gets++;
+    await held;
+    await route.continue();
+  });
+  await writeLiveMap(Date.now() - 1 * HOUR, "Drift check v2");
+  await refetchListing(page);
+  await expect.poll(() => gets).toBeGreaterThan(0);
+  const wrap = page.locator("#articleWrap");
+  expect(await wrap.evaluate((w) => w.scrollHeight - w.clientHeight)).toBeGreaterThan(150);
+  await wrap.evaluate((w) => (w.scrollTop = 120));
+  release();
+  await expect(page.locator("#wikiEffortPage h1")).toHaveText("Drift check v2");
+  expect(await wrap.evaluate((w) => w.scrollTop)).toBe(120);
 });
 
 const THEMES: { label: string; stored: string | null; scheme: "light" | "dark" }[] = [

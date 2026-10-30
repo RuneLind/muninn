@@ -5583,15 +5583,51 @@ function openEffort(id: string): void {
   renderEffort(id);
 }
 
+/** The markup the effort page last wrote into the article and Connections
+ *  panes, so a background re-join that changes nothing writes nothing. */
+let effortShown: { article: string; conn: string } | null = null;
+
+/** A selector that finds the focused control again after a re-render: its id,
+ *  else its tag, first class and the link attribute the effort page keys on. */
+function effortFocusKey(el: Element | null): string | null {
+  if (!(el instanceof HTMLElement)) return null;
+  if (el.id) return `#${CSS.escape(el.id)}`;
+  const cls = el.classList[0] ? `.${CSS.escape(el.classList[0])}` : "";
+  for (const a of ["data-relpath", "data-effort-link", "data-effort-home"]) {
+    const v = el.getAttribute(a);
+    if (v !== null) return `${el.tagName.toLowerCase()}${cls}[${a}="${CSS.escape(v)}"]`;
+  }
+  return null;
+}
+
+/** Write the effort page's two panes. A navigation paints and scrolls to the
+ *  top. A background re-join (`background`) skips the write when the markup is
+ *  unchanged (a swap drops focus and wipes a selection), and otherwise keeps
+ *  the scroll as it is at paint time and focus on the same control. */
+function writeEffortPanes(wrap: HTMLElement, article: string, connHtml: string, background: boolean): void {
+  const conn = document.getElementById("connBody");
+  if (background && effortShown && effortShown.article === article && effortShown.conn === connHtml) return;
+  const active = document.activeElement;
+  const holder = background && active ? (wrap.contains(active) ? wrap : conn?.contains(active) ? conn : null) : null;
+  const key = holder ? effortFocusKey(active) : null;
+  const scroll = background ? wrap.scrollTop : 0;
+  wrap.innerHTML = article;
+  wrap.scrollTop = scroll;
+  if (conn) conn.innerHTML = connHtml;
+  effortShown = { article, conn: connHtml };
+  if (holder && key) (holder.querySelector(key) as HTMLElement | null)?.focus({ preventScroll: true });
+}
+
 /** `?effort=<id>`: the effort page fills the article pane, as the issue graph
- *  does, with no page behind it. A loading state paints first; the map comes
- *  from the cache when the listing's run time still matches it. */
-function renderEffort(id: string, keepScroll = false): void {
+ *  does, with no page behind it. A navigation: it applies a stashed listing
+ *  first (as `renderStart`/`loadPage` do), then paints. */
+function renderEffort(id: string): void {
+  // A listing stashed while an article was open lands now, before the map is
+  // joined to `allPages`; the list is repainted from it like `renderStart` does.
+  if (applyPendingPages()) renderList();
   consumeUrlLens();
   abortAgentRuns();
-  const wrap = document.getElementById("articleWrap");
-  if (!wrap) return;
-  const scroll = keepScroll ? wrap.scrollTop : 0;
+  if (!document.getElementById("articleWrap")) return;
   setAtlasFull(false);
   currentName = null;
   setCurrentRelPath(null);
@@ -5601,9 +5637,19 @@ function renderEffort(id: string, keepScroll = false): void {
   removeGraph();
   hideBreadcrumb();
   effortOpen = id;
+  paintEffort(id, false);
+}
+
+/** Join the map to the listing and paint it. The map comes from the cache when
+ *  the listing's run time still matches it. A navigation paints a loading
+ *  state before a fetch and the error pane when it fails; a background re-join
+ *  keeps the effort on screen through both. */
+function paintEffort(id: string, background: boolean): void {
+  const wrap = document.getElementById("articleWrap");
+  if (!wrap) return;
   const seq = pageViewSeq;
   const head = { wiki: WIKI, startHref: currentStartUrl(), id };
-  const conn = document.getElementById("connBody");
+  const noMapConn = '<div class="wiki-ef-conn-empty">No work map.</div>';
   const paint = (map: WorkMap) => {
     const view = effortView({
       map,
@@ -5617,26 +5663,19 @@ function renderEffort(id: string, keepScroll = false): void {
       done: workMapDoneSet(map.runAtMs),
       now: Date.now(),
     });
-    wrap.innerHTML = view.article;
-    wrap.scrollTop = scroll;
-    if (conn) conn.innerHTML = view.connections;
+    writeEffortPanes(wrap, view.article, view.connections, background);
   };
   const runAt = workMapRunAt;
   if (runAt === null) {
     effortMapCache = null;
-    wrap.innerHTML = effortStatusHtml(head, "no-map");
-    if (conn) conn.innerHTML = '<div class="wiki-ef-conn-empty">No work map.</div>';
+    writeEffortPanes(wrap, effortStatusHtml(head, "no-map"), noMapConn, background);
     return;
   }
   if (effortMapCache && effortMapCache.runAtMs === runAt) {
     paint(effortMapCache);
     return;
   }
-  if (!keepScroll || !document.getElementById("wikiEffortPage")) {
-    wrap.innerHTML = effortStatusHtml(head, "loading");
-    wrap.scrollTop = 0;
-    if (conn) conn.innerHTML = '<div class="wiki-ef-conn-empty">Loading…</div>';
-  }
+  if (!background) writeEffortPanes(wrap, effortStatusHtml(head, "loading"), '<div class="wiki-ef-conn-empty">Loading…</div>', false);
   const current = () => effortOpen === id && pageViewSeq === seq && !!document.getElementById("wikiEffortPage");
   fetch(withWiki("/api/wiki/work-map"))
     .then(async (r) => {
@@ -5644,8 +5683,7 @@ function renderEffort(id: string, keepScroll = false): void {
       if (!current()) return;
       if (!r.ok || !body || typeof body !== "object") throw new Error(r.ok ? "malformed response" : `HTTP ${r.status}`);
       if (!body.map) {
-        wrap.innerHTML = effortStatusHtml(head, "no-map");
-        if (conn) conn.innerHTML = '<div class="wiki-ef-conn-empty">No work map.</div>';
+        writeEffortPanes(wrap, effortStatusHtml(head, "no-map"), noMapConn, background);
         return;
       }
       effortMapCache = body.map;
@@ -5653,16 +5691,19 @@ function renderEffort(id: string, keepScroll = false): void {
     })
     .catch((err: Error) => {
       if (!current()) return;
-      wrap.innerHTML = effortStatusHtml(head, "error", err.message);
-      if (conn) conn.innerHTML = '<div class="wiki-ef-conn-empty">No work map.</div>';
+      // A background re-join that fails keeps the effort being read; the next
+      // adopt or a navigation tries again.
+      if (background) return;
+      writeEffortPanes(wrap, effortStatusHtml(head, "error", err.message), noMapConn, false);
     });
 }
 
 /** A listing adopted while the effort page is open: re-join it (a page may
- *  have been renamed, or a new run landed), keeping the scroll. */
+ *  have been renamed, or a new run landed). Paint only: no navigation side
+ *  effects, and nothing written when the markup is unchanged. */
 function refreshEffortFromListing(): void {
   if (effortOpen === null || !document.getElementById("wikiEffortPage")) return;
-  renderEffort(effortOpen, true);
+  paintEffort(effortOpen, true);
 }
 
 const GRAPH_NODE_SEL = `#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`;
@@ -10119,15 +10160,18 @@ function applyPagesResponse(applied: PendingPages): void {
  *
  *  Data + facets only: every caller (`renderStart`, `loadPage`/`loadPageByRelPath`
  *  → `fetchAndRenderPage`/`loadExplainer`) paints the list itself a moment later,
- *  so painting here would mean two full 953-row renders per user action. */
-function applyPendingPages(): void {
+ *  so painting here would mean two full 953-row renders per user action.
+ *  `renderEffort` paints no list of its own, so it repaints it when this
+ *  returns true (something was applied). */
+function applyPendingPages(): boolean {
   const pending = takePending(pagesRefresh);
-  if (!pending) return;
+  if (!pending) return false;
   if (!pagesRefresh.bootRendered) {
     bootRender(pending);
-    return;
+    return true;
   }
   adoptPagesDataAndFacets(pending);
+  return true;
 }
 
 /** Paint the boot-only "this wiki isn't usable" pane. Suppressed once anything has
