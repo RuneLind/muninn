@@ -115,7 +115,7 @@ import {
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
 // The effort page (work map P3): pure HTML, wired by `renderEffort` below.
-import { EFFORT_PARAM, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
+import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
 import type { WorkMapGetBody } from "./wiki-work-card.ts";
 import type { WorkMap } from "../../../wiki/work-map/schema.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
@@ -5576,6 +5576,22 @@ function effortHrefFor(id: string): string {
   return urlWithJira(urlWithProject(effortUrl(WIKI, id), filters.project), filters.jira);
 }
 
+/** The effort a URL's `?effort=` names, or null for none. A blank value is
+ *  dropped from the address bar and a case variant (`Drift`) is written as its
+ *  slug, both in place (`replaceState`): neither is a navigation. */
+function effortFromUrl(params: URLSearchParams): string | null {
+  const raw = params.get(EFFORT_PARAM);
+  if (raw === null) return null;
+  const id = canonicalEffortParam(raw);
+  if (id !== raw) {
+    const u = new URL(location.href);
+    if (id === null) u.searchParams.delete(EFFORT_PARAM);
+    else u.searchParams.set(EFFORT_PARAM, id);
+    history.replaceState(history.state, "", u.pathname + u.search + u.hash);
+  }
+  return id;
+}
+
 /** Open an effort from a link: push its URL (unless already there), render. */
 function openEffort(id: string): void {
   const target = effortHrefFor(id);
@@ -5636,6 +5652,8 @@ function renderEffort(id: string): void {
   graphIssue = "";
   removeGraph();
   hideBreadcrumb();
+  // No page is open: the rail's highlight goes (the class alone; the rows stay).
+  document.querySelectorAll("#wikiList .wiki-list-item.active").forEach((r) => r.classList.remove("active"));
   effortOpen = id;
   paintEffort(id, false);
 }
@@ -7193,7 +7211,7 @@ window.addEventListener("popstate", () => {
     return;
   }
   const page = params.get("page");
-  const effort = params.get(EFFORT_PARAM);
+  const effort = page ? null : effortFromUrl(params);
   if (page) loadPage(page, false);
   else if (effort !== null) renderEffort(effort);
   else if (graphMode && graphIssue && hasTracker()) renderIssueGraph();
@@ -10134,7 +10152,7 @@ function bootRender(applied: PendingPages): void {
     loadPageByRelPath(relPath, false);
   } else {
     const page = params.get("page");
-    const effort = params.get(EFFORT_PARAM);
+    const effort = page ? null : effortFromUrl(params);
     if (page) loadPage(page, false);
     // `?effort=<id>`: the effort page (work map P3), with no page behind it.
     else if (effort !== null) {

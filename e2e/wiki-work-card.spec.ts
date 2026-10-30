@@ -237,6 +237,8 @@ test("a wiki with a map shows the card and never asks for the digest", async ({ 
   // An inline page link is bounded at rest, not only on hover.
   await expect(card.locator('.wiki-wm-summary a[data-relpath="plans/alpha.mdx"]')).toHaveCSS("text-decoration-line", "underline");
   await expect(card.locator(".wiki-wm-summary")).toContainText("the old gone was removed");
+  // An effort name is a link and reads as one at rest, not only on hover.
+  await expect(card.locator('a.wiki-wm-effort-name[data-effort-link="alpha"]')).toHaveCSS("text-decoration-line", "underline");
   // Lanes: Moving open, the other two closed.
   await expect(card.locator('[data-wm-lane="moving"]')).toHaveAttribute("open", "");
   await expect(card.locator('[data-wm-lane="cooling"]')).not.toHaveAttribute("open", "");
@@ -1113,7 +1115,7 @@ for (const theme of THEMES) {
     await openStart(page, SWEEP);
     const card = page.locator("#wikiWorkCard");
     await expect(card.locator(".wiki-wm-stale")).toBeVisible();
-    expect(await card.locator(".wiki-wm-effort-name").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--text-primary"));
+    expect(await card.locator("a.wiki-wm-effort-name").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
     expect(await card.locator(".wiki-wm-summary a").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
     const low: string[] = [];
     const seen = new Set<string>();

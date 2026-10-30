@@ -244,6 +244,53 @@ test("an unknown id says it is no longer in the map and links the alias match", 
   await expect(page.locator("#wikiWorkCard")).toBeVisible();
 });
 
+test("an empty or blank ?effort= opens the start view and drops the param in place", async ({ page }) => {
+  for (const blank of ["", "%20"]) {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    const before = await page.evaluate(() => history.length);
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=${blank}`);
+    await expect(page.locator(".wiki-start")).toBeVisible();
+    await expect(page.locator("#wikiEffortPage")).toHaveCount(0);
+    expect(new URL(page.url()).searchParams.has("effort")).toBe(false);
+    expect(new URL(page.url()).searchParams.get("wiki")).toBe(WIKI);
+    // One entry for the goto, none for the clean-up.
+    expect(await page.evaluate(() => history.length)).toBe(before + 1);
+  }
+  // Reached by popstate: the same, and the entry is replaced in place, so the
+  // one after it is still there for Forward.
+  await page.evaluate((w) => {
+    history.pushState({}, "", `/wiki?wiki=${w}&effort=`);
+    history.pushState({ mark: "after" }, "", `/wiki?wiki=${w}`);
+  }, WIKI);
+  await page.goBack();
+  await expect.poll(() => new URL(page.url()).searchParams.has("effort")).toBe(false);
+  await expect(page.locator(".wiki-start")).toBeVisible();
+  await expect(page.locator("#wikiEffortPage")).toHaveCount(0);
+  await page.goForward();
+  await expect.poll(() => page.evaluate(() => (history.state as { mark?: string } | null)?.mark)).toBe("after");
+});
+
+test("a case variant of an effort id opens the effort and corrects the URL in place", async ({ page }) => {
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+  const before = await page.evaluate(() => history.length);
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=Drift`);
+  await expectDriftPage(page);
+  expect(effortParam(page)).toBe("drift");
+  // One entry for the goto, none for the correction.
+  expect(await page.evaluate(() => history.length)).toBe(before + 1);
+});
+
+test("Back from a page to its effort leaves no rail row active", async ({ page }) => {
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=drift`);
+  await expectDriftPage(page);
+  await page.locator('#wikiEffortPage .wiki-ef-plink[data-relpath="archive/drift-report.mdx"]').click();
+  await expect(page.locator("#articleWrap")).toContainText("Body of Drift report.");
+  await expect(page.locator('#wikiList .wiki-list-item.active[data-relpath="archive/drift-report.mdx"]').first()).toBeVisible();
+  await page.goBack();
+  await expectDriftPage(page);
+  await expect(page.locator("#wikiList .wiki-list-item.active")).toHaveCount(0);
+});
+
 test("a wiki with no map says so instead of a blank pane", async ({ page }) => {
   await page.goto(`${BASE}/wiki?wiki=${NOMAP}&effort=drift`);
   await expect(page.locator("#wikiEffortPage .wiki-ef-status")).toHaveText("This wiki has no work map, so it has no effort pages.");

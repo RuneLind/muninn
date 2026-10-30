@@ -2609,8 +2609,12 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-next-label { color: var(--text-soft); font-weight: 600; }
     .wiki-wm-coverage { font-size: 11px; color: var(--text-soft); margin-top: 10px; }
     .wiki-wm-warnings { margin: 4px 0 0 18px; padding: 0; font-size: 11.5px; color: var(--tone-warn); }
-    a.wiki-wm-effort-name { text-decoration: none; }
-    a.wiki-wm-effort-name:hover, a.wiki-wm-effort-name:focus-visible { text-decoration: underline; text-underline-offset: 2px; }
+    /* A linked effort name reads as a link at rest (WCAG 1.4.1), as .wiki-wm-link does. */
+    a.wiki-wm-effort-name {
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px;
+      text-decoration-color: color-mix(in srgb, var(--accent-light) 45%, transparent);
+    }
+    a.wiki-wm-effort-name:hover, a.wiki-wm-effort-name:focus-visible { text-decoration-color: currentColor; }
 
     /* Effort page (?effort=, work map P3). Text uses --text-primary/-secondary/
        -soft, --accent-light and the --tone-* inks, which clear 4.5:1 in every

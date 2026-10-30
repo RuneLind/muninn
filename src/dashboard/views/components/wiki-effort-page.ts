@@ -10,7 +10,7 @@
  */
 
 import { joinWorkMap, type JoinedEffort, type JoinedEffortPage, type JoinedWorkMap } from "../../../wiki/work-map/join.ts";
-import { osloDay, slugifyEffortId } from "../../../wiki/work-map/ids.ts";
+import { EFFORT_ID_RE, osloDay, slugifyEffortId } from "../../../wiki/work-map/ids.ts";
 import type { WorkMap, WorkMapDaily } from "../../../wiki/work-map/schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { escHtml as esc } from "./escape.ts";
@@ -50,6 +50,17 @@ export interface EffortViewInput<P extends EffortPageListing> {
   now: number;
 }
 
+/**
+ * The effort id an `?effort=` value names: null for an empty or blank value
+ * (the URL means the start view), else its slug, so `Work-Map` opens
+ * `work-map`. A value with no slug (`日本語`, `🚀`) stays as typed and reads as
+ * a dropped id.
+ */
+export function canonicalEffortParam(raw: string | null): string | null {
+  if (raw === null || raw.trim() === "") return null;
+  return slugifyEffortId(raw) || raw;
+}
+
 export type EffortLookup<P> =
   | { kind: "found"; effort: JoinedEffort<P> }
   // P6 adds `{ kind: "retired"; … }` here, read off the map's `retired` list.
@@ -61,11 +72,15 @@ export type EffortLookup<P> =
  * only when one of that effort's aliases, or its name, slugifies to the id.
  */
 export function lookupEffort<P>(map: JoinedWorkMap<P>, id: string): EffortLookup<P> {
-  const effort = map.efforts.find((e) => e.id === id);
+  // `id` is compared as its slug; one that is no valid effort id (empty slug,
+  // too long) is dropped with no match, so an empty name slug never matches.
+  const key = slugifyEffortId(id);
+  if (!EFFORT_ID_RE.test(key)) return { kind: "dropped", matches: [] };
+  const effort = map.efforts.find((e) => e.id === key);
   if (effort) return { kind: "found", effort };
   // The one branch point for P6's retired ids: a `retired` entry for `id`
   // answers here, before the dropped fallback.
-  const matches = map.efforts.filter((e) => slugifyEffortId(e.name) === id || e.aliases.some((a) => slugifyEffortId(a) === id));
+  const matches = map.efforts.filter((e) => slugifyEffortId(e.name) === key || e.aliases.some((a) => slugifyEffortId(a) === key));
   return { kind: "dropped", matches };
 }
 

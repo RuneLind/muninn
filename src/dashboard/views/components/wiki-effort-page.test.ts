@@ -5,6 +5,7 @@ import { osloDay } from "../../../wiki/work-map/ids.ts";
 import {
   activityStrip,
   activityStripHtml,
+  canonicalEffortParam,
   effortStatusHtml,
   effortUrl,
   effortView,
@@ -224,6 +225,43 @@ describe("lookupEffort and the dropped page", () => {
     expect(v.article).toContain("no longer in the map");
     expect(v.article).not.toContain("data-effort-link");
     expect(v.article).toContain("Your work card");
+  });
+
+  // Efforts whose name and aliases slugify to "" (non-Latin, punctuation, emoji).
+  const blank = map({
+    efforts: [effort("drift", ["plans/a.mdx"]), effort("jp", ["plans/b.mdx"], { name: "日本語", aliases: ["—", "🚀"] })],
+  });
+
+  test("an empty id matches no effort through an empty name or alias slug", () => {
+    const r = lookupEffort(joinWorkMap(blank, PAGES), "");
+    expect(r.kind === "dropped" && r.matches.map((e) => e.id)).toEqual([]);
+  });
+
+  test("an id that slugifies to empty is dropped with no alias match", () => {
+    for (const id of ["日本語", "—", "🚀"]) {
+      const r = lookupEffort(joinWorkMap(blank, PAGES), id);
+      expect(r.kind === "dropped" && r.matches.map((e) => e.id)).toEqual([]);
+    }
+    expect(view(blank, "🚀").article).not.toContain("data-effort-link");
+  });
+
+  test("a case variant of a current id is found", () => {
+    const r = lookupEffort(joinWorkMap(blank, PAGES), "Drift");
+    expect(r.kind === "found" && r.effort.id).toBe("drift");
+  });
+
+  test("a case variant of an alias slug links that effort", () => {
+    const r = lookupEffort(joinWorkMap(m, PAGES), "Old-Name");
+    expect(r.kind === "dropped" && r.matches.map((e) => e.id)).toEqual(["new-name"]);
+  });
+
+  test("canonicalEffortParam: blank is none, a variant is its slug, an unsluggable id stays as typed", () => {
+    expect(canonicalEffortParam(null)).toBeNull();
+    expect(canonicalEffortParam("")).toBeNull();
+    expect(canonicalEffortParam("  ")).toBeNull();
+    expect(canonicalEffortParam("Work-Map")).toBe("work-map");
+    expect(canonicalEffortParam("drift")).toBe("drift");
+    expect(canonicalEffortParam("日本語")).toBe("日本語");
   });
 
   test("an unknown id is escaped wherever it shows", () => {
