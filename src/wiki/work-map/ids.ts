@@ -64,11 +64,11 @@ export interface DatedPage {
   birthtimeMs?: number;
 }
 
-/** A page's newest creation, touch, worked-on or uncommitted-edit date, on
- *  the reader's update rules (`updatedSignal`, `wiki-filter.ts`): the mtime
- *  counts only when the index marks the page dirty (a clean file's mtime is
- *  checkout or pull time). A date past `now` + 48 h is ignored
- *  (`isImplausibleFutureDate`). */
+/** A page's newest creation, touch, worked-on or uncommitted-edit date. The
+ *  mtime counts only when the index marks the page dirty, because a clean
+ *  file's mtime is checkout or pull time. This is stricter than the reader's
+ *  `updatedSignal` (`wiki-filter.ts`), which trusts the mtime of a page with
+ *  no git dates. A date past `now` + 48 h is ignored (`isImplausibleFutureDate`). */
 export function pageNewestMs(p: DatedPage, now: number = Date.now()): number {
   const dates = [p.gitCreatedMs, p.gitTouchedMs, p.workedMs];
   if (p.gitDirty === true) dates.push(p.mtimeMs);

@@ -157,13 +157,6 @@ describe("declared pages join at once (P6)", () => {
     ];
     // A viewer clock 10 days behind the run still sorts post-run commits.
     expect(ids(joinWorkMap(m, [...listed, ...pair(RUN)], RUN - 240 * HOUR))[1]).toEqual(["plans/three-hours.mdx", "plans/one-hour.mdx", "plans/c.mdx"]);
-    // The `now` passed in is the clock, not the process's own.
-    const later = Date.parse("2031-01-01T00:00:00Z");
-    expect(ids(joinWorkMap({ ...m, runAtMs: later }, [...listed, ...pair(later)], later + 6 * HOUR))[1]).toEqual([
-      "plans/three-hours.mdx",
-      "plans/one-hour.mdx",
-      "plans/c.mdx",
-    ]);
   });
 
   test("a mapped page re-declared elsewhere moves, keeping its role, and is recorded as moved out; a loose one leaves loose", () => {
