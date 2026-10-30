@@ -560,3 +560,132 @@ describe("focus keys", () => {
     expect(faceted.map(keys)).toEqual(panes().map(keys));
   });
 });
+
+describe("the retired effort page (P6)", () => {
+  const m = map({ efforts: [effort("live", ["plans/a.mdx"])], retired: [{ id: "drift", name: "Drift <old>", lastActive: Date.parse("2026-09-14T10:00:00Z") }] });
+  const pages: EffortPageListing[] = [
+    ...PAGES.slice(0, 2),
+    { relPath: "plans/c.mdx", title: "Plan C", effort: "drift" },
+    { relPath: "plans/d.mdx", title: "Plan D", effort: "other" },
+  ];
+
+  test("lookupEffort answers a retired id, exact or as its slug, before the dropped fallback", () => {
+    const joined = joinWorkMap(m, pages);
+    expect(lookupEffort(joined, "drift").kind).toBe("retired");
+    expect(lookupEffort(joined, "Drift").kind).toBe("retired");
+    expect(lookupEffort(joined, "gone").kind).toBe("dropped");
+  });
+
+  test("shows the name, the last-active date and the listing's pages that declare it", () => {
+    const v = effortView({ map: m, pages, id: "drift", wiki: "w", startHref: "/wiki", hrefFor: href, effortHref, now: NOW });
+    expect(v.article).toContain("wiki-effort-retired");
+    expect(v.article).toContain("<h1>Drift &lt;old&gt;</h1>");
+    expect(v.article).toContain("last active 2026-09-14");
+    expect(v.article).toContain('data-relpath="plans/c.mdx"');
+    expect(v.article).not.toContain('data-relpath="plans/d.mdx"');
+  });
+
+  test("a map written before P6 (no `retired`) still parses and an id is dropped", () => {
+    const old = map({ efforts: [effort("live", ["plans/a.mdx"])] });
+    expect(lookupEffort(joinWorkMap(old, pages), "drift").kind).toBe("dropped");
+  });
+});
+
+describe("moved and gone pages after a declaration (P6)", () => {
+  const RUN = NOW - 2 * HOUR;
+  const old = { gitCreatedMs: RUN - 40 * DAY, gitTouchedMs: RUN - 30 * DAY };
+
+  test("a moved page is shown as moved, not counted as gone; a real deletion still is, beside a joined page", () => {
+    // e: a (stays), b (deleted), c (moves to f); n joins e after the run.
+    const m = map({ runAtMs: RUN, efforts: [effort("e", ["plans/a.mdx", "plans/b.mdx", "plans/c.mdx"]), effort("f", ["plans/d.mdx"])] });
+    const pages: EffortPageListing[] = [
+      { relPath: "plans/a.mdx", title: "Plan A", ...old },
+      { relPath: "plans/c.mdx", title: "Plan C", effort: "f", ...old },
+      { relPath: "plans/d.mdx", title: "Plan D", ...old },
+      { relPath: "plans/n.mdx", title: "Plan N", effort: "e", gitDirty: true, mtimeMs: NOW },
+    ];
+    const { article } = view(m, "e", { pages });
+    expect(article).toContain("2 pages (1 no longer in the wiki)");
+    expect(article).toContain("Moved to another effort");
+    expect(article).toMatch(/data-relpath="plans\/c\.mdx"[^]*moved to <a class="wiki-ef-elink" href="\/wiki\?effort=f" data-effort-link="f"[^>]*>Effort f<\/a>/);
+    // The joined page lists first.
+    expect(article.indexOf('data-relpath="plans/n.mdx"')).toBeLessThan(article.indexOf('data-relpath="plans/a.mdx"'));
+    // On f's page the moved page is an ordinary page.
+    expect(view(m, "f", { pages }).article).toContain("2 pages<");
+  });
+
+  test("an effort every page moved out of says so instead of «no longer in the wiki»", () => {
+    const m = map({ runAtMs: RUN, efforts: [effort("e", ["plans/a.mdx"]), effort("f", ["plans/d.mdx"])] });
+    const pages: EffortPageListing[] = [
+      { relPath: "plans/a.mdx", title: "Plan A", effort: "f", ...old },
+      { relPath: "plans/d.mdx", title: "Plan D", ...old },
+    ];
+    const { article } = view(m, "e", { pages });
+    expect(article).toContain("0 pages<");
+    expect(article).not.toContain("no longer in the wiki");
+    expect(article).toContain("Every page of this effort moved to another effort since the run.");
+  });
+
+  test("the card drops an effort a move left empty off its lanes, but keeps one emptied by deletion", () => {
+    const m = map({ runAtMs: RUN, efforts: [effort("moved", ["plans/a.mdx"]), effort("deleted", ["plans/gone.mdx"]), effort("f", ["plans/d.mdx"])] });
+    const pages = [
+      { relPath: "plans/a.mdx", title: "Plan A", effort: "f", ...old },
+      { relPath: "plans/d.mdx", title: "Plan D", ...old },
+    ];
+    const html = workCardHtml({ body: { map: m, organizable: false }, pages, now: NOW, done: new Set(), hrefFor: href, refresh: { phase: "idle" } });
+    expect(html).not.toContain('data-effort-id="moved"');
+    expect(html).toContain('data-effort-id="deleted"');
+    expect(html).toContain('data-effort-id="f"');
+  });
+
+  test("on the card, a page joined to a 7-page effort shows among the first six, not behind «+N more»", () => {
+    const seven = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"].map((s) => `plans/${s}.mdx`);
+    const m = map({ runAtMs: RUN, efforts: [effort("big", seven)] });
+    const pages = [
+      ...seven.map((rel, i) => ({ relPath: rel, title: `Page ${i + 1}`, ...old })),
+      { relPath: "plans/today.mdx", title: "Written today", effort: "big", gitDirty: true, mtimeMs: NOW },
+    ];
+    const html = workCardHtml({ body: { map: m, organizable: false }, pages, now: NOW, done: new Set(), hrefFor: href, refresh: { phase: "idle" } });
+    const list = html.slice(html.indexOf('data-effort-id="big"'));
+    const shown = list.slice(0, list.indexOf("wiki-wm-more"));
+    expect(shown).toContain(">Written today</a>");
+    expect(list).toContain("+2 more");
+  });
+});
+
+describe("the Pages note over every (joined, moved, gone, remaining) combination", () => {
+  const RUN = NOW - 2 * HOUR;
+  const old = { gitCreatedMs: RUN - 40 * DAY, gitTouchedMs: RUN - 30 * DAY };
+  const NOTE_RE = /<h2 class="wiki-ef-h">Pages<\/h2><div class="wiki-ef-note">([^<]*)<\/div>/;
+  const pagesWord = (n: number) => `${n} ${n === 1 ? "page" : "pages"}`;
+  /** The one true note for an effort that shows no rows, or none when it shows any. */
+  const expected = (rows: number, moved: number, gone: number): string | null => {
+    if (rows > 0) return null;
+    if (moved > 0 && gone > 0) return `None of this effort’s pages are here now: ${moved} moved to another effort, ${gone} no longer in the wiki.`;
+    if (moved > 0) return "Every page of this effort moved to another effort since the run.";
+    if (gone > 0) return "None of this effort’s pages are in the wiki any more.";
+    return "This effort has no pages.";
+  };
+  const counts = [0, 1, 2];
+  for (const joined of counts)
+    for (const moved of counts)
+      for (const gone of counts)
+        for (const remaining of counts) {
+          test(`joined ${joined}, moved ${moved}, gone ${gone}, remaining ${remaining}`, () => {
+            const ids = (kind: string, n: number) => Array.from({ length: n }, (_, i) => `plans/${kind}${i}.mdx`);
+            const m = map({ runAtMs: RUN, efforts: [effort("a", [...ids("r", remaining), ...ids("m", moved), ...ids("g", gone)]), effort("b", [])] });
+            const pages: EffortPageListing[] = [
+              ...ids("r", remaining).map((relPath) => ({ relPath, title: relPath, ...old })),
+              ...ids("m", moved).map((relPath) => ({ relPath, title: relPath, effort: "b", ...old })),
+              ...ids("j", joined).map((relPath) => ({ relPath, title: relPath, effort: "a", gitDirty: true, mtimeMs: NOW })),
+            ];
+            const { article } = view(m, "a", { pages });
+            const rows = joined + remaining;
+            expect(article).toContain(`${pagesWord(rows)}${gone > 0 ? ` (${gone} no longer in the wiki)` : ""}<`);
+            const note = article.match(NOTE_RE)?.[1] ?? null;
+            expect(note).toBe(expected(rows, moved, gone));
+            expect(article.includes("Moved to another effort")).toBe(moved > 0);
+            if (moved > 0) expect(article).toContain(`Moved to another effort <span class="wiki-ef-count">${moved}</span>`);
+          });
+        }
+});
