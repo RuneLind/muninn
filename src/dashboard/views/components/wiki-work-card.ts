@@ -277,7 +277,7 @@ function needsYouHtml<P>(
         `<div class="wiki-wm-need" data-wm-need="${i}">` +
         `<div class="wiki-wm-need-head"><span class="wiki-wm-kind">${esc(n.kind)}</span>` +
         `<span class="wiki-wm-need-title">${prose(n.title)}</span>` +
-        `<button class="wiki-wm-done" data-wm-done="${i}" title="Mark done" aria-label="Mark done">✓</button></div>` +
+        `<button class="wiki-wm-done" data-wm-done="${i}" data-wm-key="${esc(needKey(raw[i]!))}" title="Mark done" aria-label="Mark done">✓</button></div>` +
         (n.why ? `<div class="wiki-wm-why" title="${esc(proseText(n.why, byKey))}">${prose(n.why)}</div>` : "") +
         (n.action ? `<div class="wiki-wm-action">${prose(n.action)}</div>` : "") +
         // Pages the item's own prose already links are not repeated.

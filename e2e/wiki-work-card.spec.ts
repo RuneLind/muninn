@@ -48,6 +48,12 @@ const STALE = "e2e-wm-stale";
 const DONE = "e2e-wm-done";
 const NONE = "e2e-wm-none";
 const LONG = "e2e-wm-long";
+/** Wikis a test mutates on disk: one each, so a failed test leaves no state behind for the next. */
+const FLIP = "e2e-wm-flip";
+const GROW = "e2e-wm-grow";
+const GROW_ERR = "e2e-wm-grow-err";
+const GROW_LATE = "e2e-wm-grow-late";
+const FB = "e2e-wm-fb";
 const LONG_WHY =
   "The two drafts of ⟦plans/alpha.mdx⟧ disagree on the name, the scope and the owner, and the review thread under the second draft has gone quiet for a week, so nobody has decided which of them the next slice builds on.";
 const HOUR = 3_600_000;
@@ -113,6 +119,11 @@ test.beforeAll(async () => {
   await seedWiki(DONE, now - 3 * HOUR);
   await seedWiki(NONE, null);
   await seedWiki(LONG, now - 2 * HOUR, [{ title: "Settle alpha", kind: "decision", why: LONG_WHY, action: "Pick one draft and close the other.", pages: [] }]);
+  await seedWiki(FLIP, now - 2 * HOUR);
+  await seedWiki(GROW, null);
+  await seedWiki(GROW_ERR, null);
+  await seedWiki(GROW_LATE, null);
+  await seedWiki(FB, now - 2 * HOUR);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -123,7 +134,7 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -367,23 +378,91 @@ const DIGEST_OK = { digest: { bullets: "- x", html: "<ul><li>Something changed</
 
 test("a work-map GET the instance refuses (4xx) falls back to What's new", async ({ page }) => {
   await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
-  await page.route("**/api/wiki/work-map?*", (route) => route.fulfill({ status: 400, json: { error: "wiki is required" } }));
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", (route) => {
+    gets++;
+    return route.fulfill({ status: 400, json: { error: "wiki is required" } });
+  });
   await openStart(page, FRESH);
   await expect(page.locator("#wikiWhatsNew")).toContainText("Something changed");
   await expect(page.locator("#wikiWorkCard")).toBeHidden();
+  // Longer than the network retry's delay: a refusal is not retried.
+  await page.waitForTimeout(2_500);
+  expect(gets).toBe(1);
 });
 
-test("a work-map GET that fails on the network twice falls back to What's new", async ({ page }) => {
+test("a work-map GET answered 5xx keeps the card's Retry", async ({ page }) => {
   await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
   let gets = 0;
   await page.route("**/api/wiki/work-map?*", (route) => {
     gets++;
+    return route.fulfill({ status: 503, json: { error: "down" } });
+  });
+  await openStart(page, FRESH);
+  await expect(page.locator("#wikiWorkCard #wikiWorkMapRetry")).toBeVisible();
+  await expect(page.locator("#wikiWhatsNew")).toBeHidden();
+  await page.waitForTimeout(2_500);
+  expect(gets).toBe(1);
+});
+
+test("a work-map GET answered 2xx with a non-JSON body falls back once, without a retry", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", (route) => {
+    gets++;
+    return route.fulfill({ status: 200, contentType: "text/html", body: "<html><body>Sign in</body></html>" });
+  });
+  await openStart(page, FRESH);
+  await expect(page.locator("#wikiWhatsNew")).toContainText("Something changed");
+  await expect(page.locator("#wikiWorkCard")).toBeHidden();
+  await page.waitForTimeout(2_500);
+  expect(gets).toBe(1);
+});
+
+test("a work-map GET that fails on the network twice falls back to What's new", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  const at: number[] = [];
+  await page.route("**/api/wiki/work-map?*", (route) => {
+    at.push(Date.now());
     return route.abort();
   });
   await openStart(page, FRESH);
   await expect(page.locator("#wikiWhatsNew")).toContainText("Something changed");
   await expect(page.locator("#wikiWorkCard")).toBeHidden();
+  expect(at).toHaveLength(2);
+  // The retry waits out a restart blip instead of firing in the same instant.
+  expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(1_000);
+});
+
+test("after a twice-failed work-map GET, an adopt with a new run time brings the card", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", (route) => {
+    gets++;
+    return gets <= 2 ? route.abort() : route.continue();
+  });
+  await page.clock.install();
+  await openStart(page, FB);
+  const wn = page.locator("#wikiWhatsNew");
+  const card = page.locator("#wikiWorkCard");
+  await expect
+    .poll(async () => {
+      await page.clock.runFor(500);
+      return gets;
+    })
+    .toBe(2);
+  await expect(wn).toContainText("Something changed");
+  await expect(card).toBeHidden();
+  // The same run time: the fallback holds, no new GET.
+  await forceAdopt(page, FB);
   expect(gets).toBe(2);
+  await expect(wn).toBeVisible();
+  // A new run: the card takes the slot back.
+  await writeFile(path.join(roots[FB]!, ".work-map.json"), mapJson(FB, Date.now() - HOUR), "utf8");
+  await forceAdopt(page, FB);
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await expect(wn).toBeHidden();
+  expect(gets).toBe(3);
 });
 
 test("✓ dismiss lasts the page's life when storage throws", async ({ page }) => {
@@ -406,6 +485,149 @@ test("✓ dismiss lasts the page's life when storage throws", async ({ page }) =
   await expect(card.locator("[data-wm-need]")).toHaveCount(1);
   await card.locator("#wikiWorkMapRestore").click();
   await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+});
+
+test("an adopt that drops the map brings What's new back, and one that restores it brings the card", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  await page.clock.install();
+  const digests = await openStart(page, FLIP);
+  const card = page.locator("#wikiWorkCard");
+  const wn = page.locator("#wikiWhatsNew");
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  expect(digests).toHaveLength(0);
+  await rm(path.join(roots[FLIP]!, ".work-map.json"));
+  await forceAdopt(page, FLIP);
+  await expect(card).toBeHidden();
+  await expect(wn).toContainText("Something changed");
+  await forceAdopt(page, FLIP);
+  expect(digests).toHaveLength(1);
+  await writeFile(path.join(roots[FLIP]!, ".work-map.json"), mapJson(FLIP, Date.now() - HOUR), "utf8");
+  await forceAdopt(page, FLIP);
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await expect(wn).toBeHidden();
+  expect(digests).toHaveLength(1);
+});
+
+test("a map that comes and goes on adopts keeps What's new's in-flight ↻", async ({ page }) => {
+  let release: (() => Promise<void>) | null = null;
+  await page.route("**/api/wiki/digest*", (route) => {
+    if (!route.request().url().includes("refresh=1")) return route.fulfill({ json: DIGEST_OK });
+    release = () => route.fulfill({ json: DIGEST_OK });
+  });
+  await page.clock.install();
+  const digests = await openStart(page, GROW);
+  const card = page.locator("#wikiWorkCard");
+  const wn = page.locator("#wikiWhatsNew");
+  const spin = page.locator("#wikiWhatsNewRefresh");
+  await spin.click();
+  await expect(spin).toBeDisabled();
+  await expect.poll(() => release !== null).toBe(true);
+  await writeFile(path.join(roots[GROW]!, ".work-map.json"), mapJson(GROW, Date.now() - HOUR), "utf8");
+  await forceAdopt(page, GROW);
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await expect(wn).toBeHidden();
+  await rm(path.join(roots[GROW]!, ".work-map.json"));
+  await forceAdopt(page, GROW);
+  await expect(card).toBeHidden();
+  await expect(wn).toBeVisible();
+  await expect(spin).toBeDisabled();
+  await release!();
+  await expect(spin).toBeEnabled();
+  await expect(card).toBeHidden();
+  expect(digests).toHaveLength(2);
+});
+
+test("a What's new ↻ that lands while the card holds the slot stays hidden until the map goes", async ({ page }) => {
+  let release: (() => Promise<void>) | null = null;
+  const fresh = { digest: { ...DIGEST_OK.digest, html: "<ul><li>Fresher news</li></ul>" } };
+  await page.route("**/api/wiki/digest*", (route) => {
+    if (!route.request().url().includes("refresh=1")) return route.fulfill({ json: DIGEST_OK });
+    release = () => route.fulfill({ json: fresh });
+  });
+  await page.clock.install();
+  await openStart(page, GROW_LATE);
+  const card = page.locator("#wikiWorkCard");
+  const wn = page.locator("#wikiWhatsNew");
+  await page.locator("#wikiWhatsNewRefresh").click();
+  await expect.poll(() => release !== null).toBe(true);
+  await writeFile(path.join(roots[GROW_LATE]!, ".work-map.json"), mapJson(GROW_LATE, Date.now() - HOUR), "utf8");
+  await forceAdopt(page, GROW_LATE);
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await release!();
+  await expect(wn).toContainText("Fresher news");
+  await expect(wn).toBeHidden();
+  await expect(card).toBeVisible();
+  await rm(path.join(roots[GROW_LATE]!, ".work-map.json"));
+  await forceAdopt(page, GROW_LATE);
+  await expect(wn).toBeVisible();
+  await expect(wn).toContainText("Fresher news");
+  await expect(page.locator("#wikiWhatsNewRefresh")).toBeEnabled();
+});
+
+test("a map that comes and goes on adopts keeps What's new's error and asks for the digest once", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: { digest: null, error: "connector busy" } }));
+  await page.clock.install();
+  const digests = await openStart(page, GROW_ERR);
+  const card = page.locator("#wikiWorkCard");
+  const wn = page.locator("#wikiWhatsNew");
+  await expect(wn).toContainText("connector busy");
+  await writeFile(path.join(roots[GROW_ERR]!, ".work-map.json"), mapJson(GROW_ERR, Date.now() - HOUR), "utf8");
+  await forceAdopt(page, GROW_ERR);
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  await expect(wn).toBeHidden();
+  await rm(path.join(roots[GROW_ERR]!, ".work-map.json"));
+  await forceAdopt(page, GROW_ERR);
+  await expect(card).toBeHidden();
+  await expect(wn).toContainText("connector busy");
+  await expect(wn.locator("#wikiWhatsNewRetry")).toBeVisible();
+  expect(digests).toHaveLength(1);
+});
+
+test("focus on a ✓ or a page link survives a ↻ poll repaint", async ({ page }) => {
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    gets++;
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - 60 * 60_000 } });
+  });
+  await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
+  await page.clock.install();
+  await openStart(page, FRESH);
+  const card = page.locator("#wikiWorkCard");
+  await card.locator("#wikiWorkMapRefresh").click();
+  await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
+  const repaint = async () => {
+    await page.evaluate(() => document.querySelector("#wikiWorkCard .wiki-wm-summary")!.setAttribute("data-before-repaint", ""));
+    const n = gets;
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(1_000);
+        return gets;
+      })
+      .toBeGreaterThan(n);
+    await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  };
+  const done = card.locator('[data-wm-done="1"]');
+  await done.focus();
+  await repaint();
+  await expect(done).toBeFocused();
+  const link = card.locator('.wiki-wm-link[data-relpath="plans/alpha.mdx"]').nth(2);
+  await link.focus();
+  await repaint();
+  await expect(link).toBeFocused();
+});
+
+test("a ✓ pressed from the keyboard moves focus to the next ✓, then to the restore control", async ({ page }) => {
+  await openStart(page, FRESH);
+  const card = page.locator("#wikiWorkCard");
+  await card.locator('[data-wm-done="0"]').focus();
+  await page.keyboard.press("Enter");
+  await expect(card.locator("[data-wm-need]")).toHaveCount(1);
+  await expect(card.locator('[data-wm-done="1"]')).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(card.locator("[data-wm-need]")).toHaveCount(0);
+  await expect(card.locator("#wikiWorkMapRestore")).toBeFocused();
 });
 
 /** Every theme a reader can end up in: an explicit pick stored under

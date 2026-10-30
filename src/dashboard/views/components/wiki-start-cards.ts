@@ -150,7 +150,13 @@ function renderWhatsNewError(el: HTMLElement, message: string): void {
     (whatsNewHtml || "") +
     '<div class="wiki-wn-error"><span>' + esc(message) + "</span>" +
     '<button class="wiki-wn-retry" id="wikiWhatsNewRetry">Retry</button></div>';
-  el.style.display = "";
+  revealWhatsNew(el);
+}
+
+/** Show What's new unless the Your work card holds the slot: a digest that
+ *  lands after a map arrived stays hidden until the map goes away. */
+function revealWhatsNew(el: HTMLElement): void {
+  if (workMountedFor === null) el.style.display = "";
 }
 
 /** Fetch (or refresh) the digest and paint the card. Hidden entirely when the
@@ -212,7 +218,7 @@ export function loadDigest(refresh: boolean): void {
       }
       whatsNewHtml = buildWhatsNewInner(data.digest);
       cur.innerHTML = whatsNewHtml;
-      cur.style.display = "";
+      revealWhatsNew(cur);
     })
     .catch(() => {
       if (myId !== whatsNewFetchId) return;
@@ -682,19 +688,12 @@ export function mountStartCards(): void {
   const runAt = deps.workMapRunAt ? deps.workMapRunAt() : null;
   // A wiki with a work map shows the Your work card and never asks for the
   // digest, so What's new's model call stops there (D1: no map ⇒ What's new).
-  const useWorkCard = runAt !== null && !!wc && !workMapFallback;
-  if (wc && !useWorkCard) wc.style.display = "none";
-  if (useWorkCard) {
+  if (runAt !== null && wc && !fallbackHolds(runAt)) {
     if (wn) wn.style.display = "none";
     mountWorkCard(runAt);
-  } else if (wn) {
-    if (whatsNewHtml) {
-      wn.innerHTML = whatsNewHtml;
-      wn.style.display = "";
-    } else if (!digestAttempted) {
-      digestAttempted = true;
-      loadDigest(false);
-    }
+  } else {
+    unmountWorkCard();
+    showWhatsNew();
   }
   const ix = document.getElementById("wikiIndexCard");
   if (ix) {
@@ -712,26 +711,41 @@ export function mountStartCards(): void {
 // ── Your work card (start view, plan muninn-wiki-work-map P2) ─────────
 /** The last GET body with a map; reused across start-view renders. */
 let workBody: (WorkMapGetBody & { map: WorkMap }) | null = null;
-let workLoading = false;
 let workRefresh: RefreshView = { phase: "idle" };
-/** Set when the listing said "map" but the GET found none: What's new takes
- *  the slot for the rest of the page's life. */
-let workMapFallback = false;
+/** The listing `runAt` the GET could not serve a map for (none found, 4xx, a
+ *  non-JSON body, the network twice): What's new holds the slot until an
+ *  adopt brings another `runAt`. */
+let workFallbackFor: number | null = null;
 let workPollTimer: ReturnType<typeof setTimeout> | null = null;
-/** The listing `runAt` the card was last mounted for. */
+/** The listing `runAt` the card is mounted for; null while What's new holds the slot. */
 let workMountedFor: number | null = null;
+/** Bumped when the card leaves the slot, so a GET, POST or poll started
+ *  before then neither paints nor latches the fallback. */
+let workGen = 0;
+/** The generation of the GET in flight, if any. */
+let workLoadGen: number | null = null;
 /** Lanes the reader opened or closed, by lane id; for the page's life. */
 const laneOpen = new Map<string, boolean>();
 let laneListening = false;
+
+/** A card control to re-focus after a repaint, by what survives one. */
+type FocusKey = { sel: string } | { done: string } | { link: string; nth: number };
 /** A control that could not take focus back (↻ disabled while running): retried
  *  on the next paint while focus is still nowhere. */
-let pendingFocus: string | null = null;
+let pendingFocus: FocusKey | null = null;
 
 /** How often ↻ polls the GET, and for how long before it stops waiting. */
 const WORK_POLL_MS = 5_000;
 const WORK_POLL_MAX_MS = 20 * 60_000;
 /** Consecutive failed poll GETs before ↻ stops waiting. */
 const WORK_POLL_MAX_FAILURES = 3;
+/** The wait before the first GET's one network retry, so a dev-server restart
+ *  or a wake-from-sleep blip can pass. */
+const WORK_GET_RETRY_MS = 1_500;
+
+function fallbackHolds(runAt: number): boolean {
+  return workFallbackFor === runAt;
+}
 
 function doneStorageKey(): string {
   return WORK_MAP_DONE_KEY_PREFIX + readActiveWikiName();
@@ -762,38 +776,88 @@ function writeDoneRaw(v: string | null): void {
 
 function mountWorkCard(runAt: number): void {
   workMountedFor = runAt;
+  workFallbackFor = null;
   if (workBody && workBody.map.runAtMs >= runAt) return paintWorkCard();
   if (workBody) paintWorkCard(); // the older map, until the newer one lands
   loadWorkMap();
 }
 
-/** The adopt path's half of `mountStartCards`: only the Your work card, only
- *  on a wiki with a map, and only when the listing's `runAt` moved. What's new
- *  and the Index card are left as they are. */
-export function refreshWorkCardFromListing(): void {
-  const runAt = deps.workMapRunAt ? deps.workMapRunAt() : null;
-  if (runAt === null || workMapFallback || runAt === workMountedFor) return;
-  if (!document.getElementById("wikiWorkCard")) return;
-  const wn = document.getElementById("wikiWhatsNew");
-  if (wn) wn.style.display = "none";
-  mountWorkCard(runAt);
+/** Take the card out of the slot: hide it and drop its in-flight work. */
+function unmountWorkCard(): void {
+  const wc = document.getElementById("wikiWorkCard");
+  if (wc) wc.style.display = "none";
+  if (workMountedFor === null) return;
+  workMountedFor = null;
+  workGen++;
+  workBody = null;
+  workRefresh = { phase: "idle" };
+  pendingFocus = null;
+  if (workPollTimer) clearTimeout(workPollTimer);
+  workPollTimer = null;
 }
 
-/** A selector for the focused control inside the card, to re-focus after a repaint. */
-function focusedCardControl(el: HTMLElement): string | null {
+/** Put What's new in the slot. Content it already holds (a digest, an error's
+ *  Retry, an in-flight ↻) is shown as it is; otherwise the cached digest, or
+ *  one first load. */
+function showWhatsNew(): void {
+  const wn = document.getElementById("wikiWhatsNew");
+  if (!wn) return;
+  if (wn.innerHTML !== "") {
+    wn.style.display = "";
+  } else if (whatsNewHtml) {
+    wn.innerHTML = whatsNewHtml;
+    wn.style.display = "";
+  } else if (!digestAttempted) {
+    digestAttempted = true;
+    loadDigest(false);
+  }
+}
+
+/** The adopt path's half of `mountStartCards`. The card follows the listing:
+ *  a new `runAt` mounts it, a gone map hands the slot back to What's new. A
+ *  slot What's new already holds is left as it is, and the Index card is not
+ *  touched. */
+export function refreshWorkCardFromListing(): void {
+  if (!document.getElementById("wikiWorkCard")) return;
+  const runAt = deps.workMapRunAt ? deps.workMapRunAt() : null;
+  if (runAt === null || fallbackHolds(runAt)) {
+    if (workMountedFor === null) return;
+    unmountWorkCard();
+    showWhatsNew();
+    return;
+  }
+  if (runAt !== workMountedFor) mountWorkCard(runAt);
+}
+
+/** The focused control inside the card, to re-focus after a repaint. */
+function focusedCardControl(el: HTMLElement): FocusKey | null {
   const active = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
   if (!active || active === el || typeof el.contains !== "function" || !el.contains(active)) return null;
-  if (active.id) return "#" + active.id;
+  if (active.id) return { sel: "#" + active.id };
+  const doneKey = active.getAttribute("data-wm-key");
+  if (doneKey !== null && active.hasAttribute("data-wm-done")) return { done: doneKey };
+  const rel = active.getAttribute("data-relpath");
+  if (rel !== null) return { link: rel, nth: cardLinks(el, rel).indexOf(active) };
   const lane = active.tagName === "SUMMARY" ? active.parentElement?.getAttribute("data-wm-lane") : null;
-  return lane ? `[data-wm-lane="${lane}"] > summary` : null;
+  return lane ? { sel: `[data-wm-lane="${lane}"] > summary` } : null;
 }
 
-function paintWorkCard(): void {
+function cardLinks(el: HTMLElement, rel: string): HTMLElement[] {
+  return Array.from(el.querySelectorAll<HTMLElement>("a[data-relpath]")).filter((a) => a.getAttribute("data-relpath") === rel);
+}
+
+function findFocusTarget(el: HTMLElement, key: FocusKey): HTMLElement | null {
+  if ("sel" in key) return el.querySelector<HTMLElement>(key.sel);
+  if ("done" in key) return Array.from(el.querySelectorAll<HTMLElement>("[data-wm-done]")).find((b) => b.getAttribute("data-wm-key") === key.done) ?? null;
+  return cardLinks(el, key.link)[key.nth] ?? null;
+}
+
+function paintWorkCard(override?: FocusKey): void {
   const el = document.getElementById("wikiWorkCard");
-  if (!el || !workBody) return;
+  if (!el || !workBody || workMountedFor === null) return;
   const runAt = workBody.map.runAtMs;
   const lost = !document.activeElement || document.activeElement === document.body;
-  const refocus = focusedCardControl(el) ?? (lost ? pendingFocus : null);
+  const refocus = override ?? focusedCardControl(el) ?? (lost ? pendingFocus : null);
   pendingFocus = null;
   el.innerHTML = workCardHtml({
     body: workBody,
@@ -809,21 +873,30 @@ function paintWorkCard(): void {
       if (open !== undefined) d.open = open;
     });
   }
-  el.style.display = "";
+  showWorkCardSlot(el);
   if (refocus) {
-    const t = el.querySelector(refocus) as HTMLElement | null;
+    const t = findFocusTarget(el, refocus) ?? (override ? el.querySelector<HTMLElement>("#wikiWorkMapRestore") : null);
     t?.focus({ preventScroll: true });
     if (t && document.activeElement !== t) pendingFocus = refocus;
   }
 }
 
-function fallBackToWhatsNew(): void {
-  workMapFallback = true;
-  const wc = document.getElementById("wikiWorkCard");
-  if (wc) wc.style.display = "none";
-  mountStartCards();
+/** The card takes the slot: What's new hides, its content kept for a later hand-back. */
+function showWorkCardSlot(el: HTMLElement): void {
+  const wn = document.getElementById("wikiWhatsNew");
+  if (wn) wn.style.display = "none";
+  el.style.display = "";
 }
 
+function fallBackToWhatsNew(): void {
+  const runAt = workMountedFor;
+  unmountWorkCard();
+  workFallbackFor = runAt;
+  showWhatsNew();
+}
+
+/** A GET this instance answered without a map body: an HTTP error, or a 2xx
+ *  whose body is not a JSON object (a proxy's login page). */
 class WorkMapHttpError extends Error {
   constructor(readonly status: number) {
     super("HTTP " + status);
@@ -833,25 +906,34 @@ class WorkMapHttpError extends Error {
 async function fetchWorkMapBody(): Promise<WorkMapGetBody> {
   const r = await fetch(withWiki("/api/wiki/work-map"));
   if (!r.ok) throw new WorkMapHttpError(r.status);
-  return (await r.json()) as WorkMapGetBody;
+  const body: unknown = await r.json().catch(() => null);
+  if (!body || typeof body !== "object") throw new WorkMapHttpError(r.status);
+  return body as WorkMapGetBody;
 }
 
-/** One GET, retried once on a network error (not on an HTTP status). */
+/** One GET, retried once after `WORK_GET_RETRY_MS` when the request itself
+ *  failed (not when the instance answered). */
 async function fetchWorkMapBodyRetry(): Promise<WorkMapGetBody> {
   try {
     return await fetchWorkMapBody();
   } catch (err) {
     if (err instanceof WorkMapHttpError) throw err;
+    await new Promise((r) => setTimeout(r, WORK_GET_RETRY_MS));
     return fetchWorkMapBody();
   }
 }
 
 function loadWorkMap(): void {
-  if (workLoading) return;
-  workLoading = true;
+  if (workLoadGen === workGen) return;
+  const gen = workGen;
+  workLoadGen = gen;
+  const settle = (): boolean => {
+    if (workLoadGen === gen) workLoadGen = null;
+    return gen === workGen;
+  };
   fetchWorkMapBodyRetry()
     .then((body) => {
-      workLoading = false;
+      if (!settle()) return;
       if (!body.map) {
         if (!workBody) fallBackToWhatsNew();
         return;
@@ -860,23 +942,25 @@ function loadWorkMap(): void {
       paintWorkCard();
     })
     .catch((err) => {
-      workLoading = false;
+      if (!settle()) return;
       const el = document.getElementById("wikiWorkCard");
       if (!el || workBody) return;
-      // The instance will not serve this map (4xx), or the network failed twice:
-      // What's new takes the slot. A 5xx keeps the card's Retry.
+      // The instance will not serve this map (4xx, or a 2xx that is not JSON),
+      // or the network failed twice: What's new takes the slot. A 5xx keeps
+      // the card's Retry.
       if (!(err instanceof WorkMapHttpError) || err.status < 500) return fallBackToWhatsNew();
       el.innerHTML =
         '<div class="wiki-wn-head"><span class="wiki-wn-title">Your work</span></div>' +
         '<div class="wiki-wn-error"><span>Couldn’t load the work map.</span>' +
         '<button class="wiki-wn-retry" id="wikiWorkMapRetry">Retry</button></div>';
-      el.style.display = "";
+      showWorkCardSlot(el);
     });
 }
 
 function startWorkMapRefresh(): void {
   if (!workBody || workRefresh.phase === "running") return;
   const prevRunAt = workBody.map.runAtMs;
+  const gen = workGen;
   workRefresh = { phase: "running", startedAt: Date.now() };
   paintWorkCard();
   // Never `force`: the route's 10-minute cooldown answers a second click.
@@ -887,6 +971,7 @@ function startWorkMapRefresh(): void {
   })
     .then(async (r) => {
       const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+      if (gen !== workGen) return;
       if (r.status !== 202) {
         workRefresh = { phase: "message", text: refreshRefusalText(r.status, body, Date.now()), tone: "warn" };
         paintWorkCard();
@@ -898,6 +983,7 @@ function startWorkMapRefresh(): void {
       pollWorkMap(prevRunAt, startedAt, Date.now());
     })
     .catch(() => {
+      if (gen !== workGen) return;
       workRefresh = { phase: "message", text: "Re-organize failed: the server did not answer.", tone: "warn" };
       paintWorkCard();
     });
@@ -905,10 +991,12 @@ function startWorkMapRefresh(): void {
 
 function pollWorkMap(prevRunAt: number, startedAt: number, since: number, failures = 0): void {
   if (workPollTimer) clearTimeout(workPollTimer);
+  const gen = workGen;
   workPollTimer = setTimeout(() => {
     workPollTimer = null;
     fetchWorkMapBody()
       .then((body) => {
+        if (gen !== workGen) return;
         const st = pollState(body, prevRunAt, startedAt);
         if (body.map) workBody = body as WorkMapGetBody & { map: WorkMap };
         if (st.state === "updated") {
@@ -928,6 +1016,7 @@ function pollWorkMap(prevRunAt: number, startedAt: number, since: number, failur
         paintWorkCard();
       })
       .catch(() => {
+        if (gen !== workGen) return;
         if (failures + 1 >= WORK_POLL_MAX_FAILURES || Date.now() - since > WORK_POLL_MAX_MS) {
           workRefresh = { phase: "message", text: "Couldn’t check on the re-organize — reload to see the new map.", tone: "warn" };
           paintWorkCard();
@@ -953,8 +1042,13 @@ export function handleWorkCardClick(target: Element): boolean {
   if (done && workBody) {
     const item = workBody.map.needsYou[Number(done.getAttribute("data-wm-done"))];
     if (item) {
+      // Focus moves to the next ✓ (else the previous one, else the restore
+      // control), so a keyboard reader is not dropped to <body>.
+      const buttons = Array.from(document.querySelectorAll<HTMLElement>("#wikiWorkCard [data-wm-done]"));
+      const at = buttons.indexOf(done as HTMLElement);
+      const next = buttons[at + 1] ?? buttons[at - 1];
       writeDoneRaw(writeDone(readDoneRaw(), workBody.map.runAtMs, needKey(item), true));
-      paintWorkCard();
+      paintWorkCard({ done: next?.getAttribute("data-wm-key") ?? "" });
     }
     return true;
   }
