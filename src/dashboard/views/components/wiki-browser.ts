@@ -1728,7 +1728,9 @@ function forcedOpenWhy(what: "group" | "section"): string {
  * (one nowrap unit per count, so it wraps between counts and never clips one).
  */
 function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: number): string {
-  const { effort, members } = entry;
+  const { effort } = entry;
+  // A pinned page is still the effort's: the roll-up counts its ghost too.
+  const members = [...entry.members, ...(entry.ghosts ?? [])];
   const roll = groupRollup("series", members);
   const moves = movesPersonal() ? members.reduce((n, p) => n + (p.movesYou ?? 0), 0) : 0;
   const age = formatRailAge(now - entry.ageMs, now);

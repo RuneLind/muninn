@@ -1194,6 +1194,10 @@ export type RailEntry =
       toggleKey: string;
       /** The Activity rows this fold holds, in rank order. */
       members: WikiListing[];
+      /** The pages of this fold the reader PINNED: real rows under `Pinned`,
+       *  ghost rows here when the fold is open (the series rule). Absent
+       *  (never `[]`) when none. */
+      ghosts?: WikiListing[];
       /** The newest member's Activity age. */
       ageMs: number;
       folded: boolean;
@@ -1758,7 +1762,7 @@ export function buildRail(input: RailInput): RailModel {
   // known: a series Activity ranked renders at its Activity slot, and whether
   // that row is open depends on the lift both sections make.
   /** One Activity slot: a page, or a series one of its pages earned. */
-  type ActivityItem = { row: ActivityRow } | { seriesKey: string } | { effortId: string };
+  type ActivityItem = { row: ActivityRow } | { seriesKey: string } | { effortId: string; rel: string };
   const activityItems: ActivityItem[] = [];
   const activityRows: ActivityRow[] = [];
   /**
@@ -1848,17 +1852,18 @@ export function buildRail(input: RailInput): RailModel {
         if (held.holder === row.page && (!row.via || row.ownRanked)) selfRanked.add(holderKey);
         continue;
       }
-      // P4: a page in an effort folds under that effort's row, placed at the
-      // slot of its best-ranked page. It is still an Activity row for the
-      // claims below, so a pin on it does not draw it twice.
+      // P4: a page in an effort folds under that effort's row. Every row
+      // leaves a slot candidate here; the fold keeps only its NEWEST page's
+      // slot (pruned after this loop), the same age the default-open three
+      // are chosen by.
       const effort = input.efforts?.get(rel);
       if (effort) {
         let bucket = activityEfforts.get(effort.id);
         if (!bucket) {
           bucket = { effort, rows: [] };
           activityEfforts.set(effort.id, bucket);
-          activityItems.push({ effortId: effort.id });
         }
+        activityItems.push({ effortId: effort.id, rel });
         bucket.rows.push(row);
         effortHeld.add(rel);
         activityRows.push(row);
@@ -1866,6 +1871,16 @@ export function buildRail(input: RailInput): RailModel {
       }
       activityRows.push(row);
       activityItems.push({ row });
+    }
+    // The fold's slot: its newest row (smallest age; a tie keeps rank order).
+    const effortSlot = new Map<string, string>();
+    for (const [id, b] of activityEfforts) {
+      const newest = b.rows.reduce((best, r) => (r.ageMs < best.ageMs ? r : best));
+      effortSlot.set(id, normalizeRel(newest.page.relPath));
+    }
+    for (let i = activityItems.length - 1; i >= 0; i--) {
+      const item = activityItems[i]!;
+      if ("effortId" in item && effortSlot.get(item.effortId) !== item.rel) activityItems.splice(i, 1);
     }
     // Activity wins the overlap because the SEEN set is shared: a page it already
     // took is skipped here, whatever spelling the pin list holds it under. There
@@ -1884,7 +1899,13 @@ export function buildRail(input: RailInput): RailModel {
     // placements have to be known before the first chip is counted.
     const pinSeen = new Set(claimed);
     for (const key of threadLifted.keys()) pinSeen.add(key);
-    for (const row of activityRows) pinSeen.add(normalizeRel(row.page.relPath));
+    // An effort fold's row does NOT count as taken: a closed fold draws no
+    // rows, so a pin on its page resolves to `Pinned` and the fold names it as
+    // a ghost — the series rule, so a ★ row never sits inside a closed fold.
+    for (const row of activityRows) {
+      const key = normalizeRel(row.page.relPath);
+      if (!effortHeld.has(key)) pinSeen.add(key);
+    }
     for (const key of selfRanked) pinSeen.add(key);
     pinned = resolve(pins, filtered, pinSeen);
     for (const p of [...threadLifted.keys(), ...activityRows.map((r) => r.page.relPath), ...pinned.map((x) => x.relPath)]) {
@@ -1917,16 +1938,19 @@ export function buildRail(input: RailInput): RailModel {
   if (input.openRelPath && activityEfforts.size) {
     const openKey = normalizeRel(input.openRelPath);
     const parent = parentOf.get(openKey);
-    const holders = new Set([openKey, ...(parent ? [normalizeRel(parent.relPath)] : [])]);
-    for (const b of activityEfforts.values()) {
-      if (b.rows.some((r) => holders.has(normalizeRel(r.page.relPath)))) forcedEffortId = b.effort.id;
-    }
+    // The fold holding the open page itself wins; its parent's fold only when
+    // no fold holds the page.
+    const holding = (key: string) =>
+      [...activityEfforts.values()].find((b) => b.rows.some((r) => normalizeRel(r.page.relPath) === key))?.effort.id ?? null;
+    forcedEffortId = holding(openKey) ?? (parent ? holding(normalizeRel(parent.relPath)) : null);
   }
   let effortEmitted = false;
   /** Emit one effort fold: its row, then (open) its rows under it. */
+  const pinnedKeys = new Set(pinned.map((p) => normalizeRel(p.relPath)));
   const emitEffort = (b: { effort: RailEffort; rows: ActivityRow[] }): void => {
-    const rows = b.rows.filter((r) => !claimed.has(normalizeRel(r.page.relPath)));
-    if (!rows.length) return;
+    const rows = b.rows.filter((r) => !claimed.has(normalizeRel(r.page.relPath)) && !pinnedKeys.has(normalizeRel(r.page.relPath)));
+    const ghosts = b.rows.filter((r) => pinnedKeys.has(normalizeRel(r.page.relPath))).map((r) => r.page);
+    if (!rows.length && !ghosts.length) return;
     const foldKey = normalizeFoldKey(effortFoldKey(b.effort.id));
     const defaultsOpen = effortDefaultOpen.has(b.effort.id);
     const forcedHere = !!input.expandAll || forcedEffortId === b.effort.id;
@@ -1940,7 +1964,8 @@ export function buildRail(input: RailInput): RailModel {
       foldKey,
       toggleKey: defaultsOpen ? closedFoldKey(foldKey) : foldKey,
       members: rows.map((r) => r.page),
-      ageMs: effortAge({ rows }),
+      ...(ghosts.length ? { ghosts } : {}),
+      ageMs: effortAge({ rows: b.rows.filter((r) => !claimed.has(normalizeRel(r.page.relPath))) }),
       folded: !expanded,
       ...(forcedHere ? { forcedOpen: true } : {}),
     });
@@ -1949,6 +1974,7 @@ export function buildRail(input: RailInput): RailModel {
       if (claimed.has(normalizeRel(r.page.relPath))) continue;
       emitRow(r.page, "activity", { activity: railActivityOf(r), newerChildren: r.newerChildren, inEffort: b.effort });
     }
+    for (const p of ghosts) entries.push({ kind: "ghost", section: "activity", page: p, reason: "pinned" });
   };
   /** The ranked members a CLOSED series row in Activity shows under it — never
    *  one a pin lifted to `Pinned`, which is on screen there already. */
