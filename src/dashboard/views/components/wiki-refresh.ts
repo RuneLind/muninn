@@ -75,6 +75,9 @@ export interface WikiPagesResponse {
   /** A bucket-mirrored wiki's health while it is not up to date; absent
    *  otherwise (`src/wiki/bucket-mirror-status.ts`). */
   mirror?: ListingMirrorStatus;
+  /** The work map's run time (`.work-map.json`), present only when the wiki has
+   *  one: the start view then shows the Your work card instead of What's new. */
+  workMap?: { runAt: number };
   error?: string;
 }
 

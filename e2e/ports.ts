@@ -236,6 +236,10 @@ export const E2E_PORTS = {
   "wiki-system-map": 3164,
   // «Walk me through»: ONE muninn over two synthetic wikis, one of them read-only.
   "wiki-walkthrough": 3165,
+  // The Your work card (plan `muninn-wiki-work-map`, P2): ONE muninn over four
+  // synthetic wikis — a fresh map, a stale one, one for the dismiss reload and
+  // one with no map, which still shows What's new.
+  "wiki-work-card": 3190,
   // Tracker links: two temp wikis in ONE process — one declaring a `trackers`
   // block (pills, the widened Jira facet) and one that does not, which must
   // render today's stamped-only facet and no pills.

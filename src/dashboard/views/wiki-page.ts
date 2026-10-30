@@ -2529,6 +2529,87 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wn-retry:hover { color: var(--accent-light); border-color: var(--accent); }
 
+    /* Your work card (start view, work map P2) — What's new's slot and box;
+       every colour is a theme token; text uses --text-soft and the --tone-*
+       inks, which clear 4.5:1 in every palette (the e2e measures each). */
+    .wiki-workcard .wiki-wn-head { flex-wrap: wrap; row-gap: 4px; }
+    .wiki-workcard .wiki-wn-error, .wiki-workcard .wiki-wn-retry, .wiki-workcard .wiki-wn-refresh { color: var(--text-soft); }
+    /* The override above outranks the shared :hover rules; restate them, and the keyboard's twin. */
+    .wiki-workcard .wiki-wn-refresh:not(:disabled):hover, .wiki-workcard .wiki-wn-refresh:not(:disabled):focus-visible,
+    .wiki-workcard .wiki-wn-retry:hover, .wiki-workcard .wiki-wn-retry:focus-visible { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-wm-age, .wiki-wm-model { font-size: 11.5px; color: var(--text-soft); }
+    .wiki-wm-stale {
+      font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 999px;
+      background: var(--tint-warning); color: var(--tone-warn);
+    }
+    .wiki-wm-status { font-size: 12px; color: var(--text-soft); margin: 2px 0 6px; }
+    .wiki-wm-status.warn { color: var(--tone-warn); }
+    .wiki-wm-summary { font-size: 13px; line-height: 1.6; color: var(--text-secondary); margin: 4px 0 8px; }
+    .wiki-wm-link {
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px;
+      text-decoration-color: color-mix(in srgb, var(--accent-light) 45%, transparent);
+    }
+    .wiki-wm-link:hover { text-decoration-color: currentColor; }
+    .wiki-wm-section { margin: 8px 0; }
+    .wiki-wm-section-title, .wiki-wm-lane-title {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+      color: var(--text-soft); margin-bottom: 6px;
+    }
+    .wiki-wm-needs { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+    .wiki-wm-need {
+      background: var(--bg-inset); border: 1px solid var(--border-secondary);
+      border-radius: 8px; padding: 8px 10px; font-size: 12.5px; min-width: 0;
+    }
+    .wiki-wm-need-head { display: flex; align-items: flex-start; gap: 6px; }
+    .wiki-wm-need-title { flex: 1; min-width: 0; color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+    .wiki-wm-kind {
+      font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+      background: var(--tint-neutral); color: var(--text-soft);
+    }
+    .wiki-wm-why, .wiki-wm-action { color: var(--text-secondary); margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-wm-action { color: var(--text-primary); }
+    .wiki-wm-why-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+    .wiki-wm-why.open .wiki-wm-why-text { display: block; }
+    .wiki-wm-why-more {
+      background: none; border: none; padding: 0; margin-top: 2px; font: inherit; font-size: 11.5px;
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+    }
+    .wiki-wm-why-more[hidden] { display: none; }
+    .wiki-wm-done, .wiki-wm-restore {
+      background: transparent; border: 1px solid var(--border-secondary); border-radius: 6px;
+      color: var(--text-soft); font-size: 11px; line-height: 1; padding: 3px 7px;
+      cursor: pointer; font-family: inherit; flex-shrink: 0;
+    }
+    .wiki-wm-restore { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+    .wiki-wm-done:hover, .wiki-wm-restore:hover { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-wm-empty { font-size: 12px; color: var(--text-soft); }
+    .wiki-wm-lane { margin: 8px 0 0; }
+    .wiki-wm-lane-title { cursor: pointer; list-style-position: inside; }
+    .wiki-wm-count { color: var(--text-soft); font-weight: 400; }
+    .wiki-wm-efforts, .wiki-wm-sub { list-style: none; margin: 0; padding: 0; }
+    .wiki-wm-sub { margin: 6px 0 0 14px; padding-left: 10px; border-left: 2px solid var(--border-secondary); }
+    .wiki-wm-effort { padding: 6px 0; border-top: 1px solid var(--border-primary); font-size: 12.5px; min-width: 0; }
+    .wiki-wm-efforts > .wiki-wm-effort:first-child { border-top: none; }
+    .wiki-wm-sub > .wiki-wm-effort { border-top: none; padding: 4px 0; }
+    .wiki-wm-effort-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .wiki-wm-effort-name { font-weight: 600; color: var(--text-primary); }
+    .wiki-wm-state {
+      font-size: 10px; padding: 1px 7px; border-radius: 999px; font-weight: 600;
+      background: var(--tint-neutral); color: var(--text-soft);
+    }
+    .wm-state-active { background: var(--tint-purple); color: var(--accent-light); }
+    .wm-state-blocked { background: var(--tint-warning); color: var(--tone-warn); }
+    .wm-state-shipped { background: var(--tint-success); color: var(--tone-good); }
+    .wiki-wm-active { font-size: 11px; color: var(--text-soft); }
+    .wiki-wm-partof { font-size: 11px; color: var(--text-soft); font-style: italic; }
+    .wiki-wm-oneline { color: var(--text-secondary); margin-top: 2px; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-wm-pages { margin-top: 3px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+    .wiki-wm-sep, .wiki-wm-more { color: var(--text-soft); }
+    .wiki-wm-next { margin-top: 3px; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-wm-next-label { color: var(--text-soft); font-weight: 600; }
+    .wiki-wm-coverage { font-size: 11px; color: var(--text-soft); margin-top: 10px; }
+    .wiki-wm-warnings { margin: 4px 0 0 18px; padding: 0; font-size: 11.5px; color: var(--tone-warn); }
+
     /* Index coverage card (start view) */
     .wiki-index-card {
       background: var(--bg-surface);

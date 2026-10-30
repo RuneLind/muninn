@@ -61,3 +61,12 @@ describe("joinWorkMap prose markers", () => {
     expect(prose(j).map((s) => s.slice(2))).toEqual(Array(8).fill("a b ⟦notes/kept.md⟧ c"));
   });
 });
+
+describe("joinWorkMap effort ids", () => {
+  test("a duplicate effort id keeps the first effort only", () => {
+    const base = mapCiting("x", []);
+    const e = base.efforts[0]!;
+    const m = { ...base, efforts: [{ ...e, id: "a", name: "A1", parent: "b" }, { ...e, id: "a", name: "A2" }, { ...e, id: "b", name: "B1", parent: "a" }, { ...e, id: "b", name: "B2" }] };
+    expect(joinWorkMap(m, []).efforts.map((x) => x.name)).toEqual(["A1", "B1"]);
+  });
+});

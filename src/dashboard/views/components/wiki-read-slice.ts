@@ -60,10 +60,11 @@ export const WIKI_READ_SLICE_HIDDEN_SELECTOR = [
   ".wiki-gardener-icon",
   // Stamp on a provenance ghost row: `POST /api/wiki/provenance/stamp`.
   "[data-prov-stamp]",
-  // The start view's What's new (digest) and Index (index-coverage, reindex)
+  // The start view's Your work, What's new (digest) and Index (index-coverage, reindex)
   // cards, the rail's coverage footer and Similar: the client does not fetch
   // them under the read slice, and these stop an empty box from showing.
   "#wikiWhatsNew",
+  "#wikiWorkCard",
   "#wikiIndexCard",
   "#wikiCoverageFoot",
   "#wikiSimilar",

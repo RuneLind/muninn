@@ -104,10 +104,12 @@ import { RELATED_HOP_LIMIT_DEFAULT } from "../../../wiki/related-constants.ts";
 // The start-view cards (What's new · Index coverage · reindex poller): IMPORTED
 // for the same reason as the share dialog above — one bundle, one module state.
 import {
+  handleWorkCardClick,
   initStartCards,
   loadDigest,
   loadIndexCoverage,
   mountStartCards,
+  refreshWorkCardFromListing,
   startReindex,
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
@@ -979,7 +981,13 @@ function relPathToName(relPath: string): string | null {
   return hit ? hit.name : null;
 }
 
-initStartCards({ withWiki, resolvePageName: relPathToName });
+initStartCards({
+  withWiki,
+  resolvePageName: relPathToName,
+  workMapRunAt: () => workMapRunAt,
+  pages: () => allPages,
+  hrefFor: pageUrlByRelPath,
+});
 initWikiVisuals();
 initRailResize();
 initPaneToggles();
@@ -1502,6 +1510,9 @@ function tabHasFocus(): boolean {
  *  cold sessions memo, or a wiki with no sessions — no section (D11). Not the
  *  "keep the last known value" degrade: stale threads would lift pages the
  *  listing on screen no longer works on. */
+/** The listing's `workMap.runAt` — set on a wiki with a work map, which
+ *  shows the Your work card instead of What's new (`wiki-start-cards.ts`). */
+let workMapRunAt: number | null = null;
 let workFacts: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs" | "evidence">>) | null = null;
 
 /** Is the reader grouping this wiki's rail into families and months? OFF by
@@ -3307,6 +3318,7 @@ function renderStart(): void {
   let html =
     '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>' +
     '<div class="wiki-meta-row"><span class="wiki-dates">Browse by search and filters on the left, or start from a hub below. Click any wikilink to follow connections.</span></div></div>' +
+    '<div id="wikiWorkCard" class="wiki-whatsnew wiki-workcard" style="display:none"></div>' +
     '<div id="wikiWhatsNew" class="wiki-whatsnew" style="display:none"></div>' +
     '<div id="wikiIndexCard" class="wiki-index-card" style="display:none"></div>' +
     // The Stale check's line (PR 2b), beside the Index card rather than in
@@ -5620,6 +5632,7 @@ document.body.addEventListener("click", (e) => {
     loadDigest(true);
     return;
   }
+  if (typeof target.closest === "function" && handleWorkCardClick(target)) return;
   if (target.closest && target.closest("#wikiIndexReindex")) {
     startReindex();
     return;
@@ -9842,6 +9855,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   workedGate = workedGateFor(data.pages, activityWeights, recencyNow(), data.workedCoverage?.asOfMs);
   // Shape-checked thread by thread in `openThreadCards` (`usableThreads`).
   workFacts = data.work && typeof data.work === "object" && Array.isArray(data.work.threads) ? data.work : null;
+  workMapRunAt = typeof data.workMap?.runAt === "number" ? data.workMap.runAt : null;
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one
   // would admit a project the listing on screen no longer has. An older server /
@@ -9904,6 +9918,9 @@ function adoptPagesAndRender(applied: PendingPages): void {
   adoptPagesDataAndFacets(applied);
   renderList();
   refreshStartBody();
+  // A run that finished since the last listing shows at once. Only the Your
+  // work card: What's new and the Index card are not re-mounted on an adopt.
+  if (currentName === null && wikiToolsFlag()) refreshWorkCardFromListing();
 }
 
 /** Everything an adopt does EXCEPT painting the row list and the start body — the
