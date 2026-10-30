@@ -685,6 +685,37 @@ export function activityAgeMs(page: WikiListing, weights: ActivityWeights, now: 
 }
 
 /**
+ * Undo the roll-up for the children `lift` names (work map D14, X3): a row
+ * whose `via` child is lifted becomes the child's own row, and the parent keeps
+ * a row only when its own score cleared the floor (`ownRanked`), dated by its
+ * own signal. Re-sorted by {@link rankActivity}'s order; not re-cut, so the list
+ * can hold one row more than `weights.rows` per split.
+ */
+export function splitLiftedChildren(
+  rows: readonly ActivityRow[],
+  lift: (child: WikiListing) => boolean,
+  weights: ActivityWeights,
+  now: number,
+  gate?: WorkedGate | null,
+): ActivityRow[] {
+  const substitute = gate?.open === true ? gate : null;
+  const out: ActivityRow[] = [];
+  for (const r of rows) {
+    if (!r.via || !lift(r.via)) {
+      out.push(r);
+      continue;
+    }
+    out.push(scorePage(r.via, weights, now, substitute));
+    if (!r.ownRanked) continue;
+    const self = scorePage(r.page, weights, now, substitute);
+    const viaKey = relKey(r.via.relPath);
+    const newer = r.newerChildren?.filter((k) => k !== viaKey);
+    out.push(newer?.length ? { ...self, newerChildren: newer } : self);
+  }
+  return out.sort((a, b) => b.score - a.score || displayTitleOf(a.page).localeCompare(displayTitleOf(b.page)));
+}
+
+/**
  * One page's score.
  *
  * A page with NO date signal at all scores 0 and the floor drops it — there is

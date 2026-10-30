@@ -1852,6 +1852,9 @@ function renderList(cause: "storage" | "local" = "local"): void {
       // Built only when it can be used: the mode on, and no query (a search
       // flattens every group).
       efforts: effortsGrouped() && !filters.q.trim() ? railEffortsIndex(now) : null,
+      // X1: a failed GET is not retried for this run time, so the rail draws
+      // Work threads instead of waiting for it.
+      effortMapFailed: workMapRunAt !== null && railMapFailedAt === workMapRunAt,
     },
     {
       mode,
@@ -5764,13 +5767,17 @@ function railEffortsIndex(now: number): Map<string, RailEffort> | null {
           if (workMapRunAt !== runAt) return;
           if (!r.ok || !r.body?.map) {
             railMapFailedAt = runAt;
+            // X1: repaint so the rail stops waiting and draws Work threads.
+            renderList();
             return;
           }
           renderList();
         })
         .catch(() => {
           settle();
+          if (workMapRunAt !== runAt) return;
           railMapFailedAt = runAt;
+          renderList();
         });
     }
     return null;

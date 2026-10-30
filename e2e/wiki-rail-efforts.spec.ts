@@ -22,6 +22,7 @@
  *  4. Unchecking `group by effort` draws the pre-P4 rail — Work threads back,
  *     plain Activity — and stores `toggle:no-efforts`, through a reload;
  *     re-checking removes it.
+ *     A failed map GET draws Work threads too (X1), and Pick up reads its card.
  *  5. A wiki with no map draws plain Activity, with no checkbox.
  *  6. Families still group the pages in no effort.
  *  7. One map cache: the start view's card, the rail and the effort page send
@@ -426,6 +427,19 @@ test.describe("Wiki rail: group by effort", () => {
     await expect(effortRows(page)).toHaveCount(EFFORT_ORDER.length);
     await expect(page.locator('.wiki-list-sec[data-section="threads"]')).toHaveCount(0);
     expect(await stored()).not.toContain("toggle:no-efforts");
+  });
+
+  test("X1: a failed map GET draws Work threads, and Pick up rows read their card again", async ({ page }) => {
+    await page.route("**/api/wiki/work-map?*", (route) => route.fulfill({ status: 500, json: { error: "boom" } }));
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${MAP}`);
+    await expect(page.locator('.wiki-list-sec[data-section="threads"]')).toHaveCount(1);
+    await expect(pageRow(page, THREAD_PAGE)).toHaveAttribute("data-section", "threads");
+    await expect(effortRows(page)).toHaveCount(0);
+    const pick = page.locator(`#wikiList .wiki-pickup-row[data-pickup="${THREAD_PAGE}"]`);
+    await expect(pick).toHaveCount(1);
+    await expect(pick).not.toContainText("not in Work threads");
+    await expect(pick).toContainText(" in ");
   });
 
   test("a wiki with no map draws plain Activity, with no checkbox, whatever is stored", async ({ page }) => {

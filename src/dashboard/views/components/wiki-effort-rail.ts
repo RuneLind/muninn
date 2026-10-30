@@ -63,6 +63,25 @@ export function effortNeedsOpen(effort: Pick<RailEffort, "needs">, done: Readonl
   return effort.needs.filter((k) => !done.has(k)).length;
 }
 
+/** The efforts that fold (D14): those with a page in Activity. Computed once,
+ *  in `railInputFor`, and handed to `buildRail` as `RailInput.effortFolds`. */
+export function foldedEffortIds(activity: readonly { page: WikiListing }[], efforts: ReadonlyMap<string, RailEffort>): Set<string> {
+  const out = new Set<string>();
+  for (const r of activity) {
+    const e = efforts.get(normalizeRel(r.page.relPath));
+    if (e) out.add(e.id);
+  }
+  return out;
+}
+
+/** The fold that lists `p`, or undefined. A culled page is never listed: it
+ *  stays where culled pages go with retired shown (X2). */
+export function effortFoldOf(p: WikiListing, efforts: ReadonlyMap<string, RailEffort>, folded: ReadonlySet<string>): RailEffort | undefined {
+  if (p.culled) return undefined;
+  const e = efforts.get(normalizeRel(p.relPath));
+  return e && folded.has(e.id) ? e : undefined;
+}
+
 /** Is the reader's mode on? Off on a wiki with no map, whatever is stored. */
 export function effortsOn(openFolds: readonly string[], hasMap: boolean): boolean {
   // The folds store's own comparison (`isFoldOpen`), inlined: `wiki-recents.ts`

@@ -46,6 +46,8 @@ import {
   EFFORTS_OPEN_DEFAULT,
   effortAllKey,
   effortFoldKey,
+  effortFoldOf,
+  foldedEffortIds,
   type RailEffort,
 } from "./wiki-effort-rail.ts";
 
@@ -1371,6 +1373,12 @@ export interface RailInput {
    */
   efforts?: ReadonlyMap<string, RailEffort>;
   /**
+   * The ids of the efforts that fold (`foldedEffortIds` over `activity`),
+   * computed once by `railInputFor`. Absent on a hand-built input ⇒ derived
+   * here by the same function.
+   */
+  effortFolds?: ReadonlySet<string>;
+  /**
    * D14: a page's age as Activity would date it (`activityAgeMs`), for the
    * effort-fold pages Activity did not rank: their order inside the fold and
    * the fold's age. Absent ⇒ such a page sorts last.
@@ -1654,20 +1662,18 @@ export function buildRail(input: RailInput): RailModel {
   // (the caller subtracts the same pages before it groups). An attachment
   // child the map lists is the fold's own row, lifted from under its parent
   // (below); an effort with no Activity page claims nothing.
-  const effortMode = grouped && !!input.efforts?.size;
+  // X1: the mode is on only while a fold forms — no fold, no hidden threads.
+  const folded =
+    grouped && input.efforts?.size
+      ? (input.effortFolds ?? foldedEffortIds((activity ?? []).filter((r) => byRel.has(normalizeRel(r.page.relPath))), input.efforts))
+      : null;
+  const effortMode = !!folded?.size;
   /** page key → the effort fold that lists it. */
   const effortOf = new Map<string, RailEffort>();
   if (effortMode) {
-    const folded = new Set<string>();
-    for (const row of activity ?? []) {
-      const k = normalizeRel(row.page.relPath);
-      const e = input.efforts!.get(k);
-      if (e && byRel.has(k)) folded.add(e.id);
-    }
     for (const p of filtered) {
-      const k = normalizeRel(p.relPath);
-      const e = input.efforts!.get(k);
-      if (e && folded.has(e.id)) effortOf.set(k, e);
+      const e = effortFoldOf(p, input.efforts!, folded!);
+      if (e) effortOf.set(normalizeRel(p.relPath), e);
     }
   }
   if (grouped) {

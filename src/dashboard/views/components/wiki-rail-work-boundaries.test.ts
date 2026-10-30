@@ -649,4 +649,58 @@ describe("railInputFor in `group by effort` (work map D14)", () => {
     expect(off.efforts).toBeUndefined();
     expect(JSON.stringify(buildRail(off).entries)).toBe(JSON.stringify(buildRail(plain).entries));
   });
+
+  test("X1: a failed map GET, an empty joined index, or an index no Activity page is in draws Work threads, as with the box off", () => {
+    const off = JSON.stringify(buildRail(railInputFor(facts(), { ...viewer, effortsOn: false })).entries);
+    const cases: [string, RailWikiFacts][] = [
+      ["failed", { ...facts(), efforts: null, effortMapFailed: true }],
+      ["empty", { ...facts(), efforts: new Map() }],
+      ["no fold", { ...facts(), efforts: new Map([["plans/unlisted.md", e1]]) }],
+    ];
+    for (const [why, f] of cases) {
+      const input = railInputFor(f, { ...viewer, effortsOn: true });
+      expect([why, input.threads?.length ?? 0]).not.toEqual([why, 0]);
+      expect([why, JSON.stringify(buildRail(input).entries)]).toEqual([why, off]);
+    }
+  });
+
+  test("X2: with retired pages shown, a culled page of a folded effort stays out of the fold and keeps its series", () => {
+    const fx = fixture();
+    fx.pages[3] = { ...fx.pages[3]!, culled: true }; // plans/a.md: e1, series alpha
+    const input = railInputFor(facts(fx), { ...viewer, showRetired: true, effortsOn: true });
+    expect(input.seriesGroups!.flatMap((g) => g.members.map((m) => m.relPath))).toContain("plans/a.md");
+    const rail = buildRail(input);
+    const fold = rail.entries.find((e) => e.kind === "effort") as Extract<ReturnType<typeof buildRail>["entries"][number], { kind: "effort" }>;
+    expect(fold.members.map((p) => p.relPath).sort()).toEqual(["plans/k.md", "plans/p.md"]);
+    expect(rail.entries.filter((e) => e.kind === "row" && e.section === "activity" && e.page.relPath === "plans/a.md")).toHaveLength(0);
+  });
+
+  test("X3: an attachment child places its effort's fold; the parent keeps an Activity row only on its own signal", () => {
+    const e2 = effort("e2");
+    const quiet = { work: undefined, gitCreatedMs: NOW - 400 * DAY } as Partial<WikiListing>;
+    const kid = { ...page("plans/kid.html", { edits: 60, focusAgo: 0.5, parent: "notes/par.md", type: "explainer" }) };
+    const sib = { ...page("plans/sib.md"), ...quiet };
+    const idx = new Map<string, RailEffort>([...efforts, ["plans/kid.html", e2], ["plans/sib.md", e2]]);
+    const build = (par: WikiListing) => {
+      const fx = fixture();
+      const pages = [...fx.pages, par, kid, sib];
+      return buildRail(railInputFor({ ...facts({ ...fx, pages }), efforts: idx }, { ...viewer, effortsOn: true }));
+    };
+    type Row = Extract<ReturnType<typeof buildRail>["entries"][number], { kind: "row" }>;
+    type Fold = Extract<ReturnType<typeof buildRail>["entries"][number], { kind: "effort" }>;
+    // No signal of its own: e2 folds through the child, the parent is a plain remainder row.
+    const silent = build({ ...page("notes/par.md", { type: "note" }), ...quiet });
+    const f2 = silent.entries.find((e) => e.kind === "effort" && e.effort.id === "e2") as Fold | undefined;
+    expect(f2?.members.map((p) => p.relPath).sort()).toEqual(["plans/kid.html", "plans/sib.md"]);
+    const parRows = silent.entries.filter((e) => e.kind === "row" && e.page.relPath === "notes/par.md") as Row[];
+    expect(parRows.map((r) => r.section)).toEqual(["all"]);
+    // A signal of its own: the parent keeps an Activity row dated by its OWN change, not the child's.
+    const busy = build(page("notes/par.md", { type: "note", edits: 20, focusAgo: 6 }));
+    const own = busy.entries.find((e) => e.kind === "row" && e.section === "activity" && e.page.relPath === "notes/par.md") as Row | undefined;
+    expect(own?.activity?.via).toBeUndefined();
+    expect(own!.activity!.ageMs).toBeGreaterThan(5 * H);
+    const kidRow = busy.entries.find((e) => e.kind === "row" && e.page.relPath === "plans/kid.html") as Row | undefined;
+    expect(kidRow?.member).toEqual({ label: "E e2", kind: "effort" });
+    expect(kidRow!.activity!.ageMs).toBeLessThan(H);
+  });
 });

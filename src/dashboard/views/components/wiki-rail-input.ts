@@ -8,7 +8,7 @@
  */
 
 import { railPool } from "./wiki-cull-view.ts";
-import { activityAgeMs, pageWorkTerm, rankActivity, type ActivityWeights, type WorkedGate } from "./wiki-activity-rank.ts";
+import { activityAgeMs, pageWorkTerm, rankActivity, splitLiftedChildren, type ActivityWeights, type WorkedGate } from "./wiki-activity-rank.ts";
 import {
   displayTitleOf,
   filterPages,
@@ -63,7 +63,7 @@ import { applyWorkBoundaries, type BoundedThread, type WorkBoundaries } from "./
 import { saveAsSeriesPlan } from "./wiki-work-series.ts";
 import { pageAddedMs } from "./wiki-filter.ts";
 import { normalizeRel } from "./wiki-nav.ts";
-import type { RailEffort } from "./wiki-effort-rail.ts";
+import { effortFoldOf, foldedEffortIds, type RailEffort } from "./wiki-effort-rail.ts";
 import { pickUpRows, workAgeSource, workCardAgeMs, type WorkAgeSource } from "./wiki-pick-up.ts";
 import { WORK_WINDOW_MS, workSessionRef, type IndexWork, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
 import {
@@ -93,6 +93,9 @@ export interface RailWikiFacts {
   /** Work map P4: page key → its effort (`railEffortIndex`), or null/absent on
    *  a wiki with no map (or before the map has loaded). */
   efforts?: ReadonlyMap<string, RailEffort> | null;
+  /** X1: the map GET for this run time failed, so `efforts` will not arrive and
+   *  `group by effort` draws Work threads instead of waiting for it. */
+  effortMapFailed?: boolean;
 }
 
 /** What this viewer has chosen. */
@@ -749,24 +752,33 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
   // counts toward `N of M shown` and can name the fold).
   const pool = railPool(wiki.allPages, viewer.showRetired, filters.q);
   const filtered = sortPages(filterPages(pool, filters), mode, now);
-  // D14: `group by effort` on a map wiki draws no Work threads (unchecking the
-  // box brings them back), so no card lifts a page out of Activity and the
-  // Pick up strip points at no card. Decided on the mode alone, not on the
-  // map having loaded, so the threads do not flash in and out.
+  // D14: `group by effort` on a map wiki draws no Work threads while its folds
+  // replace them (unchecking the box brings them back). X1: they hide only
+  // while the map GET is pending (no thread flash before it lands) or while a
+  // fold forms; a failed GET, an empty index or no fold draws them as with the
+  // box off.
   const effortMode = !!viewer.effortsOn && railSectionsVisible(filters);
-  const efforts = effortMode && wiki.efforts?.size ? wiki.efforts : null;
+  const effortIndex = effortMode && wiki.efforts?.size ? wiki.efforts : null;
   // Activity is ranked BEFORE the groups in this mode: an effort with a page
   // in Activity becomes a fold that claims every page of the effort, so those
   // pages leave the series and family input (`buildRail` skips them too). The
-  // ranking reads no group, so the order changes nothing else.
-  const effortActivity = efforts ? rankActivity(filtered, wiki.activityWeights, now, wiki.workedGate) : null;
-  const foldedEfforts = new Set<string>();
-  for (const r of effortActivity ?? []) {
-    const e = efforts!.get(normalizeRel(r.page.relPath));
-    if (e) foldedEfforts.add(e.id);
-  }
+  // ranking reads no group, so the order changes nothing else. X3: a row an
+  // attachment child in an effort earned becomes the child's own row, and the
+  // parent keeps one only on its own signal.
+  const effortActivity = effortIndex
+    ? splitLiftedChildren(
+        rankActivity(filtered, wiki.activityWeights, now, wiki.workedGate),
+        (c) => !c.culled && effortIndex.has(normalizeRel(c.relPath)),
+        wiki.activityWeights,
+        now,
+        wiki.workedGate,
+      )
+    : null;
+  const foldedEfforts = effortActivity ? foldedEffortIds(effortActivity, effortIndex!) : new Set<string>();
+  const efforts = foldedEfforts.size ? effortIndex : null;
+  const threadsHidden = effortMode && (!!efforts || (!wiki.efforts && !wiki.effortMapFailed));
   const outsideEfforts = (pages: WikiListing[]): WikiListing[] =>
-    foldedEfforts.size ? pages.filter((p) => !foldedEfforts.has(efforts!.get(normalizeRel(p.relPath))?.id ?? "")) : pages;
+    efforts ? pages.filter((p) => !effortFoldOf(p, efforts, foldedEfforts)) : pages;
   // The key jump reads the facets WITHOUT the query (the query is the key). Only
   // computed when the query could name one — on every other keystroke this is the
   // same single `filterPages` pass the rail has always done.
@@ -802,13 +814,13 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
   // cards ⇒ an empty exclude set ⇒ today's ranking (D11).
   // With the Group control (`viewer.workGroup`), the stop the reader chose;
   // without it, today's Threads cards and today's label.
-  const work = effortMode
+  const work = threadsHidden
     ? null
     : viewer.workGroup
     ? openWorkCards(wiki.work, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages, viewer.workGroup)
     : null;
   const ages = workAgeSource(wiki.work, wiki.allPages);
-  const threads: readonly RailWorkCard[] = effortMode
+  const threads: readonly RailWorkCard[] = threadsHidden
     ? []
     : work?.cards ??
     withWorkAges(
@@ -833,15 +845,15 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
     metaTail: isRecencySort(mode),
     // Ranked over the FILTERED pages and on the same anchored instant as the
     // sort; skipped under a query, where `buildRail` renders no sections.
-    activity:
-      effortActivity ??
-      (railSectionsVisible(filters)
+    activity: efforts
+      ? effortActivity!
+      : (railSectionsVisible(filters)
         ? rankActivity(rows, wiki.activityWeights, now, wiki.workedGate, exclude.size ? exclude : undefined)
         : []),
     ...(threads.length ? { threads } : {}),
     ...(threads.length && work ? { workControl: work.control } : {}),
     ...(pickUp.length ? { pickUp } : {}),
-    ...(efforts ? { efforts, pageAgeMs: (p: WikiListing) => activityAgeMs(p, wiki.activityWeights, now, wiki.workedGate) } : {}),
+    ...(efforts ? { efforts, effortFolds: foldedEfforts, pageAgeMs: (p: WikiListing) => activityAgeMs(p, wiki.activityWeights, now, wiki.workedGate) } : {}),
     // The series peek's work term (D12), only while the gate lets work score —
     // a closed gate keeps today's peek as it keeps today's ranking.
     ...(wiki.workedGate?.open ? { workTerm: (p: WikiListing) => pageWorkTerm(p, now) } : {}),
