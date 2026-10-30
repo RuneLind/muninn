@@ -2609,6 +2609,106 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-next-label { color: var(--text-soft); font-weight: 600; }
     .wiki-wm-coverage { font-size: 11px; color: var(--text-soft); margin-top: 10px; }
     .wiki-wm-warnings { margin: 4px 0 0 18px; padding: 0; font-size: 11.5px; color: var(--tone-warn); }
+    /* A linked effort name reads as a link at rest (WCAG 1.4.1), as .wiki-wm-link does. */
+    a.wiki-wm-effort-name {
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px;
+      text-decoration-color: color-mix(in srgb, var(--accent-light) 45%, transparent);
+    }
+    a.wiki-wm-effort-name:hover, a.wiki-wm-effort-name:focus-visible { text-decoration-color: currentColor; }
+
+    /* Effort page (?effort=, work map P3). Text uses --text-primary/-secondary/
+       -soft, --accent-light and the --tone-* inks, which clear 4.5:1 in every
+       palette (e2e/wiki-effort-page.spec.ts measures each). */
+    .wiki-effort { max-width: 860px; }
+    .wiki-ef-crumbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 12.5px; margin-bottom: 8px; color: var(--text-soft); }
+    .wiki-ef-crumbs .wiki-bc-wiki, .wiki-ef-crumb { color: var(--accent-light); text-decoration: none; }
+    .wiki-ef-crumbs .wiki-bc-wiki:hover, .wiki-ef-crumb:hover { text-decoration: underline; }
+    .wiki-ef-sep { color: var(--text-soft); }
+    .wiki-ef-crumb-theme { color: var(--text-secondary); }
+    .wiki-ef-metarow { gap: 10px; }
+    .wiki-ef-meta { font-size: 12px; color: var(--text-soft); }
+    .wiki-ef-tldr {
+      margin: 0 0 18px; padding: 10px 14px; border-radius: 10px; background: var(--bg-surface);
+      border: 1px solid var(--border-secondary); border-top: 3px solid var(--accent);
+    }
+    .wiki-ef-tldr-label {
+      font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--accent-light); margin-bottom: 4px;
+    }
+    .wiki-ef-oneline, .wiki-ef-next { margin: 4px 0 0; font-size: 14px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; }
+    .wiki-ef-next-label { font-weight: 600; color: var(--text-secondary); }
+    .wiki-ef-section { margin: 0 0 20px; }
+    .wiki-ef-h { font-size: 12px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: var(--text-soft); margin: 0 0 8px; }
+    .wiki-ef-count { color: var(--text-soft); font-weight: 400; }
+    .wiki-ef-needs, .wiki-ef-subs, .wiki-ef-pages, .wiki-ef-conns { list-style: none; margin: 0; padding: 0; }
+    .wiki-ef-need {
+      background: var(--bg-inset); border: 1px solid var(--border-secondary);
+      border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-bottom: 8px;
+    }
+    .wiki-ef-need-head { display: flex; align-items: baseline; gap: 6px; }
+    .wiki-ef-need-title { color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+    .wiki-ef-kind {
+      font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+      background: var(--tint-neutral); color: var(--text-soft);
+    }
+    .wiki-ef-need-why { color: var(--text-secondary); margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-ef-need-action { color: var(--text-primary); margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-ef-note { font-size: 12px; color: var(--text-soft); }
+    .wiki-ef-sub, .wiki-ef-page, .wiki-ef-conn { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 4px 0; font-size: 13px; min-width: 0; }
+    .wiki-ef-page { padding-left: calc(var(--ef-depth, 0) * 18px); border-top: 1px solid var(--border-primary); }
+    .wiki-ef-pages > .wiki-ef-page:first-child { border-top: none; }
+    .wiki-ef-branch { color: var(--text-soft); }
+    .wiki-ef-plink, .wiki-ef-elink {
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere;
+      text-decoration-color: color-mix(in srgb, var(--accent-light) 45%, transparent);
+    }
+    .wiki-ef-plink:hover, .wiki-ef-elink:hover { text-decoration-color: currentColor; }
+    /* The shared pill's neutral ink (--text-muted) measured 4.26:1 in Light. */
+    .wiki-ef-page .wiki-status:not(.plan-shipped):not(.plan-in-flight):not(.plan-blocked) { color: var(--text-soft); }
+    .wiki-ef-role {
+      font-size: 10.5px; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+      background: var(--tint-neutral); color: var(--text-soft);
+    }
+    /* Cells share the article width (8–18 px each), so the strip fits from a
+       phone up; below that it scrolls, and the bottom padding holds the
+       session dots, which overflow-x: auto would otherwise clip. */
+    .wiki-ef-strip { display: flex; gap: 10px; align-items: flex-end; overflow-x: auto; padding-bottom: 10px; }
+    .wiki-ef-strip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .wiki-ef-run { display: flex; flex-direction: column; gap: 4px; flex: var(--ef-cells, 1) 1 0; min-width: min-content; max-width: calc(var(--ef-cells, 1) * 21px); }
+    .wiki-ef-run-label { font-size: 11px; color: var(--text-soft); overflow-wrap: anywhere; }
+    .wiki-ef-cells { display: flex; gap: 3px; }
+    .wiki-ef-day {
+      position: relative; flex: 1 1 0; min-width: 8px; max-width: 18px; height: 22px; border-radius: 3px;
+      background: var(--bg-inset); border: 1px solid var(--border-secondary);
+    }
+    .wiki-ef-day.lvl-1 { background: color-mix(in srgb, var(--accent) 30%, var(--bg-inset)); }
+    .wiki-ef-day.lvl-2 { background: color-mix(in srgb, var(--accent) 50%, var(--bg-inset)); }
+    .wiki-ef-day.lvl-3 { background: color-mix(in srgb, var(--accent) 72%, var(--bg-inset)); }
+    .wiki-ef-day.lvl-4 { background: var(--accent); }
+    .wiki-ef-run.old .wiki-ef-day { border-style: dashed; }
+    .wiki-ef-sess {
+      position: absolute; left: 50%; bottom: -8px; width: 5px; height: 5px; margin-left: -2.5px;
+      border-radius: 50%; background: var(--tone-good);
+    }
+    .wiki-ef-strip-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 12px; font-size: 11px; color: var(--text-soft); flex-wrap: wrap; }
+    .wiki-ef-strip-sum { color: var(--text-secondary); }
+    .wiki-ef-legend { font-size: 11.5px; color: var(--text-soft); margin-top: 4px; }
+    .wiki-ef-why { font-size: 13.5px; line-height: 1.6; color: var(--text-secondary); margin: 0; overflow-wrap: anywhere; }
+    .wiki-ef-foot { font-size: 11px; color: var(--text-soft); margin-top: 8px; }
+    .wiki-ef-gone, .wiki-ef-gone-match, .wiki-ef-gone-home { font-size: 14px; color: var(--text-primary); margin: 0 0 10px; }
+    .wiki-ef-status { font-size: 13.5px; color: var(--text-secondary); margin: 0 0 10px; }
+    .wiki-ef-status.warn { color: var(--tone-warn); }
+    .wiki-ef-retry {
+      background: transparent; border: 1px solid var(--border-secondary); border-radius: 6px;
+      color: var(--text-soft); font-size: 12px; padding: 3px 9px; cursor: pointer; font-family: inherit;
+    }
+    .wiki-ef-retry:hover, .wiki-ef-retry:focus-visible { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-ef-conn-title { font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: var(--text-soft); padding: 4px 8px; }
+    .wiki-ef-conns { padding: 0 8px; }
+    .wiki-ef-conn { font-size: 12.5px; }
+    .wiki-ef-conn-why { flex-basis: 100%; font-size: 12px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-ef-conn-gone { color: var(--text-secondary); }
+    .wiki-ef-conn-empty { font-size: 12px; color: var(--text-soft); padding: 4px 8px; }
 
     /* Index coverage card (start view) */
     .wiki-index-card {

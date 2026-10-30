@@ -59,6 +59,8 @@ export interface WorkCardInput<P extends CardPage> {
   /** Needs-you keys whose clamped why the reader opened. */
   openWhy?: ReadonlySet<string>;
   hrefFor(relPath: string): string;
+  /** The reader URL of an effort page; absent, effort names render as text. */
+  effortHref?(id: string): string;
   refresh: RefreshView;
 }
 
@@ -221,7 +223,7 @@ export function workCardHtml<P extends CardPage>(input: WorkCardInput<P>): strin
     headHtml(joined, body, now, input.refresh) +
     (joined.summary.trim() ? `<div class="wiki-wm-summary">${prose(joined.summary)}</div>` : "") +
     needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor) +
-    lanesHtml(joined, now, prose, byKey, hrefFor) +
+    lanesHtml(joined, now, prose, byKey, hrefFor, input.effortHref) +
     coverageHtml(joined)
   );
 }
@@ -323,6 +325,7 @@ function effortHtml<P>(
   hrefFor: (rel: string) => string,
   shown: Set<string> = new Set(),
   partOf?: string,
+  effortHref?: (id: string) => string,
 ): string {
   shown.add(e.id);
   const active = activeLabel(lastActiveDays(e, now));
@@ -331,12 +334,14 @@ function effortHtml<P>(
   const children = childrenOf(e.id).filter((c) => !shown.has(c.id));
   for (const c of children) shown.add(c.id);
   const subs = children.length
-    ? `<ul class="wiki-wm-sub">${children.map((c) => effortHtml(c, childrenOf, now, prose, byKey, hrefFor, shown)).join("")}</ul>`
+    ? `<ul class="wiki-wm-sub">${children.map((c) => effortHtml(c, childrenOf, now, prose, byKey, hrefFor, shown, undefined, effortHref)).join("")}</ul>`
     : "";
   return (
     `<li class="wiki-wm-effort" data-effort-id="${esc(e.id)}">` +
     '<div class="wiki-wm-effort-head">' +
-    `<span class="wiki-wm-effort-name">${esc(e.name)}</span>` +
+    (effortHref
+      ? `<a class="wiki-wm-effort-name" href="${esc(effortHref(e.id))}" data-effort-link="${esc(e.id)}">${esc(e.name)}</a>`
+      : `<span class="wiki-wm-effort-name">${esc(e.name)}</span>`) +
     `<span class="wiki-wm-state wm-state-${esc(e.state)}">${esc(e.state)}</span>` +
     (active ? `<span class="wiki-wm-active">${esc(active)}</span>` : "") +
     (partOf ? `<span class="wiki-wm-partof">part of ${esc(partOf)}</span>` : "") +
@@ -359,6 +364,7 @@ function lanesHtml<P>(
   prose: (s: string) => string,
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
+  effortHref?: (id: string) => string,
 ): string {
   const childrenOf = (id: string) => map.efforts.filter((x) => x.parent === id && rendersUnderParent(x, map.efforts));
   const parentName = (e: JoinedEffort<P>) => (isNestedEffort(e, map.efforts) ? map.efforts.find((x) => x.id === e.parent)?.name : undefined);
@@ -368,7 +374,7 @@ function lanesHtml<P>(
       const before = shown.size;
       const items = efforts
         .filter((e) => !shown.has(e.id))
-        .map((e) => effortHtml(e, childrenOf, now, prose, byKey, hrefFor, shown, parentName(e)))
+        .map((e) => effortHtml(e, childrenOf, now, prose, byKey, hrefFor, shown, parentName(e), effortHref))
         .join("");
       // Every effort rendered in this lane, sub-efforts included.
       const count = shown.size - before;

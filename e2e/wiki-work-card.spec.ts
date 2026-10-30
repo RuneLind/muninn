@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { paintedMeasure, token } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
@@ -180,6 +181,7 @@ test.beforeAll(async () => {
   await seedWiki(SWEEP, null);
   for (let i = 1; i <= 6; i++) await writeFile(path.join(roots[SWEEP]!, `plans/p${i}.mdx`), md(`Page ${i}`), "utf8");
   await writeFile(path.join(roots[SWEEP]!, ".work-map.json"), sweepMapJson(now - 30 * HOUR), "utf8");
+  await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -194,17 +196,7 @@ test.beforeAll(async () => {
     },
     stdio: "ignore",
   });
-  const deadline = Date.now() + 30_000;
-  for (;;) {
-    try {
-      const res = await fetch(`${BASE}/api/wiki/pages?wiki=${NONE}`);
-      if (res.ok) break;
-    } catch {
-      /* not up yet */
-    }
-    if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
-    await new Promise((r) => setTimeout(r, 400));
-  }
+  await waitForOwnServer(server, `${BASE}/api/wiki/pages?wiki=${NONE}`);
 });
 
 test.afterAll(async () => {
@@ -237,6 +229,8 @@ test("a wiki with a map shows the card and never asks for the digest", async ({ 
   // An inline page link is bounded at rest, not only on hover.
   await expect(card.locator('.wiki-wm-summary a[data-relpath="plans/alpha.mdx"]')).toHaveCSS("text-decoration-line", "underline");
   await expect(card.locator(".wiki-wm-summary")).toContainText("the old gone was removed");
+  // An effort name is a link and reads as one at rest, not only on hover.
+  await expect(card.locator('a.wiki-wm-effort-name[data-effort-link="alpha"]')).toHaveCSS("text-decoration-line", "underline");
   // Lanes: Moving open, the other two closed.
   await expect(card.locator('[data-wm-lane="moving"]')).toHaveAttribute("open", "");
   await expect(card.locator('[data-wm-lane="cooling"]')).not.toHaveAttribute("open", "");
@@ -1113,7 +1107,7 @@ for (const theme of THEMES) {
     await openStart(page, SWEEP);
     const card = page.locator("#wikiWorkCard");
     await expect(card.locator(".wiki-wm-stale")).toBeVisible();
-    expect(await card.locator(".wiki-wm-effort-name").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--text-primary"));
+    expect(await card.locator("a.wiki-wm-effort-name").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
     expect(await card.locator(".wiki-wm-summary a").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
     const low: string[] = [];
     const seen = new Set<string>();

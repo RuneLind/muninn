@@ -83,8 +83,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 
 // A size pin, so growth of the bundle every /wiki load inlines is a decision
 // rather than drift. Measured 1,089,983 bytes (272,938 gzipped) on 2026-10-20;
-// raise the bound in the PR that needs it.
-const WIKI_CLIENT_MAX_BYTES = 1_300_000;
+// raise the bound in the PR that needs it. 2026-10-30: the effort page (work map
+// P3) took it from 1,281,098 to 1,301,295 bytes (322,578 → 327,890 gzipped).
+const WIKI_CLIENT_MAX_BYTES = 1_350_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

@@ -22,9 +22,8 @@
 
 import { z } from "zod";
 
-/** An effort id: what the `?effort=` URL and the wiki lint accept. Numeric
- *  slugs are valid. */
-export const EFFORT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+import { EFFORT_ID_RE } from "./ids.ts";
+export { EFFORT_ID_RE };
 
 export const NEEDS_YOU_KINDS = ["decision", "blocked", "followup", "resume", "stale", "drift", "verify"] as const;
 export const EFFORT_STATES = ["active", "cooling", "quiet", "shipped", "blocked", "proposed"] as const;

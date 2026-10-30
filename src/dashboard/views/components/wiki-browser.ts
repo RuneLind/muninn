@@ -111,8 +111,13 @@ import {
   mountStartCards,
   refreshWorkCardFromListing,
   startReindex,
+  workMapDoneSet,
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
+// The effort page (work map P3): pure HTML, wired by `renderEffort` below.
+import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
+import type { WorkMapGetBody } from "./wiki-work-card.ts";
+import type { WorkMap } from "../../../wiki/work-map/schema.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
@@ -928,12 +933,13 @@ function adoptJiraFilter(boot: boolean): void {
   writeJiraParam();
 }
 
-/** Keep the breadcrumb's wiki-crumb href in step with the project filter. It is
- *  built once per ARTICLE render, so after a chip click a middle-click or
- *  copy-link would hand over the filter the reader had before it. */
+/** Keep the wiki-crumb hrefs in step with the facets. They are built once per
+ *  render, so after a chip click a middle-click or copy-link would hand over
+ *  the filter the reader had before it. Every crumb: the hidden breadcrumb
+ *  keeps its old one while the effort page shows its own, and the effort
+ *  page's Efforts links go to the same overview. */
 function refreshCrumbHref(): void {
-  const crumb = document.querySelector(".wiki-bc-wiki");
-  if (crumb) crumb.setAttribute("href", currentStartUrl());
+  document.querySelectorAll(".wiki-bc-wiki, #wikiEffortPage [data-effort-home]").forEach((crumb) => crumb.setAttribute("href", currentStartUrl()));
 }
 /**
  * Return to the overview from wherever the reader is — the breadcrumb's wiki
@@ -951,9 +957,13 @@ function refreshCrumbHref(): void {
  */
 function goToStart(): void {
   const target = currentStartUrl();
+  // `sameStartUrl` reads an `?effort=` URL as the overview it sits on, so the
+  // effort page's way home must push explicitly.
+  const onEffort = new URLSearchParams(location.search).has(EFFORT_PARAM);
   if (
-    !sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI), wikiToolsFlag(), staleTabAvailable()) &&
-    location.pathname + location.search !== target
+    onEffort ||
+    (!sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI), wikiToolsFlag(), staleTabAvailable()) &&
+      location.pathname + location.search !== target)
   ) {
     history.pushState({}, "", target);
   }
@@ -987,6 +997,7 @@ initStartCards({
   workMapRunAt: () => workMapRunAt,
   pages: () => allPages,
   hrefFor: pageUrlByRelPath,
+  effortHref: effortHrefFor,
 });
 initWikiVisuals();
 initRailResize();
@@ -1284,6 +1295,8 @@ function renderProjectChips(): void {
 function repaintForProject(autoOpen = true): void {
   renderProjectChips();
   refreshCrumbHref();
+  // The effort page builds every href with the facets; re-paint it in place.
+  refreshEffortFromListing();
   renderList();
   refreshStartBody();
   syncFilters(autoOpen);
@@ -1359,6 +1372,7 @@ function renderJiraChips(): void {
 function repaintForJira(autoOpen = true): void {
   renderJiraChips();
   refreshCrumbHref();
+  refreshEffortFromListing();
   renderList();
   refreshStartBody();
   syncFilters(autoOpen);
@@ -5553,6 +5567,181 @@ function renderIssueGraph(): void {
   applyDisplay();
 }
 
+// ── Effort page (work map P3) ─────────────────────────────────────────
+/** The effort the article pane shows, or null. Read only while
+ *  `#wikiEffortPage` is in the pane: every other view replaces it. */
+let effortOpen: string | null = null;
+/** The last map the effort page fetched, kept while the listing's run time
+ *  matches it. */
+let effortMapCache: WorkMap | null = null;
+/** The map GET in flight and the run time it was started for: a repaint while
+ *  it runs (a facet change, an adopt) waits on it instead of sending another. */
+let effortMapFetch: { runAt: number; done: Promise<{ ok: boolean; status: number; body: WorkMapGetBody | null }> } | null = null;
+
+/** An effort's reader URL, carrying the facets an article URL carries. */
+function effortHrefFor(id: string): string {
+  return urlWithJira(urlWithProject(effortUrl(WIKI, id), filters.project), filters.jira);
+}
+
+/** The effort a URL's `?effort=` names, or null for none. A blank value is
+ *  dropped from the address bar and a case variant (`Drift`) is written as its
+ *  slug, both in place (`replaceState`): neither is a navigation. A value that
+ *  is already a valid effort id (`a--b`) is kept as typed. */
+function effortFromUrl(params: URLSearchParams): string | null {
+  const raw = params.get(EFFORT_PARAM);
+  if (raw === null) return null;
+  const id = canonicalEffortParam(raw);
+  if (id !== raw) {
+    const u = new URL(location.href);
+    if (id === null) u.searchParams.delete(EFFORT_PARAM);
+    else u.searchParams.set(EFFORT_PARAM, id);
+    history.replaceState(history.state, "", u.pathname + u.search + u.hash);
+  }
+  return id;
+}
+
+/** Open an effort from a link: push its URL (unless already there), render. */
+function openEffort(id: string): void {
+  const target = effortHrefFor(id);
+  if (location.pathname + location.search !== target) history.pushState({}, "", target);
+  renderEffort(id);
+}
+
+/** The markup the effort page last wrote into the article and Connections
+ *  panes, so a background re-join that changes nothing writes nothing. */
+let effortShown: { article: string; conn: string } | null = null;
+
+/** A selector that finds the focused control again after a re-render: the
+ *  `data-focus-key` the effort view gives every focusable element. */
+function effortFocusKey(el: Element | null): string | null {
+  const key = el instanceof HTMLElement ? el.getAttribute("data-focus-key") : null;
+  return key === null ? null : `[data-focus-key="${CSS.escape(key)}"]`;
+}
+
+/** Write the effort page's two panes. A navigation paints and scrolls to the
+ *  top. A background re-join (`background`) skips the write when the markup is
+ *  unchanged (a swap drops focus and wipes a selection), and otherwise keeps
+ *  the scroll as it is at paint time and focus on the same control. */
+function writeEffortPanes(wrap: HTMLElement, article: string, connHtml: string, background: boolean): void {
+  const conn = document.getElementById("connBody");
+  if (background && effortShown && effortShown.article === article && effortShown.conn === connHtml) return;
+  const active = document.activeElement;
+  const holder = background && active ? (wrap.contains(active) ? wrap : conn?.contains(active) ? conn : null) : null;
+  const key = holder ? effortFocusKey(active) : null;
+  const scroll = background ? wrap.scrollTop : 0;
+  wrap.innerHTML = article;
+  wrap.scrollTop = scroll;
+  if (conn) conn.innerHTML = connHtml;
+  effortShown = { article, conn: connHtml };
+  if (holder && key) (holder.querySelector(key) as HTMLElement | null)?.focus({ preventScroll: true });
+}
+
+/** `?effort=<id>`: the effort page fills the article pane, as the issue graph
+ *  does, with no page behind it. A navigation: it applies a stashed listing
+ *  first (as `renderStart`/`loadPage` do), then paints. */
+function renderEffort(id: string): void {
+  // A listing stashed while an article was open lands now, before the map is
+  // joined to `allPages`; the list is repainted from it like `renderStart` does.
+  if (applyPendingPages()) renderList();
+  consumeUrlLens();
+  abortAgentRuns();
+  if (!document.getElementById("articleWrap")) return;
+  setAtlasFull(false);
+  currentName = null;
+  setCurrentRelPath(null);
+  currentPageHash = null;
+  graphMode = false;
+  graphIssue = "";
+  removeGraph();
+  hideBreadcrumb();
+  // No page is open: the rail's highlight goes (the class alone; the rows stay).
+  document.querySelectorAll("#wikiList .wiki-list-item.active").forEach((r) => r.classList.remove("active"));
+  effortOpen = id;
+  paintEffort(id, false);
+}
+
+/** Join the map to the listing and paint it. The map comes from the cache when
+ *  the listing's run time still matches it. A navigation paints a loading
+ *  state before a fetch and the error pane when it fails; a background re-join
+ *  keeps the effort on screen through both. */
+function paintEffort(id: string, background: boolean): void {
+  const wrap = document.getElementById("articleWrap");
+  if (!wrap) return;
+  const seq = pageViewSeq;
+  // Built at each write, so a pane painted after the GET carries the facets
+  // set while it was in flight.
+  const head = () => ({ wiki: WIKI, startHref: currentStartUrl(), id });
+  const noMapConn = '<div class="wiki-ef-conn-empty">No work map.</div>';
+  const paint = (map: WorkMap) => {
+    const view = effortView({
+      map,
+      pages: allPages,
+      id,
+      wiki: WIKI,
+      startHref: currentStartUrl(),
+      hrefFor: pageUrlByRelPath,
+      effortHref: effortHrefFor,
+      pill: statusPillHtml,
+      done: workMapDoneSet(map.runAtMs),
+      now: Date.now(),
+    });
+    writeEffortPanes(wrap, view.article, view.connections, background);
+  };
+  const runAt = workMapRunAt;
+  if (runAt === null) {
+    effortMapCache = null;
+    writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
+    return;
+  }
+  if (effortMapCache && effortMapCache.runAtMs === runAt) {
+    paint(effortMapCache);
+    return;
+  }
+  if (!background) writeEffortPanes(wrap, effortStatusHtml(head(), "loading"), '<div class="wiki-ef-conn-empty">Loading…</div>', false);
+  const current = () => effortOpen === id && pageViewSeq === seq && !!document.getElementById("wikiEffortPage");
+  if (effortMapFetch?.runAt !== runAt) {
+    const done = fetch(withWiki("/api/wiki/work-map")).then(async (r) => ({
+      ok: r.ok,
+      status: r.status,
+      body: (await r.json().catch(() => null)) as WorkMapGetBody | null,
+    }));
+    const entry = { runAt, done };
+    effortMapFetch = entry;
+    const clear = () => {
+      if (effortMapFetch === entry) effortMapFetch = null;
+    };
+    done.then(clear, clear);
+  }
+  effortMapFetch.done
+    .then((r) => {
+      const body = r.body;
+      if (!current()) return;
+      if (!r.ok || !body || typeof body !== "object") throw new Error(r.ok ? "malformed response" : `HTTP ${r.status}`);
+      if (!body.map) {
+        writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
+        return;
+      }
+      effortMapCache = body.map;
+      paint(body.map);
+    })
+    .catch((err: Error) => {
+      if (!current()) return;
+      // A background re-join that fails keeps the effort being read; the next
+      // adopt or a navigation tries again.
+      if (background) return;
+      writeEffortPanes(wrap, effortStatusHtml(head(), "error", err.message), noMapConn, false);
+    });
+}
+
+/** A listing adopted, or a facet changed, while the effort page is open:
+ *  re-join it (a page may have been renamed, a new run landed, or the hrefs
+ *  carry another facet). Paint only: no navigation side effects, and nothing
+ *  written when the markup is unchanged. */
+function refreshEffortFromListing(): void {
+  if (effortOpen === null || !document.getElementById("wikiEffortPage")) return;
+  paintEffort(effortOpen, true);
+}
+
 const GRAPH_NODE_SEL = `#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`;
 document.addEventListener("mouseover", (e) => {
   const t = e.target as HTMLElement | null;
@@ -5635,6 +5824,22 @@ document.body.addEventListener("click", (e) => {
   if (typeof target.closest === "function" && handleWorkCardClick(target)) return;
   if (target.closest && target.closest("#wikiIndexReindex")) {
     startReindex();
+    return;
+  }
+  // Effort links (the Your work card, the effort page) open in the reader;
+  // a modifier or middle click keeps the anchor's own href.
+  const effortLink = target.closest ? target.closest("[data-effort-link]") : null;
+  const effortHome = target.closest ? target.closest("[data-effort-home]") : null;
+  const effortRetry = target.closest ? target.closest("#wikiEffortRetry") : null;
+  if (effortLink || effortHome || effortRetry) {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    e.preventDefault();
+    if (effortLink) openEffort(effortLink.getAttribute("data-effort-link") || "");
+    else if (effortRetry && effortOpen !== null) renderEffort(effortOpen);
+    else if (effortHome) {
+      goToStart();
+      document.getElementById("wikiWorkCard")?.scrollIntoView({ block: "start" });
+    }
     return;
   }
   const crumb = target.closest ? target.closest(".wiki-bc-wiki") : null;
@@ -7024,7 +7229,9 @@ window.addEventListener("popstate", () => {
     return;
   }
   const page = params.get("page");
+  const effort = page ? null : effortFromUrl(params);
   if (page) loadPage(page, false);
+  else if (effort !== null) renderEffort(effort);
   else if (graphMode && graphIssue && hasTracker()) renderIssueGraph();
   else {
     syncStartTabFromUrl();
@@ -9921,6 +10128,7 @@ function adoptPagesAndRender(applied: PendingPages): void {
   // A run that finished since the last listing shows at once. Only the Your
   // work card: What's new and the Index card are not re-mounted on an adopt.
   if (currentName === null && wikiToolsFlag()) refreshWorkCardFromListing();
+  refreshEffortFromListing();
 }
 
 /** Everything an adopt does EXCEPT painting the row list and the start body — the
@@ -9962,7 +10170,13 @@ function bootRender(applied: PendingPages): void {
     loadPageByRelPath(relPath, false);
   } else {
     const page = params.get("page");
+    const effort = page ? null : effortFromUrl(params);
     if (page) loadPage(page, false);
+    // `?effort=<id>`: the effort page (work map P3), with no page behind it.
+    else if (effort !== null) {
+      renderEffort(effort);
+      renderList();
+    }
     // `?display=graph&issue=jira:KEY` with no page: the issue's graph alone.
     else if (graphMode && graphIssue && hasTracker()) {
       renderIssueGraph();
@@ -9982,15 +10196,18 @@ function applyPagesResponse(applied: PendingPages): void {
  *
  *  Data + facets only: every caller (`renderStart`, `loadPage`/`loadPageByRelPath`
  *  → `fetchAndRenderPage`/`loadExplainer`) paints the list itself a moment later,
- *  so painting here would mean two full 953-row renders per user action. */
-function applyPendingPages(): void {
+ *  so painting here would mean two full 953-row renders per user action.
+ *  `renderEffort` paints no list of its own, so it repaints it when this
+ *  returns true (something was applied). */
+function applyPendingPages(): boolean {
   const pending = takePending(pagesRefresh);
-  if (!pending) return;
+  if (!pending) return false;
   if (!pagesRefresh.bootRendered) {
     bootRender(pending);
-    return;
+    return true;
   }
   adoptPagesDataAndFacets(pending);
+  return true;
 }
 
 /** Paint the boot-only "this wiki isn't usable" pane. Suppressed once anything has
