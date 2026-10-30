@@ -63,6 +63,7 @@ import { applyWorkBoundaries, type BoundedThread, type WorkBoundaries } from "./
 import { saveAsSeriesPlan } from "./wiki-work-series.ts";
 import { pageAddedMs } from "./wiki-filter.ts";
 import { normalizeRel } from "./wiki-nav.ts";
+import type { RailEffort } from "./wiki-effort-rail.ts";
 import { pickUpRows, workAgeSource, workCardAgeMs, type WorkAgeSource } from "./wiki-pick-up.ts";
 import { WORK_WINDOW_MS, workSessionRef, type IndexWork, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
 import {
@@ -89,6 +90,9 @@ export interface RailWikiFacts {
   /** The work threads (`/api/wiki/pages`' `work`); absent or null with no
    *  sessions memo, which renders no section (D11). */
   work?: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs" | "evidence">>) | null;
+  /** Work map P4: page key → its effort (`railEffortIndex`), or null/absent on
+   *  a wiki with no map (or before the map has loaded). */
+  efforts?: ReadonlyMap<string, RailEffort> | null;
 }
 
 /** What this viewer has chosen. */
@@ -99,6 +103,9 @@ export interface RailViewer {
   filters: WikiFilters;
   showRetired: boolean;
   familiesOn: boolean;
+  /** `group by effort` (P4): on unless the reader stored `toggle:no-efforts`.
+   *  Reads nothing on a wiki with no map. */
+  effortsOn?: boolean;
   pins: string[];
   openFolds: string[];
   /** The page the reader has open, if any. */
@@ -811,6 +818,7 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
     ...(threads.length ? { threads } : {}),
     ...(threads.length && work ? { workControl: work.control } : {}),
     ...(pickUp.length ? { pickUp } : {}),
+    ...(viewer.effortsOn && wiki.efforts?.size && railSectionsVisible(filters) ? { efforts: wiki.efforts } : {}),
     // The series peek's work term (D12), only while the gate lets work score —
     // a closed gate keeps today's peek as it keeps today's ranking.
     ...(wiki.workedGate?.open ? { workTerm: (p: WikiListing) => pageWorkTerm(p, now) } : {}),

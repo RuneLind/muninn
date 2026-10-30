@@ -228,6 +228,13 @@ test.afterAll(async () => {
   for (const r of Object.values(roots)) await rm(r, { recursive: true, force: true });
 });
 
+// The card and the rail keep polling `/api/wiki/work-map` after a test's last
+// assertion; a handler still awaiting `route.fetch()` when the page closes
+// throws "Response has been disposed" (CI, 2026-10-30). Same as wiki-stale-tab.
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: "ignoreErrors" });
+});
+
 /** Open a wiki's start view, recording every `/api/wiki/digest` request. */
 async function openStart(page: Page, wiki: string): Promise<string[]> {
   const digests: string[] = [];

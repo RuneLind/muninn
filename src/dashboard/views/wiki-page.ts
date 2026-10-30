@@ -370,13 +370,13 @@ export async function renderWikiPage(opts?: {
        measurement the group chip's own comment records), under the 4.5:1 floor.
        Pinned by the spec's both-themes contrast case, which measures against
        whatever actually paints behind it. */
-    .wiki-group-toggle, .wiki-retired-toggle {
+    .wiki-group-toggle, .wiki-efforts-toggle, .wiki-retired-toggle {
       display: inline-flex; align-items: center; gap: 4px;
       font-size: 11.5px; color: var(--text-secondary); cursor: pointer;
       user-select: none;
     }
-    .wiki-group-toggle input, .wiki-retired-toggle input { margin: 0; accent-color: var(--accent); cursor: pointer; }
-    .wiki-retired-toggle[hidden] { display: none; }
+    .wiki-group-toggle input, .wiki-efforts-toggle input, .wiki-retired-toggle input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+    .wiki-retired-toggle[hidden], .wiki-efforts-toggle[hidden] { display: none; }
     /* A retired row the toggle (or a search) put on screen: italic, never a
        seventh flex item — the marker word rides the row's hover. */
     .wiki-list-item.culled .wiki-list-title { font-style: italic; }
@@ -822,6 +822,38 @@ export async function renderWikiPage(opts?: {
     .wiki-rollup-part.s-in-flight { color: var(--accent-light); }
     .wiki-rollup-sep { color: var(--text-muted); }
     .wiki-group-fold:hover .wiki-group-rollup { color: var(--text-secondary); }
+    /* An EFFORT fold row (work map P4): two controls side by side, never one
+       button — the caret folds the effort, the name opens its page (D2) — so
+       each is its own tab stop with its own focus ring. Line one is caret ·
+       name · age; the meta line (state · ✋ N · plan-status roll-up) wraps
+       between its parts and never clips one. The name ellipsizes on one line,
+       so a long name never widens the rail. */
+    .wiki-list-group.effort {
+      display: flex; align-items: flex-start; gap: 6px; padding: 5px 10px 5px 6px;
+    }
+    .wiki-effort-fold {
+      flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; margin-top: 0; padding: 0; border: 0; border-radius: 4px;
+      background: none; color: var(--text-muted); cursor: pointer; font-family: inherit;
+    }
+    .wiki-effort-fold:hover { color: var(--text-secondary); background: var(--bg-surface); }
+    .wiki-effort-fold[disabled] { cursor: default; }
+    .wiki-effort-fold:focus-visible, .wiki-effort-name:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 1px;
+    }
+    .wiki-effort-body { flex: 1 1 0; min-width: 0; }
+    .wiki-effort-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+    .wiki-effort-name {
+      flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 12.5px; line-height: 18px; font-weight: 600; color: var(--accent-light);
+      text-decoration: none; border-radius: 2px;
+    }
+    .wiki-effort-name:hover { text-decoration: underline; }
+    .wiki-effort-age {
+      flex: 0 0 auto; font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+    }
+    .wiki-effort-meta { margin-top: 0; }
+    .wiki-effort-state { color: var(--text-secondary); }
     /* \`N of M shown\` — a facet is hiding part of the series. Its OWN line under
        the name, because the census is the one thing on a group row a reader has
        to READ and the name is allowed to take the rest. */
@@ -3369,6 +3401,12 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
           <div class="wiki-options-pane" id="wikiOptions" role="dialog" aria-label="View options" hidden>
             <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
               <input type="checkbox" id="wikiGroupFamilies">group families
+            </label>
+            <!-- group by effort (work map P4): ON by default on a wiki with a
+                 work map, so it is the one toggle painted checked; shown only
+                 where the listing says a map exists. -->
+            <label class="wiki-efforts-toggle" id="wikiEffortsToggle" title="Fold Activity under the work map's efforts" hidden>
+              <input type="checkbox" id="wikiGroupEfforts">group by effort
             </label>
             <!-- Retired (culled) pages, per wiki. Hidden on a wiki with none and
                  while the facets select none (unless checked); the label and its

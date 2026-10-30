@@ -118,6 +118,7 @@ import {
 import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
 import type { WorkMapGetBody } from "./wiki-work-card.ts";
 import type { WorkMap } from "../../../wiki/work-map/schema.ts";
+import { EFFORTS_OFF_TOGGLE_KEY, effortsOn, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
@@ -157,6 +158,7 @@ import {
   isPinnedRelPath,
   pairedByWhy,
   parseRelatedOrder,
+  railMemberWhy,
   storageEventTouchesThreadPin,
   threadPinSettle,
   threadPinStep,
@@ -995,6 +997,10 @@ initStartCards({
   withWiki,
   resolvePageName: relPathToName,
   workMapRunAt: () => workMapRunAt,
+  // One map cache for the card, the rail and the effort page (P4). The ↻ poll
+  // asks `fresh` and hands a newer map back through `adoptWorkMap`.
+  fetchWorkMap: (fresh) => (fresh || workMapRunAt === null ? getWorkMap() : workMapFetchFor(workMapRunAt)),
+  adoptWorkMap,
   pages: () => allPages,
   hrefFor: pageUrlByRelPath,
   effortHref: effortHrefFor,
@@ -1537,6 +1543,13 @@ function familiesOn(): boolean {
   return isFoldOpen(openFolds, GROUP_FAMILIES_TOGGLE_KEY);
 }
 
+/** Is `group by effort` on for this wiki (P4)? On by default wherever the
+ *  listing says a work map exists; `toggle:no-efforts` stores the reader's
+ *  OFF. */
+function effortsGrouped(): boolean {
+  return effortsOn(openFolds, workMapRunAt !== null);
+}
+
 /** Is the reader showing RETIRED (culled) pages in the rail? Off by default, and
  *  remembered per wiki as a `toggle:` mode key in the same folds store. */
 function showRetired(): boolean {
@@ -1711,6 +1724,57 @@ function forcedOpenWhy(what: "group" | "section"): string {
   return filters.jira ? "the Jira filter shows every matching page" : `the open page is in this ${what}`;
 }
 
+/**
+ * One effort fold row: caret · name (link) · age on line one, then a meta
+ * line — the effort's state, ✋ N over its rows, and the plan-status roll-up
+ * (one nowrap unit per count, so it wraps between counts and never clips one).
+ */
+function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: number): string {
+  const { effort } = entry;
+  // A pinned page is still the effort's: the roll-up counts its ghost too.
+  const members = [...entry.members, ...(entry.ghosts ?? [])];
+  const roll = groupRollup("series", members);
+  const moves = movesPersonal() ? members.reduce((n, p) => n + (p.movesYou ?? 0), 0) : 0;
+  const age = formatRailAge(now - entry.ageMs, now);
+  const n = members.length;
+  const what = `${n} page${n === 1 ? "" : "s"} of ${effort.name}`;
+  const caretWhy = entry.forcedOpen ? forcedOpenWhy("group") : `${entry.folded ? "Show" : "Hide"} the ${what}`;
+  const sep = '<span class="wiki-rollup-sep"> ·</span>';
+  const parts = [
+    `<span class="wiki-rollup-part wiki-effort-state">${esc(effort.state)}</span>`,
+    ...(moves > 0 ? [`<span class="wiki-rollup-part wiki-effort-moves" title="${moves} step${moves === 1 ? "" : "s"} waiting on you">✋ ${moves}</span>`] : []),
+    ...roll.parts.map(
+      (p) => `<span class="wiki-rollup-part${p.word === "shipped" || p.word === "in-flight" ? " s-" + p.word : ""}">${p.n} ${esc(p.word)}</span>`,
+    ),
+  ];
+  // The separator rides inside the part before it, so a wrapped line never
+  // starts with one (the series roll-up's rule).
+  const meta = parts.map((h, i) => (i < parts.length - 1 ? h.replace(/<\/span>$/, sep + "</span>") : h)).join(" ");
+  return (
+    `<div class="wiki-list-group effort${entry.folded ? " folded" : ""}" data-section="${esc(entry.section)}" data-group="${esc(entry.foldKey)}" data-effort="${esc(effort.id)}">` +
+    `<button type="button" class="wiki-effort-fold${entry.folded ? " folded" : ""}" data-fold-key="${esc(entry.toggleKey)}"` +
+    ` aria-expanded="${entry.folded ? "false" : "true"}"${entry.forcedOpen ? " disabled" : ""}` +
+    ` aria-label="${esc(caretWhy)}" title="${esc(caretWhy)}"><span class="wiki-fold-caret" aria-hidden="true">▸</span></button>` +
+    `<div class="wiki-effort-body">` +
+    `<div class="wiki-effort-line">` +
+    `<a class="wiki-effort-name" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}" title="${esc(`Open the effort page: ${effort.name}`)}">${esc(effort.name)}</a>` +
+    (age ? `<span class="wiki-effort-age" title="${esc(`${entry.members.length ? "newest page drawn here" : "newest pinned page"} ${age}`)}">${esc(age)}</span>` : "") +
+    `</div>` +
+    `<small class="wiki-group-rollup wiki-effort-meta">${meta}</small>` +
+    `</div></div>`
+  );
+}
+
+/** The `group by effort` checkbox: shown only on a wiki with a work map,
+ *  checked from the store (absent `toggle:no-efforts` = on). */
+function paintEffortsToggle(): void {
+  const wrap = document.getElementById("wikiEffortsToggle");
+  const box = document.getElementById("wikiGroupEfforts") as HTMLInputElement | null;
+  if (!wrap || !box) return;
+  wrap.hidden = workMapRunAt === null;
+  box.checked = effortsOn(openFolds, true);
+}
+
 /** True while `renderList` puts focus back on the rail control its repaint replaced. */
 let restoringRailFocus = false;
 
@@ -1725,6 +1789,7 @@ let restoringRailFocus = false;
  *  something after its own render still wins. */
 function renderList(cause: "storage" | "local" = "local"): void {
   staleRailPainted = new Map();
+  paintEffortsToggle();
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
@@ -1759,13 +1824,23 @@ function renderList(cause: "storage" | "local" = "local"): void {
   // The input assembly is `railInputFor` (`wiki-rail-input.ts`), shared with the
   // work replay.
   const railInput = railInputFor(
-    { allPages, projects, activityWeights, workedGate, work: workFacts },
+    {
+      allPages,
+      projects,
+      activityWeights,
+      workedGate,
+      work: workFacts,
+      // Built only when it can be used: the mode on, and no query (a search
+      // flattens every group).
+      efforts: effortsGrouped() && !filters.q.trim() ? railEffortsIndex(now) : null,
+    },
     {
       mode,
       now,
       filters,
       showRetired: showRetired(),
       familiesOn: familiesOn(),
+      effortsOn: effortsGrouped(),
       pins,
       openFolds,
       openRelPath: currentRelPath || undefined,
@@ -1956,6 +2031,13 @@ function renderList(cause: "storage" | "local" = "local"): void {
         `</button></div>`;
       return;
     }
+    // An EFFORT fold row (work map P4): two controls, never one button — the
+    // caret folds and the name opens the effort page (D2). Not a page row: no
+    // `data-relpath`, and `#wikiCount` does not count it.
+    if (entry.kind === "effort") {
+      html += effortRowHtml(entry, now);
+      return;
+    }
     // A GHOST row: a series member the reader pinned, so the real row is under
     // `Pinned` and this is a dim placeholder saying where it went. Deliberately
     // NOT a `.wiki-list-item` and carrying no `data-relpath` — that selector
@@ -2062,14 +2144,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
     const childWhy = entry.child
       ? pairedByWhy(entry.child.pairedBy, displayTitleOf(entry.child.parent))
       : "";
-    // A row inside a family, month or series says which one on hover — the
-    // group's own row carries the label, and a reader scrolling past the top of
-    // a long open group has nothing else to read it from.
-    const memberWhy = entry.member
-      ? entry.member.kind === "month"
-        ? `In ${entry.member.label}`
-        : `In the ${entry.member.label} ${entry.member.kind === "series" ? "series" : "family"}`
-      : "";
+    const memberWhy = railMemberWhy(entry.member);
     // The latest dot (a pseudo-element on the series rail) says WHAT it is here,
     // because a dot cannot: the words live in the reader header.
     const latestWhy = entry.latest ? "newest plan in this series that is not retired" : "";
@@ -5571,12 +5646,98 @@ function renderIssueGraph(): void {
 /** The effort the article pane shows, or null. Read only while
  *  `#wikiEffortPage` is in the pane: every other view replaces it. */
 let effortOpen: string | null = null;
-/** The last map the effort page fetched, kept while the listing's run time
- *  matches it. */
-let effortMapCache: WorkMap | null = null;
+type WorkMapGet = { ok: boolean; status: number; body: WorkMapGetBody | null };
+/** The one map cache the Your work card, the rail and the effort page read
+ *  and write, keyed on the listing's run time (whatever run the body carries). */
+let workMapCache: { runAt: number; body: WorkMapGetBody & { map: WorkMap } } | null = null;
 /** The map GET in flight and the run time it was started for: a repaint while
  *  it runs (a facet change, an adopt) waits on it instead of sending another. */
-let effortMapFetch: { runAt: number; done: Promise<{ ok: boolean; status: number; body: WorkMapGetBody | null }> } | null = null;
+let effortMapFetch: { runAt: number; done: Promise<WorkMapGet> } | null = null;
+
+function getWorkMap(): Promise<WorkMapGet> {
+  return fetch(withWiki("/api/wiki/work-map")).then(async (r) => ({
+    ok: r.ok,
+    status: r.status,
+    body: (await r.json().catch(() => null)) as WorkMapGetBody | null,
+  }));
+}
+
+/** The map for one run time: the cache, else the GET in flight, else a new
+ *  GET whose map lands in the cache. A failed GET is not cached. */
+function workMapFetchFor(runAt: number): Promise<WorkMapGet> {
+  if (workMapCache?.runAt === runAt) return Promise.resolve({ ok: true, status: 200, body: workMapCache.body });
+  if (effortMapFetch?.runAt !== runAt) {
+    const done = getWorkMap().then((r) => {
+      if (r.ok && r.body?.map && workMapRunAt === runAt) workMapCache = { runAt, body: r.body as WorkMapGetBody & { map: WorkMap } };
+      return r;
+    });
+    const entry = { runAt, done };
+    effortMapFetch = entry;
+    const clear = () => {
+      if (effortMapFetch === entry) effortMapFetch = null;
+    };
+    done.then(clear, clear);
+  }
+  return effortMapFetch!.done;
+}
+
+/** A map the card's ↻ poll fetched: when it is a newer run than the listing's,
+ *  it becomes the cache and the run time, and the rail and an open effort
+ *  page repaint from it without waiting for a listing refresh. */
+function adoptWorkMap(body: WorkMapGetBody): void {
+  if (!body.map || workMapRunAt === null || body.map.runAtMs <= workMapRunAt) return;
+  workMapRunAt = body.map.runAtMs;
+  workMapCache = { runAt: workMapRunAt, body: body as WorkMapGetBody & { map: WorkMap } };
+  renderList();
+  if (effortOpen !== null && document.getElementById("wikiEffortPage")) paintEffort(effortOpen, true);
+}
+
+/** The run time whose map GET failed for the rail, so a repaint does not
+ *  re-fetch on every render; a new run time (or a reload) tries again. */
+let railMapFailedAt: number | null = null;
+/** The run time the rail is waiting on a map GET for (one listener per GET). */
+let railMapPending: number | null = null;
+/** The last effort index the rail built, and what it was built from. */
+let railEffortMemo: { map: WorkMap; pages: WikiListing[]; index: Map<string, RailEffort> } | null = null;
+
+/**
+ * The rail's effort index (P4), or null: no map on this wiki, the map not
+ * loaded yet (the GET starts here and repaints the rail when it lands, so
+ * Activity draws plain until then), or a failed GET. Reads the shared map
+ * cache, so the reader never fetches the map twice for one run time.
+ */
+function railEffortsIndex(now: number): Map<string, RailEffort> | null {
+  const runAt = workMapRunAt;
+  if (runAt === null) return null;
+  const map = workMapCache?.runAt === runAt ? workMapCache.body.map : null;
+  if (!map) {
+    if (railMapFailedAt !== runAt && railMapPending !== runAt) {
+      railMapPending = runAt;
+      const settle = () => {
+        if (railMapPending === runAt) railMapPending = null;
+      };
+      workMapFetchFor(runAt)
+        .then((r) => {
+          settle();
+          if (workMapRunAt !== runAt) return;
+          if (!r.ok || !r.body?.map) {
+            railMapFailedAt = runAt;
+            return;
+          }
+          renderList();
+        })
+        .catch(() => {
+          settle();
+          railMapFailedAt = runAt;
+        });
+    }
+    return null;
+  }
+  if (railEffortMemo?.map !== map || railEffortMemo.pages !== allPages) {
+    railEffortMemo = { map, pages: allPages, index: railEffortIndex(map, allPages, now) };
+  }
+  return railEffortMemo.index;
+}
 
 /** An effort's reader URL, carrying the facets an article URL carries. */
 function effortHrefFor(id: string): string {
@@ -5642,7 +5803,7 @@ function writeEffortPanes(wrap: HTMLElement, article: string, connHtml: string, 
 function renderEffort(id: string): void {
   // A listing stashed while an article was open lands now, before the map is
   // joined to `allPages`; the list is repainted from it like `renderStart` does.
-  if (applyPendingPages()) renderList();
+  applyPendingPages();
   consumeUrlLens();
   abortAgentRuns();
   if (!document.getElementById("articleWrap")) return;
@@ -5654,8 +5815,9 @@ function renderEffort(id: string): void {
   graphIssue = "";
   removeGraph();
   hideBreadcrumb();
-  // No page is open: the rail's highlight goes (the class alone; the rows stay).
-  document.querySelectorAll("#wikiList .wiki-list-item.active").forEach((r) => r.classList.remove("active"));
+  // No page is open: repaint the rail, so the highlight goes and a fold the
+  // page forced open gets its caret back.
+  renderList();
   effortOpen = id;
   paintEffort(id, false);
 }
@@ -5689,30 +5851,16 @@ function paintEffort(id: string, background: boolean): void {
   };
   const runAt = workMapRunAt;
   if (runAt === null) {
-    effortMapCache = null;
     writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
     return;
   }
-  if (effortMapCache && effortMapCache.runAtMs === runAt) {
-    paint(effortMapCache);
+  if (workMapCache?.runAt === runAt) {
+    paint(workMapCache.body.map);
     return;
   }
   if (!background) writeEffortPanes(wrap, effortStatusHtml(head(), "loading"), '<div class="wiki-ef-conn-empty">Loading…</div>', false);
   const current = () => effortOpen === id && pageViewSeq === seq && !!document.getElementById("wikiEffortPage");
-  if (effortMapFetch?.runAt !== runAt) {
-    const done = fetch(withWiki("/api/wiki/work-map")).then(async (r) => ({
-      ok: r.ok,
-      status: r.status,
-      body: (await r.json().catch(() => null)) as WorkMapGetBody | null,
-    }));
-    const entry = { runAt, done };
-    effortMapFetch = entry;
-    const clear = () => {
-      if (effortMapFetch === entry) effortMapFetch = null;
-    };
-    done.then(clear, clear);
-  }
-  effortMapFetch.done
+  workMapFetchFor(runAt)
     .then((r) => {
       const body = r.body;
       if (!current()) return;
@@ -5721,7 +5869,6 @@ function paintEffort(id: string, background: boolean): void {
         writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
         return;
       }
-      effortMapCache = body.map;
       paint(body.map);
     })
     .catch((err: Error) => {
@@ -6144,9 +6291,10 @@ function refocusRailControl(selector: string, pressed: Element): void {
 }
 
 /** The rail control `el` is, as a selector by its own key that finds it again
- *  after a repaint; null for anything else (a page row, a link). Covers the
- *  Group button and its menu items, `+ N more threads`, the shared context's
- *  `+N`, a 📌 (by its card's key, never by position), and every
+ *  after a repaint; null for anything else (a page row, a link other than an
+ *  effort fold's name). Covers the Group button and its menu items, `+ N more
+ *  threads`, the shared context's `+N`, a 📌 (by its card's key, never by
+ *  position), an effort fold's name (by effort id), and every
  *  `[data-fold-key]` fold in the rail: thread, group and child cards, series
  *  and folder groups, Bookkeeping, under either spelling. */
 function railControlSelector(el: Element | null): string | null {
@@ -6165,6 +6313,8 @@ function railControlSelector(el: Element | null): string | null {
     "data-work-reset",
     // A Pick up row, by its page: kept through the renders a jump runs.
     "data-pickup",
+    // An effort fold's name, by effort id: opening the effort repaints the rail.
+    "data-effort-link",
   ]) {
     const v = el.getAttribute(attr);
     if (v !== null) return at(attr, v);
@@ -7082,6 +7232,18 @@ if (familiesBox) {
   familiesBox.checked = familiesOn();
   familiesBox.addEventListener("change", () => setGroupFamilies(familiesBox.checked));
 }
+
+// `group by effort` (P4), per wiki: the same store, inverted — the stored
+// `toggle:no-efforts` is the OFF, so a click writes the exception to an ON
+// default. Painted (and shown) from the listing on every render, since the
+// map can appear or go with any adopt.
+const effortsBox = document.getElementById("wikiGroupEfforts") as HTMLInputElement | null;
+function setGroupEfforts(on: boolean): void {
+  if (effortsOn(openFolds, true) !== on) openFolds = toggleFolded(WIKI, EFFORTS_OFF_TOGGLE_KEY);
+  paintEffortsToggle();
+  renderList();
+}
+if (effortsBox) effortsBox.addEventListener("change", () => setGroupEfforts(effortsBox.checked));
 
 // `Show retired (N)`, per wiki: the same store and discipline as `group
 // families`. A flip changes the pool every facet counts from, so the facets,
