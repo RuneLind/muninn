@@ -1969,18 +1969,18 @@ export function buildRail(input: RailInput): RailModel {
       .slice(0, EFFORTS_OPEN_DEFAULT)
       .map((x) => x.id),
   );
-  // The fold the open page forces open: it, or the parent it is attached to,
-  // is a DRAWN row of that fold. A pinned page is a ghost there and renders
-  // under Pinned, so it forces nothing (the finding-72 rule for parents).
+  // The fold the open page forces open: the fold that draws it as a row; else
+  // the fold that draws its parent's row, but only while the page renders
+  // under that parent (not `lifted` — the finding-72 rule above); else none.
+  // A pinned page is a ghost and `lifted`, so it forces nothing either way.
+  // The table in `wiki-effort-rail.test.ts` enumerates the cases.
   let forcedEffortId: string | null = null;
   if (input.openRelPath && activityEfforts.size) {
     const openKey = normalizeRel(input.openRelPath);
     const parent = parentOf.get(openKey);
-    // The fold holding the open page itself wins; its parent's fold only when
-    // no fold holds the page.
     const holding = (key: string) =>
       [...effortDraws].find(([, d]) => d.rows.some((r) => normalizeRel(r.page.relPath) === key))?.[0] ?? null;
-    forcedEffortId = holding(openKey) ?? (parent ? holding(normalizeRel(parent.relPath)) : null);
+    forcedEffortId = holding(openKey) ?? (parent && !lifted.has(openKey) ? holding(normalizeRel(parent.relPath)) : null);
   }
   let effortEmitted = false;
   /** Emit one effort fold: its row, then (open) its rows under it. */

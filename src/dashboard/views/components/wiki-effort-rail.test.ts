@@ -361,6 +361,71 @@ describe("buildRail — effort folds (P4)", () => {
     expect(activitySeq(g.entries)).toEqual(["effort:a", "notes/p1.md", "effort:b", "plans/b1.mdx"]);
   });
 
+  describe("class check: which fold the open page forces open", () => {
+    // Placement of the open page × where its parent is. X and Y are older
+    // than a–d, so neither starts open and any `forcedOpen` is the rule's.
+    type Place = "drawnX" | "ghostX" | "pinnedNoFold" | "plainRow" | "underParent" | "rankedChild" | "offRail";
+    type Par = "none" | "drawnY" | "ghostY" | "plainRow" | "sameX";
+    // Dropped: underParent/rankedChild × none (a child has a parent);
+    // plainRow × any parent (a ranked page with a parent IS rankedChild);
+    // pinnedNoFold/underParent/rankedChild × sameX (the open page is in no
+    // fold, so sameX is drawnY); offRail × any parent (parentOf is built
+    // from the filtered set, so a page off the rail has no parent there).
+    const CASES: [Place, Par, "x" | "y" | null, "activity" | "pinned" | null][] = [
+      ["drawnX", "none", "x", "activity"],
+      ["drawnX", "drawnY", "x", "activity"],
+      ["drawnX", "ghostY", "x", "activity"],
+      ["drawnX", "plainRow", "x", "activity"],
+      ["drawnX", "sameX", "x", "activity"],
+      ["ghostX", "none", null, "pinned"],
+      ["ghostX", "drawnY", null, "pinned"], // reproduced: was y
+      ["ghostX", "ghostY", null, "pinned"],
+      ["ghostX", "plainRow", null, "pinned"],
+      ["ghostX", "sameX", null, "pinned"],
+      ["pinnedNoFold", "none", null, "pinned"],
+      ["pinnedNoFold", "drawnY", null, "pinned"], // reproduced: was y
+      ["pinnedNoFold", "ghostY", null, "pinned"],
+      ["pinnedNoFold", "plainRow", null, "pinned"],
+      ["plainRow", "none", null, "activity"],
+      ["underParent", "drawnY", "y", "activity"],
+      ["underParent", "ghostY", null, "pinned"],
+      ["underParent", "plainRow", null, "activity"],
+      ["rankedChild", "drawnY", null, "activity"],
+      ["rankedChild", "ghostY", null, "activity"],
+      ["rankedChild", "plainRow", null, "activity"],
+      ["offRail", "none", null, null],
+    ];
+    test.each(CASES)("open page %s, parent %s ⇒ forced fold %p, row in %p", (place, par, want, section) => {
+      const PAR = page({ relPath: "plans/par.mdx" });
+      const OPEN = page({ relPath: "plans/open.html", ...(par !== "none" ? { parent: PAR.relPath } : {}) });
+      const pages = [...ALL, ...(place === "offRail" ? [] : [OPEN]), ...(par !== "none" ? [PAR] : [])];
+      const effMap = new Map(EFFORTS);
+      const activity = [...ACTIVITY];
+      const pins: string[] = [];
+      if (["drawnX", "ghostX", "plainRow", "rankedChild"].includes(place)) activity.push(act(OPEN, 2, 10));
+      if (place === "drawnX" || place === "ghostX") effMap.set(OPEN.relPath, eff("x"));
+      if (place === "ghostX" || place === "pinnedNoFold") pins.push(OPEN.relPath);
+      if (par !== "none") activity.push(act(PAR, 1, 11));
+      if (par === "drawnY" || par === "ghostY") effMap.set(PAR.relPath, eff("y"));
+      if (par === "sameX") effMap.set(PAR.relPath, eff("x"));
+      if (par === "ghostY") pins.push(PAR.relPath);
+      const m = buildRail({
+        filtered: pages, facetOnly: pages, filters: INERT, pins, activity, efforts: effMap,
+        openRelPath: place === "offRail" ? "plans/nowhere.mdx" : OPEN.relPath,
+      });
+      const folds = efforts(m.entries);
+      expect(folds.filter((e) => e.forcedOpen).map((e) => e.effort.id)).toEqual(want ? [want] : []);
+      // forcedOpen disables the caret, so a forced fold is never folded.
+      for (const f of folds) if (f.forcedOpen) expect(f.folded).toBe(false);
+      const openRows = rows(m.entries).filter((r) => r.page.relPath === OPEN.relPath);
+      expect(openRows.map((r) => r.section)).toEqual(section ? [section] : []);
+      // The parent's own chip is forced exactly when the open page renders under it.
+      const parRow = rows(m.entries).find((r) => r.page.relPath === PAR.relPath);
+      if (parRow?.children) expect(!!parRow.forcedOpen).toBe(place === "underParent");
+      expectOneRowPerPage(m.entries);
+    });
+  });
+
   test("effortFoldKey", () => {
     expect(effortFoldKey("drift")).toBe("effort:drift");
   });
