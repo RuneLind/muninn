@@ -762,16 +762,13 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
   // Activity is ranked BEFORE the groups in this mode: an effort with a page
   // in Activity becomes a fold that claims every page of the effort, so those
   // pages leave the series and family input (`buildRail` skips them too). The
-  // ranking reads no group, so the order changes nothing else. X3: a row an
-  // attachment child in an effort earned becomes the child's own row, and the
-  // parent keeps one only on its own signal.
+  // ranking reads no group, so the order changes nothing else. X3: every
+  // attachment child in an effort that clears the floor gets its own row, and
+  // its parent's row is rebuilt without it.
   const effortActivity = effortIndex
     ? splitLiftedChildren(
         rankActivity(filtered, wiki.activityWeights, now, wiki.workedGate),
         (c) => !c.culled && effortIndex.has(normalizeRel(c.relPath)),
-        wiki.activityWeights,
-        now,
-        wiki.workedGate,
       )
     : null;
   const foldedEfforts = effortActivity ? foldedEffortIds(effortActivity, effortIndex!) : new Set<string>();

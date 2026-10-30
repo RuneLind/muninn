@@ -435,6 +435,12 @@ describe("effortView", () => {
     expect(article).toContain("1 item marked done on the Your work card.");
   });
 
+  test("Needs you shows each item from its own place in the map, not the effort's first item", () => {
+    const { article } = view(m, "main");
+    expect(article).toContain('<span class="wiki-ef-kind">verify</span><span class="wiki-ef-need-title">Done one</span>');
+    expect(article.split("Two drafts.").length - 1).toBe(1);
+  });
+
   test("pages in lineage order with role and the reader's status pill", () => {
     const { article } = view(m, "main");
     expect(article).toMatch(/data-relpath="plans\/a.mdx"[^>]*>Plan A<\/a><span class="wiki-ef-role">plan<\/span><span class="pill">in-flight<\/span>[\s\S]*data-depth="1" title="Derived from Plan A"[\s\S]*Plan &lt;B&gt;/);

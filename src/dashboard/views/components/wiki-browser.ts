@@ -116,7 +116,7 @@ import {
 } from "./wiki-start-cards.ts";
 // The effort page (work map P3): pure HTML, wired by `renderEffort` below.
 import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
-import { proseHtml, proseText, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
+import { proseText, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import type { WorkMap } from "../../../wiki/work-map/schema.ts";
 import { EFFORTS_OFF_TOGGLE_KEY, effortNeedsOpen, effortsOn, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
@@ -1768,8 +1768,8 @@ function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: numbe
   );
 }
 
-/** The prose lookup an effort fold's summary renders its `⟦relPath⟧`
- *  markers through (the card's `proseHtml`), rebuilt when the listing changes. */
+/** The lookup an effort fold's summary reads its `⟦relPath⟧` markers through
+ *  (the card's `proseText`), rebuilt when the listing changes. */
 let effortProseMemo: { pages: WikiListing[]; byKey: Map<string, CardPage> } | null = null;
 
 /** An open effort fold's head (D14): its one-line summary, then «Open effort →». */
@@ -1777,11 +1777,11 @@ function effortIntroHtml(effort: RailEffort): string {
   if (effortProseMemo?.pages !== allPages) {
     effortProseMemo = { pages: allPages, byKey: new Map(allPages.map((p) => [normalizeRelPath(p.relPath), p as CardPage])) };
   }
-  // Clamped to three lines (CSS); the title carries the whole summary.
-  const { byKey } = effortProseMemo;
-  const line = effort.oneLine.trim()
-    ? `<span class="wiki-effort-oneline" title="${esc(proseText(effort.oneLine, byKey))}">${proseHtml(effort.oneLine, byKey, pageUrlByRelPath)}</span> `
-    : "";
+  // Plain text, no links (they would be Tab stops on clipped lines): clamped
+  // to three lines (CSS), the title carries the whole summary. The effort
+  // page, one click away, links the pages.
+  const text = effort.oneLine.trim() ? esc(proseText(effort.oneLine, effortProseMemo.byKey)) : "";
+  const line = text ? `<span class="wiki-effort-oneline" title="${text}">${text}</span> ` : "";
   return (
     `<div class="wiki-effort-intro" data-section="activity" data-effort="${esc(effort.id)}">${line}` +
     `<a class="wiki-effort-open" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}">Open effort →</a></div>`

@@ -1366,11 +1366,13 @@ export interface RailInput {
   workControl?: RailWorkControl;
   /**
    * Work map P4/D14: page key (normalized relPath) → its effort, handed in
-   * only while `group by effort` is on and the wiki has a map. An effort with
-   * a page in Activity becomes one fold there, at its newest Activity page's
-   * slot, listing every page of the effort in this listing; a page with no
-   * effort (or whose effort has no Activity page) stays an ordinary row.
-   * Work threads are not drawn while it is set. Absent ⇒ plain Activity.
+   * by `railInputFor` only while `group by effort` is on and at least one
+   * effort folds (`effortFolds` non-empty). An effort with a page in Activity
+   * becomes one fold there, at its newest Activity page's slot, listing every
+   * page of the effort in this listing; a page with no effort (or whose effort
+   * has no Activity page) stays an ordinary row. Work threads hide only while
+   * a fold forms (or the map GET is pending), which `railInputFor` decides.
+   * Absent ⇒ plain Activity.
    */
   efforts?: ReadonlyMap<string, RailEffort>;
   /**

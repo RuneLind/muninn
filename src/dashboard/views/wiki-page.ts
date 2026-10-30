@@ -856,9 +856,8 @@ export async function renderWikiPage(opts?: {
     .wiki-effort-state { color: var(--text-secondary); }
     /* An OPEN effort fold's head (D14): the map's one-line summary, then
        «Open effort →». Indented to the member rows' depth. The summary is
-       clamped to three lines (full text in its title) and «Open effort →»
-       sits outside the clamp on its own line; keyboard focus on a summary
-       link unclamps it, so a link on a hidden line never takes focus unseen. */
+       plain text clamped to three lines (full text in its title), and
+       «Open effort →» sits outside the clamp on its own line. */
     .wiki-effort-intro {
       padding: 0 10px 4px 20px; font-size: 11.5px; line-height: 1.45;
       color: var(--text-secondary); overflow-wrap: anywhere;
@@ -866,10 +865,6 @@ export async function renderWikiPage(opts?: {
     .wiki-effort-oneline {
       display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
     }
-    .wiki-effort-oneline:focus-within { display: block; overflow: visible; }
-    .wiki-effort-oneline .wiki-wm-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 2px; }
-    .wiki-effort-intro .wiki-wm-link { color: var(--accent-light); text-decoration: none; }
-    .wiki-effort-intro .wiki-wm-link:hover { text-decoration: underline; }
     .wiki-effort-open { color: var(--accent-light); text-decoration: none; white-space: nowrap; border-radius: 2px; }
     .wiki-effort-open:hover { text-decoration: underline; }
     .wiki-effort-open:focus-visible, .wiki-effort-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

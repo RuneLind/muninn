@@ -11,6 +11,7 @@ import {
   parseDone,
   pollState,
   proseHtml,
+  proseText,
   refreshRefusalText,
   workCardHtml,
   writeDone,
@@ -220,6 +221,12 @@ describe("prose and ages", () => {
     expect(html).toContain("</a>" + sep + "gone moved");
     expect(html).toContain("</a>" + sep + "<a ");
     expect(html).toContain("</a>, gone");
+  });
+  test("proseText reads markers as titles with the same separator proseHtml puts between back-to-back markers", () => {
+    const byKey = new Map([["plans/a.mdx", PAGES[0]!]]);
+    expect(proseText("a<b ⟦plans/a.mdx⟧ ⟦plans/gone.mdx⟧ moved; ⟦plans/a.mdx⟧⟦plans/a.mdx⟧, ⟦plans/gone.mdx⟧", byKey)).toBe(
+      "a<b Plan A · gone moved; Plan A · Plan A, gone",
+    );
   });
   test("formatAge and isWorkMapStale", () => {
     expect(formatAge(30_000)).toBe("just now");

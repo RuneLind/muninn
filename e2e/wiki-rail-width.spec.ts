@@ -233,7 +233,7 @@ const EF_PAGES: Array<[string, string, string]> = [
   ["plans/ef-short.md", "Short effort page", "in-flight"],
   ["plans/ef-e.md", "Effort page E with a title long enough to wrap inside the fold", "in-flight"],
 ];
-// ~300 chars: long enough that an unclamped summary runs to ~15 lines at 260 px.
+// ~300 chars: long enough that an unclamped summary runs to 8 lines at 260 px (measured).
 const EF_ONELINE =
   "Carry ⟦plans/ef-a.md⟧ through review, then fold the follow-up, the report and the explainer into one long-running piece of work that keeps going " +
   "until every open question is settled, every reviewer has signed off, the explainer matches the code and the report records what the campaign measured.";
@@ -938,27 +938,35 @@ test.describe("Wiki rail: effort fold rows at the width budgets (work map P4)", 
     expect(bad).toEqual([]);
   });
 
-  test("B1: at 260px a ~300-char summary is clamped to three lines, its title holds the whole text, «Open effort →» shows whole below it, and focusing a summary link unclamps it", async ({ page }) => {
+  test("B1: at 260px a ~300-char summary is plain text clamped to three lines, its title holds the whole text, it holds no link or Tab stop, and «Open effort →» shows whole below it and stays put when Tab reaches it", async ({ page }) => {
     expect(EF_ONELINE.length).toBeGreaterThanOrEqual(290);
     await openEf(page, 260);
     const intro = page.locator('#wikiList .wiki-effort-intro[data-effort="long"]');
     const line = intro.locator(".wiki-effort-oneline");
+    const open = intro.locator("a.wiki-effort-open");
     const lines = () => line.evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
     expect(await lines()).toBe(3);
     expect(await line.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
-    await expect(line).toHaveAttribute("title", EF_ONELINE.replace("⟦plans/ef-a.md⟧", "Effort page A"));
+    const full = EF_ONELINE.replace("⟦plans/ef-a.md⟧", "Effort page A");
+    await expect(line).toHaveAttribute("title", full);
+    await expect(line).toHaveText(full);
+    expect(await line.evaluate((el) => el.querySelectorAll("a, button, [tabindex], input, select, textarea").length)).toBe(0);
     const g = await intro.evaluate((el) => {
-      const open = el.querySelector(".wiki-effort-open") as HTMLElement;
+      const o = el.querySelector(".wiki-effort-open") as HTMLElement;
       const one = el.querySelector(".wiki-effort-oneline") as HTMLElement;
       const ir = el.getBoundingClientRect();
-      const or = open.getBoundingClientRect();
+      const or = o.getBoundingClientRect();
       return { below: or.top >= one.getBoundingClientRect().bottom - 0.5, inside: or.left >= ir.left && or.right <= ir.right + 0.5 && or.bottom <= ir.bottom + 0.5, oneLine: or.height < 20 };
     });
     expect(g).toEqual({ below: true, inside: true, oneLine: true });
-    await line.locator("a.wiki-wm-link").first().focus();
-    await page.keyboard.press("Shift+Tab");
+    // Tab from the effort's name lands on «Open effort →» next, and nothing moves.
+    const top = () => open.evaluate((el) => el.getBoundingClientRect().top);
+    const before = await top();
+    await page.locator('#wikiList .wiki-list-group.effort[data-effort="long"] .wiki-effort-name').focus();
     await page.keyboard.press("Tab");
-    expect(await lines()).toBeGreaterThan(3);
+    expect(await open.evaluate((el) => el === document.activeElement)).toBe(true);
+    expect(await lines()).toBe(3);
+    expect(await top()).toBe(before);
   });
 
   test("D14: from 260 to 400px the open fold's body — a long summary, role chips, «+1 more» — stays inside the rail", async ({ page }) => {

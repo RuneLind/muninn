@@ -49,7 +49,7 @@ export interface RailEffort {
   name: string;
   state: EffortState;
   /** The map's one-line summary, raw: `⟦relPath⟧` markers and all. The
-   *  painter renders it through the card's `proseHtml`. */
+   *  painter renders it as plain text through the card's `proseText`. */
   oneLine: string;
   /** The keys (`needKey`) of the map's Needs-you items for this effort; the
    *  painter subtracts the ones ✓ on the card, as the effort page does. */

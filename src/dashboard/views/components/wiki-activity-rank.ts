@@ -584,6 +584,35 @@ export function workedGateFor(
   };
 }
 
+/** A family row's inputs, for {@link splitLiftedChildren}: the parent's own
+ *  row and its children's rows that clear the floor. */
+const familyOf = new WeakMap<ActivityRow, { self: ActivityRow; children: ActivityRow[] }>();
+
+/** One family's row: the better of the parent's own row and its children's
+ *  (ties to the parent), or null when neither clears the floor. */
+function rollUpFamily(self: ActivityRow, children: readonly ActivityRow[]): ActivityRow | null {
+  // Ties go to the parent's own row: "the page changed" is the plainer claim.
+  let best = self;
+  for (const c of children) if (c.score > best.score) best = c;
+  if (best.score < ACTIVITY_MIN_SCORE) return null;
+  const selfNewest = newestOf.get(self) ?? 0;
+  const newer = children.filter((c) => (newestOf.get(c) ?? 0) > selfNewest).map((c) => relKey(c.page.relPath));
+  // Copied, never mutated: `splitLiftedChildren` rolls the same `self` up again.
+  if (best === self) return newer.length ? { ...self, newerChildren: newer } : self;
+  const row: ActivityRow = {
+    page: self.page,
+    kind: best.kind,
+    score: best.score,
+    why: `${childNoun(best.page)} "${displayTitleOf(best.page)}" ${best.why}`,
+    ageMs: best.ageMs,
+    ...(best.worked ? { worked: true as const } : {}),
+    via: best.page,
+    ...(self.score >= ACTIVITY_MIN_SCORE ? { ownRanked: true as const } : {}),
+  };
+  if (newer.length) row.newerChildren = newer;
+  return row;
+}
+
 /**
  * Rank pages by activity, best first, truncated to `weights.rows`.
  *
@@ -647,28 +676,9 @@ export function rankActivity(
   const rows: ActivityRow[] = [];
   for (const [key, self] of own) {
     const children = (kids.get(key) ?? []).filter((r) => r.score >= ACTIVITY_MIN_SCORE);
-    // Ties go to the parent's own row: "the page changed" is the plainer claim.
-    let best = self;
-    for (const c of children) if (c.score > best.score) best = c;
-    if (best.score < ACTIVITY_MIN_SCORE) continue;
-    const selfNewest = newestOf.get(self) ?? 0;
-    const newer = children
-      .filter((c) => (newestOf.get(c) ?? 0) > selfNewest)
-      .map((c) => relKey(c.page.relPath));
-    const row: ActivityRow =
-      best === self
-        ? self
-        : {
-            page: self.page,
-            kind: best.kind,
-            score: best.score,
-            why: `${childNoun(best.page)} "${displayTitleOf(best.page)}" ${best.why}`,
-            ageMs: best.ageMs,
-            ...(best.worked ? { worked: true as const } : {}),
-            via: best.page,
-            ...(self.score >= ACTIVITY_MIN_SCORE ? { ownRanked: true as const } : {}),
-          };
-    if (newer.length) row.newerChildren = newer;
+    const row = rollUpFamily(self, children);
+    if (!row) continue;
+    familyOf.set(row, { self, children });
     rows.push(row);
   }
   rows.sort((a, b) => b.score - a.score || displayTitleOf(a.page).localeCompare(displayTitleOf(b.page)));
@@ -685,32 +695,26 @@ export function activityAgeMs(page: WikiListing, weights: ActivityWeights, now: 
 }
 
 /**
- * Undo the roll-up for the children `lift` names (work map D14, X3): a row
- * whose `via` child is lifted becomes the child's own row, and the parent keeps
- * a row only when its own score cleared the floor (`ownRanked`), dated by its
- * own signal. Re-sorted by {@link rankActivity}'s order; not re-cut, so the list
- * can hold one row more than `weights.rows` per split.
+ * Undo the roll-up for the children `lift` names (work map D14, X3): every
+ * child of a ranked family that `lift` names and that clears the floor gets
+ * its own row, dated by its own signal (so its effort folds), and the family
+ * row is rebuilt from the parent's own row and the children left under it —
+ * so the parent keeps a row on its own signal or a remaining child's, never
+ * on a lifted one. Rows `rankActivity` did not build pass through. Re-sorted
+ * by {@link rankActivity}'s order; not re-cut, so the list can grow.
  */
-export function splitLiftedChildren(
-  rows: readonly ActivityRow[],
-  lift: (child: WikiListing) => boolean,
-  weights: ActivityWeights,
-  now: number,
-  gate?: WorkedGate | null,
-): ActivityRow[] {
-  const substitute = gate?.open === true ? gate : null;
+export function splitLiftedChildren(rows: readonly ActivityRow[], lift: (child: WikiListing) => boolean): ActivityRow[] {
   const out: ActivityRow[] = [];
   for (const r of rows) {
-    if (!r.via || !lift(r.via)) {
+    const fam = familyOf.get(r);
+    const lifted = fam?.children.filter((c) => lift(c.page)) ?? [];
+    if (!fam || !lifted.length) {
       out.push(r);
       continue;
     }
-    out.push(scorePage(r.via, weights, now, substitute));
-    if (!r.ownRanked) continue;
-    const self = scorePage(r.page, weights, now, substitute);
-    const viaKey = relKey(r.via.relPath);
-    const newer = r.newerChildren?.filter((k) => k !== viaKey);
-    out.push(newer?.length ? { ...self, newerChildren: newer } : self);
+    out.push(...lifted);
+    const rest = rollUpFamily(fam.self, fam.children.filter((c) => !lifted.includes(c)));
+    if (rest) out.push(rest);
   }
   return out.sort((a, b) => b.score - a.score || displayTitleOf(a.page).localeCompare(displayTitleOf(b.page)));
 }

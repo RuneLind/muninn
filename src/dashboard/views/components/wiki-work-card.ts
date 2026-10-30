@@ -136,13 +136,20 @@ export function proseHtml(text: string, byKey: ReadonlyMap<string, CardPage>, hr
   return out + esc(text.slice(last));
 }
 
-/** `text` as plain text, each marker read as its page title: a `title=`
- *  value for prose the card clamps. */
+/** `text` as plain text, each marker read as its page title, with the same
+ *  ` · ` between back-to-back markers as {@link proseHtml}: prose the card
+ *  clamps (a `title=` value) and the rail's effort summary. */
 export function proseText(text: string, byKey: ReadonlyMap<string, CardPage>): string {
-  return text.replace(/⟦([^⟧]+)⟧/g, (_, rel: string) => {
-    const page = byKey.get(normalizeRelPath(rel));
-    return page ? pageTitle(page) : stemOf(rel);
-  });
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(/⟦([^⟧]+)⟧/g)) {
+    const gap = text.slice(last, m.index);
+    out += last > 0 && gap.trim() === "" ? " · " : gap;
+    const page = byKey.get(normalizeRelPath(m[1]!));
+    out += page ? pageTitle(page) : stemOf(m[1]!);
+    last = m.index! + m[0].length;
+  }
+  return out + text.slice(last);
 }
 
 function pageTitle(page: CardPage): string {

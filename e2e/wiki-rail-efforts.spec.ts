@@ -275,11 +275,12 @@ test.describe("Wiki rail: group by effort", () => {
     await expect(more).toHaveText("+2 more");
     // The roll-up counts every page of the fold, hidden ones too.
     await expect(effortRow(page, "epsilon").locator(".wiki-effort-meta")).toContainText("1 in-flight");
-    // Summary with its page marker as a link, never raw, then «Open effort →».
+    // Summary as plain text, its page marker read as the page title, never raw, then «Open effort →».
     const intro = page.locator('#wikiList .wiki-effort-intro[data-effort="epsilon"]');
     await expect(intro).toContainText("Ship Epsilon one and then the long tail");
     await expect(intro).not.toContainText("⟦");
-    await expect(intro.locator('a.wiki-wm-link[data-relpath="plans/eps-1.md"]')).toHaveText("Epsilon one");
+    await expect(intro.locator(".wiki-effort-oneline")).toContainText("Epsilon one");
+    await expect(intro.locator(".wiki-effort-oneline a")).toHaveCount(0);
     await expect(intro.locator("a.wiki-effort-open")).toHaveText("Open effort →");
     // Role chips on the fold's rows.
     await expect(pageRow(page, "plans/eps-1.md").locator(".wiki-effort-role")).toHaveText("plan");
