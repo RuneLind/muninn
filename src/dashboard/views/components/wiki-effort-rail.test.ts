@@ -6,14 +6,28 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  EFFORT_ROWS_SHOWN,
   EFFORTS_OFF_TOGGLE_KEY,
   EFFORTS_OPEN_DEFAULT,
+  effortAllKey,
   effortFoldKey,
+  effortNeedsOpen,
   effortsOn,
   railEffortIndex,
   type RailEffort,
 } from "./wiki-effort-rail.ts";
-import { buildRail, capFolds, isModeFoldKey, railMemberWhy, toggleFold, type RailEntry, type RailThreadCard } from "./wiki-recents.ts";
+import {
+  EFFORT_FOLDS_MAX,
+  FOLDS_MAX,
+  buildRail,
+  capFolds,
+  isEffortFoldKey,
+  isModeFoldKey,
+  railMemberWhy,
+  toggleFold,
+  type RailEntry,
+  type RailThreadCard,
+} from "./wiki-recents.ts";
 import { closedFoldKey } from "./wiki-groups.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { ActivityRow } from "./wiki-activity-rank.ts";
@@ -40,7 +54,15 @@ const INERT: WikiFilters = {
 
 const HOUR = 3_600_000;
 const act = (p: WikiListing, score: number, ageH: number): ActivityRow => ({ page: p, kind: "changed", score, why: "changed", ageMs: ageH * HOUR });
-const eff = (id: string): RailEffort => ({ id, name: `Effort ${id}`, state: "active" });
+const EFF = new Map<string, RailEffort>();
+/** One shared RailEffort per id, as `railEffortIndex` builds them. */
+const eff = (id: string, over: Partial<RailEffort> = {}): RailEffort => {
+  const hit = EFF.get(id);
+  if (hit && !Object.keys(over).length) return hit;
+  const e: RailEffort = { id, name: `Effort ${id}`, state: "active", oneLine: "", needs: [], roles: new Map(), ...over };
+  if (!Object.keys(over).length) EFF.set(id, e);
+  return e;
+};
 
 const A1 = page({ relPath: "plans/a1.mdx", plan_status: "in-flight" });
 const A2 = page({ relPath: "plans/a2.mdx", plan_status: "shipped" });
@@ -188,28 +210,31 @@ describe("buildRail — effort folds (P4)", () => {
     expect(efforts(m.entries)).toEqual([]);
   });
 
-  test("the invariant across Pick up, Work threads and effort folds: an open card claims first, a fold holds only what is left", () => {
+  test("D14: Work threads are not drawn in the mode; Pick up stays; every page once across the rail", () => {
     const card: RailThreadCard = {
       key: "plans/b2.mdx", foldKey: "thread:plans/b2.mdx", toggleKey: "thread:plans/b2.mdx", name: "B two", open: true, pinned: false,
       pinAnchor: "plans/b2.mdx", focus: [B2, A2], created: [], touched: [], sessions: [], movesYou: 0, score: 1,
     } as unknown as RailThreadCard;
     const pickUp: PickUpRow[] = [
-      { page: B2, atMs: 1, edits: 1, sessions: 1, low: false, source: "rows", target: { kind: "card", foldKey: card.foldKey } as never },
+      { page: B2, atMs: 1, edits: 1, sessions: 1, low: false, source: "rows", target: null },
       { page: P1, atMs: 1, edits: 1, sessions: 1, low: false, source: "page", target: null },
     ];
-    const m = build({ threads: [card], pickUp, pins: ["plans/a1.mdx", "notes/old.md"] });
-    // Section order: Pick up, Work threads, Activity, Pinned.
+    const control = { stop: "threads", label: "Threads" } as never;
+    const m = build({ threads: [card], workControl: control, pickUp, pins: ["plans/a1.mdx", "notes/old.md"] });
+    // Section order: Pick up, Activity, Pinned — no Work threads section or label.
     const heads = m.entries.filter((e) => e.kind === "header").map((e) => (e as { label: string }).label);
-    expect(heads.slice(0, 4)).toEqual(["Pick up", "Work threads", "Activity", "Pinned"]);
+    expect(heads).toEqual(["Pick up", "Activity", "Pinned"]);
+    expect(m.entries.some((e) => e.kind === "thread" || e.section === "threads")).toBe(false);
     // Pick up stays pointers: no page row in its section.
     expect(rows(m.entries).filter((r) => r.section === "pickup")).toEqual([]);
-    // The card drew b2 and a2; the folds hold only the Activity rows left.
+    // The card would have claimed b2 and a2: the folds list them instead.
     const sec = (rel: string) => rows(m.entries).filter((r) => r.page.relPath === rel).map((r) => r.section);
-    expect(sec("plans/b2.mdx")).toEqual(["threads"]);
-    expect(sec("plans/a2.mdx")).toEqual(["threads"]);
+    expect(sec("plans/b2.mdx")).toEqual(["activity"]);
+    // a draws only a2 (5h; a1 is pinned), the 4th newest fold: closed, a2 held.
+    expect(sec("plans/a2.mdx")).toEqual([]);
     const es = efforts(m.entries);
-    expect(es.find((e) => e.effort.id === "a")!.members.map((p) => p.relPath)).toEqual([]);
-    expect(es.find((e) => e.effort.id === "b")!.members.map((p) => p.relPath)).toEqual(["plans/b1.mdx"]);
+    expect(es.find((e) => e.effort.id === "a")!.members.map((p) => p.relPath)).toEqual(["plans/a2.mdx"]);
+    expect(es.find((e) => e.effort.id === "b")!.members.map((p) => p.relPath)).toEqual(["plans/b1.mdx", "plans/b2.mdx"]);
     // A pinned page an effort fold holds goes under Pinned and the fold names
     // it as a ghost (the series rule); so does a pinned page Activity did not rank.
     expect(sec("plans/a1.mdx")).toEqual(["pinned"]);
@@ -223,7 +248,19 @@ describe("buildRail — effort folds (P4)", () => {
     expect([...drawn, ...held].sort()).toEqual(ALL.map((p) => p.relPath).sort());
   });
 
-  test("a series member Activity ranked keeps its series fold; the effort fold does not nest it", () => {
+  test("D14: Work threads draw only outside the mode — no efforts handed in, the card claims as before", () => {
+    const card: RailThreadCard = {
+      key: "plans/b2.mdx", foldKey: "thread:plans/b2.mdx", toggleKey: "thread:plans/b2.mdx", name: "B two", open: true, pinned: false,
+      pinAnchor: "plans/b2.mdx", focus: [B2, A2], created: [], touched: [], sessions: [], movesYou: 0, score: 1,
+    } as unknown as RailThreadCard;
+    const m = build({ efforts: undefined, threads: [card] });
+    const heads = m.entries.filter((e) => e.kind === "header").map((e) => (e as { label: string }).label);
+    expect(heads.slice(0, 2)).toEqual(["Work threads", "Activity"]);
+    expect(rows(m.entries).filter((r) => r.section === "threads").map((r) => r.page.relPath)).toEqual(["plans/b2.mdx", "plans/a2.mdx"]);
+    expectOneRowPerPage(m.entries);
+  });
+
+  test("D14: an effort fold claims a series member ahead of the series; a series nothing else holds draws nowhere", () => {
     const S1 = page({ relPath: "plans/s1.mdx", series: "s" });
     const pages = [...ALL, S1];
     const series = { kind: "series" as const, key: "series:s", label: "S", members: [S1], supersededChildren: [], total: 1 };
@@ -233,8 +270,8 @@ describe("buildRail — effort folds (P4)", () => {
       efforts: new Map([...EFFORTS, ["plans/s1.mdx", eff("a")]]),
       seriesGroups: [series],
     });
-    expect(m.entries.some((e) => e.kind === "group" && e.group.kind === "series" && e.section === "activity")).toBe(true);
-    expect(efforts(m.entries).find((e) => e.effort.id === "a")!.members.map((p) => p.relPath)).toEqual(["plans/a1.mdx", "plans/a2.mdx"]);
+    expect(m.entries.some((e) => e.kind === "group" && e.group.kind === "series")).toBe(false);
+    expect(efforts(m.entries).find((e) => e.effort.id === "a")!.members.map((p) => p.relPath)).toEqual(["plans/s1.mdx", "plans/a1.mdx", "plans/a2.mdx"]);
     expectOneRowPerPage(m.entries);
   });
 
@@ -258,7 +295,10 @@ describe("buildRail — effort folds (P4)", () => {
   test("fix B: a fold takes the Activity slot of its NEWEST page, not its best-ranked one", () => {
     // a2 ranks first but is 40h old; a1, the newest page of a, ranks below p1.
     const m = build({ activity: [act(A2, 9, 40), act(P1, 8, 1.5), act(A1, 7, 1), act(B1, 6, 2)] });
-    expect(activitySeq(m.entries)).toEqual(["notes/p1.md", "effort:a", "plans/a2.mdx", "plans/a1.mdx", "effort:b", "plans/b1.mdx"]);
+    // Inside the fold the pages run newest first (D14); b lists b2 too, which
+    // Activity did not rank. c and d have no Activity page: no fold, plain rows.
+    expect(activitySeq(m.entries)).toEqual(["notes/p1.md", "effort:a", "plans/a1.mdx", "plans/a2.mdx", "effort:b", "plans/b1.mdx", "plans/b2.mdx"]);
+    expect(rows(m.entries).filter((r) => r.section === "all").map((r) => r.page.relPath)).toEqual(["plans/c1.mdx", "plans/d1.mdx", "notes/old.md"]);
   });
 
   test("fix C: the open page's own fold is forced open, not its parent's", () => {
@@ -354,24 +394,28 @@ describe("buildRail — effort folds (P4)", () => {
   test("R2-2: the fold sits at the slot of its newest DRAWN row, not a pinned one; a ghost-only fold at its newest ghost", () => {
     // a1 (1h) is pinned, a2 (50h) is the only row fold a draws; p1 2h, b1 3h.
     const m = build({ pins: ["plans/a1.mdx"], activity: [act(A1, 9, 1), act(P1, 8, 2), act(B1, 7, 3), act(A2, 4, 50)] });
-    expect(activitySeq(m.entries)).toEqual(["notes/p1.md", "effort:b", "plans/b1.mdx", "effort:a", "plans/a2.mdx"]);
+    expect(activitySeq(m.entries)).toEqual(["notes/p1.md", "effort:b", "plans/b1.mdx", "plans/b2.mdx", "effort:a", "plans/a2.mdx"]);
     expect(efforts(m.entries).find((e) => e.effort.id === "a")!.ageMs).toBe(50 * HOUR);
     // Both a1 and a2 pinned: ghost-only fold a keeps a1's slot (its newest ghost), closed.
     const g = build({ pins: ["plans/a1.mdx", "plans/a2.mdx"], activity: [act(A1, 9, 1), act(P1, 8, 2), act(B1, 7, 3), act(A2, 4, 50)] });
-    expect(activitySeq(g.entries)).toEqual(["effort:a", "notes/p1.md", "effort:b", "plans/b1.mdx"]);
+    expect(activitySeq(g.entries)).toEqual(["effort:a", "notes/p1.md", "effort:b", "plans/b1.mdx", "plans/b2.mdx"]);
   });
 
   describe("class check: which fold the open page forces open", () => {
     // Placement of the open page × where its parent is. X and Y are older
     // than a–d, so neither starts open and any `forcedOpen` is the rule's.
-    type Place = "drawnX" | "ghostX" | "pinnedNoFold" | "plainRow" | "underParent" | "rankedChild" | "offRail";
-    type Par = "none" | "drawnY" | "ghostY" | "plainRow" | "sameX";
+    type Place = "drawnX" | "ghostX" | "pinnedNoFold" | "plainRow" | "underParent" | "rankedChild" | "offRail" | "listedX" | "hiddenX" | "noFoldX";
+    type Par = "none" | "drawnY" | "ghostY" | "plainRow" | "sameX" | "listedY" | "hiddenY";
+    // D14 placements: listedX — in fold x, which lists it though Activity did
+    // not rank it; hiddenX — listed past the first four, behind «+N more»;
+    // noFoldX — in an effort with no Activity page, so no fold at all.
+    // listedY / hiddenY — the parent placed the same way in fold y.
     // Dropped: underParent/rankedChild × none (a child has a parent);
     // plainRow × any parent (a ranked page with a parent IS rankedChild);
     // pinnedNoFold/underParent/rankedChild × sameX (the open page is in no
     // fold, so sameX is drawnY); offRail × any parent (parentOf is built
     // from the filtered set, so a page off the rail has no parent there).
-    const CASES: [Place, Par, "x" | "y" | null, "activity" | "pinned" | null][] = [
+    const CASES: [Place, Par, "x" | "y" | null, "activity" | "pinned" | "all" | null][] = [
       ["drawnX", "none", "x", "activity"],
       ["drawnX", "drawnY", "x", "activity"],
       ["drawnX", "ghostY", "x", "activity"],
@@ -394,6 +438,15 @@ describe("buildRail — effort folds (P4)", () => {
       ["rankedChild", "ghostY", null, "activity"],
       ["rankedChild", "plainRow", null, "activity"],
       ["offRail", "none", null, null],
+      ["listedX", "none", "x", "activity"],
+      ["hiddenX", "none", "x", "activity"],
+      ["noFoldX", "none", null, "all"],
+      ["listedX", "listedY", "x", "activity"],
+      ["hiddenX", "hiddenY", "x", "activity"],
+      ["underParent", "listedY", "y", "activity"],
+      ["underParent", "hiddenY", "y", "activity"],
+      ["noFoldX", "listedY", "y", "activity"],
+      ["rankedChild", "hiddenY", null, "activity"],
     ];
     test.each(CASES)("open page %s, parent %s ⇒ forced fold %p, row in %p", (place, par, want, section) => {
       const PAR = page({ relPath: "plans/par.mdx" });
@@ -402,6 +455,27 @@ describe("buildRail — effort folds (P4)", () => {
       const effMap = new Map(EFFORTS);
       const activity = [...ACTIVITY];
       const pins: string[] = [];
+      // D14: the pages a fold lists without Activity ranking them, dated by
+      // `pageAgeMs`. Each listed fold gets one ranked anchor (10.5h, older than
+      // a–d, so the fold does not start open); a hidden page also gets four
+      // newer unranked siblings, which push it past the first four.
+      const extra: WikiListing[] = [];
+      const ages = new Map<string, number>();
+      const listIn = (id: "x" | "y", target: WikiListing, hidden: boolean) => {
+        const anchor = page({ relPath: `plans/${id}0.mdx` });
+        extra.push(anchor);
+        effMap.set(anchor.relPath, eff(id));
+        activity.push(act(anchor, 1, 10.5));
+        effMap.set(target.relPath, eff(id));
+        ages.set(target.relPath, 100 * HOUR);
+        if (!hidden) return;
+        for (let i = 1; i <= 4; i++) {
+          const sib = page({ relPath: `plans/${id}-sib${i}.mdx` });
+          extra.push(sib);
+          effMap.set(sib.relPath, eff(id));
+          ages.set(sib.relPath, i * HOUR);
+        }
+      };
       if (["drawnX", "ghostX", "plainRow", "rankedChild"].includes(place)) activity.push(act(OPEN, 2, 10));
       if (place === "drawnX" || place === "ghostX") effMap.set(OPEN.relPath, eff("x"));
       if (place === "ghostX" || place === "pinnedNoFold") pins.push(OPEN.relPath);
@@ -409,8 +483,17 @@ describe("buildRail — effort folds (P4)", () => {
       if (par === "drawnY" || par === "ghostY") effMap.set(PAR.relPath, eff("y"));
       if (par === "sameX") effMap.set(PAR.relPath, eff("x"));
       if (par === "ghostY") pins.push(PAR.relPath);
+      if (place === "listedX" || place === "hiddenX") listIn("x", OPEN, place === "hiddenX");
+      if (place === "noFoldX") effMap.set(OPEN.relPath, eff("z"));
+      if (par === "listedY" || par === "hiddenY") {
+        // Unranked: the fold lists the parent, Activity does not.
+        activity.splice(activity.findIndex((r) => r.page === PAR), 1);
+        listIn("y", PAR, par === "hiddenY");
+      }
+      const all = [...pages, ...extra];
       const m = buildRail({
-        filtered: pages, facetOnly: pages, filters: INERT, pins, activity, efforts: effMap,
+        filtered: all, facetOnly: all, filters: INERT, pins, activity, efforts: effMap,
+        pageAgeMs: (p) => ages.get(p.relPath) ?? Infinity,
         openRelPath: place === "offRail" ? "plans/nowhere.mdx" : OPEN.relPath,
       });
       const folds = efforts(m.entries);
@@ -421,12 +504,166 @@ describe("buildRail — effort folds (P4)", () => {
       expect(openRows.map((r) => r.section)).toEqual(section ? [section] : []);
       // The parent's own chip is forced exactly when the open page renders under it.
       const parRow = rows(m.entries).find((r) => r.page.relPath === PAR.relPath);
-      if (parRow?.children) expect(!!parRow.forcedOpen).toBe(place === "underParent");
+      if (parRow?.children) expect(!!parRow.forcedOpen).toBe(place === "underParent" || place === "noFoldX");
+      // A forced fold shows the row it was forced for, even past the cut: the
+      // «+N more» left behind counts only the pages still hidden.
+      if (want && (place === "hiddenX" || par === "hiddenY")) {
+        const fold = folds.find((e) => e.effort.id === want)!;
+        const more = m.entries.find((e) => e.kind === "more" && e.effort?.id === want) as Extract<RailEntry, { kind: "more" }>;
+        // The fold's own rows: an attachment child drawn under one of them is not one.
+        const shownHere = rows(m.entries).filter((r) => r.member?.label === `Effort ${want}` && !(r.child && !r.lifted));
+        expect(more.hidden).toBe(fold.members.length - shownHere.length);
+        expect(shownHere.length).toBe(5);
+      }
       expectOneRowPerPage(m.entries);
     });
   });
 
   test("effortFoldKey", () => {
     expect(effortFoldKey("drift")).toBe("effort:drift");
+  });
+});
+
+describe("buildRail — the fold body (D14)", () => {
+  // Effort e lists eight pages; Activity ranked only e1 (1h) and e5 (3h).
+  // The rest are dated by `pageAgeMs`.
+  const E = Array.from({ length: 8 }, (_, i) => page({ relPath: `plans/e${i + 1}.mdx`, plan_status: i % 2 ? "shipped" : "in-flight" }));
+  const AGE: Record<string, number> = { "plans/e2.mdx": 2, "plans/e3.mdx": 2.5, "plans/e4.mdx": 4, "plans/e6.mdx": 6, "plans/e7.mdx": 7, "plans/e8.mdx": 8 };
+  const roles = new Map(E.map((p, i) => [p.relPath, i === 0 ? "plan" : "report"] as const));
+  const e = eff("e", { oneLine: "Ship ⟦plans/e1.mdx⟧ first", roles, needs: ["decision|Pick one", "review|Read it"] });
+  const OUTSIDE = page({ relPath: "notes/outside.md" });
+  const pages = [...E, OUTSIDE];
+  const base = {
+    filtered: pages, facetOnly: pages, filters: INERT, pins: [] as string[],
+    activity: [act(E[0]!, 9, 1), act(OUTSIDE, 8, 1.5), act(E[4]!, 7, 3)],
+    efforts: new Map(E.map((p) => [p.relPath, e] as const)),
+    pageAgeMs: (p: WikiListing) => (AGE[p.relPath] ?? 99) * HOUR,
+  };
+  const body = (m: ReturnType<typeof buildRail>) =>
+    m.entries
+      .filter((x) => x.section === "activity" && x.kind !== "header")
+      .map((x) => (x.kind === "row" ? x.page.relPath : x.kind === "more" ? `more ${x.hidden}${x.expanded ? " expanded" : ""}` : x.kind));
+
+  test("an open fold lists every page of the effort, newest first, four shown and «+N more»; ranked or not, each with its role", () => {
+    const m = buildRail(base);
+    expect(body(m)).toEqual([
+      "effort", "effort-intro",
+      "plans/e1.mdx", "plans/e2.mdx", "plans/e3.mdx", "plans/e5.mdx",
+      "more 4",
+      "notes/outside.md",
+    ]);
+    const fold = efforts(m.entries)[0]!;
+    // The fold holds all eight: the hidden four count in its roll-up.
+    expect(fold.members.map((p) => p.relPath)).toEqual(["plans/e1.mdx", "plans/e2.mdx", "plans/e3.mdx", "plans/e5.mdx", "plans/e4.mdx", "plans/e6.mdx", "plans/e7.mdx", "plans/e8.mdx"]);
+    expect(rows(m.entries).filter((r) => r.member?.kind === "effort").map((r) => r.role)).toEqual(["plan", "report", "report", "report"]);
+    // A ranked row keeps its Activity signal; an unranked one has none.
+    expect(rows(m.entries).find((r) => r.page.relPath === "plans/e1.mdx")!.activity).toBeDefined();
+    expect(rows(m.entries).find((r) => r.page.relPath === "plans/e2.mdx")!.activity).toBeUndefined();
+    // The hidden pages are held, never Other pages.
+    expect(rows(m.entries).some((r) => r.section === "all")).toBe(false);
+    expect(m.shown).toBe(5);
+    const more = m.entries.find((x) => x.kind === "more") as Extract<RailEntry, { kind: "more" }>;
+    expect([more.toggleKey, more.effort?.id]).toEqual([effortAllKey("e"), "e"]);
+    expect(EFFORT_ROWS_SHOWN).toBe(4);
+  });
+
+  test("«+N more» pressed shows every row and stays as «Show fewer»; a toggle round-trips; a Jira filter shows all with no button", () => {
+    const all = buildRail({ ...base, openFolds: toggleFold([], effortAllKey("e")) });
+    expect(body(all).filter((x) => x.startsWith("plans/")).length).toBe(8);
+    expect(body(all)).toContain("more 0 expanded");
+    const back = buildRail({ ...base, openFolds: toggleFold(toggleFold([], effortAllKey("e")), effortAllKey("e")) });
+    expect(body(back)).toContain("more 4");
+    const jira = buildRail({ ...base, expandAll: true });
+    expect(body(jira).filter((x) => x.startsWith("plans/")).length).toBe(8);
+    expect(jira.entries.some((x) => x.kind === "more")).toBe(false);
+  });
+
+  test("a fold of four or fewer drawn rows has no «+N more»; a closed fold has no intro and no rows", () => {
+    const few = buildRail({ ...base, filtered: [...E.slice(0, 4), OUTSIDE], facetOnly: [...E.slice(0, 4), OUTSIDE], activity: [act(E[0]!, 9, 1)] });
+    expect(few.entries.some((x) => x.kind === "more")).toBe(false);
+    const closed = buildRail({ ...base, openFolds: [`closed:${effortFoldKey("e")}`] });
+    expect(body(closed)).toEqual(["effort", "notes/outside.md"]);
+  });
+
+  test("an effort page the listing does not hold (a facet, a retired page) is not in the fold", () => {
+    const narrowed = pages.filter((p) => p.relPath !== "plans/e2.mdx");
+    const m = buildRail({ ...base, filtered: narrowed, facetOnly: narrowed });
+    expect(efforts(m.entries)[0]!.members.map((p) => p.relPath)).not.toContain("plans/e2.mdx");
+    expect(efforts(m.entries)[0]!.members.length).toBe(7);
+  });
+
+  test("the fold's age is its newest page, ranked or not", () => {
+    const m = buildRail({ ...base, pageAgeMs: (p) => (p.relPath === "plans/e8.mdx" ? 0.25 * HOUR : 99 * HOUR) });
+    expect(efforts(m.entries)[0]!.ageMs).toBe(0.25 * HOUR);
+    expect(efforts(m.entries)[0]!.members[0]!.relPath).toBe("plans/e8.mdx");
+  });
+
+  test("✋ counts the effort's Needs-you items minus the ones ✓ on the card", () => {
+    expect(effortNeedsOpen(e, new Set())).toBe(2);
+    expect(effortNeedsOpen(e, new Set(["review|Read it"]))).toBe(1);
+  });
+
+  test("the default-open folds: up to three, the most recent among active, blocked and proposed — never a cooling, quiet or shipped one", () => {
+    const states = ["shipped", "active", "cooling", "blocked", "proposed", "active", "quiet"] as const;
+    const ps = states.map((_, i) => page({ relPath: `plans/s${i}.mdx` }));
+    const idx = new Map(ps.map((p, i) => [p.relPath, eff(`s${i}`, { state: states[i] })] as const));
+    // s0 (shipped) is the newest; s6 (quiet) the second newest.
+    const ages = [0.5, 3, 1, 4, 5, 6, 0.7];
+    const m = buildRail({
+      filtered: ps, facetOnly: ps, filters: INERT, pins: [],
+      activity: ps.map((p, i) => act(p, 10 - i, ages[i]!)),
+      efforts: idx,
+    });
+    expect(efforts(m.entries).filter((x) => !x.folded).map((x) => x.effort.id).sort()).toEqual(["s1", "s3", "s4"]);
+    expect(efforts(m.entries).length).toBe(7);
+  });
+
+  test("an attachment child the map lists is the fold's own row, not drawn under its parent", () => {
+    const KID = page({ relPath: "plans/e1.html", parent: "plans/e1.mdx" });
+    const withKid = [...pages, KID];
+    const m = buildRail({ ...base, filtered: withKid, facetOnly: withKid, efforts: new Map([...base.efforts, ["plans/e1.html", e]]), pageAgeMs: (p) => (p === KID ? 2.2 * HOUR : (AGE[p.relPath] ?? 99) * HOUR) });
+    const kid = rows(m.entries).filter((r) => r.page.relPath === "plans/e1.html");
+    expect(kid.map((r) => [r.member?.kind, r.lifted])).toEqual([["effort", true]]);
+    expect(rows(m.entries).find((r) => r.page.relPath === "plans/e1.mdx")!.children).toBeUndefined();
+    expectOneRowPerPage(m.entries);
+  });
+});
+
+describe("railEffortIndex — what a fold reads off the map (D14)", () => {
+  test("the one-line summary, the Needs-you keys and each page's role", () => {
+    const map = {
+      version: 1, wiki: "w", runAtMs: 1, model: "m",
+      coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+      summary: "", themes: [], loose: [],
+      needsYou: [
+        { title: "Pick one", kind: "decision", why: "", action: "", pages: [], effort: "a" },
+        { title: "Other", kind: "review", why: "", action: "", pages: [], effort: "b" },
+        { title: "Loose", kind: "review", why: "", action: "", pages: [] },
+      ],
+      efforts: [
+        {
+          id: "a", name: "A", aliases: [], oneLine: "Do ⟦plans/a1.mdx⟧", state: "blocked",
+          pages: [{ id: "plans/a1.mdx", role: "plan" }, { id: "plans/a2.mdx", role: "report" }], why: "", confidence: 1, next: "", related: [], daily: [],
+        },
+      ],
+    } as unknown as WorkMap;
+    const idx = railEffortIndex(map, ALL, 2);
+    const a = idx.get("plans/a1.mdx")!;
+    expect([a.oneLine, a.state, a.needs]).toEqual(["Do ⟦plans/a1.mdx⟧", "blocked", ["decision|Pick one"]]);
+    expect([...a.roles]).toEqual([["plans/a1.mdx", "plan"], ["plans/a2.mdx", "report"]]);
+    expect(idx.get("plans/a2.mdx")).toBe(a);
+  });
+});
+
+describe("capFolds — effort keys in their own class", () => {
+  test("effort fold and «+N more» keys are bounded apart from the reader's folds", () => {
+    expect([effortFoldKey("x"), `closed:${effortFoldKey("x")}`, effortAllKey("x")].every(isEffortFoldKey)).toBe(true);
+    expect(isEffortFoldKey("plans/effort.md")).toBe(false);
+    const pagesKeys = Array.from({ length: FOLDS_MAX }, (_, i) => `plans/p${i}.md`);
+    const effortKeys = Array.from({ length: EFFORT_FOLDS_MAX + 5 }, (_, i) => effortFoldKey(`e${i}`));
+    const out = capFolds([...effortKeys, ...pagesKeys]);
+    // The reader's 200 folds all survive; the effort class keeps its newest 40.
+    expect(out.filter((k) => k.startsWith("plans/")).length).toBe(FOLDS_MAX);
+    expect(out.filter(isEffortFoldKey)).toEqual(effortKeys.slice(0, EFFORT_FOLDS_MAX));
   });
 });

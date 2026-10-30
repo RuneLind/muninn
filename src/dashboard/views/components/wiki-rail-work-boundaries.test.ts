@@ -14,6 +14,7 @@ import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupSplit } from "./wiki-work-group-prefs.ts";
 import { WORK_EVIDENCE_VERSION, type IndexWork, type WorkContribution, type WorkThread } from "../../../wiki/work-focus.ts";
 import { CAP_NOW, CapRandom, nextCapScenario } from "./wiki-rail-work-cap-gen.ts";
+import type { RailEffort } from "./wiki-effort-rail.ts";
 
 const NOW = Date.UTC(2026, 9, 17, 20, 0);
 const H = 3_600_000;
@@ -606,3 +607,46 @@ describe("D20 fix round 2: fold keys, the pin and + N more across broken base ca
   });
 });
 const K_SPLIT: WorkGroupSplit = { id: "sk2", page: "plans/k.md" };
+
+describe("railInputFor in `group by effort` (work map D14)", () => {
+  const effort = (id: string): RailEffort => ({ id, name: `E ${id}`, state: "active", oneLine: "", needs: [], roles: new Map() });
+  const e1 = effort("e1");
+  const efforts = new Map<string, RailEffort>([
+    ["plans/k.md", e1],
+    ["plans/p.md", e1],
+    ["plans/a.md", e1],
+  ]);
+  const viewer = { mode: "updated" as const, now: NOW, filters: INERT, showRetired: false, familiesOn: false, pins: [], openFolds: [], workGroup: { stop: "threads" as const, evidence: ALL } };
+  const facts = (fx = fixture()): RailWikiFacts => ({ allPages: fx.pages, projects: {}, activityWeights: DEFAULT_ACTIVITY_WEIGHTS, workedGate: { open: true, why: "" } as never, work: fx.work, efforts });
+
+  test("the mode draws no Work threads: no cards, no Group control, no page left out of Activity, Pick up points at no card", () => {
+    const input = railInputFor(facts(), { ...viewer, effortsOn: true });
+    expect(input.threads).toBeUndefined();
+    expect(input.workControl).toBeUndefined();
+    // The open k card would have lifted k, p and q out of the ranking.
+    expect(input.activity!.map((r) => r.page.relPath)).toEqual(expect.arrayContaining(["plans/k.md", "plans/p.md", "plans/q.md"]));
+    expect((input.pickUp ?? []).every((r) => r.target === null)).toBe(true);
+    // The fold claims the series member a ahead of its series; b keeps the series.
+    expect(input.seriesGroups!.flatMap((g) => g.members.map((m) => m.relPath))).not.toContain("plans/a.md");
+    const rail = buildRail(input);
+    expect(rail.entries.some((e) => e.section === "threads")).toBe(false);
+    const fold = rail.entries.find((e) => e.kind === "effort") as Extract<ReturnType<typeof buildRail>["entries"][number], { kind: "effort" }>;
+    expect(fold.members.map((p) => p.relPath).sort()).toEqual(["plans/a.md", "plans/k.md", "plans/p.md"]);
+    expect(input.pageAgeMs).toBeDefined();
+  });
+
+  test("before the map lands (no index yet) the mode still draws no Work threads, and Activity is plain", () => {
+    const input = railInputFor({ ...facts(), efforts: null }, { ...viewer, effortsOn: true });
+    expect(input.threads).toBeUndefined();
+    expect(input.efforts).toBeUndefined();
+  });
+
+  test("unchecked, the rail is the pre-P4 rail: Work threads with the Group control, no folds", () => {
+    const off = railInputFor(facts(), { ...viewer, effortsOn: false });
+    const plain = railInputFor({ ...facts(), efforts: null }, { ...viewer });
+    expect(off.threads!.length).toBeGreaterThan(0);
+    expect(off.workControl).toBeDefined();
+    expect(off.efforts).toBeUndefined();
+    expect(JSON.stringify(buildRail(off).entries)).toBe(JSON.stringify(buildRail(plain).entries));
+  });
+});

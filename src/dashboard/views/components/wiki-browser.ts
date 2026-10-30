@@ -116,9 +116,10 @@ import {
 } from "./wiki-start-cards.ts";
 // The effort page (work map P3): pure HTML, wired by `renderEffort` below.
 import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
-import type { WorkMapGetBody } from "./wiki-work-card.ts";
+import { proseHtml, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
+import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import type { WorkMap } from "../../../wiki/work-map/schema.ts";
-import { EFFORTS_OFF_TOGGLE_KEY, effortsOn, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
+import { EFFORTS_OFF_TOGGLE_KEY, effortNeedsOpen, effortsOn, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
@@ -1726,15 +1727,17 @@ function forcedOpenWhy(what: "group" | "section"): string {
 
 /**
  * One effort fold row: caret · name (link) · age on line one, then a meta
- * line — the effort's state, ✋ N over its rows, and the plan-status roll-up
- * (one nowrap unit per count, so it wraps between counts and never clips one).
+ * line — the effort's state, ✋ N (the map's Needs-you items for it, minus the
+ * ones ✓ on the card, as the effort page counts them), and the plan-status
+ * roll-up over every page of the fold (one nowrap unit per count, so it wraps
+ * between counts and never clips one).
  */
-function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: number): string {
+function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: number, done: ReadonlySet<string>): string {
   const { effort } = entry;
   // A pinned page is still the effort's: the roll-up counts its ghost too.
   const members = [...entry.members, ...(entry.ghosts ?? [])];
   const roll = groupRollup("series", members);
-  const moves = movesPersonal() ? members.reduce((n, p) => n + (p.movesYou ?? 0), 0) : 0;
+  const moves = effortNeedsOpen(effort, done);
   const age = formatRailAge(now - entry.ageMs, now);
   const n = members.length;
   const what = `${n} page${n === 1 ? "" : "s"} of ${effort.name}`;
@@ -1742,7 +1745,7 @@ function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: numbe
   const sep = '<span class="wiki-rollup-sep"> ·</span>';
   const parts = [
     `<span class="wiki-rollup-part wiki-effort-state">${esc(effort.state)}</span>`,
-    ...(moves > 0 ? [`<span class="wiki-rollup-part wiki-effort-moves" title="${moves} step${moves === 1 ? "" : "s"} waiting on you">✋ ${moves}</span>`] : []),
+    ...(moves > 0 ? [`<span class="wiki-rollup-part wiki-effort-moves" title="${moves} item${moves === 1 ? "" : "s"} in Needs you">✋ ${moves}</span>`] : []),
     ...roll.parts.map(
       (p) => `<span class="wiki-rollup-part${p.word === "shipped" || p.word === "in-flight" ? " s-" + p.word : ""}">${p.n} ${esc(p.word)}</span>`,
     ),
@@ -1762,6 +1765,22 @@ function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: numbe
     `</div>` +
     `<small class="wiki-group-rollup wiki-effort-meta">${meta}</small>` +
     `</div></div>`
+  );
+}
+
+/** The prose lookup an effort fold's summary renders its `⟦relPath⟧`
+ *  markers through (the card's `proseHtml`), rebuilt when the listing changes. */
+let effortProseMemo: { pages: WikiListing[]; byKey: Map<string, CardPage> } | null = null;
+
+/** An open effort fold's head (D14): its one-line summary, then «Open effort →». */
+function effortIntroHtml(effort: RailEffort): string {
+  if (effortProseMemo?.pages !== allPages) {
+    effortProseMemo = { pages: allPages, byKey: new Map(allPages.map((p) => [normalizeRelPath(p.relPath), p as CardPage])) };
+  }
+  const line = effort.oneLine.trim() ? `<span class="wiki-effort-oneline">${proseHtml(effort.oneLine, effortProseMemo.byKey, pageUrlByRelPath)}</span> ` : "";
+  return (
+    `<div class="wiki-effort-intro" data-section="activity" data-effort="${esc(effort.id)}">${line}` +
+    `<a class="wiki-effort-open" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}">Open effort →</a></div>`
   );
 }
 
@@ -1867,6 +1886,9 @@ function renderList(cause: "storage" | "local" = "local"): void {
   // Read ONCE per render, not per row: the answer is a fact about the instance
   // and the wiki, and it is the same for all 953 rows.
   const canEditSeries = seriesEditable();
+  // The Needs-you items ✓ on the card for the cached run: an effort fold's ✋
+  // leaves them out, as the effort page does.
+  const effortDone: ReadonlySet<string> = workMapCache ? workMapDoneSet(workMapCache.body.map.runAtMs) : new Set();
   rail.entries.forEach((entry: RailEntry) => {
     // A WORK-THREAD card's header and its `touched:` line (`wiki-thread-view.ts`).
     if (entry.kind === "thread") {
@@ -2035,7 +2057,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
     // caret folds and the name opens the effort page (D2). Not a page row: no
     // `data-relpath`, and `#wikiCount` does not count it.
     if (entry.kind === "effort") {
-      html += effortRowHtml(entry, now);
+      html += effortRowHtml(entry, now, effortDone);
       return;
     }
     // A GHOST row: a series member the reader pinned, so the real row is under
@@ -2047,6 +2069,24 @@ function renderList(cause: "storage" | "local" = "local"): void {
       // Lifted by a pin, or by an open work-thread card (D13) — the note says
       // which section above holds the real row.
       html += railGhostHtml(entry.page.relPath, displayTitleOf(entry.page), entry.reason);
+      return;
+    }
+    // An open effort fold's head (D14): its summary and «Open effort →».
+    if (entry.kind === "effort-intro") {
+      html += effortIntroHtml(entry.effort);
+      return;
+    }
+    // An open effort fold's «+N more» (D14), its own stored key; once pressed it
+    // stays as «Show fewer», so focus has a control to come back to.
+    if (entry.kind === "more" && entry.effort) {
+      const label = entry.expanded ? "Show fewer" : `+${entry.hidden} more`;
+      const why = entry.expanded
+        ? `Show the first pages of ${entry.effort.name} only`
+        : `Show the other ${entry.hidden} ${entry.hidden === 1 ? "page" : "pages"} of ${entry.effort.name}`;
+      html +=
+        `<button type="button" class="wiki-list-more wiki-effort-more" data-section="${esc(entry.section)}"` +
+        ` data-fold-key="${esc(entry.toggleKey)}" aria-expanded="${entry.expanded ? "true" : "false"}"` +
+        ` title="${esc(why)}" aria-label="${esc(why)}">${esc(label)}</button>`;
       return;
     }
     // The `+N more` row under a CLOSED series in Activity: a second button for
@@ -2220,6 +2260,8 @@ function renderList(cause: "storage" | "local" = "local"): void {
       followupFlagHtml(p) +
       movesFlagHtml(p) +
       (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "") +
+      // The page's role in its effort (D14), on a row inside an open effort fold.
+      (entry.role ? `<span class="wiki-effort-role" title="${esc(`Role in the effort: ${entry.role}`)}">${esc(entry.role)}</span>` : "") +
       // The Stale check's two numbers (PR 2b, D26), off the summary route.
       railStaleBadge(p.relPath) +
       chipSlot;

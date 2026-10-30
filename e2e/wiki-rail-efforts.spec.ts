@@ -1,19 +1,27 @@
 /**
- * /wiki rail — `group by effort` (plan `muninn-wiki-work-map`, P4, D2/D4/D8):
- * Activity folds under the work map's efforts.
+ * /wiki rail — `group by effort` (plan `muninn-wiki-work-map`, P4 + D14,
+ * D2/D4/D8): Activity folds under the work map's efforts.
  *
  * What only a real page holds (the rule itself is `wiki-effort-rail.test.ts`):
- *  1. Activity shows one fold row per effort, at its newest drawn page's slot; the
- *     three most recently active start open; pages in no effort stay rows.
- *  2. Each page is ONE row across Pick up, Work threads and Activity — an open
- *     card claims its page first, the fold holds what is left.
+ *  1. Activity shows one fold row per effort with a page in Activity, at its
+ *     newest Activity page's slot; up to three of the moving efforts (active,
+ *     blocked, proposed) start open, the most recent first; pages in no effort
+ *     stay rows.
+ *  2. D14: in the mode no Work threads section or label draws (Pick up stays);
+ *     each fold lists every page of its effort in the listing, newest first,
+ *     four shown and «+N more», with role chips, and an open fold starts with
+ *     the effort's one-line summary and «Open effort →». Each page is ONE row.
  *  3. The name opens `?effort=<id>` (and clears the active row); the caret
  *     folds without navigating; both are keyboard stops with a focus ring,
  *     and Enter on the name keeps focus on it through the rail's repaint.
  *     The open page inside a closed fold forces it open (caret disabled) until
  *     the reader leaves the page.
- *  4. Unchecking `group by effort` draws plain Activity and stores
- *     `toggle:no-efforts`, through a reload; re-checking removes it.
+ *     Caret, name, «Open effort →» and «+N more» are Tab stops, and focus stays
+ *     on «+N more» (then «Show fewer») and «Open effort →» through the repaint.
+ *     The open page behind «+N more» forces its fold open and is shown.
+ *  4. Unchecking `group by effort` draws the pre-P4 rail — Work threads back,
+ *     plain Activity — and stores `toggle:no-efforts`, through a reload;
+ *     re-checking removes it.
  *  5. A wiki with no map draws plain Activity, with no checkbox.
  *  6. Families still group the pages in no effort.
  *  7. One map cache: the start view's card, the rail and the effort page send
@@ -53,6 +61,14 @@ const FOLDS = (wiki: string) => `muninn.wiki.folds.v1:${wiki}`;
 
 /** relPath, title, hours since its last change, effort, plan_status. */
 const PAGES: [string, string, number, string | null, string?][] = [
+  // Epsilon: one page in Activity, five older ones (20 days, out of
+  // Activity) that only its fold lists — six in all, so «+2 more».
+  ["plans/eps-1.md", "Epsilon one", 0.5, "epsilon", "in-flight"],
+  ["plans/eps-2.md", "Epsilon two", 20 * 24 + 1, "epsilon"],
+  ["plans/eps-3.md", "Epsilon three", 20 * 24 + 2, "epsilon"],
+  ["plans/eps-4.md", "Epsilon four", 20 * 24 + 3, "epsilon"],
+  ["plans/eps-5.md", "Epsilon five", 20 * 24 + 4, "epsilon"],
+  ["plans/eps-6.md", "Epsilon six", 20 * 24 + 5, "epsilon"],
   ["plans/alpha-one.md", "Alpha one", 1, "alpha", "in-flight"],
   ["notes/plain-one.md", "Plain one", 1.5, null],
   ["plans/beta-one.md", "Beta one", 2, "beta"],
@@ -67,21 +83,25 @@ const PAGES: [string, string, number, string | null, string?][] = [
   ["notes/kit-tool-three.md", "Kit tool three", 20 * 24, null],
 ];
 const THREAD_PAGE = "plans/beta-thread.md";
-/** Efforts in Activity order, and which start open (the three newest). */
-const EFFORT_ORDER = ["alpha", "beta", "gamma", "delta", "alpha-ui"];
-const OPEN_DEFAULT = ["alpha", "beta", "gamma"];
+/** Efforts in Activity order, and which start open: the three newest among
+ *  active, blocked and proposed (beta is cooling, delta quiet). */
+const EFFORT_ORDER = ["epsilon", "alpha", "beta", "gamma", "delta", "alpha-ui"];
+const OPEN_DEFAULT = ["epsilon", "alpha", "gamma"];
+const EPS_ONELINE = "Ship ⟦plans/eps-1.md⟧ and then the long tail of every follow-up the effort has collected over a very long time";
 
 function mapJson(runAtMs: number, rename: Record<string, string> = {}): string {
   const e = (id: string, name: string, pages: string[], extra: Record<string, unknown> = {}) => ({
-    id, name: rename[id] ?? name, aliases: [], oneLine: "", state: "active", pages: pages.map((p) => ({ id: p, role: "plan" })),
+    id, name: rename[id] ?? name, aliases: [], oneLine: "", state: "active", pages: pages.map((p, i) => ({ id: p, role: i === 0 ? "plan" : "report" })),
     why: "", confidence: 0.9, next: "", related: [], daily: [], ...extra,
   });
   const of = (id: string) => PAGES.filter((p) => p[3] === id).map((p) => p[0]);
   return JSON.stringify({
     version: 1, wiki: MAP, runAtMs, model: "test-model",
     coverage: { sessionsSinceMs: runAtMs - 8 * DAY, sessionsAsOfMs: runAtMs, touchWindowDays: 28, activePages: 8, threads: 1, logEntries: 0, digestChars: 1, warnings: [] },
-    summary: "", needsYou: [], themes: [],
+    summary: "", themes: [],
+    needsYou: [{ title: "Pick a shape", kind: "decision", why: "", action: "", pages: [], effort: "alpha" }],
     efforts: [
+      e("epsilon", "Epsilon work with a rather long name that has to ellipsize", of("epsilon"), { oneLine: EPS_ONELINE }),
       e("alpha", "Alpha work", of("alpha")),
       e("alpha-ui", "Alpha UI work", of("alpha-ui"), { parent: "alpha", state: "proposed" }),
       e("beta", "Beta work", of("beta"), { state: "cooling" }),
@@ -179,12 +199,24 @@ const caret = (page: Page, id: string) => effortRow(page, id).locator(".wiki-eff
 const nameLink = (page: Page, id: string) => effortRow(page, id).locator("a.wiki-effort-name");
 const pageRow = (page: Page, rel: string) => page.locator(`#wikiList .wiki-list-item[data-relpath="${rel}"]`);
 
-async function open(page: Page, wiki = MAP, folds?: string[]): Promise<void> {
+/** Open the wiki; `threads` says whether the Work threads section draws
+ *  (off in `group by effort`, D14). */
+async function open(page: Page, wiki = MAP, folds?: string[], threads = wiki !== MAP): Promise<void> {
   await page.setViewportSize({ width: 1400, height: 900 });
   if (folds) await page.addInitScript(([k, v]) => localStorage.setItem(k as string, v as string), [FOLDS(wiki), JSON.stringify(folds)] as const);
   await page.goto(`${BASE}/wiki?wiki=${wiki}`);
   await expect(page.locator('.wiki-list-sec[data-section="activity"]')).toHaveCount(1);
-  await expect(page.locator('.wiki-list-sec[data-section="threads"]')).toHaveCount(1);
+  if (wiki === MAP) await expect(effortRows(page).first()).toBeVisible();
+  await expect(page.locator('.wiki-list-sec[data-section="threads"]')).toHaveCount(threads ? 1 : 0);
+}
+
+/** Tab forward until `target` holds focus, at most `max` presses. */
+async function tabTo(page: Page, target: ReturnType<Page["locator"]>, max = 25): Promise<void> {
+  for (let i = 0; i < max; i++) {
+    if (await target.evaluate((el) => el === document.activeElement)) return;
+    await page.keyboard.press("Tab");
+  }
+  await expect(target).toBeFocused();
 }
 
 async function relPathsOnRail(page: Page): Promise<string[]> {
@@ -192,7 +224,7 @@ async function relPathsOnRail(page: Page): Promise<string[]> {
 }
 
 test.describe("Wiki rail: group by effort", () => {
-  test("Activity folds by effort, the three newest open, one row per page across Pick up, Work threads and Activity", async ({ page }) => {
+  test("Activity folds by effort, three moving efforts open, no Work threads, one row per page across Pick up and Activity", async ({ page }) => {
     await open(page);
     await expect(effortRows(page)).toHaveCount(EFFORT_ORDER.length);
     expect(await effortRows(page).evaluateAll((els) => els.map((e) => e.getAttribute("data-effort")))).toEqual(EFFORT_ORDER);
@@ -201,7 +233,8 @@ test.describe("Wiki rail: group by effort", () => {
     }
     // Row furniture: the name, the state, the roll-up and the age.
     await expect(nameLink(page, "alpha")).toHaveText("Alpha work");
-    await expect(effortRow(page, "alpha").locator(".wiki-effort-meta")).toHaveText(/active\s·\s1 in-flight\s·\s1 shipped/);
+    // ✋ counts the map's Needs-you items for the effort.
+    await expect(effortRow(page, "alpha").locator(".wiki-effort-meta")).toHaveText(/active\s·\s✋ 1\s·\s1 in-flight\s·\s1 shipped/);
     await expect(effortRow(page, "beta").locator(".wiki-effort-meta")).toContainText("cooling");
     await expect(effortRow(page, "alpha").locator(".wiki-effort-age")).toHaveText("1h");
     // Open folds draw their pages as members; closed ones draw none.
@@ -212,13 +245,90 @@ test.describe("Wiki rail: group by effort", () => {
     // A page in no effort stays an ordinary Activity row.
     await expect(pageRow(page, "notes/plain-one.md")).toHaveAttribute("data-section", "activity");
     await expect(pageRow(page, "notes/plain-one.md")).not.toHaveClass(/member/);
-    // The open card claimed its page first; the beta fold holds what is left.
-    await expect(pageRow(page, THREAD_PAGE)).toHaveAttribute("data-section", "threads");
+    // No Work threads section or label: the card that would claim beta's
+    // thread page draws nowhere, so the (closed) beta fold holds it. Pick up stays.
+    await expect(page.locator("#wikiList .wiki-thread-card")).toHaveCount(0);
+    await expect(page.locator("#wikiList [data-work-group-menu]")).toHaveCount(0);
+    await expect(pageRow(page, THREAD_PAGE)).toHaveCount(0);
+    await caret(page, "beta").click();
+    await expect(pageRow(page, THREAD_PAGE)).toHaveAttribute("data-section", "activity");
+    await expect(pageRow(page, THREAD_PAGE)).toHaveClass(/member/);
     await expect(page.locator(`#wikiList .wiki-pickup-row[data-pickup="${THREAD_PAGE}"]`)).toHaveCount(1);
     // One row per page over the whole rail (Pick up rows are pointers).
     const rels = await relPathsOnRail(page);
     expect(rels.length).toBe(new Set(rels).size);
     expect(rels.filter((r) => r === "plans/beta-one.md")).toHaveLength(1);
+  });
+
+  test("D14: an open fold lists all its pages newest first, four shown and «+N more» that expands, with summary and role chips", async ({ page }) => {
+    await open(page);
+    const body = (id: string) =>
+      page.locator(`#wikiList .wiki-list-item.member`).evaluateAll(
+        (els, name) => els.filter((e) => (e.getAttribute("title") ?? "").includes(`In the ${name} effort`)).map((e) => e.getAttribute("data-relpath")),
+        id,
+      );
+    const EPS_NAME = "Epsilon work with a rather long name that has to ellipsize";
+    // Every listed page of the effort is in the fold: 6 = the joined pages present.
+    expect(await body(EPS_NAME)).toEqual(["plans/eps-1.md", "plans/eps-2.md", "plans/eps-3.md", "plans/eps-4.md"]);
+    const more = page.locator('#wikiList .wiki-effort-more[data-fold-key="effort-all:epsilon"]');
+    await expect(more).toHaveText("+2 more");
+    // The roll-up counts every page of the fold, hidden ones too.
+    await expect(effortRow(page, "epsilon").locator(".wiki-effort-meta")).toContainText("1 in-flight");
+    // Summary with its page marker as a link, never raw, then «Open effort →».
+    const intro = page.locator('#wikiList .wiki-effort-intro[data-effort="epsilon"]');
+    await expect(intro).toContainText("Ship Epsilon one and then the long tail");
+    await expect(intro).not.toContainText("⟦");
+    await expect(intro.locator('a.wiki-wm-link[data-relpath="plans/eps-1.md"]')).toHaveText("Epsilon one");
+    await expect(intro.locator("a.wiki-effort-open")).toHaveText("Open effort →");
+    // Role chips on the fold's rows.
+    await expect(pageRow(page, "plans/eps-1.md").locator(".wiki-effort-role")).toHaveText("plan");
+    await expect(pageRow(page, "plans/eps-2.md").locator(".wiki-effort-role")).toHaveText("report");
+    await expect(pageRow(page, "notes/plain-one.md").locator(".wiki-effort-role")).toHaveCount(0);
+    // «+N more» expands in place and stays as «Show fewer».
+    await more.click();
+    expect(await body(EPS_NAME)).toEqual(["plans/eps-1.md", "plans/eps-2.md", "plans/eps-3.md", "plans/eps-4.md", "plans/eps-5.md", "plans/eps-6.md"]);
+    await expect(more).toHaveText("Show fewer");
+    await more.click();
+    await expect(more).toHaveText("+2 more");
+    // Every page once across the rail.
+    const rels = await relPathsOnRail(page);
+    expect(rels.length).toBe(new Set(rels).size);
+    // «Open effort →» opens the effort page.
+    await intro.locator("a.wiki-effort-open").click();
+    await expect(page.locator("#wikiEffortPage")).toHaveAttribute("data-effort", "epsilon");
+  });
+
+  test("D14: the open page behind «+N more» forces its fold open and is shown", async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${MAP}&relPath=${encodeURIComponent("plans/eps-6.md")}`);
+    await expect(caret(page, "epsilon")).toBeDisabled();
+    await expect(pageRow(page, "plans/eps-6.md")).toHaveClass(/active/);
+    await expect(page.locator('#wikiList .wiki-effort-more[data-fold-key="effort-all:epsilon"]')).toHaveText("+1 more");
+  });
+
+  test("keyboard: caret, name, «Open effort →» and «+N more» are Tab stops; focus stays through the repaint", async ({ page }) => {
+    await open(page);
+    await caret(page, "epsilon").focus();
+    await page.keyboard.press("Tab");
+    await expect(nameLink(page, "epsilon")).toBeFocused();
+    const openLink = page.locator('#wikiList .wiki-effort-intro[data-effort="epsilon"] a.wiki-effort-open');
+    await tabTo(page, openLink);
+    const more = page.locator('#wikiList .wiki-effort-more[data-fold-key="effort-all:epsilon"]');
+    await tabTo(page, more);
+    await page.keyboard.press("Enter");
+    await expect(more).toHaveText("Show fewer");
+    await expect(more).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(more).toHaveText("+2 more");
+    await expect(more).toBeFocused();
+    // Enter on «Open effort →» opens the effort and keeps focus on that link.
+    await openLink.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#wikiEffortPage")).toHaveAttribute("data-effort", "epsilon");
+    expect(await page.evaluate(() => {
+      const a = document.activeElement;
+      return a ? `${a.tagName}:${a.className}:${a.getAttribute("data-effort-link")}` : null;
+    })).toBe("A:wiki-effort-open:epsilon");
   });
 
   test("the name opens the effort page and clears the active row; the caret folds without navigating", async ({ page }) => {
@@ -298,17 +408,23 @@ test.describe("Wiki rail: group by effort", () => {
     await expect(box).toBeChecked();
     await box.uncheck();
     await expect(effortRows(page)).toHaveCount(0);
+    // The pre-P4 rail: Work threads back (its card claims its page), no fold furniture.
+    await expect(page.locator('.wiki-list-sec[data-section="threads"]')).toHaveCount(1);
+    await expect(pageRow(page, THREAD_PAGE)).toHaveAttribute("data-section", "threads");
+    await expect(page.locator("#wikiList .wiki-effort-intro, #wikiList .wiki-effort-more, #wikiList .wiki-effort-role")).toHaveCount(0);
     await expect(pageRow(page, "plans/delta-one.md")).toHaveAttribute("data-section", "activity");
     await expect(pageRow(page, "plans/alpha-one.md")).not.toHaveClass(/member/);
     const stored = () => page.evaluate((k) => JSON.parse(localStorage.getItem(k) ?? "[]") as string[], FOLDS(MAP));
     expect(await stored()).toContain("toggle:no-efforts");
     await page.reload();
     await expect(page.locator('.wiki-list-sec[data-section="activity"]')).toHaveCount(1);
+    await expect(page.locator('.wiki-list-sec[data-section="threads"]')).toHaveCount(1);
     await expect(effortRows(page)).toHaveCount(0);
     await page.locator("#wikiOptionsBtn").click();
     await expect(page.locator("#wikiGroupEfforts")).not.toBeChecked();
     await page.locator("#wikiGroupEfforts").check();
     await expect(effortRows(page)).toHaveCount(EFFORT_ORDER.length);
+    await expect(page.locator('.wiki-list-sec[data-section="threads"]')).toHaveCount(0);
     expect(await stored()).not.toContain("toggle:no-efforts");
   });
 

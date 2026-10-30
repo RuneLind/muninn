@@ -676,6 +676,15 @@ export function rankActivity(
 }
 
 /**
+ * How old a page is as Activity dates it — the `ageMs` its own row would
+ * carry (worked, touched or created, under the same gate), ranked or not. The
+ * effort folds (work map D14) order their pages and date the fold by it.
+ */
+export function activityAgeMs(page: WikiListing, weights: ActivityWeights, now: number, gate?: WorkedGate | null): number {
+  return scorePage(page, weights, now, gate?.open === true ? gate : null).ageMs;
+}
+
+/**
  * One page's score.
  *
  * A page with NO date signal at all scores 0 and the floor drops it — there is
