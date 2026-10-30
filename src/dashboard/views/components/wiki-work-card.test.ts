@@ -189,6 +189,15 @@ describe("prose and ages", () => {
     const byKey = new Map([["plans/a.mdx", PAGES[0]!]]);
     expect(proseHtml("a<b ⟦Plans/A.mdx⟧", byKey, href)).toBe('a&lt;b <a class="wiki-wm-link" href="/wiki?relPath=plans%2Fa.mdx" data-relpath="plans/a.mdx">Plan A</a>');
   });
+  test("proseHtml separates markers with only whitespace between them", () => {
+    const byKey = new Map([["plans/a.mdx", PAGES[0]!]]);
+    const sep = '<span class="wiki-wm-sep"> · </span>';
+    const html = proseHtml("⟦plans/a.mdx⟧ ⟦plans/gone.mdx⟧ moved; ⟦plans/a.mdx⟧⟦plans/a.mdx⟧, ⟦plans/gone.mdx⟧", byKey, href);
+    expect(html.split(sep).length - 1).toBe(2);
+    expect(html).toContain("</a>" + sep + "gone moved");
+    expect(html).toContain("</a>" + sep + "<a ");
+    expect(html).toContain("</a>, gone");
+  });
   test("formatAge and isWorkMapStale", () => {
     expect(formatAge(30_000)).toBe("just now");
     expect(formatAge(5 * 60_000)).toBe("5 min ago");

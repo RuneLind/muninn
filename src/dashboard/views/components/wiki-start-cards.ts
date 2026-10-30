@@ -958,6 +958,11 @@ export function handleWorkCardClick(target: Element): boolean {
     }
     return true;
   }
+  const why = target.closest(".wiki-wm-why");
+  if (why && !target.closest("a")) {
+    why.classList.toggle("open");
+    return true;
+  }
   if (target.closest("#wikiWorkMapRestore")) {
     writeDoneRaw(null);
     paintWorkCard();

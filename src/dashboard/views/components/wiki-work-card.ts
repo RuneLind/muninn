@@ -105,22 +105,38 @@ export function writeDone(raw: string | null, runAt: number, key: string, on: bo
 
 // ── Prose with page markers ───────────────────────────────────────────
 /** Escape `text`, turning each `⟦relPath⟧` marker into a link to that page
- *  when the listing holds it, else into its file stem as plain text. */
+ *  when the listing holds it, else into its file stem as plain text. Two
+ *  markers with only whitespace between them get a ` · ` separator, so two
+ *  titles never read as one. */
 export function proseHtml(text: string, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string): string {
   let out = "";
   let last = 0;
   for (const m of text.matchAll(/⟦([^⟧]+)⟧/g)) {
-    out += esc(text.slice(last, m.index));
+    const gap = text.slice(last, m.index);
+    out += last > 0 && gap.trim() === "" ? '<span class="wiki-wm-sep"> · </span>' : esc(gap);
     out += pageLinkHtml(m[1]!, byKey, hrefFor);
     last = m.index! + m[0].length;
   }
   return out + esc(text.slice(last));
 }
 
+/** `text` as plain text, each marker read as its page title: a `title=`
+ *  value for prose the card clamps. */
+function proseText(text: string, byKey: ReadonlyMap<string, CardPage>): string {
+  return text.replace(/⟦([^⟧]+)⟧/g, (_, rel: string) => {
+    const page = byKey.get(normalizeRelPath(rel));
+    return page ? pageTitle(page) : stemOf(rel);
+  });
+}
+
+function pageTitle(page: CardPage): string {
+  return page.displayTitle || page.title || stemOf(page.relPath);
+}
+
 function pageLinkHtml(rel: string, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string): string {
   const page = byKey.get(normalizeRelPath(rel));
   if (!page) return esc(stemOf(rel));
-  const title = page.displayTitle || page.title || stemOf(page.relPath);
+  const title = pageTitle(page);
   return `<a class="wiki-wm-link" href="${esc(hrefFor(page.relPath))}" data-relpath="${esc(page.relPath)}">${esc(title)}</a>`;
 }
 
@@ -262,7 +278,7 @@ function needsYouHtml<P>(
         `<div class="wiki-wm-need-head"><span class="wiki-wm-kind">${esc(n.kind)}</span>` +
         `<span class="wiki-wm-need-title">${prose(n.title)}</span>` +
         `<button class="wiki-wm-done" data-wm-done="${i}" title="Mark done" aria-label="Mark done">✓</button></div>` +
-        (n.why ? `<div class="wiki-wm-why">${prose(n.why)}</div>` : "") +
+        (n.why ? `<div class="wiki-wm-why" title="${esc(proseText(n.why, byKey))}">${prose(n.why)}</div>` : "") +
         (n.action ? `<div class="wiki-wm-action">${prose(n.action)}</div>` : "") +
         // Pages the item's own prose already links are not repeated.
         pagesHtml(
