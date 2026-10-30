@@ -115,21 +115,25 @@ describe("activityStrip", () => {
   const today = osloDay(run);
   const ago = (n: number) => osloDay(run - n * DAY);
 
-  test("28 days ending on the run's Oslo day, missing days read as zero", () => {
+  test("the 29 Oslo days the 28-day window touches, ending on the run's day; missing days read as zero", () => {
     const days = activityStrip([{ day: ago(3), commits: 2, sessions: 1 }], run);
-    expect(days).toHaveLength(STRIP_DAYS);
+    expect(days).toHaveLength(STRIP_DAYS + 1);
     expect(days[days.length - 1]!.day).toBe(today);
-    expect(days[0]!.day).toBe(ago(27));
+    expect(days[0]!.day).toBe(ago(28));
     expect(days.find((d) => d.day === ago(3))).toEqual({ day: ago(3), commits: 2, sessions: 1 });
     expect(days.find((d) => d.day === ago(4))).toEqual({ day: ago(4), commits: 0, sessions: 0 });
   });
 
-  test("days 9–28 carry no session count, the newest 8 do", () => {
-    const days = activityStrip([{ day: ago(10), commits: 1, sessions: 4 }], run);
-    expect(days.filter((d) => d.sessions !== null)).toHaveLength(STRIP_SESSION_DAYS);
+  test("days before the sessions window carry no session count, the newest 9 do", () => {
+    const days = activityStrip([{ day: ago(10), commits: 1, sessions: 0 }], run);
+    expect(days.filter((d) => d.sessions !== null)).toHaveLength(STRIP_SESSION_DAYS + 1);
     expect(days.find((d) => d.day === ago(10))!.sessions).toBeNull();
-    expect(days.find((d) => d.day === ago(7))!.sessions).toBe(0);
-    expect(days.find((d) => d.day === ago(8))!.sessions).toBeNull();
+    expect(days.find((d) => d.day === ago(9))!.sessions).toBeNull();
+    expect(days.find((d) => d.day === ago(8))!.sessions).toBe(0);
+  });
+
+  test("a stored session count before the window is shown, not dropped", () => {
+    expect(activityStrip([{ day: ago(10), commits: 1, sessions: 4 }], run).find((d) => d.day === ago(10))!.sessions).toBe(4);
   });
 
   test("a 0-session day says only its commits; an empty day says no activity", () => {
@@ -140,13 +144,50 @@ describe("activityStrip", () => {
 
   test("the html marks the commits-only run and never prints 0 sessions", () => {
     const html = activityStripHtml([{ day: ago(1), commits: 3, sessions: 0 }, { day: ago(12), commits: 1, sessions: 0 }], run);
-    expect(html).toContain("days 9–28 · commits only");
+    expect(html).toContain("earlier · commits only");
     expect(html).toContain("Sessions are counted for the last 8 days only");
     expect(html).not.toMatch(/0 sessions?/);
     expect(html).toContain("4 commits on 2 days");
-    expect(html.match(/class="wiki-ef-day/g)).toHaveLength(28);
+    expect(html.match(/class="wiki-ef-day/g)).toHaveLength(29);
     expect(html.match(/wiki-ef-day[^"]* old/g)).toHaveLength(20);
     expect(html).not.toContain("wiki-ef-sess");
+  });
+
+  // The run at 10:00 on 10-29 (Oslo, UTC+1): `dailyActivity`'s rolling windows
+  // reach back into 10-21 for sessions and 10-01 for commits.
+  test("a stored session count on the 8-day window's first, partial day is kept", () => {
+    const days = activityStrip([{ day: "2026-10-21", commits: 0, sessions: 2 }], run);
+    expect(days.find((d) => d.day === "2026-10-21")).toEqual({ day: "2026-10-21", commits: 0, sessions: 2 });
+    const html = activityStripHtml([{ day: "2026-10-21", commits: 0, sessions: 2 }], run);
+    expect(html).toContain("2 sessions in the last 8 days");
+    expect(html).toContain('title="2026-10-21: 2 sessions"><span class="wiki-ef-sess"');
+  });
+
+  test("a stored commit count on the 28-day window's first, partial day is kept", () => {
+    const days = activityStrip([{ day: "2026-10-01", commits: 1, sessions: 0 }], run);
+    expect(days[0]).toEqual({ day: "2026-10-01", commits: 1, sessions: null });
+    expect(activityStripHtml([{ day: "2026-10-01", commits: 1, sessions: 0 }], run)).toContain("1 commit on 1 day");
+  });
+
+  test("a stored day older than the 28-day window widens the strip instead of vanishing", () => {
+    const days = activityStrip([{ day: "2026-09-29", commits: 2, sessions: 0 }], run);
+    expect(days[0]).toEqual({ day: "2026-09-29", commits: 2, sessions: null });
+    expect(days).toHaveLength(31);
+  });
+
+  test("a session day the sessions memo never covered still keeps its stored count", () => {
+    // A memo shorter than the run's 8 days: 10-24 onward counts sessions.
+    const days = activityStrip([{ day: "2026-10-22", commits: 0, sessions: 1 }], run, Date.parse("2026-10-24T08:00:00Z"));
+    expect(days.find((d) => d.day === "2026-10-23")!.sessions).toBeNull();
+    expect(days.find((d) => d.day === "2026-10-22")!.sessions).toBe(1);
+    expect(days.find((d) => d.day === "2026-10-24")!.sessions).toBe(0);
+  });
+
+  test("the strip's accessible name puts a period between the summary and the note", () => {
+    const html = activityStripHtml([{ day: ago(1), commits: 3, sessions: 0 }], run);
+    expect(html).toContain('aria-label="3 commits on 1 day. Days before the last 8 count commits only."');
+    expect(activityStripHtml([], run)).toContain('aria-label="No commits or sessions in the last 28 days. Days before');
+    expect(html).toMatch(/class="wiki-ef-strip"[^>]* tabindex="0"/);
   });
 
   test("a session day gets its dot; an empty effort says so", () => {
@@ -268,6 +309,11 @@ describe("effortView", () => {
     const { article } = view(m, "main");
     expect(article).toContain("Activity, last 28 days");
     expect(article).toMatch(/Why together[\s\S]*They share/);
+  });
+
+  test("the strip counts sessions from the run's own coverage when it is shorter than 8 days", () => {
+    const short = map({ ...m, coverage: { ...m.coverage, sessionsSinceMs: Date.parse("2026-10-26T08:00:00Z") } });
+    expect(view(short, "main").article.match(/wiki-ef-day[^"]* old/g)).toHaveLength(25);
   });
 });
 

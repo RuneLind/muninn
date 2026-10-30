@@ -75,6 +75,8 @@ function mapJson(runAtMs: number): string {
         why: "The plan, its report and the follow-up grew from one another; ⟦plans/gone.mdx⟧ was removed.",
         related: [{ id: "visuals", why: "Shares the reader." }],
         daily: [
+          // Sessions only, on the 8-day window's first (partial) Oslo day.
+          { day: osloDay(runAtMs - 8 * DAY), commits: 0, sessions: 1 },
           { day: osloDay(runAtMs - 1 * DAY), commits: 3, sessions: 0 },
           { day: osloDay(runAtMs - 2 * DAY), commits: 1, sessions: 2 },
           { day: osloDay(runAtMs - 15 * DAY), commits: 2, sessions: 0 },
@@ -157,8 +159,9 @@ async function expectDriftPage(page: Page): Promise<void> {
   await expect(ef.locator(".wiki-ef-crumbs")).toContainText("Efforts");
   await expect(ef.locator(".wiki-ef-crumb-theme")).toHaveText("Reader");
   await expect(ef.locator(".wiki-ef-need")).toHaveCount(1);
-  await expect(ef.locator(".wiki-ef-day")).toHaveCount(28);
-  await expect(ef.locator(".wiki-ef-strip-sum")).toHaveText("6 commits on 3 days · 2 sessions in the last 8 days");
+  await expect(ef.locator(".wiki-ef-day")).toHaveCount(29);
+  await expect(ef.locator(".wiki-ef-strip-sum")).toHaveText("6 commits on 4 days · 3 sessions in the last 8 days");
+  await expect(ef.locator(".wiki-ef-sess")).toHaveCount(2);
   await expect(ef).not.toContainText("0 sessions");
   const conn = page.locator("#connBody");
   await expect(conn).toContainText("Related efforts (1)");
@@ -255,6 +258,51 @@ test("a slow map GET shows the loading state first, then the effort", async ({ p
   await expectDriftPage(page);
 });
 
+/** The strip's geometry at a viewport width: every session dot is painted
+ *  (the topmost element at its centre), no run label is clipped, and the strip
+ *  itself scrolls sideways or not. */
+async function stripGeometry(page: Page) {
+  return page.locator("#wikiEffortPage .wiki-ef-strip").evaluate((strip) => {
+    // Scroll the page to the strip, never the strip itself: a dot's own
+    // scrollIntoView scrolls the clipping strip to it and hides the clip.
+    strip.scrollIntoView({ block: "center" });
+    const dots = Array.from(strip.querySelectorAll<HTMLElement>(".wiki-ef-sess")).map((d) => {
+      // Where the strip scrolls, bring the dot's CELL into view sideways.
+      d.parentElement!.scrollIntoView({ block: "nearest", inline: "nearest" });
+      const box = strip.getBoundingClientRect();
+      const r = d.getBoundingClientRect();
+      const inside = r.top >= box.top && r.bottom <= box.bottom && r.left >= box.left && r.right <= box.right;
+      return inside && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === d;
+    });
+    const clippedLabels = Array.from(strip.querySelectorAll<HTMLElement>(".wiki-ef-run-label"))
+      .filter((l) => l.scrollWidth > l.clientWidth)
+      .map((l) => `${l.textContent} ${l.scrollWidth}>${l.clientWidth}`);
+    return { dots, clippedLabels, scrolls: strip.scrollWidth > strip.clientWidth, tabindex: strip.getAttribute("tabindex"), name: strip.getAttribute("aria-label") };
+  });
+}
+
+test("the activity strip paints its session dots, clips no label, and fits at desktop widths", async ({ page }) => {
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=drift`);
+  await expect(page.locator("#wikiEffortPage .wiki-ef-strip")).toBeVisible();
+  for (const width of [1024, 1280, 1600]) {
+    await page.setViewportSize({ width, height: 900 });
+    const g = await stripGeometry(page);
+    expect(g.dots.length, `${width}px: session dots`).toBeGreaterThan(0);
+    expect(g.dots, `${width}px: each dot is painted`).toEqual(g.dots.map(() => true));
+    expect(g.clippedLabels, `${width}px: clipped run labels`).toEqual([]);
+    expect(g.scrolls, `${width}px: the strip scrolls sideways`).toBe(false);
+  }
+  // A narrow article (600 px viewport) scrolls; the scroll region is then a
+  // named tab stop. (Below ~600 px the reader has no article column at all.)
+  await page.setViewportSize({ width: 600, height: 800 });
+  const narrow = await stripGeometry(page);
+  expect(narrow.scrolls).toBe(true);
+  expect(narrow.dots).toEqual(narrow.dots.map(() => true));
+  expect(narrow.clippedLabels).toEqual([]);
+  expect(narrow.tabindex).toBe("0");
+  expect(narrow.name).toMatch(/\. Days before the last 8 count commits only\.$/);
+});
+
 const THEMES: { label: string; stored: string | null; scheme: "light" | "dark" }[] = [
   { label: "Light", stored: "light", scheme: "dark" },
   { label: "Dark", stored: "dark", scheme: "light" },
@@ -300,7 +348,7 @@ async function styledEffortClasses(page: Page): Promise<string[]> {
 
 /** Classes that paint no text of their own, or only in a state this sweep
  *  reaches through another test. */
-const UNSWEPT = new Set(["wiki-ef-day", "wiki-ef-sess", "wiki-ef-cells", "wiki-ef-run", "wiki-ef-strip"]);
+const UNSWEPT = new Set(["wiki-ef-day", "wiki-ef-cells", "wiki-ef-run", "wiki-ef-strip"]);
 
 for (const theme of THEMES) {
   test(`the effort page is legible in the ${theme.label} theme`, async ({ page }) => {

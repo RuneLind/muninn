@@ -18,10 +18,13 @@ import { lastActiveDays, needKey, proseHtml, type CardPage } from "./wiki-work-c
 
 /** The URL parameter that names an effort. */
 export const EFFORT_PARAM = "effort";
-/** The strip's length, and how many of its newest days count sessions: the
- *  sessions memo covers 8 days (`WORK_WINDOW_MS`), git the whole 28. */
+/** The windows `dailyActivity` counts over: commits for the last 28 days,
+ *  sessions for the last 8 (`WORK_WINDOW_MS`). Both are rolling, so each
+ *  reaches into one more Oslo calendar day: the strip shows 29 cells, the
+ *  newest 9 counting sessions. */
 export const STRIP_DAYS = 28;
 export const STRIP_SESSION_DAYS = 8;
+const DAY_MS = 86_400_000;
 /** Lineage indent stops growing past this depth. */
 const MAX_INDENT = 4;
 
@@ -106,29 +109,40 @@ export function lineageOrder<P>(pages: readonly JoinedEffortPage<P>[]): LineageR
 export interface StripDay {
   day: string;
   commits: number;
-  /** null outside the sessions window (days 9–28). */
+  /** null before the sessions window: that day counts commits only. */
   sessions: number | null;
 }
 
 /** `YYYY-MM-DD` minus `n` calendar days. */
 function minusDays(day: string, n: number): string {
-  const t = Date.parse(day + "T12:00:00Z") - n * 86_400_000;
+  const t = Date.parse(day + "T12:00:00Z") - n * DAY_MS;
   return new Date(t).toISOString().slice(0, 10);
 }
 
 /**
- * The 28 days ending on the run's Oslo day, oldest first. A day missing from
- * `daily` (only active days are stored) reads as zero; the newest 8 carry
- * sessions, the rest `null`.
+ * The Oslo days the run's windows touch, oldest first: from the day 28 × 24 h
+ * before the run to the run's own day. A day missing from `daily` (only active
+ * days are stored) reads as zero. Days from the sessions window's first day
+ * (`sessionsSinceMs`, the run's coverage, never before the 8-day window the
+ * labels promise) carry sessions, older days `null` —
+ * unless `daily` stores a session count there, which is shown, never dropped.
+ * A stored day older than the 28-day window widens the strip the same way.
  */
-export function activityStrip(daily: readonly WorkMapDaily[], runAtMs: number): StripDay[] {
+export function activityStrip(
+  daily: readonly WorkMapDaily[],
+  runAtMs: number,
+  sessionsSinceMs: number = runAtMs - STRIP_SESSION_DAYS * DAY_MS,
+): StripDay[] {
   const end = osloDay(runAtMs);
+  const sessionsFrom = osloDay(Math.max(sessionsSinceMs, runAtMs - STRIP_SESSION_DAYS * DAY_MS));
+  let start = osloDay(runAtMs - STRIP_DAYS * DAY_MS);
+  for (const d of daily) if (d.day < start) start = d.day;
   const byDay = new Map(daily.map((d) => [d.day, d]));
   const out: StripDay[] = [];
-  for (let back = STRIP_DAYS - 1; back >= 0; back--) {
-    const day = minusDays(end, back);
+  for (let day = start; day <= end; day = minusDays(day, -1)) {
     const d = byDay.get(day);
-    out.push({ day, commits: d?.commits ?? 0, sessions: back < STRIP_SESSION_DAYS ? (d?.sessions ?? 0) : null });
+    const sessions = day >= sessionsFrom ? (d?.sessions ?? 0) : d?.sessions ? d.sessions : null;
+    out.push({ day, commits: d?.commits ?? 0, sessions });
   }
   return out;
 }
@@ -144,8 +158,8 @@ export function stripDayLabel(d: StripDay): string {
   return `${d.day}: ${parts.length ? parts.join(", ") : "no activity"}`;
 }
 
-export function activityStripHtml(daily: readonly WorkMapDaily[], runAtMs: number): string {
-  const days = activityStrip(daily, runAtMs);
+export function activityStripHtml(daily: readonly WorkMapDaily[], runAtMs: number, sessionsSinceMs?: number): string {
+  const days = activityStrip(daily, runAtMs, sessionsSinceMs);
   const maxCommits = Math.max(1, ...days.map((d) => d.commits));
   const commits = days.reduce((n, d) => n + d.commits, 0);
   const activeDays = days.filter((d) => d.commits > 0 || (d.sessions ?? 0) > 0).length;
@@ -159,19 +173,28 @@ export function activityStripHtml(daily: readonly WorkMapDaily[], runAtMs: numbe
       "</span>"
     );
   };
-  const old = days.slice(0, STRIP_DAYS - STRIP_SESSION_DAYS);
-  const recent = days.slice(STRIP_DAYS - STRIP_SESSION_DAYS);
+  // The commits-only run ends at the last null-session day.
+  let split = 0;
+  days.forEach((d, i) => {
+    if (d.sessions === null) split = i + 1;
+  });
+  const old = days.slice(0, split);
+  const recent = days.slice(split);
+  const run = (cls: string, label: string, ds: StripDay[]) =>
+    ds.length === 0
+      ? ""
+      : `<div class="wiki-ef-run${cls}" style="--ef-cells:${ds.length}"><div class="wiki-ef-run-label">${label}</div><div class="wiki-ef-cells">${ds.map(cell).join("")}</div></div>`;
   const summary =
     activeDays === 0
-      ? "No commits or sessions in the last 28 days."
+      ? "No commits or sessions in the last 28 days"
       : `${plural(commits, "commit")} on ${plural(activeDays, "day")}` + (sessions ? ` · ${plural(sessions, "session")} in the last 8 days` : "");
   return (
     '<section class="wiki-ef-section wiki-ef-activity"><h2 class="wiki-ef-h">Activity, last 28 days</h2>' +
-    `<div class="wiki-ef-strip" role="img" aria-label="${esc(`${summary} Days 9 to 28 count commits only.`)}">` +
-    `<div class="wiki-ef-run old"><div class="wiki-ef-run-label">days 9–28 · commits only</div><div class="wiki-ef-cells">${old.map(cell).join("")}</div></div>` +
-    `<div class="wiki-ef-run"><div class="wiki-ef-run-label">last 8 days · commits and sessions</div><div class="wiki-ef-cells">${recent.map(cell).join("")}</div></div>` +
+    `<div class="wiki-ef-strip" role="img" tabindex="0" aria-label="${esc(`${summary}. Days before the last 8 count commits only.`)}">` +
+    run(" old", "earlier · commits only", old) +
+    run("", "last 8 days · commits and sessions", recent) +
     "</div>" +
-    `<div class="wiki-ef-strip-foot"><span>${esc(days[0]!.day)}</span><span class="wiki-ef-strip-sum">${esc(summary)}</span><span>${esc(days[days.length - 1]!.day)}</span></div>` +
+    `<div class="wiki-ef-strip-foot"><span>${esc(days[0]!.day)}</span><span class="wiki-ef-strip-sum">${esc(activeDays === 0 ? summary + "." : summary)}</span><span>${esc(days[days.length - 1]!.day)}</span></div>` +
     '<div class="wiki-ef-legend">Darker means more commits; a dot marks a day with a session. Sessions are counted for the last 8 days only.</div>' +
     "</section>"
   );
@@ -258,7 +281,7 @@ export function effortView<P extends EffortPageListing>(input: EffortViewInput<P
     needsHtml(joined, input.map, e.id, input.done ?? new Set(), prose) +
     subEffortsHtml(e, efforts, input.effortHref) +
     pagesHtml(e, input) +
-    activityStripHtml(e.daily, input.map.runAtMs) +
+    activityStripHtml(e.daily, input.map.runAtMs, input.map.coverage.sessionsSinceMs) +
     (e.why ? `<section class="wiki-ef-section"><h2 class="wiki-ef-h">Why together</h2><p class="wiki-ef-why">${prose(e.why)}</p></section>` : "") +
     `<div class="wiki-ef-foot">From the work map organized ${esc(new Date(input.map.runAtMs).toLocaleString())}.</div>` +
     "</div>";

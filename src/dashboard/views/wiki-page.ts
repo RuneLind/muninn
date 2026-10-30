@@ -2665,12 +2665,16 @@ export async function renderWikiPage(opts?: {
       font-size: 10.5px; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
       background: var(--tint-neutral); color: var(--text-soft);
     }
-    .wiki-ef-strip { display: flex; gap: 10px; align-items: flex-end; overflow-x: auto; }
-    .wiki-ef-run { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-    .wiki-ef-run-label { font-size: 11px; color: var(--text-soft); white-space: nowrap; }
+    /* Cells share the article width (8–18 px each), so the strip fits from a
+       phone up; below that it scrolls, and the bottom padding holds the
+       session dots, which overflow-x: auto would otherwise clip. */
+    .wiki-ef-strip { display: flex; gap: 10px; align-items: flex-end; overflow-x: auto; padding-bottom: 10px; }
+    .wiki-ef-strip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .wiki-ef-run { display: flex; flex-direction: column; gap: 4px; flex: var(--ef-cells, 1) 1 0; min-width: min-content; max-width: calc(var(--ef-cells, 1) * 21px); }
+    .wiki-ef-run-label { font-size: 11px; color: var(--text-soft); overflow-wrap: anywhere; }
     .wiki-ef-cells { display: flex; gap: 3px; }
     .wiki-ef-day {
-      position: relative; width: 16px; height: 22px; border-radius: 3px; flex-shrink: 0;
+      position: relative; flex: 1 1 0; min-width: 8px; max-width: 18px; height: 22px; border-radius: 3px;
       background: var(--bg-inset); border: 1px solid var(--border-secondary);
     }
     .wiki-ef-day.lvl-1 { background: color-mix(in srgb, var(--accent) 30%, var(--bg-inset)); }
