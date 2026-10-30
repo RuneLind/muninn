@@ -269,6 +269,42 @@ test("a project chip clicked on the effort page rewrites its links to carry the 
   for (const link of [home, sibling, sub, wikiCrumb]) await expect(link).not.toHaveAttribute("href", /project=/);
 });
 
+/** Click the `reader` project chip and wait for the URL to carry it. */
+async function pickReaderChip(page: Page): Promise<void> {
+  await page.locator("#wikiFiltersBtn").click();
+  await page.locator('#projectChips [data-project="reader"]').click();
+  await expect.poll(() => new URL(page.url()).searchParams.get("project")).toBe("reader");
+}
+
+test("a project chip clicked while the map GET is in flight: one GET, and the error pane's crumbs carry the facet", async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    gets++;
+    await held;
+    await route.fulfill({ status: 500, json: { error: "down" } });
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=drift`);
+  await expect(page.locator('#wikiEffortPage[data-effort-status="loading"]')).toBeVisible();
+  await pickReaderChip(page);
+  release();
+  const ef = page.locator('#wikiEffortPage[data-effort-status="error"]');
+  await expect(ef).toBeVisible();
+  for (const sel of ["[data-effort-home]", ".wiki-bc-wiki"]) await expect.soft(ef.locator(sel)).toHaveAttribute("href", /[?&]project=reader(&|$)/);
+  await page.waitForTimeout(300);
+  expect.soft(gets).toBe(1);
+});
+
+test("a project chip clicked on the error pane rewrites both crumbs", async ({ page }) => {
+  await page.route("**/api/wiki/work-map?*", (route) => route.fulfill({ status: 500, json: { error: "down" } }));
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=drift`);
+  const ef = page.locator('#wikiEffortPage[data-effort-status="error"]');
+  await expect(ef).toBeVisible();
+  await pickReaderChip(page);
+  for (const sel of ["[data-effort-home]", ".wiki-bc-wiki"]) await expect(ef.locator(sel)).toHaveAttribute("href", /[?&]project=reader(&|$)/);
+});
+
 test("an unknown id says it is no longer in the map and links the alias match", async ({ page }) => {
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=stale-check`);
   const ef = page.locator("#wikiEffortPage");
@@ -458,6 +494,17 @@ test("an adopt that brings a new run repaints the effort page and keeps focus on
   await expect(page.locator("#wikiEffortPage h1")).toHaveText("Drift check v2");
   await expect(link).toBeFocused();
 });
+
+for (const [what, sel] of [["the activity strip", ".wiki-ef-strip"], ["the wiki crumb", ".wiki-ef-crumbs .wiki-bc-wiki"]] as const) {
+  test(`an adopt that brings a new run keeps focus on ${what}`, async ({ page }) => {
+    await openLiveDrift(page);
+    await page.locator(`#wikiEffortPage ${sel}`).focus();
+    await writeLiveMap(Date.now() - 1 * HOUR, "Drift check v2");
+    await refetchListing(page);
+    await expect(page.locator("#wikiEffortPage h1")).toHaveText("Drift check v2");
+    expect(await page.evaluate((s) => document.activeElement === document.querySelector(`#wikiEffortPage ${s}`), sel)).toBe(true);
+  });
+}
 
 test("a failed map GET during a background re-join keeps the effort on screen", async ({ page }) => {
   await openLiveDrift(page);

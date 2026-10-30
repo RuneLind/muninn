@@ -14,7 +14,7 @@ import { EFFORT_ID_RE, osloDay, slugifyEffortId } from "../../../wiki/work-map/i
 import type { WorkMap, WorkMapDaily } from "../../../wiki/work-map/schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { escHtml as esc } from "./escape.ts";
-import { isNestedEffort, lastActiveDays, needKey, proseHtml, rendersUnderParent, type CardPage } from "./wiki-work-card.ts";
+import { isNestedEffort, lastActiveDays, needKey, proseHtml, type CardPage } from "./wiki-work-card.ts";
 
 /** The URL parameter that names an effort. */
 export const EFFORT_PARAM = "effort";
@@ -311,7 +311,34 @@ export function effortView<P extends EffortPageListing>(input: EffortViewInput<P
     `<div class="wiki-ef-foot">From the work map organized ${esc(new Date(input.map.runAtMs).toLocaleString())}.</div>` +
     "</div>";
 
-  return { article, connections: connectionsHtml(e, joined, themes, input, prose) };
+  return { article: withFocusKeys(article, "a"), connections: withFocusKeys(connectionsHtml(e, joined, themes, input, prose), "c") };
+}
+
+/** The opening tag of every element a keyboard reaches: links, buttons and
+ *  anything with a `tabindex`. Attribute values are escaped, so no `>` sits
+ *  inside one. */
+const FOCUSABLE_TAG_RE = /<(a|button)\b([^>]*)>|<(\w+)\b([^>]*\btabindex="[^"]*"[^>]*)>/g;
+
+/**
+ * Give every focusable element a `data-focus-key`, so a repaint can put focus
+ * back on the same control (`writeEffortPanes`). The key is the element's id,
+ * else its tag, first class and the page or effort it names, never its href (a
+ * facet change rewrites every href); a repeat gets `~n`, so keys are unique
+ * within the pane.
+ */
+export function withFocusKeys(html: string, pane: string): string {
+  const seen = new Map<string, number>();
+  return html.replace(FOCUSABLE_TAG_RE, (_tag, t1: string | undefined, a1: string | undefined, t2: string | undefined, a2: string | undefined) => {
+    const name = (t1 ?? t2)!;
+    const attrs = (a1 ?? a2)!;
+    const attr = (n: string) => attrs.match(new RegExp(`\\s${n}="([^"]*)"`))?.[1];
+    const id = attr("id");
+    const target = attr("data-relpath") ?? attr("data-effort-link") ?? (/\sdata-effort-home\b/.test(attrs) ? "home" : "");
+    const base = `${pane}:` + (id ? `#${id}` : `${name}.${(attr("class") ?? "").split(" ")[0]}|${target}`);
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return `<${name}${attrs} data-focus-key="${n ? `${base}~${n}` : base}">`;
+  });
 }
 
 function confidenceLabel(c: number): string {
@@ -346,8 +373,9 @@ function needsHtml<P>(map: JoinedWorkMap<P>, raw: WorkMap, id: string, done: Rea
 }
 
 function subEffortsHtml<P>(e: JoinedEffort<P>, efforts: readonly JoinedEffort<P>[], href: (id: string) => string): string {
-  // Exactly the efforts the card nests under this one (`rendersUnderParent`).
-  const all = efforts.filter((x) => x.parent === e.id && rendersUnderParent(x, efforts));
+  // Every child whose crumb names this effort (`isNestedEffort`), including a
+  // Moving child the card lifts top-level from a closed-lane parent.
+  const all = efforts.filter((x) => x.parent === e.id && isNestedEffort(x, efforts));
   if (!all.length) return "";
   return (
     `<section class="wiki-ef-section"><h2 class="wiki-ef-h">Sub-efforts <span class="wiki-ef-count">${all.length}</span></h2><ul class="wiki-ef-subs">` +
@@ -445,7 +473,7 @@ function droppedView<P extends EffortPageListing>(input: EffortViewInput<P>, mat
     `<p class="wiki-ef-gone-home"><a class="wiki-ef-crumb" href="${esc(input.startHref)}" data-effort-home>See every effort on the Your work card</a></p>` +
     "</div>";
   return {
-    article,
+    article: withFocusKeys(article, "a"),
     connections: '<div class="wiki-ef-conn-empty">This effort is no longer in the map.</div>',
   };
 }
@@ -458,14 +486,15 @@ export function effortStatusHtml(input: { wiki: string; startHref: string; id: s
       : kind === "no-map"
         ? "This wiki has no work map, so it has no effort pages."
         : `Couldn’t load the work map${detail ? `: ${detail}` : "."}`;
-  return (
+  return withFocusKeys(
     `<div class="wiki-effort wiki-effort-status" id="wikiEffortPage" data-effort="${esc(input.id)}" data-effort-status="${kind}">` +
     '<div class="wiki-article-head">' +
     crumbsHtml(input, [`<span class="wiki-ef-crumb-theme">${esc(input.id)}</span>`]) +
     `<h1>${esc(input.id)}</h1></div>` +
     `<p class="wiki-ef-status${kind === "error" ? " warn" : ""}" role="status">${esc(text)}</p>` +
     (kind === "error" ? '<button type="button" class="wiki-ef-retry" id="wikiEffortRetry">Retry</button>' : "") +
-    "</div>"
+    "</div>",
+    "a",
   );
 }
 

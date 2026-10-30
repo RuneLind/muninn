@@ -16,7 +16,7 @@ import {
   STRIP_SESSION_DAYS,
   type EffortPageListing,
 } from "./wiki-effort-page.ts";
-import { rendersUnderParent, workCardHtml } from "./wiki-work-card.ts";
+import { workCardHtml } from "./wiki-work-card.ts";
 
 const NOW = Date.parse("2026-10-29T12:00:00Z");
 const HOUR = 3_600_000;
@@ -403,7 +403,7 @@ describe("effortView", () => {
 
   test("In short carries the one-liner and the next step; a gone marker is its stem", () => {
     const { article } = view(m, "main");
-    expect(article).toMatch(/In short[\s\S]*The main line on <a class="wiki-wm-link"[^>]*data-relpath="plans\/a.mdx">Plan A<\/a>/);
+    expect(article).toMatch(/In short[\s\S]*The main line on <a class="wiki-wm-link"[^>]*data-relpath="plans\/a.mdx"[^>]*>Plan A<\/a>/);
     expect(article).toMatch(/Next:<\/span> Ship gone\./);
   });
 
@@ -418,11 +418,11 @@ describe("effortView", () => {
 
   test("pages in lineage order with role and the reader's status pill", () => {
     const { article } = view(m, "main");
-    expect(article).toMatch(/data-relpath="plans\/a.mdx">Plan A<\/a><span class="wiki-ef-role">plan<\/span><span class="pill">in-flight<\/span>[\s\S]*data-depth="1" title="Derived from Plan A"[\s\S]*Plan &lt;B&gt;/);
+    expect(article).toMatch(/data-relpath="plans\/a.mdx"[^>]*>Plan A<\/a><span class="wiki-ef-role">plan<\/span><span class="pill">in-flight<\/span>[\s\S]*data-depth="1" title="Derived from Plan A"[\s\S]*Plan &lt;B&gt;/);
   });
 
   test("sub-efforts list on the parent; the child's crumbs link back to it", () => {
-    expect(view(m, "main").article).toMatch(/Sub-efforts[\s\S]*data-effort-link="child">Effort child/);
+    expect(view(m, "main").article).toMatch(/Sub-efforts[\s\S]*data-effort-link="child"[^>]*>Effort child/);
     expect(view(m, "child").article).toMatch(/wiki-ef-crumbs[\s\S]*data-effort-link="main"[^>]*>Main &lt;work&gt;<\/a><\/nav>/);
   });
 
@@ -466,7 +466,7 @@ test("the Your work card links effort names when given effortHref, and keeps tex
   expect(workCardHtml(base)).not.toContain("data-effort-link");
 });
 
-test("a parent cycle reads as the card reads it: no parent crumb, sub-efforts only what the card nests", () => {
+test("a parent cycle reads as the card reads it: no parent crumb, and no sub-effort row on either side", () => {
   // Normalize clears parent cycles, so this map is hand-edited.
   const efforts = [
     effort("x", ["plans/a.mdx"], { parent: "y" }),
@@ -478,11 +478,66 @@ test("a parent cycle reads as the card reads it: no parent crumb, sub-efforts on
   const m = map({ efforts });
   const crumbLinks = (id: string) => [...(view(m, id).article.match(/<nav class="wiki-ef-crumbs"[\s\S]*?<\/nav>/)?.[0] ?? "").matchAll(/data-effort-link="([^"]+)"/g)].map((x) => x[1]);
   const subs = (id: string) => [...(view(m, id).article.match(/<ul class="wiki-ef-subs">[\s\S]*?<\/ul>/)?.[0] ?? "").matchAll(/data-effort-link="([^"]+)"/g)].map((x) => x[1]);
-  const joined = joinWorkMap(m, PAGES).efforts;
-  const nested = (id: string) => joined.filter((x) => x.parent === id && rendersUnderParent(x, joined)).map((x) => x.id);
   expect(crumbLinks("x")).toEqual([]);
   expect(crumbLinks("y")).toEqual([]);
-  for (const id of ["x", "y", "k", "lift", "q"]) expect(subs(id)).toEqual(nested(id));
+  expect(subs("x")).toEqual([]);
+  expect(subs("y")).toEqual([]);
   // `k` hangs off a cycle member, so its chain never reaches a root: top-level.
   expect(crumbLinks("k")).toEqual([]);
+  // A Moving child of a closed-lane parent is lifted top-level on the card, yet
+  // the parent page lists it and its own crumb names the parent: both agree.
+  expect(subs("q")).toEqual(["lift"]);
+  expect(crumbLinks("lift")).toEqual(["q"]);
+});
+
+describe("focus keys", () => {
+  /** The opening tag of every element a keyboard reaches. */
+  const focusables = (html: string) => [...html.matchAll(/<(?:a|button)\b[^>]*>|<\w+\b[^>]*\btabindex="[^"]*"[^>]*>/g)].map((x) => x[0]);
+  const keys = (html: string) => focusables(html).map((t) => t.match(/\bdata-focus-key="([^"]*)"/)?.[1]);
+  const m = map({
+    themes: [{ name: "Reader", efforts: ["main", "sib"] }],
+    needsYou: [{ title: "Decide ⟦plans/a.mdx⟧", kind: "decision", why: "", action: "", pages: [], effort: "main" }],
+    efforts: [
+      effort("main", ["plans/a.mdx", ["plans/b.mdx", "plans/a.mdx"]], { oneLine: "On ⟦plans/a.mdx⟧.", related: [{ id: "sib", why: "" }] }),
+      effort("child", ["plans/c.mdx"], { parent: "main" }),
+      effort("sib", ["plans/d.mdx"], { aliases: ["Old sib"] }),
+    ],
+  });
+  const head = { wiki: "w", startHref: "/wiki?wiki=w", id: "main" };
+  const panes = (over: Partial<Parameters<typeof effortView>[0]> = {}) => [
+    ...["main", "child", "old-sib"].flatMap((id) => {
+      const v = view(m, id, over);
+      return [v.article, v.connections];
+    }),
+    ...(["loading", "no-map", "error"] as const).map((k) => effortStatusHtml({ ...head, startHref: over.startHref ?? head.startHref }, k)),
+  ];
+
+  test("every focusable element in every pane carries a key, unique within its pane", () => {
+    expect(panes().flatMap(keys).length).toBeGreaterThan(20);
+    for (const html of panes()) {
+      const ks = keys(html);
+      expect(ks.every((k) => typeof k === "string" && k !== "")).toBe(true);
+      expect(new Set(ks).size).toBe(ks.length);
+    }
+    // The strip and the wiki crumb are among them.
+    const article = view(m, "main").article;
+    expect(focusables(article).some((t) => t.includes("wiki-ef-strip") && /data-focus-key=/.test(t))).toBe(true);
+    expect(focusables(article).some((t) => t.includes("wiki-bc-wiki") && /data-focus-key=/.test(t))).toBe(true);
+  });
+
+  test("two prose links to one page get different keys", () => {
+    const prose = focusables(view(m, "main").article).filter((t) => t.includes('class="wiki-wm-link"') && t.includes('data-relpath="plans/a.mdx"'));
+    expect(prose).toHaveLength(2);
+    expect(new Set(keys(prose.join(""))).size).toBe(2);
+  });
+
+  test("a facet change, which rewrites every href, keeps every key", () => {
+    const faceted = panes({
+      startHref: "/wiki?wiki=w&project=p",
+      hrefFor: (rel) => href(rel) + "&project=p",
+      effortHref: (id) => effortHref(id) + "&project=p",
+    });
+    expect(faceted.flatMap(keys).every((k) => !!k)).toBe(true);
+    expect(faceted.map(keys)).toEqual(panes().map(keys));
+  });
 });

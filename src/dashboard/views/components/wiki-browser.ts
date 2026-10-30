@@ -936,9 +936,10 @@ function adoptJiraFilter(boot: boolean): void {
 /** Keep the wiki-crumb hrefs in step with the facets. They are built once per
  *  render, so after a chip click a middle-click or copy-link would hand over
  *  the filter the reader had before it. Every crumb: the hidden breadcrumb
- *  keeps its old one while the effort page shows its own. */
+ *  keeps its old one while the effort page shows its own, and the effort
+ *  page's Efforts links go to the same overview. */
 function refreshCrumbHref(): void {
-  document.querySelectorAll(".wiki-bc-wiki").forEach((crumb) => crumb.setAttribute("href", currentStartUrl()));
+  document.querySelectorAll(".wiki-bc-wiki, #wikiEffortPage [data-effort-home]").forEach((crumb) => crumb.setAttribute("href", currentStartUrl()));
 }
 /**
  * Return to the overview from wherever the reader is — the breadcrumb's wiki
@@ -5573,6 +5574,9 @@ let effortOpen: string | null = null;
 /** The last map the effort page fetched, kept while the listing's run time
  *  matches it. */
 let effortMapCache: WorkMap | null = null;
+/** The map GET in flight and the run time it was started for: a repaint while
+ *  it runs (a facet change, an adopt) waits on it instead of sending another. */
+let effortMapFetch: { runAt: number; done: Promise<{ ok: boolean; status: number; body: WorkMapGetBody | null }> } | null = null;
 
 /** An effort's reader URL, carrying the facets an article URL carries. */
 function effortHrefFor(id: string): string {
@@ -5606,17 +5610,11 @@ function openEffort(id: string): void {
  *  panes, so a background re-join that changes nothing writes nothing. */
 let effortShown: { article: string; conn: string } | null = null;
 
-/** A selector that finds the focused control again after a re-render: its id,
- *  else its tag, first class and the link attribute the effort page keys on. */
+/** A selector that finds the focused control again after a re-render: the
+ *  `data-focus-key` the effort view gives every focusable element. */
 function effortFocusKey(el: Element | null): string | null {
-  if (!(el instanceof HTMLElement)) return null;
-  if (el.id) return `#${CSS.escape(el.id)}`;
-  const cls = el.classList[0] ? `.${CSS.escape(el.classList[0])}` : "";
-  for (const a of ["data-relpath", "data-effort-link", "data-effort-home"]) {
-    const v = el.getAttribute(a);
-    if (v !== null) return `${el.tagName.toLowerCase()}${cls}[${a}="${CSS.escape(v)}"]`;
-  }
-  return null;
+  const key = el instanceof HTMLElement ? el.getAttribute("data-focus-key") : null;
+  return key === null ? null : `[data-focus-key="${CSS.escape(key)}"]`;
 }
 
 /** Write the effort page's two panes. A navigation paints and scrolls to the
@@ -5669,7 +5667,9 @@ function paintEffort(id: string, background: boolean): void {
   const wrap = document.getElementById("articleWrap");
   if (!wrap) return;
   const seq = pageViewSeq;
-  const head = { wiki: WIKI, startHref: currentStartUrl(), id };
+  // Built at each write, so a pane painted after the GET carries the facets
+  // set while it was in flight.
+  const head = () => ({ wiki: WIKI, startHref: currentStartUrl(), id });
   const noMapConn = '<div class="wiki-ef-conn-empty">No work map.</div>';
   const paint = (map: WorkMap) => {
     const view = effortView({
@@ -5689,22 +5689,35 @@ function paintEffort(id: string, background: boolean): void {
   const runAt = workMapRunAt;
   if (runAt === null) {
     effortMapCache = null;
-    writeEffortPanes(wrap, effortStatusHtml(head, "no-map"), noMapConn, background);
+    writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
     return;
   }
   if (effortMapCache && effortMapCache.runAtMs === runAt) {
     paint(effortMapCache);
     return;
   }
-  if (!background) writeEffortPanes(wrap, effortStatusHtml(head, "loading"), '<div class="wiki-ef-conn-empty">Loading…</div>', false);
+  if (!background) writeEffortPanes(wrap, effortStatusHtml(head(), "loading"), '<div class="wiki-ef-conn-empty">Loading…</div>', false);
   const current = () => effortOpen === id && pageViewSeq === seq && !!document.getElementById("wikiEffortPage");
-  fetch(withWiki("/api/wiki/work-map"))
-    .then(async (r) => {
-      const body = (await r.json().catch(() => null)) as WorkMapGetBody | null;
+  if (effortMapFetch?.runAt !== runAt) {
+    const done = fetch(withWiki("/api/wiki/work-map")).then(async (r) => ({
+      ok: r.ok,
+      status: r.status,
+      body: (await r.json().catch(() => null)) as WorkMapGetBody | null,
+    }));
+    const entry = { runAt, done };
+    effortMapFetch = entry;
+    const clear = () => {
+      if (effortMapFetch === entry) effortMapFetch = null;
+    };
+    done.then(clear, clear);
+  }
+  effortMapFetch.done
+    .then((r) => {
+      const body = r.body;
       if (!current()) return;
       if (!r.ok || !body || typeof body !== "object") throw new Error(r.ok ? "malformed response" : `HTTP ${r.status}`);
       if (!body.map) {
-        writeEffortPanes(wrap, effortStatusHtml(head, "no-map"), noMapConn, background);
+        writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
         return;
       }
       effortMapCache = body.map;
@@ -5715,7 +5728,7 @@ function paintEffort(id: string, background: boolean): void {
       // A background re-join that fails keeps the effort being read; the next
       // adopt or a navigation tries again.
       if (background) return;
-      writeEffortPanes(wrap, effortStatusHtml(head, "error", err.message), noMapConn, false);
+      writeEffortPanes(wrap, effortStatusHtml(head(), "error", err.message), noMapConn, false);
     });
 }
 
