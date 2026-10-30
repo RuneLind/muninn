@@ -1,11 +1,13 @@
 /**
- * The rail's `group by effort` mode (work map P4): the effort index off the
- * map, the mode key, and `buildRail`'s effort folds — placement, the default
- * open three, the stored exceptions, the forced-open page, and the one-row
- * invariant across Pick up, Work threads and Activity.
+ * The rail's `group by effort` mode (work map P4, D14): the effort index off
+ * the map, the mode key, and `buildRail`'s effort folds — placement, the fold
+ * body, the default-open three, the stored exceptions, the forced-open page,
+ * and the one-row invariant across Pick up and Activity (Work threads are not
+ * drawn while folds form).
  */
 import { describe, expect, test } from "bun:test";
 import {
+  EFFORT_MOVING_STATES,
   EFFORT_ROWS_SHOWN,
   EFFORTS_OFF_TOGGLE_KEY,
   EFFORTS_OPEN_DEFAULT,
@@ -33,6 +35,8 @@ import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { ActivityRow } from "./wiki-activity-rank.ts";
 import type { PickUpRow } from "./wiki-pick-up.ts";
 import type { WorkMap } from "../../../wiki/work-map/schema.ts";
+import { WORK_MAP_LANES, effortNeedItems, openNeeds } from "./wiki-work-card.ts";
+import { effortView } from "./wiki-effort-page.ts";
 
 function page(over: Partial<WikiListing> & { relPath: string }): WikiListing {
   return {
@@ -652,6 +656,38 @@ describe("railEffortIndex — what a fold reads off the map (D14)", () => {
     expect([a.oneLine, a.state, a.needs]).toEqual(["Do ⟦plans/a1.mdx⟧", "blocked", ["decision|Pick one"]]);
     expect([...a.roles]).toEqual([["plans/a1.mdx", "plan"], ["plans/a2.mdx", "report"]]);
     expect(idx.get("plans/a2.mdx")).toBe(a);
+  });
+});
+
+describe("one source for the rail and the card or effort page (B2)", () => {
+  test("the rail's moving states are the card's Moving lane, not a copy", () => {
+    expect(EFFORT_MOVING_STATES).toBe(WORK_MAP_LANES.find((l) => l.id === "moving")!.states);
+  });
+
+  test("the rail's ✋ and the effort page's Needs you count the same items, a ✓-done one excluded", () => {
+    const map = {
+      version: 1, wiki: "w", runAtMs: 1, model: "m",
+      coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+      summary: "", themes: [], loose: [],
+      needsYou: [
+        { title: "Pick one", kind: "decision", why: "", action: "", pages: [], effort: "a" },
+        { title: "Other", kind: "review", why: "", action: "", pages: [], effort: "b" },
+        { title: "Read it", kind: "review", why: "", action: "", pages: [], effort: "a" },
+        { title: "Done one", kind: "verify", why: "", action: "", pages: [], effort: "a" },
+      ],
+      efforts: [
+        { id: "a", name: "A", aliases: [], oneLine: "", state: "active", pages: [{ id: "plans/a1.mdx", role: "plan" }], why: "", confidence: 1, next: "", related: [], daily: [] },
+      ],
+    } as unknown as WorkMap;
+    const done = new Set(["verify|Done one"]);
+    expect(effortNeedItems(map.needsYou, "a").map((x) => x.i)).toEqual([0, 2, 3]);
+    expect(openNeeds(effortNeedItems(map.needsYou, "a"), done).map((x) => x.key)).toEqual(["decision|Pick one", "review|Read it"]);
+    const rail = effortNeedsOpen(railEffortIndex(map, ALL, 2).get("plans/a1.mdx")!, done);
+    const { article } = effortView({
+      map, pages: ALL, id: "a", wiki: "w", startHref: "/wiki", hrefFor: (r) => r, effortHref: (id) => id, pill: () => "", now: 2, done,
+    });
+    const page = (article.match(/<li class="wiki-ef-need">/g) ?? []).length;
+    expect([rail, page]).toEqual([2, 2]);
   });
 });
 

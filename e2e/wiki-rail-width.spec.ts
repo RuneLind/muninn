@@ -233,8 +233,10 @@ const EF_PAGES: Array<[string, string, string]> = [
   ["plans/ef-short.md", "Short effort page", "in-flight"],
   ["plans/ef-e.md", "Effort page E with a title long enough to wrap inside the fold", "in-flight"],
 ];
+// ~300 chars: long enough that an unclamped summary runs to ~15 lines at 260 px.
 const EF_ONELINE =
-  "Carry ⟦plans/ef-a.md⟧ through review, then fold the follow-up, the report and the explainer into one long-running piece of work that keeps going";
+  "Carry ⟦plans/ef-a.md⟧ through review, then fold the follow-up, the report and the explainer into one long-running piece of work that keeps going " +
+  "until every open question is settled, every reviewer has signed off, the explainer matches the code and the report records what the campaign measured.";
 const EF_ROLES = ["prototype", "explainer", "spin-off", "followup", "reference"];
 const efMap = (runAtMs: number) =>
   JSON.stringify({
@@ -277,10 +279,7 @@ test.beforeAll(async () => {
   efRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-ef-"));
   await mkdir(path.join(efRoot, "plans"), { recursive: true });
   for (const [rel, title, status] of EF_PAGES) {
-    const moves = rel === "plans/ef-a.md"
-      ? ["<NextMoves>", "", '<Lane kind="you" who="Du">', "", ...Array.from({ length: 12 }, (_, i) => `${i + 1}. **Step ${i + 1}.**`), "", "</Lane>", "", "</NextMoves>", ""]
-      : [];
-    await writeFile(path.join(efRoot, rel), ["---", `title: ${title}`, `plan_status: ${status}`, "---", "", `# ${title}`, "", ...moves].join("\n"), "utf8");
+    await writeFile(path.join(efRoot, rel), ["---", `title: ${title}`, `plan_status: ${status}`, "---", "", `# ${title}`, ""].join("\n"), "utf8");
   }
   await writeFile(path.join(efRoot, ".work-map.json"), efMap(Date.now()), "utf8");
 
@@ -937,6 +936,29 @@ test.describe("Wiki rail: effort fold rows at the width budgets (work map P4)", 
       }
     }
     expect(bad).toEqual([]);
+  });
+
+  test("B1: at 260px a ~300-char summary is clamped to three lines, its title holds the whole text, «Open effort →» shows whole below it, and focusing a summary link unclamps it", async ({ page }) => {
+    expect(EF_ONELINE.length).toBeGreaterThanOrEqual(290);
+    await openEf(page, 260);
+    const intro = page.locator('#wikiList .wiki-effort-intro[data-effort="long"]');
+    const line = intro.locator(".wiki-effort-oneline");
+    const lines = () => line.evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
+    expect(await lines()).toBe(3);
+    expect(await line.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+    await expect(line).toHaveAttribute("title", EF_ONELINE.replace("⟦plans/ef-a.md⟧", "Effort page A"));
+    const g = await intro.evaluate((el) => {
+      const open = el.querySelector(".wiki-effort-open") as HTMLElement;
+      const one = el.querySelector(".wiki-effort-oneline") as HTMLElement;
+      const ir = el.getBoundingClientRect();
+      const or = open.getBoundingClientRect();
+      return { below: or.top >= one.getBoundingClientRect().bottom - 0.5, inside: or.left >= ir.left && or.right <= ir.right + 0.5 && or.bottom <= ir.bottom + 0.5, oneLine: or.height < 20 };
+    });
+    expect(g).toEqual({ below: true, inside: true, oneLine: true });
+    await line.locator("a.wiki-wm-link").first().focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    expect(await lines()).toBeGreaterThan(3);
   });
 
   test("D14: from 260 to 400px the open fold's body — a long summary, role chips, «+1 more» — stays inside the rail", async ({ page }) => {

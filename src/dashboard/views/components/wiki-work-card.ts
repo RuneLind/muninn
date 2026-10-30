@@ -84,6 +84,17 @@ export function needKey(n: { kind: string; title: string }): string {
   return `${n.kind}|${n.title}`;
 }
 
+/** The map's Needs-you items for effort `id`: index into `needsYou` and key. */
+export function effortNeedItems(needsYou: readonly { kind: string; title: string; effort?: string }[], id: string): { i: number; key: string }[] {
+  return needsYou.flatMap((n, i) => (n.effort === id ? [{ i, key: needKey(n) }] : []));
+}
+
+/** The items not ✓ on the card. The effort page's Needs you and the rail's ✋
+ *  both count through this and {@link effortNeedItems}. */
+export function openNeeds<T extends { key: string }>(items: readonly T[], done: ReadonlySet<string>): T[] {
+  return items.filter(({ key }) => !done.has(key));
+}
+
 // ── Done store (per wiki, keyed by run time) ──────────────────────────
 export const WORK_MAP_DONE_KEY_PREFIX = "muninn.wiki.workMapDone.v1:";
 
@@ -127,7 +138,7 @@ export function proseHtml(text: string, byKey: ReadonlyMap<string, CardPage>, hr
 
 /** `text` as plain text, each marker read as its page title: a `title=`
  *  value for prose the card clamps. */
-function proseText(text: string, byKey: ReadonlyMap<string, CardPage>): string {
+export function proseText(text: string, byKey: ReadonlyMap<string, CardPage>): string {
   return text.replace(/⟦([^⟧]+)⟧/g, (_, rel: string) => {
     const page = byKey.get(normalizeRelPath(rel));
     return page ? pageTitle(page) : stemOf(rel);

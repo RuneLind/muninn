@@ -126,8 +126,9 @@ export const GROUP_FOLDS_MAX = 20;
 
 /** Effort fold keys (`effort:…`, `closed:effort:…` and the «+N more» key
  *  `effort-all:…`), bounded apart from the reader's folds: a map run can
- *  rename or drop an effort, so its keys orphan the way a thread's do. A map
- *  holds a few dozen efforts at most. */
+ *  rename or drop an effort, so its keys orphan the way a thread's do. An
+ *  effort stores at most two keys (its fold key, `effort-all:`), so 40 covers
+ *  20 efforts; mimir's map held 16 on 2026-10-30. */
 export const EFFORT_FOLDS_MAX = 40;
 
 /** What a raw read may hold before `capFolds` sorts it out: every cap plus
@@ -1867,8 +1868,9 @@ export function buildRail(input: RailInput): RailModel {
   const activitySeries = new Map<string, { group: RailGroup; ranked: WikiListing[] }>();
   /**
    * P4: the effort folds Activity holds, by effort id, each with its Activity
-   * rows in rank order — the rows that place the fold and its age. The pages
-   * the fold lists are `effortOf`'s (D14), ranked or not.
+   * rows in rank order — the rows that place the fold (its slot). Its pages,
+   * age and default-open test read `effortDraws` (D14); these rows give its
+   * age only when no page has a finite one.
    */
   const activityEfforts = new Map<string, { effort: RailEffort; rows: ActivityRow[] }>();
   /** Every page an effort fold holds, open or closed: the remainder skips them. */
@@ -1902,7 +1904,7 @@ export function buildRail(input: RailInput): RailModel {
   // D14: with effort folds on, Work threads are not drawn and lift nothing;
   // unchecking `group by effort` brings them back.
   const cards = grouped && !effortMode ? (input.threads ?? []) : [];
-  /** page key → the open card it renders in. */
+  /** page key → the open card it renders in. Empty in the effort mode. */
   const threadLifted = new Map<string, RailThreadCard>();
   for (const c of openWorkThreadCards(cards)) {
     for (const p of c.focus) {
@@ -1923,8 +1925,8 @@ export function buildRail(input: RailInput): RailModel {
       // P4: a page in an effort folds under that effort's row — ahead of the
       // series test, since the fold claims the page first (D14). Every row
       // leaves a slot candidate here; the fold keeps only the slot of its
-      // newest DRAWN row (pruned once the pins are resolved, below) — the same
-      // rows its age and the default-open three are read from.
+      // newest DRAWN row (pruned once the pins are resolved, below). The page
+      // is already in `effortHeld` (seeded from `effortOf`).
       const effort = effortOf.get(rel);
       if (effort) {
         let bucket = activityEfforts.get(effort.id);
@@ -1934,7 +1936,6 @@ export function buildRail(input: RailInput): RailModel {
         }
         activityItems.push({ effortId: effort.id, rel });
         bucket.rows.push(row);
-        effortHeld.add(rel);
         activityRows.push(row);
         continue;
       }

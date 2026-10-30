@@ -8,7 +8,7 @@
 import { joinWorkMap } from "../../../wiki/work-map/join.ts";
 import type { EffortState, WorkMap } from "../../../wiki/work-map/schema.ts";
 import { normalizeRel } from "./wiki-nav.ts";
-import { needKey } from "./wiki-work-card.ts";
+import { effortNeedItems, openNeeds, WORK_MAP_LANES } from "./wiki-work-card.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 
 /**
@@ -25,8 +25,8 @@ export const EFFORT_FOLD_PREFIX = "effort:";
 /** How many effort folds start open: the most recently active ones. */
 export const EFFORTS_OPEN_DEFAULT = 3;
 
-/** The effort states whose folds may start open (D14): work that moves. */
-export const EFFORT_MOVING_STATES: readonly EffortState[] = ["active", "blocked", "proposed"];
+/** The effort states whose folds may start open (D14): the card's Moving lane. */
+export const EFFORT_MOVING_STATES: readonly EffortState[] = WORK_MAP_LANES.find((l) => l.id === "moving")!.states;
 
 /** How many rows an open fold shows before «+N more» (D14). */
 export const EFFORT_ROWS_SHOWN = 4;
@@ -60,7 +60,7 @@ export interface RailEffort {
 
 /** ✋ on a fold: the effort's Needs-you items not marked done on the card. */
 export function effortNeedsOpen(effort: Pick<RailEffort, "needs">, done: ReadonlySet<string>): number {
-  return effort.needs.filter((k) => !done.has(k)).length;
+  return openNeeds(effort.needs.map((key) => ({ key })), done).length;
 }
 
 /** The efforts that fold (D14): those with a page in Activity. Computed once,
@@ -99,7 +99,7 @@ export function railEffortIndex(map: WorkMap, pages: readonly WikiListing[], now
   const out = new Map<string, RailEffort>();
   for (const e of joinWorkMap(map, pages, now).efforts) {
     const roles = new Map<string, string>();
-    const needs = map.needsYou.filter((n) => n.effort === e.id).map(needKey);
+    const needs = effortNeedItems(map.needsYou, e.id).map((n) => n.key);
     const effort: RailEffort = { id: e.id, name: e.name, state: e.state, oneLine: e.oneLine, needs, roles };
     for (const p of e.pages) {
       const key = normalizeRel(p.page.relPath);

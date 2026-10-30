@@ -116,7 +116,7 @@ import {
 } from "./wiki-start-cards.ts";
 // The effort page (work map P3): pure HTML, wired by `renderEffort` below.
 import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
-import { proseHtml, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
+import { proseHtml, proseText, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import type { WorkMap } from "../../../wiki/work-map/schema.ts";
 import { EFFORTS_OFF_TOGGLE_KEY, effortNeedsOpen, effortsOn, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
@@ -1777,7 +1777,11 @@ function effortIntroHtml(effort: RailEffort): string {
   if (effortProseMemo?.pages !== allPages) {
     effortProseMemo = { pages: allPages, byKey: new Map(allPages.map((p) => [normalizeRelPath(p.relPath), p as CardPage])) };
   }
-  const line = effort.oneLine.trim() ? `<span class="wiki-effort-oneline">${proseHtml(effort.oneLine, effortProseMemo.byKey, pageUrlByRelPath)}</span> ` : "";
+  // Clamped to three lines (CSS); the title carries the whole summary.
+  const { byKey } = effortProseMemo;
+  const line = effort.oneLine.trim()
+    ? `<span class="wiki-effort-oneline" title="${esc(proseText(effort.oneLine, byKey))}">${proseHtml(effort.oneLine, byKey, pageUrlByRelPath)}</span> `
+    : "";
   return (
     `<div class="wiki-effort-intro" data-section="activity" data-effort="${esc(effort.id)}">${line}` +
     `<a class="wiki-effort-open" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}">Open effort →</a></div>`
