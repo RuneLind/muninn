@@ -20,8 +20,8 @@ import { isNestedEffort, lastActiveDays, needKey, proseHtml, rendersUnderParent,
 export const EFFORT_PARAM = "effort";
 /** The windows `dailyActivity` counts over: commits for the last 28 days,
  *  sessions for the last 8 (`WORK_WINDOW_MS`). Both are rolling, so each
- *  reaches into one more Oslo calendar day: the strip shows 29 cells, the
- *  newest 9 counting sessions. */
+ *  reaches into one more Oslo calendar day, and a DST change moves that by
+ *  one: the strip spans 28–30 days. */
 export const STRIP_DAYS = 28;
 export const STRIP_SESSION_DAYS = 8;
 const DAY_MS = 86_400_000;
@@ -136,12 +136,8 @@ function minusDays(day: string, n: number): string {
 
 /**
  * The Oslo days the run's windows touch, oldest first: from the day 28 × 24 h
- * before the run to the run's own day. A day missing from `daily` (only active
- * days are stored) reads as zero. Days from the sessions window's first day
- * (`sessionsSinceMs`, the run's coverage, never before the 8-day window the
- * labels promise) carry sessions, older days `null` —
- * unless `daily` stores a session count there, which is shown, never dropped.
- * A stored day older than the 28-day window widens the strip the same way.
+ * before the run (or an older stored day) to the run's own day. A day missing
+ * from `daily` (only active days are stored) reads as zero.
  */
 export function activityStrip(
   daily: readonly WorkMapDaily[],
@@ -149,17 +145,32 @@ export function activityStrip(
   sessionsSinceMs: number = runAtMs - STRIP_SESSION_DAYS * DAY_MS,
 ): StripDay[] {
   const end = osloDay(runAtMs);
-  const sessionsFrom = osloDay(Math.max(sessionsSinceMs, runAtMs - STRIP_SESSION_DAYS * DAY_MS));
+  const from = sessionsFromDay(daily, runAtMs, sessionsSinceMs);
   let start = osloDay(runAtMs - STRIP_DAYS * DAY_MS);
   for (const d of daily) if (d.day < start) start = d.day;
   const byDay = new Map(daily.map((d) => [d.day, d]));
   const out: StripDay[] = [];
   for (let day = start; day <= end; day = minusDays(day, -1)) {
     const d = byDay.get(day);
-    const sessions = day >= sessionsFrom ? (d?.sessions ?? 0) : d?.sessions ? d.sessions : null;
-    out.push({ day, commits: d?.commits ?? 0, sessions });
+    out.push({ day, commits: d?.commits ?? 0, sessions: day >= from ? (d?.sessions ?? 0) : null });
   }
   return out;
+}
+
+/**
+ * The first day that counts sessions: the earlier of the sessions memo's first
+ * Oslo day (`sessionsSinceMs`) and the oldest stored day with a session, never
+ * after the run's own day. Every day from it on carries sessions, every day
+ * before it `null`, so no stored session sits in the commits-only run.
+ */
+export function sessionsFromDay(
+  daily: readonly WorkMapDaily[],
+  runAtMs: number,
+  sessionsSinceMs: number = runAtMs - STRIP_SESSION_DAYS * DAY_MS,
+): string {
+  let from = osloDay(Math.min(sessionsSinceMs, runAtMs));
+  for (const d of daily) if (d.sessions > 0 && d.day < from) from = d.day;
+  return from;
 }
 
 const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
@@ -175,6 +186,7 @@ export function stripDayLabel(d: StripDay): string {
 
 export function activityStripHtml(daily: readonly WorkMapDaily[], runAtMs: number, sessionsSinceMs?: number): string {
   const days = activityStrip(daily, runAtMs, sessionsSinceMs);
+  const from = sessionsFromDay(daily, runAtMs, sessionsSinceMs);
   const maxCommits = Math.max(1, ...days.map((d) => d.commits));
   const commits = days.reduce((n, d) => n + d.commits, 0);
   const activeDays = days.filter((d) => d.commits > 0 || (d.sessions ?? 0) > 0).length;
@@ -188,13 +200,12 @@ export function activityStripHtml(daily: readonly WorkMapDaily[], runAtMs: numbe
       "</span>"
     );
   };
-  // The commits-only run ends at the last null-session day.
-  let split = 0;
-  days.forEach((d, i) => {
-    if (d.sessions === null) split = i + 1;
-  });
+  const split = days.findIndex((d) => d.day >= from);
   const old = days.slice(0, split);
   const recent = days.slice(split);
+  // The text names the session run's first CELL, which a memo older than the
+  // strip would otherwise put before the strip's first day.
+  const since = recent[0]!.day;
   const run = (cls: string, label: string, ds: StripDay[]) =>
     ds.length === 0
       ? ""
@@ -202,15 +213,15 @@ export function activityStripHtml(daily: readonly WorkMapDaily[], runAtMs: numbe
   const summary =
     activeDays === 0
       ? "No commits or sessions in the last 28 days"
-      : `${plural(commits, "commit")} on ${plural(activeDays, "day")}` + (sessions ? ` · ${plural(sessions, "session")} in the last 8 days` : "");
+      : `${plural(commits, "commit")} on ${plural(activeDays, "day")}` + (sessions ? ` · ${plural(sessions, "session")} since ${since}` : "");
   return (
     '<section class="wiki-ef-section wiki-ef-activity"><h2 class="wiki-ef-h">Activity, last 28 days</h2>' +
-    `<div class="wiki-ef-strip" role="img" tabindex="0" aria-label="${esc(`${summary}. Days before the last 8 count commits only.`)}">` +
+    `<div class="wiki-ef-strip" role="img" tabindex="0" aria-label="${esc(`${summary}.${old.length ? ` Days before ${since} count commits only.` : ""}`)}">` +
     run(" old", "earlier · commits only", old) +
-    run("", "last 8 days · commits and sessions", recent) +
+    run("", `since ${esc(since)} · commits and sessions`, recent) +
     "</div>" +
     `<div class="wiki-ef-strip-foot"><span>${esc(days[0]!.day)}</span><span class="wiki-ef-strip-sum">${esc(activeDays === 0 ? summary + "." : summary)}</span><span>${esc(days[days.length - 1]!.day)}</span></div>` +
-    '<div class="wiki-ef-legend">Darker means more commits; a dot marks a day with a session. Sessions are counted for the last 8 days only.</div>' +
+    `<div class="wiki-ef-legend">Darker means more commits; a dot marks a day with a session. Sessions are counted from ${esc(since)} on.</div>` +
     "</section>"
   );
 }

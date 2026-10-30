@@ -29,6 +29,7 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { paintedMeasure } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
+import { activityStrip, sessionsFromDay } from "../src/dashboard/views/components/wiki-effort-page.ts";
 
 const PORT = e2ePort("wiki-effort-page");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -48,6 +49,21 @@ function md(title: string, status?: string): string {
 function osloDay(ms: number): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
 }
+
+/** The drift effort's stored days. */
+function driftDaily(runAtMs: number) {
+  return [
+    // Sessions only, on the 8-day window's first (partial) Oslo day.
+    { day: osloDay(runAtMs - 8 * DAY), commits: 0, sessions: 1 },
+    { day: osloDay(runAtMs - 1 * DAY), commits: 3, sessions: 0 },
+    { day: osloDay(runAtMs - 2 * DAY), commits: 1, sessions: 2 },
+    { day: osloDay(runAtMs - 15 * DAY), commits: 2, sessions: 0 },
+  ];
+}
+
+/** The seeded map's run time. The strip spans 28–30 Oslo days depending on it
+ *  (DST), so every strip assertion derives its numbers from this value. */
+let wikiRunAt = 0;
 
 function mapJson(runAtMs: number, wiki = WIKI, driftName = "Drift check"): string {
   const e = (id: string, name: string, pages: { id: string; role: string; derivedFrom?: string }[], extra: Record<string, unknown> = {}) => ({
@@ -77,13 +93,7 @@ function mapJson(runAtMs: number, wiki = WIKI, driftName = "Drift check"): strin
         next: "Land the follow-up ⟦plans/drift-followup.mdx⟧.",
         why: "The plan, its report and the follow-up grew from one another; ⟦plans/gone.mdx⟧ was removed.",
         related: [{ id: "visuals", why: "Shares the reader." }],
-        daily: [
-          // Sessions only, on the 8-day window's first (partial) Oslo day.
-          { day: osloDay(runAtMs - 8 * DAY), commits: 0, sessions: 1 },
-          { day: osloDay(runAtMs - 1 * DAY), commits: 3, sessions: 0 },
-          { day: osloDay(runAtMs - 2 * DAY), commits: 1, sessions: 2 },
-          { day: osloDay(runAtMs - 15 * DAY), commits: 2, sessions: 0 },
-        ],
+        daily: driftDaily(runAtMs),
       }),
       e("drift-ui", "Drift UI", [{ id: "plans/drift-ui.mdx", role: "plan" }], { parent: "drift", state: "proposed" }),
       e("grocery", "Grocery bot", [{ id: "plans/grocery.mdx", role: "plan" }], { state: "cooling" }),
@@ -112,7 +122,8 @@ test.beforeAll(async () => {
     await writeFile(path.join(root, "plans/grocery.mdx"), md("Grocery plan"), "utf8");
     await writeFile(path.join(root, "plans/visuals.mdx"), md("Visuals plan", "shipped"), "utf8");
   }
-  await writeFile(path.join(roots[WIKI]!, ".work-map.json"), mapJson(now - 2 * HOUR), "utf8");
+  wikiRunAt = now - 2 * HOUR;
+  await writeFile(path.join(roots[WIKI]!, ".work-map.json"), mapJson(wikiRunAt), "utf8");
   // A project facet on the map wiki, for the facet-change test: two pages name
   // the project in frontmatter.
   await writeFile(path.join(roots[WIKI]!, ".wiki-reader.json"), JSON.stringify({ project: { frontmatter: ["project"] } }), "utf8");
@@ -169,8 +180,11 @@ async function expectDriftPage(page: Page): Promise<void> {
   await expect(ef.locator(".wiki-ef-crumbs")).toContainText("Efforts");
   await expect(ef.locator(".wiki-ef-crumb-theme")).toHaveText("Reader");
   await expect(ef.locator(".wiki-ef-need")).toHaveCount(1);
-  await expect(ef.locator(".wiki-ef-day")).toHaveCount(29);
-  await expect(ef.locator(".wiki-ef-strip-sum")).toHaveText("6 commits on 4 days · 3 sessions in the last 8 days");
+  const sessionsSince = wikiRunAt - 8 * DAY;
+  await expect(ef.locator(".wiki-ef-day")).toHaveCount(activityStrip(driftDaily(wikiRunAt), wikiRunAt, sessionsSince).length);
+  const from = sessionsFromDay(driftDaily(wikiRunAt), wikiRunAt, sessionsSince);
+  await expect(ef.locator(".wiki-ef-strip-sum")).toHaveText(`6 commits on 4 days · 3 sessions since ${from}`);
+  await expect(ef.locator(".wiki-ef-run:not(.old) .wiki-ef-day").first()).toHaveAttribute("title", new RegExp(`^${from}:`));
   await expect(ef.locator(".wiki-ef-sess")).toHaveCount(2);
   await expect(ef).not.toContainText("0 sessions");
   const conn = page.locator("#connBody");
@@ -376,7 +390,7 @@ test("the activity strip paints its session dots, clips no label, and fits at de
   expect(narrow.dots).toEqual(narrow.dots.map(() => true));
   expect(narrow.clippedLabels).toEqual([]);
   expect(narrow.tabindex).toBe("0");
-  expect(narrow.name).toMatch(/\. Days before the last 8 count commits only\.$/);
+  expect(narrow.name).toMatch(/\. Days before \d{4}-\d\d-\d\d count commits only\.$/);
 });
 
 // ── The effort page against a background listing refresh ──────────────
