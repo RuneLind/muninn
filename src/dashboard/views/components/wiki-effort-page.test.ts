@@ -360,6 +360,25 @@ describe("lookupEffort and the dropped page", () => {
     expect(canonicalEffortParam("日本語")).toBe("日本語");
   });
 
+  // `slugifyEffortId` collapses `--` and trims a trailing `-`, but
+  // `EFFORT_ID_RE` accepts both, so a hand-edited map can hold such an id.
+  const raw = map({ efforts: [effort("a--b", ["plans/a.mdx"]), effort("c-", ["plans/b.mdx"]), effort("a-b", ["plans/a.mdx"], { name: "Other" })] });
+
+  test("an id the slug changes is found by exact match, ahead of its slug", () => {
+    for (const id of ["a--b", "c-", "a-b"]) {
+      const r = lookupEffort(joinWorkMap(raw, PAGES), id);
+      expect(r.kind === "found" && r.effort.id).toBe(id);
+    }
+    const v = view(raw, "a--b");
+    expect(v.article).not.toContain("no longer in the map");
+    expect(v.article).toContain('data-effort="a--b"');
+  });
+
+  test("canonicalEffortParam keeps any schema-valid id as typed", () => {
+    expect(canonicalEffortParam("a--b")).toBe("a--b");
+    expect(canonicalEffortParam("c-")).toBe("c-");
+  });
+
   test("an unknown id is escaped wherever it shows", () => {
     const v = view(m, '<img src=x onerror="1">');
     expect(v.article).not.toContain("<img");

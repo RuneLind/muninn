@@ -52,12 +52,14 @@ export interface EffortViewInput<P extends EffortPageListing> {
 
 /**
  * The effort id an `?effort=` value names: null for an empty or blank value
- * (the URL means the start view), else its slug, so `Work-Map` opens
- * `work-map`. A value with no slug (`日本語`, `🚀`) stays as typed and reads as
- * a dropped id.
+ * (the URL means the start view); a value `EFFORT_ID_RE` accepts as typed, so
+ * a stored id the slug would change (`a--b`) is never rewritten; else its slug,
+ * so `Work-Map` opens `work-map`. A value with no slug (`日本語`, `🚀`) stays as
+ * typed and reads as a dropped id.
  */
 export function canonicalEffortParam(raw: string | null): string | null {
   if (raw === null || raw.trim() === "") return null;
+  if (EFFORT_ID_RE.test(raw)) return raw;
   return slugifyEffortId(raw) || raw;
 }
 
@@ -72,8 +74,12 @@ export type EffortLookup<P> =
  * only when one of that effort's aliases, or its name, slugifies to the id.
  */
 export function lookupEffort<P>(map: JoinedWorkMap<P>, id: string): EffortLookup<P> {
-  // `id` is compared as its slug; one that is no valid effort id (empty slug,
-  // too long) is dropped with no match, so an empty name slug never matches.
+  // An exact id wins: the schema accepts ids the slug changes (`a--b`).
+  const exact = map.efforts.find((e) => e.id === id);
+  if (exact) return { kind: "found", effort: exact };
+  // Otherwise `id` is compared as its slug; one that is no valid effort id
+  // (empty slug, too long) is dropped with no match, so an empty name slug
+  // never matches.
   const key = slugifyEffortId(id);
   if (!EFFORT_ID_RE.test(key)) return { kind: "dropped", matches: [] };
   const effort = map.efforts.find((e) => e.id === key);

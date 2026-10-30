@@ -5585,7 +5585,8 @@ function effortHrefFor(id: string): string {
 
 /** The effort a URL's `?effort=` names, or null for none. A blank value is
  *  dropped from the address bar and a case variant (`Drift`) is written as its
- *  slug, both in place (`replaceState`): neither is a navigation. */
+ *  slug, both in place (`replaceState`): neither is a navigation. A value that
+ *  is already a valid effort id (`a--b`) is kept as typed. */
 function effortFromUrl(params: URLSearchParams): string | null {
   const raw = params.get(EFFORT_PARAM);
   if (raw === null) return null;

@@ -8,9 +8,10 @@ const OSLO_DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo", yea
 /** `YYYY-MM-DD` of `ms` in Europe/Oslo: the day key of an effort's `daily`. */
 export const osloDay = (ms: number) => OSLO_DAY.format(new Date(ms));
 
-/** An effort id: what the `?effort=` URL and the wiki lint accept. Numeric
- *  slugs are valid. Here rather than in `schema.ts` so the client bundle reads
- *  it without zod; `schema.ts` re-exports it. */
+/** An effort id, as the stored map's schema accepts it. Numeric slugs are
+ *  valid. An `?effort=` value it accepts is kept as typed; any other value is
+ *  slugged. Here rather than in `schema.ts` so the client bundle reads it
+ *  without zod; `schema.ts` re-exports it. */
 export const EFFORT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /** NFKD, `å`→`aa`, `ø`→`o`, `æ`→`ae`, lowercase, `_` and spaces → `-`, other

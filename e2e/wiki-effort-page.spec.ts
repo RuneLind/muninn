@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { paintedMeasure } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 import { activityStrip, sessionsFromDay } from "../src/dashboard/views/components/wiki-effort-page.ts";
@@ -131,6 +132,7 @@ test.beforeAll(async () => {
     await writeFile(path.join(roots[WIKI]!, rel), `---\ntitle: ${title}\nproject: reader\n---\n\nBody of ${title}.\n`, "utf8");
   }
   await writeFile(path.join(roots[LIVE]!, ".work-map.json"), mapJson(now - 2 * HOUR, LIVE), "utf8");
+  await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -145,17 +147,7 @@ test.beforeAll(async () => {
     },
     stdio: "ignore",
   });
-  const deadline = Date.now() + 30_000;
-  for (;;) {
-    try {
-      const res = await fetch(`${BASE}/api/wiki/pages?wiki=${NOMAP}`);
-      if (res.ok) break;
-    } catch {
-      /* not up yet */
-    }
-    if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
-    await new Promise((r) => setTimeout(r, 400));
-  }
+  await waitForOwnServer(server, `${BASE}/api/wiki/pages?wiki=${NOMAP}`);
 });
 
 test.afterAll(async () => {
