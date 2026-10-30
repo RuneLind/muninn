@@ -15,6 +15,9 @@
  *     `toggle:no-efforts`, through a reload; re-checking removes it.
  *  5. A wiki with no map draws plain Activity, with no checkbox.
  *  6. Families still group the pages in no effort.
+ *  7. One map cache: the start view's card, the rail and the effort page send
+ *     one GET per run time, and a map the card's ↻ poll receives reaches the
+ *     rail. Opening an effort from its own forced-open fold releases it.
  *
  * One muninn over two temp wikis (one with a seeded `.work-map.json`, one
  * without) and one fake `node:http` claude-usage with one session, so Work
@@ -67,9 +70,9 @@ const THREAD_PAGE = "plans/beta-thread.md";
 const EFFORT_ORDER = ["alpha", "beta", "gamma", "delta", "alpha-ui"];
 const OPEN_DEFAULT = ["alpha", "beta", "gamma"];
 
-function mapJson(runAtMs: number): string {
+function mapJson(runAtMs: number, rename: Record<string, string> = {}): string {
   const e = (id: string, name: string, pages: string[], extra: Record<string, unknown> = {}) => ({
-    id, name, aliases: [], oneLine: "", state: "active", pages: pages.map((p) => ({ id: p, role: "plan" })),
+    id, name: rename[id] ?? name, aliases: [], oneLine: "", state: "active", pages: pages.map((p) => ({ id: p, role: "plan" })),
     why: "", confidence: 0.9, next: "", related: [], daily: [], ...extra,
   });
   const of = (id: string) => PAGES.filter((p) => p[3] === id).map((p) => p[0]);
@@ -318,5 +321,48 @@ test.describe("Wiki rail: group by effort", () => {
     await expect(fam).toHaveCount(1);
     await expect(fam.locator(".wiki-group-name")).toHaveText("kit-tool-*");
     await expect(pageRow(page, "notes/plain-one.md")).toHaveAttribute("data-section", "activity");
+  });
+
+  test("one map GET serves the card, the rail and the effort page", async ({ page }) => {
+    const gets: string[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "GET" && new URL(r.url()).pathname === "/api/wiki/work-map") gets.push(r.url());
+    });
+    await open(page);
+    await expect(effortRows(page)).toHaveCount(EFFORT_ORDER.length);
+    await expect(page.locator("#wikiWorkCard")).toBeVisible();
+    await nameLink(page, "alpha").click();
+    await expect(page.locator("#wikiEffortPage")).toHaveAttribute("data-effort", "alpha");
+    await expect(page.locator("#wikiEffortPage")).toContainText("Alpha one");
+    expect(gets).toHaveLength(1);
+  });
+
+  test("opening an effort from its own forced-open fold releases the fold's caret", async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${MAP}&relPath=${encodeURIComponent("plans/delta-one.md")}`);
+    await expect(caret(page, "delta")).toBeDisabled();
+    await nameLink(page, "delta").click();
+    await expect(page.locator("#wikiEffortPage")).toHaveAttribute("data-effort", "delta");
+    await expect(caret(page, "delta")).toBeEnabled();
+  });
+
+  test("a new map the card's ↻ poll receives reaches the rail", async ({ page }) => {
+    let next = false;
+    await page.route("**/api/wiki/work-map?*", async (route) => {
+      if (next) return route.fulfill({ json: { map: JSON.parse(mapJson(Date.now(), { alpha: "Alpha renamed" })), organizable: true } });
+      const res = await route.fetch();
+      const body = (await res.json()) as Record<string, unknown>;
+      await route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - HOUR } });
+    });
+    await page.route("**/api/wiki/work-map/refresh*", (route) => {
+      next = true;
+      return route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } });
+    });
+    await open(page);
+    await expect(nameLink(page, "alpha")).toHaveText("Alpha work");
+    await page.locator("#wikiWorkMapRefresh").click();
+    // The poll runs every 5 s.
+    await expect(page.locator("#wikiWorkCard")).toContainText("Alpha renamed", { timeout: 15_000 });
+    await expect(nameLink(page, "alpha")).toHaveText("Alpha renamed");
   });
 });

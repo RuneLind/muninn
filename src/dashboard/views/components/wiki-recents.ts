@@ -1319,7 +1319,7 @@ export interface RailInput {
   /**
    * Work map P4: page key (normalized relPath) → its effort, handed in only
    * while `group by effort` is on and the wiki has a map. Activity rows of one
-   * effort fold under one row, placed at the best-ranked one's slot; a page
+   * effort fold under one row, placed at the newest one's slot; a page
    * with no effort stays an ordinary Activity row. Absent ⇒ plain Activity.
    */
   efforts?: ReadonlyMap<string, RailEffort>;

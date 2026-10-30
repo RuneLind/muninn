@@ -997,9 +997,10 @@ initStartCards({
   withWiki,
   resolvePageName: relPathToName,
   workMapRunAt: () => workMapRunAt,
-  // One GET for the card, the rail and the effort page (P4): the card joins
-  // the request in flight for this run time instead of sending its own.
-  fetchWorkMap: () => (workMapRunAt === null ? fetch(withWiki("/api/wiki/work-map")).then(async (r) => ({ ok: r.ok, status: r.status, body: (await r.json().catch(() => null)) as WorkMapGetBody | null })) : workMapFetchFor(workMapRunAt)),
+  // One map cache for the card, the rail and the effort page (P4). The ↻ poll
+  // asks `fresh` and hands a newer map back through `adoptWorkMap`.
+  fetchWorkMap: (fresh) => (fresh || workMapRunAt === null ? getWorkMap() : workMapFetchFor(workMapRunAt)),
+  adoptWorkMap,
   pages: () => allPages,
   hrefFor: pageUrlByRelPath,
   effortHref: effortHrefFor,
@@ -5645,22 +5646,31 @@ function renderIssueGraph(): void {
 /** The effort the article pane shows, or null. Read only while
  *  `#wikiEffortPage` is in the pane: every other view replaces it. */
 let effortOpen: string | null = null;
-/** The last map the effort page fetched, kept while the listing's run time
- *  matches it. */
-let effortMapCache: WorkMap | null = null;
+type WorkMapGet = { ok: boolean; status: number; body: WorkMapGetBody | null };
+/** The one map cache the Your work card, the rail and the effort page read
+ *  and write, keyed on the listing's run time (whatever run the body carries). */
+let workMapCache: { runAt: number; body: WorkMapGetBody & { map: WorkMap } } | null = null;
 /** The map GET in flight and the run time it was started for: a repaint while
  *  it runs (a facet change, an adopt) waits on it instead of sending another. */
-let effortMapFetch: { runAt: number; done: Promise<{ ok: boolean; status: number; body: WorkMapGetBody | null }> } | null = null;
+let effortMapFetch: { runAt: number; done: Promise<WorkMapGet> } | null = null;
 
-/** The map GET for one run time: joins the one in flight, else starts one.
- *  The effort page and the rail's `group by effort` both read through it. */
-function workMapFetchFor(runAt: number): Promise<{ ok: boolean; status: number; body: WorkMapGetBody | null }> {
+function getWorkMap(): Promise<WorkMapGet> {
+  return fetch(withWiki("/api/wiki/work-map")).then(async (r) => ({
+    ok: r.ok,
+    status: r.status,
+    body: (await r.json().catch(() => null)) as WorkMapGetBody | null,
+  }));
+}
+
+/** The map for one run time: the cache, else the GET in flight, else a new
+ *  GET whose map lands in the cache. A failed GET is not cached. */
+function workMapFetchFor(runAt: number): Promise<WorkMapGet> {
+  if (workMapCache?.runAt === runAt) return Promise.resolve({ ok: true, status: 200, body: workMapCache.body });
   if (effortMapFetch?.runAt !== runAt) {
-    const done = fetch(withWiki("/api/wiki/work-map")).then(async (r) => ({
-      ok: r.ok,
-      status: r.status,
-      body: (await r.json().catch(() => null)) as WorkMapGetBody | null,
-    }));
+    const done = getWorkMap().then((r) => {
+      if (r.ok && r.body?.map && workMapRunAt === runAt) workMapCache = { runAt, body: r.body as WorkMapGetBody & { map: WorkMap } };
+      return r;
+    });
     const entry = { runAt, done };
     effortMapFetch = entry;
     const clear = () => {
@@ -5671,11 +5681,20 @@ function workMapFetchFor(runAt: number): Promise<{ ok: boolean; status: number; 
   return effortMapFetch!.done;
 }
 
+/** A map the card's ↻ poll fetched: when it is a newer run than the listing's,
+ *  it becomes the cache and the run time, and the rail and an open effort
+ *  page repaint from it without waiting for a listing refresh. */
+function adoptWorkMap(body: WorkMapGetBody): void {
+  if (!body.map || workMapRunAt === null || body.map.runAtMs <= workMapRunAt) return;
+  workMapRunAt = body.map.runAtMs;
+  workMapCache = { runAt: workMapRunAt, body: body as WorkMapGetBody & { map: WorkMap } };
+  renderList();
+  if (effortOpen !== null && document.getElementById("wikiEffortPage")) paintEffort(effortOpen, true);
+}
+
 /** The run time whose map GET failed for the rail, so a repaint does not
  *  re-fetch on every render; a new run time (or a reload) tries again. */
 let railMapFailedAt: number | null = null;
-/** The map the rail groups by, and the listing run time it was fetched for. */
-let railMap: { runAt: number; map: WorkMap } | null = null;
 /** The run time the rail is waiting on a map GET for (one listener per GET). */
 let railMapPending: number | null = null;
 /** The last effort index the rail built, and what it was built from. */
@@ -5684,14 +5703,13 @@ let railEffortMemo: { map: WorkMap; pages: WikiListing[]; index: Map<string, Rai
 /**
  * The rail's effort index (P4), or null: no map on this wiki, the map not
  * loaded yet (the GET starts here and repaints the rail when it lands, so
- * Activity draws plain until then), or a failed GET. Shares the effort page's
- * cache and in-flight GET, so the reader never fetches the map twice.
+ * Activity draws plain until then), or a failed GET. Reads the shared map
+ * cache, so the reader never fetches the map twice for one run time.
  */
 function railEffortsIndex(now: number): Map<string, RailEffort> | null {
   const runAt = workMapRunAt;
   if (runAt === null) return null;
-  if (effortMapCache && effortMapCache.runAtMs === runAt) railMap = { runAt, map: effortMapCache };
-  const map = railMap?.runAt === runAt ? railMap.map : null;
+  const map = workMapCache?.runAt === runAt ? workMapCache.body.map : null;
   if (!map) {
     if (railMapFailedAt !== runAt && railMapPending !== runAt) {
       railMapPending = runAt;
@@ -5706,10 +5724,6 @@ function railEffortsIndex(now: number): Map<string, RailEffort> | null {
             railMapFailedAt = runAt;
             return;
           }
-          // Keyed on the LISTING's run time, whatever run the body carries: a
-          // run that landed after the listing would otherwise never match and
-          // re-fetch on every render. The next adopt moves the run time.
-          railMap = { runAt, map: r.body.map };
           renderList();
         })
         .catch(() => {
@@ -5789,7 +5803,7 @@ function writeEffortPanes(wrap: HTMLElement, article: string, connHtml: string, 
 function renderEffort(id: string): void {
   // A listing stashed while an article was open lands now, before the map is
   // joined to `allPages`; the list is repainted from it like `renderStart` does.
-  if (applyPendingPages()) renderList();
+  applyPendingPages();
   consumeUrlLens();
   abortAgentRuns();
   if (!document.getElementById("articleWrap")) return;
@@ -5801,8 +5815,9 @@ function renderEffort(id: string): void {
   graphIssue = "";
   removeGraph();
   hideBreadcrumb();
-  // No page is open: the rail's highlight goes (the class alone; the rows stay).
-  document.querySelectorAll("#wikiList .wiki-list-item.active").forEach((r) => r.classList.remove("active"));
+  // No page is open: repaint the rail, so the highlight goes and a fold the
+  // page forced open gets its caret back.
+  renderList();
   effortOpen = id;
   paintEffort(id, false);
 }
@@ -5836,12 +5851,11 @@ function paintEffort(id: string, background: boolean): void {
   };
   const runAt = workMapRunAt;
   if (runAt === null) {
-    effortMapCache = null;
     writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
     return;
   }
-  if (effortMapCache && effortMapCache.runAtMs === runAt) {
-    paint(effortMapCache);
+  if (workMapCache?.runAt === runAt) {
+    paint(workMapCache.body.map);
     return;
   }
   if (!background) writeEffortPanes(wrap, effortStatusHtml(head(), "loading"), '<div class="wiki-ef-conn-empty">Loading…</div>', false);
@@ -5855,7 +5869,6 @@ function paintEffort(id: string, background: boolean): void {
         writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
         return;
       }
-      effortMapCache = body.map;
       paint(body.map);
     })
     .catch((err: Error) => {
