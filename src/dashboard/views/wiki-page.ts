@@ -2786,6 +2786,20 @@ export async function renderWikiPage(opts?: {
     .wiki-ef-conn-why { flex-basis: 100%; font-size: 12px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
     .wiki-ef-conn-gone { color: var(--text-secondary); }
     .wiki-ef-conn-empty { font-size: 12px; color: var(--text-soft); padding: 4px 8px; }
+    /* Theme page (themes map P3): the card's weekly strip, taller and over every
+       stored week (at most 26); the padding leaves the slot frames room. */
+    .wiki-ef-weekly .wiki-wm-weeks { height: 44px; gap: 6px; overflow-x: auto; padding: 3px; margin: 0; }
+    .wiki-ef-weekly .wiki-wm-slot { flex: 0 0 16px; width: 16px; }
+    /* The box is the strip's width; the footer adds none (inline-size containment),
+       its padding matches the strip's, and a footer too narrow for both labels
+       puts the newest on a second row, right-aligned under the last bar. */
+    .wiki-ef-weekbox { width: max-content; max-width: 100%; }
+    .wiki-ef-week-foot { display: grid; grid-template-columns: minmax(0, 1fr); container-type: inline-size; padding: 0 3px; }
+    .wiki-ef-week-foot > span { grid-area: 1 / 1; white-space: nowrap; }
+    .wiki-ef-week-first { justify-self: start; }
+    .wiki-ef-week-last { justify-self: end; }
+    @container (max-width: 120px) { .wiki-ef-week-foot > .wiki-ef-week-last { grid-row: 2; } }
+    .wiki-ef-hubs { margin-top: 0; font-size: 12.5px; }
 
     /* Index coverage card (start view) */
     .wiki-index-card {

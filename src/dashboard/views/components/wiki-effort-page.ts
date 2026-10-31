@@ -63,17 +63,19 @@ export function canonicalEffortParam(raw: string | null): string | null {
   return slugifyEffortId(raw) || raw;
 }
 
-export type EffortLookup<P> =
-  | { kind: "found"; effort: JoinedEffort<P> }
-  | { kind: "retired"; retired: WorkMapRetired }
-  | { kind: "dropped"; matches: JoinedEffort<P>[] };
+/** What an id names in a joined map of either kind (`E` its efforts or themes, `R` its retired entries). */
+export type LookupOf<E, R> = { kind: "found"; effort: E } | { kind: "retired"; retired: R } | { kind: "dropped"; matches: E[] };
+export type EffortLookup<P> = LookupOf<JoinedEffort<P>, WorkMapRetired>;
 
 /**
  * Find `id` in the joined map. A missing id is `dropped`; the stored map keeps
  * no record of a dropped effort's pages, so it is matched to a current effort
  * only when one of that effort's aliases, or its name, slugifies to the id.
  */
-export function lookupEffort<P>(map: JoinedWorkMap<P>, id: string): EffortLookup<P> {
+export function lookupEffort<E extends { id: string; name: string; aliases?: readonly string[] }, R extends { id: string }>(
+  map: { efforts: readonly E[]; retired?: readonly R[] },
+  id: string,
+): LookupOf<E, R> {
   const retired = (rid: string) => map.retired?.find((r) => r.id === rid);
   // An exact id wins: the schema accepts ids the slug changes (`a--b`).
   const exact = map.efforts.find((e) => e.id === id);
@@ -90,7 +92,7 @@ export function lookupEffort<P>(map: JoinedWorkMap<P>, id: string): EffortLookup
   // A retired id (P6) answers before the dropped fallback.
   const retiredSlug = retired(key);
   if (retiredSlug) return { kind: "retired", retired: retiredSlug };
-  const matches = map.efforts.filter((e) => slugifyEffortId(e.name) === key || e.aliases.some((a) => slugifyEffortId(a) === key));
+  const matches = map.efforts.filter((e) => slugifyEffortId(e.name) === key || (e.aliases ?? []).some((a) => slugifyEffortId(a) === key));
   return { kind: "dropped", matches };
 }
 
@@ -183,7 +185,7 @@ export function sessionsFromDay(
   return from;
 }
 
-const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+export const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 
 /** One day's tooltip: no "0 sessions" — a day with commits and no session
  *  reported says only what it has. */
@@ -244,24 +246,25 @@ export interface EffortView {
   connections: string;
 }
 
-function pageTitle(page: CardPage): string {
+export function pageTitle(page: CardPage): string {
   return page.displayTitle || page.title || (page.relPath.split("/").pop() || page.relPath).replace(/\.[^.]+$/, "");
 }
 
-function stateHtml(state: string): string {
+export function stateHtml(state: string): string {
   return `<span class="wiki-wm-state wm-state-${esc(state)}">${esc(state)}</span>`;
 }
 
-function effortLinkHtml(e: { id: string; name: string }, href: (id: string) => string, cls = "wiki-ef-elink"): string {
+export function effortLinkHtml(e: { id: string; name: string }, href: (id: string) => string, cls = "wiki-ef-elink"): string {
   return `<a class="${cls}" href="${esc(href(e.id))}" data-effort-link="${esc(e.id)}">${esc(e.name)}</a>`;
 }
 
-function crumbsHtml(input: { wiki: string; startHref: string }, tail: string[]): string {
+/** `home` names the second crumb: «Efforts» on a work map, the theme's domain group on a themes map. */
+export function crumbsHtml(input: { wiki: string; startHref: string }, tail: string[], home = "Efforts"): string {
   return (
     '<nav class="wiki-ef-crumbs" aria-label="Breadcrumb">' +
     `<a class="wiki-bc-wiki" href="${esc(input.startHref)}" title="Back to the overview"><span aria-hidden="true">⌂</span> ${esc(input.wiki || "Wiki")}</a>` +
     '<span class="wiki-ef-sep" aria-hidden="true">›</span>' +
-    `<a class="wiki-ef-crumb" href="${esc(input.startHref)}" data-effort-home>Efforts</a>` +
+    `<a class="wiki-ef-crumb" href="${esc(input.startHref)}" data-effort-home>${esc(home)}</a>` +
     tail.map((t) => `<span class="wiki-ef-sep" aria-hidden="true">›</span>${t}`).join("") +
     "</nav>"
   );
@@ -355,7 +358,7 @@ export function withFocusKeys(html: string, pane: string): string {
   });
 }
 
-function confidenceLabel(c: number): string {
+export function confidenceLabel(c: number): string {
   if (!Number.isFinite(c)) return "unknown";
   return c <= 1 ? `${Math.round(c * 100)}%` : String(c);
 }
@@ -566,20 +569,26 @@ function retiredView<P extends EffortPageListing>(input: EffortViewInput<P>, r: 
   };
 }
 
-/** The pane while the map loads, and when the wiki has none. */
-export function effortStatusHtml(input: { wiki: string; startHref: string; id: string }, kind: "loading" | "no-map" | "error" | "themes", detail = ""): string {
+/** The pane while the map loads, and when the wiki has none. `themes`: the
+ *  listing says the wiki's map is a themes map, so the pane says theme. */
+export function effortStatusHtml(
+  input: { wiki: string; startHref: string; id: string; themes?: boolean },
+  kind: "loading" | "no-map" | "error",
+  detail = "",
+): string {
+  const map = input.themes ? "theme map" : "work map";
   const text =
     kind === "loading"
-      ? "Loading the work map…"
+      ? `Loading the ${map}…`
       : kind === "no-map"
-        ? "This wiki has no work map, so it has no effort pages."
-        : kind === "themes"
-          ? "This wiki's map holds themes, which have no page of their own yet. The start view's card shows this theme."
-          : `Couldn’t load the work map${detail ? `: ${detail}` : "."}`;
+        ? input.themes
+          ? "This wiki has no theme map, so it has no theme pages."
+          : "This wiki has no work map, so it has no effort pages."
+        : `Couldn’t load the ${map}${detail ? `: ${detail}` : "."}`;
   return withFocusKeys(
     `<div class="wiki-effort wiki-effort-status" id="wikiEffortPage" data-effort="${esc(input.id)}" data-effort-status="${kind}">` +
     '<div class="wiki-article-head">' +
-    crumbsHtml(input, [`<span class="wiki-ef-crumb-theme">${esc(input.id)}</span>`]) +
+    crumbsHtml(input, [`<span class="wiki-ef-crumb-theme">${esc(input.id)}</span>`], input.themes ? "Themes" : undefined) +
     `<h1>${esc(input.id)}</h1></div>` +
     `<p class="wiki-ef-status${kind === "error" ? " warn" : ""}" role="status">${esc(text)}</p>` +
     (kind === "error" ? '<button type="button" class="wiki-ef-retry" id="wikiEffortRetry">Retry</button>' : "") +

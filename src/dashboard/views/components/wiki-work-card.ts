@@ -535,7 +535,7 @@ export function themeActiveLabel(days: number | null): string {
 
 /** A Worth-a-look item's runner count: a drift item's sources since the hub's
  *  last update, else the sources it cites. */
-function needCountHtml(kind: string, count: number): string {
+export function needCountHtml(kind: string, count: number): string {
   const drift = kind === "drift";
   const text = drift ? `${count} new since update` : `${count} source${count === 1 ? "" : "s"}`;
   const title = drift ? "Active sources linking this hub, created after the hub was last updated" : "Sources this item cites";
@@ -549,16 +549,17 @@ function hubsHtml(rels: readonly string[], byKey: ReadonlyMap<string, CardPage>,
   return `<div class="wiki-wm-hubs">${shown.join("")}${more > 0 ? `<span class="wiki-wm-more">+${more} more</span>` : ""}</div>`;
 }
 
-/** The weekly bar strip: the newest {@link THEME_STRIP_WEEKS} stored weeks,
+/** The weekly bar strip: the newest `shown` stored weeks (the card's
+ *  {@link THEME_STRIP_WEEKS}; the theme page passes every stored week),
  *  each bar's height a step of the strip's busiest week. Older weeks holding
  *  sources show as «+N earlier». The week holding `runAtMs` (Oslo) is framed
  *  `current` while it has not ended at `now` (Oslo; absent, the run's own
  *  day); once it has, the run missed its last days and it reads `partial`. A
  *  `partial` week is framed too, so an empty one reads apart from a full
  *  empty week. */
-export function weeklyStripHtml(weekly: readonly ThemeWeek[], runAtMs?: number, now?: number): string {
+export function weeklyStripHtml(weekly: readonly ThemeWeek[], runAtMs?: number, now?: number, shown: number = THEME_STRIP_WEEKS): string {
   const sorted = [...weekly].sort((a, b) => a.start.localeCompare(b.start));
-  const weeks = sorted.slice(-THEME_STRIP_WEEKS);
+  const weeks = sorted.slice(-Math.max(1, shown));
   if (!weeks.length) return "";
   const earlier = sorted.slice(0, sorted.length - weeks.length);
   const earlierTotal = earlier.reduce((n, w) => n + w.count, 0);

@@ -85,7 +85,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // rather than drift. Measured 1,089,983 bytes (272,938 gzipped) on 2026-10-20;
 // raise the bound in the PR that needs it. 2026-10-30: the effort page (work map
 // P3) took it from 1,281,098 to 1,301,295 bytes (322,578 → 327,890 gzipped).
-const WIKI_CLIENT_MAX_BYTES = 1_350_000;
+// 2026-10-31: the theme page (theme map P3) took it from 1,342,993 to
+// 1,356,382 bytes (337,896 → 339,876 gzipped).
+const WIKI_CLIENT_MAX_BYTES = 1_400_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
