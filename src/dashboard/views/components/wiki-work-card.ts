@@ -581,7 +581,8 @@ function connectedHtml<P>(themes: readonly JoinedTheme<P>[], prose: (s: string) 
   if (!pairs.length) return "";
   const name = (t: JoinedTheme<P>) =>
     effortHref
-      ? `<a class="wiki-wm-effort-name" href="${esc(effortHref(t.id))}" data-effort-link="${esc(t.id)}">${esc(t.name)}</a>`
+      ? // `data-wm-conn-link` sets this link apart from the theme's name in its lane, for the focus restore.
+        `<a class="wiki-wm-effort-name" href="${esc(effortHref(t.id))}" data-effort-link="${esc(t.id)}" data-wm-conn-link>${esc(t.name)}</a>`
       : `<span class="wiki-wm-effort-name">${esc(t.name)}</span>`;
   const shown = pairs.slice(0, THEME_CONNECTIONS_SHOWN);
   const more = pairs.length - shown.length;

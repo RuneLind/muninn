@@ -916,8 +916,14 @@ function focusedCardControl(el: HTMLElement): FocusKey | null {
   const whyKey = active.getAttribute("data-wm-why") ?? (active.classList.contains("wiki-wm-why-text") ? active.parentElement?.querySelector("[data-wm-why]")?.getAttribute("data-wm-why") : null);
   if (whyKey != null) return { why: whyKey };
   // An effort id matches EFFORT_ID_RE, so it needs no escaping in a selector.
+  // A themes card names a theme twice (Connected, then its lane): the key
+  // picks the same copy, a Connected one by its pair.
   const effort = active.getAttribute("data-effort-link");
-  if (effort !== null) return { sel: `[data-effort-link="${effort}"]` };
+  if (effort !== null) {
+    if (!active.hasAttribute("data-wm-conn-link")) return { sel: `[data-effort-link="${effort}"]:not([data-wm-conn-link])` };
+    const pair = active.parentElement?.getAttribute("data-wm-conn");
+    if (pair != null) return { sel: `[data-wm-conn="${pair}"] [data-effort-link="${effort}"]` };
+  }
   const rel = active.getAttribute("data-relpath");
   if (rel !== null) return { link: rel, nth: cardLinks(el, rel).indexOf(active) };
   if (active.classList.contains("wiki-wn-title")) return { heading: true };

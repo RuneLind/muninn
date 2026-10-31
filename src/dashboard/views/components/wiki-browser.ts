@@ -1742,10 +1742,12 @@ function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: numbe
   const n = members.length;
   const what = `${n} page${n === 1 ? "" : "s"} of ${effort.name}`;
   const caretWhy = entry.forcedOpen ? forcedOpenWhy("group") : `${entry.folded ? "Show" : "Hide"} the ${what}`;
+  // A themes map names its words as the card does: a theme, Worth a look.
+  const theme = effort.kind === "themes";
   const sep = '<span class="wiki-rollup-sep"> ·</span>';
   const parts = [
     `<span class="wiki-rollup-part wiki-effort-state">${esc(effort.state)}</span>`,
-    ...(moves > 0 ? [`<span class="wiki-rollup-part wiki-effort-moves" title="${moves} item${moves === 1 ? "" : "s"} in Needs you">✋ ${moves}</span>`] : []),
+    ...(moves > 0 ? [`<span class="wiki-rollup-part wiki-effort-moves" title="${moves} item${moves === 1 ? "" : "s"} in ${theme ? "Worth a look" : "Needs you"}">✋ ${moves}</span>`] : []),
     ...roll.parts.map(
       (p) => `<span class="wiki-rollup-part${p.word === "shipped" || p.word === "in-flight" ? " s-" + p.word : ""}">${p.n} ${esc(p.word)}</span>`,
     ),
@@ -1760,7 +1762,7 @@ function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: numbe
     ` aria-label="${esc(caretWhy)}" title="${esc(caretWhy)}"><span class="wiki-fold-caret" aria-hidden="true">▸</span></button>` +
     `<div class="wiki-effort-body">` +
     `<div class="wiki-effort-line">` +
-    `<a class="wiki-effort-name" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}" title="${esc(`Open the effort page: ${effort.name}`)}">${esc(effort.name)}</a>` +
+    `<a class="wiki-effort-name" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}" title="${esc(`Open the ${theme ? "theme" : "effort"} page: ${effort.name}`)}">${esc(effort.name)}</a>` +
     (age ? `<span class="wiki-effort-age" title="${esc(`${entry.members.length ? "newest page drawn here" : "newest pinned page"} ${age}`)}">${esc(age)}</span>` : "") +
     `</div>` +
     `<small class="wiki-group-rollup wiki-effort-meta">${meta}</small>` +
@@ -1784,7 +1786,7 @@ function effortIntroHtml(effort: RailEffort): string {
   const line = text ? `<span class="wiki-effort-oneline" title="${text}">${text}</span> ` : "";
   return (
     `<div class="wiki-effort-intro" data-section="activity" data-effort="${esc(effort.id)}">${line}` +
-    `<a class="wiki-effort-open" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}">Open effort →</a></div>`
+    `<a class="wiki-effort-open" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}">Open ${effort.kind === "themes" ? "theme" : "effort"} →</a></div>`
   );
 }
 
@@ -2268,7 +2270,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
       movesFlagHtml(p) +
       (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "") +
       // The page's role in its effort (D14), on a row inside an open effort fold.
-      (entry.role ? `<span class="wiki-effort-role" title="${esc(`Role in the effort: ${entry.role}`)}">${esc(entry.role)}</span>` : "") +
+      (entry.role ? `<span class="wiki-effort-role" title="${esc(`Role in the ${entry.member?.theme ? "theme" : "effort"}: ${entry.role}`)}">${esc(entry.role)}</span>` : "") +
       // The Stale check's two numbers (PR 2b, D26), off the summary route.
       railStaleBadge(p.relPath) +
       chipSlot;

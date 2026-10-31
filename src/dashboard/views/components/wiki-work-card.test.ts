@@ -301,7 +301,7 @@ describe("What you're following (a themes map, theme map P2)", () => {
     expect(conns).toEqual(["alpha|beta", "beta|gamma"]);
     expect(html).toContain("Both lean on Hub X.");
     expect(html).not.toContain("The other end");
-    expect(html).toMatch(/data-effort-link="alpha">Theme alpha<\/a> <span class="wiki-wm-conn-arrow"[^>]*>↔<\/span> <a [^>]*data-effort-link="beta">Theme beta<\/a><span class="wiki-wm-conn-why">: Both lean on Hub X\.<\/span>/);
+    expect(html).toMatch(/data-effort-link="alpha" data-wm-conn-link>Theme alpha<\/a> <span class="wiki-wm-conn-arrow"[^>]*>↔<\/span> <a [^>]*data-effort-link="beta" data-wm-conn-link>Theme beta<\/a><span class="wiki-wm-conn-why">: Both lean on Hub X\.<\/span>/);
   });
 
   test("lanes New, Rising, Steady, Fading in that order, Fading closed; Life follows the AI lanes", () => {

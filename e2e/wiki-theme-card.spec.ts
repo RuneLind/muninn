@@ -12,6 +12,9 @@
  *     dismissing an item through a reload.
  *  3. The rail folds Activity by theme: a `rising` and a `new` theme start
  *     open, a `steady` and a `fading` one start closed.
+ *  4. Focus on a theme name, in its lane or in Connected (the same
+ *     `data-effort-link` twice), stays on that link through a ↻ poll repaint.
+ *  5. The rail's fold says theme and Worth a look, not effort and Needs you.
  *
  * One muninn on its own port over one temp wiki whose `.wiki-reader.json`
  * declares `workMap: {"kind": "themes"}` and whose map is seeded, not run.
@@ -178,6 +181,55 @@ test("the start view shows What you're following over a themes map, not What's n
 
   await page.waitForTimeout(500);
   expect(digests).toEqual([]);
+});
+
+test("focus on a theme name in a lane, or in Connected, stays on that same link through a ↻ poll repaint", async ({ page }) => {
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    gets++;
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - 60 * 60_000 } });
+  });
+  await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
+  await page.clock.install();
+  await openStart(page);
+  const card = page.locator("#wikiWorkCard");
+  await card.locator("#wikiWorkMapRefresh").click();
+  await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
+  const repaint = async () => {
+    await page.evaluate(() => document.querySelector("#wikiWorkCard .wiki-wm-coverage")!.setAttribute("data-before-repaint", ""));
+    const n = gets;
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(1_000);
+        return gets;
+      })
+      .toBeGreaterThan(n);
+    await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  };
+  // "Steady winds" is a link twice: in the Connected row (first) and in its lane.
+  const inLane = card.locator('.wiki-wm-theme[data-effort-id="steady"] [data-effort-link="steady"]');
+  const inConn = card.locator('.wiki-wm-conn [data-effort-link="steady"]');
+  await expect(inConn).toHaveCount(1);
+  await inLane.focus();
+  await repaint();
+  await expect(inLane).toBeFocused();
+  await inConn.focus();
+  await repaint();
+  await expect(inConn).toBeFocused();
+});
+
+test("the rail speaks of themes on a themes map", async ({ page }) => {
+  await openStart(page);
+  const fold = page.locator('#wikiList .wiki-list-group.effort[data-effort="rise"]');
+  await expect(fold.locator(".wiki-effort-name")).toHaveAttribute("title", "Open the theme page: Rising kites");
+  await expect(fold.locator(".wiki-effort-moves")).toHaveAttribute("title", "1 item in Worth a look");
+  const intro = page.locator('#wikiList .wiki-effort-intro[data-effort="rise"]');
+  await expect(intro.locator(".wiki-effort-open")).toHaveText("Open theme →");
+  const member = page.locator('#wikiList .wiki-list-item[data-relpath="sources/rise-one.mdx"]');
+  await expect(member).toHaveAttribute("title", /In the Rising kites theme/);
+  await expect(member.locator(".wiki-effort-role")).toHaveAttribute("title", "Role in the theme: source");
 });
 
 test("the rail folds Activity by theme: rising and new start open, steady and fading closed", async ({ page }) => {

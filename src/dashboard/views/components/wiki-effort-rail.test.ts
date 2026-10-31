@@ -734,8 +734,20 @@ describe("a themes map in the rail (theme map P2)", () => {
     const alpha = idx.get("sources/alpha-1.mdx")!;
     expect([alpha.kind, alpha.state]).toEqual(["themes", "rising"]);
     expect(idx.get("sources/beta-1.mdx")!.needs).toEqual(["drift|Hub X is behind its sources"]);
-    // A work map's folds carry no kind, as before.
-    expect(railEffortIndex({ ...fixtureWorkMapLike(), efforts: [] } as WorkMap, ALL, 2).size).toBe(0);
+  });
+
+  test("a work map's fold carries no kind, and its active effort starts open", () => {
+    const map = {
+      ...fixtureWorkMapLike(),
+      efforts: [
+        { id: "w", name: "W", aliases: [], oneLine: "", state: "active", pages: [{ id: "plans/a1.mdx", role: "plan" }], why: "", confidence: 1, next: "", related: [], daily: [] },
+      ],
+    } as unknown as WorkMap;
+    const idx = railEffortIndex(map, ALL, 2);
+    const w = idx.get("plans/a1.mdx")!;
+    expect([w.id, "kind" in w, effortMayStartOpen(w)]).toEqual(["w", false, true]);
+    const m = build({ efforts: idx, activity: [act(A1, 9, 1)] });
+    expect(efforts_(m.entries).map((e) => [e.effort.id, e.folded])).toEqual([["w", false]]);
   });
 
   test("new and rising start open on a themes map; steady and fading start closed", () => {
@@ -750,6 +762,14 @@ describe("a themes map in the rail (theme map P2)", () => {
     ]);
     const m = build({ efforts, activity: [act(A1, 9, 1), act(B1, 8, 2), act(C1, 7, 3), act(D1, 6, 4)] });
     expect(efforts_(m.entries).map((e) => [e.effort.id, e.folded])).toEqual([["a", true], ["b", false], ["c", true], ["d", false]]);
+  });
+
+  test("a row in a theme fold hovers as «In the <name> theme»; a work fold's row keeps «effort»", () => {
+    const themed = build({ efforts: new Map([["plans/a1.mdx", eff("a", { state: "rising", kind: "themes" })]]), activity: [act(A1, 9, 1)] });
+    const a1 = rows(themed.entries).find((r) => r.page.relPath === "plans/a1.mdx")!;
+    expect(railMemberWhy(a1.member)).toBe("In the Effort a theme");
+    const work = rows(build().entries).find((r) => r.page.relPath === "plans/a1.mdx")!;
+    expect([work.member, railMemberWhy(work.member)]).toEqual([{ label: "Effort a", kind: "effort" }, "In the Effort a effort"]);
   });
 
   test("a work fold in state active still starts open, and the theme states do not open a work fold", () => {
