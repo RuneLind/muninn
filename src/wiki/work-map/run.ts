@@ -149,6 +149,9 @@ export interface WorkMapRunDeps {
   isReadonlyRoot?: (root: string) => boolean;
   inputs: WarmInputDeps;
   readText: (absPath: string) => Promise<string | null>;
+  /** Whether a file exists, to tell an unreadable `.wiki-reader.json` from an
+   *  absent one; without it, an unreadable file reads as absent. */
+  exists?: (absPath: string) => Promise<boolean>;
   model: (req: ModelRequest) => Promise<ModelReply>;
   write?: (opts: WorkMapWriteOptions) => Promise<WorkMapWriteOutcome>;
   /** The commit tail handed to the write seam; `null` commits nothing. */
@@ -285,8 +288,20 @@ async function organizeSteps(
   const org = workMapOrganizable(wiki, deps);
   if (!org.ok) return outcomes.refuse(org.reason);
   const { entry } = org;
-  // The kind before the gate: a themes wiki needs no claude-usage.
-  const kind = workMapKindFromReaderText(await deps.readText(path.join(entry.root, WIKI_READER_FILE)));
+  // The kind before the gate: a themes wiki needs no claude-usage. A config
+  // the run cannot read refuses: guessing `work` would overwrite a themes map.
+  const configPath = path.join(entry.root, WIKI_READER_FILE);
+  const configText = await deps.readText(configPath);
+  if (configText === null && (await deps.exists?.(configPath))) {
+    log.warn("Work map run for {wiki}: {file} exists but could not be read", { wiki, file: WIKI_READER_FILE });
+    return outcomes.refuse(`${WIKI_READER_FILE} exists but could not be read`);
+  }
+  const kindRead = workMapKindFromReaderText(configText);
+  if (!kindRead.ok) {
+    log.warn("Work map run for {wiki}: {reason}", { wiki, reason: kindRead.reason });
+    return outcomes.refuse(kindRead.reason);
+  }
+  const kind = kindRead.kind;
   const built =
     kind === "themes"
       ? await buildThemeMap(entry, deps, runStart, signal, outcomes, progress)

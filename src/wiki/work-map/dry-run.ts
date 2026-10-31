@@ -107,6 +107,7 @@ export function dryRunDeps(opts: DryRunOptions): WorkMapRunDeps {
       if (path.resolve(abs) === mapPath) return opts.previous ? readOrNull(opts.previous) : null;
       return readOrNull(abs);
     },
+    exists: (abs) => Bun.file(abs).exists(),
     model: async (req) => {
       if (opts.answer) {
         if (opts.answer.prompt !== req.prompt) throw new Error("the digest differs from the saved prompt (the wiki or --previous changed); a replay would misread its short ids");

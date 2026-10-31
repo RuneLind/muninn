@@ -16,6 +16,7 @@ import {
   isoMonday,
   isoWeekLabel,
   normalizeThemeAnswer,
+  osloMidnightMs,
   themeState,
   themeWeekly,
   themeWindowStart,
@@ -71,12 +72,13 @@ function fixturePages() {
 }
 
 describe("kind", () => {
-  test("absent, malformed and unknown kinds read as work; themes reads as themes", () => {
-    expect(workMapKindFromReaderText(null)).toBe("work");
-    expect(workMapKindFromReaderText("{")).toBe("work");
-    expect(workMapKindFromReaderText("{}")).toBe("work");
-    expect(workMapKindFromReaderText('{"workMap":{"kind":"themes"}}')).toBe("themes");
-    expect(workMapKindFromReaderText('{"workMap":{"kind":"nope"}}')).toBe("work");
+  test("absent reads as work; malformed JSON, a non-object, or an unknown kind is an error; a BOM is dropped", () => {
+    expect(workMapKindFromReaderText(null)).toEqual({ ok: true, kind: "work" });
+    expect(workMapKindFromReaderText("{}")).toEqual({ ok: true, kind: "work" });
+    expect(workMapKindFromReaderText('{"workMap":{"kind":"work"}}')).toEqual({ ok: true, kind: "work" });
+    expect(workMapKindFromReaderText('{"workMap":{"kind":"themes"}}')).toEqual({ ok: true, kind: "themes" });
+    expect(workMapKindFromReaderText("\uFEFF{}")).toEqual({ ok: true, kind: "work" });
+    for (const bad of ["{", "[]", "1", '{"workMap":{"kind":"nope"}}', '{"workMap":"themes"}', '{"workMap":null}', '{"workMap":{}}']) expect(workMapKindFromReaderText(bad).ok).toBe(false);
     expect(parseWorkMapReaderConfig({ kind: "nope" }).warning).toContain("nope");
     expect(parseWorkMapReaderConfig("x").warning).toBeDefined();
     expect(parseWorkMapReaderConfig(undefined)).toEqual({ kind: "work" });
@@ -375,6 +377,46 @@ describe("normalize: references, domains, caps", () => {
   });
 });
 
+function dayRange(from: string, to: string): string[] {
+  const out: string[] = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+
+type SimNight = { day: string; assign: (rel: string) => string | null };
+/** Nightly runs: each night's sources are every source created in the window
+ *  (`perDay` names a day's sources); `assign` names each source's theme, null for loose. */
+function simulate(nights: SimNight[], perDay: (day: string) => string[]) {
+  let previous: ThemeMap | null = null;
+  const outs: { day: string; runAtMs: number; created: Map<string, string>; out: ReturnType<typeof normalizeThemeAnswer> }[] = [];
+  for (const { day, assign } of nights) {
+    const sources: Record<string, string> = {};
+    for (let d = themeWindowStart(day); d <= day; d = addDays(d, 1)) for (const r of perDay(d)) sources[r] = d;
+    const runAtMs = Date.parse(`${day}T20:00:00Z`);
+    const ctx = ctxFor(sources, day, previous);
+    const groups = new Map<string, string[]>();
+    for (const [id, r] of ctx.rel) {
+      const t = assign(r);
+      if (t) groups.set(t, [...(groups.get(t) ?? []), id]);
+    }
+    const out = normalizeThemeAnswer(answer({ themes: [...groups].map(([id, s]) => ({ id, name: id, sources: s })) }), ctx);
+    outs.push({ day, runAtMs, created: new Map(Object.entries(sources)), out });
+    previous = themeMap({ ...out, runAtMs });
+  }
+  return outs;
+}
+/** A theme's weekly on one night: weeks contiguous from its first to the current
+ *  one, and every non-partial frozen week holds the sources created in it (7, one a day). */
+function checkWeeks(o: { day: string; out: ReturnType<typeof normalizeThemeAnswer> }, id: string) {
+  const t = o.out.efforts.find((e) => e.id === id);
+  if (!t) return;
+  const starts = t.weekly.map((w) => w.start);
+  for (let i = 1; i < starts.length; i++) expect([o.day, starts[i]]).toEqual([o.day, addDays(starts[i - 1]!, 7)]);
+  expect(starts.at(-1)).toBe(isoMonday(o.day));
+  const recountFrom = firstRecountedMonday(o.day);
+  for (const w of t.weekly) if (w.start < recountFrom && !w.partial) expect([o.day, w.start, w.count]).toEqual([o.day, w.start, 7]);
+}
+
 describe("weekly", () => {
   test("ISO weeks", () => {
     expect(isoMonday("2026-10-31")).toBe("2026-10-26");
@@ -387,7 +429,7 @@ describe("weekly", () => {
   });
 
   test("a first run marks the straddling week partial and recounts the rest", () => {
-    const w = themeWeekly(["2026-10-04", "2026-10-05", "2026-10-30"], null, null, RUN_DAY);
+    const w = themeWeekly(["2026-10-04", "2026-10-05", "2026-10-30"], null, 0, RUN_DAY);
     expect(w).toEqual([
       { week: "2026-W40", start: "2026-09-28", count: 1, partial: true },
       { week: "2026-W41", start: "2026-10-05", count: 1 },
@@ -399,8 +441,14 @@ describe("weekly", () => {
 
   test("a carried week is partial when the previous run came before it ended", () => {
     const prior = [{ week: "2026-W40", start: "2026-09-28", count: 3 }];
-    expect(themeWeekly([], prior, "2026-10-02", RUN_DAY)[0]).toEqual({ week: "2026-W40", start: "2026-09-28", count: 3, partial: true });
-    expect(themeWeekly([], prior, "2026-10-30", RUN_DAY)[0]).toEqual({ week: "2026-W40", start: "2026-09-28", count: 3 });
+    const at = (iso: string) => Date.parse(iso);
+    expect(themeWeekly([], prior, at("2026-10-02T10:00:00Z"), RUN_DAY)[0]).toEqual({ week: "2026-W40", start: "2026-09-28", count: 3, partial: true });
+    expect(themeWeekly([], prior, at("2026-10-30T10:00:00Z"), RUN_DAY)[0]).toEqual({ week: "2026-W40", start: "2026-09-28", count: 3 });
+    // The week ends Monday 00:00 Oslo (Sunday 22:00 UTC in summer time).
+    expect(themeWeekly([], prior, at("2026-10-04T21:59:00Z"), RUN_DAY)[0]!.partial).toBe(true);
+    expect(themeWeekly([], prior, at("2026-10-04T22:00:00Z"), RUN_DAY)[0]!.partial).toBeUndefined();
+    expect(osloMidnightMs("2026-10-05")).toBe(at("2026-10-04T22:00:00Z"));
+    expect(osloMidnightMs("2026-11-02")).toBe(at("2026-11-01T23:00:00Z"));
   });
 
   test("nightly across week boundaries: a frozen week holds its full 7-day count, and the invariant holds every night", () => {
@@ -427,6 +475,70 @@ describe("weekly", () => {
     expect(frozenSeen.size).toBeGreaterThanOrEqual(4);
     for (const [, count] of frozenSeen) expect(count).toBe(7);
     expect(previous!.efforts[0]!.weekly.find((w) => w.start === isoMonday(themeWindowStart(first)))?.partial).toBe(true);
+  });
+
+  test("(a) a week last counted before it ended is carried partial, judged on the Oslo clock", () => {
+    // The previous run ran Sunday 2026-10-04 at 20:00 Oslo; a source created later that Sunday was not counted.
+    const previous = themeMap({
+      runAtMs: Date.parse("2026-10-04T18:00:00Z"),
+      efforts: [theme("a", "A", ["sources/x.md"], { weekly: [{ week: "2026-W40", start: "2026-09-28", count: 1 }] })],
+    });
+    const sources = { "sources/x.md": "2026-10-02", "sources/y.md": "2026-10-04", "sources/z.md": "2026-10-04" };
+    const ctx = ctxFor(sources, "2026-10-29", previous);
+    const out = normalizeThemeAnswer(answer({ themes: [{ id: "a", name: "A", sources: ["p1", "p2", "p3"] }] }), ctx);
+    expect(out.efforts[0]!.weekly.find((w) => w.start === "2026-09-28")).toMatchObject({ partial: true });
+  });
+
+  test("(b) a theme revived after five weeks retired: no frozen week is short, no week is missing", () => {
+    const nights = dayRange("2026-06-01", "2026-08-30").map((day) => ({
+      day,
+      assign: (_r: string) => (day >= "2026-07-15" && day < "2026-08-24" ? null : "r"),
+    }));
+    const outs = simulate(nights, (d) => [`sources/${d}.md`]);
+    for (const o of outs) checkWeeks(o, "r");
+    const rev = outs.find((o) => o.day === "2026-08-24")!.out.efforts.find((e) => e.id === "r")!;
+    const at = (s: string) => rev.weekly.find((w) => w.start === s);
+    expect(at("2026-07-13")?.partial).toBe(true);
+    expect(at("2026-07-20")).toMatchObject({ partial: true });
+    expect(at("2026-07-27")).toMatchObject({ partial: true, count: 6 });
+  });
+
+  test("(c) a gap of 50 days between runs leaves partial weeks, not holes", () => {
+    const nights = [...dayRange("2026-06-01", "2026-07-10"), ...dayRange("2026-08-30", "2026-09-10")].map((day) => ({ day, assign: () => "r" }));
+    const outs = simulate(nights, (d) => [`sources/${d}.md`]);
+    for (const o of outs) checkWeeks(o, "r");
+    const t = outs.find((o) => o.day === "2026-08-30")!.out.efforts[0]!;
+    for (const s of ["2026-07-06", "2026-07-13", "2026-07-20", "2026-07-27"]) expect(t.weekly.find((w) => w.start === s)).toMatchObject({ partial: true });
+  });
+
+  test("a theme that retires on the night after a gap keeps that night's partial verdict when revived", () => {
+    const nights = [...dayRange("2026-06-01", "2026-07-10"), ...dayRange("2026-08-30", "2026-09-05")].map((day) => ({
+      day,
+      assign: () => (day === "2026-08-30" || day === "2026-08-31" ? null : "r"),
+    }));
+    const outs = simulate(nights, (d) => [`sources/${d}.md`]);
+    for (const o of outs) checkWeeks(o, "r");
+    expect(outs.find((o) => o.day === "2026-08-30")!.out.retired[0]!.weekly.find((w) => w.start === "2026-07-06")).toMatchObject({ partial: true });
+  });
+
+  test("a theme merged into another retires with its frozen weeks only: no week counts a source twice", () => {
+    const nights = dayRange("2026-06-01", "2026-08-10").map((day) => ({
+      day,
+      assign: (r: string) => (day >= "2026-08-01" ? "a" : r.includes("/a-") ? "a" : "b"),
+    }));
+    const outs = simulate(nights, (d) => [`sources/a-${d}.md`, `sources/b-${d}.md`]);
+    for (const { day, out } of outs) {
+      const recountFrom = firstRecountedMonday(day);
+      const all = [...out.efforts.map((e) => e.weekly), ...out.retired.map((r) => r.weekly)];
+      for (let mon = recountFrom; mon < isoMonday(day); mon = addDays(mon, 7)) {
+        const sum = all.reduce((n, wk) => n + (wk.find((w) => w.start === mon)?.count ?? 0), 0);
+        expect([day, mon, sum]).toEqual([day, mon, 14]);
+      }
+    }
+    const last = outs.at(-1)!.out;
+    const b = last.retired.find((r) => r.id === "b")!;
+    expect(b.weekly.every((w) => w.start < firstRecountedMonday("2026-08-01"))).toBe(true);
+    expect(b.weekly.filter((w) => !w.partial).every((w) => w.count === 7)).toBe(true);
   });
 
   test("a source moving to another theme takes its recounted week; carried weeks stay", () => {
@@ -545,6 +657,35 @@ describe("the themes run", () => {
     const { d, models } = themeDeps({}, { ".wiki-reader.json": "{}" });
     const res = await startWorkMapRun("kb", d).promise;
     expect(res).toEqual({ outcome: "refused", reason: "claude-usage not configured (CLAUDE_USAGE_URL is unset)" });
+    expect(models).toHaveLength(0);
+  });
+
+  test("a broken kind config refuses before any model call and writes nothing", async () => {
+    for (const text of ["{", '{"workMap":{"kind":"theme"}}', '{"workMap":{"kind":"Themes"}}', '{"workMap":"themes"}', '{"workMap":null}', '{"workMap":{}}', "[]"]) {
+      const { d, models, written } = themeDeps({}, { ".wiki-reader.json": text });
+      const res = await startWorkMapRun("kb", d).promise;
+      expect(res.outcome).toBe("refused");
+      expect((res as { reason: string }).reason).toContain(".wiki-reader.json");
+      expect(models).toHaveLength(0);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  test("a leading BOM is tolerated: the kind still reads as themes", async () => {
+    const { d, written } = themeDeps({}, { ".wiki-reader.json": '\uFEFF{"workMap":{"kind":"themes"}}' });
+    const res = await startWorkMapRun("kb", d).promise;
+    expect(res.outcome).toBe("ok");
+    expect(readMapFile(written[0]!)?.kind).toBe("themes");
+  });
+
+  test("a config file that exists but cannot be read refuses", async () => {
+    const { d, models } = themeDeps({
+      readText: async (p) => (p.endsWith(".wiki-reader.json") ? null : null),
+      exists: async (p) => p.endsWith(".wiki-reader.json"),
+    } as Partial<WorkMapRunDeps>);
+    const res = await startWorkMapRun("kb", d).promise;
+    expect(res.outcome).toBe("refused");
+    expect((res as { reason: string }).reason).toContain("could not be read");
     expect(models).toHaveLength(0);
   });
 

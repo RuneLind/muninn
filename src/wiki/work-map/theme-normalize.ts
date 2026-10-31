@@ -22,10 +22,14 @@
  * `weekly`: each run recounts every ISO week that starts on or after the
  * window start from the current members, and carries every earlier week from
  * the previous map unchanged (up to 26 weeks), so a week is counted while it
- * is whole inside the window and then frozen.
+ * is whole inside the window and then frozen. A carried week is `partial` when
+ * it was last counted before it ended (Monday 00:00 Oslo of the next week), and
+ * a week missing between the stored ones and tonight's (a gap between runs, a
+ * theme retired meanwhile) is stored `partial` so the strip can tell a hole
+ * from zero.
  */
 
-import { EFFORT_ID_RE } from "./ids.ts";
+import { EFFORT_ID_RE, osloDay } from "./ids.ts";
 import { linkifySigils, slugifyEffortId } from "./normalize.ts";
 import { addDays, THEME_RECENT_DAYS, THEME_WINDOW_DAYS, type ThemeHub, type ThemeSource } from "./theme-digest.ts";
 import type {
@@ -103,13 +107,33 @@ export function firstRecountedMonday(runDay: string): string {
   return mon === start ? mon : addDays(mon, 7);
 }
 
+/** 00:00 Europe/Oslo on `day`, in ms. */
+export function osloMidnightMs(day: string): number {
+  const utc = dayMs(day);
+  for (const h of [-2, -1, 0]) {
+    const t = utc + h * 3_600_000;
+    if (osloDay(t) === day && osloDay(t - 1) !== day) return t;
+  }
+  return utc;
+}
+
+/** A week carried from a map that ran at `countedAtMs`: `partial` when that
+ *  run came before the week ended. Every week a map stores was recounted at
+ *  its run, or was judged when it was first carried and holds that verdict
+ *  (a complete week stays complete, `partial` sticks), so the map's run is
+ *  the week's last count. */
+export function carryWeek(w: ThemeWeek, countedAtMs: number): ThemeWeek {
+  const ended = countedAtMs >= osloMidnightMs(addDays(w.start, 7));
+  return { week: w.week, start: w.start, count: w.count, ...(w.partial || !ended ? { partial: true } : {}) };
+}
+
 /**
  * A theme's weekly counts tonight. `created` are its members' creation days;
  * `prior` is the weekly list of the previous map's entry for this id (a theme
- * or a retired theme), null when the previous map lacks it; `priorRunDay` is
- * the previous run's day.
+ * or a retired theme), null when the previous map lacks it; `priorRunAtMs` is
+ * the previous map's run.
  */
-export function themeWeekly(created: readonly string[], prior: readonly ThemeWeek[] | null, priorRunDay: string | null, runDay: string): ThemeWeek[] {
+export function themeWeekly(created: readonly string[], prior: readonly ThemeWeek[] | null, priorRunAtMs: number, runDay: string): ThemeWeek[] {
   const windowStart = themeWindowStart(runDay);
   const recountFrom = firstRecountedMonday(runDay);
   const current = isoMonday(runDay);
@@ -119,16 +143,16 @@ export function themeWeekly(created: readonly string[], prior: readonly ThemeWee
   const carried = new Set<string>();
   for (const w of prior ?? []) {
     if (w.start >= recountFrom) continue;
-    const endedBeforePriorRun = priorRunDay !== null && priorRunDay >= addDays(w.start, 6);
-    out.push({ week: w.week, start: w.start, count: w.count, ...(w.partial || !endedBeforePriorRun ? { partial: true } : {}) });
+    out.push(carryWeek(w, priorRunAtMs));
     carried.add(w.start);
   }
-  // The straddling week, when the prior map could not have counted it whole.
+  // A week before tonight's recount the previous map lacks: the straddling
+  // week counted from the window start, an earlier hole as 0; both partial.
   const straddle = isoMonday(windowStart);
-  if (straddle !== windowStart && !carried.has(straddle)) {
-    const priorSawIt = prior !== null && priorRunDay !== null && priorRunDay >= addDays(straddle, 6);
-    const n = inWeek(straddle, windowStart);
-    if (!priorSawIt && (n > 0 || prior === null)) out.push({ week: isoWeekLabel(straddle), start: straddle, count: n, partial: true });
+  const holesFrom = prior?.length ? prior.map((w) => w.start).sort()[0]! : straddle;
+  for (let mon = holesFrom < straddle ? holesFrom : straddle; mon < recountFrom; mon = addDays(mon, 7)) {
+    if (carried.has(mon)) continue;
+    out.push({ week: isoWeekLabel(mon), start: mon, count: mon === straddle ? inWeek(mon, windowStart) : 0, partial: true });
   }
   for (let mon = recountFrom; mon <= current; mon = addDays(mon, 7)) {
     out.push({ week: isoWeekLabel(mon), start: mon, count: inWeek(mon) });
@@ -151,7 +175,6 @@ export function normalizeThemeAnswer(answer: ThemeMapAnswer, ctx: ThemeNormalize
   const resolveHub = (name: string) => ctx.hubByName.get(name.trim().toLowerCase()) ?? ctx.resolveHub(name.trim());
   const hubStat = new Map(ctx.hubs.map((h) => [h.relPath, h]));
   const prev = ctx.previous;
-  const prevRunDay = prev ? new Date(prev.runAtMs).toISOString().slice(0, 10) : null;
   const prevTheme = new Map((prev?.efforts ?? []).map((t) => [t.id, t]));
   const prevRetired = new Map((prev?.retired ?? []).map((r) => [r.id, r]));
 
@@ -227,7 +250,7 @@ export function normalizeThemeAnswer(answer: ThemeMapAnswer, ctx: ThemeNormalize
       disagreement: link(d.a.disagreement),
       confidence: d.a.confidence,
       related: related.get(d.id)!,
-      weekly: themeWeekly(created, prior, prevRunDay, ctx.runDay),
+      weekly: themeWeekly(created, prior, prev?.runAtMs ?? 0, ctx.runDay),
       trend: { recent, earlier },
     };
   });
@@ -238,10 +261,13 @@ export function normalizeThemeAnswer(answer: ThemeMapAnswer, ctx: ThemeNormalize
     return days.length ? dayMs(days.sort().at(-1)!) : fallback;
   };
   const quietLimit = dayMs(ctx.runDay) - THEME_WEEKS_KEPT * 7 * DAY;
+  const recountFrom = firstRecountedMonday(ctx.runDay);
   const retired: ThemeMapRetired[] = [];
   for (const t of prev?.efforts ?? []) {
     if (known.has(t.id)) continue;
-    retired.push({ id: t.id, name: t.name, lastActive: lastActiveOf(t, prev!.runAtMs), weekly: t.weekly });
+    // Only its frozen weeks: the recounted ones left with its sources.
+    const frozen = t.weekly.filter((w) => w.start < recountFrom).map((w) => carryWeek(w, prev!.runAtMs));
+    retired.push({ id: t.id, name: t.name, lastActive: lastActiveOf(t, prev!.runAtMs), weekly: frozen });
   }
   for (const r of prev?.retired ?? []) {
     if (known.has(r.id) || prevTheme.has(r.id)) continue;
