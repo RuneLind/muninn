@@ -98,6 +98,14 @@ export function effortFoldOf(p: WikiListing, efforts: ReadonlyMap<string, RailEf
   return e && folded.has(e.id) ? e : undefined;
 }
 
+/** View options' `group by effort` checkbox, in the map's own words: a themes
+ *  map folds by theme. The work strings are the page shell's markup. */
+export function effortsToggleWords(themes: boolean): { label: string; title: string } {
+  return themes
+    ? { label: "group by theme", title: "Fold Activity under the theme map's themes" }
+    : { label: "group by effort", title: "Fold Activity under the work map's efforts" };
+}
+
 /** Is the reader's mode on? Off on a wiki with no map, whatever is stored. */
 export function effortsOn(openFolds: readonly string[], hasMap: boolean): boolean {
   // The folds store's own comparison (`isFoldOpen`), inlined: `wiki-recents.ts`

@@ -76,8 +76,9 @@ export interface WikiPagesResponse {
    *  otherwise (`src/wiki/bucket-mirror-status.ts`). */
   mirror?: ListingMirrorStatus;
   /** The work map's run time (`.work-map.json`), present only when the wiki has
-   *  one: the start view then shows the Your work card instead of What's new. */
-  workMap?: { runAt: number };
+   *  one: the start view then shows the Your work card instead of What's new.
+   *  `kind: "themes"` on a themes map only, for the rail's words. */
+  workMap?: { runAt: number; kind?: "themes" };
   error?: string;
 }
 

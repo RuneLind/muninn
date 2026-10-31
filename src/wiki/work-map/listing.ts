@@ -1,5 +1,6 @@
 /**
- * The listing's `workMap: {runAt}` field: read per `/api/wiki/pages` request
+ * The listing's `workMap: {runAt, kind?}` field (`kind: "themes"` only on a
+ * themes map, so a work map's field is unchanged): read per `/api/wiki/pages` request
  * from `.work-map.json`, cached on the file's stat, so a run that just
  * finished shows on the next listing and an unchanged file costs one `stat`.
  * The client uses it to pick the Your work card over What's new without a
@@ -17,36 +18,44 @@ interface StatKey {
   size: number;
   ino: number;
 }
-const cache = new Map<string, StatKey & { runAt: number | null }>();
+type Entry = { runAt: number | null; themes: boolean };
+const cache = new Map<string, StatKey & Entry>();
 
-/** The map's `runAtMs`, or null when the root has no readable work map. */
-export async function workMapRunAt(root: string): Promise<number | null> {
+/** The map's `runAtMs` and whether it is a themes map; null runAt when the
+ *  root has no readable work map. */
+async function readEntry(root: string): Promise<Entry> {
   const file = path.join(root, WORK_MAP_FILE);
   let st;
   try {
     st = await stat(file);
   } catch {
     cache.delete(file);
-    return null;
+    return { runAt: null, themes: false };
   }
   const hit = cache.get(file);
   // ino + ctime catch a same-size rewrite that preserved the mtime (cp -p, rsync -t).
-  if (hit && hit.mtimeMs === st.mtimeMs && hit.ctimeMs === st.ctimeMs && hit.size === st.size && hit.ino === st.ino) return hit.runAt;
-  let runAt: number | null = null;
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.ctimeMs === st.ctimeMs && hit.size === st.size && hit.ino === st.ino) return hit;
+  let entry: Entry = { runAt: null, themes: false };
   try {
-    runAt = readMapFile(await readFile(file, "utf8"))?.map.runAtMs ?? null;
+    const stored = readMapFile(await readFile(file, "utf8"));
+    if (stored) entry = { runAt: stored.map.runAtMs, themes: stored.kind === "themes" };
   } catch {
-    runAt = null;
+    entry = { runAt: null, themes: false };
   }
-  cache.set(file, { mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, size: st.size, ino: st.ino, runAt });
-  return runAt;
+  cache.set(file, { mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, size: st.size, ino: st.ino, ...entry });
+  return entry;
+}
+
+/** The map's `runAtMs`, or null when the root has no readable work map. */
+export async function workMapRunAt(root: string): Promise<number | null> {
+  return (await readEntry(root)).runAt;
 }
 
 /** The listing field: present only when the wiki has a map. */
-export async function workMapListingField(root: string | undefined): Promise<{ workMap?: { runAt: number } }> {
+export async function workMapListingField(root: string | undefined): Promise<{ workMap?: { runAt: number; kind?: "themes" } }> {
   if (!root) return {};
-  const runAt = await workMapRunAt(root);
-  return runAt === null ? {} : { workMap: { runAt } };
+  const { runAt, themes } = await readEntry(root);
+  return runAt === null ? {} : { workMap: { runAt, ...(themes ? { kind: "themes" as const } : {}) } };
 }
 
 export function __resetWorkMapListingCacheForTest(): void {

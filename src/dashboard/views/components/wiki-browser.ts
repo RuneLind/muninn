@@ -119,7 +119,7 @@ import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effort
 import { proseText, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { isThemeMap, type AnyWorkMap } from "../../../wiki/work-map/join.ts";
-import { EFFORTS_OFF_TOGGLE_KEY, effortNeedsOpen, effortsOn, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
+import { EFFORTS_OFF_TOGGLE_KEY, effortNeedsOpen, effortsOn, effortsToggleWords, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
@@ -1534,6 +1534,8 @@ function tabHasFocus(): boolean {
 /** The listing's `workMap.runAt` — set on a wiki with a work map, which
  *  shows the Your work card instead of What's new (`wiki-start-cards.ts`). */
 let workMapRunAt: number | null = null;
+/** The listing's `workMap.kind === "themes"`: View options then says theme. */
+let workMapThemes = false;
 let workFacts: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs" | "evidence">>) | null = null;
 
 /** Is the reader grouping this wiki's rail into families and months? OFF by
@@ -1798,6 +1800,11 @@ function paintEffortsToggle(): void {
   if (!wrap || !box) return;
   wrap.hidden = workMapRunAt === null;
   box.checked = effortsOn(openFolds, true);
+  // The label's text node follows the checkbox (wiki-page.ts).
+  const words = effortsToggleWords(workMapThemes);
+  if (wrap.title !== words.title) wrap.title = words.title;
+  const text = box.nextSibling;
+  if (text?.nodeType === Node.TEXT_NODE && text.textContent?.trim() !== words.label) text.textContent = words.label;
 }
 
 /** True while `renderList` puts focus back on the rail control its repaint replaced. */
@@ -10286,6 +10293,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // Shape-checked thread by thread in `openThreadCards` (`usableThreads`).
   workFacts = data.work && typeof data.work === "object" && Array.isArray(data.work.threads) ? data.work : null;
   workMapRunAt = typeof data.workMap?.runAt === "number" ? data.workMap.runAt : null;
+  workMapThemes = workMapRunAt !== null && data.workMap?.kind === "themes";
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one
   // would admit a project the listing on screen no longer has. An older server /

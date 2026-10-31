@@ -17,6 +17,7 @@ import {
   effortFoldKey,
   effortNeedsOpen,
   effortsOn,
+  effortsToggleWords,
   railEffortIndex,
   type RailEffort,
 } from "./wiki-effort-rail.ts";
@@ -104,6 +105,14 @@ function expectOneRowPerPage(es: RailEntry[]): void {
   const seen = rows(es).map((r) => r.page.relPath);
   expect(seen.length).toBe(new Set(seen).size);
 }
+
+// Fix round 2 batch 1: View options names the fold in the map's own words.
+describe("effortsToggleWords", () => {
+  test("a themes map says theme; a work map keeps its effort words", () => {
+    expect(effortsToggleWords(true)).toEqual({ label: "group by theme", title: "Fold Activity under the theme map's themes" });
+    expect(effortsToggleWords(false)).toEqual({ label: "group by effort", title: "Fold Activity under the work map's efforts" });
+  });
+});
 
 describe("effortsOn / the mode key", () => {
   test("on by default where a map exists; the stored exception turns it off; no map ⇒ off whatever is stored", () => {

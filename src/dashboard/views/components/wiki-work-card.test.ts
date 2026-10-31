@@ -17,6 +17,7 @@ import {
   writeDone,
   WORK_MAP_STALE_MS,
   THEME_STRIP_WEEKS,
+  THEME_CONNECTIONS_SHOWN,
   themeActiveLabel,
   themeConnections,
   weeklyStripHtml,
@@ -393,14 +394,75 @@ describe("theme helpers", () => {
     expect(weeklyStripHtml(weekly, Date.parse("2026-11-02T03:00:00Z"))).not.toContain(" current");
   });
 
-  test("Connected spreads its rows across themes: each theme's first before any theme's second", () => {
-    const t = (id: string, rel: string[]) => ({ id, related: rel.map((r) => ({ id: r, why: `${id}-${r}` })) });
-    const themes = [t("a", ["b", "c", "d"]), t("b", ["a", "c"]), t("c", ["a", "b"]), t("d", ["a"]), t("e", ["f"]), t("f", ["e"])];
-    const rows = themeConnections(themes).map((c) => `${c.a.id}|${c.b.id}:${c.why}`);
-    expect(rows).toEqual(["a|b:a-b", "c|a:c-a", "d|a:d-a", "e|f:e-f", "b|c:b-c"]);
-    // A pair stored on one end only keeps that end first, with its why.
-    const one = themeConnections([t("g", []), t("h", ["g"])]).map((c) => `${c.a.id}|${c.b.id}:${c.why}`);
-    expect(one).toEqual(["h|g:h-g"]);
+  // Fix round 2 batch 1: the shown rows are picked so no theme fills them.
+  const t = (id: string, rel: string[]) => ({ id, related: rel.map((r) => ({ id: r, why: `${id}-${r}` })) });
+  const rowsOf = (themes: ReturnType<typeof t>[]) => themeConnections(themes).map((c) => `${c.a.id}|${c.b.id}:${c.why}`);
+  /** Each theme's count of rows among the first `THEME_CONNECTIONS_SHOWN`. */
+  const appearances = (themes: ReturnType<typeof t>[]) => {
+    const n = new Map<string, number>();
+    for (const c of themeConnections(themes).slice(0, THEME_CONNECTIONS_SHOWN)) for (const id of [c.a.id, c.b.id]) n.set(id, (n.get(id) ?? 0) + 1);
+    return Object.fromEntries([...n].sort(([a], [b]) => a.localeCompare(b)));
+  };
+
+  test("Connected: a hub linked to six themes, plus three pairs without it, shows the hub in 3 of 6 rows, not every row", () => {
+    const themes = [
+      t("h", ["x1", "x2", "x3", "x4", "x5", "x6"]),
+      t("x1", ["h", "x2"]), t("x2", ["h", "x1"]), t("x3", ["h", "x4"]), t("x4", ["h", "x3"]), t("x5", ["h", "x6"]), t("x6", ["h", "x5"]),
+    ];
+    // 9 pairs; any 6 of them hold at least 3 of the hub's 6, so 3 is the least it can fill.
+    expect(rowsOf(themes)).toEqual(["h|x1:h-x1", "x3|x4:x3-x4", "x5|x6:x5-x6", "h|x2:h-x2", "x1|x2:x1-x2", "h|x3:h-x3", "h|x4:h-x4", "h|x5:h-x5", "h|x6:h-x6"]);
+    expect(appearances(themes)).toEqual({ h: 3, x1: 2, x2: 2, x3: 2, x4: 1, x5: 1, x6: 1 });
+  });
+
+  test("Connected: a chain of seven themes shows its six links, no theme in more than 2 rows", () => {
+    const ids = ["a", "b", "c", "d", "e", "f", "g"];
+    const themes = ids.map((id, i) => t(id, [ids[i - 1], ids[i + 1]].filter((x): x is string => !!x)));
+    expect(rowsOf(themes)).toEqual(["a|b:a-b", "c|d:c-d", "e|f:e-f", "f|g:f-g", "b|c:b-c", "d|e:d-e"]);
+    expect(Math.max(...Object.values(appearances(themes)))).toBe(2);
+  });
+
+  test("Connected: four themes all linked show their six links, each theme in exactly 3 rows", () => {
+    const ids = ["a", "b", "c", "d"];
+    const themes = ids.map((id) => t(id, ids.filter((x) => x !== id)));
+    expect(rowsOf(themes)).toEqual(["a|b:a-b", "c|d:c-d", "a|c:a-c", "b|d:b-d", "a|d:a-d", "b|c:b-c"]);
+    expect(appearances(themes)).toEqual({ a: 3, b: 3, c: 3, d: 3 });
+  });
+
+  test("Connected: five themes all linked show 6 of 10 links, no theme in more than 3 rows", () => {
+    const ids = ["a", "b", "c", "d", "e"];
+    const themes = ids.map((id) => t(id, ids.filter((x) => x !== id)));
+    expect(themeConnections(themes)).toHaveLength(10);
+    // 12 ends over 5 themes: at least one theme fills 3 rows.
+    expect(Math.max(...Object.values(appearances(themes)))).toBe(3);
+  });
+
+  test("Connected: the busier end decides before the sum: a theme in 3 rows waits for a pair whose ends are in 2 each", () => {
+    const themes = [t("a", ["d", "c", "e"]), t("b", ["a", "d"]), t("c", ["b"]), t("d", []), t("e", ["d"])];
+    // After five rows a is in 3 and b, d in 2: b|d (2, 2) comes before a|e (3, 0), though both sum to 4.
+    expect(rowsOf(themes)).toEqual(["b|a:b-a", "e|d:e-d", "a|c:a-c", "c|b:c-b", "a|d:a-d", "b|d:b-d", "a|e:a-e"]);
+    expect(appearances(themes).a).toBe(3);
+  });
+
+  test("Connected: a pair stored on one end only keeps that end first, with its why; one stored on both keeps the earlier end's", () => {
+    expect(rowsOf([t("g", []), t("h", ["g"])])).toEqual(["h|g:h-g"]);
+    expect(rowsOf([t("g", ["h"]), t("h", ["g"])])).toEqual(["g|h:g-h"]);
+    // A hub only others point at: still spread.
+    const themes = [t("h", []), ...["x1", "x2", "x3", "x4", "x5", "x6", "x7"].map((id) => t(id, ["h"])), t("y1", ["y2"]), t("y2", []), t("y3", ["y4"]), t("y4", [])];
+    expect(appearances(themes).h).toBe(4);
+    expect(rowsOf(themes).slice(0, 3)).toEqual(["x1|h:x1-h", "y1|y2:y1-y2", "y3|y4:y3-y4"]);
+  });
+
+  test("Connected: the real map's shape (12 links over 17 themes) shows no theme in more than 2 rows", () => {
+    // Synthetic ids; the link shape of the jarvis map of 2026-10-30, in lane
+    // order (new, rising, steady, fading, life), map order within a lane.
+    const links: Record<string, string[]> = {
+      n13: [], r0: ["r2", "f8", "f12", "s1"], r2: ["r0", "s4", "r5", "r10"], r5: ["r2", "s4"], r9: [], r10: ["s7", "r2", "l15"],
+      s1: ["r0"], s3: ["s4"], s4: ["r2", "s3", "r5"], s6: ["s7"], s7: ["r10", "s6"], s11: [], f8: ["r0"], f12: ["r0"], l14: [], l15: ["r10"], l16: [],
+    };
+    const themes = Object.entries(links).map(([id, rel]) => t(id, rel));
+    expect(themeConnections(themes)).toHaveLength(12);
+    // 12 ends; r0's three one-link neighbours and r2's crowd make 1 each impossible.
+    expect(Math.max(...Object.values(appearances(themes)))).toBe(2);
   });
 
   test("themeConnections drops a link to a theme not listed and a self link", () => {

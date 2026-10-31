@@ -485,47 +485,42 @@ export const THEME_HUBS_SHOWN = 4;
 export const THEME_CONNECTIONS_SHOWN = 6;
 
 /** The card's Connected row: each pair of listed themes once (a connection is
- *  stored on both ends). `themes` come in the card's lane order; rows are
- *  dealt round-robin so one theme cannot fill the row: in round k a theme
- *  already in more than k rows waits, else it takes its first pair not yet
- *  shown, its own stored links first, with itself on the left and its own why
- *  (a pair stored on the other end only keeps that end on the left). */
+ *  stored on both ends), left end the earlier theme that stores it, with its
+ *  why. `themes` come in the card's lane order. Rows are picked greedily so no
+ *  theme fills them: each next row is the remaining pair whose busier end is
+ *  in the fewest rows so far, then the fewest rows over both ends, then the
+ *  earliest pair in lane order. A theme linked to every other one still shows
+ *  only as often as the pairs without it run out. */
 export function themeConnections<T extends { id: string; related: readonly { id: string; why: string }[] }>(
   themes: readonly T[],
 ): { a: T; b: T; why: string }[] {
-  const byId = new Map(themes.map((t) => [t.id, t]));
-  const key = (x: string, y: string) => [x, y].sort().join("\u0000");
-  // Each theme's candidates: its own links, then links stored only on the other end.
-  const cands = new Map<string, { a: T; b: T; why: string; key: string }[]>(themes.map((t) => [t.id, []]));
-  const stored = new Set<string>();
-  for (const a of themes) {
+  const at = new Map<string, number>();
+  themes.forEach((t, i) => at.has(t.id) || at.set(t.id, i));
+  const pairs = new Map<string, { a: T; b: T; why: string; lo: number; hi: number }>();
+  themes.forEach((a, i) => {
     for (const r of a.related) {
-      const b = byId.get(r.id);
-      if (!b || b.id === a.id) continue;
-      const k = key(a.id, b.id);
-      if (cands.get(a.id)!.some((c) => c.key === k)) continue;
-      cands.get(a.id)!.push({ a, b, why: r.why, key: k });
-      stored.add(`${a.id}\u0000${b.id}`);
+      const j = at.get(r.id);
+      if (j === undefined || r.id === a.id) continue;
+      const k = [a.id, r.id].sort().join("\u0000");
+      if (!pairs.has(k)) pairs.set(k, { a, b: themes[j]!, why: r.why, lo: Math.min(i, j), hi: Math.max(i, j) });
     }
-  }
-  for (const a of themes) {
-    for (const c of [...cands.get(a.id)!]) {
-      if (!stored.has(`${c.b.id}\u0000${a.id}`)) cands.get(c.b.id)!.push(c);
-    }
-  }
-  const seen = new Set<string>();
+  });
+  const rest = [...pairs.values()].sort((x, y) => x.lo - y.lo || x.hi - y.hi);
   const uses = new Map<string, number>();
+  const n = (id: string) => uses.get(id) ?? 0;
   const out: { a: T; b: T; why: string }[] = [];
-  const total = new Set([...cands.values()].flat().map((c) => c.key)).size;
-  for (let round = 0; out.length < total; round++) {
-    for (const t of themes) {
-      if ((uses.get(t.id) ?? 0) > round) continue;
-      const c = cands.get(t.id)!.find((x) => !seen.has(x.key));
-      if (!c) continue;
-      seen.add(c.key);
-      for (const id of [c.a.id, c.b.id]) uses.set(id, (uses.get(id) ?? 0) + 1);
-      out.push({ a: c.a, b: c.b, why: c.why });
-    }
+  while (rest.length) {
+    let best = 0;
+    let bestMax = Infinity;
+    let bestSum = Infinity;
+    rest.forEach((c, i) => {
+      const max = Math.max(n(c.a.id), n(c.b.id));
+      const sum = n(c.a.id) + n(c.b.id);
+      if (max < bestMax || (max === bestMax && sum < bestSum)) [best, bestMax, bestSum] = [i, max, sum];
+    });
+    const { a, b, why } = rest.splice(best, 1)[0]!;
+    for (const id of [a.id, b.id]) uses.set(id, n(id) + 1);
+    out.push({ a, b, why });
   }
   return out;
 }

@@ -14,7 +14,8 @@
  *     open, a `steady` and a `fading` one start closed.
  *  4. Focus on a theme name, in its lane or in Connected (the same
  *     `data-effort-link` twice), stays on that link through a ↻ poll repaint.
- *  5. The rail's fold says theme and Worth a look, not effort and Needs you.
+ *  5. The rail's fold says theme and Worth a look, not effort and Needs you,
+ *     and View options says «group by theme», also with the fold turned off.
  *
  * One muninn on its own port over one temp wiki whose `.wiki-reader.json`
  * declares `workMap: {"kind": "themes"}` and whose map is seeded, not run.
@@ -188,6 +189,44 @@ test("the start view shows What you're following over a themes map, not What's n
   expect(digests).toEqual([]);
 });
 
+// Fix round 2 batch 1: the running week's frame stands off the bar, in a
+// colour no bar level uses, in both themes and at every level.
+test("the running and partial weeks are framed apart from their bar at every level, light and dark", async ({ page }) => {
+  await openStart(page);
+  const card = page.locator(".wiki-start");
+  for (const theme of ["light", "dark"]) {
+    const got = await card.evaluate((root, theme) => {
+      document.documentElement.setAttribute("data-theme", theme);
+      const probe = (v: string) => {
+        const p = document.createElement("span");
+        p.style.color = `var(${v})`;
+        document.body.appendChild(p);
+        const c = getComputedStyle(p).color;
+        p.remove();
+        return c;
+      };
+      const strip = document.createElement("div");
+      strip.className = "wiki-wm-weeks";
+      strip.innerHTML = [0, 1, 2, 3, 4].flatMap((l) => ["current", "partial"].map((m) => `<span class="wiki-wm-slot ${m}"><span class="wiki-wm-week lvl-${l}"></span></span>`)).join("");
+      root.appendChild(strip);
+      const out = Array.from(strip.children).map((slot) => {
+        const cs = getComputedStyle(slot);
+        const bar = getComputedStyle(slot.firstElementChild!);
+        return { cls: slot.className, style: cs.outlineStyle, color: cs.outlineColor, offset: cs.outlineOffset, bar: bar.backgroundColor };
+      });
+      strip.remove();
+      return { out, text: probe("--text-primary"), soft: probe("--text-soft") };
+    }, theme);
+    for (const s of got.out) {
+      const current = s.cls.includes("current");
+      expect(s.style, `${theme} ${s.cls}`).toBe(current ? "dashed" : "dotted");
+      expect(s.color, `${theme} ${s.cls}`).toBe(current ? got.text : got.soft);
+      expect(s.color, `${theme} ${s.cls}`).not.toBe(s.bar);
+      expect(s.offset, `${theme} ${s.cls}`).toBe("1px");
+    }
+  }
+});
+
 test("focus on a theme name in a lane, or in Connected, stays on that same link through a ↻ poll repaint", async ({ page }) => {
   let gets = 0;
   await page.route("**/api/wiki/work-map?*", async (route) => {
@@ -235,6 +274,19 @@ test("the rail speaks of themes on a themes map", async ({ page }) => {
   const member = page.locator('#wikiList .wiki-list-item[data-relpath="sources/rise-one.mdx"]');
   await expect(member).toHaveAttribute("title", /In the Rising kites theme/);
   await expect(member.locator(".wiki-effort-role")).toHaveAttribute("title", "Role in the theme: source");
+  // Fix round 2 batch 1: View options says theme too, and still does with the
+  // fold off through a reload (the words come from the listing, not the map GET).
+  await page.locator("#wikiOptionsBtn").click();
+  const toggle = page.locator("#wikiEffortsToggle");
+  await expect(toggle).toHaveText("group by theme");
+  await expect(toggle).toHaveAttribute("title", "Fold Activity under the theme map's themes");
+  await page.locator("#wikiGroupEfforts").uncheck();
+  await page.reload();
+  await expect(page.locator(".wiki-start")).toBeVisible();
+  await page.locator("#wikiOptionsBtn").click();
+  await expect(toggle).toHaveText("group by theme");
+  await expect(page.locator("#wikiGroupEfforts")).not.toBeChecked();
+  await page.locator("#wikiGroupEfforts").check();
 });
 
 test("the rail folds Activity by theme: rising and new start open, steady and fading closed", async ({ page }) => {

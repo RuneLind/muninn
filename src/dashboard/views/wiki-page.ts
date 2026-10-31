@@ -2668,12 +2668,14 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wm-hubs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; font-size: 11.5px; }
     .wiki-wm-hub { padding: 1px 7px; border-radius: 999px; background: var(--tint-neutral); min-width: 0; overflow-wrap: anywhere; }
-    .wiki-wm-weeks { display: flex; align-items: flex-end; gap: 3px; height: 18px; margin-top: 4px; }
+    .wiki-wm-weeks { display: flex; align-items: flex-end; gap: 5px; height: 18px; margin: 6px 0 2px 2px; }
     .wiki-wm-weeks-earlier { align-self: center; margin-right: 3px; font-size: 11px; color: var(--text-soft); white-space: nowrap; }
     .wiki-wm-slot { display: flex; align-items: flex-end; width: 10px; height: 100%; }
-    /* A framed slot: the running week (dashed, accent) or a partial week (dotted). */
-    .wiki-wm-slot.current { outline: 1px dashed var(--accent-light); }
-    .wiki-wm-slot.partial { outline: 1px dotted var(--text-soft); }
+    /* A framed slot: the running week (dashed) or a partial week (dotted), 1px
+       off the bar in a text token, so a full bar (the bar's own colour) never
+       swallows its frame. The gap and margin leave the frame room. */
+    .wiki-wm-slot.current { outline: 1px dashed var(--text-primary); outline-offset: 1px; }
+    .wiki-wm-slot.partial { outline: 1px dotted var(--text-soft); outline-offset: 1px; }
     .wiki-wm-week { width: 100%; min-height: 2px; border-radius: 2px 2px 0 0; background: var(--accent-light); }
     .wiki-wm-week.lvl-0 { height: 2px; background: var(--border-secondary); }
     .wiki-wm-week.lvl-1 { height: 25%; } .wiki-wm-week.lvl-2 { height: 50%; }
