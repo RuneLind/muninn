@@ -390,6 +390,8 @@ export const E2E_PORTS = {
   // Theme map P2: the What you're following card and the rail's theme folds,
   // over a seeded themes map.
   "wiki-theme-card": 3194,
+  // Theme map P3: the theme page (`?effort=<id>` on a themes map).
+  "wiki-theme-page": 3195,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

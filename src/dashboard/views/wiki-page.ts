@@ -2786,6 +2786,11 @@ export async function renderWikiPage(opts?: {
     .wiki-ef-conn-why { flex-basis: 100%; font-size: 12px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
     .wiki-ef-conn-gone { color: var(--text-secondary); }
     .wiki-ef-conn-empty { font-size: 12px; color: var(--text-soft); padding: 4px 8px; }
+    /* Theme page (themes map P3): the card's weekly strip, taller and over every
+       stored week (at most 26); the padding leaves the slot frames room. */
+    .wiki-ef-weekly .wiki-wm-weeks { height: 44px; gap: 6px; overflow-x: auto; padding: 3px; margin: 0; }
+    .wiki-ef-weekly .wiki-wm-slot { flex: 0 0 16px; width: 16px; }
+    .wiki-ef-hubs { margin-top: 0; font-size: 12.5px; }
 
     /* Index coverage card (start view) */
     .wiki-index-card {

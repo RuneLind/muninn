@@ -650,7 +650,16 @@ async function styledEffortClasses(page: Page): Promise<string[]> {
 
 /** Classes that paint no text of their own, or only in a state this sweep
  *  reaches through another test. */
-const UNSWEPT = new Set(["wiki-ef-day", "wiki-ef-cells", "wiki-ef-run", "wiki-ef-strip"]);
+const UNSWEPT = new Set([
+  "wiki-ef-day",
+  "wiki-ef-cells",
+  "wiki-ef-run",
+  "wiki-ef-strip",
+  // The theme page's own classes (themes map P3): a work map never paints
+  // them; `e2e/wiki-theme-page.spec.ts` sweeps them in every theme.
+  "wiki-ef-hubs",
+  "wiki-ef-weekly",
+]);
 
 for (const theme of THEMES) {
   test(`the effort page is legible in the ${theme.label} theme`, async ({ page }) => {
