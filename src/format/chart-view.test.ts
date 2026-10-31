@@ -410,6 +410,26 @@ describe("range", () => {
     expect(plot.match(/vc-rule/g)).toHaveLength(1);
   });
 
+  test("a narrow interval keeps a visible width; only a true point is a tick", () => {
+    const widths = (html: string) =>
+      Object.fromEntries(
+        [...html.split('class="vc-table')[0]!.matchAll(/<title>([^:<]*):[^<]*<\/title>(.*?)<\/svg>/g)].map((m) => [
+          m[1],
+          m[2]!.includes("vc-point") ? "point" : Number(/class="vc-value"[^>]*width="([\d.]+)"/.exec(m[2]!)?.[1]),
+        ]),
+      );
+    const w = widths(range(["| all | 0–10000 |", "| low | 100–100.5 |", "| top | 9999–10000 |", "| one | 5000 |"]));
+    expect(w.low).toBe(1);
+    expect(w.top).toBe(1);
+    expect(w.one).toBe("point");
+    expect(w.all).toBeGreaterThan(90);
+    const tiny = widths(range(["| all | 0–1000 |", "| mid | 500–500.01 |", "| same | 500–500 |"]));
+    expect(tiny.mid).toBe(1);
+    expect(tiny.same).toBe("point");
+    const edge = range(["| all | 0–10000 |", "| base | 0–1 |"]).split('class="vc-table')[0]!;
+    expect(edge).toMatch(/base: 0–1<\/title>.*?class="vc-value" x="0" y="2" width="1"/);
+  });
+
   test("a mixed sign is a note under the drawn chart; a flipped interval falls back to the table", () => {
     expect(range(["| a | $1–2 |", "| b | €3–4 |"])).toContain("vc-kind-range");
     expect(range(["| a | $1–2 |", "| b | €3–4 |"])).toContain("<li>row &quot;b&quot;: € differs from $ in row &quot;a&quot;</li>");

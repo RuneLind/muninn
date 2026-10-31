@@ -516,6 +516,16 @@ function withRule(rows: readonly { total: boolean }[], html: string[]): string {
 
 // ── range ───────────────────────────────────────────────────────────────────
 
+/** The narrowest an interval draws, in track percent: `9999–10000` beside
+ *  `0–10000` scales to 0.01 and would vanish, so it widens about its middle. */
+const MIN_INTERVAL_WIDTH = 1;
+
+function intervalRect(a: number, b: number): string {
+  if (b - a >= MIN_INTERVAL_WIDTH) return rect("vc-value", a, b, 2, 8);
+  const x = Math.min(Math.max((a + b) / 2 - MIN_INTERVAL_WIDTH / 2, 0), 100 - MIN_INTERVAL_WIDTH);
+  return rect("vc-value", round2(x), round2(x + MIN_INTERVAL_WIDTH), 2, 8);
+}
+
 function rangeRows(model: Extract<ChartModel, { kind: "range" }>, logIds: ReadonlySet<string>): string {
   const sc = scale(model.rows.flatMap((r) => [r.value.lo, r.value.hi]));
   const row = (r: (typeof model.rows)[number]) => {
@@ -523,7 +533,7 @@ function rangeRows(model: Extract<ChartModel, { kind: "range" }>, logIds: Readon
     const svg =
       svgOpen(`${r.label}: ${r.value.text}`) +
       track +
-      (a === b ? vline("vc-point", a, 1, 11) : rect("vc-value", a, b, 2, 8)) +
+      (r.value.lo === r.value.hi ? vline("vc-point", a, 1, 11) : intervalRect(a, b)) +
       (sc.negative ? vline("vc-zero", sc.at(0)) : "") +
       `</svg>`;
     return rowHtml(r.total ? totalLabel(r) : escapeHtml(r.label), svg, `${escapeHtml(r.value.text)}${idsHtml(r.value.ids, logIds)}`);

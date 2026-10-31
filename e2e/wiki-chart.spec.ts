@@ -9,8 +9,10 @@
  * mouse and keyboard; print and forced colours; a peek shows the table only;
  * an Explain selection across a chart locates in the source; nothing runs
  * past the page or its section at 390 px; bars draws on a log scale and range
- * draws its bold total below a rule, in both themes; and chat gets every
- * table as written, no SVG.
+ * draws its points, its narrow intervals and its bold total below one rule
+ * (and no rule when the last row is not bold), under the System, Dark and
+ * Light themes and in forced colours; and chat gets every table as written,
+ * no SVG.
  *
  * No model calls, no DB rows: one muninn over a temp wiki holding one
  * synthetic plan page; the Explain route is stubbed at the network boundary.
@@ -55,7 +57,8 @@ const BARS_CHART = [
   "</Chart>",
 ];
 
-/** The shape of a plan's cost table, bold total and bold value included. */
+/** The shape of a plan's cost table, bold total and bold value included; P4
+ *  is a single number (a point) and P5 an interval that scales to 0.2 % of the track. */
 const RANGE_CHART = [
   '<Chart kind="range" caption="Range" value="Interval">',
   "",
@@ -64,7 +67,22 @@ const RANGE_CHART = [
   "| P1 — kinds | $120–220 | one PR |",
   "| P2 — lint | $100–180 | one PR |",
   "| P3 — rule | ~$30 – $70 | a commit |",
+  "| P4 — note | $40 | a note |",
+  "| P5 — typo | $100–101 | a commit |",
   "| **Slate** | **$250–470** | |",
+  "",
+  "</Chart>",
+];
+
+/** A bold row that is not the last: no total, so no rule. */
+const MID_BOLD_CHART = [
+  '<Chart kind="range" caption="Mid bold" value="Interval">',
+  "",
+  "| Slice | Interval |",
+  "|---|---|",
+  "| a | $1–2 |",
+  "| **Sub** | $3–5 |",
+  "| c | $2–4 |",
   "",
   "</Chart>",
 ];
@@ -147,6 +165,10 @@ const PAGE = [
   "## Range chart",
   "",
   ...RANGE_CHART,
+  "",
+  "## Mid bold chart",
+  "",
+  ...MID_BOLD_CHART,
   "",
   "## Broken chart",
   "",
@@ -247,7 +269,7 @@ const visiblePlot = (c: Locator) => c.locator(":scope > .vc-plot:not([hidden])")
 async function open(page: Page, width: number, focus = false): Promise<void> {
   await page.setViewportSize({ width, height: 900 });
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
-  await expect(page.locator(".wiki-article section.vc[class*='vc-kind-']")).toHaveCount(9);
+  await expect(page.locator(".wiki-article section.vc[class*='vc-kind-']")).toHaveCount(10);
   if (focus) {
     await page.locator("body").press("f");
     await expect(page.locator("#wikiFocusExit")).toBeVisible();
@@ -289,6 +311,60 @@ const contrast = (c: Locator, sel: string, prop: "fill" | "stroke") =>
     [sel, prop],
   );
 
+/** The bars and range checks every theme runs: tokens, the log scale, the point, the narrow interval, the rule. */
+async function checkBarsAndRange(page: Page, what: string): Promise<void> {
+  const paint = (c: Locator, sel: string, prop: "fill" | "stroke" | "borderTopColor" | "strokeWidth") =>
+    c.locator(sel).first().evaluate((e, p) => getComputedStyle(e)[p as "fill"], prop);
+  // Bars: three bars on a log scale ($900 is over 100 × $3), and the notes say so.
+  const bars = chart(page, "bars");
+  const barRects = visiblePlot(bars).locator(".vc-value");
+  await expect(barRects, what).toHaveCount(3);
+  expect(await paint(bars, ".vc-plot:not([hidden]) .vc-value", "fill"), what).toBe(await token(page, "--accent"));
+  await expect(bars.locator(".vc-notes"), what).toContainText("Log scale");
+  // Drawn on that scale: $40 is 4 % of $900 linearly, about half of it on a log axis.
+  const [middle, large] = [(await barRects.nth(1).boundingBox())!, (await barRects.nth(2).boundingBox())!];
+  expect(middle.width / large.width, what).toBeGreaterThan(0.3);
+  // Range: five intervals and one point; the bold Slate row below a visible rule.
+  const range = chart(page, "range");
+  const plot = visiblePlot(range);
+  await expect(plot.locator(".vc-value"), what).toHaveCount(5);
+  expect(await paint(range, ".vc-plot:not([hidden]) .vc-value", "fill"), what).toBe(await token(page, "--accent"));
+  const point = plot.locator(".vc-point");
+  await expect(point, what).toHaveCount(1);
+  // A vertical line has a zero-width box, which Playwright calls hidden: measure the paint instead.
+  const pointRow = plot.locator(".vc-row", { hasText: "P4 — note" });
+  const [pt, ptTrack] = [(await point.boundingBox())!, (await pointRow.locator(".vc-track").boundingBox())!];
+  expect(pt.height, what).toBeGreaterThanOrEqual(ptTrack.height * 0.8);
+  expect(pt.x, what).toBeGreaterThan(ptTrack.x);
+  expect(pt.x, what).toBeLessThan(ptTrack.x + ptTrack.width);
+  expect(parseFloat(await paint(range, ".vc-plot:not([hidden]) .vc-point", "strokeWidth")), what).toBeGreaterThanOrEqual(2);
+  expect(await point.evaluate((e) => e.closest("svg")!.querySelector("title")!.textContent), what).toBe("P4 — note: $40");
+  expect(await paint(range, ".vc-plot:not([hidden]) .vc-point", "stroke"), what).toBe(await token(page, "--accent"));
+  // $100–101 beside $470 is 0.2 % of the track; it draws at the 1 % minimum.
+  const narrowRow = plot.locator(".vc-row", { hasText: "P5 — typo" });
+  const [narrow, track] = [(await narrowRow.locator(".vc-value").boundingBox())!, (await narrowRow.locator(".vc-track").boundingBox())!];
+  expect(narrow.width / track.width, what).toBeGreaterThanOrEqual(0.009);
+  const rule = (await plot.locator(".vc-rule").boundingBox())!;
+  expect(rule.height, what).toBeGreaterThanOrEqual(1);
+  expect(await paint(range, ".vc-plot:not([hidden]) .vc-rule", "borderTopColor"), what).toBe(await token(page, "--text-muted"));
+  const total = (await plot.locator(".vc-total").boundingBox())!;
+  const lastPart = (await plot.locator(".vc-lab").nth(4).boundingBox())!;
+  expect(rule.y, what).toBeGreaterThan(lastPart.y + lastPart.height - 1);
+  expect(total.y, what).toBeGreaterThanOrEqual(rule.y);
+  await expect(plot.locator(".vc-total"), what).toHaveText("Slate");
+  expect(await plot.locator(".vc-total").evaluate((e) => getComputedStyle(e).fontWeight), what).toBe("600");
+  // In written order: every part, then the one rule, then the total.
+  const order = (c: Locator) =>
+    visiblePlot(c).locator(".vc-rows").evaluate((rows) =>
+      Array.from(rows.children).map((e) => (e.classList.contains("vc-rule") ? "|" : e.querySelector(".vc-lab")!.textContent)),
+    );
+  expect(await order(range), what).toEqual(["P1 — kinds", "P2 — lint", "P3 — rule", "P4 — note", "P5 — typo", "|", "Slate"]);
+  // A bold row that is not last is no total: the rows keep their order and no rule draws.
+  const midBold = chart(page, "range", "Mid bold");
+  expect(await order(midBold), what).toEqual(["a", "Sub", "c"]);
+  await expect(midBold.locator(".vc-rule"), what).toHaveCount(0);
+}
+
 /** No element in `c` runs past its section. */
 const overflowsSection = (c: Locator) => c.evaluate((e) => e.scrollWidth - e.clientWidth);
 
@@ -325,27 +401,27 @@ test.describe("Wiki reader: Chart", () => {
       // An unpressed button's border is visible against the section.
       const unpressed = gap.locator('button[data-vc-mode="table"]');
       expect(await unpressed.evaluate((e) => getComputedStyle(e).borderTopColor)).toBe(await token(page, "--text-muted"));
-      // Bars: three bars on a log scale ($900 is over 100 × $3), and the notes say so.
-      const bars = chart(page, "bars");
-      await expect(bars.locator(".vc-plot:not([hidden]) .vc-value")).toHaveCount(3);
-      expect(await paint(bars, ".vc-plot:not([hidden]) .vc-value", "fill")).toBe(await token(page, "--accent"));
-      await expect(bars.locator(".vc-notes")).toContainText("Log scale");
-      // Range: four intervals, the bold Slate row below a visible rule.
-      const range = chart(page, "range");
-      const plot = visiblePlot(range);
-      await expect(plot.locator(".vc-value")).toHaveCount(4);
-      expect(await paint(range, ".vc-plot:not([hidden]) .vc-value", "fill")).toBe(await token(page, "--accent"));
-      const rule = (await plot.locator(".vc-rule").boundingBox())!;
-      expect(rule.height).toBeGreaterThanOrEqual(1);
-      expect(await plot.locator(".vc-rule").evaluate((e) => getComputedStyle(e).borderTopColor)).toBe(await token(page, "--text-muted"));
-      const total = (await plot.locator(".vc-total").boundingBox())!;
-      const lastPart = (await plot.locator(".vc-lab").nth(2).boundingBox())!;
-      expect(rule.y).toBeGreaterThan(lastPart.y + lastPart.height - 1);
-      expect(total.y).toBeGreaterThanOrEqual(rule.y);
-      await expect(plot.locator(".vc-total")).toHaveText("Slate");
-      expect(await plot.locator(".vc-total").evaluate((e) => getComputedStyle(e).fontWeight)).toBe("600");
+      await checkBarsAndRange(page, `system ${scheme}`);
+      const [bars, range] = [chart(page, "bars"), chart(page, "range")];
       await range.screenshot({ path: test.info().outputPath(`range-${scheme}.png`) });
       await bars.screenshot({ path: test.info().outputPath(`bars-${scheme}.png`) });
+    });
+  }
+
+  // An explicit theme against the opposite system scheme: the marks follow the stored choice, not the media query.
+  for (const theme of ["dark", "light"] as const) {
+    test(`1280 px, explicit ${theme} theme: bars and range draw in its tokens`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: theme === "dark" ? "light" : "dark" });
+      await page.addInitScript((t) => {
+        try {
+          localStorage.setItem("muninn-theme", t);
+        } catch {
+          /* storage unavailable */
+        }
+      }, theme);
+      await open(page, 1280);
+      expect(await page.evaluate(() => document.documentElement.getAttribute("data-theme"))).toBe(theme);
+      await checkBarsAndRange(page, `explicit ${theme}`);
     });
   }
 
@@ -602,7 +678,7 @@ test.describe("Wiki reader: Chart", () => {
     }
   });
 
-  test("forced colours paint the track, the marks, every series line and the swatches in system colours", async ({ page }) => {
+  test("forced colours paint the track, the marks, every series line, the swatches, the point and the rule in system colours", async ({ page }) => {
     await page.emulateMedia({ forcedColors: "active" });
     await open(page, 1280);
     const system = (name: string) =>
@@ -616,7 +692,7 @@ test.describe("Wiki reader: Chart", () => {
       }, name);
     const [text, highlight] = [await system("CanvasText"), await system("Highlight")];
     expect(text).not.toBe(highlight);
-    const all = (c: Locator, sel: string, prop: "fill" | "stroke" | "backgroundColor") =>
+    const all = (c: Locator, sel: string, prop: "fill" | "stroke" | "backgroundColor" | "borderTopColor") =>
       c.locator(sel).evaluateAll((es, p) => es.map((e) => getComputedStyle(e)[p as "fill"]), prop);
     const gap = chart(page, "gap");
     expect(await all(gap, ".vc-plot:not([hidden]) .vc-track", "stroke")).toEqual(Array(3).fill(text));
@@ -630,6 +706,12 @@ test.describe("Wiki reader: Chart", () => {
     const lines = await all(steps, ".vc-plot:not([hidden]) .vc-line, .vc-legend .vc-line", "stroke");
     expect(lines.length).toBe(4);
     expect(lines).toEqual(Array(4).fill(text));
+    // Bars and range: the bars and intervals in Highlight, the point too, the rule in CanvasText.
+    expect(await all(chart(page, "bars"), ".vc-plot:not([hidden]) .vc-value", "fill")).toEqual(Array(3).fill(highlight));
+    const range = chart(page, "range");
+    expect(await all(range, ".vc-plot:not([hidden]) .vc-value", "fill")).toEqual(Array(5).fill(highlight));
+    expect(await all(range, ".vc-plot:not([hidden]) .vc-point", "stroke")).toEqual([highlight]);
+    expect(await all(range, ".vc-plot:not([hidden]) .vc-rule", "borderTopColor")).toEqual([text]);
   });
 
   for (const scheme of ["dark", "light"] as const) {
@@ -757,6 +839,8 @@ test.describe("Chat bubbles: a Chart reaches chat as its table", () => {
         ["P1 — kinds", "$120–220", "one PR"],
         ["P2 — lint", "$100–180", "one PR"],
         ["P3 — rule", "~$30 – $70", "a commit"],
+        ["P4 — note", "$40", "a note"],
+        ["P5 — typo", "$100–101", "a commit"],
         ["Slate", "$250–470", ""],
       ],
       bold: ["Slate", "$250–470"],
