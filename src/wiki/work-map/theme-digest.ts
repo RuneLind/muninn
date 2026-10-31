@@ -76,9 +76,9 @@ export interface ThemeDigest {
   cut: number;
   /** The digest's hubs, most-linked first. */
   hubs: ThemeHub[];
-  /** Lowercased hub name → relPath, for the normalizer. */
+  /** Lowercased printed hub name (a hub line or a link target) → relPath, for the normalizer. */
   hubByName: Map<string, string>;
-  /** Lowercased bare stems two digest hubs share: a name the digest never printed. */
+  /** Lowercased names that could mean more than one printed page (`printedHubNames`): refused. */
   ambiguousHubNames: Set<string>;
   windowStart: string;
   runDay: string;
@@ -131,6 +131,57 @@ Answer with ONE JSON object and nothing else — no prose before or after, no co
  "connections":[{"a": theme id,"b": theme id,"why": string}],
  "worthALook":[{"kind":"gap"|"drift"|"contradiction"|"shift","title": string,"why": string,"action": string,"sources":[id],"hubs":[hub name],"theme": theme id}],
  "loose":[id]}`;
+
+/**
+ * A name for every hub page the digest prints (a hub line or a source's link
+ * target), unique over that whole set: the bare stem when no other printed
+ * page shares it (ignoring case), else `folder/stem`, else the relPath with its
+ * extension. `hubByName` maps each lowercased printed name back to its page;
+ * `ambiguousHubNames` holds every shorter form a colliding page did not get
+ * (its bare stem, its `folder/stem`) and any printed name two pages share, so
+ * an answer naming one resolves to nothing instead of an arbitrary page.
+ */
+export function printedHubNames(rels: Iterable<string>): { nameOf: Map<string, string>; hubByName: Map<string, string>; ambiguousHubNames: Set<string> } {
+  const byStem = new Map<string, string[]>();
+  for (const r of rels) {
+    const k = stemOf(r).toLowerCase();
+    byStem.set(k, [...(byStem.get(k) ?? []), r]);
+  }
+  const nameOf = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  for (const [stem, group] of byStem) {
+    if (group.length === 1) {
+      nameOf.set(group[0]!, stemOf(group[0]!));
+      continue;
+    }
+    ambiguous.add(stem);
+    const short = (r: string) => {
+      const dir = r.split("/").slice(0, -1).join("/");
+      return dir ? `${dir}/${stemOf(r)}` : undefined;
+    };
+    const shortCount = new Map<string, number>();
+    for (const r of group) {
+      const q = short(r)?.toLowerCase();
+      if (q) shortCount.set(q, (shortCount.get(q) ?? 0) + 1);
+    }
+    for (const r of group) {
+      const q = short(r);
+      if (q && shortCount.get(q.toLowerCase()) === 1) nameOf.set(r, q);
+      else {
+        if (q) ambiguous.add(q.toLowerCase());
+        nameOf.set(r, r);
+      }
+    }
+  }
+  const owners = new Map<string, string[]>();
+  for (const [r, n] of nameOf) owners.set(n.toLowerCase(), [...(owners.get(n.toLowerCase()) ?? []), r]);
+  const hubByName = new Map<string, string>();
+  for (const [n, rs] of owners) {
+    if (rs.length > 1 || ambiguous.has(n)) ambiguous.add(n);
+    else hubByName.set(n, rs[0]!);
+  }
+  return { nameOf, hubByName, ambiguousHubNames: ambiguous };
+}
 
 /** The active sources of `pages` at `nowMs`, newest first. */
 export function activeSources(pages: readonly ThemeDigestPage[], nowMs: number): ThemeSource[] {
@@ -195,19 +246,13 @@ export function buildThemeMapDigest(input: ThemeDigestInput): ThemeDigest {
     });
   }
   hubs.sort((a, b) => b.links - a.links || a.relPath.localeCompare(b.relPath));
-  // Two hubs sharing a stem print as `folder/stem`, so each name maps back to one page.
-  const stemCount = new Map<string, number>();
-  for (const h of hubs) stemCount.set(h.name.toLowerCase(), (stemCount.get(h.name.toLowerCase()) ?? 0) + 1);
-  const ambiguousHubNames = new Set([...stemCount].filter(([, n]) => n > 1).map(([k]) => k));
-  const qualified = (rel: string) => rel.replace(/\.[^./]+$/, "");
-  const nameOf = (rel: string) => (ambiguousHubNames.has(stemOf(rel).toLowerCase()) ? qualified(rel) : stemOf(rel));
-  for (const h of hubs) h.name = nameOf(h.relPath);
-  const hubByName = new Map<string, string>();
-  for (const h of hubs) if (!hubByName.has(h.name.toLowerCase())) hubByName.set(h.name.toLowerCase(), h.relPath);
+  const printed = new Set([...hubs.map((h) => h.relPath), ...listed.flatMap((s) => hubLinks.get(s.relPath) ?? [])]);
+  const { nameOf, hubByName, ambiguousHubNames } = printedHubNames(printed);
+  for (const h of hubs) h.name = nameOf.get(h.relPath)!;
 
   const sourceLines = listed.map((s) => {
     const p = byRel.get(s.relPath)!;
-    const links = (hubLinks.get(s.relPath) ?? []).map(nameOf).sort((a, b) => a.localeCompare(b));
+    const links = (hubLinks.get(s.relPath) ?? []).map((r) => nameOf.get(r)!).sort((a, b) => a.localeCompare(b));
     return [
       `${ids.get(s.relPath)} "${clip(p.displayTitle ?? p.title, 160)}"`,
       s.domain,

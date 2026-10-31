@@ -7,7 +7,7 @@
  * committed. The model call keeps its trace and `/agents` row.
  */
 
-import { realpathSync } from "node:fs";
+import { lstatSync, readlinkSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { MuninnProfile, WorkMapEffort } from "../../config.ts";
@@ -76,21 +76,46 @@ export function memoryStateStore(): WorkMapStateStore {
   };
 }
 
-/** `abs` with symlinks resolved; a path not made yet resolves through its
- *  nearest existing ancestor. Throws when no ancestor resolves. */
-function canonical(abs: string): string {
-  const rest: string[] = [];
-  let at = path.resolve(abs);
-  for (;;) {
-    try {
-      return path.join(realpathSync(at), ...rest.reverse());
-    } catch (err) {
-      const parent = path.dirname(at);
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT" || parent === at) throw err;
-      rest.push(path.basename(at));
-      at = parent;
+/** Symlinks `canonical` follows before it gives up (the kernel's own bound). */
+const SYMLINK_HOPS_MAX = 40;
+
+/**
+ * `file` with every symlink resolved, component by component, the last one
+ * included: a link is read (`lstat` + `readlink`) whether or not its target
+ * exists, so a dangling link is followed to where a write through it would
+ * land. The first component that does not exist ends the walk, and the rest is
+ * appended as written (nothing below it can be a link). Throws on any other
+ * error, or past `SYMLINK_HOPS_MAX` links.
+ */
+function canonical(file: string): string {
+  const parts = (p: string) => p.split(path.sep).filter((x) => x !== "" && x !== ".");
+  let todo = parts(path.isAbsolute(file) ? file : path.join(process.cwd(), file));
+  let cur = path.parse(path.resolve(file)).root;
+  let hops = 0;
+  while (todo.length > 0) {
+    const part = todo.shift()!;
+    if (part === "..") {
+      cur = path.dirname(cur);
+      continue;
     }
+    const next = path.join(cur, part);
+    let st;
+    try {
+      st = lstatSync(next);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return path.join(next, ...todo);
+      throw err;
+    }
+    if (!st.isSymbolicLink()) {
+      cur = next;
+      continue;
+    }
+    if (++hops > SYMLINK_HOPS_MAX) throw new Error(`more than ${SYMLINK_HOPS_MAX} symlinks in ${file}`);
+    const target = readlinkSync(next);
+    if (path.isAbsolute(target)) cur = path.parse(target).root;
+    todo = [...parts(target), ...todo];
   }
+  return cur;
 }
 
 /** Is `file` inside `root`, symlinks resolved? Unsure (a path that cannot be resolved) counts as inside. */

@@ -119,6 +119,38 @@ describe("dryRunDeps", () => {
     expect(() => dryRunDeps({ ...base, out: path.join(link, "new", "dir", "map.json") })).toThrow("inside the wiki root");
   });
 
+  test("a symlink that dangles into the root is inside it: the final component, a chain, a middle component, a relative target", async () => {
+    const { root: rootRel, out: outRel, base } = await setup();
+    // Absolute: a relative link target is read from the link's own folder.
+    const root = path.resolve(rootRel);
+    const out = path.resolve(outRel);
+    const planted = path.join(root, "planted.json");
+    // The final component dangles into the root.
+    await symlink(planted, path.join(out, "dangle.json"));
+    expect(() => dryRunDeps({ ...base, out: path.join(out, "dangle.json") })).toThrow("inside the wiki root");
+    expect(() => dryRunDeps({ ...base, saveAnswer: path.join(out, "dangle.json") })).toThrow("inside the wiki root");
+    // A chain: l1 → l2 → the root.
+    await symlink(planted, path.join(out, "l2.json"));
+    await symlink(path.join(out, "l2.json"), path.join(out, "l1.json"));
+    expect(() => dryRunDeps({ ...base, out: path.join(out, "l1.json") })).toThrow("inside the wiki root");
+    // A middle component dangles into a folder of the root not made yet.
+    await symlink(path.join(root, "newdir"), path.join(out, "dir"));
+    expect(() => dryRunDeps({ ...base, out: path.join(out, "dir", "m.json") })).toThrow("inside the wiki root");
+    // A relative target, with `..`, resolved from the link's own folder.
+    await mkdir(path.join(out, "sub"));
+    await symlink(path.relative(path.join(out, "sub"), planted), path.join(out, "sub", "rel.json"));
+    expect(() => dryRunDeps({ ...base, out: path.join(out, "sub", "rel.json") })).toThrow("inside the wiki root");
+    // A loop cannot be resolved: refused.
+    await symlink(path.join(out, "loopB"), path.join(out, "loopA"));
+    await symlink(path.join(out, "loopA"), path.join(out, "loopB"));
+    expect(() => dryRunDeps({ ...base, out: path.join(out, "loopA") })).toThrow("could not be resolved");
+    // Nothing was created in the root.
+    expect(await Bun.file(planted).exists()).toBe(false);
+    // A link dangling outside the root is allowed.
+    await symlink(path.join(out, "elsewhere.json"), path.join(out, "fine.json"));
+    expect(() => dryRunDeps({ ...base, out: path.join(out, "fine.json") })).not.toThrow();
+  });
+
   test("a --previous that is missing, unparseable or another kind's map fails the run before the model call", async () => {
     const { out, base, models } = await setup();
     await writeFile(path.join(out, "bad.json"), "{ nope");

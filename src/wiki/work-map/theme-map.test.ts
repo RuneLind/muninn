@@ -10,7 +10,7 @@ import { workMapKindFromReaderText, parseWorkMapReaderConfig } from "./kind.ts";
 import { previousMapOf, readMapFile } from "./map-file.ts";
 import { __resetWorkMapRunsForTest, startWorkMapRun, type ModelRequest, type WorkMapRunDeps } from "./run.ts";
 import { WORK_MAP_VERSION } from "./schema.ts";
-import { addDays, buildThemeMapDigest, THEME_DRIFT_MIN_SINCE, THEME_SOURCES_MAX, type ThemeDigestPage, type ThemeSource } from "./theme-digest.ts";
+import { addDays, buildThemeMapDigest, printedHubNames, THEME_DRIFT_MIN_SINCE, THEME_SOURCES_MAX, type ThemeDigestPage, type ThemeSource } from "./theme-digest.ts";
 import {
   firstRecountedMonday,
   isoMonday,
@@ -440,6 +440,16 @@ function checkWeeks(o: { day: string; out: ReturnType<typeof normalizeThemeAnswe
   const recountFrom = firstRecountedMonday(o.day);
   for (const w of t.weekly) if (w.start < recountFrom && !w.partial) expect([o.day, w.start, w.count]).toEqual([o.day, w.start, 7]);
 }
+/** The invariant across themes AND retired themes: a week inside tonight's recount
+ *  window never sums above the active sources created in it. */
+function checkNoDoubleCount(o: { day: string; created: Map<string, string>; out: ReturnType<typeof normalizeThemeAnswer> }) {
+  const all = [...o.out.efforts.map((e) => e.weekly), ...o.out.retired.map((r) => r.weekly)];
+  for (let mon = firstRecountedMonday(o.day); mon <= isoMonday(o.day); mon = addDays(mon, 7)) {
+    const truth = [...o.created.values()].filter((d) => d >= mon && d <= addDays(mon, 6)).length;
+    const sum = all.reduce((n, wk) => n + (wk.find((w) => w.start === mon)?.count ?? 0), 0);
+    expect([o.day, mon, sum <= truth]).toEqual([o.day, mon, true]);
+  }
+}
 
 describe("weekly", () => {
   test("ISO weeks", () => {
@@ -559,10 +569,79 @@ describe("weekly", () => {
         expect([day, mon, sum]).toEqual([day, mon, 14]);
       }
     }
+    for (const o of outs) checkNoDoubleCount(o);
+    // b's weeks before its last recount window stay whole; the weeks inside it went with its sources to a.
     const last = outs.at(-1)!.out;
     const b = last.retired.find((r) => r.id === "b")!;
-    expect(b.weekly.every((w) => w.start < firstRecountedMonday("2026-08-01"))).toBe(true);
-    expect(b.weekly.filter((w) => !w.partial).every((w) => w.count === 7)).toBe(true);
+    const from = firstRecountedMonday("2026-08-01");
+    expect(b.weekly.filter((w) => w.start < from && !w.partial).every((w) => w.count === 7)).toBe(true);
+    expect(b.weekly.filter((w) => w.start >= from).every((w) => w.count === 0)).toBe(true);
+    expect(b.members).toBeUndefined();
+  });
+
+  /** a holds its own sources every night; `bAssign` places b's (null for loose). */
+  const twoThemes = (from: string, to: string, bAssign: (day: string, r: string) => string | null) =>
+    simulate(
+      dayRange(from, to).map((day) => ({ day, assign: (r: string) => (r.includes("/a-") ? "a" : bAssign(day, r)) })),
+      (d) => [`sources/a-${d}.md`, `sources/b-${d}.md`],
+    );
+  const retiredOf = (o: { out: ReturnType<typeof normalizeThemeAnswer> }, id: string) => o.out.retired.find((r) => r.id === id);
+  const weekOf = (weekly: { start: string; count: number; partial?: boolean }[] | undefined, start: string) => {
+    const w = weekly?.find((x) => x.start === start);
+    return w ? { count: w.count, partial: !!w.partial } : undefined;
+  };
+
+  test("a theme whose sources all go loose retires with its complete weeks, and revives with them after a long gap", () => {
+    const outs = twoThemes("2026-06-01", "2026-08-30", (day) => (day >= "2026-07-15" && day < "2026-08-24" ? null : "b"));
+    for (const o of outs) checkNoDoubleCount(o);
+    const night = (day: string) => outs.find((o) => o.day === day)!;
+    // Retirement night: the weeks inside the window are recounted from its loose members, so whole weeks stay whole.
+    const r0 = retiredOf(night("2026-07-15"), "b")!;
+    for (const s of ["2026-06-22", "2026-06-29", "2026-07-06"]) expect([s, weekOf(r0.weekly, s)]).toEqual([s, { count: 7, partial: false }]);
+    expect(weekOf(r0.weekly, "2026-07-13")).toEqual({ count: 2, partial: true });
+    expect(r0.weekly.at(-1)!.start).toBe("2026-07-13");
+    expect(r0.members?.length).toBe(27); // 06-18..07-14: the window's b sources
+    // While retired the weeks age out of the window unchanged, and the members with them.
+    const r1 = retiredOf(night("2026-08-23"), "b")!;
+    for (const s of ["2026-06-22", "2026-06-29", "2026-07-06"]) expect([s, weekOf(r1.weekly, s)]).toEqual([s, { count: 7, partial: false }]);
+    expect(weekOf(r1.weekly, "2026-07-13")).toEqual({ count: 2, partial: true });
+    expect(r1.members).toBeUndefined();
+    // Revived: the history is back, the weeks it spent retired are partial.
+    const b = night("2026-08-24").out.efforts.find((e) => e.id === "b")!;
+    for (const s of ["2026-06-22", "2026-06-29", "2026-07-06"]) expect([s, weekOf(b.weekly, s)]).toEqual([s, { count: 7, partial: false }]);
+    expect(weekOf(b.weekly, "2026-07-13")).toEqual({ count: 2, partial: true });
+    expect(weekOf(b.weekly, "2026-07-20")).toEqual({ count: 0, partial: true });
+    expect(weekOf(b.weekly, "2026-07-27")).toEqual({ count: 6, partial: true });
+  });
+
+  test("a theme retired for three nights revives with every whole week whole", () => {
+    const outs = twoThemes("2026-06-01", "2026-07-31", (day) => (day >= "2026-07-15" && day < "2026-07-18" ? null : "b"));
+    for (const o of outs) {
+      checkNoDoubleCount(o);
+      checkWeeks(o, "b");
+    }
+    const b = outs.find((o) => o.day === "2026-07-18")!.out.efforts.find((e) => e.id === "b")!;
+    for (const s of ["2026-06-22", "2026-06-29", "2026-07-06"]) expect([s, weekOf(b.weekly, s)]).toEqual([s, { count: 7, partial: false }]);
+    // Inside the window every week is recounted from the revived theme's members.
+    expect(weekOf(b.weekly, "2026-07-13")).toEqual({ count: 6, partial: false });
+  });
+
+  test("half the sources loose, half moved: each half counts once, and loose members that move later leave the retired theme", () => {
+    const odd = (r: string) => Number(r.slice(-5, -3)) % 2 === 1;
+    const outs = twoThemes("2026-06-01", "2026-08-10", (day, r) => (day < "2026-07-15" ? "b" : day >= "2026-07-25" || odd(r) ? "a" : null));
+    for (const o of outs) checkNoDoubleCount(o);
+    const o = outs.find((x) => x.day === "2026-07-15")!;
+    const r = retiredOf(o, "b")!;
+    const a = o.out.efforts.find((e) => e.id === "a")!;
+    // Week 07-06 (06..12): 4 even days stay with b, 3 odd days went to a beside a's own 7.
+    expect(weekOf(r.weekly, "2026-07-06")).toEqual({ count: 4, partial: false });
+    expect(weekOf(a.weekly, "2026-07-06")).toEqual({ count: 10, partial: false });
+    // Once a takes the loose ones too, b's weeks inside the window are 0 and nothing counts twice.
+    const later = retiredOf(outs.find((x) => x.day === "2026-07-25")!, "b")!;
+    expect(later.members).toBeUndefined();
+    expect(later.weekly.filter((w) => w.start >= firstRecountedMonday("2026-07-25")).every((w) => w.count === 0)).toBe(true);
+    // A week that left the window before a took them keeps b's loose half.
+    expect(weekOf(later.weekly, "2026-06-22")).toEqual({ count: 4, partial: false });
   });
 
   test("a source moving to another theme takes its recounted week; carried weeks stay", () => {
@@ -738,6 +817,16 @@ function collidingPages() {
   for (const r of ["sources/a3.md", "sources/a4.md", "sources/a5.md"]) outgoing.set(key(r), [...outgoing.get(key(r))!, key("entities/x.md")]);
   return { pages, outgoing };
 }
+/** The fixture plus a hub `concepts/x.md` (2 links) and five link-only
+ *  targets, all linked from a1: `concepts/x.mdx`, `entities/x.md`, `entities/y.md`, `people/y.md`. */
+function linkOnlyCollidingPages() {
+  const { pages, outgoing } = fixturePages();
+  const extra = ["concepts/x.md", "concepts/x.mdx", "entities/x.md", "entities/y.md", "people/y.md"];
+  pages.push(...extra.map((r) => hub(r, "2026-10-01")));
+  outgoing.set(key("sources/a1.md"), [...outgoing.get(key("sources/a1.md"))!, ...extra.map(key)]);
+  outgoing.set(key("sources/a2.md"), [...outgoing.get(key("sources/a2.md"))!, key("concepts/x.md")]);
+  return { pages, outgoing };
+}
 function indexOf(pages: ThemeDigestPage[], outgoing: Map<string, string[]>): WikiIndex {
   const metas = pages.map((p) => ({ aliases: [], steps: [], ...p }) as unknown as WikiPageMeta);
   return { pages: metas, outgoing, resolve: (t: string) => metas.find((p) => p.name.toLowerCase() === t.toLowerCase()), gitTouches: new Map() } as unknown as WikiIndex;
@@ -779,6 +868,61 @@ describe("hub names", () => {
       const map = readMapFile(written[0]!)!.map as ThemeMap;
       expect(map.efforts[0]!.hubs).toEqual([...want]);
       expect(map.needsYou[0]!.hubs).toEqual([...want]);
+    }
+  });
+
+  test("names are unique over everything the digest prints: link-only targets collide too, and folder/stem falls back to the extension", () => {
+    const { pages, outgoing } = linkOnlyCollidingPages();
+    const d = buildThemeMapDigest({ wiki: "w", nowMs: NOW, pages, outgoing, previous: null });
+    // Only Hub A, Hub B and concepts/x.md reach the hub list; the rest are link targets.
+    expect(d.hubs.map((h) => h.name)).toEqual(["Hub A", "Hub B", "concepts/x.md"]);
+    expect(d.text).toContain('p1 "a1" | ai | created=2026-10-30 | tags=t | links=[concepts/x.md; concepts/x.mdx; entities/x; entities/y; Hub A; Hub B; people/y]');
+    expect(d.text).toContain("\nconcepts/x.md | concepts | linked by 2 recent sources");
+    for (const [name, rel] of [
+      ["concepts/x.md", "concepts/x.md"],
+      ["concepts/x.mdx", "concepts/x.mdx"],
+      ["entities/x", "entities/x.md"],
+      ["entities/y", "entities/y.md"],
+      ["people/y", "people/y.md"],
+      ["hub a", "concepts/Hub A.md"],
+    ] as const) expect([name, d.hubByName.get(name)]).toEqual([name, rel]);
+    for (const short of ["x", "y", "concepts/x"]) {
+      expect(d.hubByName.has(short)).toBe(false);
+      expect(d.ambiguousHubNames.has(short)).toBe(true);
+    }
+    expect(d.ambiguousHubNames.has("entities/y")).toBe(false);
+  });
+
+  test("printedHubNames: a root page takes its extension, nested folders stay whole, a case-only twin is refused, a unique stem stays bare", () => {
+    const { nameOf, hubByName, ambiguousHubNames } = printedHubNames(["x.md", "concepts/x.md", "a/b/y.md", "c/b/y.md", "k/Z.md", "k/z.md", "solo.md"]);
+    expect(Object.fromEntries(nameOf)).toEqual({
+      "x.md": "x.md",
+      "concepts/x.md": "concepts/x",
+      "a/b/y.md": "a/b/y",
+      "c/b/y.md": "c/b/y",
+      "k/Z.md": "k/Z.md",
+      "k/z.md": "k/z.md",
+      "solo.md": "solo",
+    });
+    expect([...ambiguousHubNames].sort()).toEqual(["k/z", "k/z.md", "x", "y", "z"]);
+    expect(Object.fromEntries(hubByName)).toEqual({ "x.md": "x.md", "concepts/x": "concepts/x.md", "a/b/y": "a/b/y.md", "c/b/y": "c/b/y.md", solo: "solo.md" });
+  });
+
+  test("the run maps each printed name to its own page and drops every ambiguous short name", async () => {
+    const { pages, outgoing } = linkOnlyCollidingPages();
+    const idx = indexOf(pages, outgoing);
+    for (const [names, want] of [
+      [["entities/y"], ["entities/y.md"]],
+      [["people/y"], ["people/y.md"]],
+      [["concepts/x.mdx"], ["concepts/x.mdx"]],
+      [["entities/x"], ["entities/x.md"]],
+      [["y", "x", "concepts/x"], []],
+    ] as const) {
+      __resetWorkMapRunsForTest();
+      const { d, written } = themeDeps({ model: hubsAnswer([...names]), inputs: { ...themeDeps().d.inputs, rebuildIndex: async () => idx } });
+      expect((await startWorkMapRun("kb", d).promise).outcome).toBe("ok");
+      const map = readMapFile(written[0]!)!.map as ThemeMap;
+      expect([names, map.efforts[0]!.hubs]).toEqual([names, [...want]]);
     }
   });
 

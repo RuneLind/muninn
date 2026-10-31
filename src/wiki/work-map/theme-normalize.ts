@@ -26,7 +26,10 @@
  * it was last counted before it ended (Monday 00:00 Oslo of the next week), and
  * a week missing between the stored ones and tonight's (a gap between runs, a
  * theme retired meanwhile) is stored `partial` so the strip can tell a hole
- * from zero.
+ * from zero. A theme that retires keeps its weekly (`retiredWeekly`): the
+ * weeks inside the window go on being recounted from its members no theme
+ * holds, so a merged theme's sources are counted once and a dropped theme's
+ * whole weeks stay whole.
  */
 
 import { EFFORT_ID_RE, osloDay } from "./ids.ts";
@@ -161,6 +164,34 @@ export function themeWeekly(created: readonly string[], prior: readonly ThemeWee
   return out.filter((w) => w.start >= oldest).sort((a, b) => a.start.localeCompare(b.start));
 }
 
+/**
+ * A retired theme's weekly counts tonight. A week before tonight's recount
+ * window is carried (`carryWeek`); a week inside it is recounted from
+ * `members` that are still active and that no theme holds tonight, so a
+ * loose source stays with the retired theme and a source another theme took
+ * is counted there instead. `partialIn` gives a recounted week's verdict. No
+ * week is added after the stored ones: the weeks a theme spends retired are
+ * holes, filled `partial` if it is revived (`themeWeekly`).
+ */
+export function retiredWeekly(
+  weekly: readonly ThemeWeek[],
+  members: readonly string[],
+  held: ReadonlySet<string>,
+  ctx: Pick<ThemeNormalizeContext, "sources" | "runDay">,
+  priorRunAtMs: number,
+  partialIn: (w: ThemeWeek) => boolean,
+): { weekly: ThemeWeek[]; members?: string[] } {
+  const recountFrom = firstRecountedMonday(ctx.runDay);
+  const kept = members.filter((r) => ctx.sources.has(r) && !held.has(r));
+  const created = kept.map((r) => ctx.sources.get(r)!.created);
+  const out = weekly.map((w): ThemeWeek => {
+    if (w.start < recountFrom) return carryWeek(w, priorRunAtMs);
+    const count = created.filter((d) => d >= w.start && d <= addDays(w.start, 6)).length;
+    return { week: w.week, start: w.start, count, ...(partialIn(w) ? { partial: true } : {}) };
+  });
+  return { weekly: out, ...(kept.length ? { members: kept } : {}) };
+}
+
 /** The trend state from the two windows; `isNew` wins. */
 export function themeState(recent: number, earlier: number, isNew: boolean): ThemeState {
   if (isNew) return "new";
@@ -261,17 +292,18 @@ export function normalizeThemeAnswer(answer: ThemeMapAnswer, ctx: ThemeNormalize
     return days.length ? dayMs(days.sort().at(-1)!) : fallback;
   };
   const quietLimit = dayMs(ctx.runDay) - THEME_WEEKS_KEPT * 7 * DAY;
-  const recountFrom = firstRecountedMonday(ctx.runDay);
+  const held = new Set(efforts.flatMap((e) => e.pages.map((p) => p.id)));
   const retired: ThemeMapRetired[] = [];
   for (const t of prev?.efforts ?? []) {
     if (known.has(t.id)) continue;
-    // Only its frozen weeks: the recounted ones left with its sources.
-    const frozen = t.weekly.filter((w) => w.start < recountFrom).map((w) => carryWeek(w, prev!.runAtMs));
-    retired.push({ id: t.id, name: t.name, lastActive: lastActiveOf(t, prev!.runAtMs), weekly: frozen });
+    // The week the theme was last counted in is judged on that run (carryWeek): partial when it had not ended.
+    const weekly = retiredWeekly(t.weekly, t.pages.map((p) => p.id), held, ctx, prev!.runAtMs, (w) => !!carryWeek(w, prev!.runAtMs).partial);
+    retired.push({ id: t.id, name: t.name, lastActive: lastActiveOf(t, prev!.runAtMs), ...weekly });
   }
   for (const r of prev?.retired ?? []) {
     if (known.has(r.id) || prevTheme.has(r.id)) continue;
-    retired.push(r);
+    const weekly = retiredWeekly(r.weekly, r.members ?? [], held, ctx, prev!.runAtMs, (w) => !!w.partial);
+    retired.push({ id: r.id, name: r.name, lastActive: r.lastActive, ...weekly });
   }
   const keptRetired = retired.filter((r) => r.lastActive >= quietLimit).sort((a, b) => a.id.localeCompare(b.id));
 
@@ -317,7 +349,6 @@ export function normalizeThemeAnswer(answer: ThemeMapAnswer, ctx: ThemeNormalize
     .filter((g) => g.efforts.length > 0);
 
   // 8. Loose.
-  const held = new Set(efforts.flatMap((e) => e.pages.map((p) => p.id)));
   const loose: string[] = [];
   for (const id of answer.loose) {
     const r = toRel(id);

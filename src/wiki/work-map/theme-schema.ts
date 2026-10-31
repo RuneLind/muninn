@@ -126,6 +126,9 @@ const retiredTheme = z.object({
   /** Newest `created` (ms, UTC midnight) among its last members. */
   lastActive: z.number(),
   weekly: z.array(weeklyCount),
+  /** Its last members that no theme holds and are still active (relPaths):
+   *  the weeks inside the window are recounted from them. Absent when none. */
+  members: z.array(z.string()).optional(),
 });
 
 const themeCoverage = z.object({
