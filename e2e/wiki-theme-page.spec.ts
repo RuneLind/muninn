@@ -16,9 +16,11 @@
  *  3. A retired theme id opens its retired page.
  *  4. A theme name on the What you're following card lands on its page with
  *     no console error.
- *  5. The theme page and its retired view clear 4.5:1 in every theme; the two
+ *  5. The theme page and its retired view clear 4.5:1 in every theme; the
  *     classes only the theme page paints are swept here, not in
  *     `wiki-effort-page.spec.ts`.
+ *  6. The strip's footer labels sit under its first and last bars (one label
+ *     for one week), and the loading and error panes say theme.
  *
  * One muninn on its own port over one temp wiki whose `.wiki-reader.json`
  * declares `workMap: {"kind": "themes"}` and whose map is seeded, not run.
@@ -101,9 +103,9 @@ const MAP = {
       weekly: WEEKLY,
       related: [{ id: "winds", why: "Both need wind." }, ...OTHERS.map((t) => ({ id: t, why: `Kites and ${t}.` }))],
     }),
-    theme("winds", "Steady winds", "steady", ["sources/wind-one.mdx"], { related: [{ id: "kites", why: "The other end." }] }),
+    theme("winds", "Steady winds", "steady", ["sources/wind-one.mdx"], { related: [{ id: "kites", why: "The other end." }], weekly: WEEKLY.slice(-5) }),
     ...OTHERS.map((t) => theme(t, `Theme ${t}`, "steady", [`sources/${t}-one.mdx`], { related: [{ id: "kites", why: `${t} and kites.` }] })),
-    theme("walks", "Morning walks", "steady", ["life/sources/walk-one.mdx"], { domain: "life" }),
+    theme("walks", "Morning walks", "steady", ["life/sources/walk-one.mdx"], { domain: "life", weekly: WEEKLY.slice(-1) }),
   ],
   retired: [{ id: "old-tides", name: "Old tides", lastActive: Date.parse("2026-10-08T00:00:00Z"), weekly: WEEKLY.slice(0, 6), members: ["sources/retired-one.mdx"] }],
   loose: [],
@@ -250,6 +252,56 @@ test("a retired theme id opens its retired page", async ({ page }) => {
   await expect(ef.locator(".wiki-ef-weekly .wiki-wm-slot")).toHaveCount(6);
 });
 
+/** The strip's last bar and its footer labels, in page coordinates. */
+async function stripFoot(page: Page) {
+  return page.locator("#wikiEffortPage .wiki-ef-weekly").evaluate((sec) => {
+    const bars = Array.from(sec.querySelectorAll(".wiki-wm-slot")).map((b) => b.getBoundingClientRect());
+    const labels = Array.from(sec.querySelectorAll(".wiki-ef-strip-foot > span")).map((l) => {
+      const r = l.getBoundingClientRect();
+      return { text: l.textContent, left: r.left, right: r.right, top: r.top };
+    });
+    return { firstLeft: bars[0]!.left, lastRight: bars.at(-1)!.right, labels };
+  });
+}
+
+test("the strip's footer labels sit under its first and last bars, one label for one week", async ({ page }) => {
+  await page.clock.setFixedTime(IN_RUN_WEEK);
+  // Ten weeks (one line of labels), five (the real jarvis map) and three (too narrow for one line), and one week.
+  for (const [id, first, last] of [["kites", "2026-W35", "2026-W44"], ["winds", "2026-W40", "2026-W44"], ["t1", "2026-W42", "2026-W44"]] as const) {
+    await openTheme(page, id);
+    const f = await stripFoot(page);
+    expect(f.labels.map((l) => l.text), id).toEqual([first, last]);
+    expect(Math.abs(f.labels[1]!.right - f.lastRight), `${id} newest label`).toBeLessThanOrEqual(2);
+    expect(Math.abs(f.labels[0]!.left - f.firstLeft), `${id} first label`).toBeLessThanOrEqual(2);
+    // The labels never overlap.
+    expect(f.labels[1]!.left >= f.labels[0]!.right || f.labels[1]!.top > f.labels[0]!.top, `${id} overlap`).toBe(true);
+  }
+  await openTheme(page, "walks");
+  const one = await stripFoot(page);
+  expect(one.labels.map((l) => l.text)).toEqual(["2026-W44"]);
+  expect(Math.abs(one.labels[0]!.left - one.firstLeft)).toBeLessThanOrEqual(2);
+});
+
+test("while the map loads and when its GET fails, the panes say theme", async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    await held;
+    await route.fulfill({ status: 500, json: { error: "down" } });
+  });
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=kites`);
+  const ef = page.locator("#wikiEffortPage");
+  await expect(ef).toHaveAttribute("data-effort-status", "loading");
+  await expect(ef.locator(".wiki-ef-status")).toHaveText("Loading the theme map…");
+  await expect(ef.locator(".wiki-ef-crumbs [data-effort-home]")).toHaveText("Themes");
+  release();
+  await expect(ef).toHaveAttribute("data-effort-status", "error");
+  await expect(ef.locator(".wiki-ef-status")).toHaveText("Couldn’t load the theme map: HTTP 500");
+  await expect(ef.locator(".wiki-ef-crumbs [data-effort-home]")).toHaveText("Themes");
+  await expect(page.locator("#connBody")).toHaveText("No theme map.");
+});
+
 const THEMES: { label: string; stored: string | null; scheme: "light" | "dark" }[] = [
   { label: "Light", stored: "light", scheme: "dark" },
   { label: "Dark", stored: "dark", scheme: "light" },
@@ -298,7 +350,7 @@ for (const theme of THEMES) {
       }
     }
     // The theme page's own styled classes are painted here.
-    for (const c of ["wiki-ef-hubs", "wiki-ef-weekly"]) expect(seen.has(c), c).toBe(true);
+    for (const c of ["wiki-ef-hubs", "wiki-ef-weekly", "wiki-ef-weekbox", "wiki-ef-week-foot", "wiki-ef-week-first", "wiki-ef-week-last"]) expect(seen.has(c), c).toBe(true);
     expect(low).toEqual([]);
   });
 }

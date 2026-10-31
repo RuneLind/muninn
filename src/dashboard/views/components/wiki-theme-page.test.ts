@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { fixtureTheme, fixtureThemeMap, fixtureThemePages, THEME_RUN_AT } from "../../../test/theme-map-fixture.ts";
 import type { ThemeMap } from "../../../wiki/work-map/theme-schema.ts";
 import { THEME_CONNECTIONS_SHOWN, THEME_HUBS_SHOWN, THEME_STRIP_WEEKS } from "./wiki-work-card.ts";
+import { effortStatusHtml } from "./wiki-effort-page.ts";
 import { sourcesNewestFirst, themeView, type ThemePageListing, type ThemeViewInput } from "./wiki-theme-page.ts";
 
 /** Friday of the run's week (W44, Mon 2026-10-26 – Sun 2026-11-01). */
@@ -164,6 +165,25 @@ describe("themeView", () => {
     expect(view("Old-Theme").article).toContain("<h1>Old theme</h1>");
   });
 
+  test("a retired theme's sentence matches its members: in-window sources still with it, or none", () => {
+    // P1 retires any theme the run drops; `members` are its in-window sources no theme holds.
+    const withMembers = view("old-theme").article;
+    expect(withMembers).not.toContain("no source from the last");
+    expect(withMembers).toContain("This theme is retired: the last run placed no source under it. 1 source from the last 28 days still sits with it, under no other theme.");
+    const m = bigMap();
+    const bare = view("old-theme", { map: { ...m, retired: [{ ...m.retired![0]!, members: undefined }] } }).article;
+    expect(bare).toContain("This theme is retired: the last run placed no source under it, and no source from the last 28 days is left with it.");
+  });
+
+  test("the strip footer sits in the strip's own box, with one label for one week", () => {
+    const strip = view("alpha").article.match(/wiki-ef-weekly.*?<\/section>/)![0];
+    expect(strip).toMatch(/<div class="wiki-ef-weekbox"><div class="wiki-wm-weeks[^]*<div class="wiki-ef-strip-foot wiki-ef-week-foot"><span class="wiki-ef-week-first">2026-W35<\/span><span class="wiki-ef-week-last">2026-W44<\/span><\/div><\/div>/);
+    const m = bigMap();
+    const one = { ...m, efforts: m.efforts.map((e) => (e.id === "alpha" ? { ...e, weekly: WEEKS.slice(-1) } : e)) };
+    const single = view("alpha", { map: one }).article.match(/wiki-ef-week-foot">(.*?)<\/div>/)![1];
+    expect(single).toBe('<span class="wiki-ef-week-first">2026-W44</span>');
+  });
+
   test("an id the map does not hold reads as no longer in the map, matched by name", () => {
     const { article } = view("theme-c1");
     expect(article).toContain("This theme is no longer in the map.");
@@ -176,4 +196,22 @@ test("sourcesNewestFirst puts undated sources last, map order within a day", () 
   const p = (relPath: string, created?: string) => ({ id: relPath, page: { relPath, title: relPath, ...(created ? { created } : {}) } });
   const out = sourcesNewestFirst([p("a"), p("b", "2026-10-01"), p("c", "2026-10-09"), p("d", "2026-10-01"), p("e", "2026-10-09T08:00")]);
   expect(out.map((r) => r.id)).toEqual(["c", "e", "b", "d", "a"]);
+});
+
+test("the status panes say theme on a themes wiki and keep the work words otherwise", () => {
+  const head = { wiki: "w", startHref: "/wiki", id: "x" };
+  const themes = { ...head, themes: true };
+  const loading = effortStatusHtml(themes, "loading");
+  expect(loading).toContain("Loading the theme map…");
+  expect(loading).toMatch(/data-effort-home[^>]*>Themes<\/a>/);
+  expect(effortStatusHtml(themes, "no-map")).toContain("This wiki has no theme map, so it has no theme pages.");
+  expect(effortStatusHtml(themes, "error", "HTTP 500")).toContain("Couldn’t load the theme map: HTTP 500");
+  for (const k of ["loading", "no-map", "error"] as const) {
+    const html = effortStatusHtml(themes, k, "HTTP 500");
+    expect(html).not.toContain("work map");
+    expect(html).not.toContain(">Efforts<");
+    expect(effortStatusHtml({ ...head, themes: false }, k, "HTTP 500")).toBe(effortStatusHtml(head, k, "HTTP 500"));
+  }
+  expect(effortStatusHtml(head, "loading")).toContain("Loading the work map…");
+  expect(effortStatusHtml(head, "loading")).toMatch(/data-effort-home[^>]*>Efforts<\/a>/);
 });

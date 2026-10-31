@@ -86,8 +86,12 @@ function weeklyHtml(weekly: readonly ThemeWeek[], runAtMs: number, now: number):
   const sorted = [...weekly].sort((a, b) => a.start.localeCompare(b.start));
   return (
     '<section class="wiki-ef-section wiki-ef-weekly"><h2 class="wiki-ef-h">Sources per week</h2>' +
+    // The box is as wide as the strip, so the footer's labels sit under its first and last bars.
+    '<div class="wiki-ef-weekbox">' +
     weeklyStripHtml(sorted, runAtMs, now, sorted.length) +
-    `<div class="wiki-ef-strip-foot"><span>${esc(sorted[0]!.week)}</span><span>${esc(sorted[sorted.length - 1]!.week)}</span></div>` +
+    `<div class="wiki-ef-strip-foot wiki-ef-week-foot"><span class="wiki-ef-week-first">${esc(sorted[0]!.week)}</span>` +
+    (sorted.length > 1 ? `<span class="wiki-ef-week-last">${esc(sorted[sorted.length - 1]!.week)}</span>` : "") +
+    "</div></div>" +
     '<div class="wiki-ef-legend">Each bar counts the sources created that week. A dashed frame marks the week still running; a dotted frame marks a week whose count may miss days.</div>' +
     "</section>"
   );
@@ -277,6 +281,14 @@ function droppedThemeView<P extends ThemePageListing>(input: ThemeViewInput<P>, 
   return { article: withFocusKeys(article, "a"), connections: '<div class="wiki-ef-conn-empty">This theme is no longer in the map.</div>' };
 }
 
+/** P1 retires every theme the run drops; `members` are its in-window sources no theme holds. */
+function retiredSentence(members: number, windowDays: number): string {
+  const head = "This theme is retired: the last run placed no source under it";
+  return members > 0
+    ? `${head}. ${plural(members, "source")} from the last ${windowDays} days still ${members === 1 ? "sits" : "sit"} with it, under no other theme. It comes back when a run places sources under it.`
+    : `${head}, and no source from the last ${windowDays} days is left with it. It comes back when a run places new sources under it.`;
+}
+
 /**
  * A retired theme: its name, last-active day, its stored weeks, the last
  * members the listing still holds and the pages that declare it. The map keeps
@@ -303,7 +315,7 @@ function retiredThemeView<P extends ThemePageListing>(input: ThemeViewInput<P>, 
     `<div class="wiki-meta-row wiki-ef-metarow">${stateHtml("retired")}` +
     `<span class="wiki-ef-meta" data-effort-last-active>${esc(last ? `last active ${last}` : "no recorded activity")}</span></div>` +
     "</div>" +
-    `<p class="wiki-ef-gone">This theme is retired: no source from the last ${esc(String(input.map.coverage.windowDays))} days sits under it. It comes back when a run places new sources under it.</p>` +
+    `<p class="wiki-ef-gone">${esc(retiredSentence(r.members?.length ?? 0, input.map.coverage.windowDays))}</p>` +
     pages +
     weeklyHtml(r.weekly, input.map.runAtMs, input.now) +
     footHtml(input.map.runAtMs) +

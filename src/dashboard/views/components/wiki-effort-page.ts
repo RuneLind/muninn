@@ -569,18 +569,26 @@ function retiredView<P extends EffortPageListing>(input: EffortViewInput<P>, r: 
   };
 }
 
-/** The pane while the map loads, and when the wiki has none. */
-export function effortStatusHtml(input: { wiki: string; startHref: string; id: string }, kind: "loading" | "no-map" | "error", detail = ""): string {
+/** The pane while the map loads, and when the wiki has none. `themes`: the
+ *  listing says the wiki's map is a themes map, so the pane says theme. */
+export function effortStatusHtml(
+  input: { wiki: string; startHref: string; id: string; themes?: boolean },
+  kind: "loading" | "no-map" | "error",
+  detail = "",
+): string {
+  const map = input.themes ? "theme map" : "work map";
   const text =
     kind === "loading"
-      ? "Loading the work map…"
+      ? `Loading the ${map}…`
       : kind === "no-map"
-        ? "This wiki has no work map, so it has no effort pages."
-        : `Couldn’t load the work map${detail ? `: ${detail}` : "."}`;
+        ? input.themes
+          ? "This wiki has no theme map, so it has no theme pages."
+          : "This wiki has no work map, so it has no effort pages."
+        : `Couldn’t load the ${map}${detail ? `: ${detail}` : "."}`;
   return withFocusKeys(
     `<div class="wiki-effort wiki-effort-status" id="wikiEffortPage" data-effort="${esc(input.id)}" data-effort-status="${kind}">` +
     '<div class="wiki-article-head">' +
-    crumbsHtml(input, [`<span class="wiki-ef-crumb-theme">${esc(input.id)}</span>`]) +
+    crumbsHtml(input, [`<span class="wiki-ef-crumb-theme">${esc(input.id)}</span>`], input.themes ? "Themes" : undefined) +
     `<h1>${esc(input.id)}</h1></div>` +
     `<p class="wiki-ef-status${kind === "error" ? " warn" : ""}" role="status">${esc(text)}</p>` +
     (kind === "error" ? '<button type="button" class="wiki-ef-retry" id="wikiEffortRetry">Retry</button>' : "") +

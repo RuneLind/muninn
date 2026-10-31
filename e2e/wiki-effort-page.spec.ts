@@ -659,6 +659,10 @@ const UNSWEPT = new Set([
   // them; `e2e/wiki-theme-page.spec.ts` sweeps them in every theme.
   "wiki-ef-hubs",
   "wiki-ef-weekly",
+  "wiki-ef-weekbox",
+  "wiki-ef-week-foot",
+  "wiki-ef-week-first",
+  "wiki-ef-week-last",
 ]);
 
 for (const theme of THEMES) {

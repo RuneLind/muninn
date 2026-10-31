@@ -5895,8 +5895,10 @@ function paintEffort(id: string, background: boolean): void {
   const seq = pageViewSeq;
   // Built at each write, so a pane painted after the GET carries the facets
   // set while it was in flight.
-  const head = () => ({ wiki: WIKI, startHref: currentStartUrl(), id });
-  const noMapConn = '<div class="wiki-ef-conn-empty">No work map.</div>';
+  // The listing's map kind is known before the map loads, so a themes wiki's
+  // status panes say theme.
+  const head = () => ({ wiki: WIKI, startHref: currentStartUrl(), id, themes: workMapThemes });
+  const noMapConn = `<div class="wiki-ef-conn-empty">No ${workMapThemes ? "theme" : "work"} map.</div>`;
   const paint = (map: AnyWorkMap) => {
     // A themes map draws the theme page (theme map P3) on the reader's clock,
     // so the run's week reads as running only while it has not ended.
