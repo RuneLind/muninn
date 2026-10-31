@@ -355,6 +355,15 @@ export function readPlanStatus(fm: Record<string, string | string[]>): PlanStatu
 export const PLAN_FOLLOWUPS_VALUES = ["open", "none"] as const;
 export type PlanFollowups = (typeof PLAN_FOLLOWUPS_VALUES)[number];
 
+/** The validated `followups:` value, read as {@link parsePlanFields} reads it:
+ *  exact-case `open`/`none`, a trailing comment stripped; anything else is
+ *  undefined. Exported for `scripts/wiki-check.ts`, which has no index. */
+export function readFollowups(fm: Record<string, string | string[]>): PlanFollowups | undefined {
+  const v = fm.followups;
+  const raw = typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
+  return (PLAN_FOLLOWUPS_VALUES as readonly string[]).includes(raw) ? (raw as PlanFollowups) : undefined;
+}
+
 /** `status_date` SHAPE gate — an ISO calendar day, nothing looser. Shape only:
  *  it admits `2026-99-99` / `2026-02-31`, which `isCalendarDay` then rejects. */
 const STATUS_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -553,10 +562,6 @@ function parsePlanFields(
     drops.pages++;
     if (drops.samples.length < PLAN_DROP_SAMPLE_CAP) drops.samples.push(relPath);
   };
-  /** The validated fields' shared read: string-or-nothing, comment-stripped, trimmed. */
-  const scalar = (v: string | string[] | undefined) =>
-    typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
-
   const plan_status = readPlanStatus(fm);
   if (fm.plan_status !== undefined && plan_status === undefined) drop("planStatus");
 
@@ -568,10 +573,8 @@ function parsePlanFields(
 
   let followups: PlanFollowups | undefined;
   if (fm.followups !== undefined) {
-    const raw = scalar(fm.followups);
-    if ((PLAN_FOLLOWUPS_VALUES as readonly string[]).includes(raw)) {
-      followups = raw as PlanFollowups;
-    } else drop("followups");
+    followups = readFollowups(fm);
+    if (followups === undefined) drop("followups");
   }
 
   // NOT comment-stripped (see `stripTrailingComment`) — a note may say "#399".

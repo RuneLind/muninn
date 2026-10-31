@@ -168,6 +168,21 @@ export function isLiveReportPage(relPath: string, fm: Record<string, unknown>, p
   return fm.plan_status === undefined && planStatus === undefined && relPath.startsWith("plans/");
 }
 
+/**
+ * The picture scope of lint check 26's `genre-missing` and `chart-candidate`
+ * (`lint-genre.ts`), and P4's sweep list: a live report page
+ * ({@link isLiveReportPage}), or a `plan_status: shipped` page with
+ * `followups: open` (the store's validated value, so `Open` is not open).
+ */
+export function isPictureScopePage(
+  relPath: string,
+  fm: Record<string, unknown>,
+  planStatus: string | undefined,
+  followups: string | undefined,
+): boolean {
+  return isLiveReportPage(relPath, fm, planStatus) || (planStatus === "shipped" && followups === "open");
+}
+
 /** Lines as `wc -l` counts them, plus a last line with no newline: a trailing
  *  newline does not add a line. */
 export function pageLineCount(content: string): number {

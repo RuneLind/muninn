@@ -6,14 +6,17 @@
  * question-block, decision-first-sentence, status-row-long, status-tones,
  * status-tile-long, role-key,
  * case-board-labels, missing-tldr, tldr-no-more, the component checks, ledger-row-state,
- * chain-close-conflict, chart-table, rule-tree, glossary, text-diagram, diagram-svg, steps-focus and system-map) over a page or a
+ * chain-close-conflict, chart-table, rule-tree, glossary, text-diagram, diagram-svg, steps-focus, system-map,
+ * genre-missing, genre-picture and chart-candidate) over a page or a
  * directory, with no wiki index, no database and no `.env`. `roleKeys` comes
  * from the wiki root's `.wiki-reader.json`:
  *
  *   bun --no-env-file scripts/wiki-check.ts <absolute page or directory path>
  *
  * Prints one JSON line per finding (`{check, relPath, line, message, detail}`)
- * on stdout. A page must be an `.mdx` file and is checked as given. A directory
+ * on stdout. A page must be an `.mdx` file and is checked as given, except
+ * that a culled page (`signal: none`) skips the checks a culled page skips in
+ * `lintWiki`, as in a directory. A directory
  * checks the `.mdx` pages under it that `lintWiki` checks: the store's own scan
  * of the wiki root (`.wiki-reader.json` `include`, no dot directories or
  * `node_modules`, a `blogs/src/` source dropped only when its compiled `.html`
@@ -42,7 +45,7 @@
 
 import path from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { extRank, parseFrontmatter, readCull, readPlanStatus, readWikiReaderConfig, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
+import { extRank, parseFrontmatter, readCull, readFollowups, readPlanStatus, readWikiReaderConfig, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
 import { checkPageText, pageTextFiles, type LintFinding } from "../src/wiki/lint.ts";
 import type { LoadedPageFiles } from "../src/wiki/lint-components.ts";
 import { pageFileRefKinds } from "../src/format/query-block.ts";
@@ -141,8 +144,8 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     const root = found ?? base;
     const rel = path.relative(root, target).split(path.sep).join("/");
     const content = await Bun.file(target).text();
-    const plan_status = readPlanStatus(parseFrontmatter(content));
-    const ref = { relPath: rel, plan_status };
+    const fm = parseFrontmatter(content);
+    const ref = { relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm), followups: readFollowups(fm) };
     const files = await pageTextFiles(root, ref, content);
     const findings = checkPageText(ref, content, await roleKeysAt(root), files);
     if (found) return { findings, checked: 1, selected: 1, unreadable: [] };
@@ -172,7 +175,7 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     }
     out.checked += 1;
     const fm = parseFrontmatter(content);
-    const ref = { relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm) };
+    const ref = { relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm), followups: readFollowups(fm) };
     const files = await pageTextFiles(root, ref, content);
     const findings = checkPageText(ref, content, roleKeys, files);
     if (found) {

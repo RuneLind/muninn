@@ -219,7 +219,7 @@ function landedLinksOnly(cell: string): boolean {
 }
 
 /** A qualifier in parentheses may follow: `Status (10-19)`, `State (as of …)`. */
-const STATE_HEADER_RE = /^(?:state|status|tilstand)(?:\s*\([^()]*\))?$/i;
+export const STATE_HEADER_RE = /^(?:state|status|tilstand)(?:\s*\([^()]*\))?$/i;
 const LANDED_HEADER_RE = /^(?:landed|landet)$/i;
 const DECISIONS_HEADER_RE = /^(?:decisions?|beslutning(?:er)?)$/i;
 const PR_HEADER_RE = /^PR$/i;
