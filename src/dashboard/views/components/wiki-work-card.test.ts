@@ -394,6 +394,45 @@ describe("theme helpers", () => {
     expect(weeklyStripHtml(weekly, Date.parse("2026-11-02T03:00:00Z"))).not.toContain(" current");
   });
 
+  // Fix round 2 batch 2: the running mark needs the run's week AND a week not yet over.
+  const W44 = { week: "2026-W44", start: "2026-10-26", count: 2 };
+  const W45 = { week: "2026-W45", start: "2026-11-02", count: 1 };
+  const slotsOf = (html: string) => [...html.matchAll(/<span class="wiki-wm-slot([^"]*)" title="([^"]+)">/g)].map((m) => [m[1], m[2]]);
+
+  test("a map run Friday and rendered the next Tuesday shows its week as partial, not still running", () => {
+    const tuesday = Date.parse("2026-11-03T12:00:00Z");
+    const html = weeklyStripHtml([W44], THEME_RUN_AT, tuesday);
+    expect(slotsOf(html)).toEqual([[" partial", "2026-W44 (from 2026-10-26): 2 sources, may miss days"]]);
+    expect(html).toContain('aria-label="2 sources over the last 1 week, 1 week may miss days"');
+    // Rendered the same Sunday evening, the week still runs.
+    expect(slotsOf(weeklyStripHtml([W44], THEME_RUN_AT, Date.parse("2026-11-01T20:00:00Z")))[0]![0]).toBe(" current");
+    // The card reads its own clock.
+    const m = fixtureThemeMap();
+    const html2 = workCardHtml({ body: { map: m, organizable: true }, pages: fixtureThemePages(), now: tuesday, done: new Set(), hrefFor: href, refresh: { phase: "idle" } });
+    expect(html2).not.toContain("week still running");
+    expect(html2).not.toContain("this week so far");
+  });
+
+  test("the running week turns at Oslo midnight, not UTC midnight", () => {
+    const at = (iso: string) => slotsOf(weeklyStripHtml([W44, W45], Date.parse(iso))).map((s) => s[0]);
+    // November in Oslo is UTC+1.
+    expect(at("2026-11-01T22:30:00Z")).toEqual([" current", ""]); // Sunday 23:30
+    expect(at("2026-11-01T22:59:59Z")).toEqual([" current", ""]); // Sunday 23:59:59
+    expect(at("2026-11-01T23:00:00Z")).toEqual(["", " current"]); // Monday 00:00
+    expect(at("2026-11-01T23:30:00Z")).toEqual(["", " current"]); // Monday 00:30
+  });
+
+  test("a run on the Monday a week starts marks that week running", () => {
+    expect(slotsOf(weeklyStripHtml([W44, W45], Date.parse("2026-11-02T08:00:00Z"))).map((s) => s[0])).toEqual(["", " current"]);
+  });
+
+  test("a week both running and partial reads running, and the aria count of partial weeks leaves it out", () => {
+    const weekly = [{ week: "2026-W40", start: "2026-09-28", count: 0, partial: true }, { ...W44, partial: true }];
+    const html = weeklyStripHtml(weekly, THEME_RUN_AT);
+    expect(slotsOf(html)[1]).toEqual([" current", "2026-W44 (from 2026-10-26): 2 sources so far, week still running"]);
+    expect(html).toContain('aria-label="2 sources over the last 2 weeks, this week so far, 1 week may miss days"');
+  });
+
   // Fix round 2 batch 1: the shown rows are picked so no theme fills them.
   const t = (id: string, rel: string[]) => ({ id, related: rel.map((r) => ({ id: r, why: `${id}-${r}` })) });
   const rowsOf = (themes: ReturnType<typeof t>[]) => themeConnections(themes).map((c) => `${c.a.id}|${c.b.id}:${c.why}`);
@@ -436,9 +475,10 @@ describe("theme helpers", () => {
     expect(Math.max(...Object.values(appearances(themes)))).toBe(3);
   });
 
-  test("Connected: the busier end decides before the sum: a theme in 3 rows waits for a pair whose ends are in 2 each", () => {
+  test("Connected: with five rows placed, b|d (busier end 2) comes before a|e (busier end 3)", () => {
     const themes = [t("a", ["d", "c", "e"]), t("b", ["a", "d"]), t("c", ["b"]), t("d", []), t("e", ["d"])];
-    // After five rows a is in 3 and b, d in 2: b|d (2, 2) comes before a|e (3, 0), though both sum to 4.
+    // After five rows a is in 3, b and d in 2, e in 1: b|d (2, 2) sums to 4 and a|e (3, 1) to 4 too,
+    // so only the busier-end key separates them. A sum-only pick would take a|e here.
     expect(rowsOf(themes)).toEqual(["b|a:b-a", "e|d:e-d", "a|c:a-c", "c|b:c-b", "a|d:a-d", "b|d:b-d", "a|e:a-e"]);
     expect(appearances(themes).a).toBe(3);
   });
@@ -463,6 +503,26 @@ describe("theme helpers", () => {
     expect(themeConnections(themes)).toHaveLength(12);
     // 12 ends; r0's three one-link neighbours and r2's crowd make 1 each impossible.
     expect(Math.max(...Object.values(appearances(themes)))).toBe(2);
+  });
+
+  test("Connected: a row counts against both its ends", () => {
+    // Counting only the left end, b|x would follow a|x; only the right end, h|b would follow h|a.
+    expect(rowsOf([t("x", []), t("a", ["x"]), t("b", ["x"]), t("c", ["d"]), t("d", [])])).toEqual(["a|x:a-x", "c|d:c-d", "b|x:b-x"]);
+    expect(rowsOf([t("h", ["a", "b"]), t("a", []), t("b", []), t("c", ["d"]), t("d", [])])).toEqual(["h|a:h-a", "c|d:c-d", "h|b:h-b"]);
+  });
+
+  test("Connected: a Life theme sorts after the AI lanes whatever its state", () => {
+    const m = fixtureThemeMap({
+      efforts: [
+        fixtureTheme("alpha", { state: "rising", related: [{ id: "beta", why: "ab" }] }),
+        fixtureTheme("beta"),
+        fixtureTheme("delta", { state: "fading" }),
+        fixtureTheme("life-one", { state: "new", domain: "life", related: [{ id: "delta", why: "ld" }] }),
+      ],
+    });
+    const html = workCardHtml({ body: { map: m, organizable: true }, pages: fixtureThemePages(), now: THEME_RUN_AT, done: new Set(), hrefFor: href, refresh: { phase: "idle" } });
+    // By state alone life-one (new) would lead, and its pair with delta would take the first row.
+    expect([...html.matchAll(/data-wm-conn="([^"]+)"/g)].map((x) => x[1])).toEqual(["alpha|beta", "life-one|delta"]);
   });
 
   test("themeConnections drops a link to a theme not listed and a self link", () => {

@@ -486,11 +486,12 @@ export const THEME_CONNECTIONS_SHOWN = 6;
 
 /** The card's Connected row: each pair of listed themes once (a connection is
  *  stored on both ends), left end the earlier theme that stores it, with its
- *  why. `themes` come in the card's lane order. Rows are picked greedily so no
- *  theme fills them: each next row is the remaining pair whose busier end is
- *  in the fewest rows so far, then the fewest rows over both ends, then the
- *  earliest pair in lane order. A theme linked to every other one still shows
- *  only as often as the pairs without it run out. */
+ *  why. `themes` come in the card's lane order. Rows are picked greedily so a
+ *  hub no longer fills every row: each next row is the remaining pair whose
+ *  busier end is in the fewest rows so far, then the fewest rows over both
+ *  ends, then the earliest pair in lane order. Greedy, not optimal: on some
+ *  graphs a theme lands in one row more than the best pick allows (t0 linked
+ *  to t1–t4 and t1 to t2–t4 puts t0 in 4 rows; 3 is possible). */
 export function themeConnections<T extends { id: string; related: readonly { id: string; why: string }[] }>(
   themes: readonly T[],
 ): { a: T; b: T; why: string }[] {
@@ -550,17 +551,22 @@ function hubsHtml(rels: readonly string[], byKey: ReadonlyMap<string, CardPage>,
 
 /** The weekly bar strip: the newest {@link THEME_STRIP_WEEKS} stored weeks,
  *  each bar's height a step of the strip's busiest week. Older weeks holding
- *  sources show as «+N earlier». The week holding `runAtMs` (Oslo) is still
- *  running and is framed `current`; a `partial` week is framed too, so an
- *  empty one reads apart from a full empty week. */
-export function weeklyStripHtml(weekly: readonly ThemeWeek[], runAtMs?: number): string {
+ *  sources show as «+N earlier». The week holding `runAtMs` (Oslo) is framed
+ *  `current` while it has not ended at `now` (Oslo; absent, the run's own
+ *  day); once it has, the run missed its last days and it reads `partial`. A
+ *  `partial` week is framed too, so an empty one reads apart from a full
+ *  empty week. */
+export function weeklyStripHtml(weekly: readonly ThemeWeek[], runAtMs?: number, now?: number): string {
   const sorted = [...weekly].sort((a, b) => a.start.localeCompare(b.start));
   const weeks = sorted.slice(-THEME_STRIP_WEEKS);
   if (!weeks.length) return "";
   const earlier = sorted.slice(0, sorted.length - weeks.length);
   const earlierTotal = earlier.reduce((n, w) => n + w.count, 0);
   const runDay = runAtMs === undefined ? null : osloDay(runAtMs);
-  const isCurrent = (w: ThemeWeek) => runDay !== null && w.start <= runDay && runDay <= plusDays(w.start, 6);
+  const nowDay = now === undefined ? runDay : osloDay(now);
+  const holdsRun = (w: ThemeWeek) => runDay !== null && w.start <= runDay && runDay <= plusDays(w.start, 6);
+  const isCurrent = (w: ThemeWeek) => holdsRun(w) && nowDay !== null && nowDay <= plusDays(w.start, 6);
+  const isPartial = (w: ThemeWeek) => !!w.partial || holdsRun(w);
   const max = Math.max(1, ...weeks.map((w) => w.count));
   const total = weeks.reduce((n, w) => n + w.count, 0);
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -568,14 +574,14 @@ export function weeklyStripHtml(weekly: readonly ThemeWeek[], runAtMs?: number):
     .map((w) => {
       const level = w.count === 0 ? 0 : Math.max(1, Math.ceil((w.count / max) * 4));
       const current = isCurrent(w);
-      const mark = current ? " current" : w.partial ? " partial" : "";
+      const mark = current ? " current" : isPartial(w) ? " partial" : "";
       const label =
         `${w.week} (from ${w.start}): ${plural(w.count, "source")}` +
-        (current ? " so far, week still running" : w.partial ? ", may miss days" : "");
+        (current ? " so far, week still running" : isPartial(w) ? ", may miss days" : "");
       return `<span class="wiki-wm-slot${mark}" title="${esc(label)}"><span class="wiki-wm-week lvl-${level}"></span></span>`;
     })
     .join("");
-  const partials = weeks.filter((w) => w.partial && !isCurrent(w)).length;
+  const partials = weeks.filter((w) => isPartial(w) && !isCurrent(w)).length;
   const aria =
     `${plural(total, "source")} over the last ${plural(weeks.length, "week")}` +
     (weeks.some(isCurrent) ? ", this week so far" : "") +
@@ -608,7 +614,7 @@ function themeHtml<P>(
     `<span class="wiki-wm-active">${esc(`${n} source${n === 1 ? "" : "s"}`)}${active ? esc(` · ${active}`) : ""}</span>` +
     "</div>" +
     (e.oneLine ? `<div class="wiki-wm-oneline">${prose(e.oneLine)}</div>` : "") +
-    weeklyStripHtml(e.weekly, runAtMs) +
+    weeklyStripHtml(e.weekly, runAtMs, now) +
     hubsHtml(e.hubs, byKey, hrefFor) +
     pagesHtml(
       e.pages.map((p) => p.id),
