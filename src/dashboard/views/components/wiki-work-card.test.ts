@@ -298,7 +298,8 @@ describe("What you're following (a themes map, theme map P2)", () => {
   test("Connected lists each pair once, A ↔ B: why, with the first end's why", () => {
     const html = themeCard();
     const conns = [...html.matchAll(/data-wm-conn="([^"]+)"/g)].map((m) => m[1]);
-    expect(conns).toEqual(["alpha|beta", "beta|gamma"]);
+    // Lane order deals the rows: gamma (New) first, its one pair stored on beta's end.
+    expect(conns).toEqual(["beta|gamma", "alpha|beta"]);
     expect(html).toContain("Both lean on Hub X.");
     expect(html).not.toContain("The other end");
     expect(html).toMatch(/data-effort-link="alpha" data-wm-conn-link>Theme alpha<\/a> <span class="wiki-wm-conn-arrow"[^>]*>↔<\/span> <a [^>]*data-effort-link="beta" data-wm-conn-link>Theme beta<\/a><span class="wiki-wm-conn-why">: Both lean on Hub X\.<\/span>/);
@@ -319,7 +320,7 @@ describe("What you're following (a themes map, theme map P2)", () => {
     expect((html.match(/class="wiki-wm-weeks"/g) ?? []).length).toBe(5);
     const alpha = html.slice(html.indexOf('data-effort-id="alpha"'), html.indexOf("</li>", html.indexOf('data-effort-id="alpha"')));
     expect(alpha).toContain("2 sources · this week");
-    expect(alpha).toContain('aria-label="7 sources over the last 3 weeks"');
+    expect(alpha).toContain('aria-label="7 sources over the last 3 weeks, this week so far, 1 week may miss days"');
     expect(alpha).toContain('data-relpath="sources/alpha-2.mdx"');
   });
 
@@ -352,10 +353,54 @@ describe("theme helpers", () => {
   test("the strip shows the newest weeks only, oldest first, with partial weeks marked", () => {
     const weekly = Array.from({ length: THEME_STRIP_WEEKS + 2 }, (_, i) => ({ week: `W${i}`, start: `2026-08-${String(i + 10).padStart(2, "0")}`, count: i, ...(i === 9 ? { partial: true } : {}) }));
     const html = weeklyStripHtml(weekly.reverse());
-    const titles = [...html.matchAll(/title="([^"]+)"/g)].map((m) => m[1]!.split(" ")[0]);
+    const titles = [...html.matchAll(/class="wiki-wm-slot[^"]*" title="([^"]+)"/g)].map((m) => m[1]!.split(" ")[0]);
     expect(titles).toEqual(["W2", "W3", "W4", "W5", "W6", "W7", "W8", "W9"]);
-    expect(html).toContain('class="wiki-wm-week lvl-4 partial"');
+    expect(html).toContain('<span class="wiki-wm-slot partial" title="W9 (from 2026-08-19): 9 sources, may miss days"><span class="wiki-wm-week lvl-4"></span></span>');
     expect(weeklyStripHtml([])).toBe("");
+  });
+
+  // Fix round 1 batch 2: the strip's hidden weeks, the running week, a partial week.
+  const mondays = (from: string, n: number) => Array.from({ length: n }, (_, i) => new Date(Date.parse(`${from}T00:00:00Z`) + i * 7 * 86_400_000).toISOString().slice(0, 10));
+
+  test("weeks before the strip's 8 bars show as «+N earlier», and the label does not claim them", () => {
+    const weekly = mondays("2026-08-10", 12).map((start, i) => ({ week: `W${i}`, start, count: i < 4 ? 9 : 1 }));
+    const html = weeklyStripHtml(weekly);
+    expect((html.match(/class="wiki-wm-week /g) ?? []).length).toBe(THEME_STRIP_WEEKS);
+    expect(html).toContain('<span class="wiki-wm-weeks-earlier" title="36 sources in the 4 weeks before">+36 earlier</span>');
+    expect(html).toContain('aria-label="8 sources over the last 8 weeks, 36 more in 4 earlier weeks"');
+    // Earlier weeks with no source: nothing hidden, no marker.
+    const quiet = weeklyStripHtml(mondays("2026-08-10", 10).map((start, i) => ({ week: `W${i}`, start, count: i < 2 ? 0 : 1 })));
+    expect(quiet).not.toContain("wiki-wm-weeks-earlier");
+    expect(quiet).toContain('aria-label="8 sources over the last 8 weeks"');
+  });
+
+  test("the week holding the run is marked running, a partial week is marked, a full empty week is not", () => {
+    // THEME_RUN_AT is Friday 2026-10-30 in Oslo: W44 (from 2026-10-26) is still running.
+    const weekly = [
+      { week: "2026-W40", start: "2026-09-28", count: 0, partial: true },
+      { week: "2026-W41", start: "2026-10-05", count: 0 },
+      { week: "2026-W44", start: "2026-10-26", count: 2 },
+    ];
+    const html = weeklyStripHtml(weekly, THEME_RUN_AT);
+    const slots = [...html.matchAll(/<span class="wiki-wm-slot([^"]*)" title="([^"]+)">/g)].map((m) => [m[1], m[2]]);
+    expect(slots).toEqual([
+      [" partial", "2026-W40 (from 2026-09-28): 0 sources, may miss days"],
+      ["", "2026-W41 (from 2026-10-05): 0 sources"],
+      [" current", "2026-W44 (from 2026-10-26): 2 sources so far, week still running"],
+    ]);
+    expect(html).toContain('aria-label="2 sources over the last 3 weeks, this week so far, 1 week may miss days"');
+    // A run on the Monday after: W44 is complete.
+    expect(weeklyStripHtml(weekly, Date.parse("2026-11-02T03:00:00Z"))).not.toContain(" current");
+  });
+
+  test("Connected spreads its rows across themes: each theme's first before any theme's second", () => {
+    const t = (id: string, rel: string[]) => ({ id, related: rel.map((r) => ({ id: r, why: `${id}-${r}` })) });
+    const themes = [t("a", ["b", "c", "d"]), t("b", ["a", "c"]), t("c", ["a", "b"]), t("d", ["a"]), t("e", ["f"]), t("f", ["e"])];
+    const rows = themeConnections(themes).map((c) => `${c.a.id}|${c.b.id}:${c.why}`);
+    expect(rows).toEqual(["a|b:a-b", "c|a:c-a", "d|a:d-a", "e|f:e-f", "b|c:b-c"]);
+    // A pair stored on one end only keeps that end first, with its why.
+    const one = themeConnections([t("g", []), t("h", ["g"])]).map((c) => `${c.a.id}|${c.b.id}:${c.why}`);
+    expect(one).toEqual(["h|g:h-g"]);
   });
 
   test("themeConnections drops a link to a theme not listed and a self link", () => {

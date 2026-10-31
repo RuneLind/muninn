@@ -163,8 +163,13 @@ test("the start view shows What you're following over a themes map, not What's n
   await expect(card.locator(".wiki-wm-theme .wiki-wm-weeks")).toHaveCount(5);
   const rise = card.locator('.wiki-wm-theme[data-effort-id="rise"]');
   await expect(rise.locator(".wiki-wm-week")).toHaveCount(4);
-  await expect(rise.locator(".wiki-wm-week.partial")).toHaveCount(1);
-  await expect(rise.locator(".wiki-wm-weeks")).toHaveAttribute("aria-label", "6 sources over the last 4 weeks");
+  await expect(rise.locator(".wiki-wm-slot.partial")).toHaveCount(1);
+  // «this week so far» only while W44 holds the map's run (NOW).
+  await expect(rise.locator(".wiki-wm-weeks")).toHaveAttribute("aria-label", /^6 sources over the last 4 weeks(, this week so far)?, 1 week may miss days$/);
+  // The partial week (W41) is framed; the full empty week (W42) is not.
+  const outline = (i: number) => rise.locator(".wiki-wm-slot").nth(i).evaluate((el) => { const cs = getComputedStyle(el); return `${cs.outlineStyle} ${cs.outlineWidth}`; });
+  expect(await outline(0)).toBe("dotted 1px");
+  expect(await outline(1)).toMatch(/^none /);
   // The bars have height: a busy week is taller than an empty one.
   const heights = await rise.locator(".wiki-wm-week").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
   expect(heights[3]!).toBeGreaterThan(heights[1]!);

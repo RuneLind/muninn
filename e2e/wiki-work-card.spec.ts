@@ -1116,13 +1116,16 @@ async function sweepCard(page: Page, label: string): Promise<{ low: string[]; mi
 
 /** A themes map over the sweep wiki's pages that paints every part of the
  *  themes card: each state, a Life theme, a connection, a drift count, hub
- *  chips and a partial week. */
+ *  chips, a partial week, the running week and «+N earlier». */
 function sweepThemesMap(runAtMs: number): unknown {
   const states = ["new", "rising", "steady", "fading", "steady"];
-  const weekly = [
-    { week: "2026-W43", start: "2026-10-19", count: 1, partial: true },
-    { week: "2026-W44", start: "2026-10-26", count: 3 },
-  ];
+  // Ten weeks ending with the one holding the run (Oslo): two before the strip's 8.
+  const runDay = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(new Date(runAtMs));
+  const monday = Date.parse(`${runDay}T00:00:00Z`) - ((new Date(`${runDay}T00:00:00Z`).getUTCDay() + 6) % 7) * 86_400_000;
+  const weekly = Array.from({ length: 10 }, (_, i) => {
+    const start = new Date(monday - (9 - i) * 7 * 86_400_000).toISOString().slice(0, 10);
+    return { week: `W${i}`, start, count: i < 2 ? 2 : i % 3, ...(i === 2 ? { partial: true } : {}) };
+  });
   const efforts = states.map((state, i) => ({
     id: `t${i}`, name: `Theme ${i}`, oneLine: `About theme ${i}.`, state, domain: i === 4 ? "life" : "ai",
     pages: [{ id: `plans/p${i + 1}.mdx`, role: "source" }], hubs: ["plans/alpha.mdx", "plans/beta.mdx"], readFirst: [],
@@ -1235,6 +1238,10 @@ for (const theme of THEMES) {
     await expect(card.locator(".wiki-wn-title")).toHaveText("What you’re following");
     await card.evaluate((root) => root.querySelectorAll("details").forEach((d) => (d.open = true)));
     await expect(card.locator(".wiki-wm-conn")).toHaveCount(1);
+    // The running week is framed dashed, and the hidden weeks read «+N earlier».
+    const cur = card.locator(".wiki-wm-theme").first().locator(".wiki-wm-slot.current");
+    expect(await cur.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("dashed");
+    await expect(card.locator(".wiki-wm-theme").first().locator(".wiki-wm-weeks-earlier")).toHaveText("+4 earlier");
     await sweep("themes");
     // The GET answered 5xx: the card's error and Retry.
     await page.unroute("**/api/wiki/work-map?*");

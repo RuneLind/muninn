@@ -2668,12 +2668,16 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wm-hubs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; font-size: 11.5px; }
     .wiki-wm-hub { padding: 1px 7px; border-radius: 999px; background: var(--tint-neutral); min-width: 0; overflow-wrap: anywhere; }
-    .wiki-wm-weeks { display: flex; align-items: flex-end; gap: 2px; height: 18px; margin-top: 4px; }
-    .wiki-wm-week { width: 10px; min-height: 2px; border-radius: 2px 2px 0 0; background: var(--accent-light); }
+    .wiki-wm-weeks { display: flex; align-items: flex-end; gap: 3px; height: 18px; margin-top: 4px; }
+    .wiki-wm-weeks-earlier { align-self: center; margin-right: 3px; font-size: 11px; color: var(--text-soft); white-space: nowrap; }
+    .wiki-wm-slot { display: flex; align-items: flex-end; width: 10px; height: 100%; }
+    /* A framed slot: the running week (dashed, accent) or a partial week (dotted). */
+    .wiki-wm-slot.current { outline: 1px dashed var(--accent-light); }
+    .wiki-wm-slot.partial { outline: 1px dotted var(--text-soft); }
+    .wiki-wm-week { width: 100%; min-height: 2px; border-radius: 2px 2px 0 0; background: var(--accent-light); }
     .wiki-wm-week.lvl-0 { height: 2px; background: var(--border-secondary); }
     .wiki-wm-week.lvl-1 { height: 25%; } .wiki-wm-week.lvl-2 { height: 50%; }
     .wiki-wm-week.lvl-3 { height: 75%; } .wiki-wm-week.lvl-4 { height: 100%; }
-    .wiki-wm-week.partial { opacity: 0.55; }
     .wiki-wm-conns { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
     .wiki-wm-conn { padding: 3px 0; line-height: 1.5; overflow-wrap: anywhere; }
     .wiki-wm-conn-arrow { color: var(--text-soft); }

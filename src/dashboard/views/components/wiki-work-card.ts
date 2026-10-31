@@ -20,6 +20,7 @@ import {
   type JoinedThemeMap,
   type JoinedWorkMap,
 } from "../../../wiki/work-map/join.ts";
+import { osloDay } from "../../../wiki/work-map/ids.ts";
 import type { ThemeMap, ThemeWeek } from "../../../wiki/work-map/theme-schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { escHtml as esc } from "./escape.ts";
@@ -484,21 +485,46 @@ export const THEME_HUBS_SHOWN = 4;
 export const THEME_CONNECTIONS_SHOWN = 6;
 
 /** The card's Connected row: each pair of listed themes once (a connection is
- *  stored on both ends), in map order, keeping the first end's why. */
+ *  stored on both ends). `themes` come in the card's lane order; rows are
+ *  dealt round-robin so one theme cannot fill the row: in round k a theme
+ *  already in more than k rows waits, else it takes its first pair not yet
+ *  shown, its own stored links first, with itself on the left and its own why
+ *  (a pair stored on the other end only keeps that end on the left). */
 export function themeConnections<T extends { id: string; related: readonly { id: string; why: string }[] }>(
   themes: readonly T[],
 ): { a: T; b: T; why: string }[] {
   const byId = new Map(themes.map((t) => [t.id, t]));
-  const seen = new Set<string>();
-  const out: { a: T; b: T; why: string }[] = [];
+  const key = (x: string, y: string) => [x, y].sort().join("\u0000");
+  // Each theme's candidates: its own links, then links stored only on the other end.
+  const cands = new Map<string, { a: T; b: T; why: string; key: string }[]>(themes.map((t) => [t.id, []]));
+  const stored = new Set<string>();
   for (const a of themes) {
     for (const r of a.related) {
       const b = byId.get(r.id);
       if (!b || b.id === a.id) continue;
-      const key = [a.id, b.id].sort().join("\u0000");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ a, b, why: r.why });
+      const k = key(a.id, b.id);
+      if (cands.get(a.id)!.some((c) => c.key === k)) continue;
+      cands.get(a.id)!.push({ a, b, why: r.why, key: k });
+      stored.add(`${a.id}\u0000${b.id}`);
+    }
+  }
+  for (const a of themes) {
+    for (const c of [...cands.get(a.id)!]) {
+      if (!stored.has(`${c.b.id}\u0000${a.id}`)) cands.get(c.b.id)!.push(c);
+    }
+  }
+  const seen = new Set<string>();
+  const uses = new Map<string, number>();
+  const out: { a: T; b: T; why: string }[] = [];
+  const total = new Set([...cands.values()].flat().map((c) => c.key)).size;
+  for (let round = 0; out.length < total; round++) {
+    for (const t of themes) {
+      if ((uses.get(t.id) ?? 0) > round) continue;
+      const c = cands.get(t.id)!.find((x) => !seen.has(x.key));
+      if (!c) continue;
+      seen.add(c.key);
+      for (const id of [c.a.id, c.b.id]) uses.set(id, (uses.get(id) ?? 0) + 1);
+      out.push({ a: c.a, b: c.b, why: c.why });
     }
   }
   return out;
@@ -528,21 +554,42 @@ function hubsHtml(rels: readonly string[], byKey: ReadonlyMap<string, CardPage>,
 }
 
 /** The weekly bar strip: the newest {@link THEME_STRIP_WEEKS} stored weeks,
- *  each bar's height a step of the strip's busiest week. */
-export function weeklyStripHtml(weekly: readonly ThemeWeek[]): string {
-  const weeks = [...weekly].sort((a, b) => a.start.localeCompare(b.start)).slice(-THEME_STRIP_WEEKS);
+ *  each bar's height a step of the strip's busiest week. Older weeks holding
+ *  sources show as «+N earlier». The week holding `runAtMs` (Oslo) is still
+ *  running and is framed `current`; a `partial` week is framed too, so an
+ *  empty one reads apart from a full empty week. */
+export function weeklyStripHtml(weekly: readonly ThemeWeek[], runAtMs?: number): string {
+  const sorted = [...weekly].sort((a, b) => a.start.localeCompare(b.start));
+  const weeks = sorted.slice(-THEME_STRIP_WEEKS);
   if (!weeks.length) return "";
+  const earlier = sorted.slice(0, sorted.length - weeks.length);
+  const earlierTotal = earlier.reduce((n, w) => n + w.count, 0);
+  const runDay = runAtMs === undefined ? null : osloDay(runAtMs);
+  const isCurrent = (w: ThemeWeek) => runDay !== null && w.start <= runDay && runDay <= plusDays(w.start, 6);
   const max = Math.max(1, ...weeks.map((w) => w.count));
   const total = weeks.reduce((n, w) => n + w.count, 0);
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
   const bars = weeks
     .map((w) => {
       const level = w.count === 0 ? 0 : Math.max(1, Math.ceil((w.count / max) * 4));
-      const label = `${w.week} (from ${w.start}): ${w.count} source${w.count === 1 ? "" : "s"}${w.partial ? ", may miss days" : ""}`;
-      return `<span class="wiki-wm-week lvl-${level}${w.partial ? " partial" : ""}" title="${esc(label)}"></span>`;
+      const current = isCurrent(w);
+      const mark = current ? " current" : w.partial ? " partial" : "";
+      const label =
+        `${w.week} (from ${w.start}): ${plural(w.count, "source")}` +
+        (current ? " so far, week still running" : w.partial ? ", may miss days" : "");
+      return `<span class="wiki-wm-slot${mark}" title="${esc(label)}"><span class="wiki-wm-week lvl-${level}"></span></span>`;
     })
     .join("");
-  const aria = `${total} source${total === 1 ? "" : "s"} over the last ${weeks.length} week${weeks.length === 1 ? "" : "s"}`;
-  return `<div class="wiki-wm-weeks" role="img" aria-label="${esc(aria)}">${bars}</div>`;
+  const partials = weeks.filter((w) => w.partial && !isCurrent(w)).length;
+  const aria =
+    `${plural(total, "source")} over the last ${plural(weeks.length, "week")}` +
+    (weeks.some(isCurrent) ? ", this week so far" : "") +
+    (partials ? `, ${plural(partials, "week")} may miss days` : "") +
+    (earlierTotal ? `, ${earlierTotal} more in ${earlier.length} earlier week${earlier.length === 1 ? "" : "s"}` : "");
+  const more = earlierTotal
+    ? `<span class="wiki-wm-weeks-earlier" title="${esc(`${plural(earlierTotal, "source")} in the ${earlier.length} week${earlier.length === 1 ? "" : "s"} before`)}">+${earlierTotal} earlier</span>`
+    : "";
+  return `<div class="wiki-wm-weeks" role="img" aria-label="${esc(aria)}">${more}${bars}</div>`;
 }
 
 function themeHtml<P>(
@@ -551,6 +598,7 @@ function themeHtml<P>(
   prose: (s: string) => string,
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
+  runAtMs: number,
   effortHref?: (id: string) => string,
 ): string {
   const active = themeActiveLabel(lastActiveDays(e, now));
@@ -565,7 +613,7 @@ function themeHtml<P>(
     `<span class="wiki-wm-active">${esc(`${n} source${n === 1 ? "" : "s"}`)}${active ? esc(` · ${active}`) : ""}</span>` +
     "</div>" +
     (e.oneLine ? `<div class="wiki-wm-oneline">${prose(e.oneLine)}</div>` : "") +
-    weeklyStripHtml(e.weekly) +
+    weeklyStripHtml(e.weekly, runAtMs) +
     hubsHtml(e.hubs, byKey, hrefFor) +
     pagesHtml(
       e.pages.map((p) => p.id),
@@ -576,8 +624,16 @@ function themeHtml<P>(
   );
 }
 
+/** A theme's place in the card's lane order: New, Rising, Steady, Fading, then Life. */
+function themeLaneRank(e: { state: string; domain?: string }): number {
+  if (e.domain === "life") return THEME_MAP_LANES.length;
+  const i = THEME_MAP_LANES.findIndex((l) => (l.states as readonly string[]).includes(e.state));
+  return i < 0 ? THEME_MAP_LANES.length : i;
+}
+
 function connectedHtml<P>(themes: readonly JoinedTheme<P>[], prose: (s: string) => string, effortHref?: (id: string) => string): string {
-  const pairs = themeConnections(themes);
+  // Stable sort: map order within a lane.
+  const pairs = themeConnections([...themes].sort((x, y) => themeLaneRank(x) - themeLaneRank(y)));
   if (!pairs.length) return "";
   const name = (t: JoinedTheme<P>) =>
     effortHref
@@ -624,7 +680,7 @@ function themeCardHtml<P extends CardPage>(input: WorkCardInput<P>, map: ThemeMa
   const byKey = new Map<string, CardPage>(input.pages.map((p) => [normalizeRelPath(p.relPath), p]));
   const prose = (s: string) => proseHtml(s, byKey, hrefFor);
   const listed = joined.efforts.filter((e) => e.pages.length > 0 || e.movedOut.length === 0);
-  const render = (e: JoinedTheme<P>) => themeHtml(e, now, prose, byKey, hrefFor, input.effortHref);
+  const render = (e: JoinedTheme<P>) => themeHtml(e, now, prose, byKey, hrefFor, map.runAtMs, input.effortHref);
   const ai = listed.filter((e) => e.domain !== "life");
   const life = listed.filter((e) => e.domain === "life");
   // The Life section takes its name from the stored domain group holding its themes.
