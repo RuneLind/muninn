@@ -14,7 +14,7 @@
  * the sweep covers a bot's `wikiDir` only.
  */
 
-import { extractJson } from "../../ai/json-extract.ts";
+import { callWorkMapModel, usageOf, type Built, type BuiltMap } from "./run-shared.ts";
 import { resolveFencedAgentCwd } from "../../ai/agent-cwd.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { Config, MuninnProfile, WorkMapEffort } from "../../config.ts";
@@ -26,12 +26,18 @@ import { buildWorkMapDigest, WORK_MAP_SYSTEM_PROMPT, WORK_MAP_TOUCH_WINDOW_DAYS 
 import { gatherWarmInputs, type WarmInputDeps } from "./inputs.ts";
 import { declaredEffortOf } from "./ids.ts";
 import { normalizeWorkMapAnswer } from "./normalize.ts";
-import { parseWorkMap, WORK_MAP_VERSION, workMapAnswerSchema, type WorkMap, type WorkMapAnswer } from "./schema.ts";
+import { WORK_MAP_VERSION, workMapAnswerSchema, type WorkMap, type WorkMapAnswer } from "./schema.ts";
+import { workMapKindFromReaderText } from "./kind.ts";
+import { previousMapOf } from "./map-file.ts";
+import type { ThemeMap } from "./theme-schema.ts";
+import { buildThemeMap } from "./theme-run.ts";
 import type { WorkMapStateStore } from "./state.ts";
 import { WORK_MAP_FILE, writeWorkMapFile, type WorkMapWriteOptions, type WorkMapWriteOutcome } from "./write.ts";
 import path from "node:path";
 
 const log = getLog("wiki", "work-map");
+/** The wiki's reader config, where the work map's kind is declared. */
+export const WIKI_READER_FILE = ".wiki-reader.json";
 
 /** The model call's own budget. The prototype measured 93 s on mimir's digest. */
 export const WORK_MAP_TIMEOUT_MS = 300_000;
@@ -143,6 +149,9 @@ export interface WorkMapRunDeps {
   isReadonlyRoot?: (root: string) => boolean;
   inputs: WarmInputDeps;
   readText: (absPath: string) => Promise<string | null>;
+  /** Whether a file exists, to tell an unreadable `.wiki-reader.json` from an
+   *  absent one; without it, an unreadable file reads as absent. */
+  exists?: (absPath: string) => Promise<boolean>;
   model: (req: ModelRequest) => Promise<ModelReply>;
   write?: (opts: WorkMapWriteOptions) => Promise<WorkMapWriteOutcome>;
   /** The commit tail handed to the write seam; `null` commits nothing. */
@@ -175,7 +184,7 @@ export function workMapOrganizable(
 }
 
 export type WorkMapRunResult =
-  | { outcome: "ok"; map: WorkMap; written: boolean }
+  | { outcome: "ok"; map: WorkMap | ThemeMap; written: boolean }
   | { outcome: "refused"; reason: string }
   | { outcome: "failed"; reason: string }
   | { outcome: "aborted" };
@@ -262,7 +271,7 @@ async function organizeWorkMap(wiki: string, deps: WorkMapRunDeps, runStart: num
   }
 }
 
-interface RunOutcomes {
+export interface RunOutcomes {
   refuse: (reason: string) => Promise<WorkMapRunResult>;
   fail: (reason: string) => Promise<WorkMapRunResult>;
   record: (outcome: "ok" | "refused" | "failed", error?: string) => Promise<void>;
@@ -273,20 +282,50 @@ async function organizeSteps(
   deps: WorkMapRunDeps,
   runStart: number,
   signal: AbortSignal | undefined,
-  { refuse, fail, record }: RunOutcomes,
+  outcomes: RunOutcomes,
   progress: { modelCalled: boolean },
 ): Promise<WorkMapRunResult> {
   const org = workMapOrganizable(wiki, deps);
-  if (!org.ok) return refuse(org.reason);
+  if (!org.ok) return outcomes.refuse(org.reason);
   const { entry } = org;
+  // The kind before the gate: a themes wiki needs no claude-usage. A config
+  // the run cannot read refuses: guessing `work` would overwrite a themes map.
+  const configPath = path.join(entry.root, WIKI_READER_FILE);
+  const configText = await deps.readText(configPath);
+  if (configText === null && (await deps.exists?.(configPath))) {
+    log.warn("Work map run for {wiki}: {file} exists but could not be read", { wiki, file: WIKI_READER_FILE });
+    return outcomes.refuse(`${WIKI_READER_FILE} exists but could not be read`);
+  }
+  const kindRead = workMapKindFromReaderText(configText);
+  if (!kindRead.ok) {
+    log.warn("Work map run for {wiki}: {reason}", { wiki, reason: kindRead.reason });
+    return outcomes.refuse(kindRead.reason);
+  }
+  const kind = kindRead.kind;
+  const built =
+    kind === "themes"
+      ? await buildThemeMap(entry, deps, runStart, signal, outcomes, progress)
+      : await buildWorkKindMap(entry, deps, runStart, signal, outcomes, progress);
+  if ("result" in built) return built.result;
+  return writeMap(entry, deps, signal, outcomes, built);
+}
+
+async function buildWorkKindMap(
+  entry: WikiRegistryEntry,
+  deps: WorkMapRunDeps,
+  runStart: number,
+  signal: AbortSignal | undefined,
+  outcomes: RunOutcomes,
+  progress: { modelCalled: boolean },
+): Promise<Built> {
+  const { refuse, fail } = outcomes;
   const warm = await gatherWarmInputs(entry.root, runStart, deps.inputs);
-  if (signal?.aborted) return { outcome: "aborted" };
-  if (!warm.ok) return refuse(warm.reason);
+  if (signal?.aborted) return { result: { outcome: "aborted" } };
+  if (!warm.ok) return { result: await refuse(warm.reason) };
   const index = warm.index;
   const work = index.work!;
 
-  const previousText = await deps.readText(path.join(entry.root, WORK_MAP_FILE));
-  const previous = previousText === null ? null : parseWorkMap(previousText);
+  const previous = previousMapOf(await deps.readText(path.join(entry.root, WORK_MAP_FILE)), "work");
   const logText = await deps.readText(path.join(entry.root, "log.md"));
   const digest = buildWorkMapDigest({
     wiki: entry.name,
@@ -312,33 +351,13 @@ async function organizeSteps(
     warnings.push(`Active pages fell from ${prevActive} to ${digest.active.length} since the previous run.`);
   }
 
-  if (signal?.aborted) return { outcome: "aborted" };
-  let reply: ModelReply;
-  progress.modelCalled = true;
-  try {
-    reply = await deps.model({
-      wiki: entry.name,
-      prompt: digest.text,
-      systemPrompt: WORK_MAP_SYSTEM_PROMPT,
-      model: deps.config.workMapModel,
-      ...(deps.config.workMapEffort ? { effort: deps.config.workMapEffort } : {}),
-    });
-  } catch (err) {
-    if (signal?.aborted) return { outcome: "aborted" };
-    return fail(`the model call failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (signal?.aborted) return { outcome: "aborted" };
-
-  let raw: unknown;
-  try {
-    raw = extractJson<unknown>(reply.text);
-  } catch {
-    return fail(`the answer was not JSON (${reply.text.length} chars)`);
-  }
+  const called = await callWorkMapModel(entry, deps, digest.text, WORK_MAP_SYSTEM_PROMPT, signal, outcomes, progress);
+  if ("result" in called) return called;
+  const { reply, raw } = called;
   const parsed = workMapAnswerSchema.safeParse(raw);
   if (!parsed.success) {
     const issues = parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-    return fail(`the answer did not match the schema (${issues})`);
+    return { result: await fail(`the answer did not match the schema (${issues})`) };
   }
   const answer: WorkMapAnswer = parsed.data;
   const byRel = new Map(index.pages.map((p) => [p.relPath, p]));
@@ -377,19 +396,35 @@ async function organizeSteps(
       warnings,
     },
     ...normalized,
-    usage: {
-      ...(reply.costUsd !== undefined ? { costUsd: reply.costUsd } : {}),
-      ...(reply.durationMs !== undefined ? { durationMs: reply.durationMs } : {}),
-      ...(reply.inputTokens !== undefined ? { inputTokens: reply.inputTokens } : {}),
-      ...(reply.outputTokens !== undefined ? { outputTokens: reply.outputTokens } : {}),
-    },
+    usage: usageOf(reply),
   };
+  return {
+    map,
+    commitMessage: `work-map: organize ${entry.name} (${map.efforts.length} efforts)`,
+    logDone: () =>
+      log.info("Work map for {wiki}: {efforts} effort(s), {needs} needs-you, {pages} active page(s)", {
+        wiki: entry.name,
+        efforts: map.efforts.length,
+        needs: map.needsYou.length,
+        pages: digest.active.length,
+      }),
+  };
+}
 
+/** The shared tail: write the map through the seam, record the attempt. */
+async function writeMap(
+  entry: WikiRegistryEntry,
+  deps: WorkMapRunDeps,
+  signal: AbortSignal | undefined,
+  { fail, record }: RunOutcomes,
+  built: BuiltMap,
+): Promise<WorkMapRunResult> {
+  const { map } = built;
   if (signal?.aborted) return { outcome: "aborted" };
   const writing = (deps.write ?? writeWorkMapFile)({
     wikiDir: entry.root,
     content: `${JSON.stringify(map, null, 1)}\n`,
-    commitMessage: `work-map: organize ${entry.name} (${map.efforts.length} efforts)`,
+    commitMessage: built.commitMessage,
     proceed: () => !signal?.aborted,
     ...(deps.isReadonly ? { isReadonly: deps.isReadonly } : {}),
     ...(deps.isReadonlyRoot ? { isReadonlyRoot: deps.isReadonlyRoot } : {}),
@@ -407,12 +442,7 @@ async function organizeSteps(
     return fail(`the map was not written: ${wrote.reason}`);
   }
   await record("ok");
-  log.info("Work map for {wiki}: {efforts} effort(s), {needs} needs-you, {pages} active page(s)", {
-    wiki: entry.name,
-    efforts: map.efforts.length,
-    needs: map.needsYou.length,
-    pages: digest.active.length,
-  });
+  built.logDone();
   return { outcome: "ok", map, written: wrote.outcome === "written" };
 }
 

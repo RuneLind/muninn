@@ -123,6 +123,7 @@ export function realWorkMapRunDeps(config: Config): WorkMapRunDeps {
         return null;
       }
     },
+    exists: (abs) => Bun.file(abs).exists(),
     model: realWorkMapModel(config),
     state,
   };
