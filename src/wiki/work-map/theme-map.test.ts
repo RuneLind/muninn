@@ -399,6 +399,30 @@ describe("normalize: references, domains, caps", () => {
     expect(out.needsYou[4]!.effort).toBeUndefined();
     expect(out.needsYou[1]!.hubs).toEqual(["concepts/h3.md"]);
   });
+
+  test("worth a look: drift slots refill in rank order before the 6-item cut, so a higher drift past slot 6 survives it", () => {
+    const hubs = [["d10", 10], ["d30", 30], ["d40", 40]].map(([n, since]) => ({
+      relPath: `concepts/${n}.md`,
+      name: n as string,
+      folder: "concepts",
+      links: 40,
+      updated: "2026-08-01",
+      sinceUpdate: since as number,
+      share: 1,
+      drift: true,
+    }));
+    const ctx = ctxFor({ "sources/a.md": "2026-10-30" }, RUN_DAY, null, { hubs, hubByName: new Map(hubs.map((h) => [h.name, h.relPath])) });
+    const n = (i: number) => ({ title: `n${i}`, kind: "shift" as const });
+    const drift = (h: string) => ({ title: h, kind: "drift" as const, hubs: [h] });
+    const out = normalizeThemeAnswer(
+      answer({
+        themes: [{ id: "t", name: "T", sources: ["p1"] }],
+        worthALook: [n(1), drift("d10"), n(2), n(3), drift("d30"), n(4), n(5), drift("d40"), n(6)],
+      }),
+      ctx,
+    );
+    expect(out.needsYou.map((x) => x.title)).toEqual(["n1", "n2", "n3", "d40", "n4", "n5"]);
+  });
 });
 
 function dayRange(from: string, to: string): string[] {

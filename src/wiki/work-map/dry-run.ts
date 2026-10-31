@@ -7,7 +7,7 @@
  * committed. The model call keeps its trace and `/agents` row.
  */
 
-import { lstatSync, readlinkSync } from "node:fs";
+import { lstatSync, readlinkSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { MuninnProfile, WorkMapEffort } from "../../config.ts";
@@ -118,15 +118,33 @@ function canonical(file: string): string {
   return cur;
 }
 
-/** Is `file` inside `root`, symlinks resolved? Unsure (a path that cannot be resolved) counts as inside. */
+/**
+ * Is `file` inside `root`? Decided by filesystem identity, not by comparing
+ * path strings: `file` is resolved (`canonical`), then every existing ancestor
+ * of it, itself included, is `stat`ed, and it is inside when one of them is the
+ * root directory (same `dev` and `ino`). That holds whatever spelling reaches
+ * the root: a case variant on a case-insensitive volume, NFD for NFC, a
+ * symlink, `/tmp` for `/private/tmp`, `..`. A missing ancestor is skipped; any
+ * other error counts as inside (unsure ⇒ refused).
+ */
 const inside = (root: string, file: string) => {
-  let rel: string;
   try {
-    rel = path.relative(canonical(root), canonical(file));
+    const r = statSync(root);
+    let cur = canonical(file);
+    for (;;) {
+      try {
+        const st = statSync(cur);
+        if (st.dev === r.dev && st.ino === r.ino) return true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
+      const up = path.dirname(cur);
+      if (up === cur) return false;
+      cur = up;
+    }
   } catch {
     return true;
   }
-  return !(rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel));
 };
 
 export function dryRunDeps(opts: DryRunOptions): WorkMapRunDeps {

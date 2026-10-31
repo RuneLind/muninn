@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { testTempDir } from "../../test/temp-dir.ts";
+import { testTempDir, testTempDirSync } from "../../test/temp-dir.ts";
 import type { WikiIndex } from "../store.ts";
 import { readWikiReaderConfig } from "../store.ts";
 import { dryRunDeps, parseSavedAnswer } from "./dry-run.ts";
@@ -168,6 +169,139 @@ describe("dryRunDeps", () => {
   test("parseSavedAnswer refuses another shape", () => {
     expect(() => parseSavedAnswer('{"text":"x"}')).toThrow("not a --save-answer file");
   });
+});
+
+// Every shape the --out guard has to judge, one row each. A row builds its
+// own root (under `parent`) when the shape needs a particular root name; the
+// verdict is the only thing asserted, so a row never depends on the spelling.
+type GuardRow = {
+  name: string;
+  expect: "refused" | "accepted";
+  needs?: "case-insensitive" | "normalization-insensitive";
+  make: (t: { parent: string; root: string; out: string }) => Promise<{ target: string; root?: string }>;
+};
+const GUARD_ROWS: GuardRow[] = [
+  { name: "plain inside", expect: "refused", make: async ({ root }) => ({ target: path.join(root, "x.json") }) },
+  { name: "plain outside (a scratch dir)", expect: "accepted", make: async ({ out }) => ({ target: path.join(out, "map.json") }) },
+  { name: "a `..x` child of the root", expect: "refused", make: async ({ root }) => ({ target: path.join(root, "..map.json") }) },
+  { name: "a `..x` sibling of the root", expect: "accepted", make: async ({ root }) => ({ target: path.join(path.dirname(root), "..x", "map.json") }) },
+  {
+    name: "a symlinked dir into the root",
+    expect: "refused",
+    make: async ({ root, out }) => {
+      await mkdir(path.join(root, "deep"));
+      await symlink(path.join(root, "deep"), path.join(out, "link"));
+      return { target: path.join(out, "link", "map.json") };
+    },
+  },
+  {
+    name: "a symlinked file into the root",
+    expect: "refused",
+    make: async ({ root, out }) => {
+      await writeFile(path.join(root, "f.json"), "{}");
+      await symlink(path.join(root, "f.json"), path.join(out, "f.json"));
+      return { target: path.join(out, "f.json") };
+    },
+  },
+  {
+    name: "a dangling link into the root",
+    expect: "refused",
+    make: async ({ root, out }) => {
+      await symlink(path.join(root, "planted.json"), path.join(out, "dangle.json"));
+      return { target: path.join(out, "dangle.json") };
+    },
+  },
+  {
+    name: "a chain of links into the root",
+    expect: "refused",
+    make: async ({ root, out }) => {
+      await symlink(path.join(root, "planted.json"), path.join(out, "l2.json"));
+      await symlink(path.join(out, "l2.json"), path.join(out, "l1.json"));
+      return { target: path.join(out, "l1.json") };
+    },
+  },
+  {
+    name: "a relative link target",
+    expect: "refused",
+    make: async ({ root, out }) => {
+      await mkdir(path.join(out, "sub"));
+      await symlink(path.relative(path.join(out, "sub"), path.join(root, "planted.json")), path.join(out, "sub", "rel.json"));
+      return { target: path.join(out, "sub", "rel.json") };
+    },
+  },
+  {
+    name: "a link loop",
+    expect: "refused",
+    make: async ({ out }) => {
+      await symlink(path.join(out, "loopB"), path.join(out, "loopA"));
+      await symlink(path.join(out, "loopA"), path.join(out, "loopB"));
+      return { target: path.join(out, "loopA") };
+    },
+  },
+  {
+    name: "a case variant of the root",
+    expect: "refused",
+    needs: "case-insensitive",
+    make: async ({ parent }) => {
+      await mkdir(path.join(parent, "wiki"));
+      return { root: path.join(parent, "wiki"), target: path.join(parent, "WIKI", "map.json") };
+    },
+  },
+  {
+    name: "an NFD spelling of an NFC root name",
+    expect: "refused",
+    needs: "normalization-insensitive",
+    make: async ({ parent }) => {
+      await mkdir(path.join(parent, "caf\u00e9"));
+      return { root: path.join(parent, "caf\u00e9"), target: path.join(parent, "cafe\u0301", "map.json") };
+    },
+  },
+  {
+    name: "a path through a file (ENOTDIR)",
+    expect: "refused",
+    make: async ({ out }) => {
+      await writeFile(path.join(out, "file.txt"), "");
+      return { target: path.join(out, "file.txt", "x.json") };
+    },
+  },
+  { name: "a nested dir under the root not made yet", expect: "refused", make: async ({ root }) => ({ target: path.join(root, "new", "dir", "map.json") }) },
+  {
+    name: "a dangling link to a case variant of the root",
+    expect: "refused",
+    needs: "case-insensitive",
+    make: async ({ parent, out }) => {
+      await mkdir(path.join(parent, "wiki"));
+      await symlink(path.join(parent, "WIKI", "planted.json"), path.join(out, "dl.json"));
+      return { root: path.join(parent, "wiki"), target: path.join(out, "dl.json") };
+    },
+  },
+];
+
+// What the volume the temp dirs land on folds, probed once: a row that needs a
+// fold the volume lacks is skipped, and its name says why.
+const probeDir = path.resolve(testTempDirSync("muninn-wm-probe-"));
+mkdirSync(path.join(probeDir, "CaseProbe"));
+mkdirSync(path.join(probeDir, "n\u00e9"));
+const VOLUME: Record<NonNullable<GuardRow["needs"]>, boolean> = {
+  "case-insensitive": existsSync(path.join(probeDir, "caseprobe")),
+  "normalization-insensitive": existsSync(path.join(probeDir, "ne\u0301")),
+};
+rmSync(probeDir, { recursive: true, force: true });
+
+describe("the dry run's --out guard (filesystem identity)", () => {
+  for (const row of GUARD_ROWS) {
+    const skip = row.needs !== undefined && !VOLUME[row.needs];
+    test.skipIf(skip)(`${row.expect}: ${row.name}${skip ? ` (skipped: the test volume is not ${row.needs})` : ""}`, async () => {
+      const { root, out, base } = await setup();
+      const parent = path.resolve(await testTempDir("muninn-wm-guard-"));
+      dirs.push(parent);
+      const made = await row.make({ parent, root: path.resolve(root), out: path.resolve(out) });
+      const entry = made.root ? { ...base.entry, root: made.root } : base.entry;
+      const run = () => dryRunDeps({ ...base, entry, out: made.target });
+      if (row.expect === "refused") expect(run).toThrow("inside the wiki root");
+      else expect(run).not.toThrow();
+    });
+  }
 });
 
 describe(".wiki-reader.json workMap key", () => {

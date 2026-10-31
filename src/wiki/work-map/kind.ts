@@ -2,7 +2,7 @@
  * The work map's kind, a property of the wiki: `.wiki-reader.json`
  * `workMap: {"kind": "themes"}`. Absent (or no file) means `work`, so a wiki
  * that declares nothing runs today's efforts map byte-identically. Zod-free,
- * so `store.ts` and the client bundle can read it.
+ * so `store.ts` can read it.
  */
 
 export const WORK_MAP_KINDS = ["work", "themes"] as const;
