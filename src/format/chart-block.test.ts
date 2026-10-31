@@ -402,6 +402,65 @@ describe("range", () => {
   });
 });
 
+describe("bars and range cells", () => {
+  const read = (kind: "bars" | "range", cells: string[]) => chart(`<Chart kind="${kind}" value="V">`, ["Row", "V"], cells.map((c, i) => [`r${i}`, c]));
+  const ends = (r: ChartRead) => {
+    const m = r.model;
+    if (m?.kind === "range") return m.rows.map((x) => [x.value.lo, x.value.hi]);
+    if (m?.kind === "bars") return m.rows.map((x) => x.value.n);
+    return null;
+  };
+
+  test("a decimal comma behind a sign or inside an interval sets the table's context", () => {
+    expect(ends(read("range", ["1,250–1,750", "0,5–1,5"]))).toEqual([[1.25, 1.75], [0.5, 1.5]]);
+    const one = read("range", ["1,250–1,5"]);
+    expect(one.findings).toEqual([]);
+    expect(ends(one)).toEqual([[1.25, 1.5]]);
+    const bars = read("bars", ["$1,5", "$1,250"]);
+    expect(ends(bars)).toEqual([1.5, 1.25]);
+    expect(bars.model?.kind === "bars" && bars.model.log).toBe(false);
+  });
+
+  test("dates, months, clock times and years read in neither kind", () => {
+    const spans = ["10.2024–12.2024", "01.25–03.25", "09.00–11.30", "20.06–20.25", "09.52–09.53", "00.00–00.04"];
+    for (const cell of spans) expect({ cell, m: read("range", [cell]).model }).toEqual({ cell, m: null });
+    for (const kind of ["bars", "range"] as const) {
+      for (const cells of [["2024"], ["01.10"], ["03.07"], ["18.09"], ["10.2024"], ["12.30"], ["18.09", "03.07"], ["2024", "2025"]]) {
+        expect({ kind, cells, m: read(kind, cells).model }).toEqual({ kind, cells, m: null });
+      }
+      // A leading zero or MM.YYYY is a date in any column; a whole column of date shapes is named.
+      for (const cells of [["01.10", "5"], ["10.2024", "5"]]) expect({ kind, cells, m: read(kind, cells).model }).toEqual({ kind, cells, m: null });
+      expect(messages(read(kind, ["18.09", "2024"]))).toEqual(["V holds dates, times or years, not numbers"]);
+    }
+    expect(read("range", ["09.00–11.30", "5"]).model).toBeNull();
+  });
+
+  test("numbers that only look like dates still read", () => {
+    expect(ends(read("range", ["1.5–2.5", "0.5"]))).toEqual([[1.5, 2.5], [0.5, 0.5]]);
+    expect(ends(read("range", ["$2024–2025"]))).toEqual([[2024, 2025]]);
+    expect(ends(read("bars", ["0.5", "1.10"]))).toEqual([0.5, 1.1]);
+    expect(ends(read("bars", ["12.50", "15.75"]))).toEqual([12.5, 15.75]);
+    expect(ends(read("bars", ["2048", "150"]))).toEqual([2048, 150]);
+    expect(ends(read("bars", ["2024 kr"]))).toEqual([2024]);
+  });
+
+  test("`≈` and `ca.` read as `~` does", () => {
+    const cases: [string, number, number, string, string][] = [
+      ["≈ $40–80", 40, 80, "$", ""],
+      ["≈$1–3", 1, 3, "$", ""],
+      ["ca. $70–140", 70, 140, "$", ""],
+      ["Ca.$105–220", 105, 220, "$", ""],
+      ["CA. 1 min", 1, 1, "", "min"],
+      ["ca. 40 – ca. 80", 40, 80, "", ""],
+    ];
+    for (const [cell, lo, hi, sign, unit] of cases) {
+      const v = readIntervalCell(cell, {});
+      expect({ cell, v: v && [v.lo, v.hi, v.sign, v.unit] }).toEqual({ cell, v: [lo, hi, sign, unit] });
+    }
+    expect(ends(read("bars", ["≈ $16", "ca. $20", "~$5"]))).toEqual([16, 20, 5]);
+  });
+});
+
 describe("numbers", () => {
   test("a minus is U+2212, never −0, trailing zeros cut", () => {
     expect(formatChartNumber(-1.5, 1, false)).toBe("−1.5");
