@@ -561,6 +561,8 @@ const GRAMMAR: [string, "bars" | "range", string[], string | null, string[]][] =
   ["F12", "range", ["40/PR"], null, ["fatal: row \"r0\": \"40/PR\" in V is not a number or a range"]],
   ["F13", "range", ["$1.25 / $10.00 per 1M"], null, ["fatal: row \"r0\": \"$1.25 / $10.00 per 1M\" in V is not a number or a range"]],
   ["F14", "bars", ["≈ $75 per PR","$85/PR"], "75, 85", []],
+  ["F16", "bars", ["40 per PR"], null, ["fatal: row \"r0\": \"40 per PR\" in V is not a number"]],
+  ["F17", "range", ["$0.15 per 1M", "$1"], "0.15–0.15, 1–1", []],
   ["F15", "bars", ["$40 EUR each"], null, ["fatal: row \"r0\": \"$40 EUR each\" in V is not a number"]],
   ["G1", "range", ["1 økt","3 økter"], "1–1, 3–3", []],
   ["G2", "range", ["1 session","2 sessions"], "1–1, 2–2", []],
