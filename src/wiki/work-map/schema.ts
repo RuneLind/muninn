@@ -33,28 +33,28 @@ export type EffortState = (typeof EFFORT_STATES)[number];
 export type PageRole = (typeof PAGE_ROLES)[number];
 
 /** Optional on the wire: `null`, a blank or a non-string means "none". */
-const optionalString = z
+export const optionalString = z
   .string()
   .nullish()
   .catch(undefined)
   .transform((v) => (v == null || v.trim() === "" ? undefined : v));
 /** Prose a model may omit, null or mistype: reads as "". */
-const prose = z.string().nullish().catch("").transform((v) => v ?? "");
+export const prose = z.string().nullish().catch("").transform((v) => v ?? "");
 
 /** The members of `arr` that pass `item`; the rest are dropped. */
-function validMembers<T extends z.ZodTypeAny>(item: T, arr: unknown[]): z.output<T>[] {
+export function validMembers<T extends z.ZodTypeAny>(item: T, arr: unknown[]): z.output<T>[] {
   return arr.flatMap((m) => {
     const r = item.safeParse(m);
     return r.success ? [r.data as z.output<T>] : [];
   });
 }
 /** A required string id that also takes a JSON number. */
-const effortRef = z.union([z.string(), z.number().transform(String)]);
+export const effortRef = z.union([z.string(), z.number().transform(String)]);
 /** A required array whose odd members are dropped. */
-const members = <T extends z.ZodTypeAny>(item: T) =>
+export const members = <T extends z.ZodTypeAny>(item: T) =>
   z.array(z.unknown()).transform((arr) => validMembers(item, arr)) as unknown as z.ZodType<z.output<T>[], z.input<T>[]>;
 /** An optional list: absent or not an array reads as empty; odd members are dropped. */
-const list = <T extends z.ZodTypeAny>(item: T) =>
+export const list = <T extends z.ZodTypeAny>(item: T) =>
   z
     .array(z.unknown())
     .nullish()
@@ -130,7 +130,7 @@ export type WorkMapAnswer = z.infer<typeof workMapAnswerSchema>;
 /** The answer as the model may write it (optional fields absent). */
 export type WorkMapAnswerInput = z.input<typeof workMapAnswerSchema>;
 
-const effortId = z.string().regex(EFFORT_ID_RE);
+export const effortId = z.string().regex(EFFORT_ID_RE);
 
 const dailyActivity = z.object({
   /** `YYYY-MM-DD`, Europe/Oslo. */

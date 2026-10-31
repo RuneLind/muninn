@@ -65,6 +65,7 @@ import {
 import { kickWorkSessionsRefresh, workSessionsFor, workSessionsIdentityFor } from "./work-sessions.ts";
 import { computeWorkFocus, type IndexWork, type PageWork, type WorkPageInput } from "./work-focus.ts";
 import { buildWorkEvidence } from "./work-evidence.ts";
+import { parseWorkMapReaderConfig, type WorkMapKind } from "./work-map/kind.ts";
 
 const log = getLog("wiki", "store");
 
@@ -244,6 +245,13 @@ export interface WikiReaderConfig {
    * left empty warns and is ignored.
    */
   systemMapLinkHeadings?: string[];
+  /**
+   * The work map's kind for this wiki (`workMap: {"kind": "themes"}`,
+   * `work-map/kind.ts`). Absent ⇒ `work`. A bad block or kind warns and reads
+   * as `work`. Optional so hand-built configs stay valid;
+   * `readWikiReaderConfig` always sets it.
+   */
+  workMap?: { kind: WorkMapKind };
 }
 
 /** A heading's text with one trailing parenthetical dropped, trimmed:
@@ -2163,6 +2171,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   for (const { key, reason } of cull.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
   }
+  const workMap = parseWorkMapReaderConfig(obj.workMap);
+  if (workMap.warning) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "workMap", reason: workMap.warning });
+  }
   // Same shape once more, one level down: `parseActivityWeights` drops a knob
   // whose value is not a finite number of the right magnitude and keeps the rest
   // of the block, so a typo costs one weight rather than the section.
@@ -2190,6 +2202,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     roleKeys: roleKeys.keys,
     statePhrases: statePhrases.config,
     ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
+    workMap: { kind: workMap.kind },
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

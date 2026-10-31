@@ -73,4 +73,31 @@ describe("workMapRunAt", () => {
     await writeFile(path.join(root, ".work-map.json"), "{not json");
     expect(await workMapListingField(root)).toEqual({});
   });
+
+  test("a themes map advertises its runAt; a work map still parses unchanged", async () => {
+    root = await testTempDir("muninn-wm-listing-");
+    const file = path.join(root, ".work-map.json");
+    const themes = {
+      version: 1,
+      kind: "themes",
+      wiki: "kb",
+      runAtMs: 4242,
+      model: "m",
+      coverage: { activeSources: 0, hubs: 0, driftHubs: 0, placed: 0, digestChars: 0, windowDays: 28, warnings: [] },
+      summary: "",
+      needsYou: [],
+      themes: [],
+      efforts: [],
+      retired: [],
+      loose: [],
+    };
+    await writeFile(file, JSON.stringify(themes));
+    expect(await workMapListingField(root)).toEqual({ workMap: { runAt: 4242 } });
+    await writeFile(file, JSON.stringify({ ...themes, kind: "other" }));
+    await utimes(file, 9, 9);
+    expect(await workMapRunAt(root)).toBeNull();
+    await writeFile(file, mapText(5151));
+    await utimes(file, 11, 11);
+    expect(await workMapRunAt(root)).toBe(5151);
+  });
 });

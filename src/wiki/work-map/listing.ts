@@ -8,7 +8,7 @@
 
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { parseWorkMap } from "./schema.ts";
+import { readMapFile } from "./map-file.ts";
 import { WORK_MAP_FILE } from "./write.ts";
 
 interface StatKey {
@@ -34,7 +34,7 @@ export async function workMapRunAt(root: string): Promise<number | null> {
   if (hit && hit.mtimeMs === st.mtimeMs && hit.ctimeMs === st.ctimeMs && hit.size === st.size && hit.ino === st.ino) return hit.runAt;
   let runAt: number | null = null;
   try {
-    runAt = parseWorkMap(await readFile(file, "utf8"))?.runAtMs ?? null;
+    runAt = readMapFile(await readFile(file, "utf8"))?.map.runAtMs ?? null;
   } catch {
     runAt = null;
   }

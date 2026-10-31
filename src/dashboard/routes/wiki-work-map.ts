@@ -26,7 +26,7 @@ import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
 import { workMapRunDepsFor } from "../../wiki/work-map/loop.ts";
 import { startWorkMapRun, workMapOrganizable, workMapRunInFlight, type WorkMapRunDeps } from "../../wiki/work-map/run.ts";
-import { parseWorkMap } from "../../wiki/work-map/schema.ts";
+import { readMapFile } from "../../wiki/work-map/map-file.ts";
 import { WORK_MAP_FILE } from "../../wiki/work-map/write.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { readonlyRefusal } from "./route-utils.ts";
@@ -54,7 +54,7 @@ export function registerWikiWorkMapRoutes(
     const entry = resolve(c, deps);
     if (!entry) return c.json({ error: "no wiki configured for that name" }, 404);
     const text = await deps.readText(path.join(entry.root, WORK_MAP_FILE));
-    const map = text === null ? null : parseWorkMap(text);
+    const map = text === null ? null : (readMapFile(text)?.map ?? null);
     const org = workMapOrganizable(entry.name, deps);
     const body: Record<string, unknown> = {
       wiki: entry.name,

@@ -192,4 +192,44 @@ describe("GET /api/wiki/work-map", () => {
     expect(body.organizableReason).toContain("WORK_MAP_WIKIS");
     expect(body.lastAttempt).toBeUndefined();
   });
+
+  test("serves a themes map whole, never mapError; a themes map with a work shape is mapError", async () => {
+    const map = {
+      version: 1,
+      kind: "themes",
+      wiki: "kb",
+      runAtMs: NOW,
+      model: "m",
+      coverage: { activeSources: 2, hubs: 1, driftHubs: 0, placed: 2, digestChars: 10, windowDays: 28, warnings: [] },
+      summary: "s",
+      needsYou: [{ title: "t", kind: "drift", why: "", action: "", pages: [], hubs: ["concepts/H.md"], count: 21 }],
+      themes: [{ name: "AI & tech", efforts: ["t1"] }],
+      efforts: [
+        {
+          id: "t1",
+          name: "T",
+          oneLine: "",
+          state: "rising",
+          domain: "ai",
+          pages: [{ id: "sources/a.md", role: "source" }],
+          hubs: [],
+          readFirst: [],
+          takeaway: "",
+          disagreement: "",
+          confidence: 1,
+          related: [],
+          weekly: [{ week: "2026-W44", start: "2026-10-26", count: 1 }],
+          trend: { recent: 1, earlier: 0 },
+        },
+      ],
+      retired: [],
+      loose: ["sources/b.md"],
+    };
+    const s = setup({ readText: async (p) => (p === "/w/mimir/.work-map.json" ? JSON.stringify(map) : null) });
+    const body = await (await s.app.request("/api/wiki/work-map?wiki=mimir")).json();
+    expect(body.map).toEqual(map);
+    expect(body.mapError).toBeUndefined();
+    const bad = setup({ readText: async () => JSON.stringify({ ...map, coverage: { sessionsSinceMs: 0 } }) });
+    expect((await (await bad.app.request("/api/wiki/work-map?wiki=mimir")).json()).mapError).toContain("could not be read");
+  });
 });
