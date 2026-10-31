@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { testTempDir } from "../../test/temp-dir.ts";
 import type { WikiIndex } from "../store.ts";
@@ -7,6 +7,7 @@ import { readWikiReaderConfig } from "../store.ts";
 import { dryRunDeps, parseSavedAnswer } from "./dry-run.ts";
 import { readMapFile } from "./map-file.ts";
 import { __resetWorkMapRunsForTest, startWorkMapRun, type ModelRequest } from "./run.ts";
+import { WORK_MAP_VERSION } from "./schema.ts";
 import { THEME_MAP_VERSION, type ThemeMap } from "./theme-schema.ts";
 
 const NOW = Date.parse("2026-10-31T10:00:00Z");
@@ -101,6 +102,35 @@ describe("dryRunDeps", () => {
     const { root, base } = await setup();
     expect(() => dryRunDeps({ ...base, out: path.join(root, "x.json") })).toThrow("inside the wiki root");
     expect(() => dryRunDeps({ ...base, saveAnswer: path.join(root, "sub", "a.json") })).toThrow("inside the wiki root");
+  });
+
+  test("the inside-the-root check is separator-aware and follows symlinks", async () => {
+    const { root, out, base } = await setup();
+    // A file named `..map.json` in the root is inside it.
+    expect(() => dryRunDeps({ ...base, out: path.join(root, "..map.json") })).toThrow("inside the wiki root");
+    expect(() => dryRunDeps({ ...base, out: path.join(path.dirname(root), "..x", "map.json") })).not.toThrow();
+    // A symlink outside the root that points into it: inside, for an existing file and a path not made yet.
+    await mkdir(path.join(root, "deep"), { recursive: true });
+    const link = path.join(out, "link");
+    await symlink(path.resolve(root, "deep"), link);
+    await writeFile(path.join(root, "deep", "f.json"), "{}");
+    expect(() => dryRunDeps({ ...base, saveAnswer: path.join(link, "f.json") })).toThrow("inside the wiki root");
+    expect(() => dryRunDeps({ ...base, out: path.join(link, "map.json") })).toThrow("inside the wiki root");
+    expect(() => dryRunDeps({ ...base, out: path.join(link, "new", "dir", "map.json") })).toThrow("inside the wiki root");
+  });
+
+  test("a --previous that is missing, unparseable or another kind's map fails the run before the model call", async () => {
+    const { out, base, models } = await setup();
+    await writeFile(path.join(out, "bad.json"), "{ nope");
+    const workMap = { version: WORK_MAP_VERSION, wiki: "kb", runAtMs: NOW, model: "m", coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, digestChars: 0, warnings: [] }, summary: "", needsYou: [], themes: [], efforts: [], loose: [] };
+    await writeFile(path.join(out, "work.json"), JSON.stringify(workMap));
+    for (const [file, msg] of [["missing.json", "could not be read"], ["bad.json", "is not a work map file"], ["work.json", "not a themes map"]] as const) {
+      __resetWorkMapRunsForTest();
+      const res = await startWorkMapRun("kb", dryRunDeps({ ...base, previous: path.join(out, file) })).promise;
+      expect(res.outcome).toBe("refused");
+      expect(res.outcome === "refused" && res.reason).toContain(msg);
+    }
+    expect(models).toHaveLength(0);
   });
 
   test("parseSavedAnswer refuses another shape", () => {

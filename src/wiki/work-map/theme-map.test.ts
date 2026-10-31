@@ -727,3 +727,74 @@ describe("the themes run", () => {
     expect(models).toHaveLength(0);
   });
 });
+
+// --- hub names (fix round 1 batch 3) ------------------------------------------
+
+/** The fixture plus two hubs sharing the stem `x`: concepts/x (2 links), entities/x (3). */
+function collidingPages() {
+  const { pages, outgoing } = fixturePages();
+  pages.push(hub("concepts/x.md", "2026-10-01"), hub("entities/x.md", "2026-10-01"));
+  for (const r of ["sources/a1.md", "sources/a2.md"]) outgoing.set(key(r), [...outgoing.get(key(r))!, key("concepts/x.md")]);
+  for (const r of ["sources/a3.md", "sources/a4.md", "sources/a5.md"]) outgoing.set(key(r), [...outgoing.get(key(r))!, key("entities/x.md")]);
+  return { pages, outgoing };
+}
+function indexOf(pages: ThemeDigestPage[], outgoing: Map<string, string[]>): WikiIndex {
+  const metas = pages.map((p) => ({ aliases: [], steps: [], ...p }) as unknown as WikiPageMeta);
+  return { pages: metas, outgoing, resolve: (t: string) => metas.find((p) => p.name.toLowerCase() === t.toLowerCase()), gitTouches: new Map() } as unknown as WikiIndex;
+}
+function hubsAnswer(hubs: string[]) {
+  return async () => ({ text: JSON.stringify({ summary: "s", themes: [{ id: "agents", name: "Agents", domain: "ai", hubs, sources: ["p1"] }], worthALook: [{ kind: "gap", title: "g", sources: ["p1"], hubs, theme: "agents" }] }) });
+}
+
+describe("hub names", () => {
+  test("two hubs sharing a stem get folder/stem names, each mapping back to its own page; unique stems stay bare", () => {
+    const { pages, outgoing } = collidingPages();
+    const d = buildThemeMapDigest({ wiki: "w", nowMs: NOW, pages, outgoing, previous: null });
+    expect(d.hubs.map((h) => [h.name, h.relPath])).toEqual([
+      ["Hub A", "concepts/Hub A.md"],
+      ["Hub B", "entities/Hub B.md"],
+      ["entities/x", "entities/x.md"],
+      ["concepts/x", "concepts/x.md"],
+    ]);
+    expect(d.hubByName.get("concepts/x")).toBe("concepts/x.md");
+    expect(d.hubByName.get("entities/x")).toBe("entities/x.md");
+    expect(d.hubByName.has("x")).toBe(false);
+    expect(d.text).toContain("\nconcepts/x | concepts | linked by 2 recent sources");
+    expect(d.text).toContain("\nentities/x | entities | linked by 3 recent sources");
+    expect(d.text).toContain('p1 "a1" | ai | created=2026-10-30 | tags=t | links=[concepts/x; Hub A; Hub B]');
+    expect(d.text).toContain("\nHub A | concepts |");
+  });
+
+  test("the run stores each colliding hub by its own name, and drops the ambiguous bare stem", async () => {
+    const { pages, outgoing } = collidingPages();
+    const idx = indexOf(pages, outgoing);
+    for (const [names, want] of [
+      [["concepts/x"], ["concepts/x.md"]],
+      [["entities/x"], ["entities/x.md"]],
+      [["x"], []],
+    ] as const) {
+      __resetWorkMapRunsForTest();
+      const { d, written } = themeDeps({ model: hubsAnswer([...names]), inputs: { ...themeDeps().d.inputs, rebuildIndex: async () => idx } });
+      expect((await startWorkMapRun("kb", d).promise).outcome).toBe("ok");
+      const map = readMapFile(written[0]!)!.map as ThemeMap;
+      expect(map.efforts[0]!.hubs).toEqual([...want]);
+      expect(map.needsYou[0]!.hubs).toEqual([...want]);
+    }
+  });
+
+  test("a hub name outside the digest is kept only when that page passes the hub rule", async () => {
+    const { pages, outgoing } = fixturePages();
+    pages.push(
+      { ...hub("log.md", "2026-10-01"), type: "note" },
+      { ...hub("concepts/gone.md", "2026-10-01"), culled: true },
+      { ...hub("sources/aside.md", "2026-10-01"), type: "note" },
+      hub("concepts/lone.md", "2026-10-01"),
+    );
+    const idx = indexOf(pages, outgoing);
+    const { d, written } = themeDeps({ model: hubsAnswer(["log", "gone", "aside", "a1", "lone"]), inputs: { ...themeDeps().d.inputs, rebuildIndex: async () => idx } });
+    expect((await startWorkMapRun("kb", d).promise).outcome).toBe("ok");
+    const map = readMapFile(written[0]!)!.map as ThemeMap;
+    expect(map.efforts[0]!.hubs).toEqual(["concepts/lone.md"]);
+    expect(map.needsYou[0]!.hubs).toEqual(["concepts/lone.md"]);
+  });
+});

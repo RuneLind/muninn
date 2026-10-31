@@ -78,6 +78,8 @@ export interface ThemeDigest {
   hubs: ThemeHub[];
   /** Lowercased hub name → relPath, for the normalizer. */
   hubByName: Map<string, string>;
+  /** Lowercased bare stems two digest hubs share: a name the digest never printed. */
+  ambiguousHubNames: Set<string>;
   windowStart: string;
   runDay: string;
 }
@@ -104,7 +106,7 @@ export function isThemeSource(p: ThemeDigestPage): boolean {
 }
 
 /** A page a source's link may name as a hub: not a source, not a bookkeeping page. */
-function isHubCandidate(p: ThemeDigestPage): boolean {
+export function isHubCandidate(p: ThemeDigestPage): boolean {
   return p.type !== "source" && !/^(life\/)?sources\//.test(p.relPath) && !isMetaStem(pageStemOf(p.relPath)) && !p.culled;
 }
 
@@ -193,13 +195,19 @@ export function buildThemeMapDigest(input: ThemeDigestInput): ThemeDigest {
     });
   }
   hubs.sort((a, b) => b.links - a.links || a.relPath.localeCompare(b.relPath));
-  // Names resolve to the digest's hub first: two folders can share a stem.
+  // Two hubs sharing a stem print as `folder/stem`, so each name maps back to one page.
+  const stemCount = new Map<string, number>();
+  for (const h of hubs) stemCount.set(h.name.toLowerCase(), (stemCount.get(h.name.toLowerCase()) ?? 0) + 1);
+  const ambiguousHubNames = new Set([...stemCount].filter(([, n]) => n > 1).map(([k]) => k));
+  const qualified = (rel: string) => rel.replace(/\.[^./]+$/, "");
+  const nameOf = (rel: string) => (ambiguousHubNames.has(stemOf(rel).toLowerCase()) ? qualified(rel) : stemOf(rel));
+  for (const h of hubs) h.name = nameOf(h.relPath);
   const hubByName = new Map<string, string>();
   for (const h of hubs) if (!hubByName.has(h.name.toLowerCase())) hubByName.set(h.name.toLowerCase(), h.relPath);
 
   const sourceLines = listed.map((s) => {
     const p = byRel.get(s.relPath)!;
-    const links = (hubLinks.get(s.relPath) ?? []).map(stemOf).sort((a, b) => a.localeCompare(b));
+    const links = (hubLinks.get(s.relPath) ?? []).map(nameOf).sort((a, b) => a.localeCompare(b));
     return [
       `${ids.get(s.relPath)} "${clip(p.displayTitle ?? p.title, 160)}"`,
       s.domain,
@@ -245,5 +253,5 @@ export function buildThemeMapDigest(input: ThemeDigestInput): ThemeDigest {
   if (retiredLines.length) {
     sections.push(`\n## Retired themes — themes an earlier map no longer kept (dropped, merged, or their sources went quiet); reuse an id when its topic returns (a reused id is not new)\n${retiredLines.join("\n")}`);
   }
-  return { text: sections.join("\n"), rel, ids, active, cut: active.length - listed.length, hubs, hubByName, windowStart, runDay };
+  return { text: sections.join("\n"), rel, ids, active, cut: active.length - listed.length, hubs, hubByName, ambiguousHubNames, windowStart, runDay };
 }

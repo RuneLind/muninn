@@ -11,7 +11,7 @@ import type { WikiRegistryEntry } from "../registry.ts";
 import { previousMapOf } from "./map-file.ts";
 import type { RunOutcomes, WorkMapRunDeps } from "./run.ts";
 import { callWorkMapModel, usageOf, type Built } from "./run-shared.ts";
-import { buildThemeMapDigest, createdDayOf, isThemeSource, THEME_MAP_SYSTEM_PROMPT, THEME_WINDOW_DAYS } from "./theme-digest.ts";
+import { buildThemeMapDigest, createdDayOf, isHubCandidate, THEME_MAP_SYSTEM_PROMPT, THEME_WINDOW_DAYS } from "./theme-digest.ts";
 import { normalizeThemeAnswer } from "./theme-normalize.ts";
 import { THEME_MAP_VERSION, themeAnswerSchema, type ThemeMap } from "./theme-schema.ts";
 import { WORK_MAP_FILE } from "./write.ts";
@@ -62,8 +62,9 @@ export async function buildThemeMap(
     hubs: digest.hubs,
     hubByName: digest.hubByName,
     resolveHub: (name) => {
+      if (digest.ambiguousHubNames.has(name.toLowerCase())) return undefined;
       const p = index.resolve(name);
-      return p && !isThemeSource(p) && p.type !== "source" ? p.relPath : undefined;
+      return p && isHubCandidate(p) ? p.relPath : undefined;
     },
     createdDayOf: (rel) => {
       const p = byRel.get(rel);

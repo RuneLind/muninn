@@ -37,7 +37,7 @@ import path from "node:path";
 
 const log = getLog("wiki", "work-map");
 /** The wiki's reader config, where the work map's kind is declared. */
-const WIKI_READER_FILE = ".wiki-reader.json";
+export const WIKI_READER_FILE = ".wiki-reader.json";
 
 /** The model call's own budget. The prototype measured 93 s on mimir's digest. */
 export const WORK_MAP_TIMEOUT_MS = 300_000;

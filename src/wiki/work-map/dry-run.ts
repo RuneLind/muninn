@@ -7,12 +7,15 @@
  * committed. The model call keeps its trace and `/agents` row.
  */
 
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { MuninnProfile, WorkMapEffort } from "../../config.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
 import { realWarmInputDeps, type WarmInputDeps } from "./inputs.ts";
-import type { ModelReply, ModelRequest, WorkMapRunDeps } from "./run.ts";
+import { workMapKindFromReaderText } from "./kind.ts";
+import { readMapFile } from "./map-file.ts";
+import { WIKI_READER_FILE, type ModelReply, type ModelRequest, type WorkMapRunDeps } from "./run.ts";
 import type { WorkMapAttempt, WorkMapState, WorkMapStateStore } from "./state.ts";
 import { WORK_MAP_FILE } from "./write.ts";
 
@@ -73,15 +76,38 @@ export function memoryStateStore(): WorkMapStateStore {
   };
 }
 
+/** `abs` with symlinks resolved; a path not made yet resolves through its
+ *  nearest existing ancestor. Throws when no ancestor resolves. */
+function canonical(abs: string): string {
+  const rest: string[] = [];
+  let at = path.resolve(abs);
+  for (;;) {
+    try {
+      return path.join(realpathSync(at), ...rest.reverse());
+    } catch (err) {
+      const parent = path.dirname(at);
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT" || parent === at) throw err;
+      rest.push(path.basename(at));
+      at = parent;
+    }
+  }
+}
+
+/** Is `file` inside `root`, symlinks resolved? Unsure (a path that cannot be resolved) counts as inside. */
 const inside = (root: string, file: string) => {
-  const rel = path.relative(path.resolve(root), path.resolve(file));
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  let rel: string;
+  try {
+    rel = path.relative(canonical(root), canonical(file));
+  } catch {
+    return true;
+  }
+  return !(rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel));
 };
 
 export function dryRunDeps(opts: DryRunOptions): WorkMapRunDeps {
   const root = path.resolve(opts.entry.root);
   for (const [flag, file] of [["--out", opts.out], ["--save-answer", opts.saveAnswer]] as const) {
-    if (file && inside(root, file)) throw new Error(`${flag} ${file} is inside the wiki root; the dry run writes nothing there`);
+    if (file && inside(root, file)) throw new Error(`${flag} ${file} is inside the wiki root (or could not be resolved); the dry run writes nothing there`);
   }
   const mapPath = path.join(root, WORK_MAP_FILE);
   const readOrNull = async (file: string) => {
@@ -90,6 +116,17 @@ export function dryRunDeps(opts: DryRunOptions): WorkMapRunDeps {
     } catch {
       return null;
     }
+  };
+  // A given --previous must be a map of this wiki's kind: one that reads as
+  // none would turn the run into a first run without saying so.
+  const readPrevious = async (file: string) => {
+    const text = await readOrNull(file);
+    if (text === null) throw new Error(`--previous ${file} could not be read`);
+    const stored = readMapFile(text);
+    if (!stored) throw new Error(`--previous ${file} is not a work map file`);
+    const kind = workMapKindFromReaderText(await readOrNull(path.join(root, WIKI_READER_FILE)));
+    if (kind.ok && stored.kind !== kind.kind) throw new Error(`--previous ${file} is a ${stored.kind} map, not a ${kind.kind} map`);
+    return text;
   };
   let startedAt = 0;
   return {
@@ -104,7 +141,7 @@ export function dryRunDeps(opts: DryRunOptions): WorkMapRunDeps {
     registry: () => [{ ...opts.entry, root }],
     inputs: opts.inputs ?? realWarmInputDeps(),
     readText: async (abs) => {
-      if (path.resolve(abs) === mapPath) return opts.previous ? readOrNull(opts.previous) : null;
+      if (path.resolve(abs) === mapPath) return opts.previous ? readPrevious(opts.previous) : null;
       return readOrNull(abs);
     },
     exists: (abs) => Bun.file(abs).exists(),
