@@ -567,13 +567,15 @@ function retiredView<P extends EffortPageListing>(input: EffortViewInput<P>, r: 
 }
 
 /** The pane while the map loads, and when the wiki has none. */
-export function effortStatusHtml(input: { wiki: string; startHref: string; id: string }, kind: "loading" | "no-map" | "error", detail = ""): string {
+export function effortStatusHtml(input: { wiki: string; startHref: string; id: string }, kind: "loading" | "no-map" | "error" | "themes", detail = ""): string {
   const text =
     kind === "loading"
       ? "Loading the work map…"
       : kind === "no-map"
         ? "This wiki has no work map, so it has no effort pages."
-        : `Couldn’t load the work map${detail ? `: ${detail}` : "."}`;
+        : kind === "themes"
+          ? "This wiki's map holds themes, which have no page of their own yet. The start view's card shows this theme."
+          : `Couldn’t load the work map${detail ? `: ${detail}` : "."}`;
   return withFocusKeys(
     `<div class="wiki-effort wiki-effort-status" id="wikiEffortPage" data-effort="${esc(input.id)}" data-effort-status="${kind}">` +
     '<div class="wiki-article-head">' +

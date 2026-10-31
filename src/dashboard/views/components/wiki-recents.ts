@@ -41,7 +41,7 @@ import type { PickUpRow } from "./wiki-pick-up.ts";
 import {
   EFFORT_ALL_PREFIX,
   EFFORT_FOLD_PREFIX,
-  EFFORT_MOVING_STATES,
+  effortMayStartOpen,
   EFFORT_ROWS_SHOWN,
   EFFORTS_OPEN_DEFAULT,
   effortAllKey,
@@ -2072,13 +2072,13 @@ export function buildRail(input: RailInput): RailModel {
     return ages.length ? Math.min(...ages) : Math.min(...activityEfforts.get(id)!.rows.map((r) => r.ageMs));
   };
   // The folds that start open (D14): the EFFORTS_OPEN_DEFAULT most recently
-  // active among the efforts whose state moves (active, blocked, proposed)
-  // and that draw at least one row (a tie keeps rank order). A ghost-only fold
+  // active among the efforts whose state moves (active, blocked, proposed; on
+  // a themes map new and rising — `EFFORT_OPEN_STATES`) and that draw at least one row (a tie keeps rank order). A ghost-only fold
   // renders, but closed by default — its pages are under Pinned.
   const effortDefaultOpen = new Set(
     [...activityEfforts.entries()]
-      .map(([id, b], i) => ({ id, i, state: b.effort.state }))
-      .filter((x) => EFFORT_MOVING_STATES.includes(x.state) && effortDraws.get(x.id)!.drawn.length > 0)
+      .map(([id, b], i) => ({ id, i, effort: b.effort }))
+      .filter((x) => effortMayStartOpen(x.effort) && effortDraws.get(x.id)!.drawn.length > 0)
       .map((x) => ({ ...x, age: effortAge(x.id) }))
       .sort((a, b) => a.age - b.age || a.i - b.i)
       .slice(0, EFFORTS_OPEN_DEFAULT)

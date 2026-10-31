@@ -9,27 +9,46 @@ import path from "node:path";
 import { normalizeRelPath } from "../rel-path.ts";
 import { declaredEffortOf, pageNewerThanRun, pageNewestMs, roleFromFolder, type DatedPage } from "./ids.ts";
 import type { WorkMap, WorkMapEffort } from "./schema.ts";
+import type { ThemeMap, ThemeMapTheme } from "./theme-schema.ts";
 
-export interface JoinedEffortPage<P> {
+/** Either stored kind, as the GET serves it (`map-file.ts` parses by `kind`). */
+export type AnyWorkMap = WorkMap | ThemeMap;
+
+/** A themes map: the one stored kind that carries `kind`. */
+export function isThemeMap(map: AnyWorkMap): map is ThemeMap {
+  return (map as { kind?: unknown }).kind === "themes";
+}
+
+type PageRole = WorkMapEffort["pages"][number]["role"] | ThemeMapTheme["pages"][number]["role"];
+
+export interface JoinedEffortPage<P, R extends PageRole = WorkMapEffort["pages"][number]["role"]> {
   id: string;
-  role: WorkMapEffort["pages"][number]["role"];
+  role: R;
   derivedFrom?: string;
   page: P;
   /** Placed by the reader from the page's `effort:`, not by the run (P6). */
   joined?: true;
 }
 
-export type JoinedEffort<P> = Omit<WorkMapEffort, "pages"> & {
-  pages: JoinedEffortPage<P>[];
+type JoinedOf<E extends { pages: { role: PageRole }[] }, P> = Omit<E, "pages"> & {
+  pages: JoinedEffortPage<P, E["pages"][number]["role"]>[];
   /** Map pages of this effort that now declare another effort, and where to. */
   movedOut: { id: string; to: string }[];
 };
 
-export type JoinedWorkMap<P> = Omit<WorkMap, "efforts" | "loose" | "needsYou"> & {
-  efforts: JoinedEffort<P>[];
-  needsYou: (WorkMap["needsYou"][number] & { pages: string[] })[];
+export type JoinedEffort<P> = JoinedOf<WorkMapEffort, P>;
+/** A theme joined: the theme fields (`takeaway`, `hubs`, `weekly`, …) kept. */
+export type JoinedTheme<P> = JoinedOf<ThemeMapTheme, P>;
+
+type JoinedMapOf<M extends AnyWorkMap, E, P> = Omit<M, "efforts" | "loose" | "needsYou"> & {
+  efforts: E[];
+  needsYou: (M["needsYou"][number] & { pages: string[] })[];
   loose: P[];
 };
+
+export type JoinedWorkMap<P> = JoinedMapOf<WorkMap, JoinedEffort<P>, P>;
+export type JoinedThemeMap<P> = JoinedMapOf<ThemeMap, JoinedTheme<P>, P>;
+export type JoinedAnyMap<P> = JoinedWorkMap<P> | JoinedThemeMap<P>;
 
 /** The listing fields the join reads. */
 export type JoinablePage = { relPath: string; effort?: string } & DatedPage;
@@ -55,8 +74,20 @@ export type JoinablePage = { relPath: string; effort?: string } & DatedPage;
  * Joined pages list first in their effort, newest first ({@link pageNewestMs}:
  * an uncommitted edit counts its mtime). `now` is the future-date guard's
  * clock. An unknown or invalid id moves nothing.
+ *
+ * A themes map joins the same way: a theme has no `why`/`next` (left absent),
+ * its prose fields `takeaway` and `disagreement` get the marker rewrite, and
+ * every other theme field rides through. A page declaring a theme joins it as
+ * a `source`.
  */
-export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonly P[], now: number = Date.now()): JoinedWorkMap<P> {
+export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonly P[], now?: number): JoinedWorkMap<P>;
+export function joinWorkMap<P extends JoinablePage>(map: ThemeMap, pages: readonly P[], now?: number): JoinedThemeMap<P>;
+export function joinWorkMap<P extends JoinablePage>(map: AnyWorkMap, pages: readonly P[], now?: number): JoinedAnyMap<P>;
+export function joinWorkMap<P extends JoinablePage>(anyMap: AnyWorkMap, pages: readonly P[], now: number = Date.now()): JoinedAnyMap<P> {
+  // One code path for both kinds; the work branch reads exactly what it read
+  // before, so a work map joins byte-identically.
+  const themes = isThemeMap(anyMap);
+  const map = anyMap as WorkMap;
   // Anchored to the run: a viewer clock behind it must not make post-run dates look future.
   const clock = Math.max(now, map.runAtMs);
   const byKey = new Map(pages.map((p) => [normalizeRelPath(p.relPath), p]));
@@ -76,11 +107,13 @@ export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonl
         const from = pg.derivedFrom !== undefined ? find(pg.derivedFrom) : undefined;
         joined.push({ id: page.relPath, role: pg.role, ...(from ? { derivedFrom: from.relPath } : {}), page });
       }
+      const t = e as unknown as Partial<ThemeMapTheme>;
       return {
         ...e,
         oneLine: text(e.oneLine),
-        why: text(e.why),
-        next: text(e.next),
+        ...(themes
+          ? { takeaway: text(t.takeaway ?? ""), disagreement: text(t.disagreement ?? "") }
+          : { why: text(e.why), next: text(e.next) }),
         related: e.related.map((r) => ({ ...r, why: text(r.why) })),
         pages: joined,
         movedOut: [],
@@ -100,7 +133,7 @@ export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonl
     if (home?.id === slug) continue;
     const inMap = home !== undefined || looseKeys.has(key);
     if (!inMap && !pageNewerThanRun(page, map.runAtMs, clock)) continue;
-    let role: JoinedEffortPage<P>["role"] = roleFromFolder(page.relPath);
+    let role: JoinedEffortPage<P>["role"] = themes ? ("source" as unknown as JoinedEffortPage<P>["role"]) : roleFromFolder(page.relPath);
     if (home) {
       const at = home.pages.findIndex((p) => normalizeRelPath(p.id) === key);
       role = home.pages[at]!.role;
@@ -129,7 +162,7 @@ export function joinWorkMap<P extends JoinablePage>(map: WorkMap, pages: readonl
       pages: n.pages.map(find).filter((p): p is P => !!p).map((p) => p.relPath),
     })),
     loose,
-  };
+  } as JoinedAnyMap<P>;
 }
 
 /**

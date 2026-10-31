@@ -387,6 +387,9 @@ export const E2E_PORTS = {
   // claude-usage so Work threads and Pick up are on screen too.
   "wiki-rail-efforts": 3192,
   "wiki-rail-efforts/ledger": 3193,
+  // Theme map P2: the What you're following card and the rail's theme folds,
+  // over a seeded themes map.
+  "wiki-theme-card": 3194,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

@@ -16,8 +16,14 @@ import {
   workCardHtml,
   writeDone,
   WORK_MAP_STALE_MS,
+  THEME_STRIP_WEEKS,
+  themeActiveLabel,
+  themeConnections,
+  weeklyStripHtml,
   type WorkMapGetBody,
 } from "./wiki-work-card.ts";
+import { fixtureTheme, fixtureThemeMap, fixtureThemePages, THEME_RUN_AT } from "../../../test/theme-map-fixture.ts";
+import type { ThemeMap } from "../../../wiki/work-map/theme-schema.ts";
 
 const NOW = Date.parse("2026-10-29T12:00:00");
 const HOUR = 3_600_000;
@@ -250,5 +256,111 @@ describe("↻", () => {
     expect(pollState({ map: m, organizable: true, lastAttempt: { at: NOW - 1, outcome: "failed" } }, m.runAtMs, NOW).state).toBe("pending");
     const s = pollState({ map: m, organizable: true, lastAttempt: { at: NOW, outcome: "refused", error: "cold" } }, m.runAtMs, NOW);
     expect(s).toEqual({ state: "settled", attempt: { at: NOW, outcome: "refused", error: "cold" } });
+  });
+});
+
+describe("What you're following (a themes map, theme map P2)", () => {
+  const T_NOW = THEME_RUN_AT + 2 * HOUR;
+  const themeCard = (m: ThemeMap = fixtureThemeMap(), done = new Set<string>()) =>
+    workCardHtml({
+      body: { map: m, organizable: true },
+      pages: fixtureThemePages(),
+      now: T_NOW,
+      done,
+      hrefFor: href,
+      effortHref: (id) => `/wiki?effort=${id}`,
+      refresh: { phase: "idle" },
+    });
+
+  test("the head, Worth a look and the coverage read the themes words", () => {
+    const html = themeCard();
+    expect(html).toContain('<span class="wiki-wn-title">What you’re following</span>');
+    expect(html).not.toContain("Your work");
+    expect(html).toContain("Worth a look");
+    expect(html).not.toContain("Needs you");
+    expect(html).toContain('<div class="wiki-wm-coverage">9 sources in 28 days · 3 hubs</div>');
+    expect(html).not.toContain("active page");
+  });
+
+  test("a drift item shows the runner's count; another kind shows its sources; hubs render as chips", () => {
+    const html = themeCard();
+    expect(html).toContain(">12 new since update</span>");
+    expect(html).toContain(">2 sources</span>");
+    expect(html).toContain('<span class="wiki-wm-hub"><a class="wiki-wm-link" href="/wiki?relPath=concepts%2FHub%20X.md" data-relpath="concepts/Hub X.md">Hub X</a></span>');
+  });
+
+  test("✓ hides an item by its needKey", () => {
+    const html = themeCard(fixtureThemeMap(), new Set([needKey({ kind: "drift", title: "Hub X is behind its sources" })]));
+    expect(html).not.toContain("12 new since update");
+    expect(html).toContain("1 done · show");
+  });
+
+  test("Connected lists each pair once, A ↔ B: why, with the first end's why", () => {
+    const html = themeCard();
+    const conns = [...html.matchAll(/data-wm-conn="([^"]+)"/g)].map((m) => m[1]);
+    expect(conns).toEqual(["alpha|beta", "beta|gamma"]);
+    expect(html).toContain("Both lean on Hub X.");
+    expect(html).not.toContain("The other end");
+    expect(html).toMatch(/data-effort-link="alpha">Theme alpha<\/a> <span class="wiki-wm-conn-arrow"[^>]*>↔<\/span> <a [^>]*data-effort-link="beta">Theme beta<\/a><span class="wiki-wm-conn-why">: Both lean on Hub X\.<\/span>/);
+  });
+
+  test("lanes New, Rising, Steady, Fading in that order, Fading closed; Life follows the AI lanes", () => {
+    const html = themeCard();
+    const lanes = [...html.matchAll(/<details class="wiki-wm-lane[^"]*" data-wm-lane="([a-z]+)"( open)?>/g)].map((m) => `${m[1]}${m[2] ? "+" : ""}`);
+    expect(lanes).toEqual(["new+", "rising+", "steady+", "fading", "life+"]);
+    const life = html.slice(html.indexOf('data-wm-lane="life"'));
+    expect(life).toContain(">Life <span");
+    expect(life).toContain('data-effort-id="life-one"');
+    expect(html.indexOf('data-effort-id="life-one"')).toBeGreaterThan(html.indexOf('data-effort-id="delta"'));
+  });
+
+  test("each theme carries a weekly strip, its hubs and its sources", () => {
+    const html = themeCard();
+    expect((html.match(/class="wiki-wm-weeks"/g) ?? []).length).toBe(5);
+    const alpha = html.slice(html.indexOf('data-effort-id="alpha"'), html.indexOf("</li>", html.indexOf('data-effort-id="alpha"')));
+    expect(alpha).toContain("2 sources · this week");
+    expect(alpha).toContain('aria-label="7 sources over the last 3 weeks"');
+    expect(alpha).toContain('data-relpath="sources/alpha-2.mdx"');
+  });
+
+  test("a work map renders unchanged words (no themes branch)", () => {
+    const html = card(map());
+    expect(html).toContain('<span class="wiki-wn-title">Your work</span>');
+    expect(html).toContain("Needs you");
+    expect(html).not.toContain("wiki-wm-need-count");
+  });
+});
+
+describe("theme helpers", () => {
+  test("lastActiveDays reads the newest week with a source, from its Sunday", () => {
+    const t = fixtureTheme("x");
+    // W44 starts Monday 2026-10-26; its Sunday is 2026-11-01, after T_NOW.
+    expect(lastActiveDays(t, Date.parse("2026-10-30T12:00:00"))).toBe(0);
+    expect(lastActiveDays(t, Date.parse("2026-11-04T12:00:00"))).toBe(3);
+    expect(lastActiveDays(fixtureTheme("y", { weekly: [{ week: "2026-W40", start: "2026-09-28", count: 0 }] }), NOW)).toBeNull();
+    // A week with no source does not count: delta's newest active week is W40.
+    const delta = fixtureTheme("d", { weekly: [{ week: "2026-W40", start: "2026-09-28", count: 3 }, { week: "2026-W41", start: "2026-10-05", count: 0 }] });
+    expect(lastActiveDays(delta, Date.parse("2026-10-30T12:00:00"))).toBe(26);
+    expect(themeActiveLabel(26)).toBe("4 wk ago");
+    expect([0, 1, 7, 8].map(themeActiveLabel)).toEqual(["this week", "last week", "last week", "2 wk ago"]);
+  });
+
+  test("lastActiveDays on a work effort still reads daily", () => {
+    expect(lastActiveDays({ daily: [{ day: "2026-10-27", commits: 1, sessions: 0 }] }, NOW)).toBe(2);
+  });
+
+  test("the strip shows the newest weeks only, oldest first, with partial weeks marked", () => {
+    const weekly = Array.from({ length: THEME_STRIP_WEEKS + 2 }, (_, i) => ({ week: `W${i}`, start: `2026-08-${String(i + 10).padStart(2, "0")}`, count: i, ...(i === 9 ? { partial: true } : {}) }));
+    const html = weeklyStripHtml(weekly.reverse());
+    const titles = [...html.matchAll(/title="([^"]+)"/g)].map((m) => m[1]!.split(" ")[0]);
+    expect(titles).toEqual(["W2", "W3", "W4", "W5", "W6", "W7", "W8", "W9"]);
+    expect(html).toContain('class="wiki-wm-week lvl-4 partial"');
+    expect(weeklyStripHtml([])).toBe("");
+  });
+
+  test("themeConnections drops a link to a theme not listed and a self link", () => {
+    const a = { id: "a", related: [{ id: "a", why: "self" }, { id: "gone", why: "x" }, { id: "b", why: "ab" }] };
+    const b = { id: "b", related: [{ id: "a", why: "ba" }] };
+    expect(themeConnections([a, b]).map((c) => [c.a.id, c.b.id, c.why])).toEqual([["a", "b", "ab"]]);
   });
 });

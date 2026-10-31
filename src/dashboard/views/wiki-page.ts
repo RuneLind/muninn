@@ -2660,6 +2660,25 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-next { margin-top: 3px; color: var(--text-secondary); overflow-wrap: anywhere; }
     .wiki-wm-next-label { color: var(--text-soft); font-weight: 600; }
     .wiki-wm-coverage { font-size: 11px; color: var(--text-soft); margin-top: 10px; }
+    /* What you're following (themes map, theme map P2). */
+    .wm-state-new, .wm-state-rising { background: var(--tint-purple); color: var(--accent-light); }
+    .wiki-wm-need-count {
+      font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+      background: var(--tint-warning); color: var(--tone-warn);
+    }
+    .wiki-wm-hubs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; font-size: 11.5px; }
+    .wiki-wm-hub { padding: 1px 7px; border-radius: 999px; background: var(--tint-neutral); min-width: 0; overflow-wrap: anywhere; }
+    .wiki-wm-weeks { display: flex; align-items: flex-end; gap: 2px; height: 18px; margin-top: 4px; }
+    .wiki-wm-week { width: 10px; min-height: 2px; border-radius: 2px 2px 0 0; background: var(--accent-light); }
+    .wiki-wm-week.lvl-0 { height: 2px; background: var(--border-secondary); }
+    .wiki-wm-week.lvl-1 { height: 25%; } .wiki-wm-week.lvl-2 { height: 50%; }
+    .wiki-wm-week.lvl-3 { height: 75%; } .wiki-wm-week.lvl-4 { height: 100%; }
+    .wiki-wm-week.partial { opacity: 0.55; }
+    .wiki-wm-conns { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
+    .wiki-wm-conn { padding: 3px 0; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-wm-conn-arrow { color: var(--text-soft); }
+    .wiki-wm-conn-why { color: var(--text-secondary); }
+    .wiki-wm-life { margin-top: 12px; }
     .wiki-wm-warnings { margin: 4px 0 0 18px; padding: 0; font-size: 11.5px; color: var(--tone-warn); }
     /* A linked effort name reads as a link at rest (WCAG 1.4.1), as .wiki-wm-link does. */
     a.wiki-wm-effort-name {

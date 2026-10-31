@@ -35,7 +35,7 @@ import {
   type RefreshView,
   type WorkMapGetBody,
 } from "./wiki-work-card.ts";
-import type { WorkMap } from "../../../wiki/work-map/schema.ts";
+import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
 import { declarationKey } from "../../../wiki/work-map/join.ts";
 import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
 
@@ -723,7 +723,7 @@ export function mountStartCards(): void {
  *  it through `transition`, and `applySlot` alone sets the two cards' visibility. */
 let slot: SlotState = INITIAL_SLOT;
 /** The last GET body with a map; reused across start-view renders. */
-let workBody: (WorkMapGetBody & { map: WorkMap }) | null = null;
+let workBody: (WorkMapGetBody & { map: AnyWorkMap }) | null = null;
 let workRefresh: RefreshView = { phase: "idle" };
 let workPollTimer: ReturnType<typeof setTimeout> | null = null;
 /** The generation of the GET in flight, if any. */
@@ -1046,7 +1046,7 @@ function loadWorkMap(): void {
       if (!body.map) return transition({ type: "get-refused", gen });
       transition({ type: "get-map", gen });
       if (slot.kind !== "card") return;
-      workBody = body as WorkMapGetBody & { map: WorkMap };
+      workBody = body as WorkMapGetBody & { map: AnyWorkMap };
       paintWorkCard();
     })
     .catch((err) => {
@@ -1102,7 +1102,7 @@ function pollWorkMap(prevRunAt: number, startedAt: number, since: number, failur
       .then((body) => {
         if (!slotLive(slot, gen)) return;
         const st = pollState(body, prevRunAt, startedAt);
-        if (body.map) workBody = body as WorkMapGetBody & { map: WorkMap };
+        if (body.map) workBody = body as WorkMapGetBody & { map: AnyWorkMap };
         deps.adoptWorkMap?.(body);
         if (st.state === "updated") {
           workRefresh = { phase: "idle" };

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { declarationKey, joinWorkMap } from "./join.ts";
+import { declarationKey, joinWorkMap, type JoinablePage, type JoinedWorkMap } from "./join.ts";
 import { WORK_MAP_VERSION, type WorkMap } from "./schema.ts";
+import { readMapFile } from "./map-file.ts";
+import { fixtureTheme, fixtureThemeMap, fixtureThemePages, THEME_RUN_AT } from "../../test/theme-map-fixture.ts";
 
 /** Every prose field the map carries cites `m` once. */
 function mapCiting(m: string, pages: string[]): WorkMap {
@@ -32,7 +34,7 @@ function mapCiting(m: string, pages: string[]): WorkMap {
   };
 }
 
-function prose(j: ReturnType<typeof joinWorkMap>): string[] {
+function prose(j: JoinedWorkMap<JoinablePage>): string[] {
   const e = j.efforts[0]!;
   const n = j.needsYou[0]!;
   return [j.summary, n.title, n.why, n.action, e.oneLine, e.why, e.next, e.related[0]!.why];
@@ -201,5 +203,40 @@ describe("declarationKey", () => {
     expect(declarationKey([{ relPath: "x.md", effort: "e" }, { relPath: "y.md", effort: "e", gitTouchedMs: 1 }], 10)).not.toBe(a);
     expect(declarationKey([{ relPath: "y.md", effort: "f", gitTouchedMs: 1 }], 10)).not.toBe(a);
     expect(declarationKey([{ relPath: "y.md", effort: "e", gitTouchedMs: 1, gitDirty: true }], 10)).not.toBe(a);
+  });
+});
+
+describe("joinWorkMap on a themes map (theme map P2)", () => {
+  const map = fixtureThemeMap();
+  const pages = fixtureThemePages();
+
+  test("the stored fixture parses as a themes map", () => {
+    expect(readMapFile(JSON.stringify(map))?.kind).toBe("themes");
+  });
+
+  test("joins without why/next and keeps every theme field", () => {
+    const j = joinWorkMap(map, pages);
+    const a = j.efforts.find((e) => e.id === "alpha")!;
+    expect("why" in a || "next" in a).toBe(false);
+    expect(a.hubs).toEqual(["concepts/Hub X.md"]);
+    expect(a.weekly).toEqual(map.efforts[0]!.weekly);
+    expect(a.readFirst).toEqual(["sources/alpha-1.mdx"]);
+    expect(a.domain).toBe("ai");
+    expect(a.trend).toEqual({ recent: 4, earlier: 2 });
+    expect(a.pages.map((p) => [p.id, p.role])).toEqual([["sources/alpha-1.mdx", "source"], ["sources/alpha-2.mdx", "source"]]);
+    expect(j.needsYou[0]).toMatchObject({ kind: "drift", count: 12, hubs: ["concepts/Hub X.md"] });
+    expect(j.coverage.activeSources).toBe(9);
+    expect(j.kind).toBe("themes");
+  });
+
+  test("takeaway and disagreement get the marker rewrite: a page gone from the listing reads as its stem", () => {
+    const j = joinWorkMap(fixtureThemeMap({ efforts: [fixtureTheme("t", { disagreement: "⟦sources/Gone.mdx⟧ disagrees" })] }), [{ relPath: "sources/t-1.mdx" }]);
+    expect(j.efforts[0]!.takeaway).toBe("Takeaway for t, see ⟦sources/t-1.mdx⟧.");
+    expect(j.efforts[0]!.disagreement).toBe("Gone disagrees");
+  });
+
+  test("a page declaring a theme joins it as a source", () => {
+    const j = joinWorkMap(map, [...pages, { relPath: "plans/new.md", effort: "gamma", gitTouchedMs: THEME_RUN_AT + 60_000 }], THEME_RUN_AT + 120_000);
+    expect(j.efforts.find((e) => e.id === "gamma")!.pages[0]).toMatchObject({ id: "plans/new.md", role: "source", joined: true });
   });
 });
