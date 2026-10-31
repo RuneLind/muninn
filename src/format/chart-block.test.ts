@@ -421,18 +421,65 @@ describe("bars and range cells", () => {
     expect(bars.model?.kind === "bars" && bars.model.log).toBe(false);
   });
 
-  test("dates, months, clock times and years read in neither kind", () => {
-    const spans = ["10.2024–12.2024", "01.25–03.25", "09.00–11.30", "20.06–20.25", "09.52–09.53", "00.00–00.04"];
-    for (const cell of spans) expect({ cell, m: read("range", [cell]).model }).toEqual({ cell, m: null });
+  // One test per branch of the date rule (`isDateCell`, `numericProof`, `namesDate`).
+  const under = (kind: "bars" | "range", header: string, cells: string[]) =>
+    chart(`<Chart kind="${kind}" value="${header}">`, ["Row", header], cells.map((c, i) => [`r${i}`, c]));
+  const drawn = (r: ChartRead) => (r.model ? "read" : r.findings.some((f) => f.message.includes("holds dates")) ? "column" : "row");
+
+  test("a leading zero or MM.YYYY is a date under any header and beside any decimal", () => {
     for (const kind of ["bars", "range"] as const) {
-      for (const cells of [["2024"], ["01.10"], ["03.07"], ["18.09"], ["10.2024"], ["12.30"], ["18.09", "03.07"], ["2024", "2025"]]) {
-        expect({ kind, cells, m: read(kind, cells).model }).toEqual({ kind, cells, m: null });
+      for (const cells of [["03.07"], ["10.2024"], ["03.07", "1.5"], ["10.2024", "1.5"], ["03.07", "5"]]) {
+        expect({ kind, cells, r: drawn(under(kind, "V", cells)) }).toEqual({ kind, cells, r: cells.length > 1 ? "row" : "column" });
       }
-      // A leading zero or MM.YYYY is a date in any column; a whole column of date shapes is named.
-      for (const cells of [["01.10", "5"], ["10.2024", "5"]]) expect({ kind, cells, m: read(kind, cells).model }).toEqual({ kind, cells, m: null });
-      expect(messages(read(kind, ["18.09", "2024"]))).toEqual(["V holds dates, times or years, not numbers"]);
     }
-    expect(read("range", ["09.00–11.30", "5"]).model).toBeNull();
+    for (const cells of [["01.10–05.10"], ["10.2024–12.2024"], ["00.00–00.04", "1.5"]]) {
+      expect({ cells, r: drawn(under("range", "V", cells)) }).toEqual({ cells, r: cells.length > 1 ? "row" : "column" });
+    }
+  });
+
+  test("a span whose ends share a date shape is a date, unless the column has a decimal no shape covers", () => {
+    // Year, clock and D.M spans, beside an integer (which proves nothing) and alone.
+    for (const span of ["2024–2025", "20.06–20.25", "1.10–31.12", "10.00–12.00"]) {
+      expect({ span, r: drawn(under("range", "V", [span, "5"])) }).toEqual({ span, r: "row" });
+      expect({ span, r: drawn(under("range", "V", [span])) }).toEqual({ span, r: "column" });
+      expect({ span, r: drawn(under("range", "V", [span, "1.5"])) }).toEqual({ span, r: "read" });
+    }
+    // Ends of different shapes (D.M and HH.MM) are no date and prove the column numeric.
+    expect(ends(under("range", "V", ["5.10–10.50", "1.05–12.30", "3", "10.00–12.00"]))).toEqual([[5.1, 10.5], [1.05, 12.3], [3, 3], [10, 12]]);
+    expect(drawn(under("range", "V", ["20.06–20.25", "1.05–12.30"]))).toBe("read");
+    expect(ends(under("range", "V", ["2024–2150"]))).toEqual([[2024, 2150]]);
+    // Under a date header too: the header rule needs a date shape on every end.
+    expect(ends(under("range", "År", ["2024–2150"]))).toEqual([[2024, 2150]]);
+  });
+
+  test("a single year, D.M or HH.MM is a date only under a date header", () => {
+    for (const kind of ["bars", "range"] as const) {
+      for (const cell of ["2024", "18.09", "12.30", "5.10"]) {
+        expect({ kind, cell, r: drawn(under(kind, "V", [cell, "5"])) }).toEqual({ kind, cell, r: "read" });
+        expect({ kind, cell, r: drawn(under(kind, "Tid", [cell, "5"])) }).toEqual({ kind, cell, r: "row" });
+        expect({ kind, cell, r: drawn(under(kind, "Tid", [cell])) }).toEqual({ kind, cell, r: "column" });
+        // A decimal no date shape covers proves the column numeric, under a date header too.
+        expect({ kind, cell, r: drawn(under(kind, "Tid", [cell, "1.75"])) }).toEqual({ kind, cell, r: "read" });
+      }
+      // Under a date header a cell with no date shape still reads.
+      expect(drawn(under(kind, "År", ["2150", "14"]))).toBe("read");
+      // Whole words in any case: «Kandidat siden» and ÅR name a date, «Tidsbruk» and «Antall» do not.
+      expect(drawn(under(kind, "Kandidat siden", ["18.09", "29.09"]))).toBe("column");
+      expect(drawn(under(kind, "ÅR", ["2025", "2024"]))).toBe("column");
+      expect(drawn(under(kind, "Tidsbruk", ["12.30", "14.25"]))).toBe("read");
+      expect(ends(under(kind, "Antall", ["2070", "2060", "2059"]))).toEqual(kind === "bars" ? [2070, 2060, 2059] : [[2070, 2070], [2060, 2060], [2059, 2059]]);
+    }
+    expect(ends(under("bars", "V", ["10.50", "14.25", "22.40"]))).toEqual([10.5, 14.25, 22.4]);
+    for (const header of ["År", "Årstall", "Year", "Dato", "Date", "Tid", "Tidspunkt", "Time", "Klokke", "Klokkeslett", "Kl", "Periode", "Period", "Uke", "Week", "Måned", "Month", "Siden", "Since", "Når", "When"]) {
+      expect({ header, r: drawn(under("bars", header, ["2024"])) }).toEqual({ header, r: "column" });
+    }
+  });
+
+  test("a sign or a unit makes a date shape a number", () => {
+    expect(ends(under("range", "Tid", ["$2024–2025", "$20.06–20.25"]))).toEqual([[2024, 2025], [20.06, 20.25]]);
+    expect(ends(under("bars", "År", ["2024 kr", "2025 kr"]))).toEqual([2024, 2025]);
+    expect(ends(under("bars", "År", ["$2024", "$2025"]))).toEqual([2024, 2025]);
+    expect(ends(under("range", "V", ["01.10–05.10 kr"]))).toEqual([[1.1, 5.1]]);
   });
 
   test("numbers that only look like dates still read", () => {

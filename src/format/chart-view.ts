@@ -516,14 +516,12 @@ function withRule(rows: readonly { total: boolean }[], html: string[]): string {
 
 // ── range ───────────────────────────────────────────────────────────────────
 
-/** The narrowest an interval draws, in track percent: `9999–10000` beside
- *  `0–10000` scales to 0.01 and would vanish, so it widens about its middle. */
-const MIN_INTERVAL_WIDTH = 1;
-
+/** An interval: its true extent, and under it a band at its middle with a
+ *  fixed pixel width (`.vc-span`, a non-scaling stroke), so an interval that
+ *  scales to under that width (`5000–5110` beside `0–10000` at 390 px) still
+ *  draws wider than a point's 3 px tick. */
 function intervalRect(a: number, b: number): string {
-  if (b - a >= MIN_INTERVAL_WIDTH) return rect("vc-value", a, b, 2, 8);
-  const x = Math.min(Math.max((a + b) / 2 - MIN_INTERVAL_WIDTH / 2, 0), 100 - MIN_INTERVAL_WIDTH);
-  return rect("vc-value", round2(x), round2(x + MIN_INTERVAL_WIDTH), 2, 8);
+  return `<line class="vc-span" x1="${round2((a + b) / 2)}" x2="${round2((a + b) / 2)}" y1="2" y2="10" vector-effect="non-scaling-stroke"/>` + rect("vc-value", a, b, 2, 8);
 }
 
 function rangeRows(model: Extract<ChartModel, { kind: "range" }>, logIds: ReadonlySet<string>): string {

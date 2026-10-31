@@ -85,14 +85,54 @@ export function readValueCell(cell: string, ctx: NumberContext): ChartValue | nu
 
 /** Leading approximation marks (`~`, `≈`, `ca.`) and currency signs on one end of an interval. */
 const END_SIGN_RE = /^((?:[~≈\p{Sc}]|ca\.)(?:\s*(?:[~≈\p{Sc}]|ca\.))*)\s*/iu;
-/** A yearless `D.M` date with a two-digit month, the shape `item-dates.ts` reads as one. */
-const DAY_MONTH_RE = /^(?:0?[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])$/;
-const YEAR_RE = /^(?:19|20)\d{2}$/;
-/** `DD.MM` or `HH.MM` with a two-digit integer part, `MM.YYYY`, or a year. */
-const DATE_LIKE_RE =
-  /^(?:(?:0[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])|(?:[01]\d|2[0-3])\.[0-5]\d|(?:0[1-9]|1[0-2])\.(?:19|20)\d{2}|(?:19|20)\d{2})$/;
+/** The shapes a number and a date, time or year share: a 19xx/20xx year, a
+ *  yearless `D.M` date with a two-digit month (the shape `item-dates.ts`
+ *  reads), and a `HH.MM` clock time with a two-digit hour. */
+const DATE_SHAPES: readonly RegExp[] = [/^(?:19|20)\d{2}$/, /^(?:0?[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])$/, /^(?:[01]\d|2[0-3])\.[0-5]\d$/];
 /** Date shapes no one writes as a decimal: a leading zero before the dot (`01.10`, `09.52`) or `MM.YYYY`. */
 const DATE_ONLY_RE = /^(?:0\d\.\d{2}|(?:0[1-9]|1[0-2])\.(?:19|20)\d{2})$/;
+/** Header words that name a date, time or year, matched whole and in any case. */
+const DATE_HEADER_WORDS: ReadonlySet<string> = new Set([
+  "år", "årstall", "year", "dato", "date", "tid", "tidspunkt", "time", "klokke", "klokkeslett", "kl",
+  "periode", "period", "uke", "week", "måned", "month", "siden", "since", "når", "when",
+]);
+
+/** How a value column reads a cell that has a date shape: `header` when its
+ *  header names a date (`DATE_HEADER_WORDS`), `numeric` when one of its
+ *  cells is a decimal no date shape covers (`numericProof`). */
+export interface DateColumn {
+  header: boolean;
+  numeric: boolean;
+}
+
+/** A cell read on its own, with no column (`readIntervalCell` called directly). */
+const NO_COLUMN: DateColumn = { header: false, numeric: false };
+
+function dateShapes(rest: string): number[] {
+  return DATE_SHAPES.flatMap((re, i) => (re.test(rest) ? [i] : []));
+}
+
+/** True when a header has a `DATE_HEADER_WORDS` word. */
+function namesDate(header: string): boolean {
+  return (header.toLowerCase().match(/\p{L}+/gu) ?? []).some((w) => DATE_HEADER_WORDS.has(w));
+}
+
+/** True when a cell can only be a number: an end with a decimal that is no
+ *  date shape (`1.5`, `14.75`), or a span whose ends share no shape
+ *  (`5.10–10.50`). An integer (`5`) proves nothing. */
+function numericProof(cell: string): boolean {
+  const { span, ends } = intervalEnds(splitValueCell(endSign(cell.trim()).rest).num);
+  const rests = ends.map((e) => e.rest);
+  if (!rests.some((r) => /\d[.,]\d/.test(r))) return false;
+  const shapes = rests.map(dateShapes);
+  if (shapes.some((x) => !x.length)) return true;
+  return span && !shapes[0]!.some((i) => shapes[1]!.includes(i));
+}
+
+/** The date rule of the value column headed `header` over its `cells`. */
+function dateColumnOf(header: string, cells: readonly string[]): DateColumn {
+  return { header: namesDate(header), numeric: cells.some((c) => !isBlankValue(c) && numericProof(c)) };
+}
 
 function endSign(end: string): { sign: string; rest: string } {
   const m = END_SIGN_RE.exec(end);
@@ -105,20 +145,18 @@ function intervalEnds(num: string): { span: boolean; ends: { sign: string; rest:
   return { span: !!m, ends: (m ? [m[1]!, m[2]!] : [num]).map((e) => endSign(e.trim())) };
 }
 
-/** True when an unsigned cell is a date or time on its own: a `DATE_ONLY_RE`
- *  end, or a span whose both ends are dates, times or years. */
-function isDateCell(span: boolean, ends: readonly { sign: string; rest: string }[]): boolean {
+/** True when an unsigned cell is a date, time or year, in this order: an end
+ *  in `DATE_ONLY_RE` always is; in a `numeric` column nothing else is; a span
+ *  whose ends share a date shape is (`2024–2025`, `20.06–20.25`); under a
+ *  date header a cell whose every end has a date shape is (`2024`, `18.09`). */
+function isDateCell(span: boolean, ends: readonly { sign: string; rest: string }[], col: DateColumn): boolean {
   if (ends.some((e) => e.sign)) return false;
   const rests = ends.map((e) => e.rest);
   if (rests.some((r) => DATE_ONLY_RE.test(r))) return true;
-  return span && (rests.every((r) => DAY_MONTH_RE.test(r) || DATE_LIKE_RE.test(r)) || rests.every((r) => YEAR_RE.test(r)));
-}
-
-/** True when an unsigned cell has every end date-like (`DATE_LIKE_RE`): a
- *  column of only such cells is dates, times or years, not numbers. */
-function isDateLikeCell(cell: string): boolean {
-  const { ends } = intervalEnds(splitValueCell(cell).num);
-  return ends.every((e) => !e.sign && DATE_LIKE_RE.test(e.rest));
+  if (col.numeric) return false;
+  const shapes = rests.map(dateShapes);
+  if (span && shapes[0]!.some((i) => shapes[1]!.includes(i))) return true;
+  return col.header && shapes.every((x) => x.length > 0);
 }
 
 /** A `range` cell: `a–b` (an en dash, or a hyphen with spaces around it) with
@@ -128,9 +166,9 @@ function isDateLikeCell(cell: string): boolean {
  *  qualifier (`each`, `per PR`, `/PR`), which is dropped. Null when it is none
  *  of these, when the ends carry different signs or units, when a leading sign
  *  and a trailing currency differ (`$40–80 EUR`), or when it is a date, time or
- *  year with no sign or unit (`isDateCell`: `01.10–05.10`, `2024–2025`,
- *  `09.00–11.30`, `01.10`). */
-export function readIntervalCell(cell: string, ctx: NumberContext): ChartInterval | null {
+ *  year with no sign or unit (`isDateCell` under `col`: `01.10–05.10`,
+ *  `2024–2025`, `09.00–11.30`, `01.10`). */
+export function readIntervalCell(cell: string, ctx: NumberContext, col: DateColumn = NO_COLUMN): ChartInterval | null {
   const { num, pm, ids } = splitValueCell(cell);
   if (pm !== null) return null;
   const read = (n: string): ChartInterval | null => {
@@ -141,7 +179,7 @@ export function readIntervalCell(cell: string, ctx: NumberContext): ChartInterva
     if (signs.size > 1 || units.size > 1 || vals.some((v) => !v)) return null;
     const sign = [...signs][0] ?? "";
     const unit = [...units][0] ?? "";
-    if (!unit && isDateCell(span, ends)) return null;
+    if (!unit && isDateCell(span, ends, col)) return null;
     const m = cellMeasure(sign, unit);
     return m && { lo: vals[0]!.n, hi: vals[vals.length - 1]!.n, text: num, sign, unit, ...m, ids };
   };
@@ -155,10 +193,10 @@ export function readIntervalCell(cell: string, ctx: NumberContext): ChartInterva
 /** A bars cell: a leading sign, `~`, `≈` or `ca.` read as one end of a range
  *  cell (`$89`), the rest a value cell (`± n`, ids), and a qualifier after a
  *  currency dropped as in `readIntervalCell`. Null for a date or no number. */
-function readBarCell(cell: string, ctx: NumberContext): { value: ChartValue; currency: string | null; measure: string } | null {
+function readBarCell(cell: string, ctx: NumberContext, col: DateColumn): { value: ChartValue; currency: string | null; measure: string } | null {
   const { sign, rest } = endSign(cell.trim());
   const read = (s: string) => {
-    const v = isDateCell(false, [{ sign, rest: splitValueCell(s).num }]) ? null : readValueCell(s, ctx);
+    const v = isDateCell(false, [{ sign, rest: splitValueCell(s).num }], col) ? null : readValueCell(s, ctx);
     const m = v && cellMeasure(sign, v.unit);
     return v && m ? { value: { ...v, text: splitValueCell(cell).num }, ...m } : null;
   };
@@ -428,13 +466,20 @@ class Reader {
     return null;
   }
 
-  /** A bars or range column whose every cell is date-like (`isDateLikeCell`)
-   *  holds dates, times or years: a finding. */
-  private dateColumn(i: number): boolean {
-    const cells = this.t.rows.map((_, r) => this.cell(r, i)).filter((c) => !isBlankValue(c));
-    if (!cells.length || !cells.every(isDateLikeCell)) return false;
+  /** The date rule of a bars or range column; null, with a finding, when
+   *  every cell of it is a date, time or year (`isDateCell`). */
+  private dateColumn(i: number): DateColumn | null {
+    const all = this.t.rows.map((_, r) => this.cell(r, i));
+    const col = dateColumnOf(this.t.headers[i] ?? "", all);
+    const cells = all.filter((c) => !isBlankValue(c));
+    // As the cell readers do: a unit on any end makes the cell a number.
+    const isDate = (c: string) => {
+      const { span, ends } = intervalEnds(splitValueCell(c).num);
+      return !ends.some((e) => parseCellValue(e.rest, this.ctx)?.unit) && isDateCell(span, ends, col);
+    };
+    if (!cells.length || !cells.every(isDate)) return col;
     this.fatal(`${this.t.headers[i]} holds dates, times or years, not numbers`);
-    return true;
+    return null;
   }
 
   /** The first column whose header is one of `names`; a finding when two are. */
@@ -638,10 +683,11 @@ class Reader {
 
   private bars(): ChartModel | null {
     const vi = this.column("value", true);
-    if (vi === null || this.dateColumn(vi)) return null;
+    const col = vi === null ? null : this.dateColumn(vi);
+    if (vi === null || !col) return null;
     const rows: BarsRow[] = [];
     const cells = this.t.rows.map((_, r) => this.cell(r, vi));
-    const reads = cells.map((c) => (isBlankValue(c) ? null : readBarCell(c, this.ctx)));
+    const reads = cells.map((c) => (isBlankValue(c) ? null : readBarCell(c, this.ctx, col)));
     const krone = resolveKrone(reads.map((x) => x?.currency ?? null));
     let first: { currency: string | null; measure: string } | null = null;
     this.t.rows.forEach((row, r) => {
@@ -672,12 +718,13 @@ class Reader {
 
   private range(): ChartModel | null {
     const vi = this.column("value", true);
-    if (vi === null || this.dateColumn(vi)) return null;
+    const col = vi === null ? null : this.dateColumn(vi);
+    if (vi === null || !col) return null;
     const rows: RangeRow[] = [];
     let signed: { sign: string; code: string; label: string } | null = null;
     let first: { unit: string; text: string } | null = null;
     const cells = this.t.rows.map((_, r) => this.cell(r, vi));
-    const reads = cells.map((c) => (isBlankValue(c) ? null : readIntervalCell(c, this.ctx)));
+    const reads = cells.map((c) => (isBlankValue(c) ? null : readIntervalCell(c, this.ctx, col)));
     const krone = resolveKrone(reads.map((x) => x?.currency ?? null));
     this.t.rows.forEach((row, r) => {
       const label = row[0] ?? "";

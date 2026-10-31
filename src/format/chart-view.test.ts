@@ -410,24 +410,27 @@ describe("range", () => {
     expect(plot.match(/vc-rule/g)).toHaveLength(1);
   });
 
-  test("a narrow interval keeps a visible width; only a true point is a tick", () => {
-    const widths = (html: string) =>
+  test("an interval draws its true extent and a fixed-width band at its midpoint; only a true point is a tick", () => {
+    // Per row: the rect's x and width, and the band's x1/x2, in track percent.
+    const shapes = (html: string) =>
       Object.fromEntries(
-        [...html.split('class="vc-table')[0]!.matchAll(/<title>([^:<]*):[^<]*<\/title>(.*?)<\/svg>/g)].map((m) => [
-          m[1],
-          m[2]!.includes("vc-point") ? "point" : Number(/class="vc-value"[^>]*width="([\d.]+)"/.exec(m[2]!)?.[1]),
-        ]),
+        [...html.split('class="vc-table')[0]!.matchAll(/<title>([^:<]*):[^<]*<\/title>(.*?)<\/svg>/g)].map((m) => {
+          if (m[2]!.includes("vc-point")) return [m[1], "point"];
+          const r = /class="vc-value" x="([\d.]+)" y="2" width="([\d.]+)"/.exec(m[2]!)!;
+          const band = /<line class="vc-span" x1="([\d.]+)" x2="([\d.]+)" y1="2" y2="10" vector-effect="non-scaling-stroke"\/>/.exec(m[2]!);
+          return [m[1], { x: Number(r[1]), w: Number(r[2]), band: band && [Number(band[1]), Number(band[2])] }];
+        }),
       );
-    const w = widths(range(["| all | 0–10000 |", "| low | 100–100.5 |", "| top | 9999–10000 |", "| one | 5000 |"]));
-    expect(w.low).toBe(1);
-    expect(w.top).toBe(1);
-    expect(w.one).toBe("point");
-    expect(w.all).toBeGreaterThan(90);
-    const tiny = widths(range(["| all | 0–1000 |", "| mid | 500–500.01 |", "| same | 500–500 |"]));
-    expect(tiny.mid).toBe(1);
+    // 0–10000 on a 0–10400 axis (4 % pad): 1 % of the axis is 104.
+    const s = shapes(range(["| all | 0–10000 |", "| low | 100–152 |", "| top | 9896–10000 |", "| mid | 5000–5110 |", "| one | 5000 |"]));
+    expect(s.all).toEqual({ x: 0, w: 96.15, band: [48.08, 48.08] });
+    expect(s.low).toEqual({ x: 0.96, w: 0.5, band: [1.21, 1.21] });
+    expect(s.top).toEqual({ x: 95.15, w: 1, band: [95.65, 95.65] });
+    expect(s.mid).toEqual({ x: 48.08, w: 1.05, band: [48.61, 48.61] });
+    expect(s.one).toBe("point");
+    const tiny = shapes(range(["| all | 0–1000 |", "| mid | 500–500.01 |", "| same | 500–500 |"]));
+    expect(tiny.mid).toEqual({ x: 48.08, w: 0, band: [48.08, 48.08] });
     expect(tiny.same).toBe("point");
-    const edge = range(["| all | 0–10000 |", "| base | 0–1 |"]).split('class="vc-table')[0]!;
-    expect(edge).toMatch(/base: 0–1<\/title>.*?class="vc-value" x="0" y="2" width="1"/);
   });
 
   test("a mixed sign is a note under the drawn chart; a flipped interval falls back to the table", () => {

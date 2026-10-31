@@ -311,6 +311,37 @@ const contrast = (c: Locator, sel: string, prop: "fill" | "stroke") =>
     [sel, prop],
   );
 
+/** The pixels a row's marks matching `sel` paint across the middle of its
+ *  plot, hit-tested every quarter pixel, so a non-scaling stroke counts at
+ *  its drawn width; and the plot's box, for positions in track percent. */
+async function painted(row: Locator, sel: string): Promise<{ left: number; width: number; svgX: number; svgW: number }> {
+  await row.locator(".vc-track").scrollIntoViewIfNeeded();
+  return row.locator("svg.vc-svg").evaluate((svg, s) => {
+    const b = svg.getBoundingClientRect();
+    const y = b.y + b.height / 2;
+    const hits: number[] = [];
+    for (let x = Math.floor(b.x) - 12; x <= Math.ceil(b.right) + 12; x += 0.25) {
+      const e = document.elementFromPoint(x, y);
+      if (e && svg.contains(e) && e.matches(s)) hits.push(x);
+    }
+    return { left: hits[0] ?? NaN, width: hits.length ? hits[hits.length - 1]! - hits[0]! + 0.25 : 0, svgX: b.x, svgW: b.width };
+  }, sel);
+}
+
+/** P5 ($100–101 beside $470, 0.2 % of the track) paints the 8 px band centred
+ *  on its midpoint (20.56 % of the axis, which ends at $488.80); P4, a point,
+ *  paints a 3 px tick. Measured in pixels, at the caller's width. */
+async function checkNarrowInterval(plot: Locator, what: string): Promise<void> {
+  const narrow = await painted(plot.locator(".vc-row", { hasText: "P5 — typo" }), ".vc-span, .vc-value");
+  const point = await painted(plot.locator(".vc-row", { hasText: "P4 — note" }), ".vc-point");
+  expect(narrow.width, what).toBeGreaterThanOrEqual(7.5);
+  expect(narrow.width, what).toBeLessThanOrEqual(8.5);
+  expect(point.width, what).toBeLessThanOrEqual(3.5);
+  expect(narrow.width, what).toBeGreaterThan(2 * point.width);
+  const centre = narrow.left + narrow.width / 2;
+  expect(Math.abs(centre - (narrow.svgX + narrow.svgW * 0.2056)), what).toBeLessThanOrEqual(1);
+}
+
 /** The bars and range checks every theme runs: tokens, the log scale, the point, the narrow interval, the rule. */
 async function checkBarsAndRange(page: Page, what: string): Promise<void> {
   const paint = (c: Locator, sel: string, prop: "fill" | "stroke" | "borderTopColor" | "strokeWidth") =>
@@ -340,10 +371,7 @@ async function checkBarsAndRange(page: Page, what: string): Promise<void> {
   expect(parseFloat(await paint(range, ".vc-plot:not([hidden]) .vc-point", "strokeWidth")), what).toBeGreaterThanOrEqual(2);
   expect(await point.evaluate((e) => e.closest("svg")!.querySelector("title")!.textContent), what).toBe("P4 — note: $40");
   expect(await paint(range, ".vc-plot:not([hidden]) .vc-point", "stroke"), what).toBe(await token(page, "--accent"));
-  // $100–101 beside $470 is 0.2 % of the track; it draws at the 1 % minimum.
-  const narrowRow = plot.locator(".vc-row", { hasText: "P5 — typo" });
-  const [narrow, track] = [(await narrowRow.locator(".vc-value").boundingBox())!, (await narrowRow.locator(".vc-track").boundingBox())!];
-  expect(narrow.width / track.width, what).toBeGreaterThanOrEqual(0.009);
+  await checkNarrowInterval(plot, what);
   const rule = (await plot.locator(".vc-rule").boundingBox())!;
   expect(rule.height, what).toBeGreaterThanOrEqual(1);
   expect(await paint(range, ".vc-plot:not([hidden]) .vc-rule", "borderTopColor"), what).toBe(await token(page, "--text-muted"));
@@ -713,6 +741,13 @@ test.describe("Wiki reader: Chart", () => {
     expect(await all(range, ".vc-plot:not([hidden]) .vc-point", "stroke")).toEqual([highlight]);
     expect(await all(range, ".vc-plot:not([hidden]) .vc-rule", "borderTopColor")).toEqual([text]);
   });
+
+  for (const width of [390, 320]) {
+    test(`${width} px focus: a narrow interval paints wider than a point, centred on its midpoint`, async ({ page }) => {
+      await open(page, width, true);
+      await checkNarrowInterval(visiblePlot(chart(page, "range")), `${width} px`);
+    });
+  }
 
   for (const scheme of ["dark", "light"] as const) {
     test(`390 px focus, ${scheme}: nothing runs past the page or a section, labels wrap, steps labels stay whole`, async ({ page }) => {
