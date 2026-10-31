@@ -508,6 +508,107 @@ describe("range units", () => {
   });
 });
 
+// The cell-grammar state table (fix round 2): one row per cell shape or column pair, each its own test.
+// A row is [id, kind, column cells, the rows drawn ("lo–hi" or "n", null for no chart), the findings].
+const GRAMMAR: [string, "bars" | "range", string[], string | null, string[]][] = [
+  ["A1", "range", ["$40–80"], "40–80", []],
+  ["A1b", "bars", ["$40"], "40", []],
+  ["A2", "range", ["€50"], "50–50", []],
+  ["A3", "range", ["$40–80","€50–60"], "40–80, 50–60", ["note: row \"r1\": € differs from $ in row \"r0\""]],
+  ["A3b", "bars", ["$40","€50"], null, ["fatal: row \"r1\": $40 and €50 are not in the same unit"]],
+  ["B1", "range", ["40–80 €"], "40–80", []],
+  ["B1b", "bars", ["40 €"], "40", []],
+  ["B2", "range", ["$40–80","40–80 €"], "40–80, 40–80", ["note: row \"r1\": € differs from $ in row \"r0\""]],
+  ["C1", "range", ["40–80 USD"], "40–80", []],
+  ["C2", "range", ["40–80 usd","$1–2"], "40–80, 1–2", []],
+  ["C3", "range", ["$40–80","40–80 eur"], "40–80, 40–80", ["note: row \"r1\": eur differs from $ in row \"r0\""]],
+  ["C4", "range", ["40–80 kr","50 Kr"], "40–80, 50–50", []],
+  ["C5", "range", ["40–80 KR","50 NOK"], "40–80, 50–50", []],
+  ["C6", "range", ["40 SEK","50 kr"], "40–40, 50–50", []],
+  ["C7", "range", ["40 DKK","50 Kr"], "40–40, 50–50", []],
+  ["C8", "range", ["40 CHF","50 chf"], "40–40, 50–50", []],
+  ["C9", "range", ["40 SEK","50 kr","60 NOK"], "40–40, 50–50, 60–60", ["note: row \"r1\": kr differs from SEK in row \"r0\"","note: row \"r2\": NOK differs from SEK in row \"r0\""]],
+  ["C10", "range", ["22,10 sek","2,55 sek"], "22.1–22.1, 2.55–2.55", []],
+  ["C11", "range", ["22,10 sek","40 SEK"], null, ["fatal: row \"r1\": 22,10 sek and 40 SEK are not in the same unit"]],
+  ["C12", "bars", ["40 USD","$50"], "40, 50", []],
+  ["C13", "bars", ["40 kr","50 Kr","60 NOK"], "40, 50, 60", []],
+  ["C14", "bars", ["40 SEK","50 kr"], "40, 50", []],
+  ["C15", "bars", ["40 SEK","50 NOK"], null, ["fatal: row \"r1\": 40 SEK and 50 NOK are not in the same unit"]],
+  ["D1", "range", ["$40–80 USD","$10–20"], "40–80, 10–20", []],
+  ["D2", "range", ["$40–80 EUR"], null, ["fatal: row \"r0\": \"$40–80 EUR\" in V is not a number or a range"]],
+  ["D3", "range", ["$40–80 €"], null, ["fatal: row \"r0\": \"$40–80 €\" in V is not a number or a range"]],
+  ["D4", "range", ["$40–80","$40–80 EUR"], null, ["fatal: row \"r1\": \"$40–80 EUR\" in V is not a number or a range"]],
+  ["D5", "bars", ["$40 EUR"], null, ["fatal: row \"r0\": \"$40 EUR\" in V is not a number"]],
+  ["D6", "range", ["€40 eur","€5"], "40–40, 5–5", []],
+  ["D7", "bars", ["$40 USD","$5"], "40, 5", []],
+  ["E1", "range", ["~$40–80"], "40–80", []],
+  ["E2", "range", ["≈ 40–80 €","€1"], "40–80, 1–1", []],
+  ["E3", "range", ["ca. 40–80 kr","50 NOK"], "40–80, 50–50", []],
+  ["E4", "range", ["Ca. $3–5 USD","$1"], "3–5, 1–1", []],
+  ["E5", "range", ["~$40–80 EUR"], null, ["fatal: row \"r0\": \"~$40–80 EUR\" in V is not a number or a range"]],
+  ["E6", "range", ["ca. $3–5 hver","$1–2"], "3–5, 1–2", []],
+  ["F1", "range", ["$80–150 each","$15–30"], "80–150, 15–30", []],
+  ["F2", "range", ["$40–80 hver","$5"], "40–80, 5–5", []],
+  ["F3", "range", ["≈ $75 per PR","$10"], "75–75, 10–10", []],
+  ["F4", "range", ["$85/PR","$10"], "85–85, 10–10", []],
+  ["F5", "range", ["$40 total","$5"], "40–40, 5–5", []],
+  ["F6", "range", ["$2 per session","$1–3"], "2–2, 1–3", []],
+  ["F7", "bars", ["$80 each","$15"], "80, 15", []],
+  ["F8", "range", ["40–80 EUR each","€5"], "40–80, 5–5", []],
+  ["F9", "range", ["40 each","50 each"], "40–40, 50–50", []],
+  ["F10", "range", ["40 each","50"], null, ["fatal: row \"r1\": 40 each and 50 are not in the same unit"]],
+  ["F11", "range", ["40 per PR"], null, ["fatal: row \"r0\": \"40 per PR\" in V is not a number or a range"]],
+  ["F12", "range", ["40/PR"], null, ["fatal: row \"r0\": \"40/PR\" in V is not a number or a range"]],
+  ["F13", "range", ["$1.25 / $10.00 per 1M"], null, ["fatal: row \"r0\": \"$1.25 / $10.00 per 1M\" in V is not a number or a range"]],
+  ["F14", "bars", ["≈ $75 per PR","$85/PR"], "75, 85", []],
+  ["F15", "bars", ["$40 EUR each"], null, ["fatal: row \"r0\": \"$40 EUR each\" in V is not a number"]],
+  ["G1", "range", ["1 økt","3 økter"], "1–1, 3–3", []],
+  ["G2", "range", ["1 session","2 sessions"], "1–1, 2–2", []],
+  ["G3", "range", ["1 day","3 days"], "1–1, 3–3", []],
+  ["G4", "range", ["1 h","2 h"], "1–1, 2–2", []],
+  ["G5", "range", ["1 dag","3–4 dager"], "1–1, 3–4", []],
+  ["G6", "range", ["1 time","3 timer"], "1–1, 3–3", []],
+  ["G7", "range", ["1 PR","3 PRs"], "1–1, 3–3", []],
+  ["G8", "range", ["5 m","5 ms"], null, ["fatal: row \"r1\": 5 m and 5 ms are not in the same unit"]],
+  ["G9", "bars", ["1 økt","3 økter"], "1, 3", []],
+  ["G10", "bars", ["3 sessions","1 session"], "3, 1", []],
+  ["H1", "range", ["82 s","20 min"], null, ["fatal: row \"r1\": 82 s and 20 min are not in the same unit"]],
+  ["H2", "range", ["~1 day","~2.3 h"], null, ["fatal: row \"r1\": ~1 day and ~2.3 h are not in the same unit"]],
+  ["H3", "range", ["$185","11 h"], null, ["fatal: row \"r1\": $185 and 11 h are not in the same unit"]],
+  ["H4", "range", ["3,5 min","34 s"], null, ["fatal: row \"r1\": 3,5 min and 34 s are not in the same unit"]],
+  ["H5", "bars", ["82 s","20 min"], null, ["fatal: row \"r1\": 82 s and 20 min are not in the same unit"]],
+  ["H6", "bars", ["$185","11 h"], null, ["fatal: row \"r1\": $185 and 11 h are not in the same unit"]],
+  ["I1", "range", ["5","5 merges"], null, ["fatal: row \"r1\": 5 and 5 merges are not in the same unit"]],
+  ["I2", "range", ["21","18 days"], null, ["fatal: row \"r1\": 21 and 18 days are not in the same unit"]],
+  ["I3", "range", ["40 %","5"], null, ["fatal: row \"r1\": 40 % and 5 are not in the same unit"]],
+  ["I4", "range", ["$40–80","5"], "40–80, 5–5", []],
+  ["I5", "bars", ["$40","5"], null, ["fatal: row \"r1\": $40 and 5 are not in the same unit"]],
+  ["I6", "bars", ["5","5 merges"], null, ["fatal: row \"r1\": 5 and 5 merges are not in the same unit"]],
+  ["J1", "bars", ["$40 ± 5","$50"], "40, 50", []],
+  ["J2", "bars", ["40 h ± 5","50 h"], "40, 50", []],
+  ["J3", "range", ["40 ± 5"], null, ["fatal: row \"r0\": \"40 ± 5\" in V is not a number or a range"]],
+  ["J4", "bars", ["$40 ± 5 USD"], null, ["fatal: row \"r0\": \"$40 ± 5 USD\" in V is not a number"]],
+  ["K1", "range", ["kr 40–80"], null, ["fatal: row \"r0\": \"kr 40–80\" in V is not a number or a range"]],
+  ["K2", "bars", ["NOK 40"], null, ["fatal: row \"r0\": \"NOK 40\" in V is not a number"]],
+  ["L1", "range", ["01.10–05.10 kr"], "1.1–5.1", []],
+  ["L2", "range", ["09.00–11.30 %"], "9–11.3", []],
+  ["L3", "range", ["$1,250–$1,750","$0,5–$1,5"], "1.25–1.75, 0.5–1.5", []],
+  ["L4", "range", ["40–80 SEK","1 sek"], null, ["fatal: row \"r1\": 40–80 SEK and 1 sek are not in the same unit"]],
+  ["M1", "range", ["40 USD–80 EUR"], null, ["fatal: row \"r0\": \"40 USD–80 EUR\" in V is not a number or a range"]],
+  ["M2", "range", ["$40–€80"], null, ["fatal: row \"r0\": \"$40–€80\" in V is not a number or a range"]],
+];
+
+describe("bars and range cell grammar", () => {
+  for (const [id, kind, cells, drawn, findings] of GRAMMAR) {
+    test(`${id} ${kind}: ${cells.join(" / ")}`, () => {
+      const r = chart(`<Chart kind="${kind}" value="V">`, ["Row", "V"], cells.map((c, i) => [`r${i}`, c]));
+      const m = r.model;
+      const got = m?.kind === "range" ? m.rows.map((x) => `${x.value.lo}–${x.value.hi}`).join(", ") : m?.kind === "bars" ? m.rows.map((x) => `${x.value.n}`).join(", ") : null;
+      expect({ drawn: got, findings: r.findings.map((f) => `${f.fatal ? "fatal" : "note"}: ${f.message}`) }).toEqual({ drawn, findings });
+    });
+  }
+});
+
 describe("bars ±", () => {
   test("a value cell may carry ± n, as in the other kinds", () => {
     const b = model(chart('<Chart kind="bars" value="V">', ["Row", "V"], [["a", "5 ± 1"], ["b", "6 ± 2 (D3)"], ["c", "1,5 ± 0,5"]]), "bars");

@@ -124,21 +124,101 @@ function isDateLikeCell(cell: string): boolean {
 /** A `range` cell: `a–b` (an en dash, or a hyphen with spaces around it) with
  *  each end read by `parseCellValue` after its leading `~`, `≈`, `ca.` and
  *  currency sign; a sign or a trailing unit on one end applies to both; one
- *  number is a point. Null when it is none of these, when the ends carry
- *  different signs or units, or when it is a date, time or year with no sign
- *  or unit (`isDateCell`: `01.10–05.10`, `2024–2025`, `09.00–11.30`, `01.10`). */
+ *  number is a point. A cell with a currency (`cellMeasure`) may end in a
+ *  qualifier (`each`, `per PR`, `/PR`), which is dropped. Null when it is none
+ *  of these, when the ends carry different signs or units, when a leading sign
+ *  and a trailing currency differ (`$40–80 EUR`), or when it is a date, time or
+ *  year with no sign or unit (`isDateCell`: `01.10–05.10`, `2024–2025`,
+ *  `09.00–11.30`, `01.10`). */
 export function readIntervalCell(cell: string, ctx: NumberContext): ChartInterval | null {
   const { num, pm, ids } = splitValueCell(cell);
   if (pm !== null) return null;
-  const { span, ends } = intervalEnds(num);
-  const signs = new Set(ends.map((e) => e.sign).filter(Boolean));
-  const vals = ends.map((e) => parseCellValue(e.rest, ctx));
-  const units = new Set(vals.map((v) => v?.unit ?? "").filter(Boolean));
-  if (signs.size > 1 || units.size > 1 || vals.some((v) => !v)) return null;
-  const sign = [...signs][0] ?? "";
-  const unit = [...units][0] ?? "";
-  if (!unit && isDateCell(span, ends)) return null;
-  return { lo: vals[0]!.n, hi: vals[vals.length - 1]!.n, text: num, sign, unit, ids };
+  const read = (n: string): ChartInterval | null => {
+    const { span, ends } = intervalEnds(n);
+    const signs = new Set(ends.map((e) => e.sign).filter(Boolean));
+    const vals = ends.map((e) => parseCellValue(e.rest, ctx));
+    const units = new Set(vals.map((v) => v?.unit ?? "").filter(Boolean));
+    if (signs.size > 1 || units.size > 1 || vals.some((v) => !v)) return null;
+    const sign = [...signs][0] ?? "";
+    const unit = [...units][0] ?? "";
+    if (!unit && isDateCell(span, ends)) return null;
+    const m = cellMeasure(sign, unit);
+    return m && { lo: vals[0]!.n, hi: vals[vals.length - 1]!.n, text: num, sign, unit, ...m, ids };
+  };
+  const v = read(num);
+  if (v) return v;
+  const bare = withoutQualifier(num);
+  const q = bare === null ? null : read(bare);
+  return q?.currency ? q : null;
+}
+
+/** A bars cell: a leading sign, `~`, `≈` or `ca.` read as one end of a range
+ *  cell (`$89`), the rest a value cell (`± n`, ids), and a qualifier after a
+ *  currency dropped as in `readIntervalCell`. Null for a date or no number. */
+function readBarCell(cell: string, ctx: NumberContext): { value: ChartValue; currency: string | null; measure: string } | null {
+  const { sign, rest } = endSign(cell.trim());
+  const read = (s: string) => {
+    const v = isDateCell(false, [{ sign, rest: splitValueCell(s).num }]) ? null : readValueCell(s, ctx);
+    const m = v && cellMeasure(sign, v.unit);
+    return v && m ? { value: { ...v, text: splitValueCell(cell).num }, ...m } : null;
+  };
+  const v = read(rest);
+  if (v) return v;
+  const bare = withoutQualifier(rest);
+  const q = bare === null ? null : read(bare);
+  return q?.currency ? q : null;
+}
+
+/** A trailing qualifier after a currency amount: `per PR`, `/PR`, `/ 1M`, or one word (`each`, `hver`). */
+const QUALIFIER_RE = /(?:\s+per\s+[\p{L}\d]+|\s*\/\s*[\p{L}\d]+|\s+(\p{L}+))$/iu;
+
+/** The text without its trailing qualifier; null when it has none or the word is a currency (`40 ± 5 USD`). */
+function withoutQualifier(s: string): string | null {
+  const m = QUALIFIER_RE.exec(s);
+  return m && !(m[1] && currencyOf(m[1])) ? s.slice(0, m.index) : null;
+}
+
+/** Currency signs as ISO codes. */
+const SIGN_CODES: Readonly<Record<string, string>> = { $: "USD", "€": "EUR", "£": "GBP", "¥": "JPY" };
+const CURRENCY_CODES = new Set(["USD", "EUR", "GBP", "JPY", "NOK", "SEK", "DKK", "CHF"]);
+/** `kr` in any case: a krone, NOK unless its column names SEK or DKK (`resolveKrone`). */
+const KRONE = "kr";
+const KRONE_CODES: ReadonlySet<string> = new Set(["NOK", "SEK", "DKK"]);
+
+/** A sign or a trailing unit as a currency code; null for any other unit. A
+ *  code reads in any case except `sek`/`Sek`, Norwegian for seconds. */
+function currencyOf(token: string): string | null {
+  if (/^\p{Sc}+$/u.test(token)) return SIGN_CODES[token] ?? token;
+  if (/^kr$/i.test(token)) return KRONE;
+  if (/^sek$/i.test(token) && token !== "SEK") return null;
+  return CURRENCY_CODES.has(token.toUpperCase()) ? token.toUpperCase() : null;
+}
+
+/** What a cell counts in, from its leading sign and trailing unit: a currency
+ *  (code) or a unit as written (`measure`, "" for none). A leading sign
+ *  decides the currency: a trailing word is then not a unit (`$80 each`), and
+ *  a trailing currency must be the same one (`$40 USD`; `$40 EUR` is null). */
+function cellMeasure(sign: string, unit: string): { currency: string | null; measure: string } | null {
+  const lead = sign ? currencyOf(sign) : null;
+  const tail = unit ? currencyOf(unit) : null;
+  if (lead && tail && lead !== tail) return null;
+  const currency = lead ?? tail;
+  return { currency, measure: currency ? "" : unit };
+}
+
+/** A column's `kr` as the one krone code the column also names, else NOK. */
+function resolveKrone(codes: readonly (string | null)[]): (code: string | null) => string | null {
+  const named = new Set(codes.filter((c): c is string => !!c && KRONE_CODES.has(c)));
+  const kr = named.size === 1 ? [...named][0]! : "NOK";
+  return (code) => (code === KRONE ? kr : code);
+}
+
+/** Two units as written are one unit: equal, or one is the other plus a
+ *  plural ending (`s`, `es`, `er`, `r`, `ar`) on a base of two or more
+ *  letters (`økt`/`økter`, `PR`/`PRs`, `time`/`timer`; not `m`/`ms`). */
+function sameMeasure(a: string, b: string): boolean {
+  const plural = (base: string, w: string) => base.length >= 2 && ["s", "es", "er", "r", "ar"].some((s) => w === base + s);
+  return a === b || plural(a, b) || plural(b, a);
 }
 
 /** A label cell that is one bold span as a whole (`**Slate**`, `__Slate__`;
@@ -154,16 +234,6 @@ function markTotals<R extends { total: boolean }>(rows: R[]): R[] {
   while (k > 0 && rows[k - 1]!.total) k--;
   rows.forEach((r, i) => (r.total = k > 0 && i >= k));
   return rows;
-}
-
-/** Currency signs as the ISO codes a trailing unit may spell them with. */
-const SIGN_CODES: Readonly<Record<string, string>> = { $: "USD", "€": "EUR", "£": "GBP", "¥": "JPY", kr: "NOK" };
-const CURRENCY_CODES = new Set(["USD", "EUR", "GBP", "JPY", "NOK", "SEK", "DKK", "CHF"]);
-
-/** A trailing unit that names a currency, as its code; null for any other unit. */
-function unitCurrency(unit: string): string | null {
-  const code = SIGN_CODES[unit] ?? (/^\p{Sc}+$/u.test(unit) ? unit : unit.toUpperCase());
-  return CURRENCY_CODES.has(code) || /^\p{Sc}+$/u.test(code) ? code : null;
 }
 
 /** An empty cell, a NULL spelling or a lone dash: no value. */
@@ -232,6 +302,10 @@ export interface ChartInterval {
   text: string;
   sign: string;
   unit: string;
+  /** The currency code (`cellMeasure`; `kr` before its column resolves it), or null. */
+  currency: string | null;
+  /** The unit the column compares: "" with a currency or no unit. */
+  measure: string;
   ids: string[];
 }
 
@@ -566,29 +640,30 @@ class Reader {
     const vi = this.column("value", true);
     if (vi === null || this.dateColumn(vi)) return null;
     const rows: BarsRow[] = [];
-    let firstKey = "";
+    const cells = this.t.rows.map((_, r) => this.cell(r, vi));
+    const reads = cells.map((c) => (isBlankValue(c) ? null : readBarCell(c, this.ctx)));
+    const krone = resolveKrone(reads.map((x) => x?.currency ?? null));
+    let first: { currency: string | null; measure: string } | null = null;
     this.t.rows.forEach((row, r) => {
       const label = row[0] ?? "";
-      const c = this.cell(r, vi);
+      const c = cells[r]!;
       if (isBlankValue(c)) {
         this.fatal(`row "${label}": the ${this.t.headers[vi]} cell is empty`, r);
         return;
       }
-      // A leading currency sign, `~`, `≈` or `ca.` reads as the range reader reads one end (`$89`).
-      const { sign, rest } = endSign(c.trim());
-      const v = isDateCell(false, [{ sign, rest: splitValueCell(rest).num }]) ? null : readValueCell(rest, this.ctx);
-      if (!v) {
+      const read = reads[r];
+      if (!read) {
         this.fatal(`row "${label}": "${c}" in ${this.t.headers[vi]} is not a number`, r);
         return;
       }
-      const value: ChartValue = { ...v, text: splitValueCell(c).num };
-      const key = `${sign} ${v.unit}`;
-      if (rows.length && key !== firstKey) {
-        this.fatal(`row "${label}": ${rows[0]!.value.text} and ${value.text} are not in the same unit`, r);
+      // Every row shares the first row's currency and unit: a currency and none differ too.
+      const currency = krone(read.currency);
+      if (first && (currency !== first.currency || !sameMeasure(first.measure, read.measure))) {
+        this.fatal(`row "${label}": ${rows[0]!.value.text} and ${read.value.text} are not in the same unit`, r);
         return;
       }
-      firstKey = key;
-      rows.push({ label, value, total: isBoldLabel(this.t.rawFirst[r] ?? "") });
+      first ??= { currency, measure: read.measure };
+      rows.push({ label, value: read.value, total: isBoldLabel(this.t.rawFirst[r] ?? "") });
     });
     const ns = markTotals(rows).filter((r) => !r.total).map((r) => r.value.n);
     const log = ns.length > 0 && ns.every((n) => n > 0) && Math.max(...ns) > BARS_LOG_RATIO * Math.min(...ns);
@@ -601,14 +676,17 @@ class Reader {
     const rows: RangeRow[] = [];
     let signed: { sign: string; code: string; label: string } | null = null;
     let first: { unit: string; text: string } | null = null;
+    const cells = this.t.rows.map((_, r) => this.cell(r, vi));
+    const reads = cells.map((c) => (isBlankValue(c) ? null : readIntervalCell(c, this.ctx)));
+    const krone = resolveKrone(reads.map((x) => x?.currency ?? null));
     this.t.rows.forEach((row, r) => {
       const label = row[0] ?? "";
-      const c = this.cell(r, vi);
+      const c = cells[r]!;
       if (isBlankValue(c)) {
         this.fatal(`row "${label}": the ${this.t.headers[vi]} cell is empty`, r);
         return;
       }
-      const value = readIntervalCell(c, this.ctx);
+      const value = reads[r];
       if (!value) {
         this.fatal(`row "${label}": "${c}" in ${this.t.headers[vi]} is not a number or a range`, r);
         return;
@@ -617,17 +695,15 @@ class Reader {
         this.fatal(`row "${label}": the low end of ${value.text} is above its high end`, r);
         return;
       }
-      // A trailing currency (`40–80 EUR`) is a sign; any other unit must match the first row's, as in bars.
-      const currency = value.unit ? unitCurrency(value.unit) : null;
-      const unit = currency ? "" : value.unit;
-      if (first && unit !== first.unit) {
+      // A currency (`$40–80`, `40–80 EUR`) is a sign; any other unit must match the first row's, as in bars.
+      if (first && !sameMeasure(first.unit, value.measure)) {
         this.fatal(`row "${label}": ${first.text} and ${value.text} are not in the same unit`, r);
         return;
       }
-      first ??= { unit, text: value.text };
-      const sign = value.sign || (currency ? value.unit : "");
-      if (sign) {
-        const code = SIGN_CODES[sign] ?? currency ?? sign;
+      first ??= { unit: value.measure, text: value.text };
+      const code = krone(value.currency);
+      if (code) {
+        const sign = value.sign || value.unit;
         if (!signed) signed = { sign, code, label };
         else if (code !== signed.code) this.note(`row "${label}": ${sign} differs from ${signed.sign} in row "${signed.label}"`, r);
       }
