@@ -8,7 +8,9 @@
  * reach 3:1 against the section; the Table, variant and gate toggles work by
  * mouse and keyboard; print and forced colours; a peek shows the table only;
  * an Explain selection across a chart locates in the source; nothing runs
- * past the page or its section at 390 px; and chat gets the table, no SVG.
+ * past the page or its section at 390 px; bars draws on a log scale and range
+ * draws its bold total below a rule, in both themes; and chat gets every
+ * table as written, no SVG.
  *
  * No model calls, no DB rows: one muninn over a temp wiki holding one
  * synthetic plan page; the Explain route is stubbed at the network boundary.
@@ -37,6 +39,32 @@ const GAP_CHART = [
   "| Alpha track with a long name that has to wrap at phone width | 40 | 50 | 10 | 35 |",
   "| Beta | 12 | 20 | 8 | 15 |",
   "| Gamma | -3 | 10 | 13 | |",
+  "",
+  "</Chart>",
+];
+
+const BARS_CHART = [
+  '<Chart kind="bars" caption="Bars" value="Cost">',
+  "",
+  "| Run | Cost |",
+  "|---|---|",
+  "| Small | $3 |",
+  "| Middle | $40 |",
+  "| Large | $900 |",
+  "",
+  "</Chart>",
+];
+
+/** The shape of a plan's cost table, bold total and bold value included. */
+const RANGE_CHART = [
+  '<Chart kind="range" caption="Range" value="Interval">',
+  "",
+  "| Slice | Interval | Basis |",
+  "|---|---|---|",
+  "| P1 — kinds | $120–220 | one PR |",
+  "| P2 — lint | $100–180 | one PR |",
+  "| P3 — rule | ~$30 – $70 | a commit |",
+  "| **Slate** | **$250–470** | |",
   "",
   "</Chart>",
 ];
@@ -111,6 +139,14 @@ const PAGE = [
   "| Kept | 30 | 120 |",
   "",
   "</Chart>",
+  "",
+  "## Bars chart",
+  "",
+  ...BARS_CHART,
+  "",
+  "## Range chart",
+  "",
+  ...RANGE_CHART,
   "",
   "## Broken chart",
   "",
@@ -202,7 +238,7 @@ test.afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
-const KINDS = ["gap", "gate", "steps", "funnel"] as const;
+const KINDS = ["gap", "gate", "steps", "funnel", "bars", "range"] as const;
 const chart = (page: Page, kind: string, caption?: string) =>
   page.locator(`.wiki-article section.vc.vc-kind-${kind}${caption ? `[aria-label="${caption}"]` : ""}`).first();
 const visiblePlot = (c: Locator) => c.locator(":scope > .vc-plot:not([hidden])");
@@ -211,7 +247,7 @@ const visiblePlot = (c: Locator) => c.locator(":scope > .vc-plot:not([hidden])")
 async function open(page: Page, width: number, focus = false): Promise<void> {
   await page.setViewportSize({ width, height: 900 });
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
-  await expect(page.locator(".wiki-article section.vc[class*='vc-kind-']")).toHaveCount(7);
+  await expect(page.locator(".wiki-article section.vc[class*='vc-kind-']")).toHaveCount(9);
   if (focus) {
     await page.locator("body").press("f");
     await expect(page.locator("#wikiFocusExit")).toBeVisible();
@@ -289,6 +325,27 @@ test.describe("Wiki reader: Chart", () => {
       // An unpressed button's border is visible against the section.
       const unpressed = gap.locator('button[data-vc-mode="table"]');
       expect(await unpressed.evaluate((e) => getComputedStyle(e).borderTopColor)).toBe(await token(page, "--text-muted"));
+      // Bars: three bars on a log scale ($900 is over 100 × $3), and the notes say so.
+      const bars = chart(page, "bars");
+      await expect(bars.locator(".vc-plot:not([hidden]) .vc-value")).toHaveCount(3);
+      expect(await paint(bars, ".vc-plot:not([hidden]) .vc-value", "fill")).toBe(await token(page, "--accent"));
+      await expect(bars.locator(".vc-notes")).toContainText("Log scale");
+      // Range: four intervals, the bold Slate row below a visible rule.
+      const range = chart(page, "range");
+      const plot = visiblePlot(range);
+      await expect(plot.locator(".vc-value")).toHaveCount(4);
+      expect(await paint(range, ".vc-plot:not([hidden]) .vc-value", "fill")).toBe(await token(page, "--accent"));
+      const rule = (await plot.locator(".vc-rule").boundingBox())!;
+      expect(rule.height).toBeGreaterThanOrEqual(1);
+      expect(await plot.locator(".vc-rule").evaluate((e) => getComputedStyle(e).borderTopColor)).toBe(await token(page, "--text-muted"));
+      const total = (await plot.locator(".vc-total").boundingBox())!;
+      const lastPart = (await plot.locator(".vc-lab").nth(2).boundingBox())!;
+      expect(rule.y).toBeGreaterThan(lastPart.y + lastPart.height - 1);
+      expect(total.y).toBeGreaterThanOrEqual(rule.y);
+      await expect(plot.locator(".vc-total")).toHaveText("Slate");
+      expect(await plot.locator(".vc-total").evaluate((e) => getComputedStyle(e).fontWeight)).toBe("600");
+      await range.screenshot({ path: test.info().outputPath(`range-${scheme}.png`) });
+      await bars.screenshot({ path: test.info().outputPath(`bars-${scheme}.png`) });
     });
   }
 
@@ -670,5 +727,40 @@ test.describe("Chat bubbles: a Chart reaches chat as its table", () => {
     ]);
     expect(result.vc).toBe(false);
     expect(result.svg).toBe(false);
+  });
+
+  test("the bars and range tables reach chat unchanged, the bold total included", async ({ page }) => {
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () =>
+        typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function" &&
+        typeof (globalThis as { sanitizeHtml?: unknown }).sanitizeHtml === "function",
+    );
+    const read = (src: string) =>
+      page.evaluate((s: string) => {
+        const g = globalThis as unknown as {
+          formatWebHtml: (s: string, o?: { views?: boolean }) => string;
+          sanitizeHtml: (h: string, isWeb: boolean) => string;
+        };
+        const clean = g.sanitizeHtml(g.formatWebHtml(s, { views: true }), true);
+        const probe = document.createElement("div");
+        probe.innerHTML = clean;
+        return {
+          rows: Array.from(probe.querySelectorAll("tbody tr")).map((tr) => Array.from(tr.querySelectorAll("td")).map((td) => td.textContent)),
+          bold: Array.from(probe.querySelectorAll("tbody strong")).map((b) => b.textContent),
+          vc: clean.includes("vc-") || clean.includes("<svg"),
+        };
+      }, src);
+    expect(await read(BARS_CHART.join("\n"))).toEqual({ rows: [["Small", "$3"], ["Middle", "$40"], ["Large", "$900"]], bold: [], vc: false });
+    expect(await read(RANGE_CHART.join("\n"))).toEqual({
+      rows: [
+        ["P1 — kinds", "$120–220", "one PR"],
+        ["P2 — lint", "$100–180", "one PR"],
+        ["P3 — rule", "~$30 – $70", "a commit"],
+        ["Slate", "$250–470", ""],
+      ],
+      bold: ["Slate", "$250–470"],
+      vc: false,
+    });
   });
 });

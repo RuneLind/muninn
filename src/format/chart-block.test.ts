@@ -7,6 +7,7 @@ import {
   formatChartNumber,
   formatChartPercent,
   readChart,
+  readIntervalCell,
   readValueCell,
   type ChartModel,
   type ChartRead,
@@ -304,6 +305,100 @@ describe("funnel", () => {
     expect(messages(chart('<Chart kind="funnel">', ["Step", "Count"], [["all", "8"]]))).toEqual([
       "has no «Av» or «Of» column naming each row's parent count",
     ]);
+  });
+});
+
+describe("bars", () => {
+  test("one bar per row, in the order written, a leading currency sign read", () => {
+    const b = model(chart('<Chart kind="bars" value="Cost">', ["Run", "Cost"], [["c", "$30"], ["a", "$12 (D2)"], ["b", "$45"]]), "bars");
+    expect(b.rows.map((r) => [r.label, r.value.n, r.value.text, r.value.ids])).toEqual([
+      ["c", 30, "$30", []],
+      ["a", 12, "$12", ["D2"]],
+      ["b", 45, "$45", []],
+    ]);
+    expect(b.log).toBe(false);
+  });
+
+  test("the log-scale rule: every value above 0 and the largest over 100 times the smallest", () => {
+    const log = (vals: string[]) => model(chart('<Chart kind="bars" value="N">', ["Item", "N"], vals.map((v, i) => [`r${i}`, v])), "bars").log;
+    expect(log(["1", "101"])).toBe(true);
+    expect(log(["1", "100"])).toBe(false);
+    expect(log(["0", "5000"])).toBe(false); // a 0 has no log
+    expect(log(["-1", "5000"])).toBe(false);
+    expect(log(["7"])).toBe(false);
+  });
+
+  test("findings: an unreadable cell, an empty cell, mixed units, no value=", () => {
+    expect(messages(chart('<Chart kind="bars" value="N">', ["Item", "N"], [["a", "lots"]]))).toEqual(['row "a": "lots" in N is not a number']);
+    expect(messages(chart('<Chart kind="bars" value="N">', ["Item", "N"], [["a", "—"]]))).toEqual(['row "a": the N cell is empty']);
+    expect(messages(chart('<Chart kind="bars" value="N">', ["Item", "N"], [["a", "$3"], ["b", "4"]]))).toEqual(['row "b": $3 and 4 are not in the same unit']);
+    expect(messages(chart('<Chart kind="bars" value="N">', ["Item", "N"], [["a", "3 h"], ["b", "4 d"]]))).toEqual(['row "b": 3 h and 4 d are not in the same unit']);
+    const none = chart('<Chart kind="bars">', ["Item", "N"], [["a", "3"]]);
+    expect(none.findings).toEqual([{ message: "needs value= naming a column", fatal: true }]);
+    expect(none.model).toBeNull();
+  });
+});
+
+describe("range", () => {
+  const range = (rows: string[][], header = ["Slice", "Interval"]) => chart('<Chart kind="range" value="Interval">', header, rows);
+
+  test("the interval spellings: en dash, spaced hyphen, a sign on either end, `~`, a trailing unit, a point", () => {
+    const cases: [string, number, number, string, string][] = [
+      ["$40–80", 40, 80, "$", ""],
+      ["$40–$80", 40, 80, "$", ""],
+      ["40–$80", 40, 80, "$", ""],
+      ["~$40 – $80", 40, 80, "$", ""],
+      ["40 - 80", 40, 80, "", ""],
+      ["40–80 USD", 40, 80, "", "USD"],
+      ["$1,200–1,800", 1200, 1800, "$", ""],
+      ["€50", 50, 50, "€", ""],
+      ["12", 12, 12, "", ""],
+    ];
+    for (const [cell, lo, hi, sign, unit] of cases) {
+      const v = readIntervalCell(cell, {});
+      expect({ cell, v: v && [v.lo, v.hi, v.sign, v.unit] }).toEqual({ cell, v: [lo, hi, sign, unit] });
+    }
+  });
+
+  test("not an interval: dates, years, two signs, two units, a ± or text", () => {
+    for (const cell of ["01.10–05.10", "1.10–31.12", "2024–2025", "$40–€80", "40 USD–80 EUR", "40–80 ± 5", "40-80", "soon", "40–"]) {
+      expect({ cell, v: readIntervalCell(cell, {}) }).toEqual({ cell, v: null });
+    }
+    // A sign or unit makes it money, not a date span.
+    expect(readIntervalCell("$2024–2025", {})?.hi).toBe(2025);
+    expect(readIntervalCell("1.5–2.5", {})?.lo).toBe(1.5);
+  });
+
+  test("the plan cost table draws as it stands: a bold total, a bold value, below the parts", () => {
+    const r = model(
+      range(
+        [
+          ["P1 — chart kinds", "$120–220", "the size of #724"],
+          ["P2 — lint", "$100–180", "one muninn PR"],
+          ["**Slate**", "**$330–670**", ""],
+        ],
+        ["Slice", "Interval", "Basis"],
+      ),
+      "range",
+    );
+    expect(r.rows.map((x) => [x.label, x.value.lo, x.value.hi, x.total])).toEqual([
+      ["P1 — chart kinds", 120, 220, false],
+      ["P2 — lint", 100, 180, false],
+      ["Slate", 330, 670, true],
+    ]);
+    expect(range([["a", "$1–2"]]).findings).toEqual([]);
+  });
+
+  test("findings: a low end above the high end is fatal, mixed signs warn, an unreadable cell is fatal", () => {
+    const flipped = range([["a", "$80–40"]]);
+    expect(flipped.findings).toEqual([{ message: 'row "a": the low end of $80–40 is above its high end', row: 0, fatal: true }]);
+    expect(flipped.model).toBeNull();
+    const mixed = range([["a", "$1–2"], ["b", "3–4"], ["c", "€5–6"]]);
+    expect(mixed.findings).toEqual([{ message: 'row "c": € differs from $ in row "a"', row: 2, fatal: false }]);
+    expect(mixed.model?.kind).toBe("range");
+    const bad = range([["a", "$1–2"], ["b", "01.10–05.10"]]);
+    expect(bad.findings).toEqual([{ message: 'row "b": "01.10–05.10" in Interval is not a number or a range', row: 1, fatal: true }]);
+    expect(range([["a", ""]]).findings.map((f) => f.message)).toEqual(['row "a": the Interval cell is empty']);
   });
 });
 

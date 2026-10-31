@@ -53,6 +53,8 @@ interface ChartWords {
   of: string;
   gap: string;
   bar: string;
+  /** The note under a bars chart drawn on a log scale. */
+  logScale: string;
   kinds: Record<ChartKind, string>;
 }
 
@@ -73,7 +75,8 @@ export const CHART_WORDS: Record<QuestionLanguage, ChartWords> = {
     of: "of",
     gap: "gap",
     bar: "bar",
-    kinds: { gap: "Gap chart", steps: "Steps chart", gate: "Gate chart", funnel: "Funnel chart" },
+    logScale: "Log scale: the largest value is more than 100 times the smallest.",
+    kinds: { gap: "Gap chart", steps: "Steps chart", gate: "Gate chart", funnel: "Funnel chart", bars: "Bar chart", range: "Range chart" },
   },
   no: {
     chart: "Diagram",
@@ -91,7 +94,8 @@ export const CHART_WORDS: Record<QuestionLanguage, ChartWords> = {
     of: "av",
     gap: "gap",
     bar: "krav",
-    kinds: { gap: "Gapdiagram", steps: "Trinndiagram", gate: "Kravdiagram", funnel: "Trakt" },
+    logScale: "Logaritmisk skala: den største verdien er mer enn 100 ganger den minste.",
+    kinds: { gap: "Gapdiagram", steps: "Trinndiagram", gate: "Kravdiagram", funnel: "Trakt", bars: "Stolpediagram", range: "Intervalldiagram" },
   },
 };
 
@@ -108,9 +112,9 @@ interface Variant {
 export function chartViewHtml(input: ChartViewInput): string {
   const { model } = input.read;
   const w = CHART_WORDS[input.language];
-  const notes = input.read.findings.length
-    ? `<ul class="vc-notes" ${RO}>${input.read.findings.map((f) => `<li>${escapeHtml(f.message)}</li>`).join("")}</ul>`
-    : "";
+  const lines = input.read.findings.map((f) => f.message);
+  if (model?.kind === "bars" && model.log) lines.push(w.logScale);
+  const notes = lines.length ? `<ul class="vc-notes" ${RO}>${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>` : "";
   if (!model) {
     const name = input.captionText.trim() || w.chart;
     return (
@@ -191,6 +195,10 @@ function plotFor(
       return { toggle: "scale", variants: [{ id: "lines", label: "", html: stepsPlot(model, comma, input.captionText.trim() || w.kinds.steps) }], legend: stepsLegend(model) };
     case "funnel":
       return { toggle: "scale", variants: [{ id: "bars", label: "", html: funnelRows(model, w, comma, input.logIds) }], legend: "" };
+    case "bars":
+      return { toggle: "scale", variants: [{ id: "bars", label: "", html: barsRows(model, input.logIds) }], legend: "" };
+    case "range":
+      return { toggle: "scale", variants: [{ id: "range", label: "", html: rangeRows(model, input.logIds) }], legend: "" };
   }
 }
 
@@ -235,11 +243,12 @@ const track = `<rect class="vc-track" x="0" y="1" width="100" height="10" vector
  *  of the decision or question shape links to its log item when the page's
  *  DecisionLog has one (`logIds`), else stays text, so no link goes nowhere. */
 function valueHtml(v: ChartValue, logIds: ReadonlySet<string>): string {
+  return `${escapeHtml(v.text)}${v.pm ? ` ± ${escapeHtml(v.pm)}` : ""}${idsHtml(v.ids, logIds)}`;
+}
+
+function idsHtml(ids: readonly string[], logIds: ReadonlySet<string>): string {
   const linked = (id: string) => (DECISION_ID_RE.test(id) || QUESTION_ID_RE.test(id)) && logIds.has(id);
-  const ids = v.ids.length
-    ? ` (${v.ids.map((id) => (linked(id) ? dcGoLink(id, escapeHtml(id)) : escapeHtml(id))).join(", ")})`
-    : "";
-  return `${escapeHtml(v.text)}${v.pm ? ` ± ${escapeHtml(v.pm)}` : ""}${ids}`;
+  return ids.length ? ` (${ids.map((id) => (linked(id) ? dcGoLink(id, escapeHtml(id)) : escapeHtml(id))).join(", ")})` : "";
 }
 
 function rowHtml(label: string, svg: string, nums: string): string {
@@ -468,4 +477,46 @@ function funnelRows(model: Extract<ChartModel, { kind: "funnel" }>, w: ChartWord
     return rowHtml(`<span class="vc-d${Math.min(r.depth, 4)}">${escapeHtml(r.label)}</span>`, svg, nums);
   });
   return `<div class="vc-rows">${rows.join("")}</div>`;
+}
+
+// ── bars ────────────────────────────────────────────────────────────────────
+
+function barsRows(model: Extract<ChartModel, { kind: "bars" }>, logIds: ReadonlySet<string>): string {
+  const ns = model.rows.map((r) => r.value.n);
+  const sc = scale(ns);
+  const [lo, hi] = [Math.log10(Math.min(...ns)), Math.log10(Math.max(...ns))];
+  // On a log scale the smallest bar keeps a visible stub of 2 of the 100 units.
+  const at = (v: number) => (model.log ? round2(2 + ((Math.log10(v) - lo) / (hi - lo)) * 98) : sc.at(v));
+  const z = model.log ? 0 : sc.at(0);
+  const rows = model.rows.map((r) => {
+    const svg =
+      svgOpen(`${r.label}: ${r.value.text}`) +
+      track +
+      rect("vc-value", z, at(r.value.n), 2, 8) +
+      (!model.log && sc.negative ? vline("vc-zero", z) : "") +
+      `</svg>`;
+    return rowHtml(escapeHtml(r.label), svg, valueHtml(r.value, logIds));
+  });
+  return `<div class="vc-rows">${rows.join("")}</div>`;
+}
+
+// ── range ───────────────────────────────────────────────────────────────────
+
+function rangeRows(model: Extract<ChartModel, { kind: "range" }>, logIds: ReadonlySet<string>): string {
+  const sc = scale(model.rows.flatMap((r) => [r.value.lo, r.value.hi]));
+  const row = (r: (typeof model.rows)[number]) => {
+    const [a, b] = [sc.at(r.value.lo), sc.at(r.value.hi)];
+    const svg =
+      svgOpen(`${r.label}: ${r.value.text}`) +
+      track +
+      (a === b ? vline("vc-point", a, 1, 11) : rect("vc-value", a, b, 2, 8)) +
+      (sc.negative ? vline("vc-zero", sc.at(0)) : "") +
+      `</svg>`;
+    const label = r.total ? `<span class="vc-total">${escapeHtml(r.label)}</span>` : escapeHtml(r.label);
+    return rowHtml(label, svg, `${escapeHtml(r.value.text)}${idsHtml(r.value.ids, logIds)}`);
+  };
+  const parts = model.rows.filter((r) => !r.total).map(row);
+  const totals = model.rows.filter((r) => r.total).map(row);
+  const rule = totals.length ? `<div class="vc-rule" aria-hidden="true"></div>` : "";
+  return `<div class="vc-rows">${parts.join("")}${rule}${totals.join("")}</div>`;
 }

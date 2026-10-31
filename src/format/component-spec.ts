@@ -283,7 +283,7 @@ export function readCaseBoardView(raw: string | undefined): AttrRead<CaseBoardVi
 
 // ── Chart ───────────────────────────────────────────────────────────────────
 
-export const CHART_KINDS = ["gap", "steps", "gate", "funnel"] as const;
+export const CHART_KINDS = ["gap", "steps", "gate", "funnel", "bars", "range"] as const;
 export type ChartKind = (typeof CHART_KINDS)[number];
 
 /** A `Chart kind=` value, read case-sensitively like every other enum. No

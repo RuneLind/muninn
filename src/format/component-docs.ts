@@ -168,7 +168,10 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     attrs: {
       kind: { doc: "Which chart the table is read as", onFallback: "is not a chart kind; it renders as its table" },
       caption: { doc: "A line over the chart" },
-      value: { doc: "gap: the column of values; funnel: the count column (default: the first after the label that is not Of)", printType: '"<column>"' },
+      value: {
+        doc: "gap: the column of values; funnel: the count column (default: the first after the label that is not Of); bars: the column drawn as one bar per row (a log scale when every value is above 0 and the largest is over 100 times the smallest); range: the column of intervals (`$40–80`, `~$40 – $80`, `40–80 USD`; one number is a point; a bold label row is the total, drawn below a rule)",
+        printType: '"<column>"',
+      },
       target: { doc: "gap: the column of targets", printType: '"<column>"' },
       gap: { doc: "gap: the column of written gaps", printType: '"<column>"' },
       mark: { doc: "gap: a column drawn as a tick", printType: '"<column>"' },

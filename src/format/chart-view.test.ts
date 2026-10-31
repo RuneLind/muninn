@@ -347,6 +347,45 @@ describe("steps x labels", () => {
   });
 });
 
+describe("bars", () => {
+  const bars = (rows: string[]) => reader(chart('<Chart kind="bars" caption="Runs" value="N">', ["| Run | N |", "|---|---|", ...rows]));
+
+  test("one bar per row in the order written, linear from 0 by default", () => {
+    const html = bars(["| b | 10 |", "| a | 40 |"]);
+    expect(html).toContain('class="vc vc-kind-bars"');
+    expect(texts(html, "vc-lab")).toEqual(["b", "a"]);
+    expect(html).not.toContain(CHART_WORDS.en.logScale);
+    // Linear: the 40 bar is four times the 10 bar's width.
+    const widths = [...html.matchAll(/class="vc-value" x="[\d.]+" y="2" width="([\d.]+)"/g)].map((m) => Number(m[1]));
+    expect(widths[1]! / widths[0]!).toBeCloseTo(4, 1);
+  });
+
+  test("a log scale says so in its notes; a 0 keeps it linear", () => {
+    expect(bars(["| a | 1 |", "| b | 500 |"])).toContain(`<li>${CHART_WORDS.en.logScale}</li>`);
+    expect(bars(["| a | 0 |", "| b | 500 |"])).not.toContain(CHART_WORDS.en.logScale);
+  });
+});
+
+describe("range", () => {
+  const range = (rows: string[]) => reader(chart('<Chart kind="range" value="Interval">', ["| Slice | Interval |", "|---|---|", ...rows]));
+
+  test("one interval per row; a bold row draws below a rule as the total; a point is a tick", () => {
+    const html = range(["| P1 | $120–220 |", "| P2 | $40 |", "| **Slate** | **$160–260** |"]);
+    const plot = html.split('class="vc-table')[0]!;
+    expect(plot).toMatch(/P2: \$40<\/title>.*vc-point/);
+    const rule = plot.indexOf("vc-rule");
+    expect(rule).toBeGreaterThan(plot.indexOf("P2"));
+    expect(plot.indexOf('<span class="vc-total">Slate</span>')).toBeGreaterThan(rule);
+    expect(plot).toContain("$160–260");
+  });
+
+  test("a mixed sign is a note under the drawn chart; a flipped interval falls back to the table", () => {
+    expect(range(["| a | $1–2 |", "| b | €3–4 |"])).toContain("vc-kind-range");
+    expect(range(["| a | $1–2 |", "| b | €3–4 |"])).toContain("<li>row &quot;b&quot;: € differs from $ in row &quot;a&quot;</li>");
+    expect(range(["| a | $9–2 |"])).toContain("vc-fallback");
+  });
+});
+
 describe("funnel", () => {
   test("bars are each row's share of its parent, indented by depth", () => {
     const md = chart('<Chart kind="funnel">', ["| Step | Count | Of |", "|---|---|---|", "| all | 40 | |", "| kept | 10 | 40 |", "| fine | 5 | 10 |", "| zero | 0 | 5 |", "| under | 0 | 0 |"]);
@@ -539,6 +578,11 @@ describe("render and lint agree", () => {
     ["code cell", ["| Slice | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | `3` | 2 |"], true],
     ["struck cell", ["| Slice | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | ~~9~~ 3 | 2 |"], true],
     ["text cell", ["| Slice | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | soon | 2 |"], false],
+    ["bars, currency", ["| Run | N |", "|---|---|", "| a | $2 |", "| b | **$3** |"], true, '<Chart kind="bars" value="N">'],
+    ["bars, text", ["| Run | N |", "|---|---|", "| a | many |"], false, '<Chart kind="bars" value="N">'],
+    ["range, bold total", ["| Slice | I |", "|---|---|", "| a | $2–3 |", "| **All** | **$2–3** |"], true, '<Chart kind="range" value="I">'],
+    ["range, mixed signs", ["| Slice | I |", "|---|---|", "| a | $2–3 |", "| b | €2–3 |"], true, '<Chart kind="range" value="I">'],
+    ["range, year span", ["| Slice | I |", "|---|---|", "| a | 2024–2025 |"], false, '<Chart kind="range" value="I">'],
   ];
   for (const [name, rows, draws, open] of cases) {
     test(name, () => {

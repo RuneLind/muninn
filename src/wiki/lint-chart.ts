@@ -8,9 +8,12 @@
  *   with it (a named column missing or written twice, a non-number in a value
  *   column, a funnel row larger than its parent or matching no parent count, a
  *   negative count, mixed units in a gate row, a steps series with no values
- *   or no step rows, a missing or ambiguous `ref=` row);
+ *   or no step rows, a missing or ambiguous `ref=` row, mixed units in a
+ *   bars column, a range cell that is no interval or whose low end is above
+ *   its high end);
  * - info: a note beside a drawn chart (a gap cell that differs from
- *   target − value by more than half a unit of its last decimal).
+ *   target − value by more than half a unit of its last decimal; a range
+ *   row whose currency sign differs from the column's first).
  *
  * A chart with no usable `kind=` is left to check 15.
  */

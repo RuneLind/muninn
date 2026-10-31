@@ -1,5 +1,5 @@
 /**
- * `<Chart kind="gap|steps|gate|funnel">` around a pipe table: the table read
+ * `<Chart kind="gap|steps|gate|funnel|bars|range">` around a pipe table: the table read
  * per kind, the findings a kind raises on it, and the gate verdict. The wiki
  * reader's view (`chart-view.ts`, `views: true` only) and lint check 17
  * (`src/wiki/lint-chart.ts`) both read a chart through `chartBody`,
@@ -83,6 +83,44 @@ export function readValueCell(cell: string, ctx: NumberContext): ChartValue | nu
   return { n: v.n, text: num, decimals: v.decimals, unit: v.unit, pm, ids };
 }
 
+/** Leading `~` and currency signs on one end of an interval. */
+const END_SIGN_RE = /^([~\p{Sc}](?:\s*[~\p{Sc}])*)\s*/u;
+/** A yearless `D.M` date with a two-digit month, the shape `item-dates.ts` reads as one. */
+const DAY_MONTH_RE = /^(?:0?[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])$/;
+const YEAR_RE = /^(?:19|20)\d{2}$/;
+
+function endSign(end: string): { sign: string; rest: string } {
+  const m = END_SIGN_RE.exec(end);
+  return m ? { sign: m[1]!.replace(/[~\s]/g, ""), rest: end.slice(m[0].length) } : { sign: "", rest: end };
+}
+
+/** A `range` cell: `a–b` (an en dash, or a hyphen with spaces around it) with
+ *  each end read by `parseCellValue` after its leading `~` and currency sign;
+ *  a sign or a trailing unit on one end applies to both; one number is a
+ *  point. Null when it is none of these, when the ends carry different signs
+ *  or units, or when both ends read as dates (`01.10–05.10`) or years
+ *  (`2024–2025`) with no sign or unit. */
+export function readIntervalCell(cell: string, ctx: NumberContext): ChartInterval | null {
+  const { num, pm, ids } = splitValueCell(cell);
+  if (pm !== null) return null;
+  const m = /^(.+?)\s*–\s*(.+)$/u.exec(num) ?? /^(.+?)\s+-\s+(.+)$/u.exec(num);
+  const ends = (m ? [m[1]!, m[2]!] : [num]).map((e) => endSign(e.trim()));
+  const signs = new Set(ends.map((e) => e.sign).filter(Boolean));
+  const vals = ends.map((e) => parseCellValue(e.rest, ctx));
+  const units = new Set(vals.map((v) => v?.unit ?? "").filter(Boolean));
+  if (signs.size > 1 || units.size > 1 || vals.some((v) => !v)) return null;
+  const sign = [...signs][0] ?? "";
+  const unit = [...units][0] ?? "";
+  const rests = ends.map((e) => e.rest);
+  if (m && !sign && !unit && (rests.every((r) => DAY_MONTH_RE.test(r)) || rests.every((r) => YEAR_RE.test(r)))) return null;
+  return { lo: vals[0]!.n, hi: vals[vals.length - 1]!.n, text: num, sign, unit, ids };
+}
+
+/** A label cell written bold as a whole (`**Slate**`, `__Slate__`). */
+function isBoldLabel(raw: string): boolean {
+  return /^(\*\*|__)(?!\s)[\s\S]*?\S\1$/.test(raw.trim());
+}
+
 /** An empty cell, a NULL spelling or a lone dash: no value. */
 function isBlankValue(cell: string): boolean {
   return isEmptyCell(cell) || /^[-–—]$/.test(cell.trim());
@@ -134,11 +172,40 @@ interface FunnelRow {
   share: number | null;
 }
 
+interface BarsRow {
+  label: string;
+  value: ChartValue;
+}
+
+/** A `range` cell read: both ends (equal for a point), the number part as
+ *  written, its currency sign and unit ("" for none) and its ids. */
+export interface ChartInterval {
+  lo: number;
+  hi: number;
+  text: string;
+  sign: string;
+  unit: string;
+  ids: string[];
+}
+
+interface RangeRow {
+  label: string;
+  value: ChartInterval;
+  /** A bold label (`**Slate**`): drawn below a rule as the total. */
+  total: boolean;
+}
+
 export type ChartModel =
   | { kind: "gap"; valueName: string; targetName: string; markName: string | null; rows: GapRow[] }
   | { kind: "gate"; passName: string; holdName: string; barAfter: boolean; rows: GateRow[] }
   | { kind: "steps"; steps: string[]; series: StepsSeries[]; refLabel: string | null; normalize: boolean; decimals: number }
-  | { kind: "funnel"; rows: FunnelRow[] };
+  | { kind: "funnel"; rows: FunnelRow[] }
+  /** `log`: every value is above 0 and the largest over `BARS_LOG_RATIO` times the smallest. */
+  | { kind: "bars"; log: boolean; rows: BarsRow[] }
+  | { kind: "range"; rows: RangeRow[] };
+
+/** A bars chart whose largest value is more than this many times its smallest draws a log scale. */
+export const BARS_LOG_RATIO = 100;
 
 export interface ChartRead {
   model: ChartModel | null;
@@ -271,6 +338,10 @@ class Reader {
         return this.steps();
       case "funnel":
         return this.funnel();
+      case "bars":
+        return this.bars();
+      case "range":
+        return this.range();
     }
   }
 
@@ -430,6 +501,70 @@ class Reader {
       rows.push({ label, value, of, depth: parent ? parent.depth + 1 : 0, share });
     });
     return { kind: "funnel", rows };
+  }
+
+  private bars(): ChartModel | null {
+    const vi = this.column("value", true);
+    if (vi === null) return null;
+    const rows: BarsRow[] = [];
+    let firstKey = "";
+    this.t.rows.forEach((row, r) => {
+      const label = row[0] ?? "";
+      const c = this.cell(r, vi);
+      if (isBlankValue(c)) {
+        this.fatal(`row "${label}": the ${this.t.headers[vi]} cell is empty`, r);
+        return;
+      }
+      // A leading currency sign or `~` reads as the range reader reads one end (`$89`).
+      const { num, pm, ids } = splitValueCell(c);
+      const { sign, rest } = endSign(num);
+      const v = pm === null ? parseCellValue(rest, this.ctx) : null;
+      if (!v) {
+        this.fatal(`row "${label}": "${c}" in ${this.t.headers[vi]} is not a number`, r);
+        return;
+      }
+      const value: ChartValue = { n: v.n, text: num, decimals: v.decimals, unit: v.unit, pm: null, ids };
+      const key = `${sign} ${v.unit}`;
+      if (rows.length && key !== firstKey) {
+        this.fatal(`row "${label}": ${rows[0]!.value.text} and ${value.text} are not in the same unit`, r);
+        return;
+      }
+      firstKey = key;
+      rows.push({ label, value });
+    });
+    const ns = rows.map((r) => r.value.n);
+    const log = ns.length > 0 && ns.every((n) => n > 0) && Math.max(...ns) > BARS_LOG_RATIO * Math.min(...ns);
+    return { kind: "bars", log, rows };
+  }
+
+  private range(): ChartModel | null {
+    const vi = this.column("value", true);
+    if (vi === null) return null;
+    const rows: RangeRow[] = [];
+    let signed: { sign: string; label: string } | null = null;
+    this.t.rows.forEach((row, r) => {
+      const label = row[0] ?? "";
+      const c = this.cell(r, vi);
+      if (isBlankValue(c)) {
+        this.fatal(`row "${label}": the ${this.t.headers[vi]} cell is empty`, r);
+        return;
+      }
+      const value = readIntervalCell(c, this.ctx);
+      if (!value) {
+        this.fatal(`row "${label}": "${c}" in ${this.t.headers[vi]} is not a number or a range`, r);
+        return;
+      }
+      if (value.lo > value.hi) {
+        this.fatal(`row "${label}": the low end of ${value.text} is above its high end`, r);
+        return;
+      }
+      if (value.sign) {
+        if (!signed) signed = { sign: value.sign, label };
+        else if (value.sign !== signed.sign) this.note(`row "${label}": ${value.sign} differs from ${signed.sign} in row "${signed.label}"`, r);
+      }
+      rows.push({ label, value, total: isBoldLabel(this.t.rawFirst[r] ?? "") });
+    });
+    return { kind: "range", rows };
   }
 }
 
