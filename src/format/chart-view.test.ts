@@ -364,6 +364,22 @@ describe("bars", () => {
     expect(bars(["| a | 1 |", "| b | 500 |"])).toContain(`<li>${CHART_WORDS.en.logScale}</li>`);
     expect(bars(["| a | 0 |", "| b | 500 |"])).not.toContain(CHART_WORDS.en.logScale);
   });
+
+  test("a trailing bold total draws below a rule with its number and no bar; the parts keep their scale", () => {
+    const html = bars(["| b | 10 |", "| a | 40 |", "| **Total** | 50 |"]);
+    const plot = html.split('class="vc-table')[0]!;
+    const widths = [...plot.matchAll(/class="vc-value" x="[\d.]+" y="2" width="([\d.]+)"/g)].map((m) => Number(m[1]));
+    expect(widths).toHaveLength(2);
+    expect(widths[1]).toBeCloseTo(96.15, 1); // 40 on a 0–41.6 axis: the 50 total sets no max
+    const rule = plot.indexOf("vc-rule");
+    expect(rule).toBeGreaterThan(plot.indexOf("a: 40"));
+    expect(plot.indexOf('<span class="vc-total">Total</span>')).toBeGreaterThan(rule);
+    expect(plot.slice(rule)).toContain(">50<");
+  });
+
+  test("a ± n prints beside the bar", () => {
+    expect(bars(["| a | 5 ± 1 |", "| b | 8 |"])).toContain('<span class="vc-num">5 ± 1</span>');
+  });
 });
 
 describe("range", () => {
@@ -377,6 +393,21 @@ describe("range", () => {
     expect(rule).toBeGreaterThan(plot.indexOf("P2"));
     expect(plot.indexOf('<span class="vc-total">Slate</span>')).toBeGreaterThan(rule);
     expect(plot).toContain("$160–260");
+  });
+
+  test("rows keep the written order; the rule draws only before a trailing bold run", () => {
+    const titles = (html: string) => [...html.split('class="vc-table')[0]!.matchAll(/<title>([^:<]*):/g)].map((m) => m[1]);
+    const mid = range(["| a | $1–2 |", "| **Slate** | $3–5 |", "| c | $1 |"]);
+    expect(titles(mid)).toEqual(["a", "Slate", "c"]);
+    expect(mid).not.toContain("vc-rule");
+    const all = range(["| **A** | $1–2 |", "| **B** | $3–5 |"]);
+    expect(all).not.toContain("vc-rule");
+    const tail = range(["| a | $1–2 |", "| **Sub** | $2 |", "| b | $3 |", "| **All** | $3–5 |"]);
+    const plot = tail.split('class="vc-table')[0]!;
+    expect(titles(tail)).toEqual(["a", "Sub", "b", "All"]);
+    expect(plot.indexOf("vc-rule")).toBeGreaterThan(plot.indexOf("b: $3"));
+    expect(plot.indexOf("vc-rule")).toBeLessThan(plot.indexOf("All: "));
+    expect(plot.match(/vc-rule/g)).toHaveLength(1);
   });
 
   test("a mixed sign is a note under the drawn chart; a flipped interval falls back to the table", () => {

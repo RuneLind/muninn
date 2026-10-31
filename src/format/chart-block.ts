@@ -141,9 +141,29 @@ export function readIntervalCell(cell: string, ctx: NumberContext): ChartInterva
   return { lo: vals[0]!.n, hi: vals[vals.length - 1]!.n, text: num, sign, unit, ids };
 }
 
-/** A label cell written bold as a whole (`**Slate**`, `__Slate__`). */
+/** A label cell that is one bold span as a whole (`**Slate**`, `__Slate__`;
+ *  not `**a** and **b**`). */
 function isBoldLabel(raw: string): boolean {
-  return /^(\*\*|__)(?!\s)[\s\S]*?\S\1$/.test(raw.trim());
+  return /^\*\*(?!\s)(?:(?!\*\*)[\s\S])*?\S\*\*$|^__(?!\s)(?:(?!__)[\s\S])*?\S__$/.test(raw.trim());
+}
+
+/** Marks the totals: the trailing run of bold-label rows, and only when an
+ *  ordinary row comes before it; a bold row anywhere else is an ordinary row. */
+function markTotals<R extends { total: boolean }>(rows: R[]): R[] {
+  let k = rows.length;
+  while (k > 0 && rows[k - 1]!.total) k--;
+  rows.forEach((r, i) => (r.total = k > 0 && i >= k));
+  return rows;
+}
+
+/** Currency signs as the ISO codes a trailing unit may spell them with. */
+const SIGN_CODES: Readonly<Record<string, string>> = { $: "USD", "€": "EUR", "£": "GBP", "¥": "JPY", kr: "NOK" };
+const CURRENCY_CODES = new Set(["USD", "EUR", "GBP", "JPY", "NOK", "SEK", "DKK", "CHF"]);
+
+/** A trailing unit that names a currency, as its code; null for any other unit. */
+function unitCurrency(unit: string): string | null {
+  const code = SIGN_CODES[unit] ?? (/^\p{Sc}+$/u.test(unit) ? unit : unit.toUpperCase());
+  return CURRENCY_CODES.has(code) || /^\p{Sc}+$/u.test(code) ? code : null;
 }
 
 /** An empty cell, a NULL spelling or a lone dash: no value. */
@@ -200,6 +220,8 @@ interface FunnelRow {
 interface BarsRow {
   label: string;
   value: ChartValue;
+  /** In the trailing bold run (`markTotals`): drawn below a rule, outside the parts' scale. */
+  total: boolean;
 }
 
 /** A `range` cell read: both ends (equal for a point), the number part as
@@ -216,7 +238,7 @@ export interface ChartInterval {
 interface RangeRow {
   label: string;
   value: ChartInterval;
-  /** A bold label (`**Slate**`): drawn below a rule as the total. */
+  /** In the trailing bold run (`markTotals`): drawn below a rule, on the parts' axis. */
   total: boolean;
 }
 
@@ -225,7 +247,7 @@ export type ChartModel =
   | { kind: "gate"; passName: string; holdName: string; barAfter: boolean; rows: GateRow[] }
   | { kind: "steps"; steps: string[]; series: StepsSeries[]; refLabel: string | null; normalize: boolean; decimals: number }
   | { kind: "funnel"; rows: FunnelRow[] }
-  /** `log`: every value is above 0 and the largest over `BARS_LOG_RATIO` times the smallest. */
+  /** `log`: every non-total value is above 0 and the largest over `BARS_LOG_RATIO` times the smallest. */
   | { kind: "bars"; log: boolean; rows: BarsRow[] }
   | { kind: "range"; rows: RangeRow[] };
 
@@ -553,23 +575,22 @@ class Reader {
         return;
       }
       // A leading currency sign, `~`, `≈` or `ca.` reads as the range reader reads one end (`$89`).
-      const { num, pm, ids } = splitValueCell(c);
-      const { sign, rest } = endSign(num);
-      const v = pm === null && !isDateCell(false, [{ sign, rest }]) ? parseCellValue(rest, this.ctx) : null;
+      const { sign, rest } = endSign(c.trim());
+      const v = isDateCell(false, [{ sign, rest: splitValueCell(rest).num }]) ? null : readValueCell(rest, this.ctx);
       if (!v) {
         this.fatal(`row "${label}": "${c}" in ${this.t.headers[vi]} is not a number`, r);
         return;
       }
-      const value: ChartValue = { n: v.n, text: num, decimals: v.decimals, unit: v.unit, pm: null, ids };
+      const value: ChartValue = { ...v, text: splitValueCell(c).num };
       const key = `${sign} ${v.unit}`;
       if (rows.length && key !== firstKey) {
         this.fatal(`row "${label}": ${rows[0]!.value.text} and ${value.text} are not in the same unit`, r);
         return;
       }
       firstKey = key;
-      rows.push({ label, value });
+      rows.push({ label, value, total: isBoldLabel(this.t.rawFirst[r] ?? "") });
     });
-    const ns = rows.map((r) => r.value.n);
+    const ns = markTotals(rows).filter((r) => !r.total).map((r) => r.value.n);
     const log = ns.length > 0 && ns.every((n) => n > 0) && Math.max(...ns) > BARS_LOG_RATIO * Math.min(...ns);
     return { kind: "bars", log, rows };
   }
@@ -578,7 +599,8 @@ class Reader {
     const vi = this.column("value", true);
     if (vi === null || this.dateColumn(vi)) return null;
     const rows: RangeRow[] = [];
-    let signed: { sign: string; label: string } | null = null;
+    let signed: { sign: string; code: string; label: string } | null = null;
+    let first: { unit: string; text: string } | null = null;
     this.t.rows.forEach((row, r) => {
       const label = row[0] ?? "";
       const c = this.cell(r, vi);
@@ -595,13 +617,23 @@ class Reader {
         this.fatal(`row "${label}": the low end of ${value.text} is above its high end`, r);
         return;
       }
-      if (value.sign) {
-        if (!signed) signed = { sign: value.sign, label };
-        else if (value.sign !== signed.sign) this.note(`row "${label}": ${value.sign} differs from ${signed.sign} in row "${signed.label}"`, r);
+      // A trailing currency (`40–80 EUR`) is a sign; any other unit must match the first row's, as in bars.
+      const currency = value.unit ? unitCurrency(value.unit) : null;
+      const unit = currency ? "" : value.unit;
+      if (first && unit !== first.unit) {
+        this.fatal(`row "${label}": ${first.text} and ${value.text} are not in the same unit`, r);
+        return;
+      }
+      first ??= { unit, text: value.text };
+      const sign = value.sign || (currency ? value.unit : "");
+      if (sign) {
+        const code = SIGN_CODES[sign] ?? currency ?? sign;
+        if (!signed) signed = { sign, code, label };
+        else if (code !== signed.code) this.note(`row "${label}": ${sign} differs from ${signed.sign} in row "${signed.label}"`, r);
       }
       rows.push({ label, value, total: isBoldLabel(this.t.rawFirst[r] ?? "") });
     });
-    return { kind: "range", rows };
+    return { kind: "range", rows: markTotals(rows) };
   }
 }
 

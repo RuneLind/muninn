@@ -481,14 +481,17 @@ function funnelRows(model: Extract<ChartModel, { kind: "funnel" }>, w: ChartWord
 
 // ── bars ────────────────────────────────────────────────────────────────────
 
+/** A bars total (`markTotals`) prints its number below the rule with no bar:
+ *  a sum on the parts' axis would squash them, and on its own it says nothing. */
 function barsRows(model: Extract<ChartModel, { kind: "bars" }>, logIds: ReadonlySet<string>): string {
-  const ns = model.rows.map((r) => r.value.n);
+  const ns = model.rows.filter((r) => !r.total).map((r) => r.value.n);
   const sc = scale(ns);
   const [lo, hi] = [Math.log10(Math.min(...ns)), Math.log10(Math.max(...ns))];
   // On a log scale the smallest bar keeps a visible stub of 2 of the 100 units.
   const at = (v: number) => (model.log ? round2(2 + ((Math.log10(v) - lo) / (hi - lo)) * 98) : sc.at(v));
   const z = model.log ? 0 : sc.at(0);
   const rows = model.rows.map((r) => {
+    if (r.total) return rowHtml(totalLabel(r), "", valueHtml(r.value, logIds));
     const svg =
       svgOpen(`${r.label}: ${r.value.text}`) +
       track +
@@ -497,7 +500,18 @@ function barsRows(model: Extract<ChartModel, { kind: "bars" }>, logIds: Readonly
       `</svg>`;
     return rowHtml(escapeHtml(r.label), svg, valueHtml(r.value, logIds));
   });
-  return `<div class="vc-rows">${rows.join("")}</div>`;
+  return withRule(model.rows, rows);
+}
+
+function totalLabel(r: { label: string }): string {
+  return `<span class="vc-total">${escapeHtml(r.label)}</span>`;
+}
+
+/** The rows in the order written, a rule before the first total. */
+function withRule(rows: readonly { total: boolean }[], html: string[]): string {
+  const k = rows.findIndex((r) => r.total);
+  const rule = `<div class="vc-rule" aria-hidden="true"></div>`;
+  return `<div class="vc-rows">${html.map((h, i) => (i === k ? rule + h : h)).join("")}</div>`;
 }
 
 // ── range ───────────────────────────────────────────────────────────────────
@@ -512,11 +526,7 @@ function rangeRows(model: Extract<ChartModel, { kind: "range" }>, logIds: Readon
       (a === b ? vline("vc-point", a, 1, 11) : rect("vc-value", a, b, 2, 8)) +
       (sc.negative ? vline("vc-zero", sc.at(0)) : "") +
       `</svg>`;
-    const label = r.total ? `<span class="vc-total">${escapeHtml(r.label)}</span>` : escapeHtml(r.label);
-    return rowHtml(label, svg, `${escapeHtml(r.value.text)}${idsHtml(r.value.ids, logIds)}`);
+    return rowHtml(r.total ? totalLabel(r) : escapeHtml(r.label), svg, `${escapeHtml(r.value.text)}${idsHtml(r.value.ids, logIds)}`);
   };
-  const parts = model.rows.filter((r) => !r.total).map(row);
-  const totals = model.rows.filter((r) => r.total).map(row);
-  const rule = totals.length ? `<div class="vc-rule" aria-hidden="true"></div>` : "";
-  return `<div class="vc-rows">${parts.join("")}${rule}${totals.join("")}</div>`;
+  return withRule(model.rows, model.rows.map(row));
 }

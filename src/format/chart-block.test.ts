@@ -461,6 +461,67 @@ describe("bars and range cells", () => {
   });
 });
 
+describe("bars and range totals", () => {
+  const totals = (kind: "bars" | "range", labels: string[]) => {
+    const m = chart(`<Chart kind="${kind}" value="V">`, ["Row", "V"], labels.map((l, i) => [l, `${i + 1}`])).model;
+    return m?.kind === kind ? m.rows.map((r) => [r.label, r.total]) : null;
+  };
+
+  test("only the trailing run of bold rows is the total, after at least one ordinary row", () => {
+    for (const kind of ["bars", "range"] as const) {
+      expect(totals(kind, ["a", "**Slate**", "c"])).toEqual([["a", false], ["Slate", false], ["c", false]]);
+      expect(totals(kind, ["a", "**Sub**", "b", "**Total**", "**Grand**"])).toEqual([["a", false], ["Sub", false], ["b", false], ["Total", true], ["Grand", true]]);
+      expect(totals(kind, ["**A**", "**B**"])).toEqual([["A", false], ["B", false]]);
+    }
+  });
+
+  test("a label is bold only when one bold span covers all of it", () => {
+    expect(totals("range", ["a", "**a** and **b**"])).toEqual([["a", false], ["a and b", false]]);
+    expect(totals("range", ["a", "**Sl**ate**"])?.[1]?.[1]).toBe(false);
+    expect(totals("range", ["a", "__All__"])?.[1]).toEqual(["All", true]);
+    expect(totals("range", ["a", "**A**"])?.[1]).toEqual(["A", true]);
+  });
+
+  test("a bars total stays out of the log-scale rule", () => {
+    const b = model(chart('<Chart kind="bars" value="V">', ["Row", "V"], [["a", "1"], ["b", "50"], ["**Total**", "5000"]]), "bars");
+    expect(b.log).toBe(false);
+  });
+});
+
+describe("range units", () => {
+  const range = (cells: string[]) => chart('<Chart kind="range" value="V">', ["Row", "V"], cells.map((c, i) => [`r${i}`, c]));
+
+  test("different trailing units across rows are fatal, a missing unit too", () => {
+    expect(messages(range(["82 s", "20 min"]))).toEqual(['row "r1": 82 s and 20 min are not in the same unit']);
+    expect(range(["82 s", "20 min"]).model).toBeNull();
+    expect(messages(range(["3,5 min", "34 s"]))).toEqual(['row "r1": 3,5 min and 34 s are not in the same unit']);
+    expect(messages(range(["~2 h", "5"]))).toEqual(['row "r1": ~2 h and 5 are not in the same unit']);
+    expect(range(["1–2 h", "3 h"]).findings).toEqual([]);
+  });
+
+  test("a trailing currency is a sign: a different one warns, the same one does not", () => {
+    expect(range(["$40–80", "40–80 €"]).findings).toEqual([{ message: 'row "r1": € differs from $ in row "r0"', row: 1, fatal: false }]);
+    expect(messages(range(["$40–80", "40–80 EUR"]))).toEqual(['row "r1": EUR differs from $ in row "r0"']);
+    expect(range(["$40–80", "40–80 EUR"]).model?.kind).toBe("range");
+    expect(range(["$40–80", "40–80 USD"]).findings).toEqual([]);
+    expect(range(["40–80 kr", "50 NOK"]).findings).toEqual([]);
+  });
+});
+
+describe("bars ±", () => {
+  test("a value cell may carry ± n, as in the other kinds", () => {
+    const b = model(chart('<Chart kind="bars" value="V">', ["Row", "V"], [["a", "5 ± 1"], ["b", "6 ± 2 (D3)"], ["c", "1,5 ± 0,5"]]), "bars");
+    expect(b.rows.map((r) => [r.value.n, r.value.text, r.value.pm, r.value.ids])).toEqual([
+      [5, "5", "1", []],
+      [6, "6", "2", ["D3"]],
+      [1.5, "1,5", "0,5", []],
+    ]);
+    const signed = model(chart('<Chart kind="bars" value="V">', ["Row", "V"], [["a", "$5 ± 1"], ["b", "~$7"]]), "bars");
+    expect(signed.rows.map((r) => [r.value.n, r.value.text, r.value.pm])).toEqual([[5, "$5", "1"], [7, "~$7", null]]);
+    expect(messages(chart('<Chart kind="bars" value="V">', ["Row", "V"], [["a", "5 ± x"]]))).toEqual(['row "a": "5 ± x" in V is not a number']);
+  });
+});
+
 describe("numbers", () => {
   test("a minus is U+2212, never −0, trailing zeros cut", () => {
     expect(formatChartNumber(-1.5, 1, false)).toBe("−1.5");
