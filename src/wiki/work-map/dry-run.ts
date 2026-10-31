@@ -124,8 +124,9 @@ function canonical(file: string): string {
  * of it, itself included, is `stat`ed, and it is inside when one of them is the
  * root directory (same `dev` and `ino`). That holds whatever spelling reaches
  * the root: a case variant on a case-insensitive volume, NFD for NFC, a
- * symlink, `/tmp` for `/private/tmp`, `..`. A missing ancestor is skipped; any
- * other error counts as inside (unsure ⇒ refused).
+ * symlink, `/tmp` for `/private/tmp`. A missing ancestor is skipped; any
+ * other error counts as inside (unsure ⇒ refused). Not covered: a `..` after a
+ * missing component (`canonical` joins the rest as text) and a hard link.
  */
 const inside = (root: string, file: string) => {
   try {
