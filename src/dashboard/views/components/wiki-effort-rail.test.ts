@@ -8,6 +8,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   EFFORT_MOVING_STATES,
+  EFFORT_OPEN_STATES,
+  effortMayStartOpen,
   EFFORT_ROWS_SHOWN,
   EFFORTS_OFF_TOGGLE_KEY,
   EFFORTS_OPEN_DEFAULT,
@@ -15,6 +17,7 @@ import {
   effortFoldKey,
   effortNeedsOpen,
   effortsOn,
+  effortsToggleWords,
   railEffortIndex,
   type RailEffort,
 } from "./wiki-effort-rail.ts";
@@ -37,6 +40,7 @@ import type { PickUpRow } from "./wiki-pick-up.ts";
 import type { WorkMap } from "../../../wiki/work-map/schema.ts";
 import { WORK_MAP_LANES, effortNeedItems, openNeeds } from "./wiki-work-card.ts";
 import { effortView } from "./wiki-effort-page.ts";
+import { fixtureThemeMap, fixtureThemePages, THEME_RUN_AT } from "../../../test/theme-map-fixture.ts";
 
 function page(over: Partial<WikiListing> & { relPath: string }): WikiListing {
   return {
@@ -101,6 +105,14 @@ function expectOneRowPerPage(es: RailEntry[]): void {
   const seen = rows(es).map((r) => r.page.relPath);
   expect(seen.length).toBe(new Set(seen).size);
 }
+
+// Fix round 2 batch 1: View options names the fold in the map's own words.
+describe("effortsToggleWords", () => {
+  test("a themes map says theme; a work map keeps its effort words", () => {
+    expect(effortsToggleWords(true)).toEqual({ label: "group by theme", title: "Fold Activity under the theme map's themes" });
+    expect(effortsToggleWords(false)).toEqual({ label: "group by effort", title: "Fold Activity under the work map's efforts" });
+  });
+});
 
 describe("effortsOn / the mode key", () => {
   test("on by default where a map exists; the stored exception turns it off; no map ⇒ off whatever is stored", () => {
@@ -723,3 +735,65 @@ describe("capFolds — effort keys in their own class", () => {
     expect(out.filter(isEffortFoldKey)).toEqual(effortKeys.slice(0, EFFORT_FOLDS_MAX));
   });
 });
+
+describe("a themes map in the rail (theme map P2)", () => {
+  test("railEffortIndex marks every theme fold kind themes, with its theme state and its Worth-a-look keys", () => {
+    const pages = fixtureThemePages().map((p) => page({ relPath: p.relPath }));
+    const idx = railEffortIndex(fixtureThemeMap(), pages, THEME_RUN_AT);
+    const alpha = idx.get("sources/alpha-1.mdx")!;
+    expect([alpha.kind, alpha.state]).toEqual(["themes", "rising"]);
+    expect(idx.get("sources/beta-1.mdx")!.needs).toEqual(["drift|Hub X is behind its sources"]);
+  });
+
+  test("a work map's fold carries no kind, and its active effort starts open", () => {
+    const map = {
+      ...fixtureWorkMapLike(),
+      efforts: [
+        { id: "w", name: "W", aliases: [], oneLine: "", state: "active", pages: [{ id: "plans/a1.mdx", role: "plan" }], why: "", confidence: 1, next: "", related: [], daily: [] },
+      ],
+    } as unknown as WorkMap;
+    const idx = railEffortIndex(map, ALL, 2);
+    const w = idx.get("plans/a1.mdx")!;
+    expect([w.id, "kind" in w, effortMayStartOpen(w)]).toEqual(["w", false, true]);
+    const m = build({ efforts: idx, activity: [act(A1, 9, 1)] });
+    expect(efforts_(m.entries).map((e) => [e.effort.id, e.folded])).toEqual([["w", false]]);
+  });
+
+  test("new and rising start open on a themes map; steady and fading start closed", () => {
+    expect(EFFORT_OPEN_STATES.themes).toEqual(["new", "rising"]);
+    expect(EFFORT_OPEN_STATES.work).toBe(EFFORT_MOVING_STATES);
+    const th = (id: string, state: RailEffort["state"]) => eff(id, { state, kind: "themes" });
+    const efforts = new Map<string, RailEffort>([
+      ["plans/a1.mdx", th("a", "steady")],
+      ["plans/b1.mdx", th("b", "rising")],
+      ["plans/c1.mdx", th("c", "fading")],
+      ["plans/d1.mdx", th("d", "new")],
+    ]);
+    const m = build({ efforts, activity: [act(A1, 9, 1), act(B1, 8, 2), act(C1, 7, 3), act(D1, 6, 4)] });
+    expect(efforts_(m.entries).map((e) => [e.effort.id, e.folded])).toEqual([["a", true], ["b", false], ["c", true], ["d", false]]);
+  });
+
+  test("a row in a theme fold hovers as «In the <name> theme»; a work fold's row keeps «effort»", () => {
+    const themed = build({ efforts: new Map([["plans/a1.mdx", eff("a", { state: "rising", kind: "themes" })]]), activity: [act(A1, 9, 1)] });
+    const a1 = rows(themed.entries).find((r) => r.page.relPath === "plans/a1.mdx")!;
+    expect(railMemberWhy(a1.member)).toBe("In the Effort a theme");
+    const work = rows(build().entries).find((r) => r.page.relPath === "plans/a1.mdx")!;
+    expect([work.member, railMemberWhy(work.member)]).toEqual([{ label: "Effort a", kind: "effort" }, "In the Effort a effort"]);
+  });
+
+  test("a work fold in state active still starts open, and the theme states do not open a work fold", () => {
+    expect(effortMayStartOpen({ state: "active" })).toBe(true);
+    expect(effortMayStartOpen({ state: "rising" })).toBe(false);
+    expect(effortMayStartOpen({ state: "rising", kind: "themes" })).toBe(true);
+    expect(effortMayStartOpen({ state: "steady", kind: "themes" })).toBe(false);
+  });
+});
+
+function fixtureWorkMapLike() {
+  return {
+    version: 1, wiki: "w", runAtMs: 1, model: "m",
+    coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+    summary: "", themes: [], loose: [], needsYou: [],
+  };
+}
+const efforts_ = (es: RailEntry[]) => es.filter((e) => e.kind === "effort") as Extract<RailEntry, { kind: "effort" }>[];

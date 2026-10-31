@@ -92,12 +92,15 @@ describe("workMapRunAt", () => {
       loose: [],
     };
     await writeFile(file, JSON.stringify(themes));
-    expect(await workMapListingField(root)).toEqual({ workMap: { runAt: 4242 } });
+    // Fix round 2 batch 1: a themes map names its kind, so the rail's words
+    // need no map GET; a work map's field stays `{runAt}` exactly.
+    expect(await workMapListingField(root)).toEqual({ workMap: { runAt: 4242, kind: "themes" } });
     await writeFile(file, JSON.stringify({ ...themes, kind: "other" }));
     await utimes(file, 9, 9);
     expect(await workMapRunAt(root)).toBeNull();
     await writeFile(file, mapText(5151));
     await utimes(file, 11, 11);
     expect(await workMapRunAt(root)).toBe(5151);
+    expect(await workMapListingField(root)).toEqual({ workMap: { runAt: 5151 } });
   });
 });

@@ -408,6 +408,9 @@ test.describe("Wiki rail: group by effort", () => {
     const box = page.locator("#wikiGroupEfforts");
     await expect(box).toBeVisible();
     await expect(box).toBeChecked();
+    // A work map keeps its effort words (theme map P2 fix round 2 batch 1).
+    await expect(page.locator("#wikiEffortsToggle")).toHaveText("group by effort");
+    await expect(page.locator("#wikiEffortsToggle")).toHaveAttribute("title", "Fold Activity under the work map's efforts");
     await box.uncheck();
     await expect(effortRows(page)).toHaveCount(0);
     // The pre-P4 rail: Work threads back (its card claims its page), no fold furniture.

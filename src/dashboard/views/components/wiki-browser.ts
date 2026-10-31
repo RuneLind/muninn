@@ -118,8 +118,8 @@ import {
 import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
 import { proseText, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
-import type { WorkMap } from "../../../wiki/work-map/schema.ts";
-import { EFFORTS_OFF_TOGGLE_KEY, effortNeedsOpen, effortsOn, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
+import { isThemeMap, type AnyWorkMap } from "../../../wiki/work-map/join.ts";
+import { EFFORTS_OFF_TOGGLE_KEY, effortNeedsOpen, effortsOn, effortsToggleWords, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
@@ -1534,6 +1534,8 @@ function tabHasFocus(): boolean {
 /** The listing's `workMap.runAt` — set on a wiki with a work map, which
  *  shows the Your work card instead of What's new (`wiki-start-cards.ts`). */
 let workMapRunAt: number | null = null;
+/** The listing's `workMap.kind === "themes"`: View options then says theme. */
+let workMapThemes = false;
 let workFacts: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs" | "evidence">>) | null = null;
 
 /** Is the reader grouping this wiki's rail into families and months? OFF by
@@ -1742,10 +1744,12 @@ function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: numbe
   const n = members.length;
   const what = `${n} page${n === 1 ? "" : "s"} of ${effort.name}`;
   const caretWhy = entry.forcedOpen ? forcedOpenWhy("group") : `${entry.folded ? "Show" : "Hide"} the ${what}`;
+  // A themes map names its words as the card does: a theme, Worth a look.
+  const theme = effort.kind === "themes";
   const sep = '<span class="wiki-rollup-sep"> ·</span>';
   const parts = [
     `<span class="wiki-rollup-part wiki-effort-state">${esc(effort.state)}</span>`,
-    ...(moves > 0 ? [`<span class="wiki-rollup-part wiki-effort-moves" title="${moves} item${moves === 1 ? "" : "s"} in Needs you">✋ ${moves}</span>`] : []),
+    ...(moves > 0 ? [`<span class="wiki-rollup-part wiki-effort-moves" title="${moves} item${moves === 1 ? "" : "s"} in ${theme ? "Worth a look" : "Needs you"}">✋ ${moves}</span>`] : []),
     ...roll.parts.map(
       (p) => `<span class="wiki-rollup-part${p.word === "shipped" || p.word === "in-flight" ? " s-" + p.word : ""}">${p.n} ${esc(p.word)}</span>`,
     ),
@@ -1760,7 +1764,7 @@ function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: numbe
     ` aria-label="${esc(caretWhy)}" title="${esc(caretWhy)}"><span class="wiki-fold-caret" aria-hidden="true">▸</span></button>` +
     `<div class="wiki-effort-body">` +
     `<div class="wiki-effort-line">` +
-    `<a class="wiki-effort-name" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}" title="${esc(`Open the effort page: ${effort.name}`)}">${esc(effort.name)}</a>` +
+    `<a class="wiki-effort-name" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}" title="${esc(`Open the ${theme ? "theme" : "effort"} page: ${effort.name}`)}">${esc(effort.name)}</a>` +
     (age ? `<span class="wiki-effort-age" title="${esc(`${entry.members.length ? "newest page drawn here" : "newest pinned page"} ${age}`)}">${esc(age)}</span>` : "") +
     `</div>` +
     `<small class="wiki-group-rollup wiki-effort-meta">${meta}</small>` +
@@ -1784,7 +1788,7 @@ function effortIntroHtml(effort: RailEffort): string {
   const line = text ? `<span class="wiki-effort-oneline" title="${text}">${text}</span> ` : "";
   return (
     `<div class="wiki-effort-intro" data-section="activity" data-effort="${esc(effort.id)}">${line}` +
-    `<a class="wiki-effort-open" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}">Open effort →</a></div>`
+    `<a class="wiki-effort-open" href="${esc(effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}">Open ${effort.kind === "themes" ? "theme" : "effort"} →</a></div>`
   );
 }
 
@@ -1796,6 +1800,11 @@ function paintEffortsToggle(): void {
   if (!wrap || !box) return;
   wrap.hidden = workMapRunAt === null;
   box.checked = effortsOn(openFolds, true);
+  // The label's text node follows the checkbox (wiki-page.ts).
+  const words = effortsToggleWords(workMapThemes);
+  if (wrap.title !== words.title) wrap.title = words.title;
+  const text = box.nextSibling;
+  if (text?.nodeType === Node.TEXT_NODE && text.textContent?.trim() !== words.label) text.textContent = words.label;
 }
 
 /** True while `renderList` puts focus back on the rail control its repaint replaced. */
@@ -2268,7 +2277,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
       movesFlagHtml(p) +
       (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "") +
       // The page's role in its effort (D14), on a row inside an open effort fold.
-      (entry.role ? `<span class="wiki-effort-role" title="${esc(`Role in the effort: ${entry.role}`)}">${esc(entry.role)}</span>` : "") +
+      (entry.role ? `<span class="wiki-effort-role" title="${esc(`Role in the ${entry.member?.theme ? "theme" : "effort"}: ${entry.role}`)}">${esc(entry.role)}</span>` : "") +
       // The Stale check's two numbers (PR 2b, D26), off the summary route.
       railStaleBadge(p.relPath) +
       chipSlot;
@@ -5698,7 +5707,7 @@ let effortOpen: string | null = null;
 type WorkMapGet = { ok: boolean; status: number; body: WorkMapGetBody | null };
 /** The one map cache the Your work card, the rail and the effort page read
  *  and write, keyed on the listing's run time (whatever run the body carries). */
-let workMapCache: { runAt: number; body: WorkMapGetBody & { map: WorkMap } } | null = null;
+let workMapCache: { runAt: number; body: WorkMapGetBody & { map: AnyWorkMap } } | null = null;
 /** The map GET in flight and the run time it was started for: a repaint while
  *  it runs (a facet change, an adopt) waits on it instead of sending another. */
 let effortMapFetch: { runAt: number; done: Promise<WorkMapGet> } | null = null;
@@ -5717,7 +5726,7 @@ function workMapFetchFor(runAt: number): Promise<WorkMapGet> {
   if (workMapCache?.runAt === runAt) return Promise.resolve({ ok: true, status: 200, body: workMapCache.body });
   if (effortMapFetch?.runAt !== runAt) {
     const done = getWorkMap().then((r) => {
-      if (r.ok && r.body?.map && workMapRunAt === runAt) workMapCache = { runAt, body: r.body as WorkMapGetBody & { map: WorkMap } };
+      if (r.ok && r.body?.map && workMapRunAt === runAt) workMapCache = { runAt, body: r.body as WorkMapGetBody & { map: AnyWorkMap } };
       return r;
     });
     const entry = { runAt, done };
@@ -5736,7 +5745,7 @@ function workMapFetchFor(runAt: number): Promise<WorkMapGet> {
 function adoptWorkMap(body: WorkMapGetBody): void {
   if (!body.map || workMapRunAt === null || body.map.runAtMs <= workMapRunAt) return;
   workMapRunAt = body.map.runAtMs;
-  workMapCache = { runAt: workMapRunAt, body: body as WorkMapGetBody & { map: WorkMap } };
+  workMapCache = { runAt: workMapRunAt, body: body as WorkMapGetBody & { map: AnyWorkMap } };
   renderList();
   if (effortOpen !== null && document.getElementById("wikiEffortPage")) paintEffort(effortOpen, true);
 }
@@ -5747,7 +5756,7 @@ let railMapFailedAt: number | null = null;
 /** The run time the rail is waiting on a map GET for (one listener per GET). */
 let railMapPending: number | null = null;
 /** The last effort index the rail built, and what it was built from. */
-let railEffortMemo: { map: WorkMap; pages: WikiListing[]; index: Map<string, RailEffort> } | null = null;
+let railEffortMemo: { map: AnyWorkMap; pages: WikiListing[]; index: Map<string, RailEffort> } | null = null;
 
 /**
  * The rail's effort index (P4), or null: no map on this wiki, the map not
@@ -5887,7 +5896,13 @@ function paintEffort(id: string, background: boolean): void {
   // set while it was in flight.
   const head = () => ({ wiki: WIKI, startHref: currentStartUrl(), id });
   const noMapConn = '<div class="wiki-ef-conn-empty">No work map.</div>';
-  const paint = (map: WorkMap) => {
+  const paint = (map: AnyWorkMap) => {
+    // A theme's page is the next slice (theme map P3); until then a themes
+    // map says so instead of drawing a work effort page over theme fields.
+    if (isThemeMap(map)) {
+      writeEffortPanes(wrap, effortStatusHtml(head(), "themes"), '<div class="wiki-ef-conn-empty">No theme page yet.</div>', background);
+      return;
+    }
     const view = effortView({
       map,
       pages: allPages,
@@ -10278,6 +10293,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // Shape-checked thread by thread in `openThreadCards` (`usableThreads`).
   workFacts = data.work && typeof data.work === "object" && Array.isArray(data.work.threads) ? data.work : null;
   workMapRunAt = typeof data.workMap?.runAt === "number" ? data.workMap.runAt : null;
+  workMapThemes = workMapRunAt !== null && data.workMap?.kind === "themes";
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one
   // would admit a project the listing on screen no longer has. An older server /

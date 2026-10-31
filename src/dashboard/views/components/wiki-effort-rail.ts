@@ -5,8 +5,10 @@
  * Activity rows by it; this module owns no layout.
  */
 
-import { joinWorkMap } from "../../../wiki/work-map/join.ts";
-import type { EffortState, WorkMap } from "../../../wiki/work-map/schema.ts";
+import { isThemeMap, joinWorkMap, type AnyWorkMap } from "../../../wiki/work-map/join.ts";
+import type { WorkMapKind } from "../../../wiki/work-map/kind.ts";
+import type { EffortState } from "../../../wiki/work-map/schema.ts";
+import type { ThemeState } from "../../../wiki/work-map/theme-schema.ts";
 import { normalizeRel } from "./wiki-nav.ts";
 import { effortNeedItems, openNeeds, WORK_MAP_LANES } from "./wiki-work-card.ts";
 import type { WikiListing } from "./wiki-filter.ts";
@@ -28,6 +30,18 @@ export const EFFORTS_OPEN_DEFAULT = 3;
 /** The effort states whose folds may start open (D14): the card's Moving lane. */
 export const EFFORT_MOVING_STATES: readonly EffortState[] = WORK_MAP_LANES.find((l) => l.id === "moving")!.states;
 
+/** The states whose folds may start open, per map kind: a themes map opens
+ *  its `new` and `rising` themes (theme map P2). */
+export const EFFORT_OPEN_STATES: { readonly [K in WorkMapKind]: readonly string[] } = {
+  work: EFFORT_MOVING_STATES,
+  themes: ["new", "rising"] satisfies readonly ThemeState[],
+};
+
+/** May this effort's fold start open? A fold with no `kind` is a work map's. */
+export function effortMayStartOpen(e: Pick<RailEffort, "state" | "kind">): boolean {
+  return EFFORT_OPEN_STATES[e.kind ?? "work"].includes(e.state);
+}
+
 /** How many rows an open fold shows before «+N more» (D14). */
 export const EFFORT_ROWS_SHOWN = 4;
 
@@ -47,7 +61,9 @@ export function effortFoldKey(id: string): string {
 export interface RailEffort {
   id: string;
   name: string;
-  state: EffortState;
+  state: EffortState | ThemeState;
+  /** The map's kind; absent reads as `work`. Picks the default-open states. */
+  kind?: WorkMapKind;
   /** The map's one-line summary, raw: `⟦relPath⟧` markers and all. The
    *  painter renders it as plain text through the card's `proseText`. */
   oneLine: string;
@@ -82,6 +98,14 @@ export function effortFoldOf(p: WikiListing, efforts: ReadonlyMap<string, RailEf
   return e && folded.has(e.id) ? e : undefined;
 }
 
+/** View options' `group by effort` checkbox, in the map's own words: a themes
+ *  map folds by theme. The work strings are the page shell's markup. */
+export function effortsToggleWords(themes: boolean): { label: string; title: string } {
+  return themes
+    ? { label: "group by theme", title: "Fold Activity under the theme map's themes" }
+    : { label: "group by effort", title: "Fold Activity under the work map's efforts" };
+}
+
 /** Is the reader's mode on? Off on a wiki with no map, whatever is stored. */
 export function effortsOn(openFolds: readonly string[], hasMap: boolean): boolean {
   // The folds store's own comparison (`isFoldOpen`), inlined: `wiki-recents.ts`
@@ -95,12 +119,13 @@ export function effortsOn(openFolds: readonly string[], hasMap: boolean): boolea
  * nest). A page two efforts list belongs to the first one in map order, so a
  * page sits in one fold.
  */
-export function railEffortIndex(map: WorkMap, pages: readonly WikiListing[], now: number): Map<string, RailEffort> {
+export function railEffortIndex(map: AnyWorkMap, pages: readonly WikiListing[], now: number): Map<string, RailEffort> {
   const out = new Map<string, RailEffort>();
+  const themes = isThemeMap(map);
   for (const e of joinWorkMap(map, pages, now).efforts) {
     const roles = new Map<string, string>();
     const needs = effortNeedItems(map.needsYou, e.id).map((n) => n.key);
-    const effort: RailEffort = { id: e.id, name: e.name, state: e.state, oneLine: e.oneLine, needs, roles };
+    const effort: RailEffort = { id: e.id, name: e.name, state: e.state, oneLine: e.oneLine, needs, roles, ...(themes ? { kind: "themes" as const } : {}) };
     for (const p of e.pages) {
       const key = normalizeRel(p.page.relPath);
       if (out.has(key)) continue;

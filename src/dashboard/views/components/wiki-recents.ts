@@ -41,7 +41,7 @@ import type { PickUpRow } from "./wiki-pick-up.ts";
 import {
   EFFORT_ALL_PREFIX,
   EFFORT_FOLD_PREFIX,
-  EFFORT_MOVING_STATES,
+  effortMayStartOpen,
   EFFORT_ROWS_SHOWN,
   EFFORTS_OPEN_DEFAULT,
   effortAllKey,
@@ -425,10 +425,10 @@ export function pairedByWhy(pairedBy: string, parentTitle: string): string {
 /** A row drawn inside a group's body says which group on hover: the group's
  *  own row carries the label, and a reader scrolled past the top of a long
  *  open group has nothing else to read it from. */
-export function railMemberWhy(member: { label: string; kind: RailGroupKind | "effort" } | undefined): string {
+export function railMemberWhy(member: { label: string; kind: RailGroupKind | "effort"; theme?: true } | undefined): string {
   if (!member) return "";
   if (member.kind === "month") return `In ${member.label}`;
-  if (member.kind === "effort") return `In the ${member.label} effort`;
+  if (member.kind === "effort") return `In the ${member.label} ${member.theme ? "theme" : "effort"}`;
   return `In the ${member.label} ${member.kind === "series" ? "series" : "family"}`;
 }
 
@@ -1054,7 +1054,8 @@ export type RailEntry =
        *  lifted into Activity or Pinned does not carry it — it is not in the
        *  group's body there, exactly as a lifted attachment child loses its
        *  indent. */
-      member?: { label: string; kind: RailGroupKind | "effort" };
+      /** `theme` marks an effort fold of a themes map, for the hover's noun. */
+      member?: { label: string; kind: RailGroupKind | "effort"; theme?: true };
       /** Set on a focus row drawn inside an OPEN work-thread card: the card's
        *  name, for the painter's hover and the card's left rule; `session` on
        *  a row of a Sessions-stop card, whose ⋯ holds no Make own thread. */
@@ -1814,7 +1815,7 @@ export function buildRail(input: RailInput): RailModel {
       ...(extra.inGroup
         ? { member: { label: extra.inGroup.label, kind: extra.inGroup.kind } }
         : extra.inEffort
-          ? { member: { label: extra.inEffort.name, kind: "effort" as const } }
+          ? { member: { label: extra.inEffort.name, kind: "effort" as const, ...(extra.inEffort.kind === "themes" ? { theme: true as const } : {}) } }
           : {}),
       ...(latestRels.has(key) ? { latest: true as const } : {}),
       ...(extra.thread !== undefined ? { thread: { name: extra.thread, ...(extra.session ? { session: true as const } : {}) } } : {}),
@@ -2072,13 +2073,13 @@ export function buildRail(input: RailInput): RailModel {
     return ages.length ? Math.min(...ages) : Math.min(...activityEfforts.get(id)!.rows.map((r) => r.ageMs));
   };
   // The folds that start open (D14): the EFFORTS_OPEN_DEFAULT most recently
-  // active among the efforts whose state moves (active, blocked, proposed)
-  // and that draw at least one row (a tie keeps rank order). A ghost-only fold
+  // active among the efforts whose state moves (active, blocked, proposed; on
+  // a themes map new and rising — `EFFORT_OPEN_STATES`) and that draw at least one row (a tie keeps rank order). A ghost-only fold
   // renders, but closed by default — its pages are under Pinned.
   const effortDefaultOpen = new Set(
     [...activityEfforts.entries()]
-      .map(([id, b], i) => ({ id, i, state: b.effort.state }))
-      .filter((x) => EFFORT_MOVING_STATES.includes(x.state) && effortDraws.get(x.id)!.drawn.length > 0)
+      .map(([id, b], i) => ({ id, i, effort: b.effort }))
+      .filter((x) => effortMayStartOpen(x.effort) && effortDraws.get(x.id)!.drawn.length > 0)
       .map((x) => ({ ...x, age: effortAge(x.id) }))
       .sort((a, b) => a.age - b.age || a.i - b.i)
       .slice(0, EFFORTS_OPEN_DEFAULT)

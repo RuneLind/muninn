@@ -16,8 +16,15 @@ import {
   workCardHtml,
   writeDone,
   WORK_MAP_STALE_MS,
+  THEME_STRIP_WEEKS,
+  THEME_CONNECTIONS_SHOWN,
+  themeActiveLabel,
+  themeConnections,
+  weeklyStripHtml,
   type WorkMapGetBody,
 } from "./wiki-work-card.ts";
+import { fixtureTheme, fixtureThemeMap, fixtureThemePages, THEME_RUN_AT } from "../../../test/theme-map-fixture.ts";
+import type { ThemeMap } from "../../../wiki/work-map/theme-schema.ts";
 
 const NOW = Date.parse("2026-10-29T12:00:00");
 const HOUR = 3_600_000;
@@ -250,5 +257,277 @@ describe("↻", () => {
     expect(pollState({ map: m, organizable: true, lastAttempt: { at: NOW - 1, outcome: "failed" } }, m.runAtMs, NOW).state).toBe("pending");
     const s = pollState({ map: m, organizable: true, lastAttempt: { at: NOW, outcome: "refused", error: "cold" } }, m.runAtMs, NOW);
     expect(s).toEqual({ state: "settled", attempt: { at: NOW, outcome: "refused", error: "cold" } });
+  });
+});
+
+describe("What you're following (a themes map, theme map P2)", () => {
+  const T_NOW = THEME_RUN_AT + 2 * HOUR;
+  const themeCard = (m: ThemeMap = fixtureThemeMap(), done = new Set<string>()) =>
+    workCardHtml({
+      body: { map: m, organizable: true },
+      pages: fixtureThemePages(),
+      now: T_NOW,
+      done,
+      hrefFor: href,
+      effortHref: (id) => `/wiki?effort=${id}`,
+      refresh: { phase: "idle" },
+    });
+
+  test("the head, Worth a look and the coverage read the themes words", () => {
+    const html = themeCard();
+    expect(html).toContain('<span class="wiki-wn-title">What you’re following</span>');
+    expect(html).not.toContain("Your work");
+    expect(html).toContain("Worth a look");
+    expect(html).not.toContain("Needs you");
+    expect(html).toContain('<div class="wiki-wm-coverage">9 sources in 28 days · 3 hubs</div>');
+    expect(html).not.toContain("active page");
+  });
+
+  test("a drift item shows the runner's count; another kind shows its sources; hubs render as chips", () => {
+    const html = themeCard();
+    expect(html).toContain(">12 new since update</span>");
+    expect(html).toContain(">2 sources</span>");
+    expect(html).toContain('<span class="wiki-wm-hub"><a class="wiki-wm-link" href="/wiki?relPath=concepts%2FHub%20X.md" data-relpath="concepts/Hub X.md">Hub X</a></span>');
+  });
+
+  test("✓ hides an item by its needKey", () => {
+    const html = themeCard(fixtureThemeMap(), new Set([needKey({ kind: "drift", title: "Hub X is behind its sources" })]));
+    expect(html).not.toContain("12 new since update");
+    expect(html).toContain("1 done · show");
+  });
+
+  test("Connected lists each pair once, A ↔ B: why, with the first end's why", () => {
+    const html = themeCard();
+    const conns = [...html.matchAll(/data-wm-conn="([^"]+)"/g)].map((m) => m[1]);
+    // Lane order deals the rows: gamma (New) first, its one pair stored on beta's end.
+    expect(conns).toEqual(["beta|gamma", "alpha|beta"]);
+    expect(html).toContain("Both lean on Hub X.");
+    expect(html).not.toContain("The other end");
+    expect(html).toMatch(/data-effort-link="alpha" data-wm-conn-link>Theme alpha<\/a> <span class="wiki-wm-conn-arrow"[^>]*>↔<\/span> <a [^>]*data-effort-link="beta" data-wm-conn-link>Theme beta<\/a><span class="wiki-wm-conn-why">: Both lean on Hub X\.<\/span>/);
+  });
+
+  test("lanes New, Rising, Steady, Fading in that order, Fading closed; Life follows the AI lanes", () => {
+    const html = themeCard();
+    const lanes = [...html.matchAll(/<details class="wiki-wm-lane[^"]*" data-wm-lane="([a-z]+)"( open)?>/g)].map((m) => `${m[1]}${m[2] ? "+" : ""}`);
+    expect(lanes).toEqual(["new+", "rising+", "steady+", "fading", "life+"]);
+    const life = html.slice(html.indexOf('data-wm-lane="life"'));
+    expect(life).toContain(">Life <span");
+    expect(life).toContain('data-effort-id="life-one"');
+    expect(html.indexOf('data-effort-id="life-one"')).toBeGreaterThan(html.indexOf('data-effort-id="delta"'));
+  });
+
+  test("each theme carries a weekly strip, its hubs and its sources", () => {
+    const html = themeCard();
+    expect((html.match(/class="wiki-wm-weeks"/g) ?? []).length).toBe(5);
+    const alpha = html.slice(html.indexOf('data-effort-id="alpha"'), html.indexOf("</li>", html.indexOf('data-effort-id="alpha"')));
+    expect(alpha).toContain("2 sources · this week");
+    expect(alpha).toContain('aria-label="7 sources over the last 3 weeks, this week so far, 1 week may miss days"');
+    expect(alpha).toContain('data-relpath="sources/alpha-2.mdx"');
+  });
+
+  test("a work map renders unchanged words (no themes branch)", () => {
+    const html = card(map());
+    expect(html).toContain('<span class="wiki-wn-title">Your work</span>');
+    expect(html).toContain("Needs you");
+    expect(html).not.toContain("wiki-wm-need-count");
+  });
+});
+
+describe("theme helpers", () => {
+  test("lastActiveDays reads the newest week with a source, from its Sunday", () => {
+    const t = fixtureTheme("x");
+    // W44 starts Monday 2026-10-26; its Sunday is 2026-11-01, after T_NOW.
+    expect(lastActiveDays(t, Date.parse("2026-10-30T12:00:00"))).toBe(0);
+    expect(lastActiveDays(t, Date.parse("2026-11-04T12:00:00"))).toBe(3);
+    expect(lastActiveDays(fixtureTheme("y", { weekly: [{ week: "2026-W40", start: "2026-09-28", count: 0 }] }), NOW)).toBeNull();
+    // A week with no source does not count: delta's newest active week is W40.
+    const delta = fixtureTheme("d", { weekly: [{ week: "2026-W40", start: "2026-09-28", count: 3 }, { week: "2026-W41", start: "2026-10-05", count: 0 }] });
+    expect(lastActiveDays(delta, Date.parse("2026-10-30T12:00:00"))).toBe(26);
+    expect(themeActiveLabel(26)).toBe("4 wk ago");
+    expect([0, 1, 7, 8].map(themeActiveLabel)).toEqual(["this week", "last week", "last week", "2 wk ago"]);
+  });
+
+  test("lastActiveDays on a work effort still reads daily", () => {
+    expect(lastActiveDays({ daily: [{ day: "2026-10-27", commits: 1, sessions: 0 }] }, NOW)).toBe(2);
+  });
+
+  test("the strip shows the newest weeks only, oldest first, with partial weeks marked", () => {
+    const weekly = Array.from({ length: THEME_STRIP_WEEKS + 2 }, (_, i) => ({ week: `W${i}`, start: `2026-08-${String(i + 10).padStart(2, "0")}`, count: i, ...(i === 9 ? { partial: true } : {}) }));
+    const html = weeklyStripHtml(weekly.reverse());
+    const titles = [...html.matchAll(/class="wiki-wm-slot[^"]*" title="([^"]+)"/g)].map((m) => m[1]!.split(" ")[0]);
+    expect(titles).toEqual(["W2", "W3", "W4", "W5", "W6", "W7", "W8", "W9"]);
+    expect(html).toContain('<span class="wiki-wm-slot partial" title="W9 (from 2026-08-19): 9 sources, may miss days"><span class="wiki-wm-week lvl-4"></span></span>');
+    expect(weeklyStripHtml([])).toBe("");
+  });
+
+  // Fix round 1 batch 2: the strip's hidden weeks, the running week, a partial week.
+  const mondays = (from: string, n: number) => Array.from({ length: n }, (_, i) => new Date(Date.parse(`${from}T00:00:00Z`) + i * 7 * 86_400_000).toISOString().slice(0, 10));
+
+  test("weeks before the strip's 8 bars show as «+N earlier», and the label does not claim them", () => {
+    const weekly = mondays("2026-08-10", 12).map((start, i) => ({ week: `W${i}`, start, count: i < 4 ? 9 : 1 }));
+    const html = weeklyStripHtml(weekly);
+    expect((html.match(/class="wiki-wm-week /g) ?? []).length).toBe(THEME_STRIP_WEEKS);
+    expect(html).toContain('<span class="wiki-wm-weeks-earlier" title="36 sources in the 4 weeks before">+36 earlier</span>');
+    expect(html).toContain('aria-label="8 sources over the last 8 weeks, 36 more in 4 earlier weeks"');
+    // Earlier weeks with no source: nothing hidden, no marker.
+    const quiet = weeklyStripHtml(mondays("2026-08-10", 10).map((start, i) => ({ week: `W${i}`, start, count: i < 2 ? 0 : 1 })));
+    expect(quiet).not.toContain("wiki-wm-weeks-earlier");
+    expect(quiet).toContain('aria-label="8 sources over the last 8 weeks"');
+  });
+
+  test("the week holding the run is marked running, a partial week is marked, a full empty week is not", () => {
+    // THEME_RUN_AT is Friday 2026-10-30 in Oslo: W44 (from 2026-10-26) is still running.
+    const weekly = [
+      { week: "2026-W40", start: "2026-09-28", count: 0, partial: true },
+      { week: "2026-W41", start: "2026-10-05", count: 0 },
+      { week: "2026-W44", start: "2026-10-26", count: 2 },
+    ];
+    const html = weeklyStripHtml(weekly, THEME_RUN_AT);
+    const slots = [...html.matchAll(/<span class="wiki-wm-slot([^"]*)" title="([^"]+)">/g)].map((m) => [m[1], m[2]]);
+    expect(slots).toEqual([
+      [" partial", "2026-W40 (from 2026-09-28): 0 sources, may miss days"],
+      ["", "2026-W41 (from 2026-10-05): 0 sources"],
+      [" current", "2026-W44 (from 2026-10-26): 2 sources so far, week still running"],
+    ]);
+    expect(html).toContain('aria-label="2 sources over the last 3 weeks, this week so far, 1 week may miss days"');
+    // A run on the Monday after: W44 is complete.
+    expect(weeklyStripHtml(weekly, Date.parse("2026-11-02T03:00:00Z"))).not.toContain(" current");
+  });
+
+  // Fix round 2 batch 2: the running mark needs the run's week AND a week not yet over.
+  const W44 = { week: "2026-W44", start: "2026-10-26", count: 2 };
+  const W45 = { week: "2026-W45", start: "2026-11-02", count: 1 };
+  const slotsOf = (html: string) => [...html.matchAll(/<span class="wiki-wm-slot([^"]*)" title="([^"]+)">/g)].map((m) => [m[1], m[2]]);
+
+  test("a map run Friday and rendered the next Tuesday shows its week as partial, not still running", () => {
+    const tuesday = Date.parse("2026-11-03T12:00:00Z");
+    const html = weeklyStripHtml([W44], THEME_RUN_AT, tuesday);
+    expect(slotsOf(html)).toEqual([[" partial", "2026-W44 (from 2026-10-26): 2 sources, may miss days"]]);
+    expect(html).toContain('aria-label="2 sources over the last 1 week, 1 week may miss days"');
+    // Rendered the same Sunday evening, the week still runs.
+    expect(slotsOf(weeklyStripHtml([W44], THEME_RUN_AT, Date.parse("2026-11-01T20:00:00Z")))[0]![0]).toBe(" current");
+    // The card reads its own clock.
+    const m = fixtureThemeMap();
+    const html2 = workCardHtml({ body: { map: m, organizable: true }, pages: fixtureThemePages(), now: tuesday, done: new Set(), hrefFor: href, refresh: { phase: "idle" } });
+    expect(html2).not.toContain("week still running");
+    expect(html2).not.toContain("this week so far");
+  });
+
+  test("the running week turns at Oslo midnight, not UTC midnight", () => {
+    const at = (iso: string) => slotsOf(weeklyStripHtml([W44, W45], Date.parse(iso))).map((s) => s[0]);
+    // November in Oslo is UTC+1.
+    expect(at("2026-11-01T22:30:00Z")).toEqual([" current", ""]); // Sunday 23:30
+    expect(at("2026-11-01T22:59:59Z")).toEqual([" current", ""]); // Sunday 23:59:59
+    expect(at("2026-11-01T23:00:00Z")).toEqual(["", " current"]); // Monday 00:00
+    expect(at("2026-11-01T23:30:00Z")).toEqual(["", " current"]); // Monday 00:30
+  });
+
+  test("a run on the Monday a week starts marks that week running", () => {
+    expect(slotsOf(weeklyStripHtml([W44, W45], Date.parse("2026-11-02T08:00:00Z"))).map((s) => s[0])).toEqual(["", " current"]);
+  });
+
+  test("a week both running and partial reads running, and the aria count of partial weeks leaves it out", () => {
+    const weekly = [{ week: "2026-W40", start: "2026-09-28", count: 0, partial: true }, { ...W44, partial: true }];
+    const html = weeklyStripHtml(weekly, THEME_RUN_AT);
+    expect(slotsOf(html)[1]).toEqual([" current", "2026-W44 (from 2026-10-26): 2 sources so far, week still running"]);
+    expect(html).toContain('aria-label="2 sources over the last 2 weeks, this week so far, 1 week may miss days"');
+  });
+
+  // Fix round 2 batch 1: the shown rows are picked so no theme fills them.
+  const t = (id: string, rel: string[]) => ({ id, related: rel.map((r) => ({ id: r, why: `${id}-${r}` })) });
+  const rowsOf = (themes: ReturnType<typeof t>[]) => themeConnections(themes).map((c) => `${c.a.id}|${c.b.id}:${c.why}`);
+  /** Each theme's count of rows among the first `THEME_CONNECTIONS_SHOWN`. */
+  const appearances = (themes: ReturnType<typeof t>[]) => {
+    const n = new Map<string, number>();
+    for (const c of themeConnections(themes).slice(0, THEME_CONNECTIONS_SHOWN)) for (const id of [c.a.id, c.b.id]) n.set(id, (n.get(id) ?? 0) + 1);
+    return Object.fromEntries([...n].sort(([a], [b]) => a.localeCompare(b)));
+  };
+
+  test("Connected: a hub linked to six themes, plus three pairs without it, shows the hub in 3 of 6 rows, not every row", () => {
+    const themes = [
+      t("h", ["x1", "x2", "x3", "x4", "x5", "x6"]),
+      t("x1", ["h", "x2"]), t("x2", ["h", "x1"]), t("x3", ["h", "x4"]), t("x4", ["h", "x3"]), t("x5", ["h", "x6"]), t("x6", ["h", "x5"]),
+    ];
+    // 9 pairs; any 6 of them hold at least 3 of the hub's 6, so 3 is the least it can fill.
+    expect(rowsOf(themes)).toEqual(["h|x1:h-x1", "x3|x4:x3-x4", "x5|x6:x5-x6", "h|x2:h-x2", "x1|x2:x1-x2", "h|x3:h-x3", "h|x4:h-x4", "h|x5:h-x5", "h|x6:h-x6"]);
+    expect(appearances(themes)).toEqual({ h: 3, x1: 2, x2: 2, x3: 2, x4: 1, x5: 1, x6: 1 });
+  });
+
+  test("Connected: a chain of seven themes shows its six links, no theme in more than 2 rows", () => {
+    const ids = ["a", "b", "c", "d", "e", "f", "g"];
+    const themes = ids.map((id, i) => t(id, [ids[i - 1], ids[i + 1]].filter((x): x is string => !!x)));
+    expect(rowsOf(themes)).toEqual(["a|b:a-b", "c|d:c-d", "e|f:e-f", "f|g:f-g", "b|c:b-c", "d|e:d-e"]);
+    expect(Math.max(...Object.values(appearances(themes)))).toBe(2);
+  });
+
+  test("Connected: four themes all linked show their six links, each theme in exactly 3 rows", () => {
+    const ids = ["a", "b", "c", "d"];
+    const themes = ids.map((id) => t(id, ids.filter((x) => x !== id)));
+    expect(rowsOf(themes)).toEqual(["a|b:a-b", "c|d:c-d", "a|c:a-c", "b|d:b-d", "a|d:a-d", "b|c:b-c"]);
+    expect(appearances(themes)).toEqual({ a: 3, b: 3, c: 3, d: 3 });
+  });
+
+  test("Connected: five themes all linked show 6 of 10 links, no theme in more than 3 rows", () => {
+    const ids = ["a", "b", "c", "d", "e"];
+    const themes = ids.map((id) => t(id, ids.filter((x) => x !== id)));
+    expect(themeConnections(themes)).toHaveLength(10);
+    // 12 ends over 5 themes: at least one theme fills 3 rows.
+    expect(Math.max(...Object.values(appearances(themes)))).toBe(3);
+  });
+
+  test("Connected: with five rows placed, b|d (busier end 2) comes before a|e (busier end 3)", () => {
+    const themes = [t("a", ["d", "c", "e"]), t("b", ["a", "d"]), t("c", ["b"]), t("d", []), t("e", ["d"])];
+    // After five rows a is in 3, b and d in 2, e in 1: b|d (2, 2) sums to 4 and a|e (3, 1) to 4 too,
+    // so only the busier-end key separates them. A sum-only pick would take a|e here.
+    expect(rowsOf(themes)).toEqual(["b|a:b-a", "e|d:e-d", "a|c:a-c", "c|b:c-b", "a|d:a-d", "b|d:b-d", "a|e:a-e"]);
+    expect(appearances(themes).a).toBe(3);
+  });
+
+  test("Connected: a pair stored on one end only keeps that end first, with its why; one stored on both keeps the earlier end's", () => {
+    expect(rowsOf([t("g", []), t("h", ["g"])])).toEqual(["h|g:h-g"]);
+    expect(rowsOf([t("g", ["h"]), t("h", ["g"])])).toEqual(["g|h:g-h"]);
+    // A hub only others point at: still spread.
+    const themes = [t("h", []), ...["x1", "x2", "x3", "x4", "x5", "x6", "x7"].map((id) => t(id, ["h"])), t("y1", ["y2"]), t("y2", []), t("y3", ["y4"]), t("y4", [])];
+    expect(appearances(themes).h).toBe(4);
+    expect(rowsOf(themes).slice(0, 3)).toEqual(["x1|h:x1-h", "y1|y2:y1-y2", "y3|y4:y3-y4"]);
+  });
+
+  test("Connected: the real map's shape (12 links over 17 themes) shows no theme in more than 2 rows", () => {
+    // Synthetic ids; the link shape of the jarvis map of 2026-10-30, in lane
+    // order (new, rising, steady, fading, life), map order within a lane.
+    const links: Record<string, string[]> = {
+      n13: [], r0: ["r2", "f8", "f12", "s1"], r2: ["r0", "s4", "r5", "r10"], r5: ["r2", "s4"], r9: [], r10: ["s7", "r2", "l15"],
+      s1: ["r0"], s3: ["s4"], s4: ["r2", "s3", "r5"], s6: ["s7"], s7: ["r10", "s6"], s11: [], f8: ["r0"], f12: ["r0"], l14: [], l15: ["r10"], l16: [],
+    };
+    const themes = Object.entries(links).map(([id, rel]) => t(id, rel));
+    expect(themeConnections(themes)).toHaveLength(12);
+    // 12 ends; r0's three one-link neighbours and r2's crowd make 1 each impossible.
+    expect(Math.max(...Object.values(appearances(themes)))).toBe(2);
+  });
+
+  test("Connected: a row counts against both its ends", () => {
+    // Counting only the left end, b|x would follow a|x; only the right end, h|b would follow h|a.
+    expect(rowsOf([t("x", []), t("a", ["x"]), t("b", ["x"]), t("c", ["d"]), t("d", [])])).toEqual(["a|x:a-x", "c|d:c-d", "b|x:b-x"]);
+    expect(rowsOf([t("h", ["a", "b"]), t("a", []), t("b", []), t("c", ["d"]), t("d", [])])).toEqual(["h|a:h-a", "c|d:c-d", "h|b:h-b"]);
+  });
+
+  test("Connected: a Life theme sorts after the AI lanes whatever its state", () => {
+    const m = fixtureThemeMap({
+      efforts: [
+        fixtureTheme("alpha", { state: "rising", related: [{ id: "beta", why: "ab" }] }),
+        fixtureTheme("beta"),
+        fixtureTheme("delta", { state: "fading" }),
+        fixtureTheme("life-one", { state: "new", domain: "life", related: [{ id: "delta", why: "ld" }] }),
+      ],
+    });
+    const html = workCardHtml({ body: { map: m, organizable: true }, pages: fixtureThemePages(), now: THEME_RUN_AT, done: new Set(), hrefFor: href, refresh: { phase: "idle" } });
+    // By state alone life-one (new) would lead, and its pair with delta would take the first row.
+    expect([...html.matchAll(/data-wm-conn="([^"]+)"/g)].map((x) => x[1])).toEqual(["alpha|beta", "life-one|delta"]);
+  });
+
+  test("themeConnections drops a link to a theme not listed and a self link", () => {
+    const a = { id: "a", related: [{ id: "a", why: "self" }, { id: "gone", why: "x" }, { id: "b", why: "ab" }] };
+    const b = { id: "b", related: [{ id: "a", why: "ba" }] };
+    expect(themeConnections([a, b]).map((c) => [c.a.id, c.b.id, c.why])).toEqual([["a", "b", "ab"]]);
   });
 });

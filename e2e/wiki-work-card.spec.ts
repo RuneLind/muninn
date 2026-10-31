@@ -1114,6 +1114,34 @@ async function sweepCard(page: Page, label: string): Promise<{ low: string[]; mi
   return { low, min, classes };
 }
 
+/** A themes map over the sweep wiki's pages that paints every part of the
+ *  themes card: each state, a Life theme, a connection, a drift count, hub
+ *  chips, a partial week, the running week and «+N earlier». */
+function sweepThemesMap(runAtMs: number): unknown {
+  const states = ["new", "rising", "steady", "fading", "steady"];
+  // Ten weeks ending with the one holding the run (Oslo): two before the strip's 8.
+  const runDay = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(new Date(runAtMs));
+  const monday = Date.parse(`${runDay}T00:00:00Z`) - ((new Date(`${runDay}T00:00:00Z`).getUTCDay() + 6) % 7) * 86_400_000;
+  const weekly = Array.from({ length: 10 }, (_, i) => {
+    const start = new Date(monday - (9 - i) * 7 * 86_400_000).toISOString().slice(0, 10);
+    return { week: `W${i}`, start, count: i < 2 ? 2 : i % 3, ...(i === 2 ? { partial: true } : {}) };
+  });
+  const efforts = states.map((state, i) => ({
+    id: `t${i}`, name: `Theme ${i}`, oneLine: `About theme ${i}.`, state, domain: i === 4 ? "life" : "ai",
+    pages: [{ id: `plans/p${i + 1}.mdx`, role: "source" }], hubs: ["plans/alpha.mdx", "plans/beta.mdx"], readFirst: [],
+    takeaway: "", disagreement: "", confidence: 1, related: i === 0 ? [{ id: "t1", why: "Both read ⟦plans/alpha.mdx⟧." }] : [],
+    weekly, trend: { recent: 3, earlier: 1 },
+  }));
+  return {
+    version: 1, kind: "themes", wiki: SWEEP, runAtMs, model: "test-model",
+    coverage: { activeSources: 5, hubs: 2, driftHubs: 1, placed: 5, digestChars: 100, windowDays: 28, warnings: ["Ten sources were cut from the digest."] },
+    summary: "Mostly ⟦plans/p1.mdx⟧.",
+    needsYou: [{ title: "Alpha is behind", kind: "drift", why: "Three sources since.", action: "Refresh it.", pages: [], effort: "t0", hubs: ["plans/alpha.mdx"], count: 3 }],
+    themes: [{ name: "AI & tech", efforts: ["t0", "t1", "t2", "t3"] }, { name: "Life", efforts: ["t4"] }],
+    efforts, retired: [], loose: [],
+  };
+}
+
 /** The `.wiki-wm-*` / `.wm-state-*` classes the stylesheet styles, and the
  *  shared `.wiki-wn-*` ones it restyles inside the card: each must be painted
  *  in some swept state, or the sweep never measured it. */
@@ -1198,6 +1226,23 @@ for (const theme of THEMES) {
     await expect(card.locator(".wiki-wm-empty")).toBeVisible();
     await expect(card.locator("#wikiWorkMapRestore")).toBeVisible();
     await sweep("empty");
+    // The same GET answering a themes map (theme map P2): What you're
+    // following paints its own classes, every lane open.
+    await page.unroute("**/api/wiki/work-map?*");
+    await page.route("**/api/wiki/work-map?*", async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as { map: { runAtMs: number } } & Record<string, unknown>;
+      await route.fulfill({ json: { ...body, organizable: false, map: sweepThemesMap(body.map.runAtMs) } });
+    });
+    await page.reload();
+    await expect(card.locator(".wiki-wn-title")).toHaveText("What you’re following");
+    await card.evaluate((root) => root.querySelectorAll("details").forEach((d) => (d.open = true)));
+    await expect(card.locator(".wiki-wm-conn")).toHaveCount(1);
+    // The running week is framed dashed, and the hidden weeks read «+N earlier».
+    const cur = card.locator(".wiki-wm-theme").first().locator(".wiki-wm-slot.current");
+    expect(await cur.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("dashed");
+    await expect(card.locator(".wiki-wm-theme").first().locator(".wiki-wm-weeks-earlier")).toHaveText("+4 earlier");
+    await sweep("themes");
     // The GET answered 5xx: the card's error and Retry.
     await page.unroute("**/api/wiki/work-map?*");
     await page.route("**/api/wiki/work-map?*", (route) => route.fulfill({ status: 503, json: { error: "down" } }));

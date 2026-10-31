@@ -9,8 +9,19 @@
  * of its effort and its marker reads as plain text).
  */
 
-import { joinWorkMap, type JoinablePage, type JoinedEffort, type JoinedWorkMap } from "../../../wiki/work-map/join.ts";
-import type { WorkMap } from "../../../wiki/work-map/schema.ts";
+import {
+  isThemeMap,
+  joinWorkMap,
+  type AnyWorkMap,
+  type JoinablePage,
+  type JoinedAnyMap,
+  type JoinedEffort,
+  type JoinedTheme,
+  type JoinedThemeMap,
+  type JoinedWorkMap,
+} from "../../../wiki/work-map/join.ts";
+import { osloDay } from "../../../wiki/work-map/ids.ts";
+import type { ThemeMap, ThemeWeek } from "../../../wiki/work-map/theme-schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { escHtml as esc } from "./escape.ts";
 
@@ -28,7 +39,8 @@ export interface WorkMapAttempt {
 /** `GET /api/wiki/work-map`'s body (`routes/wiki-work-map.ts`). */
 export interface WorkMapGetBody {
   wiki?: string;
-  map: WorkMap | null;
+  /** Either kind: a themes map carries `kind: "themes"`. */
+  map: AnyWorkMap | null;
   mapError?: string;
   organizable: boolean;
   organizableReason?: string;
@@ -52,7 +64,7 @@ export type RefreshView =
   | { phase: "message"; text: string; tone: "info" | "warn" };
 
 export interface WorkCardInput<P extends CardPage> {
-  body: WorkMapGetBody & { map: WorkMap };
+  body: WorkMapGetBody & { map: AnyWorkMap };
   pages: readonly P[];
   now: number;
   /** Needs-you keys marked done for this run. */
@@ -215,16 +227,32 @@ export function isNestedEffort(e: { id: string; parent?: string }, efforts: read
   return true;
 }
 
-/** The newest day with any activity, as days before `now` (local days). */
-export function lastActiveDays(effort: { daily: readonly { day: string; commits: number; sessions: number }[] }, now: number): number | null {
+/** The newest day with any activity, as days before `now` (local days). A
+ *  theme stores no `daily`: its newest week with a source counts from that
+ *  week's last day (Sunday), so a source this week reads as 0. */
+export function lastActiveDays(
+  effort: { daily?: readonly { day: string; commits: number; sessions: number }[]; weekly?: readonly { start: string; count: number }[] },
+  now: number,
+): number | null {
   let best: string | null = null;
-  for (const d of effort.daily) if (d.commits + d.sessions > 0 && (!best || d.day > best)) best = d.day;
+  if (effort.daily) {
+    for (const d of effort.daily) if (d.commits + d.sessions > 0 && (!best || d.day > best)) best = d.day;
+  } else {
+    for (const w of effort.weekly ?? []) if (w.count > 0 && (!best || w.start > best)) best = w.start;
+    if (best) best = plusDays(best, 6);
+  }
   if (!best) return null;
   const t = Date.parse(best + "T12:00:00");
   if (!Number.isFinite(t)) return null;
   const today = new Date(now);
   today.setHours(12, 0, 0, 0);
   return Math.max(0, Math.round((today.getTime() - t) / 86_400_000));
+}
+
+/** `YYYY-MM-DD` plus `n` days, by the calendar. */
+function plusDays(day: string, n: number): string {
+  const t = Date.parse(day + "T12:00:00Z");
+  return Number.isFinite(t) ? new Date(t + n * 86_400_000).toISOString().slice(0, 10) : day;
 }
 
 function activeLabel(days: number | null): string {
@@ -235,19 +263,20 @@ function activeLabel(days: number | null): string {
 // ── The card ──────────────────────────────────────────────────────────
 export function workCardHtml<P extends CardPage>(input: WorkCardInput<P>): string {
   const { body, now, hrefFor } = input;
+  if (isThemeMap(body.map)) return themeCardHtml(input, body.map);
   const joined = joinWorkMap(body.map, input.pages, now);
   const byKey = new Map<string, CardPage>(input.pages.map((p) => [normalizeRelPath(p.relPath), p]));
   const prose = (s: string) => proseHtml(s, byKey, hrefFor);
   return (
     headHtml(joined, body, now, input.refresh) +
     (joined.summary.trim() ? `<div class="wiki-wm-summary">${prose(joined.summary)}</div>` : "") +
-    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor) +
+    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you") +
     lanesHtml(joined, now, prose, byKey, hrefFor, input.effortHref) +
     coverageHtml(joined)
   );
 }
 
-function headHtml<P>(map: JoinedWorkMap<P>, body: WorkMapGetBody, now: number, refresh: RefreshView): string {
+function headHtml<P>(map: JoinedAnyMap<P>, body: WorkMapGetBody, now: number, refresh: RefreshView, title = "Your work"): string {
   const stale = isWorkMapStale(map.runAtMs, now);
   const runAt = new Date(map.runAtMs);
   const lastRun = body.lastSuccessAt ?? map.runAtMs;
@@ -266,7 +295,7 @@ function headHtml<P>(map: JoinedWorkMap<P>, body: WorkMapGetBody, now: number, r
   }
   return (
     '<div class="wiki-wn-head">' +
-    '<span class="wiki-wn-title">Your work</span>' +
+    `<span class="wiki-wn-title">${esc(title)}</span>` +
     `<span class="wiki-wm-age" title="${esc(runAt.toLocaleString())}">organized ${esc(formatAge(now - map.runAtMs))}</span>` +
     (stale ? '<span class="wiki-wm-stale" title="The map is more than 26 hours old">stale</span>' : "") +
     (map.model ? `<span class="wiki-wm-model">${esc(map.model)}</span>` : "") +
@@ -284,27 +313,32 @@ function pagesHtml(rels: readonly string[], byKey: ReadonlyMap<string, CardPage>
 }
 
 function needsYouHtml<P>(
-  map: JoinedWorkMap<P>,
-  raw: WorkMap["needsYou"],
+  map: JoinedAnyMap<P>,
+  raw: readonly { kind: string; title: string }[],
   done: ReadonlySet<string>,
   openWhy: ReadonlySet<string>,
   prose: (s: string) => string,
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
+  title: string,
 ): string {
-  if (!map.needsYou.length) return "";
+  // A theme item also carries `hubs` and the runner's `count`.
+  const needs = map.needsYou as readonly { kind: string; title: string; why: string; action: string; pages: string[]; hubs?: string[]; count?: number }[];
+  if (!needs.length) return "";
   // Keyed on the STORED item, so the key survives a page rename between renders.
-  const open = map.needsYou.map((n, i) => ({ n, i })).filter(({ i }) => !done.has(needKey(raw[i]!)));
-  const doneCount = map.needsYou.length - open.length;
+  const open = needs.map((n, i) => ({ n, i })).filter(({ i }) => !done.has(needKey(raw[i]!)));
+  const doneCount = needs.length - open.length;
   const cards = open
     .map(
       ({ n, i }) =>
         `<div class="wiki-wm-need" data-wm-need="${i}">` +
         `<div class="wiki-wm-need-head"><span class="wiki-wm-kind">${esc(n.kind)}</span>` +
         `<span class="wiki-wm-need-title">${prose(n.title)}</span>` +
+        (n.count !== undefined ? needCountHtml(n.kind, n.count) : "") +
         `<button class="wiki-wm-done" data-wm-done="${i}" data-wm-key="${esc(needKey(raw[i]!))}" title="Mark done" aria-label="Mark done">✓</button></div>` +
         (n.why ? whyHtml(i, needKey(raw[i]!), openWhy.has(needKey(raw[i]!)), n.why, prose, byKey) : "") +
         (n.action ? `<div class="wiki-wm-action">${prose(n.action)}</div>` : "") +
+        (n.hubs?.length ? hubsHtml(n.hubs, byKey, hrefFor) : "") +
         // Pages the item's own prose already links are not repeated.
         pagesHtml(
           n.pages.filter((r) => !citedIn(`${n.title} ${n.why} ${n.action}`).has(normalizeRelPath(r))),
@@ -315,7 +349,7 @@ function needsYouHtml<P>(
     )
     .join("");
   return (
-    '<div class="wiki-wm-section"><div class="wiki-wm-section-title">Needs you' +
+    `<div class="wiki-wm-section"><div class="wiki-wm-section-title">${esc(title)}` +
     (doneCount ? ` <button class="wiki-wm-restore" id="wikiWorkMapRestore" title="Show the items marked done">${doneCount} done · show</button>` : "") +
     "</div>" +
     (cards ? `<div class="wiki-wm-needs">${cards}</div>` : '<div class="wiki-wm-empty">Nothing left for this run.</div>') +
@@ -430,6 +464,254 @@ function coverageHtml<P>(map: JoinedWorkMap<P>): string {
   const uniq = [...new Set(c.warnings)];
   return (
     `<div class="wiki-wm-coverage">Covers ${esc(parts.join(" · "))}</div>` +
+    (uniq.length ? `<ul class="wiki-wm-warnings">${uniq.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : "")
+  );
+}
+
+// ── What you're following (a themes map, plan muninn-wiki-theme-map P2) ──
+/** The themes card's lanes, by the runner's trend state. Fading starts closed,
+ *  as the work card's quiet lanes do. */
+export const THEME_MAP_LANES = [
+  { id: "new", label: "New", states: ["new"], open: true },
+  { id: "rising", label: "Rising", states: ["rising"], open: true },
+  { id: "steady", label: "Steady", states: ["steady"], open: true },
+  { id: "fading", label: "Fading", states: ["fading"], open: false },
+] as const;
+/** Weeks a theme's strip shows, oldest first. */
+export const THEME_STRIP_WEEKS = 8;
+/** Hub chips shown before `+N more`. */
+export const THEME_HUBS_SHOWN = 4;
+/** Connections shown before `+N more`. */
+export const THEME_CONNECTIONS_SHOWN = 6;
+
+/** The card's Connected row: each pair of listed themes once (a connection is
+ *  stored on both ends), left end the earlier theme that stores it, with its
+ *  why. `themes` come in the card's lane order. Rows are picked greedily so a
+ *  hub no longer fills every row: each next row is the remaining pair whose
+ *  busier end is in the fewest rows so far, then the fewest rows over both
+ *  ends, then the earliest pair in lane order. Greedy, not optimal: on some
+ *  graphs a theme lands in one row more than the best pick allows (t0 linked
+ *  to t1–t4 and t1 to t2–t4 puts t0 in 4 rows; 3 is possible). */
+export function themeConnections<T extends { id: string; related: readonly { id: string; why: string }[] }>(
+  themes: readonly T[],
+): { a: T; b: T; why: string }[] {
+  const at = new Map<string, number>();
+  themes.forEach((t, i) => at.has(t.id) || at.set(t.id, i));
+  const pairs = new Map<string, { a: T; b: T; why: string; lo: number; hi: number }>();
+  themes.forEach((a, i) => {
+    for (const r of a.related) {
+      const j = at.get(r.id);
+      if (j === undefined || r.id === a.id) continue;
+      const k = [a.id, r.id].sort().join("\u0000");
+      if (!pairs.has(k)) pairs.set(k, { a, b: themes[j]!, why: r.why, lo: Math.min(i, j), hi: Math.max(i, j) });
+    }
+  });
+  const rest = [...pairs.values()].sort((x, y) => x.lo - y.lo || x.hi - y.hi);
+  const uses = new Map<string, number>();
+  const n = (id: string) => uses.get(id) ?? 0;
+  const out: { a: T; b: T; why: string }[] = [];
+  while (rest.length) {
+    let best = 0;
+    let bestMax = Infinity;
+    let bestSum = Infinity;
+    rest.forEach((c, i) => {
+      const max = Math.max(n(c.a.id), n(c.b.id));
+      const sum = n(c.a.id) + n(c.b.id);
+      if (max < bestMax || (max === bestMax && sum < bestSum)) [best, bestMax, bestSum] = [i, max, sum];
+    });
+    const { a, b, why } = rest.splice(best, 1)[0]!;
+    for (const id of [a.id, b.id]) uses.set(id, n(id) + 1);
+    out.push({ a, b, why });
+  }
+  return out;
+}
+
+/** "this week" / "last week" / "N wk ago", from {@link lastActiveDays}. */
+export function themeActiveLabel(days: number | null): string {
+  if (days === null) return "";
+  const weeks = Math.ceil(days / 7);
+  return weeks === 0 ? "this week" : weeks === 1 ? "last week" : `${weeks} wk ago`;
+}
+
+/** A Worth-a-look item's runner count: a drift item's sources since the hub's
+ *  last update, else the sources it cites. */
+function needCountHtml(kind: string, count: number): string {
+  const drift = kind === "drift";
+  const text = drift ? `${count} new since update` : `${count} source${count === 1 ? "" : "s"}`;
+  const title = drift ? "Active sources linking this hub, created after the hub was last updated" : "Sources this item cites";
+  return `<span class="wiki-wm-need-count" title="${esc(title)}">${esc(text)}</span>`;
+}
+
+function hubsHtml(rels: readonly string[], byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string): string {
+  const shown = rels.slice(0, THEME_HUBS_SHOWN).map((r) => `<span class="wiki-wm-hub">${pageLinkHtml(r, byKey, hrefFor)}</span>`);
+  if (!shown.length) return "";
+  const more = rels.length - shown.length;
+  return `<div class="wiki-wm-hubs">${shown.join("")}${more > 0 ? `<span class="wiki-wm-more">+${more} more</span>` : ""}</div>`;
+}
+
+/** The weekly bar strip: the newest {@link THEME_STRIP_WEEKS} stored weeks,
+ *  each bar's height a step of the strip's busiest week. Older weeks holding
+ *  sources show as «+N earlier». The week holding `runAtMs` (Oslo) is framed
+ *  `current` while it has not ended at `now` (Oslo; absent, the run's own
+ *  day); once it has, the run missed its last days and it reads `partial`. A
+ *  `partial` week is framed too, so an empty one reads apart from a full
+ *  empty week. */
+export function weeklyStripHtml(weekly: readonly ThemeWeek[], runAtMs?: number, now?: number): string {
+  const sorted = [...weekly].sort((a, b) => a.start.localeCompare(b.start));
+  const weeks = sorted.slice(-THEME_STRIP_WEEKS);
+  if (!weeks.length) return "";
+  const earlier = sorted.slice(0, sorted.length - weeks.length);
+  const earlierTotal = earlier.reduce((n, w) => n + w.count, 0);
+  const runDay = runAtMs === undefined ? null : osloDay(runAtMs);
+  const nowDay = now === undefined ? runDay : osloDay(now);
+  const holdsRun = (w: ThemeWeek) => runDay !== null && w.start <= runDay && runDay <= plusDays(w.start, 6);
+  const isCurrent = (w: ThemeWeek) => holdsRun(w) && nowDay !== null && nowDay <= plusDays(w.start, 6);
+  const isPartial = (w: ThemeWeek) => !!w.partial || holdsRun(w);
+  const max = Math.max(1, ...weeks.map((w) => w.count));
+  const total = weeks.reduce((n, w) => n + w.count, 0);
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const bars = weeks
+    .map((w) => {
+      const level = w.count === 0 ? 0 : Math.max(1, Math.ceil((w.count / max) * 4));
+      const current = isCurrent(w);
+      const mark = current ? " current" : isPartial(w) ? " partial" : "";
+      const label =
+        `${w.week} (from ${w.start}): ${plural(w.count, "source")}` +
+        (current ? " so far, week still running" : isPartial(w) ? ", may miss days" : "");
+      return `<span class="wiki-wm-slot${mark}" title="${esc(label)}"><span class="wiki-wm-week lvl-${level}"></span></span>`;
+    })
+    .join("");
+  const partials = weeks.filter((w) => isPartial(w) && !isCurrent(w)).length;
+  const aria =
+    `${plural(total, "source")} over the last ${plural(weeks.length, "week")}` +
+    (weeks.some(isCurrent) ? ", this week so far" : "") +
+    (partials ? `, ${plural(partials, "week")} may miss days` : "") +
+    (earlierTotal ? `, ${earlierTotal} more in ${earlier.length} earlier week${earlier.length === 1 ? "" : "s"}` : "");
+  const more = earlierTotal
+    ? `<span class="wiki-wm-weeks-earlier" title="${esc(`${plural(earlierTotal, "source")} in the ${earlier.length} week${earlier.length === 1 ? "" : "s"} before`)}">+${earlierTotal} earlier</span>`
+    : "";
+  return `<div class="wiki-wm-weeks" role="img" aria-label="${esc(aria)}">${more}${bars}</div>`;
+}
+
+function themeHtml<P>(
+  e: JoinedTheme<P>,
+  now: number,
+  prose: (s: string) => string,
+  byKey: ReadonlyMap<string, CardPage>,
+  hrefFor: (rel: string) => string,
+  runAtMs: number,
+  effortHref?: (id: string) => string,
+): string {
+  const active = themeActiveLabel(lastActiveDays(e, now));
+  const n = e.pages.length;
+  return (
+    `<li class="wiki-wm-effort wiki-wm-theme" data-effort-id="${esc(e.id)}">` +
+    '<div class="wiki-wm-effort-head">' +
+    (effortHref
+      ? `<a class="wiki-wm-effort-name" href="${esc(effortHref(e.id))}" data-effort-link="${esc(e.id)}">${esc(e.name)}</a>`
+      : `<span class="wiki-wm-effort-name">${esc(e.name)}</span>`) +
+    `<span class="wiki-wm-state wm-state-${esc(e.state)}">${esc(e.state)}</span>` +
+    `<span class="wiki-wm-active">${esc(`${n} source${n === 1 ? "" : "s"}`)}${active ? esc(` · ${active}`) : ""}</span>` +
+    "</div>" +
+    (e.oneLine ? `<div class="wiki-wm-oneline">${prose(e.oneLine)}</div>` : "") +
+    weeklyStripHtml(e.weekly, runAtMs, now) +
+    hubsHtml(e.hubs, byKey, hrefFor) +
+    pagesHtml(
+      e.pages.map((p) => p.id),
+      byKey,
+      hrefFor,
+    ) +
+    "</li>"
+  );
+}
+
+/** A theme's place in the card's lane order: New, Rising, Steady, Fading, then Life. */
+function themeLaneRank(e: { state: string; domain?: string }): number {
+  if (e.domain === "life") return THEME_MAP_LANES.length;
+  const i = THEME_MAP_LANES.findIndex((l) => (l.states as readonly string[]).includes(e.state));
+  return i < 0 ? THEME_MAP_LANES.length : i;
+}
+
+function connectedHtml<P>(themes: readonly JoinedTheme<P>[], prose: (s: string) => string, effortHref?: (id: string) => string): string {
+  // Stable sort: map order within a lane.
+  const pairs = themeConnections([...themes].sort((x, y) => themeLaneRank(x) - themeLaneRank(y)));
+  if (!pairs.length) return "";
+  const name = (t: JoinedTheme<P>) =>
+    effortHref
+      ? // `data-wm-conn-link` sets this link apart from the theme's name in its lane, for the focus restore.
+        `<a class="wiki-wm-effort-name" href="${esc(effortHref(t.id))}" data-effort-link="${esc(t.id)}" data-wm-conn-link>${esc(t.name)}</a>`
+      : `<span class="wiki-wm-effort-name">${esc(t.name)}</span>`;
+  const shown = pairs.slice(0, THEME_CONNECTIONS_SHOWN);
+  const more = pairs.length - shown.length;
+  return (
+    '<div class="wiki-wm-section wiki-wm-connected"><div class="wiki-wm-section-title">Connected</div><ul class="wiki-wm-conns">' +
+    shown
+      .map(
+        ({ a, b, why }) =>
+          `<li class="wiki-wm-conn" data-wm-conn="${esc(a.id)}|${esc(b.id)}">${name(a)} <span class="wiki-wm-conn-arrow" aria-label="connected to">↔</span> ${name(b)}` +
+          (why ? `<span class="wiki-wm-conn-why">: ${prose(why)}</span>` : "") +
+          "</li>",
+      )
+      .join("") +
+    "</ul>" +
+    (more > 0 ? `<div class="wiki-wm-more">+${more} more</div>` : "") +
+    "</div>"
+  );
+}
+
+function themeLaneHtml<P>(
+  id: string,
+  label: string,
+  open: boolean,
+  themes: readonly JoinedTheme<P>[],
+  render: (e: JoinedTheme<P>) => string,
+  extraClass = "",
+): string {
+  if (!themes.length) return "";
+  return (
+    `<details class="wiki-wm-lane${extraClass}" data-wm-lane="${esc(id)}"${open ? " open" : ""}>` +
+    `<summary class="wiki-wm-lane-title">${esc(label)} <span class="wiki-wm-count">${themes.length}</span></summary>` +
+    `<ul class="wiki-wm-efforts">${themes.map(render).join("")}</ul></details>`
+  );
+}
+
+function themeCardHtml<P extends CardPage>(input: WorkCardInput<P>, map: ThemeMap): string {
+  const { body, now, hrefFor } = input;
+  const joined: JoinedThemeMap<P> = joinWorkMap(map, input.pages, now);
+  const byKey = new Map<string, CardPage>(input.pages.map((p) => [normalizeRelPath(p.relPath), p]));
+  const prose = (s: string) => proseHtml(s, byKey, hrefFor);
+  const listed = joined.efforts.filter((e) => e.pages.length > 0 || e.movedOut.length === 0);
+  const render = (e: JoinedTheme<P>) => themeHtml(e, now, prose, byKey, hrefFor, map.runAtMs, input.effortHref);
+  const ai = listed.filter((e) => e.domain !== "life");
+  const life = listed.filter((e) => e.domain === "life");
+  // The Life section takes its name from the stored domain group holding its themes.
+  const lifeLabel = joined.themes.find((g) => life.some((e) => g.efforts.includes(e.id)))?.name || "Life";
+  const lanes = THEME_MAP_LANES.map((lane) =>
+    themeLaneHtml(
+      lane.id,
+      lane.label,
+      lane.open,
+      ai.filter((e) => (lane.states as readonly string[]).includes(e.state)),
+      render,
+    ),
+  ).join("");
+  return (
+    headHtml(joined, body, now, input.refresh, "What you’re following") +
+    (joined.summary.trim() ? `<div class="wiki-wm-summary">${prose(joined.summary)}</div>` : "") +
+    needsYouHtml(joined, map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Worth a look") +
+    connectedHtml(listed, prose, input.effortHref) +
+    lanes +
+    themeLaneHtml("life", lifeLabel, true, life, render, " wiki-wm-life") +
+    themeCoverageHtml(joined)
+  );
+}
+
+function themeCoverageHtml<P>(map: JoinedThemeMap<P>): string {
+  const c = map.coverage;
+  const text = `${c.activeSources} source${c.activeSources === 1 ? "" : "s"} in ${c.windowDays} days · ${c.hubs} hub${c.hubs === 1 ? "" : "s"}`;
+  const uniq = [...new Set(c.warnings)];
+  return (
+    `<div class="wiki-wm-coverage">${esc(text)}</div>` +
     (uniq.length ? `<ul class="wiki-wm-warnings">${uniq.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : "")
   );
 }
