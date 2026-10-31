@@ -10,7 +10,7 @@ import { workMapKindFromReaderText, parseWorkMapReaderConfig } from "./kind.ts";
 import { previousMapOf, readMapFile } from "./map-file.ts";
 import { __resetWorkMapRunsForTest, startWorkMapRun, type ModelRequest, type WorkMapRunDeps } from "./run.ts";
 import { WORK_MAP_VERSION } from "./schema.ts";
-import { addDays, buildThemeMapDigest, THEME_DRIFT_MIN_SINCE, type ThemeDigestPage, type ThemeSource } from "./theme-digest.ts";
+import { addDays, buildThemeMapDigest, THEME_DRIFT_MIN_SINCE, THEME_SOURCES_MAX, type ThemeDigestPage, type ThemeSource } from "./theme-digest.ts";
 import {
   firstRecountedMonday,
   isoMonday,
@@ -143,6 +143,30 @@ describe("theme digest", () => {
     const d = buildThemeMapDigest({ wiki: "w", nowMs: NOW, pages, outgoing, previous });
     expect(d.text).toContain("t1: T one (ai) — sources [p1,p2] +2 not active now");
     expect(d.text).toContain("r1: R one — last active 2026-09-01");
+  });
+
+  test("past the source cap, a previous member that is active but cut reads +N not listed, not +N not active now", () => {
+    const pages: ThemeDigestPage[] = [];
+    // THEME_SOURCES_MAX + 2 active sources, newest first by name: s000 is the newest.
+    for (let i = 0; i < THEME_SOURCES_MAX + 2; i++) {
+      const day = addDays(RUN_DAY, -Math.floor(i / 12));
+      pages.push(src(`sources/s${String(i).padStart(3, "0")}.md`, day));
+    }
+    const last = `sources/s${String(THEME_SOURCES_MAX + 1).padStart(3, "0")}.md`;
+    const previous = themeMap({ efforts: [theme("t1", "T one", ["sources/s000.md", last, "sources/gone.md"])] });
+    const d = buildThemeMapDigest({ wiki: "w", nowMs: NOW, pages, outgoing: new Map(), previous });
+    expect(d.cut).toBe(2);
+    expect(d.ids.has(last)).toBe(false);
+    expect(d.text).toContain("t1: T one (ai) — sources [p1] +1 not listed +1 not active now");
+  });
+
+  test("the retired section names what retired means: themes the previous map no longer kept, whatever the reason", () => {
+    const { pages, outgoing } = fixturePages();
+    const previous = themeMap({ retired: [{ id: "r1", name: "R one", lastActive: Date.parse("2026-09-01"), weekly: [] }] });
+    const d = buildThemeMapDigest({ wiki: "w", nowMs: NOW, pages, outgoing, previous });
+    expect(d.text).not.toContain("no active sources at the previous run");
+    expect(d.text).toContain("## Retired themes — themes an earlier map no longer kept (dropped, merged, or their sources went quiet)");
+    expect(d.text).toContain("a reused id is not new");
   });
 });
 
@@ -365,15 +389,15 @@ describe("normalize: references, domains, caps", () => {
     );
     expect(out.needsYou.map((n) => [n.title, n.count])).toEqual([
       ["gap", 2],
-      ["drift h1", 30],
       ["drift h3", 40],
+      ["drift h1", 30],
       ["c1", 1],
       ["s1", 0],
       ["s2", 0],
     ]);
     expect(out.needsYou[0]!.effort).toBe("t");
     expect(out.needsYou[4]!.effort).toBeUndefined();
-    expect(out.needsYou[1]!.hubs).toEqual(["concepts/h1.md"]);
+    expect(out.needsYou[1]!.hubs).toEqual(["concepts/h3.md"]);
   });
 });
 

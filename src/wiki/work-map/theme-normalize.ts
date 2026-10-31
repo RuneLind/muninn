@@ -305,7 +305,10 @@ export function normalizeThemeAnswer(answer: ThemeMapAnswer, ctx: ThemeNormalize
       .sort((a, b) => b.drift! - a.drift!)
       .slice(0, THEME_DRIFT_ITEMS_MAX),
   );
-  needs = needs.filter((n) => n.drift === undefined || keptDrift.has(n)).slice(0, THEME_NEEDS_MAX);
+  needs = needs.filter((n) => n.drift === undefined || keptDrift.has(n));
+  // Kept drift items take the slots drift held, in sinceUpdate order.
+  const rankedDrift = [...keptDrift];
+  needs = needs.map((n) => (n.drift === undefined ? n : rankedDrift.shift()!)).slice(0, THEME_NEEDS_MAX);
   const needsYou: ThemeNeedsYou[] = needs.map(({ drift: _d, ...n }) => n);
 
   // Domain groups.

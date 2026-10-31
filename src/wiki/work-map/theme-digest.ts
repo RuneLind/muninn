@@ -215,10 +215,17 @@ export function buildThemeMapDigest(input: ThemeDigestInput): ThemeDigest {
   );
 
   const prev = input.previous;
+  // A member past the cap is still active: "not active now" would tell the model it is gone.
+  const activeRels = new Set(active.map((s) => s.relPath));
   const prevLines = (prev?.efforts ?? []).map((t) => {
     const inSet = t.pages.map((pg) => ids.get(pg.id)).filter((x): x is string => !!x);
-    const outside = t.pages.length - inSet.length;
-    return `${t.id}: ${t.name} (${t.domain}) — sources [${inSet.join(",")}]${outside ? ` +${outside} not active now` : ""}`;
+    const unlisted = t.pages.filter((pg) => !ids.has(pg.id) && activeRels.has(pg.id)).length;
+    const gone = t.pages.length - inSet.length - unlisted;
+    return (
+      `${t.id}: ${t.name} (${t.domain}) — sources [${inSet.join(",")}]` +
+      (unlisted ? ` +${unlisted} not listed` : "") +
+      (gone ? ` +${gone} not active now` : "")
+    );
   });
   const retiredLines = (prev?.retired ?? []).map((r) => `${r.id}: ${r.name} — last active ${new Date(r.lastActive).toISOString().slice(0, 10)}`);
 
@@ -236,7 +243,7 @@ export function buildThemeMapDigest(input: ThemeDigestInput): ThemeDigest {
     sections.push(`\n## The previous map (${new Date(prev!.runAtMs).toISOString().slice(0, 10)}) — keep a theme's id while its sources overlap\n${prevLines.join("\n")}`);
   }
   if (retiredLines.length) {
-    sections.push(`\n## Retired themes — no active sources at the previous run; reuse an id when its sources return (a reused id is not new)\n${retiredLines.join("\n")}`);
+    sections.push(`\n## Retired themes — themes an earlier map no longer kept (dropped, merged, or their sources went quiet); reuse an id when its topic returns (a reused id is not new)\n${retiredLines.join("\n")}`);
   }
   return { text: sections.join("\n"), rel, ids, active, cut: active.length - listed.length, hubs, hubByName, windowStart, runDay };
 }
