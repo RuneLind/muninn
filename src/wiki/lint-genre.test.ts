@@ -520,10 +520,20 @@ describe("plan D7: a full Meter is no picture, and a shipped campaign may show i
     expect(fires("shipped", meter('value="2" max="2"'), STATUS, ledger(4))).toBe(false);
   });
 
-  test("the message names the new conditions", () => {
-    const [f] = of(lint("plans/x.mdx", doc(ps("shipped"), H1, meter('value="2" max="2"'))), "genre-picture");
-    expect(f!.message).toContain("a <Meter> that is not full");
-    expect(f!.message).toContain("a mermaid fence on a shipped page");
+  test("the message offers the fence on a shipped page only", () => {
+    const message = (s: string) => of(lint("plans/x.mdx", doc(ps(s), H1, meter('value="2" max="2"'))), "genre-picture")[0]!.message;
+    expect(message("shipped")).toContain("a mermaid fence of how the system works");
+    expect(message("shipped")).toContain("a <Meter> that is not full");
+    for (const s of ["in-flight", "blocked", "superseded"]) {
+      expect(message(s)).toContain("a <Meter> that is not full");
+      expect(message(s)).not.toContain("mermaid");
+    }
+  });
+
+  test("an archive page with no plan_status takes no fence, and its message offers none", () => {
+    const [f] = of(lint("archive/x.mdx", doc(["genre: campaign"], H1, MERMAID)), "genre-picture");
+    expect(f!.detail).toBe("campaign");
+    expect(f!.message).not.toContain("mermaid");
   });
 });
 

@@ -214,7 +214,7 @@ function hasCostTable(blocks: Block[]): boolean {
 
 /** What a genre accepts, worded for the message. */
 const ACCEPTS: Record<Exclude<Genre, "none">, string> = {
-  campaign: '<Chart kind="range"> of the slice costs, a <Meter> that is not full, a mermaid fence on a shipped page, or a PR strip or chain view the reader draws',
+  campaign: '<Chart kind="range"> of the slice costs, a <Meter> that is not full, or a PR strip or chain view the reader draws',
   investigation: '<Chart kind="funnel">, <CaseBoard view="dots"> with 5 or more cases, or <RuleTree>',
   runbook: '<DeltaTable> or <Chart kind="bars">',
   "run-report": '<Chart kind="bars"> or <DeltaTable>',
@@ -302,7 +302,7 @@ export function checkGenre(page: GenrePageRef, rawContent: string, files?: Loade
     info("genre-picture", `genre: "${genre.raw}" is not a genre slug (${GENRE_VALUES.join(", ")}; lower case)`, { detail: "invalid" });
   } else if (genre.kind === "genre" && genre.genre !== "none" && !accepts(genre.genre, page.plan_status, blocks, files)) {
     const ps = page.plan_status ? ` and plan_status ${page.plan_status}` : "";
-    info("genre-picture", `genre: ${genre.genre}${ps}: the first screen (after the In short box, before the first <Fold>) holds none of ${ACCEPTS[genre.genre]}`, { detail: genre.genre });
+    info("genre-picture", `genre: ${genre.genre}${ps}: the first screen (after the In short box, before the first <Fold>) holds none of ${genre.genre === "campaign" && page.plan_status === "shipped" ? "a mermaid fence of how the system works, " : ""}${ACCEPTS[genre.genre]}`, { detail: genre.genre });
   }
 
   return findings;
