@@ -31,6 +31,7 @@ import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
+import { questionCardAnchor, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
@@ -401,14 +402,30 @@ export function formatWebHtml(
       // inside a label (`[[plans/x|PR 7]]`) counts as the route counts it.
       const linkTexts = opts?.wikiLinkTexts;
       const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
-      const data = pageDecisionData(analysed === text ? blocks : parseBlocks(analysed), { proposed: opts?.proposedPlan === true });
+      const analysedBlocks = analysed === text ? blocks : parseBlocks(analysed);
+      const data = pageDecisionData(analysedBlocks, { proposed: opts?.proposedPlan === true });
       const lanes = currentItemDates && opts?.timelineLanes ? opts.timelineLanes(blocks, currentItemDates, currentLanguage, shownLinkText) : "";
       const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis) + lanes;
-      rendered = view
-        ? [renderBlocks(blocks.slice(0, slot), webRenderer), view, renderBlocks(blocks.slice(slot), webRenderer)]
-            .filter((part) => part !== "")
-            .join("\n")
-        : renderBlocks(blocks, webRenderer);
+      const grid = questionGridHtml(questionGridRows(analysedBlocks, data.analysis, currentItemDates?.today), currentLanguage);
+      // Grid first when both land in one slot; the sort is stable.
+      const inserts = [
+        { at: grid ? questionGridSlot(blocks, slot) : -1, html: grid },
+        { at: view ? slot : -1, html: view },
+      ]
+        .filter((x) => x.html !== "")
+        .sort((a, b) => a.at - b.at);
+      if (inserts.length) {
+        const parts: string[] = [];
+        let from = 0;
+        for (const x of inserts) {
+          parts.push(renderBlocks(blocks.slice(from, x.at), webRenderer), x.html);
+          from = x.at;
+        }
+        parts.push(renderBlocks(blocks.slice(from), webRenderer));
+        rendered = parts.filter((part) => part !== "").join("\n");
+      } else {
+        rendered = renderBlocks(blocks, webRenderer);
+      }
     }
     rendered = fillCaseDots(rendered, currentCaseDotsPending);
     // Cases first: a Query card that collides with a case anchor yields; a
@@ -600,8 +617,9 @@ function retargetQuestionLinks(html: string): string {
 
 /**
  * A `<Question>` as an answer card. With the wiki's options it carries the id
- * (linking the DecisionLog item, whose anchor it never takes: the card has NO
- * `id` attribute, or `uniqueLogAnchors` would rename the item `o3-2`), the
+ * (linking the DecisionLog item, whose anchor it never takes: the card's only
+ * `id` is the page render's distinct `qcard-…`, for the question grid, since the
+ * bare id would make `uniqueLogAnchors` rename the item `o3-2`), the
  * state from the pre-pass (D6), the body and who it is for, plus the data
  * attributes the reader's client hydrates (PR 3). Without them — chat, a
  * gardener preview — it is a plain bordered question with no state.
@@ -654,7 +672,9 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     // carry one (the answer route computes `asked` on the server).
     (to.length ? ` data-question-to="${escapeHtml(to.map((t) => t.name).join("|"))}"` : "");
   const cls = `question q-${state ? state.kind : "noid"}`;
-  return `<section class="${cls}"${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
+  // The question grid's link lands here; only the page render draws that grid.
+  const anchor = currentViews && id !== "" && !isDuplicate ? ` id="${questionCardAnchor(id)}"` : "";
+  return `<section class="${cls}"${anchor}${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
 }
 
 const STAMP_LOG_RE = /<li class="(dl-item[^"]*)"((?: value="\d+")?) id="([^"]+)">(<a class="dl-id" href="#\3">([^<]*)<\/a>)/g;

@@ -248,6 +248,8 @@ describe("first sentence: abbreviations (C)", () => {
   // short-sentence rule (D) cannot hide a wrong end.
   const cases: [string, string][] = [
     ["Dette står beskrevet i pkt. 3 i avtalen. Resten.", "Dette står beskrevet i pkt. 3 i avtalen."],
+    ["Dette står beskrevet i art. 5 i avtalen. Resten.", "Dette står beskrevet i art. 5 i avtalen."],
+    ["Dette er en lang tekst om en god art. Resten står under.", "Dette er en lang tekst om en god art."],
     ["Dette står beskrevet i kap. 3 i boken. Resten.", "Dette står beskrevet i kap. 3 i boken."],
     ["Vi tar lister, tabeller o.l. Senere i år. Resten.", "Vi tar lister, tabeller o.l. Senere i år."],
     ["Vi tar lister, tabeller m.m. Senere i år. Resten.", "Vi tar lister, tabeller m.m. Senere i år."],

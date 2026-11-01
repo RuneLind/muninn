@@ -263,7 +263,7 @@ export function parseChoices(value: string | undefined): string[] {
 type ComponentBlock = Extract<Block, { type: "component" }>;
 
 /** Every component block on the page, depth first in source order. */
-function eachComponent(blocks: Block[], visit: (b: ComponentBlock) => void): void {
+export function eachComponent(blocks: Block[], visit: (b: ComponentBlock) => void): void {
   for (const b of blocks) {
     if (b.type !== "component") continue;
     visit(b);
