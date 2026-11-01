@@ -54,7 +54,6 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "status-line": "Status words beside a plan link that disagree with its plan_status",
   "genre-missing": "Live report pages with no genre: key",
   "genre-picture": "Report pages whose first screen lacks their genre's picture, or whose genre: is not a slug",
-  "chart-candidate": "Tables a <Chart> kind or <DeltaTable> could draw as they stand",
 };
 
 /** A group's heading: its label, plus `(info)` when every finding in it carries

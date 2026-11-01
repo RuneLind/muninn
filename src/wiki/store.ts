@@ -421,6 +421,15 @@ function stripTrailingComment(raw: string): string {
   return i === -1 ? raw : raw.slice(0, i).trim();
 }
 
+/** A hand-written scalar as `readEffort` reads it: a trailing `# comment` and
+ *  wrapping quotes dropped, trimmed. A value that is only a comment
+ *  (`genre: # later`) is empty, as YAML reads it. For lint check 26's `genre:`
+ *  and `tags:`. */
+export function readCommentedScalar(raw: string): string {
+  const t = raw.trim();
+  return t.startsWith("#") ? "" : unquote(stripTrailingComment(t)).trim();
+}
+
 /** A frontmatter `status_date` as the index reads it — comment-stripped,
  *  trimmed and a real `YYYY-MM-DD` day — or undefined. The one reading of the
  *  field: the reader's item dates (D20) take it from here too. */

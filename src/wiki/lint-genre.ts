@@ -1,5 +1,5 @@
 /**
- * Lint check 26 — a report page's genre and its picture. Three info findings,
+ * Lint check 26 — a report page's genre and its picture. Two info findings,
  * page text only (`checkPageText`, so `wiki-check` reports them), on `.mdx`
  * pages under `plans/` or `archive/` that are not culled and not reserved
  * ({@link isGenreScope}):
@@ -8,35 +8,36 @@
  *   `genre:` value; the message suggests one ({@link suggestGenre});
  * - `genre-picture` — a page whose `genre:` is a slug other than `none` and
  *   whose first screen ({@link firstScreen}) holds none of what that genre
- *   accepts; or a `genre:` that is not a slug;
- * - `chart-candidate` — on a picture-scope page, a pipe table a Chart kind or
- *   `<DeltaTable>` can draw as it stands ({@link inferTableKind}).
+ *   accepts; or a `genre:` that is not a slug.
+ *
+ * A third check, `chart-candidate` (a table a Chart kind could draw), was
+ * dropped: two hand checks scored 15/20 and 14/20 against the plan's 16/20.
  *
  * The rules are the plan's (mimir `plans/muninn-mdx-genre-pictures.mdx`,
- * Design) as its P2 state table (rows A1–A62, B1–B45, rulings D1–D25) reads
- * them against the code; `lint-genre.test.ts` pins every row by id. Every
- * structural test reads the parsed AST, wikilinks read as their text, and
- * every drawability test is the reader's own (`readChart`, `deltaGrid`,
- * `computeDelta`, `prStripHtml`, `viewSlot`).
+ * Design) as its P2 state table (rows A1–A75, rulings D1–D25; Table B retired
+ * with `chart-candidate`) reads them against the code; `lint-genre.test.ts`
+ * pins every row by id. Every structural test reads the parsed AST, wikilinks
+ * read as their text, and every drawability test is the reader's own
+ * (`readChart`, `prStripHtml`, `viewSlot`).
  */
 
-import { chartBody, chartTable, FUNNEL_OF_HEADERS, readChart } from "../format/chart-block.ts";
+import { chartBody, chartTable, readChart } from "../format/chart-block.ts";
 import { readCaseBoardView, readChartKind } from "../format/component-spec.ts";
 import { parseCaseBoard } from "../format/case-board.ts";
-import { computeDelta, deltaGrid, deltaRowContexts, headerKey } from "../format/delta-table.ts";
+import { headerKey } from "../format/delta-table.ts";
 import { CHAIN_VIEW_MIN, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
 import { componentBlocks, parseBlocks, type Block, type ComponentName, type TableBlock } from "../format/markdown-ast.ts";
-import { findGlanceLedger, findLedgers, STATE_HEADER_RE } from "../format/pr-ledger.ts";
+import { findGlanceLedger, findLedgers } from "../format/pr-ledger.ts";
 import { readSystemMapBlock } from "../format/system-map.ts";
 import { visibleText } from "../format/report-top.ts";
 import { WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
-import { isCaseRow, isPictureScopePage } from "./lint-drift.ts";
+import { isPictureScopePage } from "./lint-drift.ts";
 import type { LoadedPageFiles } from "./lint-components.ts";
-import { parseFrontmatter, stripFrontmatter, type WikiPageMeta } from "./store.ts";
+import { parseFrontmatter, readCommentedScalar, splitInlineArray, stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 
-export const GENRE_LINT_CHECKS = ["genre-missing", "genre-picture", "chart-candidate"] as const;
+export const GENRE_LINT_CHECKS = ["genre-missing", "genre-picture"] as const;
 
 /** The genre slugs `genre:` takes, plus `none` (no picture check). Case-sensitive (D10). */
 export const GENRES = ["campaign", "investigation", "runbook", "run-report", "bug", "design", "audit"] as const;
@@ -51,48 +52,26 @@ const TAG_GENRES: readonly [string, Genre][] = [
   ["plan", "campaign"],
 ];
 
-/** A table inside one of these is not a candidate: the block draws or owns it,
- *  keeps history, is an answer card or must hold no chart. Closed list (D20). */
-const SHIELDS: ReadonlySet<ComponentName> = new Set<ComponentName>([
-  "Chart", "DeltaTable", "Query", "CaseBoard", "ComparisonTable", "SystemMap", "Historic", "Question", "Tldr", "More",
-]);
-
-/** Run-column headers (`headerKey` form) a `<DeltaTable>` candidate needs two of (D18). */
-const RUN_HEADER_RE = new RegExp(
-  "^(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\.\\d{1,2}(?:\\.\\d{2,4})?|(?:run|round|runde|kjøring) #?\\d+|before|after|før|etter|last run|this run|previous|current|forrige|forrige kjøring|denne kjøring)(?: ?\\([^()]*\\))?$",
-  "u",
-);
-/** A share of rows a delta must compute on (inclusive). */
-export const DELTA_CANDIDATE_MIN = 0.7;
-/** The fewest data rows any candidate needs; a total row (the trailing bold
- *  run the bars and range readers mark) is not one (row B44). */
-export const CANDIDATE_MIN_ROWS = 3;
-/** The fewest rows whose cell is a real `a–b` interval a `range` candidate needs (row B42). */
-export const RANGE_CANDIDATE_MIN_INTERVALS = 2;
-
-/** D17: the header words of a `gap` candidate's three columns. */
-const GAP_VALUE = new Set(["value", "verdi", "målt", "measured"]);
-const GAP_TARGET = new Set(["target", "mål", "krav"]);
-const GAP_GAP = new Set(["gap", "avvik"]);
 /** D24: the `x=` column of an audit's steps chart. */
 const ROUND_HEADERS = new Set(["round", "rounds", "runde", "runder"]);
-/** D1: a top-level `### P1 —` / `## PR 2:` heading names a slate PR. */
-const SLATE_HEADING_RE = /^P(?:R)?\s*(\d+)\s*[—–:-]/;
-/** D22: the heading of the brief. */
-const BRIEF_HEADING_RE = /^(?:brief|oppsummering)$/i;
+/** D1: a top-level `### P1 —` / `## PR 2:` heading names a slate PR; so does
+ *  `## PR A —`, one capital letter after `PR` and a space (§8). */
+const SLATE_HEADING_RE = /^(?:P(?:R)?\s*(\d+)|PR\s+([A-Z]))\s*[—–:-]/;
 
-/** The lint scope of all three checks: a non-culled, non-reserved `.mdx` page under `plans/` or `archive/`. */
+/** The lint scope of both checks: a non-culled, non-reserved `.mdx` page under `plans/` or `archive/`. */
 export function isGenreScope(page: { relPath: string; culled?: boolean }): boolean {
   const p = page.relPath;
   return !page.culled && p.toLowerCase().endsWith(".mdx") && (p.startsWith("plans/") || p.startsWith("archive/")) && !isReservedBasename(p);
 }
 
-/** `genre:` read: absent or empty is missing; a slug (or `none`) is a genre; anything else is `invalid`, as written. */
+/** `genre:` read, a trailing `# comment` dropped as the store drops it: absent
+ *  or empty is missing; a slug (or `none`) is a genre; anything else is
+ *  `invalid`, as written. */
 export function readGenre(fm: Record<string, string | string[]>): { kind: "missing" } | { kind: "genre"; genre: Genre } | { kind: "invalid"; raw: string } {
   const v = fm.genre;
   if (v === undefined) return { kind: "missing" };
   if (Array.isArray(v)) return v.length === 0 ? { kind: "missing" } : { kind: "invalid", raw: `[${v.join(", ")}]` };
-  const raw = v.trim();
+  const raw = readCommentedScalar(v);
   if (raw === "") return { kind: "missing" };
   return GENRE_VALUES.includes(raw) ? { kind: "genre", genre: raw as Genre } : { kind: "invalid", raw };
 }
@@ -100,23 +79,30 @@ export function readGenre(fm: Record<string, string | string[]>): { kind: "missi
 const isBlankBlock = (b: Block) => b.type === "text" && b.lines.every((l) => l.trim() === "");
 const isComponent = (b: Block, name: ComponentName): b is Extract<Block, { type: "component" }> => b.type === "component" && b.name === name;
 
-/** D1: the distinct PRs of the page's slate — every ledger and the glance
- *  table (any `plan_status`), plus top-level `P1 —` headings at levels 2–4. */
-export function slatePrs(blocks: Block[]): Set<number> {
-  const prs = new Set<number>();
+/** D1: the distinct PR ids of the page's slate — every ledger and the glance
+ *  table (any `plan_status`), plus top-level `P1 —` / `PR A —` headings at
+ *  levels 2–4. A number and a letter are two ids. */
+export function slatePrs(blocks: Block[]): Set<string> {
+  const prs = new Set<string>();
   const glance = findGlanceLedger(blocks);
-  for (const l of [...findLedgers(blocks), ...(glance ? [glance] : [])]) for (const r of l.rows) if (r.pr !== null) prs.add(r.pr);
+  for (const l of [...findLedgers(blocks), ...(glance ? [glance] : [])]) for (const r of l.rows) if (r.pr !== null) prs.add(String(r.pr));
   for (const b of blocks) {
     if (b.type !== "heading" || b.level < 2 || b.level > 4) continue;
     const m = SLATE_HEADING_RE.exec(visibleText(b.content).trim());
-    if (m) prs.add(Number(m[1]));
+    if (m) prs.add(m[1] !== undefined ? String(Number(m[1])) : m[2]!);
   }
   return prs;
 }
 
+/** `tags:`, a trailing `# comment` dropped: `tags: [a]  # x` reaches here as one string. */
 function tagsOf(fm: Record<string, string | string[]>): string[] {
   const v = fm.tags;
-  const list = Array.isArray(v) ? v : typeof v === "string" ? v.replace(/^\[|\]$/g, "").split(",") : [];
+  let list: string[] = [];
+  if (Array.isArray(v)) list = v;
+  else if (typeof v === "string") {
+    const raw = readCommentedScalar(v);
+    list = raw.startsWith("[") && raw.endsWith("]") ? splitInlineArray(raw.slice(1, -1)) : raw.split(",");
+  }
   return list.map((t) => t.trim().toLowerCase()).filter(Boolean);
 }
 
@@ -206,100 +192,21 @@ function screenPictures(window: Block[], files: LoadedPageFiles | undefined): Sc
   return p;
 }
 
-/** Every pipe table on the page at any depth, with the components around it. */
-function tablesOf(blocks: Block[]): { table: TableBlock; inside: ComponentName[] }[] {
-  const out: { table: TableBlock; inside: ComponentName[] }[] = [];
-  const walk = (bs: readonly Block[], inside: ComponentName[]) => {
-    for (const b of bs) {
-      if (b.type === "table") out.push({ table: b, inside });
-      else if (b.type === "component") walk(b.children, [...inside, b.name]);
-    }
-  };
-  walk(blocks, []);
-  return out;
+/** Every pipe table on the page at any depth. */
+function tablesOf(blocks: readonly Block[]): TableBlock[] {
+  return blocks.flatMap((b) => (b.type === "table" ? [b] : b.type === "component" ? tablesOf(b.children) : []));
 }
 
-export type CandidateKind = "funnel" | "gap" | "delta" | "range" | "bars";
-
-/** The first kind that draws this table, in D19's order (funnel > gap >
- *  DeltaTable > range > bars), with the attributes it was read with. */
-export function inferTableKind(table: TableBlock): { kind: CandidateKind; attrs: Record<string, string> } | null {
-  const ct = chartTable(table, cellText);
-  const h = ct.headers;
-  const keys = h.map(headerKey);
-  const model = (kind: "funnel" | "gap" | "range" | "bars", attrs: Record<string, string>) => readChart(kind, attrs, ct).model;
-  const col = (set: ReadonlySet<string>) => keys.findIndex((k, i) => i > 0 && set.has(k));
-  // Row B44: funnel, gap and DeltaTable mark no totals, so every data row counts.
-  const enoughRows = ct.rows.length >= CANDIDATE_MIN_ROWS;
-
-  // An `Of`/`Av` column commits the table to funnel: a broken one is no candidate (row B18).
-  if (keys.some((k, i) => i > 0 && FUNNEL_OF_HEADERS.has(k))) return enoughRows && model("funnel", {}) ? { kind: "funnel", attrs: {} } : null;
-
-  const [vi, ti, gi] = [col(GAP_VALUE), col(GAP_TARGET), col(GAP_GAP)];
-  if (enoughRows && vi > 0 && ti > 0 && gi > 0) {
-    const attrs = { value: h[vi]!, target: h[ti]!, gap: h[gi]! };
-    if (model("gap", attrs)) return { kind: "gap", attrs };
-  }
-
-  const runCols = keys.flatMap((k, i) => (i > 0 && RUN_HEADER_RE.test(k) ? [i] : []));
-  if (enoughRows && runCols.length >= 2) {
-    const grid = deltaGrid([h[0]!, ...runCols.map((i) => h[i]!)], ct.rows.map((r) => [r[0]!, ...runCols.map((i) => r[i]!)]));
-    if (grid.runs) {
-      const [a, b] = grid.runs;
-      const ctxs = deltaRowContexts(grid, "");
-      const overflow = table.rows.map((r) => r.slice(table.headers.length).some((c) => c.trim() !== ""));
-      const computed = grid.rows.filter((r, k) => !overflow[k] && computeDelta(r[a]!, r[b]!, "", ctxs[k]) !== null).length;
-      if (computed >= DELTA_CANDIDATE_MIN * grid.rows.length) return { kind: "delta", attrs: {} };
-    }
-  }
-
-  const range = rangeColumn(ct, RANGE_CANDIDATE_MIN_INTERVALS, CANDIDATE_MIN_ROWS);
-  if (range !== null) return { kind: "range", attrs: { value: range } };
-
-  // D16: exactly one count column. The bars reader judges each column (a blank
-  // cell, mixed units, dates, times and years rule it out); row B43 adds that
-  // the parts are not all one value, and row B44 that 3 of them are not a total.
-  const counts = h.flatMap((name, i) => {
-    const m = i > 0 ? model("bars", { value: name }) : null;
-    if (m?.kind !== "bars") return [];
-    const parts = m.rows.filter((r) => !r.total).map((r) => r.value.n);
-    return parts.length >= CANDIDATE_MIN_ROWS && new Set(parts).size > 1 ? [i] : [];
-  });
-  if (counts.length === 1) return { kind: "bars", attrs: { value: h[counts[0]!]! } };
-  return null;
-}
-
-/** The first column the `range` reader draws with at least `minIntervals`
- *  rows whose cell is a real `a–b` interval and `minRows` rows in all, totals
- *  left out of both unless `totals` (D14, rows B42 and B44); else null. The
- *  reader judges every cell, under the column's own date rule (row B45). */
-function rangeColumn(ct: ReturnType<typeof chartTable>, minIntervals: number, minRows: number, totals = false): string | null {
-  for (let i = 1; i < ct.headers.length; i++) {
-    const m = readChart("range", { value: ct.headers[i]! }, ct).model;
-    if (m?.kind !== "range") continue;
-    const parts = m.rows.filter((r) => totals || !r.total);
-    if (parts.length >= minRows && parts.filter((r) => /–|\s-\s/u.test(r.value.text)).length >= minIntervals) return ct.headers[i]!;
-  }
-  return null;
-}
-
-/** Is any table on the page, at any depth, a cost table the `range` reader parses (D2)? */
+/** D2: is any table on the page, at any depth, a cost table the `range` reader
+ *  parses — a column it draws with at least one `a–b` interval, totals counted? */
 function hasCostTable(blocks: Block[]): boolean {
-  // D2 keeps D14's bar: one interval, any row count (the candidate rules are chart-candidate's).
-  return tablesOf(blocks).some(({ table }) => rangeColumn(chartTable(table, cellText), 1, 1, true) !== null);
-}
-
-/** D22: the brief's slot-5 table — the first top-level pipe table under
- *  `## Brief`/`## Oppsummering`, before the next H2 and the first top-level Fold. */
-export function slotFiveTable(blocks: Block[]): TableBlock | null {
-  const at = blocks.findIndex((b) => b.type === "heading" && b.level === 2 && BRIEF_HEADING_RE.test(visibleText(b.content).trim()));
-  if (at < 0) return null;
-  for (let i = at + 1; i < blocks.length; i++) {
-    const b = blocks[i]!;
-    if ((b.type === "heading" && b.level <= 2) || isComponent(b, "Fold")) return null;
-    if (b.type === "table") return b;
-  }
-  return null;
+  return tablesOf(blocks).some((table) => {
+    const ct = chartTable(table, cellText);
+    return ct.headers.slice(1).some((value) => {
+      const m = readChart("range", { value }, ct).model;
+      return m?.kind === "range" && m.rows.some((r) => /–|\s-\s/u.test(r.value.text));
+    });
+  });
 }
 
 /** What a genre accepts, worded for the message. */
@@ -351,20 +258,13 @@ function accepts(genre: Exclude<Genre, "none">, planStatus: string | undefined, 
   }
 }
 
-/** The chart tag a candidate would take. */
-function candidateTag(c: { kind: CandidateKind; attrs: Record<string, string> }): string {
-  if (c.kind === "delta") return "<DeltaTable>";
-  const attrs = Object.entries(c.attrs).map(([k, v]) => ` ${k}="${v}"`).join("");
-  return `<Chart kind="${c.kind}"${attrs}>`;
-}
-
 export type GenrePageRef = Pick<WikiPageMeta, "relPath" | "plan_status" | "followups"> & { culled?: boolean };
 
 export function checkGenre(page: GenrePageRef, rawContent: string, files?: LoadedPageFiles): LintFinding[] {
   if (!isGenreScope(page)) return [];
   const fm = parseFrontmatter(rawContent);
   const body = stripFrontmatter(rawContent);
-  const bodyAt = rawContent.slice(0, rawContent.length - body.length).split("\n").length - 1;
+  const frontmatter = rawContent.slice(0, rawContent.length - body.length);
   // Wikilinks read as their text, as the reader's decision text reads them; no line moves.
   const blocks = parseBlocks(body.replace(WIKILINK_WITH_LABEL_RE, (_m, t: string, l?: string) => wikiLinkText(t, l)));
   const pictureScope = isPictureScopePage(page.relPath, fm, page.plan_status, page.followups);
@@ -375,7 +275,9 @@ export function checkGenre(page: GenrePageRef, rawContent: string, files?: Loade
 
   const suggested = genre.kind === "genre" ? null : suggestGenre(page.relPath, fm, blocks);
   if (genre.kind === "missing" && pictureScope) {
-    info("genre-missing", `No genre: key. The blocks suggest genre: ${suggested!.genre} (${suggested!.rule}); write genre: none for a page with no genre picture`, { detail: suggested!.genre });
+    // The parser drops a value-less key, so an empty `genre:` is read off the fence.
+    const lead = /^genre:/m.test(frontmatter) ? "The genre: key is empty." : "No genre: key.";
+    info("genre-missing", `${lead} The blocks suggest genre: ${suggested!.genre} (${suggested!.rule}); write genre: none for a page with no genre picture`, { detail: suggested!.genre });
   } else if (genre.kind === "invalid") {
     info("genre-picture", `genre: "${genre.raw}" is not a genre slug (${GENRE_VALUES.join(", ")}; lower case)`, { detail: "invalid" });
   } else if (genre.kind === "genre" && genre.genre !== "none" && !accepts(genre.genre, page.plan_status, blocks, files)) {
@@ -383,19 +285,5 @@ export function checkGenre(page: GenrePageRef, rawContent: string, files?: Loade
     info("genre-picture", `genre: ${genre.genre}${ps}: the first screen (after the In short box, before the first <Fold>) holds none of ${ACCEPTS[genre.genre]}`, { detail: genre.genre });
   }
 
-  if (!pictureScope) return findings;
-  const pastProposed = page.plan_status !== undefined && page.plan_status !== "proposed";
-  const exemptGenre = genre.kind === "genre" ? genre.genre : (suggested?.genre ?? "none");
-  const slotFive = pastProposed && exemptGenre !== "run-report" ? slotFiveTable(blocks) : null;
-  for (const { table, inside } of tablesOf(blocks)) {
-    if (table === slotFive || inside.some((n) => SHIELDS.has(n))) continue;
-    if (table.headers.some((hd) => STATE_HEADER_RE.test(visibleText(hd).trim()))) continue;
-    if (table.rows.some(isCaseRow)) continue;
-    const c = inferTableKind(table);
-    if (!c) continue;
-    const line = table.line === undefined ? {} : { line: bodyAt + table.line + 1 };
-    const headers = table.headers.map((x) => visibleText(x).trim()).join(" | ");
-    info("chart-candidate", `The table "${headers}" can draw as ${candidateTag(c)}; wrap it`, { detail: c.kind, ...line });
-  }
   return findings;
 }

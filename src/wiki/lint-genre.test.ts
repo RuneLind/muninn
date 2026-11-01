@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
-import { checkGenre, firstScreen, inferTableKind } from "./lint-genre.ts";
+import { checkGenre, firstScreen } from "./lint-genre.ts";
 import { checkPageText, LINT_CHECKS, PAGE_TEXT_LINT_CHECKS, type LintFinding } from "./lint.ts";
 import { parseFrontmatter, readCull, readFollowups, readPlanStatus, stripFrontmatter } from "./store.ts";
 import type { LoadedPageFiles } from "./lint-components.ts";
@@ -9,7 +9,7 @@ import { pageDecisionData, prStripHtml } from "../format/decision-views.ts";
 import { parseBlocks, type TableBlock } from "../format/markdown-ast.ts";
 
 // Invented pages only, except the marked copy of the plan page (A33/A34).
-// Test names carry the P2 state table's row ids (A1…A62, B1…B45).
+// Test names carry the P2 state table's row ids (A1…A75; Table B retired with chart-candidate).
 
 const lint = (relPath: string, content: string, files?: LoadedPageFiles): LintFinding[] => {
   const fm = parseFrontmatter(content);
@@ -23,7 +23,6 @@ const doc = (fm: readonly string[], ...body: (readonly string[])[]) => ["---", "
 const of = (fs: LintFinding[], check: LintFinding["check"]) => fs.filter((f) => f.check === check);
 const missing = (fs: LintFinding[]) => of(fs, "genre-missing").map((f) => f.detail);
 const picture = (fs: LintFinding[]) => of(fs, "genre-picture").length > 0;
-const candidates = (fs: LintFinding[]) => of(fs, "chart-candidate").map((f) => f.detail);
 
 const H1 = ["# Page", ""];
 const TLDR = ["<Tldr>", "", "Short.", "", "</Tldr>", ""];
@@ -357,299 +356,70 @@ describe("the first screen (Table A)", () => {
   });
 });
 
-describe("chart-candidate (Table B)", () => {
-  const PS = ["plan_status: proposed", "genre: campaign"];
-  const IN = ["plan_status: in-flight", "genre: campaign"];
-  const cand = (fm: string[], ...body: string[][]) => candidates(lint("plans/x.mdx", doc(fm, H1, ...body)));
-  const COST_HEADER = 'value="Interval"';
-
-  test("B1: a cost table in a Fold reads as range", () => {
-    const fs = of(lint("plans/x.mdx", doc(PS, H1, FOLD(COST))), "chart-candidate");
-    expect(fs.map((f) => f.detail)).toEqual(["range"]);
-    expect(fs[0]!.message).toContain(COST_HEADER);
-  });
-
-  test.each([
-    ["Lane in NextMoves", wrap("<NextMoves>", "</NextMoves>", wrap('<Lane kind="you">', "</Lane>", COST))],
-    ["Callout", CALLOUT(COST)],
-    ["Fold", FOLD(COST)],
-  ])("B2: %s does not shield", (_n, body) => {
-    expect(cand(PS, body)).toEqual(["range"]);
-  });
-
-  test.each([
-    ["Chart", wrap('<Chart kind="gap">', "</Chart>", COST)],
-    ["DeltaTable", wrap("<DeltaTable>", "</DeltaTable>", COST)],
-    ["Query", wrap('<Query id="Q-1">', "</Query>", COST)],
-    ["CaseBoard", wrap('<CaseBoard src="c.yaml">', "</CaseBoard>", COST)],
-    ["ComparisonTable", wrap("<ComparisonTable>", "</ComparisonTable>", COST)],
-    ["SystemMap", wrap("<SystemMap>", "</SystemMap>", COST)],
-    ["Historic", wrap('<Historic since="2026-01-01">', "</Historic>", COST)],
-    ["Question", wrap('<Question id="O1" choices="A|B">', "</Question>", COST)],
-    ["Tldr", wrap("<Tldr>", "</Tldr>", COST)],
-    ["More", wrap("<More>", "</More>", COST)],
-    ["Fold > Callout > Query", FOLD(CALLOUT(wrap('<Query id="Q-1">', "</Query>", COST)))],
-  ])("B3: a table inside %s is skipped", (_n, body) => {
-    expect(cand(PS, body)).toEqual([]);
-  });
-
-  test.each([
-    ["Steps", wrap('<Steps src="./x.lifecycle.json">', "</Steps>", COST)],
-    ["DecisionLog", wrap("<DecisionLog>", "</DecisionLog>", COST)],
-    ["RuleTree", wrap('<RuleTree title="t">', "</RuleTree>", COST)],
-    ["Glossary", wrap("<Glossary>", "</Glossary>", COST)],
-    ["StatusRows-adjacent", [...STATUS, ...COST]],
-  ])("B4: %s does not shield (D20)", (_n, body) => {
-    expect(cand(PS, body)).toEqual(["range"]);
-  });
-
-  test("B5: a table indented under a list item is a block of its own and is read", () => {
-    expect(cand(PS, ["- item", "", ...COST.map((l) => (l ? `  ${l}` : l))])).toEqual(["range"]);
-  });
-
-  test("B6: a table inside a code fence is no table", () => {
-    expect(cand(PS, ["```", ...COST, "```", ""])).toEqual([]);
-  });
-
-  test("B7: an archive page with no plan_status is not picture scope", () => {
-    expect(candidates(lint("archive/x.mdx", doc(["genre: campaign"], H1, FOLD(COST))))).toEqual([]);
-  });
-
-  test.each([
-    ["40 - 80", "50 - 90", "10 - 20"],
-    ["40–80 USD", "50–90 USD", "10–20 USD"],
-  ])("B8: %s reads as an interval", (a, b, c) => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", `| x | ${a} |`, `| y | ${b} |`, `| z | ${c} |`, ""])).toEqual(["range"]);
-  });
-
-  test("B9: an unspaced hyphen is no interval", () => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | 40-80 |", "| y | 50-90 |", "| z | 10-20 |", ""])).toEqual([]);
-  });
-
-  test.each([
-    ["B10 (a date pair)", "01.10–05.10", "08.10–12.10", "15.10–19.10"],
-    ["B11 (a year pair)", "2024–2025", "2025–2026", "2026–2027"],
-  ])("%s is no interval (P1's reader, D15)", (_id, a, b, c) => {
-    expect(cand(PS, ["| Period | Cost |", "|---|---|", `| x | ${a} |`, `| y | ${b} |`, `| z | ${c} |`, ""])).toEqual([]);
-  });
-
-  test("B12: a one-digit-month pair follows P1's reader (D15)", () => {
-    const t = ["| Period | Cost |", "|---|---|", "| x | 5.9–8.9 |", "| y | 6.9–9.9 |", "| z | 7.9–9.9 |"];
-    const reads = readChart("range", { value: "Cost" }, chartTable(parseBlocks(t.join("\n"))[0] as TableBlock, (c) => c)).model !== null;
-    expect(reads).toBe(true);
-    expect(cand(PS, [...t, ""])).toEqual(["range"]);
-  });
-
-  test("B13: mixed currency signs are a note, not fatal", () => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | $40–80 |", "| y | €50–90 |", "| z | $10–20 |", ""])).toEqual(["range"]);
-  });
-
-  test("B14: a low end above the high end is fatal", () => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | 40–80 |", "| y | 80–40 |", "| z | 10–20 |", ""])).toEqual([]);
-  });
-
-  test("B15: a blank interval cell is fatal", () => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | 40–80 |", "| y | — |", "| z | 10–20 |", ""])).toEqual([]);
-  });
-
-  test("B16: points only and several count columns: no candidate (D14, D16)", () => {
-    expect(cand(PS, ["| Comparable | PRs | Wall | Total | Per PR |", "|---|---|---|---|---|", "| a | 5 | 19.8 h | $951 | ~$190 |", "| b | 5 | 32 h | $639 | ~$128 |", "| c | 3 | 6 h | $210 | ~$70 |", ""])).toEqual([]);
-  });
-
-  test("B17: an Of column reads as funnel", () => {
-    expect(cand(IN, ["| Step | Count | Of |", "|---|---|---|", "| all | 165 | |", "| kept | 94 | 165 |", "| fixed | 81 | 165 |", ""])).toEqual(["funnel"]);
-  });
-
-  test("B18: an Av value matching no earlier count is fatal, and the Av column commits the table", () => {
-    expect(cand(IN, ["| Steg | Antall | Av |", "|---|---|---|", "| alle | 165 | |", "| igjen | 94 | 165 |", "| rest | 10 | 77 |", ""])).toEqual([]);
-  });
-
-  test("B19: value, target and gap columns read as gap (D17)", () => {
-    const fs = of(lint("plans/x.mdx", doc(IN, H1, ["| Item | Value | Target | Gap |", "|---|---|---|---|", "| a | 3 | 5 | 2 |", "| b | 4 | 6 | 2 |", "| c | 1 | 4 | 3 |", ""])), "chart-candidate");
-    expect(fs.map((f) => f.detail)).toEqual(["gap"]);
-    expect(fs[0]!.message).toContain('value="Value" target="Target" gap="Gap"');
-  });
-
-  test("B20: one count column over 3 rows reads as bars", () => {
-    expect(cand(IN, ["| Outcome | Pages |", "|---|---|", "| ok | 5 |", "| failed | 2 |", "| skipped | 1 |", ""])).toEqual(["bars"]);
-  });
-
-  test("B21: 2 rows are too few for bars", () => {
-    expect(cand(IN, ["| Outcome | Pages |", "|---|---|", "| ok | 5 |", "| failed | 2 |", ""])).toEqual([]);
-  });
-
-  test("B22: mixed units are fatal in bars", () => {
-    expect(cand(IN, ["| Outcome | Time |", "|---|---|", "| a | 3 min |", "| b | 40 s |", "| c | 2 min |", ""])).toEqual([]);
-  });
-
-  test("B23: a blank count cell is fatal", () => {
-    expect(cand(IN, ["| Outcome | Pages |", "|---|---|", "| ok | 5 |", "| failed | |", "| skipped | 1 |", ""])).toEqual([]);
-  });
-
-  // D16 rests on the bars reader, which reads no date or year cell (PR 1).
-  const DATES = ["| Run | Date |", "|---|---|", "| a | 01.10 |", "| b | 08.10 |", "| c | 15.10 |"];
-  const YEARS = ["| Wiki | Year |", "|---|---|", "| a | 2024 |", "| b | 2025 |", "| c | 2026 |"];
-  const barsReads = (t: string[]) => readChart("bars", { value: t[0]!.split("|")[2]!.trim() }, chartTable(parseBlocks(t.join("\n"))[0] as TableBlock, (s) => s)).model !== null;
-  test.each([
-    ["dates", DATES],
-    ["years", YEARS],
-  ])("B24: a column of %s is a candidate exactly when the bars reader draws it", (_n, t) => {
-    expect(cand(IN, [...t, ""])).toEqual(barsReads(t) ? ["bars"] : []);
-  });
-  test("B24: dates and years are not counts (D16, with P1's fix round)", () => {
-    expect(barsReads(DATES) || barsReads(YEARS)).toBe(false);
-    expect(cand(IN, [...DATES, ""])).toEqual([]);
-    expect(cand(IN, [...YEARS, ""])).toEqual([]);
-  });
-
-  test("B25: the label column is never the count column", () => {
-    expect(cand(IN, ["| Round | Found | Changed |", "|---|---|---|", "| 1 | a | b |", "| 2 | c | d |", "| 3 | e | f |", ""])).toEqual([]);
-  });
-
-  test("B26: a Status header is a ledger", () => {
-    expect(cand(IN, ["| PR | What | Status |", "|---|---|---|", "| a | 3 | x |", "| b | 4 | y |", "| c | 5 | z |", ""])).toEqual([]);
-  });
-
-  test.each([
-    ["State (31.10)", []],
-    ["PR state", ["bars"]],
-  ])("B27: a %s header (D21)", (h, want) => {
-    expect(cand(IN, [`| PR | Files | ${h} |`, "|---|---|---|", "| a | 3 | x |", "| b | 4 | y |", "| c | 5 | z |", ""])).toEqual(want);
-  });
-
-  test("B28: a case row skips the table", () => {
-    expect(cand(IN, ["| Case | Rows | Note |", "|---|---|---|", "| MEL-123 | 4 | venter |", "| MEL-124 | 5 | x |", "| MEL-125 | 6 | y |", ""])).toEqual([]);
-  });
-
-  const deltaRows = (n: number, computing: number) =>
-    ["| Metric | Before | After |", "|---|---|---|", ...Array.from({ length: n }, (_, i) => (i < computing ? `| m${i} | ${i + 1} | ${i + 2} |` : `| m${i} | n/a | n/a |`)), ""];
-  test("B29: 7 of 10 rows compute a delta (70 %, inclusive)", () => {
-    expect(cand(IN, deltaRows(10, 7))).toEqual(["delta"]);
-  });
-  test.each([
-    [9, 6, []],
-    [4, 3, ["delta"]],
-  ])("B30: %i rows, %i compute", (n, c, want) => {
-    expect(cand(IN, deltaRows(n, c))).toEqual(want);
-  });
-
-  test.each([
-    ["2026-10-01", "2026-10-08"],
-    ["01.10", "08.10"],
-    ["Run 1", "Run 2"],
-    ["Round 3", "Round 4"],
-    ["Runde 1", "Runde 2"],
-    ["Kjøring 1", "Kjøring 2"],
-    ["Før", "Etter"],
-    ["Last run", "This run"],
-    ["Previous", "Current"],
-    ["Forrige", "Denne kjøring"],
-  ])("B31: run headers %s | %s read as DeltaTable", (a, b) => {
-    expect(cand(IN, [`| Metric | ${a} | ${b} |`, "|---|---|---|", "| pages | 10 | 12 |", "| links | 4 | 5 |", "| hubs | 2 | 3 |", ""])).toEqual(["delta"]);
-  });
-
-  test("B32: a filled Note column stays out of the grid (D18)", () => {
-    expect(cand(IN, ["| Metric | Before | After | Note |", "|---|---|---|---|", "| pages | 10 | 12 | more |", "| links | 4 | 5 | same |", "| hubs | 2 | 3 | less |", ""])).toEqual(["delta"]);
-  });
-
-  test("B33: Before | Target is one run column", () => {
-    expect(cand(IN, ["| Metric | Before | Target |", "|---|---|---|", "| pages | 10 | 12 |", "| links | 4 | 5 |", "| hubs | 2 | 3 |", ""])).toEqual([]);
-  });
-
-  test("B34: a funnel-valid table with run columns reads as funnel (D19)", () => {
-    expect(cand(IN, ["| Metric | Before | After | Of |", "|---|---|---|---|", "| all | 10 | 12 | |", "| kept | 6 | 7 | 10 |", "| fixed | 4 | 5 | 10 |", ""])).toEqual(["funnel"]);
-  });
-
-  test("B35: an interval column beats a count column (D19)", () => {
-    const fs = of(lint("plans/x.mdx", doc(IN, H1, ["| Item | Cost | Pages |", "|---|---|---|", "| a | $40–80 | 3 |", "| b | $50–90 | 4 |", "| c | $10–20 | 5 |", ""])), "chart-candidate");
-    expect(fs.map((f) => f.detail)).toEqual(["range"]);
-    expect(fs[0]!.message).toContain('value="Cost"');
-  });
-
-  const SLOT5 = ["## Brief", "", "| PR | What | Files |", "|---|---|---|", "| 1 — a | x | 3 |", "| 2 — b | y | 4 |", "| 3 — c | z | 5 |", ""];
-  test("B36: past proposed, the slot-5 table is exempt", () => {
-    expect(cand(IN, SLOT5)).toEqual([]);
-  });
-  test("B37: on a proposed page the slot-5 table is not exempt", () => {
-    expect(cand(PS, SLOT5)).toEqual(["bars"]);
-  });
-  test("B38: on run-report the slot-5 table is never exempt", () => {
-    expect(cand(["plan_status: in-flight", "genre: run-report"], ["## Brief", "", "| Metric | Before | After |", "|---|---|---|", "| pages | 10 | 12 |", "| links | 4 | 5 |", "| hubs | 2 | 3 |", ""])).toEqual(["delta"]);
-  });
-  test("B39: a brief table inside a Chart is not slot 5; the next plain table is (D22)", () => {
-    const chart = wrap('<Chart kind="funnel">', "</Chart>", ["| Step | Count | Of |", "|---|---|---|", "| all | 10 | |", "| kept | 6 | 10 |"]);
-    expect(cand(IN, ["## Brief", ""], chart, SLOT5.slice(2))).toEqual([]);
-  });
-  test.each([
-    ["under a later ## section before the first Fold", [["## Brief", "", "Text.", "", "## Other", ""], SLOT5.slice(2)]],
-    ["after the first Fold", [["## Brief", "", "Text.", ""], FOLD(["x"]), SLOT5.slice(2)]],
-  ])("B40: a table %s is not slot 5 (D22)", (_n, body) => {
-    expect(cand(IN, ...body)).toEqual(["bars"]);
-  });
-  test("B41: with no genre: key the suggested genre decides the exemption (D22)", () => {
-    expect(candidates(lint("plans/x.mdx", doc(["plan_status: in-flight"], H1, SLOT5, DELTA)))).toEqual(["bars"]);
-  });
-});
-
-describe("chart-candidate: the rule fix after the first hand check (Table B)", () => {
-  const PS = ["plan_status: proposed", "genre: campaign"];
-  const IN = ["plan_status: in-flight", "genre: campaign"];
-  const cand = (fm: string[], ...rows: string[][]) => candidates(lint("plans/x.mdx", doc(fm, H1, [...rows.flat(), ""])));
-  const table = (head: string, ...rows: string[]) => {
-    const cols = head.split("|").length - 2;
-    return [head, `|${"---|".repeat(cols)}`, ...rows];
-  };
-
-  test.each([
-    ["one interval among points", ["| x | $50–90 |", "| y | $40 |", "| z | $60 |"], []],
-    ["two intervals and a point", ["| x | $50–90 |", "| y | $40–70 |", "| z | $60 |"], ["range"]],
-    ["points with an interval total", ["| x | $40 |", "| y | $50 |", "| z | $60 |", "| **Total** | **$100–200** |"], []],
-  ])("B42: %s", (_n, rows, want) => {
-    expect(cand(PS, table("| Item | Cost |", ...rows))).toEqual(want);
-  });
-
-  test.each([
-    ["all zero", ["| a | 0 |", "| b | 0 |", "| c | 0 |"]],
-    ["all equal", ["| a | 5 |", "| b | 5 |", "| c | 5 |"]],
-    ["all equal beside a differing total", ["| a | 5 |", "| b | 5 |", "| c | 5 |", "| **Total** | **15** |"]],
-  ])("B43: a bars column whose parts are %s is no candidate", (_n, rows) => {
-    expect(cand(IN, table("| Outcome | Pages |", ...rows))).toEqual([]);
-  });
-
-  test.each([
-    ["range", table("| Item | Cost |", "| x | $40–80 |", "| y | $50–90 |")],
-    ["range plus a bold total", table("| Item | Cost |", "| x | $40–80 |", "| y | $50–90 |", "| **Total** | **$90–170** |")],
-    ["bars plus a bold total", table("| Outcome | Pages |", "| ok | 5 |", "| failed | 2 |", "| **Total** | **7** |")],
-    ["funnel", table("| Step | Count | Of |", "| all | 10 | |", "| kept | 6 | 10 |")],
-    ["gap", table("| Item | Value | Target | Gap |", "| a | 3 | 5 | 2 |", "| b | 4 | 6 | 2 |")],
-    ["DeltaTable", table("| Metric | Before | After |", "| pages | 10 | 12 |", "| links | 4 | 5 |")],
-  ])("B44: %s over 2 data rows is no candidate", (_n, t) => {
-    expect(cand(IN, t)).toEqual([]);
-  });
-  test("B44: range over 3 data rows plus a bold total is a candidate", () => {
-    expect(cand(IN, table("| Item | Cost |", "| x | $40–80 |", "| y | $50–90 |", "| z | $10–20 |", "| **Total** | **$100–190** |"))).toEqual(["range"]);
-  });
-
-  test("B45: the range column reads under the reader's own column date rule", () => {
-    expect(cand(PS, table("| Item | Cost |", "| x | 1.25–2.75 |", "| y | 1.10–2.12 |", "| z | 3.5–4.5 |"))).toEqual(["range"]);
-  });
-});
-
 describe("wiring", () => {
-  test("the three checks are in LINT_CHECKS and PAGE_TEXT_LINT_CHECKS, and checkPageText runs them", () => {
-    for (const c of ["genre-missing", "genre-picture", "chart-candidate"] as const) {
+  test("the two checks are in LINT_CHECKS and PAGE_TEXT_LINT_CHECKS, and checkPageText runs them", () => {
+    for (const c of ["genre-missing", "genre-picture"] as const) {
       expect(LINT_CHECKS).toContain(c);
       expect(PAGE_TEXT_LINT_CHECKS).toContain(c);
     }
-    const content = doc(["plan_status: in-flight"], H1, ["| Outcome | Pages |", "|---|---|", "| ok | 5 |", "| failed | 2 |", "| skipped | 1 |", ""]);
-    const fs = checkPageText({ relPath: "plans/x.mdx", plan_status: "in-flight" }, content, []);
-    expect(fs.filter((f) => f.check.startsWith("genre") || f.check === "chart-candidate").map((f) => [f.check, f.severity, f.line])).toEqual([
-      ["genre-missing", "info", undefined],
-      ["chart-candidate", "info", 8],
-    ]);
+    const fs = checkPageText({ relPath: "plans/x.mdx", plan_status: "in-flight" }, doc(["plan_status: in-flight"], H1, SLATE), []);
+    expect(fs.filter((f) => f.check.startsWith("genre")).map((f) => [f.check, f.severity, f.detail])).toEqual([["genre-missing", "info", "campaign"]]);
+  });
+});
+
+describe("fix round 1: trailing comments, an empty genre: key, lettered slate headings (Table A, §8)", () => {
+  const PROP = ["plan_status: proposed"];
+
+  test("A63: genre: none with a trailing comment is none", () => {
+    expect(lint("plans/x.mdx", doc([...PROP, "genre: none # no picture"], QUERY))).toEqual([]);
   });
 
-  test("inferTableKind names nothing on a prose table", () => {
-    expect(inferTableKind(parseBlocks("| A | B |\n|---|---|\n| x | y |")[0] as TableBlock)).toBeNull();
+  test("A64: genre: campaign with a trailing comment is campaign, so the accept list runs", () => {
+    const fm = [...PROP, "genre: campaign  # picture: range"];
+    expect(lint("plans/x.mdx", doc(fm, H1, RANGE))).toEqual([]);
+    expect(of(lint("plans/x.mdx", doc(fm, H1, ["Text.", ""])), "genre-picture").map((f) => f.detail)).toEqual(["campaign"]);
+  });
+
+  test("A65: a quoted genre with a trailing comment", () => {
+    expect(lint("plans/x.mdx", doc([...PROP, 'genre: "design" # drawn below'], H1, MERMAID))).toEqual([]);
+  });
+
+  test("A66: an archive tag list with a trailing comment reads its tags", () => {
+    expect(missing(lint("archive/x.mdx", doc(["plan_status: shipped", "followups: open", "tags: [postmortem]  # x"], SLATE)))).toEqual(["bug"]);
+  });
+
+  test.each([["genre:"], ['genre: ""'], ["genre: # later"]])("A67: %s says the key is empty, not absent", (line) => {
+    const fs = of(lint("plans/x.mdx", doc([...PROP, line])), "genre-missing");
+    expect(fs.map((f) => f.detail)).toEqual(["none"]);
+    expect(fs[0]!.message).toStartWith("The genre: key is empty.");
+  });
+  test("A67: an absent key says No genre: key", () => {
+    expect(of(lint("plans/x.mdx", doc(PROP)), "genre-missing")[0]!.message).toStartWith("No genre: key.");
+  });
+
+  const heads = (...hs: string[]) => hs.flatMap((h) => [h, "", "x", ""]);
+  test.each([
+    ["A68", heads("## PR A — first", "## PR B — second"), "campaign"],
+    ["A68 (colon, en dash, level 4)", heads("#### PR A: first", "#### PR B – second"), "campaign"],
+    ["A69", heads("### PR A — first", "### PR A — again"), "none"],
+    ["A70", heads("##### PR A — first", "##### PR B — second"), "none"],
+    ["A71", heads("## PR A — first", "## PR 1 — second"), "campaign"],
+    ["A72", heads("## PR Approach — first", "## PR Budget — second"), "none"],
+    ["A73", heads("## PRA — first", "## PRB — second"), "none"],
+    ["A74", heads("## PR a — first", "## PR b — second"), "none"],
+    ["A75", heads("## P A — first", "## P B — second"), "none"],
+  ])("%s: lettered slate headings", (_id, body, want) => {
+    expect(missing(lint("plans/x.mdx", doc(PROP, body)))).toEqual([want]);
+  });
+});
+
+describe("chart-candidate dropped (§8)", () => {
+  test("checkPageText reports no chart-candidate on a page that used to produce one", () => {
+    expect(LINT_CHECKS as readonly string[]).not.toContain("chart-candidate");
+    expect(PAGE_TEXT_LINT_CHECKS as readonly string[]).not.toContain("chart-candidate");
+    const content = doc(["plan_status: in-flight"], H1, ["| Outcome | Pages |", "|---|---|", "| ok | 5 |", "| failed | 2 |", "| skipped | 1 |", ""], FOLD(COST));
+    const fs = checkPageText({ relPath: "plans/x.mdx", plan_status: "in-flight" }, content, []);
+    expect(fs.map((f) => f.check as string)).not.toContain("chart-candidate");
+    expect(fs.filter((f) => f.check.startsWith("genre")).map((f) => [f.check, f.detail])).toEqual([["genre-missing", "none"]]);
   });
 });

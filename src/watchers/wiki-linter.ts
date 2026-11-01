@@ -75,7 +75,6 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "status-line": { one: "stale status line", many: "stale status lines" },
   "genre-missing": { one: "report page with no genre", many: "report pages with no genre" },
   "genre-picture": { one: "genre picture missing from the first screen", many: "genre pictures missing from the first screen" },
-  "chart-candidate": { one: "table a chart could draw", many: "tables a chart could draw" },
 };
 
 /** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks

@@ -169,7 +169,7 @@ export function isLiveReportPage(relPath: string, fm: Record<string, unknown>, p
 }
 
 /**
- * The picture scope of lint check 26's `genre-missing` and `chart-candidate`
+ * The picture scope of lint check 26's `genre-missing`
  * (`lint-genre.ts`), and P4's sweep list: a live report page
  * ({@link isLiveReportPage}), or a `plan_status: shipped` page with
  * `followups: open` (the store's validated value, so `Open` is not open).
