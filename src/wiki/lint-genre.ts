@@ -13,15 +13,14 @@
  *   `<DeltaTable>` can draw as it stands ({@link inferTableKind}).
  *
  * The rules are the plan's (mimir `plans/muninn-mdx-genre-pictures.mdx`,
- * Design) as its P2 state table (rows A1–A62, B1–B41, rulings D1–D25) reads
+ * Design) as its P2 state table (rows A1–A62, B1–B45, rulings D1–D25) reads
  * them against the code; `lint-genre.test.ts` pins every row by id. Every
  * structural test reads the parsed AST, wikilinks read as their text, and
  * every drawability test is the reader's own (`readChart`, `deltaGrid`,
  * `computeDelta`, `prStripHtml`, `viewSlot`).
  */
 
-import { chartBody, chartTable, FUNNEL_OF_HEADERS, readChart, readIntervalCell } from "../format/chart-block.ts";
-import { isEmptyCell, tableDecimalComma } from "../format/cell-number.ts";
+import { chartBody, chartTable, FUNNEL_OF_HEADERS, readChart } from "../format/chart-block.ts";
 import { readCaseBoardView, readChartKind } from "../format/component-spec.ts";
 import { parseCaseBoard } from "../format/case-board.ts";
 import { computeDelta, deltaGrid, deltaRowContexts, headerKey } from "../format/delta-table.ts";
@@ -65,8 +64,11 @@ const RUN_HEADER_RE = new RegExp(
 );
 /** A share of rows a delta must compute on (inclusive). */
 export const DELTA_CANDIDATE_MIN = 0.7;
-/** The fewest rows a `bars` candidate needs. */
-export const BARS_CANDIDATE_MIN_ROWS = 3;
+/** The fewest data rows any candidate needs; a total row (the trailing bold
+ *  run the bars and range readers mark) is not one (row B44). */
+export const CANDIDATE_MIN_ROWS = 3;
+/** The fewest rows whose cell is a real `a–b` interval a `range` candidate needs (row B42). */
+export const RANGE_CANDIDATE_MIN_INTERVALS = 2;
 
 /** D17: the header words of a `gap` candidate's three columns. */
 const GAP_VALUE = new Set(["value", "verdi", "målt", "measured"]);
@@ -96,7 +98,6 @@ export function readGenre(fm: Record<string, string | string[]>): { kind: "missi
 }
 
 const isBlankBlock = (b: Block) => b.type === "text" && b.lines.every((l) => l.trim() === "");
-const isBlankCell = (c: string) => isEmptyCell(c) || /^[-–—]$/.test(c.trim());
 const isComponent = (b: Block, name: ComponentName): b is Extract<Block, { type: "component" }> => b.type === "component" && b.name === name;
 
 /** D1: the distinct PRs of the page's slate — every ledger and the glance
@@ -226,20 +227,22 @@ export function inferTableKind(table: TableBlock): { kind: CandidateKind; attrs:
   const ct = chartTable(table, cellText);
   const h = ct.headers;
   const keys = h.map(headerKey);
-  const draws = (kind: "funnel" | "gap" | "range" | "bars", attrs: Record<string, string>) => readChart(kind, attrs, ct).model !== null;
+  const model = (kind: "funnel" | "gap" | "range" | "bars", attrs: Record<string, string>) => readChart(kind, attrs, ct).model;
   const col = (set: ReadonlySet<string>) => keys.findIndex((k, i) => i > 0 && set.has(k));
+  // Row B44: funnel, gap and DeltaTable mark no totals, so every data row counts.
+  const enoughRows = ct.rows.length >= CANDIDATE_MIN_ROWS;
 
   // An `Of`/`Av` column commits the table to funnel: a broken one is no candidate (row B18).
-  if (keys.some((k, i) => i > 0 && FUNNEL_OF_HEADERS.has(k))) return draws("funnel", {}) ? { kind: "funnel", attrs: {} } : null;
+  if (keys.some((k, i) => i > 0 && FUNNEL_OF_HEADERS.has(k))) return enoughRows && model("funnel", {}) ? { kind: "funnel", attrs: {} } : null;
 
   const [vi, ti, gi] = [col(GAP_VALUE), col(GAP_TARGET), col(GAP_GAP)];
-  if (vi > 0 && ti > 0 && gi > 0) {
+  if (enoughRows && vi > 0 && ti > 0 && gi > 0) {
     const attrs = { value: h[vi]!, target: h[ti]!, gap: h[gi]! };
-    if (draws("gap", attrs)) return { kind: "gap", attrs };
+    if (model("gap", attrs)) return { kind: "gap", attrs };
   }
 
   const runCols = keys.flatMap((k, i) => (i > 0 && RUN_HEADER_RE.test(k) ? [i] : []));
-  if (runCols.length >= 2 && ct.rows.length >= 2) {
+  if (enoughRows && runCols.length >= 2) {
     const grid = deltaGrid([h[0]!, ...runCols.map((i) => h[i]!)], ct.rows.map((r) => [r[0]!, ...runCols.map((i) => r[i]!)]));
     if (grid.runs) {
       const [a, b] = grid.runs;
@@ -250,33 +253,40 @@ export function inferTableKind(table: TableBlock): { kind: CandidateKind; attrs:
     }
   }
 
-  const range = rangeColumn(ct);
+  const range = rangeColumn(ct, RANGE_CANDIDATE_MIN_INTERVALS, CANDIDATE_MIN_ROWS);
   if (range !== null) return { kind: "range", attrs: { value: range } };
 
-  if (ct.rows.length >= BARS_CANDIDATE_MIN_ROWS) {
-    // D16: exactly one count column. The bars reader judges each column, so a
-    // blank cell, mixed units and (after P1's fix round) date and year cells rule it out.
-    const counts = h.flatMap((name, i) => (i > 0 && draws("bars", { value: name }) ? [i] : []));
-    if (counts.length === 1) return { kind: "bars", attrs: { value: h[counts[0]!]! } };
-  }
+  // D16: exactly one count column. The bars reader judges each column (a blank
+  // cell, mixed units, dates, times and years rule it out); row B43 adds that
+  // the parts are not all one value, and row B44 that 3 of them are not a total.
+  const counts = h.flatMap((name, i) => {
+    const m = i > 0 ? model("bars", { value: name }) : null;
+    if (m?.kind !== "bars") return [];
+    const parts = m.rows.filter((r) => !r.total).map((r) => r.value.n);
+    return parts.length >= CANDIDATE_MIN_ROWS && new Set(parts).size > 1 ? [i] : [];
+  });
+  if (counts.length === 1) return { kind: "bars", attrs: { value: h[counts[0]!]! } };
   return null;
 }
 
-/** The first column the `range` reader draws and that holds a real `a–b`
- *  interval in some cell, every filled cell reading as one (D14); else null. */
-function rangeColumn(ct: ReturnType<typeof chartTable>): string | null {
-  const ctx = tableDecimalComma(ct.rows.flat());
+/** The first column the `range` reader draws with at least `minIntervals`
+ *  rows whose cell is a real `a–b` interval and `minRows` rows in all, totals
+ *  left out of both unless `totals` (D14, rows B42 and B44); else null. The
+ *  reader judges every cell, under the column's own date rule (row B45). */
+function rangeColumn(ct: ReturnType<typeof chartTable>, minIntervals: number, minRows: number, totals = false): string | null {
   for (let i = 1; i < ct.headers.length; i++) {
-    const reads = ct.rows.map((r) => r[i]!).filter((c) => !isBlankCell(c)).map((c) => readIntervalCell(c, ctx));
-    if (reads.length === 0 || reads.some((r) => r === null) || !reads.some((r) => /–|\s-\s/u.test(r!.text))) continue;
-    if (readChart("range", { value: ct.headers[i]! }, ct).model !== null) return ct.headers[i]!;
+    const m = readChart("range", { value: ct.headers[i]! }, ct).model;
+    if (m?.kind !== "range") continue;
+    const parts = m.rows.filter((r) => totals || !r.total);
+    if (parts.length >= minRows && parts.filter((r) => /–|\s-\s/u.test(r.value.text)).length >= minIntervals) return ct.headers[i]!;
   }
   return null;
 }
 
 /** Is any table on the page, at any depth, a cost table the `range` reader parses (D2)? */
 function hasCostTable(blocks: Block[]): boolean {
-  return tablesOf(blocks).some(({ table }) => rangeColumn(chartTable(table, cellText)) !== null);
+  // D2 keeps D14's bar: one interval, any row count (the candidate rules are chart-candidate's).
+  return tablesOf(blocks).some(({ table }) => rangeColumn(chartTable(table, cellText), 1, 1, true) !== null);
 }
 
 /** D22: the brief's slot-5 table — the first top-level pipe table under

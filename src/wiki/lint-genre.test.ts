@@ -4,12 +4,12 @@ import { checkGenre, firstScreen, inferTableKind } from "./lint-genre.ts";
 import { checkPageText, LINT_CHECKS, PAGE_TEXT_LINT_CHECKS, type LintFinding } from "./lint.ts";
 import { parseFrontmatter, readCull, readFollowups, readPlanStatus, stripFrontmatter } from "./store.ts";
 import type { LoadedPageFiles } from "./lint-components.ts";
-import { chartTable, readChart, readIntervalCell } from "../format/chart-block.ts";
+import { chartTable, readChart } from "../format/chart-block.ts";
 import { pageDecisionData, prStripHtml } from "../format/decision-views.ts";
 import { parseBlocks, type TableBlock } from "../format/markdown-ast.ts";
 
 // Invented pages only, except the marked copy of the plan page (A33/A34).
-// Test names carry the P2 state table's row ids (A1…A62, B1…B41).
+// Test names carry the P2 state table's row ids (A1…A62, B1…B45).
 
 const lint = (relPath: string, content: string, files?: LoadedPageFiles): LintFinding[] => {
   const fm = parseFrontmatter(content);
@@ -33,7 +33,7 @@ const CALLOUT = (...inner: string[][]) => wrap('<Callout tone="info" title="c">'
 const RANGE_ROWS = ["| Slice | Interval |", "|---|---|", "| P1 | $40–80 |", "| P2 | $50–90 |"];
 const RANGE = wrap('<Chart kind="range" value="Interval">', "</Chart>", RANGE_ROWS);
 const RANGE_BAD = wrap('<Chart kind="range" value="Interval">', "</Chart>", ["| Slice | Interval |", "|---|---|", "| P1 | $80–40 |", "| P2 | $50–90 |"]);
-const COST = ["| Slice | Interval | Basis |", "|---|---|---|", "| P1 | $120–220 | x |", "| P2 | $100–180 | y |", "| **Slate** | **$220–400** | |", ""];
+const COST = ["| Slice | Interval | Basis |", "|---|---|---|", "| P1 | $120–220 | x |", "| P2 | $100–180 | y |", "| P3 | $40–60 | z |", "| **Slate** | **$220–400** | |", ""];
 const METER = ['<Meter value="2" max="4">Progress</Meter>', ""];
 const STATUS = wrap("<StatusRows>", "</StatusRows>", ["- **Status:** in flight."]);
 const NEXT = wrap("<NextMoves>", "</NextMoves>", wrap('<Lane kind="you">', "</Lane>", ["1. Run it."]));
@@ -416,38 +416,40 @@ describe("chart-candidate (Table B)", () => {
   });
 
   test.each([
-    ["40 - 80", "50 - 90"],
-    ["40–80 USD", "50–90 USD"],
-  ])("B8: %s reads as an interval", (a, b) => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", `| x | ${a} |`, `| y | ${b} |`, ""])).toEqual(["range"]);
+    ["40 - 80", "50 - 90", "10 - 20"],
+    ["40–80 USD", "50–90 USD", "10–20 USD"],
+  ])("B8: %s reads as an interval", (a, b, c) => {
+    expect(cand(PS, ["| Item | Cost |", "|---|---|", `| x | ${a} |`, `| y | ${b} |`, `| z | ${c} |`, ""])).toEqual(["range"]);
   });
 
   test("B9: an unspaced hyphen is no interval", () => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | 40-80 |", "| y | 50-90 |", ""])).toEqual([]);
+    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | 40-80 |", "| y | 50-90 |", "| z | 10-20 |", ""])).toEqual([]);
   });
 
   test.each([
-    ["B10 (a date pair)", "01.10–05.10", "08.10–12.10"],
-    ["B11 (a year pair)", "2024–2025", "2025–2026"],
-  ])("%s is no interval (P1's reader, D15)", (_id, a, b) => {
-    expect(cand(PS, ["| Period | Cost |", "|---|---|", `| x | ${a} |`, `| y | ${b} |`, ""])).toEqual([]);
+    ["B10 (a date pair)", "01.10–05.10", "08.10–12.10", "15.10–19.10"],
+    ["B11 (a year pair)", "2024–2025", "2025–2026", "2026–2027"],
+  ])("%s is no interval (P1's reader, D15)", (_id, a, b, c) => {
+    expect(cand(PS, ["| Period | Cost |", "|---|---|", `| x | ${a} |`, `| y | ${b} |`, `| z | ${c} |`, ""])).toEqual([]);
   });
 
   test("B12: a one-digit-month pair follows P1's reader (D15)", () => {
-    const reads = readIntervalCell("5.9–8.9", {}) !== null;
-    expect(cand(PS, ["| Period | Cost |", "|---|---|", "| x | 5.9–8.9 |", "| y | 6.9–9.9 |", ""])).toEqual(reads ? ["range"] : []);
+    const t = ["| Period | Cost |", "|---|---|", "| x | 5.9–8.9 |", "| y | 6.9–9.9 |", "| z | 7.9–9.9 |"];
+    const reads = readChart("range", { value: "Cost" }, chartTable(parseBlocks(t.join("\n"))[0] as TableBlock, (c) => c)).model !== null;
+    expect(reads).toBe(true);
+    expect(cand(PS, [...t, ""])).toEqual(["range"]);
   });
 
   test("B13: mixed currency signs are a note, not fatal", () => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | $40–80 |", "| y | €50–90 |", ""])).toEqual(["range"]);
+    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | $40–80 |", "| y | €50–90 |", "| z | $10–20 |", ""])).toEqual(["range"]);
   });
 
   test("B14: a low end above the high end is fatal", () => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | 40–80 |", "| y | 80–40 |", ""])).toEqual([]);
+    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | 40–80 |", "| y | 80–40 |", "| z | 10–20 |", ""])).toEqual([]);
   });
 
   test("B15: a blank interval cell is fatal", () => {
-    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | 40–80 |", "| y | — |", ""])).toEqual([]);
+    expect(cand(PS, ["| Item | Cost |", "|---|---|", "| x | 40–80 |", "| y | — |", "| z | 10–20 |", ""])).toEqual([]);
   });
 
   test("B16: points only and several count columns: no candidate (D14, D16)", () => {
@@ -463,7 +465,7 @@ describe("chart-candidate (Table B)", () => {
   });
 
   test("B19: value, target and gap columns read as gap (D17)", () => {
-    const fs = of(lint("plans/x.mdx", doc(IN, H1, ["| Item | Value | Target | Gap |", "|---|---|---|---|", "| a | 3 | 5 | 2 |", "| b | 4 | 6 | 2 |", ""])), "chart-candidate");
+    const fs = of(lint("plans/x.mdx", doc(IN, H1, ["| Item | Value | Target | Gap |", "|---|---|---|---|", "| a | 3 | 5 | 2 |", "| b | 4 | 6 | 2 |", "| c | 1 | 4 | 3 |", ""])), "chart-candidate");
     expect(fs.map((f) => f.detail)).toEqual(["gap"]);
     expect(fs[0]!.message).toContain('value="Value" target="Target" gap="Gap"');
   });
@@ -484,8 +486,7 @@ describe("chart-candidate (Table B)", () => {
     expect(cand(IN, ["| Outcome | Pages |", "|---|---|", "| ok | 5 |", "| failed | |", "| skipped | 1 |", ""])).toEqual([]);
   });
 
-  // D16 rests on the bars reader: P1's fix round makes date and year cells
-  // unreadable there. Until this branch carries it, the strict row cannot hold.
+  // D16 rests on the bars reader, which reads no date or year cell (PR 1).
   const DATES = ["| Run | Date |", "|---|---|", "| a | 01.10 |", "| b | 08.10 |", "| c | 15.10 |"];
   const YEARS = ["| Wiki | Year |", "|---|---|", "| a | 2024 |", "| b | 2025 |", "| c | 2026 |"];
   const barsReads = (t: string[]) => readChart("bars", { value: t[0]!.split("|")[2]!.trim() }, chartTable(parseBlocks(t.join("\n"))[0] as TableBlock, (s) => s)).model !== null;
@@ -495,7 +496,8 @@ describe("chart-candidate (Table B)", () => {
   ])("B24: a column of %s is a candidate exactly when the bars reader draws it", (_n, t) => {
     expect(cand(IN, [...t, ""])).toEqual(barsReads(t) ? ["bars"] : []);
   });
-  test.skipIf(barsReads(DATES) || barsReads(YEARS))("B24: dates and years are not counts (D16, with P1's fix round)", () => {
+  test("B24: dates and years are not counts (D16, with P1's fix round)", () => {
+    expect(barsReads(DATES) || barsReads(YEARS)).toBe(false);
     expect(cand(IN, [...DATES, ""])).toEqual([]);
     expect(cand(IN, [...YEARS, ""])).toEqual([]);
   });
@@ -543,19 +545,19 @@ describe("chart-candidate (Table B)", () => {
     ["Previous", "Current"],
     ["Forrige", "Denne kjøring"],
   ])("B31: run headers %s | %s read as DeltaTable", (a, b) => {
-    expect(cand(IN, [`| Metric | ${a} | ${b} |`, "|---|---|---|", "| pages | 10 | 12 |", "| links | 4 | 5 |", ""])).toEqual(["delta"]);
+    expect(cand(IN, [`| Metric | ${a} | ${b} |`, "|---|---|---|", "| pages | 10 | 12 |", "| links | 4 | 5 |", "| hubs | 2 | 3 |", ""])).toEqual(["delta"]);
   });
 
   test("B32: a filled Note column stays out of the grid (D18)", () => {
-    expect(cand(IN, ["| Metric | Before | After | Note |", "|---|---|---|---|", "| pages | 10 | 12 | more |", "| links | 4 | 5 | same |", ""])).toEqual(["delta"]);
+    expect(cand(IN, ["| Metric | Before | After | Note |", "|---|---|---|---|", "| pages | 10 | 12 | more |", "| links | 4 | 5 | same |", "| hubs | 2 | 3 | less |", ""])).toEqual(["delta"]);
   });
 
   test("B33: Before | Target is one run column", () => {
-    expect(cand(IN, ["| Metric | Before | Target |", "|---|---|---|", "| pages | 10 | 12 |", "| links | 4 | 5 |", ""])).toEqual([]);
+    expect(cand(IN, ["| Metric | Before | Target |", "|---|---|---|", "| pages | 10 | 12 |", "| links | 4 | 5 |", "| hubs | 2 | 3 |", ""])).toEqual([]);
   });
 
   test("B34: a funnel-valid table with run columns reads as funnel (D19)", () => {
-    expect(cand(IN, ["| Metric | Before | After | Of |", "|---|---|---|---|", "| all | 10 | 12 | |", "| kept | 6 | 7 | 10 |", ""])).toEqual(["funnel"]);
+    expect(cand(IN, ["| Metric | Before | After | Of |", "|---|---|---|---|", "| all | 10 | 12 | |", "| kept | 6 | 7 | 10 |", "| fixed | 4 | 5 | 10 |", ""])).toEqual(["funnel"]);
   });
 
   test("B35: an interval column beats a count column (D19)", () => {
@@ -572,7 +574,7 @@ describe("chart-candidate (Table B)", () => {
     expect(cand(PS, SLOT5)).toEqual(["bars"]);
   });
   test("B38: on run-report the slot-5 table is never exempt", () => {
-    expect(cand(["plan_status: in-flight", "genre: run-report"], ["## Brief", "", "| Metric | Before | After |", "|---|---|---|", "| pages | 10 | 12 |", "| links | 4 | 5 |", ""])).toEqual(["delta"]);
+    expect(cand(["plan_status: in-flight", "genre: run-report"], ["## Brief", "", "| Metric | Before | After |", "|---|---|---|", "| pages | 10 | 12 |", "| links | 4 | 5 |", "| hubs | 2 | 3 |", ""])).toEqual(["delta"]);
   });
   test("B39: a brief table inside a Chart is not slot 5; the next plain table is (D22)", () => {
     const chart = wrap('<Chart kind="funnel">', "</Chart>", ["| Step | Count | Of |", "|---|---|---|", "| all | 10 | |", "| kept | 6 | 10 |"]);
@@ -586,6 +588,50 @@ describe("chart-candidate (Table B)", () => {
   });
   test("B41: with no genre: key the suggested genre decides the exemption (D22)", () => {
     expect(candidates(lint("plans/x.mdx", doc(["plan_status: in-flight"], H1, SLOT5, DELTA)))).toEqual(["bars"]);
+  });
+});
+
+describe("chart-candidate: the rule fix after the first hand check (Table B)", () => {
+  const PS = ["plan_status: proposed", "genre: campaign"];
+  const IN = ["plan_status: in-flight", "genre: campaign"];
+  const cand = (fm: string[], ...rows: string[][]) => candidates(lint("plans/x.mdx", doc(fm, H1, [...rows.flat(), ""])));
+  const table = (head: string, ...rows: string[]) => {
+    const cols = head.split("|").length - 2;
+    return [head, `|${"---|".repeat(cols)}`, ...rows];
+  };
+
+  test.each([
+    ["one interval among points", ["| x | $50–90 |", "| y | $40 |", "| z | $60 |"], []],
+    ["two intervals and a point", ["| x | $50–90 |", "| y | $40–70 |", "| z | $60 |"], ["range"]],
+    ["points with an interval total", ["| x | $40 |", "| y | $50 |", "| z | $60 |", "| **Total** | **$100–200** |"], []],
+  ])("B42: %s", (_n, rows, want) => {
+    expect(cand(PS, table("| Item | Cost |", ...rows))).toEqual(want);
+  });
+
+  test.each([
+    ["all zero", ["| a | 0 |", "| b | 0 |", "| c | 0 |"]],
+    ["all equal", ["| a | 5 |", "| b | 5 |", "| c | 5 |"]],
+    ["all equal beside a differing total", ["| a | 5 |", "| b | 5 |", "| c | 5 |", "| **Total** | **15** |"]],
+  ])("B43: a bars column whose parts are %s is no candidate", (_n, rows) => {
+    expect(cand(IN, table("| Outcome | Pages |", ...rows))).toEqual([]);
+  });
+
+  test.each([
+    ["range", table("| Item | Cost |", "| x | $40–80 |", "| y | $50–90 |")],
+    ["range plus a bold total", table("| Item | Cost |", "| x | $40–80 |", "| y | $50–90 |", "| **Total** | **$90–170** |")],
+    ["bars plus a bold total", table("| Outcome | Pages |", "| ok | 5 |", "| failed | 2 |", "| **Total** | **7** |")],
+    ["funnel", table("| Step | Count | Of |", "| all | 10 | |", "| kept | 6 | 10 |")],
+    ["gap", table("| Item | Value | Target | Gap |", "| a | 3 | 5 | 2 |", "| b | 4 | 6 | 2 |")],
+    ["DeltaTable", table("| Metric | Before | After |", "| pages | 10 | 12 |", "| links | 4 | 5 |")],
+  ])("B44: %s over 2 data rows is no candidate", (_n, t) => {
+    expect(cand(IN, t)).toEqual([]);
+  });
+  test("B44: range over 3 data rows plus a bold total is a candidate", () => {
+    expect(cand(IN, table("| Item | Cost |", "| x | $40–80 |", "| y | $50–90 |", "| z | $10–20 |", "| **Total** | **$100–190** |"))).toEqual(["range"]);
+  });
+
+  test("B45: the range column reads under the reader's own column date rule", () => {
+    expect(cand(PS, table("| Item | Cost |", "| x | 1.25–2.75 |", "| y | 1.10–2.12 |", "| z | 3.5–4.5 |"))).toEqual(["range"]);
   });
 });
 
