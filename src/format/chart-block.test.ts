@@ -904,7 +904,7 @@ describe("closed cell grammar", () => {
     });
   }
   test("the lists are the ones the table enumerates: a new entry needs its row", () => {
-    expect([...CHART_QUALIFIERS]).toEqual(["each","hver","stk","total","totalt","i alt","per stk","/stk","per PR","/PR","per session","/session","per økt","/økt"]);
+    expect([...CHART_QUALIFIERS]).toEqual(["each","hver","stk","total","totalt","i alt","per stk","per PR","per session","per økt"]);
     expect(CHART_UNIT_PLURALS.map(([s, p]) => `${s}/${p}`)).toEqual(["dag/dager","day/days","uke/uker","week/weeks","måned/måneder","month/months","year/years","time/timer","hour/hours","min/mins","minutt/minutter","minute/minutes","sekund/sekunder","second/seconds","økt/økter","session/sessions","pr/prs","merge/merges","run/runs","kjøring/kjøringer","runde/runder","round/rounds","fil/filer","file/files","linje/linjer","line/lines","rad/rader","row/rows","sak/saker","test/tests","test/tester","forekomst/forekomster","occurrence/occurrences","char/chars","flip/flips","spec/specs","publisering/publiseringer","commit/commits"]);
     expect([...CHART_DATE_HEADERS]).toEqual(["år","året","årstall","year","dato","datoen","datoer","date","dates","tid","tidspunkt","tidspunktet","tidspunkter","klokke","klokkeslett","kl","kl.","periode","perioden","period","uke","uka","uken","week","måned","måneden","month","siden","since","når","when","kandidat siden"]);
   });

@@ -248,9 +248,10 @@ function endUnitKey(unit: string): string {
 }
 
 /** The trailing words dropped after a currency amount; any other tail is a
- *  unit. `per X` and `/X` compare as one (`tailKey`). */
+ *  unit. A `per X` entry covers `/X` too (`tailKey`), so the list holds no
+ *  `/X` literal, which the chat page's zone inventory would read as a URL. */
 export const CHART_QUALIFIERS: readonly string[] = [
-  "each", "hver", "stk", "total", "totalt", "i alt", "per stk", "/stk", "per PR", "/PR", "per session", "/session", "per økt", "/økt",
+  "each", "hver", "stk", "total", "totalt", "i alt", "per stk", "per PR", "per session", "per økt",
 ];
 
 /** A tail after the amount: `per X`, `/X` (`X` a token with a letter, `1M`),
