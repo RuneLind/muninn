@@ -91,15 +91,29 @@ const END_SIGN_RE = /^((?:[~≈\p{Sc}]|ca\.)(?:\s*(?:[~≈\p{Sc}]|ca\.))*)\s*/iu
 const DATE_SHAPES: readonly RegExp[] = [/^(?:19|20)\d{2}$/, /^(?:0?[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])$/, /^(?:[01]\d|2[0-3])\.[0-5]\d$/];
 /** Date shapes no one writes as a decimal: a leading zero before the dot (`01.10`, `09.52`) or `MM.YYYY`. */
 const DATE_ONLY_RE = /^(?:0\d\.\d{2}|(?:0[1-9]|1[0-2])\.(?:19|20)\d{2})$/;
-/** Header words that name a date, time or year, matched whole and in any case. */
-const DATE_HEADER_WORDS: ReadonlySet<string> = new Set([
-  "år", "årstall", "year", "dato", "date", "tid", "tidspunkt", "time", "klokke", "klokkeslett", "kl",
-  "periode", "period", "uke", "week", "måned", "month", "siden", "since", "når", "when",
-]);
+/** The headers that name a date, time or year, compared with a whole header
+ *  (`dateHeaderKey`). Left out: «Time» (Norwegian for hour, a duration; an
+ *  English clock column writes `07:54`, which never reads as a number) and the
+ *  plurals «Years», «Uker», «Weeks», «Måneder», «Months», which head counts
+ *  and durations. */
+export const CHART_DATE_HEADERS: readonly string[] = [
+  "år", "året", "årstall", "year", "dato", "datoen", "datoer", "date", "dates", "tid", "tidspunkt", "tidspunktet",
+  "tidspunkter", "klokke", "klokkeslett", "kl", "kl.", "periode", "perioden", "period", "uke", "uka", "uken", "week",
+  "måned", "måneden", "month", "siden", "since", "når", "when", "kandidat siden",
+];
+/** A unit in a header's trailing `(…)` (a currency too): «Tid (s)» heads a
+ *  duration, so the part stays and the header is no date header. */
+export const CHART_HEADER_UNITS: readonly string[] = [
+  "s", "sek", "sekunder", "sec", "ms", "min", "mins", "minutter", "minutes", "h", "t", "time", "timer", "hours",
+  "d", "dager", "days", "uker", "weeks", "%",
+];
+const DATE_HEADER_SET: ReadonlySet<string> = new Set(CHART_DATE_HEADERS);
+const HEADER_UNIT_SET: ReadonlySet<string> = new Set(CHART_HEADER_UNITS);
 
 /** How a value column reads a cell that has a date shape: `header` when its
- *  header names a date (`DATE_HEADER_WORDS`), `numeric` when one of its
- *  cells is a decimal no date shape covers (`numericProof`). */
+ *  header is a date header (`CHART_DATE_HEADERS`), `numeric` when one of its
+ *  cells is a decimal no date shape covers or a span whose ends share no
+ *  shape (`numericProof`). */
 export interface DateColumn {
   header: boolean;
   numeric: boolean;
@@ -112,9 +126,20 @@ function dateShapes(rest: string): number[] {
   return DATE_SHAPES.flatMap((re, i) => (re.test(rest) ? [i] : []));
 }
 
-/** True when a header has a `DATE_HEADER_WORDS` word. */
+/** A header as `CHART_DATE_HEADERS` compares it: `headerKey`, without one
+ *  trailing `(…)` unless that holds a unit (`Tid (UTC)` is `tid`, `Tid (s)`
+ *  stays whole). */
+function dateHeaderKey(header: string): string {
+  const k = headerKey(header);
+  const m = /^(.*?)\s*\(([^()]*)\)$/u.exec(k);
+  if (!m) return k;
+  const inner = m[2]!.trim();
+  return HEADER_UNIT_SET.has(inner) || currencyOf(inner) ? k : m[1]!;
+}
+
+/** True when the whole header is a `CHART_DATE_HEADERS` entry. */
 function namesDate(header: string): boolean {
-  return (header.toLowerCase().match(/\p{L}+/gu) ?? []).some((w) => DATE_HEADER_WORDS.has(w));
+  return DATE_HEADER_SET.has(dateHeaderKey(header));
 }
 
 /** True when a cell can only be a number: an end with a decimal that is no
@@ -162,10 +187,10 @@ function isDateCell(span: boolean, ends: readonly { sign: string; rest: string }
 /** A `range` cell: `a–b` (an en dash, or a hyphen with spaces around it) with
  *  each end read by `parseCellValue` after its leading `~`, `≈`, `ca.` and
  *  currency sign; a sign or a trailing unit on one end applies to both; one
- *  number is a point. A cell with a currency (`cellMeasure`) may end in a
- *  qualifier (`each`, `per PR`, `/PR`), which is dropped. Null when it is none
- *  of these, when the ends carry different signs or units, when a leading sign
- *  and a trailing currency differ (`$40–80 EUR`), or when it is a date, time or
+ *  number is a point. A cell with a currency may end in a tail (`withTail`).
+ *  Null when it is none of these, when the ends carry different signs or
+ *  units (`unitKey`: `1 dag – 3 dager` is one unit), when a leading sign and
+ *  a trailing currency differ (`$40–80 EUR`), or when it is a date, time or
  *  year with no sign or unit (`isDateCell` under `col`: `01.10–05.10`,
  *  `2024–2025`, `09.00–11.30`, `01.10`). */
 export function readIntervalCell(cell: string, ctx: NumberContext, col: DateColumn = NO_COLUMN): ChartInterval | null {
@@ -175,24 +200,20 @@ export function readIntervalCell(cell: string, ctx: NumberContext, col: DateColu
     const { span, ends } = intervalEnds(n);
     const signs = new Set(ends.map((e) => e.sign).filter(Boolean));
     const vals = ends.map((e) => parseCellValue(e.rest, ctx));
-    const units = new Set(vals.map((v) => v?.unit ?? "").filter(Boolean));
-    if (signs.size > 1 || units.size > 1 || vals.some((v) => !v)) return null;
+    const units = vals.map((v) => v?.unit ?? "").filter(Boolean);
+    if (signs.size > 1 || new Set(units.map(endUnitKey)).size > 1 || vals.some((v) => !v)) return null;
     const sign = [...signs][0] ?? "";
-    const unit = [...units][0] ?? "";
+    const unit = units[0] ?? "";
     if (!unit && isDateCell(span, ends, col)) return null;
     const m = cellMeasure(sign, unit);
     return m && { lo: vals[0]!.n, hi: vals[vals.length - 1]!.n, text: num, sign, unit, ...m, ids };
   };
-  const v = read(num);
-  if (v) return v;
-  const bare = withoutQualifier(num);
-  const q = bare === null ? null : read(bare);
-  return q?.currency ? q : null;
+  return read(num) ?? withTail(num, read);
 }
 
 /** A bars cell: a leading sign, `~`, `≈` or `ca.` read as one end of a range
- *  cell (`$89`), the rest a value cell (`± n`, ids), and a qualifier after a
- *  currency dropped as in `readIntervalCell`. Null for a date or no number. */
+ *  cell (`$89`), the rest a value cell (`± n`, ids), and a tail after a
+ *  currency read as in `readIntervalCell`. Null for a date or no number. */
 function readBarCell(cell: string, ctx: NumberContext, col: DateColumn): { value: ChartValue; currency: string | null; measure: string } | null {
   const { sign, rest } = endSign(cell.trim());
   const read = (s: string) => {
@@ -200,20 +221,71 @@ function readBarCell(cell: string, ctx: NumberContext, col: DateColumn): { value
     const m = v && cellMeasure(sign, v.unit);
     return v && m ? { value: { ...v, text: splitValueCell(cell).num }, ...m } : null;
   };
-  const v = read(rest);
-  if (v) return v;
-  const bare = withoutQualifier(rest);
-  const q = bare === null ? null : read(bare);
-  return q?.currency ? q : null;
+  return read(rest) ?? withTail(rest, read);
 }
 
-/** A trailing qualifier after a currency amount: `per PR`, `/PR`, `/ 1M`, or one word (`each`, `hver`). */
-const QUALIFIER_RE = /(?:\s+per\s+[\p{L}\d]+|\s*\/\s*[\p{L}\d]+|\s+(\p{L}+))$/iu;
+/** Singular and plural units that are one unit, compared in any case. No
+ *  other word folds: `mil`/`miles`, `time`/`times`, `s`/`ms` differ. */
+export const CHART_UNIT_PLURALS: readonly (readonly [string, string])[] = [
+  ["dag", "dager"], ["day", "days"], ["uke", "uker"], ["week", "weeks"], ["måned", "måneder"], ["month", "months"], ["year", "years"],
+  ["time", "timer"], ["hour", "hours"], ["min", "mins"], ["minutt", "minutter"], ["minute", "minutes"], ["sekund", "sekunder"], ["second", "seconds"],
+  ["økt", "økter"], ["session", "sessions"], ["pr", "prs"], ["merge", "merges"], ["run", "runs"], ["kjøring", "kjøringer"], ["runde", "runder"], ["round", "rounds"],
+  ["fil", "filer"], ["file", "files"], ["linje", "linjer"], ["line", "lines"], ["rad", "rader"], ["row", "rows"], ["sak", "saker"],
+  ["test", "tests"], ["test", "tester"], ["forekomst", "forekomster"], ["occurrence", "occurrences"], ["char", "chars"], ["flip", "flips"], ["spec", "specs"],
+  ["publisering", "publiseringer"], ["commit", "commits"],
+];
+const SINGULAR_OF: ReadonlyMap<string, string> = new Map(CHART_UNIT_PLURALS.flatMap(([s, p]) => [[s, s], [p, s]] as const));
 
-/** The text without its trailing qualifier; null when it has none or the word is a currency (`40 ± 5 USD`). */
-function withoutQualifier(s: string): string | null {
-  const m = QUALIFIER_RE.exec(s);
-  return m && !(m[1] && currencyOf(m[1])) ? s.slice(0, m.index) : null;
+/** A unit as a column compares it: a `CHART_UNIT_PLURALS` word as its
+ *  singular in lower case, any other unit as written (`MB` and `mb` differ). */
+function unitKey(unit: string): string {
+  return SINGULAR_OF.get(unit.toLowerCase()) ?? unit;
+}
+
+/** One end's unit as the other end of the cell compares it: a currency as its code, else `unitKey`. */
+function endUnitKey(unit: string): string {
+  return currencyOf(unit) ?? unitKey(unit);
+}
+
+/** The trailing words dropped after a currency amount; any other tail is a
+ *  unit. `per X` and `/X` compare as one (`tailKey`). */
+export const CHART_QUALIFIERS: readonly string[] = [
+  "each", "hver", "stk", "total", "totalt", "i alt", "per stk", "/stk", "per PR", "/PR", "per session", "/session", "per økt", "/økt",
+];
+
+/** A tail after the amount: `per X`, `/X` (`X` a token with a letter, `1M`),
+ *  `i alt`, or one word; `rate` is the `X` of `per X` and `/X`. */
+const TAIL_RE = /(?:\s+per\s+(\S+)|\s*\/\s*([^\s/]+)|\s+(i\s+alt)|\s+(\p{L}+))$/iu;
+
+/** A tail as a unit key: `per hour` and `/hours` are `/hour`, a word is its `unitKey`. */
+function tailKey(tail: string): string {
+  const m = /^(?:per\s+|\/\s*)(.+)$/iu.exec(tail.trim());
+  return m ? `/${unitKey(m[1]!)}` : unitKey(tail.trim().replace(/\s+/g, " "));
+}
+const QUALIFIER_KEYS: ReadonlySet<string> = new Set(CHART_QUALIFIERS.map((q) => tailKey(q).toLowerCase()));
+
+/** True when a tail is on `CHART_QUALIFIERS`, in any case. */
+function isQualifier(tail: string): boolean {
+  return QUALIFIER_KEYS.has(tailKey(tail).toLowerCase());
+}
+
+/** A cell read again without its tail, when the rest carries a currency: a
+ *  `CHART_QUALIFIERS` tail is dropped, any other is the cell's unit (null when
+ *  the rest has a unit already, `$40 h per day`). A tail that is a currency
+ *  (`$40 ± 5 USD`) or a rate with no letter (`$40/80`, `$40 per 30`) leaves
+ *  the cell unread. */
+function withTail<T extends { currency: string | null; measure: string }>(s: string, read: (bare: string) => T | null): T | null {
+  const m = TAIL_RE.exec(s);
+  if (!m) return null;
+  const rate = m[1] ?? m[2];
+  if (rate !== undefined && !/^[\p{L}\d]*\p{L}[\p{L}\d]*$/u.test(rate)) return null;
+  const word = m[3] ?? m[4];
+  if (word !== undefined && currencyOf(word)) return null;
+  const v = read(s.slice(0, m.index));
+  if (!v?.currency) return null;
+  const tail = m[0].trim();
+  if (isQualifier(tail)) return v;
+  return v.measure ? null : { ...v, measure: tailKey(tail) };
 }
 
 /** Currency signs as ISO codes. */
@@ -233,15 +305,16 @@ function currencyOf(token: string): string | null {
 }
 
 /** What a cell counts in, from its leading sign and trailing unit: a currency
- *  (code) or a unit as written (`measure`, "" for none). A leading sign
- *  decides the currency: a trailing word is then not a unit (`$80 each`), and
- *  a trailing currency must be the same one (`$40 USD`; `$40 EUR` is null). */
+ *  (code) and a unit key (`measure`, `unitKey`, "" for none). A trailing
+ *  currency must be the leading sign's (`$40 USD`; `$40 EUR` is null). After a
+ *  currency, a `CHART_QUALIFIERS` word is no unit (`$80 each`), any other word
+ *  is (`$40 h`). */
 function cellMeasure(sign: string, unit: string): { currency: string | null; measure: string } | null {
   const lead = sign ? currencyOf(sign) : null;
   const tail = unit ? currencyOf(unit) : null;
   if (lead && tail && lead !== tail) return null;
   const currency = lead ?? tail;
-  return { currency, measure: currency ? "" : unit };
+  return { currency, measure: !unit || tail || (currency && isQualifier(unit)) ? "" : unitKey(unit) };
 }
 
 /** A column's `kr` as the one krone code the column also names, else NOK. */
@@ -249,14 +322,6 @@ function resolveKrone(codes: readonly (string | null)[]): (code: string | null) 
   const named = new Set(codes.filter((c): c is string => !!c && KRONE_CODES.has(c)));
   const kr = named.size === 1 ? [...named][0]! : "NOK";
   return (code) => (code === KRONE ? kr : code);
-}
-
-/** Two units as written are one unit: equal, or one is the other plus a
- *  plural ending (`s`, `es`, `er`, `r`, `ar`) on a base of two or more
- *  letters (`økt`/`økter`, `PR`/`PRs`, `time`/`timer`; not `m`/`ms`). */
-function sameMeasure(a: string, b: string): boolean {
-  const plural = (base: string, w: string) => base.length >= 2 && ["s", "es", "er", "r", "ar"].some((s) => w === base + s);
-  return a === b || plural(a, b) || plural(b, a);
 }
 
 /** A label cell that is one bold span as a whole (`**Slate**`, `__Slate__`;
@@ -704,7 +769,7 @@ class Reader {
       }
       // Every row shares the first row's currency and unit: a currency and none differ too.
       const currency = krone(read.currency);
-      if (first && (currency !== first.currency || !sameMeasure(first.measure, read.measure))) {
+      if (first && (currency !== first.currency || first.measure !== read.measure)) {
         this.fatal(`row "${label}": ${rows[0]!.value.text} and ${read.value.text} are not in the same unit`, r);
         return;
       }
@@ -742,8 +807,8 @@ class Reader {
         this.fatal(`row "${label}": the low end of ${value.text} is above its high end`, r);
         return;
       }
-      // A currency (`$40–80`, `40–80 EUR`) is a sign; any other unit must match the first row's, as in bars.
-      if (first && !sameMeasure(first.unit, value.measure)) {
+      // A currency (`$40–80`, `40–80 EUR`) is a sign; the unit (`measure`, `$40 h` too) must match the first row's, as in bars.
+      if (first && first.unit !== value.measure) {
         this.fatal(`row "${label}": ${first.text} and ${value.text} are not in the same unit`, r);
         return;
       }
