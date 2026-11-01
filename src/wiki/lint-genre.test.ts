@@ -4,12 +4,11 @@ import { checkGenre, firstScreen } from "./lint-genre.ts";
 import { checkPageText, LINT_CHECKS, PAGE_TEXT_LINT_CHECKS, type LintFinding } from "./lint.ts";
 import { parseFrontmatter, readCull, readFollowups, readPlanStatus, stripFrontmatter } from "./store.ts";
 import type { LoadedPageFiles } from "./lint-components.ts";
-import { chartTable, readChart } from "../format/chart-block.ts";
 import { pageDecisionData, prStripHtml } from "../format/decision-views.ts";
-import { parseBlocks, type TableBlock } from "../format/markdown-ast.ts";
+import { parseBlocks } from "../format/markdown-ast.ts";
 
 // Invented pages only, except the marked copy of the plan page (A33/A34).
-// Test names carry the P2 state table's row ids (A1…A75; Table B retired with chart-candidate).
+// Test names carry the P2 state table's row ids (A1…A86; Table B retired with chart-candidate).
 
 const lint = (relPath: string, content: string, files?: LoadedPageFiles): LintFinding[] => {
   const fm = parseFrontmatter(content);
@@ -410,6 +409,60 @@ describe("fix round 1: trailing comments, an empty genre: key, lettered slate he
     ["A75", heads("## P A — first", "## P B — second"), "none"],
   ])("%s: lettered slate headings", (_id, body, want) => {
     expect(missing(lint("plans/x.mdx", doc(PROP, body)))).toEqual([want]);
+  });
+});
+
+describe("fix round 2: quoted genre values, the cost-table bar, tags, the empty-key anchor, multi-letter ids (Table A, §8)", () => {
+  const PROP = ["plan_status: proposed"];
+
+  test.each([
+    ['genre: "none # x"', "none # x"],
+    ['genre: "#campaign"', "#campaign"],
+    [`genre: "'campaign'"`, "'campaign'"],
+  ])("A76: %s is a quoted string, unquoted once and keeping its #, not a slug", (line, raw) => {
+    const fs = lint("plans/x.mdx", doc([...PROP, line], QUERY));
+    expect(missing(fs)).toEqual([]);
+    expect(of(fs, "genre-picture").map((f) => f.message)).toEqual([expect.stringContaining(`genre: "${raw}" is not a genre slug`)]);
+  });
+  test("A76: a single-quoted genre with a trailing comment is the slug", () => {
+    expect(lint("plans/x.mdx", doc([...PROP, "genre: 'design'  # drawn below"], H1, MERMAID))).toEqual([]);
+  });
+
+  test.each([
+    ["the last genre: line wins", ["genre: none", 'genre: "none # x"']],
+    ["an empty genre: line after it is skipped", ['genre: "none # x"', "genre:"]],
+  ])("A86: %s, read as written", (_n, lines) => {
+    expect(of(lint("plans/x.mdx", doc([...PROP, ...lines], QUERY)), "genre-picture").map((f) => f.detail)).toEqual(["invalid"]);
+  });
+  test("A86: a CRLF page reads the quoted value as written", () => {
+    expect(of(lint("plans/x.mdx", doc([...PROP, 'genre: "none # x"'], QUERY).replaceAll("\n", "\r\n")), "genre-picture").map((f) => f.detail)).toEqual(["invalid"]);
+  });
+
+  // D2 through the output: a Meter on the first screen counts only when no table parses as a cost table (D14: one `a–b` interval, any row count, totals counted).
+  const cost = (...rows: string[]) => doc([...PROP, "genre: campaign"], H1, METER, FOLD(rows));
+  test.each([
+    ["A77", "an interval only in the bold total row", cost("| Slice | Cost |", "|---|---|", "| P1 | $40 |", "| P2 | $50 |", "| **Slate** | **$90–120** |"), true],
+    ["A78", "one interval among points", cost("| Slice | Cost |", "|---|---|", "| P1 | $40–80 |", "| P2 | $50 |", "| P3 | $60 |"), true],
+    ["A79", "spaced-hyphen intervals", cost("| Slice | Cost |", "|---|---|", "| P1 | $40 - 80 |", "| P2 | $50 - 90 |", "| P3 | $60 - 70 |"), true],
+    ["A80", "points only", cost("| Slice | Cost |", "|---|---|", "| P1 | $40 |", "| P2 | $50 |", "| P3 | $60 |"), false],
+    ["A81", "two interval rows", cost("| Slice | Cost |", "|---|---|", "| P1 | $40–80 |", "| P2 | $50–90 |"), true],
+    ["A82", "the interval column second", cost("| Slice | Basis | Cost |", "|---|---|---|", "| P1 | first | $40–80 |", "| P2 | second | $50–90 |", "| P3 | third | $60–70 |"), true],
+  ] as const)("%s: a Meter on the first screen, a table in a Fold with %s", (_id, _n, content, fires) => {
+    expect(of(lint("plans/x.mdx", content), "genre-picture").map((f) => f.detail)).toEqual(fires ? ["campaign"] : []);
+  });
+
+  test("A83: an archive inline tag list with a quoted tag and a trailing comment reads each tag", () => {
+    expect(missing(lint("archive/x.mdx", doc(["plan_status: shipped", "followups: open", "tags: ['postmortem', bug]  # x"], SLATE)))).toEqual(["bug"]);
+  });
+
+  test.each([["subgenre: campaign"], ["# genre: later"]])("A84: a page with %s and no genre: key says No genre: key", (line) => {
+    const fs = of(lint("plans/x.mdx", doc([...PROP, line])), "genre-missing");
+    expect(fs.map((f) => f.detail)).toEqual(["none"]);
+    expect(fs[0]!.message).toStartWith("No genre: key.");
+  });
+
+  test("A85: two capital letters after PR are no slate id", () => {
+    expect(missing(lint("plans/x.mdx", doc(PROP, ["## PR AB — first", "", "x", "", "## PR CD — second", "", "y", ""])))).toEqual(["none"]);
   });
 });
 

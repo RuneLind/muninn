@@ -421,13 +421,20 @@ function stripTrailingComment(raw: string): string {
   return i === -1 ? raw : raw.slice(0, i).trim();
 }
 
-/** A hand-written scalar as `readEffort` reads it: a trailing `# comment` and
- *  wrapping quotes dropped, trimmed. A value that is only a comment
- *  (`genre: # later`) is empty, as YAML reads it. For lint check 26's `genre:`
- *  and `tags:`. */
+/** A scalar AS WRITTEN on its line (before `parseFrontmatter` unquotes it), read
+ *  as YAML reads it: a quoted value is what its quotes hold, `#` kept, with only
+ *  a comment after the closing quote dropped; an unquoted value drops a trailing
+ *  `# comment`, and a value that is only a comment (`genre: # later`) is empty.
+ *  Unquoted at most once. For lint check 26's `genre:` and `tags:`. */
 export function readCommentedScalar(raw: string): string {
   const t = raw.trim();
-  return t.startsWith("#") ? "" : unquote(stripTrailingComment(t)).trim();
+  const q = t[0];
+  if (q === '"' || q === "'") {
+    const end = t.indexOf(q, 1);
+    const rest = end < 0 ? "" : t.slice(end + 1);
+    return end > 0 && (rest === "" || /^\s+#/.test(rest)) ? t.slice(1, end).trim() : t;
+  }
+  return t.startsWith("#") ? "" : stripTrailingComment(t);
 }
 
 /** A frontmatter `status_date` as the index reads it — comment-stripped,

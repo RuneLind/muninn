@@ -14,7 +14,7 @@
  * dropped: two hand checks scored 15/20 and 14/20 against the plan's 16/20.
  *
  * The rules are the plan's (mimir `plans/muninn-mdx-genre-pictures.mdx`,
- * Design) as its P2 state table (rows A1–A75, rulings D1–D25; Table B retired
+ * Design) as its P2 state table (rows A1–A86, rulings D1–D25; Table B retired
  * with `chart-candidate`) reads them against the code; `lint-genre.test.ts`
  * pins every row by id. Every structural test reads the parsed AST, wikilinks
  * read as their text, and every drawability test is the reader's own
@@ -64,7 +64,7 @@ export function isGenreScope(page: { relPath: string; culled?: boolean }): boole
   return !page.culled && p.toLowerCase().endsWith(".mdx") && (p.startsWith("plans/") || p.startsWith("archive/")) && !isReservedBasename(p);
 }
 
-/** `genre:` read, a trailing `# comment` dropped as the store drops it: absent
+/** `genre:` read as written (`readCommentedScalar`): absent
  *  or empty is missing; a slug (or `none`) is a genre; anything else is
  *  `invalid`, as written. */
 export function readGenre(fm: Record<string, string | string[]>): { kind: "missing" } | { kind: "genre"; genre: Genre } | { kind: "invalid"; raw: string } {
@@ -94,7 +94,7 @@ export function slatePrs(blocks: Block[]): Set<string> {
   return prs;
 }
 
-/** `tags:`, a trailing `# comment` dropped: `tags: [a]  # x` reaches here as one string. */
+/** `tags:` read as written, a trailing `# comment` dropped: `tags: [a]  # x` reaches here as one string. */
 function tagsOf(fm: Record<string, string | string[]>): string[] {
   const v = fm.tags;
   let list: string[] = [];
@@ -260,14 +260,29 @@ function accepts(genre: Exclude<Genre, "none">, planStatus: string | undefined, 
 
 export type GenrePageRef = Pick<WikiPageMeta, "relPath" | "plan_status" | "followups"> & { culled?: boolean };
 
+/** The value of the last top-level `key:` line that has one, as written: the
+ *  parser's own last-wins rule, before its unquote loses whether a `#` sat
+ *  inside quotes. */
+function writtenValue(frontmatter: string, key: string): string | undefined {
+  let v: string | undefined;
+  for (const line of frontmatter.split("\n")) {
+    const m = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(line.replace(/\r$/, ""));
+    if (m && m[1] === key && m[2]!.trim()) v = m[2]!.trim();
+  }
+  return v;
+}
+
 export function checkGenre(page: GenrePageRef, rawContent: string, files?: LoadedPageFiles): LintFinding[] {
   if (!isGenreScope(page)) return [];
-  const fm = parseFrontmatter(rawContent);
+  const parsed = parseFrontmatter(rawContent);
   const body = stripFrontmatter(rawContent);
   const frontmatter = rawContent.slice(0, rawContent.length - body.length);
+  // `genre:` and `tags:` reach `readCommentedScalar` as written, so a value is unquoted once.
+  const fm = { ...parsed };
+  for (const key of ["genre", "tags"]) if (typeof fm[key] === "string") fm[key] = writtenValue(frontmatter, key) ?? fm[key];
   // Wikilinks read as their text, as the reader's decision text reads them; no line moves.
   const blocks = parseBlocks(body.replace(WIKILINK_WITH_LABEL_RE, (_m, t: string, l?: string) => wikiLinkText(t, l)));
-  const pictureScope = isPictureScopePage(page.relPath, fm, page.plan_status, page.followups);
+  const pictureScope = isPictureScopePage(page.relPath, parsed, page.plan_status, page.followups);
   const genre = readGenre(fm);
   const findings: LintFinding[] = [];
   const info = (check: LintFinding["check"], message: string, extra: Partial<LintFinding> = {}) =>
