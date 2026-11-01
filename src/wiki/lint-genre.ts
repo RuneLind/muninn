@@ -223,6 +223,9 @@ const ACCEPTS: Record<Exclude<Genre, "none">, string> = {
   audit: '<Chart kind="steps"> with rounds as its x= column',
 };
 
+/** Plan D7 and O9: on a shipped campaign a fence counts and a Meter does not. */
+const ACCEPTS_SHIPPED_CAMPAIGN = 'a mermaid fence of how the system works, <Chart kind="range"> of the slice costs, or a PR strip or chain view the reader draws';
+
 /** Does the first screen hold the genre's picture? */
 function accepts(genre: Exclude<Genre, "none">, planStatus: string | undefined, blocks: Block[], files: LoadedPageFiles | undefined): boolean {
   const { from, to, foldAt } = firstScreen(blocks);
@@ -255,7 +258,8 @@ function accepts(genre: Exclude<Genre, "none">, planStatus: string | undefined, 
         const data = pageDecisionData(blocks, { proposed: planStatus === "proposed" });
         return viewShown && prStripHtml(data.ledgers, "en", data.analysis) !== "";
       }
-      if (p.meter) return true;
+      // Plan O9: on a shipped plan the ledger already shows a PR that did not land.
+      if (p.meter && planStatus !== "shipped") return true;
       if (!viewShown) return false;
       const data = pageDecisionData(blocks);
       return prStripHtml(data.ledgers, "en", data.analysis) !== "" || data.analysis.chains.length >= CHAIN_VIEW_MIN;
@@ -302,7 +306,7 @@ export function checkGenre(page: GenrePageRef, rawContent: string, files?: Loade
     info("genre-picture", `genre: "${genre.raw}" is not a genre slug (${GENRE_VALUES.join(", ")}; lower case)`, { detail: "invalid" });
   } else if (genre.kind === "genre" && genre.genre !== "none" && !accepts(genre.genre, page.plan_status, blocks, files)) {
     const ps = page.plan_status ? ` and plan_status ${page.plan_status}` : "";
-    info("genre-picture", `genre: ${genre.genre}${ps}: the first screen (after the In short box, before the first <Fold>) holds none of ${genre.genre === "campaign" && page.plan_status === "shipped" ? "a mermaid fence of how the system works, " : ""}${ACCEPTS[genre.genre]}`, { detail: genre.genre });
+    info("genre-picture", `genre: ${genre.genre}${ps}: the first screen (after the In short box, before the first <Fold>) holds none of ${genre.genre === "campaign" && page.plan_status === "shipped" ? ACCEPTS_SHIPPED_CAMPAIGN : ACCEPTS[genre.genre]}`, { detail: genre.genre });
   }
 
   return findings;

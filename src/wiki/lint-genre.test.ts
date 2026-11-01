@@ -523,11 +523,24 @@ describe("plan D7: a full Meter is no picture, and a shipped campaign may show i
   test("the message offers the fence on a shipped page only", () => {
     const message = (s: string) => of(lint("plans/x.mdx", doc(ps(s), H1, meter('value="2" max="2"'))), "genre-picture")[0]!.message;
     expect(message("shipped")).toContain("a mermaid fence of how the system works");
-    expect(message("shipped")).toContain("a <Meter> that is not full");
+    expect(message("shipped")).not.toContain("<Meter>");
     for (const s of ["in-flight", "blocked", "superseded"]) {
       expect(message(s)).toContain("a <Meter> that is not full");
       expect(message(s)).not.toContain("mermaid");
     }
+  });
+
+  test("plan O9: a partial Meter is no picture on shipped, and still is on every other status", () => {
+    expect(fires("shipped", meter('value="1" max="2"'))).toBe(true);
+    for (const s of ["proposed", "ready", "in-flight", "blocked", "superseded", "abandoned"]) {
+      expect(fires(s, meter('value="1" max="2"'))).toBe(false);
+    }
+  });
+
+  test("plan O9: what else passes on shipped still passes beside a partial Meter", () => {
+    expect(fires("shipped", meter('value="1" max="2"'), MERMAID)).toBe(false);
+    expect(fires("shipped", meter('value="1" max="2"'), RANGE)).toBe(false);
+    expect(fires("shipped", meter('value="1" max="2"'), STATUS, ledger(4))).toBe(false);
   });
 
   test("an archive page with no plan_status takes no fence, and its message offers none", () => {
