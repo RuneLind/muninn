@@ -355,6 +355,15 @@ export function readPlanStatus(fm: Record<string, string | string[]>): PlanStatu
 export const PLAN_FOLLOWUPS_VALUES = ["open", "none"] as const;
 export type PlanFollowups = (typeof PLAN_FOLLOWUPS_VALUES)[number];
 
+/** The validated `followups:` value, read as {@link parsePlanFields} reads it:
+ *  exact-case `open`/`none`, a trailing comment stripped; anything else is
+ *  undefined. Exported for `scripts/wiki-check.ts`, which has no index. */
+export function readFollowups(fm: Record<string, string | string[]>): PlanFollowups | undefined {
+  const v = fm.followups;
+  const raw = typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
+  return (PLAN_FOLLOWUPS_VALUES as readonly string[]).includes(raw) ? (raw as PlanFollowups) : undefined;
+}
+
 /** `status_date` SHAPE gate — an ISO calendar day, nothing looser. Shape only:
  *  it admits `2026-99-99` / `2026-02-31`, which `isCalendarDay` then rejects. */
 const STATUS_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -410,6 +419,22 @@ const YAML_BLOCK_SCALAR_INDICATORS = new Set([">", "|", ">-", "|-", ">+", "|+"])
 function stripTrailingComment(raw: string): string {
   const i = raw.search(/\s#/);
   return i === -1 ? raw : raw.slice(0, i).trim();
+}
+
+/** A scalar AS WRITTEN on its line (before `parseFrontmatter` unquotes it), read
+ *  as YAML reads it: a quoted value is what its quotes hold, `#` kept, with only
+ *  a comment after the closing quote dropped; an unquoted value drops a trailing
+ *  `# comment`, and a value that is only a comment (`genre: # later`) is empty.
+ *  Unquoted at most once. For lint check 26's `genre:` and `tags:`. */
+export function readCommentedScalar(raw: string): string {
+  const t = raw.trim();
+  const q = t[0];
+  if (q === '"' || q === "'") {
+    const end = t.indexOf(q, 1);
+    const rest = end < 0 ? "" : t.slice(end + 1);
+    return end > 0 && (rest === "" || /^\s+#/.test(rest)) ? t.slice(1, end).trim() : t;
+  }
+  return t.startsWith("#") ? "" : stripTrailingComment(t);
 }
 
 /** A frontmatter `status_date` as the index reads it — comment-stripped,
@@ -553,10 +578,6 @@ function parsePlanFields(
     drops.pages++;
     if (drops.samples.length < PLAN_DROP_SAMPLE_CAP) drops.samples.push(relPath);
   };
-  /** The validated fields' shared read: string-or-nothing, comment-stripped, trimmed. */
-  const scalar = (v: string | string[] | undefined) =>
-    typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
-
   const plan_status = readPlanStatus(fm);
   if (fm.plan_status !== undefined && plan_status === undefined) drop("planStatus");
 
@@ -568,10 +589,8 @@ function parsePlanFields(
 
   let followups: PlanFollowups | undefined;
   if (fm.followups !== undefined) {
-    const raw = scalar(fm.followups);
-    if ((PLAN_FOLLOWUPS_VALUES as readonly string[]).includes(raw)) {
-      followups = raw as PlanFollowups;
-    } else drop("followups");
+    followups = readFollowups(fm);
+    if (followups === undefined) drop("followups");
   }
 
   // NOT comment-stripped (see `stripTrailingComment`) — a note may say "#399".

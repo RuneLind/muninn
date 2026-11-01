@@ -182,6 +182,7 @@ import { checkStatusLines, STALE_LINT_CHECKS } from "./stale.ts";
 import { loadPageFiles } from "./page-files.ts";
 import { checkDecisionChain, DECISION_CHAIN_LINT_CHECKS } from "./lint-decision-chain.ts";
 import { CHART_LINT_CHECKS, checkCharts } from "./lint-chart.ts";
+import { checkGenre, GENRE_LINT_CHECKS } from "./lint-genre.ts";
 import { checkRuleTrees, RULE_TREE_LINT_CHECKS } from "./lint-rule-tree.ts";
 import { checkGlossaries, GLOSSARY_LINT_CHECKS } from "./lint-glossary.ts";
 import { checkTextDiagrams, TEXT_DIAGRAM_LINT_CHECKS } from "./lint-text-diagram.ts";
@@ -233,11 +234,12 @@ export const LINT_CHECKS = [
   ...SYSTEM_MAP_LINT_CHECKS,
   ...SYSTEM_MAP_DRIFT_LINT_CHECKS,
   ...STALE_LINT_CHECKS,
+  ...GENRE_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
 /** The checks that read a page's own text, its relPath and the reader
- *  config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17, 18, 19 and 20),
+ *  config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20 and 26),
  *  and for check 15 the data files the page names ({@link pageTextFiles}). Check
  *  11's Tldr half reads `plan_status`, which the index parses from the page's
  *  own frontmatter ({@link readPlanStatus}). `lintWiki` runs them per page
@@ -269,14 +271,15 @@ export const PAGE_TEXT_LINT_CHECKS = [
   ...DIAGRAM_LINT_CHECKS,
   ...STEPS_LINT_CHECKS,
   ...SYSTEM_MAP_LINT_CHECKS,
+  ...GENRE_LINT_CHECKS,
 ] as const satisfies readonly LintCheck[];
 
 /** What the page-text checks read of a page. */
 type PageRef = Pick<WikiPageMeta, "relPath">;
 
 /** What {@link checkPageText} reads of a page: its relPath, whether it is
- *  culled, and its validated `plan_status`. */
-export type PageTextRef = PageRef & Pick<WikiPageMeta, "plan_status"> & { culled?: boolean };
+ *  culled, and its validated `plan_status` and `followups` (check 26's scope). */
+export type PageTextRef = PageRef & Pick<WikiPageMeta, "plan_status" | "followups"> & { culled?: boolean };
 
 export interface LintFinding {
   check: LintCheck;
@@ -1072,8 +1075,9 @@ function checkCaseBoardLabels(page: PageRef, rawContent: string): LintFinding[] 
  * question target, 13 on a page with a labelled CaseBoard, 11's first half on a
  * page with a DecisionLog or StatusRows, 15 on an `.mdx` page that is not
  * culled, 11's Tldr half on an `.mdx` page that is a live report page or a
- * reference page and is not reserved or culled, and 20 on a page outside
- * `archive/` and `plans/` that is not reserved or culled.
+ * reference page and is not reserved or culled, 20 on a page outside
+ * `archive/` and `plans/` that is not reserved or culled, and 26 on an `.mdx`
+ * page under `archive/` or `plans/` that is not reserved or culled.
  */
 export function checkPageText(
   page: PageTextRef,
@@ -1091,7 +1095,7 @@ export function checkPageText(
     ...checkReportTop(page, content),
     ...checkDecisionChain(page, content),
   ];
-  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content), ...checkDiagrams(page, content, files), ...checkSteps(page, content, files));
+  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content), ...checkDiagrams(page, content, files), ...checkSteps(page, content, files), ...checkGenre(page, content, files));
   // The reader draws a `<SystemMap>` on `.md` pages too, so its checks skip only culled pages.
   if (!page.culled) findings.push(...checkSystemMaps(page, content));
   if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content), ...checkTextDiagrams(page, content));

@@ -52,6 +52,8 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "component-value": "Component values the renderer falls back on",
   "component-attr": "Component attributes the renderer drops",
   "status-line": "Status words beside a plan link that disagree with its plan_status",
+  "genre-missing": "Live report pages with no genre: key",
+  "genre-picture": "Report pages whose first screen lacks their genre's picture, or whose genre: is not a slug",
 };
 
 /** A group's heading: its label, plus `(info)` when every finding in it carries
