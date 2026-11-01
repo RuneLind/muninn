@@ -169,7 +169,7 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
       kind: { doc: "Which chart the table is read as", onFallback: "is not a chart kind; it renders as its table" },
       caption: { doc: "A line over the chart" },
       value: {
-        doc: "gap: the column of values; funnel: the count column (default: the first after the label that is not Of); bars: the column drawn as one bar per row (a log scale when every value is above 0 and the largest is over 100 times the smallest); range: the column of intervals (`$40–80`, `~$40 – $80`, `40–80 USD`; one number is a point; a bold label row is the total, drawn below a rule)",
+        doc: "gap: the column of values; funnel: the count column (default: the first after the label that is not Of); bars: the column drawn as one bar per row (a trailing run of bold label rows after at least one ordinary row is the total, printed below a rule with no bar; a log scale when every value is above 0 and the largest is over 100 times the smallest); range: the column of intervals (`$40–80`, `~$40 – $80`, `40–80 USD`; one number is a point; every row in one unit; a trailing run of bold label rows after at least one ordinary row is the total, drawn below a rule)",
         printType: '"<column>"',
       },
       target: { doc: "gap: the column of targets", printType: '"<column>"' },
