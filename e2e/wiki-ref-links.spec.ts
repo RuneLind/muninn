@@ -4,8 +4,9 @@
  * links, as do server-rendered `](#slug)` links to a heading; hovering or
  * focusing one shows a peek card with the target; clicking jumps there with
  * the fold opened and the target flashed, and Back returns to the scroll
- * position the jump left. Also a fresh load on `#q2-oppskrift`, and 4.5:1 on
- * the link and the peek in both colour schemes.
+ * position the jump left. Also a fresh load on a fold's hash and on the hash of
+ * a heading inside a closed fold, and 4.5:1 on the link and the peek in both
+ * colour schemes.
  *
  * No model calls, no DB rows. ENV / SPAWN ENV: no `.env` is required — the
  * spawn inherits `DATABASE_URL` and `e2eEnv()` blanks the platform tokens and
