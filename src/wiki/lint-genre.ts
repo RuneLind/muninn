@@ -22,7 +22,7 @@
  */
 
 import { chartBody, chartTable, readChart } from "../format/chart-block.ts";
-import { readCaseBoardView, readChartKind } from "../format/component-spec.ts";
+import { parseMeterAttrs, readCaseBoardView, readChartKind } from "../format/component-spec.ts";
 import { parseCaseBoard } from "../format/case-board.ts";
 import { headerKey } from "../format/delta-table.ts";
 import { CHAIN_VIEW_MIN, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
@@ -172,8 +172,11 @@ function screenPictures(window: Block[], files: LoadedPageFiles | undefined): Sc
       if (b.name === "Chart") {
         const c = readChartBlock(b);
         if (c.ok && c.kind) p.charts.push({ kind: c.kind, x: b.attrs.x ?? "" });
-      } else if (b.name === "Meter") p.meter = true;
-      else if (b.name === "Diagram") p.diagram = true;
+      } else if (b.name === "Meter") {
+        // Plan D7: a full Meter (N of N) repeats the Status row, so it is no picture.
+        const m = parseMeterAttrs(b.attrs);
+        if (!m || m.value < m.max) p.meter = true;
+      } else if (b.name === "Diagram") p.diagram = true;
       else if (b.name === "RuleTree") p.ruleTree = true;
       else if (b.name === "DeltaTable") p.deltaTable = true;
       else if (b.name === "SystemMap") {
@@ -211,7 +214,7 @@ function hasCostTable(blocks: Block[]): boolean {
 
 /** What a genre accepts, worded for the message. */
 const ACCEPTS: Record<Exclude<Genre, "none">, string> = {
-  campaign: '<Chart kind="range"> of the slice costs, a <Meter>, or a PR strip or chain view the reader draws',
+  campaign: '<Chart kind="range"> of the slice costs, a <Meter> that is not full, or a PR strip or chain view the reader draws',
   investigation: '<Chart kind="funnel">, <CaseBoard view="dots"> with 5 or more cases, or <RuleTree>',
   runbook: '<DeltaTable> or <Chart kind="bars">',
   "run-report": '<Chart kind="bars"> or <DeltaTable>',
@@ -239,6 +242,8 @@ function accepts(genre: Exclude<Genre, "none">, planStatus: string | undefined, 
       return p.charts.some((c) => c.kind === "steps" && ROUND_HEADERS.has(headerKey(c.x)));
     case "campaign": {
       if (chart("range")) return true;
+      // Plan D7: a finished plan shows how the system works.
+      if (planStatus === "shipped" && p.mermaid) return true;
       // D4: a view counts only when its slot sits before the first top-level Fold.
       const slot = viewSlot(blocks);
       const viewShown = slot >= 0 && (foldAt < 0 || slot - 1 < foldAt);
@@ -297,7 +302,7 @@ export function checkGenre(page: GenrePageRef, rawContent: string, files?: Loade
     info("genre-picture", `genre: "${genre.raw}" is not a genre slug (${GENRE_VALUES.join(", ")}; lower case)`, { detail: "invalid" });
   } else if (genre.kind === "genre" && genre.genre !== "none" && !accepts(genre.genre, page.plan_status, blocks, files)) {
     const ps = page.plan_status ? ` and plan_status ${page.plan_status}` : "";
-    info("genre-picture", `genre: ${genre.genre}${ps}: the first screen (after the In short box, before the first <Fold>) holds none of ${ACCEPTS[genre.genre]}`, { detail: genre.genre });
+    info("genre-picture", `genre: ${genre.genre}${ps}: the first screen (after the In short box, before the first <Fold>) holds none of ${genre.genre === "campaign" && page.plan_status === "shipped" ? "a mermaid fence of how the system works, " : ""}${ACCEPTS[genre.genre]}`, { detail: genre.genre });
   }
 
   return findings;

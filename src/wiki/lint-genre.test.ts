@@ -466,6 +466,77 @@ describe("fix round 2: quoted genre values, the cost-table bar, tags, the empty-
   });
 });
 
+describe("plan D7: a full Meter is no picture, and a shipped campaign may show its system", () => {
+  const ps = (s: string) => [`plan_status: ${s}`, "genre: campaign"];
+  const meter = (attrs: string) => [`<Meter ${attrs}>PRs landed</Meter>`, ""];
+  const fires = (s: string, ...body: string[][]) => picture(lint("plans/x.mdx", doc(ps(s), H1, ...body)));
+
+  test.each(["proposed", "ready", "in-flight", "blocked", "shipped", "superseded", "abandoned"])("a full Meter on %s is refused", (s) => {
+    expect(fires(s, meter('value="2" max="2"'))).toBe(true);
+  });
+
+  test.each([
+    ["over max, which the reader clamps to full", 'value="3" max="2"', true],
+    ["the default max of 5, full", 'value="5"', true],
+    ["the default max of 5, partial", 'value="3"', false],
+    ["partial", 'value="1" max="2"', false],
+    ["zero", 'value="0" max="2"', false],
+    ["no value, which the reader draws as its label", 'max="2"', false],
+  ] as const)("a Meter with %s", (_name, attrs, expected) => {
+    expect(fires("in-flight", meter(attrs))).toBe(expected);
+  });
+
+  test("a partial Meter beside a full one counts, in either order", () => {
+    expect(fires("in-flight", meter('value="2" max="2"'), meter('value="1" max="2"'))).toBe(false);
+    expect(fires("in-flight", meter('value="1" max="2"'), meter('value="2" max="2"'))).toBe(false);
+  });
+
+  test("a full Meter inside a Callout is refused like one at the top level", () => {
+    expect(fires("shipped", CALLOUT(meter('value="2" max="2"')))).toBe(true);
+  });
+
+  test("a mermaid fence is accepted on shipped", () => {
+    expect(fires("shipped", MERMAID)).toBe(false);
+  });
+
+  test("a mermaid fence beside a full Meter on shipped passes on the fence", () => {
+    expect(fires("shipped", meter('value="2" max="2"'), MERMAID)).toBe(false);
+  });
+
+  test.each(["proposed", "ready", "in-flight", "blocked", "superseded", "abandoned"])("a mermaid fence alone on %s is no picture", (s) => {
+    expect(fires(s, MERMAID)).toBe(true);
+  });
+
+  test("a mermaid fence in a Fold on shipped is off the first screen", () => {
+    expect(fires("shipped", FOLD(MERMAID))).toBe(true);
+  });
+
+  test("a <Diagram> on shipped is not accepted: only the fence is", () => {
+    expect(fires("shipped", DIAGRAM)).toBe(true);
+  });
+
+  test("the range chart and the strip still count beside a full Meter", () => {
+    expect(fires("in-flight", meter('value="2" max="2"'), RANGE)).toBe(false);
+    expect(fires("shipped", meter('value="2" max="2"'), STATUS, ledger(4))).toBe(false);
+  });
+
+  test("the message offers the fence on a shipped page only", () => {
+    const message = (s: string) => of(lint("plans/x.mdx", doc(ps(s), H1, meter('value="2" max="2"'))), "genre-picture")[0]!.message;
+    expect(message("shipped")).toContain("a mermaid fence of how the system works");
+    expect(message("shipped")).toContain("a <Meter> that is not full");
+    for (const s of ["in-flight", "blocked", "superseded"]) {
+      expect(message(s)).toContain("a <Meter> that is not full");
+      expect(message(s)).not.toContain("mermaid");
+    }
+  });
+
+  test("an archive page with no plan_status takes no fence, and its message offers none", () => {
+    const [f] = of(lint("archive/x.mdx", doc(["genre: campaign"], H1, MERMAID)), "genre-picture");
+    expect(f!.detail).toBe("campaign");
+    expect(f!.message).not.toContain("mermaid");
+  });
+});
+
 describe("chart-candidate dropped (§8)", () => {
   test("checkPageText reports no chart-candidate on a page that used to produce one", () => {
     expect(LINT_CHECKS as readonly string[]).not.toContain("chart-candidate");
