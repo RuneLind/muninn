@@ -14,7 +14,7 @@
  * dropped: two hand checks scored 15/20 and 14/20 against the plan's 16/20.
  *
  * The rules are the plan's (mimir `plans/muninn-mdx-genre-pictures.mdx`,
- * Design) as its P2 state table (rows A1–A86, rulings D1–D25; Table B retired
+ * Design) as its P2 state table (rows A1–A89, rulings D1–D25; Table B retired
  * with `chart-candidate`) reads them against the code; `lint-genre.test.ts`
  * pins every row by id. Every structural test reads the parsed AST, wikilinks
  * read as their text, and every drawability test is the reader's own
@@ -223,7 +223,7 @@ const ACCEPTS: Record<Exclude<Genre, "none">, string> = {
   audit: '<Chart kind="steps"> with rounds as its x= column',
 };
 
-/** Plan D7 and O9: on a shipped campaign a fence counts and a Meter or bars chart does not. */
+/** Plan D7, O9 and D13: on a shipped campaign a fence counts and a Meter or bars chart does not. */
 const ACCEPTS_SHIPPED_CAMPAIGN = 'a mermaid fence of how the system works, <Chart kind="range"> of the slice costs, or a PR strip or chain view the reader draws';
 
 /** Does the first screen hold the genre's picture? */
@@ -258,7 +258,8 @@ function accepts(genre: Exclude<Genre, "none">, planStatus: string | undefined, 
         const data = pageDecisionData(blocks, { proposed: planStatus === "proposed" });
         return viewShown && prStripHtml(data.ledgers, "en", data.analysis) !== "";
       }
-      // Plan O9: on a shipped plan the ledger already shows a PR that did not land.
+      // Plan O9: on a shipped plan the ledger already shows a PR that did not land, so a Meter
+      // is no picture. Plan D13: bars follow the Meter here, since a shipped plan shows its system.
       if ((p.meter || chart("bars")) && planStatus !== "shipped") return true;
       if (!viewShown) return false;
       const data = pageDecisionData(blocks);
