@@ -524,6 +524,8 @@ describe("plan D7: a full Meter is no picture, and a shipped campaign may show i
     const message = (s: string) => of(lint("plans/x.mdx", doc(ps(s), H1, meter('value="2" max="2"'))), "genre-picture")[0]!.message;
     expect(message("shipped")).toContain("a mermaid fence of how the system works");
     expect(message("shipped")).not.toContain("<Meter>");
+    expect(message("shipped")).toContain('<Chart kind="range">');
+    expect(message("shipped")).toContain("a PR strip or chain view");
     for (const s of ["in-flight", "blocked", "superseded"]) {
       expect(message(s)).toContain("a <Meter> that is not full");
       expect(message(s)).not.toContain("mermaid");
@@ -541,6 +543,25 @@ describe("plan D7: a full Meter is no picture, and a shipped campaign may show i
     expect(fires("shipped", meter('value="1" max="2"'), MERMAID)).toBe(false);
     expect(fires("shipped", meter('value="1" max="2"'), RANGE)).toBe(false);
     expect(fires("shipped", meter('value="1" max="2"'), STATUS, ledger(4))).toBe(false);
+  });
+
+  test("plan O9: a chain view passes on shipped beside a partial Meter", () => {
+    const log = wrap("<DecisionLog>", "</DecisionLog>", [
+      "- **O1** — Which store? Closed 2026-10-01 (D1).",
+      "- **O2** — Which shape? Closed 2026-10-02 (D2).",
+      "- **O3** — Which key? Closed 2026-10-03 (D3).",
+      "- **D1** — Use the flat file.",
+      "- **D2** — Rows per item.",
+      "- **D3** — One row per group.",
+    ]);
+    const led = ["**PR ledger.**", "", "| PR | State | Decisions |", "|---|---|---|", "| 1 — store | merged | D1 |", "| 2 — rows | merged | D2 |", "| 3 — groups | merged | D3 |", ""];
+    expect(fires("shipped", NEXT, meter('value="1" max="2"'), log, led)).toBe(false);
+  });
+
+  test("the shipped message is a campaign's: a shipped bug keeps its own list", () => {
+    const [f] = of(lint("plans/x.mdx", doc(["plan_status: shipped", "genre: bug"], H1)), "genre-picture");
+    expect(f!.message).toContain("<SystemMap>");
+    expect(f!.message).not.toContain("<Chart");
   });
 
   test("an archive page with no plan_status takes no fence, and its message offers none", () => {
