@@ -1243,6 +1243,10 @@ export function chartViewCss(scope: string): string {
     ${scope} .vc-target { stroke: var(--text-primary); stroke-width: 2px; }
     ${scope} .vc-mark { stroke: var(--status-magenta); stroke-width: 2px; stroke-dasharray: 2 1; }
     ${scope} .vc-zero { stroke: var(--text-secondary); stroke-width: 1px; }
+    ${scope} .vc-point { stroke: var(--accent); stroke-width: 3px; }
+    ${scope} .vc-span { stroke: var(--accent); stroke-width: 8px; }
+    ${scope} .vc-rule { grid-column: 1 / -1; border-top: 1px solid var(--text-muted); }
+    ${scope} .vc-total { font-weight: 600; }
     ${scope} .vc-gap { color: var(--tone-warn); }
     ${scope} .vc-verdict { display: block; font-weight: 600; }
     ${scope} .vc-ok { color: var(--tone-good); }
@@ -1308,6 +1312,8 @@ export function chartViewCss(scope: string): string {
       /* \`.vc .vc-line\` matches the \`.vc-sN .vc-line\` series rules' specificity and comes later. */
       ${scope} .vc-track, ${scope} .vc-hold { stroke: CanvasText; }
       ${scope} .vc-value { fill: Highlight; }
+      ${scope} .vc-point, ${scope} .vc-span { stroke: Highlight; }
+      ${scope} .vc-rule { border-top-color: CanvasText; }
       ${scope} .vc-band { fill: CanvasText; }
       ${scope} .vc-target, ${scope} .vc-mark, ${scope} .vc-ref, ${scope} .vc-zero, ${scope} .vc .vc-line { stroke: CanvasText; }
       ${scope} .vc-sw { forced-color-adjust: none; background: CanvasText; }
