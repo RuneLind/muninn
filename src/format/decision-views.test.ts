@@ -48,7 +48,7 @@ describe("formatWebHtml views gate", () => {
     expect(formatWebHtml(PAGE)).not.toContain(DC_VIEW_CLASS);
   });
 
-  test("views: true ⇒ the chain view then the strip, right after NextMoves, reader-only", () => {
+  test("views: true ⇒ the question grid, the chain view and the strip, right after NextMoves, reader-only", () => {
     const html = formatWebHtml(PAGE, { reader: true, views: true });
     const chain = html.indexOf(`class="${DC_VIEW_CLASS} dc-chain" ${READER_ONLY_ATTR}`);
     const strip = html.indexOf(`class="${DC_VIEW_CLASS} dc-strip" ${READER_ONLY_ATTR}`);
@@ -57,7 +57,10 @@ describe("formatWebHtml views gate", () => {
     expect(html.indexOf(">Decisions<")).toBeGreaterThan(strip);
     // The rest of the page renders exactly as without views.
     const without = formatWebHtml(PAGE, { reader: true });
-    const viewStart = html.indexOf("<section", chain - 20);
+    const grid = html.indexOf(`class="${DC_VIEW_CLASS} qg" ${READER_ONLY_ATTR}`);
+    expect(grid).toBeGreaterThan(html.indexOf("Run it."));
+    expect(chain).toBeGreaterThan(grid);
+    const viewStart = html.lastIndexOf("<section", grid);
     const viewEnd = html.indexOf("</section>", strip) + "</section>".length;
     expect((html.slice(0, viewStart) + html.slice(viewEnd)).replace(/\n+/g, "\n")).toBe(without.replace(/\n+/g, "\n"));
   });

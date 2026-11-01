@@ -16,6 +16,7 @@
 import path from "node:path";
 import { Glob } from "bun";
 import { chainViewHtml, pageDecisionData, prStripHtml, viewSlot } from "../src/format/decision-views.ts";
+import { questionGridHtml, questionGridRows } from "../src/format/question-grid.ts";
 import { lineageLine } from "../src/format/decision-chain.ts";
 import { parseBlocks } from "../src/format/markdown-ast.ts";
 import { parseFrontmatter, readPlanStatus } from "../src/wiki/store.ts";
@@ -65,6 +66,7 @@ async function dryRun(root: string): Promise<string[]> {
     const drawn = [
       chainViewHtml(analysis, "en") ? "chain" : "",
       prStripHtml(ls, "en", analysis) ? "strip" : "",
+      questionGridHtml(questionGridRows(blocks, analysis), "en") ? "grid" : "",
     ].filter(Boolean);
     const slotted = viewSlot(blocks) >= 0;
     if (slotted && drawn.includes("chain")) chainViews++;

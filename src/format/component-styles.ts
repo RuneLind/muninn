@@ -1124,6 +1124,27 @@ export function decisionViewsCss(scope: string): string {
       container: dc-view / inline-size;
     }
     ${scope} .dc-title { font-size: 0.8em; font-weight: 600; color: var(--text-soft); margin-bottom: 0.4rem; }
+    ${scope} .qg-count { font-weight: 500; color: var(--text-muted); margin-left: 0.35em; }
+    ${scope} .qg-row { display: grid; grid-template-columns: 2.6em minmax(0, 1fr); gap: 0.1rem 0.5rem; padding: 0.35rem 0.1rem; border-top: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent); }
+    ${scope} .qg-rows > .qg-row:first-child { border-top: 0; }
+    ${scope} .qg-id { font-weight: 700; font-size: 0.85em; padding-top: 0.08em; }
+    ${scope} .qg-id a { color: inherit; text-decoration: none; }
+    ${scope} .qg-id a:hover { text-decoration: underline; }
+    ${scope} .qg-open .qg-id { color: var(--status-warning); }
+    ${scope} .qg-done .qg-id { color: var(--status-success); }
+    ${scope} .qg-q { line-height: 1.35; overflow-wrap: anywhere; }
+    ${scope} .qg-a { grid-column: 2; color: var(--text-soft); line-height: 1.35; font-size: 0.94em; overflow-wrap: anywhere; }
+    ${scope} .qg-chip { display: inline-block; font-size: 0.82em; font-weight: 700; padding: 0 0.4em; border-radius: 4px; margin-right: 0.35em; white-space: nowrap; }
+    ${scope} .qg-chip a { color: inherit; text-decoration: none; }
+    ${scope} .qg-chip a:hover { text-decoration: underline; }
+    ${scope} .qg-chip-done { color: var(--status-success); background: color-mix(in srgb, var(--status-success) 14%, transparent); }
+    ${scope} .qg-chip-open { color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 15%, transparent); }
+    ${scope} .qg-chip-reversed { text-decoration: line-through; color: var(--text-muted); background: color-mix(in srgb, var(--text-muted) 14%, transparent); }
+    ${scope} .qg-reversed { font-style: normal; font-weight: 600; color: var(--text-muted); }
+    ${scope} .qg-who { color: var(--text-muted); }
+    ${scope} .qg-card { color: var(--accent-light); }
+    ${scope} .qg-more { border-top: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent); }
+    ${scope} .qg-more > summary { cursor: pointer; padding: 0.35rem 0.1rem; color: var(--text-soft); font-size: 0.9em; }
     /* One grid over every row (rows are subgrids) with each cell on a fixed
        column, so all decisions start at one x whether or not a row has
        questions or outputs. The questions and decision columns are capped and

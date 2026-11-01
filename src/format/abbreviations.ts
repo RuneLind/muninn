@@ -16,7 +16,7 @@ export const ABBREVIATIONS: ReadonlySet<string> = new Set([
 /** Also ordinary words (`jul`, `Jan`, `kr`) or a common last word: an
  *  abbreviation only before a number (`kr. 500`, `kap. 3`, `Oct. 9`). */
 const BEFORE_NUMBER: ReadonlySet<string> = new Set([
-  "kr", "kap", "pkt", "nr", "kl", "fig",
+  "kr", "kap", "art", "pkt", "nr", "kl", "fig",
   "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "okt", "nov", "dec", "des",
 ]);
 
