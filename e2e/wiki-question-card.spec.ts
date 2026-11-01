@@ -4,7 +4,7 @@
  * Closed and a reopened item — with the DecisionLog below the questions inside
  * a closed fold, so the state can only come from the renderer's pre-pass. A
  * second wiki whose `.wiki-reader.json` says `language: "no"` gets the
- * Norwegian labels. The cards carry no `id`, so the log item keeps its `o3`
+ * Norwegian labels. A card's only `id` is `qcard-…`, so the log item keeps its `o3`
  * anchor rather than becoming `o3-2`.
  *
  * What a unit test cannot show: the route reads the wiki's reader config and
@@ -199,10 +199,13 @@ test.describe("Wiki reader: <Question> answer card", () => {
     expectClean(seen);
   });
 
-  test("the cards carry no id, so the DecisionLog item keeps its o3 anchor", async ({ page }) => {
+  test("a card's id cannot take a log anchor, so the DecisionLog item keeps its o3 anchor", async ({ page }) => {
     const seen = await openPage(page, WIKI_EN);
     const cardIds = await page.locator(".wiki-article section.question").evaluateAll((els) => els.map((el) => el.id));
-    expect(cardIds).toEqual(["", "", "", ""]);
+    // The only id a card takes is the question grid's anchor, which a log item cannot collide with.
+    expect(cardIds).toHaveLength(4);
+    expect(cardIds.every((id) => id.startsWith("qcard-"))).toBe(true);
+    expect(new Set(cardIds).size).toBe(cardIds.length);
     const logIds = await page.locator("section.decision-log .dl-item[id]").evaluateAll((lis) => lis.map((li) => li.id));
     expect(logIds).toEqual(["d99", "o1", "o2", "o3", "o4"]);
     expect(await page.locator("#o3-2").count()).toBe(0);
