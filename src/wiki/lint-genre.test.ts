@@ -8,7 +8,7 @@ import { pageDecisionData, prStripHtml } from "../format/decision-views.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
 
 // Invented pages only, except the marked copy of the plan page (A33/A34).
-// Test names carry the P2 state table's row ids (A1…A86; Table B retired with chart-candidate).
+// Test names carry the P2 state table's row ids (A1…A89; Table B retired with chart-candidate).
 
 const lint = (relPath: string, content: string, files?: LoadedPageFiles): LintFinding[] => {
   const fm = parseFrontmatter(content);
