@@ -8,7 +8,7 @@ import { pageDecisionData, prStripHtml } from "../format/decision-views.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
 
 // Invented pages only, except the marked copy of the plan page (A33/A34).
-// Test names carry the P2 state table's row ids (A1…A86; Table B retired with chart-candidate).
+// Test names carry the P2 state table's row ids (A1…A89; Table B retired with chart-candidate).
 
 const lint = (relPath: string, content: string, files?: LoadedPageFiles): LintFinding[] => {
   const fm = parseFrontmatter(content);
@@ -265,6 +265,45 @@ describe("genre-picture: campaign (Table A)", () => {
     expect(picture(lint("plans/x.mdx", doc(ps("proposed"), H1, RANGE_BAD)))).toBe(true);
   });
 
+  test.each([
+    ["proposed", false],
+    ["ready", false],
+    ["in-flight", false],
+    ["blocked", false],
+    ["shipped", true],
+  ])("A87: a bars chart counts as a %s campaign's picture where a Meter does (plan D13)", (s, fires) => {
+    expect(picture(lint("plans/x.mdx", doc([`plan_status: ${s}`, "genre: campaign"], H1, BARS)))).toBe(fires);
+  });
+  test.each(["superseded", "abandoned"])("A87: a %s campaign takes a bars chart as it takes a Meter (plan D13)", (s) => {
+    expect(picture(lint("plans/x.mdx", doc([`plan_status: ${s}`, "genre: campaign"], H1, BARS)))).toBe(false);
+  });
+  test("A87: an archive page with no plan_status takes a bars chart as it takes a Meter (plan D13)", () => {
+    expect(picture(lint("archive/x.mdx", doc(["genre: campaign"], H1, BARS)))).toBe(false);
+  });
+  test("A87: past ready, a bars chart counts beside a parsing cost table, as a Meter does (plan D13)", () => {
+    const cost = ["| Slice | Interval |", "|---|---|", "| P1 | $40–80 |", "| P2 | $10–20 |", ""];
+    expect(picture(lint("plans/x.mdx", doc(["plan_status: in-flight", "genre: campaign"], H1, BARS, cost)))).toBe(false);
+  });
+  test.each([
+    ["investigation", "in-flight"],
+    ["campaign", "proposed"],
+    ["campaign", "in-flight"],
+  ])("A88: a bars chart that does not draw is no picture on a %s, %s (plan D13)", (genre, s) => {
+    const mixed = wrap('<Chart kind="bars" value="Time">', "</Chart>", ["| Step | Time |", "|---|---|", "| a | 82 s |", "| b | 20 min |"]);
+    expect(picture(lint("plans/x.mdx", doc([`plan_status: ${s}`, `genre: ${genre}`], H1, mixed)))).toBe(true);
+  });
+  test.each([
+    ["investigation", "in-flight", true],
+    ["campaign", "in-flight", true],
+    ["campaign", "shipped", false],
+  ])("A89: the %s %s message names a bars chart only where one counts (plan D13)", (genre, s, named) => {
+    const found = lint("plans/x.mdx", doc([`plan_status: ${s}`, `genre: ${genre}`], H1)).find((f) => f.check === "genre-picture");
+    expect(found?.message.includes('<Chart kind="bars">')).toBe(named);
+  });
+  test("A87: a parsing cost table still needs the range chart beside a bars chart (the cost-table gate)", () => {
+    const cost = ["| Slice | Interval |", "|---|---|", "| P1 | $40–80 |", "| P2 | $10–20 |", ""];
+    expect(picture(lint("plans/x.mdx", doc(["plan_status: proposed", "genre: campaign"], H1, BARS, cost)))).toBe(true);
+  });
   test("A52: an extra funnel chart is never the campaign's picture (D25)", () => {
     expect(picture(lint("plans/x.mdx", doc(ps("proposed"), H1, FUNNEL)))).toBe(true);
   });
@@ -286,6 +325,7 @@ describe("genre-picture: the other genres (Table A)", () => {
   test.each([
     ["funnel", FUNNEL],
     ["RuleTree", RULETREE],
+    ["bars chart (plan D13)", BARS],
   ])("A54: investigation accepts a %s", (_n, body) => {
     expect(picture(lint("plans/x.mdx", doc(g("investigation"), H1, body)))).toBe(false);
   });
