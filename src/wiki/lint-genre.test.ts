@@ -265,6 +265,19 @@ describe("genre-picture: campaign (Table A)", () => {
     expect(picture(lint("plans/x.mdx", doc(ps("proposed"), H1, RANGE_BAD)))).toBe(true);
   });
 
+  test.each([
+    ["proposed", false],
+    ["ready", false],
+    ["in-flight", false],
+    ["blocked", false],
+    ["shipped", true],
+  ])("A87: a bars chart counts as a %s campaign's picture where a Meter does (D13)", (s, fires) => {
+    expect(picture(lint("plans/x.mdx", doc([`plan_status: ${s}`, "genre: campaign"], H1, BARS)))).toBe(fires);
+  });
+  test("A87: a parsing cost table still needs the range chart beside a bars chart (D2)", () => {
+    const cost = ["| Slice | Interval |", "|---|---|", "| P1 | $40–80 |", "| P2 | $10–20 |", ""];
+    expect(picture(lint("plans/x.mdx", doc(["plan_status: proposed", "genre: campaign"], H1, BARS, cost)))).toBe(true);
+  });
   test("A52: an extra funnel chart is never the campaign's picture (D25)", () => {
     expect(picture(lint("plans/x.mdx", doc(ps("proposed"), H1, FUNNEL)))).toBe(true);
   });
@@ -286,6 +299,7 @@ describe("genre-picture: the other genres (Table A)", () => {
   test.each([
     ["funnel", FUNNEL],
     ["RuleTree", RULETREE],
+    ["bars chart (D13)", BARS],
   ])("A54: investigation accepts a %s", (_n, body) => {
     expect(picture(lint("plans/x.mdx", doc(g("investigation"), H1, body)))).toBe(false);
   });

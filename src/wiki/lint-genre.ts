@@ -214,8 +214,8 @@ function hasCostTable(blocks: Block[]): boolean {
 
 /** What a genre accepts, worded for the message. */
 const ACCEPTS: Record<Exclude<Genre, "none">, string> = {
-  campaign: '<Chart kind="range"> of the slice costs, a <Meter> that is not full, or a PR strip or chain view the reader draws',
-  investigation: '<Chart kind="funnel">, <CaseBoard view="dots"> with 5 or more cases, or <RuleTree>',
+  campaign: '<Chart kind="range"> of the slice costs, a <Meter> that is not full, <Chart kind="bars">, or a PR strip or chain view the reader draws',
+  investigation: '<Chart kind="funnel"> or <Chart kind="bars">, <CaseBoard view="dots"> with 5 or more cases, or <RuleTree>',
   runbook: '<DeltaTable> or <Chart kind="bars">',
   "run-report": '<Chart kind="bars"> or <DeltaTable>',
   bug: "<SystemMap> with a wrong row, or a mermaid fence",
@@ -223,7 +223,7 @@ const ACCEPTS: Record<Exclude<Genre, "none">, string> = {
   audit: '<Chart kind="steps"> with rounds as its x= column',
 };
 
-/** Plan D7 and O9: on a shipped campaign a fence counts and a Meter does not. */
+/** Plan D7 and O9: on a shipped campaign a fence counts and a Meter or bars chart does not. */
 const ACCEPTS_SHIPPED_CAMPAIGN = 'a mermaid fence of how the system works, <Chart kind="range"> of the slice costs, or a PR strip or chain view the reader draws';
 
 /** Does the first screen hold the genre's picture? */
@@ -233,7 +233,7 @@ function accepts(genre: Exclude<Genre, "none">, planStatus: string | undefined, 
   const chart = (kind: string) => p.charts.some((c) => c.kind === kind);
   switch (genre) {
     case "investigation":
-      return chart("funnel") || p.caseDots || p.ruleTree;
+      return chart("funnel") || chart("bars") || p.caseDots || p.ruleTree;
     case "runbook":
     case "run-report":
       return p.deltaTable || chart("bars");
@@ -254,12 +254,12 @@ function accepts(genre: Exclude<Genre, "none">, planStatus: string | undefined, 
       if (early) {
         // D2: a page whose cost table parses as a range must draw it.
         if (hasCostTable(blocks)) return false;
-        if (p.meter) return true;
+        if (p.meter || chart("bars")) return true;
         const data = pageDecisionData(blocks, { proposed: planStatus === "proposed" });
         return viewShown && prStripHtml(data.ledgers, "en", data.analysis) !== "";
       }
       // Plan O9: on a shipped plan the ledger already shows a PR that did not land.
-      if (p.meter && planStatus !== "shipped") return true;
+      if ((p.meter || chart("bars")) && planStatus !== "shipped") return true;
       if (!viewShown) return false;
       const data = pageDecisionData(blocks);
       return prStripHtml(data.ledgers, "en", data.analysis) !== "" || data.analysis.chains.length >= CHAIN_VIEW_MIN;
