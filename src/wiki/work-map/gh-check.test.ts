@@ -4,7 +4,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
@@ -143,6 +143,18 @@ describe("the rows", () => {
     expect([body.skipped, body.checked]).toEqual([0, 1]);
   });
 
+  test("a not-started row GitHub has merged is flagged", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 4), "x", "not started", ""]]) });
+    const body = await run(r, deps(stubGh({ [`${WIDGETS}#4`]: { state: "MERGED", mergedAt: MERGED_AT } })));
+    expect(body.contradictions).toEqual([{ page: "plans/a.mdx", pr: 4, repo: WIDGETS, rowState: "not-started", ghState: "MERGED", mergedAt: MERGED_AT }]);
+  });
+
+  test.each(["MEL-10 here", "XMEL-1 here"])("a state link to the owner of MEL-1 does not skip a row naming %s", async (what) => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 9), what, "open [[owner]]", ""]]), "plans/owner.mdx": "---\ntitle: Owner\nowns: [MEL-1]\n---\n\nBody.\n" });
+    const body = await run(r, deps(stubGh({ [`${WIDGETS}#9`]: { state: "OPEN" } })));
+    expect([body.skipped, body.checked]).toEqual([0, 1]);
+  });
+
   describe("a row with no number", () => {
     const owner = "---\ntitle: Owner\nowns: [MEL-1]\n---\n\nBody.\n";
 
@@ -275,9 +287,28 @@ describe("the rows", () => {
         expect(calls.map((c) => [c.find((a) => a.startsWith("repo=")), /number:(\d+)/.exec(c.find((a) => a.startsWith("query="))!)![1]])).toEqual([["repo=widgets", "3"], ["repo=gears", "4"]]);
       });
 
-      test("two rows sharing a first PR are two flags, one row asking for the same PR once", async () => {
-        const body = await run(wiki({ "plans/a.mdx": page("ready", [...row, [url(WIDGETS, 3), "z", "open", ""]]) }), deps(stubGh(merged(3, 4))));
+      test("two rows sharing a first PR are two flags, and the PR is asked for once", async () => {
+        const calls: string[][] = [];
+        const body = await run(wiki({ "plans/a.mdx": page("ready", [...row, [url(WIDGETS, 3), "z", "open", ""]]) }), deps(stubGh(merged(3, 4), calls)));
         expect(body.contradictions.map((c) => c.pr)).toEqual([3, 3]);
+        expect(calls.length).toBe(1);
+        expect([...calls[0]!.join(" ").matchAll(/number:3\b/g)].length).toBe(1);
+      });
+
+      test("one row naming a PR twice asks for it once", async () => {
+        const calls: string[][] = [];
+        await run(wiki({ "plans/a.mdx": page("ready", [[`${url(WIDGETS, 3)}, ${url(WIDGETS, 3)}`, "y", "open", ""]]) }), deps(stubGh(merged(3), calls)));
+        expect([...calls.flat().join(" ").matchAll(/number:3\b/g)].length).toBe(1);
+      });
+
+      test("the same row twice on a page is one flag and two checked rows; on two pages it is two flags", async () => {
+        const same = [url(WIDGETS, 3), "y", "open", ""];
+        const once = await run(wiki({ "plans/a.mdx": page("ready", [same, same]) }), deps(stubGh(merged(3))));
+        expect(once.contradictions.map((c) => c.pr)).toEqual([3]);
+        expect(once.checked).toBe(2);
+        __resetGhCheckForTest();
+        const twice = await run(wiki({ "plans/a.mdx": page("ready", [same]), "plans/b.mdx": page("ready", [same]) }), deps(stubGh(merged(3))));
+        expect(twice.contradictions.map((c) => c.page)).toEqual(["plans/a.mdx", "plans/b.mdx"]);
       });
     });
   });
@@ -463,6 +494,32 @@ describe("notChecked", () => {
     expect(only.notChecked?.reason).toBe("no-access");
     expect([...only.notChecked!.repos].sort()).toEqual(["acme/third", WIDGETS].sort());
     expect(only.checked).toBe(1);
+  });
+
+  // One signal per case: `readGhAnswer` must reach the reason from that alone.
+  const reasonOf = (result: Partial<GhResult>) => readGhAnswer({ exitCode: 1, stdout: "", stderr: "", ...result }, [1]).failure;
+  const repoErrors = (errors: unknown[]) => JSON.stringify({ data: { repository: null }, errors });
+
+  test.each<[string, string, Partial<GhResult>]>([
+    ["exit 4 alone", "auth", { exitCode: 4 }],
+    ["HTTP 401 in stderr alone", "auth", { stderr: "gh: HTTP 401" }],
+    ["Bad credentials in stderr alone", "auth", { stderr: "gh: Bad credentials" }],
+    ["Bad credentials in the body's message alone", "auth", { stdout: JSON.stringify({ message: "Bad credentials" }) }],
+    ["a FORBIDDEN error type alone", "sso", { stdout: repoErrors([{ type: "FORBIDDEN" }]) }],
+    ["FORBIDDEN in stderr alone", "sso", { stderr: "gh: FORBIDDEN" }],
+    ["SAML in stderr alone", "sso", { stderr: "gh: protected by SAML" }],
+    ["SAML in the body's message alone", "sso", { stdout: JSON.stringify({ message: "protected by SAML" }) }],
+    ["SAML in an error's message alone", "sso", { stdout: repoErrors([{ type: "OTHER", message: "protected by SAML" }]) }],
+  ])("%s reads as %s", (_name, reason, result) => {
+    expect(reasonOf(result)).toBe(reason as "auth");
+  });
+
+  test.each<[string, Partial<GhResult>]>([
+    ["an ordinary failure", { stderr: "gh: connection reset" }],
+    ["an exit 2", { exitCode: 2, stderr: "gh: usage" }],
+    ["another HTTP status", { stderr: "gh: HTTP 502" }],
+  ])("%s names no reason", (_name, result) => {
+    expect(reasonOf(result)).toBeUndefined();
   });
 
   test("a null repository with a more specific error keeps that reason", () => {
@@ -893,10 +950,24 @@ describe("Needs you", () => {
     });
   });
 
-  test("the page ref index and a ledger link both resolve a number", async () => {
-    const r = wiki({ "plans/plain.mdx": `---\ntitle: Plain\nprs: [acme/gears#12]\n---\n\nBody.\n` });
-    const body = await run(r, deps(stubGh({ [`${GEARS}#12`]: { state: "MERGED", mergedAt: MERGED_AT } })), map([{ title: "T", action: "Merge #12", pages: ["plans/plain.mdx"] }]));
-    expect(body.needs[0]!.state).toBe("MERGED");
+  const merge12 = map([{ title: "T", action: "Merge #12", pages: ["plans/p.mdx"] }]);
+  const gh12 = stubGh({ [`${GEARS}#12`]: { state: "MERGED", mergedAt: MERGED_AT } });
+
+  test("the page ref index alone resolves a number", async () => {
+    const r = wiki({ "plans/p.mdx": `---\ntitle: Plain\nprs: [acme/gears#12]\n---\n\nBody.\n` });
+    expect((await run(r, deps(gh12), merge12)).needs[0]!.state).toBe("MERGED");
+  });
+
+  test("a ledger link alone resolves a number", async () => {
+    const r = wiki({ "plans/p.mdx": page("ready", [[url(GEARS, 12), "x", "open", ""]]) });
+    // The index also reads that link from the body, so it is taken away here.
+    const noIndexRefs: GhCheckDeps["index"] = async (root) => {
+      const index = await getWikiIndex({ root, refresh: true });
+      for (const p of index?.pages ?? []) delete p.prRefs;
+      return index;
+    };
+    const body = await run(r, deps(gh12, { index: noIndexRefs }), merge12);
+    expect(body.needs[0]).toMatchObject({ pr: 12, state: "MERGED" });
   });
 });
 
@@ -974,6 +1045,30 @@ describe("spawnGhRunner", () => {
       expect(res.noBinary).toBe(true);
       expect(res.failure).toBe("no-gh");
     });
+  });
+
+  test("the call's own process is gone after its timeout", async () => {
+    const dir = testTempDirSync(path.join(tmpdir(), "gh-runner-pid-"));
+    const pidFile = path.join(dir, "pid");
+    const res = await spawnGhRunner(script(`echo $$ > ${pidFile}\nexec sleep 30`), 500)([]);
+    expect(res.timedOut).toBe(true);
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(pid).toBeGreaterThan(0);
+    const alive = (): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      // The kill is sent before the race resolves, and the reap follows it.
+      for (let i = 0; i < 40 && alive(); i++) await Bun.sleep(50);
+      expect(alive()).toBe(false);
+    } finally {
+      if (alive()) process.kill(pid, "SIGKILL");
+    }
   });
 
   test("a hung call is killed at its timeout, even with a child holding the pipes", async () => {

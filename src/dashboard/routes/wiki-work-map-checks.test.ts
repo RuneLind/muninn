@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { __resetGhCheckForTest, type GhCheckDeps } from "../../wiki/work-map/gh-check.ts";
+import { readMapFile } from "../../wiki/work-map/map-file.ts";
 import type { WorkMapRunDeps } from "../../wiki/work-map/run.ts";
 import { registerWikiWorkMapRoutes } from "./wiki-work-map.ts";
 
@@ -18,6 +19,22 @@ const WORK_MAP = {
   efforts: [],
   loose: [],
 };
+
+// It asks for #7 like the work map above, so only the kind can keep it from `gh`.
+const THEME_MAP = JSON.stringify({
+  version: 1,
+  kind: "themes",
+  wiki: "w",
+  runAtMs: NOW,
+  model: "m",
+  coverage: { activeSources: 1, hubs: 0, driftHubs: 0, placed: 1, digestChars: 1, windowDays: 28, warnings: [] },
+  summary: "",
+  needsYou: [{ title: "Merge it", kind: "gap", why: "", action: "Merge #7", pages: ["plans/a.mdx"], hubs: [], count: 1 }],
+  themes: [],
+  efforts: [],
+  retired: [],
+  loose: [],
+});
 
 function setup(over: Partial<WorkMapRunDeps> = {}, mapText: string | null = JSON.stringify(WORK_MAP)) {
   const spawns: string[][] = [];
@@ -68,12 +85,19 @@ describe("GET /api/wiki/work-map/checks", () => {
     expect(s.spawns).toEqual([]);
   });
 
-  test("no map, an unreadable map and a themes map answer 404 with no spawn", async () => {
+  test("no map, an unreadable map and a map that fails its kind's parse answer 404 with no spawn", async () => {
     for (const text of [null, "{not json", JSON.stringify({ ...WORK_MAP, kind: "themes" })]) {
       const s = setup({}, text);
       expect((await get(s)).status).toBe(404);
       expect(s.spawns).toEqual([]);
     }
+  });
+
+  test("a valid themes map answers 404 with no spawn", async () => {
+    expect(readMapFile(THEME_MAP)?.kind).toBe("themes");
+    const s = setup({}, THEME_MAP);
+    expect((await get(s)).status).toBe(404);
+    expect(s.spawns).toEqual([]);
   });
 
   test("a read-only root, and an instance with no seam, answer disabled with no spawn", async () => {

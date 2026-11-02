@@ -42,7 +42,8 @@
  *     refetch and no mark from the previous answer while it is pending or after
  *     it fails, and a themes map that never asks. Its list's three groups and
  *     their keyboard rule, focus and selection across a repaint, and the strip's
- *     layout, measured: equal cell widths and no word broken at six widths.
+ *     layout, measured: equal cell widths and no word broken at six widths. Its
+ *     lifecycle: a late answer dropped, and no fetch or timer added by a render.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -101,6 +102,13 @@ const STRIP_KEEP_OPEN = "e2e-wm-strip-keep-open";
 const THEME_HOLD = "e2e-wm-theme-hold";
 /** The GitHub check: the checks GET is stubbed, since a spec server never spawns `gh`. */
 const GH = "e2e-wm-gh";
+/** Each loses its map mid-test and gets it back with the same run time. */
+const GH_DROP_OK = "e2e-wm-gh-drop-ok";
+const GH_DROP_FAIL = "e2e-wm-gh-drop-fail";
+const GH_DROP_DONE = "e2e-wm-gh-drop-done";
+/** `forceAdopt` adds pages to it. */
+const GH_ADOPT = "e2e-wm-gh-adopt";
+const GH_DROP_RUN = Date.now() - 2 * 3_600_000;
 /** No break opportunity anywhere. */
 const LONG_TOKEN = "Aa".repeat(90);
 const LONG_WHY =
@@ -278,6 +286,8 @@ test.beforeAll(async () => {
     { title: "Asks for two", kind: "followup", why: "", action: "Merge #1 and #2", pages: [] },
     { title: "No PR", kind: "decision", why: "", action: "Pick one", pages: [] },
   ]);
+  for (const n of [GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE]) await seedWiki(n, GH_DROP_RUN);
+  await seedWiki(GH_ADOPT, now - 2 * HOUR);
   await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -292,7 +302,7 @@ test.beforeAll(async () => {
       WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP].join(","),
       WIKI_ANSWER_OWNER: "Test Owner (T000001)",
       WIKI_ANSWER_GROUPS: "utvikler=T000001",
-      WIKI_EXTRA: [GH, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [GH, GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE, GH_ADOPT, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -361,8 +371,10 @@ test("a long Needs-you why is clamped to two lines and opens from its keyboard c
   const text = card.locator(".wiki-wm-why-text");
   const more = card.locator(".wiki-wm-why-more");
   const lines = () => text.evaluate((el) => Math.round(el.clientHeight / parseFloat(getComputedStyle(el).lineHeight)));
-  expect(await lines()).toBe(2);
-  expect(await text.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  // Polled: the checks answer repaints the card, and an element caught across
+  // that repaint is detached, with no computed line height.
+  await expect.poll(lines).toBe(2);
+  await expect.poll(() => text.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
   await expect(text).toHaveAttribute("title", LONG_WHY.replace("⟦plans/alpha.mdx⟧", "Alpha plan"));
   await expect(card.locator(".wiki-wm-action")).toBeVisible();
   await expect(more).toBeVisible();
@@ -373,11 +385,11 @@ test("a long Needs-you why is clamped to two lines and opens from its keyboard c
   await page.keyboard.press("Enter");
   await expect(more).toHaveAttribute("aria-expanded", "true");
   await expect.poll(() => text.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
-  expect(await lines()).toBeGreaterThan(2);
+  await expect.poll(lines).toBeGreaterThan(2);
   await expect(more).toBeFocused();
   await page.keyboard.press("Space");
   await expect(more).toHaveAttribute("aria-expanded", "false");
-  expect(await lines()).toBe(2);
+  await expect.poll(lines).toBe(2);
 });
 
 test("a why that fits its two lines offers no expand control", async ({ page }) => {
@@ -1146,6 +1158,196 @@ test("an answer older than an hour is fetched again when the start view renders,
   await page.goBack();
   await expect.poll(() => stub.count()).toBe(2);
 });
+
+// ── The check's lifecycle ─────────────────────────────────────────────
+const GH_REFRESHING = (): WorkMapChecksBody => checksBody({ refreshing: true, checked: 1, unchecked: 3, uncheckedRows: [{ page: "plans/beta.mdx", pr: 4, repo: "acme/gears" }] });
+const CHECKS_PATH = "/api/wiki/work-map/checks";
+const mapFile = (wiki: string) => path.join(roots[wiki]!, ".work-map.json");
+
+for (const [what, wiki, late] of [
+  ["An answer", GH_DROP_OK, (route: Route) => route.fulfill({ json: checksBody({ refreshing: true, contradictions: [GH_CONTRADICTION] }) })],
+  ["A failure", GH_DROP_FAIL, (route: Route) => route.fulfill({ status: 500, json: { error: "x" } })],
+] as const) {
+  test(`${what} arriving after the card left the slot paints nothing and is dropped, and the card coming back behaves as new`, async ({ page }) => {
+    await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+    let n = 0;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/wiki/work-map/checks*", async (route) => {
+      if (++n === 1) {
+        await held;
+        await late(route);
+      } else await route.fulfill({ json: checksBody() });
+    });
+    await page.clock.install();
+    await openStart(page, wiki);
+    const card = page.locator("#wikiWorkCard");
+    const wn = page.locator("#wikiWhatsNew");
+    const cell = card.locator('[data-wm-cell="github"]');
+    await expect(cell.locator("b")).toHaveText("checking…");
+    await rm(mapFile(wiki));
+    await forceAdopt(page, wiki);
+    await expect(card).toBeHidden();
+    await expect(wn).toContainText("Something changed");
+    const landed = page.waitForResponse((r) => new URL(r.url()).pathname === CHECKS_PATH);
+    release();
+    await landed;
+    await page.waitForTimeout(200);
+    await expect(card).toBeHidden();
+    await expect(wn).toBeVisible();
+    // Same run time, so only the dropped answer could spare it a fetch.
+    await writeFile(mapFile(wiki), mapJson(wiki, GH_DROP_RUN), "utf8");
+    await forceAdopt(page, wiki);
+    await expect.poll(() => n).toBe(2);
+    await expect(cell.locator("b")).toHaveText("0");
+    await expect(cell).not.toHaveClass(/\bmuted\b/);
+    await expect(cell).not.toContainText("refreshing");
+    await expect(wn).toBeHidden();
+    // The late answer left no timer behind.
+    await page.clock.runFor(60_000);
+    await page.waitForTimeout(100);
+    expect(n).toBe(2);
+  });
+}
+
+test("an answer the card already has is forgotten when the card leaves the slot", async ({ page }) => {
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  const stub = await stubChecks(page, (n) => checksBody(n === 1 ? { contradictions: [GH_CONTRADICTION] } : {}));
+  await page.clock.install();
+  await openStart(page, GH_DROP_DONE);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator('[data-wm-cell="github"] b')).toHaveText("1");
+  await rm(mapFile(GH_DROP_DONE));
+  await forceAdopt(page, GH_DROP_DONE);
+  await expect(card).toBeHidden();
+  await writeFile(mapFile(GH_DROP_DONE), mapJson(GH_DROP_DONE, GH_DROP_RUN), "utf8");
+  await forceAdopt(page, GH_DROP_DONE);
+  await expect.poll(() => stub.count()).toBe(2);
+  await expect(card.locator('[data-wm-cell="github"] b')).toHaveText("0");
+});
+
+test("an answer arriving on an article view paints nothing there, and the start view shows it with no new fetch", async ({ page }) => {
+  let n = 0;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/work-map/checks*", async (route) => {
+    n++;
+    await held;
+    await route.fulfill({ json: checksBody({ contradictions: [GH_CONTRADICTION] }) });
+  });
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator('[data-wm-cell="github"] b')).toHaveText("checking…");
+  await card.locator('.wiki-wm-pages a[data-relpath], .wiki-wm-summary a[data-relpath]').first().click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  const landed = page.waitForResponse((r) => new URL(r.url()).pathname === CHECKS_PATH);
+  release();
+  await landed;
+  await page.waitForTimeout(100);
+  await expect(card).toHaveCount(0);
+  await page.goBack();
+  await expect(card.locator('[data-wm-cell="github"] b')).toHaveText("1");
+  expect(n).toBe(1);
+});
+
+test("start views rendered while the first fetch is in flight add no fetch", async ({ page }) => {
+  let n = 0;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/work-map/checks*", async (route) => {
+    n++;
+    await held;
+    await route.fulfill({ json: checksBody() });
+  });
+  await openStart(page, GH);
+  const b = page.locator('#wikiWorkCard [data-wm-cell="github"] b');
+  await expect(b).toHaveText("checking…");
+  await visitAndReturn(page);
+  await visitAndReturn(page);
+  await expect(b).toHaveText("checking…");
+  release();
+  await expect(b).toHaveText("0");
+  await page.waitForTimeout(100);
+  expect(n).toBe(1);
+});
+
+test("start views rendered during a retry chain add no fetch and no second timer", async ({ page }) => {
+  await page.clock.install();
+  const stub = await stubChecks(page, GH_REFRESHING);
+  await openStart(page, GH);
+  const cell = page.locator('#wikiWorkCard [data-wm-cell="github"]');
+  // Painted after its timer is set. An unread answer re-arms on a start view, so
+  // only the pending timer keeps these renders from fetching.
+  await expect(cell).toContainText("refreshing");
+  for (const n of [1, 2, 3]) {
+    await visitAndReturn(page);
+    await visitAndReturn(page);
+    await expect(cell).toContainText("refreshing");
+    await page.waitForTimeout(100);
+    expect(stub.count()).toBe(n);
+    await page.clock.runFor(15_000);
+    await expect.poll(() => stub.count()).toBe(n + 1);
+    await page.waitForTimeout(100);
+    expect(stub.count()).toBe(n + 1);
+  }
+  await expect(cell).toContainText("3 not checked");
+  await page.clock.runFor(60_000);
+  await page.waitForTimeout(100);
+  expect(stub.count()).toBe(4);
+});
+
+test("a start view rendered while a retry is in flight adds no fetch and still reads «refreshing»", async ({ page }) => {
+  await page.clock.install();
+  let n = 0;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/work-map/checks*", async (route) => {
+    if (++n === 2) await held;
+    await route.fulfill({ json: n === 1 ? GH_REFRESHING() : checksBody() });
+  });
+  await openStart(page, GH);
+  const cell = page.locator('#wikiWorkCard [data-wm-cell="github"]');
+  await expect(cell).toContainText("refreshing");
+  await page.clock.runFor(15_000);
+  await expect.poll(() => n).toBe(2);
+  // The timer has fired, so only the fetch in flight says «refreshing» now.
+  await visitAndReturn(page);
+  await expect(cell).toContainText("refreshing");
+  await expect(cell).not.toContainText("not checked");
+  await page.waitForTimeout(100);
+  expect(n).toBe(2);
+  release();
+  await expect(cell).not.toContainText("refreshing");
+  await page.clock.runFor(60_000);
+  await page.waitForTimeout(100);
+  expect(n).toBe(2);
+});
+
+for (const [what, answer] of [
+  ["rows left unchecked", (route: Route) => route.fulfill({ json: checksBody({ checked: 1, unchecked: 3, uncheckedRows: [{ page: "plans/beta.mdx", pr: 4, repo: "acme/gears" }] }) })],
+  ["a failed GET", (route: Route) => route.fulfill({ status: 500, json: { error: "x" } })],
+] as const) {
+  test(`an adopt over ${what} re-arms nothing: neither it nor the next repaint fetches`, async ({ page }) => {
+    let n = 0;
+    await page.route("**/api/wiki/work-map/checks*", (route) => {
+      n++;
+      return answer(route);
+    });
+    await page.clock.install();
+    await openStart(page, GH_ADOPT);
+    const card = page.locator("#wikiWorkCard");
+    await expect(card.locator('[data-wm-cell="github"]')).toContainText("not checked");
+    await forceAdopt(page, GH_ADOPT);
+    expect(n).toBe(1);
+    // ✓ repaints the card, and a repaint is what reads a re-armed answer.
+    const needs = card.locator("[data-wm-done]");
+    const before = await needs.count();
+    await needs.first().click();
+    await expect(needs).toHaveCount(before - 1);
+    await page.waitForTimeout(100);
+    expect(n).toBe(1);
+  });
+}
 
 test("a new map after ↻ fetches the checks at once, for its marks", async ({ page }) => {
   const stub = await stubChecks(page, () => checksBody());
