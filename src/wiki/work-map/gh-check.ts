@@ -14,7 +14,7 @@
 
 import type { WorkMap } from "./schema.ts";
 import { parseBlocks } from "../../format/markdown-ast.ts";
-import { pageLedgers, type Ledger, type LedgerRow, type PrState as LedgerState } from "../../format/pr-ledger.ts";
+import { CLAIMABLE_STATES, pageLedgers, type Ledger, type LedgerRow, type PrState as LedgerState } from "../../format/pr-ledger.ts";
 import { getLog } from "../../logging.ts";
 import { truncateUnits } from "../ask-chat.ts";
 import { splitFrontmatter } from "../page-text.ts";
@@ -156,33 +156,6 @@ export function realGhCheckDeps(): GhCheckDeps {
   };
 }
 
-/** The imperatives that ask for a PR, Norwegian included, whole words only:
- *  `merged`, `merges`, `reviewer`, `re-review` and `preview` stay out. */
-export const NEEDS_ASK_VERB_RE = /(?<![\p{L}\p{N}_-])(?:merge|merg|lukk|close|godkjenn|approve|review)(?![\p{L}\p{N}_-])/iu;
-
-const ASK_VERBS = `${NEEDS_ASK_VERB_RE.source}(?:\\s+(?:eller|or|og|and)\\s+${NEEDS_ASK_VERB_RE.source})*`;
-/** A word between the verb and the number that can name a repo. A preposition
- *  says the PR is something else's condition: «Merge after #5». */
-const ASK_QUALIFIER = "(?:(?!(?:after|before|with|without|until|once|since|when|on|in|into|to|for|from|of|by|at|not|no|the|this|that|it|i|på|etter|før|når|med|uten|til|fra|av|inn|mot|ikke)\\s)[\\p{L}\\p{N}][\\p{L}\\p{N}._/-]*\\s+)?";
-const ASK_PR_END = "(?![\\p{L}\\p{N}_]|\\.\\d)";
-const ASK_URL = "https?://(?:www\\.)?github\\.com/[\\w.-]+/[\\w.-]+/pull/\\d+";
-const ASK_BARE_PR = `(?:\\(?(?:[\\p{L}\\p{N}._/-]*#\\d{1,7}${ASK_PR_END}\\)?|${ASK_URL}\\S*)|\\[#\\d{1,7}\\]\\(${ASK_URL}\\S*\\))`;
-const ASK_LIST_JOIN = "(?:\\s*,\\s*|\\s+(?:og|and)\\s+)";
-/** A verb opens the action or a clause. `og`/`and` alone join two steps of which
- *  the merge is only one, so they open nothing; a negation never gets here,
- *  since `ikke`, `not` and `don't` are no openers. */
-const ASK_OPENER = "(?:^|[,;:.!—–]\\s+|\\s-\\s+|(?<![\\p{L}\\p{N}_-])(?<!(?:ikke|not|never)\\s+)(?:then|så)\\s+)";
-
-/** The action ends in a clause asking for its PRs: nothing follows them. A word
- *  before a later PR needs its own verb: «og deploy #2» is a step, not a repo. */
-export const NEEDS_ASK_RE = new RegExp(`${ASK_OPENER}${ASK_VERBS}\\s+${ASK_QUALIFIER}${ASK_BARE_PR}(?:${ASK_LIST_JOIN}(?:${ASK_VERBS}\\s+${ASK_QUALIFIER})?${ASK_BARE_PR})*[.!]?$`, "iu");
-
-/** Whether an item's action asks for the PRs it names. When unsure this answers
- *  false: a neutral note is the safe mark, a wrong strike is not. */
-export function needsAskFor(action: string): boolean {
-  return NEEDS_ASK_RE.test(action.replace(/(?:\s*⟦[^⟧]*⟧)+[\s.!]*$/, "").trim());
-}
-
 /** The live plan pages: open plans, and shipped ones with follow-ups open. A
  *  retired page is out, as it is from the rail's live lists. */
 export function isLiveCheckPage(p: Pick<WikiPageMeta, "plan_status" | "followups" | "culled">): boolean {
@@ -219,8 +192,6 @@ type ScannedRow =
   | { kind: "unlinked"; page: string; label: string }
   /** `refs` are the row's own PRs, `state` what it claims about them. */
   | { kind: "pr"; page: string; refs: PrRef[]; state: LedgerState };
-
-const CONTRADICTABLE: ReadonlySet<LedgerState> = new Set<LedgerState>(["open", "not-started", "planned"]);
 
 async function ledgersOf(index: WikiIndex, meta: WikiPageMeta, deps: GhCheckDeps): Promise<Ledger[]> {
   if (!/\.mdx?$/i.test(meta.relPath)) return [];
@@ -268,20 +239,60 @@ type ItemRef =
   /** `#n`, with the word right before it, if any. */
   | { form: "bare"; n: number; word: string | null; glued: boolean };
 
+const NOT_NUMBER_END = "(?![\\p{L}\\p{N}_]|\\.\\d)";
+const OWNER_REPO = "[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._][A-Za-z0-9._-]*";
+
 const ITEM_REF_RE = new RegExp(
   [
     "https?://(?:www\\.)?github\\.com/([\\w.-]+/[\\w.-]+)/pull/(\\d+)[^\\s)\\]]*",
     // Any other URL: its anchor is no PR.
     "[a-z][a-z0-9+.-]*://[^\\s)\\]]+",
-    `(?<![\\p{L}\\p{N}_./-])([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._][A-Za-z0-9._-]*)#(\\d{1,7})${ASK_PR_END}`,
+    `(?<![\\p{L}\\p{N}_./-])(${OWNER_REPO})#(\\d{1,7})${NOT_NUMBER_END}`,
     // `&#39;` and a path's anchor (`/#5`) are no PR; `a.#5` is a glued word's.
-    `(?<![&/#])#(\\d{1,7})${ASK_PR_END}`,
+    `(?<![&/#])#(\\d{1,7})${NOT_NUMBER_END}`,
   ].join("|"),
   "giu",
 );
 
-/** What an item's words name, in order, its page markers masked. */
+/** Item text is the model's and unbounded, and these patterns are quadratic on a
+ *  run (100k characters took 30 s), so past this an item's text names nothing. */
+const ITEM_TEXT_MAX = 200;
+
+const ASK_VERBS = ["merge", "merg", "lukk", "close", "godkjenn", "approve", "review"];
+const ASK_VERB = `(?:${ASK_VERBS.join("|")})`;
+/** VERB, a second VERB, a QUALIFIER (1) and the REF list (2). */
+const ASK_HEAD_RE = new RegExp(`^${ASK_VERB}(?:\\s+(?:eller|or|og|and)\\s+${ASK_VERB})?\\s+(?:([\\p{L}\\p{N}._-]+)\\s+)?(\\S.*)$`, "iu");
+const ASK_LIST_JOIN_RE = /\s*[,&]\s*|\s+(?:og|and)\s+/i;
+const ASK_REF_RE = new RegExp(`^(?:(?:${OWNER_REPO})?#\\d{1,7}|https?://(?:www\\.)?github\\.com/[\\w.-]+/[\\w.-]+/pull/\\d{1,7})$`, "i");
+
+/**
+ * The refs of an action that asks for its PRs, read over the whole of it: `VERB
+ * [(eller|or|og|and) VERB] [QUALIFIER] REF [(og|and|,|&) REF]…`, with one trailing
+ * `.` or `!` and page markers after it. Anything else is null: a neutral note is
+ * the safe mark, a wrong strike is not.
+ */
+function askedRefs(action: string): { qualifier: string | null; refs: ItemRef[] } | null {
+  const text = action.trim();
+  if (text.length > ITEM_TEXT_MAX) return null;
+  const head = ASK_HEAD_RE.exec(text.replace(/(?:\s*⟦[^⟧]*⟧)+([.!]?)$/, "$1").replace(/[.!]$/, ""));
+  const parts = head?.[2]!.split(ASK_LIST_JOIN_RE);
+  if (!parts?.every((part) => ASK_REF_RE.test(part))) return null;
+  const qualifier = /^pr$/i.test(head![1] ?? "") ? null : (head![1] ?? null);
+  const refs = parts.flatMap(scanItemRefs);
+  if (qualifier && refs[0]!.form === "bare") refs[0] = { ...refs[0]!, word: qualifier };
+  return { qualifier, refs };
+}
+
+/** A word naming a repo: its name, or one `-`-separated token of it (`e2e`). */
+function repoWordFits(word: string, repo: string): boolean {
+  const name = repo.slice(repo.indexOf("/") + 1).toLowerCase();
+  return [name, ...name.split("-")].includes(word.toLowerCase());
+}
+
+/** What an item's words name, in order, its page markers masked. A verb before
+ *  the number is the verb, even on a page knowing a repo called that. */
 function scanItemRefs(text: string): ItemRef[] {
+  if (text.length > ITEM_TEXT_MAX) return [];
   const words = text.replace(/⟦[^⟧]*⟧/g, " ");
   const out: ItemRef[] = [];
   for (const m of words.matchAll(ITEM_REF_RE)) {
@@ -289,7 +300,8 @@ function scanItemRefs(text: string): ItemRef[] {
     else if (m[3]) out.push({ form: "slug", n: Number(m[4]), repo: m[3] });
     else if (m[5]) {
       const before = /([\p{L}\p{N}_.-]+)(\s*)$/u.exec(words.slice(0, m.index));
-      out.push({ form: "bare", n: Number(m[5]), word: before?.[1] ?? null, glued: !!before && !before[2] });
+      const glued = !!before && !before[2];
+      out.push({ form: "bare", n: Number(m[5]), word: !before || (!glued && ASK_VERBS.includes(before[1]!.toLowerCase())) ? null : before[1]!, glued });
     }
   }
   return out;
@@ -393,9 +405,11 @@ async function scan(index: WikiIndex, map: WorkMap, deps: GhCheckDeps): Promise<
     const itemKey = `${item.kind}|${item.title}`;
     if (itemSeen.has(itemKey)) continue;
     itemSeen.add(itemKey);
-    const scanned = scanItemRefs(`${item.title} ${item.action}`);
+    const asked = askedRefs(item.action);
+    const scanned = [...scanItemRefs(item.title), ...(asked?.refs ?? scanItemRefs(item.action))];
     if (!scanned.length) continue;
-    const markers = [...`${item.title} ${item.why} ${item.action}`.matchAll(/⟦([^⟧]+)⟧/g)].map((m) => m[1]!);
+    // No `⟦` in the class, so a run of them with no close stays linear.
+    const markers = [...`${item.title} ${item.why} ${item.action}`.matchAll(/⟦([^⟦⟧]+)⟧/g)].map((m) => m[1]!);
     const known: PrRef[] = [];
     for (const rel of new Set([...item.pages, ...markers])) {
       const meta = index.resolveRelPath(rel);
@@ -404,7 +418,9 @@ async function scan(index: WikiIndex, map: WorkMap, deps: GhCheckDeps): Promise<
     const { prs, incomplete } = resolveItemRefs(scanned, known);
     if (!prs.length) continue;
     for (const { ref } of prs) if (ref && !refs.has(ref.id)) refs.set(ref.id, ref);
-    needs.push({ kind: item.kind, title: item.title, asksForIt: !incomplete && needsAskFor(item.action), prs });
+    // Every entry is one PR, and the qualifier names the repo of the PR it stands before.
+    const asksForIt = asked !== null && !incomplete && prs.every((p) => p.ref && (!asked.qualifier || p.n !== asked.refs[0]!.n || repoWordFits(asked.qualifier, p.ref.repo)));
+    needs.push({ kind: item.kind, title: item.title, asksForIt, prs });
   }
 
   const rows: ScannedRow[] = [];
@@ -640,7 +656,7 @@ function buildBody(s: Scan, c: WikiCache, refreshing: boolean, at: number): Work
       }
       body.checked++;
       // Several PRs in one cell are one statement: it fails only once none is left open.
-      if (!CONTRADICTABLE.has(row.state) || row.refs.some((ref) => known(ref)!.state === "OPEN")) continue;
+      if (!CLAIMABLE_STATES.has(row.state) || row.refs.some((ref) => known(ref)!.state === "OPEN")) continue;
       const key = `${row.page}\0${row.refs.map((ref) => ref.id).join(" ")}`;
       if (listed.has(key)) continue;
       listed.add(key);

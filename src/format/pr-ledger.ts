@@ -20,8 +20,8 @@
  * `owner/repo#n`, `repo #n`, `repo#n` (`bareNumber`).
  *
  * The GitHub check reads more than the views do: `everyRow` keeps a row with no
- * number, `ownPrs` names the row's own PRs and `claimedState` drops a state word
- * that is about something else. `state`, `pr` and the rest do not move for it.
+ * number, `ownPrs` names the row's own PRs and `claimedState` keeps a state word
+ * only when the whole cell says it of them. `state`, `pr` and the rest do not move.
  *
  * The strip draws a ledger only when its header names a state column
  * (State/Status/Tilstand, a parenthetical qualifier allowed) and at least {@link LEDGER_PARSED_MIN} of its rows
@@ -262,10 +262,9 @@ export interface LedgerRow {
   state: PrState;
   /** Which rule gave the state: 1–3, 0 for unknown. */
   rule: 0 | 1 | 2 | 3;
-  /** What the row itself says about its PR, for the GitHub check. `state`, or
-   *  `unknown` when that word is about something else: it goes on in prose
-   *  (`open follow-up`) or sits behind prose (`blocked by #8; open #9`). `state`
-   *  stays as it is, because the strip and the lint read it. */
+  /** What the row itself says about its PR, for the GitHub check: `state`, or
+   *  `unknown` when a {@link CLAIMABLE_STATES} word fails {@link cellClaimsOwnPr}.
+   *  `state` stays as it is, because the strip and the lint read it. */
   claimedState: PrState;
   /** The D ids the row cites, in cell order, deduplicated. */
   decisions: string[];
@@ -285,9 +284,10 @@ export interface Ledger {
   draws: boolean;
 }
 
-/** Strip `**`, `__`, `~~` and a leading/trailing whitespace from a cell. */
+/** Strip `**`, `__`, `~~` and a leading/trailing whitespace from a cell, but not
+ *  from a URL: `__` can be part of a slug. */
 function plain(cell: string): string {
-  return cell.replace(/\*\*|__|~~/g, "").trim();
+  return cell.replace(/https?:\/\/[^\s()]+|\*\*|__|~~/g, (m) => (m.length === 2 ? "" : m)).trim();
 }
 
 /** A cell with its struck text (`~~merged~~`) removed, for state and identity. */
@@ -442,21 +442,49 @@ function ownPrsOf(cells: string[], prCol: number, landedCol: number, stateCol: n
   return stateCol >= 0 ? stateCellOwnPrs(cells[stateCol] ?? "", state) : [];
 }
 
-/** A bare word right after the state word, past emphasis, a code tick or a link
- *  bracket: `open follow-up`. A separator (`,`, `:`, `—`, `(`) keeps the state. */
-const GOES_ON_RE = /^[\s*_`[]*\p{L}/u;
+/** The states a row's PR can contradict on GitHub. */
+export const CLAIMABLE_STATES: ReadonlySet<PrState> = new Set<PrState>(["open", "not-started", "planned"]);
 
-function claimedStateOf(cells: string[], state: PrState, rule: 0 | 1 | 2 | 3, stateCol: number, landedCol: number, prCol: number): PrState {
-  if (rule === 2) {
-    const rest = openingWord(cells[stateCol] ?? "")!.rest.replace(WORD_LINK_TARGET_RE, "");
-    return GOES_ON_RE.test(rest) ? "unknown" : state;
-  }
-  if (rule !== 1) return state;
-  const opensWithIt = (i: number): boolean => {
-    const opening = i >= 0 ? openingWord(cells[i] ?? "") : null;
-    return opening !== null && stateWord(opening.word) === state;
+const CLAIM_DATE_RE = /^\s*\d{1,4}(?:[-.]\d{1,4}){1,2}/;
+const CLAIM_SEPARATOR_RE = /^(?:\s*[,:—–(]|\s+-(?:\s|$))/;
+
+/**
+ * Whether the text after a cell's state word says that word of the row's own PR:
+ * `[own PR link(s)] [date] [separator anything]`, nothing else. A ref to another
+ * PR means the word is about that PR, also right after the separator, the place
+ * `merged (#5)` puts the own one.
+ */
+function cellClaimsOwnPr(rest: string, own: readonly OwnPr[]): boolean {
+  const isOwnLink = (link: string): boolean => {
+    const prs = fullPrLinks(link);
+    return prs.length > 0 && distinctPrs([...own, ...prs]).length === own.length;
   };
-  return [stateCol, landedCol, prCol, 0].some(opensWithIt) ? state : "unknown";
+  let t = rest.replace(/^[*_]+/, "");
+  const target = WORD_LINK_TARGET_RE.exec(t);
+  if (target) {
+    if (PR_URL_RE.test(target[0]) && !isOwnLink(target[0])) return false;
+    t = t.slice(target[0].length);
+  }
+  let leading: RegExpExecArray | null;
+  while ((leading = LINK_AT_START_RE.exec(t.trimStart()))) {
+    if (!isOwnLink(leading[0])) return false;
+    t = t.trimStart().slice(leading[0].length);
+  }
+  t = t.replace(CLAIM_DATE_RE, "");
+  const separator = CLAIM_SEPARATOR_RE.exec(t);
+  if (!separator) return !t.trim();
+  const after = t.slice(separator[0].length).trimStart();
+  const link = LINK_AT_START_RE.exec(after)?.[0] ?? "";
+  return isOwnLink(link) || !(scanRefs(after).refs[0]?.start === 0 || /^#\d/.test(after) || PR_URL_RE.test(link));
+}
+
+function claimedStateOf(cells: string[], state: PrState, rule: 0 | 1 | 2 | 3, own: readonly OwnPr[], stateCol: number, landedCol: number, prCol: number): PrState {
+  if (rule === 0 || !CLAIMABLE_STATES.has(state)) return state;
+  for (const i of [stateCol, landedCol, prCol, 0]) {
+    const opening = i >= 0 ? openingWord(cells[i] ?? "") : null;
+    if (opening && stateWord(opening.word) === state) return cellClaimsOwnPr(opening.rest, own) ? state : "unknown";
+  }
+  return "unknown";
 }
 
 function stateWord(word: string): Exclude<PrState, "unknown"> {
@@ -526,7 +554,7 @@ export function parseLedgerTable(headers: string[], rows: string[][], source: Le
     if (pr === null && !opts.everyRow) continue;
     const { state, rule } = source === "glance" ? { state: "planned" as const, rule: 0 as const } : rowState(live, stateColumn, landedCol);
     const ownPrs = ownPrsOf(live, prCol, landedCol, stateColumn, state);
-    const claimedState = claimedStateOf(live, state, rule, stateColumn, landedCol, prCol);
+    const claimedState = claimedStateOf(live, state, rule, ownPrs, stateColumn, landedCol, prCol);
     out.push({ slate, link, pr, ...(ownPrs.length ? { ownPr: ownPrs[0]!, ownPrs } : {}), state, rule, claimedState, decisions: decisionsOf(cells, decisionsCol), label, cells });
   }
   const known = out.filter((r) => r.state !== "unknown").length;

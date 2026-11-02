@@ -124,6 +124,16 @@ describe("a link in the state cell", () => {
     expect(own(state).ownPr).toBeUndefined();
   });
 
+  test("the URL is read raw: `__` in a slug is part of the slug", () => {
+    const OWN = { repo: "acme/my__repo", n: 1 };
+    expect(own("open [#1](https://github.com/acme/my__repo/pull/1)").ownPr).toEqual(OWN);
+    expect(own("merged https://github.com/acme/my__repo/pull/1").ownPr).toEqual(OWN);
+    expect(own("[merget](https://github.com/acme/my__repo/pull/1)").ownPr).toEqual(OWN);
+    expect(own("**merged** [#1](https://github.com/acme/my__repo/pull/1)").ownPr).toEqual(OWN);
+    expect(own("__merged__ [#1](https://github.com/acme/my__repo/pull/1)").ownPr).toEqual(OWN);
+    expect(own("merged **[#1](https://github.com/acme/my__repo/pull/1)**").ownPr).toEqual(OWN);
+  });
+
   test("links run on only with nothing but punctuation between", () => {
     expect(own(`merged ${A}, ${B}`).ownPrs).toEqual([OWN_A, OWN_B]);
     expect(own(`merged ${A}, waits on ${B}`).ownPrs).toEqual([OWN_A]);
@@ -165,6 +175,10 @@ describe("claimedState: what the GitHub check compares", () => {
   const A = "[#1](https://github.com/acme/a/pull/1)";
   const one = (state: string) => parseLedgerTable(["Slate", "State"], [["3 x", state]]).rows[0]!;
 
+  const NINE = "[#9](https://github.com/acme/a/pull/9)";
+  const own1 = (state: string) => parseLedgerTable(["PR", "State"], [[A, state]]).rows[0]!;
+
+  // Anything but the rule: the cell is about something else. `state` stays, the strip reads it.
   test.each([
     ["open follow-up: rail polish", "open"],
     ["planned next: more", "planned"],
@@ -178,30 +192,149 @@ describe("claimedState: what the GitHub check compares", () => {
     ["open [the follow-up](https://example.test/f)", "open"],
     ["open [[plans/follow-up]]", "open"],
     ["[åpen](https://example.test/x) follow-up", "open"],
-  ])("%s goes on in prose: unknown, though the strip still reads it", (cell, parsed) => {
+    ["open 3 follow-ups", "open"],
+    ['open "later"', "open"],
+    ["open/blocked", "open"],
+    ["open.", "open"],
+    ["open; waiting", "open"],
+    ["open -x", "open"],
+    ["open 3", "open"],
+    ["open 2026-10-01 later", "open"],
+    ["open 2026-10-01x", "open"],
+  ])("%s reads unknown", (cell, parsed) => {
     expect(one(cell).claimedState).toBe("unknown");
     expect(one(cell).state).toBe(parsed as never);
-    expect(one(cell).rule).toBe(2);
+  });
+
+  // The ref must be the row's own; another PR means the cell is about that PR.
+  test.each([
+    ["open follow-up #9"],
+    ["planned next #9"],
+    ["open #9"],
+    ["open PR #9"],
+    ["open a #9"],
+    ["open acme/a#9"],
+    ["open acme/b#1"],
+    ["open b #1"],
+    ["open follow-up #1"],
+    // A row's own PR is a full URL, so only a link can be checked against it.
+    ["open #1"],
+    ["open PR #1"],
+    ["open a #1"],
+    ["open acme/a#1"],
+    [`open ${NINE}`],
+    [`open ${A} ${NINE}`],
+    ["open https://github.com/acme/a/pull/9"],
+    ["open [#1](https://github.com/acme/b/pull/1)"],
+    ["open [#1](https://example.test/1)"],
+    [`open: ${NINE}`],
+    [`open, ${NINE}`],
+    [`open (${NINE})`],
+    [`open — ${NINE}`],
+    [`open – ${NINE}`],
+    [`open - ${NINE}`],
+    ["open, #9 is the follow-up"],
+    ["open, PR #9 is the follow-up"],
+    ["open: acme/a#9"],
+    ["open (a #9)"],
+    ["open, [#9](https://example.test/9)"],
+    ["[åpen](https://github.com/acme/a/pull/9)"],
+    ["[åpen](https://example.test/pull/1)"],
+  ])("%s on own #1 reads unknown", (cell) => {
+    expect(own1(cell).ownPr).toEqual({ repo: "acme/a", n: 1 });
+    expect(own1(cell).claimedState).toBe("unknown");
   });
 
   test.each([
     ["open", "open"],
     ["planned", "planned"],
     ["not started", "not-started"],
+    ["ikke startet", "not-started"],
+    ["åpen", "open"],
+    ["planlagt", "planned"],
     ["open, awaiting review", "open"],
     ["open: awaiting review", "open"],
     ["open — awaiting review", "open"],
     ["open – awaiting review", "open"],
     ["open - awaiting review", "open"],
     ["open (awaiting review)", "open"],
-    ["open.", "open"],
+    ["open,awaiting", "open"],
+    ["open -", "open"],
     ["**open** — awaiting", "open"],
+    ["__open__ — awaiting", "open"],
+    ["_open_, awaiting", "open"],
     ["open 2026-10-01", "open"],
+    ["open 24.10", "open"],
+    ["open 2026-10-01, later", "open"],
     ["[åpen](https://example.test/x)", "open"],
     ["[åpen](https://example.test/x) — venter", "open"],
+    ["planned: more", "planned"],
+    ["not started, waits", "not-started"],
     [`open ${A}`, "open"],
   ])("%s keeps its state", (cell, want) => {
     expect(one(cell).claimedState).toBe(want as never);
+  });
+
+  // A ref to the row's own PR, in each spelling, and whatever follows a separator.
+  test.each([
+    [`open ${A}`],
+    ["open [#1](https://github.com/ACME/A/pull/1)"],
+    ["open https://github.com/acme/a/pull/1"],
+    [`open ${A} 2026-10-01`],
+    [`open ${A} 2026-10-01 - waits`],
+    [`open ${A} - waits`],
+    [`open ${A} — waits`],
+    [`open ${A} – waits`],
+    [`open ${A}: waits`],
+    [`open ${A}, waits on ${NINE}`],
+    [`open ${A} (blocked by ${NINE})`],
+    [`open: ${A} waits`],
+    [`open (${A})`],
+    [`open, waits on ${NINE}`],
+    [`open (blocked by ${NINE})`],
+    ["open, klar for review #9"],
+    ["[åpen](https://github.com/acme/a/pull/1)"],
+    ["[åpen](https://github.com/acme/a/pull/1), venter"],
+    [`åpen: [a #1](https://github.com/acme/a/pull/1) venter`],
+  ])("%s on own #1 keeps open", (cell) => {
+    expect(own1(cell).claimedState).toBe("open");
+  });
+
+  test("a link text says nothing: the URL decides", () => {
+    const row = (state: string) => parseLedgerTable(["PR", "State"], [["[#4](https://github.com/acme/foo-e2e-tests/pull/4)", state]]).rows[0]!.claimedState;
+    expect(row("åpen: [e2e #4](https://github.com/acme/foo-e2e-tests/pull/4) venter")).toBe("open");
+    expect(row("åpen: [e2e #4](https://github.com/acme/foo-e2e-tests/pull/9) venter")).toBe("unknown");
+  });
+
+  test("past a separator a link that is no PR is just words", () => {
+    expect(own1("open, [notes](https://example.test/n) soon").claimedState).toBe("open");
+    expect(own1("open: https://example.test/n").claimedState).toBe("open");
+    expect(own1("open: https://github.com/acme/a/pull/9").claimedState).toBe("unknown");
+  });
+
+  test("when the cell itself sets the own PR, its refs are the row's", () => {
+    expect(one(`open ${NINE}`).ownPr).toEqual({ repo: "acme/a", n: 9 });
+    expect(one(`open ${NINE}`).claimedState).toBe("open");
+    expect(one(`open ${A}, ${NINE}`).ownPrs).toHaveLength(2);
+    expect(one(`open ${A}, ${NINE}`).claimedState).toBe("open");
+  });
+
+  test("any of a row's own PRs may be named", () => {
+    const row = parseLedgerTable(["PR", "State"], [[`${A} ${NINE}`, `open ${NINE}`]]).rows[0]!;
+    expect(row.claimedState).toBe("open");
+  });
+
+  test("a slug with `__` still matches its own URL in the state cell", () => {
+    const u = "https://github.com/acme/my__repo/pull/1";
+    expect(parseLedgerTable(["PR", "State"], [[`[#1](${u})`, `open [#1](${u})`]]).rows[0]!.claimedState).toBe("open");
+    expect(parseLedgerTable(["PR", "State"], [[`[#1](${u})`, "open [#1](https://github.com/acme/myrepo/pull/1)"]]).rows[0]!.claimedState).toBe("unknown");
+  });
+
+  test("a merged, dropped or blocked row keeps its state: only what can contradict is read", () => {
+    expect(one("merged 2026-10-30, #762").claimedState).toBe("merged");
+    expect(one("merged follow-up").claimedState).toBe("merged");
+    expect(one("dropped for later").claimedState).toBe("dropped");
+    expect(one("blocked by #8").claimedState).toBe("blocked");
   });
 
   test("a state word reading a link deep in prose is about that link, not the row", () => {
@@ -218,6 +351,11 @@ describe("claimedState: what the GitHub check compares", () => {
     expect(parseLedgerTable(["Slate", "PR"], [["3 x", `open ${A}`]]).rows[0]!.claimedState).toBe("open");
     expect(parseLedgerTable(["Slate", "Landed"], [["3 x", `open ${A}`]]).rows[0]!.claimedState).toBe("open");
     expect(parseLedgerTable(["Slate", "What"], [[`open ${A}`, "x"]]).rows[0]!.claimedState).toBe("open");
+  });
+
+  test("a state word opening the Landed cell is read past a state cell opening with another word", () => {
+    const row = parseLedgerTable(["PR", "State", "Landed"], [["3 x", "blocked by more", `open ${A}`]]).rows[0]!;
+    expect([row.state, row.rule, row.claimedState]).toEqual(["open", 1, "open"]);
   });
 
   test("a row with no state keeps none, and a merged one stays merged", () => {
