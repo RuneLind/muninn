@@ -1231,8 +1231,9 @@ for (const theme of THEMES) {
     await page.unroute("**/api/wiki/work-map?*");
     await page.route("**/api/wiki/work-map?*", async (route) => {
       const res = await route.fetch();
-      const body = (await res.json()) as { map: { runAtMs: number } } & Record<string, unknown>;
-      await route.fulfill({ json: { ...body, organizable: false, map: sweepThemesMap(body.map.runAtMs) } });
+      const body = (await res.json()) as Record<string, unknown>;
+      // Run now: the seeded map is 30 h old, which until Tuesday morning falls in last week, so no slot is current.
+      await route.fulfill({ json: { ...body, organizable: false, map: sweepThemesMap(Date.now()) } });
     });
     await page.reload();
     await expect(card.locator(".wiki-wn-title")).toHaveText("What you’re following");
