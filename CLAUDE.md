@@ -153,6 +153,7 @@ Two traps regardless of how the page is driven:
 - Watcher email checking: Haiku spawned in muninn's agent home on the `gmail-read` tool surface — the bot's Gmail server only, the three Gmail reads allowed, `dontAsk`, the known write tools disallowed; every other `spawnHaiku` is tool-less — see the `MUNINN_AGENT_CWD` row
 - Quiet hours: per-user, timezone-aware, overnight ranges supported (e.g. 22-08)
 - All timestamps stored as `TIMESTAMPTZ` in DB, exposed as epoch ms in TypeScript
+- Where documentation goes: a design note, measurement or trap about one function goes into `notes.md` (`src/<module>/reference/notes.md`), under a heading, and the heading goes into `## Index`; a rule for the whole folder goes into `CLAUDE.md`. Text trimmed from this root file goes to the module's `reference/notes.md`, never into a module `CLAUDE.md`. A nested `CLAUDE.md` is loaded in full on every read in its folder, so `src/test/claude-md-budget.test.ts` caps its size and checks the index
 
 ## Logging
 
