@@ -688,6 +688,40 @@ describe("GET /api/wiki/pages — workMap under the WIKI_DIR override", () => {
   });
 });
 
+describe("GET /api/wiki/pages — waitsCounted", () => {
+  let root: string;
+  const prev = { extra: process.env.WIKI_EXTRA };
+
+  beforeEach(async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-waits-counted-"));
+    await Bun.write(path.join(root, "notes/a.md"), "---\ntitle: A\n---\n\nBody.");
+    process.env.WIKI_EXTRA = `waitswiki=${root},otherwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+  });
+
+  afterEach(async () => {
+    if (prev.extra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prev.extra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const counted = async (wiki: string, wikiAnswers: { wikis: Set<string>; owner: string | null }) => {
+    const app = new Hono();
+    registerWikiRoutes(app, { wikiAnswers } as unknown as Parameters<typeof registerWikiRoutes>[1]);
+    const body = (await (await app.request(`/api/wiki/pages?wiki=${wiki}`)).json()) as Record<string, unknown>;
+    return body.waitsCounted;
+  };
+
+  test("true only with an owner on a wiki that takes answers", async () => {
+    expect(await counted("waitswiki", { wikis: new Set(["waitswiki"]), owner: "Kari (A1)" })).toBe(true);
+    expect(await counted("otherwiki", { wikis: new Set(["waitswiki"]), owner: "Kari (A1)" })).toBe(false);
+    expect(await counted("waitswiki", { wikis: new Set(["waitswiki"]), owner: null })).toBe(false);
+  });
+});
+
 /**
  * Wiki Ask route resolution. Exercises only the branches that never reach
  * `streamResearchAnswer` (no Huginn / no `claude` spawn): an unknown wiki and a

@@ -14,7 +14,8 @@
 import path from "node:path";
 import { readdir, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
-import { resolveServingProfile } from "../config.ts";
+import { resolveServingProfile, resolveWikiAnswerConfig } from "../config.ts";
+import type { AnswerGroups } from "../format/question.ts";
 import { wikiToolsRegistered } from "../dashboard/route-groups.ts";
 import {
   isMetaStem,
@@ -48,7 +49,7 @@ import { normalizeRelPath } from "./rel-path.ts";
 import { aliasTopDirs, aliasWorkedPaths } from "./alias-ref.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { readFrontmatterLists, resolveRelatedEntries, type RelatedEntry } from "./frontmatter-lists.ts";
-import { extractNextMoves } from "./next-moves.ts";
+import { extractNextMoves, waitOwnerFrom, waitsOnOwner } from "./next-moves.ts";
 import {
   inferIssues,
   parseTrackersConfig,
@@ -866,6 +867,16 @@ export interface WikiPageMeta {
    * with no such item. Rides the listing (the `/wiki` ✋ chip and row flag).
    */
   movesYou?: number;
+  /**
+   * DECISIONS WAITING — the open `<Question>` ids a `waiting` lane names that ask
+   * `WIKI_ANSWER_OWNER` (`waitsOnOwner`, `next-moves.ts`). Derived at index time
+   * and absent, not 0, on a page with none or with no owner configured; the
+   * listing's `waitsCounted` says whether it applies to this wiki.
+   */
+  movesWaiting?: number;
+  /** The oldest parsed `since=` (`YYYY-MM-DD`) among the lanes holding a counted
+   *  id. Absent when none of them carries a date. */
+  waitingSince?: string;
   /**
    * SERIES — the piece of work this page belongs to, from the frontmatter key
    * `series:`. One authored slug per member, spread over folders and stems: the
@@ -3430,6 +3441,10 @@ export async function buildWikiIndex(
   // read BEFORE the scan, not after, because `include` scopes the scan itself;
   // the move is safe because the read depends on nothing but `root`.
   const readerConfig = await readWikiReaderConfig(root);
+  // Read once per build, so a change to the owner or the groups takes a restart
+  // and a re-index. Which wiki it applies to is the listing's `waitsCounted`: the
+  // index has no wiki name.
+  const waitOwner = waitOwnerFrom(answerConfigForIndex());
   const includePatterns = readerConfig?.include ?? [];
   // The one place the STORE needs to know a root is read-only: `include` is
   // cosmetic and degrades to absent, so on a root whose whole point is that it
@@ -3663,8 +3678,14 @@ export async function buildWikiIndex(
       if (lists.owns.keys.length) meta.owns = lists.owns.keys;
       if (lists.related.entries.length) rawRelated.set(relPath, lists.related.entries);
       // Waiting on you, from the body's `<NextMoves>` you lanes.
-      const movesYou = extractNextMoves(content)?.counts.you ?? 0;
+      const moves = extractNextMoves(content);
+      const movesYou = moves?.counts.you ?? 0;
       if (movesYou > 0) meta.movesYou = movesYou;
+      if (moves && waitOwner) {
+        const waits = waitsOnOwner(moves, fm.questions_to, waitOwner);
+        if (waits.ids.length) meta.movesWaiting = waits.ids.length;
+        if (waits.oldestSince) meta.waitingSince = waits.oldestSince;
+      }
       // Issue refs, where the body is already in hand (the `pagePrRefs`
       // precedent). The TITLE rule reads the authored `title:` line only, never
       // the stem fallback `titleFromFrontmatter` answers with.
@@ -4399,6 +4420,13 @@ async function buildAndCache(root: string): Promise<WikiIndex | null> {
 
 /** Test-only: swap the index builder (null restores the real one) and zero the
  *  build counter. */
+let answerConfigForIndex: () => { owner: string | null; groups?: AnswerGroups } = resolveWikiAnswerConfig;
+
+/** Test seam: the answer config `buildWikiIndex` reads; null restores the env's. */
+export function __setWikiIndexAnswerConfigForTest(cfg: { owner: string | null; groups?: AnswerGroups } | null): void {
+  answerConfigForIndex = cfg ? () => cfg : resolveWikiAnswerConfig;
+}
+
 export function __setWikiIndexBuilderForTest(fn: ((root: string) => Promise<WikiIndex>) | null): void {
   buildImpl = fn ?? ((root) => buildWikiIndex(root));
   buildsStarted = 0;

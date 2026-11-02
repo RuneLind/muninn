@@ -31,6 +31,8 @@ import type { ListingMirrorStatus } from "./wiki-mirror-status.ts";
 export interface WikiPagesResponse {
   pages: WikiListing[];
   scannedAt: number | null;
+  /** The owner is set and this wiki takes answers, so `movesWaiting` applies. */
+  waitsCounted?: boolean;
   types?: { order: string[]; labels: Record<string, string> };
   /** Effective display label per first-path-segment folder (see the store's
    *  `deriveFolderLabels`). Absent on an older server ⇒ raw folder names. */

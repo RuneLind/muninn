@@ -1,7 +1,7 @@
 import type { Context, Hono } from "hono";
 import { bucketMirrorPayloadField } from "../../wiki/bucket-mirror-status.ts";
 import { compress } from "hono/compress";
-import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens, wikiTakesAnswers, type Config } from "../../config.ts";
+import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens, wikiTakesAnswers, type Config, type WikiAnswerConfig } from "../../config.ts";
 import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest, resolveScopedPage, type ScopedPageLookup } from "./wiki-read-scope.ts";
@@ -1125,6 +1125,11 @@ export interface WikiPageListing extends WikiPageMeta {
 
 /** Exported for `trackers/store-issues.test.ts`, which drives the real
  *  compaction rather than restating it. */
+/** The owner is set and `wikiName` takes answers: `movesWaiting` means something. */
+export function waitsCountedFor(wikiName: string | undefined, cfg: WikiAnswerConfig): boolean {
+  return !!cfg.owner && wikiTakesAnswers(wikiName, cfg);
+}
+
 export function toListing(
   index: WikiIndex,
   meta: WikiPageMeta,
@@ -1671,6 +1676,9 @@ export function registerWikiReadRoutes(
       // The ⇪ Felles control's gate, present only on a wiki that offers it. The
       // route re-checks; this only decides whether the button renders.
       ...fellesPublishPayloadField(entry?.name, entry?.root),
+      // Whether the index's `movesWaiting` applies here. The index has no wiki
+      // name, so the wiki half of the gate sits where the name is known.
+      waitsCounted: waitsCountedFor(entry?.name, config.wikiAnswers ?? resolveWikiAnswerConfig()),
       // A bucket-mirrored root's health, present only while the mirror is not
       // up to date (finding 32): no object names, paths or error text.
       ...bucketMirrorPayloadField(resolveWikiRoot(root)),

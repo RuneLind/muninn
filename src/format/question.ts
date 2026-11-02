@@ -529,6 +529,36 @@ export function isOpenQuestion(id: string, state: QuestionState | undefined, que
   return state?.kind === "open" && (QUESTION_ID_RE.test(id) || questionIds.has(id));
 }
 
+/** Characters an id may not touch on either side to count as named. */
+const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
+
+/** Where each `<Question>` id an item names sits, in text order. An id counts
+ *  only on its own boundary: `S1` is not named by `S10`, `PS1`, `S1.1`, `S1-2`
+ *  or `1.S1` — a `.` or `-` joined to an id character on its far side extends
+ *  the id — while a sentence-final `S1.` is named. */
+export function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number }[] {
+  const hits: { id: string; at: number }[] = [];
+  for (const id of ids) {
+    const m = questionIdRe(id).exec(text);
+    if (m) hits.push({ id, at: m.index });
+  }
+  return hits.sort((a, b) => a.at - b.at);
+}
+
+/** `id` on its own boundary, as {@link namedQuestionHits} reads it. */
+export function questionIdRe(id: string, flags = ""): RegExp {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`, flags);
+}
+
+/** The `<Question>` ids an item names, in the order they appear. A caller masks
+ *  wikilinks first (the reader parks them as sentinels), so an id in a link's
+ *  target or text names nothing. The reader's peek, counts and card moves and
+ *  the index's wait count all read this, so they agree. */
+export function namedQuestionIds(item: string, ids: Iterable<string>): string[] {
+  return namedQuestionHits(item, ids).map((h) => h.id);
+}
+
 /** The D ids the page's `<DecisionLog>` blocks define. */
 export function definedDecisions(entries: DecisionLogEntry[]): Set<string> {
   return new Set(entries.map((e) => e.id).filter((id) => DECISION_ID_RE.test(id)));

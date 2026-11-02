@@ -23,6 +23,7 @@ import {
 import { osloDay } from "../../../wiki/work-map/ids.ts";
 import type { ThemeMap, ThemeWeek } from "../../../wiki/work-map/theme-schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
+import { closedWithoutShipping } from "../../../plans/board-client-pure.ts";
 import { escHtml as esc } from "./escape.ts";
 
 /** Past this age the card marks the map stale (the loop runs daily). */
@@ -55,6 +56,12 @@ export interface CardPage extends JoinablePage {
   relPath: string;
   title: string;
   displayTitle?: string;
+  movesYou?: number;
+  movesWaiting?: number;
+  waitingSince?: string;
+  plan_status?: string;
+  status_date?: string;
+  followups?: string;
 }
 
 /** What the ↻ control is doing, held by the DOM half. */
@@ -75,6 +82,10 @@ export interface WorkCardInput<P extends CardPage> {
   /** The reader URL of an effort page; absent, effort names render as text. */
   effortHref?(id: string): string;
   refresh: RefreshView;
+  /** The listing's `waitsCounted`; absent reads as not counted. */
+  waitsCounted?: boolean;
+  /** The health strip's open cell and whether its list is expanded. */
+  strip?: StripView;
 }
 
 /** "just now" / "N min ago" / "N h ago" / "N d ago". */
@@ -269,6 +280,7 @@ export function workCardHtml<P extends CardPage>(input: WorkCardInput<P>): strin
   const prose = (s: string) => proseHtml(s, byKey, hrefFor);
   return (
     headHtml(joined, body, now, input.refresh) +
+    healthStripHtml(input.pages, !!input.waitsCounted, input.strip ?? { open: null, expanded: false }, now, byKey, hrefFor) +
     (joined.summary.trim() ? `<div class="wiki-wm-summary">${prose(joined.summary)}</div>` : "") +
     needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you") +
     lanesHtml(joined, now, prose, byKey, hrefFor, input.effortHref) +
@@ -465,6 +477,127 @@ function coverageHtml<P>(map: JoinedWorkMap<P>): string {
   return (
     `<div class="wiki-wm-coverage">Covers ${esc(parts.join(" · "))}</div>` +
     (uniq.length ? `<ul class="wiki-wm-warnings">${uniq.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : "")
+  );
+}
+
+// ── The health strip (plan muninn-wiki-your-work-board, P1) ───────────
+export type StripCell = "decisions" | "oldest" | "steps" | "shipped";
+export interface StripView {
+  open: StripCell | null;
+  expanded: boolean;
+}
+/** Rows a cell's list shows before `+N more`. */
+export const STRIP_ROWS_SHOWN = 8;
+/** Past these the two wait cells take the warn tone. */
+export const STRIP_DECISIONS_WARN = 10;
+export const STRIP_OLDEST_WARN_DAYS = 7;
+
+interface StripRow {
+  relPath: string;
+  count?: number;
+  since?: string;
+}
+
+/** Calendar days from `day` to `now`, local; a future day reads as 0. */
+function daysSinceDay(day: string, now: number): number {
+  const today = new Date(now);
+  today.setHours(12, 0, 0, 0);
+  return Math.max(0, Math.round((today.getTime() - Date.parse(day + "T12:00:00")) / 86_400_000));
+}
+
+/** Oldest first, undated last; then the larger count, then the path. */
+function byOldest(a: StripRow, b: StripRow): number {
+  if (a.since !== b.since) return !a.since ? 1 : !b.since ? -1 : a.since < b.since ? -1 : 1;
+  return (b.count ?? 0) - (a.count ?? 0) || a.relPath.localeCompare(b.relPath);
+}
+
+/**
+ * The strip's four lists, from the live listing. Every page counts but a plan
+ * closed without shipping, whether or not the map placed it. A wait with no
+ * parsed `since` lists under decisions and not under oldest.
+ */
+export function stripRows<P extends CardPage>(pages: readonly P[]): Record<StripCell, StripRow[]> {
+  const live = pages.filter((p) => !closedWithoutShipping(p.plan_status));
+  const waits = live
+    .filter((p) => (p.movesWaiting ?? 0) > 0)
+    .map((p) => ({ relPath: p.relPath, count: p.movesWaiting, ...(p.waitingSince ? { since: p.waitingSince } : {}) }));
+  return {
+    decisions: [...waits].sort(byOldest),
+    oldest: waits.filter((r) => r.since).sort(byOldest),
+    steps: live.filter((p) => (p.movesYou ?? 0) > 0).map((p) => ({ relPath: p.relPath, count: p.movesYou })).sort(byOldest),
+    shipped: live
+      .filter((p) => p.plan_status === "shipped" && p.followups === "open")
+      .map((p) => ({ relPath: p.relPath, ...(p.status_date ? { since: p.status_date } : {}) }))
+      .sort(byOldest),
+  };
+}
+
+/** What the strip reads off the listing, so an adopt repaints only on a change. */
+export function stripKey<P extends CardPage>(pages: readonly P[], waitsCounted: boolean): string {
+  return JSON.stringify([waitsCounted, stripRows(pages), pages.filter((p) => p.movesWaiting || p.movesYou || p.followups === "open").map((p) => pageTitle(p))]);
+}
+
+const STRIP_TITLES: Record<StripCell, string> = {
+  decisions: "Open questions, oldest wait first",
+  oldest: "Dated waits, oldest first",
+  steps: "Pages with steps in a you lane",
+  shipped: "Shipped plans with follow-ups open, oldest first",
+};
+
+function stripCellHtml(cell: StripCell, value: string, label: string, tone: string, view: StripView, empty: boolean): string {
+  const on = view.open === cell && !empty;
+  return (
+    `<button type="button" class="wiki-wm-cell${tone ? " " + tone : ""}${on ? " on" : ""}" data-wm-cell="${cell}" aria-expanded="${on}"${empty ? " disabled" : ""}>` +
+    `<b>${esc(value)}</b><span>${esc(label)}</span></button>`
+  );
+}
+
+function stripDrillHtml(rows: readonly StripRow[], cell: StripCell, view: StripView, now: number, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string): string {
+  const shown = view.expanded ? rows : rows.slice(0, STRIP_ROWS_SHOWN);
+  const more = rows.length - shown.length;
+  const items = shown.map((r) => {
+    const meta = [
+      ...(r.count !== undefined ? [String(r.count)] : []),
+      ...(r.since ? [`since ${r.since} · ${daysSinceDay(r.since, now)} d`] : []),
+    ].join(" · ");
+    return `<li class="wiki-wm-drill-row">${pageLinkHtml(r.relPath, byKey, hrefFor)}${meta ? ` <span class="wiki-wm-drill-meta">· ${esc(meta)}</span>` : ""}</li>`;
+  });
+  return (
+    `<div class="wiki-wm-drill" data-wm-drill="${cell}"><div class="wiki-wm-drill-title">${esc(STRIP_TITLES[cell])}</div>` +
+    `<ol class="wiki-wm-drill-list">${items.join("")}</ol>` +
+    (more > 0 ? `<button type="button" class="wiki-wm-drill-more" data-wm-drill-more>+${more} more</button>` : "") +
+    "</div>"
+  );
+}
+
+function healthStripHtml<P extends CardPage>(
+  pages: readonly P[],
+  waitsCounted: boolean,
+  view: StripView,
+  now: number,
+  byKey: ReadonlyMap<string, CardPage>,
+  hrefFor: (rel: string) => string,
+): string {
+  const rows = stripRows(pages);
+  const sum = (rs: readonly StripRow[]) => rs.reduce((n, r) => n + (r.count ?? 0), 0);
+  const decisions = sum(rows.decisions);
+  const oldest = rows.oldest[0]?.since ? daysSinceDay(rows.oldest[0].since, now) : null;
+  const cells = [
+    waitsCounted
+      ? stripCellHtml("decisions", String(decisions), "decisions wait on you", decisions > STRIP_DECISIONS_WARN ? "warn" : "", view, !rows.decisions.length)
+      : stripCellHtml("decisions", "owner not set", "decisions wait on you", "unset", view, true),
+    waitsCounted
+      ? stripCellHtml("oldest", oldest === null ? "—" : `${oldest} d`, "oldest wait", oldest !== null && oldest > STRIP_OLDEST_WARN_DAYS ? "warn" : "", view, oldest === null)
+      : stripCellHtml("oldest", "owner not set", "oldest wait", "unset", view, true),
+    stripCellHtml("steps", String(sum(rows.steps)), "steps in your lanes", "", view, !rows.steps.length),
+    stripCellHtml("shipped", String(rows.shipped.length), "shipped, follow-ups open", "muted", view, !rows.shipped.length),
+  ];
+  const waitCell = view.open === "decisions" || view.open === "oldest";
+  const list = view.open && !(waitCell && !waitsCounted) ? rows[view.open] : [];
+  return (
+    '<div class="wiki-wm-section-title">Waiting on you, counted from the pages now</div>' +
+    `<div class="wiki-wm-strip">${cells.join("")}</div>` +
+    (view.open && list.length ? stripDrillHtml(list, view.open, view, now, byKey, hrefFor) : "")
   );
 }
 

@@ -13,6 +13,9 @@ import {
   proseHtml,
   proseText,
   refreshRefusalText,
+  STRIP_ROWS_SHOWN,
+  stripKey,
+  stripRows,
   workCardHtml,
   writeDone,
   WORK_MAP_STALE_MS,
@@ -529,5 +532,128 @@ describe("theme helpers", () => {
     const a = { id: "a", related: [{ id: "a", why: "self" }, { id: "gone", why: "x" }, { id: "b", why: "ab" }] };
     const b = { id: "b", related: [{ id: "a", why: "ba" }] };
     expect(themeConnections([a, b]).map((c) => [c.a.id, c.b.id, c.why])).toEqual([["a", "b", "ab"]]);
+  });
+});
+
+describe("the health strip", () => {
+  const body = (m: WorkMap) => ({ map: m, organizable: false }) as WorkMapGetBody & { map: WorkMap };
+  const html = (pages: Parameters<typeof workCardHtml>[0]["pages"], over: Partial<Parameters<typeof workCardHtml>[0]> = {}) =>
+    workCardHtml({ body: body(map()), pages, now: NOW, done: new Set(), hrefFor: href, refresh: { phase: "idle" }, waitsCounted: true, ...over });
+  const cell = (out: string, name: string) => new RegExp(`data-wm-cell="${name}"[^>]*><b>([^<]*)</b>`).exec(out)?.[1];
+  const page = (rel: string, over: Record<string, unknown> = {}) => ({ relPath: rel, title: rel, ...over });
+
+  test("the four cells sum the whole listing, placed by the map or not", () => {
+    const out = html([
+      page("plans/a.mdx", { movesWaiting: 2, waitingSince: "2026-10-20", movesYou: 3 }),
+      page("plans/unplaced.mdx", { movesWaiting: 1, waitingSince: "2026-10-27", movesYou: 1 }),
+      page("plans/s.mdx", { plan_status: "shipped", followups: "open" }),
+      page("plans/t.mdx", { plan_status: "shipped", followups: "none" }),
+    ]);
+    expect(cell(out, "decisions")).toBe("3");
+    expect(cell(out, "oldest")).toBe("9 d");
+    expect(cell(out, "steps")).toBe("4");
+    expect(cell(out, "shipped")).toBe("1");
+    expect(out.match(/data-wm-cell=/g)!.length).toBe(4);
+  });
+
+  test("an abandoned or superseded plan counts in no cell; a shipped one still does", () => {
+    const out = html([
+      page("plans/x.mdx", { plan_status: "abandoned", movesWaiting: 5, waitingSince: "2020-01-01", movesYou: 5 }),
+      page("plans/y.mdx", { plan_status: "superseded", movesWaiting: 5, movesYou: 5, followups: "open" }),
+      page("plans/z.mdx", { plan_status: "shipped", movesWaiting: 1, waitingSince: "2026-10-28", movesYou: 2 }),
+    ]);
+    expect(cell(out, "decisions")).toBe("1");
+    expect(cell(out, "oldest")).toBe("1 d");
+    expect(cell(out, "steps")).toBe("2");
+  });
+
+  test("an undated wait counts in decisions and not in the oldest wait", () => {
+    const pages = [page("plans/a.mdx", { movesWaiting: 2 })];
+    const out = html(pages);
+    expect(cell(out, "decisions")).toBe("2");
+    expect(cell(out, "oldest")).toBe("—");
+    expect(stripRows(pages).oldest).toEqual([]);
+  });
+
+  test("no owner: both wait cells read «owner not set», never 0, and open nothing", () => {
+    const out = html([page("plans/a.mdx", { movesWaiting: 2, waitingSince: "2026-10-20", movesYou: 1 })], {
+      waitsCounted: false,
+      strip: { open: "decisions", expanded: false },
+    });
+    expect(cell(out, "decisions")).toBe("owner not set");
+    expect(cell(out, "oldest")).toBe("owner not set");
+    expect(out).toMatch(/data-wm-cell="decisions"[^>]* disabled/);
+    expect(cell(out, "steps")).toBe("1");
+    expect(out).not.toContain("wiki-wm-drill");
+  });
+
+  test("warn takes the count past 10 and the wait past 7 days, not at them", () => {
+    const tone = (out: string, name: string) => new RegExp(`class="wiki-wm-cell([^"]*)" data-wm-cell="${name}"`).exec(out)![1];
+    const at = (n: number, since: string) => html([page("plans/a.mdx", { movesWaiting: n, waitingSince: since })]);
+    expect(tone(at(10, "2026-10-22"), "decisions")).not.toContain("warn");
+    expect(tone(at(10, "2026-10-22"), "oldest")).not.toContain("warn");
+    expect(tone(at(11, "2026-10-21"), "decisions")).toContain("warn");
+    expect(tone(at(11, "2026-10-21"), "oldest")).toContain("warn");
+  });
+
+  test("a cell opens its list, oldest first, with count and since; 8 rows, then +N more", () => {
+    const pages = Array.from({ length: 11 }, (_, i) => page(`plans/p${i}.mdx`, { title: `P${i}`, movesWaiting: 1, waitingSince: `2026-10-${String(11 + i)}` }));
+    pages.push(page("plans/undated.mdx", { title: "Undated", movesWaiting: 4 }));
+    const shut = html(pages);
+    expect(shut).not.toContain("wiki-wm-drill-row");
+    const open = html(pages, { strip: { open: "decisions", expanded: false } });
+    expect(open.match(/wiki-wm-drill-row/g)!.length).toBe(STRIP_ROWS_SHOWN);
+    expect(open).toContain("+4 more");
+    expect(open.indexOf(">P0<")).toBeLessThan(open.indexOf(">P1<"));
+    expect(open).toContain("· 1 · since 2026-10-11 · 18 d");
+    const all = html(pages, { strip: { open: "decisions", expanded: true } });
+    expect(all.match(/wiki-wm-drill-row/g)!.length).toBe(12);
+    expect(all).not.toContain("wiki-wm-drill-more");
+    // Undated sorts last, and the oldest cell leaves it out.
+    expect(all.indexOf(">P10<")).toBeLessThan(all.indexOf(">Undated<"));
+    expect(html(pages, { strip: { open: "oldest", expanded: true } })).not.toContain(">Undated<");
+  });
+
+  test("the other cells' lists: steps by count, shipped by status date", () => {
+    const pages = [
+      page("plans/one.mdx", { title: "One", movesYou: 1 }),
+      page("plans/three.mdx", { title: "Three", movesYou: 3 }),
+      page("plans/new.mdx", { title: "New", plan_status: "shipped", followups: "open", status_date: "2026-10-20" }),
+      page("plans/old.mdx", { title: "Old", plan_status: "shipped", followups: "open", status_date: "2026-09-01" }),
+    ];
+    const steps = html(pages, { strip: { open: "steps", expanded: false } });
+    expect(steps.indexOf(">Three<")).toBeLessThan(steps.indexOf(">One<"));
+    const shipped = html(pages, { strip: { open: "shipped", expanded: false } });
+    expect(shipped.indexOf(">Old<")).toBeLessThan(shipped.indexOf(">New<"));
+    expect(shipped).toContain("since 2026-09-01");
+  });
+
+  test("an empty cell does not open", () => {
+    expect(html([])).toMatch(/data-wm-cell="steps"[^>]* disabled/);
+  });
+
+  test("a page title is escaped in its row", () => {
+    const out = html([page("plans/a.mdx", { title: "<b>x</b>", movesYou: 1 })], { strip: { open: "steps", expanded: false } });
+    expect(out).toContain("&lt;b&gt;x&lt;/b&gt;");
+  });
+
+  test("stripKey moves with what the strip reads, and with nothing else", () => {
+    const a = [page("plans/a.mdx", { movesWaiting: 1 }), page("plans/b.mdx")];
+    expect(stripKey(a, true)).toBe(stripKey([page("plans/a.mdx", { movesWaiting: 1 }), page("plans/b.mdx", { updated: "2026-01-01" })], true));
+    expect(stripKey(a, true)).not.toBe(stripKey([page("plans/a.mdx", { movesWaiting: 2 }), page("plans/b.mdx")], true));
+    expect(stripKey(a, true)).not.toBe(stripKey(a, false));
+  });
+
+  test("a themes map has no strip", () => {
+    const out = workCardHtml({
+      body: { map: fixtureThemeMap(), organizable: false } as WorkMapGetBody & { map: ThemeMap },
+      pages: [page("plans/a.mdx", { movesWaiting: 2, movesYou: 1 })],
+      now: NOW,
+      done: new Set(),
+      hrefFor: href,
+      refresh: { phase: "idle" },
+      waitsCounted: true,
+    });
+    expect(out).not.toContain("wiki-wm-strip");
   });
 });

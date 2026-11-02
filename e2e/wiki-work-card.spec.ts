@@ -28,6 +28,10 @@
  *  8. **A page declared after the run (P6)** joins its effort on a listing
  *     refresh though the run did not move, first in the effort and not behind
  *     «+N more».
+ *  9. **The health strip (your-work board P1)**: its cells count the live
+ *     listing, a cell opens its list and «+N more» expands it, a wiki taking no
+ *     answers reads «owner not set», an adopt repaints the count, a themes map
+ *     has no strip.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -72,6 +76,10 @@ const P_WHY = "e2e-wm-p-why";
 const SWEEP = "e2e-wm-sweep";
 /** P6: a seven-page effort a page declared after the load must join on a listing refresh. */
 const DECL = "e2e-wm-decl";
+/** The health strip: one wiki with counts, one taking no answers, one an adopt grows. */
+const STRIP = "e2e-wm-strip";
+const STRIP_OFF = "e2e-wm-strip-off";
+const STRIP_GROW = "e2e-wm-strip-grow";
 const LONG_WHY =
   "The two drafts of ⟦plans/alpha.mdx⟧ disagree on the name, the scope and the owner, and the review thread under the second draft has gone quiet for a week, so nobody has decided which of them the next slice builds on.";
 /** Clamps to two lines in a narrow card and fits them in a wide one. */
@@ -86,6 +94,27 @@ const WHY_FITS_AT = 900;
 
 function md(title: string): string {
   return `---\ntitle: ${title}\n---\n\nBody of ${title}.\n`;
+}
+
+/** A page with one waiting lane naming `ids`, each with a `<Question>` block. */
+function waitPage(title: string, ids: string[], since: string, frontmatter = "", to = ""): string {
+  const items = ids.map((id) => `- ${id} needs a pick`).join("\n");
+  const blocks = ids.map((id) => `<Question id="${id}"${to ? ` to="${to}"` : ""}>\n\nWhich one?\n\n</Question>`).join("\n\n");
+  return `---\ntitle: ${title}\n${frontmatter}---\n\n<NextMoves>\n\n<Lane kind="waiting" since="${since}">\n\n${items}\n\n</Lane>\n\n</NextMoves>\n\n${blocks}\n`;
+}
+
+function dayBefore(now: number, days: number): string {
+  return new Date(now - days * 24 * HOUR).toISOString().slice(0, 10);
+}
+
+/** Fourteen decisions on thirteen pages, the oldest about 30 days old, plus the pages that must not count. */
+async function seedStripPages(root: string, now: number): Promise<void> {
+  for (let i = 1; i <= 12; i++) await writeFile(path.join(root, `plans/wait-${i}.mdx`), waitPage(`Wait ${i}`, ["O1"], dayBefore(now, 30 - i)), "utf8");
+  await writeFile(path.join(root, "plans/two.mdx"), waitPage("Two asks", ["O1", "O2"], dayBefore(now, 10)), "utf8");
+  await writeFile(path.join(root, "plans/other.mdx"), waitPage("Other group", ["O1"], dayBefore(now, 90), "", "fag"), "utf8");
+  await writeFile(path.join(root, "plans/dropped.mdx"), waitPage("Dropped", ["O1"], dayBefore(now, 90), "plan_status: abandoned\n"), "utf8");
+  await writeFile(path.join(root, "plans/steps.mdx"), `---\ntitle: Steps\n---\n\n<NextMoves>\n\n<Lane kind="you">\n\n- One\n- Two\n- Three\n\n</Lane>\n\n</NextMoves>\n`, "utf8");
+  await writeFile(path.join(root, "plans/loop.mdx"), `---\ntitle: Loop\nplan_status: shipped\nfollowups: open\nstatus_date: ${dayBefore(now, 5)}\n---\n\nBody.\n`, "utf8");
 }
 
 type NeedFixture = { title: string; kind: string; why: string; action: string; pages: string[] };
@@ -205,6 +234,11 @@ test.beforeAll(async () => {
   await seedWiki(SWEEP, null);
   for (let i = 1; i <= 6; i++) await writeFile(path.join(roots[SWEEP]!, `plans/p${i}.mdx`), md(`Page ${i}`), "utf8");
   await writeFile(path.join(roots[SWEEP]!, ".work-map.json"), sweepMapJson(now - 30 * HOUR), "utf8");
+  await seedStripPages(roots[SWEEP]!, now);
+  for (const n of [STRIP, STRIP_OFF, STRIP_GROW]) await seedWiki(n, now - 2 * HOUR);
+  await seedStripPages(roots[STRIP]!, now);
+  await seedStripPages(roots[STRIP_OFF]!, now);
+  await writeFile(path.join(roots[STRIP_GROW]!, "plans/first.mdx"), waitPage("First wait", ["O1"], dayBefore(now, 2)), "utf8");
   await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -216,7 +250,10 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, SWEEP].join(","),
+      WIKI_ANSWER_OWNER: "Test Owner (T000001)",
+      WIKI_ANSWER_GROUPS: "utvikler=T000001",
+      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -416,6 +453,100 @@ test("a page declared after the load joins its seven-page effort on a listing re
   await expect(links.first()).toHaveText("Declared today");
   await expect(links).toHaveCount(6);
   await expect(alpha.locator(".wiki-wm-more")).toHaveText(" +2 more");
+});
+
+test("the health strip's cells count the live listing, and the listing says the same", async ({ page }) => {
+  const listing = (await (await page.request.get(`${BASE}/api/wiki/pages?wiki=${STRIP}`)).json()) as {
+    waitsCounted: boolean;
+    pages: { relPath: string; movesWaiting?: number; waitingSince?: string }[];
+  };
+  expect(listing.waitsCounted).toBe(true);
+  const at = (rel: string) => listing.pages.find((p) => p.relPath === rel)!;
+  expect(at("plans/two.mdx").movesWaiting).toBe(2);
+  expect(at("plans/other.mdx").movesWaiting).toBeUndefined();
+  await openStart(page, STRIP);
+  const cell = (name: string) => page.locator(`#wikiWorkCard [data-wm-cell="${name}"]`);
+  await expect(page.locator("#wikiWorkCard .wiki-wm-cell")).toHaveCount(4);
+  await expect(cell("decisions").locator("b")).toHaveText("14");
+  await expect(cell("decisions")).toHaveClass(/\bwarn\b/);
+  await expect(cell("oldest").locator("b")).toHaveText(/^(28|29|30) d$/);
+  await expect(cell("oldest")).toHaveClass(/\bwarn\b/);
+  await expect(cell("steps").locator("b")).toHaveText("3");
+  await expect(cell("shipped").locator("b")).toHaveText("1");
+  await expect(cell("shipped")).toHaveClass(/\bmuted\b/);
+  // The layout of the prototype's Proposed view: the strip opens the card, in one row at this width.
+  const boxes = await page.locator("#wikiWorkCard .wiki-wm-cell").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().top));
+  expect(new Set(boxes).size).toBe(1);
+});
+
+test("a cell opens its list, oldest first, and +N more expands it", async ({ page }) => {
+  await openStart(page, STRIP);
+  const card = page.locator("#wikiWorkCard");
+  const rows = card.locator(".wiki-wm-drill-row");
+  await expect(rows).toHaveCount(0);
+  await card.locator('[data-wm-cell="decisions"]').click();
+  await expect(card.locator('[data-wm-cell="decisions"]')).toHaveAttribute("aria-expanded", "true");
+  await expect(rows).toHaveCount(8);
+  await expect(rows.first()).toContainText("Wait 1");
+  await expect(rows.first()).toContainText(/· 1 · since \d{4}-\d{2}-\d{2} · \d+ d/);
+  await expect(card.locator("[data-wm-drill-more]")).toHaveText("+5 more");
+  await card.locator("[data-wm-drill-more]").click();
+  await expect(rows).toHaveCount(13);
+  await expect(card.locator("[data-wm-drill-more]")).toHaveCount(0);
+  // Focus lands on the first row the button hid, not on the document.
+  expect(await page.evaluate(() => document.activeElement?.closest(".wiki-wm-drill-row")?.textContent ?? "")).toContain("Wait 9");
+  await expect(rows.filter({ hasText: "Two asks" })).toContainText("· 2 ·");
+  await expect(card.locator(".wiki-wm-drill")).not.toContainText("Other group");
+  await expect(card.locator(".wiki-wm-drill")).not.toContainText("Dropped");
+  // Another cell swaps the list and folds it again; its own cell closes it.
+  await card.locator('[data-wm-cell="steps"]').click();
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("Steps");
+  await card.locator('[data-wm-cell="steps"]').click();
+  await expect(rows).toHaveCount(0);
+  // A row opens its page.
+  await card.locator('[data-wm-cell="shipped"]').click();
+  await rows.first().locator("a").click();
+  await expect(page).toHaveURL(/relPath=plans%2Floop\.mdx/);
+});
+
+test("a wiki that takes no answers reads «owner not set» in both wait cells", async ({ page }) => {
+  const listing = (await (await page.request.get(`${BASE}/api/wiki/pages?wiki=${STRIP_OFF}`)).json()) as { waitsCounted: boolean };
+  expect(listing.waitsCounted).toBe(false);
+  await openStart(page, STRIP_OFF);
+  const card = page.locator("#wikiWorkCard");
+  for (const name of ["decisions", "oldest"]) {
+    await expect(card.locator(`[data-wm-cell="${name}"] b`)).toHaveText("owner not set");
+    await expect(card.locator(`[data-wm-cell="${name}"]`)).toBeDisabled();
+  }
+  await expect(card.locator('[data-wm-cell="steps"] b')).toHaveText("3");
+});
+
+test("an adopt repaints the strip's count, keeping the open list", async ({ page }) => {
+  await page.clock.install();
+  await openStart(page, STRIP_GROW);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator('[data-wm-cell="decisions"] b')).toHaveText("1");
+  await card.locator('[data-wm-cell="decisions"]').click();
+  await expect(card.locator(".wiki-wm-drill-row")).toHaveCount(1);
+  await writeFile(path.join(roots[STRIP_GROW]!, "plans/second.mdx"), waitPage("Second wait", ["O1"], "2026-01-02"), "utf8");
+  await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.locator("#wikiList")).toContainText("Second wait");
+  await expect(card.locator('[data-wm-cell="decisions"] b')).toHaveText("2");
+  await expect(card.locator(".wiki-wm-drill-row")).toHaveCount(2);
+});
+
+test("a themes map has no strip", async ({ page }) => {
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: false, map: sweepThemesMap(Date.now()) } });
+  });
+  await openStart(page, SWEEP);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator(".wiki-wn-title")).toHaveText("What you’re following");
+  await expect(card.locator(".wiki-wm-strip")).toHaveCount(0);
 });
 
 test("a no-map wiki asks for the digest no more often across adopts after a digest error", async ({ page }) => {
@@ -1201,6 +1332,8 @@ for (const theme of THEMES) {
     await card.locator(".wiki-wm-why-more:visible").click();
     await expect(card.locator(".wiki-wm-why.open")).toHaveCount(1);
     await expect(card.locator("#wikiWorkMapStatus.warn")).toBeVisible();
+    await card.locator('[data-wm-cell="decisions"]').click();
+    await expect(card.locator("[data-wm-drill-more]")).toBeVisible();
     await sweep("map");
     // ↻ hovered, then focused from the keyboard.
     await card.locator("#wikiWorkMapRefresh").hover();
@@ -1253,6 +1386,11 @@ for (const theme of THEMES) {
     await card.locator("#wikiWorkMapRetry").hover();
     await expect.poll(async () => card.locator("#wikiWorkMapRetry").evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
     await sweep("Retry hover");
+    // A wiki taking no answers: the two cells' «owner not set».
+    await page.unroute("**/api/wiki/work-map?*");
+    await openStart(page, STRIP_OFF);
+    await expect(card.locator('[data-wm-cell="decisions"] b')).toHaveText("owner not set");
+    await sweep("owner not set");
     expect((await styledCardClasses(page)).filter((c) => !seen.has(c))).toEqual([]);
     console.log(`contrast min ${theme.label}: ${Math.min(...mins).toFixed(2)} (${labels.map((l, i) => `${l} ${mins[i]!.toFixed(2)}`).join(", ")})`);
     expect(low).toEqual([]);

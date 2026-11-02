@@ -145,6 +145,10 @@ export interface WikiListing {
   /** Open steps in the body's `<NextMoves>` `you` lanes (the ✋ flag and the
    *  "waiting on you" chip). Derived server-side; absent ⇒ 0. */
   movesYou?: number;
+  /** Open questions a waiting lane asks the owner (`waitsOnOwner`); absent at 0. */
+  movesWaiting?: number;
+  /** The oldest `since=` among the lanes holding those questions, `YYYY-MM-DD`. */
+  waitingSince?: string;
   /** One line of free prose qualifying the status. Unvalidated by nature; absent
    *  when empty or undeclared. Arrives **unescaped** — the first renderer of this
    *  field owns escaping it at its own sink. */

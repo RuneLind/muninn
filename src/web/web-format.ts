@@ -65,8 +65,10 @@ import {
   decisionLogEntries,
   DECISION_ID_RE,
   isOpenQuestion,
+  namedQuestionIds,
   parseQuestionAttrs,
   parseQuestionPage,
+  questionIdRe,
   resolveQuestionTargets,
   type QuestionRenderOptions,
   type QuestionState,
@@ -1374,35 +1376,6 @@ let currentLaneCards: LaneCards | undefined;
 let currentLinkTexts: readonly string[] | undefined;
 /** `opts.wikiLinkSources` for the call in progress. */
 let currentLinkSources: readonly string[] | undefined;
-
-/** Characters an id may not touch on either side to count as named. */
-const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
-
-/** Where each `<Question>` id an item names sits, in text order. An id counts
- *  only on its own boundary: `S1` is not named by `S10`, `PS1`, `S1.1`, `S1-2`
- *  or `1.S1` — a `.` or `-` joined to an id character on its far side extends
- *  the id — while a sentence-final `S1.` is named. */
-function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number }[] {
-  const hits: { id: string; at: number }[] = [];
-  for (const id of ids) {
-    const m = questionIdRe(id).exec(text);
-    if (m) hits.push({ id, at: m.index });
-  }
-  return hits.sort((a, b) => a.at - b.at);
-}
-
-/** `id` on its own boundary, as {@link namedQuestionHits} reads it. */
-function questionIdRe(id: string, flags = ""): RegExp {
-  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`, flags);
-}
-
-/** The `<Question>` ids an item names, in the order they appear. On the
- *  reader a wikilink is a sentinel here, so an id in its target or text names
- *  nothing. The peek, the counts and the card moves all read this, so they agree. */
-function namedQuestionIds(item: string, ids: Iterable<string>): string[] {
-  return namedQuestionHits(item, ids).map((h) => h.id);
-}
 
 /**
  * The pre-pass behind D13: the first waiting lane (in document order) whose
