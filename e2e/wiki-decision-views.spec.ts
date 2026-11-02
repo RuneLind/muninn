@@ -119,12 +119,12 @@ const MANY = [
   "",
 ].join("\n");
 
-const GRID_REL = "plans/questions.mdx";
-// A long question and answer, one open with a card, one open with none, and 9
-// decided, so the cap folds some.
 /** The grid counts an age from the render day, so a fixed `since=` passes on one day only. */
 const FOUR_DAYS_AGO = new Date(Date.parse(`${renderDay()}T00:00:00Z`) - 4 * 86_400_000).toISOString().slice(0, 10);
 
+const GRID_REL = "plans/questions.mdx";
+// A long question and answer, one open with a card, one open with none, and 9
+// decided, so the cap folds some.
 const GRID = [
   "---",
   "title: Question plan",
@@ -457,7 +457,7 @@ test.describe("Wiki reader: question grid", () => {
     expect(await y(".wiki-article .next-moves")).toBeGreaterThan(await y(".wiki-article .qg"));
     await expect(page.locator(".qg-count")).toHaveText("2 open of 11");
     await expect(page.locator(".qg-rows > .qg-row .qg-id")).toHaveText(["O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8"]);
-    await expect(page.locator(".qg-rows > .qg-row").first().locator(".qg-chip")).toHaveText("open · 4 d");
+    await expect(page.locator(".qg-rows > .qg-row").first().locator(".qg-chip")).toHaveText(/^open · [45] d$/);  // 5 when the run crosses Oslo midnight
   });
 
   test("the cap holds the rest behind one click", async ({ page }) => {
