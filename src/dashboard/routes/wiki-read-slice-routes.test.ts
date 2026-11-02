@@ -113,15 +113,26 @@ describe("wiki read slice — routes", () => {
     beforeEach(async () => {
       await Bun.write(path.join(ro, "Waits.md"), WAITS);
       await Bun.write(path.join(ro, "Linker.md"), "---\ntitle: Linker\n---\n\nSee [[Waits]].\n");
+      // One commit holds both pages, so Linker's `movedWith` carries a Waits row.
+      for (const args of [["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+        const proc = Bun.spawn(["git", "-C", ro, "-c", "user.email=f@example.com", "-c", "user.name=f", "-c", "commit.gpgsign=false", ...args], { stdout: "ignore", stderr: "ignore" });
+        if ((await proc.exited) !== 0) throw new Error(`git ${args[0]} failed`);
+      }
       __setWikiIndexAnswerConfigForTest(answers);
       __resetWikiCacheForTest();
     });
     afterEach(() => __setWikiIndexAnswerConfigForTest(null));
 
+    const movedWithOfLinker = async (app: Hono) => {
+      const body = (await (await app.request("/api/wiki/page?wiki=rowiki&name=Linker")).json()) as { movedWith: { relPath: string }[] };
+      return body.movedWith.map((m) => m.relPath);
+    };
+
     // Comparing a page's `q-for` line with a count says which group the owner is
     // in, and the slice serves no work map to read one.
     test("nais: no response carries it, on any row shape", async () => {
       const app = appWithAnswers("nais");
+      expect(await movedWithOfLinker(app)).toContain("Waits.md");
       for (const url of [
         "/api/wiki/pages?wiki=rowiki",
         "/api/wiki/page?wiki=rowiki&name=Waits",
@@ -138,6 +149,7 @@ describe("wiki read slice — routes", () => {
 
     test("default: the listing carries it for the card, and no other row does", async () => {
       const app = appWithAnswers("default");
+      expect(await movedWithOfLinker(app)).toContain("Waits.md");
       const listing = (await (await app.request("/api/wiki/pages?wiki=rowiki")).json()) as {
         waitsCounted: boolean;
         pages: { relPath: string; movesWaiting?: number; waitingSince?: string }[];

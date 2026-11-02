@@ -421,6 +421,15 @@ describe("waitsOnOwner: only the owner's lane holds a counted item", () => {
     expect(onLane('role="utvikler" who="Waiting on the calendar"')).toEqual(["O1"]);
   });
 
+  test("a role that is not a valid key reads as no role: open, or left to the who", () => {
+    for (const role of ["fag jus", "z990001"]) {
+      expect(onLane(`role="${role}"`)).toEqual(["O1"]);
+      expect(onLane(`role="${role}"`, q("O1", "fag"))).toEqual([]);
+      expect(onLane(`role="${role}" who="Waiting on Kari"`)).toEqual(["O1"]);
+      expect(onLane(`role="${role}" who="Waiting on the calendar"`)).toEqual([]);
+    }
+  });
+
   test("a who naming nobody the owner is holds nothing", () => {
     for (const text of ["Waiting on the calendar", "Venter på prioritering", "Claude", "Next", "Whoever next touches it", "Venter på fag"]) {
       expect(`${text}: ${onLane(`who="${text}"`)}`).toBe(`${text}: `);
@@ -435,7 +444,7 @@ describe("waitsOnOwner: only the owner's lane holds a counted item", () => {
     expect(onLane('who="Waiting on Rune"', q("O1", "utvikler"), rune)).toEqual(["O1"]);
   });
 
-  test("a who match is a whole word, with non-Latin letters as word characters", () => {
+  test("a who match is a whole word, with letters beyond ASCII as word characters", () => {
     for (const text of ["Karianne", "Testdalen", "Mari-Kari", "Kari-Anne"]) {
       expect(`${text}: ${onLane(`who="${text}"`)}`).toBe(`${text}: `);
     }
@@ -446,6 +455,29 @@ describe("waitsOnOwner: only the owner's lane holds a counted item", () => {
     for (const text of ["Åsebø", "Bråse", "Ørnulf", "Sørn"]) {
       expect(`${text}: ${onLane(`who="${text}"`, q("O1"), ase)}`).toBe(`${text}: `);
     }
+  });
+
+  // Each of these is a character class in the word split: without it the text
+  // breaks into pieces, and a piece names the owner.
+  test("a digit is a word character: another person's ident shares no word with the owner's", () => {
+    expect(onLane('who="Waiting on A999999"')).toEqual([]);
+  });
+
+  test("an underscore is a word character: a group key's parts name nothing", () => {
+    const inFagJus = waitOwnerFrom({ owner: OWNER, groups: new Map([["fag_jus", new Set(["A123456"])]]) })!;
+    expect(onLane('who="jus"', q("O1"), inFagJus)).toEqual([]);
+    expect(onLane('who="fag_jus"', q("O1"), inFagJus)).toEqual(["O1"]);
+  });
+
+  test("a combining mark is a word character: a mark inside a word does not end it", () => {
+    expect(onLane('who="Kari\u0307x"')).toEqual([]);
+  });
+
+  // The empty ident and the split's empty edge strings must not meet.
+  test("a name-only owner matches no who through punctuation", () => {
+    const nameOnly = waitOwnerFrom({ owner: "Kari Testdal", groups: GROUPS })!;
+    expect(onLane('who="(Ola)"', q("O1"), nameOnly)).toEqual([]);
+    expect(onLane('who="(Kari)"', q("O1"), nameOnly)).toEqual(["O1"]);
   });
 
   test("a lane with neither role nor who is open to the question's rule", () => {

@@ -868,9 +868,10 @@ export interface WikiPageMeta {
    */
   movesYou?: number;
   /**
-   * DECISIONS WAITING — the open `<Question>` ids a `waiting` lane names that ask
-   * `WIKI_ANSWER_OWNER` (`waitsOnOwner`, `next-moves.ts`). Derived at index time
-   * and absent, not 0, on a page with none or with no owner configured; the
+   * DECISIONS WAITING — the open `<Question>` ids that ask `WIKI_ANSWER_OWNER` and
+   * that a `waiting` lane of the owner's names: a `role` the owner is in, a `who`
+   * naming the owner, or neither (`waitsOnOwner`, `next-moves.ts`). Derived at index
+   * time and absent, not 0, on a page with none or with no owner configured; the
    * listing's `waitsCounted` says whether it applies to this wiki. Only
    * `/api/wiki/pages` serves it, and not on the read slice (`toListing`).
    */
