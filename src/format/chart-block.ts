@@ -100,12 +100,13 @@ export const CHART_DATE_HEADERS: readonly string[] = [
   "år", "året", "årstall", "year", "dato", "datoen", "datoer", "date", "dates", "tid", "tidspunkt", "tidspunktet",
   "tidspunkter", "klokke", "klokkeslett", "kl", "kl.", "periode", "perioden", "period", "uke", "uka", "uken", "week",
   "måned", "måneden", "month", "siden", "since", "når", "when", "kandidat siden",
+  "start date", "release year", "fra dato", "merge date", "dato:", "år*",
 ];
 /** A unit in a header's trailing `(…)` (a currency too): «Tid (s)» heads a
  *  duration, so the part stays and the header is no date header. */
 export const CHART_HEADER_UNITS: readonly string[] = [
   "s", "sek", "sekunder", "sec", "ms", "min", "mins", "minutter", "minutes", "h", "t", "time", "timer", "hours",
-  "d", "dager", "days", "uker", "weeks", "%",
+  "d", "dager", "days", "uker", "weeks", "%", "seconds", "sekund", "sek.", "min.", "hrs",
 ];
 const DATE_HEADER_SET: ReadonlySet<string> = new Set(CHART_DATE_HEADERS);
 const HEADER_UNIT_SET: ReadonlySet<string> = new Set(CHART_HEADER_UNITS);

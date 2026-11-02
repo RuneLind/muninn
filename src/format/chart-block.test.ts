@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CHART_DATE_HEADERS,
+  CHART_HEADER_UNITS,
   CHART_QUALIFIERS,
   CHART_UNIT_PLURALS,
   chartBlocks,
@@ -662,8 +663,8 @@ describe("bars and range cell grammar", () => {
   }
 });
 
-// The closed cell grammar (class check): every entry of CHART_QUALIFIERS, CHART_UNIT_PLURALS and
-// CHART_DATE_HEADERS, the tokens off those lists, the false merges, the two pins and the real cases earlier
+// The closed cell grammar (class check): every entry of CHART_QUALIFIERS, CHART_UNIT_PLURALS,
+// CHART_DATE_HEADERS and CHART_HEADER_UNITS' #774 spellings, the tokens off those lists, the false merges, the two pins and the real cases earlier
 // rounds kept. A row is [id, kind, value header, column cells, the rows drawn, the findings]; Q qualifiers,
 // U units after a currency, P plurals (PC case, PI one cell, PF false merges), D date headers (DC, DN not one,
 // DP a parenthesised part), N pins, R real cases. The table: grammar-closed-table.md in the PR's scratchpad.
@@ -835,6 +836,12 @@ const CLOSED: [string, "bars" | "range", string, string[], string | null, string
   ["D30", "bars", "Når", ["12.30"], null, ["fatal: Når holds dates, times or years, not numbers"]],
   ["D31", "bars", "When", ["12.30"], null, ["fatal: When holds dates, times or years, not numbers"]],
   ["D32", "bars", "Kandidat siden", ["12.30"], null, ["fatal: Kandidat siden holds dates, times or years, not numbers"]],
+  ["D33", "bars", "Start date", ["12.30"], null, ["fatal: Start date holds dates, times or years, not numbers"]],
+  ["D34", "bars", "Release year", ["12.30"], null, ["fatal: Release year holds dates, times or years, not numbers"]],
+  ["D35", "bars", "Fra dato", ["12.30"], null, ["fatal: Fra dato holds dates, times or years, not numbers"]],
+  ["D36", "bars", "Merge date", ["12.30"], null, ["fatal: Merge date holds dates, times or years, not numbers"]],
+  ["D37", "bars", "Dato:", ["12.30"], null, ["fatal: Dato: holds dates, times or years, not numbers"]],
+  ["D38", "bars", "År*", ["12.30"], null, ["fatal: År* holds dates, times or years, not numbers"]],
   ["DC1", "bars", "ÅR", ["12.30"], null, ["fatal: ÅR holds dates, times or years, not numbers"]],
   ["DC2", "range", "Kandidat siden", ["18.09","29.09"], null, ["fatal: Kandidat siden holds dates, times or years, not numbers"]],
   ["DN1", "bars", "Antall per måned", ["12.30"], "12.3", []],
@@ -859,6 +866,11 @@ const CLOSED: [string, "bars" | "range", string, string[], string | null, string
   ["DN20", "bars", "Tid (%)", ["12.30"], "12.3", []],
   ["DN21", "bars", "Tid til master", ["12.30"], "12.3", []],
   ["DN22", "bars", "År og måned", ["12.30"], "12.3", []],
+  ["DN23", "bars", "Tid (seconds)", ["12.30"], "12.3", []],
+  ["DN24", "bars", "Tid (sekund)", ["12.30"], "12.3", []],
+  ["DN25", "bars", "Tid (sek.)", ["12.30"], "12.3", []],
+  ["DN26", "bars", "Tid (min.)", ["12.30"], "12.3", []],
+  ["DN27", "bars", "Tid (hrs)", ["12.30"], "12.3", []],
   ["DP1", "bars", "Tid (UTC)", ["12.30"], null, ["fatal: Tid (UTC) holds dates, times or years, not numbers"]],
   ["DP2", "bars", "År (30.10)", ["2024","2025"], null, ["fatal: År (30.10) holds dates, times or years, not numbers"]],
   ["DP3", "bars", "Dato (svar)", ["12.30"], null, ["fatal: Dato (svar) holds dates, times or years, not numbers"]],
@@ -906,7 +918,8 @@ describe("closed cell grammar", () => {
   test("the lists are the ones the table enumerates: a new entry needs its row", () => {
     expect([...CHART_QUALIFIERS]).toEqual(["each","hver","stk","total","totalt","i alt","per stk","per PR","per session","per økt"]);
     expect(CHART_UNIT_PLURALS.map(([s, p]) => `${s}/${p}`)).toEqual(["dag/dager","day/days","uke/uker","week/weeks","måned/måneder","month/months","year/years","time/timer","hour/hours","min/mins","minutt/minutter","minute/minutes","sekund/sekunder","second/seconds","økt/økter","session/sessions","pr/prs","merge/merges","run/runs","kjøring/kjøringer","runde/runder","round/rounds","fil/filer","file/files","linje/linjer","line/lines","rad/rader","row/rows","sak/saker","test/tests","test/tester","forekomst/forekomster","occurrence/occurrences","char/chars","flip/flips","spec/specs","publisering/publiseringer","commit/commits"]);
-    expect([...CHART_DATE_HEADERS]).toEqual(["år","året","årstall","year","dato","datoen","datoer","date","dates","tid","tidspunkt","tidspunktet","tidspunkter","klokke","klokkeslett","kl","kl.","periode","perioden","period","uke","uka","uken","week","måned","måneden","month","siden","since","når","when","kandidat siden"]);
+    expect([...CHART_DATE_HEADERS]).toEqual(["år","året","årstall","year","dato","datoen","datoer","date","dates","tid","tidspunkt","tidspunktet","tidspunkter","klokke","klokkeslett","kl","kl.","periode","perioden","period","uke","uka","uken","week","måned","måneden","month","siden","since","når","when","kandidat siden","start date","release year","fra dato","merge date","dato:","år*"]);
+    expect([...CHART_HEADER_UNITS]).toEqual(["s","sek","sekunder","sec","ms","min","mins","minutter","minutes","h","t","time","timer","hours","d","dager","days","uker","weeks","%","seconds","sekund","sek.","min.","hrs"]);
   });
 });
 
