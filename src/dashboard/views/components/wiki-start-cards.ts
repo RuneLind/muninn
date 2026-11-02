@@ -40,7 +40,7 @@ import {
   type WorkMapGetBody,
 } from "./wiki-work-card.ts";
 import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
-import { declarationKey } from "../../../wiki/work-map/join.ts";
+import { declarationKey, isThemeMap } from "../../../wiki/work-map/join.ts";
 import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
 
 export interface StartCardsDeps {
@@ -834,8 +834,8 @@ function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
   if (e.type === "adopt" && slot === prev) {
     // The run did not move, but a page may have declared an effort since it
     // (P6): re-join, and only when something a join reads changed, so an
-    // ordinary adopt leaves the card's markup alone.
-    if (slot.kind === "card" && workBody && (currentDeclarationKey(workBody.map.runAtMs) !== paintedDeclarationKey || currentStripKey() !== paintedStripKey)) paintWorkCard();
+    // ordinary adopt leaves the card's markup alone. A themes card has no strip.
+    if (slot.kind === "card" && workBody && (currentDeclarationKey(workBody.map.runAtMs) !== paintedDeclarationKey || (!isThemeMap(workBody.map) && currentStripKey() !== paintedStripKey))) paintWorkCard();
     return;
   }
   if (slot.kind === "card") paintWorkCard();

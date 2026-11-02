@@ -31,7 +31,8 @@
  *  9. **The health strip (your-work board P1)**: its cells count the live
  *     listing, a cell opens its list and «+N more» expands it, a wiki taking no
  *     answers reads «owner not set», an adopt repaints the count, a themes map
- *     has no strip.
+ *     has no strip and keeps its markup when only the strip's inputs change.
+ *     A long title wraps in the list; focus on an open cell shows in every theme.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -45,7 +46,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
-import { paintedMeasure, token } from "./contrast.ts";
+import { contrastOf, paintedMeasure, token } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-work-card");
@@ -80,6 +81,11 @@ const DECL = "e2e-wm-decl";
 const STRIP = "e2e-wm-strip";
 const STRIP_OFF = "e2e-wm-strip-off";
 const STRIP_GROW = "e2e-wm-strip-grow";
+const STRIP_LONG = "e2e-wm-strip-long";
+/** A themes map a test adopts page changes under. */
+const THEME_HOLD = "e2e-wm-theme-hold";
+/** No break opportunity anywhere. */
+const LONG_TOKEN = "Aa".repeat(90);
 const LONG_WHY =
   "The two drafts of ⟦plans/alpha.mdx⟧ disagree on the name, the scope and the owner, and the review thread under the second draft has gone quiet for a week, so nobody has decided which of them the next slice builds on.";
 /** Clamps to two lines in a narrow card and fits them in a wide one. */
@@ -239,6 +245,11 @@ test.beforeAll(async () => {
   await seedStripPages(roots[STRIP]!, now);
   await seedStripPages(roots[STRIP_OFF]!, now);
   await writeFile(path.join(roots[STRIP_GROW]!, "plans/first.mdx"), waitPage("First wait", ["O1"], dayBefore(now, 2)), "utf8");
+  await seedWiki(STRIP_LONG, now - 2 * HOUR);
+  await writeFile(path.join(roots[STRIP_LONG]!, "plans/long.mdx"), waitPage(LONG_TOKEN, ["O1"], dayBefore(now, 3)), "utf8");
+  // No title: `pageTitle` falls back to the stem.
+  await writeFile(path.join(roots[STRIP_LONG]!, `plans/${"s".repeat(180)}.mdx`), waitPage("x", ["O1"], dayBefore(now, 2)).replace("title: x\n", ""), "utf8");
+  await seedWiki(THEME_HOLD, now - 2 * HOUR);
   await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -250,10 +261,10 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, SWEEP].join(","),
+      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, SWEEP].join(","),
       WIKI_ANSWER_OWNER: "Test Owner (T000001)",
       WIKI_ANSWER_GROUPS: "utvikler=T000001",
-      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -547,6 +558,56 @@ test("a themes map has no strip", async ({ page }) => {
   const card = page.locator("#wikiWorkCard");
   await expect(card.locator(".wiki-wn-title")).toHaveText("What you’re following");
   await expect(card.locator(".wiki-wm-strip")).toHaveCount(0);
+});
+
+for (const width of [1280, 700]) {
+  test(`a long unbroken title wraps inside the open list at ${width} wide`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await openStart(page, STRIP_LONG);
+    const card = page.locator("#wikiWorkCard");
+    await card.locator('[data-wm-cell="decisions"]').click();
+    const drill = card.locator(".wiki-wm-drill");
+    await expect(drill.locator(".wiki-wm-drill-row")).toHaveCount(2);
+    await expect(drill).toContainText(LONG_TOKEN);
+    await expect(drill).toContainText("s".repeat(180));
+    const m = await drill.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth, rowH: el.querySelector("li")!.getBoundingClientRect().height, twoEm: parseFloat(getComputedStyle(el).fontSize) * 2 }));
+    expect(m.scroll).toBeLessThanOrEqual(m.client);
+    expect(m.rowH).toBeGreaterThan(m.twoEm);
+    expect(await card.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0);
+  });
+}
+
+test("a themes map keeps its markup when only the strip's inputs change, and repaints on a declaration", async ({ page }) => {
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: false, map: sweepThemesMap(Date.now()) } });
+  });
+  await page.clock.install();
+  await openStart(page, THEME_HOLD);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator(".wiki-wn-title")).toHaveText("What you’re following");
+  const selected = await page.evaluate(() => {
+    const el = document.querySelector("#wikiWorkCard .wiki-wm-summary")!;
+    el.setAttribute("data-before-adopt", "");
+    getSelection()!.selectAllChildren(el);
+    return String(getSelection());
+  });
+  expect(selected.length).toBeGreaterThan(0);
+  const adopt = async (title: string) => {
+    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(page.locator("#wikiList")).toContainText(title);
+    await page.waitForTimeout(300);
+  };
+  await writeFile(path.join(roots[THEME_HOLD]!, "plans/hold-steps.mdx"), `---\ntitle: Hold steps\n---\n\n<NextMoves>\n\n<Lane kind="you">\n\n- One\n\n</Lane>\n\n</NextMoves>\n`, "utf8");
+  await adopt("Hold steps");
+  await expect(card.locator("[data-before-adopt]")).toHaveCount(1);
+  expect(await page.evaluate(() => String(getSelection()))).toBe(selected);
+  // A declaration still re-joins a themes map: this is the repaint the guard must not take away.
+  await writeFile(path.join(roots[THEME_HOLD]!, "plans/hold-declared.mdx"), `---\ntitle: Hold declared\neffort: t0\n---\n\nBody.\n`, "utf8");
+  await adopt("Hold declared");
+  await expect(card.locator("[data-before-adopt]")).toHaveCount(0);
 });
 
 test("a no-map wiki asks for the digest no more often across adopts after a digest error", async ({ page }) => {
@@ -1219,6 +1280,60 @@ const THEMES: { label: string; stored: string | null; scheme: "light" | "dark" }
   { label: "System light", stored: null, scheme: "light" },
   { label: "System dark", stored: null, scheme: "dark" },
 ];
+
+for (const theme of THEMES) {
+  test(`keyboard focus on an open cell looks different from open without focus in the ${theme.label} theme`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.emulateMedia({ colorScheme: theme.scheme });
+    await page.addInitScript((v) => {
+      if (v === null) localStorage.removeItem("muninn-theme");
+      else localStorage.setItem("muninn-theme", v);
+    }, theme.stored);
+    await openStart(page, STRIP);
+    const card = page.locator("#wikiWorkCard");
+    const open = card.locator('[data-wm-cell="decisions"]');
+    const next = card.locator('[data-wm-cell="oldest"]');
+    const shut = card.locator('[data-wm-cell="steps"]');
+    const accent = await token(page, "--accent");
+    const paint = (l: typeof open) =>
+      l.evaluate((el) => {
+        const c = getComputedStyle(el);
+        return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor };
+      });
+    await open.focus();
+    await page.keyboard.press("Enter");
+    await expect(open).toHaveAttribute("aria-expanded", "true");
+    await expect(open).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(next).toBeFocused();
+    const closedFocused = await paint(next);
+    const openAtRest = await paint(open);
+    const closedAtRest = await paint(shut);
+    await page.keyboard.press("Shift+Tab");
+    await expect(open).toBeFocused();
+    expect(await open.evaluate((el) => el.matches(":focus-visible"))).toBe(true);
+    const openFocused = await paint(open);
+    expect(openFocused).not.toEqual(openAtRest);
+    // Focus is the outline, on an open cell and a closed one alike.
+    expect(openAtRest.outline).toBe("none 0px");
+    expect(openFocused.outline).toBe("solid 2px");
+    expect(openFocused.outlineColor).toBe(accent);
+    expect(closedFocused.outline).toBe("solid 2px");
+    // Open still reads at rest, without any outline.
+    expect(openAtRest.shadow).toContain(accent);
+    expect(openAtRest.border).toBe(accent);
+    expect(closedAtRest.shadow).toBe("none");
+    expect(closedAtRest.border).not.toBe(accent);
+    // The ring is seen against the card behind it (WCAG 1.4.11: 3:1).
+    await card.evaluate((el) => {
+      const probe = document.createElement("span");
+      probe.id = "ringProbe";
+      probe.style.color = "var(--accent)";
+      el.appendChild(probe);
+    });
+    expect(await contrastOf(page.locator("#ringProbe"))).toBeGreaterThanOrEqual(3);
+  });
+}
 
 /** Every element in the card that paints its own text, measured where it sits
  *  (no `.first()`: one class can sit on two boxes). Returns the ratios and the

@@ -2603,8 +2603,10 @@ export async function renderWikiPage(opts?: {
       text-align: left; font: inherit; color: var(--text-secondary); cursor: pointer;
     }
     .wiki-wm-cell:disabled { cursor: default; }
-    .wiki-wm-cell:not(:disabled):hover, .wiki-wm-cell:focus-visible { border-color: var(--accent); }
-    .wiki-wm-cell.on { outline: 2px solid var(--accent); }
+    .wiki-wm-cell:not(:disabled):hover { border-color: var(--accent); }
+    /* The outline is focus alone, so an open cell can show both: open is drawn inside the border. */
+    .wiki-wm-cell:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
+    .wiki-wm-cell.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
     .wiki-wm-cell b { display: block; font-size: 22px; line-height: 1.1; color: var(--text-primary); }
     .wiki-wm-cell span { font-size: 12.5px; }
     .wiki-wm-cell.warn b { color: var(--tone-warn); }
@@ -2612,7 +2614,7 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-cell.unset b { font-size: 13px; line-height: 1.3; font-weight: 600; color: var(--text-soft); }
     .wiki-wm-drill { border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 12px; margin: 4px 0 8px; font-size: 13px; background: var(--bg-surface); }
     .wiki-wm-drill-title { font-weight: 600; color: var(--text-primary); }
-    .wiki-wm-drill-list { margin: 4px 0; padding-left: 20px; color: var(--text-secondary); }
+    .wiki-wm-drill-list { margin: 4px 0; padding-left: 20px; color: var(--text-secondary); overflow-wrap: anywhere; }
     .wiki-wm-drill-row { margin: 2px 0; }
     .wiki-wm-drill-meta { color: var(--text-soft); }
     .wiki-wm-drill-more { border: 0; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--accent-light); cursor: pointer; }
