@@ -14,9 +14,9 @@
  * decision.
  *
  * The question grid (`src/format/question-grid.ts`) shares the server: its place
- * under the status block, the cap, both links, its tokens and 390 px.
+ * under the status block, the cap, the fold with none open, both links, its tokens and 390 px.
  *
- * No model calls, no DB rows: one muninn over a temp wiki holding three
+ * No model calls, no DB rows: one muninn over a temp wiki holding four
  * synthetic plan pages.
  */
 
