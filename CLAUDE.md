@@ -153,7 +153,10 @@ Two traps regardless of how the page is driven:
 - Watcher email checking: Haiku spawned in muninn's agent home on the `gmail-read` tool surface — the bot's Gmail server only, the three Gmail reads allowed, `dontAsk`, the known write tools disallowed; every other `spawnHaiku` is tool-less — see the `MUNINN_AGENT_CWD` row
 - Quiet hours: per-user, timezone-aware, overnight ranges supported (e.g. 22-08)
 - All timestamps stored as `TIMESTAMPTZ` in DB, exposed as epoch ms in TypeScript
-- Where documentation goes: where `src/<module>/reference/notes.md` exists, a design note, measurement or trap about one function goes there, under a heading listed in `## Index`, and a rule for the whole folder goes into `CLAUDE.md`. While a folder is in `pending` in `src/test/claude-md-budgets.json`, keep adding to its `CLAUDE.md`, raise its entry if the guard asks, and never create `reference/` by hand. Text trimmed from this root file follows the same split. Claude Code loads a nested `CLAUDE.md` the first time a session reads a file under its folder, and it then stays in context for the session and is re-read from cache each turn, so `src/test/claude-md-budget.test.ts` caps its size and checks the index
+- Where documentation goes, checked by `src/test/claude-md-budget.test.ts`. Claude Code loads a nested `CLAUDE.md` the first time a session reads a file under its folder, up to a per-file limit of about 40k–150k chars by context window; what it loads is a cost on every later turn, and past the limit only the start is delivered, so rules there go unseen.
+  - A folder with `reference/notes.md`: a note about one function goes into `notes.md`, under a heading listed in `## Index`; a folder-wide rule goes into `CLAUDE.md`. Text trimmed from this root file goes into `notes.md`, never into the module `CLAUDE.md`.
+  - A folder in `pending` (`src/test/claude-md-budgets.json`): keep adding to its `CLAUDE.md` and raise its entry if the guard asks. Never create its `reference/` by hand: its later `git mv` then stops with `fatal: destination exists`.
+  - Any other module: add to `CLAUDE.md` while it fits. Past its ceiling, move detail into a new `src/<module>/reference/notes.md`, add an `## Index` of its headings to `CLAUDE.md`, and delete the folder's entry in that json if it has one.
 
 ## Logging
 
