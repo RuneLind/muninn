@@ -1,15 +1,16 @@
 import { test, expect, describe } from "bun:test";
 import { statSync } from "node:fs";
 import { join, posix } from "node:path";
-import { Lexer, Tokenizer, type Tokens } from "marked";
+import { Lexer, type Tokens } from "marked";
 
 /**
  * Caps every tracked CLAUDE.md that Claude Code reads as memory.
  *
- * Claude Code loads a nested CLAUDE.md the first time a session reads a file under
- * its folder. It then stays in context for the session and is re-read from cache
- * each turn, so its size is a cost on every later turn. Detail about one function belongs in
- * `src/<module>/reference/notes.md`, reached through the `## Index` in CLAUDE.md.
+ * Claude Code loads a nested CLAUDE.md the first time a session reads a file under its folder,
+ * up to a per-file limit of about 40k–150k chars by context window. What it loads is a cost on
+ * every later turn, and past the limit only the start is delivered, so rules there go unseen.
+ * Detail about one function belongs in `src/<module>/reference/notes.md`, reached through the
+ * `## Index` in CLAUDE.md.
  * There is deliberately no "entry too high" rule: it would go red on ordinary shrinks.
  */
 
@@ -65,61 +66,62 @@ function sizeAdvice(path: string, tree: Tree): string {
   return "trim, or move the text into the module it describes";
 }
 
-/**
- * Same tokens as marked's own, bar `raw` and blank-line `space`, without its cost here: on Bun these five rules take time
- * proportional to all the remaining text each time they fail, 2.4 s of 2.5 s on a 591k file.
- * Each is skipped when the block cannot match it, and lheading cannot pass a blank line.
- */
-class BoundedTokenizer extends Tokenizer {
-  override hr(src: string) {
-    return /^ {0,3}[-_*]/.test(src) ? super.hr(src) : undefined;
-  }
-  override blockquote(src: string) {
-    return /^ {0,3}>/.test(src) ? super.blockquote(src) : undefined;
-  }
-  override list(src: string) {
-    return /^ {0,3}[-*+\d]/.test(src) ? super.list(src) : undefined;
-  }
-  override html(src: string) {
-    return /^ {0,3}</.test(src) ? super.html(src) : undefined;
-  }
-  override lheading(src: string) {
-    const blank = src.search(/\n\s*?\n/);
-    return super.lheading(blank < 0 ? src : src.slice(0, blank + 1));
-  }
-}
-
 const lexed = new Map<string, Tokens.Generic[]>();
 
-/** Claude Code's import walker lexes with marked at gfm:false, so the guard reads a file as it does. */
+/** The lexer options of Claude Code's import walker; its `marked` version is not pinned to this one. */
 function lex(text: string): Tokens.Generic[] {
-  const tokens = lexed.get(text) ?? new Lexer({ gfm: false, tokenizer: new BoundedTokenizer() }).lex(text);
+  const tokens = lexed.get(text) ?? new Lexer({ gfm: false }).lex(text);
   lexed.set(text, tokens);
   return tokens;
 }
 
-/** Every leaf's text outside code. A parent's own text would bring its code spans back in. */
-function proseIn(tokens: Tokens.Generic[]): string[] {
+/**
+ * The text Claude Code scans for imports, by its walker's rules. A block `text` token, which is what a
+ * list item holds, is scanned raw before its inline tokens, so backticks protect nothing there.
+ */
+function scannedTextIn(tokens: Tokens.Generic[]): string[] {
   return tokens.flatMap((token) => {
     if (token.type === "code" || token.type === "codespan") return [];
-    const children: Tokens.Generic[] | undefined = token.items ?? token.tokens;
-    return children !== undefined ? proseIn(children) : [token.text ?? ""];
+    if (token.type === "html") {
+      const raw: string = token.raw ?? "";
+      const start = raw.trimStart();
+      return start.startsWith("<!--") && start.includes("-->") ? [raw.replace(/<!--[\s\S]*?-->/g, "")] : [];
+    }
+    return [
+      ...(token.type === "text" ? [token.text ?? ""] : []),
+      ...scannedTextIn(token.tokens ?? []),
+      ...scannedTextIn(token.items ?? []),
+    ];
   });
 }
 
 /** Claude Code's pattern, plus the wider ( and [ boundary. */
 const AT_PATH = /(?:^|[\s(\[])@((?:[^\s\\]|\\ )+)/g;
+/** What Claude Code lets start an import. A lone @/ does not. */
+const IMPORTABLE = /^(?:~\/|\/.|[a-zA-Z0-9._-])/;
+const FRONTMATTER = /^---\s*\n[\s\S]*?---\s*\n?/;
+/** Claude Code skips an import with any other extension. */
+const TEXT_EXTENSIONS = new Set(
+  (".md .txt .text .json .yaml .yml .toml .xml .csv .html .htm .css .scss .sass .less .js .ts .tsx .jsx .mjs .cjs .mts .cts " +
+    ".py .pyi .pyw .rb .erb .rake .go .rs .java .kt .kts .scala .c .cpp .cc .cxx .h .hpp .hxx .cs .swift .sh .bash .zsh .fish " +
+    ".ps1 .bat .cmd .env .ini .cfg .conf .config .properties .sql .graphql .gql .proto .vue .svelte .astro .ejs .hbs .pug " +
+    ".jade .php .pl .pm .lua .r .dart .ex .exs .erl .hrl .clj .cljs .cljc .edn .hs .lhs .elm .ml .mli .f .f90 .f95 .for " +
+    ".cmake .make .makefile .gradle .sbt .rst .adoc .asciidoc .org .tex .latex .lock .log .diff .patch").split(" "),
+);
 
-/** `@path` tokens outside code, without their #fragment or trailing punctuation. */
+/** The distinct `@path` tokens Claude Code would scan, without their #fragment or trailing punctuation. */
 function atPathsIn(text: string): string[] {
-  return proseIn(lex(text))
-    .flatMap((prose) => [...prose.matchAll(AT_PATH)])
+  const body = text.replace(/^﻿/, "").replace(FRONTMATTER, "");
+  const paths = scannedTextIn(lex(body))
+    .flatMap((scanned) => [...scanned.matchAll(AT_PATH)])
     .map((match) => (match[1] ?? "").replace(/\\ /g, " ").replace(/#.*$/, "").replace(/[.,;:!?)\]'"*_]+$/, ""))
-    .filter(Boolean);
+    .filter((path) => IMPORTABLE.test(path));
+  return [...new Set(paths)];
 }
 
 function isImport(raw: string, folder: string, tree: Tree): boolean {
-  if (raw === "/") return false; // Claude Code excludes a lone @/.
+  const extension = posix.extname(raw).toLowerCase();
+  if (extension !== "" && !TEXT_EXTENSIONS.has(extension)) return false;
   // These resolve on a developer machine and not on CI, so existence here proves nothing.
   if (raw.startsWith("~/") || raw.startsWith("/")) return true;
   return tree.isFile(posix.normalize(posix.join(folder, raw)));
@@ -199,7 +201,7 @@ function checkClaudeMdBudgets(tree: Tree): string[] {
     }
     for (const raw of atPathsIn(text)) {
       if (isImport(raw, posix.dirname(path), tree)) {
-        out.push(`${path}: \`@${raw}\` is a Claude Code import, loaded with this file. Write the path in backticks.`);
+        out.push(`${path}: \`@${raw}\` is a Claude Code import, loaded with this file. Drop the \`@\`, or write the path in backticks outside a list item.`);
       }
     }
   }
@@ -246,7 +248,7 @@ test("the real tree is within its budgets", async () => {
   const tree = await readRealTree();
   expect([...tree.files.keys()].filter(isMemoryFile).length).toBeGreaterThan(10);
   expect(checkClaudeMdBudgets(tree)).toEqual([]);
-});
+}, 30_000); // lexes every file; a CI runner is slower than a laptop, and bun's default is 5 s
 
 const fill = (chars: number) => "x".repeat(chars);
 
@@ -367,7 +369,7 @@ describe("@-import", () => {
   test("fails on an @-import of an existing file, resolved from the CLAUDE.md's own folder", () => {
     const out = check({ "src/ai/CLAUDE.md": "See @notes.md for detail.\n" }, { existing: ["src/ai/notes.md"] });
     expect(out).toHaveLength(1);
-    expect(out[0]).toContain("Write the path in backticks.");
+    expect(out[0]).toContain("Drop the `@`, or write the path in backticks outside a list item.");
     expect(out[0]).toContain("@notes.md");
   });
 
@@ -387,7 +389,7 @@ describe("@-import", () => {
   test("fails on an @~/ path that does not exist", () => {
     const out = check({ "CLAUDE.md": "Personal rules: @~/.claude/mine.md\n" });
     expect(out).toHaveLength(1);
-    expect(out[0]).toContain("Write the path in backticks.");
+    expect(out[0]).toContain("Drop the `@`, or write the path in backticks outside a list item.");
   });
 
   test("fails on an @/ path that does not exist", () => {
@@ -526,6 +528,7 @@ describe("stale entry", () => {
 
 describe("@-import, as Claude Code's lexer reads the file", () => {
   const A = { existing: ["a.md"] };
+  const ABC = { existing: ["a.md", "b.md", "c.md"] };
 
   test("a fence opened on a list-item line ends with its item", () => {
     expect(check({ "CLAUDE.md": "- ```bash\n  x\n  ```\n\nSee @a.md\n" }, A)).toHaveLength(1);
@@ -553,8 +556,40 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
     expect(out[0]).toContain("my file.md");
   });
 
-  test("an @path after a space inside a code span passes, in a paragraph and in a list item", () => {
-    expect(check({ "CLAUDE.md": "Run `x @a.md y` here.\n\n- Run `x @a.md y` here.\n" }, A)).toEqual([]);
+  test("backticks protect a path outside a list item, and not in one, whose text is read raw", () => {
+    for (const body of [
+      "Run `x @a.md y` here.\n",
+      "## Run `x @a.md y` here\n",
+      "> Run `x @a.md y` here.\n",
+      '[x](y "see @a.md z")\n',
+      '[x]: y "see @a.md z"\n',
+    ]) {
+      expect(check({ "CLAUDE.md": body }, A)).toEqual([]);
+    }
+    for (const body of [
+      "- List: run `x @a.md y` here.\n",
+      "- Run `curl -d @a.md http://x` here\n",
+      "- Run `curl -d @~/x.json http://x` here\n",
+      "1. Run `x @a.md y` here\n",
+      "- a\n  - Run `x @a.md y` here\n",
+      "> - Run `x @a.md y` here\n",
+      "- first line\n  then `x @a.md y` here\n",
+      "- a\n\n- Run `x @a.md y` here\n",
+      "- ``x @a.md y``\n",
+      '- [x](y "see @a.md z")\n',
+    ]) {
+      expect(check({ "CLAUDE.md": body }, A)).toHaveLength(1);
+    }
+  });
+
+  test("in a list item, a path that runs into its closing backtick names no file", () => {
+    expect(check({ "CLAUDE.md": "- Run `x @a.md` and `@a.md` here\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "- Run `x @a.md` and `y @a.md z` here\n" }, A)).toHaveLength(1);
+  });
+
+  test("a fence in a list item still hides its path", () => {
+    expect(check({ "CLAUDE.md": "- ```\n  @a.md\n  ```\n- Run `x @a.md` here\n- `y @a.md z`\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "- ```\n  @a.md\n  ```\n- Run `y @b.md z`\n" }, A)).toEqual([]);
   });
 
   test("an @path in indented code passes", () => {
@@ -567,23 +602,62 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
   });
 
   test("an @path wrapped in emphasis fails", () => {
-    expect(check({ "CLAUDE.md": "**@a.md** and *@a.md*\n" }, A)).toHaveLength(2);
+    expect(check({ "CLAUDE.md": "**@a.md** and *@b.md*\n" }, ABC)).toHaveLength(2);
   });
 
   test("(@path, [@path and a link's text still count", () => {
-    expect(check({ "CLAUDE.md": "(@a.md) and [@a.md] and [@a.md](x)\n" }, A)).toHaveLength(3);
+    expect(check({ "CLAUDE.md": "(@a.md) and [@b.md] and [@c.md](x)\n" }, ABC)).toHaveLength(3);
   });
 
   test("an @path in a heading, a list item and a block quote fails", () => {
-    expect(check({ "CLAUDE.md": "## See @a.md\n\n- @a.md\n\n> @a.md\n" }, A)).toHaveLength(3);
+    expect(check({ "CLAUDE.md": "## See @a.md\n\n- @b.md\n\n> @c.md\n" }, ABC)).toHaveLength(3);
+  });
+
+  test("a path named twice is one import, though a list item reads it as raw and as inline text", () => {
+    expect(check({ "CLAUDE.md": "See @a.md and @a.md\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "See @a.md\n\n- @a.md\n- **@a.md**\n" }, A)).toHaveLength(1);
+  });
+
+  test("a path that cannot start an import passes though the file exists", () => {
+    expect(check({ "CLAUDE.md": "@@a.md and @+b.md\n" }, { existing: ["@a.md", "+b.md"] })).toEqual([]);
+    expect(check({ "CLAUDE.md": "@-a.md and @_b.md and @9c.md and @Zd.md\n" }, { existing: ["-a.md", "_b.md", "9c.md", "Zd.md"] })).toHaveLength(4);
+  });
+
+  test("a non-text extension is skipped, like Claude Code's, whether or not the path is relative", () => {
+    expect(check({ "CLAUDE.md": "@a.png and @~/b.pdf and @/c.zip\n" }, { existing: ["a.png"] })).toEqual([]);
+    expect(check({ "CLAUDE.md": "@a.MD and @LICENSE and @.env\n" }, { existing: ["a.MD", "LICENSE", ".env"] })).toHaveLength(3);
+  });
+
+  test("frontmatter is not scanned, and only a leading block is frontmatter", () => {
+    expect(check({ "CLAUDE.md": "---\nsee: @a.md\n---\nBody\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "﻿---\nsee: @a.md\n---\nBody\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "---\nx: 1\n---\n@a.md\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "Body\n\n---\n\n@a.md\n\n---\n" }, A)).toHaveLength(1);
   });
 
   test("a table row is prose at gfm:false", () => {
     expect(check({ "CLAUDE.md": "a | b\n---|---\n@a.md | c\n" }, A)).toHaveLength(1);
   });
 
-  test("an @path in an HTML block or comment still fails", () => {
-    expect(check({ "CLAUDE.md": "<!-- @a.md -->\n\n<div>\n@a.md\n</div>\n" }, A)).toHaveLength(2);
+  test("an html token is not scanned, and a comment is not read", () => {
+    for (const body of [
+      "<div>\n@a.md\n</div>\n",
+      "<pre>\n@a.md\n</pre>\n",
+      "<X>\n@a.md\n",
+      "<!-- @a.md -->\n",
+      "<!-- @a.md\n",
+      "x <!-- @a.md --> y\n",
+      "- <!-- @a.md -->\n",
+    ]) {
+      expect(check({ "CLAUDE.md": body }, A)).toEqual([]);
+    }
+  });
+
+  test("the text beside a closed comment is scanned, and an unclosed comment's is not", () => {
+    const out = check({ "CLAUDE.md": "<!-- @b.md --> @a.md\n" }, ABC);
+    expect(out).toEqual([expect.stringContaining("`@a.md`")]);
+    expect(check({ "CLAUDE.md": "<!-- @b.md @a.md\n" }, ABC)).toEqual([]);
+    expect(check({ "CLAUDE.md": "x <b>@a.md</b> y\n\n<!-- c -->\n\n@b.md\n" }, ABC)).toHaveLength(2);
   });
 });
 
@@ -706,32 +780,6 @@ describe("index, as the lexer reads it", () => {
     expect(check(indexed("## One\n", "1. One\n"))).toEqual([expect.stringContaining('"One"')]);
     expect(check(indexed("## One\n\n## Two\n\n## Three\n", "- One\n\n* Two\n\n+ Three\n"))).toEqual([]);
   });
-});
-
-test("the bounded tokenizer reads a file as marked's own does", () => {
-  const blocks = [
-    "---", "___", "***", "   ---", "    ---", "- - -", "_ _ _", "* * *", "--", "__x__", "*x*",
-    "> quote", "   > quote\nlazy", "    > code", ">",
-    "- a", "* a", "+ a", "1. a", "1) a", "123456789. a", "   - a", "    - a", "- a\n  - b\n\n  c", "-", "2 a", "1.a",
-    "<div>\nx\n</div>", "   <div>", "    <div>", "<!-- c\n\nd -->", "<pre>\n\n## x\n</pre>", "<X>", "<X> y", "</x>", "a <b> c", "<?php\n\n?>", "<!DOCTYPE x>",
-    "Foo\n---", "Foo\n===", "Foo\nbar\n---", "Foo\n\n---", "Foo\n   \n===", "Foo\n ---", "Foo\n    ---", "Foo\n---  ", "- a\n---", "> a\n---", "# a\n---", "##foo\n---",
-    "```\n---\n\n## x\n```", "~~~\n> x", "    code\n---", "plain", "plain\n- item", "plain\n> quote", "plain\n# heading", "plain\n<div>",
-    "[def]: x\n---", "\\- a", "\t- a", "\t---", " \t> a", "\r\n---\r\n",
-  ];
-  const stock = (text: string) => JSON.stringify(
-    (new Lexer({ gfm: false }).lex(text) as Tokens.Generic[]).filter((token) => token.type !== "space"),
-    (key, value) => (key === "raw" ? undefined : value),
-  );
-  const ours = (text: string) => JSON.stringify(
-    lex(text).filter((token) => token.type !== "space"),
-    (key, value) => (key === "raw" ? undefined : value),
-  );
-  for (const first of blocks) {
-    expect(ours(first)).toBe(stock(first));
-    for (const second of blocks) {
-      for (const text of [`${first}\n${second}\n`, `${first}\n\n${second}\n`]) expect(ours(text)).toBe(stock(text));
-    }
-  }
 });
 
 describe("budgets file", () => {
