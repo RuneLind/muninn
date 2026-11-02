@@ -76,12 +76,12 @@ function lex(text: string): Tokens.Generic[] {
 }
 
 /**
- * The text Claude Code scans for imports, by its walker's rules. A block `text` token, which is what a
- * list item holds, is scanned raw before its inline tokens, so backticks protect nothing there.
+ * The text Claude Code scans for imports, by its walker's rules. Only `text` tokens count, so code never
+ * does, but a block `text` token, which is what a list item holds, is scanned raw before its inline
+ * tokens, so backticks protect nothing there.
  */
 function scannedTextIn(tokens: Tokens.Generic[]): string[] {
   return tokens.flatMap((token) => {
-    if (token.type === "code" || token.type === "codespan") return [];
     if (token.type === "html") {
       const raw: string = token.raw ?? "";
       const start = raw.trimStart();
@@ -111,7 +111,7 @@ const TEXT_EXTENSIONS = new Set(
 
 /** The distinct `@path` tokens Claude Code would scan, without their #fragment or trailing punctuation. */
 function atPathsIn(text: string): string[] {
-  const body = text.replace(/^﻿/, "").replace(FRONTMATTER, "");
+  const body = text.replace(/^\uFEFF/, "").replace(FRONTMATTER, "");
   const paths = scannedTextIn(lex(body))
     .flatMap((scanned) => [...scanned.matchAll(AT_PATH)])
     .map((match) => (match[1] ?? "").replace(/\\ /g, " ").replace(/#.*$/, "").replace(/[.,;:!?)\]'"*_]+$/, ""))
@@ -630,8 +630,9 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
 
   test("frontmatter is not scanned, and only a leading block is frontmatter", () => {
     expect(check({ "CLAUDE.md": "---\nsee: @a.md\n---\nBody\n" }, A)).toEqual([]);
-    expect(check({ "CLAUDE.md": "﻿---\nsee: @a.md\n---\nBody\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "\uFEFF---\nsee: @a.md\n---\nBody\n" }, A)).toEqual([]);
     expect(check({ "CLAUDE.md": "---\nx: 1\n---\n@a.md\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "---\nx: 1\n---\n@a.md\n\n---\nEnd\n" }, A)).toHaveLength(1);
     expect(check({ "CLAUDE.md": "Body\n\n---\n\n@a.md\n\n---\n" }, A)).toHaveLength(1);
   });
 
@@ -656,7 +657,7 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
   });
 
   test("the text beside a closed comment is scanned, and an unclosed comment's is not", () => {
-    for (const body of ["<!-- @b.md --> @a.md\n", "  <!-- @b.md --> @a.md\n", "<!-- @b.md\n--> @a.md\n", "<!-- @b.md --> <!-- @c.md --> @a.md\n"]) {
+    for (const body of ["<!-- @b.md --> @a.md\n", "  <!-- @b.md --> @a.md\n", "<!-- @b.md\n--> @a.md\n", "<!-- @b.md --> <!-- @c.md --> @a.md\n", "<!-- @b.md --> @a.md <!-- @c.md -->\n"]) {
       expect(check({ "CLAUDE.md": body }, ABC)).toEqual([expect.stringContaining("`@a.md`")]);
     }
     expect(check({ "CLAUDE.md": "<!-- @b.md @a.md\n" }, ABC)).toEqual([]);
