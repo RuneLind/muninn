@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { extractNextMoves, leadSentence, MOVES_STEP_CHARS, MOVES_STEPS_MAX, waitOwnerFrom, waitsOnOwner } from "./next-moves.ts";
 import { __setWikiIndexAnswerConfigForTest, buildWikiIndex, parseFrontmatter } from "./store.ts";
 import { laneFromAttrs, normalizeLaneKind, parseBlocks, parseLaneSince } from "../format/markdown-ast.ts";
 import { renderWikiHtml } from "./render.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const BLOCK = [
   "<NextMoves>",
@@ -400,7 +401,7 @@ describe("buildWikiIndex: movesWaiting and waitingSince", () => {
   });
 
   async function index(files: Record<string, string>) {
-    root = await mkdtemp(path.join(tmpdir(), "muninn-waits-"));
+    root = await testTempDir(path.join(tmpdir(), "muninn-waits-"));
     for (const [rel, text] of Object.entries(files)) {
       await mkdir(path.dirname(path.join(root, rel)), { recursive: true });
       await writeFile(path.join(root, rel), text, "utf8");
