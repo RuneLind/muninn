@@ -1004,6 +1004,7 @@ initStartCards({
   fetchWorkMap: (fresh) => (fresh || workMapRunAt === null ? getWorkMap() : workMapFetchFor(workMapRunAt)),
   adoptWorkMap,
   pages: () => allPages,
+  waitsCounted: () => waitsCounted,
   hrefFor: pageUrlByRelPath,
   effortHref: effortHrefFor,
 });
@@ -1535,6 +1536,8 @@ function tabHasFocus(): boolean {
 /** The listing's `workMap.runAt` — set on a wiki with a work map, which
  *  shows the Your work card instead of What's new (`wiki-start-cards.ts`). */
 let workMapRunAt: number | null = null;
+/** The listing's `waitsCounted`: the Your work strip's wait cells apply here. */
+let waitsCounted = false;
 /** The listing's `workMap.kind === "themes"`: View options then says theme. */
 let workMapThemes = false;
 let workFacts: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs" | "evidence">>) | null = null;
@@ -10307,6 +10310,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // Shape-checked thread by thread in `openThreadCards` (`usableThreads`).
   workFacts = data.work && typeof data.work === "object" && Array.isArray(data.work.threads) ? data.work : null;
   workMapRunAt = typeof data.workMap?.runAt === "number" ? data.workMap.runAt : null;
+  waitsCounted = data.waitsCounted === true;
   workMapThemes = workMapRunAt !== null && data.workMap?.kind === "themes";
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one

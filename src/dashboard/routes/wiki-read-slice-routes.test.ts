@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { registerWikiReadRoutes } from "./wiki-routes.ts";
 import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
-import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { __resetWikiCacheForTest, __setWikiIndexAnswerConfigForTest } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 
@@ -98,6 +98,71 @@ describe("wiki read slice — routes", () => {
     const listing = (await (await app.request("/api/wiki/pages?wiki=rwwiki")).json()) as { pages: unknown[]; error?: string };
     expect(listing.pages).toEqual([]);
     expect(listing.error).toBe("no wiki configured for that name");
+  });
+
+  describe("what waits on the owner", () => {
+    const answers = { wikis: new Set(["rowiki"]), owner: "Kari (A123456)", groups: new Map([["utvikler", new Set(["A123456"])]]) };
+    const WAITS = '---\ntitle: Waits\n---\n\n<NextMoves>\n\n<Lane kind="waiting" since="2026-09-30">\n\n- O1\n\n</Lane>\n\n</NextMoves>\n\n<Question id="O1" to="utvikler">\n\nWhich?\n\n</Question>\n';
+
+    const appWithAnswers = (profile: "default" | "nais") => {
+      const app = new Hono();
+      registerWikiReadRoutes(app, { profile, dashboardPort: 3010, wikiAnswers: answers } as unknown as Config, provenanceCtx);
+      return app;
+    };
+
+    beforeEach(async () => {
+      await Bun.write(path.join(ro, "Waits.md"), WAITS);
+      await Bun.write(path.join(ro, "Linker.md"), "---\ntitle: Linker\n---\n\nSee [[Waits]].\n");
+      // One commit holds both pages, so Linker's `movedWith` carries a Waits row.
+      for (const args of [["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+        const proc = Bun.spawn(["git", "-C", ro, "-c", "user.email=f@example.com", "-c", "user.name=f", "-c", "commit.gpgsign=false", ...args], { stdout: "ignore", stderr: "ignore" });
+        if ((await proc.exited) !== 0) throw new Error(`git ${args[0]} failed`);
+      }
+      __setWikiIndexAnswerConfigForTest(answers);
+      __resetWikiCacheForTest();
+    });
+    afterEach(() => __setWikiIndexAnswerConfigForTest(null));
+
+    const movedWithOfLinker = async (app: Hono) => {
+      const body = (await (await app.request("/api/wiki/page?wiki=rowiki&name=Linker")).json()) as { movedWith: { relPath: string }[] };
+      return body.movedWith.map((m) => m.relPath);
+    };
+
+    // Comparing a page's `q-for` line with a count says which group the owner is
+    // in, and the slice serves no work map to read one.
+    test("nais: no response carries it, on any row shape", async () => {
+      const app = appWithAnswers("nais");
+      expect(await movedWithOfLinker(app)).toContain("Waits.md");
+      for (const url of [
+        "/api/wiki/pages?wiki=rowiki",
+        "/api/wiki/page?wiki=rowiki&name=Waits",
+        "/api/wiki/page?wiki=rowiki&name=Linker",
+        "/api/wiki/related?wiki=rowiki&name=Linker",
+      ]) {
+        const res = await app.request(url);
+        const text = await res.text();
+        expect(`${url} → ${res.status}`).toBe(`${url} → 200`);
+        expect(text, url).toContain("Waits");
+        for (const field of ["movesWaiting", "waitingSince", "waitsCounted"]) expect(text.includes(field), `${url} ${field}`).toBe(false);
+      }
+    });
+
+    test("default: the listing carries it for the card, and no other row does", async () => {
+      const app = appWithAnswers("default");
+      expect(await movedWithOfLinker(app)).toContain("Waits.md");
+      const listing = (await (await app.request("/api/wiki/pages?wiki=rowiki")).json()) as {
+        waitsCounted: boolean;
+        pages: { relPath: string; movesWaiting?: number; waitingSince?: string }[];
+      };
+      expect(listing.waitsCounted).toBe(true);
+      const row = listing.pages.find((p) => p.relPath === "Waits.md")!;
+      expect(row.movesWaiting).toBe(1);
+      expect(row.waitingSince).toBe("2026-09-30");
+      for (const url of ["/api/wiki/page?wiki=rowiki&name=Waits", "/api/wiki/page?wiki=rowiki&name=Linker"]) {
+        const text = await (await app.request(url)).text();
+        expect(text.includes("movesWaiting"), url).toBe(false);
+      }
+    });
   });
 
   test("nais: the read-only wiki is served, and a bare listing defaults to it", async () => {

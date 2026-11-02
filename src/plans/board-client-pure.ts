@@ -551,7 +551,12 @@ export function effectiveScope(view: { scope: BoardScope; filters: BoardFilters 
  *  left in one is history. A SHIPPED plan still counts — its follow-up steps
  *  are real. */
 export function waitsOnYou(card: { movesYou: number; planStatus: PlanStatus | null }): boolean {
-  return card.movesYou > 0 && card.planStatus !== "superseded" && card.planStatus !== "abandoned";
+  return card.movesYou > 0 && !closedWithoutShipping(card.planStatus);
+}
+
+/** The two plan states that end a plan without shipping it. */
+export function closedWithoutShipping(planStatus: string | null | undefined): boolean {
+  return planStatus === "superseded" || planStatus === "abandoned";
 }
 
 /** The Waiting on you toggle's count: every card that {@link waitsOnYou}. */

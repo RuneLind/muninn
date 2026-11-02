@@ -30,13 +30,17 @@ import {
   pollState,
   refreshRefusalText,
   WORK_MAP_DONE_KEY_PREFIX,
+  STRIP_ROWS_SHOWN,
+  stripKey,
   workCardHtml,
   type CardPage,
+  type StripCell,
+  type StripView,
   type RefreshView,
   type WorkMapGetBody,
 } from "./wiki-work-card.ts";
 import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
-import { declarationKey } from "../../../wiki/work-map/join.ts";
+import { declarationKey, isThemeMap } from "../../../wiki/work-map/join.ts";
 import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
 
 export interface StartCardsDeps {
@@ -58,6 +62,8 @@ export interface StartCardsDeps {
   adoptWorkMap?(body: WorkMapGetBody): void;
   /** The live listing the Your work card joins the map to. */
   pages?(): readonly CardPage[];
+  /** The listing's `waitsCounted`: the strip's two wait cells apply here. */
+  waitsCounted?(): boolean;
   /** The reader URL of a page, for a link's `href`. */
   hrefFor?(relPath: string): string;
   /** The reader URL of an effort page (P3); absent, effort names are text. */
@@ -733,6 +739,8 @@ const laneOpen = new Map<string, boolean>();
 let laneListening = false;
 /** Needs-you items whose why the reader opened, by `needKey`; for the page's life. */
 const whyOpen = new Set<string>();
+/** The strip's open cell and list: held here, so a repaint keeps them. */
+let stripView: StripView = { open: null, expanded: false };
 /** Cards whose resize re-checks which whys are clamped. */
 const whyObserved = new WeakSet<HTMLElement>();
 
@@ -826,8 +834,8 @@ function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
   if (e.type === "adopt" && slot === prev) {
     // The run did not move, but a page may have declared an effort since it
     // (P6): re-join, and only when something a join reads changed, so an
-    // ordinary adopt leaves the card's markup alone.
-    if (slot.kind === "card" && workBody && currentDeclarationKey(workBody.map.runAtMs) !== paintedDeclarationKey) paintWorkCard();
+    // ordinary adopt leaves the card's markup alone. A themes card has no strip.
+    if (slot.kind === "card" && workBody && (currentDeclarationKey(workBody.map.runAtMs) !== paintedDeclarationKey || (!isThemeMap(workBody.map) && currentStripKey() !== paintedStripKey))) paintWorkCard();
     return;
   }
   if (slot.kind === "card") paintWorkCard();
@@ -838,6 +846,11 @@ function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
 let paintedDeclarationKey: string | null = null;
 function currentDeclarationKey(runAt: number): string {
   return declarationKey(deps.pages ? deps.pages() : [], runAt);
+}
+/** `stripKey` of the listing the card last painted from: the strip counts the live listing. */
+let paintedStripKey: string | null = null;
+function currentStripKey(): string {
+  return stripKey(deps.pages ? deps.pages() : [], deps.waitsCounted ? deps.waitsCounted() : false);
 }
 
 /** The adopt path's half of `mountStartCards`: the card follows the listing,
@@ -925,6 +938,9 @@ function focusedCardControl(el: HTMLElement): FocusKey | null {
     if (pair != null) return { sel: `[data-wm-conn="${pair}"] [data-effort-link="${effort}"]` };
   }
   const rel = active.getAttribute("data-relpath");
+  const cell = active.getAttribute("data-wm-cell");
+  if (cell !== null) return { sel: `[data-wm-cell="${cell}"]` };
+  if (active.hasAttribute("data-wm-drill-more")) return { sel: "[data-wm-drill-more]" };
   if (rel !== null) return { link: rel, nth: cardLinks(el, rel).indexOf(active) };
   if (active.classList.contains("wiki-wn-title")) return { heading: true };
   const lane = active.tagName === "SUMMARY" ? active.parentElement?.getAttribute("data-wm-lane") : null;
@@ -957,6 +973,7 @@ function paintWorkCard(override?: FocusKey): void {
   pendingFocus = null;
   const pages = deps.pages ? deps.pages() : [];
   paintedDeclarationKey = declarationKey(pages, runAt);
+  paintedStripKey = currentStripKey();
   el.innerHTML = workCardHtml({
     body: workBody,
     pages,
@@ -966,6 +983,8 @@ function paintWorkCard(override?: FocusKey): void {
     hrefFor: deps.hrefFor ?? ((rel) => withWiki("/wiki?relPath=" + encodeURIComponent(rel))),
     ...(deps.effortHref ? { effortHref: deps.effortHref } : {}),
     refresh: workRefresh,
+    waitsCounted: deps.waitsCounted ? deps.waitsCounted() : false,
+    strip: stripView,
   });
   if (typeof el.querySelectorAll === "function") {
     el.querySelectorAll<HTMLDetailsElement>("details[data-wm-lane]").forEach((d) => {
@@ -1157,6 +1176,20 @@ export function handleWorkCardClick(target: Element): boolean {
       writeDoneRaw(writeDone(readDoneRaw(), workBody.map.runAtMs, needKey(item), true));
       paintWorkCard({ doneAt: at });
     }
+    return true;
+  }
+  const cell = target.closest("[data-wm-cell]");
+  if (cell) {
+    const name = cell.getAttribute("data-wm-cell") as StripCell;
+    stripView = { open: stripView.open === name ? null : name, expanded: false };
+    paintWorkCard({ sel: `[data-wm-cell="${name}"]` });
+    return true;
+  }
+  if (target.closest("[data-wm-drill-more]")) {
+    const shown = STRIP_ROWS_SHOWN;
+    stripView = { ...stripView, expanded: true };
+    // The button goes with the expansion; focus lands on the first row it hid.
+    paintWorkCard({ sel: `.wiki-wm-drill-row:nth-child(${shown + 1}) a` });
     return true;
   }
   const why = target.closest("[data-wm-why]");

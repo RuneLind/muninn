@@ -2596,6 +2596,32 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wm-status { font-size: 12px; color: var(--text-soft); margin: 2px 0 6px; }
     .wiki-wm-status.warn { color: var(--tone-warn); }
+    .wiki-wm-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; margin: 2px 0 8px; }
+    .wiki-wm-cell {
+      border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 10px; background: var(--bg-surface);
+      display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start;
+      text-align: left; font: inherit; color: var(--text-secondary); cursor: pointer;
+    }
+    .wiki-wm-cell:disabled { cursor: default; }
+    .wiki-wm-cell:not(:disabled):hover { border-color: var(--accent); }
+    /* The outline is focus alone, so an open cell can show both: open is drawn inside the border. */
+    .wiki-wm-cell:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
+    .wiki-wm-cell.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .wiki-wm-cell.on:hover { box-shadow: inset 0 0 0 2px var(--accent); }
+    /* Forced colors drop the shadow and force a non-system border colour; the padding keeps the box still. */
+    @media (forced-colors: active) { .wiki-wm-cell.on { border: 2px solid Highlight; padding: 7px 9px; } }
+    .wiki-wm-cell b { display: block; font-size: 22px; line-height: 1.1; color: var(--text-primary); }
+    .wiki-wm-cell span { font-size: 12.5px; }
+    .wiki-wm-cell.warn b { color: var(--tone-warn); }
+    .wiki-wm-cell.muted b { color: var(--text-soft); }
+    .wiki-wm-cell.unset b { font-size: 13px; line-height: 1.3; font-weight: 600; color: var(--text-soft); }
+    .wiki-wm-drill { border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 12px; margin: 4px 0 8px; font-size: 13px; background: var(--bg-surface); }
+    .wiki-wm-drill-title { font-weight: 600; color: var(--text-primary); }
+    .wiki-wm-drill-list { margin: 4px 0; padding-left: 20px; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-wm-drill-row { margin: 2px 0; }
+    .wiki-wm-drill-meta { color: var(--text-soft); }
+    .wiki-wm-drill-more { border: 0; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--accent-light); cursor: pointer; }
+    .wiki-wm-drill-more:hover, .wiki-wm-drill-more:focus-visible { text-decoration: underline; }
     .wiki-wm-summary { font-size: 13px; line-height: 1.6; color: var(--text-secondary); margin: 4px 0 8px; }
     .wiki-wm-link {
       color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px;

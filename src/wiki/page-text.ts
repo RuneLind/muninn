@@ -1,5 +1,5 @@
 /**
- * The two primitives a wiki page's BYTES are read with, in a module that imports
+ * What a wiki page's BYTES are read with, in a module that imports
  * nothing — so both sides of the `store.ts` ↔ `git-dates.ts` edge can use them.
  *
  * `store.ts` imports `git-dates.ts` (the index build asks for a page's git
@@ -11,8 +11,16 @@
  * `src/dashboard/route-groups.ts`, which exists because a view importing the route
  * factory would be a cycle.
  *
- * Both functions are re-exported from `store.ts`, so its importers are untouched.
+ * `store.ts` re-exports `isMarkdownWikiPath` for its importers; everything else
+ * is imported from here.
  */
+
+/** A `[[wikilink]]` with an optional `|label`, target and label both NEWLINE-FREE
+ *  — `WIKILINK_RE`'s exclusion (`store.ts`), and the reader is where its absence
+ *  was VISIBLE: a dangling `[[` from a truncated index one-liner paired with the
+ *  NEXT line's `]]`, so five index.md entries rendered as one merged
+ *  `wiki-link-missing` span that ate the following entry's real link. */
+export const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
 
 /** A page split at its frontmatter fence. `frontmatter` is `null` for a page that
  *  has none — there is no fence, so there is nothing to have been written into —
