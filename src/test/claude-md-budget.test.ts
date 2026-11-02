@@ -1,12 +1,14 @@
 import { test, expect, describe } from "bun:test";
 import { statSync } from "node:fs";
 import { join, posix } from "node:path";
+import { Lexer, Tokenizer, type Tokens } from "marked";
 
 /**
  * Caps every tracked CLAUDE.md that Claude Code reads as memory.
  *
- * A nested CLAUDE.md is loaded in full whenever a session reads a file in its
- * folder, so its size is a per-read cost. Detail about one function belongs in
+ * Claude Code loads a nested CLAUDE.md the first time a session reads a file under
+ * its folder. It then stays in context for the session and is re-read from cache
+ * each turn, so its size is a cost on every later turn. Detail about one function belongs in
  * `src/<module>/reference/notes.md`, reached through the `## Index` in CLAUDE.md.
  * There is deliberately no "entry too high" rule: it would go red on ordinary shrinks.
  */
@@ -19,7 +21,8 @@ const TIGHT_CEILING = 20_000;
 const TIGHT_FOLDERS = ["src/wiki", "src/dashboard", "src/web"];
 
 interface Budgets {
-  entries: Record<string, number>;
+  /** Hand-edited json: a value is only a ceiling once isCeiling has said so. */
+  entries: Record<string, unknown>;
   pending: string[];
 }
 
@@ -39,9 +42,11 @@ function isMemoryFile(path: string): boolean {
   );
 }
 
+const isCeiling = (value: unknown): value is number => Number.isInteger(value) && (value as number) > 0;
+
 function ceilingOf(path: string, budgets: Budgets): number {
   const entry = budgets.entries[path];
-  if (entry !== undefined) return entry;
+  if (isCeiling(entry)) return entry;
   return TIGHT_FOLDERS.some((folder) => path.startsWith(`${folder}/`)) ? TIGHT_CEILING : DEFAULT_CEILING;
 }
 
@@ -60,70 +65,98 @@ function sizeAdvice(path: string, tree: Tree): string {
   return "trim, or move the text into the module it describes";
 }
 
-/** The file's lines with each fenced block blanked, so paragraph breaks survive. An unclosed fence runs to the end. */
-function linesOutsideFences(text: string): string[] {
-  let fence: string | null = null;
-  return text.split("\n").map((line) => {
-    const marker = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
-    if (fence !== null) {
-      const closes =
-        marker?.[1] !== undefined &&
-        marker[1][0] === fence[0] &&
-        marker[1].length >= fence.length &&
-        marker[2]?.trim() === "";
-      if (closes) fence = null;
-      return "";
-    }
-    // A backtick fence's info string holds no backtick: ```a``` on one line is a code span.
-    if (marker?.[1] !== undefined && !(marker[1][0] === "`" && marker[2]?.includes("`"))) {
-      fence = marker[1];
-      return "";
-    }
-    return line;
+/**
+ * Same tokens as marked's own, without its cost here: on Bun these five rules take time
+ * proportional to all the remaining text each time they fail, 2.4 s of 2.5 s on a 591k file.
+ * Each is skipped when the block cannot match it, and lheading cannot pass a blank line.
+ */
+class BoundedTokenizer extends Tokenizer {
+  override hr(src: string) {
+    return /^ {0,3}[-_*]/.test(src) ? super.hr(src) : undefined;
+  }
+  override blockquote(src: string) {
+    return /^ {0,3}>/.test(src) ? super.blockquote(src) : undefined;
+  }
+  override list(src: string) {
+    return /^ {0,3}[-*+\d]/.test(src) ? super.list(src) : undefined;
+  }
+  override html(src: string) {
+    return /^ {0,3}</.test(src) ? super.html(src) : undefined;
+  }
+  override lheading(src: string) {
+    const blank = src.search(/\n\s*?\n/);
+    return super.lheading(blank < 0 ? src : src.slice(0, blank + 1));
+  }
+}
+
+const lexed = new Map<string, Tokens.Generic[]>();
+
+/** Claude Code's import walker lexes with marked at gfm:false, so the guard reads a file as it does. */
+function lex(text: string): Tokens.Generic[] {
+  const tokens = lexed.get(text) ?? new Lexer({ gfm: false, tokenizer: new BoundedTokenizer() }).lex(text);
+  lexed.set(text, tokens);
+  return tokens;
+}
+
+/** Every leaf's text outside code. A parent's own text would bring its code spans back in. */
+function proseIn(tokens: Tokens.Generic[]): string[] {
+  return tokens.flatMap((token) => {
+    if (token.type === "code" || token.type === "codespan") return [];
+    const children: Tokens.Generic[] | undefined = token.items ?? token.tokens;
+    return children !== undefined ? proseIn(children) : [token.text ?? ""];
   });
 }
 
-/** A run of N backticks closes only on a run of exactly N. */
-const CODE_SPAN = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g;
-const AT_PATH = /(?:^|[\s(\[])@([^\s`]+)/gm;
+/** Claude Code's pattern, plus the wider ( and [ boundary. */
+const AT_PATH = /(?:^|[\s(\[])@((?:[^\s\\]|\\ )+)/g;
 
-/** `@path` tokens outside fences and code spans, without their #fragment or trailing punctuation. */
+/** `@path` tokens outside code, without their #fragment or trailing punctuation. */
 function atPathsIn(text: string): string[] {
-  const prose = linesOutsideFences(text)
-    .join("\n")
-    .split(/\n\s*\n/)
-    .map((paragraph) => paragraph.replace(CODE_SPAN, " "))
-    .join("\n\n");
-  return [...prose.matchAll(AT_PATH)]
-    .map((match) => (match[1] ?? "").replace(/#.*$/, "").replace(/[.,;:!?)\]'"*_]+$/, ""))
+  return proseIn(lex(text))
+    .flatMap((prose) => [...prose.matchAll(AT_PATH)])
+    .map((match) => (match[1] ?? "").replace(/\\ /g, " ").replace(/#.*$/, "").replace(/[.,;:!?)\]'"*_]+$/, ""))
     .filter(Boolean);
 }
 
 function isImport(raw: string, folder: string, tree: Tree): boolean {
+  if (raw === "/") return false; // Claude Code excludes a lone @/.
   // These resolve on a developer machine and not on CI, so existence here proves nothing.
   if (raw.startsWith("~/") || raw.startsWith("/")) return true;
   return tree.isFile(posix.normalize(posix.join(folder, raw)));
 }
 
+/** A top-level ATX ## or ###. marked also reports setext underlines as headings. */
+function isSection(token: Tokens.Generic): boolean {
+  return token.type === "heading" && /^ {0,3}#{2,3}(?:\s|$)/.test(token.raw);
+}
+
 function headingsIn(text: string): string[] {
-  return linesOutsideFences(text).flatMap((line) => {
-    const heading = line.match(/^ {0,3}#{2,3}[ \t]+(.+?)\s*$/);
-    return heading?.[1] !== undefined ? [heading[1]] : [];
+  return lex(text)
+    .filter((token) => isSection(token) && token.text !== "")
+    .map((token) => token.text as string);
+}
+
+/**
+ * An item's first line as written, so inline markup in a heading compares equal.
+ * A list opening on that line (`- 1. Numbered`) is the item's own text, not a nested item.
+ */
+function itemLines(list: Tokens.Generic): string[] {
+  if (list.ordered) return [];
+  return (list.items as Tokens.Generic[]).flatMap((item) => {
+    const line = (item.raw.split("\n")[0] ?? "").replace(/^\s*[-*+]/, "").trim().replace(/ \[trap\]$/, "");
+    const nested = (item.tokens as Tokens.Generic[]).filter((token, i) => token.type === "list" && (i > 0 || line === ""));
+    return [...(line === "" ? [] : [line]), ...nested.flatMap(itemLines)];
   });
 }
 
 /** The list items under `## Index`, up to the next heading of any level, without a trailing ` [trap]`. */
 function indexLinesIn(text: string): string[] {
-  const lines = linesOutsideFences(text);
-  const start = lines.findIndex((line) => /^##[ \t]+Index\s*$/.test(line));
+  const tokens = lex(text);
+  const start = tokens.findIndex((token) => isSection(token) && token.depth === 2 && token.text === "Index");
   if (start < 0) return [];
-  const out: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    if (/^ {0,3}#{1,6}[ \t]/.test(line)) break;
-    const item = line.match(/^\s*[-*+][ \t]+(.+?)\s*$/);
-    if (item?.[1] !== undefined) out.push(item[1].replace(/ \[trap\]$/, ""));
-  }
-  return out;
+  const rest = tokens.slice(start + 1);
+  const end = rest.findIndex((token) => token.type === "heading");
+  return (end < 0 ? rest : rest.slice(0, end)).filter((token) => token.type === "list").flatMap(itemLines);
 }
 
 function checkIndex(notesPath: string, folder: string, tree: Tree): string[] {
@@ -153,6 +186,10 @@ function checkIndex(notesPath: string, folder: string, tree: Tree): string[] {
 
 /** One message per violation, each naming the file and what to do. */
 function checkClaudeMdBudgets(tree: Tree): string[] {
+  const { entries, pending } = tree.budgets;
+  if (!Array.isArray(pending) || pending.some((folder) => typeof folder !== "string")) {
+    return ["`claude-md-budgets.json`: `pending` must be an array of folder names."];
+  }
   const out: string[] = [];
   for (const [path, text] of tree.files) {
     if (!isMemoryFile(path)) continue;
@@ -170,7 +207,13 @@ function checkClaudeMdBudgets(tree: Tree): string[] {
     const module = path.match(/^(src\/[^/]+)\/reference\/notes\.md$/);
     if (module?.[1] !== undefined) out.push(...checkIndex(path, module[1], tree));
   }
-  for (const path of Object.keys(tree.budgets.entries)) {
+  for (const [path, value] of Object.entries(entries)) {
+    if (!isCeiling(value)) {
+      out.push(`${path}: its entry in \`claude-md-budgets.json\` must be a positive integer, not ${JSON.stringify(value)}.`);
+    }
+    if (!isMemoryFile(path) || !tree.files.has(path)) {
+      out.push(`${path}: has an entry in \`claude-md-budgets.json\` but is not a tracked in-scope CLAUDE.md. Correct the path or delete the entry.`);
+    }
     const notes = `${posix.dirname(path)}/reference/notes.md`;
     if (tree.files.has(notes)) {
       out.push(`${path}: has an entry in \`claude-md-budgets.json\` and \`${notes}\` exists. The file PR deletes its entry.`);
@@ -217,7 +260,7 @@ function check(
     files: map,
     isFile: (path) => existing.has(path),
     // The json is hand-edited, so fixtures may hold what its type rules out.
-    budgets: { entries: opts.entries ?? {}, pending: opts.pending ?? [] } as Budgets,
+    budgets: { entries: opts.entries ?? {}, pending: "pending" in opts ? opts.pending : [] } as Budgets,
   });
 }
 
@@ -531,6 +574,10 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
     expect(check({ "CLAUDE.md": "## See @a.md\n\n- @a.md\n\n> @a.md\n" }, A)).toHaveLength(3);
   });
 
+  test("a table row is prose at gfm:false", () => {
+    expect(check({ "CLAUDE.md": "a | b\n---|---\n@a.md | c\n" }, A)).toHaveLength(1);
+  });
+
   test("an @path in an HTML block or comment still fails", () => {
     expect(check({ "CLAUDE.md": "<!-- @a.md -->\n\n<div>\n@a.md\n</div>\n" }, A)).toHaveLength(2);
   });
@@ -631,6 +678,10 @@ describe("index, as the lexer reads it", () => {
     expect(check(indexed("## One\n", "- One\n  - Detail\n"))).toEqual([expect.stringContaining('"Detail"')]);
   });
 
+  test("an item whose text starts on the next line is read", () => {
+    expect(check(indexed("## One\n", "-\n  - One\n"))).toEqual([]);
+  });
+
   test("a list item's continuation line is not part of its text", () => {
     expect(check(indexed("## One\n", "- One\n  more text\n"))).toEqual([]);
   });
@@ -643,6 +694,32 @@ describe("index, as the lexer reads it", () => {
     expect(check(indexed("## One\n", "1. One\n"))).toEqual([expect.stringContaining('"One"')]);
     expect(check(indexed("## One\n\n## Two\n\n## Three\n", "- One\n\n* Two\n\n+ Three\n"))).toEqual([]);
   });
+});
+
+test("the bounded tokenizer reads a file as marked's own does", () => {
+  const blocks = [
+    "---", "___", "***", "   ---", "    ---", "- - -", "_ _ _", "* * *", "--", "__x__", "*x*",
+    "> quote", "   > quote\nlazy", "    > code", ">",
+    "- a", "* a", "+ a", "1. a", "1) a", "123456789. a", "   - a", "    - a", "- a\n  - b\n\n  c", "-", "2 a", "1.a",
+    "<div>\nx\n</div>", "   <div>", "    <div>", "<!-- c\n\nd -->", "<pre>\n\n## x\n</pre>", "<X>", "<X> y", "</x>", "a <b> c", "<?php\n\n?>", "<!DOCTYPE x>",
+    "Foo\n---", "Foo\n===", "Foo\nbar\n---", "Foo\n\n---", "Foo\n   \n===", "Foo\n ---", "Foo\n    ---", "Foo\n---  ", "- a\n---", "> a\n---", "# a\n---", "##foo\n---",
+    "```\n---\n\n## x\n```", "~~~\n> x", "    code\n---", "plain", "plain\n- item", "plain\n> quote", "plain\n# heading", "plain\n<div>",
+    "[def]: x\n---", "\\- a", "\t- a", "\t---", " \t> a", "\r\n---\r\n",
+  ];
+  const stock = (text: string) => JSON.stringify(
+    (new Lexer({ gfm: false }).lex(text) as Tokens.Generic[]).filter((token) => token.type !== "space"),
+    (key, value) => (key === "raw" ? undefined : value),
+  );
+  const ours = (text: string) => JSON.stringify(
+    lex(text).filter((token) => token.type !== "space"),
+    (key, value) => (key === "raw" ? undefined : value),
+  );
+  for (const first of blocks) {
+    expect(ours(first)).toBe(stock(first));
+    for (const second of blocks) {
+      for (const text of [`${first}\n${second}\n`, `${first}\n\n${second}\n`]) expect(ours(text)).toBe(stock(text));
+    }
+  }
 });
 
 describe("budgets file", () => {
