@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { renderDay } from "../src/format/item-dates.ts";
 
 const PORT = e2ePort("wiki-decision-views");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -121,6 +122,9 @@ const MANY = [
 const GRID_REL = "plans/questions.mdx";
 // A long question and answer, one open with a card, one open with none, and 9
 // decided, so the cap folds some.
+/** The grid counts an age from the render day, so a fixed `since=` passes on one day only. */
+const FOUR_DAYS_AGO = new Date(Date.parse(`${renderDay()}T00:00:00Z`) - 4 * 86_400_000).toISOString().slice(0, 10);
+
 const GRID = [
   "---",
   "title: Question plan",
@@ -138,7 +142,7 @@ const GRID = [
   "",
   "<NextMoves>",
   "",
-  '<Lane kind="waiting" since="2026-10-28">',
+  `<Lane kind="waiting" since="${FOUR_DAYS_AGO}">`,
   "",
   "- **O1**",
   "",
