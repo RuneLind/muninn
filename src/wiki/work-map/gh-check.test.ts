@@ -117,7 +117,7 @@ describe("the rows", () => {
     expect(body.prs[`${WIDGETS}#1`]).toEqual({ state: "MERGED", mergedAt: MERGED_AT });
     expect(body.prs[`${WIDGETS}#4`]).toBeUndefined();
     expect(body.uncheckedRows).toEqual([{ page: "plans/alpha.mdx", pr: 4, repo: WIDGETS }]);
-    expect(body.unlinkedRows.map((r) => r.label)).toEqual(["#7", "#8"]);
+    expect(body.unlinkedRows.map((r) => r.label)).toEqual(["7", "PR #8"]);
   });
 
   test("a merged PR in a Depends on cell does not flag its row, and is not asked for on its behalf", async () => {
@@ -141,6 +141,145 @@ describe("the rows", () => {
     const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 9), "MEL-2 here", "open [[owner]]", ""]]), "plans/owner.mdx": "---\ntitle: Owner\nowns: [MEL-1]\n---\n\nBody.\n" });
     const body = await run(r, deps(stubGh({ [`${WIDGETS}#9`]: { state: "OPEN" } })));
     expect([body.skipped, body.checked]).toEqual([0, 1]);
+  });
+
+  describe("a row with no number", () => {
+    const owner = "---\ntitle: Owner\nowns: [MEL-1]\n---\n\nBody.\n";
+
+    test("is seen: no full link is unlinked, a state owned elsewhere is skipped, and the rows sum", async () => {
+      const r = wiki({
+        "plans/a.mdx": page("in-flight", [
+          ["**P3 — unprompted TUI**", "x", "not started", ""],
+          ["L — local acceptance", "x", "open", ""],
+          ["[MEL-1](https://jira.test/MEL-1)", "A1", "se [[owner]]", ""],
+          ["PR A", "MEL-1, the second", "se [[plans/owner]]", ""],
+          ["PR B", "MEL-2", "se [[owner]]", ""],
+          ["1 — numbered", "x", "open", ""],
+          [url(WIDGETS, 3), "linked", "open", ""],
+        ]),
+        "plans/owner.mdx": owner,
+      });
+      const body = await run(r, deps(stubGh({ [`${WIDGETS}#3`]: { state: "OPEN" } })));
+      expect({ checked: body.checked, unchecked: body.unchecked, unlinked: body.unlinked, skipped: body.skipped }).toEqual({ checked: 1, unchecked: 0, unlinked: 4, skipped: 2 });
+      expect(body.unlinkedRows.map((x) => x.label)).toEqual(["P3 — unprompted TUI", "L — local acceptance", "PR B", "numbered"]);
+    });
+
+    test("a table with no state column counts its rows and skips none", async () => {
+      const r = wiki({
+        "plans/a.mdx": page("in-flight", [["P0 — shared", "[[owner]] MEL-1"], ["1 — x", "y"], [url(WIDGETS, 3), "z"]], "", ["PR", "What"]),
+        "plans/owner.mdx": owner,
+      });
+      const body = await run(r, deps(stubGh({ [`${WIDGETS}#3`]: { state: "MERGED", mergedAt: MERGED_AT } })));
+      expect({ checked: body.checked, unlinked: body.unlinked, skipped: body.skipped }).toEqual({ checked: 1, unlinked: 2, skipped: 0 });
+      expect(body.contradictions).toEqual([]);
+    });
+
+    test("a glance table's row with no number stays out, as it is for every other reader", async () => {
+      const glance = `---\ntitle: G\nplan_status: proposed\n---\n\n### At a glance\n\n| PR | What |\n|---|---|\n| 1 — a | x |\n| Later | y |\n`;
+      const body = await run(wiki({ "plans/g.mdx": glance }), deps(stubGh({})));
+      expect(body.unlinkedRows.map((x) => x.label)).toEqual(["a"]);
+    });
+  });
+
+  describe("the drill label", () => {
+    const labelOf = async (first: string): Promise<string> => {
+      const body = await run(wiki({ "plans/a.mdx": page("ready", [[first, "x", "open", ""]]) }), deps(stubGh({})));
+      return body.unlinkedRows[0]!.label;
+    };
+
+    test.each([
+      ["**7**", "7"],
+      ["~~7~~", "7"],
+      ["7 — the *real* `name`", "the real name"],
+      ["3 — see [[plans/other]]", "see plans/other"],
+      // A table row splits on every `|`, so a piped wikilink reaches its cell cut.
+      ["3 — see [[plans/other\\|Other page]]", "see plans/other"],
+      ["3 — see [[plans/other|Other page]]", "see plans/other"],
+      ["3 — see [[plans/other#part]]", "see plans/other"],
+      ["3 — see [the doc](https://example.test/d)", "see the doc"],
+      ["3 — ~~old~~ name", "old name"],
+      ["3 — __bold__ _lead_ snake_case", "bold lead snake_case"],
+    ])("%s reads %s", async (first, want) => {
+      expect(await labelOf(first)).toBe(want);
+    });
+
+    test("a blank first cell says so", async () => {
+      expect(await labelOf(" ")).toBe("(no label)");
+    });
+
+    test("a clip never halves a character outside the BMP, and stays in bounds", async () => {
+      const label = await labelOf(`3 — ${"a".repeat(78)}😀😀`);
+      expect(label).toBe(`${"a".repeat(78)}…`);
+      expect(await labelOf(`3 — ${"a".repeat(80)}`)).toBe("a".repeat(80));
+      expect(await labelOf(`3 — ${"a".repeat(81)}`)).toBe(`${"a".repeat(79)}…`);
+    });
+  });
+
+  describe("no false contradiction", () => {
+    const flagged = async (rows: string[][], table: Record<string, Pr>) => {
+      const body = await run(wiki({ "plans/a.mdx": page("ready", rows) }), deps(stubGh(table)));
+      return { pairs: body.contradictions.map((c) => `${c.pr} ${c.rowState} ${c.ghState}`), checked: body.checked, unchecked: body.unchecked, unlinked: body.unlinked };
+    };
+    const merged = (...ns: number[]) => Object.fromEntries(ns.map((n) => [`${WIDGETS}#${n}`, { state: "MERGED", mergedAt: MERGED_AT } as Pr]));
+
+    test.each([
+      ["open, waits on"],
+      ["open (blocked by"],
+    ])("a dependency in the state cell (%s) is no own PR", async (lead) => {
+      const close = lead.includes("(") ? ")" : "";
+      expect(await flagged([["3 — x", "y", `${lead} ${url(WIDGETS, 9)}${close}`, ""]], merged(9))).toEqual({ pairs: [], checked: 0, unchecked: 0, unlinked: 1 });
+    });
+
+    test("a merged own PR whose state word goes on about follow-up work is not flagged", async () => {
+      expect((await flagged([[url(WIDGETS, 1), "y", "open follow-up: rail polish", ""], [url(WIDGETS, 2), "y", "planned next: more", ""]], merged(1, 2))).pairs).toEqual([]);
+    });
+
+    test("a state word with a separator still flags", async () => {
+      expect((await flagged([[url(WIDGETS, 1), "y", "open — awaiting review", ""]], merged(1))).pairs).toEqual(["1 open MERGED"]);
+    });
+
+    test("state cell: the PR right after the state word still flags", async () => {
+      expect((await flagged([["3 — x", "y", `open ${url(WIDGETS, 4)}`, ""]], merged(4))).pairs).toEqual(["4 open MERGED"]);
+    });
+
+    test("a PR in the state cell's prose is no reason to flag the row's own", async () => {
+      expect((await flagged([[url(WIDGETS, 1), "y", `blocked by ${url(WIDGETS, 8)}; open ${url(WIDGETS, 9)}`, ""]], merged(1, 8, 9))).pairs).toEqual([]);
+    });
+
+    describe("several PRs in the own cell", () => {
+      const row = [[`${url(WIDGETS, 3)}, ${url(WIDGETS, 4)}`, "y", "open", ""]];
+
+      test("one still open: no flag, and the row is one checked row", async () => {
+        expect(await flagged(row, { ...merged(3), [`${WIDGETS}#4`]: { state: "OPEN" } })).toEqual({ pairs: [], checked: 1, unchecked: 0, unlinked: 0 });
+      });
+
+      test("the first open and the second merged: no flag either", async () => {
+        expect((await flagged(row, { [`${WIDGETS}#3`]: { state: "OPEN" }, ...merged(4) })).pairs).toEqual([]);
+      });
+
+      test("all settled: one flag for the row, whichever way each one settled", async () => {
+        expect(await flagged(row, merged(3, 4))).toEqual({ pairs: ["3 open MERGED"], checked: 1, unchecked: 0, unlinked: 0 });
+        expect((await flagged(row, { ...merged(3), [`${WIDGETS}#4`]: { state: "CLOSED" } })).pairs).toEqual(["3 open MERGED"]);
+      });
+
+      test("one GitHub does not know: unchecked, naming that PR, never a flag", async () => {
+        const body = await run(wiki({ "plans/a.mdx": page("ready", row) }), deps(stubGh(merged(3))));
+        expect(body.contradictions).toEqual([]);
+        expect([body.checked, body.unchecked]).toEqual([0, 1]);
+        expect(body.uncheckedRows).toEqual([{ page: "plans/a.mdx", pr: 4, repo: WIDGETS }]);
+      });
+
+      test("every one is asked for, across repos", async () => {
+        const calls: string[][] = [];
+        await run(wiki({ "plans/a.mdx": page("ready", [[`${url(WIDGETS, 3)} ${url(GEARS, 4)}`, "y", "open", ""]]) }), deps(stubGh({}, calls)));
+        expect(calls.map((c) => [c.find((a) => a.startsWith("repo=")), /number:(\d+)/.exec(c.find((a) => a.startsWith("query="))!)![1]])).toEqual([["repo=widgets", "3"], ["repo=gears", "4"]]);
+      });
+
+      test("two rows sharing a first PR are two flags, one row asking for the same PR once", async () => {
+        const body = await run(wiki({ "plans/a.mdx": page("ready", [...row, [url(WIDGETS, 3), "z", "open", ""]]) }), deps(stubGh(merged(3, 4))));
+        expect(body.contradictions.map((c) => c.pr)).toEqual([3, 3]);
+      });
+    });
   });
 
   test("only a live page is read: its status decides, a retired page is out", () => {

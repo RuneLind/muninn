@@ -16,6 +16,7 @@ import type { WorkMap } from "./schema.ts";
 import { parseBlocks } from "../../format/markdown-ast.ts";
 import { pageLedgers, type Ledger, type LedgerRow, type PrState as LedgerState } from "../../format/pr-ledger.ts";
 import { getLog } from "../../logging.ts";
+import { truncateUnits } from "../ask-chat.ts";
 import { splitFrontmatter } from "../page-text.ts";
 import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from "../store.ts";
 
@@ -201,7 +202,8 @@ function parseRefString(s: string): PrRef | null {
 type ScannedRow =
   | { kind: "skipped" }
   | { kind: "unlinked"; page: string; label: string }
-  | { kind: "pr"; page: string; ref: PrRef; state: LedgerState };
+  /** `refs` are the row's own PRs, `state` what it claims about them. */
+  | { kind: "pr"; page: string; refs: PrRef[]; state: LedgerState };
 
 const CONTRADICTABLE: ReadonlySet<LedgerState> = new Set<LedgerState>(["open", "not-started", "planned"]);
 
@@ -209,7 +211,7 @@ async function ledgersOf(index: WikiIndex, meta: WikiPageMeta, deps: GhCheckDeps
   if (!/\.mdx?$/i.test(meta.relPath)) return [];
   const body = await deps.readBody(index, meta);
   if (body === null) return [];
-  return pageLedgers(parseBlocks(splitFrontmatter(body).body), meta.plan_status === "proposed");
+  return pageLedgers(parseBlocks(splitFrontmatter(body).body), meta.plan_status === "proposed", { everyRow: true });
 }
 
 /** «Say it once»: the state cell links a page that owns a Jira key the row names. */
@@ -224,16 +226,23 @@ function stateOwnedElsewhere(row: LedgerRow, stateColumn: number, index: WikiInd
   return false;
 }
 
+/** The row's first cell as the drill list shows it; a slate number stays a
+ *  number, since no PR may stand behind it. A table row splits on every `|`, so
+ *  a piped wikilink reaches the cell with no close: `[[target\`. */
 function rowLabel(row: LedgerRow): string {
-  const flat = row.label.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*`_]/g, "").trim();
-  const text = flat || (row.pr !== null ? `#${row.pr}` : "");
-  return text.length > ROW_LABEL_MAX ? `${text.slice(0, ROW_LABEL_MAX - 1)}…` : text;
+  const flat = (row.label || (row.cells[0] ?? ""))
+    .replace(/\[\[([^\]\\#]*)[^\]]*(?:\]\])?/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\*|`|~~|(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, "")
+    .trim();
+  const text = flat || "(no label)";
+  return text.length > ROW_LABEL_MAX ? `${truncateUnits(text, ROW_LABEL_MAX - 1)}…` : text;
 }
 
 function scanRow(row: LedgerRow, ledger: Ledger, page: string, index: WikiIndex): ScannedRow {
   if (stateOwnedElsewhere(row, ledger.stateColumn, index)) return { kind: "skipped" };
-  const ref = row.ownPr ? prRef(row.ownPr.repo, row.ownPr.n) : null;
-  return ref ? { kind: "pr", page, ref, state: row.state } : { kind: "unlinked", page, label: rowLabel(row) };
+  const refs = (row.ownPrs ?? []).flatMap((p) => prRef(p.repo, p.n) ?? []);
+  return refs.length ? { kind: "pr", page, refs, state: row.claimedState } : { kind: "unlinked", page, label: rowLabel(row) };
 }
 
 type ItemRef =
@@ -389,7 +398,7 @@ async function scan(index: WikiIndex, map: WorkMap, deps: GhCheckDeps): Promise<
       for (const row of ledger.rows) {
         const scanned = scanRow(row, ledger, meta.relPath, index);
         rows.push(scanned);
-        if (scanned.kind === "pr" && !refs.has(scanned.ref.id)) refs.set(scanned.ref.id, scanned.ref);
+        if (scanned.kind === "pr") for (const ref of scanned.refs) if (!refs.has(ref.id)) refs.set(ref.id, ref);
       }
     }
   }
@@ -607,18 +616,21 @@ function buildBody(s: Scan, c: WikiCache, refreshing: boolean, at: number): Work
       body.unlinked++;
       body.unlinkedRows.push({ page: row.page, label: row.label });
     } else {
-      const gh = known(row.ref);
-      if (!gh) {
+      const gone = row.refs.find((ref) => !known(ref));
+      if (gone) {
         body.unchecked++;
-        body.uncheckedRows.push({ page: row.page, pr: row.ref.n, repo: row.ref.repo });
+        body.uncheckedRows.push({ page: row.page, pr: gone.n, repo: gone.repo });
         continue;
       }
       body.checked++;
-      if (gh.state === "OPEN" || !CONTRADICTABLE.has(row.state)) continue;
-      const key = `${row.page}\0${row.ref.id}`;
+      // Several PRs in one cell are one statement: it fails only once none is left open.
+      if (!CONTRADICTABLE.has(row.state) || row.refs.some((ref) => known(ref)!.state === "OPEN")) continue;
+      const key = `${row.page}\0${row.refs.map((ref) => ref.id).join(" ")}`;
       if (listed.has(key)) continue;
       listed.add(key);
-      body.contradictions.push({ page: row.page, pr: row.ref.n, repo: row.ref.repo, rowState: row.state, ghState: gh.state, mergedAt: gh.mergedAt });
+      const first = row.refs[0]!;
+      const gh = known(first)!;
+      body.contradictions.push({ page: row.page, pr: first.n, repo: first.repo, rowState: row.state, ghState: gh.state, mergedAt: gh.mergedAt });
     }
   }
   for (const need of s.needs) {
