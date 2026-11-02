@@ -140,9 +140,32 @@ export function realGhCheckDeps(): GhCheckDeps {
   };
 }
 
-/** What an item's action must say for a merged PR to finish it, Norwegian
- *  included. Anchored at a word's start, so `preview` and `disclose` stay out. */
-export const NEEDS_ASK_VERB_RE = /(?<![\p{L}\p{N}])(?:merg|lukk|close|godkjenn|approve|review)/iu;
+/** The imperatives that ask for a PR, Norwegian included, whole words only:
+ *  `merged`, `merges`, `reviewer`, `re-review` and `preview` stay out. */
+export const NEEDS_ASK_VERB_RE = /(?<![\p{L}\p{N}_-])(?:merge|merg|lukk|close|godkjenn|approve|review)(?![\p{L}\p{N}_-])/iu;
+
+const ASK_VERBS = `${NEEDS_ASK_VERB_RE.source}(?:\\s+(?:eller|or|og|and)\\s+${NEEDS_ASK_VERB_RE.source})*`;
+/** A word between the verb and the number that can name a repo. A preposition
+ *  says the PR is something else's condition: «Merge after #5». */
+const ASK_QUALIFIER = "(?:(?!(?:after|before|with|without|until|once|since|when|on|in|into|to|for|from|of|by|at|not|no|the|this|that|it|i|på|etter|før|når|med|uten|til|fra|av|inn|mot|ikke)\\s)[\\p{L}\\p{N}][\\p{L}\\p{N}._/-]*\\s+)?";
+const ASK_PR_END = "(?![\\p{L}\\p{N}_]|\\.\\d)";
+const ASK_URL = "https?://(?:www\\.)?github\\.com/[\\w.-]+/[\\w.-]+/pull/\\d+";
+const ASK_BARE_PR = `(?:\\(?(?:[\\p{L}\\p{N}._/-]*#\\d{1,7}${ASK_PR_END}\\)?|${ASK_URL}\\S*)|\\[#\\d{1,7}\\]\\(${ASK_URL}\\S*\\))`;
+const ASK_LIST_JOIN = "(?:\\s*,\\s*|\\s+(?:og|and)\\s+)";
+/** A verb opens the action or a clause. `og`/`and` alone join two steps of which
+ *  the merge is only one, so they open nothing; a negation never gets here,
+ *  since `ikke`, `not` and `don't` are no openers. */
+const ASK_OPENER = "(?:^|[,;:.!—–]\\s+|\\s-\\s+|(?<![\\p{L}\\p{N}_-])(?<!(?:ikke|not|never)\\s+)(?:then|så)\\s+)";
+
+/** The action ends in a clause asking for its PRs: nothing follows them. A word
+ *  before a later PR needs its own verb: «og deploy #2» is a step, not a repo. */
+export const NEEDS_ASK_RE = new RegExp(`${ASK_OPENER}${ASK_VERBS}\\s+${ASK_QUALIFIER}${ASK_BARE_PR}(?:${ASK_LIST_JOIN}(?:${ASK_VERBS}\\s+${ASK_QUALIFIER})?${ASK_BARE_PR})*[.!]?$`, "iu");
+
+/** Whether an item's action asks for the PRs it names. When unsure this answers
+ *  false: a neutral note is the safe mark, a wrong strike is not. */
+export function needsAskFor(action: string): boolean {
+  return NEEDS_ASK_RE.test(action.replace(/(?:\s*⟦[^⟧]*⟧)+[\s.!]*$/, "").trim());
+}
 
 /** The live plan pages: open plans, and shipped ones with follow-ups open. A
  *  retired page is out, as it is from the rail's live lists. */
@@ -213,13 +236,89 @@ function scanRow(row: LedgerRow, ledger: Ledger, page: string, index: WikiIndex)
   return ref ? { kind: "pr", page, ref, state: row.state } : { kind: "unlinked", page, label: rowLabel(row) };
 }
 
-/** Every `#n` an item's words name, its page markers masked. `&#39;` and a path's
- *  anchor are no PR. */
-function itemPrNumbers(text: string): number[] {
+type ItemRef =
+  /** A full PR URL: that PR, whatever the page knows. */
+  | { form: "url"; n: number; repo: string }
+  /** `owner/repo#n`. */
+  | { form: "slug"; n: number; repo: string }
+  /** `#n`, with the word right before it, if any. */
+  | { form: "bare"; n: number; word: string | null; glued: boolean };
+
+const ITEM_REF_RE = new RegExp(
+  [
+    "https?://(?:www\\.)?github\\.com/([\\w.-]+/[\\w.-]+)/pull/(\\d+)[^\\s)\\]]*",
+    // Any other URL: its anchor is no PR.
+    "[a-z][a-z0-9+.-]*://[^\\s)\\]]+",
+    `(?<![\\p{L}\\p{N}_./-])([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._][A-Za-z0-9._-]*)#(\\d{1,7})${ASK_PR_END}`,
+    // `&#39;` and a path's anchor (`/#5`) are no PR; `a.#5` is a glued word's.
+    `(?<![&/#])#(\\d{1,7})${ASK_PR_END}`,
+  ].join("|"),
+  "giu",
+);
+
+/** What an item's words name, in order, its page markers masked. */
+function scanItemRefs(text: string): ItemRef[] {
   const words = text.replace(/⟦[^⟧]*⟧/g, " ");
-  const out = new Set<number>();
-  for (const m of words.matchAll(/(?<![&/#])#(\d{1,7})(?![\p{L}\p{N}])/gu)) out.add(Number(m[1]));
-  return [...out];
+  const out: ItemRef[] = [];
+  for (const m of words.matchAll(ITEM_REF_RE)) {
+    if (m[1]) out.push({ form: "url", n: Number(m[2]), repo: m[1] });
+    else if (m[3]) out.push({ form: "slug", n: Number(m[4]), repo: m[3] });
+    else if (m[5]) {
+      const before = /([\p{L}\p{N}_.-]+)(\s*)$/u.exec(words.slice(0, m.index));
+      out.push({ form: "bare", n: Number(m[5]), word: before?.[1] ?? null, glued: !!before && !before[2] });
+    }
+  }
+  return out;
+}
+
+interface ResolvedItem {
+  prs: { n: number; ref: PrRef | null }[];
+  /** The words name a PR with no entry, so the entries are not the whole item. */
+  incomplete: boolean;
+}
+
+/**
+ * An item's PRs against the refs its pages know. A named repo is that repo and
+ * only that one: a page that does not know its PR gives no entry. A bare `#n`
+ * needs exactly one repo to match, and is the named PR when the item also names
+ * that number with a repo.
+ */
+function resolveItemRefs(refs: readonly ItemRef[], known: readonly PrRef[]): ResolvedItem {
+  const nameOf = (repo: string): string => repo.slice(repo.indexOf("/") + 1).toLowerCase();
+  const names = new Set(known.map((r) => nameOf(r.repo)));
+  const distinct = (rs: readonly PrRef[]): PrRef[] => [...new Map(rs.map((r) => [r.id, r])).values()];
+  const named = (r: ItemRef): boolean => r.form !== "bare" || (r.word !== null && names.has(r.word.toLowerCase()));
+  const namedNumbers = new Set(refs.filter(named).map((r) => r.n));
+
+  const out = new Map<string, { n: number; ref: PrRef | null }>();
+  const add = (n: number, ref: PrRef | null): void => {
+    const key = ref?.id ?? `?${n}`;
+    if (!out.has(key)) out.set(key, { n, ref });
+  };
+  let incomplete = false;
+  for (const r of refs) {
+    const same = known.filter((k) => k.n === r.n);
+    if (r.form === "url") {
+      const ref = prRef(r.repo, r.n);
+      if (ref) add(r.n, ref);
+      else incomplete = true;
+    } else if (r.form === "slug") {
+      const hit = same.find((k) => k.repo.toLowerCase() === r.repo.toLowerCase());
+      if (hit) add(r.n, hit);
+      else incomplete = true;
+    } else if (named(r)) {
+      const hits = distinct(same.filter((k) => nameOf(k.repo) === r.word!.toLowerCase()));
+      if (hits.length) add(r.n, hits.length === 1 ? hits[0]! : null);
+      else incomplete = true;
+    } else if (r.glued) {
+      // `x#5`, `foo.md#5`: no PR, but no strike either beside a real one.
+      incomplete = true;
+    } else if (!namedNumbers.has(r.n)) {
+      const repos = new Map(same.map((k) => [k.repo.toLowerCase(), k]));
+      add(r.n, repos.size === 1 ? [...repos.values()][0]! : null);
+    }
+  }
+  return { prs: [...out.values()], incomplete };
 }
 
 interface ScannedNeed {
@@ -270,21 +369,18 @@ async function scan(index: WikiIndex, map: WorkMap, deps: GhCheckDeps): Promise<
     const itemKey = `${item.kind}|${item.title}`;
     if (itemSeen.has(itemKey)) continue;
     itemSeen.add(itemKey);
-    const numbers = itemPrNumbers(`${item.title} ${item.action}`);
-    if (!numbers.length) continue;
+    const scanned = scanItemRefs(`${item.title} ${item.action}`);
+    if (!scanned.length) continue;
     const markers = [...`${item.title} ${item.why} ${item.action}`.matchAll(/⟦([^⟧]+)⟧/g)].map((m) => m[1]!);
     const known: PrRef[] = [];
     for (const rel of new Set([...item.pages, ...markers])) {
       const meta = index.resolveRelPath(rel);
       if (meta) known.push(...refsOf(meta, await ledgers(meta)));
     }
-    const prs = numbers.map((n) => {
-      const repos = new Map(known.filter((r) => r.n === n).map((r) => [r.repo.toLowerCase(), r]));
-      const ref = repos.size === 1 ? [...repos.values()][0]! : null;
-      if (ref && !refs.has(ref.id)) refs.set(ref.id, ref);
-      return { n, ref };
-    });
-    needs.push({ kind: item.kind, title: item.title, asksForIt: NEEDS_ASK_VERB_RE.test(item.action), prs });
+    const { prs, incomplete } = resolveItemRefs(scanned, known);
+    if (!prs.length) continue;
+    for (const { ref } of prs) if (ref && !refs.has(ref.id)) refs.set(ref.id, ref);
+    needs.push({ kind: item.kind, title: item.title, asksForIt: !incomplete && needsAskFor(item.action), prs });
   }
 
   const rows: ScannedRow[] = [];

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import { getWikiIndex, readWikiPage } from "../store.ts";
+import { needGhMarks } from "../../dashboard/views/components/wiki-work-card.ts";
 import {
   __resetGhCheckForTest,
   checkWorkMapPrs,
@@ -20,6 +21,7 @@ import {
   ghQueryArgs,
   isLiveCheckPage,
   NEEDS_ASK_VERB_RE,
+  needsAskFor,
   readGhAnswer,
   spawnGhRunner,
   type GhCheckDeps,
@@ -455,9 +457,186 @@ describe("Needs you", () => {
     expect((await run(twoRepos(), deps(stubGh(table)), m)).needs).toEqual([]);
   });
 
-  test("the verb pattern reads the words, Norwegian included, at a word's start", () => {
+  test("the verb pattern reads whole words, Norwegian included", () => {
     for (const s of ["Merge #1", "merg den", "Lukk #1", "Close it", "Godkjenn PR-en", "Approve", "Review #1", "gjør review"]) expect(NEEDS_ASK_VERB_RE.test(s)).toBe(true);
-    for (const s of ["preview #1", "disclose", "emerge", "Se på #1", ""]) expect(NEEDS_ASK_VERB_RE.test(s)).toBe(false);
+    for (const s of ["preview #1", "disclose", "emerge", "Se på #1", "", "merged", "merget", "merging", "merges", "reviewer", "closes", "re-review"]) expect(NEEDS_ASK_VERB_RE.test(s)).toBe(false);
+  });
+
+  describe("an action asks for a PR only when nothing is left after it", () => {
+    const NUMBERS = [1, 2, 5, 369, 378, 786, 3556];
+    const allMerged = Object.fromEntries(NUMBERS.map((n) => [`${WIDGETS}#${n}`, { state: "MERGED", mergedAt: MERGED_AT } as Pr]));
+    const needsOf = (action: string) =>
+      run(wiki({ "plans/a.mdx": page("ready", NUMBERS.map((n) => [url(WIDGETS, n), "x", "merged", ""])) }), deps(stubGh(allMerged)), map([{ title: "T", action, pages: ["plans/a.mdx"] }]));
+
+    test.each([
+      "Merged #5 needs prod",
+      "Vent på reviewer for #5",
+      "Se review-kommentar på #5",
+      "Closes in release, #5 lands",
+      "ikke merg #5",
+      "don't merge #5",
+      "do not merge #5",
+      "not merge #5",
+      "Re-review #5",
+      "Verify that the merged #786 works in prod",
+      "After merging #786, set up the cron on the mini",
+      "Revert merged #786",
+      "Review #786, then deploy it to prod and run the backfill",
+      "Merge step #786 of the sweep",
+      "Merge e2e #369 og sett siden til shipped",
+      "Merge #5 and deploy it",
+      "Merge #1 og deploy #2",
+      "Merge #1, release #2",
+      "Merge #5 så deploy",
+      "Merge #5; deploy",
+      "Merge #5: then deploy",
+      "Merge #5. Then deploy.",
+      "Merge #5 first",
+      "Merge #5?",
+      "Merge after #5",
+      "Merge før #5",
+      "Lukk når #5",
+      "merges #5",
+      "merget #5",
+      "merging #5",
+      "reviewer #5",
+      "closes #5",
+      "Set up the cron and merge #5",
+    ])("%s: not asked for", async (action) => {
+      const { needs } = await needsOf(action);
+      expect(needs.length).toBeGreaterThan(0);
+      expect(needs.map((n) => n.asksForIt)).toEqual(needs.map(() => false));
+    });
+
+    test.each([
+      ["Merge #5", [5]],
+      ["merg #5", [5]],
+      ["Lukk #5", [5]],
+      ["Close #5", [5]],
+      ["Godkjenn #5", [5]],
+      ["Approve #5", [5]],
+      ["Review #5", [5]],
+      ["Merge #5.", [5]],
+      ["Merge e2e #369", [369]],
+      ["Merge PR #369", [369]],
+      ["merge eller lukk #378", [378]],
+      ["Run the tests, then merge #5", [5]],
+      ["Merge #1 og #2", [1, 2]],
+      ["Merge #1, #2 and #5", [1, 2, 5]],
+      ["Merge #1 og lukk #2", [1, 2]],
+    ] as const)("%s: asked for", async (action, prs) => {
+      const { needs } = await needsOf(action);
+      expect(needs.map((n) => [n.pr, n.asksForIt])).toEqual(prs.map((n) => [n, true]));
+    });
+
+    test("the owner/repo form asks too, and the pattern is the exported one", async () => {
+      const r = wiki({ "plans/a.mdx": page("ready", [[url("navikt/melosys-api", 3556), "x", "merged", ""]]) });
+      const body = await run(r, deps(stubGh({ "navikt/melosys-api#3556": { state: "MERGED", mergedAt: MERGED_AT } })), map([{ title: "T", action: "Merge navikt/melosys-api#3556", pages: ["plans/a.mdx"] }]));
+      expect(body.needs).toEqual([{ kind: "followup", title: "T", pr: 3556, state: "MERGED", mergedAt: MERGED_AT, asksForIt: true }]);
+      expect(needsAskFor("Merge navikt/melosys-api#3556")).toBe(true);
+      expect(needsAskFor("Merged navikt/melosys-api#3556")).toBe(false);
+    });
+
+    test("a page marker after the PR adds no step; one between verb and PR keeps it unasked", async () => {
+      const on = (action: string) => run(wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 5), "x", "merged", ""]]) }), deps(stubGh(allMerged)), map([{ title: "T", action, pages: ["plans/a.mdx"] }]));
+      expect((await on("Merge #5 ⟦plans/a.mdx⟧")).needs[0]!.asksForIt).toBe(true);
+      __resetGhCheckForTest();
+      expect((await on("Merge ⟦plans/a.mdx⟧ #5")).needs[0]!.asksForIt).toBe(false);
+    });
+
+    test.each([
+      ["Merge e2e #369 og sett siden til shipped", "GitHub: #369 merged"],
+      ["Release #3556 to prod", "GitHub: #3556 merged"],
+      ["Vent på release av #3556", "GitHub: #3556 merged"],
+    ])("%s: a neutral note, not struck", async (action, text) => {
+      const m = needGhMarks((await needsOf(action)).needs);
+      expect(m.struck).toBe(false);
+      expect(m.notes.map((n) => [n.tone, n.text.replace(/ \d+\.\d+$/, "")])).toEqual([["info", text]]);
+    });
+
+    test("two PRs asked for are done only when both are merged", async () => {
+      const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "merged", ""], [url(WIDGETS, 2), "x", "open", ""]]) });
+      const m = map([{ title: "T", action: "Merge #1 og #2", pages: ["plans/a.mdx"] }]);
+      const open = await run(r, deps(stubGh({ [`${WIDGETS}#1`]: { state: "MERGED", mergedAt: MERGED_AT }, [`${WIDGETS}#2`]: { state: "OPEN" } })), m);
+      expect(needGhMarks(open.needs).struck).toBe(false);
+      __resetGhCheckForTest();
+      const both = await run(r, deps(stubGh({ [`${WIDGETS}#1`]: { state: "MERGED", mergedAt: MERGED_AT }, [`${WIDGETS}#2`]: { state: "MERGED", mergedAt: MERGED_AT } })), m);
+      expect(needGhMarks(both.needs).struck).toBe(true);
+    });
+  });
+
+  describe("an item's PR is the one it names", () => {
+    const widgetsOnly = () => wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 5), "x", "merged", ""], [url(WIDGETS, 6), "x", "merged", ""]]) });
+    const gearsElsewhere = () => wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 5), "x", "merged", ""], [url(GEARS, 9), "x", "merged", ""]]) });
+    const merged = { [`${WIDGETS}#5`]: { state: "MERGED", mergedAt: MERGED_AT }, [`${WIDGETS}#6`]: { state: "MERGED", mergedAt: MERGED_AT }, [`${GEARS}#5`]: { state: "CLOSED" }, [`${GEARS}#9`]: { state: "MERGED", mergedAt: MERGED_AT } } as Record<string, Pr>;
+    const item = (action: string, pages = ["plans/a.mdx"]) => map([{ title: "T", action, pages }]);
+    const brief = (needs: { pr: number; state: unknown; asksForIt: boolean }[]) => needs.map((n) => [n.pr, n.state, n.asksForIt]);
+
+    test.each(["Merge acme/gears#5", "Merge ACME/gears#5"])("%s on a page knowing only another repo's #5: no entry", async (action) => {
+      expect((await run(widgetsOnly(), deps(stubGh(merged)), item(action))).needs).toEqual([]);
+    });
+
+    test.each(["Merge gears #5", "Merge gears#5"])("%s where the page knows gears but not its #5: no entry", async (action) => {
+      expect((await run(gearsElsewhere(), deps(stubGh(merged)), item(action))).needs).toEqual([]);
+    });
+
+    test.each(["Merge acme/gears#5", "Merge ACME/Gears#5", "Merge gears #5", "Merge GEARS #5", "Merge gears#5"])("%s on a page knowing both repos: the named one", async (action) => {
+      expect(brief((await run(twoRepos(), deps(stubGh(table)), item(action, ["plans/a.mdx", "plans/b.mdx"]))).needs)).toEqual([[5, "CLOSED", true]]);
+    });
+
+    test("a known short name with no such PR keeps another PR in the item from being struck", async () => {
+      const body = await run(gearsElsewhere(), deps(stubGh(merged)), item("Merge gears #7 og #5"));
+      expect(brief(body.needs)).toEqual([[5, "MERGED", false]]);
+    });
+
+    test("a short name two owners share resolves to neither", async () => {
+      const r = wiki({ "plans/a.mdx": page("ready", [[url("acme/gears", 5), "x", "merged", ""], [url("other/gears", 5), "x", "merged", ""]]) });
+      expect(brief((await run(r, deps(stubGh({ "acme/gears#5": { state: "MERGED" }, "other/gears#5": { state: "MERGED" } })), item("Merge gears #5"))).needs)).toEqual([[5, null, true]]);
+    });
+
+    test("a word that is no repo on the page leaves the bare form's rule", async () => {
+      const r = wiki({ "plans/a.mdx": page("ready", [[url("navikt/melosys-e2e-tests", 369), "x", "merged", ""]]) });
+      expect(brief((await run(r, deps(stubGh({ "navikt/melosys-e2e-tests#369": { state: "MERGED", mergedAt: MERGED_AT } })), item("Merge e2e #369"))).needs)).toEqual([[369, "MERGED", true]]);
+    });
+
+    test.each(["see foo.md#5", "https://example.test/x#5", "https://example.test/?a=#5", "#5.2 merge", "x#5", "/#5", "docs/foo.md#5", "#5x", "#5_x", "&#5;", "a.#5"])("%s is no PR", async (action) => {
+      expect((await run(widgetsOnly(), deps(stubGh(merged)), item(action))).needs).toEqual([]);
+    });
+
+    test("a number after an ordinary word stays a bare #n and is never struck", async () => {
+      const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 12), "x", "merged", ""]]) });
+      const body = await run(r, deps(stubGh({ [`${WIDGETS}#12`]: { state: "MERGED", mergedAt: MERGED_AT } })), item("color #12 merge"));
+      expect(brief(body.needs)).toEqual([[12, "MERGED", false]]);
+      expect(needGhMarks(body.needs).struck).toBe(false);
+    });
+
+    test.each([
+      "Merge https://github.com/acme/other/pull/44",
+      "Merge [#44](https://github.com/acme/other/pull/44)",
+      "Merge https://github.com/acme/other/pull/44/files",
+    ])("%s is that PR, known to the page or not, one entry", async (action) => {
+      const calls: string[][] = [];
+      const body = await run(widgetsOnly(), deps(stubGh({ ...merged, "acme/other#44": { state: "MERGED", mergedAt: MERGED_AT } }, calls)), item(action));
+      expect(brief(body.needs)).toEqual([[44, "MERGED", true]]);
+      expect(calls.some((c) => c.includes("repo=other"))).toBe(true);
+    });
+
+    test("a URL to a PR that does not exist on GitHub is not struck", async () => {
+      const body = await run(widgetsOnly(), deps(stubGh(merged)), item("Merge https://github.com/acme/other/pull/44"));
+      expect(brief(body.needs)).toEqual([[44, null, true]]);
+      expect(needGhMarks(body.needs).struck).toBe(false);
+    });
+
+    test.each(["Merge acme/gears#7 og #5", "Merge #5 og x#6"])("%s: a named PR with no entry keeps the other from being struck", async (action) => {
+      const body = await run(widgetsOnly(), deps(stubGh(merged)), item(action));
+      expect(brief(body.needs)).toEqual([[5, "MERGED", false]]);
+      expect(needGhMarks(body.needs).struck).toBe(false);
+    });
+
+    test("the title's bare #5 is the action's named PR, not a second one", async () => {
+      const m = map([{ title: "Land #5", action: "Merge gears #5", pages: ["plans/a.mdx", "plans/b.mdx"] }]);
+      expect(brief((await run(twoRepos(), deps(stubGh(table)), m)).needs)).toEqual([[5, "CLOSED", true]]);
+    });
   });
 
   test("the page ref index and a ledger link both resolve a number", async () => {

@@ -39,13 +39,14 @@
  *     cell in one row with the others, its list, the struck, warning and neutral
  *     marks, «checking…», «refreshing» and its three more fetches, the «not
  *     checked» remedies, a repaint that keeps a fold and focus, a new map's
- *     refetch, and a themes map that never asks.
+ *     refetch and no mark from the previous answer while it is pending or after
+ *     it fails, and a themes map that never asks.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
  */
 
-import { test, expect, type Locator, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page, type Route } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -850,6 +851,73 @@ test("a new map after ↻ fetches the checks at once, for its marks", async ({ p
     })
     .toBe(2);
   expect(gets).toBeGreaterThan(1);
+});
+
+// The new map shares a title with the old one, so an old answer would land on it.
+async function refreshToNewMap(page: Page, second: (route: Route) => Promise<void>): Promise<{ card: Locator; checks: () => number }> {
+  let n = 0;
+  await page.route("**/api/wiki/work-map/checks*", async (route) => (++n === 1 ? route.fulfill({ json: checksBody({ needs: GH_NEEDS, contradictions: [{ page: "plans/alpha.mdx", pr: 369, repo: "acme/gears", rowState: "open", ghState: "MERGED", mergedAt: GH_MERGED_AT }] }) }) : second(route)));
+  const newRun = Date.now();
+  let posted = false;
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as { map: { runAtMs: number } } & Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - HOUR, map: posted ? { ...body.map, runAtMs: newRun } : body.map } });
+  });
+  await page.route("**/api/wiki/work-map/refresh*", (route) => {
+    posted = true;
+    return route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } });
+  });
+  await page.clock.install();
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator(".wiki-wm-ghnote.done")).toHaveCount(1);
+  await card.locator("#wikiWorkMapRefresh").click();
+  await expect
+    .poll(async () => {
+      await page.clock.runFor(1_000);
+      return n;
+    })
+    .toBe(2);
+  return { card, checks: () => n };
+}
+
+test("a new map shows no mark from the previous answer while its own GET is pending", async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const { card } = await refreshToNewMap(page, async (route) => {
+    await held;
+    await route.fulfill({ json: checksBody({ needs: [{ kind: "followup", title: "Only mentions", pr: 3556, state: "MERGED", mergedAt: "2026-10-28T12:00:00Z", asksForIt: false }] }) });
+  });
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(card.locator(".wiki-wm-ghnote")).toHaveCount(0);
+  await expect(card.locator(".wiki-wm-need.gh-done")).toHaveCount(0);
+  expect(await card.locator(".wiki-wm-need").filter({ hasText: "Merge the fix" }).locator(".wiki-wm-action").evaluate((el) => getComputedStyle(el).textDecorationLine)).toBe("none");
+  // The old answer still counts the rows, muted.
+  await expect(cell.locator("b")).toHaveText("1");
+  await expect(cell).toHaveClass(/\bmuted\b/);
+  await expect(cell).not.toHaveClass(/\bbad\b/);
+  await expect(cell).toContainText("checking…");
+  // Its own answer marks.
+  release();
+  await expect(card.locator(".wiki-wm-ghnote.info")).toHaveText("GitHub: #3556 merged 28.10");
+  await expect(card.locator(".wiki-wm-ghnote")).toHaveCount(1);
+  await expect(cell).not.toHaveClass(/\bmuted\b/);
+});
+
+test("a new map whose GET answers 500 keeps no mark from the previous answer", async ({ page }) => {
+  const { card, checks } = await refreshToNewMap(page, (route) => route.fulfill({ status: 500, json: { error: "x" } }));
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(card.locator(".wiki-wm-ghnote")).toHaveCount(0);
+  await expect(card.locator(".wiki-wm-need.gh-done")).toHaveCount(0);
+  await expect(cell).toContainText("not checked");
+  await expect(cell.locator("b")).toHaveText("1");
+  await expect(cell).toHaveClass(/\bmuted\b/);
+  // No retry loop on the same map.
+  await page.clock.runFor(30_000);
+  await page.waitForTimeout(100);
+  expect(checks()).toBe(2);
+  await expect(card.locator(".wiki-wm-ghnote")).toHaveCount(0);
 });
 
 test("a themes map never asks for the check", async ({ page }) => {

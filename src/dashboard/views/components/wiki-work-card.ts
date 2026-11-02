@@ -95,6 +95,9 @@ export interface WorkCardInput<P extends CardPage> {
 export interface ChecksView {
   /** Null until the first answer. */
   body: WorkMapChecksBody | null;
+  /** The map `body` was fetched for. A title can recur on a new map, so only an
+   *  answer for the map on the card may mark its items. */
+  answerRunAt: number | null;
   /** The last fetch failed: nothing was said about any PR. */
   failed?: boolean;
   /** The card will fetch again while `refreshing` stays true. */
@@ -293,9 +296,9 @@ export function workCardHtml<P extends CardPage>(input: WorkCardInput<P>): strin
   const prose = (s: string) => proseHtml(s, byKey, hrefFor);
   return (
     headHtml(joined, body, now, input.refresh) +
-    healthStripHtml(input.pages, !!input.waitsCounted, input.strip ?? { open: null, expanded: false }, now, byKey, hrefFor, input.checks) +
+    healthStripHtml(input.pages, !!input.waitsCounted, input.strip ?? { open: null, expanded: false }, now, byKey, hrefFor, input.checks, body.map.runAtMs) +
     (joined.summary.trim() ? `<div class="wiki-wm-summary">${prose(joined.summary)}</div>` : "") +
-    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you", input.checks?.body?.needs) +
+    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you", input.checks?.answerRunAt === body.map.runAtMs ? input.checks.body?.needs : undefined) +
     lanesHtml(joined, now, prose, byKey, hrefFor, input.effortHref) +
     coverageHtml(joined)
   );
@@ -649,7 +652,7 @@ function ghDrillItems(body: WorkMapChecksBody, byKey: ReadonlyMap<string, CardPa
 }
 
 /** The fifth cell and its list, or null when the check is off here. */
-function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string): { cell: string; items: string[] } | null {
+function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string, runAtMs: number | undefined): { cell: string; items: string[] } | null {
   const { body } = checks;
   if (!body) {
     return checks.failed
@@ -661,11 +664,14 @@ function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, 
   const items = ghDrillItems(body, byKey, hrefFor);
   const n = body.contradictions.length;
   const notes: string[] = [];
+  // The rows are read from the pages, so an older answer's count still stands, muted.
+  const older = checks.answerRunAt !== runAtMs;
   if (reason) notes.push(`<span class="wiki-wm-cell-note">${NOT_CHECKED_HTML[reason]}</span>`);
-  if (body.refreshing && checks.retrying) notes.push('<span class="wiki-wm-cell-note">refreshing</span>');
+  if (older) notes.push(`<span class="wiki-wm-cell-note">${checks.failed ? "not checked" : "checking…"}</span>`);
+  else if (body.refreshing && checks.retrying) notes.push('<span class="wiki-wm-cell-note">refreshing</span>');
   else if (!reason && body.unchecked > 0) notes.push(`<span class="wiki-wm-cell-note">${body.unchecked} not checked</span>`);
   const nothingRead = !!reason && body.checked === 0;
-  const tone = [n > 0 ? "bad" : nothingRead ? "muted" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
+  const tone = [older || nothingRead ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
   const cell = stripCellHtml("github", nothingRead ? "—" : String(n), GH_CELL_LABEL, tone, view, !items.length, {
     note: notes.join(""),
     title: `${body.checked} checked · ${body.unchecked} not checked · ${body.unlinked} with no full PR link · ${body.skipped} skipped`,
@@ -681,6 +687,7 @@ function healthStripHtml<P extends CardPage>(
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
   checks?: ChecksView,
+  runAtMs?: number,
 ): string {
   const rows = stripRows(pages);
   const sum = (rs: readonly StripRow[]) => rs.reduce((n, r) => n + (r.count ?? 0), 0);
@@ -696,7 +703,7 @@ function healthStripHtml<P extends CardPage>(
     stripCellHtml("steps", String(sum(rows.steps)), "steps in your lanes", "", view, !rows.steps.length),
     stripCellHtml("shipped", String(rows.shipped.length), "shipped, follow-ups open", "muted", view, !rows.shipped.length),
   ];
-  const gh = checks ? ghCell(checks, view, byKey, hrefFor) : null;
+  const gh = checks ? ghCell(checks, view, byKey, hrefFor, runAtMs) : null;
   if (gh) cells.push(gh.cell);
   const open = view.open;
   let drill = "";

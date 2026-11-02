@@ -29,8 +29,9 @@ const map = (): WorkMap =>
   }) as unknown as WorkMap;
 
 const checksBody = (over: Partial<WorkMapChecksBody> = {}): WorkMapChecksBody => ({ at: NOW, checked: 3, unchecked: 0, unlinked: 0, skipped: 0, contradictions: [], prs: {}, needs: [], uncheckedRows: [], unlinkedRows: [], ...over });
-const render = (checks?: ChecksView, strip?: StripView) =>
-  workCardHtml({ body: { map: map(), organizable: false }, pages: PAGES, now: NOW, done: new Set(), hrefFor: href, refresh: { phase: "idle" }, waitsCounted: true, ...(checks ? { checks } : {}), ...(strip ? { strip } : {}) });
+/** An answer is for the map on the card unless a test says otherwise. */
+const render = (checks?: Omit<ChecksView, "answerRunAt"> & { answerRunAt?: number | null }, strip?: StripView) =>
+  workCardHtml({ body: { map: map(), organizable: false }, pages: PAGES, now: NOW, done: new Set(), hrefFor: href, refresh: { phase: "idle" }, waitsCounted: true, ...(checks ? { checks: { answerRunAt: map().runAtMs, ...checks } } : {}), ...(strip ? { strip } : {}) });
 const cellHtml = (out: string) => /<button[^>]*data-wm-cell="github"[\s\S]*?<\/button>/.exec(out)?.[0] ?? null;
 const flat = (s: string | null) => (s ?? "").replace(/<[^>]+>/g, "");
 const contradiction = { page: "plans/a.mdx", pr: 12, repo: "acme/gears", rowState: "open", ghState: "MERGED" as const, mergedAt: "2026-10-29T12:00:00Z" };
@@ -153,6 +154,30 @@ describe("needGhMarks", () => {
 
   test("no entries: nothing", () => {
     expect(needGhMarks([])).toEqual({ struck: false, notes: [] });
+  });
+});
+
+describe("an answer for an older map", () => {
+  const older = { answerRunAt: map().runAtMs - 1 };
+  const out = (over: Partial<ChecksView> = {}) => render({ body: checksBody({ contradictions: [contradiction], needs: [need()] }), ...older, ...over });
+
+  test("marks no item, whatever it says about a title the new map shares", () => {
+    for (const html of [out(), out({ retrying: true }), out({ failed: true })]) {
+      expect(html).not.toContain("wiki-wm-ghnote");
+      expect(html).not.toContain("gh-done");
+    }
+  });
+
+  test("still gives the cell its count, muted, and says where the new answer stands", () => {
+    const pending = cellHtml(out({ retrying: true }))!;
+    expect(pending).toContain("<b>1</b>");
+    expect(pending).toMatch(/class="wiki-wm-cell muted"/);
+    expect(flat(pending)).toContain("checking…");
+    expect(flat(cellHtml(out({ failed: true })))).toContain("not checked");
+  });
+
+  test("the answer for this map marks as before", () => {
+    expect(render({ body: checksBody({ needs: [need()] }), answerRunAt: map().runAtMs })).toContain("gh-done");
   });
 });
 

@@ -991,6 +991,7 @@ function paintWorkCard(override?: FocusKey): void {
     strip: stripView,
     checks: {
       body: workChecks?.body ?? null,
+      answerRunAt: workChecks?.answerRunAt ?? null,
       failed: !!workChecks?.failed,
       retrying: workChecksTimer !== null || workChecksGen === slot.gen,
     },
@@ -1039,7 +1040,15 @@ function paintWorkError(el: HTMLElement): void {
 
 // ── The GitHub check (plan muninn-wiki-your-work-board, P2) ───────────
 /** The last answer; it repaints through `paintWorkCard`, so `stripKey` stays out of it. */
-let workChecks: { body: WorkMapChecksBody | null; fetchedAt: number; runAt: number; failed: boolean } | null = null;
+let workChecks: {
+  body: WorkMapChecksBody | null;
+  fetchedAt: number;
+  /** The map of the last fetch, whatever it answered. */
+  runAt: number;
+  /** The map `body` answered for: a failed fetch keeps the older pair. */
+  answerRunAt: number | null;
+  failed: boolean;
+} | null = null;
 /** The generation of the fetch in flight, if any. */
 let workChecksGen: number | null = null;
 let workChecksTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1082,7 +1091,7 @@ function fetchWorkChecks(): void {
     .then((body) => {
       if (!slotLive(slot, gen)) return;
       workChecksGen = null;
-      workChecks = { body, fetchedAt: Date.now(), runAt, failed: false };
+      workChecks = { body, fetchedAt: Date.now(), runAt, answerRunAt: runAt, failed: false };
       if (body.refreshing && workChecksRetries < WORK_CHECKS_RETRIES_MAX) {
         workChecksRetries++;
         workChecksTimer = setTimeout(() => {
@@ -1095,7 +1104,7 @@ function fetchWorkChecks(): void {
     .catch(() => {
       if (!slotLive(slot, gen)) return;
       workChecksGen = null;
-      workChecks = { body: workChecks?.body ?? null, fetchedAt: Date.now(), runAt, failed: true };
+      workChecks = { body: workChecks?.body ?? null, fetchedAt: Date.now(), runAt, answerRunAt: workChecks?.answerRunAt ?? null, failed: true };
       paintWorkCard();
     });
 }
