@@ -644,7 +644,9 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
       "<div>\n@a.md\n</div>\n",
       "<pre>\n@a.md\n</pre>\n",
       "<X>\n@a.md\n",
+      "<div>\n@a.md -->\n</div>\n",
       "<!-- @a.md -->\n",
+      "<!-- x\n@a.md\n-->\n",
       "<!-- @a.md\n",
       "x <!-- @a.md --> y\n",
       "- <!-- @a.md -->\n",
@@ -654,8 +656,9 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
   });
 
   test("the text beside a closed comment is scanned, and an unclosed comment's is not", () => {
-    const out = check({ "CLAUDE.md": "<!-- @b.md --> @a.md\n" }, ABC);
-    expect(out).toEqual([expect.stringContaining("`@a.md`")]);
+    for (const body of ["<!-- @b.md --> @a.md\n", "  <!-- @b.md --> @a.md\n", "<!-- @b.md\n--> @a.md\n", "<!-- @b.md --> <!-- @c.md --> @a.md\n"]) {
+      expect(check({ "CLAUDE.md": body }, ABC)).toEqual([expect.stringContaining("`@a.md`")]);
+    }
     expect(check({ "CLAUDE.md": "<!-- @b.md @a.md\n" }, ABC)).toEqual([]);
     expect(check({ "CLAUDE.md": "x <b>@a.md</b> y\n\n<!-- c -->\n\n@b.md\n" }, ABC)).toHaveLength(2);
   });
