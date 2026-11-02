@@ -33,13 +33,14 @@
  *     answers reads «owner not set», an adopt repaints the count, a themes map
  *     has no strip and keeps its markup when only the strip's inputs change.
  *     Focus on a cell or on «+N more», and an expanded list, survive that repaint.
- *     A long title wraps in the list; focus on an open cell shows in every theme.
+ *     A long title wraps in the list; focus on an open cell shows in every theme,
+ *     hover answers on an enabled cell, and forced colors keep open and focus apart.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1375,6 +1376,7 @@ for (const theme of THEMES) {
     expect(closedFocused.outline).toBe("solid 2px");
     // Open still reads at rest, without any outline.
     expect(openAtRest.shadow).toContain(accent);
+    expect(openAtRest.shadow).toContain("inset");
     expect(openAtRest.border).toBe(accent);
     expect(closedAtRest.shadow).toBe("none");
     expect(closedAtRest.border).not.toBe(accent);
@@ -1386,6 +1388,105 @@ for (const theme of THEMES) {
       el.appendChild(probe);
     });
     expect(await contrastOf(page.locator("#ringProbe"))).toBeGreaterThanOrEqual(3);
+  });
+}
+
+/** All a cell's border, ring and shadow paint: what a state change has to move. */
+function cellPaint(cell: Locator) {
+  return cell.evaluate((el) => {
+    const c = getComputedStyle(el);
+    return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor, borderWidth: c.borderTopWidth };
+  });
+}
+
+for (const theme of THEMES) {
+  test.describe(`cell hover in the ${theme.label} theme`, () => {
+    test.beforeEach(async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.emulateMedia({ colorScheme: theme.scheme });
+      await page.addInitScript((v) => {
+        if (v === null) localStorage.removeItem("muninn-theme");
+        else localStorage.setItem("muninn-theme", v);
+      }, theme.stored);
+    });
+
+    test("hovering an open cell paints differently from the open cell at rest", async ({ page }) => {
+      await openStart(page, STRIP);
+      const open = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
+      await open.click();
+      await expect(open).toHaveAttribute("aria-expanded", "true");
+      await page.mouse.move(0, 0);
+      const rest = await cellPaint(open);
+      await open.hover();
+      await expect.poll(() => cellPaint(open)).not.toEqual(rest);
+    });
+
+    test("hovering a closed cell paints the accent border, and a disabled cell does not react", async ({ page }) => {
+      await openStart(page, STRIP);
+      const shut = page.locator('#wikiWorkCard [data-wm-cell="steps"]');
+      const rest = await cellPaint(shut);
+      expect(rest.border).not.toBe(await token(page, "--accent"));
+      await shut.hover();
+      await expect.poll(async () => (await cellPaint(shut)).border).toBe(await token(page, "--accent"));
+      await page.mouse.move(0, 0);
+      await openStart(page, STRIP_OFF);
+      const off = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
+      await expect(off).toBeDisabled();
+      const offRest = await cellPaint(off);
+      await off.hover();
+      expect(await off.evaluate((el) => el.matches(":hover"))).toBe(true);
+      expect(await cellPaint(off)).toEqual(offRest);
+    });
+  });
+}
+
+test("a mouse click opens a cell and draws no focus ring", async ({ page }) => {
+  await openStart(page, STRIP);
+  const cell = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
+  await cell.click();
+  await expect(cell).toHaveAttribute("aria-expanded", "true");
+  await expect(cell).toBeFocused();
+  expect((await cellPaint(cell)).outline).toBe("none 0px");
+});
+
+for (const scheme of ["light", "dark"] as const) {
+  test(`forced colors over a ${scheme} scheme: open differs from closed, and focus from open at rest`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.emulateMedia({ colorScheme: scheme, forcedColors: "active" });
+    await openStart(page, STRIP);
+    expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+    const card = page.locator("#wikiWorkCard");
+    const open = card.locator('[data-wm-cell="decisions"]');
+    const next = card.locator('[data-wm-cell="oldest"]');
+    const shut = card.locator('[data-wm-cell="steps"]');
+    const box = async () => {
+      const b = (await open.locator("b").boundingBox())!;
+      return { x: b.x, y: b.y, cell: (await open.boundingBox())!.height };
+    };
+    const boxShut = await box();
+    await open.focus();
+    await page.keyboard.press("Enter");
+    await expect(open).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Tab");
+    await expect(next).toBeFocused();
+    const closedFocused = await cellPaint(next);
+    const openAtRest = await cellPaint(open);
+    const closedAtRest = await cellPaint(shut);
+    // Open is a colour and a width, so it does not hang on one system colour pair.
+    expect(openAtRest.border).not.toBe(closedAtRest.border);
+    expect(openAtRest.borderWidth).toBe("2px");
+    expect(closedAtRest.borderWidth).toBe("1px");
+    // The wider border takes its width from the padding: nothing moves when a cell opens.
+    expect(await box()).toEqual(boxShut);
+    await page.keyboard.press("Shift+Tab");
+    await expect(open).toBeFocused();
+    const openFocused = await cellPaint(open);
+    // Focus is still the outline alone, on top of the open mark.
+    expect(openAtRest.outline).toBe("none 0px");
+    expect(openFocused.outline).toBe("solid 2px");
+    expect(closedFocused.outline).toBe("solid 2px");
+    expect(openFocused.borderWidth).toBe("2px");
+    expect(closedFocused.borderWidth).toBe("1px");
   });
 }
 

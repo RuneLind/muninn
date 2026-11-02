@@ -2607,6 +2607,9 @@ export async function renderWikiPage(opts?: {
     /* The outline is focus alone, so an open cell can show both: open is drawn inside the border. */
     .wiki-wm-cell:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
     .wiki-wm-cell.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .wiki-wm-cell.on:hover { box-shadow: inset 0 0 0 2px var(--accent); }
+    /* Forced colors drop the shadow and force a non-system border colour; the padding keeps the box still. */
+    @media (forced-colors: active) { .wiki-wm-cell.on { border: 2px solid Highlight; padding: 7px 9px; } }
     .wiki-wm-cell b { display: block; font-size: 22px; line-height: 1.1; color: var(--text-primary); }
     .wiki-wm-cell span { font-size: 12.5px; }
     .wiki-wm-cell.warn b { color: var(--tone-warn); }
