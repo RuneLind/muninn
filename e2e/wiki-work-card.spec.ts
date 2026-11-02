@@ -759,6 +759,39 @@ test("«refreshing» shows the count and the marks it has, and three more fetche
   expect(stub.count()).toBe(4);
 });
 
+test("a `gh` that stays hung ends «not refreshed», muted with only merges marked, and tab clicks ask at most once a minute", async ({ page }) => {
+  await page.clock.install();
+  const stub = await stubChecks(page, () => checksBody({ refreshing: true, contradictions: [GH_CONTRADICTION], needs: GH_NEEDS }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(cell).toContainText("refreshing");
+  await expect(card.locator(".wiki-wm-ghnote.warn")).toHaveCount(1);
+  for (const n of [2, 3, 4]) {
+    await page.clock.runFor(15_000);
+    await expect.poll(() => stub.count()).toBe(n);
+  }
+  await expect(cell).toContainText("not refreshed");
+  await expect(cell).not.toContainText("refreshing");
+  await expect(cell.locator("b")).toHaveText("1");
+  await expect(cell).toHaveClass(/\bmuted\b/);
+  await expect(cell).not.toHaveClass(/\bbad\b/);
+  await expect(card.locator(".wiki-wm-ghnote.warn")).toHaveCount(0);
+  await expect(card.locator(".wiki-wm-ghnote.done")).toHaveCount(1);
+  const tabs = async () => {
+    await page.locator('.wiki-tab[data-tab="timeline"]').click();
+    await page.locator('.wiki-tab[data-tab="hubs"]').click();
+    await expect(page.locator('#wikiWorkCard [data-wm-cell="github"]')).toBeVisible();
+  };
+  await tabs();
+  await tabs();
+  await page.waitForTimeout(100);
+  expect(stub.count()).toBe(4);
+  await page.clock.runFor(60_000);
+  await tabs();
+  await expect.poll(() => stub.count()).toBe(5);
+});
+
 test("«refreshing» that settles stops the fetches at once", async ({ page }) => {
   await page.clock.install();
   const stub = await stubChecks(page, (n) => checksBody(n === 1 ? { refreshing: true } : {}));
@@ -1027,7 +1060,8 @@ test("rows with no full PR link and nothing read: «—», muted, the count, and
   await expect(card.locator(".wiki-wm-drill-clear")).toHaveText("No ledger row has a full PR link, so GitHub was asked about none of them.");
 });
 
-test("a checks GET that fails says «not checked», and the next start view asks again", async ({ page }) => {
+test("a checks GET that fails says «not checked», and a start view a minute later asks again", async ({ page }) => {
+  await page.clock.install();
   let n = 0;
   await page.route("**/api/wiki/work-map/checks*", (route) => (++n === 1 ? route.fulfill({ status: 500, json: { error: "x" } }) : route.fulfill({ json: checksBody() })));
   await openStart(page, GH);
@@ -1037,6 +1071,7 @@ test("a checks GET that fails says «not checked», and the next start view asks
   await expect(cell.locator("b")).toHaveText("—");
   await card.locator('.wiki-wm-pages a[data-relpath], .wiki-wm-summary a[data-relpath]').first().click();
   await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.clock.fastForward(60_000);
   await page.goBack();
   await expect(cell.locator("b")).toHaveText("0");
   expect(n).toBe(2);
@@ -1094,6 +1129,7 @@ test("an hourly refetch that fails does not look fresh", async ({ page }) => {
   await expect(cell).toContainText("not checked");
   await expect(cell.locator("b")).toHaveText("1");
   await expect(cell).toHaveClass(/\bmuted\b/);
+  await page.clock.fastForward(60_000);
   await visitAndReturn(page);
   await expect.poll(() => n).toBe(3);
   await expect(cell).toHaveClass(/\bbad\b/);

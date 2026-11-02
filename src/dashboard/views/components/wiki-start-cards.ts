@@ -834,10 +834,10 @@ function applySlot(): void {
 function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
   const prev = slot;
   transition(e);
-  // A start view that renders after a check that left something unread asks
-  // again: the remedy may have been followed. Only here, never on a repaint, so
-  // an answer that stays unread cannot loop.
-  if (e.type === "mount" && workChecks && checksLeftUnread(workChecks)) workChecks = { ...workChecks, fetchedAt: 0 };
+  // A start view after a check that left something unread asks again: the remedy
+  // may have been followed. Never on a repaint, so it cannot loop, and at most once
+  // a minute, since every tab click mounts and each ask can spawn `gh`.
+  if (e.type === "mount" && workChecks && checksLeftUnread(workChecks) && Date.now() - workChecks.startedAt >= WORK_CHECKS_REASK_MS) workChecks = { ...workChecks, fetchedAt: 0 };
   if (e.type === "adopt" && slot === prev) {
     // The run did not move, but a page may have declared an effort since it
     // (P6): re-join, and only when something a join reads changed, so an
@@ -1070,6 +1070,8 @@ function paintWorkError(el: HTMLElement): void {
 let workChecks: {
   body: WorkMapChecksBody | null;
   fetchedAt: number;
+  /** When the fetch behind this answer started. */
+  startedAt: number;
   /** The map of the last fetch, whatever it answered. */
   runAt: number;
   /** The map `body` answered for: a failed fetch keeps the older pair. */
@@ -1084,11 +1086,13 @@ let workChecksRetries = 0;
 
 /** An answer older than this is fetched again when the start view renders. */
 const WORK_CHECKS_TTL_MS = 60 * 60_000;
+/** An answer that left something unread is asked again this long after its fetch started. */
+const WORK_CHECKS_REASK_MS = 60_000;
 const WORK_CHECKS_RETRY_MS = 15_000;
 const WORK_CHECKS_RETRIES_MAX = 3;
 
 function checksLeftUnread(c: { body: WorkMapChecksBody | null; failed: boolean }): boolean {
-  if (c.failed) return true;
+  if (c.failed || c.body?.refreshing) return true;
   const reason = c.body?.notChecked?.reason;
   return (!!reason && reason !== "disabled") || (c.body?.unchecked ?? 0) > 0;
 }
@@ -1114,6 +1118,7 @@ function fetchWorkChecks(): void {
   if (!workBody) return;
   const gen = slot.gen;
   const runAt = workBody.map.runAtMs;
+  const startedAt = Date.now();
   workChecksGen = gen;
   fetch(withWiki("/api/wiki/work-map/checks"))
     .then(async (res) => {
@@ -1124,7 +1129,7 @@ function fetchWorkChecks(): void {
     .then((body) => {
       if (!slotLive(slot, gen)) return;
       workChecksGen = null;
-      workChecks = { body, fetchedAt: Date.now(), runAt, answerRunAt: runAt, failed: false };
+      workChecks = { body, fetchedAt: Date.now(), startedAt, runAt, answerRunAt: runAt, failed: false };
       if (body.refreshing && workChecksRetries < WORK_CHECKS_RETRIES_MAX) {
         workChecksRetries++;
         workChecksTimer = setTimeout(() => {
@@ -1137,7 +1142,7 @@ function fetchWorkChecks(): void {
     .catch(() => {
       if (!slotLive(slot, gen)) return;
       workChecksGen = null;
-      workChecks = { body: workChecks?.body ?? null, fetchedAt: Date.now(), runAt, answerRunAt: workChecks?.answerRunAt ?? null, failed: true };
+      workChecks = { body: workChecks?.body ?? null, fetchedAt: Date.now(), startedAt, runAt, answerRunAt: workChecks?.answerRunAt ?? null, failed: true };
       paintWorkCardIfChanged();
     });
 }

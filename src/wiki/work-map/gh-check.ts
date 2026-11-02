@@ -496,27 +496,32 @@ interface QueryAnswer {
   unanswered: boolean;
 }
 
-function failureReason(result: GhResult, message: string, errors: readonly GqlError[]): QueryAnswer["failure"] {
+/** Why GitHub refused, from what it said. Stderr and a message can quote the repo,
+ *  so a repo called `SAML-tools` must not read as a SAML block: its name is cut out. */
+function failureReason(result: GhResult, repo: string, message: string, errors: readonly GqlError[]): QueryAnswer["failure"] {
   if (result.noBinary) return "no-gh";
-  const text = `${result.stderr}\n${message}`;
-  if (result.exitCode === 4 || /Bad credentials|HTTP 401/i.test(text)) return "auth";
-  if (errors.some((e) => e.type === "FORBIDDEN") || /SAML|\bFORBIDDEN\b/.test(`${text}\n${errors.map((e) => e.message ?? "").join("\n")}`)) return "sso";
-  return undefined;
+  if (result.exitCode === 4) return "auth";
+  if (errors.some((e) => e.type === "FORBIDDEN")) return "sso";
+  if (errors.length && errors.every((e) => e.type === "NOT_FOUND")) return undefined;
+  const parsed = [message, ...errors.map((e) => e.message ?? "")].join("\n").trim();
+  const text = (parsed || result.stderr).replace(new RegExp(repo.replace(/\./g, "\\."), "gi"), "");
+  if (/Bad credentials|HTTP 401/i.test(text)) return "auth";
+  return /SAML|\bFORBIDDEN\b/.test(text) ? "sso" : undefined;
 }
 
 /** Stdout is read on exit 0 or 1: `gh api` exits 1 when `errors` sits beside partial `data`. */
-export function readGhAnswer(result: GhResult, numbers: readonly number[]): QueryAnswer {
+export function readGhAnswer(result: GhResult, numbers: readonly number[], repo = ""): QueryAnswer {
   const unanswered = (failure?: QueryAnswer["failure"]): QueryAnswer => ({ states: new Map(), unanswered: true, ...(failure ? { failure } : {}) });
   if (result.timedOut) return unanswered();
-  if (result.exitCode !== 0 && result.exitCode !== 1) return unanswered(failureReason(result, "", []));
+  if (result.exitCode !== 0 && result.exitCode !== 1) return unanswered(failureReason(result, repo, "", []));
   let json: { data?: { repository?: Record<string, unknown> | null } | null; errors?: GqlError[]; message?: string } | null;
   try {
     json = JSON.parse(result.stdout) as typeof json;
   } catch {
-    return unanswered(failureReason(result, "", []));
+    return unanswered(failureReason(result, repo, "", []));
   }
   const errors = Array.isArray(json?.errors) ? json.errors.filter((e) => e !== null) : [];
-  const failure = failureReason(result, typeof json?.message === "string" ? json.message : "", errors);
+  const failure = failureReason(result, repo, typeof json?.message === "string" ? json.message : "", errors);
   if (!json?.data) return unanswered(failure);
   const repository = json.data.repository;
   // GitHub answers null for a repo that is gone and for a private one this login
@@ -562,7 +567,7 @@ function startFlight(c: WikiCache, ask: readonly PrRef[], deps: GhCheckDeps, now
     } catch (err) {
       result = { exitCode: -1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
     }
-    const answer = readGhAnswer(result, numbers);
+    const answer = readGhAnswer(result, numbers, job.repo);
     if (answer.failure) c.failures.set(job.repo.toLowerCase(), { repo: job.repo, reason: answer.failure });
     if (answer.unanswered) {
       log.warn("GitHub check: the query for {repo} was not answered (exit {code}): {stderr}", { repo: job.repo, code: result.exitCode, stderr: result.stderr.trim().slice(0, 200) });

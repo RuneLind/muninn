@@ -540,6 +540,67 @@ describe("notChecked", () => {
     expect(reasonOf(result)).toBeUndefined();
   });
 
+  describe("a repo's name decides nothing", () => {
+    const notFound = (repo: string, echoed = repo): GhResult => ({
+      exitCode: 1,
+      stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: `Could not resolve to a Repository with the name '${echoed}'.` }] }),
+      stderr: `gh: Could not resolve to a Repository with the name '${echoed}'.`,
+    });
+    const onRepo = async (repo: string, result: GhResult) => {
+      const r = wiki({ "plans/a.mdx": page("ready", [[url(repo, 1), "x", "open", ""]]) });
+      return (await run(r, deps(async () => result))).notChecked;
+    };
+
+    test.each(["acme/SAML-tools", "acme/FORBIDDEN", "acme/saml-tools", "SAML/tools", "FORBIDDEN/x.y"])("a NOT_FOUND on %s reads as no-access", async (repo) => {
+      expect(await onRepo(repo, notFound(repo))).toEqual({ reason: "no-access", repos: [repo] });
+    });
+
+    test("GitHub echoing the name in another case is the same name", async () => {
+      expect(await onRepo("acme/saml-tools", notFound("acme/saml-tools", "ACME/SAML-TOOLS"))).toEqual({ reason: "no-access", repos: ["acme/saml-tools"] });
+      expect(readGhAnswer({ exitCode: 1, stdout: "", stderr: "gh: Could not resolve 'ACME/SAML-TOOLS'" }, [1], "acme/saml-tools").failure).toBeUndefined();
+    });
+
+    test("the flight hands the query's repo to the reader, so only its name is cut", async () => {
+      expect(await onRepo("acme/SAML-tools", { exitCode: 1, stdout: "", stderr: "gh: connection reset for acme/SAML-tools" })).toBeUndefined();
+    });
+
+    test.each<[string, string, GhResult]>([
+      ["a real SAML block on a repo named SAML", "acme/SAML", { exitCode: 1, stdout: JSON.stringify({ message: "Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization." }), stderr: "gh: Resource protected by organization SAML enforcement. (HTTP 403)" }],
+      ["a real SAML error on a repo named after it", "acme/SAML-tools", { exitCode: 1, stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "FORBIDDEN", message: "Resource protected by organization SAML enforcement." }] }), stderr: "gh: Resource protected" }],
+      ["a real FORBIDDEN that names the repo", "acme/plain", { exitCode: 1, stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "FORBIDDEN", message: "Although you appear to have the correct authorization credentials, the `acme` organization has an IP allow list enabled, for 'acme/plain'." }] }), stderr: "gh: x" }],
+      ["the word in a message of another type", "acme/FORBIDDEN", { exitCode: 1, stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "OTHER", message: "FORBIDDEN on 'acme/FORBIDDEN'" }] }), stderr: "" }],
+    ])("%s still reads as sso", async (_name, repo, result) => {
+      expect(await onRepo(repo, result)).toEqual({ reason: "sso", repos: [repo] });
+    });
+
+    const read = (repo: string, result: Partial<GhResult>) => readGhAnswer({ exitCode: 1, stdout: "", stderr: "", ...result }, [1], repo).failure;
+
+    test("a NOT_FOUND's type outranks its message", () => {
+      expect(read("acme/x", { stdout: repoErrors([{ type: "NOT_FOUND", message: "protected by SAML" }]) })).toBe("no-access");
+    });
+
+    test("a NOT_FOUND beside another error does not silence that error's message", () => {
+      expect(read("acme/x", { stdout: repoErrors([{ type: "NOT_FOUND" }, { type: "OTHER", message: "protected by SAML" }]) })).toBe("sso");
+    });
+
+    test("stderr is read only when no text was parsed", () => {
+      expect(read("acme/x", { stdout: JSON.stringify({ message: "Not Found" }), stderr: "gh: protected by SAML" })).toBeUndefined();
+      expect(read("acme/x", { stdout: JSON.stringify({ data: { repository: null } }), stderr: "gh: protected by SAML" })).toBe("sso");
+    });
+
+    test("stderr with nothing parsed loses the name too, and keeps the rest", () => {
+      expect(read("acme/SAML-tools", { stderr: "gh: Could not resolve 'acme/SAML-tools'" })).toBeUndefined();
+      expect(read("acme/FORBIDDEN", { exitCode: 2, stderr: "gh: Could not resolve 'acme/FORBIDDEN'" })).toBeUndefined();
+      expect(read("acme/SAML-tools", { stderr: "gh: acme/SAML-tools is protected by SAML" })).toBe("sso");
+      expect(read("acme/SAML-tools", { stderr: "gh: Bad credentials for acme/SAML-tools" })).toBe("auth");
+    });
+
+    test("a name with a dot is matched as written, not as a pattern", () => {
+      expect(read("acme/a.SAML", { stderr: "acme/axSAML is protected" })).toBe("sso");
+      expect(read("acme/a.SAML", { stderr: "gh: acme/a.SAML is gone" })).toBeUndefined();
+    });
+  });
+
   test("a null repository with a more specific error keeps that reason", () => {
     const answer = readGhAnswer({ exitCode: 1, stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "NOT_FOUND" }, { type: "FORBIDDEN" }] }), stderr: "" }, [1]);
     expect(answer.failure).toBe("sso");

@@ -133,6 +133,63 @@ describe("the GitHub cell", () => {
     });
   });
 
+  describe("the retries spent with «refreshing» still true", () => {
+    const stale = { refreshing: true, contradictions: [contradiction] };
+
+    test("keeps the count, muted, and says not refreshed", () => {
+      const c = cellHtml(render({ body: checksBody(stale), retrying: false }))!;
+      expect(c).toContain("<b>1</b>");
+      expect(c).toMatch(/class="wiki-wm-cell muted"/);
+      expect(c).not.toMatch(/\bbad\b/);
+      expect(flat(c)).toContain("not refreshed");
+      expect(flat(c)).not.toContain("refreshing");
+    });
+
+    test("a 0 is no plain 0 either", () => {
+      const c = cellHtml(render({ body: checksBody({ refreshing: true }), retrying: false }))!;
+      expect(c).toContain("<b>0</b>");
+      expect(c).toMatch(/class="wiki-wm-cell muted"/);
+      expect(flat(c)).toContain("not refreshed");
+    });
+
+    test("while the retries run it stays the live count", () => {
+      const c = cellHtml(render({ body: checksBody(stale), retrying: true }))!;
+      expect(c).toMatch(/class="wiki-wm-cell bad"/);
+      expect(flat(c)).toContain("refreshing");
+      expect(flat(c)).not.toContain("not refreshed");
+    });
+
+    test("rows unchecked beside it are still counted", () => {
+      const c = flat(cellHtml(render({ body: checksBody({ ...stale, unchecked: 2 }), retrying: false })));
+      expect(c).toContain("not refreshed");
+      expect(c).toContain("2 not checked");
+    });
+
+    test("nothing read has no count to call stale", () => {
+      const c = cellHtml(render({ body: checksBody({ refreshing: true, checked: 0, unchecked: 2 }), retrying: false }))!;
+      expect(c).toContain("<b>—</b>");
+      expect(flat(c)).not.toContain("not refreshed");
+      expect(flat(c)).toContain("2 not checked");
+    });
+
+    test("a remedy for one repo leaves the others' count stale", () => {
+      const c = cellHtml(render({ body: checksBody({ ...stale, notChecked: { reason: "auth", repos: ["acme/x"] } }), retrying: false }))!;
+      expect(c).toMatch(/class="wiki-wm-cell muted wide"/);
+      expect(flat(c)).toContain("log in with");
+      expect(flat(c)).toContain("not refreshed");
+    });
+
+    test("a failed fetch outranks it", () => {
+      const c = flat(cellHtml(render({ body: checksBody(stale), failed: true, retrying: false })));
+      expect(c).toContain("not checked");
+      expect(c).not.toContain("not refreshed");
+    });
+
+    test("an answer with no «refreshing» says nothing of it", () => {
+      expect(flat(cellHtml(render({ body: checksBody({ contradictions: [contradiction] }), retrying: false })))).not.toContain("not refreshed");
+    });
+  });
+
   describe("nothing read", () => {
     test("0 checked with rows unchecked reads —, muted, with no reason", () => {
       const c = cellHtml(render({ body: checksBody({ checked: 0, unchecked: 85 }) }))!;
@@ -311,6 +368,32 @@ describe("needGhMarks", () => {
   test("no entries: nothing", () => {
     expect(needGhMarks([])).toEqual({ struck: false, notes: [] });
   });
+
+  describe("on an answer GitHub did not just confirm", () => {
+    test("«closed without merge» goes: a closed PR can reopen", () => {
+      expect(needGhMarks([need({ state: "CLOSED", mergedAt: null })], true)).toEqual({ struck: false, notes: [] });
+    });
+
+    test("«#2 open» goes: an open PR can merge; the merged one's note stays and nothing strikes", () => {
+      const m = needGhMarks([need({ pr: 1 }), need({ pr: 2, state: "OPEN", mergedAt: null })], true);
+      expect(m.struck).toBe(false);
+      expect(m.notes.map((n) => n.text.replace(/ \d+\.10/, ""))).toEqual(["GitHub: #1 merged"]);
+    });
+
+    test("a merged strike stays: a merge is final", () => {
+      const m = needGhMarks([need()], true);
+      expect(m.struck).toBe(true);
+      expect(m.notes).toEqual([{ tone: "done", text: expect.stringMatching(/this step is done$/) }]);
+    });
+
+    test("a merged note stays", () => {
+      expect(needGhMarks([need({ asksForIt: false })], true).notes.map((n) => n.tone)).toEqual(["info"]);
+    });
+
+    test("«not checked» stays: it says the answer is missing", () => {
+      expect(needGhMarks([need({ pr: 1 }), need({ pr: 2, state: null, mergedAt: null })], true).notes.map((n) => n.text.replace(/ \d+\.10/, ""))).toEqual(["GitHub: #1 merged", "GitHub: #2 not checked"]);
+    });
+  });
 });
 
 describe("an answer for an older map", () => {
@@ -345,6 +428,25 @@ describe("marks on the items", () => {
     expect(out).toContain('class="wiki-wm-need gh-done" data-wm-need="1"');
     expect(out).toMatch(/<div class="wiki-wm-ghnote done">GitHub: #369 merged \d+\.10, this step is done<\/div>/);
     expect(out).toContain('data-wm-done="1"');
+  });
+
+  describe("when the last fetch failed or was not refreshed", () => {
+    const needs = [need(), need({ title: "First", kind: "decision", pr: 7, state: "CLOSED", mergedAt: null, asksForIt: false })];
+
+    test.each<[string, Partial<ChecksView>, Partial<WorkMapChecksBody>]>([
+      ["failed", { failed: true }, {}],
+      ["not refreshed", { retrying: false }, { refreshing: true }],
+    ])("%s: the closed note goes and the merged strike stays", (_name, view, over) => {
+      const out = render({ body: checksBody({ needs, ...over }), ...view });
+      expect(out).not.toContain("closed without merge");
+      expect(out).toContain("gh-done");
+      expect(out).toContain("this step is done");
+    });
+
+    test("while the retries run, or on a good answer, it stays", () => {
+      expect(render({ body: checksBody({ needs, refreshing: true }), retrying: true })).toContain("closed without merge");
+      expect(render({ body: checksBody({ needs }) })).toContain("closed without merge");
+    });
   });
 
   test("a mark for a title the map no longer holds lands nowhere", () => {

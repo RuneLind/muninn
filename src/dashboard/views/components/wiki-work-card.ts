@@ -298,7 +298,7 @@ export function workCardHtml<P extends CardPage>(input: WorkCardInput<P>): strin
     headHtml(joined, body, now, input.refresh) +
     healthStripHtml(input.pages, !!input.waitsCounted, input.strip ?? { open: null, expanded: false }, now, byKey, hrefFor, input.checks, body.map.runAtMs) +
     (joined.summary.trim() ? `<div class="wiki-wm-summary">${prose(joined.summary)}</div>` : "") +
-    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you", input.checks?.answerRunAt === body.map.runAtMs ? input.checks.body?.needs : undefined) +
+    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you", input.checks?.answerRunAt === body.map.runAtMs ? input.checks.body?.needs : undefined, !!input.checks?.failed || (!!input.checks?.body?.refreshing && !input.checks.retrying)) +
     lanesHtml(joined, now, prose, byKey, hrefFor, input.effortHref) +
     coverageHtml(joined)
   );
@@ -350,6 +350,7 @@ function needsYouHtml<P>(
   hrefFor: (rel: string) => string,
   title: string,
   checks?: readonly ChecksNeed[],
+  unconfirmed = false,
 ): string {
   // A theme item also carries `hubs` and the runner's `count`.
   const needs = map.needsYou as readonly { kind: string; title: string; why: string; action: string; pages: string[]; hubs?: string[]; count?: number }[];
@@ -357,7 +358,7 @@ function needsYouHtml<P>(
   // Keyed on the STORED item, so the key survives a page rename between renders.
   const open = needs.map((n, i) => ({ n, i })).filter(({ i }) => !done.has(needKey(raw[i]!)));
   const doneCount = needs.length - open.length;
-  const marks = (i: number) => needGhMarks((checks ?? []).filter((c) => needKey(c) === needKey(raw[i]!)));
+  const marks = (i: number) => needGhMarks((checks ?? []).filter((c) => needKey(c) === needKey(raw[i]!)), unconfirmed);
   const cards = open
     .map(
       ({ n, i }) =>
@@ -400,15 +401,18 @@ function shortDay(iso: string | null): string {
  * What GitHub says on one Needs you item, from its entries in the checks body.
  * It is struck through only when it asks for its PRs and every one is merged. A
  * PR closed without a merge warns. An item that asks for several PRs says where
- * each stands, so a reader can see why it is not struck through.
+ * each stands, so a reader can see why it is not struck through. On an answer
+ * GitHub did not just confirm, `unconfirmed`, only a merge is still said: it is
+ * final, while an open or closed PR can have moved, and no note shows an age.
  */
-export function needGhMarks(entries: readonly ChecksNeed[]): { struck: boolean; notes: GhNote[] } {
+export function needGhMarks(entries: readonly ChecksNeed[], unconfirmed = false): { struck: boolean; notes: GhNote[] } {
   const struck = entries.length > 0 && entries.every((e) => e.asksForIt && e.state === "MERGED");
   const several = entries.length > 1;
   const notes: GhNote[] = [];
   for (const e of entries) {
     const merged = `GitHub: #${e.pr} merged ${shortDay(e.mergedAt)}`.trim();
     if (e.state === "MERGED") notes.push(struck ? { tone: "done", text: `${merged}, this step is done` } : { tone: "info", text: merged });
+    else if (unconfirmed && e.state !== null) continue;
     else if (e.state === "CLOSED") notes.push({ tone: "warn", text: `GitHub: #${e.pr} closed without merge` });
     else if (several && e.asksForIt) notes.push({ tone: "info", text: `GitHub: #${e.pr} ${e.state === "OPEN" ? "open" : "not checked"}` });
   }
@@ -718,17 +722,22 @@ function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, 
   const drill = ghDrillHtml(body, view, older || !!checks.failed, byKey, hrefFor);
   // Rows but no PR to ask about: that 0 would read as all clear too.
   const onlyUnlinked = body.checked === 0 && !reason && body.unchecked === 0 && body.unlinked > 0;
+  // A 0 with nothing read would read as all clear.
+  const nothingRead = body.checked === 0 && (!!reason || body.unchecked > 0 || onlyUnlinked);
+  // A hung `gh` answers from states past their hour, so the retries can end here.
+  const notRefreshed = !!body.refreshing && !checks.retrying;
   if (reason) notes.push(`<span class="wiki-wm-cell-note">${notCheckedHtml(reason, notChecked?.repos ?? [])}</span>`);
   // A failed fetch outranks what the older answer said about itself; a remedy already says it.
   if (checks.failed) {
     if (!reason) notes.push('<span class="wiki-wm-cell-note">not checked</span>');
   } else if (older) notes.push('<span class="wiki-wm-cell-note">checking…</span>');
   else if (body.refreshing && checks.retrying) notes.push('<span class="wiki-wm-cell-note">refreshing</span>');
-  else if (!reason && body.unchecked > 0) notes.push(`<span class="wiki-wm-cell-note">${body.unchecked} not checked</span>`);
-  else if (onlyUnlinked) notes.push(`<span class="wiki-wm-cell-note">${body.unlinked} with no full PR link</span>`);
-  // A 0 with nothing read would read as all clear.
-  const nothingRead = body.checked === 0 && (!!reason || body.unchecked > 0 || onlyUnlinked);
-  const tone = [older || checks.failed || nothingRead ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
+  else {
+    if (notRefreshed && !nothingRead) notes.push('<span class="wiki-wm-cell-note">not refreshed</span>');
+    if (!reason && body.unchecked > 0) notes.push(`<span class="wiki-wm-cell-note">${body.unchecked} not checked</span>`);
+    else if (onlyUnlinked) notes.push(`<span class="wiki-wm-cell-note">${body.unlinked} with no full PR link</span>`);
+  }
+  const tone = [older || checks.failed || nothingRead || notRefreshed ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
   const cell = stripCellHtml("github", nothingRead ? "—" : String(n), GH_CELL_LABEL, tone, view, !drill, {
     note: notes.join(""),
     title: `${body.checked} checked · ${body.unchecked} not checked · ${body.unlinked} with no full PR link · ${body.skipped} skipped`,
