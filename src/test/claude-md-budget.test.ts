@@ -144,7 +144,7 @@ function itemLines(list: Tokens.Generic): string[] {
   if (list.ordered) return [];
   return (list.items as Tokens.Generic[]).flatMap((item) => {
     const line = (item.raw.split("\n")[0] ?? "").replace(/^\s*[-*+]/, "").trim().replace(/ \[trap\]$/, "");
-    const nested = (item.tokens as Tokens.Generic[]).filter((token, i) => token.type === "list" && (i > 0 || line === ""));
+    const nested = (item.tokens as Tokens.Generic[]).filter((token, i) => token.type === "list" && i > 0);
     return [...(line === "" ? [] : [line]), ...nested.flatMap(itemLines)];
   });
 }
@@ -553,6 +553,10 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
     expect(out[0]).toContain("my file.md");
   });
 
+  test("an @path after a space inside a code span passes, in a paragraph and in a list item", () => {
+    expect(check({ "CLAUDE.md": "Run `x @a.md y` here.\n\n- Run `x @a.md y` here.\n" }, A)).toEqual([]);
+  });
+
   test("an @path in indented code passes", () => {
     expect(check({ "CLAUDE.md": "Text\n\n    @a.md\n" }, A)).toEqual([]);
   });
@@ -676,6 +680,14 @@ describe("index, as the lexer reads it", () => {
   test("a nested item is read, and fails loudly when it is no heading", () => {
     expect(check(indexed("## One\n\n## Two\n", "- One\n  - Two\n"))).toEqual([]);
     expect(check(indexed("## One\n", "- One\n  - Detail\n"))).toEqual([expect.stringContaining('"Detail"')]);
+  });
+
+  test("the index is ## Index, not the first ## section", () => {
+    expect(check(indexed("## One\n", "- One\n", "## Rules\n\n- Never do the thing.\n"))).toEqual([]);
+  });
+
+  test("trailing spaces on an index line that is not the last are ignored", () => {
+    expect(check(indexed("## A\n\n## B\n", "- A  \n- B [trap]  \n- A [trap]  \n"))).toEqual([]);
   });
 
   test("an item whose text starts on the next line is read", () => {
