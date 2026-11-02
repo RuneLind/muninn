@@ -36,7 +36,7 @@ export const GH_PRS_PER_HOUR = 500;
 const ROW_LABEL_MAX = 80;
 
 export type GhState = "OPEN" | "MERGED" | "CLOSED";
-export type NotCheckedReason = "no-gh" | "auth" | "sso" | "disabled";
+export type NotCheckedReason = "no-gh" | "auth" | "sso" | "no-access" | "disabled";
 
 export interface ChecksContradiction {
   page: string;
@@ -87,13 +87,28 @@ export interface GhResult {
 /** The seam: `gh` with these arguments, passed as an array. Never rejects. */
 export type GhRunner = (args: string[]) => Promise<GhResult>;
 
+/** All `gh` gets from muninn's env: where it is and where its login is (`HOME`
+ *  alone reaches the macOS keychain, measured). The login is the identity: an env
+ *  token outranks it, so a card remedy naming `gh auth login` could never work,
+ *  and a low-scope one reads private repos as missing. Felles spawns the same way. */
+const GH_CHILD_ENV = ["PATH", "HOME", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"] as const;
+
+function ghChildEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of GH_CHILD_ENV) {
+    const value = process.env[name];
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
+}
+
 /** `gh` on `Bun.spawn`, killed at the timeout (`Bun.$` has none). A killed call
  *  answers without waiting for its pipes: a child can hold them open. */
 export function spawnGhRunner(bin = "gh", timeoutMs = GH_CALL_TIMEOUT_MS): GhRunner {
   return async (args) => {
     let proc;
     try {
-      proc = Bun.spawn([bin, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      proc = Bun.spawn([bin, ...args], { env: ghChildEnv(), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const noBinary = (err as { code?: string } | null)?.code === "ENOENT" || /ENOENT|not found/i.test(message);
@@ -484,17 +499,18 @@ export function readGhAnswer(result: GhResult, numbers: readonly number[]): Quer
   } catch {
     return unanswered(failureReason(result, "", []));
   }
-  const errors = Array.isArray(json?.errors) ? json.errors : [];
+  const errors = Array.isArray(json?.errors) ? json.errors.filter((e) => e !== null) : [];
   const failure = failureReason(result, typeof json?.message === "string" ? json.message : "", errors);
   if (!json?.data) return unanswered(failure);
   const repository = json.data.repository;
-  // A repository the token may not read answers FORBIDDEN and null: nothing to cache.
-  if (repository === null && failure) return unanswered(failure);
-  const notFound = (n: number): boolean =>
-    repository === null || errors.some((e) => e.type === "NOT_FOUND" && Array.isArray(e.path) && e.path.includes(`p${n}`));
+  // GitHub answers null for a repo that is gone and for a private one this login
+  // cannot read, so null says nothing about its PRs: nothing to cache.
+  if (repository === null) return unanswered(failure ?? (errors.some((e) => e.type === "NOT_FOUND") ? "no-access" : undefined));
+  if (typeof repository !== "object" || !numbers.some((n) => Object.hasOwn(repository, `p${n}`))) return unanswered(failure);
+  const notFound = (n: number): boolean => errors.some((e) => e.type === "NOT_FOUND" && Array.isArray(e.path) && e.path.includes(`p${n}`));
   const states = new Map<number, CachedState["state"]>();
   for (const n of numbers) {
-    const alias = repository?.[`p${n}`] as { state?: unknown; mergedAt?: unknown } | null | undefined;
+    const alias = repository[`p${n}`] as { state?: unknown; mergedAt?: unknown } | null | undefined;
     if (alias && (alias.state === "OPEN" || alias.state === "MERGED" || alias.state === "CLOSED")) {
       states.set(n, { state: alias.state, mergedAt: typeof alias.mergedAt === "string" ? alias.mergedAt : null });
     } else if (notFound(n)) {
@@ -599,7 +615,7 @@ export function disabledChecksBody(at: number): WorkMapChecksBody {
   return { ...emptyBody(at), notChecked: { reason: "disabled", repos: [] } };
 }
 
-const FAILURE_ORDER = ["no-gh", "auth", "sso"] as const;
+const FAILURE_ORDER = ["no-gh", "auth", "sso", "no-access"] as const;
 
 function buildBody(s: Scan, c: WikiCache, refreshing: boolean, at: number): WorkMapChecksBody {
   const body = emptyBody(at);

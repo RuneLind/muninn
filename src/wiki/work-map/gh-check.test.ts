@@ -393,12 +393,19 @@ describe("the lookups", () => {
 
 describe("notChecked", () => {
   const SSO = JSON.stringify({ data: { repository: null }, errors: [{ type: "FORBIDDEN", message: "Resource protected by organization SAML enforcement." }] });
+  // The real answer for a repo that does not exist, and for a private one the token cannot read.
+  const NO_ACCESS: GhResult = {
+    exitCode: 1,
+    stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository with the name 'acme/widgets'." }] }),
+    stderr: "gh: Could not resolve to a Repository with the name 'acme/widgets'.",
+  };
   const cases: [string, GhResult, string][] = [
     ["no gh on PATH", { exitCode: -1, stdout: "", stderr: "ENOENT", noBinary: true }, "no-gh"],
     ["not logged in: exit 4", { exitCode: 4, stdout: "", stderr: "To get started with GitHub CLI, please run:  gh auth login" }, "auth"],
     ["a 401 answer", { exitCode: 1, stdout: JSON.stringify({ message: "Bad credentials", status: "401" }), stderr: "gh: Bad credentials (HTTP 401)" }, "auth"],
     ["FORBIDDEN", { exitCode: 1, stdout: SSO, stderr: "gh: Resource protected" }, "sso"],
     ["a SAML 403", { exitCode: 1, stdout: JSON.stringify({ message: "Resource protected by organization SAML enforcement." }), stderr: "HTTP 403" }, "sso"],
+    ["a repo the login cannot see", NO_ACCESS, "no-access"],
   ];
   for (const [name, result, reason] of cases) {
     test(`${name} reads as ${reason}, and the other repo's counts still show`, async () => {
@@ -413,6 +420,114 @@ describe("notChecked", () => {
       expect(after.checked).toBe(2);
     });
   }
+
+  test("a repo the login cannot see caches nothing: its PRs are unchecked and the next request asks again", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""]]) });
+    const calls: string[][] = [];
+    const counting: GhRunner = async (args) => {
+      calls.push(args);
+      return NO_ACCESS;
+    };
+    const first = await run(r, deps(counting));
+    expect([first.checked, first.unchecked]).toEqual([0, 1]);
+    expect(first.uncheckedRows).toEqual([{ page: "plans/a.mdx", pr: 1, repo: WIDGETS }]);
+    expect(first.prs).toEqual({});
+    await run(r, deps(counting));
+    expect(calls.length).toBe(2);
+  });
+
+  test("a repo the login cannot see spends none of the hour's budget", async () => {
+    const rows = Array.from({ length: GH_PRS_PER_HOUR }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
+    const table = Object.fromEntries(rows.map((_, i) => [`${WIDGETS}#${i + 1}`, { state: "OPEN" } as Pr]));
+    const r = wiki({ "plans/a.mdx": page("ready", rows) });
+    await run(r, deps(async () => NO_ACCESS));
+    // Switched back to the account that can see it: the whole set is read at once.
+    const after = await run(r, deps(stubGh(table)));
+    expect([after.checked, after.unchecked]).toEqual([GH_PRS_PER_HOUR, 0]);
+    expect(after.notChecked).toBeUndefined();
+  });
+
+  test("no-access ranks below no-gh, auth and sso, and names only its own repos", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""], [url(GEARS, 2), "x", "open", ""], [url("acme/third", 3), "x", "open", ""]]) });
+    for (const [result, reason] of [
+      [{ exitCode: -1, stdout: "", stderr: "ENOENT", noBinary: true }, "no-gh"],
+      [{ exitCode: 4, stdout: "", stderr: "gh auth login" }, "auth"],
+      [{ exitCode: 1, stdout: SSO, stderr: "" }, "sso"],
+    ] as [GhResult, string][]) {
+      __resetGhCheckForTest();
+      const body = await run(r, deps(async (args) => (args.includes("repo=gears") ? result : NO_ACCESS)));
+      expect(body.notChecked).toEqual({ reason: reason as "auth", repos: [GEARS] });
+    }
+    __resetGhCheckForTest();
+    const only = await run(r, deps(async (args) => (args.includes("repo=gears") ? stubGh({ [`${GEARS}#2`]: { state: "OPEN" } })(args) : NO_ACCESS)));
+    expect(only.notChecked?.reason).toBe("no-access");
+    expect([...only.notChecked!.repos].sort()).toEqual(["acme/third", WIDGETS].sort());
+    expect(only.checked).toBe(1);
+  });
+
+  test("a null repository with a more specific error keeps that reason", () => {
+    const answer = readGhAnswer({ exitCode: 1, stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "NOT_FOUND" }, { type: "FORBIDDEN" }] }), stderr: "" }, [1]);
+    expect(answer.failure).toBe("sso");
+  });
+
+  test("a null repository with no NOT_FOUND is a failed query, with no remedy it cannot back", () => {
+    const answer = readGhAnswer({ exitCode: 1, stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "SERVICE_UNAVAILABLE", message: "try later" }] }), stderr: "" }, [1]);
+    expect(answer.unanswered).toBe(true);
+    expect(answer.failure).toBeUndefined();
+    expect(answer.states.size).toBe(0);
+  });
+
+  test("an alias NOT_FOUND beside a live repository stays cached, with no reason", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""], [url(WIDGETS, 2), "x", "open", ""]]) });
+    const calls: string[][] = [];
+    const body = await run(r, deps(stubGh({ [`${WIDGETS}#1`]: { state: "OPEN" } }, calls)));
+    expect(body.notChecked).toBeUndefined();
+    expect([body.checked, body.unchecked]).toEqual([1, 1]);
+    await run(r, deps(stubGh({}, calls)));
+    expect(calls.length).toBe(1);
+  });
+
+  describe("a malformed answer is an unanswered query", () => {
+    const shapes: [string, unknown][] = [
+      ["a null error", { errors: [null] }],
+      ["no repository key", { data: {} }],
+      ["a string repository", { data: { repository: "x" } }],
+      ["an array repository", { data: { repository: [1] } }],
+      ["a repository with none of the aliases", { data: { repository: {} } }],
+      ["a bare number", 5],
+      ["null", null],
+    ];
+    const answerOf = (json: unknown) => readGhAnswer({ exitCode: 1, stdout: JSON.stringify(json), stderr: "" }, [1]);
+
+    for (const [name, json] of shapes) {
+      test(`${name}: no throw, nothing read`, () => {
+        const answer = answerOf(json);
+        expect(answer.unanswered).toBe(true);
+        expect(answer.states.size).toBe(0);
+      });
+    }
+
+    test("junk in errors does not cost the data beside it", () => {
+      const answer = answerOf({ data: { repository: { p1: { state: "OPEN", mergedAt: null } } }, errors: [null, 5, "x"] });
+      expect(answer.unanswered).toBe(false);
+      expect(answer.states.get(1)).toEqual({ state: "OPEN", mergedAt: null });
+    });
+
+    test("through a request: it resolves, the other repo counts, and no budget goes", async () => {
+      const rows = Array.from({ length: GH_PRS_PER_HOUR }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
+      const table = Object.fromEntries(rows.map((_, i) => [`${WIDGETS}#${i + 1}`, { state: "OPEN" } as Pr]));
+      const r = wiki({ "plans/a.mdx": page("ready", rows) });
+      const empty = await run(r, deps(async () => ({ exitCode: 1, stdout: JSON.stringify({ data: { repository: {} } }), stderr: "" })));
+      expect(empty.unchecked).toBe(GH_PRS_PER_HOUR);
+      expect((await run(r, deps(stubGh(table)))).checked).toBe(GH_PRS_PER_HOUR);
+
+      __resetGhCheckForTest();
+      const two = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""], [url(GEARS, 2), "x", "open", ""]]) });
+      const ok = stubGh({ [`${GEARS}#2`]: { state: "OPEN" } });
+      const body = await run(two, deps(async (args) => (args.includes("repo=widgets") ? { exitCode: 1, stdout: JSON.stringify({ errors: [null] }), stderr: "" } : ok(args))));
+      expect([body.checked, body.unchecked]).toEqual([1, 1]);
+    });
+  });
 
   test("the env switch: no spawn, reason disabled", async () => {
     const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""]]) });
@@ -803,6 +918,62 @@ describe("spawnGhRunner", () => {
   test("arguments arrive as one array, unsplit and unexpanded", async () => {
     const res = await spawnGhRunner(script('printf "%s|" "$@"; echo err >&2; exit 1'))(["a b", "$HOME", "c"]);
     expect(res).toEqual({ exitCode: 1, stdout: "a b|$HOME|c|", stderr: "err\n" });
+  });
+
+  describe("the child's environment", () => {
+    const ALLOWED = ["PATH", "HOME", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"];
+    const EXCLUDED = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "DATABASE_URL", "TELEGRAM_BOT_TOKEN_JARVIS", "SLACK_BOT_TOKEN_JARVIS"];
+    const MODULE = path.join(import.meta.dir, "gh-check.ts");
+
+    /** The runner in a muninn-like process that STARTED with this env (a later
+     *  `process.env` write does not reach Bun's default spawn env), printing what
+     *  its own child printed. */
+    async function inProcess(set: Record<string, string | undefined>, bin: string): Promise<{ stdout: string; noBinary?: boolean; failure?: string }> {
+      const code = `import { spawnGhRunner, readGhAnswer } from ${JSON.stringify(MODULE)};
+        const r = await spawnGhRunner(${bin})([]);
+        process.stdout.write(JSON.stringify({ stdout: r.stdout, noBinary: r.noBinary, failure: readGhAnswer(r, [1]).failure }));`;
+      const env = Object.fromEntries(Object.entries({ ...process.env, ...set }).filter(([, v]) => v !== undefined)) as Record<string, string>;
+      const proc = Bun.spawn([process.execPath, "--no-env-file", "-e", code], { env, stdout: "pipe", stderr: "pipe" });
+      const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      await proc.exited;
+      if (!out) throw new Error(`the process printed nothing: ${err}`);
+      return JSON.parse(out);
+    }
+
+    /** What a real child sees: `/usr/bin/env` through the runner. */
+    async function childEnv(set: Record<string, string | undefined>): Promise<Map<string, string>> {
+      const { stdout } = await inProcess(set, '"/usr/bin/env"');
+      return new Map(stdout.split("\n").filter(Boolean).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+    }
+
+    for (const name of ALLOWED) {
+      test(`${name} arrives, as muninn has it`, async () => {
+        expect((await childEnv({ [name]: `/sentinel/${name}` })).get(name)).toBe(`/sentinel/${name}`);
+      });
+    }
+
+    for (const name of EXCLUDED) {
+      test(`${name} does not arrive`, async () => {
+        expect((await childEnv({ [name]: "secret" })).has(name)).toBe(false);
+      });
+    }
+
+    test("nothing else arrives, and a name muninn does not have stays unset", async () => {
+      const env = await childEnv({ HOME: "/sentinel/home", GH_CONFIG_DIR: "/sentinel/gh", XDG_CONFIG_HOME: undefined, SOME_OTHER_SECRET: "secret" });
+      expect([...env.keys()].sort()).toEqual(["GH_CONFIG_DIR", "HOME", "PATH"]);
+    });
+
+    test("the default binary is found on muninn's PATH and gets the same env", async () => {
+      const dir = path.dirname(script('echo "token=${GH_TOKEN:-none} home=$HOME"'));
+      const res = await inProcess({ PATH: dir, GH_TOKEN: "secret", HOME: "/sentinel/home" }, "");
+      expect(res.stdout.trim()).toBe("token=none home=/sentinel/home");
+    });
+
+    test("a PATH without gh is still no-gh", async () => {
+      const res = await inProcess({ PATH: testTempDirSync(path.join(tmpdir(), "gh-nopath-")) }, "");
+      expect(res.noBinary).toBe(true);
+      expect(res.failure).toBe("no-gh");
+    });
   });
 
   test("a hung call is killed at its timeout, even with a child holding the pipes", async () => {

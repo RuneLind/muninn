@@ -833,8 +833,10 @@ function applySlot(): void {
 function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
   const prev = slot;
   transition(e);
-  // A start view that renders after a failed check tries again.
-  if (e.type === "mount" && workChecks?.failed) workChecks = { ...workChecks, fetchedAt: 0 };
+  // A start view that renders after a check that left something unread asks
+  // again: the remedy may have been followed. Only here, never on a repaint, so
+  // an answer that stays unread cannot loop.
+  if (e.type === "mount" && workChecks && checksLeftUnread(workChecks)) workChecks = { ...workChecks, fetchedAt: 0 };
   if (e.type === "adopt" && slot === prev) {
     // The run did not move, but a page may have declared an effort since it
     // (P6): re-join, and only when something a join reads changed, so an
@@ -1059,6 +1061,12 @@ let workChecksRetries = 0;
 const WORK_CHECKS_TTL_MS = 60 * 60_000;
 const WORK_CHECKS_RETRY_MS = 15_000;
 const WORK_CHECKS_RETRIES_MAX = 3;
+
+function checksLeftUnread(c: { body: WorkMapChecksBody | null; failed: boolean }): boolean {
+  if (c.failed) return true;
+  const reason = c.body?.notChecked?.reason;
+  return (!!reason && reason !== "disabled") || (c.body?.unchecked ?? 0) > 0;
+}
 
 function resetWorkChecks(): void {
   workChecks = null;

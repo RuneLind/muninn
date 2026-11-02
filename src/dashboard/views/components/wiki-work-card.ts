@@ -98,7 +98,7 @@ export interface ChecksView {
   /** The map `body` was fetched for. A title can recur on a new map, so only an
    *  answer for the map on the card may mark its items. */
   answerRunAt: number | null;
-  /** The last fetch failed: nothing was said about any PR. */
+  /** The last fetch failed: `body`, if any, is older and did not just get checked. */
   failed?: boolean;
   /** The card will fetch again while `refreshing` stays true. */
   retrying?: boolean;
@@ -629,11 +629,16 @@ function stripDrillHtml(rows: readonly StripRow[], cell: StripCell, view: StripV
 // ── The GitHub check's cell (your-work board P2) ──────────────────────
 const GH_CELL_LABEL = "ledger rows GitHub contradicts";
 
-const NOT_CHECKED_HTML: Record<Exclude<NotCheckedReason, "disabled">, string> = {
+const NOT_CHECKED_HTML: Record<Exclude<NotCheckedReason, "disabled" | "no-access">, string> = {
   "no-gh": "not checked: install <code>gh</code>",
   auth: "not checked: log in with <code>gh auth login</code>",
   sso: "not checked: authorize the token for the organization (<code>gh auth refresh</code>)",
 };
+
+function notCheckedHtml(reason: Exclude<NotCheckedReason, "disabled">, repos: readonly string[]): string {
+  if (reason === "no-access") return `not checked: your <code>gh</code> login cannot see ${esc(repos[0] ?? "a repo")} (<code>gh auth status</code>)`;
+  return NOT_CHECKED_HTML[reason];
+}
 
 function ghPrLinkHtml(repo: string, pr: number): string {
   return `<a class="wiki-wm-link" href="https://github.com/${esc(repo)}/pull/${pr}" target="_blank" rel="noopener noreferrer">#${pr}</a>`;
@@ -659,19 +664,24 @@ function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, 
       ? { cell: stripCellHtml("github", "—", GH_CELL_LABEL, "muted", view, true, { note: '<span class="wiki-wm-cell-note">not checked</span>' }), items: [] }
       : { cell: stripCellHtml("github", "checking…", GH_CELL_LABEL, "muted unset", view, true), items: [] };
   }
-  const reason = body.notChecked?.reason;
+  const notChecked = body.notChecked;
+  const reason = notChecked?.reason;
   if (reason === "disabled") return null;
   const items = ghDrillItems(body, byKey, hrefFor);
   const n = body.contradictions.length;
   const notes: string[] = [];
   // The rows are read from the pages, so an older answer's count still stands, muted.
   const older = checks.answerRunAt !== runAtMs;
-  if (reason) notes.push(`<span class="wiki-wm-cell-note">${NOT_CHECKED_HTML[reason]}</span>`);
-  if (older) notes.push(`<span class="wiki-wm-cell-note">${checks.failed ? "not checked" : "checking…"}</span>`);
+  if (reason) notes.push(`<span class="wiki-wm-cell-note">${notCheckedHtml(reason, notChecked?.repos ?? [])}</span>`);
+  // A failed fetch outranks what the older answer said about itself; a remedy already says it.
+  if (checks.failed) {
+    if (!reason) notes.push('<span class="wiki-wm-cell-note">not checked</span>');
+  } else if (older) notes.push('<span class="wiki-wm-cell-note">checking…</span>');
   else if (body.refreshing && checks.retrying) notes.push('<span class="wiki-wm-cell-note">refreshing</span>');
   else if (!reason && body.unchecked > 0) notes.push(`<span class="wiki-wm-cell-note">${body.unchecked} not checked</span>`);
-  const nothingRead = !!reason && body.checked === 0;
-  const tone = [older || nothingRead ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
+  // A 0 with nothing read would read as all clear.
+  const nothingRead = body.checked === 0 && (!!reason || body.unchecked > 0);
+  const tone = [older || checks.failed || nothingRead ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
   const cell = stripCellHtml("github", nothingRead ? "—" : String(n), GH_CELL_LABEL, tone, view, !items.length, {
     note: notes.join(""),
     title: `${body.checked} checked · ${body.unchecked} not checked · ${body.unlinked} with no full PR link · ${body.skipped} skipped`,

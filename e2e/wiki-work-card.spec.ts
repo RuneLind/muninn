@@ -803,6 +803,103 @@ test("a checks GET that fails says «not checked», and the next start view asks
   expect(n).toBe(2);
 });
 
+/** Open a page off the card, and come back. */
+async function visitAndReturn(page: Page): Promise<void> {
+  await page.locator("#wikiWorkCard").locator('.wiki-wm-pages a[data-relpath], .wiki-wm-summary a[data-relpath]').first().click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.goBack();
+  await expect(page.locator(".wiki-start")).toBeVisible();
+}
+
+const GH_CONTRADICTION = { page: "plans/alpha.mdx", pr: 369, repo: "acme/gears", rowState: "open", ghState: "MERGED" as const, mergedAt: GH_MERGED_AT };
+
+test("a retry that fails during «refreshing» keeps the count muted with «not checked», and the next start view asks again", async ({ page }) => {
+  await page.clock.install();
+  let n = 0;
+  await page.route("**/api/wiki/work-map/checks*", (route) =>
+    ++n === 2 ? route.fulfill({ status: 500, json: { error: "x" } }) : route.fulfill({ json: n === 1 ? checksBody({ refreshing: true, contradictions: [GH_CONTRADICTION], needs: GH_NEEDS }) : checksBody({ contradictions: [GH_CONTRADICTION], needs: GH_NEEDS }) }),
+  );
+  await openStart(page, GH);
+  const cell = page.locator('#wikiWorkCard [data-wm-cell="github"]');
+  await expect(cell).toContainText("refreshing");
+  await page.clock.runFor(15_000);
+  await expect(cell).toContainText("not checked");
+  await expect(cell).not.toContainText("refreshing");
+  await expect(cell.locator("b")).toHaveText("1");
+  await expect(cell).toHaveClass(/\bmuted\b/);
+  await expect(cell).not.toHaveClass(/\bbad\b/);
+  // The same map's marks stay.
+  await expect(page.locator("#wikiWorkCard .wiki-wm-ghnote.done")).toHaveCount(1);
+  // A failure starts no loop.
+  await page.clock.runFor(60_000);
+  await page.waitForTimeout(100);
+  expect(n).toBe(2);
+  await visitAndReturn(page);
+  await expect.poll(() => n).toBe(3);
+  await expect(cell).not.toContainText("not checked");
+  await expect(cell).toHaveClass(/\bbad\b/);
+});
+
+test("an hourly refetch that fails does not look fresh", async ({ page }) => {
+  await page.clock.install();
+  let n = 0;
+  await page.route("**/api/wiki/work-map/checks*", (route) => (++n === 2 ? route.fulfill({ status: 500, json: { error: "x" } }) : route.fulfill({ json: checksBody({ contradictions: [GH_CONTRADICTION] }) })));
+  await openStart(page, GH);
+  const cell = page.locator('#wikiWorkCard [data-wm-cell="github"]');
+  await expect(cell).toHaveClass(/\bbad\b/);
+  await page.locator("#wikiWorkCard").locator('.wiki-wm-pages a[data-relpath], .wiki-wm-summary a[data-relpath]').first().click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.clock.fastForward(HOUR + 1_000);
+  await page.goBack();
+  await expect.poll(() => n).toBe(2);
+  await expect(cell).toContainText("not checked");
+  await expect(cell.locator("b")).toHaveText("1");
+  await expect(cell).toHaveClass(/\bmuted\b/);
+  await visitAndReturn(page);
+  await expect.poll(() => n).toBe(3);
+  await expect(cell).toHaveClass(/\bbad\b/);
+});
+
+for (const [name, first] of [
+  ["a remedy", { notChecked: { reason: "auth", repos: ["acme/gears"] } }],
+  ["no access", { notChecked: { reason: "no-access", repos: ["acme/gears"] } }],
+  ["rows left unchecked", { checked: 0, unchecked: 85 }],
+] as [string, Partial<WorkMapChecksBody>][]) {
+  test(`an answer with ${name} is asked again on the next start view, and starts no loop`, async ({ page }) => {
+    await page.clock.install();
+    const stub = await stubChecks(page, (n) => (n === 1 ? checksBody(first) : checksBody()));
+    await openStart(page, GH);
+    const cell = page.locator('#wikiWorkCard [data-wm-cell="github"]');
+    await expect(cell).toContainText("not checked");
+    await page.clock.runFor(60_000);
+    await page.waitForTimeout(100);
+    expect(stub.count()).toBe(1);
+    await visitAndReturn(page);
+    await expect.poll(() => stub.count()).toBe(2);
+    await expect(cell).not.toContainText("not checked");
+    await expect(cell.locator("b")).toHaveText("0");
+    // Settled: the next visit asks nothing.
+    await visitAndReturn(page);
+    await page.waitForTimeout(100);
+    expect(stub.count()).toBe(2);
+  });
+}
+
+test("a no-access answer reads its remedy on the card", async ({ page }) => {
+  await stubChecks(page, () => checksBody({ checked: 2, unchecked: 1, notChecked: { reason: "no-access", repos: ["acme/gears"] } }));
+  await openStart(page, GH);
+  await expect(page.locator('#wikiWorkCard [data-wm-cell="github"]')).toContainText("not checked: your gh login cannot see acme/gears (gh auth status)");
+});
+
+test("disabled is not asked again on the next start view", async ({ page }) => {
+  const stub = await stubChecks(page, () => checksBody({ notChecked: { reason: "disabled", repos: [] } }));
+  await openStart(page, GH);
+  await expect.poll(() => stub.count()).toBe(1);
+  await visitAndReturn(page);
+  await page.waitForTimeout(100);
+  expect(stub.count()).toBe(1);
+});
+
 test("an answer older than an hour is fetched again when the start view renders, and not before", async ({ page }) => {
   await page.clock.install();
   const stub = await stubChecks(page, () => checksBody());

@@ -85,6 +85,80 @@ describe("the GitHub cell", () => {
     expect(cellHtml(render({ body: checksBody({ checked: 0, unchecked: 2, notChecked: { reason, repos: ["acme/gears"] } }) }))).toContain("<b>—</b>");
   });
 
+  test("no-access names the first repo the login cannot see, as text, in the remedy's form", () => {
+    const c = cellHtml(render({ body: checksBody({ checked: 2, unchecked: 3, contradictions: [contradiction], notChecked: { reason: "no-access", repos: ["acme/<first>", "acme/second"] } }) }))!;
+    expect(flat(c)).toContain("not checked: your gh login cannot see acme/&lt;first&gt; (gh auth status)");
+    expect(c).toContain("<code>gh</code>");
+    expect(c).toContain("<code>gh auth status</code>");
+    expect(flat(c)).not.toContain("second");
+    expect(flat(c)).not.toContain("3 not checked");
+    expect(c).toContain("<b>1</b>");
+    expect(c).toMatch(/\bwide\b/);
+    expect(cellHtml(render({ body: checksBody({ checked: 0, unchecked: 3, notChecked: { reason: "no-access", repos: ["acme/x"] } }) }))).toContain("<b>—</b>");
+  });
+
+  describe("a fetch that failed after an answer for this map", () => {
+    const body = checksBody({ contradictions: [contradiction], needs: [need()] });
+
+    test("keeps the old count, muted, and says not checked", () => {
+      const c = cellHtml(render({ body, failed: true }))!;
+      expect(c).toContain("<b>1</b>");
+      expect(c).toMatch(/class="wiki-wm-cell muted"/);
+      expect(c).not.toMatch(/\bbad\b/);
+      expect(flat(c)).toContain("not checked");
+    });
+
+    test("during «refreshing» says not checked and not refreshing", () => {
+      const c = cellHtml(render({ body: { ...body, refreshing: true }, failed: true, retrying: false }))!;
+      expect(flat(c)).toContain("not checked");
+      expect(flat(c)).not.toContain("refreshing");
+      expect(c).toMatch(/\bmuted\b/);
+    });
+
+    test("does not repeat itself beside a remedy, or count what it did not ask", () => {
+      const c = flat(cellHtml(render({ body: { ...body, unchecked: 4, notChecked: { reason: "auth", repos: ["acme/x"] } }, failed: true })));
+      expect(c.match(/not checked/g)!.length).toBe(1);
+      expect(c).toContain("log in with");
+      expect(flat(cellHtml(render({ body: { ...body, unchecked: 4 }, failed: true })))).not.toContain("4 not checked");
+    });
+
+    test("keeps this map's marks, and its list open", () => {
+      const out = render({ body, failed: true }, { open: "github", expanded: false });
+      expect(out).toContain("gh-done");
+      expect(out).toContain("wiki-wm-drill");
+    });
+
+    test("a good answer afterwards is not muted", () => {
+      expect(cellHtml(render({ body, failed: false }))).toMatch(/class="wiki-wm-cell bad"/);
+    });
+  });
+
+  describe("nothing read", () => {
+    test("0 checked with rows unchecked reads —, muted, with no reason", () => {
+      const c = cellHtml(render({ body: checksBody({ checked: 0, unchecked: 85 }) }))!;
+      expect(c).toContain("<b>—</b>");
+      expect(c).not.toContain("<b>0</b>");
+      expect(c).toMatch(/class="wiki-wm-cell muted"/);
+      expect(flat(c)).toContain("85 not checked");
+    });
+
+    test("a remedy with nothing to count reads —, muted", () => {
+      const c = cellHtml(render({ body: checksBody({ checked: 0, unchecked: 0, notChecked: { reason: "auth", repos: ["acme/x"] } }) }))!;
+      expect(c).toContain("<b>—</b>");
+      expect(c).toMatch(/\bmuted\b/);
+    });
+
+    test("0 checked and nothing to check is the plain 0", () => {
+      const c = cellHtml(render({ body: checksBody({ checked: 0, unchecked: 0 }) }))!;
+      expect(c).toContain("<b>0</b>");
+      expect(c).not.toMatch(/\bmuted\b/);
+    });
+
+    test("one row read is a real count", () => {
+      expect(cellHtml(render({ body: checksBody({ checked: 1, unchecked: 85 }) }))).toContain("<b>0</b>");
+    });
+  });
+
   test("disabled: the cell is absent", () => {
     expect(cellHtml(render({ body: checksBody({ notChecked: { reason: "disabled", repos: [] } }) }))).toBeNull();
   });
