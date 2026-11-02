@@ -536,7 +536,10 @@ export type StripCell = "decisions" | "oldest" | "steps" | "shipped" | "github";
 export interface StripView {
   open: StripCell | null;
   expanded: boolean;
+  /** How far the GitHub list's two shut groups are open: absent is the one line. */
+  ghGroups?: Partial<Record<GhFoldedGroup, "window" | "all">>;
 }
+export type GhFoldedGroup = "unchecked" | "unlinked";
 /** Rows a cell's list shows before `+N more`. */
 export const STRIP_ROWS_SHOWN = 8;
 /** Past these the two wait cells take the warn tone. */
@@ -593,7 +596,7 @@ const STRIP_TITLES: Record<StripCell, string> = {
   oldest: "Dated waits, oldest first",
   steps: "Pages with steps in a you lane",
   shipped: "Shipped plans with follow-ups open, oldest first",
-  github: "Ledger rows GitHub contradicts, then the rows not checked",
+  github: "What the GitHub check found in the ledger rows",
 };
 
 function stripCellHtml(cell: StripCell, value: string, label: string, tone: string, view: StripView, empty: boolean, extra: { note?: string; title?: string } = {}): string {
@@ -644,34 +647,77 @@ function ghPrLinkHtml(repo: string, pr: number): string {
   return `<a class="wiki-wm-link" href="https://github.com/${esc(repo)}/pull/${pr}" target="_blank" rel="noopener noreferrer">#${pr}</a>`;
 }
 
-/** The cell's list: the contradictions, then the rows the check could not read. */
-function ghDrillItems(body: WorkMapChecksBody, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string): string[] {
+const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+
+/** The list's opening line when no row is contradicted. It claims only what was read. */
+function ghClearSentence(body: WorkMapChecksBody, stale: boolean): string {
+  const { checked, unchecked } = body;
+  const partly = unchecked > 0 || !!body.notChecked;
+  if (!checked) {
+    if (unchecked > 0) return `GitHub answered for none of the ${plural(unchecked, "row")} with a PR link, so nothing is known about them yet.`;
+    return partly ? "Nothing was read from GitHub." : "No ledger row has a full PR link, so GitHub was asked about none of them.";
+  }
+  const line = partly
+    ? `GitHub contradicts none of the rows it answered for (${plural(checked, "row")} checked, ${unchecked} not checked).`
+    : `Every ledger row with a full PR link agrees with GitHub (${plural(checked, "row")} checked).`;
+  return stale ? `In the last answer, ${line[0]!.toLowerCase()}${line.slice(1)}` : line;
+}
+
+/** One labelled group. A folded one is a heading and a `+N more`; open, it takes the row window. */
+function ghGroupHtml(key: string, label: string, items: readonly string[], fold: "shut" | "window" | "all", moreLabel: string): string {
+  if (!items.length) return "";
+  const shown = fold === "all" ? items : fold === "window" ? items.slice(0, STRIP_ROWS_SHOWN) : [];
+  const more = items.length - shown.length;
+  const moreHtml = more > 0 ? `<button type="button" class="wiki-wm-drill-more" data-wm-gh-more="${key}" aria-label="+${more} more ${esc(moreLabel)}">+${more} more</button>` : "";
+  return (
+    `<div class="wiki-wm-drill-group" data-wm-gh-group="${key}"><div class="wiki-wm-drill-group-head"><span>${esc(label)} · ${items.length}</span>${fold === "shut" ? ` ${moreHtml}` : ""}</div>` +
+    (shown.length ? `<ol class="wiki-wm-drill-list">${shown.join("")}</ol>` : "") +
+    (fold === "shut" ? "" : moreHtml) +
+    "</div>"
+  );
+}
+
+/** The cell's list, or "" with nothing to list. The contradictions are always all shown. */
+function ghDrillHtml(body: WorkMapChecksBody, view: StripView, stale: boolean, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string): string {
   const row = (page: string, meta: string) => `<li class="wiki-wm-drill-row">${pageLinkHtml(page, byKey, hrefFor)} <span class="wiki-wm-drill-meta">· ${meta}</span></li>`;
-  return [
-    ...body.contradictions.map((c) =>
-      row(c.page, `says ${esc(c.rowState)} · GitHub: ${ghPrLinkHtml(c.repo, c.pr)} ${c.ghState === "MERGED" ? esc(`merged ${shortDay(c.mergedAt)}`.trim()) : "closed without merge"}`),
-    ),
-    ...body.uncheckedRows.map((r) => row(r.page, `${ghPrLinkHtml(r.repo, r.pr)} not checked`)),
-    ...body.unlinkedRows.map((r) => row(r.page, `${esc(r.label)}: no full PR link`)),
-  ];
+  if (!body.contradictions.length && !body.uncheckedRows.length && !body.unlinkedRows.length) return "";
+  const fold = (g: GhFoldedGroup) => view.ghGroups?.[g] ?? "shut";
+  return (
+    `<div class="wiki-wm-drill" data-wm-drill="github"><div class="wiki-wm-drill-title">${esc(STRIP_TITLES.github)}</div>` +
+    (body.contradictions.length ? "" : `<p class="wiki-wm-drill-clear">${esc(ghClearSentence(body, stale))}</p>`) +
+    ghGroupHtml(
+      "contradictions",
+      "GitHub contradicts",
+      body.contradictions.map((c) =>
+        row(c.page, `says ${esc(c.rowState)} · GitHub: ${ghPrLinkHtml(c.repo, c.pr)} ${c.ghState === "MERGED" ? esc(`merged ${shortDay(c.mergedAt)}`.trim()) : "closed without merge"}`),
+      ),
+      "all",
+      "",
+    ) +
+    ghGroupHtml("unchecked", "Not checked", body.uncheckedRows.map((r) => row(r.page, `${ghPrLinkHtml(r.repo, r.pr)} not checked`)), fold("unchecked"), "not checked") +
+    ghGroupHtml("unlinked", "No full PR link", body.unlinkedRows.map((r) => row(r.page, `${esc(r.label)}: no full PR link`)), fold("unlinked"), "with no full PR link") +
+    "</div>"
+  );
 }
 
 /** The fifth cell and its list, or null when the check is off here. */
-function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string, runAtMs: number | undefined): { cell: string; items: string[] } | null {
+function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string, runAtMs: number | undefined): { cell: string; drill: string } | null {
   const { body } = checks;
   if (!body) {
     return checks.failed
-      ? { cell: stripCellHtml("github", "—", GH_CELL_LABEL, "muted", view, true, { note: '<span class="wiki-wm-cell-note">not checked</span>' }), items: [] }
-      : { cell: stripCellHtml("github", "checking…", GH_CELL_LABEL, "muted unset", view, true), items: [] };
+      ? { cell: stripCellHtml("github", "—", GH_CELL_LABEL, "muted", view, true, { note: '<span class="wiki-wm-cell-note">not checked</span>' }), drill: "" }
+      : { cell: stripCellHtml("github", "checking…", GH_CELL_LABEL, "muted unset", view, true), drill: "" };
   }
   const notChecked = body.notChecked;
   const reason = notChecked?.reason;
   if (reason === "disabled") return null;
-  const items = ghDrillItems(body, byKey, hrefFor);
   const n = body.contradictions.length;
   const notes: string[] = [];
   // The rows are read from the pages, so an older answer's count still stands, muted.
   const older = checks.answerRunAt !== runAtMs;
+  const drill = ghDrillHtml(body, view, older || !!checks.failed, byKey, hrefFor);
+  // Rows but no PR to ask about: that 0 would read as all clear too.
+  const onlyUnlinked = body.checked === 0 && !reason && body.unchecked === 0 && body.unlinked > 0;
   if (reason) notes.push(`<span class="wiki-wm-cell-note">${notCheckedHtml(reason, notChecked?.repos ?? [])}</span>`);
   // A failed fetch outranks what the older answer said about itself; a remedy already says it.
   if (checks.failed) {
@@ -679,14 +725,15 @@ function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, 
   } else if (older) notes.push('<span class="wiki-wm-cell-note">checking…</span>');
   else if (body.refreshing && checks.retrying) notes.push('<span class="wiki-wm-cell-note">refreshing</span>');
   else if (!reason && body.unchecked > 0) notes.push(`<span class="wiki-wm-cell-note">${body.unchecked} not checked</span>`);
+  else if (onlyUnlinked) notes.push(`<span class="wiki-wm-cell-note">${body.unlinked} with no full PR link</span>`);
   // A 0 with nothing read would read as all clear.
-  const nothingRead = body.checked === 0 && (!!reason || body.unchecked > 0);
+  const nothingRead = body.checked === 0 && (!!reason || body.unchecked > 0 || onlyUnlinked);
   const tone = [older || checks.failed || nothingRead ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
-  const cell = stripCellHtml("github", nothingRead ? "—" : String(n), GH_CELL_LABEL, tone, view, !items.length, {
+  const cell = stripCellHtml("github", nothingRead ? "—" : String(n), GH_CELL_LABEL, tone, view, !drill, {
     note: notes.join(""),
     title: `${body.checked} checked · ${body.unchecked} not checked · ${body.unlinked} with no full PR link · ${body.skipped} skipped`,
   });
-  return { cell, items };
+  return { cell, drill };
 }
 
 function healthStripHtml<P extends CardPage>(
@@ -718,7 +765,7 @@ function healthStripHtml<P extends CardPage>(
   const open = view.open;
   let drill = "";
   if (open === "github") {
-    if (gh?.items.length) drill = drillHtml(gh.items, open, view);
+    drill = gh?.drill ?? "";
   } else if (open) {
     const waitCell = open === "decisions" || open === "oldest";
     const list = waitCell && !waitsCounted ? [] : rows[open];

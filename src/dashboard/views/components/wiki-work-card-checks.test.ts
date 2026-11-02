@@ -163,22 +163,104 @@ describe("the GitHub cell", () => {
     expect(cellHtml(render({ body: checksBody({ notChecked: { reason: "disabled", repos: [] } }) }))).toBeNull();
   });
 
-  test("the drill list: contradictions first, then the unchecked and unlinked rows, folded at the row limit", () => {
-    const body = checksBody({
-      contradictions: [contradiction],
-      uncheckedRows: [{ page: "plans/b.mdx", pr: 4, repo: "acme/x" }],
-      unlinkedRows: Array.from({ length: 9 }, (_, i) => ({ page: "plans/c.mdx", label: `row <${i}>` })),
+  describe("the drill list", () => {
+    const rowsOf = (out: string) => [...out.matchAll(/<li class="wiki-wm-drill-row">([\s\S]*?)<\/li>/g)].map((m) => flat(m[1]!));
+    const groupOf = (out: string, g: string) => new RegExp(`data-wm-gh-group="${g}"[\\s\\S]*?(?=data-wm-gh-group=|$)`).exec(out)?.[0] ?? null;
+    const unlinkedRows = Array.from({ length: 9 }, (_, i) => ({ page: "plans/c.mdx", label: `row <${i}>` }));
+    const uncheckedRows = [{ page: "plans/b.mdx", pr: 4, repo: "acme/x" }];
+    const open = (over: Partial<WorkMapChecksBody>, ghGroups?: StripView["ghGroups"], extra: Partial<ChecksView> = {}) => render({ body: checksBody(over), ...extra }, { open: "github", expanded: false, ...(ghGroups ? { ghGroups } : {}) });
+
+    test("three labelled groups in the slice's order, each with its count", () => {
+      const out = open({ contradictions: [contradiction], uncheckedRows, unlinkedRows });
+      const text = flat(out);
+      const at = ["GitHub contradicts · 1", "Not checked · 1", "No full PR link · 9"].map((label) => text.indexOf(label));
+      expect(at.every((i) => i >= 0)).toBe(true);
+      expect(at).toEqual([...at].sort((a, b) => a - b));
+      expect(out).toContain('data-wm-gh-group="contradictions"');
+      expect(out).toContain('data-wm-gh-group="unchecked"');
+      expect(out).toContain('data-wm-gh-group="unlinked"');
     });
-    const out = render({ body }, { open: "github", expanded: false });
-    const rows = [...out.matchAll(/<li class="wiki-wm-drill-row">([\s\S]*?)<\/li>/g)].map((m) => flat(m[1]!));
-    expect(rows.length).toBe(STRIP_ROWS_SHOWN);
-    expect(rows[0]).toMatch(/Plan A.*says open.*GitHub: #12 merged \d+\.10/);
-    expect(rows[1]).toMatch(/Plan B.*#4 not checked/);
-    expect(rows[2]).toContain("no full PR link");
-    expect(out).toContain("&lt;0&gt;");
-    expect(out).toContain('href="https://github.com/acme/gears/pull/12"');
-    expect(out).toContain("+3 more");
-    expect(render({ body }, { open: "github", expanded: true })).not.toContain("+3 more");
+
+    test("a group is present only when it has rows", () => {
+      const only = open({ contradictions: [contradiction] });
+      expect(only).toContain('data-wm-gh-group="contradictions"');
+      expect(only).not.toContain('data-wm-gh-group="unchecked"');
+      expect(only).not.toContain('data-wm-gh-group="unlinked"');
+      const noContra = open({ unlinkedRows });
+      expect(noContra).not.toContain('data-wm-gh-group="contradictions"');
+      expect(noContra).not.toContain('data-wm-gh-group="unchecked"');
+      expect(noContra).toContain('data-wm-gh-group="unlinked"');
+    });
+
+    test("contradictions are always all shown; the other groups start as one line naming the count", () => {
+      const many = Array.from({ length: STRIP_ROWS_SHOWN + 3 }, (_, i) => ({ ...contradiction, pr: i + 1 }));
+      const out = open({ contradictions: many, uncheckedRows, unlinkedRows });
+      const rows = rowsOf(out);
+      expect(rows.length).toBe(many.length);
+      expect(rows.every((r) => r.includes("says open"))).toBe(true);
+      expect(groupOf(out, "unchecked")).toContain("+1 more");
+      expect(groupOf(out, "unlinked")).toContain("+9 more");
+      expect(groupOf(out, "unlinked")).toContain('aria-label="+9 more with no full PR link"');
+      expect(out).toContain('href="https://github.com/acme/gears/pull/1"');
+    });
+
+    test("a line opens its group to the row limit, then +N more shows the rest", () => {
+      const window = open({ uncheckedRows, unlinkedRows }, { unlinked: "window" });
+      expect(rowsOf(window).length).toBe(STRIP_ROWS_SHOWN);
+      expect(rowsOf(window)[0]).toContain("row &lt;0&gt;: no full PR link");
+      expect(groupOf(window, "unlinked")).toContain("+1 more");
+      expect(groupOf(window, "unchecked")).toContain("+1 more");
+      const all = open({ uncheckedRows, unlinkedRows }, { unlinked: "all" });
+      expect(rowsOf(all).length).toBe(9);
+      expect(groupOf(all, "unlinked")).not.toContain("more");
+      expect(flat(open({ uncheckedRows }, { unchecked: "window" }))).toContain("#4 not checked");
+    });
+
+    test("with no contradictions it opens with one sentence, before any group", () => {
+      const out = open({ checked: 3, unlinkedRows });
+      const text = flat(out);
+      expect(text).toContain("Every ledger row with a full PR link agrees with GitHub (3 rows checked).");
+      expect(out.indexOf("wiki-wm-drill-clear")).toBeGreaterThan(-1);
+      expect(out.indexOf("wiki-wm-drill-clear")).toBeLessThan(out.indexOf("data-wm-gh-group="));
+      expect(open({ contradictions: [contradiction], unlinkedRows })).not.toContain("wiki-wm-drill-clear");
+      expect(flat(open({ checked: 1, unlinkedRows }))).toContain("(1 row checked)");
+    });
+
+    test("the sentence claims only what was read", () => {
+      const partial = flat(open({ checked: 3, unchecked: 2, uncheckedRows }));
+      expect(partial).not.toContain("Every ledger row");
+      expect(partial).toContain("GitHub contradicts none of the rows it answered for (3 rows checked, 2 not checked).");
+      const none = flat(open({ checked: 0, unchecked: 2, uncheckedRows }));
+      expect(none).not.toContain("agrees");
+      expect(none).toContain("GitHub answered for none of the 2 rows with a PR link");
+      const remedy = flat(open({ checked: 0, unchecked: 0, unlinkedRows, unlinked: 9, notChecked: { reason: "auth", repos: ["acme/x"] } }));
+      expect(remedy).not.toContain("agrees");
+      expect(remedy).toContain("Nothing was read from GitHub.");
+      expect(flat(open({ checked: 3, unlinkedRows }, undefined, { failed: true }))).toContain("In the last answer, every ledger row");
+    });
+
+    test("the list's title promises no contradiction", () => {
+      const out = open({ checked: 0, unlinked: 9, unlinkedRows });
+      expect(/wiki-wm-drill-title">([^<]*)</.exec(out)![1]).toBe("What the GitHub check found in the ledger rows");
+    });
+
+    test("rows with no full PR link and nothing else read are not an all-clear", () => {
+      const out = open({ checked: 0, unchecked: 0, unlinked: 197, unlinkedRows });
+      const c = cellHtml(out)!;
+      expect(c).toContain("<b>—</b>");
+      expect(c).not.toContain("<b>0</b>");
+      expect(c).toMatch(/class="wiki-wm-cell muted( on)?"/);
+      expect(flat(c)).toContain("197 with no full PR link");
+      expect(c).not.toContain(" disabled");
+      expect(flat(out)).toContain("No ledger row has a full PR link, so GitHub was asked about none of them.");
+    });
+
+    test("rows read beside the unlinked ones stay the plain count", () => {
+      const c = cellHtml(open({ checked: 5, unlinked: 197, unlinkedRows }))!;
+      expect(c).toContain("<b>0</b>");
+      expect(c).not.toMatch(/\bmuted\b/);
+      expect(c).not.toContain(" disabled");
+    });
   });
 
   test("a cell open while its list empties renders no list", () => {

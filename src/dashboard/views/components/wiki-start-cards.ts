@@ -35,6 +35,7 @@ import {
   workCardHtml,
   type CardPage,
   type StripCell,
+  type GhFoldedGroup,
   type StripView,
   type RefreshView,
   type WorkMapGetBody,
@@ -746,7 +747,7 @@ let stripView: StripView = { open: null, expanded: false };
 const whyObserved = new WeakSet<HTMLElement>();
 
 /** A card control to re-focus after a repaint, by what survives one. */
-type FocusKey = { sel: string } | { doneAt: number } | { why: string } | { link: string; nth: number } | { heading: true };
+type FocusKey = { sel: string } | { doneAt: number } | { why: string } | { link: string; nth: number } | { href: string; nth: number } | { heading: true };
 /** A control that could not take focus back (↻ disabled while running): focus
  *  waits on the card's heading, and the next paint tries the control again. */
 let pendingFocus: FocusKey | null = null;
@@ -922,6 +923,7 @@ function focusCandidates(el: HTMLElement, key: FocusKey): (HTMLElement | null | 
   }
   if ("sel" in key) return [el.querySelector<HTMLElement>(key.sel), heading];
   if ("link" in key) return [cardLinks(el, key.link)[key.nth], heading];
+  if ("href" in key) return [hrefLinks(el, key.href)[key.nth], heading];
   return [heading];
 }
 
@@ -947,7 +949,12 @@ function focusedCardControl(el: HTMLElement): FocusKey | null {
   const cell = active.getAttribute("data-wm-cell");
   if (cell !== null) return { sel: `[data-wm-cell="${cell}"]` };
   if (active.hasAttribute("data-wm-drill-more")) return { sel: "[data-wm-drill-more]" };
+  const ghMore = active.getAttribute("data-wm-gh-more");
+  if (ghMore !== null) return { sel: `[data-wm-gh-more="${ghMore}"]` };
   if (rel !== null) return { link: rel, nth: cardLinks(el, rel).indexOf(active) };
+  // A link off the wiki, such as a PR in the GitHub list, has no page to key on.
+  const href = active.tagName === "A" ? active.getAttribute("href") : null;
+  if (href !== null) return { href, nth: hrefLinks(el, href).indexOf(active) };
   if (active.classList.contains("wiki-wn-title")) return { heading: true };
   const lane = active.tagName === "SUMMARY" ? active.parentElement?.getAttribute("data-wm-lane") : null;
   return lane ? { sel: `[data-wm-lane="${lane}"] > summary` } : null;
@@ -955,6 +962,10 @@ function focusedCardControl(el: HTMLElement): FocusKey | null {
 
 function cardLinks(el: HTMLElement, rel: string): HTMLElement[] {
   return Array.from(el.querySelectorAll<HTMLElement>("a[data-relpath]")).filter((a) => a.getAttribute("data-relpath") === rel);
+}
+
+function hrefLinks(el: HTMLElement, href: string): HTMLElement[] {
+  return Array.from(el.querySelectorAll<HTMLElement>("a[href]:not([data-relpath])")).filter((a) => a.getAttribute("href") === href);
 }
 
 /** Re-focus `key` in the freshly painted card, by the fallback chain. A control
@@ -968,19 +979,20 @@ function resolveFocus(el: HTMLElement, key: FocusKey): void {
   }
 }
 
-function paintWorkCard(override?: FocusKey): void {
+/** The markup the card last got: a checks answer that renders the same leaves the DOM alone. */
+let paintedCardHtml: string | null = null;
+
+/** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing. */
+function paintWorkCardIfChanged(): void {
+  paintWorkCard(undefined, true);
+}
+
+function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   const el = document.getElementById("wikiWorkCard");
   if (!el || !workBody || slot.kind !== "card") return;
   const runAt = workBody.map.runAtMs;
-  const active = document.activeElement as HTMLElement | null;
-  const lost = !active || active === document.body;
-  const parked = !!active && active.hasAttribute(PARKED_ATTR) && el.contains(active);
-  const refocus = override ?? (parked ? pendingFocus : null) ?? focusedCardControl(el) ?? (lost ? pendingFocus : null);
-  pendingFocus = null;
   const pages = deps.pages ? deps.pages() : [];
-  paintedDeclarationKey = declarationKey(pages, runAt);
-  paintedStripKey = currentStripKey();
-  el.innerHTML = workCardHtml({
+  const html = workCardHtml({
     body: workBody,
     pages,
     now: Date.now(),
@@ -998,6 +1010,19 @@ function paintWorkCard(override?: FocusKey): void {
       retrying: workChecksTimer !== null || workChecksGen === slot.gen,
     },
   });
+  if (onlyIfChanged && paintedCardHtml === html) {
+    ensureWorkChecks();
+    return;
+  }
+  const active = document.activeElement as HTMLElement | null;
+  const lost = !active || active === document.body;
+  const parked = !!active && active.hasAttribute(PARKED_ATTR) && el.contains(active);
+  const refocus = override ?? (parked ? pendingFocus : null) ?? focusedCardControl(el) ?? (lost ? pendingFocus : null);
+  pendingFocus = null;
+  paintedDeclarationKey = declarationKey(pages, runAt);
+  paintedStripKey = currentStripKey();
+  el.innerHTML = html;
+  paintedCardHtml = html;
   ensureWorkChecks();
   if (typeof el.querySelectorAll === "function") {
     el.querySelectorAll<HTMLDetailsElement>("details[data-wm-lane]").forEach((d) => {
@@ -1107,13 +1132,13 @@ function fetchWorkChecks(): void {
           fetchWorkChecks();
         }, WORK_CHECKS_RETRY_MS);
       }
-      paintWorkCard();
+      paintWorkCardIfChanged();
     })
     .catch(() => {
       if (!slotLive(slot, gen)) return;
       workChecksGen = null;
       workChecks = { body: workChecks?.body ?? null, fetchedAt: Date.now(), runAt, answerRunAt: workChecks?.answerRunAt ?? null, failed: true };
-      paintWorkCard();
+      paintWorkCardIfChanged();
     });
 }
 
@@ -1280,6 +1305,15 @@ export function handleWorkCardClick(target: Element): boolean {
     stripView = { ...stripView, expanded: true };
     // The button goes with the expansion; focus lands on the first row it hid.
     paintWorkCard({ sel: `.wiki-wm-drill-row:nth-child(${shown + 1}) a` });
+    return true;
+  }
+  const ghMore = target.closest("[data-wm-gh-more]");
+  if (ghMore) {
+    const group = ghMore.getAttribute("data-wm-gh-more") as GhFoldedGroup;
+    const was = stripView.ghGroups?.[group];
+    stripView = { ...stripView, ghGroups: { ...stripView.ghGroups, [group]: was ? "all" : "window" } };
+    // As with +N more: the first row the line or the button hid takes focus.
+    paintWorkCard({ sel: `[data-wm-gh-group="${group}"] .wiki-wm-drill-row:nth-child(${was ? STRIP_ROWS_SHOWN + 1 : 1}) a` });
     return true;
   }
   const why = target.closest("[data-wm-why]");

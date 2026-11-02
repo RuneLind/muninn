@@ -40,7 +40,9 @@
  *     marks, «checking…», «refreshing» and its three more fetches, the «not
  *     checked» remedies, a repaint that keeps a fold and focus, a new map's
  *     refetch and no mark from the previous answer while it is pending or after
- *     it fails, and a themes map that never asks.
+ *     it fails, and a themes map that never asks. Its list's three groups and
+ *     their keyboard rule, focus and selection across a repaint, and the strip's
+ *     layout, measured: equal cell widths and no word broken at six widths.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -666,16 +668,16 @@ test("the fifth cell sits in one row with the others, opens its list, and the Ne
   const tops = await card.locator(".wiki-wm-cell").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().top));
   expect(tops.length).toBe(5);
   expect(new Set(tops).size).toBe(1);
-  // No cell's word pokes out of its box at this width.
-  expect(await card.locator(".wiki-wm-cell").evaluateAll((els) => els.every((e) => e.scrollWidth <= e.clientWidth))).toBe(true);
 
   await cell.click();
   const rows = card.locator('[data-wm-drill="github"] .wiki-wm-drill-row');
-  await expect(rows).toHaveCount(3);
+  await expect(rows).toHaveCount(1);
   await expect(rows.nth(0)).toContainText("Alpha plan");
   await expect(rows.nth(0)).toContainText("says open · GitHub: #369 merged 29.10");
   await expect(rows.nth(0).locator('a[href="https://github.com/acme/gears/pull/369"]')).toBeVisible();
+  await card.locator('[data-wm-gh-more="unchecked"]').click();
   await expect(rows.nth(1)).toContainText("#4 not checked");
+  await card.locator('[data-wm-gh-more="unlinked"]').click();
   await expect(rows.nth(2)).toContainText("row with no link: no full PR link");
 
   const item = (title: string) => card.locator(".wiki-wm-need").filter({ hasText: title });
@@ -778,15 +780,240 @@ for (const [reason, text] of [
     const cell = card.locator('[data-wm-cell="github"]');
     await expect(cell).toContainText(text);
     await expect(cell.locator("b")).toHaveText("1");
-    // Its long remedy takes a row of its own; nothing overflows.
-    expect(await cell.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    // Its long remedy takes a row of its own, with no word broken.
+    expect((await stripLayout(page)).broken).toEqual([]);
     const boxes = await card.locator(".wiki-wm-cell").evaluateAll((els) => els.map((e) => e.getBoundingClientRect()).map((r) => ({ top: r.top, bottom: r.bottom })));
     expect(new Set(boxes.slice(0, 4).map((b) => b.top)).size).toBe(1);
     expect(boxes[4]!.top).toBeGreaterThanOrEqual(boxes[0]!.bottom);
+    // Four across, filling the row, with the remedy under them at full width.
+    const strip = (await card.locator(".wiki-wm-strip").boundingBox())!;
+    const edges = await card.locator(".wiki-wm-cell").evaluateAll((els) => els.map((e) => e.getBoundingClientRect()).map((r) => ({ right: r.right, width: r.width })));
+    expect(Math.abs(edges[3]!.right - (strip.x + strip.width))).toBeLessThan(1);
+    expect(Math.abs(edges[4]!.width - strip.width)).toBeLessThan(1);
     await cell.click();
     await expect(card.locator('[data-wm-drill="github"]')).toContainText("closed without merge");
   });
 }
+
+/**
+ * The strip as laid out. `rows` holds the cell widths per rendered row; a `.wide`
+ * cell spans its row and is left out of `narrow`. `broken` names each word whose
+ * box spans two lines or leaves its cell: `scrollWidth` cannot show this, since
+ * a word that may break never overflows.
+ */
+async function stripLayout(page: Page): Promise<{ rows: number[][]; narrow: number[]; broken: string[] }> {
+  return page.locator("#wikiWorkCard .wiki-wm-strip").evaluate((strip) => {
+    const rows = new Map<number, number[]>();
+    const narrow: number[] = [];
+    const broken: string[] = [];
+    for (const cell of Array.from(strip.querySelectorAll<HTMLElement>(".wiki-wm-cell"))) {
+      const box = cell.getBoundingClientRect();
+      const top = Math.round(box.top);
+      rows.set(top, [...(rows.get(top) ?? []), box.width]);
+      if (!cell.classList.contains("wide")) narrow.push(box.width);
+      const walk = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+      for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+        // A hyphen is a line-break opportunity, not a word's middle.
+        for (const m of n.textContent!.matchAll(/[^\s-]+/g)) {
+          const range = document.createRange();
+          range.setStart(n, m.index);
+          range.setEnd(n, m.index + m[0].length);
+          const rects = Array.from(range.getClientRects());
+          if (new Set(rects.map((r) => Math.round(r.top))).size > 1 || rects.some((r) => r.right > box.right + 0.5)) broken.push(`${m[0]} in a ${Math.round(box.width)} px cell`);
+        }
+      }
+    }
+    return { rows: [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, w]) => w), narrow, broken };
+  });
+}
+
+const STRIP_WIDTHS = [1280, 1265, 1200, 900, 800, 700, 480];
+
+for (const width of STRIP_WIDTHS) {
+  test(`at ${width} wide the cells are equal and no word breaks`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await stubChecks(page, () => checksBody({ checked: 2, unchecked: 3, contradictions: [GH_CONTRADICTION] }));
+    await openStart(page, GH);
+    const cell = page.locator('#wikiWorkCard [data-wm-cell="github"]');
+    await expect(cell).toContainText("3 not checked");
+    const { rows, narrow, broken } = await stripLayout(page);
+    expect(narrow.length).toBe(5);
+    expect(broken).toEqual([]);
+    expect(Math.max(...narrow) - Math.min(...narrow)).toBeLessThan(0.5);
+    if (width >= 1265) expect(rows.map((r) => r.length)).toEqual([5]);
+  });
+}
+
+test("«checking…» and «refreshing» fit their cells too", async ({ page }) => {
+  await page.setViewportSize({ width: 1265, height: 900 });
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/work-map/checks*", async (route) => {
+    await held;
+    await route.fulfill({ json: checksBody({ refreshing: true }) });
+  });
+  await openStart(page, GH);
+  const cell = page.locator('#wikiWorkCard [data-wm-cell="github"]');
+  await expect(cell.locator("b")).toHaveText("checking…");
+  expect((await stripLayout(page)).broken).toEqual([]);
+  release();
+  await expect(cell).toContainText("refreshing");
+  expect((await stripLayout(page)).broken).toEqual([]);
+});
+
+const GH_UNLINKED = Array.from({ length: 197 }, (_, i) => ({ page: "plans/gamma.mdx", label: `row ${i + 1}` }));
+const GH_UNCHECKED = Array.from({ length: 9 }, (_, i) => ({ page: "plans/beta.mdx", pr: 100 + i, repo: "acme/gears" }));
+
+test("no contradictions: the list opens with a sentence and a line for the rest, and stays short", async ({ page }) => {
+  await stubChecks(page, () => checksBody({ checked: 5, unlinked: 197, unlinkedRows: GH_UNLINKED }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(cell.locator("b")).toHaveText("0");
+  const before = await card.evaluate((el) => el.getBoundingClientRect().height);
+  await cell.click();
+  const drill = card.locator('[data-wm-drill="github"]');
+  await expect(drill.locator(".wiki-wm-drill-clear")).toHaveText("Every ledger row with a full PR link agrees with GitHub (5 rows checked).");
+  await expect(drill.locator(".wiki-wm-drill-row")).toHaveCount(0);
+  await expect(drill.locator('[data-wm-gh-group="contradictions"]')).toHaveCount(0);
+  await expect(drill.locator('[data-wm-gh-group="unlinked"]')).toContainText("No full PR link · 197");
+  await expect(drill.locator('[data-wm-gh-more="unlinked"]')).toHaveText("+197 more");
+  const after = await card.evaluate((el) => el.getBoundingClientRect().height);
+  expect(after - before).toBeLessThan(120);
+});
+
+test("the groups read apart, a line opens its group at the first revealed row, and +N more goes on from there", async ({ page }) => {
+  await stubChecks(page, () => checksBody({ checked: 3, unchecked: 9, unlinked: 197, contradictions: [GH_CONTRADICTION, { ...GH_CONTRADICTION, pr: 370 }], uncheckedRows: GH_UNCHECKED, unlinkedRows: GH_UNLINKED }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  await card.locator('[data-wm-cell="github"]').click();
+  const group = (name: string) => card.locator(`[data-wm-gh-group="${name}"]`);
+  await expect(group("contradictions").locator(".wiki-wm-drill-group-head")).toHaveText("GitHub contradicts · 2");
+  await expect(group("contradictions").locator(".wiki-wm-drill-row")).toHaveCount(2);
+  await expect(card.locator(".wiki-wm-drill-clear")).toHaveCount(0);
+  await expect(group("unchecked").locator(".wiki-wm-drill-group-head")).toContainText("Not checked · 9");
+  await expect(group("unchecked").locator(".wiki-wm-drill-row")).toHaveCount(0);
+  await expect(group("unlinked").locator(".wiki-wm-drill-row")).toHaveCount(0);
+  const heads = await card.locator(".wiki-wm-drill-group-head").evaluateAll((els) => els.map((e) => getComputedStyle(e).color));
+  expect(heads[0]).not.toBe(heads[1]);
+
+  const focusRow = () => page.evaluate(() => document.activeElement?.closest(".wiki-wm-drill-row")?.textContent ?? "");
+  const more = card.locator('[data-wm-gh-more="unlinked"]');
+  await more.focus();
+  await page.keyboard.press("Enter");
+  await expect(group("unlinked").locator(".wiki-wm-drill-row")).toHaveCount(8);
+  expect(await focusRow()).toContain("row 1:");
+  // The other group stays shut.
+  await expect(group("unchecked").locator(".wiki-wm-drill-row")).toHaveCount(0);
+  await expect(more).toHaveText("+189 more");
+  await more.focus();
+  await page.keyboard.press("Enter");
+  await expect(group("unlinked").locator(".wiki-wm-drill-row")).toHaveCount(197);
+  expect(await focusRow()).toContain("row 9:");
+  await expect(more).toHaveCount(0);
+  // Shutting the list folds the groups again.
+  await card.locator('[data-wm-cell="github"]').click();
+  await card.locator('[data-wm-cell="github"]').click();
+  await expect(group("unlinked").locator(".wiki-wm-drill-row")).toHaveCount(0);
+});
+
+test("focus stays on a GitHub link, a group's line and its +N more across a checks repaint", async ({ page }) => {
+  await page.clock.install();
+  // Each answer differs, so each repaints: the marker below goes with the old DOM.
+  const stub = await stubChecks(page, (n) => checksBody({ refreshing: true, checked: n, contradictions: [GH_CONTRADICTION, { ...GH_CONTRADICTION, pr: 370 }], uncheckedRows: GH_UNCHECKED, unlinkedRows: GH_UNLINKED }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  await card.locator('[data-wm-cell="github"]').click();
+  const repaint = async (n: number) => {
+    await page.evaluate(() => document.querySelector("#wikiWorkCard .wiki-wm-strip")!.setAttribute("data-before-repaint", ""));
+    await page.clock.runFor(15_000);
+    await expect.poll(() => stub.count()).toBe(n);
+    await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  };
+  const link = card.locator('a[href="https://github.com/acme/gears/pull/370"]');
+  await link.focus();
+  await repaint(2);
+  await expect(link).toBeFocused();
+  const line = card.locator('[data-wm-gh-more="unchecked"]');
+  await line.focus();
+  await repaint(3);
+  await expect(line).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(card.locator('[data-wm-gh-group="unchecked"] .wiki-wm-drill-row')).toHaveCount(8);
+  await expect(line).toHaveText("+1 more");
+  await line.focus();
+  await repaint(4);
+  await expect(line).toBeFocused();
+});
+
+test("focus on the second link to one PR comes back to the second", async ({ page }) => {
+  await page.clock.install();
+  const stub = await stubChecks(page, (n) => checksBody({ refreshing: true, checked: n, contradictions: [GH_CONTRADICTION, { ...GH_CONTRADICTION, page: "plans/beta.mdx" }] }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  await card.locator('[data-wm-cell="github"]').click();
+  const links = card.locator('a[href="https://github.com/acme/gears/pull/369"]');
+  await expect(links).toHaveCount(2);
+  await links.nth(1).focus();
+  await page.clock.runFor(15_000);
+  await expect.poll(() => stub.count()).toBe(2);
+  await expect(card.locator('[data-wm-cell="github"]')).toHaveAttribute("title", /^2 checked/);
+  await expect(links.nth(1)).toBeFocused();
+});
+
+test("a checks answer that changes nothing leaves the DOM and a selection alone", async ({ page }) => {
+  await page.clock.install();
+  const stub = await stubChecks(page, () => checksBody({ refreshing: true, contradictions: [GH_CONTRADICTION] }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(cell).toContainText("refreshing");
+  await page.evaluate(() => {
+    document.querySelector("#wikiWorkCard .wiki-wm-strip")!.setAttribute("data-before-repaint", "");
+    const r = document.createRange();
+    r.selectNodeContents(document.querySelector("#wikiWorkCard .wiki-wm-need-title")!);
+    const sel = getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(r);
+  });
+  const selected = await page.evaluate(() => getSelection()!.toString());
+  expect(selected.length).toBeGreaterThan(0);
+  await page.clock.runFor(15_000);
+  await expect.poll(() => stub.count()).toBe(2);
+  await page.waitForTimeout(100);
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(selected);
+  // The last fetch ends the suffix: that one is a change, and paints.
+  await page.clock.runFor(15_000);
+  await expect.poll(() => stub.count()).toBe(3);
+  await page.clock.runFor(15_000);
+  await expect.poll(() => stub.count()).toBe(4);
+  await expect(cell).not.toContainText("refreshing");
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+});
+
+test("a start view that comes back paints its card, though the last answer changed nothing", async ({ page }) => {
+  await stubChecks(page, () => checksBody({ contradictions: [GH_CONTRADICTION] }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator('[data-wm-cell="github"] b')).toHaveText("1");
+  await page.locator("#wikiList a").first().click();
+  await expect(page).toHaveURL(/effort=|relPath=/);
+  await page.goBack();
+  await expect(card.locator('[data-wm-cell="github"] b')).toHaveText("1");
+});
+
+test("rows with no full PR link and nothing read: «—», muted, the count, and a list", async ({ page }) => {
+  await stubChecks(page, () => checksBody({ checked: 0, unchecked: 0, unlinked: 197, unlinkedRows: GH_UNLINKED }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(cell.locator("b")).toHaveText("—");
+  await expect(cell).toHaveClass(/\bmuted\b/);
+  await expect(cell).toContainText("197 with no full PR link");
+  await cell.click();
+  await expect(card.locator(".wiki-wm-drill-clear")).toHaveText("No ledger row has a full PR link, so GitHub was asked about none of them.");
+});
 
 test("a checks GET that fails says «not checked», and the next start view asks again", async ({ page }) => {
   let n = 0;
@@ -2010,10 +2237,13 @@ for (const theme of THEMES) {
         : route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }),
     );
     // Every mark and note the GitHub check paints: bad tone, remedy, three note tones.
+    let answerAllClear = false;
     await stubChecks(page, () =>
-      checksBody({
+      answerAllClear ? checksBody({ checked: 5, unlinked: 197, unlinkedRows: GH_UNLINKED }) : checksBody({
         notChecked: { reason: "auth", repos: ["acme/gears"] },
         contradictions: [{ page: "plans/alpha.mdx", pr: 1, repo: "acme/other", rowState: "open", ghState: "MERGED", mergedAt: GH_MERGED_AT }],
+        uncheckedRows: GH_UNCHECKED,
+        unlinkedRows: GH_UNLINKED,
         needs: [
           { kind: "decision", title: "Settle ⟦plans/alpha.mdx⟧", pr: 1, state: "MERGED", mergedAt: GH_MERGED_AT, asksForIt: true },
           { kind: "decision", title: "Settle ⟦plans/alpha.mdx⟧", pr: 2, state: "CLOSED", mergedAt: null, asksForIt: true },
@@ -2047,6 +2277,15 @@ for (const theme of THEMES) {
     await card.locator('[data-wm-cell="decisions"]').click();
     await expect(card.locator("[data-wm-drill-more]")).toBeVisible();
     await sweep("map");
+    // The GitHub list: a group's line shut, then both groups open with their +N more.
+    await card.locator('[data-wm-cell="github"]').click();
+    await expect(card.locator('[data-wm-drill="github"] .wiki-wm-drill-row')).toHaveCount(1);
+    await sweep("GitHub list shut");
+    await card.locator('[data-wm-gh-more="unchecked"]').click();
+    await card.locator('[data-wm-gh-more="unlinked"]').click();
+    await expect(card.locator('[data-wm-drill="github"] .wiki-wm-drill-row')).toHaveCount(17);
+    await expect(card.locator('[data-wm-gh-group="contradictions"] .wiki-wm-drill-group-head')).toBeVisible();
+    await sweep("GitHub list open");
     // ↻ hovered, then focused from the keyboard.
     await card.locator("#wikiWorkMapRefresh").hover();
     await expect.poll(async () => card.locator("#wikiWorkMapRefresh").evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
@@ -2103,6 +2342,12 @@ for (const theme of THEMES) {
     await openStart(page, STRIP_OFF);
     await expect(card.locator('[data-wm-cell="decisions"] b')).toHaveText("owner not set");
     await sweep("owner not set");
+    // The GitHub list with no contradiction: its sentence.
+    answerAllClear = true;
+    await openStart(page, SWEEP);
+    await card.locator('[data-wm-cell="github"]').click();
+    await expect(card.locator(".wiki-wm-drill-clear")).toBeVisible();
+    await sweep("GitHub all clear");
     expect((await styledCardClasses(page)).filter((c) => !seen.has(c))).toEqual([]);
     console.log(`contrast min ${theme.label}: ${Math.min(...mins).toFixed(2)} (${labels.map((l, i) => `${l} ${mins[i]!.toFixed(2)}`).join(", ")})`);
     expect(low).toEqual([]);

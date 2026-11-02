@@ -2596,10 +2596,13 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wm-status { font-size: 12px; color: var(--text-soft); margin: 2px 0 6px; }
     .wiki-wm-status.warn { color: var(--tone-warn); }
-    /* Flex, so five cells share one row at the default width and a cell that wraps fills its row. */
-    .wiki-wm-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 8px; }
+    /* Equal cells. The floor is "contradicts" plus the cell's padding, and five fit the 485 px a 1265 viewport leaves.
+       P1's 112 px does not. A wider fallback font runs a word into the padding; a cell's words never break. */
+    .wiki-wm-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; margin: 2px 0 8px; }
+    /* A remedy spans a row, so its four neighbours take P1's floor instead of leaving a hole beside them. */
+    .wiki-wm-strip:has(> .wide) { grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); }
     .wiki-wm-cell {
-      flex: 1 1 92px; min-width: 0; overflow-wrap: anywhere;
+      min-width: 0;
       border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 10px; background: var(--bg-surface);
       display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start;
       text-align: left; font: inherit; color: var(--text-secondary); cursor: pointer;
@@ -2618,9 +2621,9 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-cell.muted b { color: var(--text-soft); }
     .wiki-wm-cell.unset b { font-size: 13px; line-height: 1.3; font-weight: 600; color: var(--text-soft); }
     .wiki-wm-cell.bad b { color: var(--tone-err); }
-    .wiki-wm-cell.wide { flex-basis: 100%; }
+    .wiki-wm-cell.wide { grid-column: 1 / -1; }
     .wiki-wm-cell span.wiki-wm-cell-note { display: block; margin-top: 2px; font-size: 11.5px; color: var(--text-soft); }
-    .wiki-wm-cell-note code { font-size: 11px; background: var(--bg-inset); color: var(--text-secondary); padding: 0 4px; border-radius: 4px; }
+    .wiki-wm-cell-note code { overflow-wrap: anywhere; font-size: 11px; background: var(--bg-inset); color: var(--text-secondary); padding: 0 4px; border-radius: 4px; }
     .wiki-wm-need.gh-done .wiki-wm-need-title, .wiki-wm-need.gh-done .wiki-wm-action { text-decoration: line-through; }
     .wiki-wm-ghnote { margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--tone-info); overflow-wrap: anywhere; }
     .wiki-wm-ghnote.done { color: var(--tone-good); }
@@ -2630,6 +2633,11 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-drill-list { margin: 4px 0; padding-left: 20px; color: var(--text-secondary); overflow-wrap: anywhere; }
     .wiki-wm-drill-row { margin: 2px 0; }
     .wiki-wm-drill-meta { color: var(--text-soft); }
+    .wiki-wm-drill-clear { margin: 4px 0 6px; color: var(--text-secondary); }
+    .wiki-wm-drill-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-primary); }
+    .wiki-wm-drill-group-head { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+    .wiki-wm-drill-group-head .wiki-wm-drill-more { font-weight: 400; margin-left: 4px; }
+    [data-wm-gh-group="contradictions"] .wiki-wm-drill-group-head { color: var(--tone-err); }
     .wiki-wm-drill-more { border: 0; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--accent-light); cursor: pointer; }
     .wiki-wm-drill-more:hover, .wiki-wm-drill-more:focus-visible { text-decoration: underline; }
     .wiki-wm-summary { font-size: 13px; line-height: 1.6; color: var(--text-secondary); margin: 4px 0 8px; }
