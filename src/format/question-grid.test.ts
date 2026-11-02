@@ -189,13 +189,12 @@ describe("questionGridHtml", () => {
     expect(html).not.toContain("qg-more");
     expect(html).toContain("none open · 12");
   });
-  test("a reversed decision keeps the grid unfolded, read from the page's own log", () => {
+  test("a reversed decision folds with the rest, its mark one click away", () => {
     const rows = rowsOf(log("- **O1** — Which store holds rows? Lukket 07.10 (D1).", "- **O2** — Which key? Lukket 07.10 (D2).", "- **O3** — Which view? Lukket 07.10 (D2).", "- **D1** — ~~Keep this one for now.~~ Snudd 09.10: nothing replaces it yet. Kari Nordmann, 09.10.", "- **D2** — Key by id. Kari Nordmann, 04.10."));
-    expect(rows.every((r) => r.state !== "open")).toBe(true);
     expect(rows.some((r) => r.reversed)).toBe(true);
     const html = questionGridHtml(rows, "en");
-    expect(html).not.toContain("qg-settled");
-    expect(html).toContain("qg-chip-reversed");
+    expect(html).toContain('<details class="qg-settled">');
+    expect(html.indexOf("qg-chip-reversed")).toBeGreaterThan(html.indexOf("</summary>"));
   });
   test("one open question keeps the grid unfolded", () => {
     const html = questionGridHtml([row("S1", "open"), row("S2", "decided"), row("S3", "decided")], "en");
