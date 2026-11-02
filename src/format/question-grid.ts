@@ -23,8 +23,8 @@ import { splitFirstSentence, visibleText } from "./report-top.ts";
 
 /** The grid draws at this many questions, as the chain view does at 3 chains. */
 export const QUESTION_GRID_MIN = 3;
-/** Rows shown before «show more»: Grocery Bot's 21 questions would fill the
- *  screen. An open question is never behind it. */
+/** Rows shown before «show more» on a grid with an open row, and that row is
+ *  never behind it. A grid with none open folds whole and opens to every row. */
 export const QUESTION_GRID_CAP = 8;
 /** A row's question or answer, in code points. */
 export const QUESTION_GRID_TEXT_MAX = 220;
@@ -209,20 +209,23 @@ export function questionGridSlot(blocks: Block[], viewSlotAt: number): number {
   return i >= 0 ? i + 1 : viewSlotAt;
 }
 
-/** The grid, or "" under {@link QUESTION_GRID_MIN} rows. */
+/** The grid, or "" under {@link QUESTION_GRID_MIN} rows. It folds when no row is
+ *  open: it counts rows, so an open `<Question>` card does not hold it open. */
 export function questionGridHtml(rows: QuestionGridRow[], language: QuestionLanguage): string {
   if (rows.length < QUESTION_GRID_MIN) return "";
   const L = LABELS[language];
   const openCount = rows.filter((r) => r.state === "open").length;
+  const titleInner = `${escapeHtml(L.title)} <span class="qg-count">${escapeHtml(L.count(openCount, rows.length))}</span>`;
+  const section = (inner: string) => `<section class="${DC_VIEW_CLASS} qg" ${READER_ONLY_ATTR} aria-label="${escapeHtml(L.title)}">${inner}</section>`;
+  // Nothing to answer: the settled rows wait one click away, so a long list does not push the page's picture down.
+  if (openCount === 0) {
+    return section(`<details class="qg-settled"><summary class="dc-title">${titleInner}</summary><div class="qg-rows" role="list">${rows.map((r) => rowHtml(r, language)).join("")}</div></details>`);
+  }
   const shown = Math.max(QUESTION_GRID_CAP, openCount);
   const head = rows.slice(0, shown).map((r) => rowHtml(r, language)).join("");
   const rest = rows.slice(shown);
   const more = rest.length
     ? `<details class="qg-more"><summary>${escapeHtml(L.more(rest.length))}</summary>${rest.map((r) => rowHtml(r, language)).join("")}</details>`
     : "";
-  return (
-    `<section class="${DC_VIEW_CLASS} qg" ${READER_ONLY_ATTR} aria-label="${escapeHtml(L.title)}">` +
-    `<div class="dc-title">${escapeHtml(L.title)} <span class="qg-count">${escapeHtml(L.count(openCount, rows.length))}</span></div>` +
-    `<div class="qg-rows" role="list">${head}${more}</div></section>`
-  );
+  return section(`<div class="dc-title">${titleInner}</div><div class="qg-rows" role="list">${head}${more}</div>`);
 }

@@ -180,6 +180,27 @@ describe("questionGridHtml", () => {
     expect(questionGridHtml([row("S1", "open"), row("S2", "open"), row("S3", "decided")], "no")).toContain("2 åpne av 3");
     expect(questionGridHtml(rows.slice(1).concat(row("S4", "decided")), "no")).toContain("ingen åpne · 3");
   });
+  test("with none open it folds to its title line, and holds every row", () => {
+    const rows = Array.from({ length: 12 }, (_, i) => row(`S${i + 1}`, "decided"));
+    const html = questionGridHtml(rows, "en");
+    expect(html).toContain('<details class="qg-settled"><summary class="dc-title">');
+    expect(html).not.toContain("<details class=\"qg-settled\" open");
+    expect(html.match(/class="qg-row /g)).toHaveLength(12);
+    expect(html).not.toContain("qg-more");
+    expect(html).toContain("none open · 12");
+  });
+  test("a reversed decision folds with the rest, its mark one click away", () => {
+    const rows = rowsOf(log("- **O1** — Which store holds rows? Lukket 07.10 (D1).", "- **O2** — Which key? Lukket 07.10 (D2).", "- **O3** — Which view? Lukket 07.10 (D2).", "- **D1** — ~~Keep this one for now.~~ Snudd 09.10: nothing replaces it yet. Kari Nordmann, 09.10.", "- **D2** — Key by id. Kari Nordmann, 04.10."));
+    expect(rows.some((r) => r.reversed)).toBe(true);
+    const html = questionGridHtml(rows, "en");
+    expect(html).toContain('<details class="qg-settled">');
+    expect(html.indexOf("qg-chip-reversed")).toBeGreaterThan(html.indexOf("</summary>"));
+  });
+  test("one open question keeps the grid unfolded", () => {
+    const html = questionGridHtml([row("S1", "open"), row("S2", "decided"), row("S3", "decided")], "en");
+    expect(html).not.toContain("qg-settled");
+    expect(html).toContain('<div class="dc-title">');
+  });
   test("an open row links its card only when it has one, and shows its age", () => {
     const html = questionGridHtml([row("S1", "open", { hasCard: true, ageDays: 4 }), row("S2", "open", { ageDays: 0 }), row("S3", "open")], "no");
     expect(html).toContain(`href="#${questionCardAnchor("S1")}"`);
@@ -193,10 +214,11 @@ describe("questionGridHtml", () => {
   });
   test(`the cap folds decided rows past ${QUESTION_GRID_CAP}, never an open one`, () => {
     const decided = Array.from({ length: 10 }, (_, i) => row(`S${i + 1}`, "decided"));
-    const atCap = questionGridHtml(decided.slice(0, QUESTION_GRID_CAP), "en");
+    const asked = row("O1", "open");
+    const atCap = questionGridHtml([asked, ...decided.slice(0, QUESTION_GRID_CAP - 1)], "en");
     expect(atCap).not.toContain("qg-more");
-    const html = questionGridHtml(decided, "en");
-    expect(html).toContain("2 more");
+    const html = questionGridHtml([asked, ...decided], "en");
+    expect(html).toContain("3 more");
     expect(html.indexOf("qg-more")).toBeLessThan(html.indexOf(">S9<"));
     const open = Array.from({ length: 10 }, (_, i) => row(`O${i + 1}`, "open"));
     const many = questionGridHtml([...open, row("S1", "decided")], "en");

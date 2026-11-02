@@ -1144,6 +1144,8 @@ export function decisionViewsCss(scope: string): string {
     ${scope} .qg-who { color: var(--text-muted); }
     ${scope} .qg-card { color: var(--accent-light); }
     ${scope} .qg-more { border-top: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent); }
+    ${scope} .qg-settled > summary { cursor: pointer; margin-bottom: 0; }
+    ${scope} .qg-settled[open] > summary { margin-bottom: 0.4rem; }
     ${scope} .qg-more > summary { cursor: pointer; padding: 0.35rem 0.1rem; color: var(--text-soft); font-size: 0.9em; }
     /* One grid over every row (rows are subgrids) with each cell on a fixed
        column, so all decisions start at one x whether or not a row has
