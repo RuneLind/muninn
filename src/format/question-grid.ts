@@ -214,15 +214,17 @@ export function questionGridHtml(rows: QuestionGridRow[], language: QuestionLang
   if (rows.length < QUESTION_GRID_MIN) return "";
   const L = LABELS[language];
   const openCount = rows.filter((r) => r.state === "open").length;
+  const titleInner = `${escapeHtml(L.title)} <span class="qg-count">${escapeHtml(L.count(openCount, rows.length))}</span>`;
+  const section = (inner: string) => `<section class="${DC_VIEW_CLASS} qg" ${READER_ONLY_ATTR} aria-label="${escapeHtml(L.title)}">${inner}</section>`;
+  // Nothing to answer: the settled rows wait one click away, so a long list does not push the page's picture down.
+  if (openCount === 0) {
+    return section(`<details class="qg-settled"><summary class="dc-title">${titleInner}</summary><div class="qg-rows" role="list">${rows.map((r) => rowHtml(r, language)).join("")}</div></details>`);
+  }
   const shown = Math.max(QUESTION_GRID_CAP, openCount);
   const head = rows.slice(0, shown).map((r) => rowHtml(r, language)).join("");
   const rest = rows.slice(shown);
   const more = rest.length
     ? `<details class="qg-more"><summary>${escapeHtml(L.more(rest.length))}</summary>${rest.map((r) => rowHtml(r, language)).join("")}</details>`
     : "";
-  return (
-    `<section class="${DC_VIEW_CLASS} qg" ${READER_ONLY_ATTR} aria-label="${escapeHtml(L.title)}">` +
-    `<div class="dc-title">${escapeHtml(L.title)} <span class="qg-count">${escapeHtml(L.count(openCount, rows.length))}</span></div>` +
-    `<div class="qg-rows" role="list">${head}${more}</div></section>`
-  );
+  return section(`<div class="dc-title">${titleInner}</div><div class="qg-rows" role="list">${head}${more}</div>`);
 }

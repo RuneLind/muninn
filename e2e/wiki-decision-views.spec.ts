@@ -173,6 +173,38 @@ const GRID = [
   "",
 ].join("\n");
 
+const SETTLED_REL = "plans/settled-questions.mdx";
+// Twelve questions, all decided: the grid folds to one line.
+const SETTLED = [
+  "---",
+  "title: Settled questions",
+  "type: plan",
+  "plan_status: shipped",
+  "---",
+  "",
+  "# Settled questions",
+  "",
+  "<StatusRows>",
+  "",
+  "- **Status:** shipped 2026-10-30",
+  "",
+  "</StatusRows>",
+  "",
+  "<Fold title=\"Decisions\">",
+  "",
+  "## Decisions",
+  "",
+  "<DecisionLog>",
+  "",
+  ...Array.from({ length: 12 }, (_, i) => `- **O${i + 1}** — Which option number ${i + 1} holds? Closed 2026-10-01 (D1).`),
+  "- **D1** — The reader reads the groups by key. Kari Nordmann, 04.10.",
+  "",
+  "</DecisionLog>",
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -182,6 +214,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, REL), PAGE, "utf8");
   await writeFile(path.join(root, MANY_REL), MANY, "utf8");
   await writeFile(path.join(root, GRID_REL), GRID, "utf8");
+  await writeFile(path.join(root, SETTLED_REL), SETTLED, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -482,6 +515,22 @@ test.describe("Wiki reader: question grid", () => {
       await openGrid(page, 1440);
       await expect(page.locator(".qg-chip-open").first()).toHaveCSS("color", await token(page, "color", "--status-warning"));
       await expect(page.locator(".qg-chip-done").first()).toHaveCSS("color", await token(page, "color", "--status-success"));
+    });
+  }
+
+  for (const scheme of ["dark", "light"] as const) {
+    test(`${scheme}: with none open the grid is one line, and a click opens every row`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(SETTLED_REL)}`);
+      const summary = page.locator(".wiki-article .qg-settled > summary");
+      await expect(summary).toContainText("none open · 12");
+      await expect(page.locator(".qg-rows .qg-row").first()).toBeHidden();
+      expect((await page.locator(".wiki-article .qg").boundingBox())!.height).toBeLessThan(60);
+      await expect(summary).toHaveCSS("color", await token(page, "color", "--text-soft"));
+      await summary.click();
+      await expect(page.locator(".qg-rows > .qg-row")).toHaveCount(12);
+      await expect(page.locator(".qg-rows > .qg-row").last()).toBeVisible();
     });
   }
 
