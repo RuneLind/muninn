@@ -1124,8 +1124,6 @@ export interface WikiPageListing extends WikiPageMeta {
   backlinkCount: number;
 }
 
-/** Exported for `trackers/store-issues.test.ts`, which drives the real
- *  compaction rather than restating it. */
 /** `movesWaiting` means something: `wikiName` takes answers and an owner is set,
  *  both for this route and for the build that counted (`config.wikiAnswers` is
  *  injectable, the index reads its own), so a lone owner can never paint a 0. */
@@ -1133,6 +1131,8 @@ export function waitsCountedFor(wikiName: string | undefined, cfg: WikiAnswerCon
   return !!index.waitOwnerSet && waitOwnerFrom(cfg) !== null && wikiTakesAnswers(wikiName, cfg);
 }
 
+/** Exported for `trackers/store-issues.test.ts`, which drives the real
+ *  compaction rather than restating it. */
 export function toListing(
   index: WikiIndex,
   meta: WikiPageMeta,

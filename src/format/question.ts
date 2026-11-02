@@ -554,7 +554,8 @@ export function questionIdRe(id: string, flags = ""): RegExp {
 /** The `<Question>` ids an item names, in the order they appear. A caller masks
  *  wikilinks first (the reader parks them as sentinels), so an id in a link's
  *  target or text names nothing. The reader's peek, counts and card moves and
- *  the index's wait count all read this, so they agree. */
+ *  the index's wait count all read this, so they name the same ids. Whether a
+ *  named id is open can still differ: see `waitsOnOwner`. */
 export function namedQuestionIds(item: string, ids: Iterable<string>): string[] {
   return namedQuestionHits(item, ids).map((h) => h.id);
 }

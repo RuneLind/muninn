@@ -4423,8 +4423,6 @@ async function buildAndCache(root: string): Promise<WikiIndex | null> {
   return index;
 }
 
-/** Test-only: swap the index builder (null restores the real one) and zero the
- *  build counter. */
 let answerConfigForIndex: () => { owner: string | null; groups?: AnswerGroups } = resolveWikiAnswerConfig;
 
 /** Test seam: the answer config `buildWikiIndex` reads; null restores the env's. */
@@ -4432,6 +4430,8 @@ export function __setWikiIndexAnswerConfigForTest(cfg: { owner: string | null; g
   answerConfigForIndex = cfg ? () => cfg : resolveWikiAnswerConfig;
 }
 
+/** Test-only: swap the index builder (null restores the real one) and zero the
+ *  build counter. */
 export function __setWikiIndexBuilderForTest(fn: ((root: string) => Promise<WikiIndex>) | null): void {
   buildImpl = fn ?? ((root) => buildWikiIndex(root));
   buildsStarted = 0;

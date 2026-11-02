@@ -644,6 +644,12 @@ describe("the health strip", () => {
     expect(stripKey(a, true)).not.toBe(stripKey(a, false));
   });
 
+  test("stripKey moves when only a listed page's title changes, and not for a page the strip does not list", () => {
+    const a = [page("plans/a.mdx", { movesWaiting: 1, title: "Old" }), page("plans/b.mdx", { title: "Quiet" })];
+    expect(stripKey(a, true)).not.toBe(stripKey([page("plans/a.mdx", { movesWaiting: 1, title: "New" }), page("plans/b.mdx", { title: "Quiet" })], true));
+    expect(stripKey(a, true)).toBe(stripKey([page("plans/a.mdx", { movesWaiting: 1, title: "Old" }), page("plans/b.mdx", { title: "Renamed" })], true));
+  });
+
   test("a themes map has no strip", () => {
     const out = workCardHtml({
       body: { map: fixtureThemeMap(), organizable: false } as WorkMapGetBody & { map: ThemeMap },

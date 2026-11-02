@@ -109,8 +109,11 @@ function isOwnersLane(lane: PageNextMoves["waiting"][number], who: WaitOwner): b
  * What waits on the owner on this page: the one rule behind the strip and the
  * board. The distinct `<Question>` ids that a counted `waiting` lane of the
  * owner's ({@link isOwnersLane}) names and that are open and ask the owner, and
- * the oldest parsed `since` among the lanes holding one. A wikilink names nothing (the reader parks them before it scans) and a
- * duplicated id does not count, so the reader's lane counts and this agree. An
+ * the oldest parsed `since` among the lanes holding one. A wikilink names nothing
+ * (the reader parks them before it scans) and a duplicated id does not count, so
+ * the reader's lane counts and this agree. One rare exception: only lane items are
+ * masked here, so a DecisionLog item `- **O1** see [[p|Closed 2026-10-01 (D1)]]`
+ * closes O1 in this count, while the reader parks the link and reads O1 open. An
  * id absent from `states` is open, as the reader treats it.
  */
 export function waitsOnOwner(

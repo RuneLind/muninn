@@ -32,6 +32,7 @@
  *     listing, a cell opens its list and «+N more» expands it, a wiki taking no
  *     answers reads «owner not set», an adopt repaints the count, a themes map
  *     has no strip and keeps its markup when only the strip's inputs change.
+ *     Focus on a cell or on «+N more», and an expanded list, survive that repaint.
  *     A long title wraps in the list; focus on an open cell shows in every theme.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
@@ -82,6 +83,10 @@ const STRIP = "e2e-wm-strip";
 const STRIP_OFF = "e2e-wm-strip-off";
 const STRIP_GROW = "e2e-wm-strip-grow";
 const STRIP_LONG = "e2e-wm-strip-long";
+/** Each gains a wait in its test, so one each: a held focus, a held «+N more», a held expansion. */
+const STRIP_KEEP_CELL = "e2e-wm-strip-keep-cell";
+const STRIP_KEEP_MORE = "e2e-wm-strip-keep-more";
+const STRIP_KEEP_OPEN = "e2e-wm-strip-keep-open";
 /** A themes map a test adopts page changes under. */
 const THEME_HOLD = "e2e-wm-theme-hold";
 /** No break opportunity anywhere. */
@@ -245,6 +250,10 @@ test.beforeAll(async () => {
   await seedStripPages(roots[STRIP]!, now);
   await seedStripPages(roots[STRIP_OFF]!, now);
   await writeFile(path.join(roots[STRIP_GROW]!, "plans/first.mdx"), waitPage("First wait", ["O1"], dayBefore(now, 2)), "utf8");
+  for (const n of [STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN]) {
+    await seedWiki(n, now - 2 * HOUR);
+    await seedStripPages(roots[n]!, now);
+  }
   await seedWiki(STRIP_LONG, now - 2 * HOUR);
   await writeFile(path.join(roots[STRIP_LONG]!, "plans/long.mdx"), waitPage(LONG_TOKEN, ["O1"], dayBefore(now, 3)), "utf8");
   // No title: `pageTitle` falls back to the stem.
@@ -261,10 +270,10 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, SWEEP].join(","),
+      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP].join(","),
       WIKI_ANSWER_OWNER: "Test Owner (T000001)",
       WIKI_ANSWER_GROUPS: "utvikler=T000001",
-      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -546,6 +555,51 @@ test("an adopt repaints the strip's count, keeping the open list", async ({ page
   await expect(page.locator("#wikiList")).toContainText("Second wait");
   await expect(card.locator('[data-wm-cell="decisions"] b')).toHaveText("2");
   await expect(card.locator(".wiki-wm-drill-row")).toHaveCount(2);
+});
+
+/** A wait lands and an adopt takes it: the strip's key moves, so the card repaints. */
+async function adoptNewWait(page: Page, wiki: string): Promise<void> {
+  await writeFile(path.join(roots[wiki]!, "plans/new-wait.mdx"), waitPage("New wait", ["O1"], "2026-01-02"), "utf8");
+  await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.locator("#wikiList")).toContainText("New wait");
+}
+
+test("focus on a cell survives an adopt that repaints the strip", async ({ page }) => {
+  await page.clock.install();
+  await openStart(page, STRIP_KEEP_CELL);
+  const cell = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
+  await expect(cell.locator("b")).toHaveText("14");
+  await cell.focus();
+  await adoptNewWait(page, STRIP_KEEP_CELL);
+  await expect(cell.locator("b")).toHaveText("15");
+  await expect(cell).toBeFocused();
+});
+
+test("focus on +N more survives an adopt that repaints the strip", async ({ page }) => {
+  await page.clock.install();
+  await openStart(page, STRIP_KEEP_MORE);
+  const card = page.locator("#wikiWorkCard");
+  await card.locator('[data-wm-cell="decisions"]').click();
+  const more = card.locator("[data-wm-drill-more]");
+  await expect(more).toHaveText("+5 more");
+  await more.focus();
+  await adoptNewWait(page, STRIP_KEEP_MORE);
+  await expect(more).toHaveText("+6 more");
+  await expect(more).toBeFocused();
+});
+
+test("an expanded list stays expanded across an adopt that repaints the strip", async ({ page }) => {
+  await page.clock.install();
+  await openStart(page, STRIP_KEEP_OPEN);
+  const card = page.locator("#wikiWorkCard");
+  const rows = card.locator(".wiki-wm-drill-row");
+  await card.locator('[data-wm-cell="decisions"]').click();
+  await card.locator("[data-wm-drill-more]").click();
+  await expect(rows).toHaveCount(13);
+  await adoptNewWait(page, STRIP_KEEP_OPEN);
+  await expect(rows).toHaveCount(14);
+  await expect(card.locator("[data-wm-drill-more]")).toHaveCount(0);
 });
 
 test("a themes map has no strip", async ({ page }) => {
