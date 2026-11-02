@@ -209,14 +209,15 @@ const fill = (chars: number) => "x".repeat(chars);
 
 function check(
   files: Record<string, string>,
-  opts: { entries?: Record<string, number>; pending?: string[]; existing?: string[] } = {},
+  opts: { entries?: Record<string, unknown>; pending?: unknown; existing?: string[] } = {},
 ): string[] {
   const map = new Map(Object.entries(files));
   const existing = new Set([...map.keys(), ...(opts.existing ?? [])]);
   return checkClaudeMdBudgets({
     files: map,
     isFile: (path) => existing.has(path),
-    budgets: { entries: opts.entries ?? {}, pending: opts.pending ?? [] },
+    // The json is hand-edited, so fixtures may hold what its type rules out.
+    budgets: { entries: opts.entries ?? {}, pending: opts.pending ?? [] } as Budgets,
   });
 }
 
@@ -477,5 +478,201 @@ describe("stale entry", () => {
 
   test("an entry for a folder without reference/notes.md is not stale", () => {
     expect(check({ "src/foo/CLAUDE.md": "x\n" }, { entries: { "src/foo/CLAUDE.md": 50_000 } })).toEqual([]);
+  });
+});
+
+describe("@-import, as Claude Code's lexer reads the file", () => {
+  const A = { existing: ["a.md"] };
+
+  test("a fence opened on a list-item line ends with its item", () => {
+    expect(check({ "CLAUDE.md": "- ```bash\n  x\n  ```\n\nSee @a.md\n" }, A)).toHaveLength(1);
+  });
+
+  test("a ``` indented four spaces is code, and opens no fence", () => {
+    expect(check({ "CLAUDE.md": "Para\n\n    ```\n\nSee @a.md\n" }, A)).toHaveLength(1);
+  });
+
+  test("a code span does not cross list items", () => {
+    expect(check({ "CLAUDE.md": "- a stray ` here\n- @a.md\n- use `x` ok\n" }, A)).toHaveLength(1);
+  });
+
+  test("a code span does not cross out of a heading", () => {
+    expect(check({ "CLAUDE.md": "# H ` x\n@a.md `y\n" }, A)).toHaveLength(1);
+  });
+
+  test("escaped backticks open no code span", () => {
+    expect(check({ "CLAUDE.md": "\\`x @a.md y\\`\n" }, A)).toHaveLength(1);
+  });
+
+  test("an escaped space stays in the path", () => {
+    const out = check({ "CLAUDE.md": "@my\\ file.md\n" }, { existing: ["my file.md"] });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain("my file.md");
+  });
+
+  test("an @path in indented code passes", () => {
+    expect(check({ "CLAUDE.md": "Text\n\n    @a.md\n" }, A)).toEqual([]);
+  });
+
+  test("a lone @/ passes, and an @/ path still fails", () => {
+    expect(check({ "CLAUDE.md": "Routes under @/ are public.\n" })).toEqual([]);
+    expect(check({ "CLAUDE.md": "Routes under @/x are public.\n" })).toHaveLength(1);
+  });
+
+  test("an @path wrapped in emphasis fails", () => {
+    expect(check({ "CLAUDE.md": "**@a.md** and *@a.md*\n" }, A)).toHaveLength(2);
+  });
+
+  test("(@path, [@path and a link's text still count", () => {
+    expect(check({ "CLAUDE.md": "(@a.md) and [@a.md] and [@a.md](x)\n" }, A)).toHaveLength(3);
+  });
+
+  test("an @path in a heading, a list item and a block quote fails", () => {
+    expect(check({ "CLAUDE.md": "## See @a.md\n\n- @a.md\n\n> @a.md\n" }, A)).toHaveLength(3);
+  });
+
+  test("an @path in an HTML block or comment still fails", () => {
+    expect(check({ "CLAUDE.md": "<!-- @a.md -->\n\n<div>\n@a.md\n</div>\n" }, A)).toHaveLength(2);
+  });
+});
+
+describe("headings, as the lexer reads them", () => {
+  test("a heading after a fence opened on a list-item line counts", () => {
+    const notes = "- ```bash\n  x\n  ```\n\n## Later\n";
+    expect(check(indexed(notes, "- Later\n"))).toEqual([]);
+    expect(check(indexed(notes, ""))).toEqual([expect.stringContaining('"Later"')]);
+  });
+
+  test("a closing fence indented four spaces does not close", () => {
+    expect(check(indexed("```\n    ```\n## fake\n```\n## Real\n", "- Real\n"))).toEqual([]);
+  });
+
+  test("a CRLF fence hides its # lines", () => {
+    expect(check(indexed("## One\r\n\r\n```\r\n## fake\r\n```\r\n", "- One\n"))).toEqual([]);
+  });
+
+  test("an empty heading is no heading", () => {
+    expect(check(indexed("##  \n\n##\n\n## One\n", "- One\n"))).toEqual([]);
+  });
+
+  test("a closing run of # is not part of the text", () => {
+    expect(check(indexed("## Foo ##\n", "- Foo\n"))).toEqual([]);
+  });
+
+  test("a setext heading is not indexed", () => {
+    expect(check(indexed("Foo\n---\n\nBar\n===\n\n## One\n", "- One\n"))).toEqual([]);
+    expect(check(indexed("##foo\n---\n\n## One\n", "- One\n"))).toEqual([]);
+  });
+
+  test("a heading inside a list item or block quote is not indexed", () => {
+    expect(check(indexed("- ## Nested\n\n> ## Quoted\n\n## One\n", "- One\n"))).toEqual([]);
+  });
+
+  test("an ATX heading indented up to three spaces counts, and four is code", () => {
+    expect(check(indexed("   ## One\n\n    ## Code\n", "- One\n"))).toEqual([]);
+  });
+
+  test("a heading and its index line compare equal, whatever the heading holds", () => {
+    const headings = [
+      "Use `x` and ``y``",
+      "A stray ` tick",
+      "The <X> tag",
+      "<X>",
+      "<details> opens a block",
+      "⚠️ Sharp edge",
+      "*emphasis* and **strong**",
+      "* star first",
+      "a | b | c",
+      "| a | b |",
+      "1. Numbered",
+      "- dash first",
+      "# hash first",
+      "[link](x) and [ref]",
+      "C#",
+      "a\\_b",
+      "&amp; entity",
+      "```fence-like",
+    ];
+    for (const heading of headings) {
+      expect(check(indexed(`## ${heading}\n`, `- ${heading}\n`))).toEqual([]);
+      expect(check(indexed(`## ${heading}\n`, `- ${heading} [trap]\n`))).toEqual([]);
+      expect(check(indexed(`## ${heading}  \n`, `- ${heading}  \n`))).toEqual([]);
+      expect(check(indexed(`## ${heading}\n`, `- ${heading}x\n`))).toHaveLength(2);
+    }
+  });
+});
+
+describe("index, as the lexer reads it", () => {
+  test("a thematic break is no index line", () => {
+    expect(check(indexed("## One\n", "- One\n\n- - -\n\n* * *\n"))).toEqual([]);
+  });
+
+  test("## Index may be indented like any heading", () => {
+    const files = { "src/foo/CLAUDE.md": "  ## Index\n\n- One\n", "src/foo/reference/notes.md": "## One\n" };
+    expect(check(files)).toEqual([]);
+  });
+
+  test("a setext Index and an ### Index are not ## Index", () => {
+    const notes = "## One\n";
+    expect(check({ "src/foo/CLAUDE.md": "Index\n---\n\n- One\n", "src/foo/reference/notes.md": notes })).toHaveLength(1);
+    expect(check({ "src/foo/CLAUDE.md": "### Index\n\n- One\n", "src/foo/reference/notes.md": notes })).toHaveLength(1);
+  });
+
+  test("a bare ## ends the index", () => {
+    expect(check(indexed("## One\n", "- One\n\n##\n\n- Later\n"))).toEqual([]);
+  });
+
+  test("a setext heading ends the index", () => {
+    expect(check(indexed("## One\n", "- One\n\nLater\n---\n\n- Later\n"))).toEqual([]);
+  });
+
+  test("a nested item is read, and fails loudly when it is no heading", () => {
+    expect(check(indexed("## One\n\n## Two\n", "- One\n  - Two\n"))).toEqual([]);
+    expect(check(indexed("## One\n", "- One\n  - Detail\n"))).toEqual([expect.stringContaining('"Detail"')]);
+  });
+
+  test("a list item's continuation line is not part of its text", () => {
+    expect(check(indexed("## One\n", "- One\n  more text\n"))).toEqual([]);
+  });
+
+  test("a fence under ## Index is not read", () => {
+    expect(check(indexed("## One\n", "- One\n\n```\n- Fake\n```\n"))).toEqual([]);
+  });
+
+  test("an ordered list is not read, and every bullet kind is", () => {
+    expect(check(indexed("## One\n", "1. One\n"))).toEqual([expect.stringContaining('"One"')]);
+    expect(check(indexed("## One\n\n## Two\n\n## Three\n", "- One\n\n* Two\n\n+ Three\n"))).toEqual([]);
+  });
+});
+
+describe("budgets file", () => {
+  const file = { "src/ai/CLAUDE.md": "x\n" };
+
+  test("an entry that is no positive integer fails", () => {
+    for (const value of ["abc", null, 0, -1, 1.5, "50000"]) {
+      const out = check(file, { entries: { "src/ai/CLAUDE.md": value } });
+      expect(out).toEqual([expect.stringContaining("must be a positive integer")]);
+    }
+  });
+
+  test("an invalid entry leaves the default ceiling on", () => {
+    const out = check({ "src/ai/CLAUDE.md": fill(40_001) }, { entries: { "src/ai/CLAUDE.md": "abc" } });
+    expect(out).toHaveLength(2);
+    expect(out[0]).toContain("40000 ceiling");
+    expect(check({ "src/ai/CLAUDE.md": fill(40_000) }, { entries: { "src/ai/CLAUDE.md": null } })).toHaveLength(1);
+  });
+
+  test("an entry for a path that is not a tracked in-scope CLAUDE.md fails", () => {
+    for (const path of ["src/ai/CLAUDE.mdd", "src/gone/CLAUDE.md", "bots/jarvis/CLAUDE.md", "src/ai/reference/notes.md"]) {
+      const files = { "bots/jarvis/CLAUDE.md": "x\n", "src/ai/CLAUDE.md": "## Index\n", "src/ai/reference/notes.md": "" };
+      const out = check(files, { entries: { [path]: 50_000 } });
+      expect(out.filter((m) => m.includes("not a tracked"))).toEqual([expect.stringContaining(path)]);
+    }
+  });
+
+  test("pending must be an array of strings", () => {
+    for (const pending of ["src/wiki", null, [1]]) {
+      expect(check(file, { pending })).toEqual([expect.stringContaining("`pending`")]);
+    }
   });
 });
