@@ -23,8 +23,9 @@ import { splitFirstSentence, visibleText } from "./report-top.ts";
 
 /** The grid draws at this many questions, as the chain view does at 3 chains. */
 export const QUESTION_GRID_MIN = 3;
-/** Rows shown before «show more»: Grocery Bot's 21 questions would fill the
- *  screen. An open question is never behind it. */
+/** Rows shown before «show more» on a grid that stays unfolded. An open
+ *  question is never behind it. A grid with none open folds whole and opens to
+ *  every row. */
 export const QUESTION_GRID_CAP = 8;
 /** A row's question or answer, in code points. */
 export const QUESTION_GRID_TEXT_MAX = 220;
@@ -209,7 +210,9 @@ export function questionGridSlot(blocks: Block[], viewSlotAt: number): number {
   return i >= 0 ? i + 1 : viewSlotAt;
 }
 
-/** The grid, or "" under {@link QUESTION_GRID_MIN} rows. */
+/** The grid, or "" under {@link QUESTION_GRID_MIN} rows. It folds when no row is
+ *  open and none is reversed. A `<Question>` card with no log item has no row, so
+ *  it does not hold the grid open; lint check 10 reports that card. */
 export function questionGridHtml(rows: QuestionGridRow[], language: QuestionLanguage): string {
   if (rows.length < QUESTION_GRID_MIN) return "";
   const L = LABELS[language];
@@ -217,7 +220,8 @@ export function questionGridHtml(rows: QuestionGridRow[], language: QuestionLang
   const titleInner = `${escapeHtml(L.title)} <span class="qg-count">${escapeHtml(L.count(openCount, rows.length))}</span>`;
   const section = (inner: string) => `<section class="${DC_VIEW_CLASS} qg" ${READER_ONLY_ATTR} aria-label="${escapeHtml(L.title)}">${inner}</section>`;
   // Nothing to answer: the settled rows wait one click away, so a long list does not push the page's picture down.
-  if (openCount === 0) {
+  // A reversed decision stays in view: its question may have no live answer.
+  if (openCount === 0 && !rows.some((r) => r.reversed)) {
     return section(`<details class="qg-settled"><summary class="dc-title">${titleInner}</summary><div class="qg-rows" role="list">${rows.map((r) => rowHtml(r, language)).join("")}</div></details>`);
   }
   const shown = Math.max(QUESTION_GRID_CAP, openCount);
