@@ -35,6 +35,11 @@
  *     Focus on a cell or on «+N more», and an expanded list, survive that repaint.
  *     A long title wraps in the list; focus on an open cell shows in every theme,
  *     hover answers on an enabled cell, and forced colors keep open and focus apart.
+ * 10. **The GitHub check (your-work board P2)**, with its GET stubbed: the fifth
+ *     cell in one row with the others, its list, the struck, warning and neutral
+ *     marks, «checking…», «refreshing» and its three more fetches, the «not
+ *     checked» remedies, a repaint that keeps a fold and focus, a new map's
+ *     refetch, and a themes map that never asks.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -50,6 +55,7 @@ import { e2ePort } from "./ports.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { contrastOf, paintedMeasure, token } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
+import type { WorkMapChecksBody } from "../src/wiki/work-map/gh-check.ts";
 
 const PORT = e2ePort("wiki-work-card");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -90,6 +96,8 @@ const STRIP_KEEP_MORE = "e2e-wm-strip-keep-more";
 const STRIP_KEEP_OPEN = "e2e-wm-strip-keep-open";
 /** A themes map a test adopts page changes under. */
 const THEME_HOLD = "e2e-wm-theme-hold";
+/** The GitHub check: the checks GET is stubbed, since a spec server never spawns `gh`. */
+const GH = "e2e-wm-gh";
 /** No break opportunity anywhere. */
 const LONG_TOKEN = "Aa".repeat(90);
 const LONG_WHY =
@@ -260,6 +268,13 @@ test.beforeAll(async () => {
   // No title: `pageTitle` falls back to the stem.
   await writeFile(path.join(roots[STRIP_LONG]!, `plans/${"s".repeat(180)}.mdx`), waitPage("x", ["O1"], dayBefore(now, 2)).replace("title: x\n", ""), "utf8");
   await seedWiki(THEME_HOLD, now - 2 * HOUR);
+  await seedWiki(GH, now - 2 * HOUR, [
+    { title: "Merge the fix", kind: "followup", why: "", action: "Merge #369", pages: [] },
+    { title: "Closed one", kind: "followup", why: "", action: "Close #12", pages: [] },
+    { title: "Only mentions", kind: "followup", why: "", action: "Wait for the release of #3556", pages: [] },
+    { title: "Asks for two", kind: "followup", why: "", action: "Merge #1 and #2", pages: [] },
+    { title: "No PR", kind: "decision", why: "", action: "Pick one", pages: [] },
+  ]);
   await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -274,7 +289,7 @@ test.beforeAll(async () => {
       WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP].join(","),
       WIKI_ANSWER_OWNER: "Test Owner (T000001)",
       WIKI_ANSWER_GROUPS: "utvikler=T000001",
-      WIKI_EXTRA: [FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [GH, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -601,6 +616,255 @@ test("an expanded list stays expanded across an adopt that repaints the strip", 
   await adoptNewWait(page, STRIP_KEEP_OPEN);
   await expect(rows).toHaveCount(14);
   await expect(card.locator("[data-wm-drill-more]")).toHaveCount(0);
+});
+
+const GH_MERGED_AT = "2026-10-29T12:00:00Z";
+
+function checksBody(over: Partial<WorkMapChecksBody> = {}): WorkMapChecksBody {
+  return { at: Date.now(), checked: 5, unchecked: 0, unlinked: 0, skipped: 0, contradictions: [], prs: {}, needs: [], uncheckedRows: [], unlinkedRows: [], ...over };
+}
+
+const GH_NEEDS: WorkMapChecksBody["needs"] = [
+  { kind: "followup", title: "Merge the fix", pr: 369, state: "MERGED", mergedAt: GH_MERGED_AT, asksForIt: true },
+  { kind: "followup", title: "Closed one", pr: 12, state: "CLOSED", mergedAt: null, asksForIt: true },
+  { kind: "followup", title: "Only mentions", pr: 3556, state: "MERGED", mergedAt: "2026-10-28T12:00:00Z", asksForIt: false },
+  { kind: "followup", title: "Asks for two", pr: 1, state: "MERGED", mergedAt: GH_MERGED_AT, asksForIt: true },
+  { kind: "followup", title: "Asks for two", pr: 2, state: "OPEN", mergedAt: null, asksForIt: true },
+];
+
+/** Stub the checks GET; returns the request count. */
+async function stubChecks(page: Page, answer: (n: number) => WorkMapChecksBody): Promise<{ count: () => number }> {
+  let n = 0;
+  await page.route("**/api/wiki/work-map/checks*", (route) => route.fulfill({ json: answer(++n) }));
+  return { count: () => n };
+}
+
+test("the spec server never reaches gh: the real checks GET answers disabled and the cell is absent", async ({ page }) => {
+  const res = await page.request.get(`${BASE}/api/wiki/work-map/checks?wiki=${GH}`);
+  expect(((await res.json()) as WorkMapChecksBody).notChecked).toEqual({ reason: "disabled", repos: [] });
+  await openStart(page, GH);
+  await expect(page.locator("#wikiWorkCard .wiki-wm-cell")).toHaveCount(4);
+  await expect(page.locator('#wikiWorkCard [data-wm-cell="github"]')).toHaveCount(0);
+});
+
+test("the fifth cell sits in one row with the others, opens its list, and the Needs you items carry their marks", async ({ page }) => {
+  await stubChecks(page, () =>
+    checksBody({
+      contradictions: [{ page: "plans/alpha.mdx", pr: 369, repo: "acme/gears", rowState: "open", ghState: "MERGED", mergedAt: GH_MERGED_AT }],
+      uncheckedRows: [{ page: "plans/beta.mdx", pr: 4, repo: "acme/gears" }],
+      unlinkedRows: [{ page: "plans/gamma.mdx", label: "row with no link" }],
+      needs: GH_NEEDS,
+    }),
+  );
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(cell.locator("b")).toHaveText("1");
+  await expect(cell).toHaveClass(/\bbad\b/);
+  await expect(cell).toContainText("ledger rows GitHub contradicts");
+  const tops = await card.locator(".wiki-wm-cell").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().top));
+  expect(tops.length).toBe(5);
+  expect(new Set(tops).size).toBe(1);
+  // No cell's word pokes out of its box at this width.
+  expect(await card.locator(".wiki-wm-cell").evaluateAll((els) => els.every((e) => e.scrollWidth <= e.clientWidth))).toBe(true);
+
+  await cell.click();
+  const rows = card.locator('[data-wm-drill="github"] .wiki-wm-drill-row');
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(0)).toContainText("Alpha plan");
+  await expect(rows.nth(0)).toContainText("says open · GitHub: #369 merged 29.10");
+  await expect(rows.nth(0).locator('a[href="https://github.com/acme/gears/pull/369"]')).toBeVisible();
+  await expect(rows.nth(1)).toContainText("#4 not checked");
+  await expect(rows.nth(2)).toContainText("row with no link: no full PR link");
+
+  const item = (title: string) => card.locator(".wiki-wm-need").filter({ hasText: title });
+  const struck = (l: Locator) => l.evaluate((el) => getComputedStyle(el).textDecorationLine);
+  await expect(item("Merge the fix").locator(".wiki-wm-ghnote.done")).toHaveText("GitHub: #369 merged 29.10, this step is done");
+  expect(await struck(item("Merge the fix").locator(".wiki-wm-action"))).toBe("line-through");
+  await expect(item("Closed one").locator(".wiki-wm-ghnote.warn")).toHaveText("GitHub: #12 closed without merge");
+  expect(await struck(item("Closed one").locator(".wiki-wm-action"))).toBe("none");
+  await expect(item("Only mentions").locator(".wiki-wm-ghnote.info")).toHaveText("GitHub: #3556 merged 28.10");
+  expect(await struck(item("Only mentions").locator(".wiki-wm-action"))).toBe("none");
+  await expect(item("Asks for two").locator(".wiki-wm-ghnote")).toHaveText(["GitHub: #1 merged 29.10", "GitHub: #2 open"]);
+  expect(await struck(item("Asks for two").locator(".wiki-wm-action"))).toBe("none");
+  await expect(item("No PR").locator(".wiki-wm-ghnote")).toHaveCount(0);
+  // A struck item keeps its ✓, and ✓ still takes it off the card.
+  await item("Merge the fix").locator("[data-wm-done]").click();
+  await expect(item("Merge the fix")).toHaveCount(0);
+});
+
+test("the card paints before the check answers, reads «checking…», and the answer's repaint keeps a fold and focus", async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/work-map/checks*", async (route) => {
+    await held;
+    await route.fulfill({ json: checksBody({ needs: GH_NEEDS }) });
+  });
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(card.locator(".wiki-wm-need")).toHaveCount(5);
+  await expect(cell.locator("b")).toHaveText("checking…");
+  await expect(cell).toHaveClass(/\bmuted\b/);
+  await expect(cell).toBeDisabled();
+  await expect(card.locator(".wiki-wm-ghnote")).toHaveCount(0);
+  // The reader opens a closed lane, which holds focus, while it waits.
+  const summary = card.locator('[data-wm-lane="cooling"] > summary');
+  await summary.click();
+  await expect(card.locator('[data-wm-lane="cooling"]')).toHaveAttribute("open", "");
+  await summary.focus();
+  await page.evaluate(() => document.querySelector("#wikiWorkCard .wiki-wm-strip")!.setAttribute("data-before-repaint", ""));
+  release();
+  await expect(cell.locator("b")).toHaveText("0");
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  await expect(card.locator(".wiki-wm-ghnote.done")).toHaveCount(1);
+  await expect(card.locator('[data-wm-lane="cooling"]')).toHaveAttribute("open", "");
+  await expect(summary).toBeFocused();
+});
+
+test("«refreshing» shows the count and the marks it has, and three more fetches end it with «N not checked»", async ({ page }) => {
+  await page.clock.install();
+  const stub = await stubChecks(page, (n) => checksBody({ refreshing: true, unchecked: 3, uncheckedRows: [{ page: "plans/beta.mdx", pr: 4, repo: "acme/gears" }], needs: GH_NEEDS, checked: n }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(cell).toContainText("refreshing");
+  await expect(cell).not.toContainText("not checked");
+  await expect(cell.locator("b")).toHaveText("0");
+  await expect(card.locator(".wiki-wm-ghnote.done")).toHaveCount(1);
+  expect(stub.count()).toBe(1);
+  for (const n of [2, 3, 4]) {
+    await page.clock.runFor(15_000);
+    await expect.poll(() => stub.count()).toBe(n);
+  }
+  await expect(cell).toContainText("3 not checked");
+  await expect(cell).not.toContainText("refreshing");
+  await page.clock.runFor(60_000);
+  await page.waitForTimeout(100);
+  expect(stub.count()).toBe(4);
+});
+
+test("«refreshing» that settles stops the fetches at once", async ({ page }) => {
+  await page.clock.install();
+  const stub = await stubChecks(page, (n) => checksBody(n === 1 ? { refreshing: true } : {}));
+  await openStart(page, GH);
+  const cell = page.locator('#wikiWorkCard [data-wm-cell="github"]');
+  await expect(cell).toContainText("refreshing");
+  await page.clock.runFor(15_000);
+  await expect(cell).not.toContainText("refreshing");
+  await page.clock.runFor(60_000);
+  await page.waitForTimeout(100);
+  expect(stub.count()).toBe(2);
+});
+
+for (const [reason, text] of [
+  ["no-gh", "not checked: install gh"],
+  ["auth", "not checked: log in with gh auth login"],
+  ["sso", "not checked: authorize the token for the organization (gh auth refresh)"],
+] as const) {
+  test(`notChecked ${reason} reads «${text}» and the other repos' counts still show`, async ({ page }) => {
+    await stubChecks(page, () =>
+      checksBody({
+        checked: 2,
+        unchecked: 1,
+        notChecked: { reason, repos: ["acme/gears"] },
+        contradictions: [{ page: "plans/alpha.mdx", pr: 369, repo: "acme/other", rowState: "open", ghState: "CLOSED", mergedAt: null }],
+        uncheckedRows: [{ page: "plans/beta.mdx", pr: 4, repo: "acme/gears" }],
+      }),
+    );
+    await openStart(page, GH);
+    const card = page.locator("#wikiWorkCard");
+    const cell = card.locator('[data-wm-cell="github"]');
+    await expect(cell).toContainText(text);
+    await expect(cell.locator("b")).toHaveText("1");
+    // Its long remedy takes a row of its own; nothing overflows.
+    expect(await cell.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    const boxes = await card.locator(".wiki-wm-cell").evaluateAll((els) => els.map((e) => e.getBoundingClientRect()).map((r) => ({ top: r.top, bottom: r.bottom })));
+    expect(new Set(boxes.slice(0, 4).map((b) => b.top)).size).toBe(1);
+    expect(boxes[4]!.top).toBeGreaterThanOrEqual(boxes[0]!.bottom);
+    await cell.click();
+    await expect(card.locator('[data-wm-drill="github"]')).toContainText("closed without merge");
+  });
+}
+
+test("a checks GET that fails says «not checked», and the next start view asks again", async ({ page }) => {
+  let n = 0;
+  await page.route("**/api/wiki/work-map/checks*", (route) => (++n === 1 ? route.fulfill({ status: 500, json: { error: "x" } }) : route.fulfill({ json: checksBody() })));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const cell = card.locator('[data-wm-cell="github"]');
+  await expect(cell).toContainText("not checked");
+  await expect(cell.locator("b")).toHaveText("—");
+  await card.locator('.wiki-wm-pages a[data-relpath], .wiki-wm-summary a[data-relpath]').first().click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.goBack();
+  await expect(cell.locator("b")).toHaveText("0");
+  expect(n).toBe(2);
+});
+
+test("an answer older than an hour is fetched again when the start view renders, and not before", async ({ page }) => {
+  await page.clock.install();
+  const stub = await stubChecks(page, () => checksBody());
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator('[data-wm-cell="github"] b')).toHaveText("0");
+  const link = card.locator('.wiki-wm-pages a[data-relpath], .wiki-wm-summary a[data-relpath]').first();
+  await link.click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.goBack();
+  await expect(page.locator(".wiki-start")).toBeVisible();
+  await page.waitForTimeout(100);
+  expect(stub.count()).toBe(1);
+  await link.click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.clock.fastForward(HOUR + 1_000);
+  await page.goBack();
+  await expect.poll(() => stub.count()).toBe(2);
+});
+
+test("a new map after ↻ fetches the checks at once, for its marks", async ({ page }) => {
+  const stub = await stubChecks(page, () => checksBody());
+  const newRun = Date.now();
+  let gets = 0;
+  let posted = false;
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    gets++;
+    const res = await route.fetch();
+    const body = (await res.json()) as { map: { runAtMs: number } } & Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - HOUR, map: posted ? { ...body.map, runAtMs: newRun } : body.map } });
+  });
+  await page.route("**/api/wiki/work-map/refresh*", (route) => {
+    posted = true;
+    return route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } });
+  });
+  await page.clock.install();
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator('[data-wm-cell="github"] b')).toHaveText("0");
+  expect(stub.count()).toBe(1);
+  await card.locator("#wikiWorkMapRefresh").click();
+  await expect
+    .poll(async () => {
+      await page.clock.runFor(1_000);
+      return stub.count();
+    })
+    .toBe(2);
+  expect(gets).toBeGreaterThan(1);
+});
+
+test("a themes map never asks for the check", async ({ page }) => {
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...body, organizable: false, map: sweepThemesMap(Date.now()) } });
+  });
+  const stub = await stubChecks(page, () => checksBody());
+  await openStart(page, SWEEP);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator(".wiki-wn-title")).toHaveText("What you’re following");
+  await page.waitForTimeout(300);
+  expect(stub.count()).toBe(0);
+  await expect(card.locator(".wiki-wm-ghnote")).toHaveCount(0);
 });
 
 test("a themes map has no strip", async ({ page }) => {
@@ -1580,10 +1844,23 @@ for (const theme of THEMES) {
         ? route.fulfill({ status: 429, json: { error: "ran recently", lastSuccessAt: Date.now() - 5 * 60_000, retryAfterMs: 5 * 60_000 } })
         : route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }),
     );
+    // Every mark and note the GitHub check paints: bad tone, remedy, three note tones.
+    await stubChecks(page, () =>
+      checksBody({
+        notChecked: { reason: "auth", repos: ["acme/gears"] },
+        contradictions: [{ page: "plans/alpha.mdx", pr: 1, repo: "acme/other", rowState: "open", ghState: "MERGED", mergedAt: GH_MERGED_AT }],
+        needs: [
+          { kind: "decision", title: "Settle ⟦plans/alpha.mdx⟧", pr: 1, state: "MERGED", mergedAt: GH_MERGED_AT, asksForIt: true },
+          { kind: "decision", title: "Settle ⟦plans/alpha.mdx⟧", pr: 2, state: "CLOSED", mergedAt: null, asksForIt: true },
+          { kind: "resume", title: "Resume beta", pr: 3, state: "MERGED", mergedAt: GH_MERGED_AT, asksForIt: true },
+        ],
+      }),
+    );
     await page.clock.install();
     await openStart(page, SWEEP);
     const card = page.locator("#wikiWorkCard");
     await expect(card.locator(".wiki-wm-stale")).toBeVisible();
+    await expect(card.locator(".wiki-wm-ghnote")).toHaveCount(3);
     expect(await card.locator("a.wiki-wm-effort-name").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
     expect(await card.locator(".wiki-wm-summary a").first().evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--accent-light"));
     const low: string[] = [];

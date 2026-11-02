@@ -1,0 +1,497 @@
+/**
+ * The GitHub check against real temp wikis read through the real index, with a
+ * stubbed `gh`. Repo names are made up.
+ */
+
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { testTempDirSync } from "../../test/temp-dir.ts";
+import { getWikiIndex, readWikiPage } from "../store.ts";
+import {
+  __resetGhCheckForTest,
+  checkWorkMapPrs,
+  GH_PRS_PER_HOUR,
+  GH_PRS_PER_QUERY,
+  GH_QUERIES_AT_ONCE,
+  GH_STATE_TTL_MS,
+  ghCheckDisabled,
+  ghQueryArgs,
+  isLiveCheckPage,
+  NEEDS_ASK_VERB_RE,
+  readGhAnswer,
+  spawnGhRunner,
+  type GhCheckDeps,
+  type GhResult,
+  type GhRunner,
+} from "./gh-check.ts";
+import type { WorkMap } from "./schema.ts";
+
+afterEach(() => __resetGhCheckForTest());
+
+const url = (repo: string, n: number) => `[#${n}](https://github.com/${repo}/pull/${n})`;
+const WIDGETS = "acme/widgets";
+const GEARS = "acme/gears";
+const AT = 1_800_000_000_000;
+
+function wiki(pages: Record<string, string>): string {
+  const root = testTempDirSync(path.join(tmpdir(), "gh-check-"));
+  mkdirSync(path.join(root, "plans"), { recursive: true });
+  for (const [rel, text] of Object.entries(pages)) writeFileSync(path.join(root, rel), text);
+  return root;
+}
+
+const page = (status: string, rows: string[][], extra = "", header = ["PR", "What", "State", "Depends on"]) =>
+  `---\ntitle: A plan\nplan_status: ${status}\n${extra}---\n\n**PR ledger.**\n\n| ${header.join(" | ")} |\n|${header.map(() => "---").join("|")}|\n${rows.map((r) => `| ${r.join(" | ")} |`).join("\n")}\n`;
+
+function map(needsYou: { title: string; action?: string; pages: string[]; kind?: string }[] = []): WorkMap {
+  return {
+    version: 1,
+    wiki: "w",
+    runAtMs: AT,
+    model: "m",
+    coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, logEntriesInWindow: 0, digestChars: 0, warnings: [] },
+    summary: "",
+    needsYou: needsYou.map((n) => ({ kind: "followup", why: "", action: "", ...n })),
+    themes: [],
+    efforts: [],
+    loose: [],
+  } as unknown as WorkMap;
+}
+
+type Pr = { state: "OPEN" | "MERGED" | "CLOSED"; mergedAt?: string };
+
+/** A `gh` that answers from a table, keyed `owner/repo#n`; a miss is NOT_FOUND with exit 1, as the real one. */
+function stubGh(table: Record<string, Pr>, calls: string[][] = []): GhRunner {
+  return async (args) => {
+    calls.push(args);
+    const owner = args.find((a) => a.startsWith("owner="))!.slice(6);
+    const repo = args.find((a) => a.startsWith("repo="))!.slice(5);
+    const q = args.find((a) => a.startsWith("query="))!;
+    const fields: Record<string, unknown> = {};
+    const errors: unknown[] = [];
+    for (const m of q.matchAll(/pullRequest\(number:(\d+)\)/g)) {
+      const pr = table[`${owner}/${repo}#${m[1]}`];
+      fields[`p${m[1]}`] = pr ? { state: pr.state, mergedAt: pr.mergedAt ?? null } : null;
+      if (!pr) errors.push({ type: "NOT_FOUND", path: ["repository", `p${m[1]}`], message: "Could not resolve" });
+    }
+    return { exitCode: errors.length ? 1 : 0, stdout: JSON.stringify({ data: { repository: fields }, ...(errors.length ? { errors } : {}) }), stderr: errors.length ? "gh: Could not resolve" : "" };
+  };
+}
+
+function deps(runGh: GhRunner, over: Partial<GhCheckDeps> = {}): GhCheckDeps {
+  return { index: (root) => getWikiIndex({ root, refresh: true }), readBody: readWikiPage, runGh, disabled: () => false, ...over };
+}
+
+const run = (root: string, d: GhCheckDeps, m: WorkMap = map(), now: () => number = () => AT) => checkWorkMapPrs({ wiki: "w", root, map: m }, d, now);
+
+const MERGED_AT = "2026-10-29T08:44:22Z";
+
+describe("the rows", () => {
+  const root = () =>
+    wiki({
+      "plans/alpha.mdx": page("in-flight", [
+        [url(WIDGETS, 1), "merged on GitHub", "open", ""],
+        [url(WIDGETS, 2), "closed on GitHub", "planned", ""],
+        [url(WIDGETS, 3), "still open", "open", ""],
+        [url(WIDGETS, 4), "GitHub does not know it", "not started", ""],
+        [url(WIDGETS, 5), "merged both ways", "merged", ""],
+        ["7", "depends on a merged PR", "open", url(WIDGETS, 1)],
+        ["PR #8", "a bare number", "open", ""],
+        [url(WIDGETS, 9), "MEL-1 owned elsewhere", "[[owner]]", ""],
+      ]),
+      "plans/owner.mdx": "---\ntitle: Owner\nowns: [MEL-1]\n---\n\nBody.\n",
+    });
+  const table = { [`${WIDGETS}#1`]: { state: "MERGED", mergedAt: MERGED_AT }, [`${WIDGETS}#2`]: { state: "CLOSED" }, [`${WIDGETS}#3`]: { state: "OPEN" }, [`${WIDGETS}#5`]: { state: "MERGED", mergedAt: MERGED_AT } } as Record<string, Pr>;
+
+  test("each row lands in exactly one count, and only an open row GitHub has settled contradicts", async () => {
+    const body = await run(root(), deps(stubGh(table)));
+    expect({ checked: body.checked, unchecked: body.unchecked, unlinked: body.unlinked, skipped: body.skipped }).toEqual({ checked: 4, unchecked: 1, unlinked: 2, skipped: 1 });
+    expect(body.contradictions).toEqual([
+      { page: "plans/alpha.mdx", pr: 1, repo: WIDGETS, rowState: "open", ghState: "MERGED", mergedAt: MERGED_AT },
+      { page: "plans/alpha.mdx", pr: 2, repo: WIDGETS, rowState: "planned", ghState: "CLOSED", mergedAt: null },
+    ]);
+    expect(body.prs[`${WIDGETS}#1`]).toEqual({ state: "MERGED", mergedAt: MERGED_AT });
+    expect(body.prs[`${WIDGETS}#4`]).toBeUndefined();
+    expect(body.uncheckedRows).toEqual([{ page: "plans/alpha.mdx", pr: 4, repo: WIDGETS }]);
+    expect(body.unlinkedRows.map((r) => r.label)).toEqual(["#7", "#8"]);
+  });
+
+  test("a merged PR in a Depends on cell does not flag its row, and is not asked for on its behalf", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [["7", "x", "open", url(WIDGETS, 1)]]) });
+    const calls: string[][] = [];
+    const body = await run(r, deps(stubGh({ [`${WIDGETS}#1`]: { state: "MERGED" } }, calls)));
+    expect(body.contradictions).toEqual([]);
+    expect(body.unlinked).toBe(1);
+    expect(calls).toEqual([]);
+  });
+
+  test("a row whose state links the page owning its Jira key is skipped, and asks GitHub nothing", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 9), "MEL-1 here", "[[owner]]", ""]]), "plans/owner.mdx": "---\ntitle: Owner\nowns: [MEL-1]\n---\n\nBody.\n" });
+    const calls: string[][] = [];
+    const body = await run(r, deps(stubGh({}, calls)));
+    expect(body.skipped).toBe(1);
+    expect(calls).toEqual([]);
+  });
+
+  test("a state link to a page owning another key is an ordinary row", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 9), "MEL-2 here", "open [[owner]]", ""]]), "plans/owner.mdx": "---\ntitle: Owner\nowns: [MEL-1]\n---\n\nBody.\n" });
+    const body = await run(r, deps(stubGh({ [`${WIDGETS}#9`]: { state: "OPEN" } })));
+    expect([body.skipped, body.checked]).toEqual([0, 1]);
+  });
+
+  test("only a live page is read: its status decides, a retired page is out", () => {
+    const live = (p: Parameters<typeof isLiveCheckPage>[0]) => isLiveCheckPage(p);
+    for (const s of ["proposed", "ready", "in-flight", "blocked"] as const) expect(live({ plan_status: s })).toBe(true);
+    expect(live({ plan_status: "shipped", followups: "open" })).toBe(true);
+    expect(live({ plan_status: "shipped" })).toBe(false);
+    expect(live({ plan_status: "abandoned" })).toBe(false);
+    expect(live({})).toBe(false);
+    expect(live({ plan_status: "ready", culled: true })).toBe(false);
+  });
+
+  test("an owner or repo with a leading dash is never passed to gh and the row is unlinked", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[`[#1](https://github.com/-x/widgets/pull/1)`, "x", "open", ""]]) });
+    const calls: string[][] = [];
+    const body = await run(r, deps(stubGh({}, calls)));
+    expect(body.unlinked).toBe(1);
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("the lookups", () => {
+  test("one query per repo per 50 PRs, four at a time, arguments as an array", async () => {
+    const rows = Array.from({ length: GH_PRS_PER_QUERY + 1 }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
+    const r = wiki({ "plans/a.mdx": page("ready", [...rows, [url(GEARS, 1), "x", "open", ""]]) });
+    const calls: string[][] = [];
+    await run(r, deps(stubGh({}, calls)));
+    expect(calls.length).toBe(3);
+    expect(calls.every((c) => c[0] === "api" && c[1] === "graphql")).toBe(true);
+    expect(calls.map((c) => [...c.join(" ").matchAll(/number:/g)].length).sort((a, b) => a - b)).toEqual([1, 1, GH_PRS_PER_QUERY]);
+
+    let running = 0;
+    let peak = 0;
+    const slow: GhRunner = async (args) => {
+      peak = Math.max(peak, ++running);
+      await Bun.sleep(5);
+      running--;
+      return stubGh({})(args);
+    };
+    const many = Array.from({ length: GH_PRS_PER_QUERY * (GH_QUERIES_AT_ONCE + 3) }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
+    __resetGhCheckForTest();
+    await run(wiki({ "plans/a.mdx": page("ready", many) }), deps(slow));
+    expect(peak).toBe(GH_QUERIES_AT_ONCE);
+  });
+
+  test("the slug travels in variables, so it can break out of nothing", () => {
+    expect(ghQueryArgs("acme/widgets", [1, 2])).toEqual([
+      "api",
+      "graphql",
+      "-f",
+      "query=query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){p1:pullRequest(number:1){state mergedAt} p2:pullRequest(number:2){state mergedAt}}}",
+      "-f",
+      "owner=acme",
+      "-f",
+      "repo=widgets",
+    ]);
+  });
+
+  test("past the hourly cap the rest count as unchecked, and a second request asks nothing more", async () => {
+    const rows = Array.from({ length: GH_PRS_PER_HOUR + 1 }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
+    const table = Object.fromEntries(rows.map((_, i) => [`${WIDGETS}#${i + 1}`, { state: "OPEN" } as Pr]));
+    const r = wiki({ "plans/a.mdx": page("ready", rows) });
+    const calls: string[][] = [];
+    const first = await run(r, deps(stubGh(table, calls)));
+    expect([first.checked, first.unchecked]).toEqual([GH_PRS_PER_HOUR, 1]);
+    const n = calls.length;
+    const second = await run(r, deps(stubGh(table, calls)));
+    expect(calls.length).toBe(n);
+    expect(second.unchecked).toBe(1);
+    // An hour on the budget is back, and the states are due again.
+    const later = await run(r, deps(stubGh(table, calls)), map(), () => AT + GH_STATE_TTL_MS);
+    expect(calls.length).toBeGreaterThan(n);
+    expect(later.checked).toBe(GH_PRS_PER_HOUR);
+  });
+
+  test("a failed alias beside partial data on exit 1 leaves the others checked", () => {
+    const answer = readGhAnswer(
+      {
+        exitCode: 1,
+        stdout: JSON.stringify({ data: { repository: { p1: { state: "MERGED", mergedAt: MERGED_AT }, p2: null } }, errors: [{ type: "NOT_FOUND", path: ["repository", "p2"] }] }),
+        stderr: "gh: Could not resolve to a PullRequest with the number of 2.",
+      },
+      [1, 2],
+    );
+    expect(answer.unanswered).toBe(false);
+    expect(answer.states.get(1)).toEqual({ state: "MERGED", mergedAt: MERGED_AT });
+    expect(answer.states.get(2)).toBeNull();
+  });
+
+  test("any other exit, a timeout or unreadable stdout leaves the whole query unchecked, never a contradiction", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""]]) });
+    const results: GhResult[] = [
+      { exitCode: 2, stdout: JSON.stringify({ data: { repository: { p1: { state: "MERGED" } } } }), stderr: "" },
+      { exitCode: -1, stdout: "", stderr: "", timedOut: true },
+      { exitCode: 1, stdout: "<html>", stderr: "HTTP 502" },
+    ];
+    for (const result of results) {
+      __resetGhCheckForTest();
+      const body = await run(r, deps(async () => result));
+      expect([body.checked, body.unchecked, body.contradictions.length]).toEqual([0, 1, 0]);
+      expect(body.notChecked).toBeUndefined();
+    }
+  });
+
+  test("a runner that throws is a failed call", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""]]) });
+    const body = await run(r, deps(async () => { throw new Error("boom"); }));
+    expect(body.unchecked).toBe(1);
+  });
+});
+
+describe("notChecked", () => {
+  const SSO = JSON.stringify({ data: { repository: null }, errors: [{ type: "FORBIDDEN", message: "Resource protected by organization SAML enforcement." }] });
+  const cases: [string, GhResult, string][] = [
+    ["no gh on PATH", { exitCode: -1, stdout: "", stderr: "ENOENT", noBinary: true }, "no-gh"],
+    ["not logged in: exit 4", { exitCode: 4, stdout: "", stderr: "To get started with GitHub CLI, please run:  gh auth login" }, "auth"],
+    ["a 401 answer", { exitCode: 1, stdout: JSON.stringify({ message: "Bad credentials", status: "401" }), stderr: "gh: Bad credentials (HTTP 401)" }, "auth"],
+    ["FORBIDDEN", { exitCode: 1, stdout: SSO, stderr: "gh: Resource protected" }, "sso"],
+    ["a SAML 403", { exitCode: 1, stdout: JSON.stringify({ message: "Resource protected by organization SAML enforcement." }), stderr: "HTTP 403" }, "sso"],
+  ];
+  for (const [name, result, reason] of cases) {
+    test(`${name} reads as ${reason}, and the other repo's counts still show`, async () => {
+      const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""], [url(GEARS, 2), "x", "open", ""]]) });
+      const ok = stubGh({ [`${GEARS}#2`]: { state: "MERGED", mergedAt: MERGED_AT } });
+      const body = await run(r, deps(async (args) => (args.includes("repo=widgets") ? result : ok(args))));
+      expect(body.notChecked).toEqual({ reason: reason as "auth", repos: [WIDGETS] });
+      expect([body.checked, body.unchecked, body.contradictions.length]).toEqual([1, 1, 1]);
+      // The login comes back: the next request asks again and the note goes.
+      const after = await run(r, deps(stubGh({ [`${WIDGETS}#1`]: { state: "OPEN" }, [`${GEARS}#2`]: { state: "MERGED" } })));
+      expect(after.notChecked).toBeUndefined();
+      expect(after.checked).toBe(2);
+    });
+  }
+
+  test("the env switch: no spawn, reason disabled", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""]]) });
+    const calls: string[][] = [];
+    const body = await run(r, deps(stubGh({}, calls), { disabled: () => true }));
+    expect(body.notChecked).toEqual({ reason: "disabled", repos: [] });
+    expect(calls).toEqual([]);
+  });
+
+  test("WORK_MAP_GH_CHECK: off, 0 and false turn it off; unset and blank leave it on", () => {
+    for (const v of ["off", "OFF", " 0 ", "false"]) expect(ghCheckDisabled({ WORK_MAP_GH_CHECK: v })).toBe(true);
+    for (const v of [undefined, "", "on", "1"]) expect(ghCheckDisabled({ WORK_MAP_GH_CHECK: v })).toBe(false);
+  });
+});
+
+describe("the cache", () => {
+  const one = () => wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""]]) });
+  const merged = { [`${WIDGETS}#1`]: { state: "MERGED", mergedAt: MERGED_AT } } as Record<string, Pr>;
+
+  test("two concurrent cold calls share one lookup", async () => {
+    const r = one();
+    const calls: string[][] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const d = deps(async (args) => {
+      await gate;
+      return stubGh(merged, calls)(args);
+    });
+    const both = Promise.all([run(r, d), run(r, d)]);
+    // Held, so a second lookup could only come from a missing single-flight.
+    await Bun.sleep(100);
+    release();
+    const [a, b] = await both;
+    expect(calls.length).toBe(1);
+    expect(a.checked).toBe(1);
+    expect(b.checked).toBe(1);
+  });
+
+  test("a failed flight is not asked again by the call that joined it", async () => {
+    const r = one();
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const d = deps(async () => {
+      calls++;
+      await gate;
+      return { exitCode: 2, stdout: "", stderr: "" };
+    });
+    const both = Promise.all([run(r, d), run(r, d)]);
+    // Long enough for both calls to read the pages and meet at the flight.
+    await Bun.sleep(100);
+    release();
+    const [a, b] = await both;
+    expect(calls).toBe(1);
+    expect([a.unchecked, b.unchecked]).toEqual([1, 1]);
+  });
+
+  test("a state under an hour is served without a spawn", async () => {
+    const r = one();
+    const calls: string[][] = [];
+    await run(r, deps(stubGh(merged, calls)));
+    const body = await run(r, deps(stubGh(merged, calls)), map(), () => AT + GH_STATE_TTL_MS - 1);
+    expect(calls.length).toBe(1);
+    expect(body.checked).toBe(1);
+  });
+
+  test("past the hour a request waits for the refresh and gets the new state", async () => {
+    const r = one();
+    await run(r, deps(stubGh({ [`${WIDGETS}#1`]: { state: "OPEN" } })));
+    const body = await run(r, deps(stubGh(merged)), map(), () => AT + GH_STATE_TTL_MS);
+    expect(body.refreshing).toBeUndefined();
+    expect(body.contradictions.length).toBe(1);
+  });
+
+  test("past the hour a refresh that outlasts the wait returns the old state with refreshing", async () => {
+    const r = one();
+    await run(r, deps(stubGh({ [`${WIDGETS}#1`]: { state: "OPEN" } })));
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const later = () => AT + GH_STATE_TTL_MS;
+    const slow = deps(
+      async (args) => {
+        await gate;
+        return stubGh(merged)(args);
+      },
+      { refreshWaitMs: 10 },
+    );
+    const waited = await run(r, slow, map(), later);
+    expect(waited.refreshing).toBe(true);
+    expect(waited.prs[`${WIDGETS}#1`]!.state).toBe("OPEN");
+    expect(waited.contradictions).toEqual([]);
+    release();
+    await Bun.sleep(5);
+    const after = await run(r, slow, map(), later);
+    expect(after.refreshing).toBeUndefined();
+    expect(after.contradictions.length).toBe(1);
+  });
+
+  test("on a cold process a refresh that outlasts the wait returns every PR unchecked with refreshing", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const body = await run(
+      one(),
+      deps(
+        async (args) => {
+          await gate;
+          return stubGh(merged)(args);
+        },
+        { refreshWaitMs: 10 },
+      ),
+    );
+    expect(body.refreshing).toBe(true);
+    expect([body.checked, body.unchecked]).toEqual([0, 1]);
+    release();
+  });
+
+  test("a refresh that fails past the hour leaves the row unchecked, not checked on an old state", async () => {
+    const r = one();
+    await run(r, deps(stubGh(merged)));
+    const body = await run(r, deps(async () => ({ exitCode: 2, stdout: "", stderr: "" })), map(), () => AT + GH_STATE_TTL_MS);
+    expect([body.checked, body.unchecked, body.contradictions.length]).toEqual([0, 1, 0]);
+  });
+
+  test("a new map gets its marks without waiting for the cache", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""], [url(WIDGETS, 2), "x", "open", ""]]) });
+    const calls: string[][] = [];
+    const table = { ...merged, [`${WIDGETS}#2`]: { state: "CLOSED" } } as Record<string, Pr>;
+    await run(r, deps(stubGh(table, calls)), map([{ title: "Old", action: "Merge #1", pages: ["plans/a.mdx"] }]));
+    const n = calls.length;
+    const body = await run(r, deps(stubGh(table, calls)), map([{ title: "New", action: "Close #2", pages: ["plans/a.mdx"] }]), () => AT + 1);
+    expect(calls.length).toBe(n);
+    expect(body.needs).toEqual([{ kind: "followup", title: "New", pr: 2, state: "CLOSED", mergedAt: null, asksForIt: true }]);
+  });
+
+  test("a PR only a new map names is looked up in that request", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 1), "x", "open", ""]]), "plans/b.mdx": `---\ntitle: B\n---\n\nSee https://github.com/${GEARS}/pull/7 here.\n` });
+    const calls: string[][] = [];
+    const table = { ...merged, [`${GEARS}#7`]: { state: "MERGED", mergedAt: MERGED_AT } } as Record<string, Pr>;
+    await run(r, deps(stubGh(table, calls)));
+    expect(calls.length).toBe(1);
+    const body = await run(r, deps(stubGh(table, calls)), map([{ title: "T", action: "Merge #7", pages: ["plans/b.mdx"] }]), () => AT + 1);
+    expect(calls.length).toBe(2);
+    expect(body.needs[0]!.state).toBe("MERGED");
+  });
+});
+
+describe("Needs you", () => {
+  const twoRepos = () =>
+    wiki({
+      "plans/a.mdx": page("ready", [[url(WIDGETS, 5), "x", "merged", ""], [url(WIDGETS, 6), "x", "open", ""]]),
+      "plans/b.mdx": page("ready", [[url(GEARS, 5), "x", "merged", ""]]),
+    });
+  const table = { [`${WIDGETS}#5`]: { state: "MERGED", mergedAt: MERGED_AT }, [`${WIDGETS}#6`]: { state: "OPEN" }, [`${GEARS}#5`]: { state: "CLOSED" } } as Record<string, Pr>;
+
+  test("a #n that matches two repos resolves to neither", async () => {
+    const m = map([{ title: "Merge #5", action: "Merge #5", pages: ["plans/a.mdx", "plans/b.mdx"] }]);
+    const body = await run(twoRepos(), deps(stubGh(table)), m);
+    expect(body.needs).toEqual([{ kind: "followup", title: "Merge #5", pr: 5, state: null, mergedAt: null, asksForIt: true }]);
+  });
+
+  test("a #n resolves through the item's own pages only", async () => {
+    const m = map([{ title: "Merge #5", action: "Merge #5", pages: ["plans/a.mdx"] }]);
+    const body = await run(twoRepos(), deps(stubGh(table)), m);
+    expect(body.needs[0]).toMatchObject({ pr: 5, state: "MERGED", mergedAt: MERGED_AT, asksForIt: true });
+  });
+
+  test("an item asking for two PRs gets an entry for each, with its own state", async () => {
+    const m = map([{ title: "Both", action: "Merge #5 and #6", pages: ["plans/a.mdx"] }]);
+    const body = await run(twoRepos(), deps(stubGh(table)), m);
+    expect(body.needs.map((n) => [n.pr, n.state, n.asksForIt])).toEqual([[5, "MERGED", true], [6, "OPEN", true]]);
+  });
+
+  test("an item that only mentions a PR does not ask for it, and a #n said twice is one entry", async () => {
+    const m = map([{ title: "e2e #5 is open", action: "See what #5 changed.", pages: ["plans/a.mdx"] }]);
+    const body = await run(twoRepos(), deps(stubGh(table)), m);
+    expect(body.needs.map((n) => [n.pr, n.asksForIt])).toEqual([[5, false]]);
+  });
+
+  test("a page marker's anchor is no PR number, and an item with no #n has no entry", async () => {
+    const m = map([{ title: "See ⟦plans/a#5.mdx⟧", action: "Merge it", pages: ["plans/a.mdx"] }]);
+    expect((await run(twoRepos(), deps(stubGh(table)), m)).needs).toEqual([]);
+  });
+
+  test("the verb pattern reads the words, Norwegian included, at a word's start", () => {
+    for (const s of ["Merge #1", "merg den", "Lukk #1", "Close it", "Godkjenn PR-en", "Approve", "Review #1", "gjør review"]) expect(NEEDS_ASK_VERB_RE.test(s)).toBe(true);
+    for (const s of ["preview #1", "disclose", "emerge", "Se på #1", ""]) expect(NEEDS_ASK_VERB_RE.test(s)).toBe(false);
+  });
+
+  test("the page ref index and a ledger link both resolve a number", async () => {
+    const r = wiki({ "plans/plain.mdx": `---\ntitle: Plain\nprs: [acme/gears#12]\n---\n\nBody.\n` });
+    const body = await run(r, deps(stubGh({ [`${GEARS}#12`]: { state: "MERGED", mergedAt: MERGED_AT } })), map([{ title: "T", action: "Merge #12", pages: ["plans/plain.mdx"] }]));
+    expect(body.needs[0]!.state).toBe("MERGED");
+  });
+});
+
+describe("spawnGhRunner", () => {
+  const script = (text: string) => {
+    const dir = testTempDirSync(path.join(tmpdir(), "gh-runner-"));
+    const file = path.join(dir, "gh");
+    writeFileSync(file, `#!/bin/sh\n${text}\n`);
+    chmodSync(file, 0o755);
+    return file;
+  };
+
+  test("a missing binary says so", async () => {
+    const res = await spawnGhRunner("/no/such/gh-binary")(["x"]);
+    expect(res.noBinary).toBe(true);
+    expect(readGhAnswer(res, [1]).failure).toBe("no-gh");
+  });
+
+  test("arguments arrive as one array, unsplit and unexpanded", async () => {
+    const res = await spawnGhRunner(script('printf "%s|" "$@"; echo err >&2; exit 1'))(["a b", "$HOME", "c"]);
+    expect(res).toEqual({ exitCode: 1, stdout: "a b|$HOME|c|", stderr: "err\n" });
+  });
+
+  test("a hung call is killed at its timeout, even with a child holding the pipes", async () => {
+    const start = Date.now();
+    const res = await spawnGhRunner(script("sleep 30"), 50)([]);
+    expect(res.timedOut).toBe(true);
+    expect(Date.now() - start).toBeLessThan(5_000);
+    expect(readGhAnswer(res, [1]).unanswered).toBe(true);
+  });
+});

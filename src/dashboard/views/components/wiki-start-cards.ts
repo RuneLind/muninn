@@ -39,6 +39,7 @@ import {
   type RefreshView,
   type WorkMapGetBody,
 } from "./wiki-work-card.ts";
+import type { WorkMapChecksBody } from "../../../wiki/work-map/gh-check.ts";
 import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
 import { declarationKey, isThemeMap } from "../../../wiki/work-map/join.ts";
 import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
@@ -803,6 +804,7 @@ function transition(e: SlotEvent): void {
     pendingFocus = null;
     if (workPollTimer) clearTimeout(workPollTimer);
     workPollTimer = null;
+    resetWorkChecks();
   }
   if (isCardKind(slot.kind)) wnFocusPending = false;
   applySlot();
@@ -831,6 +833,8 @@ function applySlot(): void {
 function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
   const prev = slot;
   transition(e);
+  // A start view that renders after a failed check tries again.
+  if (e.type === "mount" && workChecks?.failed) workChecks = { ...workChecks, fetchedAt: 0 };
   if (e.type === "adopt" && slot === prev) {
     // The run did not move, but a page may have declared an effort since it
     // (P6): re-join, and only when something a join reads changed, so an
@@ -985,7 +989,13 @@ function paintWorkCard(override?: FocusKey): void {
     refresh: workRefresh,
     waitsCounted: deps.waitsCounted ? deps.waitsCounted() : false,
     strip: stripView,
+    checks: {
+      body: workChecks?.body ?? null,
+      failed: !!workChecks?.failed,
+      retrying: workChecksTimer !== null || workChecksGen === slot.gen,
+    },
   });
+  ensureWorkChecks();
   if (typeof el.querySelectorAll === "function") {
     el.querySelectorAll<HTMLDetailsElement>("details[data-wm-lane]").forEach((d) => {
       const open = laneOpen.get(d.getAttribute("data-wm-lane") ?? "");
@@ -1025,6 +1035,69 @@ function paintWorkError(el: HTMLElement): void {
     '<button class="wiki-wn-retry" id="wikiWorkMapRetry">Retry</button></div>';
   applySlot();
   if (refocus) resolveFocus(el, refocus);
+}
+
+// ── The GitHub check (plan muninn-wiki-your-work-board, P2) ───────────
+/** The last answer; it repaints through `paintWorkCard`, so `stripKey` stays out of it. */
+let workChecks: { body: WorkMapChecksBody | null; fetchedAt: number; runAt: number; failed: boolean } | null = null;
+/** The generation of the fetch in flight, if any. */
+let workChecksGen: number | null = null;
+let workChecksTimer: ReturnType<typeof setTimeout> | null = null;
+/** Fetches made because the last answer said `refreshing`. */
+let workChecksRetries = 0;
+
+/** An answer older than this is fetched again when the start view renders. */
+const WORK_CHECKS_TTL_MS = 60 * 60_000;
+const WORK_CHECKS_RETRY_MS = 15_000;
+const WORK_CHECKS_RETRIES_MAX = 3;
+
+function resetWorkChecks(): void {
+  workChecks = null;
+  workChecksGen = null;
+  workChecksRetries = 0;
+  if (workChecksTimer) clearTimeout(workChecksTimer);
+  workChecksTimer = null;
+}
+
+/** Fetch unless an answer for this map is young enough. A new map's marks are
+ *  the server's to compute, so a new `runAt` fetches at once. */
+function ensureWorkChecks(): void {
+  if (!workBody || isThemeMap(workBody.map) || workChecksGen === slot.gen || workChecksTimer) return;
+  if (workChecks && workChecks.runAt === workBody.map.runAtMs && Date.now() - workChecks.fetchedAt < WORK_CHECKS_TTL_MS) return;
+  workChecksRetries = 0;
+  fetchWorkChecks();
+}
+
+function fetchWorkChecks(): void {
+  if (!workBody) return;
+  const gen = slot.gen;
+  const runAt = workBody.map.runAtMs;
+  workChecksGen = gen;
+  fetch(withWiki("/api/wiki/work-map/checks"))
+    .then(async (res) => {
+      const body = (await res.json().catch(() => null)) as WorkMapChecksBody | null;
+      if (!res.ok || !body || typeof body.checked !== "number") throw new Error("HTTP " + res.status);
+      return body;
+    })
+    .then((body) => {
+      if (!slotLive(slot, gen)) return;
+      workChecksGen = null;
+      workChecks = { body, fetchedAt: Date.now(), runAt, failed: false };
+      if (body.refreshing && workChecksRetries < WORK_CHECKS_RETRIES_MAX) {
+        workChecksRetries++;
+        workChecksTimer = setTimeout(() => {
+          workChecksTimer = null;
+          fetchWorkChecks();
+        }, WORK_CHECKS_RETRY_MS);
+      }
+      paintWorkCard();
+    })
+    .catch(() => {
+      if (!slotLive(slot, gen)) return;
+      workChecksGen = null;
+      workChecks = { body: workChecks?.body ?? null, fetchedAt: Date.now(), runAt, failed: true };
+      paintWorkCard();
+    });
 }
 
 /** A GET this instance answered without a map body: an HTTP error, or a 2xx

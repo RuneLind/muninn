@@ -23,6 +23,7 @@ import { getLog } from "../../logging.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../readonly.ts";
 import { getWikiRegistry } from "../registry-memo.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
+import { realGhCheckDeps } from "./gh-check.ts";
 import { realWarmInputDeps } from "./inputs.ts";
 import {
   abortWorkMapRuns,
@@ -126,6 +127,7 @@ export function realWorkMapRunDeps(config: Config): WorkMapRunDeps {
     exists: (abs) => Bun.file(abs).exists(),
     model: realWorkMapModel(config),
     state,
+    ghCheck: realGhCheckDeps(),
   };
 }
 

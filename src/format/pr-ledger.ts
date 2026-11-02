@@ -242,6 +242,12 @@ export interface LedgerRow {
   link: number | null;
   /** The number the strip shows: slate, else link. */
   pr: number | null;
+  /** The row's OWN PR, which the GitHub check compares its state with: the
+   *  first full pull URL in the first, PR and Landed cells, then in the state
+   *  cell when the word opening it is the one that set the state. Unlike
+   *  `link` it never reads another cell, where a PR is a dependency. Absent
+   *  when the row has none. */
+  ownPr?: { repo: string; n: number };
   state: PrState;
   /** Which rule gave the state: 1–3, 0 for unknown. */
   rule: 0 | 1 | 2 | 3;
@@ -359,6 +365,23 @@ function linkOf(cells: string[], preferred: number[]): number | null {
   return null;
 }
 
+const FULL_PR_URL_RE = /https:\/\/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\/pull\/(\d{1,7})(?!\d)/;
+
+function fullPrLink(cell: string): { repo: string; n: number } | undefined {
+  const m = FULL_PR_URL_RE.exec(cell);
+  return m ? { repo: m[1]!, n: Number(m[2]) } : undefined;
+}
+
+function ownPrOf(cells: string[], prCol: number, landedCol: number, stateCol: number, state: PrState): LedgerRow["ownPr"] {
+  for (const i of [0, prCol, landedCol]) {
+    const own = i >= 0 ? fullPrLink(cells[i] ?? "") : undefined;
+    if (own) return own;
+  }
+  if (stateCol < 0) return undefined;
+  const opening = WORD_AT_START_RE.exec(plain(cells[stateCol] ?? "").replace(/^[_*[]+/, ""));
+  return opening && stateWord(opening[1]!) === state ? fullPrLink(cells[stateCol] ?? "") : undefined;
+}
+
 function stateWord(word: string): Exclude<PrState, "unknown"> {
   const w = word.toLowerCase().replace(/\s+/g, " ");
   return STATE_WORDS.find(([s]) => s === w)![1];
@@ -418,7 +441,8 @@ export function parseLedgerTable(headers: string[], rows: string[][], source: Le
     const pr = slate ?? link;
     if (pr === null) continue;
     const { state, rule } = source === "glance" ? { state: "planned" as const, rule: 0 as const } : rowState(live, stateColumn, landedCol);
-    out.push({ slate, link, pr, state, rule, decisions: decisionsOf(cells, decisionsCol), label, cells });
+    const ownPr = ownPrOf(live, prCol, landedCol, stateColumn, state);
+    out.push({ slate, link, pr, ...(ownPr ? { ownPr } : {}), state, rule, decisions: decisionsOf(cells, decisionsCol), label, cells });
   }
   const known = out.filter((r) => r.state !== "unknown").length;
   const parsedShare = out.length ? known / out.length : 0;

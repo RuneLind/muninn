@@ -1,5 +1,5 @@
 /**
- * The work map's two routes (`src/wiki/work-map/`), in the `wiki` tool group,
+ * The work map's three routes (`src/wiki/work-map/`), in the `wiki` tool group,
  * so `MUNINN_PROFILE=nais` drops them with the rest of the filesystem-bound
  * wiki surface.
  *
@@ -15,6 +15,8 @@
  *    success, or the newest post-model failure, is under 10 minutes old and
  *    the request does not say `force=1`. The 429 is not recorded as an
  *    attempt, so it never touches the loop's retry gate.
+ *  - `GET /api/wiki/work-map/checks?wiki=` is the card's GitHub check
+ *    (`work-map/gh-check.ts`). It spawns `gh`, so it is on `SIDE_EFFECTING_GETS`.
  */
 
 import type { Context, Hono } from "hono";
@@ -24,6 +26,7 @@ import { getLog } from "../../logging.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
+import { checkWorkMapPrs, disabledChecksBody } from "../../wiki/work-map/gh-check.ts";
 import { workMapRunDepsFor } from "../../wiki/work-map/loop.ts";
 import { startWorkMapRun, workMapOrganizable, workMapRunInFlight, type WorkMapRunDeps } from "../../wiki/work-map/run.ts";
 import { readMapFile } from "../../wiki/work-map/map-file.ts";
@@ -72,6 +75,26 @@ export function registerWikiWorkMapRoutes(
       if (running) body.running = running;
     }
     return c.json(body);
+  });
+
+  // The card's GitHub check, outside `workMapCache`, so the map GET stays a file
+  // read for every surface that shares it. A wiki with no work map, a themes map
+  // or a read-only root never reaches `gh`.
+  app.get("/api/wiki/work-map/checks", async (c) => {
+    const deps = depsFor();
+    if (!c.req.query("wiki")?.trim()) return c.json({ error: "wiki is required" }, 400);
+    const entry = resolve(c, deps);
+    if (!entry) return c.json({ error: "no wiki configured for that name" }, 404);
+    const text = await deps.readText(path.join(entry.root, WORK_MAP_FILE));
+    const stored = text === null ? null : readMapFile(text);
+    if (!stored || stored.kind !== "work") return c.json({ error: "this wiki has no work map to check" }, 404);
+    if (!deps.ghCheck || (deps.isReadonlyRoot ?? isReadonlyWikiRoot)(entry.root)) return c.json(disabledChecksBody(deps.now()));
+    try {
+      return c.json(await checkWorkMapPrs({ wiki: entry.name, root: entry.root, map: stored.map }, deps.ghCheck, deps.now));
+    } catch (err) {
+      log.warn("The GitHub check for {wiki} failed: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "the GitHub check failed" }, 500);
+    }
   });
 
   app.post("/api/wiki/work-map/refresh", async (c) => {

@@ -2596,8 +2596,10 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wm-status { font-size: 12px; color: var(--text-soft); margin: 2px 0 6px; }
     .wiki-wm-status.warn { color: var(--tone-warn); }
-    .wiki-wm-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; margin: 2px 0 8px; }
+    /* Flex, so five cells share one row at the default width and a cell that wraps fills its row. */
+    .wiki-wm-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 8px; }
     .wiki-wm-cell {
+      flex: 1 1 92px; min-width: 0; overflow-wrap: anywhere;
       border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 10px; background: var(--bg-surface);
       display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start;
       text-align: left; font: inherit; color: var(--text-secondary); cursor: pointer;
@@ -2615,6 +2617,14 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-cell.warn b { color: var(--tone-warn); }
     .wiki-wm-cell.muted b { color: var(--text-soft); }
     .wiki-wm-cell.unset b { font-size: 13px; line-height: 1.3; font-weight: 600; color: var(--text-soft); }
+    .wiki-wm-cell.bad b { color: var(--tone-err); }
+    .wiki-wm-cell.wide { flex-basis: 100%; }
+    .wiki-wm-cell span.wiki-wm-cell-note { display: block; margin-top: 2px; font-size: 11.5px; color: var(--text-soft); }
+    .wiki-wm-cell-note code { font-size: 11px; background: var(--bg-inset); color: var(--text-secondary); padding: 0 4px; border-radius: 4px; }
+    .wiki-wm-need.gh-done .wiki-wm-need-title, .wiki-wm-need.gh-done .wiki-wm-action { text-decoration: line-through; }
+    .wiki-wm-ghnote { margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--tone-info); overflow-wrap: anywhere; }
+    .wiki-wm-ghnote.done { color: var(--tone-good); }
+    .wiki-wm-ghnote.warn { color: var(--tone-warn); font-weight: 600; }
     .wiki-wm-drill { border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 12px; margin: 4px 0 8px; font-size: 13px; background: var(--bg-surface); }
     .wiki-wm-drill-title { font-weight: 600; color: var(--text-primary); }
     .wiki-wm-drill-list { margin: 4px 0; padding-left: 20px; color: var(--text-secondary); overflow-wrap: anywhere; }
