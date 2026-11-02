@@ -66,7 +66,7 @@ function sizeAdvice(path: string, tree: Tree): string {
 }
 
 /**
- * Same tokens as marked's own, without its cost here: on Bun these five rules take time
+ * Same tokens as marked's own, bar `raw` and blank-line `space`, without its cost here: on Bun these five rules take time
  * proportional to all the remaining text each time they fail, 2.4 s of 2.5 s on a 591k file.
  * Each is skipped when the block cannot match it, and lheading cannot pass a blank line.
  */
