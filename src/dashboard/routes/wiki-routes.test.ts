@@ -37,7 +37,7 @@ import { integrateBodyLen, pageHasComponentVocabulary } from "../../wiki/integra
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
-import { __resetWikiCacheForTest, getWikiIndex } from "../../wiki/store.ts";
+import { __resetWikiCacheForTest, __setWikiIndexAnswerConfigForTest, getWikiIndex } from "../../wiki/store.ts";
 import { readLogMtimeMs, type WikiDigest } from "../../wiki/digest.ts";
 import { EXPLAINER_BRIDGE_MARKER } from "../../wiki/explainer-bridge.ts";
 import { ASK_CHAT_SEED_MAX } from "../../wiki/ask-chat.ts";
@@ -701,6 +701,7 @@ describe("GET /api/wiki/pages — waitsCounted", () => {
   });
 
   afterEach(async () => {
+    __setWikiIndexAnswerConfigForTest(null);
     if (prev.extra === undefined) delete process.env.WIKI_EXTRA;
     else process.env.WIKI_EXTRA = prev.extra;
     __resetWikiRegistryForTest();
@@ -708,17 +709,39 @@ describe("GET /api/wiki/pages — waitsCounted", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  const counted = async (wiki: string, wikiAnswers: { wikis: Set<string>; owner: string | null }) => {
+  type Answers = { wikis: Set<string>; owner: string | null; groups?: Map<string, Set<string>> };
+  // `index` is what the index was built with; it defaults to what the route is given.
+  const counted = async (wiki: string, wikiAnswers: Answers, index: Answers = wikiAnswers) => {
+    __setWikiIndexAnswerConfigForTest(index);
+    __resetWikiCacheForTest();
     const app = new Hono();
     registerWikiRoutes(app, { wikiAnswers } as unknown as Parameters<typeof registerWikiRoutes>[1]);
     const body = (await (await app.request(`/api/wiki/pages?wiki=${wiki}`)).json()) as Record<string, unknown>;
     return body.waitsCounted;
   };
+  const wikis = new Set(["waitswiki"]);
 
   test("true only with an owner on a wiki that takes answers", async () => {
-    expect(await counted("waitswiki", { wikis: new Set(["waitswiki"]), owner: "Kari (A1)" })).toBe(true);
-    expect(await counted("otherwiki", { wikis: new Set(["waitswiki"]), owner: "Kari (A1)" })).toBe(false);
-    expect(await counted("waitswiki", { wikis: new Set(["waitswiki"]), owner: null })).toBe(false);
+    expect(await counted("waitswiki", { wikis, owner: "Kari (A1)" })).toBe(true);
+    expect(await counted("otherwiki", { wikis, owner: "Kari (A1)" })).toBe(false);
+    expect(await counted("waitswiki", { wikis, owner: null })).toBe(false);
+  });
+
+  test("an owner who cannot be asked anything is no owner", async () => {
+    const groups = new Map([["utvikler", new Set(["A1"])]]);
+    expect(await counted("waitswiki", { wikis, owner: '""' })).toBe(false);
+    expect(await counted("waitswiki", { wikis, owner: "utvikler", groups })).toBe(false);
+    expect(await counted("waitswiki", { wikis, owner: "Kari Testdal", groups })).toBe(true);
+  });
+
+  test("the route and the index must both have an owner, so neither alone paints a 0", async () => {
+    const set = { wikis, owner: "Kari (A1)" };
+    const unset = { wikis, owner: null };
+    expect(await counted("waitswiki", set, unset)).toBe(false);
+    expect(await counted("waitswiki", unset, set)).toBe(false);
+    const groups = new Map([["utvikler", new Set(["A1"])]]);
+    expect(await counted("waitswiki", { wikis, owner: '""' }, set)).toBe(false);
+    expect(await counted("waitswiki", { wikis, owner: "utvikler", groups }, set)).toBe(false);
   });
 });
 

@@ -871,7 +871,8 @@ export interface WikiPageMeta {
    * DECISIONS WAITING — the open `<Question>` ids a `waiting` lane names that ask
    * `WIKI_ANSWER_OWNER` (`waitsOnOwner`, `next-moves.ts`). Derived at index time
    * and absent, not 0, on a page with none or with no owner configured; the
-   * listing's `waitsCounted` says whether it applies to this wiki.
+   * listing's `waitsCounted` says whether it applies to this wiki. Only
+   * `/api/wiki/pages` serves it, and not on the read slice (`toListing`).
    */
   movesWaiting?: number;
   /** The oldest parsed `since=` (`YYYY-MM-DD`) among the lanes holding a counted
@@ -990,6 +991,9 @@ export interface WikiTrail {
 
 export interface WikiIndex {
   pages: WikiPageMeta[];
+  /** This build had an owner to count `movesWaiting` for (`waitOwnerFrom`), so an
+   *  absent count means 0 rather than «not counted». */
+  waitOwnerSet?: boolean;
   /**
    * Outgoing link targets per page, keyed by normalized lowercased relPath
    * (`normalizeRelPath`); values are target relPaths in the same form.
@@ -4290,6 +4294,7 @@ export async function buildWikiIndex(
 
   return {
     pages,
+    waitOwnerSet: waitOwner !== null,
     outgoing,
     backlinks,
     resolve,

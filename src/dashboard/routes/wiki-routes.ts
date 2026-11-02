@@ -6,6 +6,7 @@ import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest, resolveScopedPage, type ScopedPageLookup } from "./wiki-read-scope.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
+import { waitOwnerFrom } from "../../wiki/next-moves.ts";
 import { getWikiIndex, normalizeRelPath, parseFrontmatter, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { pageDecisionDataOf } from "../../wiki/decision-text.ts";
 import { DECISION_CHAIN_LINES_MAX, lineageLine } from "../../format/decision-chain.ts";
@@ -1125,15 +1126,17 @@ export interface WikiPageListing extends WikiPageMeta {
 
 /** Exported for `trackers/store-issues.test.ts`, which drives the real
  *  compaction rather than restating it. */
-/** The owner is set and `wikiName` takes answers: `movesWaiting` means something. */
-export function waitsCountedFor(wikiName: string | undefined, cfg: WikiAnswerConfig): boolean {
-  return !!cfg.owner && wikiTakesAnswers(wikiName, cfg);
+/** `movesWaiting` means something: `wikiName` takes answers and an owner is set,
+ *  both for this route and for the build that counted (`config.wikiAnswers` is
+ *  injectable, the index reads its own), so a lone owner can never paint a 0. */
+export function waitsCountedFor(wikiName: string | undefined, cfg: WikiAnswerConfig, index: Pick<WikiIndex, "waitOwnerSet">): boolean {
+  return !!index.waitOwnerSet && waitOwnerFrom(cfg) !== null && wikiTakesAnswers(wikiName, cfg);
 }
 
 export function toListing(
   index: WikiIndex,
   meta: WikiPageMeta,
-  opts: { includeDesc?: boolean; includeProvenance?: boolean; includeCull?: boolean; includeWork?: boolean } = {},
+  opts: { includeDesc?: boolean; includeProvenance?: boolean; includeCull?: boolean; includeWork?: boolean; includeWaits?: boolean } = {},
 ): WikiPageListing {
   // `desc` + `pubDate` are stripped by default: they are page-body fields no
   // LISTING consumer reads, and on jarvis they add ~100 KB to the hot
@@ -1147,6 +1150,7 @@ export function toListing(
   //      same response, which are link-heavy pages' bulk. Strip.
   //   4. `/api/wiki/page`'s and `/api/wiki/related`'s `related` rows
   //      (`relatedRows`) — caller 3's shape plus `why`/`strength`/`signals`. Strip.
+  //      `movedWith` rows are this shape too, with `movedN`.
   // So a field stripped for payload size (e.g. `status_note`) also goes out of
   // reach of the reader, and a field opted IN for caller 2 must not be opted in
   // for callers 3 or 4, which would re-bloat exactly the pages this strip protects.
@@ -1200,6 +1204,13 @@ export function toListing(
   // any, read by the rail's ✋ row flag and "waiting on you" chip. The client,
   // not this function, hides those two on a shared instance (nais).
   //
+  // `movesWaiting` and `waitingSince` are the FIFTH opt-in, `includeWaits`, passed
+  // by caller 1 alone and never on the read slice. Stripping is the default
+  // because they cannot just be hidden client-side as `movesYou` is: the count
+  // applies the owner's group membership, so a pod reader comparing it with a
+  // page's `q-for` line learns the group, and membership never leaves the server
+  // (`lane-roles.ts`). The slice serves no work map, so it has no reader for them.
+  //
   // `work` (the page's session events, `work-focus.ts`) is the FOURTH opt-in,
   // `includeWork`, passed by callers 1 and 2: the rail scores from the listing
   // and the article header reads the open page's meta, while the outgoing,
@@ -1225,6 +1236,8 @@ export function toListing(
     related,
     relatedSkipped,
     relatedAmbiguous,
+    movesWaiting,
+    waitingSince,
     ...rest
   } = meta;
   void pubDate;
@@ -1250,6 +1263,7 @@ export function toListing(
       ? { ...(cullReason ? { cullReason } : {}), ...(supersededBy ? { supersededBy } : {}) }
       : {}),
     ...(opts.includeWork && work ? { work } : {}),
+    ...(opts.includeWaits ? { ...(movesWaiting ? { movesWaiting } : {}), ...(waitingSince ? { waitingSince } : {}) } : {}),
     linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
     backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
   };
@@ -1617,7 +1631,7 @@ export function registerWikiReadRoutes(
       return c.json({ pages: [], scannedAt: null, error: "wiki directory not found" });
     }
     return c.json({
-      pages: index.pages.map((m) => toListing(index, m, { includeWork: true })),
+      pages: index.pages.map((m) => toListing(index, m, { includeWork: true, includeWaits: !readSliceOnly })),
       scannedAt: index.scannedAt,
       // The wiki's ordered type list + labels (built-in defaults merged with its
       // `.wiki-reader.json` customs). The client stores this and renders every
@@ -1677,8 +1691,9 @@ export function registerWikiReadRoutes(
       // route re-checks; this only decides whether the button renders.
       ...fellesPublishPayloadField(entry?.name, entry?.root),
       // Whether the index's `movesWaiting` applies here. The index has no wiki
-      // name, so the wiki half of the gate sits where the name is known.
-      waitsCounted: waitsCountedFor(entry?.name, config.wikiAnswers ?? resolveWikiAnswerConfig()),
+      // name, so the wiki half of the gate sits where the name is known. Off the
+      // read slice with the fields it describes (`toListing`).
+      ...(readSliceOnly ? {} : { waitsCounted: waitsCountedFor(entry?.name, config.wikiAnswers ?? resolveWikiAnswerConfig(), index) }),
       // A bucket-mirrored root's health, present only while the mirror is not
       // up to date (finding 32): no object names, paths or error text.
       ...bucketMirrorPayloadField(resolveWikiRoot(root)),

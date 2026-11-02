@@ -12,8 +12,11 @@
 
 import { parseBlocks, countedNextMovesLanes, type Block, type LaneKind } from "../format/markdown-ast.ts";
 import {
+  authorGroupsOf,
+  foldName,
   isAskedAuthor,
   namedQuestionIds,
+  ownerGroupName,
   parseQuestionPage,
   parseQuestionsTo,
   parseQuestionTarget,
@@ -35,8 +38,8 @@ export interface PageNextMoves {
   /** The `you` lanes' item lead sentences, plain text, first `MOVES_STEPS_MAX`. */
   youSteps: string[];
   /** The counted `waiting` lanes, each with its parsed `since` (null when absent
-   *  or not a date) and its open steps as written. */
-  waiting: { since: string | null; items: string[] }[];
+   *  or not a date), its open steps as written, and who it says it waits on. */
+  waiting: { since: string | null; items: string[]; who: string | null; role: string | null }[];
   /** The parsed body, so {@link waitsOnOwner} needs no second parse. */
   blocks: Block[];
 }
@@ -58,7 +61,7 @@ export function extractNextMoves(content: string): PageNextMoves | null {
   const waiting: PageNextMoves["waiting"] = [];
   for (const lane of lanes) {
     counts[lane.kind] += lane.items.length;
-    if (lane.kind === "waiting") waiting.push({ since: lane.since, items: lane.items });
+    if (lane.kind === "waiting") waiting.push({ since: lane.since, items: lane.items, who: lane.who, role: lane.role });
     if (lane.kind !== "you") continue;
     for (const item of lane.items) {
       if (youSteps.length < MOVES_STEPS_MAX) youSteps.push(leadSentence(item));
@@ -75,18 +78,38 @@ export interface WaitOwner {
   groups: AnswerGroups;
 }
 
-/** The owner as {@link waitsOnOwner} reads it, or null when none is set. */
+/** The owner as {@link waitsOnOwner} reads it, or null when none is set: the one
+ *  definition of «owner set». An owner nothing can ask is none: a value with no
+ *  target in it, or a group name, which is not a person. A name with no ident
+ *  stays an owner. */
 export function waitOwnerFrom(cfg: { owner: string | null; groups?: AnswerGroups }): WaitOwner | null {
   const target = cfg.owner ? parseQuestionTarget(cfg.owner) : null;
-  if (!cfg.owner || !target) return null;
-  return { owner: cfg.owner, author: { name: target.name, navIdent: target.ident }, groups: cfg.groups ?? new Map() };
+  const groups = cfg.groups ?? new Map();
+  if (!cfg.owner || !target || ownerGroupName(cfg.owner, groups)) return null;
+  return { owner: cfg.owner, author: { name: target.name, navIdent: target.ident }, groups };
+}
+
+// `-` joins a word: `Kari-Anne` does not name Kari, and a group key such as
+// `fag-jus` stays one word.
+const NOT_WORD_RE = /[^\p{L}\p{M}\p{N}_-]+/u;
+const wordsOf = (text: string) => foldName(text).split(NOT_WORD_RE).filter(Boolean);
+
+/** Can this lane hold the owner's wait? A `role` decides alone, by membership. A
+ *  `who` must name the owner: a whole word from their name or ident, or a group
+ *  they are in. A lane saying neither leaves it to the question's targets. */
+function isOwnersLane(lane: PageNextMoves["waiting"][number], who: WaitOwner): boolean {
+  const memberOf = authorGroupsOf(who.author.navIdent, who.groups);
+  if (lane.role) return memberOf.includes(lane.role);
+  if (!lane.who) return true;
+  const written = new Set(wordsOf(lane.who));
+  return [who.author.name, who.author.navIdent ?? "", ...memberOf].flatMap(wordsOf).some((w) => written.has(w));
 }
 
 /**
  * What waits on the owner on this page: the one rule behind the strip and the
- * board. The distinct `<Question>` ids a counted `waiting` lane names that are
- * open and ask the owner, and the oldest parsed `since` among the lanes holding
- * one. A wikilink names nothing (the reader parks them before it scans) and a
+ * board. The distinct `<Question>` ids that a counted `waiting` lane of the
+ * owner's ({@link isOwnersLane}) names and that are open and ask the owner, and
+ * the oldest parsed `since` among the lanes holding one. A wikilink names nothing (the reader parks them before it scans) and a
  * duplicated id does not count, so the reader's lane counts and this agree. An
  * id absent from `states` is open, as the reader treats it.
  */
@@ -107,6 +130,7 @@ export function waitsOnOwner(
   const ids = new Set<string>();
   let oldestSince: string | null = null;
   for (const lane of moves.waiting) {
+    if (!isOwnersLane(lane, who)) continue;
     const named = lane.items.flatMap((item) => namedQuestionIds(item.replace(WIKILINK_WITH_LABEL_RE, "\x00"), asked));
     if (!named.length) continue;
     for (const id of named) ids.add(id);

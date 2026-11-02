@@ -177,7 +177,7 @@ export function resolveQuestionTargets(
  *  NFC — in that order, or a format character between a letter and its
  *  combining mark blocks the composition — white space collapsed, lower-cased:
  *  a name pasted from a document still matches. */
-const foldName = (s: string) =>
+export const foldName = (s: string) =>
   s.replace(/\p{Cf}/gu, "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
 
 /** `WIKI_ANSWER_GROUPS`: group name (lower-case) → member NAV idents (upper-case). */

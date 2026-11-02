@@ -393,6 +393,87 @@ describe("waitsOnOwner", () => {
   });
 });
 
+describe("waitsOnOwner: only the owner's lane holds a counted item", () => {
+  const outside = waitOwnerFrom({ owner: "Ola Testdal (C000000)", groups: GROUPS })!;
+  const onLane = (attrs: string, question = q("O1"), owner = who) => waits(page([lane(["O1"], attrs)], [question]), owner).ids;
+
+  test('a role="fag" lane the owner is not in holds nothing, whatever the question says', () => {
+    expect(onLane('role="fag"')).toEqual([]);
+    expect(onLane('role="fag"', q("O1", "utvikler"))).toEqual([]);
+    expect(onLane('role="fag"', q("O1", OWNER))).toEqual([]);
+  });
+
+  test("a role lane counts for its member, by ident, and not for someone outside it", () => {
+    expect(onLane('role="utvikler"')).toEqual(["O1"]);
+    expect(onLane('role="Utvikler"', q("O1", "utvikler"))).toEqual(["O1"]);
+    expect(onLane('role="utvikler"', q("O1", "Ola Testdal (C000000)"), outside)).toEqual([]);
+    const nameOnly = waitOwnerFrom({ owner: "Kari Testdal", groups: GROUPS })!;
+    expect(onLane('role="utvikler"', q("O1"), nameOnly)).toEqual([]);
+  });
+
+  test("the question's rule still applies inside the owner's lane", () => {
+    expect(onLane('role="utvikler"', q("O1", "fag"))).toEqual([]);
+    expect(onLane('who="Waiting on Kari"', q("O1", "fag"))).toEqual([]);
+  });
+
+  test("a role decides even with a who beside it", () => {
+    expect(onLane('role="fag" who="Waiting on Kari"')).toEqual([]);
+    expect(onLane('role="utvikler" who="Waiting on the calendar"')).toEqual(["O1"]);
+  });
+
+  test("a who naming nobody the owner is holds nothing", () => {
+    for (const text of ["Waiting on the calendar", "Venter på prioritering", "Claude", "Next", "Whoever next touches it", "Venter på fag"]) {
+      expect(`${text}: ${onLane(`who="${text}"`)}`).toBe(`${text}: `);
+    }
+  });
+
+  test("a who names the owner by a name token, the ident or a group they are in", () => {
+    for (const text of ["Waiting on Kari", "venter på TESTDAL", "Waiting on a123456", "Venter på Utvikler", "(Kari)", "Kari's call"]) {
+      expect(`${text}: ${onLane(`who="${text}"`)}`).toBe(`${text}: O1`);
+    }
+    const rune = waitOwnerFrom({ owner: "Rune Lind (RUNE)", groups: new Map([["utvikler", new Set(["RUNE"])]]) })!;
+    expect(onLane('who="Waiting on Rune"', q("O1", "utvikler"), rune)).toEqual(["O1"]);
+  });
+
+  test("a who match is a whole word, with non-Latin letters as word characters", () => {
+    for (const text of ["Karianne", "Testdalen", "Mari-Kari", "Kari-Anne"]) {
+      expect(`${text}: ${onLane(`who="${text}"`)}`).toBe(`${text}: `);
+    }
+    const ase = waitOwnerFrom({ owner: "Åse Ørn (D111111)" })!;
+    expect(onLane('who="Venter på Åse"', q("O1"), ase)).toEqual(["O1"]);
+    expect(onLane('who="Venter på ØRN"', q("O1"), ase)).toEqual(["O1"]);
+    expect(onLane(`who="Venter på ${"Åse".normalize("NFD")}"`, q("O1"), ase)).toEqual(["O1"]);
+    for (const text of ["Åsebø", "Bråse", "Ørnulf", "Sørn"]) {
+      expect(`${text}: ${onLane(`who="${text}"`, q("O1"), ase)}`).toBe(`${text}: `);
+    }
+  });
+
+  test("a lane with neither role nor who is open to the question's rule", () => {
+    expect(onLane('since="2026-09-30"')).toEqual(["O1"]);
+    expect(onLane('since="2026-09-30"', q("O1", "fag"))).toEqual([]);
+  });
+
+  test("a lane that is not the owner's does not move the oldest since", () => {
+    const content = page([lane(["O1"], 'role="fag" since="2020-01-01"'), lane(["O1"], 'who="Waiting on Kari" since="2026-10-05"')], [q("O1")]);
+    expect(waits(content)).toEqual({ ids: ["O1"], oldestSince: "2026-10-05" });
+  });
+});
+
+describe("waitOwnerFrom: an owner who can be asked something", () => {
+  test("blank after the target parse is not set", () => {
+    expect(waitOwnerFrom({ owner: '""' })).toBeNull();
+    expect(waitOwnerFrom({ owner: "''" })).toBeNull();
+  });
+
+  test("a group name is not a person, in any case; a bare name beside no such group is", () => {
+    expect(waitOwnerFrom({ owner: "utvikler", groups: GROUPS })).toBeNull();
+    expect(waitOwnerFrom({ owner: "UTVIKLER", groups: GROUPS })).toBeNull();
+    expect(waitOwnerFrom({ owner: "utvikler" })?.owner).toBe("utvikler");
+    expect(waitOwnerFrom({ owner: "Kari Testdal", groups: GROUPS })?.author).toEqual({ name: "Kari Testdal", navIdent: null });
+    expect(waitOwnerFrom({ owner: "utvikler (A123456)", groups: GROUPS })?.author.navIdent).toBe("A123456");
+  });
+});
+
 describe("buildWikiIndex: movesWaiting and waitingSince", () => {
   let root: string;
   afterEach(async () => {
@@ -427,6 +508,29 @@ describe("buildWikiIndex: movesWaiting and waitingSince", () => {
     expect(at("plans/other.mdx").waitingSince).toBeUndefined();
     expect(at("plans/nodate.mdx").movesWaiting).toBe(1);
     expect(at("plans/nodate.mdx").waitingSince).toBeUndefined();
+  });
+
+  test("a page's questions_to: reaches the rule", async () => {
+    __setWikiIndexAnswerConfigForTest({ owner: OWNER, groups: GROUPS });
+    const at = await index({
+      "plans/fag.mdx": page([lane(["O1"])], [q("O1")], 'questions_to: ["fag"]\n'),
+      "plans/mine.mdx": page([lane(["O1"])], [q("O1")], 'questions_to: ["utvikler"]\n'),
+    });
+    expect(at("plans/fag.mdx").movesWaiting).toBeUndefined();
+    expect(at("plans/mine.mdx").movesWaiting).toBe(1);
+  });
+
+  test("the index says whether it counted for an owner, and a group name is none", async () => {
+    __setWikiIndexAnswerConfigForTest({ owner: "utvikler", groups: GROUPS });
+    root = await testTempDir(path.join(tmpdir(), "muninn-waits-"));
+    await writeFile(path.join(root, "two.mdx"), FILES["plans/two.mdx"], "utf8");
+    const group = await buildWikiIndex(root);
+    expect(group.waitOwnerSet).toBe(false);
+    expect(group.pages[0]!.movesWaiting).toBeUndefined();
+    __setWikiIndexAnswerConfigForTest({ owner: OWNER, groups: GROUPS });
+    const person = await buildWikiIndex(root);
+    expect(person.waitOwnerSet).toBe(true);
+    expect(person.pages[0]!.movesWaiting).toBe(2);
   });
 
   test("no owner, no field on any page", async () => {
