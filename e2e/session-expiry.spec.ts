@@ -155,7 +155,10 @@ async function open(page: Page, opts: Opts): Promise<void> {
     // nothing else here can produce that code. The handler HOLDS the socket
     // instead of closing it, because the close has to land after the page has
     // settled — see `closeWs` below.
-    await page.routeWebSocket("**/chat/ws", (ws) => { wsRoute = ws; });
+    await page.routeWebSocket("**/chat/ws", (ws) => {
+      hits.sockets += 1;
+      wsRoute = ws;
+    });
   }
 
   const me = page.waitForResponse((r) => r.url().includes("/chat/me"));
@@ -179,6 +182,8 @@ async function open(page: Page, opts: Opts): Promise<void> {
  */
 async function closeWs(page: Page, code: number): Promise<void> {
   await page.waitForFunction(() => !!document.querySelector("#chatMessages .empty-state"));
+  // init opens its socket only after `/chat/bots` answers, which can outlast the 250 ms.
+  await expect.poll(() => wsRoute !== null, { message: "closeWs needs interceptWs and a socket" }).toBe(true);
   await page.waitForTimeout(250);
   if (!wsRoute) throw new Error("closeWs called without interceptWs");
   wsRoute.close({ code });
@@ -498,26 +503,38 @@ test.describe("acceptance 19 — the breaker", () => {
   test("a second refusal inside the window shows the banner instead of reloading", async ({ page }) => {
     // Without this a persistent 401 — a Texas outage, an unrefreshable token —
     // is reload → init → 401 → reload from every open tab.
-    await open(page, { provider: "entra" });
-    // Armed BEFORE the first refusal, because the reload starts inside that
-    // evaluate. The reloaded page's provider stays null until its own
-    // `/chat/me` answers, and a ws refusal judged against a null provider is
-    // "ignore" — the race `open()` waits out for the first load.
-    const reloadedMe = page.waitForResponse((r) => r.url().includes("/chat/me"));
-    const first = await page.evaluate(() =>
-      (window as unknown as { __muninnAuthRefusal: (c: string) => string }).__muninnAuthRefusal("ws"));
-    expect(first).toBe("reload");
-
-    // The reload above is real; wait for the page to come back, then refuse
-    // again inside the 60 s window. The stamp lives in sessionStorage, so it
+    let navigations = 0;
+    page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations++; });
+    await open(page, { provider: "entra", interceptWs: true });
+    await closeWs(page, 4401);
+    // The goto, plus exactly one reload. The stamp lives in sessionStorage, so it
     // survives the navigation — which is the whole mechanism.
-    await page.waitForLoadState("load");
-    await page.waitForFunction(() => typeof (window as { authedFetch?: unknown }).authedFetch === "function");
-    await reloadedMe;
-    const second = await page.evaluate(() =>
-      (window as unknown as { __muninnAuthRefusal: (c: string) => string }).__muninnAuthRefusal("ws"));
-    expect(second).toBe("banner");
+    await expect.poll(() => navigations).toBe(2);
+
+    // A real close on the reloaded page's own socket. A bare `__muninnAuthRefusal("ws")`
+    // can land before init's connectWs, and that socket's open then takes the banner
+    // down, as it should for a channel that opened (CI, 2026-11-03; measured 5 ms apart).
+    await expect.poll(() => hits.sockets).toBe(2);
+    await closeWs(page, 4401);
     await expect(banner(page)).toBeVisible();
+    await page.waitForTimeout(400);
+    await expect(banner(page)).toBeVisible();
+    expect(navigations).toBe(2);
+  });
+
+  test("a session refused on every route keeps its banner through the next load", async ({ page }) => {
+    let navigations = 0;
+    page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations++; });
+    await open(page, { provider: "entra", refuseUpgrade: true });
+    // Everything from here on, so no 2xx can stand in for a recovery. The socket
+    // never opens, as a refused handshake never does.
+    await page.route(/\/(chat|api)\//, (route) => route.fulfill({ status: 401, json: ENTRA_401 }));
+    await expect.poll(() => navigations, { timeout: 10_000 }).toBe(2);
+    await expect(banner(page)).toBeVisible();
+    // Past the socket's first retry and an SSE reconnect, each of which re-asks.
+    await page.waitForTimeout(3500);
+    await expect(banner(page)).toBeVisible();
+    expect(navigations).toBe(2);
   });
 
   test("the breaker is shared with the EventSource channel", async ({ page }) => {
