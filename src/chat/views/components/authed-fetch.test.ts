@@ -183,7 +183,14 @@ interface Stub {
 
 /** Evaluate the real emitted script against a stubbed browser. */
 function evalScript(
-  opts: { status?: number; body?: unknown; raw?: string; storageThrows?: boolean } = {},
+  opts: {
+    status?: number;
+    body?: unknown;
+    raw?: string;
+    storageThrows?: boolean;
+    /** Answers each fetch itself, so a test decides the order responses land in. */
+    answer?: () => Promise<Response>;
+  } = {},
 ): Stub {
   const state = { reloads: 0, now: 1_700_000_000_000, fetches: 0, bannerAppends: 0 };
   const store: Record<string, string> = {};
@@ -233,6 +240,7 @@ function evalScript(
     },
     fetch: async () => {
       state.fetches++;
+      if (opts.answer) return opts.answer();
       if (opts.raw !== undefined) return new Response(opts.raw, { status: opts.status ?? 401 });
       const body = opts.body ?? { error: "unauthenticated", mode: "entra", loginUrl: LOGIN_URL_HINT };
       return new Response(JSON.stringify(body), { status: opts.status ?? 401 });
@@ -551,6 +559,105 @@ describe("the SSE/WS channel latch — a terminal refusal is TERMINAL", () => {
     await settle();
     expect(s.latched("http")).toBe(false);
     expect(s.banner()).toBe(false);
+  });
+
+  describe("a 2xx only counts as recovery when its request started after the refusal", () => {
+    const REFUSED = () => new Response("<html>401</html>", { status: 401 });
+    const OK = () => new Response("{}", { status: 200 });
+
+    /** Every fetch waits here until the test answers it, in any order. */
+    function heldFetches() {
+      const held: Array<(res: Response) => void> = [];
+      const s = evalScript({
+        answer: () => new Promise<Response>((resolve) => { held.push(resolve); }),
+      });
+      s.setProvider("entra");
+      const answer = async (index: number, res: Response) => {
+        held[index]!(res);
+        await settle();
+      };
+      return { s, answer };
+    }
+
+    test("a request started BEFORE the refused one, answered after it, leaves the banner up", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/older");
+      void s.authedFetch("/refused");
+      await answer(1, REFUSED());
+      expect(s.banner()).toBe(true);
+      await answer(0, OK());
+      expect(s.banner()).toBe(true);
+      expect(s.latched("http")).toBe(true);
+    });
+
+    test("so does one started after the refused request but before its 401 landed", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/refused");
+      void s.authedFetch("/between");
+      await answer(0, REFUSED());
+      await answer(1, OK());
+      expect(s.banner()).toBe(true);
+      expect(s.latched("http")).toBe(true);
+    });
+
+    test("a request started after the 401 landed takes the banner down", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/refused");
+      await answer(0, REFUSED());
+      expect(s.banner()).toBe(true);
+      void s.authedFetch("/after");
+      await answer(1, OK());
+      expect(s.banner()).toBe(false);
+      expect(s.latched("http")).toBe(false);
+    });
+
+    test("a second refusal moves the mark: a request older than IT no longer counts", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/first-refused");
+      await answer(0, REFUSED());
+      void s.authedFetch("/older-than-second");
+      void s.authedFetch("/second-refused");
+      await answer(2, REFUSED());
+      await answer(1, OK());
+      expect(s.banner()).toBe(true);
+      expect(s.latched("http")).toBe(true);
+    });
+
+    test("another channel latching does not move http's mark", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/refused");
+      await answer(0, REFUSED());
+      void s.authedFetch("/after");
+      s.refusal("ws");
+      await answer(1, OK());
+      expect(s.latched("http")).toBe(false);
+      expect(s.latched("ws")).toBe(true);
+    });
+
+    test("a latch from an armed reload is marked too", async () => {
+      const s = evalScript({
+        answer: () => new Promise<Response>((resolve) => { release = resolve; }),
+      });
+      let release: (res: Response) => void = () => {};
+      s.setProvider("entra");
+      void s.authedFetch("/older");
+      expect(s.refusal("http", LOGIN_URL_HINT)).toBe("reload");
+      release(OK());
+      await settle();
+      expect(s.latched("http")).toBe(true);
+    });
+  });
+
+  test("a 2xx leaves a banner whose channels have all been released", async () => {
+    // An explicit reconnect releases the latch and deliberately leaves the banner:
+    // with nothing latched, only the 'http' guard stands between a 2xx and removing it.
+    const s = evalScript({ status: 200, body: { ok: true } });
+    s.setProvider("local");
+    s.refusal("sse");
+    s.releaseLatch("sse");
+    await s.authedFetch("/chat/bots");
+    await settle();
+    expect(s.banner()).toBe(true);
   });
 
   test("a 2xx on a page where http was never latched removes NOTHING", async () => {
