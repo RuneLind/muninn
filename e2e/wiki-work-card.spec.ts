@@ -409,14 +409,23 @@ async function openStart(page: Page, wiki: string): Promise<string[]> {
   return digests;
 }
 
-/** The card paints twice on a load, and the second swaps every node: the checks
- *  answer changes the GitHub cell. A style or geometry read across that swap is
- *  empty, so a test that reads one waits for the answer first. */
-async function openStartSettled(page: Page, wiki: string): Promise<void> {
-  await openStart(page, wiki);
-  const card = page.locator("#wikiWorkCard");
-  await expect(card.locator('[data-wm-cell="steps"]')).toBeVisible();
-  await expect(card.locator('[data-wm-cell="github"] b', { hasText: "checking…" })).toHaveCount(0);
+/** Wait out the card's second paint on a load. The checks answer lands after the first paint and replaces every
+ *  cell, whatever it says: a real answer with the check off here drops the strip from 5 cells to 4, so a cell moves
+ *  out from under a hover, and a stubbed answer keeps the cell with its figure. Either way the cell's value stops
+ *  reading «checking…». The first line is needed: before the first paint there is no `github` cell either. */
+async function checksPainted(page: Page) {
+  await expect(page.locator('#wikiWorkCard [data-wm-cell="decisions"]')).toBeAttached();
+  await expect(page.locator('#wikiWorkCard [data-wm-cell="github"] b', { hasText: "checking…" })).toHaveCount(0);
+}
+
+/**
+ * `openStart` for a test that reads the card outside a web-first assertion, on a wiki with a strip. Never with an
+ * answer held on purpose: `checksPainted` would wait out its timeout.
+ */
+async function openSettled(page: Page, wiki: string): Promise<string[]> {
+  const digests = await openStart(page, wiki);
+  await checksPainted(page);
+  return digests;
 }
 
 test("a wiki with a map shows the card and never asks for the digest", async ({ page }) => {
@@ -454,13 +463,11 @@ test("a wiki with a map shows the card and never asks for the digest", async ({ 
 
 test("a long Needs-you why is clamped to two lines and opens from its keyboard control", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
-  await openStart(page, LONG);
+  await openSettled(page, LONG);
   const card = page.locator("#wikiWorkCard");
   const text = card.locator(".wiki-wm-why-text");
   const more = card.locator(".wiki-wm-why-more");
   const lines = () => text.evaluate((el) => Math.round(el.clientHeight / parseFloat(getComputedStyle(el).lineHeight)));
-  // Polled: the checks answer repaints the card, and an element caught across
-  // that repaint is detached, with no computed line height.
   await expect.poll(lines).toBe(2);
   await expect.poll(() => text.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
   await expect(text).toHaveAttribute("title", LONG_WHY.replace("⟦plans/alpha.mdx⟧", "Alpha plan"));
@@ -491,7 +498,9 @@ test("a why that fits its two lines offers no expand control", async ({ page }) 
 
 test("selecting text in an opened why leaves it open", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
-  await openStartSettled(page, LONG);
+  // Settled because a checks answer that changes the card wipes a selection on a real page too. That
+  // is tracked separately, and this test does not say a selection survives it.
+  await openSettled(page, LONG);
   const card = page.locator("#wikiWorkCard");
   const text = card.locator(".wiki-wm-why-text");
   await card.locator(".wiki-wm-why-more").click();
@@ -520,7 +529,7 @@ test("an opened why and focus on its control survive a ↻ poll repaint", async 
   });
   await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
   await page.clock.install();
-  await openStart(page, LONG);
+  await openSettled(page, LONG);
   const card = page.locator("#wikiWorkCard");
   await card.locator("#wikiWorkMapRefresh").click();
   await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
@@ -638,7 +647,7 @@ for (const [width, tracks, shown] of [
 ] as const) {
   test(`at a ${width} window the board has ${tracks} track${tracks === 1 ? "" : "s"} and shows ${shown.length} columns' content, with nothing overflowing`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStartSettled(page, BOARD);
+    await openSettled(page, BOARD);
     const card = boardCard(page);
     await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
     console.log(`board inner width at ${width}: ${await boardInnerWidth(page)}`);
@@ -649,7 +658,7 @@ for (const [width, tracks, shown] of [
 }
 
 test("the column heads count every effort in the column, nested included, in the table's order", async ({ page }) => {
-  await openStartSettled(page, BOARD);
+  await openSettled(page, BOARD);
   const heads = await boardCard(page).locator("details.wiki-wm-col > summary").allInnerTexts();
   expect(heads.map((h) => h.replace(/\s+/g, " ").trim().toLowerCase())).toEqual(["waiting on you 3", "moving 3", "cooling 1", "quiet 1", "shipped 1"]);
   const moves = boardCard(page).locator('[data-wm-lane="moving"] .wiki-wm-tile[data-effort-id="moves"]');
@@ -661,7 +670,7 @@ test("the column heads count every effort in the column, nested included, in the
 
 test("pressing F at 1280 gives five tracks with every column's content shown, with no repaint, and Esc brings the folds back", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  await openStartSettled(page, BOARD);
+  await openSettled(page, BOARD);
   const card = boardCard(page);
   await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
   expect(await trackCount(page)).toBe(2);
@@ -687,7 +696,7 @@ test("pressing F at 1280 gives five tracks with every column's content shown, wi
 
 test("a resize across the five-track width folds and unfolds with no repaint", async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 900 });
-  await openStartSettled(page, BOARD);
+  await openSettled(page, BOARD);
   const card = boardCard(page);
   await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
   expect(await columnsShown(page)).toEqual(COLUMN_IDS);
@@ -756,7 +765,7 @@ for (const [label, width, f, tracks] of [
 ] as const) {
   test(`beside a tall Waiting on you at ${label}, the other columns land right under each other`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStartSettled(page, BOARD_TALL);
+    await openSettled(page, BOARD_TALL);
     await expect(boardCard(page).locator(".wiki-wm-tile").first()).toBeAttached();
     if (f) {
       await page.keyboard.press("f");
@@ -771,7 +780,7 @@ for (const [label, width, f, tracks] of [
 for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [700, 1]] as const) {
   test(`at ${width}, a Waiting on you the reader folds leaves no gap`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStartSettled(page, BOARD_TALL);
+    await openSettled(page, BOARD_TALL);
     const you = boardCard(page).locator('[data-wm-lane="you"]');
     await you.locator("> summary").click();
     await expect(you).not.toHaveAttribute("open", "");
@@ -779,7 +788,7 @@ for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [700, 1]] as con
   });
   test(`at ${width}, an empty Waiting on you leaves no gap`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStartSettled(page, BOARD_NO_WAIT);
+    await openSettled(page, BOARD_NO_WAIT);
     await expect(boardCard(page).locator('[data-wm-lane="you"] .wiki-wm-col-none')).toBeVisible();
     await expectBoardLayout(page, tracks, `empty ${width}`);
   });
@@ -799,7 +808,7 @@ async function dropMovingEfforts(page: Page): Promise<void> {
 for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [1920, 5]] as const) {
   test(`at ${width}, a Moving the reader folds leaves no gap`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStartSettled(page, BOARD_TALL);
+    await openSettled(page, BOARD_TALL);
     const moving = boardCard(page).locator('[data-wm-lane="moving"]');
     await moving.evaluate((el: HTMLDetailsElement) => (el.open = false));
     await expect(moving).not.toHaveAttribute("open", "");
@@ -808,7 +817,7 @@ for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [1920, 5]] as co
   test(`at ${width}, an empty Moving leaves no gap`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await dropMovingEfforts(page);
-    await openStartSettled(page, BOARD_TALL);
+    await openSettled(page, BOARD_TALL);
     await expect(boardCard(page).locator('[data-wm-lane="moving"] .wiki-wm-col-none')).toBeAttached();
     await expectBoardLayout(page, tracks, `moving empty ${width}`);
   });
@@ -817,7 +826,7 @@ for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [1920, 5]] as co
 for (const [boardWidth, tracks] of [[619, 2], [620, 3], [829, 3], [830, 4], [1039, 4], [1040, 5]] as const) {
   test(`on a ${boardWidth} px board, ${tracks} tracks with the columns landing right under each other`, async ({ page }) => {
     await page.setViewportSize({ width: 1920, height: 900 });
-    await openStartSettled(page, BOARD_TALL);
+    await openSettled(page, BOARD_TALL);
     const board = boardCard(page).locator(".wiki-wm-board");
     await board.evaluate((el, w) => (el.style.width = `${w}px`), boardWidth);
     expect(await boardInnerWidth(page)).toBe(boardWidth);
@@ -829,7 +838,7 @@ for (const [boardWidth, tracks] of [[619, 2], [620, 3], [829, 3], [830, 4], [103
 for (const [width, tracks] of [[1512, 3], [1728, 4]] as const) {
   test(`at ${width}, Cooling the reader opens keeps Quiet and Shipped right under the row above`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStartSettled(page, BOARD_TALL);
+    await openSettled(page, BOARD_TALL);
     const cooling = boardCard(page).locator('[data-wm-lane="cooling"]');
     await cooling.locator("> summary").click();
     await expect(cooling).toHaveAttribute("open", "");
@@ -841,7 +850,7 @@ for (const [width, tracks] of [[1512, 3], [1728, 4]] as const) {
 for (const width of [600, 420]) {
   test(`at a ${width} window the track fits the board, however narrow`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStartSettled(page, BOARD_TALL);
+    await openSettled(page, BOARD_TALL);
     const cols = boardCard(page).locator(".wiki-wm-cols");
     await expect(boardCard(page).locator(".wiki-wm-tile").first()).toBeAttached();
     const r = await cols.evaluate((el) => {
@@ -863,7 +872,7 @@ for (const width of [600, 420]) {
 for (const column of [200, 245, 500]) {
   test(`a compact row in a ${column} px column is two lines: name and sparkline, then pills`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
-    await openStartSettled(page, BOARD_TALL);
+    await openSettled(page, BOARD_TALL);
     const card = boardCard(page);
     await expect(card.locator('.wiki-wm-kid[data-effort-id="kid-two"]')).toBeAttached();
     const rows = await card.locator(".wiki-wm-cols").evaluate((grid, column) => {
@@ -979,7 +988,7 @@ const COLUMN_NAMES = ["Waiting on you 3", "Moving 3", "Cooling 1", "Quiet 1", "S
 
 test("from 1040 px Tab goes link to link and no key flips a fold; at 1280 a head focuses and Enter opens it", async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 900 });
-  await openStartSettled(page, BOARD);
+  await openSettled(page, BOARD);
   const card = boardCard(page);
   const links = card.locator(".wiki-wm-board a");
   const total = await links.count();
@@ -1030,7 +1039,7 @@ test("a column's name follows its count through a repaint", async ({ page }) => 
 
 test("a head focused while the board crosses to wide lets go of focus and keeps no tabindex", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  await openStartSettled(page, BOARD);
+  await openSettled(page, BOARD);
   const head = boardCard(page).locator('[data-wm-lane="cooling"] > summary');
   await head.focus();
   await page.keyboard.press("f");
@@ -1044,7 +1053,7 @@ test("a summary key saved at narrow and resolved at wide lands on the card's hea
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.setViewportSize({ width: 1280, height: 900 });
-  await openStartSettled(page, BOARD);
+  await openSettled(page, BOARD);
   const card = boardCard(page);
   await card.locator('[data-wm-done="0"]').click();
   // One task: the head is still document.activeElement when the wide paint reads
@@ -1193,7 +1202,7 @@ test("a link that moves into a column the wide card shows keeps its focus", asyn
 
 test("an adopt that changes nothing on the card keeps its nodes and the reader's selection", async ({ page }) => {
   await page.clock.install();
-  await openStartSettled(page, BOARD_QUIET);
+  await openSettled(page, BOARD_QUIET);
   const card = boardCard(page);
   const link = card.locator('a[data-effort-link="moves"]');
   await link.evaluate((el) => {
@@ -1255,7 +1264,7 @@ for (const forced of [false, true]) {
   test(`every effort has a sparkline that fills its tile${forced ? ", under forced colors" : ""}`, async ({ page }) => {
     await page.setViewportSize({ width: 1920, height: 900 });
     if (forced) await page.emulateMedia({ forcedColors: "active" });
-    await openStartSettled(page, BOARD);
+    await openSettled(page, BOARD);
     const card = boardCard(page);
     await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
     const r = await card.locator(".wiki-wm-effort").evaluateAll((efforts) =>
@@ -2343,7 +2352,7 @@ test("a themes map has no strip", async ({ page }) => {
 for (const width of [1280, 700]) {
   test(`a long unbroken title wraps inside the open list at ${width} wide`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
-    await openStartSettled(page, STRIP_LONG);
+    await openSettled(page, STRIP_LONG);
     const card = page.locator("#wikiWorkCard");
     await card.locator('[data-wm-cell="decisions"]').click();
     const drill = card.locator(".wiki-wm-drill");
@@ -2771,7 +2780,7 @@ test("focus on a ✓ or a page link survives a ↻ poll repaint", async ({ page 
   });
   await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
   await page.clock.install();
-  await openStart(page, FRESH);
+  await openSettled(page, FRESH);
   const card = page.locator("#wikiWorkCard");
   await card.locator("#wikiWorkMapRefresh").click();
   await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
@@ -3029,7 +3038,7 @@ for (const theme of [
     await page.emulateMedia({ colorScheme: theme.scheme });
     await page.addInitScript((v) => localStorage.setItem("muninn-theme", v), theme.stored);
     await organizable(page);
-    await openStartSettled(page, FRESH);
+    await openSettled(page, FRESH);
     const color = (sel: string) => page.locator(sel).evaluate((el) => getComputedStyle(el).color);
     const accent = await token(page, "--accent-light");
     const btn = page.locator("#wikiWorkMapRefresh");
@@ -3069,30 +3078,25 @@ for (const theme of THEMES) {
       if (v === null) localStorage.removeItem("muninn-theme");
       else localStorage.setItem("muninn-theme", v);
     }, theme.stored);
-    await openStartSettled(page, STRIP);
+    await openSettled(page, STRIP);
     const card = page.locator("#wikiWorkCard");
     const open = card.locator('[data-wm-cell="decisions"]');
     const next = card.locator('[data-wm-cell="oldest"]');
     const shut = card.locator('[data-wm-cell="steps"]');
     const accent = await token(page, "--accent");
-    const paint = (l: typeof open) =>
-      l.evaluate((el) => {
-        const c = getComputedStyle(el);
-        return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor };
-      });
     await open.focus();
     await page.keyboard.press("Enter");
     await expect(open).toHaveAttribute("aria-expanded", "true");
     await expect(open).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(next).toBeFocused();
-    const closedFocused = await paint(next);
-    const openAtRest = await paint(open);
-    const closedAtRest = await paint(shut);
+    const closedFocused = await cellPaint(next);
+    const openAtRest = await cellPaint(open);
+    const closedAtRest = await cellPaint(shut);
     await page.keyboard.press("Shift+Tab");
     await expect(open).toBeFocused();
     expect(await open.evaluate((el) => el.matches(":focus-visible"))).toBe(true);
-    const openFocused = await paint(open);
+    const openFocused = await cellPaint(open);
     expect(openFocused).not.toEqual(openAtRest);
     // Focus is the outline, on an open cell and a closed one alike.
     expect(openAtRest.outline).toBe("none 0px");
@@ -3116,14 +3120,29 @@ for (const theme of THEMES) {
   });
 }
 
-/** All a cell's border, ring and shadow paint: what a state change has to move. */
-function cellPaint(cell: Locator) {
-  return cell.evaluate((el) => {
-    // A detached node reads all empty, which a later comparison takes for a paint.
-    if (!el.isConnected) throw new Error("cellPaint read a node a repaint had replaced");
-    const c = getComputedStyle(el);
-    return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor, borderWidth: c.borderTopWidth };
-  });
+/** How often `cellPaint` reads, 50 ms apart, before it calls the card repainting for good. */
+const CELL_PAINT_READS = 40;
+
+/** All a cell's border, ring and shadow paint: what a state change has to move.
+ *  `Locator.evaluate` finds the element, then reads it: a repaint between the two
+ *  reads a detached element, whose computed style is empty, so this paint's fields
+ *  would be "" and the outline " " (CI, #787). */
+async function cellPaint(cell: Locator) {
+  await checksPainted(cell.page());
+  for (let read = 0; read < CELL_PAINT_READS; read++) {
+    const paint = await cell.evaluate(
+      (el) => {
+        if (!el.isConnected) return null;
+        const c = getComputedStyle(el);
+        return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor, borderWidth: c.borderTopWidth };
+      },
+      undefined,
+      { timeout: 5_000 },
+    );
+    if (paint) return paint;
+    await cell.page().waitForTimeout(50);
+  }
+  throw new Error(`cellPaint: ${cell} was detached on all ${CELL_PAINT_READS} reads, so the card keeps repainting`);
 }
 
 for (const theme of THEMES) {
@@ -3138,7 +3157,7 @@ for (const theme of THEMES) {
     });
 
     test("hovering an open cell paints differently from the open cell at rest", async ({ page }) => {
-      await openStartSettled(page, STRIP);
+      await openSettled(page, STRIP);
       const open = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
       await open.click();
       await expect(open).toHaveAttribute("aria-expanded", "true");
@@ -3149,14 +3168,14 @@ for (const theme of THEMES) {
     });
 
     test("hovering a closed cell paints the accent border, and a disabled cell does not react", async ({ page }) => {
-      await openStartSettled(page, STRIP);
+      await openSettled(page, STRIP);
       const shut = page.locator('#wikiWorkCard [data-wm-cell="steps"]');
       const rest = await cellPaint(shut);
       expect(rest.border).not.toBe(await token(page, "--accent"));
       await shut.hover();
       await expect.poll(async () => (await cellPaint(shut)).border).toBe(await token(page, "--accent"));
       await page.mouse.move(0, 0);
-      await openStartSettled(page, STRIP_OFF);
+      await openSettled(page, STRIP_OFF);
       const off = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
       await expect(off).toBeDisabled();
       const offRest = await cellPaint(off);
@@ -3168,7 +3187,7 @@ for (const theme of THEMES) {
 }
 
 test("a mouse click opens a cell and draws no focus ring", async ({ page }) => {
-  await openStartSettled(page, STRIP);
+  await openSettled(page, STRIP);
   const cell = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
   await cell.click();
   await expect(cell).toHaveAttribute("aria-expanded", "true");
@@ -3180,7 +3199,7 @@ for (const scheme of ["light", "dark"] as const) {
   test(`forced colors over a ${scheme} scheme: open differs from closed, and focus from open at rest`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.emulateMedia({ colorScheme: scheme, forcedColors: "active" });
-    await openStartSettled(page, STRIP);
+    await openSettled(page, STRIP);
     expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
     const card = page.locator("#wikiWorkCard");
     const open = card.locator('[data-wm-cell="decisions"]');
@@ -3502,7 +3521,7 @@ for (const scale of [1, 2]) {
         await page.setViewportSize({ width: 1280, height: 900 });
         await page.emulateMedia({ colorScheme: theme.scheme });
         await page.addInitScript((v) => localStorage.setItem("muninn-theme", v!), theme.stored);
-        await openStartSettled(page, BOARD_TALL);
+        await openSettled(page, BOARD_TALL);
         const card = boardCard(page);
         const row = (id: string) => card.locator(`.wiki-wm-kid[data-effort-id="${id}"] > svg.wiki-wm-spark`);
         const tile = (id: string) => card.locator(`.wiki-wm-tile[data-effort-id="${id}"] > svg.wiki-wm-spark`);
@@ -3528,7 +3547,7 @@ test.describe("at device scale 0.9", () => {
   test.use({ deviceScaleFactor: 0.9 });
   test("a compact row's baseline keeps its ink", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
-    await openStartSettled(page, BOARD_TALL);
+    await openSettled(page, BOARD_TALL);
     const r = await sparkRuns(boardCard(page).locator('.wiki-wm-kid[data-effort-id="kid-idle"] > svg.wiki-wm-spark'));
     console.log(`spark x0.9 row: inked ${r.inked.toFixed(2)}, peak ${r.peak.toFixed(2)}`);
     expect(r.inked).toBeGreaterThan(0.8);
