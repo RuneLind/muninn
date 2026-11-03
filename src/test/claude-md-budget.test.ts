@@ -7,7 +7,7 @@ import { Lexer, type Tokens } from "marked";
  * Caps every tracked CLAUDE.md that Claude Code reads as memory.
  *
  * Claude Code loads a nested CLAUDE.md the first time a session reads a file under its folder,
- * up to a per-file limit of about 40k–150k chars by context window. What it loads is a cost on
+ * up to a per-file limit of 40k–200k chars by context window and model. What it loads is a cost on
  * every later turn, and past the limit only the start is delivered, so rules there go unseen.
  * Detail about one function belongs in `src/<module>/reference/notes.md`, reached through the
  * `## Index` in CLAUDE.md.
@@ -111,7 +111,9 @@ const TEXT_EXTENSIONS = new Set(
 
 /** The distinct `@path` tokens Claude Code would scan, without their #fragment or trailing punctuation. */
 function atPathsIn(text: string): string[] {
-  const body = text.replace(/^\uFEFF/, "").replace(FRONTMATTER, "");
+  // Claude Code drops a leading BOM only along with frontmatter. Otherwise it reaches the lexer, so `<BOM>~~~` opens no fence.
+  const bare = text.replace(/^\uFEFF/, "");
+  const body = FRONTMATTER.test(bare) ? bare.replace(FRONTMATTER, "") : text;
   const paths = scannedTextIn(lex(body))
     .flatMap((scanned) => [...scanned.matchAll(AT_PATH)])
     .map((match) => (match[1] ?? "").replace(/\\ /g, " ").replace(/#.*$/, "").replace(/[.,;:!?)\]'"*_]+$/, ""))
@@ -218,7 +220,7 @@ function checkClaudeMdBudgets(tree: Tree): string[] {
     }
     const notes = `${posix.dirname(path)}/reference/notes.md`;
     if (tree.files.has(notes)) {
-      out.push(`${path}: has an entry in \`claude-md-budgets.json\` and \`${notes}\` exists. The file PR deletes its entry.`);
+      out.push(`${path}: has an entry in \`claude-md-budgets.json\` and \`${notes}\` exists. Delete its entry.`);
     }
   }
   return out;
@@ -248,7 +250,7 @@ test("the real tree is within its budgets", async () => {
   const tree = await readRealTree();
   expect([...tree.files.keys()].filter(isMemoryFile).length).toBeGreaterThan(10);
   expect(checkClaudeMdBudgets(tree)).toEqual([]);
-}, 30_000); // lexes every file; a CI runner is slower than a laptop, and bun's default is 5 s
+});
 
 const fill = (chars: number) => "x".repeat(chars);
 
@@ -521,7 +523,7 @@ describe("stale entry", () => {
   test("fails on a budgets entry for a folder that has reference/notes.md", () => {
     const out = check(indexed("## One\n", "- One\n"), { entries: { "src/foo/CLAUDE.md": 50_000 } });
     expect(out).toHaveLength(1);
-    expect(out[0]).toContain("The file PR deletes its entry.");
+    expect(out[0]).toContain("Delete its entry.");
     expect(out[0]).toContain("src/foo/CLAUDE.md");
   });
 
@@ -625,6 +627,7 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
   test("a path that cannot start an import passes though the file exists", () => {
     expect(check({ "CLAUDE.md": "@@a.md and @+b.md\n" }, { existing: ["@a.md", "+b.md"] })).toEqual([]);
     expect(check({ "CLAUDE.md": "@-a.md and @_b.md and @9c.md and @Zd.md\n" }, { existing: ["-a.md", "_b.md", "9c.md", "Zd.md"] })).toHaveLength(4);
+    expect(check({ "CLAUDE.md": "@~x.md\n" }, { existing: ["~x.md"] })).toEqual([]);
   });
 
   test("a non-text extension is skipped, like Claude Code's, whether or not the path is relative", () => {
@@ -638,6 +641,23 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
     expect(check({ "CLAUDE.md": "---\nx: 1\n---\n@a.md\n" }, A)).toHaveLength(1);
     expect(check({ "CLAUDE.md": "---\nx: 1\n---\n@a.md\n\n---\nEnd\n" }, A)).toHaveLength(1);
     expect(check({ "CLAUDE.md": "Body\n\n---\n\n@a.md\n\n---\n" }, A)).toHaveLength(1);
+  });
+
+  test("a leading BOM is dropped only along with frontmatter, as Claude Code does", () => {
+    expect(check({ "CLAUDE.md": "\uFEFF~~~\n@a.md\n~~~\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "\uFEFF---\nx: 1\n---\n~~~\n@a.md\n~~~\n" }, A)).toEqual([]);
+  });
+
+  test("a BOM mid-file stays, so it opens no fence", () => {
+    expect(check({ "CLAUDE.md": "x\n\n\uFEFF~~~\n@a.md\n~~~\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "---\nx: 1\n---\nBody\n\n\uFEFF~~~\n@a.md\n~~~\n" }, A)).toHaveLength(1);
+  });
+
+  test("a frontmatter opener or closer may carry trailing spaces", () => {
+    expect(check({ "CLAUDE.md": "---  \nsee: @a.md\n---\nBody\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "---\nsee: @a.md\n---  \nBody\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "---  \nx: 1\n---  \n@a.md\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "---\nx: 1\n---\n    @a.md\n" }, A)).toHaveLength(1); // the closer takes the indent, so this is no code block
   });
 
   test("a table row is prose at gfm:false", () => {
