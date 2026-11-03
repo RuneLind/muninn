@@ -557,13 +557,13 @@ function byBoardOrder(a: BoardOrder, b: BoardOrder): number {
 function boardPillsHtml<P>(r: BoardRow<P>, now: number): string {
   const { decisions, since, steps, needKinds } = r.facts;
   const pill = (text: string, tone = "") => `<span class="wiki-wm-pill${tone}">${esc(text)}</span>`;
+  const active = activeLabel(r.idle);
   const pills =
     (decisions ? pill(`${decisions} decision${decisions === 1 ? "" : "s"}${since ? ` · ${daysSinceDay(since, now)} d` : ""}`, " warn") : "") +
     (needKinds.length ? pill(needKinds.join(" · "), " acc") : "") +
     (steps ? pill(`${steps} step${steps === 1 ? "" : "s"}`) : "") +
-    // A fixed label, so a quiet effort is not read as one with missing data.
-    pill(activeLabel(r.idle) || "no activity");
-  return `<div class="wiki-wm-pills">${pills}</div>`;
+    (active ? pill(active) : "");
+  return pills && `<div class="wiki-wm-pills">${pills}</div>`;
 }
 
 function boardNameHtml(e: { id: string; name: string }, effortHref?: (id: string) => string, titled = false): string {

@@ -265,7 +265,7 @@ function boardTallMapJson(wiki: string, runAtMs: number, waits: boolean): string
           e("kids", "active", "plans/waits.mdx", { daily }),
           e("kid-two", "active", "plans/waits.mdx", { parent: "kids", name: "two pills", daily }),
           e("kid-long", "active", "plans/waits.mdx", { parent: "kids", name: KID_LONG_NAME, daily }),
-          e("kid-idle", "active", "plans/waits.mdx", { parent: "kids", name: "no activity" }),
+          e("kid-idle", "active", "plans/waits.mdx", { parent: "kids", name: "idle" }),
         ]
       : []),
     e("moving-a", "active", "plans/gamma.mdx", { daily }),
@@ -590,14 +590,14 @@ test("a page declared after the load joins its effort on a listing refresh: its 
   await page.clock.install();
   await openStart(page, DECL);
   const alpha = page.locator('#wikiWorkCard .wiki-wm-effort[data-effort-id="alpha"]');
-  await expect(alpha.locator(".wiki-wm-pill")).toHaveText(["no activity"]);
+  await expect(alpha.locator(".wiki-wm-pills")).toHaveCount(0);
   // The run does not move: only the listing learns of the declaration.
   await writeFile(path.join(roots[DECL]!, "plans/declared-today.mdx"), `---\ntitle: Declared today\neffort: alpha\n---\n\n<NextMoves>\n\n<Lane kind="you">\n\n- One\n\n</Lane>\n\n</NextMoves>\n`, "utf8");
   await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(page.locator("#wikiList")).toContainText("Declared today");
   // On the board without a reload, and one click from its page.
-  await expect(alpha.locator(".wiki-wm-pill")).toHaveText(["1 step", "no activity"]);
+  await expect(alpha.locator(".wiki-wm-pill")).toHaveText(["1 step"]);
   await alpha.locator("a.wiki-wm-effort-name").click();
   await expect(page.locator(".wiki-effort a[data-relpath]").first()).toHaveText("Declared today");
 });
