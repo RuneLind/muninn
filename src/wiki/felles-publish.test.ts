@@ -6,6 +6,7 @@ import {
   fellesScriptArgs,
   fellesPublishPayloadField,
 } from "./felles-publish.ts";
+import { __setWikiReadonlyForTest } from "./readonly.ts";
 
 const BIN = "/abs/muninn-nais/scripts/publiser-felles-wiki.ts";
 
@@ -60,6 +61,16 @@ describe("fellesPublishableFor", () => {
 
   test("a read-only root offers no control", () => {
     expect(fellesPublishPayloadField("melosys-kode-wiki", "/w", config, () => true)).toEqual({});
+  });
+
+  test("a read-only instance offers no control", () => {
+    __setWikiReadonlyForTest(true);
+    try {
+      expect(fellesPublishPayloadField("melosys-kode-wiki", "/w", config)).toEqual({});
+    } finally {
+      __setWikiReadonlyForTest();
+    }
+    expect(fellesPublishPayloadField("melosys-kode-wiki", "/w", config)).toEqual({ fellesPublish: { bin: BIN } });
   });
 });
 
