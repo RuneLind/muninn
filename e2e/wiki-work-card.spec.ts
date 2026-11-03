@@ -115,6 +115,8 @@ const GH_ADOPT = "e2e-wm-gh-adopt";
 /** The board: one wiki read in many tests, one an adopt grows. */
 const BOARD = "e2e-wm-board";
 const BOARD_ADOPT = "e2e-wm-board-adopt";
+/** An adopt adds an unrelated page to it. */
+const BOARD_QUIET = "e2e-wm-board-quiet";
 const GH_DROP_RUN = Date.now() - 2 * 3_600_000;
 /** No break opportunity anywhere. */
 const LONG_TOKEN = "Aa".repeat(90);
@@ -318,7 +320,7 @@ test.beforeAll(async () => {
   ]);
   for (const n of [GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE]) await seedWiki(n, GH_DROP_RUN);
   await seedWiki(GH_ADOPT, now - 2 * HOUR);
-  for (const n of [BOARD, BOARD_ADOPT]) {
+  for (const n of [BOARD, BOARD_ADOPT, BOARD_QUIET]) {
     await seedWiki(n, null);
     await writeFile(path.join(roots[n]!, "plans/waits.mdx"), waitPage("Waits", ["O1"], dayBefore(now, 4)), "utf8");
     await writeFile(path.join(roots[n]!, ".work-map.json"), boardMapJson(n, now - 2 * HOUR), "utf8");
@@ -334,10 +336,10 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP, BOARD, BOARD_ADOPT].join(","),
+      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP, BOARD, BOARD_ADOPT, BOARD_QUIET].join(","),
       WIKI_ANSWER_OWNER: "Test Owner (T000001)",
       WIKI_ANSWER_GROUPS: "utvikler=T000001",
-      WIKI_EXTRA: [BOARD, BOARD_ADOPT, GH, GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE, GH_ADOPT, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [BOARD, BOARD_ADOPT, BOARD_QUIET, GH, GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE, GH_ADOPT, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -365,6 +367,16 @@ async function openStart(page: Page, wiki: string): Promise<string[]> {
   await page.goto(`${BASE}/wiki?wiki=${wiki}`);
   await expect(page.locator(".wiki-start")).toBeVisible();
   return digests;
+}
+
+/** The card paints twice on a load, and the second swaps every node: the checks
+ *  answer changes the GitHub cell. A computed style read across that swap is
+ *  empty, so a test that reads one waits for the answer first. */
+async function openStartSettled(page: Page, wiki: string): Promise<void> {
+  await openStart(page, wiki);
+  const card = page.locator("#wikiWorkCard");
+  await expect(card.locator('[data-wm-cell="steps"]')).toBeVisible();
+  await expect(card.locator('[data-wm-cell="github"] b', { hasText: "checking…" })).toHaveCount(0);
 }
 
 test("a wiki with a map shows the card and never asks for the digest", async ({ page }) => {
@@ -719,6 +731,70 @@ test("focus on an effort link that moves into a folded column lands on that colu
   // The next repaint leaves the reader on the head.
   await card.locator('[data-wm-done="0"]').click();
   await expect(card.locator('[data-wm-lane="cooling"]')).toHaveAttribute("open", "");
+});
+
+for (const native of [true, false]) {
+  test(`a link that moves into a folded column stays reachable by keyboard once the fold opens, ${native ? "with no tabindex ever written to it" : "in a browser without checkVisibility"}`, async ({ page }) => {
+    if (!native) await page.addInitScript(() => Reflect.deleteProperty(Element.prototype, "checkVisibility"));
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const release = await holdChecks(page, () => checksBody({ needs: boardNeeds() }));
+    await openStart(page, BOARD);
+    const card = boardCard(page);
+    const link = card.locator('a[data-effort-link="to-cooling"]');
+    await expect(link).toBeAttached();
+    expect(await page.evaluate(() => typeof Element.prototype.checkVisibility === "function")).toBe(native);
+    // Every tabindex write in the card, including one taken back at once.
+    await card.evaluate((el) => {
+      const writes: string[] = [];
+      (window as unknown as { __tabindexWrites: string[] }).__tabindexWrites = writes;
+      new MutationObserver((ms) => ms.forEach((m) => writes.push((m.target as Element).getAttribute("data-effort-link") ?? (m.target as Element).tagName))).observe(el, { subtree: true, attributes: true, attributeFilter: ["tabindex"] });
+    });
+    await link.focus();
+    release();
+    const head = card.locator('[data-wm-lane="cooling"] > summary');
+    await expect(card.locator('[data-wm-lane="cooling"] [data-effort-id="to-cooling"]')).toHaveCount(1);
+    await expect(head).toBeFocused();
+    expect(await link.getAttribute("tabindex")).toBeNull();
+    if (native) expect(await page.evaluate(() => (window as unknown as { __tabindexWrites: string[] }).__tabindexWrites)).toEqual([]);
+    await page.keyboard.press("Enter");
+    await expect(card.locator('[data-wm-lane="cooling"]')).toHaveAttribute("open", "");
+    // Tab walks the opened fold: the column holds only what the fixture put there.
+    const reached = async () => link.evaluate((el) => document.activeElement === el);
+    let at = false;
+    for (let i = 0; i < 4 && !at; i++) {
+      await page.keyboard.press("Tab");
+      at = await reached();
+    }
+    expect(at).toBe(true);
+  });
+}
+
+test("a link that moves into a column the wide card shows keeps its focus", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 900 });
+  const release = await holdChecks(page, () => checksBody({ needs: boardNeeds() }));
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await card.locator('a[data-effort-link="to-cooling"]').focus();
+  release();
+  await expect(card.locator('[data-wm-lane="cooling"] [data-effort-id="to-cooling"]')).toHaveCount(1);
+  await expect(card.locator('[data-wm-lane="cooling"] a[data-effort-link="to-cooling"]')).toBeFocused();
+});
+
+test("an adopt that changes nothing on the card keeps its nodes and the reader's selection", async ({ page }) => {
+  await page.clock.install();
+  await openStartSettled(page, BOARD_QUIET);
+  const card = boardCard(page);
+  const link = card.locator('a[data-effort-link="moves"]');
+  await link.evaluate((el) => {
+    (window as unknown as { __held: Element }).__held = el;
+    getSelection()!.selectAllChildren(el);
+  });
+  const before = await card.innerHTML();
+  await forceAdopt(page, BOARD_QUIET);
+  // Byte-equal markup, or this test would be about a repaint that had a reason.
+  expect(await card.innerHTML()).toBe(before);
+  expect(await page.evaluate(() => (window as unknown as { __held: Element }).__held.isConnected)).toBe(true);
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe("moves work");
 });
 
 test("focus on a column's head survives the repaint that changes the column", async ({ page }) => {
@@ -2581,7 +2657,7 @@ for (const theme of THEMES) {
       if (v === null) localStorage.removeItem("muninn-theme");
       else localStorage.setItem("muninn-theme", v);
     }, theme.stored);
-    await openStart(page, STRIP);
+    await openStartSettled(page, STRIP);
     const card = page.locator("#wikiWorkCard");
     const open = card.locator('[data-wm-cell="decisions"]');
     const next = card.locator('[data-wm-cell="oldest"]');
@@ -2631,6 +2707,8 @@ for (const theme of THEMES) {
 /** All a cell's border, ring and shadow paint: what a state change has to move. */
 function cellPaint(cell: Locator) {
   return cell.evaluate((el) => {
+    // A detached node reads all empty, which a later comparison takes for a paint.
+    if (!el.isConnected) throw new Error("cellPaint read a node a repaint had replaced");
     const c = getComputedStyle(el);
     return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor, borderWidth: c.borderTopWidth };
   });
@@ -2648,7 +2726,7 @@ for (const theme of THEMES) {
     });
 
     test("hovering an open cell paints differently from the open cell at rest", async ({ page }) => {
-      await openStart(page, STRIP);
+      await openStartSettled(page, STRIP);
       const open = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
       await open.click();
       await expect(open).toHaveAttribute("aria-expanded", "true");
@@ -2659,14 +2737,14 @@ for (const theme of THEMES) {
     });
 
     test("hovering a closed cell paints the accent border, and a disabled cell does not react", async ({ page }) => {
-      await openStart(page, STRIP);
+      await openStartSettled(page, STRIP);
       const shut = page.locator('#wikiWorkCard [data-wm-cell="steps"]');
       const rest = await cellPaint(shut);
       expect(rest.border).not.toBe(await token(page, "--accent"));
       await shut.hover();
       await expect.poll(async () => (await cellPaint(shut)).border).toBe(await token(page, "--accent"));
       await page.mouse.move(0, 0);
-      await openStart(page, STRIP_OFF);
+      await openStartSettled(page, STRIP_OFF);
       const off = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
       await expect(off).toBeDisabled();
       const offRest = await cellPaint(off);
@@ -2678,7 +2756,7 @@ for (const theme of THEMES) {
 }
 
 test("a mouse click opens a cell and draws no focus ring", async ({ page }) => {
-  await openStart(page, STRIP);
+  await openStartSettled(page, STRIP);
   const cell = page.locator('#wikiWorkCard [data-wm-cell="decisions"]');
   await cell.click();
   await expect(cell).toHaveAttribute("aria-expanded", "true");
@@ -2690,7 +2768,7 @@ for (const scheme of ["light", "dark"] as const) {
   test(`forced colors over a ${scheme} scheme: open differs from closed, and focus from open at rest`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.emulateMedia({ colorScheme: scheme, forcedColors: "active" });
-    await openStart(page, STRIP);
+    await openStartSettled(page, STRIP);
     expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
     const card = page.locator("#wikiWorkCard");
     const open = card.locator('[data-wm-cell="decisions"]');
