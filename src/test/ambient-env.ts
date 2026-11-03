@@ -209,8 +209,9 @@ const WIKI_STALE_FLAGS = ["WIKI_STALE_CONFIRM_WIKIS"];
 /** The work map's nightly organize (`src/wiki/work-map/`): `WORK_MAP_WIKIS`
  *  would start a background Opus loop in every spawned server on that machine
  *  only, and the other three change what it runs. The loop's tests pass their
- *  config explicitly. */
-const WORK_MAP_FLAGS = ["WORK_MAP_WIKIS", "WORK_MAP_HOUR", "WORK_MAP_MODEL", "WORK_MAP_EFFORT"];
+ *  config explicitly. `WORK_MAP_GH_CHECK` turns the card's GitHub check off;
+ *  `e2eEnv()` sets it to `off` after blanking this list, since blank means on. */
+const WORK_MAP_FLAGS = ["WORK_MAP_WIKIS", "WORK_MAP_HOUR", "WORK_MAP_MODEL", "WORK_MAP_EFFORT", "WORK_MAP_GH_CHECK"];
 
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.

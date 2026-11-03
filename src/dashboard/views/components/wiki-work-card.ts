@@ -24,6 +24,7 @@ import { osloDay } from "../../../wiki/work-map/ids.ts";
 import type { ThemeMap, ThemeWeek } from "../../../wiki/work-map/theme-schema.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { closedWithoutShipping } from "../../../plans/board-client-pure.ts";
+import type { ChecksNeed, NotCheckedReason, WorkMapChecksBody } from "../../../wiki/work-map/gh-check.ts";
 import { escHtml as esc } from "./escape.ts";
 
 /** Past this age the card marks the map stale (the loop runs daily). */
@@ -86,6 +87,21 @@ export interface WorkCardInput<P extends CardPage> {
   waitsCounted?: boolean;
   /** The health strip's open cell and whether its list is expanded. */
   strip?: StripView;
+  /** The GitHub check's fifth cell and the Needs you marks; absent, neither renders. */
+  checks?: ChecksView;
+}
+
+/** Where the card's GitHub check stands, held by the DOM half. */
+export interface ChecksView {
+  /** Null until the first answer. */
+  body: WorkMapChecksBody | null;
+  /** The map `body` was fetched for. A title can recur on a new map, so only an
+   *  answer for the map on the card may mark its items. */
+  answerRunAt: number | null;
+  /** The last fetch failed: `body`, if any, is older and did not just get checked. */
+  failed?: boolean;
+  /** The card will fetch again while `refreshing` stays true. */
+  retrying?: boolean;
 }
 
 /** "just now" / "N min ago" / "N h ago" / "N d ago". */
@@ -280,9 +296,9 @@ export function workCardHtml<P extends CardPage>(input: WorkCardInput<P>): strin
   const prose = (s: string) => proseHtml(s, byKey, hrefFor);
   return (
     headHtml(joined, body, now, input.refresh) +
-    healthStripHtml(input.pages, !!input.waitsCounted, input.strip ?? { open: null, expanded: false }, now, byKey, hrefFor) +
+    healthStripHtml(input.pages, !!input.waitsCounted, input.strip ?? { open: null, expanded: false }, now, byKey, hrefFor, input.checks, body.map.runAtMs) +
     (joined.summary.trim() ? `<div class="wiki-wm-summary">${prose(joined.summary)}</div>` : "") +
-    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you") +
+    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you", input.checks?.answerRunAt === body.map.runAtMs ? input.checks.body?.needs : undefined, !!input.checks?.failed || (!!input.checks?.body?.refreshing && !input.checks.retrying)) +
     lanesHtml(joined, now, prose, byKey, hrefFor, input.effortHref) +
     coverageHtml(joined)
   );
@@ -333,6 +349,8 @@ function needsYouHtml<P>(
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
   title: string,
+  checks?: readonly ChecksNeed[],
+  unconfirmed = false,
 ): string {
   // A theme item also carries `hubs` and the runner's `count`.
   const needs = map.needsYou as readonly { kind: string; title: string; why: string; action: string; pages: string[]; hubs?: string[]; count?: number }[];
@@ -340,16 +358,20 @@ function needsYouHtml<P>(
   // Keyed on the STORED item, so the key survives a page rename between renders.
   const open = needs.map((n, i) => ({ n, i })).filter(({ i }) => !done.has(needKey(raw[i]!)));
   const doneCount = needs.length - open.length;
+  const marks = (i: number) => needGhMarks((checks ?? []).filter((c) => needKey(c) === needKey(raw[i]!)), unconfirmed);
   const cards = open
     .map(
       ({ n, i }) =>
-        `<div class="wiki-wm-need" data-wm-need="${i}">` +
+        `<div class="wiki-wm-need${marks(i).struck ? " gh-done" : ""}" data-wm-need="${i}">` +
         `<div class="wiki-wm-need-head"><span class="wiki-wm-kind">${esc(n.kind)}</span>` +
         `<span class="wiki-wm-need-title">${prose(n.title)}</span>` +
         (n.count !== undefined ? needCountHtml(n.kind, n.count) : "") +
         `<button class="wiki-wm-done" data-wm-done="${i}" data-wm-key="${esc(needKey(raw[i]!))}" title="Mark done" aria-label="Mark done">✓</button></div>` +
         (n.why ? whyHtml(i, needKey(raw[i]!), openWhy.has(needKey(raw[i]!)), n.why, prose, byKey) : "") +
         (n.action ? `<div class="wiki-wm-action">${prose(n.action)}</div>` : "") +
+        marks(i)
+          .notes.map((note) => `<div class="wiki-wm-ghnote ${note.tone}">${esc(note.text)}</div>`)
+          .join("") +
         (n.hubs?.length ? hubsHtml(n.hubs, byKey, hrefFor) : "") +
         // Pages the item's own prose already links are not repeated.
         pagesHtml(
@@ -367,6 +389,39 @@ function needsYouHtml<P>(
     (cards ? `<div class="wiki-wm-needs">${cards}</div>` : '<div class="wiki-wm-empty">Nothing left for this run.</div>') +
     "</div>"
   );
+}
+
+/** A merge date as the card writes it: `29.10`, the viewer's day. */
+function shortDay(iso: string | null): string {
+  const d = iso ? new Date(iso) : null;
+  return d && !Number.isNaN(d.getTime()) ? `${d.getDate()}.${d.getMonth() + 1}` : "";
+}
+
+/**
+ * What GitHub says on one Needs you item, from its entries in the checks body.
+ * It is struck through only when it asks for its PRs and every one is merged. A
+ * PR closed without a merge warns. An item that asks for several PRs says where
+ * each stands, so a reader can see why it is not struck through. On an answer
+ * GitHub did not just confirm, `unconfirmed`, only a merge is still said: it is
+ * final, while an open or closed PR can have moved, and no note shows an age.
+ */
+export function needGhMarks(entries: readonly ChecksNeed[], unconfirmed = false): { struck: boolean; notes: GhNote[] } {
+  const struck = entries.length > 0 && entries.every((e) => e.asksForIt && e.state === "MERGED");
+  const several = entries.length > 1;
+  const notes: GhNote[] = [];
+  for (const e of entries) {
+    const merged = `GitHub: #${e.pr} merged ${shortDay(e.mergedAt)}`.trim();
+    if (e.state === "MERGED") notes.push(struck ? { tone: "done", text: `${merged}, this step is done` } : { tone: "info", text: merged });
+    else if (unconfirmed && e.state !== null) continue;
+    else if (e.state === "CLOSED") notes.push({ tone: "warn", text: `GitHub: #${e.pr} closed without merge` });
+    else if (several && e.asksForIt) notes.push({ tone: "info", text: `GitHub: #${e.pr} ${e.state === "OPEN" ? "open" : "not checked"}` });
+  }
+  return { struck, notes };
+}
+
+export interface GhNote {
+  tone: "done" | "warn" | "info";
+  text: string;
 }
 
 /** A Needs-you why, clamped to two lines. Its expand control renders hidden
@@ -481,11 +536,14 @@ function coverageHtml<P>(map: JoinedWorkMap<P>): string {
 }
 
 // ── The health strip (plan muninn-wiki-your-work-board, P1) ───────────
-export type StripCell = "decisions" | "oldest" | "steps" | "shipped";
+export type StripCell = "decisions" | "oldest" | "steps" | "shipped" | "github";
 export interface StripView {
   open: StripCell | null;
   expanded: boolean;
+  /** How far the GitHub list's two shut groups are open: absent is the one line. */
+  ghGroups?: Partial<Record<GhFoldedGroup, "window" | "all">>;
 }
+export type GhFoldedGroup = "unchecked" | "unlinked";
 /** Rows a cell's list shows before `+N more`. */
 export const STRIP_ROWS_SHOWN = 8;
 /** Past these the two wait cells take the warn tone. */
@@ -516,7 +574,7 @@ function byOldest(a: StripRow, b: StripRow): number {
  * closed without shipping, whether or not the map placed it. A wait with no
  * parsed `since` lists under decisions and not under oldest.
  */
-export function stripRows<P extends CardPage>(pages: readonly P[]): Record<StripCell, StripRow[]> {
+export function stripRows<P extends CardPage>(pages: readonly P[]): Record<Exclude<StripCell, "github">, StripRow[]> {
   const live = pages.filter((p) => !closedWithoutShipping(p.plan_status));
   const waits = live
     .filter((p) => (p.movesWaiting ?? 0) > 0)
@@ -542,32 +600,141 @@ const STRIP_TITLES: Record<StripCell, string> = {
   oldest: "Dated waits, oldest first",
   steps: "Pages with steps in a you lane",
   shipped: "Shipped plans with follow-ups open, oldest first",
+  github: "What the GitHub check found in the ledger rows",
 };
 
-function stripCellHtml(cell: StripCell, value: string, label: string, tone: string, view: StripView, empty: boolean): string {
+function stripCellHtml(cell: StripCell, value: string, label: string, tone: string, view: StripView, empty: boolean, extra: { note?: string; title?: string } = {}): string {
   const on = view.open === cell && !empty;
   return (
-    `<button type="button" class="wiki-wm-cell${tone ? " " + tone : ""}${on ? " on" : ""}" data-wm-cell="${cell}" aria-expanded="${on}"${empty ? " disabled" : ""}>` +
-    `<b>${esc(value)}</b><span>${esc(label)}</span></button>`
+    `<button type="button" class="wiki-wm-cell${tone ? " " + tone : ""}${on ? " on" : ""}" data-wm-cell="${cell}" aria-expanded="${on}"${extra.title ? ` title="${esc(extra.title)}"` : ""}${empty ? " disabled" : ""}>` +
+    `<b>${esc(value)}</b><span>${esc(label)}</span>${extra.note ?? ""}</button>`
+  );
+}
+
+function drillHtml(items: readonly string[], cell: StripCell, view: StripView): string {
+  const shown = view.expanded ? items : items.slice(0, STRIP_ROWS_SHOWN);
+  const more = items.length - shown.length;
+  return (
+    `<div class="wiki-wm-drill" data-wm-drill="${cell}"><div class="wiki-wm-drill-title">${esc(STRIP_TITLES[cell])}</div>` +
+    `<ol class="wiki-wm-drill-list">${shown.join("")}</ol>` +
+    (more > 0 ? `<button type="button" class="wiki-wm-drill-more" data-wm-drill-more>+${more} more</button>` : "") +
+    "</div>"
   );
 }
 
 function stripDrillHtml(rows: readonly StripRow[], cell: StripCell, view: StripView, now: number, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string): string {
-  const shown = view.expanded ? rows : rows.slice(0, STRIP_ROWS_SHOWN);
-  const more = rows.length - shown.length;
-  const items = shown.map((r) => {
+  const items = rows.map((r) => {
     const meta = [
       ...(r.count !== undefined ? [String(r.count)] : []),
       ...(r.since ? [`since ${r.since} · ${daysSinceDay(r.since, now)} d`] : []),
     ].join(" · ");
     return `<li class="wiki-wm-drill-row">${pageLinkHtml(r.relPath, byKey, hrefFor)}${meta ? ` <span class="wiki-wm-drill-meta">· ${esc(meta)}</span>` : ""}</li>`;
   });
+  return drillHtml(items, cell, view);
+}
+
+// ── The GitHub check's cell (your-work board P2) ──────────────────────
+const GH_CELL_LABEL = "ledger rows GitHub contradicts";
+const GH_NOT_CURRENT = "From the last answer, not current";
+
+const NOT_CHECKED_HTML: Record<Exclude<NotCheckedReason, "disabled" | "no-access">, string> = {
+  "no-gh": "not checked: install <code>gh</code>",
+  auth: "not checked: log in with <code>gh auth login</code>",
+  sso: "not checked: authorize the token for the organization (<code>gh auth refresh</code>)",
+};
+
+function notCheckedHtml(reason: Exclude<NotCheckedReason, "disabled">, repos: readonly string[]): string {
+  if (reason === "no-access") return `not checked: your <code>gh</code> login cannot see ${esc(repos[0] ?? "a repo")} (<code>gh auth status</code>)`;
+  return NOT_CHECKED_HTML[reason];
+}
+
+function ghPrLinkHtml(repo: string, pr: number): string {
+  return `<a class="wiki-wm-link" href="https://github.com/${esc(repo)}/pull/${pr}" target="_blank" rel="noopener noreferrer">#${pr}</a>`;
+}
+
+/** The check's counts and no conclusion: every sentence that drew one was false on some answer. */
+function ghCounts(body: WorkMapChecksBody): string {
+  return `${body.checked} checked · ${body.compared} with a state to compare · ${body.unchecked} not checked · ${body.unlinked} with no PR link read · ${body.skipped} skipped`;
+}
+
+/** One labelled group. A folded one is a heading and a `+N more`; open, it takes the row window. */
+function ghGroupHtml(key: string, label: string, items: readonly string[], fold: "shut" | "window" | "all", moreLabel: string): string {
+  if (!items.length) return "";
+  const shown = fold === "all" ? items : fold === "window" ? items.slice(0, STRIP_ROWS_SHOWN) : [];
+  const more = items.length - shown.length;
+  const moreHtml = more > 0 ? `<button type="button" class="wiki-wm-drill-more" data-wm-gh-more="${key}" aria-label="+${more} more ${esc(moreLabel)}">+${more} more</button>` : "";
   return (
-    `<div class="wiki-wm-drill" data-wm-drill="${cell}"><div class="wiki-wm-drill-title">${esc(STRIP_TITLES[cell])}</div>` +
-    `<ol class="wiki-wm-drill-list">${items.join("")}</ol>` +
-    (more > 0 ? `<button type="button" class="wiki-wm-drill-more" data-wm-drill-more>+${more} more</button>` : "") +
+    `<div class="wiki-wm-drill-group" data-wm-gh-group="${key}"><div class="wiki-wm-drill-group-head"><span>${esc(label)} · ${items.length}</span>${fold === "shut" ? ` ${moreHtml}` : ""}</div>` +
+    (shown.length ? `<ol class="wiki-wm-drill-list">${shown.join("")}</ol>` : "") +
+    (fold === "shut" ? "" : moreHtml) +
     "</div>"
   );
+}
+
+/** The cell's list, or "" with nothing to list. The contradictions are always all shown. */
+function ghDrillHtml(body: WorkMapChecksBody, view: StripView, stale: boolean, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string): string {
+  const row = (page: string, meta: string) => `<li class="wiki-wm-drill-row">${pageLinkHtml(page, byKey, hrefFor)} <span class="wiki-wm-drill-meta">· ${meta}</span></li>`;
+  if (!body.contradictions.length && !body.uncheckedRows.length && !body.unlinkedRows.length) return "";
+  const fold = (g: GhFoldedGroup) => view.ghGroups?.[g] ?? "shut";
+  return (
+    `<div class="wiki-wm-drill" data-wm-drill="github"><div class="wiki-wm-drill-title">${esc(STRIP_TITLES.github)}</div>` +
+    (stale ? `<p class="wiki-wm-drill-stale">${GH_NOT_CURRENT}</p>` : "") +
+    `<p class="wiki-wm-drill-counts">${esc(ghCounts(body))}</p>` +
+    ghGroupHtml(
+      "contradictions",
+      "GitHub contradicts",
+      body.contradictions.map((c) =>
+        row(c.page, `says ${esc(c.rowState)} · GitHub: ${ghPrLinkHtml(c.repo, c.pr)} ${c.ghState === "MERGED" ? esc(`merged ${shortDay(c.mergedAt)}`.trim()) : "closed without merge"}`),
+      ),
+      "all",
+      "",
+    ) +
+    ghGroupHtml("unchecked", "Not checked", body.uncheckedRows.map((r) => row(r.page, `${ghPrLinkHtml(r.repo, r.pr)} not checked`)), fold("unchecked"), "not checked") +
+    ghGroupHtml("unlinked", "No PR link read", body.unlinkedRows.map((r) => row(r.page, `${esc(r.label)}: no PR link in a column the check reads`)), fold("unlinked"), "with no PR link read") +
+    "</div>"
+  );
+}
+
+/** The fifth cell and its list, or null when the check is off here. */
+function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, CardPage>, hrefFor: (rel: string) => string, runAtMs: number | undefined): { cell: string; drill: string } | null {
+  const { body } = checks;
+  if (!body) {
+    return checks.failed
+      ? { cell: stripCellHtml("github", "—", GH_CELL_LABEL, "muted", view, true, { note: '<span class="wiki-wm-cell-note">not checked</span>' }), drill: "" }
+      : { cell: stripCellHtml("github", "checking…", GH_CELL_LABEL, "muted unset", view, true), drill: "" };
+  }
+  const notChecked = body.notChecked;
+  const reason = notChecked?.reason;
+  if (reason === "disabled") return null;
+  const n = body.contradictions.length;
+  const notes: string[] = [];
+  // The rows are read from the pages, so an older answer's count still stands, muted.
+  const older = checks.answerRunAt !== runAtMs;
+  // A hung `gh` answers from states past their hour, so the retries can end here.
+  const notRefreshed = !!body.refreshing && !checks.retrying;
+  const stale = older || !!checks.failed || notRefreshed;
+  const drill = ghDrillHtml(body, view, stale, byKey, hrefFor);
+  // Rows but no PR to ask about: that 0 would read as all clear too.
+  const noneToAsk = body.checked === 0 && !reason && body.unchecked === 0 && body.unlinked + body.skipped > 0;
+  // A 0 with nothing read would read as all clear.
+  const nothingRead = body.checked === 0 && (!!reason || body.unchecked > 0 || noneToAsk);
+  if (reason) notes.push(`<span class="wiki-wm-cell-note">${notCheckedHtml(reason, notChecked?.repos ?? [])}</span>`);
+  // A failed fetch outranks what the older answer said about itself; a remedy already says it.
+  if (checks.failed) {
+    if (!reason) notes.push('<span class="wiki-wm-cell-note">not checked</span>');
+  } else if (older) notes.push('<span class="wiki-wm-cell-note">checking…</span>');
+  else if (body.refreshing && checks.retrying) notes.push('<span class="wiki-wm-cell-note">refreshing</span>');
+  else {
+    if (notRefreshed && !nothingRead) notes.push('<span class="wiki-wm-cell-note">not refreshed</span>');
+    if (!reason && body.unchecked > 0) notes.push(`<span class="wiki-wm-cell-note">${body.unchecked} not checked</span>`);
+    else if (noneToAsk) notes.push(`<span class="wiki-wm-cell-note">${body.unlinked ? `${body.unlinked} with no PR link read` : `${body.skipped} skipped`}</span>`);
+  }
+  const tone = [stale || nothingRead ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
+  const cell = stripCellHtml("github", nothingRead ? "—" : String(n), GH_CELL_LABEL, tone, view, !drill, {
+    note: notes.join(""),
+    title: `${stale ? `${GH_NOT_CURRENT} · ` : ""}${ghCounts(body)}`,
+  });
+  return { cell, drill };
 }
 
 function healthStripHtml<P extends CardPage>(
@@ -577,6 +744,8 @@ function healthStripHtml<P extends CardPage>(
   now: number,
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
+  checks?: ChecksView,
+  runAtMs?: number,
 ): string {
   const rows = stripRows(pages);
   const sum = (rs: readonly StripRow[]) => rs.reduce((n, r) => n + (r.count ?? 0), 0);
@@ -592,12 +761,21 @@ function healthStripHtml<P extends CardPage>(
     stripCellHtml("steps", String(sum(rows.steps)), "steps in your lanes", "", view, !rows.steps.length),
     stripCellHtml("shipped", String(rows.shipped.length), "shipped, follow-ups open", "muted", view, !rows.shipped.length),
   ];
-  const waitCell = view.open === "decisions" || view.open === "oldest";
-  const list = view.open && !(waitCell && !waitsCounted) ? rows[view.open] : [];
+  const gh = checks ? ghCell(checks, view, byKey, hrefFor, runAtMs) : null;
+  if (gh) cells.push(gh.cell);
+  const open = view.open;
+  let drill = "";
+  if (open === "github") {
+    drill = gh?.drill ?? "";
+  } else if (open) {
+    const waitCell = open === "decisions" || open === "oldest";
+    const list = waitCell && !waitsCounted ? [] : rows[open];
+    if (list.length) drill = stripDrillHtml(list, open, view, now, byKey, hrefFor);
+  }
   return (
     '<div class="wiki-wm-section-title">Waiting on you, counted from the pages now</div>' +
     `<div class="wiki-wm-strip">${cells.join("")}</div>` +
-    (view.open && list.length ? stripDrillHtml(list, view.open, view, now, byKey, hrefFor) : "")
+    drill
   );
 }
 

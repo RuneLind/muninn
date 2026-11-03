@@ -35,10 +35,12 @@ import {
   workCardHtml,
   type CardPage,
   type StripCell,
+  type GhFoldedGroup,
   type StripView,
   type RefreshView,
   type WorkMapGetBody,
 } from "./wiki-work-card.ts";
+import type { WorkMapChecksBody } from "../../../wiki/work-map/gh-check.ts";
 import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
 import { declarationKey, isThemeMap } from "../../../wiki/work-map/join.ts";
 import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
@@ -745,7 +747,7 @@ let stripView: StripView = { open: null, expanded: false };
 const whyObserved = new WeakSet<HTMLElement>();
 
 /** A card control to re-focus after a repaint, by what survives one. */
-type FocusKey = { sel: string } | { doneAt: number } | { why: string } | { link: string; nth: number } | { heading: true };
+type FocusKey = { sel: string } | { doneAt: number } | { why: string } | { link: string; nth: number } | { href: string; nth: number } | { heading: true };
 /** A control that could not take focus back (↻ disabled while running): focus
  *  waits on the card's heading, and the next paint tries the control again. */
 let pendingFocus: FocusKey | null = null;
@@ -803,6 +805,7 @@ function transition(e: SlotEvent): void {
     pendingFocus = null;
     if (workPollTimer) clearTimeout(workPollTimer);
     workPollTimer = null;
+    resetWorkChecks();
   }
   if (isCardKind(slot.kind)) wnFocusPending = false;
   applySlot();
@@ -831,6 +834,10 @@ function applySlot(): void {
 function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
   const prev = slot;
   transition(e);
+  // A start view after a check that left something unread asks again: the remedy
+  // may have been followed. Never on a repaint, so it cannot loop, and at most once
+  // a minute, since every tab click mounts and each ask can spawn `gh`.
+  if (e.type === "mount" && workChecks && checksLeftUnread(workChecks) && Date.now() - workChecks.startedAt >= WORK_CHECKS_REASK_MS) workChecks = { ...workChecks, fetchedAt: 0 };
   if (e.type === "adopt" && slot === prev) {
     // The run did not move, but a page may have declared an effort since it
     // (P6): re-join, and only when something a join reads changed, so an
@@ -916,6 +923,7 @@ function focusCandidates(el: HTMLElement, key: FocusKey): (HTMLElement | null | 
   }
   if ("sel" in key) return [el.querySelector<HTMLElement>(key.sel), heading];
   if ("link" in key) return [cardLinks(el, key.link)[key.nth], heading];
+  if ("href" in key) return [hrefLinks(el, key.href)[key.nth], heading];
   return [heading];
 }
 
@@ -941,7 +949,12 @@ function focusedCardControl(el: HTMLElement): FocusKey | null {
   const cell = active.getAttribute("data-wm-cell");
   if (cell !== null) return { sel: `[data-wm-cell="${cell}"]` };
   if (active.hasAttribute("data-wm-drill-more")) return { sel: "[data-wm-drill-more]" };
+  const ghMore = active.getAttribute("data-wm-gh-more");
+  if (ghMore !== null) return { sel: `[data-wm-gh-more="${ghMore}"]` };
   if (rel !== null) return { link: rel, nth: cardLinks(el, rel).indexOf(active) };
+  // A link off the wiki, such as a PR in the GitHub list, has no page to key on.
+  const href = active.tagName === "A" ? active.getAttribute("href") : null;
+  if (href !== null) return { href, nth: hrefLinks(el, href).indexOf(active) };
   if (active.classList.contains("wiki-wn-title")) return { heading: true };
   const lane = active.tagName === "SUMMARY" ? active.parentElement?.getAttribute("data-wm-lane") : null;
   return lane ? { sel: `[data-wm-lane="${lane}"] > summary` } : null;
@@ -949,6 +962,10 @@ function focusedCardControl(el: HTMLElement): FocusKey | null {
 
 function cardLinks(el: HTMLElement, rel: string): HTMLElement[] {
   return Array.from(el.querySelectorAll<HTMLElement>("a[data-relpath]")).filter((a) => a.getAttribute("data-relpath") === rel);
+}
+
+function hrefLinks(el: HTMLElement, href: string): HTMLElement[] {
+  return Array.from(el.querySelectorAll<HTMLElement>("a[href]:not([data-relpath])")).filter((a) => a.getAttribute("href") === href);
 }
 
 /** Re-focus `key` in the freshly painted card, by the fallback chain. A control
@@ -962,19 +979,20 @@ function resolveFocus(el: HTMLElement, key: FocusKey): void {
   }
 }
 
-function paintWorkCard(override?: FocusKey): void {
+/** The markup the card last got: a checks answer that renders the same leaves the DOM alone. */
+let paintedCardHtml: string | null = null;
+
+/** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing. */
+function paintWorkCardIfChanged(): void {
+  paintWorkCard(undefined, true);
+}
+
+function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   const el = document.getElementById("wikiWorkCard");
   if (!el || !workBody || slot.kind !== "card") return;
   const runAt = workBody.map.runAtMs;
-  const active = document.activeElement as HTMLElement | null;
-  const lost = !active || active === document.body;
-  const parked = !!active && active.hasAttribute(PARKED_ATTR) && el.contains(active);
-  const refocus = override ?? (parked ? pendingFocus : null) ?? focusedCardControl(el) ?? (lost ? pendingFocus : null);
-  pendingFocus = null;
   const pages = deps.pages ? deps.pages() : [];
-  paintedDeclarationKey = declarationKey(pages, runAt);
-  paintedStripKey = currentStripKey();
-  el.innerHTML = workCardHtml({
+  const html = workCardHtml({
     body: workBody,
     pages,
     now: Date.now(),
@@ -985,7 +1003,27 @@ function paintWorkCard(override?: FocusKey): void {
     refresh: workRefresh,
     waitsCounted: deps.waitsCounted ? deps.waitsCounted() : false,
     strip: stripView,
+    checks: {
+      body: workChecks?.body ?? null,
+      answerRunAt: workChecks?.answerRunAt ?? null,
+      failed: !!workChecks?.failed,
+      retrying: workChecksTimer !== null || workChecksGen === slot.gen,
+    },
   });
+  if (onlyIfChanged && paintedCardHtml === html) {
+    ensureWorkChecks();
+    return;
+  }
+  const active = document.activeElement as HTMLElement | null;
+  const lost = !active || active === document.body;
+  const parked = !!active && active.hasAttribute(PARKED_ATTR) && el.contains(active);
+  const refocus = override ?? (parked ? pendingFocus : null) ?? focusedCardControl(el) ?? (lost ? pendingFocus : null);
+  pendingFocus = null;
+  paintedDeclarationKey = declarationKey(pages, runAt);
+  paintedStripKey = currentStripKey();
+  el.innerHTML = html;
+  paintedCardHtml = html;
+  ensureWorkChecks();
   if (typeof el.querySelectorAll === "function") {
     el.querySelectorAll<HTMLDetailsElement>("details[data-wm-lane]").forEach((d) => {
       const open = laneOpen.get(d.getAttribute("data-wm-lane") ?? "");
@@ -1025,6 +1063,88 @@ function paintWorkError(el: HTMLElement): void {
     '<button class="wiki-wn-retry" id="wikiWorkMapRetry">Retry</button></div>';
   applySlot();
   if (refocus) resolveFocus(el, refocus);
+}
+
+// ── The GitHub check (plan muninn-wiki-your-work-board, P2) ───────────
+/** The last answer; it repaints through `paintWorkCard`, so `stripKey` stays out of it. */
+let workChecks: {
+  body: WorkMapChecksBody | null;
+  fetchedAt: number;
+  /** When the fetch behind this answer started. */
+  startedAt: number;
+  /** The map of the last fetch, whatever it answered. */
+  runAt: number;
+  /** The map `body` answered for: a failed fetch keeps the older pair. */
+  answerRunAt: number | null;
+  failed: boolean;
+} | null = null;
+/** The generation of the fetch in flight, if any. */
+let workChecksGen: number | null = null;
+let workChecksTimer: ReturnType<typeof setTimeout> | null = null;
+/** Fetches made because the last answer said `refreshing`. */
+let workChecksRetries = 0;
+
+/** An answer older than this is fetched again when the start view renders. */
+const WORK_CHECKS_TTL_MS = 60 * 60_000;
+/** An answer that left something unread is asked again this long after its fetch started. */
+const WORK_CHECKS_REASK_MS = 60_000;
+const WORK_CHECKS_RETRY_MS = 15_000;
+const WORK_CHECKS_RETRIES_MAX = 3;
+
+function checksLeftUnread(c: { body: WorkMapChecksBody | null; failed: boolean }): boolean {
+  if (c.failed || c.body?.refreshing) return true;
+  const reason = c.body?.notChecked?.reason;
+  return (!!reason && reason !== "disabled") || (c.body?.unchecked ?? 0) > 0;
+}
+
+function resetWorkChecks(): void {
+  workChecks = null;
+  workChecksGen = null;
+  workChecksRetries = 0;
+  if (workChecksTimer) clearTimeout(workChecksTimer);
+  workChecksTimer = null;
+}
+
+/** Fetch unless an answer for this map is young enough. A new map's marks are
+ *  the server's to compute, so a new `runAt` fetches at once. */
+function ensureWorkChecks(): void {
+  if (!workBody || isThemeMap(workBody.map) || workChecksGen === slot.gen || workChecksTimer) return;
+  if (workChecks && workChecks.runAt === workBody.map.runAtMs && Date.now() - workChecks.fetchedAt < WORK_CHECKS_TTL_MS) return;
+  workChecksRetries = 0;
+  fetchWorkChecks();
+}
+
+function fetchWorkChecks(): void {
+  if (!workBody) return;
+  const gen = slot.gen;
+  const runAt = workBody.map.runAtMs;
+  const startedAt = Date.now();
+  workChecksGen = gen;
+  fetch(withWiki("/api/wiki/work-map/checks"))
+    .then(async (res) => {
+      const body = (await res.json().catch(() => null)) as WorkMapChecksBody | null;
+      if (!res.ok || !body || typeof body.checked !== "number") throw new Error("HTTP " + res.status);
+      return body;
+    })
+    .then((body) => {
+      if (!slotLive(slot, gen)) return;
+      workChecksGen = null;
+      workChecks = { body, fetchedAt: Date.now(), startedAt, runAt, answerRunAt: runAt, failed: false };
+      if (body.refreshing && workChecksRetries < WORK_CHECKS_RETRIES_MAX) {
+        workChecksRetries++;
+        workChecksTimer = setTimeout(() => {
+          workChecksTimer = null;
+          fetchWorkChecks();
+        }, WORK_CHECKS_RETRY_MS);
+      }
+      paintWorkCardIfChanged();
+    })
+    .catch(() => {
+      if (!slotLive(slot, gen)) return;
+      workChecksGen = null;
+      workChecks = { body: workChecks?.body ?? null, fetchedAt: Date.now(), startedAt, runAt, answerRunAt: workChecks?.answerRunAt ?? null, failed: true };
+      paintWorkCardIfChanged();
+    });
 }
 
 /** A GET this instance answered without a map body: an HTTP error, or a 2xx
@@ -1190,6 +1310,15 @@ export function handleWorkCardClick(target: Element): boolean {
     stripView = { ...stripView, expanded: true };
     // The button goes with the expansion; focus lands on the first row it hid.
     paintWorkCard({ sel: `.wiki-wm-drill-row:nth-child(${shown + 1}) a` });
+    return true;
+  }
+  const ghMore = target.closest("[data-wm-gh-more]");
+  if (ghMore) {
+    const group = ghMore.getAttribute("data-wm-gh-more") as GhFoldedGroup;
+    const was = stripView.ghGroups?.[group];
+    stripView = { ...stripView, ghGroups: { ...stripView.ghGroups, [group]: was ? "all" : "window" } };
+    // As with +N more: the first row the line or the button hid takes focus.
+    paintWorkCard({ sel: `[data-wm-gh-group="${group}"] .wiki-wm-drill-row:nth-child(${was ? STRIP_ROWS_SHOWN + 1 : 1}) a` });
     return true;
   }
   const why = target.closest("[data-wm-why]");

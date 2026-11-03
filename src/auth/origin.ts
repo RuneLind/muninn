@@ -124,6 +124,9 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // calls back into this instance and into claude-usage), so an `<img>` on any
   // page must not be able to start one. The reader's same-origin fetch passes.
   "/api/wiki/plan-card",
+  // The work map's GitHub check SPAWNS `gh` per uncached request, a query per 50
+  // PRs on the machine's login. The card's same-origin fetch passes.
+  "/api/wiki/work-map/checks",
   // The felles status SPAWNS Bun and a gcloud bucket listing per uncached
   // request. The route also requires its own header, which a cross-origin page
   // cannot send without a preflight; this entry is the instance-wide rule.

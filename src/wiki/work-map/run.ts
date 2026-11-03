@@ -31,6 +31,7 @@ import { workMapKindFromReaderText } from "./kind.ts";
 import { previousMapOf } from "./map-file.ts";
 import type { ThemeMap } from "./theme-schema.ts";
 import { buildThemeMap } from "./theme-run.ts";
+import type { GhCheckDeps } from "./gh-check.ts";
 import type { WorkMapStateStore } from "./state.ts";
 import { WORK_MAP_FILE, writeWorkMapFile, type WorkMapWriteOptions, type WorkMapWriteOutcome } from "./write.ts";
 import path from "node:path";
@@ -157,6 +158,9 @@ export interface WorkMapRunDeps {
   /** The commit tail handed to the write seam; `null` commits nothing. */
   commit?: WorkMapWriteOptions["commit"];
   state: WorkMapStateStore;
+  /** The GitHub check's seam (`GET /api/wiki/work-map/checks`); absent, the
+   *  check is off and nothing spawns `gh`. */
+  ghCheck?: GhCheckDeps;
 }
 
 export type Organizable = { ok: true; entry: WikiRegistryEntry } | { ok: false; reason: string };
