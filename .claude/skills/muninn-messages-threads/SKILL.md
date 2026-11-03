@@ -134,7 +134,7 @@ When loading persisted messages from the DB:
 
 ### Streaming messages
 
-For real-time streaming, the client-side `formatWebHtml()` in `src/chat/views/components/web-format-client.ts` is used directly on accumulated deltas. Keep it in sync with `src/web/web-format.ts` (rules in `src/web/CLAUDE.md`).
+For real-time streaming, the client-side `formatWebHtml()` in `src/chat/views/components/web-format-client.ts` is used directly on accumulated deltas. Keep it in sync with `src/web/web-format.ts` (rules in `src/web/CLAUDE.md`; detail in `src/web/reference/notes.md`).
 
 ## 4. Research Thread Creation (Jira Chrome Extension)
 
