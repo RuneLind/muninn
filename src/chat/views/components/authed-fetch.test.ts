@@ -634,7 +634,7 @@ describe("the SSE/WS channel latch — a terminal refusal is TERMINAL", () => {
       expect(s.latched("ws")).toBe(true);
     });
 
-    test("a latch from a spent reload is marked too", async () => {
+    test("a latch from an armed reload is marked too", async () => {
       const s = evalScript({
         answer: () => new Promise<Response>((resolve) => { release = resolve; }),
       });
@@ -646,6 +646,18 @@ describe("the SSE/WS channel latch — a terminal refusal is TERMINAL", () => {
       await settle();
       expect(s.latched("http")).toBe(true);
     });
+  });
+
+  test("a 2xx leaves a banner whose channels have all been released", async () => {
+    // An explicit reconnect releases the latch and deliberately leaves the banner:
+    // with nothing latched, only the 'http' guard stands between a 2xx and removing it.
+    const s = evalScript({ status: 200, body: { ok: true } });
+    s.setProvider("local");
+    s.refusal("sse");
+    s.releaseLatch("sse");
+    await s.authedFetch("/chat/bots");
+    await settle();
+    expect(s.banner()).toBe(true);
   });
 
   test("a 2xx on a page where http was never latched removes NOTHING", async () => {
