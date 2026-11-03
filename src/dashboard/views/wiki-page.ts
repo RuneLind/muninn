@@ -2634,7 +2634,7 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-drill-list { margin: 4px 0; padding-left: 20px; color: var(--text-secondary); overflow-wrap: anywhere; }
     .wiki-wm-drill-row { margin: 2px 0; }
     .wiki-wm-drill-meta { color: var(--text-soft); }
-    .wiki-wm-drill-clear { margin: 4px 0 6px; color: var(--text-secondary); }
+    .wiki-wm-drill-counts { margin: 4px 0 6px; color: var(--text-secondary); }
     .wiki-wm-drill-stale { margin: 4px 0; font-size: 12px; color: var(--text-soft); }
     .wiki-wm-drill-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-primary); }
     .wiki-wm-drill-group-head { font-size: 12px; font-weight: 600; color: var(--text-secondary); }

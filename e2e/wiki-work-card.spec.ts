@@ -937,7 +937,8 @@ test("no contradictions: the list opens with a sentence and a line for the rest,
   const before = await card.evaluate((el) => el.getBoundingClientRect().height);
   await cell.click();
   const drill = card.locator('[data-wm-drill="github"]');
-  await expect(drill.locator(".wiki-wm-drill-clear")).toHaveText("None of the 5 rows saying open or planned contradicts GitHub.");
+  await expect(drill.locator(".wiki-wm-drill-counts")).toContainText("5 checked");
+  await expect(drill.locator(".wiki-wm-drill-counts")).toContainText("197 with no PR link read");
   await expect(drill.locator(".wiki-wm-drill-row")).toHaveCount(0);
   await expect(drill.locator('[data-wm-gh-group="contradictions"]')).toHaveCount(0);
   await expect(drill.locator('[data-wm-gh-group="unlinked"]')).toContainText("No PR link read · 197");
@@ -954,7 +955,7 @@ test("the groups read apart, a line opens its group at the first revealed row, a
   const group = (name: string) => card.locator(`[data-wm-gh-group="${name}"]`);
   await expect(group("contradictions").locator(".wiki-wm-drill-group-head")).toHaveText("GitHub contradicts · 2");
   await expect(group("contradictions").locator(".wiki-wm-drill-row")).toHaveCount(2);
-  await expect(card.locator(".wiki-wm-drill-clear")).toHaveCount(0);
+  await expect(card.locator(".wiki-wm-drill-counts")).toContainText("3 checked · ");
   await expect(group("unchecked").locator(".wiki-wm-drill-group-head")).toContainText("Not checked · 9");
   await expect(group("unchecked").locator(".wiki-wm-drill-row")).toHaveCount(0);
   await expect(group("unlinked").locator(".wiki-wm-drill-row")).toHaveCount(0);
@@ -1076,7 +1077,7 @@ test("rows with no PR link read and nothing read: «—», muted, the count, and
   await expect(cell).toHaveClass(/\bmuted\b/);
   await expect(cell).toContainText("197 with no PR link read");
   await cell.click();
-  await expect(card.locator(".wiki-wm-drill-clear")).toHaveText("No ledger row has a PR link in a column the check reads.");
+  await expect(card.locator(".wiki-wm-drill-counts")).toContainText("197 with no PR link read");
 });
 
 test("a checks GET that fails says «not checked», and a start view a minute later asks again", async ({ page }) => {
@@ -1123,7 +1124,8 @@ test("a not refreshed answer: one line above the whole list, contradictions incl
   await cell.click();
   const drill = card.locator('[data-wm-drill="github"]');
   await expect(drill.locator(":scope > *").nth(1)).toHaveText("From the last answer, not current");
-  await expect(drill.locator(":scope > *").nth(2)).toHaveAttribute("data-wm-gh-group", "contradictions");
+  await expect(drill.locator(":scope > *").nth(2)).toHaveClass("wiki-wm-drill-counts");
+  await expect(drill.locator(":scope > *").nth(3)).toHaveAttribute("data-wm-gh-group", "contradictions");
 });
 
 test("a retry that fails during «refreshing» keeps the count muted with «not checked», and the next start view asks again", async ({ page }) => {
@@ -2620,11 +2622,11 @@ for (const theme of THEMES) {
     await openStart(page, STRIP_OFF);
     await expect(card.locator('[data-wm-cell="decisions"] b')).toHaveText("owner not set");
     await sweep("owner not set");
-    // The GitHub list with no contradiction: its sentence.
+    // The GitHub list with no contradiction: its counts line.
     answerAllClear = true;
     await openStart(page, SWEEP);
     await card.locator('[data-wm-cell="github"]').click();
-    await expect(card.locator(".wiki-wm-drill-clear")).toBeVisible();
+    await expect(card.locator(".wiki-wm-drill-counts")).toBeVisible();
     await sweep("GitHub all clear");
     // The same list on an answer that is no longer current: its line.
     answerNotCurrent = true;

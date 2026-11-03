@@ -273,26 +273,34 @@ describe("the GitHub cell", () => {
       expect(flat(open({ uncheckedRows }, { unchecked: "window" }))).toContain("#4 not checked");
     });
 
-    test("with no contradictions it opens with one sentence, before any group", () => {
+    test("the list opens with the counts, before any group, with or without a contradiction", () => {
       const out = open({ checked: 3, compared: 3, unlinkedRows });
-      const text = flat(out);
-      expect(text).toContain("None of the 3 rows saying open or planned contradicts GitHub.");
-      expect(out.indexOf("wiki-wm-drill-clear")).toBeGreaterThan(-1);
-      expect(out.indexOf("wiki-wm-drill-clear")).toBeLessThan(out.indexOf("data-wm-gh-group="));
-      expect(open({ contradictions: [contradiction], unlinkedRows })).not.toContain("wiki-wm-drill-clear");
-      expect(flat(open({ checked: 1, compared: 1, unlinkedRows }))).toContain("The 1 row saying open or planned does not contradict GitHub.");
+      expect(out.indexOf("wiki-wm-drill-counts")).toBeGreaterThan(-1);
+      expect(out.indexOf("wiki-wm-drill-counts")).toBeLessThan(out.indexOf("data-wm-gh-group="));
+      expect(open({ contradictions: [contradiction], unlinkedRows })).toContain("wiki-wm-drill-counts");
     });
 
-    test("the sentence claims only what was read", () => {
-      const partial = flat(open({ checked: 3, compared: 2, unchecked: 2, uncheckedRows }));
-      expect(partial).toContain("None of the 2 rows saying open or planned contradicts GitHub.");
-      const uncomparable = flat(open({ checked: 167, compared: 0, unlinkedRows }));
-      expect(uncomparable).toContain("No row with a PR read says open or planned, so nothing could contradict GitHub.");
-      const none = flat(open({ checked: 0, unchecked: 2, uncheckedRows }));
-      expect(none).toContain("GitHub answered for none of the 2 rows with a PR link");
-      const remedy = flat(open({ checked: 0, unchecked: 0, unlinkedRows, unlinked: 9, notChecked: { reason: "auth", repos: ["acme/x"] } }));
-      expect(remedy).toContain("Nothing was read from GitHub.");
-      for (const text of [partial, uncomparable, none, remedy]) expect(text).not.toMatch(/agrees|every (ledger )?row/i);
+    // The body shapes the earlier sentences were false on: a list states counts and no conclusion.
+    const SHAPES: [string, Partial<WorkMapChecksBody>, string][] = [
+      ["partly read behind a login", { checked: 1, compared: 0, unchecked: 2, uncheckedRows, notChecked: { reason: "auth", repos: ["acme/x"] } }, "1 checked · 0 with a state to compare · 2 not checked · 0 with no PR link read · 0 skipped"],
+      ["nothing comparable beside unlinked rows", { checked: 167, compared: 0, unlinked: 199, unlinkedRows }, "167 checked · 0 with a state to compare · 0 not checked · 199 with no PR link read · 0 skipped"],
+      ["some compared", { checked: 3, compared: 2, unchecked: 2, uncheckedRows }, "3 checked · 2 with a state to compare · 2 not checked · 0 with no PR link read · 0 skipped"],
+      ["a multi-PR row half answered", { checked: 0, compared: 0, unchecked: 1, uncheckedRows }, "0 checked · 0 with a state to compare · 1 not checked · 0 with no PR link read · 0 skipped"],
+      ["no PR link read beside a skipped row", { checked: 0, unlinked: 1, skipped: 1, unlinkedRows }, "0 checked · 0 with a state to compare · 0 not checked · 1 with no PR link read · 1 skipped"],
+      ["a remedy", { checked: 0, unlinked: 9, unlinkedRows, notChecked: { reason: "auth", repos: ["acme/x"] } }, "0 checked · 0 with a state to compare · 0 not checked · 9 with no PR link read · 0 skipped"],
+    ];
+    for (const [name, body, line] of SHAPES) {
+      test(`${name}: the list states the counts and concludes nothing`, () => {
+        const out = open(body);
+        const text = flat(out);
+        expect(text).toContain(line);
+        expect(text).not.toMatch(/agrees|every (ledger )?row|nothing could|none of|does not contradict|answered for|was read from|has a PR link/i);
+      });
+    }
+
+    test("the tooltip carries the same counts as the list", () => {
+      const c = cellHtml(open({ checked: 3, compared: 2, unlinked: 4, skipped: 1, unlinkedRows }))!;
+      expect(/title="([^"]*)"/.exec(c)![1]).toBe("3 checked · 2 with a state to compare · 0 not checked · 4 with no PR link read · 1 skipped");
     });
 
     describe("on an answer that is not current", () => {
@@ -318,13 +326,13 @@ describe("the GitHub cell", () => {
           const at = out.indexOf("wiki-wm-drill-stale");
           expect(at).toBeGreaterThan(out.indexOf("wiki-wm-drill-title"));
           expect(at).toBeLessThan(out.indexOf("data-wm-gh-group="));
-          const clear = out.indexOf("wiki-wm-drill-clear");
+          const clear = out.indexOf("wiki-wm-drill-counts");
           if (clear >= 0) expect(at).toBeLessThan(clear);
           expect(out).not.toMatch(/In the last answer|gitHub/);
         });
         test(`${state}: the tooltip opens with the same words`, () => {
           const c = cellHtml(render({ body: checksBody({ unlinked: 1, skipped: 2, ...body }), ...view }))!;
-          expect(/title="([^"]*)"/.exec(c)![1]).toBe(`${LINE} · 3 checked · 0 not checked · 1 with no PR link read · 2 skipped`);
+          expect(/title="([^"]*)"/.exec(c)![1]).toBe(`${LINE} · 3 checked · 0 with a state to compare · 0 not checked · 1 with no PR link read · 2 skipped`);
         });
       }
       test("a current answer has neither, nor has one still refreshing", () => {
@@ -356,7 +364,7 @@ describe("the GitHub cell", () => {
       expect(c).toMatch(/class="wiki-wm-cell muted( on)?"/);
       expect(flat(c)).toContain("197 with no PR link read");
       expect(c).not.toContain(" disabled");
-      expect(flat(out)).toContain("No ledger row has a PR link in a column the check reads.");
+      expect(flat(out)).toContain("0 checked · 0 with a state to compare · 0 not checked · 197 with no PR link read · 0 skipped");
     });
 
     test("rows read beside the unlinked ones stay the plain count", () => {

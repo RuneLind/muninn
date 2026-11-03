@@ -652,17 +652,9 @@ function ghPrLinkHtml(repo: string, pr: number): string {
   return `<a class="wiki-wm-link" href="https://github.com/${esc(repo)}/pull/${pr}" target="_blank" rel="noopener noreferrer">#${pr}</a>`;
 }
 
-const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
-
-/** The list's opening line when no row is contradicted. It claims only what was read. */
-function ghClearSentence(body: WorkMapChecksBody): string {
-  const { checked, compared, unchecked } = body;
-  if (!checked) {
-    if (unchecked > 0) return `GitHub answered for none of the ${plural(unchecked, "row")} with a PR link, so nothing is known about them yet.`;
-    return body.notChecked ? "Nothing was read from GitHub." : "No ledger row has a PR link in a column the check reads.";
-  }
-  if (!compared) return "No row with a PR read says open or planned, so nothing could contradict GitHub.";
-  return compared === 1 ? "The 1 row saying open or planned does not contradict GitHub." : `None of the ${compared} rows saying open or planned contradicts GitHub.`;
+/** The check's counts and no conclusion: every sentence that drew one was false on some answer. */
+function ghCounts(body: WorkMapChecksBody): string {
+  return `${body.checked} checked · ${body.compared} with a state to compare · ${body.unchecked} not checked · ${body.unlinked} with no PR link read · ${body.skipped} skipped`;
 }
 
 /** One labelled group. A folded one is a heading and a `+N more`; open, it takes the row window. */
@@ -687,7 +679,7 @@ function ghDrillHtml(body: WorkMapChecksBody, view: StripView, stale: boolean, b
   return (
     `<div class="wiki-wm-drill" data-wm-drill="github"><div class="wiki-wm-drill-title">${esc(STRIP_TITLES.github)}</div>` +
     (stale ? `<p class="wiki-wm-drill-stale">${GH_NOT_CURRENT}</p>` : "") +
-    (body.contradictions.length ? "" : `<p class="wiki-wm-drill-clear">${esc(ghClearSentence(body))}</p>`) +
+    `<p class="wiki-wm-drill-counts">${esc(ghCounts(body))}</p>` +
     ghGroupHtml(
       "contradictions",
       "GitHub contradicts",
@@ -740,7 +732,7 @@ function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, 
   const tone = [stale || nothingRead ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
   const cell = stripCellHtml("github", nothingRead ? "—" : String(n), GH_CELL_LABEL, tone, view, !drill, {
     note: notes.join(""),
-    title: `${stale ? `${GH_NOT_CURRENT} · ` : ""}${body.checked} checked · ${body.unchecked} not checked · ${body.unlinked} with no PR link read · ${body.skipped} skipped`,
+    title: `${stale ? `${GH_NOT_CURRENT} · ` : ""}${ghCounts(body)}`,
   });
   return { cell, drill };
 }
