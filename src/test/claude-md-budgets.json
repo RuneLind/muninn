@@ -6,14 +6,10 @@
     "src/gardener/CLAUDE.md": 60026,
     "src/summaries/CLAUDE.md": 80880,
     "src/vimeo/CLAUDE.md": 97139,
-    "src/watchers/CLAUDE.md": 210641,
-    "src/web/CLAUDE.md": 227165,
     "src/youtube/CLAUDE.md": 76991
   },
   "pending": [
     "src/dashboard",
-    "src/web",
-    "src/watchers",
     "src/vimeo",
     "src/auth",
     "src/summaries",
