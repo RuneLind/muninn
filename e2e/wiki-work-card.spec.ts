@@ -2285,24 +2285,19 @@ for (const theme of THEMES) {
     const next = card.locator('[data-wm-cell="oldest"]');
     const shut = card.locator('[data-wm-cell="steps"]');
     const accent = await token(page, "--accent");
-    const paint = (l: typeof open) =>
-      l.evaluate((el) => {
-        const c = getComputedStyle(el);
-        return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor };
-      });
     await open.focus();
     await page.keyboard.press("Enter");
     await expect(open).toHaveAttribute("aria-expanded", "true");
     await expect(open).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(next).toBeFocused();
-    const closedFocused = await paint(next);
-    const openAtRest = await paint(open);
-    const closedAtRest = await paint(shut);
+    const closedFocused = await cellPaint(next);
+    const openAtRest = await cellPaint(open);
+    const closedAtRest = await cellPaint(shut);
     await page.keyboard.press("Shift+Tab");
     await expect(open).toBeFocused();
     expect(await open.evaluate((el) => el.matches(":focus-visible"))).toBe(true);
-    const openFocused = await paint(open);
+    const openFocused = await cellPaint(open);
     expect(openFocused).not.toEqual(openAtRest);
     // Focus is the outline, on an open cell and a closed one alike.
     expect(openAtRest.outline).toBe("none 0px");
@@ -2326,12 +2321,26 @@ for (const theme of THEMES) {
   });
 }
 
-/** All a cell's border, ring and shadow paint: what a state change has to move. */
-function cellPaint(cell: Locator) {
-  return cell.evaluate((el) => {
-    const c = getComputedStyle(el);
-    return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor, borderWidth: c.borderTopWidth };
-  });
+/** Wait out the card's second paint. The checks answer lands about 5 ms after the first (measured),
+ *  replaces every cell and, with the check off on this server, drops the strip from 5 cells to 4, so a cell moves out from under a hover. */
+async function checksPainted(page: Page) {
+  await expect(page.locator('#wikiWorkCard [data-wm-cell="decisions"]')).toBeAttached();
+  await expect(page.locator('#wikiWorkCard [data-wm-cell="github"]')).toHaveCount(0);
+}
+
+/** All a cell's border, ring and shadow paint: what a state change has to move.
+ *  `Locator.evaluate` finds the element, then reads it: a repaint between the two
+ *  reads a detached element, whose computed style is all "" (CI, #787). */
+async function cellPaint(cell: Locator) {
+  await checksPainted(cell.page());
+  for (;;) {
+    const paint = await cell.evaluate((el) => {
+      if (!el.isConnected) return null;
+      const c = getComputedStyle(el);
+      return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor, borderWidth: c.borderTopWidth };
+    });
+    if (paint) return paint;
+  }
 }
 
 for (const theme of THEMES) {
@@ -2389,6 +2398,7 @@ for (const scheme of ["light", "dark"] as const) {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.emulateMedia({ colorScheme: scheme, forcedColors: "active" });
     await openStart(page, STRIP);
+    await checksPainted(page);
     expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
     const card = page.locator("#wikiWorkCard");
     const open = card.locator('[data-wm-cell="decisions"]');
