@@ -1,13 +1,15 @@
 import { test, expect, describe } from "bun:test";
 import { statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { Lexer, type Tokens } from "marked";
+import { testTempDirSync } from "./temp-dir.ts";
 
 /**
  * Caps every tracked CLAUDE.md that Claude Code reads as memory.
  *
  * Claude Code loads a nested CLAUDE.md the first time a session reads a file under its folder,
- * up to a per-file limit of about 40k–150k chars by context window. What it loads is a cost on
+ * up to a per-file limit of 40k–200k chars by context window and model. What it loads is a cost on
  * every later turn, and past the limit only the start is delivered, so rules there go unseen.
  * Detail about one function belongs in `src/<module>/reference/notes.md`, reached through the
  * `## Index` in CLAUDE.md.
@@ -111,7 +113,9 @@ const TEXT_EXTENSIONS = new Set(
 
 /** The distinct `@path` tokens Claude Code would scan, without their #fragment or trailing punctuation. */
 function atPathsIn(text: string): string[] {
-  const body = text.replace(/^\uFEFF/, "").replace(FRONTMATTER, "");
+  // Claude Code drops a leading BOM only along with frontmatter. Otherwise it reaches the lexer, so `<BOM>~~~` opens no fence.
+  const bare = withoutBom(text);
+  const body = FRONTMATTER.test(bare) ? bare.replace(FRONTMATTER, "") : text;
   const paths = scannedTextIn(lex(body))
     .flatMap((scanned) => [...scanned.matchAll(AT_PATH)])
     .map((match) => (match[1] ?? "").replace(/\\ /g, " ").replace(/#.*$/, "").replace(/[.,;:!?)\]'"*_]+$/, ""))
@@ -132,8 +136,11 @@ function isSection(token: Tokens.Generic): boolean {
   return token.type === "heading" && /^ {0,3}#{2,3}(?:\s|$)/.test(token.raw);
 }
 
+/** The BOM rule is Claude Code's import read. A heading or an index line is the same with or without one. */
+const withoutBom = (text: string) => text.replace(/^\uFEFF/, "");
+
 function headingsIn(text: string): string[] {
-  return lex(text)
+  return lex(withoutBom(text))
     .filter((token) => isSection(token) && token.text !== "")
     .map((token) => token.text as string);
 }
@@ -153,7 +160,7 @@ function itemLines(list: Tokens.Generic): string[] {
 
 /** The list items under `## Index`, up to the next heading of any level, without a trailing ` [trap]`. */
 function indexLinesIn(text: string): string[] {
-  const tokens = lex(text);
+  const tokens = lex(withoutBom(text));
   const start = tokens.findIndex((token) => isSection(token) && token.depth === 2 && token.text === "Index");
   if (start < 0) return [];
   const rest = tokens.slice(start + 1);
@@ -218,25 +225,26 @@ function checkClaudeMdBudgets(tree: Tree): string[] {
     }
     const notes = `${posix.dirname(path)}/reference/notes.md`;
     if (tree.files.has(notes)) {
-      out.push(`${path}: has an entry in \`claude-md-budgets.json\` and \`${notes}\` exists. The file PR deletes its entry.`);
+      out.push(`${path}: has an entry in \`claude-md-budgets.json\` and \`${notes}\` exists. Delete its entry.`);
     }
   }
   return out;
 }
 
-async function readRealTree(): Promise<Tree> {
-  const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: ROOT });
-  if (listed.exitCode !== 0) throw new Error(`git ls-files failed: ${listed.stderr.toString()}`);
+const BOM_KEEPING_UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
+
+async function readTree(root: string, paths: string[]): Promise<Tree> {
   const files = new Map<string, string>();
-  for (const path of listed.stdout.toString().split("\0").filter(Boolean)) {
+  for (const path of paths) {
     const inReference = posix.basename(posix.dirname(path)) === "reference" && path.endsWith(".md");
     if (!isMemoryFile(path) && !inReference) continue;
-    const file = Bun.file(join(ROOT, path));
-    if (await file.exists()) files.set(path, await file.text()); // absent: deleted in the working tree
+    const file = Bun.file(join(root, path));
+    // `text()` drops a leading BOM, and Claude Code's read keeps it, which changes what it imports.
+    if (await file.exists()) files.set(path, BOM_KEEPING_UTF8.decode(await file.arrayBuffer())); // absent: deleted in the working tree
   }
   const isFile = (path: string) => {
     try {
-      return statSync(join(ROOT, path)).isFile();
+      return statSync(join(root, path)).isFile();
     } catch {
       return false;
     }
@@ -244,11 +252,17 @@ async function readRealTree(): Promise<Tree> {
   return { files, isFile, budgets: (await Bun.file(BUDGETS_FILE).json()) as Budgets };
 }
 
+async function readRealTree(): Promise<Tree> {
+  const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: ROOT });
+  if (listed.exitCode !== 0) throw new Error(`git ls-files failed: ${listed.stderr.toString()}`);
+  return readTree(ROOT, listed.stdout.toString().split("\0").filter(Boolean));
+}
+
 test("the real tree is within its budgets", async () => {
   const tree = await readRealTree();
   expect([...tree.files.keys()].filter(isMemoryFile).length).toBeGreaterThan(10);
   expect(checkClaudeMdBudgets(tree)).toEqual([]);
-}, 30_000); // lexes every file; a CI runner is slower than a laptop, and bun's default is 5 s
+});
 
 const fill = (chars: number) => "x".repeat(chars);
 
@@ -512,6 +526,13 @@ describe("index", () => {
     expect(check({ "src/old/CLAUDE.md": `## Index\n\n${old}` })).toEqual([]);
   });
 
+  test("a leading BOM hides no heading from the index", () => {
+    expect(check(indexed("\uFEFF## First\n", "- First\n"))).toEqual([]);
+    expect(check(indexed("\uFEFF## First\n\n## Other\n", "- Other\n"))).toHaveLength(1);
+    expect(check(indexed("## First\n\n\uFEFF## Not a heading\n", "- First\n"))).toEqual([]);
+    expect(check({ "src/foo/CLAUDE.md": "\uFEFF## Index\n\n- One\n", "src/foo/reference/notes.md": "## One\n" })).toEqual([]);
+  });
+
   test("reference/ without notes.md is not indexed", () => {
     expect(check({ "src/foo/CLAUDE.md": "x\n", "src/foo/reference/other.md": "## One\n" })).toEqual([]);
   });
@@ -521,7 +542,7 @@ describe("stale entry", () => {
   test("fails on a budgets entry for a folder that has reference/notes.md", () => {
     const out = check(indexed("## One\n", "- One\n"), { entries: { "src/foo/CLAUDE.md": 50_000 } });
     expect(out).toHaveLength(1);
-    expect(out[0]).toContain("The file PR deletes its entry.");
+    expect(out[0]).toContain("Delete its entry.");
     expect(out[0]).toContain("src/foo/CLAUDE.md");
   });
 
@@ -625,6 +646,7 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
   test("a path that cannot start an import passes though the file exists", () => {
     expect(check({ "CLAUDE.md": "@@a.md and @+b.md\n" }, { existing: ["@a.md", "+b.md"] })).toEqual([]);
     expect(check({ "CLAUDE.md": "@-a.md and @_b.md and @9c.md and @Zd.md\n" }, { existing: ["-a.md", "_b.md", "9c.md", "Zd.md"] })).toHaveLength(4);
+    expect(check({ "CLAUDE.md": "@~x.md\n" }, { existing: ["~x.md"] })).toEqual([]);
   });
 
   test("a non-text extension is skipped, like Claude Code's, whether or not the path is relative", () => {
@@ -638,6 +660,45 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
     expect(check({ "CLAUDE.md": "---\nx: 1\n---\n@a.md\n" }, A)).toHaveLength(1);
     expect(check({ "CLAUDE.md": "---\nx: 1\n---\n@a.md\n\n---\nEnd\n" }, A)).toHaveLength(1);
     expect(check({ "CLAUDE.md": "Body\n\n---\n\n@a.md\n\n---\n" }, A)).toHaveLength(1);
+  });
+
+  test("a leading BOM is dropped only along with frontmatter, as Claude Code does", () => {
+    expect(check({ "CLAUDE.md": "\uFEFF~~~\n@a.md\n~~~\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "\uFEFF---\nx: 1\n---\n~~~\n@a.md\n~~~\n" }, A)).toEqual([]);
+  });
+
+  test("the file read keeps a leading BOM, so the rule reaches a file on disk", async () => {
+    const dir = testTempDirSync(join(tmpdir(), "claude-md-bom-"));
+    await Bun.write(join(dir, "src/zz/CLAUDE.md"), "\uFEFF~~~\n@a.md\n~~~\n");
+    await Bun.write(join(dir, "src/zz/a.md"), "x\n");
+    const tree = await readTree(dir, ["src/zz/CLAUDE.md"]);
+    expect(tree.files.get("src/zz/CLAUDE.md")?.charCodeAt(0)).toBe(0xfeff);
+    const out = checkClaudeMdBudgets({ ...tree, budgets: { entries: {}, pending: [] } });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain("@a.md");
+  });
+
+  test("a BOM mid-file stays, so it opens no fence", () => {
+    expect(check({ "CLAUDE.md": "x\n\n\uFEFF~~~\n@a.md\n~~~\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "---\nx: 1\n---\nBody\n\n\uFEFF~~~\n@a.md\n~~~\n" }, A)).toHaveLength(1);
+  });
+
+  test("a frontmatter opener or closer may carry trailing spaces", () => {
+    expect(check({ "CLAUDE.md": "---  \nsee: @a.md\n---\nBody\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "---\nsee: @a.md\n---  \nBody\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "---  \nx: 1\n---  \n@a.md\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "---\nx: 1\n---\n    @a.md\n" }, A)).toHaveLength(1); // the closer takes the indent, so this is no code block
+  });
+
+  test("a closer may sit mid-line, so what follows it is the body", () => {
+    expect(check({ "CLAUDE.md": "---\nx: a--- @a.md\n\nBody\n---\nEnd\n" }, A)).toHaveLength(1);
+  });
+
+  test("CRLF frontmatter is frontmatter", () => {
+    expect(check({ "CLAUDE.md": "---\r\nsee: @a.md\r\n---\r\nBody\r\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "---\r\nx: 1\r\n---\r\n~~~\r\n@a.md\r\n~~~\r\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "---\r\nx: 1\r\n---\r\n@a.md\r\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "---\r\nx: 1\r\n---\r\n    @a.md\r\n" }, A)).toHaveLength(1);
   });
 
   test("a table row is prose at gfm:false", () => {
