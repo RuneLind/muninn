@@ -881,7 +881,7 @@ latch set *after* init lived for the life of the tab. Measured on a `local`
 instance, where the verdict is a banner and there is no reload to re-run init:
 ONE transient `/chat/events` failure killed the stream permanently and left
 "your session expired" over a session that was fine, where the pre-latch page
-recovered in 3 s. There are three releases now, and the two added are driven by
+recovered in 3 s. There are four releases now, and the ones added are driven by
 evidence rather than by a timer:
 
 | release | latch | banner |
@@ -901,8 +901,9 @@ reconnect, neither of which a `fetch` can produce. A latched `http` therefore
 pinned the shared banner up for the life of the tab — and blocked every OTHER
 channel's recovery from taking it down, since that clear requires nothing to be
 latched. A 2xx is the http channel's own open evidence, and it is consulted only
-while `http` is latched: on an ordinary page every response would otherwise be a
-second, decision-free door onto removing someone else's banner.
+while `http` is latched, and only from a request started after the latch: on an
+ordinary page every response would otherwise be a second, decision-free door onto
+removing someone else's banner, and an older response says nothing about now.
 
 **Accepted, not fixed: a FLAPPING stream on an `entra` instance.** The releases
 are evidence-driven, so open → error → open → error re-enters the rule every
