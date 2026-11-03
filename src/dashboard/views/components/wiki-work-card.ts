@@ -232,9 +232,16 @@ export function isNestedEffort(e: { id: string; parent?: string }, efforts: read
   return true;
 }
 
-/** The newest day with any activity, as days before `now` (local days). A
- *  theme stores no `daily`: its newest week with a source counts from that
- *  week's last day (Sunday), so a source this week reads as 0. */
+/** Calendar days from `day` to `today`, both `YYYY-MM-DD`, so no clock and no DST
+ *  enters; a later `day` reads as 0, a bad one as NaN. */
+function calendarDaysTo(day: string, today: string): number {
+  return Math.max(0, Math.round((Date.parse(today + "T12:00:00Z") - Date.parse(day + "T12:00:00Z")) / 86_400_000));
+}
+
+/** The newest day with any activity, as days before Oslo's today, the calendar
+ *  `daily` and `weekly` are keyed on, whatever the browser's zone. A theme stores
+ *  no `daily`: its newest week with a source counts from that week's last day
+ *  (Sunday), so a source this week reads as 0. */
 export function lastActiveDays(
   effort: { daily?: readonly { day: string; commits: number; sessions: number }[]; weekly?: readonly { start: string; count: number }[] },
   now: number,
@@ -247,11 +254,8 @@ export function lastActiveDays(
     if (best) best = plusDays(best, 6);
   }
   if (!best) return null;
-  const t = Date.parse(best + "T12:00:00");
-  if (!Number.isFinite(t)) return null;
-  const today = new Date(now);
-  today.setHours(12, 0, 0, 0);
-  return Math.max(0, Math.round((today.getTime() - t) / 86_400_000));
+  const days = calendarDaysTo(best, osloDay(now));
+  return Number.isFinite(days) ? days : null;
 }
 
 /** `YYYY-MM-DD` plus `n` days, by the calendar. */
@@ -486,11 +490,12 @@ export function boardColumn(effort: { state: JoinedEffort<unknown>["state"] }, f
 export const SPARK_DAYS = 28;
 const SPARK_HEIGHT = 24;
 
-/** Commits plus twice the sessions per day, oldest first. A day after today counts as today, as in {@link lastActiveDays}. */
+/** Commits plus twice the sessions per day, oldest first, ending on Oslo's today. A day after it counts as today, as in {@link lastActiveDays}. */
 export function sparkValues(daily: readonly { day: string; commits: number; sessions: number }[], now: number): number[] {
   const out = new Array<number>(SPARK_DAYS).fill(0);
+  const today = osloDay(now);
   for (const d of daily) {
-    const age = daysSinceDay(d.day, now);
+    const age = calendarDaysTo(d.day, today);
     if (age < SPARK_DAYS) out[SPARK_DAYS - 1 - age]! += d.commits + 2 * d.sessions;
   }
   return out;
@@ -515,12 +520,34 @@ interface BoardRow<P> {
   idle: number | null;
 }
 
-/** Oldest wait first, undated after; then most recently active, then map order. */
-function byBoardOrder<P>(a: BoardRow<P>, b: BoardRow<P>): number {
-  const x = a.facts.since;
-  const y = b.facts.since;
-  if (x !== y) return !x ? 1 : !y ? -1 : x < y ? -1 : 1;
-  return (a.idle ?? Infinity) - (b.idle ?? Infinity) || a.at - b.at;
+/** What the board sorts on, never what it shows: a tile's pills keep its own facts. */
+interface BoardOrder {
+  since?: string;
+  waits: boolean;
+  idle: number;
+  at: number;
+}
+
+/** A row's sort key, rolled up over the rows nested in it: a column that shows who
+ *  has waited longest must lead with that wait, even when it sits in a nested row. */
+function boardOrder<P>(row: BoardRow<P>, nested: readonly BoardRow<P>[] = []): BoardOrder {
+  const all = [row, ...nested];
+  const since = all.flatMap((r) => (r.facts.since ? [r.facts.since] : [])).sort()[0];
+  return {
+    ...(since ? { since } : {}),
+    waits: all.some((r) => r.facts.decisions > 0),
+    idle: Math.min(...all.map((r) => r.idle ?? Infinity)),
+    at: row.at,
+  };
+}
+
+const waitRank = (o: BoardOrder) => (o.since ? 0 : o.waits ? 1 : 2);
+
+/** Dated waits oldest first, then undated waits, then no wait; within each, most recently active, then map order. */
+function byBoardOrder(a: BoardOrder, b: BoardOrder): number {
+  if (waitRank(a) !== waitRank(b)) return waitRank(a) - waitRank(b);
+  if (a.since !== b.since) return a.since! < b.since! ? -1 : 1;
+  return a.idle - b.idle || a.at - b.at;
 }
 
 function boardPillsHtml<P>(r: BoardRow<P>, now: number): string {
@@ -564,8 +591,9 @@ function boardHtml<P extends CardPage>(
   const tileOf = (r: BoardRow<P>): BoardRow<P> => (nestsUp(r) ? tileOf(parentOf(r)!) : r);
   const kidHtml = (k: BoardRow<P>) =>
     `<li class="wiki-wm-effort wiki-wm-kid" data-effort-id="${esc(k.e.id)}">${boardNameHtml(k.e, effortHref, true)}${boardPillsHtml(k, now)}${sparkHtml(k.e.daily, now)}</li>`;
+  const kidsOf = (r: BoardRow<P>) => rows.filter((k) => nestsUp(k) && tileOf(k) === r);
   const tileHtml = (r: BoardRow<P>) => {
-    const kids = rows.filter((k) => nestsUp(k) && tileOf(k) === r).sort(byBoardOrder);
+    const kids = kidsOf(r).sort((a, b) => byBoardOrder(boardOrder(a), boardOrder(b)));
     const partOf = parentOf(r);
     return (
       `<li class="wiki-wm-effort wiki-wm-tile" data-effort-id="${esc(r.e.id)}">` +
@@ -580,7 +608,7 @@ function boardHtml<P extends CardPage>(
   };
   const cols = BOARD_COLUMN_HEADS.map(({ id, label, open }) => {
     const inCol = rows.filter((r) => r.col === id);
-    const tiles = inCol.filter((r) => !nestsUp(r)).sort(byBoardOrder);
+    const tiles = inCol.filter((r) => !nestsUp(r)).sort((a, b) => byBoardOrder(boardOrder(a, kidsOf(a)), boardOrder(b, kidsOf(b))));
     return (
       // Named here because an inert head (the wide board) drops out of the accessibility tree.
       `<details class="wiki-wm-col" data-wm-lane="${id}" aria-label="${esc(label)} ${inCol.length}"${open ? " open" : ""}>` +

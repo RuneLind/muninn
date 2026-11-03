@@ -315,6 +315,143 @@ describe("the board", () => {
     expect(orderIn(html, "you")).toEqual(["dated-old", "dated-young", "undated-new", "undated-old", "idle-a", "idle-b"]);
   });
 
+  describe("order: dated waits oldest first, then undated waits, then no wait", () => {
+    const kidsIn = (html: string, tile: string) => {
+      const at = html.indexOf(`wiki-wm-tile" data-effort-id="${tile}"`);
+      return [...html.slice(at, html.indexOf("</ul>", at)).matchAll(/wiki-wm-kid" data-effort-id="([^"]+)"/g)].map((m) => m[1]);
+    };
+    const pillsOf = (html: string, id: string) => {
+      const at = html.indexOf(`wiki-wm-pills`, html.indexOf(`data-effort-id="${id}"`));
+      return html.slice(at, html.indexOf("</div>", at));
+    };
+    const day = (d: string) => [{ day: d, commits: 1, sessions: 0 }];
+    const waits = (since: string) => pg(`w-${since}.mdx`, { movesWaiting: 1, waitingSince: since });
+    const undated = pg("undated.mdx", { movesWaiting: 1 });
+    const plain = pg("plain.mdx");
+
+    test("an undated wait ranks ahead of no wait, however recent the no-wait effort is", () => {
+      const html = render(
+        only(
+          [
+            effort("needs-only", "active", ["plain.mdx"], { daily: day("2026-10-29") }),
+            effort("undated", "active", ["undated.mdx"], { daily: day("2026-10-19") }),
+            effort("dated", "active", ["w-2026-10-01.mdx"]),
+          ],
+          [need("needs-only")],
+        ),
+        [plain, undated, waits("2026-10-01")],
+      );
+      expect(orderIn(html, "you")).toEqual(["dated", "undated", "needs-only"]);
+    });
+
+    test("a tile sorts by the oldest wait nested in it, and its pills and the row's keep their own facts", () => {
+      const html = render(
+        only([
+          effort("mid", "active", ["w-2026-10-06.mdx"]),
+          effort("other", "active", ["w-2026-10-10.mdx"]),
+          effort("parent", "active", ["w-2026-10-23.mdx"]),
+          effort("old-kid", "active", ["w-2026-09-24.mdx"], { parent: "parent" }),
+        ]),
+        ["2026-10-06", "2026-10-10", "2026-10-23", "2026-09-24"].map(waits),
+      );
+      expect(orderIn(html, "you")).toEqual(["parent", "mid", "other"]);
+      expect(pillsOf(html, "parent")).toContain("1 decision · 6 d");
+      expect(pillsOf(html, "parent")).not.toContain("35 d");
+      expect(pillsOf(html, "old-kid")).toContain("1 decision · 35 d");
+    });
+
+    test("the rollup reaches a grandchild, which renders as a flat row in the top tile", () => {
+      const html = render(
+        only(
+          [
+            effort("rival", "active", ["w-2026-10-06.mdx"]),
+            effort("top", "active", ["plain.mdx"]),
+            effort("child", "active", ["plain.mdx"], { parent: "top" }),
+            effort("grandchild", "active", ["w-2026-09-24.mdx"], { parent: "child" }),
+          ],
+          [need("top"), need("child", "Other")],
+        ),
+        [plain, waits("2026-10-06"), waits("2026-09-24")],
+      );
+      expect(orderIn(html, "you")).toEqual(["top", "rival"]);
+    });
+
+    test("a nested undated wait lifts its tile above no wait, below a dated wait", () => {
+      const html = render(
+        only(
+          [
+            effort("no-wait", "active", ["plain.mdx"], { daily: day("2026-10-29") }),
+            effort("holder", "active", ["plain.mdx"], { daily: day("2026-10-01") }),
+            effort("undated-kid", "active", ["undated.mdx"], { parent: "holder" }),
+            effort("dated", "active", ["w-2026-10-20.mdx"]),
+          ],
+          [need("no-wait"), need("holder", "Other")],
+        ),
+        [plain, undated, waits("2026-10-20")],
+      );
+      expect(orderIn(html, "you")).toEqual(["dated", "holder", "no-wait"]);
+    });
+
+    test("with no wait, a tile sorts by the most recent activity nested in it", () => {
+      const html = render(
+        only([
+          effort("recent", "active", ["plain.mdx"], { daily: day("2026-10-20") }),
+          effort("holder", "active", ["plain.mdx"], { daily: day("2026-10-10") }),
+          effort("busy-kid", "active", ["plain.mdx"], { parent: "holder", daily: day("2026-10-29") }),
+        ]),
+        [plain],
+      );
+      expect(orderIn(html, "moving")).toEqual(["holder", "recent"]);
+    });
+
+    test("a sub-effort that stands alone in another column does not lift its parent", () => {
+      const html = render(
+        only(
+          [
+            effort("recent", "active", ["plain.mdx"], { daily: day("2026-10-24") }),
+            effort("holder", "active", ["plain.mdx"], { daily: day("2026-10-09") }),
+            effort("elsewhere", "active", ["plain.mdx"], { parent: "holder", daily: day("2026-10-29") }),
+          ],
+          [need("recent"), need("holder", "Other")],
+        ),
+        [plain],
+      );
+      expect(orderIn(html, "you")).toEqual(["recent", "holder"]);
+      expect(orderIn(html, "moving")).toEqual(["elsewhere"]);
+    });
+
+    test("nested rows take the same order inside their tile", () => {
+      const html = render(
+        only(
+          [
+            effort("top", "active", ["plain.mdx"]),
+            effort("none-old", "active", ["plain.mdx"], { parent: "top", daily: day("2026-10-01") }),
+            effort("none-new", "active", ["plain.mdx"], { parent: "top", daily: day("2026-10-28") }),
+            effort("undated", "active", ["undated.mdx"], { parent: "top", daily: day("2026-09-20") }),
+            effort("young", "active", ["w-2026-10-20.mdx"], { parent: "top" }),
+            effort("old", "active", ["w-2026-10-02.mdx"], { parent: "top" }),
+          ],
+          [need("top"), need("none-old", "A"), need("none-new", "B")],
+        ),
+        [plain, undated, waits("2026-10-20"), waits("2026-10-02")],
+      );
+      expect(kidsIn(html, "top")).toEqual(["old", "young", "undated", "none-new", "none-old"]);
+    });
+  });
+
+  test("the bar and the active pill read Oslo's day where the local one is behind it (no TZ set)", () => {
+    // 23:30 UTC is 00:30 the next day in Oslo; `bun test` runs in UTC when no TZ is set.
+    const now = Date.parse("2026-11-03T23:30:00Z");
+    const daily = [{ day: "2026-11-02", commits: 3, sessions: 0 }, { day: "2026-11-03", commits: 5, sessions: 0 }, { day: "2026-11-04", commits: 7, sessions: 0 }];
+    expect(sparkValues(daily, now).slice(-4)).toEqual([0, 3, 5, 7]);
+    const pills = (rows: typeof daily) => {
+      const html = render(only([effort("x", "active", ["a.mdx"], { daily: rows })]), [pg("a.mdx")], { now });
+      return html.slice(html.indexOf("wiki-wm-pills"));
+    };
+    expect(pills(daily)).toContain(">today<");
+    expect(pills(daily.slice(0, 2))).toContain(">yesterday<");
+  });
+
   test("pills: counts and fixed labels, oldest date across pages, no age without a date, a duplicate page once", () => {
     const m = only([effort("x", "active", ["a.mdx", "b.mdx", "a.mdx"], { daily: [{ day: "2026-10-27", commits: 1, sessions: 0 }] })], [need("x", "One", "decision"), need("x", "Two")]);
     const html = render(m, [pg("a.mdx", { movesWaiting: 2, waitingSince: "2026-10-19", movesYou: 1 }), pg("b.mdx", { movesWaiting: 1, waitingSince: "2026-10-26", movesYou: 1 })]);
@@ -390,6 +527,64 @@ describe("sparkValues", () => {
   test("a compact row's name carries the whole name in a tooltip, since it may be cut to one line", () => {
     const m = map({ efforts: [effort("p", "active", ["plans/a.mdx"]), effort("k", "active", ["plans/a.mdx"], { parent: "p", name: 'a "long" name' })], needsYou: [], summary: "" });
     expect(card(m)).toMatch(/wiki-wm-kid" data-effort-id="k"><[^>]*class="wiki-wm-effort-name"[^>]*title="a &quot;long&quot; name"/);
+  });
+});
+
+describe("the sparkline and the active label in any time zone", () => {
+  type Row = { day: string; commits: number; sessions: number };
+  type Case = { now: string; rows: Record<string, number>; bars: Record<number, number>; idle: number | null };
+  const bars = (at: Record<number, number>) => Array.from({ length: SPARK_DAYS }, (_, i) => at[i] ?? 0);
+  const row = (rows: Record<string, number>): Row[] => Object.entries(rows).map(([day, commits]) => ({ day, commits, sessions: 0 }));
+  const CASES: Case[] = [
+    // Oslo is already 11-04: New York's local day is still 11-03.
+    { now: "2026-11-03T23:30:00Z", rows: { "2026-11-02": 3, "2026-11-03": 5, "2026-11-04": 7 }, bars: { 25: 3, 26: 5, 27: 7 }, idle: 0 },
+    { now: "2026-11-03T23:30:00Z", rows: { "2026-11-03": 5 }, bars: { 26: 5 }, idle: 1 },
+    // Oslo is still 11-03: Tokyo's local day is already 11-04.
+    { now: "2026-11-03T22:00:00Z", rows: { "2026-11-01": 2, "2026-11-02": 3, "2026-11-03": 5 }, bars: { 25: 2, 26: 3, 27: 5 }, idle: 0 },
+    // Just after midnight in Oslo on the day after each clock change.
+    { now: "2026-10-25T23:30:00Z", rows: { "2026-10-24": 1, "2026-10-25": 2, "2026-10-26": 4 }, bars: { 25: 1, 26: 2, 27: 4 }, idle: 0 },
+    { now: "2026-03-29T22:30:00Z", rows: { "2026-03-28": 1, "2026-03-29": 2, "2026-03-30": 4 }, bars: { 25: 1, 26: 2, 27: 4 }, idle: 0 },
+    // The window's edge, across a clock change: day 27 back is in, day 28 back is out.
+    { now: "2026-11-03T23:30:00Z", rows: { "2026-10-08": 6, "2026-10-07": 9 }, bars: { 0: 6 }, idle: 27 },
+    { now: "2026-04-10T10:00:00Z", rows: { "2026-03-14": 6, "2026-03-13": 9 }, bars: { 0: 6 }, idle: 27 },
+    // A row later than Oslo's today counts as today.
+    { now: "2026-11-03T22:00:00Z", rows: { "2026-11-04": 7 }, bars: { 27: 7 }, idle: 0 },
+  ];
+  // A child process, because assigning process.env.TZ here does not reliably move or
+  // restore the local clock in bun (Tokyo, then "UTC", stayed on Tokyo).
+  const PROBE = `
+    const { sparkValues, lastActiveDays } = await import(process.env.CARD_MODULE);
+    const cases = JSON.parse(process.env.CARD_CASES);
+    console.log(JSON.stringify(cases.map(({ now, daily }) => {
+      const t = Date.parse(now);
+      return { offset: new Date(t).getTimezoneOffset(), bars: sparkValues(daily, t), idle: lastActiveDays({ daily }, t) };
+    })));
+  `;
+  const zones: [string, string, number][] = [
+    ["America/New_York", "2026-11-03T23:30:00Z", 300],
+    ["Asia/Tokyo", "2026-11-03T23:30:00Z", -540],
+    ["Europe/Oslo", "2026-11-03T23:30:00Z", -60],
+    ["Pacific/Kiritimati", "2026-11-03T23:30:00Z", -840],
+    ["Pacific/Pago_Pago", "2026-11-03T23:30:00Z", 660],
+  ];
+  test.each(zones)("%s", (TZ, proofAt, proofOffset) => {
+    const input = [{ now: proofAt, daily: [] as Row[] }, ...CASES.map((c) => ({ now: c.now, daily: row(c.rows) }))];
+    const out = Bun.spawnSync([process.execPath, "-e", PROBE], {
+      cwd: import.meta.dir,
+      env: { ...process.env, TZ, CARD_MODULE: `${import.meta.dir}/wiki-work-card.ts`, CARD_CASES: JSON.stringify(input) },
+    });
+    expect(out.stderr.toString()).toBe("");
+    const [proof, ...got] = JSON.parse(out.stdout.toString()) as { offset: number; bars: number[]; idle: number | null }[];
+    // The zone really moved the child's local clock, or the rest proves nothing.
+    expect(proof!.offset).toBe(proofOffset);
+    expect(got.map((g) => ({ bars: g.bars, idle: g.idle }))).toEqual(CASES.map((c) => ({ bars: bars(c.bars), idle: c.idle })));
+  }, 30_000);
+
+  test("a theme's week ends on Oslo's calendar too", () => {
+    const theme = { weekly: [{ start: "2026-10-26", count: 1 }] };
+    // 23:30 UTC on the week's Sunday is already Monday in Oslo.
+    expect(lastActiveDays(theme, Date.parse("2026-11-01T23:30:00Z"))).toBe(1);
+    expect(themeActiveLabel(lastActiveDays(theme, Date.parse("2026-11-01T22:30:00Z")))).toBe("this week");
   });
 });
 
