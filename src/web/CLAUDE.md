@@ -23,7 +23,7 @@ t=$(mktemp); sed -n '<N>p' src/web/reference/notes.md | fold -s -w 2000 > "$t"; 
 - Add a new `tok-*` class to the exported `HIGHLIGHT_TOKEN_CLASSES`, never to the CSS alone.
 - Every selector in `COMPONENT_FENCE_CHROME` must also be in `COMPONENT_CLASS_ALLOW` (`src/chat/views/components/component-class-allow.ts`), or the skip is inert in chat and the block gets a doubled bar there.
 - Build a fence's header bar and Copy button in the client enhancer `enhanceCodeBlocks`, never in `web-format.ts`.
-- A new render site that inserts finished `formatWebHtml` or `renderWikiHtml` output calls `enhanceCodeTabs(root); enhanceCodeBlocks(root);` itself: both are client enhancers and nothing walks the document for them. A streaming delta loop deliberately does not: it sets `innerHTML` on each delta, and the finished render enhances once (`promoteStreamingBubble` in `streaming-ui.ts`). Existing finished sites without the pair: `/jira`, the gardener preview, the What's-new card.
+- A new render site that inserts finished `formatWebHtml` or `renderWikiHtml` output calls `enhanceCodeTabs(root); enhanceCodeBlocks(root);` itself: both are client enhancers and nothing walks the document for them. A streaming delta loop deliberately does not: it sets `innerHTML` on each delta, and the finished render enhances once (`promoteStreamingBubble` in `streaming-ui.ts`). Existing finished sites without the pair: `/jira`, the gardener preview, the What's-new card, the `/summaries` fact-check answer.
 - A clone of an enhanced fence goes through `unwrapCodeBlockChrome` and is then re-enhanced: unwrap, then wrap. Stripping the marker alone makes `enhanceCodeBlocks` wrap the `pre` in a second `div.fence`: two bars, two Copy buttons, the outer inert.
 - Decide whether a parked sentinel sits in code on the RENDERED HTML (`renderedCodeRegions`, `src/format/rendered-code.ts`), never by scanning the markdown for fences: a scanner cannot see the string the renderer parses, because parking rewrites the body in between.
 - The renderer takes page files from the `files` lookup, never from IO.
@@ -34,7 +34,7 @@ t=$(mktemp); sed -n '<N>p' src/web/reference/notes.md | fold -s -w 2000 > "$t"; 
 
 - ⚠️ `/wiki` injects this HTML unsanitized, but the chat re-renders every bubble through `sanitizeHtml`, which flattens any tag outside `WEB_TAGS` to its text and removes every attribute it does not allowlist: a `class` not in `COMPONENT_CLASS_ALLOW`, and `data-*` and `id` apart from the few it names. Markup that falls outside those lists renders perfectly in the reader and wrong in chat, with every unit test green. The evidence is an e2e that drives the real bundle: `e2e/wiki-code-highlight.spec.ts`, `e2e/chat-card-fences.spec.ts`, `e2e/chat-fold.spec.ts`.
 - ⚠️ The text of a code block is data. `code.textContent` is what the Copy button hands over, what `wiki-mermaid.ts` reads to build a diagram and what the fact-check evidence card clones, so a tokenizer that drops a character is a data bug wearing a styling bug's clothes.
-- ⚠️ Prose from `formatWebHtml` is bare text at top level and in component bodies, as in `<div class="callout-body">one\n\ntwo</div>`, so `.callout-body p` matches nothing. `<p>` appears only inside list items and in a component's own labels. An inline element can be a direct child of `.wiki-article`, so "the block containing X" can resolve to X itself.
+- ⚠️ Prose from `formatWebHtml` is bare text at top level and in component bodies, as in `<div class="callout-body">\none\n\ntwo\n</div>`, so `.callout-body p` matches no body prose. `<p>` appears only inside list items, which a component body can hold, and in a component's own labels and notices. An inline element can be a direct child of `.wiki-article`, so "the block containing X" can resolve to X itself.
 - ⚠️ The chat bundle carries this renderer into a browser, so what `web-format.ts` imports statically has to run there: `case-board.ts` reads `Bun.YAML` off `globalThis` for that reason. The decision chain, PR strip and question grid ARE in the bundle, imported statically and called only with `views: true`. Chart, rule tree, system map, case dots, diagram, steps and timeline lanes reach `formatWebHtml` as options `renderWikiHtml` passes on `GET /api/wiki/page`, so the bundle does not carry them. Glossary marks are a post-pass in `renderWikiHtml`, outside `formatWebHtml`.
 - ⚠️ In chat, `streaming-ui.ts` replaces `innerHTML` on every streaming delta and calls no enhancer until `promoteStreamingBubble`, so DOM state such as a `<details>` element's `open` is rebuilt by the next delta and by any history repaint.
 
@@ -59,9 +59,9 @@ Rules and traps about one function stay in their section of the notes; ` [trap]`
 - `<RuleTree title outcomes>` — a rule drawn as a tree over the list it wraps (MDX visual components PR 4)
 - `<Glossary>` — terms marked where the page uses them (MDX visual components PR 5) [trap]
 - `<CaseBoard view="dots">` — one square per case (MDX visual components PR 5)
-- Timeline lanes — the page's dates on one axis (MDX visual components PR 5)
+- Timeline lanes — the page's dates on one axis (MDX visual components PR 5) [trap]
 - `<Diagram src>` — an archify diagram (Wiki visuals v2 PR 2) [trap]
-- `<Steps src>` — a diagram stepped through (Wiki visuals v2 PR 3)
+- `<Steps src>` — a diagram stepped through (Wiki visuals v2 PR 3) [trap]
 - `<SystemMap>` — an edge table drawn as a map of systems (Wiki visuals v2 PR 4)
 - `<Query>` — one prod query as a card [trap]
 - `<CaseBoard>` and `<DeltaTable>` — tracked cases and run-to-run numbers [trap]
