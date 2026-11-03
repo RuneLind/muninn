@@ -987,7 +987,7 @@ function resolveFocus(el: HTMLElement, key: FocusKey): void {
   }
 }
 
-/** The markup the card last got: a checks answer that renders the same leaves the DOM alone. */
+/** The markup the card last got: a checks answer or an adopt that renders the same leaves the DOM alone. */
 let paintedCardHtml: string | null = null;
 
 /** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing.

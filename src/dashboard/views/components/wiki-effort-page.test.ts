@@ -509,7 +509,7 @@ test("a parent cycle reads as the card reads it: no parent crumb, and no sub-eff
   expect(subs("y")).toEqual([]);
   // `k` hangs off a cycle member, so its chain never reaches a root: top-level.
   expect(crumbLinks("k")).toEqual([]);
-  // A Moving child of a closed-lane parent is lifted top-level on the card, yet
+  // A Moving child of a parent in another column stands alone on the board, yet
   // the parent page lists it and its own crumb names the parent: both agree.
   expect(subs("q")).toEqual(["lift"]);
   expect(crumbLinks("lift")).toEqual(["q"]);

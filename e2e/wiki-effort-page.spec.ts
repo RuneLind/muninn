@@ -13,8 +13,8 @@
  *  3. **Sub-efforts and page links** navigate in the reader.
  *  4. **An id the map does not hold** shows «no longer in the map», linking the
  *     effort whose alias slugifies to it; a wiki with no map says so.
- *  5. **Declared efforts (P6)**: a page declared after the run lists first
- *     under its effort on the card and the effort page; a retired id opens
+ *  5. **Declared efforts (P6)**: a page declared after the run lists first on
+ *     its effort's page, one click from the board; a retired id opens
  *     its retired view with the pages that declare it.
  *  6. **Legible in every theme**: every element of the effort page and its
  *     Connections pane that paints text clears 4.5:1, the three state chips

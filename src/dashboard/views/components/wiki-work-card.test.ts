@@ -568,8 +568,8 @@ describe("the sparkline and the active label in any time zone", () => {
     // A row later than Oslo's today counts as today.
     { now: "2026-11-03T22:00:00Z", rows: { "2026-11-04": 7 }, bars: { 27: 7 }, idle: 0 },
   ];
-  // A child process, because assigning process.env.TZ here does not reliably move or
-  // restore the local clock in bun (Tokyo, then "UTC", stayed on Tokyo).
+  // A child process, because in this bun (1.3.10) assignments to process.env.TZ stop
+  // taking effect after `delete process.env.TZ`, so a zone cannot be set and restored here.
   const PROBE = `
     const { sparkValues, lastActiveDays } = await import(process.env.CARD_MODULE);
     const cases = JSON.parse(process.env.CARD_CASES);

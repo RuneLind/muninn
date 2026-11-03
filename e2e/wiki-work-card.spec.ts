@@ -26,8 +26,8 @@
  *     paints text, in every state (map, refusal, running, all done, error),
  *     clears 4.5:1 against what is painted behind it.
  *  8. **A page declared after the run (P6)** joins its effort on a listing
- *     refresh though the run did not move, first in the effort and not behind
- *     «+N more».
+ *     refresh though the run did not move: its step on the board, and first on
+ *     the effort page.
  *  9. **The health strip (your-work board P1)**: its cells count the live
  *     listing, a cell opens its list and «+N more» expands it, a wiki taking no
  *     answers reads «owner not set», an adopt repaints the count, a themes map
@@ -806,7 +806,8 @@ async function dropMovingEfforts(page: Page): Promise<void> {
 
 // Fix round 2: at 3 and 4 tracks a tall Moving spans the rows too.
 for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [1920, 5]] as const) {
-  test(`at ${width}, a Moving the reader folds leaves no gap`, async ({ page }) => {
+  // Shut by script: at 1920 no head can shut it, so a shut fold there comes from a narrower window.
+  test(`at ${width}, a Moving with its fold shut leaves no gap`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await openSettled(page, BOARD_TALL);
     const moving = boardCard(page).locator('[data-wm-lane="moving"]');
@@ -1011,9 +1012,9 @@ test("from 1040 px Tab goes link to link and no key flips a fold; at 1280 a head
   }
   await expect(card.locator('[data-wm-lane="you"]')).toHaveAttribute("open", "");
   await expect(card.locator('[data-wm-lane="cooling"]')).not.toHaveAttribute("open", "");
-  // The tree names each column, with its links readable and no collapsed triangle.
+  // The tree names each column and holds no collapsed triangle.
   expect(await columnsInAxTree(page)).toEqual({ groups: COLUMN_NAMES, triangles: [] });
-  // No repaint since: the same nodes fold again at 1280, and the head works.
+  // At 1280 the columns fold again, and a head opens its column.
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect.poll(() => columnsShown(page)).toEqual(["you", "moving"]);
   const narrow = await columnsInAxTree(page);
@@ -3542,7 +3543,8 @@ for (const scale of [1, 2]) {
 }
 
 // A crisp 1 px bar scaled below a pixel can miss every pixel centre, so below 1x the row
-// keeps its soft bars: fainter than 3:1, but each still paints.
+// keeps its soft bars: fainter than 3:1, but each still paints. Emulated deviceScaleFactor
+// misreads fractional scales, so this pins the ink and not its ratio.
 test.describe("at device scale 0.9", () => {
   test.use({ deviceScaleFactor: 0.9 });
   test("a compact row's baseline keeps its ink", async ({ page }) => {
