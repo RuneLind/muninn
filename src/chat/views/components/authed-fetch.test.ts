@@ -188,6 +188,7 @@ function evalScript(
     body?: unknown;
     raw?: string;
     storageThrows?: boolean;
+    provider?: "local" | "entra";
     /** Answers each fetch itself, so a test decides the order responses land in. */
     answer?: () => Promise<Response>;
   } = {},
@@ -251,7 +252,7 @@ function evalScript(
     "ctx",
     "var window = ctx.window; var document = ctx.document; var sessionStorage = ctx.sessionStorage;" +
     "var fetch = ctx.fetch; var Date = ctx.Date;" +
-    authedFetchScript(),
+    authedFetchScript(opts.provider ?? null),
   );
   fn(sandbox);
 
@@ -299,8 +300,7 @@ describe("acceptance 19 — expiry, per channel", () => {
   });
 
   test("with auth OFF a ws/sse failure is IGNORED — there is no session to expire", () => {
-    // The regression this closes: `authProvider === null` is BOTH "auth is off"
-    // and "before /chat/me answered", and the first cut banner'd for both. On
+    // The regression this closes: the first cut banner'd on a null provider. On
     // an auth-off instance — today's default — any permanent SSE failure (a
     // 500, a 403, a dev-server restart) then reads "Your session expired" to a
     // reader who has no session at all. Silent reconnect is what those
@@ -313,6 +313,37 @@ describe("acceptance 19 — expiry, per channel", () => {
       expect(s.banner()).toBe(false);
       expect(s.reloads).toBe(0);
     }
+  });
+
+  // A session refused from the first request: /chat/me itself answers a proxy's
+  // HTML 401, so it never publishes a provider. Only the page render can.
+  test("entra, /chat/me refused without JSON: the provider the page was rendered with still banners", async () => {
+    const s = evalScript({ status: 401, raw: "<html>401</html>", provider: "entra" });
+    await s.authedFetch("/chat/me");
+    await settle();
+    expect(s.banner()).toBe(true);
+    expect(s.reloads).toBe(0);
+  });
+
+  test("entra, /chat/me never answered: a refused socket spends the one reload, then banners", () => {
+    const s = evalScript({ provider: "entra" });
+    expect(s.refusal("ws")).toBe("reload");
+    expect(s.refusal("ws")).toBe("banner");
+    expect(s.reloads).toBe(1);
+  });
+
+  test("local, /chat/me never answered: a refused stream banners and an HTML 401 stays its call site's", async () => {
+    const s = evalScript({ status: 401, raw: "<html>401</html>", provider: "local" });
+    await s.authedFetch("/api/x");
+    await settle();
+    expect(s.banner()).toBe(false);
+    expect(s.refusal("sse")).toBe("banner");
+    expect(s.reloads).toBe(0);
+  });
+
+  test("the page script carries the provider it was rendered with, and null with auth off", async () => {
+    expect(await renderChatPage({ authProvider: "entra" })).toContain('var authProvider = "entra";');
+    expect(await renderChatPage()).toContain("var authProvider = null;");
   });
 
   test("an entra 401 whose body is UNREADABLE banners rather than saying nothing", () => {

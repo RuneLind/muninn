@@ -339,6 +339,34 @@ test.describe("acceptance 17 — ONE introspection across BOTH credential paths"
   });
 });
 
+test.describe("the chat page knows its provider before /chat/me answers", () => {
+  test("a /chat/me refused with a proxy's HTML 401 ends on the banner after one reload", async ({ browser }) => {
+    tokens.set("tok-html-401", { active: true, oid: OID_A, NAVident: "X999999" });
+    const context = await browser.newContext({ extraHTTPHeaders: bearer("tok-html-401") });
+    const page = await context.newPage();
+    let navigations = 0;
+    page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations++; });
+    try {
+      // Only /chat/me: the page itself comes from the real server, so the provider
+      // it was rendered with is the real session's. The socket gets no bearer header
+      // here and is refused, so its probe meets the same HTML 401: that spends the
+      // one reload the breaker allows, and the second load banners.
+      await page.route(/\/chat\/me$/, (route) =>
+        route.fulfill({ status: 401, contentType: "text/html", body: "<html>401</html>" }));
+      const res = await page.goto(`${BASE}/chat`);
+      expect(res?.status()).toBe(200);
+      expect(await res?.text()).toContain('var authProvider = "entra";');
+      await expect.poll(() => navigations).toBe(2);
+      await expect(page.locator("#authExpiredBanner")).toBeVisible();
+      await page.waitForTimeout(2500);
+      await expect(page.locator("#authExpiredBanner")).toBeVisible();
+      expect(navigations).toBe(2);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 /**
  * A raw `/chat/ws` handshake carrying the bearer token, and whether it 101'd.
  *

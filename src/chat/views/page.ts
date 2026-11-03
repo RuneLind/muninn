@@ -19,9 +19,10 @@ import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 import { authedFetchScript, EXPIRED_BANNER_ID } from "./components/authed-fetch.ts";
 import type { AuthRole } from "../../auth/role.ts";
+import type { IdentityProvider } from "../../auth/introspect.ts";
 import { wsRetryScript, WS_STALLED_NOTICE_ID, WS_STALLED_NOTICE_TEXT } from "./components/ws-retry.ts";
 
-export async function renderChatPage(opts?: { role?: AuthRole | null }): Promise<string> {
+export async function renderChatPage(opts?: { role?: AuthRole | null; authProvider?: IdentityProvider | null }): Promise<string> {
   const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle, jiraCardBundle] =
     await Promise.all([
       webFormatClientScript(),
@@ -149,7 +150,7 @@ export async function renderChatPage(opts?: { role?: AuthRole | null }): Promise
           and are dispositioned in authed-fetch.test.ts instead). A call site
           evaluated before the definition would be a ReferenceError on the one
           path whose job is to degrade gracefully. */ ""}
-    ${authedFetchScript()}
+    ${authedFetchScript(opts?.authProvider ?? null)}
     ${helpersScript}
     ${agentStatusScript()}
     ${requestProgressScript()}
@@ -429,8 +430,8 @@ const CHAT_SCRIPT = `
           sessionUser = me && me.mode === 'session' ? me : null;
           identityUnknown = false;
           // The provider is what the WebSocket and EventSource expiry rules key
-          // on — neither channel can read a body, so this is the only place it
-          // can come from. Published before anything opens either.
+          // on, since neither channel can read a body. The page render seeded it;
+          // this answer replaces that, before anything opens either.
           window.__muninnSetAuthProvider(me && me.provider);
           // A working session is the evidence that a previous automatic reload
           // succeeded. Window-guarded inside — see authed-fetch.ts.
@@ -793,8 +794,8 @@ const CHAT_SCRIPT = `
   var wsPreOpenRetry = makePreOpenRetry({
     probe: chatSessionProbe,
     retry: function() { connectWs(); },
-    // Idempotent with authedFetch's own 401 handling, which may already have
-    // acted on the same probe response: a second banner is the same banner.
+    // Beside authedFetch's own 401 handling of the same probe response. A login
+    // hint reloads through either; an HTML 401 banners there and reloads here, once.
     expired: function() { window.__muninnAuthRefusal('ws'); },
     stall: showWsStalledNotice,
     clearStall: hideWsStalledNotice,
@@ -832,7 +833,7 @@ const CHAT_SCRIPT = `
       // then spin against it forever with nothing on screen to say why.
       //
       // The decision is MODE-CONDITIONAL, and a close event carries no body —
-      // only a code — so the predicate is the provider cached from /chat/me:
+      // only a code — so the predicate is the cached provider:
       //
       //   entra → the sidecar signs the reader back in on the next navigation,
       //           so a reload is a transparent re-login (breaker-bounded).

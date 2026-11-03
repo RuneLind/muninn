@@ -812,13 +812,22 @@ three predicates, **one breaker**:
 | `/chat/ws` | cached `provider === "entra"` | a `close` event carries a CODE and nothing else |
 | `EventSource` | cached `provider === "entra"` | it exposes neither status nor body, so it cannot go through a fetch wrapper at all |
 
-**`provider === null` is two states and neither reloads.** It is "auth is off"
-AND "`/chat/me` has not answered yet", so on `ws`/`sse` the verdict there is
-`ignore` — the silent reconnect those instances had before this module existed.
-Banner'ing instead told readers of an auth-OFF instance, which has no sessions,
-that their session had expired on any permanent stream failure. ⚠️ The provider
-is cached ONCE, at init: a tab whose `/chat/me` failed both attempts keeps
-`null` for its whole lifetime, so it never reloads and never banners.
+**`provider === null` means auth is off, and it never reloads.** On `ws`/`sse`
+the verdict there is `ignore` — the silent reconnect those instances had before
+this module existed. Banner'ing instead told readers of an auth-OFF instance,
+which has no sessions, that their session had expired on any permanent stream
+failure. The page render writes in the session's provider, so it is known even
+when `/chat/me` fails at load. `/chat/me` is asked at init and not again, so such
+a tab keeps no identity until a reload. What it shows, on `entra`:
+
+- `/chat/me` answers a 401 whose body is not JSON, and the socket is refused: its
+  probe gets a 401 too, which spends the one reload and then banners.
+- That 401 with a socket that opens: the banner shows, and the next 2xx takes it
+  down, because only `http` was latched. Nothing is left on screen.
+- `/chat/me` keeps failing any other way (a 403, a 5xx, a transport failure, a 200
+  that is not JSON): no expiry banner. A 200 that is not JSON brings the amber
+  stall bar once the socket's ladder is spent.
+- `/chat/me` fails at load, and a later probe gets a 401: the reload as above.
 
 **A refused UPGRADE carries no code.** The browser reports a 401'd handshake as
 an ordinary 1006 close, so the 4401 rule was structurally blind to it and the
