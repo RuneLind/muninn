@@ -1451,8 +1451,8 @@ Dismiss is durable: `src/gardener/CLAUDE.md`.
   detail?, fix? }` — `fix` on check 8's findings alone. The full set of checks
   is `LINT_CHECKS` in `src/wiki/lint.ts`. Where each check's rules live:
   checks 1–5 and 7 in the list below; check 6 splits, with its lint-specific
-  facts in the list below and the rule it enforces in `src/web/CLAUDE.md`;
-  check 6b has a one-line summary below and its rule in `src/web/CLAUDE.md`;
+  facts in the list below and the rule it enforces in `src/web/reference/notes.md`;
+  check 6b has a one-line summary below and its rule in `src/web/reference/notes.md`;
   check 10 (`question-block`) is in the answer cards' **Lint** bullet in
   `src/web/reference/notes.md`; checks 8, 9 and 11 onward are in the «Lint check N»
   sections of `src/wiki/reference/notes.md`, which this command lists:

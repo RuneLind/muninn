@@ -112,8 +112,7 @@ export function overviewSectionStyles(): string {
     .uchart-slim { padding: 14px 16px 8px; }
     .uchart-plot { position: relative; height: 150px; }
     .uchart-plot svg { width: 100%; height: 100%; display: block; }
-    /* fill/stroke set here (CSS) — they resolve var(); as SVG presentation attrs
-       they would NOT (the #316 lesson), hence classes not fill=/stroke=. */
+    /* fill/stroke set here in CSS, the house style, not as fill=/stroke= attributes. */
     .uchart-bar  { fill: var(--accent); opacity: 0.55; }
     .uchart-line { fill: none; stroke: var(--status-success); stroke-width: 2; }
     .uchart-area { fill: var(--status-success); opacity: 0.09; }
