@@ -1981,6 +1981,99 @@ test("a selection outside the card does not hold the answer back", async ({ page
   await expect(github.locator("b")).toHaveText("1");
 });
 
+/** How many checks answers the page has read. The page's own chain on `json()` runs in that promise's microtask
+ *  checkpoint, so once this counts one, the page has handled it by the next `evaluate`. */
+async function countChecksAnswers(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __checksRead: number };
+    w.__checksRead = 0;
+    const json = Response.prototype.json;
+    Response.prototype.json = function (this: Response) {
+      const p = json.call(this);
+      if (this.url.includes("/work-map/checks")) void p.then(() => { w.__checksRead += 1; });
+      return p;
+    };
+  });
+  return () => page.evaluate(() => (window as unknown as { __checksRead: number }).__checksRead);
+}
+
+/** A held checks answer on a board whose strip is painted and marked, with no timer in the way. */
+async function boardWithHeldAnswer(page: Page) {
+  const read = await countChecksAnswers(page);
+  const release = await holdChecks(page, () => checksBody({ needs: boardNeeds() }));
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await card.locator(".wiki-wm-strip").evaluate((el) => el.setAttribute("data-before-repaint", ""));
+  const land = async () => {
+    release();
+    await expect.poll(read).toBe(1);
+  };
+  return { card, land };
+}
+
+const selectCardTitle = (page: Page) =>
+  page.evaluate(() => {
+    getSelection()!.selectAllChildren(document.querySelector("#wikiWorkCard .wiki-wn-title")!);
+    return getSelection()!.toString();
+  });
+
+for (const [name, lane, opened] of [
+  ["opens a closed lane", '[data-wm-lane="cooling"]', true],
+  ["closes an open lane", '[data-wm-lane="moving"]', false],
+] as const) {
+  test(`a click that ends the selection ${name}, and the waiting answer keeps that`, async ({ page }) => {
+    const { card, land } = await boardWithHeldAnswer(page);
+    expect((await selectCardTitle(page)).length).toBeGreaterThan(0);
+    await land();
+    await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+    await card.locator(`${lane} > summary`).click();
+    await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+    if (opened) await expect(card.locator(lane)).toHaveAttribute("open", "");
+    else await expect(card.locator(lane)).not.toHaveAttribute("open", "");
+  });
+}
+
+test("a drag that collapses back over its start keeps the answer waiting until the pointer is up", async ({ page }) => {
+  const { card, land } = await boardWithHeldAnswer(page);
+  const box = (await card.locator(".wiki-wm-coverage").boundingBox())!;
+  const start = { x: box.x + 2, y: box.y + 6 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + box.width / 2, start.y + 2, { steps: 6 });
+  expect((await page.evaluate(() => getSelection()!.toString())).length).toBeGreaterThan(0);
+  await land();
+  await page.mouse.move(start.x, start.y, { steps: 6 });
+  await expect.poll(() => page.evaluate(() => getSelection()!.isCollapsed)).toBe(true);
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  await page.mouse.move(start.x + box.width / 2, start.y + 2, { steps: 6 });
+  expect((await page.evaluate(() => getSelection()!.toString())).length).toBeGreaterThan(0);
+  await page.mouse.up();
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+});
+
+test("an answer that lands inside a press with nothing selected waits for the pointer", async ({ page }) => {
+  const { card, land } = await boardWithHeldAnswer(page);
+  const box = (await card.locator(".wiki-wm-coverage").boundingBox())!;
+  await page.mouse.move(box.x + 2, box.y + 6);
+  await page.mouse.down();
+  await land();
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  await page.mouse.up();
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+});
+
+test("a held right button does not hold the answer back", async ({ page }) => {
+  const { card, land } = await boardWithHeldAnswer(page);
+  const box = (await card.locator(".wiki-wm-coverage").boundingBox())!;
+  await page.mouse.move(box.x + 2, box.y + 6);
+  await page.mouse.down({ button: "right" });
+  await land();
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  await page.mouse.up({ button: "right" });
+});
+
 test("a start view that comes back paints its card, though the last answer changed nothing", async ({ page }) => {
   await stubChecks(page, () => checksBody({ contradictions: [GH_CONTRADICTION] }));
   await openStart(page, GH);
