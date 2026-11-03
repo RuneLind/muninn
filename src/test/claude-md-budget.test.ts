@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { Lexer, type Tokens } from "marked";
 
@@ -226,19 +227,22 @@ function checkClaudeMdBudgets(tree: Tree): string[] {
   return out;
 }
 
-async function readRealTree(): Promise<Tree> {
-  const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: ROOT });
+const BOM_KEEPING_UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
+
+async function readRealTree(root = ROOT): Promise<Tree> {
+  const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: root });
   if (listed.exitCode !== 0) throw new Error(`git ls-files failed: ${listed.stderr.toString()}`);
   const files = new Map<string, string>();
   for (const path of listed.stdout.toString().split("\0").filter(Boolean)) {
     const inReference = posix.basename(posix.dirname(path)) === "reference" && path.endsWith(".md");
     if (!isMemoryFile(path) && !inReference) continue;
-    const file = Bun.file(join(ROOT, path));
-    if (await file.exists()) files.set(path, await file.text()); // absent: deleted in the working tree
+    const file = Bun.file(join(root, path));
+    // `text()` drops a leading BOM, and Claude Code's read keeps it, which changes what it imports.
+    if (await file.exists()) files.set(path, BOM_KEEPING_UTF8.decode(await file.arrayBuffer())); // absent: deleted in the working tree
   }
   const isFile = (path: string) => {
     try {
-      return statSync(join(ROOT, path)).isFile();
+      return statSync(join(root, path)).isFile();
     } catch {
       return false;
     }
@@ -648,6 +652,24 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
     expect(check({ "CLAUDE.md": "\uFEFF---\nx: 1\n---\n~~~\n@a.md\n~~~\n" }, A)).toEqual([]);
   });
 
+  test("the real-tree read keeps a leading BOM, so the rule reaches a tracked file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-md-bom-"));
+    try {
+      await Bun.write(join(dir, "src/zz/CLAUDE.md"), "\uFEFF~~~\n@a.md\n~~~\n");
+      await Bun.write(join(dir, "src/zz/a.md"), "x\n");
+      for (const args of [["init", "-q"], ["add", "src/zz/CLAUDE.md"]]) {
+        expect(Bun.spawnSync(["git", ...args], { cwd: dir }).exitCode).toBe(0);
+      }
+      const tree = await readRealTree(dir);
+      expect(tree.files.get("src/zz/CLAUDE.md")?.charCodeAt(0)).toBe(0xfeff);
+      const out = checkClaudeMdBudgets({ ...tree, budgets: { entries: {}, pending: [] } });
+      expect(out).toHaveLength(1);
+      expect(out[0]).toContain("@a.md");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a BOM mid-file stays, so it opens no fence", () => {
     expect(check({ "CLAUDE.md": "x\n\n\uFEFF~~~\n@a.md\n~~~\n" }, A)).toHaveLength(1);
     expect(check({ "CLAUDE.md": "---\nx: 1\n---\nBody\n\n\uFEFF~~~\n@a.md\n~~~\n" }, A)).toHaveLength(1);
@@ -658,6 +680,17 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
     expect(check({ "CLAUDE.md": "---\nsee: @a.md\n---  \nBody\n" }, A)).toEqual([]);
     expect(check({ "CLAUDE.md": "---  \nx: 1\n---  \n@a.md\n" }, A)).toHaveLength(1);
     expect(check({ "CLAUDE.md": "---\nx: 1\n---\n    @a.md\n" }, A)).toHaveLength(1); // the closer takes the indent, so this is no code block
+  });
+
+  test("a closer may sit mid-line, so what follows it is the body", () => {
+    expect(check({ "CLAUDE.md": "---\nx: a--- @a.md\n\nBody\n---\nEnd\n" }, A)).toHaveLength(1);
+  });
+
+  test("CRLF frontmatter is frontmatter", () => {
+    expect(check({ "CLAUDE.md": "---\r\nsee: @a.md\r\n---\r\nBody\r\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "---\r\nx: 1\r\n---\r\n~~~\r\n@a.md\r\n~~~\r\n" }, A)).toEqual([]);
+    expect(check({ "CLAUDE.md": "---\r\nx: 1\r\n---\r\n@a.md\r\n" }, A)).toHaveLength(1);
+    expect(check({ "CLAUDE.md": "---\r\nx: 1\r\n---\r\n    @a.md\r\n" }, A)).toHaveLength(1);
   });
 
   test("a table row is prose at gfm:false", () => {
