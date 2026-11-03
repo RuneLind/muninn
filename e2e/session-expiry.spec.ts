@@ -513,7 +513,7 @@ test.describe("acceptance 19 — the breaker", () => {
 
     // A real close on the reloaded page's own socket. A bare `__muninnAuthRefusal("ws")`
     // can land before init's connectWs, and that socket's open then takes the banner
-    // down, as it should for a channel that opened (CI, 2026-11-03; measured 5 ms apart).
+    // down, as it should for a channel that opened (seen in CI 2026-11-03; 5 ms apart in a local trace).
     await expect.poll(() => hits.sockets).toBe(2);
     await closeWs(page, 4401);
     await expect(banner(page)).toBeVisible();
@@ -531,7 +531,7 @@ test.describe("acceptance 19 — the breaker", () => {
     await page.route(/\/(chat|api)\//, (route) => route.fulfill({ status: 401, json: ENTRA_401 }));
     await expect.poll(() => navigations, { timeout: 10_000 }).toBe(2);
     await expect(banner(page)).toBeVisible();
-    // Past the socket's first retry and an SSE reconnect, each of which re-asks.
+    // The page's re-asks all land within about 250 ms of the banner; this holds well past them.
     await page.waitForTimeout(3500);
     await expect(banner(page)).toBeVisible();
     expect(navigations).toBe(2);
