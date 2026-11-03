@@ -9,8 +9,8 @@
  *      `shareDialogStyles`** (nothing in the browser entrypoint references it),
  *      so the CSS has to be rendered SERVER-side by the page. Miss that and the
  *      dialog ships transparent and unpositioned, which is exactly how the chat
- *      dialog shipped once (`var(--bg-elevated)`, a token that page never
- *      defined). Hence the computed-background assertion, again.
+ *      dialog shipped once (`var(--bg-elevated)`, a token that page did not
+ *      define then). Hence the computed-background assertion, again.
  *   2. **It opens OVER the doc panel.** The panel is a `z-index: 1000` overlay
  *      here; the dialog ships 59/60 for /wiki, which has no overlay. Asserted by
  *      hit-testing, not by reading the stylesheet.

@@ -1531,7 +1531,7 @@ Dismiss is durable: `src/gardener/CLAUDE.md`.
      link target. Shipped by the fact-check integrate pass on 2026-08-10 (jarvis
      commit `1c1f978`, three links on one page, repaired by hand 2026-08-16). **The
      whole rule — the write-side expansion, the correction refusal, the post-splice
-     repair and why the shape is what it is — lives in `src/web/CLAUDE.md`**, stated
+     repair and why the shape is what it is — lives in `src/web/reference/notes.md`**, stated
      once; this check is its third line of defence, over pages nobody wrote through
      those seams (a hand edit, another writer, a regression), and it consumes that
      rule's own `NESTED_MARKUP_RE` rather than a copy.
@@ -1550,7 +1550,7 @@ Dismiss is durable: `src/gardener/CLAUDE.md`.
      pages" was those two counts added together and attributed to mimir alone — and
      a control copy of mimir's plan page with ONE live occurrence added reports
      exactly that line and none of its six documented ones.
-  6b. **unrendered-fact-mark** — a page whose zone-aware `countFactWrappers` differs from the `fc-mark` elements (inline span and `fc-mark-block` alike) `formatWebHtml` renders for its body: a `<Fact>` shipping as literal markup, such as one across a table row's pipes written before #500. Report-only; the rule is in `src/web/CLAUDE.md`.
+  6b. **unrendered-fact-mark** — a page whose zone-aware `countFactWrappers` differs from the `fc-mark` elements (inline span and `fc-mark-block` alike) `formatWebHtml` renders for its body: a `<Fact>` shipping as literal markup, such as one across a table row's pipes written before #500. Report-only; the rule is in `src/web/reference/notes.md`.
   7. **stem-collision** — two same-stem MARKDOWN pages, one of which `store.ts`'s
      precedence rule (`.md` > `.mdx`) therefore DROPPED from the index. The
      continuous regression guard behind the apply path's approve-time refusal
