@@ -31,7 +31,9 @@
  * argv from its index relPath (in NFC for remove) and keeps a dash-led page
  * from being read as a flag.
  * A `WIKI_READONLY_ROOTS` root is refused (403): publishing ships the page off
- * the machine, the same egress every other read-only check refuses.
+ * the machine, the same egress every other read-only check refuses. A
+ * `MUNINN_WIKI_READONLY` instance refuses the POST (403) before it reads the
+ * body: the script checks neither flag, and its child environment leaves them out.
  *
  * GET `?wiki=<name>[&allowIdent=0|1]` (header `x-muninn-felles: status`):
  * 200 `{ bucket, pages, orphans, maybeOrphans, changed, checkedAt }`
@@ -67,6 +69,7 @@ import {
 } from "../../wiki/felles-publish.ts";
 import { parseFellesStatus, type FellesStatus } from "../../wiki/felles-status.ts";
 import { fellesFjernVerdict, fellesRemoveDataFiles, type FellesFjernVerdict } from "../../wiki/felles-remove.ts";
+import { readonlyRefusal } from "./route-utils.ts";
 import { decideStampRequest, originMatchesHost } from "./wiki-stamp.ts";
 import { ProcTimeoutError, runProc } from "../../utils/run-proc.ts";
 import { getLog } from "../../logging.ts";
@@ -277,6 +280,8 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
       host: c.req.header("host"),
     });
     if (refusal) return c.json({ error: refusal.error, reason: refusal.reason }, refusal.status);
+    const readonly = readonlyRefusal(c, log);
+    if (readonly) return readonly;
 
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
     const wiki = typeof body?.wiki === "string" ? body.wiki.trim() : "";

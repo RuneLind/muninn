@@ -11,7 +11,7 @@ import path from "node:path";
 import { Hono } from "hono";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
-import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
+import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
 import { registerWikiFellesPublishRoute, type FellesPublishRouteDeps } from "./wiki-felles-publish.ts";
 import { ProcTimeoutError } from "../../utils/run-proc.ts";
 import type { FellesPublishConfig } from "../../wiki/felles-publish.ts";
@@ -588,6 +588,25 @@ describe("refusals before any spawn", () => {
     expect(spawned).toBe(false);
   });
 
+  test.each([
+    ["a publish", ok],
+    ["a dry run", { ...ok, dryRun: true }],
+    ["a remove", { ...ok, dryRun: false, action: "remove" }],
+    ["a data-file retry", { ...ok, dryRun: false, action: "remove", dataFilesOnly: true }],
+    ["a sync", { wiki: "kode", dryRun: false, allowIdent: true, action: "sync" }],
+  ])("a read-only instance refuses %s before any spawn", async (_name, body) => {
+    spawned = false;
+    __setWikiReadonlyForTest(true);
+    try {
+      const res = await post(appWith(watch()), body);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: WIKI_READONLY_REASON, readonly: true });
+    } finally {
+      __setWikiReadonlyForTest();
+    }
+    expect(spawned).toBe(false);
+  });
+
   test("an unconfigured instance is a 501", async () => {
     spawned = false;
     const res = await post(appWith({ ...watch(), config: () => config({ bin: null }) }), ok);
@@ -983,6 +1002,17 @@ describe("GET /api/wiki/felles-status", () => {
         host: "localhost:3010",
       });
       expect(res.status).toBe(200);
+    });
+
+    test("a read-only instance still answers: it reads the bucket and writes nothing", async () => {
+      const f = fake();
+      __setWikiReadonlyForTest(true);
+      try {
+        expect((await get(appWith({ runProc: f.runProc }))).status).toBe(200);
+      } finally {
+        __setWikiReadonlyForTest();
+      }
+      expect(f.state.calls).toBe(1);
     });
 
     test("a read-only root and an unconfigured instance", async () => {

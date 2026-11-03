@@ -22,7 +22,7 @@
  */
 import path from "node:path";
 import { parseWikiNameList, resolveServingProfile } from "../config.ts";
-import { isReadonlyWikiRoot } from "./readonly.ts";
+import { isReadonlyWikiRoot, isWikiReadonly } from "./readonly.ts";
 
 export const FELLES_PUBLISH_BIN_ENV = "FELLES_WIKI_PUBLISH_BIN";
 export const FELLES_PUBLISH_WIKIS_ENV = "FELLES_WIKI_PUBLISH_WIKIS";
@@ -70,7 +70,7 @@ export function fellesPublishPayloadField(
   config: FellesPublishConfig = fellesPublishConfigFromEnv(),
   isReadonlyRoot: (root: string) => boolean = isReadonlyWikiRoot,
 ): { fellesPublish?: { bin: string; bucket?: string } } {
-  if (!fellesPublishableFor(wikiName, config) || !config.bin || !root || isReadonlyRoot(root)) return {};
+  if (!fellesPublishableFor(wikiName, config) || !config.bin || !root || isReadonlyRoot(root) || isWikiReadonly()) return {};
   return { fellesPublish: { bin: config.bin, ...(config.bucket ? { bucket: config.bucket } : {}) } };
 }
 
