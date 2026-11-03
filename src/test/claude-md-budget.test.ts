@@ -1,8 +1,9 @@
 import { test, expect, describe } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { Lexer, type Tokens } from "marked";
+import { testTempDirSync } from "./temp-dir.ts";
 
 /**
  * Caps every tracked CLAUDE.md that Claude Code reads as memory.
@@ -229,11 +230,9 @@ function checkClaudeMdBudgets(tree: Tree): string[] {
 
 const BOM_KEEPING_UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
 
-async function readRealTree(root = ROOT): Promise<Tree> {
-  const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: root });
-  if (listed.exitCode !== 0) throw new Error(`git ls-files failed: ${listed.stderr.toString()}`);
+async function readTree(root: string, paths: string[]): Promise<Tree> {
   const files = new Map<string, string>();
-  for (const path of listed.stdout.toString().split("\0").filter(Boolean)) {
+  for (const path of paths) {
     const inReference = posix.basename(posix.dirname(path)) === "reference" && path.endsWith(".md");
     if (!isMemoryFile(path) && !inReference) continue;
     const file = Bun.file(join(root, path));
@@ -248,6 +247,12 @@ async function readRealTree(root = ROOT): Promise<Tree> {
     }
   };
   return { files, isFile, budgets: (await Bun.file(BUDGETS_FILE).json()) as Budgets };
+}
+
+async function readRealTree(): Promise<Tree> {
+  const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: ROOT });
+  if (listed.exitCode !== 0) throw new Error(`git ls-files failed: ${listed.stderr.toString()}`);
+  return readTree(ROOT, listed.stdout.toString().split("\0").filter(Boolean));
 }
 
 test("the real tree is within its budgets", async () => {
@@ -653,21 +658,14 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
   });
 
   test("the real-tree read keeps a leading BOM, so the rule reaches a tracked file", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "claude-md-bom-"));
-    try {
-      await Bun.write(join(dir, "src/zz/CLAUDE.md"), "\uFEFF~~~\n@a.md\n~~~\n");
-      await Bun.write(join(dir, "src/zz/a.md"), "x\n");
-      for (const args of [["init", "-q"], ["add", "src/zz/CLAUDE.md"]]) {
-        expect(Bun.spawnSync(["git", ...args], { cwd: dir }).exitCode).toBe(0);
-      }
-      const tree = await readRealTree(dir);
-      expect(tree.files.get("src/zz/CLAUDE.md")?.charCodeAt(0)).toBe(0xfeff);
-      const out = checkClaudeMdBudgets({ ...tree, budgets: { entries: {}, pending: [] } });
-      expect(out).toHaveLength(1);
-      expect(out[0]).toContain("@a.md");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const dir = testTempDirSync(join(tmpdir(), "claude-md-bom-"));
+    await Bun.write(join(dir, "src/zz/CLAUDE.md"), "\uFEFF~~~\n@a.md\n~~~\n");
+    await Bun.write(join(dir, "src/zz/a.md"), "x\n");
+    const tree = await readTree(dir, ["src/zz/CLAUDE.md"]);
+    expect(tree.files.get("src/zz/CLAUDE.md")?.charCodeAt(0)).toBe(0xfeff);
+    const out = checkClaudeMdBudgets({ ...tree, budgets: { entries: {}, pending: [] } });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain("@a.md");
   });
 
   test("a BOM mid-file stays, so it opens no fence", () => {
