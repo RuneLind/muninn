@@ -2711,15 +2711,18 @@ export async function renderWikiPage(opts?: {
        browser keeps working folds. A browser without interactivity keeps a head that can be
        tabbed to and flipped unseen. */
     .wiki-wm-board { container-type: inline-size; container-name: wmboard; margin-top: 10px; }
-    /* Waiting on you spans all the rows, so the rest flow beside it. An item crossing an fr
-       track gives its extra height to that track alone, so a tall column stretches no auto
-       row. The row gap is a margin because a gap would also space the empty rows. */
+    /* Waiting on you spans all the rows, so the rest flow beside it, and from three tracks
+       (three 200 px tracks and two 10 px gaps need 620 px) Moving does too; at two it shares
+       its track with the shut columns. An item crossing an fr track gives its extra height
+       to that track alone, so a tall column stretches no auto row. The row gap is a margin
+       because a gap would also space the empty rows. */
     .wiki-wm-cols {
       display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
       grid-template-rows: repeat(4, auto) 1fr; column-gap: 10px; align-items: start; margin-bottom: -10px;
     }
     .wiki-wm-col { min-width: 0; margin-bottom: 10px; }
     .wiki-wm-col[data-wm-lane="you"] { grid-row: 1 / -1; }
+    @container wmboard (min-width: 620px) { .wiki-wm-col[data-wm-lane="moving"] { grid-row: 1 / -1; } }
     .wiki-wm-col[data-wm-lane="you"] > summary, .wiki-wm-col[data-wm-lane="you"] > summary .wiki-wm-count { color: var(--accent-light); }
     @supports selector(::details-content) {
       @container wmboard (min-width: 1040px) {
@@ -2755,6 +2758,13 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-kids > .wiki-wm-kid:first-child { border-top: none; padding-top: 0; }
     .wiki-wm-kid .wiki-wm-effort-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .wiki-wm-kid .wiki-wm-spark { grid-column: 2; grid-row: 1; height: 12px; margin: 0; }
+    /* 56 px over 28 days is 2 px a day, so a 0.8-unit bar covers no pixel fully at 1x. Half
+       a unit with crisp edges is one whole pixel on and one off, wherever the row lands.
+       Below 1x a crisp bar can miss every pixel centre and vanish, so it stays soft there. */
+    @media (min-resolution: 1dppx) {
+      .wiki-wm-kid .wiki-wm-spark { shape-rendering: crispEdges; }
+      .wiki-wm-kid .wiki-wm-spark rect { width: 0.5px; }
+    }
     .wiki-wm-kid .wiki-wm-pills { grid-column: 1 / -1; margin: 2px 0 0; }
     /* What you're following (themes map, theme map P2). */
     .wm-state-new, .wm-state-rising { background: var(--tint-purple); color: var(--accent-light); }

@@ -410,7 +410,7 @@ async function openStart(page: Page, wiki: string): Promise<string[]> {
 }
 
 /** The card paints twice on a load, and the second swaps every node: the checks
- *  answer changes the GitHub cell. A computed style read across that swap is
+ *  answer changes the GitHub cell. A style or geometry read across that swap is
  *  empty, so a test that reads one waits for the answer first. */
 async function openStartSettled(page: Page, wiki: string): Promise<void> {
   await openStart(page, wiki);
@@ -491,7 +491,7 @@ test("a why that fits its two lines offers no expand control", async ({ page }) 
 
 test("selecting text in an opened why leaves it open", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
-  await openStart(page, LONG);
+  await openStartSettled(page, LONG);
   const card = page.locator("#wikiWorkCard");
   const text = card.locator(".wiki-wm-why-text");
   await card.locator(".wiki-wm-why-more").click();
@@ -638,7 +638,7 @@ for (const [width, tracks, shown] of [
 ] as const) {
   test(`at a ${width} window the board has ${tracks} track${tracks === 1 ? "" : "s"} and shows ${shown.length} columns' content, with nothing overflowing`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStart(page, BOARD);
+    await openStartSettled(page, BOARD);
     const card = boardCard(page);
     await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
     console.log(`board inner width at ${width}: ${await boardInnerWidth(page)}`);
@@ -649,7 +649,7 @@ for (const [width, tracks, shown] of [
 }
 
 test("the column heads count every effort in the column, nested included, in the table's order", async ({ page }) => {
-  await openStart(page, BOARD);
+  await openStartSettled(page, BOARD);
   const heads = await boardCard(page).locator("details.wiki-wm-col > summary").allInnerTexts();
   expect(heads.map((h) => h.replace(/\s+/g, " ").trim().toLowerCase())).toEqual(["waiting on you 3", "moving 3", "cooling 1", "quiet 1", "shipped 1"]);
   const moves = boardCard(page).locator('[data-wm-lane="moving"] .wiki-wm-tile[data-effort-id="moves"]');
@@ -661,7 +661,7 @@ test("the column heads count every effort in the column, nested included, in the
 
 test("pressing F at 1280 gives five tracks with every column's content shown, with no repaint, and Esc brings the folds back", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  await openStart(page, BOARD);
+  await openStartSettled(page, BOARD);
   const card = boardCard(page);
   await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
   expect(await trackCount(page)).toBe(2);
@@ -687,7 +687,7 @@ test("pressing F at 1280 gives five tracks with every column's content shown, wi
 
 test("a resize across the five-track width folds and unfolds with no repaint", async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 900 });
-  await openStart(page, BOARD);
+  await openStartSettled(page, BOARD);
   const card = boardCard(page);
   await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
   expect(await columnsShown(page)).toEqual(COLUMN_IDS);
@@ -713,19 +713,26 @@ async function boardGeometry(page: Page) {
   });
 }
 
-/** Waiting on you alone in the first track (tracks > 1), the rest row by row in the
- *  others, each row a gap below the tallest box above it, and nothing under the last. */
+/** Waiting on you alone in the first track (tracks > 1), from 3 tracks Moving alone in
+ *  the second, the rest row by row in the others, each row a gap below the tallest box
+ *  above it, and nothing under the last. */
 async function expectBoardLayout(page: Page, tracks: number, label: string): Promise<void> {
   const g = await boardGeometry(page);
   const at = (id: string) => g.cols[id]!;
   console.log(`${label}: ${COLUMN_IDS.map((id) => `${id} ${Math.round(at(id).top)}`).join(", ")}; board ${Math.round(g.height)}`);
   expect(at("you").left, `${label}: you left`).toBeCloseTo(0, 0);
   expect(at("you").top, `${label}: you top`).toBeCloseTo(0, 0);
-  const inRows = tracks === 1 ? COLUMN_IDS.map((id) => [id]) : chunk(COLUMN_IDS.slice(1), tracks - 1);
+  const spans = tracks >= 3 ? 2 : tracks > 1 ? 1 : 0;
+  if (spans === 2) {
+    expect(at("moving").top, `${label}: moving top`).toBeCloseTo(0, 0);
+    expect(at("moving").left, `${label}: moving beside Waiting on you`).toBeGreaterThan(0);
+  }
+  const flowing = COLUMN_IDS.slice(spans);
+  const inRows = tracks === 1 ? COLUMN_IDS.map((id) => [id]) : chunk(flowing, tracks - spans);
   let top = 0;
   for (const row of inRows) {
     for (const id of row) expect(Math.abs(at(id).top - top), `${label}: ${id} top ${at(id).top}, wanted ${top}`).toBeLessThanOrEqual(1);
-    if (tracks > 1) for (const id of row) expect(at(id).left, `${label}: ${id} beside Waiting on you`).toBeGreaterThan(0);
+    if (spans) for (const id of row) expect(at(id).left, `${label}: ${id} beside the spanning columns`).toBeGreaterThan(at(COLUMN_IDS[spans - 1]!).left);
     top = Math.max(...row.map((id) => at(id).bottom)) + COL_GAP;
   }
   const lowest = Math.max(...COLUMN_IDS.map((id) => at(id).bottom));
@@ -744,15 +751,16 @@ for (const [label, width, f, tracks] of [
   ["1728", 1728, false, 4],
   ["1920", 1920, false, 5],
   ["1280 under F", 1280, true, 5],
+  ["800 under F", 800, true, 3],
   ["700", 700, false, 1],
 ] as const) {
   test(`beside a tall Waiting on you at ${label}, the other columns land right under each other`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStart(page, BOARD_TALL);
+    await openStartSettled(page, BOARD_TALL);
     await expect(boardCard(page).locator(".wiki-wm-tile").first()).toBeAttached();
     if (f) {
       await page.keyboard.press("f");
-      await expect.poll(() => trackCount(page)).toBe(5);
+      await expect.poll(() => trackCount(page)).toBe(tracks);
     }
     expect(await trackCount(page)).toBe(tracks);
     await expectBoardLayout(page, tracks, `tall ${label}`);
@@ -760,10 +768,10 @@ for (const [label, width, f, tracks] of [
   });
 }
 
-for (const [width, tracks] of [[1280, 2], [1512, 3], [700, 1]] as const) {
+for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [700, 1]] as const) {
   test(`at ${width}, a Waiting on you the reader folds leaves no gap`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStart(page, BOARD_TALL);
+    await openStartSettled(page, BOARD_TALL);
     const you = boardCard(page).locator('[data-wm-lane="you"]');
     await you.locator("> summary").click();
     await expect(you).not.toHaveAttribute("open", "");
@@ -771,16 +779,69 @@ for (const [width, tracks] of [[1280, 2], [1512, 3], [700, 1]] as const) {
   });
   test(`at ${width}, an empty Waiting on you leaves no gap`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStart(page, BOARD_NO_WAIT);
+    await openStartSettled(page, BOARD_NO_WAIT);
     await expect(boardCard(page).locator('[data-wm-lane="you"] .wiki-wm-col-none')).toBeVisible();
     await expectBoardLayout(page, tracks, `empty ${width}`);
+  });
+}
+
+/** The tall map's Moving emptied: every effort that lands there is gone from the GET. */
+async function dropMovingEfforts(page: Page): Promise<void> {
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as { map: { efforts: { id: string }[] } } & Record<string, unknown>;
+    const out = new Set(["kids", "kid-two", "kid-long", "kid-idle", "moving-a", "moving-b"]);
+    await route.fulfill({ json: { ...body, map: { ...body.map, efforts: body.map.efforts.filter((e) => !out.has(e.id)) } } });
+  });
+}
+
+// Fix round 2: at 3 and 4 tracks a tall Moving spans the rows too.
+for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [1920, 5]] as const) {
+  test(`at ${width}, a Moving the reader folds leaves no gap`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openStartSettled(page, BOARD_TALL);
+    const moving = boardCard(page).locator('[data-wm-lane="moving"]');
+    await moving.evaluate((el: HTMLDetailsElement) => (el.open = false));
+    await expect(moving).not.toHaveAttribute("open", "");
+    await expectBoardLayout(page, tracks, `moving folded ${width}`);
+  });
+  test(`at ${width}, an empty Moving leaves no gap`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await dropMovingEfforts(page);
+    await openStartSettled(page, BOARD_TALL);
+    await expect(boardCard(page).locator('[data-wm-lane="moving"] .wiki-wm-col-none')).toBeAttached();
+    await expectBoardLayout(page, tracks, `moving empty ${width}`);
+  });
+}
+
+for (const [boardWidth, tracks] of [[619, 2], [620, 3], [829, 3], [830, 4], [1039, 4], [1040, 5]] as const) {
+  test(`on a ${boardWidth} px board, ${tracks} tracks with the columns landing right under each other`, async ({ page }) => {
+    await page.setViewportSize({ width: 1920, height: 900 });
+    await openStartSettled(page, BOARD_TALL);
+    const board = boardCard(page).locator(".wiki-wm-board");
+    await board.evaluate((el, w) => (el.style.width = `${w}px`), boardWidth);
+    expect(await boardInnerWidth(page)).toBe(boardWidth);
+    expect(await trackCount(page)).toBe(tracks);
+    await expectBoardLayout(page, tracks, `board ${boardWidth}`);
+  });
+}
+
+for (const [width, tracks] of [[1512, 3], [1728, 4]] as const) {
+  test(`at ${width}, Cooling the reader opens keeps Quiet and Shipped right under the row above`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openStartSettled(page, BOARD_TALL);
+    const cooling = boardCard(page).locator('[data-wm-lane="cooling"]');
+    await cooling.locator("> summary").click();
+    await expect(cooling).toHaveAttribute("open", "");
+    expect(await columnsShown(page)).toEqual(["you", "moving", "cooling"]);
+    await expectBoardLayout(page, tracks, `cooling open ${width}`);
   });
 }
 
 for (const width of [600, 420]) {
   test(`at a ${width} window the track fits the board, however narrow`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await openStart(page, BOARD_TALL);
+    await openStartSettled(page, BOARD_TALL);
     const cols = boardCard(page).locator(".wiki-wm-cols");
     await expect(boardCard(page).locator(".wiki-wm-tile").first()).toBeAttached();
     const r = await cols.evaluate((el) => {
@@ -802,7 +863,7 @@ for (const width of [600, 420]) {
 for (const column of [200, 245, 500]) {
   test(`a compact row in a ${column} px column is two lines: name and sparkline, then pills`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
-    await openStart(page, BOARD_TALL);
+    await openStartSettled(page, BOARD_TALL);
     const card = boardCard(page);
     await expect(card.locator('.wiki-wm-kid[data-effort-id="kid-two"]')).toBeAttached();
     const rows = await card.locator(".wiki-wm-cols").evaluate((grid, column) => {
@@ -868,7 +929,7 @@ test("the wide board's rules all sit behind @supports selector(::details-content
     const walk = (rules: CSSRuleList, guarded: boolean, wide: boolean) => {
       for (const r of Array.from(rules)) {
         if (r instanceof CSSSupportsRule) walk(r.cssRules, guarded || r.conditionText === "selector(::details-content)", wide);
-        else if (r instanceof CSSContainerRule) walk(r.cssRules, guarded, wide || r.containerName === "wmboard");
+        else if (r instanceof CSSContainerRule) walk(r.cssRules, guarded, wide || (r.containerName === "wmboard" && r.containerQuery === "(min-width: 1040px)"));
         else if (r instanceof CSSMediaRule) walk(r.cssRules, guarded, wide);
         else if (wide && r instanceof CSSStyleRule) (guarded ? out.guarded : out.bare).push(r.selectorText);
       }
@@ -1194,7 +1255,7 @@ for (const forced of [false, true]) {
   test(`every effort has a sparkline that fills its tile${forced ? ", under forced colors" : ""}`, async ({ page }) => {
     await page.setViewportSize({ width: 1920, height: 900 });
     if (forced) await page.emulateMedia({ forcedColors: "active" });
-    await openStart(page, BOARD);
+    await openStartSettled(page, BOARD);
     const card = boardCard(page);
     await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
     const r = await card.locator(".wiki-wm-effort").evaluateAll((efforts) =>
@@ -2282,7 +2343,7 @@ test("a themes map has no strip", async ({ page }) => {
 for (const width of [1280, 700]) {
   test(`a long unbroken title wraps inside the open list at ${width} wide`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
-    await openStart(page, STRIP_LONG);
+    await openStartSettled(page, STRIP_LONG);
     const card = page.locator("#wikiWorkCard");
     await card.locator('[data-wm-cell="decisions"]').click();
     const drill = card.locator(".wiki-wm-drill");
@@ -2968,7 +3029,7 @@ for (const theme of [
     await page.emulateMedia({ colorScheme: theme.scheme });
     await page.addInitScript((v) => localStorage.setItem("muninn-theme", v), theme.stored);
     await organizable(page);
-    await openStart(page, FRESH);
+    await openStartSettled(page, FRESH);
     const color = (sel: string) => page.locator(sel).evaluate((el) => getComputedStyle(el).color);
     const accent = await token(page, "--accent-light");
     const btn = page.locator("#wikiWorkMapRefresh");
@@ -3380,37 +3441,96 @@ for (const theme of THEMES) {
 }
 
 // Non-text marks need 3:1 (WCAG 1.4.11), a zero bar included: it is the row's baseline.
-for (const theme of THEMES.slice(0, 4)) {
-  test(`a sparkline's bars clear 3:1 on the tile and a zero bar is at least 1 px, in the ${theme.label} theme`, async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await page.emulateMedia({ colorScheme: theme.scheme });
-    await page.addInitScript((v) => localStorage.setItem("muninn-theme", v!), theme.stored);
-    await openStart(page, BOARD_TALL);
-    const card = boardCard(page);
-    await expect(card.locator('.wiki-wm-kid[data-effort-id="kid-idle"]')).toBeAttached();
-    const measure = await paintedMeasure(page);
-    const r = await card.evaluate((root, measure) => {
-      const one = (sel: string) => {
-        const rect = root.querySelector(sel)!;
-        const tile = rect.closest(".wiki-wm-tile")!;
-        const probe = document.createElement("span");
-        probe.style.backgroundColor = getComputedStyle(rect).fill;
-        tile.append(probe);
-        const ratio = measure(probe, false, true);
-        probe.remove();
-        return { ratio, h: rect.getBoundingClientRect().height };
-      };
-      return {
-        zeroRow: one('.wiki-wm-kid[data-effort-id="kid-idle"] rect.zero'),
-        zeroTile: one('.wiki-wm-tile[data-effort-id="moving-b"] > svg rect.zero'),
-        barRow: one('.wiki-wm-kid[data-effort-id="kid-two"] rect:not(.zero)'),
-        barTile: one('.wiki-wm-tile[data-effort-id="moving-a"] > svg rect:not(.zero)'),
-      };
-    }, measure);
-    console.log(`spark ${theme.label}: ${Object.entries(r).map(([k, v]) => `${k} ${v.ratio.toFixed(2)} @ ${v.h.toFixed(2)} px`).join(", ")}`);
-    for (const [what, v] of Object.entries(r)) {
-      expect(v.ratio, `${what} contrast`).toBeGreaterThanOrEqual(3);
-      expect(v.h, `${what} height`).toBeGreaterThanOrEqual(1);
+// A computed fill says nothing about a bar thinner than its pixels, so this reads paint.
+function contrastOfRgb(a: number[], b: number[]): number {
+  const lum = (c: number[]) => {
+    const [r, g, bl] = c.map((v) => {
+      const x = v / 255;
+      return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r! + 0.7152 * g! + 0.0722 * bl!;
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi! + 0.05) / (lo! + 0.05);
+}
+
+/** A locator's device pixels as painted, decoded on a blank page. */
+async function paintedPixels(l: Locator): Promise<{ w: number; h: number; px: number[] }> {
+  const png = (await l.screenshot()).toString("base64");
+  const blank = await l.page().context().newPage();
+  try {
+    return await blank.evaluate(async (b64) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${b64}`;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      return { w: c.width, h: c.height, px: Array.from(ctx.getImageData(0, 0, c.width, c.height).data) };
+    }, png);
+  } finally {
+    await blank.close();
+  }
+}
+
+/** The pixel row holding the most runs clearing 3:1 against the commonest colour, the
+ *  background. A day's bar is a run, so 28 runs is 28 bars each read as its own day. */
+async function sparkRuns(l: Locator): Promise<{ runs: number; peak: number; lowest: number; inked: number }> {
+  const { w, h, px } = await paintedPixels(l);
+  const at = (x: number, y: number) => px.slice((y * w + x) * 4, (y * w + x) * 4 + 3);
+  const tally = new Map<string, number>();
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) tally.set(at(x, y).join(), (tally.get(at(x, y).join()) ?? 0) + 1);
+  const bg = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]![0].split(",").map(Number);
+  let best = { runs: 0, peak: 0, lowest: 0, inked: 0 };
+  for (let y = 0; y < h; y++) {
+    const ratios = Array.from({ length: w }, (_, x) => contrastOfRgb(at(x, y), bg));
+    const inRun = ratios.flatMap((r, x) => (r >= 3 ? [x] : []));
+    const runs = inRun.filter((x, i) => i === 0 || inRun[i - 1] !== x - 1).length;
+    const peak = Math.max(...ratios);
+    if (runs > best.runs || (runs === best.runs && peak > best.peak)) best = { runs, peak, lowest: inRun.length ? Math.min(...inRun.map((x) => ratios[x]!)) : 0, inked: ratios.filter((r) => r >= 1.2).length / w };
+  }
+  return best;
+}
+
+for (const scale of [1, 2]) {
+  test.describe(`at device scale ${scale}`, () => {
+    test.use({ deviceScaleFactor: scale });
+    for (const theme of THEMES.slice(0, 4)) {
+      test(`each of a sparkline's 28 bars paints as its own day at 3:1, on a tile and a compact row, in the ${theme.label} theme`, async ({ page }) => {
+        await page.setViewportSize({ width: 1280, height: 900 });
+        await page.emulateMedia({ colorScheme: theme.scheme });
+        await page.addInitScript((v) => localStorage.setItem("muninn-theme", v!), theme.stored);
+        await openStartSettled(page, BOARD_TALL);
+        const card = boardCard(page);
+        const row = (id: string) => card.locator(`.wiki-wm-kid[data-effort-id="${id}"] > svg.wiki-wm-spark`);
+        const tile = (id: string) => card.locator(`.wiki-wm-tile[data-effort-id="${id}"] > svg.wiki-wm-spark`);
+        const read = async (targets: [string, Locator][]) => {
+          for (const [what, l] of targets) {
+            const r = await sparkRuns(l);
+            console.log(`spark ${theme.label} x${scale} ${what}: ${r.runs} bars, peak ${r.peak.toFixed(2)}, lowest ${r.lowest.toFixed(2)}`);
+            expect(r.runs, `${what} at x${scale}: peak ${r.peak.toFixed(2)}`).toBe(28);
+          }
+        };
+        await read([["row, all zero", row("kid-idle")], ["row, one bar", row("kid-two")], ["tile, all zero", tile("moving-b")], ["tile, one bar", tile("moving-a")]]);
+        // The narrowest tile a track gives.
+        await card.locator(".wiki-wm-cols").evaluate((el) => ((el as HTMLElement).style.gridTemplateColumns = "200px"));
+        await read([["200 px tile, all zero", tile("moving-b")], ["200 px tile, one bar", tile("moving-a")]]);
+      });
     }
   });
 }
+
+// A crisp 1 px bar scaled below a pixel can miss every pixel centre, so below 1x the row
+// keeps its soft bars: fainter than 3:1, but each still paints.
+test.describe("at device scale 0.9", () => {
+  test.use({ deviceScaleFactor: 0.9 });
+  test("a compact row's baseline keeps its ink", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openStartSettled(page, BOARD_TALL);
+    const r = await sparkRuns(boardCard(page).locator('.wiki-wm-kid[data-effort-id="kid-idle"] > svg.wiki-wm-spark'));
+    console.log(`spark x0.9 row: inked ${r.inked.toFixed(2)}, peak ${r.peak.toFixed(2)}`);
+    expect(r.inked).toBeGreaterThan(0.8);
+  });
+});
