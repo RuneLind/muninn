@@ -5,22 +5,22 @@
 `src/dashboard/reference/notes.md` holds this folder's detail and is **not loaded automatically**. Rules and traps that apply to one function stay in its section there: ` [trap]` on an index line below sends you to that section before you edit that code.
 
 - **Search it this way, never plain:** `rg -n -o '.{0,120}<term>.{0,120}' src/dashboard/reference/notes.md`. With the Grep tool: `output_mode: content`, `-o`, the same pattern and that path. Lines are long, 31 of them over 500 bytes (measured 2026-11-03, as is every count here): plain `rg` prints each whole line (one hit can cost tens of thousands of chars) and plain Grep returns "Omitted long matching line". Keep the window at 120 chars or less. Do not use `grep -o` here: in a Claude Code shell it returns nothing for this pattern and exits 1, which reads as no note.
-- **Before editing a file:** search its basename, such as `wiki-routes.ts`.
+- **Before editing a file:** search its basename, such as `wiki-routes.ts`, and the functions you are changing: `tools-routes.ts` never hits the leak warning that `disconnectServer` hits.
 - **To look up a topic:** find its heading in the index and search a few plain words of it, never the whole heading: parens and brackets are regex metacharacters, and 5 of the 14 headings match nothing verbatim. 89% of the file sits under `Route Organization`, so most topics are bold lead-ins inside its table rows: search plain words for those too.
 - **No hit:** zero hits on a basename means no note under that name, not no rule. Search the file's exported function names, then the index, then the neighbouring module's `notes.md`, or its `CLAUDE.md` where it has none; `rg -l <term> src -g '{CLAUDE,notes}.md'` (or the Grep equivalent) finds which. 20 of the 60 non-test `src/dashboard/routes/*.ts` files have no hit here, and 15 of those have their notes in another module's file, 7 of them in `src/wiki`'s.
 - **To read a hit's line:** `Read` it whole only under about 5,000 chars: `sed -n '<N>p' src/dashboard/reference/notes.md | wc -c` tells you. 9 lines are longer (line 25 is 68k). `Read` refuses only line 25 and dumps the rest whole, so send a longer line to a scratch file first, from the repo root and with the file's full path. A bare `notes.md` prints a valid path to an empty file and exits 0:
 
 ```bash
-t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -w 2000 > "$t"; echo "$t"
+t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -s -w 2000 > "$t"; echo "$t"
 ```
 
-  Then `rg -n '<term>' "$t"` finds the fold line to `Read` with offset and limit. A later Bash call has lost `$t`, so use the printed path there. A fold boundary can split a term, so no hit in the fold means search part of the term.
+  Then `rg -n -o '.{0,120}<term>.{0,120}' <printed path>` finds the fold line to `Read` with offset and limit; a later Bash call has lost `$t`. Search one word or path: `fold -s` breaks only at spaces, so a phrase can split.
 - **History:** `git log --follow -- src/dashboard/reference/notes.md` reaches the old file's commits.
 
 ## Rules
 
 - A component exports only the parts it has (`*Styles`, `*Html`, `*Script`); a page imports and concatenates the ones that exist.
-- Whatever the bundled client imports lands in the browser bundle with its own imports, so it must carry no server dependency. A file on the server side is fine if it is import-safe: `wiki-chat-target.ts` imports `deriveAskThreadTitle` from the dependency-free `src/wiki/ask-chat.ts`. Other examples: `views/components/wiki-integrate.ts`, `src/jira/wire.ts`.
+- A file the bundled client imports lands in the browser bundle with whatever it uses, and a green build does not prove it runs. Keep it free of npm packages (`postgres` fails the build), of Node builtins other than the bundled `node:path` (`node:fs` builds, then throws when called) and of top-level `getLog()` (about 38k chars of logtape). A file on the server side is fine if it is import-safe: `wiki-chat-target.ts` imports `deriveAskThreadTitle` from the dependency-free `src/wiki/ask-chat.ts`. Other examples: `views/components/wiki-integrate.ts`, `src/jira/wire.ts`.
 - A view does not import the routes factory: that would be a cycle, which is why the route groups have their own module, `route-groups.ts`.
 - A POST+SSE route returns every body check as a plain JSON 400 before `streamSSE` commits a 200: after that, a validation failure can only be an `app_error` no client can tell from a model failure.
 - The overview routes `/api/attention`, `/api/agents/overview`, `/api/indexing/overview`, `/api/models/overview` and `/api/sync/status` answer a degraded source through `errors[]`, not a 5xx. The catch is per source, so a throw outside it is still a 5xx: `assembleModelsOverview` itself, `getSyncRepos()`.
