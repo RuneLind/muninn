@@ -842,7 +842,7 @@ function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
     // The run did not move, but a page may have declared an effort since it
     // (P6): re-join, and only when something a join reads changed, so an
     // ordinary adopt leaves the card's markup alone. A themes card has no strip.
-    if (slot.kind === "card" && workBody && (currentDeclarationKey(workBody.map.runAtMs) !== paintedDeclarationKey || (!isThemeMap(workBody.map) && currentStripKey() !== paintedStripKey))) paintWorkCard();
+    if (slot.kind === "card" && workBody && (currentDeclarationKey(workBody.map.runAtMs) !== paintedDeclarationKey || (!isThemeMap(workBody.map) && currentStripKey() !== paintedStripKey))) paintWorkCard(undefined, true);
     return;
   }
   if (slot.kind === "card") paintWorkCard();
@@ -875,15 +875,20 @@ export function workMapDoneSet(runAt: number): Set<string> {
 
 // ── Focus: one resolver, an ordered chain of visible, focusable targets ──
 function focusable(t: HTMLElement | null | undefined): t is HTMLElement {
-  return !!t && t.isConnected && !t.hidden && !(t as HTMLButtonElement).disabled && t.getClientRects().length > 0;
+  if (!t || !t.isConnected || t.hidden || (t as HTMLButtonElement).disabled || t.getClientRects().length === 0) return false;
+  // Inside a shut fold an element still has client rects; only this call says it is skipped.
+  return typeof t.checkVisibility !== "function" || t.checkVisibility();
 }
 
-/** Focus `t`, giving a non-control (a heading, a why's text) `tabindex=-1` when it needs one. */
+/** Focus `t`, giving a non-control (a heading, a why's text) `tabindex=-1` when
+ *  it needs one, and taking it back when focus still did not land: a link left
+ *  with it drops out of the tab order. */
 function focusOn(t: HTMLElement): boolean {
   t.focus({ preventScroll: true });
   if (document.activeElement !== t && !t.hasAttribute("tabindex")) {
     t.setAttribute("tabindex", "-1");
     t.focus({ preventScroll: true });
+    if (document.activeElement !== t) t.removeAttribute("tabindex");
   }
   return document.activeElement === t;
 }
@@ -921,9 +926,12 @@ function focusCandidates(el: HTMLElement, key: FocusKey): (HTMLElement | null | 
     const btn = Array.from(el.querySelectorAll<HTMLElement>("[data-wm-why]")).find((b) => b.getAttribute("data-wm-why") === key.why);
     return [btn, btn?.parentElement?.querySelector<HTMLElement>(".wiki-wm-why-text"), heading];
   }
-  if ("sel" in key) return [el.querySelector<HTMLElement>(key.sel), heading];
-  if ("link" in key) return [cardLinks(el, key.link)[key.nth], heading];
-  if ("href" in key) return [hrefLinks(el, key.href)[key.nth], heading];
+  // A control in a shut board column takes no focus: the column's head does.
+  // A themes lane is not one: there focus parks on the heading and the next paint retries.
+  const orFold = (t: HTMLElement | null | undefined) => [t, t?.closest(".wiki-wm-col")?.querySelector<HTMLElement>(":scope > summary"), heading];
+  if ("sel" in key) return orFold(el.querySelector<HTMLElement>(key.sel));
+  if ("link" in key) return orFold(cardLinks(el, key.link)[key.nth]);
+  if ("href" in key) return orFold(hrefLinks(el, key.href)[key.nth]);
   return [heading];
 }
 
@@ -973,16 +981,17 @@ function hrefLinks(el: HTMLElement, href: string): HTMLElement[] {
 function resolveFocus(el: HTMLElement, key: FocusKey): void {
   const t = focusFirst(focusCandidates(el, key));
   const wanted = "sel" in key ? el.querySelector<HTMLElement>(key.sel) : null;
-  if (t && wanted && t !== wanted) {
+  if (t && wanted && t !== wanted && !wanted.closest(".wiki-wm-col")) {
     pendingFocus = key;
     t.setAttribute(PARKED_ATTR, "");
   }
 }
 
-/** The markup the card last got: a checks answer that renders the same leaves the DOM alone. */
+/** The markup the card last got: a checks answer or an adopt that renders the same leaves the DOM alone. */
 let paintedCardHtml: string | null = null;
 
-/** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing. */
+/** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing.
+ *  An adopt whose keys moved paints the same way. */
 function paintWorkCardIfChanged(): void {
   paintWorkCard(undefined, true);
 }
@@ -1010,6 +1019,10 @@ function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
       retrying: workChecksTimer !== null || workChecksGen === slot.gen,
     },
   });
+  // Before the early return: this listing has been rendered, so the next adopt
+  // compares against it and does not render the card again for the same keys.
+  paintedDeclarationKey = declarationKey(pages, runAt);
+  paintedStripKey = currentStripKey();
   if (onlyIfChanged && paintedCardHtml === html) {
     ensureWorkChecks();
     return;
@@ -1019,8 +1032,6 @@ function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   const parked = !!active && active.hasAttribute(PARKED_ATTR) && el.contains(active);
   const refocus = override ?? (parked ? pendingFocus : null) ?? focusedCardControl(el) ?? (lost ? pendingFocus : null);
   pendingFocus = null;
-  paintedDeclarationKey = declarationKey(pages, runAt);
-  paintedStripKey = currentStripKey();
   el.innerHTML = html;
   paintedCardHtml = html;
   ensureWorkChecks();

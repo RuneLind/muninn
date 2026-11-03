@@ -14,7 +14,8 @@
  *     open, a `steady` and a `fading` one start closed.
  *  4. Focus on a theme name, in its lane or in Connected (the same
  *     `data-effort-link` more than once), stays on that link through a ↻ poll
- *     repaint, also on a theme's second Connected row.
+ *     repaint, also on a theme's second Connected row; moved into a shut lane
+ *     it parks on the heading and the next paint retries.
  *  5. The rail's fold says theme and Worth a look, not effort and Needs you,
  *     and View options says «group by theme», also with the fold turned off.
  *
@@ -295,6 +296,49 @@ test("focus on a theme name in its second Connected row stays on that row throug
     .toBeGreaterThan(n);
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
   await expect(second).toBeFocused();
+});
+
+// Fix round 1 batch 2: a shut lane is not a board column, so focus parks and retries.
+test("focus on a theme name a new run moves into a shut lane parks on the heading, and the next paint puts it back", async ({ page }) => {
+  let steadyState = "steady";
+  let gets = 0;
+  await page.route("**/api/wiki/work-map?*", async (route) => {
+    gets++;
+    const res = await route.fetch();
+    const body = (await res.json()) as { map: { efforts: { id: string; state: string }[] } };
+    for (const e of body.map.efforts) if (e.id === "steady") e.state = steadyState;
+    await route.fulfill({ json: { ...body, organizable: true, lastSuccessAt: Date.now() - 60 * 60_000 } });
+  });
+  await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
+  await page.clock.install();
+  await openStart(page);
+  const card = page.locator("#wikiWorkCard");
+  await card.locator("#wikiWorkMapRefresh").click();
+  await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
+  const repaint = async () => {
+    await page.evaluate(() => document.querySelector("#wikiWorkCard .wiki-wm-coverage")!.setAttribute("data-before-repaint", ""));
+    const n = gets;
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(1_000);
+        return gets;
+      })
+      .toBeGreaterThan(n);
+    await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  };
+  const name = card.locator('.wiki-wm-theme[data-effort-id="steady"] [data-effort-link="steady"]');
+  const heading = card.locator(".wiki-wn-title");
+  await name.focus();
+  steadyState = "fading";
+  await repaint();
+  await expect(card.locator('[data-wm-lane="fading"] .wiki-wm-theme[data-effort-id="steady"]')).toHaveCount(1);
+  await expect(card.locator('[data-wm-lane="fading"]')).not.toHaveAttribute("open", "");
+  await expect(heading).toBeFocused();
+  await expect(heading).toHaveAttribute("data-wm-parked", "");
+  steadyState = "steady";
+  await repaint();
+  await expect(card.locator('[data-wm-lane="steady"] .wiki-wm-theme[data-effort-id="steady"]')).toHaveCount(1);
+  await expect(name).toBeFocused();
 });
 
 test("the rail speaks of themes on a themes map", async ({ page }) => {

@@ -29,7 +29,7 @@ import { escHtml as esc } from "./escape.ts";
 
 /** Past this age the card marks the map stale (the loop runs daily). */
 export const WORK_MAP_STALE_MS = 26 * 3_600_000;
-/** Page links shown per effort before `+N more`. */
+/** Page links a Needs you item or a theme shows before `+N more`. */
 export const EFFORT_PAGES_SHOWN = 6;
 
 export interface WorkMapAttempt {
@@ -211,36 +211,17 @@ function stemOf(rel: string): string {
 }
 
 // ── Lanes ─────────────────────────────────────────────────────────────
+/** Only the rail reads these, for the folds that may start open; the board reads
+ *  {@link BOARD_COLUMNS}. A unit test ties the two Movings together. */
 export const WORK_MAP_LANES = [
   { id: "moving", label: "Moving", states: ["active", "blocked", "proposed"], open: true },
   { id: "cooling", label: "Cooling", states: ["cooling"], open: false },
   { id: "quiet", label: "Quiet and shipped", states: ["quiet", "shipped"], open: false },
 ] as const;
 
-const MOVING_STATES: readonly string[] = WORK_MAP_LANES[0].states;
-
-/** True when `e` renders under its parent: nested, and not a Moving effort
- *  whose parent's own state is a closed-lane one (cooling, quiet, shipped),
- *  wherever that parent renders; that one renders in Moving instead. */
-export function rendersUnderParent(e: { id: string; parent?: string; state: string }, efforts: readonly { id: string; parent?: string; state: string }[]): boolean {
-  if (!isNestedEffort(e, efforts)) return false;
-  const parent = efforts.findLast((x) => x.id === e.parent);
-  return !(MOVING_STATES.includes(e.state) && parent && !MOVING_STATES.includes(parent.state));
-}
-
-/** Top-level efforts per lane, map order. A sub-effort renders under its
- *  parent, except a Moving one under a closed-lane parent, which is top-level
- *  in Moving. */
-export function laneEfforts<P>(efforts: readonly JoinedEffort<P>[]): { lane: (typeof WORK_MAP_LANES)[number]; efforts: JoinedEffort<P>[] }[] {
-  const top = efforts.filter((e) => !rendersUnderParent(e, efforts));
-  return WORK_MAP_LANES.map((lane) => ({
-    lane,
-    efforts: top.filter((e) => (lane.states as readonly string[]).includes(e.state)),
-  }));
-}
-
-/** True when `e` renders under a parent: its parent chain reaches a root
- *  effort without a cycle. A cycle or a missing parent leaves it top-level. */
+/** True when `e`'s parent chain reaches a root effort without a cycle, the rule
+ *  for a crumb. A cycle or a missing parent leaves it top-level. On the board,
+ *  nesting also needs the parent in the same column (`nestsUp`). */
 export function isNestedEffort(e: { id: string; parent?: string }, efforts: readonly { id: string; parent?: string }[]): boolean {
   const byId = new Map(efforts.map((x) => [x.id, x]));
   const seen = new Set([e.id]);
@@ -254,9 +235,17 @@ export function isNestedEffort(e: { id: string; parent?: string }, efforts: read
   return true;
 }
 
-/** The newest day with any activity, as days before `now` (local days). A
- *  theme stores no `daily`: its newest week with a source counts from that
- *  week's last day (Sunday), so a source this week reads as 0. */
+/** Calendar days from `day` to `today`, both `YYYY-MM-DD`, so no clock and no DST
+ *  enters; a later `day` reads as 0, an unparseable one as NaN, and an overflow date
+ *  (`2026-02-30`) rolls over to the day it lands on. */
+function calendarDaysTo(day: string, today: string): number {
+  return Math.max(0, Math.round((Date.parse(today + "T12:00:00Z") - Date.parse(day + "T12:00:00Z")) / 86_400_000));
+}
+
+/** The newest day with any activity, as days before Oslo's today, the calendar
+ *  `daily` and `weekly` are keyed on, whatever the browser's zone. A theme stores
+ *  no `daily`: its newest week with a source counts from that week's last day
+ *  (Sunday), so a source this week reads as 0. */
 export function lastActiveDays(
   effort: { daily?: readonly { day: string; commits: number; sessions: number }[]; weekly?: readonly { start: string; count: number }[] },
   now: number,
@@ -269,11 +258,8 @@ export function lastActiveDays(
     if (best) best = plusDays(best, 6);
   }
   if (!best) return null;
-  const t = Date.parse(best + "T12:00:00");
-  if (!Number.isFinite(t)) return null;
-  const today = new Date(now);
-  today.setHours(12, 0, 0, 0);
-  return Math.max(0, Math.round((today.getTime() - t) / 86_400_000));
+  const days = calendarDaysTo(best, osloDay(now));
+  return Number.isFinite(days) ? days : null;
 }
 
 /** `YYYY-MM-DD` plus `n` days, by the calendar. */
@@ -294,12 +280,13 @@ export function workCardHtml<P extends CardPage>(input: WorkCardInput<P>): strin
   const joined = joinWorkMap(body.map, input.pages, now);
   const byKey = new Map<string, CardPage>(input.pages.map((p) => [normalizeRelPath(p.relPath), p]));
   const prose = (s: string) => proseHtml(s, byKey, hrefFor);
+  const marks = needMarksReader(body.map.needsYou, input.checks, body.map.runAtMs);
   return (
     headHtml(joined, body, now, input.refresh) +
     healthStripHtml(input.pages, !!input.waitsCounted, input.strip ?? { open: null, expanded: false }, now, byKey, hrefFor, input.checks, body.map.runAtMs) +
     (joined.summary.trim() ? `<div class="wiki-wm-summary">${prose(joined.summary)}</div>` : "") +
-    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you", input.checks?.answerRunAt === body.map.runAtMs ? input.checks.body?.needs : undefined, !!input.checks?.failed || (!!input.checks?.body?.refreshing && !input.checks.retrying)) +
-    lanesHtml(joined, now, prose, byKey, hrefFor, input.effortHref) +
+    needsYouHtml(joined, body.map.needsYou, input.done, input.openWhy ?? new Set(), prose, byKey, hrefFor, "Needs you", marks) +
+    boardHtml(joined, body.map.needsYou, input.done, marks, !!input.waitsCounted, now, prose, input.effortHref) +
     coverageHtml(joined)
   );
 }
@@ -349,8 +336,7 @@ function needsYouHtml<P>(
   byKey: ReadonlyMap<string, CardPage>,
   hrefFor: (rel: string) => string,
   title: string,
-  checks?: readonly ChecksNeed[],
-  unconfirmed = false,
+  marks: NeedMarks = () => ({ struck: false, notes: [] }),
 ): string {
   // A theme item also carries `hubs` and the runner's `count`.
   const needs = map.needsYou as readonly { kind: string; title: string; why: string; action: string; pages: string[]; hubs?: string[]; count?: number }[];
@@ -358,7 +344,6 @@ function needsYouHtml<P>(
   // Keyed on the STORED item, so the key survives a page rename between renders.
   const open = needs.map((n, i) => ({ n, i })).filter(({ i }) => !done.has(needKey(raw[i]!)));
   const doneCount = needs.length - open.length;
-  const marks = (i: number) => needGhMarks((checks ?? []).filter((c) => needKey(c) === needKey(raw[i]!)), unconfirmed);
   const cards = open
     .map(
       ({ n, i }) =>
@@ -424,6 +409,19 @@ export interface GhNote {
   text: string;
 }
 
+/** What GitHub says on the map's Needs you item at index `i`. */
+export type NeedMarks = (i: number) => { struck: boolean; notes: GhNote[] };
+
+/**
+ * The one reading of the check for the Needs you cards and the board, so the two
+ * cannot differ: only an answer for the map on the card marks its items.
+ */
+export function needMarksReader(raw: readonly { kind: string; title: string }[], checks: ChecksView | undefined, runAtMs: number): NeedMarks {
+  const entries = checks?.answerRunAt === runAtMs ? (checks.body?.needs ?? []) : [];
+  const unconfirmed = !!checks?.failed || (!!checks?.body?.refreshing && !checks.retrying);
+  return (i) => needGhMarks(entries.filter((c) => needKey(c) === needKey(raw[i]!)), unconfirmed);
+}
+
 /** A Needs-you why, clamped to two lines. Its expand control renders hidden
  *  unless open; the client shows it once it finds the text clamped. */
 function whyHtml(i: number, key: string, open: boolean, why: string, prose: (s: string) => string, byKey: ReadonlyMap<string, CardPage>): string {
@@ -436,84 +434,194 @@ function whyHtml(i: number, key: string, open: boolean, why: string, prose: (s: 
   );
 }
 
-function effortHtml<P>(
-  e: JoinedEffort<P>,
-  childrenOf: (id: string) => JoinedEffort<P>[],
-  now: number,
-  prose: (s: string) => string,
-  byKey: ReadonlyMap<string, CardPage>,
-  hrefFor: (rel: string) => string,
-  shown: Set<string> = new Set(),
-  partOf?: string,
-  effortHref?: (id: string) => string,
-): string {
-  shown.add(e.id);
-  const active = activeLabel(lastActiveDays(e, now));
-  // Sub-efforts render under their parent; `isNestedEffort` keeps a cycle
-  // top-level, and `shown` stops the walk at an id already rendered.
-  const children = childrenOf(e.id).filter((c) => !shown.has(c.id));
-  for (const c of children) shown.add(c.id);
-  const subs = children.length
-    ? `<ul class="wiki-wm-sub">${children.map((c) => effortHtml(c, childrenOf, now, prose, byKey, hrefFor, shown, undefined, effortHref)).join("")}</ul>`
-    : "";
-  return (
-    `<li class="wiki-wm-effort" data-effort-id="${esc(e.id)}">` +
-    '<div class="wiki-wm-effort-head">' +
-    (effortHref
-      ? `<a class="wiki-wm-effort-name" href="${esc(effortHref(e.id))}" data-effort-link="${esc(e.id)}">${esc(e.name)}</a>`
-      : `<span class="wiki-wm-effort-name">${esc(e.name)}</span>`) +
-    `<span class="wiki-wm-state wm-state-${esc(e.state)}">${esc(e.state)}</span>` +
-    (active ? `<span class="wiki-wm-active">${esc(active)}</span>` : "") +
-    (partOf ? `<span class="wiki-wm-partof">part of ${esc(partOf)}</span>` : "") +
-    "</div>" +
-    (e.oneLine ? `<div class="wiki-wm-oneline">${prose(e.oneLine)}</div>` : "") +
-    pagesHtml(
-      e.pages.map((p) => p.id),
-      byKey,
-      hrefFor,
-    ) +
-    (e.next ? `<div class="wiki-wm-next"><span class="wiki-wm-next-label">Next:</span> ${prose(e.next)}</div>` : "") +
-    subs +
-    "</li>"
-  );
+// ── The board (plan muninn-wiki-your-work-board, P3) ──────────────────
+export type BoardColumnId = "you" | "moving" | "cooling" | "quiet" | "shipped";
+
+/** The column an effort's state puts it in, when nothing waits on the reader. */
+export const BOARD_COLUMNS: Record<JoinedEffort<unknown>["state"], Exclude<BoardColumnId, "you">> = {
+  active: "moving",
+  blocked: "moving",
+  proposed: "moving",
+  cooling: "cooling",
+  quiet: "quiet",
+  shipped: "shipped",
+};
+
+const BOARD_COLUMN_HEADS: readonly { id: BoardColumnId; label: string; open: boolean }[] = [
+  { id: "you", label: "Waiting on you", open: true },
+  { id: "moving", label: "Moving", open: true },
+  { id: "cooling", label: "Cooling", open: false },
+  { id: "quiet", label: "Quiet", open: false },
+  { id: "shipped", label: "Shipped", open: false },
+];
+
+/** What the board reads off an effort's pages and Needs you items. */
+export interface BoardFacts {
+  decisions: number;
+  /** The oldest dated wait, `YYYY-MM-DD`. */
+  since?: string;
+  steps: number;
+  /** The `kind` of each Needs you item still open for this effort. */
+  needKinds: string[];
 }
 
-/** The efforts the card lists: every joined effort except one that declared
- *  pages moving elsewhere left empty (P6). An effort emptied by deletions
- *  stays, so the card can still say it existed. */
-export function cardEfforts<P>(efforts: readonly JoinedEffort<P>[]): JoinedEffort<P>[] {
-  return efforts.filter((e) => e.pages.length > 0 || e.movedOut.length === 0);
+/** The strip's page rule per effort; `waitsCounted` false turns only the waits off. */
+export function boardFacts<P extends CardPage>(
+  effort: { id: string; pages: readonly { page: P }[] },
+  raw: readonly { kind: string; title: string; effort?: string }[],
+  done: ReadonlySet<string>,
+  marks: NeedMarks,
+  waitsCounted: boolean,
+): BoardFacts {
+  const live = livePages([...new Set(effort.pages.map((p) => p.page))]);
+  const waits = waitsCounted ? live.filter((p) => (p.movesWaiting ?? 0) > 0) : [];
+  const dates = waits.flatMap((p) => (p.waitingSince ? [p.waitingSince] : [])).sort();
+  return {
+    decisions: waits.reduce((n, p) => n + p.movesWaiting!, 0),
+    ...(dates[0] ? { since: dates[0] } : {}),
+    steps: live.reduce((n, p) => n + (p.movesYou ?? 0), 0),
+    needKinds: openNeeds(effortNeedItems(raw, effort.id), done)
+      .filter(({ i }) => !marks(i).struck)
+      .map(({ i }) => raw[i]!.kind),
+  };
 }
 
-function lanesHtml<P>(
+export function boardColumn(effort: { state: JoinedEffort<unknown>["state"] }, facts: BoardFacts): BoardColumnId {
+  return facts.decisions > 0 || facts.needKinds.length > 0 ? "you" : BOARD_COLUMNS[effort.state];
+}
+
+/** The days a sparkline covers, today last. */
+export const SPARK_DAYS = 28;
+const SPARK_HEIGHT = 24;
+
+/** Commits plus twice the sessions per day, oldest first, ending on Oslo's today. A day after it counts as today, as in {@link lastActiveDays}. */
+export function sparkValues(daily: readonly { day: string; commits: number; sessions: number }[], now: number): number[] {
+  const out = new Array<number>(SPARK_DAYS).fill(0);
+  const today = osloDay(now);
+  for (const d of daily) {
+    const age = calendarDaysTo(d.day, today);
+    if (age < SPARK_DAYS) out[SPARK_DAYS - 1 - age]! += d.commits + 2 * d.sessions;
+  }
+  return out;
+}
+
+function sparkHtml(daily: readonly { day: string; commits: number; sessions: number }[], now: number): string {
+  const values = sparkValues(daily, now);
+  const top = Math.max(1, ...values);
+  const bars = values.map((v, i) => {
+    // Units, not pixels: a compact row draws at half scale, where 2 is a 1 px baseline.
+    const h = v ? Math.max(4, (v / top) * SPARK_HEIGHT) : 2;
+    return `<rect${v ? "" : ' class="zero"'} x="${i + 0.1}" y="${(SPARK_HEIGHT - h).toFixed(1)}" width="0.8" height="${h.toFixed(1)}"/>`;
+  });
+  return `<svg class="wiki-wm-spark" viewBox="0 0 ${SPARK_DAYS} ${SPARK_HEIGHT}" preserveAspectRatio="none" role="img" aria-label="Activity, last 28 days">${bars.join("")}</svg>`;
+}
+
+interface BoardRow<P> {
+  e: JoinedEffort<P>;
+  at: number;
+  facts: BoardFacts;
+  col: BoardColumnId;
+  idle: number | null;
+}
+
+/** What the board sorts on, never what it shows: a tile's pills keep its own facts. */
+interface BoardOrder {
+  since?: string;
+  waits: boolean;
+  idle: number;
+  at: number;
+}
+
+/** A row's sort key, rolled up over the rows nested in it: a column that shows who
+ *  has waited longest must lead with that wait, even when it sits in a nested row. */
+function boardOrder<P>(row: BoardRow<P>, nested: readonly BoardRow<P>[] = []): BoardOrder {
+  const all = [row, ...nested];
+  const since = all.flatMap((r) => (r.facts.since ? [r.facts.since] : [])).sort()[0];
+  return {
+    ...(since ? { since } : {}),
+    waits: all.some((r) => r.facts.decisions > 0),
+    idle: Math.min(...all.map((r) => r.idle ?? Infinity)),
+    at: row.at,
+  };
+}
+
+const waitRank = (o: BoardOrder) => (o.since ? 0 : o.waits ? 1 : 2);
+
+/** Dated waits oldest first, then undated waits, then no wait; within each, most recently active, then map order. */
+function byBoardOrder(a: BoardOrder, b: BoardOrder): number {
+  if (waitRank(a) !== waitRank(b)) return waitRank(a) - waitRank(b);
+  if (a.since !== b.since) return a.since! < b.since! ? -1 : 1;
+  return a.idle - b.idle || a.at - b.at;
+}
+
+function boardPillsHtml<P>(r: BoardRow<P>, now: number): string {
+  const { decisions, since, steps, needKinds } = r.facts;
+  const pill = (text: string, tone = "") => `<span class="wiki-wm-pill${tone}">${esc(text)}</span>`;
+  const active = activeLabel(r.idle);
+  const pills =
+    (decisions ? pill(`${decisions} decision${decisions === 1 ? "" : "s"}${since ? ` · ${daysSinceDay(since, now)} d` : ""}`, " warn") : "") +
+    (needKinds.length ? pill(needKinds.join(" · "), " acc") : "") +
+    (steps ? pill(`${steps} step${steps === 1 ? "" : "s"}`) : "") +
+    (active ? pill(active) : "");
+  return pills && `<div class="wiki-wm-pills">${pills}</div>`;
+}
+
+function boardNameHtml(e: { id: string; name: string }, effortHref?: (id: string) => string, titled = false): string {
+  const title = titled ? ` title="${esc(e.name)}"` : "";
+  return effortHref
+    ? `<a class="wiki-wm-effort-name" href="${esc(effortHref(e.id))}" data-effort-link="${esc(e.id)}"${title}>${esc(e.name)}</a>`
+    : `<span class="wiki-wm-effort-name"${title}>${esc(e.name)}</span>`;
+}
+
+function boardHtml<P extends CardPage>(
   map: JoinedWorkMap<P>,
+  raw: readonly { kind: string; title: string; effort?: string }[],
+  done: ReadonlySet<string>,
+  marks: NeedMarks,
+  waitsCounted: boolean,
   now: number,
   prose: (s: string) => string,
-  byKey: ReadonlyMap<string, CardPage>,
-  hrefFor: (rel: string) => string,
   effortHref?: (id: string) => string,
 ): string {
-  const listed = cardEfforts(map.efforts);
-  const childrenOf = (id: string) => listed.filter((x) => x.parent === id && rendersUnderParent(x, listed));
-  const parentName = (e: JoinedEffort<P>) => (isNestedEffort(e, listed) ? listed.find((x) => x.id === e.parent)?.name : undefined);
-  const shown = new Set<string>();
-  return laneEfforts(listed)
-    .map(({ lane, efforts }) => {
-      const before = shown.size;
-      const items = efforts
-        .filter((e) => !shown.has(e.id))
-        .map((e) => effortHtml(e, childrenOf, now, prose, byKey, hrefFor, shown, parentName(e), effortHref))
-        .join("");
-      // Every effort rendered in this lane, sub-efforts included.
-      const count = shown.size - before;
-      if (!count) return "";
-      return (
-        `<details class="wiki-wm-lane" data-wm-lane="${lane.id}"${lane.open ? " open" : ""}>` +
-        `<summary class="wiki-wm-lane-title">${esc(lane.label)} <span class="wiki-wm-count">${count}</span></summary>` +
-        `<ul class="wiki-wm-efforts">${items}</ul></details>`
-      );
-    })
-    .join("");
+  const listed = map.efforts.filter((e) => e.pages.length > 0);
+  const rows = listed.map((e, at): BoardRow<P> => {
+    const facts = boardFacts(e, raw, done, marks, waitsCounted);
+    return { e, at, facts, col: boardColumn(e, facts), idle: lastActiveDays(e, now) };
+  });
+  const byId = new Map(rows.map((r) => [r.e.id, r]));
+  const parentOf = (r: BoardRow<P>) => (isNestedEffort(r.e, listed) ? byId.get(r.e.parent!) : undefined);
+  const nestsUp = (r: BoardRow<P>) => parentOf(r)?.col === r.col;
+  // `isNestedEffort` holds for the whole chain, so this walk ends.
+  const tileOf = (r: BoardRow<P>): BoardRow<P> => (nestsUp(r) ? tileOf(parentOf(r)!) : r);
+  const kidHtml = (k: BoardRow<P>) =>
+    `<li class="wiki-wm-effort wiki-wm-kid" data-effort-id="${esc(k.e.id)}">${boardNameHtml(k.e, effortHref, true)}${boardPillsHtml(k, now)}${sparkHtml(k.e.daily, now)}</li>`;
+  const kidsOf = (r: BoardRow<P>) => rows.filter((k) => nestsUp(k) && tileOf(k) === r);
+  const tileHtml = (r: BoardRow<P>) => {
+    const kids = kidsOf(r).sort((a, b) => byBoardOrder(boardOrder(a), boardOrder(b)));
+    const partOf = parentOf(r);
+    return (
+      `<li class="wiki-wm-effort wiki-wm-tile" data-effort-id="${esc(r.e.id)}">` +
+      `<div class="wiki-wm-effort-head">${boardNameHtml(r.e, effortHref)}${partOf ? `<span class="wiki-wm-partof">part of ${esc(partOf.e.name)}</span>` : ""}</div>` +
+      sparkHtml(r.e.daily, now) +
+      (r.e.oneLine ? `<div class="wiki-wm-oneline">${prose(r.e.oneLine)}</div>` : "") +
+      boardPillsHtml(r, now) +
+      (r.e.next ? `<div class="wiki-wm-next"><span class="wiki-wm-next-label">Next:</span> ${prose(r.e.next)}</div>` : "") +
+      (kids.length ? `<ul class="wiki-wm-kids">${kids.map(kidHtml).join("")}</ul>` : "") +
+      "</li>"
+    );
+  };
+  const cols = BOARD_COLUMN_HEADS.map(({ id, label, open }) => {
+    const inCol = rows.filter((r) => r.col === id);
+    const tiles = inCol.filter((r) => !nestsUp(r)).sort((a, b) => byBoardOrder(boardOrder(a, kidsOf(a)), boardOrder(b, kidsOf(b))));
+    return (
+      // Named here because an inert head (the wide board) drops out of the accessibility tree.
+      `<details class="wiki-wm-col" data-wm-lane="${id}" aria-label="${esc(label)} ${inCol.length}"${open ? " open" : ""}>` +
+      `<summary class="wiki-wm-lane-title">${esc(label)} <span class="wiki-wm-count">${inCol.length}</span></summary>` +
+      (tiles.length ? `<ul class="wiki-wm-efforts">${tiles.map(tileHtml).join("")}</ul>` : '<div class="wiki-wm-col-none">none</div>') +
+      "</details>"
+    );
+  });
+  return `<div class="wiki-wm-board"><div class="wiki-wm-cols">${cols.join("")}</div></div>`;
 }
 
 function coverageHtml<P>(map: JoinedWorkMap<P>): string {
@@ -569,13 +677,18 @@ function byOldest(a: StripRow, b: StripRow): number {
   return (b.count ?? 0) - (a.count ?? 0) || a.relPath.localeCompare(b.relPath);
 }
 
+/** The pages the strip and the board count: all but a plan closed without shipping. */
+function livePages<P extends CardPage>(pages: readonly P[]): P[] {
+  return pages.filter((p) => !closedWithoutShipping(p.plan_status));
+}
+
 /**
  * The strip's four lists, from the live listing. Every page counts but a plan
  * closed without shipping, whether or not the map placed it. A wait with no
  * parsed `since` lists under decisions and not under oldest.
  */
 export function stripRows<P extends CardPage>(pages: readonly P[]): Record<Exclude<StripCell, "github">, StripRow[]> {
-  const live = pages.filter((p) => !closedWithoutShipping(p.plan_status));
+  const live = livePages(pages);
   const waits = live
     .filter((p) => (p.movesWaiting ?? 0) > 0)
     .map((p) => ({ relPath: p.relPath, count: p.movesWaiting, ...(p.waitingSince ? { since: p.waitingSince } : {}) }));
@@ -590,9 +703,10 @@ export function stripRows<P extends CardPage>(pages: readonly P[]): Record<Exclu
   };
 }
 
-/** What the strip reads off the listing, so an adopt repaints only on a change. */
+/** What the strip and the board read off the listing, so an adopt repaints only on a change: an
+ *  effort leaves the board with its last page, and its prose names any page by title. */
 export function stripKey<P extends CardPage>(pages: readonly P[], waitsCounted: boolean): string {
-  return JSON.stringify([waitsCounted, stripRows(pages), pages.filter((p) => p.movesWaiting || p.movesYou || p.followups === "open").map((p) => pageTitle(p))]);
+  return JSON.stringify([waitsCounted, stripRows(pages), pages.map((p) => `${normalizeRelPath(p.relPath)}\u0000${pageTitle(p)}`).sort()]);
 }
 
 const STRIP_TITLES: Record<StripCell, string> = {
@@ -781,7 +895,7 @@ function healthStripHtml<P extends CardPage>(
 
 // ── What you're following (a themes map, plan muninn-wiki-theme-map P2) ──
 /** The themes card's lanes, by the runner's trend state. Fading starts closed,
- *  as the work card's quiet lanes do. */
+ *  as a work map's Cooling, Quiet and Shipped columns do. */
 export const THEME_MAP_LANES = [
   { id: "new", label: "New", states: ["new"], open: true },
   { id: "rising", label: "Rising", states: ["rising"], open: true },

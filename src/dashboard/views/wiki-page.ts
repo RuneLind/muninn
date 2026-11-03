@@ -2684,11 +2684,9 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-lane { margin: 8px 0 0; }
     .wiki-wm-lane-title { cursor: pointer; list-style-position: inside; }
     .wiki-wm-count { color: var(--text-soft); font-weight: 400; }
-    .wiki-wm-efforts, .wiki-wm-sub { list-style: none; margin: 0; padding: 0; }
-    .wiki-wm-sub { margin: 6px 0 0 14px; padding-left: 10px; border-left: 2px solid var(--border-secondary); }
+    .wiki-wm-efforts { list-style: none; margin: 0; padding: 0; }
     .wiki-wm-effort { padding: 6px 0; border-top: 1px solid var(--border-primary); font-size: 12.5px; min-width: 0; }
     .wiki-wm-efforts > .wiki-wm-effort:first-child { border-top: none; }
-    .wiki-wm-sub > .wiki-wm-effort { border-top: none; padding: 4px 0; }
     .wiki-wm-effort-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
     .wiki-wm-effort-name { font-weight: 600; color: var(--text-primary); }
     .wiki-wm-state {
@@ -2706,6 +2704,68 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-next { margin-top: 3px; color: var(--text-secondary); overflow-wrap: anywhere; }
     .wiki-wm-next-label { color: var(--text-soft); font-weight: 600; }
     .wiki-wm-coverage { font-size: 11px; color: var(--text-soft); margin-top: 10px; }
+    /* The board (your-work board P3). Layout is CSS alone, so F and a resize need no repaint.
+       Five 200 px tracks and four 10 px gaps need 1040 px: from there every column shows, so
+       nothing is left to fold, and the head takes no pointer, focus or key. Behind @supports:
+       without ::details-content the summary rule would make shut columns unopenable, so that
+       browser keeps working folds. A browser without interactivity keeps a head that can be
+       tabbed to and flipped unseen. */
+    .wiki-wm-board { container-type: inline-size; container-name: wmboard; margin-top: 10px; }
+    /* Waiting on you spans all the rows, so the rest flow beside it, and from three tracks
+       (three 200 px tracks and two 10 px gaps need 620 px) Moving does too; at two it shares
+       its track with the shut columns. An item crossing an fr track gives its extra height
+       to that track alone, so a tall column stretches no auto row. The row gap is a margin
+       because a gap would also space the empty rows. */
+    .wiki-wm-cols {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+      grid-template-rows: repeat(4, auto) 1fr; column-gap: 10px; align-items: start; margin-bottom: -10px;
+    }
+    .wiki-wm-col { min-width: 0; margin-bottom: 10px; }
+    .wiki-wm-col[data-wm-lane="you"] { grid-row: 1 / -1; }
+    @container wmboard (min-width: 620px) { .wiki-wm-col[data-wm-lane="moving"] { grid-row: 1 / -1; } }
+    .wiki-wm-col[data-wm-lane="you"] > summary, .wiki-wm-col[data-wm-lane="you"] > summary .wiki-wm-count { color: var(--accent-light); }
+    @supports selector(::details-content) {
+      @container wmboard (min-width: 1040px) {
+        .wiki-wm-col::details-content { content-visibility: visible; }
+        .wiki-wm-col > summary { display: flex; justify-content: space-between; cursor: default; pointer-events: none; interactivity: inert; }
+      }
+    }
+    .wiki-wm-col-none { font-size: 12.5px; color: var(--text-soft); padding: 4px 2px; }
+    .wiki-wm-col .wiki-wm-efforts > .wiki-wm-tile {
+      border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 10px;
+      background: var(--bg-inset); margin-bottom: 8px; overflow-wrap: anywhere;
+    }
+    .wiki-wm-col[data-wm-lane="you"] .wiki-wm-efforts > .wiki-wm-tile { border: 1.5px solid var(--accent); }
+    .wiki-wm-tile .wiki-wm-effort-head { gap: 2px 6px; line-height: 1.3; }
+    .wiki-wm-spark { display: block; width: 100%; height: 24px; margin: 5px 0 3px; }
+    .wiki-wm-spark rect { fill: var(--accent-light); }
+    .wiki-wm-spark rect.zero { fill: var(--text-dim); }
+    @media (forced-colors: active) {
+      .wiki-wm-spark rect { fill: CanvasText; }
+      .wiki-wm-spark rect.zero { fill: GrayText; }
+    }
+    .wiki-wm-pills { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+    .wiki-wm-pill { font-size: 11.5px; line-height: 1.4; padding: 1px 7px; border-radius: 9px; background: var(--bg-surface); color: var(--text-soft); min-width: 0; }
+    .wiki-wm-pill.warn { background: var(--tint-warning); color: var(--tone-warn); }
+    .wiki-wm-pill.acc { background: var(--tint-purple); color: var(--accent-light); }
+    .wiki-wm-kids { list-style: none; margin: 6px 0 0; padding: 6px 0 0; border-top: 1px dashed var(--border-primary); }
+    /* Two lines: name and a fixed sparkline, then pills. The name takes one line, with the
+       whole of it in its title. */
+    .wiki-wm-kids > .wiki-wm-kid {
+      display: grid; grid-template-columns: minmax(0, 1fr) 56px; column-gap: 6px; align-items: center;
+      padding: 4px 0; border-top-color: var(--border-secondary); line-height: 1.3;
+    }
+    .wiki-wm-kids > .wiki-wm-kid:first-child { border-top: none; padding-top: 0; }
+    .wiki-wm-kid .wiki-wm-effort-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .wiki-wm-kid .wiki-wm-spark { grid-column: 2; grid-row: 1; height: 12px; margin: 0; }
+    /* 56 px over 28 days is 2 px a day, so a 0.8-unit bar covers no pixel fully at 1x. Half
+       a unit with crisp edges is one whole pixel on and one off, wherever the row lands.
+       Below 1x a crisp bar can miss every pixel centre and vanish, so it stays soft there. */
+    @media (min-resolution: 1dppx) {
+      .wiki-wm-kid .wiki-wm-spark { shape-rendering: crispEdges; }
+      .wiki-wm-kid .wiki-wm-spark rect { width: 0.5px; }
+    }
+    .wiki-wm-kid .wiki-wm-pills { grid-column: 1 / -1; margin: 2px 0 0; }
     /* What you're following (themes map, theme map P2). */
     .wm-state-new, .wm-state-rising { background: var(--tint-purple); color: var(--accent-light); }
     .wiki-wm-need-count {

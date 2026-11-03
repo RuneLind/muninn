@@ -692,7 +692,7 @@ describe("railEffortIndex — what a fold reads off the map (D14)", () => {
 });
 
 describe("one source for the rail and the card or effort page (B2)", () => {
-  test("the rail's moving states are the card's Moving lane, not a copy", () => {
+  test("the rail's moving states are WORK_MAP_LANES' Moving lane, not a copy", () => {
     expect(EFFORT_MOVING_STATES).toBe(WORK_MAP_LANES.find((l) => l.id === "moving")!.states);
   });
 
