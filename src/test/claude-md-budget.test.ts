@@ -478,6 +478,10 @@ describe("index", () => {
     expect(check(indexed("## One\n", "- One\n", "- **Never** do the thing.\n- Always do the other.\n"))).toEqual([]);
   });
 
+  test("an index item indented two spaces reads as its heading", () => {
+    expect(check(indexed("## One\n## Two\n", "  - One\n  - Two\n"))).toEqual([]);
+  });
+
   test("a heading that starts with ⚠️, indexed with [trap], passes", () => {
     expect(check(indexed("## ⚠️ Sharp edge\n", "- ⚠️ Sharp edge [trap]\n"))).toEqual([]);
   });
