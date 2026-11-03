@@ -40,7 +40,7 @@ Writing to a wiki:
 
 Read-only, two independent switches, neither implying the other:
 
-- `MUNINN_WIKI_READONLY` is the instance (`isWikiReadonly()`), and forbids page content writes. `WIKI_READONLY_ROOTS` is one root (`isReadonlyWikiRoot(root)`), and forbids those plus any model call, web reach or chat seed on that wiki: find and provenance still answer. `SCHEDULER_ENABLED=false` is no substitute: every route stays registered.
+- `MUNINN_WIKI_READONLY` is the instance (`isWikiReadonly()`), and forbids page content writes and Felles publishing. `WIKI_READONLY_ROOTS` is one root (`isReadonlyWikiRoot(root)`), and forbids those plus any model call, web reach or chat seed on that wiki: find and provenance still answer. `SCHEDULER_ENABLED=false` is no substitute: every route stays registered.
 - A content-write seam takes injectable `isReadonly ?? isWikiReadonly` and `isReadonlyRoot ?? isReadonlyWikiRoot` and returns `forbidden` before it opens anything, so a later call site is guarded.
 - A new refusal is 403 with `{error, readonly: true}`, never the generic `error`: a refusal is not a failure.
 - A new mutation route refuses before any DB, model or CAS work (`readonlyRefusal`, instance only, plus a root check above any status CAS: a later 403 strands the row) and `log.info`s it. Existing routes vary: copy `proposals/:id/approve`, not a seam-only one.

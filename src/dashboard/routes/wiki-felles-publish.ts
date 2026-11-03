@@ -26,7 +26,7 @@
  * 415/403 (the stamp route's same-origin gate), 400 bad body, 501 not
  * configured, 403 a wiki not in `FELLES_WIKI_PUBLISH_WIKIS`, 404 no such page,
  * 409 while another run is in flight (one at a time per process; the three
- * actions share the slot).
+ * actions share the slot), and 403 on a read-only instance (below).
  * The page must be one the wiki index lists. `fellesScriptArgs` builds the
  * argv from its index relPath (in NFC for remove) and keeps a dash-led page
  * from being read as a flag.
@@ -40,7 +40,8 @@
  * (`felles-status.ts`); 403 `cross-origin` or `missing-header` from its own
  * gate; 400 without a wiki or with an `allowIdent` other than 0 or 1; 502 when
  * the script failed or answered anything but the status shape; 504 on timeout;
- * and the same 501/403/404 as the POST. `allowIdent` (default 1, the dialogs'
+ * and the same 501/403/404 as the POST, without its instance check: the status
+ * writes nothing. `allowIdent` (default 1, the dialogs'
  * default) is the script's `--tillat-ident`, which decides whether a page with
  * a NAVident counts as changed or refused. The status does NOT take the run
  * slot: it is read-only, and the reader asks for it while a long sync runs.

@@ -62,7 +62,8 @@ export function fellesPublishableFor(wikiName: string | undefined, config: Felle
 
 /** `{ fellesPublish: { bin, bucket? } }` for `/api/wiki/pages` on a wiki that
  *  offers the control, else `{}` — including on a `WIKI_READONLY_ROOTS` root,
- *  since publishing ships the page off the machine. `bin` and `bucket` let the
+ *  since publishing ships the page off the machine, and on a read-only instance,
+ *  so neither the dialog, its copyable command nor the sync chip appears. `bin` and `bucket` let the
  *  dialog build the copyable command line. */
 export function fellesPublishPayloadField(
   wikiName: string | undefined,
