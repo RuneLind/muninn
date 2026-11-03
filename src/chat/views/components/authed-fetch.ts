@@ -308,6 +308,15 @@ export function authedFetchScript(initialProvider: IdentityProvider | null = nul
     return 'reload';
   };
 
+  // A socket that never opened asks /chat/me through authedFetch, so the 'http'
+  // rule has already got that 401 and its body. On entra the reload is left to it:
+  // only the login hint is evidence that a reload lands on a login page, and a
+  // proxy's own 401 page would replace the chat. This channel just latches and banners.
+  window.__muninnAuthProbeRefusal = function() {
+    if (authProvider === 'entra') return banner('ws');
+    return window.__muninnAuthRefusal('ws');
+  };
+
   /**
    * The ONE fetch every call site under src/chat/views/ goes through.
    *

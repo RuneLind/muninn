@@ -340,18 +340,26 @@ test.describe("acceptance 17 — ONE introspection across BOTH credential paths"
 });
 
 test.describe("the chat page knows its provider before /chat/me answers", () => {
-  test("a /chat/me refused with a proxy's HTML 401 still shows the expiry banner", async ({ browser }) => {
+  test("a /chat/me refused with a proxy's HTML 401 banners and stays on the page", async ({ browser }) => {
     tokens.set("tok-html-401", { active: true, oid: OID_A, NAVident: "X999999" });
     const context = await browser.newContext({ extraHTTPHeaders: bearer("tok-html-401") });
     const page = await context.newPage();
+    let navigations = 0;
+    page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations++; });
     try {
-      // Only /chat/me: the page itself comes from the real server, so the
-      // provider it was rendered with is the real session's.
+      // Only /chat/me: the page itself comes from the real server, so the provider
+      // it was rendered with is the real session's. The socket is refused here too,
+      // so its probe meets the same HTML 401, and its latch is what keeps the banner
+      // up through the 2xx the page's other requests get.
       await page.route(/\/chat\/me$/, (route) =>
         route.fulfill({ status: 401, contentType: "text/html", body: "<html>401</html>" }));
       const res = await page.goto(`${BASE}/chat`);
       expect(res?.status()).toBe(200);
+      expect(await res?.text()).toContain('var authProvider = "entra";');
       await expect(page.locator("#authExpiredBanner")).toBeVisible();
+      await page.waitForTimeout(2500);
+      await expect(page.locator("#authExpiredBanner")).toBeVisible();
+      expect(navigations).toBe(1);
     } finally {
       await context.close();
     }

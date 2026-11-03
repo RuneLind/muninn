@@ -31,7 +31,7 @@
  *
  * | probe result | meaning | what happens |
  * |---|---|---|
- * | `dead` (**401**) | the session is gone | `__muninnAuthRefusal('ws')` — reload or banner, terminal |
+ * | `dead` (**401**) | the session is gone | `__muninnAuthProbeRefusal` — reload or banner, terminal |
  * | `refused` (**2xx**) | the session is FINE and the upgrade is still refused | one rung of the ladder below |
  * | `unknown` (5xx, a transport failure, anything else) | an outage that says nothing about the session | retry in {@link WS_UNKNOWN_RETRY_MS}, forever, no rung, no notice |
  *
@@ -127,7 +127,7 @@ export interface PreOpenRetryDeps {
   probe: () => Promise<ChatSessionProbe>;
   /** Open another socket. */
   retry: () => void;
-  /** The session is gone: `__muninnAuthRefusal('ws')`. Terminal. */
+  /** The session is gone: `__muninnAuthProbeRefusal`. Terminal. */
   expired: () => void;
   /** The ladder is spent: show the amber "live updates are unavailable" bar. */
   stall: () => void;
