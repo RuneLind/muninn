@@ -4,16 +4,17 @@
 
 `src/dashboard/reference/notes.md` holds this folder's detail and is **not loaded automatically**. Rules and traps that apply to one function stay in its section there: ` [trap]` on an index line below sends you to that section before you edit that code.
 
-- **Before editing a file:** Grep `notes.md` for the file's basename (such as `wiki-routes.ts`) with the `-o` pattern under "Long lines".
-- **To look up a topic:** find its heading in the index and Grep for a few plain words of it, never the whole heading: parens and brackets are regex metacharacters, and 5 of the 14 headings match nothing verbatim (measured 2026-11-03). 89% of the file sits under `Route Organization`, so most topics are bold lead-ins inside its table rows: Grep plain words for those too. Then `Read` with offset and limit.
-- **No hit:** zero hits on a basename means no note under that name, not no rule. 20 of the 60 non-test `src/dashboard/routes/*.ts` files have no hit in `notes.md`, and 15 of those have their notes in another module's file, 7 of them in `src/wiki`'s. So go to the index, then to the neighbouring module's `notes.md`, or its `CLAUDE.md` where it has no `notes.md`. Grep the path `src` with glob `{CLAUDE,notes}.md` and `output_mode: files_with_matches` to find which one.
-- **Long lines:** 31 lines are over 500 bytes, and Claude Code's Grep tool runs ripgrep with `--max-columns 500`, so a plain search matching one returns "Omitted long matching line". Grep with `output_mode: content`, `-o` and a pattern such as `.{0,120}<term>.{0,120}` returns the text around each match. Keep the `-o` window at 120 chars or less: ripgrep counts its 500-column limit in bytes.
-- **A line too long for `Read`** (line 25 is 68k chars) goes to a scratch file first, from the repo root and with the file's full path. A bare `notes.md` prints a valid path to an empty file and exits 0. Then `Read` that file with offset and limit:
+- **Search it this way, never plain:** `rg -n -o '.{0,120}<term>.{0,120}' src/dashboard/reference/notes.md`. With the Grep tool: `output_mode: content`, `-o`, the same pattern and that path. Lines are long, 31 of them over 500 bytes (measured 2026-11-03, as is every count here): plain `rg` prints each whole line (one hit can cost tens of thousands of chars) and plain Grep returns "Omitted long matching line". Keep the window at 120 chars or less. Do not use `grep -o` here: in a Claude Code shell it returns nothing for this pattern and exits 1, which reads as no note.
+- **Before editing a file:** search its basename, such as `wiki-routes.ts`.
+- **To look up a topic:** find its heading in the index and search a few plain words of it, never the whole heading: parens and brackets are regex metacharacters, and 5 of the 14 headings match nothing verbatim. 89% of the file sits under `Route Organization`, so most topics are bold lead-ins inside its table rows: search plain words for those too.
+- **No hit:** zero hits on a basename means no note under that name, not no rule. Search the file's exported function names, then the index, then the neighbouring module's `notes.md`, or its `CLAUDE.md` where it has none; `rg -l <term> src -g '{CLAUDE,notes}.md'` (or the Grep equivalent) finds which. 20 of the 60 non-test `src/dashboard/routes/*.ts` files have no hit here, and 15 of those have their notes in another module's file, 7 of them in `src/wiki`'s.
+- **To read a hit's line:** `Read` it whole only under about 5,000 chars: `sed -n '<N>p' src/dashboard/reference/notes.md | wc -c` tells you. 9 lines are longer (line 25 is 68k). `Read` refuses only line 25 and dumps the rest whole, so send a longer line to a scratch file first, from the repo root and with the file's full path. A bare `notes.md` prints a valid path to an empty file and exits 0:
 
 ```bash
 t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -w 2000 > "$t"; echo "$t"
 ```
 
+  Then `rg -n '<term>' "$t"` finds the fold line to `Read` with offset and limit. A later Bash call has lost `$t`, so use the printed path there. A fold boundary can split a term, so no hit in the fold means search part of the term.
 - **History:** `git log --follow -- src/dashboard/reference/notes.md` reaches the old file's commits.
 
 ## Rules
@@ -22,10 +23,9 @@ t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -w 2000 > "$t
 - The bundled client must not import a server module, which would drag that module's imports into the browser bundle. What both sides share lives in an import-safe file, such as `views/components/wiki-integrate.ts` or the dependency-free `src/jira/wire.ts`.
 - A view does not import the routes factory: that would be a cycle, which is why the route groups have their own module, `route-groups.ts`.
 - A POST+SSE route returns every body check as a plain JSON 400 before `streamSSE` commits a 200: after that, a validation failure can only be an `app_error` no client can tell from a model failure.
-- An overview or status route (attention, agents, indexing, models, sync) never 5xxes: degraded sources land in `errors[]`.
-- A POST landing on an in-flight run answers 409 `{state:"running"}` with a human-readable `error`, the family's single-flight convention: the card's toast reads that field.
-- A plain-JSON wiki write route wraps its whole body, so an unexpected failure logs and returns 500 JSON, never an unhandled throw.
-- Run `isValidUuid` before a uuid-column `WHERE` can 500.
+- The overview routes `/api/attention`, `/api/agents/overview`, `/api/indexing/overview`, `/api/models/overview` and `/api/sync/status` answer a degraded source through `errors[]`, not a 5xx. The catch is per source, so a throw outside it is still a 5xx: `assembleModelsOverview` itself, `getSyncRepos()`.
+- A new plain-JSON wiki write route wraps its whole body, as `POST /api/wiki/remember` and `POST /api/wiki/factcheck/append` do, so an unexpected failure logs and returns 500 JSON. Nothing does that for it: there is no `app.onError`, and an unwrapped throw answers `500 text/plain`.
+- In new code, run `isValidUuid` before a caller's id reaches a uuid-column `WHERE`, which would otherwise 500.
 - A document deep link is `/search/document/<collection>/<encodeURIComponent(id)>`: the id segment is always encoded, because real ids carry `/`, spaces, `#` and non-ASCII, and naive interpolation truncates at `#`.
 - Text on an `--accent`/`--accent-hover` fill is `var(--on-accent)` or `var(--on-accent-primary)`, never a literal `#fff`: Reading draws dark ink there.
 - A badge that is a dark island in both bases takes an `--island-*` token, not a `--tint-*`: the tints are pale in light.
