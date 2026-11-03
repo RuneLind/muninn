@@ -158,8 +158,6 @@ interface Stub {
   store: Record<string, string>;
   now: number;
   banner: () => boolean;
-  /** The verdict for a socket that never opened and whose `/chat/me` probe got a 401. */
-  probeRefusal: () => string;
   /** How many nodes the banner ever appended — the idempotency assertion. */
   banners: () => number;
   /** True when the banner was appended OUTSIDE `#chatMessages` (acceptance F5:
@@ -264,7 +262,6 @@ function evalScript(
       bodyChildren.some((c) => c.id === EXPIRED_BANNER_ID) &&
       !chatChildren.some((c) => c.id === EXPIRED_BANNER_ID),
     refusal: (channel, hint) => (win.__muninnAuthRefusal as (c: string, h?: string) => string)(channel, hint),
-    probeRefusal: () => (win.__muninnAuthProbeRefusal as () => string)(),
     latched: (channel) => (win.__muninnAuthLatched as (c: string) => boolean)(channel),
     authedFetch: (url) => (win.authedFetch as (u: string) => Promise<{ status: number }>)(url),
     setProvider: (p) => (win.__muninnSetAuthProvider as (p: string | null) => void)(p),
@@ -333,34 +330,6 @@ describe("acceptance 19 — expiry, per channel", () => {
     expect(s.banner()).toBe(false);
     expect(s.refusal("sse")).toBe("banner");
     expect(s.reloads).toBe(0);
-  });
-
-  test("entra: a socket's probe banners and leaves the reload to the 401's own http verdict", async () => {
-    // A proxy's own 401 page says nothing about a login page, and a reload would
-    // put the reader on that page in place of the chat.
-    const proxy = evalScript({ status: 401, raw: "<html>401</html>", provider: "entra" });
-    await proxy.authedFetch("/chat/me");
-    await settle();
-    expect(proxy.probeRefusal()).toBe("banner");
-    expect(proxy.reloads).toBe(0);
-    expect(proxy.latched("ws")).toBe(true);
-
-    const sidecar = evalScript({ status: 401, provider: "entra" });
-    await sidecar.authedFetch("/chat/me");
-    await settle();
-    expect(sidecar.reloads).toBe(1);
-    expect(sidecar.probeRefusal()).toBe("banner");
-    expect(sidecar.reloads).toBe(1);
-  });
-
-  test("off entra a socket's probe keeps the channel's rule", () => {
-    const local = evalScript({ provider: "local" });
-    expect(local.probeRefusal()).toBe("banner");
-    expect(local.reloads).toBe(0);
-
-    const off = evalScript();
-    expect(off.probeRefusal()).toBe("ignore");
-    expect(off.banner()).toBe(false);
   });
 
   test("the page script carries the provider it was rendered with, and null with auth off", async () => {

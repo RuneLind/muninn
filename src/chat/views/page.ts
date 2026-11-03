@@ -796,7 +796,7 @@ const CHAT_SCRIPT = `
     retry: function() { connectWs(); },
     // Idempotent with authedFetch's own 401 handling, which may already have
     // acted on the same probe response: a second banner is the same banner.
-    expired: function() { window.__muninnAuthProbeRefusal(); },
+    expired: function() { window.__muninnAuthRefusal('ws'); },
     stall: showWsStalledNotice,
     clearStall: hideWsStalledNotice,
     schedule: function(fn, ms) { setTimeout(fn, ms); },
