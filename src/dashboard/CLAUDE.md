@@ -20,7 +20,7 @@ t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -w 2000 > "$t
 ## Rules
 
 - A component exports only the parts it has (`*Styles`, `*Html`, `*Script`); a page imports and concatenates the ones that exist.
-- The bundled client must not import a server module, which would drag that module's imports into the browser bundle. What both sides share lives in an import-safe file, such as `views/components/wiki-integrate.ts` or the dependency-free `src/jira/wire.ts`.
+- Whatever the bundled client imports lands in the browser bundle with its own imports, so it must carry no server dependency. A file on the server side is fine if it is import-safe: `wiki-chat-target.ts` imports `deriveAskThreadTitle` from the dependency-free `src/wiki/ask-chat.ts`. Other examples: `views/components/wiki-integrate.ts`, `src/jira/wire.ts`.
 - A view does not import the routes factory: that would be a cycle, which is why the route groups have their own module, `route-groups.ts`.
 - A POST+SSE route returns every body check as a plain JSON 400 before `streamSSE` commits a 200: after that, a validation failure can only be an `app_error` no client can tell from a model failure.
 - The overview routes `/api/attention`, `/api/agents/overview`, `/api/indexing/overview`, `/api/models/overview` and `/api/sync/status` answer a degraded source through `errors[]`, not a 5xx. The catch is per source, so a throw outside it is still a 5xx: `assembleModelsOverview` itself, `getSyncRepos()`.
@@ -30,26 +30,27 @@ t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -w 2000 > "$t
 - Text on an `--accent`/`--accent-hover` fill is `var(--on-accent)` or `var(--on-accent-primary)`, never a literal `#fff`: Reading draws dark ink there.
 - A badge that is a dark island in both bases takes an `--island-*` token, not a `--tint-*`: the tints are pale in light.
 - A page sized against the header writes `calc(100vh - var(--header-h, <px>))`: the hidden state sets `--header-h` to 0.
+- An SVG takes its theme colours from CSS classes, the house style (`fill: var(--x)` in a rule). No file here writes `var()` in a `fill=` or `stroke=` attribute.
 
 ## Traps
 
-- ⚠️ **SSE format:** events must be `data: JSON\n\n`; a missing double newline breaks the stream.
-- ⚠️ **MCP connection cleanup:** always call `disconnectServer()` or `disconnectAll()`; leaked stdio processes stay alive.
+- ⚠️ **Hand-written SSE framing:** `stream.writeSSE({event, data})` frames an event itself. Only a hand-written write has to end each event in a double newline (`data: JSON\n\n`); a missing one breaks the stream.
 - ⚠️ **A non-200 ends an `EventSource` for good:** it goes to `readyState` 2 and never retries.
 - ⚠️ **An undefined CSS token fails silently:** `.wiki-chatopt` used `var(--bg-elevated, var(--bg-secondary))`, neither token is defined on `/wiki` (`--bg-elevated` lives only in `chat/views/components/chat-styles.ts`), so the declaration was invalid and the dialog rendered fully transparent.
-- ⚠️ **SVG `fill=`/`stroke=` attributes never resolve `var()`:** make an SVG theme-aware through CSS classes.
 
 ## Index
+
+` [trap]` marks a section that records a failure or hazard; an unmarked section can still hold a rule, so search before you edit.
 
 - File Overview [trap]
 - Route Organization [trap]
 - View System
 - Component Pattern
 - Shared Infrastructure [trap]
-- Pages [trap]
+- Pages
 - Real-Time Updates
-- SSE Endpoints (sse-routes.ts) [trap]
-- Agent Status (`src/observability/agent-status.ts`)
+- SSE Endpoints (sse-routes.ts)
+- Agent Status (`src/observability/agent-status.ts`) [trap]
 - Activity Log (`src/observability/activity-log.ts`)
 - MCP Debug Client (`src/ai/mcp-tool-caller.ts`)
 - Common Pitfalls [trap]
