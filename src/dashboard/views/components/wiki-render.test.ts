@@ -86,8 +86,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // raise the bound in the PR that needs it. 2026-10-30: the effort page (work map
 // P3) took it from 1,281,098 to 1,301,295 bytes (322,578 → 327,890 gzipped).
 // 2026-10-31: the theme page (theme map P3) took it from 1,342,993 to
-// 1,356,382 bytes (337,896 → 339,876 gzipped).
-const WIKI_CLIENT_MAX_BYTES = 1_400_000;
+// 1,356,382 bytes (337,896 → 339,876 gzipped). 2026-11-03: the GitHub check's
+// re-ask and «not refreshed» (your-work board P2) took it to 1,400,548 bytes.
+const WIKI_CLIENT_MAX_BYTES = 1_401_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

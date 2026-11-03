@@ -19,6 +19,10 @@
  * A PR ref is a markdown PR link (`linkNumber`) or a bare `PR #n`,
  * `owner/repo#n`, `repo #n`, `repo#n` (`bareNumber`).
  *
+ * The GitHub check reads more than the views do: `everyRow` keeps a row with no
+ * number, `ownPrs` names the row's own PRs and `claimedState` keeps a state word
+ * only when the whole cell says it of them. `state`, `pr` and the rest do not move.
+ *
  * The strip draws a ledger only when its header names a state column
  * (State/Status/Tilstand, a parenthetical qualifier allowed) and at least {@link LEDGER_PARSED_MIN} of its rows
  * parse to a known state.
@@ -220,6 +224,8 @@ function landedLinksOnly(cell: string): boolean {
 
 /** A qualifier in parentheses may follow: `Status (10-19)`, `State (as of …)`. */
 const STATE_HEADER_RE = /^(?:state|status|tilstand)(?:\s*\([^()]*\))?$/i;
+/** The check's wider read of a state header: `Status og PR-er` holds the state too. */
+const STATE_HEADER_OPENS_RE = /^(?:state|status|tilstand)(?![\p{L}\p{N}-])/iu;
 const LANDED_HEADER_RE = /^(?:landed|landet)$/i;
 const DECISIONS_HEADER_RE = /^(?:decisions?|beslutning(?:er)?)$/i;
 const PR_HEADER_RE = /^PR$/i;
@@ -233,6 +239,11 @@ const DECISION_ID_GLOBAL = /(?<![\p{L}\p{N}])D(\d{1,4})(?![\p{L}\p{N}])/gu;
 /** The share of a ledger's rows that must parse for the strip to draw. */
 export const LEDGER_PARSED_MIN = 0.75;
 
+export interface OwnPr {
+  repo: string;
+  n: number;
+}
+
 export interface LedgerRow {
   /** The slate number: the leading integer of the first cell, unless the
    *  first column is a phase, date or period column (Fase, Date, Week …). */
@@ -242,9 +253,21 @@ export interface LedgerRow {
   link: number | null;
   /** The number the strip shows: slate, else link. */
   pr: number | null;
+  /** The row's OWN PR, which the GitHub check compares its state with: the
+   *  first of {@link ownPrs}. Absent when the row has none. */
+  ownPr?: OwnPr;
+  /** Every PR of the first of the first, PR and Landed cells to hold a full
+   *  pull URL; else the state cell's links, when the word opening that cell set
+   *  the state and they follow it with no word between. Unlike `link` it never
+   *  reads another cell, where a PR is a dependency. Absent when the row has none. */
+  ownPrs?: OwnPr[];
   state: PrState;
   /** Which rule gave the state: 1–3, 0 for unknown. */
   rule: 0 | 1 | 2 | 3;
+  /** What the row itself says about its PR, for the GitHub check: `state`, or
+   *  `unknown` when a {@link CLAIMABLE_STATES} word fails {@link cellClaimsOwnPr}.
+   *  `state` stays as it is, because the strip and the lint read it. */
+  claimedState: PrState;
   /** The D ids the row cites, in cell order, deduplicated. */
   decisions: string[];
   /** The first cell's text without its number (`harness`), struck text kept. */
@@ -263,9 +286,10 @@ export interface Ledger {
   draws: boolean;
 }
 
-/** Strip `**`, `__`, `~~` and a leading/trailing whitespace from a cell. */
+/** Strip `**`, `__`, `~~` and a leading/trailing whitespace from a cell, but not
+ *  from a URL: `__` can be part of a slug. */
 function plain(cell: string): string {
-  return cell.replace(/\*\*|__|~~/g, "").trim();
+  return cell.replace(/https?:\/\/[^\s()]+|\*\*|__|~~/g, (m) => (m.length === 2 ? "" : m)).trim();
 }
 
 /** A cell with its struck text (`~~merged~~`) removed, for state and identity. */
@@ -359,6 +383,112 @@ function linkOf(cells: string[], preferred: number[]): number | null {
   return null;
 }
 
+const FULL_PR_URL_RE = /https:\/\/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\/pull\/(\d{1,7})(?!\d)/;
+const FULL_PR_URLS_RE = new RegExp(FULL_PR_URL_RE.source, "g");
+
+/** One PR once, as first spelled: GitHub ignores case in a slug. */
+function distinctPrs(prs: OwnPr[]): OwnPr[] {
+  const seen = new Set<string>();
+  return prs.filter((p) => {
+    const key = `${p.repo.toLowerCase()}#${p.n}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function fullPrLinks(cell: string): OwnPr[] {
+  return distinctPrs([...cell.matchAll(FULL_PR_URLS_RE)].map((m) => ({ repo: m[1]!, n: Number(m[2]) })));
+}
+
+/** A cell's opening state word, emphasis or a link bracket before it allowed,
+ *  and the text after it. */
+function openingWord(cell: string): { word: string; rest: string } | null {
+  const body = plain(cell).replace(/^[_*[]+/, "");
+  const m = WORD_AT_START_RE.exec(body);
+  return m ? { word: m[1]!, rest: body.slice(m[0].length) } : null;
+}
+
+/** The target of a state word that is itself a link: `[merget](…)`. */
+const WORD_LINK_TARGET_RE = /^\]\([^()]*\)/;
+/** Spaces, punctuation and dates: no word, no bare number, no opening bracket.
+ *  `merged 24.10 ([#5](…))` names its own PR on real pages. */
+const NO_WORD_GAP_RE = /^(?:[^\p{L}\p{N}[]|\d{1,4}(?:[-.]\d{1,4}){1,2})*/u;
+/** Rule 1's `merged in #5`, `merget i #5`, for the first link alone. */
+const IN_WORD_RE = /^(?:in|i)\s+/i;
+const LINK_AT_START_RE = /^(?:\[[^[\]\n]*\]\([^()\s]*(?:[ \t]+"[^"\n]*")?\)|https:\/\/[^\s()]+)/;
+
+/** The links a state cell gives the row: those right after the state word that
+ *  opens the cell and set the state. A link past a word is a dependency. */
+function stateCellOwnPrs(cell: string, state: PrState): OwnPr[] {
+  const opening = openingWord(cell);
+  if (!opening || stateWord(opening.word) !== state) return [];
+  const skipGap = (t: string): string => t.replace(NO_WORD_GAP_RE, "");
+  const wordLink = WORD_LINK_TARGET_RE.exec(opening.rest);
+  const own = wordLink ? fullPrLinks(wordLink[0]) : [];
+  let rest = skipGap(skipGap(wordLink ? opening.rest.slice(wordLink[0].length) : opening.rest).replace(IN_WORD_RE, ""));
+  for (let next = LINK_AT_START_RE.exec(rest); next; next = LINK_AT_START_RE.exec(rest)) {
+    const prs = fullPrLinks(next[0]);
+    if (!prs.length) break;
+    own.push(...prs);
+    rest = skipGap(rest.slice(next[0].length));
+  }
+  return distinctPrs(own);
+}
+
+function ownPrsOf(cells: string[], prCol: number, landedCol: number, stateCol: number, state: PrState): OwnPr[] {
+  for (const i of [0, prCol, landedCol]) {
+    const own = i >= 0 ? fullPrLinks(cells[i] ?? "") : [];
+    if (own.length) return own;
+  }
+  return stateCol >= 0 ? stateCellOwnPrs(cells[stateCol] ?? "", state) : [];
+}
+
+/** The states a row's PR can contradict on GitHub. */
+export const CLAIMABLE_STATES: ReadonlySet<PrState> = new Set<PrState>(["open", "not-started", "planned"]);
+
+const CLAIM_DATE_RE = /^\s*\d{1,4}(?:[-.]\d{1,4}){1,2}/;
+const CLAIM_SEPARATOR_RE = /^(?:\s*[,:—–(]|\s+-(?:\s|$))/;
+
+/**
+ * Whether the text after a cell's state word says that word of the row's own PR:
+ * `[own PR link(s)] [date] [separator anything]`, nothing else. A ref to another
+ * PR means the word is about that PR, also right after the separator, the place
+ * `merged (#5)` puts the own one.
+ */
+function cellClaimsOwnPr(rest: string, own: readonly OwnPr[]): boolean {
+  const isOwnLink = (link: string): boolean => {
+    const prs = fullPrLinks(link);
+    return prs.length > 0 && distinctPrs([...own, ...prs]).length === own.length;
+  };
+  let t = rest.replace(/^[*_]+/, "");
+  const target = WORD_LINK_TARGET_RE.exec(t);
+  if (target) {
+    if (PR_URL_RE.test(target[0]) && !isOwnLink(target[0])) return false;
+    t = t.slice(target[0].length);
+  }
+  let leading: RegExpExecArray | null;
+  while ((leading = LINK_AT_START_RE.exec(t.trimStart()))) {
+    if (!isOwnLink(leading[0])) return false;
+    t = t.trimStart().slice(leading[0].length);
+  }
+  t = t.replace(CLAIM_DATE_RE, "");
+  const separator = CLAIM_SEPARATOR_RE.exec(t);
+  if (!separator) return !t.trim();
+  const after = t.slice(separator[0].length).trimStart();
+  const link = LINK_AT_START_RE.exec(after)?.[0] ?? "";
+  return isOwnLink(link) || !(scanRefs(after).refs[0]?.start === 0 || /^#\d/.test(after) || PR_URL_RE.test(link));
+}
+
+function claimedStateOf(cells: string[], state: PrState, rule: 0 | 1 | 2 | 3, own: readonly OwnPr[], stateCol: number, landedCol: number, prCol: number): PrState {
+  if (rule === 0 || !CLAIMABLE_STATES.has(state)) return state;
+  for (const i of [stateCol, landedCol, prCol, 0]) {
+    const opening = i >= 0 ? openingWord(cells[i] ?? "") : null;
+    if (opening && stateWord(opening.word) === state) return cellClaimsOwnPr(opening.rest, own) ? state : "unknown";
+  }
+  return "unknown";
+}
+
 function stateWord(word: string): Exclude<PrState, "unknown"> {
   const w = word.toLowerCase().replace(/\s+/g, " ");
   return STATE_WORDS.find(([s]) => s === w)![1];
@@ -377,8 +507,8 @@ function rowState(cells: string[], stateCol: number, landedCol: number): { state
   }
   if (stateCol >= 0) {
     // Emphasis or a link bracket may open the cell: `_åpen_`, `[merget](…)`.
-    const m = WORD_AT_START_RE.exec(plain(cells[stateCol] ?? "").replace(/^[_*[]+/, ""));
-    if (m) return { state: stateWord(m[1]!), rule: 2 };
+    const opening = openingWord(cells[stateCol] ?? "");
+    if (opening) return { state: stateWord(opening.word), rule: 2 };
   }
   for (let i = 0; i < cells.length; i++) {
     if (i === stateCol || i === landedCol) continue;
@@ -401,9 +531,18 @@ function decisionsOf(cells: string[], decisionsCol: number): string[] {
   return out;
 }
 
+export interface LedgerReadOptions {
+  /** Keep a row with no number too, its `pr` null, and read `parsedShare` and
+   *  `draws` over those rows; a header opening with a state word also counts as
+   *  the state column. For the GitHub check, which accounts for every row; a view
+   *  has nothing to draw for such a row. */
+  everyRow?: boolean;
+}
+
 /** Read one ledger table. */
-export function parseLedgerTable(headers: string[], rows: string[][], source: Ledger["source"] = "ledger"): Ledger {
-  const stateColumn = headerIndex(headers, STATE_HEADER_RE);
+export function parseLedgerTable(headers: string[], rows: string[][], source: Ledger["source"] = "ledger", opts: LedgerReadOptions = {}): Ledger {
+  const exactState = headerIndex(headers, STATE_HEADER_RE);
+  const stateColumn = exactState < 0 && opts.everyRow ? headerIndex(headers, STATE_HEADER_OPENS_RE) : exactState;
   const landedCol = headerIndex(headers, LANDED_HEADER_RE);
   const decisionsCol = headerIndex(headers, DECISIONS_HEADER_RE);
   const prCol = headerIndex(headers, PR_HEADER_RE);
@@ -416,9 +555,11 @@ export function parseLedgerTable(headers: string[], rows: string[][], source: Le
     const { slate, label } = slateOf(cells[0] ?? "", slateColumn);
     const link = linkOf(live, [prCol, stateColumn, landedCol]);
     const pr = slate ?? link;
-    if (pr === null) continue;
+    if (pr === null && !opts.everyRow) continue;
     const { state, rule } = source === "glance" ? { state: "planned" as const, rule: 0 as const } : rowState(live, stateColumn, landedCol);
-    out.push({ slate, link, pr, state, rule, decisions: decisionsOf(cells, decisionsCol), label, cells });
+    const ownPrs = ownPrsOf(live, prCol, landedCol, stateColumn, state);
+    const claimedState = claimedStateOf(live, state, rule, ownPrs, stateColumn, landedCol, prCol);
+    out.push({ slate, link, pr, ...(ownPrs.length ? { ownPr: ownPrs[0]!, ownPrs } : {}), state, rule, claimedState, decisions: decisionsOf(cells, decisionsCol), label, cells });
   }
   const known = out.filter((r) => r.state !== "unknown").length;
   const parsedShare = out.length ? known / out.length : 0;
@@ -456,13 +597,13 @@ function linesAbove(blocks: Block[], i: number): string[] {
 
 /** Every PR ledger on the page, in source order, inside component bodies
  *  (Lane, Fold, More …) too. */
-export function findLedgers(blocks: Block[]): Ledger[] {
+export function findLedgers(blocks: Block[], opts: LedgerReadOptions = {}): Ledger[] {
   const out: Ledger[] = [];
   const walk = (bs: Block[]): void => {
     bs.forEach((b, i) => {
       if (b.type === "component") walk(b.children);
       else if (b.type === "table") {
-        if (linesAbove(bs, i).some(opensWithLedgerLabel)) out.push(parseLedgerTable(b.headers, b.rows));
+        if (linesAbove(bs, i).some(opensWithLedgerLabel)) out.push(parseLedgerTable(b.headers, b.rows, "ledger", opts));
       }
     });
   };
@@ -472,7 +613,7 @@ export function findLedgers(blocks: Block[]): Ledger[] {
 
 /** The `### At a glance` table whose first column is `PR`: the planned slate
  *  of a page that has no ledger yet. */
-export function findGlanceLedger(blocks: Block[]): Ledger | null {
+export function findGlanceLedger(blocks: Block[], opts: LedgerReadOptions = {}): Ledger | null {
   let found: Ledger | null = null;
   const walk = (bs: Block[]): void => {
     let inGlance = false;
@@ -481,7 +622,7 @@ export function findGlanceLedger(blocks: Block[]): Ledger | null {
       if (b.type === "heading") inGlance = /^at a glance$/i.test(plain(b.content));
       else if (b.type === "component") walk(b.children);
       else if (b.type === "table" && inGlance && PR_HEADER_RE.test(plain(b.headers[0] ?? ""))) {
-        found = parseLedgerTable(b.headers, b.rows, "glance");
+        found = parseLedgerTable(b.headers, b.rows, "glance", opts);
       }
     }
   };
@@ -492,10 +633,10 @@ export function findGlanceLedger(blocks: Block[]): Ledger | null {
 /** The ledgers the page's views read: every ledger, else — on a `proposed`
  *  plan only — the glance table. A shipped plan with no ledger is not a slate
  *  of planned PRs, so it gets nothing. */
-export function pageLedgers(blocks: Block[], proposed = false): Ledger[] {
-  const ledgers = findLedgers(blocks);
+export function pageLedgers(blocks: Block[], proposed = false, opts: LedgerReadOptions = {}): Ledger[] {
+  const ledgers = findLedgers(blocks, opts);
   if (ledgers.length || !proposed) return ledgers;
-  const glance = findGlanceLedger(blocks);
+  const glance = findGlanceLedger(blocks, opts);
   return glance ? [glance] : [];
 }
 
