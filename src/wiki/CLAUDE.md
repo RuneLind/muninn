@@ -67,8 +67,8 @@ Pages and routes:
 - Fold keys are one flat namespace: a bare relPath is that page's attachment group, a card is `thread:<key>`, and each spelling means one thing.
 - `link` and `mention` are demoted: a new count reads `relationsCount`, `DEMOTED_RELATIONS` or `facetJiraKeys`, never `meta.issues` directly, which still holds demoted keys.
 - An unknown cost never renders as `$0`: an unpriced key shows as unknown, since `$0.00` says it was free.
-- The browser never calls huginn or claude-usage (tailnet viewers, mixed content under `tailscale serve`): the server computes the field and ships it.
-- A POST+SSE route returns every body check as a plain JSON 400 BEFORE `streamSSE`: after that commits a 200, the only way to report a bad request is an `app_error` nothing can tell from a model failure.
+- Never have the browser fetch huginn or claude-usage (tailnet viewers, mixed content under `tailscale serve`): the server computes the field and ships it. The one exception is a link for the viewer to follow (`CLAUDE_USAGE_PUBLIC_URL`).
+- Answer every request check on an SSE route as plain JSON with its status BEFORE `streamSSE`: after that commits a 200, the only way to report a bad request is an `app_error` nothing can tell from a model failure.
 - On the pod's read slice, a background fetch from the index build gates on `wikiToolsRegistered`: the service it would dial is on another machine's loopback. An owner-derived listing field is never served there (`includeWaits`: a count would tell a reader which group the owner is in), and a personal one is hidden (`movesYou`: every colleague would read it as waiting on them).
 - A field left on `toListing`'s rest spread goes to every caller unless stripped and opted in. A new reader control that calls a tool-half route joins `WIKI_READ_SLICE_HIDDEN_SELECTOR`: on the pod that route has no handler.
 - Run the suite from the repo root on a host whose `.env` carries `MUNINN_WIKI_READONLY`: the bunfig preload that clears it resolves against the CWD and is ignored silently when it cannot. From a subdirectory, pass `bun test --preload ../test/preload.ts`.
@@ -83,7 +83,7 @@ Pages and routes:
 - ⚠️ A `display` declaration on a class beats the user agent's own `[hidden]` rule, green through every unit test and caught by the e2e: `.wiki-prov-chain[hidden] { display: none; }` rides beside its `display: flex`.
 - `modalOpen()` reads every visible `[role="dialog"]` as a modal, so a non-modal panel with that role kills the reader's single-key shortcuts page-wide.
 - `isPathConfined` is LEXICAL, so a symlink inside the wiki that points outside it passes: the Stamp route adds realpath containment for that reason.
-- The older `fencedLineMask` and `frontmatterEndLine` (`wiki-integrate.ts`: a `~~~` fence counts, an unclosed opener runs to the end, an indented `---` ends the frontmatter) disagree with the reader's rule (`readerFencedLines`: backticks only, an unclosed opener stays prose; `frontmatterBodyLine`). The line-walking lint checks listed under Lint check 14 read the older one; checks 14 and 20 read the reader's.
+- The older `fencedLineMask` and `frontmatterEndLine` (`wiki-integrate.ts`: a `~~~` fence counts, an unclosed opener runs to the end, an indented `---` ends the frontmatter) disagree with the reader's rule (`readerFencedLines`: backticks only, an unclosed opener stays prose; `frontmatterBodyLine`). Read a check's own imports to tell which it uses: one can mix the two.
 
 ## Index
 
