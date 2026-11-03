@@ -1447,11 +1447,39 @@ const GH_NEEDS: WorkMapChecksBody["needs"] = [
   { kind: "followup", title: "Asks for two", pr: 2, state: "OPEN", mergedAt: null, asksForIt: true },
 ];
 
-/** Stub the checks GET; returns the request count. */
-async function stubChecks(page: Page, answer: (n: number) => WorkMapChecksBody): Promise<{ count: () => number }> {
+/** The client's `WORK_CHECKS_RETRY_MS`. */
+const CHECKS_RETRY_MS = 15_000;
+
+/**
+ * Stub the checks GET; returns the request count and `retry(n)`, one step of the
+ * client's retry chain under a fake clock: its n-1 timers are armed, one interval
+ * fires the next, and that fetch is number n.
+ *
+ * `count` moves when a request is SENT and the client arms its timer only after
+ * reading the answer, so a `runFor` in that gap fires nothing (CI, 2026-11-03:
+ * expected 4, received 3). Hence the wait on the armed timers. Install the clock first.
+ */
+async function stubChecks(page: Page, answer: (n: number) => WorkMapChecksBody): Promise<{ count: () => number; retry: (n: number) => Promise<void> }> {
   let n = 0;
+  await page.addInitScript((retryMs) => {
+    const w = window as unknown as { __checksRetriesArmed: number; setTimeout: (fn: () => void, ms: number) => number };
+    w.__checksRetriesArmed = 0;
+    const real = w.setTimeout;
+    w.setTimeout = (fn, ms) => {
+      if (ms === retryMs) w.__checksRetriesArmed += 1;
+      return real(fn, ms);
+    };
+  }, CHECKS_RETRY_MS);
   await page.route("**/api/wiki/work-map/checks*", (route) => route.fulfill({ json: answer(++n) }));
-  return { count: () => n };
+  const armed = () => page.evaluate(() => (window as unknown as { __checksRetriesArmed: number }).__checksRetriesArmed);
+  return {
+    count: () => n,
+    retry: async (expected) => {
+      await expect.poll(armed).toBe(expected - 1);
+      await page.clock.runFor(CHECKS_RETRY_MS);
+      await expect.poll(() => n).toBe(expected);
+    },
+  };
 }
 
 test("the spec server never reaches gh: the real checks GET answers disabled and the cell is absent", async ({ page }) => {
@@ -1548,10 +1576,7 @@ test("«refreshing» shows the count and the marks it has, and three more fetche
   await expect(cell.locator("b")).toHaveText("0");
   await expect(card.locator(".wiki-wm-ghnote.done")).toHaveCount(1);
   expect(stub.count()).toBe(1);
-  for (const n of [2, 3, 4]) {
-    await page.clock.runFor(15_000);
-    await expect.poll(() => stub.count()).toBe(n);
-  }
+  for (const n of [2, 3, 4]) await stub.retry(n);
   await expect(cell).toContainText("3 not checked");
   await expect(cell).not.toContainText("refreshing");
   await page.clock.runFor(60_000);
@@ -1567,10 +1592,7 @@ test("a `gh` that stays hung ends «not refreshed», muted with only merges mark
   const cell = card.locator('[data-wm-cell="github"]');
   await expect(cell).toContainText("refreshing");
   await expect(card.locator(".wiki-wm-ghnote.warn")).toHaveCount(1);
-  for (const n of [2, 3, 4]) {
-    await page.clock.runFor(15_000);
-    await expect.poll(() => stub.count()).toBe(n);
-  }
+  for (const n of [2, 3, 4]) await stub.retry(n);
   await expect(cell).toContainText("not refreshed");
   await expect(cell).not.toContainText("refreshing");
   await expect(cell.locator("b")).toHaveText("1");
@@ -1791,8 +1813,7 @@ test("focus stays on a GitHub link, a group's line and its +N more across a chec
   await card.locator('[data-wm-cell="github"]').click();
   const repaint = async (n: number) => {
     await page.evaluate(() => document.querySelector("#wikiWorkCard .wiki-wm-strip")!.setAttribute("data-before-repaint", ""));
-    await page.clock.runFor(15_000);
-    await expect.poll(() => stub.count()).toBe(n);
+    await stub.retry(n);
     await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
   };
   const link = card.locator('a[href="https://github.com/acme/gears/pull/370"]');
@@ -1820,8 +1841,7 @@ test("focus on the second link to one PR comes back to the second", async ({ pag
   const links = card.locator('a[href="https://github.com/acme/gears/pull/369"]');
   await expect(links).toHaveCount(2);
   await links.nth(1).focus();
-  await page.clock.runFor(15_000);
-  await expect.poll(() => stub.count()).toBe(2);
+  await stub.retry(2);
   await expect(card.locator('[data-wm-cell="github"]')).toHaveAttribute("title", /^2 checked/);
   await expect(links.nth(1)).toBeFocused();
 });
@@ -1843,16 +1863,13 @@ test("a checks answer that changes nothing leaves the DOM and a selection alone"
   });
   const selected = await page.evaluate(() => getSelection()!.toString());
   expect(selected.length).toBeGreaterThan(0);
-  await page.clock.runFor(15_000);
-  await expect.poll(() => stub.count()).toBe(2);
+  await stub.retry(2);
   await page.waitForTimeout(100);
   await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
   expect(await page.evaluate(() => getSelection()!.toString())).toBe(selected);
   // The last fetch ends the suffix: that one is a change, and paints.
-  await page.clock.runFor(15_000);
-  await expect.poll(() => stub.count()).toBe(3);
-  await page.clock.runFor(15_000);
-  await expect.poll(() => stub.count()).toBe(4);
+  await stub.retry(3);
+  await stub.retry(4);
   await expect(cell).not.toContainText("refreshing");
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
 });
@@ -1915,10 +1932,7 @@ test("a not refreshed answer: one line above the whole list, contradictions incl
   const cell = card.locator('[data-wm-cell="github"]');
   await expect(cell).toContainText("refreshing");
   await expect(cell).not.toHaveAttribute("title", /^From the last answer/);
-  for (const n of [2, 3, 4]) {
-    await page.clock.runFor(15_000);
-    await expect.poll(() => stub.count()).toBe(n);
-  }
+  for (const n of [2, 3, 4]) await stub.retry(n);
   await expect(cell).toContainText("not refreshed");
   await expect(cell).toHaveAttribute("title", /^From the last answer, not current · 5 checked/);
   await cell.click();
@@ -2162,8 +2176,7 @@ test("start views rendered during a retry chain add no fetch and no second timer
     await expect(cell).toContainText("refreshing");
     await page.waitForTimeout(100);
     expect(stub.count()).toBe(n);
-    await page.clock.runFor(15_000);
-    await expect.poll(() => stub.count()).toBe(n + 1);
+    await stub.retry(n + 1);
     await page.waitForTimeout(100);
     expect(stub.count()).toBe(n + 1);
   }
