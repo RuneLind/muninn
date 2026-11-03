@@ -332,6 +332,25 @@ async function openStart(page: Page, wiki: string): Promise<string[]> {
   return digests;
 }
 
+/** Wait out the card's second paint. The checks answer lands after the first paint, replaces every cell and, with
+ *  the check off on this server, drops the strip from 5 cells to 4, so a cell moves out from under a hover.
+ *  The first line is needed: before the first paint there is no `github` cell either. */
+async function checksPainted(page: Page) {
+  await expect(page.locator('#wikiWorkCard [data-wm-cell="decisions"]')).toBeAttached();
+  await expect(page.locator('#wikiWorkCard [data-wm-cell="github"]')).toHaveCount(0);
+}
+
+/**
+ * `openStart` for a test that reads the card outside a web-first assertion, on a wiki with a work map and the
+ * real checks answer. Never with a stubbed answer that keeps the `github` cell, or an answer held on purpose:
+ * `checksPainted` would wait out its timeout. A test on a stub waits for what its answer paints instead.
+ */
+async function openSettled(page: Page, wiki: string): Promise<string[]> {
+  const digests = await openStart(page, wiki);
+  await checksPainted(page);
+  return digests;
+}
+
 test("a wiki with a map shows the card and never asks for the digest", async ({ page }) => {
   const digests = await openStart(page, FRESH);
   const card = page.locator("#wikiWorkCard");
@@ -366,13 +385,11 @@ test("a wiki with a map shows the card and never asks for the digest", async ({ 
 
 test("a long Needs-you why is clamped to two lines and opens from its keyboard control", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
-  await openStart(page, LONG);
+  await openSettled(page, LONG);
   const card = page.locator("#wikiWorkCard");
   const text = card.locator(".wiki-wm-why-text");
   const more = card.locator(".wiki-wm-why-more");
   const lines = () => text.evaluate((el) => Math.round(el.clientHeight / parseFloat(getComputedStyle(el).lineHeight)));
-  // Polled: the checks answer repaints the card, and an element caught across
-  // that repaint is detached, with no computed line height.
   await expect.poll(lines).toBe(2);
   await expect.poll(() => text.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
   await expect(text).toHaveAttribute("title", LONG_WHY.replace("⟦plans/alpha.mdx⟧", "Alpha plan"));
@@ -403,7 +420,9 @@ test("a why that fits its two lines offers no expand control", async ({ page }) 
 
 test("selecting text in an opened why leaves it open", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
-  await openStart(page, LONG);
+  // Settled because a checks answer that changes the card wipes a selection on a real page too. That
+  // is tracked separately, and this test does not say a selection survives it.
+  await openSettled(page, LONG);
   const card = page.locator("#wikiWorkCard");
   const text = card.locator(".wiki-wm-why-text");
   await card.locator(".wiki-wm-why-more").click();
@@ -432,7 +451,7 @@ test("an opened why and focus on its control survive a ↻ poll repaint", async 
   });
   await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
   await page.clock.install();
-  await openStart(page, LONG);
+  await openSettled(page, LONG);
   const card = page.locator("#wikiWorkCard");
   await card.locator("#wikiWorkMapRefresh").click();
   await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
@@ -1553,7 +1572,7 @@ test("a themes map has no strip", async ({ page }) => {
 for (const width of [1280, 700]) {
   test(`a long unbroken title wraps inside the open list at ${width} wide`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
-    await openStart(page, STRIP_LONG);
+    await openSettled(page, STRIP_LONG);
     const card = page.locator("#wikiWorkCard");
     await card.locator('[data-wm-cell="decisions"]').click();
     const drill = card.locator(".wiki-wm-drill");
@@ -1981,7 +2000,7 @@ test("focus on a ✓ or a page link survives a ↻ poll repaint", async ({ page 
   });
   await page.route("**/api/wiki/work-map/refresh*", (route) => route.fulfill({ status: 202, json: { state: "started", startedAt: Date.now() } }));
   await page.clock.install();
-  await openStart(page, FRESH);
+  await openSettled(page, FRESH);
   const card = page.locator("#wikiWorkCard");
   await card.locator("#wikiWorkMapRefresh").click();
   await expect(page.locator("#wikiWorkMapStatus")).toContainText("Organizing…");
@@ -2239,7 +2258,7 @@ for (const theme of [
     await page.emulateMedia({ colorScheme: theme.scheme });
     await page.addInitScript((v) => localStorage.setItem("muninn-theme", v), theme.stored);
     await organizable(page);
-    await openStart(page, FRESH);
+    await openSettled(page, FRESH);
     const color = (sel: string) => page.locator(sel).evaluate((el) => getComputedStyle(el).color);
     const accent = await token(page, "--accent-light");
     const btn = page.locator("#wikiWorkMapRefresh");
@@ -2321,26 +2340,29 @@ for (const theme of THEMES) {
   });
 }
 
-/** Wait out the card's second paint. The checks answer lands about 5 ms after the first (measured),
- *  replaces every cell and, with the check off on this server, drops the strip from 5 cells to 4, so a cell moves out from under a hover. */
-async function checksPainted(page: Page) {
-  await expect(page.locator('#wikiWorkCard [data-wm-cell="decisions"]')).toBeAttached();
-  await expect(page.locator('#wikiWorkCard [data-wm-cell="github"]')).toHaveCount(0);
-}
+/** How often `cellPaint` reads, 50 ms apart, before it calls the card repainting for good. */
+const CELL_PAINT_READS = 40;
 
 /** All a cell's border, ring and shadow paint: what a state change has to move.
  *  `Locator.evaluate` finds the element, then reads it: a repaint between the two
- *  reads a detached element, whose computed style is all "" (CI, #787). */
+ *  reads a detached element, whose computed style is empty, so this paint's fields
+ *  would be "" and the outline " " (CI, #787). */
 async function cellPaint(cell: Locator) {
   await checksPainted(cell.page());
-  for (;;) {
-    const paint = await cell.evaluate((el) => {
-      if (!el.isConnected) return null;
-      const c = getComputedStyle(el);
-      return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor, borderWidth: c.borderTopWidth };
-    });
+  for (let read = 0; read < CELL_PAINT_READS; read++) {
+    const paint = await cell.evaluate(
+      (el) => {
+        if (!el.isConnected) return null;
+        const c = getComputedStyle(el);
+        return { outline: `${c.outlineStyle} ${c.outlineWidth}`, outlineColor: c.outlineColor, shadow: c.boxShadow, border: c.borderTopColor, borderWidth: c.borderTopWidth };
+      },
+      undefined,
+      { timeout: 5_000 },
+    );
     if (paint) return paint;
+    await cell.page().waitForTimeout(50);
   }
+  throw new Error(`cellPaint: ${cell} was detached on all ${CELL_PAINT_READS} reads, so the card keeps repainting`);
 }
 
 for (const theme of THEMES) {
@@ -2397,8 +2419,7 @@ for (const scheme of ["light", "dark"] as const) {
   test(`forced colors over a ${scheme} scheme: open differs from closed, and focus from open at rest`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.emulateMedia({ colorScheme: scheme, forcedColors: "active" });
-    await openStart(page, STRIP);
-    await checksPainted(page);
+    await openSettled(page, STRIP);
     expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
     const card = page.locator("#wikiWorkCard");
     const open = card.locator('[data-wm-cell="decisions"]');
