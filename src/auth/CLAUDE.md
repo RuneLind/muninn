@@ -812,13 +812,12 @@ three predicates, **one breaker**:
 | `/chat/ws` | cached `provider === "entra"` | a `close` event carries a CODE and nothing else |
 | `EventSource` | cached `provider === "entra"` | it exposes neither status nor body, so it cannot go through a fetch wrapper at all |
 
-**`provider === null` is two states and neither reloads.** It is "auth is off"
-AND "`/chat/me` has not answered yet", so on `ws`/`sse` the verdict there is
-`ignore` — the silent reconnect those instances had before this module existed.
-Banner'ing instead told readers of an auth-OFF instance, which has no sessions,
-that their session had expired on any permanent stream failure. ⚠️ The provider
-is cached ONCE, at init: a tab whose `/chat/me` failed both attempts keeps
-`null` for its whole lifetime, so it never reloads and never banners.
+**`provider === null` means auth is off, and it never reloads.** On `ws`/`sse`
+the verdict there is `ignore` — the silent reconnect those instances had before
+this module existed. Banner'ing instead told readers of an auth-OFF instance,
+which has no sessions, that their session had expired on any permanent stream
+failure. The page render writes in the session's provider, so a tab whose
+`/chat/me` failed both attempts still reloads and banners.
 
 **A refused UPGRADE carries no code.** The browser reports a 401'd handshake as
 an ordinary 1006 close, so the 4401 rule was structurally blind to it and the

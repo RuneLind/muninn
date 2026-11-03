@@ -19,9 +19,10 @@ import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 import { authedFetchScript, EXPIRED_BANNER_ID } from "./components/authed-fetch.ts";
 import type { AuthRole } from "../../auth/role.ts";
+import type { IdentityProvider } from "../../auth/introspect.ts";
 import { wsRetryScript, WS_STALLED_NOTICE_ID, WS_STALLED_NOTICE_TEXT } from "./components/ws-retry.ts";
 
-export async function renderChatPage(opts?: { role?: AuthRole | null }): Promise<string> {
+export async function renderChatPage(opts?: { role?: AuthRole | null; authProvider?: IdentityProvider | null }): Promise<string> {
   const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle, jiraCardBundle] =
     await Promise.all([
       webFormatClientScript(),
@@ -149,7 +150,7 @@ export async function renderChatPage(opts?: { role?: AuthRole | null }): Promise
           and are dispositioned in authed-fetch.test.ts instead). A call site
           evaluated before the definition would be a ReferenceError on the one
           path whose job is to degrade gracefully. */ ""}
-    ${authedFetchScript()}
+    ${authedFetchScript(opts?.authProvider ?? null)}
     ${helpersScript}
     ${agentStatusScript()}
     ${requestProgressScript()}
