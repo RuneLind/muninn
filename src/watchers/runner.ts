@@ -818,8 +818,8 @@ async function sendToSlackChannels(botName: string, markdown: string, channels: 
  * It began life scoped to the four wiki checkers, for the readonly-guard test —
  * whose claim is about which checker a run REACHES, something an empty return
  * value cannot show, since every checker degrades to `[]` on a degraded bot
- * config. A `mock.module` spy would leak across the `bun test src/watchers/`
- * chunk into the gardener/linter tests beside it, so the seam is a parameter.
+ * config. A `mock.module` spy would leak across its `bun test`
+ * process into the tests beside it, so the seam is a parameter.
  *
  * It now covers ALL EIGHT because the four without a seam had no dispatch
  * coverage at all: a refactor deleted `case "email"` outright and every tick

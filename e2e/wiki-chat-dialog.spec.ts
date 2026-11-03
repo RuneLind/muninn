@@ -4,8 +4,8 @@
  * Three things no unit test can prove, and all three are how this surface actually
  * broke:
  *   1. **The dialog is opaque.** Its `background` was
- *      `var(--bg-elevated, var(--bg-secondary))` and NEITHER token is defined on
- *      /wiki (`--bg-elevated` exists only in the chat page's own styles), so the
+ *      `var(--bg-elevated, var(--bg-secondary))` and NEITHER token was defined on
+ *      /wiki then (`--bg-elevated` existed only in the chat page's own styles), so the
  *      whole declaration was invalid and the panel rendered fully TRANSPARENT with
  *      the article text showing through it. A pure test cannot see a computed
  *      style; only a browser can.

@@ -897,7 +897,7 @@ type, off the runner's `catch`:
 - **`handleWatcherFailure` is the whole path in one call and NEVER throws** — the run
   already failed and the catch must still advance `last_run_at`.
 - **Every DB seam is a parameter, not a module mock.** A `mock.module` test here
-  invalidates `db/*` for the whole `bun test src/watchers/` chunk; the first cut did
+  invalidates `db/*` for its whole `bun test` process; the first cut did
   exactly that and silently broke six of `x.test.ts`'s assertions. Same call
   `runChecker` makes for `WatcherCheckers`.
 - **Surface:** `GET /api/watchers` merges both snapshot keys into the one

@@ -6,7 +6,7 @@
  * pulled `x.ts`/`anthropic.ts`/the gardeners into any test that touches run
  * health. That is not merely heavy: a `mock.module` test loading this graph
  * evaluates `x.ts` with the REAL logger bound, and `x.test.ts` (running later in
- * the same `bun test src/watchers/` process) then mocks `../logging.ts` too late
+ * the same `bun test` process) then mocks `../logging.ts` too late
  * to rebind it — six of its assertions went silently log-less. Keeping the
  * formatter free of imports is what lets the health module stay a leaf too.
  *
