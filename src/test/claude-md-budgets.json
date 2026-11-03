@@ -2,14 +2,12 @@
   "entries": {
     "src/ai/CLAUDE.md": 40709,
     "src/auth/CLAUDE.md": 92445,
-    "src/dashboard/CLAUDE.md": 256197,
     "src/gardener/CLAUDE.md": 60026,
     "src/summaries/CLAUDE.md": 80880,
     "src/vimeo/CLAUDE.md": 97139,
     "src/youtube/CLAUDE.md": 76991
   },
   "pending": [
-    "src/dashboard",
     "src/vimeo",
     "src/auth",
     "src/summaries",
