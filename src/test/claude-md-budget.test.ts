@@ -114,7 +114,7 @@ const TEXT_EXTENSIONS = new Set(
 /** The distinct `@path` tokens Claude Code would scan, without their #fragment or trailing punctuation. */
 function atPathsIn(text: string): string[] {
   // Claude Code drops a leading BOM only along with frontmatter. Otherwise it reaches the lexer, so `<BOM>~~~` opens no fence.
-  const bare = text.replace(/^\uFEFF/, "");
+  const bare = withoutBom(text);
   const body = FRONTMATTER.test(bare) ? bare.replace(FRONTMATTER, "") : text;
   const paths = scannedTextIn(lex(body))
     .flatMap((scanned) => [...scanned.matchAll(AT_PATH)])
@@ -136,8 +136,11 @@ function isSection(token: Tokens.Generic): boolean {
   return token.type === "heading" && /^ {0,3}#{2,3}(?:\s|$)/.test(token.raw);
 }
 
+/** The BOM rule is Claude Code's import read. A heading or an index line is the same with or without one. */
+const withoutBom = (text: string) => text.replace(/^\uFEFF/, "");
+
 function headingsIn(text: string): string[] {
-  return lex(text)
+  return lex(withoutBom(text))
     .filter((token) => isSection(token) && token.text !== "")
     .map((token) => token.text as string);
 }
@@ -157,7 +160,7 @@ function itemLines(list: Tokens.Generic): string[] {
 
 /** The list items under `## Index`, up to the next heading of any level, without a trailing ` [trap]`. */
 function indexLinesIn(text: string): string[] {
-  const tokens = lex(text);
+  const tokens = lex(withoutBom(text));
   const start = tokens.findIndex((token) => isSection(token) && token.depth === 2 && token.text === "Index");
   if (start < 0) return [];
   const rest = tokens.slice(start + 1);
@@ -523,6 +526,13 @@ describe("index", () => {
     expect(check({ "src/old/CLAUDE.md": `## Index\n\n${old}` })).toEqual([]);
   });
 
+  test("a leading BOM hides no heading from the index", () => {
+    expect(check(indexed("\uFEFF## First\n", "- First\n"))).toEqual([]);
+    expect(check(indexed("\uFEFF## First\n\n## Other\n", "- Other\n"))).toHaveLength(1);
+    expect(check(indexed("## First\n\n\uFEFF## Not a heading\n", "- First\n"))).toEqual([]);
+    expect(check({ "src/foo/CLAUDE.md": "\uFEFF## Index\n\n- One\n", "src/foo/reference/notes.md": "## One\n" })).toEqual([]);
+  });
+
   test("reference/ without notes.md is not indexed", () => {
     expect(check({ "src/foo/CLAUDE.md": "x\n", "src/foo/reference/other.md": "## One\n" })).toEqual([]);
   });
@@ -657,7 +667,7 @@ describe("@-import, as Claude Code's lexer reads the file", () => {
     expect(check({ "CLAUDE.md": "\uFEFF---\nx: 1\n---\n~~~\n@a.md\n~~~\n" }, A)).toEqual([]);
   });
 
-  test("the real-tree read keeps a leading BOM, so the rule reaches a tracked file", async () => {
+  test("the file read keeps a leading BOM, so the rule reaches a file on disk", async () => {
     const dir = testTempDirSync(join(tmpdir(), "claude-md-bom-"));
     await Bun.write(join(dir, "src/zz/CLAUDE.md"), "\uFEFF~~~\n@a.md\n~~~\n");
     await Bun.write(join(dir, "src/zz/a.md"), "x\n");
