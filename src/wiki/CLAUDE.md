@@ -21,7 +21,7 @@ Writing to a wiki:
 
 - Anything writing to a wiki joins the per-wiki write queue (`runWikiWriteExclusive`, `queue.ts`, realpath-keyed on the root), with the queued section spanning read→CAS→write→`log.md`. `log.md` is wiki-global, so every read-modify-writer of it serializes on this one chain. The bucket mirror stays out: it is its root's only writer.
 - The commit tail runs OUTSIDE the queue: push is bounded only by `GIT_NETWORK_TIMEOUT_MS` (60 s), and an unreachable origin would otherwise park every writer for that minute.
-- Two locks, in this order: the in-process queue first, the file lock (`.wiki-write.lock`) inside it, released before the section returns. The file lock outside the queue is a deadlock shape, not a wait.
+- Two locks: the in-process queue, then the file lock (`.wiki-write.lock`) inside it, released before the section returns; outside the queue it is a deadlock shape. `applyWikiProposal` and `writePlanQueue` hold only the queue, on purpose.
 - Joining both queues, the commit queue (`runExclusiveQueued`) comes first and the per-wiki write queue second, with network I/O outside both, so a hung push can never park a page write.
 - A file `writeWikiPage` cannot carry (its path confinement admits `.md`/`.mdx` only) repeats the guard and the per-wiki queue rather than routing around them: `plans/queue.yaml` the sha256 CAS too, `.work-map.json` the file lock.
 - Every programmatic writer passes `refresh: true` to `getWikiIndex` after it lands.
@@ -35,16 +35,16 @@ Writing to a wiki:
 - Only a stale-fix commit may carry a `[stale-check] ` subject (`STALE_CHECK_COMMIT_PREFIX`): the commit becomes invisible to `gitTouchedMs` and the changed-page rule, so a hand edit under it is hidden.
 - A spawned Bun child passes `--no-env-file` and an allowlisted env: without the flag Bun reloads muninn's `.env` from its working directory, and every secret the allowlist left out comes back.
 - Code enumerating a wiki's dirty files skips `.wiki-write.lock` and `.wiki-stamp.*.tmp` through `isWikiWriteArtifact`: the lock is taken on every registered root, and not every root's `.gitignore` names them.
-- A lint check writes nothing: `lintWiki(index, deps)` stays pure and a `fix` is a payload. What turns it into rows, and what happens on Accept, is `src/gardener/CLAUDE.md`.
+- A lint check writes nothing: `lintWiki(index, deps)` only reads and a `fix` is a payload. Rows and Accept: `src/gardener/CLAUDE.md`.
 - The queue's full rationale is in `src/gardener/CLAUDE.md`, and the sync loop's locking and deferral contract in `src/sync/CLAUDE.md`, stated once.
 
 Read-only, two independent switches, neither implying the other:
 
-- `MUNINN_WIKI_READONLY` is the instance (`isWikiReadonly()`), and forbids page content writes. `WIKI_READONLY_ROOTS` is one root (`isReadonlyWikiRoot(root)`), and forbids those plus every model call, web reach and chat seed on it. `SCHEDULER_ENABLED=false` is no substitute: every dashboard route stays registered.
-- A content-write seam takes an injectable `isReadonly` defaulting to `isWikiReadonly()` and returns `forbidden` before it opens anything, so a call site added later is guarded by default.
-- A refusal is 403 with `{error, readonly: true}`, never collapsed into the generic `error`: a refusal is not a failure.
-- A mutation route refuses as its FIRST statement (`readonlyRefusal`) and `log.info`s the refusal with its route path.
-- A `?wiki=`-steerable route that spends a model call on page content or ships it off the machine carries the per-wiki prologue (`egressRefusal`) immediately after the entry resolves and BEFORE bot resolution, the index read, the DB thread, the `/agents` run registration and the one-shot. It keys on the resolved ROOT, entry or no entry.
+- `MUNINN_WIKI_READONLY` is the instance (`isWikiReadonly()`), and forbids page content writes. `WIKI_READONLY_ROOTS` is one root (`isReadonlyWikiRoot(root)`), and forbids those plus any model call, web reach or chat seed on its page content: find and provenance still answer. `SCHEDULER_ENABLED=false` is no substitute: every route stays registered.
+- A content-write seam takes injectable `isReadonly ?? isWikiReadonly` and `isReadonlyRoot ?? isReadonlyWikiRoot` and returns `forbidden` before it opens anything, so a later call site is guarded.
+- A refusal is 403 with `{error, readonly: true}`, never the generic `error`: a refusal is not a failure. Digest alone: `{digest: null, readonly: true, reason}`.
+- A mutation route refuses before any DB, model or CAS work (`readonlyRefusal`, instance only, plus a root check above any status CAS: a later 403 strands the row) and `log.info`s it with its route path. Exempt: `proposals/:id/reject`, `/remember`, `/reindex`.
+- A `?wiki=`-steerable route that spends a model call on page content or ships it off-machine carries the per-wiki prologue (`egressRefusal`) right after the entry resolves, BEFORE bot resolution, the index read, the DB thread, the `/agents` run registration and the one-shot. It keys on the ROOT: `WIKI_DIR` is guarded, an unknown name is not.
 - Non-HTTP surfaces carry the same check, since a scheduled run spends exactly what a route would. A wiki-drafting watcher type joins `WIKI_DRAFTING_WATCHER_TYPES`, which both guards read.
 - Neither switch gates git: `commitWikiChange` and the `wiki-committer` stay open, or the repo-sync loop stops on the read-only instance.
 - Enforcement never reads `WikiRegistryEntry.readonly`: that flag is for the client half and the `/models` card, and a stale memo must not be able to open the guard.
@@ -52,17 +52,17 @@ Read-only, two independent switches, neither implying the other:
 - Compare roots through `sameWikiRoot`, never a re-spelling. Matching is root-exact, never a prefix: a wiki at a subdirectory of a listed root is NOT covered, so list each root you mean.
 - A root muninn should only READ must ALSO be listed in `WIKI_READONLY_ROOTS`: registration alone makes it writable and model-reachable over HTTP.
 - A refusal's copy never names a filesystem path: it lands verbatim in a 403 body on a reader-facing API.
-- In the client, a write control joins `WIKI_READONLY_BLOCKED_SELECTOR` and an egress control `WIKI_READONLY_EGRESS_SELECTOR`, by the SAME attributes its delegated handler keys on. Folding egress ids into the shared list would dim Share and Fact check on a read-only instance, where the server serves both. A control activated from `mousedown` or the keyboard also joins `WIKI_READONLY_MOUSEDOWN_SELECTOR` or `WIKI_READONLY_KEYDOWN_SELECTOR`: a mousedown delegate fires BEFORE `click` and has already spent the call.
+- In the client, a write control joins `WIKI_READONLY_BLOCKED_SELECTOR` (not a panel's `cancel`: that strands it) and an egress control `WIKI_READONLY_EGRESS_SELECTOR`, by the attributes its delegated handler keys on. Egress ids in the shared list would dim Share and Fact check on a read-only instance, which serves both. An egress control activated from `mousedown` or the keyboard also joins `WIKI_READONLY_MOUSEDOWN_SELECTOR` or `WIKI_READONLY_KEYDOWN_SELECTOR` (read-only wiki only: a write control activates on click): a mousedown delegate fires BEFORE `click` and spends the call.
 - State the refusal with the body class, not a per-render `disabled` sweep: the gardener strip and the answer pane replace their innerHTML on every poll or SSE event, so state written into a button is gone by the next paint.
 
 Pages and routes:
 
-- Every page-scoped action takes `relPath` and resolves through `resolvePageRef` (relPath first, the stem name as the fallback, and only onto an unambiguous stem): `index.resolve(name)` is first-registration-wins, and a name-keyed action wrote into another page with the same stem.
+- Every page-scoped action takes `relPath`: a name-keyed action wrote into a same-stem page. `resolvePageRef` guards a shared stem only for a STALE relPath; a name alone is first-registration-wins. Stamp, Felles, Series and `/stale/apply` use `index.resolveRelPath`, no stem fallback.
 - One path spelling: every site that stores a page path or compares two goes through `normalizeRel`, and the server's work keys through `normalizeWorkedPath`. A key looked up against the listing uses its `relPath` spelling, never the lowercased `normalizeRelPath`, which zeroes the match on any path with a capital.
 - Every row emitter carries `data-relpath` beside `data-page`, and relPaths are stored, never names: a name resolves to whichever same-stem page registered first.
-- `displayTitle` is a second field, never a rewrite of `title`, which decides what a `[[wikilink]]` resolves to, the H1 strip and the Similar query. Whatever shows a page in a list goes through `displayTitleOf`.
-- Rank and date a page through `pageAddedMs`/`pageTimeMs`, never raw `mtimeMs`/`gitCreatedMs`: a mechanical pass moves every mtime in the wiki.
-- `work` moves ORDER and placement only, never series identity: `seriesDateSignal`, heads, `lint-series.ts` and Related's identity never read it.
+- `displayTitle` is a second field, never a rewrite of `title`, which decides what a `[[wikilink]]` resolves to, the H1 strip and the Similar query. Whatever shows, searches or sorts a page list goes through `displayTitleOf` (Atlas: `atlasLabel`).
+- A reader list or rank dates a page through `pageAddedMs`/`pageTimeMs`, never raw `mtimeMs`/`gitCreatedMs`: a mechanical pass moves every mtime. Series order is `seriesDateSignal`: `pageTimeMs` reordered 23 of 30 folds.
+- `work` moves ORDER and placement, `worked`/`workedMs` ORDER, never series identity: `seriesDateSignal`, heads, `lint-series.ts` and Related's identity never read them, or a cold memo proposes another head. Absence falls back per page.
 - Every consumer that ranks or targets pages reads `culled`. The series census deliberately includes culled pages: a culled member can be the series head and name the fold.
 - Fold keys are one flat namespace: a bare relPath is that page's attachment group, a card is `thread:<key>`, and each spelling means one thing.
 - `link` and `mention` are demoted: a new count reads `relationsCount`, `DEMOTED_RELATIONS` or `facetJiraKeys`, never `meta.issues` directly, which still holds demoted keys.
@@ -77,9 +77,9 @@ Pages and routes:
 
 - ⚠️ The fence on `.wiki-write.lock` is one-sided: `wiki-stamp` writes an empty lockfile and unlinks unconditionally, so it can drop a lock muninn holds once that lock has aged past `WIKI_LOCK_STALE_MS` (10 s). The Stamp route makes that reader-triggerable.
 - ⚠️ `WIKI_STAMP_ROOTS` (claude-usage) and muninn's registered roots must name the SAME directories. The lock is per root: for a wiki at a strict subdirectory of a stamp root, the stamper locks the parent, muninn locks the child, and both writes proceed.
-- ⚠️ A DIRTY page's mtime is trusted, so a mechanical frontmatter write can make every page it touches read as edited minutes ago. `buildWikiGitDates` drops a tracked, modified page from `dirty` only when its `HEAD` blob compares `metadata-only` (only `METADATA_ONLY_FRONTMATTER_KEYS` lines differ) or `identical`: a differing key outside that set is an `edit`.
-- ⚠️ The reader has THREE URL writers (`writeProjectParam`, the tab click's `replaceState(currentStartUrl())`, `goToStart`), and only the first keeps `location.hash`: a property fixed on one is not a property of the reader.
-- ⚠️ `isMetaStem` is case-sensitive on `CLAUDE` alone. Feed it `pageStemOf`, which strips ANY extension: `wikiPageStem` strips only `.md`/`.mdx`, so `plans/index.html` passes as an ordinary page.
+- ⚠️ A DIRTY page's mtime is trusted, so a mechanical frontmatter write makes every page it touches read as just edited. `buildWikiGitDates` drops a tracked, modified page from `dirty` only when its `HEAD` blob compares `metadata-only` (only `METADATA_ONLY_FRONTMATTER_KEYS` lines differ) or `identical`: a differing key outside that set is an `edit`, so a new machine-written key joins it. Commits step back likewise: per-call writes dated 93 of 139 series members to one morning.
+- ⚠️ `wiki-browser.ts` writes its URL at many sites (`rg 'history\.'`), and some drop `location.hash` (the tab click, `goToStart`): a property fixed on one is not a property of the reader.
+- ⚠️ `isMetaStem` is case-sensitive on all three stems. Feed it `pageStemOf`, which strips ANY extension: `wikiPageStem` strips only `.md`/`.mdx`, so `plans/index.html` passes as an ordinary page.
 - ⚠️ A `display` declaration on a class beats the user agent's own `[hidden]` rule, green through every unit test and caught by the e2e: `.wiki-prov-chain[hidden] { display: none; }` rides beside its `display: flex`.
 - `modalOpen()` reads every visible `[role="dialog"]` as a modal, so a non-modal panel with that role kills the reader's single-key shortcuts page-wide.
 - `isPathConfined` is LEXICAL, so a symlink inside the wiki that points outside it passes: the Stamp route adds realpath containment for that reason.
