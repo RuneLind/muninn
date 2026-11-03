@@ -377,12 +377,19 @@ describe("sparkValues", () => {
       const at = html.indexOf(`data-effort-id="${id}"`);
       return html.slice(html.indexOf("<svg", at), html.indexOf("</svg>", at));
     };
-    expect(svg("z").match(/<rect class="zero"[^>]*height="1\.0"/g)).toHaveLength(28);
+    expect(svg("z").match(/<rect class="zero"[^>]*height="2\.0"/g)).toHaveLength(28);
     expect(svg("z")).not.toMatch(/<rect x/);
     expect(svg("y").match(/<rect class="zero"/g)).toHaveLength(26);
     expect(svg("y")).toContain('<rect x="27.1" y="0.0" width="0.8" height="24.0"/>');
-    // A small day keeps its 3-unit floor.
     expect(svg("y")).toContain('<rect x="26.1" y="18.0" width="0.8" height="6.0"/>');
+  });
+  test("a small day keeps a floor taller than a zero bar", () => {
+    const m = map({ efforts: [effort("y", "active", ["plans/a.mdx"], { daily: [{ day: "2026-10-29", commits: 100, sessions: 0 }, { day: "2026-10-28", commits: 1, sessions: 0 }] })], needsYou: [], summary: "" });
+    expect(card(m)).toContain('<rect x="26.1" y="20.0" width="0.8" height="4.0"/>');
+  });
+  test("a compact row's name carries the whole name in a tooltip, since it may be cut to one line", () => {
+    const m = map({ efforts: [effort("p", "active", ["plans/a.mdx"]), effort("k", "active", ["plans/a.mdx"], { parent: "p", name: 'a "long" name' })], needsYou: [], summary: "" });
+    expect(card(m)).toMatch(/wiki-wm-kid" data-effort-id="k"><[^>]*class="wiki-wm-effort-name"[^>]*title="a &quot;long&quot; name"/);
   });
 });
 

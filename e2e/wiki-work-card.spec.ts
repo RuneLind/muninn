@@ -49,6 +49,8 @@
  *     horizontal overflow, an effort moving between columns when the check or a ✓
  *     or an adopt says so, focus following it, the sparkline under forced colors,
  *     and from that width heads that take no focus or key, with each column named.
+ *     Beside a tall Waiting on you the other columns land right under each other,
+ *     and a compact row is two lines, all measured.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -118,6 +120,10 @@ const BOARD = "e2e-wm-board";
 const BOARD_ADOPT = "e2e-wm-board-adopt";
 /** An adopt adds an unrelated page to it. */
 const BOARD_QUIET = "e2e-wm-board-quiet";
+/** A tall Waiting on you beside short columns, and a board with nothing waiting. */
+const BOARD_TALL = "e2e-wm-board-tall";
+const BOARD_NO_WAIT = "e2e-wm-board-no-wait";
+const KID_LONG_NAME = "a rather long sub-effort name that runs well past the width of its column";
 const GH_DROP_RUN = Date.now() - 2 * 3_600_000;
 /** No break opportunity anywhere. */
 const LONG_TOKEN = "Aa".repeat(90);
@@ -243,6 +249,34 @@ function boardMapJson(wiki: string, runAtMs: number): string {
   return JSON.stringify(m);
 }
 
+function boardTallMapJson(wiki: string, runAtMs: number, waits: boolean): string {
+  const ids = waits ? Array.from({ length: 9 }, (_, i) => `wait-${i}`) : [];
+  const m = JSON.parse(mapJson(wiki, runAtMs, ids.map((id) => ({ title: `Settle ${id}`, kind: "followup", why: "", action: "Pick one", pages: [], effort: id })))) as Record<string, unknown>;
+  m.summary = "";
+  const today = new Date().toISOString().slice(0, 10);
+  const daily = [{ day: today, commits: 2, sessions: 0 }];
+  const e = (id: string, state: string, page: string, extra: Record<string, unknown> = {}) => ({
+    id, name: `${id} work`, aliases: [], oneLine: `The ${id} effort.`, state, pages: [{ id: page, role: "plan" }], why: "", confidence: 1, next: "", related: [], daily: [], ...extra,
+  });
+  m.efforts = [
+    ...ids.map((id) => e(id, "active", "plans/gamma.mdx", { oneLine: "A one line long enough to take several lines in a narrow column, as real ones do.", next: "Decide it." })),
+    ...(waits
+      ? [
+          e("kids", "active", "plans/waits.mdx", { daily }),
+          e("kid-two", "active", "plans/waits.mdx", { parent: "kids", name: "two pills", daily }),
+          e("kid-long", "active", "plans/waits.mdx", { parent: "kids", name: KID_LONG_NAME, daily }),
+          e("kid-idle", "active", "plans/waits.mdx", { parent: "kids", name: "no activity" }),
+        ]
+      : []),
+    e("moving-a", "active", "plans/gamma.mdx", { daily }),
+    e("moving-b", "active", "plans/gamma.mdx"),
+    e("cool", "cooling", "plans/beta.mdx"),
+    e("still", "quiet", "plans/gamma.mdx"),
+    e("over", "shipped", "plans/gamma.mdx"),
+  ];
+  return JSON.stringify(m);
+}
+
 let server: ChildProcess | undefined;
 const roots: Record<string, string> = {};
 
@@ -326,6 +360,11 @@ test.beforeAll(async () => {
     await writeFile(path.join(roots[n]!, "plans/waits.mdx"), waitPage("Waits", ["O1"], dayBefore(now, 4)), "utf8");
     await writeFile(path.join(roots[n]!, ".work-map.json"), boardMapJson(n, now - 2 * HOUR), "utf8");
   }
+  for (const [n, waits] of [[BOARD_TALL, true], [BOARD_NO_WAIT, false]] as const) {
+    await seedWiki(n, null);
+    await writeFile(path.join(roots[n]!, "plans/waits.mdx"), waitPage("Waits", ["O1"], dayBefore(now, 4)), "utf8");
+    await writeFile(path.join(roots[n]!, ".work-map.json"), boardTallMapJson(n, now - 2 * HOUR, waits), "utf8");
+  }
   await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -337,10 +376,10 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP, BOARD, BOARD_ADOPT, BOARD_QUIET].join(","),
+      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP, BOARD, BOARD_ADOPT, BOARD_QUIET, BOARD_TALL, BOARD_NO_WAIT].join(","),
       WIKI_ANSWER_OWNER: "Test Owner (T000001)",
       WIKI_ANSWER_GROUPS: "utvikler=T000001",
-      WIKI_EXTRA: [BOARD, BOARD_ADOPT, BOARD_QUIET, GH, GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE, GH_ADOPT, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [BOARD, BOARD_ADOPT, BOARD_QUIET, BOARD_TALL, BOARD_NO_WAIT, GH, GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE, GH_ADOPT, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -657,6 +696,163 @@ test("a resize across the five-track width folds and unfolds with no repaint", a
   await expect.poll(() => columnsShown(page)).toEqual(["you", "moving"]);
   await expect(card.locator("[data-before-resize]")).toHaveCount(1);
 });
+
+// Fix round 1 batch 3: where the columns land beside a tall Waiting on you.
+const COL_GAP = 10;
+
+/** Each column's box against the board's top-left, and where its own content ends. */
+async function boardGeometry(page: Page) {
+  return boardCard(page).locator(".wiki-wm-board").evaluate((board) => {
+    const b = board.getBoundingClientRect();
+    const cols = Array.from(board.querySelectorAll("details.wiki-wm-col")).map((c) => {
+      const r = c.getBoundingClientRect();
+      const kids = Array.from(c.children).filter((k) => k.tagName === "SUMMARY" || k.checkVisibility());
+      return { id: c.getAttribute("data-wm-lane")!, left: r.left - b.left, top: r.top - b.top, bottom: r.bottom - b.top, slack: r.bottom - Math.max(...kids.map((k) => k.getBoundingClientRect().bottom)) };
+    });
+    return { height: b.height, cols: Object.fromEntries(cols.map((c) => [c.id, c])) };
+  });
+}
+
+/** Waiting on you alone in the first track (tracks > 1), the rest row by row in the
+ *  others, each row a gap below the tallest box above it, and nothing under the last. */
+async function expectBoardLayout(page: Page, tracks: number, label: string): Promise<void> {
+  const g = await boardGeometry(page);
+  const at = (id: string) => g.cols[id]!;
+  console.log(`${label}: ${COLUMN_IDS.map((id) => `${id} ${Math.round(at(id).top)}`).join(", ")}; board ${Math.round(g.height)}`);
+  expect(at("you").left, `${label}: you left`).toBeCloseTo(0, 0);
+  expect(at("you").top, `${label}: you top`).toBeCloseTo(0, 0);
+  const inRows = tracks === 1 ? COLUMN_IDS.map((id) => [id]) : chunk(COLUMN_IDS.slice(1), tracks - 1);
+  let top = 0;
+  for (const row of inRows) {
+    for (const id of row) expect(Math.abs(at(id).top - top), `${label}: ${id} top ${at(id).top}, wanted ${top}`).toBeLessThanOrEqual(1);
+    if (tracks > 1) for (const id of row) expect(at(id).left, `${label}: ${id} beside Waiting on you`).toBeGreaterThan(0);
+    top = Math.max(...row.map((id) => at(id).bottom)) + COL_GAP;
+  }
+  const lowest = Math.max(...COLUMN_IDS.map((id) => at(id).bottom));
+  expect(Math.abs(g.height - lowest), `${label}: board ${g.height}, lowest column ${lowest}`).toBeLessThanOrEqual(1);
+  // A column ends where its content does (a tile's own bottom margin is inside it).
+  for (const id of COLUMN_IDS) expect(at(id).slack, `${label}: ${id} is stretched`).toBeLessThanOrEqual(9);
+}
+
+function chunk<T>(xs: readonly T[], n: number): T[][] {
+  return Array.from({ length: Math.ceil(xs.length / n) }, (_, i) => xs.slice(i * n, (i + 1) * n));
+}
+
+for (const [label, width, f, tracks] of [
+  ["1280", 1280, false, 2],
+  ["1512", 1512, false, 3],
+  ["1728", 1728, false, 4],
+  ["1920", 1920, false, 5],
+  ["1280 under F", 1280, true, 5],
+  ["700", 700, false, 1],
+] as const) {
+  test(`beside a tall Waiting on you at ${label}, the other columns land right under each other`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openStart(page, BOARD_TALL);
+    await expect(boardCard(page).locator(".wiki-wm-tile").first()).toBeAttached();
+    if (f) {
+      await page.keyboard.press("f");
+      await expect.poll(() => trackCount(page)).toBe(5);
+    }
+    expect(await trackCount(page)).toBe(tracks);
+    await expectBoardLayout(page, tracks, `tall ${label}`);
+    await expectNoOverflow(page, label);
+  });
+}
+
+for (const [width, tracks] of [[1280, 2], [1512, 3], [700, 1]] as const) {
+  test(`at ${width}, a Waiting on you the reader folds leaves no gap`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openStart(page, BOARD_TALL);
+    const you = boardCard(page).locator('[data-wm-lane="you"]');
+    await you.locator("> summary").click();
+    await expect(you).not.toHaveAttribute("open", "");
+    await expectBoardLayout(page, tracks, `folded ${width}`);
+  });
+  test(`at ${width}, an empty Waiting on you leaves no gap`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openStart(page, BOARD_NO_WAIT);
+    await expect(boardCard(page).locator('[data-wm-lane="you"] .wiki-wm-col-none')).toBeVisible();
+    await expectBoardLayout(page, tracks, `empty ${width}`);
+  });
+}
+
+for (const width of [600, 420]) {
+  test(`at a ${width} window the track fits the board, however narrow`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openStart(page, BOARD_TALL);
+    const cols = boardCard(page).locator(".wiki-wm-cols");
+    await expect(boardCard(page).locator(".wiki-wm-tile").first()).toBeAttached();
+    const r = await cols.evaluate((el) => {
+      const right = el.getBoundingClientRect().right;
+      return {
+        board: el.getBoundingClientRect().width,
+        tracks: getComputedStyle(el).gridTemplateColumns.split(" ").map(parseFloat),
+        past: Array.from(el.querySelectorAll("*")).filter((k) => k.getClientRects().length > 0 && k.getBoundingClientRect().right > right + 0.5).map((k) => k.getAttribute("class")),
+      };
+    });
+    console.log(`window ${width}: board ${r.board}, tracks ${r.tracks.join(" ")}`);
+    expect(r.tracks).toHaveLength(1);
+    expect(r.tracks[0]!).toBeLessThanOrEqual(r.board + 0.5);
+    // At 420 the page leaves the card no width at all, so there is nothing to hold it to.
+    if (r.board > 0) expect(r.past).toEqual([]);
+  });
+}
+
+for (const column of [200, 245, 500]) {
+  test(`a compact row in a ${column} px column is two lines: name and sparkline, then pills`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openStart(page, BOARD_TALL);
+    const card = boardCard(page);
+    await expect(card.locator('.wiki-wm-kid[data-effort-id="kid-two"]')).toBeAttached();
+    const rows = await card.locator(".wiki-wm-cols").evaluate((grid, column) => {
+      (grid as HTMLElement).style.gridTemplateColumns = `${column}px`;
+      return Array.from(grid.querySelectorAll<HTMLElement>(".wiki-wm-kid")).map((row, i, all) => {
+        const box = (sel: string) => row.querySelector(sel)!.getBoundingClientRect();
+        const name = row.querySelector<HTMLElement>(".wiki-wm-effort-name")!;
+        const before = all[i - 1];
+        return {
+          id: row.dataset.effortId!,
+          h: row.getBoundingClientRect().height,
+          right: row.getBoundingClientRect().right,
+          name: box(".wiki-wm-effort-name"),
+          text: name.textContent,
+          title: name.title,
+          clipped: name.scrollWidth > name.clientWidth,
+          spark: box("svg.wiki-wm-spark"),
+          pills: box(".wiki-wm-pills"),
+          pillCount: row.querySelectorAll(".wiki-wm-pill").length,
+          rule: getComputedStyle(row).borderTopStyle + " " + getComputedStyle(row).borderTopWidth,
+          ruleColor: getComputedStyle(row).borderTopColor,
+          gapAbove: before ? box(".wiki-wm-effort-name").top - before.querySelector(".wiki-wm-pills")!.getBoundingClientRect().bottom : null,
+        };
+      });
+    }, column);
+    console.log(`compact row at ${column}: ${rows.map((r) => `${r.id} ${r.h.toFixed(1)} (${r.pillCount} pills)`).join(", ")}`);
+    expect(rows.map((r) => r.id).sort()).toEqual(["kid-idle", "kid-long", "kid-two"]);
+    expect(rows.find((r) => r.id === "kid-two")!.pillCount).toBe(2);
+    for (const r of rows) {
+      expect(r.h, `${r.id} height`).toBeLessThanOrEqual(46);
+      expect(r.name.height, `${r.id} name is one line`).toBeLessThanOrEqual(20);
+      expect(r.pills.height, `${r.id} pills are one line`).toBeLessThanOrEqual(20);
+      expect(r.spark.width, `${r.id} sparkline width`).toBeCloseTo(56, 0);
+      expect(r.spark.height, `${r.id} sparkline height`).toBeCloseTo(12, 0);
+      expect(r.spark.left, `${r.id} sparkline clear of the name`).toBeGreaterThanOrEqual(r.name.right);
+      expect(Math.abs(r.spark.right - r.right), `${r.id} sparkline ends the line`).toBeLessThanOrEqual(1);
+      expect(r.spark.bottom, `${r.id} sparkline above the pills`).toBeLessThanOrEqual(r.pills.top);
+      expect(r.title, `${r.id} keeps its whole name`).toBe(r.text);
+    }
+    if (column <= 245) expect(rows.find((r) => r.id === "kid-long")!.clipped).toBe(true);
+    // Rows read apart: a rule between them, and air from the pills above to the next name.
+    const ruled = await token(page, "--border-secondary");
+    expect(rows[0]!.rule, "no rule above the first row").toBe("none 0px");
+    for (const r of rows.slice(1)) {
+      expect(r.rule, `${r.id} rule`).toBe("solid 1px");
+      expect(r.ruleColor, `${r.id} rule colour`).toBe(ruled);
+      expect(r.gapAbove!, `${r.id} gap`).toBeGreaterThanOrEqual(8);
+    }
+  });
+}
 
 // Fix round 1 batch 2: the wide board's rules and its heads.
 test("the wide board's rules all sit behind @supports selector(::details-content), and without them the folds work at 1920", async ({ page }) => {
@@ -1015,7 +1211,8 @@ for (const forced of [false, true]) {
     expect(r.length).toBe(9);
     for (const s of r) {
       expect(s, `${s.id}`).toMatchObject({ role: "img", label: "Activity, last 28 days", bars: 28, painted: 28 });
-      expect(s.share, `${s.id}`).toBeGreaterThan(0.75);
+      // A compact row's sparkline shares a line with the name, at a fixed width.
+      if (s.id !== "sub") expect(s.share, `${s.id}`).toBeGreaterThan(0.75);
     }
     const moves = r.find((s) => s.id === "moves")!;
     const none = r.find((s) => s.id === "still")!;
@@ -3179,5 +3376,41 @@ for (const theme of THEMES) {
     expect((await styledCardClasses(page)).filter((c) => !seen.has(c) && !["wm-state-active", "wm-state-blocked", "wm-state-shipped"].includes(c))).toEqual([]);
     console.log(`contrast min ${theme.label}: ${Math.min(...mins).toFixed(2)} (${labels.map((l, i) => `${l} ${mins[i]!.toFixed(2)}`).join(", ")})`);
     expect(low).toEqual([]);
+  });
+}
+
+// Non-text marks need 3:1 (WCAG 1.4.11), a zero bar included: it is the row's baseline.
+for (const theme of THEMES.slice(0, 4)) {
+  test(`a sparkline's bars clear 3:1 on the tile and a zero bar is at least 1 px, in the ${theme.label} theme`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.emulateMedia({ colorScheme: theme.scheme });
+    await page.addInitScript((v) => localStorage.setItem("muninn-theme", v!), theme.stored);
+    await openStart(page, BOARD_TALL);
+    const card = boardCard(page);
+    await expect(card.locator('.wiki-wm-kid[data-effort-id="kid-idle"]')).toBeAttached();
+    const measure = await paintedMeasure(page);
+    const r = await card.evaluate((root, measure) => {
+      const one = (sel: string) => {
+        const rect = root.querySelector(sel)!;
+        const tile = rect.closest(".wiki-wm-tile")!;
+        const probe = document.createElement("span");
+        probe.style.backgroundColor = getComputedStyle(rect).fill;
+        tile.append(probe);
+        const ratio = measure(probe, false, true);
+        probe.remove();
+        return { ratio, h: rect.getBoundingClientRect().height };
+      };
+      return {
+        zeroRow: one('.wiki-wm-kid[data-effort-id="kid-idle"] rect.zero'),
+        zeroTile: one('.wiki-wm-tile[data-effort-id="moving-b"] > svg rect.zero'),
+        barRow: one('.wiki-wm-kid[data-effort-id="kid-two"] rect:not(.zero)'),
+        barTile: one('.wiki-wm-tile[data-effort-id="moving-a"] > svg rect:not(.zero)'),
+      };
+    }, measure);
+    console.log(`spark ${theme.label}: ${Object.entries(r).map(([k, v]) => `${k} ${v.ratio.toFixed(2)} @ ${v.h.toFixed(2)} px`).join(", ")}`);
+    for (const [what, v] of Object.entries(r)) {
+      expect(v.ratio, `${what} contrast`).toBeGreaterThanOrEqual(3);
+      expect(v.h, `${what} height`).toBeGreaterThanOrEqual(1);
+    }
   });
 }

@@ -2711,8 +2711,15 @@ export async function renderWikiPage(opts?: {
        browser keeps working folds. A browser without interactivity keeps a head that can be
        tabbed to and flipped unseen. */
     .wiki-wm-board { container-type: inline-size; container-name: wmboard; margin-top: 10px; }
-    .wiki-wm-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; align-items: start; }
-    .wiki-wm-col { min-width: 0; }
+    /* Waiting on you spans all the rows, so the rest flow beside it. An item crossing an fr
+       track gives its extra height to that track alone, so a tall column stretches no auto
+       row. The row gap is a margin because a gap would also space the empty rows. */
+    .wiki-wm-cols {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+      grid-template-rows: repeat(4, auto) 1fr; column-gap: 10px; align-items: start; margin-bottom: -10px;
+    }
+    .wiki-wm-col { min-width: 0; margin-bottom: 10px; }
+    .wiki-wm-col[data-wm-lane="you"] { grid-row: 1 / -1; }
     .wiki-wm-col > summary { cursor: pointer; list-style-position: inside; }
     .wiki-wm-col[data-wm-lane="you"] > summary, .wiki-wm-col[data-wm-lane="you"] > summary .wiki-wm-count { color: var(--accent-light); }
     @supports selector(::details-content) {
@@ -2730,7 +2737,7 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-tile .wiki-wm-effort-head { gap: 2px 6px; line-height: 1.3; }
     .wiki-wm-spark { display: block; width: 100%; height: 24px; margin: 5px 0 3px; }
     .wiki-wm-spark rect { fill: var(--accent-light); }
-    .wiki-wm-spark rect.zero { fill: var(--border-secondary); }
+    .wiki-wm-spark rect.zero { fill: var(--text-dim); }
     @media (forced-colors: active) {
       .wiki-wm-spark rect { fill: CanvasText; }
       .wiki-wm-spark rect.zero { fill: GrayText; }
@@ -2740,8 +2747,16 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-pill.warn { background: var(--tint-warning); color: var(--tone-warn); }
     .wiki-wm-pill.acc { background: var(--tint-purple); color: var(--accent-light); }
     .wiki-wm-kids { list-style: none; margin: 6px 0 0; padding: 6px 0 0; border-top: 1px dashed var(--border-primary); }
-    .wiki-wm-kids > .wiki-wm-kid { border-top: none; padding: 3px 0; }
-    .wiki-wm-kid .wiki-wm-spark { height: 12px; margin: 2px 0 0; }
+    /* Two lines: name and a fixed sparkline, then pills. The name takes one line, with the
+       whole of it in its title. */
+    .wiki-wm-kids > .wiki-wm-kid {
+      display: grid; grid-template-columns: minmax(0, 1fr) 56px; column-gap: 6px; align-items: center;
+      padding: 4px 0; border-top-color: var(--border-secondary); line-height: 1.3;
+    }
+    .wiki-wm-kids > .wiki-wm-kid:first-child { border-top: none; padding-top: 0; }
+    .wiki-wm-kid .wiki-wm-effort-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .wiki-wm-kid .wiki-wm-spark { grid-column: 2; grid-row: 1; height: 12px; margin: 0; }
+    .wiki-wm-kid .wiki-wm-pills { grid-column: 1 / -1; margin: 2px 0 0; }
     /* What you're following (themes map, theme map P2). */
     .wm-state-new, .wm-state-rising { background: var(--tint-purple); color: var(--accent-light); }
     .wiki-wm-need-count {

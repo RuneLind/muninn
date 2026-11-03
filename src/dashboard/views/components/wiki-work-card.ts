@@ -500,7 +500,8 @@ function sparkHtml(daily: readonly { day: string; commits: number; sessions: num
   const values = sparkValues(daily, now);
   const top = Math.max(1, ...values);
   const bars = values.map((v, i) => {
-    const h = v ? Math.max(3, (v / top) * SPARK_HEIGHT) : 1;
+    // Units, not pixels: a compact row draws at half scale, where 2 is a 1 px baseline.
+    const h = v ? Math.max(4, (v / top) * SPARK_HEIGHT) : 2;
     return `<rect${v ? "" : ' class="zero"'} x="${i + 0.1}" y="${(SPARK_HEIGHT - h).toFixed(1)}" width="0.8" height="${h.toFixed(1)}"/>`;
   });
   return `<svg class="wiki-wm-spark" viewBox="0 0 ${SPARK_DAYS} ${SPARK_HEIGHT}" preserveAspectRatio="none" role="img" aria-label="Activity, last 28 days">${bars.join("")}</svg>`;
@@ -534,10 +535,11 @@ function boardPillsHtml<P>(r: BoardRow<P>, now: number): string {
   return pills && `<div class="wiki-wm-pills">${pills}</div>`;
 }
 
-function boardNameHtml(e: { id: string; name: string }, effortHref?: (id: string) => string): string {
+function boardNameHtml(e: { id: string; name: string }, effortHref?: (id: string) => string, titled = false): string {
+  const title = titled ? ` title="${esc(e.name)}"` : "";
   return effortHref
-    ? `<a class="wiki-wm-effort-name" href="${esc(effortHref(e.id))}" data-effort-link="${esc(e.id)}">${esc(e.name)}</a>`
-    : `<span class="wiki-wm-effort-name">${esc(e.name)}</span>`;
+    ? `<a class="wiki-wm-effort-name" href="${esc(effortHref(e.id))}" data-effort-link="${esc(e.id)}"${title}>${esc(e.name)}</a>`
+    : `<span class="wiki-wm-effort-name"${title}>${esc(e.name)}</span>`;
 }
 
 function boardHtml<P extends CardPage>(
@@ -561,7 +563,7 @@ function boardHtml<P extends CardPage>(
   // `isNestedEffort` holds for the whole chain, so this walk ends.
   const tileOf = (r: BoardRow<P>): BoardRow<P> => (nestsUp(r) ? tileOf(parentOf(r)!) : r);
   const kidHtml = (k: BoardRow<P>) =>
-    `<li class="wiki-wm-effort wiki-wm-kid" data-effort-id="${esc(k.e.id)}">${boardNameHtml(k.e, effortHref)}${boardPillsHtml(k, now)}${sparkHtml(k.e.daily, now)}</li>`;
+    `<li class="wiki-wm-effort wiki-wm-kid" data-effort-id="${esc(k.e.id)}">${boardNameHtml(k.e, effortHref, true)}${boardPillsHtml(k, now)}${sparkHtml(k.e.daily, now)}</li>`;
   const tileHtml = (r: BoardRow<P>) => {
     const kids = rows.filter((k) => nestsUp(k) && tileOf(k) === r).sort(byBoardOrder);
     const partOf = parentOf(r);
