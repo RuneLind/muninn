@@ -498,8 +498,7 @@ test("a why that fits its two lines offers no expand control", async ({ page }) 
 
 test("selecting text in an opened why leaves it open", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
-  // Settled because a checks answer that changes the card wipes a selection on a real page too. That
-  // is tracked separately, and this test does not say a selection survives it.
+  // Settled so this test is about the why alone: a checks answer waiting on a selection has its own tests.
   await openSettled(page, LONG);
   const card = page.locator("#wikiWorkCard");
   const text = card.locator(".wiki-wm-why-text");
@@ -1867,11 +1866,119 @@ test("a checks answer that changes nothing leaves the DOM and a selection alone"
   await page.waitForTimeout(100);
   await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
   expect(await page.evaluate(() => getSelection()!.toString())).toBe(selected);
-  // The last fetch ends the suffix: that one is a change, and paints.
+  // The last fetch ends the suffix: that one is a change, and paints once the selection ends.
   await stub.retry(3);
   await stub.retry(4);
+  await page.evaluate(() => getSelection()!.removeAllRanges());
   await expect(cell).not.toContainText("refreshing");
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+});
+
+/** Select a page-title's text in the card, the way a reader's drag ends up. */
+const selectNeedTitle = (page: Page) =>
+  page.evaluate(() => {
+    const r = document.createRange();
+    r.selectNodeContents(document.querySelector("#wikiWorkCard .wiki-wm-need-title")!);
+    const sel = getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(r);
+    return sel.toString();
+  });
+
+/** A check that answers «refreshing» first and a contradiction next, with the reader's selection in between. */
+async function checksChangeUnderSelection(page: Page) {
+  await page.clock.install();
+  const stub = await stubChecks(page, (n) =>
+    n === 1 ? checksBody({ refreshing: true }) : checksBody({ contradictions: [GH_CONTRADICTION] }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const github = card.locator('[data-wm-cell="github"]');
+  await expect(github).toContainText("refreshing");
+  await card.locator(".wiki-wm-strip").evaluate((el) => el.setAttribute("data-before-repaint", ""));
+  const selected = await selectNeedTitle(page);
+  expect(selected.length).toBeGreaterThan(0);
+  await stub.retry(2);
+  await expect.poll(() => stub.count()).toBe(2);
+  await page.waitForTimeout(100);
+  return { card, github, selected };
+}
+
+test("a checks answer that changes the card waits while the reader has text selected in it", async ({ page }) => {
+  const { card, github, selected } = await checksChangeUnderSelection(page);
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(selected);
+  await expect(github).toContainText("refreshing");
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  await expect(github).not.toContainText("refreshing");
+  await expect(github.locator("b")).toHaveText("1");
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+});
+
+test("a press that ends the selection holds the waiting answer until the pointer is up", async ({ page }) => {
+  const { card, github } = await checksChangeUnderSelection(page);
+  const box = (await card.locator(".wiki-wm-summary").boundingBox())!;
+  await page.mouse.move(box.x + 2, box.y + 6);
+  await page.mouse.down();
+  // A press collapses the selection. A paint now would replace whatever is under the pointer and lose its click.
+  await expect.poll(() => page.evaluate(() => getSelection()!.isCollapsed)).toBe(true);
+  await page.waitForTimeout(50);
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  await page.mouse.up();
+  await page.clock.runFor(1);
+  await expect(github.locator("b")).toHaveText("1");
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+});
+
+test("a click on a control with the selection still up lands, and paints what waited", async ({ page }) => {
+  await page.clock.install();
+  const stub = await stubChecks(page, (n) =>
+    checksBody({ refreshing: n === 1, contradictions: [GH_CONTRADICTION] }));
+  await openStart(page, GH);
+  const card = page.locator("#wikiWorkCard");
+  const github = card.locator('[data-wm-cell="github"]');
+  await expect(github).toContainText("refreshing");
+  await selectNeedTitle(page);
+  await stub.retry(2);
+  await page.waitForTimeout(100);
+  await expect(github).toContainText("refreshing");
+  // By coordinates: `click()` waits on animation frames that the installed clock holds.
+  const box = (await github.boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(github).toHaveAttribute("aria-expanded", "true");
+  await expect(github).not.toContainText("refreshing");
+});
+
+test("a drag that starts a new selection keeps the answer waiting", async ({ page }) => {
+  const { card, github } = await checksChangeUnderSelection(page);
+  const box = (await card.locator(".wiki-wm-summary").boundingBox())!;
+  await page.mouse.move(box.x + 2, box.y + 6);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + 8, { steps: 6 });
+  await page.mouse.up();
+  await page.clock.runFor(1);
+  expect((await page.evaluate(() => getSelection()!.toString())).length).toBeGreaterThan(0);
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  await expect(github).toContainText("refreshing");
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  await expect(github.locator("b")).toHaveText("1");
+});
+
+test("a selection outside the card does not hold the answer back", async ({ page }) => {
+  await page.clock.install();
+  const stub = await stubChecks(page, (n) =>
+    n === 1 ? checksBody({ refreshing: true }) : checksBody({ contradictions: [GH_CONTRADICTION] }));
+  await openStart(page, GH);
+  const github = page.locator('#wikiWorkCard [data-wm-cell="github"]');
+  await expect(github).toContainText("refreshing");
+  await page.evaluate(() => {
+    const outside = Array.from(document.querySelectorAll(".wiki-start *")).find(
+      (n) => !n.closest("#wikiWorkCard") && !n.querySelector("#wikiWorkCard") && (n.textContent ?? "").trim().length > 0,
+    ) ?? document.querySelector("#wikiList a")!;
+    getSelection()!.selectAllChildren(outside);
+  });
+  expect((await page.evaluate(() => getSelection()!.toString())).length).toBeGreaterThan(0);
+  await stub.retry(2);
+  await expect(github.locator("b")).toHaveText("1");
 });
 
 test("a start view that comes back paints its card, though the last answer changed nothing", async ({ page }) => {
@@ -2410,6 +2517,9 @@ test("a themes map keeps its markup when only the strip's inputs change, and rep
   // A declaration still re-joins a themes map: this is the repaint the guard must not take away.
   await writeFile(path.join(roots[THEME_HOLD]!, "plans/hold-declared.mdx"), `---\ntitle: Hold declared\neffort: t0\n---\n\nBody.\n`, "utf8");
   await adopt("Hold declared");
+  // It waits for the reader's selection like any paint nobody asked for.
+  await expect(card.locator("[data-before-adopt]")).toHaveCount(1);
+  await page.evaluate(() => getSelection()!.removeAllRanges());
   await expect(card.locator("[data-before-adopt]")).toHaveCount(0);
 });
 

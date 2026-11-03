@@ -990,10 +990,59 @@ function resolveFocus(el: HTMLElement, key: FocusKey): void {
 /** The markup the card last got: a checks answer or an adopt that renders the same leaves the DOM alone. */
 let paintedCardHtml: string | null = null;
 
-/** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing.
- *  An adopt whose keys moved paints the same way. */
+/** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing,
+ *  and an answer that changes something waits until the reader's selection ends. An adopt whose keys moved
+ *  paints the same way. */
 function paintWorkCardIfChanged(): void {
   paintWorkCard(undefined, true);
+}
+
+/** Does the reader have text selected that touches the card? `innerHTML` would wipe it. */
+function selectionTouchesCard(el: HTMLElement): boolean {
+  const sel = globalThis.getSelection?.();
+  return !!sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.getRangeAt(0).intersectsNode(el);
+}
+
+let paintWaiting = false;
+let pointerHeld = false;
+
+/** Paint what waited, once no selection touches the card. Never with the pointer held: pressing a control ends
+ *  the selection, and a paint then replaces the control and loses the click. */
+function flushWaitingPaint(): void {
+  if (!paintWaiting || pointerHeld) return;
+  const el = document.getElementById("wikiWorkCard");
+  if (el && selectionTouchesCard(el)) return;
+  stopWaitingForSelection();
+  paintWorkCardIfChanged();
+}
+
+function onWaitPointerDown(): void {
+  pointerHeld = true;
+}
+
+/** After the click: the browser dispatches it right after this event, ahead of any timer. */
+function onWaitPointerEnd(): void {
+  pointerHeld = false;
+  setTimeout(flushWaitingPaint, 0);
+}
+
+function waitForSelectionToEnd(): void {
+  if (paintWaiting) return;
+  paintWaiting = true;
+  document.addEventListener("selectionchange", flushWaitingPaint);
+  document.addEventListener("pointerdown", onWaitPointerDown, true);
+  document.addEventListener("pointerup", onWaitPointerEnd, true);
+  document.addEventListener("pointercancel", onWaitPointerEnd, true);
+}
+
+function stopWaitingForSelection(): void {
+  if (!paintWaiting) return;
+  paintWaiting = false;
+  pointerHeld = false;
+  document.removeEventListener("selectionchange", flushWaitingPaint);
+  document.removeEventListener("pointerdown", onWaitPointerDown, true);
+  document.removeEventListener("pointerup", onWaitPointerEnd, true);
+  document.removeEventListener("pointercancel", onWaitPointerEnd, true);
 }
 
 function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
@@ -1023,7 +1072,8 @@ function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   // compares against it and does not render the card again for the same keys.
   paintedDeclarationKey = declarationKey(pages, runAt);
   paintedStripKey = currentStripKey();
-  if (onlyIfChanged && paintedCardHtml === html) {
+  if (onlyIfChanged && (paintedCardHtml === html || selectionTouchesCard(el))) {
+    if (paintedCardHtml !== html) waitForSelectionToEnd();
     ensureWorkChecks();
     return;
   }
