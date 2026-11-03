@@ -185,7 +185,8 @@ describe("fix round 1: cancellation, the queue bound, the kill and the cwd", () 
     await Bun.sleep(100);
     const runs = (await readFile(`${out}.runs`, "utf8")).trim().split("\n");
     expect(runs).toHaveLength(1);
-    expect(runs[0]).not.toContain("D1");
+    // Not the bare id: a run's temp dir has a random name that can contain it.
+    expect(runs[0]).not.toContain("--id");
   });
 
   test(`at most ${PLAN_CARD_MAX_WAITING} argument sets wait per page; one more is 429`, async () => {

@@ -115,7 +115,10 @@
  * clears it once NOTHING is latched. So `authedFetch` routes a 2xx response
  * through the same recovery, and only while `http` is latched: an ordinary
  * successful request on a page where nothing was refused must not become a
- * second, decision-free door onto removing someone else's banner.
+ * second, decision-free door onto removing someone else's banner. And only a
+ * request STARTED after the refusal landed counts: an older request's 2xx says
+ * what the credential was when it left, so it used to take the banner down on a
+ * session that was still expired.
  *
  * ## Accepted: a FLAPPING stream on an `entra` instance
  *
@@ -182,6 +185,15 @@ export function authedFetchScript(initialProvider: IdentityProvider | null = nul
   // long as the refusal lasts.
   var latched = {};
   window.__muninnAuthLatched = function(channel) { return latched[channel] === true; };
+
+  // authedFetch numbers its requests. A 2xx recovers 'http' only when its number
+  // is above the one taken when the channel latched.
+  var requestsStarted = 0;
+  var httpLatchMark = 0;
+  function latch(channel) {
+    latched[channel] = true;
+    if (channel === 'http') httpLatchMark = requestsStarted;
+  }
 
   function readStamp() {
     var stored = 0;
@@ -272,7 +284,7 @@ export function authedFetchScript(initialProvider: IdentityProvider | null = nul
   }
 
   function banner(channel) {
-    latched[channel] = true;
+    latch(channel);
     showExpiredBanner();
     return 'banner';
   }
@@ -303,7 +315,7 @@ export function authedFetchScript(initialProvider: IdentityProvider | null = nul
       return authProvider === null ? 'ignore' : banner(channel);
     }
     if (!armReload()) return banner(channel);
-    latched[channel] = true;
+    latch(channel);
     window.location.reload();
     return 'reload';
   };
@@ -324,14 +336,16 @@ export function authedFetchScript(initialProvider: IdentityProvider | null = nul
    * A 2xx is the one thing this channel has instead of an open event, so it
    * releases a latched 'http' — see the module doc. Only while it IS latched:
    * on an ordinary page every response would otherwise be a decision-free door
-   * onto removing another channel's banner.
+   * onto removing another channel's banner. And only from a request started
+   * after the latch: an older one proves nothing about the session now.
    */
   window.authedFetch = function(input, init) {
+    var started = ++requestsStarted;
     var p = fetch(input, init);
     p.then(function(res) {
       if (!res) return;
       if (res.status >= 200 && res.status < 300) {
-        if (latched['http'] === true) window.__muninnAuthChannelRecovered('http');
+        if (latched['http'] === true && started > httpLatchMark) window.__muninnAuthChannelRecovered('http');
         return;
       }
       if (res.status !== 401) return;

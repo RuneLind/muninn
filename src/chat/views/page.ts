@@ -794,8 +794,8 @@ const CHAT_SCRIPT = `
   var wsPreOpenRetry = makePreOpenRetry({
     probe: chatSessionProbe,
     retry: function() { connectWs(); },
-    // Idempotent with authedFetch's own 401 handling, which may already have
-    // acted on the same probe response: a second banner is the same banner.
+    // Beside authedFetch's own 401 handling of the same probe response. A login
+    // hint reloads through either; an HTML 401 banners there and reloads here, once.
     expired: function() { window.__muninnAuthRefusal('ws'); },
     stall: showWsStalledNotice,
     clearStall: hideWsStalledNotice,

@@ -490,6 +490,39 @@ test.describe("acceptance 19 + 20 — the HTTP half, through a real call site", 
     expect(await reloaded(page)).toBe(true);
   });
 
+  test("an older request's 2xx leaves the banner up, and a newer one takes it down", async ({ page }) => {
+    await open(page, { provider: "entra" });
+    // Init's own fetches start after the latch and answer 2xx, which is a real recovery.
+    await page.waitForFunction(() => !!document.querySelector("#chatMessages .empty-state"));
+    await page.waitForTimeout(250);
+    let releaseOlder: () => void = () => {};
+    const olderHeld = new Promise<void>((resolve) => { releaseOlder = resolve; });
+    await page.route("**/api/e2e-older", async (route) => {
+      await olderHeld;
+      await route.fulfill({ json: { ok: true } });
+    });
+    await page.route("**/api/e2e-refused", (route) =>
+      route.fulfill({ status: 401, contentType: "text/html", body: "<html>401</html>" }));
+    await page.route("**/api/e2e-newer", (route) => route.fulfill({ json: { ok: true } }));
+    type Page = { authedFetch: (u: string) => Promise<Response>; __older?: Promise<number> };
+    const call = (url: string) => page.evaluate((u) => { (window as unknown as Page).authedFetch(u); }, url);
+
+    await page.evaluate(() => {
+      const w = window as unknown as Page;
+      w.__older = w.authedFetch("/api/e2e-older").then(() => 1);
+    });
+    await call("/api/e2e-refused");
+    await expect(banner(page)).toBeVisible();
+
+    releaseOlder();
+    // authedFetch's own handler is on the promise first, so it has run once this resolves.
+    await page.evaluate(() => (window as unknown as Page).__older);
+    await expect(banner(page)).toHaveCount(1);
+
+    await call("/api/e2e-newer");
+    await expect(banner(page)).toHaveCount(0);
+  });
+
   test("a 401 carrying the LOCAL loginUrl neither reloads nor banners", async ({ page }) => {
     await open(page, { provider: "local", refuse: LOCAL_401 });
     await markPage(page);

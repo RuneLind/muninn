@@ -356,6 +356,7 @@ test.describe("the chat page knows its provider before /chat/me answers", () => 
       const res = await page.goto(`${BASE}/chat`);
       expect(res?.status()).toBe(200);
       expect(await res?.text()).toContain('var authProvider = "entra";');
+      await expect.poll(() => navigations).toBe(2);
       await expect(page.locator("#authExpiredBanner")).toBeVisible();
       await page.waitForTimeout(2500);
       await expect(page.locator("#authExpiredBanner")).toBeVisible();

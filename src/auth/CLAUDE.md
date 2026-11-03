@@ -816,11 +816,18 @@ three predicates, **one breaker**:
 the verdict there is `ignore` — the silent reconnect those instances had before
 this module existed. Banner'ing instead told readers of an auth-OFF instance,
 which has no sessions, that their session had expired on any permanent stream
-failure. The page render writes in the session's provider, so a tab whose
-`/chat/me` answered a 401 on both attempts still reaches the rules above: its
-socket's probe gets a 401 too, which reloads once on `entra` and then banners.
-A `/chat/me` that fails any other way (a 403, a 5xx, a transport failure, a 200
-that is not JSON) still leaves the tab with no expiry banner and no identity.
+failure. The page render writes in the session's provider, so it is known even
+when `/chat/me` fails at load. `/chat/me` is asked at init and not again, so such
+a tab keeps no identity until a reload. What it shows, on `entra`:
+
+- `/chat/me` answers a 401 whose body is not JSON, and the socket is refused: its
+  probe gets a 401 too, which spends the one reload and then banners.
+- That 401 with a socket that opens: the banner shows, and the next 2xx takes it
+  down, because only `http` was latched. Nothing is left on screen.
+- `/chat/me` keeps failing any other way (a 403, a 5xx, a transport failure, a 200
+  that is not JSON): no expiry banner. A 200 that is not JSON brings the amber
+  stall bar once the socket's ladder is spent.
+- `/chat/me` fails at load, and a later probe gets a 401: the reload as above.
 
 **A refused UPGRADE carries no code.** The browser reports a 401'd handshake as
 an ordinary 1006 close, so the 4401 rule was structurally blind to it and the
@@ -883,7 +890,7 @@ latch set *after* init lived for the life of the tab. Measured on a `local`
 instance, where the verdict is a banner and there is no reload to re-run init:
 ONE transient `/chat/events` failure killed the stream permanently and left
 "your session expired" over a session that was fine, where the pre-latch page
-recovered in 3 s. There are three releases now, and the two added are driven by
+recovered in 3 s. There are four releases now, and the ones added are driven by
 evidence rather than by a timer:
 
 | release | latch | banner |
@@ -891,7 +898,7 @@ evidence rather than by a timer:
 | a successful `/chat/me` (`__muninnClearAuthReloadStamp`, init) | cleared | left |
 | `reconnectChatSse()` → `__muninnAuthReleaseLatch('sse')` | cleared | left — a request is not an outcome |
 | the stream/socket OPENS → `__muninnAuthChannelRecovered(channel)` | cleared | removed, **but only once NO channel is still latched** |
-| a **2xx through `authedFetch`** → `__muninnAuthChannelRecovered('http')`, only while `http` is latched | cleared | same rule |
+| a **2xx through `authedFetch`** → `__muninnAuthChannelRecovered('http')`, only while `http` is latched and only from a request started after the latch | cleared | same rule |
 
 That third condition is the non-obvious half: the banner is one page-level bar
 shared by three channels, so an SSE recovery clearing it while a 4401'd socket
@@ -903,8 +910,9 @@ reconnect, neither of which a `fetch` can produce. A latched `http` therefore
 pinned the shared banner up for the life of the tab — and blocked every OTHER
 channel's recovery from taking it down, since that clear requires nothing to be
 latched. A 2xx is the http channel's own open evidence, and it is consulted only
-while `http` is latched: on an ordinary page every response would otherwise be a
-second, decision-free door onto removing someone else's banner.
+while `http` is latched, and only from a request started after the latch: on an
+ordinary page every response would otherwise be a second, decision-free door onto
+removing someone else's banner, and an older response says nothing about now.
 
 **Accepted, not fixed: a FLAPPING stream on an `entra` instance.** The releases
 are evidence-driven, so open → error → open → error re-enters the rule every

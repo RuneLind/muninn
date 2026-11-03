@@ -22,6 +22,9 @@
  * The `wiki-committer` watcher also calls `commitWikiChange` (it commits stray
  * dirty files and writes no page content) and stays unguarded too.
  *
+ * One route guard is not a content write: `POST /api/wiki/felles-publish` writes a
+ * bucket, and a read-only instance refuses it too (the owner's ruling, 2026-11-03).
+ *
  * Offline scripts that write with a bare `Bun.write` are out of scope — this
  * guards the HTTP surface, and the readonly instance runs no such scripts.
  */
