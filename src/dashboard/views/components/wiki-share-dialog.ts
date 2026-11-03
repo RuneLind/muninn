@@ -625,7 +625,7 @@ export function shareDialogHtml(state: ShareDialogState, slackHtml: string, now:
  * because `/summaries` mounts the same dialog in PR C, and a second hand-copied
  * stylesheet is how the two surfaces drift. Every colour names a token the HOST
  * page actually defines — the chat dialog shipped fully transparent on
- * `var(--bg-elevated)`, a token that exists only in the chat page's own styles,
+ * `var(--bg-elevated)`, a token the explicit Light and Dark themes do not define,
  * and the e2e asserts the computed background for exactly that reason.
  */
 export function shareDialogStyles(): string {

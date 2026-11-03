@@ -1454,9 +1454,9 @@ Dismiss is durable: `src/gardener/CLAUDE.md`.
   facts in the list below and the rule it enforces in `src/web/CLAUDE.md`;
   check 6b has a one-line summary below and its rule in `src/web/CLAUDE.md`;
   check 10 (`question-block`) is in the answer cards' **Lint** bullet in
-  `src/web/CLAUDE.md`; checks 8, 9 and 11 onward are in the «Lint check N»
-  sections of `src/wiki/CLAUDE.md`, which this command lists:
-  `grep -n '^#.*Lint check' src/wiki/CLAUDE.md`.
+  `src/web/reference/notes.md`; checks 8, 9 and 11 onward are in the «Lint check N»
+  sections of `src/wiki/reference/notes.md`, which this command lists:
+  `grep -n '^#.*Lint check' src/wiki/reference/notes.md`.
   The engine's first checks:
   1. **broken-link** — re-runs `extractWikilinks` + `extractMarkdownLinks` per
      page and resolves against the index (the store's builder silently drops
@@ -1807,7 +1807,7 @@ All watchers support `config.prompt`. Defaults are exported (`DEFAULT_X_PROMPT`,
 
 ## Configurable model
 
-`spawnHaiku(prompt, opts)` accepts `opts.model`. Default is Haiku. Watchers pass `config.model` through. Set via dashboard Edit tab. Important: non-Haiku models (Sonnet) need higher `timeoutMs` — Haiku default is 60s.
+`spawnHaiku(prompt, opts)` accepts `opts.model`. Default is Haiku. Watchers pass `config.model` through. Set via dashboard Edit tab. Important: a non-Haiku model (Sonnet) can need a longer model-call timeout, which `config.timeoutMs` sets on `x` and `anthropic`. `checkEmail` never passes it: each attempt gets `HAIKU_TIMEOUT_MS`, 60s.
 
 ## Tool-call visibility for Haiku-driven checkers (`spawnHaiku` telemetry)
 

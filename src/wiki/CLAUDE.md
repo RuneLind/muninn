@@ -26,7 +26,7 @@ Writing to a wiki:
 - A file `writeWikiPage` cannot carry (its path confinement admits `.md`/`.mdx` only) repeats the guard and the per-wiki queue rather than routing around them: `plans/queue.yaml` the sha256 CAS too, `.work-map.json` the file lock.
 - Every programmatic writer passes `refresh: true` to `getWikiIndex` after it lands.
 - A burst of metadata writes uses no-log mode (`logKind: null`): one log line each would bury `log.md`, and each reindex would re-embed a page whose prose never moved.
-- Name a new `PageWriteOutcome` variant in every route that maps it: those are `if` chains whose fall-through is success, so an unnamed variant reports a write that never happened.
+- Name a new `PageWriteOutcome` variant in every route that maps it: most are `if` chains whose fall-through is success: an unnamed variant reports a write that never happened.
 - At a 409 the body's `locked` flag decides, never the status: `locked` is a retry, a stale page is a reload.
 - muninn never writes the four provenance keys (`sessions:`, `sessions_backfilled:`, `jira:`, `prs:`). Their one line-upsert lives in claude-usage, and the Stamp route shells out to its CLI rather than growing a second writer: two writers of one frontmatter line lose each other's appends.
 - A new non-provenance frontmatter writer uses `setFrontmatterScalar` (`src/plans/frontmatter.ts`); the plan writers beside it keep their anchors.
@@ -47,7 +47,7 @@ Read-only, two independent switches, neither implying the other:
 - A `?wiki=`-steerable route that spends a model call on page content or ships it off-machine carries the per-wiki prologue (`egressRefusal`) right after the entry resolves, BEFORE bot resolution, the index read, the DB thread, the `/agents` run registration and the one-shot. It keys on the ROOT: `WIKI_DIR` is guarded, an unknown name is not.
 - Non-HTTP surfaces carry the same check, since a scheduled run spends exactly what a route would. A wiki-drafting watcher type joins `WIKI_DRAFTING_WATCHER_TYPES`, which both guards read.
 - Neither switch gates git: `commitWikiChange` and the `wiki-committer` stay open, or the repo-sync loop stops on the read-only instance.
-- Enforcement never reads `WikiRegistryEntry.readonly`: that flag is for the client half and the `/models` card, and a stale memo must not be able to open the guard.
+- Enforcement never reads `WikiRegistryEntry.readonly`: that flag is for the `/models` card, and a stale memo must not be able to open the guard.
 - A write guard lives in the environment, never in `.wiki-reader.json`: that file degrades to `null`, which for a guard means writable. The file carries cosmetics, the environment carries safety.
 - Compare roots through `sameWikiRoot`, never a re-spelling. Matching is root-exact, never a prefix: a wiki at a subdirectory of a listed root is NOT covered, so list each root you mean.
 - A root muninn should only READ must ALSO be listed in `WIKI_READONLY_ROOTS`: registration alone makes it writable and model-reachable over HTTP.
@@ -68,7 +68,7 @@ Pages and routes:
 - `link` and `mention` are demoted: a new count reads `relationsCount`, `DEMOTED_RELATIONS` or `facetJiraKeys`, never `meta.issues` directly, which still holds demoted keys.
 - An unknown cost never renders as `$0`: an unpriced key shows as unknown, since `$0.00` says it was free.
 - Never have the browser fetch huginn or claude-usage (tailnet viewers, mixed content under `tailscale serve`): the server computes the field and ships it. The one exception is a link for the viewer to follow (`CLAUDE_USAGE_PUBLIC_URL`).
-- A `fetch`-read route answers every body or parameter check as JSON with its status BEFORE `streamSSE`: after its 200, the only report is an `app_error` nothing can tell from a model failure. An `EventSource` route reports preflight checks in the stream (`preflightError`): a non-200 tells it nothing.
+- A `fetch`-read route answers every shape check as JSON with its status BEFORE `streamSSE`: after its 200, the only report is an `app_error` nothing can tell from a model failure; a lookup may use `preflightError`. An `EventSource` route reports preflight checks in the stream (`preflightError`): a non-200 tells it nothing.
 - On the pod's read slice, a background fetch from the index build gates on `wikiToolsRegistered`: the service it would dial is on another machine's loopback. An owner-derived listing field is never served there (`includeWaits`: a count would tell a reader which group the owner is in), and a personal one is hidden (`movesYou`: every colleague would read it as waiting on them).
 - A field left on `toListing`'s rest spread goes to every caller unless stripped and opted in. A new reader control that calls a tool-half route joins `WIKI_READ_SLICE_HIDDEN_SELECTOR`: on the pod that route has no handler.
 - Run the suite from the repo root on a host whose `.env` carries `MUNINN_WIKI_READONLY`: the bunfig preload that clears it resolves against the CWD and is ignored silently when it cannot. From a subdirectory, pass `bun test --preload ../test/preload.ts`.

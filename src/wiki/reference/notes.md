@@ -2488,7 +2488,7 @@ after the provenance backfill.
   own spelling, which strips ANY extension — `wikiPageStem` strips only
   `.md`/`.mdx`, so `plans/index.html` sat under `Bookkeeping` in the rail and
   arrived here as ordinary related work. ⚠️ `isMetaStem` is case-sensitive on
-  `CLAUDE` alone, inherited from the rail.
+  all three stems, inherited from the rail.
 
 **The open page's own ATTACHMENTS are excluded too** — a candidate whose `parent`
 is the open page. The rail already shows them as that page's attachment chip, so

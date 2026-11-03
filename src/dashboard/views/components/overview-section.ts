@@ -6,8 +6,7 @@
  *     RIGHT = a single Activity column (the former bottom drawer, folded in here
  *     with inline All/Chat/System/Errors filter chips)
  *   - a slimmed 7-day usage chart (SVG bars + one total-token line, theme-aware
- *     via CSS classes — SVG presentation attrs never resolve var()), with the
- *     full 4-series Chart.js breakdown behind a toggle.
+ *     via CSS classes), with the full 4-series Chart.js breakdown behind a toggle.
  *
  * The tile / chip builders come from the shared globals `tileHtml`, `kindChip`
  * (summary-tiles.ts / status-chips.ts). The live data is wired in connection.ts:
