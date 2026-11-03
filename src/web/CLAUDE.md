@@ -4,7 +4,7 @@
 
 ## Detail: `src/web/reference/notes.md`
 
-Detail about one function or one component lives in `src/web/reference/notes.md`, which is not loaded automatically. It also covers `src/format/` and the wiki renderer's components. The counts in this section are this file's own (measured 2026-11-03).
+Detail about one function or one component lives in `src/web/reference/notes.md`, which is not loaded automatically. It also covers `src/format/` and the wiki renderer's components. A `src/<module>/CLAUDE.md` cited inside `notes.md` may now mean that module's `reference/notes.md`. The counts in this section are this file's own (measured 2026-11-03).
 
 - **Search it this way, never plain:** `rg -n -o '.{0,120}<term>.{0,120}' src/web/reference/notes.md`. With the Grep tool: `output_mode: content`, `-o`, the same pattern and that path. Keep the window at 120 chars or less. Lines are long: plain `rg` prints each whole line and plain Grep returns "Omitted long matching line". Do not use `grep -o` here: in a Claude Code shell it returns nothing for this pattern and exits 1, which reads as no note.
 - **Before editing a file:** search its basename and the exported functions you are changing; few hits is not full coverage: `web-format.ts` gets 4 lines, none about a component trap. **To look up a topic:** find its heading in the index and search a few plain words of it, never the whole heading.
@@ -42,6 +42,8 @@ Rules and traps about one function stay in their section of the notes; ` [trap]`
 
 ## Index
 
+` [trap]` marks a section that records a failure or hazard; an unmarked section can still hold a rule, so search before you edit.
+
 - What counts as a fenced code block [trap]
 - Lists and nested lists
 - Syntax highlighting in fenced code blocks [trap]
@@ -50,19 +52,19 @@ Rules and traps about one function stay in their section of the notes; ` [trap]`
 - Code-block chrome (header bar + copy) [trap]
 - `<Fold title open>` — a collapsible section [trap]
 - Report blocks — `Fold summary=`, `Callout resolved=`, `<Historic>`, line-ref chips
-- `<NextMoves>` / `<Lane>` — who has the next move
+- `<NextMoves>` / `<Lane>` — who has the next move [trap]
 - Decision chain and PR strip (`views`, the reader's page render only)
 - Question grid (`views`, the reader's page render only)
 - `<Chart kind>` — a chart over the pipe table it wraps (MDX visual components PR 3)
 - `<RuleTree title outcomes>` — a rule drawn as a tree over the list it wraps (MDX visual components PR 4)
-- `<Glossary>` — terms marked where the page uses them (MDX visual components PR 5)
+- `<Glossary>` — terms marked where the page uses them (MDX visual components PR 5) [trap]
 - `<CaseBoard view="dots">` — one square per case (MDX visual components PR 5)
 - Timeline lanes — the page's dates on one axis (MDX visual components PR 5)
-- `<Diagram src>` — an archify diagram (Wiki visuals v2 PR 2)
+- `<Diagram src>` — an archify diagram (Wiki visuals v2 PR 2) [trap]
 - `<Steps src>` — a diagram stepped through (Wiki visuals v2 PR 3)
 - `<SystemMap>` — an edge table drawn as a map of systems (Wiki visuals v2 PR 4)
 - `<Query>` — one prod query as a card [trap]
-- `<CaseBoard>` and `<DeltaTable>` — tracked cases and run-to-run numbers
+- `<CaseBoard>` and `<DeltaTable>` — tracked cases and run-to-run numbers [trap]
 - `<Tldr>`, `<Timeline>`, `<DecisionLog>`, `<RunChecklist>` — list wrappers [trap]
 - `<Question>` — an open question as an answer card [trap]
 - Fact-check annotation pair [trap]

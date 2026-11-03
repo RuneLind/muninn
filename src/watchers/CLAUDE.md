@@ -4,7 +4,7 @@ Background monitors that check external services at intervals and send alerts to
 
 ## Detail: `src/watchers/reference/notes.md`
 
-Detail about one checker or one function lives in `src/watchers/reference/notes.md`, which is not loaded automatically. The counts in this section are this file's own (measured 2026-11-03).
+Detail about one checker or one function lives in `src/watchers/reference/notes.md`, which is not loaded automatically. A `src/<module>/CLAUDE.md` cited inside `notes.md` may now mean that module's `reference/notes.md`. The counts in this section are this file's own (measured 2026-11-03).
 
 - **Search it this way, never plain:** `rg -n -o '.{0,120}<term>.{0,120}' src/watchers/reference/notes.md`. With the Grep tool: `output_mode: content`, `-o`, the same pattern and that path. Keep the window at 120 chars or less. Lines are long: plain `rg` prints each whole line and plain Grep returns "Omitted long matching line". Do not use `grep -o` here: in a Claude Code shell it returns nothing for this pattern and exits 1, which reads as no note.
 - **Before editing a file:** search its basename and the exported functions you are changing; few hits is not full coverage: `x.ts` gets 3 lines, while its section, `X/Twitter Watcher — Key Lessons`, runs to 75k chars under a heading without the basename. **To look up a topic:** find its heading in the index and search a few plain words of it, never the whole heading.
@@ -24,7 +24,7 @@ t=$(mktemp); sed -n '<N>p' src/watchers/reference/notes.md | fold -w 2000 > "$t"
 - Treat a fix that requires a hand-edited DB row as inert where it matters.
 - `last_run_at` must never be treated as a health signal: `runner.ts` advances it on every failure to prevent retry storms, which is why it is uninformative.
 - Give a new guard that can repeat indefinitely a counter, a bound or a surface. The skip-forever audit went through every watcher for guards with none, as a defect class; two stand as noted and latent, the `news` checker and the quiet-hours whole-run skip.
-- Adopt health at a seam through the recorder: `openSourceHealth(watcher.id, watcher.name)`, `mark(key, outcome, detail?)`, `return health.finish()`. These checkers early-return, so an escalation built at the bottom of the function never ships.
+- Adopt health at a seam through the recorder: `openSourceHealth(watcher.id, watcher.name)`, `mark(key, outcome, detail?)`, `return health.finish()`. These checkers early-return, so an escalation built at the bottom of the function never ships. On a run that could not judge a source, call `carry(key)`: `finish()` drops any source neither marked nor carried, which is meant for a de-configured one. A dropped record loses its `consecutive` streak and `lastOkAt`, so a streak one run from escalating resets and the alert reads "never succeeded". An infrastructure failure judges nothing either: Anthropic Tier-2 carries its record on a DB error after a successful fetch, and only a fetch failure counts against the source.
 - Health is observability and must never break the path it observes; capture is best-effort too, and a DB error never breaks the alert path.
 - A health alert's builder emits on every run past the threshold, and suppressing the repeats is the runner's id-dedup job. Never commit "we alerted" bookkeeping when the alert is built: the runner writes `last_notified_ids` only after a successful send, so an undelivered alert is simply re-emitted next run.
 - A health alert's id must be stable within an episode and distinct across episodes.
@@ -44,11 +44,14 @@ t=$(mktemp); sed -n '<N>p' src/watchers/reference/notes.md | fold -w 2000 > "$t"
 - ⚠️ Only the email spawn has tools (`toolSurface: "gmail-read"`); every other watcher spawn is tool-less (`--tools ""`).
 - ⚠️ A failing checker's errored span is the CHILD: the `scheduler_tick` root still finishes `ok`, so the `/traces` list row stays green and only the waterfall detail shows red.
 - ⚠️ A run landing in quiet hours is skipped whole, and `last_run_at` still advances, unless it is forced (`force_next_run`) or its type is in `QUIET_HOURS_RUN_EXEMPT`: `wiki-committer` is, because its side effect is a git commit and not a user notification.
+- ⚠️ A failure on an hour-gated row (`config.hour` set, any checker type) is not retried next tick: the runner's catch advances `last_run_at`, and `isScheduledTimeDue` then sees it inside today, so that day's run is lost. A weekly row also waits out its interval from that failure, so the week's run is gone. Only `force_next_run` brings it back early.
 - ⚠️ A prompt key seeded into a row's config hides the code default: the X Daily and Highlights alert prompts' seeded keys had to be stripped to pick up code defaults. X's capture gate (`runCaptureGate`) is code-only, since there `config.prompt` reaches only the alert and digest path. Anthropic differs: its gate reads `config.prompt || DEFAULT_ANTHROPIC_GATE_PROMPT` and its capture reuses that gate's score, so the row's prompt moves capture too. A setup script skips an existing row, so its seed reaches a fresh box only.
 
 Rules and traps about one checker stay in their section of the notes; ` [trap]` in the index below sends you there before you edit that code.
 
 ## Index
+
+` [trap]` marks a section that records a failure or hazard; an unmarked section can still hold a rule, so search before you edit.
 
 - Architecture
 - Watcher Types
@@ -56,7 +59,7 @@ Rules and traps about one checker stay in their section of the notes; ` [trap]` 
 - X/Twitter Watcher — Key Lessons
 - Rank read (`combined_score`, metadata-preferred) [trap]
 - Score-ordered document cap (`orderDocsForCap`) [trap]
-- X-Article amplification signal (`x-amplification.ts`)
+- X-Article amplification signal (`x-amplification.ts`) [trap]
 - Prompt size is critical [trap]
 - Collection path gotchas [trap]
 - Dedup
@@ -69,27 +72,27 @@ Rules and traps about one checker stay in their section of the notes; ` [trap]` 
 - Manual trigger via force_next_run
 - Wiki-readonly skip (`MUNINN_WIKI_READONLY`) [trap]
 - Time-of-day scheduling [trap]
-- Truthful `/agents` connector + model (`watcherConnectorInfo`)
+- Truthful `/agents` connector + model (`watcherConnectorInfo`) [trap]
 - Scheduler context
-- Per-watcher safety-net timeout
+- Per-watcher safety-net timeout [trap]
 - Concurrent-duplicate guard (`claimChecker`/`releaseChecker`) [trap]
 - Email Watcher (email.ts)
 - Query window + the success watermark (2026-08-14) [trap]
 - Tool fence (2026-10, arch-review A1) [trap]
 - Bounded retry (2026-08-13) [trap]
-- Anthropic Watcher (anthropic.ts)
+- Anthropic Watcher (anthropic.ts) [trap]
 - Two-layer Tier-2 response guard (2026-07-27, the llms.txt wedge) [trap]
 - Per-source health + escalation (`src/watchers/source-health.ts`) [trap]
 - Run-level health (2026-08-14, `run-health.ts`) [trap]
 - Skip-forever audit (2026-07-27) — dispositions [trap]
-- 3-row digest cadence (Phase 4)
-- Config fields (JSONB)
-- Candidate capture → the Candidates → Summaries inbox (Claude Learning Center, Phase B)
+- 3-row digest cadence (Phase 4) [trap]
+- Config fields (JSONB) [trap]
+- Candidate capture → the Candidates → Summaries inbox (Claude Learning Center, Phase B) [trap]
 - Wiki Gardener (wiki-gardener.ts + src/gardener/) [trap]
 - Wiki Linter (wiki-linter.ts + src/wiki/lint.ts) [trap]
 - Wiki Committer (wiki-committer.ts) [trap]
-- Consolidation Gardener (consolidation-gardener.ts)
+- Consolidation Gardener (consolidation-gardener.ts) [trap]
 - Configurable prompts
-- Configurable model [trap]
+- Configurable model
 - Tool-call visibility for Haiku-driven checkers (`spawnHaiku` telemetry) [trap]
 - Testing
