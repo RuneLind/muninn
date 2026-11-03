@@ -2488,7 +2488,7 @@ after the provenance backfill.
   own spelling, which strips ANY extension — `wikiPageStem` strips only
   `.md`/`.mdx`, so `plans/index.html` sat under `Bookkeeping` in the rail and
   arrived here as ordinary related work. ⚠️ `isMetaStem` is case-sensitive on
-  `CLAUDE` alone, inherited from the rail.
+  all three stems, inherited from the rail.
 
 **The open page's own ATTACHMENTS are excluded too** — a candidate whose `parent`
 is the open page. The rail already shows them as that page's attachment chip, so
@@ -4480,7 +4480,7 @@ The mutation routes additionally refuse as their FIRST statement (`readonlyRefus
 
 1. **Keyed on the resolved ROOT, not the registry name.** Every enforcement point already holds the root at its refusal (`writeWikiPage`'s `wikiDir`, `applyWikiProposal`'s `deps.wikiDir`, `writePlanQueue`'s `opts.wikiDir`, an egress route's `entry.root`), so the predicate is a string comparison against a value in hand — no registry lookup, and therefore no `registry-memo.ts` → `bots/config.ts` → `db/` import pull into the store and the page writer. A NAME key would need a name→root translation whose typo path fails **open**; the root key's typo path names a root nothing writes, i.e. fails closed for itself. Paths resolve through the shared `resolveConfiguredPath`, and matching additionally tries the realpath form so a symlinked (or, on a case-insensitive filesystem, differently-cased) spelling of the same directory still matches. Matching is **root-EXACT, never a prefix**: a wiki registered at a subdirectory of a listed root is NOT covered, so list each root you mean. The single realpath-aware comparison is `sameWikiRoot`, shared by the guard and by `unmatchedReadonlyWikiRoots` (the `registry-memo.ts` drift report + the `/models` card) — the pure registry builder used to re-spell it normalize-only, which warned "matches no registered wiki root" for every symlinked root while the entry it named carried `readonly: true`.
 2. **In the environment, not in `.wiki-reader.json`.** `readWikiReaderConfig` degrades a missing/unreadable/malformed file to `null`; for an ontology that is right, for a write guard it means "degrade to writable", silently and invisibly to any test run against a well-formed config. The file carries cosmetics (`include`), the environment carries safety.
-3. **Enforcement never reads `WikiRegistryEntry.readonly`.** That flag exists for the client half and the `/models` card only; a stale memo or a registry built without the roots must not be able to open the guard.
+3. **Enforcement never reads `WikiRegistryEntry.readonly`.** That flag exists for the `/models` card only (the client half reads `readonlyWiki`, from the root); a stale memo or a registry built without the roots must not be able to open the guard.
 
 **Registration buys THREE surfaces, not two,** which is why this switch forbids more than writes: file writes (the three seams), local reads (bounded by `DASHBOARD_HOST=127.0.0.1`) — and a set of `?wiki=`-steerable routes that spend a **model call** on page content, two of which reach the **live web** through the fact-check prompt's WebFetch/search instructions. Loopback does not bound that. Nor does bot-lessness: `resolveWikiSynthesisBot` falls through to `resolveResearchBot` for any entry with no pin and `source !== "bot"` (`bots/config.ts`), so every one of these routes resolves a bot and runs.
 

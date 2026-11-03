@@ -5,9 +5,9 @@
  * NO `mock.module` here — every DB seam is a parameter. The first cut mocked
  * `db/watchers.ts`/`db/messages.ts`/`db/threads.ts` and imported `runner.ts`, which
  * evaluates `x.ts` with the real logger bound; `x.test.ts`, later in the same
- * `bun test src/watchers/` process, then mocked `../logging.ts` too late to rebind
+ * `bun test` process, then mocked `../logging.ts` too late to rebind
  * it and six of its assertions went silently log-less. Injected deps mean this file
- * is safe anywhere in the chunk and needs no dedicated link in the test chain.
+ * is safe in any chain link and needs no dedicated link in the test chain.
  */
 import { test, expect, describe, beforeEach } from "bun:test";
 import type { Watcher, WatcherAlert } from "../types.ts";

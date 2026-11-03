@@ -50,7 +50,7 @@ import { bareId, stampedSessionRefs } from "./session-refs.ts";
  * The stem comes from `pageStemOf`, the RAIL's own spelling, which strips any
  * extension: `wikiPageStem` strips only `.md`/`.mdx`, so `plans/index.html` read
  * as the stem `index.html`, sat under `Bookkeeping` in the rail and arrived here
- * as ordinary related work. ⚠️ `isMetaStem` is case-SENSITIVE on `CLAUDE` alone
+ * as ordinary related work. ⚠️ `isMetaStem` is case-SENSITIVE on all three stems
  * (inherited from the rail, where the same predicate decides the tail).
  *
  * Exported for the lint's series checks (`lint-series.ts`, through `related.ts`'s
