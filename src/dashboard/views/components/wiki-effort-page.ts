@@ -392,8 +392,8 @@ function needsHtml<P>(map: JoinedWorkMap<P>, raw: WorkMap, id: string, done: Rea
 }
 
 function subEffortsHtml<P>(e: JoinedEffort<P>, efforts: readonly JoinedEffort<P>[], href: (id: string) => string): string {
-  // Every child whose crumb names this effort (`isNestedEffort`), including a
-  // Moving child the card lifts top-level from a closed-lane parent.
+  // Every child whose crumb names this effort (`isNestedEffort`), including one
+  // in another column, which the board shows alone with «part of».
   const all = efforts.filter((x) => x.parent === e.id && isNestedEffort(x, efforts));
   if (!all.length) return "";
   return (

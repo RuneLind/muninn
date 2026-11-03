@@ -581,14 +581,14 @@ test("a page declared after the load joins its effort on a listing refresh: its 
   await page.clock.install();
   await openStart(page, DECL);
   const alpha = page.locator('#wikiWorkCard .wiki-wm-effort[data-effort-id="alpha"]');
-  await expect(alpha.locator(".wiki-wm-pill")).toHaveCount(0);
+  await expect(alpha.locator(".wiki-wm-pill")).toHaveText(["no activity"]);
   // The run does not move: only the listing learns of the declaration.
   await writeFile(path.join(roots[DECL]!, "plans/declared-today.mdx"), `---\ntitle: Declared today\neffort: alpha\n---\n\n<NextMoves>\n\n<Lane kind="you">\n\n- One\n\n</Lane>\n\n</NextMoves>\n`, "utf8");
   await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(page.locator("#wikiList")).toContainText("Declared today");
   // On the board without a reload, and one click from its page.
-  await expect(alpha.locator(".wiki-wm-pill")).toHaveText("1 step");
+  await expect(alpha.locator(".wiki-wm-pill")).toHaveText(["1 step", "no activity"]);
   await alpha.locator("a.wiki-wm-effort-name").click();
   await expect(page.locator(".wiki-effort a[data-relpath]").first()).toHaveText("Declared today");
 });
@@ -3372,7 +3372,7 @@ for (const theme of THEMES) {
     await github.click();
     await expect(card.locator(".wiki-wm-drill-stale")).toBeVisible();
     await sweep("GitHub not current");
-    // A work effort's state chip paints on the effort page alone, whose spec sweeps it.
+    // A work effort's state chip paints on the effort page alone: that page's spec sweeps and pins all three.
     expect((await styledCardClasses(page)).filter((c) => !seen.has(c) && !["wm-state-active", "wm-state-blocked", "wm-state-shipped"].includes(c))).toEqual([]);
     console.log(`contrast min ${theme.label}: ${Math.min(...mins).toFixed(2)} (${labels.map((l, i) => `${l} ${mins[i]!.toFixed(2)}`).join(", ")})`);
     expect(low).toEqual([]);

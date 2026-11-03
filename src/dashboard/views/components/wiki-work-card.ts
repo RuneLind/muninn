@@ -211,14 +211,17 @@ function stemOf(rel: string): string {
 }
 
 // ── Lanes ─────────────────────────────────────────────────────────────
+/** Only the rail reads these, for the folds that may start open; the board reads
+ *  {@link BOARD_COLUMNS}. A unit test ties the two Movings together. */
 export const WORK_MAP_LANES = [
   { id: "moving", label: "Moving", states: ["active", "blocked", "proposed"], open: true },
   { id: "cooling", label: "Cooling", states: ["cooling"], open: false },
   { id: "quiet", label: "Quiet and shipped", states: ["quiet", "shipped"], open: false },
 ] as const;
 
-/** True when `e` renders under a parent: its parent chain reaches a root
- *  effort without a cycle. A cycle or a missing parent leaves it top-level. */
+/** True when `e`'s parent chain reaches a root effort without a cycle, the rule
+ *  for a crumb. A cycle or a missing parent leaves it top-level. On the board,
+ *  nesting also needs the parent in the same column (`nestsUp`). */
 export function isNestedEffort(e: { id: string; parent?: string }, efforts: readonly { id: string; parent?: string }[]): boolean {
   const byId = new Map(efforts.map((x) => [x.id, x]));
   const seen = new Set([e.id]);
@@ -233,7 +236,8 @@ export function isNestedEffort(e: { id: string; parent?: string }, efforts: read
 }
 
 /** Calendar days from `day` to `today`, both `YYYY-MM-DD`, so no clock and no DST
- *  enters; a later `day` reads as 0, a bad one as NaN. */
+ *  enters; a later `day` reads as 0, an unparseable one as NaN, and an overflow date
+ *  (`2026-02-30`) rolls over to the day it lands on. */
 function calendarDaysTo(day: string, today: string): number {
   return Math.max(0, Math.round((Date.parse(today + "T12:00:00Z") - Date.parse(day + "T12:00:00Z")) / 86_400_000));
 }
@@ -553,13 +557,13 @@ function byBoardOrder(a: BoardOrder, b: BoardOrder): number {
 function boardPillsHtml<P>(r: BoardRow<P>, now: number): string {
   const { decisions, since, steps, needKinds } = r.facts;
   const pill = (text: string, tone = "") => `<span class="wiki-wm-pill${tone}">${esc(text)}</span>`;
-  const active = activeLabel(r.idle);
   const pills =
     (decisions ? pill(`${decisions} decision${decisions === 1 ? "" : "s"}${since ? ` · ${daysSinceDay(since, now)} d` : ""}`, " warn") : "") +
     (needKinds.length ? pill(needKinds.join(" · "), " acc") : "") +
     (steps ? pill(`${steps} step${steps === 1 ? "" : "s"}`) : "") +
-    (active ? pill(active) : "");
-  return pills && `<div class="wiki-wm-pills">${pills}</div>`;
+    // A fixed label, so a quiet effort is not read as one with missing data.
+    pill(activeLabel(r.idle) || "no activity");
+  return `<div class="wiki-wm-pills">${pills}</div>`;
 }
 
 function boardNameHtml(e: { id: string; name: string }, effortHref?: (id: string) => string, titled = false): string {
@@ -891,7 +895,7 @@ function healthStripHtml<P extends CardPage>(
 
 // ── What you're following (a themes map, plan muninn-wiki-theme-map P2) ──
 /** The themes card's lanes, by the runner's trend state. Fading starts closed,
- *  as the work card's quiet lanes do. */
+ *  as a work map's Cooling, Quiet and Shipped columns do. */
 export const THEME_MAP_LANES = [
   { id: "new", label: "New", states: ["new"], open: true },
   { id: "rising", label: "Rising", states: ["rising"], open: true },

@@ -17,7 +17,8 @@
  *     under its effort on the card and the effort page; a retired id opens
  *     its retired view with the pages that declare it.
  *  6. **Legible in every theme**: every element of the effort page and its
- *     Connections pane that paints text clears 4.5:1.
+ *     Connections pane that paints text clears 4.5:1, the three state chips
+ *     the card's board no longer draws included.
  *
  * One muninn on its own port over two temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off. No model calls.
@@ -31,7 +32,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
-import { paintedMeasure } from "./contrast.ts";
+import { paintedMeasure, token } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 import { activityStrip, sessionsFromDay } from "../src/dashboard/views/components/wiki-effort-page.ts";
 
@@ -114,6 +115,7 @@ function mapJson(runAtMs: number, wiki = WIKI, driftName = "Drift check"): strin
       e("drift-ui", "Drift UI", [{ id: "plans/drift-ui.mdx", role: "plan" }], { parent: "drift", state: "proposed" }),
       e("grocery", "Grocery bot", [{ id: "plans/grocery.mdx", role: "plan" }], { state: "cooling" }),
       e("visuals", "Visual components", [{ id: "plans/visuals.mdx", role: "plan" }], { state: "shipped" }),
+      e("held", "Held work", [{ id: "plans/held.mdx", role: "plan" }], { state: "blocked" }),
       // Every page gone, and a related effort a later run dropped.
       e("ghost", "Ghost work", [{ id: "plans/gone.mdx", role: "plan" }], { state: "quiet", related: [{ id: "vanished", why: "" }] }),
     ],
@@ -156,6 +158,7 @@ test.beforeAll(async () => {
     await writeFile(path.join(root, "plans/drift-ui.mdx"), md("Drift UI plan"), "utf8");
     await writeFile(path.join(root, "plans/grocery.mdx"), md("Grocery plan"), "utf8");
     await writeFile(path.join(root, "plans/visuals.mdx"), md("Visuals plan", "shipped"), "utf8");
+    await writeFile(path.join(root, "plans/held.mdx"), md("Held plan"), "utf8");
   }
   wikiRunAt = now - 2 * HOUR;
   await writeFile(path.join(roots[WIKI]!, ".work-map.json"), mapJson(wikiRunAt), "utf8");
@@ -665,6 +668,16 @@ const UNSWEPT = new Set([
   "wiki-ef-week-last",
 ]);
 
+/** The chips this sweep alone measures since the board dropped them: where each
+ *  paints and the ink its rule gives it. `held` has no plan_status and shipped is
+ *  read off drift's Related row, because a blocked or shipped plan pill on a page
+ *  row is under 4.5:1 in the light themes, which is not this chip's measure. */
+const STATE_CHIPS = [
+  { cls: "wm-state-active", effort: "drift", pane: "#wikiEffortPage", ink: "--accent-light" },
+  { cls: "wm-state-blocked", effort: "held", pane: "#wikiEffortPage", ink: "--tone-warn" },
+  { cls: "wm-state-shipped", effort: "drift", pane: "#connBody", ink: "--tone-good" },
+];
+
 for (const theme of THEMES) {
   test(`the effort page is legible in the ${theme.label} theme`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -687,6 +700,12 @@ for (const theme of THEMES) {
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=drift`);
     await expectDriftPage(page);
     await run("effort");
+    for (const { cls, effort, pane, ink } of STATE_CHIPS) {
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=${effort}`);
+      // toHaveCSS retries until the page has landed; the token is read off a body probe.
+      await expect(page.locator(`${pane} .${cls}`)).toHaveCSS("color", await token(page, ink));
+      await run(`chip ${cls}`);
+    }
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&effort=ghost`);
     await expect(page.locator(".wiki-ef-conn-gone")).toHaveText("vanished");
     await expect(page.locator("#wikiEffortPage .wiki-ef-note")).toContainText("None of this effort’s pages");
@@ -702,6 +721,7 @@ for (const theme of THEMES) {
     await expect(page.locator(".wiki-ef-status")).toBeVisible();
     await run("no map");
     expect((await styledEffortClasses(page)).filter((c) => !seen.has(c) && !UNSWEPT.has(c))).toEqual([]);
+    expect(STATE_CHIPS.map((c) => c.cls).filter((c) => !seen.has(c))).toEqual([]);
     console.log(`contrast min ${theme.label}: ${mins.join(", ")}`);
     expect(low).toEqual([]);
   });

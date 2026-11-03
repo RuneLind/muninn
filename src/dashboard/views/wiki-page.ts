@@ -2720,7 +2720,6 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wm-col { min-width: 0; margin-bottom: 10px; }
     .wiki-wm-col[data-wm-lane="you"] { grid-row: 1 / -1; }
-    .wiki-wm-col > summary { cursor: pointer; list-style-position: inside; }
     .wiki-wm-col[data-wm-lane="you"] > summary, .wiki-wm-col[data-wm-lane="you"] > summary .wiki-wm-count { color: var(--accent-light); }
     @supports selector(::details-content) {
       @container wmboard (min-width: 1040px) {

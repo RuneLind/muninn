@@ -27,7 +27,8 @@ export const EFFORT_FOLD_PREFIX = "effort:";
 /** How many effort folds start open: the most recently active ones. */
 export const EFFORTS_OPEN_DEFAULT = 3;
 
-/** The effort states whose folds may start open (D14): the card's Moving lane. */
+/** The effort states whose folds may start open (D14): the Moving lane of
+ *  `WORK_MAP_LANES`, which only the rail reads. */
 export const EFFORT_MOVING_STATES: readonly EffortState[] = WORK_MAP_LANES.find((l) => l.id === "moving")!.states;
 
 /** The states whose folds may start open, per map kind: a themes map opens

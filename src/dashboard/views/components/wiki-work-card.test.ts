@@ -3,6 +3,7 @@ import { WORK_MAP_VERSION, type WorkMap } from "../../../wiki/work-map/schema.ts
 import { metadataFilterWarning } from "../../../wiki/work-map/run.ts";
 import {
   BOARD_COLUMNS,
+  WORK_MAP_LANES,
   boardColumn,
   boardFacts,
   formatAge,
@@ -180,6 +181,11 @@ describe("the board", () => {
     expect(boardColumn({ state: "quiet" }, { ...quiet, steps: 4 })).toBe("quiet");
   });
 
+  test("the board's Moving column holds the states the rail's Moving lane does", () => {
+    const moving = Object.entries(BOARD_COLUMNS).flatMap(([state, column]) => (column === "moving" ? [state] : []));
+    expect(moving.sort()).toEqual([...WORK_MAP_LANES[0].states].sort());
+  });
+
   test("one effort for each column rule", () => {
     const html = render(
       only(
@@ -212,7 +218,7 @@ describe("the board", () => {
   test("a closed-without-shipping page neither makes Waiting nor adds a step, as in the strip", () => {
     const html = render(only([effort("x", "quiet", ["x.mdx"])]), [pg("x.mdx", { movesWaiting: 2, movesYou: 2, waitingSince: "2026-10-01", plan_status: "abandoned" })]);
     expect(columnOf(html, "x")).toEqual(["quiet"]);
-    expect(html).not.toContain("wiki-wm-pill");
+    expect([...html.matchAll(/wiki-wm-pill( \w+)?">([^<]*)</g)].map((p) => p[2])).toEqual(["no activity"]);
     expect(stripRows([pg("x.mdx", { movesWaiting: 2, plan_status: "abandoned" })]).decisions).toEqual([]);
   });
 
@@ -457,7 +463,19 @@ describe("the board", () => {
     const html = render(m, [pg("a.mdx", { movesWaiting: 2, waitingSince: "2026-10-19", movesYou: 1 }), pg("b.mdx", { movesWaiting: 1, waitingSince: "2026-10-26", movesYou: 1 })]);
     expect([...html.matchAll(/wiki-wm-pill( \w+)?">([^<]*)</g)].map((p) => p[2])).toEqual(["3 decisions · 10 d", "decision · followup", "2 steps", "2 d ago"]);
     const one = render(only([effort("x", "active", ["a.mdx"])]), [pg("a.mdx", { movesWaiting: 1, movesYou: 1 })]);
-    expect([...one.matchAll(/wiki-wm-pill( \w+)?">([^<]*)</g)].map((p) => p[2])).toEqual(["1 decision", "1 step"]);
+    expect([...one.matchAll(/wiki-wm-pill( \w+)?">([^<]*)</g)].map((p) => p[2])).toEqual(["1 decision", "1 step", "no activity"]);
+  });
+
+  test("an effort with no activity says so, on a tile and on a compact row", () => {
+    const quietDay = [{ day: "2026-10-27", commits: 0, sessions: 0 }];
+    const html = render(only([effort("x", "active", ["a.mdx"]), effort("k", "active", ["a.mdx"], { parent: "x", daily: quietDay })]), [pg("a.mdx")]);
+    const row = (id: string) => {
+      const at = html.indexOf(`data-effort-id="${id}"`);
+      return html.slice(at, html.indexOf("wiki-wm-spark", html.indexOf("wiki-wm-pills", at)));
+    };
+    expect(row("x")).toContain('<div class="wiki-wm-pills"><span class="wiki-wm-pill">no activity</span></div>');
+    expect(html).toContain('wiki-wm-kid" data-effort-id="k"');
+    expect(row("k")).toContain('<div class="wiki-wm-pills"><span class="wiki-wm-pill">no activity</span></div>');
   });
 
   test("boardFacts counts what stripRows counts for the same pages", () => {
