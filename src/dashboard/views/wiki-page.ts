@@ -3286,8 +3286,8 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
       width: min(480px, calc(100vw - 32px));
       padding: 14px; border-radius: 12px; border: 1px solid var(--border-secondary);
       /* NB: an explicit token. This was var(--bg-elevated, var(--bg-secondary)),
-         and the explicit Light and Dark themes define NEITHER name (--bg-elevated comes
-         from the System theme and the palettes) — so there the declaration was invalid and the
+         and NEITHER name was defined on this page then (today --bg-elevated comes from
+         the System theme and the palettes) — so the whole declaration was invalid and the
          dialog rendered fully TRANSPARENT, with the article text showing through
          it. Any replacement must name a token this page actually defines. */
       background: var(--bg-surface); box-shadow: 0 18px 48px rgba(0,0,0,0.5);

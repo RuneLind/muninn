@@ -36,7 +36,7 @@ t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -s -w 2000 > 
 
 - ⚠️ **Hand-written SSE framing:** `stream.writeSSE({event, data})` frames an event itself. Only a hand-written write has to end each event in a double newline (`data: JSON\n\n`); a missing one breaks the stream.
 - ⚠️ **A non-200 ends an `EventSource` for good:** it goes to `readyState` 2 and never retries.
-- ⚠️ **An undefined CSS token fails silently:** `.wiki-chatopt` used `var(--bg-elevated, var(--bg-secondary))`. On `/wiki`, `--bg-secondary` is never defined and `--bg-elevated` is missing under the explicit Light and Dark themes (`palettes.ts` sets it for the System theme and every palette), so there the declaration is invalid and the dialog renders fully transparent. Check a token in every theme.
+- ⚠️ **An undefined CSS token fails silently:** `.wiki-chatopt` once used `var(--bg-elevated, var(--bg-secondary))`, neither defined on `/wiki` then, so the declaration was invalid and the dialog rendered fully transparent. Today `--bg-secondary` is still never defined, and `--bg-elevated` is missing under the explicit Light and Dark themes only (`palettes.ts` sets it for the System theme and every palette). Check a token in every theme.
 
 ## Index
 
