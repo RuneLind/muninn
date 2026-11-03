@@ -9,11 +9,7 @@ Detail about one checker or one function lives in `src/watchers/reference/notes.
 - **Search it this way, never plain:** `rg -n -o '.{0,120}<term>.{0,120}' src/watchers/reference/notes.md`. With the Grep tool: `output_mode: content`, `-o`, the same pattern and that path. Keep the window at 120 chars or less. Lines are long: plain `rg` prints each whole line and plain Grep returns "Omitted long matching line". Do not use `grep -o` here: in a Claude Code shell it returns nothing for this pattern and exits 1, which reads as no note.
 - **Before editing a file:** search its basename and the exported functions you are changing; few hits is not full coverage: `x.ts` gets 3 lines, while its section, `X/Twitter Watcher — Key Lessons`, runs to 75k chars under a heading without the basename. **To look up a topic:** find its heading in the index and search a few plain words of it, never the whole heading.
 - **No hit:** zero hits on a basename means no note under that name, not no rule: `format-alerts.ts`, `config-knobs.ts` and `quiet-hours.ts` have none. Search the file's stem and exported names (`quiet-hours` 9 lines, `isQuietHours` 2, `formatAlerts` 1), then the index (`config-knobs` and `readIntKnob` have no hit either; Config fields holds its knobs), then the neighbouring module's `notes.md`, or its `CLAUDE.md` where it has none; `rg -l <term> src -g '{CLAUDE,notes}.md'` finds which.
-- **Read a hit:** `Read` from the hit's line with a limit of about 30 lines, not the whole section: sections run to 75k chars, and one subsection (`Candidate capture`) to 50k. A line over about 5,000 chars goes through this fold step first, with the file's full path; none does today (the longest is 2,703). From the repo root a bare `notes.md` prints a valid path to an empty file and exits 0. Then `Read` the printed file with offset and limit:
-
-```bash
-t=$(mktemp); sed -n '<N>p' src/watchers/reference/notes.md | fold -w 2000 > "$t"; echo "$t"
-```
+- **Read a hit:** `Read` from the hit's line with a limit of about 30 lines, not the whole section: sections run to 75k chars, and one subsection (`Candidate capture`) to 50k. No line is over about 5,000 chars today (the longest is 2,703); one that grows past it goes through `t=$(mktemp); sed -n '<N>p' src/watchers/reference/notes.md | fold -s -w 2000 > "$t"; echo "$t"` first, with the full path because a bare `notes.md` prints a valid path to an empty file and exits 0, and the printed file takes `Read` with offset and limit or `rg -n -o '.{0,120}<term>.{0,120}' <printed path>`.
 
 **History:** `git log --follow -- src/watchers/reference/notes.md` reaches the old file's commits.
 
@@ -24,7 +20,7 @@ t=$(mktemp); sed -n '<N>p' src/watchers/reference/notes.md | fold -w 2000 > "$t"
 - Treat a fix that requires a hand-edited DB row as inert where it matters.
 - `last_run_at` must never be treated as a health signal: `runner.ts` advances it on every failure to prevent retry storms, which is why it is uninformative.
 - Give a new guard that can repeat indefinitely a counter, a bound or a surface. The skip-forever audit went through every watcher for guards with none, as a defect class; two stand as noted and latent, the `news` checker and the quiet-hours whole-run skip.
-- Adopt health at a seam through the recorder: `openSourceHealth(watcher.id, watcher.name)`, `mark(key, outcome, detail?)`, `return health.finish()`. These checkers early-return, so an escalation built at the bottom of the function never ships. On a run that could not judge a source, call `carry(key)`: `finish()` drops any source neither marked nor carried, which is meant for a de-configured one. A dropped record loses its `consecutive` streak and `lastOkAt`, so a streak one run from escalating resets and the alert reads "never succeeded". An infrastructure failure judges nothing either: Anthropic Tier-2 carries its record on a DB error after a successful fetch, and only a fetch failure counts against the source.
+- Adopt health at a seam through the recorder: `openSourceHealth(watcher.id, watcher.name)`, `mark(key, outcome, detail?)`, `return health.finish()`. These checkers early-return, so an escalation built at the bottom of the function never ships. Mark a failure you want surfaced: every non-`ok` outcome extends the streak, and three in a row escalate. On a run that could not judge a source, call `carry(key)`: `finish()` drops any source neither marked nor carried, which is meant for a de-configured one. A dropped record loses its `consecutive` streak and `lastOkAt`, so a streak one run from escalating resets and the alert reads "never succeeded".
 - Health is observability and must never break the path it observes; capture is best-effort too, and a DB error never breaks the alert path.
 - A health alert's builder emits on every run past the threshold, and suppressing the repeats is the runner's id-dedup job. Never commit "we alerted" bookkeeping when the alert is built: the runner writes `last_notified_ids` only after a successful send, so an undelivered alert is simply re-emitted next run.
 - A health alert's id must be stable within an episode and distinct across episodes.
@@ -44,7 +40,7 @@ t=$(mktemp); sed -n '<N>p' src/watchers/reference/notes.md | fold -w 2000 > "$t"
 - ⚠️ Only the email spawn has tools (`toolSurface: "gmail-read"`); every other watcher spawn is tool-less (`--tools ""`).
 - ⚠️ A failing checker's errored span is the CHILD: the `scheduler_tick` root still finishes `ok`, so the `/traces` list row stays green and only the waterfall detail shows red.
 - ⚠️ A run landing in quiet hours is skipped whole, and `last_run_at` still advances, unless it is forced (`force_next_run`) or its type is in `QUIET_HOURS_RUN_EXEMPT`: `wiki-committer` is, because its side effect is a git commit and not a user notification.
-- ⚠️ A failure on an hour-gated row (`config.hour` set, any checker type) is not retried next tick: the runner's catch advances `last_run_at`, and `isScheduledTimeDue` then sees it inside today, so that day's run is lost. A weekly row also waits out its interval from that failure, so the week's run is gone. Only `force_next_run` brings it back early.
+- ⚠️ A failed run on an hour-gated row (`config.hour` set, any checker type) still advances `last_run_at`, whichever way it ends: a checker that swallows the error reaches the runner's success tail (`finishWatcherRun`), and a throw reaches the runner's catch. `isScheduledTimeDue` then sees it inside today, so that day's run is lost. A weekly row also waits out its interval from that failure, so the week's run is gone. `force_next_run` brings it back. A process death or a failed write of `last_run_at` leaves the row due.
 - ⚠️ A prompt key seeded into a row's config hides the code default: the X Daily and Highlights alert prompts' seeded keys had to be stripped to pick up code defaults. X's capture gate (`runCaptureGate`) is code-only, since there `config.prompt` reaches only the alert and digest path. Anthropic differs: its gate reads `config.prompt || DEFAULT_ANTHROPIC_GATE_PROMPT` and its capture reuses that gate's score, so the row's prompt moves capture too. A setup script skips an existing row, so its seed reaches a fresh box only.
 
 Rules and traps about one checker stay in their section of the notes; ` [trap]` in the index below sends you there before you edit that code.
@@ -66,7 +62,7 @@ Rules and traps about one checker stay in their section of the notes; ` [trap]` 
 - Config fields (stored in watcher JSONB config) [trap]
 - Silent alerts and the quality-gate pattern
 - Candidate capture → the Candidates → Summaries inbox (Claude Learning Center, Phase B — X → shelf) [trap]
-- 3-watcher pattern (daytime alerts + daily + weekly)
+- 3-watcher pattern (daytime alerts + daily + weekly) [trap]
 - No fallback on model failure
 - Runner (runner.ts)
 - Manual trigger via force_next_run
