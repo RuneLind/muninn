@@ -1874,6 +1874,22 @@ test("a checks answer that changes nothing leaves the DOM and a selection alone"
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
 });
 
+/** How many checks answers the page has read. The page's own chain on `json()` runs in that promise's microtask
+ *  checkpoint, so once this counts one, the page has handled it by the next `evaluate`. */
+async function countChecksAnswers(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __checksRead: number };
+    w.__checksRead = 0;
+    const json = Response.prototype.json;
+    Response.prototype.json = function (this: Response) {
+      const p = json.call(this);
+      if (this.url.includes("/work-map/checks")) void p.then(() => { w.__checksRead += 1; });
+      return p;
+    };
+  });
+  return () => page.evaluate(() => (window as unknown as { __checksRead: number }).__checksRead);
+}
+
 /** Select a page-title's text in the card, the way a reader's drag ends up. */
 const selectNeedTitle = (page: Page) =>
   page.evaluate(() => {
@@ -1888,6 +1904,7 @@ const selectNeedTitle = (page: Page) =>
 /** A check that answers «refreshing» first and a contradiction next, with the reader's selection in between. */
 async function checksChangeUnderSelection(page: Page) {
   await page.clock.install();
+  const read = await countChecksAnswers(page);
   const stub = await stubChecks(page, (n) =>
     n === 1 ? checksBody({ refreshing: true }) : checksBody({ contradictions: [GH_CONTRADICTION] }));
   await openStart(page, GH);
@@ -1898,8 +1915,7 @@ async function checksChangeUnderSelection(page: Page) {
   const selected = await selectNeedTitle(page);
   expect(selected.length).toBeGreaterThan(0);
   await stub.retry(2);
-  await expect.poll(() => stub.count()).toBe(2);
-  await page.waitForTimeout(100);
+  await expect.poll(read).toBe(2);
   return { card, github, selected };
 }
 
@@ -1927,25 +1943,6 @@ test("a press that ends the selection holds the waiting answer until the pointer
   await page.clock.runFor(1);
   await expect(github.locator("b")).toHaveText("1");
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
-});
-
-test("a click on a control with the selection still up lands, and paints what waited", async ({ page }) => {
-  await page.clock.install();
-  const stub = await stubChecks(page, (n) =>
-    checksBody({ refreshing: n === 1, contradictions: [GH_CONTRADICTION] }));
-  await openStart(page, GH);
-  const card = page.locator("#wikiWorkCard");
-  const github = card.locator('[data-wm-cell="github"]');
-  await expect(github).toContainText("refreshing");
-  await selectNeedTitle(page);
-  await stub.retry(2);
-  await page.waitForTimeout(100);
-  await expect(github).toContainText("refreshing");
-  // By coordinates: `click()` waits on animation frames that the installed clock holds.
-  const box = (await github.boundingBox())!;
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await expect(github).toHaveAttribute("aria-expanded", "true");
-  await expect(github).not.toContainText("refreshing");
 });
 
 test("a drag that starts a new selection keeps the answer waiting", async ({ page }) => {
@@ -1980,22 +1977,6 @@ test("a selection outside the card does not hold the answer back", async ({ page
   await stub.retry(2);
   await expect(github.locator("b")).toHaveText("1");
 });
-
-/** How many checks answers the page has read. The page's own chain on `json()` runs in that promise's microtask
- *  checkpoint, so once this counts one, the page has handled it by the next `evaluate`. */
-async function countChecksAnswers(page: Page) {
-  await page.addInitScript(() => {
-    const w = window as unknown as { __checksRead: number };
-    w.__checksRead = 0;
-    const json = Response.prototype.json;
-    Response.prototype.json = function (this: Response) {
-      const p = json.call(this);
-      if (this.url.includes("/work-map/checks")) void p.then(() => { w.__checksRead += 1; });
-      return p;
-    };
-  });
-  return () => page.evaluate(() => (window as unknown as { __checksRead: number }).__checksRead);
-}
 
 /** A held checks answer on a board whose strip is painted and marked, with no timer in the way. */
 async function boardWithHeldAnswer(page: Page) {
@@ -2033,19 +2014,38 @@ for (const [name, lane, opened] of [
   });
 }
 
+test("a click on a control with the selection still up lands, and paints what waited", async ({ page }) => {
+  const { card, land } = await boardWithHeldAnswer(page);
+  const name = await card.locator("[data-wm-cell]:not([disabled])").first().getAttribute("data-wm-cell");
+  const cell = card.locator(`[data-wm-cell="${name}"]`);
+  expect((await selectCardTitle(page)).length).toBeGreaterThan(0);
+  await land();
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  await cell.click();
+  await expect(cell).toHaveAttribute("aria-expanded", "true");
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+});
+
+/** A point on plain text in the card, in view: a press off-screen lands on the document, not the card. */
+async function pressPoint(card: ReturnType<Page["locator"]>) {
+  const text = card.locator(".wiki-wm-coverage");
+  await text.scrollIntoViewIfNeeded();
+  const box = (await text.boundingBox())!;
+  return { x: box.x + 2, y: box.y + 6, width: box.width };
+}
+
 test("a drag that collapses back over its start keeps the answer waiting until the pointer is up", async ({ page }) => {
   const { card, land } = await boardWithHeldAnswer(page);
-  const box = (await card.locator(".wiki-wm-coverage").boundingBox())!;
-  const start = { x: box.x + 2, y: box.y + 6 };
+  const start = await pressPoint(card);
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
-  await page.mouse.move(start.x + box.width / 2, start.y + 2, { steps: 6 });
+  await page.mouse.move(start.x + start.width / 2, start.y + 2, { steps: 6 });
   expect((await page.evaluate(() => getSelection()!.toString())).length).toBeGreaterThan(0);
   await land();
   await page.mouse.move(start.x, start.y, { steps: 6 });
   await expect.poll(() => page.evaluate(() => getSelection()!.isCollapsed)).toBe(true);
   await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
-  await page.mouse.move(start.x + box.width / 2, start.y + 2, { steps: 6 });
+  await page.mouse.move(start.x + start.width / 2, start.y + 2, { steps: 6 });
   expect((await page.evaluate(() => getSelection()!.toString())).length).toBeGreaterThan(0);
   await page.mouse.up();
   await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
@@ -2053,25 +2053,61 @@ test("a drag that collapses back over its start keeps the answer waiting until t
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
 });
 
-test("an answer that lands inside a press with nothing selected waits for the pointer", async ({ page }) => {
+test("a cancelled press lets the waiting answer paint", async ({ page }) => {
   const { card, land } = await boardWithHeldAnswer(page);
-  const box = (await card.locator(".wiki-wm-coverage").boundingBox())!;
-  await page.mouse.move(box.x + 2, box.y + 6);
-  await page.mouse.down();
+  await selectCardTitle(page);
   await land();
+  const at = await pressPoint(card);
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.down();
+  await page.evaluate(() => getSelection()!.removeAllRanges());
   await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
-  await page.mouse.up();
+  await page.evaluate(() => document.dispatchEvent(new PointerEvent("pointercancel")));
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  await page.mouse.up();
 });
 
-test("a held right button does not hold the answer back", async ({ page }) => {
+test("a right-button press does not hold the waiting answer back once its menu opens", async ({ page }) => {
   const { card, land } = await boardWithHeldAnswer(page);
-  const box = (await card.locator(".wiki-wm-coverage").boundingBox())!;
-  await page.mouse.move(box.x + 2, box.y + 6);
-  await page.mouse.down({ button: "right" });
+  await selectCardTitle(page);
   await land();
+  const at = await pressPoint(card);
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.down({ button: "right" });
+  await page.evaluate(() => document.dispatchEvent(new MouseEvent("contextmenu")));
+  await page.evaluate(() => getSelection()!.removeAllRanges());
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
   await page.mouse.up({ button: "right" });
+});
+
+for (const [name, heal] of [
+  ["a hover with no button down", async (page: Page, at: { x: number; y: number }) => { await page.mouse.move(at.x, at.y); await page.mouse.move(at.x + 4, at.y); }],
+  ["a context menu", async (page: Page) => { await page.evaluate(() => document.dispatchEvent(new MouseEvent("contextmenu"))); }],
+] as const) {
+  test(`a release the page never saw is ended by ${name}`, async ({ page }) => {
+    const { card, land } = await boardWithHeldAnswer(page);
+    await selectCardTitle(page);
+    await land();
+    const at = await pressPoint(card);
+    // What a release over an iframe leaves: a press, and no pointerup at this document.
+    await page.evaluate(() => document.dispatchEvent(new PointerEvent("pointerdown", { button: 0 })));
+    await page.evaluate(() => getSelection()!.removeAllRanges());
+    await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+    await heal(page, at);
+    await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  });
+}
+
+test("a lane opened without a click stays open through the repaint", async ({ page }) => {
+  const { card, land } = await boardWithHeldAnswer(page);
+  await page.evaluate(() => new Promise((resolve) => {
+    const lane = document.querySelector<HTMLDetailsElement>('#wikiWorkCard [data-wm-lane="cooling"]')!;
+    lane.addEventListener("toggle", resolve, { once: true });
+    lane.open = true;
+  }));
+  await land();
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  await expect(card.locator('[data-wm-lane="cooling"]')).toHaveAttribute("open", "");
 });
 
 test("a start view that comes back paints its card, though the last answer changed nothing", async ({ page }) => {

@@ -118,10 +118,13 @@ export function initStartCards(d: StartCardsDeps): void {
       true,
     );
     document.addEventListener("selectionchange", flushWaitingPaint);
-    // Primary button only: a right-click's release can go to a context menu instead.
-    document.addEventListener("pointerdown", (e) => { if (e.button === 0) pointerHeld = true; }, true);
+    // A release can miss this document (over an iframe, into a context menu), so a
+    // hover with no button down and `contextmenu` end the press too.
+    document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
     document.addEventListener("pointerup", onPointerEnd, true);
     document.addEventListener("pointercancel", onPointerEnd, true);
+    document.addEventListener("contextmenu", onPointerEnd, true);
+    document.addEventListener("pointermove", (e) => { if (pointerHeld && e.buttons === 0) onPointerEnd(); }, true);
   }
 }
 
@@ -1008,8 +1011,8 @@ function resolveFocus(el: HTMLElement, key: FocusKey): void {
 let paintedCardHtml: string | null = null;
 
 /** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing,
- *  and an answer that changes something waits until the reader's selection and press end. An adopt whose keys
- *  moved paints the same way. */
+ *  and an answer that changes something waits until the reader's selection ends. An adopt whose keys moved
+ *  paints the same way. */
 function paintWorkCardIfChanged(): void {
   paintWorkCard(undefined, true);
 }
@@ -1023,8 +1026,8 @@ function selectionTouchesCard(el: HTMLElement): boolean {
 let paintWaiting = false;
 let pointerHeld = false;
 
-/** Try what waited again. `paintWorkCard` waits on if the pointer is still down or a selection still touches the
- *  card; the check here only saves that render on every `selectionchange` of a drag. */
+/** Try what waited again, once the pointer is up: a drag can pass back over its start and collapse its selection,
+ *  and a paint then would end the drag. `paintWorkCard` waits on if a selection still touches the card. */
 function flushWaitingPaint(): void {
   if (paintWaiting && !pointerHeld) paintWorkCardIfChanged();
 }
@@ -1062,7 +1065,7 @@ function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   // compares against it and does not render the card again for the same keys.
   paintedDeclarationKey = declarationKey(pages, runAt);
   paintedStripKey = currentStripKey();
-  if (onlyIfChanged && (paintedCardHtml === html || pointerHeld || selectionTouchesCard(el))) {
+  if (onlyIfChanged && (paintedCardHtml === html || selectionTouchesCard(el))) {
     paintWaiting = paintedCardHtml !== html;
     ensureWorkChecks();
     return;
