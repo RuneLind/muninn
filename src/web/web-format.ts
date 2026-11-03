@@ -2278,7 +2278,7 @@ const webRenderer: BlockRenderer = {
       case "Fact": {
         // BLOCK form — a `<Fact>` owning its whole line, which the block parser
         // claims before `renderInline` ever sees it. `children` is already rendered
-        // block HTML (a <p>), so the mark is a block-level wrapper here; the
+        // block HTML, so the mark is a block-level wrapper here; the
         // common inline form is handled in `renderInline`.
         const { chip } = factMarkParts(attrs);
         const v = normalizeFactVerdict(attrs.v);
