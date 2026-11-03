@@ -817,7 +817,10 @@ the verdict there is `ignore` — the silent reconnect those instances had befor
 this module existed. Banner'ing instead told readers of an auth-OFF instance,
 which has no sessions, that their session had expired on any permanent stream
 failure. The page render writes in the session's provider, so a tab whose
-`/chat/me` failed both attempts still reloads and banners.
+`/chat/me` answered a 401 on both attempts still reaches the rules above: its
+socket's probe gets a 401 too, which reloads once on `entra` and then banners.
+A `/chat/me` that fails any other way (a 403, a 5xx, a transport failure, a 200
+that is not JSON) still leaves the tab with no expiry banner and no identity.
 
 **A refused UPGRADE carries no code.** The browser reports a 401'd handshake as
 an ordinary 1006 close, so the 4401 rule was structurally blind to it and the

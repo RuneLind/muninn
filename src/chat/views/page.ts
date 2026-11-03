@@ -430,8 +430,8 @@ const CHAT_SCRIPT = `
           sessionUser = me && me.mode === 'session' ? me : null;
           identityUnknown = false;
           // The provider is what the WebSocket and EventSource expiry rules key
-          // on — neither channel can read a body, so this is the only place it
-          // can come from. Published before anything opens either.
+          // on, since neither channel can read a body. The page render seeded it;
+          // this answer replaces that, before anything opens either.
           window.__muninnSetAuthProvider(me && me.provider);
           // A working session is the evidence that a previous automatic reload
           // succeeded. Window-guarded inside — see authed-fetch.ts.
@@ -833,7 +833,7 @@ const CHAT_SCRIPT = `
       // then spin against it forever with nothing on screen to say why.
       //
       // The decision is MODE-CONDITIONAL, and a close event carries no body —
-      // only a code — so the predicate is the provider cached from /chat/me:
+      // only a code — so the predicate is the cached provider:
       //
       //   entra → the sidecar signs the reader back in on the next navigation,
       //           so a reload is a transparent re-login (breaker-bounded).

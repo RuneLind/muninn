@@ -27,8 +27,8 @@
  *    rather than saying nothing. NB a **HEAD** request carries no body either,
  *    so it lands in that same "refused, unexplained" branch by construction.
  *  - **The WebSocket** has neither status nor body — a `close` event carries a
- *    CODE. So it keys on the provider `/chat/me` already returns, cached here
- *    at load. Two closes reach the rule: the server's own 4401 cap, and a
+ *    CODE. So it keys on the provider cached here, from the page render and
+ *    then `/chat/me`. Two closes reach the rule: the server's own 4401 cap, and a
  *    handshake REFUSED by the middleware, which the browser reports as an
  *    ordinary 1006 — see `page.ts`'s `connectWs`, which probes the session
  *    before it believes a socket that never opened.
