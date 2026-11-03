@@ -635,6 +635,7 @@ function stripDrillHtml(rows: readonly StripRow[], cell: StripCell, view: StripV
 
 // ── The GitHub check's cell (your-work board P2) ──────────────────────
 const GH_CELL_LABEL = "ledger rows GitHub contradicts";
+const GH_NOT_CURRENT = "From the last answer, not current";
 
 const NOT_CHECKED_HTML: Record<Exclude<NotCheckedReason, "disabled" | "no-access">, string> = {
   "no-gh": "not checked: install <code>gh</code>",
@@ -654,17 +655,14 @@ function ghPrLinkHtml(repo: string, pr: number): string {
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 /** The list's opening line when no row is contradicted. It claims only what was read. */
-function ghClearSentence(body: WorkMapChecksBody, stale: boolean): string {
-  const { checked, unchecked } = body;
-  const partly = unchecked > 0 || !!body.notChecked;
+function ghClearSentence(body: WorkMapChecksBody): string {
+  const { checked, compared, unchecked } = body;
   if (!checked) {
     if (unchecked > 0) return `GitHub answered for none of the ${plural(unchecked, "row")} with a PR link, so nothing is known about them yet.`;
-    return partly ? "Nothing was read from GitHub." : "No ledger row has a full PR link, so GitHub was asked about none of them.";
+    return body.notChecked ? "Nothing was read from GitHub." : "No ledger row has a PR link in a column the check reads.";
   }
-  const line = partly
-    ? `GitHub contradicts none of the rows it answered for (${plural(checked, "row")} checked, ${unchecked} not checked).`
-    : `Every ledger row with a full PR link agrees with GitHub (${plural(checked, "row")} checked).`;
-  return stale ? `In the last answer, ${line[0]!.toLowerCase()}${line.slice(1)}` : line;
+  if (!compared) return "No row with a PR read says open or planned, so nothing could contradict GitHub.";
+  return compared === 1 ? "The 1 row saying open or planned does not contradict GitHub." : `None of the ${compared} rows saying open or planned contradicts GitHub.`;
 }
 
 /** One labelled group. A folded one is a heading and a `+N more`; open, it takes the row window. */
@@ -688,7 +686,8 @@ function ghDrillHtml(body: WorkMapChecksBody, view: StripView, stale: boolean, b
   const fold = (g: GhFoldedGroup) => view.ghGroups?.[g] ?? "shut";
   return (
     `<div class="wiki-wm-drill" data-wm-drill="github"><div class="wiki-wm-drill-title">${esc(STRIP_TITLES.github)}</div>` +
-    (body.contradictions.length ? "" : `<p class="wiki-wm-drill-clear">${esc(ghClearSentence(body, stale))}</p>`) +
+    (stale ? `<p class="wiki-wm-drill-stale">${GH_NOT_CURRENT}</p>` : "") +
+    (body.contradictions.length ? "" : `<p class="wiki-wm-drill-clear">${esc(ghClearSentence(body))}</p>`) +
     ghGroupHtml(
       "contradictions",
       "GitHub contradicts",
@@ -699,7 +698,7 @@ function ghDrillHtml(body: WorkMapChecksBody, view: StripView, stale: boolean, b
       "",
     ) +
     ghGroupHtml("unchecked", "Not checked", body.uncheckedRows.map((r) => row(r.page, `${ghPrLinkHtml(r.repo, r.pr)} not checked`)), fold("unchecked"), "not checked") +
-    ghGroupHtml("unlinked", "No full PR link", body.unlinkedRows.map((r) => row(r.page, `${esc(r.label)}: no full PR link`)), fold("unlinked"), "with no full PR link") +
+    ghGroupHtml("unlinked", "No PR link read", body.unlinkedRows.map((r) => row(r.page, `${esc(r.label)}: no PR link in a column the check reads`)), fold("unlinked"), "with no PR link read") +
     "</div>"
   );
 }
@@ -719,13 +718,14 @@ function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, 
   const notes: string[] = [];
   // The rows are read from the pages, so an older answer's count still stands, muted.
   const older = checks.answerRunAt !== runAtMs;
-  const drill = ghDrillHtml(body, view, older || !!checks.failed, byKey, hrefFor);
-  // Rows but no PR to ask about: that 0 would read as all clear too.
-  const onlyUnlinked = body.checked === 0 && !reason && body.unchecked === 0 && body.unlinked > 0;
-  // A 0 with nothing read would read as all clear.
-  const nothingRead = body.checked === 0 && (!!reason || body.unchecked > 0 || onlyUnlinked);
   // A hung `gh` answers from states past their hour, so the retries can end here.
   const notRefreshed = !!body.refreshing && !checks.retrying;
+  const stale = older || !!checks.failed || notRefreshed;
+  const drill = ghDrillHtml(body, view, stale, byKey, hrefFor);
+  // Rows but no PR to ask about: that 0 would read as all clear too.
+  const noneToAsk = body.checked === 0 && !reason && body.unchecked === 0 && body.unlinked + body.skipped > 0;
+  // A 0 with nothing read would read as all clear.
+  const nothingRead = body.checked === 0 && (!!reason || body.unchecked > 0 || noneToAsk);
   if (reason) notes.push(`<span class="wiki-wm-cell-note">${notCheckedHtml(reason, notChecked?.repos ?? [])}</span>`);
   // A failed fetch outranks what the older answer said about itself; a remedy already says it.
   if (checks.failed) {
@@ -735,12 +735,12 @@ function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, 
   else {
     if (notRefreshed && !nothingRead) notes.push('<span class="wiki-wm-cell-note">not refreshed</span>');
     if (!reason && body.unchecked > 0) notes.push(`<span class="wiki-wm-cell-note">${body.unchecked} not checked</span>`);
-    else if (onlyUnlinked) notes.push(`<span class="wiki-wm-cell-note">${body.unlinked} with no full PR link</span>`);
+    else if (noneToAsk) notes.push(`<span class="wiki-wm-cell-note">${body.unlinked ? `${body.unlinked} with no PR link read` : `${body.skipped} skipped`}</span>`);
   }
-  const tone = [older || checks.failed || nothingRead || notRefreshed ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
+  const tone = [stale || nothingRead ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
   const cell = stripCellHtml("github", nothingRead ? "—" : String(n), GH_CELL_LABEL, tone, view, !drill, {
     note: notes.join(""),
-    title: `${body.checked} checked · ${body.unchecked} not checked · ${body.unlinked} with no full PR link · ${body.skipped} skipped`,
+    title: `${stale ? `${GH_NOT_CURRENT} · ` : ""}${body.checked} checked · ${body.unchecked} not checked · ${body.unlinked} with no PR link read · ${body.skipped} skipped`,
   });
   return { cell, drill };
 }

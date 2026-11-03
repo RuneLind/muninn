@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseBlocks } from "./markdown-ast.ts";
-import { findLedgers, firstRowPerPr, pageLedgers, parseLedgerTable, prStateMap } from "./pr-ledger.ts";
+import { findGlanceLedger, findLedgers, firstRowPerPr, pageLedgers, parseLedgerTable, prStateMap } from "./pr-ledger.ts";
 
 // A row's own PR, the one the GitHub check compares its state with. Made-up repos.
 describe("LedgerRow.ownPr", () => {
@@ -71,10 +71,53 @@ describe("the everyRow read", () => {
     expect(prStateMap([parseLedgerTable(H, ROWS)])).toEqual(new Map([[7, "open"]]));
   });
 
-  test("a glance table stays as it is: its rows with no number stay out", () => {
-    const glance = "### At a glance\n\n| PR | What |\n|---|---|\n| 1 — a | x |\n| Later | y |\n";
-    const rows = pageLedgers(parseBlocks(glance), true, { everyRow: true })[0]!.rows;
-    expect(rows.map((r) => [r.pr, r.state, r.claimedState])).toEqual([[1, "planned", "planned"]]);
+  describe("a glance table", () => {
+    const GLANCE = "### At a glance\n\n| PR | What |\n|---|---|\n| 1 — a | x |\n| Later | y |\n";
+
+    test("keeps a row with no number for the check, planned by source", () => {
+      const rows = pageLedgers(parseBlocks(GLANCE), true, { everyRow: true })[0]!.rows;
+      expect(rows.map((r) => [r.pr, r.state, r.claimedState])).toEqual([[1, "planned", "planned"], [null, "planned", "planned"]]);
+      expect(findGlanceLedger(parseBlocks(GLANCE), { everyRow: true })!.rows).toHaveLength(2);
+    });
+
+    test("every other reader's rows stay the numbered ones", () => {
+      expect(pageLedgers(parseBlocks(GLANCE), true)[0]!.rows.map((r) => r.pr)).toEqual([1]);
+      expect(findGlanceLedger(parseBlocks(GLANCE))!.rows.map((r) => r.pr)).toEqual([1]);
+    });
+  });
+});
+
+// A header such as `Status og PR-er` says its cell holds the state, among other things.
+describe("a header that opens with a state word", () => {
+  const LINKED = "[[owner]]";
+  const ledger = (headers: string[], opts = { everyRow: true }) => parseLedgerTable(headers, [headers.map(() => LINKED)], "ledger", opts);
+
+  test.each([
+    ["Status og PR-er", 1],
+    ["status: PR", 1],
+    ["Tilstand og PR", 1],
+    ["State and PRs", 1],
+    ["**Status** og PR-er", 1],
+  ])("%s is the state column for the check", (header, column) => {
+    expect(ledger(["Sak", header]).stateColumn).toBe(column);
+  });
+
+  test.each(["Statuses", "Statusbar", "Status-log", "Stateful", "Prior status", "Tilstander"])("%s is not", (header) => {
+    expect(ledger(["Sak", header]).stateColumn).toBe(-1);
+  });
+
+  test("a header that is the state alone wins over one that opens with it", () => {
+    expect(ledger(["Sak", "Status og PR-er", "State"]).stateColumn).toBe(2);
+  });
+
+  test("its cell sets the state for the check, and only for the check", () => {
+    const cells = [["1 a", "merged"]];
+    const check = parseLedgerTable(["Sak", "Status og PR-er"], cells, "ledger", { everyRow: true });
+    expect(check.rows[0]!.state).toBe("merged");
+    const other = parseLedgerTable(["Sak", "Status og PR-er"], cells);
+    expect(other.stateColumn).toBe(-1);
+    expect(other.rows[0]!.state).toBe("unknown");
+    expect(other.draws).toBe(false);
   });
 });
 

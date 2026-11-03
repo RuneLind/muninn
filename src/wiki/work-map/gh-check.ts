@@ -64,6 +64,8 @@ export interface WorkMapChecksBody {
   refreshing?: boolean;
   notChecked?: { reason: NotCheckedReason; repos: string[] };
   checked: number;
+  /** The checked rows that could contradict: they say open, not started or planned. */
+  compared: number;
   unchecked: number;
   unlinked: number;
   skipped: number;
@@ -629,7 +631,7 @@ async function refreshDue(c: WikiCache, refs: ReadonlyMap<string, PrRef>, deps: 
 
 // ── The body ───────────────────────────────────────────────────────────
 function emptyBody(at: number): WorkMapChecksBody {
-  return { at, checked: 0, unchecked: 0, unlinked: 0, skipped: 0, contradictions: [], prs: {}, needs: [], uncheckedRows: [], unlinkedRows: [] };
+  return { at, checked: 0, compared: 0, unchecked: 0, unlinked: 0, skipped: 0, contradictions: [], prs: {}, needs: [], uncheckedRows: [], unlinkedRows: [] };
 }
 
 export function disabledChecksBody(at: number): WorkMapChecksBody {
@@ -661,7 +663,9 @@ function buildBody(s: Scan, c: WikiCache, refreshing: boolean, at: number): Work
       }
       body.checked++;
       // Several PRs in one cell are one statement: it fails only once none is left open.
-      if (!CLAIMABLE_STATES.has(row.state) || row.refs.some((ref) => known(ref)!.state === "OPEN")) continue;
+      if (!CLAIMABLE_STATES.has(row.state)) continue;
+      body.compared++;
+      if (row.refs.some((ref) => known(ref)!.state === "OPEN")) continue;
       const key = `${row.page}\0${row.refs.map((ref) => ref.id).join(" ")}`;
       if (listed.has(key)) continue;
       listed.add(key);

@@ -3,8 +3,8 @@
  * a DOM shim, with a fake clock and hand-fired retry timers. A mount is what a
  * Hubs or Timeline click does (`switchStartTab` → `renderStart`).
  *
- * In its own file because the cards' module state is per file: each test leaves
- * the slot through a null `runAt`, which drops the state a card held.
+ * The cards' module state outlives a test (and a file, in one `bun test` process),
+ * so each test leaves the slot through a null `runAt`, which drops what a card held.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -29,7 +29,7 @@ const MAP = {
   loose: [],
 };
 
-const body = (over: Partial<WorkMapChecksBody> = {}): WorkMapChecksBody => ({ at: T0, checked: 3, unchecked: 0, unlinked: 0, skipped: 0, contradictions: [], prs: {}, needs: [], uncheckedRows: [], unlinkedRows: [], ...over });
+const body = (over: Partial<WorkMapChecksBody> = {}): WorkMapChecksBody => ({ at: T0, checked: 3, compared: 0, unchecked: 0, unlinked: 0, skipped: 0, contradictions: [], prs: {}, needs: [], uncheckedRows: [], unlinkedRows: [], ...over });
 
 let now = T0;
 let fetches = 0;

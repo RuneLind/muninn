@@ -224,6 +224,8 @@ function landedLinksOnly(cell: string): boolean {
 
 /** A qualifier in parentheses may follow: `Status (10-19)`, `State (as of …)`. */
 const STATE_HEADER_RE = /^(?:state|status|tilstand)(?:\s*\([^()]*\))?$/i;
+/** The check's wider read of a state header: `Status og PR-er` holds the state too. */
+const STATE_HEADER_OPENS_RE = /^(?:state|status|tilstand)(?![\p{L}\p{N}-])/iu;
 const LANDED_HEADER_RE = /^(?:landed|landet)$/i;
 const DECISIONS_HEADER_RE = /^(?:decisions?|beslutning(?:er)?)$/i;
 const PR_HEADER_RE = /^PR$/i;
@@ -530,15 +532,17 @@ function decisionsOf(cells: string[], decisionsCol: number): string[] {
 }
 
 export interface LedgerReadOptions {
-  /** Keep a ledger row with no number too, its `pr` null, and read `parsedShare`
-   *  and `draws` over those rows. For the GitHub check, which accounts for every
-   *  row; a view has nothing to draw for such a row. `pageLedgers` keeps it from a glance table. */
+  /** Keep a row with no number too, its `pr` null, and read `parsedShare` and
+   *  `draws` over those rows; a header opening with a state word also counts as
+   *  the state column. For the GitHub check, which accounts for every row; a view
+   *  has nothing to draw for such a row. */
   everyRow?: boolean;
 }
 
 /** Read one ledger table. */
 export function parseLedgerTable(headers: string[], rows: string[][], source: Ledger["source"] = "ledger", opts: LedgerReadOptions = {}): Ledger {
-  const stateColumn = headerIndex(headers, STATE_HEADER_RE);
+  const exactState = headerIndex(headers, STATE_HEADER_RE);
+  const stateColumn = exactState < 0 && opts.everyRow ? headerIndex(headers, STATE_HEADER_OPENS_RE) : exactState;
   const landedCol = headerIndex(headers, LANDED_HEADER_RE);
   const decisionsCol = headerIndex(headers, DECISIONS_HEADER_RE);
   const prCol = headerIndex(headers, PR_HEADER_RE);
@@ -609,7 +613,7 @@ export function findLedgers(blocks: Block[], opts: LedgerReadOptions = {}): Ledg
 
 /** The `### At a glance` table whose first column is `PR`: the planned slate
  *  of a page that has no ledger yet. */
-export function findGlanceLedger(blocks: Block[]): Ledger | null {
+export function findGlanceLedger(blocks: Block[], opts: LedgerReadOptions = {}): Ledger | null {
   let found: Ledger | null = null;
   const walk = (bs: Block[]): void => {
     let inGlance = false;
@@ -618,7 +622,7 @@ export function findGlanceLedger(blocks: Block[]): Ledger | null {
       if (b.type === "heading") inGlance = /^at a glance$/i.test(plain(b.content));
       else if (b.type === "component") walk(b.children);
       else if (b.type === "table" && inGlance && PR_HEADER_RE.test(plain(b.headers[0] ?? ""))) {
-        found = parseLedgerTable(b.headers, b.rows, "glance");
+        found = parseLedgerTable(b.headers, b.rows, "glance", opts);
       }
     }
   };
@@ -632,7 +636,7 @@ export function findGlanceLedger(blocks: Block[]): Ledger | null {
 export function pageLedgers(blocks: Block[], proposed = false, opts: LedgerReadOptions = {}): Ledger[] {
   const ledgers = findLedgers(blocks, opts);
   if (ledgers.length || !proposed) return ledgers;
-  const glance = findGlanceLedger(blocks);
+  const glance = findGlanceLedger(blocks, opts);
   return glance ? [glance] : [];
 }
 

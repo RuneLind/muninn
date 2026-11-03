@@ -118,6 +118,28 @@ describe("the rows", () => {
     expect(body.unlinkedRows.map((r) => r.label)).toEqual(["7", "PR #8"]);
   });
 
+  test("compared counts the checked rows that could contradict, flagged or not", async () => {
+    expect((await run(root(), deps(stubGh(table)))).compared).toBe(3);
+  });
+
+  test.each([
+    ["not started", 1],
+    ["planned", 1],
+    ["open", 1],
+    ["merged", 0],
+    ["dropped", 0],
+    ["open/blocked", 0],
+  ])("a row saying %s adds %d to compared", async (state, n) => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[url(WIDGETS, 3), "x", state, ""]]) });
+    expect((await run(r, deps(stubGh({ [`${WIDGETS}#3`]: { state: "OPEN" } })))).compared).toBe(n);
+  });
+
+  test("an open row is compared only once all its own PRs are answered", async () => {
+    const r = wiki({ "plans/a.mdx": page("ready", [[`${url(WIDGETS, 3)} ${url(WIDGETS, 4)}`, "x", "open", ""]]) });
+    const body = await run(r, deps(stubGh({ [`${WIDGETS}#3`]: { state: "MERGED", mergedAt: MERGED_AT } })));
+    expect({ checked: body.checked, unchecked: body.unchecked, compared: body.compared }).toEqual({ checked: 0, unchecked: 1, compared: 0 });
+  });
+
   test("a merged PR in a Depends on cell does not flag its row, and is not asked for on its behalf", async () => {
     const r = wiki({ "plans/a.mdx": page("ready", [["7", "x", "open", url(WIDGETS, 1)]]) });
     const calls: string[][] = [];
@@ -184,10 +206,30 @@ describe("the rows", () => {
       expect(body.contradictions).toEqual([]);
     });
 
-    test("a glance table's row with no number stays out, as it is for every other reader", async () => {
-      const glance = `---\ntitle: G\nplan_status: proposed\n---\n\n### At a glance\n\n| PR | What |\n|---|---|\n| 1 — a | x |\n| Later | y |\n`;
-      const body = await run(wiki({ "plans/g.mdx": glance }), deps(stubGh({})));
-      expect(body.unlinkedRows.map((x) => x.label)).toEqual(["a"]);
+    const glance = (rows: string) => `---\ntitle: G\nplan_status: proposed\n---\n\n### At a glance\n\n| PR | What |\n|---|---|\n${rows}`;
+
+    test("a glance table's row with no number is counted like a numbered one", async () => {
+      const body = await run(wiki({ "plans/g.mdx": glance("| 1 — a | x |\n| P2 | y |\n") }), deps(stubGh({})));
+      expect(body.unlinkedRows.map((x) => x.label)).toEqual(["a", "P2"]);
+    });
+
+    test("a glance row is planned by source, so its own merged PR flags and it counts as compared", async () => {
+      const body = await run(wiki({ "plans/g.mdx": glance(`| ${url(WIDGETS, 5)} | y |\n`) }), deps(stubGh({ [`${WIDGETS}#5`]: { state: "MERGED", mergedAt: MERGED_AT } })));
+      expect(body.contradictions.map((c) => [c.pr, c.rowState])).toEqual([[5, "planned"]]);
+      expect(body.compared).toBe(1);
+    });
+
+    test("a glance table inside a component under the heading stays in no count, as declared", async () => {
+      const inside = `---\ntitle: G\nplan_status: proposed\n---\n\n### At a glance\n\n<ComparisonTable>\n\n| PR | What |\n|---|---|\n| P1 | x |\n\n</ComparisonTable>\n`;
+      const body = await run(wiki({ "plans/g.mdx": inside }), deps(stubGh({})));
+      expect(body.unlinked + body.checked).toBe(0);
+    });
+
+    test("a state column named with more words counts: its link to the owning page skips the row", async () => {
+      const owner = "---\ntitle: Owner\nowns: [MEL-1]\n---\n\nBody.\n";
+      const r = wiki({ "plans/a.mdx": page("in-flight", [["MEL-1", "x", "[[owner]]"]], "", ["Sak", "What", "Status og PR-er"]), "plans/owner.mdx": owner });
+      const body = await run(r, deps(stubGh({})));
+      expect({ unlinked: body.unlinked, skipped: body.skipped }).toEqual({ unlinked: 0, skipped: 1 });
     });
   });
 
