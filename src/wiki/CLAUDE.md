@@ -7,10 +7,10 @@ How to reach it (measured 2026-11-03):
 - **Search it this way, never plain:** `rg -n -o '.{0,120}<term>.{0,120}' src/wiki/reference/notes.md`. With the Grep tool: `output_mode: content`, `-o`, the same pattern and that path. Lines are long: plain `rg` prints each whole line and plain Grep returns "Omitted long matching line". Do not use `grep -o` here: in a Claude Code shell it returns nothing for this pattern and exits 1, which reads as no note. Keep the window at 120 chars or less.
 - **Before editing a file:** search its basename and the exported functions you are changing. **To look up a topic:** find its heading in the index and search a few plain words of it, never the whole heading: parens and brackets are regex metacharacters, and 63 of the 73 headings match nothing verbatim.
 - **No hit:** zero hits on a basename means no note under that name, not no rule: 26 of the 118 non-test `src/wiki/**/*.ts` have none, among them the main write seam `page-write.ts`, while `writeWikiPage` hits 12 lines. Search the exported function names, then the index, then the neighbouring module's `notes.md`, or its `CLAUDE.md` where it has none; `rg -l <term> src -g '{CLAUDE,notes}.md'` finds which.
-- **Read a hit:** `Read` from the hit's line with a limit of about 30 lines, not the whole section: sections run up to 70k chars. A line over about 5,000 chars goes to a scratch file first, then `Read` that file with offset and limit. Write the file's full path: from the repo root a bare `notes.md` prints a valid path to an empty file and exits 0.
+- **Read a hit:** `Read` about 30 lines from the hit, not the whole section (up to 70k chars). A line over 5,000 chars (rule of thumb) goes to a scratch file; `Read` that path or windowed `rg` it: a later Bash call has lost `$t`. Write the full path: a bare `notes.md` from the repo root prints an empty file's path and exits 0.
 
   ```bash
-  t=$(mktemp); sed -n '<N>p' src/wiki/reference/notes.md | fold -w 2000 > "$t"; echo "$t"
+  t=$(mktemp); sed -n '<N>p' src/wiki/reference/notes.md | fold -s -w 2000 > "$t"; echo "$t"
   ```
 
 - **History:** `git log --follow -- src/wiki/reference/notes.md` reaches the old file's commits.
@@ -68,7 +68,7 @@ Pages and routes:
 - `link` and `mention` are demoted: a new count reads `relationsCount`, `DEMOTED_RELATIONS` or `facetJiraKeys`, never `meta.issues` directly, which still holds demoted keys.
 - An unknown cost never renders as `$0`: an unpriced key shows as unknown, since `$0.00` says it was free.
 - Never have the browser fetch huginn or claude-usage (tailnet viewers, mixed content under `tailscale serve`): the server computes the field and ships it. The one exception is a link for the viewer to follow (`CLAUDE_USAGE_PUBLIC_URL`).
-- Answer every request check on an SSE route as plain JSON with its status BEFORE `streamSSE`: after that commits a 200, the only way to report a bad request is an `app_error` nothing can tell from a model failure.
+- A `fetch`-read POST route answers every body check as JSON with its status BEFORE `streamSSE`: after its 200, the only report is an `app_error` nothing can tell from a model failure. An `EventSource` route reports preflight checks in the stream (`preflightError`): a non-200 tells it nothing.
 - On the pod's read slice, a background fetch from the index build gates on `wikiToolsRegistered`: the service it would dial is on another machine's loopback. An owner-derived listing field is never served there (`includeWaits`: a count would tell a reader which group the owner is in), and a personal one is hidden (`movesYou`: every colleague would read it as waiting on them).
 - A field left on `toListing`'s rest spread goes to every caller unless stripped and opted in. A new reader control that calls a tool-half route joins `WIKI_READ_SLICE_HIDDEN_SELECTOR`: on the pod that route has no handler.
 - Run the suite from the repo root on a host whose `.env` carries `MUNINN_WIKI_READONLY`: the bunfig preload that clears it resolves against the CWD and is ignored silently when it cannot. From a subdirectory, pass `bun test --preload ../test/preload.ts`.
@@ -83,11 +83,11 @@ Pages and routes:
 - ⚠️ A `display` declaration on a class beats the user agent's own `[hidden]` rule, green through every unit test and caught by the e2e: `.wiki-prov-chain[hidden] { display: none; }` rides beside its `display: flex`.
 - `modalOpen()` reads every visible `[role="dialog"]` as a modal, so a non-modal panel with that role kills the reader's single-key shortcuts page-wide.
 - `isPathConfined` is LEXICAL, so a symlink inside the wiki that points outside it passes: the Stamp route adds realpath containment for that reason.
-- The older `fencedLineMask` and `frontmatterEndLine` (`wiki-integrate.ts`: a `~~~` fence counts, an unclosed opener runs to the end, an indented `---` ends the frontmatter) disagree with the reader's rule (`readerFencedLines`: backticks only, an unclosed opener stays prose; `frontmatterBodyLine`). Read a check's own imports to tell which it uses: one can mix the two.
+- The older `fencedLineMask` and `frontmatterEndLine` (`wiki-integrate.ts`: a `~~~` fence counts, an unclosed opener runs to the end, an indented `---` ends the frontmatter) disagree with the reader's rule (`readerFencedLines`: backticks only, an unclosed opener stays prose; `frontmatterBodyLine`). Find the helpers a check calls, one hop down: `fenceLineStates` with `"literal"` is a third (`~~~` counts, unclosed stays prose); a check can mix them.
 
 ## Index
 
-` [trap]` marks a recorded failure, and an unmarked section can still hold a rule, so search before you edit.
+` [trap]` marks a section that records a failure or hazard; an unmarked section can still hold a rule, so search before you edit.
 
 - Registry (`registry.ts`) [trap]
 - One nested frontmatter level (`parseFrontmatter`) [trap]
@@ -104,7 +104,7 @@ Pages and routes:
 - The page rail's recall aids (Activity · Pinned · Jira-key jump) [trap]
 - Attachments — the rail's groups (`pairAttachments`, `store.ts`) [trap]
 - In the rail [trap]
-- The row's layout rules (`wiki-page.ts`, constants in `wiki-rail-width.ts`)
+- The row's layout rules (`wiki-page.ts`, constants in `wiki-rail-width.ts`) [trap]
 - Culled pages (`signal: none`, `WikiPageMeta.culled`)
 - Families and months (`wiki-groups.ts`) [trap]
 - Series (`series:` / `series_label:`, `groupSeries`) [trap]
@@ -126,7 +126,7 @@ Pages and routes:
 - Lint check 22 — `<Steps>` focus ids (`lint-steps.ts`)
 - Lint check 23 — `<SystemMap>` (`lint-system-map.ts`)
 - Lint check 24 — status lines (`stale.ts`)
-- Lint check 25 — declared efforts (`effort-unknown`, in `lint.ts`)
+- Lint check 25 — declared efforts (`effort-unknown`, in `lint.ts`) [trap]
 - Lint check 26 — genre and its picture (`lint-genre.ts`)
 - Decision chain route and dry run
 - Stale check — free half (`stale.ts`, `GET /api/wiki/stale`, `scripts/wiki-stale.ts`)
@@ -149,9 +149,9 @@ Pages and routes:
 - The client (`views/components/wiki-provenance-view.ts`) [trap]
 - Stamp (`POST /api/wiki/provenance/stamp`, `routes/wiki-stamp.ts`, `stamp-roots.ts`) [trap]
 - The cross-process lockfile (`lockfile.ts`) [trap]
-- Index single-flight (`getWikiIndex`, `store.ts`)
-- Write queue (`queue.ts`)
-- Readonly — two independent mechanisms (`readonly.ts`)
+- Index single-flight (`getWikiIndex`, `store.ts`) [trap]
+- Write queue (`queue.ts`) [trap]
+- Readonly — two independent mechanisms (`readonly.ts`) [trap]
 - The instance switch (`MUNINN_WIKI_READONLY`) [trap]
 - The per-wiki switch (`WIKI_READONLY_ROOTS`) [trap]
 - Client half [trap]
