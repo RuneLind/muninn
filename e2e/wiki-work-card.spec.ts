@@ -44,6 +44,10 @@
  *     their keyboard rule, focus and selection across a repaint, and the strip's
  *     layout, measured: equal cell widths and no word broken at six widths. Its
  *     lifecycle: a late answer dropped, and no fetch or timer added by a render.
+ * 11. **The board (your-work board P3)**: the columns' tracks at each window, the
+ *     folds that stop folding when all five fit, live under F with no repaint, no
+ *     horizontal overflow, an effort moving between columns when the check or a ✓
+ *     or an adopt says so, focus following it, and the sparkline under forced colors.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -108,6 +112,9 @@ const GH_DROP_FAIL = "e2e-wm-gh-drop-fail";
 const GH_DROP_DONE = "e2e-wm-gh-drop-done";
 /** `forceAdopt` adds pages to it. */
 const GH_ADOPT = "e2e-wm-gh-adopt";
+/** The board: one wiki read in many tests, one an adopt grows. */
+const BOARD = "e2e-wm-board";
+const BOARD_ADOPT = "e2e-wm-board-adopt";
 const GH_DROP_RUN = Date.now() - 2 * 3_600_000;
 /** No break opportunity anywhere. */
 const LONG_TOKEN = "Aa".repeat(90);
@@ -148,7 +155,7 @@ async function seedStripPages(root: string, now: number): Promise<void> {
   await writeFile(path.join(root, "plans/loop.mdx"), `---\ntitle: Loop\nplan_status: shipped\nfollowups: open\nstatus_date: ${dayBefore(now, 5)}\n---\n\nBody.\n`, "utf8");
 }
 
-type NeedFixture = { title: string; kind: string; why: string; action: string; pages: string[] };
+type NeedFixture = { title: string; kind: string; why: string; action: string; pages: string[]; effort?: string };
 
 const DEFAULT_NEEDS: NeedFixture[] = [
   { title: "Pick a name for ⟦plans/alpha.mdx⟧", kind: "decision", why: "Two drafts disagree.", action: "Choose one.", pages: ["plans/alpha.mdx"] },
@@ -185,12 +192,12 @@ function mapJson(wiki: string, runAtMs: number, needsYou: NeedFixture[] = DEFAUL
   });
 }
 
-/** A stale map that renders every part of the card: all six states, a nested
- *  and a part-of sub-effort, an active day, `+N more`, a next step, a
- *  coverage warning, a clamped why and a Needs-you item with page links. */
+/** A stale map that renders every part of the card: a waiting tile with every
+ *  pill, a nested and a part-of sub-effort, an empty column, an active day, a
+ *  Needs-you item with `+N more`, a next step, a coverage warning and a clamped why. */
 function sweepMapJson(runAtMs: number): string {
   const m = JSON.parse(mapJson(SWEEP, runAtMs, [
-    { title: "Settle ⟦plans/alpha.mdx⟧", kind: "decision", why: LONG_WHY, action: "Pick one draft.", pages: ["plans/beta.mdx", "plans/gamma.mdx"] },
+    { title: "Settle ⟦plans/alpha.mdx⟧", kind: "decision", why: LONG_WHY, action: "Pick one draft.", pages: ["plans/beta.mdx", "plans/gamma.mdx", "plans/p1.mdx", "plans/p2.mdx", "plans/p3.mdx", "plans/p4.mdx", "plans/p5.mdx"], effort: "waiting" },
     { title: "Resume beta", kind: "resume", why: "Quiet a week.", action: "", pages: [] },
   ])) as Record<string, unknown> & { coverage: Record<string, unknown> };
   m.coverage.warnings = ["Active pages fell from 90 to 30."];
@@ -205,7 +212,30 @@ function sweepMapJson(runAtMs: number): string {
     e("cooling", "cooling", ["plans/beta.mdx"]),
     e("partof", "active", ["plans/gamma.mdx"], { parent: "cooling" }),
     e("quiet", "quiet", ["plans/gamma.mdx"]),
-    e("shipped", "shipped", ["plans/gamma.mdx"]),
+    e("waiting", "active", ["plans/two.mdx", "plans/steps.mdx"], { daily: [{ day: today, commits: 1, sessions: 0 }] }),
+  ];
+  return JSON.stringify(m);
+}
+
+/** Every column holds something, and two efforts wait on a PR the stubbed check can merge. */
+function boardMapJson(wiki: string, runAtMs: number): string {
+  const need = (title: string, effort: string): NeedFixture => ({ title, kind: "followup", why: "", action: "Merge #369", pages: [], effort });
+  const m = JSON.parse(mapJson(wiki, runAtMs, [need("Merge the move", "to-moving"), need("Merge the cooling", "to-cooling")])) as Record<string, unknown>;
+  m.summary = "";
+  const today = new Date().toISOString().slice(0, 10);
+  const e = (id: string, state: string, page: string, extra: Record<string, unknown> = {}) => ({
+    id, name: `${id} work`, aliases: [], oneLine: `The ${id} effort.`, state, pages: [{ id: page, role: "plan" }], why: "", confidence: 1, next: "", related: [], daily: [], ...extra,
+  });
+  m.efforts = [
+    e("waiting", "quiet", "plans/waits.mdx"),
+    e("to-moving", "active", "plans/alpha.mdx"),
+    e("to-cooling", "cooling", "plans/beta.mdx"),
+    e("moves", "active", "plans/gamma.mdx", { next: "Ship it.", daily: [{ day: today, commits: 3, sessions: 1 }] }),
+    e("sub", "blocked", "plans/gamma.mdx", { parent: "moves" }),
+    e("away", "cooling", "plans/beta.mdx", { parent: "moves" }),
+    e("long", "active", "plans/gamma.mdx", { name: LONG_TOKEN, oneLine: LONG_TOKEN, next: LONG_TOKEN }),
+    e("still", "quiet", "plans/gamma.mdx"),
+    e("over", "shipped", "plans/gamma.mdx"),
   ];
   return JSON.stringify(m);
 }
@@ -288,6 +318,11 @@ test.beforeAll(async () => {
   ]);
   for (const n of [GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE]) await seedWiki(n, GH_DROP_RUN);
   await seedWiki(GH_ADOPT, now - 2 * HOUR);
+  for (const n of [BOARD, BOARD_ADOPT]) {
+    await seedWiki(n, null);
+    await writeFile(path.join(roots[n]!, "plans/waits.mdx"), waitPage("Waits", ["O1"], dayBefore(now, 4)), "utf8");
+    await writeFile(path.join(roots[n]!, ".work-map.json"), boardMapJson(n, now - 2 * HOUR), "utf8");
+  }
   await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -299,10 +334,10 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       WORK_MAP_WIKIS: "",
       WIKI_DIR: "",
-      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP].join(","),
+      WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP, BOARD, BOARD_ADOPT].join(","),
       WIKI_ANSWER_OWNER: "Test Owner (T000001)",
       WIKI_ANSWER_GROUPS: "utvikler=T000001",
-      WIKI_EXTRA: [GH, GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE, GH_ADOPT, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+      WIKI_EXTRA: [BOARD, BOARD_ADOPT, GH, GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE, GH_ADOPT, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
     },
     stdio: "ignore",
   });
@@ -348,10 +383,11 @@ test("a wiki with a map shows the card and never asks for the digest", async ({ 
   await expect(card.locator(".wiki-wm-summary")).toContainText("the old gone was removed");
   // An effort name is a link and reads as one at rest, not only on hover.
   await expect(card.locator('a.wiki-wm-effort-name[data-effort-link="alpha"]')).toHaveCSS("text-decoration-line", "underline");
-  // Lanes: Moving open, the other two closed.
+  // The columns: Waiting on you and Moving open, the other three folded.
+  await expect(card.locator("details.wiki-wm-col")).toHaveCount(5);
+  await expect(card.locator('[data-wm-lane="you"]')).toHaveAttribute("open", "");
   await expect(card.locator('[data-wm-lane="moving"]')).toHaveAttribute("open", "");
-  await expect(card.locator('[data-wm-lane="cooling"]')).not.toHaveAttribute("open", "");
-  await expect(card.locator('[data-wm-lane="quiet"]')).not.toHaveAttribute("open", "");
+  for (const id of ["cooling", "quiet", "shipped"]) await expect(card.locator(`[data-wm-lane="${id}"]`)).not.toHaveAttribute("open", "");
   // Not organizable on this instance: no ↻.
   await expect(card.locator("#wikiWorkMapRefresh")).toHaveCount(0);
   await expect(page.locator("#wikiWhatsNew")).toBeHidden();
@@ -489,22 +525,288 @@ async function forceAdopt(page: Page, wiki: string): Promise<void> {
   await page.waitForTimeout(300);
 }
 
-test("a page declared after the load joins its seven-page effort on a listing refresh, among the first six (P6)", async ({ page }) => {
+test("a page declared after the load joins its effort on a listing refresh: its step on the board, the page first on the effort page (P6)", async ({ page }) => {
   await page.clock.install();
   await openStart(page, DECL);
   const alpha = page.locator('#wikiWorkCard .wiki-wm-effort[data-effort-id="alpha"]');
-  await expect(alpha.locator(".wiki-wm-more")).toHaveText(" +1 more");
+  await expect(alpha.locator(".wiki-wm-pill")).toHaveCount(0);
   // The run does not move: only the listing learns of the declaration.
-  await writeFile(path.join(roots[DECL]!, "plans/declared-today.mdx"), `---\ntitle: Declared today\neffort: alpha\n---\n\nWritten after the run.\n`, "utf8");
+  await writeFile(path.join(roots[DECL]!, "plans/declared-today.mdx"), `---\ntitle: Declared today\neffort: alpha\n---\n\n<NextMoves>\n\n<Lane kind="you">\n\n- One\n\n</Lane>\n\n</NextMoves>\n`, "utf8");
   await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(page.locator("#wikiList")).toContainText("Declared today");
-  // On the card without a reload, first in the effort, not behind «+N more».
-  const links = alpha.locator(".wiki-wm-pages .wiki-wm-link");
-  await expect(links.first()).toHaveText("Declared today");
-  await expect(links).toHaveCount(6);
-  await expect(alpha.locator(".wiki-wm-more")).toHaveText(" +2 more");
+  // On the board without a reload, and one click from its page.
+  await expect(alpha.locator(".wiki-wm-pill")).toHaveText("1 step");
+  await alpha.locator("a.wiki-wm-effort-name").click();
+  await expect(page.locator(".wiki-effort a[data-relpath]").first()).toHaveText("Declared today");
 });
+
+// ── The board (your-work board P3) ────────────────────────────────────
+const boardCard = (page: Page) => page.locator("#wikiWorkCard");
+const COLUMN_IDS = ["you", "moving", "cooling", "quiet", "shipped"];
+
+async function trackCount(page: Page): Promise<number> {
+  return boardCard(page).locator(".wiki-wm-cols").evaluate((el) => getComputedStyle(el).gridTemplateColumns.split(" ").length);
+}
+
+/** The column ids whose content the reader can see, by the browser's own answer. */
+async function columnsShown(page: Page): Promise<string[]> {
+  return boardCard(page).locator("details.wiki-wm-col").evaluateAll((cols) =>
+    cols.flatMap((c) => {
+      const content = c.querySelector(".wiki-wm-efforts, .wiki-wm-col-none");
+      return content?.checkVisibility({ contentVisibilityAuto: true }) ? [c.getAttribute("data-wm-lane")!] : [];
+    }),
+  );
+}
+
+/** Nothing in the card reaches past it, and the page does not scroll sideways. */
+async function expectNoOverflow(page: Page, label: string): Promise<void> {
+  const r = await boardCard(page).evaluate((card) => {
+    const right = card.getBoundingClientRect().right;
+    const past = Array.from(card.querySelectorAll("*")).filter((el) => el.getClientRects().length > 0 && el.getBoundingClientRect().right > right + 0.5);
+    return {
+      scroll: card.scrollWidth - card.clientWidth,
+      doc: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      past: past.map((el) => el.getAttribute("class")).slice(0, 5),
+    };
+  });
+  expect(r, label).toEqual({ scroll: 0, doc: 0, past: [] });
+}
+
+async function boardInnerWidth(page: Page): Promise<number> {
+  return boardCard(page).locator(".wiki-wm-board").evaluate((el) => el.getBoundingClientRect().width);
+}
+
+for (const [width, tracks, shown] of [
+  [1280, 2, ["you", "moving"]],
+  [1512, 3, ["you", "moving"]],
+  [1728, 4, ["you", "moving"]],
+  [1920, 5, COLUMN_IDS],
+  [700, 1, ["you", "moving"]],
+] as const) {
+  test(`at a ${width} window the board has ${tracks} track${tracks === 1 ? "" : "s"} and shows ${shown.length} columns' content, with nothing overflowing`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openStart(page, BOARD);
+    const card = boardCard(page);
+    await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
+    console.log(`board inner width at ${width}: ${await boardInnerWidth(page)}`);
+    expect(await trackCount(page)).toBe(tracks);
+    expect(await columnsShown(page)).toEqual([...shown]);
+    await expectNoOverflow(page, `at ${width}`);
+  });
+}
+
+test("the column heads count every effort in the column, nested included, in the table's order", async ({ page }) => {
+  await openStart(page, BOARD);
+  const heads = await boardCard(page).locator("details.wiki-wm-col > summary").allInnerTexts();
+  expect(heads.map((h) => h.replace(/\s+/g, " ").trim().toLowerCase())).toEqual(["waiting on you 3", "moving 3", "cooling 1", "quiet 1", "shipped 1"]);
+  const moves = boardCard(page).locator('[data-wm-lane="moving"] .wiki-wm-tile[data-effort-id="moves"]');
+  await expect(moves.locator('.wiki-wm-kid[data-effort-id="sub"]')).toHaveCount(1);
+  // A sub-effort in another column stands on its own, naming its parent.
+  await expect(boardCard(page).locator('[data-wm-lane="cooling"] .wiki-wm-tile[data-effort-id="away"] .wiki-wm-partof')).toHaveText("part of moves work");
+  await expect(boardCard(page).locator('[data-wm-lane="you"] .wiki-wm-tile[data-effort-id="waiting"] .wiki-wm-pill.warn')).toHaveText("1 decision · 4 d");
+});
+
+test("pressing F at 1280 gives five tracks with every column's content shown, with no repaint, and Esc brings the folds back", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
+  expect(await trackCount(page)).toBe(2);
+  await card.locator(".wiki-wm-board").evaluate((el) => el.setAttribute("data-before-f", ""));
+  await page.keyboard.press("f");
+  await expect(page.locator(".wiki-layout.focus-mode")).toHaveCount(1);
+  console.log(`board inner width at 1280 under F: ${await boardInnerWidth(page)}`);
+  await expect.poll(() => trackCount(page)).toBe(5);
+  expect(await columnsShown(page)).toEqual(COLUMN_IDS);
+  await expect(card.locator("[data-before-f]")).toHaveCount(1);
+  await expectNoOverflow(page, "under F");
+  // A folded column's own state is untouched, and its head reads as a heading.
+  await expect(card.locator('[data-wm-lane="quiet"]')).not.toHaveAttribute("open", "");
+  const head = card.locator('[data-wm-lane="quiet"] > summary');
+  expect(await head.evaluate((el) => getComputedStyle(el).display)).toBe("flex");
+  await head.click({ force: true });
+  await expect(card.locator('[data-wm-lane="quiet"]')).not.toHaveAttribute("open", "");
+  await page.keyboard.press("Escape");
+  await expect.poll(() => trackCount(page)).toBe(2);
+  expect(await columnsShown(page)).toEqual(["you", "moving"]);
+  await expect(card.locator("[data-before-f]")).toHaveCount(1);
+});
+
+test("a resize across the five-track width folds and unfolds with no repaint", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 900 });
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
+  expect(await columnsShown(page)).toEqual(COLUMN_IDS);
+  await card.locator(".wiki-wm-board").evaluate((el) => el.setAttribute("data-before-resize", ""));
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expect.poll(() => columnsShown(page)).toEqual(["you", "moving"]);
+  await expect(card.locator("[data-before-resize]")).toHaveCount(1);
+});
+
+test("a fold the reader opens shows its content, and stays open across a repaint", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await card.locator('[data-wm-lane="quiet"] > summary').click();
+  expect(await columnsShown(page)).toEqual(["you", "moving", "quiet"]);
+  await card.locator('[data-wm-done="0"]').click();
+  await expect(card.locator("[data-wm-need]")).toHaveCount(1);
+  await expect(card.locator('[data-wm-lane="quiet"]')).toHaveAttribute("open", "");
+  expect(await columnsShown(page)).toEqual(["you", "moving", "quiet"]);
+});
+
+const boardNeeds = (): WorkMapChecksBody["needs"] => [
+  { kind: "followup", title: "Merge the move", pr: 369, state: "MERGED", mergedAt: GH_MERGED_AT, asksForIt: true },
+  { kind: "followup", title: "Merge the cooling", pr: 369, state: "MERGED", mergedAt: GH_MERGED_AT, asksForIt: true },
+];
+
+/** Hold the checks GET until the returned call. */
+async function holdChecks(page: Page, body: () => WorkMapChecksBody): Promise<() => void> {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/work-map/checks*", async (route) => {
+    await held;
+    await route.fulfill({ json: body() });
+  });
+  return release;
+}
+
+test("an effort leaves Waiting on you when the stubbed checks arrive, and goes to the column of its state", async ({ page }) => {
+  const release = await holdChecks(page, () => checksBody({ needs: boardNeeds() }));
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  const inCol = (col: string, id: string) => card.locator(`[data-wm-lane="${col}"] [data-effort-id="${id}"]`);
+  await expect(inCol("you", "to-moving")).toHaveCount(1);
+  await expect(inCol("you", "to-cooling")).toHaveCount(1);
+  await expect(card.locator('[data-wm-lane="you"] .wiki-wm-count')).toHaveText("3");
+  release();
+  await expect(inCol("moving", "to-moving")).toHaveCount(1);
+  await expect(inCol("cooling", "to-cooling")).toHaveCount(1);
+  await expect(inCol("you", "to-moving")).toHaveCount(0);
+  // The Needs you cards keep their layout and P2's marks.
+  await expect(card.locator(".wiki-wm-need.gh-done")).toHaveCount(2);
+  // Its wait keeps the other one there.
+  await expect(card.locator('[data-wm-lane="you"] .wiki-wm-count')).toHaveText("1");
+});
+
+test("focus on an effort link follows the effort to its new open column", async ({ page }) => {
+  const release = await holdChecks(page, () => checksBody({ needs: boardNeeds() }));
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  const link = card.locator('a[data-effort-link="to-moving"]');
+  await link.focus();
+  await card.locator(".wiki-wm-board").evaluate((el) => el.setAttribute("data-before", ""));
+  release();
+  await expect(card.locator('[data-wm-lane="moving"] a[data-effort-link="to-moving"]')).toBeFocused();
+  await expect(card.locator("[data-before]")).toHaveCount(0);
+});
+
+test("focus on an effort link that moves into a folded column lands on that column's head, and stays when the fold opens", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const release = await holdChecks(page, () => checksBody({ needs: boardNeeds() }));
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await card.locator('a[data-effort-link="to-cooling"]').focus();
+  release();
+  const head = card.locator('[data-wm-lane="cooling"] > summary');
+  await expect(card.locator('[data-wm-lane="cooling"] [data-effort-id="to-cooling"]')).toHaveCount(1);
+  await expect(head).toBeFocused();
+  expect(await head.evaluate((el) => el.hasAttribute("data-wm-parked"))).toBe(false);
+  await page.keyboard.press("Enter");
+  await expect(card.locator('[data-wm-lane="cooling"]')).toHaveAttribute("open", "");
+  // The next repaint leaves the reader on the head.
+  await card.locator('[data-wm-done="0"]').click();
+  await expect(card.locator('[data-wm-lane="cooling"]')).toHaveAttribute("open", "");
+});
+
+test("focus on a column's head survives the repaint that changes the column", async ({ page }) => {
+  const release = await holdChecks(page, () => checksBody({ needs: boardNeeds() }));
+  await openStart(page, BOARD);
+  const head = boardCard(page).locator('[data-wm-lane="you"] > summary');
+  await head.focus();
+  release();
+  await expect(boardCard(page).locator('[data-wm-lane="you"] .wiki-wm-count')).toHaveText("1");
+  await expect(head).toBeFocused();
+});
+
+test("a checks answer that changes no column leaves the board alone", async ({ page }) => {
+  await stubChecks(page, () => checksBody({ needs: [] }));
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await expect(card.locator('[data-wm-cell="github"] b')).toHaveText("0");
+  await card.locator(".wiki-wm-board").evaluate((el) => el.setAttribute("data-kept", ""));
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(300);
+  await expect(card.locator("[data-kept]")).toHaveCount(1);
+});
+
+test("✓ moves an effort out of Waiting on you, and restoring brings it back", async ({ page }) => {
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await card.locator('[data-wm-done="0"]').click();
+  await expect(card.locator('[data-wm-lane="moving"] [data-effort-id="to-moving"]')).toHaveCount(1);
+  await card.locator("#wikiWorkMapRestore").click();
+  await expect(card.locator('[data-wm-lane="you"] [data-effort-id="to-moving"]')).toHaveCount(1);
+});
+
+test("an adopt that brings a page a wait moves its effort, and focus on its link follows", async ({ page }) => {
+  await page.clock.install();
+  await openStart(page, BOARD_ADOPT);
+  const card = boardCard(page);
+  await expect(card.locator('[data-wm-lane="moving"] [data-effort-id="moves"]')).toHaveCount(1);
+  await card.locator('a[data-effort-link="moves"]').focus();
+  await writeFile(path.join(roots[BOARD_ADOPT]!, "plans/gamma.mdx"), waitPage("Gamma plan", ["O1"], "2026-01-02"), "utf8");
+  await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(card.locator('[data-wm-lane="you"] [data-effort-id="moves"]')).toHaveCount(1);
+  await expect(card.locator('a[data-effort-link="moves"]')).toBeFocused();
+});
+
+for (const forced of [false, true]) {
+  test(`every effort has a sparkline that fills its tile${forced ? ", under forced colors" : ""}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1920, height: 900 });
+    if (forced) await page.emulateMedia({ forcedColors: "active" });
+    await openStart(page, BOARD);
+    const card = boardCard(page);
+    await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
+    const r = await card.locator(".wiki-wm-effort").evaluateAll((efforts) =>
+      efforts.map((e) => {
+        const svg = e.querySelector("svg.wiki-wm-spark")!;
+        const box = svg.getBoundingClientRect();
+        const rects = Array.from(svg.querySelectorAll("rect"));
+        const painted = rects.filter((b) => b.getBoundingClientRect().width > 0 && b.getBoundingClientRect().height > 0).length;
+        const fills = new Set(rects.map((b) => getComputedStyle(b).fill));
+        const inner = e.getBoundingClientRect().width;
+        return { id: e.getAttribute("data-effort-id"), role: svg.getAttribute("role"), label: svg.getAttribute("aria-label"), bars: rects.length, painted, fills: [...fills], share: box.width / inner, h: box.height };
+      }),
+    );
+    expect(r.length).toBe(9);
+    for (const s of r) {
+      expect(s, `${s.id}`).toMatchObject({ role: "img", label: "Activity, last 28 days", bars: 28, painted: 28 });
+      expect(s.share, `${s.id}`).toBeGreaterThan(0.75);
+    }
+    const moves = r.find((s) => s.id === "moves")!;
+    const none = r.find((s) => s.id === "still")!;
+    expect(none.fills).toHaveLength(1);
+    expect(moves.fills).toHaveLength(2);
+    if (forced) {
+      const system = await page.evaluate(() => {
+        const probe = document.createElement("div");
+        probe.style.color = "CanvasText";
+        document.body.append(probe);
+        const c = getComputedStyle(probe).color;
+        probe.remove();
+        return c;
+      });
+      expect(moves.fills).toContain(system);
+      // The bar must not sit on the tile in its own colour.
+      const tile = await card.locator('.wiki-wm-tile[data-effort-id="moves"]').evaluate((el) => getComputedStyle(el).backgroundColor);
+      expect(moves.fills.every((f) => f !== tile)).toBe(true);
+    }
+  });
+}
 
 test("the health strip's cells count the live listing, and the listing says the same", async ({ page }) => {
   const listing = (await (await page.request.get(`${BASE}/api/wiki/pages?wiki=${STRIP}`)).json()) as {
@@ -2000,7 +2302,7 @@ test("focus on a ✓ or a page link survives a ↻ poll repaint", async ({ page 
   await done.focus();
   await repaint();
   await expect(done).toBeFocused();
-  const link = card.locator('.wiki-wm-link[data-relpath="plans/alpha.mdx"]').nth(2);
+  const link = card.locator('.wiki-wm-link[data-relpath="plans/alpha.mdx"]').nth(1);
   await link.focus();
   await repaint();
   await expect(link).toBeFocused();
@@ -2641,7 +2943,8 @@ for (const theme of THEMES) {
     await github.click();
     await expect(card.locator(".wiki-wm-drill-stale")).toBeVisible();
     await sweep("GitHub not current");
-    expect((await styledCardClasses(page)).filter((c) => !seen.has(c))).toEqual([]);
+    // A work effort's state chip paints on the effort page alone, whose spec sweeps it.
+    expect((await styledCardClasses(page)).filter((c) => !seen.has(c) && !["wm-state-active", "wm-state-blocked", "wm-state-shipped"].includes(c))).toEqual([]);
     console.log(`contrast min ${theme.label}: ${Math.min(...mins).toFixed(2)} (${labels.map((l, i) => `${l} ${mins[i]!.toFixed(2)}`).join(", ")})`);
     expect(low).toEqual([]);
   });

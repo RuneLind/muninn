@@ -921,9 +921,11 @@ function focusCandidates(el: HTMLElement, key: FocusKey): (HTMLElement | null | 
     const btn = Array.from(el.querySelectorAll<HTMLElement>("[data-wm-why]")).find((b) => b.getAttribute("data-wm-why") === key.why);
     return [btn, btn?.parentElement?.querySelector<HTMLElement>(".wiki-wm-why-text"), heading];
   }
-  if ("sel" in key) return [el.querySelector<HTMLElement>(key.sel), heading];
-  if ("link" in key) return [cardLinks(el, key.link)[key.nth], heading];
-  if ("href" in key) return [hrefLinks(el, key.href)[key.nth], heading];
+  // A control in a shut board column takes no focus: the column's head does.
+  const orFold = (t: HTMLElement | null | undefined) => [t, t?.closest("details")?.querySelector("summary"), heading];
+  if ("sel" in key) return orFold(el.querySelector<HTMLElement>(key.sel));
+  if ("link" in key) return orFold(cardLinks(el, key.link)[key.nth]);
+  if ("href" in key) return orFold(hrefLinks(el, key.href)[key.nth]);
   return [heading];
 }
 
@@ -973,7 +975,7 @@ function hrefLinks(el: HTMLElement, href: string): HTMLElement[] {
 function resolveFocus(el: HTMLElement, key: FocusKey): void {
   const t = focusFirst(focusCandidates(el, key));
   const wanted = "sel" in key ? el.querySelector<HTMLElement>(key.sel) : null;
-  if (t && wanted && t !== wanted) {
+  if (t && wanted && t !== wanted && !wanted.closest("details")) {
     pendingFocus = key;
     t.setAttribute(PARKED_ATTR, "");
   }

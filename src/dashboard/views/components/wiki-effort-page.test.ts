@@ -632,7 +632,7 @@ describe("moved and gone pages after a declaration (P6)", () => {
     expect(article).toContain("Every page of this effort moved to another effort since the run.");
   });
 
-  test("the card drops an effort a move left empty off its lanes, but keeps one emptied by deletion", () => {
+  test("the board shows an effort with a page: one a move or a deletion left empty is off it", () => {
     const m = map({ runAtMs: RUN, efforts: [effort("moved", ["plans/a.mdx"]), effort("deleted", ["plans/gone.mdx"]), effort("f", ["plans/d.mdx"])] });
     const pages = [
       { relPath: "plans/a.mdx", title: "Plan A", effort: "f", ...old },
@@ -640,22 +640,20 @@ describe("moved and gone pages after a declaration (P6)", () => {
     ];
     const html = workCardHtml({ body: { map: m, organizable: false }, pages, now: NOW, done: new Set(), hrefFor: href, refresh: { phase: "idle" } });
     expect(html).not.toContain('data-effort-id="moved"');
-    expect(html).toContain('data-effort-id="deleted"');
+    expect(html).not.toContain('data-effort-id="deleted"');
     expect(html).toContain('data-effort-id="f"');
   });
 
-  test("on the card, a page joined to a 7-page effort shows among the first six, not behind «+N more»", () => {
-    const seven = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"].map((s) => `plans/${s}.mdx`);
-    const m = map({ runAtMs: RUN, efforts: [effort("big", seven)] });
+  test("on the board, a page joined after the run brings its wait: the effort moves to Waiting on you", () => {
+    const m = map({ runAtMs: RUN, efforts: [effort("big", ["plans/p1.mdx"])] });
     const pages = [
-      ...seven.map((rel, i) => ({ relPath: rel, title: `Page ${i + 1}`, ...old })),
-      { relPath: "plans/today.mdx", title: "Written today", effort: "big", gitDirty: true, mtimeMs: NOW },
+      { relPath: "plans/p1.mdx", title: "Page 1", ...old },
+      { relPath: "plans/today.mdx", title: "Written today", effort: "big", gitDirty: true, mtimeMs: NOW, movesWaiting: 2 },
     ];
-    const html = workCardHtml({ body: { map: m, organizable: false }, pages, now: NOW, done: new Set(), hrefFor: href, refresh: { phase: "idle" } });
-    const list = html.slice(html.indexOf('data-effort-id="big"'));
-    const shown = list.slice(0, list.indexOf("wiki-wm-more"));
-    expect(shown).toContain(">Written today</a>");
-    expect(list).toContain("+2 more");
+    const html = workCardHtml({ body: { map: m, organizable: false }, pages, now: NOW, done: new Set(), hrefFor: href, refresh: { phase: "idle" }, waitsCounted: true });
+    const you = html.slice(html.indexOf('data-wm-lane="you"'), html.indexOf('data-wm-lane="moving"'));
+    expect(you).toContain('data-effort-id="big"');
+    expect(you).toContain(">2 decisions<");
   });
 });
 

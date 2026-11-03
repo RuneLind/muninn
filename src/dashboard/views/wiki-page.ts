@@ -2684,11 +2684,9 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-lane { margin: 8px 0 0; }
     .wiki-wm-lane-title { cursor: pointer; list-style-position: inside; }
     .wiki-wm-count { color: var(--text-soft); font-weight: 400; }
-    .wiki-wm-efforts, .wiki-wm-sub { list-style: none; margin: 0; padding: 0; }
-    .wiki-wm-sub { margin: 6px 0 0 14px; padding-left: 10px; border-left: 2px solid var(--border-secondary); }
+    .wiki-wm-efforts { list-style: none; margin: 0; padding: 0; }
     .wiki-wm-effort { padding: 6px 0; border-top: 1px solid var(--border-primary); font-size: 12.5px; min-width: 0; }
     .wiki-wm-efforts > .wiki-wm-effort:first-child { border-top: none; }
-    .wiki-wm-sub > .wiki-wm-effort { border-top: none; padding: 4px 0; }
     .wiki-wm-effort-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
     .wiki-wm-effort-name { font-weight: 600; color: var(--text-primary); }
     .wiki-wm-state {
@@ -2706,6 +2704,39 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-next { margin-top: 3px; color: var(--text-secondary); overflow-wrap: anywhere; }
     .wiki-wm-next-label { color: var(--text-soft); font-weight: 600; }
     .wiki-wm-coverage { font-size: 11px; color: var(--text-soft); margin-top: 10px; }
+    /* The board (your-work board P3). Layout is CSS alone, so F and a resize need no repaint.
+       Five 200 px tracks and four 10 px gaps need 1040 px: from there every column shows, so
+       nothing is left to fold. A browser without ::details-content keeps working folds. */
+    .wiki-wm-board { container-type: inline-size; container-name: wmboard; margin-top: 10px; }
+    .wiki-wm-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; align-items: start; }
+    .wiki-wm-col { min-width: 0; }
+    .wiki-wm-col > summary { cursor: pointer; list-style-position: inside; }
+    .wiki-wm-col[data-wm-lane="you"] > summary, .wiki-wm-col[data-wm-lane="you"] > summary .wiki-wm-count { color: var(--accent-light); }
+    @container wmboard (min-width: 1040px) {
+      .wiki-wm-col::details-content { content-visibility: visible; }
+      .wiki-wm-col > summary { display: flex; justify-content: space-between; cursor: default; pointer-events: none; }
+    }
+    .wiki-wm-col-none { font-size: 12.5px; color: var(--text-soft); padding: 4px 2px; }
+    .wiki-wm-col .wiki-wm-efforts > .wiki-wm-tile {
+      border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 10px;
+      background: var(--bg-inset); margin-bottom: 8px; overflow-wrap: anywhere;
+    }
+    .wiki-wm-col[data-wm-lane="you"] .wiki-wm-efforts > .wiki-wm-tile { border: 1.5px solid var(--accent); }
+    .wiki-wm-tile .wiki-wm-effort-head { gap: 2px 6px; line-height: 1.3; }
+    .wiki-wm-spark { display: block; width: 100%; height: 24px; margin: 5px 0 3px; }
+    .wiki-wm-spark rect { fill: var(--accent-light); }
+    .wiki-wm-spark rect.zero { fill: var(--border-secondary); }
+    @media (forced-colors: active) {
+      .wiki-wm-spark rect { fill: CanvasText; }
+      .wiki-wm-spark rect.zero { fill: GrayText; }
+    }
+    .wiki-wm-pills { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+    .wiki-wm-pill { font-size: 11.5px; line-height: 1.4; padding: 1px 7px; border-radius: 9px; background: var(--bg-surface); color: var(--text-soft); min-width: 0; }
+    .wiki-wm-pill.warn { background: var(--tint-warning); color: var(--tone-warn); }
+    .wiki-wm-pill.acc { background: var(--tint-purple); color: var(--accent-light); }
+    .wiki-wm-kids { list-style: none; margin: 6px 0 0; padding: 6px 0 0; border-top: 1px dashed var(--border-primary); }
+    .wiki-wm-kids > .wiki-wm-kid { border-top: none; padding: 3px 0; }
+    .wiki-wm-kid .wiki-wm-spark { height: 12px; margin: 2px 0 0; }
     /* What you're following (themes map, theme map P2). */
     .wm-state-new, .wm-state-rising { background: var(--tint-purple); color: var(--accent-light); }
     .wiki-wm-need-count {

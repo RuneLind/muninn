@@ -2,17 +2,22 @@ import { describe, expect, test } from "bun:test";
 import { WORK_MAP_VERSION, type WorkMap } from "../../../wiki/work-map/schema.ts";
 import { metadataFilterWarning } from "../../../wiki/work-map/run.ts";
 import {
+  BOARD_COLUMNS,
+  boardColumn,
+  boardFacts,
   formatAge,
   isNestedEffort,
   isWorkMapStale,
-  laneEfforts,
   lastActiveDays,
   needKey,
+  needMarksReader,
   parseDone,
   pollState,
   proseHtml,
   proseText,
   refreshRefusalText,
+  SPARK_DAYS,
+  sparkValues,
   STRIP_ROWS_SHOWN,
   stripKey,
   stripRows,
@@ -89,11 +94,11 @@ describe("workCardHtml", () => {
     expect(card(map(), { organizable: true, lastSuccessAt: NOW - 3 * HOUR })).toContain("last run 3 h ago");
   });
 
-  test("Moving is open; Cooling and Quiet-and-shipped are closed", () => {
-    const html = card(map());
-    expect(html).toMatch(/data-wm-lane="moving" open>/);
-    expect(html).toMatch(/data-wm-lane="cooling">/);
-    expect(html).toMatch(/data-wm-lane="quiet">/);
+  test("the five columns in order, Waiting on you and Moving open, each rendered even when empty", () => {
+    const html = card(map({ efforts: [] }));
+    const cols = [...html.matchAll(/<details class="wiki-wm-col" data-wm-lane="([a-z]+)"( open)?>/g)].map((m) => `${m[1]}${m[2] ? "+" : ""}`);
+    expect(cols).toEqual(["you+", "moving+", "cooling", "quiet", "shipped"]);
+    expect(html.match(/wiki-wm-col-none">none</g)).toHaveLength(5);
   });
 
   test("escapes every model string and listing title", () => {
@@ -145,54 +150,243 @@ describe("workCardHtml", () => {
     expect(html).toContain("Active pages fell from 90 to 30.");
   });
 
-  test("a sub-effort renders under its parent, not as its own row", () => {
-    const m = map({ efforts: [effort("p", "active", ["plans/a.mdx"]), effort("k", "active", ["plans/b.mdx"], { parent: "p" })] });
-    const html = card(m);
-    expect(html).toMatch(/data-effort-id="p">[\s\S]*wiki-wm-sub[\s\S]*data-effort-id="k"/);
-    expect(html.match(/data-effort-id="k"/g)).toHaveLength(1);
-  });
 });
 
-describe("lanes and nesting", () => {
-  test("a Moving sub-effort of a closed-lane parent renders in Moving, naming its parent", () => {
-    const m = map({ efforts: [effort("p", "shipped", ["plans/a.mdx"]), effort("k", "active", ["plans/b.mdx"], { parent: "p" }), effort("q", "cooling", [], { parent: "p" })] });
-    const html = card(m);
-    const lane = (id: string) => html.slice(html.indexOf(`data-wm-lane="${id}"`), html.indexOf("</details>", html.indexOf(`data-wm-lane="${id}"`)));
-    expect(lane("moving")).toContain('data-effort-id="k"');
-    expect(lane("moving")).toContain("part of Effort p");
-    expect(lane("moving")).toContain('wiki-wm-count">1<');
-    expect(lane("quiet")).not.toContain('data-effort-id="k"');
-    // A closed child of a closed parent stays nested, and counts in the lane it renders in.
-    expect(lane("quiet")).toContain('data-effort-id="q"');
-    expect(lane("quiet")).toContain('wiki-wm-count">2<');
+describe("the board", () => {
+  type Pg = { relPath: string; title: string; movesWaiting?: number; waitingSince?: string; movesYou?: number; plan_status?: string };
+  const pg = (rel: string, over: Partial<Pg> = {}): Pg => ({ relPath: rel, title: rel, ...over });
+  const render = (m: WorkMap, pages: Pg[], over: { done?: Set<string>; waitsCounted?: boolean; checks?: Parameters<typeof workCardHtml>[0]["checks"]; now?: number } = {}) =>
+    workCardHtml({ body: { map: m, organizable: false }, pages, now: over.now ?? NOW, done: over.done ?? new Set(), hrefFor: href, effortHref: (id) => `/wiki?effort=${id}`, refresh: { phase: "idle" }, waitsCounted: over.waitsCounted ?? true, ...(over.checks ? { checks: over.checks } : {}) });
+  const col = (html: string, id: string) => {
+    const at = html.indexOf(`data-wm-lane="${id}"`);
+    return html.slice(at, html.indexOf("</details>", at));
+  };
+  const columnOf = (html: string, effortId: string) => ["you", "moving", "cooling", "quiet", "shipped"].filter((c) => col(html, c).includes(`data-effort-id="${effortId}"`));
+  const orderIn = (html: string, id: string) => [...col(html, id).matchAll(/wiki-wm-tile" data-effort-id="([^"]+)"/g)].map((m) => m[1]);
+  const need = (effortId: string | undefined, title = "Do it", kind: "decision" | "followup" = "followup") => ({ title, kind, why: "", action: "", pages: [], ...(effortId ? { effort: effortId } : {}) }) as WorkMap["needsYou"][number];
+  const only = (e: WorkMap["efforts"], needsYou: WorkMap["needsYou"] = []) => map({ efforts: e, needsYou, summary: "" });
+  const checksFor = (runAt: number, entries: { kind: string; title: string; pr: number; state: "MERGED" | "OPEN"; asksForIt: boolean }[]) => ({
+    body: { needs: entries.map((e) => ({ ...e, mergedAt: null })), contradictions: [], uncheckedRows: [], unlinkedRows: [], checked: 0, compared: 0, unchecked: 0, unlinked: 0, skipped: 0 } as never,
+    answerRunAt: runAt,
+  });
+
+  test("BOARD_COLUMNS maps every state; a wait or an open item beats the state", () => {
+    const quiet = { decisions: 0, steps: 0, needKinds: [] };
+    for (const [state, column] of Object.entries(BOARD_COLUMNS)) expect(boardColumn({ state: state as "active" }, quiet)).toBe(column);
+    expect(Object.keys(BOARD_COLUMNS).sort()).toEqual(["active", "blocked", "cooling", "proposed", "quiet", "shipped"]);
+    expect(boardColumn({ state: "shipped" }, { ...quiet, decisions: 1 })).toBe("you");
+    expect(boardColumn({ state: "quiet" }, { ...quiet, needKinds: ["followup"] })).toBe("you");
+    // Steps alone move nothing.
+    expect(boardColumn({ state: "quiet" }, { ...quiet, steps: 4 })).toBe("quiet");
+  });
+
+  test("one effort for each column rule", () => {
+    const html = render(
+      only(
+        [effort("w", "quiet", ["w.mdx"]), effort("n", "cooling", ["n.mdx"]), effort("a", "active", ["a.mdx"]), effort("b", "blocked", ["a.mdx"]), effort("p", "proposed", ["a.mdx"]), effort("c", "cooling", ["a.mdx"]), effort("q", "quiet", ["a.mdx"]), effort("s", "shipped", ["a.mdx"])],
+        [need("n")],
+      ),
+      [pg("w.mdx", { movesWaiting: 1 }), pg("n.mdx"), pg("a.mdx")],
+    );
+    const at = Object.fromEntries(["w", "n", "a", "b", "p", "c", "q", "s"].map((id) => [id, columnOf(html, id)]));
+    expect(at).toEqual({ w: ["you"], n: ["you"], a: ["moving"], b: ["moving"], p: ["moving"], c: ["cooling"], q: ["quiet"], s: ["shipped"] });
+  });
+
+  test("an effort with no page is not on the board, though the map holds it", () => {
+    const html = render(only([effort("empty", "active", ["gone.mdx"]), effort("a", "active", ["a.mdx"])]), [pg("a.mdx")]);
+    expect(html).not.toContain('data-effort-id="empty"');
+    expect(col(html, "moving")).toContain('wiki-wm-count">1<');
+  });
+
+  test("waitsCounted false: no question rule and no decisions pill; Needs you and steps still run", () => {
+    const m = only([effort("w", "quiet", ["w.mdx"]), effort("n", "quiet", ["n.mdx"])], [need("n")]);
+    const pages = [pg("w.mdx", { movesWaiting: 2, waitingSince: "2026-10-01", movesYou: 3 }), pg("n.mdx")];
+    const html = render(m, pages, { waitsCounted: false });
+    expect(columnOf(html, "w")).toEqual(["quiet"]);
+    expect(columnOf(html, "n")).toEqual(["you"]);
+    expect(html).not.toContain("wiki-wm-pill warn");
+    expect(html).toContain(">3 steps<");
+    expect(columnOf(render(m, pages), "w")).toEqual(["you"]);
+  });
+
+  test("a closed-without-shipping page neither makes Waiting nor adds a step, as in the strip", () => {
+    const html = render(only([effort("x", "quiet", ["x.mdx"])]), [pg("x.mdx", { movesWaiting: 2, movesYou: 2, waitingSince: "2026-10-01", plan_status: "abandoned" })]);
+    expect(columnOf(html, "x")).toEqual(["quiet"]);
+    expect(html).not.toContain("wiki-wm-pill");
+    expect(stripRows([pg("x.mdx", { movesWaiting: 2, plan_status: "abandoned" })]).decisions).toEqual([]);
+  });
+
+  test("a ✓-done item and a struck item do not make Waiting; an unstruck one does", () => {
+    const m = only([effort("d", "quiet", ["a.mdx"]), effort("g", "quiet", ["a.mdx"]), effort("o", "quiet", ["a.mdx"])], [need("d", "Done one"), need("g", "Merged one"), need("o", "Open one")]);
+    const entries = [
+      { kind: "followup", title: "Merged one", pr: 1, state: "MERGED" as const, asksForIt: true },
+      { kind: "followup", title: "Open one", pr: 2, state: "OPEN" as const, asksForIt: true },
+    ];
+    const html = render(m, [pg("a.mdx")], { done: new Set([needKey(need("d", "Done one"))]), checks: checksFor(m.runAtMs, entries) });
+    expect(columnOf(html, "d")).toEqual(["quiet"]);
+    expect(columnOf(html, "g")).toEqual(["quiet"]);
+    expect(columnOf(html, "o")).toEqual(["you"]);
+    // The same answer for another map marks nothing: exactly the section's gate.
+    const older = render(m, [pg("a.mdx")], { checks: checksFor(m.runAtMs - 1, entries) });
+    expect(columnOf(older, "g")).toEqual(["you"]);
+    expect(older).not.toContain("gh-done");
+    // A mention is not an ask, and two PRs need both merged.
+    const reader = needMarksReader(m.needsYou, { ...checksFor(m.runAtMs, [{ ...entries[0]!, asksForIt: false }]) }, m.runAtMs);
+    expect(reader(1).struck).toBe(false);
+    const two = needMarksReader(m.needsYou, { ...checksFor(m.runAtMs, [entries[0]!, { ...entries[0]!, pr: 3, state: "OPEN" }]) }, m.runAtMs);
+    expect(two(1).struck).toBe(false);
+  });
+
+  test("an item with no effort or an unknown effort moves nothing, and a parent's item does not roll up", () => {
+    const m = only([effort("p", "quiet", ["a.mdx"]), effort("k", "quiet", ["a.mdx"], { parent: "p" })], [need(undefined), need("zz", "Other"), need("k", "Kid's")]);
+    const html = render(m, [pg("a.mdx")]);
+    expect(columnOf(html, "p")).toEqual(["quiet"]);
+    expect(columnOf(html, "k")).toEqual(["you"]);
+    expect(col(html, "you")).toContain("part of Effort p");
+  });
+
+  test("a waiting sub-effort under a Moving parent stands on its own, naming its parent", () => {
+    const html = render(only([effort("p", "active", ["a.mdx"]), effort("k", "active", ["w.mdx"], { parent: "p" })]), [pg("a.mdx"), pg("w.mdx", { movesWaiting: 1 })]);
+    expect(columnOf(html, "k")).toEqual(["you"]);
+    expect(col(html, "you")).toContain('wiki-wm-tile" data-effort-id="k"');
+    expect(col(html, "you")).toContain("part of Effort p");
+    expect(col(html, "moving")).not.toContain("wiki-wm-kid");
+    expect(col(html, "moving")).toContain('wiki-wm-count">1<');
+  });
+
+  test("a sub-effort in its parent's column is a compact row in the tile, counted in the head", () => {
+    const html = render(only([effort("p", "active", ["a.mdx"]), effort("k", "blocked", ["a.mdx"], { parent: "p", oneLine: "Kid line.", next: "Kid next." })]), [pg("a.mdx")]);
+    const moving = col(html, "moving");
+    expect(moving).toMatch(/wiki-wm-tile" data-effort-id="p">[\s\S]*wiki-wm-kids[\s\S]*wiki-wm-kid" data-effort-id="k"/);
+    expect(moving).toContain('wiki-wm-count">2<');
+    expect(moving).not.toContain("part of");
+    expect(moving).not.toContain("Kid line.");
+    expect(moving).not.toContain("Kid next.");
     expect(html.match(/data-effort-id="k"/g)).toHaveLength(1);
   });
-  test("a Moving sub-effort of a Moving parent stays nested and counts in Moving", () => {
-    const m = map({ efforts: [effort("p", "active", []), effort("k", "blocked", [], { parent: "p" })] });
-    const html = card(m);
-    expect(html).toMatch(/data-effort-id="p">[\s\S]*wiki-wm-sub[\s\S]*data-effort-id="k"/);
+
+  test("a grandchild in the same column renders once, in the top tile", () => {
+    const html = render(only([effort("g", "active", ["a.mdx"]), effort("c", "active", ["a.mdx"], { parent: "g" }), effort("k", "active", ["a.mdx"], { parent: "c" })]), [pg("a.mdx")]);
+    expect(orderIn(html, "moving")).toEqual(["g"]);
+    expect(col(html, "moving").match(/wiki-wm-kid" data-effort-id/g)).toHaveLength(2);
+    expect(html.match(/data-effort-id="k"/g)).toHaveLength(1);
+  });
+
+  test("a grandchild whose parent went elsewhere stands on its own, naming that parent", () => {
+    const html = render(only([effort("g", "active", ["a.mdx"]), effort("c", "cooling", ["a.mdx"], { parent: "g" }), effort("k", "active", ["a.mdx"], { parent: "c" })]), [pg("a.mdx")]);
+    expect(orderIn(html, "moving")).toEqual(["g", "k"]);
+    expect(col(html, "moving")).toContain("part of Effort c");
+    expect(col(html, "cooling")).toContain("part of Effort g");
+  });
+
+  test("a parent cycle and a missing parent stay top-level, once each, with no «part of»", () => {
+    const es = [effort("a", "active", ["a.mdx"], { parent: "b" }), effort("b", "active", ["a.mdx"], { parent: "a" }), effort("m", "active", ["a.mdx"], { parent: "zz" })];
+    expect(es.map((e) => isNestedEffort(e, es))).toEqual([false, false, false]);
+    const html = render(only(es), [pg("a.mdx")]);
+    expect(orderIn(html, "moving")).toEqual(["a", "b", "m"]);
     expect(html).not.toContain("part of");
-    expect(html).toContain('wiki-wm-count">2<');
   });
-  test("a Moving grandchild under a closed-state child of a Moving effort renders once, top-level in Moving", () => {
-    const m = map({ efforts: [effort("g", "active", []), effort("c", "cooling", [], { parent: "g" }), effort("k", "active", [], { parent: "c" })] });
-    const html = card(m);
-    expect(html.match(/data-effort-id="k"/g)).toHaveLength(1);
-    expect(html).toContain("part of Effort c");
-    expect(html).toContain('data-wm-lane="moving"');
-    expect(html).toContain('wiki-wm-count">3<');
-  });
-  test("duplicate effort ids that cross-parent render once each, without overflowing", () => {
-    const m = map({ efforts: [effort("a", "active", [], { parent: "b" }), effort("a", "active", []), effort("b", "active", [], { parent: "a" }), effort("b", "active", [])] });
-    const html = card(m);
+
+  test("duplicate effort ids render once each", () => {
+    const html = render(only([effort("a", "active", ["a.mdx"], { parent: "b" }), effort("a", "active", ["a.mdx"]), effort("b", "active", ["a.mdx"], { parent: "a" }), effort("b", "active", ["a.mdx"])]), [pg("a.mdx")]);
     expect(html.match(/data-effort-id="a"/g)).toHaveLength(1);
     expect(html.match(/data-effort-id="b"/g)).toHaveLength(1);
   });
-  test("a parent cycle leaves both efforts top-level", () => {
-    const es = [effort("a", "active", [], { parent: "b" }), effort("b", "active", [], { parent: "a" })];
-    expect(es.map((e) => isNestedEffort(e, es))).toEqual([false, false]);
-    expect(laneEfforts(es.map((e) => ({ ...e, pages: [], movedOut: [] })))[0]!.efforts.map((e) => e.id)).toEqual(["a", "b"]);
+
+  test("a parent with no page is off the board, so its sub-effort stands alone with no «part of»", () => {
+    const html = render(only([effort("p", "active", []), effort("k", "active", ["a.mdx"], { parent: "p" })]), [pg("a.mdx")]);
+    expect(orderIn(html, "moving")).toEqual(["k"]);
+    expect(html).not.toContain("part of");
   });
+
+  test("order: oldest wait first, undated after, then most recently active, then map order", () => {
+    const day = (d: string) => [{ day: d, commits: 1, sessions: 0 }];
+    const html = render(
+      only([
+        effort("undated-old", "active", ["u.mdx"], { daily: day("2026-10-01") }),
+        effort("undated-new", "active", ["u.mdx"], { daily: day("2026-10-28") }),
+        effort("dated-young", "active", ["y.mdx"]),
+        effort("dated-old", "active", ["o.mdx"]),
+        effort("idle-a", "active", ["u.mdx"]),
+        effort("idle-b", "active", ["u.mdx"]),
+      ]),
+      [pg("u.mdx", { movesWaiting: 1 }), pg("y.mdx", { movesWaiting: 1, waitingSince: "2026-10-20" }), pg("o.mdx", { movesWaiting: 1, waitingSince: "2026-10-02" })],
+    );
+    expect(orderIn(html, "you")).toEqual(["dated-old", "dated-young", "undated-new", "undated-old", "idle-a", "idle-b"]);
+  });
+
+  test("pills: counts and fixed labels, oldest date across pages, no age without a date, a duplicate page once", () => {
+    const m = only([effort("x", "active", ["a.mdx", "b.mdx", "a.mdx"], { daily: [{ day: "2026-10-27", commits: 1, sessions: 0 }] })], [need("x", "One", "decision"), need("x", "Two")]);
+    const html = render(m, [pg("a.mdx", { movesWaiting: 2, waitingSince: "2026-10-19", movesYou: 1 }), pg("b.mdx", { movesWaiting: 1, waitingSince: "2026-10-26", movesYou: 1 })]);
+    expect([...html.matchAll(/wiki-wm-pill( \w+)?">([^<]*)</g)].map((p) => p[2])).toEqual(["3 decisions · 10 d", "decision · followup", "2 steps", "2 d ago"]);
+    const one = render(only([effort("x", "active", ["a.mdx"])]), [pg("a.mdx", { movesWaiting: 1, movesYou: 1 })]);
+    expect([...one.matchAll(/wiki-wm-pill( \w+)?">([^<]*)</g)].map((p) => p[2])).toEqual(["1 decision", "1 step"]);
+  });
+
+  test("boardFacts counts what stripRows counts for the same pages", () => {
+    const pages = [pg("a.mdx", { movesWaiting: 2, waitingSince: "2026-10-05", movesYou: 1 }), pg("b.mdx", { movesWaiting: 1 }), pg("c.mdx", { movesWaiting: 9, plan_status: "abandoned" })];
+    const f = boardFacts({ id: "x", pages: pages.map((page) => ({ page })) }, [], new Set(), () => ({ struck: false, notes: [] }), true);
+    const rows = stripRows(pages);
+    expect(f.decisions).toBe(rows.decisions.reduce((n, r) => n + (r.count ?? 0), 0));
+    expect(f.steps).toBe(rows.steps.reduce((n, r) => n + (r.count ?? 0), 0));
+    expect(f.since).toBe(rows.oldest[0]!.since);
+  });
+
+  test("the tile: linked name, sparkline, one line, Next; no page list and no state chip", () => {
+    const html = render(only([effort("x", "active", ["a.mdx"], { oneLine: "See ⟦a.mdx⟧.", next: "Ship <it>." })]), [pg("a.mdx")]);
+    const tile = col(html, "moving");
+    expect(tile).toContain('<a class="wiki-wm-effort-name" href="/wiki?effort=x" data-effort-link="x">Effort x</a>');
+    expect(tile).toContain('role="img" aria-label="Activity, last 28 days"');
+    expect(tile).toContain('data-relpath="a.mdx"');
+    expect(tile).toContain("Ship &lt;it&gt;.");
+    expect(tile).not.toContain("wiki-wm-pages");
+    expect(tile).not.toContain("wiki-wm-state");
+  });
+
+  test("with no effort href the name is text", () => {
+    const html = workCardHtml({ body: { map: only([effort("x", "active", ["plans/a.mdx"])]), organizable: false }, pages: PAGES, now: NOW, done: new Set(), hrefFor: href, refresh: { phase: "idle" } });
+    expect(html).toContain('<span class="wiki-wm-effort-name">Effort x</span>');
+  });
+
+  test("escapes the name, the part-of parent and a kind", () => {
+    const m = only([effort("p", "active", ["a.mdx"], { name: '<i>"p' }), effort("k", "cooling", ["a.mdx"], { parent: "p", name: "<b>k" })], [{ ...need("p"), kind: "<u>" as never }]);
+    const html = render(m, [pg("a.mdx")]);
+    for (const raw of ["<i>", "<b>k", "<u>"]) expect(col(html, "you") + col(html, "cooling")).not.toContain(raw);
+    expect(col(html, "cooling")).toContain("part of &lt;i&gt;");
+  });
+});
+
+describe("sparkValues", () => {
+  test("28 days ending today: commits plus twice the sessions, summed per day", () => {
+    const v = sparkValues([{ day: "2026-10-29", commits: 2, sessions: 1 }, { day: "2026-10-29", commits: 1, sessions: 0 }, { day: "2026-10-28", commits: 0, sessions: 3 }, { day: "2026-10-02", commits: 7, sessions: 0 }], NOW);
+    expect(v).toHaveLength(SPARK_DAYS);
+    expect(v[27]).toBe(5);
+    expect(v[26]).toBe(6);
+    expect(v[0]).toBe(7);
+    expect(v.reduce((a, b) => a + b, 0)).toBe(18);
+  });
+  test("a day outside the 28 is ignored, a bad day too, and a later day counts as today", () => {
+    const v = sparkValues([{ day: "2026-10-01", commits: 9, sessions: 9 }, { day: "not-a-day", commits: 9, sessions: 9 }, { day: "2026-10-30", commits: 1, sessions: 0 }], NOW);
+    expect(v.reduce((a, b) => a + b, 0)).toBe(1);
+    expect(v[27]).toBe(1);
+  });
+  test("an all-zero series draws a flat baseline, a real day stands taller", () => {
+    const m = map({ efforts: [effort("z", "active", ["plans/a.mdx"]), effort("y", "active", ["plans/a.mdx"], { daily: [{ day: "2026-10-29", commits: 4, sessions: 0 }, { day: "2026-10-28", commits: 1, sessions: 0 }] })], needsYou: [], summary: "" });
+    const html = card(m);
+    const svg = (id: string) => {
+      const at = html.indexOf(`data-effort-id="${id}"`);
+      return html.slice(html.indexOf("<svg", at), html.indexOf("</svg>", at));
+    };
+    expect(svg("z").match(/<rect class="zero"[^>]*height="1\.0"/g)).toHaveLength(28);
+    expect(svg("z")).not.toMatch(/<rect x/);
+    expect(svg("y").match(/<rect class="zero"/g)).toHaveLength(26);
+    expect(svg("y")).toContain('<rect x="27.1" y="0.0" width="0.8" height="24.0"/>');
+    // A small day keeps its 3-unit floor.
+    expect(svg("y")).toContain('<rect x="26.1" y="18.0" width="0.8" height="6.0"/>');
+  });
+});
+
+describe("nesting and days", () => {
   test("a missing parent leaves the effort top-level", () => {
     const es = [effort("a", "cooling", [], { parent: "zz" })];
     expect(isNestedEffort(es[0]!, es)).toBe(false);
@@ -644,10 +838,15 @@ describe("the health strip", () => {
     expect(stripKey(a, true)).not.toBe(stripKey(a, false));
   });
 
-  test("stripKey moves when only a listed page's title changes, and not for a page the strip does not list", () => {
+  test("stripKey moves for what the board reads: any page's title, a page leaving, a status; not for the listing's order", () => {
     const a = [page("plans/a.mdx", { movesWaiting: 1, title: "Old" }), page("plans/b.mdx", { title: "Quiet" })];
-    expect(stripKey(a, true)).not.toBe(stripKey([page("plans/a.mdx", { movesWaiting: 1, title: "New" }), page("plans/b.mdx", { title: "Quiet" })], true));
-    expect(stripKey(a, true)).toBe(stripKey([page("plans/a.mdx", { movesWaiting: 1, title: "Old" }), page("plans/b.mdx", { title: "Renamed" })], true));
+    expect(stripKey(a, true)).not.toBe(stripKey([page("plans/a.mdx", { movesWaiting: 1, title: "New" }), a[1]!], true));
+    // A marker in an effort's one line reads a page the strip does not list, by title.
+    expect(stripKey(a, true)).not.toBe(stripKey([a[0]!, page("plans/b.mdx", { title: "Renamed" })], true));
+    // A page gone can leave an effort with none, and that effort leaves the board.
+    expect(stripKey(a, true)).not.toBe(stripKey([a[0]!], true));
+    expect(stripKey(a, true)).not.toBe(stripKey([page("plans/a.mdx", { movesWaiting: 1, title: "Old", plan_status: "abandoned" }), a[1]!], true));
+    expect(stripKey(a, true)).toBe(stripKey([a[1]!, a[0]!], true));
   });
 
   test("a themes map has no strip", () => {

@@ -353,11 +353,11 @@ test("an unknown id says it is no longer in the map and links the alias match", 
   await expect(page.locator("#wikiWorkCard")).toBeVisible();
 });
 
-test("a page declared after the run shows under its effort on the card and on the effort page (P6)", async ({ page }) => {
+test("a page declared after the run shows on its effort's page, one click from the board (P6)", async ({ page }) => {
   await page.goto(`${BASE}/wiki?wiki=${DECLARED}`);
   const card = page.locator("#wikiWorkCard");
   const drift = card.locator('.wiki-wm-effort[data-effort-id="drift"]');
-  await expect(drift.locator('.wiki-wm-link[data-relpath="plans/drift-today.mdx"]')).toHaveText("Drift today");
+  await expect(drift).toHaveCount(1);
   // A retired effort is not on the card.
   await expect(card.locator('[data-effort-id="parked"]')).toHaveCount(0);
   await drift.locator('a.wiki-wm-effort-name[data-effort-link="drift"]').click();
