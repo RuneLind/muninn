@@ -580,7 +580,8 @@ function boardHtml<P extends CardPage>(
     const inCol = rows.filter((r) => r.col === id);
     const tiles = inCol.filter((r) => !nestsUp(r)).sort(byBoardOrder);
     return (
-      `<details class="wiki-wm-col" data-wm-lane="${id}"${open ? " open" : ""}>` +
+      // Named here because an inert head (the wide board) drops out of the accessibility tree.
+      `<details class="wiki-wm-col" data-wm-lane="${id}" aria-label="${esc(label)} ${inCol.length}"${open ? " open" : ""}>` +
       `<summary class="wiki-wm-lane-title">${esc(label)} <span class="wiki-wm-count">${inCol.length}</span></summary>` +
       (tiles.length ? `<ul class="wiki-wm-efforts">${tiles.map(tileHtml).join("")}</ul>` : '<div class="wiki-wm-col-none">none</div>') +
       "</details>"

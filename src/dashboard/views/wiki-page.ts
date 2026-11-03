@@ -2706,15 +2706,20 @@ export async function renderWikiPage(opts?: {
     .wiki-wm-coverage { font-size: 11px; color: var(--text-soft); margin-top: 10px; }
     /* The board (your-work board P3). Layout is CSS alone, so F and a resize need no repaint.
        Five 200 px tracks and four 10 px gaps need 1040 px: from there every column shows, so
-       nothing is left to fold. A browser without ::details-content keeps working folds. */
+       nothing is left to fold, and the head takes no pointer, focus or key. Behind @supports:
+       without ::details-content the summary rule would make shut columns unopenable, so that
+       browser keeps working folds. A browser without interactivity keeps a head that can be
+       tabbed to and flipped unseen. */
     .wiki-wm-board { container-type: inline-size; container-name: wmboard; margin-top: 10px; }
     .wiki-wm-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; align-items: start; }
     .wiki-wm-col { min-width: 0; }
     .wiki-wm-col > summary { cursor: pointer; list-style-position: inside; }
     .wiki-wm-col[data-wm-lane="you"] > summary, .wiki-wm-col[data-wm-lane="you"] > summary .wiki-wm-count { color: var(--accent-light); }
-    @container wmboard (min-width: 1040px) {
-      .wiki-wm-col::details-content { content-visibility: visible; }
-      .wiki-wm-col > summary { display: flex; justify-content: space-between; cursor: default; pointer-events: none; }
+    @supports selector(::details-content) {
+      @container wmboard (min-width: 1040px) {
+        .wiki-wm-col::details-content { content-visibility: visible; }
+        .wiki-wm-col > summary { display: flex; justify-content: space-between; cursor: default; pointer-events: none; interactivity: inert; }
+      }
     }
     .wiki-wm-col-none { font-size: 12.5px; color: var(--text-soft); padding: 4px 2px; }
     .wiki-wm-col .wiki-wm-efforts > .wiki-wm-tile {

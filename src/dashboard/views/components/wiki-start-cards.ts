@@ -927,7 +927,8 @@ function focusCandidates(el: HTMLElement, key: FocusKey): (HTMLElement | null | 
     return [btn, btn?.parentElement?.querySelector<HTMLElement>(".wiki-wm-why-text"), heading];
   }
   // A control in a shut board column takes no focus: the column's head does.
-  const orFold = (t: HTMLElement | null | undefined) => [t, t?.closest("details")?.querySelector("summary"), heading];
+  // A themes lane is not one: there focus parks on the heading and the next paint retries.
+  const orFold = (t: HTMLElement | null | undefined) => [t, t?.closest(".wiki-wm-col")?.querySelector<HTMLElement>(":scope > summary"), heading];
   if ("sel" in key) return orFold(el.querySelector<HTMLElement>(key.sel));
   if ("link" in key) return orFold(cardLinks(el, key.link)[key.nth]);
   if ("href" in key) return orFold(hrefLinks(el, key.href)[key.nth]);
@@ -980,7 +981,7 @@ function hrefLinks(el: HTMLElement, href: string): HTMLElement[] {
 function resolveFocus(el: HTMLElement, key: FocusKey): void {
   const t = focusFirst(focusCandidates(el, key));
   const wanted = "sel" in key ? el.querySelector<HTMLElement>(key.sel) : null;
-  if (t && wanted && t !== wanted && !wanted.closest("details")) {
+  if (t && wanted && t !== wanted && !wanted.closest(".wiki-wm-col")) {
     pendingFocus = key;
     t.setAttribute(PARKED_ATTR, "");
   }

@@ -47,7 +47,8 @@
  * 11. **The board (your-work board P3)**: the columns' tracks at each window, the
  *     folds that stop folding when all five fit, live under F with no repaint, no
  *     horizontal overflow, an effort moving between columns when the check or a ✓
- *     or an adopt says so, focus following it, and the sparkline under forced colors.
+ *     or an adopt says so, focus following it, the sparkline under forced colors,
+ *     and from that width heads that take no focus or key, with each column named.
  *
  * One muninn on its own port over four temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -655,6 +656,159 @@ test("a resize across the five-track width folds and unfolds with no repaint", a
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect.poll(() => columnsShown(page)).toEqual(["you", "moving"]);
   await expect(card.locator("[data-before-resize]")).toHaveCount(1);
+});
+
+// Fix round 1 batch 2: the wide board's rules and its heads.
+test("the wide board's rules all sit behind @supports selector(::details-content), and without them the folds work at 1920", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 900 });
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await expect(card.locator(".wiki-wm-tile").first()).toBeAttached();
+  expect(await columnsShown(page)).toEqual(COLUMN_IDS);
+  // Chromium supports the selector, so no run here is a browser without it. This
+  // is the stylesheet's structure, then what such a browser does: it drops the block.
+  const shape = await page.evaluate(() => {
+    const out = { supported: CSS.supports("selector(::details-content)"), guarded: [] as string[], bare: [] as string[] };
+    const walk = (rules: CSSRuleList, guarded: boolean, wide: boolean) => {
+      for (const r of Array.from(rules)) {
+        if (r instanceof CSSSupportsRule) walk(r.cssRules, guarded || r.conditionText === "selector(::details-content)", wide);
+        else if (r instanceof CSSContainerRule) walk(r.cssRules, guarded, wide || r.containerName === "wmboard");
+        else if (r instanceof CSSMediaRule) walk(r.cssRules, guarded, wide);
+        else if (wide && r instanceof CSSStyleRule) (guarded ? out.guarded : out.bare).push(r.selectorText);
+      }
+    };
+    for (const sheet of Array.from(document.styleSheets)) {
+      let rules: CSSRuleList | null = null;
+      try { rules = sheet.cssRules; } catch { /* a cross-origin sheet */ }
+      if (rules) walk(rules, false, false);
+    }
+    return out;
+  });
+  expect(shape.supported).toBe(true);
+  expect(shape.bare).toEqual([]);
+  expect(shape.guarded.sort()).toEqual([".wiki-wm-col > summary", ".wiki-wm-col::details-content"]);
+  await page.evaluate(() => {
+    for (const sheet of Array.from(document.styleSheets)) {
+      let rules: CSSRuleList | null = null;
+      try { rules = sheet.cssRules; } catch { /* a cross-origin sheet */ }
+      if (!rules) continue;
+      for (let i = rules.length - 1; i >= 0; i--) {
+        const r = rules[i];
+        if (r instanceof CSSSupportsRule && r.conditionText === "selector(::details-content)") sheet.deleteRule(i);
+      }
+    }
+  });
+  expect(await columnsShown(page)).toEqual(["you", "moving"]);
+  await card.locator('[data-wm-lane="cooling"] > summary').click();
+  await expect(card.locator('[data-wm-lane="cooling"]')).toHaveAttribute("open", "");
+  expect(await columnsShown(page)).toEqual(["you", "moving", "cooling"]);
+});
+
+/** What Chromium's accessibility tree says of the board's columns. */
+async function columnsInAxTree(page: Page): Promise<{ groups: string[]; triangles: string[] }> {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Accessibility.enable");
+  const { nodes } = await cdp.send("Accessibility.getFullAXTree");
+  await cdp.detach();
+  const named = (role: string) =>
+    nodes
+      .filter((n) => !n.ignored && n.role?.value === role)
+      .map((n) => String(n.name?.value ?? ""))
+      .filter((name) => /^(waiting on you|moving|cooling|quiet|shipped) \d+$/i.test(name));
+  return { groups: named("group"), triangles: named("DisclosureTriangle") };
+}
+
+const COLUMN_NAMES = ["Waiting on you 3", "Moving 3", "Cooling 1", "Quiet 1", "Shipped 1"];
+
+test("from 1040 px Tab goes link to link and no key flips a fold; at 1280 a head focuses and Enter opens it", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 900 });
+  await openStartSettled(page, BOARD);
+  const card = boardCard(page);
+  const links = card.locator(".wiki-wm-board a");
+  const total = await links.count();
+  expect(total).toBeGreaterThan(5);
+  await links.first().focus();
+  const stops: string[] = [];
+  for (let i = 1; i < total; i++) {
+    await page.keyboard.press("Tab");
+    stops.push(await page.evaluate(() => document.activeElement!.tagName));
+  }
+  expect(stops).toEqual(Array(total - 1).fill("A"));
+  // A head takes no focus even when asked, so Enter and Space have nothing to flip.
+  await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+  for (const [id, key] of [["you", "Enter"], ["cooling", "Space"]] as const) {
+    const head = card.locator(`[data-wm-lane="${id}"] > summary`);
+    await head.focus();
+    await expect(head).not.toBeFocused();
+    expect(await head.getAttribute("tabindex")).toBeNull();
+    await page.keyboard.press(key);
+  }
+  await expect(card.locator('[data-wm-lane="you"]')).toHaveAttribute("open", "");
+  await expect(card.locator('[data-wm-lane="cooling"]')).not.toHaveAttribute("open", "");
+  // The tree names each column, with its links readable and no collapsed triangle.
+  expect(await columnsInAxTree(page)).toEqual({ groups: COLUMN_NAMES, triangles: [] });
+  // No repaint since: the same nodes fold again at 1280, and the head works.
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expect.poll(() => columnsShown(page)).toEqual(["you", "moving"]);
+  const narrow = await columnsInAxTree(page);
+  expect(narrow.groups).toEqual(COLUMN_NAMES);
+  expect(narrow.triangles.map((t) => t.toLowerCase())).toEqual(COLUMN_NAMES.map((n) => n.toLowerCase()));
+  const head = card.locator('[data-wm-lane="cooling"] > summary');
+  await head.focus();
+  await expect(head).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(card.locator('[data-wm-lane="cooling"]')).toHaveAttribute("open", "");
+  expect(await columnsShown(page)).toEqual(["you", "moving", "cooling"]);
+});
+
+test("a column's name follows its count through a repaint", async ({ page }) => {
+  const release = await holdChecks(page, () => checksBody({ needs: boardNeeds() }));
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await expect(card.locator('[data-wm-lane="you"]')).toHaveAttribute("aria-label", "Waiting on you 3");
+  release();
+  await expect(card.locator('[data-wm-lane="you"] .wiki-wm-count')).toHaveText("1");
+  await expect(card.locator('[data-wm-lane="you"]')).toHaveAttribute("aria-label", "Waiting on you 1");
+});
+
+test("a head focused while the board crosses to wide lets go of focus and keeps no tabindex", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openStartSettled(page, BOARD);
+  const head = boardCard(page).locator('[data-wm-lane="cooling"] > summary');
+  await head.focus();
+  await page.keyboard.press("f");
+  await expect(page.locator(".wiki-layout.focus-mode")).toHaveCount(1);
+  await expect.poll(() => trackCount(page)).toBe(5);
+  await expect.poll(() => page.evaluate(() => document.activeElement === document.body)).toBe(true);
+  expect(await head.getAttribute("tabindex")).toBeNull();
+});
+
+test("a summary key saved at narrow and resolved at wide lands on the card's heading, writes no tabindex and throws nothing", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openStartSettled(page, BOARD);
+  const card = boardCard(page);
+  await card.locator('[data-wm-done="0"]').click();
+  // One task: the head is still document.activeElement when the wide paint reads
+  // its key, since the browser moves focus off an inert element only at the next frame.
+  await page.evaluate(() => {
+    (document.querySelector('#wikiWorkCard [data-wm-lane="cooling"] > summary') as HTMLElement).focus();
+    document.querySelector(".wiki-layout")!.classList.add("focus-mode");
+    (document.getElementById("wikiWorkMapRestore") as HTMLElement).click();
+  });
+  await expect(card.locator("[data-wm-need]")).toHaveCount(2);
+  const head = card.locator('[data-wm-lane="cooling"] > summary');
+  await expect(head).not.toBeFocused();
+  expect(await head.getAttribute("tabindex")).toBeNull();
+  await expect(card.locator(".wiki-wn-title")).toBeFocused();
+  await expect(card.locator(".wiki-wn-title")).not.toHaveAttribute("data-wm-parked", "");
+  expect(errors).toEqual([]);
+  // Back at narrow it is an ordinary head.
+  await page.evaluate(() => document.querySelector(".wiki-layout")!.classList.remove("focus-mode"));
+  await expect.poll(() => trackCount(page)).toBe(2);
+  await head.focus();
+  await expect(head).toBeFocused();
 });
 
 test("a fold the reader opens shows its content, and stays open across a repaint", async ({ page }) => {

@@ -96,7 +96,7 @@ describe("workCardHtml", () => {
 
   test("the five columns in order, Waiting on you and Moving open, each rendered even when empty", () => {
     const html = card(map({ efforts: [] }));
-    const cols = [...html.matchAll(/<details class="wiki-wm-col" data-wm-lane="([a-z]+)"( open)?>/g)].map((m) => `${m[1]}${m[2] ? "+" : ""}`);
+    const cols = [...html.matchAll(/<details class="wiki-wm-col" data-wm-lane="([a-z]+)" aria-label="[^"]*"( open)?>/g)].map((m) => `${m[1]}${m[2] ? "+" : ""}`);
     expect(cols).toEqual(["you+", "moving+", "cooling", "quiet", "shipped"]);
     expect(html.match(/wiki-wm-col-none">none</g)).toHaveLength(5);
   });
