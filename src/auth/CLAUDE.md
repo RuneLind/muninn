@@ -889,7 +889,7 @@ evidence rather than by a timer:
 | a successful `/chat/me` (`__muninnClearAuthReloadStamp`, init) | cleared | left |
 | `reconnectChatSse()` → `__muninnAuthReleaseLatch('sse')` | cleared | left — a request is not an outcome |
 | the stream/socket OPENS → `__muninnAuthChannelRecovered(channel)` | cleared | removed, **but only once NO channel is still latched** |
-| a **2xx through `authedFetch`** → `__muninnAuthChannelRecovered('http')`, only while `http` is latched | cleared | same rule |
+| a **2xx through `authedFetch`** → `__muninnAuthChannelRecovered('http')`, only while `http` is latched and only from a request started after the latch | cleared | same rule |
 
 That third condition is the non-obvious half: the banner is one page-level bar
 shared by three channels, so an SSE recovery clearing it while a 4401'd socket
