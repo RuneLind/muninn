@@ -105,6 +105,26 @@ export function initStartCards(d: StartCardsDeps): void {
       },
       true,
     );
+    // The reader's choice, ahead of `toggle`: a waiting paint can land between the
+    // click and that event, and would rebuild the lane from the old state.
+    document.addEventListener(
+      "click",
+      (e) => {
+        const t = e.target as HTMLElement | null;
+        const summary = t && typeof t.closest === "function" ? t.closest("#wikiWorkCard details[data-wm-lane] > summary") : null;
+        const lane = summary?.parentElement as HTMLDetailsElement | null | undefined;
+        if (lane) laneOpen.set(lane.getAttribute("data-wm-lane") ?? "", !lane.open);
+      },
+      true,
+    );
+    document.addEventListener("selectionchange", flushWaitingPaint);
+    // A release can miss this document (over an iframe, into a context menu), so a
+    // hover with no button down and `contextmenu` end the press too.
+    document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+    document.addEventListener("pointerup", onPointerEnd, true);
+    document.addEventListener("pointercancel", onPointerEnd, true);
+    document.addEventListener("contextmenu", onPointerEnd, true);
+    document.addEventListener("pointermove", (e) => { if (pointerHeld && e.buttons === 0) onPointerEnd(); }, true);
   }
 }
 
@@ -990,10 +1010,32 @@ function resolveFocus(el: HTMLElement, key: FocusKey): void {
 /** The markup the card last got: a checks answer or an adopt that renders the same leaves the DOM alone. */
 let paintedCardHtml: string | null = null;
 
-/** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing.
- *  An adopt whose keys moved paints the same way. */
+/** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing,
+ *  and an answer that changes something waits until the reader's selection ends. An adopt whose keys moved
+ *  paints the same way. */
 function paintWorkCardIfChanged(): void {
   paintWorkCard(undefined, true);
+}
+
+/** Does the reader have text selected that touches the card? `innerHTML` would wipe it. */
+function selectionTouchesCard(el: HTMLElement): boolean {
+  const sel = globalThis.getSelection?.();
+  return !!sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.getRangeAt(0).intersectsNode(el);
+}
+
+let paintWaiting = false;
+let pointerHeld = false;
+
+/** Try what waited again, once the pointer is up: a drag can pass back over its start and collapse its selection,
+ *  and a paint then would end the drag. `paintWorkCard` waits on if a selection still touches the card. */
+function flushWaitingPaint(): void {
+  if (paintWaiting && !pointerHeld) paintWorkCardIfChanged();
+}
+
+/** After any click: the browser dispatches it right after this event, ahead of a timer. */
+function onPointerEnd(): void {
+  pointerHeld = false;
+  if (paintWaiting) setTimeout(flushWaitingPaint, 0);
 }
 
 function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
@@ -1023,10 +1065,12 @@ function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   // compares against it and does not render the card again for the same keys.
   paintedDeclarationKey = declarationKey(pages, runAt);
   paintedStripKey = currentStripKey();
-  if (onlyIfChanged && paintedCardHtml === html) {
+  if (onlyIfChanged && (paintedCardHtml === html || selectionTouchesCard(el))) {
+    paintWaiting = paintedCardHtml !== html;
     ensureWorkChecks();
     return;
   }
+  paintWaiting = false;
   const active = document.activeElement as HTMLElement | null;
   const lost = !active || active === document.body;
   const parked = !!active && active.hasAttribute(PARKED_ATTR) && el.contains(active);
