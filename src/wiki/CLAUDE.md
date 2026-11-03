@@ -22,15 +22,15 @@ Writing to a wiki:
 - Anything writing to a wiki joins the per-wiki write queue (`runWikiWriteExclusive`, `queue.ts`, realpath-keyed on the root), with the queued section spanning read→CAS→write→`log.md`. `log.md` is wiki-global, so every read-modify-writer of it serializes on this one chain. The bucket mirror stays out: it is its root's only writer.
 - The commit tail runs OUTSIDE the queue: push is bounded only by `GIT_NETWORK_TIMEOUT_MS` (60 s), and an unreachable origin would otherwise park every writer for that minute.
 - Two locks: the in-process queue, then the file lock (`.wiki-write.lock`) inside it, released before the section returns; outside the queue it is a deadlock shape. `applyWikiProposal` and `writePlanQueue` hold only the queue, on purpose.
-- Joining both queues, the commit queue (`runExclusiveQueued`) comes first and the per-wiki write queue second, with network I/O outside both, so a hung push can never park a page write.
+- Joining both queues, the commit queue (`runExclusiveQueued`) comes first and the per-wiki write queue second. Network I/O stays out of the write queue and the joined section: a hung push can hold the next commit, never park a page write.
 - A file `writeWikiPage` cannot carry (its path confinement admits `.md`/`.mdx` only) repeats the guard and the per-wiki queue rather than routing around them: `plans/queue.yaml` the sha256 CAS too, `.work-map.json` the file lock.
 - Every programmatic writer passes `refresh: true` to `getWikiIndex` after it lands.
 - A burst of metadata writes uses no-log mode (`logKind: null`): one log line each would bury `log.md`, and each reindex would re-embed a page whose prose never moved.
 - Name a new `PageWriteOutcome` variant in every route that maps it: those are `if` chains whose fall-through is success, so an unnamed variant reports a write that never happened.
 - At a 409 the body's `locked` flag decides, never the status: `locked` is a retry, a stale page is a reload.
 - muninn never writes the four provenance keys (`sessions:`, `sessions_backfilled:`, `jira:`, `prs:`). Their one line-upsert lives in claude-usage, and the Stamp route shells out to its CLI rather than growing a second writer: two writers of one frontmatter line lose each other's appends.
-- Any other frontmatter write goes through muninn's one line-upsert, `setFrontmatterScalar` (`src/plans/frontmatter.ts`).
-- A commit seam stages exactly the touched files, on the default branch only. Its failures warn and never block the write, and it never runs clean, checkout, restore or reset.
+- A new non-provenance frontmatter writer uses `setFrontmatterScalar` (`src/plans/frontmatter.ts`); the plan writers beside it keep their anchors.
+- A per-write commit stages exactly the touched files; its failures warn, never block the write. Sync and `wiki-committer` stage the dirty set and report by card or alert. All three commit on the default branch only and never run clean, checkout, restore or reset.
 - Every wiki `git status` prefixes `STATUS_READONLY_ARGS` (`--no-optional-locks`) and lists with `--porcelain -z -uall`: a plain status takes `.git/index.lock` from an unlocked read path, and the sync loop's `git add` then exits 128.
 - Only a stale-fix commit may carry a `[stale-check] ` subject (`STALE_CHECK_COMMIT_PREFIX`): the commit becomes invisible to `gitTouchedMs` and the changed-page rule, so a hand edit under it is hidden.
 - A spawned Bun child passes `--no-env-file` and an allowlisted env: without the flag Bun reloads muninn's `.env` from its working directory, and every secret the allowlist left out comes back.
@@ -40,10 +40,10 @@ Writing to a wiki:
 
 Read-only, two independent switches, neither implying the other:
 
-- `MUNINN_WIKI_READONLY` is the instance (`isWikiReadonly()`), and forbids page content writes. `WIKI_READONLY_ROOTS` is one root (`isReadonlyWikiRoot(root)`), and forbids those plus any model call, web reach or chat seed on its page content: find and provenance still answer. `SCHEDULER_ENABLED=false` is no substitute: every route stays registered.
+- `MUNINN_WIKI_READONLY` is the instance (`isWikiReadonly()`), and forbids page content writes. `WIKI_READONLY_ROOTS` is one root (`isReadonlyWikiRoot(root)`), and forbids those plus any model call, web reach or chat seed on that wiki: find and provenance still answer. `SCHEDULER_ENABLED=false` is no substitute: every route stays registered.
 - A content-write seam takes injectable `isReadonly ?? isWikiReadonly` and `isReadonlyRoot ?? isReadonlyWikiRoot` and returns `forbidden` before it opens anything, so a later call site is guarded.
-- A refusal is 403 with `{error, readonly: true}`, never the generic `error`: a refusal is not a failure. Digest alone: `{digest: null, readonly: true, reason}`.
-- A mutation route refuses before any DB, model or CAS work (`readonlyRefusal`, instance only, plus a root check above any status CAS: a later 403 strands the row) and `log.info`s it with its route path. Exempt: `proposals/:id/reject`, `/remember`, `/reindex`.
+- A new refusal is 403 with `{error, readonly: true}`, never the generic `error`: a refusal is not a failure.
+- A new mutation route refuses before any DB, model or CAS work (`readonlyRefusal`, instance only, plus a root check above any status CAS: a later 403 strands the row) and `log.info`s it. Existing routes vary: copy `proposals/:id/approve`, not a seam-only one.
 - A `?wiki=`-steerable route that spends a model call on page content or ships it off-machine carries the per-wiki prologue (`egressRefusal`) right after the entry resolves, BEFORE bot resolution, the index read, the DB thread, the `/agents` run registration and the one-shot. It keys on the ROOT: `WIKI_DIR` is guarded, an unknown name is not.
 - Non-HTTP surfaces carry the same check, since a scheduled run spends exactly what a route would. A wiki-drafting watcher type joins `WIKI_DRAFTING_WATCHER_TYPES`, which both guards read.
 - Neither switch gates git: `commitWikiChange` and the `wiki-committer` stay open, or the repo-sync loop stops on the read-only instance.
@@ -57,11 +57,11 @@ Read-only, two independent switches, neither implying the other:
 
 Pages and routes:
 
-- Every page-scoped action takes `relPath`: a name-keyed action wrote into a same-stem page. `resolvePageRef` guards a shared stem only for a STALE relPath; a name alone is first-registration-wins. Stamp, Felles, Series and `/stale/apply` use `index.resolveRelPath`, no stem fallback.
-- One path spelling: every site that stores a page path or compares two goes through `normalizeRel`, and the server's work keys through `normalizeWorkedPath`. A key looked up against the listing uses its `relPath` spelling, never the lowercased `normalizeRelPath`, which zeroes the match on any path with a capital.
+- A new page-scoped action takes `relPath` and resolves through `resolvePageRef`: a name-keyed action wrote into a same-stem page. Its stem fallback covers only a STALE relPath, onto an unambiguous stem; a name alone is first-registration-wins. To 404 rather than fall back, use `index.resolveRelPath`.
+- On the work surface, a stored or compared path goes through `normalizeRel` (`normalizeWorkedPath` on the server), a stored one once, on the way in. Both sides of a lookup use one spelling: `near` is raw-keyed, so look it up by the listing's `relPath`: a lowercased key misses any path with a capital.
 - Every row emitter carries `data-relpath` beside `data-page`, and relPaths are stored, never names: a name resolves to whichever same-stem page registered first.
 - `displayTitle` is a second field, never a rewrite of `title`, which decides what a `[[wikilink]]` resolves to, the H1 strip and the Similar query. Whatever shows, searches or sorts a page list goes through `displayTitleOf` (Atlas: `atlasLabel`).
-- A reader list or rank dates a page through `pageAddedMs`/`pageTimeMs`, never raw `mtimeMs`/`gitCreatedMs`: a mechanical pass moves every mtime. Series order is `seriesDateSignal`: `pageTimeMs` reordered 23 of 30 folds.
+- A new reader list or rank dates a page through `pageAddedMs`/`pageTimeMs`, never raw `mtimeMs`/`gitCreatedMs`: a mechanical pass moves every mtime. A new series surface sorts with `byWorkedDateDesc`: `pageTimeMs` reordered 23 of 30 folds.
 - `work` moves ORDER and placement, `worked`/`workedMs` ORDER, never series identity: `seriesDateSignal`, heads, `lint-series.ts` and Related's identity never read them, or a cold memo proposes another head. Absence falls back per page.
 - Every consumer that ranks or targets pages reads `culled`. The series census deliberately includes culled pages: a culled member can be the series head and name the fold.
 - Fold keys are one flat namespace: a bare relPath is that page's attachment group, a card is `thread:<key>`, and each spelling means one thing.
