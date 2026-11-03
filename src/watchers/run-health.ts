@@ -27,7 +27,7 @@
  * written the other way round, would delete that run's per-source chips.
  *
  * EVERY DB SEAM IS INJECTABLE, and that is not style. A `mock.module` test of this
- * file invalidates `db/*` for the whole `bun test src/watchers/` chunk; the first
+ * file invalidates `db/*` for its whole `bun test` process; the first
  * cut did exactly that and silently broke six of `x.test.ts`'s assertions. Passing
  * the seams as parameters is the same call `runner.ts` makes for `WatcherCheckers`,
  * for the same reason.

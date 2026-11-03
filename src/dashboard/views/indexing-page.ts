@@ -118,8 +118,7 @@ export async function renderIndexingPage(): Promise<string> {
     .ph-fatal { color: var(--text-faint); font-size: 9px; text-transform: uppercase; letter-spacing: 0.3px; }
     .ph-arrow { color: var(--text-disabled); padding: 0 7px; font-size: 13px; }
 
-    /* Duration bar chart. Bars are HTML divs — the #317 SVG var() caveat does not
-       apply; VARIANT_COLORS (single palette source) drives both bar + legend fill
+    /* Duration bar chart. Bars are HTML divs; VARIANT_COLORS (single palette source) drives both bar + legend fill
        via inline background. A null-duration failed run renders a short hollow-red
        marker, NEVER a 0-height bar. */
     .bars-wrap { display: flex; flex-direction: column; }
@@ -166,8 +165,8 @@ export async function renderIndexingPage(): Promise<string> {
     var groupOpen = { scheduled: true, tracked: true, never: false };
 
     // Single palette source for the duration bars + their legend swatches
-    // (VARIANT_COLORS — kept from the sparkline machinery). Bars are HTML, so
-    // inline background:var(...) resolves fine (the SVG caveat from #317 is moot).
+    // (VARIANT_COLORS — kept from the sparkline machinery). Bars are HTML, with
+    // an inline background:var(...).
     var VARIANT_COLORS = ['var(--accent)', 'var(--status-magenta)', 'var(--status-warning)', 'var(--status-info)'];
     function variantColor(i) { return VARIANT_COLORS[i % VARIANT_COLORS.length]; }
     function shortVariant(v) { return v === 'incremental' ? 'incr' : v; }

@@ -20,7 +20,7 @@ t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -s -w 2000 > 
 ## Rules
 
 - A component exports only the parts it has (`*Styles`, `*Html`, `*Script`); a page imports and concatenates the ones that exist.
-- A file the bundled client imports lands in the browser bundle with whatever it uses, and a green build does not prove it runs. Keep it free of npm packages (`postgres` fails the build), of Node builtins other than the bundled `node:path` (`node:fs` builds, then throws when called), of `Bun.*` and `process` (build, then throw at load) and of `getLog()` in any reachable code (about 38k chars of logtape). A file on the server side is fine if it is import-safe: `wiki-chat-target.ts` imports `deriveAskThreadTitle` from the dependency-free `src/wiki/ask-chat.ts`. Other examples: `views/components/wiki-integrate.ts`, `src/jira/wire.ts`.
+- A file the bundled client imports lands in the browser bundle with whatever it uses, and a green build does not prove it runs. Keep it free of npm packages (`postgres` fails the build), of Node builtins other than the bundled `node:path` (`node:fs` builds, then throws when called), of `Bun.*` and `process` (build, then throw when the line runs, at load if top-level; Bun inlines `process.env.NODE_ENV`, and a guarded `globalThis.Bun?.` read does not throw) and of `getLog()` in any reachable code (about 38k chars of logtape). A file on the server side is fine if it is import-safe: `wiki-chat-target.ts` imports `deriveAskThreadTitle` from the dependency-free `src/wiki/ask-chat.ts`. Other examples: `views/components/wiki-integrate.ts`, `src/jira/wire.ts`.
 - A view does not import the routes factory: that would be a cycle, which is why the route groups have their own module, `route-groups.ts`.
 - A POST+SSE route returns every body check as a plain JSON 400 before `streamSSE` commits a 200: after that, a validation failure can only be an `app_error` no client can tell from a model failure.
 - The overview routes `/api/attention`, `/api/agents/overview`, `/api/indexing/overview`, `/api/models/overview` and `/api/sync/status` answer a degraded source through `errors[]`, not a 5xx. The catch is per source, so a throw outside it is still a 5xx: `assembleModelsOverview` itself, `getSyncRepos()`.
@@ -36,7 +36,7 @@ t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -s -w 2000 > 
 
 - ⚠️ **Hand-written SSE framing:** `stream.writeSSE({event, data})` frames an event itself. Only a hand-written write has to end each event in a double newline (`data: JSON\n\n`); a missing one breaks the stream.
 - ⚠️ **A non-200 ends an `EventSource` for good:** it goes to `readyState` 2 and never retries.
-- ⚠️ **An undefined CSS token fails silently:** `.wiki-chatopt` used `var(--bg-elevated, var(--bg-secondary))`, neither token is defined on `/wiki` (`--bg-elevated` lives only in `chat/views/components/chat-styles.ts`), so the declaration was invalid and the dialog rendered fully transparent.
+- ⚠️ **An undefined CSS token fails silently:** `.wiki-chatopt` once used `var(--bg-elevated, var(--bg-secondary))`, neither defined on `/wiki` then, so the declaration was invalid and the dialog rendered fully transparent. Today on `/wiki`, `--bg-secondary` is still never defined, and `--bg-elevated` is missing under the explicit Light and Dark themes only (`palettes.ts` sets it for the System theme and every palette). Check a token in every theme.
 
 ## Index
 

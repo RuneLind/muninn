@@ -16,7 +16,7 @@ Detail about one checker or one function lives in `src/watchers/reference/notes.
 ## Rules
 
 - A new checker type must be wired through the `WatcherCheckers` seam (`runChecker`'s 4th arg) and given a dispatch test, or deleting its branch is invisible.
-- New importers of `computeWatcherTimeoutMs` and `TICK_TIMEOUT_MS` take them from `./timeout.ts`: importing them from `runner.ts` closes an import cycle.
+- New importers of `computeWatcherTimeoutMs` and `TICK_TIMEOUT_MS` take them from `./timeout.ts`. `runner.ts` re-exports only `computeWatcherTimeoutMs`, and a checker importing it there closes an import cycle; it does not export `TICK_TIMEOUT_MS` at all.
 - Treat a fix that requires a hand-edited DB row as inert where it matters.
 - `last_run_at` must never be treated as a health signal: `runner.ts` advances it on every failure to prevent retry storms, which is why it is uninformative.
 - Give a new guard that can repeat indefinitely a counter, a bound or a surface. The skip-forever audit went through every watcher for guards with none, as a defect class; two stand as noted and latent, the `news` checker and the quiet-hours whole-run skip.
@@ -24,7 +24,7 @@ Detail about one checker or one function lives in `src/watchers/reference/notes.
 - Health is observability and must never break the path it observes; capture is best-effort too, and a DB error never breaks the alert path.
 - A health alert's builder emits on every run past the threshold, and suppressing the repeats is the runner's id-dedup job. Never commit "we alerted" bookkeeping when the alert is built: the runner writes `last_notified_ids` only after a successful send, so an undelivered alert is simply re-emitted next run.
 - A health alert's id must be stable within an episode and distinct across episodes.
-- Pass a DB seam as a parameter, not a `mock.module`: a `mock.module` test here invalidates `db/*` for the whole `bun test src/watchers/` chunk.
+- Pass a DB seam as a parameter, not a `mock.module`: a `mock.module` test here invalidates `db/*` for its whole `bun test` process.
 - Keep new durable per-source state in `watcher_snapshots`, as Anthropic Tier-2 does: NOT `lastNotifiedIds` (600-capped, shared with Tier-1) and NOT `config` (the dashboard's `updateWatcher` overwrites the whole blob).
 - The interest profile augments, never narrows: baseline topics always qualify on their own, and the profile only raises relevance. Load it with `loadInterestProfile(watcher.userId, botName)`, keyed on the watcher's own owner and NOT `bot_default_user`, which leaks one user's interests into another's alerts.
 - A numeric knob read through `readIntKnob` (`config-knobs.ts`) with a wrong-typed or out-of-range value is warned about and falls back to its default, and never aborts the run: `captureMaxItems: "1"` runs at 3, `amplificationMinAuthors: "5"` at 3. The direction differs per knob: `captureMaxItems` absent or invalid is ON at 3, never unlimited, while `captureAmplifyMin` (its own reader, `resolveCaptureAmplifyMin`) absent or invalid is OFF, so a typo never grows the gate batch.
