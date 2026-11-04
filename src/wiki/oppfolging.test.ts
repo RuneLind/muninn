@@ -981,7 +981,8 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(none.match(/data-question-id="S2"/g)).toHaveLength(1);
     expect(none).toContain('id="nm-q-s1"');
     expect(none).toContain('id="nm-q-s2"');
-    expect(stubs(none)).toEqual([]);
+    // S1 follows the block directly; S2 is away from it, so it leaves the line.
+    expect(stubs(none)).toEqual(["nm-q-s2|Spørsmål S2 står under Oppfølging ↑"]);
   });
 
   test("no live NextMoves: an open card stays a card, in place, beside the block", () => {
@@ -1002,6 +1003,48 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(html.match(/nm-settled"/g)).toHaveLength(1);
     expect(html.indexOf("Prosa.")).toBeLessThan(html.indexOf("nm-settled"));
     expect(stubs(html)).toEqual([]);
+  });
+
+  test("no live NextMoves: a card in a Fold pulls no other card in, and the block stays outside it", () => {
+    const html = reader(
+      ['<Fold title="Dev" for="dev">', "", ...card("S1", "Spm 1?"), "</Fold>", "", "## Til fag", "", ...card("S2", "Spm 2?"), ...log([decided("S1", "D7"), decided("S2", "D8")])].join("\n"),
+    );
+    const block = html.indexOf('<section class="next-moves');
+    expect(block).toBeGreaterThanOrEqual(0);
+    expect(block).toBeLessThan(html.indexOf("fold-for-dev"));
+    expect(stubs(html)).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↑", "nm-q-s2|Spørsmål S2 står under Oppfølging ↑"]);
+  });
+
+  test("no live NextMoves: a card under its own heading leaves a line, so the heading is not empty", () => {
+    const html = reader(["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", "", "Prosa.", "", "## S2 alene", "", ...card("S2", "Spm?"), ...log([decided("S2", "D7")])].join("\n"));
+    expect(stubs(html)).toEqual(["nm-q-s2|Spørsmål S2 står under Oppfølging ↑"]);
+    // The block sits where a written one goes: right after the status.
+    expect(html.indexOf("next-moves")).toBeLessThan(html.indexOf("Prosa."));
+  });
+
+  test("no live NextMoves: a first card in a block that drops its children loses no other card", () => {
+    const html = reader(['<Embed src="x.html">', "", ...card("S1", "Spm 1?"), "</Embed>", "", ...card("S2", "Spm 2?"), ...log([decided("S1", "D7"), decided("S2", "D8")])].join("\n"));
+    expect(html.match(/<details class="q-compact"/g)).toHaveLength(2);
+    expect(html).toContain('data-question-id="S2"');
+  });
+
+  test("the block a page gets adds no decision views to a page with no slot for them", () => {
+    const md = [...card("S1", "Spm?"), ...log([decided("S1", "D7")]), "", "**PR ledger**", "", "| PR | State | Review |", "|---|---|---|", "| **1 — a** | merged [#1](https://example.test/pull/1) | D7 |", "| **2 — b** | merged [#2](https://example.test/pull/2) | D7 |", "| **3 — c** | merged [#3](https://example.test/pull/3) | D7 |", "| **4 — d** | merged [#4](https://example.test/pull/4) | D7 |"].join("\n");
+    const page = renderWikiHtml(md, () => undefined, {
+      question: questionRenderOptionsFor(md, { language: "no" } as never, true, "Eier (X111111)"),
+      language: "no",
+      views: true,
+    });
+    expect(page).toContain("nm-settled");
+    expect(page).not.toContain("dc-view");
+    // With a status block the same page has the slot, so the views do draw.
+    const status = ["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", "", md].join("\n");
+    const withSlot = renderWikiHtml(status, () => undefined, {
+      question: questionRenderOptionsFor(status, { language: "no" } as never, true, "Eier (X111111)"),
+      language: "no",
+      views: true,
+    });
+    expect(withSlot.indexOf("next-moves")).toBeLessThan(withSlot.indexOf("dc-view"));
   });
 
   test("no live NextMoves: the block speaks the wiki's language", () => {

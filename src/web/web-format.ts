@@ -375,13 +375,15 @@ export function formatWebHtml(
     // On the reader, a waiting lane that names a `<Question>` holds its card
     // (D13); decided over the whole page first, as the card may sit above or
     // below the block.
+    // A spliced-in block must not give a page the views' slot it did not have.
+    const hasViewSlot = viewSlot(blocks) >= 0;
     currentLaneCards =
       currentReader && currentQuestionPage?.options
         ? laneCardsFor(blocks, currentQuestionPage)
         : undefined;
     // The views' whole-page pre-pass runs only on the reader's page render;
     // without it the walk is the one `renderBlocks` call, byte for byte.
-    const slot = opts?.views ? viewSlot(blocks) : -1;
+    const slot = opts?.views && hasViewSlot ? viewSlot(blocks) : -1;
     // A tree's case ids join the page's CaseBoard rows, whichever comes first.
     if (currentRuleTreeView && text.includes("<CaseBoard")) currentCaseKorts = pageCaseKorts(blocks);
     if (charted) {
@@ -1358,9 +1360,6 @@ interface LaneCards {
    *  and closed cards its render-only «Avklart» lane shows, in page order
    *  (settled questions plan, D1, D10). */
   settled: Map<Block[], ComponentBlock[]>;
-  /** The same cards on a page with no such `<NextMoves>`: the first card's
-   *  place draws the block, by that card's `attrs`, and the rest draw nothing. */
-  settledInPlace: { attrs: Record<string, string>; cards: ComponentBlock[] } | null;
   /** A moved card's authored place (D39), keyed by its block's `attrs`, which
    *  the renderer hands back unchanged: the run's one line on its first card,
    *  null (nothing) on the rest of a run and on a card that sits right after
@@ -1391,9 +1390,9 @@ let currentLinkSources: readonly string[] | undefined;
  * A decided or closed card goes to no waiting lane: the page's first live
  * `<NextMoves>` with a lane takes it into its render-only «Avklart» lane
  * (settled questions plan, D1, D10) — unless it sits in a settled section or
- * inside a lane, where it stays. A page with no such block draws that lane
- * where its first decided card is written, so deleting a page's last lane does
- * not unfold its decided cards.
+ * inside a lane, where it stays. A page with no such block gets an empty one,
+ * spliced into `blocks`, so deleting a page's last lane does not unfold its
+ * decided cards and they leave the same pointer lines.
  */
 function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   const questions = new Map<string, { block: ComponentBlock; lanes: Block[][]; settledSection: boolean }>();
@@ -1424,20 +1423,17 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   for (const lane of waiting) {
     for (const id of named(lane)) if (questions.get(id)!.lanes.includes(lane.children)) stays.add(id);
   }
-  const out: LaneCards = { byLane: new Map(), moved: new Map(), settled: new Map(), settledInPlace: null, stubs: new Map() };
+  const out: LaneCards = { byLane: new Map(), moved: new Map(), settled: new Map(), stubs: new Map() };
   /** Question id → the `<NextMoves>` block whose lane took its card, and that lane. */
   const takenBy = new Map<string, ComponentBlock>();
   const takenLane = new Map<string, Block[]>();
   const anchors = new Set<string>();
-  const uniqueAnchor = (id: string): string => {
+  const take = (id: string, block: ComponentBlock, lane: Block[], list: ComponentBlock[]) => {
     const base = `nm-q-${anchorSlug(id)}`;
     let anchor = base;
     for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
     anchors.add(anchor);
-    return anchor;
-  };
-  const take = (id: string, block: ComponentBlock, lane: Block[], list: ComponentBlock[]) => {
-    out.moved.set(id, uniqueAnchor(id));
+    out.moved.set(id, anchor);
     takenBy.set(id, block);
     takenLane.set(id, lane);
     list.push(questions.get(id)!.block);
@@ -1454,21 +1450,29 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   }
   // A block with no lane renders as plain markdown, so it has no lane list to
   // add the «Avklart» lane to.
-  const host = nextMoves.find((b) => nextMovesLanes(b.children).length > 0);
   const settledIds = [...questions].filter(([id, q]) => isSettled(id) && !q.settledSection && q.lanes.length === 0).map(([id]) => id);
+  const firstSettled = settledIds[0];
+  const host = nextMoves.find((b) => nextMovesLanes(b.children).length > 0)
+    ?? (firstSettled === undefined ? undefined : insertSettledHost(blocks, questions.get(firstSettled)!.block));
   if (host) {
     const list: ComponentBlock[] = [];
     for (const id of settledIds) take(id, host, SETTLED_LANE, list);
     if (list.length) out.settled.set(host.children, list);
   }
   planMovedStubs(blocks, out, takenBy, takenLane);
-  // After the stubs: no block took these cards, so none leaves a line behind.
-  if (!host && settledIds.length) {
-    const cards = settledIds.map((id) => questions.get(id)!.block);
-    settledIds.forEach((id) => out.moved.set(id, uniqueAnchor(id)));
-    out.settledInPlace = { attrs: cards[0]!.attrs, cards };
-  }
   return out;
+}
+
+/** Splices an empty `<NextMoves>` into a page that has none to hold its decided
+ *  cards: at the top level, so no fold or lens can hide it, right after the
+ *  status where a written one goes, else before the block holding the first
+ *  card. Returns it. */
+function insertSettledHost(blocks: Block[], firstCard: ComponentBlock): ComponentBlock {
+  const holds = (b: Block): boolean => b === firstCard || (b.type === "component" && b.children.some(holds));
+  const status = blocks.findIndex((b) => b.type === "component" && b.name === "StatusRows");
+  const host: ComponentBlock = { type: "component", name: "NextMoves", attrs: {}, children: [] };
+  blocks.splice(status >= 0 ? status + 1 : blocks.findIndex(holds), 0, host);
+  return host;
 }
 
 /** The «Avklart» lane's key where a lane's `children` would be: it has no
@@ -1865,15 +1869,10 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
     const sumAt = ordered.slice(0, at).filter((l) => l.items.length > 0).length;
     sum.splice(sumAt, 0, words.settledSum(settled.length));
   }
-  return nextMovesSectionHtml(lang, sum, intro, rows);
-}
-
-/** The «Oppfølging» frame: the title, the line counting the lanes, the lanes. */
-function nextMovesSectionHtml(lang: QuestionLanguage, sum: readonly string[], intro: string, rows: readonly string[]): string {
   const sumHtml = sum.length ? `<span class="nm-sum">${escapeHtml(sum.join(" · "))}</span>` : "";
   return (
     `<section class="next-moves nm-compact" data-lang="${lang}">` +
-    `<div class="nm-title-row" ${READER_ONLY_ATTR}><span class="nm-title" role="heading" aria-level="3">${escapeHtml(laneWords(lang).title)}</span>${sumHtml}</div>` +
+    `<div class="nm-title-row" ${READER_ONLY_ATTR}><span class="nm-title" role="heading" aria-level="3">${escapeHtml(words.title)}</span>${sumHtml}</div>` +
     `${intro}<div class="nm-lanes">${rows.join("")}</div></section>`
   );
 }
@@ -2355,7 +2354,8 @@ const webRenderer: BlockRenderer = {
         // four-lane block from leaving one card alone on a row.
         // No lane ⇒ the body renders as plain markdown, with no grid.
         const lanes = nextMovesLanes(rawChildren, currentReader ? currentLanguage : undefined);
-        if (lanes.length === 0) return children;
+        // A block `laneCardsFor` spliced in has no lanes, only its «Avklart» row.
+        if (lanes.length === 0) return currentLaneCards?.settled.has(rawChildren) ? compactNextMovesHtml(lanes, rawChildren) : children;
         // The wiki reader's compact «Oppfølging» block (D13, D14); chat keeps the grid.
         if (currentReader) return compactNextMovesHtml(lanes, rawChildren);
         // Anything in the block that is not a lane (an intro line) sits above the grid.
@@ -2492,10 +2492,6 @@ const webRenderer: BlockRenderer = {
         // page never holds two composers for one question.
         const id = parseQuestionAttrs(attrs).id;
         if (id !== null && currentLaneCards?.moved.has(id)) {
-          const inPlace = currentLaneCards.settledInPlace;
-          if (inPlace?.attrs === attrs) {
-            return nextMovesSectionHtml(currentLanguage, [laneWords(currentLanguage).settledSum(inPlace.cards.length)], "", [settledLaneHtml(inPlace.cards, currentLanguage)]);
-          }
           // `planMovedStubs` visits every component, so a miss renders nothing.
           const stub = currentLaneCards.stubs.get(attrs) ?? null;
           if (stub === null) return "";
