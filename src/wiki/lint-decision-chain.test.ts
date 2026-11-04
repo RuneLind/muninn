@@ -37,6 +37,7 @@ describe("lint: plan-no-ledger", () => {
     expect(f.map((x) => [x.severity, x.relPath])).toEqual([["info", "plans/p.mdx"]]);
     expect(f[0]!.message).toContain("shipped with 2 PRs");
     expect(fired(page(["plan_status: in-flight", "prs: [o/r#1, o/r#2]"], ["Text."]))).toHaveLength(1);
+    expect(fired(page(["plan_status: blocked", "prs: [o/r#1, o/r#2]"], ["Text."]))).toHaveLength(1);
   });
 
   test("another table in the Brief is no ledger: the page that prompted this check", () => {
@@ -46,8 +47,26 @@ describe("lint: plan-no-ledger", () => {
 
   test("a ledger in a Fold or a Historic does not count, and the at-a-glance slate is one of those", () => {
     expect(fired(page(SHIPPED, ['<Fold title="Old">', "", ...LEDGER, "", "</Fold>"]))).toHaveLength(1);
+    expect(fired(page(SHIPPED, ['<Historic since="r#1">', "", ...LEDGER, "", "</Historic>"]))).toHaveLength(1);
     const glance = ["## Slate", "", "### At a glance", "", '<Historic since="r#1">', "", "| PR | What |", "|---|---|", "| 1 | a |", "", "</Historic>"];
     expect(fired(page(SHIPPED, glance))).toHaveLength(1);
+  });
+
+  test("a table a component separates from the label is no ledger, as the reader reads it", () => {
+    const table = ["| PR | State |", "|---|---|", "| 1 — a | merged |"];
+    expect(fired(page(SHIPPED, ["**PR ledger**", "", '<Fold title="x">', "", "Text.", "", "</Fold>", "", ...table]))).toHaveLength(1);
+    expect(fired(page(SHIPPED, ["**PR ledger**", "", "<Callout>", "", "Text.", "", "</Callout>", "", ...table]))).toHaveLength(1);
+  });
+
+  test("a ledger the reader shows without opening anything counts, in a Callout or an open Fold", () => {
+    expect(fired(page(SHIPPED, ["<Callout>", "", ...LEDGER, "", "</Callout>"]))).toEqual([]);
+    expect(fired(page(SHIPPED, ['<Fold title="x" open="true">', "", ...LEDGER, "", "</Fold>"]))).toEqual([]);
+  });
+
+  test("a plan that stopped is not asked for a ledger", () => {
+    for (const status of ["abandoned", "superseded"]) {
+      expect(fired(page([`plan_status: ${status}`, "prs: [o/r#1, o/r#2]"], ["Text."]))).toEqual([]);
+    }
   });
 
   test("a ledger in the Brief ends it, labelled in either language", () => {

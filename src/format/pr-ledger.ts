@@ -537,6 +537,9 @@ export interface LedgerReadOptions {
    *  the state column. For the GitHub check, which accounts for every row; a view
    *  has nothing to draw for such a row. */
   everyRow?: boolean;
+  /** {@link findLedgers} only: leave out a ledger the reader shows only when
+   *  opened, in a closed `<Fold>` or a `<Historic>`. */
+  shownOnly?: boolean;
 }
 
 /** Read one ledger table. */
@@ -601,8 +604,10 @@ export function findLedgers(blocks: Block[], opts: LedgerReadOptions = {}): Ledg
   const out: Ledger[] = [];
   const walk = (bs: Block[]): void => {
     bs.forEach((b, i) => {
-      if (b.type === "component") walk(b.children);
-      else if (b.type === "table") {
+      if (b.type === "component") {
+        const away = b.name === "Historic" || (b.name === "Fold" && b.attrs.open !== "true");
+        if (!(opts.shownOnly && away)) walk(b.children);
+      } else if (b.type === "table") {
         if (linesAbove(bs, i).some(opensWithLedgerLabel)) out.push(parseLedgerTable(b.headers, b.rows, "ledger", opts));
       }
     });

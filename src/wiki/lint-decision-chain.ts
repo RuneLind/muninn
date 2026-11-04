@@ -9,8 +9,8 @@
  * |                        | (`src/format/pr-ledger.ts`); the strip shows it as `unknown`         |
  * | `chain-close-conflict` | a decision says «Lukker Sn» / «Closes On» while On's own item closes |
  * |                        | it with another decision; the chain view keeps the question's close  |
- * | `plan-no-ledger`       | a plan past `proposed` has two or more `prs:` and no PR ledger table |
- * |                        | outside a component block; the page shows no PR state                |
+ * | `plan-no-ledger`       | an in-flight, blocked or shipped plan has 2+ `prs:` and no PR ledger |
+ * |                        | the reader shows without opening anything                            |
  *
  * The first two read the page through `pageDecisionDataOf` (`decision-text.ts`),
  * the text and pass the reader draws from, so a finding and the view agree.
@@ -29,16 +29,16 @@ import { findUnfencedLine as findLine } from "./lint-lines.ts";
 
 export const DECISION_CHAIN_LINT_CHECKS = ["ledger-row-state", "chain-close-conflict", "plan-no-ledger"] as const;
 
-/** A table inside a `<Fold>` or a `<Historic>` is no ledger: a reader of the
- *  Brief never sees it, and the at-a-glance slate is one of those. */
+/** A closed `<Fold>` or a `<Historic>` hides its table from a reader of the
+ *  Brief, and the at-a-glance slate usually sits in one. A plan that stopped
+ *  (`abandoned`, `superseded`) has no state left to show. */
 function checkPlanLedger(page: Pick<WikiPageMeta, "relPath">, rawContent: string): LintFinding[] {
   const fm = parseFrontmatter(rawContent);
   const status = readPlanStatus(fm);
-  if (status === undefined || status === "proposed") return [];
+  if (status !== "in-flight" && status !== "blocked" && status !== "shipped") return [];
   const prs = Array.isArray(fm.prs) ? fm.prs.length : 0;
   if (prs < 2) return [];
-  const topLevel = parseBlocks(splitFrontmatter(rawContent).body).filter((b) => b.type !== "component");
-  if (findLedgers(topLevel).length > 0) return [];
+  if (findLedgers(parseBlocks(splitFrontmatter(rawContent).body), { shownOnly: true }).length > 0) return [];
   return [{
     check: "plan-no-ledger",
     relPath: page.relPath,
