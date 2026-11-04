@@ -1022,6 +1022,43 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(html.indexOf("next-moves")).toBeLessThan(html.indexOf("Prosa."));
   });
 
+  test("no live NextMoves: the block follows the status and the page's picture, as a written one does", () => {
+    const status = ["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", ""];
+    const cards = ["Prosa.", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])];
+    const at = (html: string, needle: string) => {
+      expect(html).toContain(needle);
+      return html.indexOf(needle);
+    };
+    const pictures: [string[], string][] = [
+      [['<Chart kind="bars" value="N">', "", "| A | N |", "|---|---:|", "| a | 1 |", "", "</Chart>", ""], "<table"],
+      [["| A | B |", "|---|---|", "| a | b |", ""], "<table"],
+      [["```mermaid", "flowchart LR", "  A --> B", "```", ""], "language-mermaid"],
+    ];
+    for (const [picture, needle] of pictures) {
+      const html = reader([...status, ...picture, ...cards].join("\n"));
+      expect(at(html, "status-rows")).toBeLessThan(at(html, needle));
+      expect(at(html, needle)).toBeLessThan(at(html, "next-moves"));
+      expect(at(html, "next-moves")).toBeLessThan(at(html, "Prosa."));
+    }
+    // With no picture it is right after the status.
+    const plain = reader([...status, ...cards].join("\n"));
+    expect(at(plain, "status-rows")).toBeLessThan(at(plain, "next-moves"));
+    expect(at(plain, "next-moves")).toBeLessThan(at(plain, "Prosa."));
+    // A table further down is no picture of the status: prose ends the walk.
+    const later = reader([...status, "Prosa.", "", "| A | B |", "|---|---|", "| a | b |", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
+    expect(at(later, "next-moves")).toBeLessThan(at(later, "Prosa."));
+  });
+
+  test("no live NextMoves: the first of two status blocks places it, as the views read it", () => {
+    const two = reader(["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", "", "Mellom.", "", "<StatusRows>", "", "- **Annet:** y", "", "</StatusRows>", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
+    expect(two.indexOf("next-moves")).toBeLessThan(two.indexOf("Mellom."));
+  });
+
+  test("no decided card, no block", () => {
+    expect(reader([...card("S1", "Åpen?"), ...log(["- **S1** — Åpen."])].join("\n"))).not.toContain("next-moves");
+    expect(reader(log([]).join("\n"))).not.toContain("next-moves");
+  });
+
   test("no live NextMoves: a first card in a block that drops its children loses no other card", () => {
     const html = reader(['<Embed src="x.html">', "", ...card("S1", "Spm 1?"), "</Embed>", "", ...card("S2", "Spm 2?"), ...log([decided("S1", "D7"), decided("S2", "D8")])].join("\n"));
     expect(html.match(/<details class="q-compact"/g)).toHaveLength(2);

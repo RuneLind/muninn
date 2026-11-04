@@ -1463,15 +1463,29 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   return out;
 }
 
+/** A block a page's author may write as its picture, right after the status. */
+const isPictureBlock = (b: Block): boolean =>
+  b.type === "table" ||
+  (b.type === "code_block" && b.lang === "mermaid") ||
+  (b.type === "component" && PICTURE_COMPONENTS.has(b.name));
+const PICTURE_COMPONENTS: ReadonlySet<string> = new Set(["Chart", "ComparisonTable", "DeltaTable", "Diagram", "Figure", "RuleTree", "CaseBoard", "Steps", "SystemMap"]);
+
 /** Splices an empty `<NextMoves>` into a page that has none to hold its decided
- *  cards: at the top level, so no fold or lens can hide it, right after the
- *  status where a written one goes, else before the block holding the first
- *  card. Returns it. */
+ *  cards: at the top level, so no fold can hide it. It goes where a written one
+ *  goes, after the status and any picture that follows it, else before the block
+ *  holding the first card. Returns it. */
 function insertSettledHost(blocks: Block[], firstCard: ComponentBlock): ComponentBlock {
   const holds = (b: Block): boolean => b === firstCard || (b.type === "component" && b.children.some(holds));
   const status = blocks.findIndex((b) => b.type === "component" && b.name === "StatusRows");
+  let at = status >= 0 ? status + 1 : blocks.findIndex(holds);
+  if (status >= 0) {
+    for (let i = at; i < blocks.length; i++) {
+      if (isPictureBlock(blocks[i]!)) at = i + 1;
+      else if (!isBlankOrCommentBlock(blocks[i]!)) break;
+    }
+  }
   const host: ComponentBlock = { type: "component", name: "NextMoves", attrs: {}, children: [] };
-  blocks.splice(status >= 0 ? status + 1 : blocks.findIndex(holds), 0, host);
+  blocks.splice(at, 0, host);
   return host;
 }
 
