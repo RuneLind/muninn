@@ -24,7 +24,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "case-board-labels": "<CaseBoard labels=> entries that name no case status",
   "effort-unknown": "effort: values that name no effort in the work map",
   "ledger-row-state": "PR ledger rows the strip cannot read a state from",
-  "plan-no-ledger": "Plans with two or more PRs and no PR ledger in the Brief",
+  "plan-no-ledger": "Plans with two or more PRs and no PR ledger on the page",
   "chain-close-conflict": "Decisions whose «Lukker» the question's own close contradicts",
   "chart-table": "<Chart> tables the chart cannot draw, or draws with a note",
   "rule-tree": "<RuleTree> lists the tree cannot read: untoned outcomes, cases on two leaves",

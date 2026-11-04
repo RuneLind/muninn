@@ -43,7 +43,7 @@ function checkPlanLedger(page: Pick<WikiPageMeta, "relPath">, rawContent: string
     check: "plan-no-ledger",
     relPath: page.relPath,
     severity: "info",
-    message: `plan is ${status} with ${prs} PRs in prs: and no PR ledger in its Brief — add a **PR ledger** label and a table with one row per planned PR`,
+    message: `plan is ${status} with ${prs} PRs in prs: and no PR ledger directly on the page — add a **PR ledger** label and a table with one row per planned PR`,
   }];
 }
 
