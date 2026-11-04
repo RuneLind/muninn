@@ -714,7 +714,7 @@ const STRIP_TITLES: Record<StripCell, string> = {
   oldest: "Dated waits, oldest first",
   steps: "Pages with steps in a you lane",
   shipped: "Shipped plans with follow-ups open, oldest first",
-  github: "What the GitHub check found in the ledger rows",
+  github: "What the GitHub check found in the PR rows",
 };
 
 function stripCellHtml(cell: StripCell, value: string, label: string, tone: string, view: StripView, empty: boolean, extra: { note?: string; title?: string } = {}): string {
@@ -748,7 +748,7 @@ function stripDrillHtml(rows: readonly StripRow[], cell: StripCell, view: StripV
 }
 
 // ── The GitHub check's cell (your-work board P2) ──────────────────────
-const GH_CELL_LABEL = "ledger rows GitHub contradicts";
+const GH_CELL_LABEL = "PR rows out of date";
 const GH_NOT_CURRENT = "From the last answer, not current";
 
 const NOT_CHECKED_HTML: Record<Exclude<NotCheckedReason, "disabled" | "no-access">, string> = {
@@ -844,7 +844,7 @@ function ghCell(checks: ChecksView, view: StripView, byKey: ReadonlyMap<string, 
     else if (noneToAsk) notes.push(`<span class="wiki-wm-cell-note">${body.unlinked ? `${body.unlinked} with no PR link read` : `${body.skipped} skipped`}</span>`);
   }
   const tone = [stale || nothingRead ? "muted" : n > 0 ? "bad" : "", reason ? "wide" : ""].filter(Boolean).join(" ");
-  const cell = stripCellHtml("github", nothingRead ? "—" : String(n), GH_CELL_LABEL, tone, view, !drill, {
+  const cell = stripCellHtml("github", nothingRead ? "—" : String(n), n === 1 ? "PR row out of date" : GH_CELL_LABEL, tone, view, !drill, {
     note: notes.join(""),
     title: `${stale ? `${GH_NOT_CURRENT} · ` : ""}${ghCounts(body)}`,
   });

@@ -2596,7 +2596,7 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wm-status { font-size: 12px; color: var(--text-soft); margin: 2px 0 6px; }
     .wiki-wm-status.warn { color: var(--tone-warn); }
-    /* Equal cells. The floor is "contradicts" plus the cell's padding, and five fit the 485 px a 1265 viewport leaves.
+    /* Equal cells. The floor is "follow-ups", the strip's longest word, plus the cell's padding, and five fit the 485 px a 1265 viewport leaves.
        P1's 112 px does not. A wider fallback font runs a word into the padding; a cell's words never break. */
     .wiki-wm-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; margin: 2px 0 8px; }
     /* A remedy spans a row; its neighbours take P1's floor, which fills a row only where four fit. */

@@ -351,9 +351,23 @@ describe("the GitHub cell", () => {
       expect(flat(c)).toContain("4 skipped");
     });
 
+    test("the cell says what it counts, one row or many", () => {
+      const label = (over: Partial<WorkMapChecksBody>) => /data-wm-cell="github"[^>]*><b>[^<]*<\/b><span>([^<]*)</.exec(render({ body: checksBody(over) }))![1];
+      expect(label({ contradictions: [contradiction] })).toBe("PR row out of date");
+      expect(label({ contradictions: [contradiction, { ...contradiction, pr: 8 }] })).toBe("PR rows out of date");
+      expect(label({ contradictions: [] })).toBe("PR rows out of date");
+    });
+
+    test("with no count to read, the cell keeps the plural label", () => {
+      const labelOf = (checks: Parameters<typeof render>[0]) => /<\/b><span>([^<]*)</.exec(cellHtml(render(checks))!)![1];
+      expect(labelOf({ body: null })).toBe("PR rows out of date");
+      expect(labelOf({ body: null, failed: true })).toBe("PR rows out of date");
+      expect(labelOf({ body: checksBody({ checked: 0, unlinked: 9, unlinkedRows: [] }) })).toBe("PR rows out of date");
+    });
+
     test("the list's title promises no contradiction", () => {
       const out = open({ checked: 0, unlinked: 9, unlinkedRows });
-      expect(/wiki-wm-drill-title">([^<]*)</.exec(out)![1]).toBe("What the GitHub check found in the ledger rows");
+      expect(/wiki-wm-drill-title">([^<]*)</.exec(out)![1]).toBe("What the GitHub check found in the PR rows");
     });
 
     test("rows with no PR link read and nothing else read are not an all-clear", () => {

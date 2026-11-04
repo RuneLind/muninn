@@ -1503,7 +1503,7 @@ test("the fifth cell sits in one row with the others, opens its list, and the Ne
   const cell = card.locator('[data-wm-cell="github"]');
   await expect(cell.locator("b")).toHaveText("1");
   await expect(cell).toHaveClass(/\bbad\b/);
-  await expect(cell).toContainText("ledger rows GitHub contradicts");
+  await expect(cell).toContainText("PR row out of date");
   const tops = await card.locator(".wiki-wm-cell").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().top));
   expect(tops.length).toBe(5);
   expect(new Set(tops).size).toBe(1);
