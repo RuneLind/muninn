@@ -1112,6 +1112,9 @@ test.describe("Wiki reader: answer card focus across a repaint", () => {
     await holdPosts(page);
     await rewriteGets(page, (answers) => [...answers, otherAnswer("G7", false)]);
     await saveOn(card(page, "G8"), "G8 saved.");
+    // A decided card sits closed in «Avklart», so open its row to reach the link.
+    await page.locator(".wiki-article .nm-settled > summary").click();
+    await page.locator('.wiki-article .q-compact:has(section.question[data-question-id="G7"]) > summary').click();
     const g7 = card(page, "G7");
     const link = g7.locator("a.q-decision");
     await link.focus();

@@ -89,11 +89,14 @@
  *                      earlier spelling of a repeated one). Not culled. Rules:
  *                      `lint-components.ts`. `scripts/wiki-check.ts` runs it with checks
  *                      5, 6, 6b, 10, 11, 12, 13, 16, 17 and 18 (`checkPageText`).
- * 16. ledger-row-state / chain-close-conflict — what the decision views
+ * 16. ledger-row-state / chain-close-conflict / plan-no-ledger — what the decision views
  *                      cannot draw: a PR ledger row whose state no rule reads
  *                      (the strip shows `unknown`), and a decision's «Lukker
  *                      Sn» that the question's own close contradicts. Info,
  *                      report-only. Rules: `lint-decision-chain.ts`.
+ *                      `plan-no-ledger`, in the same file: a plan past
+ *                      `proposed` with two or more `prs:` and no PR ledger in
+ *                      its Brief.
  * 17. chart-table — on `.mdx` pages that are not culled, what a `<Chart>`
  *                      cannot draw from its table (a warning: the reader shows
  *                      the table instead) or draws with a note (info: a gap

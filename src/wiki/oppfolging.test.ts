@@ -966,15 +966,62 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(stubs(html)).toEqual([]);
   });
 
-  test("no live NextMoves: settled cards render where they are written", () => {
-    const none = reader([...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
-    expect(none).not.toContain("q-compact");
-    expect(none).toContain('<section class="question q-decided" data-question-id="S1"');
-    // A block inside a Historic takes none either.
+  test("no live NextMoves: the settled cards fold into one block, at the first card's place", () => {
+    const none = reader(
+      ["Før.", "", ...card("S1", "Spm 1?"), "Mellom.", "", ...card("S2", "Spm 2?"), "Etter.", "", ...log([decided("S1", "D7"), closed("S2")])].join("\n"),
+    );
+    expect(none.match(/<section class="next-moves/g)).toHaveLength(1);
+    expect(none.match(/<details class="q-compact"/g)).toHaveLength(2);
+    expect(sumOf(none)).toBe("Avklart: 2");
+    expect(laneKinds(none)).toEqual(["settled"]);
+    expect(none.indexOf("Før.")).toBeLessThan(none.indexOf("next-moves"));
+    expect(none.indexOf("next-moves")).toBeLessThan(none.indexOf("Mellom."));
+    // Each card is once on the page, inside its row, with no pointer line left behind.
+    expect(none.match(/data-question-id="S1"/g)).toHaveLength(1);
+    expect(none.match(/data-question-id="S2"/g)).toHaveLength(1);
+    expect(none).toContain('id="nm-q-s1"');
+    expect(none).toContain('id="nm-q-s2"');
+    expect(stubs(none)).toEqual([]);
+  });
+
+  test("no live NextMoves: an open card stays a card, in place, beside the block", () => {
+    const html = reader([...card("S1", "Åpen?"), ...card("S2", "Avgjort?"), ...log(["- **S1** — Åpen.", decided("S2", "D7")])].join("\n"));
+    expect(html).toContain('<section class="question q-open" data-question-id="S1"');
+    expect(sumOf(html)).toBe("Avklart: 1");
+    expect(html.indexOf('data-question-id="S1"')).toBeLessThan(html.indexOf("next-moves"));
+  });
+
+  test("no live NextMoves: a card in a settled section stays there", () => {
+    const html = reader(['<Historic since="v1">', "", ...card("S1", "Spm?"), "</Historic>", "", ...log([decided("S1", "D7")])].join("\n"));
+    expect(html).not.toContain("nm-settled");
+    expect(html).toContain('<section class="question q-decided" data-question-id="S1"');
+  });
+
+  test("a NextMoves with no lane hosts nothing, so the cards fold at their own place", () => {
+    const html = reader(["<NextMoves>", "", "Ingen baner.", "", "</NextMoves>", "", "Prosa.", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
+    expect(html.match(/nm-settled"/g)).toHaveLength(1);
+    expect(html.indexOf("Prosa.")).toBeLessThan(html.indexOf("nm-settled"));
+    expect(stubs(html)).toEqual([]);
+  });
+
+  test("no live NextMoves: the block speaks the wiki's language", () => {
+    const html = reader([...card("S1", "Q?"), ...log([decided("S1", "D7")])].join("\n"), "en");
+    expect(sumOf(html)).toBe("Settled: 1");
+    expect(html).toContain('<section class="next-moves nm-compact" data-lang="en">');
+  });
+
+  test("no live NextMoves, no question option: nothing moves", () => {
+    const md = [...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n");
+    expect(renderWikiHtml(md, () => undefined)).not.toContain("nm-settled");
+    expect(formatWebHtml(md)).not.toContain("nm-settled");
+  });
+
+  test("a block inside a Historic is no host: its lanes stay history, and the cards fold outside it", () => {
     const hist = reader(
       ['<Historic since="v1">', "", ...nm([lane('kind="you"', ["- gammelt"])]), "", "</Historic>", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"),
     );
-    expect(hist).not.toContain("nm-settled");
+    expect(hist.match(/nm-settled"/g)).toHaveLength(1);
+    expect(hist.indexOf("</section>", hist.indexOf('class="historic'))).toBeLessThan(hist.indexOf("nm-settled"));
     expect(hist).not.toContain("q-moved");
   });
 

@@ -213,7 +213,12 @@ test.describe("Wiki reader: <Question> answer card", () => {
   });
 
   test('language "no" in .wiki-reader.json gives the Norwegian labels', async ({ page }) => {
-    const seen = await openPage(page, WIKI_NO);
+    // Decided, so it sits closed in «Avklart», in the wiki's language too.
+    const seen = watch(page);
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_NO}&relPath=${encodeURIComponent(PAGE_REL)}`);
+    await expect(page.locator(".wiki-article .nm-settled .nm-who")).toHaveText("Avklart");
+    await page.locator(".wiki-article .nm-settled > summary").click();
+    await page.locator(".wiki-article .q-compact > summary").click();
     const card = page.locator(".wiki-article section.question");
     await expect(card.locator(".q-label")).toHaveText("Spørsmål");
     await expect(card.locator(".q-state")).toHaveText("Avgjort → D99");

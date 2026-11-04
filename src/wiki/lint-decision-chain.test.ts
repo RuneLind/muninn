@@ -26,6 +26,52 @@ const PAGE = [
   "", // 18
 ].join("\n");
 
+describe("lint: plan-no-ledger", () => {
+  const LEDGER = ["**PR ledger**", "", "| PR | State |", "|---|---|", "| 1 — a | merged |", "| 2 — b | merged |"];
+  const page = (fm: string[], body: string[]) => ["---", "title: P", ...fm, "---", "", ...body, ""].join("\n");
+  const fired = (content: string) => checkDecisionChain({ relPath: "plans/p.mdx" }, content).filter((x) => x.check === "plan-no-ledger");
+  const SHIPPED = ["plan_status: shipped", "prs: [o/r#1, o/r#2]"];
+
+  test("a shipped plan with two PRs and no ledger gets one info finding", () => {
+    const f = fired(page(SHIPPED, ["## Brief", "", "Text."]));
+    expect(f.map((x) => [x.severity, x.relPath])).toEqual([["info", "plans/p.mdx"]]);
+    expect(f[0]!.message).toContain("shipped with 2 PRs");
+    expect(fired(page(["plan_status: in-flight", "prs: [o/r#1, o/r#2]"], ["Text."]))).toHaveLength(1);
+  });
+
+  test("another table in the Brief is no ledger: the page that prompted this check", () => {
+    const body = ["## Brief", "", "**Answer / numbers / decision**", "", "| Question | Answer |", "|---|---|", "| a | b |"];
+    expect(fired(page(SHIPPED, body))).toHaveLength(1);
+  });
+
+  test("a ledger in a Fold or a Historic does not count, and the at-a-glance slate is one of those", () => {
+    expect(fired(page(SHIPPED, ['<Fold title="Old">', "", ...LEDGER, "", "</Fold>"]))).toHaveLength(1);
+    const glance = ["## Slate", "", "### At a glance", "", '<Historic since="r#1">', "", "| PR | What |", "|---|---|", "| 1 | a |", "", "</Historic>"];
+    expect(fired(page(SHIPPED, glance))).toHaveLength(1);
+  });
+
+  test("a ledger in the Brief ends it, labelled in either language", () => {
+    expect(fired(page(SHIPPED, ["## Brief", "", ...LEDGER]))).toEqual([]);
+    const no = ["**PR-oversikt.**", "", "| PR | Status |", "|---|---|", "| 1 — a | merget |"];
+    expect(fired(page(SHIPPED, no))).toEqual([]);
+  });
+
+  test("not asked of a proposed plan, a one-PR plan, a page with no plan_status, or a ledger in a fence", () => {
+    expect(fired(page(["plan_status: proposed", "prs: [o/r#1, o/r#2]"], ["Text."]))).toEqual([]);
+    expect(fired(page(["plan_status: shipped", "prs: [o/r#1]"], ["Text."]))).toEqual([]);
+    expect(fired(page(["plan_status: shipped"], ["Text."]))).toEqual([]);
+    expect(fired(page(["prs: [o/r#1, o/r#2]"], ["Text."]))).toEqual([]);
+    expect(fired(page(SHIPPED, ["```markdown", ...LEDGER, "```"]))).toHaveLength(1);
+  });
+
+  test("runs in checkPageText, beside a page's other chain findings", () => {
+    expect(PAGE_TEXT_LINT_CHECKS).toContain("plan-no-ledger");
+    expect(checkPageText({ relPath: "plans/p.mdx" }, page(SHIPPED, ["Text."]), []).map((x) => x.check)).toContain("plan-no-ledger");
+    const both = page(SHIPPED, ["<DecisionLog>", "", "- **S1** — Hva? Lukket 01.10.2026 (D1).", "- **D1** — A.", "- **D2** — B. Lukker S1.", "", "</DecisionLog>"]);
+    expect(checkDecisionChain({ relPath: "plans/p.mdx" }, both).map((x) => x.check).sort()).toEqual(["chain-close-conflict", "plan-no-ledger"]);
+  });
+});
+
 describe("lint: ledger-row-state / chain-close-conflict", () => {
   test("one info finding each, on the row's and the claimant's line", () => {
     const f = checkDecisionChain({ relPath: "plans/p.mdx" }, PAGE);

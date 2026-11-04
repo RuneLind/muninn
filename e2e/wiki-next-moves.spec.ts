@@ -255,7 +255,7 @@ FILES["plans/settled-q.mdx"] = plan("Settled questions", "in-flight", [
   "",
   ...QLOG,
 ]);
-// Settled cards and no block: they render where they are written (acceptance 7).
+// Settled cards and no block: they fold into one block at the first card's place.
 FILES["plans/settled-noblock.mdx"] = plan("Settled, no block", "in-flight", [
   ...qcard("S1", "**Should the letter go out as A or B?**"),
   ...qcard("S2", "Does this also cover old cases?"),
@@ -643,15 +643,22 @@ test.describe("The settled-questions lane", () => {
     await expect(s3).toBeInViewport();
   });
 
-  test("no block: settled cards stay where they are written; a block in a Historic takes none", async ({ page }) => {
+  test("no block: settled cards fold into one closed block; a block in a Historic takes none", async ({ page }) => {
     await open(page, "plans/settled-noblock.mdx");
-    await expect(page.locator(".wiki-article section.question")).toHaveCount(2);
-    await expect(page.locator(".wiki-article .q-compact")).toHaveCount(0);
+    await expect(page.locator(".wiki-article section.next-moves")).toHaveCount(1);
+    await expect(settled(page)).toBeVisible();
+    await expect(settled(page)).not.toHaveAttribute("open", "");
+    await expect(page.locator(".wiki-article section.question:visible")).toHaveCount(0);
+    await expect(page.locator(".wiki-article .q-compact")).toHaveCount(2);
     await expect(page.locator(".wiki-article .q-moved")).toHaveCount(0);
+    // It opens to the card, as the lane under a written block does.
+    await settled(page).locator(":scope > .nm-head").click();
+    await page.locator('.wiki-article .q-compact[id="nm-q-s1"] > summary').click();
+    await expect(page.locator('.wiki-article section.question[data-question-id="S1"]')).toBeVisible();
     await open(page, "plans/settled-historic.mdx");
     await expect(page.locator(".wiki-article section.historic .nm-lane")).toHaveCount(1);
-    await expect(page.locator('.wiki-article .nm-lane[data-kind="settled"]')).toHaveCount(0);
-    await expect(page.locator('.wiki-article section.question[data-question-id="S1"]')).toBeVisible();
+    await expect(page.locator('.wiki-article section.historic .nm-lane[data-kind="settled"]')).toHaveCount(0);
+    await expect(settled(page)).toHaveCount(1);
     await expect(page.locator(".wiki-article .q-moved")).toHaveCount(0);
   });
 

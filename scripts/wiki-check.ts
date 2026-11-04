@@ -6,7 +6,7 @@
  * question-block, decision-first-sentence, status-row-long, status-tones,
  * status-tile-long, role-key,
  * case-board-labels, missing-tldr, tldr-no-more, the component checks, ledger-row-state,
- * chain-close-conflict, chart-table, rule-tree, glossary, text-diagram, diagram-svg, steps-focus, system-map,
+ * plan-no-ledger, chain-close-conflict, chart-table, rule-tree, glossary, text-diagram, diagram-svg, steps-focus, system-map,
  * genre-missing and genre-picture) over a page or a
  * directory, with no wiki index, no database and no `.env`. `roleKeys` comes
  * from the wiki root's `.wiki-reader.json`:
