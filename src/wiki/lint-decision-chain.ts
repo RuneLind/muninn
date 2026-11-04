@@ -9,19 +9,44 @@
  * |                        | (`src/format/pr-ledger.ts`); the strip shows it as `unknown`         |
  * | `chain-close-conflict` | a decision says «Lukker Sn» / «Closes On» while On's own item closes |
  * |                        | it with another decision; the chain view keeps the question's close  |
+ * | `plan-no-ledger`       | an in-flight, blocked or shipped plan has 2+ `prs:` and no PR ledger |
+ * |                        | table directly on the page                                           |
  *
- * Both read the page through `pageDecisionDataOf` (`decision-text.ts`), the
- * text and pass the reader draws from, so a finding and the view agree.
+ * The first two read the page through `pageDecisionDataOf` (`decision-text.ts`),
+ * the text and pass the reader draws from, so a finding and the view agree.
  */
 
 import { pageDecisionDataOf, wikiLinksAsText } from "./decision-text.ts";
+import { parseBlocks } from "../format/markdown-ast.ts";
+import { findLedgers } from "../format/pr-ledger.ts";
+import { splitFrontmatter } from "./page-text.ts";
+import { parseFrontmatter, readPlanStatus } from "./store.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
 import type { WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 import { findUnfencedLine as findLine } from "./lint-lines.ts";
 
-export const DECISION_CHAIN_LINT_CHECKS = ["ledger-row-state", "chain-close-conflict"] as const;
+export const DECISION_CHAIN_LINT_CHECKS = ["ledger-row-state", "chain-close-conflict", "plan-no-ledger"] as const;
+
+/** A table inside a component block is no ledger, however the reader shows that
+ *  block; `mdx-explainer` says the same of the Brief's ledger on most genres. Any
+ *  genre can fire, a run-report's `<DeltaTable>` included. A `ready` plan has not
+ *  started and a stopped one (`abandoned`, `superseded`) has no state left. */
+function checkPlanLedger(page: Pick<WikiPageMeta, "relPath">, rawContent: string): LintFinding[] {
+  const fm = parseFrontmatter(rawContent);
+  const status = readPlanStatus(fm);
+  if (status !== "in-flight" && status !== "blocked" && status !== "shipped") return [];
+  const prs = Array.isArray(fm.prs) ? fm.prs.length : 0;
+  if (prs < 2) return [];
+  if (findLedgers(parseBlocks(splitFrontmatter(rawContent).body), { topLevelOnly: true }).length > 0) return [];
+  return [{
+    check: "plan-no-ledger",
+    relPath: page.relPath,
+    severity: "info",
+    message: `plan is ${status} with ${prs} PRs in prs: and no PR ledger directly on the page — add a **PR ledger** label and a table with one row per planned PR`,
+  }];
+}
 
 /** A table row whose first cell, flattened, is `cell`. */
 function rowTest(cell: string): (line: string) => boolean {
@@ -37,7 +62,8 @@ function rowTest(cell: string): (line: string) => boolean {
 export function checkDecisionChain(page: Pick<WikiPageMeta, "relPath">, rawContent: string): LintFinding[] {
   const hasLedger = /PR[ -]ledger|PR-oversikt/i.test(rawContent);
   const hasCloses = rawContent.includes("<DecisionLog") && /[Ll]ukker|[Cc]loses/.test(rawContent);
-  if (!hasLedger && !hasCloses) return [];
+  const planLedger = checkPlanLedger(page, rawContent);
+  if (!hasLedger && !hasCloses) return planLedger;
   // Glance tables are never linted, so the `proposed` gate does not matter here.
   const { ledgers, analysis } = pageDecisionDataOf(rawContent, false);
   // Rows are matched on the text the analysis read: a wikilink as its label.
@@ -45,7 +71,7 @@ export function checkDecisionChain(page: Pick<WikiPageMeta, "relPath">, rawConte
   const lines = wikiLinksAsText(rawContent).split("\n");
   const fenced = fencedLineMask(lines);
   const body = frontmatterEndLine(lines);
-  const findings: LintFinding[] = [];
+  const findings: LintFinding[] = [...planLedger];
 
   // Rows are located in source order, each search after the last hit, so two
   // ledgers sharing a first cell point at their own rows.

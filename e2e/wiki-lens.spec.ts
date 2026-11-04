@@ -547,6 +547,9 @@ test.describe("Wiki reader: lenses", () => {
   test("acceptance 3: a card's decision chip and a header pill reveal through the lens", async ({ page }) => {
     await setStored(page, "overview");
     let seen = await open_(page, WIKI, REPORT_REL);
+    // A decided card sits closed in «Avklart», which the Overview lens shows.
+    await page.locator(".wiki-article .nm-settled > summary").click();
+    await page.locator(".wiki-article .q-compact > summary").click();
     const chip = page.locator(".wiki-article section.question a.q-decision");
     await expect(chip).toHaveText("D12");
     await chip.click();

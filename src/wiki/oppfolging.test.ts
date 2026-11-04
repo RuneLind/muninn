@@ -966,15 +966,142 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(stubs(html)).toEqual([]);
   });
 
-  test("no live NextMoves: settled cards render where they are written", () => {
-    const none = reader([...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
-    expect(none).not.toContain("q-compact");
-    expect(none).toContain('<section class="question q-decided" data-question-id="S1"');
-    // A block inside a Historic takes none either.
+  test("no live NextMoves: the settled cards fold into one block, before the first card", () => {
+    const none = reader(
+      ["Før.", "", ...card("S1", "Spm 1?"), "Mellom.", "", ...card("S2", "Spm 2?"), "Etter.", "", ...log([decided("S1", "D7"), closed("S2")])].join("\n"),
+    );
+    expect(none.match(/<section class="next-moves/g)).toHaveLength(1);
+    expect(none.match(/<details class="q-compact"/g)).toHaveLength(2);
+    expect(sumOf(none)).toBe("Avklart: 2");
+    expect(laneKinds(none)).toEqual(["settled"]);
+    expect(none.indexOf("Før.")).toBeLessThan(none.indexOf("next-moves"));
+    expect(none.indexOf("next-moves")).toBeLessThan(none.indexOf("Mellom."));
+    // Each card is once on the page, inside its row, with no pointer line left behind.
+    expect(none.match(/data-question-id="S1"/g)).toHaveLength(1);
+    expect(none.match(/data-question-id="S2"/g)).toHaveLength(1);
+    expect(none).toContain('id="nm-q-s1"');
+    expect(none).toContain('id="nm-q-s2"');
+    // S1 follows the block directly; S2 is away from it, so it leaves the line.
+    expect(stubs(none)).toEqual(["nm-q-s2|Spørsmål S2 står under Oppfølging ↑"]);
+  });
+
+  test("no live NextMoves: an open card stays a card, in place, beside the block", () => {
+    const html = reader([...card("S1", "Åpen?"), ...card("S2", "Avgjort?"), ...log(["- **S1** — Åpen.", decided("S2", "D7")])].join("\n"));
+    expect(html).toContain('<section class="question q-open" data-question-id="S1"');
+    expect(sumOf(html)).toBe("Avklart: 1");
+    expect(html.indexOf('data-question-id="S1"')).toBeLessThan(html.indexOf("next-moves"));
+  });
+
+  test("no live NextMoves: a card in a settled section stays there", () => {
+    const html = reader(['<Historic since="v1">', "", ...card("S1", "Spm?"), "</Historic>", "", ...log([decided("S1", "D7")])].join("\n"));
+    expect(html).not.toContain("nm-settled");
+    expect(html).toContain('<section class="question q-decided" data-question-id="S1"');
+  });
+
+  test("a NextMoves with no lane hosts nothing, so the page gets a block of its own", () => {
+    const html = reader(["<NextMoves>", "", "Ingen baner.", "", "</NextMoves>", "", "Prosa.", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
+    expect(html.match(/nm-settled"/g)).toHaveLength(1);
+    expect(html.indexOf("Prosa.")).toBeLessThan(html.indexOf("nm-settled"));
+    expect(stubs(html)).toEqual([]);
+  });
+
+  test("no live NextMoves: a card in a Fold pulls no other card in, and the block stays outside it", () => {
+    const html = reader(
+      ['<Fold title="Dev" for="dev">', "", ...card("S1", "Spm 1?"), "</Fold>", "", "## Til fag", "", ...card("S2", "Spm 2?"), ...log([decided("S1", "D7"), decided("S2", "D8")])].join("\n"),
+    );
+    const block = html.indexOf('<section class="next-moves');
+    expect(block).toBeGreaterThanOrEqual(0);
+    expect(block).toBeLessThan(html.indexOf("fold-for-dev"));
+    expect(stubs(html)).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↑", "nm-q-s2|Spørsmål S2 står under Oppfølging ↑"]);
+  });
+
+  test("no live NextMoves: a card under its own heading leaves a line, so the heading is not empty", () => {
+    const html = reader(["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", "", "Prosa.", "", "## S2 alene", "", ...card("S2", "Spm?"), ...log([decided("S2", "D7")])].join("\n"));
+    expect(stubs(html)).toEqual(["nm-q-s2|Spørsmål S2 står under Oppfølging ↑"]);
+    // The block sits where a written one goes: right after the status.
+    expect(html.indexOf("next-moves")).toBeLessThan(html.indexOf("Prosa."));
+  });
+
+  test("no live NextMoves: the block follows the status and the page's picture", () => {
+    const status = ["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", ""];
+    const cards = ["Prosa.", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])];
+    const at = (html: string, needle: string) => {
+      expect(html).toContain(needle);
+      return html.indexOf(needle);
+    };
+    const pictures: [string[], string][] = [
+      [['<Chart kind="bars" value="N">', "", "| A | N |", "|---|---:|", "| a | 1 |", "", "</Chart>", ""], "<table"],
+      [["| A | B |", "|---|---|", "| a | b |", ""], "<table"],
+      [["```mermaid", "flowchart LR", "  A --> B", "```", ""], "language-mermaid"],
+    ];
+    for (const [picture, needle] of pictures) {
+      const html = reader([...status, ...picture, ...cards].join("\n"));
+      expect(at(html, "status-rows")).toBeLessThan(at(html, needle));
+      expect(at(html, needle)).toBeLessThan(at(html, "next-moves"));
+      expect(at(html, "next-moves")).toBeLessThan(at(html, "Prosa."));
+    }
+    // With no picture it is right after the status.
+    const plain = reader([...status, ...cards].join("\n"));
+    expect(at(plain, "status-rows")).toBeLessThan(at(plain, "next-moves"));
+    expect(at(plain, "next-moves")).toBeLessThan(at(plain, "Prosa."));
+    // A table further down is no picture of the status: prose ends the walk.
+    const later = reader([...status, "Prosa.", "", "| A | B |", "|---|---|", "| a | b |", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
+    expect(at(later, "next-moves")).toBeLessThan(at(later, "Prosa."));
+  });
+
+  test("no live NextMoves: the first of two status blocks places it, as the views read it", () => {
+    const two = reader(["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", "", "Mellom.", "", "<StatusRows>", "", "- **Annet:** y", "", "</StatusRows>", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
+    expect(two).toContain("next-moves");
+    expect(two.indexOf("next-moves")).toBeLessThan(two.indexOf("Mellom."));
+  });
+
+  test("no decided card, no block", () => {
+    expect(reader([...card("S1", "Åpen?"), ...log(["- **S1** — Åpen."])].join("\n"))).not.toContain("next-moves");
+  });
+
+  test("no live NextMoves: a first card in a block that drops its children loses no other card", () => {
+    const html = reader(['<Embed src="x.html">', "", ...card("S1", "Spm 1?"), "</Embed>", "", ...card("S2", "Spm 2?"), ...log([decided("S1", "D7"), decided("S2", "D8")])].join("\n"));
+    expect(html.match(/<details class="q-compact"/g)).toHaveLength(2);
+    expect(html).toContain('data-question-id="S2"');
+  });
+
+  test("the block a page gets adds no decision views to a page with no slot for them", () => {
+    const md = [...card("S1", "Spm?"), ...log([decided("S1", "D7")]), "", "**PR ledger**", "", "| PR | State | Review |", "|---|---|---|", "| **1 — a** | merged [#1](https://example.test/pull/1) | D7 |", "| **2 — b** | merged [#2](https://example.test/pull/2) | D7 |", "| **3 — c** | merged [#3](https://example.test/pull/3) | D7 |", "| **4 — d** | merged [#4](https://example.test/pull/4) | D7 |"].join("\n");
+    const page = renderWikiHtml(md, () => undefined, {
+      question: questionRenderOptionsFor(md, { language: "no" } as never, true, "Eier (X111111)"),
+      language: "no",
+      views: true,
+    });
+    expect(page).toContain("nm-settled");
+    expect(page).not.toContain("dc-view");
+    // With a status block the same page has the slot, so the views do draw.
+    const status = ["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", "", md].join("\n");
+    const withSlot = renderWikiHtml(status, () => undefined, {
+      question: questionRenderOptionsFor(status, { language: "no" } as never, true, "Eier (X111111)"),
+      language: "no",
+      views: true,
+    });
+    expect(withSlot.indexOf("next-moves")).toBeLessThan(withSlot.indexOf("dc-view"));
+  });
+
+  test("no live NextMoves: the block speaks the wiki's language", () => {
+    const html = reader([...card("S1", "Q?"), ...log([decided("S1", "D7")])].join("\n"), "en");
+    expect(sumOf(html)).toBe("Settled: 1");
+    expect(html).toContain('<section class="next-moves nm-compact" data-lang="en">');
+  });
+
+  test("no live NextMoves, no question option: nothing moves", () => {
+    const md = [...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n");
+    expect(renderWikiHtml(md, () => undefined)).not.toContain("nm-settled");
+    expect(formatWebHtml(md)).not.toContain("nm-settled");
+  });
+
+  test("a block inside a Historic is no host: its lanes stay history, and the cards fold outside it", () => {
     const hist = reader(
       ['<Historic since="v1">', "", ...nm([lane('kind="you"', ["- gammelt"])]), "", "</Historic>", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"),
     );
-    expect(hist).not.toContain("nm-settled");
+    expect(hist.match(/nm-settled"/g)).toHaveLength(1);
+    expect(hist.indexOf("</section>", hist.indexOf('class="historic'))).toBeLessThan(hist.indexOf("nm-settled"));
     expect(hist).not.toContain("q-moved");
   });
 
