@@ -10,7 +10,7 @@
  * | `chain-close-conflict` | a decision says «Lukker Sn» / «Closes On» while On's own item closes |
  * |                        | it with another decision; the chain view keeps the question's close  |
  * | `plan-no-ledger`       | an in-flight, blocked or shipped plan has 2+ `prs:` and no PR ledger |
- * |                        | the reader shows without opening anything                            |
+ * |                        | table directly on the page, the one `mdx-explainer` asks for         |
  *
  * The first two read the page through `pageDecisionDataOf` (`decision-text.ts`),
  * the text and pass the reader draws from, so a finding and the view agree.
@@ -29,16 +29,16 @@ import { findUnfencedLine as findLine } from "./lint-lines.ts";
 
 export const DECISION_CHAIN_LINT_CHECKS = ["ledger-row-state", "chain-close-conflict", "plan-no-ledger"] as const;
 
-/** A closed `<Fold>` or a `<Historic>` hides its table from a reader of the
- *  Brief, and the at-a-glance slate usually sits in one. A plan that stopped
- *  (`abandoned`, `superseded`) has no state left to show. */
+/** A table inside a component block is no ledger, as `mdx-explainer` and mimir's
+ *  check 13 read it, however the reader shows that block. A `ready` plan has not
+ *  started and a stopped one (`abandoned`, `superseded`) has no state left. */
 function checkPlanLedger(page: Pick<WikiPageMeta, "relPath">, rawContent: string): LintFinding[] {
   const fm = parseFrontmatter(rawContent);
   const status = readPlanStatus(fm);
   if (status !== "in-flight" && status !== "blocked" && status !== "shipped") return [];
   const prs = Array.isArray(fm.prs) ? fm.prs.length : 0;
   if (prs < 2) return [];
-  if (findLedgers(parseBlocks(splitFrontmatter(rawContent).body), { shownOnly: true }).length > 0) return [];
+  if (findLedgers(parseBlocks(splitFrontmatter(rawContent).body), { topLevelOnly: true }).length > 0) return [];
   return [{
     check: "plan-no-ledger",
     relPath: page.relPath,

@@ -94,9 +94,9 @@
  *                      (the strip shows `unknown`), and a decision's «Lukker
  *                      Sn» that the question's own close contradicts. Info,
  *                      report-only. Rules: `lint-decision-chain.ts`.
- *                      `plan-no-ledger`, in the same file: a plan past
- *                      `proposed` with two or more `prs:` and no PR ledger in
- *                      its Brief.
+ *                      `plan-no-ledger`, in the same file: an in-flight,
+ *                      blocked or shipped plan with two or more `prs:` and no
+ *                      PR ledger table directly on the page.
  * 17. chart-table — on `.mdx` pages that are not culled, what a `<Chart>`
  *                      cannot draw from its table (a warning: the reader shows
  *                      the table instead) or draws with a note (info: a gap

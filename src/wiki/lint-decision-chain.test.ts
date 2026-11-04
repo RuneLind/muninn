@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { checkDecisionChain } from "./lint-decision-chain.ts";
 import { checkPageText, PAGE_TEXT_LINT_CHECKS } from "./lint.ts";
+import { parseBlocks } from "../format/markdown-ast.ts";
+import { findLedgers } from "../format/pr-ledger.ts";
 
 // Check 16 over synthetic pages: an unreadable ledger row and a contradicted
 // «Lukker», both info, each pointing at its own line.
@@ -58,13 +60,22 @@ describe("lint: plan-no-ledger", () => {
     expect(fired(page(SHIPPED, ["**PR ledger**", "", "<Callout>", "", "Text.", "", "</Callout>", "", ...table]))).toHaveLength(1);
   });
 
-  test("a ledger the reader shows without opening anything counts, in a Callout or an open Fold", () => {
-    expect(fired(page(SHIPPED, ["<Callout>", "", ...LEDGER, "", "</Callout>"]))).toEqual([]);
-    expect(fired(page(SHIPPED, ['<Fold title="x" open="true">', "", ...LEDGER, "", "</Fold>"]))).toEqual([]);
+  test("a table inside any component block is no ledger, as the skill and mimir's check 13 read it", () => {
+    for (const wrap of ["<Callout>", '<Callout resolved="2026-01-01">', '<Fold title="x" open="true">', "<More>"]) {
+      const name = /<(\w+)/.exec(wrap)![1]!;
+      expect(fired(page(SHIPPED, [wrap, "", ...LEDGER, "", `</${name}>`]))).toHaveLength(1);
+    }
+    expect(fired(page(SHIPPED, ["<NextMoves>", "", '<Lane kind="you">', "", ...LEDGER, "", "</Lane>", "", "</NextMoves>"]))).toHaveLength(1);
   });
 
-  test("a plan that stopped is not asked for a ledger", () => {
-    for (const status of ["abandoned", "superseded"]) {
+  test("the reader's views still read a ledger inside a component block", () => {
+    const blocks = parseBlocks(['<Fold title="x">', "", ...LEDGER, "", "</Fold>"].join("\n"));
+    expect(findLedgers(blocks)).toHaveLength(1);
+    expect(findLedgers(blocks, { topLevelOnly: true })).toHaveLength(0);
+  });
+
+  test("a plan that stopped or has not started is not asked for a ledger", () => {
+    for (const status of ["abandoned", "superseded", "ready"]) {
       expect(fired(page([`plan_status: ${status}`, "prs: [o/r#1, o/r#2]"], ["Text."]))).toEqual([]);
     }
   });
