@@ -47,7 +47,7 @@ describe("lint: plan-no-ledger", () => {
     expect(fired(page(SHIPPED, body))).toHaveLength(1);
   });
 
-  test("a ledger in a Fold or a Historic does not count, and the at-a-glance slate is one of those", () => {
+  test("a ledger in a Fold or a Historic does not count, nor does an at-a-glance slate", () => {
     expect(fired(page(SHIPPED, ['<Fold title="Old">', "", ...LEDGER, "", "</Fold>"]))).toHaveLength(1);
     expect(fired(page(SHIPPED, ['<Historic since="r#1">', "", ...LEDGER, "", "</Historic>"]))).toHaveLength(1);
     const glance = ["## Slate", "", "### At a glance", "", '<Historic since="r#1">', "", "| PR | What |", "|---|---|", "| 1 | a |", "", "</Historic>"];
@@ -60,7 +60,7 @@ describe("lint: plan-no-ledger", () => {
     expect(fired(page(SHIPPED, ["**PR ledger**", "", "<Callout>", "", "Text.", "", "</Callout>", "", ...table]))).toHaveLength(1);
   });
 
-  test("a table inside any component block is no ledger, as the skill and mimir's check 13 read it", () => {
+  test("a table inside any component block is no ledger", () => {
     for (const wrap of ["<Callout>", '<Callout resolved="2026-01-01">', '<Fold title="x" open="true">', "<More>"]) {
       const name = /<(\w+)/.exec(wrap)![1]!;
       expect(fired(page(SHIPPED, [wrap, "", ...LEDGER, "", `</${name}>`]))).toHaveLength(1);

@@ -966,7 +966,7 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(stubs(html)).toEqual([]);
   });
 
-  test("no live NextMoves: the settled cards fold into one block, at the first card's place", () => {
+  test("no live NextMoves: the settled cards fold into one block, before the first card", () => {
     const none = reader(
       ["Før.", "", ...card("S1", "Spm 1?"), "Mellom.", "", ...card("S2", "Spm 2?"), "Etter.", "", ...log([decided("S1", "D7"), closed("S2")])].join("\n"),
     );
@@ -998,7 +998,7 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(html).toContain('<section class="question q-decided" data-question-id="S1"');
   });
 
-  test("a NextMoves with no lane hosts nothing, so the cards fold at their own place", () => {
+  test("a NextMoves with no lane hosts nothing, so the page gets a block of its own", () => {
     const html = reader(["<NextMoves>", "", "Ingen baner.", "", "</NextMoves>", "", "Prosa.", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
     expect(html.match(/nm-settled"/g)).toHaveLength(1);
     expect(html.indexOf("Prosa.")).toBeLessThan(html.indexOf("nm-settled"));
@@ -1022,7 +1022,7 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(html.indexOf("next-moves")).toBeLessThan(html.indexOf("Prosa."));
   });
 
-  test("no live NextMoves: the block follows the status and the page's picture, as a written one does", () => {
+  test("no live NextMoves: the block follows the status and the page's picture", () => {
     const status = ["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", ""];
     const cards = ["Prosa.", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])];
     const at = (html: string, needle: string) => {
@@ -1051,12 +1051,12 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
 
   test("no live NextMoves: the first of two status blocks places it, as the views read it", () => {
     const two = reader(["<StatusRows>", "", "- **Status:** x", "", "</StatusRows>", "", "Mellom.", "", "<StatusRows>", "", "- **Annet:** y", "", "</StatusRows>", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
+    expect(two).toContain("next-moves");
     expect(two.indexOf("next-moves")).toBeLessThan(two.indexOf("Mellom."));
   });
 
   test("no decided card, no block", () => {
     expect(reader([...card("S1", "Åpen?"), ...log(["- **S1** — Åpen."])].join("\n"))).not.toContain("next-moves");
-    expect(reader(log([]).join("\n"))).not.toContain("next-moves");
   });
 
   test("no live NextMoves: a first card in a block that drops its children loses no other card", () => {

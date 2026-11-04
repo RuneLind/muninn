@@ -10,7 +10,7 @@
  * | `chain-close-conflict` | a decision says «Lukker Sn» / «Closes On» while On's own item closes |
  * |                        | it with another decision; the chain view keeps the question's close  |
  * | `plan-no-ledger`       | an in-flight, blocked or shipped plan has 2+ `prs:` and no PR ledger |
- * |                        | table directly on the page, the one `mdx-explainer` asks for         |
+ * |                        | table directly on the page                                           |
  *
  * The first two read the page through `pageDecisionDataOf` (`decision-text.ts`),
  * the text and pass the reader draws from, so a finding and the view agree.
@@ -29,8 +29,9 @@ import { findUnfencedLine as findLine } from "./lint-lines.ts";
 
 export const DECISION_CHAIN_LINT_CHECKS = ["ledger-row-state", "chain-close-conflict", "plan-no-ledger"] as const;
 
-/** A table inside a component block is no ledger, as `mdx-explainer` and mimir's
- *  check 13 read it, however the reader shows that block. A `ready` plan has not
+/** A table inside a component block is no ledger, however the reader shows that
+ *  block; `mdx-explainer` says the same of the Brief's ledger on most genres. Any
+ *  genre can fire, a run-report's `<DeltaTable>` included. A `ready` plan has not
  *  started and a stopped one (`abandoned`, `superseded`) has no state left. */
 function checkPlanLedger(page: Pick<WikiPageMeta, "relPath">, rawContent: string): LintFinding[] {
   const fm = parseFrontmatter(rawContent);

@@ -537,8 +537,8 @@ export interface LedgerReadOptions {
    *  the state column. For the GitHub check, which accounts for every row; a view
    *  has nothing to draw for such a row. */
   everyRow?: boolean;
-  /** {@link findLedgers} only: read tables directly in `blocks`, not those inside
-   *  a component block. The authoring contract's ledger; the views draw both. */
+  /** Read tables directly in `blocks`, not those inside a component block. Lint
+   *  passes it; the views read both. */
   topLevelOnly?: boolean;
 }
 
@@ -599,7 +599,7 @@ function linesAbove(blocks: Block[], i: number): string[] {
 }
 
 /** Every PR ledger on the page, in source order, inside component bodies
- *  (Lane, Fold, More …) too. */
+ *  (Lane, Fold, More …) too unless `topLevelOnly`. */
 export function findLedgers(blocks: Block[], opts: LedgerReadOptions = {}): Ledger[] {
   const out: Ledger[] = [];
   const walk = (bs: Block[]): void => {

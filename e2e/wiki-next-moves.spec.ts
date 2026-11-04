@@ -255,7 +255,7 @@ FILES["plans/settled-q.mdx"] = plan("Settled questions", "in-flight", [
   "",
   ...QLOG,
 ]);
-// Settled cards and no block: they fold into one block at the first card's place.
+// Settled cards and no block: the page gets a block for them, before the first card.
 FILES["plans/settled-noblock.mdx"] = plan("Settled, no block", "in-flight", [
   ...qcard("S1", "**Should the letter go out as A or B?**"),
   ...qcard("S2", "Does this also cover old cases?"),
