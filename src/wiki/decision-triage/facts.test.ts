@@ -9,9 +9,12 @@ import { testTempDirSync } from "../../test/temp-dir.ts";
 import { readBaselineCards } from "./baseline.ts";
 import type { WikiIndex } from "../store.ts";
 import { answeredByChoice, commitView, gatherCardFacts, gatherPageFacts, liveAnswers, liveView, logEntriesNaming, readPageText, type GatherContext } from "./facts.ts";
-import { parseRepoRoots, realGit, resolveRepo } from "./git.ts";
+import { parseRepoRoots, realGit, resolveRepo, type GitRun } from "./git.ts";
 import { renderBatch } from "./prompt.ts";
-import { gatherReplay, messageMoments, replayBatches, replayCounts, ReplayRefused, runReplay, type ReplayDeps } from "./replay.ts";
+import { gatherReplay, messageMoments, replayBatches, replayCounts, replayDigest, ReplayRefused, runReplay, type ReplayDeps } from "./replay.ts";
+import { readBaselineLabels } from "./baseline.ts";
+import { replayLogPath } from "./log.ts";
+import { replayKey, type CardLine, type LogLine } from "./schema.ts";
 import { commitAt, git, mergeAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 
 const PAGE = (extra = "") => `---
@@ -130,10 +133,10 @@ const version = (over: Partial<WikiAnswerVersion>): WikiAnswerVersion => ({
   ...over,
 });
 
-function ctx(answers: WikiAnswerVersion[] = []): GatherContext {
+function ctx(answers: WikiAnswerVersion[] = [], git: GitRun = realGit): GatherContext {
   const roots = parseRepoRoots(codeRoot);
   return {
-    git: realGit,
+    git,
     repo: (name) => resolveRepo(name, roots, realGit, { fetch: false }),
     answers,
     owner: "Eier (X123456)",
@@ -141,10 +144,10 @@ function ctx(answers: WikiAnswerVersion[] = []): GatherContext {
   };
 }
 
-async function asOf(commit: string, cutMs: number, answers: WikiAnswerVersion[] = []) {
+async function asOf(commit: string, cutMs: number, answers: WikiAnswerVersion[] = [], git: GitRun = realGit) {
   const view = commitView(wiki, commit, cutMs, realGit);
   const read = readPageText("plans/testplan.mdx", (await view.readPage("plans/testplan.mdx"))!);
-  const gathered = await gatherCardFacts({ wiki: "w", relPath: read.relPath, id: "O1", answeredAt: new Date(cutMs).toISOString(), commit }, read, view, ctx(answers));
+  const gathered = await gatherCardFacts({ wiki: "w", relPath: read.relPath, id: "O1", answeredAt: new Date(cutMs).toISOString(), commit }, read, view, ctx(answers, git));
   return { gathered, page: await gatherPageFacts(read, view) };
 }
 
@@ -228,6 +231,117 @@ describe("the ref's tip then follows the branch, not a merged-in feature", () =>
     expect(repo.tipDate).toStartWith("2026-10-06");
     expect(repo.code!.map((c) => c.token)).toEqual(["feature_token"]);
     expect(repo.subjectsSinceCard!.map((s) => s.replace(/^\S+ \S+ /, ""))).toEqual(["merge after the moment", "feature before the moment", "main before the moment"]);
+  });
+});
+
+describe("a search that failed is not a search that found nothing", () => {
+  const TIMED_OUT = { ok: false, stdout: "", stderr: "git grep timed out after 15000 ms", timedOut: true };
+  const GIT_ERROR = { ok: false, stdout: "", stderr: "fatal: bad object" };
+  /** Real git, except calls `when` picks. */
+  const failing = (when: (args: readonly string[]) => boolean, res: Awaited<ReturnType<GitRun>> = GIT_ERROR): GitRun => (cwd, args, opts) => (when(args) ? Promise.resolve(res) : realGit(cwd, args, opts));
+  const codeRepo = (g: Awaited<ReturnType<typeof asOf>>["gathered"]) => g.card.repos.find((r) => r.repo === "code")!;
+
+  test("a grep that timed out marks its token", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "grep" && a.includes("needle_token"), TIMED_OUT));
+    const entry = codeRepo(gathered).code!.find((c) => c.token === "needle_token");
+    expect(entry).toEqual({ token: "needle_token", grep: [], searchFailed: "timed out" });
+    expect(codeRepo(gathered).code!.find((c) => c.token === "src/a.ts")!.searchFailed).toBeUndefined();
+  });
+
+  test("a grep git could not run marks its token apart from a timeout", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "grep" && a.includes("needle_token")));
+    expect(codeRepo(gathered).code!.find((c) => c.token === "needle_token")).toEqual({ token: "needle_token", grep: [], searchFailed: "git error" });
+  });
+
+  test("git's own no-match is exit 1 with nothing on stderr, and marks nothing", async () => {
+    const dir = path.join(codeRoot, "code");
+    const none = await realGit(dir, ["grep", "-I", "-n", "-F", "-e", "no_such_token_anywhere", "HEAD", "--"]);
+    expect(none).toEqual({ ok: false, stdout: "" });
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "grep" && a.includes("needle_token"), none));
+    expect(codeRepo(gathered).code!.some((c) => c.token === "needle_token")).toBe(false);
+  });
+
+  test("a failed path read marks the token and keeps its lines", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "log" && a[a.length - 1] === "src/a.ts"));
+    const entry = codeRepo(gathered).code!.find((c) => c.token === "src/a.ts")!;
+    expect(entry.searchFailed).toBe("git error");
+    expect(entry.pathLastChanged).toBeUndefined();
+  });
+
+  test("a token no path can be fails no search: a URL or a climb out of the repo is only grepped", async () => {
+    const root = testTempDirSync(path.join(tmpdir(), "triage-urltoken-"));
+    git(root, "init", "-q");
+    write(root, "p.mdx", `---\ntitle: T\nrepos: [code]\n---\n\n<Question id="O1" choices="A|B">\nSkal \`/admin/run\` og \`../utenfor.ts\` bort?\n</Question>\n`);
+    const sha = commitAt(root, "2026-10-01T10:00:00Z", "the card");
+    const view = commitView(root, sha, CUT, realGit);
+    const read = readPageText("p.mdx", (await view.readPage("p.mdx"))!);
+    const { card } = await gatherCardFacts({ wiki: "w", relPath: "p.mdx", id: "O1", answeredAt: new Date(CUT).toISOString(), commit: sha }, read, view, ctx());
+    expect(card.repos[0]!.found).toBe(true);
+    expect(card.repos[0]!.code).toEqual([]);
+  });
+
+  test("a failed search is no code fact", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "grep" || (a[0] === "log" && a[a.length - 1] === "src/a.ts")));
+    expect(codeRepo(gathered).code!.every((c) => c.searchFailed === "git error")).toBe(true);
+    expect(gathered.codeFacts).toBe(false);
+  });
+
+  test("a failed read of the tip then marks the repo, not «none at that time»", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "rev-list"));
+    const repo = codeRepo(gathered);
+    expect(repo.searchFailed).toBe("git error");
+    expect(repo.tipDate).not.toBe("none at that time");
+    expect(repo.subjectsSinceCard).toBeUndefined();
+    expect(repo.code).toBeUndefined();
+  });
+
+  test("a failed read of the tip's date marks the repo and keeps the search going", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "log" && a.includes("--format=%cI") && !a.includes("--follow")));
+    const repo = codeRepo(gathered);
+    expect(repo.searchFailed).toBe("git error");
+    expect(repo.tipDate).toBeUndefined();
+    expect(repo.code!.length).toBeGreaterThan(0);
+  });
+
+  test("no commit by then stays «none at that time», with no mark", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "rev-list", { ok: true, stdout: "" }));
+    const repo = codeRepo(gathered);
+    expect(repo.tipDate).toBe("none at that time");
+    expect(repo.searchFailed).toBeUndefined();
+  });
+
+  test("a failed read of the subjects marks the repo and leaves them absent", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "log" && a.some((x) => x.startsWith("--since="))));
+    const repo = codeRepo(gathered);
+    expect(repo.searchFailed).toBe("git error");
+    expect(repo.subjectsSinceCard).toBeUndefined();
+    expect(repo.code!.length).toBeGreaterThan(0);
+  });
+
+  test("a failed history read of the card reads «lookup failed», not uncommitted", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a.includes("--follow")));
+    expect(gathered.card.addedCommit).toBe("lookup failed");
+    expect(codeRepo(gathered).subjectsSinceCard).toBeUndefined();
+  });
+
+  test("no commit holding the card stays «none», with an empty subject list", async () => {
+    const { gathered } = await asOf(first, CUT, [], failing((a) => a.includes("--follow"), { ok: true, stdout: "" }));
+    expect(gathered.card.addedCommit).toBe("none");
+    expect(codeRepo(gathered).subjectsSinceCard).toEqual([]);
+  });
+
+  test("adding an attribute to the tag later does not move the commit that added the card", async () => {
+    const root = testTempDirSync(path.join(tmpdir(), "triage-added-"));
+    git(root, "init", "-q");
+    const card = (tag: string) => `---\ntitle: T\n---\n\n${tag}\nSkal vi?\n</Question>\n`;
+    write(root, "p.mdx", card(`<Question id="O1" choices="A|B">`));
+    const added = commitAt(root, "2026-10-01T10:00:00Z", "the card");
+    write(root, "p.mdx", card(`<Question id="O1" to="Eier" choices="A|B">`));
+    const edited = commitAt(root, "2026-10-02T10:00:00Z", "the addressee");
+    const view = commitView(root, edited, CUT, realGit);
+    const read = readPageText("p.mdx", (await view.readPage("p.mdx"))!);
+    const { card: facts } = await gatherCardFacts({ wiki: "w", relPath: "p.mdx", id: "O1", answeredAt: new Date(CUT).toISOString(), commit: edited }, read, view, ctx());
+    expect(facts.addedCommit).toMatchObject({ sha: added, subject: "the card" });
   });
 });
 
@@ -441,6 +555,145 @@ describe("replay's mechanics, with no score", () => {
     const prompt = `x\n\n${JSON.stringify({ pages: [{ page: "p1", ...a.page }], cards: [{ card: "c1", page: "p1" }, { card: "c2", page: "p1" }] })}`;
     expect(messageMoments({ items: [a, b], prompt })).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 1, twoMoments: true });
     expect(messageMoments({ items: [a], prompt: `x\n\n${JSON.stringify({ pages: [{ page: "p1", ...a.page }], cards: [{ card: "c1", page: "p1" }] })}` })).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 0, twoMoments: false });
+  });
+
+  describe("a kept verdict is one for this very message", () => {
+    const CARD = { wiki: "w", relPath: "plans/testplan.mdx", id: "O1", answeredAt: "2026-10-05T12:00:00Z", commit: "", hashMatches: true, replayable: true as const };
+    const earlier = version({ answerId: "early", author: { userId: "u2", oid: null, navIdent: null, name: "Fag" }, body: "tidligere", createdAt: CUT - 86_400_000 });
+    function replay(existing: readonly CardLine[]) {
+      let calls = 0;
+      const appended: LogLine[] = [];
+      return {
+        run: (g: Awaited<ReturnType<typeof gatherReplay>>) =>
+          runReplay(g, {
+            call: async (req) => {
+              calls++;
+              const ids = [...req.prompt.matchAll(/"card": "(c\d+)"/g)].map((m) => m[1]!);
+              return { text: JSON.stringify({ verdicts: ids.map((card) => ({ card, verdict: "ASK_OWNER", costOfDelay: "low", reversible: true, onlyOwnerHas: "x", why: "fresh", evidence: [], restsOnPrs: [] })) }) };
+            },
+            model: "m",
+            existing,
+            append: async (l) => void appended.push(...l),
+            now: Date.now,
+            repoRoots: codeRoot,
+          }),
+        calls: () => calls,
+        cardLines: () => appended.filter((l): l is CardLine => l.type === "card"),
+      };
+    }
+    const once = async (answers: WikiAnswerVersion[] = []) => {
+      const gathered = await gatherReplay([{ ...CARD, commit: first }], deps({ answers: async () => answers }));
+      const r = replay([]);
+      await r.run(gathered);
+      return { gathered, lines: r.cardLines() };
+    };
+
+    test("a line from another wiki, on stale wording, is not kept", async () => {
+      const { gathered, lines } = await once();
+      const stale: CardLine = { ...lines[0]!, wiki: "OTHER", questionHash: "stale-hash", verdict: "DEFAULT" };
+      const r = replay([stale]);
+      const out = await r.run(gathered);
+      expect(r.calls()).toBe(1);
+      expect(out.lines.get(replayKey(gathered.items[0]!.gathered.ref))!.verdict).toBe("ASK_OWNER");
+    });
+
+    test("a line with no digest is not kept", async () => {
+      const { gathered, lines } = await once();
+      const { messageDigest: _gone, ...bare } = lines[0]!;
+      const r = replay([bare as CardLine]);
+      await r.run(gathered);
+      expect(r.calls()).toBe(1);
+    });
+
+    test("the same message keeps its verdict with no call, and says so", async () => {
+      const { lines } = await once();
+      const again = await gatherReplay([{ ...CARD, commit: first }], deps());
+      const r = replay([{ ...lines[0]!, verdict: "VOID" }]);
+      const out = await r.run(again);
+      expect(r.calls()).toBe(0);
+      expect(out.kept).toBe(1);
+      expect(out.rejudged).toBe(0);
+      expect(out.lines.get(replayKey(again.items[0]!.gathered.ref))!.verdict).toBe("VOID");
+    });
+
+    test("facts that moved re-judge the card, and say so", async () => {
+      const { lines } = await once();
+      const moved = await gatherReplay([{ ...CARD, commit: first }], deps({ answers: async () => [earlier] }));
+      const r = replay([{ ...lines[0]!, verdict: "VOID" }]);
+      const out = await r.run(moved);
+      expect(r.calls()).toBe(1);
+      expect(out.kept).toBe(0);
+      expect(out.rejudged).toBe(1);
+      expect(out.lines.get(replayKey(moved.items[0]!.gathered.ref))!.verdict).toBe("ASK_OWNER");
+      expect(r.cardLines()[0]!.messageDigest).toBe(replayDigest(moved.items[0]!));
+    });
+
+    test("a card gathered with no matching line is new, not re-judged", async () => {
+      const gathered = await gatherReplay([{ ...CARD, commit: first }], deps());
+      const out = await replay([]).run(gathered);
+      expect(out.kept).toBe(0);
+      expect(out.rejudged).toBe(0);
+    });
+
+    test("the key holds the wiki: one path in two wikis is two cards", async () => {
+      const gathered = await gatherReplay([{ ...CARD, commit: first }, { ...CARD, wiki: "v", commit: first }], deps({ roots: new Map([["w", wiki], ["v", wiki]]) }));
+      expect(gathered.items).toHaveLength(2);
+      const r = replay([]);
+      const out = await r.run(gathered);
+      expect(out.lines.size).toBe(2);
+      expect(r.cardLines().map((l) => l.wiki).sort()).toEqual(["v", "w"]);
+    });
+
+    test("a verdict on a card this run did not gather is not handed back", async () => {
+      const { lines } = await once();
+      const none = await gatherReplay([], deps());
+      const out = await replay(lines).run(none);
+      expect(out.lines.size).toBe(0);
+    });
+
+    test("a card left with no verdict is asked again, on the same message", async () => {
+      const { gathered, lines } = await once();
+      const r = replay([{ ...lines[0]!, verdict: "NO_VERDICT" }]);
+      const out = await r.run(gathered);
+      expect(r.calls()).toBe(1);
+      expect(out.kept).toBe(0);
+      expect(out.rejudged).toBe(0);
+      expect(out.lines.get(replayKey(gathered.items[0]!.gathered.ref))!.verdict).toBe("ASK_OWNER");
+    });
+
+    test("a line with no digest on a card not gathered is not handed back either", async () => {
+      const { lines } = await once();
+      const { messageDigest: _gone, ...bare } = lines[0]!;
+      const out = await replay([bare as CardLine]).run(await gatherReplay([], deps()));
+      expect(out.lines.size).toBe(0);
+    });
+
+    test("the digest moves with the prompt version, the card and the page; a new version is a new file", async () => {
+      const { gathered } = await once();
+      const item = gathered.items[0]!;
+      expect(replayDigest(item, "a")).not.toBe(replayDigest(item, "b"));
+      expect(replayDigest(item)).toBe(replayDigest(item));
+      expect(replayDigest({ ...item, gathered: { ...item.gathered, card: { ...item.gathered.card, body: "annet" } } })).not.toBe(replayDigest(item));
+      expect(replayDigest({ ...item, page: { ...item.page, status: "annet" } })).not.toBe(replayDigest(item));
+      expect(replayDigest({ ...item, gathered: { ...item.gathered, ref: { ...item.gathered.ref, wiki: "annen" } } })).not.toBe(replayDigest(item));
+      expect(replayLogPath("a", "/d")).not.toBe(replayLogPath("b", "/d"));
+    });
+
+    test("the scorer finds a card's label by the same key", () => {
+      const text = baseline(true);
+      const { cards } = readBaselineCards(text);
+      expect(readBaselineLabels(text).labels.get(replayKey(cards[0]!))).toMatchObject({ added: true });
+    });
+  });
+
+  test("a commit this repo does not hold is refused as that, alone or wholesale", async () => {
+    const { cards } = readBaselineCards(baseline(false));
+    const lost = { ...cards[0]!, commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", answeredAt: "2026-10-05T12:30:00Z" };
+    const some = await gatherReplay([lost, cards[0]!], deps());
+    expect(some.items).toHaveLength(1);
+    expect(some.refused.map((r) => r.reason)).toEqual(["the commit is not in this repo"]);
+    await expect(gatherReplay([lost], deps())).rejects.toThrow("none of w's 1 commit(s) are in");
+    await expect(gatherReplay([lost], deps())).rejects.toBeInstanceOf(ReplayRefused);
   });
 
   test("a card missing from its commit is refused alone; a commit id that is not one too", async () => {

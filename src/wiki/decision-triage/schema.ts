@@ -6,7 +6,7 @@
 import { z } from "zod";
 
 /** Changes only by hand, with the prompt. A new value restarts `--since`. */
-export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.2";
+export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.3";
 /** The frozen prompt's date: part (2) replays answers given after it. */
 export const DECISION_TRIAGE_PROMPT_FROZEN_ON = "2026-11-05";
 
@@ -92,6 +92,9 @@ export interface CardLine {
   reason?: string;
   /** Replay only: the moment the card was read as of. */
   answeredAt?: string;
+  /** Replay only: the digest of what the model read (`replayDigest`). A re-run keeps
+   *  this line only for that same message. */
+  messageDigest?: string;
   codeFacts?: boolean;
   costOfDelay?: Verdict["costOfDelay"];
   reversible?: boolean;
@@ -102,3 +105,6 @@ export interface CardLine {
 }
 
 export type LogLine = RunLine | CardLine;
+
+/** A replayed card: the scorer's labels and the replay log both key on this. */
+export const replayKey = (c: { wiki: string; relPath: string; id: string; answeredAt?: string | null }) => `${c.wiki}\0${c.relPath}\0${c.id}\0${c.answeredAt ?? ""}`;

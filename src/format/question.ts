@@ -23,7 +23,7 @@
  * remainder, superseded) is `closed`; everything else is `open`.
  */
 import type { AuthMode } from "../auth/mode.ts";
-import { stripFactWrappers, type Block, type ListBlock, type ListChild } from "./markdown-ast.ts";
+import { readerFencedLines, stripFactWrappers, type Block, type ListBlock, type ListChild } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
 import { maskLineCodeSpans } from "./code-spans.ts";
 import { isCalendarDay, isDayFirstDate } from "./calendar-day.ts";
@@ -608,19 +608,22 @@ export function closedQuestionIds(blocks: Block[]): Set<string> {
 
 /**
  * The choice a card's body recommends, or null. Reads `**Recommendation:` and
- * `**Anbefaling`, with the colon inside or outside the bold, outside code spans,
- * and returns the choice the text after it opens with (the longest one, whole
- * word, any case). Regexes stay in the function: `new RegExp` at module level
- * would keep this file's weight in the browser bundles.
+ * `**Anbefaling`, with the colon inside or outside the bold, outside code spans
+ * and fenced blocks, and returns the choice the text after it opens with (the
+ * longest one, whole word, exact case: `a small fix` is prose, not choice `A`).
+ * Regexes stay in the function: `new RegExp` at module level would keep this
+ * file's weight in the browser bundles.
  */
 export function parseRecommendation(body: string, choices: readonly string[]): string | null {
   const text = body.normalize("NFC");
-  const marker = /\*\*(?:Recommendation|Anbefaling)(?::\*\*|\*\*:|:)/u.exec(maskCodeSpans(text));
+  const fenced = readerFencedLines(text);
+  const prose = text.split("\n").map((line, i) => (fenced[i] ? " ".repeat(line.length) : line)).join("\n");
+  const marker = /\*\*(?:Recommendation|Anbefaling)(?::\*\*|\*\*:|:)/u.exec(maskCodeSpans(prose));
   if (!marker) return null;
-  const lead = text.slice(marker.index + marker[0].length).replace(/^[\s*_`«"'“‘(]+/u, "").toLowerCase();
+  const lead = text.slice(marker.index + marker[0].length).replace(/^[\s*_`«"'“‘(]+/u, "");
   const byLength = [...choices].sort((a, b) => b.length - a.length);
   for (const choice of byLength) {
-    const c = choice.normalize("NFC").toLowerCase();
+    const c = choice.normalize("NFC");
     if (lead.startsWith(c) && !/^[\p{L}\p{N}_]/u.test(lead.slice(c.length))) return choice;
   }
   return null;

@@ -3,7 +3,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { CardFacts, PageFacts } from "./facts.ts";
-import { buildBatches, renderBatch, type BatchItem } from "./prompt.ts";
+import { buildBatches, renderBatch, TRIAGE_SYSTEM_PROMPT, type BatchItem } from "./prompt.ts";
 import { replayBatches } from "./replay.ts";
 
 const page = (relPath: string, ruling: string, asOf?: string): PageFacts => ({
@@ -171,4 +171,11 @@ describe("tonight's message", () => {
     expect(batches.map((b) => b.items.map((i) => i.gathered.ref.id))).toEqual([["O1", "O2", "O3"], ["O4", "O5"]]);
     expect(parsed(batches[0]!.prompt).pages.map((p) => p.relPath)).toEqual(["plans/a.mdx", "plans/b.mdx"]);
   });
+});
+
+test("the prompt says a failed search and a failed history read are not absence", () => {
+  expect(TRIAGE_SYSTEM_PROMPT).toContain("searchFailed");
+  expect(TRIAGE_SYSTEM_PROMPT).toContain("never read it as absent");
+  expect(TRIAGE_SYSTEM_PROMPT).toContain('"lookup failed"');
+  expect(TRIAGE_SYSTEM_PROMPT).toContain('addedCommit "none"');
 });

@@ -18,7 +18,7 @@ import { closeDb, initDb } from "../src/db/client.ts";
 import { appendLogLines, DECISION_TRIAGE_DIR } from "../src/wiki/decision-triage/log.ts";
 import { runDecisionTriage } from "../src/wiki/decision-triage/run.ts";
 import { realTriageRunDeps, scopeVerdict, triageScope } from "../src/wiki/decision-triage/scope.ts";
-import { outInsideLog, rootOverrides, triageEntries } from "../src/wiki/decision-triage/script-roots.ts";
+import { outInsideLog, rootOverrides, triageEntries, UsageError } from "../src/wiki/decision-triage/script-roots.ts";
 import { isInsideDir } from "../src/wiki/work-map/dry-run.ts";
 
 const { values } = parseArgs({
@@ -35,13 +35,20 @@ if (!wiki || !values.out) {
   process.exit(2);
 }
 const out = path.resolve(values.out);
+let overrides: Map<string, string>;
+try {
+  overrides = rootOverrides(values.root ?? []);
+} catch (err) {
+  if (!(err instanceof UsageError)) throw err;
+  console.error(`usage error: ${err.message}. usage: bun scripts/decision-triage-run.ts --wiki <name> --out <file> [--root <wiki>=<path>]`);
+  process.exit(2);
+}
 
 const config = loadConfig();
 if (!config.decisionTriageRepoRoots) {
   console.error("DECISION_TRIAGE_REPO_ROOTS is not set: the triage is off. Set it inline on this command.");
   process.exit(2);
 }
-const overrides = rootOverrides(values.root ?? []);
 const answerConfig = resolveWikiAnswerConfig();
 const scope = await triageScope({
   workMapWikis: config.workMapWikis,

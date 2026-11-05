@@ -28,7 +28,7 @@ How to choose:
 - If the facts contradict the card's premise, say so in why. Being stale can make a card VOID, or can make it need the owner.
 - An unclosedHint is a mechanical reading of free prose, not a ruling. It may have caught a word inside a condition. Read the whole decisionLog beside it before you trust it. A hint with only a word and no decision is the weakest kind.
 - answers hold what people said earlier. A not-sure answer, a text-only answer or an answer to since-changed wording decides nothing by itself, but its text is evidence.
-- A repo with found: false, a failed fetch or an old tipDate means the code facts are missing or stale. A code fact shows only the lines listed: a token with no entry was searched and not found, or the search budget ran out. If your verdict rests on code the facts do not show, say so in why. Never claim code exists or is missing beyond what they show.
+- A repo with found: false, a failed fetch or an old tipDate means the code facts are missing or stale. A code fact shows only the lines listed: a token with no entry was searched and not found, or the search budget ran out. searchFailed, on a token or a repo, means git could not run that search: it says nothing about whether the code exists, so never read it as absent. addedCommit "none" means the card is not committed yet; "lookup failed" means its history could not be read, so its age is unknown and subjectsSinceCard is missing, not empty. If your verdict rests on code the facts do not show, say so in why. Never claim code exists or is missing beyond what they show.
 - prReferences are references only. You do not know their state. List in restsOnPrs any your verdict depends on.
 
 For each card also give:

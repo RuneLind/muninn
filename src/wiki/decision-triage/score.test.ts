@@ -4,7 +4,8 @@ import path from "node:path";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { sha256 } from "../../gardener/util.ts";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { realGit } from "./git.ts";
+import { computeFloor, labelsSince } from "./floor.ts";
+import { realGit, type GitRun } from "./git.ts";
 import { cardAsAnswered, labelAnswers } from "./history.ts";
 import { missedNights } from "./loop-deps.ts";
 import type { CardLine, RunLine } from "./schema.ts";
@@ -119,6 +120,111 @@ describe("the card as answered", () => {
     expect(card).toMatchObject({ status: "hash-mismatch", commit: before, body: REC });
   });
 
+  test("a page busier than any count still finds the commit before the answer", async () => {
+    const root = repo();
+    write(root, "p.mdx", page(REC));
+    const sha = commitAt(root, "2026-10-01T10:00:00Z", "the card");
+    for (let i = 0; i < 85; i++) {
+      write(root, "p.mdx", `${page(REC)}\nline ${i}\n`);
+      commitAt(root, `2026-10-03T10:${String(i % 60).padStart(2, "0")}:00Z`, `busy ${i}`);
+    }
+    const card = await cardAsAnswered(root, "p.mdx", "O1", hash(REC), at("2026-10-02T10:00:00Z"), realGit);
+    expect(card).toMatchObject({ status: "ok", commit: sha, body: REC });
+  }, 30_000);
+
+  test("the log read takes no count", async () => {
+    const root = repo();
+    write(root, "p.mdx", page(REC));
+    commitAt(root, "2026-10-01T10:00:00Z", "one");
+    const seen: (number | undefined)[] = [];
+    const spy: GitRun = (cwd, args, opts) => {
+      if (args[0] === "log") seen.push(opts?.maxLines);
+      return realGit(cwd, args, opts);
+    };
+    await cardAsAnswered(root, "p.mdx", "O1", hash(REC), at("2026-10-02T10:00:00Z"), spy);
+    expect(seen).toEqual([undefined]);
+  });
+
+  test("a root that is no repo reads unreadable, never no-history", async () => {
+    const root = testTempDirSync(path.join(tmpdir(), "triage-norepo-"));
+    const card = await cardAsAnswered(root, "p.mdx", "O1", "h", at("2026-10-02T10:00:00Z"), realGit);
+    expect(card).toMatchObject({ status: "unreadable", commit: null, body: null });
+  });
+
+  test("a log cut off by the byte bound or a timeout reads unreadable", async () => {
+    const root = repo();
+    write(root, "p.mdx", page(REC));
+    commitAt(root, "2026-10-01T10:00:00Z", "one");
+    const when = at("2026-10-02T10:00:00Z");
+    const capped: GitRun = () => Promise.resolve({ ok: true, stdout: "", capped: true });
+    const timedOut: GitRun = () => Promise.resolve({ ok: false, stdout: "", timedOut: true });
+    expect((await cardAsAnswered(root, "p.mdx", "O1", hash(REC), when, capped)).status).toBe("unreadable");
+    expect((await cardAsAnswered(root, "p.mdx", "O1", hash(REC), when, timedOut)).status).toBe("unreadable");
+  });
+
+  test("a commit that cannot be read reads unreadable, wherever it fell in the walk", async () => {
+    const root = repo();
+    write(root, "p.mdx", page(REC));
+    commitAt(root, "2026-10-01T10:00:00Z", "one");
+    write(root, "p.mdx", page(NO_REC));
+    const newest = commitAt(root, "2026-10-01T12:00:00Z", "two");
+    const bad: GitRun = (cwd, args, opts) => (args[0] === "show" && args[1]!.startsWith(newest) ? Promise.resolve({ ok: false, stdout: "", stderr: "fatal: bad object" }) : realGit(cwd, args, opts));
+    expect((await cardAsAnswered(root, "p.mdx", "O1", hash(REC), at("2026-10-02T10:00:00Z"), bad)).status).toBe("unreadable");
+  });
+
+  test("a read failing in the later walks reads unreadable too", async () => {
+    const root = repo();
+    write(root, "p.mdx", page(NO_REC));
+    const older = commitAt(root, "2026-10-01T10:00:00Z", "older");
+    write(root, "p.mdx", page(REC));
+    const newer = commitAt(root, "2026-10-01T12:00:00Z", "newer");
+    write(root, "p.mdx", page(NO_REC));
+    const later = commitAt(root, "2026-10-05T10:00:00Z", "later");
+    const failsOn = (sha: string): GitRun => (cwd, args, opts) => (args[0] === "show" && args[1]!.startsWith(sha) ? Promise.resolve({ ok: false, stdout: "", timedOut: true }) : realGit(cwd, args, opts));
+    // The newest before the answer holds other wording, so the walk for the answered wording goes on.
+    expect((await cardAsAnswered(root, "p.mdx", "O1", "another-hash", at("2026-10-02T10:00:00Z"), failsOn(older))).status).toBe("unreadable");
+    // Nothing before the answer: the search runs through the commits after it.
+    expect((await cardAsAnswered(root, "p.mdx", "O1", "another-hash", at("2026-09-02T10:00:00Z"), failsOn(later))).status).toBe("unreadable");
+    expect((await cardAsAnswered(root, "p.mdx", "O1", hash(REC), at("2026-09-02T10:00:00Z"), failsOn(newer))).status).toBe("unreadable");
+  });
+
+  test("a commit that deleted the page is no read failure: the walk goes on", async () => {
+    const root = repo();
+    write(root, "p.mdx", page(REC));
+    const sha = commitAt(root, "2026-10-01T10:00:00Z", "one");
+    git(root, "rm", "-q", "p.mdx");
+    commitAt(root, "2026-10-01T12:00:00Z", "gone");
+    const card = await cardAsAnswered(root, "p.mdx", "O1", hash(REC), at("2026-10-02T10:00:00Z"), realGit);
+    expect(card).toMatchObject({ status: "ok", commit: sha });
+  });
+
+  test("a whole wiki's history failing is a fault, not an empty result, and the floor throws", async () => {
+    const root = testTempDirSync(path.join(tmpdir(), "triage-norepo-"));
+    let asked = 0;
+    const history = async () => {
+      asked++;
+      return [v({})];
+    };
+    const [row] = await labelsSince([{ wiki: "w", root }], 0, history, realGit);
+    expect(row!.labelled).toEqual([]);
+    expect(row!.fault).toContain("not a git repository");
+    expect(asked).toBe(0);
+    await expect(computeFloor([{ wiki: "w", root }], history, realGit)).rejects.toThrow("not a git repository");
+  });
+
+  test("every answer's read failing is a fault; one of several is a count, not a fault", async () => {
+    const root = repo();
+    write(root, "p.mdx", page(REC));
+    commitAt(root, "2026-10-01T10:00:00Z", "one");
+    const logFails = (rel: string | null): GitRun => (cwd, args, opts) => (args[0] === "log" && (rel === null || args.includes(rel)) ? Promise.resolve({ ok: false, stdout: "", stderr: "fatal: bad" }) : realGit(cwd, args, opts));
+    const two = async () => [v({ questionHash: hash(REC), createdAt: at("2026-10-02T10:00:00Z") }), v({ answerId: "b", relPath: "q.mdx", createdAt: at("2026-10-02T10:00:00Z") })];
+    const [all] = await labelsSince([{ wiki: "w", root }], 0, two, logFails(null));
+    expect(all!.fault).toContain("none of w's 2 answers");
+    const [some] = await labelsSince([{ wiki: "w", root }], 0, two, logFails("q.mdx"));
+    expect(some!.fault).toBeUndefined();
+    expect(some!.labelled.map((l) => l.status).sort()).toEqual(["ok", "unreadable"]);
+  });
+
   test("nothing in git: no-history, no label for a plain choice", async () => {
     const root = repo();
     write(root, "other.md", "x\n");
@@ -201,6 +307,7 @@ describe("the floor and part (2)", () => {
     shares: { askOwnerMedian: 0.2, askAnyMedian: 0.4, nights: 10 },
     handRead: 5,
     handWrong: 0,
+    settledThenAnswered: 0,
     ...over,
   });
 
@@ -223,8 +330,26 @@ describe("the floor and part (2)", () => {
     expect(part2Headline(input({ handWrong: 1 })).result).toBe("miss");
   });
 
+  test("a SETTLED or VOID later answered blocks a pass, whatever the hand sample", () => {
+    for (const hand of [{ handRead: null, handWrong: null }, { handRead: 4, handWrong: 0 }, { handRead: 5, handWrong: 0 }]) {
+      const h = part2Headline(input({ ...hand, settledThenAnswered: 3 }));
+      expect(h.result).toBe("miss");
+      expect(h.line).toContain("3 SETTLED or VOID later answered");
+      expect(h.line).not.toContain("not judged");
+    }
+  });
+
+  test("fewer than 5 read and none later answered: the headline says not judged, and a wrong read below 5 does not decide", () => {
+    for (const hand of [{ handRead: null, handWrong: null }, { handRead: 4, handWrong: 0 }]) {
+      const h = part2Headline(input(hand));
+      expect(h.result).toBe("pass");
+      expect(h.line).toContain("«SETTLED or VOID» not judged");
+    }
+    expect(part2Headline(input({ handRead: 5 })).line).not.toContain("not judged");
+  });
+
   test("fewer than 5 hand reads say not judged; the rule and ASK_OTHER get their notes", () => {
-    expect(part2Headline(input({ handRead: 4 })).notes.join(" ")).toContain("not judged");
+    expect(part2Headline(input({ handRead: 4 })).line).toContain("not judged");
     const items = build(10, 10, 9, 3).map((i, n) => ({ ...i, verdict: n < 9 ? ("ASK_OTHER" as const) : i.verdict, wiki: n < 10 ? "melosys-kode-wiki" : "mimir" }));
     const notes = part2Headline(input({ report: replayReport(items) })).notes.join(" ");
     expect(notes).toContain("rule matches");

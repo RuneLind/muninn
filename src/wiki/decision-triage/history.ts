@@ -10,8 +10,6 @@ import { readPageText } from "./facts.ts";
 import type { GitRun } from "./git.ts";
 import { labelOf, settledAnswers, type Settled } from "./score.ts";
 
-const COMMITS_READ_MAX = 80;
-
 export type AnsweredStatus =
   /** The newest commit before the answer holds the card, on the answered wording. */
   | "ok"
@@ -20,7 +18,9 @@ export type AnsweredStatus =
   /** No commit before the answer holds the card: first committed after it. */
   | "after-answer"
   /** No commit holds the card at all. */
-  | "no-history";
+  | "no-history"
+  /** Git failed on the log or on a commit: this says nothing about the card. */
+  | "unreadable";
 
 export interface CardAsAnswered {
   status: AnsweredStatus;
@@ -46,15 +46,22 @@ interface CardAt {
  * closest text there is.
  */
 export async function cardAsAnswered(root: string, relPath: string, id: string, hash: string, atMs: number, git: GitRun): Promise<CardAsAnswered> {
-  const log = await git(root, ["log", "--format=%H %ct", "HEAD", "--", relPath], { maxLines: COMMITS_READ_MAX });
+  const unreadable: CardAsAnswered = { status: "unreadable", commit: null, body: null, choices: [] };
+  // Every commit, newest first: a busy page's oldest commits are the ones an old
+  // answer needs. The call's timeout bounds it, and a cut-off list is a failure.
+  const log = await git(root, ["log", "--format=%H %ct", "HEAD", "--", relPath]);
+  if (!log.ok || log.capped) return unreadable;
   const commits = log.stdout.split("\n").filter(Boolean).map((l) => {
     const [sha, ct] = l.split(" ");
     return { sha: sha!, at: Number(ct) * 1000 };
   });
   const cache = new Map<string, CardAt | null>();
+  let readFailed = false;
   const read = async (c: { sha: string; at: number }): Promise<CardAt | null> => {
     if (cache.has(c.sha)) return cache.get(c.sha)!;
     const show = await git(root, ["show", `${c.sha}:./${relPath}`]);
+    // A commit that deleted the page is a commit with no card; anything else is a fault.
+    if (!show.ok && !/does not exist in|exists on disk, but not in/i.test(show.stderr ?? "")) readFailed = true;
     const q = show.ok ? readPageText(relPath, show.stdout).page.questions.find((x) => x.id === id) : undefined;
     const card = q ? { sha: c.sha, at: c.at, hash: sha256(q.hashInput), body: q.body, choices: q.choices } : null;
     cache.set(c.sha, card);
@@ -68,12 +75,14 @@ export async function cardAsAnswered(root: string, relPath: string, id: string, 
     newestBefore = await read(c);
     if (newestBefore) break;
   }
+  if (readFailed) return unreadable;
   if (newestBefore?.hash === hash) return { status: "ok", commit: newestBefore.sha, body: newestBefore.body, choices: newestBefore.choices };
 
   // Nearest first: earlier text before the answer, then later text after it.
   let holding: CardAt | null = null;
   for (const c of [...before, ...after]) {
     const card = await read(c);
+    if (readFailed) return unreadable;
     if (card?.hash === hash) {
       holding = card;
       break;

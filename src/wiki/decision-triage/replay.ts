@@ -11,11 +11,12 @@
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
-import { commitView, gatherCardFacts, gatherPageFacts, readPageText, type GatherContext, type PageFacts, type PageRead, type ReplayCard, type WikiView } from "./facts.ts";
+import { sha256 } from "../../gardener/util.ts";
+import { commitView, gatherCardFacts, isCommitId, gatherPageFacts, readPageText, type GatherContext, type PageFacts, type PageRead, type ReplayCard, type WikiView } from "./facts.ts";
 import { parseRepoRoots, type GitRun } from "./git.ts";
-import { buildBatches, CHARS_PER_CALL, momentOf, soloChars, type Batch, type BatchItem } from "./prompt.ts";
+import { buildBatches, CHARS_PER_CALL, momentOf, renderBatch, soloChars, type Batch, type BatchItem } from "./prompt.ts";
 import { callBatch, noVerdictReason, overRss, repoResolver, verdictFields, withTimeout, type TriageModel } from "./run.ts";
-import { DECISION_TRIAGE_PROMPT_VERSION, type CardLine, type LogLine, type RepoFact, type RunLine, type TriageUsage } from "./schema.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION, replayKey, type CardLine, type LogLine, type RepoFact, type RunLine, type TriageUsage } from "./schema.ts";
 
 const CARD_GATHER_TIMEOUT_MS = 90_000;
 /** A card left with no verdict gets this many more tries. */
@@ -43,17 +44,31 @@ export interface GatheredReplay {
   repos: RepoFact[];
 }
 
-export const replayKey = (c: { relPath: string; id: string; answeredAt?: string | null }) => `${c.relPath}\0${c.id}\0${c.answeredAt ?? ""}`;
+export { replayKey };
+
+/** What the model is told about this card: the prompt's version, and the card and its
+ *  page as a call alone renders them. A re-run keeps a verdict only for this digest. */
+export function replayDigest(item: BatchItem, promptVersion: string = DECISION_TRIAGE_PROMPT_VERSION): string {
+  return sha256(`${promptVersion}\0${renderBatch(item.gathered.ref.wiki, [item])}`);
+}
 
 /** Gather facts for every card, refusing the whole replay on a setup fault. */
 export async function gatherReplay(cards: readonly ReplayCard[], deps: ReplayDeps): Promise<GatheredReplay> {
   if (!deps.repoRoots) throw new ReplayRefused("DECISION_TRIAGE_REPO_ROOTS is not set");
   const wikis = [...new Set(cards.map((c) => c.wiki))];
+  const lost = new Set<string>();
   for (const wiki of wikis) {
     const root = deps.roots.get(wiki);
     if (!root) throw new ReplayRefused(`no root for ${wiki}: run from a checkout that registers it, or pass --root ${wiki}=<path>`);
     if (!(await stat(root).then((s) => s.isDirectory()).catch(() => false))) throw new ReplayRefused(`${wiki}'s root ${root} is missing`);
     if (!(await deps.git(root, ["rev-parse", "--git-dir"])).ok) throw new ReplayRefused(`${wiki}'s root ${root} is not a git repo`);
+    const commits = [...new Set(cards.filter((c) => c.wiki === wiki && isCommitId(c.commit)).map((c) => c.commit))];
+    const missing = new Set<string>();
+    for (const commit of commits) {
+      if (!(await deps.git(root, ["cat-file", "-e", `${commit}^{commit}`])).ok) missing.add(commit);
+    }
+    if (commits.length > 0 && missing.size === commits.length) throw new ReplayRefused(`none of ${wiki}'s ${commits.length} commit(s) are in ${root}`);
+    for (const commit of missing) lost.add(`${wiki}\0${commit}`);
   }
   const resolver = repoResolver(parseRepoRoots(deps.repoRoots), deps.git, { fetch: true });
   const answers = new Map<string, WikiAnswerVersion[]>();
@@ -73,6 +88,10 @@ export async function gatherReplay(cards: readonly ReplayCard[], deps: ReplayDep
     }
     if (overRss()) {
       out.refused.push({ card, reason: "the memory guard stopped the gather" });
+      continue;
+    }
+    if (lost.has(`${card.wiki}\0${card.commit}`)) {
+      out.refused.push({ card, reason: "the commit is not in this repo" });
       continue;
     }
     try {
@@ -199,16 +218,25 @@ export interface ReplayRunDeps {
 }
 
 /** Call the model over gathered cards, with `REPLAY_RETRIES` more tries for any
- *  card left with no verdict. Returns the card lines by {@link replayKey}. */
-export async function runReplay(gathered: GatheredReplay, deps: ReplayRunDeps): Promise<{ lines: Map<string, CardLine>; usage: TriageUsage; run: RunLine }> {
+ *  card left with no verdict. A line in the log counts only for the message it
+ *  answered ({@link replayDigest}). Returns the card lines by {@link replayKey}, and
+ *  how many came from the log and how many of the rest had an older verdict. */
+export async function runReplay(gathered: GatheredReplay, deps: ReplayRunDeps): Promise<{ lines: Map<string, CardLine>; usage: TriageUsage; run: RunLine; kept: number; rejudged: number }> {
   const runId = randomUUID();
   const at = deps.now();
   const usage: TriageUsage = { calls: 0 };
   const lines = new Map<string, CardLine>();
   const keyOf = (item: BatchItem) => replayKey(item.gathered.ref);
+  const digests = new Map([...gathered.items, ...gathered.oversized].map((item) => [keyOf(item), replayDigest(item)]));
+  const staleKey = (c: { relPath: string; id: string; answeredAt?: string | null }) => `${c.relPath}\0${c.id}\0${c.answeredAt ?? ""}`;
+  const hadVerdict = new Set<string>();
   for (const c of deps.existing) {
-    if (c.verdict !== "NO_VERDICT") lines.set(replayKey(c), c);
+    if (c.verdict === "NO_VERDICT") continue;
+    hadVerdict.add(staleKey(c));
+    if (c.messageDigest !== undefined && c.messageDigest === digests.get(replayKey(c))) lines.set(replayKey(c), c);
   }
+  const kept = lines.size;
+  const rejudged = gathered.items.filter((i) => !lines.has(keyOf(i)) && hadVerdict.has(staleKey(i.gathered.ref))).length;
   const lineOf = (item: BatchItem, rest: Pick<CardLine, "verdict"> & Partial<CardLine>): CardLine => ({
     type: "card",
     runId,
@@ -219,6 +247,7 @@ export async function runReplay(gathered: GatheredReplay, deps: ReplayRunDeps): 
     questionHash: item.gathered.questionHash,
     recommendation: item.gathered.recommendation,
     answeredAt: item.gathered.ref.answeredAt!,
+    messageDigest: digests.get(keyOf(item))!,
     codeFacts: item.gathered.codeFacts,
     ...rest,
   });
@@ -258,5 +287,5 @@ export async function runReplay(gathered: GatheredReplay, deps: ReplayRunDeps): 
     outcome: "ok",
   };
   await deps.append([run]);
-  return { lines, usage, run };
+  return { lines, usage, run, kept, rejudged };
 }

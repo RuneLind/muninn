@@ -313,32 +313,44 @@ export interface Part2Input {
   /** Distinct cards read in the hand sample of `SETTLED` and `VOID`. */
   handRead: number | null;
   handWrong: number | null;
+  /** Nightly `SETTLED` or `VOID` verdicts on a card answered later: each counts against the verdict, sample or no sample. */
+  settledThenAnswered: number;
+}
+
+export type Part2Result = "too early" | "too few to score" | "pass" | "miss" | "not scored";
+export type Part2Headline = { result: Part2Result; line: string; notes: string[] };
+
+/** The two headlines known before any verdict: nothing to replay for. */
+export function part2Stop(day: number | null, floor: FloorState): Part2Headline | null {
+  const dayText = day === null ? "no ok or partial run line yet" : `day ${day}`;
+  if (day === null || day < 14) return { result: "too early", line: `TOO EARLY (${dayText}): the first scoring is at day 14.`, notes: [] };
+  if (floor.met) return null;
+  const note = day >= CAP_DAY ? "At the cap this is neither a pass nor a failure: the counts go to Rune, silence stays off, and Rune decides on P3." : `The decision moves to day ${CAP_DAY}, with no scoring between.`;
+  return { result: "too few to score", line: `TOO FEW TO SCORE (${dayText}): ${floor.labelled} labelled, ${floor.added} added, on ${floor.addedPages} page(s); the floor is ${FLOOR_LABELLED}, ${FLOOR_ADDED} and ${FLOOR_PAGES}.`, notes: [note] };
 }
 
 /** Part (2)'s headline. Below the floor reads «too few to score», never a pass,
  *  and only the first scoring on or after day 14 can pass. */
-export function part2Headline(p: Part2Input): { result: "too early" | "too few to score" | "pass" | "miss" | "not scored"; line: string; notes: string[] } {
+export function part2Headline(p: Part2Input): Part2Headline {
   const notes: string[] = [];
   const { report: r, floor, day, shares } = p;
-  const dayText = day === null ? "no ok or partial run line yet" : `day ${day}`;
-  if (day === null || day < 14) return { result: "too early", line: `TOO EARLY (${dayText}): the first scoring is at day 14.`, notes };
-  const atCap = day >= CAP_DAY;
-  if (!floor.met) {
-    notes.push(atCap ? "At the cap this is neither a pass nor a failure: the counts go to Rune, silence stays off, and Rune decides on P3." : `The decision moves to day ${CAP_DAY}, with no scoring between.`);
-    return { result: "too few to score", line: `TOO FEW TO SCORE (${dayText}): ${floor.labelled} labelled, ${floor.added} added, on ${floor.addedPages} page(s); the floor is ${FLOOR_LABELLED}, ${FLOOR_ADDED} and ${FLOOR_PAGES}.`, notes };
-  }
+  const stop = part2Stop(day, floor);
+  if (stop) return stop;
+  const dayText = `day ${day}`;
+  const atCap = day! >= CAP_DAY;
   if (r.notScored > 0) return { result: "not scored", line: `NOT SCORED (${dayText}): ${r.notScored} card(s) have no verdict after the re-runs. This re-opens the contract.`, notes };
   const caughtPct = r.verdict.of ? (100 * r.verdict.caught) / r.verdict.of : 0;
   const ownerOk = shares.askOwnerMedian !== null && shares.askOwnerMedian <= 0.3;
   const anyOk = shares.askAnyMedian !== null && shares.askAnyMedian <= 0.5;
   const handJudged = p.handRead !== null && p.handRead >= 5;
-  if (!handJudged) notes.push(`«SETTLED or VOID» is not judged: ${p.handRead ?? 0} distinct card(s) read, 5 are needed, so P3 keeps those cards visible.`);
   if (r.rule.caught >= r.verdict.caught && r.rule.sharePct <= r.sharePct) notes.push(`The «flag every ${FLAGGING_RULE_WIKI} card» rule matches this result.`);
   if (r.catchesBy.ASK_OTHER > r.catchesBy.ASK_OWNER) notes.push("Most catches are ASK_OTHER.");
   const handOk = !handJudged || p.handWrong === 0;
-  const pass = caughtPct >= 90 && ownerOk && anyOk && handOk;
+  const later = p.settledThenAnswered;
+  const pass = caughtPct >= 90 && ownerOk && anyOk && handOk && later === 0;
+  const settled = later > 0 ? `; ${later} SETTLED or VOID later answered` : handJudged ? "" : `; «SETTLED or VOID» not judged (${p.handRead ?? 0} distinct card(s) read, 5 are needed, so P3 keeps those cards visible)`;
   if (!pass) notes.push(atCap ? "A miss at the cap stops the work on P3 and re-opens the contract." : `The decision moves to day ${CAP_DAY}, with no scoring between.`);
-  const stated = `${r.verdict.caught} of ${r.verdict.of} caught (${Math.round(caughtPct)}%), nightly median ASK_OWNER ${pct(shares.askOwnerMedian)}, both ${pct(shares.askAnyMedian)}`;
+  const stated = `${r.verdict.caught} of ${r.verdict.of} caught (${Math.round(caughtPct)}%), nightly median ASK_OWNER ${pct(shares.askOwnerMedian)}, both ${pct(shares.askAnyMedian)}${settled}`;
   return { result: pass ? "pass" : "miss", line: `${pass ? "PASS" : "MISS"} (${dayText}): ${stated}.`, notes };
 }
 

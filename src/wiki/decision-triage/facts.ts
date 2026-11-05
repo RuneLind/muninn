@@ -29,7 +29,7 @@ import { extractNextMoves, waitOwnerFrom, type PageNextMoves, type WaitOwner } f
 import { splitFrontmatter, WIKILINK_WITH_LABEL_RE } from "../page-text.ts";
 import { normalizeRelPath } from "../rel-path.ts";
 import { extractMarkdownLinks, extractWikilinks, parseFrontmatter, readPlanStatus, resolveMarkdownTargets, wikiPageStem, type WikiIndex } from "../store.ts";
-import { cardTokens, cutLine, type GitRun, type ResolvedRepo } from "./git.ts";
+import { cardTokens, cutLine, type GitResult, type GitRun, type ResolvedRepo } from "./git.ts";
 
 export const CODE_LINES_PER_CARD = 40;
 export const SUBJECTS_PER_REPO = 30;
@@ -109,9 +109,11 @@ export function namesPage(text: string, fromRelPath: string, relPath: string): b
   return new RegExp(`(?<![\\p{L}\\p{N}_./-])${plain}(?![\\p{L}\\p{N}_/-]|\\.[\\p{L}\\p{N}])`, "iu").test(text);
 }
 
+export const isCommitId = (commit: string) => /^[0-9a-f]{7,64}$/.test(commit);
+
 /** A past moment: every read goes to the tree of `commit`. */
 export function commitView(root: string, commit: string, cutMs: number, git: GitRun): WikiView {
-  if (!/^[0-9a-f]{7,64}$/.test(commit)) throw new Error(`not a commit id: ${commit}`);
+  if (!isCommitId(commit)) throw new Error(`not a commit id: ${commit}`);
   const show = async (rel: string) => {
     const res = await git(root, ["show", `${commit}:./${rel}`]);
     return res.ok ? res.stdout : null;
@@ -266,8 +268,19 @@ export interface RepoCodeFact {
   fetch?: ResolvedRepo["fact"]["fetch"];
   subjectsSinceCard?: string[];
   subjectsCapped?: boolean;
-  code?: { token: string; grep: string[]; capped?: boolean; pathLastChanged?: string }[];
+  /** Git could not read this repo's tip or subjects; what it did read stays. */
+  searchFailed?: SearchFailure;
+  code?: { token: string; grep: string[]; capped?: boolean; pathLastChanged?: string; searchFailed?: SearchFailure }[];
 }
+
+/** Why a search has no result, as distinct from a result of nothing. Fixed words:
+ *  git's stderr names paths, and this goes to the model. */
+export type SearchFailure = "timed out" | "git error";
+
+const failureOf = (res: GitResult): SearchFailure => (res.timedOut ? "timed out" : "git error");
+
+/** `git grep` exits 1 with an empty stderr when nothing matched. */
+const grepFailure = (res: GitResult): SearchFailure | undefined => (res.ok || (!res.timedOut && !res.stderr?.trim()) ? undefined : failureOf(res));
 
 export interface CardFacts {
   relPath: string;
@@ -282,7 +295,8 @@ export interface CardFacts {
   waitingLanes: { who: string | null; role: string | null; since: string | null }[];
   /** A prose reading of the page that may be wrong: see the system prompt. */
   unclosedHint: { decision: string | null; namedBy: string | null; word: string | null } | null;
-  addedCommit: { sha: string; date: string; subject: string } | "none";
+  /** "none": no commit holds the card. "lookup failed": the history read failed. */
+  addedCommit: { sha: string; date: string; subject: string } | "none" | "lookup failed";
   answers: AnswerFact[];
   repos: RepoCodeFact[];
   /** Tonight, or the moment this reads as of. */
@@ -297,13 +311,15 @@ export interface GatheredCard {
   codeFacts: boolean;
 }
 
-/** The commit that added the card: the oldest touching its opening tag. */
+/** The commit that added the card: the oldest changing the count of its `id="…"`,
+ *  which a later edit elsewhere in the tag leaves alone. */
 async function addedCommit(view: WikiView, read: PageRead, q: ParsedQuestion, git: GitRun): Promise<CardFacts["addedCommit"]> {
-  const tag = read.body.match(new RegExp(`<Question\\b[^>\\n]*\\bid=["']${q.id!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["'][^>\\n]*>`))?.[0];
-  if (!tag) return "none";
-  const res = await git(view.root, ["log", "--follow", "--format=%H%x09%cI%x09%s", `-S${tag}`, view.commit ?? "HEAD", "--", read.relPath]);
+  const idAttr = read.body.match(new RegExp(`<Question\\b[^>\\n]*?\\b(id=(["'])${q.id!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\2)`))?.[1];
+  if (!idAttr) return "none";
+  const res = await git(view.root, ["log", "--follow", "--format=%H%x09%cI%x09%s", `-S${idAttr}`, view.commit ?? "HEAD", "--", read.relPath]);
+  if (!res.ok) return "lookup failed";
   const oldest = res.stdout.trim().split("\n").filter(Boolean).pop();
-  if (!res.ok || !oldest) return "none";
+  if (!oldest) return "none";
   const [sha, date, ...subject] = oldest.split("\t");
   return { sha: sha!, date: date!, subject: cutLine(subject.join("\t")) };
 }
@@ -326,19 +342,28 @@ async function repoFacts(
   let rev = `refs/remotes/origin/${branch}`;
   if (cutMs !== null) {
     const then = await git(dir, ["rev-list", "-1", "--first-parent", `--before=${new Date(cutMs).toISOString()}`, rev, "--"]);
+    if (!then.ok) {
+      const { tipDate: _unknown, ...rest } = out;
+      return { ...rest, searchFailed: failureOf(then) };
+    }
     const sha = then.stdout.trim();
-    if (!then.ok || !sha) return { ...out, tipDate: "none at that time", subjectsSinceCard: [], code: [] };
+    if (!sha) return { ...out, tipDate: "none at that time", subjectsSinceCard: [], code: [] };
     rev = sha;
     const dated = await git(dir, ["log", "-1", "--format=%cI", rev, "--"]);
-    out.tipDate = dated.stdout.trim();
+    if (dated.ok) out.tipDate = dated.stdout.trim();
+    else {
+      delete out.tipDate;
+      out.searchFailed = failureOf(dated);
+    }
   }
-  if (added !== "none") {
+  if (added === "none") out.subjectsSinceCard = [];
+  else if (added !== "lookup failed") {
     const log = await git(dir, ["log", `-n${SUBJECTS_PER_REPO + 1}`, "--format=%h %cs %s", `--since=${added.date}`, rev, "--"]);
-    const lines = log.stdout.split("\n").filter(Boolean);
-    out.subjectsSinceCard = lines.slice(0, SUBJECTS_PER_REPO).map(cutLine);
-    if (lines.length > SUBJECTS_PER_REPO) out.subjectsCapped = true;
-  } else {
-    out.subjectsSinceCard = [];
+    if (log.ok) {
+      const lines = log.stdout.split("\n").filter(Boolean);
+      out.subjectsSinceCard = lines.slice(0, SUBJECTS_PER_REPO).map(cutLine);
+      if (lines.length > SUBJECTS_PER_REPO) out.subjectsCapped = true;
+    } else out.searchFailed = failureOf(log);
   }
   out.code = [];
   for (const token of tokens) {
@@ -349,12 +374,15 @@ async function repoFacts(
     const grep = hits.ok ? hits.stdout.split("\n").filter(Boolean).slice(0, share).map((l) => cutLine(l.startsWith(`${rev}:`) ? l.slice(rev.length + 1) : l)) : [];
     budget.lines -= grep.length;
     let pathLastChanged: string | undefined;
+    let searchFailed = grepFailure(hits);
     if (/[/.]/.test(token)) {
       const last = await git(dir, ["log", "-1", "--format=%h %cs %s", rev, "--", token]);
       if (last.ok && last.stdout.trim()) pathLastChanged = cutLine(last.stdout.trim());
+      // A URL such as `/admin/run` is a fine token and no path git can look up.
+      else if (!last.ok && !/outside repository|Invalid path/i.test(last.stderr ?? "")) searchFailed ??= failureOf(last);
     }
-    if (grep.length || pathLastChanged) {
-      out.code.push({ token, grep, ...(hits.capped ? { capped: true } : {}), ...(pathLastChanged ? { pathLastChanged } : {}) });
+    if (grep.length || pathLastChanged || searchFailed) {
+      out.code.push({ token, grep, ...(hits.capped ? { capped: true } : {}), ...(pathLastChanged ? { pathLastChanged } : {}), ...(searchFailed ? { searchFailed } : {}) });
     }
   }
   return out;
@@ -402,7 +430,7 @@ export async function gatherCardFacts(ref: CardRef, read: PageRead, view: WikiVi
     repos,
     asOf: view.cutMs === null ? null : new Date(view.cutMs).toISOString(),
   };
-  return { ref, questionHash, recommendation, card, codeFacts: repos.some((r) => (r.code ?? []).length > 0) };
+  return { ref, questionHash, recommendation, card, codeFacts: repos.some((r) => (r.code ?? []).some((c) => c.grep.length > 0 || c.pathLastChanged)) };
 }
 
 function askedOwner(owner: WaitOwner | null, to: Parameters<typeof isAskedAuthor>[1], ctx: GatherContext): boolean | null {

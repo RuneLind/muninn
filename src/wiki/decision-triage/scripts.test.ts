@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
+import { git } from "./test-repo.ts";
 
 const REPO = path.join(import.meta.dir, "..", "..", "..");
 const RUN = path.join(REPO, "scripts", "decision-triage-run.ts");
@@ -136,4 +137,47 @@ describe("decision-triage-score.ts refuses a readonly root before any model call
     expect(res.stderr).toContain("REFUSED");
     expect(res.stderr).toContain("readonly root");
   });
+});
+
+describe("a bad flag value is one usage line, exit 2", () => {
+  const usage = (res: { code: number; stderr: string }) => {
+    expect(res.code).toBe(2);
+    expect(res.stderr.trim().split("\n")).toHaveLength(1);
+    expect(res.stderr).toContain("usage");
+    expect(res.stderr).not.toMatch(/^\s+at /m);
+  };
+
+  test.each([
+    ["--root with no path", SCORE, ["--root", "mimir"], "--root takes"],
+    ["--root with an empty path", SCORE, ["--root", "mimir="], "--root takes"],
+    ["--since nonsense", SCORE, ["--since", "nonsense"], "--since takes"],
+    ["--since empty", SCORE, ["--since", ""], "--since takes"],
+    ["--since a day the calendar lacks", SCORE, ["--since", "2026-02-30"], "--since takes"],
+    ["--since with a time", SCORE, ["--since", "2026-02-20T10:00:00Z"], "--since takes"],
+    ["--until nonsense", SCORE, ["--labels", "--until", "nonsense"], "--until takes"],
+    ["an unknown flag", SCORE, ["--replya"], "--replya"],
+    ["the run script's --root", RUN, ["--wiki", "w", "--out", "/nowhere/out.jsonl", "--root", "w"], "--root takes"],
+  ] as const)("%s", async (_name, file, args, says) => {
+    const { tmp } = world();
+    const res = await script(file, [...args], tmp);
+    usage(res);
+    expect(res.stderr).toContain(says);
+  });
+
+  test("a hand file that is not {read, wrong} is a usage line", async () => {
+    const { tmp, w } = world();
+    const hand = path.join(tmp, "hand.json");
+    writeFileSync(hand, "{}");
+    git(w, "init", "-q");
+    usage(await script(SCORE, ["--since", "2026-11-06", "--hand", hand, "--root", `w=${w}`, "--log-dir", path.join(tmp, "l")], tmp));
+    usage(await script(SCORE, ["--since", "2026-11-06", "--hand", path.join(tmp, "gone.json"), "--root", `w=${w}`, "--log-dir", path.join(tmp, "l")], tmp));
+  });
+});
+
+test("--since on a wiki root that is no repo refuses with the reason, before the database", async () => {
+  const { tmp, w } = world();
+  const res = await script(SCORE, ["--since", "2026-11-06", "--root", `w=${w}`, "--log-dir", path.join(tmp, "l")], tmp, { WORK_MAP_WIKIS: "w" });
+  expect(res.code).toBe(2);
+  expect(res.stderr).toContain("REFUSED");
+  expect(res.stderr).toContain("not a git repository");
 });

@@ -10,6 +10,7 @@
  *   (no mode)                                  the nightly logs' figures
  *
  * `--dry-run` gathers facts, makes no model call, reads no label and writes nothing.
+ * `--since` makes no model call either when its headline will be TOO EARLY or TOO FEW.
  * `--root <wiki>=<path>` (repeatable) names a wiki's root; `--log-dir <dir>` moves
  * the logs. Both replays refuse without DECISION_TRIAGE_REPO_ROOTS, or on a wiki
  * `scope.ts` refuses (a readonly root). From a worktree, run with `bun --env-file <checkout>/.env`.
@@ -25,18 +26,17 @@ import { listWikiAnswerHistory } from "../src/db/wiki-answers.ts";
 import { readBaselineCards, readBaselineLabels } from "../src/wiki/decision-triage/baseline.ts";
 import type { ReplayCard } from "../src/wiki/decision-triage/facts.ts";
 import { frozenAfterMs, labelsSince, type WikiLabels } from "../src/wiki/decision-triage/floor.ts";
+import { droppedOf, runPart2, part2Plan, type Dropped } from "../src/wiki/decision-triage/part2.ts";
 import { realGit } from "../src/wiki/decision-triage/git.ts";
 import { appendLogLines, DECISION_TRIAGE_DIR, nightlyLogPath, readLog, replayLogPath, type ParsedLog } from "../src/wiki/decision-triage/log.ts";
 import { gatherReplay, replayCounts, replayKey, ReplayRefused, runReplay, type ReplayDeps } from "../src/wiki/decision-triage/replay.ts";
 import { realDecisionTriageModel } from "../src/wiki/decision-triage/run.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, type CardLine } from "../src/wiki/decision-triage/schema.ts";
 import {
-  floorOf,
   nightlyCatches,
   nightlyShares,
   nightsOf,
   part1Headline,
-  part2Headline,
   replayReport,
   SETTLE_WINDOW_MS,
   verdictFlips,
@@ -44,34 +44,54 @@ import {
   type ScoredItem,
 } from "../src/wiki/decision-triage/score.ts";
 import { scopeVerdict, triageScope, type TriageScope } from "../src/wiki/decision-triage/scope.ts";
-import { rootOverrides, triageEntries } from "../src/wiki/decision-triage/script-roots.ts";
+import { parseHandSample, parseIsoMoment, parseSinceDay, rootOverrides, triageEntries, UsageError } from "../src/wiki/decision-triage/script-roots.ts";
 import type { WikiRegistryEntry } from "../src/wiki/registry.ts";
 import { closedQuestionIds } from "../src/format/question.ts";
 import { getWikiIndex, readWikiPage } from "../src/wiki/store.ts";
 import { parseBlocks } from "../src/format/markdown-ast.ts";
 import { splitFrontmatter } from "../src/wiki/page-text.ts";
 
-const { values } = parseArgs({
-  options: {
-    replay: { type: "boolean" },
-    since: { type: "string" },
-    labels: { type: "boolean" },
-    until: { type: "string" },
-    baseline: { type: "string" },
-    "dry-run": { type: "boolean" },
-    final: { type: "boolean" },
-    root: { type: "string", multiple: true },
-    "log-dir": { type: "string" },
-    hand: { type: "string" },
-  },
-});
+const USAGE = "usage: bun scripts/decision-triage-score.ts [--replay [--baseline <file>] | --since <YYYY-MM-DD> [--final] [--hand <file>] | --labels [--until <iso>]] [--dry-run] [--root <wiki>=<path>] [--log-dir <dir>]";
+const usageExit = (message: string): never => {
+  console.error(`usage error: ${message}. ${USAGE}`);
+  process.exit(2);
+};
+
+/** Every flag read before anything else runs, or one usage line. */
+function readFlags() {
+  try {
+    const { values } = parseArgs({
+      options: {
+        replay: { type: "boolean" },
+        since: { type: "string" },
+        labels: { type: "boolean" },
+        until: { type: "string" },
+        baseline: { type: "string" },
+        "dry-run": { type: "boolean" },
+        final: { type: "boolean" },
+        root: { type: "string", multiple: true },
+        "log-dir": { type: "string" },
+        hand: { type: "string" },
+      },
+    });
+    return {
+      values,
+      overrides: rootOverrides(values.root ?? []),
+      sinceArg: values.since === undefined ? null : parseSinceDay(values.since),
+      untilArg: values.until === undefined ? null : parseIsoMoment("--until", values.until),
+    };
+  } catch (err) {
+    return usageExit(err instanceof Error ? err.message : String(err));
+  }
+}
+
+const { values, overrides, sinceArg, untilArg } = readFlags();
 
 const DEFAULT_BASELINE = path.join(homedir(), ".muninn", "decision-triage", "baseline-2026-11-04.json");
 const SAMPLE_PER_KIND = 5;
 
 const config = loadConfig();
 const answerConfig = resolveWikiAnswerConfig();
-const overrides = rootOverrides(values.root ?? []);
 const logDir = values["log-dir"] ? path.resolve(values["log-dir"]) : DECISION_TRIAGE_DIR;
 const readScope = () => triageScope({ workMapWikis: config.workMapWikis, answerWikis: answerConfig.wikis, entryOf: (name) => triageEntries(overrides, [name])[0] });
 const asRoots = (entries: readonly WikiRegistryEntry[]) => entries.map((e) => ({ wiki: e.name, root: e.root }));
@@ -104,7 +124,7 @@ async function modelReplay(cards: readonly ReplayCard[], entries: readonly WikiR
   const gathered = await gatherReplay(cards, replayDeps(entries));
   const file = replayLogPath(DECISION_TRIAGE_PROMPT_VERSION, logDir);
   const { cards: existing } = await readLog(file);
-  const { lines, usage } = await runReplay(gathered, {
+  const { lines, usage, kept, rejudged } = await runReplay(gathered, {
     call: realDecisionTriageModel(config),
     model: config.workMapModel,
     ...(config.workMapEffort ? { effort: config.workMapEffort } : {}),
@@ -113,7 +133,7 @@ async function modelReplay(cards: readonly ReplayCard[], entries: readonly WikiR
     now: Date.now,
     repoRoots: config.decisionTriageRepoRoots,
   });
-  console.log(`replay: ${gathered.items.length} cards, ${gathered.refused.length} refused, ${gathered.oversized.length} over the limit; usage ${JSON.stringify(usage)}; log ${file}`);
+  console.log(`replay: ${gathered.items.length} cards, ${gathered.refused.length} refused, ${gathered.oversized.length} over the limit; ${kept} verdict(s) kept for the same message, ${rejudged} re-judged because the message changed; usage ${JSON.stringify(usage)}; log ${file}`);
   return lines;
 }
 
@@ -143,23 +163,6 @@ async function modePart1(): Promise<number> {
   console.log(part1Headline(report).line);
   printReport(report);
   return 0;
-}
-
-/** Part (2)'s cards: first answered since `sinceMs`, with a commit holding the answered wording. */
-function sinceCards(wikis: readonly WikiLabels[]): ReplayCard[] {
-  return wikis.flatMap(({ wiki, labelled }) =>
-    labelled
-      .filter((l) => l.status === "ok" && l.commit !== null)
-      .map((l) => ({
-        wiki,
-        relPath: l.settled.relPath,
-        id: l.settled.id,
-        answeredAt: new Date(l.settled.firstAt).toISOString(),
-        commit: l.commit!,
-        hashMatches: true,
-        replayable: true as const,
-      })),
-  );
 }
 
 async function nightlyLogs(names: readonly string[]): Promise<ParsedLog> {
@@ -211,20 +214,16 @@ async function printNightly(log: ParsedLog, labelled: readonly WikiLabels[], wik
   console.log(`positives by page: ${[...byPage.values()].sort((a, b) => b - a).join(", ") || "none"} on ${byPage.size} page(s)`);
   const coded = log.cards.filter((c) => c.codeFacts !== undefined);
   console.log(`cards with code facts: ${coded.filter((c) => c.codeFacts).length} of ${coded.length} card lines`);
-  const counts = { after: 0, mismatch: 0 };
-  for (const { labelled: rows } of labelled) {
-    for (const r of rows) {
-      if (r.status === "after-answer" || r.status === "no-history") counts.after++;
-      if (r.status === "hash-mismatch") counts.mismatch++;
-    }
-  }
-  console.log(`not scored: ${counts.after} on a card first committed after its answer, ${counts.mismatch} whose hash does not match the page at that commit, ${await closedWithNoAnswer(wikis)} closed on the page with no card answer`);
+  const d = droppedOf(labelled);
+  console.log(`not scored: ${d.afterAnswer} on a card first committed after its answer, ${d.hashMismatch} whose hash does not match the page at that commit, ${await closedWithNoAnswer(wikis)} closed on the page with no card answer`);
+  console.log(droppedLine(d));
 }
 
+const droppedLine = (d: Dropped) => `answers with no card in git: ${d.noHistory} no-history, ${d.unreadable} whose history could not be read`;
+
 async function modePart2(): Promise<number> {
-  const sinceArg = Date.parse(`${values.since}T00:00:00Z`);
-  if (!Number.isFinite(sinceArg)) throw new Error(`--since takes a day (YYYY-MM-DD), got ${values.since}`);
-  const sinceMs = Math.max(sinceArg, frozenAfterMs());
+  const sinceMs = Math.max(sinceArg!, frozenAfterMs());
+  const hand = values.hand ? parseHandSample(await readFile(path.resolve(values.hand), "utf8").catch(() => "not a file")) : null;
   const scope = await readScope();
   const faults = faultsOf(scope);
   if (faults.length > 0) throw new ReplayRefused(faults.join("; "));
@@ -232,33 +231,24 @@ async function modePart2(): Promise<number> {
   const names = wikis.map((w) => w.wiki);
   if (!config.decisionTriageRepoRoots) throw new ReplayRefused("DECISION_TRIAGE_REPO_ROOTS is not set");
   const labelled = await labelsSince(wikis, sinceMs, listWikiAnswerHistory, realGit);
-  const cards = sinceCards(labelled);
+  // A wiki whose history cannot be read would otherwise read as no answers at all.
+  const historyFaults = labelled.flatMap((w) => w.fault ?? []);
+  if (historyFaults.length > 0) throw new ReplayRefused(historyFaults.join("; "));
+  const log = await nightlyLogs(names);
+  console.log(droppedLine(droppedOf(labelled)));
   if (values["dry-run"]) {
-    const counts = replayCounts(await gatherReplay(cards, replayDeps(scope.covered)));
-    console.log(JSON.stringify({ mode: "since --dry-run", ...counts }, null, 1));
+    const plan = part2Plan(labelled, log.runs, Date.now());
+    const counts = replayCounts(await gatherReplay(plan.cards, replayDeps(scope.covered)));
+    console.log(JSON.stringify({ mode: "since --dry-run", ...(plan.stop ? { wouldStopAt: plan.stop.line } : {}), day: plan.day, floor: plan.floor, dropped: plan.dropped, ...counts }, null, 1));
     return 0;
   }
-  const lines = await modelReplay(cards, scope.covered);
-  const byCard = new Map(labelled.flatMap(({ wiki, labelled: rows }) => rows.map((l) => [`${wiki}\0${l.settled.relPath}\0${l.settled.id}`, l] as const)));
-  const items: ScoredItem[] = cards.flatMap((c) => {
-    const l = byCard.get(`${c.wiki}\0${c.relPath}\0${c.id}`);
-    if (!l || l.added === null) return [];
-    return [{ wiki: c.wiki, relPath: c.relPath, id: c.id, added: l.added, verdict: lines.get(replayKey(c))?.verdict }];
-  });
-  const report = replayReport(items);
-  const floor = floorOf(items.map((i) => ({ wiki: i.wiki, relPath: i.relPath, added: i.added })));
-  const log = await nightlyLogs(names);
-  const started = log.runs.filter((r) => r.outcome === "ok" || r.outcome === "partial").map((r) => r.at);
-  const day = started.length ? Math.floor((Date.now() - Math.min(...started)) / 86_400_000) : null;
-  const handFile = values.hand ? (JSON.parse(await readFile(path.resolve(values.hand), "utf8")) as { read: number; wrong: number }) : null;
-  // A `SETTLED` or `VOID` later answered counts against the verdict, as a wrong read does.
-  const later = nightlyCatches(labelled.flatMap(({ wiki, labelled: rows }) => rows.map((l) => ({ wiki, relPath: l.settled.relPath, id: l.settled.id, firstAt: l.settled.firstAt, added: l.added }))), log.cards).settledThenAnswered;
-  const headline = part2Headline({ report, floor, day, shares: nightlyShares(nightsOf(log.runs, log.cards, Date.now())), handRead: handFile?.read ?? null, handWrong: handFile ? handFile.wrong + later : later });
+  const { plan, headline, scored } = await runPart2({ wikis: labelled, log, nowMs: Date.now(), hand, replay: (cards) => modelReplay(cards, scope.covered) });
   console.log(headline.line);
   for (const note of headline.notes) console.log(note);
-  printReport(report);
+  if (!scored) console.log("no model call: this headline needs no verdict.");
+  if (scored) printReport(scored.report);
   await printNightly(log, labelled, wikis);
-  printHandSample(cards, lines, values.final === true);
+  if (scored) printHandSample(plan.cards, scored.lines, values.final === true);
   return 0;
 }
 
@@ -284,11 +274,17 @@ async function reportWikis(): Promise<{ wiki: string; root: string }[]> {
   return asRoots(scope.covered);
 }
 
+const printHistoryFaults = (read: readonly WikiLabels[]) => {
+  for (const w of read) if (w.fault) console.error(`left out: ${w.fault}`);
+};
+
 async function modeLabels(): Promise<number> {
   const wikis = await reportWikis();
-  const untilMs = values.until ? Date.parse(values.until) : Date.parse((JSON.parse(await readFile(DEFAULT_BASELINE, "utf8")) as { answersUntil: string }).answersUntil);
+  const untilMs = untilArg !== null ? untilArg : Date.parse((JSON.parse(await readFile(DEFAULT_BASELINE, "utf8")) as { answersUntil: string }).answersUntil);
   for (const [label, windowMs] of [["with the 10-minute rule", SETTLE_WINDOW_MS], ["without it", 0]] as const) {
-    const rows = (await labelsSince(wikis, 0, listWikiAnswerHistory, realGit, { windowMs, untilMs })).flatMap((w) => w.labelled);
+    const read = await labelsSince(wikis, 0, listWikiAnswerHistory, realGit, { windowMs, untilMs });
+    printHistoryFaults(read);
+    const rows = read.flatMap((w) => w.labelled);
     const added = rows.filter((r) => r.added === true).length;
     const other = rows.filter((r) => r.added === false).length;
     const statuses: Record<string, number> = {};
@@ -302,15 +298,20 @@ initDb(config);
 let exit = 0;
 try {
   if (values.replay) exit = await modePart1();
-  else if (values.since) exit = await modePart2();
+  else if (sinceArg !== null) exit = await modePart2();
   else if (values.labels) exit = await modeLabels();
   else {
     const wikis = await reportWikis();
-    await printNightly(await nightlyLogs(wikis.map((w) => w.wiki)), await labelsSince(wikis, frozenAfterMs(), listWikiAnswerHistory, realGit), wikis);
+    const read = await labelsSince(wikis, frozenAfterMs(), listWikiAnswerHistory, realGit);
+    printHistoryFaults(read);
+    await printNightly(await nightlyLogs(wikis.map((w) => w.wiki)), read, wikis);
   }
 } catch (err) {
-  if (!(err instanceof ReplayRefused)) throw err;
-  console.error(`REFUSED: ${err.message}. This is a setup fault, not a result.`);
+  if (err instanceof UsageError) {
+    console.error(`usage error: ${err.message}. ${USAGE}`);
+  } else if (err instanceof ReplayRefused) {
+    console.error(`REFUSED: ${err.message}. This is a setup fault, not a result.`);
+  } else throw err;
   exit = 2;
 } finally {
   await closeDb();

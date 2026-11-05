@@ -5,6 +5,7 @@
  */
 
 import type { ReplayCard } from "./facts.ts";
+import { replayKey } from "./schema.ts";
 
 interface RawItem {
   wiki: string;
@@ -47,7 +48,7 @@ export function readBaselineLabels(text: string): BaselineLabels {
   const labels: BaselineLabels["labels"] = new Map();
   for (const i of raw.items) {
     if (i.replayable !== true) continue;
-    labels.set(`${i.relPath}\0${i.id}\0${i.answeredAt}`, {
+    labels.set(replayKey(i), {
       added: i.addedSomething === true,
       gapHours: i.gapHours ?? null,
       textAlone: i.textAlonePredict === "HUMAN",

@@ -5,7 +5,7 @@
  */
 
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
-import type { GitRun } from "./git.ts";
+import { cutLine, type GitRun } from "./git.ts";
 import { labelAnswers, type LabelledAnswer } from "./history.ts";
 import { floorOf } from "./score.ts";
 import { DECISION_TRIAGE_PROMPT_FROZEN_ON, type FloorState } from "./schema.ts";
@@ -18,9 +18,12 @@ export function frozenAfterMs(frozenOn = DECISION_TRIAGE_PROMPT_FROZEN_ON): numb
 export interface WikiLabels {
   wiki: string;
   labelled: LabelledAnswer[];
+  /** Why this wiki's history could not be read at all: a setup fault, never a result. */
+  fault?: string;
 }
 
-/** Answers on or after `sinceMs`, each read against its card as answered. */
+/** Answers on or after `sinceMs`, each read against its card as answered. A root
+ *  git cannot read is found before its answers are asked for. */
 export async function labelsSince(
   entries: readonly { wiki: string; root: string }[],
   sinceMs: number,
@@ -30,9 +33,15 @@ export async function labelsSince(
 ): Promise<WikiLabels[]> {
   const out: WikiLabels[] = [];
   for (const { wiki, root } of entries) {
+    const head = await git(root, ["rev-parse", "--verify", "HEAD^{commit}"]);
+    if (!head.ok) {
+      out.push({ wiki, labelled: [], fault: `${wiki}'s root ${root} has no history to read: ${cutLine(head.stderr?.trim().split("\n")[0] ?? "git failed")}` });
+      continue;
+    }
     const versions = (await history(wiki)).filter((v) => opts.untilMs === undefined || v.createdAt <= opts.untilMs);
     const labelled = await labelAnswers(root, versions, git, { ...(opts.windowMs !== undefined ? { windowMs: opts.windowMs } : {}), sinceMs });
-    out.push({ wiki, labelled });
+    const wholesale = labelled.length > 0 && labelled.every((l) => l.status === "unreadable");
+    out.push({ wiki, labelled, ...(wholesale ? { fault: `none of ${wiki}'s ${labelled.length} answers could be read from git at ${root}` } : {}) });
   }
   return out;
 }
@@ -43,5 +52,7 @@ export async function computeFloor(
   git: GitRun,
 ): Promise<FloorState> {
   const wikis = await labelsSince(entries, frozenAfterMs(), history, git);
+  const faults = wikis.flatMap((w) => w.fault ?? []);
+  if (faults.length > 0) throw new Error(faults.join("; "));
   return floorOf(wikis.flatMap(({ wiki, labelled }) => labelled.filter((l) => l.status === "ok").map((l) => ({ wiki, relPath: l.settled.relPath, added: l.added }))));
 }
