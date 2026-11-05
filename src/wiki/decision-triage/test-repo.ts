@@ -46,3 +46,13 @@ export function pushMain(dir: string): void {
   git(dir, "push", "-q", "origin", "HEAD:refs/heads/main");
   git(dir, "fetch", "-q", "origin", "main:refs/remotes/origin/main");
 }
+
+/** A real merge commit of `branch` at an ISO time, with both parents kept. */
+export function mergeAt(cwd: string, iso: string, branch: string, subject: string): string {
+  const res = Bun.spawnSync(["git", "-c", "user.name=T", "-c", "user.email=t@example.com", "merge", "-q", "--no-ff", "-m", subject, branch], {
+    cwd,
+    env: { PATH: process.env.PATH ?? "", HOME: cwd, GIT_AUTHOR_DATE: iso, GIT_COMMITTER_DATE: iso },
+  });
+  if (res.exitCode !== 0) throw new Error(res.stderr.toString());
+  return git(cwd, "rev-parse", "HEAD");
+}

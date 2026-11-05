@@ -28,12 +28,14 @@ import { sha256 } from "../../gardener/util.ts";
 import { extractNextMoves, waitOwnerFrom, type PageNextMoves, type WaitOwner } from "../next-moves.ts";
 import { splitFrontmatter, WIKILINK_WITH_LABEL_RE } from "../page-text.ts";
 import { normalizeRelPath } from "../rel-path.ts";
-import { parseFrontmatter, readPlanStatus, type WikiIndex } from "../store.ts";
+import { extractMarkdownLinks, extractWikilinks, parseFrontmatter, readPlanStatus, resolveMarkdownTargets, wikiPageStem, type WikiIndex } from "../store.ts";
 import { cardTokens, cutLine, type GitRun, type ResolvedRepo } from "./git.ts";
 
 export const CODE_LINES_PER_CARD = 40;
 export const SUBJECTS_PER_REPO = 30;
 const LINKERS_MAX = 20;
+/** Files to read for a stem at a commit: a mention costs a read and links nothing. */
+const LINKER_CANDIDATES_MAX = 300;
 const LOG_ENTRIES_MAX = 8;
 const ANSWER_BODY_CHARS = 2000;
 /** How close to the moment an answer counts as the answer being replayed: a
@@ -65,6 +67,8 @@ export interface WikiView {
   cutMs: number | null;
   readPage(relPath: string): Promise<string | null>;
   readLog(): Promise<string | null>;
+  /** When the commit being read was made; null for today's tree. */
+  madeAt(): Promise<string | null>;
   linkers(relPath: string): Promise<{ relPath: string; date: string | null }[]>;
 }
 
@@ -78,15 +82,32 @@ export function liveView(index: WikiIndex, readFile: (abs: string) => Promise<st
     cutMs: null,
     readPage: (rel) => readFile(`${index.root}/${rel}`),
     readLog: () => readFile(`${index.root}/log.md`),
+    madeAt: async () => null,
     linkers: async (rel) =>
-      (index.backlinks.get(normalizeRelPath(rel)) ?? []).slice(0, LINKERS_MAX).map((back) => {
+      (index.backlinks.get(normalizeRelPath(rel)) ?? []).filter((back) => back !== "log.md").slice(0, LINKERS_MAX).map((back) => {
         const meta = index.resolveRelPath(back);
         return { relPath: meta?.relPath ?? back, date: dayOf(meta?.gitTouchedMs ?? meta?.mtimeMs) };
       }),
   };
 }
 
-const stemOf = (relPath: string) => relPath.replace(/^.*\//, "").replace(/\.[^.]+$/, "");
+/**
+ * Does this text name the page: a wikilink, a relative markdown link, or the plain
+ * relPath? Links read as the reader reads them, except that a bare `[[stem]]` names
+ * every page of that stem, since a past commit has no index to say which one won.
+ */
+export function namesPage(text: string, fromRelPath: string, relPath: string): boolean {
+  const rel = normalizeRelPath(relPath);
+  const noExtension = rel.replace(/\.mdx?$/, "");
+  const stem = wikiPageStem(rel);
+  for (const target of extractWikilinks(text)) {
+    const t = normalizeRelPath(target).replace(/\.mdx?$/, "");
+    if (t === stem || t === noExtension) return true;
+  }
+  if (resolveMarkdownTargets(fromRelPath, extractMarkdownLinks(text)).includes(rel)) return true;
+  const plain = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![\\p{L}\\p{N}_./-])${plain}(?![\\p{L}\\p{N}_/-]|\\.[\\p{L}\\p{N}])`, "iu").test(text);
+}
 
 /** A past moment: every read goes to the tree of `commit`. */
 export function commitView(root: string, commit: string, cutMs: number, git: GitRun): WikiView {
@@ -101,12 +122,20 @@ export function commitView(root: string, commit: string, cutMs: number, git: Git
     cutMs,
     readPage: show,
     readLog: () => show("log.md"),
+    madeAt: async () => {
+      const made = await git(root, ["log", "-1", "--format=%cI", commit, "--"]);
+      if (!made.ok || !made.stdout.trim()) throw new Error(`no date for commit ${commit}`);
+      return new Date(made.stdout.trim()).toISOString();
+    },
     linkers: async (rel) => {
-      const hits = await git(root, ["grep", "-I", "-l", "-i", "-F", "-e", `[[${stemOf(rel)}`, commit, "--"], { maxLines: LINKERS_MAX + 1 });
+      const hits = await git(root, ["-c", "core.quotepath=off", "grep", "-I", "-l", "-i", "-F", "-e", wikiPageStem(rel), commit, "--"], { maxLines: LINKER_CANDIDATES_MAX });
       const out: { relPath: string; date: string | null }[] = [];
       for (const line of hits.stdout.split("\n")) {
+        if (out.length === LINKERS_MAX) break;
         const hit = line.slice(commit.length + 1);
-        if (!hit || hit === rel || hit === "log.md" || !/\.mdx?$/i.test(hit) || out.length === LINKERS_MAX) continue;
+        if (!hit || hit === rel || hit === "log.md" || !/\.mdx?$/i.test(hit)) continue;
+        const text = await show(hit);
+        if (text === null || !namesPage(text, hit, rel)) continue;
         const dated = await git(root, ["log", "-1", "--format=%cs", commit, "--", hit]);
         out.push({ relPath: hit, date: dated.stdout.trim() || null });
       }
@@ -146,9 +175,11 @@ export function readPageText(relPath: string, text: string): PageRead {
   return { relPath, body: text, fm, blocks, page, moves: extractNextMoves(text), status, repos, hints: unclosedCards(page), prRefs: [...prRefs] };
 }
 
-/** The page half of the facts, sent once per page in a batch. */
+/** The page half of the facts, sent once per page and moment in a batch. */
 export interface PageFacts {
   relPath: string;
+  /** When the commit this page was read from was made. Absent tonight. */
+  asOf?: string;
   status: string | null;
   decisionLog: { id: string; state: string; struck: boolean; text: string }[];
   linkedFrom: { relPath: string; date: string | null }[];
@@ -158,8 +189,10 @@ export interface PageFacts {
 
 export async function gatherPageFacts(read: PageRead, view: WikiView): Promise<PageFacts> {
   const { page } = read;
+  const asOf = await view.madeAt();
   return {
     relPath: read.relPath,
+    ...(asOf ? { asOf } : {}),
     status: read.status,
     decisionLog: page.entries.map((e) => ({ id: e.id, state: page.states.get(e.id)?.kind ?? "open", struck: e.dim, text: e.text })),
     linkedFrom: await view.linkers(read.relPath),
@@ -168,15 +201,14 @@ export async function gatherPageFacts(read: PageRead, view: WikiView): Promise<P
   };
 }
 
-/** The newest `log.md` entries naming the page, by path or wikilink. */
+/** The newest `log.md` entries naming the page ({@link namesPage}), newest first
+ *  up to the cap. A past moment's log is that commit's file, so it ends there. */
 export function logEntriesNaming(text: string | null, relPath: string): string[] {
   if (!text) return [];
-  const stem = stemOf(relPath).toLowerCase();
   const out: string[] = [];
   for (const entry of text.split(/^(?=## \[)/m)) {
     if (!entry.startsWith("## [")) continue;
-    const lower = entry.toLowerCase();
-    if (lower.includes(relPath.toLowerCase()) || lower.includes(`[[${stem}`)) out.push(cutLine(entry.trim().replace(/\s+/g, " ")));
+    if (namesPage(entry, "log.md", relPath)) out.push(cutLine(entry.trim().replace(/\s+/g, " ")));
   }
   // A log may run either way: keep the entries with the newest dates.
   return out.sort((a, b) => (a.slice(0, 15) < b.slice(0, 15) ? 1 : a.slice(0, 15) > b.slice(0, 15) ? -1 : 0)).slice(0, LOG_ENTRIES_MAX);
@@ -287,10 +319,13 @@ async function repoFacts(
   const { fact, dir, branch } = repo;
   if (!dir || !branch) return { repo: fact.repo, found: false, ...(fact.reason ? { notFoundBecause: fact.reason } : {}) };
   const out: RepoCodeFact = { repo: fact.repo, found: true, ref: fact.ref!, tipDate: fact.tipDate!, ...(fact.fetch ? { fetch: fact.fetch } : {}) };
-  // The ref's tip then, so a replay reads no code written after its moment.
+  // The branch's own tip then: walking every parent can land on a feature commit
+  // dated before the moment and merged after it. What this tip reaches was merged
+  // by then, so the reads below walk every parent. A commit made before the moment
+  // and pushed after it cannot be told apart.
   let rev = `refs/remotes/origin/${branch}`;
   if (cutMs !== null) {
-    const then = await git(dir, ["rev-list", "-1", `--before=${new Date(cutMs).toISOString()}`, rev, "--"]);
+    const then = await git(dir, ["rev-list", "-1", "--first-parent", `--before=${new Date(cutMs).toISOString()}`, rev, "--"]);
     const sha = then.stdout.trim();
     if (!then.ok || !sha) return { ...out, tipDate: "none at that time", subjectsSinceCard: [], code: [] };
     rev = sha;

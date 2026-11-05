@@ -6,7 +6,7 @@
 import { z } from "zod";
 
 /** Changes only by hand, with the prompt. A new value restarts `--since`. */
-export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.1";
+export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.2";
 /** The frozen prompt's date: part (2) replays answers given after it. */
 export const DECISION_TRIAGE_PROMPT_FROZEN_ON = "2026-11-05";
 

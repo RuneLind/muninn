@@ -4,7 +4,7 @@
  * which restarts `--since`. Only facts reach it, never a label.
  */
 
-import type { GatheredCard, PageFacts } from "./facts.ts";
+import type { CardRef, GatheredCard, PageFacts } from "./facts.ts";
 
 export const CARDS_PER_CALL = 25;
 export const CHARS_PER_CALL = 120_000;
@@ -54,15 +54,25 @@ export interface Batch {
 
 const pageKey = (i: number) => `p${i + 1}`;
 
-/** A batch's user message: its pages once each, then its cards, numbered in order. */
+const MOMENT_BUCKET_MS = 10 * 60_000;
+
+/** One wiki moment: a commit, and answers close enough that a card's day-dated
+ *  code facts read alike. Tonight is one moment. Cards just across a bucket's edge
+ *  cost a call, never a leak. */
+export function momentOf(ref: CardRef): string {
+  return ref.commit === null ? "" : `${ref.commit}\0${Math.floor(Date.parse(ref.answeredAt ?? "") / MOMENT_BUCKET_MS)}`;
+}
+
+/** A batch's user message: its pages once each per moment, then its cards, numbered in order. */
 export function renderBatch(wiki: string, items: readonly BatchItem[]): string {
   const pageIds = new Map<string, string>();
   const pages: (PageFacts & { page: string })[] = [];
   const cards = items.map((item, i) => {
-    let page = pageIds.get(item.page.relPath);
+    const slot = `${item.page.relPath}\0${momentOf(item.gathered.ref)}`;
+    let page = pageIds.get(slot);
     if (!page) {
       page = pageKey(pages.length);
-      pageIds.set(item.page.relPath, page);
+      pageIds.set(slot, page);
       pages.push({ page, ...item.page });
     }
     return { card: `c${i + 1}`, page, ...item.gathered.card };
@@ -75,24 +85,31 @@ export function soloChars(wiki: string, item: BatchItem): number {
   return renderBatch(wiki, [item]).length;
 }
 
-/** Items into calls, in order, within both limits. An item over the limit alone
- *  goes in `oversized` and in no call. */
+/** Items into calls, in order within each wiki moment, within both limits: no call
+ *  holds text from a moment later than one of its cards. An item over the limit
+ *  alone goes in `oversized` and in no call. */
 export function buildBatches(wiki: string, items: readonly BatchItem[], limits = { cards: CARDS_PER_CALL, chars: CHARS_PER_CALL }): { batches: Batch[]; oversized: BatchItem[] } {
   const batches: Batch[] = [];
   const oversized: BatchItem[] = [];
-  let run: BatchItem[] = [];
-  const flush = () => {
-    if (run.length) batches.push({ items: run, prompt: renderBatch(wiki, run) });
-    run = [];
-  };
+  const moments = new Map<string, BatchItem[]>();
   for (const item of items) {
     if (soloChars(wiki, item) > limits.chars) {
       oversized.push(item);
       continue;
     }
-    if (run.length >= limits.cards || renderBatch(wiki, [...run, item]).length > limits.chars) flush();
-    run.push(item);
+    const key = `${item.gathered.ref.wiki}\0${momentOf(item.gathered.ref)}`;
+    moments.set(key, [...(moments.get(key) ?? []), item]);
   }
-  flush();
+  for (const moment of moments.values()) {
+    let run: BatchItem[] = [];
+    for (const item of moment) {
+      if (run.length >= limits.cards || renderBatch(wiki, [...run, item]).length > limits.chars) {
+        batches.push({ items: run, prompt: renderBatch(wiki, run) });
+        run = [];
+      }
+      run.push(item);
+    }
+    batches.push({ items: run, prompt: renderBatch(wiki, run) });
+  }
   return { batches, oversized };
 }

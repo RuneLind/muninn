@@ -7,11 +7,12 @@ import path from "node:path";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import { readBaselineCards } from "./baseline.ts";
-import { answeredByChoice, commitView, gatherCardFacts, gatherPageFacts, liveAnswers, logEntriesNaming, readPageText, type GatherContext } from "./facts.ts";
+import type { WikiIndex } from "../store.ts";
+import { answeredByChoice, commitView, gatherCardFacts, gatherPageFacts, liveAnswers, liveView, logEntriesNaming, readPageText, type GatherContext } from "./facts.ts";
 import { parseRepoRoots, realGit, resolveRepo } from "./git.ts";
 import { renderBatch } from "./prompt.ts";
-import { gatherReplay, replayCounts, ReplayRefused, type ReplayDeps } from "./replay.ts";
-import { commitAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
+import { gatherReplay, messageMoments, replayBatches, replayCounts, ReplayRefused, runReplay, type ReplayDeps } from "./replay.ts";
+import { commitAt, git, mergeAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 
 const PAGE = (extra = "") => `---
 title: Testplan
@@ -42,6 +43,8 @@ let wiki: string;
 let codeRoot: string;
 let first: string;
 let second: string;
+let linkWiki: string;
+let linkCommit: string;
 const CUT = Date.parse("2026-10-05T12:00:00Z");
 
 beforeAll(() => {
@@ -65,6 +68,50 @@ beforeAll(() => {
   write(code, "src/late.ts", "const needle_token = 2;\n");
   commitAt(code, "2026-10-07T10:00:00Z", "code after the moment");
   pushMain(code);
+
+  // A feature branch's commit dated before the cut, merged after it.
+  const merged = path.join(codeRoot, "merged");
+  repoWithOrigin(merged, path.join(root, "bare"), "merged");
+  write(merged, "src/main.ts", "const main_token = 1;\n");
+  commitAt(merged, "2026-10-03T10:00:00Z", "main before the moment");
+  git(merged, "switch", "-q", "-c", "feature");
+  write(merged, "src/feature.ts", "const feature_token = 1;\n");
+  commitAt(merged, "2026-10-04T10:00:00Z", "feature before the moment");
+  git(merged, "switch", "-q", "main");
+  mergeAt(merged, "2026-10-06T10:00:00Z", "feature", "merge after the moment");
+  pushMain(merged);
+
+  linkWiki = path.join(root, "link-wiki");
+  repoWithOrigin(linkWiki, path.join(root, "bare"), "link-wiki");
+  write(linkWiki, "plans/teststem.mdx", "# Siden\n\nSe [[teststem]] selv.\n");
+  const links: Record<string, string> = {
+    "notes/wl-bare.md": "Se [[teststem]].",
+    "notes/wl-path.md": "Se [[plans/teststem]].",
+    "notes/wl-label.md": "Se [[plans/teststem|merkelapp]].",
+    "notes/wl-heading.md": "Se [[plans/teststem#overskrift]].",
+    "notes/wl-case.md": "Se [[Plans/TestStem]].",
+    "notes/wl-årsak.md": "Se [[teststem]].",
+    "plans/md-sibling.md": "Se [her](./teststem.mdx).",
+    "archive/md-up.md": "Se [her](../plans/teststem.mdx).",
+    "md-root.md": "Se [her](plans/teststem.mdx).",
+    "notes/plain.md": "Se plans/teststem.mdx.",
+    "notes/no-longer.md": "Se [[teststem-longer]].",
+    "notes/no-longer-path.md": "Se [[plans/teststem-longer]].",
+    "notes/no-other-page.md": "Se [her](./teststem.mdx).",
+    "notes/no-mention.md": "Ordet teststem i prosa.",
+    "notes/no-deeper.md": "Se archive/plans/teststem.mdx og plans/teststem.mdx-gammel.",
+    "plans/teststem.txt": "[[teststem]]",
+  };
+  for (const [rel, text] of Object.entries(links)) write(linkWiki, rel, `${text}\n`);
+  write(linkWiki, "log.md", "## [2026-10-01] plan | [[plans/teststem]]\n");
+  // Mentions sorting ahead of the one link, more of them than the linker cap.
+  for (let i = 0; i < 25; i++) write(linkWiki, `aaa/mention-${i}.md`, "Ordet crowded i prosa.\n");
+  write(linkWiki, "plans/crowded.mdx", "# Trang\n");
+  write(linkWiki, "zzz/late-link.md", "Se [[crowded]].\n");
+  // More real links than the cap.
+  write(linkWiki, "plans/popular.mdx", "# Populær\n");
+  for (let i = 0; i < 25; i++) write(linkWiki, `pop/l${String(i).padStart(2, "0")}.md`, "Se [[popular]].\n");
+  linkCommit = commitAt(linkWiki, "2026-10-01T10:00:00Z", "the link forms");
 });
 
 const version = (over: Partial<WikiAnswerVersion>): WikiAnswerVersion => ({
@@ -153,6 +200,37 @@ describe("facts as of a date", () => {
   });
 });
 
+describe("the page slot's moment", () => {
+  test("a commit's page facts say when that commit was made", async () => {
+    const { page } = await asOf(first, CUT);
+    expect(page.asOf).toBe("2026-10-01T10:00:00.000Z");
+  });
+});
+
+describe("the ref's tip then follows the branch, not a merged-in feature", () => {
+  const mergedPage = `---\ntitle: T\nrepos: [merged]\n---\n# T\n\n<Question id="O1" choices="A|B">\nSkal \`feature_token\` bort?\n</Question>\n`;
+  const read = async (cutMs: number) => {
+    const view = commitView(wiki, first, cutMs, realGit);
+    const page = readPageText("plans/testplan.mdx", mergedPage);
+    const { card } = await gatherCardFacts({ wiki: "w", relPath: page.relPath, id: "O1", answeredAt: new Date(cutMs).toISOString(), commit: first }, page, view, ctx());
+    return card.repos[0]!;
+  };
+
+  test("a feature commit dated before the cut and merged after it is not there yet", async () => {
+    const repo = await read(CUT);
+    expect(repo.tipDate).toStartWith("2026-10-03");
+    expect(repo.code).toEqual([]);
+    expect(repo.subjectsSinceCard!.map((s) => s.replace(/^\S+ \S+ /, ""))).toEqual(["main before the moment"]);
+  });
+
+  test("after the merge, the feature's file and its own subject are there", async () => {
+    const repo = await read(Date.parse("2026-10-07T00:00:00Z"));
+    expect(repo.tipDate).toStartWith("2026-10-06");
+    expect(repo.code!.map((c) => c.token)).toEqual(["feature_token"]);
+    expect(repo.subjectsSinceCard!.map((s) => s.replace(/^\S+ \S+ /, ""))).toEqual(["merge after the moment", "feature before the moment", "main before the moment"]);
+  });
+});
+
 describe("answers as facts", () => {
   test("every author's latest live answer; redacted rows skipped", () => {
     const rows = [
@@ -191,6 +269,86 @@ test("log entries: the newest naming the page, by wikilink or path, others left 
   const log = "## [2026-10-01] a | one [[p]]\n\n## [2026-10-03] a | other\n\n## [2026-10-02] a | two plans/p.mdx\n";
   expect(logEntriesNaming(log, "plans/p.mdx").map((e) => e.slice(0, 15))).toEqual(["## [2026-10-02]", "## [2026-10-01]"]);
   expect(logEntriesNaming(null, "plans/p.mdx")).toEqual([]);
+});
+
+describe("what names a page in log.md", () => {
+  const named = (line: string, relPath = "plans/teststem.mdx") => logEntriesNaming(`## [2026-10-01] a | ${line}\n`, relPath).length === 1;
+
+  test("a bare wikilink", () => expect(named("[[teststem]]")).toBe(true));
+  test("a path wikilink", () => expect(named("[[plans/teststem]]")).toBe(true));
+  test("a path wikilink with a label", () => expect(named("[[plans/teststem|merkelapp]]")).toBe(true));
+  test("a path wikilink with a heading", () => expect(named("[[plans/teststem#overskrift]]")).toBe(true));
+  test("a bare wikilink with an extension", () => expect(named("[[teststem.mdx]]")).toBe(true));
+  test("a path wikilink with an extension", () => expect(named("[[plans/teststem.mdx]]")).toBe(true));
+  test("a path wikilink in other case", () => expect(named("[[Plans/TestStem]]")).toBe(true));
+  test("a markdown link from the root", () => expect(named("[her](plans/teststem.mdx)")).toBe(true));
+  test("a markdown link with a heading", () => expect(named("[her](plans/teststem.mdx#o1)")).toBe(true));
+  test("a dot-slash link beside a root page", () => expect(named("[her](./rootstem.md)", "rootstem.md")).toBe(true));
+  test("the plain path", () => expect(named("endret plans/teststem.mdx i dag")).toBe(true));
+  test("the plain path ending a sentence", () => expect(named("endret plans/teststem.mdx.")).toBe(true));
+  test("the plain path in backticks", () => expect(named("endret `plans/teststem.mdx`")).toBe(true));
+
+  test("the plain path in other case", () => expect(named("endret Plans/TestStem.mdx i dag")).toBe(true));
+
+  test("never a longer stem as a wikilink", () => expect(named("[[teststem-longer]]")).toBe(false));
+  test("never a longer stem as a path wikilink", () => expect(named("[[plans/teststem-longer]]")).toBe(false));
+  test("never the same stem in another folder by path", () => expect(named("[[archive/teststem]]")).toBe(false));
+  test("never a longer path ending in the page's", () => expect(named("endret archive/plans/teststem.mdx")).toBe(false));
+  test("never a longer file name starting with the page's", () => expect(named("endret plans/teststem.mdx-gammel")).toBe(false));
+  test("never the stem in prose", () => expect(named("teststem i prosa")).toBe(false));
+  test("never a dot-slash link from the root to a page elsewhere", () => expect(named("[her](./teststem.mdx)")).toBe(false));
+  test("never the path with another extension after it", () => expect(named("![bilde](plans/teststem.mdx.png)")).toBe(false));
+
+  test("the cap keeps the eight newest, newest first, whichever way the log runs", () => {
+    const days = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"];
+    const up = days.map((d) => `## [2026-10-${d}] a | [[plans/teststem]]`).join("\n\n");
+    const down = [...days].reverse().map((d) => `## [2026-10-${d}] a | [[plans/teststem]]`).join("\n\n");
+    const expected = ["10", "09", "08", "07", "06", "05", "04", "03"];
+    expect(logEntriesNaming(up, "plans/teststem.mdx").map((e) => e.slice(12, 14))).toEqual(expected);
+    expect(logEntriesNaming(down, "plans/teststem.mdx").map((e) => e.slice(12, 14))).toEqual(expected);
+  });
+});
+
+describe("what links a page tonight", () => {
+  const index = (backlinks: string[]) => ({ root: "/w", backlinks: new Map([["plans/p.mdx", backlinks]]), resolveRelPath: () => undefined }) as unknown as WikiIndex;
+
+  test("log.md is not a linker, as at a commit: its entries reach the card as logEntries", async () => {
+    const view = liveView(index(["log.md", "notes/a.md"]), async () => null);
+    expect((await view.linkers("plans/p.mdx")).map((l) => l.relPath)).toEqual(["notes/a.md"]);
+  });
+
+  test("a today's view names no moment", async () => {
+    expect(await liveView(index([]), async () => null).madeAt()).toBeNull();
+  });
+});
+
+describe("what links a page at a commit", () => {
+  const linkers = async (relPath: string) => (await commitView(linkWiki, linkCommit, CUT, realGit).linkers(relPath)).map((l) => l.relPath);
+
+  test("every link form, and nothing else", async () => {
+    expect((await linkers("plans/teststem.mdx")).sort()).toEqual([
+      "archive/md-up.md",
+      "md-root.md",
+      "notes/plain.md",
+      "notes/wl-bare.md",
+      "notes/wl-case.md",
+      "notes/wl-heading.md",
+      "notes/wl-label.md",
+      "notes/wl-path.md",
+      "notes/wl-årsak.md",
+      "plans/md-sibling.md",
+    ]);
+  });
+
+  test("more mentions than the cap do not crowd out the link behind them", async () => {
+    expect(await linkers("plans/crowded.mdx")).toEqual(["zzz/late-link.md"]);
+  });
+
+  test("real links stop at the cap", async () => {
+    const hits = await linkers("plans/popular.mdx");
+    expect(hits).toHaveLength(20);
+    expect(hits[0]).toBe("pop/l00.md");
+  });
 });
 
 describe("replay's mechanics, with no score", () => {
@@ -235,6 +393,54 @@ describe("replay's mechanics, with no score", () => {
     expect(counts).toMatchObject({ gathered: 1, refused: 0, oversized: 0, codeFactCards: 1 });
     expect(JSON.stringify(counts)).not.toMatch(/added|textAlone|HUMAN|plans\//);
     expect(counts.repos.notFound).toEqual([{ repo: "nowhere", reason: "no such folder under the roots" }]);
+  });
+
+  test("two moments on one page: two calls, no card on the other moment's page, the later ruling out of the earlier message", async () => {
+    const cards = [
+      { wiki: "w", relPath: "plans/testplan.mdx", id: "O1", answeredAt: "2026-10-05T12:00:00Z", commit: first, hashMatches: true, replayable: true as const },
+      { wiki: "w", relPath: "plans/testplan.mdx", id: "O1", answeredAt: "2026-10-08T12:00:00Z", commit: second, hashMatches: true, replayable: true as const },
+    ];
+    const gathered = await gatherReplay(cards, deps());
+    expect(replayCounts(gathered)).toMatchObject({ gathered: 2, batches: 2, pageSlots: 2, cardsOnAnotherMoment: 0, batchesWithTwoMoments: 0 });
+    expect(replayCounts(gathered).totalChars).toBe(replayBatches(gathered.items).reduce((n, b) => n + b.batch.prompt.length, 0));
+    const earlier = replayBatches(gathered.items).find((b) => b.batch.items[0]!.gathered.ref.commit === first)!;
+    expect(earlier.batch.prompt).not.toContain("LATER DECISION");
+    expect(earlier.batch.prompt).not.toContain("LATE ENTRY");
+    expect(earlier.batch.prompt).not.toContain("late-linker");
+  });
+
+  test("a replay run makes those calls, one per moment, and every card lands", async () => {
+    const cards = [
+      { wiki: "w", relPath: "plans/testplan.mdx", id: "O1", answeredAt: "2026-10-05T12:00:00Z", commit: first, hashMatches: true, replayable: true as const },
+      { wiki: "w", relPath: "plans/testplan.mdx", id: "O1", answeredAt: "2026-10-08T12:00:00Z", commit: second, hashMatches: true, replayable: true as const },
+    ];
+    const prompts: string[] = [];
+    const { lines, usage } = await runReplay(await gatherReplay(cards, deps()), {
+      call: async (req) => {
+        prompts.push(req.prompt);
+        const ids = [...req.prompt.matchAll(/"card": "(c\d+)"/g)].map((m) => m[1]!);
+        return { text: JSON.stringify({ verdicts: ids.map((card) => ({ card, verdict: "DEFAULT", costOfDelay: "low", reversible: true, onlyOwnerHas: null, why: "x", evidence: [], restsOnPrs: [] })) }) };
+      },
+      model: "m",
+      existing: [],
+      append: async () => {},
+      now: Date.now,
+      repoRoots: codeRoot,
+    });
+    expect(usage.calls).toBe(2);
+    expect(lines.size).toBe(2);
+    expect(prompts.filter((p) => p.includes("LATER DECISION"))).toHaveLength(1);
+  });
+
+  test("the count sees a message that puts a card on another moment's page", () => {
+    const pageFacts = (asOf: string, text: string) => ({ relPath: "plans/p.mdx", asOf, status: null, decisionLog: [{ id: "D1", state: "open", struck: false, text }], linkedFrom: [], logEntries: [], prReferences: [] });
+    const card = (commit: string, page: ReturnType<typeof pageFacts>) => ({ gathered: { ref: { wiki: "w", relPath: "plans/p.mdx", id: "O1", answeredAt: "2026-10-02T09:00:00Z", commit }, questionHash: "h", recommendation: null, card: { relPath: "plans/p.mdx", id: "O1" } as never, codeFacts: false }, page });
+    const a = card("aaaaaaa", pageFacts("2026-10-01T00:00:00.000Z", "one"));
+    const b = card("bbbbbbb", pageFacts("2026-10-06T00:00:00.000Z", "two"));
+    // The old message's shape: both cards pointing at the first page's slot.
+    const prompt = `x\n\n${JSON.stringify({ pages: [{ page: "p1", ...a.page }], cards: [{ card: "c1", page: "p1" }, { card: "c2", page: "p1" }] })}`;
+    expect(messageMoments({ items: [a, b], prompt })).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 1, twoMoments: true });
+    expect(messageMoments({ items: [a], prompt: `x\n\n${JSON.stringify({ pages: [{ page: "p1", ...a.page }], cards: [{ card: "c1", page: "p1" }] })}` })).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 0, twoMoments: false });
   });
 
   test("a card missing from its commit is refused alone; a commit id that is not one too", async () => {

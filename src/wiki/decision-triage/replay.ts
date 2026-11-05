@@ -13,7 +13,7 @@ import { stat } from "node:fs/promises";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { commitView, gatherCardFacts, gatherPageFacts, readPageText, type GatherContext, type PageFacts, type PageRead, type ReplayCard, type WikiView } from "./facts.ts";
 import { parseRepoRoots, type GitRun } from "./git.ts";
-import { buildBatches, CHARS_PER_CALL, soloChars, type BatchItem } from "./prompt.ts";
+import { buildBatches, CHARS_PER_CALL, momentOf, soloChars, type Batch, type BatchItem } from "./prompt.ts";
 import { callBatch, overRss, repoResolver, verdictFields, withTimeout, type TriageModel } from "./run.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, type CardLine, type LogLine, type RepoFact, type RunLine, type TriageUsage } from "./schema.ts";
 
@@ -101,10 +101,10 @@ export async function gatherReplay(cards: readonly ReplayCard[], deps: ReplayDep
       for (const r of read.repos) names.add(r);
       const ctx: GatherContext = { git: deps.git, repo: resolver.repo, answers: answers.get(card.wiki)!, owner: deps.owner, groups: deps.groups };
       const gathered = await withTimeout(gatherCardFacts(card, read, view, ctx), CARD_GATHER_TIMEOUT_MS, "the facts");
-      let page = pageFacts.get(`${pageKey}\0${card.answeredAt}`);
+      let page = pageFacts.get(pageKey);
       if (!page) {
         page = await gatherPageFacts(read, view);
-        pageFacts.set(`${pageKey}\0${card.answeredAt}`, page);
+        pageFacts.set(pageKey, page);
       }
       out.items.push({ gathered, page });
     } catch (err) {
@@ -127,6 +127,21 @@ export async function gatherReplay(cards: readonly ReplayCard[], deps: ReplayDep
   return out;
 }
 
+/** The real calls over these items, wiki by wiki. */
+export function replayBatches(items: readonly BatchItem[]): { wiki: string; batch: Batch }[] {
+  const wikis = [...new Set(items.map((i) => i.gathered.ref.wiki))];
+  return wikis.flatMap((wiki) => buildBatches(wiki, items.filter((i) => i.gathered.ref.wiki === wiki)).batches.map((batch) => ({ wiki, batch })));
+}
+
+/** Read from the rendered message: whether each card's page slot is the page that
+ *  card's facts were gathered with, and whether the call mixes moments. */
+export function messageMoments(batch: Batch): { pageSlots: number; cardsOnAnotherMoment: number; twoMoments: boolean } {
+  const { pages, cards } = JSON.parse(batch.prompt.slice(batch.prompt.indexOf("\n\n") + 2)) as { pages: ({ page: string } & PageFacts)[]; cards: { page: string }[] };
+  const slots = new Map(pages.map(({ page, ...facts }) => [page, JSON.stringify(facts)]));
+  const cardsOnAnotherMoment = batch.items.filter((item, i) => slots.get(cards[i]!.page) !== JSON.stringify(item.page)).length;
+  return { pageSlots: pages.length, cardsOnAnotherMoment, twoMoments: new Set(batch.items.map((i) => momentOf(i.gathered.ref))).size > 1 };
+}
+
 /** What `--dry-run` reports: counts only. */
 export interface ReplayCounts {
   gathered: number;
@@ -136,6 +151,12 @@ export interface ReplayCounts {
   medianChars: number;
   maxChars: number;
   codeFactCards: number;
+  /** The calls a real run makes, what they carry, and what they must never hold. */
+  batches: number;
+  pageSlots: number;
+  totalChars: number;
+  cardsOnAnotherMoment: number;
+  batchesWithTwoMoments: number;
   repos: { found: string[]; notFound: { repo: string; reason?: string }[]; fetchFailed: string[] };
 }
 
@@ -144,6 +165,7 @@ export function replayCounts(g: GatheredReplay): ReplayCounts {
   const sizes = all.map((i) => soloChars(i.gathered.ref.wiki, i)).sort((a, b) => a - b);
   const reasons: Record<string, number> = {};
   for (const r of g.refused) reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
+  const batches = replayBatches(g.items).map(({ batch }) => ({ chars: batch.prompt.length, ...messageMoments(batch) }));
   return {
     gathered: all.length,
     refused: g.refused.length,
@@ -152,6 +174,11 @@ export function replayCounts(g: GatheredReplay): ReplayCounts {
     medianChars: sizes[Math.floor(sizes.length / 2)] ?? 0,
     maxChars: sizes[sizes.length - 1] ?? 0,
     codeFactCards: all.filter((i) => i.gathered.codeFacts).length,
+    batches: batches.length,
+    pageSlots: batches.reduce((n, b) => n + b.pageSlots, 0),
+    totalChars: batches.reduce((n, b) => n + b.chars, 0),
+    cardsOnAnotherMoment: batches.reduce((n, b) => n + b.cardsOnAnotherMoment, 0),
+    batchesWithTwoMoments: batches.filter((b) => b.twoMoments).length,
     repos: {
       found: g.repos.filter((r) => r.found).map((r) => r.repo),
       notFound: g.repos.filter((r) => !r.found).map((r) => ({ repo: r.repo, ...(r.reason ? { reason: r.reason } : {}) })),
@@ -198,23 +225,20 @@ export async function runReplay(gathered: GatheredReplay, deps: ReplayRunDeps): 
   for (let round = 0; round <= REPLAY_RETRIES; round++) {
     const left = gathered.items.filter((i) => !lines.has(keyOf(i)));
     if (left.length === 0) break;
-    for (const wiki of new Set(left.map((i) => i.gathered.ref.wiki))) {
-      const { batches } = buildBatches(wiki, left.filter((i) => i.gathered.ref.wiki === wiki));
-      for (const batch of batches) {
-        const result = await callBatch(wiki, batch, deps, usage);
-        const landed: CardLine[] = [];
-        batch.items.forEach((item, i) => {
-          const v = result.verdicts[i];
-          if (v) {
-            const line = lineOf(item, verdictFields(v));
-            lines.set(keyOf(item), line);
-            landed.push(line);
-          } else if (round === REPLAY_RETRIES) {
-            landed.push(lineOf(item, { verdict: "NO_VERDICT", reason: result.failed ? "the batch failed" : "missing from the answer" }));
-          }
-        });
-        await deps.append(landed);
-      }
+    for (const { wiki, batch } of replayBatches(left)) {
+      const result = await callBatch(wiki, batch, deps, usage);
+      const landed: CardLine[] = [];
+      batch.items.forEach((item, i) => {
+        const v = result.verdicts[i];
+        if (v) {
+          const line = lineOf(item, verdictFields(v));
+          lines.set(keyOf(item), line);
+          landed.push(line);
+        } else if (round === REPLAY_RETRIES) {
+          landed.push(lineOf(item, { verdict: "NO_VERDICT", reason: result.failed ? "the batch failed" : "missing from the answer" }));
+        }
+      });
+      await deps.append(landed);
     }
   }
   const oversized = gathered.oversized.map((item) => lineOf(item, { verdict: "NO_VERDICT", reason: "over the call's size limit" }));
