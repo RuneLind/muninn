@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
@@ -113,4 +113,63 @@ test("originBasename takes ssh and https forms, with .git stripped once", () => 
   expect(originBasename("https://github.com/o/repo")).toBe("repo");
   expect(originBasename("https://github.com/o/repo.git/")).toBe("repo");
   expect(originBasename("git@host:repo.git")).toBe("repo");
+});
+
+describe("the runner's bound holds whatever the child does", () => {
+  const savedPath = process.env.PATH;
+  afterEach(() => {
+    process.env.PATH = savedPath;
+  });
+  /** A `git` on PATH running `body`; `$PIDS` names a file for a child's pid. */
+  function fakeGit(body: string) {
+    const bin = temp();
+    const pids = path.join(bin, "pids");
+    writeFileSync(path.join(bin, "git"), `#!/bin/sh\nPIDS=${pids}\n${body}\n`);
+    chmodSync(path.join(bin, "git"), 0o755);
+    process.env.PATH = `${bin}:${savedPath}`;
+    return { bin, pids };
+  }
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  /** The transport child: survives a kill of `git` alone, and holds both pipes. */
+  const TRANSPORT = "sleep 8 &\necho $! > $PIDS";
+
+  test("a child holding the pipes: back at the timeout, marked, and the child is gone", async () => {
+    const { bin, pids } = fakeGit(`${TRANSPORT}\nwait`);
+    const started = Date.now();
+    const res = await realGit(bin, ["fetch", "origin"], { timeoutMs: 300 });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(res.ok).toBe(false);
+    expect(res.timedOut).toBe(true);
+    await Bun.sleep(50);
+    expect(alive(Number(readFileSync(pids, "utf8").trim()))).toBe(false);
+  });
+
+  test("a child holding stderr after the cap: back at once with the lines it got", async () => {
+    const { bin } = fakeGit(`${TRANSPORT}\nprintf 'a\\nb\\nc\\nd\\n'\nwait`);
+    const started = Date.now();
+    const res = await realGit(bin, ["grep", "x"], { maxLines: 2, timeoutMs: 5_000 });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(res).toMatchObject({ ok: true, capped: true, stdout: "a\nb" });
+    expect(res.timedOut).toBeUndefined();
+  });
+
+  test("the argv and the allowlisted environment stay as they were", async () => {
+    const { bin } = fakeGit(`echo "$@"\nenv`);
+    process.env.TRIAGE_TEST_SECRET = "s3cret";
+    try {
+      const res = await realGit(bin, ["status"]);
+      expect(res.stdout).toStartWith("--no-pager --no-optional-locks --literal-pathspecs status\n");
+      expect(res.stdout).toContain("GIT_TERMINAL_PROMPT=0");
+      expect(res.stdout).not.toContain("s3cret");
+    } finally {
+      delete process.env.TRIAGE_TEST_SECRET;
+    }
+  });
 });

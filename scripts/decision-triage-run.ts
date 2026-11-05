@@ -15,14 +15,10 @@ import { parseArgs } from "node:util";
 import path from "node:path";
 import { loadConfig, resolveWikiAnswerConfig } from "../src/config.ts";
 import { closeDb, initDb } from "../src/db/client.ts";
-import { listWikiAnswerHistory } from "../src/db/wiki-answers.ts";
-import { computeFloor } from "../src/wiki/decision-triage/floor.ts";
-import { realGit } from "../src/wiki/decision-triage/git.ts";
 import { appendLogLines, DECISION_TRIAGE_DIR } from "../src/wiki/decision-triage/log.ts";
-import { realDecisionTriageModel, runDecisionTriage } from "../src/wiki/decision-triage/run.ts";
-import { rootOverrides, triageEntries } from "../src/wiki/decision-triage/script-roots.ts";
-import { isReadonlyWikiRoot } from "../src/wiki/readonly.ts";
-import { getWikiIndex } from "../src/wiki/store.ts";
+import { runDecisionTriage } from "../src/wiki/decision-triage/run.ts";
+import { realTriageRunDeps, scopeVerdict, triageScope } from "../src/wiki/decision-triage/scope.ts";
+import { outInsideLog, rootOverrides, triageEntries } from "../src/wiki/decision-triage/script-roots.ts";
 import { isInsideDir } from "../src/wiki/work-map/dry-run.ts";
 
 const { values } = parseArgs({
@@ -46,48 +42,28 @@ if (!config.decisionTriageRepoRoots) {
   process.exit(2);
 }
 const overrides = rootOverrides(values.root ?? []);
-const entries = triageEntries(overrides, [wiki]);
-const entry = entries[0];
-if (!entry) {
-  console.error(`${wiki} is not a registered wiki here; pass --root ${wiki}=<path>`);
+const answerConfig = resolveWikiAnswerConfig();
+const scope = await triageScope({
+  workMapWikis: config.workMapWikis,
+  answerWikis: answerConfig.wikis,
+  entryOf: (name) => triageEntries(overrides, [name])[0],
+});
+const standing = scopeVerdict(scope, wiki);
+if ("reason" in standing) {
+  console.error(`${standing.reason}; the triage spends no model call on it`);
   process.exit(2);
 }
-if (isReadonlyWikiRoot(entry.root)) {
-  console.error(`${entry.name} has a readonly root; the triage spends no model call on it`);
-  process.exit(2);
-}
-if (isInsideDir(entry.root, out) || isInsideDir(DECISION_TRIAGE_DIR, out)) {
+const { entry } = standing;
+if (isInsideDir(entry.root, out) || outInsideLog(out)) {
   console.error(`--out ${out} is inside the wiki root or ${DECISION_TRIAGE_DIR} (or could not be resolved); this run writes nothing there`);
   process.exit(2);
 }
 
-const answerConfig = resolveWikiAnswerConfig();
 initDb(config);
 const started = Date.now();
 let exit = 0;
 try {
-  const res = await runDecisionTriage({
-    entry,
-    now: Date.now,
-    repoRoots: config.decisionTriageRepoRoots,
-    model: config.workMapModel,
-    ...(config.workMapEffort ? { effort: config.workMapEffort } : {}),
-    call: realDecisionTriageModel(config),
-    git: realGit,
-    loadIndex: () => getWikiIndex({ root: entry.root, refresh: true }),
-    readFile: async (abs) => {
-      try {
-        return await Bun.file(abs).text();
-      } catch {
-        return null;
-      }
-    },
-    answers: () => listWikiAnswerHistory(entry.name),
-    owner: answerConfig.owner,
-    groups: answerConfig.groups,
-    append: (lines) => appendLogLines(out, lines),
-    floor: () => computeFloor(triageEntries(overrides, [...answerConfig.wikis]).map((e) => ({ wiki: e.name, root: e.root })), listWikiAnswerHistory, realGit),
-  });
+  const res = await runDecisionTriage(realTriageRunDeps(config, entry, answerConfig, { append: (lines) => appendLogLines(out, lines), floorEntries: () => scope.covered }));
   if (res.outcome === "aborted") throw new Error("aborted");
   // Counts and repo facts only: an open card's verdict stays in the file.
   console.log(

@@ -11,8 +11,8 @@
  *
  * `--dry-run` gathers facts, makes no model call, reads no label and writes nothing.
  * `--root <wiki>=<path>` (repeatable) names a wiki's root; `--log-dir <dir>` moves
- * the logs. Both replays refuse without DECISION_TRIAGE_REPO_ROOTS. From a worktree,
- * run with `bun --env-file <checkout>/.env`.
+ * the logs. Both replays refuse without DECISION_TRIAGE_REPO_ROOTS, or on a wiki
+ * `scope.ts` refuses (a readonly root). From a worktree, run with `bun --env-file <checkout>/.env`.
  */
 
 import { readFile } from "node:fs/promises";
@@ -43,7 +43,9 @@ import {
   type ReplayReport,
   type ScoredItem,
 } from "../src/wiki/decision-triage/score.ts";
+import { scopeVerdict, triageScope, type TriageScope } from "../src/wiki/decision-triage/scope.ts";
 import { rootOverrides, triageEntries } from "../src/wiki/decision-triage/script-roots.ts";
+import type { WikiRegistryEntry } from "../src/wiki/registry.ts";
 import { closedQuestionIds } from "../src/format/question.ts";
 import { getWikiIndex, readWikiPage } from "../src/wiki/store.ts";
 import { parseBlocks } from "../src/format/markdown-ast.ts";
@@ -71,12 +73,13 @@ const config = loadConfig();
 const answerConfig = resolveWikiAnswerConfig();
 const overrides = rootOverrides(values.root ?? []);
 const logDir = values["log-dir"] ? path.resolve(values["log-dir"]) : DECISION_TRIAGE_DIR;
-const wikiNames = () => [...new Set([...config.workMapWikis.map((w) => w.toLowerCase())].filter((w) => answerConfig.wikis.has(w)))];
-const entriesFor = (names: readonly string[]) => triageEntries(overrides, names).map((e) => ({ wiki: e.name, root: e.root }));
+const readScope = () => triageScope({ workMapWikis: config.workMapWikis, answerWikis: answerConfig.wikis, entryOf: (name) => triageEntries(overrides, [name])[0] });
+const asRoots = (entries: readonly WikiRegistryEntry[]) => entries.map((e) => ({ wiki: e.name, root: e.root }));
+const faultsOf = (scope: TriageScope) => scope.dropped.filter((d) => d.fault).map((d) => `${d.wiki}: ${d.reason}`);
 
-function replayDeps(wikis: readonly string[]): ReplayDeps {
+function replayDeps(entries: readonly WikiRegistryEntry[]): ReplayDeps {
   return {
-    roots: new Map(entriesFor(wikis).map((e) => [e.wiki, e.root])),
+    roots: new Map(asRoots(entries).map((e) => [e.wiki, e.root])),
     repoRoots: config.decisionTriageRepoRoots,
     git: realGit,
     answers: listWikiAnswerHistory,
@@ -97,8 +100,8 @@ function printReport(r: ReplayReport): void {
   console.log(`answered more than 12 h after writing (passes nothing): ${fmt(r.late)}; text alone ${fmt(r.lateTextAlone)}`);
 }
 
-async function modelReplay(cards: readonly ReplayCard[], wikis: readonly string[]): Promise<Map<string, CardLine>> {
-  const gathered = await gatherReplay(cards, replayDeps(wikis));
+async function modelReplay(cards: readonly ReplayCard[], entries: readonly WikiRegistryEntry[]): Promise<Map<string, CardLine>> {
+  const gathered = await gatherReplay(cards, replayDeps(entries));
   const file = replayLogPath(DECISION_TRIAGE_PROMPT_VERSION, logDir);
   const { cards: existing } = await readLog(file);
   const { lines, usage } = await runReplay(gathered, {
@@ -117,13 +120,19 @@ async function modelReplay(cards: readonly ReplayCard[], wikis: readonly string[
 async function modePart1(): Promise<number> {
   const text = await readFile(path.resolve(values.baseline ?? DEFAULT_BASELINE), "utf8");
   const { cards, unreplayable } = readBaselineCards(text);
-  const wikis = [...new Set(cards.map((c) => c.wiki))];
+  const scope = await readScope();
+  // A readonly root forbids the model call, and a rehearsal refuses what the run would.
+  const entries = [...new Set(cards.map((c) => c.wiki))].map((wiki) => {
+    const standing = scopeVerdict(scope, wiki);
+    if ("reason" in standing) throw new ReplayRefused(standing.reason);
+    return { ...standing.entry, name: wiki };
+  });
   if (values["dry-run"]) {
-    const counts = replayCounts(await gatherReplay(cards, replayDeps(wikis)));
+    const counts = replayCounts(await gatherReplay(cards, replayDeps(entries)));
     console.log(JSON.stringify({ mode: "replay --dry-run", unreplayable, ...counts }, null, 1));
     return 0;
   }
-  const lines = await modelReplay(cards, wikis);
+  const lines = await modelReplay(cards, entries);
   // The labels are read here, after every verdict is on disk.
   const { labels, population } = readBaselineLabels(text);
   const items: ScoredItem[] = cards.map((c) => {
@@ -216,18 +225,20 @@ async function modePart2(): Promise<number> {
   const sinceArg = Date.parse(`${values.since}T00:00:00Z`);
   if (!Number.isFinite(sinceArg)) throw new Error(`--since takes a day (YYYY-MM-DD), got ${values.since}`);
   const sinceMs = Math.max(sinceArg, frozenAfterMs());
-  const names = wikiNames();
-  const wikis = entriesFor(names);
-  if (wikis.length !== names.length) throw new ReplayRefused(`a wiki's root is missing: pass --root for each of ${names.join(", ")}`);
+  const scope = await readScope();
+  const faults = faultsOf(scope);
+  if (faults.length > 0) throw new ReplayRefused(faults.join("; "));
+  const wikis = asRoots(scope.covered);
+  const names = wikis.map((w) => w.wiki);
   if (!config.decisionTriageRepoRoots) throw new ReplayRefused("DECISION_TRIAGE_REPO_ROOTS is not set");
   const labelled = await labelsSince(wikis, sinceMs, listWikiAnswerHistory, realGit);
   const cards = sinceCards(labelled);
   if (values["dry-run"]) {
-    const counts = replayCounts(await gatherReplay(cards, replayDeps(names)));
+    const counts = replayCounts(await gatherReplay(cards, replayDeps(scope.covered)));
     console.log(JSON.stringify({ mode: "since --dry-run", ...counts }, null, 1));
     return 0;
   }
-  const lines = await modelReplay(cards, names);
+  const lines = await modelReplay(cards, scope.covered);
   const byCard = new Map(labelled.flatMap(({ wiki, labelled: rows }) => rows.map((l) => [`${wiki}\0${l.settled.relPath}\0${l.settled.id}`, l] as const)));
   const items: ScoredItem[] = cards.flatMap((c) => {
     const l = byCard.get(`${c.wiki}\0${c.relPath}\0${c.id}`);
@@ -266,9 +277,15 @@ function printHandSample(cards: readonly ReplayCard[], lines: ReadonlyMap<string
   }
 }
 
+/** The wikis a read-only report covers: a fault is printed, and the rest still report. */
+async function reportWikis(): Promise<{ wiki: string; root: string }[]> {
+  const scope = await readScope();
+  for (const fault of faultsOf(scope)) console.error(`left out: ${fault}`);
+  return asRoots(scope.covered);
+}
+
 async function modeLabels(): Promise<number> {
-  const names = wikiNames();
-  const wikis = entriesFor(names);
+  const wikis = await reportWikis();
   const untilMs = values.until ? Date.parse(values.until) : Date.parse((JSON.parse(await readFile(DEFAULT_BASELINE, "utf8")) as { answersUntil: string }).answersUntil);
   for (const [label, windowMs] of [["with the 10-minute rule", SETTLE_WINDOW_MS], ["without it", 0]] as const) {
     const rows = (await labelsSince(wikis, 0, listWikiAnswerHistory, realGit, { windowMs, untilMs })).flatMap((w) => w.labelled);
@@ -288,9 +305,8 @@ try {
   else if (values.since) exit = await modePart2();
   else if (values.labels) exit = await modeLabels();
   else {
-    const names = wikiNames();
-    const wikis = entriesFor(names);
-    await printNightly(await nightlyLogs(names), await labelsSince(wikis, frozenAfterMs(), listWikiAnswerHistory, realGit), wikis);
+    const wikis = await reportWikis();
+    await printNightly(await nightlyLogs(wikis.map((w) => w.wiki)), await labelsSince(wikis, frozenAfterMs(), listWikiAnswerHistory, realGit), wikis);
   }
 } catch (err) {
   if (!(err instanceof ReplayRefused)) throw err;

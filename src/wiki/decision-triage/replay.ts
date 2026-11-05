@@ -14,7 +14,7 @@ import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { commitView, gatherCardFacts, gatherPageFacts, readPageText, type GatherContext, type PageFacts, type PageRead, type ReplayCard, type WikiView } from "./facts.ts";
 import { parseRepoRoots, type GitRun } from "./git.ts";
 import { buildBatches, CHARS_PER_CALL, momentOf, soloChars, type Batch, type BatchItem } from "./prompt.ts";
-import { callBatch, overRss, repoResolver, verdictFields, withTimeout, type TriageModel } from "./run.ts";
+import { callBatch, noVerdictReason, overRss, repoResolver, verdictFields, withTimeout, type TriageModel } from "./run.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, type CardLine, type LogLine, type RepoFact, type RunLine, type TriageUsage } from "./schema.ts";
 
 const CARD_GATHER_TIMEOUT_MS = 90_000;
@@ -235,7 +235,7 @@ export async function runReplay(gathered: GatheredReplay, deps: ReplayRunDeps): 
           lines.set(keyOf(item), line);
           landed.push(line);
         } else if (round === REPLAY_RETRIES) {
-          landed.push(lineOf(item, { verdict: "NO_VERDICT", reason: result.failed ? "the batch failed" : "missing from the answer" }));
+          landed.push(lineOf(item, { verdict: "NO_VERDICT", reason: noVerdictReason(result, i) }));
         }
       });
       await deps.append(landed);

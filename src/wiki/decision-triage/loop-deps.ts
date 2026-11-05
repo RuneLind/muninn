@@ -1,34 +1,32 @@
 /**
  * The decision triage's half of the work map's tick (`work-map/loop.ts`): which
- * wikis it covers, its own state, and one night's run into the log. A wiki needs a
- * `work` map and answer cards, so a themes wiki such as jarvis is out.
+ * wikis it covers (`scope.ts`), its own state, and one night's run into the log.
  */
 
+import { randomUUID } from "node:crypto";
 import type { Config } from "../../config.ts";
 import { resolveWikiAnswerConfig } from "../../config.ts";
-import { listWikiAnswerHistory } from "../../db/wiki-answers.ts";
 import { getLog } from "../../logging.ts";
 import { getWikiRegistry } from "../registry-memo.ts";
-import { getWikiIndex } from "../store.ts";
 import { osloDay } from "../work-map/ids.ts";
-import { workMapKindFromReaderText } from "../work-map/kind.ts";
 import type { WorkMapState } from "../work-map/state.ts";
-import { computeFloor } from "./floor.ts";
-import { realGit } from "./git.ts";
 import { appendLogLines, DECISION_TRIAGE_DIR, nightlyLogPath, readLog, triageStateStore } from "./log.ts";
-import { realDecisionTriageModel, runDecisionTriage, type TriageRunDeps, type TriageRunResult } from "./run.ts";
-import type { RunLine } from "./schema.ts";
+import { runDecisionTriage, type TriageRunResult } from "./run.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION, type RunLine } from "./schema.ts";
+import { realTriageRunDeps, triageScope } from "./scope.ts";
 
 const log = getLog("wiki", "decision-triage");
 const DAY_MS = 86_400_000;
 
 export interface TriageLoopDeps {
-  /** The covered wikis this pass reads, from those the work map covers. */
+  /** The wikis this pass reads, from those the work map covers, read at each check. */
   wikis: (covered: readonly string[]) => Promise<string[]>;
   /** Called on every check: the two-nights-with-no-run-line warning. */
   beforeCheck: (wiki: string, nowMs: number) => Promise<void>;
   readState: (wiki: string) => Promise<WorkMapState | null>;
   run: (wiki: string, signal: AbortSignal) => Promise<{ outcome: TriageRunResult["outcome"] }>;
+  /** A pass that hit its bound: counts as `failed`, as a throw does. */
+  recordFailed: (wiki: string, error: string) => Promise<void>;
 }
 
 /** Whole Oslo nights between the last run line and today, not counting either. */
@@ -46,13 +44,20 @@ export function missedNights(runs: readonly Pick<RunLine, "at">[], nowMs: number
   return Math.max(missed, 0);
 }
 
-const readerKind = async (root: string) => {
+/** A run's throw, as the state records it. A throw during a stop is the stop. */
+export async function settleTriageRun<T extends { outcome: TriageRunResult["outcome"] }>(
+  run: () => Promise<T>,
+  signal: AbortSignal,
+  recordFailed: (error: string) => Promise<void>,
+): Promise<T | { outcome: "failed" | "aborted" }> {
   try {
-    return workMapKindFromReaderText(await Bun.file(`${root}/.wiki-reader.json`).text());
-  } catch {
-    return workMapKindFromReaderText(null);
+    return await run();
+  } catch (err) {
+    if (signal.aborted) return { outcome: "aborted" };
+    await recordFailed(err instanceof Error ? err.message : String(err));
+    return { outcome: "failed" };
   }
-};
+}
 
 export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE_DIR): TriageLoopDeps | null {
   if (!config.decisionTriageRepoRoots) {
@@ -64,30 +69,50 @@ export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE
   const warnedOn = new Map<string, string>();
   let floorMet = false;
   const entryOf = (wiki: string) => getWikiRegistry().find((e) => e.name.toLowerCase() === wiki.toLowerCase());
-  const covered = async (names: readonly string[]) => {
-    const out: string[] = [];
-    for (const name of names) {
-      const entry = entryOf(name);
-      if (!entry || !answerConfig.wikis.has(name.toLowerCase())) continue;
-      const kind = await readerKind(entry.root);
-      if (kind.ok && kind.kind === "work") out.push(name);
+  const droppedFor = new Map<string, string>();
+  let announced = false;
+  let names: string[] = [];
+
+  const warnMissed = async (wiki: string, nowMs: number) => {
+    const { runs } = await readLog(nightlyLogPath(wiki, dir));
+    const missed = missedNights(runs, nowMs);
+    const today = osloDay(nowMs);
+    if (missed >= 2 && warnedOn.get(wiki) !== today) {
+      warnedOn.set(wiki, today);
+      log.warn("Decision triage: {wiki} has {missed} nights with no run line", { wiki, missed });
     }
-    return out;
   };
-  let scope: Promise<string[]> | null = null;
+  /** A failed run, in the state's count and the log, so the night has its line. */
+  const recordFailed = async (wiki: string, error: string) => {
+    const at = Date.now();
+    await state.record(wiki, { at, outcome: "failed", error });
+    await appendLogLines(nightlyLogPath(wiki, dir), [
+      { type: "run", runId: randomUUID(), at, wiki, model: config.workMapModel, promptVersion: DECISION_TRIAGE_PROMPT_VERSION, usage: { calls: 0 }, repoRoots: config.decisionTriageRepoRoots, repos: [], cards: 0, floor: null, outcome: "failed", reason: error },
+    ]);
+  };
 
   return {
-    wikis: (names) => (scope ??= covered(names)),
-    beforeCheck: async (wiki, nowMs) => {
-      const { runs } = await readLog(nightlyLogPath(wiki, dir));
-      const missed = missedNights(runs, nowMs);
-      const today = osloDay(nowMs);
-      if (missed >= 2 && warnedOn.get(wiki) !== today) {
-        warnedOn.set(wiki, today);
-        log.warn("Decision triage: {wiki} has {missed} nights with no run line", { wiki, missed });
+    wikis: async (workMapWikis) => {
+      const scope = await triageScope({ workMapWikis, answerWikis: answerConfig.wikis, entryOf });
+      names = scope.covered.map((e) => e.name);
+      for (const wiki of names) droppedFor.delete(wiki);
+      for (const { wiki, reason, fault } of scope.dropped) {
+        if (droppedFor.get(wiki) !== reason) {
+          droppedFor.set(wiki, reason);
+          log.warn("Decision triage skips {wiki}: {reason}", { wiki, reason });
+        }
+        if (fault) await warnMissed(wiki, Date.now());
       }
+      if (!announced) {
+        announced = true;
+        if (names.length > 0) log.info("Decision triage covers {wikis}", { wikis: names.join(", ") });
+        else log.warn("Decision triage covers nothing, though DECISION_TRIAGE_REPO_ROOTS is set");
+      }
+      return names;
     },
+    beforeCheck: warnMissed,
     readState: (wiki) => state.read(wiki),
+    recordFailed,
     run: async (wiki, signal) => {
       const entry = entryOf(wiki);
       const at = Date.now();
@@ -95,43 +120,19 @@ export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE
         await state.record(wiki, { at, outcome: "refused", error: "not a registered wiki" });
         return { outcome: "refused" };
       }
-      const names = await (scope ?? Promise.resolve([wiki]));
-      const deps: TriageRunDeps = {
-        entry,
-        now: Date.now,
-        repoRoots: config.decisionTriageRepoRoots,
-        model: config.workMapModel,
-        ...(config.workMapEffort ? { effort: config.workMapEffort } : {}),
-        call: realDecisionTriageModel(config),
-        git: realGit,
-        loadIndex: () => getWikiIndex({ root: entry.root, refresh: true }),
-        readFile: async (abs) => {
-          try {
-            return await Bun.file(abs).text();
-          } catch {
-            return null;
-          }
-        },
-        answers: () => listWikiAnswerHistory(entry.name),
-        owner: answerConfig.owner,
-        groups: answerConfig.groups,
+      const deps = realTriageRunDeps(config, entry, answerConfig, {
         append: (lines) => appendLogLines(nightlyLogPath(wiki, dir), lines),
-        floor: () => computeFloor(names.flatMap((n) => {
+        floorEntries: () => names.flatMap((n) => {
           const e = entryOf(n);
-          return e ? [{ wiki: e.name, root: e.root }] : [];
-        }), listWikiAnswerHistory, realGit),
+          return e ? [e] : [];
+        }),
         signal,
-      };
-      let result: TriageRunResult;
-      try {
-        result = await runDecisionTriage(deps);
-      } catch (err) {
-        const error = err instanceof Error ? err.message : String(err);
+      });
+      const result = await settleTriageRun(() => runDecisionTriage(deps), signal, (error) => {
         log.warn("Decision triage threw for {wiki}: {error}", { wiki, error });
-        await state.record(wiki, { at, outcome: "failed", error });
-        return { outcome: "failed" };
-      }
-      if (result.outcome === "aborted") return result;
+        return recordFailed(wiki, error);
+      });
+      if (!("run" in result)) return result;
       await state.record(wiki, {
         at,
         outcome: result.outcome === "partial" ? "ok" : result.outcome,

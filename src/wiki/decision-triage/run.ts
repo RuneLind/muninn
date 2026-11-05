@@ -105,14 +105,17 @@ function addUsage(total: TriageUsage, reply: ModelReply): void {
 
 /** A batch's answer by its short card ids. A malformed entry or a whole answer
  *  that does not parse leaves its cards with no verdict. */
-export function parseVerdicts(text: string): { verdicts: Map<string, Verdict>; invalid: number } {
+export function parseVerdicts(text: string): { verdicts: Map<string, Verdict>; invalid: Set<string> } {
   const raw = answerSchema.parse(extractJson<unknown>(text));
   const verdicts = new Map<string, Verdict>();
-  let invalid = 0;
+  const invalid = new Set<string>();
   for (const entry of raw.verdicts) {
     const parsed = verdictSchema.safeParse(entry);
     if (parsed.success) verdicts.set(parsed.data.card, parsed.data);
-    else invalid++;
+    else {
+      const card = (entry as { card?: unknown } | null)?.card;
+      if (typeof card === "string") invalid.add(card);
+    }
   }
   return { verdicts, invalid };
 }
@@ -121,7 +124,15 @@ export interface BatchResult {
   batch: Batch;
   verdicts: (Verdict | null)[];
   failed?: string;
+  /** Items whose verdict came back and did not parse. */
+  malformed?: ReadonlySet<number>;
 }
+
+const MALFORMED = "a malformed verdict";
+const MISSING = "missing from the answer";
+
+/** Why item `i` of a batch has no verdict. */
+export const noVerdictReason = (r: BatchResult, i: number) => (r.failed ? "the batch failed" : r.malformed?.has(i) ? MALFORMED : MISSING);
 
 /** Call one batch; never throws. */
 export async function callBatch(wiki: string, batch: Batch, opts: { model: string; effort?: WorkMapEffort; call: TriageModel }, usage: TriageUsage): Promise<BatchResult> {
@@ -134,8 +145,9 @@ export async function callBatch(wiki: string, batch: Batch, opts: { model: strin
       ...(opts.effort ? { effort: opts.effort } : {}),
     });
     addUsage(usage, reply);
-    const { verdicts } = parseVerdicts(reply.text);
-    return { batch, verdicts: batch.items.map((_, i) => verdicts.get(`c${i + 1}`) ?? null) };
+    const { verdicts, invalid } = parseVerdicts(reply.text);
+    const malformed = new Set(batch.items.flatMap((_, i) => (invalid.has(`c${i + 1}`) ? [i] : [])));
+    return { batch, verdicts: batch.items.map((_, i) => verdicts.get(`c${i + 1}`) ?? null), malformed };
   } catch (err) {
     return { batch, verdicts: batch.items.map(() => null), failed: err instanceof Error ? err.message : String(err) };
   }
@@ -177,7 +189,11 @@ export function repoResolver(roots: RepoRoots, git: GitRun, opts: { fetch: boole
       }
       return held;
     },
-    facts: async (): Promise<RepoFact[]> => (await Promise.all(memo.values())).map((r) => r.fact),
+    facts: async (): Promise<RepoFact[]> => {
+      const names = [...memo.keys()];
+      const settled = await Promise.allSettled(memo.values());
+      return settled.map((r, i) => (r.status === "fulfilled" ? r.value.fact : { repo: names[i]!, found: false, reason: "could not be resolved" }));
+    },
   };
 }
 
@@ -219,7 +235,8 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   const roots = parseRepoRoots(deps.repoRoots);
   const resolver = repoResolver(roots, deps.git, { fetch: true });
 
-  const finish = async (outcome: RunOutcome, cards: number, reason?: string): Promise<RunLine> => {
+  /** Null when a stop came in while the floor was read: no line then. */
+  const finish = async (outcome: RunOutcome, cards: number, reason?: string): Promise<RunLine | null> => {
     let floor: FloorState | null = null;
     if (deps.floor) {
       try {
@@ -228,6 +245,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
         floor = { labelled: 0, added: 0, addedPages: 0, met: false, error: err instanceof Error ? err.message : String(err) };
       }
     }
+    if (deps.signal?.aborted) return null;
     const run: RunLine = {
       type: "run",
       runId,
@@ -246,9 +264,12 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     await deps.append([run]);
     return run;
   };
+  // A stop is no refusal: no line, and no failure against the day's count.
   const refuse = async (reason: string): Promise<TriageRunResult> => {
+    const run = await finish("refused", 0, reason);
+    if (!run) return { outcome: "aborted" };
     log.warn("Decision triage refused for {wiki}: {reason}", { wiki, reason });
-    return { outcome: "refused", reason, run: await finish("refused", 0, reason), counts, wallMs: deps.now() - startedAt };
+    return { outcome: "refused", reason, run, counts, wallMs: deps.now() - startedAt };
   };
 
   // Nothing is spent yet, so a throw here is a refusal and retries at the next check.
@@ -259,8 +280,11 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     const loaded = await deps.loadIndex();
     if (!loaded) return refuse("the wiki index could not be read");
     index = loaded;
+    // No page at all is a wrong root, never a quiet night. Pages with no open card are one.
+    if (!index.pages.some((p) => /\.mdx?$/i.test(p.relPath))) return refuse("the wiki has no pages");
     versions = await deps.answers();
     open = await collectOpenCards(index, (meta: WikiPageMeta) => deps.readFile(`${index.root}/${meta.relPath}`));
+    if (open.inScope > 0 && open.readable === 0) return refuse(`none of its ${open.inScope} page(s) could be read`);
   } catch (err) {
     return refuse(`the cards could not be read: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -269,7 +293,12 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
 
   // Repos before anything is spent. A setup fault is no verdict on any card.
   const names = new Set(pages.flatMap((p) => p.repos));
-  const resolved = await Promise.all([...names].map((n) => resolver.repo(n)));
+  let resolved: ResolvedRepo[];
+  try {
+    resolved = await Promise.all([...names].map((n) => resolver.repo(n)));
+  } catch (err) {
+    return refuse(`the repos could not be resolved: ${err instanceof Error ? err.message : String(err)}`);
+  }
   if (cards.length > 0 && names.size > 0 && !resolved.some((r) => r.fact.found)) return refuse("no-repo");
 
   const view = liveView(index, deps.readFile);
@@ -287,6 +316,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   const items: BatchItem[] = [];
   const held: CardLine[] = [];
   const pageFacts = new Map<string, PageFacts>();
+  let noFacts = 0;
   for (const { relPath, id } of cards) {
     if (deps.signal?.aborted) return { outcome: "aborted" };
     const read = byPage.get(relPath)!;
@@ -297,6 +327,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
       continue;
     }
     if (overRss()) {
+      noFacts++;
       held.push(line({ ...base(relPath, id), recommendation: recommendationOf(read.page.questions.find((x) => x.id === id)!), verdict: "NO_VERDICT", reason: "the memory guard stopped the gather" }));
       continue;
     }
@@ -309,9 +340,11 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
       }
       items.push({ gathered, page });
     } catch (err) {
+      noFacts++;
       held.push(line({ ...base(relPath, id), recommendation: recommendationOf(read.page.questions.find((x) => x.id === id)!), verdict: "NO_VERDICT", reason: `facts: ${err instanceof Error ? err.message : String(err)}` }));
     }
   }
+  if (deps.signal?.aborted) return { outcome: "aborted" };
   await deps.append(held);
 
   const { batches, oversized } = buildBatches(wiki, items);
@@ -319,6 +352,8 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
 
   let batchFailures = 0;
   let verdictCount = 0;
+  let malformed = 0;
+  let missing = 0;
   for (const batch of batches) {
     if (deps.signal?.aborted) return { outcome: "aborted" };
     const result = await callBatch(wiki, batch, deps, usage);
@@ -330,18 +365,33 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     const lines = batch.items.map((item, i) => {
       const v = result.verdicts[i];
       if (v) verdictCount++;
+      const reason = noVerdictReason(result, i);
+      if (!v && reason === MALFORMED) malformed++;
+      if (!v && reason === MISSING) missing++;
       return line({
         ...lineBase(item),
-        ...(v ? verdictFields(v) : { verdict: "NO_VERDICT" as const, reason: result.failed ? "the batch failed" : "missing from the answer" }),
+        ...(v ? verdictFields(v) : { verdict: "NO_VERDICT" as const, reason }),
       });
     });
     await deps.append(lines);
   }
 
-  const asked = items.length > 0;
-  const outcome: RunOutcome = asked && verdictCount === 0 ? "failed" : batchFailures > 0 ? "partial" : "ok";
-  const run = await finish(outcome, cards.length, outcome === "ok" ? undefined : `${batchFailures} of ${batches.length} batch(es) failed`);
-  if (outcome === "failed") log.warn("Decision triage for {wiki} got no verdicts", { wiki });
+  // `failed`: cards went unjudged and none was judged. `partial`: a batch or a
+  // gather fell over beside verdicts that landed. A card the model skipped, or one
+  // too large to send, beside verdicts stays `ok`: its line says so. Nothing to ask
+  // (no open card, or only `ANSWERED` lines) is `ok`.
+  const unjudged = (counts.NO_VERDICT ?? 0) > 0;
+  const outcome: RunOutcome = verdictCount === 0 && unjudged ? "failed" : batchFailures > 0 || noFacts > 0 ? "partial" : "ok";
+  const why = [
+    ...(batchFailures > 0 ? [`${batchFailures} of ${batches.length} batch(es) failed`] : []),
+    ...(noFacts > 0 ? [`${noFacts} card(s) with no facts`] : []),
+    ...(malformed > 0 ? [`${malformed} malformed verdict(s)`] : []),
+    ...(missing > 0 ? [`${missing} card(s) ${MISSING}`] : []),
+    ...(oversized.length > 0 ? [`${oversized.length} card(s) over the call's size limit`] : []),
+  ].join(", ");
+  const run = await finish(outcome, cards.length, outcome === "ok" ? undefined : why);
+  if (!run) return { outcome: "aborted" };
+  if (outcome !== "ok") log.warn("Decision triage for {wiki}: {outcome}: {why}", { wiki, outcome, why });
   return { outcome, run, counts, wallMs: deps.now() - startedAt };
 }
 

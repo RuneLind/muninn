@@ -1,8 +1,11 @@
 /** The two triage scripts' `--root <wiki>=<path>` flag and registry lookup. */
 
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { getWikiRegistry } from "../registry-memo.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
+import { isInsideDir } from "../work-map/dry-run.ts";
+import { DECISION_TRIAGE_DIR } from "./log.ts";
 
 export function rootOverrides(flags: readonly string[]): Map<string, string> {
   const out = new Map<string, string>();
@@ -22,4 +25,12 @@ export function triageEntries(overrides: ReadonlyMap<string, string>, names: rea
     const found = getWikiRegistry().find((e) => e.name.toLowerCase() === name.toLowerCase());
     return found ? [found] : [];
   });
+}
+
+/** Would `--out` land in the log folder? A folder not there yet holds nothing, but
+ *  the append would create it, so a path under its name still counts. */
+export function outInsideLog(out: string, dir: string = DECISION_TRIAGE_DIR): boolean {
+  if (existsSync(dir)) return isInsideDir(dir, out);
+  const rel = path.relative(dir, path.resolve(out));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }

@@ -8,6 +8,7 @@
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { killProcessGroup } from "../commit.ts";
 import type { RepoFact } from "./schema.ts";
 
 const GIT_TIMEOUT_MS = 15_000;
@@ -18,7 +19,9 @@ export interface GitResult {
   ok: boolean;
   stdout: string;
   stderr?: string;
-  /** Output stopped at `maxLines` or the byte bound; the process was killed. */
+  /** Output reached `maxLines` or the byte bound; the process was killed. An exact
+   *  `maxLines` of output reads as capped too: the facts carry this flag, and the
+   *  prompt is frozen. */
   capped?: boolean;
   timedOut?: boolean;
 }
@@ -34,6 +37,8 @@ export const realGit: GitRun = async (cwd, args, opts = {}) => {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      // Its own process group, so a timeout's kill reaches the transport child.
+      detached: true,
       env: {
         PATH: process.env.PATH ?? "",
         HOME: process.env.HOME ?? homedir(),
@@ -45,37 +50,49 @@ export const realGit: GitRun = async (cwd, args, opts = {}) => {
   } catch (err) {
     return { ok: false, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
   }
-  let timedOut = false;
   const running = proc;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    running.kill("SIGKILL");
-  }, opts.timeoutMs ?? GIT_TIMEOUT_MS);
   let out = "";
   let lines = 0;
   let capped = false;
   const decoder = new TextDecoder();
   const stderr = new Response(proc.stderr).text();
   const reader = proc.stdout.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const text = decoder.decode(value, { stream: true });
-    out += text;
-    for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) lines++;
-    if ((opts.maxLines !== undefined && lines >= opts.maxLines) || out.length > GIT_MAX_BYTES) {
-      capped = true;
-      proc.kill("SIGKILL");
-      await reader.cancel().catch(() => {});
-      break;
+  const collect = (async () => {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      out += text;
+      for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) lines++;
+      if ((opts.maxLines !== undefined && lines >= opts.maxLines) || out.length > GIT_MAX_BYTES) {
+        capped = true;
+        killProcessGroup(running);
+        await reader.cancel().catch(() => {});
+        break;
+      }
     }
-  }
-  const code = await proc.exited;
+    const code = await running.exited;
+    return { code, errText: await stderr.catch(() => "") };
+  })();
+  collect.catch(() => {}); // the losing branch must never surface as unhandled
+  // A race, as in `runGit`: a transport child inherits the pipes, so a read awaited
+  // after the kill can outlive the timeout.
+  const timeoutMs = opts.timeoutMs ?? GIT_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      killProcessGroup(running);
+      resolve(null);
+    }, timeoutMs);
+  });
+  const done = await Promise.race([collect, expiry]);
   clearTimeout(timer);
-  const errText = await stderr.catch(() => "");
+  if (done === null) void reader.cancel().catch(() => {});
+  const timedOut = done === null && !capped;
+  const errText = done?.errText || (timedOut ? `git ${args[0] ?? "?"} timed out after ${timeoutMs} ms` : "");
   if (capped && opts.maxLines !== undefined) out = out.split("\n").slice(0, opts.maxLines).join("\n");
   return {
-    ok: capped || (code === 0 && !timedOut),
+    ok: capped || (done?.code === 0),
     stdout: out,
     ...(errText ? { stderr: errText } : {}),
     ...(capped ? { capped } : {}),

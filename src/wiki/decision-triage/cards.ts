@@ -12,6 +12,9 @@ export interface OpenCards {
   /** The pages holding at least one card, read once. */
   pages: PageRead[];
   cards: { relPath: string; id: string }[];
+  /** Pages in scope, and how many of them could be read: the unreadable wiki's tell. */
+  inScope: number;
+  readable: number;
 }
 
 function pageInScope(meta: WikiPageMeta): boolean {
@@ -21,9 +24,13 @@ function pageInScope(meta: WikiPageMeta): boolean {
 export async function collectOpenCards(index: WikiIndex, readBody: (meta: WikiPageMeta) => Promise<string | null>): Promise<OpenCards> {
   const pages: PageRead[] = [];
   const cards: OpenCards["cards"] = [];
+  let inScope = 0;
+  let readable = 0;
   for (const meta of [...index.pages].sort((a, b) => a.relPath.localeCompare(b.relPath))) {
     if (!pageInScope(meta)) continue;
+    inScope++;
     const text = await readBody(meta);
+    if (text !== null) readable++;
     if (text === null || !text.includes("<Question")) continue;
     const read = readPageText(meta.relPath, text);
     const open = read.page.questions.filter((q) => q.id !== null && !q.duplicate && (read.page.states.get(q.id)?.kind ?? "open") === "open");
@@ -31,5 +38,5 @@ export async function collectOpenCards(index: WikiIndex, readBody: (meta: WikiPa
     pages.push(read);
     for (const q of open) cards.push({ relPath: meta.relPath, id: q.id! });
   }
-  return { pages, cards };
+  return { pages, cards, inScope, readable };
 }
