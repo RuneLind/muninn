@@ -18,7 +18,6 @@ import {
   authorGroupsOf,
   isAskedAuthor,
   resolveQuestionTargets,
-  unclosedCards,
 } from "./question.ts";
 import { parseQuestionLanguage, QUESTION_LABELS } from "./question-labels.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -746,45 +745,5 @@ describe("fix round 2: a fact mark over the reopen phrase", () => {
     const text = 'Skal vi? Lukket 07.10 (D10). <Fact n="2" v="ok">Gjenåpnet 08.10</Fact>.';
     expect(itemReopened(text)).toBe(true);
     expect(itemQuestionState(text, false, new Set(["D10"]))).toEqual({ kind: "open" });
-  });
-});
-
-describe("unclosedCards: the fact a triage reads", () => {
-  const cards = (md: string) => unclosedCards(parseQuestionPage(parseBlocks(md)));
-
-  test("the card's own word and the decision naming it, side by side", () => {
-    expect(cards(page("Keep it? decided A.", ["- **D5** — The old path stays (O3 → A)."]))).toEqual([
-      { id: "O3", decision: "D5", namedBy: "D5", word: "decided" },
-    ]);
-    expect(cards(page("Keep it? decided A."))).toEqual([{ id: "O3", decision: null, namedBy: null, word: "decided" }]);
-    expect(cards(page("Keep it?", ["- **D5** — The old path stays (O3 → A)."]))).toEqual([
-      { id: "O3", decision: "D5", namedBy: "D5", word: null },
-    ]);
-  });
-
-  test("it reports what the linter leaves to its near-miss finding", () => {
-    expect(cards(page("Keep it? Besvart 06.10: ja."))).toEqual([{ id: "O3", decision: null, namedBy: null, word: "Besvart" }]);
-  });
-
-  test("a superseded decision names its successor as the one to close with", () => {
-    const md = page("Keep it?", ["- **D5** — The old path stays (O3 → A). Erstattet av D6.", "- **D6** — A new path."]);
-    expect(cards(md)).toEqual([{ id: "O3", decision: "D6", namedBy: "D5", word: null }]);
-  });
-
-  test("a supersede chain to nowhere, or round in a circle, rules on nothing", () => {
-    expect(cards(page("Keep it?", ["- **D5** — The old path stays (O3 → A). Superseded by D9."]))).toEqual([]);
-    expect(
-      cards(page("Keep it?", ["- **D5** — The old path stays (O3 → A). Superseded by D6.", "- **D6** — A new path. Superseded by D5."])),
-    ).toEqual([]);
-  });
-
-  test("two blocks sharing an id are one row, and a repeated decision id reads its first item", () => {
-    const again = ['<Question id="O3">', "", "Q?", "", "</Question>"].join("\n");
-    expect(cards(`${page("Keep it?", ["- **D5** — A first statement here.", "- **D5** — The old path stays (O3 → A)."])}\n\n${again}`)).toEqual([]);
-    expect(cards(`${page("Keep it? decided A.")}\n\n${again}`).map((c) => c.id)).toEqual(["O3"]);
-  });
-
-  test("the ruling word reads the nested sub-bullets, as the close rule does", () => {
-    expect(cards(page("Keep it?\n  - Rune decided A."))).toEqual([{ id: "O3", decision: null, namedBy: null, word: "decided" }]);
   });
 });

@@ -129,7 +129,7 @@ describe("lint: question-block, a card its page already answered", () => {
     return (await questionFindings()).map((x) => x.message);
   };
   const addDecision = (id: string, word: string) =>
-    `DecisionLog item ${id} says "${word}" but its card stays open and no decision records the ruling; add a decision recording it, then write Closed <date> (Dn). in item ${id}`;
+    `DecisionLog item ${id} says "${word}" but its card stays open and no decision's first sentence names ${id} as ruled. If this is a ruling, write Closed <date> (Dn). in item ${id}, naming the decision that records it or one you add; if it is not, leave the card open`;
   const rules = (d: string, id: string) =>
     `Decision ${d} already rules on ${id} but its card stays open; write Closed <date> (${d}). in item ${id}`;
 
@@ -203,6 +203,25 @@ describe("lint: question-block, a card its page already answered", () => {
 
   test("a negated word and a plain one in one item flags the plain one", async () => {
     expect(await messagesFor(["- **O3** — Keep it? Not decided on 01.10, decided A on 03.10."])).toEqual([addDecision("O3", "decided")]);
+  });
+
+  for (const [name, items] of [
+    ["a decision the item cites but no shape reads", ["- **O3** — Keep it? Avgjort 06.10 (D5).", "- **D5** — The old path stays."]],
+    ["a decision naming the card in passing", ["- **O3** — Keep it? answered A.", "- **D1** — Build the script (O3 A)."]],
+  ] as const) {
+    test(`the message claims only what it checked: ${name}`, async () => {
+      const [message, ...rest] = await messagesFor([...items]);
+      expect(rest).toEqual([]);
+      expect(message).toContain("no decision's first sentence names O3 as ruled");
+      expect(message).not.toContain("no decision records");
+      expect(message).toContain("naming the decision that records it");
+      expect(message).toContain("or one you add");
+      expect(message).toContain("if it is not, leave the card open");
+    });
+  }
+
+  test("a struck word and a question draw no finding at all", async () => {
+    expect(await messagesFor(["- **O3** — Keep it? ~~decided A~~ taken back. Who decided this?"])).toEqual([]);
   });
 
   test("a near miss on Answered or Besvart gets no second finding", async () => {

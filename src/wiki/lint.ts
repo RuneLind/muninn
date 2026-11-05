@@ -50,7 +50,8 @@
  *                      refuses it), an id two DecisionLog items carry (the
  *                      first decides), an item carrying a near-miss close
  *                      (D6 — `Closed 2026-10-08: B (D15)`, `Besvart 06.10`),
- *                      an open card its page already rules on (`unclosedCards`),
+ *                      an open card its page already rules on (`unclosedCards`,
+ *                      `src/format/question-unclosed.ts`),
  *                      or a `questions_to:` written as a block list, which
  *                      `parseFrontmatter` does not read. Rules:
  *                      `src/format/question.ts`.
@@ -203,10 +204,9 @@ import {
   parseQuestionAttrs,
   parseQuestionPage,
   parseQuestionsTo,
-  unclosedCards,
   type QuestionState,
-  type UnclosedCard,
 } from "../format/question.ts";
+import { unclosedCards, type UnclosedCard } from "../format/question-unclosed.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { CASE_STATUSES, parseCaseLabels } from "../format/case-board.ts";
 import type { Block } from "../format/markdown-ast.ts";
@@ -674,7 +674,7 @@ function nearMissConsequence(id: string, quoted: string, state: QuestionState | 
 /** What to write for a card whose page already holds its ruling. */
 function unclosedCardMessage(card: UnclosedCard): string {
   if (card.decision === null) {
-    return `DecisionLog item ${card.id} says "${card.word}" but its card stays open and no decision records the ruling; add a decision recording it, then write Closed <date> (Dn). in item ${card.id}`;
+    return `DecisionLog item ${card.id} says "${card.word}" but its card stays open and no decision's first sentence names ${card.id} as ruled. If this is a ruling, write Closed <date> (Dn). in item ${card.id}, naming the decision that records it or one you add; if it is not, leave the card open`;
   }
   const decision =
     card.namedBy === card.decision ? `Decision ${card.decision}` : `Decision ${card.namedBy}, superseded by ${card.decision},`;
