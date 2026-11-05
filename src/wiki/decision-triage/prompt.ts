@@ -18,15 +18,15 @@ Give each card exactly one verdict:
 - SETTLED: the facts already hold the answer. A decision in the page's log rules on it, or the code or commits show it was done. Name the decision or the line.
 - VOID: the question no longer applies. What it asks about is gone, replaced, or overtaken by events the facts show.
 - DEFAULT: the card can take its recommended choice and move on. Nothing in the facts argues against the recommendation, and a wrong choice would be cheap to undo. The owner would most likely just agree.
-- ASK_OWNER: it needs the owner's own knowledge, access, authority or taste. Something only the owner has decides it, and the facts cannot stand in for it.
+- ASK_OWNER: it needs the owner's own knowledge, access or authority, or the owner's taste where the facts show the choices are close or the matter hard to undo. Something only the owner has decides it.
 - ASK_OTHER: it needs someone else's knowledge, access or authority, such as a domain expert, a team or an organization's owner. This holds even when the card is addressed to a group the owner is in: ask whose knowledge decides it, not whose name is on the card.
 
 How to choose:
 
-- Prefer the verdict the facts can carry. A card whose text argues for one choice, on a reversible matter, is DEFAULT however much text it has.
+- Prefer the verdict the facts can carry. A card whose text argues for one choice, on a reversible matter, is DEFAULT however much text it has, unless it turns on knowledge the facts do not hold (see the ASK_OTHER rule below).
 - Flag a card (ASK_OWNER or ASK_OTHER) when the owner would likely have something to add, not merely pick: the recommendation rests on something unverified, the choices are close, the card asks for a check nobody has done, the recommendation conflicts with a decision or with the code, or the matter is hard to undo. Do not flag a card only because it is important.
-- ASK_OWNER needs a reason the facts show, not taste in general. On the owner's own tools, notes and workflow, a reasoned recommendation on a reversible matter is DEFAULT, even when the owner could have an opinion.
-- A card that turns on a business or legal rule, how a product should behave for its users, production data, or another team's system or process needs knowledge the code and commits do not hold. Unless the facts settle it, that card is ASK_OTHER, also when its recommendation reads clear and when the owner is the one who would pass it on.
+- ASK_OWNER needs a reason in the facts why only the owner can decide. Taste alone is not one: on tools, notes and workflow that only the owner uses, a reasoned recommendation on a reversible matter is DEFAULT, even when the owner could have an opinion.
+- An exception to the DEFAULT rule above: a card that turns on a business or legal rule, how a product should behave for its users, production data, or a system or process a team shares, also one the owner works on, needs knowledge the code and commits do not hold. Unless the facts make it SETTLED or VOID, that card is ASK_OTHER, also when its recommendation reads clear and when the owner is the one who would pass it on.
 - If the facts contradict the card's premise, say so in why. Being stale can make a card VOID, or can make it need the owner.
 - An unclosedHint is a mechanical reading of free prose, not a ruling. It may have caught a word inside a condition. Read the whole decisionLog beside it before you trust it. A hint with only a word and no decision is the weakest kind.
 - answers hold what people said earlier. A not-sure answer, a text-only answer or an answer to since-changed wording decides nothing by itself, but its text is evidence.
