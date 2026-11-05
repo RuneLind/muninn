@@ -157,7 +157,7 @@ describe("a new prompt version restarts part (2)", () => {
     const { replay } = replaying();
     const out = await runPart2({ wikis: [{ wiki: "w", labelled: floorMet() }], log: { runs: [run(start), old(start - 20 * DAY)], cards: lines }, nowMs: NOW, hand: { read: 5, wrong: 0 }, replay, ...common });
     expect(out.headline.result).toBe("pass");
-    expect(out.headline.line).toContain("nightly median ASK_OWNER 0%");
+    expect(out.headline.line).toContain("nightly median ASK_OWNER 0.0%");
     expect(out.headline.line).toContain("4 log line(s) of older prompt versions left out");
   });
 

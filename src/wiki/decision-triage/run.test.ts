@@ -13,7 +13,7 @@ import type { WikiIndex, WikiPageMeta } from "../store.ts";
 import { WORK_MAP_SPAWN_ARGS, WORK_MAP_TIMEOUT_MS } from "../work-map/run.ts";
 import { appendLogLines, nightlyLogPath, parseLog, readLog } from "./log.ts";
 import { TRIAGE_SYSTEM_PROMPT } from "./prompt.ts";
-import { decisionTriageBotConfig, parseVerdicts, realDecisionTriageModel, runDecisionTriage, type TriageModel, type TriageRunDeps } from "./run.ts";
+import { decisionTriageBotConfig, parseVerdicts, realDecisionTriageModel, runDecisionTriage, type TriageModel, type TriageProgress, type TriageRunDeps } from "./run.ts";
 import { commitAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 import { realGit } from "./git.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, type LogLine } from "./schema.ts";
@@ -190,18 +190,85 @@ describe("partial and failed nights", () => {
     expect(cards.every((c) => c.verdict === "NO_VERDICT")).toBe(true);
   });
 
-  test("a card missing from the answer, or malformed, logs NO_VERDICT and the night stays ok", async () => {
+  test("a card missing from the answer, or malformed, logs NO_VERDICT and the night is partial, counting both", async () => {
     const res = await runDecisionTriage(
       deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}\n${card("O3")}`) } }, {
         call: async () => ({ text: JSON.stringify({ verdicts: [{ card: "c1", verdict: "ASK_OWNER", costOfDelay: "high", reversible: false, onlyOwnerHas: "smak", why: "fordi", evidence: [], restsOnPrs: ["repo#1"] }, { card: "c2", verdict: "MAYBE" }] }) }),
       }),
     );
-    expect(res.outcome).toBe("ok");
-    const { cards } = await readLog(dirs.log);
+    expect(res.outcome).toBe("partial");
+    const { cards, runs } = await readLog(dirs.log);
+    expect(runs[0]).toMatchObject({ outcome: "partial", reason: "1 malformed verdict(s), 1 card(s) missing from the answer" });
     expect(cards.map((c) => c.verdict)).toEqual(["ASK_OWNER", "NO_VERDICT", "NO_VERDICT"]);
     expect(cards[0]).toMatchObject({ onlyOwnerHas: "smak", restsOnPrs: ["repo#1"], costOfDelay: "high", reversible: false });
     expect(cards[1]!.reason).toBe("a malformed verdict");
     expect(cards[2]!.reason).toBe("missing from the answer");
+  });
+
+  test("only a malformed verdict beside one that landed is partial too", async () => {
+    const res = await runDecisionTriage(
+      deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }, {
+        call: async () => ({ text: JSON.stringify({ verdicts: [{ card: "c1", verdict: "DEFAULT", costOfDelay: "low", reversible: true, onlyOwnerHas: null, why: "fordi", evidence: [], restsOnPrs: [] }, { card: "c2", verdict: "MAYBE" }] }) }),
+      }),
+    );
+    expect(res.outcome).toBe("partial");
+    expect((await readLog(dirs.log)).runs[0]!.reason).toBe("1 malformed verdict(s)");
+  });
+
+  test("the model answering 1 of 25 cards is partial, and the reason counts the other 24", async () => {
+    const pages = { "plans/p.mdx": { text: page(Array.from({ length: 25 }, (_, i) => card(`O${i + 1}`)).join("\n")) } };
+    const res = await runDecisionTriage(deps(pages, { call: async () => ({ text: answerVerdicts('"card": "c1"') }) }));
+    expect(res.outcome).toBe("partial");
+    expect((await readLog(dirs.log)).runs[0]!.reason).toBe("24 card(s) missing from the answer");
+  });
+
+  test("a card over the limit beside verdicts stays ok, and the run line still counts it", async () => {
+    const pages = { "plans/p.mdx": { text: page(`${card("O1")}\n${card("BIG", " " + "x".repeat(130_000))}`) } };
+    const res = await runDecisionTriage(deps(pages));
+    expect(res.outcome).toBe("ok");
+    const { runs } = await readLog(dirs.log);
+    expect(runs[0]).toMatchObject({ outcome: "ok", reason: "1 card(s) over the call's size limit" });
+  });
+
+  test("a clean night has no reason", async () => {
+    const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(card("O1")) } }));
+    expect(res.outcome).toBe("ok");
+    expect((await readLog(dirs.log)).runs[0]!.reason).toBeUndefined();
+  });
+
+  test("the progress is live: run id, calls, usage, cards and verdicts as each batch lands, repos before any call", async () => {
+    const seen: TriageProgress[] = [];
+    const snapshots: unknown[] = [];
+    await runDecisionTriage(deps(many(), {
+      track: (p) => void seen.push(p),
+      call: async (req) => {
+        const p = seen[0]!;
+        snapshots.push({ calls: p.usage.calls, cost: p.usage.costUsd, logged: p.cardsLogged, verdicts: p.verdicts, open: p.open, repos: p.repos.map((r) => r.repo) });
+        return { text: answerVerdicts(req.prompt), costUsd: 0.5 };
+      },
+    }));
+    expect(seen).toHaveLength(1);
+    expect(snapshots).toEqual([
+      { calls: 0, cost: undefined, logged: 0, verdicts: 0, open: 30, repos: ["code"] },
+      { calls: 1, cost: 0.5, logged: 25, verdicts: 25, open: 30, repos: ["code"] },
+    ]);
+    const { cards, runs } = await readLog(dirs.log);
+    expect(seen[0]!.runId).toBe(runs[0]!.runId);
+    expect(cards.every((c) => c.runId === seen[0]!.runId && c.at === seen[0]!.at)).toBe(true);
+  });
+
+  test("a card line counts as logged only once it is written, and only a model verdict counts as a verdict", async () => {
+    let progress: TriageProgress | undefined;
+    const res = runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }, {
+      answers: async () => [answer("O1")],
+      track: (p) => void (progress = p),
+      append: async (lines) => {
+        if (lines.some((l) => l.type === "card" && l.verdict === "DEFAULT")) throw new Error("disk full");
+        await appendLogLines(dirs.log, lines);
+      },
+    }));
+    await expect(res).rejects.toThrow("disk full");
+    expect(progress).toMatchObject({ cardsLogged: 1, verdicts: 0, open: 2 });
   });
 
   /** Facts for a card naming `a.txt` throw; the rest gather. */

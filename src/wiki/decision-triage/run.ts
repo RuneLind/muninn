@@ -3,7 +3,7 @@
  * tool-less model calls in batches, and everything appended through a sink. The
  * run writes no wiki page and takes no write lock (D3). A batch that fails makes
  * the night `partial` and keeps what landed; only a night with no verdicts at all
- * is `failed`.
+ * is `failed`, including one a throw or the pass's bound cut short (`TriageProgress`).
  */
 
 import { randomUUID } from "node:crypto";
@@ -197,6 +197,19 @@ export function repoResolver(roots: RepoRoots, git: GitRun, opts: { fetch: boole
   };
 }
 
+/** What a pass has done so far, live, for the failure path when it throws or hits its
+ *  bound. `usage` counts calls answered, so one still in flight is not in it. */
+export interface TriageProgress {
+  runId: string;
+  at: number;
+  usage: TriageUsage;
+  repos: RepoFact[];
+  /** Open cards in scope, once read. */
+  open: number | null;
+  cardsLogged: number;
+  verdicts: number;
+}
+
 export interface TriageRunDeps {
   entry: WikiRegistryEntry;
   now: () => number;
@@ -217,6 +230,8 @@ export interface TriageRunDeps {
   /** The floor's state for the run line; `startedAt` is this run's own line. */
   floor?: (startedAt: number) => Promise<FloorState>;
   signal?: AbortSignal;
+  /** Handed the run's live progress before anything is spent. */
+  track?: (progress: TriageProgress) => void;
 }
 
 export type TriageRunResult =
@@ -231,6 +246,8 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   const runId = randomUUID();
   const wiki = deps.entry.name;
   const usage: TriageUsage = { calls: 0 };
+  const progress: TriageProgress = { runId, at: startedAt, usage, repos: [], open: null, cardsLogged: 0, verdicts: 0 };
+  deps.track?.(progress);
   const counts: Record<string, number> = {};
   const roots = parseRepoRoots(deps.repoRoots);
   const resolver = repoResolver(roots, deps.git, { fetch: true });
@@ -289,6 +306,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     return refuse(`the cards could not be read: ${err instanceof Error ? err.message : String(err)}`);
   }
   const { pages, cards } = open;
+  progress.open = cards.length;
   if (deps.signal?.aborted) return { outcome: "aborted" };
 
   // Repos before anything is spent. A setup fault is no verdict on any card.
@@ -299,6 +317,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   } catch (err) {
     return refuse(`the repos could not be resolved: ${err instanceof Error ? err.message : String(err)}`);
   }
+  progress.repos = resolved.map((r) => r.fact);
   if (cards.length > 0 && names.size > 0 && !resolved.some((r) => r.fact.found)) return refuse("no-repo");
 
   const view = liveView(index, deps.readFile);
@@ -311,6 +330,12 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   const base = (relPath: string, id: string) => {
     const q = byPage.get(relPath)!.page.questions.find((x) => x.id === id)!;
     return { relPath, id, questionHash: sha256(q.hashInput) };
+  };
+
+  const appendCards = async (lines: readonly CardLine[]) => {
+    await deps.append(lines);
+    progress.cardsLogged += lines.length;
+    progress.verdicts += lines.filter((l) => l.verdict !== "ANSWERED" && l.verdict !== "NO_VERDICT").length;
   };
 
   const items: BatchItem[] = [];
@@ -345,13 +370,12 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     }
   }
   if (deps.signal?.aborted) return { outcome: "aborted" };
-  await deps.append(held);
+  await appendCards(held);
 
   const { batches, oversized } = buildBatches(wiki, items);
-  await deps.append(oversized.map((o) => line({ ...lineBase(o), verdict: "NO_VERDICT", reason: "over the call's size limit" })));
+  await appendCards(oversized.map((o) => line({ ...lineBase(o), verdict: "NO_VERDICT", reason: "over the call's size limit" })));
 
   let batchFailures = 0;
-  let verdictCount = 0;
   let malformed = 0;
   let missing = 0;
   for (const batch of batches) {
@@ -364,7 +388,6 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     }
     const lines = batch.items.map((item, i) => {
       const v = result.verdicts[i];
-      if (v) verdictCount++;
       const reason = noVerdictReason(result, i);
       if (!v && reason === MALFORMED) malformed++;
       if (!v && reason === MISSING) missing++;
@@ -373,15 +396,15 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
         ...(v ? verdictFields(v) : { verdict: "NO_VERDICT" as const, reason }),
       });
     });
-    await deps.append(lines);
+    await appendCards(lines);
   }
 
-  // `failed`: cards went unjudged and none was judged. `partial`: a batch or a
-  // gather fell over beside verdicts that landed. A card the model skipped, or one
-  // too large to send, beside verdicts stays `ok`: its line says so. Nothing to ask
-  // (no open card, or only `ANSWERED` lines) is `ok`.
+  // `failed`: cards went unjudged and none was judged. `partial`: a batch or a gather
+  // fell over, or the model dropped or garbled a card, beside verdicts that landed. A
+  // card too large to send beside verdicts stays `ok`, with a reason. Nothing to ask
+  // (no open card, or only `ANSWERED` lines) is a clean `ok`, with no reason.
   const unjudged = (counts.NO_VERDICT ?? 0) > 0;
-  const outcome: RunOutcome = verdictCount === 0 && unjudged ? "failed" : batchFailures > 0 || noFacts > 0 ? "partial" : "ok";
+  const outcome: RunOutcome = progress.verdicts === 0 && unjudged ? "failed" : batchFailures > 0 || noFacts > 0 || malformed > 0 || missing > 0 ? "partial" : "ok";
   const why = [
     ...(batchFailures > 0 ? [`${batchFailures} of ${batches.length} batch(es) failed`] : []),
     ...(noFacts > 0 ? [`${noFacts} card(s) with no facts`] : []),
@@ -389,9 +412,9 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     ...(missing > 0 ? [`${missing} card(s) ${MISSING}`] : []),
     ...(oversized.length > 0 ? [`${oversized.length} card(s) over the call's size limit`] : []),
   ].join(", ");
-  const run = await finish(outcome, cards.length, outcome === "ok" ? undefined : why);
+  const run = await finish(outcome, cards.length, why);
   if (!run) return { outcome: "aborted" };
-  if (outcome !== "ok") log.warn("Decision triage for {wiki}: {outcome}: {why}", { wiki, outcome, why });
+  if (why) log.warn("Decision triage for {wiki}: {outcome}: {why}", { wiki, outcome, why });
   return { outcome, run, counts, wallMs: deps.now() - startedAt };
 }
 

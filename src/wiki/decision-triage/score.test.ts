@@ -20,6 +20,7 @@ import {
   nightsOf,
   part1Headline,
   part2Headline,
+  shownPct,
   projectedShare,
   replayReport,
   settledAnswers,
@@ -305,11 +306,79 @@ describe("the replay's figures", () => {
   test("the bars read the raw share: 11 of 14 with 16 of 35 is 50.24%, over 50% though it prints 50%", () => {
     const h = head(11, 16);
     expect(h.result).toBe("worse");
-    expect(h.line).toContain("50% flagged");
+    expect(h.line).toContain("50.2% flagged");
     const report = replayReport(build(14, 35, 12, 8), population);
     expect(part1Headline({ ...report, sharePct: 39, shareRaw: 39.3 }).result).toBe("tie");
     expect(part1Headline({ ...report, sharePct: 39, shareRaw: 39 }).result).toBe("better");
     expect(part1Headline({ ...report, sharePct: 50, shareRaw: 50 }).result).toBe("tie");
+  });
+
+  describe("the headline prints what the bars read", () => {
+    const BARS = "Bars, read raw: worse at 9 or fewer caught or over 50% flagged; better at 12 or more caught and at most 39% flagged.";
+    /** The contract's two controls beside the verdict: text alone 10 of 14 with 12 of 35, the rule 11 of 14 with 10 of 35. */
+    const withControls = (caught: number, flaggedOthers: number) =>
+      build(14, 35, caught, flaggedOthers).map((it, i) => ({
+        ...it,
+        textAlone: i < 14 ? i < 10 : i - 14 < 12,
+        wiki: (i < 14 ? i < 11 : i - 14 < 10) ? "melosys-kode-wiki" : "mimir",
+      }));
+    const line = (caught: number, flaggedOthers: number) => part1Headline(replayReport(withControls(caught, flaggedOthers), population));
+
+    test.each([
+      ["worse", 11, 16, "WORSE: 11 of 14 caught, 50.2% flagged"],
+      ["worse", 9, 3, "WORSE: 9 of 14 caught, 16.2% flagged"],
+      ["better", 12, 8, "BETTER: 12 of 14 caught, 31.5% flagged"],
+      ["tie", 10, 8, "TIE: 10 of 14 caught, 29.5% flagged"],
+      ["tie", 12, 12, "TIE: 12 of 14 caught, 41.4% flagged"],
+    ] as const)("%s at %i and %i prints one decimal, both controls and the bars", (result, caught, others, opening) => {
+      const h = line(caught, others);
+      expect(h.result).toBe(result);
+      expect(h.line).toStartWith(opening);
+      expect(h.line).toContain("(text alone 10 of 14, 39.4%; rule 11 of 14, 35.5%)");
+      expect(h.line).toEndWith(BARS);
+    });
+
+    test("not scored gives no share and no bars: nothing was read against them", () => {
+      const items = withControls(12, 8);
+      items[0]!.verdict = "NO_VERDICT";
+      const h = part1Headline(replayReport(items, population));
+      expect(h.result).toBe("not scored");
+      expect(h.line).not.toContain("%");
+      expect(h.line).not.toContain("Bars");
+    });
+
+    test("a base with no bars prints one decimal and no bars line", () => {
+      const h = part1Headline(replayReport(build(13, 35, 12, 8), population));
+      expect(h.result).toBe("no bars");
+      expect(h.line).toMatch(/caught, \d+\.\d% flagged/);
+      expect(h.line).not.toContain("Bars, read raw");
+    });
+
+    test("a share one decimal would print on its bar, or on the rule, prints as many as it takes", () => {
+      const report = replayReport(withControls(12, 8), population);
+      const over = part1Headline({ ...report, shareRaw: 50.04 });
+      expect(over.result).toBe("worse");
+      expect(over.line).toContain("50.04% flagged");
+      expect(part1Headline({ ...report, shareRaw: 39.04 }).line).toContain("39.04% flagged");
+      expect(part1Headline({ ...report, shareRaw: 39 }).line).toContain("39.0% flagged");
+      expect(part1Headline({ ...report, shareRaw: 50 }).line).toContain("50.0% flagged");
+      const close = part1Headline({ ...report, verdict: { ...report.verdict, caught: 11 }, shareRaw: 30.91, rule: { ...report.rule, caught: 11, shareRaw: 30.94 } });
+      expect(close.line).toContain("30.91% flagged");
+      expect(close.line).toContain("rule 11 of 14, 30.94%");
+      expect(close.line).toContain("at or above");
+      expect(part1Headline({ ...report, verdict: { ...report.verdict, caught: 11 }, shareRaw: 30.94, rule: { ...report.rule, caught: 11, shareRaw: 30.91 } }).line).toContain("below");
+    });
+
+    test("shownPct: one decimal, more only against a bar it differs from", () => {
+      expect(shownPct(39.4)).toBe("39.4%");
+      expect(shownPct(39.44, 39)).toBe("39.4%");
+      expect(shownPct(39.04, 39)).toBe("39.04%");
+      expect(shownPct(38.96, 39)).toBe("38.96%");
+      expect(shownPct(39, 39)).toBe("39.0%");
+      expect(shownPct(39 + 1e-12, 39)).toBe("39.0%");
+      expect(shownPct(39.04, 50, 39)).toBe("39.04%");
+      expect(shownPct(39 + 1e-8, 39)).toBe("39.00000001%");
+    });
   });
 
   test("below the rule reads the raw shares too", () => {
@@ -423,6 +492,19 @@ describe("the floor and part (2)", () => {
     expect(part2Headline(input({ context: { ...context, olderLines: 7 } })).line).toContain("7 log line(s) of older prompt versions left out.");
   });
 
+  test("part (2) prints what its bars read, with the bars, in pass and in miss", () => {
+    const pass = part2Headline(input({ shares: { askOwnerMedian: 0.3, askAnyMedian: 0.5, nights: 10 } }));
+    expect(pass.result).toBe("pass");
+    expect(pass.line).toStartWith("PASS (day 14): 9 of 10 caught (90.0%, bar at least 90%), nightly median ASK_OWNER 30.0% (bar at most 30%), both 50.0% (bar at most 50%). Bars read raw.");
+    const miss = part2Headline(input({ shares: { askOwnerMedian: 0.3004, askAnyMedian: 0.5004, nights: 10 } }));
+    expect(miss.result).toBe("miss");
+    expect(miss.line).toStartWith("MISS (day 14): 9 of 10 caught (90.0%, bar at least 90%), nightly median ASK_OWNER 30.04% (bar at most 30%), both 50.04% (bar at most 50%). Bars read raw.");
+    expect(part2Headline(input({ shares: { askOwnerMedian: null, askAnyMedian: null, nights: 0 } })).line).toContain("ASK_OWNER n/a (bar at most 30%), both n/a (bar at most 50%)");
+    const below = part2Headline(input({ report: { ...replayReport(build(10, 10, 9, 0)), verdict: { caught: 8996, of: 10000, flagged: 8996, cards: 10000 } } }));
+    expect(below.result).toBe("miss");
+    expect(below.line).toContain("(89.96%, bar at least 90%)");
+  });
+
   test("most catches means more ASK_OTHER than ASK_OWNER: a tie says nothing", () => {
     const report = replayReport(build(10, 10, 9, 0));
     const said = (ASK_OWNER: number, ASK_OTHER: number) => part2Headline(input({ report: { ...report, catchesBy: { ASK_OWNER, ASK_OTHER } } })).line;
@@ -434,7 +516,7 @@ describe("the floor and part (2)", () => {
   test("the bars read raw shares: 30.4% misses though it prints 30%, and exactly 30% and 50% pass through float noise", () => {
     const miss = part2Headline(input({ shares: { askOwnerMedian: 0.304, askAnyMedian: 0.4, nights: 10 } }));
     expect(miss.result).toBe("miss");
-    expect(miss.line).toContain("ASK_OWNER 30%");
+    expect(miss.line).toContain("ASK_OWNER 30.4% (bar at most 30%)");
     expect(part2Headline(input({ shares: { askOwnerMedian: 0.2, askAnyMedian: 0.504, nights: 10 } })).result).toBe("miss");
     // (0.2 + 0.4) / 2 is 0.30000000000000004, read off two real nights.
     const fifths = (owner: number): NightRecord => ({ day: `d${owner}`, wiki: "w", outcome: "ok", kinds: { ASK_OWNER: owner, DEFAULT: 5 - owner } });
@@ -445,7 +527,7 @@ describe("the floor and part (2)", () => {
     expect(caught(9, 10).result).toBe("pass");
     const justUnder = caught(26, 29);
     expect(justUnder.result).toBe("miss");
-    expect(justUnder.line).toContain("(90%)");
+    expect(justUnder.line).toContain("(89.7%, bar at least 90%)");
   });
 
   test("the rule's match reads raw shares: 50.4% does not match a result at 50.2%, though both print 50%", () => {

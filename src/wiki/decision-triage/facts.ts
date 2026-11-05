@@ -380,9 +380,12 @@ async function repoFacts(
   // below walk every parent. It takes the wrong side of a pull-merge or a foxtrot,
   // where main is the second parent: a commit on main before the cut can drop out of
   // `code` and `subjectsSinceCard`. Three real repos hold that shape (20, 13 and 1
-  // merges on the first-parent chain), with 0 of the 98 baseline rows hit. It goes
-  // stale and never leaks, the safe side for a held-out judge. A commit made before
-  // the moment and pushed after it cannot be told apart.
+  // merges on the first-parent chain), with 0 of the 98 baseline rows hit. It can leak
+  // too: `--before` takes the first chain commit dated at or before the cut, assuming
+  // dates fall down the chain, and a real repo has first-parent links whose parent is
+  // up to 885 s younger than its child, so a card answered in such a window can read a
+  // commit up to minutes after its answer. 0 of the 98 baseline rows hit; a follow-up
+  // PR takes it. A commit made before the moment and pushed after it cannot be told apart.
   let rev = `refs/remotes/origin/${branch}`;
   let out: RepoCodeFact;
   if (cutMs === null) {

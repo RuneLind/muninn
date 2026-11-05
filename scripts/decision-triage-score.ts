@@ -58,6 +58,7 @@ import {
   part1Headline,
   replayReport,
   SETTLE_WINDOW_MS,
+  shownPct,
   verdictFlips,
   type ReplayReport,
   type ScoredItem,
@@ -130,9 +131,9 @@ function replayDeps(entries: readonly WikiRegistryEntry[]): ReplayDeps {
 const fmt = (f: { caught: number; of: number; flagged: number; cards: number }) => `${f.caught} of ${f.of} caught, ${f.flagged} of ${f.cards} flagged`;
 
 function printReport(r: ReplayReport): void {
-  console.log(`verdict:    ${fmt(r.verdict)}, projected share ${r.sharePct}%`);
-  console.log(`text alone: ${fmt(r.textAlone)}, projected share ${r.textAlone.sharePct}%`);
-  console.log(`rule:       ${fmt(r.rule)}, projected share ${r.rule.sharePct}%`);
+  console.log(`verdict:    ${fmt(r.verdict)}, projected share ${shownPct(r.shareRaw)}`);
+  console.log(`text alone: ${fmt(r.textAlone)}, projected share ${shownPct(r.textAlone.shareRaw)}`);
+  console.log(`rule:       ${fmt(r.rule)}, projected share ${shownPct(r.rule.shareRaw)}`);
   console.log(`by kind:    ${JSON.stringify(r.byKind)}; catches by verdict ${JSON.stringify(r.catchesBy)}`);
   for (const [wiki, f] of Object.entries(r.perWiki)) console.log(`  ${wiki}: ${fmt(f)}`);
   console.log(`answered more than 12 h after writing (passes nothing): ${fmt(r.late)}; text alone ${fmt(r.lateTextAlone)}`);
@@ -339,7 +340,7 @@ async function printHandSample(cards: readonly ReplayCard[], lines: ReadonlyMap<
   console.log(`hand sample leaves out ${cards.length - done.size} replayed card(s) still open today`);
   if (final) {
     console.log(`catches by verdict: ASK_OWNER ${report.catchesBy.ASK_OWNER}, ASK_OTHER ${report.catchesBy.ASK_OTHER}`);
-    console.log(`control, flag every ${FLAGGING_RULE_WIKI} card: ${fmt(report.rule)}, share ${report.rule.sharePct}%`);
+    console.log(`control, flag every ${FLAGGING_RULE_WIKI} card: ${fmt(report.rule)}, share ${shownPct(report.rule.shareRaw)}`);
   }
 }
 

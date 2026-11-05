@@ -11,7 +11,7 @@ import { getWikiRegistry } from "../registry-memo.ts";
 import { osloDay } from "../work-map/ids.ts";
 import type { WorkMapState } from "../work-map/state.ts";
 import { appendLogLines, DECISION_TRIAGE_DIR, nightlyLogPath, readLog, triageStateStore } from "./log.ts";
-import { runDecisionTriage, type TriageRunResult } from "./run.ts";
+import { runDecisionTriage, type TriageProgress, type TriageRunDeps, type TriageRunResult } from "./run.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, type RunLine } from "./schema.ts";
 import { realTriageRunDeps, triageScope } from "./scope.ts";
 
@@ -25,8 +25,8 @@ export interface TriageLoopDeps {
   beforeCheck: (wiki: string, nowMs: number) => Promise<void>;
   readState: (wiki: string) => Promise<WorkMapState | null>;
   run: (wiki: string, signal: AbortSignal) => Promise<{ outcome: TriageRunResult["outcome"] }>;
-  /** A pass that hit its bound: counts as `failed`, as a throw does. */
-  recordFailed: (wiki: string, error: string) => Promise<void>;
+  /** A pass that hit its bound, as a throw does: `partial` if it logged verdicts first, else `failed`. */
+  recordFailed: (wiki: string, error: string) => Promise<"partial" | "failed" | void>;
 }
 
 /** Whole Oslo nights between the last run line and today, not counting either. */
@@ -48,18 +48,18 @@ export function missedNights(runs: readonly Pick<RunLine, "at">[], nowMs: number
 export async function settleTriageRun<T extends { outcome: TriageRunResult["outcome"] }>(
   run: () => Promise<T>,
   signal: AbortSignal,
-  recordFailed: (error: string) => Promise<void>,
-): Promise<T | { outcome: "failed" | "aborted" }> {
+  recordFailed: (error: string) => Promise<"partial" | "failed" | void>,
+): Promise<T | { outcome: "partial" | "failed" | "aborted" }> {
   try {
     return await run();
   } catch (err) {
     if (signal.aborted) return { outcome: "aborted" };
-    await recordFailed(err instanceof Error ? err.message : String(err));
-    return { outcome: "failed" };
+    return { outcome: (await recordFailed(err instanceof Error ? err.message : String(err))) || "failed" };
   }
 }
 
-export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE_DIR): TriageLoopDeps | null {
+/** `over` replaces a real seam of the night's run (tests). */
+export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE_DIR, over: Partial<Pick<TriageRunDeps, "call" | "answers" | "floor" | "append">> = {}): TriageLoopDeps | null {
   if (!config.decisionTriageRepoRoots) {
     log.info("Decision triage off: DECISION_TRIAGE_REPO_ROOTS is not set");
     return null;
@@ -82,13 +82,23 @@ export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE
       log.warn("Decision triage: {wiki} has {missed} nights with no run line", { wiki, missed });
     }
   };
-  /** A failed run, in the state's count and the log, so the night has its line. */
+  const inFlight = new Map<string, TriageProgress>();
+  /** A run that threw or hit the bound, in the state's count and the log: the line
+   *  carries its run id and what it had done, so its card lines have their run line.
+   *  Verdicts already logged make it `partial`, which is `ok` to the state, so the
+   *  next check does not pay for them twice. Reads the progress before its first await:
+   *  the bound calls this right after the abort that ends the run. */
   const recordFailed = async (wiki: string, error: string) => {
-    const at = Date.now();
-    await state.record(wiki, { at, outcome: "failed", error });
+    const done = inFlight.get(wiki);
+    inFlight.delete(wiki);
+    const now = Date.now();
+    const outcome = done && done.verdicts > 0 ? "partial" : "failed";
+    const reason = done && done.open !== null ? `${error}; ${done.verdicts} verdict(s) in ${done.cardsLogged} card line(s) logged of ${done.open} open card(s), ${done.usage.calls} call(s) answered` : error;
+    await state.record(wiki, { at: now, outcome: outcome === "partial" ? "ok" : "failed", error: reason });
     await appendLogLines(nightlyLogPath(wiki, dir), [
-      { type: "run", runId: randomUUID(), at, wiki, model: config.workMapModel, promptVersion: DECISION_TRIAGE_PROMPT_VERSION, usage: { calls: 0 }, repoRoots: config.decisionTriageRepoRoots, repos: [], cards: 0, floor: null, outcome: "failed", reason: error },
+      { type: "run", runId: done?.runId ?? randomUUID(), at: done?.at ?? now, wiki, model: config.workMapModel, promptVersion: DECISION_TRIAGE_PROMPT_VERSION, usage: done?.usage ?? { calls: 0 }, repoRoots: config.decisionTriageRepoRoots, repos: done?.repos ?? [], cards: done?.cardsLogged ?? 0, floor: null, outcome, reason },
     ]);
+    return outcome;
   };
 
   return {
@@ -129,11 +139,13 @@ export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE
         }),
         signal,
       });
-      const result = await settleTriageRun(() => runDecisionTriage(deps), signal, (error) => {
+      const track = (progress: TriageProgress) => void inFlight.set(wiki, progress);
+      const result = await settleTriageRun(() => runDecisionTriage({ ...deps, ...over, track }), signal, (error) => {
         log.warn("Decision triage threw for {wiki}: {error}", { wiki, error });
         return recordFailed(wiki, error);
       });
       if (!("run" in result)) return result;
+      inFlight.delete(wiki);
       await state.record(wiki, {
         at,
         outcome: result.outcome === "partial" ? "ok" : result.outcome,

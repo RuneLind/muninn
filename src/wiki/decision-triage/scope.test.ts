@@ -70,6 +70,11 @@ describe("settleTriageRun", () => {
     expect(await settleTriageRun(async () => { throw new Error("closing"); }, stopped.signal, record)).toEqual({ outcome: "aborted" });
     expect(failed).toEqual(["disk full"]);
   });
+
+  test("a throw after verdicts landed reads as what the record says it was", async () => {
+    const res = await settleTriageRun(async () => { throw new Error("disk full"); }, new AbortController().signal, async () => "partial");
+    expect(res).toEqual({ outcome: "partial" });
+  });
 });
 
 describe("outInsideLog", () => {

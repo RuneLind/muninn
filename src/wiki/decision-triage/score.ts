@@ -27,6 +27,16 @@ const DAY_MS = 86_400_000;
 /** Bars read raw shares; only float noise is forgiven: (0.2 + 0.4) / 2 is exactly 30%. */
 const atMost = (x: number, bar: number) => x <= bar + 1e-9;
 
+/** A share as a headline prints it: one decimal, more only where one decimal would
+ *  hide which side of a bar, or of the figure it is compared with, it fell on. */
+export function shownPct(x: number, ...bars: readonly number[]): string {
+  for (let d = 1; d < 9; d++) {
+    const s = x.toFixed(d);
+    if (!bars.some((b) => s === b.toFixed(d) && Math.abs(x - b) > 1e-9)) return `${s}%`;
+  }
+  return `${x.toFixed(9)}%`;
+}
+
 /** A question's first answer, as its author settled it. */
 export interface Settled {
   relPath: string;
@@ -129,7 +139,7 @@ export function projectedRaw(f: Figures, population?: { added: number; other: nu
   return (100 * (population.added * (f.caught / f.of) + population.other * (flaggedOther / others))) / (population.added + population.other);
 }
 
-/** What gets printed. A bar reads {@link projectedRaw}. */
+/** The share in whole numbers, as the contract names its controls. A bar and a headline read {@link projectedRaw}. */
 export const projectedShare = (f: Figures, population?: { added: number; other: number }): number => Math.round(projectedRaw(f, population));
 
 const withShare = (f: Figures, population?: { added: number; other: number }) => ({ ...f, sharePct: projectedShare(f, population), shareRaw: projectedRaw(f, population) });
@@ -185,12 +195,13 @@ export function part1Headline(r: ReplayReport): { result: "better" | "worse" | "
     return { result: "not scored", line: `NOT SCORED: ${r.notScored} card(s) have no verdict after the re-runs. This re-opens the contract; it is not a worse result.` };
   }
   const { caught, of } = r.verdict;
-  const stated = `${caught} of ${of} caught, ${r.sharePct}% flagged (text alone ${r.textAlone.caught} of ${r.textAlone.of}, ${r.textAlone.sharePct}%; rule ${r.rule.caught} of ${r.rule.of}, ${r.rule.sharePct}%)`;
+  const stated = `${caught} of ${of} caught, ${shownPct(r.shareRaw, 39, 50, r.rule.shareRaw)} flagged (text alone ${r.textAlone.caught} of ${r.textAlone.of}, ${shownPct(r.textAlone.shareRaw)}; rule ${r.rule.caught} of ${r.rule.of}, ${shownPct(r.rule.shareRaw, r.shareRaw)})`;
+  const bars = "Bars, read raw: worse at 9 or fewer caught or over 50% flagged; better at 12 or more caught and at most 39% flagged.";
   if (of !== PART1_BASE_POSITIVES) return { result: "no bars", line: `NO BARS: ${stated}. The bars apply only to the file's base of ${PART1_BASE_POSITIVES} answers that added something; this file has ${of}.` };
-  if (caught <= 9 || !atMost(r.shareRaw, 50)) return { result: "worse", line: `WORSE: ${stated}.` };
-  if (caught >= 12 && atMost(r.shareRaw, 39)) return { result: "better", line: `BETTER: ${stated}.` };
+  if (caught <= 9 || !atMost(r.shareRaw, 50)) return { result: "worse", line: `WORSE: ${stated}. ${bars}` };
+  if (caught >= 12 && atMost(r.shareRaw, 39)) return { result: "better", line: `BETTER: ${stated}. ${bars}` };
   const belowRule = caught < r.rule.caught || (caught === r.rule.caught && !atMost(r.shareRaw, r.rule.shareRaw));
-  return { result: "tie", line: `TIE: ${stated}. It fell ${belowRule ? "below" : "at or above"} the «flag every ${FLAGGING_RULE_WIKI} card» rule.` };
+  return { result: "tie", line: `TIE: ${stated}. It fell ${belowRule ? "below" : "at or above"} the «flag every ${FLAGGING_RULE_WIKI} card» rule. ${bars}` };
 }
 
 /** The floor over labelled answers. */
@@ -395,8 +406,8 @@ export function part2Headline(p: Part2Input): Part2Headline {
   const pass = caughtPct >= 90 - 1e-9 && ownerOk && anyOk && handOk && later === 0;
   const settled = later > 0 ? `; ${later} SETTLED or VOID later answered` : handJudged ? "" : `; «SETTLED or VOID» not judged (${p.handRead ?? 0} distinct card(s) read, 5 are needed, so P3 keeps those cards visible)`;
   if (!pass) notes.push(atCap ? "A miss at the cap stops the work on P3 and re-opens the contract." : `The decision moves to day ${CAP_DAY}, with no scoring between.`);
-  const stated = `${r.verdict.caught} of ${r.verdict.of} caught (${Math.round(caughtPct)}%), nightly median ASK_OWNER ${pct(shares.askOwnerMedian)}, both ${pct(shares.askAnyMedian)}${settled}`;
-  return { result: pass ? "pass" : "miss", line: `${pass ? "PASS" : "MISS"} (${dayText}): ${stated}.${flags.length ? ` ${flags.join(" ")}` : ""}${tail}`, notes };
+  const stated = `${r.verdict.caught} of ${r.verdict.of} caught (${shownPct(caughtPct, 90)}, bar at least 90%), nightly median ASK_OWNER ${pct(shares.askOwnerMedian, 30)} (bar at most 30%), both ${pct(shares.askAnyMedian, 50)} (bar at most 50%)${settled}`;
+  return { result: pass ? "pass" : "miss", line: `${pass ? "PASS" : "MISS"} (${dayText}): ${stated}. Bars read raw.${flags.length ? ` ${flags.join(" ")}` : ""}${tail}`, notes };
 }
 
-const pct = (x: number | null) => (x === null ? "n/a" : `${Math.round(x * 100)}%`);
+const pct = (x: number | null, bar: number) => (x === null ? "n/a" : shownPct(x * 100, bar));
