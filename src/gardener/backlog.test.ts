@@ -478,12 +478,15 @@ describe("startBacklogRun", () => {
       });
     const lastRow = () => agentStatus.getRecentCompleted().filter((r) => r.kind === "gardener_drain").at(-1)!;
 
+    let liveDuringRun: string | undefined;
     start(async (_a, hooks) => {
       hooks.onTraceId?.("drain-trace-ok");
+      liveDuringRun = agentStatus.getAll().find((r) => r.kind === "gardener_drain" && !r.completed)?.liveTraceId;
       return [];
     });
     await new Promise((res) => setTimeout(res, 10));
     expect(lastRow()).toMatchObject({ name: "Backlog drain", status: "ok", traceId: "drain-trace-ok" });
+    expect(liveDuringRun).toBe("drain-trace-ok");
 
     start(async (_a, hooks) => {
       hooks.onTraceId?.("drain-trace-bad");

@@ -895,6 +895,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     const hooks: GardenerRunHooks = {
       onTraceId: (traceId) => {
         drainTraceId = traceId;
+        agentStatus.setLiveTraceId(reqId, traceId);
       },
       onProgress: (p) => {
         const prog = backlogProgress.get(deps.botName);

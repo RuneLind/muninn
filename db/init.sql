@@ -590,6 +590,8 @@ CREATE INDEX idx_traces_root ON traces (started_at DESC) WHERE parent_id IS NULL
 CREATE INDEX idx_traces_bot ON traces (bot_name, started_at DESC) WHERE parent_id IS NULL;
 -- The retention cleanup's batched delete walks this, oldest first (migration 083).
 CREATE INDEX idx_traces_created ON traces (created_at);
+-- `/agents` Recently finished reads the stamped spans (migration 087).
+CREATE INDEX idx_traces_agent_run ON traces (started_at DESC) WHERE attributes ? 'agentKind';
 
 -- ============================================================================
 -- Prompt snapshots: full system + user prompts per trace PASS, for inspection.

@@ -1,7 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { saveSpan } from "./traces.ts";
-import { getRecentAgentTraces, getRecentExtractorUsage } from "./agent-activity.ts";
+import { getRecentAgentRuns, getRecentAgentTraces, getRecentExtractorUsage } from "./agent-activity.ts";
 import { getDb } from "./client.ts";
 import { Tracer } from "../tracing/tracer.ts";
 import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
@@ -200,5 +200,87 @@ describe("a stamped span on real Postgres", () => {
     });
     expect(root.duration_ms).not.toBeNull();
     expect(root.attributes).toMatchObject({ agentName: "twonuls", error: "f\ufffdg" });
+  });
+});
+
+describe("getRecentAgentRuns", () => {
+  /** Every suite shares the table, so read one bot's rows. */
+  const runsOf = async (bot: string, windowHours?: number) =>
+    (await getRecentAgentRuns(200, windowHours)).filter((r) => r.botName === bot);
+
+  function span(bot: string, attributes: Record<string, unknown>, over: Record<string, unknown> = {}) {
+    return saveSpan({
+      id: crypto.randomUUID(),
+      traceId: crypto.randomUUID(),
+      name: "wiki_digest",
+      kind: "root" as const,
+      botName: bot,
+      startedAt: new Date(),
+      durationMs: 900,
+      attributes,
+      ...over,
+    });
+  }
+
+  test("reads what finishAgentRunTrace wrote, through a real Tracer", async () => {
+    const bot = `runs-${crypto.randomUUID()}`;
+    const tracer = new Tracer("capture:youtube", { botName: bot });
+    finishAgentRunTrace(tracer, { kind: "capture", name: "YouTube: a talk" }, "error", {
+      model: "m",
+      inputTokens: 3,
+      outputTokens: 4,
+      costUsd: 0,
+      error: "boom",
+    });
+    let rows: Awaited<ReturnType<typeof runsOf>> = [];
+    for (let i = 0; i < 50 && rows.length === 0; i++) {
+      rows = await runsOf(bot);
+      if (rows.length === 0) await Bun.sleep(20);
+    }
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      traceId: tracer.traceId,
+      kind: "capture",
+      name: "YouTube: a talk",
+      status: "error",
+      model: "m",
+      inputTokens: 3,
+      outputTokens: 4,
+      costUsd: 0,
+      durationMs: expect.any(Number),
+    });
+  });
+
+  test("a stamped child span counts, and an unstamped root does not", async () => {
+    const bot = `runs-${crypto.randomUUID()}`;
+    await span(bot, { agentKind: "scheduled_task", agentName: "Brief" }, { name: "task:briefing", kind: "span", parentId: crypto.randomUUID() });
+    await span(bot, { wiki: "from before the stamp" });
+    const rows = await runsOf(bot);
+    expect(rows.map((r) => r.name)).toEqual(["Brief"]);
+  });
+
+  test("reads agentModel first, then model, and null when neither is there", async () => {
+    const bot = `runs-${crypto.randomUUID()}`;
+    await span(bot, { agentKind: "digest", agentName: "both", agentModel: "agent", model: "plain" });
+    await span(bot, { agentKind: "digest", agentName: "plain", model: "plain" });
+    await span(bot, { agentKind: "digest", agentName: "neither" });
+    const rows = await runsOf(bot);
+    const modelOf = (name: string) => rows.find((r) => r.name === name)!.model;
+    expect(modelOf("both")).toBe("agent");
+    expect(modelOf("plain")).toBe("plain");
+    expect(modelOf("neither")).toBeNull();
+    expect(rows.find((r) => r.name === "neither")).toMatchObject({ inputTokens: null, outputTokens: null, costUsd: null });
+  });
+
+  test("keeps to the window, newest first, and to the limit", async () => {
+    const bot = `runs-${crypto.randomUUID()}`;
+    const ago = (h: number) => new Date(Date.now() - h * 3_600_000);
+    await span(bot, { agentKind: "digest", agentName: "older" }, { startedAt: ago(5) });
+    await span(bot, { agentKind: "digest", agentName: "newer" }, { startedAt: ago(1) });
+    await span(bot, { agentKind: "digest", agentName: "outside" }, { startedAt: ago(49) });
+    expect((await runsOf(bot)).map((r) => r.name)).toEqual(["newer", "older"]);
+    expect((await runsOf(bot, 2)).map((r) => r.name)).toEqual(["newer"]);
+    const limited = await getRecentAgentRuns(1);
+    expect(limited).toHaveLength(1);
   });
 });

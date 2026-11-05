@@ -395,7 +395,7 @@ export async function renderAgentsPage(): Promise<string> {
       if (!empty) return;
       empty.textContent = processStartedAt
         ? 'No live runs — process up since ' + new Date(processStartedAt).toLocaleString() +
-          '; in-memory history resets on restart.'
+          '; run-time estimates reset on restart.'
         : 'Nothing running right now.';
     }
 

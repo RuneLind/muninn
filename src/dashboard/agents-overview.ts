@@ -9,10 +9,11 @@
  *   - `upNext`   — `scheduled_tasks.next_run_at` (precomputed) + watchers, whose
  *                  next fire mirrors `isScheduledTimeDue` (time-of-day slot
  *                  dominates a naive `last_run_at + interval_ms`).
- *   - `recent`   — a UNION keyed by span NAME (NOT `parent_id IS NULL`): chat +
- *                  watcher trace spans, extractor `haiku_usage` rows, and the
- *                  registry's completed-runs ring for kinds with no durable
- *                  source (gardener_drain / capture / research / per-task).
+ *   - `recent`   — a UNION: chat + watcher trace spans keyed by span NAME (NOT
+ *                  `parent_id IS NULL`), extractor `haiku_usage` rows, and the
+ *                  ring kinds twice over, from the registry's completed-runs ring
+ *                  and from the spans `finishAgentRunTrace` stamped, one row per
+ *                  run (`assembleRingKinds`). The stamp is what outlives a restart.
  */
 
 import type { AgentKind, AgentRun } from "../observability/agent-status.ts";
@@ -20,10 +21,13 @@ import { agentStatus } from "../observability/agent-status.ts";
 import type { ScheduledTask, Watcher } from "../types.ts";
 import { getAllScheduledTasks } from "../db/scheduled-tasks.ts";
 import { getAllWatchers } from "../db/watchers.ts";
+import { jsonbSafeText } from "../db/traces.ts";
 import {
+  getRecentAgentRuns,
   getRecentAgentTraces,
   getRecentExtractorUsage,
   getWatcherRunDurations,
+  type RecentAgentRunRow,
   type RecentExtractorRow,
   type RecentTraceRow,
   type WatcherDurationRow,
@@ -32,15 +36,15 @@ import { buildRunEstimates } from "./agent-eta.ts";
 import { getLog } from "../logging.ts";
 
 /** Captured at module load (≈ server start). The `/agents` "process restarted"
- *  empty state reads this to say when the in-memory history last reset. */
+ *  empty state reads this to say when the in-memory ETA history last reset. */
 export const PROCESS_STARTED_AT = Date.now();
 
 const log = getLog("dashboard", "agents");
 
 const OSLO = "Europe/Oslo";
-/** Kinds whose Recent rows are sourced from the registry ring only — every other
- *  kind has a durable trace/usage row, so taking them from the ring too would
- *  double-count. */
+/** Kinds the registry ring lists in Recent, beside their stamped spans. Every other
+ *  kind has its own durable trace/usage row and no stamp, so taking it from the ring
+ *  too would double-count. */
 const RING_RECENT_KINDS: ReadonlySet<AgentKind> = new Set<AgentKind>([
   "gardener_drain",
   "capture",
@@ -83,7 +87,7 @@ export interface RecentEntry {
 
 export interface AgentsOverview {
   generatedAt: number;
-  /** Epoch ms the muninn process started — the "history resets on restart" note. */
+  /** Epoch ms the muninn process started — the "estimates reset on restart" note. */
   processStartedAt: number;
   running: AgentRun[];
   upNext: UpNextEntry[];
@@ -105,6 +109,7 @@ export interface AgentsOverviewDeps {
   getScheduledTasks: () => Promise<ScheduledTask[]>;
   getWatchers: () => Promise<Watcher[]>;
   getRecentTraces: () => Promise<RecentTraceRow[]>;
+  getRecentAgentRuns: () => Promise<RecentAgentRunRow[]>;
   getRecentExtractors: () => Promise<RecentExtractorRow[]>;
   getWatcherDurations: () => Promise<WatcherDurationRow[]>;
 }
@@ -115,6 +120,7 @@ export const DEFAULT_AGENTS_OVERVIEW_DEPS: AgentsOverviewDeps = {
   getScheduledTasks: () => getAllScheduledTasks(),
   getWatchers: () => getAllWatchers(),
   getRecentTraces: () => getRecentAgentTraces(),
+  getRecentAgentRuns: () => getRecentAgentRuns(),
   getRecentExtractors: () => getRecentExtractorUsage(),
   getWatcherDurations: () => getWatcherRunDurations(),
 };
@@ -282,6 +288,55 @@ function ringToRecent(r: AgentRun): RecentEntry {
   };
 }
 
+function agentRunToRecent(r: RecentAgentRunRow): RecentEntry {
+  return {
+    kind: r.kind as AgentKind,
+    bot: r.botName,
+    name: r.name,
+    finishedAt: r.startedAt + (r.durationMs ?? 0),
+    ...(r.durationMs != null ? { durationMs: r.durationMs } : {}),
+    status: r.status,
+    traceId: r.traceId,
+    ...(r.model ? { model: r.model } : {}),
+    ...(r.inputTokens != null ? { inputTokens: r.inputTokens } : {}),
+    ...(r.outputTokens != null ? { outputTokens: r.outputTokens } : {}),
+    ...(r.costUsd != null ? { costUsd: r.costUsd } : {}),
+  };
+}
+
+/** One run across the two sources. `traceId` alone is not enough: every task in a
+ *  scheduler tick shares its tick's trace. The name is compared as the span stored it. */
+function runKey(traceId: string, name: string): string {
+  return `${traceId}\n${jsonbSafeText(name)}`;
+}
+
+/**
+ * The Recent rows of the ring kinds, one per run. The ring row wins where a run is in
+ * both, being richer, except that a span which ended in error says so: a goal completes
+ * its ring row before a last DB write that can still throw. A stamped span whose run is
+ * still live is left out, since a capture's root finishes before its ingest does.
+ *
+ * ⚠️ A run in both sources is only constructible, never seen in a fresh process, and a
+ * miss here is one run listed twice with no error anywhere.
+ */
+function assembleRingKinds(
+  ring: AgentRun[],
+  running: AgentRun[],
+  agentRuns: RecentAgentRunRow[],
+): RecentEntry[] {
+  const statusByRun = new Map(agentRuns.map((r) => [runKey(r.traceId, r.name), r.status]));
+  const ringRows = ring.filter((r) => RING_RECENT_KINDS.has(r.kind ?? "chat")).map(ringToRecent);
+  const covered = new Set<string>();
+  for (const row of ringRows) if (row.traceId) covered.add(runKey(row.traceId, row.name));
+  for (const r of running) if (r.liveTraceId && r.name) covered.add(runKey(r.liveTraceId, r.name));
+  return [
+    ...ringRows.map((row) =>
+      row.traceId && statusByRun.get(runKey(row.traceId, row.name)) === "error" ? { ...row, status: "error" } : row,
+    ),
+    ...agentRuns.filter((r) => !covered.has(runKey(r.traceId, r.name))).map(agentRunToRecent),
+  ];
+}
+
 // NB: mirror of the client `kindLabels` map in views/agents-page.ts — a new
 // AgentKind must be added to BOTH (server Recent labels + client pill labels).
 function kindLabel(kind?: AgentKind): string {
@@ -313,7 +368,7 @@ export async function assembleAgentsOverview(
 ): Promise<AgentsOverview> {
   const errors: string[] = [];
 
-  const [tasks, watchers, traces, extractors, watcherDurations] = await Promise.all([
+  const [tasks, watchers, traces, agentRuns, extractors, watcherDurations] = await Promise.all([
     deps.getScheduledTasks().catch((err) => {
       errors.push(`scheduled_tasks: ${err instanceof Error ? err.message : String(err)}`);
       return [] as ScheduledTask[];
@@ -325,6 +380,10 @@ export async function assembleAgentsOverview(
     deps.getRecentTraces().catch((err) => {
       errors.push(`traces: ${err instanceof Error ? err.message : String(err)}`);
       return [] as RecentTraceRow[];
+    }),
+    deps.getRecentAgentRuns().catch((err) => {
+      errors.push(`agent_runs: ${err instanceof Error ? err.message : String(err)}`);
+      return [] as RecentAgentRunRow[];
     }),
     deps.getRecentExtractors().catch((err) => {
       errors.push(`haiku_usage: ${err instanceof Error ? err.message : String(err)}`);
@@ -368,11 +427,11 @@ export async function assembleAgentsOverview(
   }
   upNext.sort((a, b) => a.nextRunAt - b.nextRunAt);
 
-  // ---- recent (four-source union, per-kind source-of-truth) ----------------
+  // ---- recent (union, per-kind source-of-truth) ----------------------------
   const recent: RecentEntry[] = [
     ...traces.map(traceToRecent),
     ...extractors.map(extractorToRecent),
-    ...deps.getCompletedRing().filter((r) => RING_RECENT_KINDS.has(r.kind ?? "chat")).map(ringToRecent),
+    ...assembleRingKinds(deps.getCompletedRing(), running, agentRuns),
   ];
   recent.sort((a, b) => b.finishedAt - a.finishedAt);
 

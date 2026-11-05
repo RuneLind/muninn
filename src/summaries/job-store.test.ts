@@ -622,6 +622,17 @@ describe("the run behind a job", () => {
     expect(store.attachRun("unknown", {})).toBeUndefined();
   });
 
+  test("a live run says which trace it writes without offering the card a link", () => {
+    const store = makeStore();
+    const id = store.createJob({ videoId: "v", title: "Live", url: "u" });
+    store.attachRun(id, { traceId: "t-live" });
+    const live = agentStatus.getAll().find((r) => r.name === "Test: Live")!;
+    expect(live.liveTraceId).toBe("t-live");
+    expect(live.traceId).toBeUndefined();
+    store.completeJob(id, "s", "c");
+    expect(row("Test: Live").traceId).toBe("t-live");
+  });
+
   test("a failed job completes its run as error, a finished one as ok", () => {
     const store = makeStore();
     const failed = store.createJob({ videoId: "v", title: "Bad", url: "u" });

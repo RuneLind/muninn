@@ -123,6 +123,10 @@ export interface AgentRun {
    *  completed one whose producer reports only success (read as `ok`). */
   status?: "ok" | "error";
   traceId?: string;
+  /** The trace of a run still in flight. Separate from `traceId` because the card's
+   *  Trace and Prompt links read that one; `/agents` Recent reads this one, to keep
+   *  a root that finished before its run did out of the list. */
+  liveTraceId?: string;
   inputTokens?: number;
   outputTokens?: number;
   numTurns?: number;
@@ -342,6 +346,11 @@ class AgentStatusTracker {
   /** Late-bind the bot that actually ran this job. The capture verticals start
    *  their run at `createJob` (route level, before the summarizer bot is
    *  resolved), so their card would otherwise carry an empty bot chip. */
+  setLiveTraceId(requestId: string, traceId: string) {
+    const req = this.requests.get(requestId);
+    if (req) req.liveTraceId = traceId;
+  }
+
   setBotName(requestId: string, botName: string) {
     const req = this.requests.get(requestId);
     if (!req) return;
@@ -409,8 +418,8 @@ class AgentStatusTracker {
     req.costUsd = meta.costUsd;
 
     // Snapshot into the completed-runs ring — this survives the 30s auto-clear
-    // below, so Recent can source kinds that have no durable trace/usage row
-    // (gardener drains, capture jobs, research, per-task granularity).
+    // below, so Recent can list the current process's runs in their richest form,
+    // beside the stamped spans that outlive it.
     this.completedRing.push({ ...req });
     if (this.completedRing.length > COMPLETED_RING_MAX) this.completedRing.shift();
 

@@ -48,6 +48,11 @@ interface UpdateSpanParams {
   attributes?: Record<string, unknown>;
 }
 
+/** A string as {@link saveSpan} and {@link updateSpan} store it in `attributes`. */
+export function jsonbSafeText(text: string): string {
+  return text.toWellFormed().replaceAll("\u0000", "");
+}
+
 /**
  * jsonb refuses a lone surrogate and a NUL, and those are the only text it refuses.
  * Attributes carry free text that a bare `slice` may have cut through an emoji (a
@@ -56,7 +61,7 @@ interface UpdateSpanParams {
  * way into the table.
  */
 function jsonbSafe(value: unknown): unknown {
-  if (typeof value === "string") return value.toWellFormed().replaceAll("\u0000", "");
+  if (typeof value === "string") return jsonbSafeText(value);
   if (Array.isArray(value)) return value.map(jsonbSafe);
   if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [jsonbSafe(k) as string, jsonbSafe(v)]));

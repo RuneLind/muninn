@@ -200,6 +200,7 @@ export function createJobStore<S extends string, F>(
     if (meta.model) agentStatus.setModel(reqId, meta.model);
 
     const { traceId, inputTokens, outputTokens, numTurns, toolCount, costUsd } = meta;
+    if (traceId !== undefined) agentStatus.setLiveTraceId(reqId, traceId);
     if (
       traceId !== undefined || inputTokens !== undefined || outputTokens !== undefined ||
       numTurns !== undefined || toolCount !== undefined || costUsd !== undefined
