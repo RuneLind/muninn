@@ -41,10 +41,11 @@ interface RecordedSpan {
 }
 
 const spans: RecordedSpan[] = [];
+const spanAttrs = new Map<string, Record<string, unknown>>();
 /** Every `updateSpan` — `tracer.finish` is an UPDATE on the root, so this is the
  *  only way to see whether the trace root was ever closed (an unfinished root
  *  renders as perpetually running on `/traces`). */
-const spanAttrs = new Map<string, Record<string, unknown>>();const spanUpdates: { id: string; status?: string }[] = [];
+const spanUpdates: { id: string; status?: string }[] = [];
 
 const realTraces = await import("../../db/traces.ts");
 mock.module("../../db/traces.ts", () => ({

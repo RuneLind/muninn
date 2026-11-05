@@ -1,7 +1,7 @@
 /**
  * The `/agents` identity on a goal run's trace root, on both goal paths.
  *
- * Runs in its own `bun test` process (its own link in the `test` and `test:unit`
+ * Runs in its own `bun test` process (its own link in the `test` and `test:handlers`
  * chains): `mock.module` on the DB and Haiku modules would leak into every other
  * file sharing the process. `src/test/mock-isolation.test.ts` pins that placement.
  */

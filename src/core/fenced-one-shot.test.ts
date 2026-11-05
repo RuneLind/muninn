@@ -13,8 +13,7 @@
  * (`tracer`, `oneShot`), so nothing here touches the DB or a model.
  */
 
-import { test, expect, describe, spyOn } from "bun:test";
-import { beforeEach } from "bun:test";
+import { test, expect, describe, spyOn, beforeEach } from "bun:test";
 import { agentStatus } from "../observability/agent-status.ts";
 import type { Tracer } from "../tracing/index.ts";
 import type { Config } from "../config.ts";
