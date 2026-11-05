@@ -35,6 +35,7 @@ import { agentStatus } from "../observability/agent-status.ts";
  * their batches are ≥ 1); the guard's own tests override it.
  */
 const NOOP_JOURNAL = {
+  markRunFailed: async () => {},
   minClusterSize: 1,
   getOffered: async () => new Set<string>(),
   readRunJournal: async (): Promise<RunJournal | null> => null,
@@ -463,9 +464,11 @@ describe("startBacklogRun", () => {
 
   test("the drain's ring row names the trace the work fn opened, and says how it ended", async () => {
     agentStatus.clearRequest();
+    const markedFailed: unknown[] = [];
     const start = (runGardener: Parameters<typeof startBacklogRun>[0]["runGardener"]) =>
       startBacklogRun({
         ...NOOP_JOURNAL,
+        markRunFailed: async (traceId: string, name: string, error: string) => void markedFailed.push({ traceId, name, error }),
         botName: "jarvis",
         gardenerEnabled: true,
         hasWatcher: true,
@@ -478,12 +481,15 @@ describe("startBacklogRun", () => {
       });
     const lastRow = () => agentStatus.getRecentCompleted().filter((r) => r.kind === "gardener_drain").at(-1)!;
 
+    let liveDuringRun: string | undefined;
     start(async (_a, hooks) => {
       hooks.onTraceId?.("drain-trace-ok");
+      liveDuringRun = agentStatus.getAll().find((r) => r.kind === "gardener_drain" && !r.completed)?.liveTraceId;
       return [];
     });
     await new Promise((res) => setTimeout(res, 10));
     expect(lastRow()).toMatchObject({ name: "Backlog drain", status: "ok", traceId: "drain-trace-ok" });
+    expect(liveDuringRun).toBe("drain-trace-ok");
 
     start(async (_a, hooks) => {
       hooks.onTraceId?.("drain-trace-bad");
@@ -491,6 +497,7 @@ describe("startBacklogRun", () => {
     });
     await new Promise((res) => setTimeout(res, 10));
     expect(lastRow()).toMatchObject({ status: "error", traceId: "drain-trace-bad" });
+    expect(markedFailed).toEqual([{ traceId: "drain-trace-bad", name: "Backlog drain", error: "draft blew up" }]);
   });
 
   test("records an error outcome + releases the mutex + KEEPS the journal when the run throws", async () => {

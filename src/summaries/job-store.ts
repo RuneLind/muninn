@@ -1,8 +1,9 @@
 import { getLog } from "../logging.ts";
 import { agentStatus } from "../observability/agent-status.ts";
+import { markAgentRunFailed } from "../db/traces.ts";
 import type { AgentRunIdentity } from "../tracing/agent-run-trace.ts";
 
-// Generic in-memory job store shared by the capture verticals (youtube,
+// Generic job store, held in memory, shared by the capture verticals (youtube,
 // x-article, tiktok, anthropic, article). Each vertical's `state.ts` instantiates this
 // with its own status union + identity fields and re-exports a vertical-typed
 // API, so routes/summarizers keep importing from `<vertical>/state.ts` unchanged.
@@ -200,6 +201,7 @@ export function createJobStore<S extends string, F>(
     if (meta.model) agentStatus.setModel(reqId, meta.model);
 
     const { traceId, inputTokens, outputTokens, numTurns, toolCount, costUsd } = meta;
+    if (traceId !== undefined) agentStatus.setLiveTraceId(reqId, traceId);
     if (
       traceId !== undefined || inputTokens !== undefined || outputTokens !== undefined ||
       numTurns !== undefined || toolCount !== undefined || costUsd !== undefined
@@ -245,13 +247,22 @@ export function createJobStore<S extends string, F>(
     return run;
   }
 
-  function completeRun(jobId: string, status: "ok" | "error"): void {
+  function completeRun(jobId: string, outcome: { status: "ok" } | { status: "error"; error: string }): void {
     const live = jobRuns.get(jobId);
     if (!live) return;
     jobRuns.delete(jobId);
     const meta = jobRunMeta.get(jobId) ?? {};
     jobRunMeta.delete(jobId);
-    agentStatus.completeRequest(live.reqId, { ...meta, status });
+    agentStatus.completeRequest(live.reqId, { ...meta, status: outcome.status });
+    // The root finished before this job's tail did, so it may still say ok.
+    if (outcome.status === "error" && meta.traceId) {
+      markAgentRunFailed(meta.traceId, live.run.name, outcome.error).catch((err) => {
+        log.warn(`${opts.label} job {jobId}: could not mark its trace failed: {error}`, {
+          jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
   }
 
   // --- Pub/Sub ---
@@ -376,7 +387,7 @@ export function createJobStore<S extends string, F>(
     } else {
       publish(jobId, { type: "complete" });
     }
-    completeRun(jobId, "ok");
+    completeRun(jobId, { status: "ok" });
     log.info(`${opts.label} job {jobId} completed, category: {category}`, { jobId, category });
   }
 
@@ -386,7 +397,7 @@ export function createJobStore<S extends string, F>(
     job.status = "error" as S;
     job.error = error;
     publish(jobId, { type: "error", message: error });
-    completeRun(jobId, "error");
+    completeRun(jobId, { status: "error", error });
     log.error(`${opts.label} job {jobId} failed: {error}`, { jobId, error });
   }
 
@@ -417,7 +428,7 @@ export function createJobStore<S extends string, F>(
         // Safety net: a job that never reached a terminal state would otherwise
         // leak its registry run (auto-clear only fires on completeRequest). A run
         // still live here was abandoned; a terminal job's run is already gone.
-        completeRun(id, "error");
+        completeRun(id, { status: "error", error: "the job outran its time budget and was cleaned up" });
       }
     }
   }, opts.cleanupIntervalMs ?? CLEANUP_INTERVAL_MS);

@@ -376,6 +376,19 @@ describe("research trace", () => {
     expect(finish.attrs).not.toHaveProperty("model");
   });
 
+  test("a live run names its trace, which keeps its stamped root out of Recent", async () => {
+    // The failure path stamps the root, then waits on an SSE write before completing.
+    let liveWhileReportingFailure: string | undefined;
+    const { tracer } = fakeTracer();
+    researchThrows = "retrieval down";
+    await streamResearchAnswer({ question: "Live window", config, botConfig: bot, tracer }, (e) => {
+      if (e.type === "error") {
+        liveWhileReportingFailure = agentStatus.getAll().find((r) => r.name === "Live window" && !r.completed)?.liveTraceId;
+      }
+    });
+    expect(liveWhileReportingFailure).toBe("ask-trace-1");
+  });
+
   test("a run that dies after synthesis keeps its spend on the root and reads error on its row", async () => {
     const { tracer, spans } = fakeTracer();
     await streamResearchAnswer(

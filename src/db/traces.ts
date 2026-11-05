@@ -48,6 +48,11 @@ interface UpdateSpanParams {
   attributes?: Record<string, unknown>;
 }
 
+/** A string as {@link saveSpan} and {@link updateSpan} store it in `attributes`. */
+export function jsonbSafeText(text: string): string {
+  return text.toWellFormed().replaceAll("\u0000", "");
+}
+
 /**
  * jsonb refuses a lone surrogate and a NUL, and those are the only text it refuses.
  * Attributes carry free text that a bare `slice` may have cut through an emoji (a
@@ -56,7 +61,7 @@ interface UpdateSpanParams {
  * way into the table.
  */
 function jsonbSafe(value: unknown): unknown {
-  if (typeof value === "string") return value.toWellFormed().replaceAll("\u0000", "");
+  if (typeof value === "string") return jsonbSafeText(value);
   if (Array.isArray(value)) return value.map(jsonbSafe);
   if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [jsonbSafe(k) as string, jsonbSafe(v)]));
@@ -98,6 +103,34 @@ export async function updateSpan(id: string, params: UpdateSpanParams): Promise<
       END
     WHERE id = ${id}
   `;
+}
+
+/** How long to wait, in turn, for a stamp still on its way before each further try. */
+const MARK_RETRY_DELAYS_MS = [250, 1000];
+
+/**
+ * Mark a run's stamped span failed after it finished ok: a capture's root finishes
+ * before its ingest, a drain's before its offered-set write. Without this the row reads
+ * red only while the ring holds it. A span already in error keeps its own message.
+ *
+ * `Tracer.finish` is fire-and-forget, so a failure right after it can reach Postgres
+ * before the stamp does and match nothing, with the finish then writing `ok`. Hence the
+ * retries. A span that is in error already matches nothing as well, and costs them too.
+ */
+export async function markAgentRunFailed(traceId: string, name: string, error: string): Promise<void> {
+  const sql = getDb();
+  for (const delayMs of [0, ...MARK_RETRY_DELAYS_MS]) {
+    if (delayMs > 0) await Bun.sleep(delayMs);
+    const result = await sql`
+      UPDATE traces SET
+        status = 'error',
+        attributes = attributes || ${sql.json({ error: jsonbSafeText(error) })}
+      WHERE trace_id = ${traceId}
+        AND attributes->>'agentName' = ${jsonbSafeText(name)}
+        AND status <> 'error'
+    `;
+    if (result.count > 0) return;
+  }
 }
 
 export async function getTrace(traceId: string): Promise<SpanRow[]> {

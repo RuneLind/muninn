@@ -215,6 +215,32 @@ describe("the factcheck run's ending", () => {
     return spanAttrs.get(spans.find((s) => s.name === "factcheck" && s.parentId === null)!.id);
   }
 
+  test("a live run names its trace, which keeps its stamped root out of Recent", async () => {
+    let live: string | undefined;
+    const root = () => spans.find((s) => s.name === "factcheck" && s.parentId === null)?.id;
+    const app = new Hono();
+    spans.length = 0;
+    app.get("/fc", (c) =>
+      streamFactcheckSSE(c, {
+        config,
+        botConfig,
+        body: "The sky is blue. Water is wet.",
+        meta: { title: "Live window", tags: [], type: "concept" },
+        wikiName: "testwiki",
+        mode: "article",
+        baseHash: "deadbeef",
+        oneShot: (async () => {
+          live = agentStatus.getAll().find((r) => r.kind === "factcheck" && !r.completed)?.liveTraceId;
+          throw new Error("boom");
+        }) as never,
+      }),
+    );
+    await (await app.request("/fc")).text();
+    expect(root()).toBeDefined();
+    expect(live).toBe(agentStatus.getRecentCompleted().filter((r) => r.kind === "factcheck").at(-1)!.traceId);
+    expect(live).toEqual(expect.any(String));
+  });
+
   test("a run with no reported cost leaves its cost unknown, not $0", async () => {
     haikuCostUsd = undefined;
     const attrs = await runThatDies();

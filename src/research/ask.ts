@@ -135,6 +135,8 @@ export async function streamResearchAnswer(
     platform: "research",
   });
   const traceId: string | undefined = tracer.traceId;
+  // The failure path stamps the root, then waits on a write to the client.
+  if (config.tracingEnabled) agentStatus.setLiveTraceId(reqId, tracer.traceId);
   let usage: { inputTokens?: number; outputTokens?: number; numTurns?: number; costUsd?: number } = {};
   let model: string | undefined;
   let status: "ok" | "error" = "ok";

@@ -669,6 +669,8 @@ export interface StartBacklogRunDeps {
   assemble: () => Promise<AssembledBacklog>;
   /** Persist the new offered set (called BEFORE runGardener — at-most-once). */
   persistOffered: (keys: string[]) => Promise<void>;
+  /** Mark the drain's stamped root failed: it finishes before the drain's own tail does. */
+  markRunFailed: (traceId: string, name: string, error: string) => Promise<void>;
   /** Read the current offered set — used by the in-mutex auto-recover only. */
   getOffered: () => Promise<Set<string>>;
   /** Read the pending run journal (null when none) — first step of the work fn. */
@@ -895,6 +897,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     const hooks: GardenerRunHooks = {
       onTraceId: (traceId) => {
         drainTraceId = traceId;
+        agentStatus.setLiveTraceId(reqId, traceId);
       },
       onProgress: (p) => {
         const prog = backlogProgress.get(deps.botName);
@@ -1002,6 +1005,11 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     };
     } catch (err) {
       drainStatus = "error";
+      if (drainTraceId) {
+        deps.markRunFailed(drainTraceId, BACKLOG_DRAIN_RUN.name, err instanceof Error ? err.message : String(err)).catch(() => {
+          // The ring row still says error; only the row after a restart would not.
+        });
+      }
       throw err;
     } finally {
       // Complete the registry run on EVERY exit path — success, soft-cancel
