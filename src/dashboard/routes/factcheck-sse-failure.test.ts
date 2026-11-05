@@ -63,6 +63,8 @@ mock.module("../../db/traces.ts", () => ({
 // compose). The compose case below swaps in two.
 let extractedClaims: { title: string; quote: string }[] = [{ title: "The sky is blue", quote: "the sky is blue" }];
 
+let haikuCostUsd: number | undefined = 0.25;
+
 const realHaiku = await import("../../ai/haiku-direct.ts");
 mock.module("../../ai/haiku-direct.ts", () => ({
   ...realHaiku,
@@ -71,7 +73,7 @@ mock.module("../../ai/haiku-direct.ts", () => ({
     inputTokens: 10,
     outputTokens: 5,
     numTurns: 1,
-    costUsd: 0.25,
+    ...(haikuCostUsd === undefined ? {} : { costUsd: haikuCostUsd }),
     model: "claude-haiku-4-5",
     backend: "cli",
   }),
@@ -190,7 +192,7 @@ describe("the factcheck run's ending", () => {
     expect(lastRow().status).toBe("ok");
   });
 
-  test("a run that dies reads error on its ring row, and its root keeps what it spent", async () => {
+  async function runThatDies() {
     spans.length = 0;
     const app = new Hono();
     app.get("/fc", (c) =>
@@ -210,9 +212,21 @@ describe("the factcheck run's ending", () => {
     );
     await (await app.request("/fc")).text();
     await new Promise((r) => setTimeout(r, 20));
+    return spanAttrs.get(spans.find((s) => s.name === "factcheck" && s.parentId === null)!.id);
+  }
+
+  test("a run with no reported cost leaves its cost unknown, not $0", async () => {
+    haikuCostUsd = undefined;
+    const attrs = await runThatDies();
+    haikuCostUsd = 0.25;
+    expect(attrs).toMatchObject({ error: "late failure", inputTokens: 10 });
+    expect(attrs!.costUsd).toBeUndefined();
+  });
+
+  test("a run that dies reads error on its ring row, and its root keeps what it spent", async () => {
+    const attrs = await runThatDies();
     expect(lastRow().status).toBe("error");
-    const root = spans.find((s) => s.name === "factcheck" && s.parentId === null)!;
-    expect(spanAttrs.get(root.id)).toMatchObject({
+    expect(attrs).toMatchObject({
       agentKind: "factcheck",
       error: "late failure",
       inputTokens: 10,

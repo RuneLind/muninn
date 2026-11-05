@@ -1816,9 +1816,9 @@ export function registerWikiGardenerRoutes(
       clearRunJournal: () => backlogDeps.setSnapshot(watcher!.id, WIKI_GARDENER_RUN_KEY, null),
       draftedKeysSince: async (startedAt, batchKeys) =>
         draftedKeysSince(await backlogDeps.listProposals(bot.name), startedAt, batchKeys),
-      // The tracer root span must be finished HERE — runGardener only creates
-      // sub-spans (the weekly checker finishes its own tracer the same way);
-      // without this every drain leaves a malformed open trace in the waterfall.
+      // `runGardener` only creates sub-spans, so the root is finished in
+      // `runDrainUnderTrace` (the weekly checker finishes its own tracer the same
+      // way); without that every drain leaves a malformed open trace in the waterfall.
       runGardener: drainGardenerRun({ bot, config, apiUrl: KNOWLEDGE_API_URL, root }),
       // Low-volume vertical fallback (R4): when the gardener drafts ZERO cluster
       // proposals, draft the batch docs individually as source pages instead. Bound to

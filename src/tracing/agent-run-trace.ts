@@ -30,8 +30,9 @@ export interface AgentRunUsage {
  * the one whose `traceId` the ring row carries, and leave a superseded attempt
  * unstamped. They are written last so a caller's attributes cannot overwrite them.
  *
- * With no `run` (a capture job whose run already settled, or a test's bare
- * `attachRun`) this is a plain finish: no ring row exists to rebuild.
+ * With no `run` this is a plain finish, for a span that is not one run's: a capture
+ * job whose run already settled, an abandoned attempt, or a caller's span that holds
+ * many runs. Any ring row those runs have stays their only record.
  */
 export function finishAgentRunTrace(
   tracer: Pick<Tracer, "finish">,

@@ -316,8 +316,10 @@ export interface SynthesisOneShotOptions {
   /** Thinking budget override; omitted, the seam's default (equal to
    *  {@link SYNTHESIS_THINKING_MAX_TOKENS}) applies with low effort. No production caller sets it. */
   thinkingMaxTokens?: number;
-  /** Test seams — production callers pass neither. */
+  /** Test seam — production callers omit it. */
   oneShot?: typeof executeOneShot;
+  /** A span to run under: a test seam, and how the consolidation watcher keeps each
+   *  draft under its own `watcher:` span. */
   tracer?: Tracer;
 }
 
@@ -385,8 +387,9 @@ export interface DraftSynthesisOptions {
   index: WikiIndex;
   config: Config;
   botConfig: BotConfig;
-  /** Test seams. */
+  /** Test seam. */
   oneShot?: typeof executeOneShot;
+  /** Passed on to the one-shot; see its option above. */
   tracer?: Tracer;
   /** Override `insertWikiProposal` in tests. */
   insert?: typeof insertWikiProposal;
