@@ -24,7 +24,8 @@
  */
 import type { AuthMode } from "../auth/mode.ts";
 import { stripFactWrappers, type Block, type ListBlock, type ListChild } from "./markdown-ast.ts";
-import { parseLogItem } from "./genre-lists.ts";
+import { parseLogItem, supersededById } from "./genre-lists.ts";
+import { splitFirstSentence } from "./report-top.ts";
 import { maskLineCodeSpans } from "./code-spans.ts";
 import { isCalendarDay, isDayFirstDate } from "./calendar-day.ts";
 import { QUESTION_LABELS, type QuestionLanguage } from "./question-labels.ts";
@@ -592,6 +593,95 @@ export function parseQuestionPage(blocks: Block[]): QuestionPage {
     if (!states.has(e.id)) states.set(e.id, itemQuestionState(e.text, e.dim, decisions));
   }
   return { questions: parseQuestions(blocks), entries, decisions, states };
+}
+
+/** An open card whose page already holds its ruling (lint check 10). */
+export interface UnclosedCard {
+  id: string;
+  /** The decision a close should name; null when only the card's own item
+   *  records the ruling, so a decision has to be added first. */
+  decision: string | null;
+  /** The decision whose first sentence names the card; differs from
+   *  `decision` when that one was superseded. */
+  namedBy: string | null;
+  /** The ruling word in the card's own item, as written; null when it has none. */
+  word: string | null;
+}
+
+const WORD_END = String.raw`(?![\p{L}\p{N}_])`;
+const RULING_WORD_RE = new RegExp(`${WORD_START}(answered|besvart|avgjort|decided)${WORD_END}`, "giu");
+/** A negation before a ruling word, at most one word away («not yet answered»). */
+const RULING_NEGATION_RE = new RegExp(`${WORD_START}(?:ikke|not|to be|aldri|never)${WS}(?:\\p{L}+${WS})?$`, "iu");
+const STRUCK_SPAN_RE = /~~[\s\S]*?~~/g;
+
+/** The first ruling word in an item that nothing negates, or null. */
+function rulingWord(text: string): string | null {
+  const masked = phraseText(text);
+  for (const m of masked.matchAll(RULING_WORD_RE)) {
+    if (!RULING_NEGATION_RE.test(masked.slice(0, m.index!).replace(/[*_~]/g, ""))) return m[1]!;
+  }
+  return null;
+}
+
+/** Does this first sentence name `id` as ruled: right before `→`, `=` or
+ *  `avgjort`, or as `card <id>`/`kortet <id>` after `Answer`/`Svar`? */
+function sentenceRulesOn(masked: string, id: string): boolean {
+  const named = questionIdRe(id).source;
+  const before = new RegExp(`${named}\\*{0,2}(?:${WS})?(?:→|=|avgjort${WORD_END})`, "u");
+  const card = new RegExp(`${WORD_START}(?:Answer|Svar)${WORD_END}[\\s\\S]*?${WORD_START}(?:card|kortet)${WS}\\*{0,2}${named}`, "u");
+  return before.test(masked) || card.test(masked);
+}
+
+/** The live decision a superseded one hands over to; null when the chain leaves
+ *  the page's decisions. */
+function liveDecision(start: DecisionLogEntry, byId: ReadonlyMap<string, DecisionLogEntry>): string | null {
+  const visited = new Set<string>();
+  let e: DecisionLogEntry | undefined = start;
+  while (e && !visited.has(e.id)) {
+    visited.add(e.id);
+    if (!e.dim) return e.id;
+    const next = supersededById(e.itemText);
+    e = next ? byId.get(next) : undefined;
+  }
+  return null;
+}
+
+/**
+ * The open cards whose page already holds the ruling, one per `<Question>` id,
+ * in source order: a decision's first sentence names the id as ruled (the last
+ * such decision wins), or the card's own item carries a ruling word. Struck text
+ * rules on nothing unless its item names a live successor, and a reopened card
+ * is left out: its ruling was taken back.
+ */
+export function unclosedCards(page: QuestionPage): UnclosedCard[] {
+  const decisions = new Map<string, DecisionLogEntry>();
+  for (const e of page.entries) {
+    if (DECISION_ID_RE.test(e.id) && !decisions.has(e.id)) decisions.set(e.id, e);
+  }
+  const out: UnclosedCard[] = [];
+  const seen = new Set<string>();
+  for (const { id } of page.questions) {
+    if (id === null || seen.has(id)) continue;
+    seen.add(id);
+    const item = page.entries.find((e) => e.id === id);
+    if (!item || page.states.get(id)?.kind !== "open" || itemReopened(item.text)) continue;
+    let decision: string | null = null;
+    let namedBy: string | null = null;
+    for (const e of decisions.values()) {
+      if (e.id === id) continue;
+      const live = liveDecision(e, decisions);
+      if (!live) continue;
+      const first = splitFirstSentence(e.itemText)?.first ?? e.itemText;
+      const read = live === e.id ? first.replace(STRUCK_SPAN_RE, " ") : first;
+      if (sentenceRulesOn(phraseText(read), id)) {
+        decision = live;
+        namedBy = e.id;
+      }
+    }
+    const word = rulingWord(item.text);
+    if (decision || word) out.push({ id, decision, namedBy, word });
+  }
+  return out;
 }
 
 /** The state of every DecisionLog id on the page ({@link QuestionPage.states}). */

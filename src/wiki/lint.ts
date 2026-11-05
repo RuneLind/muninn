@@ -50,6 +50,7 @@
  *                      refuses it), an id two DecisionLog items carry (the
  *                      first decides), an item carrying a near-miss close
  *                      (D6 — `Closed 2026-10-08: B (D15)`, `Besvart 06.10`),
+ *                      an open card its page already rules on (`unclosedCards`),
  *                      or a `questions_to:` written as a block list, which
  *                      `parseFrontmatter` does not read. Rules:
  *                      `src/format/question.ts`.
@@ -202,7 +203,9 @@ import {
   parseQuestionAttrs,
   parseQuestionPage,
   parseQuestionsTo,
+  unclosedCards,
   type QuestionState,
+  type UnclosedCard,
 } from "../format/question.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { CASE_STATUSES, parseCaseLabels } from "../format/case-board.ts";
@@ -668,6 +671,16 @@ function nearMissConsequence(id: string, quoted: string, state: QuestionState | 
   return `DecisionLog item ${id} says ${quoted} but no canonical close (Closed <date> (Dn).), so its card stays open`;
 }
 
+/** What to write for a card whose page already holds its ruling. */
+function unclosedCardMessage(card: UnclosedCard): string {
+  if (card.decision === null) {
+    return `DecisionLog item ${card.id} says "${card.word}" but its card stays open and no decision records the ruling; add a decision recording it, then write Closed <date> (Dn). in item ${card.id}`;
+  }
+  const decision =
+    card.namedBy === card.decision ? `Decision ${card.decision}` : `Decision ${card.namedBy}, superseded by ${card.decision},`;
+  return `${decision} already rules on ${card.id} but its card stays open; write Closed <date> (${card.decision}). in item ${card.id}`;
+}
+
 /**
  * Check 10 — a `<Question>` whose answer card cannot follow its DecisionLog
  * item. Reads the page through the one parse the renderer runs
@@ -698,6 +711,7 @@ function checkQuestions(page: PageRef, rawContent: string): LintFinding[] {
 
   const blockLines = questionLines(questions, questionTagLines(lines));
   const lineOf = (k: number) => blockLines[k];
+  const unclosed = new Map(unclosedCards(parsed).map((c) => [c.id, c]));
   const seen = new Set<string>();
   questions.forEach((q, k) => {
     const line = lineOf(k);
@@ -728,6 +742,8 @@ function checkQuestions(page: PageRef, rawContent: string): LintFinding[] {
       const quoted = [...new Set(words)].map((w) => `"${w}"`).join(", ");
       push(nearMissConsequence(q.id, quoted, states.get(q.id), item.text), line);
     }
+    const card = unclosed.get(q.id);
+    if (card && !words.some((w) => w === "Answered" || w === "Besvart")) push(unclosedCardMessage(card), line);
   });
   return findings;
 }

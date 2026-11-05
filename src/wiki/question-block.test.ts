@@ -123,6 +123,145 @@ describe("lint: question-block", () => {
   });
 });
 
+describe("lint: question-block, a card its page already answered", () => {
+  const messagesFor = async (items: string[], questions = ['<Question id="O3">']): Promise<string[]> => {
+    await write("plans/p.mdx", plan(questions, items));
+    return (await questionFindings()).map((x) => x.message);
+  };
+  const addDecision = (id: string, word: string) =>
+    `DecisionLog item ${id} says "${word}" but its card stays open and no decision records the ruling; add a decision recording it, then write Closed <date> (Dn). in item ${id}`;
+  const rules = (d: string, id: string) =>
+    `Decision ${d} already rules on ${id} but its card stays open; write Closed <date> (${d}). in item ${id}`;
+
+  for (const word of ["answered", "besvart", "avgjort", "decided", "AVGJORT", "Decided"]) {
+    test(`its own item holds «${word}»`, async () => {
+      expect(await messagesFor([`- **O3** — Keep it? Asked Kari; **${word} A on 01.10**.`])).toEqual([addDecision("O3", word)]);
+    });
+  }
+
+  for (const [name, sentence] of [
+    ["an arrow", "Keep the old path (O3 → B). Kari, 01.10."],
+    ["an arrow with no space", "Keep the old path (O3→B). Kari, 01.10."],
+    ["an equals sign", "Keep the old path, O3 = B. Kari, 01.10."],
+    ["avgjort", "O3 avgjort med B, den gamle veien står. Kari, 01.10."],
+    ["a bold id", "**O3** → B, the old path stays. Kari, 01.10."],
+    ["Answer and card", "Answer on card O3: the old path stays. Kari, 01.10."],
+    ["Svar and kortet", "Svar på kortet O3: den gamle veien står. Kari, 01.10."],
+  ] as const) {
+    test(`a decision's first sentence names the id with ${name}`, async () => {
+      expect(await messagesFor(["- **O3** — Keep it?", `- **D5** — ${sentence}`])).toEqual([rules("D5", "O3")]);
+    });
+  }
+
+  test("the first sentence is read past the dots in a code span", async () => {
+    expect(await messagesFor(["- **O3** — Keep it?", "- **D5** — Bind to `10.0.0.1` on the host (O3 → B). Kari, 01.10."])).toEqual([
+      rules("D5", "O3"),
+    ]);
+  });
+
+  test("a decision also ruling names the decision, not the add-one-first message", async () => {
+    expect(await messagesFor(["- **O3** — Keep it? Answered in chat, decided A.", "- **D5** — The old path stays (O3 → A)."])).toEqual([
+      'DecisionLog item O3 says "Answered" but no canonical close (Closed <date> (Dn).), so its card stays open',
+    ]);
+    expect(await messagesFor(["- **O3** — Keep it? decided A in chat.", "- **D5** — The old path stays (O3 → A)."])).toEqual([rules("D5", "O3")]);
+  });
+
+  test("the last decision naming the id is the one to close with", async () => {
+    expect(await messagesFor(["- **O3** — Keep it?", "- **D5** — First go at this (O3 → A).", "- **D6** — Second go at this (O3 → B)."])).toEqual([
+      rules("D6", "O3"),
+    ]);
+  });
+
+  test("a superseded decision hands the close to its successor", async () => {
+    expect(
+      await messagesFor(["- **O3** — Keep it?", "- **D5** — Bind the UIs here (O3 → B). Superseded by D6: the bind fails.", "- **D6** — Bind on loopback instead."]),
+    ).toEqual(["Decision D5, superseded by D6, already rules on O3 but its card stays open; write Closed <date> (D6). in item O3"]);
+  });
+
+  test("the canonical close reports nothing, whatever else the page says", async () => {
+    expect(await messagesFor(["- **O3** — Keep it? answered A. Closed 2026-10-08 (D5).", "- **D5** — The old path stays (O3 → A)."])).toEqual([]);
+  });
+
+  for (const negated of [
+    "ikke besvart",
+    "ikke avgjort",
+    "not answered",
+    "not decided",
+    "not yet decided",
+    "to be decided",
+    "to be answered",
+    "ikke **avgjort**",
+    "NOT decided",
+    "aldri besvart",
+    "never answered",
+  ]) {
+    test(`a negated word stays silent: ${negated}`, async () => {
+      // "not answered" holds no capitalised Answered, so no near miss fires either.
+      expect(await messagesFor([`- **O3** — Keep it? Still ${negated}.`])).toEqual([]);
+    });
+  }
+
+  test("a negated word and a plain one in one item flags the plain one", async () => {
+    expect(await messagesFor(["- **O3** — Keep it? Not decided on 01.10, decided A on 03.10."])).toEqual([addDecision("O3", "decided")]);
+  });
+
+  test("a near miss on Answered or Besvart gets no second finding", async () => {
+    expect(await messagesFor(["- **O3** — Keep it? Besvart 06.10: ja."])).toEqual([
+      'DecisionLog item O3 says "Besvart" but no canonical close (Closed <date> (Dn).), so its card stays open',
+    ]);
+    expect(await messagesFor(["- **O3** — Keep it? Answered 06.10, avgjort A."])).toEqual([
+      'DecisionLog item O3 says "Answered" but no canonical close (Closed <date> (Dn).), so its card stays open',
+    ]);
+  });
+
+  test("a near miss on Closed alone does not hide the ruling", async () => {
+    expect(await messagesFor(["- **O3** — Keep it? Closed 2026-10-08: B.", "- **D5** — The old path stays (O3 → B)."])).toEqual([
+      'DecisionLog item O3 says "Closed" but no canonical close (Closed <date> (Dn).), so its card stays open',
+      rules("D5", "O3"),
+    ]);
+  });
+
+  for (const [name, decision] of [
+    ["a mere mention with a verb", "- **D5** — Use the existing switch for everything here. O3 kan endre foo-delen. Kari, 01.10."],
+    ["a mention in the first sentence", "- **O9** — O3 kan endre foo-delen."],
+    ["a decision mentioning it in its first sentence", "- **D5** — O3 kan endre foo-delen, og resten står."],
+    ["the arrow in the second sentence", "- **D5** — The old path stays for now. Later O3 → B may follow."],
+    ["the arrow in a code span", "- **D5** — The form is `O3 → B` on every page."],
+    ["another id", "- **D5** — The old path stays (O31 → B, PO3 → B, O3.1 → B)."],
+    ["an id not right before the arrow", "- **D5** — O3 and the rest → B is the idea."],
+    ["card without Answer", "- **D5** — See card O3 for the options."],
+    ["Answer without card", "- **D5** — Answer O3 when the options are in."],
+    ["a code span between id and arrow", "- **D5** — O3 `x` → B here."],
+  ] as const) {
+    test(`silent: ${name}`, async () => {
+      expect(await messagesFor(["- **O3** — Keep it?", decision])).toEqual([]);
+    });
+  }
+
+  test("silent: the ruling word only in a code span", async () => {
+    expect(await messagesFor(["- **O3** — Keep it? The form is `answered A`."])).toEqual([]);
+  });
+
+  test("silent: a struck ruling with nothing replacing it", async () => {
+    expect(await messagesFor(["- **O3** — Keep it?", "- **D5** — ~~O3 → A here.~~ Snudd 15.10."])).toEqual([]);
+    expect(await messagesFor(["- **O3** — Keep it?", "- ~~**D5** — O3 → A here.~~"])).toEqual([]);
+  });
+
+  test("silent: a reopened card, whose ruling was taken back", async () => {
+    expect(await messagesFor(["- **O3** — Keep it? Closed 2026-10-08 (D5). Reopened 2026-10-09.", "- **D5** — The old path stays (O3 → A)."])).toEqual([]);
+  });
+
+  test("a closed card is left alone", async () => {
+    expect(await messagesFor(["- ~~**O3** — Keep it? decided A.~~", "- **D5** — The old path stays (O3 → A)."])).toEqual([]);
+  });
+
+  test("an id with no item gets only the missing-item finding", async () => {
+    expect(await messagesFor(["- **D5** — The old path stays (O3 → A)."])).toEqual([
+      '<Question id="O3"> has no item in the page\'s <DecisionLog>, so its card can never close',
+    ]);
+  });
+});
+
 describe("the render option", () => {
   test("language comes from .wiki-reader.json; a bad value warns and falls back to en", async () => {
     await write(".wiki-reader.json", JSON.stringify({ language: "no" }));
