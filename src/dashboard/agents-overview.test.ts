@@ -609,23 +609,24 @@ describe("assembleAgentsOverview recent, ring kinds", () => {
     expect(o.recent.map((r) => r.name).sort()).toEqual(["Synthesis page: x", "consolidation-gardener"]);
   });
 
-  test("a run failing every tick shows a few rows, not the whole list", async () => {
-    // A goal whose send fails is picked up again on every tick.
-    const failures = Array.from({ length: 12 }, (_, i) =>
-      agentRunRow({ kind: "scheduled_task", traceId: `t${i}`, name: "Goal reminder: x", status: "error", startedAt: 9000 - i }),
-    );
+  test("two spans sharing a run's key fill nothing: one call's cost must not show on two rows", async () => {
+    // Same-titled tasks in one tick. Each ring row has one span, but nothing says which.
     const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [
+        run({ kind: "scheduled_task", name: "Same", traceId: "tick", model: "configured" }),
+        run({ kind: "scheduled_task", name: "Same", traceId: "tick", model: "configured" }),
+      ],
       getRecentAgentRuns: async () => [
-        ...failures,
-        agentRunRow({ traceId: "ok1", name: "Wiki digest: w", startedAt: 100 }),
-        agentRunRow({ traceId: "ok2", name: "Wiki digest: w", startedAt: 90 }),
-        agentRunRow({ traceId: "ok3", name: "Wiki digest: w", startedAt: 80 }),
-        agentRunRow({ traceId: "ok4", name: "Wiki digest: w", startedAt: 70 }),
+        agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Same", model: "ran-a", inputTokens: 500, costUsd: 0.5 }),
+        agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Same", model: "ran-b", inputTokens: 700, costUsd: 0.7 }),
       ],
     }), NOW);
-    // The newest failures stay; a name's ordinary runs are all history and are not capped.
-    expect(named(o, "Goal reminder: x").map((r) => r.traceId)).toEqual(["t0", "t1", "t2"]);
-    expect(named(o, "Wiki digest: w")).toHaveLength(4);
+    expect(named(o, "Same")).toHaveLength(2);
+    for (const row of named(o, "Same")) {
+      expect(row).not.toHaveProperty("inputTokens");
+      expect(row).not.toHaveProperty("costUsd");
+      expect(row.model).toBe("configured");
+    }
   });
 
   test("two same-named runs under one trace: an error on either turns the row red, in either order", async () => {

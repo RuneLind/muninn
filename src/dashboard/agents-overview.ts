@@ -120,16 +120,12 @@ export const DEFAULT_AGENTS_OVERVIEW_DEPS: AgentsOverviewDeps = {
   getScheduledTasks: () => getAllScheduledTasks(),
   getWatchers: () => getAllWatchers(),
   getRecentTraces: () => getRecentAgentTraces(),
-  // Past RECENT_LIMIT on purpose: the failure cap below can drop most of a window.
-  getRecentAgentRuns: () => getRecentAgentRuns(200),
+  getRecentAgentRuns: () => getRecentAgentRuns(),
   getRecentExtractors: () => getRecentExtractorUsage(),
   getWatcherDurations: () => getWatcherRunDurations(),
 };
 
 const RECENT_LIMIT = 40;
-/** A goal whose send fails is picked up again on every tick, so one Telegram outage
- *  would otherwise fill the list with one run's failures. */
-const MAX_FAILED_ROWS_PER_NAME = 3;
 const UP_NEXT_LIMIT = 25;
 
 // ── Europe/Oslo wall-clock helpers (mirror db/scheduled-tasks.ts arithmetic) ──
@@ -333,7 +329,8 @@ function assembleRingKinds(
   // A blank title is dropped from the ring row's name, which then reads the kind's label.
   const agentRuns = stampedRuns.map((r) => ({ ...r, name: r.name || kindLabel(r.kind as AgentKind) }));
   const failedRuns = new Set(agentRuns.filter((r) => r.status === "error").map((r) => runKey(r.traceId, r.name)));
-  const spanByRun = new Map(agentRuns.map((r) => [runKey(r.traceId, r.name), r]));
+  // Same-titled tasks in one tick share a key, and nothing says which span is whose.
+  const spansByRun = Map.groupBy(agentRuns, (r) => runKey(r.traceId, r.name));
   const ringRows = ring.filter((r) => RING_RECENT_KINDS.has(r.kind ?? "chat")).map(ringToRecent);
   const covered = new Set<string>();
   for (const row of ringRows) if (row.traceId) covered.add(runKey(row.traceId, row.name));
@@ -342,25 +339,17 @@ function assembleRingKinds(
     ...ringRows.map((row) => {
       if (!row.traceId) return row;
       const key = runKey(row.traceId, row.name);
-      const span = spanByRun.get(key);
-      if (!span) return row;
-      const merged: RecentEntry = { ...agentRunToRecent(span), ...row, ...(span.model ? { model: span.model } : {}) };
+      const spans = spansByRun.get(key) ?? [];
+      const span = spans.length === 1 ? spans[0]! : undefined;
+      const merged: RecentEntry = span
+        ? { ...agentRunToRecent(span), ...row, ...(span.model ? { model: span.model } : {}) }
+        : row;
       return failedRuns.has(key) ? { ...merged, status: "error" } : merged;
     }),
-    ...capRepeatedFailures(agentRuns.filter((r) => !covered.has(runKey(r.traceId, r.name)))).map(agentRunToRecent),
+    ...agentRuns.filter((r) => !covered.has(runKey(r.traceId, r.name))).map(agentRunToRecent),
   ];
 }
 
-/** Rows arrive newest first, so the newest failures of a name stay. */
-function capRepeatedFailures(rows: RecentAgentRunRow[]): RecentAgentRunRow[] {
-  const failures = new Map<string, number>();
-  return rows.filter((r) => {
-    if (r.status !== "error") return true;
-    const seen = failures.get(r.name) ?? 0;
-    failures.set(r.name, seen + 1);
-    return seen < MAX_FAILED_ROWS_PER_NAME;
-  });
-}
 
 // NB: mirror of the client `kindLabels` map in views/agents-page.ts — a new
 // AgentKind must be added to BOTH (server Recent labels + client pill labels).

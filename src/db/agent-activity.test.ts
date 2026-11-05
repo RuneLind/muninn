@@ -223,6 +223,12 @@ describe("getRecentAgentRuns", () => {
     });
   }
 
+  async function spanFailed(bot: string, attributes: Record<string, unknown>, startedAt: Date) {
+    const id = crypto.randomUUID();
+    await span(bot, attributes, { id, startedAt });
+    await getDb()`UPDATE traces SET status = 'error' WHERE id = ${id}`;
+  }
+
   test("reads what finishAgentRunTrace wrote, through a real Tracer", async () => {
     const bot = `runs-${crypto.randomUUID()}`;
     const tracer = new Tracer("capture:youtube", { botName: bot });
@@ -285,6 +291,36 @@ describe("getRecentAgentRuns", () => {
     expect(await getRecentAgentRuns(1)).toHaveLength(1);
   });
 
+  test("one run failing every tick does not push the rest out of the read", async () => {
+    // A goal whose send fails is picked up again on every tick.
+    const bot = `runs-${crypto.randomUUID()}`;
+    const other = `runs-${crypto.randomUUID()}`;
+    const ago = (m: number) => new Date(Date.now() - m * 60_000);
+    await span(bot, { agentKind: "digest", agentName: "older ok" }, { startedAt: ago(600) });
+    await span(other, { agentKind: "gardener_drain", agentName: "Backlog drain" }, { startedAt: ago(500) });
+    await getDb()`UPDATE traces SET status = 'error' WHERE bot_name = ${other}`;
+    await Promise.all(
+      Array.from({ length: 45 }, (_, i) =>
+        spanFailed(bot, { agentKind: "gardener_drain", agentName: "Backlog drain" }, ago(i + 1)),
+      ),
+    );
+    await spanFailed(bot, { agentKind: "scheduled_task", agentName: "Another name" }, ago(450));
+    const rows = await getRecentAgentRuns(100_000);
+    const failing = rows.filter((r) => r.botName === bot && r.name === "Backlog drain");
+    // The newest three of a bot's failures under one name.
+    expect(failing.map((r) => Math.round((Date.now() - r.startedAt) / 60_000))).toEqual([1, 2, 3]);
+    expect(rows.filter((r) => r.botName === other && r.status === "error")).toHaveLength(1);
+    expect(rows.filter((r) => r.botName === bot && r.name === "Another name")).toHaveLength(1);
+    // Past a default read's limit once the failures are capped, the ordinary row is there.
+    expect((await getRecentAgentRuns()).some((r) => r.botName === bot && r.name === "older ok")).toBe(true);
+  });
+
+  test("a name's ordinary runs are all kept", async () => {
+    const bot = `runs-${crypto.randomUUID()}`;
+    await Promise.all(Array.from({ length: 5 }, () => span(bot, { agentKind: "digest", agentName: "Wiki digest: w" })));
+    expect(await runsOf(bot)).toHaveLength(5);
+  });
+
   test("the index the read relies on exists, with the predicate the read spells", async () => {
     const [row] = await getDb()`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_traces_agent_run'`;
     expect(row!.indexdef).toContain("attributes ? 'agentKind'");
@@ -303,7 +339,7 @@ describe("a run that fails after its span finished ok", () => {
       attributes: Record<string, unknown>;
     }[];
   async function until(traceId: string, status: string) {
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 150; i++) {
       const [row] = await rowsOf(traceId);
       if (row?.status === status) return row;
       await Bun.sleep(20);
@@ -331,6 +367,20 @@ describe("a run that fails after its span finished ok", () => {
     const row = await until(tracer.traceId, "error");
     expect(row!.status).toBe("error");
     expect(row!.attributes).toMatchObject({ error: "ingest refused", inputTokens: 5, agentName: "Late: ingest fails" });
+  });
+
+  test("a failure right after the finish still lands, though the stamp had not", async () => {
+    // The finish is fire-and-forget, so with no `await` between them the mark reaches
+    // Postgres first and matches nothing.
+    for (let i = 0; i < 5; i++) {
+      const id = store.createJob({ videoId: "v", title: `no gap ${i}`, url: "u" });
+      const tracer = new Tracer("capture:youtube", { botName: "testbot" });
+      const run = store.attachRun(id, { traceId: tracer.traceId });
+      finishAgentRunTrace(tracer, run, "ok", { inputTokens: 5 });
+      store.failJob(id, "huginn refused the ingest");
+      const row = await until(tracer.traceId, "error");
+      expect(row!.status).toBe("error");
+    }
   });
 
   test("a finished job leaves its span ok", async () => {

@@ -90,6 +90,8 @@ export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promis
   }));
 }
 
+const MAX_FAILED_ROWS_PER_NAME = 3;
+
 /** A finished run of a kind the completed-runs ring lists, read off its stamped span. */
 export interface RecentAgentRunRow {
   traceId: string;
@@ -114,20 +116,30 @@ export interface RecentAgentRunRow {
  * with the finish, so an unfinished run has none. Spend is read off the span itself,
  * which carries the whole run's total where a child `claude` span holds one call's.
  * The predicate is spelled like `idx_traces_agent_run`'s, or the index goes unused.
+ *
+ * A bot's failures under one name are capped here, before the limit: a goal whose send
+ * fails is picked up again on every tick, so one outage would otherwise fill the read.
  */
 export async function getRecentAgentRuns(limit = 40, windowHours = 48): Promise<RecentAgentRunRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT trace_id, status, bot_name, started_at, duration_ms,
-           attributes->>'agentKind'  AS agent_kind,
-           attributes->>'agentName'  AS agent_name,
-           COALESCE(attributes->>'agentModel', attributes->>'model') AS model,
-           attributes->>'inputTokens'  AS input_tokens,
-           attributes->>'outputTokens' AS output_tokens,
-           attributes->>'costUsd'      AS cost_usd
-    FROM traces
-    WHERE attributes ? 'agentKind'
-      AND started_at >= now() - make_interval(hours => ${windowHours})
+    SELECT * FROM (
+      SELECT trace_id, status, bot_name, started_at, duration_ms,
+             attributes->>'agentKind'  AS agent_kind,
+             attributes->>'agentName'  AS agent_name,
+             COALESCE(attributes->>'agentModel', attributes->>'model') AS model,
+             attributes->>'inputTokens'  AS input_tokens,
+             attributes->>'outputTokens' AS output_tokens,
+             attributes->>'costUsd'      AS cost_usd,
+             ROW_NUMBER() OVER (
+               PARTITION BY bot_name, attributes->>'agentName', status = 'error'
+               ORDER BY started_at DESC
+             ) AS nth
+      FROM traces
+      WHERE attributes ? 'agentKind'
+        AND started_at >= now() - make_interval(hours => ${windowHours})
+    ) stamped
+    WHERE status <> 'error' OR nth <= ${MAX_FAILED_ROWS_PER_NAME}
     ORDER BY started_at DESC
     LIMIT ${limit}
   `;

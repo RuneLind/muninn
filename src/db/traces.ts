@@ -105,21 +105,32 @@ export async function updateSpan(id: string, params: UpdateSpanParams): Promise<
   `;
 }
 
+/** How long to wait, in turn, for a stamp still on its way before each further try. */
+const MARK_RETRY_DELAYS_MS = [250, 1000];
+
 /**
  * Mark a run's stamped span failed after it finished ok: a capture's root finishes
- * before its ingest, a drain's before its fallback drafts. Without this the row reads
+ * before its ingest, a drain's before its offered-set write. Without this the row reads
  * red only while the ring holds it. A span already in error keeps its own message.
+ *
+ * `Tracer.finish` is fire-and-forget, so a failure right after it can reach Postgres
+ * before the stamp does and match nothing, with the finish then writing `ok`. Hence the
+ * retries. A span that is in error already matches nothing as well, and costs them too.
  */
 export async function markAgentRunFailed(traceId: string, name: string, error: string): Promise<void> {
   const sql = getDb();
-  await sql`
-    UPDATE traces SET
-      status = 'error',
-      attributes = attributes || ${sql.json({ error: jsonbSafeText(error) })}
-    WHERE trace_id = ${traceId}
-      AND attributes->>'agentName' = ${jsonbSafeText(name)}
-      AND status <> 'error'
-  `;
+  for (const delayMs of [0, ...MARK_RETRY_DELAYS_MS]) {
+    if (delayMs > 0) await Bun.sleep(delayMs);
+    const result = await sql`
+      UPDATE traces SET
+        status = 'error',
+        attributes = attributes || ${sql.json({ error: jsonbSafeText(error) })}
+      WHERE trace_id = ${traceId}
+        AND attributes->>'agentName' = ${jsonbSafeText(name)}
+        AND status <> 'error'
+    `;
+    if (result.count > 0) return;
+  }
 }
 
 export async function getTrace(traceId: string): Promise<SpanRow[]> {
