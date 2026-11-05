@@ -97,14 +97,34 @@ function rulingWord(text: string): string | null {
   return null;
 }
 
+/** A decision's first sentence. `**` and `~~` go first, since
+ *  `splitFirstSentence` refuses a break inside them. A live decision's struck
+ *  text keeps its sentence ends and loses its words, so it counts for neither
+ *  the id nor the sentence after it. */
+function firstSentence(text: string, live: boolean): string {
+  const read = live ? text.replace(STRUCK_SPAN_RE, (s) => s.slice(2, -2).replace(/[^\s.!?]/g, FILL)) : text;
+  const plain = read.replace(/\*\*|~~/g, "");
+  return splitFirstSentence(plain)?.first ?? plain;
+}
+
+/** Not a ruling however it goes on. */
+const CONDITIONAL_OPEN_RE = new RegExp(`^[^\\p{L}\\p{N}]*(?:if|hvis|dersom)${WORD_END}`, "iu");
+/** Right after `→`, `=` or `avgjort`: the sign states no ruling. */
+const NOT_STATED = String.raw`(?!\s*(?:\?|(?:[Nn]ot|[Ii]kkj?e)${WORD_END}))`;
+/** Between `Answer`/`Svar` and `card`/`kortet`: a choice label and a preposition. */
+const ANSWER_GAP = String.raw`:?(?:${WS}[\p{L}\p{N}]{1,3}[,:]?){0,2}`;
+
 /** Does this first sentence name `id` as ruled: right before `→`, `=` or
- *  `avgjort`, or as `card <id>`/`kortet <id>` after `Answer`/`Svar`? */
+ *  `avgjort`, or as `card <id>`/`kortet <id>` after `Answer`/`Svar`? A question
+ *  or an opening conditional rules on nothing. A sentence too short for
+ *  `splitFirstSentence` to stop at reads on, so each part is judged alone. */
 function sentenceRulesOn(masked: string, id: string): boolean {
-  const WS = String.raw`(?:[ \t ]+|[ \t ]*\n[ \t ]*)`;
   const named = questionIdRe(id).source;
-  const before = new RegExp(`${named}\\*{0,2}(?:${WS})?(?:→|=|avgjort${WORD_END})`, "u");
-  const card = new RegExp(`${WORD_START}(?:Answer|Svar)${WORD_END}[\\s\\S]*?${WORD_START}(?:card|kortet)${WS}\\*{0,2}${named}`, "u");
-  return before.test(masked) || card.test(masked);
+  const before = new RegExp(`${named}\\*?(?:${WS})?(?:→|=|avgjort${WORD_END})${NOT_STATED}`, "u");
+  const card = new RegExp(`${WORD_START}(?:Answer|Svar)${WORD_END}${ANSWER_GAP}${WS}(?:card|kortet)${WS}\\*?${named}`, "u");
+  return masked
+    .split(SENTENCE_BREAK_RE)
+    .some((s) => !QUESTION_END_RE.test(s) && !CONDITIONAL_OPEN_RE.test(s) && (before.test(s) || card.test(s)));
 }
 
 /** The live decision a superseded one hands over to; null when the chain leaves
@@ -121,11 +141,16 @@ function liveDecision(start: DecisionLogEntry, byId: ReadonlyMap<string, Decisio
   return null;
 }
 
+function decisionNumber(id: string): number {
+  return Number(id.slice(1));
+}
+
 /**
  * The open cards whose page already holds the ruling, one per `<Question>` id,
- * in source order: a decision's first sentence names the id as ruled (the last
- * such decision wins; a superseded decision's sentence counts and hands over to
- * its live successor), or the card's own item carries a ruling word
+ * in source order: a decision's first sentence names the id as ruled (a
+ * superseded decision's sentence counts and hands over to its live successor;
+ * the highest decision the chains end on wins, then the highest that names the
+ * id), or the card's own item carries a ruling word
  * ({@link rulingWord}). A live decision's struck text rules on nothing, a
  * superseded one's still does, and a reopened card is left out: its ruling was
  * taken back.
@@ -148,9 +173,8 @@ export function unclosedCards(page: QuestionPage): UnclosedCard[] {
       if (e.id === id) continue;
       const live = liveDecision(e, decisions);
       if (!live) continue;
-      const first = splitFirstSentence(e.itemText)?.first ?? e.itemText;
-      const read = live === e.id ? first.replace(STRUCK_SPAN_RE, " ") : first;
-      if (sentenceRulesOn(maskTargets(phraseText(read)), id)) {
+      const later = !decision || decisionNumber(live) > decisionNumber(decision) || (live === decision && decisionNumber(e.id) > decisionNumber(namedBy!));
+      if (later && sentenceRulesOn(maskTargets(phraseText(firstSentence(e.itemText, live === e.id))), id)) {
         decision = live;
         namedBy = e.id;
       }

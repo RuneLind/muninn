@@ -266,3 +266,150 @@ describe("unclosedCards: a decision's target is not its sentence", () => {
     test(`link text still rules: ${sentence}`, () => expect(decision(sentence)).toEqual(["D5"]));
   }
 });
+
+describe("unclosedCards: only a decision's first sentence is read, with emphasis or not", () => {
+  const row = (items: string[], item = "Keep it?") =>
+    unclosedCards(parseQuestionPage(parseBlocks(page(item, items)))).map((c) => [c.decision, c.namedBy]);
+
+  test("a later sentence inside a whole-item strike names nothing", () => {
+    expect(row(["- ~~**D5** — Something else entirely here. Later O3 → B. Superseded by D6.~~", "- **D6** — A new path."])).toEqual([]);
+  });
+  test("a later sentence inside bold names nothing", () => {
+    expect(row(["- **D5** — **A long enough bold sentence one. Later O3 → B.** Slutt."])).toEqual([]);
+  });
+  test("a sentence inside a live decision's strike names nothing", () => {
+    expect(row(["- **D5** — ~~O3 → A here in a long sentence. Second one.~~ Slutt her nå."])).toEqual([]);
+  });
+  test("a superseded decision's struck first sentence still hands over", () => {
+    expect(row(["- ~~**D5** — The old path stays (O3 → A). Superseded by D6.~~", "- **D6** — A new path."])).toEqual([["D6", "D5"]]);
+  });
+  test("a bold first sentence still rules", () => {
+    expect(row(["- **D5** — **O3 → B is the bold ruling.** Slutt her nå."])).toEqual([["D5", "D5"]]);
+  });
+  test("a live decision's struck id rules on nothing", () => {
+    expect(row(["- **D5** — ~~O3 → A~~ Keeping the old path here. Slutt her."])).toEqual([]);
+  });
+  test("the sentence after a live decision's struck first sentence is not its first", () => {
+    expect(row(["- **D5** — ~~The long struck sentence (O3 → A).~~ O3 → B was the second one here."])).toEqual([]);
+  });
+  test("text beside a live decision's strike in the first sentence still rules", () => {
+    expect(row(["- **D5** — ~~O3 → A~~ O3 → B stays now. Slutt her."])).toEqual([["D5", "D5"]]);
+  });
+  test("single-star emphasis around the id is tolerated", () => {
+    expect(row(["- **D5** — *O3* → B."])).toEqual([["D5", "D5"]]);
+  });
+});
+
+describe("unclosedCards: the highest decision the chains end on wins, not the last in the source", () => {
+  const row = (items: string[]) =>
+    unclosedCards(parseQuestionPage(parseBlocks(page("Keep it?", items)))).map((c) => [c.decision, c.namedBy]);
+
+  test("a newest-first log names its newest decision", () => {
+    expect(row(["- **D6** — The new path (O3 → B).", "- **D5** — The old path (O3 → A)."])).toEqual([["D6", "D6"]]);
+  });
+  test("oldest-first reads the same", () => {
+    expect(row(["- **D5** — The old path (O3 → A).", "- **D6** — The new path (O3 → B)."])).toEqual([["D6", "D6"]]);
+  });
+  test("the order is numeric", () => {
+    expect(row(["- **D10** — The new path (O3 → B).", "- **D9** — The old path (O3 → A)."])).toEqual([["D10", "D10"]]);
+  });
+  test("a chain's end counts, above a live decision with a higher number than the one it started from", () => {
+    expect(
+      row(["- **D8** — The old path (O3 → A). Superseded by D10.", "- **D10** — A new path.", "- **D9** — The other path (O3 → B)."]),
+    ).toEqual([["D10", "D8"]]);
+  });
+  test("a chain's end counts, not the number it started from", () => {
+    expect(
+      row(["- **D5** — The other path (O3 → B).", "- **D9** — The old path (O3 → A). Superseded by D3.", "- **D3** — A new path."]),
+    ).toEqual([["D5", "D5"]]);
+  });
+  test("two decisions ending on the same one: the highest that names the card, listed last", () => {
+    expect(
+      row(["- **D5** — Another path (O3 → B). Superseded by D7.", "- **D6** — One path (O3 → A). Superseded by D7.", "- **D7** — A new path."]),
+    ).toEqual([["D7", "D6"]]);
+  });
+  test("two decisions ending on the same one: the highest that names the card, listed first", () => {
+    expect(
+      row(["- **D6** — One path (O3 → A). Superseded by D7.", "- **D7** — A new path.", "- **D5** — Another path (O3 → B). Superseded by D7."]),
+    ).toEqual([["D7", "D6"]]);
+  });
+  test("the successor naming the card itself beats the one it replaced, listed last", () => {
+    expect(row(["- **D5** — The old path (O3 → A). Superseded by D7.", "- **D7** — The new path (O3 → B)."])).toEqual([["D7", "D7"]]);
+  });
+  test("the successor naming the card itself beats the one it replaced, listed first", () => {
+    expect(row(["- **D7** — The new path (O3 → B).", "- **D5** — The old path (O3 → A). Superseded by D7."])).toEqual([["D7", "D7"]]);
+  });
+});
+
+describe("unclosedCards: what a decision's sentence does not rule on", () => {
+  const onCard = (id: string, sentence: string) =>
+    unclosedCards(
+      parseQuestionPage(
+        parseBlocks(
+          [`<Question id="${id}">`, "", "Q?", "", "</Question>", "", "<DecisionLog>", "", `- **${id}** — Keep it?`, `- **D5** — ${sentence}`, "", "</DecisionLog>"].join("\n"),
+        ),
+      ),
+    ).map((c) => c.decision);
+  const silent = (id: string, sentence: string) => test(`silent: ${sentence}`, () => expect(onCard(id, sentence)).toEqual([]));
+  const flags = (id: string, sentence: string) => test(`flags: ${sentence}`, () => expect(onCard(id, sentence)).toEqual(["D5"]));
+
+  // The Answer/Svar gap.
+  silent("O3", "Answer the mail before reading card O3.");
+  silent("O3", "Svar kommer senere, se kortet O3 for valg.");
+  silent("O3", "Answer the long mail on card O3.");
+  silent("O3", "Answer A or B on card O3.");
+  silent("O3", "Answer A or B card O3.");
+  silent("O3", "Answer mail on card O3.");
+  flags("O1", "Answer A on card O1");
+  flags("S1", "Svar B på kortet S1");
+  flags("O1", "Answer on card O1");
+  flags("O1", "Answer card O1");
+  flags("O1", "Answer yes on card O1");
+  flags("S1", "Svar i kortet S1");
+  flags("O1", "Answer A on card *O1*");
+  flags("O1", "Answer A on card **O1**");
+  flags("O1", "Answer: A on card O1");
+  flags("O1", "Answer A, on card O1");
+  flags("S1", "Svar A på kortet S1");
+  flags("O1", "Answer A on\n  card O1");
+
+  // A negation or question right after the arrow, `=` or `avgjort`.
+  silent("O3", "O3 = ikke avgjort ennå her.");
+  silent("O3", "O3 → not decided yet at all.");
+  silent("O3", "O3 → Ikke avgjort ennå her.");
+  silent("O3", "O3 → ikkje avgjort ennå her.");
+  silent("O1", "O1 = ? until Rune replies.");
+  silent("O1", "O1 →? until Rune replies.");
+  silent("O1", "O1 = ?, until Rune replies.");
+  silent("S1", "S1 avgjort ikke før møtet.");
+  flags("O3", "O3 → B");
+  flags("O1", "O1 = A");
+  flags("S1", "S1 avgjort med A");
+  flags("O3", "**O3** → B");
+  flags("O3", "O3 → nothing else changes here.");
+  flags("O3", "O3 = notify the owner first.");
+
+  // A question.
+  silent("O3", "Should O3 → B stand here?");
+  silent("O3", "Should O3 → B stand here? Nobody has said so yet.");
+  silent("O3", "(Should O3 → B stand here?)");
+  silent("O3", "Should O3 → B? Ja.");
+  flags("O3", "Keep it? O3 → B.");
+  flags("O3", "O3 → B. Hvorfor? Fordi det holder.");
+
+  // A conditional opening the sentence.
+  silent("O3", "If O3 → B, we drop the path.");
+  silent("O3", "Hvis O3 = B, faller delen bort.");
+  silent("O3", "Dersom O3 = B, faller delen bort.");
+  silent("O3", "**If O3 → B, we drop the path.** Slutt her nå.");
+  silent("O3", "(If O3 → B, we drop the path.)");
+  silent("O3", "if O3 → B, we drop the path.");
+  flags("O3", "Iffy start, O3 → B stands.");
+  flags("O3", "We drop the path if O3 → B holds.");
+  flags("O3", "O3 → B. If that fails, we drop the path.");
+
+  // Accepted, and declared in the PR: no mood word list catches these.
+  flags("O3", "Kari will answer O3 = B maybe.");
+  flags("O1", "O1 → O2 is the order");
+  flags("S1", "Svar på kortet S1 mangler fortsatt");
+});
