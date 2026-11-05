@@ -90,7 +90,18 @@ describe.each(paths)("goal %s", (_label, run, name) => {
     await run(api, config, bot, [goal]);
     expect(completed).toEqual([]);
     expect(FakeTracer.instances[0]!.finished).toEqual([
-      { status: "error", attrs: { error: "send boom", agentKind: "scheduled_task", agentName: name } },
+      {
+        status: "error",
+        attrs: {
+          connector: "cli",
+          model: "claude-haiku-test",
+          inputTokens: 5,
+          outputTokens: 2,
+          error: "send boom",
+          agentKind: "scheduled_task",
+          agentName: name,
+        },
+      },
     ]);
   });
 });

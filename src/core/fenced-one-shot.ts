@@ -136,8 +136,10 @@ export interface FencedOneShotOptions {
   /** Called with the error message on failure, so each vertical keeps its own
    *  log line. The error is rethrown regardless. */
   onError?: (message: string) => void;
-  /** Test seams — production callers pass neither. */
+  /** Test seam — production callers omit it. */
   oneShot?: typeof executeOneShot;
+  /** A span to run under instead of a root of its own. A test seam, and the
+   *  consolidation watcher's way of keeping each draft under its `watcher:` span. */
   tracer?: Tracer;
 }
 
@@ -158,6 +160,9 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
   // shared `tracedOneShot` owns the `claude` span's whole lifecycle (start + ok-end +
   // error-end), so the catch only needs the root finish + `completeRequest`.
   const run = { kind: opts.kind, name: opts.runName };
+  // A caller's span (the consolidation watcher's) is not this run's root: it holds
+  // many drafts, so it carries no one run's identity. That run stays ring-only.
+  const ownRoot = tracer.name === opts.traceName ? run : null;
   let reqId: string | undefined;
   try {
     reqId = agentStatus.startRequest(botConfig.name, opts.phase, undefined, run);
@@ -211,7 +216,7 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
       costUsd: result.costUsd,
     };
 
-    finishAgentRunTrace(tracer, run, "ok", { source: opts.source, ...usage });
+    finishAgentRunTrace(tracer, ownRoot, "ok", { source: opts.source, ...usage });
     agentStatus.completeRequest(reqId, {
       status: "ok",
       ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
@@ -224,7 +229,7 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    finishAgentRunTrace(tracer, run, "error", { source: opts.source, error: message });
+    finishAgentRunTrace(tracer, ownRoot, "error", { source: opts.source, error: message });
     if (reqId) {
       agentStatus.completeRequest(reqId, {
         status: "error",

@@ -300,7 +300,14 @@ describe("runScheduledTasksFromList — task tracing", () => {
     await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "reminder", title: "Water" })], CTX);
     expect(FakeTracer.instances[0]!.finished).toMatchObject({
       status: "error",
-      attrs: { agentKind: "scheduled_task", agentName: "Water", error: expect.stringContaining("boom") },
+      attrs: {
+        agentKind: "scheduled_task",
+        agentName: "Water",
+        error: expect.stringContaining("boom"),
+        // The model call was paid for before the send failed.
+        inputTokens: 50,
+        model: "claude-haiku-test",
+      },
     });
   });
 

@@ -24,6 +24,16 @@ describe("finishAgentRunTrace", () => {
     expect(finishes[0]!.attrs).toEqual({ agentKind: "capture", agentName: "real" });
   });
 
+  test("a name Postgres jsonb would refuse is cleaned, so the finish still lands", () => {
+    const { tracer, finishes } = recorder();
+    // What a bare `slice` through an emoji leaves behind, plus a NUL.
+    finishAgentRunTrace(tracer, { kind: "capture", name: "YouTube: a\ud83d\u0000b" }, "ok");
+    const name = finishes[0]!.attrs!.agentName as string;
+    expect(name.isWellFormed()).toBe(true);
+    expect(name).not.toContain("\u0000");
+    expect(name).toBe("YouTube: a\ufffdb");
+  });
+
   test.each([[undefined], [null]])("with no run (%p) it is a plain finish, carrying no stamp", (run) => {
     const { tracer, finishes } = recorder();
     finishAgentRunTrace(tracer, run, "ok", { source: "youtube" });

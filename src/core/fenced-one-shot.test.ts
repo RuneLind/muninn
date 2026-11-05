@@ -26,8 +26,9 @@ function fakeTracer(): Tracer {
   let n = 0;
   const tracer: Pick<
     Tracer,
-    "start" | "end" | "addChildSpan" | "addSubSpan" | "spanStartedAt" | "finish" | "traceId"
+    "start" | "end" | "addChildSpan" | "addSubSpan" | "spanStartedAt" | "finish" | "traceId" | "name"
   > = {
+    name: "share",
     traceId: "trace-1",
     start: () => `span-${++n}`,
     end: () => 1,
@@ -106,6 +107,18 @@ describe("runFencedOneShot — the run's identity on the trace root", () => {
       attrs: { agentKind: "capture", agentName: "Share test", error: "boom" },
     });
     expect(runRow()).toMatchObject({ status: "error", traceId: "trace-1" });
+  });
+
+  test("a tracer the caller owns stays unstamped: it is not this run's root", async () => {
+    // The consolidation watcher hands its own `watcher:<type>` span to every draft.
+    // Stamping it would list that span as a capture, named after the last draft.
+    const { tracer, finishes } = recording();
+    Object.defineProperty(tracer, "name", { value: "watcher:consolidation-gardener" });
+    const { oneShot } = recordingOneShot();
+    await runFencedOneShot({ ...base, config: tracing, tracer, oneShot: oneShot as never });
+    expect(finishes[0]!.attrs).not.toHaveProperty("agentKind");
+    expect(finishes[0]!.attrs).toMatchObject({ source: "share" });
+    expect(runRow()).toMatchObject({ status: "ok", traceId: "trace-1" });
   });
 
   test("with tracing off a failed run names no trace, since none was written", async () => {

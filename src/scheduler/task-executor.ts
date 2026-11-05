@@ -39,11 +39,13 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
       });
     }
     const run = { kind: "scheduled_task", name: task.title } as const;
+    let spent: TaskResult["meta"] = {};
     try {
       agentStatus.set("running_task", task.title);
       requestId = agentStatus.startRequest(botConfig.name, "running_task", undefined, run);
       setConnectorInfo(requestId, botConfig, config.claudeModel);
       const { markdown, meta } = await executeTask(task, config, botConfig, requestId, tt);
+      spent = meta;
       agentStatus.set("sending_telegram", task.title);
       agentStatus.updatePhase(requestId, "sending_telegram");
       await api.sendMessage(task.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
@@ -73,7 +75,7 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
       if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
       // Settle the task span on failure so it never leaks unfinished.
-      if (tt) finishAgentRunTrace(tt, run, "error", { error: err instanceof Error ? err.message : String(err) });
+      if (tt) finishAgentRunTrace(tt, run, "error", { ...spent, error: err instanceof Error ? err.message : String(err) });
       log.error("Failed to execute scheduled task {taskId}: {error}", { botName: tag, taskId: task.id, error: err instanceof Error ? err.message : String(err) });
 
       // Still advance schedule to prevent infinite retry storms (same pattern as watchers)

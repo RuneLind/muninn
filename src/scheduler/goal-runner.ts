@@ -89,8 +89,9 @@ export async function runGoalRemindersFromList(api: Api, config: Config, botConf
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
-      // Settle the root span on failure so it never leaks unfinished.
-      finishAgentRunTrace(tracer, run, "error", { error: err instanceof Error ? err.message : String(err) });
+      // Settle the root span on failure so it never leaks unfinished, with whatever
+      // the model call already spent.
+      finishAgentRunTrace(tracer, run, "error", { ...goalRunMeta(usage), error: err instanceof Error ? err.message : String(err) });
       log.error("Failed to send reminder for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
@@ -135,7 +136,7 @@ export async function runGoalCheckinsFromList(api: Api, config: Config, botConfi
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
-      finishAgentRunTrace(tracer, run, "error", { error: err instanceof Error ? err.message : String(err) });
+      finishAgentRunTrace(tracer, run, "error", { ...goalRunMeta(usage), error: err instanceof Error ? err.message : String(err) });
       log.error("Failed to send check-in for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }
   }

@@ -39,5 +39,12 @@ export function finishAgentRunTrace(
   status: "ok" | "error",
   attrs: AgentRunUsage & Record<string, unknown> = {},
 ): void {
-  tracer.finish(status, run ? { ...attrs, agentKind: run.kind, agentName: run.name } : attrs);
+  tracer.finish(status, run ? { ...attrs, agentKind: run.kind, agentName: jsonbSafe(run.name) } : attrs);
+}
+
+/** A run name ends in a title or question, cut with a bare `slice` at some sites.
+ *  jsonb refuses a lone surrogate and a NUL, and a refused UPDATE loses the whole
+ *  finish (status, duration, spend) to a log line. */
+function jsonbSafe(name: string): string {
+  return name.toWellFormed().replaceAll("\u0000", "");
 }

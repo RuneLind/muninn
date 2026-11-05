@@ -3,6 +3,8 @@ import { setupTestDb } from "../test/setup-db.ts";
 import { saveSpan } from "./traces.ts";
 import { getRecentAgentTraces, getRecentExtractorUsage } from "./agent-activity.ts";
 import { getDb } from "./client.ts";
+import { Tracer } from "../tracing/tracer.ts";
+import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 
 setupTestDb();
 
@@ -150,5 +152,27 @@ describe("getRecentExtractorUsage", () => {
     expect(rows.some((r) => r.source === "wiki_gardener_cluster")).toBe(true);
     // watcher-* tokens surface via the trace path, NOT here (would double a Recent row).
     expect(rows.some((r) => r.source === "watcher-email")).toBe(false);
+  });
+});
+
+describe("a stamped span on real Postgres", () => {
+  async function rootRow(traceId: string) {
+    const sql = getDb();
+    for (let i = 0; i < 50; i++) {
+      const [row] = await sql`SELECT duration_ms, attributes FROM traces WHERE trace_id = ${traceId} AND duration_ms IS NOT NULL`;
+      if (row) return row;
+      await Bun.sleep(20);
+    }
+    return null;
+  }
+
+  test("a run name with a lone surrogate and a NUL does not lose the finish", async () => {
+    // jsonb refuses both, and the failed UPDATE reaches only a log line: the root
+    // would stay unfinished on /traces and carry no stamp.
+    const tracer = new Tracer("capture:youtube", { botName: "testbot" });
+    finishAgentRunTrace(tracer, { kind: "capture", name: "YouTube: a\ud83d\u0000b" }, "ok", { inputTokens: 3 });
+    const row = await rootRow(tracer.traceId);
+    expect(row).not.toBeNull();
+    expect(row!.attributes).toMatchObject({ agentKind: "capture", agentName: "YouTube: a\ufffdb", inputTokens: 3 });
   });
 });
