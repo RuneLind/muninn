@@ -24,6 +24,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
 import { tracedOneShot } from "./traced-one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
+import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 import {
   agentStatus,
   getConnectorLabel,
@@ -156,12 +157,10 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
   // still finishes the root span and completes the run, instead of leaking both. The
   // shared `tracedOneShot` owns the `claude` span's whole lifecycle (start + ok-end +
   // error-end), so the catch only needs the root finish + `completeRequest`.
+  const run = { kind: opts.kind, name: opts.runName };
   let reqId: string | undefined;
   try {
-    reqId = agentStatus.startRequest(botConfig.name, opts.phase, undefined, {
-      kind: opts.kind,
-      name: opts.runName,
-    });
+    reqId = agentStatus.startRequest(botConfig.name, opts.phase, undefined, run);
     agentStatus.setSourcePage(reqId, opts.sourcePage);
     agentStatus.setConnectorLabel(reqId, getConnectorLabel(botConfig.connector ?? "claude-cli"));
     if (botConfig.model) agentStatus.setModel(reqId, botConfig.model);
@@ -212,8 +211,9 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
       costUsd: result.costUsd,
     };
 
-    tracer.finish("ok", { source: opts.source, ...usage });
+    finishAgentRunTrace(tracer, run, "ok", { source: opts.source, ...usage });
     agentStatus.completeRequest(reqId, {
+      status: "ok",
       ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
@@ -224,8 +224,13 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    tracer.finish("error", { source: opts.source, error: message });
-    if (reqId) agentStatus.completeRequest(reqId, {});
+    finishAgentRunTrace(tracer, run, "error", { source: opts.source, error: message });
+    if (reqId) {
+      agentStatus.completeRequest(reqId, {
+        status: "error",
+        ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
+      });
+    }
     opts.onError?.(message);
     throw err;
   }

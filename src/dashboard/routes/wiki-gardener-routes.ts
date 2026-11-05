@@ -82,6 +82,7 @@ import {
   WIKI_GARDENER_RUN_KEY,
   WIKI_GARDENER_LAST_RUN_KEY,
   WIKI_GARDENER_WEEKLY_RUN_KEY,
+  BACKLOG_DRAIN_RUN,
   type AssembledBacklog,
   type BacklogProgress,
   type DraftedScanProposal,
@@ -114,6 +115,7 @@ import {
 } from "../../db/source-draft-attempts.ts";
 import { loadConfig } from "../../config.ts";
 import { Tracer } from "../../tracing/index.ts";
+import { finishAgentRunTrace } from "../../tracing/agent-run-trace.ts";
 import { getLog } from "../../logging.ts";
 import { readonlyRefusal as sharedReadonlyRefusal } from "./route-utils.ts";
 import { requireJsonRequest } from "./json-request.ts";
@@ -1780,17 +1782,20 @@ export function registerWikiGardenerRoutes(
       // without this every drain leaves a malformed open trace in the waterfall.
       runGardener: async (assembled, hooks) => {
         const tracer = new Tracer("wiki-gardener-backlog", { botName: bot.name });
+        if (config.tracingEnabled) hooks.onTraceId?.(tracer.traceId);
         try {
           const alerts = await runGardener(
             buildBacklogGardenerDeps(assembled, { bot, config, apiUrl: KNOWLEDGE_API_URL, root, tracer }, hooks),
           );
-          tracer.finish("ok", {
+          finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "ok", {
             offered: assembled.batchKeys.length,
             drafted: draftedCount(alerts),
           });
           return alerts;
         } catch (err) {
-          tracer.error(err instanceof Error ? err : String(err));
+          finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "error", {
+            error: err instanceof Error ? err.message : String(err),
+          });
           throw err;
         }
       },

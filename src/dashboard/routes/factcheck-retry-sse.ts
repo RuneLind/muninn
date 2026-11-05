@@ -39,6 +39,7 @@ import type { BotConfig } from "../../bots/config.ts";
 import type { executeOneShot } from "../../ai/one-shot.ts";
 import { agentStatus, setConnectorInfo } from "../../observability/agent-status.ts";
 import { Tracer } from "../../tracing/tracer.ts";
+import { finishAgentRunTrace } from "../../tracing/agent-run-trace.ts";
 import { tracedOneShot } from "../../core/traced-one-shot.ts";
 import { buildClaimVerifyPrompt, type Claim } from "../../wiki/factcheck-context.ts";
 import { truncateUnits } from "../../wiki/ask-chat.ts";
@@ -283,13 +284,14 @@ async function runClaimRetry(
 ): Promise<void> {
   const { config, claim } = opts;
   const runName = retryRunName(opts);
-  const reqId = agentStatus.startRequest(botConfig.name, "verifying_claims", undefined, {
+  const run = {
     kind: "factcheck",
     // Surrogate-safe: the name ends in a client-echoed title, and a bare `slice`
     // through an astral character stores a U+FFFD on the run card (the reason
     // `truncateUnits` exists — see `src/wiki/ask-chat.ts`).
     name: runName.length > 60 ? `${truncateUnits(runName, 57)}…` : runName,
-  });
+  } as const;
+  const reqId = agentStatus.startRequest(botConfig.name, "verifying_claims", undefined, run);
   setConnectorInfo(reqId, botConfig, config.claudeModel);
 
   const tracer = new Tracer("factcheck-retry", { botName: botConfig.name, platform: "factcheck" });
@@ -298,6 +300,7 @@ async function runClaimRetry(
   let outputTokens = 0;
   let numTurns = 0;
   let costUsd: number | undefined;
+  let model: string | undefined;
   let status: "ok" | "error" = "ok";
   // What the trace root's `error` attribute reports. Held here (rather than
   // finished at each failure site) so the `finally` can close the root on EVERY
@@ -348,7 +351,10 @@ async function runClaimRetry(
     outputTokens = claude.outputTokens ?? 0;
     numTurns = claude.numTurns ?? 0;
     if (typeof claude.costUsd === "number") costUsd = claude.costUsd;
-    if (claude.model) agentStatus.setModel(reqId, claude.model);
+    if (claude.model) {
+      model = claude.model;
+      agentStatus.setModel(reqId, claude.model);
+    }
 
     const result = (claude.result ?? "").trim();
     if (!result) {
@@ -468,9 +474,11 @@ async function runClaimRetry(
     // and an unfinished root renders as perpetually running on `/traces` forever,
     // since nothing ever revisits it. Keying the single call on `status` is what
     // makes "every path" and "exactly once" both hold by construction.
-    if (status === "ok") tracer.finish("ok", { inputTokens, outputTokens, numTurns, costUsd });
-    else tracer.finish("error", { error: failureMessage ?? "the claim retry failed" });
+    const spend = { inputTokens, outputTokens, numTurns, costUsd, ...(model ? { agentModel: model } : {}) };
+    if (status === "ok") finishAgentRunTrace(tracer, run, "ok", spend);
+    else finishAgentRunTrace(tracer, run, "error", { ...spend, error: failureMessage ?? "the claim retry failed" });
     agentStatus.completeRequest(reqId, {
+      status,
       inputTokens,
       outputTokens,
       numTurns,

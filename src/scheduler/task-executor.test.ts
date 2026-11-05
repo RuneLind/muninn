@@ -288,7 +288,20 @@ describe("runScheduledTasksFromList — task tracing", () => {
 
     const tt = FakeTracer.instances[0]!;
     expect(tt.finished?.status).toBe("error");
-    expect(tt.errored).toBeInstanceOf(Error);
+    expect(tt.finished?.attrs.error).toEqual(expect.any(String));
+  });
+
+  test("the settled span carries the run's identity on both exits", async () => {
+    await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "reminder", title: "Water" })], CTX);
+    expect(FakeTracer.instances[0]!.finished?.attrs).toMatchObject({ agentKind: "scheduled_task", agentName: "Water" });
+
+    FakeTracer.reset();
+    sendThrows = true;
+    await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "reminder", title: "Water" })], CTX);
+    expect(FakeTracer.instances[0]!.finished).toMatchObject({
+      status: "error",
+      attrs: { agentKind: "scheduled_task", agentName: "Water", error: expect.stringContaining("boom") },
+    });
   });
 
   test("briefing build-prompt throw: claude span never opened, guard avoids ending an unstarted span", async () => {

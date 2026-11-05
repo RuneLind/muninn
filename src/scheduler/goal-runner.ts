@@ -18,6 +18,7 @@ import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { Tracer } from "../tracing/index.ts";
+import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("scheduler", "goal-runner");
@@ -53,12 +54,10 @@ export async function runGoalRemindersFromList(api: Api, config: Config, botConf
     // returned usage feeds the root-span meta stamp below.
     const tracer = new Tracer("goal_reminder", { botName: tag, userId: goal.userId, platform: "telegram" });
     let usage: HaikuMessageUsage | null = null;
+    const run = { kind: "scheduled_task", name: `Goal reminder: ${goal.title}` } as const;
     try {
       agentStatus.set("checking_goals", goal.title);
-      requestId = agentStatus.startRequest(botConfig.name, "checking_goals", undefined, {
-        kind: "scheduled_task",
-        name: `Goal reminder: ${goal.title}`,
-      });
+      requestId = agentStatus.startRequest(botConfig.name, "checking_goals", undefined, run);
       setConnectorInfo(requestId, botConfig, config.claudeModel);
       const { text: markdown, usage: reminderUsage } = await generateReminderMessage(goal, botConfig, tracer);
       usage = reminderUsage;
@@ -86,12 +85,12 @@ export async function runGoalRemindersFromList(api: Api, config: Config, botConf
       // the post-send DB write + activity log — so a throw from those error-settles
       // exactly ONCE via the catch, instead of a second settle flipping an
       // already-ok root to error even though the user got the message.
-      tracer.finish("ok", goalRunMeta(usage));
+      finishAgentRunTrace(tracer, run, "ok", goalRunMeta(usage));
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
       // Settle the root span on failure so it never leaks unfinished.
-      tracer.error(err instanceof Error ? err : String(err));
+      finishAgentRunTrace(tracer, run, "error", { error: err instanceof Error ? err.message : String(err) });
       log.error("Failed to send reminder for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
@@ -105,12 +104,10 @@ export async function runGoalCheckinsFromList(api: Api, config: Config, botConfi
     // Per-run ROOT tracer — same rationale as the reminder path above.
     const tracer = new Tracer("goal_checkin", { botName: tag, userId: goal.userId, platform: "telegram" });
     let usage: HaikuMessageUsage | null = null;
+    const run = { kind: "scheduled_task", name: `Goal check-in: ${goal.title}` } as const;
     try {
       agentStatus.set("checking_goals", goal.title);
-      requestId = agentStatus.startRequest(botConfig.name, "checking_goals", undefined, {
-        kind: "scheduled_task",
-        name: `Goal check-in: ${goal.title}`,
-      });
+      requestId = agentStatus.startRequest(botConfig.name, "checking_goals", undefined, run);
       setConnectorInfo(requestId, botConfig, config.claudeModel);
       const { text: markdown, usage: checkinUsage } = await generateCheckinMessage(goal, botConfig, tracer);
       usage = checkinUsage;
@@ -134,11 +131,11 @@ export async function runGoalCheckinsFromList(api: Api, config: Config, botConfi
       // Settle LAST (same rationale as the reminder path) so a post-send DB
       // failure error-settles once via the catch instead of double-settling an
       // already-ok root.
-      tracer.finish("ok", goalRunMeta(usage));
+      finishAgentRunTrace(tracer, run, "ok", goalRunMeta(usage));
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
-      tracer.error(err instanceof Error ? err : String(err));
+      finishAgentRunTrace(tracer, run, "error", { error: err instanceof Error ? err.message : String(err) });
       log.error("Failed to send check-in for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }
   }

@@ -43,6 +43,7 @@ interface RecordedSpan {
 }
 
 const spans: RecordedSpan[] = [];
+const spanAttrs = new Map<string, Record<string, unknown>>();
 const spanUpdates: { id: string; status?: string }[] = [];
 
 const realTraces = await import("../../db/traces.ts");
@@ -53,6 +54,8 @@ mock.module("../../db/traces.ts", () => ({
   },
   updateSpan: async (id: string, p: { status?: string }) => {
     spanUpdates.push({ id, status: p.status });
+    const attrs = (p as { attributes?: Record<string, unknown> }).attributes;
+    if (attrs) spanAttrs.set(id, attrs);
   },
 }));
 
@@ -176,6 +179,19 @@ beforeEach(async () => {
 
 const claimResult = (r: { events: SseEvent[] }) =>
   r.events.find((e) => e.event === "claim_result")!.data;
+
+describe("the factcheck root's run identity", () => {
+  test("the finished root carries kind, name and spend", () => {
+    const root = timeoutRun.spans.find((s) => s.name === "factcheck" && s.parentId === null)!;
+    expect(spanAttrs.get(root.id)).toMatchObject({
+      agentKind: "factcheck",
+      agentName: expect.stringContaining("Sky"),
+      inputTokens: expect.any(Number),
+      agentModel: "claude-haiku-4-5",
+    });
+    expect(spanAttrs.get(root.id)).not.toHaveProperty("model");
+  });
+});
 
 describe("failed claim — cause-specific outcome + block", () => {
   test("a connector timeout yields outcome 'timeout' and names the budget in seconds", () => {

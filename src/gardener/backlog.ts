@@ -216,8 +216,13 @@ export function requestBacklogCancel(botName: string): boolean {
   return true;
 }
 
+/** The `/agents` identity of a manual drain, shared by its run and its trace root. */
+export const BACKLOG_DRAIN_RUN = { kind: "gardener_drain", name: "Backlog drain" } as const;
+
 /** The optional progress/cancel seams the work fn threads into `runGardener`. */
 export interface GardenerRunHooks {
+  /** The trace the run writes, so the `/agents` row can name it. */
+  onTraceId?: (traceId: string) => void;
   onProgress?: (p: GardenerProgress) => void;
   shouldAbort?: () => boolean;
   onAborted?: (skippedClusterDocKeys: string[]) => void;
@@ -816,11 +821,12 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     // `kind:"watcher"` run via the runner — so this never double-registers a card.
     // The registry run is completed in the `finally` below (covers success, cancel,
     // AND a runGardener throw), independent of the outer settle handlers.
-    const reqId = agentStatus.startRequest(deps.botName, "assembling", undefined, {
-      kind: "gardener_drain",
-      name: "Backlog drain",
-    });
+    const reqId = agentStatus.startRequest(deps.botName, "assembling", undefined, BACKLOG_DRAIN_RUN);
     agentStatus.setSourcePage(reqId, "/wiki/gardener");
+    // Named by the work fn when it opens its trace; a run that stops before the
+    // gardener starts has no trace to point at.
+    let drainTraceId: string | undefined;
+    let drainStatus: "ok" | "error" = "ok";
 
     try {
     // Auto-recover a pending journal (a prior crash / `runGardener` throw stranded
@@ -887,6 +893,9 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     // clustered" (0) apart from "clusters formed but every draft failed" (>0).
     let keptClusters: number | undefined;
     const hooks: GardenerRunHooks = {
+      onTraceId: (traceId) => {
+        drainTraceId = traceId;
+      },
       onProgress: (p) => {
         const prog = backlogProgress.get(deps.botName);
         if (!prog) return;
@@ -991,12 +1000,18 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
       ...(keptClusters !== undefined ? { keptClusters } : {}),
       ...(fallbackDrafted > 0 ? { fallbackDrafted } : {}),
     };
+    } catch (err) {
+      drainStatus = "error";
+      throw err;
     } finally {
       // Complete the registry run on EVERY exit path — success, soft-cancel
       // (returns normally), and a runGardener/assemble throw (rethrown after this).
-      // No meta is available here (no trace/token counts on a drain); Recent sources
-      // gardener_drain from the completed-runs ring keyed on the stable name above.
-      agentStatus.completeRequest(reqId, {});
+      // No token counts are available here. Recent sources gardener_drain from the
+      // completed-runs ring keyed on the stable name above.
+      agentStatus.completeRequest(reqId, {
+        status: drainStatus,
+        ...(drainTraceId ? { traceId: drainTraceId } : {}),
+      });
     }
   });
   if (run === null) return { state: "running" };

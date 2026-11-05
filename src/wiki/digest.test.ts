@@ -402,6 +402,28 @@ describe("generateWikiDigest — observability", () => {
     expect(agentStatus.getAll().some((r) => r.kind === "digest" && !r.completed)).toBe(false);
   });
 
+  test("the root carries the run's identity and model; a failed run's ring row says error and names the root", async () => {
+    const ok = recordingTracer();
+    await generateWikiDigest(root, index, config, bot, { tracer: ok.tracer, oneShot: async () => okResult });
+    expect(ok.spans.find((s) => s.op === "finish:ok")!.attrs).toMatchObject({
+      agentKind: "digest",
+      agentName: expect.stringContaining("Wiki digest: "),
+      agentModel: "claude-sonnet-5",
+    });
+    expect(ok.spans.find((s) => s.op === "finish:ok")!.attrs).not.toHaveProperty("model");
+
+    const bad = recordingTracer();
+    await expect(
+      generateWikiDigest(root, index, { ...config, tracingEnabled: true }, bot, {
+        tracer: bad.tracer,
+        oneShot: async () => { throw new Error("connector down"); },
+      }),
+    ).rejects.toThrow("connector down");
+    expect(bad.spans.find((s) => s.op === "finish:error")!.attrs).toMatchObject({ agentKind: "digest" });
+    const row = agentStatus.getRecentCompleted().filter((r) => r.kind === "digest").at(-1)!;
+    expect(row).toMatchObject({ status: "error", traceId: "digest-trace-1" });
+  });
+
   test("a wiki with no log.md registers NO run at all (the model is never called)", async () => {
     const empty = await testTempDir(path.join(tmpdir(), "wiki-nolog-obs-"));
     try {

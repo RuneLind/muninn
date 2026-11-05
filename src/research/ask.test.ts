@@ -360,6 +360,21 @@ describe("research trace", () => {
     expect(run.outputTokens).toBeGreaterThan(0);
   });
 
+  test("the root carries the run's identity and the model that answered", async () => {
+    const { tracer, spans } = fakeTracer();
+    await collect("What is Claude Code and does it support MCP?", undefined, tracer);
+    const finish = spans.find((s) => s.op === "finish:ok")!;
+    expect(finish.attrs).toMatchObject({
+      agentKind: "research",
+      agentName: "What is Claude Code and does it support MCP?",
+      outputTokens: expect.any(Number),
+    });
+    const run = agentStatus.getRecentCompleted().filter((r) => r.kind === "research").at(-1)!;
+    expect(run.status).toBe("ok");
+    expect(finish.attrs!.agentModel).toBe(run.model);
+    expect(finish.attrs).not.toHaveProperty("model");
+  });
+
   test("a declined-coverage ask never opens a synthesis span (no Claude call was made)", async () => {
     mockResults = []; // zero hits ⇒ assessCoverage declines, synthesis is skipped
     const { tracer, spans } = fakeTracer();

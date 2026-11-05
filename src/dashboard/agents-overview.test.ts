@@ -349,6 +349,20 @@ describe("assembleAgentsOverview recent cost", () => {
     expect("costUsd" in chat).toBe(true);
   });
 
+  test("a ring row reports how its run ended; a producer that reports nothing reads as ok", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [
+        run({ kind: "capture", name: "failed", status: "error" }),
+        run({ kind: "digest", name: "fine", status: "ok" }),
+        run({ kind: "gardener_drain", name: "silent" }),
+      ],
+    }), NOW);
+    const status = (name: string) => o.recent.find((r) => r.name === name)!.status;
+    expect(status("failed")).toBe("error");
+    expect(status("fine")).toBe("ok");
+    expect(status("silent")).toBe("ok");
+  });
+
   test("ring rows (research/task/digest) carry costUsd; drain with no meta omits it", async () => {
     const o = await assembleAgentsOverview(deps({
       getCompletedRing: () => [

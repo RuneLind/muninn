@@ -44,7 +44,7 @@ const spans: RecordedSpan[] = [];
 /** Every `updateSpan` — `tracer.finish` is an UPDATE on the root, so this is the
  *  only way to see whether the trace root was ever closed (an unfinished root
  *  renders as perpetually running on `/traces`). */
-const spanUpdates: { id: string; status?: string }[] = [];
+const spanAttrs = new Map<string, Record<string, unknown>>();const spanUpdates: { id: string; status?: string }[] = [];
 
 const realTraces = await import("../../db/traces.ts");
 mock.module("../../db/traces.ts", () => ({
@@ -54,6 +54,7 @@ mock.module("../../db/traces.ts", () => ({
   },
   updateSpan: async (id: string, params: { status?: string }) => {
     spanUpdates.push({ id, status: params?.status });
+    if (params && "attributes" in params) spanAttrs.set(id, (params as { attributes: Record<string, unknown> }).attributes);
   },
 }));
 
@@ -247,6 +248,15 @@ describe("claim retry — the success path", () => {
 
   test("the `factcheck-retry` trace root is finished (ok) — never left running", () => {
     expect(rootFinish(run)).toBe("ok");
+  });
+
+  test("the root carries the run's identity, spend and model", () => {
+    const root = run.spans.find((s) => s.name === "factcheck-retry" && s.parentId === null)!;
+    expect(spanAttrs.get(root.id)).toMatchObject({
+      agentKind: "factcheck",
+      agentName: expect.any(String),
+      inputTokens: expect.any(Number),
+    });
   });
 
   test("the run is traced under a 1-BASED `claude:claim-retry-<n>` span with tool children", () => {

@@ -13,6 +13,7 @@ import { getActiveThreadId } from "../db/threads.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
+import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("scheduler", "task-executor");
@@ -37,12 +38,10 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
         parentId: traceContext.parentId,
       });
     }
+    const run = { kind: "scheduled_task", name: task.title } as const;
     try {
       agentStatus.set("running_task", task.title);
-      requestId = agentStatus.startRequest(botConfig.name, "running_task", undefined, {
-        kind: "scheduled_task",
-        name: task.title,
-      });
+      requestId = agentStatus.startRequest(botConfig.name, "running_task", undefined, run);
       setConnectorInfo(requestId, botConfig, config.claudeModel);
       const { markdown, meta } = await executeTask(task, config, botConfig, requestId, tt);
       agentStatus.set("sending_telegram", task.title);
@@ -66,16 +65,15 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
       log.info("Scheduled task fired: \"{title}\" ({taskType}) to user {userId}", { botName: tag, title: task.title, taskType: task.taskType, userId: task.userId });
       // Settle the task span on success — last in the try, so a throw from any
       // trailing call can't reach the catch and double-settle it. The
-      // `claude`/haiku token attrs land on this span for /traces; Recent stays
-      // ring-sourced for scheduled_task (the "never both" rule — task:% is
-      // deliberately NOT added to getRecentAgentTraces), so these attrs never
-      // double-count.
-      tt?.finish("ok", { taskType: task.taskType, ...meta });
+      // `claude`/haiku token attrs land on this span for /traces. task:% is
+      // deliberately NOT added to getRecentAgentTraces, whose rows have no way to
+      // dedupe against the ring.
+      if (tt) finishAgentRunTrace(tt, run, "ok", { taskType: task.taskType, ...meta });
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
       // Settle the task span on failure so it never leaks unfinished.
-      tt?.error(err instanceof Error ? err : String(err));
+      if (tt) finishAgentRunTrace(tt, run, "error", { error: err instanceof Error ? err.message : String(err) });
       log.error("Failed to execute scheduled task {taskId}: {error}", { botName: tag, taskId: task.id, error: err instanceof Error ? err.message : String(err) });
 
       // Still advance schedule to prevent infinite retry storms (same pattern as watchers)

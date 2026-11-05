@@ -1664,6 +1664,14 @@ describe("the dense scan path", () => {
     expect(finishCalls[0]!.attrs).toMatchObject({ inputTokens: 7, outputTokens: 3, toolCount: 2 });
   });
 
+  test("an abandoned root carries no run identity: only the root the job ended on is a run", async () => {
+    selectionAnswer = "I had trouble reading the sheets, sorry.";
+    await run({ frames: true });
+    expect(finishCalls).toHaveLength(2);
+    expect(finishCalls[0]!.attrs).not.toHaveProperty("agentKind");
+    expect(finishCalls[1]!.attrs).toMatchObject({ agentKind: "capture", agentName: expect.any(String) });
+  });
+
   test("an EMPTY manifest is an answer, but never a SILENT one", async () => {
     selectionAnswer = "[]";
     await run({ frames: true });
