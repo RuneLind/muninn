@@ -92,7 +92,8 @@ async function insertSpan(traceId: string, name: string, status: string, attribu
   await sql!`
     INSERT INTO traces (id, trace_id, parent_id, name, kind, status, bot_name, started_at, duration_ms, attributes)
     VALUES (${crypto.randomUUID()}, ${traceId}, NULL, ${name}, 'root', ${status}, ${BOT},
-            now() - interval '43 seconds', 42000, ${sql!.json(attributes as never)})
+            -- Newest in the table, because the read takes the newest 40 stamped spans.
+            now(), 42000, ${sql!.json(attributes as never)})
   `;
 }
 
@@ -144,6 +145,10 @@ for (const when of ["with an empty ring", "after a restart"]) {
       await startServer();
     }
     await page.goto(`${BASE}/agents`);
+    // The card shows 8 rows, and another spec's newer rows can push these below them.
+    await expect(page.locator(".rf-row").first()).toBeVisible();
+    const showAll = page.locator(".rf-showall");
+    if (await showAll.count()) await showAll.click();
 
     const finished = row(page, "YouTube: a talk that finished");
     await expect(finished).toHaveCount(1);

@@ -215,7 +215,7 @@ describe("the factcheck run's ending", () => {
     return spanAttrs.get(spans.find((s) => s.name === "factcheck" && s.parentId === null)!.id);
   }
 
-  test("while the run is live its stamped root is held out of Recent: the run names its trace", async () => {
+  test("a live run names its trace, which keeps its stamped root out of Recent", async () => {
     let live: string | undefined;
     const root = () => spans.find((s) => s.name === "factcheck" && s.parentId === null)?.id;
     const app = new Hono();

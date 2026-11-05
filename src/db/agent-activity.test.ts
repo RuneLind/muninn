@@ -315,6 +315,17 @@ describe("getRecentAgentRuns", () => {
     expect((await getRecentAgentRuns()).some((r) => r.botName === bot && r.name === "older ok")).toBe(true);
   });
 
+  test("a name's ordinary runs do not use up its failures' rank", async () => {
+    const bot = `runs-${crypto.randomUUID()}`;
+    const ago = (m: number) => new Date(Date.now() - m * 60_000);
+    for (let i = 0; i < 6; i++) {
+      const attributes = { agentKind: "digest", agentName: "Mixed" };
+      if (i % 2 === 0) await spanFailed(bot, attributes, ago(i + 1));
+      else await span(bot, attributes, { startedAt: ago(i + 1) });
+    }
+    expect((await runsOf(bot)).map((r) => r.status)).toEqual(["error", "ok", "error", "ok", "error", "ok"]);
+  });
+
   test("a name's ordinary runs are all kept", async () => {
     const bot = `runs-${crypto.randomUUID()}`;
     await Promise.all(Array.from({ length: 5 }, () => span(bot, { agentKind: "digest", agentName: "Wiki digest: w" })));
@@ -338,6 +349,8 @@ describe("a run that fails after its span finished ok", () => {
       status: string;
       attributes: Record<string, unknown>;
     }[];
+  const rowsOf0 = async (traceId: string) =>
+    ((await getDb()`SELECT count(*)::int AS n FROM traces WHERE trace_id = ${traceId}`) as unknown as { n: number }[])[0]!.n;
   async function until(traceId: string, status: string) {
     for (let i = 0; i < 150; i++) {
       const [row] = await rowsOf(traceId);
@@ -381,6 +394,31 @@ describe("a run that fails after its span finished ok", () => {
       const row = await until(tracer.traceId, "error");
       expect(row!.status).toBe("error");
     }
+  });
+
+  test("a stamp held up well past the first retry still ends red", async () => {
+    const id = store.createJob({ videoId: "v", title: "slow stamp", url: "u" });
+    const tracer = new Tracer("capture:youtube", { botName: "testbot" });
+    const run = store.attachRun(id, { traceId: tracer.traceId });
+    for (let i = 0; i < 100 && (await rowsOf0(tracer.traceId)) === 0; i++) await Bun.sleep(10);
+    // Holding the root's row keeps the finish's stamp out until the transaction ends.
+    await getDb().begin(async (tx) => {
+      await tx`SELECT id FROM traces WHERE trace_id = ${tracer.traceId} FOR UPDATE`;
+      finishAgentRunTrace(tracer, run, "ok");
+      store.failJob(id, "ingest refused");
+      await Bun.sleep(600);
+    });
+    await Bun.sleep(900);
+    expect((await rowsOf(tracer.traceId))[0]!.status).toBe("error");
+  });
+
+  test("a same-named run under another trace is left alone", async () => {
+    const other = await jobWithFinishedRoot("same name");
+    const { id, tracer } = await jobWithFinishedRoot("same name");
+    store.failJob(id, "boom");
+    await until(tracer.traceId, "error");
+    await Bun.sleep(60);
+    expect((await rowsOf(other.tracer.traceId))[0]!.status).toBe("ok");
   });
 
   test("a finished job leaves its span ok", async () => {
@@ -432,4 +470,6 @@ test("getRecentAgentRuns reads at most 40 rows unless told otherwise", async () 
     ),
   );
   expect(await getRecentAgentRuns()).toHaveLength(40);
+  // A later e2e spec on this database reads the newest 40 too.
+  await getDb()`DELETE FROM traces WHERE bot_name = ${bot}`;
 });

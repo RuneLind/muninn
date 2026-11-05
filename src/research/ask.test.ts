@@ -376,7 +376,7 @@ describe("research trace", () => {
     expect(finish.attrs).not.toHaveProperty("model");
   });
 
-  test("while the run is live its stamped root is held out of Recent: the run names its trace", async () => {
+  test("a live run names its trace, which keeps its stamped root out of Recent", async () => {
     // The failure path stamps the root, then waits on an SSE write before completing.
     let liveWhileReportingFailure: string | undefined;
     const { tracer } = fakeTracer();
