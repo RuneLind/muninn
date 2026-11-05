@@ -16,7 +16,7 @@ import { TRIAGE_SYSTEM_PROMPT } from "./prompt.ts";
 import { decisionTriageBotConfig, parseVerdicts, realDecisionTriageModel, runDecisionTriage, type TriageModel, type TriageRunDeps } from "./run.ts";
 import { commitAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 import { realGit } from "./git.ts";
-import type { LogLine } from "./schema.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION, type LogLine } from "./schema.ts";
 
 const card = (id: string, extra = "") => `<Question id="${id}" choices="A|B">\nSkal vi ${id}?${extra}\n\n**Recommendation: A.** Fordi.\n</Question>\n`;
 const page = (body: string, fm = "") => `---\ntitle: T\nrepos: [code]\n${fm}---\n# T\n\n${body}\n`;
@@ -312,6 +312,15 @@ describe("refusals", () => {
     expect(runs[2]!.floor).toMatchObject({ met: false, error: "db down" });
   });
 
+  test("the floor is told this run's own start, and every card line carries the prompt's version", async () => {
+    const seen: number[] = [];
+    await runDecisionTriage(deps({ "notes/plain.md": { text: 'x\n\n<Question id="O1" choices="A|B">\nSkal vi?\n</Question>\n' } }, { now: () => 777, floor: async (startedAt) => { seen.push(startedAt); return { labelled: 0, added: 0, addedPages: 0, met: false }; } }));
+    expect(seen).toEqual([777]);
+    const { cards } = await readLog(dirs.log);
+    expect(cards.length).toBeGreaterThan(0);
+    expect(cards.every((c) => c.promptVersion === DECISION_TRIAGE_PROMPT_VERSION)).toBe(true);
+  });
+
   test("a wiki with no pages refuses; a wiki whose pages cannot be read refuses; neither makes a call", async () => {
     let calls = 0;
     const call: TriageModel = async () => (calls++, { text: "{}" });
@@ -394,7 +403,7 @@ describe("refusals", () => {
 });
 
 describe("the log", () => {
-  const cardLine = (id: string): LogLine => ({ type: "card", runId: "r", at: 1, wiki: "w", relPath: "p", id, questionHash: "h", recommendation: null, verdict: "DEFAULT" });
+  const cardLine = (id: string): LogLine => ({ type: "card", runId: "r", at: 1, wiki: "w", promptVersion: "p", relPath: "p", id, questionHash: "h", recommendation: null, verdict: "DEFAULT" });
 
   test("append-only, and a line with no end starts the next append on a fresh line", async () => {
     await appendLogLines(dirs.log, [cardLine("O1")]);

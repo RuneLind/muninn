@@ -122,6 +122,7 @@ export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE
       }
       const deps = realTriageRunDeps(config, entry, answerConfig, {
         append: (lines) => appendLogLines(nightlyLogPath(wiki, dir), lines),
+        nightlyDir: dir,
         floorEntries: () => names.flatMap((n) => {
           const e = entryOf(n);
           return e ? [e] : [];

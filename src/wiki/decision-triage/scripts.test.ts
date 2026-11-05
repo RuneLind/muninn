@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION } from "./schema.ts";
 import { git } from "./test-repo.ts";
 
 const REPO = path.join(import.meta.dir, "..", "..", "..");
@@ -180,4 +181,94 @@ test("--since on a wiki root that is no repo refuses with the reason, before the
   expect(res.code).toBe(2);
   expect(res.stderr).toContain("REFUSED");
   expect(res.stderr).toContain("not a git repository");
+});
+
+describe("--since holds the one decision point, before it reads an answer", () => {
+  const DAY = 86_400_000;
+  /** A wiki whose log started `days` ago, with these record lines already on file. */
+  function logged(days: number, records: object[], over: object = {}) {
+    const { tmp, w } = world();
+    const logDir = path.join(tmp, "l");
+    mkdirSync(logDir);
+    const line = { type: "run", runId: "r", at: Date.now() - days * DAY - 1000, wiki: "w", model: "m", promptVersion: DECISION_TRIAGE_PROMPT_VERSION, usage: { calls: 1 }, repoRoots: null, repos: [], cards: 0, floor: null, outcome: "ok", ...over };
+    writeFileSync(path.join(logDir, "w.jsonl"), `${JSON.stringify(line)}\n`);
+    const file = path.join(logDir, "part2-scorings.jsonl");
+    if (records.length > 0) writeFileSync(file, records.map((r) => `${JSON.stringify(r)}\n`).join(""));
+    const args = ["--since", "2026-11-06", "--root", `w=${w}`, "--log-dir", logDir];
+    return { tmp, args, file, before: records.length > 0 ? readFileSync(file, "utf8") : null };
+  }
+  const scoring = (day: number, result: string, input: object | null = null) => ({ type: "scoring", at: 1, day, promptVersion: DECISION_TRIAGE_PROMPT_VERSION, result, hand: null, input });
+  const env = { WORK_MAP_WIKIS: "w" };
+
+  test("day 16 after a day 14 miss is refused, and the record does not move", async () => {
+    const { tmp, args, file, before } = logged(16, [scoring(14, "miss")]);
+    const res = await script(SCORE, args, tmp, env);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain("REFUSED (day 16)");
+    expect(res.stderr).toContain("no scoring between");
+    expect(res.stdout).toBe("");
+    expect(readFileSync(file, "utf8")).toBe(before!);
+  });
+
+  test("day 20 after a pass is refused", async () => {
+    const { tmp, args } = logged(20, [scoring(14, "pass")]);
+    const res = await script(SCORE, args, tmp, env);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain("REFUSED (day 20)");
+    expect(res.stderr).toContain("passed");
+  });
+
+  test("a second scoring past day 28 is refused", async () => {
+    const { tmp, args } = logged(31, [scoring(14, "miss"), scoring(30, "miss")]);
+    const res = await script(SCORE, args, tmp, env);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain("final");
+  });
+
+  test("--final on day 3 is refused and writes no record", async () => {
+    const { tmp, args, file } = logged(3, []);
+    const res = await script(SCORE, [...args, "--final"], tmp, env);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain("REFUSED (day 3)");
+    expect(res.stderr).toContain("--final");
+    expect(existsSync(file)).toBe(false);
+  });
+
+  test("a record line that does not parse refuses", async () => {
+    const { tmp, args, file } = logged(20, [scoring(14, "miss")]);
+    writeFileSync(file, "{not json\n");
+    const res = await script(SCORE, args, tmp, env);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain("broken");
+  });
+
+  test("a --since later than the window is a usage line", async () => {
+    const { tmp, args } = logged(3, [], { at: Date.parse("2026-11-07T04:00:00Z") });
+    const res = await script(SCORE, ["--since", "2026-11-09", ...args.slice(2)], tmp, env);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain("usage error: --since 2026-11-09 is later than");
+  });
+
+  test("--dry-run on a refused day writes nothing and is not refused at the gate", async () => {
+    const { tmp, args, file, before } = logged(16, [scoring(14, "miss")]);
+    const res = await script(SCORE, [...args, "--dry-run"], tmp, env);
+    // The root is no repo here: getting that far shows the gate did not stop it.
+    expect(res.stderr).toContain("not a git repository");
+    expect(readFileSync(file, "utf8")).toBe(before!);
+  });
+
+  test("--hand on a recorded pass adds the sample to its figures, once", async () => {
+    const report = { verdict: { caught: 9, of: 10, flagged: 9, cards: 20 }, sharePct: 45, shareRaw: 45, textAlone: {}, rule: { caught: 0, of: 10, flagged: 0, cards: 20, sharePct: 0, shareRaw: 0 }, perWiki: {}, late: {}, lateTextAlone: {}, notScored: 0, byKind: {}, catchesBy: { ASK_OWNER: 9, ASK_OTHER: 0 } };
+    const input = { report, floor: { labelled: 20, added: 10, addedPages: 2, met: true }, day: 14, shares: { askOwnerMedian: 0.2, askAnyMedian: 0.4, nights: 10 }, handRead: null, handWrong: null, settledThenAnswered: 0, context: { refused: 0, failed: 0, absent: 0, wikiNights: 10, olderLines: 0 } };
+    const { tmp, args, file } = logged(20, [scoring(14, "pass", input)]);
+    const hand = path.join(tmp, "hand.json");
+    writeFileSync(hand, JSON.stringify({ read: 5, wrong: 1 }));
+    const res = await script(SCORE, [...args, "--hand", hand], tmp, env);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain("MISS (day 14)");
+    expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(2);
+    const again = await script(SCORE, [...args, "--hand", hand], tmp, env);
+    expect(again.code).toBe(2);
+    expect(again.stderr).toContain("REFUSED (day 20)");
+  });
 });

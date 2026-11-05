@@ -7,12 +7,20 @@
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { cutLine, type GitRun } from "./git.ts";
 import { labelAnswers, type LabelledAnswer } from "./history.ts";
+import { DECISION_TRIAGE_DIR, nightlyLogPath, readLog } from "./log.ts";
 import { floorOf } from "./score.ts";
-import { DECISION_TRIAGE_PROMPT_FROZEN_ON, type FloorState } from "./schema.ts";
+import { DECISION_TRIAGE_PROMPT_FROZEN_ON, DECISION_TRIAGE_PROMPT_VERSION, type FloorState, type RunLine } from "./schema.ts";
 
 /** The first moment after the frozen prompt's date. */
 export function frozenAfterMs(frozenOn = DECISION_TRIAGE_PROMPT_FROZEN_ON): number {
   return Date.parse(`${frozenOn}T00:00:00Z`) + 86_400_000;
+}
+
+/** Where part (2)'s answers start, for the run line's floor and the score alike: the
+ *  later of the frozen date and the current prompt's first run line, of any outcome. */
+export function answerWindowMs(runs: readonly Pick<RunLine, "at" | "promptVersion">[], version = DECISION_TRIAGE_PROMPT_VERSION, frozenOn = DECISION_TRIAGE_PROMPT_FROZEN_ON): number {
+  const mine = runs.filter((r) => r.promptVersion === version).map((r) => r.at);
+  return Math.max(frozenAfterMs(frozenOn), ...(mine.length ? [Math.min(...mine)] : []));
 }
 
 export interface WikiLabels {
@@ -46,12 +54,16 @@ export async function labelsSince(
   return out;
 }
 
+/** `ownLineAt`: the line this run is about to write to these logs. */
 export async function computeFloor(
   entries: readonly { wiki: string; root: string }[],
   history: (wiki: string) => Promise<WikiAnswerVersion[]>,
   git: GitRun,
+  opts: { dir?: string; ownLineAt?: number } = {},
 ): Promise<FloorState> {
-  const wikis = await labelsSince(entries, frozenAfterMs(), history, git);
+  const logs = await Promise.all(entries.map((e) => readLog(nightlyLogPath(e.wiki, opts.dir ?? DECISION_TRIAGE_DIR))));
+  const runs = [...logs.flatMap((l) => l.runs), ...(opts.ownLineAt === undefined ? [] : [{ at: opts.ownLineAt, promptVersion: DECISION_TRIAGE_PROMPT_VERSION }])];
+  const wikis = await labelsSince(entries, answerWindowMs(runs), history, git);
   const faults = wikis.flatMap((w) => w.fault ?? []);
   if (faults.length > 0) throw new Error(faults.join("; "));
   return floorOf(wikis.flatMap(({ wiki, labelled }) => labelled.filter((l) => l.status === "ok").map((l) => ({ wiki, relPath: l.settled.relPath, added: l.added }))));

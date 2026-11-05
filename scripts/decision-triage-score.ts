@@ -11,6 +11,9 @@
  *
  * `--dry-run` gathers facts, makes no model call, reads no label and writes nothing.
  * `--since` makes no model call either when its headline will be TOO EARLY or TOO FEW.
+ * From day 14 each real `--since` goes on the record (`part2-scorings.jsonl` in the log
+ * folder), which allows one decision scoring, then only the first at or past day 28.
+ * `--hand` on a scoring already recorded adds the sample to its figures, once.
  * `--root <wiki>=<path>` (repeatable) names a wiki's root; `--log-dir <dir>` moves
  * the logs. Both replays refuse without DECISION_TRIAGE_REPO_ROOTS, or on a wiki
  * `scope.ts` refuses (a readonly root). From a worktree, run with `bun --env-file <checkout>/.env`.
@@ -25,14 +28,30 @@ import { closeDb, initDb } from "../src/db/client.ts";
 import { listWikiAnswerHistory } from "../src/db/wiki-answers.ts";
 import { readBaselineCards, readBaselineLabels } from "../src/wiki/decision-triage/baseline.ts";
 import type { ReplayCard } from "../src/wiki/decision-triage/facts.ts";
-import { frozenAfterMs, labelsSince, type WikiLabels } from "../src/wiki/decision-triage/floor.ts";
-import { droppedOf, runPart2, part2Plan, type Dropped } from "../src/wiki/decision-triage/part2.ts";
+import { answerWindowMs, labelsSince, type WikiLabels } from "../src/wiki/decision-triage/floor.ts";
+import {
+  amendWithHand,
+  cardDoneToday,
+  currentLog,
+  droppedOf,
+  finalRefusal,
+  handSample,
+  parseScoringRecords,
+  part2Day,
+  part2Plan,
+  runPart2,
+  scoringGate,
+  sinceAfterWindow,
+  type Dropped,
+} from "../src/wiki/decision-triage/part2.ts";
 import { realGit } from "../src/wiki/decision-triage/git.ts";
-import { appendLogLines, DECISION_TRIAGE_DIR, nightlyLogPath, readLog, replayLogPath, type ParsedLog } from "../src/wiki/decision-triage/log.ts";
+import { appendLogLines, DECISION_TRIAGE_DIR, nightlyLogPath, readLog, readScoringText, replayLogPath, scoringRecordPath, type ParsedLog } from "../src/wiki/decision-triage/log.ts";
 import { gatherReplay, replayCounts, replayKey, ReplayRefused, runReplay, type ReplayDeps } from "../src/wiki/decision-triage/replay.ts";
 import { realDecisionTriageModel } from "../src/wiki/decision-triage/run.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, type CardLine } from "../src/wiki/decision-triage/schema.ts";
 import {
+  CAP_DAY,
+  FLAGGING_RULE_WIKI,
   nightlyCatches,
   nightlyShares,
   nightsOf,
@@ -44,7 +63,7 @@ import {
   type ScoredItem,
 } from "../src/wiki/decision-triage/score.ts";
 import { scopeVerdict, triageScope, type TriageScope } from "../src/wiki/decision-triage/scope.ts";
-import { parseHandSample, parseIsoMoment, parseSinceDay, rootOverrides, triageEntries, UsageError } from "../src/wiki/decision-triage/script-roots.ts";
+import { parseHandSample, parseIsoMoment, parseSinceDay, rootOverrides, todayNightDue, triageEntries, UsageError } from "../src/wiki/decision-triage/script-roots.ts";
 import type { WikiRegistryEntry } from "../src/wiki/registry.ts";
 import { closedQuestionIds } from "../src/format/question.ts";
 import { getWikiIndex, readWikiPage } from "../src/wiki/store.ts";
@@ -88,7 +107,6 @@ function readFlags() {
 const { values, overrides, sinceArg, untilArg } = readFlags();
 
 const DEFAULT_BASELINE = path.join(homedir(), ".muninn", "decision-triage", "baseline-2026-11-04.json");
-const SAMPLE_PER_KIND = 5;
 
 const config = loadConfig();
 const answerConfig = resolveWikiAnswerConfig();
@@ -196,23 +214,24 @@ async function closedWithNoAnswer(wikis: readonly { wiki: string; root: string }
 }
 
 async function printNightly(log: ParsedLog, labelled: readonly WikiLabels[], wikis: readonly { wiki: string; root: string }[]): Promise<void> {
-  const nights = nightsOf(log.runs, log.cards, Date.now());
+  const current = currentLog(log);
+  const nights = nightsOf(current.runs, current.cards, Date.now(), todayNightDue(Date.now(), config.workMapHour));
   const shares = nightlyShares(nights);
   const tally: Record<string, number> = { ok: 0, partial: 0, refused: 0, failed: 0, absent: 0 };
   for (const n of nights) tally[n.outcome]!++;
-  console.log(`nights: ${JSON.stringify(tally)}${log.broken ? `; ${log.broken} broken line(s) skipped` : ""}`);
+  console.log(`nights: ${JSON.stringify(tally)}${log.broken ? `; ${log.broken} broken line(s) skipped` : ""}; ${current.olderLines} line(s) of older prompt versions left out`);
   for (const n of nights) console.log(`  ${n.day} ${n.wiki}: ${n.outcome} ${JSON.stringify(n.kinds)}`);
-  console.log(`nightly median share: ASK_OWNER ${shares.askOwnerMedian}, ASK_OWNER+ASK_OTHER ${shares.askAnyMedian}, over ${shares.nights} wiki-night(s)`);
-  const flips = verdictFlips(log.cards);
+  console.log(`nightly median share: ASK_OWNER ${shares.askOwnerMedian}, ASK_OWNER+ASK_OTHER ${shares.askAnyMedian}, over ${shares.nights} night(s)`);
+  const flips = verdictFlips(current.cards);
   console.log(`verdict flips: ${flips.flips} across ${flips.cardsFlipped} of ${flips.cards} card(s) with two or more nights`);
   const answers = labelled.flatMap(({ wiki, labelled: rows }) => rows.map((l) => ({ wiki, relPath: l.settled.relPath, id: l.settled.id, firstAt: l.settled.firstAt, added: l.added })));
-  const catches = nightlyCatches(answers, log.cards);
+  const catches = nightlyCatches(answers, current.cards);
   console.log(`nightly catches on cards that waited a night (no bar): ${catches.caught} of ${catches.addedWaited}, over ${catches.waited} labelled`);
   console.log(`SETTLED or VOID later answered (counts against the verdict): ${catches.settledThenAnswered}`);
   const byPage = new Map<string, number>();
   for (const a of answers) if (a.added) byPage.set(a.relPath, (byPage.get(a.relPath) ?? 0) + 1);
   console.log(`positives by page: ${[...byPage.values()].sort((a, b) => b - a).join(", ") || "none"} on ${byPage.size} page(s)`);
-  const coded = log.cards.filter((c) => c.codeFacts !== undefined);
+  const coded = current.cards.filter((c) => c.codeFacts !== undefined);
   console.log(`cards with code facts: ${coded.filter((c) => c.codeFacts).length} of ${coded.length} card lines`);
   const d = droppedOf(labelled);
   console.log(`not scored: ${d.afterAnswer} on a card first committed after its answer, ${d.hashMismatch} whose hash does not match the page at that commit, ${await closedWithNoAnswer(wikis)} closed on the page with no card answer`);
@@ -222,7 +241,6 @@ async function printNightly(log: ParsedLog, labelled: readonly WikiLabels[], wik
 const droppedLine = (d: Dropped) => `answers with no card in git: ${d.noHistory} no-history, ${d.unreadable} whose history could not be read`;
 
 async function modePart2(): Promise<number> {
-  const sinceMs = Math.max(sinceArg!, frozenAfterMs());
   const hand = values.hand ? parseHandSample(await readFile(path.resolve(values.hand), "utf8").catch(() => "not a file")) : null;
   const scope = await readScope();
   const faults = faultsOf(scope);
@@ -230,40 +248,98 @@ async function modePart2(): Promise<number> {
   const wikis = asRoots(scope.covered);
   const names = wikis.map((w) => w.wiki);
   if (!config.decisionTriageRepoRoots) throw new ReplayRefused("DECISION_TRIAGE_REPO_ROOTS is not set");
-  const labelled = await labelsSince(wikis, sinceMs, listWikiAnswerHistory, realGit);
+  const log = await nightlyLogs(names);
+  const windowMs = answerWindowMs(log.runs);
+  if (sinceAfterWindow(values.since!, windowMs)) throw new UsageError(`--since ${values.since} is later than this prompt's window, which starts ${new Date(windowMs).toISOString()}; the floor on the run line counts from there`);
+  const dryRun = values["dry-run"] === true;
+  const recordFile = scoringRecordPath(logDir);
+  const records = parseScoringRecords(await readScoringText(recordFile));
+  const nowMs = Date.now();
+  const day = part2Day(log.runs, nowMs);
+  const gate = scoringGate(records, day);
+  // All before the answers are read: a refusal reads no label and writes no record.
+  if (!dryRun && !gate.allowed) {
+    if (hand && gate.amend) {
+      const amended = amendWithHand(gate.amend, hand, nowMs);
+      await appendLogLines(recordFile, [amended.record]);
+      console.log(amended.headline.line);
+      for (const note of amended.headline.notes) console.log(note);
+      return 0;
+    }
+    console.error(gate.line);
+    return 2;
+  }
+  const finalEarly = !dryRun && values.final ? finalRefusal(day) : null;
+  if (finalEarly) {
+    console.error(finalEarly);
+    return 2;
+  }
+  const labelled = await labelsSince(wikis, windowMs, listWikiAnswerHistory, realGit);
   // A wiki whose history cannot be read would otherwise read as no answers at all.
   const historyFaults = labelled.flatMap((w) => w.fault ?? []);
   if (historyFaults.length > 0) throw new ReplayRefused(historyFaults.join("; "));
-  const log = await nightlyLogs(names);
   console.log(droppedLine(droppedOf(labelled)));
-  if (values["dry-run"]) {
-    const plan = part2Plan(labelled, log.runs, Date.now());
+  const todayCounts = todayNightDue(nowMs, config.workMapHour);
+  if (dryRun) {
+    const plan = part2Plan(labelled, log, nowMs, todayCounts);
     const counts = replayCounts(await gatherReplay(plan.cards, replayDeps(scope.covered)));
-    console.log(JSON.stringify({ mode: "since --dry-run", ...(plan.stop ? { wouldStopAt: plan.stop.line } : {}), day: plan.day, floor: plan.floor, dropped: plan.dropped, ...counts }, null, 1));
+    const wouldStop = !gate.allowed ? gate.line : plan.stop?.line;
+    console.log(JSON.stringify({ mode: "since --dry-run", ...(wouldStop ? { wouldStopAt: wouldStop } : {}), day: plan.day, floor: plan.floor, dropped: plan.dropped, context: plan.context, ...counts }, null, 1));
     return 0;
   }
-  const { plan, headline, scored } = await runPart2({ wikis: labelled, log, nowMs: Date.now(), hand, replay: (cards) => modelReplay(cards, scope.covered) });
+  const { plan, headline, scored } = await runPart2({
+    wikis: labelled,
+    log,
+    nowMs,
+    todayCounts,
+    hand,
+    final: values.final === true,
+    records,
+    record: (r) => appendLogLines(recordFile, [r]),
+    replay: (cards) => modelReplay(cards, scope.covered),
+  });
+  if (headline.result === "refused") {
+    console.error(headline.line);
+    return 2;
+  }
   console.log(headline.line);
   for (const note of headline.notes) console.log(note);
   if (!scored) console.log("no model call: this headline needs no verdict.");
   if (scored) printReport(scored.report);
   await printNightly(log, labelled, wikis);
-  if (scored) printHandSample(plan.cards, scored.lines, values.final === true);
+  if (scored) await printHandSample(plan.cards, scored.lines, scored.report, values.final === true || headline.result === "pass" || (plan.day ?? 0) >= CAP_DAY, wikis);
   return 0;
 }
 
-/** Cards to read by hand, from replayed cards, which were all answered. An open
- *  card's verdict is never in this set. */
-function printHandSample(cards: readonly ReplayCard[], lines: ReadonlyMap<string, CardLine>, final: boolean): void {
-  const rows = cards.flatMap((c) => {
-    const line = lines.get(replayKey(c));
-    return line ? [line] : [];
-  });
-  const kinds = final ? ["SETTLED", "VOID", "DEFAULT", "ASK_OWNER", "ASK_OTHER"] : ["SETTLED", "VOID"];
-  for (const kind of kinds) {
-    const sample = rows.filter((r) => r.verdict === kind);
-    console.log(`hand sample, ${kind}: ${sample.length} card(s)`);
-    for (const r of sample.slice(0, kind === "SETTLED" || kind === "VOID" ? sample.length : SAMPLE_PER_KIND)) console.log(`  ${r.wiki} ${r.relPath} ${r.id}: ${r.why ?? ""}`);
+/** Which replayed cards are done as of today: each page and answer list read now. */
+async function doneToday(cards: readonly ReplayCard[], wikis: readonly { wiki: string; root: string }[]): Promise<Set<string>> {
+  const done = new Set<string>();
+  for (const { wiki, root } of wikis) {
+    const mine = cards.filter((c) => c.wiki === wiki);
+    if (mine.length === 0) continue;
+    const index = await getWikiIndex({ root, refresh: true });
+    const versions = await listWikiAnswerHistory(wiki);
+    for (const card of mine) {
+      const meta = index?.pages.find((p) => p.relPath === card.relPath);
+      const text = index && meta ? await readWikiPage(index, meta) : null;
+      if (cardDoneToday(card, text, versions, answerConfig.owner)) done.add(replayKey(card));
+    }
+  }
+  return done;
+}
+
+/** The cards to read by hand. A replayed card may still be open: its first answer can
+ *  be a not-sure, text only or a colleague's, so `handSample` takes done cards alone. */
+async function printHandSample(cards: readonly ReplayCard[], lines: ReadonlyMap<string, CardLine>, report: ReplayReport, final: boolean, wikis: readonly { wiki: string; root: string }[]): Promise<void> {
+  const done = await doneToday(cards, wikis);
+  for (const { kind, total, rows } of handSample(cards, lines, (c) => done.has(replayKey(c)), final)) {
+    console.log(`hand sample, ${kind}: ${total} card(s)`);
+    for (const r of rows) console.log(`  ${r.wiki} ${r.relPath} ${r.id}: ${r.why ?? ""}`);
+  }
+  console.log(`hand sample leaves out ${cards.length - done.size} replayed card(s) still open today`);
+  if (final) {
+    console.log(`catches by verdict: ASK_OWNER ${report.catchesBy.ASK_OWNER}, ASK_OTHER ${report.catchesBy.ASK_OTHER}`);
+    console.log(`control, flag every ${FLAGGING_RULE_WIKI} card: ${fmt(report.rule)}, share ${report.rule.sharePct}%`);
   }
 }
 
@@ -302,9 +378,10 @@ try {
   else if (values.labels) exit = await modeLabels();
   else {
     const wikis = await reportWikis();
-    const read = await labelsSince(wikis, frozenAfterMs(), listWikiAnswerHistory, realGit);
+    const log = await nightlyLogs(wikis.map((w) => w.wiki));
+    const read = await labelsSince(wikis, answerWindowMs(log.runs), listWikiAnswerHistory, realGit);
     printHistoryFaults(read);
-    await printNightly(await nightlyLogs(wikis.map((w) => w.wiki)), read, wikis);
+    await printNightly(log, read, wikis);
   }
 } catch (err) {
   if (err instanceof UsageError) {

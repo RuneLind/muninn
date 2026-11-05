@@ -19,6 +19,9 @@ const safeName = (name: string) => name.toLowerCase().replace(/[^a-z0-9._-]/g, "
 export const nightlyLogPath = (wiki: string, dir = DECISION_TRIAGE_DIR) => path.join(dir, `${safeName(wiki)}.jsonl`);
 export const replayLogPath = (promptVersion: string, dir = DECISION_TRIAGE_DIR) => path.join(dir, `replay-${safeName(promptVersion)}.jsonl`);
 
+/** One line per real part (2) scoring, under the same folder as the logs it read. */
+export const scoringRecordPath = (dir = DECISION_TRIAGE_DIR) => path.join(dir, "part2-scorings.jsonl");
+
 /** The night's own state and failure count, apart from the work map's. */
 export const triageStateStore = (dir = DECISION_TRIAGE_DIR): WorkMapStateStore => fileStateStore(path.join(dir, "state"));
 
@@ -39,7 +42,7 @@ async function endsMidLine(file: string): Promise<boolean> {
   }
 }
 
-export async function appendLogLines(file: string, lines: readonly LogLine[]): Promise<void> {
+export async function appendLogLines(file: string, lines: readonly (LogLine | { type: "scoring" })[]): Promise<void> {
   if (lines.length === 0) return;
   await mkdir(path.dirname(file), { recursive: true });
   const text = lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
@@ -67,6 +70,17 @@ export function parseLog(text: string): ParsedLog {
     }
   }
   return out;
+}
+
+/** The scoring record's text. No file is no scoring yet; any other failure throws,
+ *  because reading it as empty would re-open a decision already made. */
+export async function readScoringText(file: string): Promise<string> {
+  try {
+    return await readFile(file, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw err;
+  }
 }
 
 /** A log that does not exist yet reads as empty. */

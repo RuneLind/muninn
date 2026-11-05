@@ -5,6 +5,7 @@ import path from "node:path";
 import { getWikiRegistry } from "../registry-memo.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
 import { isInsideDir } from "../work-map/dry-run.ts";
+import { todaysHourMs } from "../work-map/loop.ts";
 import { DECISION_TRIAGE_DIR } from "./log.ts";
 
 /** A flag value that can't mean anything: one line and exit 2, never a stack. */
@@ -55,6 +56,12 @@ export function triageEntries(overrides: ReadonlyMap<string, string>, names: rea
     const found = getWikiRegistry().find((e) => e.name.toLowerCase() === name.toLowerCase());
     return found ? [found] : [];
   });
+}
+
+/** Has today's night had its chance? Its hour plus one, so a run still going is not absent. */
+export function todayNightDue(nowMs: number, hour: number): boolean {
+  const boundary = todaysHourMs(nowMs, hour);
+  return boundary !== null && nowMs >= boundary + 3_600_000;
 }
 
 /** Would `--out` land in the log folder? A folder not there yet holds nothing, but

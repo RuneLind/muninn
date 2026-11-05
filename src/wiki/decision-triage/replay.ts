@@ -242,6 +242,7 @@ export async function runReplay(gathered: GatheredReplay, deps: ReplayRunDeps): 
     runId,
     at,
     wiki: item.gathered.ref.wiki,
+    promptVersion: DECISION_TRIAGE_PROMPT_VERSION,
     relPath: item.gathered.ref.relPath,
     id: item.gathered.ref.id,
     questionHash: item.gathered.questionHash,

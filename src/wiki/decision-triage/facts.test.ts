@@ -14,7 +14,7 @@ import { renderBatch } from "./prompt.ts";
 import { gatherReplay, messageMoments, replayBatches, replayCounts, replayDigest, ReplayRefused, runReplay, type ReplayDeps } from "./replay.ts";
 import { readBaselineLabels } from "./baseline.ts";
 import { replayLogPath } from "./log.ts";
-import { replayKey, type CardLine, type LogLine } from "./schema.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION, replayKey, type CardLine, type LogLine } from "./schema.ts";
 import { commitAt, git, mergeAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 
 const PAGE = (extra = "") => `---
@@ -587,6 +587,12 @@ describe("replay's mechanics, with no score", () => {
       await r.run(gathered);
       return { gathered, lines: r.cardLines() };
     };
+
+    test("a replay line carries the prompt's version", async () => {
+      const { lines } = await once();
+      expect(lines.length).toBeGreaterThan(0);
+      expect(lines.every((l) => l.promptVersion === DECISION_TRIAGE_PROMPT_VERSION)).toBe(true);
+    });
 
     test("a line from another wiki, on stale wording, is not kept", async () => {
       const { gathered, lines } = await once();

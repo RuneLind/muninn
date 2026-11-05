@@ -5,7 +5,8 @@
 
 import { z } from "zod";
 
-/** Changes only by hand, with the prompt. A new value restarts `--since`. */
+/** Changes only by hand, with the prompt. A new value restarts part (2): its day,
+ *  its answer window and the figures read only this version's lines. */
 export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.3";
 /** The frozen prompt's date: part (2) replays answers given after it. */
 export const DECISION_TRIAGE_PROMPT_FROZEN_ON = "2026-11-05";
@@ -83,6 +84,8 @@ export interface CardLine {
   runId: string;
   at: number;
   wiki: string;
+  /** The prompt that read this card: the score reads only the current version's lines. */
+  promptVersion: string;
   relPath: string;
   id: string;
   questionHash: string;

@@ -20,7 +20,12 @@ export const FLOOR_ADDED = 10;
 export const FLOOR_PAGES = 2;
 export const CAP_DAY = 28;
 export const FLAGGING_RULE_WIKI = "melosys-kode-wiki";
+/** Part (1)'s bars are counts out of this base. */
+export const PART1_BASE_POSITIVES = 14;
 const DAY_MS = 86_400_000;
+
+/** Bars read raw shares; only float noise is forgiven: (0.2 + 0.4) / 2 is exactly 30%. */
+const atMost = (x: number, bar: number) => x <= bar + 1e-9;
 
 /** A question's first answer, as its author settled it. */
 export interface Settled {
@@ -114,21 +119,27 @@ const figures = (items: readonly { added: boolean; flag: boolean }[]): Figures =
   cards: items.length,
 });
 
-/** The flag share projected onto a population: the added and other answers at
- *  this sample's rates. With none, the sample's own share. */
-export function projectedShare(f: Figures, population?: { added: number; other: number }): number {
+/** The flag share projected onto a population, unrounded: the added and other
+ *  answers at this sample's rates. With none, the sample's own share. */
+export function projectedRaw(f: Figures, population?: { added: number; other: number }): number {
   if (f.cards === 0) return 0;
-  if (!population || f.of === 0 || f.cards === f.of) return Math.round((100 * f.flagged) / f.cards);
+  if (!population || f.of === 0 || f.cards === f.of) return (100 * f.flagged) / f.cards;
   const flaggedOther = f.flagged - f.caught;
   const others = f.cards - f.of;
-  return Math.round((100 * (population.added * (f.caught / f.of) + population.other * (flaggedOther / others))) / (population.added + population.other));
+  return (100 * (population.added * (f.caught / f.of) + population.other * (flaggedOther / others))) / (population.added + population.other);
 }
+
+/** What gets printed. A bar reads {@link projectedRaw}. */
+export const projectedShare = (f: Figures, population?: { added: number; other: number }): number => Math.round(projectedRaw(f, population));
+
+const withShare = (f: Figures, population?: { added: number; other: number }) => ({ ...f, sharePct: projectedShare(f, population), shareRaw: projectedRaw(f, population) });
 
 export interface ReplayReport {
   verdict: Figures;
   sharePct: number;
-  textAlone: Figures & { sharePct: number };
-  rule: Figures & { sharePct: number };
+  shareRaw: number;
+  textAlone: Figures & { sharePct: number; shareRaw: number };
+  rule: Figures & { sharePct: number; shareRaw: number };
   perWiki: Record<string, Figures>;
   late: Figures;
   lateTextAlone: Figures;
@@ -152,8 +163,9 @@ export function replayReport(items: readonly ScoredItem[], population?: { added:
   return {
     verdict,
     sharePct: projectedShare(verdict, population),
-    textAlone: { ...text, sharePct: projectedShare(text, population) },
-    rule: { ...rule, sharePct: projectedShare(rule, population) },
+    shareRaw: projectedRaw(verdict, population),
+    textAlone: withShare(text, population),
+    rule: withShare(rule, population),
     perWiki,
     late: figures(late.filter((i) => i.verdict !== undefined && i.verdict !== "NO_VERDICT").map((i) => ({ added: i.added, flag: isFlag(i.verdict) }))),
     lateTextAlone: figures(late.map((i) => ({ added: i.added, flag: i.textAlone === true }))),
@@ -168,15 +180,16 @@ export function replayReport(items: readonly ScoredItem[], population?: { added:
 
 /** Part (1)'s headline: a card left with no verdict re-opens the contract and
  *  never reads as a worse result. */
-export function part1Headline(r: ReplayReport): { result: "better" | "worse" | "tie" | "not scored"; line: string } {
+export function part1Headline(r: ReplayReport): { result: "better" | "worse" | "tie" | "not scored" | "no bars"; line: string } {
   if (r.notScored > 0) {
     return { result: "not scored", line: `NOT SCORED: ${r.notScored} card(s) have no verdict after the re-runs. This re-opens the contract; it is not a worse result.` };
   }
   const { caught, of } = r.verdict;
   const stated = `${caught} of ${of} caught, ${r.sharePct}% flagged (text alone ${r.textAlone.caught} of ${r.textAlone.of}, ${r.textAlone.sharePct}%; rule ${r.rule.caught} of ${r.rule.of}, ${r.rule.sharePct}%)`;
-  if (caught <= 9 || r.sharePct > 50) return { result: "worse", line: `WORSE: ${stated}.` };
-  if (caught >= 12 && r.sharePct <= 39) return { result: "better", line: `BETTER: ${stated}.` };
-  const belowRule = caught < r.rule.caught || (caught === r.rule.caught && r.sharePct > r.rule.sharePct);
+  if (of !== PART1_BASE_POSITIVES) return { result: "no bars", line: `NO BARS: ${stated}. The bars apply only to the file's base of ${PART1_BASE_POSITIVES} answers that added something; this file has ${of}.` };
+  if (caught <= 9 || !atMost(r.shareRaw, 50)) return { result: "worse", line: `WORSE: ${stated}.` };
+  if (caught >= 12 && atMost(r.shareRaw, 39)) return { result: "better", line: `BETTER: ${stated}.` };
+  const belowRule = caught < r.rule.caught || (caught === r.rule.caught && !atMost(r.shareRaw, r.rule.shareRaw));
   return { result: "tie", line: `TIE: ${stated}. It fell ${belowRule ? "below" : "at or above"} the «flag every ${FLAGGING_RULE_WIKI} card» rule.` };
 }
 
@@ -203,33 +216,37 @@ export interface NightRecord {
 
 const OUTCOME_RANK = { ok: 4, partial: 3, failed: 2, refused: 1, absent: 0 } as const;
 
-/** Every wiki's nights, from its first `ok` or `partial` line to `todayMs`. A day
- *  takes its best outcome, and a card line with no run line still counts its
- *  verdicts (a kill mid-run); such a day with no run line reads absent. */
-export function nightsOf(runs: readonly RunLine[], cards: readonly CardLine[], todayMs: number): NightRecord[] {
+/** Every wiki's nights, from its first `ok` or `partial` line, or an earlier night
+ *  a kill left with card lines only, to `nowMs`. A day takes its best outcome, and a
+ *  card line with no run line still counts its verdicts; such a day reads absent. A
+ *  wiki with no `ok` or `partial` line shows only the days it left a line on. Today
+ *  with no line yet counts only under `todayCounts`: its hour may be still to come. */
+export function nightsOf(runs: readonly RunLine[], cards: readonly CardLine[], nowMs: number, todayCounts: boolean): NightRecord[] {
   const out: NightRecord[] = [];
+  const lastDay = osloDay(nowMs);
   for (const wiki of new Set([...runs, ...cards].map((l) => l.wiki))) {
     const mine = runs.filter((r) => r.wiki === wiki);
-    const started = mine.filter((r) => r.outcome === "ok" || r.outcome === "partial").map((r) => r.at);
-    const first = started.length ? Math.min(...started) : null;
-    if (first === null) {
-      for (const day of [...new Set(mine.map((r) => osloDay(r.at)))].sort()) {
-        const best = mine.filter((r) => osloDay(r.at) === day).sort((a, b) => OUTCOME_RANK[b.outcome] - OUTCOME_RANK[a.outcome])[0]!;
-        out.push({ day, wiki, outcome: best.outcome, kinds: {} });
+    const myCards = cards.filter((c) => c.wiki === wiki);
+    const night = (day: string): NightRecord => {
+      const best = mine.filter((r) => osloDay(r.at) === day).sort((a, b) => OUTCOME_RANK[b.outcome] - OUTCOME_RANK[a.outcome])[0];
+      const kinds: NightRecord["kinds"] = {};
+      for (const c of myCards) {
+        if (osloDay(c.at) === day && isModelVerdict(c.verdict)) kinds[c.verdict] = (kinds[c.verdict] ?? 0) + 1;
       }
+      return { day, wiki, outcome: best?.outcome ?? "absent", kinds };
+    };
+    const started = mine.filter((r) => r.outcome === "ok" || r.outcome === "partial").map((r) => r.at);
+    if (started.length === 0) {
+      for (const day of [...new Set([...mine, ...myCards].map((l) => osloDay(l.at)))].sort()) out.push(night(day));
       continue;
     }
-    const lastDay = osloDay(todayMs);
-    for (let at = first; ; at += DAY_MS) {
+    const verdictAts = myCards.filter((c) => isModelVerdict(c.verdict)).map((c) => c.at);
+    for (let at = Math.min(...started, ...verdictAts); ; at += DAY_MS) {
       const day = osloDay(at);
       if (day > lastDay) break;
-      const today = mine.filter((r) => osloDay(r.at) === day);
-      const best = today.sort((a, b) => OUTCOME_RANK[b.outcome] - OUTCOME_RANK[a.outcome])[0];
-      const kinds: NightRecord["kinds"] = {};
-      for (const c of cards) {
-        if (c.wiki === wiki && osloDay(c.at) === day && isModelVerdict(c.verdict)) kinds[c.verdict] = (kinds[c.verdict] ?? 0) + 1;
-      }
-      out.push({ day, wiki, outcome: best?.outcome ?? "absent", kinds });
+      const record = night(day);
+      const noLineYet = day === lastDay && record.outcome === "absent" && Object.keys(record.kinds).length === 0;
+      if (todayCounts || !noLineYet) out.push(record);
       if (day === lastDay) break;
     }
   }
@@ -242,14 +259,38 @@ const median = (xs: readonly number[]) => {
   return s.length % 2 ? s[(s.length - 1) / 2]! : (s[s.length / 2 - 1]! + s[s.length / 2]!) / 2;
 };
 
-/** A night's share of model verdicts: one per wiki and night with any. */
+/** Each night's share of model verdicts, one share per night with any: a night's
+ *  verdicts pool across wikis, so a small wiki cannot pull the median as far as a big one. */
 export function nightlyShares(nights: readonly NightRecord[]): { askOwnerMedian: number | null; askAnyMedian: number | null; nights: number } {
-  const shares = nights.flatMap((n) => {
-    const total = Object.values(n.kinds).reduce((a, b) => a + (b ?? 0), 0);
-    return total ? [{ owner: (n.kinds.ASK_OWNER ?? 0) / total, any: ((n.kinds.ASK_OWNER ?? 0) + (n.kinds.ASK_OTHER ?? 0)) / total }] : [];
-  });
+  const byDay = new Map<string, { owner: number; other: number; total: number }>();
+  for (const n of nights) {
+    const held = byDay.get(n.day) ?? { owner: 0, other: 0, total: 0 };
+    held.owner += n.kinds.ASK_OWNER ?? 0;
+    held.other += n.kinds.ASK_OTHER ?? 0;
+    held.total += Object.values(n.kinds).reduce((a, b) => a + (b ?? 0), 0);
+    byDay.set(n.day, held);
+  }
+  const shares = [...byDay.values()].filter((d) => d.total > 0).map((d) => ({ owner: d.owner / d.total, any: (d.owner + d.other) / d.total }));
   return { askOwnerMedian: median(shares.map((s) => s.owner)), askAnyMedian: median(shares.map((s) => s.any)), nights: shares.length };
 }
+
+/** What the headline counts beside its result: wiki-nights, and log lines of older
+ *  prompt versions, which no figure here reads. */
+export interface NightContext {
+  refused: number;
+  failed: number;
+  absent: number;
+  wikiNights: number;
+  olderLines: number;
+}
+
+export function nightContext(nights: readonly NightRecord[], olderLines: number): NightContext {
+  const count = (outcome: NightRecord["outcome"]) => nights.filter((n) => n.outcome === outcome).length;
+  return { refused: count("refused"), failed: count("failed"), absent: count("absent"), wikiNights: nights.length, olderLines };
+}
+
+const contextText = (c: NightContext) =>
+  ` Nights: ${c.refused} refused, ${c.failed} failed, ${c.absent} absent, of ${c.wikiNights} wiki-night(s).${c.olderLines > 0 ? ` ${c.olderLines} log line(s) of older prompt versions left out.` : ""}`;
 
 /** How many cards' verdict changed between one night and the next, over how many
  *  cards ran at least two nights. */
@@ -315,43 +356,47 @@ export interface Part2Input {
   handWrong: number | null;
   /** Nightly `SETTLED` or `VOID` verdicts on a card answered later: each counts against the verdict, sample or no sample. */
   settledThenAnswered: number;
+  context: NightContext;
 }
 
-export type Part2Result = "too early" | "too few to score" | "pass" | "miss" | "not scored";
+export type Part2Result = "too early" | "too few to score" | "pass" | "miss" | "not scored" | "refused";
 export type Part2Headline = { result: Part2Result; line: string; notes: string[] };
 
 /** The two headlines known before any verdict: nothing to replay for. */
-export function part2Stop(day: number | null, floor: FloorState): Part2Headline | null {
+export function part2Stop(day: number | null, floor: FloorState, context: NightContext): Part2Headline | null {
   const dayText = day === null ? "no ok or partial run line yet" : `day ${day}`;
-  if (day === null || day < 14) return { result: "too early", line: `TOO EARLY (${dayText}): the first scoring is at day 14.`, notes: [] };
+  const tail = contextText(context);
+  if (day === null || day < 14) return { result: "too early", line: `TOO EARLY (${dayText}): the first scoring is at day 14.${tail}`, notes: [] };
   if (floor.met) return null;
   const note = day >= CAP_DAY ? "At the cap this is neither a pass nor a failure: the counts go to Rune, silence stays off, and Rune decides on P3." : `The decision moves to day ${CAP_DAY}, with no scoring between.`;
-  return { result: "too few to score", line: `TOO FEW TO SCORE (${dayText}): ${floor.labelled} labelled, ${floor.added} added, on ${floor.addedPages} page(s); the floor is ${FLOOR_LABELLED}, ${FLOOR_ADDED} and ${FLOOR_PAGES}.`, notes: [note] };
+  return { result: "too few to score", line: `TOO FEW TO SCORE (${dayText}): ${floor.labelled} labelled, ${floor.added} added, on ${floor.addedPages} page(s); the floor is ${FLOOR_LABELLED}, ${FLOOR_ADDED} and ${FLOOR_PAGES}.${tail}`, notes: [note] };
 }
 
-/** Part (2)'s headline. Below the floor reads «too few to score», never a pass,
- *  and only the first scoring on or after day 14 can pass. */
+/** Part (2)'s headline from the figures alone. Below the floor reads «too few to
+ *  score», never a pass. Which scoring may run at all is `scoringGate`'s (`part2.ts`). */
 export function part2Headline(p: Part2Input): Part2Headline {
   const notes: string[] = [];
   const { report: r, floor, day, shares } = p;
-  const stop = part2Stop(day, floor);
+  const stop = part2Stop(day, floor, p.context);
   if (stop) return stop;
   const dayText = `day ${day}`;
   const atCap = day! >= CAP_DAY;
-  if (r.notScored > 0) return { result: "not scored", line: `NOT SCORED (${dayText}): ${r.notScored} card(s) have no verdict after the re-runs. This re-opens the contract.`, notes };
+  const tail = contextText(p.context);
+  if (r.notScored > 0) return { result: "not scored", line: `NOT SCORED (${dayText}): ${r.notScored} card(s) have no verdict after the re-runs. This re-opens the contract.${tail}`, notes };
   const caughtPct = r.verdict.of ? (100 * r.verdict.caught) / r.verdict.of : 0;
-  const ownerOk = shares.askOwnerMedian !== null && shares.askOwnerMedian <= 0.3;
-  const anyOk = shares.askAnyMedian !== null && shares.askAnyMedian <= 0.5;
+  const ownerOk = shares.askOwnerMedian !== null && atMost(shares.askOwnerMedian, 0.3);
+  const anyOk = shares.askAnyMedian !== null && atMost(shares.askAnyMedian, 0.5);
   const handJudged = p.handRead !== null && p.handRead >= 5;
-  if (r.rule.caught >= r.verdict.caught && r.rule.sharePct <= r.sharePct) notes.push(`The «flag every ${FLAGGING_RULE_WIKI} card» rule matches this result.`);
-  if (r.catchesBy.ASK_OTHER > r.catchesBy.ASK_OWNER) notes.push("Most catches are ASK_OTHER.");
+  const flags: string[] = [];
+  if (r.rule.caught >= r.verdict.caught && atMost(r.rule.shareRaw, r.shareRaw)) flags.push(`The «flag every ${FLAGGING_RULE_WIKI} card» rule matches this result.`);
+  if (r.catchesBy.ASK_OTHER > r.catchesBy.ASK_OWNER) flags.push("Most catches are ASK_OTHER.");
   const handOk = !handJudged || p.handWrong === 0;
   const later = p.settledThenAnswered;
-  const pass = caughtPct >= 90 && ownerOk && anyOk && handOk && later === 0;
+  const pass = caughtPct >= 90 - 1e-9 && ownerOk && anyOk && handOk && later === 0;
   const settled = later > 0 ? `; ${later} SETTLED or VOID later answered` : handJudged ? "" : `; «SETTLED or VOID» not judged (${p.handRead ?? 0} distinct card(s) read, 5 are needed, so P3 keeps those cards visible)`;
   if (!pass) notes.push(atCap ? "A miss at the cap stops the work on P3 and re-opens the contract." : `The decision moves to day ${CAP_DAY}, with no scoring between.`);
   const stated = `${r.verdict.caught} of ${r.verdict.of} caught (${Math.round(caughtPct)}%), nightly median ASK_OWNER ${pct(shares.askOwnerMedian)}, both ${pct(shares.askAnyMedian)}${settled}`;
-  return { result: pass ? "pass" : "miss", line: `${pass ? "PASS" : "MISS"} (${dayText}): ${stated}.`, notes };
+  return { result: pass ? "pass" : "miss", line: `${pass ? "PASS" : "MISS"} (${dayText}): ${stated}.${flags.length ? ` ${flags.join(" ")}` : ""}${tail}`, notes };
 }
 
 const pct = (x: number | null) => (x === null ? "n/a" : `${Math.round(x * 100)}%`);

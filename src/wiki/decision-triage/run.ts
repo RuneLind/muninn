@@ -214,8 +214,8 @@ export interface TriageRunDeps {
   groups: GatherContext["groups"];
   /** The run's sink: the nightly log, or `--out`. */
   append: (lines: readonly LogLine[]) => Promise<void>;
-  /** The floor's state for the run line. */
-  floor?: () => Promise<FloorState>;
+  /** The floor's state for the run line; `startedAt` is this run's own line. */
+  floor?: (startedAt: number) => Promise<FloorState>;
   signal?: AbortSignal;
 }
 
@@ -240,7 +240,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     let floor: FloorState | null = null;
     if (deps.floor) {
       try {
-        floor = await deps.floor();
+        floor = await deps.floor(startedAt);
       } catch (err) {
         floor = { labelled: 0, added: 0, addedPages: 0, met: false, error: err instanceof Error ? err.message : String(err) };
       }
@@ -304,9 +304,9 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   const view = liveView(index, deps.readFile);
   const byPage = new Map<string, PageRead>(pages.map((p) => [p.relPath, p]));
   const ctx: GatherContext = { git: deps.git, repo: resolver.repo, answers: versions, owner: deps.owner, groups: deps.groups };
-  const line = (fields: Omit<CardLine, "type" | "runId" | "at" | "wiki">): CardLine => {
+  const line = (fields: Omit<CardLine, "type" | "runId" | "at" | "wiki" | "promptVersion">): CardLine => {
     counts[fields.verdict] = (counts[fields.verdict] ?? 0) + 1;
-    return { type: "card", runId, at: startedAt, wiki, ...fields };
+    return { type: "card", runId, at: startedAt, wiki, promptVersion: DECISION_TRIAGE_PROMPT_VERSION, ...fields };
   };
   const base = (relPath: string, id: string) => {
     const q = byPage.get(relPath)!.page.questions.find((x) => x.id === id)!;

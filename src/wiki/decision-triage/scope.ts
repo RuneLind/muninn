@@ -88,7 +88,13 @@ export function realTriageRunDeps(
   config: Config,
   entry: WikiRegistryEntry,
   answerConfig: Pick<WikiAnswerConfig, "owner" | "groups">,
-  opts: { append: TriageRunDeps["append"]; floorEntries: () => readonly WikiRegistryEntry[]; signal?: AbortSignal },
+  opts: {
+    append: TriageRunDeps["append"];
+    floorEntries: () => readonly WikiRegistryEntry[];
+    signal?: AbortSignal;
+    /** The night's log folder, when `append` writes there; a run elsewhere starts no window. */
+    nightlyDir?: string;
+  },
 ): TriageRunDeps {
   return {
     entry,
@@ -110,7 +116,8 @@ export function realTriageRunDeps(
     owner: answerConfig.owner,
     groups: answerConfig.groups,
     append: opts.append,
-    floor: () => computeFloor(opts.floorEntries().map((e) => ({ wiki: e.name, root: e.root })), listWikiAnswerHistory, realGit),
+    floor: (startedAt) =>
+      computeFloor(opts.floorEntries().map((e) => ({ wiki: e.name, root: e.root })), listWikiAnswerHistory, realGit, opts.nightlyDir === undefined ? {} : { dir: opts.nightlyDir, ownLineAt: startedAt }),
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
 }

@@ -1,17 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { sha256 } from "../../gardener/util.ts";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { computeFloor, labelsSince } from "./floor.ts";
+import { answerWindowMs, computeFloor, frozenAfterMs, labelsSince } from "./floor.ts";
 import { realGit, type GitRun } from "./git.ts";
 import { cardAsAnswered, labelAnswers } from "./history.ts";
 import { missedNights } from "./loop-deps.ts";
-import type { CardLine, RunLine } from "./schema.ts";
+import { nightlyLogPath } from "./log.ts";
+import { DECISION_TRIAGE_PROMPT_FROZEN_ON, DECISION_TRIAGE_PROMPT_VERSION, type CardLine, type RunLine } from "./schema.ts";
 import {
   floorOf,
   labelOf,
+  nightContext,
   nightlyCatches,
   nightlyShares,
   nightsOf,
@@ -21,11 +24,15 @@ import {
   replayReport,
   settledAnswers,
   verdictFlips,
+  type NightRecord,
   type ScoredItem,
 } from "./score.ts";
+import { todayNightDue } from "./script-roots.ts";
+import { osloDay } from "../work-map/ids.ts";
 import { commitAt, git, write } from "./test-repo.ts";
 
 const MIN = 60_000;
+const DAY_MS = 86_400_000;
 const v = (over: Partial<WikiAnswerVersion>): WikiAnswerVersion => ({
   answerId: "a",
   version: 1,
@@ -212,6 +219,36 @@ describe("the card as answered", () => {
     await expect(computeFloor([{ wiki: "w", root }], history, realGit)).rejects.toThrow("not a git repository");
   });
 
+  describe("the answer window, one for the run line and the score", () => {
+    const after = frozenAfterMs(DECISION_TRIAGE_PROMPT_FROZEN_ON);
+    const current = DECISION_TRIAGE_PROMPT_VERSION;
+
+    test("the later of the frozen date and the current prompt's first run line, of any outcome", () => {
+      expect(answerWindowMs([])).toBe(after);
+      expect(answerWindowMs([{ at: after - DAY_MS, promptVersion: current }])).toBe(after);
+      expect(answerWindowMs([{ at: after + 3 * DAY_MS, promptVersion: current }, { at: after + DAY_MS, promptVersion: current }])).toBe(after + DAY_MS);
+      expect(answerWindowMs([{ at: after + DAY_MS, promptVersion: "older" }])).toBe(after);
+      expect(answerWindowMs([{ at: after + DAY_MS, promptVersion: "older" }, { at: after + 5 * DAY_MS, promptVersion: current }])).toBe(after + 5 * DAY_MS);
+    });
+
+    test("the floor counts from the prompt's first run line, as the score does, and a run's own line counts", async () => {
+      const root = repo();
+      write(root, "p.mdx", `${page(REC)}${page(REC, "O2")}`);
+      commitAt(root, new Date(after).toISOString(), "cards");
+      const q = (id: string, ms: number) => v({ answerId: id, questionId: id, questionHash: hash(REC), choice: "B", createdAt: ms });
+      const history = async () => [q("O1", after + DAY_MS), q("O2", after + 3 * DAY_MS)];
+      const dir = testTempDirSync(path.join(tmpdir(), "triage-floor-"));
+      const counted = async (opts: { dir: string; ownLineAt?: number }) => (await computeFloor([{ wiki: "w", root }], history, realGit, opts)).labelled;
+      expect(await counted({ dir })).toBe(2);
+      expect(await counted({ dir, ownLineAt: after + 2 * DAY_MS })).toBe(1);
+      const older = { type: "run", at: after + 2 * DAY_MS, wiki: "w", promptVersion: "older", outcome: "ok" };
+      writeFileSync(nightlyLogPath("w", dir), `${JSON.stringify(older)}\n`);
+      expect(await counted({ dir })).toBe(2);
+      writeFileSync(nightlyLogPath("w", dir), `${JSON.stringify({ ...older, promptVersion: current, outcome: "refused" })}\n`);
+      expect(await counted({ dir })).toBe(1);
+    });
+  });
+
   test("every answer's read failing is a fault; one of several is a count, not a fault", async () => {
     const root = repo();
     write(root, "p.mdx", page(REC));
@@ -246,6 +283,7 @@ function build(added: number, others: number, caught: number, flaggedOthers: num
 
 describe("the replay's figures", () => {
   const population = { added: 15, other: 94 };
+  const head = (caught: number, flaggedOthers: number) => part1Headline(replayReport(build(14, 35, caught, flaggedOthers), population));
 
   test("the two controls project to the contract's shares", () => {
     expect(projectedShare({ caught: 10, of: 14, flagged: 22, cards: 49 }, population)).toBe(39);
@@ -253,7 +291,6 @@ describe("the replay's figures", () => {
   });
 
   test("better, worse and tie by the contract's numbers, tie saying where it fell against the rule", () => {
-    const head = (caught: number, flaggedOthers: number) => part1Headline(replayReport(build(14, 35, caught, flaggedOthers), population));
     expect(head(12, 8).result).toBe("better");
     expect(head(9, 3).result).toBe("worse");
     expect(head(14, 25).result).toBe("worse");
@@ -263,6 +300,33 @@ describe("the replay's figures", () => {
     const rule = build(14, 35, 10, 8).map((i) => i);
     for (let n = 0; n < 11; n++) rule[n]!.wiki = "melosys-kode-wiki";
     expect(part1Headline(replayReport(rule, population)).line).toContain("below");
+  });
+
+  test("the bars read the raw share: 11 of 14 with 16 of 35 is 50.24%, over 50% though it prints 50%", () => {
+    const h = head(11, 16);
+    expect(h.result).toBe("worse");
+    expect(h.line).toContain("50% flagged");
+    const report = replayReport(build(14, 35, 12, 8), population);
+    expect(part1Headline({ ...report, sharePct: 39, shareRaw: 39.3 }).result).toBe("tie");
+    expect(part1Headline({ ...report, sharePct: 39, shareRaw: 39 }).result).toBe("better");
+    expect(part1Headline({ ...report, sharePct: 50, shareRaw: 50 }).result).toBe("tie");
+  });
+
+  test("below the rule reads the raw shares too", () => {
+    const rep = replayReport(build(14, 35, 10, 8), population);
+    const at = (own: number, rule: number) => part1Headline({ ...rep, sharePct: 30, shareRaw: own, rule: { ...rep.rule, caught: 10, sharePct: 30, shareRaw: rule } }).line;
+    expect(at(30.4, 30.2)).toContain("below");
+    expect(at(30.2, 30.4)).toContain("at or above");
+  });
+
+  test("a base other than 14 positives gets its figures and no bars", () => {
+    for (const items of [build(13, 35, 12, 0), build(15, 35, 15, 0)]) {
+      const h = part1Headline(replayReport(items, population));
+      expect(h.result).toBe("no bars");
+      expect(h.line).toContain(`${items.filter((i) => i.verdict === "ASK_OWNER").length} of ${items.filter((i) => i.added).length} caught`);
+      expect(h.line).toContain("bars apply only to the file's base");
+    }
+    expect(part1Headline(replayReport(build(14, 35, 14, 0), population)).result).toBe("better");
   });
 
   test("a card with no verdict reads not scored, never worse", () => {
@@ -300,7 +364,7 @@ describe("the floor and part (2)", () => {
     expect(floorOf([...rows(10, 9, 2), { wiki: "w", relPath: "q", added: null }]).met).toBe(false);
   });
 
-  const input = (over: Partial<Parameters<typeof part2Headline>[0]> = {}) => ({
+  const input = (over: Partial<Parameters<typeof part2Headline>[0]> = {}): Parameters<typeof part2Headline>[0] => ({
     report: replayReport(build(10, 10, 9, 0)),
     floor: { labelled: 20, added: 10, addedPages: 2, met: true },
     day: 14,
@@ -308,6 +372,7 @@ describe("the floor and part (2)", () => {
     handRead: 5,
     handWrong: 0,
     settledThenAnswered: 0,
+    context: { refused: 0, failed: 0, absent: 0, wikiNights: 10, olderLines: 0 },
     ...over,
   });
 
@@ -348,17 +413,59 @@ describe("the floor and part (2)", () => {
     expect(part2Headline(input({ handRead: 5 })).line).not.toContain("not judged");
   });
 
+  test("every headline counts the nights in its own line, and any older lines it left out", () => {
+    const context = { refused: 2, failed: 1, absent: 3, wikiNights: 20, olderLines: 0 };
+    const said = "Nights: 2 refused, 1 failed, 3 absent, of 20 wiki-night(s).";
+    for (const over of [{}, { report: replayReport(build(10, 10, 8, 0)) }, { day: 3 }, { day: null }, { floor: { labelled: 5, added: 1, addedPages: 1, met: false } }, { report: replayReport([{ ...item({}), verdict: "NO_VERDICT" }]) }]) {
+      expect(part2Headline(input({ context, ...over })).line).toContain(said);
+    }
+    expect(part2Headline(input({ context })).line).not.toContain("older");
+    expect(part2Headline(input({ context: { ...context, olderLines: 7 } })).line).toContain("7 log line(s) of older prompt versions left out.");
+  });
+
+  test("most catches means more ASK_OTHER than ASK_OWNER: a tie says nothing", () => {
+    const report = replayReport(build(10, 10, 9, 0));
+    const said = (ASK_OWNER: number, ASK_OTHER: number) => part2Headline(input({ report: { ...report, catchesBy: { ASK_OWNER, ASK_OTHER } } })).line;
+    expect(said(4, 5)).toContain("Most catches are ASK_OTHER");
+    expect(said(5, 5)).not.toContain("Most catches");
+    expect(said(0, 0)).not.toContain("Most catches");
+  });
+
+  test("the bars read raw shares: 30.4% misses though it prints 30%, and exactly 30% and 50% pass through float noise", () => {
+    const miss = part2Headline(input({ shares: { askOwnerMedian: 0.304, askAnyMedian: 0.4, nights: 10 } }));
+    expect(miss.result).toBe("miss");
+    expect(miss.line).toContain("ASK_OWNER 30%");
+    expect(part2Headline(input({ shares: { askOwnerMedian: 0.2, askAnyMedian: 0.504, nights: 10 } })).result).toBe("miss");
+    // (0.2 + 0.4) / 2 is 0.30000000000000004, read off two real nights.
+    const fifths = (owner: number): NightRecord => ({ day: `d${owner}`, wiki: "w", outcome: "ok", kinds: { ASK_OWNER: owner, DEFAULT: 5 - owner } });
+    const shares = nightlyShares([fifths(1), fifths(2)]);
+    expect(shares.askOwnerMedian! > 0.3).toBe(true);
+    expect(part2Headline(input({ shares })).result).toBe("pass");
+    const caught = (c: number, of: number) => part2Headline(input({ report: replayReport(build(of, 10, c, 0)) }));
+    expect(caught(9, 10).result).toBe("pass");
+    const justUnder = caught(26, 29);
+    expect(justUnder.result).toBe("miss");
+    expect(justUnder.line).toContain("(90%)");
+  });
+
+  test("the rule's match reads raw shares: 50.4% does not match a result at 50.2%, though both print 50%", () => {
+    const r = replayReport(build(10, 10, 9, 0));
+    const close = { ...r, sharePct: 50, shareRaw: 50.2, rule: { ...r.rule, caught: 9, sharePct: 50, shareRaw: 50.4 } };
+    expect(part2Headline(input({ report: close })).line).not.toContain("rule matches");
+    expect(part2Headline(input({ report: { ...close, rule: { ...close.rule, shareRaw: 50.2 } } })).line).toContain("rule matches");
+  });
+
   test("fewer than 5 hand reads say not judged; the rule and ASK_OTHER get their notes", () => {
     expect(part2Headline(input({ handRead: 4 })).line).toContain("not judged");
     const items = build(10, 10, 9, 3).map((i, n) => ({ ...i, verdict: n < 9 ? ("ASK_OTHER" as const) : i.verdict, wiki: n < 10 ? "melosys-kode-wiki" : "mimir" }));
-    const notes = part2Headline(input({ report: replayReport(items) })).notes.join(" ");
-    expect(notes).toContain("rule matches");
-    expect(notes).toContain("Most catches are ASK_OTHER");
+    const { line: said } = part2Headline(input({ report: replayReport(items) }));
+    expect(said).toContain("rule matches");
+    expect(said).toContain("Most catches are ASK_OTHER");
   });
 });
 
 const run = (over: Partial<RunLine>): RunLine => ({ type: "run", runId: "r", at: 0, wiki: "w", model: "m", promptVersion: "1", usage: { calls: 1 }, repoRoots: null, repos: [], cards: 0, floor: null, outcome: "ok", ...over });
-const line = (over: Partial<CardLine>): CardLine => ({ type: "card", runId: "r", at: 0, wiki: "w", relPath: "p", id: "O1", questionHash: "h", recommendation: null, verdict: "DEFAULT", ...over });
+const line = (over: Partial<CardLine>): CardLine => ({ type: "card", runId: "r", at: 0, wiki: "w", promptVersion: "1", relPath: "p", id: "O1", questionHash: "h", recommendation: null, verdict: "DEFAULT", ...over });
 const DAY = 86_400_000;
 const T0 = Date.parse("2026-11-10T06:00:00Z");
 
@@ -371,12 +478,12 @@ describe("the nights", () => {
       run({ at: T0 + 3 * DAY, outcome: "refused" }),
       run({ at: T0 + 3 * DAY + 3_600_000, outcome: "failed" }),
     ];
-    const nights = nightsOf(runs, [], T0 + 4 * DAY);
+    const nights = nightsOf(runs, [], T0 + 4 * DAY, true);
     expect(nights.map((n) => n.outcome)).toEqual(["ok", "partial", "absent", "failed", "absent"]);
   });
 
   test("a wiki that only ever refused shows those nights and starts no clock", () => {
-    expect(nightsOf([run({ at: T0, outcome: "refused" })], [], T0 + 5 * DAY)).toHaveLength(1);
+    expect(nightsOf([run({ at: T0, outcome: "refused" })], [], T0 + 5 * DAY, true)).toHaveLength(1);
   });
 
   test("a card line with no run line still counts its verdict; the shares read model verdicts only", () => {
@@ -384,6 +491,7 @@ describe("the nights", () => {
       [run({ at: T0 })],
       [line({ at: T0, verdict: "ASK_OWNER" }), line({ at: T0, verdict: "DEFAULT" }), line({ at: T0, verdict: "ANSWERED" }), line({ at: T0, verdict: "NO_VERDICT" }), line({ at: T0, verdict: "ASK_OTHER" }), line({ at: T0, verdict: "SETTLED" }), line({ at: T0 + DAY, verdict: "ASK_OTHER" })],
       T0 + DAY,
+      true,
     );
     expect(nights[0]!.kinds).toEqual({ ASK_OWNER: 1, DEFAULT: 1, ASK_OTHER: 1, SETTLED: 1 });
     expect(nights[1]).toMatchObject({ outcome: "absent", kinds: { ASK_OTHER: 1 } });
@@ -391,6 +499,56 @@ describe("the nights", () => {
     expect(shares.nights).toBe(2);
     expect(shares.askOwnerMedian).toBeCloseTo(0.125);
     expect(shares.askAnyMedian).toBeCloseTo(0.75);
+  });
+
+  test("the headline's counts are wiki-nights by outcome", () => {
+    const n = (outcome: NightRecord["outcome"]): NightRecord => ({ day: "d", wiki: "w", outcome, kinds: {} });
+    expect(nightContext([n("ok"), n("partial"), n("refused"), n("refused"), n("refused"), n("failed"), n("absent"), n("absent")], 4)).toEqual({ refused: 3, failed: 1, absent: 2, wikiNights: 8, olderLines: 4 });
+  });
+
+  test("one night pools its wikis: a small wiki at 0% and a big one at 60% read 50%, not 30%", () => {
+    const nights: NightRecord[] = [
+      { day: "2026-11-10", wiki: "small", outcome: "ok", kinds: { DEFAULT: 2 } },
+      { day: "2026-11-10", wiki: "big", outcome: "ok", kinds: { ASK_OWNER: 6, DEFAULT: 4 } },
+    ];
+    expect(nightlyShares(nights)).toEqual({ askOwnerMedian: 0.5, askAnyMedian: 0.5, nights: 1 });
+    const other: NightRecord = { day: "2026-11-11", wiki: "small", outcome: "ok", kinds: { ASK_OTHER: 1, DEFAULT: 1 } };
+    expect(nightlyShares([...nights, other])).toEqual({ askOwnerMedian: 0.25, askAnyMedian: 0.5, nights: 2 });
+    expect(nightlyShares([{ day: "2026-11-12", wiki: "w", outcome: "ok", kinds: {} }]).nights).toBe(0);
+  });
+
+  test("today reads absent only once its hour has passed; a line today always counts", () => {
+    const lateNight = run({ at: T0 - DAY });
+    expect(nightsOf([lateNight], [], T0, false).map((n) => n.outcome)).toEqual(["ok"]);
+    expect(nightsOf([lateNight], [], T0, true).map((n) => n.outcome)).toEqual(["ok", "absent"]);
+    expect(nightsOf([lateNight, run({ at: T0, outcome: "refused" })], [], T0, false).map((n) => n.outcome)).toEqual(["ok", "refused"]);
+    expect(nightsOf([lateNight], [line({ at: T0, verdict: "ASK_OWNER" })], T0, false).map((n) => n.outcome)).toEqual(["ok", "absent"]);
+    // An earlier day with no line is a missed night at any hour.
+    expect(nightsOf([run({ at: T0 - 2 * DAY })], [], T0, false).map((n) => n.outcome)).toEqual(["ok", "absent"]);
+  });
+
+  test("today's hour plus one decides whether today counts", () => {
+    const at = (iso: string) => todayNightDue(Date.parse(iso), 5);
+    expect(at("2026-11-10T03:59:00Z")).toBe(false); // 04:59 in Oslo
+    expect(at("2026-11-10T04:30:00Z")).toBe(false); // the hour itself: a run may be going
+    expect(at("2026-11-10T05:00:00Z")).toBe(true);
+    expect(at("2026-11-10T22:59:00Z")).toBe(true); // 23:59 in Oslo
+    expect(at("2026-11-10T23:30:00Z")).toBe(false); // 00:30 on the next day in Oslo
+  });
+
+  test("a killed night keeps its verdicts: a wiki with no ok line, and a night before the first ok line", () => {
+    const killedOnly = nightsOf([], [line({ at: T0, verdict: "ASK_OWNER" }), line({ at: T0 + DAY, verdict: "DEFAULT" })], T0 + 5 * DAY, true);
+    expect(killedOnly).toEqual([
+      { day: osloDay(T0), wiki: "w", outcome: "absent", kinds: { ASK_OWNER: 1 } },
+      { day: osloDay(T0 + DAY), wiki: "w", outcome: "absent", kinds: { DEFAULT: 1 } },
+    ]);
+    const refusedThenKilled = nightsOf([run({ at: T0, outcome: "refused" })], [line({ at: T0 + DAY, verdict: "ASK_OTHER" })], T0 + 2 * DAY, true);
+    expect(refusedThenKilled.map((n) => [n.outcome, n.kinds])).toEqual([["refused", {}], ["absent", { ASK_OTHER: 1 }]]);
+    const killedFirst = nightsOf([run({ at: T0 + DAY })], [line({ at: T0, verdict: "ASK_OWNER" }), line({ at: T0, verdict: "NO_VERDICT" })], T0 + DAY, true);
+    expect(killedFirst.map((n) => [n.outcome, n.kinds])).toEqual([["absent", { ASK_OWNER: 1 }], ["ok", {}]]);
+    expect(nightlyShares(killedFirst).nights).toBe(1);
+    // A NO_VERDICT line alone is no night of model verdicts and moves no start.
+    expect(nightsOf([run({ at: T0 + DAY })], [line({ at: T0, verdict: "NO_VERDICT" })], T0 + DAY, true).map((n) => n.outcome)).toEqual(["ok"]);
   });
 
   test("flips count changes between nights, per card with two or more", () => {
