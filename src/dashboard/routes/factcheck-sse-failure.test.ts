@@ -71,6 +71,7 @@ mock.module("../../ai/haiku-direct.ts", () => ({
     inputTokens: 10,
     outputTokens: 5,
     numTurns: 1,
+    costUsd: 0.25,
     model: "claude-haiku-4-5",
     backend: "cli",
   }),
@@ -184,7 +185,8 @@ const claimResult = (r: { events: SseEvent[] }) =>
 describe("the factcheck run's ending", () => {
   const lastRow = () => agentStatus.getRecentCompleted().filter((r) => r.kind === "factcheck").at(-1)!;
 
-  test("a claim failure inside a finished run still reads ok", () => {
+  test("a claim failure inside a finished run still reads ok", async () => {
+    await runFactcheckWith(ERROR_MESSAGE);
     expect(lastRow().status).toBe("ok");
   });
 
@@ -199,7 +201,7 @@ describe("the factcheck run's ending", () => {
         meta: { title: "Sky", tags: [], type: "concept" },
         wikiName: "testwiki",
         mode: "article",
-        // Read for the `done` event, after the claims have spent.
+        // Read for the `done` event, after the extraction call has spent.
         get baseHash(): string {
           throw new Error("late failure");
         },
@@ -214,6 +216,7 @@ describe("the factcheck run's ending", () => {
       agentKind: "factcheck",
       error: "late failure",
       inputTokens: 10,
+      costUsd: 0.25,
       agentModel: "claude-haiku-4-5",
     });
   });

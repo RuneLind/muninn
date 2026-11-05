@@ -282,7 +282,7 @@ describe("claim retry — how the run ended", () => {
     expect(lastRow().status).toBe("error");
     expect(rootAttrs(run)).toMatchObject({
       agentKind: "factcheck",
-      error: expect.any(String),
+      error: "the verifier returned no verdict",
       inputTokens: 20,
       agentModel: "claude-sonnet-5",
     });

@@ -120,6 +120,17 @@ describe("runFencedOneShot — the run's identity on the trace root", () => {
     expect(runRow()).toMatchObject({ status: "ok", traceId: "trace-1" });
   });
 
+  test("a failed draft leaves a caller's tracer unstamped too", async () => {
+    const { tracer, finishes } = recording();
+    Object.defineProperty(tracer, "name", { value: "watcher:consolidation-gardener" });
+    const oneShot = async () => { throw new Error("boom"); };
+    await expect(
+      runFencedOneShot({ ...base, config: tracing, tracer, oneShot: oneShot as never }),
+    ).rejects.toThrow("boom");
+    expect(finishes[0]!.status).toBe("error");
+    expect(finishes[0]!.attrs).not.toHaveProperty("agentKind");
+  });
+
   test("with tracing off a failed run names no trace, since none was written", async () => {
     const { tracer } = recording();
     const oneShot = async () => { throw new Error("boom"); };
