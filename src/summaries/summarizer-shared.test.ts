@@ -606,6 +606,32 @@ describe("runCaptureOneShot", () => {
     expect(h.attached[0]!.traceId).toBe(TRACE_ID);
   });
 
+  test("the root the seam owns carries the identity attachRun answered, on both exits", async () => {
+    const run = { kind: "capture", name: "YouTube: A talk" } as const;
+
+    const ok = harness();
+    await runCaptureOneShot({ ...ok.opts, attachRun: () => run });
+    expect(ok.calls.find((c) => c.op === "finish:ok")!.attrs).toMatchObject({
+      agentKind: "capture",
+      agentName: "YouTube: A talk",
+      source: "youtube",
+    });
+
+    const bad = harness({ oneShot: async () => { throw new Error("connector exploded"); } });
+    await expect(runCaptureOneShot({ ...bad.opts, attachRun: () => run })).rejects.toThrow("connector exploded");
+    expect(bad.calls.find((c) => c.op === "finish:error")!.attrs).toMatchObject({
+      agentKind: "capture",
+      agentName: "YouTube: A talk",
+      error: "connector exploded",
+    });
+  });
+
+  test("a job whose run already settled leaves the root unstamped", async () => {
+    const h = harness();
+    await runCaptureOneShot({ ...h.opts, attachRun: () => undefined });
+    expect(h.calls.find((c) => c.op === "finish:ok")!.attrs).not.toHaveProperty("agentKind");
+  });
+
   // ── a caller-owned root: `parentTracer` ────────────────────────────────────
   //
   // `Tracer.finish` has no idempotence guard, so a root finished by both the

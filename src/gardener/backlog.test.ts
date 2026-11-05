@@ -461,6 +461,38 @@ describe("startBacklogRun", () => {
     expect(runCount).toBe(1);
   });
 
+  test("the drain's ring row names the trace the work fn opened, and says how it ended", async () => {
+    agentStatus.clearRequest();
+    const start = (runGardener: Parameters<typeof startBacklogRun>[0]["runGardener"]) =>
+      startBacklogRun({
+        ...NOOP_JOURNAL,
+        botName: "jarvis",
+        gardenerEnabled: true,
+        hasWatcher: true,
+        assemble: async () => assembled,
+        writeRunJournal: async () => {},
+        clearRunJournal: async () => {},
+        persistOffered: async () => {},
+        runGardener,
+        recordLastRun: () => {},
+      });
+    const lastRow = () => agentStatus.getRecentCompleted().filter((r) => r.kind === "gardener_drain").at(-1)!;
+
+    start(async (_a, hooks) => {
+      hooks.onTraceId?.("drain-trace-ok");
+      return [];
+    });
+    await new Promise((res) => setTimeout(res, 10));
+    expect(lastRow()).toMatchObject({ name: "Backlog drain", status: "ok", traceId: "drain-trace-ok" });
+
+    start(async (_a, hooks) => {
+      hooks.onTraceId?.("drain-trace-bad");
+      throw new Error("draft blew up");
+    });
+    await new Promise((res) => setTimeout(res, 10));
+    expect(lastRow()).toMatchObject({ status: "error", traceId: "drain-trace-bad" });
+  });
+
   test("records an error outcome + releases the mutex + KEEPS the journal when the run throws", async () => {
     let recorded: { error?: string } | null = null;
     let cleared = false;

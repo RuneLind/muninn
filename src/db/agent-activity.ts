@@ -162,9 +162,9 @@ export interface RecentExtractorRow {
  * The three `wiki_gardener_*` sources ARE included — the gardener uses
  * `callHaikuWithFallback`/`executeOneShot`, not the runner's spawnHaiku
  * telemetry, so its cluster/triage/draft tokens surface NOWHERE else. This is
- * NOT double-counting against the `gardener_drain` ring entry: that ring row is
- * completed with `{}` (no tokens — see `startBacklogRun`), so it shows the drain
- * run's duration only, while these rows add the per-call token counts. The
+ * NOT double-counting against the `gardener_drain` ring entry: that ring row
+ * carries no tokens (see `startBacklogRun`), so it shows the drain run's duration
+ * only, while these rows add the per-call token counts. The
  * weekly gardener's `watcher:wiki-gardener` trace row likewise carries no tokens
  * (gardener isn't wired to runner telemetry), so no token number is duplicated.
  *

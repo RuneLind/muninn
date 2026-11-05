@@ -16,6 +16,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { Tracer } from "../tracing/tracer.ts";
+import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 import { researchKnowledge, type ResearchDecomposition, type SubQuestionTrace } from "../ai/research-knowledge.ts";
 import { persistResearchCitations } from "../db/research-citations.ts";
 import { getLog } from "../logging.ts";
@@ -114,10 +115,11 @@ export async function streamResearchAnswer(
   // /research and the wiki Ask tab (both call streamResearchAnswer). Phases mirror
   // the emitted searching → synthesizing arc; completed in the `finally` so it
   // settles on the done path AND every error/abort path.
-  const reqId = agentStatus.startRequest(botConfig.name, "searching", undefined, {
+  const run = {
     kind: "research",
     name: question.length > 60 ? `${question.slice(0, 57)}…` : question,
-  });
+  } as const;
+  const reqId = agentStatus.startRequest(botConfig.name, "searching", undefined, run);
   setConnectorInfo(reqId, botConfig, config.claudeModel);
 
   // ONE trace for the whole ask. Retrieval used to own the only trace:
@@ -134,6 +136,7 @@ export async function streamResearchAnswer(
   });
   const traceId: string | undefined = tracer.traceId;
   let usage: { inputTokens?: number; outputTokens?: number; numTurns?: number; costUsd?: number } = {};
+  let model: string | undefined;
   let status: "ok" | "error" = "ok";
 
   try {
@@ -228,7 +231,10 @@ export async function streamResearchAnswer(
       numTurns: claude.numTurns,
       costUsd: claude.costUsd,
     };
-    if (claude.model) agentStatus.setModel(reqId, claude.model);
+    if (claude.model) {
+      model = claude.model;
+      agentStatus.setModel(reqId, claude.model);
+    }
 
     const answer = (claude.result ?? "").trim();
     log.info("Research answer synthesized botName={botName} sources={sources} tokens={tokens}", {
@@ -258,7 +264,11 @@ export async function streamResearchAnswer(
   } catch (err) {
     status = "error";
     const message = err instanceof Error ? err.message : String(err);
-    tracer.finish("error", { error: message });
+    finishAgentRunTrace(tracer, run, "error", {
+      ...usage,
+      ...(model ? { agentModel: model } : {}),
+      error: message,
+    });
     log.error("Research answer failed botName={botName} error={error}", {
       botName: botConfig.name,
       error: message,
@@ -268,9 +278,12 @@ export async function streamResearchAnswer(
     // The declined-coverage path returns early without synthesizing, so `usage`
     // is empty there and the trace records retrieval only — which is exactly what
     // happened.
-    if (status === "ok") tracer.finish("ok", usage);
+    if (status === "ok") {
+      finishAgentRunTrace(tracer, run, "ok", { ...usage, ...(model ? { agentModel: model } : {}) });
+    }
     agentStatus.completeRequest(reqId, {
       ...usage,
+      status,
       ...(config.tracingEnabled ? { traceId } : {}),
     });
   }

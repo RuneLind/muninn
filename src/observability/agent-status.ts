@@ -119,6 +119,9 @@ export interface AgentRun {
   tools: ToolProgress[];
   completed?: boolean;
   completedAt?: number;
+  /** How the run ended, set at completion. Absent on a live run, and on a
+   *  completed one whose producer reports only success (read as `ok`). */
+  status?: "ok" | "error";
   traceId?: string;
   inputTokens?: number;
   outputTokens?: number;
@@ -385,6 +388,7 @@ class AgentStatusTracker {
   }
 
   completeRequest(requestId: string, meta: {
+    status?: "ok" | "error";
     traceId?: string;
     inputTokens?: number;
     outputTokens?: number;
@@ -396,6 +400,7 @@ class AgentStatusTracker {
     if (!req) return;
     req.completed = true;
     req.completedAt = Date.now();
+    if (meta.status) req.status = meta.status;
     req.traceId = meta.traceId;
     req.inputTokens = meta.inputTokens;
     req.outputTokens = meta.outputTokens;

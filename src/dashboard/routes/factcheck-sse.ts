@@ -32,6 +32,7 @@ import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
 import { getToolProgress, rawUrlField } from "../../ai/tool-status.ts";
 import { agentStatus, setConnectorInfo } from "../../observability/agent-status.ts";
 import { Tracer } from "../../tracing/tracer.ts";
+import { finishAgentRunTrace } from "../../tracing/agent-run-trace.ts";
 import { tracedOneShot } from "../../core/traced-one-shot.ts";
 import { attachToolSpans } from "../../core/tool-spans.ts";
 import type { executeOneShot } from "../../ai/one-shot.ts";
@@ -965,10 +966,11 @@ async function runFactcheck(
 
   // /agents registry mirror. Kind `factcheck`; settled in the `finally` so it
   // closes on the done path AND every error path (mirrors ask.ts).
-  const reqId = agentStatus.startRequest(botConfig.name, "extracting_claims", undefined, {
+  const run = {
     kind: "factcheck",
     name: runName.length > 60 ? `${runName.slice(0, 57)}…` : runName,
-  });
+  } as const;
+  const reqId = agentStatus.startRequest(botConfig.name, "extracting_claims", undefined, run);
   setConnectorInfo(reqId, botConfig, config.claudeModel);
 
   const tracer = new Tracer("factcheck", { botName: botConfig.name, platform: "factcheck" });
@@ -1346,13 +1348,21 @@ async function runFactcheck(
   } catch (err) {
     status = "error";
     const message = err instanceof Error ? err.message : String(err);
-    tracer.finish("error", { error: message });
+    finishAgentRunTrace(tracer, run, "error", {
+      ...usage,
+      costUsd: sawCost ? usage.costUsd : undefined,
+      ...(seenModel ? { agentModel: seenModel } : {}),
+      error: message,
+    });
     log.error("Fact check failed bot={bot} error={error}", { bot: botConfig.name, error: message });
     await stream.writeSSE({ event: "app_error", data: JSON.stringify({ type: "error", message }) });
   } finally {
     const costUsd = sawCost ? usage.costUsd : undefined;
-    if (status === "ok") tracer.finish("ok", { ...usage, costUsd });
+    if (status === "ok") {
+      finishAgentRunTrace(tracer, run, "ok", { ...usage, costUsd, ...(seenModel ? { agentModel: seenModel } : {}) });
+    }
     agentStatus.completeRequest(reqId, {
+      status,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       numTurns: usage.numTurns,

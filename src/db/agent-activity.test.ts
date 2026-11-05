@@ -3,6 +3,8 @@ import { setupTestDb } from "../test/setup-db.ts";
 import { saveSpan } from "./traces.ts";
 import { getRecentAgentTraces, getRecentExtractorUsage } from "./agent-activity.ts";
 import { getDb } from "./client.ts";
+import { Tracer } from "../tracing/tracer.ts";
+import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 
 setupTestDb();
 
@@ -150,5 +152,53 @@ describe("getRecentExtractorUsage", () => {
     expect(rows.some((r) => r.source === "wiki_gardener_cluster")).toBe(true);
     // watcher-* tokens surface via the trace path, NOT here (would double a Recent row).
     expect(rows.some((r) => r.source === "watcher-email")).toBe(false);
+  });
+});
+
+describe("a stamped span on real Postgres", () => {
+  async function rootRow(traceId: string) {
+    const sql = getDb();
+    for (let i = 0; i < 50; i++) {
+      const [row] = await sql`SELECT duration_ms, attributes FROM traces WHERE trace_id = ${traceId} AND duration_ms IS NOT NULL`;
+      if (row) return row;
+      await Bun.sleep(20);
+    }
+    return null;
+  }
+
+  test("a run name with a lone surrogate and a NUL does not lose the finish", async () => {
+    // jsonb refuses both, and the failed UPDATE reaches only a log line: the root
+    // would stay unfinished on /traces and carry no stamp.
+    const tracer = new Tracer("capture:youtube", { botName: "testbot" });
+    finishAgentRunTrace(tracer, { kind: "capture", name: "YouTube: a\ud83d\u0000b" }, "ok", { inputTokens: 3 });
+    const row = await rootRow(tracer.traceId);
+    expect(row).not.toBeNull();
+    expect(row!.attributes).toMatchObject({ agentKind: "capture", agentName: "YouTube: a\ufffdb", inputTokens: 3 });
+  });
+
+  test("free text anywhere in a span's attributes cannot lose the write", async () => {
+    // A connector's error is a bare `slice` of an upstream body, so the same
+    // refusal reached a failed run's finish through `error`.
+    const tracer = new Tracer("draft:source", { botName: "testbot" });
+    tracer.start("claude", { title: "a\ud83d\u0000\u0000b" });
+    tracer.end("claude", { error: "c\udc00d", nested: { list: ["e\u0000", 1, null] } }, "error");
+    finishAgentRunTrace(tracer, { kind: "capture", name: "two\u0000nuls\u0000" }, "error", { error: "f\ud83dg" });
+    const sql = getDb();
+    let rows: { name: string; duration_ms: number | null; attributes: Record<string, unknown> }[] = [];
+    for (let i = 0; i < 50; i++) {
+      rows = (await sql`SELECT name, duration_ms, attributes FROM traces WHERE trace_id = ${tracer.traceId}`) as never;
+      if (rows.length === 2 && rows.every((r) => r.duration_ms !== null)) break;
+      await Bun.sleep(20);
+    }
+    const claude = rows.find((r) => r.name === "claude")!;
+    const root = rows.find((r) => r.name === "draft:source")!;
+    expect(claude.duration_ms).not.toBeNull();
+    expect(claude.attributes).toMatchObject({
+      title: "a\ufffdb",
+      error: "c\ufffdd",
+      nested: { list: ["e", 1, null] },
+    });
+    expect(root.duration_ms).not.toBeNull();
+    expect(root.attributes).toMatchObject({ agentName: "twonuls", error: "f\ufffdg" });
   });
 });

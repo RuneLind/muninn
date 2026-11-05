@@ -271,7 +271,7 @@ function ringToRecent(r: AgentRun): RecentEntry {
     name: r.name ?? kindLabel(r.kind),
     finishedAt,
     durationMs: Math.max(finishedAt - r.startedAt, 0),
-    status: "ok",
+    status: r.status ?? "ok",
     ...(r.traceId ? { traceId: r.traceId } : {}),
     ...(r.model ? { model: r.model } : {}),
     ...(r.inputTokens != null ? { inputTokens: r.inputTokens } : {}),

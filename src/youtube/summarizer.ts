@@ -6,6 +6,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import type { Tracer } from "../tracing/tracer.ts";
+import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 import {
   CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
   CAPTURE_THINKING_MAX_TOKENS,
@@ -401,11 +402,17 @@ export async function summarizeVideo(
    * owns its own root as it always has.
    */
   let parentTracer: Tracer | null = null;
-  const finishParent = (status: "ok" | "error", attrs: Record<string, unknown>): void => {
+  const finishParent = (
+    status: "ok" | "error",
+    attrs: Record<string, unknown>,
+    { abandoned = false }: { abandoned?: boolean } = {},
+  ): void => {
     const tracer = parentTracer;
     if (tracer === null) return;
     parentTracer = null;
-    tracer.finish(status, attrs);
+    // An abandoned root carries no run identity: the job goes on under the seam's
+    // own root, which is the one its `/agents` row points at.
+    finishAgentRunTrace(tracer, abandoned ? null : attachRun(jobId, {}), status, attrs);
   };
   /** Both passes' spend, summed for the root's own attributes. */
   const passUsage = { inputTokens: 0, outputTokens: 0, numTurns: 0, toolCount: 0, costUsd: 0 };
@@ -879,7 +886,7 @@ export async function summarizeVideo(
             // now, because the summary call below opens its own.
             const error = err instanceof Error ? err.message : String(err);
             denseFallback = { stage, error };
-            finishParent("error", { source: "youtube", error, ...passUsage });
+            finishParent("error", { source: "youtube", error, ...passUsage }, { abandoned: true });
             // Back on the CADENCE path's own budget. The split above was sized
             // for the frames the selection pass picked; the summary call below
             // reads what the cadence extractor produces instead, and keeping

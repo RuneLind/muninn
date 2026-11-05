@@ -22,6 +22,7 @@ import type { ClaudeExecResult } from "../ai/executor.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
 import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
+import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 import { isCalendarDay } from "../format/calendar-day.ts";
@@ -373,10 +374,8 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
     botName: botConfig.name,
     platform: "wiki",
   });
-  const reqId = agentStatus.startRequest(botConfig.name, "synthesizing", undefined, {
-    kind: "digest",
-    name: `Wiki digest: ${wikiName}`,
-  });
+  const run = { kind: "digest", name: `Wiki digest: ${wikiName}` } as const;
+  const reqId = agentStatus.startRequest(botConfig.name, "synthesizing", undefined, run);
   agentStatus.setSourcePage(reqId, "/wiki");
   setConnectorInfo(reqId, botConfig, config.claudeModel);
 
@@ -395,8 +394,11 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    tracer.finish("error", { wiki: wikiName, error: message });
-    agentStatus.completeRequest(reqId, {});
+    finishAgentRunTrace(tracer, run, "error", { wiki: wikiName, error: message });
+    agentStatus.completeRequest(reqId, {
+      status: "error",
+      ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
+    });
     throw err; // the route already degrades this to `{ digest: null }`
   }
 
@@ -407,9 +409,15 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
     costUsd: result.costUsd,
   };
   if (result.model) agentStatus.setModel(reqId, result.model);
-  tracer.finish("ok", { wiki: wikiName, entries: entries.length, ...usage });
+  finishAgentRunTrace(tracer, run, "ok", {
+    wiki: wikiName,
+    entries: entries.length,
+    ...(result.model ? { agentModel: result.model } : {}),
+    ...usage,
+  });
   agentStatus.completeRequest(reqId, {
     ...usage,
+    status: "ok",
     ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
   });
 

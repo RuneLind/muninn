@@ -82,6 +82,7 @@ import {
   WIKI_GARDENER_RUN_KEY,
   WIKI_GARDENER_LAST_RUN_KEY,
   WIKI_GARDENER_WEEKLY_RUN_KEY,
+  BACKLOG_DRAIN_RUN,
   type AssembledBacklog,
   type BacklogProgress,
   type DraftedScanProposal,
@@ -113,7 +114,9 @@ import {
   type SourceDraftTrigger,
 } from "../../db/source-draft-attempts.ts";
 import { loadConfig } from "../../config.ts";
+import type { WatcherAlert } from "../../types.ts";
 import { Tracer } from "../../tracing/index.ts";
+import { finishAgentRunTrace } from "../../tracing/agent-run-trace.ts";
 import { getLog } from "../../logging.ts";
 import { readonlyRefusal as sharedReadonlyRefusal } from "./route-utils.ts";
 import { requireJsonRequest } from "./json-request.ts";
@@ -1240,6 +1243,44 @@ function buildBacklogGardenerDeps(
   };
 }
 
+/** A manual drain's gardener call, under the trace root that `runGardener` does not finish. */
+export function drainGardenerRun(
+  ctx: { bot: BotConfig; config: ReturnType<typeof loadConfig>; apiUrl: string; root: string },
+  gardener: typeof runGardener = runGardener,
+): (assembled: AssembledBacklog, hooks: GardenerRunHooks) => Promise<WatcherAlert[]> {
+  return (assembled, hooks) => {
+    const tracer = new Tracer("wiki-gardener-backlog", { botName: ctx.bot.name });
+    return runDrainUnderTrace(tracer, ctx.config.tracingEnabled, hooks, assembled.batchKeys.length, () =>
+      gardener(buildBacklogGardenerDeps(assembled, { ...ctx, tracer }, hooks)),
+    );
+  };
+}
+
+/**
+ * Run a manual drain's gardener under its trace root: name the trace to the drain's
+ * `/agents` run, so that row is not listed a second time from the root, and finish
+ * the root with the run's identity on both exits.
+ */
+export async function runDrainUnderTrace(
+  tracer: Pick<Tracer, "traceId" | "finish">,
+  tracingEnabled: boolean,
+  hooks: Pick<GardenerRunHooks, "onTraceId">,
+  offered: number,
+  run: () => Promise<WatcherAlert[]>,
+): Promise<WatcherAlert[]> {
+  if (tracingEnabled) hooks.onTraceId?.(tracer.traceId);
+  try {
+    const alerts = await run();
+    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "ok", { offered, drafted: draftedCount(alerts) });
+    return alerts;
+  } catch (err) {
+    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+}
+
 /**
  * Shared resolve/guard prologue for the two backlog POSTs: resolve the wiki
  * request against the full registry, reject unknown / non-bot wikis, and find
@@ -1775,25 +1816,10 @@ export function registerWikiGardenerRoutes(
       clearRunJournal: () => backlogDeps.setSnapshot(watcher!.id, WIKI_GARDENER_RUN_KEY, null),
       draftedKeysSince: async (startedAt, batchKeys) =>
         draftedKeysSince(await backlogDeps.listProposals(bot.name), startedAt, batchKeys),
-      // The tracer root span must be finished HERE — runGardener only creates
-      // sub-spans (the weekly checker finishes its own tracer the same way);
-      // without this every drain leaves a malformed open trace in the waterfall.
-      runGardener: async (assembled, hooks) => {
-        const tracer = new Tracer("wiki-gardener-backlog", { botName: bot.name });
-        try {
-          const alerts = await runGardener(
-            buildBacklogGardenerDeps(assembled, { bot, config, apiUrl: KNOWLEDGE_API_URL, root, tracer }, hooks),
-          );
-          tracer.finish("ok", {
-            offered: assembled.batchKeys.length,
-            drafted: draftedCount(alerts),
-          });
-          return alerts;
-        } catch (err) {
-          tracer.error(err instanceof Error ? err : String(err));
-          throw err;
-        }
-      },
+      // `runGardener` only creates sub-spans, so the root is finished in
+      // `runDrainUnderTrace` (the weekly checker finishes its own tracer the same
+      // way); without that every drain leaves a malformed open trace in the waterfall.
+      runGardener: drainGardenerRun({ bot, config, apiUrl: KNOWLEDGE_API_URL, root }),
       // Low-volume vertical fallback (R4): when the gardener drafts ZERO cluster
       // proposals, draft the batch docs individually as source pages instead. Bound to
       // the real `draftOneBacklogDoc` (which fetches each doc's body internally — the
