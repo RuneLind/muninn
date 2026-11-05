@@ -1396,6 +1396,12 @@ describe("the dense scan path", () => {
     expect(finishCalls[0]!.status).toBe("ok");
   });
 
+  test("the one root a two-pass job owns carries the run's identity", async () => {
+    await run({ frames: true });
+    expect(finishCalls).toHaveLength(1);
+    expect(finishCalls[0]!.attrs).toMatchObject({ agentKind: "capture", agentName: expect.any(String) });
+  });
+
   test("the root's attributes SUM both passes' spend", async () => {
     await run({ frames: true });
     // 7 + 10 in, 3 + 42 out, 0.01 + 0.05, 2 + 1 turns, 2 + 1 tool reads.

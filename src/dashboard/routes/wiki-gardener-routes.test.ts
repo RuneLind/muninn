@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import {
+  runDrainUnderTrace,
   registerWikiGardenerRoutes,
   computeIngestBacklogResponse,
   computeBacklogFloorCounts,
@@ -4060,5 +4061,44 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     registerWikiGardenerRoutes(app, s.deps);
     const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
     expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 2, keptSkipped: 0 });
+  });
+});
+
+describe("runDrainUnderTrace", () => {
+  function recording() {
+    const finishes: Array<{ status: string; attrs?: Record<string, unknown> }> = [];
+    return {
+      finishes,
+      tracer: { traceId: "drain-trace", finish: (status: "ok" | "error" = "ok", attrs?: Record<string, unknown>) => void finishes.push({ status, attrs }) },
+    };
+  }
+
+  test("names the trace to the run and stamps the root on success", async () => {
+    const { tracer, finishes } = recording();
+    const named: string[] = [];
+    await runDrainUnderTrace(tracer, true, { onTraceId: (id) => void named.push(id) }, 3, async () => []);
+    expect(named).toEqual(["drain-trace"]);
+    expect(finishes).toEqual([
+      { status: "ok", attrs: { offered: 3, drafted: 0, agentKind: "gardener_drain", agentName: "Backlog drain" } },
+    ]);
+  });
+
+  test("stamps the root on failure and rethrows", async () => {
+    const { tracer, finishes } = recording();
+    await expect(
+      runDrainUnderTrace(tracer, true, {}, 3, async () => {
+        throw new Error("draft blew up");
+      }),
+    ).rejects.toThrow("draft blew up");
+    expect(finishes).toEqual([
+      { status: "error", attrs: { error: "draft blew up", agentKind: "gardener_drain", agentName: "Backlog drain" } },
+    ]);
+  });
+
+  test("with tracing off it names no trace, since none was written", async () => {
+    const { tracer } = recording();
+    const named: string[] = [];
+    await runDrainUnderTrace(tracer, false, { onTraceId: (id) => void named.push(id) }, 3, async () => []);
+    expect(named).toEqual([]);
   });
 });

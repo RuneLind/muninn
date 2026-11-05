@@ -76,6 +76,7 @@ mock.module("../../ai/haiku-direct.ts", () => ({
   }),
 }));
 
+const { agentStatus } = await import("../../observability/agent-status.ts");
 const { streamFactcheckSSE } = await import("./factcheck-sse.ts");
 const { FACTCHECK_CLAIM_TIMEOUT_MS, COMPOSE_BUDGET_MS } = await import("./factcheck-sse.ts");
 
@@ -179,6 +180,44 @@ beforeEach(async () => {
 
 const claimResult = (r: { events: SseEvent[] }) =>
   r.events.find((e) => e.event === "claim_result")!.data;
+
+describe("the factcheck run's ending", () => {
+  const lastRow = () => agentStatus.getRecentCompleted().filter((r) => r.kind === "factcheck").at(-1)!;
+
+  test("a claim failure inside a finished run still reads ok", () => {
+    expect(lastRow().status).toBe("ok");
+  });
+
+  test("a run that dies reads error on its ring row, and its root keeps what it spent", async () => {
+    spans.length = 0;
+    const app = new Hono();
+    app.get("/fc", (c) =>
+      streamFactcheckSSE(c, {
+        config,
+        botConfig,
+        body: "The sky is blue. Water is wet.",
+        meta: { title: "Sky", tags: [], type: "concept" },
+        wikiName: "testwiki",
+        mode: "article",
+        // Read for the `done` event, after the claims have spent.
+        get baseHash(): string {
+          throw new Error("late failure");
+        },
+        oneShot: scriptedFailure(ERROR_MESSAGE) as never,
+      }),
+    );
+    await (await app.request("/fc")).text();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(lastRow().status).toBe("error");
+    const root = spans.find((s) => s.name === "factcheck" && s.parentId === null)!;
+    expect(spanAttrs.get(root.id)).toMatchObject({
+      agentKind: "factcheck",
+      error: "late failure",
+      inputTokens: 10,
+      agentModel: "claude-haiku-4-5",
+    });
+  });
+});
 
 describe("the factcheck root's run identity", () => {
   test("the finished root carries kind, name and spend", () => {

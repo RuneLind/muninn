@@ -114,6 +114,7 @@ import {
   type SourceDraftTrigger,
 } from "../../db/source-draft-attempts.ts";
 import { loadConfig } from "../../config.ts";
+import type { WatcherAlert } from "../../types.ts";
 import { Tracer } from "../../tracing/index.ts";
 import { finishAgentRunTrace } from "../../tracing/agent-run-trace.ts";
 import { getLog } from "../../logging.ts";
@@ -1057,6 +1058,31 @@ function backlogGenerationOf(botName: string): number {
  * re-fetch — dropping the in-flight entry is the load-bearing half, since `refresh=1`
  * bypasses the cache READ but would otherwise still join a stale in-flight promise.
  */
+/**
+ * Run a manual drain's gardener under its trace root: name the trace to the drain's
+ * `/agents` run, so that row is not listed a second time from the root, and finish
+ * the root with the run's identity on both exits.
+ */
+export async function runDrainUnderTrace(
+  tracer: Pick<Tracer, "traceId" | "finish">,
+  tracingEnabled: boolean,
+  hooks: Pick<GardenerRunHooks, "onTraceId">,
+  offered: number,
+  run: () => Promise<WatcherAlert[]>,
+): Promise<WatcherAlert[]> {
+  if (tracingEnabled) hooks.onTraceId?.(tracer.traceId);
+  try {
+    const alerts = await run();
+    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "ok", { offered, drafted: draftedCount(alerts) });
+    return alerts;
+  } catch (err) {
+    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+}
+
 export function invalidateIngestBacklogCache(botName: string): void {
   backlogCache.delete(botName);
   backlogInFlight.delete(botName);
@@ -1782,22 +1808,11 @@ export function registerWikiGardenerRoutes(
       // without this every drain leaves a malformed open trace in the waterfall.
       runGardener: async (assembled, hooks) => {
         const tracer = new Tracer("wiki-gardener-backlog", { botName: bot.name });
-        if (config.tracingEnabled) hooks.onTraceId?.(tracer.traceId);
-        try {
-          const alerts = await runGardener(
+        return runDrainUnderTrace(tracer, config.tracingEnabled, hooks, assembled.batchKeys.length, () =>
+          runGardener(
             buildBacklogGardenerDeps(assembled, { bot, config, apiUrl: KNOWLEDGE_API_URL, root, tracer }, hooks),
-          );
-          finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "ok", {
-            offered: assembled.batchKeys.length,
-            drafted: draftedCount(alerts),
-          });
-          return alerts;
-        } catch (err) {
-          finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "error", {
-            error: err instanceof Error ? err.message : String(err),
-          });
-          throw err;
-        }
+          ),
+        );
       },
       // Low-volume vertical fallback (R4): when the gardener drafts ZERO cluster
       // proposals, draft the batch docs individually as source pages instead. Bound to

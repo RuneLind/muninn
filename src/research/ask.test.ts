@@ -60,7 +60,7 @@ mock.module("../ai/one-shot.ts", () => ({
     lastSystemPrompt = opts?.systemPrompt ?? "";
     lastToolSurface = opts?.toolSurface;
     opts?.onProgress?.({ type: "text_delta", text: claudeAnswer });
-    return { result: claudeAnswer, outputTokens: 30, inputTokens: 12, wallClockMs: 4 };
+    return { result: claudeAnswer, model: "claude-answer-test", outputTokens: 30, inputTokens: 12, wallClockMs: 4 };
   },
   // summarizer-shared imports this too (the thinking-budget capability gate) —
   // mirror the real rule rather than hardcoding, so the mock can't drift.
@@ -371,8 +371,27 @@ describe("research trace", () => {
     });
     const run = agentStatus.getRecentCompleted().filter((r) => r.kind === "research").at(-1)!;
     expect(run.status).toBe("ok");
-    expect(finish.attrs!.agentModel).toBe(run.model);
+    expect(finish.attrs!.agentModel).toBe("claude-answer-test");
+    expect(run.model).toBe("claude-answer-test");
     expect(finish.attrs).not.toHaveProperty("model");
+  });
+
+  test("a run that dies after synthesis keeps its spend on the root and reads error on its row", async () => {
+    const { tracer, spans } = fakeTracer();
+    await streamResearchAnswer(
+      { question: "A late failure", config, botConfig: bot, tracer },
+      (e) => {
+        if (e.type === "done") throw new Error("client gone");
+      },
+    );
+    expect(spans.find((s) => s.op === "finish:error")!.attrs).toMatchObject({
+      agentKind: "research",
+      error: "client gone",
+      outputTokens: expect.any(Number),
+      agentModel: "claude-answer-test",
+    });
+    const run = agentStatus.getRecentCompleted().filter((r) => r.name === "A late failure").at(-1)!;
+    expect(run.status).toBe("error");
   });
 
   test("a declined-coverage ask never opens a synthesis span (no Claude call was made)", async () => {

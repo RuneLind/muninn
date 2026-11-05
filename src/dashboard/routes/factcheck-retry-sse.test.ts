@@ -58,6 +58,7 @@ mock.module("../../db/traces.ts", () => ({
   },
 }));
 
+const { agentStatus } = await import("../../observability/agent-status.ts");
 const {
   streamFactcheckRetrySSE,
   acquireClaimRetry,
@@ -267,6 +268,29 @@ describe("claim retry — the success path", () => {
     expect(run.spans.some((s) => s.name === "claude:claim-retry-2")).toBe(false);
     expect(run.spans.filter((s) => s.parentId === span!.id).map((s) => s.name)).toEqual(["WebFetch"]);
     expect(run.spans.some((s) => s.name === "factcheck-retry")).toBe(true);
+  });
+});
+
+describe("claim retry — how the run ended", () => {
+  const lastRow = () => agentStatus.getRecentCompleted().filter((r) => r.kind === "factcheck").at(-1)!;
+  const rootAttrs = (run: { spans: RecordedSpan[] }) =>
+    spanAttrs.get(run.spans.find((s) => s.name === "factcheck-retry" && s.parentId === null)!.id);
+
+  test("an empty answer reads error on the ring row, and the root keeps what it spent", async () => {
+    const run = await runRetry(scriptedSuccess("   "));
+    expect(lastRow().status).toBe("error");
+    expect(rootAttrs(run)).toMatchObject({
+      agentKind: "factcheck",
+      error: expect.any(String),
+      inputTokens: 20,
+      agentModel: "claude-sonnet-5",
+    });
+  });
+
+  test("a verdict reads ok on the ring row", async () => {
+    const run = await runRetry(scriptedSuccess(VERDICT_BLOCK));
+    expect(lastRow().status).toBe("ok");
+    expect(rootAttrs(run)).toMatchObject({ agentModel: "claude-sonnet-5", inputTokens: 20 });
   });
 });
 
