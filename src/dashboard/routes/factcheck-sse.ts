@@ -975,6 +975,8 @@ async function runFactcheck(
 
   const tracer = new Tracer("factcheck", { botName: botConfig.name, platform: "factcheck" });
   const traceId: string | undefined = tracer.traceId;
+  // The failure path stamps the root, then waits on a write to the client.
+  if (config.tracingEnabled) agentStatus.setLiveTraceId(reqId, tracer.traceId);
   const usage: Usage = { inputTokens: 0, outputTokens: 0, numTurns: 0, costUsd: 0 };
   let status: "ok" | "error" = "ok";
   let seenModel: string | undefined;

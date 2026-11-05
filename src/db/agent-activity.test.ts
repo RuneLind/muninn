@@ -207,7 +207,7 @@ describe("a stamped span on real Postgres", () => {
 describe("getRecentAgentRuns", () => {
   /** Every suite shares the table, so read one bot's rows. */
   const runsOf = async (bot: string, windowHours?: number) =>
-    (await getRecentAgentRuns(200, windowHours)).filter((r) => r.botName === bot);
+    (await getRecentAgentRuns(100_000, windowHours)).filter((r) => r.botName === bot);
 
   function span(bot: string, attributes: Record<string, unknown>, over: Record<string, unknown> = {}) {
     return saveSpan({
@@ -276,13 +276,23 @@ describe("getRecentAgentRuns", () => {
   test("keeps to the window, newest first, and to the limit", async () => {
     const bot = `runs-${crypto.randomUUID()}`;
     const ago = (h: number) => new Date(Date.now() - h * 3_600_000);
-    await span(bot, { agentKind: "digest", agentName: "older" }, { startedAt: ago(5) });
+    await span(bot, { agentKind: "digest", agentName: "older" }, { startedAt: ago(47) });
     await span(bot, { agentKind: "digest", agentName: "newer" }, { startedAt: ago(1) });
     await span(bot, { agentKind: "digest", agentName: "outside" }, { startedAt: ago(49) });
-    expect((await runsOf(bot)).map((r) => r.name)).toEqual(["newer", "older"]);
+    const rows = (await getRecentAgentRuns(100_000)).filter((r) => r.botName === bot);
+    expect(rows.map((r) => r.name)).toEqual(["newer", "older"]);
     expect((await runsOf(bot, 2)).map((r) => r.name)).toEqual(["newer"]);
-    const limited = await getRecentAgentRuns(1);
-    expect(limited).toHaveLength(1);
+    expect(await getRecentAgentRuns(1)).toHaveLength(1);
+  });
+
+  test("the index the read relies on exists, with the predicate the read spells", async () => {
+    const [row] = await getDb()`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_traces_agent_run'`;
+    expect(row!.indexdef).toContain("attributes ? 'agentKind'");
+    const here = (p: string) => Bun.file(new URL(p, import.meta.url)).text();
+    expect(await here("./agent-activity.ts")).toContain("WHERE attributes ? 'agentKind'");
+    const definition = "ON traces (started_at DESC) WHERE attributes ? 'agentKind';";
+    expect(await here("../../db/migrations/087-traces-agent-run-index.sql")).toContain(definition);
+    expect(await here("../../db/init.sql")).toContain(definition);
   });
 });
 
@@ -353,4 +363,23 @@ describe("a run that fails after its span finished ok", () => {
     await Bun.sleep(60);
     expect((await rowsOf(tracer.traceId))[0]!.attributes.error).toBe("the model's own error");
   });
+});
+
+test("getRecentAgentRuns reads at most 40 rows unless told otherwise", async () => {
+  const bot = `runs-${crypto.randomUUID()}`;
+  await Promise.all(
+    Array.from({ length: 41 }, () =>
+      saveSpan({
+        id: crypto.randomUUID(),
+        traceId: crypto.randomUUID(),
+        name: "wiki_digest",
+        kind: "root" as const,
+        botName: bot,
+        startedAt: new Date(),
+        durationMs: 1,
+        attributes: { agentKind: "digest", agentName: "n" },
+      }),
+    ),
+  );
+  expect(await getRecentAgentRuns()).toHaveLength(40);
 });

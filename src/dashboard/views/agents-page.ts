@@ -388,14 +388,13 @@ export async function renderAgentsPage(): Promise<string> {
       meta.textContent = live + ' · ' + (selectedBot ? 'filtered to ' + selectedBot : 'all bots');
     }
 
-    // Honest empty state: name when the process started, since the in-memory
-    // completed-runs history (the ETA source for non-watcher kinds) resets then.
+    // Honest empty state: name when the process started, which is what the ETAs of
+    // the ring kinds count from.
     function updateRunningEmpty() {
       var empty = document.getElementById('runningEmpty');
       if (!empty) return;
       empty.textContent = processStartedAt
-        ? 'No live runs — process up since ' + new Date(processStartedAt).toLocaleString() +
-          '; run-time estimates reset on restart.'
+        ? 'No live runs — process up since ' + new Date(processStartedAt).toLocaleString() + '.'
         : 'Nothing running right now.';
     }
 

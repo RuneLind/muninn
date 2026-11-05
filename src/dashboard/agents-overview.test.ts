@@ -493,10 +493,37 @@ describe("assembleAgentsOverview recent, ring kinds", () => {
   test("a run in both sources is listed once, as the ring row", async () => {
     const o = await assembleAgentsOverview(deps({
       getCompletedRing: () => [run({ kind: "capture", name: "YouTube: a talk", traceId: "tr-1", model: "live-corrected", completedAt: 9000 })],
-      getRecentAgentRuns: async () => [agentRunRow()],
+      getRecentAgentRuns: async () => [agentRunRow({ model: null })],
     }), NOW);
     expect(named(o, "YouTube: a talk")).toHaveLength(1);
     expect(named(o, "YouTube: a talk")[0]).toMatchObject({ model: "live-corrected", finishedAt: 9000 });
+  });
+
+  test("what the ring row lacks comes from the span, and the span names the model that ran", async () => {
+    // A goal completes its ring row with only a trace id, and a task's ring row carries
+    // the configured model, not the one the router used.
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "scheduled_task", name: "Goal", traceId: "g", model: "sonnet", completedAt: 9000 })],
+      getRecentAgentRuns: async () => [
+        agentRunRow({ kind: "scheduled_task", traceId: "g", name: "Goal", model: "haiku-ran", inputTokens: 50, outputTokens: 9, costUsd: 0.01 }),
+      ],
+    }), NOW);
+    expect(o.recent).toHaveLength(1);
+    expect(o.recent[0]).toMatchObject({ model: "haiku-ran", inputTokens: 50, outputTokens: 9, costUsd: 0.01, finishedAt: 9000 });
+  });
+
+  test("spend the ring row does have is not replaced", async () => {
+    // The ring holds a capture's whole spend, the takeaway check's included.
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "capture", name: "YouTube: a talk", traceId: "tr-1", inputTokens: 1011, outputTokens: 507, costUsd: 0 })],
+      getRecentAgentRuns: async () => [agentRunRow({ inputTokens: 11, outputTokens: 7, costUsd: 0.5 })],
+    }), NOW);
+    expect(o.recent[0]).toMatchObject({ inputTokens: 1011, outputTokens: 507, costUsd: 0 });
+  });
+
+  test("a durable row keeps its own kind", async () => {
+    const o = await assembleAgentsOverview(deps({ getRecentAgentRuns: async () => [agentRunRow({ kind: "digest" })] }), NOW);
+    expect(o.recent[0]!.kind).toBe("digest");
   });
 
   test("a name the span stored cleaned still matches its ring row", async () => {

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -92,7 +92,7 @@ async function insertSpan(traceId: string, name: string, status: string, attribu
   await sql!`
     INSERT INTO traces (id, trace_id, parent_id, name, kind, status, bot_name, started_at, duration_ms, attributes)
     VALUES (${crypto.randomUUID()}, ${traceId}, NULL, ${name}, 'root', ${status}, ${BOT},
-            now() - interval '5 minutes', 42000, ${sql!.json(attributes as never)})
+            now() - interval '43 seconds', 42000, ${sql!.json(attributes as never)})
   `;
 }
 
@@ -135,7 +135,7 @@ test.afterAll(async () => {
   removeSignalHandlers();
 });
 
-const row = (page: import("@playwright/test").Page, name: string) => page.locator(".rf-row", { hasText: name });
+const row = (page: Page, name: string) => page.locator(".rf-row", { hasText: name });
 
 for (const when of ["with an empty ring", "after a restart"]) {
   test(`stamped runs are listed ${when}`, async ({ page }) => {
@@ -151,11 +151,20 @@ for (const when of ["with an empty ring", "after a restart"]) {
     await expect(finished.locator(".rf-cost")).toHaveText("$0.42");
     await expect(finished.locator(".rf-dur")).toHaveText("42.0s");
     await expect(finished).toContainText("claude-sonnet-5");
+    await expect(finished).toContainText("1.2k in");
+    await expect(finished.locator(".rf-bot")).toHaveText(BOT);
+    await expect(finished.locator(".kind-chip")).toHaveText("CAPTURE");
     await expect(finished.locator(".run-link")).toHaveAttribute("href", `/traces#${traceIds[0]}`);
 
     const failed = row(page, "Wiki digest: a digest that failed");
     await expect(failed).toHaveCount(1);
     await expect(failed).toHaveClass(/failed/);
+    await expect(failed.locator(".rf-cost")).toHaveText("—");
+    await expect(failed.locator(".kind-chip")).toHaveText("DIGEST");
+
+    // With nothing running the page used to say Recent's history resets on restart.
+    await expect(page.locator("#runningEmpty")).toContainText("process up since");
+    await expect(page.locator("#runningEmpty")).not.toContainText("restart");
 
     const res = await page.request.get(`${BASE}/api/agents/overview`);
     const body = (await res.json()) as { recent: { traceId?: string }[] };

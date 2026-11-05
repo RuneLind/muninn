@@ -315,10 +315,12 @@ function runKey(traceId: string, name: string): string {
 }
 
 /**
- * The Recent rows of the ring kinds, one per run. The ring row wins where a run is in
- * both, being richer, except that a span which ended in error says so: a goal completes
- * its ring row before a last DB write that can still throw. A stamped span whose run is
- * still live is left out, since a capture's root finishes before its ingest does.
+ * The Recent rows of the ring kinds, one per run. Where a run is in both the ring row
+ * wins, with three things taken from the span: what the ring row lacks (a goal completes
+ * with only a trace id), the model that ran (a task's ring row holds the configured one),
+ * and an error (a goal completes its ring row before a last DB write that can throw).
+ * A stamped span whose run is still live is left out, since a capture's root finishes
+ * before its ingest does.
  *
  * ⚠️ A run in both sources is only constructible, never seen in a fresh process, and a
  * miss here is one run listed twice with no error anywhere.
@@ -331,14 +333,20 @@ function assembleRingKinds(
   // A blank title is dropped from the ring row's name, which then reads the kind's label.
   const agentRuns = stampedRuns.map((r) => ({ ...r, name: r.name || kindLabel(r.kind as AgentKind) }));
   const failedRuns = new Set(agentRuns.filter((r) => r.status === "error").map((r) => runKey(r.traceId, r.name)));
+  const spanByRun = new Map(agentRuns.map((r) => [runKey(r.traceId, r.name), r]));
   const ringRows = ring.filter((r) => RING_RECENT_KINDS.has(r.kind ?? "chat")).map(ringToRecent);
   const covered = new Set<string>();
   for (const row of ringRows) if (row.traceId) covered.add(runKey(row.traceId, row.name));
   for (const r of running) if (r.liveTraceId && r.name) covered.add(runKey(r.liveTraceId, r.name));
   return [
-    ...ringRows.map((row) =>
-      row.traceId && failedRuns.has(runKey(row.traceId, row.name)) ? { ...row, status: "error" } : row,
-    ),
+    ...ringRows.map((row) => {
+      if (!row.traceId) return row;
+      const key = runKey(row.traceId, row.name);
+      const span = spanByRun.get(key);
+      if (!span) return row;
+      const merged: RecentEntry = { ...agentRunToRecent(span), ...row, ...(span.model ? { model: span.model } : {}) };
+      return failedRuns.has(key) ? { ...merged, status: "error" } : merged;
+    }),
     ...capRepeatedFailures(agentRuns.filter((r) => !covered.has(runKey(r.traceId, r.name)))).map(agentRunToRecent),
   ];
 }
