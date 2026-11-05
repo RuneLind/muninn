@@ -131,7 +131,7 @@ describe("lint: question-block, a card its page already answered", () => {
   const addDecision = (id: string, word: string) =>
     `DecisionLog item ${id} says "${word}" but its card stays open and no decision's first sentence names ${id} as ruled. If this is a ruling, write Closed <date> (Dn). in item ${id}, naming the decision that records it or one you add; if it is not, leave the card open`;
   const rules = (d: string, id: string) =>
-    `Decision ${d} already rules on ${id} but its card stays open; write Closed <date> (${d}). in item ${id}`;
+    `Decision ${d} reads as ruling on ${id} but its card stays open. If it does, write Closed <date> (${d}). in item ${id}; if that reading is wrong, leave the card open`;
 
   for (const word of ["answered", "besvart", "avgjort", "decided", "AVGJORT", "Decided"]) {
     test(`its own item holds «${word}»`, async () => {
@@ -175,7 +175,7 @@ describe("lint: question-block, a card its page already answered", () => {
   test("a superseded decision hands the close to its successor", async () => {
     expect(
       await messagesFor(["- **O3** — Keep it?", "- **D5** — Bind the UIs here (O3 → B). Superseded by D6: the bind fails.", "- **D6** — Bind on loopback instead."]),
-    ).toEqual(["Decision D5, superseded by D6, already rules on O3 but its card stays open; write Closed <date> (D6). in item O3"]);
+    ).toEqual(["Decision D5, superseded by D6, reads as ruling on O3 but its card stays open. If it does, write Closed <date> (D6). in item O3; if that reading is wrong, leave the card open"]);
   });
 
   test("the canonical close reports nothing, whatever else the page says", async () => {

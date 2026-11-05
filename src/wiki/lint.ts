@@ -50,7 +50,7 @@
  *                      refuses it), an id two DecisionLog items carry (the
  *                      first decides), an item carrying a near-miss close
  *                      (D6 — `Closed 2026-10-08: B (D15)`, `Besvart 06.10`),
- *                      an open card its page already rules on (`unclosedCards`,
+ *                      an open card its page seems to rule on (`unclosedCards`,
  *                      `src/format/question-unclosed.ts`),
  *                      or a `questions_to:` written as a block list, which
  *                      `parseFrontmatter` does not read. Rules:
@@ -671,14 +671,15 @@ function nearMissConsequence(id: string, quoted: string, state: QuestionState | 
   return `DecisionLog item ${id} says ${quoted} but no canonical close (Closed <date> (Dn).), so its card stays open`;
 }
 
-/** What to write for a card whose page already holds its ruling. */
+/** What to write for a card whose page seems to hold its ruling; a reading of
+ *  prose, so the message says what to do if it is wrong. */
 function unclosedCardMessage(card: UnclosedCard): string {
   if (card.decision === null) {
     return `DecisionLog item ${card.id} says "${card.word}" but its card stays open and no decision's first sentence names ${card.id} as ruled. If this is a ruling, write Closed <date> (Dn). in item ${card.id}, naming the decision that records it or one you add; if it is not, leave the card open`;
   }
   const decision =
     card.namedBy === card.decision ? `Decision ${card.decision}` : `Decision ${card.namedBy}, superseded by ${card.decision},`;
-  return `${decision} already rules on ${card.id} but its card stays open; write Closed <date> (${card.decision}). in item ${card.id}`;
+  return `${decision} reads as ruling on ${card.id} but its card stays open. If it does, write Closed <date> (${card.decision}). in item ${card.id}; if that reading is wrong, leave the card open`;
 }
 
 /**

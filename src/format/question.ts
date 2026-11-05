@@ -424,11 +424,11 @@ export function decisionLogEntries(blocks: Block[]): DecisionLogEntry[] {
 // ── The closing rule (D6) ───────────────────────────────────────────────────
 
 const DATE = String.raw`(\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}(?:\.\d{4})?)`;
-export const WORD_START = String.raw`(?<![\p{L}\p{N}_])`;
+const WORD_START = String.raw`(?<![\p{L}\p{N}_])`;
 /** White space between two tokens: a run on one line, or one line break with
  *  indentation either side. A masked code span is at least three line breaks
  *  ({@link maskCodeSpans}), so it never fits. */
-export const WS = String.raw`(?:[ \t\u00a0]+|[ \t\u00a0]*\n[ \t\u00a0]*)`;
+const WS = String.raw`(?:[ \t\u00a0]+|[ \t\u00a0]*\n[ \t\u00a0]*)`;
 const CLOSE_RE = new RegExp(`${WORD_START}(Closed|Lukket)${WS}${DATE}${WS}\\((D\\d{1,4})\\)`, "gu");
 const REOPEN_RE = new RegExp(`${WORD_START}(Reopened|Gjenåpnet)${WS}${DATE}(?=[.\\s]|$)`, "gu");
 const KEYWORD_RE = new RegExp(`${WORD_START}(Closed|Lukket|Reopened|Gjenåpnet)(?![\\p{L}\\p{N}_])`, "gu");
@@ -455,7 +455,7 @@ export function maskCodeSpans(text: string): string {
 
 /** The text the close rule reads: fact-check marks removed (a `<Fact>` around
  *  `Lukket 07.10` is annotation, not part of the phrase), code spans masked. */
-export function phraseText(text: string): string {
+function phraseText(text: string): string {
   return maskCodeSpans(stripFactWrappers(text));
 }
 
