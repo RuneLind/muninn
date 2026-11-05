@@ -193,7 +193,7 @@ let nextRequestId = 1;
 /** Cap on tools serialized per run in the `agent_runs` SSE snapshot (keeps the
  *  fan-out payload bounded — a long chat turn can accumulate dozens). */
 const SNAPSHOT_TOOLS_CAP = 20;
-/** Completed-runs ring size — feeds Recent for kinds with no durable source. */
+/** Completed-runs ring size — feeds Recent for the ring kinds, and their ETAs. */
 const COMPLETED_RING_MAX = 50;
 /** Minimum interval between `agent_runs` snapshot emissions (throttle). */
 const ALL_THROTTLE_MS = 1000;
@@ -343,14 +343,14 @@ class AgentStatusTracker {
     this.notifyProgress();
   }
 
-  /** Late-bind the bot that actually ran this job. The capture verticals start
-   *  their run at `createJob` (route level, before the summarizer bot is
-   *  resolved), so their card would otherwise carry an empty bot chip. */
   setLiveTraceId(requestId: string, traceId: string) {
     const req = this.requests.get(requestId);
     if (req) req.liveTraceId = traceId;
   }
 
+  /** Late-bind the bot that actually ran this job. The capture verticals start
+   *  their run at `createJob` (route level, before the summarizer bot is
+   *  resolved), so their card would otherwise carry an empty bot chip. */
   setBotName(requestId: string, botName: string) {
     const req = this.requests.get(requestId);
     if (!req) return;

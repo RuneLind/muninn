@@ -3,7 +3,7 @@ import { agentStatus } from "../observability/agent-status.ts";
 import { markAgentRunFailed } from "../db/traces.ts";
 import type { AgentRunIdentity } from "../tracing/agent-run-trace.ts";
 
-// Generic in-memory job store shared by the capture verticals (youtube,
+// Generic job store, held in memory, shared by the capture verticals (youtube,
 // x-article, tiktok, anthropic, article). Each vertical's `state.ts` instantiates this
 // with its own status union + identity fields and re-exports a vertical-typed
 // API, so routes/summarizers keep importing from `<vertical>/state.ts` unchanged.

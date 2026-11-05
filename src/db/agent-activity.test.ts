@@ -106,7 +106,7 @@ describe("getRecentAgentTraces", () => {
     expect(ids.has(agg.traceId)).toBe(false);
   });
 
-  test("does NOT return task:% spans — scheduled tasks stay ring-sourced (never both)", async () => {
+  test("does NOT return task:% spans — getRecentAgentRuns reads those (never both)", async () => {
     // /agents Recent sources scheduled_task rows from the registry ring; a
     // task:<type> span surfacing here too would double-count the same run.
     const tick = chatRoot("scheduler_tick");

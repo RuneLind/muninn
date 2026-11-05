@@ -35,8 +35,8 @@ import {
 import { buildRunEstimates } from "./agent-eta.ts";
 import { getLog } from "../logging.ts";
 
-/** Captured at module load (≈ server start). The `/agents` "process restarted"
- *  empty state reads this to say when the in-memory ETA history last reset. */
+/** Captured at module load (≈ server start). The `/agents` empty state reads this to
+ *  say how long the process has been up. */
 export const PROCESS_STARTED_AT = Date.now();
 
 const log = getLog("dashboard", "agents");
@@ -87,7 +87,7 @@ export interface RecentEntry {
 
 export interface AgentsOverview {
   generatedAt: number;
-  /** Epoch ms the muninn process started — the "estimates reset on restart" note. */
+  /** Epoch ms the muninn process started, for the empty state. */
   processStartedAt: number;
   running: AgentRun[];
   upNext: UpNextEntry[];

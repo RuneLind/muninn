@@ -92,8 +92,8 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
  *  token/turn counts to `completeRequest` and stamp them onto the `task:<type>`
  *  span. The briefing path has a full `ClaudeExecResult`; the reminder/custom
  *  Haiku paths surface their usage via the router's {@link HaikuMessageResult}.
- *  `model` rides here only for the span attrs — `completeRequest` ignores it (the
- *  Recent card's model comes from `setConnectorInfo`). */
+ *  `model` rides here only for the span attrs — `completeRequest` ignores it, and the
+ *  Recent row reads it off the span. */
 interface TaskResult {
   markdown: string;
   meta: { inputTokens?: number; outputTokens?: number; numTurns?: number; toolCount?: number; model?: string; costUsd?: number; connector?: string };
