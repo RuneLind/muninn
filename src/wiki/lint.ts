@@ -50,6 +50,8 @@
  *                      refuses it), an id two DecisionLog items carry (the
  *                      first decides), an item carrying a near-miss close
  *                      (D6 — `Closed 2026-10-08: B (D15)`, `Besvart 06.10`),
+ *                      an open card its page seems to rule on (`unclosedCards`,
+ *                      `src/format/question-unclosed.ts`),
  *                      or a `questions_to:` written as a block list, which
  *                      `parseFrontmatter` does not read. Rules:
  *                      `src/format/question.ts`.
@@ -204,6 +206,7 @@ import {
   parseQuestionsTo,
   type QuestionState,
 } from "../format/question.ts";
+import { unclosedCards, type UnclosedCard } from "../format/question-unclosed.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { CASE_STATUSES, parseCaseLabels } from "../format/case-board.ts";
 import type { Block } from "../format/markdown-ast.ts";
@@ -668,6 +671,17 @@ function nearMissConsequence(id: string, quoted: string, state: QuestionState | 
   return `DecisionLog item ${id} says ${quoted} but no canonical close (Closed <date> (Dn).), so its card stays open`;
 }
 
+/** What to write for a card whose page seems to hold its ruling; a reading of
+ *  prose, so the message says what to do if it is wrong. */
+function unclosedCardMessage(card: UnclosedCard): string {
+  if (card.decision === null) {
+    return `DecisionLog item ${card.id} says "${card.word}" but its card stays open and no decision's first sentence names ${card.id} as ruled. If this is a ruling, write Closed <date> (Dn). in item ${card.id}, naming the decision that records it or one you add; if it is not, leave the card open`;
+  }
+  const decision =
+    card.namedBy === card.decision ? `Decision ${card.decision}` : `Decision ${card.namedBy}, superseded by ${card.decision},`;
+  return `${decision} reads as ruling on ${card.id} but its card stays open. If it does, write Closed <date> (${card.decision}). in item ${card.id}; if that reading is wrong, leave the card open`;
+}
+
 /**
  * Check 10 — a `<Question>` whose answer card cannot follow its DecisionLog
  * item. Reads the page through the one parse the renderer runs
@@ -698,6 +712,7 @@ function checkQuestions(page: PageRef, rawContent: string): LintFinding[] {
 
   const blockLines = questionLines(questions, questionTagLines(lines));
   const lineOf = (k: number) => blockLines[k];
+  const unclosed = new Map(unclosedCards(parsed).map((c) => [c.id, c]));
   const seen = new Set<string>();
   questions.forEach((q, k) => {
     const line = lineOf(k);
@@ -728,6 +743,8 @@ function checkQuestions(page: PageRef, rawContent: string): LintFinding[] {
       const quoted = [...new Set(words)].map((w) => `"${w}"`).join(", ");
       push(nearMissConsequence(q.id, quoted, states.get(q.id), item.text), line);
     }
+    const card = unclosed.get(q.id);
+    if (card && !words.some((w) => w === "Answered" || w === "Besvart")) push(unclosedCardMessage(card), line);
   });
   return findings;
 }
