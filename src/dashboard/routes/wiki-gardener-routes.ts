@@ -115,6 +115,7 @@ import {
 } from "../../db/source-draft-attempts.ts";
 import { loadConfig } from "../../config.ts";
 import type { WatcherAlert } from "../../types.ts";
+import { markAgentRunFailed } from "../../db/traces.ts";
 import { Tracer } from "../../tracing/index.ts";
 import { finishAgentRunTrace } from "../../tracing/agent-run-trace.ts";
 import { getLog } from "../../logging.ts";
@@ -1820,6 +1821,7 @@ export function registerWikiGardenerRoutes(
       // `runDrainUnderTrace` (the weekly checker finishes its own tracer the same
       // way); without that every drain leaves a malformed open trace in the waterfall.
       runGardener: drainGardenerRun({ bot, config, apiUrl: KNOWLEDGE_API_URL, root }),
+      markRunFailed: markAgentRunFailed,
       // Low-volume vertical fallback (R4): when the gardener drafts ZERO cluster
       // proposals, draft the batch docs individually as source pages instead. Bound to
       // the real `draftOneBacklogDoc` (which fetches each doc's body internally — the

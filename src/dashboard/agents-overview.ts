@@ -120,12 +120,16 @@ export const DEFAULT_AGENTS_OVERVIEW_DEPS: AgentsOverviewDeps = {
   getScheduledTasks: () => getAllScheduledTasks(),
   getWatchers: () => getAllWatchers(),
   getRecentTraces: () => getRecentAgentTraces(),
-  getRecentAgentRuns: () => getRecentAgentRuns(),
+  // Past RECENT_LIMIT on purpose: the failure cap below can drop most of a window.
+  getRecentAgentRuns: () => getRecentAgentRuns(200),
   getRecentExtractors: () => getRecentExtractorUsage(),
   getWatcherDurations: () => getWatcherRunDurations(),
 };
 
 const RECENT_LIMIT = 40;
+/** A goal whose send fails is picked up again on every tick, so one Telegram outage
+ *  would otherwise fill the list with one run's failures. */
+const MAX_FAILED_ROWS_PER_NAME = 3;
 const UP_NEXT_LIMIT = 25;
 
 // ── Europe/Oslo wall-clock helpers (mirror db/scheduled-tasks.ts arithmetic) ──
@@ -322,19 +326,32 @@ function runKey(traceId: string, name: string): string {
 function assembleRingKinds(
   ring: AgentRun[],
   running: AgentRun[],
-  agentRuns: RecentAgentRunRow[],
+  stampedRuns: RecentAgentRunRow[],
 ): RecentEntry[] {
-  const statusByRun = new Map(agentRuns.map((r) => [runKey(r.traceId, r.name), r.status]));
+  // A blank title is dropped from the ring row's name, which then reads the kind's label.
+  const agentRuns = stampedRuns.map((r) => ({ ...r, name: r.name || kindLabel(r.kind as AgentKind) }));
+  const failedRuns = new Set(agentRuns.filter((r) => r.status === "error").map((r) => runKey(r.traceId, r.name)));
   const ringRows = ring.filter((r) => RING_RECENT_KINDS.has(r.kind ?? "chat")).map(ringToRecent);
   const covered = new Set<string>();
   for (const row of ringRows) if (row.traceId) covered.add(runKey(row.traceId, row.name));
   for (const r of running) if (r.liveTraceId && r.name) covered.add(runKey(r.liveTraceId, r.name));
   return [
     ...ringRows.map((row) =>
-      row.traceId && statusByRun.get(runKey(row.traceId, row.name)) === "error" ? { ...row, status: "error" } : row,
+      row.traceId && failedRuns.has(runKey(row.traceId, row.name)) ? { ...row, status: "error" } : row,
     ),
-    ...agentRuns.filter((r) => !covered.has(runKey(r.traceId, r.name))).map(agentRunToRecent),
+    ...capRepeatedFailures(agentRuns.filter((r) => !covered.has(runKey(r.traceId, r.name)))).map(agentRunToRecent),
   ];
+}
+
+/** Rows arrive newest first, so the newest failures of a name stay. */
+function capRepeatedFailures(rows: RecentAgentRunRow[]): RecentAgentRunRow[] {
+  const failures = new Map<string, number>();
+  return rows.filter((r) => {
+    if (r.status !== "error") return true;
+    const seen = failures.get(r.name) ?? 0;
+    failures.set(r.name, seen + 1);
+    return seen < MAX_FAILED_ROWS_PER_NAME;
+  });
 }
 
 // NB: mirror of the client `kindLabels` map in views/agents-page.ts — a new

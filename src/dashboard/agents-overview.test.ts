@@ -582,6 +582,50 @@ describe("assembleAgentsOverview recent, ring kinds", () => {
     expect(o.recent.map((r) => r.name).sort()).toEqual(["Synthesis page: x", "consolidation-gardener"]);
   });
 
+  test("a run failing every tick shows a few rows, not the whole list", async () => {
+    // A goal whose send fails is picked up again on every tick.
+    const failures = Array.from({ length: 12 }, (_, i) =>
+      agentRunRow({ kind: "scheduled_task", traceId: `t${i}`, name: "Goal reminder: x", status: "error", startedAt: 9000 - i }),
+    );
+    const o = await assembleAgentsOverview(deps({
+      getRecentAgentRuns: async () => [
+        ...failures,
+        agentRunRow({ traceId: "ok1", name: "Wiki digest: w", startedAt: 100 }),
+        agentRunRow({ traceId: "ok2", name: "Wiki digest: w", startedAt: 90 }),
+        agentRunRow({ traceId: "ok3", name: "Wiki digest: w", startedAt: 80 }),
+        agentRunRow({ traceId: "ok4", name: "Wiki digest: w", startedAt: 70 }),
+      ],
+    }), NOW);
+    // The newest failures stay; a name's ordinary runs are all history and are not capped.
+    expect(named(o, "Goal reminder: x").map((r) => r.traceId)).toEqual(["t0", "t1", "t2"]);
+    expect(named(o, "Wiki digest: w")).toHaveLength(4);
+  });
+
+  test("two same-named runs under one trace: an error on either turns the row red, in either order", async () => {
+    const ring = () => [run({ kind: "scheduled_task", name: "Same", traceId: "tick" })];
+    const ok = agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Same", status: "ok" });
+    const bad = agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Same", status: "error" });
+    for (const rows of [[ok, bad], [bad, ok]]) {
+      const o = await assembleAgentsOverview(deps({ getCompletedRing: ring, getRecentAgentRuns: async () => rows }), NOW);
+      expect(named(o, "Same").map((r) => r.status)).toEqual(["error"]);
+    }
+  });
+
+  test("a task with no title is one row, under the kind's label", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "scheduled_task", traceId: "tick" })],
+      getRecentAgentRuns: async () => [agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "" })],
+    }), NOW);
+    expect(o.recent.map((r) => r.name)).toEqual(["Scheduled task"]);
+  });
+
+  test("a span with no name at all still lists under the kind's label, and never throws", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getRecentAgentRuns: async () => [agentRunRow({ kind: "digest", name: null as unknown as string })],
+    }), NOW);
+    expect(o.recent.map((r) => r.name)).toEqual(["Wiki digest"]);
+  });
+
   test("a degraded span source costs its rows, not the ring's or the page", async () => {
     const o = await assembleAgentsOverview(deps({
       getCompletedRing: () => [run({ kind: "capture", name: "from the ring", traceId: "x" })],

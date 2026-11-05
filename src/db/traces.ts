@@ -105,6 +105,23 @@ export async function updateSpan(id: string, params: UpdateSpanParams): Promise<
   `;
 }
 
+/**
+ * Mark a run's stamped span failed after it finished ok: a capture's root finishes
+ * before its ingest, a drain's before its fallback drafts. Without this the row reads
+ * red only while the ring holds it. A span already in error keeps its own message.
+ */
+export async function markAgentRunFailed(traceId: string, name: string, error: string): Promise<void> {
+  const sql = getDb();
+  await sql`
+    UPDATE traces SET
+      status = 'error',
+      attributes = attributes || ${sql.json({ error: jsonbSafeText(error) })}
+    WHERE trace_id = ${traceId}
+      AND attributes->>'agentName' = ${jsonbSafeText(name)}
+      AND status <> 'error'
+  `;
+}
+
 export async function getTrace(traceId: string): Promise<SpanRow[]> {
   const sql = getDb();
   const rows = await sql`

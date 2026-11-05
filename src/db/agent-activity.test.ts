@@ -4,6 +4,7 @@ import { saveSpan } from "./traces.ts";
 import { getRecentAgentRuns, getRecentAgentTraces, getRecentExtractorUsage } from "./agent-activity.ts";
 import { getDb } from "./client.ts";
 import { Tracer } from "../tracing/tracer.ts";
+import { createJobStore } from "../summaries/job-store.ts";
 import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 
 setupTestDb();
@@ -282,5 +283,74 @@ describe("getRecentAgentRuns", () => {
     expect((await runsOf(bot, 2)).map((r) => r.name)).toEqual(["newer"]);
     const limited = await getRecentAgentRuns(1);
     expect(limited).toHaveLength(1);
+  });
+});
+
+describe("a run that fails after its span finished ok", () => {
+  const rowsOf = async (traceId: string) =>
+    (await getDb()`SELECT status, attributes FROM traces WHERE trace_id = ${traceId} AND attributes ? 'agentKind'`) as unknown as {
+      status: string;
+      attributes: Record<string, unknown>;
+    }[];
+  async function until(traceId: string, status: string) {
+    for (let i = 0; i < 50; i++) {
+      const [row] = await rowsOf(traceId);
+      if (row?.status === status) return row;
+      await Bun.sleep(20);
+    }
+    return (await rowsOf(traceId))[0];
+  }
+  const store = createJobStore<"pending" | "complete" | "error", { videoId: string }>({
+    subsystem: "test",
+    label: "Late",
+    initialStatus: "pending",
+  });
+
+  async function jobWithFinishedRoot(title: string) {
+    const id = store.createJob({ videoId: "v", title, url: "u" });
+    const tracer = new Tracer("capture:youtube", { botName: "testbot" });
+    const run = store.attachRun(id, { traceId: tracer.traceId });
+    finishAgentRunTrace(tracer, run, "ok", { inputTokens: 5 });
+    await until(tracer.traceId, "ok");
+    return { id, tracer };
+  }
+
+  test("a failed job marks its stamped span, so the row stays red after a restart", async () => {
+    const { id, tracer } = await jobWithFinishedRoot("ingest fails");
+    store.failJob(id, "ingest refused");
+    const row = await until(tracer.traceId, "error");
+    expect(row!.status).toBe("error");
+    expect(row!.attributes).toMatchObject({ error: "ingest refused", inputTokens: 5, agentName: "Late: ingest fails" });
+  });
+
+  test("a finished job leaves its span ok", async () => {
+    const { id, tracer } = await jobWithFinishedRoot("all fine");
+    store.completeJob(id, "s", "c");
+    await Bun.sleep(60);
+    expect((await rowsOf(tracer.traceId))[0]!.status).toBe("ok");
+  });
+
+  test("only the run's own span is marked, not a sibling in the same trace", async () => {
+    const { id, tracer } = await jobWithFinishedRoot("named");
+    const sibling = new Tracer("task:briefing", { botName: "testbot", traceId: tracer.traceId, parentId: crypto.randomUUID() });
+    finishAgentRunTrace(sibling, { kind: "scheduled_task", name: "Sibling" }, "ok");
+    for (let i = 0; i < 50 && (await rowsOf(tracer.traceId)).length < 2; i++) await Bun.sleep(20);
+    store.failJob(id, "boom");
+    await until(tracer.traceId, "error");
+    await Bun.sleep(60);
+    const rows = await rowsOf(tracer.traceId);
+    expect(rows.find((r) => r.attributes.agentName === "Sibling")!.status).toBe("ok");
+    expect(rows.find((r) => r.attributes.agentName === "Late: named")!.status).toBe("error");
+  });
+
+  test("a span already in error keeps its own message", async () => {
+    const id = store.createJob({ videoId: "v", title: "model failed", url: "u" });
+    const tracer = new Tracer("capture:youtube", { botName: "testbot" });
+    const run = store.attachRun(id, { traceId: tracer.traceId });
+    finishAgentRunTrace(tracer, run, "error", { error: "the model's own error" });
+    await until(tracer.traceId, "error");
+    store.failJob(id, "wrapped message");
+    await Bun.sleep(60);
+    expect((await rowsOf(tracer.traceId))[0]!.attributes.error).toBe("the model's own error");
   });
 });
