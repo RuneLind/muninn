@@ -7,7 +7,7 @@ import { z } from "zod";
 
 /** Changes only by hand, with the prompt. A new value restarts part (2): its day,
  *  its answer window and the figures read only this version's lines. */
-export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.4";
+export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.5";
 /** The frozen prompt's date: part (2) replays answers given after it. */
 export const DECISION_TRIAGE_PROMPT_FROZEN_ON = "2026-11-05";
 

@@ -25,6 +25,8 @@ How to choose:
 
 - Prefer the verdict the facts can carry. A card whose text argues for one choice, on a reversible matter, is DEFAULT however much text it has.
 - Flag a card (ASK_OWNER or ASK_OTHER) when the owner would likely have something to add, not merely pick: the recommendation rests on something unverified, the choices are close, the card asks for a check nobody has done, the recommendation conflicts with a decision or with the code, or the matter is hard to undo. Do not flag a card only because it is important.
+- ASK_OWNER needs a reason the facts show, not taste in general. On the owner's own tools, notes and workflow, a reasoned recommendation on a reversible matter is DEFAULT, even when the owner could have an opinion.
+- A card that turns on a business or legal rule, how a product should behave for its users, production data, or another team's system or process needs knowledge the code and commits do not hold. Unless the facts settle it, that card is ASK_OTHER, also when its recommendation reads clear and when the owner is the one who would pass it on.
 - If the facts contradict the card's premise, say so in why. Being stale can make a card VOID, or can make it need the owner.
 - An unclosedHint is a mechanical reading of free prose, not a ruling. It may have caught a word inside a condition. Read the whole decisionLog beside it before you trust it. A hint with only a word and no decision is the weakest kind.
 - answers hold what people said earlier. A not-sure answer, a text-only answer or an answer to since-changed wording decides nothing by itself, but its text is evidence.
