@@ -18,13 +18,13 @@ export function write(root: string, rel: string, text: string): void {
   writeFileSync(abs, text);
 }
 
-/** Commit everything at an ISO time; returns the sha. */
-export function commitAt(cwd: string, iso: string, subject: string): string {
+/** Commit everything at an ISO time (the author's own when given); returns the sha. */
+export function commitAt(cwd: string, iso: string, subject: string, authorIso = iso): string {
   const res = Bun.spawnSync(["git", "-c", "user.name=T", "-c", "user.email=t@example.com", "add", "-A"], { cwd, env: { PATH: process.env.PATH ?? "", HOME: cwd } });
   if (res.exitCode !== 0) throw new Error(res.stderr.toString());
   const c = Bun.spawnSync(["git", "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-m", subject], {
     cwd,
-    env: { PATH: process.env.PATH ?? "", HOME: cwd, GIT_AUTHOR_DATE: iso, GIT_COMMITTER_DATE: iso },
+    env: { PATH: process.env.PATH ?? "", HOME: cwd, GIT_AUTHOR_DATE: authorIso, GIT_COMMITTER_DATE: iso },
   });
   if (c.exitCode !== 0) throw new Error(c.stderr.toString());
   return git(cwd, "rev-parse", "HEAD");

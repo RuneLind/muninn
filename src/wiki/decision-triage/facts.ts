@@ -29,7 +29,8 @@ import { extractNextMoves, waitOwnerFrom, type PageNextMoves, type WaitOwner } f
 import { splitFrontmatter, WIKILINK_WITH_LABEL_RE } from "../page-text.ts";
 import { normalizeRelPath } from "../rel-path.ts";
 import { extractMarkdownLinks, extractWikilinks, parseFrontmatter, readPlanStatus, resolveMarkdownTargets, wikiPageStem, type WikiIndex } from "../store.ts";
-import { cardTokens, cutLine, type GitResult, type GitRun, type ResolvedRepo } from "./git.ts";
+import { cardTokens, cutLine, failureOf, type GitResult, type GitRun, type ResolvedRepo } from "./git.ts";
+import type { SearchFailure } from "./schema.ts";
 
 export const CODE_LINES_PER_CARD = 40;
 export const SUBJECTS_PER_REPO = 30;
@@ -41,6 +42,9 @@ const ANSWER_BODY_CHARS = 2000;
 /** How close to the moment an answer counts as the answer being replayed: a
  *  question's label reads what its author settled on within ten minutes. */
 const LEFT_OUT_WINDOW_MS = 10 * 60_000;
+/** A rendered sha's length: git's `%h` follows the packed object count, so a `gc`
+ *  would change it and with it the message and its digest. */
+const SHA_CHARS = 10;
 
 /** The card a fact gatherer may know of: the replay file's fields it needs, and
  *  no label. `commit` and `answeredAt` are null for tonight's read. */
@@ -60,16 +64,30 @@ export interface ReplayCard extends CardRef {
   replayable: true;
 }
 
+/** A file read from a commit that failed, as distinct from a file not in it. */
+export class GitReadFailed extends Error {
+  constructor(readonly failure: SearchFailure) {
+    super(`git could not read a file: ${failure}`);
+  }
+}
+
+export interface LinkedFrom {
+  relPath: string;
+  date: string | null;
+}
+
 export interface WikiView {
   root: string;
   /** The commit being read, or null for today's working tree. */
   commit: string | null;
   cutMs: number | null;
+  /** Null when the file is not there. A commit's read throws {@link GitReadFailed}. */
   readPage(relPath: string): Promise<string | null>;
   readLog(): Promise<string | null>;
   /** When the commit being read was made; null for today's tree. */
   madeAt(): Promise<string | null>;
-  linkers(relPath: string): Promise<{ relPath: string; date: string | null }[]>;
+  /** The linkers read; `failed` when some could not be, so the rows may be short. */
+  linkers(relPath: string): Promise<{ rows: LinkedFrom[]; failed?: SearchFailure }>;
 }
 
 const dayOf = (ms: number | undefined | null) => (ms ? new Date(ms).toISOString().slice(0, 10) : null);
@@ -83,11 +101,12 @@ export function liveView(index: WikiIndex, readFile: (abs: string) => Promise<st
     readPage: (rel) => readFile(`${index.root}/${rel}`),
     readLog: () => readFile(`${index.root}/log.md`),
     madeAt: async () => null,
-    linkers: async (rel) =>
-      (index.backlinks.get(normalizeRelPath(rel)) ?? []).filter((back) => back !== "log.md").slice(0, LINKERS_MAX).map((back) => {
+    linkers: async (rel) => ({
+      rows: (index.backlinks.get(normalizeRelPath(rel)) ?? []).filter((back) => back !== "log.md").slice(0, LINKERS_MAX).map((back) => {
         const meta = index.resolveRelPath(back);
         return { relPath: meta?.relPath ?? back, date: dayOf(meta?.gitTouchedMs ?? meta?.mtimeMs) };
       }),
+    }),
   };
 }
 
@@ -116,7 +135,9 @@ export function commitView(root: string, commit: string, cutMs: number, git: Git
   if (!isCommitId(commit)) throw new Error(`not a commit id: ${commit}`);
   const show = async (rel: string) => {
     const res = await git(root, ["show", `${commit}:./${rel}`]);
-    return res.ok ? res.stdout : null;
+    if (res.ok) return res.stdout;
+    if (/^fatal: path '.*' (does not exist in|exists on disk, but not in) /m.test(res.stderr ?? "")) return null;
+    throw new GitReadFailed(failureOf(res));
   };
   return {
     root,
@@ -131,17 +152,26 @@ export function commitView(root: string, commit: string, cutMs: number, git: Git
     },
     linkers: async (rel) => {
       const hits = await git(root, ["-c", "core.quotepath=off", "grep", "-I", "-l", "-i", "-F", "-e", wikiPageStem(rel), commit, "--"], { maxLines: LINKER_CANDIDATES_MAX });
-      const out: { relPath: string; date: string | null }[] = [];
+      let failed = grepFailure(hits);
+      const rows: LinkedFrom[] = [];
       for (const line of hits.stdout.split("\n")) {
-        if (out.length === LINKERS_MAX) break;
+        if (rows.length === LINKERS_MAX) break;
         const hit = line.slice(commit.length + 1);
         if (!hit || hit === rel || hit === "log.md" || !/\.mdx?$/i.test(hit)) continue;
-        const text = await show(hit);
+        let text: string | null;
+        try {
+          text = await show(hit);
+        } catch (err) {
+          if (!(err instanceof GitReadFailed)) throw err;
+          failed ??= err.failure;
+          continue;
+        }
         if (text === null || !namesPage(text, hit, rel)) continue;
         const dated = await git(root, ["log", "-1", "--format=%cs", commit, "--", hit]);
-        out.push({ relPath: hit, date: dated.stdout.trim() || null });
+        if (!dated.ok) failed ??= failureOf(dated);
+        rows.push({ relPath: hit, date: dated.stdout.trim() || null });
       }
-      return out;
+      return { rows, ...(failed ? { failed } : {}) };
     },
   };
 }
@@ -184,22 +214,35 @@ export interface PageFacts {
   asOf?: string;
   status: string | null;
   decisionLog: { id: string; state: string; struck: boolean; text: string }[];
-  linkedFrom: { relPath: string; date: string | null }[];
+  linkedFrom: LinkedFrom[];
   logEntries: string[];
   prReferences: string[];
+  /** Git could not read these lists: a list named here is short or empty for that
+   *  reason. Absent when both were read. */
+  searchFailed?: { linkedFrom?: SearchFailure; logEntries?: SearchFailure };
 }
 
 export async function gatherPageFacts(read: PageRead, view: WikiView): Promise<PageFacts> {
   const { page } = read;
   const asOf = await view.madeAt();
+  const linkers = await view.linkers(read.relPath);
+  const searchFailed: NonNullable<PageFacts["searchFailed"]> = linkers.failed ? { linkedFrom: linkers.failed } : {};
+  let log: string | null = null;
+  try {
+    log = await view.readLog();
+  } catch (err) {
+    if (!(err instanceof GitReadFailed)) throw err;
+    searchFailed.logEntries = err.failure;
+  }
   return {
     relPath: read.relPath,
     ...(asOf ? { asOf } : {}),
     status: read.status,
     decisionLog: page.entries.map((e) => ({ id: e.id, state: page.states.get(e.id)?.kind ?? "open", struck: e.dim, text: e.text })),
-    linkedFrom: await view.linkers(read.relPath),
-    logEntries: logEntriesNaming(await view.readLog(), read.relPath),
+    linkedFrom: linkers.rows,
+    logEntries: logEntriesNaming(log, read.relPath),
     prReferences: read.prRefs,
+    ...(Object.keys(searchFailed).length > 0 ? { searchFailed } : {}),
   };
 }
 
@@ -273,14 +316,11 @@ export interface RepoCodeFact {
   code?: { token: string; grep: string[]; capped?: boolean; pathLastChanged?: string; searchFailed?: SearchFailure }[];
 }
 
-/** Why a search has no result, as distinct from a result of nothing. Fixed words:
- *  git's stderr names paths, and this goes to the model. */
-export type SearchFailure = "timed out" | "git error";
+/** `git grep` exits 1 when nothing matched; any other exit, or none, is a failure. */
+const grepFailure = (res: GitResult): SearchFailure | undefined => (res.ok || res.exitCode === 1 ? undefined : failureOf(res));
 
-const failureOf = (res: GitResult): SearchFailure => (res.timedOut ? "timed out" : "git error");
-
-/** `git grep` exits 1 with an empty stderr when nothing matched. */
-const grepFailure = (res: GitResult): SearchFailure | undefined => (res.ok || (!res.timedOut && !res.stderr?.trim()) ? undefined : failureOf(res));
+/** A `%H %cs %s` line with its sha at the rendered length. */
+const shortShaLine = (line: string) => cutLine(line.replace(/^[0-9a-f]+/, (sha) => sha.slice(0, SHA_CHARS)));
 
 export interface CardFacts {
   relPath: string;
@@ -334,34 +374,35 @@ async function repoFacts(
 ): Promise<RepoCodeFact> {
   const { fact, dir, branch } = repo;
   if (!dir || !branch) return { repo: fact.repo, found: false, ...(fact.reason ? { notFoundBecause: fact.reason } : {}) };
-  const out: RepoCodeFact = { repo: fact.repo, found: true, ref: fact.ref!, tipDate: fact.tipDate!, ...(fact.fetch ? { fetch: fact.fetch } : {}) };
-  // The branch's own tip then: walking every parent can land on a feature commit
-  // dated before the moment and merged after it. What this tip reaches was merged
-  // by then, so the reads below walk every parent. A commit made before the moment
-  // and pushed after it cannot be told apart.
+  const shape = (tipDate?: string): RepoCodeFact => ({ repo: fact.repo, found: true, ref: fact.ref!, ...(tipDate ? { tipDate } : {}), ...(fact.fetch ? { fetch: fact.fetch } : {}) });
+  // The tip then: --first-parent keeps a feature commit dated before the moment and
+  // merged after it out, and what this tip reaches was merged by then, so the reads
+  // below walk every parent. It takes the wrong side of a pull-merge or a foxtrot,
+  // where main is the second parent: a commit on main before the cut can drop out of
+  // `code` and `subjectsSinceCard`. Three real repos hold that shape (20, 13 and 1
+  // merges on the first-parent chain), with 0 of the 98 baseline rows hit. It goes
+  // stale and never leaks, the safe side for a held-out judge. A commit made before
+  // the moment and pushed after it cannot be told apart.
   let rev = `refs/remotes/origin/${branch}`;
-  if (cutMs !== null) {
+  let out: RepoCodeFact;
+  if (cutMs === null) {
+    out = { ...shape(fact.tipDate), ...(fact.searchFailed ? { searchFailed: fact.searchFailed } : {}) };
+  } else {
+    // Nothing of today's tip read reaches a past moment, neither its date nor its failure.
     const then = await git(dir, ["rev-list", "-1", "--first-parent", `--before=${new Date(cutMs).toISOString()}`, rev, "--"]);
-    if (!then.ok) {
-      const { tipDate: _unknown, ...rest } = out;
-      return { ...rest, searchFailed: failureOf(then) };
-    }
+    if (!then.ok) return { ...shape(), searchFailed: failureOf(then) };
     const sha = then.stdout.trim();
-    if (!sha) return { ...out, tipDate: "none at that time", subjectsSinceCard: [], code: [] };
+    if (!sha) return { ...shape("none at that time"), subjectsSinceCard: [], code: [] };
     rev = sha;
     const dated = await git(dir, ["log", "-1", "--format=%cI", rev, "--"]);
-    if (dated.ok) out.tipDate = dated.stdout.trim();
-    else {
-      delete out.tipDate;
-      out.searchFailed = failureOf(dated);
-    }
+    out = dated.ok ? shape(dated.stdout.trim()) : { ...shape(), searchFailed: failureOf(dated) };
   }
   if (added === "none") out.subjectsSinceCard = [];
   else if (added !== "lookup failed") {
-    const log = await git(dir, ["log", `-n${SUBJECTS_PER_REPO + 1}`, "--format=%h %cs %s", `--since=${added.date}`, rev, "--"]);
+    const log = await git(dir, ["log", `-n${SUBJECTS_PER_REPO + 1}`, "--format=%H %cs %s", `--since=${added.date}`, rev, "--"]);
     if (log.ok) {
       const lines = log.stdout.split("\n").filter(Boolean);
-      out.subjectsSinceCard = lines.slice(0, SUBJECTS_PER_REPO).map(cutLine);
+      out.subjectsSinceCard = lines.slice(0, SUBJECTS_PER_REPO).map(shortShaLine);
       if (lines.length > SUBJECTS_PER_REPO) out.subjectsCapped = true;
     } else out.searchFailed = failureOf(log);
   }
@@ -376,8 +417,8 @@ async function repoFacts(
     let pathLastChanged: string | undefined;
     let searchFailed = grepFailure(hits);
     if (/[/.]/.test(token)) {
-      const last = await git(dir, ["log", "-1", "--format=%h %cs %s", rev, "--", token]);
-      if (last.ok && last.stdout.trim()) pathLastChanged = cutLine(last.stdout.trim());
+      const last = await git(dir, ["log", "-1", "--format=%H %cs %s", rev, "--", token]);
+      if (last.ok && last.stdout.trim()) pathLastChanged = shortShaLine(last.stdout.trim());
       // A URL such as `/admin/run` is a fine token and no path git can look up.
       else if (!last.ok && !/outside repository|Invalid path/i.test(last.stderr ?? "")) searchFailed ??= failureOf(last);
     }

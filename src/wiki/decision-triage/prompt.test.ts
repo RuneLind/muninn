@@ -48,9 +48,9 @@ describe("a replay batch holds one wiki moment", () => {
     }
   });
 
-  test("the same commit shares a call and a page slot", () => {
+  test("the same commit at the same cut shares a call and a page slot", () => {
     const a = item("O1", EARLY, "aaaaaaa", "2026-10-02T09:00:10Z");
-    const b = item("O2", EARLY, "aaaaaaa", "2026-10-02T09:00:40Z");
+    const b = item("O2", EARLY, "aaaaaaa", "2026-10-02T09:00:10.000Z");
     const { batches } = buildBatches("w", [a, b]);
     expect(batches).toHaveLength(1);
     const { pages, cards } = parsed(batches[0]!.prompt);
@@ -59,9 +59,19 @@ describe("a replay batch holds one wiki moment", () => {
   });
 
   test("one commit, two pages: one call, two slots", () => {
-    const { batches } = buildBatches("w", [item("O1", EARLY, "aaaaaaa", "2026-10-02T09:00:10Z"), item("O2", page("plans/q.mdx", "Q TEXT", "2026-10-01T10:00:00.000Z"), "aaaaaaa", "2026-10-02T09:00:40Z")]);
+    const { batches } = buildBatches("w", [item("O1", EARLY, "aaaaaaa", "2026-10-02T09:00:10Z"), item("O2", page("plans/q.mdx", "Q TEXT", "2026-10-01T10:00:00.000Z"), "aaaaaaa", "2026-10-02T09:00:10Z")]);
     expect(batches).toHaveLength(1);
     expect(parsed(batches[0]!.prompt).pages.map((p) => p.relPath)).toEqual(["plans/p.mdx", "plans/q.mdx"]);
+  });
+
+  test("one commit, answers a second apart: two calls, since a card's code facts run to its own cut", () => {
+    const { batches } = buildBatches("w", [item("O1", EARLY, "aaaaaaa", "2026-10-02T09:00:00Z"), item("O2", EARLY, "aaaaaaa", "2026-10-02T09:00:01Z")]);
+    expect(batches.map((b) => b.items.map((i) => i.gathered.ref.id))).toEqual([["O1"], ["O2"]]);
+  });
+
+  test("one cut, two commits: two calls, since a page reads as of its own commit", () => {
+    const { batches } = buildBatches("w", [item("O1", EARLY, "aaaaaaa", "2026-10-02T09:00:00Z"), item("O2", LATE, "bbbbbbb", "2026-10-02T09:00:00Z")]);
+    expect(batches.map((b) => b.items.map((i) => i.gathered.ref.id))).toEqual([["O1"], ["O2"]]);
   });
 
   test("one commit, answers days apart: two calls, since a card's code facts run to its own moment", () => {
@@ -174,7 +184,7 @@ describe("tonight's message", () => {
 });
 
 test("the prompt says a failed search and a failed history read are not absence", () => {
-  expect(TRIAGE_SYSTEM_PROMPT).toContain("searchFailed");
+  expect(TRIAGE_SYSTEM_PROMPT).toContain("searchFailed, on a token, a repo or a page");
   expect(TRIAGE_SYSTEM_PROMPT).toContain("never read it as absent");
   expect(TRIAGE_SYSTEM_PROMPT).toContain('"lookup failed"');
   expect(TRIAGE_SYSTEM_PROMPT).toContain('addedCommit "none"');

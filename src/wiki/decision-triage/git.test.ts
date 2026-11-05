@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { cardTokens, cutLine, defaultBranch, findRepo, isSafeRepoName, originBasename, parseRepoRoots, realGit, resolveRepo } from "./git.ts";
+import { cardTokens, cutLine, defaultBranch, findRepo, isSafeRepoName, originBasename, parseRepoRoots, realGit, resolveRepo, type GitResult, type GitRun } from "./git.ts";
 import { commitAt, git, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 
 const temp = () => testTempDirSync(path.join(tmpdir(), "triage-git-"));
@@ -108,6 +108,62 @@ test("the runner stops at maxLines, and lines are cut at 300", async () => {
   expect(cutLine("x".repeat(400)).length).toBe(301);
 });
 
+test("an exact count of lines is not capped; one line more is", async () => {
+  const dir = temp();
+  git(dir, "init", "-q");
+  write(dir, "a.txt", "needle 1\nneedle 2\nneedle 3\n");
+  commitAt(dir, "2026-10-01T10:00:00Z", "three");
+  const exact = await realGit(dir, ["grep", "-n", "-F", "-e", "needle", "HEAD", "--"], { maxLines: 3 });
+  expect(exact.capped).toBeUndefined();
+  expect(exact.stdout.trim().split("\n")).toHaveLength(3);
+  const over = await realGit(dir, ["grep", "-n", "-F", "-e", "needle", "HEAD", "--"], { maxLines: 2 });
+  expect(over.capped).toBe(true);
+  expect(over.exitCode).toBeUndefined();
+  expect(over.stdout.split("\n")).toHaveLength(2);
+});
+
+test("the runner reports git's exit code: 1 on no match, 0 on a match", async () => {
+  const dir = temp();
+  git(dir, "init", "-q");
+  write(dir, "a.txt", "needle\n");
+  commitAt(dir, "2026-10-01T10:00:00Z", "one");
+  expect(await realGit(dir, ["grep", "-F", "-e", "absent", "HEAD", "--"])).toEqual({ ok: false, stdout: "", exitCode: 1 });
+  expect((await realGit(dir, ["grep", "-F", "-e", "needle", "HEAD", "--"])).exitCode).toBe(0);
+});
+
+test("a fetch that failed says so in fixed words: git's stderr never reaches the fact", async () => {
+  const root = temp();
+  const dir = path.join(root, "code");
+  repoWithOrigin(dir, path.join(root, "bare"), "code");
+  write(dir, "a.txt", "one\n");
+  commitAt(dir, "2026-10-01T10:00:00Z", "first");
+  pushMain(dir);
+  const failing = (res: GitResult): GitRun => (cwd, args, opts) => (args[0] === "fetch" ? Promise.resolve(res) : realGit(cwd, args, opts));
+  const fetchOf = async (res: GitResult) => (await resolveRepo("code", parseRepoRoots(root), failing(res), { fetch: true })).fact.fetch;
+  expect(await fetchOf({ ok: false, stdout: "", stderr: "fatal: unable to access '/home/someone/secret-path'", exitCode: 128 })).toEqual({ failed: "git error" });
+  expect(await fetchOf({ ok: false, stdout: "", stderr: "fatal: another line entirely", exitCode: 128 })).toEqual({ failed: "git error" });
+  expect(await fetchOf({ ok: false, stdout: "", stderr: "git fetch timed out", timedOut: true })).toEqual({ failed: "timed out" });
+});
+
+test("a tip that could not be read tonight marks the repo, with no date", async () => {
+  const root = temp();
+  const dir = path.join(root, "code");
+  repoWithOrigin(dir, path.join(root, "bare"), "code");
+  write(dir, "a.txt", "one\n");
+  commitAt(dir, "2026-10-01T10:00:00Z", "first");
+  pushMain(dir);
+  const failing = (res: GitResult): GitRun => (cwd, args, opts) => (args[0] === "log" ? Promise.resolve(res) : realGit(cwd, args, opts));
+  const timedOut = await resolveRepo("code", parseRepoRoots(root), failing({ ok: false, stdout: "", timedOut: true }), { fetch: false });
+  expect(timedOut.fact.found).toBe(true);
+  expect(timedOut.fact.searchFailed).toBe("timed out");
+  expect("tipDate" in timedOut.fact).toBe(false);
+  const broken = await resolveRepo("code", parseRepoRoots(root), failing({ ok: false, stdout: "", stderr: "fatal: bad object", exitCode: 128 }), { fetch: false });
+  expect(broken.fact.searchFailed).toBe("git error");
+  const read = await resolveRepo("code", parseRepoRoots(root), realGit, { fetch: false });
+  expect(read.fact.searchFailed).toBeUndefined();
+  expect(read.fact.tipDate).toStartWith("2026-10-01");
+});
+
 test("originBasename takes ssh and https forms, with .git stripped once", () => {
   expect(originBasename("git@github.com:o/repo.git\n")).toBe("repo");
   expect(originBasename("https://github.com/o/repo")).toBe("repo");
@@ -158,6 +214,15 @@ describe("the runner's bound holds whatever the child does", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(res).toMatchObject({ ok: true, capped: true, stdout: "a\nb" });
     expect(res.timedOut).toBeUndefined();
+  });
+
+  test("a git killed with nothing on stderr has an exit code that is not git's no-match", async () => {
+    const { bin } = fakeGit("kill -9 $$");
+    const res = await realGit(bin, ["grep", "x"]);
+    expect(res.ok).toBe(false);
+    expect(res.stderr).toBeUndefined();
+    expect(res.exitCode).toBeNumber();
+    expect(res.exitCode).not.toBe(1);
   });
 
   test("the argv and the allowlisted environment stay as they were", async () => {

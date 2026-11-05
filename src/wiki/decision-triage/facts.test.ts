@@ -17,6 +17,11 @@ import { replayLogPath } from "./log.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, replayKey, type CardLine, type LogLine } from "./schema.ts";
 import { commitAt, git, mergeAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 
+const TIMED_OUT = { ok: false, stdout: "", stderr: "git grep timed out after 15000 ms", timedOut: true };
+const GIT_ERROR = { ok: false, stdout: "", stderr: "fatal: bad object" };
+/** Real git, except calls `when` picks. */
+const failing = (when: (args: readonly string[]) => boolean, res: Awaited<ReturnType<GitRun>> = GIT_ERROR): GitRun => (cwd, args, opts) => (when(args) ? Promise.resolve(res) : realGit(cwd, args, opts));
+
 const PAGE = (extra = "") => `---
 title: Testplan
 plan_status: in-flight
@@ -235,10 +240,6 @@ describe("the ref's tip then follows the branch, not a merged-in feature", () =>
 });
 
 describe("a search that failed is not a search that found nothing", () => {
-  const TIMED_OUT = { ok: false, stdout: "", stderr: "git grep timed out after 15000 ms", timedOut: true };
-  const GIT_ERROR = { ok: false, stdout: "", stderr: "fatal: bad object" };
-  /** Real git, except calls `when` picks. */
-  const failing = (when: (args: readonly string[]) => boolean, res: Awaited<ReturnType<GitRun>> = GIT_ERROR): GitRun => (cwd, args, opts) => (when(args) ? Promise.resolve(res) : realGit(cwd, args, opts));
   const codeRepo = (g: Awaited<ReturnType<typeof asOf>>["gathered"]) => g.card.repos.find((r) => r.repo === "code")!;
 
   test("a grep that timed out marks its token", async () => {
@@ -256,7 +257,7 @@ describe("a search that failed is not a search that found nothing", () => {
   test("git's own no-match is exit 1 with nothing on stderr, and marks nothing", async () => {
     const dir = path.join(codeRoot, "code");
     const none = await realGit(dir, ["grep", "-I", "-n", "-F", "-e", "no_such_token_anywhere", "HEAD", "--"]);
-    expect(none).toEqual({ ok: false, stdout: "" });
+    expect(none).toEqual({ ok: false, stdout: "", exitCode: 1 });
     const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "grep" && a.includes("needle_token"), none));
     expect(codeRepo(gathered).code!.some((c) => c.token === "needle_token")).toBe(false);
   });
@@ -330,6 +331,114 @@ describe("a search that failed is not a search that found nothing", () => {
     expect(codeRepo(gathered).subjectsSinceCard).toEqual([]);
   });
 
+  describe("on the page", () => {
+    const pageAt = async (viewGit: GitRun, root = wiki, commit = first) => {
+      const view = commitView(root, commit, CUT, viewGit);
+      const read = readPageText("plans/testplan.mdx", PAGE());
+      return gatherPageFacts(read, view);
+    };
+    const LOG_READ = (a: readonly string[]) => a[0] === "show" && a[1] === `${first}:./log.md`;
+    const LINKER_GREP = (a: readonly string[]) => a[2] === "grep";
+
+    test("a linker search that timed out marks linkedFrom, and leaves the log alone", async () => {
+      const page = await pageAt(failing(LINKER_GREP, TIMED_OUT));
+      expect(page.linkedFrom).toEqual([]);
+      expect(page.searchFailed).toEqual({ linkedFrom: "timed out" });
+      expect(page.logEntries).toHaveLength(1);
+    });
+
+    test("a linker search killed with nothing on stderr marks linkedFrom", async () => {
+      const page = await pageAt(failing(LINKER_GREP, { ok: false, stdout: "", exitCode: 137 }));
+      expect(page.searchFailed).toEqual({ linkedFrom: "git error" });
+    });
+
+    test("no linker found is exit 1, and marks nothing", async () => {
+      const page = await pageAt(failing(LINKER_GREP, { ok: false, stdout: "", exitCode: 1 }));
+      expect(page.linkedFrom).toEqual([]);
+      expect(page.searchFailed).toBeUndefined();
+    });
+
+    test("a linker file that could not be read marks linkedFrom and keeps what was read", async () => {
+      const page = await pageAt(failing((a) => a[0] === "show" && a[1] === `${second}:./notes/late-linker.md`, TIMED_OUT), wiki, second);
+      expect(page.searchFailed).toEqual({ linkedFrom: "timed out" });
+      expect(page.linkedFrom.map((l) => l.relPath)).toEqual(["notes/linker.md"]);
+    });
+
+    test("a linker's date that could not be read marks linkedFrom and keeps the row undated", async () => {
+      const page = await pageAt(failing((a) => a[0] === "log" && a.includes("--format=%cs"), TIMED_OUT));
+      expect(page.searchFailed).toEqual({ linkedFrom: "timed out" });
+      expect(page.linkedFrom).toEqual([{ relPath: "notes/linker.md", date: null }]);
+    });
+
+    test("a log read that timed out marks logEntries, and leaves the linkers alone", async () => {
+      const page = await pageAt(failing(LOG_READ, TIMED_OUT));
+      expect(page.logEntries).toEqual([]);
+      expect(page.searchFailed).toEqual({ logEntries: "timed out" });
+      expect(page.linkedFrom).toHaveLength(1);
+    });
+
+    test("a log read that git refused marks logEntries with fixed words, never its stderr", async () => {
+      const page = await pageAt(failing(LOG_READ, { ok: false, stdout: "", stderr: "fatal: /some/path: bad object", exitCode: 128 }));
+      expect(page.searchFailed).toEqual({ logEntries: "git error" });
+      expect(JSON.stringify(page)).not.toContain("/some/path");
+    });
+
+    test("no log.md in the commit is an empty list with no mark, on disk since or not", async () => {
+      const root = testTempDirSync(path.join(tmpdir(), "triage-nolog-"));
+      git(root, "init", "-q");
+      write(root, "plans/testplan.mdx", PAGE());
+      const sha = commitAt(root, "2026-10-01T10:00:00Z", "no log");
+      for (const onDisk of [false, true]) {
+        if (onDisk) write(root, "log.md", "## [2026-10-01] plan | [[testplan]]\n");
+        const page = await pageAt(realGit, root, sha);
+        expect(page.logEntries).toEqual([]);
+        expect(page.searchFailed).toBeUndefined();
+      }
+    });
+
+    test("nothing failed: the page facts hold no mark at all", async () => {
+      expect("searchFailed" in (await pageAt(realGit))).toBe(false);
+    });
+  });
+
+  describe("on the repo", () => {
+    const TODAYS_TIP = "2026-10-07";
+
+    test("a grep killed with nothing on stderr marks its token: only exit 1 is no match", async () => {
+      const { gathered } = await asOf(first, CUT, [], failing((a) => a[0] === "grep" && a.includes("needle_token"), { ok: false, stdout: "", exitCode: 137 }));
+      expect(codeRepo(gathered).code!.find((c) => c.token === "needle_token")).toEqual({ token: "needle_token", grep: [], searchFailed: "git error" });
+    });
+
+    test("a failed read of the tip then never carries today's tip, whichever read failed", async () => {
+      for (const when of [(a: readonly string[]) => a[0] === "rev-list", (a: readonly string[]) => a[0] === "log" && a.includes("--format=%cI") && !a.includes("--follow")]) {
+        const { gathered } = await asOf(first, CUT, [], failing(when));
+        expect(codeRepo(gathered).searchFailed).toBe("git error");
+        expect(JSON.stringify(codeRepo(gathered))).not.toContain(TODAYS_TIP);
+      }
+    });
+
+    test("tonight's failed tip read reaches the card as a mark with no date", async () => {
+      const view = { ...commitView(wiki, first, CUT, realGit), commit: null, cutMs: null };
+      const read = readPageText("plans/testplan.mdx", PAGE());
+      const failed: GatherContext = { ...ctx(), repo: (name) => resolveRepo(name, parseRepoRoots(codeRoot), failing((a) => a[0] === "log" && a.includes("--format=%cI") && !a.includes("--follow"), TIMED_OUT), { fetch: false }) };
+      const { card } = await gatherCardFacts({ wiki: "w", relPath: read.relPath, id: "O1", answeredAt: null, commit: null }, read, view, failed);
+      const repo = card.repos.find((r) => r.repo === "code")!;
+      expect(repo.searchFailed).toBe("timed out");
+      expect("tipDate" in repo).toBe(false);
+      expect(repo.code!.length).toBeGreaterThan(0);
+    });
+
+    test("today's failed tip read says nothing about a past moment's own read", async () => {
+      const failed: GatherContext = { ...ctx(), repo: (name) => resolveRepo(name, parseRepoRoots(codeRoot), failing((a) => a[0] === "log", TIMED_OUT), { fetch: false }) };
+      const view = commitView(wiki, first, CUT, realGit);
+      const read = readPageText("plans/testplan.mdx", PAGE());
+      const { card } = await gatherCardFacts({ wiki: "w", relPath: read.relPath, id: "O1", answeredAt: new Date(CUT).toISOString(), commit: first }, read, view, failed);
+      const repo = card.repos.find((r) => r.repo === "code")!;
+      expect(repo.tipDate).toStartWith("2026-10-03");
+      expect(repo.searchFailed).toBeUndefined();
+    });
+  });
+
   test("adding an attribute to the tag later does not move the commit that added the card", async () => {
     const root = testTempDirSync(path.join(tmpdir(), "triage-added-"));
     git(root, "init", "-q");
@@ -343,6 +452,118 @@ describe("a search that failed is not a search that found nothing", () => {
     const { card: facts } = await gatherCardFacts({ wiki: "w", relPath: "p.mdx", id: "O1", answeredAt: new Date(CUT).toISOString(), commit: edited }, read, view, ctx());
     expect(facts.addedCommit).toMatchObject({ sha: added, subject: "the card" });
   });
+});
+
+describe("the dates a past moment reads", () => {
+  test("a linker's date comes from the commit read, not from where the branch went after", async () => {
+    const root = testTempDirSync(path.join(tmpdir(), "triage-linkdate-"));
+    git(root, "init", "-q");
+    write(root, "plans/testplan.mdx", PAGE());
+    write(root, "notes/linker.md", "Se [[testplan]].\n");
+    const before = commitAt(root, "2026-10-01T10:00:00Z", "the link");
+    write(root, "notes/linker.md", "Se [[testplan]], igjen.\n");
+    commitAt(root, "2026-10-06T10:00:00Z", "edited after the moment");
+    const { rows } = await commitView(root, before, CUT, realGit).linkers("plans/testplan.mdx");
+    expect(rows).toEqual([{ relPath: "notes/linker.md", date: "2026-10-01" }]);
+  });
+
+  test("a commit's moment is when it was committed, not when it was authored", async () => {
+    const root = testTempDirSync(path.join(tmpdir(), "triage-madeat-"));
+    git(root, "init", "-q");
+    write(root, "a.md", "x\n");
+    const sha = commitAt(root, "2026-10-04T10:00:00Z", "rebased", "2026-09-20T10:00:00Z");
+    expect(await commitView(root, sha, CUT, realGit).madeAt()).toBe("2026-10-04T10:00:00.000Z");
+  });
+});
+
+describe("a pull-merge's wrong side of the first parent", () => {
+  test("a commit on main before the cut drops out: stale, and nothing past the cut comes in", async () => {
+    const root = testTempDirSync(path.join(tmpdir(), "triage-foxtrot-"));
+    const dir = path.join(root, "src", "foxtrot");
+    repoWithOrigin(dir, path.join(root, "bare"), "foxtrot");
+    write(dir, "base.ts", "base\n");
+    commitAt(dir, "2026-10-01T10:00:00Z", "base");
+    git(dir, "switch", "-q", "-c", "local");
+    write(dir, "local.ts", "local\n");
+    commitAt(dir, "2026-10-02T10:00:00Z", "local work");
+    git(dir, "switch", "-q", "main");
+    write(dir, "landed.ts", "const landed_token = 1;\n");
+    commitAt(dir, "2026-10-03T10:00:00Z", "landed on main before the moment");
+    // The pull: main becomes the merge's second parent.
+    git(dir, "switch", "-q", "local");
+    mergeAt(dir, "2026-10-06T10:00:00Z", "main", "pull after the moment");
+    git(dir, "push", "-q", "origin", "HEAD:refs/heads/main");
+    git(dir, "fetch", "-q", "origin", "main:refs/remotes/origin/main");
+
+    const view = commitView(wiki, first, CUT, realGit);
+    const read = readPageText("plans/testplan.mdx", `---\ntitle: T\nrepos: [foxtrot]\n---\n# T\n\n<Question id="O1" choices="A|B">\nSkal \`landed_token\` bort?\n</Question>\n`);
+    const { card } = await gatherCardFacts({ wiki: "w", relPath: read.relPath, id: "O1", answeredAt: new Date(CUT).toISOString(), commit: first }, read, view, { ...ctx(), repo: (name) => resolveRepo(name, parseRepoRoots(path.join(root, "src")), realGit, { fetch: false }) });
+    const repo = card.repos[0]!;
+    expect(repo.tipDate).toStartWith("2026-10-02");
+    expect(repo.code).toEqual([]);
+    const text = JSON.stringify(repo);
+    expect(text).not.toContain("landed on main");
+    expect(text).not.toContain("pull after the moment");
+  });
+});
+
+describe("facts under a gc", () => {
+  /** Unreachable packed blobs: past 16,384 packed objects git's auto abbreviation is 8. */
+  const packMany = (dir: string) => {
+    const stream = Array.from({ length: 16_400 }, (_, i) => `blob\ndata ${String(i).length}\n${i}\n`).join("");
+    const res = Bun.spawnSync(["git", "fast-import", "--quiet"], { cwd: dir, stdin: Buffer.from(stream), env: { PATH: process.env.PATH ?? "", HOME: dir } });
+    if (res.exitCode !== 0) throw new Error(res.stderr.toString());
+  };
+  const abbrev = async (dir: string) => (await realGit(dir, ["log", "-1", "--format=%h", "HEAD"])).stdout.trim().length;
+
+  test("a real gc that moves git's auto abbreviation leaves the facts and the digest byte-identical", async () => {
+    const root = testTempDirSync(path.join(tmpdir(), "triage-gc-"));
+    const wikiDir = path.join(root, "wiki");
+    const rootsDir = path.join(root, "src");
+    const codeDir = path.join(rootsDir, "gc-code");
+    git(root, "init", "-q", wikiDir);
+    const rel = "plans/gc.mdx";
+    write(wikiDir, rel, `---\ntitle: T\nrepos: [gc-code]\n---\n# T\n\n<Question id="O1" choices="A|B">\nSkal \`gc_token\` og \`src/gc.ts\` bort?\n</Question>\n`);
+    write(wikiDir, "notes/l.md", "Se [[gc]].\n");
+    write(wikiDir, "log.md", "## [2026-10-01] plan | [[gc]]\n");
+    const sha = commitAt(wikiDir, "2026-10-01T10:00:00Z", "the card");
+    repoWithOrigin(codeDir, path.join(root, "bare"), "gc-code");
+    write(codeDir, "src/gc.ts", "const gc_token = 1;\n");
+    commitAt(codeDir, "2026-10-02T10:00:00Z", "the code");
+    pushMain(codeDir);
+    for (const dir of [wikiDir, codeDir]) packMany(dir);
+
+    const gather = async () => {
+      const out: string[] = [];
+      const lines: string[] = [];
+      const base = commitView(wikiDir, sha, CUT, realGit);
+      const read = readPageText(rel, (await base.readPage(rel))!);
+      const gatherCtx: GatherContext = { ...ctx(), repo: (name) => resolveRepo(name, parseRepoRoots(rootsDir), realGit, { fetch: false }) };
+      for (const [view, ref] of [
+        [base, { wiki: "w", relPath: rel, id: "O1", answeredAt: new Date(CUT).toISOString(), commit: sha }],
+        [{ ...base, commit: null, cutMs: null }, { wiki: "w", relPath: rel, id: "O1", answeredAt: null, commit: null }],
+      ] as const) {
+        const gathered = await gatherCardFacts(ref, read, view, gatherCtx);
+        const page = await gatherPageFacts(read, view);
+        const repo = gathered.card.repos[0]!;
+        lines.push(...repo.subjectsSinceCard!, repo.code!.find((c) => c.token === "src/gc.ts")!.pathLastChanged!);
+        out.push(JSON.stringify({ gathered, page }), replayDigest({ gathered, page }));
+      }
+      return { out, lines };
+    };
+
+    const before = await gather();
+    expect(await abbrev(codeDir)).toBe(8);
+    expect(await abbrev(wikiDir)).toBe(8);
+    for (const dir of [wikiDir, codeDir]) git(dir, "gc", "-q", "--prune=now");
+    expect(await abbrev(codeDir)).toBe(7);
+    expect(await abbrev(wikiDir)).toBe(7);
+    const after = await gather();
+
+    expect(after.out).toEqual(before.out);
+    expect(before.lines.length).toBeGreaterThan(0);
+    for (const line of before.lines) expect(line).toMatch(/^[0-9a-f]{10} 2026-10-02 the code$/);
+  }, 30_000);
 });
 
 describe("answers as facts", () => {
@@ -428,7 +649,7 @@ describe("what links a page tonight", () => {
 
   test("log.md is not a linker, as at a commit: its entries reach the card as logEntries", async () => {
     const view = liveView(index(["log.md", "notes/a.md"]), async () => null);
-    expect((await view.linkers("plans/p.mdx")).map((l) => l.relPath)).toEqual(["notes/a.md"]);
+    expect((await view.linkers("plans/p.mdx")).rows.map((l) => l.relPath)).toEqual(["notes/a.md"]);
   });
 
   test("a today's view names no moment", async () => {
@@ -437,7 +658,7 @@ describe("what links a page tonight", () => {
 });
 
 describe("what links a page at a commit", () => {
-  const linkers = async (relPath: string) => (await commitView(linkWiki, linkCommit, CUT, realGit).linkers(relPath)).map((l) => l.relPath);
+  const linkers = async (relPath: string) => (await commitView(linkWiki, linkCommit, CUT, realGit).linkers(relPath)).rows.map((l) => l.relPath);
 
   test("every link form, and nothing else", async () => {
     expect((await linkers("plans/teststem.mdx")).sort()).toEqual([
@@ -552,9 +773,147 @@ describe("replay's mechanics, with no score", () => {
     const a = card("aaaaaaa", pageFacts("2026-10-01T00:00:00.000Z", "one"));
     const b = card("bbbbbbb", pageFacts("2026-10-06T00:00:00.000Z", "two"));
     // The old message's shape: both cards pointing at the first page's slot.
-    const prompt = `x\n\n${JSON.stringify({ pages: [{ page: "p1", ...a.page }], cards: [{ card: "c1", page: "p1" }, { card: "c2", page: "p1" }] })}`;
+    const asOf = "2026-10-02T09:00:00.000Z";
+    const prompt = `x\n\n${JSON.stringify({ pages: [{ page: "p1", ...a.page }], cards: [{ card: "c1", page: "p1", asOf }, { card: "c2", page: "p1", asOf }] })}`;
     expect(messageMoments({ items: [a, b], prompt })).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 1, twoMoments: true });
-    expect(messageMoments({ items: [a], prompt: `x\n\n${JSON.stringify({ pages: [{ page: "p1", ...a.page }], cards: [{ card: "c1", page: "p1" }] })}` })).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 0, twoMoments: false });
+    expect(messageMoments({ items: [a], prompt: `x\n\n${JSON.stringify({ pages: [{ page: "p1", ...a.page }], cards: [{ card: "c1", page: "p1", asOf }] })}` })).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 0, twoMoments: false });
+  });
+
+  describe("the counts read the rendered message", () => {
+    const facts = (asOf: string) => ({ relPath: "plans/p.mdx", asOf, status: null, decisionLog: [], linkedFrom: [], logEntries: [], prReferences: [] });
+    const ONE = facts("2026-10-01T00:00:00.000Z");
+    const entry = (commit: string, answeredAt: string, page = ONE) => ({ gathered: { ref: { wiki: "w", relPath: "plans/p.mdx", id: "O1", answeredAt, commit }, questionHash: "h", recommendation: null, card: { relPath: "plans/p.mdx", id: "O1" } as never, codeFacts: false }, page });
+    const message = (pages: ReturnType<typeof facts>[], cards: { page: string; asOf: string }[]) => `x\n\n${JSON.stringify({ pages: pages.map((p, i) => ({ page: `p${i + 1}`, ...p })), cards: cards.map((c, i) => ({ card: `c${i + 1}`, ...c })) })}`;
+    const AT_1 = "2026-10-02T09:01:00.000Z";
+    const AT_9 = "2026-10-02T09:09:00.000Z";
+
+    test("one commit, two cuts eight minutes apart", () => {
+      const out = messageMoments({ items: [entry("aaaaaaa", AT_1), entry("aaaaaaa", AT_9)], prompt: message([ONE], [{ page: "p1", asOf: AT_1 }, { page: "p1", asOf: AT_9 }]) });
+      expect(out).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 0, twoMoments: true });
+    });
+
+    test("one cut, two commits, whose dates read alike", () => {
+      const out = messageMoments({ items: [entry("aaaaaaa", AT_1), entry("bbbbbbb", AT_1)], prompt: message([ONE], [{ page: "p1", asOf: AT_1 }, { page: "p1", asOf: AT_1 }]) });
+      expect(out.twoMoments).toBe(true);
+    });
+
+    test("one cut and one commit id, on page slots of two dates", () => {
+      const other = facts("2026-10-06T00:00:00.000Z");
+      const out = messageMoments({ items: [entry("aaaaaaa", AT_1), entry("aaaaaaa", AT_1, other)], prompt: message([ONE, other], [{ page: "p1", asOf: AT_1 }, { page: "p2", asOf: AT_1 }]) });
+      expect(out).toEqual({ pageSlots: 2, cardsOnAnotherMoment: 0, twoMoments: true });
+    });
+
+    test("a card rendered with a cut that is not its own is on another moment", () => {
+      const out = messageMoments({ items: [entry("aaaaaaa", AT_1)], prompt: message([ONE], [{ page: "p1", asOf: AT_9 }]) });
+      expect(out).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 1, twoMoments: false });
+    });
+
+    test("one card, its own cut: nothing to count", () => {
+      expect(messageMoments({ items: [entry("aaaaaaa", AT_1)], prompt: message([ONE], [{ page: "p1", asOf: AT_1 }]) })).toEqual({ pageSlots: 1, cardsOnAnotherMoment: 0, twoMoments: false });
+    });
+  });
+
+  describe("two answers on one commit, minutes apart", () => {
+    let burstWiki: string;
+    let burstCommit: string;
+    let burstRoots: string;
+    const O1_AT = "2026-10-05T09:01:00Z";
+    const O2_AT = "2026-10-05T09:09:00Z";
+
+    beforeAll(() => {
+      const root = testTempDirSync(path.join(tmpdir(), "triage-burst-"));
+      burstRoots = path.join(root, "src");
+      burstWiki = path.join(root, "wiki");
+      git(path.dirname(burstWiki), "init", "-q", burstWiki);
+      write(burstWiki, "plans/burst.mdx", `---\ntitle: T\nrepos: [burst-code]\n---\n# T\n\n<Question id="O1" choices="A|B">\nSkal vi?\n</Question>\n\n<Question id="O2" choices="A|B">\nSkal de?\n</Question>\n`);
+      burstCommit = commitAt(burstWiki, "2026-10-01T10:00:00Z", "the cards");
+      const code = path.join(burstRoots, "burst-code");
+      repoWithOrigin(code, path.join(root, "bare"), "burst-code");
+      write(code, "a.txt", "one\n");
+      commitAt(code, "2026-10-03T10:00:00Z", "before the answers");
+      write(code, "a.txt", "two\n");
+      commitAt(code, "2026-10-05T09:05:00Z", "between the answers");
+      pushMain(code);
+    });
+
+    const CARDS = () => [
+      { wiki: "w", relPath: "plans/burst.mdx", id: "O1", answeredAt: O1_AT, commit: burstCommit, hashMatches: true, replayable: true as const },
+      { wiki: "w", relPath: "plans/burst.mdx", id: "O2", answeredAt: O2_AT, commit: burstCommit, hashMatches: true, replayable: true as const },
+    ];
+    const burstDeps = () => deps({ roots: new Map([["w", burstWiki]]), repoRoots: burstRoots });
+
+    test("two calls, and the earlier card's message holds nothing from between them", async () => {
+      const gathered = await gatherReplay(CARDS(), burstDeps());
+      expect(replayCounts(gathered)).toMatchObject({ gathered: 2, batches: 2, pageSlots: 2, cardsOnAnotherMoment: 0, batchesWithTwoMoments: 0 });
+      const calls = replayBatches(gathered.items);
+      const earlier = calls.find((c) => c.batch.items[0]!.gathered.ref.id === "O1")!.batch.prompt;
+      const later = calls.find((c) => c.batch.items[0]!.gathered.ref.id === "O2")!.batch.prompt;
+      expect(earlier).toContain("before the answers");
+      expect(earlier).not.toContain("between the answers");
+      expect(earlier).not.toContain("2026-10-05T09:05");
+      expect(later).toContain("between the answers");
+    });
+
+    test("the dry run's counts see a call that holds both cuts", async () => {
+      const gathered = await gatherReplay(CARDS(), burstDeps());
+      const counts = replayCounts(gathered, (items) => [{ wiki: "w", batch: { items: [...items], prompt: renderBatch("w", items) } }]);
+      expect(counts.batches).toBe(1);
+      expect(counts.batchesWithTwoMoments).toBe(1);
+      expect(counts.cardsOnAnotherMoment).toBe(0);
+    });
+
+    test("the dry run's counts see a card rendered on another's cut and page", async () => {
+      const gathered = await gatherReplay(CARDS(), burstDeps());
+      const [a, b] = gathered.items;
+      const swapped = { ...b!, gathered: { ...b!.gathered, card: { ...b!.gathered.card, asOf: a!.gathered.card.asOf } } };
+      const counts = replayCounts(gathered, () => [{ wiki: "w", batch: { items: [a!, b!], prompt: renderBatch("w", [a!, swapped]) } }]);
+      expect(counts.cardsOnAnotherMoment).toBe(1);
+    });
+  });
+
+  describe("a read that failed in the replay's own setup", () => {
+    const CARD_AT = (commit: string, answeredAt = "2026-10-05T12:00:00Z") => ({ wiki: "w", relPath: "plans/testplan.mdx", id: "O1", answeredAt, commit, hashMatches: true, replayable: true as const });
+
+    test("a page read that timed out is that, not a page missing from the commit", async () => {
+      const gathered = await gatherReplay([CARD_AT(first)], deps({ git: failing((a) => a[0] === "show" && a[1] === `${first}:./plans/testplan.mdx`, TIMED_OUT) }));
+      expect(gathered.refused.map((r) => r.reason)).toEqual(["the page could not be read: timed out"]);
+    });
+
+    test("a page truly not in the commit still says so", async () => {
+      const gathered = await gatherReplay([{ ...CARD_AT(first), relPath: "plans/not-there.mdx" }], deps());
+      expect(gathered.refused.map((r) => r.reason)).toEqual(["the page is not in that commit"]);
+    });
+
+    test("every commit check timing out refuses as that, never as commits not in the repo", async () => {
+      const run = gatherReplay([CARD_AT(first)], deps({ git: failing((a) => a[0] === "cat-file", TIMED_OUT) }));
+      await expect(run).rejects.toBeInstanceOf(ReplayRefused);
+      await expect(run).rejects.toThrow("git could not read 1 of w's 1 commit(s)");
+      await expect(gatherReplay([CARD_AT(first)], deps({ git: failing((a) => a[0] === "cat-file", TIMED_OUT) }))).rejects.not.toThrow("are in");
+    });
+
+    test("one commit check timing out refuses that card with its own reason", async () => {
+      const gathered = await gatherReplay([CARD_AT(first), CARD_AT(second, "2026-10-08T12:00:00Z")], deps({ git: failing((a) => a[0] === "cat-file" && a[2] === `${second}^{commit}`, TIMED_OUT) }));
+      expect(gathered.items).toHaveLength(1);
+      expect(gathered.refused.map((r) => r.reason)).toEqual(["the commit could not be read: timed out"]);
+    });
+
+    test("the dry run counts the cards holding a failed read, and none when nothing failed", async () => {
+      const clean = replayCounts(await gatherReplay([CARD_AT(first)], deps()));
+      expect(clean.searchFailures).toBe(0);
+      for (const when of [(a: readonly string[]) => a[0] === "grep" && a.includes("needle_token"), (a: readonly string[]) => a[0] === "show" && a[1] === `${first}:./log.md`, (a: readonly string[]) => a[0] === "rev-list", (a: readonly string[]) => a.includes("--follow")]) {
+        const counts = replayCounts(await gatherReplay([CARD_AT(first)], deps({ git: failing(when) })));
+        expect(counts.gathered).toBe(1);
+        expect(counts.searchFailures).toBe(1);
+      }
+    });
+
+    test("different errors from one failed read render one message", async () => {
+      const digestWith = async (stderr: string) => {
+        const g = await gatherReplay([CARD_AT(first)], deps({ git: failing((a) => a[0] === "show" && a[1] === `${first}:./log.md`, { ok: false, stdout: "", stderr, exitCode: 128 }) }));
+        return replayDigest(g.items[0]!);
+      };
+      expect(await digestWith("fatal: one /path/here")).toBe(await digestWith("fatal: another /path/there"));
+    });
   });
 
   describe("a kept verdict is one for this very message", () => {

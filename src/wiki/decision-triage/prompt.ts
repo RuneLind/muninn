@@ -28,7 +28,7 @@ How to choose:
 - If the facts contradict the card's premise, say so in why. Being stale can make a card VOID, or can make it need the owner.
 - An unclosedHint is a mechanical reading of free prose, not a ruling. It may have caught a word inside a condition. Read the whole decisionLog beside it before you trust it. A hint with only a word and no decision is the weakest kind.
 - answers hold what people said earlier. A not-sure answer, a text-only answer or an answer to since-changed wording decides nothing by itself, but its text is evidence.
-- A repo with found: false, a failed fetch or an old tipDate means the code facts are missing or stale. A code fact shows only the lines listed: a token with no entry was searched and not found, or the search budget ran out. searchFailed, on a token or a repo, means git could not run that search: it says nothing about whether the code exists, so never read it as absent. addedCommit "none" means the card is not committed yet; "lookup failed" means its history could not be read, so its age is unknown and subjectsSinceCard is missing, not empty. If your verdict rests on code the facts do not show, say so in why. Never claim code exists or is missing beyond what they show.
+- A repo with found: false, a failed fetch or an old tipDate means the code facts are missing or stale. A code fact shows only the lines listed: a token with no entry was searched and not found, or the search budget ran out. searchFailed, on a token, a repo or a page (where it names linkedFrom or logEntries), means git could not run that search: it says nothing about whether the code or the entries exist, so never read it as absent. addedCommit "none" means the card is not committed yet; "lookup failed" means its history could not be read, so its age is unknown and subjectsSinceCard is missing, not empty. If your verdict rests on code the facts do not show, say so in why. Never claim code exists or is missing beyond what they show.
 - prReferences are references only. You do not know their state. List in restsOnPrs any your verdict depends on.
 
 For each card also give:
@@ -54,13 +54,10 @@ export interface Batch {
 
 const pageKey = (i: number) => `p${i + 1}`;
 
-const MOMENT_BUCKET_MS = 10 * 60_000;
-
-/** One wiki moment: a commit, and answers close enough that a card's day-dated
- *  code facts read alike. Tonight is one moment. Cards just across a bucket's edge
- *  cost a call, never a leak. */
+/** One wiki moment: a commit and the exact cut, since a card's tip and subjects run
+ *  to its own cut, to the second. Tonight is one moment. */
 export function momentOf(ref: CardRef): string {
-  return ref.commit === null ? "" : `${ref.commit}\0${Math.floor(Date.parse(ref.answeredAt ?? "") / MOMENT_BUCKET_MS)}`;
+  return ref.commit === null ? "" : `${ref.commit}\0${Date.parse(ref.answeredAt ?? "")}`;
 }
 
 /** A batch's user message: its pages once each per moment, then its cards, numbered in order. */
@@ -85,9 +82,9 @@ export function soloChars(wiki: string, item: BatchItem): number {
   return renderBatch(wiki, [item]).length;
 }
 
-/** Items into calls, in order within each wiki moment, within both limits: no call
- *  holds text from a moment later than one of its cards. An item over the limit
- *  alone goes in `oversized` and in no call. */
+/** Items into calls, in order within each wiki moment, within both limits. A call
+ *  holds one commit and one cut, so nothing in it is later than any of its cards. An
+ *  item over the limit alone goes in `oversized` and in no call. */
 export function buildBatches(wiki: string, items: readonly BatchItem[], limits = { cards: CARDS_PER_CALL, chars: CHARS_PER_CALL }): { batches: Batch[]; oversized: BatchItem[] } {
   const batches: Batch[] = [];
   const oversized: BatchItem[] = [];

@@ -83,7 +83,7 @@ try {
         counts: res.counts,
         usage: res.run.usage,
         floor: res.run.floor,
-        repos: res.run.repos.map((r) => (r.found ? `${r.repo}: ${r.tipDate}, fetch ${typeof r.fetch === "object" ? "failed" : r.fetch}` : `${r.repo}: not found (${r.reason})`)),
+        repos: res.run.repos.map((r) => (r.found ? `${r.repo}: ${r.tipDate ?? `tip ${r.searchFailed}`}, fetch ${typeof r.fetch === "object" ? "failed" : r.fetch}` : `${r.repo}: not found (${r.reason})`)),
         wallSeconds: Math.round((Date.now() - started) / 100) / 10,
       },
       null,

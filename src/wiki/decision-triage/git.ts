@@ -9,7 +9,7 @@ import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { killProcessGroup } from "../commit.ts";
-import type { RepoFact } from "./schema.ts";
+import type { RepoFact, SearchFailure } from "./schema.ts";
 
 const GIT_TIMEOUT_MS = 15_000;
 export const GIT_FETCH_TIMEOUT_MS = 30_000;
@@ -19,12 +19,14 @@ export interface GitResult {
   ok: boolean;
   stdout: string;
   stderr?: string;
-  /** Output reached `maxLines` or the byte bound; the process was killed. An exact
-   *  `maxLines` of output reads as capped too: the facts carry this flag, and the
-   *  prompt is frozen. */
+  /** The code git exited with on its own: absent on a timeout, a cap's kill or a failed spawn. */
+  exitCode?: number;
+  /** Output ran past `maxLines` or the byte bound; the process was killed. */
   capped?: boolean;
   timedOut?: boolean;
 }
+
+export const failureOf = (res: GitResult): SearchFailure => (res.timedOut ? "timed out" : "git error");
 
 export type GitRun = (cwd: string, args: readonly string[], opts?: { timeoutMs?: number; maxLines?: number }) => Promise<GitResult>;
 
@@ -64,7 +66,7 @@ export const realGit: GitRun = async (cwd, args, opts = {}) => {
       const text = decoder.decode(value, { stream: true });
       out += text;
       for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) lines++;
-      if ((opts.maxLines !== undefined && lines >= opts.maxLines) || out.length > GIT_MAX_BYTES) {
+      if ((opts.maxLines !== undefined && lines > opts.maxLines) || out.length > GIT_MAX_BYTES) {
         capped = true;
         killProcessGroup(running);
         await reader.cancel().catch(() => {});
@@ -95,6 +97,7 @@ export const realGit: GitRun = async (cwd, args, opts = {}) => {
     ok: capped || (done?.code === 0),
     stdout: out,
     ...(errText ? { stderr: errText } : {}),
+    ...(done && !capped ? { exitCode: done.code } : {}),
     ...(capped ? { capped } : {}),
     ...(timedOut ? { timedOut } : {}),
   };
@@ -204,8 +207,9 @@ export async function resolveRepo(name: string, roots: RepoRoots, git: GitRun, o
   let fetch: RepoFact["fetch"] = "skipped";
   if (opts.fetch) {
     const res = await git(dir, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "origin", branch], { timeoutMs: GIT_FETCH_TIMEOUT_MS });
-    fetch = res.ok ? "ok" : { failed: res.timedOut ? "timed out" : cutLine((res.stderr ?? "").trim().split("\n")[0] ?? "") };
+    fetch = res.ok ? "ok" : { failed: failureOf(res) };
   }
   const tip = await git(dir, ["log", "-1", "--format=%cI", `refs/remotes/origin/${branch}`, "--"]);
-  return { dir, branch, fact: { repo: name, found: true, ref: `origin/${branch}`, tipDate: tip.stdout.trim(), fetch } };
+  const tipDate = tip.ok ? tip.stdout.trim() : "";
+  return { dir, branch, fact: { repo: name, found: true, ref: `origin/${branch}`, ...(tipDate ? { tipDate } : { searchFailed: failureOf(tip) }), fetch } };
 }

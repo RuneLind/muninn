@@ -12,11 +12,11 @@ import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { sha256 } from "../../gardener/util.ts";
-import { commitView, gatherCardFacts, isCommitId, gatherPageFacts, readPageText, type GatherContext, type PageFacts, type PageRead, type ReplayCard, type WikiView } from "./facts.ts";
-import { parseRepoRoots, type GitRun } from "./git.ts";
-import { buildBatches, CHARS_PER_CALL, momentOf, renderBatch, soloChars, type Batch, type BatchItem } from "./prompt.ts";
+import { commitView, gatherCardFacts, GitReadFailed, isCommitId, gatherPageFacts, readPageText, type GatherContext, type PageFacts, type PageRead, type ReplayCard, type WikiView } from "./facts.ts";
+import { failureOf, parseRepoRoots, type GitRun } from "./git.ts";
+import { buildBatches, CHARS_PER_CALL, renderBatch, soloChars, type Batch, type BatchItem } from "./prompt.ts";
 import { callBatch, noVerdictReason, overRss, repoResolver, verdictFields, withTimeout, type TriageModel } from "./run.ts";
-import { DECISION_TRIAGE_PROMPT_VERSION, replayKey, type CardLine, type LogLine, type RepoFact, type RunLine, type TriageUsage } from "./schema.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION, replayKey, type CardLine, type LogLine, type RepoFact, type RunLine, type SearchFailure, type TriageUsage } from "./schema.ts";
 
 const CARD_GATHER_TIMEOUT_MS = 90_000;
 /** A card left with no verdict gets this many more tries. */
@@ -56,7 +56,7 @@ export function replayDigest(item: BatchItem, promptVersion: string = DECISION_T
 export async function gatherReplay(cards: readonly ReplayCard[], deps: ReplayDeps): Promise<GatheredReplay> {
   if (!deps.repoRoots) throw new ReplayRefused("DECISION_TRIAGE_REPO_ROOTS is not set");
   const wikis = [...new Set(cards.map((c) => c.wiki))];
-  const lost = new Set<string>();
+  const lost = new Map<string, string>();
   for (const wiki of wikis) {
     const root = deps.roots.get(wiki);
     if (!root) throw new ReplayRefused(`no root for ${wiki}: run from a checkout that registers it, or pass --root ${wiki}=<path>`);
@@ -64,11 +64,18 @@ export async function gatherReplay(cards: readonly ReplayCard[], deps: ReplayDep
     if (!(await deps.git(root, ["rev-parse", "--git-dir"])).ok) throw new ReplayRefused(`${wiki}'s root ${root} is not a git repo`);
     const commits = [...new Set(cards.filter((c) => c.wiki === wiki && isCommitId(c.commit)).map((c) => c.commit))];
     const missing = new Set<string>();
+    const unread = new Map<string, SearchFailure>();
     for (const commit of commits) {
-      if (!(await deps.git(root, ["cat-file", "-e", `${commit}^{commit}`])).ok) missing.add(commit);
+      const res = await deps.git(root, ["cat-file", "-e", `${commit}^{commit}`]);
+      if (res.ok) continue;
+      if (/Not a valid object name/.test(res.stderr ?? "")) missing.add(commit);
+      else unread.set(commit, failureOf(res));
     }
-    if (commits.length > 0 && missing.size === commits.length) throw new ReplayRefused(`none of ${wiki}'s ${commits.length} commit(s) are in ${root}`);
-    for (const commit of missing) lost.add(`${wiki}\0${commit}`);
+    if (commits.length > 0 && missing.size + unread.size === commits.length) {
+      throw new ReplayRefused(unread.size > 0 ? `git could not read ${unread.size} of ${wiki}'s ${commits.length} commit(s) in ${root}: ${[...new Set(unread.values())].join(", ")}` : `none of ${wiki}'s ${commits.length} commit(s) are in ${root}`);
+    }
+    for (const commit of missing) lost.set(`${wiki}\0${commit}`, "the commit is not in this repo");
+    for (const [commit, failure] of unread) lost.set(`${wiki}\0${commit}`, `the commit could not be read: ${failure}`);
   }
   const resolver = repoResolver(parseRepoRoots(deps.repoRoots), deps.git, { fetch: true });
   const answers = new Map<string, WikiAnswerVersion[]>();
@@ -90,8 +97,9 @@ export async function gatherReplay(cards: readonly ReplayCard[], deps: ReplayDep
       out.refused.push({ card, reason: "the memory guard stopped the gather" });
       continue;
     }
-    if (lost.has(`${card.wiki}\0${card.commit}`)) {
-      out.refused.push({ card, reason: "the commit is not in this repo" });
+    const lostBecause = lost.get(`${card.wiki}\0${card.commit}`);
+    if (lostBecause) {
+      out.refused.push({ card, reason: lostBecause });
       continue;
     }
     try {
@@ -127,7 +135,7 @@ export async function gatherReplay(cards: readonly ReplayCard[], deps: ReplayDep
       }
       out.items.push({ gathered, page });
     } catch (err) {
-      out.refused.push({ card, reason: err instanceof Error ? err.message : String(err) });
+      out.refused.push({ card, reason: err instanceof GitReadFailed ? `the page could not be read: ${err.failure}` : err instanceof Error ? err.message : String(err) });
     }
   }
   out.repos = await resolver.facts();
@@ -152,13 +160,27 @@ export function replayBatches(items: readonly BatchItem[]): { wiki: string; batc
   return wikis.flatMap((wiki) => buildBatches(wiki, items.filter((i) => i.gathered.ref.wiki === wiki)).batches.map((batch) => ({ wiki, batch })));
 }
 
-/** Read from the rendered message: whether each card's page slot is the page that
- *  card's facts were gathered with, and whether the call mixes moments. */
+/** Read from the rendered message: whether each card carries its own cut and the page
+ *  its facts were gathered with, and whether the call mixes moments. The cut and the
+ *  page commit's date come from the message; the commit id is not rendered, so that
+ *  one comes from the item in the card's position. */
 export function messageMoments(batch: Batch): { pageSlots: number; cardsOnAnotherMoment: number; twoMoments: boolean } {
-  const { pages, cards } = JSON.parse(batch.prompt.slice(batch.prompt.indexOf("\n\n") + 2)) as { pages: ({ page: string } & PageFacts)[]; cards: { page: string }[] };
-  const slots = new Map(pages.map(({ page, ...facts }) => [page, JSON.stringify(facts)]));
-  const cardsOnAnotherMoment = batch.items.filter((item, i) => slots.get(cards[i]!.page) !== JSON.stringify(item.page)).length;
-  return { pageSlots: pages.length, cardsOnAnotherMoment, twoMoments: new Set(batch.items.map((i) => momentOf(i.gathered.ref))).size > 1 };
+  const { pages, cards } = JSON.parse(batch.prompt.slice(batch.prompt.indexOf("\n\n") + 2)) as { pages: ({ page: string } & PageFacts)[]; cards: { page: string; asOf: string }[] };
+  const slots = new Map(pages.map(({ page, ...facts }) => [page, facts]));
+  const moments = new Set<string>();
+  let cardsOnAnotherMoment = 0;
+  batch.items.forEach((item, i) => {
+    const card = cards[i]!;
+    const slot = slots.get(card.page);
+    moments.add(`${item.gathered.ref.commit}\0${card.asOf}\0${slot?.asOf}`);
+    if (Date.parse(card.asOf) !== Date.parse(item.gathered.ref.answeredAt ?? "") || JSON.stringify(slot) !== JSON.stringify(item.page)) cardsOnAnotherMoment++;
+  });
+  return { pageSlots: pages.length, cardsOnAnotherMoment, twoMoments: moments.size > 1 };
+}
+
+/** Does this card's message say a read failed? */
+function holdsFailedRead({ gathered, page }: BatchItem): boolean {
+  return page.searchFailed !== undefined || gathered.card.addedCommit === "lookup failed" || gathered.card.repos.some((r) => r.searchFailed || r.code?.some((c) => c.searchFailed));
 }
 
 /** What `--dry-run` reports: counts only. */
@@ -176,15 +198,17 @@ export interface ReplayCounts {
   totalChars: number;
   cardsOnAnotherMoment: number;
   batchesWithTwoMoments: number;
+  /** Cards whose message marks a read git could not do. */
+  searchFailures: number;
   repos: { found: string[]; notFound: { repo: string; reason?: string }[]; fetchFailed: string[] };
 }
 
-export function replayCounts(g: GatheredReplay): ReplayCounts {
+export function replayCounts(g: GatheredReplay, batchesOf: (items: readonly BatchItem[]) => { batch: Batch }[] = replayBatches): ReplayCounts {
   const all = [...g.items, ...g.oversized];
   const sizes = all.map((i) => soloChars(i.gathered.ref.wiki, i)).sort((a, b) => a - b);
   const reasons: Record<string, number> = {};
   for (const r of g.refused) reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
-  const batches = replayBatches(g.items).map(({ batch }) => ({ chars: batch.prompt.length, ...messageMoments(batch) }));
+  const batches = batchesOf(g.items).map(({ batch }) => ({ chars: batch.prompt.length, ...messageMoments(batch) }));
   return {
     gathered: all.length,
     refused: g.refused.length,
@@ -198,6 +222,7 @@ export function replayCounts(g: GatheredReplay): ReplayCounts {
     totalChars: batches.reduce((n, b) => n + b.chars, 0),
     cardsOnAnotherMoment: batches.reduce((n, b) => n + b.cardsOnAnotherMoment, 0),
     batchesWithTwoMoments: batches.filter((b) => b.twoMoments).length,
+    searchFailures: all.filter(holdsFailedRead).length,
     repos: {
       found: g.repos.filter((r) => r.found).map((r) => r.repo),
       notFound: g.repos.filter((r) => !r.found).map((r) => ({ repo: r.repo, ...(r.reason ? { reason: r.reason } : {}) })),

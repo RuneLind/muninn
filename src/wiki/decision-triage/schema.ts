@@ -7,7 +7,7 @@ import { z } from "zod";
 
 /** Changes only by hand, with the prompt. A new value restarts part (2): its day,
  *  its answer window and the figures read only this version's lines. */
-export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.3";
+export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.4";
 /** The frozen prompt's date: part (2) replays answers given after it. */
 export const DECISION_TRIAGE_PROMPT_FROZEN_ON = "2026-11-05";
 
@@ -40,6 +40,10 @@ export interface TriageUsage {
   outputTokens?: number;
 }
 
+/** Why a read has no result, as distinct from a result of nothing. Fixed words: git's
+ *  stderr names paths and varies between runs, and this goes to the model. */
+export type SearchFailure = "timed out" | "git error";
+
 /** One repo as the run found it: the run line and every card's facts carry it. */
 export interface RepoFact {
   repo: string;
@@ -48,7 +52,9 @@ export interface RepoFact {
   reason?: string;
   ref?: string;
   tipDate?: string;
-  fetch?: "ok" | "skipped" | { failed: string };
+  fetch?: "ok" | "skipped" | { failed: SearchFailure };
+  /** Git could not read the tip, so there is no `tipDate`. */
+  searchFailed?: SearchFailure;
 }
 
 export interface FloorState {
