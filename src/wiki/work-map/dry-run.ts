@@ -128,7 +128,7 @@ function canonical(file: string): string {
  * other error counts as inside (unsure ⇒ refused). Not covered: a `..` after a
  * missing component (`canonical` joins the rest as text) and a hard link.
  */
-const inside = (root: string, file: string) => {
+export const isInsideDir = (root: string, file: string) => {
   try {
     const r = statSync(root);
     let cur = canonical(file);
@@ -151,7 +151,7 @@ const inside = (root: string, file: string) => {
 export function dryRunDeps(opts: DryRunOptions): WorkMapRunDeps {
   const root = path.resolve(opts.entry.root);
   for (const [flag, file] of [["--out", opts.out], ["--save-answer", opts.saveAnswer]] as const) {
-    if (file && inside(root, file)) throw new Error(`${flag} ${file} is inside the wiki root (or could not be resolved); the dry run writes nothing there`);
+    if (file && isInsideDir(root, file)) throw new Error(`${flag} ${file} is inside the wiki root (or could not be resolved); the dry run writes nothing there`);
   }
   const mapPath = path.join(root, WORK_MAP_FILE);
   const readOrNull = async (file: string) => {

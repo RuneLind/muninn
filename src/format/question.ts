@@ -606,6 +606,26 @@ export function closedQuestionIds(blocks: Block[]): Set<string> {
   return out;
 }
 
+/**
+ * The choice a card's body recommends, or null. Reads `**Recommendation:` and
+ * `**Anbefaling`, with the colon inside or outside the bold, outside code spans,
+ * and returns the choice the text after it opens with (the longest one, whole
+ * word, any case). Regexes stay in the function: `new RegExp` at module level
+ * would keep this file's weight in the browser bundles.
+ */
+export function parseRecommendation(body: string, choices: readonly string[]): string | null {
+  const text = body.normalize("NFC");
+  const marker = /\*\*(?:Recommendation|Anbefaling)(?::\*\*|\*\*:|:)/u.exec(maskCodeSpans(text));
+  if (!marker) return null;
+  const lead = text.slice(marker.index + marker[0].length).replace(/^[\s*_`«"'“‘(]+/u, "").toLowerCase();
+  const byLength = [...choices].sort((a, b) => b.length - a.length);
+  for (const choice of byLength) {
+    const c = choice.normalize("NFC").toLowerCase();
+    if (lead.startsWith(c) && !/^[\p{L}\p{N}_]/u.test(lead.slice(c.length))) return choice;
+  }
+  return null;
+}
+
 /** The text-surface lead line (Telegram, Slack, email): `Question O3`, or the
  *  bare word with no id. English, since those surfaces carry no wiki. */
 export function questionLeadText(attrs: Record<string, string>): string {

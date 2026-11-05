@@ -134,6 +134,7 @@ Pages and routes:
 - Stale check — the counts everywhere (PR 2b: `wiki-stale-summary.ts`, `wiki-stale-marks.ts`)
 - Stale check — the fix paths (PR 3: `stale-fix.ts`, `stale-fix-verdicts.ts`, Apply, Send to Gardener) [trap]
 - Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`) [trap]
+- Decision triage (`src/wiki/decision-triage/`, `DECISION_TRIAGE_REPO_ROOTS`)
 - Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 - `prRefs` — a derived index field [trap]
 - The rule (`computeRelated`, pure) [trap]

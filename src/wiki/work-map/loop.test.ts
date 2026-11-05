@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type { TriageLoopDeps } from "../decision-triage/loop-deps.ts";
 import type { WorkMapRunResult } from "./run.ts";
 import type { WorkMapState } from "./state.ts";
 import {
@@ -18,6 +19,82 @@ const MIN = 60_000;
 const MORNING = Date.parse("2026-10-20T05:00:00Z");
 
 afterEach(() => stopWorkMapLoop(10));
+
+describe("the decision triage's due check", () => {
+  function triageHarness(opts: { workMap?: WorkMapRunResult["outcome"][]; triage?: ("ok" | "partial" | "refused" | "failed")[]; state?: () => WorkMapState | null; wikis?: string[] } = {}) {
+    const base = harness({ ...(opts.workMap ? { outcomes: opts.workMap } : {}) });
+    const runs: { wiki: string; at: number }[] = [];
+    const checks: string[] = [];
+    const outcomes = [...(opts.triage ?? [])];
+    const triage: TriageLoopDeps = {
+      wikis: async (covered) => opts.wikis ?? [...covered],
+      beforeCheck: async (wiki) => void checks.push(wiki),
+      readState: async () => opts.state?.() ?? null,
+      run: async (wiki) => {
+        runs.push({ wiki, at: base.deps.now() });
+        return { outcome: outcomes.shift() ?? "ok" };
+      },
+    };
+    return { ...base, deps: { ...base.deps, triage }, triageRuns: runs, checks };
+  }
+  const config = { schedulerEnabled: true, workMapWikis: ["mimir"], workMapHour: 5, profile: "default" as const };
+
+  test("a failed work map does not cost the night", async () => {
+    const h = triageHarness({ workMap: ["failed"] });
+    startWorkMapLoop(config, { deps: h.deps });
+    await h.advance(WORK_MAP_TICK_MS);
+    expect(h.runs).toHaveLength(1);
+    expect(h.triageRuns.map((r) => r.wiki)).toEqual(["mimir"]);
+    expect(h.checks).toEqual(["mimir"]);
+  });
+
+  test("its own state decides: done within 20 h, twice failed since the hour, or before the hour", async () => {
+    const fresh = triageHarness({ state: () => ({ wiki: "mimir", lastSuccessAt: MORNING - HOUR, attempts: [] }) });
+    startWorkMapLoop(config, { deps: fresh.deps });
+    await fresh.advance(WORK_MAP_TICK_MS);
+    expect(fresh.runs).toHaveLength(1);
+    expect(fresh.triageRuns).toHaveLength(0);
+    await stopWorkMapLoop(10);
+
+    const failing = triageHarness({ state: () => ({ wiki: "mimir", attempts: [{ at: MORNING - MIN, outcome: "failed" }, { at: MORNING - 2 * MIN, outcome: "failed" }] }) });
+    startWorkMapLoop(config, { deps: failing.deps });
+    await failing.advance(WORK_MAP_TICK_MS);
+    expect(failing.triageRuns).toHaveLength(0);
+  });
+
+  test("a wiki outside its scope gets no check; a throw costs the work map nothing", async () => {
+    const out = triageHarness({ wikis: [] });
+    startWorkMapLoop(config, { deps: out.deps });
+    await out.advance(WORK_MAP_TICK_MS);
+    expect(out.runs).toHaveLength(1);
+    expect(out.triageRuns).toHaveLength(0);
+    await stopWorkMapLoop(10);
+
+    const thrower = triageHarness();
+    thrower.deps.triage!.readState = async () => {
+      throw new Error("boom");
+    };
+    startWorkMapLoop(config, { deps: thrower.deps });
+    await thrower.advance(WORK_MAP_TICK_MS);
+    expect(thrower.runs).toHaveLength(1);
+  });
+
+  test("a refused run retries at the next check", async () => {
+    const h = triageHarness({ triage: ["refused", "ok"] });
+    startWorkMapLoop(config, { deps: h.deps });
+    await h.advance(WORK_MAP_TICK_MS);
+    expect(h.triageRuns).toHaveLength(1);
+    await h.advance(HOUR + WORK_MAP_TICK_MS);
+    expect(h.triageRuns).toHaveLength(2);
+  });
+
+  test("no deps, no triage", async () => {
+    const h = harness();
+    startWorkMapLoop(config, { deps: h.deps });
+    await h.advance(WORK_MAP_TICK_MS);
+    expect(h.runs).toHaveLength(1);
+  });
+});
 
 /** A fake clock and timer queue: `advance` moves time and fires due timers. */
 function harness(opts: { outcomes?: WorkMapRunResult["outcome"][]; state?: () => WorkMapState | null; start?: number } = {}) {

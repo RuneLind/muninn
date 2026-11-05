@@ -311,6 +311,16 @@ export async function listWikiAnswerVersions(answerIds: readonly string[]): Prom
   return rows.map(rowToVersion);
 }
 
+/** Every version in one wiki, oldest first within each question: what a label and
+ *  a card's facts read, since {@link listLatestWikiAnswers} keeps only the latest. */
+export async function listWikiAnswerHistory(wiki: string, sql: Sql = getDb()): Promise<WikiAnswerVersion[]> {
+  const rows = await sql`
+    SELECT * FROM wiki_answers WHERE wiki = ${wiki}
+    ORDER BY rel_path, question_id, created_at, answer_id, version
+  `;
+  return rows.map(rowToVersion);
+}
+
 /** The last export batch of one page: the rows of its latest `exported_at`,
  *  the newest version per answer among them, oldest answer first (the order
  *  {@link listLatestWikiAnswers} uses, so a re-copy reads like the copy). Empty when

@@ -2328,6 +2328,35 @@ Rules a caller can get wrong from outside:
   - **Theme page (P3, `themeView` in `views/components/wiki-theme-page.ts`):** `paintEffort` picks it by the map's kind; `effortView` (the work map's page) is unchanged, so a work effort page renders byte-identically. It shows In short (`oneLine`, `takeaway`), Worth a look (each item's kind, the runner's `count` through the card's `needCountHtml`, every hub and its uncited sources; ✓ on the card hides an item here as on a work map), Read first, Where the sources disagree (only when stated), every hub (the card shows 4), the sources newest first by `createdDayOf` (undated last), and `weeklyStripHtml` over EVERY stored week (the card shows 8). The strip is drawn on the reader's clock (`now`), so the run's week reads as running only while it has not ended. The crumb names the theme's domain group (`themes[]`) instead of «Efforts»; the Connections pane lists every `related` theme as «Connected themes (N)» (the card shows 6), a retired one as retired and an unknown id as «no longer in the map», then a «Domain» section with the group's other themes; the footer and the confidence tooltip say theme. A retired id opens its retired view (last active, its stored weeks, its `members` and pages declaring it, and a sentence that says whether any in-window source still sits with it); the loading, error and no-map panes say theme and carry the «Themes» crumb when the listing's `workMap.kind` is `themes`, known before the map loads; an unknown id reads «no longer in the map», matched by name slug (`lookupEffort`, generic over both kinds). Acceptance: `wiki-theme-page.test.ts`, `e2e/wiki-theme-page.spec.ts` (with its contrast sweep of the two classes only the theme page paints).
   - **Dry run:** `bun scripts/work-map-dry-run.ts --wiki <name> --out <file> [--previous <file>] [--root <path>] [--save-answer <file>] [--answer <file>]` builds its own run config, keeps state in memory, reads the previous map from `--previous` (never the wiki root), refuses an output inside the wiki root by filesystem identity, not path spelling: the path is resolved link by link (a dangling link to where the write would land, at most 40 links), and it is inside when any existing ancestor has the root's `dev` and `ino`, so a case or NFD variant, a symlink and `/tmp` for `/private/tmp` all count, and any resolve error refuses the output. Not covered (a follow-up): a `..` after a component that does not exist yet (`missing/../link/x.json` skips `link`), and a hard link to a file inside the root. The dry run commits nothing. `--save-answer` stores the answer with its prompt and clock; `--answer` replays it at that clock without a model call and refuses when the digest no longer matches. Acceptance: `theme-map.test.ts`, the theme half of `schema-state.test.ts`, `dry-run.test.ts`, `listing.test.ts`, `wiki-work-map.test.ts`.
 
+## Decision triage (`src/wiki/decision-triage/`, `DECISION_TRIAGE_REPO_ROOTS`)
+
+Each night a tool-less model call reads every open `<Question>` with an id on the wikis in both `WORK_MAP_WIKIS` and `WIKI_ANSWER_WIKIS` (a `work` map only), and appends a verdict per card to `~/.muninn/decision-triage/<wiki>.jsonl`. It writes no page and closes nothing, and no reader shows a verdict yet (plan `muninn-wiki-decision-triage`, P2; the inbox is P3).
+
+| File | What it owns |
+|---|---|
+| `schema.ts` | the zod verdict, the two log lines, `DECISION_TRIAGE_PROMPT_VERSION` and its frozen date |
+| `git.ts` | the one way page text reaches git: the token and repo-name checks, `--literal-pathspecs`, the allowlisted env, the line and byte caps, origin matching, the default branch, the fetch |
+| `facts.ts` | `WikiView` (today's index, or one commit's tree), the page half and card half of the facts, live answers as of a moment |
+| `cards.ts` | which cards a night reads |
+| `prompt.ts` | the frozen system prompt, the batch message, the 25-card and 120k limits |
+| `run.ts` | one pass: repos first, the `ANSWERED` branch, the batches, the run line; `realDecisionTriageModel` and its `BotConfig` |
+| `log.ts` | the append and the tolerant read, the state store under `state/` |
+| `loop-deps.ts` | the real half of the check in `work-map/loop.ts`, the two-missed-nights warning |
+| `replay.ts`, `baseline.ts` | a card as of its own answer; the baseline split into cards with no label, and labels for the scorer |
+| `history.ts`, `floor.ts` | a card as answered from git; the floor on the run line |
+| `score.ts` | pure: the label, the figures, both headlines, the nights |
+
+Rules a caller can get wrong from outside:
+
+- **Labels reach only the scorer.** `readBaselineCards` hands on seven fields. `facts.ts`, `prompt.ts`, `replay.ts` and `run.ts` import nothing that reads a label, and a test flips every label and compares the prompt byte for byte. `--dry-run` reads no label.
+- **Never print a verdict on an open card.** The run script prints counts by kind and the score script reads hand samples only from replayed cards, which are all answered. Rune reading a verdict on an open card would anchor the answer the judge is scored on.
+- **The prompt is frozen.** A change takes a new `DECISION_TRIAGE_PROMPT_VERSION` by hand, which writes a new `replay-<version>.jsonl` and restarts `--since`. The frozen date sits beside it: answers on or before that date are not held out.
+- **`--out` and the log are different sinks.** `scripts/decision-triage-run.ts` writes only `--out`, keeps no state and refuses a path inside the wiki root or the log folder, because the first `ok` line in the log starts part (2)'s clock.
+- **The label reads the card at its first answer**, by the first version's hash and time, and takes its choice from what that author settled on within 10 minutes. Reading the card at the correction's time instead moved one card from no label to «other» on the baseline's data (15 and 94 against the measured 15 and 93).
+- **A refusal is not a verdict.** No repo resolving writes `refused` with reason `no-repo`, no model call and no clock, and retries at the next check. `partial` records `ok` in the state store: it keeps what landed and does not retry that night. Only a night with no verdicts is `failed`, which retries once.
+- **Replay never takes the `ANSWERED` branch.** Answers before the moment go in as facts; the question is what the card needed, not what somebody said earlier.
+- **A repo counts only if its origin's basename equals the `repos:` entry, case included.** A folder under a root with the right letters is not enough: the disk folds case, and a folder inside another repo reads that repo's origin.
+
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 
 The Connections panel's first section: the pages one hop from the open page,

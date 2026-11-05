@@ -16,10 +16,15 @@
  * successful run in the last 20 h. A refusal costs nothing and retries on the
  * next check; a run that failed after the model call retries once, then waits
  * for the next day's hour.
+ *
+ * The decision triage's nightly pass has its own due check in the same tick,
+ * with its own state and failure count, after the work map's, so a failed work
+ * map does not cost it a night.
  */
 
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
+import { realTriageLoopDeps, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../readonly.ts";
 import { getWikiRegistry } from "../registry-memo.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
@@ -101,6 +106,8 @@ export interface WorkMapLoopDeps {
   registry: () => readonly WikiRegistryEntry[];
   isReadonly?: () => boolean;
   isReadonlyRoot?: (root: string) => boolean;
+  /** The decision triage's half of a check; absent, it stays off. */
+  triage?: TriageLoopDeps;
 }
 
 /** The run deps a real instance uses, from its config. */
@@ -152,6 +159,7 @@ function realLoopDeps(config: Config): WorkMapLoopDeps {
     readState: (wiki) => runDeps.state.read(wiki),
     run: (wiki, signal) => startWorkMapRun(wiki, runDeps, signal).promise,
     registry: getWikiRegistry,
+    triage: realTriageLoopDeps(config) ?? undefined,
   };
 }
 
@@ -214,6 +222,25 @@ export function startWorkMapLoop(
     if (!live()) return;
     timer = deps.setTimer(tick, WORK_MAP_TICK_MS);
   };
+  /** The triage's due check, for the wikis the work map covers here. Returns
+   *  whether a run refused. Its own catch: a throw costs neither loop a check. */
+  const triageCheck = async (): Promise<boolean> => {
+    const triage = deps.triage;
+    if (!triage) return false;
+    let refused = false;
+    try {
+      for (const wiki of await triage.wikis(wikis)) {
+        if (!live()) return refused;
+        await triage.beforeCheck(wiki, deps.now());
+        if (!workMapDue(await triage.readState(wiki), deps.now(), hour).due) continue;
+        const res = await triage.run(wiki, ac.signal);
+        if (res.outcome === "refused") refused = true;
+      }
+    } catch (err) {
+      log.warn("Decision triage check failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+    }
+    return refused;
+  };
   const check = async (reason: "boot" | "wake" | "hourly" | "wake-retry") => {
     const at = deps.now();
     lastCheck = at;
@@ -226,6 +253,7 @@ export function startWorkMapLoop(
       const res = await deps.run(wiki, ac.signal);
       if (res.outcome === "refused") refused = true;
     }
+    if (await triageCheck()) refused = true;
     const afterWake = reason === "wake" || reason === "wake-retry";
     if (afterWake && refused && wakeRetriesLeft > 0) {
       wakeRetriesLeft--;
