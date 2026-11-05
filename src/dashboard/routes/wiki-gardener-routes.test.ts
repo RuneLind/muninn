@@ -1,10 +1,13 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
+import { Tracer } from "../../tracing/tracer.ts";
+import type { BotConfig } from "../../bots/config.ts";
 import { chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import {
   runDrainUnderTrace,
+  drainGardenerRun,
   registerWikiGardenerRoutes,
   computeIngestBacklogResponse,
   computeBacklogFloorCounts,
@@ -4073,10 +4076,15 @@ describe("runDrainUnderTrace", () => {
     };
   }
 
-  test("names the trace to the run and stamps the root on success", async () => {
+  test("names the trace before the run starts, and stamps the root on success", async () => {
     const { tracer, finishes } = recording();
     const named: string[] = [];
-    await runDrainUnderTrace(tracer, true, { onTraceId: (id) => void named.push(id) }, 3, async () => []);
+    let namedAtStart = -1;
+    await runDrainUnderTrace(tracer, true, { onTraceId: (id) => void named.push(id) }, 3, async () => {
+      namedAtStart = named.length;
+      return [];
+    });
+    expect(namedAtStart).toBe(1);
     expect(named).toEqual(["drain-trace"]);
     expect(finishes).toEqual([
       { status: "ok", attrs: { offered: 3, drafted: 0, agentKind: "gardener_drain", agentName: "Backlog drain" } },
@@ -4085,11 +4093,14 @@ describe("runDrainUnderTrace", () => {
 
   test("stamps the root on failure and rethrows", async () => {
     const { tracer, finishes } = recording();
+    const named: string[] = [];
     await expect(
-      runDrainUnderTrace(tracer, true, {}, 3, async () => {
+      runDrainUnderTrace(tracer, true, { onTraceId: (id) => void named.push(id) }, 3, async () => {
         throw new Error("draft blew up");
       }),
     ).rejects.toThrow("draft blew up");
+    // A failed run's row still has to name its root, or the root lists it again.
+    expect(named).toEqual(["drain-trace"]);
     expect(finishes).toEqual([
       { status: "error", attrs: { error: "draft blew up", agentKind: "gardener_drain", agentName: "Backlog drain" } },
     ]);
@@ -4100,5 +4111,49 @@ describe("runDrainUnderTrace", () => {
     const named: string[] = [];
     await runDrainUnderTrace(tracer, false, { onTraceId: (id) => void named.push(id) }, 3, async () => []);
     expect(named).toEqual([]);
+  });
+});
+
+describe("drainGardenerRun", () => {
+  const ctx = (tracingEnabled: boolean) => ({
+    bot: { name: "testbot" } as BotConfig,
+    config: { tracingEnabled } as never,
+    apiUrl: "http://kb.test",
+    root: "/tmp/no-such-wiki",
+  });
+  const assembled = { batchKeys: ["c/a", "c/b"] } as never;
+  let finish: ReturnType<typeof spyOn>;
+  beforeEach(() => {
+    finish = spyOn(Tracer.prototype, "finish").mockImplementation(() => {});
+  });
+  afterEach(() => finish.mockRestore());
+
+  test("the run a drain starts goes through the trace seam, with its real inputs", async () => {
+    const named: string[] = [];
+    const seen: unknown[] = [];
+    const hooks = { onTraceId: (id: string) => void named.push(id) };
+    await drainGardenerRun(ctx(true), async (deps) => {
+      seen.push(deps.botName);
+      return [];
+    })(assembled, hooks);
+    expect(seen).toEqual(["testbot"]);
+    expect(named).toHaveLength(1);
+    expect(finish).toHaveBeenCalledWith("ok", {
+      offered: 2,
+      drafted: 0,
+      agentKind: "gardener_drain",
+      agentName: "Backlog drain",
+    });
+  });
+
+  test("tracing off names no trace", async () => {
+    const named: string[] = [];
+    await drainGardenerRun(ctx(false), async () => [])(assembled, { onTraceId: (id) => void named.push(id) });
+    expect(named).toEqual([]);
+  });
+
+  test("the backlog route hands its run to this seam", async () => {
+    const source = await Bun.file(new URL("./wiki-gardener-routes.ts", import.meta.url)).text();
+    expect(source).toContain("runGardener: drainGardenerRun({ bot, config, apiUrl: KNOWLEDGE_API_URL, root })");
   });
 });

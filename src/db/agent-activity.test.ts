@@ -175,4 +175,30 @@ describe("a stamped span on real Postgres", () => {
     expect(row).not.toBeNull();
     expect(row!.attributes).toMatchObject({ agentKind: "capture", agentName: "YouTube: a\ufffdb", inputTokens: 3 });
   });
+
+  test("free text anywhere in a span's attributes cannot lose the write", async () => {
+    // A connector's error is a bare `slice` of an upstream body, so the same
+    // refusal reached a failed run's finish through `error`.
+    const tracer = new Tracer("draft:source", { botName: "testbot" });
+    tracer.start("claude", { title: "a\ud83d\u0000\u0000b" });
+    tracer.end("claude", { error: "c\udc00d", nested: { list: ["e\u0000", 1, null] } }, "error");
+    finishAgentRunTrace(tracer, { kind: "capture", name: "two\u0000nuls\u0000" }, "error", { error: "f\ud83dg" });
+    const sql = getDb();
+    let rows: { name: string; duration_ms: number | null; attributes: Record<string, unknown> }[] = [];
+    for (let i = 0; i < 50; i++) {
+      rows = (await sql`SELECT name, duration_ms, attributes FROM traces WHERE trace_id = ${tracer.traceId}`) as never;
+      if (rows.length === 2 && rows.every((r) => r.duration_ms !== null)) break;
+      await Bun.sleep(20);
+    }
+    const claude = rows.find((r) => r.name === "claude")!;
+    const root = rows.find((r) => r.name === "draft:source")!;
+    expect(claude.duration_ms).not.toBeNull();
+    expect(claude.attributes).toMatchObject({
+      title: "a\ufffdb",
+      error: "c\ufffdd",
+      nested: { list: ["e", 1, null] },
+    });
+    expect(root.duration_ms).not.toBeNull();
+    expect(root.attributes).toMatchObject({ agentName: "twonuls", error: "f\ufffdg" });
+  });
 });

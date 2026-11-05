@@ -48,6 +48,22 @@ interface UpdateSpanParams {
   attributes?: Record<string, unknown>;
 }
 
+/**
+ * jsonb refuses a lone surrogate and a NUL, and those are the only text it refuses.
+ * Attributes carry free text that a bare `slice` may have cut through an emoji (a
+ * run name, a connector's error body), and a refused write loses the whole span's
+ * status and duration to a log line. So a span's text is cleaned here, on its one
+ * way into the table.
+ */
+function jsonbSafe(value: unknown): unknown {
+  if (typeof value === "string") return value.toWellFormed().replaceAll("\u0000", "");
+  if (Array.isArray(value)) return value.map(jsonbSafe);
+  if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [jsonbSafe(k) as string, jsonbSafe(v)]));
+  }
+  return value;
+}
+
 export async function saveSpan(params: SaveSpanParams): Promise<void> {
   const sql = getDb();
   await sql`
@@ -64,7 +80,7 @@ export async function saveSpan(params: SaveSpanParams): Promise<void> {
       ${params.platform ?? null},
       ${params.startedAt},
       ${params.durationMs ?? null},
-      ${sql.json((params.attributes ?? {}) as Record<string, never>)}
+      ${sql.json(jsonbSafe(params.attributes ?? {}) as Record<string, never>)}
     )
   `;
 }
@@ -77,7 +93,7 @@ export async function updateSpan(id: string, params: UpdateSpanParams): Promise<
       status = COALESCE(${params.status ?? null}, status),
       attributes = CASE
         WHEN ${params.attributes ? true : null}::bool IS NOT NULL
-        THEN attributes || ${sql.json((params.attributes ?? {}) as Record<string, never>)}
+        THEN attributes || ${sql.json(jsonbSafe(params.attributes ?? {}) as Record<string, never>)}
         ELSE attributes
       END
     WHERE id = ${id}

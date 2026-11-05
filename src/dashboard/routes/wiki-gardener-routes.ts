@@ -1058,31 +1058,6 @@ function backlogGenerationOf(botName: string): number {
  * re-fetch — dropping the in-flight entry is the load-bearing half, since `refresh=1`
  * bypasses the cache READ but would otherwise still join a stale in-flight promise.
  */
-/**
- * Run a manual drain's gardener under its trace root: name the trace to the drain's
- * `/agents` run, so that row is not listed a second time from the root, and finish
- * the root with the run's identity on both exits.
- */
-export async function runDrainUnderTrace(
-  tracer: Pick<Tracer, "traceId" | "finish">,
-  tracingEnabled: boolean,
-  hooks: Pick<GardenerRunHooks, "onTraceId">,
-  offered: number,
-  run: () => Promise<WatcherAlert[]>,
-): Promise<WatcherAlert[]> {
-  if (tracingEnabled) hooks.onTraceId?.(tracer.traceId);
-  try {
-    const alerts = await run();
-    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "ok", { offered, drafted: draftedCount(alerts) });
-    return alerts;
-  } catch (err) {
-    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "error", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
-  }
-}
-
 export function invalidateIngestBacklogCache(botName: string): void {
   backlogCache.delete(botName);
   backlogInFlight.delete(botName);
@@ -1266,6 +1241,44 @@ function buildBacklogGardenerDeps(
     // `watcher:%`/`%_message` span), so the child span can't double-count.
     ...buildGardenerSeams({ botConfig: bot, config, apiUrl, wikiDir: root, tracer }),
   };
+}
+
+/** A manual drain's gardener call, under the trace root that `runGardener` does not finish. */
+export function drainGardenerRun(
+  ctx: { bot: BotConfig; config: ReturnType<typeof loadConfig>; apiUrl: string; root: string },
+  gardener: typeof runGardener = runGardener,
+): (assembled: AssembledBacklog, hooks: GardenerRunHooks) => Promise<WatcherAlert[]> {
+  return (assembled, hooks) => {
+    const tracer = new Tracer("wiki-gardener-backlog", { botName: ctx.bot.name });
+    return runDrainUnderTrace(tracer, ctx.config.tracingEnabled, hooks, assembled.batchKeys.length, () =>
+      gardener(buildBacklogGardenerDeps(assembled, { ...ctx, tracer }, hooks)),
+    );
+  };
+}
+
+/**
+ * Run a manual drain's gardener under its trace root: name the trace to the drain's
+ * `/agents` run, so that row is not listed a second time from the root, and finish
+ * the root with the run's identity on both exits.
+ */
+export async function runDrainUnderTrace(
+  tracer: Pick<Tracer, "traceId" | "finish">,
+  tracingEnabled: boolean,
+  hooks: Pick<GardenerRunHooks, "onTraceId">,
+  offered: number,
+  run: () => Promise<WatcherAlert[]>,
+): Promise<WatcherAlert[]> {
+  if (tracingEnabled) hooks.onTraceId?.(tracer.traceId);
+  try {
+    const alerts = await run();
+    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "ok", { offered, drafted: draftedCount(alerts) });
+    return alerts;
+  } catch (err) {
+    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 }
 
 /**
@@ -1806,14 +1819,7 @@ export function registerWikiGardenerRoutes(
       // The tracer root span must be finished HERE — runGardener only creates
       // sub-spans (the weekly checker finishes its own tracer the same way);
       // without this every drain leaves a malformed open trace in the waterfall.
-      runGardener: async (assembled, hooks) => {
-        const tracer = new Tracer("wiki-gardener-backlog", { botName: bot.name });
-        return runDrainUnderTrace(tracer, config.tracingEnabled, hooks, assembled.batchKeys.length, () =>
-          runGardener(
-            buildBacklogGardenerDeps(assembled, { bot, config, apiUrl: KNOWLEDGE_API_URL, root, tracer }, hooks),
-          ),
-        );
-      },
+      runGardener: drainGardenerRun({ bot, config, apiUrl: KNOWLEDGE_API_URL, root }),
       // Low-volume vertical fallback (R4): when the gardener drafts ZERO cluster
       // proposals, draft the batch docs individually as source pages instead. Bound to
       // the real `draftOneBacklogDoc` (which fetches each doc's body internally — the
