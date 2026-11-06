@@ -171,6 +171,14 @@ describe("a new prompt version restarts part (2)", () => {
     expect(verdictFlips(current.cards).flips).toBe(0);
   });
 
+  test("model-off lines are left out apart from older ones", () => {
+    const cards = [night({ id: "O9", at: 1, verdict: "NO_VERDICT", promptVersion: "off" }), night({ id: "O9", at: 2, verdict: "ASK_OWNER" })];
+    const current = currentLog({ runs: [old(1), { ...run(2), promptVersion: "off" }, run(3)], cards });
+    expect(current).toMatchObject({ olderLines: 1, offLines: 2 });
+    expect(current.runs).toHaveLength(1);
+    expect(current.cards).toHaveLength(1);
+  });
+
   test("a scoring on the old prompt holds no decision for the new one", () => {
     const records = { records: [{ type: "scoring", at: 1, day: 14, promptVersion: OLD, result: "pass", hand: null, input: null } as ScoringRecord], broken: 0 };
     expect(scoringGate(records, 14)).toEqual({ allowed: true, kind: "decision" });

@@ -11,7 +11,7 @@ import { sha256 } from "../../gardener/util.ts";
 import { osloDay } from "../work-map/ids.ts";
 import { answeredByChoice, liveAnswers, readPageText, type ReplayCard } from "./facts.ts";
 import type { WikiLabels } from "./floor.ts";
-import { DECISION_TRIAGE_PROMPT_VERSION, replayKey, type CardLine, type FloorState, type RunLine, type VerdictKind } from "./schema.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION, MODEL_OFF_VERSION, replayKey, type CardLine, type FloorState, type RunLine, type VerdictKind } from "./schema.ts";
 import {
   CAP_DAY,
   floorOf,
@@ -53,12 +53,13 @@ export interface TriageLog {
   cards: readonly CardLine[];
 }
 
-/** The current prompt's lines, and how many older ones were left out. A line with
- *  no version predates the field, so it is older. */
-export function currentLog(log: TriageLog, version = DECISION_TRIAGE_PROMPT_VERSION): { runs: RunLine[]; cards: CardLine[]; olderLines: number } {
+/** The current prompt's lines, and how many older ones and model-off ones were left
+ *  out. A line with no version predates the field, so it is older. */
+export function currentLog(log: TriageLog, version = DECISION_TRIAGE_PROMPT_VERSION): { runs: RunLine[]; cards: CardLine[]; olderLines: number; offLines: number } {
   const runs = log.runs.filter((r) => r.promptVersion === version);
   const cards = log.cards.filter((c) => c.promptVersion === version);
-  return { runs, cards, olderLines: log.runs.length + log.cards.length - runs.length - cards.length };
+  const offLines = [...log.runs, ...log.cards].filter((l) => l.promptVersion === MODEL_OFF_VERSION).length;
+  return { runs, cards, olderLines: log.runs.length + log.cards.length - runs.length - cards.length - offLines, offLines };
 }
 
 /** Days since the earliest `ok` or `partial` line of the current prompt, in either wiki. */

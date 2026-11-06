@@ -577,7 +577,6 @@ describe("the model call off (D19)", () => {
     expect(answerWindowMs(runs)).toBe(frozenAfterMs());
   });
 
-
   test("a card answered by a choice keeps its ANSWERED line", async () => {
     const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }, { call: null, answers: async () => [answer("O1")] }));
     expect(res.outcome).toBe("ok");

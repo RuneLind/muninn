@@ -219,7 +219,7 @@ async function printNightly(log: ParsedLog, labelled: readonly WikiLabels[], wik
   const shares = nightlyShares(nights);
   const tally: Record<string, number> = { ok: 0, partial: 0, refused: 0, failed: 0, absent: 0 };
   for (const n of nights) tally[n.outcome]!++;
-  console.log(`nights: ${JSON.stringify(tally)}${log.broken ? `; ${log.broken} broken line(s) skipped` : ""}; ${current.olderLines} line(s) of older prompt versions left out`);
+  console.log(`nights: ${JSON.stringify(tally)}${log.broken ? `; ${log.broken} broken line(s) skipped` : ""}; ${current.olderLines} line(s) of older prompt versions and ${current.offLines} model-off line(s) left out`);
   for (const n of nights) console.log(`  ${n.day} ${n.wiki}: ${n.outcome} ${JSON.stringify(n.kinds)}`);
   console.log(`nightly median share: ASK_OWNER ${shares.askOwnerMedian}, ASK_OWNER+ASK_OTHER ${shares.askAnyMedian}, over ${shares.nights} night(s)`);
   const flips = verdictFlips(current.cards);
