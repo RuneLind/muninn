@@ -239,9 +239,11 @@ describe("the card as answered", () => {
       const q = (id: string, ms: number) => v({ answerId: id, questionId: id, questionHash: hash(REC), choice: "B", createdAt: ms });
       const history = async () => [q("O1", after + DAY_MS), q("O2", after + 3 * DAY_MS)];
       const dir = testTempDirSync(path.join(tmpdir(), "triage-floor-"));
-      const counted = async (opts: { dir: string; ownLineAt?: number }) => (await computeFloor([{ wiki: "w", root }], history, realGit, opts)).labelled;
+      const counted = async (opts: { dir: string; ownLineAt?: number; ownLineVersion?: string }) => (await computeFloor([{ wiki: "w", root }], history, realGit, opts)).labelled;
       expect(await counted({ dir })).toBe(2);
       expect(await counted({ dir, ownLineAt: after + 2 * DAY_MS })).toBe(1);
+      // A model-off night's own line starts no window.
+      expect(await counted({ dir, ownLineAt: after + 2 * DAY_MS, ownLineVersion: "off" })).toBe(2);
       const older = { type: "run", at: after + 2 * DAY_MS, wiki: "w", promptVersion: "older", outcome: "ok" };
       writeFileSync(nightlyLogPath("w", dir), `${JSON.stringify(older)}\n`);
       expect(await counted({ dir })).toBe(2);

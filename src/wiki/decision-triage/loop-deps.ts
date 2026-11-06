@@ -13,7 +13,7 @@ import type { WorkMapState } from "../work-map/state.ts";
 import { appendLogLines, DECISION_TRIAGE_DIR, nightlyLogPath, readLog, triageStateStore } from "./log.ts";
 import { runDecisionTriage, type TriageProgress, type TriageRunDeps, type TriageRunResult } from "./run.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, MODEL_OFF_MODEL, MODEL_OFF_VERSION, type RunLine } from "./schema.ts";
-import { realTriageRunDeps, triageScope } from "./scope.ts";
+import { NIGHTLY_MODEL_OFF, realTriageRunDeps, triageScope } from "./scope.ts";
 
 const log = getLog("wiki", "decision-triage");
 const DAY_MS = 86_400_000;
@@ -65,6 +65,8 @@ export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE
     return null;
   }
   const state = triageStateStore(dir);
+  /** Whether the night's run calls a model: a test's `call` seam, else the switch. */
+  const modelOn = over.call !== undefined ? over.call !== null : !NIGHTLY_MODEL_OFF;
   const answerConfig = resolveWikiAnswerConfig();
   const warnedOn = new Map<string, string>();
   let floorMet = false;
@@ -96,7 +98,7 @@ export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE
     const reason = done && done.open !== null ? `${error}; ${done.verdicts} verdict(s) in ${done.cardsLogged} card line(s) logged of ${done.open} open card(s), ${done.usage.calls} call(s) answered` : error;
     await state.record(wiki, { at: now, outcome: outcome === "partial" ? "ok" : "failed", error: reason });
     await appendLogLines(nightlyLogPath(wiki, dir), [
-      { type: "run", runId: done?.runId ?? randomUUID(), at: done?.at ?? now, wiki, model: done?.model ?? (over.call ? config.workMapModel : MODEL_OFF_MODEL), promptVersion: done?.promptVersion ?? (over.call ? DECISION_TRIAGE_PROMPT_VERSION : MODEL_OFF_VERSION), usage: done?.usage ?? { calls: 0 }, repoRoots: config.decisionTriageRepoRoots, repos: done?.repos ?? [], cards: done?.cardsLogged ?? 0, floor: null, outcome, reason },
+      { type: "run", runId: done?.runId ?? randomUUID(), at: done?.at ?? now, wiki, model: done?.model ?? (modelOn ? config.workMapModel : MODEL_OFF_MODEL), promptVersion: done?.promptVersion ?? (modelOn ? DECISION_TRIAGE_PROMPT_VERSION : MODEL_OFF_VERSION), usage: done?.usage ?? { calls: 0 }, repoRoots: config.decisionTriageRepoRoots, repos: done?.repos ?? [], cards: done?.cardsLogged ?? 0, floor: null, outcome, reason },
     ]);
     return outcome;
   };

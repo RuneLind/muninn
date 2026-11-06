@@ -16,7 +16,12 @@ import { workMapKindFromReaderText } from "../work-map/kind.ts";
 import { WIKI_READER_FILE } from "../work-map/run.ts";
 import { computeFloor } from "./floor.ts";
 import { realGit } from "./git.ts";
-import type { TriageRunDeps } from "./run.ts";
+import { realDecisionTriageModel, type TriageRunDeps } from "./run.ts";
+
+/** D19's stop trigger (mimir plans/muninn-wiki-decision-triage.mdx): the night asks no
+ *  model. The one switch: the night's deps and the loop's failure line both read it.
+ *  `--replay` keeps the real call. */
+export const NIGHTLY_MODEL_OFF = true;
 
 export interface DroppedWiki {
   wiki: string;
@@ -102,8 +107,7 @@ export function realTriageRunDeps(
     repoRoots: config.decisionTriageRepoRoots,
     model: config.workMapModel,
     ...(config.workMapEffort ? { effort: config.workMapEffort } : {}),
-    // D19's stop trigger: the night asks no model. `--replay` keeps the real call.
-    call: null,
+    call: NIGHTLY_MODEL_OFF ? null : realDecisionTriageModel(config),
     git: realGit,
     loadIndex: () => getWikiIndex({ root: entry.root, refresh: true }),
     readFile: async (abs) => {
@@ -117,8 +121,8 @@ export function realTriageRunDeps(
     owner: answerConfig.owner,
     groups: answerConfig.groups,
     append: opts.append,
-    floor: (startedAt) =>
-      computeFloor(opts.floorEntries().map((e) => ({ wiki: e.name, root: e.root })), listWikiAnswerHistory, realGit, opts.nightlyDir === undefined ? {} : { dir: opts.nightlyDir, ownLineAt: startedAt }),
+    floor: (startedAt, promptVersion) =>
+      computeFloor(opts.floorEntries().map((e) => ({ wiki: e.name, root: e.root })), listWikiAnswerHistory, realGit, opts.nightlyDir === undefined ? {} : { dir: opts.nightlyDir, ownLineAt: startedAt, ownLineVersion: promptVersion }),
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
 }

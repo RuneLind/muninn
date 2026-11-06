@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { MODEL_OFF_MODEL, MODEL_OFF_VERSION } from "./schema.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION, MODEL_OFF_MODEL, MODEL_OFF_VERSION } from "./schema.ts";
 import { commitAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 
 const LOOP_DEPS = path.join(import.meta.dir, "loop-deps.ts");
@@ -279,7 +279,7 @@ await deps.recordFailed("a", "later");
 `, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) })`);
     const runs = logOf(tmp).filter((l) => l.type === "run");
     expect(runs).toHaveLength(2);
-    expect(runs[1]).toMatchObject({ outcome: "failed", cards: 0, usage: { calls: 0 }, reason: "later" });
+    expect(runs[1]).toMatchObject({ outcome: "failed", cards: 0, usage: { calls: 0 }, reason: "later", promptVersion: DECISION_TRIAGE_PROMPT_VERSION, model: "m" });
     expect(runs[1]!.runId).not.toBe(runs[0]!.runId);
   });
 

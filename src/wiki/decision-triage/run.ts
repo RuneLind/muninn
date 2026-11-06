@@ -236,8 +236,9 @@ export interface TriageRunDeps {
   groups: GatherContext["groups"];
   /** The run's sink: the nightly log, or `--out`. */
   append: (lines: readonly LogLine[]) => Promise<void>;
-  /** The floor's state for the run line; `startedAt` is this run's own line. */
-  floor?: (startedAt: number) => Promise<FloorState>;
+  /** The floor's state for the run line; `startedAt` is this run's own line, which
+   *  carries `promptVersion`. */
+  floor?: (startedAt: number, promptVersion: string) => Promise<FloorState>;
   signal?: AbortSignal;
   /** Handed the run's live progress before anything is spent. */
   track?: (progress: TriageProgress) => void;
@@ -268,7 +269,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     let floor: FloorState | null = null;
     if (deps.floor) {
       try {
-        floor = await deps.floor(startedAt);
+        floor = await deps.floor(startedAt, promptVersion);
       } catch (err) {
         floor = { labelled: 0, added: 0, addedPages: 0, met: false, error: err instanceof Error ? err.message : String(err) };
       }

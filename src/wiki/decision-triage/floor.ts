@@ -54,15 +54,16 @@ export async function labelsSince(
   return out;
 }
 
-/** `ownLineAt`: the line this run is about to write to these logs. */
+/** `ownLineAt`: the line this run is about to write to these logs, which carries
+ *  `ownLineVersion` (the current prompt's unless the model call is off). */
 export async function computeFloor(
   entries: readonly { wiki: string; root: string }[],
   history: (wiki: string) => Promise<WikiAnswerVersion[]>,
   git: GitRun,
-  opts: { dir?: string; ownLineAt?: number } = {},
+  opts: { dir?: string; ownLineAt?: number; ownLineVersion?: string } = {},
 ): Promise<FloorState> {
   const logs = await Promise.all(entries.map((e) => readLog(nightlyLogPath(e.wiki, opts.dir ?? DECISION_TRIAGE_DIR))));
-  const runs = [...logs.flatMap((l) => l.runs), ...(opts.ownLineAt === undefined ? [] : [{ at: opts.ownLineAt, promptVersion: DECISION_TRIAGE_PROMPT_VERSION }])];
+  const runs = [...logs.flatMap((l) => l.runs), ...(opts.ownLineAt === undefined ? [] : [{ at: opts.ownLineAt, promptVersion: opts.ownLineVersion ?? DECISION_TRIAGE_PROMPT_VERSION }])];
   const wikis = await labelsSince(entries, answerWindowMs(runs), history, git);
   const faults = wikis.flatMap((w) => w.fault ?? []);
   if (faults.length > 0) throw new Error(faults.join("; "));

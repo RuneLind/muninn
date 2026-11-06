@@ -562,8 +562,11 @@ describe("the spawned argv pins the tool surface to none", () => {
 
 describe("the model call off (D19)", () => {
   test("every gathered card is logged with the reason, no call is made, and the run is ok", async () => {
-    const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }, { call: null }));
+    const floorSaw: string[] = [];
+    const floor = async (_at: number, version: string) => (floorSaw.push(version), { labelled: 0, added: 0, addedPages: 0, met: false });
+    const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }, { call: null, floor }));
     expect(res.outcome).toBe("ok");
+    expect(floorSaw).toEqual([MODEL_OFF_VERSION]);
     const { cards, runs } = await readLog(dirs.log);
     expect(cards.map((c) => [c.id, c.verdict, c.reason])).toEqual([["O1", "NO_VERDICT", MODEL_OFF], ["O2", "NO_VERDICT", MODEL_OFF]]);
     expect(cards.every((c) => typeof c.codeFacts === "boolean")).toBe(true);
