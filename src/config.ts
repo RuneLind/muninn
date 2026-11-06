@@ -1007,6 +1007,9 @@ export function loadConfig() {
     // The work map's nightly organize (`src/wiki/work-map/`): which wikis, the
     // Europe/Oslo hour it may run from, and the model. Unset WORK_MAP_WIKIS means off.
     ...workMapEnv(),
+    // The decision triage's repo roots (`src/wiki/decision-triage/`), and its
+    // switch: unset, the nightly pass stays off.
+    decisionTriageRepoRoots: (process.env.DECISION_TRIAGE_REPO_ROOTS ?? "").trim() || null,
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

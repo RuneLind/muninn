@@ -11,7 +11,9 @@ import {
   getLatestWikiAnswerVersion,
   insertWikiAnswerVersion,
   listLatestWikiAnswers,
+  listWikiAnswerHistory,
   listWikiAnswerVersions,
+  redactWikiAnswer,
   WikiAnswerVersionConflict,
   type WikiAnswerVersionInput,
 } from "./wiki-answers.ts";
@@ -31,6 +33,25 @@ const input = (over: Partial<WikiAnswerVersionInput> = {}): WikiAnswerVersionInp
   body: "The page's language.",
   questionHash: "h1",
   ...over,
+});
+
+describe("listWikiAnswerHistory", () => {
+  test("every version in the wiki, oldest first per question, redacted rows and all", async () => {
+    const wiki = `hist-${randomUUID()}`;
+    const v1 = await insertWikiAnswerVersion(input({ wiki, choice: "not-sure", body: "" }));
+    await insertWikiAnswerVersion(input({ wiki, answerId: v1.answerId, version: 2, choice: "A", body: "" }));
+    const other = await insertWikiAnswerVersion(input({ wiki, questionId: "O1" }));
+    await insertWikiAnswerVersion(input({ wiki: `${wiki}-other` }));
+    await redactWikiAnswer(other.answerId);
+    const rows = await listWikiAnswerHistory(wiki);
+    expect(rows.map((r) => [r.questionId, r.version, r.choice])).toEqual([
+      ["O1", 1, null],
+      ["O3", 1, "not-sure"],
+      ["O3", 2, "A"],
+    ]);
+    expect(rows[0]!.redactedAt).not.toBeNull();
+    expect(await listWikiAnswerHistory(`${wiki}-none`)).toEqual([]);
+  });
 });
 
 describe("wiki_answers store", () => {

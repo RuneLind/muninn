@@ -76,7 +76,9 @@ export type AgentKind =
   | "extractor"
   | "profile"
   /** The work map's nightly organize (`src/wiki/work-map/`). */
-  | "work_map";
+  | "work_map"
+  /** The decision triage's nightly pass (`src/wiki/decision-triage/`). */
+  | "decision_triage";
 
 /**
  * Kinds eligible for the single-pane waterfall (`getProgress`/`subscribeProgress`

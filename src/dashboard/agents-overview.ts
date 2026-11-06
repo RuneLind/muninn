@@ -53,6 +53,7 @@ const RING_RECENT_KINDS: ReadonlySet<AgentKind> = new Set<AgentKind>([
   "factcheck",
   "scheduled_task",
   "work_map",
+  "decision_triage",
 ]);
 
 export interface UpNextEntry {
@@ -365,6 +366,7 @@ function kindLabel(kind?: AgentKind): string {
     case "watcher": return "Watcher";
     case "profile": return "Profile";
     case "work_map": return "Work map";
+    case "decision_triage": return "Decision triage";
     default: return "Chat turn";
   }
 }

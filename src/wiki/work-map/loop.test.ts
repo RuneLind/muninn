@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
+import type { TriageLoopDeps } from "../decision-triage/loop-deps.ts";
 import type { WorkMapRunResult } from "./run.ts";
 import type { WorkMapState } from "./state.ts";
 import {
@@ -18,6 +20,263 @@ const MIN = 60_000;
 const MORNING = Date.parse("2026-10-20T05:00:00Z");
 
 afterEach(() => stopWorkMapLoop(10));
+
+describe("the decision triage's due check", () => {
+  function triageHarness(opts: { workMap?: WorkMapRunResult["outcome"][]; triage?: ("ok" | "partial" | "refused" | "failed")[]; state?: () => WorkMapState | null; wikis?: string[]; start?: number } = {}) {
+    const base = harness({ ...(opts.workMap ? { outcomes: opts.workMap } : {}), ...(opts.start !== undefined ? { start: opts.start } : {}) });
+    const runs: { wiki: string; at: number }[] = [];
+    const checks: string[] = [];
+    const outcomes = [...(opts.triage ?? [])];
+    const triage: TriageLoopDeps = {
+      wikis: async (covered) => opts.wikis ?? [...covered],
+      beforeCheck: async (wiki) => void checks.push(wiki),
+      readState: async () => opts.state?.() ?? null,
+      run: async (wiki) => {
+        runs.push({ wiki, at: base.deps.now() });
+        return { outcome: outcomes.shift() ?? "ok" };
+      },
+      recordFailed: async () => {},
+    };
+    return { ...base, deps: { ...base.deps, triage }, triageRuns: runs, checks };
+  }
+  const config = { schedulerEnabled: true, workMapWikis: ["mimir"], workMapHour: 5, profile: "default" as const };
+
+  test("a failed work map does not cost the night", async () => {
+    const h = triageHarness({ workMap: ["failed"] });
+    startWorkMapLoop(config, { deps: h.deps });
+    await h.advance(WORK_MAP_TICK_MS);
+    expect(h.runs).toHaveLength(1);
+    expect(h.triageRuns.map((r) => r.wiki)).toEqual(["mimir"]);
+    expect(h.checks).toEqual(["mimir"]);
+  });
+
+  test("its own state decides: done within 20 h, twice failed since the hour, or before the hour", async () => {
+    const fresh = triageHarness({ state: () => ({ wiki: "mimir", lastSuccessAt: MORNING - HOUR, attempts: [] }) });
+    startWorkMapLoop(config, { deps: fresh.deps });
+    await fresh.advance(WORK_MAP_TICK_MS);
+    expect(fresh.runs).toHaveLength(1);
+    expect(fresh.triageRuns).toHaveLength(0);
+    await stopWorkMapLoop(10);
+
+    const failing = triageHarness({ state: () => ({ wiki: "mimir", attempts: [{ at: MORNING - MIN, outcome: "failed" }, { at: MORNING - 2 * MIN, outcome: "failed" }] }) });
+    startWorkMapLoop(config, { deps: failing.deps });
+    await failing.advance(WORK_MAP_TICK_MS);
+    expect(failing.triageRuns).toHaveLength(0);
+  });
+
+  test("a wiki outside its scope gets no check; a throw costs the work map nothing", async () => {
+    const out = triageHarness({ wikis: [] });
+    startWorkMapLoop(config, { deps: out.deps });
+    await out.advance(WORK_MAP_TICK_MS);
+    expect(out.runs).toHaveLength(1);
+    expect(out.triageRuns).toHaveLength(0);
+    await stopWorkMapLoop(10);
+
+    const thrower = triageHarness();
+    thrower.deps.triage!.readState = async () => {
+      throw new Error("boom");
+    };
+    startWorkMapLoop(config, { deps: thrower.deps });
+    await thrower.advance(WORK_MAP_TICK_MS);
+    expect(thrower.runs).toHaveLength(1);
+  });
+
+  test("a refused run retries at the next check", async () => {
+    const h = triageHarness({ triage: ["refused", "ok"] });
+    startWorkMapLoop(config, { deps: h.deps });
+    await h.advance(WORK_MAP_TICK_MS);
+    expect(h.triageRuns).toHaveLength(1);
+    await h.advance(HOUR + WORK_MAP_TICK_MS);
+    expect(h.triageRuns).toHaveLength(2);
+  });
+
+  test("no deps, no triage", async () => {
+    const h = harness();
+    startWorkMapLoop(config, { deps: h.deps });
+    await h.advance(WORK_MAP_TICK_MS);
+    expect(h.runs).toHaveLength(1);
+  });
+
+  describe("beside the work map's check, not inside it", () => {
+    /** A triage whose run never returns; `signals` holds what each run was handed. */
+    function stuck(h: ReturnType<typeof triageHarness>) {
+      const signals: AbortSignal[] = [];
+      const failed: { wiki: string; at: number; error: string }[] = [];
+      h.deps.triage!.run = (wiki, signal) => {
+        h.triageRuns.push({ wiki, at: h.deps.now() });
+        signals.push(signal);
+        return new Promise(() => {});
+      };
+      h.deps.triage!.recordFailed = async (wiki, error) => void failed.push({ wiki, at: h.deps.now(), error });
+      return { signals, failed };
+    }
+
+    test("a triage that never returns leaves the work map on schedule", async () => {
+      const h = triageHarness();
+      stuck(h);
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.runs).toHaveLength(1);
+      await h.advance(HOUR);
+      expect(h.runs).toHaveLength(2);
+      // Its guard holds: no second run on top of the one still going.
+      expect(h.triageRuns).toHaveLength(1);
+      await h.advance(HOUR);
+      expect(h.runs).toHaveLength(3);
+    });
+
+    test("a triage that never returns leaves the work map's wake retries on time", async () => {
+      const h = triageHarness({ workMap: Array(10).fill("refused") });
+      stuck(h);
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      await h.jump(30 * MIN);
+      const wakeAt = h.now();
+      await h.advance(20 * MIN);
+      expect(h.runs.slice(2).map((r) => Math.round((r.at - wakeAt) / MIN))).toEqual([5, 10, 15]);
+    });
+
+    test("a stalled work map does not hold the triage", async () => {
+      const h = triageHarness();
+      h.deps.run = () => new Promise(() => {});
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.triageRuns).toHaveLength(1);
+      await h.advance(HOUR);
+      expect(h.triageRuns).toHaveLength(2);
+    });
+
+    test("a triage refusal after a wake arms no work-map retry", async () => {
+      const h = triageHarness({ triage: Array(10).fill("refused") });
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      await h.jump(2 * HOUR);
+      expect(h.runs).toHaveLength(2);
+      await h.advance(30 * MIN);
+      expect(h.runs).toHaveLength(2);
+    });
+
+    test("a work-map refusal after a wake re-runs no triage, and a triage gets no wake check of its own", async () => {
+      const h = triageHarness({ workMap: Array(10).fill("refused"), triage: Array(10).fill("refused") });
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.triageRuns).toHaveLength(1);
+      await h.jump(20 * MIN);
+      await h.advance(20 * MIN);
+      expect(h.runs.length).toBeGreaterThanOrEqual(5);
+      expect(h.triageRuns).toHaveLength(1);
+      // Hourly from its own last check, whatever the work map did since.
+      await h.advance(21 * MIN);
+      expect(h.triageRuns).toHaveLength(2);
+    });
+
+    test("a refused day is one run per hour past the hour, however often the machine wakes", async () => {
+      const h = triageHarness({ start: Date.parse("2026-10-19T22:00:00Z"), triage: Array(100).fill("refused") }); // 00:00 Oslo
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      for (let i = 0; i < 72; i++) await h.jump(20 * MIN);
+      expect(h.triageRuns.length).toBeGreaterThanOrEqual(18);
+      expect(h.triageRuns.length).toBeLessThanOrEqual(19);
+    });
+
+    test("the pass's bound: 2 h, then the wiki records failed, its signal aborts and the guard opens", async () => {
+      const h = triageHarness();
+      const { signals, failed } = stuck(h);
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      const startedAt = h.now();
+      await h.advance(2 * HOUR - MIN);
+      expect(failed).toEqual([]);
+      expect(signals[0]!.aborted).toBe(false);
+      expect(h.triageRuns).toHaveLength(1);
+      await h.advance(2 * MIN);
+      expect(failed.map((f) => [f.wiki, f.at - startedAt])).toEqual([["mimir", 2 * HOUR]]);
+      expect(failed[0]!.error).toContain("timed out");
+      expect(signals[0]!.aborted).toBe(true);
+      expect(h.triageRuns).toHaveLength(2);
+    });
+
+    test("a pass that ends on its own records nothing and leaves no bound armed", async () => {
+      const h = triageHarness();
+      const failed: string[] = [];
+      h.deps.triage!.recordFailed = async (wiki) => void failed.push(wiki);
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.triageRuns).toHaveLength(1);
+      await h.advance(90 * MIN);
+      await h.advance(3 * HOUR);
+      expect(failed).toEqual([]);
+      expect(h.timers).toHaveLength(1);
+    });
+
+    test("shutdown aborts a triage that never returns, gives up after the wait and leaves no timer", async () => {
+      const h = triageHarness();
+      const { signals, failed } = stuck(h);
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      await stopWorkMapLoop(10);
+      expect(signals[0]!.aborted).toBe(true);
+      expect(h.timers).toHaveLength(0);
+      await h.advance(3 * HOUR);
+      expect(failed).toEqual([]);
+      expect(h.runs).toHaveLength(1);
+      expect(h.triageRuns).toHaveLength(1);
+    });
+
+    test("the stop path awaits a triage that is finishing", async () => {
+      const h = triageHarness();
+      let finished = false;
+      h.deps.triage!.run = (_wiki, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener("abort", () => {
+            setTimeout(() => {
+              finished = true;
+              resolve({ outcome: "aborted" });
+            }, 30);
+          });
+        });
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      await stopWorkMapLoop(2_000);
+      expect(finished).toBe(true);
+    });
+  });
+
+  describe("the variable set with the loop off says so", () => {
+    let records: LogRecord[];
+    beforeEach(async () => {
+      records = [];
+      await configure({
+        sinks: { mem: (r) => void records.push(r) },
+        loggers: [{ category: "muninn", lowestLevel: "info", sinks: ["mem"] }, { category: ["logtape", "meta"], lowestLevel: "fatal", sinks: [] }],
+      });
+    });
+    afterEach(() => reset());
+    const said = () => records.map((r) => r.message.join("")).filter((m) => m.includes("Decision triage"));
+
+    test("no WORK_MAP_WIKIS, the scheduler off, nais, a readonly instance, no wiki left: one line each", () => {
+      const { deps } = harness();
+      const on = { ...config, decisionTriageRepoRoots: "/r" };
+      for (const off of [
+        () => startWorkMapLoop({ ...on, workMapWikis: [] }, { deps }),
+        () => startWorkMapLoop({ ...on, schedulerEnabled: false }, { deps }),
+        () => startWorkMapLoop({ ...on, profile: "nais" }, { deps }),
+        () => startWorkMapLoop(on, { deps: { ...deps, isReadonly: () => true } }),
+        () => startWorkMapLoop({ ...on, workMapWikis: ["ro"] }, { deps }),
+      ]) {
+        records.length = 0;
+        expect(off()).toEqual([]);
+        expect(said()).toHaveLength(1);
+      }
+    });
+
+    test("the variable unset: nothing about the triage", () => {
+      const { deps } = harness();
+      expect(startWorkMapLoop({ ...config, workMapWikis: [] }, { deps })).toEqual([]);
+      expect(said()).toEqual([]);
+    });
+  });
+});
 
 /** A fake clock and timer queue: `advance` moves time and fires due timers. */
 function harness(opts: { outcomes?: WorkMapRunResult["outcome"][]; state?: () => WorkMapState | null; start?: number } = {}) {

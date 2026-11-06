@@ -241,7 +241,7 @@ export async function renderAgentsPage(): Promise<string> {
       chat: 'Chat', scheduled_task: 'Task', watcher: 'Watcher',
       gardener_drain: 'Gardener', capture: 'Capture', research: 'Research',
       digest: 'Wiki digest', factcheck: 'Fact check', extractor: 'Extractor', profile: 'Profile',
-      work_map: 'Work map'
+      work_map: 'Work map', decision_triage: 'Decision triage'
     };
     // Raw AgentKind → SHORT chip label; kindChip() (status-chips.ts) uppercases it
     // and maps to the shared .kind-* palette. Keep in sync with KIND_CHIP_CLASS.
@@ -249,7 +249,7 @@ export async function renderAgentsPage(): Promise<string> {
       chat: 'Chat', scheduled_task: 'Task', watcher: 'Watcher',
       gardener_drain: 'Gardener', capture: 'Capture', research: 'Research',
       digest: 'Digest', factcheck: 'Factcheck', extractor: 'Extractor', profile: 'Profile',
-      work_map: 'Workmap'
+      work_map: 'Workmap', decision_triage: 'Triage'
     };
     function kindChipFor(kind) { return kindChip(KIND_SHORT[kind] || kind || 'chat'); }
     function isFailed(r) { return /^(error|failed)$/i.test(r.status || ''); }

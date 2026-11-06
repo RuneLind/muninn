@@ -16,10 +16,16 @@
  * successful run in the last 20 h. A refusal costs nothing and retries on the
  * next check; a run that failed after the model call retries once, then waits
  * for the next day's hour.
+ *
+ * The decision triage's nightly pass is started by the same tick and awaited by
+ * nothing in it: its own in-flight guard, hourly check, state and failure count, so
+ * neither loop's stall, retry or refusal reaches the other. A refused pass waits
+ * for its next hourly check; it has no wake retries.
  */
 
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
+import { realTriageLoopDeps, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../readonly.ts";
 import { getWikiRegistry } from "../registry-memo.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
@@ -36,6 +42,10 @@ import {
 import { fileStateStore, WORK_MAP_MODEL_FAILURES_PER_DAY, type WorkMapState } from "./state.ts";
 
 const log = getLog("wiki", "work-map");
+
+/** One triage pass's wall clock. A real pass is a call or two of about a minute
+ *  each; the sum of its inner bounds on today's cards is about an hour. */
+export const TRIAGE_PASS_BOUND_MS = 2 * 60 * 60_000;
 
 export const WORK_MAP_TICK_MS = 60_000;
 export const WORK_MAP_CHECK_INTERVAL_MS = 60 * 60_000;
@@ -101,6 +111,8 @@ export interface WorkMapLoopDeps {
   registry: () => readonly WikiRegistryEntry[];
   isReadonly?: () => boolean;
   isReadonlyRoot?: (root: string) => boolean;
+  /** The decision triage's half of a check; absent, it stays off. */
+  triage?: TriageLoopDeps;
 }
 
 /** The run deps a real instance uses, from its config. */
@@ -152,6 +164,7 @@ function realLoopDeps(config: Config): WorkMapLoopDeps {
     readState: (wiki) => runDeps.state.read(wiki),
     run: (wiki, signal) => startWorkMapRun(wiki, runDeps, signal).promise,
     registry: getWikiRegistry,
+    triage: realTriageLoopDeps(config) ?? undefined,
   };
 }
 
@@ -161,6 +174,7 @@ let generation = 0;
 let loopAbort: AbortController | null = null;
 let checking: Promise<void> | null = null;
 let activeDeps: WorkMapLoopDeps | null = null;
+let triageWork: Promise<void> | null = null;
 
 /**
  * Start the loop; returns the covered wikis, or [] when it did not start. A
@@ -171,19 +185,23 @@ export function startWorkMapLoop(
   config: Pick<Config, "schedulerEnabled" | "workMapWikis" | "workMapHour" | "profile"> & Partial<Config>,
   opts: { deps?: WorkMapLoopDeps } = {},
 ): string[] {
-  if (!stopped || config.workMapWikis.length === 0) return [];
+  if (!stopped) return [];
+  /** The loop is not starting: a set triage variable would otherwise say nothing. */
+  const off = (why: string): string[] => {
+    if (config.decisionTriageRepoRoots) log.warn("Decision triage off: DECISION_TRIAGE_REPO_ROOTS is set, but {why}", { why });
+    return [];
+  };
+  if (config.workMapWikis.length === 0) return off("WORK_MAP_WIKIS is not");
   const listed = config.workMapWikis.join(",");
   if (config.profile === "nais") {
     log.warn("Work map loop off: MUNINN_PROFILE=nais (WORK_MAP_WIKIS={wikis})", { wikis: listed });
-    return [];
+    return off("the profile is nais");
   }
   const deps = opts.deps ?? realLoopDeps(config as Config);
   if (!config.schedulerEnabled || (deps.isReadonly ?? isWikiReadonly)()) {
-    log.info("Work map loop off: {why} (WORK_MAP_WIKIS={wikis})", {
-      why: config.schedulerEnabled ? "the instance is readonly" : "SCHEDULER_ENABLED is off",
-      wikis: listed,
-    });
-    return [];
+    const why = config.schedulerEnabled ? "the instance is readonly" : "SCHEDULER_ENABLED is off";
+    log.info("Work map loop off: {why} (WORK_MAP_WIKIS={wikis})", { why, wikis: listed });
+    return off(why);
   }
   const byName = new Map(deps.registry().map((e) => [e.name.toLowerCase(), e]));
   const wikis: string[] = [];
@@ -194,7 +212,7 @@ export function startWorkMapLoop(
       log.warn("Work map: {wiki} has a readonly root (WIKI_READONLY_ROOTS) — skipped", { wiki: entry.name });
     } else wikis.push(entry.name);
   }
-  if (wikis.length === 0) return [];
+  if (wikis.length === 0) return off("WORK_MAP_WIKIS names no wiki the work map can cover");
 
   armWorkMapRuns();
   stopped = false;
@@ -213,6 +231,48 @@ export function startWorkMapLoop(
   const schedule = () => {
     if (!live()) return;
     timer = deps.setTimer(tick, WORK_MAP_TICK_MS);
+  };
+  let lastTriageCheck: number | null = null;
+  let triageBusy = false;
+  /** The triage's hourly check, started and not awaited: see the header. */
+  const startTriage = () => {
+    const triage = deps.triage;
+    const started = deps.now();
+    if (!triage || triageBusy || (lastTriageCheck !== null && started - lastTriageCheck < WORK_MAP_CHECK_INTERVAL_MS)) return;
+    lastTriageCheck = started;
+    triageBusy = true;
+    const bound = new AbortController();
+    const signal = AbortSignal.any([ac.signal, bound.signal]);
+    let running: string | null = null;
+    let timedOut = false;
+    const work = (async () => {
+      for (const wiki of await triage.wikis(wikis)) {
+        if (signal.aborted) return;
+        await triage.beforeCheck(wiki, deps.now());
+        if (!workMapDue(await triage.readState(wiki), deps.now(), hour).due) continue;
+        running = wiki;
+        await triage.run(wiki, signal);
+        running = null;
+      }
+    })().catch((err) => log.warn("Decision triage check failed: {error}", { error: err instanceof Error ? err.message : String(err) }));
+    const fail = (wiki: string, error: string) =>
+      triage.recordFailed(wiki, error).catch((err) => log.warn("Decision triage: could not record {wiki}'s timeout: {error}", { wiki, error: err instanceof Error ? err.message : String(err) }));
+    const expiry = deps.setTimer(() => {
+      timedOut = true;
+      bound.abort();
+      triageBusy = false;
+      const error = `the pass timed out after ${TRIAGE_PASS_BOUND_MS} ms`;
+      log.warn("Decision triage: {error} ({wiki})", { error, wiki: running ?? "no wiki running" });
+      if (running) void fail(running, error);
+    }, TRIAGE_PASS_BOUND_MS);
+    ac.signal.addEventListener("abort", () => deps.clearTimer(expiry), { once: true });
+    triageWork = work;
+    void work.finally(() => {
+      if (triageWork === work) triageWork = null;
+      if (timedOut) return;
+      deps.clearTimer(expiry);
+      triageBusy = false;
+    });
   };
   const check = async (reason: "boot" | "wake" | "hourly" | "wake-retry") => {
     const at = deps.now();
@@ -241,6 +301,7 @@ export function startWorkMapLoop(
     const woke = pendingWake || (lastTick !== null && now - lastTick > WORK_MAP_WAKE_GAP_MS);
     lastTick = now;
     pendingWake = false;
+    startTriage();
     if (checking) {
       pendingWake = woke;
       return schedule();
@@ -281,6 +342,8 @@ export async function stopWorkMapLoop(waitMs = 5_000): Promise<void> {
   checking = null;
   activeDeps = null;
   const writes = abortWorkMapRuns();
+  if (triageWork) writes.push(triageWork);
+  triageWork = null;
   if (writes.length === 0) return;
   let t: ReturnType<typeof setTimeout> | undefined;
   const timedOut = await Promise.race([
@@ -288,5 +351,5 @@ export async function stopWorkMapLoop(waitMs = 5_000): Promise<void> {
     new Promise<boolean>((r) => (t = setTimeout(() => r(true), waitMs))),
   ]);
   clearTimeout(t);
-  if (timedOut) log.warn("Shutdown: timed out waiting for the work map write");
+  if (timedOut) log.warn("Shutdown: timed out waiting for the work map write or the decision triage");
 }

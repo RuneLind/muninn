@@ -121,6 +121,26 @@ export interface GitRunOptions {
  *  the per-repo commit queue forever. */
 export const GIT_NETWORK_TIMEOUT_MS = 60_000;
 
+/**
+ * Kill a `detached` child's whole process GROUP, not the pid. Measured on a
+ * fixture push through a hung `GIT_SSH_COMMAND`: `proc.kill(9)` alone left the
+ * ssh child alive (it holds the connection and the inherited pipes), so every
+ * timed-out 15-minute tick would leak one. `-pid` works because `detached` makes
+ * git its own group leader; the plain kill stays as the fallback for a platform
+ * where that did not take.
+ */
+export function killProcessGroup(proc: { pid: number; kill: (signal?: number) => void }): void {
+  try {
+    process.kill(-proc.pid, 9);
+  } catch {
+    try {
+      proc.kill(9);
+    } catch {
+      /* already exited */
+    }
+  }
+}
+
 /** Spawn `git -C <cwd> <args…>` and collect its output. Never throws.
  *
  * `GIT_TERMINAL_PROMPT=0` (merged over the process env) makes any git op that
@@ -173,21 +193,7 @@ export async function runGit(
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expiry = new Promise<null>((resolve) => {
       timer = setTimeout(() => {
-        // Kill the GROUP, not the pid. Measured on a fixture push through a
-        // hung `GIT_SSH_COMMAND`: `proc.kill(9)` alone left the ssh child alive
-        // (it holds the connection and the inherited pipes), so every timed-out
-        // 15-minute tick would leak one. `-pid` works because the spawn above
-        // asked for `detached`, making git its own group leader; the plain kill
-        // stays as the fallback for a platform where that did not take.
-        try {
-          process.kill(-proc.pid, 9);
-        } catch {
-          try {
-            proc.kill(9);
-          } catch {
-            /* already exited */
-          }
-        }
+        killProcessGroup(proc);
         resolve(null);
       }, opts.timeoutMs);
     });

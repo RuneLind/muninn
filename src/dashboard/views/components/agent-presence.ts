@@ -71,6 +71,7 @@ function kindShort(kind: string | undefined): string {
     case "extractor": return "Extractor";
     case "profile": return "Profile";
     case "work_map": return "Work map";
+    case "decision_triage": return "Decision triage";
     default: return "Chat";
   }
 }
