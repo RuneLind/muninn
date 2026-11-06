@@ -171,3 +171,31 @@ test("a load repaints passively, so the card's selection and pointer hold apply"
     initInbox(() => {});
   }
 });
+
+test("every repaint after an await is passive: an answer's reply and a copy's result", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "default", recommendation: "A", choices: ["A"] }), card({ id: "O2", lane: "pass", targets: ["Fag"] })] });
+  const calls: { sel: unknown; passive: unknown }[] = [];
+  initInbox((sel?: string, passive?: boolean) => { calls.push({ sel, passive }); });
+  const g2 = globalThis as { location?: unknown; navigator?: unknown };
+  const savedNav = g2.navigator, savedLoc = g2.location;
+  try {
+    globalThis.fetch = ((url: string) =>
+      url === "/api/wiki/answers" ? Promise.resolve({ ok: true, status: 201, json: async () => ({}) }) : new Promise(() => {})) as unknown as typeof fetch;
+    click("take", "plans/a.mdx#O1");
+    const synchronous = calls.length;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    Object.defineProperty(globalThis, "location", { value: { href: "http://x/wiki" }, configurable: true });
+    Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async () => {} } }, configurable: true });
+    click("copy", "plans/a.mdx#O2");
+    const beforeCopy = calls.length;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(synchronous).toBeGreaterThan(0);
+    expect(calls.slice(synchronous, beforeCopy).length).toBeGreaterThan(0);
+    expect(calls.slice(synchronous).every((c) => c.passive === true)).toBe(true);
+    expect(calls.length).toBeGreaterThan(beforeCopy);
+  } finally {
+    Object.defineProperty(globalThis, "navigator", { value: savedNav, configurable: true });
+    Object.defineProperty(globalThis, "location", { value: savedLoc, configurable: true });
+    initInbox(() => {});
+  }
+});

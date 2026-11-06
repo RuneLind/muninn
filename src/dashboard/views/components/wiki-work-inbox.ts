@@ -46,8 +46,8 @@ const sel = (k: string) => `[data-wi-key="${CSS.escape(k)}"]`;
 const firstLine = (body: string) => (body.split("\n").find((l) => l.trim()) ?? "").replace(/\*\*|__|`/g, "").replace(/^#+\s*/, "");
 const ddmm = (iso: string) => new Date(iso).toLocaleDateString("nb-NO", { day: "2-digit", month: "2-digit" });
 
-/** Wire the repaint; `focusSel` names the control to focus after it. A `passive` one
- *  (a load landing) waits, as the card's own checks answer does, while a selection or a press holds. */
+/** Wire the repaint; `focusSel` names the control to focus after it. A `passive` one, any
+ *  repaint after an await, waits while a selection touches the card or a press is down. */
 export function initInbox(paint: (focusSel?: string, passive?: boolean) => void): void {
   repaint = paint;
   if (listening || typeof document === "undefined" || typeof document.addEventListener !== "function") return;
@@ -194,7 +194,7 @@ async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: 
     const err = data && typeof data === "object" && typeof (data as { error?: unknown }).error === "string" ? (data as { error: string }).error : status ? `HTTP ${status}` : "the server did not answer";
     s.msg[k] = { text: `Couldn’t save the answer: ${err}.`, warn: true, page: false };
   }
-  repaint(`${sel(k)} .wiki-wi-row`);
+  repaint(`${sel(k)} .wiki-wi-row`, true);
   if (status >= 200 && status < 500) loadInbox(s.url);
 }
 
@@ -234,7 +234,7 @@ export function handleInboxClick(target: Element, hrefFor: (rel: string) => stri
       const url = new URL(hrefFor(c.relPath), location.href).href;
       const done = (ok: boolean) => {
         s.msg[k] = ok ? { text: "Link copied.", warn: false, page: false } : { text: `Couldn’t copy: ${url}`, warn: true, page: false };
-        repaint(`${sel(k)} [data-wi-act="copy"]`);
+        repaint(`${sel(k)} [data-wi-act="copy"]`, true);
       };
       navigator.clipboard?.writeText(url).then(() => done(true), () => done(false)) ?? done(false);
       break;

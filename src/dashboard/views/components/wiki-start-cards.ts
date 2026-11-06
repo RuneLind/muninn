@@ -94,9 +94,12 @@ let deps: StartCardsDeps = {
 export function initStartCards(d: StartCardsDeps): void {
   deps = d;
   initInbox((focusSel, passive) => {
-    if (!passive) return paintWorkCard(focusSel ? { sel: focusSel } : undefined);
-    // A load landing mid-press waits for the release, as `flushWaitingPaint` makes a checks answer wait.
-    if (pointerHeld) paintWaiting = true;
+    const focus = focusSel ? { sel: focusSel } : undefined;
+    if (!passive) return paintWorkCard(focus);
+    // After an await: a press or a selection on the card holds it until `flushWaitingPaint`.
+    const el = document.getElementById("wikiWorkCard");
+    if (pointerHeld || (el && selectionTouchesCard(el))) paintWaiting = true;
+    else if (focus) paintWorkCard(focus);
     else paintWorkCardIfChanged();
   });
   // `toggle` does not bubble: capture it, so a lane the reader opens or closes
