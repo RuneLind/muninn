@@ -297,7 +297,7 @@ function versionView(v: WikiAnswerVersion): AnswerVersionView {
 /** The session's author, or the owner with auth off, or null when auth is off
  *  and no owner is configured. The owner is read in the target format, so
  *  `Rune Lind (X111111)` stores the name and keeps the ident for `asked`. */
-function authorFor(c: Context, owner: string | null): WikiAnswerAuthor | null {
+export function answerAuthorFor(c: Context, owner: string | null): WikiAnswerAuthor | null {
   const identity = sessionIdentity(c);
   if (identity) {
     return { userId: identity.userId, oid: identity.oid, navIdent: identity.navIdent, name: identity.displayName };
@@ -565,7 +565,7 @@ export function registerWikiAnswerRoutes(
     if (!page.entry || !wikiTakesAnswers(page.entry.name, cfg)) {
       return err(c, 403, "not_answerable", `wiki "${wiki}" does not take answers (WIKI_ANSWER_WIKIS)`);
     }
-    const author = authorFor(c, cfg.owner);
+    const author = answerAuthorFor(c, cfg.owner);
     if (!author) {
       return err(c, 503, "owner_unset", "WIKI_ANSWER_OWNER is not set: with auth off an answer has no author");
     }

@@ -1,0 +1,201 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import type { DecisionInboxBody, InboxCard } from "../../routes/wiki-decision-inbox.ts";
+import { handleInboxClick, inboxHtml, initInbox, loadInbox } from "./wiki-work-inbox.ts";
+
+// The module's state is shared with the start-cards suites in one `bun test` process:
+// drop the repaint they wired, and give a late paint of theirs no card to write into.
+const saved = { fetch: globalThis.fetch, document: (globalThis as { document?: unknown }).document };
+beforeAll(() => {
+  (globalThis as { document?: unknown }).document = { getElementById: () => null };
+  initInbox(() => {});
+});
+afterAll(() => {
+  globalThis.fetch = saved.fetch;
+  (globalThis as { document?: unknown }).document = saved.document;
+});
+
+const XSS = `<img src=x onerror="alert(1)">`;
+const card = (over: Partial<InboxCard>): InboxCard => ({
+  relPath: "plans/a.mdx", id: "O1", title: "A", body: "Which?", choices: [], recommendation: null, targets: [], added: null, laneSince: null, answers: [], hint: null, viewerAnswered: false, lane: "ask", ...over,
+});
+
+async function load(body: DecisionInboxBody | null, status = 200): Promise<void> {
+  globalThis.fetch = (async () => ({ ok: status === 200, status, json: async () => body })) as unknown as typeof fetch;
+  loadInbox(`/api/wiki/decision-inbox?wiki=w${Math.random()}`);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
+
+test("four lanes, «close?» and «ask you» open, the other two folded, with their counts", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-01T10:00:00Z", questionChanged: false }] }), card({ id: "O2" }), card({ id: "O3", lane: "default" }), card({ id: "O4", lane: "default" })] });
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  const lane = (l: string) => new RegExp(`<details class="wiki-wi-lane" data-wi-lane="${l}"( open)?>.*?wiki-wm-count">(\\d+)<`).exec(html)!;
+  expect([lane("close")[1], lane("close")[2]]).toEqual([" open", "1"]);
+  expect([lane("ask")[1], lane("ask")[2]]).toEqual([" open", "1"]);
+  expect([lane("pass")[1], lane("pass")[2]]).toEqual([undefined, "0"]);
+  expect([lane("default")[1], lane("default")[2]]).toEqual([undefined, "2"]);
+  expect(html).toContain("Decisions · 4 open");
+});
+
+test("every page string is escaped", async () => {
+  await load({ wiki: "w", cards: [card({ id: XSS, title: XSS, body: XSS, lane: "pass", targets: [XSS] })] });
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).not.toContain("<img");
+  expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+});
+
+test("a wiki out of scope (404) paints no section", async () => {
+  await load(null, 404);
+  expect(inboxHtml(() => "", Date.now())).toBe("");
+});
+
+// A click on a row's control, as the card's handler passes it.
+function click(act: string, key: string, extra: Record<string, string> = {}): boolean {
+  const el = (attrs: Record<string, string>) => ({ getAttribute: (n: string) => attrs[n] ?? null });
+  const target = {
+    closest: (s: string) =>
+      s === "#wikiWorkInbox" ? {} : s === "[data-wi-act]" ? el({ "data-wi-act": act, ...extra }) : s === "[data-wi-key]" ? el({ "data-wi-key": key }) : null,
+  } as unknown as Element;
+  return handleInboxClick(target, (rel) => `/wiki?relPath=${rel}`);
+}
+const g = globalThis as { CSS?: unknown };
+g.CSS ??= { escape: (s: string) => s };
+
+test("an open row escapes its body, answers, authors, choices and hint", async () => {
+  const c = card({
+    id: "O9", lane: "close", body: XSS, choices: [XSS], recommendation: XSS,
+    answers: [{ author: XSS, choice: XSS, body: XSS, at: "2026-11-01T10:00:00Z", questionChanged: false }],
+    hint: { decision: XSS, decisionText: XSS, namedBy: null, word: null, ownItem: null },
+  });
+  await load({ wiki: "w", cards: [c, card({ id: "O8", lane: "default", body: XSS, choices: [XSS], recommendation: XSS })] });
+  click("row", "plans/a.mdx#O9");
+  expect(inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now())).not.toContain("<img");
+  click("row", "plans/a.mdx#O8");
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).toContain('class="wiki-wi-detail"');
+  expect(html).not.toContain("<img");
+});
+
+test("a reply to one card's answer leaves another card's answer in flight", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "default", recommendation: "A", choices: ["A"] }), card({ id: "O2", lane: "default", recommendation: "A", choices: ["A"] })] });
+  const replies: ((r: unknown) => void)[] = [];
+  globalThis.fetch = ((url: string) =>
+    url === "/api/wiki/answers" ? new Promise((res) => replies.push(res)) : new Promise(() => {})) as unknown as typeof fetch;
+  click("take", "plans/a.mdx#O1");
+  click("row", "plans/a.mdx#O2");
+  click("take", "plans/a.mdx#O2");
+  expect(replies.length).toBe(2);
+  replies[0]!({ ok: true, status: 200, json: async () => ({}) });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  // O2's POST is still out: a second Take must not send again.
+  click("take", "plans/a.mdx#O2");
+  expect(replies.length).toBe(2);
+  expect(inboxHtml(() => "", Date.now())).toMatch(/data-wi-act="take" disabled/);
+});
+
+test("a failed load says so, and keeps the cards it had", async () => {
+  await load(null, 500);
+  expect(inboxHtml(() => "", Date.now())).toContain("couldn’t load");
+  const url = "/api/wiki/decision-inbox?wiki=keep";
+  globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => ({ wiki: "w", cards: [card({ id: "O1" })] }) })) as unknown as typeof fetch;
+  loadInbox(url);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  globalThis.fetch = (async () => { throw new Error("offline"); }) as unknown as typeof fetch;
+  loadInbox(url);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain("Decisions · 1 open");
+  expect(html).toContain("couldn’t load");
+});
+
+test("a card the owner already answered offers the page, not a form that would 409", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O4", lane: "ask", choices: ["A", "B"], viewerAnswered: true, answers: [{ author: "R", choice: "not-sure", body: "", at: "2026-11-01T10:00:00Z", questionChanged: false }] })] });
+  click("row", "plans/a.mdx#O4");
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).toContain("change it on the page");
+  expect(html).not.toContain('data-wi-act="answer"');
+});
+
+test("an answer to older wording tags the row «wording changed», not «answered»", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O5", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-01T10:00:00Z", questionChanged: true }] })] });
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toMatch(/wiki-wi-tag warn">wording changed</);
+  expect(html).not.toContain(">answered<");
+});
+
+test("a 409 already_answered from a race says so, links the page and sends nothing more", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O3", lane: "default", recommendation: "A", choices: ["A"] })] });
+  let posts = 0;
+  globalThis.fetch = ((url: string) => {
+    if (url !== "/api/wiki/answers") return new Promise(() => {});
+    posts++;
+    return Promise.resolve({ ok: false, status: 409, json: async () => ({ code: "already_answered", answerId: "a1", version: 1 }) });
+  }) as unknown as typeof fetch;
+  click("row", "plans/a.mdx#O3");
+  click("take", "plans/a.mdx#O3");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).toContain("already has your answer");
+  expect(html).toMatch(/wiki-wi-msg warn[^]*?data-relpath="plans\/a.mdx"/);
+  expect(posts).toBe(1);
+});
+
+test("a good load after a failed one clears the failure line", async () => {
+  const url = "/api/wiki/decision-inbox?wiki=recover";
+  globalThis.fetch = (async () => ({ ok: false, status: 500, json: async () => ({}) })) as unknown as typeof fetch;
+  loadInbox(url);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(inboxHtml(() => "", Date.now())).toContain("couldn’t load");
+  globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => ({ wiki: "w", cards: [card({ id: "O1" })] }) })) as unknown as typeof fetch;
+  loadInbox(url);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(inboxHtml(() => "", Date.now())).not.toContain("couldn’t load");
+});
+
+test("a 200 that is not an inbox says the server answered, not that it was silent", async () => {
+  globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("<html>"); } })) as unknown as typeof fetch;
+  loadInbox("/api/wiki/decision-inbox?wiki=html");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain("couldn’t load: HTTP 200, not an inbox");
+  expect(html).not.toContain("did not answer");
+});
+
+test("a load repaints passively, so the card's selection and pointer hold apply", async () => {
+  const calls: unknown[][] = [];
+  initInbox((...args: unknown[]) => { calls.push(args); });
+  try {
+    await load({ wiki: "w", cards: [card({ id: "O1" })] });
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((a) => a[1] === true)).toBe(true);
+  } finally {
+    initInbox(() => {});
+  }
+});
+
+test("every repaint after an await is passive: an answer's reply and a copy's result", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "default", recommendation: "A", choices: ["A"] }), card({ id: "O2", lane: "pass", targets: ["Fag"] })] });
+  const calls: { sel: unknown; passive: unknown }[] = [];
+  initInbox((sel?: string, passive?: boolean) => { calls.push({ sel, passive }); });
+  const g2 = globalThis as { location?: unknown; navigator?: unknown };
+  const savedNav = g2.navigator, savedLoc = g2.location;
+  try {
+    globalThis.fetch = ((url: string) =>
+      url === "/api/wiki/answers" ? Promise.resolve({ ok: true, status: 201, json: async () => ({}) }) : new Promise(() => {})) as unknown as typeof fetch;
+    click("take", "plans/a.mdx#O1");
+    const synchronous = calls.length;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    Object.defineProperty(globalThis, "location", { value: { href: "http://x/wiki" }, configurable: true });
+    Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async () => {} } }, configurable: true });
+    click("copy", "plans/a.mdx#O2");
+    const beforeCopy = calls.length;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(synchronous).toBeGreaterThan(0);
+    expect(calls.slice(synchronous, beforeCopy).length).toBeGreaterThan(0);
+    expect(calls.slice(synchronous).every((c) => c.passive === true)).toBe(true);
+    expect(calls.length).toBeGreaterThan(beforeCopy);
+  } finally {
+    Object.defineProperty(globalThis, "navigator", { value: savedNav, configurable: true });
+    Object.defineProperty(globalThis, "location", { value: savedLoc, configurable: true });
+    initInbox(() => {});
+  }
+});

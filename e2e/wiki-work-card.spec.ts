@@ -3807,3 +3807,31 @@ test.describe("at device scale 0.9", () => {
     expect(r.inked).toBeGreaterThan(0.8);
   });
 });
+
+test("an inbox load landing mid-press waits for the release, then paints", async ({ page }) => {
+  let releaseInbox: () => void = () => {};
+  const gate = new Promise<void>((r) => { releaseInbox = r; });
+  let served = 0;
+  await page.route("**/api/wiki/decision-inbox**", async (route) => {
+    await gate;
+    served++;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ wiki: "x", cards: [{ relPath: "plans/a.mdx", id: "ZZQ1", title: "ZZ title", body: "Which?", choices: [], recommendation: null, targets: [], added: null, laneSince: null, answers: [], hint: null, viewerAnswered: false, lane: "ask" }] }) });
+  });
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  await expect(card.locator(".wiki-wm-strip")).toBeVisible();
+  await card.locator(".wiki-wm-strip").evaluate((el) => el.setAttribute("data-before-repaint", ""));
+  const start = await pressPoint(card);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + start.width / 2, start.y + 2, { steps: 6 });
+  await page.mouse.move(start.x, start.y, { steps: 6 });
+  await expect.poll(() => page.evaluate(() => getSelection()!.isCollapsed)).toBe(true);
+  releaseInbox();
+  await expect.poll(() => served).toBe(1);
+  await page.waitForTimeout(300);
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  await page.mouse.up();
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  await expect(card.locator("#wikiWorkInbox")).toContainText("ZZ title");
+});

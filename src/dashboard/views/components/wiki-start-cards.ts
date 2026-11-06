@@ -43,6 +43,7 @@ import {
 import type { WorkMapChecksBody } from "../../../wiki/work-map/gh-check.ts";
 import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
 import { declarationKey, isThemeMap } from "../../../wiki/work-map/join.ts";
+import { handleInboxClick, inboxHtml, initInbox, loadInbox } from "./wiki-work-inbox.ts";
 import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
 
 export interface StartCardsDeps {
@@ -92,6 +93,15 @@ let deps: StartCardsDeps = {
 /** Wire the cards to the shell. Called once, at `wiki-browser.ts` module scope. */
 export function initStartCards(d: StartCardsDeps): void {
   deps = d;
+  initInbox((focusSel, passive) => {
+    const focus = focusSel ? { sel: focusSel } : undefined;
+    if (!passive) return paintWorkCard(focus);
+    // After an await: a press or a selection on the card holds it until `flushWaitingPaint`.
+    const el = document.getElementById("wikiWorkCard");
+    if (pointerHeld || (el && selectionTouchesCard(el))) paintWaiting = true;
+    else if (focus) paintWorkCard(focus);
+    else paintWorkCardIfChanged();
+  });
   // `toggle` does not bubble: capture it, so a lane the reader opens or closes
   // is remembered across the card's repaints and the start view's rebuilds.
   if (!laneListening && typeof document !== "undefined" && typeof document.addEventListener === "function") {
@@ -1038,18 +1048,23 @@ function onPointerEnd(): void {
   if (paintWaiting) setTimeout(flushWaitingPaint, 0);
 }
 
+function pageHref(rel: string): string {
+  return deps.hrefFor ? deps.hrefFor(rel) : withWiki("/wiki?relPath=" + encodeURIComponent(rel));
+}
+
 function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   const el = document.getElementById("wikiWorkCard");
   if (!el || !workBody || slot.kind !== "card") return;
   const runAt = workBody.map.runAtMs;
   const pages = deps.pages ? deps.pages() : [];
+  const now = Date.now();
   const html = workCardHtml({
     body: workBody,
     pages,
-    now: Date.now(),
+    now,
     done: parseDone(readDoneRaw(), runAt),
     openWhy: whyOpen,
-    hrefFor: deps.hrefFor ?? ((rel) => withWiki("/wiki?relPath=" + encodeURIComponent(rel))),
+    hrefFor: pageHref,
     ...(deps.effortHref ? { effortHref: deps.effortHref } : {}),
     refresh: workRefresh,
     waitsCounted: deps.waitsCounted ? deps.waitsCounted() : false,
@@ -1060,7 +1075,7 @@ function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
       failed: !!workChecks?.failed,
       retrying: workChecksTimer !== null || workChecksGen === slot.gen,
     },
-  });
+  }) + inboxHtml(pageHref, now);
   // Before the early return: this listing has been rendered, so the next adopt
   // compares against it and does not render the card again for the same keys.
   paintedDeclarationKey = declarationKey(pages, runAt);
@@ -1248,6 +1263,8 @@ function loadWorkMap(): void {
       if (slot.kind !== "card") return;
       workBody = body as WorkMapGetBody & { map: AnyWorkMap };
       paintWorkCard();
+      // A wiki outside the decision triage's scope answers 404: the card shows no Decisions section.
+      if (!isThemeMap(workBody.map)) loadInbox(withWiki("/api/wiki/decision-inbox"));
     })
     .catch((err) => {
       if (!settle()) return;
@@ -1335,6 +1352,7 @@ function pollWorkMap(prevRunAt: number, startedAt: number, since: number, failur
 /** The Your work card's clicks, from the shell's click delegate. True when
  *  the click was the card's. */
 export function handleWorkCardClick(target: Element): boolean {
+  if (handleInboxClick(target, pageHref)) return true;
   if (target.closest("#wikiWorkMapRefresh")) {
     startWorkMapRefresh();
     return true;

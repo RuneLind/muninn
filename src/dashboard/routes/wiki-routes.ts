@@ -56,6 +56,7 @@ import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { registerWikiWorkMapRoutes } from "./wiki-work-map.ts";
+import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
 import { isReadonlyWikiRoot, isWikiReadonly, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { linkingBuckets, movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
@@ -2049,6 +2050,8 @@ export function registerWikiToolRoutes(
   // The work map's read and its ↻ (`src/wiki/work-map/`): bound to a wiki
   // root on this machine and to a model call, so dropped on nais.
   registerWikiWorkMapRoutes(app, config);
+  // The decision inbox on the Your work card: bound to a wiki root on this machine.
+  registerWikiDecisionInboxRoute(app, config);
   // The find palette's Everywhere section: every registered wiki through three
   // legs. Same group: it reads every wiki's index on this machine.
   registerWikiFindEverywhereRoute(app, config);
