@@ -10,10 +10,9 @@
  *   (no mode)                                  the nightly logs' figures
  *
  * `--dry-run` gathers facts, makes no model call, reads no label and writes nothing.
- * `--since` makes no model call either when its headline will be TOO EARLY or TOO FEW.
- * From day 14 each real `--since` goes on the record (`part2-scorings.jsonl` in the log
- * folder), which allows one decision scoring, then only the first at or past day 28.
- * `--hand` on a scoring already recorded adds the sample to its figures, once.
+ * While `--since` is off, `modePart2` below keeps part (2) as built: TOO EARLY or TOO
+ * FEW make no call, from day 14 each real `--since` goes on `part2-scorings.jsonl`, and
+ * `--hand` amends a recorded scoring once.
  * `--root <wiki>=<path>` (repeatable) names a wiki's root; `--log-dir <dir>` moves
  * the logs. Both replays refuse without DECISION_TRIAGE_REPO_ROOTS, or on a wiki
  * `scope.ts` refuses (a readonly root). From a worktree, run with `bun --env-file <checkout>/.env`.
@@ -71,7 +70,7 @@ import { getWikiIndex, readWikiPage } from "../src/wiki/store.ts";
 import { parseBlocks } from "../src/format/markdown-ast.ts";
 import { splitFrontmatter } from "../src/wiki/page-text.ts";
 
-const USAGE = "usage: bun scripts/decision-triage-score.ts [--replay [--baseline <file>] | --since <YYYY-MM-DD> [--final] [--hand <file>] | --labels [--until <iso>]] [--dry-run] [--root <wiki>=<path>] [--log-dir <dir>]";
+const USAGE = "usage: bun scripts/decision-triage-score.ts [--replay [--baseline <file>] | --labels [--until <iso>]] [--dry-run] [--root <wiki>=<path>] [--log-dir <dir>] (--since is off under D19)";
 const usageExit = (message: string): never => {
   console.error(`usage error: ${message}. ${USAGE}`);
   process.exit(2);
@@ -379,7 +378,11 @@ try {
   if (values.replay) exit = await modePart1();
   // D19's stop trigger: the night asks no model, so part (2) has no verdict to score.
   // `modePart2` stays for a retry.
-  else if (sinceArg !== null) throw new ReplayRefused(PART2_OFF);
+  else if (sinceArg !== null) {
+    // A stop by decision, not a setup fault: its own line, same exit as a refusal.
+    console.error(`OFF: ${PART2_OFF}.`);
+    exit = 2;
+  }
   else if (values.labels) exit = await modeLabels();
   else {
     const wikis = await reportWikis();
