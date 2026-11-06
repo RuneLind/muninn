@@ -12,7 +12,7 @@ import { osloDay } from "../work-map/ids.ts";
 import type { WorkMapState } from "../work-map/state.ts";
 import { appendLogLines, DECISION_TRIAGE_DIR, nightlyLogPath, readLog, triageStateStore } from "./log.ts";
 import { runDecisionTriage, type TriageProgress, type TriageRunDeps, type TriageRunResult } from "./run.ts";
-import { DECISION_TRIAGE_PROMPT_VERSION, type RunLine } from "./schema.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION, MODEL_OFF_MODEL, MODEL_OFF_VERSION, type RunLine } from "./schema.ts";
 import { realTriageRunDeps, triageScope } from "./scope.ts";
 
 const log = getLog("wiki", "decision-triage");
@@ -96,7 +96,7 @@ export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE
     const reason = done && done.open !== null ? `${error}; ${done.verdicts} verdict(s) in ${done.cardsLogged} card line(s) logged of ${done.open} open card(s), ${done.usage.calls} call(s) answered` : error;
     await state.record(wiki, { at: now, outcome: outcome === "partial" ? "ok" : "failed", error: reason });
     await appendLogLines(nightlyLogPath(wiki, dir), [
-      { type: "run", runId: done?.runId ?? randomUUID(), at: done?.at ?? now, wiki, model: config.workMapModel, promptVersion: DECISION_TRIAGE_PROMPT_VERSION, usage: done?.usage ?? { calls: 0 }, repoRoots: config.decisionTriageRepoRoots, repos: done?.repos ?? [], cards: done?.cardsLogged ?? 0, floor: null, outcome, reason },
+      { type: "run", runId: done?.runId ?? randomUUID(), at: done?.at ?? now, wiki, model: done?.model ?? (over.call ? config.workMapModel : MODEL_OFF_MODEL), promptVersion: done?.promptVersion ?? (over.call ? DECISION_TRIAGE_PROMPT_VERSION : MODEL_OFF_VERSION), usage: done?.usage ?? { calls: 0 }, repoRoots: config.decisionTriageRepoRoots, repos: done?.repos ?? [], cards: done?.cardsLogged ?? 0, floor: null, outcome, reason },
     ]);
     return outcome;
   };

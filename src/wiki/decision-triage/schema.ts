@@ -7,6 +7,11 @@ import { z } from "zod";
 
 /** Changes only by hand, with the prompt. A new value restarts part (2): its day,
  *  its answer window and the figures read only this version's lines. */
+/** The version on a line written with the model call off (D19): no reader of the current
+ *  prompt's lines counts it, so a retry's clock and answer window start at its own first night. */
+export const MODEL_OFF_VERSION = "off";
+/** The model on such a line: none ran. */
+export const MODEL_OFF_MODEL = "none";
 export const DECISION_TRIAGE_PROMPT_VERSION = "2026-11-05.5";
 /** The frozen prompt's date: part (2) replays answers given after it. */
 export const DECISION_TRIAGE_PROMPT_FROZEN_ON = "2026-11-05";

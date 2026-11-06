@@ -25,6 +25,8 @@ import { buildBatches, TRIAGE_SYSTEM_PROMPT, type Batch, type BatchItem } from "
 import {
   answerSchema,
   DECISION_TRIAGE_PROMPT_VERSION,
+  MODEL_OFF_MODEL,
+  MODEL_OFF_VERSION,
   verdictSchema,
   type CardLine,
   type FloorState,
@@ -211,6 +213,9 @@ export interface TriageProgress {
   open: number | null;
   cardsLogged: number;
   verdicts: number;
+  /** What this pass's lines carry: the prompt's, or `MODEL_OFF_*` with the call off. */
+  promptVersion: string;
+  model: string;
 }
 
 export interface TriageRunDeps {
@@ -250,7 +255,9 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   const runId = randomUUID();
   const wiki = deps.entry.name;
   const usage: TriageUsage = { calls: 0 };
-  const progress: TriageProgress = { runId, at: startedAt, usage, repos: [], open: null, cardsLogged: 0, verdicts: 0 };
+  const promptVersion = deps.call ? DECISION_TRIAGE_PROMPT_VERSION : MODEL_OFF_VERSION;
+  const model = deps.call ? deps.model : MODEL_OFF_MODEL;
+  const progress: TriageProgress = { runId, at: startedAt, usage, repos: [], open: null, cardsLogged: 0, verdicts: 0, promptVersion, model };
   deps.track?.(progress);
   const counts: Record<string, number> = {};
   const roots = parseRepoRoots(deps.repoRoots);
@@ -272,8 +279,8 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
       runId,
       at: startedAt,
       wiki,
-      model: deps.model,
-      promptVersion: DECISION_TRIAGE_PROMPT_VERSION,
+      model,
+      promptVersion,
       usage,
       repoRoots: deps.repoRoots,
       repos: await resolver.facts(),
@@ -329,7 +336,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   const ctx: GatherContext = { git: deps.git, repo: resolver.repo, answers: versions, owner: deps.owner, groups: deps.groups };
   const line = (fields: Omit<CardLine, "type" | "runId" | "at" | "wiki" | "promptVersion">): CardLine => {
     counts[fields.verdict] = (counts[fields.verdict] ?? 0) + 1;
-    return { type: "card", runId, at: startedAt, wiki, promptVersion: DECISION_TRIAGE_PROMPT_VERSION, ...fields };
+    return { type: "card", runId, at: startedAt, wiki, promptVersion, ...fields };
   };
   const base = (relPath: string, id: string) => {
     const q = byPage.get(relPath)!.page.questions.find((x) => x.id === id)!;

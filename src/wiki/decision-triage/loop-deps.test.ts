@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
+import { MODEL_OFF_MODEL, MODEL_OFF_VERSION } from "./schema.ts";
 import { commitAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 
 const LOOP_DEPS = path.join(import.meta.dir, "loop-deps.ts");
@@ -255,6 +256,19 @@ seen.push(await deps.readState("a"));
     expect(lines.filter((l) => l.type === "card").every((c) => c.runId === runs[0]!.runId)).toBe(true);
     expect(seen[0]).toEqual({ outcome: "partial" });
     expect((seen[1] as unknown as { attempts: { outcome: string }[] }).attempts[0]!.outcome).toBe("ok");
+  });
+
+  test("with the model call off (no call seam), a thrown night and a bare record carry the off version and no model", async () => {
+    const { tmp, env } = withCards(3);
+    await drive(`
+await deps.run("a", new AbortController().signal);
+await deps.recordFailed("a", "later");
+`, env, tmp, `append: async (l) => { if (l.some((x) => x.type === "card")) throw new Error("disk full"); await appendLogLines(logs + "/a.jsonl", l); }`);
+    const runs = logOf(tmp).filter((l) => l.type === "run");
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toMatchObject({ outcome: "failed", promptVersion: MODEL_OFF_VERSION, model: MODEL_OFF_MODEL });
+    expect(String(runs[0]!.reason)).toStartWith("disk full");
+    expect(runs[1]).toMatchObject({ outcome: "failed", promptVersion: MODEL_OFF_VERSION, model: MODEL_OFF_MODEL, reason: "later" });
   });
 
   test("a record after a run that finished is about no run: a fresh id and zeros, never the finished run's", async () => {

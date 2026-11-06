@@ -16,7 +16,9 @@ import { TRIAGE_SYSTEM_PROMPT } from "./prompt.ts";
 import { decisionTriageBotConfig, MODEL_OFF, parseVerdicts, realDecisionTriageModel, runDecisionTriage, type TriageModel, type TriageProgress, type TriageRunDeps } from "./run.ts";
 import { commitAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 import { realGit } from "./git.ts";
-import { DECISION_TRIAGE_PROMPT_VERSION, type LogLine } from "./schema.ts";
+import { DECISION_TRIAGE_PROMPT_VERSION, MODEL_OFF_MODEL, MODEL_OFF_VERSION, type LogLine } from "./schema.ts";
+import { part2Day } from "./part2.ts";
+import { answerWindowMs, frozenAfterMs } from "./floor.ts";
 
 const card = (id: string, extra = "") => `<Question id="${id}" choices="A|B">\nSkal vi ${id}?${extra}\n\n**Recommendation: A.** Fordi.\n</Question>\n`;
 const page = (body: string, fm = "") => `---\ntitle: T\nrepos: [code]\n${fm}---\n# T\n\n${body}\n`;
@@ -300,6 +302,14 @@ describe("partial and failed nights", () => {
     expect(runs[0]).toMatchObject({ outcome: "partial", reason: "1 card(s) with no facts" });
   });
 
+  test("a gather failure with the model off: partial, and the reason names both", async () => {
+    const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1", NAMES_A)}\n${card("O2")}`) } }, factsThrow({ call: null })));
+    expect(res.outcome).toBe("partial");
+    const { runs, cards } = await readLog(dirs.log);
+    expect(runs[0]).toMatchObject({ outcome: "partial", reason: `${MODEL_OFF}, 1 card(s) with no facts`, promptVersion: MODEL_OFF_VERSION });
+    expect(cards.map((c) => c.verdict)).toEqual(["NO_VERDICT", "NO_VERDICT"]);
+  });
+
   test("the memory guard stopping every card is a failed night too", async () => {
     const spy = spyOn(process, "memoryUsage").mockReturnValue({ rss: 4 * 1024 ** 3 } as never);
     try {
@@ -557,8 +567,13 @@ describe("the model call off (D19)", () => {
     const { cards, runs } = await readLog(dirs.log);
     expect(cards.map((c) => [c.id, c.verdict, c.reason])).toEqual([["O1", "NO_VERDICT", MODEL_OFF], ["O2", "NO_VERDICT", MODEL_OFF]]);
     expect(cards.every((c) => typeof c.codeFacts === "boolean")).toBe(true);
-    expect(runs[0]).toMatchObject({ outcome: "ok", reason: MODEL_OFF, cards: 2, usage: { calls: 0 } });
+    expect(runs[0]).toMatchObject({ outcome: "ok", reason: MODEL_OFF, cards: 2, usage: { calls: 0 }, promptVersion: MODEL_OFF_VERSION, model: MODEL_OFF_MODEL });
+    expect(cards.every((c) => c.promptVersion === MODEL_OFF_VERSION)).toBe(true);
+    // A retry's clock and answer window start at its own first night, not at this one.
+    expect(part2Day(runs, Date.parse("2026-12-01T05:00:00Z"))).toBeNull();
+    expect(answerWindowMs(runs)).toBe(frozenAfterMs());
   });
+
 
   test("a card answered by a choice keeps its ANSWERED line", async () => {
     const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }, { call: null, answers: async () => [answer("O1")] }));
