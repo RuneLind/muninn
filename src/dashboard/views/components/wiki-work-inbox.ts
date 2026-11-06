@@ -39,15 +39,16 @@ interface InboxState {
 let st: InboxState | null = null;
 let loadSeq = 0;
 let listening = false;
-let repaint: (focusSel?: string) => void = () => {};
+let repaint: (focusSel?: string, passive?: boolean) => void = () => {};
 
 const keyOf = (c: InboxCard) => `${c.relPath}#${c.id}`;
 const sel = (k: string) => `[data-wi-key="${CSS.escape(k)}"]`;
 const firstLine = (body: string) => (body.split("\n").find((l) => l.trim()) ?? "").replace(/\*\*|__|`/g, "").replace(/^#+\s*/, "");
 const ddmm = (iso: string) => new Date(iso).toLocaleDateString("nb-NO", { day: "2-digit", month: "2-digit" });
 
-/** Wire the repaint; `focusSel` names the control to focus after it. */
-export function initInbox(paint: (focusSel?: string) => void): void {
+/** Wire the repaint; `focusSel` names the control to focus after it. A `passive` one
+ *  (a load landing) waits, as the card's own checks answer does, while a selection or a press holds. */
+export function initInbox(paint: (focusSel?: string, passive?: boolean) => void): void {
   repaint = paint;
   if (listening || typeof document === "undefined" || typeof document.addEventListener !== "function") return;
   listening = true;
@@ -77,7 +78,7 @@ export function loadInbox(url: string): void {
         st.body = null;
         st.failed = null;
       } else st.failed = !status ? "the server did not answer" : status < 300 ? `HTTP ${status}, not an inbox` : `HTTP ${status}`;
-      repaint();
+      repaint(undefined, true);
     });
 }
 

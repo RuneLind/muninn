@@ -159,3 +159,15 @@ test("a 200 that is not an inbox says the server answered, not that it was silen
   expect(html).toContain("couldn’t load: HTTP 200, not an inbox");
   expect(html).not.toContain("did not answer");
 });
+
+test("a load repaints passively, so the card's selection and pointer hold apply", async () => {
+  const calls: unknown[][] = [];
+  initInbox((...args: unknown[]) => { calls.push(args); });
+  try {
+    await load({ wiki: "w", cards: [card({ id: "O1" })] });
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((a) => a[1] === true)).toBe(true);
+  } finally {
+    initInbox(() => {});
+  }
+});

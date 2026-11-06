@@ -93,7 +93,12 @@ let deps: StartCardsDeps = {
 /** Wire the cards to the shell. Called once, at `wiki-browser.ts` module scope. */
 export function initStartCards(d: StartCardsDeps): void {
   deps = d;
-  initInbox((focusSel) => paintWorkCard(focusSel ? { sel: focusSel } : undefined));
+  initInbox((focusSel, passive) => {
+    if (!passive) return paintWorkCard(focusSel ? { sel: focusSel } : undefined);
+    // A load landing mid-press waits for the release, as `flushWaitingPaint` makes a checks answer wait.
+    if (pointerHeld) paintWaiting = true;
+    else paintWorkCardIfChanged();
+  });
   // `toggle` does not bubble: capture it, so a lane the reader opens or closes
   // is remembered across the card's repaints and the start view's rebuilds.
   if (!laneListening && typeof document !== "undefined" && typeof document.addEventListener === "function") {
