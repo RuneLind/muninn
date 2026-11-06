@@ -29,7 +29,10 @@ interface InboxState {
   laneOpen: Partial<Record<InboxLane, boolean>>;
   picked: Record<string, string>;
   notes: Record<string, string>;
-  sending: string | null;
+  /** Cards whose POST is out, one entry each: a reply clears only its own. */
+  sending: Record<string, true>;
+  /** The last load failed (not a 404): said in the section, the cards it had kept. */
+  failed: string | null;
   msg: Record<string, { text: string; warn: boolean; page: boolean }>;
 }
 
@@ -61,19 +64,25 @@ export function initInbox(paint: (focusSel?: string) => void): void {
 /** Fetch the inbox (`url` carries the wiki). A wiki outside the triage scope answers 404: no section. */
 export function loadInbox(url: string): void {
   const seq = ++loadSeq;
-  if (!st || st.url !== url) st = { url, body: null, open: null, laneOpen: {}, picked: {}, notes: {}, sending: null, msg: {} };
+  if (!st || st.url !== url) st = { url, body: null, open: null, laneOpen: {}, picked: {}, notes: {}, sending: {}, failed: null, msg: {} };
   fetch(url)
-    .then(async (r) => (r.ok ? ((await r.json()) as DecisionInboxBody) : null))
-    .catch(() => null)
-    .then((body) => {
+    .then(async (r) => ({ status: r.status, body: r.ok ? ((await r.json()) as DecisionInboxBody) : null }))
+    .catch(() => ({ status: 0, body: null }))
+    .then(({ status, body }) => {
       if (seq !== loadSeq || !st || st.url !== url) return;
-      st.body = body && Array.isArray(body.cards) ? body : null;
+      if (body && Array.isArray(body.cards)) {
+        st.body = body;
+        st.failed = null;
+      } else if (status === 404) {
+        st.body = null;
+        st.failed = null;
+      } else st.failed = status ? `HTTP ${status}` : "the server did not answer";
       repaint();
     });
 }
 
 function canAnswer(k: string): boolean {
-  return !!st && st.sending !== k && (!!st.picked[k] || !!st.notes[k]?.trim());
+  return !!st && !st.sending[k] && (!!st.picked[k] || !!st.notes[k]?.trim());
 }
 
 function evidenceHtml(c: InboxCard): string {
@@ -103,7 +112,7 @@ function actionsHtml(c: InboxCard, k: string, href: string): string {
   if (c.lane === "pass") {
     return `<div class="wiki-wi-acts"><button class="wiki-wi-btn primary" data-wi-act="copy">Copy the link for ${esc(c.targets.join(", "))}</button>${open}</div>`;
   }
-  const busy = s.sending === k ? " disabled" : "";
+  const busy = s.sending[k] ? " disabled" : "";
   const choices = c.choices.length ? [...c.choices, QUESTION_NOT_SURE] : [];
   const picks = choices
     .map((ch) => `<button class="wiki-wi-btn${s.picked[k] === ch ? " on" : ""}" data-wi-act="pick" data-wi-choice="${esc(ch)}" aria-pressed="${s.picked[k] === ch}"${busy}>${esc(ch === QUESTION_NOT_SURE ? "Not sure" : ch)}${ch === c.recommendation ? " ★" : ""}</button>`)
@@ -113,7 +122,7 @@ function actionsHtml(c: InboxCard, k: string, href: string): string {
     take +
     (picks ? `<div class="wiki-wi-acts">${picks}</div>` : "") +
     `<textarea class="wiki-wi-note" data-wi-note="${esc(k)}" rows="2" placeholder="Note (optional)" aria-label="Note"${busy}>${esc(s.notes[k] ?? "")}</textarea>` +
-    `<div class="wiki-wi-acts"><button class="wiki-wi-btn primary" data-wi-act="answer"${canAnswer(k) ? "" : " disabled"}>${s.sending === k ? "Saving…" : "Answer"}</button>${open}</div>`
+    `<div class="wiki-wi-acts"><button class="wiki-wi-btn primary" data-wi-act="answer"${canAnswer(k) ? "" : " disabled"}>${s.sending[k] ? "Saving…" : "Answer"}</button>${open}</div>`
   );
 }
 
@@ -138,21 +147,23 @@ function rowHtml(c: InboxCard, now: number, hrefFor: (rel: string) => string): s
 
 /** The section's markup, or "" before the inbox has loaded or where it is out of scope. */
 export function inboxHtml(hrefFor: (rel: string) => string, now: number): string {
-  if (!st?.body) return "";
+  if (!st) return "";
   const s = st;
-  const cards = s.body!.cards;
+  const failed = s.failed ? `<div class="wiki-wi-msg warn" role="status">The inbox couldn’t load: ${esc(s.failed)}.</div>` : "";
+  if (!s.body) return failed ? `<div class="wiki-wm-section wiki-wi" id="wikiWorkInbox"><div class="wiki-wm-section-title">Decisions</div>${failed}</div>` : "";
+  const cards = s.body.cards;
   const lanes = LANES.map(({ lane, label, hint, open }) => {
     const list = cards.filter((c) => c.lane === lane);
     const isOpen = s.laneOpen[lane] ?? (open || list.some((c) => keyOf(c) === s.open));
     const rows = list.length ? `<ul class="wiki-wi-rows">${list.map((c) => rowHtml(c, now, hrefFor)).join("")}</ul>` : `<div class="wiki-wm-empty">None.</div>`;
     return `<details class="wiki-wi-lane" data-wi-lane="${lane}"${isOpen ? " open" : ""}><summary class="wiki-wm-lane-title">${label} <span class="wiki-wm-count">${list.length}</span> <span class="wiki-wi-hint">${hint}</span></summary>${rows}</details>`;
   }).join("");
-  return `<div class="wiki-wm-section wiki-wi" id="wikiWorkInbox"><div class="wiki-wm-section-title">Decisions · ${cards.length} open</div>${lanes}</div>`;
+  return `<div class="wiki-wm-section wiki-wi" id="wikiWorkInbox"><div class="wiki-wm-section-title">Decisions · ${cards.length} open</div>${failed}${lanes}</div>`;
 }
 
 async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: string): Promise<void> {
   const s = st!;
-  s.sending = k;
+  s.sending[k] = true;
   delete s.msg[k];
   repaint(`${sel(k)} .wiki-wi-row`);
   let status = 0;
@@ -169,7 +180,7 @@ async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: 
     status = 0;
   }
   if (st !== s) return;
-  s.sending = null;
+  delete s.sending[k];
   if (status >= 200 && status < 300) {
     delete s.picked[k];
     delete s.notes[k];
@@ -214,7 +225,7 @@ export function handleInboxClick(target: Element, hrefFor: (rel: string) => stri
       if (canAnswer(k)) void sendAnswer(c, k, s.picked[k] || null, s.notes[k] ?? "");
       break;
     case "take":
-      if (c.recommendation && s.sending !== k) void sendAnswer(c, k, c.recommendation, "");
+      if (c.recommendation && !s.sending[k]) void sendAnswer(c, k, c.recommendation, "");
       break;
     case "copy": {
       const url = new URL(hrefFor(c.relPath), location.href).href;

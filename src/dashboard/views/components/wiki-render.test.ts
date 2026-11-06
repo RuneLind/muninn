@@ -91,8 +91,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-03: the board (your-work board P3) took it to 1,404,017 bytes.
 // 2026-11-04: the card waiting on a selection (O5 gap 1) took it to 1,405,468 bytes.
 // 2026-11-04: a Settled block on a page with no lane took it to 1,406,807 bytes.
-// 2026-11-06: the decision inbox on the Your work card took it to 1,417,581 bytes.
-const WIKI_CLIENT_MAX_BYTES = 1_418_000;
+// 2026-11-06: the decision inbox on the Your work card took it to 1,417,581 bytes,
+// and its load-failure line and per-card sending state to 1,418,173.
+const WIKI_CLIENT_MAX_BYTES = 1_418_700;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
