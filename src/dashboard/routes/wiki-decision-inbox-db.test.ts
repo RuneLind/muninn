@@ -16,6 +16,7 @@ import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 import { registerWikiAnswerRoutes } from "./wiki-answers.ts";
+import { insertWikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { registerWikiDecisionInboxRoute, type DecisionInboxBody } from "./wiki-decision-inbox.ts";
 
 setupTestDb();
@@ -138,9 +139,17 @@ describe("GET /api/wiki/decision-inbox", () => {
 
   test("a card the owner already answered not sure says so, where an inbox answer would only 409", async () => {
     await answerFixtures();
+    // The POST's one-live-answer key is the exact stored name with auth off: another
+    // author's not-sure, and the owner's name spelt another way, leave the viewer free to answer.
+    const other = (questionId: string, name: string) =>
+      insertWikiAnswerVersion({ answerId: crypto.randomUUID(), version: 1, wiki: KODE, relPath: REL, questionId, author: { userId: null, oid: null, navIdent: null, name }, choice: QUESTION_NOT_SURE, body: "", questionHash: "h" });
+    await other("O6", "Someone Else");
+    await other("O8", "test  owner");
     const body = await inbox(KODE);
-    expect(body.cards.find((c) => c.id === "O4")!.ownerAnswered).toBe(true);
-    expect(body.cards.find((c) => c.id === "O6")!.ownerAnswered).toBe(false);
+    expect(body.cards.find((c) => c.id === "O4")!.viewerAnswered).toBe(true);
+    expect(body.cards.find((c) => c.id === "O6")!.viewerAnswered).toBe(false);
+    expect(body.cards.find((c) => c.id === "O8")!.viewerAnswered).toBe(false);
+    expect((await post({ questionId: "O8", choice: "A", body: "" })).status).toBe(201);
   });
 
   test("a wiki whose every page is unreadable is a 500, not an empty inbox", async () => {

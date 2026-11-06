@@ -112,7 +112,7 @@ function actionsHtml(c: InboxCard, k: string, href: string): string {
   if (c.lane === "pass") {
     return `<div class="wiki-wi-acts"><button class="wiki-wi-btn primary" data-wi-act="copy">Copy the link for ${esc(c.targets.join(", "))}</button>${open}</div>`;
   }
-  if (c.ownerAnswered) return `<div class="wiki-wi-acts"><span class="wiki-wi-hint">You have answered this card: change it on the page.</span>${open}</div>`;
+  if (c.viewerAnswered) return `<div class="wiki-wi-acts"><span class="wiki-wi-hint">You have answered this card: change it on the page.</span>${open}</div>`;
   const busy = s.sending[k] ? " disabled" : "";
   const choices = c.choices.length ? [...c.choices, QUESTION_NOT_SURE] : [];
   const picks = choices

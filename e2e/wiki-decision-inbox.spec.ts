@@ -9,7 +9,7 @@
  *  2. An answer in place (a pick, then Answer) goes through `POST /api/wiki/answers`
  *     and the row leaves «ask you» for «close?»; «take the default» answers with
  *     the recommendation.
- *  3. A 409 `already_answered` tells the reader and links the page.
+ *  3. A card the reader already answered offers the page, not a form (the 409 race is a unit test).
  *  4. The section is legible in the Light and Dark themes.
  *
  * One muninn on its own port, the test database, two temp git wikis:

@@ -9,8 +9,8 @@
 
 import type { Hono } from "hono";
 import { resolveWikiAnswerConfig, type Config, type WikiAnswerConfig } from "../../config.ts";
-import { listWikiAnswerHistory, type WikiAnswerVersion } from "../../db/wiki-answers.ts";
-import { foldName, parseQuestionTarget } from "../../format/question.ts";
+import { authorKeyOf, listWikiAnswerHistory, type WikiAnswerAuthor, type WikiAnswerVersion } from "../../db/wiki-answers.ts";
+import { answerAuthorFor } from "./wiki-answers.ts";
 import { getLog } from "../../logging.ts";
 import { collectOpenCards } from "../../wiki/decision-triage/cards.ts";
 import { gatherCardFacts, liveView, type AnswerFact } from "../../wiki/decision-triage/facts.ts";
@@ -38,8 +38,9 @@ export interface InboxCard {
   laneSince: string | null;
   answers: AnswerFact[];
   hint: { decision: string | null; decisionText: string | null; namedBy: string | null; word: string | null; ownItem: string | null } | null;
-  /** The owner has a live answer (not sure, in a lane that is not «close?»): an inbox answer would 409. */
-  ownerAnswered: boolean;
+  /** The viewer has a live answer, by the key `POST /api/wiki/answers` holds one
+   *  live answer to (`authorKeyOf`), so an inbox answer would 409. */
+  viewerAnswered: boolean;
   lane: InboxLane;
 }
 
@@ -76,7 +77,7 @@ const readFile = async (abs: string) => {
   }
 };
 
-export async function readDecisionInbox(entry: WikiRegistryEntry, deps: DecisionInboxDeps): Promise<DecisionInboxBody> {
+export async function readDecisionInbox(entry: WikiRegistryEntry, deps: DecisionInboxDeps, viewer: WikiAnswerAuthor | null = null): Promise<DecisionInboxBody> {
   const answerConfig = deps.answerConfig();
   const index = await getWikiIndex({ root: entry.root });
   if (!index) throw new Error("the wiki could not be indexed");
@@ -85,7 +86,10 @@ export async function readDecisionInbox(entry: WikiRegistryEntry, deps: Decision
   // As the night refuses (run.ts): an inbox read from no readable page is no inbox.
   if (open.inScope > 0 && open.readable === 0) throw new Error(`none of ${open.inScope} pages could be read`);
   const answers = await deps.answers(entry.name);
-  const ownerName = answerConfig.owner ? parseQuestionTarget(answerConfig.owner)?.name : undefined;
+  const viewerKey = viewer ? authorKeyOf(viewer) : null;
+  const redacted = new Set(answers.filter((v) => v.redactedAt !== null).map((v) => v.answerId));
+  const viewerHas = (relPath: string, id: string) =>
+    viewerKey !== null && answers.some((v) => v.relPath === relPath && v.questionId === id && !redacted.has(v.answerId) && authorKeyOf(v.author) === viewerKey);
   const ctx = {
     git: deps.git,
     // `repos: []` below: nothing asks for a code repo.
@@ -112,7 +116,7 @@ export async function readDecisionInbox(entry: WikiRegistryEntry, deps: Decision
       laneSince: card.waitingLanes.find((l) => l.since)?.since ?? null,
       answers: card.answers,
       hint: hint ? { decision: hint.decision, decisionText: itemText(hint.decision), namedBy: hint.namedBy, word: hint.word, ownItem: itemText(ref.id) } : null,
-      ownerAnswered: ownerName !== undefined && card.answers.some((a) => foldName(a.author) === foldName(ownerName)),
+      viewerAnswered: viewerHas(ref.relPath, ref.id),
       lane: inboxLane({ wiki: entry.name, answers: card.answers, hinted: hint !== null, ownerAsked: card.ownerAsked }),
     });
   }
@@ -133,7 +137,7 @@ export function registerWikiDecisionInboxRoute(app: Hono, config: Config, depsFo
       });
       const verdict = scopeVerdict(scope, wiki);
       if ("reason" in verdict) return c.json({ error: `no decision inbox here: ${verdict.reason}` }, 404);
-      return c.json(await readDecisionInbox(verdict.entry, deps));
+      return c.json(await readDecisionInbox(verdict.entry, deps, answerAuthorFor(c, deps.answerConfig().owner)));
     } catch (err) {
       log.error("The decision inbox for {wiki} failed: {error}", { wiki, error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "the decision inbox could not be read" }, 500);
