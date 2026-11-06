@@ -171,15 +171,13 @@ test.describe.serial("the Decisions section", () => {
     await expect(row(page, "ask", "O1")).toHaveCount(0);
   });
 
-  test("a card the reader already answered says so and links the page", async ({ page }) => {
+  test("a card the reader already answered not sure offers the page, not a form", async ({ page }) => {
     await openInbox(page, KODE);
     const o4 = row(page, "ask", "O4");
     await o4.locator(".wiki-wi-row").click();
-    await o4.locator('[data-wi-choice="B"]').click();
-    await o4.locator('[data-wi-act="answer"]').click();
-    const msg = row(page, "ask", "O4").locator(".wiki-wi-msg");
-    await expect(msg).toContainText("already has your answer");
-    await expect(msg.locator("a")).toHaveAttribute("data-relpath", REL);
+    await expect(o4.locator(".wiki-wi-detail")).toContainText("change it on the page");
+    await expect(o4.locator('[data-wi-act="answer"]')).toHaveCount(0);
+    await expect(o4.locator(".wiki-wi-detail a")).toHaveAttribute("data-relpath", REL);
     await expect(count(page, "ask")).toHaveText("2");
   });
 

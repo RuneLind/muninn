@@ -136,6 +136,28 @@ describe("GET /api/wiki/decision-inbox", () => {
     expect((await app.request("/api/wiki/decision-inbox")).status).toBe(400);
   });
 
+  test("a card the owner already answered not sure says so, where an inbox answer would only 409", async () => {
+    await answerFixtures();
+    const body = await inbox(KODE);
+    expect(body.cards.find((c) => c.id === "O4")!.ownerAnswered).toBe(true);
+    expect(body.cards.find((c) => c.id === "O6")!.ownerAnswered).toBe(false);
+  });
+
+  test("a wiki whose every page is unreadable is a 500, not an empty inbox", async () => {
+    const file = path.join(otherRoot, OTHER_REL);
+    // The index is built while the page reads; the page then stops reading, as a
+    // permission change or an unmounted share does under a cached index.
+    await inbox(OTHER);
+    execFileSync("chmod", ["000", file]);
+    try {
+      const res = await app.request(`/api/wiki/decision-inbox?wiki=${OTHER}`);
+      expect(res.status).toBe(500);
+    } finally {
+      execFileSync("chmod", ["644", file]);
+      __resetWikiCacheForTest();
+    }
+  });
+
   test("an answer moves a card from «ask you» to «close?»", async () => {
     expect(laneOf(await inbox(KODE)).O1).toBe("ask");
     expect((await post({ questionId: "O1", choice: "A", body: "" })).status).toBe(201);

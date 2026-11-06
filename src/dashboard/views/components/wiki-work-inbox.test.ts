@@ -16,7 +16,7 @@ afterAll(() => {
 
 const XSS = `<img src=x onerror="alert(1)">`;
 const card = (over: Partial<InboxCard>): InboxCard => ({
-  relPath: "plans/a.mdx", id: "O1", title: "A", body: "Which?", choices: [], recommendation: null, targets: [], added: null, laneSince: null, answers: [], hint: null, lane: "ask", ...over,
+  relPath: "plans/a.mdx", id: "O1", title: "A", body: "Which?", choices: [], recommendation: null, targets: [], added: null, laneSince: null, answers: [], hint: null, ownerAnswered: false, lane: "ask", ...over,
 });
 
 async function load(body: DecisionInboxBody | null, status = 200): Promise<void> {
@@ -105,4 +105,19 @@ test("a failed load says so, and keeps the cards it had", async () => {
   const html = inboxHtml(() => "", Date.now());
   expect(html).toContain("Decisions · 1 open");
   expect(html).toContain("couldn’t load");
+});
+
+test("a card the owner already answered offers the page, not a form that would 409", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O4", lane: "ask", choices: ["A", "B"], ownerAnswered: true, answers: [{ author: "R", choice: "not-sure", body: "", at: "2026-11-01T10:00:00Z", questionChanged: false }] })] });
+  click("row", "plans/a.mdx#O4");
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).toContain("change it on the page");
+  expect(html).not.toContain('data-wi-act="answer"');
+});
+
+test("an answer to older wording tags the row «wording changed», not «answered»", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O5", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-01T10:00:00Z", questionChanged: true }] })] });
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toMatch(/wiki-wi-tag warn">wording changed</);
+  expect(html).not.toContain(">answered<");
 });

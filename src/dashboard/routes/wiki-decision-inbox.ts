@@ -10,6 +10,7 @@
 import type { Hono } from "hono";
 import { resolveWikiAnswerConfig, type Config, type WikiAnswerConfig } from "../../config.ts";
 import { listWikiAnswerHistory, type WikiAnswerVersion } from "../../db/wiki-answers.ts";
+import { foldName, parseQuestionTarget } from "../../format/question.ts";
 import { getLog } from "../../logging.ts";
 import { collectOpenCards } from "../../wiki/decision-triage/cards.ts";
 import { gatherCardFacts, liveView, type AnswerFact } from "../../wiki/decision-triage/facts.ts";
@@ -37,6 +38,8 @@ export interface InboxCard {
   laneSince: string | null;
   answers: AnswerFact[];
   hint: { decision: string | null; decisionText: string | null; namedBy: string | null; word: string | null; ownItem: string | null } | null;
+  /** The owner has a live answer (not sure, in a lane that is not «close?»): an inbox answer would 409. */
+  ownerAnswered: boolean;
   lane: InboxLane;
 }
 
@@ -79,7 +82,10 @@ export async function readDecisionInbox(entry: WikiRegistryEntry, deps: Decision
   if (!index) throw new Error("the wiki could not be indexed");
   const view = liveView(index, readFile);
   const open = await collectOpenCards(index, (m) => view.readPage(m.relPath).catch(() => null));
+  // As the night refuses (run.ts): an inbox read from no readable page is no inbox.
+  if (open.inScope > 0 && open.readable === 0) throw new Error(`none of ${open.inScope} pages could be read`);
   const answers = await deps.answers(entry.name);
+  const ownerName = answerConfig.owner ? parseQuestionTarget(answerConfig.owner)?.name : undefined;
   const ctx = {
     git: deps.git,
     // `repos: []` below: nothing asks for a code repo.
@@ -106,6 +112,7 @@ export async function readDecisionInbox(entry: WikiRegistryEntry, deps: Decision
       laneSince: card.waitingLanes.find((l) => l.since)?.since ?? null,
       answers: card.answers,
       hint: hint ? { decision: hint.decision, decisionText: itemText(hint.decision), namedBy: hint.namedBy, word: hint.word, ownItem: itemText(ref.id) } : null,
+      ownerAnswered: ownerName !== undefined && card.answers.some((a) => foldName(a.author) === foldName(ownerName)),
       lane: inboxLane({ wiki: entry.name, answers: card.answers, hinted: hint !== null, ownerAsked: card.ownerAsked }),
     });
   }

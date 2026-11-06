@@ -112,6 +112,7 @@ function actionsHtml(c: InboxCard, k: string, href: string): string {
   if (c.lane === "pass") {
     return `<div class="wiki-wi-acts"><button class="wiki-wi-btn primary" data-wi-act="copy">Copy the link for ${esc(c.targets.join(", "))}</button>${open}</div>`;
   }
+  if (c.ownerAnswered) return `<div class="wiki-wi-acts"><span class="wiki-wi-hint">You have answered this card: change it on the page.</span>${open}</div>`;
   const busy = s.sending[k] ? " disabled" : "";
   const choices = c.choices.length ? [...c.choices, QUESTION_NOT_SURE] : [];
   const picks = choices
@@ -130,14 +131,15 @@ function rowHtml(c: InboxCard, now: number, hrefFor: (rel: string) => string): s
   const s = st!;
   const k = keyOf(c);
   const days = Math.max(0, Math.floor((now - inboxBornMs(c, now)) / 86_400_000));
-  const tag = c.lane === "close" ? (c.hint && !settlingAnswers(c.answers).length ? "page rules" : c.answers.some((a) => a.choice === null) ? "read it before closing" : "answered") : "";
+  const settling = settlingAnswers(c.answers);
+  const tag = c.lane !== "close" ? "" : c.hint && !settling.length ? "page rules" : settling.some((a) => a.questionChanged) ? "wording changed" : settling.some((a) => a.choice === null) ? "read it before closing" : "answered";
   const msg = s.msg[k];
   return (
     `<li class="wiki-wi-item" data-wi-key="${esc(k)}">` +
     `<button class="wiki-wi-row" data-wi-act="row" aria-expanded="${s.open === k}">` +
     `<span class="wiki-wi-q">${esc(c.id)} · ${esc(firstLine(c.body))}<span class="wiki-wi-page">${esc(c.title)}</span></span>` +
     (c.lane === "pass" ? `<span class="wiki-wi-who">→ ${esc(c.targets.join(", "))}</span>` : "") +
-    (tag ? `<span class="wiki-wi-tag${tag === "read it before closing" ? " warn" : ""}">${tag}</span>` : "") +
+    (tag ? `<span class="wiki-wi-tag${tag === "answered" || tag === "page rules" ? "" : " warn"}">${tag}</span>` : "") +
     `<span class="wiki-wi-age${days >= 14 ? " old" : ""}">${days} d</span></button>` +
     (msg ? `<div class="wiki-wi-msg${msg.warn ? " warn" : ""}" role="status">${esc(msg.text)}${msg.page ? ` <a class="wiki-wm-link" href="${esc(hrefFor(c.relPath))}" data-relpath="${esc(c.relPath)}">Open the page</a>` : ""}</div>` : "") +
     (s.open === k ? `<div class="wiki-wi-detail"><div class="wiki-wi-body">${esc(c.body)}</div>${evidenceHtml(c)}${actionsHtml(c, k, hrefFor(c.relPath))}</div>` : "") +
