@@ -3,8 +3,8 @@
  * card is never printed, so the answers stay unanchored until the final scoring.
  *
  *   --replay [--baseline <file>] [--dry-run]   part (1): the baseline's replayable cards
- *   --since <day> [--dry-run] [--final]        part (2): every card first answered since;
- *     [--hand <file>]                          {"read": n, "wrong": n} from the hand sample
+ *   --since <day> [--dry-run] [--final]        part (2): refused while the nightly model
+ *     [--hand <file>]                          call is off (D19); the code stays for a retry
  *   --labels [--until <iso>]                   the label's two counts, with and without
  *                                              the 10-minute rule
  *   (no mode)                                  the nightly logs' figures
@@ -241,6 +241,8 @@ async function printNightly(log: ParsedLog, labelled: readonly WikiLabels[], wik
 
 const droppedLine = (d: Dropped) => `answers with no card in git: ${d.noHistory} no-history, ${d.unreadable} whose history could not be read`;
 
+const PART2_OFF = "part (2) is off: the nightly model call is off under D19 (mimir plans/muninn-wiki-decision-triage.mdx), and P3 orders the queue by rule";
+
 async function modePart2(): Promise<number> {
   const hand = values.hand ? parseHandSample(await readFile(path.resolve(values.hand), "utf8").catch(() => "not a file")) : null;
   const scope = await readScope();
@@ -375,7 +377,9 @@ initDb(config);
 let exit = 0;
 try {
   if (values.replay) exit = await modePart1();
-  else if (sinceArg !== null) exit = await modePart2();
+  // D19's stop trigger: the night asks no model, so part (2) has no verdict to score.
+  // `modePart2` stays for a retry.
+  else if (sinceArg !== null) throw new ReplayRefused(PART2_OFF);
   else if (values.labels) exit = await modeLabels();
   else {
     const wikis = await reportWikis();

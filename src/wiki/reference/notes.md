@@ -2332,6 +2332,8 @@ Rules a caller can get wrong from outside:
 
 Each night a tool-less model call reads every open `<Question>` with an id on the wikis in both `WORK_MAP_WIKIS` and `WIKI_ANSWER_WIKIS` (a `work` map only, no readonly root: `triageScope`, read at each check), and appends a verdict per card to `~/.muninn/decision-triage/<wiki>.jsonl`. It writes no page and closes nothing, and no reader shows a verdict yet (plan `muninn-wiki-decision-triage`, P2; the inbox is P3).
 
+**The model call is off (D19, 2026-11-06).** The gate needed 8 positives and history held 6, so the stop trigger fired. The nightly deps pass `call: null` (`scope.ts`): the night still gathers facts and writes a card line each, `NO_VERDICT` with reason `MODEL_OFF` (an `ANSWERED` line is unchanged), and its run line is `ok` with that reason. `--replay` keeps the real call, and `--since` refuses: part (2) has no verdict to score, and P3 orders the queue by rule. The text below describes the judge as built, kept for a retry.
+
 | File | What it owns |
 |---|---|
 | `schema.ts` | the zod verdict, the two log lines, `DECISION_TRIAGE_PROMPT_VERSION` and its frozen date |

@@ -16,7 +16,7 @@ import { workMapKindFromReaderText } from "../work-map/kind.ts";
 import { WIKI_READER_FILE } from "../work-map/run.ts";
 import { computeFloor } from "./floor.ts";
 import { realGit } from "./git.ts";
-import { realDecisionTriageModel, type TriageRunDeps } from "./run.ts";
+import type { TriageRunDeps } from "./run.ts";
 
 export interface DroppedWiki {
   wiki: string;
@@ -102,7 +102,8 @@ export function realTriageRunDeps(
     repoRoots: config.decisionTriageRepoRoots,
     model: config.workMapModel,
     ...(config.workMapEffort ? { effort: config.workMapEffort } : {}),
-    call: realDecisionTriageModel(config),
+    // D19's stop trigger: the night asks no model. `--replay` keeps the real call.
+    call: null,
     git: realGit,
     loadIndex: () => getWikiIndex({ root: entry.root, refresh: true }),
     readFile: async (abs) => {

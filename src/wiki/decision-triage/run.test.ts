@@ -13,7 +13,7 @@ import type { WikiIndex, WikiPageMeta } from "../store.ts";
 import { WORK_MAP_SPAWN_ARGS, WORK_MAP_TIMEOUT_MS } from "../work-map/run.ts";
 import { appendLogLines, nightlyLogPath, parseLog, readLog } from "./log.ts";
 import { TRIAGE_SYSTEM_PROMPT } from "./prompt.ts";
-import { decisionTriageBotConfig, parseVerdicts, realDecisionTriageModel, runDecisionTriage, type TriageModel, type TriageProgress, type TriageRunDeps } from "./run.ts";
+import { decisionTriageBotConfig, MODEL_OFF, parseVerdicts, realDecisionTriageModel, runDecisionTriage, type TriageModel, type TriageProgress, type TriageRunDeps } from "./run.ts";
 import { commitAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 import { realGit } from "./git.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, type LogLine } from "./schema.ts";
@@ -549,3 +549,21 @@ describe("the spawned argv pins the tool surface to none", () => {
   });
 });
 
+
+describe("the model call off (D19)", () => {
+  test("every gathered card is logged with the reason, no call is made, and the run is ok", async () => {
+    const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }, { call: null }));
+    expect(res.outcome).toBe("ok");
+    const { cards, runs } = await readLog(dirs.log);
+    expect(cards.map((c) => [c.id, c.verdict, c.reason])).toEqual([["O1", "NO_VERDICT", MODEL_OFF], ["O2", "NO_VERDICT", MODEL_OFF]]);
+    expect(cards.every((c) => typeof c.codeFacts === "boolean")).toBe(true);
+    expect(runs[0]).toMatchObject({ outcome: "ok", reason: MODEL_OFF, cards: 2, usage: { calls: 0 } });
+  });
+
+  test("a card answered by a choice keeps its ANSWERED line", async () => {
+    const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }, { call: null, answers: async () => [answer("O1")] }));
+    expect(res.outcome).toBe("ok");
+    const { cards } = await readLog(dirs.log);
+    expect(cards.map((c) => [c.id, c.verdict])).toEqual([["O1", "ANSWERED"], ["O2", "NO_VERDICT"]]);
+  });
+});

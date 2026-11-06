@@ -130,6 +130,9 @@ export interface BatchResult {
 
 const MALFORMED = "a malformed verdict";
 const MISSING = "missing from the answer";
+/** D19's stop trigger (mimir plans/muninn-wiki-decision-triage.mdx): 6 of the 8 positives
+ *  the gate needed, so the night gathers and logs, and asks no model. */
+export const MODEL_OFF = "the model call is off (D19)";
 
 /** Why item `i` of a batch has no verdict. */
 export const noVerdictReason = (r: BatchResult, i: number) => (r.failed ? "the batch failed" : r.malformed?.has(i) ? MALFORMED : MISSING);
@@ -216,7 +219,8 @@ export interface TriageRunDeps {
   repoRoots: string | null;
   model: string;
   effort?: WorkMapEffort;
-  call: TriageModel;
+  /** Null: gather and log every card, ask no model (`MODEL_OFF`). */
+  call: TriageModel | null;
   git: GitRun;
   /** The rebuilt index, or null when it cannot be read. */
   loadIndex: () => Promise<WikiIndex | null>;
@@ -372,6 +376,14 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   if (deps.signal?.aborted) return { outcome: "aborted" };
   await appendCards(held);
 
+  if (deps.call === null) {
+    await appendCards(items.map((item) => line({ ...lineBase(item), verdict: "NO_VERDICT", reason: MODEL_OFF })));
+    const why = [MODEL_OFF, ...(noFacts > 0 ? [`${noFacts} card(s) with no facts`] : [])].join(", ");
+    const run = await finish(noFacts > 0 ? "partial" : "ok", cards.length, why);
+    if (!run) return { outcome: "aborted" };
+    return { outcome: run.outcome as Exclude<RunOutcome, "refused">, run, counts, wallMs: deps.now() - startedAt };
+  }
+  const call = deps.call;
   const { batches, oversized } = buildBatches(wiki, items);
   await appendCards(oversized.map((o) => line({ ...lineBase(o), verdict: "NO_VERDICT", reason: "over the call's size limit" })));
 
@@ -380,7 +392,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   let missing = 0;
   for (const batch of batches) {
     if (deps.signal?.aborted) return { outcome: "aborted" };
-    const result = await callBatch(wiki, batch, deps, usage);
+    const result = await callBatch(wiki, batch, { ...deps, call }, usage);
     if (deps.signal?.aborted) return { outcome: "aborted" };
     if (result.failed) {
       batchFailures++;
