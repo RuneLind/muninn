@@ -138,3 +138,24 @@ test("a 409 already_answered from a race says so, links the page and sends nothi
   expect(html).toMatch(/wiki-wi-msg warn[^]*?data-relpath="plans\/a.mdx"/);
   expect(posts).toBe(1);
 });
+
+test("a good load after a failed one clears the failure line", async () => {
+  const url = "/api/wiki/decision-inbox?wiki=recover";
+  globalThis.fetch = (async () => ({ ok: false, status: 500, json: async () => ({}) })) as unknown as typeof fetch;
+  loadInbox(url);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(inboxHtml(() => "", Date.now())).toContain("couldn’t load");
+  globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => ({ wiki: "w", cards: [card({ id: "O1" })] }) })) as unknown as typeof fetch;
+  loadInbox(url);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(inboxHtml(() => "", Date.now())).not.toContain("couldn’t load");
+});
+
+test("a 200 that is not an inbox says the server answered, not that it was silent", async () => {
+  globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("<html>"); } })) as unknown as typeof fetch;
+  loadInbox("/api/wiki/decision-inbox?wiki=html");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain("couldn’t load: HTTP 200, not an inbox");
+  expect(html).not.toContain("did not answer");
+});

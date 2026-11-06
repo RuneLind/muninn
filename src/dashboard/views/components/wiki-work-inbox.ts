@@ -66,7 +66,7 @@ export function loadInbox(url: string): void {
   const seq = ++loadSeq;
   if (!st || st.url !== url) st = { url, body: null, open: null, laneOpen: {}, picked: {}, notes: {}, sending: {}, failed: null, msg: {} };
   fetch(url)
-    .then(async (r) => ({ status: r.status, body: r.ok ? ((await r.json()) as DecisionInboxBody) : null }))
+    .then(async (r) => ({ status: r.status, body: r.ok ? ((await r.json().catch(() => null)) as DecisionInboxBody | null) : null }))
     .catch(() => ({ status: 0, body: null }))
     .then(({ status, body }) => {
       if (seq !== loadSeq || !st || st.url !== url) return;
@@ -76,7 +76,7 @@ export function loadInbox(url: string): void {
       } else if (status === 404) {
         st.body = null;
         st.failed = null;
-      } else st.failed = status ? `HTTP ${status}` : "the server did not answer";
+      } else st.failed = !status ? "the server did not answer" : status < 300 ? `HTTP ${status}, not an inbox` : `HTTP ${status}`;
       repaint();
     });
 }
