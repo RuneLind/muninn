@@ -393,6 +393,8 @@ export const E2E_PORTS = {
   "wiki-theme-card": 3194,
   // Theme map P3: the theme page (`?effort=<id>` on a themes map).
   "wiki-theme-page": 3195,
+  // Decision inbox P3a: the Decisions section on the Your work card.
+  "wiki-decision-inbox": 3196,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

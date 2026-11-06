@@ -64,6 +64,8 @@ beforeEach(async () => {
   Date.now = () => now;
   (globalThis as { document?: unknown }).document = { getElementById: (id: string) => (id === "wikiWorkCard" ? card : null) };
   globalThis.fetch = ((url: string) => {
+    // The Decisions section's own GET (wiki-work-inbox.ts): out of scope here, and not a checks fetch.
+    if (url.includes("/api/wiki/decision-inbox")) return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
     fetches++;
     expect(url).toContain("/api/wiki/work-map/checks");
     return answer();
