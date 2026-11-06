@@ -158,7 +158,7 @@ describe("a bad flag value is one usage line, exit 2", () => {
   });
 });
 
-test("--since refuses, citing D19, before the database", async () => {
+test("--since is off, citing D19, before the database", async () => {
   const { tmp, w } = world();
   const res = await script(SCORE, ["--since", "2026-11-06", "--root", `w=${w}`, "--log-dir", path.join(tmp, "l")], tmp);
   expect(res.code).toBe(2);

@@ -3,8 +3,8 @@
  * card is never printed, so the answers stay unanchored until the final scoring.
  *
  *   --replay [--baseline <file>] [--dry-run]   part (1): the baseline's replayable cards
- *   --since <day> [--dry-run] [--final]        part (2): refused while the nightly model
- *     [--hand <file>]                          call is off (D19); the code stays for a retry
+ *   --since <day> [--dry-run] [--final]        part (2): off while the nightly model call
+ *     [--hand <file>]                          is off (D19); the code stays for a retry
  *   --labels [--until <iso>]                   the label's two counts, with and without
  *                                              the 10-minute rule
  *   (no mode)                                  the nightly logs' figures
@@ -14,7 +14,7 @@
  * FEW make no call, from day 14 each real `--since` goes on `part2-scorings.jsonl`, and
  * `--hand` amends a recorded scoring once.
  * `--root <wiki>=<path>` (repeatable) names a wiki's root; `--log-dir <dir>` moves
- * the logs. Both replays refuse without DECISION_TRIAGE_REPO_ROOTS, or on a wiki
+ * the logs. `--replay` refuses without DECISION_TRIAGE_REPO_ROOTS, or on a wiki
  * `scope.ts` refuses (a readonly root). From a worktree, run with `bun --env-file <checkout>/.env`.
  */
 
@@ -70,7 +70,7 @@ import { getWikiIndex, readWikiPage } from "../src/wiki/store.ts";
 import { parseBlocks } from "../src/format/markdown-ast.ts";
 import { splitFrontmatter } from "../src/wiki/page-text.ts";
 
-const USAGE = "usage: bun scripts/decision-triage-score.ts [--replay [--baseline <file>] | --labels [--until <iso>]] [--dry-run] [--root <wiki>=<path>] [--log-dir <dir>] (--since is off under D19)";
+const USAGE = "usage: bun scripts/decision-triage-score.ts [--replay [--baseline <file>] | --labels [--until <iso>]] [--dry-run] [--root <wiki>=<path>] [--log-dir <dir>]; --since <YYYY-MM-DD> is off under D19";
 const usageExit = (message: string): never => {
   console.error(`usage error: ${message}. ${USAGE}`);
   process.exit(2);
