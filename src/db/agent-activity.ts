@@ -2,9 +2,9 @@ import { getDb } from "./client.ts";
 
 /**
  * Read-only queries backing the `/agents` overview's Recent list. These are the
- * durable sources (a/b/c in `assembleAgentsOverview`): chat + watcher trace
- * spans, and extractor `haiku_usage` rows. Gardener/capture/research/per-task
- * Recent rows come from the registry's in-memory completed-runs ring instead.
+ * durable sources in `assembleAgentsOverview`: chat + watcher trace spans,
+ * extractor `haiku_usage` rows, and the stamped spans of the kinds the registry's
+ * in-memory completed-runs ring also lists.
  */
 
 /** A recent chat-turn or watcher run, sourced from `traces`. */
@@ -90,6 +90,74 @@ export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promis
   }));
 }
 
+const MAX_FAILED_ROWS_PER_NAME = 3;
+
+/** A finished run of a kind the completed-runs ring lists, read off its stamped span. */
+export interface RecentAgentRunRow {
+  traceId: string;
+  /** `agentKind`, as `finishAgentRunTrace` stamped it. */
+  kind: string;
+  /** `agentName`, cleaned for jsonb (`jsonbSafeText`). */
+  name: string;
+  status: string;
+  botName: string | null;
+  startedAt: number; // epoch ms
+  durationMs: number | null;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  /** An explicit `0` (subscription connectors) is a real value, distinct from null. */
+  costUsd: number | null;
+}
+
+/**
+ * The spans `finishAgentRunTrace` stamped, keyed on the stamp and not on
+ * `parent_id IS NULL`: a `task:<type>` span is a child of its tick. The stamp lands
+ * with the finish, so an unfinished run has none. Spend is read off the span itself,
+ * which carries the whole run's total where a child `claude` span holds one call's.
+ * The predicate is spelled like `idx_traces_agent_run`'s, or the index goes unused.
+ *
+ * A bot's failures under one name are capped here, before the limit: a goal whose send
+ * fails is picked up again on every tick, so one outage would otherwise fill the read.
+ */
+export async function getRecentAgentRuns(limit = 40, windowHours = 48): Promise<RecentAgentRunRow[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM (
+      SELECT trace_id, status, bot_name, started_at, duration_ms,
+             attributes->>'agentKind'  AS agent_kind,
+             attributes->>'agentName'  AS agent_name,
+             COALESCE(attributes->>'agentModel', attributes->>'model') AS model,
+             attributes->>'inputTokens'  AS input_tokens,
+             attributes->>'outputTokens' AS output_tokens,
+             attributes->>'costUsd'      AS cost_usd,
+             ROW_NUMBER() OVER (
+               PARTITION BY bot_name, attributes->>'agentName', status = 'error'
+               ORDER BY started_at DESC
+             ) AS nth
+      FROM traces
+      WHERE attributes ? 'agentKind'
+        AND started_at >= now() - make_interval(hours => ${windowHours})
+    ) stamped
+    WHERE status <> 'error' OR nth <= ${MAX_FAILED_ROWS_PER_NAME}
+    ORDER BY started_at DESC
+    LIMIT ${limit}
+  `;
+  return rows.map((r) => ({
+    traceId: r.trace_id,
+    kind: r.agent_kind,
+    name: r.agent_name,
+    status: r.status,
+    botName: r.bot_name ?? null,
+    startedAt: new Date(r.started_at).getTime(),
+    durationMs: r.duration_ms ?? null,
+    model: (r.model as string | null) ?? null,
+    inputTokens: r.input_tokens != null ? Number(r.input_tokens) : null,
+    outputTokens: r.output_tokens != null ? Number(r.output_tokens) : null,
+    costUsd: r.cost_usd != null ? Number(r.cost_usd) : null,
+  }));
+}
+
 /** A `watcher:<type>` child span, feeding the `/agents` ETA estimator's watcher
  *  identity durations. Carries the two skip flags so the pure grouping step
  *  (`groupWatcherDurations`) can exclude no-op ticks — see `src/dashboard/agent-eta.ts`. */
@@ -162,9 +230,9 @@ export interface RecentExtractorRow {
  * The three `wiki_gardener_*` sources ARE included — the gardener uses
  * `callHaikuWithFallback`/`executeOneShot`, not the runner's spawnHaiku
  * telemetry, so its cluster/triage/draft tokens surface NOWHERE else. This is
- * NOT double-counting against the `gardener_drain` ring entry: that ring row is
- * completed with `{}` (no tokens — see `startBacklogRun`), so it shows the drain
- * run's duration only, while these rows add the per-call token counts. The
+ * NOT double-counting against the `gardener_drain` ring entry: that ring row
+ * carries no tokens (see `startBacklogRun`), so it shows the drain run's duration
+ * only, while these rows add the per-call token counts. The
  * weekly gardener's `watcher:wiki-gardener` trace row likewise carries no tokens
  * (gardener isn't wired to runner telemetry), so no token number is duplicated.
  *

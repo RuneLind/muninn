@@ -6,6 +6,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
 import type { ToolSurface } from "../ai/tool-surface.ts";
 import { Tracer } from "../tracing/tracer.ts";
+import { finishAgentRunTrace, type AgentRunIdentity } from "../tracing/agent-run-trace.ts";
 import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { getConnectorLabel } from "../observability/agent-status.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
@@ -61,8 +62,9 @@ export interface CaptureOneShotOptions {
   systemPrompt: string;
   config: Config;
   botConfig: BotConfig;
-  /** The vertical's job-store `attachRun` — late-binds telemetry onto the run. */
-  attachRun: (jobId: string, meta: RunMeta) => void;
+  /** The vertical's job-store `attachRun` — late-binds telemetry onto the run and
+   *  answers the identity the trace root carries. */
+  attachRun: (jobId: string, meta: RunMeta) => AgentRunIdentity | undefined | void;
   onProgress?: StreamProgressCallback;
   timeoutMs?: number;
   /** The tools the pass may reach — required, forwarded to `tracedOneShot`. */
@@ -192,7 +194,7 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
   // connector actually reported. The trace link is only offered when tracing is
   // on — a Tracer still mints a traceId with TRACING_ENABLED=false, and stamping
   // that would give the /agents card a "Trace" link to a trace nobody wrote.
-  attachRun(jobId, {
+  const run = attachRun(jobId, {
     botName: botConfig.name,
     connectorLabel,
     ...(botConfig.model ? { model: botConfig.model } : {}),
@@ -300,12 +302,12 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       text = checked.text;
     }
 
-    if (ownsRoot) tracer.finish("ok", { source, ...usage, ...(opts.rootFinishAttrs?.(text) ?? {}) });
+    if (ownsRoot) finishAgentRunTrace(tracer, run, "ok", { source, ...usage, ...(opts.rootFinishAttrs?.(text) ?? {}) });
 
     return text === result.result ? result : { ...result, result: text };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (ownsRoot) tracer.finish("error", { source, error: message });
+    if (ownsRoot) finishAgentRunTrace(tracer, run, "error", { source, error: message });
     captureLog.warn("Capture summarize failed for {source} job {jobId}: {error}", {
       source,
       jobId,

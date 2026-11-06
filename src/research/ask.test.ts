@@ -60,7 +60,7 @@ mock.module("../ai/one-shot.ts", () => ({
     lastSystemPrompt = opts?.systemPrompt ?? "";
     lastToolSurface = opts?.toolSurface;
     opts?.onProgress?.({ type: "text_delta", text: claudeAnswer });
-    return { result: claudeAnswer, outputTokens: 30, inputTokens: 12, wallClockMs: 4 };
+    return { result: claudeAnswer, model: "claude-answer-test", outputTokens: 30, inputTokens: 12, wallClockMs: 4 };
   },
   // summarizer-shared imports this too (the thinking-budget capability gate) —
   // mirror the real rule rather than hardcoding, so the mock can't drift.
@@ -358,6 +358,53 @@ describe("research trace", () => {
     await collect("What is Claude Code and does it support MCP?");
     const run = agentStatus.getRecentCompleted().filter((r) => r.kind === "research")[0]!;
     expect(run.outputTokens).toBeGreaterThan(0);
+  });
+
+  test("the root carries the run's identity and the model that answered", async () => {
+    const { tracer, spans } = fakeTracer();
+    await collect("What is Claude Code and does it support MCP?", undefined, tracer);
+    const finish = spans.find((s) => s.op === "finish:ok")!;
+    expect(finish.attrs).toMatchObject({
+      agentKind: "research",
+      agentName: "What is Claude Code and does it support MCP?",
+      outputTokens: expect.any(Number),
+    });
+    const run = agentStatus.getRecentCompleted().filter((r) => r.kind === "research").at(-1)!;
+    expect(run.status).toBe("ok");
+    expect(finish.attrs!.agentModel).toBe("claude-answer-test");
+    expect(run.model).toBe("claude-answer-test");
+    expect(finish.attrs).not.toHaveProperty("model");
+  });
+
+  test("a live run names its trace, which keeps its stamped root out of Recent", async () => {
+    // The failure path stamps the root, then waits on an SSE write before completing.
+    let liveWhileReportingFailure: string | undefined;
+    const { tracer } = fakeTracer();
+    researchThrows = "retrieval down";
+    await streamResearchAnswer({ question: "Live window", config, botConfig: bot, tracer }, (e) => {
+      if (e.type === "error") {
+        liveWhileReportingFailure = agentStatus.getAll().find((r) => r.name === "Live window" && !r.completed)?.liveTraceId;
+      }
+    });
+    expect(liveWhileReportingFailure).toBe("ask-trace-1");
+  });
+
+  test("a run that dies after synthesis keeps its spend on the root and reads error on its row", async () => {
+    const { tracer, spans } = fakeTracer();
+    await streamResearchAnswer(
+      { question: "A late failure", config, botConfig: bot, tracer },
+      (e) => {
+        if (e.type === "done") throw new Error("client gone");
+      },
+    );
+    expect(spans.find((s) => s.op === "finish:error")!.attrs).toMatchObject({
+      agentKind: "research",
+      error: "client gone",
+      outputTokens: expect.any(Number),
+      agentModel: "claude-answer-test",
+    });
+    const run = agentStatus.getRecentCompleted().filter((r) => r.name === "A late failure").at(-1)!;
+    expect(run.status).toBe("error");
   });
 
   test("a declined-coverage ask never opens a synthesis span (no Claude call was made)", async () => {

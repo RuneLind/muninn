@@ -43,6 +43,7 @@ interface RecordedSpan {
 }
 
 const spans: RecordedSpan[] = [];
+const spanAttrs = new Map<string, Record<string, unknown>>();
 const spanUpdates: { id: string; status?: string }[] = [];
 
 const realTraces = await import("../../db/traces.ts");
@@ -53,12 +54,16 @@ mock.module("../../db/traces.ts", () => ({
   },
   updateSpan: async (id: string, p: { status?: string }) => {
     spanUpdates.push({ id, status: p.status });
+    const attrs = (p as { attributes?: Record<string, unknown> }).attributes;
+    if (attrs) spanAttrs.set(id, attrs);
   },
 }));
 
 // Phase 1: one claim by default, so the run takes the single-claim path (no
 // compose). The compose case below swaps in two.
 let extractedClaims: { title: string; quote: string }[] = [{ title: "The sky is blue", quote: "the sky is blue" }];
+
+let haikuCostUsd: number | undefined = 0.25;
 
 const realHaiku = await import("../../ai/haiku-direct.ts");
 mock.module("../../ai/haiku-direct.ts", () => ({
@@ -68,11 +73,13 @@ mock.module("../../ai/haiku-direct.ts", () => ({
     inputTokens: 10,
     outputTokens: 5,
     numTurns: 1,
+    ...(haikuCostUsd === undefined ? {} : { costUsd: haikuCostUsd }),
     model: "claude-haiku-4-5",
     backend: "cli",
   }),
 }));
 
+const { agentStatus } = await import("../../observability/agent-status.ts");
 const { streamFactcheckSSE } = await import("./factcheck-sse.ts");
 const { FACTCHECK_CLAIM_TIMEOUT_MS, COMPOSE_BUDGET_MS } = await import("./factcheck-sse.ts");
 
@@ -176,6 +183,97 @@ beforeEach(async () => {
 
 const claimResult = (r: { events: SseEvent[] }) =>
   r.events.find((e) => e.event === "claim_result")!.data;
+
+describe("the factcheck run's ending", () => {
+  const lastRow = () => agentStatus.getRecentCompleted().filter((r) => r.kind === "factcheck").at(-1)!;
+
+  test("a claim failure inside a finished run still reads ok", async () => {
+    await runFactcheckWith(ERROR_MESSAGE);
+    expect(lastRow().status).toBe("ok");
+  });
+
+  async function runThatDies() {
+    spans.length = 0;
+    const app = new Hono();
+    app.get("/fc", (c) =>
+      streamFactcheckSSE(c, {
+        config,
+        botConfig,
+        body: "The sky is blue. Water is wet.",
+        meta: { title: "Sky", tags: [], type: "concept" },
+        wikiName: "testwiki",
+        mode: "article",
+        // Read for the `done` event, after the extraction call has spent.
+        get baseHash(): string {
+          throw new Error("late failure");
+        },
+        oneShot: scriptedFailure(ERROR_MESSAGE) as never,
+      }),
+    );
+    await (await app.request("/fc")).text();
+    await new Promise((r) => setTimeout(r, 20));
+    return spanAttrs.get(spans.find((s) => s.name === "factcheck" && s.parentId === null)!.id);
+  }
+
+  test("a live run names its trace, which keeps its stamped root out of Recent", async () => {
+    let live: string | undefined;
+    const root = () => spans.find((s) => s.name === "factcheck" && s.parentId === null)?.id;
+    const app = new Hono();
+    spans.length = 0;
+    app.get("/fc", (c) =>
+      streamFactcheckSSE(c, {
+        config,
+        botConfig,
+        body: "The sky is blue. Water is wet.",
+        meta: { title: "Live window", tags: [], type: "concept" },
+        wikiName: "testwiki",
+        mode: "article",
+        baseHash: "deadbeef",
+        oneShot: (async () => {
+          live = agentStatus.getAll().find((r) => r.kind === "factcheck" && !r.completed)?.liveTraceId;
+          throw new Error("boom");
+        }) as never,
+      }),
+    );
+    await (await app.request("/fc")).text();
+    expect(root()).toBeDefined();
+    expect(live).toBe(agentStatus.getRecentCompleted().filter((r) => r.kind === "factcheck").at(-1)!.traceId);
+    expect(live).toEqual(expect.any(String));
+  });
+
+  test("a run with no reported cost leaves its cost unknown, not $0", async () => {
+    haikuCostUsd = undefined;
+    const attrs = await runThatDies();
+    haikuCostUsd = 0.25;
+    expect(attrs).toMatchObject({ error: "late failure", inputTokens: 10 });
+    expect(attrs!.costUsd).toBeUndefined();
+  });
+
+  test("a run that dies reads error on its ring row, and its root keeps what it spent", async () => {
+    const attrs = await runThatDies();
+    expect(lastRow().status).toBe("error");
+    expect(attrs).toMatchObject({
+      agentKind: "factcheck",
+      error: "late failure",
+      inputTokens: 10,
+      costUsd: 0.25,
+      agentModel: "claude-haiku-4-5",
+    });
+  });
+});
+
+describe("the factcheck root's run identity", () => {
+  test("the finished root carries kind, name and spend", () => {
+    const root = timeoutRun.spans.find((s) => s.name === "factcheck" && s.parentId === null)!;
+    expect(spanAttrs.get(root.id)).toMatchObject({
+      agentKind: "factcheck",
+      agentName: expect.stringContaining("Sky"),
+      inputTokens: expect.any(Number),
+      agentModel: "claude-haiku-4-5",
+    });
+    expect(spanAttrs.get(root.id)).not.toHaveProperty("model");
+  });
+});
 
 describe("failed claim — cause-specific outcome + block", () => {
   test("a connector timeout yields outcome 'timeout' and names the budget in seconds", () => {

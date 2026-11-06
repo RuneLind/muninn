@@ -29,7 +29,7 @@ import { statusChipsScript } from "./components/status-chips.ts";
  *   - Up next: scheduled tasks + watchers from `/api/agents/overview`, rendered
  *     as a countdown timeline in the RIGHT column (force-queued watchers show
  *     their `label` — "queued" — instead of a countdown).
- *   - Recently finished: the four-source Recent union — a feed card, 8 rows +
+ *   - Recently finished: the Recent union — a feed card, 8 rows +
  *     "N more · show all" in-place expander, status-driven dots (failed rows loud
  *     red), a Cost column.
  *
@@ -388,14 +388,13 @@ export async function renderAgentsPage(): Promise<string> {
       meta.textContent = live + ' · ' + (selectedBot ? 'filtered to ' + selectedBot : 'all bots');
     }
 
-    // Honest empty state: name when the process started, since the in-memory
-    // completed-runs history (the ETA source for non-watcher kinds) resets then.
+    // Honest empty state: name when the process started, which is what the ETAs of
+    // the ring kinds count from.
     function updateRunningEmpty() {
       var empty = document.getElementById('runningEmpty');
       if (!empty) return;
       empty.textContent = processStartedAt
-        ? 'No live runs — process up since ' + new Date(processStartedAt).toLocaleString() +
-          '; in-memory history resets on restart.'
+        ? 'No live runs — process up since ' + new Date(processStartedAt).toLocaleString() + '.'
         : 'Nothing running right now.';
     }
 
@@ -759,7 +758,7 @@ export async function renderAgentsPage(): Promise<string> {
 
     // Signature of the currently-running requestIds, so we can refetch the
     // overview only when a run actually starts or finishes — not on every ~1/s
-    // agent_runs snapshot (each of which hits /api/agents/overview → 5 DB queries).
+    // agent_runs snapshot (each of which hits /api/agents/overview → 6 DB queries).
     var lastRunningKey = '';
     function runningKey(runs) {
       return (runs || []).filter(function (r) { return !r.completed; })
@@ -776,7 +775,7 @@ export async function renderAgentsPage(): Promise<string> {
     // running the rAF ticker is stopped, so even the "N m ago" labels froze.
     //
     // The poll is visibility-gated and the tab-return refetch shares its floor:
-    // one overview hit is five DB queries (counted in assembleAgentsOverview's
+    // one overview hit is six DB queries (counted in assembleAgentsOverview's
     // Promise.all), a background tab left open for a day should cost nothing,
     // and on macOS mere window OCCLUSION flips visibilityState — so an operator
     // alt-tabbing between two overlapping windows would otherwise buy a full

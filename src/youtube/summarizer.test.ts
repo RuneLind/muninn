@@ -1396,6 +1396,12 @@ describe("the dense scan path", () => {
     expect(finishCalls[0]!.status).toBe("ok");
   });
 
+  test("the one root a two-pass job owns carries the run's identity", async () => {
+    await run({ frames: true });
+    expect(finishCalls).toHaveLength(1);
+    expect(finishCalls[0]!.attrs).toMatchObject({ agentKind: "capture", agentName: expect.any(String) });
+  });
+
   test("the root's attributes SUM both passes' spend", async () => {
     await run({ frames: true });
     // 7 + 10 in, 3 + 42 out, 0.01 + 0.05, 2 + 1 turns, 2 + 1 tool reads.
@@ -1662,6 +1668,14 @@ describe("the dense scan path", () => {
     // what it cost rather than reporting nothing.
     expect(finishCalls[0]!.status).toBe("error");
     expect(finishCalls[0]!.attrs).toMatchObject({ inputTokens: 7, outputTokens: 3, toolCount: 2 });
+  });
+
+  test("an abandoned root carries no run identity: only the root the job ended on is a run", async () => {
+    selectionAnswer = "I had trouble reading the sheets, sorry.";
+    await run({ frames: true });
+    expect(finishCalls).toHaveLength(2);
+    expect(finishCalls[0]!.attrs).not.toHaveProperty("agentKind");
+    expect(finishCalls[1]!.attrs).toMatchObject({ agentKind: "capture", agentName: expect.any(String) });
   });
 
   test("an EMPTY manifest is an answer, but never a SILENT one", async () => {

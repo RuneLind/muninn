@@ -117,6 +117,7 @@ export const E2E_PORTS = {
   // Claude one is offered `deep`). The server is restarted mid-file, because a
   // per-bot `captureSummary.<id>.md` is read at bot DISCOVERY.
   "summaries-prompts": 3054,
+  "agents-recent-durable": 3107,
   // Not bound by anything — the opposite, the `plans-write/dead-ledger` idiom.
   // The spec points KNOWLEDGE_API_URL here so a page that reached for huginn
   // would fail loudly instead of quietly answering off the developer's own
