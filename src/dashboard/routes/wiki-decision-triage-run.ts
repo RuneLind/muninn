@@ -34,10 +34,12 @@ export interface TriageRunDeps extends TriageStatusDeps {
   loop: () => TriageLoopDeps | null;
   modelOff: () => boolean;
   hold: () => (() => void) | null;
+  /** The pass's wall clock, as the loop's (`TRIAGE_PASS_BOUND_MS`). */
+  boundMs: number;
 }
 
 export function realTriageRunDeps(config: Config): TriageRunDeps {
-  return { ...realTriageStatusDeps(config), loop: () => triageLoopDepsFor(config), modelOff: () => NIGHTLY_MODEL_OFF, hold: tryHoldTriagePass };
+  return { ...realTriageStatusDeps(config), loop: () => triageLoopDepsFor(config), modelOff: () => NIGHTLY_MODEL_OFF, hold: tryHoldTriagePass, boundMs: TRIAGE_PASS_BOUND_MS };
 }
 
 export function registerWikiDecisionTriageRunRoute(app: Hono, depsFor: () => TriageRunDeps): void {
@@ -69,15 +71,16 @@ export function registerWikiDecisionTriageRunRoute(app: Hono, depsFor: () => Tri
       const off = pass.why ?? (!pass.covered.includes(name) ? "the pass does not cover this wiki" : !loop ? "DECISION_TRIAGE_REPO_ROOTS is not set" : null);
       if (off || !loop) return c.json({ error: `the pass is off: ${off}`, off: true }, 409);
       release = deps.hold();
-      if (!release) return c.json({ error: "a triage pass is running: try again when it ends", busy: true }, 409);
+      if (!release) return c.json({ error: "a triage pass is still running: try again when it has ended", busy: true }, 409);
       // A pass outlives Bun's 255 s idleTimeout only with the timer off for this request.
       (c.env as { timeout?: (req: Request, seconds: number) => void } | undefined)?.timeout?.(c.req.raw, 0);
       // The scope the loop's own check would read, so the run line's floor covers the same wikis.
       await loop.wikis(pass.covered);
-      const signal = AbortSignal.timeout(TRIAGE_PASS_BOUND_MS);
+      // The bound only aborts: the hold ends in `finally`, once the pass has returned.
+      const signal = AbortSignal.timeout(deps.boundMs);
       let res = await loop.run(name, signal);
       if (res.outcome === "aborted" && signal.aborted) {
-        const error = `the pass timed out after ${TRIAGE_PASS_BOUND_MS} ms`;
+        const error = `the pass timed out after ${deps.boundMs} ms`;
         res = { outcome: (await loop.recordFailed(name, error)) || "failed", reason: error };
       }
       log.info("Run now for {wiki}: {outcome}, {cards} card(s)", { wiki: name, outcome: res.outcome, cards: res.cards ?? 0 });

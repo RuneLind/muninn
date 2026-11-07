@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { tryHoldTriagePass, type TriageLoopDeps, type TriagePassOutcome } from "../../wiki/decision-triage/loop-deps.ts";
+import { triagePassHeld, tryHoldTriagePass, type TriageLoopDeps, type TriagePassOutcome } from "../../wiki/decision-triage/loop-deps.ts";
 import { __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import { registerWikiDecisionTriageRunRoute, type TriageRunBody, type TriageRunDeps } from "./wiki-decision-triage-run.ts";
@@ -34,16 +34,21 @@ function fixture(over: Partial<TriageRunDeps> = {}, configOver: Partial<ReturnTy
     profile: "default" as const, decisionTriageRepoRoots: "/r", ...configOver,
   };
   const runs: string[] = [];
-  let next: () => Promise<TriagePassOutcome> = async () => ({ outcome: "ok", cards: 3 });
+  let next: (signal: AbortSignal) => Promise<TriagePassOutcome> = async () => ({ outcome: "ok", cards: 3 });
+  const failed: { wiki: string; error: string }[] = [];
+  let failedAs: "partial" | "failed" | void = "failed";
   const loop: TriageLoopDeps = {
     wikis: async (covered) => [...covered],
     beforeCheck: async () => {},
     readState: async () => null,
-    run: async (wiki) => {
+    run: async (wiki, signal) => {
       runs.push(wiki);
-      return next();
+      return next(signal);
     },
-    recordFailed: async () => "failed",
+    recordFailed: async (wiki, error) => {
+      failed.push({ wiki, error });
+      return failedAs;
+    },
   };
   const deps: TriageRunDeps = {
     config: () => config,
@@ -56,13 +61,14 @@ function fixture(over: Partial<TriageRunDeps> = {}, configOver: Partial<ReturnTy
     loop: () => loop,
     modelOff: () => true,
     hold: tryHoldTriagePass,
+    boundMs: 60_000,
     ...over,
   };
   const app = new Hono();
   registerWikiDecisionTriageRunRoute(app, () => deps);
   const post = (q = "?wiki=mimir", headers: Record<string, string> = { "content-type": "application/json" }) =>
     app.request(`/api/wiki/decision-triage/run${q}`, { method: "POST", headers, body: "{}" });
-  return { post, runs, setNext: (fn: typeof next) => (next = fn) };
+  return { post, runs, failed, setNext: (fn: typeof next) => (next = fn), setFailedAs: (v: typeof failedAs) => (failedAs = v) };
 }
 
 describe("POST /api/wiki/decision-triage/run", () => {
@@ -113,7 +119,7 @@ describe("POST /api/wiki/decision-triage/run", () => {
     const loopHold = tryHoldTriagePass()!;
     const busy = await post();
     expect(busy.status).toBe(409);
-    expect(await busy.json()).toMatchObject({ busy: true });
+    expect(await busy.json()).toEqual({ busy: true, error: "a triage pass is still running: try again when it has ended" });
     expect(runs).toEqual([]);
     loopHold();
 
@@ -129,6 +135,30 @@ describe("POST /api/wiki/decision-triage/run", () => {
     const after = tryHoldTriagePass();
     expect(after).not.toBeNull();
     after!();
+  });
+
+  test("the bound: the pass is aborted, recorded as timed out, and the hold ends only when the pass returns", async () => {
+    for (const [as, outcome] of [[undefined, "failed"], ["partial", "partial"]] as const) {
+      const { post, failed, setNext, setFailedAs } = fixture({ boundMs: 20 });
+      setFailedAs(as);
+      let aborted = false as boolean;
+      let heldAfterAbort = null as boolean | null;
+      // A pass that sees its signal, then takes a while to wind down, as a real one does.
+      setNext((signal) => new Promise((resolve) => signal.addEventListener("abort", () => {
+        aborted = true;
+        setTimeout(() => {
+          heldAfterAbort = triagePassHeld();
+          resolve({ outcome: "aborted" });
+        }, 30);
+      })));
+      const res = await post();
+      expect(aborted).toBe(true);
+      expect(heldAfterAbort).toBe(true);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ wiki: "mimir", outcome, reason: "the pass timed out after 20 ms" });
+      expect(failed).toEqual([{ wiki: "mimir", error: "the pass timed out after 20 ms" }]);
+      expect(triagePassHeld()).toBe(false);
+    }
   });
 
   test("a pass that throws: 500 JSON, and the single-flight is let go", async () => {

@@ -8,7 +8,8 @@
  * The disabled state with the pass off is in `wiki-decision-inbox.spec.ts`.
  *
  * Its own muninn, because the pass is on only with `SCHEDULER_ENABLED=true`. So
- * nothing else in it runs: no bot token (`e2eEnv()`), no stale-confirm wikis, and
+ * nothing else in it runs: no bot token (`e2eEnv()`), no stale-confirm wikis, the
+ * retention cleanup's windows past any row's age (`schedulerOnEnv()`), and
  * `HOME` is a temp dir whose work-map state, and the triage dir's state, read a
  * success a minute ago, so neither loop's check is due and no model is called.
  * ENV PREREQUISITE: `bun run db:setup:test`.
@@ -19,7 +20,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { e2eEnv } from "./e2e-env.ts";
+import { e2eEnv, schedulerOnEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
@@ -27,7 +28,8 @@ import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 const PORT = e2ePort("wiki-decision-run-now");
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
-const WIKI = "e2e-run-now";
+// Unique per run: /agents reads stamped spans back for 48 h, so an earlier run's row shares a fixed name.
+const WIKI = `e2e-run-now-${Date.now().toString(36)}`;
 const PAGE = `---\ntitle: Run now cards\n---\n\n<Question id="O1" choices="A|B">\n\n**Run it?**\n\n**Recommendation: A.** It holds.\n\n</Question>\n`;
 
 let server: ChildProcess | undefined;
@@ -68,8 +70,7 @@ test.beforeAll(async () => {
       DATABASE_URL: TEST_DB,
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
-      SCHEDULER_ENABLED: "true",
-      WIKI_STALE_CONFIRM_WIKIS: "",
+      ...schedulerOnEnv(),
       WIKI_DIR: "",
       WIKI_EXTRA: `${WIKI}=${wiki}`,
       WORK_MAP_WIKIS: WIKI,
