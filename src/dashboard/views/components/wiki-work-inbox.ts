@@ -63,19 +63,16 @@ function writeKept(kept: Record<string, string>): void {
 const evidenceKey = (c: InboxCard) => JSON.stringify([c.answers.map((a) => [a.author, a.choice, a.at]), c.hint?.decision, c.hint?.word]);
 const keptKey = (c: InboxCard) => `${st?.body?.wiki}|${keyOf(c)}`;
 const isKept = (c: InboxCard) => readKept()[keptKey(c)] === evidenceKey(c);
+/** The store's bound. A card missing from one load may only be unreadable for a
+ *  moment, so absence prunes nothing; the oldest entries go instead. */
+const KEPT_MAX = 200;
 function setKept(c: InboxCard, on: boolean): void {
   const kept = readKept();
+  delete kept[keptKey(c)];
   if (on) kept[keptKey(c)] = evidenceKey(c);
-  else delete kept[keptKey(c)];
+  const keys = Object.keys(kept);
+  for (const k of keys.slice(0, Math.max(0, keys.length - KEPT_MAX))) delete kept[k];
   writeKept(kept);
-}
-/** Drop this wiki's entries whose card has left the inbox. */
-function pruneKept(body: DecisionInboxBody): void {
-  const kept = readKept();
-  const live = new Set(body.cards.map((c) => `${body.wiki}|${keyOf(c)}`));
-  const gone = Object.keys(kept).filter((k) => k.startsWith(`${body.wiki}|`) && !live.has(k));
-  for (const k of gone) delete kept[k];
-  if (gone.length) writeKept(kept);
 }
 
 let st: InboxState | null = null;
@@ -115,7 +112,6 @@ export function loadInbox(url: string): void {
       if (seq !== loadSeq || !st || st.url !== url) return;
       if (body && Array.isArray(body.cards)) {
         st.body = body;
-        pruneKept(body);
         for (const k of Object.keys(st.preview)) {
           const c = body.cards.find((x) => keyOf(x) === k);
           if (!c || evidenceKey(c) !== st.preview[k]!.ev) delete st.preview[k];

@@ -141,4 +141,19 @@ describe("closeCardEdit", () => {
     const r = ok(closeCardEdit(text, "O1", answer({ choice: "<b>", author: "Rune {L} <x>" }), TODAY));
     expect(r.content).toContain("- **D1** — Answer &lt;b> on card O1. Rune &#123;L&#125; &lt;x>, 06.11.2026.");
   });
+
+  test("a line break in the author or the choice stays on the decision's line: no second item", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — Which\n- **D1** — x. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n");
+    for (const over of [{ author: "R\r\n- **D7** — ghost" }, { choice: "B\n- **D7** — ghost" }]) {
+      const r = ok(closeCardEdit(text, "O1", answer(over), TODAY));
+      expect(r.content).not.toMatch(/^- \*\*D7\*\*/m);
+      expect(parseQuestionPage(parseBlocks(r.content.replace(/^---\n[\s\S]*?\n---\n/, ""))).decisions).toEqual(new Set(["D1", "D2"]));
+    }
+  });
+
+  test("a backtick run that is no fence is part of the paragraph: the close goes after it", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — x\n  ```a``` one\n  ```b``` two\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n");
+    const r = ok(closeCardEdit(text, "O1", { kind: "decision", decision: "D1" }, TODAY));
+    expect(r.content).toContain("- **O1** — x\n  ```a``` one\n  ```b``` two. Closed 2026-11-07 (D1).\n");
+  });
 });

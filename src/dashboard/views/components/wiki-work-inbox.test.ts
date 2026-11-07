@@ -200,7 +200,7 @@ test("every repaint after an await is passive: an answer's reply and a copy's re
   }
 });
 
-test("«Still open» entries are pruned when their card leaves the inbox", async () => {
+test("a «Still open» card that leaves one load and comes back is still kept", async () => {
   const store: Record<string, string> = {};
   const g3 = globalThis as { localStorage?: unknown };
   const savedLs = g3.localStorage;
@@ -209,13 +209,30 @@ test("«Still open» entries are pruned when their card leaves the inbox", async
     const kept = card({ id: "O9", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-01T10:00:00Z", questionChanged: false }] });
     await load({ wiki: "w", cards: [kept] });
     click("keep", "plans/a.mdx#O9");
-    expect(store["muninn-inbox-kept"]).toContain("O9");
-    // The same wiki's inbox without the card (closed elsewhere): its entry goes.
-    globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => ({ wiki: "w", cards: [] }) })) as unknown as typeof fetch;
-    click("kept", "");
-    loadInbox("/api/wiki/decision-inbox?wiki=w-same");
-    for (let i = 0; i < 10; i++) await Promise.resolve();
-    expect(store["muninn-inbox-kept"] ?? "{}").not.toContain("O9");
+    // One load without it (its page unreadable for a moment), then the next with it.
+    await load({ wiki: "w", cards: [] });
+    await load({ wiki: "w", cards: [kept] });
+    expect(inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now())).not.toContain('data-wi-key="plans/a.mdx#O9"');
+  } finally {
+    g3.localStorage = savedLs;
+  }
+});
+
+test("the kept-open store holds at most 200 cards, dropping the oldest", async () => {
+  const store: Record<string, string> = {};
+  const g3 = globalThis as { localStorage?: unknown };
+  const savedLs = g3.localStorage;
+  g3.localStorage = { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
+  try {
+    const old: Record<string, string> = {};
+    for (let i = 0; i < 200; i++) old[`w|plans/old.mdx#O${i}`] = "[]";
+    store["muninn-inbox-kept"] = JSON.stringify(old);
+    await load({ wiki: "w", cards: [card({ id: "O9", lane: "close" })] });
+    click("keep", "plans/a.mdx#O9");
+    const kept = JSON.parse(store["muninn-inbox-kept"]!) as Record<string, string>;
+    expect(Object.keys(kept).length).toBe(200);
+    expect(kept["w|plans/old.mdx#O0"]).toBeUndefined();
+    expect(kept["w|plans/a.mdx#O9"]).toBeDefined();
   } finally {
     g3.localStorage = savedLs;
   }

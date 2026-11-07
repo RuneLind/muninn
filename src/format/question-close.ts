@@ -83,8 +83,12 @@ function regionItems(lines: string[], r: Region): Item[] {
     const limit = starts[k + 1] ?? r.close;
     const m = ITEM_RE.exec(lines[start]!)!;
     let paraEnd = start;
-    // A fence opens a nested code block, as a blank line or a list item ends the paragraph.
-    const ends = (l: string) => l.trim() === "" || ITEM_RE.test(l) || /^\s*(`{3,}|~{3,})/.test(l);
+    // A fence at the item's content indent (up to 3 more spaces) opens a nested
+    // code block, as a blank line or a list item ends the paragraph. A backtick
+    // run with a backtick after it is inline code, not a fence.
+    const content = " ".repeat(m[1]!.length + m[2]!.length + m[3]!.length);
+    const fence = (l: string) => /^ {0,3}(?:`{3,}[^`]*|~{3,}.*)$/.test(l.startsWith(content) ? l.slice(content.length) : l);
+    const ends = (l: string) => l.trim() === "" || ITEM_RE.test(l) || fence(l);
     while (paraEnd + 1 < limit && !ends(lines[paraEnd + 1]!)) paraEnd++;
     let end = paraEnd;
     for (let i = paraEnd + 1; i < limit; i++) {
@@ -103,12 +107,12 @@ function regionItems(lines: string[], r: Region): Item[] {
 
 const decisionNumber = (id: string) => Number(id.slice(1));
 
-/** Text with MDX's `<`, `{` and `}` escaped. */
-const mdxText = (text: string) => text.replace(/</g, "&lt;").replace(/\{/g, "&#123;").replace(/\}/g, "&#125;");
+/** Text on one line, so it can open no item of its own, with MDX's `<`, `{` and `}` escaped. */
+const mdxText = (text: string) => text.replace(/\s+/g, " ").trim().replace(/</g, "&lt;").replace(/\{/g, "&#123;").replace(/\}/g, "&#125;");
 
-/** One line of answer text: white space collapsed, escaped ({@link mdxText}), ending in a sentence stop. */
+/** One line of answer text ({@link mdxText}), ending in a sentence stop. */
 function answerSentence(text: string): string {
-  const one = mdxText(text.replace(/\s+/g, " ").trim());
+  const one = mdxText(text);
   return /[.!?]$/.test(one) ? one : `${one}.`;
 }
 
@@ -176,8 +180,9 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
 
   const after = parseQuestionPage(parseBlocks(content.split(/\r?\n/).slice(from).join("\n")));
   const read = after.states.get(id);
-  // The edit adds one `Closed` phrase. Read decided on `decision` means it is
-  // canonical and last; a phrase that is not canonical leaves the card open.
+  // The edit adds one `Closed` phrase and at most two one-line items. Read
+  // decided on `decision` means the phrase is canonical and last; a phrase that
+  // is not canonical leaves the card open.
   if (read?.kind !== "decided" || read.decision !== decision) {
     return { ok: false, code: "unplaceable", reason: `the page's log has a shape the close cannot place: close ${id} on the page` };
   }
