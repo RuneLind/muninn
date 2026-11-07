@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolveTestDatabaseUrl } from "../src/test/test-db-url.ts";
-import { ChildRegistry, DEFAULT_JOBS, checkLines, childEnv, parCheck, parOrder, parseJobs, planDrop, runPool, signalExitCode, slotDbName, staleDatabases, withDatabase } from "./test-par.ts";
+import { ChildRegistry, DEFAULT_JOBS, checkLines, childEnv, parCheck, parOrder, parseJobs, runPool, signalExitCode, slotDbName, staleDatabases, withDatabase } from "./test-par.ts";
 import { junitName, type ChainLink, type ShardTable } from "./test-chain.ts";
 
 describe("runPool", () => {
@@ -83,25 +83,12 @@ describe("staleDatabases", () => {
   });
 });
 
-describe("planDrop", () => {
-  const stale = ["a_test", "b_test"];
-  test("refuses while any `_test` database has a connection: a candidate, muninn_test or a slot", () => {
-    expect(planDrop(stale, { a_test: 6 }, true)).toEqual({ kind: "refuse", busy: ["a_test"] });
-    expect(planDrop(stale, { muninn_test: 1 }, true)).toEqual({ kind: "refuse", busy: ["muninn_test"] });
-    expect(planDrop(stale, { other_test: 1, muninn_par_2_test: 2 }, true)).toEqual({ kind: "refuse", busy: ["muninn_par_2_test", "other_test"] });
-  });
-  test("a connection to a non-`_test` database or a zero count refuses nothing; drops only with --yes", () => {
-    expect(planDrop(stale, { muninn: 3, a_test: 0 }, false)).toEqual({ kind: "dry-run", drop: stale });
-    expect(planDrop(stale, {}, true)).toEqual({ kind: "drop", drop: stale });
-  });
-});
-
 describe("ChildRegistry", () => {
-  test("kills each live child's process group once, skipping removed ones and surviving ESRCH", () => {
+  test("kills each live child by pid once, skipping removed ones and surviving ESRCH", () => {
     const calls: [number, string][] = [];
     const reg = new ChildRegistry((pid, sig) => {
       calls.push([pid, sig]);
-      if (pid === -20) throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+      if (pid === 20) throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
     });
     reg.add(10);
     reg.add(20);
@@ -110,9 +97,9 @@ describe("ChildRegistry", () => {
     reg.delete(40);
     expect(reg.killAll("SIGKILL")).toBe(2);
     expect(calls).toEqual([
-      [-10, "SIGKILL"],
-      [-20, "SIGKILL"],
-      [-30, "SIGKILL"],
+      [10, "SIGKILL"],
+      [20, "SIGKILL"],
+      [30, "SIGKILL"],
     ]);
     calls.length = 0;
     expect(reg.killAll("SIGKILL")).toBe(0);
@@ -121,6 +108,7 @@ describe("ChildRegistry", () => {
   test("exit codes follow the shell's 128 + signal number", () => {
     expect(signalExitCode("SIGINT")).toBe(130);
     expect(signalExitCode("SIGTERM")).toBe(143);
+    expect(signalExitCode("SIGHUP")).toBe(129);
   });
 });
 

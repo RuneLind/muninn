@@ -4,7 +4,6 @@
  *
  *   bun scripts/test-par.ts [--jobs N]    run the chain, N links at a time (default 6)
  *   bun scripts/test-par.ts --list-stale  print `_test` databases that are neither muninn_test nor slot 1..6's
- *   bun scripts/test-par.ts --drop-stale [--yes]  print what it would drop; with --yes, drop them
  *
  * Each slot gets its own database, `muninn_par_<slot>_test`, rebuilt the way
  * `db:setup:test` builds `muninn_test` and reused across runs; its links see it in
@@ -15,12 +14,14 @@
  * slots touch them at once. Those names are server-wide, so a run collides with any
  * other run on the same server, a second `test:par` or a plain `bun run test`.
  *
- * `--drop-stale` refuses outright while any `_test` database has a connection: a
- * run between two links holds none on the database it will use next, so "skip
- * what is in use" is not enough. Do not run it while other sessions are testing.
+ * `--list-stale` only lists. A live run can hold no connection (between links), so
+ * nothing here can tell a leftover from another session's database: drop the
+ * listed ones by hand only when no other session is testing. Slots above 6 are
+ * listed too; they are leftovers only if you do not run `--jobs` above 6.
  *
- * Children are spawned in their own process group and killed, group and all, on
- * SIGINT, SIGTERM or any exit, so none keeps writing to a slot's database.
+ * Children stay in the runner's process group, so a signal to the group reaches
+ * them directly. SIGINT, SIGTERM or SIGHUP to the runner alone kills them through
+ * its exit handler; SIGKILL to the runner alone leaves them running.
  */
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
@@ -69,7 +70,7 @@ function keptSlot(name: string): boolean {
 }
 
 /**
- * The `_test` databases `--drop-stale` may drop: never `muninn_test`, slot
+ * The `_test` databases `--list-stale` prints: never `muninn_test`, slot
  * 1..DEFAULT_JOBS's, or one named in `keep` (the database this run's
  * TEST_DATABASE_URL names).
  */
@@ -87,20 +88,7 @@ export function checkLines(r: CheckResult): string[] {
   return [...r.problems.map((p) => `✗ ${p}`), ...r.warnings.map((w) => `⚠ ${w}`)];
 }
 
-export type DropPlan = { kind: "refuse"; busy: string[] } | { kind: "dry-run" | "drop"; drop: string[] };
-
-/**
- * Refuse when any `_test` database has a connection (`active`: name → count),
- * slots and `muninn_test` included: that is a test run live on the server, and
- * its scratch databases are among the candidates. Otherwise drop only with `yes`.
- */
-export function planDrop(stale: readonly string[], active: Readonly<Record<string, number>>, yes: boolean): DropPlan {
-  const busy = Object.keys(active).filter((n) => TEST_DB.test(n) && (active[n] ?? 0) > 0).sort();
-  if (busy.length > 0) return { kind: "refuse", busy };
-  return { kind: yes ? "drop" : "dry-run", drop: [...stale] };
-}
-
-/** Live child process groups, killed together on a signal or any exit. */
+/** Live children, killed together when the runner exits. */
 export class ChildRegistry {
   private readonly live = new Set<number>();
   constructor(private readonly kill: (pid: number, sig: NodeJS.Signals) => void = (pid, sig) => process.kill(pid, sig)) {}
@@ -110,15 +98,15 @@ export class ChildRegistry {
   delete(pid: number): void {
     this.live.delete(pid);
   }
-  /** Signals each live child's process group (`-pid`); one already gone does not stop the rest. */
+  /** Signals each live child; one already gone does not stop the rest. */
   killAll(sig: NodeJS.Signals): number {
     let n = 0;
     for (const pid of this.live) {
       try {
-        this.kill(-pid, sig);
+        this.kill(pid, sig);
         n++;
       } catch {
-        // ESRCH: the group is already gone
+        // ESRCH: the child is already gone
       }
     }
     this.live.clear();
@@ -126,8 +114,10 @@ export class ChildRegistry {
   }
 }
 
-export function signalExitCode(sig: "SIGINT" | "SIGTERM"): number {
-  return 128 + (sig === "SIGINT" ? 2 : 15);
+const SIGNAL_NUMBER = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 } as const;
+
+export function signalExitCode(sig: keyof typeof SIGNAL_NUMBER): number {
+  return 128 + SIGNAL_NUMBER[sig];
 }
 
 /** Longest first by `cost`, so the slowest links do not start last. */
@@ -158,7 +148,7 @@ export async function runPool<T, R>(items: readonly T[], jobs: number, run: (ite
 const children = new ChildRegistry();
 
 function spawnTracked(cmd: string[], opts: Parameters<typeof Bun.spawn>[1]): Bun.Subprocess {
-  const proc = Bun.spawn(cmd, { ...opts, detached: true });
+  const proc = Bun.spawn(cmd, opts);
   children.add(proc.pid);
   void proc.exited.then(() => children.delete(proc.pid));
   return proc;
@@ -178,49 +168,12 @@ async function listTestDatabases(): Promise<string[]> {
   }
 }
 
-async function activeTestDatabases(): Promise<Record<string, number>> {
-  const { sql } = openPostgres(adminUrl(), { max: 1 });
-  try {
-    const rows = await sql<{ datname: string; n: number }[]>`
-      SELECT datname, count(*)::int AS n FROM pg_stat_activity
-      WHERE datname LIKE '%\\_test' AND pid <> pg_backend_pid() GROUP BY datname`;
-    return Object.fromEntries(rows.map((r) => [r.datname, r.n]));
-  } finally {
-    await sql.end({ timeout: 5 });
-  }
-}
-
-async function cmdStale(drop: boolean, yes: boolean): Promise<number> {
+async function cmdListStale(): Promise<number> {
   const keep = [new URL(TEST_DATABASE_URL).pathname.slice(1)];
   const stale = staleDatabases(await listTestDatabases(), keep);
   for (const n of stale) console.log(n);
-  console.log(`${stale.length} stale _test database(s)`);
-  if (!drop || stale.length === 0) return 0;
-  const plan = planDrop(stale, await activeTestDatabases(), yes);
-  if (plan.kind === "refuse") {
-    console.error(`✗ refusing to drop anything: a test run is live on this server (connections to ${plan.busy.join(", ")}). Run --drop-stale only while no other session is testing.`);
-    return 1;
-  }
-  if (plan.kind === "dry-run") {
-    console.log(`would drop ${plan.drop.length} database(s); pass --yes to drop them`);
-    return 0;
-  }
-  const { sql } = openPostgres(adminUrl(), { max: 1, onnotice: () => {} });
-  let failed = 0;
-  try {
-    for (const n of plan.drop) {
-      try {
-        await sql.unsafe(`DROP DATABASE "${n}"`);
-        console.log(`dropped ${n}`);
-      } catch (e) {
-        failed++;
-        console.log(`skipped ${n}: ${(e as Error).message}`);
-      }
-    }
-  } finally {
-    await sql.end({ timeout: 5 });
-  }
-  return failed === 0 ? 0 : 1;
+  console.log(`${stale.length} stale _test database(s); drop them by hand only when no other session is testing`);
+  return 0;
 }
 
 async function setupSlot(slot: number): Promise<{ slot: number; url: string; code: number; output: string }> {
@@ -304,11 +257,10 @@ async function cmdRun(jobs: number): Promise<number> {
 
 async function main(argv: string[]): Promise<number> {
   try {
-    if (argv.includes("--list-stale")) return await cmdStale(false, false);
-    if (argv.includes("--drop-stale")) return await cmdStale(true, argv.includes("--yes"));
+    if (argv.includes("--list-stale")) return await cmdListStale();
     const unknown = argv.filter((a, i) => a !== "--jobs" && !a.startsWith("--jobs=") && argv[i - 1] !== "--jobs");
     if (unknown.length > 0) {
-      console.error(`usage: bun scripts/test-par.ts [--jobs N] | --list-stale | --drop-stale [--yes] (unknown: ${unknown.join(" ")})`);
+      console.error(`usage: bun scripts/test-par.ts [--jobs N] | --list-stale (unknown: ${unknown.join(" ")})`);
       return 2;
     }
     return await cmdRun(parseJobs(argv));
@@ -322,6 +274,6 @@ if (import.meta.main) {
   // SIGKILL: the runner is going away and nothing a child writes after this is wanted.
   process.on("exit", () => children.killAll("SIGKILL"));
   // Without a handler a signal ends the process without the `exit` event.
-  for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => process.exit(signalExitCode(sig)));
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(signalExitCode(sig)));
   process.exit(await main(process.argv.slice(2)));
 }
