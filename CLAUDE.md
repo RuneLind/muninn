@@ -136,7 +136,7 @@ Two traps regardless of how the page is driven:
 
 ### CI
 
-`.github/workflows/ci.yml` runs typecheck, audit, three unit shards and four e2e shards each with a fan-in, and docker-build on every push to `main` and every PR. Load the `muninn-ci` skill before diagnosing a red job or editing the workflow, the shard plan or `e2e/ci-expected-skips.txt`. Two rules hold always: a runner has no `.env`, and e2e runs with `workers: 1` and `retries: 0` — never add retries, which turn a contention bug into a silent pass. A red `audit` is a dependency finding to fix or to suppress by GHSA id, never a flake to re-run.
+`.github/workflows/ci.yml` runs typecheck, audit, three unit shards and six e2e shards each with a fan-in, and docker-build on every push to `main` and every PR. Load the `muninn-ci` skill before diagnosing a red job or editing the workflow, the shard plan or `e2e/ci-expected-skips.txt`. Two rules hold always: a runner has no `.env`, and e2e runs with `workers: 1` and `retries: 0` — never add retries, which turn a contention bug into a silent pass. A red `audit` is a dependency finding to fix or to suppress by GHSA id, never a flake to re-run.
 
 ## Conventions
 
