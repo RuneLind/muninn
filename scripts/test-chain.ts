@@ -514,7 +514,8 @@ export function needsRetime(seconds: number): boolean {
 
 // --- I/O ---
 
-function readTree(): Tree {
+/** The tree as on disk: every test file, the mock.module scan and the own-process scan. */
+export function readTree(): Tree {
   const all = discoverTestFiles(ROOT);
   const read = (f: string) => readFileSync(path.join(ROOT, f), "utf8");
   return { allTestFiles: all, mockFiles: all.filter((f) => MOCK_MODULE_CALL.test(read(f))), ownProcessFiles: ownProcessFiles(all, read) };

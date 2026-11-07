@@ -15,7 +15,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 // No static import of anything under `src/`: `wiki-page.ts` shares 68 of
 // wiki-browser.ts's 151 modules, and a module already in the cache is not
@@ -37,6 +37,34 @@ function isAppModule(key: string, repoRoot: string, selfPath: string): boolean {
   if (key === selfPath || !path.isAbsolute(key)) return false;
   const rel = path.relative(repoRoot, key).split(path.sep).join("/");
   return rel.startsWith("src/") && !rel.startsWith("src/test/");
+}
+
+const lowerFirst = (n: string) => n[0]!.toLowerCase() + n.slice(1);
+
+/** Bare `setX(arg)` → `x = arg`, the argument found by matching parens. */
+function setCallsToAssignments(s: string): string {
+  const re = /(?<![.\w$])set(?!Timeout\(|Interval\()([A-Z]\w*)\(/g;
+  let out = "";
+  let from = 0;
+  for (let m = re.exec(s); m; m = re.exec(s)) {
+    let depth = 1;
+    let j = re.lastIndex;
+    for (; j < s.length && depth; j++) depth += s[j] === "(" ? 1 : s[j] === ")" ? -1 : 0;
+    out += s.slice(from, m.index) + lowerFirst(m[1]!) + " = " + setCallsToAssignments(s.slice(re.lastIndex, j - 1));
+    from = re.lastIndex = j;
+  }
+  return out + s.slice(from);
+}
+
+/** A handler's identity in the listener pin: a hash of its source after the
+ *  rewrites a verbatim move into a controller makes (`deps.x`→`x`, a bare
+ *  zero-arg call `x()`→`x` and `getX()`→`x`, a bare `setX(v)`→`x = v`, whitespace),
+ *  so a move keeps it; any other token change (a `!`, an operator, a name) does not. */
+function handlerFingerprint(source: string): string {
+  const norm = setCallsToAssignments(
+    source.replace(/\bdeps\./g, "").replace(/(?<![.\w$])(\w+)\(\)/g, (_m, n: string) => (/^get[A-Z]/.test(n) ? lowerFirst(n.slice(3)) : n)),
+  ).replace(/\s/g, "");
+  return Bun.hash(norm).toString(36).slice(0, 5);
 }
 
 /** The nearest folder above this file holding a `package.json`. */
@@ -63,9 +91,13 @@ let loadedInWindow: string[];
 let boot: Boot;
 let win: GlobalWindow;
 let handle: { dispose(): void };
-/** Every `document.addEventListener` call `boot()` made, in order, with its
- *  phase (`capture` from a boolean or an options object's `capture`). */
-const registered: { type: string; source: string; capture: boolean }[] = [];
+/** Every `addEventListener` call `boot()` made, on any target, in order: the
+ *  target (`window`, `document`, `#id`, else the tag name), the type, the phase
+ *  (`capture` from a boolean or an options object's `capture`), the other
+ *  options (`once`, `passive`, a `signal`; listed only when set) and the handler. */
+const listened: { target: string; type: string; source: string; capture: boolean; opts: string[] }[] = [];
+/** The `document` ones among them. */
+let registered: { type: string; source: string; capture: boolean }[] = [];
 /** Every `setInterval` call `boot()` made: the id it returned and the tick. */
 const intervals: { id: unknown; source: string }[] = [];
 const fetched: string[] = [];
@@ -74,6 +106,7 @@ const LISTING = {
   pages: [
     { name: "alpha", title: "Alpha", type: "concept", domain: "ai", tags: [], aliases: [], relPath: "concepts/alpha.md" },
     { name: "beta", title: "Beta", type: "concept", domain: "ai", tags: [], aliases: [], relPath: "concepts/beta.md" },
+    { name: "gamma", title: "Gamma", type: "entity", domain: "ai", tags: [], aliases: [], relPath: "entities/gamma.md" },
   ],
   scannedAt: 1_700_000_000_000,
 };
@@ -110,6 +143,7 @@ async function stubFetch(input: unknown): Promise<unknown> {
   const url = new URL(raw, "http://localhost:3011");
   let body: unknown = {};
   if (url.pathname === "/api/wiki/pages") body = LISTING;
+  else if (url.pathname === "/api/wiki/index-coverage") body = { totalMd: 3, indexed: 2, missing: ["entities/gamma.md"] };
   else if (url.pathname === "/api/wiki/page") {
     body = {
       meta: LISTING.pages[0],
@@ -120,6 +154,13 @@ async function stubFetch(input: unknown): Promise<unknown> {
   }
   const R = g.Response as typeof Response;
   return new R(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+/** The prototype on `node`'s chain that owns `addEventListener`. */
+function findAddOwner(node: object): Record<string, unknown> {
+  let p = Object.getPrototypeOf(node) as Record<string, unknown>;
+  while (!Object.prototype.hasOwnProperty.call(p, "addEventListener")) p = Object.getPrototypeOf(p);
+  return p;
 }
 
 async function until(cond: () => boolean, what: string): Promise<void> {
@@ -185,14 +226,33 @@ beforeAll(async () => {
   // (3) Globals, fetch stub, one boot, the article open.
   Object.assign(g, { __WIKI_NAME__: "w", __WIKI_ROOT__: "/tmp/w", __WIKI_FIND_SELF__: "w", __WIKI_FIND_ROWS__: "w" });
   g.fetch = stubFetch;
-  const doc = g.document as Document & { addEventListener: Document["addEventListener"] };
-  const realAdd = doc.addEventListener;
-  // An own property shadowing the prototype method, for the boot call only.
-  doc.addEventListener = function (this: Document, type: string, fn: unknown, opts?: unknown) {
-    const capture = typeof opts === "boolean" ? opts : !!(opts as { capture?: boolean } | undefined)?.capture;
-    registered.push({ type, source: String(fn), capture });
-    return (realAdd as (...a: unknown[]) => void).call(this, type, fn, opts);
-  } as Document["addEventListener"];
+  const doc = g.document as Document;
+  // The prototype that owns the document's `addEventListener` (happy-dom's base
+  // EventTarget, shared by every node; `g.EventTarget` is a per-window subclass
+  // it does not reach); the window's is globalThis's (`window` maps to
+  // globalThis), so it is wrapped too. Both originals are taken before either is
+  // replaced: no call records twice.
+  const proto = findAddOwner(doc);
+  expect(findAddOwner(doc.body)).toBe(proto);
+  const realProtoAdd = proto.addEventListener as (...a: unknown[]) => void;
+  const hadOwnWinAdd = Object.prototype.hasOwnProperty.call(g, "addEventListener");
+  const realWinAdd = g.addEventListener as (...a: unknown[]) => void;
+  const record = (t: unknown, type: string, fn: unknown, opts: unknown) => {
+    const o = (typeof opts === "object" && opts ? opts : {}) as { capture?: boolean; once?: boolean; passive?: boolean; signal?: unknown };
+    const capture = typeof opts === "boolean" ? opts : !!o.capture;
+    const flags = [o.once && "once", o.passive !== undefined && `passive=${o.passive}`, o.signal !== undefined && "signal"];
+    const el = t as Element;
+    const target = t === globalThis ? "window" : t === doc ? "document" : el.id ? `#${el.id}` : String(el.tagName ?? t).toLowerCase();
+    listened.push({ target, type, source: String(fn), capture, opts: flags.filter((f): f is string => !!f) });
+  };
+  proto.addEventListener = function (this: unknown, type: string, fn: unknown, opts?: unknown) {
+    record(this, type, fn, opts);
+    return realProtoAdd.call(this, type, fn, opts);
+  };
+  g.addEventListener = function (type: string, fn: unknown, opts?: unknown) {
+    record(globalThis, type, fn, opts);
+    return realWinAdd.call(globalThis, type, fn, opts);
+  };
   const realSetInterval = g.setInterval as (...a: unknown[]) => unknown;
   g.setInterval = (fn: unknown, ...rest: unknown[]) => {
     const id = realSetInterval(fn, ...rest);
@@ -202,9 +262,12 @@ beforeAll(async () => {
   try {
     handle = boot();
   } finally {
-    delete (doc as unknown as Record<string, unknown>).addEventListener;
+    proto.addEventListener = realProtoAdd;
+    if (hadOwnWinAdd) g.addEventListener = realWinAdd;
+    else delete g.addEventListener;
     g.setInterval = realSetInterval;
   }
+  registered = listened.filter((l) => l.target === "document");
   await until(() => !!doc.querySelector("#articleWrap #alphaBody"), "the article to render");
 }, 30_000);
 
@@ -238,6 +301,20 @@ describe("wiki-browser.ts — import and boot", () => {
   });
 });
 
+describe("findRepoRoot — the root the preload check is decided against", () => {
+  // A wrong root makes `isAppModule` answer false for every key, so `preloaded`
+  // would be empty however many app modules were loaded first: the check above
+  // would pass blind. This pins the root, and that it sees app modules at all.
+  test("is muninn's checkout root, and an app module loaded by boot counts under it", () => {
+    const root = findRepoRoot(import.meta.dir);
+    expect((JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as { name: string }).name).toBe("muninn");
+    expect(existsSync(path.join(root, "scripts", "test-chain.ts"))).toBe(true);
+    const shell = loadedInWindow.find((k) => k.endsWith("/components/wiki-browser.ts"))!;
+    expect(isAppModule(shell, root, import.meta.path)).toBe(true);
+    expect(loadedInWindow.filter((k) => isAppModule(k, root, import.meta.path)).length).toBeGreaterThan(100);
+  });
+});
+
 describe("isAppModule — which require.cache keys count as preloaded app modules", () => {
   const SELF = "/repo/src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts";
   const cases: [string, string, string, boolean][] = [
@@ -260,7 +337,74 @@ describe("isAppModule — which require.cache keys count as preloaded app module
   }
 });
 
+describe("handlerFingerprint — survives a move, tells handlers apart", () => {
+  const before =
+    "(e) => {\n  if (deps.filters.tag && deps.allPages().length) deps.setRailOpen(!deps.getRailOpen());\n  openFolds = toggleFolded(deps.WIKI(), e.key);\n  deps.render(e);\n}";
+  test("the C2–C4 port rewrites leave it unchanged", () => {
+    const moved = "(e) => {\n  if (filters.tag && allPages().length) railOpen = !railOpen;\n  openFolds = toggleFolded(WIKI, e.key);\n  render(e);\n}";
+    expect(handlerFingerprint(moved)).toBe(handlerFingerprint(before));
+  });
+  test("a different handler gets a different one", () => {
+    expect(handlerFingerprint(before.replace("render", "paint"))).not.toBe(handlerFingerprint(before));
+  });
+  test("a negation or operator flip gets a different one", () => {
+    const h = "(e) => {\n  if (!open && e.key !== \"Escape\") close();\n}";
+    for (const flipped of [h.replace("!open", "open"), h.replace("!==", "=="), h.replace("!==", "!=")]) {
+      expect(flipped).not.toBe(h);
+      expect(handlerFingerprint(flipped)).not.toBe(handlerFingerprint(h));
+    }
+  });
+});
+
 describe("wiki-browser.ts — listener order", () => {
+  test("every listener boot() registers, in registration order, is pinned", () => {
+    // The order is load-bearing (`keydown` handlers read `defaultPrevented`, the
+    // click delegates' selector sets rely on who runs first), and moving code out
+    // of the shell into controllers (mimir plan muninn-wiki-browser-split) must
+    // keep it: each entry is target, type, phase, any once/passive/signal option
+    // and the handler's fingerprint (so a swap inside a run of one label fails).
+    // Order captured from the pre-move code at 832e0b9b (base 00eeaa2f); a change
+    // here is a reordering to justify, never to re-snapshot. Editing a handler's
+    // body changes its fingerprint only: update that one entry. Fingerprints hash
+    // Bun's re-printed `String(fn)`, pinned by CI's BUN_VERSION: on a Bun bump, re-snapshot
+    // them only after the label-only check below passes (target/type/options unchanged).
+    const label = (l: (typeof listened)[number]) =>
+      [l.target, l.type, ...(l.capture ? ["capture"] : []), ...l.opts, handlerFingerprint(l.source)].join(" ");
+    const PINNED = [
+      "document input 2lr9x", "document toggle capture 1hmo1", "document click capture xplwj",
+      "document selectionchange 2rr9w", "document pointerdown capture 1kth3", "document pointerup capture g28bu",
+      "document pointercancel capture g28bu", "document contextmenu capture g28bu",
+      "document pointermove capture 1qtti", "document click 23ej6", "document keydown hlssx", "document keydown yo4j6",
+      "document change e5k9f", "document mouseover 1s9vt", "document focusin 1s9vt", "document mouseout 3fqd2",
+      "document focusout 78yv1", "document keydown capture 3m8dl", "window resize 9x9xn",
+      "#wikiRailResizer pointerdown s1ktq", "#wikiRailResizer pointermove 2zrwk", "#wikiRailResizer pointerup 2ipmi",
+      "#wikiRailResizer pointercancel 2ipmi", "#wikiRailResizer lostpointercapture 2ipmi",
+      "#wikiRailResizer dblclick 2ix69", "#wikiRailResizer keydown 1hhyy", "document click 29t84",
+      "document keydown 25kek", "#staleBody toggle capture 2a2m2", "document keydown 3nsjp",
+      "window scroll capture p45k6", "window resize 2km4o", "document click 1bnhl", "document submit 3msp4",
+      "document mouseover 1czfm", "document mouseout 2u68x", "document focusin 3ui45", "document change 1cb94",
+      "document keydown capture 2pgt9", "document keydown 2gxm7", "document keydown 1hysz", "body click 20r2i",
+      "document click 33ul7", "document keydown 1mf3n", "document keydown 2p96v", "window scroll capture 17plc",
+      "window resize 24jk9", "#wikiList click jjzww", "#wikiSearch input 2darq", "#domainChips click 7wyxo",
+      "#wikiFolder change 1ytiq", "#typeChips click 1oh5g", "#statusChips click 348ix", "#projectChips click 17olm",
+      "#jiraChips click 2ea4q", "#tagChips click 2hy5a", "#wikiSort change 5y9t3", "#wikiGroupFamilies change 35ij3",
+      "#wikiGroupEfforts change x5cu4", "#wikiShowRetired change vdddp", "#wikiFiltersBtn click 38n1w",
+      "#wikiFilters toggle 1cx2k", "#wikiOptionsBtn click 80q4g", "document pointerdown 3edk0",
+      "document focusin 3l9rj", "document keydown capture 1c2w7", "#wikiActiveOptions click 19s7n",
+      "#wikiSelect change 3le4p", "window hashchange kobbe", "window popstate 24ens", "#wikiAskBtn click 7m320",
+      "#wikiAskInput keydown 36h0q", "#wikiAskHistory click 13b99", "document click 1vfg7", "document keydown 2zmrp",
+      "document click 1ha77", "document change 1typa", "document input smycp", "document keydown 2bnv5",
+      "document change kqu5p", "document toggle capture 2ac08", "document keydown 35n5s", "#articleWrap mouseup 2roml",
+      "document selectionchange 33rjq", "document keydown crscu", "document mousedown m9lmg", "window message 30vgu",
+      "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",
+      "window focus 8kg09", "document visibilitychange 29s0r",
+    ];
+    // The labels alone first, so a failure says whether the order moved or only a fingerprint did.
+    const withoutFingerprint = (s: string) => s.slice(0, s.lastIndexOf(" "));
+    expect(listened.map(label).map(withoutFingerprint)).toEqual(PINNED.map(withoutFingerprint));
+    expect(listened.map(label)).toEqual(PINNED);
+  });
+
   test("the shell's click delegate is registered before initChatOptions' (dialog click-away reads a detached target)", () => {
     // Replaces the `indexOf` grep that `wiki-chat-target.test.ts` held: this is
     // the order the listeners were REGISTERED in at runtime. The shell's
@@ -313,6 +457,63 @@ describe("wiki-browser.ts — listener order", () => {
   });
 });
 
+describe("the left pane (wiki-rail-controller.ts), driven through the booted shell", () => {
+  const doc = () => g.document as Document;
+  const rows = () => Array.from(doc().querySelectorAll<HTMLElement>("#wikiList .wiki-list-item")).map((r) => r.getAttribute("data-relpath"));
+  const ALL = ["concepts/alpha.md", "concepts/beta.md", "entities/gamma.md"];
+
+  test("the modules the shell imports are evaluated inside the import-effect window", () => {
+    for (const m of ["/components/wiki-rail-controller.ts", "/components/wiki-shell-state.ts"]) {
+      expect(loadedInWindow.some((k) => k.endsWith(m))).toBe(true);
+    }
+  });
+
+  test("typing in the filter re-renders the list to the matching rows, and clearing restores it", async () => {
+    await until(() => rows().length === 3, "the rail to list the three pages");
+    expect([...rows()].sort()).toEqual(ALL);
+    const box = doc().getElementById("wikiSearch") as HTMLInputElement;
+    const Ev = g.Event as typeof Event;
+    box.value = "gamm";
+    box.dispatchEvent(new Ev("input", { bubbles: true }));
+    expect(rows()).toEqual(["entities/gamma.md"]);
+    box.value = "";
+    box.dispatchEvent(new Ev("input", { bubbles: true }));
+    expect([...rows()].sort()).toEqual(ALL);
+  });
+
+  test("a type chip narrows the list and marks itself active; All types restores it", () => {
+    const chip = (t: string) => doc().querySelector<HTMLElement>(`#typeChips [data-type="${t}"]`)!;
+    chip("entity").click();
+    expect(rows()).toEqual(["entities/gamma.md"]);
+    expect(chip("entity").classList.contains("active")).toBe(true);
+    chip("").click();
+    expect([...rows()].sort()).toEqual(ALL);
+    expect(chip("").classList.contains("active")).toBe(true);
+  });
+
+  test("the ★ pins a page in place: the row's button flips, the list is not redrawn", () => {
+    const row = doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="concepts/beta.md"]')!;
+    const star = row.querySelector<HTMLElement>("[data-pin]")!;
+    expect(star.getAttribute("aria-pressed")).toBe("false");
+    star.click();
+    expect(star.getAttribute("aria-pressed")).toBe("true");
+    expect(star.isConnected).toBe(true);
+    expect(JSON.stringify((g.localStorage as Storage).getItem("muninn.wiki.pins.v1:w"))).toContain("concepts/beta.md");
+    star.click();
+    expect(star.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  test("the coverage footer shows the index line, and its link opens the start view", async () => {
+    const foot = doc().getElementById("wikiCoverageFoot")!;
+    await until(() => foot.style.display === "" && !!doc().getElementById("wikiCoverageLink"), "the coverage footer");
+    expect(foot.textContent).toBe("3 pages · indexed 2 · 1 missing");
+    expect(fetched).toContain("/api/wiki/index-coverage?wiki=w");
+    doc().getElementById("wikiCoverageLink")!.click();
+    expect(new URLSearchParams((g.location as Location).search).get("page")).toBeNull();
+    expect(doc().querySelector("#articleWrap #alphaBody")).toBeNull();
+  });
+});
+
 describe("wiki-browser.ts — dispose", () => {
   // Runs last: it stops the timers the tests above may rely on. Observed before
   // afterAll's `happyDOM.abort()`, which clears every timer on its own.
@@ -336,3 +537,4 @@ describe("wiki-browser.ts — dispose", () => {
     expect(intervals.filter((i) => !cleared.includes(i.id)).map((i) => i.source)).toEqual([]);
   });
 });
+

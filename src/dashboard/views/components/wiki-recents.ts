@@ -3,7 +3,7 @@
  * the **Activity** and **Pinned** sections, the ★ pin state, and the **Jira-key
  * jump**. The localStorage half is `wiki-recents-store.ts`; the ranking behind
  * Activity is `wiki-activity-rank.ts` (the caller hands the result in); the paint
- * is `renderList` in `wiki-browser.ts`.
+ * is `renderList` in `wiki-rail-controller.ts`.
  *
  * Why: the rail is a flat listing of every page. Activity lifts what changed,
  * a star keeps what the reader chose, and on the melosys wiki pages are also
