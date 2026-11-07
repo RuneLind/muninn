@@ -14,7 +14,7 @@
  * not know yet costs the median, so a new spec lands somewhere rather than
  * nowhere; a stale table costs balance, never coverage.
  *
- * `check` is the fan-in's gate. Four shards can each be green while the suite
+ * `check` is the fan-in's gate. Every shard can be green while the suite
  * is not, so it compares the merged report with `playwright test --list`:
  * every listed test ran exactly once (a file in two lists or in none is a
  * failure), and the set of skipped tests, each with its reason, equals

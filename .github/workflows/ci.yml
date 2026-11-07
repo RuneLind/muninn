@@ -355,8 +355,9 @@ jobs:
   # The Playwright suite, split across six runners. One serial run took 13–15
   # min and set the wall clock of every push; six shards each run a sixth of
   # it. Six, not four, since the unit job moved to its own three shards and the
-  # e2e shards became the critical path; a run peaks at 12 concurrent jobs. Each shard still runs `workers: 1` and `retries: 0`
-  # (`playwright.config.ts` says why): the parallelism comes from separate
+  # e2e shards became the critical path; a run peaks at 12 concurrent jobs.
+  # Each shard still runs `workers: 1` and `retries: 0` (`playwright.config.ts`
+  # says why): the parallelism comes from separate
   # runners, so no host is more loaded than one serial run was.
   # `scripts/e2e-shards.ts` packs whole spec files onto shards by the times in
   # `e2e/shard-timings.json`; `--shard=i/n` balances by test count and left one
@@ -398,7 +399,7 @@ jobs:
       # holding a live token fights the production bot for Telegram.
       CI: "true"
       # One name per shard, so the fan-in's download into one directory does not
-      # overwrite three of the four reports.
+      # overwrite all but one of the reports.
       PLAYWRIGHT_BLOB_OUTPUT_NAME: report-${{ matrix.shard }}.zip
     steps:
       - uses: actions/checkout@v4
