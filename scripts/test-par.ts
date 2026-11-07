@@ -3,15 +3,17 @@
  * at a time, so a local run holds exactly CI's file sets.
  *
  *   bun scripts/test-par.ts [--jobs N]    run the chain, N links at a time (default 6)
- *   bun scripts/test-par.ts --list-stale  print `_test` databases that are neither muninn_test nor a slot's
+ *   bun scripts/test-par.ts --list-stale  print `_test` databases that are neither muninn_test nor slot 1..6's
  *   bun scripts/test-par.ts --drop-stale [--yes]  print what it would drop; with --yes, drop them
  *
  * Each slot gets its own database, `muninn_par_<slot>_test`, rebuilt the way
  * `db:setup:test` builds `muninn_test` and reused across runs; its links see it in
- * both `MUNINN_TEST_DATABASE_URL` and `DATABASE_URL`. The fixed scratch databases
- * and the role some DB tests create (`db/provision.test.ts`, three under `src/db/`)
- * each belong to one link, so no two slots touch them at once. Two `test:par` runs
- * on one server at the same time do collide, as two `bun run test` runs do.
+ * both `MUNINN_TEST_DATABASE_URL` and `DATABASE_URL`. The fixed-name scratch
+ * databases and role some DB tests create (`db/provision.test.ts`'s
+ * `muninn_provision_test` and its role; `muninn_dburl_test` and
+ * `muninn_unprovisioned_test` under `src/db/`) each belong to one link, so no two
+ * slots touch them at once. Those names are server-wide, so a run collides with any
+ * other run on the same server, a second `test:par` or a plain `bun run test`.
  *
  * `--drop-stale` refuses outright while any `_test` database has a connection: a
  * run between two links holds none on the database it will use next, so "skip
@@ -24,12 +26,12 @@ import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { openPostgres } from "../db/postgres-connection.ts";
 import { TEST_DATABASE_URL } from "../src/test/test-db-url.ts";
-import { check, junitName, linkCost, loadChain, readTimings, SHARD_TOTAL, type ChainLink } from "./test-chain.ts";
+import { check, junitName, linkCost, loadChain, readTimings, SHARD_TOTAL, type ChainLink, type CheckInput, type CheckResult } from "./test-chain.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
 const OUT_DIR = path.join(ROOT, ".test-par");
 export const DEFAULT_JOBS = 6;
-const SLOT_DB = /^muninn_par_\d+_test$/;
+const SLOT_DB = /^muninn_par_(\d+)_test$/;
 const TEST_DB = /^[A-Za-z0-9_]+_test$/;
 
 export function slotDbName(slot: number): string {
@@ -60,13 +62,29 @@ export function parseJobs(argv: readonly string[]): number {
   return Number(raw);
 }
 
+/** Slots 1..DEFAULT_JOBS; a higher one is left over from a run with a larger `--jobs`. */
+function keptSlot(name: string): boolean {
+  const m = name.match(SLOT_DB);
+  return m !== null && Number(m[1]) >= 1 && Number(m[1]) <= DEFAULT_JOBS;
+}
+
 /**
- * The `_test` databases `--drop-stale` may drop: never `muninn_test`, a slot's,
- * or one named in `keep` (the database this run's TEST_DATABASE_URL names).
+ * The `_test` databases `--drop-stale` may drop: never `muninn_test`, slot
+ * 1..DEFAULT_JOBS's, or one named in `keep` (the database this run's
+ * TEST_DATABASE_URL names).
  */
 export function staleDatabases(names: readonly string[], keep: readonly string[] = []): string[] {
   const kept = new Set(["muninn", "muninn_test", ...keep]);
-  return names.filter((n) => TEST_DB.test(n) && !kept.has(n) && !SLOT_DB.test(n)).sort();
+  return names.filter((n) => TEST_DB.test(n) && !kept.has(n) && !keptSlot(n)).sort();
+}
+
+/** The fan-in's check over every shard, as CI runs it after the shards. */
+export function parCheck(input: Pick<CheckInput, "links" | "table" | "tree" | "junit" | "timings">): CheckResult {
+  return check({ ...input, shards: Array.from({ length: SHARD_TOTAL }, (_, i) => i + 1), results: [] });
+}
+
+export function checkLines(r: CheckResult): string[] {
+  return [...r.problems.map((p) => `✗ ${p}`), ...r.warnings.map((w) => `⚠ ${w}`)];
 }
 
 export type DropPlan = { kind: "refuse"; busy: string[] } | { kind: "dry-run" | "drop"; drop: string[] };
@@ -223,7 +241,8 @@ interface LinkRun {
 async function cmdRun(jobs: number): Promise<number> {
   const t0 = performance.now();
   const { tree, table, links } = loadChain();
-  const cost = linkCost(tree, readTimings());
+  const timings = readTimings();
+  const cost = linkCost(tree, timings);
   const order = parOrder(links, cost);
   const slots = Math.min(jobs, order.length);
 
@@ -268,14 +287,13 @@ async function cmdRun(jobs: number): Promise<number> {
 
   const junit = new Map<string, string>();
   for (const f of new Bun.Glob("*.xml").scanSync({ cwd: junitDir })) junit.set(f, readFileSync(path.join(junitDir, f), "utf8"));
-  const shards = Array.from({ length: SHARD_TOTAL }, (_, i) => i + 1);
-  const ranOnce = check({ links, table, tree, junit, shards, results: [], timings: {} });
+  const ranOnce = parCheck({ links, table, tree, junit, timings });
 
   const wall = (performance.now() - t0) / 1000;
   const failed = runs.filter((r) => r.code !== 0);
   console.log(`\nslowest links:`);
   for (const r of [...runs].sort((a, b) => b.seconds - a.seconds).slice(0, 8)) console.log(`  ${r.seconds.toFixed(1).padStart(6)} s  ${r.link.key}`);
-  for (const p of ranOnce.problems) console.log(`✗ ${p}`);
+  for (const line of checkLines(ranOnce)) console.log(line);
   if (failed.length > 0) {
     console.log(`\n${failed.length} failing link(s):`);
     for (const r of failed) console.log(`  ${r.link.key}  exit ${r.code}  ${path.relative(ROOT, r.log)}`);

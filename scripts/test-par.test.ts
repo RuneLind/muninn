@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { resolveTestDatabaseUrl } from "../src/test/test-db-url.ts";
-import { ChildRegistry, DEFAULT_JOBS, childEnv, parOrder, parseJobs, planDrop, runPool, signalExitCode, slotDbName, staleDatabases, withDatabase } from "./test-par.ts";
+import { ChildRegistry, DEFAULT_JOBS, checkLines, childEnv, parCheck, parOrder, parseJobs, planDrop, runPool, signalExitCode, slotDbName, staleDatabases, withDatabase } from "./test-par.ts";
+import { junitName, type ChainLink, type ShardTable } from "./test-chain.ts";
 
 describe("runPool", () => {
   test("never runs more than `jobs` at once, never two at once on one slot, and runs each item once", async () => {
@@ -120,5 +121,28 @@ describe("ChildRegistry", () => {
   test("exit codes follow the shell's 128 + signal number", () => {
     expect(signalExitCode("SIGINT")).toBe(130);
     expect(signalExitCode("SIGTERM")).toBe(143);
+  });
+});
+
+describe("staleDatabases and high slots", () => {
+  test("a slot above the default job count is stale; slots 1..6 never are", () => {
+    const names = ["muninn_par_1_test", "muninn_par_6_test", "muninn_par_7_test", "muninn_par_12_test", "muninn_par_0_test"];
+    expect(staleDatabases(names)).toEqual(["muninn_par_0_test", "muninn_par_12_test", "muninn_par_7_test"]);
+  });
+});
+
+describe("parCheck", () => {
+  const tree = { allTestFiles: ["a.test.ts"], mockFiles: [] };
+  const links: ChainLink[] = [{ key: "a.test.ts", args: ["a.test.ts"], kind: "pinned" }];
+  const table: ShardTable = { groups: {}, shards: [[], ["a.test.ts"], []] };
+  const junit = new Map([[junitName("a.test.ts"), `<testsuites><testsuite name="a.test.ts"><testcase name="t" time="70"/></testsuite></testsuites>`]]);
+  test("checks every shard against the timing table it is given, as the CI fan-in does", () => {
+    expect(parCheck({ links, table, tree, junit, timings: { "a.test.ts": 70 } })).toEqual({ problems: [], warnings: [], ran: 1 });
+    const untimed = parCheck({ links, table, tree, junit, timings: {} });
+    expect(untimed.warnings).toHaveLength(1);
+    expect(untimed.warnings[0]).toContain("a.test.ts 70.0 s");
+  });
+  test("checkLines prints problems and warnings", () => {
+    expect(checkLines({ problems: ["never ran: x"], warnings: ["refresh the table"], ran: 0 })).toEqual(["✗ never ran: x", "⚠ refresh the table"]);
   });
 });
