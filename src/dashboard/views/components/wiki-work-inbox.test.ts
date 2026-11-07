@@ -245,6 +245,24 @@ test("a «Still open» card that leaves one load and comes back is still kept", 
   }
 });
 
+test("a close lane whose cards are all kept open stays, so «Show kept» can bring them back", async () => {
+  const store: Record<string, string> = {};
+  const g3 = globalThis as { localStorage?: unknown };
+  const savedLs = g3.localStorage;
+  g3.localStorage = { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
+  try {
+    await load({ wiki: "w", cards: [card({ id: "O9", lane: "close" }), card({ id: "O2", lane: "ask" })] });
+    click("keep", "plans/a.mdx#O9");
+    const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+    expect(html).not.toContain('data-wi-key="plans/a.mdx#O9"');
+    expect(html).toContain('data-wi-lane="close"');
+    expect(html).toContain("Show 1 kept open");
+    expect(html).not.toContain("Nothing to close");
+  } finally {
+    g3.localStorage = savedLs;
+  }
+});
+
 test("the kept-open store holds at most 200 cards, dropping the oldest", async () => {
   const store: Record<string, string> = {};
   const g3 = globalThis as { localStorage?: unknown };
