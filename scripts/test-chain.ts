@@ -571,6 +571,34 @@ export interface AloneRun {
   output: string;
   /** Killed at the timeout: its seconds are not a timing. */
   timedOut: boolean;
+  /** Set when the group kill failed and only the direct child was killed: grandchildren may still run. */
+  killWarning?: string;
+}
+
+export type KillFn = (pid: number, signal: NodeJS.Signals) => void;
+
+/**
+ * SIGKILL the child's process group. A failure other than ESRCH (the group is
+ * gone) falls back to the child itself while it still runs, so `proc.exited`
+ * resolves; the returned warning says so.
+ */
+export function killGroup(proc: { pid: number; exitCode: number | null; signalCode: string | null }, kill: KillFn = process.kill.bind(process)): string | undefined {
+  try {
+    kill(-proc.pid, "SIGKILL");
+    return undefined;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return undefined;
+    // An exited child's pid may already belong to another process.
+    if (proc.exitCode === null && proc.signalCode === null) {
+      try {
+        kill(proc.pid, "SIGKILL");
+      } catch {
+        // gone in between
+      }
+    }
+    return `killing process group ${proc.pid} failed (${code ?? String(e)}); killed only the child, grandchildren may still run`;
+  }
 }
 
 /** How long the pipes may stay open after the run ends: a grandchild that inherited them can hold them for good. */
@@ -590,12 +618,12 @@ export function aloneArgv(file: string): string[] {
 /**
  * One file alone in its own `bun test` process, wall clock. The process gets its
  * own group and the whole group is killed when it ends, so neither a timeout nor a
- * leaked grandchild holding the pipes can keep this waiting. `argv` and
- * `timeoutMs` are for tests.
+ * leaked grandchild holding the pipes can keep this waiting. `argv`, `cwd`,
+ * `timeoutMs` and `kill` are for tests.
  */
-export async function timeAlone(file: string, opts: { argv?: string[]; timeoutMs?: number } = {}): Promise<AloneRun> {
+export async function timeAlone(file: string, opts: { argv?: string[]; cwd?: string; timeoutMs?: number; kill?: KillFn } = {}): Promise<AloneRun> {
   const t0 = performance.now();
-  const proc = Bun.spawn(opts.argv ?? aloneArgv(file), { cwd: ROOT, stdout: "pipe", stderr: "pipe", detached: true });
+  const proc = Bun.spawn(opts.argv ?? aloneArgv(file), { cwd: opts.cwd ?? ROOT, stdout: "pipe", stderr: "pipe", detached: true });
   const out: string[] = [];
   const err: string[] = [];
   const pipes = Promise.all([drain(proc.stdout, out), drain(proc.stderr, err)]).catch(() => {});
@@ -606,14 +634,10 @@ export async function timeAlone(file: string, opts: { argv?: string[]; timeoutMs
   ]);
   clearTimeout(timer);
   const seconds = (performance.now() - t0) / 1000;
-  try {
-    process.kill(-proc.pid, "SIGKILL");
-  } catch {
-    // ESRCH: the group is already gone
-  }
+  const killWarning = killGroup(proc, opts.kill);
   const code = await proc.exited;
   await Promise.race([pipes, Bun.sleep(PIPE_GRACE_MS)]);
-  return { seconds, code, output: `${out.join("")}${err.join("")}`, timedOut: ended === "timeout" };
+  return { seconds, code, output: `${out.join("")}${err.join("")}`, timedOut: ended === "timeout", ...(killWarning ? { killWarning } : {}) };
 }
 
 function tail(text: string, n = 40): string {
@@ -692,28 +716,35 @@ async function cmdChanged(argv: string[]): Promise<number> {
   if (diff.exitCode !== 0) throw new Error(`git diff against ${base} failed: ${diff.stderr.toString()}`);
   const files = changedTestFiles(diff.stdout.toString(), chainFiles);
   const allow = parseAllowlist(existsSync(ALLOWLIST_PATH) ? readFileSync(ALLOWLIST_PATH, "utf8") : "");
-  const problems = [...allow.problems];
   console.log(`${files.length} test file(s) added or changed against ${base}`);
+  const problems = [...allow.problems, ...(await timeChangedFiles(files, allow.files))];
+  for (const p of problems) console.log(`::error::${p}`);
+  return problems.length === 0 ? 0 : 1;
+}
+
+/** The changed-file step's verdicts, one problem per file that timed out, failed or is over the bar. `time` is for tests. */
+export async function timeChangedFiles(files: readonly string[], allowed: ReadonlySet<string>, time: (f: string) => Promise<AloneRun> = (f) => timeAlone(f)): Promise<string[]> {
+  const problems: string[] = [];
   for (const f of files) {
-    let r = await timeAlone(f);
+    let r = await time(f);
     let line = `${r.seconds.toFixed(1).padStart(6)} s  ${f}`;
-    if (!r.timedOut && r.code === 0 && needsRetime(r.seconds) && !allow.files.has(f)) {
-      r = await timeAlone(f);
+    if (!r.timedOut && r.code === 0 && needsRetime(r.seconds) && !allowed.has(f)) {
+      r = await time(f);
       line += `  (again: ${r.seconds.toFixed(1)} s)`;
     }
     console.log(line);
+    if (r.killWarning) console.log(`::warning::${f}: ${r.killWarning}`);
     if (r.timedOut) {
       problems.push(`${f} timed out: killed after ${ALONE_TIMEOUT_MS / 1000} s alone`);
       console.log(tail(r.output));
     } else if (r.code !== 0) {
       problems.push(`${f} fails when run alone (exit ${r.code})`);
       console.log(tail(r.output));
-    } else if (r.seconds > SLOW_FILE_SECONDS && !allow.files.has(f)) {
+    } else if (r.seconds > SLOW_FILE_SECONDS && !allowed.has(f)) {
       problems.push(`${f} took ${r.seconds.toFixed(1)} s alone, over the ${SLOW_FILE_SECONDS} s bar: speed it up, or add it with a reason to scripts/unit-slow-allowlist.txt`);
     }
   }
-  for (const p of problems) console.log(`::error::${p}`);
-  return problems.length === 0 ? 0 : 1;
+  return problems;
 }
 
 /** The timing table `refresh` writes from its runs, and the files that failed. */
@@ -737,6 +768,7 @@ async function cmdRefresh(): Promise<number> {
     const r = await timeAlone(f);
     runs.push({ file: f, run: r });
     console.log(`[${i + 1}/${files.length}] ${r.seconds.toFixed(1).padStart(6)} s${r.timedOut ? "  TIMED OUT" : r.code === 0 ? "" : `  exit ${r.code}`}  ${f}`);
+    if (r.killWarning) console.log(`::warning::${f}: ${r.killWarning}`);
     if (r.timedOut || r.code !== 0) console.log(tail(r.output));
   }
   const { seconds, failed, timedOut } = refreshTimings(runs);

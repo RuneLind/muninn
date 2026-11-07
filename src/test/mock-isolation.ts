@@ -45,7 +45,8 @@ export const MOCK_MODULE_SUBSTRING = /\bmock\.module\(/;
  * `.test`/`_test`/`.spec`/`_spec` suffix before a JS/TS extension, case-insensitive;
  * every directory below the root except `node_modules` and hidden ones (a hidden
  * FILE is run). `.gitignore` is not read. Symlinked directories, which bun follows,
- * are not: the tracked tree has none.
+ * are not: the tracked tree has none. Bun also skips `Node_Modules/` (measured on
+ * macOS); this skips only the lowercase name, and the tree has no other spelling.
  */
 export const BUN_TEST_FILE = /[._](test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/i;
 
@@ -135,7 +136,10 @@ export function bunTestLinks(scripts: Record<string, string>): BunTestLink[] {
  * `a.test.tsx`; an argument starting `./` is a path, the file itself or every
  * file under that directory. NO positional argument (`bun test --coverage`) is
  * bun's whole-repo run: every test file. A file argument that matches nothing is
- * returned as itself, so callers report it as not on disk.
+ * returned as itself, so callers report it as not on disk; a directory argument
+ * that matches nothing is dropped. Not modelled, as no chain uses them: bun runs a
+ * `./` path into a hidden directory (here: nothing, as discovery skips it) and reads
+ * an absolute argument as a path (here: a substring that matches nothing).
  */
 export function expandLink(args: string[], allTestFiles: readonly string[]): string[] {
   if (args.length === 0) return [...allTestFiles];

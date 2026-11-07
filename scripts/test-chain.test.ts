@@ -13,6 +13,7 @@ import {
   check,
   generate,
   junitName,
+  killGroup,
   linkKey,
   needsRetime,
   normalizeTable,
@@ -24,6 +25,8 @@ import {
   refreshTimings,
   tableProblems,
   timeAlone,
+  timeChangedFiles,
+  type AloneRun,
   type ChainLink,
   type CheckInput,
   type ShardTable,
@@ -220,6 +223,12 @@ describe("generate", () => {
     expect(problems).toEqual(["link src/b/m.test.ts also runs sub/src/b/m.test.ts (in g3): bun reads a path argument as a substring of the file path"]);
   });
 
+  test("a link whose file argument also matches an excluded file is a problem", () => {
+    const t: Tree = { ...tree, allTestFiles: [...tree.allTestFiles, "sub/src/b/three.test.ts"].sort() };
+    const { problems } = generate(t, table, { pinned, excluded: [...excluded, "sub/src/b/three.test.ts"] });
+    expect(problems).toEqual(["link g2 also runs sub/src/b/three.test.ts (in EXCLUDED): bun reads a path argument as a substring of the file path"]);
+  });
+
   test("dropping a pinned entry leaves its file in no link", () => {
     const { problems } = generate(tree, table, { pinned: [], excluded });
     expect(problems).toEqual(["src/p.test.ts is in no link: add it to a group in scripts/unit-shards.json, or pin it"]);
@@ -409,6 +418,18 @@ describe("the changed-file step", () => {
     expect(changedTestFiles("src/a/x.test.tsx\nsrc/a/y_test.ts\nsrc/a/z.spec.ts\ne2e/o.spec.ts\nsrc/a/w.ts\n", chain)).toEqual(["src/a/x.test.tsx", "src/a/y_test.ts", "src/a/z.spec.ts"]);
   });
 
+  test("a chain file whose name is not a bun test file name drops out", () => {
+    expect(changedTestFiles("src/a/helper.ts\nsrc/a/one.test.ts\n", new Set(["src/a/helper.ts", "src/a/one.test.ts"]))).toEqual(["src/a/one.test.ts"]);
+  });
+
+  test("a timed-out file is reported as a timeout, not as a failure, and is not timed again", async () => {
+    const calls: string[] = [];
+    const run: AloneRun = { seconds: 300, code: 137, output: "", timedOut: true };
+    const problems = await timeChangedFiles(["src/a.test.ts"], new Set(), async (f) => (calls.push(f), run));
+    expect(problems).toEqual(["src/a.test.ts timed out: killed after 300 s alone"]);
+    expect(calls).toEqual(["src/a.test.ts"]);
+  });
+
   test("a file within 2 s over the 10 s bar is timed again; under the bar or further over is not", () => {
     expect(needsRetime(9.9)).toBe(false);
     expect(needsRetime(10)).toBe(false); // exactly on the bar passes (the step fails only `> 10`), so no second timing
@@ -449,6 +470,76 @@ describe("timeAlone", () => {
     expect(r.code).toBe(0);
     expect(r.output).toContain("done");
   }, 15_000);
+});
+
+describe("timeAlone's kill", () => {
+  const fixture = (body: string) => {
+    const dir = testTempDirSync(path.join(tmpdir(), "time-alone-kill-"));
+    writeFileSync(path.join(dir, "fixture.ts"), body);
+    return dir;
+  };
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  test("the whole process group is killed: a grandchild in it does not outlive the run", async () => {
+    const dir = fixture(`const c = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });\nawait Bun.write(import.meta.dir + "/pid", String(c.pid));\nsetInterval(() => {}, 1000);\n`);
+    const r = await timeAlone("x", { argv: ["bun", path.join(dir, "fixture.ts")], timeoutMs: 1500 });
+    expect(r.timedOut).toBe(true);
+    const pid = Number(readFileSync(path.join(dir, "pid"), "utf8"));
+    for (let i = 0; i < 20 && alive(pid); i++) await Bun.sleep(100);
+    const survived = alive(pid);
+    if (survived) process.kill(pid, "SIGKILL");
+    expect(survived).toBe(false);
+  }, 15_000);
+
+  test("when the group kill fails with other than ESRCH, the child itself is killed and the run says so", async () => {
+    const dir = fixture("setInterval(() => {}, 1000);\n");
+    const calls: number[] = [];
+    const kill = (pid: number, sig: NodeJS.Signals) => {
+      calls.push(pid);
+      if (pid < 0) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      process.kill(pid, sig);
+    };
+    const t0 = performance.now();
+    const r = await timeAlone("x", { argv: ["bun", path.join(dir, "fixture.ts")], timeoutMs: 1000, kill });
+    expect((performance.now() - t0) / 1000).toBeLessThan(5);
+    expect(r.timedOut).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toBe(-calls[1]!);
+    expect(r.killWarning).toContain("(EPERM)");
+  }, 10_000);
+
+  test("killGroup: ESRCH is a gone group, no fallback; a failed kill of an exited child does not touch its pid", () => {
+    const calls: number[] = [];
+    const throwing = (code: string) => (pid: number) => {
+      calls.push(pid);
+      if (pid < 0) throw Object.assign(new Error(code), { code });
+    };
+    expect(killGroup({ pid: 7, exitCode: null, signalCode: null }, throwing("ESRCH"))).toBeUndefined();
+    expect(calls).toEqual([-7]);
+    calls.length = 0;
+    expect(killGroup({ pid: 7, exitCode: 0, signalCode: null }, throwing("EPERM"))).toContain("(EPERM)");
+    expect(calls).toEqual([-7]);
+  });
+});
+
+describe("timeAlone's default argv", () => {
+  test("without argv it runs aloneArgv: only the named file, not its .tsx twin", async () => {
+    const dir = testTempDirSync(path.join(tmpdir(), "time-alone-argv-"));
+    for (const f of ["src/a/x.test.ts", "src/a/x.test.tsx"]) {
+      mkdirSync(path.join(dir, path.dirname(f)), { recursive: true });
+      writeFileSync(path.join(dir, f), 'import { test } from "bun:test";\ntest("t", () => {});\n');
+    }
+    const r = await timeAlone("src/a/x.test.ts", { cwd: dir, timeoutMs: 15_000 });
+    expect(r.code).toBe(0);
+    expect(r.output).toContain("Ran 1 test across 1 file.");
+  }, 20_000);
 });
 
 describe("aloneArgv", () => {
