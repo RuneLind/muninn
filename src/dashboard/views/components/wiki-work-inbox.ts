@@ -260,6 +260,7 @@ async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: 
 async function sendClose(c: InboxCard, k: string, sent: { baseHash: string; rulingHash: string } | null): Promise<void> {
   const s = st!;
   s.sending[k] = true;
+  s.closed = null;
   delete s.msg[k];
   repaint(`${sel(k)} .wiki-wi-row`);
   let status = 0;
@@ -284,7 +285,8 @@ async function sendClose(c: InboxCard, k: string, sent: { baseHash: string; ruli
     if (ok) s.closed = `Closed ${c.id} (${data?.decision ?? ""}).`;
     else s.msg[k] = { text: `Couldn’t close: ${data?.error ?? (status ? `HTTP ${status}` : "the server did not answer")}.`, warn: true, page: status === 409 };
   }
-  repaint(`${sel(k)} .wiki-wi-row`, true);
+  // A closed card's row leaves on the reload: focus its lane.
+  repaint(ok && sent ? '[data-wi-lane="close"] > summary' : `${sel(k)} .wiki-wi-row`, true);
   // A refusal reloads too: the evidence that moved the ruling shows on the row.
   if (sent && status >= 200 && status < 500) loadInbox(s.url);
 }

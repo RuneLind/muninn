@@ -244,8 +244,9 @@ function registerDecisionCloseRoute(app: Hono, config: Config, depsFor: () => De
     const today = todayOslo(deps.now());
     const edit = closeCardEdit(current, id, ruling, today);
     if (!edit.ok) return c.json({ error: edit.reason, refused: true, code: edit.code }, 409);
-    // The page hash guards the page; the ruling hash guards the answers the lines came from.
-    const shown = sha256(JSON.stringify(edit.lines));
+    // The page hash guards the page; the ruling hash guards what the preview showed
+    // from the answers: the lines and the warnings.
+    const shown = sha256(JSON.stringify([edit.lines, warnings]));
     if (preview) return c.json({ ok: true, preview: true, decision: edit.decision, lines: edit.lines, warnings, baseHash: sha256(current), rulingHash: shown });
     if (baseHash !== sha256(current)) return c.json({ error: "The page changed since the preview. Preview again.", stale: true }, 409);
     if (rulingHash !== shown) return c.json({ error: "The answers changed since the preview. Preview again.", changed: true }, 409);

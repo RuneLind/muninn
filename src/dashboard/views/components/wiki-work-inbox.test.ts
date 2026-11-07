@@ -270,3 +270,31 @@ test("a close says so in the lane after the closed row has left it", async () =>
   expect(html).not.toContain('data-wi-key="plans/a.mdx#O6"');
   expect(html).toContain("Closed O6 (D3).");
 });
+
+test("after a close, focus goes to the lane, and a later close's refusal does not sit beside the old «Closed»", async () => {
+  const mk = (id: string) => card({ id, lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
+  await load({ wiki: "w", cards: [mk("O6"), mk("O7")] });
+  const calls: (string | undefined)[] = [];
+  initInbox((sel?: string) => { calls.push(sel); });
+  const reply = (closeBody: unknown, status = 200) =>
+    (async (url: string) =>
+      url.endsWith("/close") ? { ok: status === 200, status, json: async () => closeBody } : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [mk("O7")] }) }) as unknown as typeof fetch;
+  const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  try {
+    globalThis.fetch = reply({ ok: true, preview: true, lines: ["- x"], warnings: [], baseHash: "b", rulingHash: "r", decision: "D3" });
+    click("preview", "plans/a.mdx#O6");
+    await tick();
+    globalThis.fetch = reply({ ok: true, decision: "D3" });
+    click("close", "plans/a.mdx#O6");
+    await tick();
+    expect(calls).toContain('[data-wi-lane="close"] > summary');
+    globalThis.fetch = reply({ error: "refused" }, 409);
+    click("preview", "plans/a.mdx#O7");
+    await tick();
+    const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+    expect(html).toContain("Couldn’t close: refused.");
+    expect(html).not.toContain("Closed O6 (D3).");
+  } finally {
+    initInbox(() => {});
+  }
+});

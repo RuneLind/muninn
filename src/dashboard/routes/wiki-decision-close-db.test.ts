@@ -215,6 +215,16 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     expect(body.warnings).toEqual(["Third Person answered an older wording of the card.", "Someone Else answered A."]);
   });
 
+  test("a warning that appears after the preview (another author not sure) is 409 too", async () => {
+    await answer("O2", "A", "");
+    const { body: p } = await preview("O2");
+    expect(p.warnings).toEqual([]);
+    await insertWikiAnswerVersion({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name: "Someone Else" }, choice: "not-sure", body: "", questionHash: "h" });
+    const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ changed: true });
+  });
+
   test("a page with uncommitted edits is 409 dirty and stays as it was", async () => {
     await answer("O2", "B", "");
     const dirty = `${PAGE}\nA hand edit.\n`;
