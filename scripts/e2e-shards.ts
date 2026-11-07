@@ -88,7 +88,7 @@ export function untimedSpecWarnings(files: string[], timings: Timings): string[]
 
 /**
  * Real seconds the specs missing from the table may take together before `check`
- * fails. With only the warning, 18 untimed specs (~381 s) grew in by 2026-11-07
+ * fails. With only the warning, 18 untimed specs (401 s in run 42352843754) grew in by 2026-11-07
  * and put 557 s on one shard against ~300 s on the others.
  */
 export const UNTIMED_SECONDS_LIMIT = 60;
@@ -101,7 +101,7 @@ export function untimedTimeProblem(measured: Timings, timings: Timings, limit = 
   const total = untimed.reduce((a, [, s]) => a + s, 0);
   if (total <= limit) return null;
   const list = untimed.map(([f, s]) => `${f} ${s} s`).join(", ");
-  return `specs with no entry in e2e/shard-timings.json took ${Math.round(total)} s, over the ${limit} s limit: ${list}. Run \`bun scripts/e2e-shards.ts refresh e2e-results.json\` on this run's e2e-report artifact and commit the table`;
+  return `specs with no entry in e2e/shard-timings.json took ${Math.round(total)} s, over the ${limit} s limit: ${list}. Run \`bun scripts/e2e-shards.ts refresh e2e-results.json\` on the e2e-report artifact of a run whose shards all passed (this one, if this check is its only failure) and commit the table`;
 }
 
 function median(xs: number[]): number | undefined {

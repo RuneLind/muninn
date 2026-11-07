@@ -1,6 +1,6 @@
 /**
  * The fixture the three Your work card specs share (`wiki-work-card-slot`,
- * `-board` and `-strip`, split from one 187 s file so no shard waits on it):
+ * `-board` and `-strip`, split from one file that spanned 190 s in run 42352843754 so no shard waits on it):
  * the temp wikis, their seeded `.work-map.json` files, the muninn each spec
  * boots on its own port, and the helpers more than one of them reads.
  *
