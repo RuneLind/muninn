@@ -9,7 +9,7 @@ import { WORK_MAP_FRESH_MS, workMapDue } from "../work-map/loop.ts";
 import { osloDay } from "../work-map/ids.ts";
 import type { WorkMapState } from "../work-map/state.ts";
 import type { ParsedLog } from "./log.ts";
-import type { CardLine, RunLine, RunOutcome } from "./schema.ts";
+import type { CardLine, RepoFact, RunLine, RunOutcome } from "./schema.ts";
 
 /** Nights the status returns, newest first. */
 export const TRIAGE_STATUS_NIGHTS = 14;
@@ -67,15 +67,31 @@ export function nextTriageDue(state: WorkMapState | null, nowMs: number, hour: n
 }
 
 const cardKey = (c: CardLine) => `${c.relPath}#${c.id}`;
+const isStr = (v: unknown): v is string => typeof v === "string";
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** A run line the counts can read, or null. `parseLog` checks only `type`, and its
+ *  fields reach the status line's markup: repos keep their well-formed entries, `cards` is a number. */
+function readableRun(r: RunLine): RunLine | null {
+  if (!isStr(r.runId) || !isNum(r.at) || !isStr(r.outcome) || !Array.isArray(r.repos)) return null;
+  const repos = r.repos.filter((x): x is RepoFact => !!x && typeof x === "object" && isStr(x.repo) && typeof x.found === "boolean");
+  const { reason, ...rest } = r;
+  return { ...rest, repos, cards: isNum(r.cards) ? r.cards : 0, model: isStr(r.model) ? r.model : "", ...(isStr(reason) ? { reason } : {}) };
+}
+const readableCard = (c: CardLine) => isStr(c.runId) && isNum(c.at) && isStr(c.relPath) && isStr(c.id) && isStr(c.verdict);
 
 export function triageWikiStatus(
   wiki: string,
-  log: ParsedLog,
+  parsed: ParsedLog,
   state: WorkMapState | null,
   nowMs: number,
   hour: number,
   maxNights = TRIAGE_STATUS_NIGHTS,
 ): TriageWikiStatus {
+  const readRuns = parsed.runs.map(readableRun).filter((r): r is RunLine => r !== null);
+  const readCards = parsed.cards.filter(readableCard);
+  // A wrong-shaped line counts with the torn ones.
+  const log: ParsedLog = { runs: readRuns, cards: readCards, broken: parsed.broken + (parsed.runs.length - readRuns.length) + (parsed.cards.length - readCards.length) };
   const runs = [...log.runs].sort((a, b) => a.at - b.at);
   const runAt = new Map(runs.map((r) => [r.runId, r.at]));
   const nights = new Map<string, { runs: RunLine[]; cards: Map<string, CardLine> }>();
@@ -117,7 +133,7 @@ export function triageWikiStatus(
       codeFacts: log.cards.filter((c) => c.runId === last.runId && c.codeFacts === true).length,
     },
     nights: rows,
-    reposNotFound: (last?.repos ?? []).filter((r) => !r.found).map((r) => ({ repo: r.repo, reason: r.reason ?? null })),
+    reposNotFound: (last?.repos ?? []).filter((r) => !r.found).map((r) => ({ repo: r.repo, reason: isStr(r.reason) ? r.reason : null })),
     nextDueAt: nextTriageDue(state, nowMs, hour),
     broken: log.broken,
   };

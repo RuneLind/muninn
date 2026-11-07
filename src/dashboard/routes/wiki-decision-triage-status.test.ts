@@ -117,6 +117,18 @@ describe("GET /api/wiki/decision-triage/overview", () => {
     expect(body.wikis).toEqual([{ wiki: "mimir", lastRun: expect.objectContaining({ at: r.at }), reposNotFound: [], nextDueAt: expect.any(Number) }]);
   });
 
+  test("a run line with no repos is counted broken: status and overview still answer 200 for every wiki", async () => {
+    const { app, dir } = fixture();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(nightlyLogPath("mimir", dir), `${JSON.stringify({ type: "run", runId: "bad", at: NOW - H })}\n${JSON.stringify(run(NOW - 2 * H, { cards: 1 }))}\n`);
+    const status = await app.request("/api/wiki/decision-triage/status?wiki=mimir");
+    expect(status.status).toBe(200);
+    expect((await status.json()) as TriageStatusBody).toMatchObject({ broken: 1, lastRun: { at: NOW - 2 * H } });
+    const overview = await app.request("/api/wiki/decision-triage/overview");
+    expect(overview.status).toBe(200);
+    expect(((await overview.json()) as TriageOverviewBody).wikis.map((w) => w.wiki)).toEqual(["mimir"]);
+  });
+
   test("the loop off: off with its reason, nothing covered", async () => {
     const cases: [Parameters<typeof fixture>[0], string][] = [
       [{ workMapWikis: [] }, "WORK_MAP_WIKIS is not set"],

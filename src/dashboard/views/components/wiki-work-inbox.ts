@@ -165,8 +165,10 @@ function statusHtml(now: number): string {
   const last = t.lastRun;
   const warn = !t.pass.on || t.pass.modelOff;
   const dotTitle = !t.pass.on ? `The pass is off: ${t.pass.why ?? "unknown"}` : t.pass.modelOff ? "The model call is off" : "The pass is on";
+  // Numbers from a log line: coerced, so nothing else reaches the markup.
+  const cards = Number(last?.cards) || 0;
   const parts = last
-    ? [`Triage checked <b>${esc(atLabel(last.at, now))}</b>`, `${last.cards} card${last.cards === 1 ? "" : "s"}`, `${last.codeFacts} with code facts`]
+    ? [`Triage checked <b>${esc(atLabel(last.at, now))}</b>`, `${cards} card${cards === 1 ? "" : "s"}`, `${Number(last.codeFacts) || 0} with code facts`]
     : ["Triage has not run on this wiki"];
   if (last && last.outcome !== "ok") parts.push(esc(last.outcome));
   const missing = t.reposNotFound.length

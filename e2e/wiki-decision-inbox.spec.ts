@@ -36,6 +36,7 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { contrastOf } from "./contrast.ts";
+import { TRIAGE_CHECKED_3_CARDS } from "./triage-patterns.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 
 const PORT = e2ePort("wiki-decision-inbox");
@@ -288,7 +289,7 @@ test.describe.serial("the Decisions section", () => {
   test("the triage status line sits above the lanes, from the seeded log; Details opens the per-night table", async ({ page }) => {
     await openInbox(page, KODE);
     const tri = page.locator("#wikiWorkInbox .wiki-wi-tri");
-    await expect(tri).toContainText(/Triage checked \d{2}:\d{2} · 3 cards · 1 with code facts/);
+    await expect(tri).toContainText(TRIAGE_CHECKED_3_CARDS);
     await expect(tri.locator(".wiki-wi-tri-warn")).toHaveText("1 repo not found");
     await expect(tri.locator(".wiki-wi-tri-warn")).toHaveAttribute("title", "e2e-gone-repo: no such folder under the roots");
     // SCHEDULER_ENABLED=false here: the pass is off, so no next time.

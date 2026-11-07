@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { DecisionInboxBody, InboxCard } from "../../routes/wiki-decision-inbox.ts";
 import type { TriageStatusBody } from "../../routes/wiki-decision-triage-status.ts";
+import { TRIAGE_CHECKED_3_CARDS } from "../../../../e2e/triage-patterns.ts";
 import { handleInboxClick, inboxHtml, initInbox, loadInbox } from "./wiki-work-inbox.ts";
 
 // The module's state is shared with the start-cards suites in one `bun test` process:
@@ -537,6 +538,18 @@ test("a pass that is off says so in place of the next time; no run yet says that
   expect(html).toContain('title="DECISION_TRIAGE_REPO_ROOTS is not set">pass off</span>');
   expect(html).not.toContain("next ~");
   expect(html).not.toContain('data-wi-act="tri-details"');
+});
+
+test("the e2e's checked-line pattern holds at 01:30 Oslo for a run 2 h earlier (yesterday's date)", async () => {
+  const now = Date.UTC(2026, 10, 7, 0, 30); // 01:30 Oslo
+  await loadWithStatus(statusBody({ lastRun: { at: now - 2 * 3_600_000, outcome: "ok", reason: null, cards: 3, model: "none", codeFacts: 1 } }));
+  const line = /<div class="wiki-wi-tri"[\s\S]*?<\/div>/.exec(inboxHtml(() => "", now))![0].replace(/<[^>]+>/g, "");
+  expect(line).toMatch(TRIAGE_CHECKED_3_CARDS);
+});
+
+test("a run line's cards that is not a number never reaches the markup raw", async () => {
+  await loadWithStatus(statusBody({ lastRun: { at: Date.now(), outcome: "ok", reason: null, cards: XSS as unknown as number, model: "none", codeFacts: 1 } }));
+  expect(inboxHtml(() => "", Date.now())).not.toContain("<img");
 });
 
 test("a status that fails or is not a status leaves the line out and the inbox whole", async () => {

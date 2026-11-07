@@ -66,6 +66,27 @@ describe("triageWikiStatus", () => {
     expect(s.nights[0]!.night).toBe("2026-11-07");
   });
 
+  test("a run line with no repos, a card line with no relPath and a repos entry that is not an object count as broken, not a throw", () => {
+    const good = run(FIVE_OSLO, { cards: 1, repos: [{ repo: "gone", found: false }] });
+    const text = [
+      JSON.stringify({ type: "run", runId: "bad", at: FIVE_OSLO + 60_000 }),
+      JSON.stringify(good),
+      JSON.stringify({ ...run(FIVE_OSLO + 2 * 60_000), repos: [null, 7, { repo: "x", found: false }] }),
+      JSON.stringify({ type: "card", runId: good.runId, at: FIVE_OSLO, id: "O9" }),
+      JSON.stringify(card(good.runId, good.at, "O1", { codeFacts: true })),
+    ].join("\n");
+    const s = triageWikiStatus("w", parseLog(text), null, FIVE_OSLO + H, 5);
+    expect(s.broken).toBe(2);
+    expect(s.lastRun?.at).toBe(FIVE_OSLO + 2 * 60_000);
+    expect(s.reposNotFound).toEqual([{ repo: "x", reason: null }]);
+    expect(s.nights[0]).toMatchObject({ cards: 1, codeFacts: 1 });
+  });
+
+  test("a run line's cards that is not a number reads as 0", () => {
+    const r = { ...run(FIVE_OSLO), cards: "<img src=x onerror=1>" } as unknown as RunLine;
+    expect(triageWikiStatus("w", logOf([r], []), null, FIVE_OSLO + H, 5).lastRun?.cards).toBe(0);
+  });
+
   test("reads a real log's text, skipping a torn line", () => {
     const text = `${JSON.stringify(run(FIVE_OSLO, { cards: 1 }))}\n${JSON.stringify(card(`r${FIVE_OSLO}`, FIVE_OSLO, "O1", { codeFacts: true }))}\n{"type":"ca`;
     const s = triageWikiStatus("w", parseLog(text), null, FIVE_OSLO + H, 5);
