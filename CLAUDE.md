@@ -118,7 +118,7 @@ Adding a bot: `bots/CLAUDE.md`. Syncing gitignored bot folders to their source-o
 
 ## Testing
 
-Always run `bun run test` after adding or changing a feature to verify nothing is broken. Tests are split into three sub-scripts (`test:unit` / `test:db` / `test:handlers`) to avoid `mock.module()` leakage between files. `test` does not call them: it inlines its own copy of their links, so a link added to a sub-script also has to be added to `test`, or CI never runs it.
+Always run `bun run test` after adding or changing a feature to verify nothing is broken. Tests are split into three sub-scripts (`test:unit` / `test:db` / `test:handlers`) to avoid `mock.module()` leakage between files. `test` does not call them: `bun scripts/test-chain.ts write` generates it (from the test files, the `mock.module` scan, the pinned links and the groups in `scripts/unit-shards.json`), and CI runs its links on three shards by that table, so a new test file outside a group's directory goes into a group there, then `write`; a test fails when `test` differs from the generated chain.
 
 `bun run test:count` reports how many tests the repo has, grouped unit / integration / e2e, and where the `test*` chains have drifted apart. Its grouping rules and flags (`--run`, `--files`, `--json`): the `muninn-ci` skill.
 
@@ -136,7 +136,7 @@ Two traps regardless of how the page is driven:
 
 ### CI
 
-`.github/workflows/ci.yml` runs typecheck, audit, test, four e2e shards with a fan-in, and docker-build on every push to `main` and every PR. Load the `muninn-ci` skill before diagnosing a red job or editing the workflow, the shard plan or `e2e/ci-expected-skips.txt`. Two rules hold always: a runner has no `.env`, and e2e runs with `workers: 1` and `retries: 0` — never add retries, which turn a contention bug into a silent pass. A red `audit` is a dependency finding to fix or to suppress by GHSA id, never a flake to re-run.
+`.github/workflows/ci.yml` runs typecheck, audit, three unit shards and four e2e shards each with a fan-in, and docker-build on every push to `main` and every PR. Load the `muninn-ci` skill before diagnosing a red job or editing the workflow, the shard plan or `e2e/ci-expected-skips.txt`. Two rules hold always: a runner has no `.env`, and e2e runs with `workers: 1` and `retries: 0` — never add retries, which turn a contention bug into a silent pass. A red `audit` is a dependency finding to fix or to suppress by GHSA id, never a flake to re-run.
 
 ## Conventions
 
