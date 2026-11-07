@@ -17,6 +17,11 @@ describe("splitQuestionLine", () => {
     expect(splitQuestionLine("**How many snapshots should `make backup` keep?**\n\nmore").question).toBe("How many snapshots should make backup keep?");
   });
 
+  test("the question drops every inline marker a reader would not see, in both branches", () => {
+    expect(splitQuestionLine("**Keep __all__ snapshots, *this* one, [the spec](https://x.org) or snake_case_name?**").question).toBe("Keep all snapshots, this one, the spec or snake_case_name?");
+    expect(splitQuestionLine("Use *this* one, [x](y) and `code`?").question).toBe("Use this one, x and code?");
+  });
+
   test("a lone bold first line is the question and leaves the body", () => {
     const { question, rest } = splitQuestionLine(LETTERED);
     expect(question).toBe("Which layout for the Decisions section?");

@@ -400,7 +400,9 @@ test("an opened structured card prints a row per choice, the recommended one mar
   click("row", "plans/a.mdx#O1");
   const html = inboxHtml(() => "", Date.now());
   expect(html).toContain('<div class="wiki-wi-context wiki-wi-rendered">Today every lane prints.</div>');
-  expect(html).toContain('<div class="wiki-wi-choice rec" data-wi-row="A"><button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="A" aria-pressed="false" aria-label="Choose A">A</button><span class="wiki-wi-choice-text"><b>lanes</b> the four lanes <code>stay</code>.</span><span class="wiki-wi-rec">Recommended</span></div>');
+  expect(html).toContain('<div class="wiki-wi-choice rec" data-wi-row="A"><button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="A" aria-pressed="false" aria-describedby="wi-plans_a_mdx_O1-A-t wi-plans_a_mdx_O1-A-r">A</button><span class="wiki-wi-choice-text" id="wi-plans_a_mdx_O1-A-t"><b>lanes</b> the four lanes <code>stay</code>.</span><span class="wiki-wi-rec" id="wi-plans_a_mdx_O1-A-r">Recommended</span></div>');
+  // A row that is not recommended is described by its text alone.
+  expect(html).toContain('data-wi-choice="B" aria-pressed="false" aria-describedby="wi-plans_a_mdx_O1-B-t">B</button><span class="wiki-wi-choice-text" id="wi-plans_a_mdx_O1-B-t">');
   expect(html).toContain('<div class="wiki-wi-choice" data-wi-row="B"><button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="B"');
   expect(html).toContain("<b>Why A</b> It fixes both faults.");
   expect(html).not.toContain("RAW-FALLBACK");
@@ -449,7 +451,7 @@ test("a link in a choice row sits outside the pick button", async () => {
   click("row", "plans/a.mdx#O1");
   const html = inboxHtml(() => "", Date.now());
   // The pick button closes on its letter; the link comes after, in the row's text.
-  expect(html).toMatch(/<div class="wiki-wi-choice rec" data-wi-row="A"><button [^>]*data-wi-act="pick"[^>]*>A<\/button><span class="wiki-wi-choice-text"><b>lanes<\/b> see <a href="https:\/\/example\.org\/x">/);
+  expect(html).toMatch(/<div class="wiki-wi-choice rec" data-wi-row="A"><button [^>]*data-wi-act="pick"[^>]*>A<\/button><span class="wiki-wi-choice-text" id="[^"]+"><b>lanes<\/b> see <a href="https:\/\/example\.org\/x">/);
   expect(html).not.toMatch(/<button [^>]*data-wi-act="pick"(?:(?!<\/button>).)*<a /s);
 });
 

@@ -2719,7 +2719,8 @@ export async function renderWikiPage(opts?: {
     button.wiki-wi-letter { font: inherit; font-weight: 700; color: var(--text-primary); cursor: pointer; padding: 2px 8px; }
     button.wiki-wi-letter:hover:not(:disabled), button.wiki-wi-letter:focus-visible { border-color: var(--accent); }
     button.wiki-wi-letter:disabled { opacity: .55; cursor: default; }
-    .wiki-wi-choice.on button.wiki-wi-letter { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    /* --accent-hover as .wiki-wi-btn.on: white on --accent measured 4.3:1 in Dark. */
+    .wiki-wi-choice.on button.wiki-wi-letter { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
     .wiki-wi-choice.rec { border-color: var(--tone-good); }
     .wiki-wi-choice.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--bg-inset); }
     .wiki-wi-letter {

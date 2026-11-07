@@ -204,6 +204,14 @@ test.describe.serial("the Decisions section", () => {
     // The letter is the pick: it presses, and Answer wakes.
     await detail.locator('.wiki-wi-choice [data-wi-choice="A"]').click();
     await expect(o1.locator('.wiki-wi-choice [data-wi-choice="A"]')).toHaveAttribute("aria-pressed", "true");
+    // The pressed letter stays legible in the explicit Light and Dark themes
+    // (white on --accent was 4.3:1 in Dark), set as theme.ts sets them.
+    await page.mouse.move(0, 0);
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((t) => { document.documentElement.dataset.theme = t; delete document.documentElement.dataset.palette; }, theme);
+      expect(await contrastOf(o1.locator('.wiki-wi-choice [data-wi-choice="A"]')), `pressed letter in ${theme}`).toBeGreaterThanOrEqual(4.5);
+    }
+    await page.evaluate(() => { delete document.documentElement.dataset.theme; });
     await expect(o1.locator('[data-wi-act="answer"]')).toBeEnabled();
     await o1.locator('.wiki-wi-choice [data-wi-choice="A"]').click();
     await o1.locator('[data-wi-act="take"]').click();

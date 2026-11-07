@@ -24,15 +24,26 @@ export interface QuestionChoices {
 
 /** The body's leading lone `**…**` line as `question` and the body after it as
  *  `rest`; with no such line, the first line and the whole body. Either way the
- *  question is plain text (backticks and bold markers dropped), as the row title prints it. */
+ *  question is plain text (`plainInline`), as the row title prints it. */
 export function splitQuestionLine(body: string): { question: string; rest: string } {
   const lines = body.split("\n");
   const i = lines.findIndex((l) => l.trim());
   if (i < 0) return { question: "", rest: body };
   const first = lines[i]!.trim();
   const bold = /^\*\*([^*]+(?:\*(?!\*)[^*]*)*)\*\*$/.exec(first);
-  if (bold) return { question: bold[1]!.replace(/`/g, "").trim(), rest: lines.slice(i + 1).join("\n").replace(/^\s*\n/, "") };
-  return { question: first.replace(/\*\*|__|`/g, "").replace(/^#+\s*/, ""), rest: body };
+  if (bold) return { question: plainInline(bold[1]!), rest: lines.slice(i + 1).join("\n").replace(/^\s*\n/, "") };
+  return { question: plainInline(first.replace(/^#+\s*/, "")), rest: body };
+}
+
+/** Inline markdown as the plain text a reader sees: links keep their text, and
+ *  code, bold and emphasis markers go. */
+function plainInline(md: string): string {
+  return md
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/`+/g, "")
+    .replace(/\*\*|__/g, "")
+    .replace(/(^|[^\p{L}\p{N}])[*_](?=\S)(.+?)(?<=\S)[*_](?![\p{L}\p{N}])/gu, "$1$2")
+    .trim();
 }
 
 /**

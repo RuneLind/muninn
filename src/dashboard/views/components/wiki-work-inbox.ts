@@ -172,14 +172,17 @@ function bodyHtml(c: InboxCard): string {
       const on = pick && s.picked[k] === r.letter;
       // Only the letter is the pick control: the rendered text can hold links and
       // Fact chips, which inside a <button> would also pick, or close it early.
+      // The button is named by its letter and described by the row's text, so a
+      // screen reader hears the choice, not only «A».
+      const id = `wi-${k.replace(/[^A-Za-z0-9_-]/g, "_")}-${r.letter.replace(/[^A-Za-z0-9_-]/g, "_")}`;
       const letter = pick
-        ? `<button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="${esc(r.letter)}" aria-pressed="${on}" aria-label="Choose ${esc(r.letter)}"${busy}>${esc(r.letter)}</button>`
+        ? `<button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="${esc(r.letter)}" aria-pressed="${on}" aria-describedby="${esc(id)}-t${rec ? ` ${esc(id)}-r` : ""}"${busy}>${esc(r.letter)}</button>`
         : `<span class="wiki-wi-letter">${esc(r.letter)}</span>`;
       const cls = `wiki-wi-choice${rec ? " rec" : ""}${on ? " on" : ""}`;
       return (
         `<div class="${cls}" data-wi-row="${esc(r.letter)}">${letter}` +
-        `<span class="wiki-wi-choice-text">${r.label ? `<b>${r.label}</b> ` : ""}${r.why}</span>` +
-        (rec ? `<span class="wiki-wi-rec">Recommended</span>` : "") +
+        `<span class="wiki-wi-choice-text" id="${esc(id)}-t">${r.label ? `<b>${r.label}</b> ` : ""}${r.why}</span>` +
+        (rec ? `<span class="wiki-wi-rec" id="${esc(id)}-r">Recommended</span>` : "") +
         `</div>`
       );
     })
