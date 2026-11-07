@@ -36,28 +36,44 @@ interface InboxState {
   msg: Record<string, { text: string; warn: boolean; page: boolean }>;
   /** A close's preview from `POST …/close` with `preview: true`: the lines it writes and the hash it writes on. */
   /** With the evidence it was made on: a reload that changes the evidence drops it. */
-  preview: Record<string, { lines: string[]; baseHash: string; rulingHash: string; ev: string }>;
+  preview: Record<string, { lines: string[]; warnings: string[]; baseHash: string; rulingHash: string; ev: string }>;
   showKept: boolean;
 }
 
 const KEPT_KEY = "muninn-inbox-kept";
-/** «Still open» cards, by key, to the evidence they were kept on: a change shows them again. */
-let kept: Record<string, string> = {};
-try {
-  kept = JSON.parse(localStorage.getItem(KEPT_KEY) ?? "{}") ?? {};
-} catch {
-  kept = {};
+/** «Still open» cards, `wiki|relPath#id` to the evidence they were kept on: a change
+ *  shows them again. Read on every use; anything but an object reads as none. */
+function readKept(): Record<string, string> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(KEPT_KEY) ?? "{}");
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
 }
-const evidenceKey = (c: InboxCard) => JSON.stringify([c.answers.map((a) => [a.author, a.choice, a.at]), c.hint?.decision, c.hint?.word]);
-const isKept = (c: InboxCard) => kept[keyOf(c)] === evidenceKey(c);
-function setKept(c: InboxCard, on: boolean): void {
-  if (on) kept[keyOf(c)] = evidenceKey(c);
-  else delete kept[keyOf(c)];
+function writeKept(kept: Record<string, string>): void {
   try {
     localStorage.setItem(KEPT_KEY, JSON.stringify(kept));
   } catch {
-    /* kept for this tab only */
+    /* not remembered */
   }
+}
+const evidenceKey = (c: InboxCard) => JSON.stringify([c.answers.map((a) => [a.author, a.choice, a.at]), c.hint?.decision, c.hint?.word]);
+const keptKey = (c: InboxCard) => `${st?.body?.wiki}|${keyOf(c)}`;
+const isKept = (c: InboxCard) => readKept()[keptKey(c)] === evidenceKey(c);
+function setKept(c: InboxCard, on: boolean): void {
+  const kept = readKept();
+  if (on) kept[keptKey(c)] = evidenceKey(c);
+  else delete kept[keptKey(c)];
+  writeKept(kept);
+}
+/** Drop this wiki's entries whose card has left the inbox. */
+function pruneKept(body: DecisionInboxBody): void {
+  const kept = readKept();
+  const live = new Set(body.cards.map((c) => `${body.wiki}|${keyOf(c)}`));
+  const gone = Object.keys(kept).filter((k) => k.startsWith(`${body.wiki}|`) && !live.has(k));
+  for (const k of gone) delete kept[k];
+  if (gone.length) writeKept(kept);
 }
 
 let st: InboxState | null = null;
@@ -97,6 +113,7 @@ export function loadInbox(url: string): void {
       if (seq !== loadSeq || !st || st.url !== url) return;
       if (body && Array.isArray(body.cards)) {
         st.body = body;
+        pruneKept(body);
         for (const k of Object.keys(st.preview)) {
           const c = body.cards.find((x) => keyOf(x) === k);
           if (!c || evidenceKey(c) !== st.preview[k]!.ev) delete st.preview[k];
@@ -142,6 +159,7 @@ function actionsHtml(c: InboxCard, k: string, href: string): string {
     const p = s.preview[k];
     if (p) {
       return (
+        p.warnings.map((w) => `<div class="wiki-wi-ev warn"><b>${esc(w)}</b></div>`).join("") +
         `<pre class="wiki-wi-pre" aria-label="The lines the close writes">${esc(p.lines.join("\n"))}</pre>` +
         `<div class="wiki-wi-acts"><button class="wiki-wi-btn primary" data-wi-act="close"${busy}>${s.sending[k] ? "Closing…" : "Close the card"}</button><button class="wiki-wi-btn" data-wi-act="cancel"${busy}>Cancel</button>${open}</div>`
       );
@@ -246,7 +264,7 @@ async function sendClose(c: InboxCard, k: string, sent: { baseHash: string; ruli
   delete s.msg[k];
   repaint(`${sel(k)} .wiki-wi-row`);
   let status = 0;
-  let data: { error?: string; lines?: string[]; baseHash?: string; rulingHash?: string; decision?: string } | null = null;
+  let data: { error?: string; lines?: string[]; warnings?: string[]; baseHash?: string; rulingHash?: string; decision?: string } | null = null;
   try {
     const res = await fetch("/api/wiki/decision-inbox/close", {
       method: "POST",
@@ -261,7 +279,7 @@ async function sendClose(c: InboxCard, k: string, sent: { baseHash: string; ruli
   if (st !== s) return;
   delete s.sending[k];
   const ok = status >= 200 && status < 300;
-  if (ok && !sent && data?.lines && data.baseHash && data.rulingHash) s.preview[k] = { lines: data.lines, baseHash: data.baseHash, rulingHash: data.rulingHash, ev: evidenceKey(c) };
+  if (ok && !sent && data?.lines && data.baseHash && data.rulingHash) s.preview[k] = { lines: data.lines, warnings: data.warnings ?? [], baseHash: data.baseHash, rulingHash: data.rulingHash, ev: evidenceKey(c) };
   else {
     delete s.preview[k];
     s.msg[k] = ok

@@ -103,9 +103,12 @@ function regionItems(lines: string[], r: Region): Item[] {
 
 const decisionNumber = (id: string) => Number(id.slice(1));
 
-/** One line of answer text: white space collapsed, MDX's `<` and `{` escaped, ending in a sentence stop. */
+/** Text with MDX's `<`, `{` and `}` escaped. */
+const mdxText = (text: string) => text.replace(/</g, "&lt;").replace(/\{/g, "&#123;").replace(/\}/g, "&#125;");
+
+/** One line of answer text: white space collapsed, escaped ({@link mdxText}), ending in a sentence stop. */
 function answerSentence(text: string): string {
-  const one = text.replace(/\s+/g, " ").trim().replace(/</g, "&lt;").replace(/\{/g, "&#123;").replace(/\}/g, "&#125;");
+  const one = mdxText(text.replace(/\s+/g, " ").trim());
   return /[.!?]$/.test(one) ? one : `${one}.`;
 }
 
@@ -150,13 +153,13 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
     const anchor = ds.at(-1) ?? own ?? items.filter((it) => it.region === regions[0]).at(-1);
     const style = anchor ?? { indent: "", marker: "-", gap: " ", sep: " — " };
     const sep = style.sep || " — ";
-    const what = ruling.choice !== null ? `Answer ${ruling.choice} on card ${id}.` : answerSentence(ruling.body);
+    const what = ruling.choice !== null ? `Answer ${mdxText(ruling.choice)} on card ${id}.` : answerSentence(ruling.body);
     if (!what.replace(/[.\s]/g, "")) return { ok: false, code: "no-ruling", reason: "the answer is empty: write the ruling on the page" };
     const at = anchor ? anchor.end : regions[0]!.open;
     const lead = `${style.indent}${style.marker}${style.gap}`;
     const block: string[] = [];
     if (!own) block.push(`${lead}**${id}**${sep}See the card. Closed ${today} (${decision}).`);
-    block.push(`${lead}**${decision}**${sep}${what} ${ruling.author}, ${ruling.date}.`);
+    block.push(`${lead}**${decision}**${sep}${what} ${mdxText(ruling.author)}, ${ruling.date}.`);
     // An empty log gets its list after a blank line, and keeps one before the close tag.
     added.push({ after: at, text: anchor ? block.join(eol) : ["", ...block, ""].join(eol) });
   }

@@ -163,12 +163,30 @@ export function closingAnswer(versions: readonly WikiAnswerVersion[], relPath: s
   return [...latest.values()].filter((v) => v.choice !== QUESTION_NOT_SURE).sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 }
 
-/** The ruling the close writes: the P1 hint's decision first, else the closing answer. */
-export function closeRulingFor(raw: string, id: string, versions: readonly WikiAnswerVersion[], relPath: string): CloseRuling | null {
-  const hint = unclosedCards(parseQuestionPage(parseBlocks(stripFrontmatter(raw)))).find((h) => h.id === id);
-  if (hint?.decision) return { kind: "decision", decision: hint.decision };
+/** The ruling the close writes: the P1 hint's decision first, else the closing answer,
+ *  with what the preview should say about it: an answer to an older wording, and
+ *  every other author's live answer that differs. Null when nothing rules. */
+export function closeRulingFor(raw: string, id: string, versions: readonly WikiAnswerVersion[], relPath: string): { ruling: CloseRuling; warnings: string[] } | null {
+  const page = parseQuestionPage(parseBlocks(stripFrontmatter(raw)));
+  const hint = unclosedCards(page).find((h) => h.id === id);
+  if (hint?.decision) return { ruling: { kind: "decision", decision: hint.decision }, warnings: [] };
   const a = closingAnswer(versions, relPath, id);
-  return a ? { kind: "answer", choice: a.choice, body: a.body, author: a.author.name, date: logDate(a.createdAt) } : null;
+  if (!a) return null;
+  const warnings: string[] = [];
+  const q = page.questions.find((x) => x.id === id);
+  if (q && a.questionHash !== sha256(q.hashInput)) warnings.push(`${a.author.name} answered an older wording of the card.`);
+  const others = new Map<string, WikiAnswerVersion>();
+  const redacted = new Set(versions.filter((v) => v.redactedAt !== null).map((v) => v.answerId));
+  for (const v of versions) {
+    if (v.relPath !== relPath || v.questionId !== id || redacted.has(v.answerId) || authorKeyOf(v.author) === authorKeyOf(a.author)) continue;
+    const held = others.get(authorKeyOf(v.author));
+    if (!held || v.createdAt > held.createdAt) others.set(authorKeyOf(v.author), v);
+  }
+  for (const o of others.values()) {
+    if (o.choice === a.choice && (o.choice !== null || o.body.trim() === a.body.trim())) continue;
+    warnings.push(o.choice === QUESTION_NOT_SURE ? `${o.author.name} is not sure.` : o.choice !== null ? `${o.author.name} answered ${o.choice}.` : `${o.author.name} answered in text.`);
+  }
+  return { ruling: { kind: "answer", choice: a.choice, body: a.body, author: a.author.name, date: logDate(a.createdAt) }, warnings };
 }
 
 function registerDecisionCloseRoute(app: Hono, config: Config, depsFor: () => DecisionInboxDeps, guards: DecisionCloseGuards): void {
@@ -214,20 +232,21 @@ function registerDecisionCloseRoute(app: Hono, config: Config, depsFor: () => De
     const io = defaultPageWriteIo(entry.root);
     const current = await io.readFile(path.join(entry.root, target.relPath));
     if (current === null) return c.json({ error: `${target.relPath} cannot be read` }, 409);
-    let ruling: CloseRuling | null;
+    let found: { ruling: CloseRuling; warnings: string[] } | null;
     try {
-      ruling = closeRulingFor(current, id, await deps.answers(entry.name), target.relPath);
+      found = closeRulingFor(current, id, await deps.answers(entry.name), target.relPath);
     } catch (err) {
       log.warn("Decision close: answers unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "the answers could not be read" }, 503);
     }
-    if (!ruling) return c.json({ error: `nothing on the page or in the answers rules on ${id}: open it on the page`, refused: true }, 409);
+    if (!found) return c.json({ error: `nothing on the page or in the answers rules on ${id}: open it on the page`, refused: true }, 409);
+    const { ruling, warnings } = found;
     const today = todayOslo(deps.now());
     const edit = closeCardEdit(current, id, ruling, today);
     if (!edit.ok) return c.json({ error: edit.reason, refused: true, code: edit.code }, 409);
     // The page hash guards the page; the ruling hash guards the answers the lines came from.
     const shown = sha256(JSON.stringify(edit.lines));
-    if (preview) return c.json({ ok: true, preview: true, decision: edit.decision, lines: edit.lines, baseHash: sha256(current), rulingHash: shown });
+    if (preview) return c.json({ ok: true, preview: true, decision: edit.decision, lines: edit.lines, warnings, baseHash: sha256(current), rulingHash: shown });
     if (baseHash !== sha256(current)) return c.json({ error: "The page changed since the preview. Preview again.", stale: true }, 409);
     if (rulingHash !== shown) return c.json({ error: "The answers changed since the preview. Preview again.", changed: true }, 409);
     try {

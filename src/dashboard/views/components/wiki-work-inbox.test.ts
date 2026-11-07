@@ -199,3 +199,24 @@ test("every repaint after an await is passive: an answer's reply and a copy's re
     initInbox(() => {});
   }
 });
+
+test("«Still open» entries are pruned when their card leaves the inbox", async () => {
+  const store: Record<string, string> = {};
+  const g3 = globalThis as { localStorage?: unknown };
+  const savedLs = g3.localStorage;
+  g3.localStorage = { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
+  try {
+    const kept = card({ id: "O9", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-01T10:00:00Z", questionChanged: false }] });
+    await load({ wiki: "w", cards: [kept] });
+    click("keep", "plans/a.mdx#O9");
+    expect(store["muninn-inbox-kept"]).toContain("O9");
+    // The same wiki's inbox without the card (closed elsewhere): its entry goes.
+    globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => ({ wiki: "w", cards: [] }) })) as unknown as typeof fetch;
+    click("kept", "");
+    loadInbox("/api/wiki/decision-inbox?wiki=w-same");
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(store["muninn-inbox-kept"] ?? "{}").not.toContain("O9");
+  } finally {
+    g3.localStorage = savedLs;
+  }
+});

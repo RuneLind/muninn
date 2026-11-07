@@ -135,4 +135,10 @@ describe("closeCardEdit", () => {
     const text = ["---\ntitle: T\n--- ", q("O1"), "<DecisionLog>\n\n- **O1** — x. Closed 2026-01-01 (D1).\n- **D1** — y. Rune Lind, 01.01.2026.\n\n</DecisionLog>\n", "---\n", "<DecisionLog>\n\n- **D5** — z. Rune Lind, 01.01.2026.\n\n</DecisionLog>\n"].join("\n");
     expect(closeCardEdit(text, "O1", answer(), TODAY)).toMatchObject({ ok: false, code: "not-open" });
   });
+
+  test("the author and the choice are escaped for MDX like the body", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — Which one?\n\n</DecisionLog>\n");
+    const r = ok(closeCardEdit(text, "O1", answer({ choice: "<b>", author: "Rune {L} <x>" }), TODAY));
+    expect(r.content).toContain("- **D1** — Answer &lt;b> on card O1. Rune &#123;L&#125; &lt;x>, 06.11.2026.");
+  });
 });

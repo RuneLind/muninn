@@ -203,6 +203,18 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     expect(await Bun.file(path.join(root, REL)).text()).toBe(PAGE);
   });
 
+  test("the preview warns of an answer to older wording and of an author who answered otherwise", async () => {
+    const other = (name: string, choice: string, questionHash: string) =>
+      insertWikiAnswerVersion({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name }, choice, body: "", questionHash });
+    await other("Someone Else", "A", "an-older-wording");
+    await Bun.sleep(10);
+    await other("Third Person", "B", "an-older-wording");
+    const { status, body } = await preview("O2");
+    expect(status).toBe(200);
+    expect(body.lines).toContain("- **D2** — Answer B on card O2. Third Person, 07.11.2026.");
+    expect(body.warnings).toEqual(["Third Person answered an older wording of the card.", "Someone Else answered A."]);
+  });
+
   test("a page with uncommitted edits is 409 dirty and stays as it was", async () => {
     await answer("O2", "B", "");
     const dirty = `${PAGE}\nA hand edit.\n`;

@@ -222,6 +222,15 @@ test.describe.serial("the Decisions section", () => {
     await expect(row(page, "close", "O5").locator(".wiki-wi-tag")).toHaveText("kept open");
   });
 
+  test("a kept-open store that is not an object reads as empty, and «Still open» still hides the card", async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem("muninn-inbox-kept", "5"));
+    await openInbox(page, KODE);
+    const o5 = row(page, "close", "O5");
+    await o5.locator(".wiki-wi-row").click();
+    await o5.locator('[data-wi-act="keep"]').click();
+    await expect(row(page, "close", "O5")).toHaveCount(0);
+  });
+
   for (const theme of ["light", "dark"] as const) {
     test(`legible in the ${theme} theme`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: theme });
