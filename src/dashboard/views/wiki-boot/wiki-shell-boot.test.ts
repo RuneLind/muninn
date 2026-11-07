@@ -15,7 +15,9 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { renderWikiPage } from "../wiki-page.ts";
+// No static import of anything under `src/`: `wiki-page.ts` shares most of
+// wiki-browser.ts's import graph, and a module already in the cache is not
+// re-evaluated inside the counting window below. It is imported after it closes.
 
 type Boot = typeof import("../components/wiki-browser.ts")["boot"];
 
@@ -32,8 +34,11 @@ let importEffects: { listeners: number; timeouts: number; intervals: number; fet
 let boot: Boot;
 let win: GlobalWindow;
 let handle: { dispose(): void };
-/** Every `document.addEventListener` call `boot()` made, in order. */
-const registered: { type: string; source: string }[] = [];
+/** Every `document.addEventListener` call `boot()` made, in order, with its
+ *  phase (`capture` from a boolean or an options object's `capture`). */
+const registered: { type: string; source: string; capture: boolean }[] = [];
+/** Every `setInterval` call `boot()` made: the id it returned and the tick. */
+const intervals: { id: unknown; source: string }[] = [];
 const fetched: string[] = [];
 
 const LISTING = {
@@ -128,6 +133,7 @@ beforeAll(async () => {
 
   // (2) The real page, its inline scripts dropped: happy-dom does not run the
   // injection script, so the `__WIKI_*__` globals are set by hand below.
+  const { renderWikiPage } = await import("../wiki-page.ts");
   const html = (await renderWikiPage({ wikis: ["w"], selected: "w", wikiRoot: "/tmp/w" })).replace(
     /<script\b[^>]*>[\s\S]*?<\/script>/g,
     "",
@@ -150,13 +156,21 @@ beforeAll(async () => {
   const realAdd = doc.addEventListener;
   // An own property shadowing the prototype method, for the boot call only.
   doc.addEventListener = function (this: Document, type: string, fn: unknown, opts?: unknown) {
-    registered.push({ type, source: String(fn) });
+    const capture = typeof opts === "boolean" ? opts : !!(opts as { capture?: boolean } | undefined)?.capture;
+    registered.push({ type, source: String(fn), capture });
     return (realAdd as (...a: unknown[]) => void).call(this, type, fn, opts);
   } as Document["addEventListener"];
+  const realSetInterval = g.setInterval as (...a: unknown[]) => unknown;
+  g.setInterval = (fn: unknown, ...rest: unknown[]) => {
+    const id = realSetInterval(fn, ...rest);
+    intervals.push({ id, source: String(fn) });
+    return id;
+  };
   try {
     handle = boot();
   } finally {
     delete (doc as unknown as Record<string, unknown>).addEventListener;
+    g.setInterval = realSetInterval;
   }
   await until(() => !!doc.querySelector("#articleWrap #alphaBody"), "the article to render");
 }, 30_000);
@@ -197,6 +211,10 @@ describe("wiki-browser.ts — listener order", () => {
     expect(shell).toBeGreaterThan(-1);
     expect(dialog).toBeGreaterThan(-1);
     expect(shell).toBeLessThan(dialog);
+    // Order decides dispatch only within one phase: a capture-phase listener on
+    // `document` runs before any bubble-phase one, whatever was registered first.
+    expect(clicks[shell]!.capture).toBe(false);
+    expect(clicks[dialog]!.capture).toBe(false);
   });
 
   test("Escape with two surfaces open closes the top one only, then the next", async () => {
@@ -230,5 +248,29 @@ describe("wiki-browser.ts — listener order", () => {
     // The next Escape reaches the bubble listeners: the Explain button goes.
     key("Escape");
     expect(explain.style.display).toBe("none");
+  });
+});
+
+describe("wiki-browser.ts — dispose", () => {
+  // Runs last: it stops the timers the tests above may rely on. Observed before
+  // afterAll's `happyDOM.abort()`, which clears every timer on its own.
+  test("dispose() clears the listing-refetch interval and the mirror tick", () => {
+    const refetch = intervals.find((i) => i.source.includes("maybeRefetchPages"));
+    const mirror = intervals.find((i) => i.source.includes("repaintMirrorStatus"));
+    expect(refetch).toBeTruthy();
+    expect(mirror).toBeTruthy();
+    const cleared: unknown[] = [];
+    const realClear = g.clearInterval as (id: unknown) => void;
+    g.clearInterval = (id: unknown) => {
+      cleared.push(id);
+      realClear(id);
+    };
+    try {
+      handle.dispose();
+    } finally {
+      g.clearInterval = realClear;
+    }
+    expect(cleared).toContain(refetch!.id);
+    expect(cleared).toContain(mirror!.id);
   });
 });
