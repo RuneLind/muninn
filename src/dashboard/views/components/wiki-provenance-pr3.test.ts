@@ -4,9 +4,8 @@
  * sessions, the ghost row with its Stamp, the line's ghost hint and its ninth
  * state, and the footer lines the four new legs degrade to.
  *
- * Pure string building, like the rest of the module — `wiki-browser.ts` cannot
- * be loaded by `bun test`, so anything shaped there is provable only through
- * Playwright, and none of this is shaped there.
+ * Pure string building, like the rest of the module, so these tests need no
+ * DOM globals; none of it is shaped in `wiki-browser.ts`.
  */
 
 import { describe, expect, test } from "bun:test";

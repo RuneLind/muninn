@@ -3,8 +3,8 @@
  * request-ordering guard, the apply/defer decision and the two "don't adopt this"
  * guards behind re-pulling `/api/wiki/pages` while a tab stays open.
  *
- * Split out of `wiki-browser.ts` (which runs DOM code at module load, so it can't
- * be imported in tests) for the same reason as `wiki-explain.ts` and
+ * Split out of `wiki-browser.ts` (which then ran DOM code at module load; it is
+ * importable since `boot()`, but needs a DOM) for the same reason as `wiki-explain.ts` and
  * `wiki-ask-render.ts`: the decision logic is the part worth testing, and it has
  * nothing to do with the DOM. NB the helpers MUTATE the model they are handed —
  * "DOM-free", not "pure".
