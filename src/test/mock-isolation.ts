@@ -15,6 +15,8 @@
  * not on its argument count — `bun test src/watchers/` is one argument and
  * fourteen files, and `bun test` with no path at all is EVERY test file.
  */
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * A `mock.module(` CALL: at the start of a line, optionally behind `await`/`void`,
@@ -37,9 +39,33 @@ export const MOCK_ALIAS_IMPORT = /import\s*\{[^}]*\bmock\s+as\s+\w+[^}]*\}/;
 /** The substring every call form contains — what MOCK_MODULE_CALL must agree with, file by file. */
 export const MOCK_MODULE_SUBSTRING = /\bmock\.module\(/;
 
-/** Where the bun test files live, relative to the repo root, and the pattern they match. */
-export const TEST_FILE_DIRS = ["src", "db", "e2e", "scripts"] as const;
-export const TEST_FILE_GLOB = "**/*.test.ts";
+/**
+ * The files `bun test` discovers under a root, as bun 1.3.10 does (measured; the
+ * conformance tests in mock-isolation.test.ts spawn bun to hold it there): a
+ * `.test`/`_test`/`.spec`/`_spec` suffix before a JS/TS extension, case-insensitive;
+ * every directory below the root except `node_modules` and hidden ones (a hidden
+ * FILE is run). `.gitignore` is not read. Symlinked directories, which bun follows,
+ * are not: the tracked tree has none.
+ */
+export const BUN_TEST_FILE = /[._](test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/i;
+
+export function discoverTestFiles(root: string, rel = ""): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
+    const p = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      if (!e.name.startsWith(".") && e.name !== "node_modules") out.push(...discoverTestFiles(root, p));
+    } else if (e.isFile() && BUN_TEST_FILE.test(e.name)) {
+      out.push(p);
+    }
+  }
+  return rel ? out : out.sort();
+}
+
+/** Playwright's files, not bun's (playwright.config.ts: testDir `./e2e`, testMatch `**\/*.spec.ts`). */
+export function isPlaywrightSpec(file: string): boolean {
+  return file.startsWith("e2e/") && file.endsWith(".spec.ts");
+}
 
 /**
  * `bun test --coverage` is bun's whole-repo, single-process run: every mock in the
@@ -72,21 +98,22 @@ export function bunTestLinks(scripts: Record<string, string>): BunTestLink[] {
 }
 
 /**
- * The test files a link runs: an argument ending in `/` is a directory and covers
- * every test file under it; anything else is taken as one file; NO positional
- * argument (`bun test --coverage`) is bun's whole-repo run — every test file. A
- * directory argument WITHOUT the slash is not a shape the chains use (asserted by
- * the test).
+ * The test files a link runs, as bun matches its arguments (measured on 1.3.10):
+ * an argument is a case-sensitive SUBSTRING of the file's root-relative path, so
+ * `src/plans/` also runs `sub/src/plans/b.test.ts` and `a.test.ts` also runs
+ * `a.test.tsx`; an argument starting `./` is a path, the file itself or every
+ * file under that directory. NO positional argument (`bun test --coverage`) is
+ * bun's whole-repo run: every test file. A file argument that matches nothing is
+ * returned as itself, so callers report it as not on disk.
  */
 export function expandLink(args: string[], allTestFiles: readonly string[]): string[] {
   if (args.length === 0) return [...allTestFiles];
   const files = new Set<string>();
   for (const arg of args) {
-    if (arg.endsWith("/")) {
-      for (const f of allTestFiles) if (f.startsWith(arg)) files.add(f);
-    } else {
-      files.add(arg);
-    }
+    const path = arg.startsWith("./") ? arg.slice(2).replace(/\/$/, "") : null;
+    const hits = allTestFiles.filter((f) => (path === null ? f.includes(arg) : f === path || f.startsWith(`${path}/`)));
+    if (hits.length === 0 && !arg.endsWith("/")) files.add(arg);
+    for (const f of hits) files.add(f);
   }
   return [...files];
 }

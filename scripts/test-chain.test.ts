@@ -27,17 +27,13 @@ import {
   type ShardTable,
   type Tree,
 } from "./test-chain.ts";
-import { MOCK_MODULE_CALL, TEST_FILE_DIRS, TEST_FILE_GLOB } from "../src/test/mock-isolation.ts";
+import { MOCK_MODULE_CALL, discoverTestFiles } from "../src/test/mock-isolation.ts";
 import { testTempDirSync } from "../src/test/temp-dir.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
 
 function liveTree(): Tree {
-  const all: string[] = [];
-  for (const dir of TEST_FILE_DIRS) {
-    for (const rel of new Bun.Glob(TEST_FILE_GLOB).scanSync({ cwd: path.join(ROOT, dir) })) all.push(`${dir}/${rel}`);
-  }
-  all.sort();
+  const all = discoverTestFiles(ROOT);
   return { allTestFiles: all, mockFiles: all.filter((f) => MOCK_MODULE_CALL.test(readFileSync(path.join(ROOT, f), "utf8"))) };
 }
 
@@ -175,6 +171,26 @@ describe("generate", () => {
     const { links, problems } = generate(t, table, { pinned, excluded: [...excluded, "src/a/x.test.ts"] });
     expect(problems).toEqual([]);
     expect(links.find((l) => l.key === "g1")!.args).toEqual(["src/a/one.test.ts", "src/a/two.test.ts"]);
+  });
+
+  test("a Playwright spec is not bun's: in no link is fine, and a group directory over it is written out file by file", () => {
+    const t: Tree = { allTestFiles: ["e2e/a.test.ts", "e2e/x.spec.ts"], mockFiles: [] };
+    const { links, problems } = generate(t, { groups: { g: ["e2e/"] }, shards: [["g"], [], []] }, { pinned: [], excluded: [] });
+    expect(problems).toEqual([]);
+    expect(links.map((l) => l.args)).toEqual([["e2e/a.test.ts"]]);
+  });
+
+  test("a mock file whose path contains a group directory (bun matches substrings) splits that directory", () => {
+    const t: Tree = { ...tree, allTestFiles: [...tree.allTestFiles, "e2e/fixtures/src/a/m.test.ts"].sort(), mockFiles: [...tree.mockFiles, "e2e/fixtures/src/a/m.test.ts"] };
+    const { links, problems } = generate(t, table, opts);
+    expect(problems).toEqual([]);
+    expect(links.find((l) => l.key === "g1")!.args).toEqual(["src/a/one.test.ts", "src/a/two.test.ts"]);
+  });
+
+  test("a link whose file argument also matches another link's file is a problem", () => {
+    const t: Tree = { ...tree, allTestFiles: [...tree.allTestFiles, "sub/src/b/m.test.ts"].sort() };
+    const { problems } = generate(t, { ...table, groups: { g1: ["src/a/"], g2: ["src/b/three.test.ts"], g3: ["sub/"] } }, opts);
+    expect(problems).toEqual(["link src/b/m.test.ts also runs sub/src/b/m.test.ts (in g3): bun reads a path argument as a substring of the file path"]);
   });
 
   test("dropping a pinned entry leaves its file in no link", () => {

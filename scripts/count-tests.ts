@@ -16,10 +16,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   SINGLE_PROCESS_SCRIPTS,
-  TEST_FILE_DIRS,
-  TEST_FILE_GLOB,
   bunTestLinks,
+  discoverTestFiles,
   expandLink,
+  isPlaywrightSpec,
 } from "../src/test/mock-isolation.ts";
 
 const ROOT = join(import.meta.dir, "..");
@@ -264,14 +264,10 @@ interface FileRow extends FileCount {
 const sum = <T>(xs: readonly T[], f: (x: T) => number) => xs.reduce((s, x) => s + f(x), 0);
 const n = (v: number) => v.toLocaleString("en-US");
 
-function glob(dir: string, pattern: string): string[] {
-  return [...new Bun.Glob(pattern).scanSync({ cwd: join(ROOT, dir) })].map((rel) => `${dir}/${rel}`).sort();
-}
-
 function staticReport() {
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
-  const testFiles = TEST_FILE_DIRS.flatMap((d) => glob(d, TEST_FILE_GLOB)).sort();
-  const c = classify(pkg.scripts, testFiles, glob("e2e", "**/*.spec.ts"));
+  const discovered = discoverTestFiles(ROOT);
+  const c = classify(pkg.scripts, discovered.filter((f) => !isPlaywrightSpec(f)), discovered.filter(isPlaywrightSpec));
   const counts = new Map<string, FileCount>();
   const count = (path: string) => {
     let hit = counts.get(path);

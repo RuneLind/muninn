@@ -1,18 +1,20 @@
 import { test, expect, describe } from "bun:test";
-import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import {
   MOCK_ALIAS_IMPORT,
   MOCK_MODULE_CALL,
   MOCK_MODULE_SUBSTRING,
   SINGLE_PROCESS_SCRIPTS,
-  TEST_FILE_DIRS,
-  TEST_FILE_GLOB,
   bunTestLinks,
+  discoverTestFiles,
   expandLink,
+  isPlaywrightSpec,
   sharedLinkOffenders,
   unrunMockFiles,
 } from "./mock-isolation.ts";
+import { testTempDirSync } from "./temp-dir.ts";
 
 /**
  * Every test file that calls `mock.module()` runs in a `bun test` process of its
@@ -40,13 +42,7 @@ import {
 const ROOT = join(import.meta.dir, "..", "..");
 
 function allTestFiles(): string[] {
-  const out: string[] = [];
-  for (const dir of TEST_FILE_DIRS) {
-    for (const rel of new Bun.Glob(TEST_FILE_GLOB).scanSync({ cwd: join(ROOT, dir) })) {
-      out.push(`${dir}/${rel}`);
-    }
-  }
-  return out.sort();
+  return discoverTestFiles(ROOT);
 }
 
 function mockFiles(files: readonly string[]): string[] {
@@ -119,6 +115,21 @@ describe("the rule, on fixtures", () => {
     expect(sharedLinkOffenders({ links: l, mockFiles: ["src/b/solo.test.ts"], allTestFiles: all })).toHaveLength(1);
   });
 
+  test("a path argument is a substring of the file's path, as bun reads it; a leading `./` makes it a path", () => {
+    const files = ["src/plans/a.test.ts", "src/plans/a.test.tsx", "src/plansx/f.test.ts", "sub/src/plans/a.test.ts", "xsrc/plans/e.test.ts"];
+    expect(expandLink(["src/plans/"], files)).toEqual(["src/plans/a.test.ts", "src/plans/a.test.tsx", "sub/src/plans/a.test.ts", "xsrc/plans/e.test.ts"]);
+    expect(expandLink(["src/plans/a.test.ts"], files)).toEqual(["src/plans/a.test.ts", "src/plans/a.test.tsx", "sub/src/plans/a.test.ts"]);
+    expect(expandLink(["./src/plans/"], files)).toEqual(["src/plans/a.test.ts", "src/plans/a.test.tsx"]);
+    expect(expandLink(["./src/plans/a.test.ts"], files)).toEqual(["src/plans/a.test.ts"]);
+    expect(expandLink(["src/gone.test.ts"], files)).toEqual(["src/gone.test.ts"]);
+  });
+
+  test("a mock file whose path contains a group's directory shares that group's process", () => {
+    const files = ["e2e/fixtures/src/wiki/m.test.ts", "src/wiki/a.test.ts"];
+    const l = bunTestLinks({ test: "bun test src/wiki/" });
+    expect(sharedLinkOffenders({ links: l, mockFiles: ["e2e/fixtures/src/wiki/m.test.ts"], allTestFiles: files })).toHaveLength(1);
+  });
+
   test("a mock file no chain runs is reported, not silently skipped", () => {
     expect(unrunMockFiles({ links, mockFiles: ["src/zz/lost.test.ts", "src/b/solo.test.ts"], allTestFiles: all })).toEqual([
       "src/zz/lost.test.ts",
@@ -137,6 +148,42 @@ describe("the rule, on fixtures", () => {
     expect(MOCK_ALIAS_IMPORT.test('import { mock, test } from "bun:test";')).toBe(false);
     expect(MOCK_ALIAS_IMPORT.test("// treat the mock as a stand-in for the DB")).toBe(false);
     expect(MOCK_MODULE_CALL.test(" * a file that mock.module()s a db module\nconst r = /mock\\.module\\(/;")).toBe(false);
+  });
+});
+
+/** The files a real `bun test <args>` loads in `dir`, read off its junit report. */
+function bunRuns(dir: string, args: string[]): string[] {
+  const out = join(dir, "..", `${basename(dir)}.xml`);
+  Bun.spawnSync(["bun", "test", "--reporter=junit", `--reporter-outfile=${out}`, ...args], { cwd: dir, stdout: "ignore", stderr: "ignore" });
+  return [...new Set([...readFileSync(out, "utf8").matchAll(/ file="([^"]+)"/g)].map((m) => m[1]!))].sort();
+}
+
+describe("the model agrees with bun itself (spawns bun on a fixture tree)", () => {
+  const dir = testTempDirSync(join(tmpdir(), "bun-discovery-"));
+  for (const f of [
+    "src/plans/a.test.ts", "src/plans/b.test.tsx", "src/plans/c.spec.ts", "src/plans/d_test.ts", "src/plans/e_spec.js",
+    "src/plans/f.test.mts", "src/plans/G.TEST.TS", "src/plans/.h.test.ts", "src/plans/i.tests.ts", "src/plans/j-test.ts",
+    "src/plans/k.test.d.ts", "src/plans/.hidden/l.test.ts", "src/plans/node_modules/m.test.ts", "src/plansx/n.test.ts",
+    "sub/src/plans/a.test.ts", "e2e/o.spec.ts",
+  ]) {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), 'import { test } from "bun:test";\ntest("t", () => {});\n');
+  }
+
+  test("discovery: every file bun runs with no argument, and no other", () => {
+    expect(discoverTestFiles(dir)).toEqual(bunRuns(dir, []));
+  }, 20_000);
+
+  test("matching: expandLink gives the files bun runs for each argument shape", () => {
+    const all = discoverTestFiles(dir);
+    for (const args of [["src/plans/"], ["src/plans/a.test.ts"], ["./src/plans/"], ["./src/plans/a.test.ts"], ["rc/pla"], ["src/plansx/", "./sub/"]]) {
+      expect(expandLink(args, all).sort(), args.join(" ")).toEqual(bunRuns(dir, args));
+    }
+  }, 20_000);
+
+  test("Playwright's specs are e2e/**/*.spec.ts (playwright.config.ts testDir + testMatch)", () => {
+    expect(discoverTestFiles(dir).filter(isPlaywrightSpec)).toEqual(["e2e/o.spec.ts"]);
+    expect(readFileSync(join(ROOT, "playwright.config.ts"), "utf8")).toMatch(/testDir: "\.\/e2e",[\s\S]*testMatch: "\*\*\/\*\.spec\.ts"/);
   });
 });
 

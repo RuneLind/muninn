@@ -9,7 +9,7 @@
  *   bun scripts/test-chain.ts refresh                time every chain file alone, write scripts/unit-timings.json
  *   bun scripts/test-chain.ts rebalance              regroup link 1 onto the shards by scripts/unit-timings.json
  *
- * The chain is built from five inputs: the test-file glob, the `mock.module` scan
+ * The chain is built from five inputs: the files bun discovers, the `mock.module` scan
  * (each such file is a link of its own, see CLAUDE.md, Testing), `PINNED` (whole
  * links kept for other reasons), the groups in `scripts/unit-shards.json` and
  * `EXCLUDED`. A group keeps its directory arguments, so a new test file under one
@@ -26,7 +26,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
-import { MOCK_MODULE_CALL, TEST_FILE_DIRS, TEST_FILE_GLOB, bunTestLinks, expandLink } from "../src/test/mock-isolation.ts";
+import { MOCK_MODULE_CALL, bunTestLinks, discoverTestFiles, expandLink, isPlaywrightSpec } from "../src/test/mock-isolation.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
 const SHARDS_PATH = path.join(ROOT, "scripts", "unit-shards.json");
@@ -154,7 +154,7 @@ export function linkKey(p: PinnedLink): string {
  */
 export function generate(tree: Tree, table: ShardTable, opts: GenerateOptions = {}): { links: ChainLink[]; problems: string[] } {
   const pinned = opts.pinned ?? PINNED;
-  const excluded = new Set(opts.excluded ?? EXCLUDED.map((e) => e.file));
+  const excluded = excludedFiles(tree, opts.excluded);
   const all = tree.allTestFiles;
   const onDisk = new Set(all);
   const mock = new Set(tree.mockFiles.filter((f) => !excluded.has(f)));
@@ -218,8 +218,22 @@ export function generate(tree: Tree, table: ShardTable, opts: GenerateOptions = 
   const unowned = all.filter((f) => !excluded.has(f) && !owner.has(f));
   for (const f of unowned) problems.push(`${f} is in no link: add it to a group in scripts/unit-shards.json, or pin it`);
 
+  // What bun really runs per link: a file argument can match more than its own file.
+  for (const l of [...groups, ...others]) {
+    for (const f of expandLink(l.args, all)) {
+      if (onDisk.has(f) && owner.get(f) !== l.key && (owner.has(f) || excluded.has(f))) {
+        problems.push(`link ${l.key} also runs ${f} (in ${owner.get(f) ?? "EXCLUDED"}): bun reads a path argument as a substring of the file path`);
+      }
+    }
+  }
+
   others.sort((a, b) => a.key.localeCompare(b.key));
   return { links: [...groups, ...others], problems };
+}
+
+/** `EXCLUDED` (or a fixture's list) plus Playwright's specs, which bun would discover but must never run. */
+function excludedFiles(tree: Tree, explicit?: readonly string[]): Set<string> {
+  return new Set([...(explicit ?? EXCLUDED.map((e) => e.file)), ...tree.allTestFiles.filter(isPlaywrightSpec)]);
 }
 
 export function chainScript(links: readonly ChainLink[]): string {
@@ -404,7 +418,7 @@ export interface CheckResult {
 export function check(input: CheckInput): CheckResult {
   const { links, table, tree, junit, timings } = input;
   const exempt = new Set(input.exempt ?? NO_TESTS_EXEMPT);
-  const excluded = new Set(input.excluded ?? EXCLUDED.map((e) => e.file));
+  const excluded = excludedFiles(tree, input.excluded);
   const mock = new Set(tree.mockFiles);
   const problems: string[] = [...tableProblems(links, table, input.total ?? SHARD_TOTAL)];
   const warnings: string[] = [];
@@ -490,11 +504,7 @@ export function needsRetime(seconds: number): boolean {
 // --- I/O ---
 
 function readTree(): Tree {
-  const all: string[] = [];
-  for (const dir of TEST_FILE_DIRS) {
-    for (const rel of new Bun.Glob(TEST_FILE_GLOB).scanSync({ cwd: path.join(ROOT, dir) })) all.push(`${dir}/${rel}`);
-  }
-  all.sort();
+  const all = discoverTestFiles(ROOT);
   return { allTestFiles: all, mockFiles: all.filter((f) => MOCK_MODULE_CALL.test(readFileSync(path.join(ROOT, f), "utf8"))) };
 }
 
