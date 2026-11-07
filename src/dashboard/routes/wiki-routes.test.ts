@@ -4716,7 +4716,9 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
       expect(res.headers.get("content-type"), p).toBe(asset.contentType);
       expect(await res.text(), p).toBe(asset.body);
     }
-    for (const p of ["/wiki/assets/x", "/wiki/assets/wiki.zz.js", "/wiki/assets/wiki.0000000000000000.map", "/wiki/assets/other.0000000000000000.js"]) {
+    const near = ["000000000000000", "00000000000000000", "000000000000000g", "000000000000000A"].map((h) => `/wiki/assets/wiki.${h}.js`);
+    const wrapped = ["xwiki.0000000000000000.js", "wiki.0000000000000000.jsx", "wiki.0000000000000000.js.map", "wiki.0000000000000000.css.js.x"].map((f) => `/wiki/assets/${f}`);
+    for (const p of ["/wiki/assets/x", "/wiki/assets/wiki.zz.js", "/wiki/assets/wiki.0000000000000000.map", "/wiki/assets/other.0000000000000000.js", ...near, ...wrapped]) {
       const res = await app.request(p);
       expect(res.status, p).toBe(404);
       expect(res.headers.get("cache-control"), p).toBe("no-store");
@@ -4731,7 +4733,11 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
       expect(res.headers.get("content-encoding"), ae).toBeNull();
       expect(await res.text(), ae).toBe(js.body);
     }
-    for (const ae of ["GZIP", "deflate, gzip;q=0.5", "*"]) {
+    for (const ae of ["gzip ; q = 0", "gzip;q= 0", "x-gzip;q=0"]) {
+      const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
+      expect(res.headers.get("content-encoding"), ae).toBeNull();
+    }
+    for (const ae of ["GZIP", "deflate, gzip;q=0.5", "*", "x-gzip", "gzip ; q = 0.5"]) {
       const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
       expect(res.headers.get("content-encoding"), ae).toBe("gzip");
     }

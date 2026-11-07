@@ -5599,13 +5599,18 @@ export function coerceClientEdits(raw: unknown): IntegrateEdit[] | null {
   return edits;
 }
 
-/** RFC 9110 §12.5.3: gzip's own entry with a q-value above 0, else a `*` entry's; an explicit gzip entry beats `*`. */
+/**
+ * RFC 9110 §12.5.3: gzip's own entry (`x-gzip` counts as gzip) with a q-value
+ * above 0, else a `*` entry's; an explicit gzip entry beats `*`. Space around
+ * `=` is tolerated, so a malformed `q = 0` still refuses.
+ */
 export function acceptsGzip(header: string | undefined): boolean {
   const q: Record<string, number> = {};
   for (const part of (header ?? "").split(",")) {
-    const [name, ...params] = part.trim().toLowerCase().split(";").map((x) => x.trim());
-    const qv = params.find((p) => p.startsWith("q="));
-    q[name!] = qv === undefined ? 1 : Number(qv.slice(2));
+    const [rawName, ...params] = part.trim().toLowerCase().split(";").map((x) => x.trim());
+    const name = rawName === "x-gzip" ? "gzip" : rawName!;
+    const qv = params.map((p) => p.split("=").map((x) => x.trim())).find(([k]) => k === "q");
+    q[name] = qv === undefined ? 1 : Number(qv[1]);
   }
   const v = q.gzip ?? q["*"];
   return v !== undefined && v > 0;
