@@ -15,9 +15,9 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-// No static import of anything under `src/`: `wiki-page.ts` shares most of
-// wiki-browser.ts's import graph, and a module already in the cache is not
-// re-evaluated inside the counting window below. It is imported after it closes.
+// No static import of anything under `src/`: `wiki-page.ts` shares 68 of
+// wiki-browser.ts's 151 modules, and a module already in the cache is not
+// re-evaluated inside the counting window below (pinned by `preloaded`).
 
 type Boot = typeof import("../components/wiki-browser.ts")["boot"];
 
@@ -31,6 +31,11 @@ const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis
 const saved = new Map<string, PropertyDescriptor | undefined>();
 
 let importEffects: { listeners: number; timeouts: number; intervals: number; fetches: number; microtasks: number };
+/** App modules (under `src/`, outside the `src/test/` preload) already loaded
+ *  when the counting window opened; each one escapes the import check. */
+let preloaded: string[];
+/** Modules first loaded inside the counting window. */
+let loadedInWindow: string[];
 let boot: Boot;
 let win: GlobalWindow;
 let handle: { dispose(): void };
@@ -111,6 +116,8 @@ beforeAll(async () => {
   // (1) Import with no DOM at all: no listener, timer, microtask or fetch.
   expect(typeof g.document).toBe("undefined");
   expect(typeof g.location).toBe("undefined");
+  const cachedBefore = new Set(Object.keys(require.cache));
+  preloaded = [...cachedBefore].filter((k) => k.includes("/src/") && !k.includes("/src/test/") && k !== import.meta.path);
   const counts = { listeners: 0, timeouts: 0, intervals: 0, fetches: 0, microtasks: 0 };
   const real = {
     addEventListener: g.addEventListener,
@@ -130,6 +137,7 @@ beforeAll(async () => {
     Object.assign(g, real);
   }
   importEffects = counts;
+  loadedInWindow = Object.keys(require.cache).filter((k) => !cachedBefore.has(k));
 
   // (2) The real page, its inline scripts dropped: happy-dom does not run the
   // injection script, so the `__WIKI_*__` globals are set by hand below.
@@ -183,6 +191,11 @@ afterAll(async () => {
 });
 
 describe("wiki-browser.ts — import and boot", () => {
+  test("the whole import graph is evaluated inside the counting window", () => {
+    expect(preloaded).toEqual([]);
+    expect(loadedInWindow.some((k) => k.endsWith("/components/wiki-browser.ts"))).toBe(true);
+  });
+
   test("importing the module adds no listener, timer, microtask or fetch", () => {
     expect(importEffects).toEqual({ listeners: 0, timeouts: 0, intervals: 0, fetches: 0, microtasks: 0 });
   });

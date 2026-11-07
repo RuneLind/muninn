@@ -129,11 +129,16 @@ describe("the rule, on fixtures", () => {
       "src/y/g.test.ts": "import {\n  Window,\n  GlobalWindow,\n} from 'happy-dom';",
       "src/z/other.test.ts": 'import { GlobalWindow } from "./my-dom";',
       "src/q/quoted.test.ts": `const s = 'import { GlobalWindow } from "happy-dom"';`,
+      "src/d/default-named.test.ts": 'import HappyDom, { GlobalWindow } from "happy-dom";',
+      "src/d/aliased.test.ts": 'import { GlobalWindow as GW } from "happy-dom";',
+      "src/n/namespace.test.ts": 'import * as hd from "happy-dom";\nconst w = new hd.GlobalWindow();',
     };
     expect(ownProcessFiles(Object.keys(src), (f) => src[f]!)).toEqual([
       "src/dashboard/views/wiki-boot/a.test.ts",
       "src/dashboard/views/components/g.test.ts",
       "src/y/g.test.ts",
+      "src/d/default-named.test.ts",
+      "src/d/aliased.test.ts",
     ]);
   });
 
