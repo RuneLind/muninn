@@ -256,6 +256,9 @@ export function startWorkMapLoop(
     timer = deps.setTimer(tick, WORK_MAP_TICK_MS);
   };
   let lastTriageCheck: number | null = null;
+  /** The loop's own pass past its bound and still running, for the hourly warning. */
+  let overdue: { wiki: string; since: number } | null = null;
+  let lastOverdueWarn: number | null = null;
   /** The triage's hourly check, started and not awaited: see the header. It holds the
    *  pass single-flight Run now shares; while a click holds it the check is skipped and
    *  tried again on the next tick. The bound and the stop only abort: the hold ends when
@@ -265,35 +268,46 @@ export function startWorkMapLoop(
     const started = deps.now();
     if (!triage || (lastTriageCheck !== null && started - lastTriageCheck < WORK_MAP_CHECK_INTERVAL_MS)) return;
     const release = tryHoldTriagePass();
-    if (!release) return;
+    if (!release) {
+      // A click's hold is ordinary; only the loop's own pass past its bound is a wedge.
+      if (overdue && (lastOverdueWarn === null || started - lastOverdueWarn >= WORK_MAP_CHECK_INTERVAL_MS)) {
+        lastOverdueWarn = started;
+        log.warn("Decision triage: a pass on {wiki} has run since {since} and still holds the guard", { wiki: overdue.wiki, since: new Date(overdue.since).toISOString() });
+      }
+      return;
+    }
     lastTriageCheck = started;
     const bound = new AbortController();
     const signal = AbortSignal.any([ac.signal, bound.signal]);
     let running: string | null = null;
+    let runningSince = started;
     let timedOut = false;
+    const fail = (wiki: string, error: string) =>
+      triage.recordFailed(wiki, error).catch((err) => log.warn("Decision triage: could not record {wiki}'s timeout: {error}", { wiki, error: err instanceof Error ? err.message : String(err) }));
     const work = (async () => {
       for (const wiki of await triage.wikis(wikis)) {
         if (signal.aborted) return;
         await triage.beforeCheck(wiki, deps.now());
         if (!workMapDue(await triage.readState(wiki), deps.now(), hour).due) continue;
         running = wiki;
-        await triage.run(wiki, signal);
+        runningSince = deps.now();
+        const res = await triage.run(wiki, signal);
         running = null;
+        // Recorded once the pass has returned, and only when it wrote no run line itself.
+        if (timedOut && res.outcome === "aborted") await fail(wiki, `the pass timed out after ${TRIAGE_PASS_BOUND_MS} ms`);
       }
     })().catch((err) => log.warn("Decision triage check failed: {error}", { error: err instanceof Error ? err.message : String(err) }));
-    const fail = (wiki: string, error: string) =>
-      triage.recordFailed(wiki, error).catch((err) => log.warn("Decision triage: could not record {wiki}'s timeout: {error}", { wiki, error: err instanceof Error ? err.message : String(err) }));
     const expiry = deps.setTimer(() => {
       timedOut = true;
       bound.abort();
-      const error = `the pass timed out after ${TRIAGE_PASS_BOUND_MS} ms`;
-      log.warn("Decision triage: {error} ({wiki})", { error, wiki: running ?? "no wiki running" });
-      if (running) void fail(running, error);
+      if (running) overdue = { wiki: running, since: runningSince };
+      log.warn("Decision triage: the pass timed out after {ms} ms ({wiki})", { ms: TRIAGE_PASS_BOUND_MS, wiki: running ?? "no wiki running" });
     }, TRIAGE_PASS_BOUND_MS);
     ac.signal.addEventListener("abort", () => deps.clearTimer(expiry), { once: true });
     triageWork = work;
     void work.finally(() => {
       if (triageWork === work) triageWork = null;
+      overdue = null;
       release();
       if (!timedOut) deps.clearTimer(expiry);
     });
