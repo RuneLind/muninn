@@ -89,7 +89,8 @@ async function seedTriageLog(dir: string): Promise<void> {
     ({ type: "run", runId, at, wiki: KODE, model: "none", promptVersion: "off", usage: { calls: 0 }, repoRoots: "/r", repos, cards, floor: null, outcome: "ok" });
   const cardLine = (runId: string, at: number, id: string, extra: Record<string, unknown>) =>
     ({ type: "card", runId, at, wiki: KODE, promptVersion: "off", relPath: REL, id, questionHash: "h", recommendation: null, verdict: "NO_VERDICT", ...extra });
-  const [old, last] = [now - 26 * HOUR, now - 2 * HOUR];
+  // 48 h apart: two Oslo dates even across the 25 h day clocks go back (26/2 met on one date there).
+  const [old, last] = [now - 50 * HOUR, now - 2 * HOUR];
   const lines = [
     cardLine("r-old", old, "O1", { codeFacts: false }),
     runLine("r-old", old, 1, [{ repo: "melosys-api", found: true }]),

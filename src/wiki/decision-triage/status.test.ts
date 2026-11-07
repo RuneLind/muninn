@@ -16,7 +16,13 @@ const card = (runId: string, at: number, id: string, over: Partial<CardLine> = {
   type: "card", runId, at, wiki: "w", promptVersion: "off", relPath: "plans/p.mdx", id, questionHash: "h",
   recommendation: null, verdict: "NO_VERDICT", ...over,
 });
-const logOf = (runs: RunLine[], cards: CardLine[], broken = 0): ParsedLog => ({ runs, cards, broken });
+/** A real-shaped line with one field taken out, so only that field's guard can reject it. */
+const without = <T extends object>(line: T, key: keyof T) => {
+  const copy: Partial<T> = { ...line };
+  delete copy[key];
+  return copy;
+};
+const logOf =(runs: RunLine[], cards: CardLine[], broken = 0): ParsedLog => ({ runs, cards, broken });
 
 describe("triageWikiStatus", () => {
   test("an empty log: no run, no nights, still a next due time", () => {
@@ -76,10 +82,10 @@ describe("triageWikiStatus", () => {
   test("a run line with no repos, a card line with no relPath and a repos entry that is not an object count as broken, not a throw", () => {
     const good = run(FIVE_OSLO, { cards: 1, repos: [{ repo: "gone", found: false }] });
     const text = [
-      JSON.stringify({ type: "run", runId: "bad", at: FIVE_OSLO + 60_000 }),
+      JSON.stringify(without(run(FIVE_OSLO + 60_000, { runId: "bad" }), "repos")),
       JSON.stringify(good),
       JSON.stringify({ ...run(FIVE_OSLO + 2 * 60_000), repos: [null, 7, { repo: "x", found: false }] }),
-      JSON.stringify({ type: "card", runId: good.runId, at: FIVE_OSLO, id: "O9" }),
+      JSON.stringify(without(card(good.runId, good.at, "O9", { codeFacts: true }), "relPath")),
       JSON.stringify(card(good.runId, good.at, "O1", { codeFacts: true })),
     ].join("\n");
     const s = triageWikiStatus("w", parseLog(text), null, FIVE_OSLO + H, 5);

@@ -120,7 +120,7 @@ describe("GET /api/wiki/decision-triage/overview", () => {
   test("a run line with no repos is counted broken: status and overview still answer 200 for every wiki", async () => {
     const { app, dir } = fixture();
     mkdirSync(dir, { recursive: true });
-    writeFileSync(nightlyLogPath("mimir", dir), `${JSON.stringify({ type: "run", runId: "bad", at: NOW - H })}\n${JSON.stringify(run(NOW - 2 * H, { cards: 1 }))}\n`);
+    writeFileSync(nightlyLogPath("mimir", dir), `${JSON.stringify((({ repos: _repos, ...rest }) => rest)(run(NOW - H, { runId: "bad" })))}\n${JSON.stringify(run(NOW - 2 * H, { cards: 1 }))}\n`);
     const status = await app.request("/api/wiki/decision-triage/status?wiki=mimir");
     expect(status.status).toBe(200);
     expect((await status.json()) as TriageStatusBody).toMatchObject({ broken: 1, lastRun: { at: NOW - 2 * H } });
