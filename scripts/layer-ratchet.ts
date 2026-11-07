@@ -13,7 +13,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { addedAllowlistLines, checkAllowlist, countByLayerPair, edgeLine, importEdges, parseAllowlist, shrinkAllowlist, sourceFiles, violations } from "../src/test/layers.ts";
+import { addedAllowlistLines, checkAllowlist, countByLayerPair, edgeLine, importEdges, parseAllowlist, rewriteAllowlist, sourceFiles, violations } from "../src/test/layers.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
 export const ALLOWLIST_PATH = path.join(ROOT, "scripts", "layer-allowlist.txt");
@@ -63,10 +63,10 @@ if (import.meta.main) {
   const byPair = Object.fromEntries(countByLayerPair(bad));
 
   if (args.includes("--update")) {
-    const kept = shrinkAllowlist(listed, current);
-    const header = readFileSync(ALLOWLIST_PATH, "utf8").split("\n").filter((l) => l.startsWith("#"));
-    writeFileSync(ALLOWLIST_PATH, [...header, ...kept].join("\n") + "\n");
-    console.log(`removed ${listed.length - kept.length} line(s); ${kept.length} remain`);
+    const next = rewriteAllowlist(readFileSync(ALLOWLIST_PATH, "utf8"), current);
+    const kept = parseAllowlist(next).length;
+    writeFileSync(ALLOWLIST_PATH, next);
+    console.log(`removed ${listed.length - kept} line(s); ${kept} remain`);
     if (check.unlisted.length > 0) console.log(`not added (hand edit, a reviewed exception):\n  ${check.unlisted.join("\n  ")}`);
   } else if (args.includes("--json")) {
     console.log(JSON.stringify({ files: files.length, violations: current.length, byPair, ...check }, null, 2));

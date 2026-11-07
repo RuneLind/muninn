@@ -192,6 +192,12 @@ export function shrinkAllowlist(listed: readonly string[], current: readonly str
   return [...new Set(listed.filter((l) => now.has(l)))].sort();
 }
 
+/** `--update`'s new file text: the list shrunk to what is still a violation. */
+export function rewriteAllowlist(text: string, current: readonly string[]): string {
+  const header = text.split("\n").filter((l) => l.startsWith("#"));
+  return [...header, ...shrinkAllowlist(parseAllowlist(text), current)].join("\n") + "\n";
+}
+
 /** Violation counts by `importer layer -> imported layer`. */
 export function countByLayerPair(edges: readonly Edge[], layer: (f: string) => Layer | null = layerOf): Map<string, number> {
   const out = new Map<string, number>();
