@@ -53,7 +53,7 @@ import {
   SEM_THRESHOLD_DEFAULT,
   type RailCluster,
   type SemanticOverlay,
-} from "../dashboard/views/components/wiki-atlas-semantic.ts";
+} from "../wiki/core/wiki-atlas-semantic.ts";
 import { draftAndPersistSynthesis } from "../gardener/synthesis-drafter.ts";
 import { openSourceHealth } from "./source-health.ts";
 import { getLog } from "../logging.ts";

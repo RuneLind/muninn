@@ -16,7 +16,7 @@ import {
 import { findAppendixSection } from "./visual-detail.ts";
 import { findLinksSection } from "./links-section.ts";
 import { markdownCodeRegions } from "../format/markdown-ast.ts";
-import { todayOslo } from "../gardener/util.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 
 /** The callout's marker, which the reader and the export style. */
 export const SUMMARY_FACTCHECK_CALLOUT_MARKER = "[!factcheck]";

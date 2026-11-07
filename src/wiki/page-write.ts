@@ -47,7 +47,7 @@
 import path from "node:path";
 import { isPathConfined } from "../gardener/draft.ts";
 import { appendWikiLogEntry } from "../gardener/apply.ts";
-import { sha256, todayOslo } from "../gardener/util.ts";
+import { sha256, todayOslo } from "../utils/date-hash.ts";
 import { runWikiWriteExclusive } from "./queue.ts";
 import { takeWikiWriteLock } from "./lockfile.ts";
 import { getWikiIndex } from "./store.ts";

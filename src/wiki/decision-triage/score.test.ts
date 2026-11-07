@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256 } from "../../utils/date-hash.ts";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import { answerWindowMs, computeFloor, frozenAfterMs, labelsSince } from "./floor.ts";
 import { realGit, type GitRun } from "./git.ts";

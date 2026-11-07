@@ -28,7 +28,7 @@
  * never per request.
  */
 
-import { isMetaStem, pageStemOf } from "../dashboard/views/components/wiki-filter.ts";
+import { isMetaStem, pageStemOf } from "./core/wiki-filter.ts";
 import { normalizeRelPath, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import {
   NEAR_HOP_DECAY,

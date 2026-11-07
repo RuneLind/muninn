@@ -21,7 +21,7 @@ import { stripFencedCode } from "../summaries/transcript-split.ts";
 import { GARDENER_DEFAULTS } from "./types.ts";
 import { normalizeLabel, resolveTarget } from "./target-resolve.ts";
 import { hasForbiddenBasename } from "./draft.ts";
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "doc-page-map");

@@ -20,7 +20,7 @@
  */
 
 import { callHaikuWithFallback, type HaikuBackend } from "../ai/haiku-direct.ts";
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import { checkModelFor, TAKEAWAY_CHECK_MODEL } from "./takeaway-check.ts";
 import { neutralizePromptTags } from "../utils/prompt-fence.ts";

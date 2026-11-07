@@ -45,8 +45,8 @@ import {
   normalizeDraftOutput,
 } from "./draft.ts";
 import { normalizeLabel } from "./target-resolve.ts";
-import { todayOslo } from "./util.ts";
-import { synthesisTopicKey } from "../dashboard/views/components/wiki-atlas-semantic.ts";
+import { todayOslo } from "../utils/date-hash.ts";
+import { synthesisTopicKey } from "../wiki/core/wiki-atlas-semantic.ts";
 import {
   insertWikiProposal,
   type WikiProposal,

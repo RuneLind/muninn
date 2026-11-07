@@ -6,7 +6,7 @@
  * names, so its callers are unchanged.
  */
 
-import { JIRA_KEY_SOURCE } from "./retrieval.ts";
+import { JIRA_KEY_SOURCE } from "./jira-key-source.ts";
 import { maskFencedCode } from "./markdown-scan.ts";
 
 /**

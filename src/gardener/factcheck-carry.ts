@@ -24,14 +24,14 @@
 
 import { correctableVerdict, type SummaryFactcheck } from "../db/summary-factchecks.ts";
 import type { WikiProposalSourceDoc } from "../db/wiki-proposals.ts";
-import { fenceLineStates, parseFactcheckClaims } from "../dashboard/views/components/wiki-integrate.ts";
+import { fenceLineStates, parseFactcheckClaims } from "../wiki/core/wiki-integrate.ts";
 import {
   buildFactcheckAppendix,
   findLiveSentinelBlocks,
   firstUnfencedLineIndex,
   hasFactcheckBlock,
 } from "../wiki/factcheck-context.ts";
-import { sha256, todayOslo } from "./util.ts";
+import { sha256, todayOslo } from "../utils/date-hash.ts";
 import { sourceKindNoun } from "../summaries/source-noun.ts";
 
 /** Cap on the findings listed in the rider (chars), per D6. */

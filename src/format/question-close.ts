@@ -11,7 +11,7 @@
 import { parseBlocks } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
 import { DECISION_ID_RE, eachComponent, parseQuestionPage, type DecisionLogEntry } from "./question.ts";
-import { frontmatterBodyLine } from "../wiki/page-text.ts";
+import { frontmatterBodyLine } from "./frontmatter-fence.ts";
 
 /** What closes the card: a decision the page already holds (the P1 hint), or an answer to record as a new one. */
 export type CloseRuling =

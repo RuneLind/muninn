@@ -22,7 +22,7 @@ import { recordSourceDraftAttempt } from "./source-draft-attempts.ts";
 import { listSummaryFactcheckMarks, upsertSummaryFactcheck } from "./summary-factchecks.ts";
 import * as sourceRedraft from "../gardener/source-redraft.ts";
 import { redraftSourceProposal } from "../gardener/source-redraft.ts";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { sourceTopicKey } from "../gardener/source-drafter.ts";
 import { __resetWikiCacheForTest } from "../wiki/store.ts";
 import { FACTCHECK_SENTINEL_START } from "../wiki/factcheck-context.ts";

@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import { parseClaudeOutput } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
 import { resolveAgentCwd } from "../ai/agent-cwd.ts";

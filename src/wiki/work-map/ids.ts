@@ -5,7 +5,7 @@
  * in; the one import is the reader's own future-date rule.
  */
 
-import { isImplausibleFutureDate } from "../../dashboard/views/components/wiki-filter.ts";
+import { isImplausibleFutureDate } from "../core/wiki-filter.ts";
 
 const OSLO_DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit" });
 /** `YYYY-MM-DD` of `ms` in Europe/Oslo: the day key of an effort's `daily`. */

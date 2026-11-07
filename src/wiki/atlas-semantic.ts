@@ -26,7 +26,7 @@
  * row.
  */
 
-import { GENERIC_TAGS } from "../dashboard/views/components/wiki-atlas-semantic.ts";
+import { GENERIC_TAGS } from "./core/wiki-atlas-semantic.ts";
 import { coverageKey } from "./index-coverage.ts";
 import { normalizeRelPath, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";

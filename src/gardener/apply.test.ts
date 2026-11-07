@@ -16,7 +16,7 @@ import {
 } from "./apply.ts";
 import { commitWikiChange, __resetForTest as resetCommitQueue } from "../wiki/commit.ts";
 import { runWikiWriteExclusive, __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { buildWikiIndex } from "../wiki/store.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import { testTempDir } from "../test/temp-dir.ts";

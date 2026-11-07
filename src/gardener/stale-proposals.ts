@@ -33,7 +33,7 @@ import {
 } from "../db/wiki-proposals.ts";
 import { applyStaleEdits, sameStaleEdit, type StaleFixEdit } from "../wiki/stale-fix.ts";
 import type { WikiIndex } from "../wiki/store.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 
 /** The DB half, a seam so the route tests run without a database. */
 export interface StaleProposalStore {

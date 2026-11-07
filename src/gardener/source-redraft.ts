@@ -36,7 +36,7 @@ import {
   type WikiProposal,
 } from "../db/wiki-proposals.ts";
 import { getSummaryFactcheck } from "../db/summary-factchecks.ts";
-import { todayOslo } from "./util.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 import {
   categoryFromDocId,
   DEFAULT_API_URL,

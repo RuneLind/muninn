@@ -47,7 +47,7 @@ import {
   commitWikiChange,
 } from "../wiki/commit.ts";
 import { syncSubsumesSweeper } from "../sync/run.ts";
-import { todayOslo } from "../gardener/util.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 import { openSourceHealth } from "./source-health.ts";
 import { getLog } from "../logging.ts";
 

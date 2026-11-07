@@ -45,8 +45,8 @@ import { COMPONENT_OPEN_RE, listItemLines, paragraphLines, parseBlocks, readerFe
 import type { StatePhrasesConfig } from "../format/state-phrases.ts";
 import { isLedgerLabel } from "../format/pr-ledger.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
-import { JIRA_KEY_DENYLIST } from "../jira/key-scan.ts";
-import { JIRA_KEY_SOURCE } from "../jira/retrieval.ts";
+import { JIRA_KEY_DENYLIST } from "../utils/jira-key-scan.ts";
+import { JIRA_KEY_SOURCE } from "../utils/jira-key-source.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { stampedKeys } from "./trackers/jira.ts";
 import { isLiveReportPage } from "./lint-drift.ts";

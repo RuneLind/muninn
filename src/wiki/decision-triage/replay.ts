@@ -11,7 +11,7 @@
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256 } from "../../utils/date-hash.ts";
 import { commitView, gatherCardFacts, GitReadFailed, isCommitId, gatherPageFacts, readPageText, type GatherContext, type PageFacts, type PageRead, type ReplayCard, type WikiView } from "./facts.ts";
 import { failureOf, parseRepoRoots, type GitRun } from "./git.ts";
 import { buildBatches, CHARS_PER_CALL, renderBatch, soloChars, type Batch, type BatchItem } from "./prompt.ts";

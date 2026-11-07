@@ -16,7 +16,7 @@ import type { Watcher, WatcherAlert } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { lintWiki, LINT_CHECKS, type LintCheck } from "../wiki/lint.ts";
-import { todayOslo } from "../gardener/util.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
 import {
   seedLintProposals,

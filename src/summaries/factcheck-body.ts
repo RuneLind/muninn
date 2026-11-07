@@ -19,7 +19,7 @@ import { markdownCodeRegions } from "../format/markdown-ast.ts";
 import { splitClosingTakeaway } from "./takeaway-check.ts";
 import { stripSummaryFactcheckBlock } from "./factcheck-block.ts";
 import { sourceTextOfRaw } from "./source-text.ts";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { findLinksSection } from "./links-section.ts";
 
 /** A `[start, end)` range of a transcript-less summary body. */
