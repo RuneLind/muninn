@@ -89,7 +89,7 @@ export function untimedSpecWarnings(files: string[], timings: Timings): string[]
 /**
  * Real seconds the specs missing from the table may take together before `check`
  * fails. With only the warning, 18 untimed specs (401 s in run 42352843754) grew in by 2026-11-07
- * and put 557 s on one shard against ~300 s on the others.
+ * and put 557 s on one shard against 323–442 s on the others.
  */
 export const UNTIMED_SECONDS_LIMIT = 60;
 
