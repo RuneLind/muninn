@@ -99,7 +99,7 @@ test("Run now runs a model-off pass, the line updates from its run line, and /ag
   await expect(run).not.toHaveAttribute("aria-disabled", "true");
 
   await run.click();
-  await expect(tri).toContainText(/Triage checked \d{2}:\d{2} · 1 card · 0 with code facts/);
+  await expect(tri).toContainText(/Triage checked (\d{2}\.\d{2} )?\d{2}:\d{2} · 1 card · 0 with code facts/);
   await expect(run).toHaveText("Run now");
   await expect(page.locator("[data-wi-run-msg]")).toHaveCount(0);
 
