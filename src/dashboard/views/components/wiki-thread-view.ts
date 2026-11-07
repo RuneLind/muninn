@@ -3,8 +3,8 @@
  * header (thread glyph, name, sessions and span, ✋, «Show N pages», 📌) and
  * the `touched:` line, plus the series ghost row and its note, for a pin's
  * ghost and a thread's. Pure string
- * building, in its own module because `wiki-browser.ts` touches `document` at
- * import time and `bun test` cannot load it (the `wiki-related-view.ts` split).
+ * building, in its own module so a test can load it without DOM globals (the
+ * `wiki-related-view.ts` split).
  * The focus rows are ordinary rail rows, painted by `renderList`.
  */
 

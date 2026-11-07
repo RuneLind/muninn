@@ -6,7 +6,8 @@ import { wikiClientScript } from "./wiki-client.ts";
 /**
  * Guards the PR-5 refactor: the /wiki page's client logic moved from a
  * hand-written inline IIFE to a real bundled TS entrypoint. If the Bun.build of
- * `wiki-browser.ts` regresses (syntax error, bad import), `renderWikiPage()`
+ * `wiki-shell-client.ts` (and the `wiki-browser.ts` it imports) regresses
+ * (syntax error, bad import), `renderWikiPage()`
  * rejects and this fails at render time — which is exactly when the route
  * would 500 in prod.
  */
