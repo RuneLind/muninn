@@ -10,7 +10,7 @@
  */
 import { parseBlocks } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
-import { DECISION_ID_RE, parseQuestionPage } from "./question.ts";
+import { DECISION_ID_RE, eachComponent, parseQuestionPage, type DecisionLogEntry } from "./question.ts";
 import { frontmatterBodyLine } from "../wiki/page-text.ts";
 
 /** What closes the card: a decision the page already holds (the P1 hint), or an answer to record as a new one. */
@@ -24,7 +24,33 @@ export type CloseEdit =
   | { ok: false; reason: string; code: "no-log" | "no-card" | "not-open" | "no-ruling" | "unplaceable" };
 
 const ITEM_RE = /^( *)([-*+]|\d{1,9}[.)])( +)(\S.*)$/;
-const FENCE_RE = /^ {0,3}(`{3,}|~{3,})/;
+/** `parseBlocks`' fence line (`FENCE_LINE_RE` in markdown-ast.ts): backticks only, 0–3 spaces. */
+const FENCE_LINE_RE = /^( {0,3})(`{3,})(.*)$/;
+
+/**
+ * The line indices `parseBlocks` reads as fenced code, opener and closer
+ * included, by its rule: an opener has no backtick in its info string and
+ * counts only when a closer (a run at least as long, nothing after it) follows.
+ */
+function fencedLines(lines: string[], from: number): Set<number> {
+  const out = new Set<number>();
+  for (let i = from; i < lines.length; i++) {
+    const open = FENCE_LINE_RE.exec(lines[i]!);
+    if (!open || open[3]!.includes("`")) continue;
+    let close = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const c = FENCE_LINE_RE.exec(lines[j]!);
+      if (c && c[2]!.length >= open[2]!.length && c[3]!.trim() === "") {
+        close = j;
+        break;
+      }
+    }
+    if (close < 0) continue;
+    for (let k = i; k <= close; k++) out.add(k);
+    i = close;
+  }
+  return out;
+}
 
 interface Region {
   open: number;
@@ -44,21 +70,13 @@ interface Item {
   sep: string;
 }
 
-/** Every `<DecisionLog>` … `</DecisionLog>` outside a code fence, by line. */
-function logRegions(lines: string[], from: number): Region[] {
+/** Every `<DecisionLog>` … `</DecisionLog>` outside fenced code, by line. */
+function logRegions(lines: string[], from: number, fenced: Set<number>): Region[] {
   const out: Region[] = [];
-  let fence: string | null = null;
   let open = -1;
   for (let i = from; i < lines.length; i++) {
-    const line = lines[i]!;
-    const f = FENCE_RE.exec(line);
-    if (f) {
-      if (fence === null) fence = f[1]![0]!.repeat(3);
-      else if (line.trim().startsWith(fence)) fence = null;
-      continue;
-    }
-    if (fence !== null) continue;
-    const t = line.trim();
+    if (fenced.has(i)) continue;
+    const t = lines[i]!.trim();
     if (open < 0 && /^<DecisionLog(?:\s[^>]*)?>$/.test(t)) open = i;
     else if (open >= 0 && t === "</DecisionLog>") {
       out.push({ open, close: i });
@@ -69,7 +87,7 @@ function logRegions(lines: string[], from: number): Region[] {
 }
 
 /** The top-level list items in a region: those at the first item's indent. */
-function regionItems(lines: string[], r: Region): Item[] {
+function regionItems(lines: string[], r: Region, fenced: Set<number>): Item[] {
   let top: number | null = null;
   const starts: number[] = [];
   for (let i = r.open + 1; i < r.close; i++) {
@@ -83,13 +101,9 @@ function regionItems(lines: string[], r: Region): Item[] {
     const limit = starts[k + 1] ?? r.close;
     const m = ITEM_RE.exec(lines[start]!)!;
     let paraEnd = start;
-    // A fence at the item's content indent (up to 3 more spaces) opens a nested
-    // code block, as a blank line or a list item ends the paragraph. A backtick
-    // run with a backtick after it is inline code, not a fence.
-    const content = " ".repeat(m[1]!.length + m[2]!.length + m[3]!.length);
-    const fence = (l: string) => /^ {0,3}(?:`{3,}[^`]*|~{3,}.*)$/.test(l.startsWith(content) ? l.slice(content.length) : l);
-    const ends = (l: string) => l.trim() === "" || ITEM_RE.test(l) || fence(l);
-    while (paraEnd + 1 < limit && !ends(lines[paraEnd + 1]!)) paraEnd++;
+    // Fenced code ends the paragraph, as a blank line or a list item does.
+    const ends = (i: number) => lines[i]!.trim() === "" || ITEM_RE.test(lines[i]!) || fenced.has(i);
+    while (paraEnd + 1 < limit && !ends(paraEnd + 1)) paraEnd++;
     let end = paraEnd;
     for (let i = paraEnd + 1; i < limit; i++) {
       const line = lines[i]!;
@@ -134,16 +148,26 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
   const lines = text.split(/\r?\n/);
   // Where the reader and lint end the frontmatter (`splitFrontmatter`).
   const from = frontmatterBodyLine(text.replace(/\r\n/g, "\n"));
-  const before = parseQuestionPage(parseBlocks(lines.slice(from).join("\n")));
+  const blocks = parseBlocks(lines.slice(from).join("\n"));
+  const before = parseQuestionPage(blocks);
   if (!before.questions.some((q) => q.id === id)) return { ok: false, code: "no-card", reason: `the page has no card ${id}` };
-  const regions = logRegions(lines, from);
-  if (regions.length === 0) return { ok: false, code: "no-log", reason: "the page has no <DecisionLog>, so where a close goes is a choice for the page: open it on the page" };
+  // Whether the page has a log is the parser's answer (D23); the line scan only places.
+  let parsedLog = false;
+  eachComponent(blocks, (b) => {
+    if (b.name === "DecisionLog") parsedLog = true;
+  });
+  if (!parsedLog) return { ok: false, code: "no-log", reason: "the page has no <DecisionLog>, so where a close goes is a choice for the page: open it on the page" };
+  const fenced = fencedLines(lines, from);
+  const regions = logRegions(lines, from, fenced);
+  if (regions.length === 0) return { ok: false, code: "unplaceable", reason: `the page's log has a shape the close cannot place: close ${id} on the page` };
   const state = before.states.get(id);
   if (state && state.kind !== "open") return { ok: false, code: "not-open", reason: `card ${id} is already closed` };
 
-  const items = regions.flatMap((r) => regionItems(lines, r).map((it) => ({ ...it, region: r })));
+  const items = regions.flatMap((r) => regionItems(lines, r, fenced).map((it) => ({ ...it, region: r })));
   const own = items.find((it) => it.id === id);
   let decision: string;
+  /** The items the edit adds, as the parser must read them back. */
+  const inserted: { id: string; itemText: string }[] = [];
   const added: { after: number; text: string }[] = [];
   if (ruling.kind === "decision") {
     if (!own) return { ok: false, code: "unplaceable", reason: `card ${id} has no log item to close` };
@@ -162,8 +186,13 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
     const at = anchor ? anchor.end : regions[0]!.open;
     const lead = `${style.indent}${style.marker}${style.gap}`;
     const block: string[] = [];
-    if (!own) block.push(`${lead}**${id}**${sep}See the card. Closed ${today} (${decision}).`);
-    block.push(`${lead}**${decision}**${sep}${what} ${mdxText(ruling.author)}, ${ruling.date}.`);
+    if (!own) {
+      block.push(`${lead}**${id}**${sep}See the card. Closed ${today} (${decision}).`);
+      inserted.push({ id, itemText: `See the card. Closed ${today} (${decision}).` });
+    }
+    const decisionText = `${what} ${mdxText(ruling.author)}, ${mdxText(ruling.date)}.`;
+    block.push(`${lead}**${decision}**${sep}${decisionText}`);
+    inserted.push({ id: decision, itemText: decisionText });
     // An empty log gets its list after a blank line, and keeps one before the close tag.
     added.push({ after: at, text: anchor ? block.join(eol) : ["", ...block, ""].join(eol) });
   }
@@ -178,12 +207,28 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
   for (const a of added) shown.push(...a.text.split(eol).filter((l) => l.trim()));
   const content = out.join(eol);
 
+  // The postcondition, read through the parser the reader and lint run: every
+  // entry the page had is there in order with its text, except that the card's
+  // item gains the phrase at the end of its first paragraph, and the inserted
+  // items are exactly the ones written. Anything else (a fence, a lazy line or a
+  // log the line scan reads differently) is refused, never written.
   const after = parseQuestionPage(parseBlocks(content.split(/\r?\n/).slice(from).join("\n")));
-  const read = after.states.get(id);
-  // The edit adds one `Closed` phrase and at most two one-line items. Read
-  // decided on `decision` means the phrase is canonical and last; a phrase that
-  // is not canonical leaves the card open.
-  if (read?.kind !== "decided" || read.decision !== decision) {
+  const phrase = `Closed ${today} (${decision}).`;
+  const ownAt = before.entries.findIndex((e) => e.id === id);
+  const expected: { id: string; itemText: string; text: string }[] = before.entries.map((e: DecisionLogEntry, k) =>
+    k === ownAt ? { id, itemText: `${withStop(e.itemText)} ${phrase}`, text: `${withStop(e.itemText)} ${phrase}${e.text.slice(e.itemText.length)}` } : e,
+  );
+  // An inserted id is new to the page (a card with no item, a decision past the
+  // highest), so its first entry is the one written.
+  const insertedAt = inserted.map((x) => after.entries.findIndex((e) => e.id === x.id));
+  const kept = after.entries.filter((_, k) => !insertedAt.includes(k));
+  const placed =
+    after.entries.length === before.entries.length + inserted.length &&
+    kept.length === expected.length &&
+    kept.every((e, k) => e.id === expected[k]!.id && e.itemText === expected[k]!.itemText && e.text === expected[k]!.text) &&
+    inserted.every((x, k) => insertedAt[k]! >= 0 && after.entries[insertedAt[k]!]!.itemText === x.itemText) &&
+    after.states.get(id)?.kind === "decided";
+  if (!placed) {
     return { ok: false, code: "unplaceable", reason: `the page's log has a shape the close cannot place: close ${id} on the page` };
   }
   return { ok: true, content, decision, lines: shown };

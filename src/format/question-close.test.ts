@@ -124,7 +124,7 @@ describe("closeCardEdit", () => {
   });
 
   test("a nested fence right after the item text stays a fence: the close goes on the text line", () => {
-    for (const fence of ["```", "~~~"]) {
+    for (const fence of ["```"]) {
       const text = page(q("O1"), `<DecisionLog>\n\n- **O1** — x\n  ${fence}ts\n  code\n  ${fence}\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n`);
       const r = ok(closeCardEdit(text, "O1", { kind: "decision", decision: "D1" }, TODAY));
       expect(r.content).toContain(`- **O1** — x. Closed 2026-11-07 (D1).\n  ${fence}ts\n  code\n  ${fence}\n`);
@@ -155,5 +155,32 @@ describe("closeCardEdit", () => {
     const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — x\n  ```a``` one\n  ```b``` two\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n");
     const r = ok(closeCardEdit(text, "O1", { kind: "decision", decision: "D1" }, TODAY));
     expect(r.content).toContain("- **O1** — x\n  ```a``` one\n  ```b``` two. Closed 2026-11-07 (D1).\n");
+  });
+
+  test("a tilde run is no fence to the reader: the close goes after it, at the paragraph's end", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — x\n  ~~~ts\n  code\n  ~~~\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n");
+    const r = ok(closeCardEdit(text, "O1", { kind: "decision", decision: "D1" }, TODAY));
+    expect(r.content).toContain("  code\n  ~~~. Closed 2026-11-07 (D1).\n- **D1**");
+  });
+
+  test("one inline triple-backtick line in the log opens no fence: the log is found and the close placed", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — x\n  ```a``` one\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n");
+    const r = ok(closeCardEdit(text, "O1", { kind: "decision", decision: "D1" }, TODAY));
+    expect(r.content).toContain("  ```a``` one. Closed 2026-11-07 (D1).\n");
+  });
+
+  test("a backtick fence 4 or more spaces in is no fence to the reader, nor an unclosed one: the close goes at the paragraph's end", () => {
+    for (const body of ["     ```\n     code\n     ```", "  ```\n  never closed"]) {
+      const text = page(q("O1"), `<DecisionLog>\n\n- **O1** — x\n${body}\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n`);
+      const r = ok(closeCardEdit(text, "O1", { kind: "decision", decision: "D1" }, TODAY));
+      const last = body.split("\n").at(-1)!;
+      expect(r.content).toContain(`${last}. Closed 2026-11-07 (D1).\n`);
+    }
+  });
+
+  test("a line the parser reads as no part of the paragraph (a rule) is refused by the read-back, not written over", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — x\n  ---\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n");
+    expect(closeCardEdit(text, "O1", { kind: "decision", decision: "D1" }, TODAY)).toMatchObject({ ok: false, code: "unplaceable" });
+    expect(closeCardEdit(text, "O1", answer(), TODAY)).toMatchObject({ ok: false, code: "unplaceable" });
   });
 });
