@@ -77,6 +77,7 @@ const LISTING = {
   pages: [
     { name: "alpha", title: "Alpha", type: "concept", domain: "ai", tags: [], aliases: [], relPath: "concepts/alpha.md" },
     { name: "beta", title: "Beta", type: "concept", domain: "ai", tags: [], aliases: [], relPath: "concepts/beta.md" },
+    { name: "gamma", title: "Gamma", type: "entity", domain: "ai", tags: [], aliases: [], relPath: "entities/gamma.md" },
   ],
   scannedAt: 1_700_000_000_000,
 };
@@ -113,6 +114,7 @@ async function stubFetch(input: unknown): Promise<unknown> {
   const url = new URL(raw, "http://localhost:3011");
   let body: unknown = {};
   if (url.pathname === "/api/wiki/pages") body = LISTING;
+  else if (url.pathname === "/api/wiki/index-coverage") body = { totalMd: 3, indexed: 2, missing: ["entities/gamma.md"] };
   else if (url.pathname === "/api/wiki/page") {
     body = {
       meta: LISTING.pages[0],
@@ -385,6 +387,63 @@ describe("wiki-browser.ts — listener order", () => {
     // The next Escape reaches the bubble listeners: the Explain button goes.
     key("Escape");
     expect(explain.style.display).toBe("none");
+  });
+});
+
+describe("the left pane (wiki-rail-controller.ts), driven through the booted shell", () => {
+  const doc = () => g.document as Document;
+  const rows = () => Array.from(doc().querySelectorAll<HTMLElement>("#wikiList .wiki-list-item")).map((r) => r.getAttribute("data-relpath"));
+  const ALL = ["concepts/alpha.md", "concepts/beta.md", "entities/gamma.md"];
+
+  test("the modules the shell imports are evaluated inside the import-effect window", () => {
+    for (const m of ["/components/wiki-rail-controller.ts", "/components/wiki-shell-state.ts"]) {
+      expect(loadedInWindow.some((k) => k.endsWith(m))).toBe(true);
+    }
+  });
+
+  test("typing in the filter re-renders the list to the matching rows, and clearing restores it", async () => {
+    await until(() => rows().length === 3, "the rail to list the three pages");
+    expect([...rows()].sort()).toEqual(ALL);
+    const box = doc().getElementById("wikiSearch") as HTMLInputElement;
+    const Ev = g.Event as typeof Event;
+    box.value = "gamm";
+    box.dispatchEvent(new Ev("input", { bubbles: true }));
+    expect(rows()).toEqual(["entities/gamma.md"]);
+    box.value = "";
+    box.dispatchEvent(new Ev("input", { bubbles: true }));
+    expect([...rows()].sort()).toEqual(ALL);
+  });
+
+  test("a type chip narrows the list and marks itself active; All types restores it", () => {
+    const chip = (t: string) => doc().querySelector<HTMLElement>(`#typeChips [data-type="${t}"]`)!;
+    chip("entity").click();
+    expect(rows()).toEqual(["entities/gamma.md"]);
+    expect(chip("entity").classList.contains("active")).toBe(true);
+    chip("").click();
+    expect([...rows()].sort()).toEqual(ALL);
+    expect(chip("").classList.contains("active")).toBe(true);
+  });
+
+  test("the ★ pins a page in place: the row's button flips, the list is not redrawn", () => {
+    const row = doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="concepts/beta.md"]')!;
+    const star = row.querySelector<HTMLElement>("[data-pin]")!;
+    expect(star.getAttribute("aria-pressed")).toBe("false");
+    star.click();
+    expect(star.getAttribute("aria-pressed")).toBe("true");
+    expect(star.isConnected).toBe(true);
+    expect(JSON.stringify((g.localStorage as Storage).getItem("muninn.wiki.pins.v1:w"))).toContain("concepts/beta.md");
+    star.click();
+    expect(star.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  test("the coverage footer shows the index line, and its link opens the start view", async () => {
+    const foot = doc().getElementById("wikiCoverageFoot")!;
+    await until(() => foot.style.display === "" && !!doc().getElementById("wikiCoverageLink"), "the coverage footer");
+    expect(foot.textContent).toBe("3 pages · indexed 2 · 1 missing");
+    expect(fetched).toContain("/api/wiki/index-coverage?wiki=w");
+    doc().getElementById("wikiCoverageLink")!.click();
+    expect(new URLSearchParams((g.location as Location).search).get("page")).toBeNull();
+    expect(doc().querySelector("#articleWrap #alphaBody")).toBeNull();
   });
 });
 

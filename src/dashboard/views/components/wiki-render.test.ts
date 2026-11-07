@@ -100,7 +100,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-07: wrapping the load-time code in `boot()` (wiki-browser split C1) took
 // it from 1,423,508 to 1,426,483 bytes (357,829 → 358,552 gzipped); the readable
 // decision inbox then took it to 1,428,716.
-const WIKI_CLIENT_MAX_BYTES = 1_429_000;
+// 2026-11-07: the left pane in its own module behind a port (wiki-browser split C2)
+// took it from 1,428,731 to 1,433,009 bytes (359,172 → 360,612 gzipped).
+const WIKI_CLIENT_MAX_BYTES = 1_434_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -120,8 +122,10 @@ test("wikiClientScript stays under its size pin", async () => {
 // inside a function, method, arrow, class body or namespace is not module state.
 // 2026-11-07, C1 baseline: 10,703 lines; 119 module-level `let`s (104 before C1,
 // plus the 14 effectful consts that became `let x!: T` and `booted`).
-const WIKI_BROWSER_MAX_LINES = 10_703;
-const WIKI_BROWSER_MAX_MODULE_LETS = 119;
+// 2026-11-07, C2 (the left pane to `wiki-rail-controller.ts`, shared state to
+// `wiki-shell-state.ts`): 8,850 lines; 103 module-level `let`s.
+const WIKI_BROWSER_MAX_LINES = 8_850;
+const WIKI_BROWSER_MAX_MODULE_LETS = 103;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {
   const sf = ts.createSourceFile("module.ts", src, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
