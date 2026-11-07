@@ -133,6 +133,7 @@
       "src/benchmarks/retrieval.test.ts",
       "src/dashboard/dashboard-build-hash.test.ts",
       "scripts/test-chain.test.ts",
+      "scripts/test-par.test.ts",
       "scripts/boundary-crossing.test.ts",
       "src/test/layer-direction.test.ts"
     ],
