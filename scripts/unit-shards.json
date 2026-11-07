@@ -2,6 +2,7 @@
   "groups": {
     "unit-1": [
       "e2e/ports.test.ts",
+      "e2e/e2e-env.test.ts",
       "scripts/preview-role.test.ts",
       "scripts/e2e-shards.test.ts",
       "scripts/decision-chain-dry-run.test.ts",

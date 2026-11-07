@@ -490,7 +490,7 @@ test("a card with no choices gets no pick rows", async () => {
 const statusBody = (over: Partial<TriageStatusBody> = {}): TriageStatusBody => ({
   wiki: "w",
   lastRun: { at: Date.UTC(2026, 10, 7, 5, 12), outcome: "ok", reason: null, cards: 7, model: "none", codeFacts: 1 },
-  nights: [{ night: "2026-11-07", outcome: "ok", cards: 7, codeFacts: 1, answered: 2, reposNotFound: [XSS] }],
+  nights: [{ night: "2026-11-07", outcome: "ok", reason: null, cards: 7, codeFacts: 1, answered: 2, reposNotFound: [XSS] }],
   reposNotFound: [{ repo: XSS, reason: "no such folder" }],
   nextDueAt: Date.UTC(2026, 10, 8, 4),
   broken: 0,
@@ -550,6 +550,21 @@ test("the e2e's checked-line pattern holds at 01:30 Oslo for a run 2 h earlier (
 test("a run line's cards that is not a number never reaches the markup raw", async () => {
   await loadWithStatus(statusBody({ lastRun: { at: Date.now(), outcome: "ok", reason: null, cards: XSS as unknown as number, model: "none", codeFacts: 1 } }));
   expect(inboxHtml(() => "", Date.now())).not.toContain("<img");
+});
+
+test("the last run's reason is the outcome word's tooltip, and each night's is its Details outcome cell's, escaped", async () => {
+  const reason = "the model call is off (D19), 6 card(s) with no facts <b>";
+  await loadWithStatus(statusBody({
+    lastRun: { at: Date.now(), outcome: "partial", reason, cards: 6, model: "none", codeFacts: 0 },
+    nights: [{ night: "2026-11-07", outcome: "partial", reason, cards: 6, codeFacts: 0, answered: 0, reposNotFound: [] }],
+  }));
+  const escaped = "the model call is off (D19), 6 card(s) with no facts &lt;b&gt;";
+  expect(inboxHtml(() => "", Date.now())).toContain(`<span title="${escaped}">partial</span>`);
+  click("tri-details", "");
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain(`<td title="${escaped}">partial</td>`);
+  expect(html).not.toContain("facts <b>");
+  click("tri-details", "");
 });
 
 test("a status that fails or is not a status leaves the line out and the inbox whole", async () => {

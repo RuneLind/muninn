@@ -41,8 +41,8 @@ describe("triageWikiStatus", () => {
     const s = triageWikiStatus("w", logOf([r2, r1], cards, 1), null, FIVE_OSLO + H, 5);
     expect(s.lastRun).toEqual({ at: r2.at, outcome: "partial", reason: "1 card(s) with no facts", cards: 3, model: "none", codeFacts: 1 });
     expect(s.nights).toEqual([
-      { night: "2026-11-07", outcome: "partial", cards: 3, codeFacts: 1, answered: 1, reposNotFound: ["gone"] },
-      { night: "2026-11-06", outcome: "ok", cards: 2, codeFacts: 1, answered: 1, reposNotFound: [] },
+      { night: "2026-11-07", outcome: "partial", reason: "1 card(s) with no facts", cards: 3, codeFacts: 1, answered: 1, reposNotFound: ["gone"] },
+      { night: "2026-11-06", outcome: "ok", reason: null, cards: 2, codeFacts: 1, answered: 1, reposNotFound: [] },
     ]);
     expect(s.reposNotFound).toEqual([{ repo: "gone", reason: "no such folder under the roots" }]);
     expect(s.broken).toBe(1);
@@ -57,6 +57,13 @@ describe("triageWikiStatus", () => {
     ];
     const [night] = triageWikiStatus("w", logOf([r], cards), null, FIVE_OSLO + H, 5).nights;
     expect(night).toMatchObject({ night: "2026-11-07", cards: 2, codeFacts: 1, answered: 1, outcome: "ok" });
+  });
+
+  test("a card line logged after midnight counts on its run's night, not its own", () => {
+    const r = run(Date.UTC(2026, 10, 7, 22, 59), { cards: 1 }); // 23:59 Oslo, 2026-11-07
+    const late = Date.UTC(2026, 10, 7, 23, 1); // 00:01 Oslo, 2026-11-08
+    const s = triageWikiStatus("w", logOf([r], [card(r.runId, late, "O1", { codeFacts: true })]), null, late + H, 5);
+    expect(s.nights).toEqual([{ night: "2026-11-07", outcome: "ok", reason: null, cards: 1, codeFacts: 1, answered: 0, reposNotFound: [] }]);
   });
 
   test("bounds the nights", () => {

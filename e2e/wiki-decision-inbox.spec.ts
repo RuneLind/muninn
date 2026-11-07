@@ -80,6 +80,8 @@ let server: ChildProcess | undefined;
 let sql: postgres.Sql | undefined;
 const roots: string[] = [];
 
+const TRIAGE_REASON = "the model call is off (D19), 1 card(s) with no facts";
+
 /** The triage log the status line and the /models card read (`DECISION_TRIAGE_DIR`): two nights for KODE. */
 async function seedTriageLog(dir: string): Promise<void> {
   const now = Date.now();
@@ -94,7 +96,7 @@ async function seedTriageLog(dir: string): Promise<void> {
     cardLine("r-last", last, "O1", { codeFacts: true }),
     cardLine("r-last", last, "O2", { verdict: "ANSWERED" }),
     cardLine("r-last", last, "O3", { codeFacts: false }),
-    runLine("r-last", last, 3, [{ repo: "melosys-api", found: true }, { repo: "e2e-gone-repo", found: false, reason: "no such folder under the roots" }]),
+    { ...runLine("r-last", last, 3, [{ repo: "melosys-api", found: true }, { repo: "e2e-gone-repo", found: false, reason: "no such folder under the roots" }]), outcome: "partial", reason: TRIAGE_REASON },
   ];
   await mkdir(dir, { recursive: true });
   await writeFile(path.join(dir, `${KODE}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
@@ -307,7 +309,10 @@ test.describe.serial("the Decisions section", () => {
     const rows = page.locator(".wiki-wi-tri-stats tbody tr");
     await expect(page.locator(".wiki-wi-tri-stats thead th")).toHaveText(["Night", "Outcome", "Cards", "With code facts", "Answered", "Repos not found"]);
     await expect(rows).toHaveCount(2);
-    await expect(rows.nth(0).locator("td")).toHaveText([/^\d{2}\.\d{2}$/, "ok", "3", "1", "1", "e2e-gone-repo"]);
+    await expect(rows.nth(0).locator("td")).toHaveText([/^\d{2}\.\d{2}$/, "partial", "3", "1", "1", "e2e-gone-repo"]);
+    // The run's reason rides the outcome: the line's word and the night's cell.
+    await expect(rows.nth(0).locator("td").nth(1)).toHaveAttribute("title", TRIAGE_REASON);
+    await expect(tri.locator("span", { hasText: /^partial$/ })).toHaveAttribute("title", TRIAGE_REASON);
     await expect(rows.nth(1).locator("td")).toHaveText([/^\d{2}\.\d{2}$/, "ok", "1", "0", "0", "none"]);
     await tri.locator('[data-wi-act="tri-details"]').click();
     await expect(page.locator(".wiki-wi-tri-stats")).toHaveCount(0);
@@ -324,6 +329,22 @@ test.describe.serial("the Decisions section", () => {
     await openInbox(page, KODE);
     await expect(page.locator("#wikiWorkInbox .wiki-wi-lane").first()).toBeVisible();
     await expect(page.locator("#wikiWorkInbox .wiki-wi-tri")).toHaveCount(0);
+  });
+
+  test("/models' last-run entry carries the run's reason, escaped", async ({ page }) => {
+    // This server's pass is off (SCHEDULER_ENABLED=false), so it covers no wiki: the overview is stubbed.
+    const reason = `${TRIAGE_REASON} <img src=x onerror="window.__xss=1">`;
+    await page.route("**/api/wiki/decision-triage/overview", (route) => route.fulfill({
+      status: 200, contentType: "application/json",
+      body: JSON.stringify({
+        pass: { on: true, why: null, modelOff: true, model: "m", hour: 5, covered: [KODE], skipped: [] },
+        wikis: [{ wiki: KODE, lastRun: { at: Date.now(), outcome: "partial", reason, cards: 3, model: "none", codeFacts: 1 }, reposNotFound: [], nextDueAt: null }],
+      }),
+    }));
+    await page.goto(`${BASE}/models`);
+    const lastRuns = page.locator("#triageKv dt:text-is(\"Last runs\") + dd");
+    await expect(lastRuns).toContainText(`partial (${reason})`);
+    expect(await page.evaluate(() => (window as { __xss?: number }).__xss)).toBeUndefined();
   });
 
   test("/models shows the Decision triage card: the pass, the model switch, coverage and the last run", async ({ page }) => {

@@ -29,6 +29,8 @@ export interface TriageNight {
   night: string;
   /** The night's last run line's outcome; null when only card lines survive. */
   outcome: RunOutcome | null;
+  /** That run line's reason. */
+  reason: string | null;
   /** Distinct cards the night logged, the latest line per card. */
   cards: number;
   codeFacts: number;
@@ -115,6 +117,7 @@ export function triageWikiStatus(
       return {
         night,
         outcome: lastRun?.outcome ?? null,
+        reason: lastRun?.reason ?? null,
         cards: cards.length,
         codeFacts: cards.filter((c) => c.codeFacts === true).length,
         answered: cards.filter((c) => c.verdict === "ANSWERED").length,

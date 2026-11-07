@@ -170,7 +170,9 @@ function statusHtml(now: number): string {
   const parts = last
     ? [`Triage checked <b>${esc(atLabel(last.at, now))}</b>`, `${cards} card${cards === 1 ? "" : "s"}`, `${Number(last.codeFacts) || 0} with code facts`]
     : ["Triage has not run on this wiki"];
-  if (last && last.outcome !== "ok") parts.push(esc(last.outcome));
+  /** An outcome word, its run's reason as the tooltip. */
+  const outcomeHtml = (outcome: string, reason: string | null, tag = "span") => `<${tag}${reason ? ` title="${esc(reason)}"` : ""}>${esc(outcome)}</${tag}>`;
+  if (last && last.outcome !== "ok") parts.push(outcomeHtml(last.outcome, last.reason));
   const missing = t.reposNotFound.length
     ? `<span class="wiki-wi-tri-warn" title="${esc(t.reposNotFound.map((r) => r.repo + (r.reason ? `: ${r.reason}` : "")).join("\n"))}">${t.reposNotFound.length} repo${t.reposNotFound.length === 1 ? "" : "s"} not found</span>`
     : "";
@@ -184,7 +186,7 @@ function statusHtml(now: number): string {
   if (!st!.statusOpen || !t.nights.length) return line;
   const day = (night: string) => night.split("-").slice(1).reverse().join(".");
   const rows = t.nights
-    .map((n) => `<tr><td>${esc(day(n.night))}</td><td>${esc(n.outcome ?? "no run line")}</td><td>${n.cards}</td><td>${n.codeFacts}</td><td>${n.answered}</td><td>${n.reposNotFound.length ? esc(n.reposNotFound.join(", ")) : "none"}</td></tr>`)
+    .map((n) => `<tr><td>${esc(day(n.night))}</td>${outcomeHtml(n.outcome ?? "no run line", n.reason, "td")}<td>${n.cards}</td><td>${n.codeFacts}</td><td>${n.answered}</td><td>${n.reposNotFound.length ? esc(n.reposNotFound.join(", ")) : "none"}</td></tr>`)
     .join("");
   return (
     line +

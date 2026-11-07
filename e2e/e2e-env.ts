@@ -32,6 +32,8 @@
  * server. A spec that spreads only `blankBotTokens()` is the shape of the bug.
  */
 
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { AMBIENT_INSTANCE_ENV, AMBIENT_INSTANCE_ENV_PREFIXES } from "../src/test/ambient-env.ts";
 import { blankBotTokens, envNamesMatchingPrefixes } from "./blank-bot-tokens.ts";
 
@@ -67,5 +69,7 @@ export function e2eEnv(): Record<string, string> {
   // developer's own muninn already holds (D43, the #670 follow-up).
   // `WORK_MAP_GH_CHECK: "off"`: blank means on, and no spec server may spawn
   // `gh` on the machine's login; the specs stub the checks GET.
-  return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0", WORK_MAP_GH_CHECK: "off" };
+  // `DECISION_TRIAGE_DIR`: blank means `~/.muninn/decision-triage`, the developer's
+  // real log; a dir nothing writes reads as no log. A spec seeding one sets its own.
+  return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0", WORK_MAP_GH_CHECK: "off", DECISION_TRIAGE_DIR: path.join(tmpdir(), "muninn-e2e-no-triage-log") };
 }

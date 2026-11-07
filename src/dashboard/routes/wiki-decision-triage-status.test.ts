@@ -81,7 +81,7 @@ describe("GET /api/wiki/decision-triage/status", () => {
     await triageStateStore(dir).record("mimir", { at: r.at, outcome: "ok" });
     const body = (await (await app.request("/api/wiki/decision-triage/status?wiki=mimir")).json()) as TriageStatusBody;
     expect(body.lastRun).toMatchObject({ at: r.at, cards: 2, codeFacts: 1, model: "none" });
-    expect(body.nights).toEqual([{ night: "2026-11-07", outcome: "ok", cards: 2, codeFacts: 1, answered: 1, reposNotFound: ["gone"] }]);
+    expect(body.nights).toEqual([{ night: "2026-11-07", outcome: "ok", reason: null, cards: 2, codeFacts: 1, answered: 1, reposNotFound: ["gone"] }]);
     expect(body.reposNotFound).toEqual([{ repo: "gone", reason: "no such folder under the roots" }]);
     // 06:00 Oslo + 20 h falls before tomorrow's 05:00, so tomorrow's hour.
     expect(body.nextDueAt).toBe(Date.UTC(2026, 10, 8, 4));

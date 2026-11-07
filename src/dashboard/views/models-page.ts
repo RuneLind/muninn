@@ -1077,7 +1077,7 @@ export async function renderModelsPage(): Promise<string> {
       rows.push(['Last runs', data.wikis.length ? data.wikis.map(function (w) {
         var r = w.lastRun;
         var next = p.on && w.nextDueAt ? ' · next ~' + esc(triAt(w.nextDueAt)) : '';
-        return esc(w.wiki) + ': ' + (r ? esc(triAt(r.at)) + ' ' + esc(r.outcome) + ', ' + esc(String(r.cards)) + ' cards, ' + esc(String(r.codeFacts)) + ' with code facts' : 'no run yet') + next;
+        return esc(w.wiki) + ': ' + (r ? esc(triAt(r.at)) + ' ' + esc(r.outcome) + (r.reason ? ' (' + esc(r.reason) + ')' : '') + ', ' + esc(String(r.cards)) + ' cards, ' + esc(String(r.codeFacts)) + ' with code facts' : 'no run yet') + next;
       }).join('<br>') : 'none']);
       var missing = data.wikis.filter(function (w) { return w.reposNotFound.length; });
       rows.push(['Repos not found', missing.length ? missing.map(function (w) {
