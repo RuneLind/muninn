@@ -32,7 +32,7 @@ import {
   type ShardTable,
   type Tree,
 } from "./test-chain.ts";
-import { expandLink } from "../src/test/mock-isolation.ts";
+import { bunTestLinks, expandLink } from "../src/test/mock-isolation.ts";
 import { testTempDirSync } from "../src/test/temp-dir.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
@@ -107,13 +107,28 @@ describe("the live chain", () => {
 
   // Through `readTree`, the scan `write` and `check` themselves run: a copy of it
   // here would leave its `ownProcessFiles` wiring unexercised.
-  test("the wiki boot test is an own-process link: alone, and in no other link", () => {
-    const boot = "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts";
+  test("the wiki boot tests are own-process links: each alone, and in no other link", () => {
+    const boots = ["src/dashboard/views/wiki-boot/wiki-controllers-boot.test.ts", "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts"];
     const t = readTree();
-    expect(t.ownProcessFiles).toEqual([boot]);
+    expect(t.ownProcessFiles).toBeDefined();
+    expect([...(t.ownProcessFiles ?? [])].sort()).toEqual(boots);
     const { links } = generate(t, readTable());
-    const running = links.filter((l) => expandLink(l.args, t.allTestFiles).includes(boot));
-    expect(running.map((l) => `${l.kind}:${l.args.join(",")}`)).toEqual([`own:${boot}`]);
+    for (const boot of boots) {
+      const running = links.filter((l) => expandLink(l.args, t.allTestFiles).includes(boot));
+      expect(running.map((l) => `${l.kind}:${l.args.join(",")}`)).toEqual([`own:${boot}`]);
+    }
+  });
+
+  // `test:unit` is hand-kept, not generated: an own-process file only `test` runs
+  // falls out of the unit group (`count-tests --files` reports it "ungrouped").
+  test("every own-process file runs alone in a test:unit link", () => {
+    const t = readTree();
+    const scripts = (JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts;
+    const unitLinks = bunTestLinks({ "test:unit": scripts["test:unit"]! });
+    for (const file of t.ownProcessFiles ?? []) {
+      const alone = unitLinks.filter((l) => l.args.length === 1 && l.args[0] === file);
+      expect(alone.length, file).toBe(1);
+    }
   });
 
   test("the exclude list starts with the live-bot integration test", () => {

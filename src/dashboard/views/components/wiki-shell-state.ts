@@ -1,11 +1,25 @@
 /**
- * The /wiki reader's shared state: the lets more than one part of the reader
- * writes, or that the left pane (`wiki-rail-controller.ts`) reads while the shell
- * (`wiki-browser.ts`) writes them. Each has this module as its one owner: a getter
- * and a setter, the `setCurrentRelPath` discipline. Importing this module runs
- * nothing.
+ * The /wiki reader's shared state: the lets that two or more modules write
+ * (the shell `wiki-browser.ts` and a controller). Each has this module as its
+ * one owner: a getter and a setter, the `setCurrentRelPath` discipline. A let
+ * one module writes stays in that module (`src/dashboard/CLAUDE.md`).
+ * Importing this module runs nothing.
  */
 import type { IndexWork } from "../../../wiki/work-focus.ts";
+
+/** Set by every page navigation that lands (the shell), cleared by the first
+ *  `renderList` that has a listing to draw (the rail): that render scrolls the
+ *  open page's row into view. Normally set and consumed in the same render; it
+ *  waits only when the boot listing failed and a later refetch heals it. */
+let revealOnRender = false;
+
+export function getRevealOnRender(): boolean {
+  return revealOnRender;
+}
+
+export function setRevealOnRender(on: boolean): void {
+  revealOnRender = on;
+}
 
 /** The open page's name: assigned from the page response, cleared with it. */
 let currentName: string | null = null;
@@ -30,28 +44,7 @@ export function setWorkMapRunAt(runAt: number | null): void {
   workMapRunAt = runAt;
 }
 
-/** The listing's `workMap.kind === "themes"`: View options then says theme. */
-let workMapThemes = false;
-
-export function getWorkMapThemes(): boolean {
-  return workMapThemes;
-}
-
-export function setWorkMapThemes(themes: boolean): void {
-  workMapThemes = themes;
-}
-
-/** The work threads off the last listing (`work`), or null: an older server, a
- *  cold sessions memo, or a wiki with no sessions — no section (D11). Not the
- *  "keep the last known value" degrade: stale threads would lift pages the
- *  listing on screen no longer works on. */
+/** The work threads off the last listing (`work`), or null. The value is the
+ *  shell's (one writer); the type lives here because the rail and the ⋯ menus
+ *  read it through their ports. */
 export type WorkFacts = (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs" | "evidence">>) | null;
-let workFacts: WorkFacts = null;
-
-export function getWorkFacts(): WorkFacts {
-  return workFacts;
-}
-
-export function setWorkFacts(facts: WorkFacts): void {
-  workFacts = facts;
-}

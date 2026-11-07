@@ -225,6 +225,9 @@ describe("the shown page's one writer (A9)", () => {
     const writes = src.split("\n").filter((l) => /\bcurrentRelPath\s*=(?!=)/.test(l) && !/^\s*(\/\/|\*)/.test(l));
     expect(writes.map((l) => l.trim())).toEqual(["currentRelPath = relPath;"]);
     // Every view change also outdates a page response in flight and moves the STALE tab with it (R2B4).
-    expect(src).toMatch(/function setCurrentRelPath\(relPath: string \| null\): void \{\n  currentRelPath = relPath;\n  pageViewSeq\+\+;\n  if \(staleCheckRun && staleCheckRun\.relPath !== relPath\) abortStaleCheck\(\);\n  staleFollowPage\(relPath\);\n\}/);
+    expect(src).toMatch(/function setCurrentRelPath\(relPath: string \| null\): void \{\n  currentRelPath = relPath;\n  pageViewSeq\+\+;\n  staleFollowShownPage\(relPath\);\n\}/);
+    // The tab's half lives in the stale controller since the split (C3): another page's Check ends there.
+    const ctl = await Bun.file(new URL("./wiki-stale-controller.ts", import.meta.url)).text();
+    expect(ctl).toMatch(/export function staleFollowShownPage\(relPath: string \| null\): void \{\n  if \(staleCheckRun && staleCheckRun\.relPath !== relPath\) abortStaleCheck\(\);\n  staleFollowPage\(relPath\);\n\}/);
   });
 });

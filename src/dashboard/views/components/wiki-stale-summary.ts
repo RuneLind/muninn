@@ -1,8 +1,9 @@
 /**
  * The Stale check's counts outside the STALE tab (plan muninn-wiki-drift-check,
  * PR 2b): the rail badge, the article head's pill, the wiki home's line
- * beside the Index card and its Stale tab. Pure and DOM-free; `wiki-browser.ts` fetches and
- * paints.
+ * beside the Index card and its Stale tab. Pure and DOM-free;
+ * `wiki-stale-controller.ts` fetches and paints, and the shell's start view
+ * (`wiki-browser.ts`) renders the home line and the Stale tab from it too.
  *
  * One source each, so every surface shows the tab's two numbers (D26):
  * confirmed stale status lines on the page, and its linking pages to check.
