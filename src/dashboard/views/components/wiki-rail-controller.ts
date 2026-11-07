@@ -1617,27 +1617,6 @@ export function loadCoverageFooter(): void {
 }
 
 // ── Rail focus after a repaint, and the Group menu's open state ──────
-/**
- * The rail's own control: the ★ pin on every row.
- *
- * On `#wikiList`, not on the body delegate above — the control sits INSIDE a
- * `.wiki-list-item`, and that delegate opens whatever `[data-relpath]` a click
- * landed in. A listener on the list runs first because it is deeper in the tree.
- *
- * ⚠️ It deliberately does NOT call `stopPropagation`; the body delegate skips
- * this control by selector instead, so a handler on ONE widget cannot
- * silence unrelated document-level listeners.
- *
- * **Correcting the claim this comment first carried**, which a verify pass
- * disproved by measurement: the failure named was "with the Discuss popover
- * open, a click on a ★ leaves the popover standing". It cannot happen. The
- * popover renders a full-viewport scrim (`.wiki-chatopt-scrim`), so a real click
- * never reaches the rail at all — and forced past the scrim, the popover stays
- * open regardless, because `shouldCloseChatOptions` returns false while
- * unattached and `renderList` below swaps the clicked element out of the
- * document synchronously, before any document listener runs. The rule stands as
- * a rule; the story about it was invented.
- */
 /** After a `renderList` that replaced the control the reader pressed, focus the
  *  same control again wherever it now is (the related-order precedent), so a
  *  keyboard reader's next Tab continues from it instead of from the page top.
@@ -1731,6 +1710,27 @@ export function initRail(d: RailDeps): void {
 
 /** The list's click delegate, the search box and the facet rows. */
 export function registerRail(): void {
+  /**
+   * The rail's own control: the ★ pin on every row.
+   *
+   * On `#wikiList`, not on the shell's body click delegate — the control sits INSIDE a
+   * `.wiki-list-item`, and that delegate opens whatever `[data-relpath]` a click
+   * landed in. A listener on the list runs first because it is deeper in the tree.
+   *
+   * ⚠️ It deliberately does NOT call `stopPropagation`; the body delegate skips
+   * this control by selector instead, so a handler on ONE widget cannot
+   * silence unrelated document-level listeners.
+   *
+   * **Correcting the claim this comment first carried**, which a verify pass
+   * disproved by measurement: the failure named was "with the Discuss popover
+   * open, a click on a ★ leaves the popover standing". It cannot happen. The
+   * popover renders a full-viewport scrim (`.wiki-chatopt-scrim`), so a real click
+   * never reaches the rail at all — and forced past the scrim, the popover stays
+   * open regardless, because `shouldCloseChatOptions` returns false while
+   * unattached and `renderList` swaps the clicked element out of the
+   * document synchronously, before any document listener runs. The rule stands as
+   * a rule; the story about it was invented.
+   */
   document.getElementById("wikiList")!.addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
     if (!target.closest) return;
