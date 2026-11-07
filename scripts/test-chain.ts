@@ -4,12 +4,12 @@
  *   bun scripts/test-chain.ts write                  regenerate `test` (and add new links to the shard table)
  *   bun scripts/test-chain.ts run --shard <i>/<n>    run the `test` links the table puts on shard i, one junit file per link
  *   bun scripts/test-chain.ts check [--junit <dir>] [--result <r>]… [--shard <i>/<n>]
- *                                                    the fan-in: every file ran once, mock files alone, no crash
+ *                                                    the fan-in: every file ran once, mock and own-process files alone, no crash
  *   bun scripts/test-chain.ts changed <base-ref>     time the test files this branch adds or changes, alone (10 s bar)
  *   bun scripts/test-chain.ts refresh                time every chain file alone, write scripts/unit-timings.json
  *   bun scripts/test-chain.ts rebalance              regroup link 1 onto the shards by scripts/unit-timings.json
  *
- * The chain is built from five inputs: the files bun discovers, the `mock.module` scan
+ * The chain is built from six inputs: the files bun discovers, the `mock.module` scan
  * (each such file is a link of its own, see CLAUDE.md, Testing) and the own-process
  * scan (`ownProcessFiles`: happy-dom globals or boot module state, a link each the
  * same way), `PINNED` (whole
