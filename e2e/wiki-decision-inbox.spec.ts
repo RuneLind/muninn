@@ -15,6 +15,9 @@
  *  6. An opened card shows its choices as rows, rendered: no literal `**`.
  *  5. (P3b) Close previews the lines, writes them, and `/api/wiki/page` reads the
  *     close back; «Still open» hides a card across a reload until its evidence changes.
+ *  7. (visibility PR 2) The triage status line and its Details table paint from a
+ *     log seeded in a temp `DECISION_TRIAGE_DIR`, a failing status route leaves the
+ *     inbox whole, and /models shows the Decision triage card.
  *
  * One muninn on its own port, the test database, two temp git wikis:
  * `melosys-kode-wiki` (the rule's «ask» wiki) and one other. Answers are seeded
@@ -33,6 +36,7 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { contrastOf } from "./contrast.ts";
+import { TRIAGE_CHECKED_3_CARDS } from "./triage-patterns.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 
 const PORT = e2ePort("wiki-decision-inbox");
@@ -76,6 +80,29 @@ let server: ChildProcess | undefined;
 let sql: postgres.Sql | undefined;
 const roots: string[] = [];
 
+const TRIAGE_REASON = "the model call is off (D19), 1 card(s) with no facts";
+
+/** The triage log the status line and the /models card read (`DECISION_TRIAGE_DIR`): two nights for KODE. */
+async function seedTriageLog(dir: string): Promise<void> {
+  const now = Date.now();
+  const runLine = (runId: string, at: number, cards: number, repos: { repo: string; found: boolean; reason?: string }[]) =>
+    ({ type: "run", runId, at, wiki: KODE, model: "none", promptVersion: "off", usage: { calls: 0 }, repoRoots: "/r", repos, cards, floor: null, outcome: "ok" });
+  const cardLine = (runId: string, at: number, id: string, extra: Record<string, unknown>) =>
+    ({ type: "card", runId, at, wiki: KODE, promptVersion: "off", relPath: REL, id, questionHash: "h", recommendation: null, verdict: "NO_VERDICT", ...extra });
+  // 48 h apart: two Oslo dates even across the 25 h day clocks go back (26/2 met on one date there).
+  const [old, last] = [now - 50 * HOUR, now - 2 * HOUR];
+  const lines = [
+    cardLine("r-old", old, "O1", { codeFacts: false }),
+    runLine("r-old", old, 1, [{ repo: "melosys-api", found: true }]),
+    cardLine("r-last", last, "O1", { codeFacts: true }),
+    cardLine("r-last", last, "O2", { verdict: "ANSWERED" }),
+    cardLine("r-last", last, "O3", { codeFacts: false }),
+    { ...runLine("r-last", last, 3, [{ repo: "melosys-api", found: true }, { repo: "e2e-gone-repo", found: false, reason: "no such folder under the roots" }]), outcome: "partial", reason: TRIAGE_REASON },
+  ];
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, `${KODE}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
+}
+
 const deleteRows = async () => {
   await sql!`DELETE FROM wiki_answers WHERE wiki IN (${KODE}, ${OTHER}) AND rel_path LIKE 'plans/e2e-inbox-%'`;
 };
@@ -104,6 +131,9 @@ test.beforeAll(async () => {
   await deleteRows();
   const kode = await seedWiki(KODE, REL, PAGE);
   const other = await seedWiki(OTHER, OTHER_REL, OTHER_PAGE);
+  const triageDir = await mkdtemp(path.join(tmpdir(), "muninn-e2e-triage-"));
+  roots.push(triageDir);
+  await seedTriageLog(triageDir);
   await assertPortFree(PORT);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -119,6 +149,7 @@ test.beforeAll(async () => {
       WORK_MAP_WIKIS: `${KODE},${OTHER}`,
       WIKI_ANSWER_WIKIS: `${KODE},${OTHER}`,
       WIKI_ANSWER_OWNER: OWNER,
+      DECISION_TRIAGE_DIR: triageDir,
     },
     stdio: "ignore",
   });
@@ -258,6 +289,80 @@ test.describe.serial("the Decisions section", () => {
     await expect(row(page, "close", "O5")).toHaveCount(0);
   });
 
+  test("the triage status line sits above the lanes, from the seeded log; Details opens the per-night table", async ({ page }) => {
+    await openInbox(page, KODE);
+    const tri = page.locator("#wikiWorkInbox .wiki-wi-tri");
+    await expect(tri).toContainText(TRIAGE_CHECKED_3_CARDS);
+    await expect(tri.locator(".wiki-wi-tri-warn")).toHaveText("1 repo not found");
+    await expect(tri.locator(".wiki-wi-tri-warn")).toHaveAttribute("title", "e2e-gone-repo: no such folder under the roots");
+    // SCHEDULER_ENABLED=false here: the pass is off, so no next time.
+    await expect(tri).toContainText("pass off");
+    await expect(tri).not.toContainText("next ~");
+    // Above the first lane, inside the section.
+    expect(await page.locator("#wikiWorkInbox").evaluate((s) => {
+      const line = s.querySelector(".wiki-wi-tri")!;
+      const lane = s.querySelector(".wiki-wi-lane")!;
+      return !!(line.compareDocumentPosition(lane) & Node.DOCUMENT_POSITION_FOLLOWING);
+    })).toBe(true);
+    await expect(page.locator(".wiki-wi-tri-stats")).toHaveCount(0);
+    await tri.locator('[data-wi-act="tri-details"]').click();
+    await expect(tri.locator('[data-wi-act="tri-details"]')).toHaveText("Hide");
+    const rows = page.locator(".wiki-wi-tri-stats tbody tr");
+    await expect(page.locator(".wiki-wi-tri-stats thead th")).toHaveText(["Night", "Outcome", "Cards", "With code facts", "Answered", "Repos not found"]);
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0).locator("td")).toHaveText([/^\d{2}\.\d{2}$/, "partial", "3", "1", "1", "e2e-gone-repo"]);
+    // The run's reason rides the outcome: the line's word and the night's cell.
+    await expect(rows.nth(0).locator("td").nth(1)).toHaveAttribute("title", TRIAGE_REASON);
+    await expect(tri.locator("span", { hasText: /^partial$/ })).toHaveAttribute("title", TRIAGE_REASON);
+    await expect(rows.nth(1).locator("td")).toHaveText([/^\d{2}\.\d{2}$/, "ok", "1", "0", "0", "none"]);
+    await tri.locator('[data-wi-act="tri-details"]').click();
+    await expect(page.locator(".wiki-wi-tri-stats")).toHaveCount(0);
+  });
+
+  test("a wiki with no triage log shows the line saying so, and the lanes still paint", async ({ page }) => {
+    await openInbox(page, OTHER);
+    await expect(page.locator("#wikiWorkInbox .wiki-wi-tri")).toContainText("Triage has not run on this wiki");
+    await expect(page.locator("#wikiWorkInbox .wiki-wi-lane").first()).toBeVisible();
+  });
+
+  test("the inbox paints when the status route fails", async ({ page }) => {
+    await page.route("**/api/wiki/decision-triage/status**", (route) => route.fulfill({ status: 500, contentType: "application/json", body: "{}" }));
+    await openInbox(page, KODE);
+    await expect(page.locator("#wikiWorkInbox .wiki-wi-lane").first()).toBeVisible();
+    await expect(page.locator("#wikiWorkInbox .wiki-wi-tri")).toHaveCount(0);
+  });
+
+  test("/models' last-run entry carries the run's reason, escaped", async ({ page }) => {
+    // This server's pass is off (SCHEDULER_ENABLED=false), so it covers no wiki: the overview is stubbed.
+    const reason = `${TRIAGE_REASON} <img src=x onerror="window.__xss=1">`;
+    await page.route("**/api/wiki/decision-triage/overview", (route) => route.fulfill({
+      status: 200, contentType: "application/json",
+      body: JSON.stringify({
+        pass: { on: true, why: null, modelOff: true, model: "m", hour: 5, covered: [KODE], skipped: [] },
+        wikis: [{ wiki: KODE, lastRun: { at: Date.now(), outcome: "partial", reason, cards: 3, model: "none", codeFacts: 1 }, reposNotFound: [], nextDueAt: null }],
+      }),
+    }));
+    await page.goto(`${BASE}/models`);
+    const lastRuns = page.locator("#triageKv dt:text-is(\"Last runs\") + dd");
+    await expect(lastRuns).toContainText(`partial (${reason})`);
+    expect(await page.evaluate(() => (window as { __xss?: number }).__xss)).toBeUndefined();
+  });
+
+  test("/models shows the Decision triage card: the pass, the model switch, coverage and the last run", async ({ page }) => {
+    await page.goto(`${BASE}/models`);
+    const kv = page.locator("#triageSection #triageKv");
+    await expect(kv).toBeVisible();
+    const dd = (label: string) => kv.locator(`dt:text-is("${label}") + dd`);
+    await expect(dd("Pass")).toHaveText("off (SCHEDULER_ENABLED is off)");
+    await expect(dd("Model call")).toContainText("off (NIGHTLY_MODEL_OFF) · would use");
+    await expect(dd("Schedule")).toContainText(":00 Oslo, 20 h after the last success, hourly check");
+    for (const label of ["Covers", "Skips", "Last runs", "Repos not found"]) await expect(dd(label)).toBeVisible();
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((t) => { document.documentElement.dataset.theme = t; delete document.documentElement.dataset.palette; }, theme);
+      for (const el of await kv.locator("dt, dd, dd .warn, dd .ok").all()) expect(await contrastOf(el), `/models triage card in ${theme}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   for (const theme of ["light", "dark"] as const) {
     test(`legible in the ${theme} theme`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: theme });
@@ -278,6 +383,10 @@ test.describe.serial("the Decisions section", () => {
         }
       };
       await sweep([".wiki-wi-q", ".wiki-wi-page", ".wiki-wi-age", ".wiki-wi-tag", ".wiki-wi-ev b", ".wiki-wi-quote", ".wiki-wi-body", ".wiki-wi-btn", ".wiki-wi-hint"], false);
+      // The triage status line and its Details table.
+      await inbox.locator('[data-wi-act="tri-details"]').click();
+      await page.mouse.move(0, 0);
+      await sweep([".wiki-wi-tri > span:not(.wiki-wi-tri-dot):not(.wiki-wi-tri-sp)", ".wiki-wi-tri b", ".wiki-wi-tri-stats th", ".wiki-wi-tri-stats td"], true);
       // The choice rows: OTHER's card, answered B by now, sits in «close?», the lane that opens.
       await openInbox(page, OTHER);
       await row(page, "close", "O1").locator(".wiki-wi-row").click();

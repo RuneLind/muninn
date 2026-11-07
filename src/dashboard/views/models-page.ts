@@ -210,6 +210,15 @@ export async function renderModelsPage(): Promise<string> {
       white-space: pre-wrap; margin: 2px 12px 8px; line-height: 1.5;
     }
 
+    /* --- Decision triage card (decision triage visibility PR 2) --- */
+    .tri-kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; padding: 10px 12px; font-size: 12px; }
+    /* --text-secondary, not --text-dim: dim measured 3.7:1 in Light. */
+    .tri-kv dt { color: var(--text-secondary); }
+    .tri-kv dd { margin: 0; color: var(--text-primary); min-width: 0; overflow-wrap: anywhere; }
+    /* The --tone-* text tokens: --status-warning text measured 3.2:1 in Light. */
+    .tri-kv .warn { color: var(--tone-warn); font-weight: 600; }
+    .tri-kv .ok { color: var(--tone-good); font-weight: 600; }
+
     /* --- Pipeline jobs list card ------------------------------------------- */
     .pl-card { background: var(--bg-panel); border: 1px solid var(--border-primary); border-radius: 12px; overflow-x: auto; }
     .pl-head, .pl-row {
@@ -302,6 +311,16 @@ export async function renderModelsPage(): Promise<string> {
         </div>
         <div class="lc-body" id="syncBody"><div class="empty-msg">Loading…</div></div>
         <div class="sync-out" id="syncOut" hidden></div>
+      </div>
+    </div>
+
+    <div class="section" id="triageSection" hidden>
+      <div class="list-card">
+        <div class="lc-head">
+          <h3>Decision triage</h3>
+          <div class="lc-sub">The nightly pass over the wikis' open question cards, in the work map's tick. Read from the config now and the nightly log; nothing here runs it.</div>
+        </div>
+        <div class="lc-body" id="triageBody"><div class="empty-msg">Loading…</div></div>
       </div>
     </div>
 
@@ -1035,6 +1054,44 @@ export async function renderModelsPage(): Promise<string> {
       } catch (e) { /* leave the last good render */ }
     }
 
+    // ---- Decision triage card ----------------------------------------------
+    // Its own fetch, like the sync card. A 404 (nais drops the wiki tool group) hides it.
+    function triAt(ms) {
+      return new Date(ms).toLocaleString('nb-NO', { timeZone: 'Europe/Oslo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    }
+    function renderTriage(data) {
+      var section = document.getElementById('triageSection');
+      var body = document.getElementById('triageBody');
+      if (!section || !body) return;
+      if (!data || !data.pass) { section.hidden = true; return; }
+      section.hidden = false;
+      var p = data.pass;
+      var rows = [];
+      rows.push(['Pass', p.on ? '<span class="ok">on</span>' : '<span class="warn">off</span> (' + esc(p.why || '') + ')']);
+      rows.push(['Model call', p.modelOff
+        ? '<span class="warn">off</span> (NIGHTLY_MODEL_OFF) · would use ' + esc(p.model)
+        : 'on · ' + esc(p.model)]);
+      rows.push(['Covers', p.covered.length ? p.covered.map(esc).join(', ') : 'none']);
+      rows.push(['Skips', p.skipped.length ? p.skipped.map(function (s) { return esc(s.wiki) + ' (' + esc(s.reason) + ')'; }).join(' · ') : 'none']);
+      rows.push(['Schedule', 'after ' + String(p.hour).padStart(2, '0') + ':00 Oslo, 20 h after the last success, hourly check']);
+      rows.push(['Last runs', data.wikis.length ? data.wikis.map(function (w) {
+        var r = w.lastRun;
+        var next = p.on && w.nextDueAt ? ' · next ~' + esc(triAt(w.nextDueAt)) : '';
+        return esc(w.wiki) + ': ' + (r ? esc(triAt(r.at)) + ' ' + esc(r.outcome) + (r.reason ? ' (' + esc(r.reason) + ')' : '') + ', ' + esc(String(r.cards)) + ' cards, ' + esc(String(r.codeFacts)) + ' with code facts' : 'no run yet') + next;
+      }).join('<br>') : 'none']);
+      var missing = data.wikis.filter(function (w) { return w.reposNotFound.length; });
+      rows.push(['Repos not found', missing.length ? missing.map(function (w) {
+        return esc(w.wiki) + ': ' + w.reposNotFound.map(function (r) { return '<span title="' + esc(r.reason || '') + '">' + esc(r.repo) + '</span>'; }).join(', ');
+      }).join('<br>') : 'none']);
+      body.innerHTML = '<dl class="tri-kv" id="triageKv">' + rows.map(function (r) { return '<dt>' + r[0] + '</dt><dd>' + r[1] + '</dd>'; }).join('') + '</dl>';
+    }
+    async function loadTriage() {
+      try {
+        var res = await fetch('/api/wiki/decision-triage/overview');
+        renderTriage(res.ok ? await res.json() : null);
+      } catch (e) { /* leave the last good render */ }
+    }
+
     async function loadSync() {
       try {
         var data = await fetch('/api/sync/status').then(r => r.json());
@@ -1097,6 +1154,8 @@ export async function renderModelsPage(): Promise<string> {
     document.getElementById('syncDryBtn').addEventListener('click', function (e) { runSyncPost('?dry-run=1', e.target, 'Checking…'); });
     loadSync();
     setInterval(loadSync, 60000);
+    loadTriage();
+    setInterval(loadTriage, 300000);
     // The ledger is rebuilt by claude-usage on its own cadence; a 5-min poll is
     // plenty and keeps the ~170 KB upstream payload off a per-minute loop.
     loadUsage();

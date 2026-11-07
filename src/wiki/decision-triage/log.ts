@@ -12,7 +12,8 @@ import path from "node:path";
 import { fileStateStore, type WorkMapStateStore } from "../work-map/state.ts";
 import type { CardLine, LogLine, RunLine } from "./schema.ts";
 
-export const DECISION_TRIAGE_DIR = path.join(homedir(), ".muninn", "decision-triage");
+/** `DECISION_TRIAGE_DIR` moves it (the e2e specs seed a log in a temp dir); read once at load. */
+export const DECISION_TRIAGE_DIR = process.env.DECISION_TRIAGE_DIR?.trim() || path.join(homedir(), ".muninn", "decision-triage");
 
 const safeName = (name: string) => name.toLowerCase().replace(/[^a-z0-9._-]/g, "_");
 
