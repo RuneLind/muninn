@@ -542,11 +542,17 @@ function flag(argv: string[], name: string): string[] {
   return out;
 }
 
-/** One file alone in its own `bun test` process, wall clock. */
-async function timeAlone(file: string): Promise<{ seconds: number; code: number; output: string }> {
+export interface AloneRun {
+  seconds: number;
+  code: number;
+  output: string;
+}
+
+/** One file alone in its own `bun test` process, wall clock. `argv` and `timeoutMs` are for tests. */
+export async function timeAlone(file: string, opts: { argv?: string[]; timeoutMs?: number } = {}): Promise<AloneRun> {
   const t0 = performance.now();
-  const proc = Bun.spawn(["bun", "test", file], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => proc.kill("SIGKILL"), ALONE_TIMEOUT_MS);
+  const proc = Bun.spawn(opts.argv ?? ["bun", "test", file], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+  const timer = setTimeout(() => proc.kill("SIGKILL"), opts.timeoutMs ?? ALONE_TIMEOUT_MS);
   const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   clearTimeout(timer);
   return { seconds: (performance.now() - t0) / 1000, code, output: `${out}${err}` };
@@ -649,20 +655,28 @@ async function cmdChanged(argv: string[]): Promise<number> {
   return problems.length === 0 ? 0 : 1;
 }
 
+/** The timing table `refresh` writes from its runs, and the files that failed. */
+export function refreshTimings(runs: readonly { file: string; run: AloneRun }[]): { seconds: Record<string, number>; failed: string[] } {
+  const seconds: Record<string, number> = {};
+  const failed: string[] = [];
+  for (const { file, run } of runs) {
+    seconds[file] = Math.round(run.seconds * 10) / 10;
+    if (run.code !== 0) failed.push(file);
+  }
+  return { seconds, failed };
+}
+
 async function cmdRefresh(): Promise<number> {
   const { tree, links } = loadChain();
   const files = [...new Set(links.flatMap((l) => expandLink(l.args, tree.allTestFiles)))].sort();
-  const seconds: Record<string, number> = {};
-  const failed: string[] = [];
+  const runs: { file: string; run: AloneRun }[] = [];
   for (const [i, f] of files.entries()) {
     const r = await timeAlone(f);
-    seconds[f] = Math.round(r.seconds * 10) / 10;
-    console.log(`[${i + 1}/${files.length}] ${seconds[f]!.toFixed(1).padStart(6)} s${r.code === 0 ? "" : `  exit ${r.code}`}  ${f}`);
-    if (r.code !== 0) {
-      failed.push(f);
-      console.log(tail(r.output));
-    }
+    runs.push({ file: f, run: r });
+    console.log(`[${i + 1}/${files.length}] ${r.seconds.toFixed(1).padStart(6)} s${r.code === 0 ? "" : `  exit ${r.code}`}  ${f}`);
+    if (r.code !== 0) console.log(tail(r.output));
   }
+  const { seconds, failed } = refreshTimings(runs);
   const sha = process.env.GITHUB_SHA ?? Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: ROOT }).stdout.toString().trim();
   const source = `refresh: each file alone, wall clock, on ${process.env.GITHUB_ACTIONS ? "a CI runner" : hostname()} at ${sha.slice(0, 8)}, ${new Date().toISOString().slice(0, 10)}`;
   writeFileSync(TIMINGS_PATH, JSON.stringify({ source, seconds }, null, 2) + "\n");
