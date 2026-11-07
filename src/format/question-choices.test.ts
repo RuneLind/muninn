@@ -81,7 +81,12 @@ describe("parseQuestionChoices", () => {
 
   test("a qualified recommendation takes its leading choice and keeps the qualifier in the why", () => {
     const r = parseQuestionChoices("**Q?**\n\n- **A:** x\n- **B:** y\n\n**Recommendation: A, with B meanwhile.** z", ["A", "B"])!;
-    expect(r.recommendation).toEqual({ letter: "A", why: "A, with B meanwhile. z" });
+    expect(r.recommendation).toEqual({ letter: "A", why: "with B meanwhile. z" });
+  });
+
+  test("the letter follows the card's own recommendation rule: a quoted choice counts", () => {
+    const r = parseQuestionChoices("**Q?**\n\n- **A:** x\n- **B:** y\n\n**Recommendation: «B».** z", ["A", "B"])!;
+    expect(r.recommendation).toEqual({ letter: "B", why: "z" });
   });
 
   test("prose after the rows, before the recommendation, refuses the shape", () => {

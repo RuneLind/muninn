@@ -71,13 +71,6 @@ export interface InboxStructured {
   recommendation: { letter: string; why: string } | null;
 }
 
-/** Markdown to inline HTML: the renderer's output without a wrapping `<p>`. */
-const inlineHtml = (md: string) => {
-  const html = formatWebHtml(md).trim();
-  const p = /^<p>([^]*)<\/p>$/.exec(html);
-  return p && !p[1]!.includes("<p>") ? p[1]! : html;
-};
-
 /** The card body's question, rendered rest and choice rows, as the inbox shows them. */
 export function renderInboxBody(body: string, choices: readonly string[]): Pick<InboxCard, "question" | "bodyHtml" | "structured"> {
   const { question, rest } = splitQuestionLine(body);
@@ -87,7 +80,7 @@ export function renderInboxBody(body: string, choices: readonly string[]): Pick<
     bodyHtml: formatWebHtml(rest).trim(),
     structured: parsed && {
       context: formatWebHtml(parsed.context).trim(),
-      rows: parsed.rows.map((r) => ({ letter: r.letter, label: inlineHtml(r.label), why: inlineHtml(r.why) })),
+      rows: parsed.rows.map((r) => ({ letter: r.letter, label: formatWebHtml(r.label).trim(), why: formatWebHtml(r.why).trim() })),
       recommendation: parsed.recommendation && { letter: parsed.recommendation.letter, why: formatWebHtml(parsed.recommendation.why).trim() },
     },
   };

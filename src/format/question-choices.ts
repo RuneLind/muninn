@@ -6,6 +6,8 @@
  * at load.
  */
 
+import { parseRecommendation } from "./question.ts";
+
 export interface QuestionChoiceRow {
   letter: string;
   label: string;
@@ -56,10 +58,12 @@ export function parseQuestionChoices(body: string, choices: readonly string[]): 
     if (m && rows.length) {
       const said = m[1]!.trim();
       const why = [m[2]!, ...lines.slice(i + 1)].join("\n").trim();
-      // `A, with D meanwhile`: the leading choice is the letter, and the qualifier opens the why.
-      const lead = [...choices].sort((a, b) => b.length - a.length).find((c) => said.startsWith(c) && !/^[\p{L}\p{N}_]/u.test(said.slice(c.length)));
+      // The letter by the card's own rule, so «Recommended» marks what ★ and Take do.
+      const lead = parseRecommendation(line.trim(), choices);
       if (!lead) return null;
-      recommendation = { letter: lead, why: said === lead ? why : `${said}.${why ? ` ${why}` : ""}` };
+      // `A, with D meanwhile`: the qualifier after the letter opens the why («Why A» names the letter).
+      const qualifier = said.slice(said.indexOf(lead) + lead.length).replace(/^[\s»"'”’),;:—–-]+/u, "");
+      recommendation = { letter: lead, why: qualifier ? `${qualifier}.${why ? ` ${why}` : ""}` : why };
       break;
     }
     if (!rows.length) context.push(line);
