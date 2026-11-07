@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { renderWikiPage } from "../wiki-page.ts";
+import { renderWikiPage, getWikiAssets } from "../wiki-page.ts";
 import ts from "typescript";
 import { wikiClientScript } from "./wiki-client.ts";
 
@@ -15,8 +15,8 @@ import { wikiClientScript } from "./wiki-client.ts";
 test("wikiClientScript bundles to a non-empty IIFE", async () => {
   const js = await wikiClientScript();
   expect(js.length).toBeGreaterThan(1000);
-  // Bundled function names survive (minify: false) — a cheap sanity check that
-  // the real entrypoint, not an empty stub, got bundled.
+  // String literals survive minification — a cheap sanity check that the real
+  // entrypoint, not an empty stub, got bundled.
   expect(js).toContain("/api/wiki/pages");
   expect(js).toContain("/api/wiki/page?name=");
 });
@@ -29,41 +29,39 @@ test("wikiClientScript bundles the client-side mermaid enhancer", async () => {
   expect(js).toContain("https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js");
 });
 
-test("renderWikiPage embeds the bundled script and the pane skeleton", async () => {
+test("renderWikiPage links the hashed script and stylesheet and carries the pane skeleton", async () => {
   const html = await renderWikiPage();
+  const { js, css } = await getWikiAssets();
   expect(html).toContain("<!DOCTYPE html>");
   // Skeleton DOM ids the client script wires against.
   for (const id of ["wikiSearch", "wikiList", "wikiCount", "articleWrap", "connBody", "wikiSort"]) {
     expect(html).toContain(`id="${id}"`);
   }
-  // The bundle is inlined, not left as an empty <script>.
-  expect(html).toContain("/api/wiki/pages");
+  // Both assets are linked at their content-hashed URLs, and neither is inlined.
+  expect(js.path).toMatch(/^\/wiki\/assets\/wiki\.[0-9a-f]{16}\.js$/);
+  expect(css.path).toMatch(/^\/wiki\/assets\/wiki\.[0-9a-f]{16}\.css$/);
+  expect(html).toContain(`<script src="${js.path}"></script>`);
+  expect(html).toContain(`<link rel="stylesheet" href="${css.path}">`);
+  expect(html).not.toContain(js.body.slice(0, 2000));
+  expect(html).not.toContain(js.body.slice(-2000));
+  expect(html).not.toContain(css.body.slice(0, 2000));
+  // The hash is of the served bytes, and the script is the memoized bundle.
+  expect(js.body).toBe(await wikiClientScript());
+  expect(js.path).toContain(new Bun.CryptoHasher("sha256").update(js.body).digest("hex").slice(0, 16));
+  expect(css.path).toContain(new Bun.CryptoHasher("sha256").update(css.body).digest("hex").slice(0, 16));
+  // The stylesheet is the reader's (spot-check two of its rules).
+  expect(css.body).toContain(".wiki-layout {");
+  expect(css.body).toContain("--wiki-rail-w");
+  // A plain script tag after the inline globals: no defer/async, so it runs
+  // where the inline bundle did — after `window.__WIKI_*__` is set, before the
+  // presence script.
+  const at = html.indexOf(`<script src="${js.path}">`);
+  expect(html.lastIndexOf("window.__WIKI_FIND_ROWS__", at)).toBeGreaterThan(0);
+  expect(html.indexOf("wikiPresence", at)).toBeGreaterThan(at);
   // The old local esc() helper is gone (replaced by the shared escHtml).
   expect(html).not.toContain("function esc(s)");
-  // No askBot ⇒ no "Answered by" line in the Ask tab.
+  // No askBot => no "Answered by" line in the Ask tab.
   expect(html).not.toContain("Answered by");
-});
-
-/**
- * The reader is an INLINED bundle: whatever the entrypoint transitively imports
- * lands inside the page's own <script> tag, and a string literal containing
- * `</script>` closes that tag mid-bundle — the browser then runs a truncated
- * script ("Unexpected end of input") and the reader is blank. Measured when
- * `wiki-embed.ts` imported `EXPLAINER_SANDBOX` from `explainer-bridge.ts`,
- * whose `EXPLAINER_BRIDGE_SCRIPT` is exactly such a string: every e2e spec
- * red. The constant lives in `explainer-sandbox.ts` for that reason, and this
- * pins the property on the page as served rather than on any one import.
- */
-test("the inlined reader bundle never carries a literal </script>", async () => {
-  const js = await wikiClientScript();
-  expect(js).not.toContain("</script>");
-  // …and the page as served keeps the entrypoint's LAST statement inside the
-  // tag that the bundle opened — the property the browser actually depends on.
-  const html = await renderWikiPage();
-  const tail = js.slice(-60);
-  const at = html.indexOf(tail);
-  expect(at).toBeGreaterThan(0);
-  expect(html.slice(html.lastIndexOf("<script", at), at)).not.toContain("</script>");
 });
 
 test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
@@ -83,7 +81,7 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
   expect(fallback).toContain("research-bot fallback");
 });
 
-// A size pin, so growth of the bundle every /wiki load inlines is a decision
+// A size pin, so growth of the bundle every /wiki load fetches is a decision
 // rather than drift. Measured 1,089,983 bytes (272,938 gzipped) on 2026-10-20;
 // raise the bound in the PR that needs it. 2026-10-30: the effort page (work map
 // P3) took it from 1,281,098 to 1,301,295 bytes (322,578 → 327,890 gzipped).
@@ -103,7 +101,10 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-07: the left pane in its own module behind a port (wiki-browser split C2)
 // took it from 1,428,731 to 1,433,009 bytes (359,172 → 360,612 gzipped); the triage
 // status line and its Details table (visibility PR 2) took it to 1,436,421.
-const WIKI_CLIENT_MAX_BYTES = 1_437_000;
+// 2026-11-07: served as a hashed asset and built with `minify: true` (arch review
+// 2026-11 B3): 1,436,421 -> 806,603 bytes (361,526 -> 271,805 gzipped). Every
+// line above counts the unminified bundle; this pin and later ones the minified.
+const WIKI_CLIENT_MAX_BYTES = 807_500;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

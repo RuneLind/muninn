@@ -4670,4 +4670,50 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
     expect(first).toContain('window.__WIKI_FIND_SELF__ = "aliasfirst"');
     expect(first).toContain('window.__WIKI_FIND_ROWS__ = "aliasfirst"');
   });
+
+  // B3 (arch review 2026-11): the page links its script and stylesheet at
+  // content-hashed URLs instead of inlining ~1.8 MB, and the route serves them.
+  test("the served page links both assets, inlines neither, and the route serves those URLs", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js, css } = await getWikiAssets();
+    const html = await (await app.request("/wiki?wiki=aliasfirst")).text();
+    expect(html).toContain(`<script src="${js.path}"></script>`);
+    expect(html).toContain(`<link rel="stylesheet" href="${css.path}">`);
+    expect(html).not.toContain(js.body.slice(0, 2000));
+    expect(html).not.toContain(css.body.slice(0, 2000));
+    // The globals still precede the bundle: it reads them at boot.
+    expect(html.indexOf("window.__WIKI_FIND_ROWS__")).toBeLessThan(html.indexOf(js.path));
+    expect(Buffer.byteLength(html)).toBeLessThan(100_000);
+    for (const [asset, type] of [[js, "text/javascript"], [css, "text/css"]] as const) {
+      const res = await app.request(asset.path);
+      expect(res.status, asset.path).toBe(200);
+      expect(res.headers.get("content-type")).toContain(type);
+      expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+      expect(res.headers.get("content-encoding")).toBeNull();
+      expect(await res.text()).toBe(asset.body);
+    }
+  });
+
+  test("an asset gzips for a client that accepts it, and inflates to the same bytes", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js } = await getWikiAssets();
+    const res = await app.request(js.path, { headers: { "Accept-Encoding": "gzip, deflate, br" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-encoding")).toBe("gzip");
+    expect(res.headers.get("vary")).toBe("Accept-Encoding");
+    expect(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await res.arrayBuffer())))).toBe(js.body);
+  });
+
+  test("a wrong or stale asset hash is a 404 that is not cached", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js, css } = await getWikiAssets();
+    const stale = js.path.replace(/wiki\.[0-9a-f]+\.js$/, "wiki.0000000000000000.js");
+    expect(stale).not.toBe(js.path);
+    // A real hash with the other extension names no asset either.
+    for (const p of [stale, js.path.replace(/\.js$/, ".css"), css.path.replace(/\.css$/, ".js"), "/wiki/assets/x"]) {
+      const res = await app.request(p);
+      expect(res.status, p).toBe(404);
+      expect(res.headers.get("cache-control"), p).toBe("no-store");
+    }
+  });
 });

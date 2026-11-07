@@ -343,6 +343,17 @@ describe("the wiki read slice in the user zone", () => {
     }
   });
 
+  test("the reader's hashed assets: one segment under /wiki/assets/, GET/HEAD, slice only", () => {
+    const asset = "/wiki/assets/wiki.0123456789abcdef.js";
+    expect(asSliceUser(asset)).toEqual({ allowed: true, zone: "user", reason: "wiki read slice" });
+    expect(asSliceUser(asset, "HEAD").allowed).toBe(true);
+    expect(asSliceUser(asset, "POST").allowed).toBe(false);
+    expect(asUser(asset).allowed).toBe(false);
+    for (const p of ["/wiki/assets/", "/wiki/assets", "/wiki/assets/a/b.js", "/wiki/assetsx/wiki.js"]) {
+      expect(asSliceUser(p).allowed, p).toBe(false);
+    }
+  });
+
   test("the user zone itself carries no wiki path, and the slice entries are exact", () => {
     expect(USER_ZONE_PATHS.filter((p) => p.startsWith("/api/wiki") || p.startsWith("/wiki"))).toEqual([]);
     for (const path of ["/api/wiki/pages/x", "/wiki/issues", "/wiki/gardener", "/api/wiki/page/provenance/x", "/api/wiki/related/x", "/api/wiki/decision-chain/x", "/wiki/"]) {

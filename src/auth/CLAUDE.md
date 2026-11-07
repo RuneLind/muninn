@@ -1013,7 +1013,9 @@ is the one surface the user zone is written around.
    dashboard routes the composed chat page fetches. All but the two
    `/api/search/` reads were already owner-guarded, so this is enumeration
    rather than new protection. **Plus, under `MUNINN_PROFILE=nais` only, the
-   wiki read slice** (`WIKI_READ_SLICE_PATHS`: `/wiki` and
+   wiki read slice** (`WIKI_READ_SLICE_PATHS`: `/wiki`, the page's hashed
+   script and stylesheet `/wiki/assets/:file` — a one-segment pattern, never a
+   prefix — and
    `/api/wiki/{pages,page,page/provenance,related,decision-chain,html,graph}`, GET/HEAD only),
    plus the slice's one write: GET/HEAD and POST on the exact path
    `/api/wiki/answers` (`WIKI_READ_SLICE_METHOD_ENTRIES` — rows of `{methods,
