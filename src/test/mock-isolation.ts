@@ -77,6 +77,37 @@ export function isPlaywrightSpec(file: string): boolean {
  */
 export const SINGLE_PROCESS_SCRIPTS: ReadonlySet<string> = new Set(["test:coverage"]);
 
+/**
+ * Test files that need a process of their own for a reason other than
+ * `mock.module`: a file that installs happy-dom's `GlobalWindow` puts its globals
+ * (`Event`, `URL`, `fetch`, timers, ~500 keys) over Bun's for the life of the
+ * process. `src/dashboard/views/wiki-boot/` is one by directory, for a second
+ * reason too: `boot()` leaves module state behind (initChatOptions's dialog
+ * listeners and deps), which broke 14 `wiki-chat-options.test.ts` tests run in
+ * one process with it. Elsewhere, a file is one by content ({@link HAPPY_DOM_GLOBALS}).
+ * The same rule as a mock file applies — alone in every link that runs it, and
+ * run by some chain — so it is read through the same links.
+ */
+export const OWN_PROCESS_DIRS = ["src/dashboard/views/wiki-boot/"] as const;
+
+/**
+ * A static import of happy-dom's `GlobalWindow` at the start of a line, so one
+ * quoted in a fixture string is not one (a private `new Window()` installs
+ * nothing global). Detected: a named import (`{ GlobalWindow }`, also across
+ * lines), an aliased one (`{ GlobalWindow as GW }`) and default plus named
+ * (`import HappyDom, { GlobalWindow }`). NOT detected: a namespace import
+ * (`import * as hd`), a dynamic `import("happy-dom")`, a re-export, a subpath
+ * (`happy-dom/lib/...`), `@happy-dom/global-registrator`, and a non-test helper
+ * module that imports `GlobalWindow` and is imported by a test — the source of
+ * each test file is read, not its import graph.
+ */
+export const HAPPY_DOM_GLOBALS = /^\s*import\s*(?:[\w$]+\s*,\s*)?\{[^}]*\bGlobalWindow\b[^}]*\}\s*from\s*["']happy-dom["']/m;
+
+/** The test files under {@link OWN_PROCESS_DIRS}, plus any whose source imports `GlobalWindow` from happy-dom. */
+export function ownProcessFiles(allTestFiles: readonly string[], readSource: (file: string) => string): string[] {
+  return allTestFiles.filter((f) => OWN_PROCESS_DIRS.some((d) => f.startsWith(d)) || HAPPY_DOM_GLOBALS.test(readSource(f)));
+}
+
 export interface BunTestLink {
   script: string;
   /** The link's positional arguments, flags removed. */

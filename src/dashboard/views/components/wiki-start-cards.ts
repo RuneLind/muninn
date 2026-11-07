@@ -90,7 +90,7 @@ let deps: StartCardsDeps = {
   resolvePageName: () => null,
 };
 
-/** Wire the cards to the shell. Called once, at `wiki-browser.ts` module scope. */
+/** Wire the cards to the shell. Called once, from `boot()` in `wiki-browser.ts`. */
 export function initStartCards(d: StartCardsDeps): void {
   deps = d;
   initInbox((focusSel, passive) => {

@@ -2569,8 +2569,7 @@ candidate — the block is about links, and the rail already groups the series.
 ### Rendering
 
 `relatedSectionHtml` (`views/components/wiki-related-view.ts` — pure string
-building, in its own module because `wiki-browser.ts` touches `document` at
-import time and `bun test` cannot load it) paints the block at the top of
+building, in its own module so `bun test` loads it without a DOM) paints the block at the top of
 `renderConnections`. Rows are the panel's own `.wiki-conn-item`, so the delegated
 `[data-page]` handler opens them and there is no second click path; the why line
 is a second line inside `.wiki-conn-text`, with each reason in an `<em>` and the
@@ -3881,9 +3880,9 @@ new article. **`prs` renders nothing at all**: the frontmatter PR row ships with
 campaign 2, and a half-built control is worse than none.
 
 Every string and every fragment of markup lives in **one pure module** — no DOM,
-no import from `wiki-browser.ts` — because that entrypoint touches `document` at
-import time and `bun test` cannot load it, so anything shaped there is provable
-only through Playwright. `costLine` has **nine outcomes**, enumerated in a table
+no import from `wiki-browser.ts` — because that module's code needs a DOM (it is
+importable since `boot()`, and `wiki-shell-boot.test.ts` boots it in happy-dom),
+so anything shaped there is costly to prove. `costLine` has **nine outcomes**, enumerated in a table
 test, and the pair that must never collapse is *asked and unreachable*
 ("claude-usage unreachable, cost unknown") against *never asked and unconfigured*
 ("no claude-usage on this host") — plus the third the server's `asked` flag exists

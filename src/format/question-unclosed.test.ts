@@ -528,6 +528,8 @@ describe("question-unclosed.ts stays server-only", () => {
   test("no browser entry reaches it", async () => {
     const root = resolve(import.meta.dir, "..");
     const entries = [...new Bun.Glob("**/*-{browser,client}.ts").scanSync(root)].map((f) => resolve(root, f));
+    // The glob matches the /wiki entry `wiki-shell-client.ts` and, by its name,
+    // the shell module `wiki-browser.ts` it imports; the line below checks the latter.
     expect(entries).toContain(resolve(root, "dashboard/views/components/wiki-browser.ts"));
     for (const entry of entries) expect([entry, (await graph(entry)).has(TARGET)]).toEqual([entry, false]);
   });

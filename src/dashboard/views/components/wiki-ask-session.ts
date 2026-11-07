@@ -1,8 +1,8 @@
 /**
  * Pure, side-effect-free (DOM-free) helpers for persisting the /wiki reader's
  * **Ask** session across page reloads via localStorage. Split out of
- * `wiki-browser.ts` (which runs DOM code at module load, so it can't be imported
- * in tests) so the serialize/validate logic can be unit-tested directly — the
+ * `wiki-browser.ts` (which then ran DOM code at module load; it is importable
+ * since `boot()`, but needs a DOM) so the serialize/validate logic can be unit-tested directly — the
  * same split rationale as `wiki-explain.ts`, `wiki-filter.ts`, `wiki-ask-render.ts`.
  *
  * The client stores the last N committed Ask/Explain turns under

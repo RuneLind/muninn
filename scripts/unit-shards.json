@@ -274,7 +274,8 @@
       "src/vimeo/summarizer.test.ts",
       "src/watchers/x.test.ts",
       "views-pages",
-      "watchers"
+      "watchers",
+      "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts"
     ]
   ]
 }

@@ -190,7 +190,7 @@ jobs:
   # One status named `test` for the unit chain. Three green shards are not
   # enough: a link on no shard, or on two, leaves every shard green. This
   # checks the merged junit files: every file the chain runs ran exactly once,
-  # every `mock.module` file was alone in its process, a link that wrote no
+  # every `mock.module` and own-process file was alone in its process, a link that wrote no
   # junit is named as a crash, and every shard finished `success`.
   # `!cancelled()`, not `always()`: a superseded PR run would report every
   # file missing.
@@ -352,10 +352,12 @@ jobs:
           grep -q "expected true or false" bogus.log \
             || { echo "::error::the build failed, but not on the build-arg check"; cat bogus.log; exit 1; }
 
-  # The Playwright suite, split across four runners. One serial run took 13–15
-  # min and set the wall clock of every push; four shards each run a quarter of
-  # it. Each shard still runs `workers: 1` and `retries: 0`
-  # (`playwright.config.ts` says why): the parallelism comes from separate
+  # The Playwright suite, split across six runners. One serial run took 13–15
+  # min and set the wall clock of every push; six shards each run a sixth of
+  # it. Six, not four, since the unit job moved to its own three shards and the
+  # e2e shards became the critical path; a run peaks at 12 concurrent jobs.
+  # Each shard still runs `workers: 1` and `retries: 0` (`playwright.config.ts`
+  # says why): the parallelism comes from separate
   # runners, so no host is more loaded than one serial run was.
   # `scripts/e2e-shards.ts` packs whole spec files onto shards by the times in
   # `e2e/shard-timings.json`; `--shard=i/n` balances by test count and left one
@@ -366,7 +368,7 @@ jobs:
       # Every shard reports, so one red does not hide another.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -397,7 +399,7 @@ jobs:
       # holding a live token fights the production bot for Telegram.
       CI: "true"
       # One name per shard, so the fan-in's download into one directory does not
-      # overwrite three of the four reports.
+      # overwrite all but one of the reports.
       PLAYWRIGHT_BLOB_OUTPUT_NAME: report-${{ matrix.shard }}.zip
     steps:
       - uses: actions/checkout@v4
@@ -457,7 +459,7 @@ jobs:
           if-no-files-found: ignore
           overwrite: true
 
-  # One status named `e2e` for the whole suite. Four green shards are not
+  # One status named `e2e` for the whole suite. Six green shards are not
   # enough on their own: a file in no shard's list, or in two, still leaves
   # every shard green. This job compares the merged report with
   # `playwright test --list` — every test ran exactly once — and fails on any
