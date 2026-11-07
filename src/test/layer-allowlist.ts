@@ -7,10 +7,18 @@ export function parseAllowlist(text: string): string[] {
   return text.split("\n").map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#"));
 }
 
-/** Entries the head's allowlist has that the base's does not. */
-export function addedAllowlistLines(baseText: string, headText: string): string[] {
-  const base = new Set(parseAllowlist(baseText));
-  return [...new Set(parseAllowlist(headText).filter((l) => !base.has(l)))].sort();
+/** Entry counts of both lists, and the lines each has that the other lacks (a move shows up in both). */
+export function allowlistDelta(baseText: string, headText: string): { base: number; head: number; added: string[]; removed: string[] } {
+  const b = parseAllowlist(baseText);
+  const h = parseAllowlist(headText);
+  const bs = new Set(b);
+  const hs = new Set(h);
+  return {
+    base: b.length,
+    head: h.length,
+    added: [...hs].filter((l) => !bs.has(l)).sort(),
+    removed: [...bs].filter((l) => !hs.has(l)).sort(),
+  };
 }
 
 /** What `git` returned for the base: a missing commit, a commit without the list, or its text. */
@@ -34,13 +42,17 @@ export function baseCheckVerdict(ref: string, relPath: string, base: BaseAllowli
   if (base.kind === "bad-ref") return { code: 2, lines: [`--check-base: ${ref} is not a commit`] };
   // Only the PR that introduces the list meets this.
   if (base.kind === "no-file") return { code: 0, lines: [`--check-base: ${ref} has no ${relPath}; nothing to compare`] };
-  const added = addedAllowlistLines(base.text, headText);
-  if (added.length === 0) return { code: 0, lines: [`--check-base: ${relPath} adds no entry over ${ref}`] };
+  // The ratchet is the count: a moved file renames its entries without adding upward imports.
+  const d = allowlistDelta(base.text, headText);
+  const sign = d.head - d.base > 0 ? "+" : "";
+  const detail = [...d.added.map((l) => `  added: ${l}`), ...d.removed.map((l) => `  removed: ${l}`)];
+  const counts = `${d.base} -> ${d.head} entries (${sign}${d.head - d.base}) over ${ref}`;
+  if (d.head <= d.base) return { code: 0, lines: [`--check-base: ${relPath} ${counts}`, ...detail] };
   return {
     code: 1,
     lines: [
-      `::error::${relPath} adds ${added.length} upward import(s) over ${ref}. The list only shrinks: remove the import, or merge it as a reviewed exception whose reason the PR body states.`,
-      ...added.map((l) => `  added: ${l}`),
+      `::error::${relPath} grows ${counts}. The list only shrinks: remove the import, or merge it as a reviewed exception whose reason the PR body states.`,
+      ...detail,
     ],
   };
 }

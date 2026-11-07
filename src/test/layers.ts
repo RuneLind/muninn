@@ -6,7 +6,7 @@
  * matches, so a new directory is classified here first. Today's upward imports
  * sit in `scripts/layer-allowlist.txt`, which may only shrink: the test fails on a
  * stale entry (`bun scripts/layer-ratchet.ts --update` removes it), and CI's
- * `--check-base` step fails a PR whose list adds an entry.
+ * `layer-ratchet` job fails a PR whose list has more entries than its base's.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";

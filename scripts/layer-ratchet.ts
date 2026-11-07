@@ -4,12 +4,14 @@
  *   bun scripts/layer-ratchet.ts                    violations by layer pair, and the list's drift
  *   bun scripts/layer-ratchet.ts --update           drop list lines that are no longer violations (never adds one)
  *   bun scripts/layer-ratchet.ts --json             the report as JSON
- *   bun scripts/layer-ratchet.ts --check-base <ref> fail when the list has an entry `<ref>`'s list lacks
+ *   bun scripts/layer-ratchet.ts --check-base <ref> fail when the list has more entries than `<ref>`'s
  *
  * `layer-direction.test.ts` fails on an upward import the list lacks and on a stale
- * entry; CI runs `--check-base` on every pull request against its base, so a PR
- * that adds an upward import together with its list line is still red. Such a line
- * is a reviewed exception: the PR body says why, and it lands only past that red step.
+ * entry. CI's `layer-ratchet` job runs `--check-base` on every pull request against the
+ * base its merge commit was built on, so a PR that adds an upward import together with
+ * its list line is still red there. The count is the ratchet: a moved file renames its
+ * entries and passes. A growth is a reviewed exception: the PR body says why, and only
+ * the `layer-ratchet` status is red.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";

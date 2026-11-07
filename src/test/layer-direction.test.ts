@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "./temp-dir.ts";
-import { addedAllowlistLines, baseCheckVerdict, readBaseAllowlist, type GitRun } from "./layer-allowlist.ts";
+import { baseCheckVerdict, readBaseAllowlist, type GitRun } from "./layer-allowlist.ts";
 import {
   checkAllowlist,
   countByLayerPair,
@@ -38,7 +38,7 @@ describe("the live tree", () => {
     expect(check.unlisted).toEqual([]);
   });
 
-  test("no stale entries: a fixed edge leaves the list (bun scripts/layer-ratchet.ts --update); CI's --check-base step fails a PR that adds one", () => {
+  test("no stale entries: a fixed edge leaves the list (bun scripts/layer-ratchet.ts --update); CI's layer-ratchet job fails a PR whose list grows", () => {
     expect(check.stale).toEqual([]);
   });
 
@@ -151,13 +151,6 @@ describe("allowlist", () => {
   test("a clean list reports nothing", () => {
     expect(checkAllowlist(["a -> b", "c -> d"], ["c -> d", "a -> b"])).toEqual({ unlisted: [], stale: [], format: [] });
   });
-  test("added lines: what the head lists that the base does not, comments and blanks ignored, trimmed", () => {
-    const base = "# header\na -> b\nc -> d\n";
-    expect(addedAllowlistLines(base, "# header\na -> b\nc -> d\n")).toEqual([]);
-    expect(addedAllowlistLines(base, "# new header text\n\na -> b\n")).toEqual([]);
-    expect(addedAllowlistLines(base, "a -> b\n  c -> d  \n# x -> y\n")).toEqual([]);
-    expect(addedAllowlistLines(base, "a -> b\nb -> z\nc -> d\ne -> f\n")).toEqual(["b -> z", "e -> f"]);
-  });
   test("shrink removes fixed lines and never adds a new violation", () => {
     expect(shrinkAllowlist(["c -> d", "a -> b", "a -> b", "x -> y"], ["a -> b", "c -> d", "new -> edge"])).toEqual(["a -> b", "c -> d"]);
   });
@@ -169,5 +162,61 @@ describe("allowlist", () => {
   });
   test("--update's rewrite keeps mid-list comments and blank lines where they are", () => {
     expect(rewriteAllowlist("# head\n\na -> b\n# group two\nc -> d\nx -> y\n", ["a -> b", "c -> d"])).toBe("# head\n\na -> b\n# group two\nc -> d\n");
+  });
+});
+
+describe("--check-base: the list's entry count may not grow over the base", () => {
+  const rel = "scripts/layer-allowlist.txt";
+  const base = { kind: "text", text: "# head\na -> b\nc -> d\n" } as const;
+  const verdict = (head: string) => baseCheckVerdict("BASE", rel, base, head);
+
+  test("one more entry: exit 1, with the count and the added edge", () => {
+    const v = verdict("# head\na -> b\nc -> d\ne -> f\n");
+    expect(v.code).toBe(1);
+    expect(v.lines.join("\n")).toContain("2 -> 3 entries");
+    expect(v.lines).toContain("  added: e -> f");
+  });
+  test("a rename or move at the same count: exit 0, the lines shown as information", () => {
+    const v = verdict("# head\na -> b\nc2 -> d\n");
+    expect(v.code).toBe(0);
+    expect(v.lines).toContain("  added: c2 -> d");
+    expect(v.lines).toContain("  removed: c -> d");
+  });
+  test("fewer entries, some of them new: exit 0", () => {
+    expect(verdict("# head\nx -> y\n").code).toBe(0);
+  });
+  test("comments, blank lines and indentation are not entries", () => {
+    const v = verdict("# new header\n\n# more\na -> b\n  c -> d  \n");
+    expect(v.code).toBe(0);
+    expect(v.lines.filter((l) => l.startsWith("  "))).toEqual([]);
+  });
+  test("a base without the list: exit 0", () => {
+    expect(baseCheckVerdict("BASE", rel, { kind: "no-file" }, "a -> b\n").code).toBe(0);
+  });
+  test("a ref that is not a commit: exit 2", () => {
+    expect(baseCheckVerdict("BASE", rel, { kind: "bad-ref" }, "a -> b\n").code).toBe(2);
+  });
+});
+
+describe("readBaseAllowlist maps git's answers", () => {
+  const git =
+    (revParse: number, show: number): GitRun =>
+    (args) =>
+      args[0] === "rev-parse" ? { exitCode: revParse, stdout: "" } : { exitCode: show, stdout: show === 0 ? "a -> b\n" : "" };
+  test("rev-parse fails: bad-ref; show fails: no-file; else the text", () => {
+    expect(readBaseAllowlist("R", "x.txt", git(1, 0))).toEqual({ kind: "bad-ref" });
+    expect(readBaseAllowlist("R", "x.txt", git(0, 128))).toEqual({ kind: "no-file" });
+    expect(readBaseAllowlist("R", "x.txt", git(0, 0))).toEqual({ kind: "text", text: "a -> b\n" });
+  });
+  test("asks for the ref as a commit and for the file at that ref", () => {
+    const calls: string[][] = [];
+    readBaseAllowlist("R", "x.txt", (a) => {
+      calls.push(a);
+      return { exitCode: 0, stdout: "" };
+    });
+    expect(calls).toEqual([
+      ["rev-parse", "--verify", "--quiet", "R^{commit}"],
+      ["show", "R:x.txt"],
+    ]);
   });
 });

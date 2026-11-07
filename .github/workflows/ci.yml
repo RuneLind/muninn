@@ -178,13 +178,6 @@ jobs:
           path: junit/
           retention-days: 7
           overwrite: true
-      # PR only: the import-direction allowlist only shrinks. `layer-direction.test.ts`
-      # cannot see a PR that adds an upward import AND its list line; this compares the
-      # list with the base's and fails on any added entry (a reviewed exception's PR body
-      # says why). Needs the base commit, which `fetch-depth: 0` above provides.
-      - name: The layer allowlist adds no entry
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && matrix.shard == 1 }}
-        run: bun scripts/layer-ratchet.ts --check-base ${{ github.event.pull_request.base.sha }}
       # PR only: each test file the PR adds or changes, alone, against a 10 s
       # bar (`scripts/unit-slow-allowlist.txt` lists the exceptions). On shard 1
       # because it has the full setup; after the links, so it adds no wait.
@@ -193,6 +186,34 @@ jobs:
         # Healthy files take seconds each; 15 min caps a PR with several 300 s kills.
         timeout-minutes: 15
         run: bun scripts/test-chain.ts changed origin/${{ github.base_ref }}
+
+  # PR only: the import-direction allowlist may not gain entries. `layer-direction.test.ts`
+  # cannot see a PR that adds an upward import AND its list line; this compares the
+  # list's entry count with the base's. Its own status, so a reviewed exception (the PR
+  # body says why) turns only this job red, never `test`. No install: the check path
+  # imports nothing outside the repo.
+  layer-ratchet:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: The layer allowlist does not grow
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # The PR checkout is a merge commit; its first parent is the base the tree was merged onto.
+        run: |
+          if git rev-parse --verify --quiet 'HEAD^2' > /dev/null; then
+            base='HEAD^1'
+          else
+            echo "HEAD is not a merge commit: comparing with the PR's base sha $BASE_SHA"
+            base="$BASE_SHA"
+          fi
+          bun scripts/layer-ratchet.ts --check-base "$base"
 
   # One status named `test` for the unit chain. Three green shards are not
   # enough: a link on no shard, or on two, leaves every shard green. This
