@@ -89,3 +89,5 @@ playwright-report/
 
 # `bun scripts/test-chain.ts run`: one junit file per unit-chain link.
 /junit/
+# `bun run test:par`: per-link logs and junit files.
+/.test-par/
