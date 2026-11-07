@@ -38,6 +38,7 @@ const PAGE = [
   q("O5", "", "Answered in text only?"),
   q("O6", ' to="Test Owner (T000001)|Someone Else (X999999)"', "For both?"),
   q("O7", "", "Ruled on the page?"),
+  q("O9", ' choices="A|B"', "**Which layout?**\n\nToday <script>alert(1)</script> every lane prints.\n\n- **A — lanes, empty folded:** the lanes **stay**.\n- **B — one list:** every card.\n\n**Anbefaling: A.** It fixes both faults."),
   "<DecisionLog>\n\n- **O7** — Decided in the meeting.\n\n</DecisionLog>\n",
 ].join("\n");
 /** Added after the commit, in a waiting lane: no commit, so the lane's since dates it. */
@@ -106,7 +107,7 @@ describe("GET /api/wiki/decision-inbox", () => {
     await answerFixtures();
     const body = await inbox(KODE);
     expect(body.wiki).toBe(KODE);
-    expect(laneOf(body)).toEqual({ O1: "ask", O2: "close", O3: "pass", O4: "ask", O5: "close", O6: "ask", O7: "close", O8: "ask" });
+    expect(laneOf(body)).toEqual({ O1: "ask", O2: "close", O3: "pass", O4: "ask", O5: "close", O6: "ask", O7: "close", O8: "ask", O9: "ask" });
     const o7 = body.cards.find((c) => c.id === "O7")!;
     expect(o7.hint).toEqual({ decision: null, decisionText: null, namedBy: null, word: "Decided", ownItem: "Decided in the meeting." });
     const o5 = body.cards.find((c) => c.id === "O5")!;
@@ -115,6 +116,34 @@ describe("GET /api/wiki/decision-inbox", () => {
     expect(o1.recommendation).toBe("A");
     expect(o1.title).toBe("Inbox cards");
     expect(body.cards.find((c) => c.id === "O6")!.targets).toEqual(["Test Owner (T000001)", "Someone Else (X999999)"]);
+  });
+
+  test("a card's body arrives rendered, without its question line, and read as choice rows", async () => {
+    const body = await inbox(KODE);
+    const o9 = body.cards.find((c) => c.id === "O9")!;
+    expect(o9.question).toBe("Which layout?");
+    expect(o9.body.startsWith("**Which layout?**")).toBe(true);
+    expect(o9.bodyHtml).not.toContain("**");
+    expect(o9.bodyHtml).not.toContain("Which layout?");
+    expect(o9.bodyHtml).not.toContain("<script>");
+    expect(o9.bodyHtml).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(o9.bodyHtml).toContain("<strong>stay</strong>");
+    expect(o9.structured).toEqual({
+      context: "Today &lt;script&gt;alert(1)&lt;/script&gt; every lane prints.",
+      rows: [
+        { letter: "A", label: "lanes, empty folded", why: "the lanes <strong>stay</strong>." },
+        { letter: "B", label: "one list", why: "every card." },
+      ],
+      recommendation: { letter: "A", why: "It fixes both faults." },
+    });
+    // No choice rows in the body: no structure, and a body with no bold line keeps its first line.
+    const o2 = body.cards.find((c) => c.id === "O2")!;
+    expect(o2.structured).toBeNull();
+    expect(o2.question).toBe("Answered by choice?");
+    expect(o2.bodyHtml).toBe("Answered by choice?");
+    const o1 = body.cards.find((c) => c.id === "O1")!;
+    expect([o1.question, o1.structured]).toEqual(["Ask me?", null]);
+    expect(o1.bodyHtml).toBe("<strong>Recommendation:</strong> A");
   });
 
   test("the added commit dates a card; one with no commit takes its lane's since and sorts first", async () => {

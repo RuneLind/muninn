@@ -2707,6 +2707,30 @@ export async function renderWikiPage(opts?: {
       white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; margin: 4px 0 8px; padding: 8px 10px;
       background: var(--bg-inset); border: 1px solid var(--border-secondary); border-radius: 8px; color: var(--text-secondary);
     }
+    .wiki-wi-rendered { white-space: pre-line; }
+    .wiki-wi-rendered :is(ul, ol) { margin: 4px 0; padding-left: 20px; white-space: normal; }
+    .wiki-wi-context { margin: 4px 0 8px; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-wi-empty { margin-top: 8px; }
+    .wiki-wi-choices { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
+    .wiki-wi-choice {
+      display: flex; align-items: baseline; gap: 8px; width: 100%; box-sizing: border-box; padding: 6px 10px; text-align: left;
+      font: inherit; color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border-secondary); border-radius: 8px;
+    }
+    button.wiki-wi-choice { cursor: pointer; }
+    button.wiki-wi-choice:hover:not(:disabled), button.wiki-wi-choice:focus-visible { border-color: var(--accent); }
+    button.wiki-wi-choice:disabled { opacity: .55; cursor: default; }
+    .wiki-wi-choice.rec { border-color: var(--tone-good); }
+    .wiki-wi-choice.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--bg-inset); }
+    .wiki-wi-letter {
+      flex: none; min-width: 1.6em; text-align: center; font-weight: 700; padding: 0 4px; border-radius: 6px;
+      background: var(--bg-inset); border: 1px solid var(--border-secondary);
+    }
+    .wiki-wi-choice-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--text-secondary); }
+    .wiki-wi-choice-text b { color: var(--text-primary); }
+    .wiki-wi-rec { flex: none; font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: var(--tint-success); color: var(--tone-good); }
+    .wiki-wi-why { margin: 0 0 8px; padding: 6px 10px; border-left: 3px solid var(--tone-good); border-radius: 0 8px 8px 0; background: var(--bg-inset); color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-wi-why > b:first-child { color: var(--text-primary); }
+    .wiki-wi-btn.small { font-size: 11.5px; padding: 2px 8px; }
     .wiki-wi-ev { margin: 0 0 8px; padding: 6px 10px; border-left: 3px solid var(--tone-good); border-radius: 0 8px 8px 0; background: var(--tint-success); color: var(--text-primary); }
     .wiki-wi-ev.warn { border-left-color: var(--tone-warn); background: var(--tint-warning); }
     .wiki-wi-quote { margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); }

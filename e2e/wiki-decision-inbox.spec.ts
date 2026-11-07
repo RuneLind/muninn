@@ -4,13 +4,15 @@
  * (`inbox.test.ts`) and the route against the test database
  * (`wiki-decision-inbox-db.test.ts`); what only a real page can hold:
  *
- *  1. The four lanes paint on the card with the right counts, «close?» and
- *     «ask you» open, «pass on» and «take the default» folded.
+ *  1. The lanes holding cards paint with the right counts, «close?» and
+ *     «ask you» open, «pass on» folded, the empty «take the default» in the one
+ *     «Nothing …» line; a wiki whose only lane is «take the default» opens it.
  *  2. An answer in place (a pick, then Answer) goes through `POST /api/wiki/answers`
  *     and the row leaves «ask you» for «close?»; «take the default» answers with
  *     the recommendation.
  *  3. A card the reader already answered offers the page, not a form (the 409 race is a unit test).
  *  4. The section is legible in the Light and Dark themes.
+ *  6. An opened card shows its choices as rows, rendered: no literal `**`.
  *  5. (P3b) Close previews the lines, writes them, and `/api/wiki/page` reads the
  *     close back; «Still open» hides a card across a reload until its evidence changes.
  *
@@ -55,7 +57,7 @@ const PAGE = [
   q("O7", "", "Ruled on the page?"),
   "<DecisionLog>\n\n- **O7** — Decided in the meeting.\n\n</DecisionLog>\n",
 ].join("\n");
-const OTHER_PAGE = `---\ntitle: Other cards\n---\n\n${q("O1", ' choices="A|B"', "**Default this?**\n\n**Recommendation:** B")}`;
+const OTHER_PAGE = `---\ntitle: Other cards\n---\n\n${q("O1", ' choices="A|B"', "**Default this?**\n\nThe context, **bold**.\n\n- **A — first way:** cheap.\n- **B — second way:** safe.\n\n**Recommendation: B.** It holds.")}`;
 
 function mapJson(wiki: string, runAtMs: number): string {
   return JSON.stringify({
@@ -143,13 +145,15 @@ async function openInbox(page: Page, wiki: string): Promise<void> {
 }
 
 test.describe.serial("the Decisions section", () => {
-  test("paints four lanes with their counts, the first two open", async ({ page }) => {
+  test("paints the lanes holding cards with their counts, the first two open, the empty one as a line", async ({ page }) => {
     await openInbox(page, KODE);
     await expect(count(page, "close")).toHaveText("3");
     await expect(count(page, "ask")).toHaveText("3");
     await expect(count(page, "pass")).toHaveText("1");
-    await expect(count(page, "default")).toHaveText("0");
-    for (const [l, open] of [["close", true], ["ask", true], ["pass", false], ["default", false]] as const) {
+    await expect(lane(page, "default")).toHaveCount(0);
+    await expect(page.locator("#wikiWorkInbox .wiki-wi-empty")).toHaveText("Nothing to take by default.");
+    await expect(page.locator("#wikiWorkInbox")).not.toContainText("None.");
+    for (const [l, open] of [["close", true], ["ask", true], ["pass", false]] as const) {
       expect(await lane(page, l).evaluate((d) => (d as HTMLDetailsElement).open)).toBe(open);
     }
     await expect(row(page, "close", "O5").locator(".wiki-wi-tag")).toHaveText("read it before closing");
@@ -182,13 +186,28 @@ test.describe.serial("the Decisions section", () => {
     await expect(count(page, "ask")).toHaveText("2");
   });
 
-  test("«take the default» answers with the recommendation", async ({ page }) => {
+  test("a default-only wiki opens that lane; its card shows choice rows; Take answers with the recommendation", async ({ page }) => {
     await openInbox(page, OTHER);
     await expect(count(page, "default")).toHaveText("1");
-    await lane(page, "default").locator(":scope > summary").click();
-    await row(page, "default", "O1").locator(".wiki-wi-row").click();
-    await row(page, "default", "O1").locator('[data-wi-act="take"]').click();
-    await expect(count(page, "default")).toHaveText("0");
+    expect(await lane(page, "default").evaluate((d) => (d as HTMLDetailsElement).open)).toBe(true);
+    await expect(page.locator("#wikiWorkInbox .wiki-wi-empty")).toHaveText("Nothing to close · for you · to pass on.");
+    const o1 = row(page, "default", "O1");
+    await expect(o1.locator(".wiki-wi-q")).toContainText("O1 · Default this?");
+    await o1.locator(".wiki-wi-row").click();
+    const detail = o1.locator(".wiki-wi-detail");
+    await expect(detail.locator(".wiki-wi-context strong")).toHaveText("bold");
+    await expect(detail.locator(".wiki-wi-choice")).toHaveText([/^A\s*first way cheap\.$/, /^B\s*second way safe\.\s*Recommended$/]);
+    await expect(detail.locator(".wiki-wi-choice.rec")).toHaveAttribute("data-wi-choice", "B");
+    await expect(detail.locator(".wiki-wi-why")).toHaveText(/^Why B\s+It holds\.$/);
+    expect(await detail.textContent()).not.toContain("**");
+    await expect(detail).not.toContainText("Default this?");
+    // A row is the pick: it presses, and Answer wakes.
+    await detail.locator('.wiki-wi-choice[data-wi-choice="A"]').click();
+    await expect(o1.locator('.wiki-wi-choice[data-wi-choice="A"]')).toHaveAttribute("aria-pressed", "true");
+    await expect(o1.locator('[data-wi-act="answer"]')).toBeEnabled();
+    await o1.locator('.wiki-wi-choice[data-wi-choice="A"]').click();
+    await o1.locator('[data-wi-act="take"]').click();
+    await expect(lane(page, "default")).toHaveCount(0);
     await expect(row(page, "close", "O1").locator(".wiki-wi-ev")).toContainText("Answered B");
   });
 
@@ -240,12 +259,22 @@ test.describe.serial("the Decisions section", () => {
       await row(page, "ask", "O4").locator(".wiki-wi-row").click();
       await page.mouse.move(0, 0);
       const inbox = page.locator("#wikiWorkInbox");
-      for (const sel of [".wiki-wi-q", ".wiki-wi-page", ".wiki-wi-age", ".wiki-wi-tag", ".wiki-wi-ev b", ".wiki-wi-quote", ".wiki-wi-body", ".wiki-wi-btn", ".wiki-wi-hint"]) {
-        for (const el of await inbox.locator(sel).all()) {
-          if (!(await el.isVisible())) continue;
-          expect(await contrastOf(el), `${sel} in ${theme}`).toBeGreaterThanOrEqual(4.5);
+      const sweep = async (sels: string[], required: boolean) => {
+        for (const sel of sels) {
+          const els = await inbox.locator(sel).all();
+          if (required) expect(els.length, `${sel} in ${theme}`).toBeGreaterThan(0);
+          for (const el of els) {
+            if (!(await el.isVisible())) continue;
+            expect(await contrastOf(el), `${sel} in ${theme}`).toBeGreaterThanOrEqual(4.5);
+          }
         }
-      }
+      };
+      await sweep([".wiki-wi-q", ".wiki-wi-page", ".wiki-wi-age", ".wiki-wi-tag", ".wiki-wi-ev b", ".wiki-wi-quote", ".wiki-wi-body", ".wiki-wi-btn", ".wiki-wi-hint"], false);
+      // The choice rows: OTHER's card, answered B by now, sits in «close?», the lane that opens.
+      await openInbox(page, OTHER);
+      await row(page, "close", "O1").locator(".wiki-wi-row").click();
+      await page.mouse.move(0, 0);
+      await sweep([".wiki-wi-context", ".wiki-wi-letter", ".wiki-wi-choice-text", ".wiki-wi-choice-text b", ".wiki-wi-rec", ".wiki-wi-why", ".wiki-wi-why > b", ".wiki-wi-empty"], true);
     });
   }
 });

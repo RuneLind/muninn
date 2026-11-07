@@ -95,7 +95,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // and its load-failure line and per-card sending state to 1,418,173, and its held repaints to 1,418,858.
 // 2026-11-07: closing a card from the inbox (P3b: preview, Close, Still open) took it to 1,422,452,
 // and its fix round (ruling hash, preview warnings, a validated kept-open store) to 1,423,473.
-const WIKI_CLIENT_MAX_BYTES = 1_424_000;
+// 2026-11-07: the readable inbox (choice rows, one empty-lanes line) took it to 1,425,407.
+const WIKI_CLIENT_MAX_BYTES = 1_426_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

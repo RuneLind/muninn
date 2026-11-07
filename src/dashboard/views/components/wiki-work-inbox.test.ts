@@ -16,7 +16,7 @@ afterAll(() => {
 
 const XSS = `<img src=x onerror="alert(1)">`;
 const card = (over: Partial<InboxCard>): InboxCard => ({
-  relPath: "plans/a.mdx", id: "O1", title: "A", body: "Which?", choices: [], recommendation: null, targets: [], added: null, laneSince: null, answers: [], hint: null, viewerAnswered: false, lane: "ask", ...over,
+  relPath: "plans/a.mdx", id: "O1", title: "A", body: "Which?", question: "Which?", bodyHtml: "", structured: null, choices: [], recommendation: null, targets: [], added: null, laneSince: null, answers: [], hint: null, viewerAnswered: false, lane: "ask", ...over,
 });
 
 async function load(body: DecisionInboxBody | null, status = 200): Promise<void> {
@@ -25,15 +25,42 @@ async function load(body: DecisionInboxBody | null, status = 200): Promise<void>
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-test("four lanes, «close?» and «ask you» open, the other two folded, with their counts", async () => {
+test("lanes holding cards print, «close?» and «ask you» open, «default» folded, with their counts", async () => {
   await load({ wiki: "w", cards: [card({ id: "O1", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-01T10:00:00Z", questionChanged: false }] }), card({ id: "O2" }), card({ id: "O3", lane: "default" }), card({ id: "O4", lane: "default" })] });
   const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
-  const lane = (l: string) => new RegExp(`<details class="wiki-wi-lane" data-wi-lane="${l}"( open)?>.*?wiki-wm-count">(\\d+)<`).exec(html)!;
-  expect([lane("close")[1], lane("close")[2]]).toEqual([" open", "1"]);
-  expect([lane("ask")[1], lane("ask")[2]]).toEqual([" open", "1"]);
-  expect([lane("pass")[1], lane("pass")[2]]).toEqual([undefined, "0"]);
-  expect([lane("default")[1], lane("default")[2]]).toEqual([undefined, "2"]);
+  const lane = (l: string) => new RegExp(`<details class="wiki-wi-lane" data-wi-lane="${l}"( open)?>.*?wiki-wm-count">(\\d+)<`).exec(html);
+  expect([lane("close")![1], lane("close")![2]]).toEqual([" open", "1"]);
+  expect([lane("ask")![1], lane("ask")![2]]).toEqual([" open", "1"]);
+  expect(lane("pass")).toBeNull();
+  expect([lane("default")![1], lane("default")![2]]).toEqual([undefined, "2"]);
   expect(html).toContain("Decisions · 4 open");
+  expect(html).toContain('wiki-wi-empty">Nothing to pass on.</div>');
+});
+
+test("empty lanes fold into one line, in lane order, with no «None.»", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O3", lane: "default" })] });
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).not.toContain("None.");
+  expect(html.match(/<details/g)!.length).toBe(1);
+  expect(html).toContain("Nothing to close · for you · to pass on.");
+});
+
+test("the first lane holding cards opens even when it is «default»; the reader's toggle still wins", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O3", lane: "default" })] });
+  expect(inboxHtml(() => "", Date.now())).toContain('data-wi-lane="default" open');
+  const summary = { parentElement: { open: true, getAttribute: () => "default" } };
+  handleInboxClick({ closest: (s: string) => (s === "#wikiWorkInbox" ? {} : s === "[data-wi-lane] > summary" ? summary : null) } as unknown as Element, () => "");
+  expect(inboxHtml(() => "", Date.now())).toContain('data-wi-lane="default">');
+});
+
+test("no empty line when every lane holds a card", async () => {
+  await load({ wiki: "w", cards: (["close", "ask", "pass", "default"] as const).map((lane, i) => card({ id: `O${i}`, lane })) });
+  expect(inboxHtml(() => "", Date.now())).not.toContain("wiki-wi-empty");
+});
+
+test("a row is titled by the card's question", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", body: "**Which layout?**\n\nmore", question: "Which layout?" })] });
+  expect(inboxHtml(() => "", Date.now())).toContain("O1 · Which layout?<span");
 });
 
 test("every page string is escaped", async () => {
@@ -269,6 +296,8 @@ test("a close says so in the lane after the closed row has left it", async () =>
   const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
   expect(html).not.toContain('data-wi-key="plans/a.mdx#O6"');
   expect(html).toContain("Closed O6 (D3).");
+  // The lane is empty now but stays, open, to say so.
+  expect(html).toContain('data-wi-lane="close" open');
 });
 
 test("after a close, focus goes to the lane, and a later close's refusal does not sit beside the old «Closed»", async () => {
@@ -337,4 +366,67 @@ test("keeping a card again makes it the newest entry, so the cap drops others fi
   } finally {
     g3.localStorage = savedLs;
   }
+});
+
+const STRUCTURED = {
+  context: "Today every lane prints.",
+  rows: [
+    { letter: "A", label: "lanes", why: "the four lanes <code>stay</code>." },
+    { letter: "B", label: "one list", why: "every card." },
+  ],
+  recommendation: { letter: "A", why: "It fixes both faults." },
+};
+
+test("an opened structured card prints a row per choice, the recommended one marked, and its why", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "ask", choices: ["A", "B"], recommendation: "A", structured: STRUCTURED, bodyHtml: "RAW-FALLBACK" })] });
+  click("row", "plans/a.mdx#O1");
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain('<div class="wiki-wi-context wiki-wi-rendered">Today every lane prints.</div>');
+  expect(html).toMatch(/<button class="wiki-wi-choice rec" data-wi-act="pick" data-wi-choice="A" aria-pressed="false"><span class="wiki-wi-letter">A<\/span><span class="wiki-wi-choice-text"><b>lanes<\/b> the four lanes <code>stay<\/code>\.<\/span><span class="wiki-wi-rec">Recommended<\/span><\/button>/);
+  expect(html).toContain('<button class="wiki-wi-choice" data-wi-act="pick" data-wi-choice="B"');
+  expect(html).toContain("<b>Why A</b> It fixes both faults.");
+  expect(html).not.toContain("RAW-FALLBACK");
+  // The letters are the rows now: only Not sure is a button among the picks.
+  expect(html.match(/class="wiki-wi-btn[^"]*" data-wi-act="pick"/g)!.length).toBe(1);
+  expect(html).toContain('data-wi-choice="not-sure"');
+});
+
+test("clicking a structured row picks it, and Answer sends that choice", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "ask", choices: ["A", "B"], structured: STRUCTURED })] });
+  click("row", "plans/a.mdx#O1");
+  click("pick", "plans/a.mdx#O1", { "data-wi-choice": "B" });
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain('<button class="wiki-wi-choice on" data-wi-act="pick" data-wi-choice="B" aria-pressed="true">');
+  expect(html).toMatch(/data-wi-act="answer">Answer/);
+  let sent: unknown = null;
+  globalThis.fetch = ((url: string, init?: { body?: string }) => {
+    if (url === "/api/wiki/answers") sent = JSON.parse(init!.body!);
+    return new Promise(() => {});
+  }) as unknown as typeof fetch;
+  click("answer", "plans/a.mdx#O1");
+  expect((sent as { choice: string } | null)?.choice).toBe("B");
+});
+
+test("a structured card in the close lane shows its rows without the pick control", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "close", choices: ["A", "B"], structured: STRUCTURED })] });
+  click("row", "plans/a.mdx#O1");
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain('<div class="wiki-wi-choice rec">');
+  expect(html).not.toContain('data-wi-act="pick"');
+  expect(html).toContain('data-wi-act="preview"');
+});
+
+test("an unstructured card prints the server's rendered body and today's pick buttons", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "ask", body: "**Q?**\n\nA or **B**?", choices: ["A", "B"], bodyHtml: "A or <strong>B</strong>?" })] });
+  click("row", "plans/a.mdx#O1");
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain('<div class="wiki-wi-body wiki-wi-rendered">A or <strong>B</strong>?</div>');
+  expect(html).not.toContain("**");
+  expect(html.match(/class="wiki-wi-btn[^"]*" data-wi-act="pick"/g)!.length).toBe(3);
+});
+
+test("a card with no choices gets no pick rows", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "ask", bodyHtml: "Free text." })] });
+  click("row", "plans/a.mdx#O1");
+  expect(inboxHtml(() => "", Date.now())).not.toContain('data-wi-act="pick"');
 });
