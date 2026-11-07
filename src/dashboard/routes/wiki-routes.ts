@@ -5600,18 +5600,23 @@ export function coerceClientEdits(raw: unknown): IntegrateEdit[] | null {
 }
 
 /**
- * RFC 9110 §12.5.3: gzip's own entry (`x-gzip` counts as gzip) with a q-value
- * above 0, else a `*` entry's; an explicit gzip entry beats `*`. Space around
- * `=` is tolerated, so a malformed `q = 0` still refuses.
+ * Whether `Accept-Encoding` (RFC 9110 §12.5.3) admits gzip. The most specific
+ * name listed decides, by its best weight: `gzip`, else `x-gzip` (its alias,
+ * §8.4.1.3), else `*`; the order of entries never matters. A missing q is 1; an
+ * unparseable one is 0. Space around `=` is tolerated (the grammar allows none),
+ * so a malformed `q = 0` still refuses.
  */
 export function acceptsGzip(header: string | undefined): boolean {
-  const q: Record<string, number> = {};
+  const best = new Map<string, number>();
   for (const part of (header ?? "").split(",")) {
-    const [rawName, ...params] = part.trim().toLowerCase().split(";").map((x) => x.trim());
-    const name = rawName === "x-gzip" ? "gzip" : rawName!;
-    const qv = params.map((p) => p.split("=").map((x) => x.trim())).find(([k]) => k === "q");
-    q[name] = qv === undefined ? 1 : Number(qv[1]);
+    const [name, ...params] = part.split(";").map((x) => x.trim().toLowerCase());
+    const q = params.map((p) => p.split("=")).find((kv) => kv[0]!.trim() === "q");
+    const w = q === undefined ? 1 : q.length === 2 ? Number(q[1]) : NaN;
+    best.set(name!, Math.max(best.get(name!) ?? 0, Number.isFinite(w) ? w : 0));
   }
-  const v = q.gzip ?? q["*"];
-  return v !== undefined && v > 0;
+  for (const name of ["gzip", "x-gzip", "*"]) {
+    const w = best.get(name);
+    if (w !== undefined) return w > 0;
+  }
+  return false;
 }

@@ -4717,12 +4717,44 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
       expect(await res.text(), p).toBe(asset.body);
     }
     const near = ["000000000000000", "00000000000000000", "000000000000000g", "000000000000000A"].map((h) => `/wiki/assets/wiki.${h}.js`);
-    const wrapped = ["xwiki.0000000000000000.js", "wiki.0000000000000000.jsx", "wiki.0000000000000000.js.map", "wiki.0000000000000000.css.js.x"].map((f) => `/wiki/assets/${f}`);
+    const wrapped = ["wikiX0000000000000000.js", "wiki.0000000000000000Xjs", "xwiki.0000000000000000.js", "wiki.0000000000000000.jsx", "wiki.0000000000000000.js.map", "wiki.0000000000000000.css.js.x"].map((f) => `/wiki/assets/${f}`);
     for (const p of ["/wiki/assets/x", "/wiki/assets/wiki.zz.js", "/wiki/assets/wiki.0000000000000000.map", "/wiki/assets/other.0000000000000000.js", ...near, ...wrapped]) {
       const res = await app.request(p);
       expect(res.status, p).toBe(404);
       expect(res.headers.get("cache-control"), p).toBe("no-store");
     }
+  });
+
+  test("acceptsGzip: every one- and two-entry header, in both orders, follows gzip > x-gzip > * and never the order", async () => {
+    const { acceptsGzip } = await import("./wiki-routes.ts");
+    const names = ["gzip", "x-gzip", "*", "br"];
+    const qs = [undefined, "0", "0.5", "1", "abc"];
+    const entries = names.flatMap((n) => qs.map((q) => ({ n, q })));
+    const text = (e: { n: string; q?: string }) => (e.q === undefined ? e.n : `${e.n};q=${e.q}`);
+    const weight = (q?: string) => (q === undefined ? 1 : Number.isFinite(Number(q)) ? Number(q) : 0);
+    // The oracle: the most specific name present decides, by its best weight.
+    const oracle = (list: { n: string; q?: string }[]) => {
+      for (const n of ["gzip", "x-gzip", "*"]) {
+        const ws = list.filter((e) => e.n === n).map((e) => weight(e.q));
+        if (ws.length > 0) return Math.max(...ws) > 0;
+      }
+      return false;
+    };
+    let checked = 0;
+    for (const a of entries) {
+      expect(acceptsGzip(text(a)), text(a)).toBe(oracle([a]));
+      for (const b of entries) {
+        const h = `${text(a)}, ${text(b)}`;
+        expect(acceptsGzip(h), h).toBe(oracle([a, b]));
+        checked++;
+      }
+    }
+    expect(checked).toBe(400);
+    expect(acceptsGzip(undefined)).toBe(false);
+    expect(acceptsGzip("")).toBe(false);
+    // Malformed weights read as 0, never as a missing q.
+    for (const h of ["gzip;q=0=1", "gzip;q", "gzip;foo=bar;q=0", "gzip;quality=1;q=0"]) expect(acceptsGzip(h), h).toBe(false);
+    expect(acceptsGzip("gzip;foo=bar")).toBe(true);
   });
 
   test("gzip is not sent to a client that refuses it with q=0", async () => {
