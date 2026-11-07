@@ -192,10 +192,24 @@ export function shrinkAllowlist(listed: readonly string[], current: readonly str
   return [...new Set(listed.filter((l) => now.has(l)))].sort();
 }
 
-/** `--update`'s new file text: the list shrunk to what is still a violation. */
+/**
+ * `--update`'s new file text: entries that are no longer violations, and repeats, are
+ * dropped; comments and blank lines (recognised trimmed, as `parseAllowlist` does) stay
+ * where they are. Entries keep their order, so an unsorted list stays a test failure.
+ */
 export function rewriteAllowlist(text: string, current: readonly string[]): string {
-  const header = text.split("\n").filter((l) => l.startsWith("#"));
-  return [...header, ...shrinkAllowlist(parseAllowlist(text), current)].join("\n") + "\n";
+  const now = new Set(current);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const line of text.replace(/\n$/, "").split("\n")) {
+    const t = line.trim();
+    if (t === "" || t.startsWith("#")) out.push(line);
+    else if (now.has(t) && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out.join("\n") + "\n";
 }
 
 /** Violation counts by `importer layer -> imported layer`. */

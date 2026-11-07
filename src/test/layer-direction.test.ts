@@ -13,6 +13,7 @@ import {
   layerOf,
   parseAllowlist,
   resolveSpecifier,
+  rewriteAllowlist,
   shrinkAllowlist,
   sourceFiles,
   violations,
@@ -159,5 +160,14 @@ describe("allowlist", () => {
   });
   test("shrink removes fixed lines and never adds a new violation", () => {
     expect(shrinkAllowlist(["c -> d", "a -> b", "a -> b", "x -> y"], ["a -> b", "c -> d", "new -> edge"])).toEqual(["a -> b", "c -> d"]);
+  });
+  test("--update's rewrite drops fixed and duplicate entries, trims them, and adds none", () => {
+    expect(rewriteAllowlist("  a -> b \na -> b\nc -> d\nx -> y\n", ["a -> b", "c -> d", "new -> edge"])).toBe("a -> b\nc -> d\n");
+  });
+  test("--update's rewrite keeps an indented comment, as the parser treats it as one", () => {
+    expect(rewriteAllowlist("# head\n  # indented note\na -> b\nx -> y\n", ["a -> b"])).toBe("# head\n  # indented note\na -> b\n");
+  });
+  test("--update's rewrite keeps mid-list comments and blank lines where they are", () => {
+    expect(rewriteAllowlist("# head\n\na -> b\n# group two\nc -> d\nx -> y\n", ["a -> b", "c -> d"])).toBe("# head\n\na -> b\n# group two\nc -> d\n");
   });
 });
