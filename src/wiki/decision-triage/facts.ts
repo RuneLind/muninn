@@ -24,7 +24,7 @@ import {
   type ParsedQuestion,
   type QuestionPage,
 } from "../../format/question.ts";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256 } from "../../utils/date-hash.ts";
 import { extractNextMoves, waitOwnerFrom, type PageNextMoves, type WaitOwner } from "../next-moves.ts";
 import { splitFrontmatter, WIKILINK_WITH_LABEL_RE } from "../page-text.ts";
 import { normalizeRelPath } from "../rel-path.ts";

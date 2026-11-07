@@ -18,14 +18,14 @@
  * for the next day's hour.
  *
  * The decision triage's nightly pass is started by the same tick and awaited by
- * nothing in it: its own in-flight guard, hourly check, state and failure count, so
+ * nothing in it: its own in-flight guard (shared with Run now), hourly check, state and failure count, so
  * neither loop's stall, retry or refusal reaches the other. A refused pass waits
  * for its next hourly check; it has no wake retries.
  */
 
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
-import { realTriageLoopDeps, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
+import { triageLoopDepsFor, tryHoldTriagePass, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../readonly.ts";
 import { getWikiRegistry } from "../registry-memo.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
@@ -194,7 +194,7 @@ function realLoopDeps(config: Config): WorkMapLoopDeps {
     readState: (wiki) => runDeps.state.read(wiki),
     run: (wiki, signal) => startWorkMapRun(wiki, runDeps, signal).promise,
     registry: getWikiRegistry,
-    triage: realTriageLoopDeps(config) ?? undefined,
+    triage: triageLoopDepsFor(config) ?? undefined,
   };
 }
 
@@ -256,14 +256,17 @@ export function startWorkMapLoop(
     timer = deps.setTimer(tick, WORK_MAP_TICK_MS);
   };
   let lastTriageCheck: number | null = null;
-  let triageBusy = false;
-  /** The triage's hourly check, started and not awaited: see the header. */
+  /** The triage's hourly check, started and not awaited: see the header. It holds the
+   *  pass single-flight Run now shares; while a click holds it the check is skipped and
+   *  tried again on the next tick. The bound and the stop only abort: the hold ends when
+   *  the check's own promise settles, so two passes never write one log at once. */
   const startTriage = () => {
     const triage = deps.triage;
     const started = deps.now();
-    if (!triage || triageBusy || (lastTriageCheck !== null && started - lastTriageCheck < WORK_MAP_CHECK_INTERVAL_MS)) return;
+    if (!triage || (lastTriageCheck !== null && started - lastTriageCheck < WORK_MAP_CHECK_INTERVAL_MS)) return;
+    const release = tryHoldTriagePass();
+    if (!release) return;
     lastTriageCheck = started;
-    triageBusy = true;
     const bound = new AbortController();
     const signal = AbortSignal.any([ac.signal, bound.signal]);
     let running: string | null = null;
@@ -283,7 +286,6 @@ export function startWorkMapLoop(
     const expiry = deps.setTimer(() => {
       timedOut = true;
       bound.abort();
-      triageBusy = false;
       const error = `the pass timed out after ${TRIAGE_PASS_BOUND_MS} ms`;
       log.warn("Decision triage: {error} ({wiki})", { error, wiki: running ?? "no wiki running" });
       if (running) void fail(running, error);
@@ -292,9 +294,8 @@ export function startWorkMapLoop(
     triageWork = work;
     void work.finally(() => {
       if (triageWork === work) triageWork = null;
-      if (timedOut) return;
-      deps.clearTimer(expiry);
-      triageBusy = false;
+      release();
+      if (!timedOut) deps.clearTimer(expiry);
     });
   };
   const check = async (reason: "boot" | "wake" | "hourly" | "wake-retry") => {

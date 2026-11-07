@@ -10,7 +10,7 @@
  * source drafter's `## See also` wiring commit touches every hub it links.
  */
 
-import { isMetaStem, pageStemOf } from "../../dashboard/views/components/wiki-filter.ts";
+import { isMetaStem, pageStemOf } from "../core/wiki-filter.ts";
 import { normalizeRelPath } from "../rel-path.ts";
 import type { WikiPageMeta } from "../store.ts";
 import { osloDay } from "./ids.ts";

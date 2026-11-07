@@ -2942,10 +2942,10 @@ function buildWikiPageCss(): string {
       font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
       border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-primary);
     }
-    .wiki-wi-btn:hover:not(:disabled), .wiki-wi-btn:focus-visible { border-color: var(--accent); }
+    .wiki-wi-btn:hover:not(:disabled):not([aria-disabled="true"]), .wiki-wi-btn:focus-visible { border-color: var(--accent); }
     /* --accent-hover, not --accent: white on --accent measured 4.3:1 in Dark. */
     .wiki-wi-btn.primary, .wiki-wi-btn.on { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
-    .wiki-wi-btn:disabled { opacity: .55; cursor: default; }
+    .wiki-wi-btn:disabled, .wiki-wi-btn[aria-disabled="true"] { opacity: .55; cursor: default; }
     .wiki-wi-note {
       display: block; width: 100%; box-sizing: border-box; font: inherit; font-size: 12.5px; padding: 6px 8px; margin: 4px 0;
       border: 1px solid var(--border-secondary); border-radius: 6px; background: var(--bg-surface); color: var(--text-primary);

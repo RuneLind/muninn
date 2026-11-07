@@ -10,9 +10,9 @@
  * and the focus-page set; a relation to a hub focus page counts like any other.
  */
 
-import { facetJiraKeys } from "../dashboard/views/components/wiki-filter.ts";
+import { facetJiraKeys } from "./core/wiki-filter.ts";
 import { ownerCensus } from "./frontmatter-lists.ts";
-import { seriesMembersByFoldKey } from "../dashboard/views/components/wiki-groups.ts";
+import { seriesMembersByFoldKey } from "./core/wiki-groups.ts";
 import type { WikiPageMeta } from "./store.ts";
 import {
   WORK_EVIDENCE_VERSION,

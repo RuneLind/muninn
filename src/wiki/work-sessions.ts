@@ -33,7 +33,7 @@ import { claudeUsageHttpStatus, claudeUsageJson, claudeUsageWarnOnce } from "../
 import { isReadonlyWikiRoot, sameWikiRoot } from "./readonly.ts";
 import { parseWorkedPages, workedLedgerFor } from "./worked-ledger.ts";
 import { WORK_WINDOW_MS, type WorkSession, type WorkSessionFile } from "./work-focus.ts";
-import { ledgerInstant } from "../dashboard/views/components/wiki-filter.ts";
+import { ledgerInstant } from "./core/wiki-filter.ts";
 
 const log = getLog("wiki", "work-sessions");
 

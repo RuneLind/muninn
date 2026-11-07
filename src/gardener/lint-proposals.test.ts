@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildLintProposalRows, seedLintProposals } from "./lint-proposals.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import type { LintFinding } from "../wiki/lint.ts";
 import type { InsertWikiProposalParams, LintGroupRow } from "../db/wiki-proposals.ts";
 import { testTempDir } from "../test/temp-dir.ts";

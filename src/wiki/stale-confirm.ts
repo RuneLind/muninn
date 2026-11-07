@@ -26,7 +26,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig } from "../bots/config.ts";
 import type { MuninnProfile } from "../config.ts";
 import {

@@ -101,10 +101,12 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-07: the left pane in its own module behind a port (wiki-browser split C2)
 // took it from 1,428,731 to 1,433,009 bytes (359,172 → 360,612 gzipped); the triage
 // status line and its Details table (visibility PR 2) took it to 1,436,421.
+// 2026-11-07: Run now on that line (visibility PR 3) took it to 1,438,444 bytes (361,992 gzipped).
 // 2026-11-07: served as a hashed asset and built with `minify: true` (arch review
 // 2026-11 B3): 1,436,421 -> 806,603 bytes (361,526 -> 271,805 gzipped). Every
 // line above counts the unminified bundle; this pin and later ones the minified.
-const WIKI_CLIENT_MAX_BYTES = 807_500;
+// 2026-11-07: merged with Run now (above) and B2's moves: 807,949 bytes (272,208 gzipped).
+const WIKI_CLIENT_MAX_BYTES = 808_500;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

@@ -169,13 +169,13 @@ import {
 import {
   FUTURE_DATE_SKEW_MS,
   isImplausibleFutureDate,
-} from "../dashboard/views/components/wiki-filter.ts";
+} from "./core/wiki-filter.ts";
 import {
   fencedLineMask,
   frontmatterEndLine,
   NESTED_MARKUP_RE,
   stripLineCodeSpans,
-} from "../dashboard/views/components/wiki-integrate.ts";
+} from "./core/wiki-integrate.ts";
 import { maskLineCodeSpans } from "../format/code-spans.ts";
 import { stripLineCodeSpansKeepingLinks } from "./park-links.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";

@@ -11,7 +11,7 @@
  * such findings were legend entries no matcher can match.
  */
 
-import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
+import { fencedLineMask } from "./core/wiki-integrate.ts";
 import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import { WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { pageGlossaries } from "./render.ts";

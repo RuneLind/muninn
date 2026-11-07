@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import type { TriageLoopDeps } from "../decision-triage/loop-deps.ts";
+import { triagePassHeld, tryHoldTriagePass, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
 import type { WorkMapRunResult } from "./run.ts";
 import type { WorkMapState } from "./state.ts";
 import {
@@ -20,6 +20,12 @@ const MIN = 60_000;
 const MORNING = Date.parse("2026-10-20T05:00:00Z");
 
 afterEach(() => stopWorkMapLoop(10));
+/** Settles every `stuck` pass a test left running, so its hold on the shared single-flight ends with the test. */
+const stuckSettlers: (() => void)[] = [];
+afterEach(async () => {
+  for (const settle of stuckSettlers.splice(0)) settle();
+  await Bun.sleep(1);
+});
 
 describe("the decision triage's due check", () => {
   function triageHarness(opts: { workMap?: WorkMapRunResult["outcome"][]; triage?: ("ok" | "partial" | "refused" | "failed")[]; state?: () => WorkMapState | null; wikis?: string[]; start?: number } = {}) {
@@ -105,10 +111,15 @@ describe("the decision triage's due check", () => {
       h.deps.triage!.run = (wiki, signal) => {
         h.triageRuns.push({ wiki, at: h.deps.now() });
         signals.push(signal);
-        return new Promise(() => {});
+        return new Promise((r) => void stuckSettlers.push(() => r({ outcome: "aborted" })));
       };
       h.deps.triage!.recordFailed = async (wiki, error) => void failed.push({ wiki, at: h.deps.now(), error });
-      return { signals, failed };
+      /** Let every stuck pass return, as an aborted one eventually does. */
+      const settle = async () => {
+        for (const s of stuckSettlers.splice(0)) s();
+        await Bun.sleep(1);
+      };
+      return { signals, failed, settle };
     }
 
     test("a triage that never returns leaves the work map on schedule", async () => {
@@ -179,9 +190,66 @@ describe("the decision triage's due check", () => {
       expect(h.triageRuns.length).toBeLessThanOrEqual(19);
     });
 
-    test("the pass's bound: 2 h, then the wiki records failed, its signal aborts and the guard opens", async () => {
+    test("Run now holding the pass skips the loop's check, which runs on the next tick after the release", async () => {
       const h = triageHarness();
-      const { signals, failed } = stuck(h);
+      const click = tryHoldTriagePass()!;
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.runs).toHaveLength(1);
+      expect(h.triageRuns).toHaveLength(0);
+      click();
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.triageRuns).toHaveLength(1);
+    });
+
+    test("the loop's check holds the pass Run now shares, until it ends", async () => {
+      const h = triageHarness();
+      let finish!: () => void;
+      h.deps.triage!.run = (wiki) => {
+        h.triageRuns.push({ wiki, at: h.deps.now() });
+        return new Promise((r) => (finish = () => r({ outcome: "ok" })));
+      };
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.triageRuns).toHaveLength(1);
+      expect(triagePassHeld()).toBe(true);
+      expect(tryHoldTriagePass()).toBeNull();
+      finish();
+      await Bun.sleep(1);
+      expect(triagePassHeld()).toBe(false);
+    });
+
+    test("a pass that ignores its bound keeps the hold: no second pass, from a click or the loop, until it settles", async () => {
+      const h = triageHarness();
+      const { signals, settle } = stuck(h);
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      await h.advance(4 * HOUR);
+      expect(signals[0]!.aborted).toBe(true);
+      expect(h.triageRuns).toHaveLength(1);
+      expect(triagePassHeld()).toBe(true);
+      expect(tryHoldTriagePass()).toBeNull();
+      await settle();
+      expect(triagePassHeld()).toBe(false);
+      await h.advance(HOUR);
+      expect(h.triageRuns).toHaveLength(2);
+    });
+
+    test("the stop aborts a pass that never returns and keeps the hold until it settles", async () => {
+      const h = triageHarness();
+      const { signals, settle } = stuck(h);
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      await stopWorkMapLoop(10);
+      expect(signals[0]!.aborted).toBe(true);
+      expect(triagePassHeld()).toBe(true);
+      await settle();
+      expect(triagePassHeld()).toBe(false);
+    });
+
+    test("the pass's bound: 2 h, then the wiki records failed and its signal aborts; the guard holds until the pass returns", async () => {
+      const h = triageHarness();
+      const { signals, failed, settle } = stuck(h);
       startWorkMapLoop(config, { deps: h.deps });
       await h.advance(WORK_MAP_TICK_MS);
       const startedAt = h.now();
@@ -193,6 +261,10 @@ describe("the decision triage's due check", () => {
       expect(failed.map((f) => [f.wiki, f.at - startedAt])).toEqual([["mimir", 2 * HOUR]]);
       expect(failed[0]!.error).toContain("timed out");
       expect(signals[0]!.aborted).toBe(true);
+      await h.advance(HOUR);
+      expect(h.triageRuns).toHaveLength(1);
+      await settle();
+      await h.advance(HOUR);
       expect(h.triageRuns).toHaveLength(2);
     });
 

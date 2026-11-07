@@ -3,7 +3,7 @@ import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadPlanSource, planRecordFromContent } from "./source.ts";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
 const tmpRoots: string[] = [];

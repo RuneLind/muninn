@@ -1,4 +1,4 @@
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 
 /**
  * A distilled durable memory produced from a wiki Ask/Explain Q&A turn by the

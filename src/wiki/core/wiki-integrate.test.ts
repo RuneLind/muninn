@@ -27,7 +27,7 @@ import {
   CLAIM_QUOTES_TOTAL_MAX,
   type ProposedEdit,
 } from "./wiki-integrate.ts";
-import { FACTCHECK_MAX_CLAIMS } from "../../../wiki/factcheck-context.ts";
+import { FACTCHECK_MAX_CLAIMS } from "../factcheck-context.ts";
 
 const ANSWER = [
   "Mostly accurate, with one contradicted claim.",

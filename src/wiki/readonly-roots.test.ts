@@ -20,7 +20,7 @@ import { __resetWikiWriteQueueForTest } from "./queue.ts";
 import { buildWikiIndex, __resetWikiCacheForTest } from "./store.ts";
 import { applyWikiProposal } from "../gardener/apply.ts";
 import { writePlanQueue } from "../plans/write.ts";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import { testTempDir } from "../test/temp-dir.ts";

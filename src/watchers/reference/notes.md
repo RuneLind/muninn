@@ -1181,7 +1181,7 @@ target-resolve → **map (pass-1)** → draft → shape-gate → persist → not
 (`src/dashboard/routes/wiki-gardener-routes.ts` + `views/wiki-gardener-page.ts` +
 the bundled `wiki-gardener-browser.ts` client) lists a bot's proposals with a
 rendered markdown preview (reuses `renderWikiHtml`), a current-file→draft unified
-diff for `update` mode (`src/gardener/diff.ts`, dependency-free LCS line diff),
+diff for `update` mode (`src/utils/line-diff.ts`, dependency-free LCS line diff),
 the source summaries, and Approve / Reject buttons (draft rows only). The `/wiki`
 header carries a 🌱 Gardener link + pending-draft count badge.
 
@@ -1512,7 +1512,7 @@ Dismiss is durable: `src/gardener/CLAUDE.md`.
      Page]]` shipped and reported clean.
 
      Four exclusions, each a false positive: **fenced blocks**, via the SHARED
-     `fencedLineMask` (`views/components/wiki-integrate.ts` — CommonMark opener
+     `fencedLineMask` (`src/wiki/core/wiki-integrate.ts` — CommonMark opener
      and closer rules, reused rather than re-implemented; the naive
      `/^\s*(```|~~~)/` toggle lets ``` and `~~~` close each other, lets a
      3-backtick line close a 4-backtick block, and — worst, because it is silent
@@ -1537,7 +1537,7 @@ Dismiss is durable: `src/gardener/CLAUDE.md`.
      rule's own `NESTED_MARKUP_RE` rather than a copy.
 
      Lint-specific facts: exclusions are `index-truncation`'s, through the same
-     shared helpers in `views/components/wiki-integrate.ts` (`fencedLineMask`,
+     shared helpers in `src/wiki/core/wiki-integrate.ts` (`fencedLineMask`,
      `frontmatterEndLine`, `maskJsxArrayOpeners`, plus `maskLineCodeSpans` from `src/format/code-spans.ts`) — all of
      which matter concretely, since mimir's own plan for this fix quotes the broken
      shape in a ```markdown fence and again in backticks, six times over. The

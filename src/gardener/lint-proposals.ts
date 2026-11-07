@@ -44,7 +44,7 @@ import {
 import { lintMeta, type LintSeeder } from "./lint-markers.ts";
 import { setFrontmatterScalar } from "../plans/frontmatter.ts";
 import { buildSeeAlsoEdit } from "./wire.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "lint-proposals");

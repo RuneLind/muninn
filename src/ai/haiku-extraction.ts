@@ -1,5 +1,5 @@
 import { backendConnector, callHaikuWithFallback, type HaikuBackend } from "./haiku-direct.ts";
-import { extractJson } from "./json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import { runTrackedExtraction } from "./extraction-tracker.ts";
 import { agentStatus } from "../observability/agent-status.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";

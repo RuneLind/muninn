@@ -10,17 +10,11 @@
  */
 
 import type { QuestionLanguage } from "./question-labels.ts";
+// The role-key grammar `src/config.ts` reads lives a layer down
+// (architecture review 2026-11, B2).
+import { DIGIT_RUN_RE, ROLE_KEY_RE } from "../utils/config-parsers.ts";
 
-/** A role key as `roleKeys` and `<Lane role=>` take it, after lower-casing —
- *  the `WIKI_ANSWER_GROUPS` group-name grammar (`parseAnswerGroups` in
- *  `src/config.ts` reads this one copy). */
-export const ROLE_KEY_RE = /^[a-z0-9æøå_-]+$/;
-/** Six or more digits in a row, anywhere in the name. A NAV ident is a letter
- *  and six digits, so a name holding one (`fag-z990001`, garbled `z9900011`)
- *  would put an ident on every chip and export heading. The rule ignores the
- *  letter on purpose: it refuses a week-coded `uke202541` too, which an
- *  operator writes `uke2025-41`, and leaves no letter class to get wrong. */
-export const DIGIT_RUN_RE = /\d{6}/;
+export { DIGIT_RUN_RE, ROLE_KEY_RE };
 
 /** A `role=` value or a `roleKeys` entry as one key: trimmed, lower-cased.
  *  Null when it is empty or not a key. */

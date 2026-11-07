@@ -298,6 +298,16 @@ test.describe.serial("the Decisions section", () => {
     // SCHEDULER_ENABLED=false here: the pass is off, so no next time.
     await expect(tri).toContainText("pass off");
     await expect(tri).not.toContainText("next ~");
+    // Run now (PR 3) says why it cannot run, and a click sends nothing.
+    const run = tri.locator('[data-wi-act="tri-run"]');
+    await expect(run).toHaveAttribute("aria-disabled", "true");
+    await expect(run).toHaveAttribute("title", "The pass is off: SCHEDULER_ENABLED is off");
+    let posted = false;
+    await page.route("**/api/wiki/decision-triage/run**", (route) => ((posted = true), route.abort()));
+    // aria-disabled, so Playwright's actionability check would wait: force the click.
+    await run.click({ force: true });
+    expect(posted).toBe(false);
+    await expect(page.locator("[data-wi-run-msg]")).toHaveCount(0);
     // Above the first lane, inside the section.
     expect(await page.locator("#wikiWorkInbox").evaluate((s) => {
       const line = s.querySelector(".wiki-wi-tri")!;

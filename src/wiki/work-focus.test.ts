@@ -22,7 +22,7 @@ import {
   type WorkSessionFile,
 } from "./work-focus.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS, rankActivity } from "../dashboard/views/components/wiki-activity-rank.ts";
-import { workedShownSignal, workedSortSignal, type WikiListing } from "../dashboard/views/components/wiki-filter.ts";
+import { workedShownSignal, workedSortSignal, type WikiListing } from "./core/wiki-filter.ts";
 import { buildWorkEvidence } from "./work-evidence.ts";
 import type { WikiPageMeta } from "./store.ts";
 

@@ -18,7 +18,7 @@ import {
   localDay,
   mergeWikiTypes,
   TYPE_LABEL,
-} from "../dashboard/views/components/wiki-filter.ts";
+} from "./core/wiki-filter.ts";
 import {
   normalizeRelPath,
   type WikiIndex,

@@ -23,7 +23,7 @@ import { __resetForTest } from "../wiki/commit.ts";
 import { runWikiWriteExclusive, __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import { WIKI_LOCK_BASENAME, WIKI_LOCK_STALE_MS } from "../wiki/lockfile.ts";
 import { writeWikiPage, type PageWriteNoLogOptions } from "../wiki/page-write.ts";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { syncRepo, syncSubsumesSweeper, __resetSyncStateForTest, type SyncDeps } from "./run.ts";
 import { SYNC_QUIET_MS } from "./decide.ts";
 import type { SyncRepo } from "./config.ts";

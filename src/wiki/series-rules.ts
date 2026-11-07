@@ -8,7 +8,7 @@
  * imports these from here and `lint-series.ts` re-exports them.
  */
 
-import { seriesCensusKey } from "../dashboard/views/components/wiki-groups.ts";
+import { seriesCensusKey } from "./core/wiki-groups.ts";
 
 /** `type:` values that are narrative by declaration, whatever folder they sit
  *  in — a wiki with a `.wiki-reader.json` ontology names its own. */
