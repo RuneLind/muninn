@@ -199,3 +199,142 @@ test("every repaint after an await is passive: an answer's reply and a copy's re
     initInbox(() => {});
   }
 });
+
+test("a «Still open» card that leaves one load and comes back is still kept", async () => {
+  const store: Record<string, string> = {};
+  const g3 = globalThis as { localStorage?: unknown };
+  const savedLs = g3.localStorage;
+  g3.localStorage = { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
+  try {
+    const kept = card({ id: "O9", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-01T10:00:00Z", questionChanged: false }] });
+    await load({ wiki: "w", cards: [kept] });
+    click("keep", "plans/a.mdx#O9");
+    // One load without it (its page unreadable for a moment), then the next with it.
+    await load({ wiki: "w", cards: [] });
+    await load({ wiki: "w", cards: [kept] });
+    expect(inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now())).not.toContain('data-wi-key="plans/a.mdx#O9"');
+  } finally {
+    g3.localStorage = savedLs;
+  }
+});
+
+test("the kept-open store holds at most 200 cards, dropping the oldest", async () => {
+  const store: Record<string, string> = {};
+  const g3 = globalThis as { localStorage?: unknown };
+  const savedLs = g3.localStorage;
+  g3.localStorage = { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
+  try {
+    const old: Record<string, string> = {};
+    for (let i = 0; i < 200; i++) old[`w|plans/old.mdx#O${i}`] = "[]";
+    store["muninn-inbox-kept"] = JSON.stringify(old);
+    await load({ wiki: "w", cards: [card({ id: "O9", lane: "close" })] });
+    click("keep", "plans/a.mdx#O9");
+    const kept = JSON.parse(store["muninn-inbox-kept"]!) as Record<string, string>;
+    expect(Object.keys(kept).length).toBe(200);
+    expect(kept["w|plans/old.mdx#O0"]).toBeUndefined();
+    expect(kept["w|plans/a.mdx#O9"]).toBeDefined();
+  } finally {
+    g3.localStorage = savedLs;
+  }
+});
+
+test("«Still open» hands focus to the lane, not to the row it hid", async () => {
+  const kept = card({ id: "O8", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
+  await load({ wiki: "w", cards: [kept] });
+  const calls: (string | undefined)[] = [];
+  initInbox((sel?: string) => { calls.push(sel); });
+  try {
+    click("keep", "plans/a.mdx#O8");
+    expect(calls.at(-1)).toBe('[data-wi-lane="close"] > summary');
+  } finally {
+    initInbox(() => {});
+  }
+});
+
+test("a close says so in the lane after the closed row has left it", async () => {
+  const closing = card({ id: "O6", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
+  await load({ wiki: "w", cards: [closing] });
+  globalThis.fetch = (async (url: string) =>
+    url.endsWith("/close")
+      ? { ok: true, status: 200, json: async () => ({ ok: true, preview: true, lines: ["- x"], warnings: [], baseHash: "b", rulingHash: "r", decision: "D3" }) }
+      : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [] }) }) as unknown as typeof fetch;
+  click("preview", "plans/a.mdx#O6");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  globalThis.fetch = (async (url: string) =>
+    url.endsWith("/close")
+      ? { ok: true, status: 200, json: async () => ({ ok: true, decision: "D3" }) }
+      : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [] }) }) as unknown as typeof fetch;
+  click("close", "plans/a.mdx#O6");
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).not.toContain('data-wi-key="plans/a.mdx#O6"');
+  expect(html).toContain("Closed O6 (D3).");
+});
+
+test("after a close, focus goes to the lane, and a later close's refusal does not sit beside the old «Closed»", async () => {
+  const mk = (id: string) => card({ id, lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
+  await load({ wiki: "w", cards: [mk("O6"), mk("O7")] });
+  const calls: (string | undefined)[] = [];
+  initInbox((sel?: string) => { calls.push(sel); });
+  const reply = (closeBody: unknown, status = 200) =>
+    (async (url: string) =>
+      url.endsWith("/close") ? { ok: status === 200, status, json: async () => closeBody } : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [mk("O7")] }) }) as unknown as typeof fetch;
+  const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  try {
+    globalThis.fetch = reply({ ok: true, preview: true, lines: ["- x"], warnings: [], baseHash: "b", rulingHash: "r", decision: "D3" });
+    click("preview", "plans/a.mdx#O6");
+    await tick();
+    globalThis.fetch = reply({ ok: true, decision: "D3" });
+    click("close", "plans/a.mdx#O6");
+    await tick();
+    expect(calls).toContain('[data-wi-lane="close"] > summary');
+    globalThis.fetch = reply({ error: "refused" }, 409);
+    click("preview", "plans/a.mdx#O7");
+    await tick();
+    const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+    expect(html).toContain("Couldn’t close: refused.");
+    expect(html).not.toContain("Closed O6 (D3).");
+  } finally {
+    initInbox(() => {});
+  }
+});
+
+test("a preview's warnings show above its lines, escaped, and a close's line sits in the «close?» lane", async () => {
+  const mk = (id: string) => card({ id, lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
+  await load({ wiki: "w", cards: [mk("O6"), card({ id: "O1", lane: "ask" })] });
+  const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, preview: true, lines: ["- x"], warnings: [`${XSS} answered B.`], baseHash: "b", rulingHash: "r", decision: "D3" }) })) as unknown as typeof fetch;
+  click("row", "plans/a.mdx#O6");
+  click("preview", "plans/a.mdx#O6");
+  await tick();
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).toMatch(/<div class="wiki-wi-ev warn"><b>&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt; answered B\.<\/b><\/div><pre class="wiki-wi-pre"/);
+  expect(html).not.toContain(XSS);
+  globalThis.fetch = (async (url: string) =>
+    url.endsWith("/close") ? { ok: true, status: 200, json: async () => ({ ok: true, decision: "D3" }) } : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [card({ id: "O1", lane: "ask" })] }) }) as unknown as typeof fetch;
+  click("close", "plans/a.mdx#O6");
+  await tick();
+  const after = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  const closeLane = /<details class="wiki-wi-lane" data-wi-lane="close"[\s\S]*?<\/details>/.exec(after)![0];
+  expect(closeLane).toContain("Closed O6 (D3).");
+});
+
+test("keeping a card again makes it the newest entry, so the cap drops others first", async () => {
+  const store: Record<string, string> = {};
+  const g3 = globalThis as { localStorage?: unknown };
+  const savedLs = g3.localStorage;
+  g3.localStorage = { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
+  try {
+    const c = card({ id: "O9", lane: "close" });
+    await load({ wiki: "w", cards: [c] });
+    click("keep", "plans/a.mdx#O9");
+    const fill: Record<string, string> = JSON.parse(store["muninn-inbox-kept"]!);
+    for (let i = 0; i < 199; i++) fill[`w|plans/old.mdx#O${i}`] = "[]";
+    store["muninn-inbox-kept"] = JSON.stringify(fill);
+    click("keep", "plans/a.mdx#O9");
+    const before = Object.keys(JSON.parse(store["muninn-inbox-kept"]!));
+    expect(before.at(-1)).toBe("w|plans/a.mdx#O9");
+  } finally {
+    g3.localStorage = savedLs;
+  }
+});
