@@ -26,7 +26,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
-import { MOCK_MODULE_CALL, bunTestLinks, discoverTestFiles, expandLink, isPlaywrightSpec } from "../src/test/mock-isolation.ts";
+import { BUN_TEST_FILE, MOCK_MODULE_CALL, bunTestLinks, discoverTestFiles, expandLink, isPlaywrightSpec } from "../src/test/mock-isolation.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
 const SHARDS_PATH = path.join(ROOT, "scripts", "unit-shards.json");
@@ -478,7 +478,7 @@ export function changedTestFiles(diffNames: string, chainFiles: ReadonlySet<stri
   return diffNames
     .split("\n")
     .map((l) => l.trim())
-    .filter((f) => f.endsWith(".test.ts") && chainFiles.has(f))
+    .filter((f) => BUN_TEST_FILE.test(f) && !isPlaywrightSpec(f) && chainFiles.has(f))
     .sort();
 }
 
@@ -575,9 +575,14 @@ async function drain(stream: ReadableStream<Uint8Array>, sink: string[]): Promis
  * leaked grandchild holding the pipes can keep this waiting. `argv` and
  * `timeoutMs` are for tests.
  */
+/** `./` makes the argument an exact path; a bare one is a substring filter that also hits `x.test.tsx` and `sub/x.test.ts`. */
+export function aloneArgv(file: string): string[] {
+  return ["bun", "test", `./${file}`];
+}
+
 export async function timeAlone(file: string, opts: { argv?: string[]; timeoutMs?: number } = {}): Promise<AloneRun> {
   const t0 = performance.now();
-  const proc = Bun.spawn(opts.argv ?? ["bun", "test", file], { cwd: ROOT, stdout: "pipe", stderr: "pipe", detached: true });
+  const proc = Bun.spawn(opts.argv ?? aloneArgv(file), { cwd: ROOT, stdout: "pipe", stderr: "pipe", detached: true });
   const out: string[] = [];
   const err: string[] = [];
   const pipes = Promise.all([drain(proc.stdout, out), drain(proc.stderr, err)]).catch(() => {});

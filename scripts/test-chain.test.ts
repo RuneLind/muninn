@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -7,6 +7,7 @@ import {
   NO_TESTS_EXEMPT,
   PINNED,
   SHARD_TOTAL,
+  aloneArgv,
   chainScript,
   changedTestFiles,
   check,
@@ -372,6 +373,11 @@ describe("the changed-file step", () => {
     expect(changedTestFiles("src/p.test.ts\nsrc/x.test.ts\nsrc/a/one.ts\nsrc/a/one.test.ts\n", chain)).toEqual(["src/a/one.test.ts", "src/p.test.ts"]);
   });
 
+  test("any bun test file name counts, as discovery reads it; Playwright specs do not", () => {
+    const chain = new Set(["src/a/x.test.tsx", "src/a/y_test.ts", "src/a/z.spec.ts", "e2e/o.spec.ts"]);
+    expect(changedTestFiles("src/a/x.test.tsx\nsrc/a/y_test.ts\nsrc/a/z.spec.ts\ne2e/o.spec.ts\nsrc/a/w.ts\n", chain)).toEqual(["src/a/x.test.tsx", "src/a/y_test.ts", "src/a/z.spec.ts"]);
+  });
+
   test("a file within 2 s over the 10 s bar is timed again; under the bar or further over is not", () => {
     expect(needsRetime(9.9)).toBe(false);
     expect(needsRetime(10)).toBe(false); // exactly on the bar passes (the step fails only `> 10`), so no second timing
@@ -412,6 +418,19 @@ describe("timeAlone", () => {
     expect(r.code).toBe(0);
     expect(r.output).toContain("done");
   }, 15_000);
+});
+
+describe("aloneArgv", () => {
+  test("bun runs only the named file, not a .tsx twin or a deeper path that ends the same", () => {
+    const dir = testTempDirSync(path.join(tmpdir(), "alone-argv-"));
+    for (const f of ["src/a/x.test.ts", "src/a/x.test.tsx", "sub/src/a/x.test.ts"]) {
+      mkdirSync(path.join(dir, path.dirname(f)), { recursive: true });
+      writeFileSync(path.join(dir, f), 'import { test } from "bun:test";\ntest("t", () => {});\n');
+    }
+    const report = path.join(dir, "report.xml");
+    Bun.spawnSync([...aloneArgv("src/a/x.test.ts"), "--reporter=junit", `--reporter-outfile=${report}`], { cwd: dir, stdout: "ignore", stderr: "ignore" });
+    expect([...new Set([...readFileSync(report, "utf8").matchAll(/ file="([^"]+)"/g)].map((m) => m[1]))]).toEqual(["src/a/x.test.ts"]);
+  }, 20_000);
 });
 
 describe("refreshTimings", () => {

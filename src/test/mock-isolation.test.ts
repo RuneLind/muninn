@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -14,7 +14,7 @@ import {
   sharedLinkOffenders,
   unrunMockFiles,
 } from "./mock-isolation.ts";
-import { testTempDirSync } from "./temp-dir.ts";
+import { recordedTestTempDirs, testTempDirSync } from "./temp-dir.ts";
 
 /**
  * Every test file that calls `mock.module()` runs in a `bun test` process of its
@@ -153,7 +153,8 @@ describe("the rule, on fixtures", () => {
 
 /** The files a real `bun test <args>` loads in `dir`, read off its junit report. */
 function bunRuns(dir: string, args: string[]): string[] {
-  const out = join(dir, "..", `${basename(dir)}.xml`);
+  // The report sits in a recorded temp dir so the run's cleanup removes it; inside `dir` it would be in the tree bun scans.
+  const out = join(testTempDirSync(join(tmpdir(), "bun-junit-")), `${basename(dir)}.xml`);
   Bun.spawnSync(["bun", "test", "--reporter=junit", `--reporter-outfile=${out}`, ...args], { cwd: dir, stdout: "ignore", stderr: "ignore" });
   return [...new Set([...readFileSync(out, "utf8").matchAll(/ file="([^"]+)"/g)].map((m) => m[1]!))].sort();
 }
@@ -179,6 +180,15 @@ describe("the model agrees with bun itself (spawns bun on a fixture tree)", () =
     for (const args of [["src/plans/"], ["src/plans/a.test.ts"], ["./src/plans/"], ["./src/plans/a.test.ts"], ["rc/pla"], ["src/plansx/", "./sub/"]]) {
       expect(expandLink(args, all).sort(), args.join(" ")).toEqual(bunRuns(dir, args));
     }
+  }, 20_000);
+
+  test("the junit report lands inside a recorded temp dir, never next to the fixture", () => {
+    const fresh = testTempDirSync(join(tmpdir(), "bun-discovery-"));
+    writeFileSync(join(fresh, "a.test.ts"), 'import { test } from "bun:test";\ntest("t", () => {});\n');
+    expect(bunRuns(fresh, [])).toEqual(["a.test.ts"]);
+    expect(readdirSync(tmpdir()).filter((n) => n.startsWith(basename(fresh)) && n !== basename(fresh))).toEqual([]);
+    const reports = recordedTestTempDirs().flatMap((d) => readdirSync(d, { recursive: true }).map(String)).filter((n) => n.endsWith(`${basename(fresh)}.xml`));
+    expect(reports).toHaveLength(1);
   }, 20_000);
 
   test("Playwright's specs are e2e/**/*.spec.ts (playwright.config.ts testDir + testMatch)", () => {
