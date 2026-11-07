@@ -19,6 +19,7 @@ import {
   parseAllowlist,
   parseJunit,
   readTable,
+  readTree,
   rebalance,
   refreshTimings,
   tableProblems,
@@ -28,16 +29,10 @@ import {
   type ShardTable,
   type Tree,
 } from "./test-chain.ts";
-import { MOCK_MODULE_CALL, discoverTestFiles, expandLink, ownProcessFiles } from "../src/test/mock-isolation.ts";
+import { expandLink } from "../src/test/mock-isolation.ts";
 import { testTempDirSync } from "../src/test/temp-dir.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
-
-function liveTree(): Tree {
-  const all = discoverTestFiles(ROOT);
-  const read = (f: string) => readFileSync(path.join(ROOT, f), "utf8");
-  return { allTestFiles: all, mockFiles: all.filter((f) => MOCK_MODULE_CALL.test(read(f))), ownProcessFiles: ownProcessFiles(all, read) };
-}
 
 /** A bun junit report with one file-level suite per file, each holding one testcase. */
 function junit(files: string[], seconds = 0.01): string {
@@ -55,14 +50,14 @@ function junit(files: string[], seconds = 0.01): string {
 
 describe("the live chain", () => {
   test("package.json's `test` is exactly the generated chain, and every test file is in a link", () => {
-    const { links, problems } = generate(liveTree(), readTable());
+    const { links, problems } = generate(readTree(), readTable());
     expect(problems).toEqual([]);
     const pkg = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
     expect(pkg.scripts.test, "run `bun scripts/test-chain.ts write`").toBe(chainScript(links));
   });
 
   test(`every link is on exactly one of the ${SHARD_TOTAL} shards, and the table names no other key`, () => {
-    const { links } = generate(liveTree(), readTable());
+    const { links } = generate(readTree(), readTable());
     expect(tableProblems(links, readTable())).toEqual([]);
   });
 
@@ -107,9 +102,11 @@ describe("the live chain", () => {
     for (const p of PINNED) expect(p.reason.trim(), linkKey(p)).not.toBe("");
   });
 
+  // Through `readTree`, the scan `write` and `check` themselves run: a copy of it
+  // here would leave its `ownProcessFiles` wiring unexercised.
   test("the wiki boot test is an own-process link: alone, and in no other link", () => {
     const boot = "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts";
-    const t = liveTree();
+    const t = readTree();
     expect(t.ownProcessFiles).toEqual([boot]);
     const { links } = generate(t, readTable());
     const running = links.filter((l) => expandLink(l.args, t.allTestFiles).includes(boot));
@@ -118,7 +115,7 @@ describe("the live chain", () => {
 
   test("the exclude list starts with the live-bot integration test", () => {
     expect(EXCLUDED.map((e) => e.file)).toEqual(["src/chat/integration.test.ts"]);
-    const { links } = generate(liveTree(), readTable());
+    const { links } = generate(readTree(), readTable());
     expect(chainScript(links)).not.toContain("src/chat/integration.test.ts");
   });
 
@@ -130,7 +127,7 @@ describe("the live chain", () => {
     const { files, problems } = parseAllowlist(readFileSync(path.join(ROOT, "scripts/unit-slow-allowlist.txt"), "utf8"));
     expect(problems).toEqual([]);
     expect(files.size).toBeGreaterThan(0);
-    const onDisk = new Set(liveTree().allTestFiles);
+    const onDisk = new Set(readTree().allTestFiles);
     for (const f of files) expect(onDisk.has(f), f).toBe(true);
   });
 });
