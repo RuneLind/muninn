@@ -571,15 +571,15 @@ export interface AloneRun {
   output: string;
   /** Killed at the timeout: its seconds are not a timing. */
   timedOut: boolean;
-  /** Set when the group kill failed (what was killed instead) or the child outlived the wait after the kill. */
+  /** Set when the group kill failed (except ESRCH after the child exited) or the child outlived the wait after the kill. */
   killWarning?: string;
 }
 
 export type KillFn = (pid: number, signal: NodeJS.Signals) => void;
 
 /**
- * SIGKILL the child's process group. When that fails (ESRCH: no such group) and
- * the child still runs, the child itself is killed; an exited child's pid is never
+ * SIGKILL the child's process group. When that fails with any error (ESRCH
+ * included) and the child still runs, the child itself is killed; an exited child's pid is never
  * touched, since it may already belong to another process. The returned warning
  * says what was and was not killed.
  */
