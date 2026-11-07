@@ -60,8 +60,6 @@ export const JIRA_MAX_SOURCES_BY_DEPTH: Record<JiraDepth, number> = {
   full: JIRA_STORED_MAX_SOURCES,
 };
 
-/** THE Jira key shape, now in `src/utils/jira-key-source.ts`. */
-
 /**
  * Pull the Jira key out of a `jira-issues` doc id (`<KEY>_<slug>.md`).
  *
