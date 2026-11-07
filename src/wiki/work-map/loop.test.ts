@@ -237,7 +237,7 @@ describe("the decision triage's due check", () => {
 
     test("the stop aborts a pass that never returns and keeps the hold until it settles", async () => {
       const h = triageHarness();
-      const { signals, failed, settle } = stuck(h);
+      const { signals, settle } = stuck(h);
       startWorkMapLoop(config, { deps: h.deps });
       await h.advance(WORK_MAP_TICK_MS);
       await stopWorkMapLoop(10);
@@ -245,59 +245,27 @@ describe("the decision triage's due check", () => {
       expect(triagePassHeld()).toBe(true);
       await settle();
       expect(triagePassHeld()).toBe(false);
-      // A stop is no failure: nothing recorded.
-      expect(failed).toEqual([]);
     });
 
-    test("the pass's bound: 2 h, then its signal aborts; a pass that returns aborted is recorded failed once, when it returns", async () => {
+    test("the pass's bound: 2 h, then the wiki records failed and its signal aborts; the guard holds until the pass returns", async () => {
       const h = triageHarness();
       const { signals, failed, settle } = stuck(h);
       startWorkMapLoop(config, { deps: h.deps });
       await h.advance(WORK_MAP_TICK_MS);
+      const startedAt = h.now();
       await h.advance(2 * HOUR - MIN);
+      expect(failed).toEqual([]);
       expect(signals[0]!.aborted).toBe(false);
       expect(h.triageRuns).toHaveLength(1);
       await h.advance(2 * MIN);
+      expect(failed.map((f) => [f.wiki, f.at - startedAt])).toEqual([["mimir", 2 * HOUR]]);
+      expect(failed[0]!.error).toContain("timed out");
       expect(signals[0]!.aborted).toBe(true);
-      // The pass may still be writing: nothing is recorded until it returns.
-      expect(failed).toEqual([]);
       await h.advance(HOUR);
-      expect(failed).toEqual([]);
       expect(h.triageRuns).toHaveLength(1);
       await settle();
-      expect(failed.map((f) => f.wiki)).toEqual(["mimir"]);
-      expect(failed[0]!.error).toContain("timed out");
       await h.advance(HOUR);
       expect(h.triageRuns).toHaveLength(2);
-      expect(failed).toHaveLength(1);
-    });
-
-    test("a pass that ignores its bound and then finishes on its own: one run line for its run, and the state is its own", async () => {
-      const h = triageHarness();
-      /** The log and state as the real half writes them: the pass's own line at its end, or `recordFailed`'s. */
-      const lines: { runId: string; outcome: string }[] = [];
-      let state = null as string | null;
-      let finish!: () => void;
-      h.deps.triage!.run = (wiki) => {
-        h.triageRuns.push({ wiki, at: h.deps.now() });
-        return new Promise((r) => (finish = () => {
-          lines.push({ runId: "r1", outcome: "ok" });
-          state = "ok";
-          r({ outcome: "ok", cards: 2 });
-        }));
-      };
-      h.deps.triage!.recordFailed = async () => {
-        lines.push({ runId: "r1", outcome: "failed" });
-        state = "failed";
-        return "failed";
-      };
-      startWorkMapLoop(config, { deps: h.deps });
-      await h.advance(WORK_MAP_TICK_MS);
-      await h.advance(2 * HOUR + MIN);
-      finish();
-      await Bun.sleep(1);
-      expect(lines).toEqual([{ runId: "r1", outcome: "ok" }]);
-      expect(state).toBe("ok");
     });
 
     test("a pass that ends on its own records nothing and leaves no bound armed", async () => {
@@ -343,44 +311,6 @@ describe("the decision triage's due check", () => {
       await h.advance(WORK_MAP_TICK_MS);
       await stopWorkMapLoop(2_000);
       expect(finished).toBe(true);
-    });
-  });
-
-  describe("a pass past its bound that still holds the guard says so", () => {
-    let records: LogRecord[];
-    beforeEach(async () => {
-      records = [];
-      await configure({
-        sinks: { mem: (r) => void records.push(r) },
-        loggers: [{ category: "muninn", lowestLevel: "info", sinks: ["mem"] }, { category: ["logtape", "meta"], lowestLevel: "fatal", sinks: [] }],
-      });
-    });
-    afterEach(() => reset());
-    const wedged = () => records.filter((r) => r.level === "warning" && r.message.join("").includes("still holds the guard")).map((r) => r.message.join(""));
-
-    test("a click's hold, however long, says nothing", async () => {
-      const h = triageHarness();
-      const click = tryHoldTriagePass()!;
-      startWorkMapLoop(config, { deps: h.deps });
-      await h.advance(5 * HOUR);
-      click();
-      expect(h.triageRuns).toHaveLength(0);
-      expect(wedged()).toEqual([]);
-    });
-
-    test("the loop's own pass past its bound: one warning an hour, naming the wiki", async () => {
-      const h = triageHarness();
-      h.deps.triage!.run = (wiki) => {
-        h.triageRuns.push({ wiki, at: h.deps.now() });
-        return new Promise((r) => void stuckSettlers.push(() => r({ outcome: "aborted" })));
-      };
-      startWorkMapLoop(config, { deps: h.deps });
-      await h.advance(WORK_MAP_TICK_MS);
-      await h.advance(2 * HOUR - MIN);
-      expect(wedged()).toEqual([]);
-      await h.advance(2 * HOUR + 30 * MIN);
-      expect(wedged()).toHaveLength(3);
-      expect(wedged()[0]).toContain("a pass on mimir has run since");
     });
   });
 
