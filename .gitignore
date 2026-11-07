@@ -86,3 +86,6 @@ test-results/
 # The SKILL lives in the shared skills repo (~/.claude/skills/playwright-cli/); this is its output.
 .playwright-cli/
 playwright-report/
+
+# `bun scripts/test-chain.ts run`: one junit file per unit-chain link.
+/junit/

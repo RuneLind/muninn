@@ -1,0 +1,360 @@
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import {
+  EXCLUDED,
+  NO_TESTS_EXEMPT,
+  PINNED,
+  SHARD_TOTAL,
+  chainScript,
+  changedTestFiles,
+  check,
+  generate,
+  junitName,
+  linkKey,
+  needsRetime,
+  normalizeTable,
+  parseAllowlist,
+  parseJunit,
+  readTable,
+  rebalance,
+  tableProblems,
+  type ChainLink,
+  type CheckInput,
+  type ShardTable,
+  type Tree,
+} from "./test-chain.ts";
+import { MOCK_MODULE_CALL, TEST_FILE_DIRS, TEST_FILE_GLOB } from "../src/test/mock-isolation.ts";
+
+const ROOT = path.join(import.meta.dir, "..");
+
+function liveTree(): Tree {
+  const all: string[] = [];
+  for (const dir of TEST_FILE_DIRS) {
+    for (const rel of new Bun.Glob(TEST_FILE_GLOB).scanSync({ cwd: path.join(ROOT, dir) })) all.push(`${dir}/${rel}`);
+  }
+  all.sort();
+  return { allTestFiles: all, mockFiles: all.filter((f) => MOCK_MODULE_CALL.test(readFileSync(path.join(ROOT, f), "utf8"))) };
+}
+
+/** A bun junit report with one file-level suite per file, each holding one testcase. */
+function junit(files: string[], seconds = 0.01): string {
+  const suites = files
+    .map(
+      (f) => `  <testsuite name="${f}" file="${f}" tests="1" time="0">
+    <testsuite name="describe" file="${f}" line="3" tests="1" time="0">
+      <testcase name="a" classname="describe" time="${seconds}" file="${f}" line="4" assertions="1" />
+    </testsuite>
+  </testsuite>`,
+    )
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="bun test" tests="${files.length}">\n${suites}\n</testsuites>\n`;
+}
+
+describe("the live chain", () => {
+  test("package.json's `test` is exactly the generated chain, and every test file is in a link", () => {
+    const { links, problems } = generate(liveTree(), readTable());
+    expect(problems).toEqual([]);
+    const pkg = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
+    expect(pkg.scripts.test, "run `bun scripts/test-chain.ts write`").toBe(chainScript(links));
+  });
+
+  test(`every link is on exactly one of the ${SHARD_TOTAL} shards, and the table names no other key`, () => {
+    const { links } = generate(liveTree(), readTable());
+    expect(tableProblems(links, readTable())).toEqual([]);
+  });
+
+  test("the groups keep today's directory arguments as directories", () => {
+    const groupArgs = Object.values(readTable().groups).flat();
+    for (const dir of ["db/migrations/", "src/utils/", "src/summaries/", "src/format/", "src/share/", "src/jira/", "src/sync/", "src/wiki/", "src/gardener/", "src/plans/", "src/auth/", "src/chat/views/components/"]) {
+      expect(groupArgs).toContain(dir);
+    }
+  });
+
+  test("the pinned links are the 25 kept from the hand-written chain plus one A2 found, each with a reason", () => {
+    expect(PINNED.map(linkKey)).toEqual([
+      "src/ai/connectors/openai-compat-request.test.ts",
+      "src/ai/connectors/copilot-sdk.test.ts",
+      "src/db/",
+      "db/provision.test.ts",
+      "src/dashboard/routes/summaries-transcript-check-db.test.ts",
+      "src/dashboard/routes/summary-save-delete-race-db.test.ts",
+      "src/dashboard/routes/wiki-answers-db.test.ts",
+      "src/dashboard/routes/wiki-answers-export-db.test.ts",
+      "src/dashboard/routes/wiki-decision-inbox-db.test.ts",
+      "src/dashboard/routes/wiki-decision-close-db.test.ts",
+      "src/dashboard/routes/wiki-gardener-drift-db.test.ts",
+      "src/dashboard/routes/wiki-gardener-factcheck-db.test.ts",
+      "src/bot/handler.test.ts",
+      "src/bot/middleware.test.ts",
+      "watchers",
+      "src/goals/detector.test.ts",
+      "src/observability/agent-status.test.ts",
+      "src/dashboard/views/components/",
+      "views-pages",
+      "src/tracing/agent-run-trace.test.ts",
+      "src/profile/inject.test.ts",
+      "src/chat/routes-owner-guard.test.ts",
+      "src/ai/tool-surface-fence.test.ts",
+      "src/scheduler/haiku-fence.test.ts",
+      "src/hivemind/",
+      "src/vimeo/captions.test.ts",
+    ]);
+    expect(PINNED.find((p) => p.name === "watchers")!.args).toHaveLength(9);
+    expect(PINNED.find((p) => p.name === "views-pages")!.args).toHaveLength(4);
+    for (const p of PINNED) expect(p.reason.trim(), linkKey(p)).not.toBe("");
+  });
+
+  test("the exclude list starts with the live-bot integration test", () => {
+    expect(EXCLUDED.map((e) => e.file)).toEqual(["src/chat/integration.test.ts"]);
+    const { links } = generate(liveTree(), readTable());
+    expect(chainScript(links)).not.toContain("src/chat/integration.test.ts");
+  });
+
+  test("the no-tests exemption list starts empty", () => {
+    expect(NO_TESTS_EXEMPT).toEqual([]);
+  });
+
+  test("the slow-file allowlist names test files on disk, each with a reason", () => {
+    const { files, problems } = parseAllowlist(readFileSync(path.join(ROOT, "scripts/unit-slow-allowlist.txt"), "utf8"));
+    expect(problems).toEqual([]);
+    expect(files.size).toBeGreaterThan(0);
+    const onDisk = new Set(liveTree().allTestFiles);
+    for (const f of files) expect(onDisk.has(f), f).toBe(true);
+  });
+});
+
+// --- fixtures ---
+
+const tree: Tree = {
+  allTestFiles: ["src/a/one.test.ts", "src/a/two.test.ts", "src/b/m.test.ts", "src/b/three.test.ts", "src/p.test.ts", "src/x.test.ts"],
+  mockFiles: ["src/b/m.test.ts"],
+};
+const pinned = [{ args: ["src/p.test.ts"], reason: "fixture" }];
+const excluded = ["src/x.test.ts"];
+const opts = { pinned, excluded };
+const table: ShardTable = {
+  groups: { g1: ["src/a/"], g2: ["src/b/"] },
+  shards: [["g1"], ["g2", "src/b/m.test.ts"], ["src/p.test.ts"]],
+};
+
+describe("generate", () => {
+  test("a directory stays a directory unless a file under it belongs to another link; mock files run alone", () => {
+    const { links, problems } = generate(tree, table, opts);
+    expect(problems).toEqual([]);
+    expect(links.map((l) => `${l.kind}:${l.key}:${l.args.join(",")}`)).toEqual([
+      "group:g1:src/a/",
+      "group:g2:src/b/three.test.ts",
+      "mock:src/b/m.test.ts:src/b/m.test.ts",
+      "pinned:src/p.test.ts:src/p.test.ts",
+    ]);
+    expect(chainScript(links)).toBe("bun test src/a/ && bun test src/b/three.test.ts && bun test src/b/m.test.ts && bun test src/p.test.ts");
+  });
+
+  test("a mock.module file named in a group is a problem", () => {
+    const { problems } = generate(tree, { ...table, groups: { g1: ["src/a/", "src/b/m.test.ts"] } }, opts);
+    expect(problems).toContain("group g1 names src/b/m.test.ts, which calls mock.module and must run alone");
+  });
+
+  test("a test file in no link is a problem, not a silent skip", () => {
+    const { problems } = generate(tree, { ...table, groups: { g1: ["src/a/"] } }, opts);
+    expect(problems).toEqual(["src/b/three.test.ts is in no link: add it to a group in scripts/unit-shards.json, or pin it"]);
+  });
+
+  test("dropping the exclude entry puts the excluded file in no link", () => {
+    const { problems } = generate(tree, table, { pinned });
+    expect(problems).toEqual(["src/x.test.ts is in no link: add it to a group in scripts/unit-shards.json, or pin it"]);
+  });
+
+  test("dropping a pinned entry leaves its file in no link", () => {
+    const { problems } = generate(tree, table, { pinned: [], excluded });
+    expect(problems).toEqual(["src/p.test.ts is in no link: add it to a group in scripts/unit-shards.json, or pin it"]);
+  });
+
+  test("a pinned link that runs a mock file, or a file twice, is a problem", () => {
+    const { problems } = generate(tree, { ...table, groups: { g1: ["src/a/", "src/p.test.ts"], g2: ["src/b/"] } }, { pinned: [...pinned, { args: ["src/b/"], reason: "x" }], excluded });
+    expect(problems).toContain("pinned link src/b/ runs src/b/m.test.ts, which calls mock.module and runs alone");
+    expect(problems).toContain("src/p.test.ts is in two links: src/p.test.ts and g1");
+  });
+});
+
+describe("tableProblems", () => {
+  const { links } = generate(tree, table, opts);
+  test("green on a table that places each link once", () => {
+    expect(tableProblems(links, table)).toEqual([]);
+  });
+  test("a link dropped from the table", () => {
+    expect(tableProblems(links, { ...table, shards: [["g1"], ["g2"], ["src/p.test.ts"]] })).toEqual(["link src/b/m.test.ts is on no shard"]);
+  });
+  test("a link assigned twice", () => {
+    expect(tableProblems(links, { ...table, shards: [["g1", "src/p.test.ts"], ["g2", "src/b/m.test.ts"], ["src/p.test.ts"]] })).toEqual([
+      "link src/p.test.ts is assigned 2 times (shards 1, 3)",
+    ]);
+  });
+  test("a key that is not a link", () => {
+    expect(tableProblems(links, { ...table, shards: [["g1", "gone"], ["g2", "src/b/m.test.ts"], ["src/p.test.ts"]] })).toEqual([
+      "the table names gone, which is not a link of the chain",
+    ]);
+  });
+});
+
+describe("check (the fan-in)", () => {
+  const { links } = generate(tree, table, opts);
+  const greenJunit = () =>
+    new Map([
+      [junitName("g1"), junit(["src/a/one.test.ts", "src/a/two.test.ts"])],
+      [junitName("g2"), junit(["src/b/three.test.ts"])],
+      [junitName("src/b/m.test.ts"), junit(["src/b/m.test.ts"])],
+      [junitName("src/p.test.ts"), junit(["src/p.test.ts"])],
+    ]);
+  const input = (over: Partial<CheckInput> = {}): CheckInput => ({
+    links,
+    table,
+    tree,
+    junit: greenJunit(),
+    shards: [1, 2, 3],
+    results: ["success"],
+    timings: Object.fromEntries(tree.allTestFiles.map((f) => [f, 1])),
+    excluded,
+    ...over,
+  });
+
+  test("green when every file ran once, mock files alone, every shard succeeded", () => {
+    expect(check(input())).toEqual({ problems: [], warnings: [], ran: 5 });
+  });
+
+  test("red on a link dropped from the table", () => {
+    const r = check(input({ table: { ...table, shards: [["g1"], ["g2"], ["src/p.test.ts"]] } }));
+    expect(r.problems).toContain("link src/b/m.test.ts is on no shard");
+  });
+
+  test("red on a link assigned twice", () => {
+    const r = check(input({ table: { ...table, shards: [["g1", "src/p.test.ts"], ["g2", "src/b/m.test.ts"], ["src/p.test.ts"]] } }));
+    expect(r.problems).toContain("link src/p.test.ts is assigned 2 times (shards 1, 3)");
+    expect(r.problems).toContain("ran 2 times: src/p.test.ts (links src/p.test.ts, src/p.test.ts)");
+  });
+
+  test("red on a mock.module file put into a group", () => {
+    const groupLinks: ChainLink[] = links.map((l) => (l.key === "g2" ? { ...l, args: ["src/b/three.test.ts", "src/b/m.test.ts"] } : l)).filter((l) => l.key !== "src/b/m.test.ts");
+    const j = greenJunit();
+    j.set(junitName("g2"), junit(["src/b/three.test.ts", "src/b/m.test.ts"]));
+    j.delete(junitName("src/b/m.test.ts"));
+    const r = check(input({ links: groupLinks, junit: j, table: { ...table, shards: [["g1"], ["g2"], ["src/p.test.ts"]] } }));
+    expect(r.problems).toEqual(["src/b/m.test.ts calls mock.module and shared its process with 1 other file(s) (link g2)"]);
+  });
+
+  test("a link that exits without junit is named as a crash, not as missing files", () => {
+    const j = greenJunit();
+    j.delete(junitName("g1"));
+    const r = check(input({ junit: j }));
+    expect(r.problems).toEqual(["crash: link g1 on shard 1 exited without writing g1.xml (a process.exit or a crash), so its 2 file(s) are unaccounted for"]);
+  });
+
+  test("red on a shard result that is not success", () => {
+    expect(check(input({ results: ["failure"] })).problems).toEqual(["a unit shard finished failure"]);
+    expect(check(input({ results: ["cancelled"] })).problems).toEqual(["a unit shard finished cancelled"]);
+  });
+
+  test("red on a file that never ran, and on one no link runs", () => {
+    const j = greenJunit();
+    j.set(junitName("g1"), junit(["src/a/one.test.ts", "src/elsewhere.test.ts"]));
+    const r = check(input({ junit: j }));
+    expect(r.problems).toEqual(["never ran: src/a/two.test.ts (link g1)", "ran, but no checked link runs it: src/elsewhere.test.ts"]);
+  });
+
+  test("an exempt file may write no suite, and an exempt file that ran is red", () => {
+    const j = greenJunit();
+    j.set(junitName("g1"), junit(["src/a/one.test.ts"]));
+    expect(check(input({ junit: j, exempt: ["src/a/two.test.ts"] })).problems).toEqual([]);
+    expect(check(input({ exempt: ["src/a/two.test.ts"] })).problems).toEqual(["src/a/two.test.ts is in NO_TESTS_EXEMPT but ran: drop it from the list"]);
+  });
+
+  test("one shard checks only its own links", () => {
+    const only1 = new Map([[junitName("g1"), junit(["src/a/one.test.ts", "src/a/two.test.ts"])]]);
+    expect(check(input({ junit: only1, shards: [1], results: [] }))).toEqual({ problems: [], warnings: [], ran: 2 });
+  });
+
+  test("warns, without failing, when files missing from the timing table took over 60 s", () => {
+    const j = greenJunit();
+    j.set(junitName("src/p.test.ts"), junit(["src/p.test.ts"], 61));
+    const r = check(input({ junit: j, timings: { "src/a/one.test.ts": 1 } }));
+    expect(r.problems).toEqual([]);
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toContain("src/p.test.ts 61.0 s");
+    expect(check(input({ junit: j })).warnings).toEqual([]);
+  });
+});
+
+describe("parseJunit", () => {
+  test("reads the file-level suites of a bun report and sums their testcase time", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="bun test" tests="3" time="0.5">
+  <testsuite name="src/a.test.ts" file="src/a.test.ts" tests="2" time="0" hostname="h">
+    <testsuite name="outer" file="src/a.test.ts" line="3" tests="2" time="0">
+      <testcase name="x" classname="outer" time="0.25" file="src/a.test.ts" line="4" assertions="1" />
+      <testsuite name="inner &apos;q&apos;" file="src/a.test.ts" line="9" tests="1" time="0">
+        <testcase name="y" classname="inner" time="0.5" file="src/a.test.ts" line="10" assertions="1">
+          <failure message="boom" type="AssertionError" />
+        </testcase>
+      </testsuite>
+    </testsuite>
+  </testsuite>
+  <testsuite name="src/b &amp; c.test.ts" file="src/b.test.ts" tests="1" time="0" hostname="h">
+    <testcase name="z" classname="" time="1" file="src/b.test.ts" line="2" assertions="1" />
+  </testsuite>
+</testsuites>
+`;
+    expect(parseJunit(xml)).toEqual([
+      { file: "src/a.test.ts", testcaseSeconds: 0.75 },
+      { file: "src/b & c.test.ts", testcaseSeconds: 1 },
+    ]);
+  });
+});
+
+describe("rebalance", () => {
+  const big: Tree = {
+    allTestFiles: ["src/d/a.test.ts", "src/d/b.test.ts", "src/e.test.ts", "src/f.test.ts", "src/g.test.ts", "src/b/m.test.ts"],
+    mockFiles: ["src/b/m.test.ts"],
+  };
+  const timings = { "src/d/a.test.ts": 30, "src/d/b.test.ts": 30, "src/e.test.ts": 50, "src/f.test.ts": 10, "src/g.test.ts": 10, "src/b/m.test.ts": 40 };
+  const start: ShardTable = { groups: { "unit-1": ["src/d/", "src/e.test.ts", "src/f.test.ts", "src/g.test.ts"] }, shards: [["unit-1", "src/b/m.test.ts"], [], []] };
+
+  test("packs longest first, keeps a directory whole, and places every link once", () => {
+    const { table: t, loads } = rebalance(big, start, timings, { pinned: [], excluded: [] });
+    expect(t.groups).toEqual({ "unit-1": ["src/d/"], "unit-2": ["src/e.test.ts", "src/g.test.ts"], "unit-3": ["src/f.test.ts"] });
+    expect(t.shards).toEqual([["unit-1"], ["unit-2"], ["unit-3", "src/b/m.test.ts"]]);
+    expect(loads).toEqual([60, 60, 50]);
+    const { links, problems } = generate(big, t, { pinned: [], excluded: [] });
+    expect(problems).toEqual([]);
+    expect(tableProblems(links, t)).toEqual([]);
+  });
+});
+
+describe("normalizeTable (run by write)", () => {
+  test("a new link goes to the least-loaded shard and a vanished key is dropped", () => {
+    const { links } = generate(tree, table, opts);
+    const stale: ShardTable = { ...table, shards: [["g1", "gone"], ["g2"], ["src/p.test.ts"]] };
+    const timings = { "src/a/one.test.ts": 50, "src/a/two.test.ts": 50, "src/b/three.test.ts": 20, "src/p.test.ts": 5, "src/b/m.test.ts": 3 };
+    expect(normalizeTable(links, stale, tree, timings).shards).toEqual([["g1"], ["g2"], ["src/p.test.ts", "src/b/m.test.ts"]]);
+  });
+});
+
+describe("the changed-file step", () => {
+  test("keeps the test files the chain runs, so excluded and non-test files drop out", () => {
+    const chain = new Set(["src/a/one.test.ts", "src/p.test.ts"]);
+    expect(changedTestFiles("src/p.test.ts\nsrc/x.test.ts\nsrc/a/one.ts\nsrc/a/one.test.ts\n", chain)).toEqual(["src/a/one.test.ts", "src/p.test.ts"]);
+  });
+
+  test("a file within 2 s over the 10 s bar is timed again; under the bar or further over is not", () => {
+    expect(needsRetime(9.9)).toBe(false);
+    expect(needsRetime(10.1)).toBe(true);
+    expect(needsRetime(12)).toBe(true);
+    expect(needsRetime(12.1)).toBe(false);
+  });
+
+  test("an allowlist entry needs a reason", () => {
+    const { files, problems } = parseAllowlist("# header\nsrc/a.test.ts  # real ffmpeg\nsrc/b.test.ts\n");
+    expect([...files]).toEqual(["src/a.test.ts", "src/b.test.ts"]);
+    expect(problems).toEqual(["allowlist entry without a reason: src/b.test.ts"]);
+  });
+});
