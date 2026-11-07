@@ -13,8 +13,8 @@
  *
  * PR 2 (UI) grew this module past the parser: the reader's Integrate button gate,
  * the diff-preview HTML builders and the apply-body construction all live here for
- * the same reason — they must be unit-testable, and `wiki-browser.ts` runs DOM code
- * at module load so it can't be imported in tests. `src/gardener/diff.ts` (the
+ * the same reason — they must be unit-testable without a DOM, which
+ * `wiki-browser.ts`'s code needs (it is importable since `boot()`). `src/gardener/diff.ts` (the
  * dependency-free LCS line diff behind the gardener's update preview) is the only
  * import, and it is likewise DOM-free + node-free.
  */

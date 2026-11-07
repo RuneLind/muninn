@@ -28,14 +28,15 @@ import {
   type ShardTable,
   type Tree,
 } from "./test-chain.ts";
-import { MOCK_MODULE_CALL, discoverTestFiles } from "../src/test/mock-isolation.ts";
+import { MOCK_MODULE_CALL, discoverTestFiles, expandLink, ownProcessFiles } from "../src/test/mock-isolation.ts";
 import { testTempDirSync } from "../src/test/temp-dir.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
 
 function liveTree(): Tree {
   const all = discoverTestFiles(ROOT);
-  return { allTestFiles: all, mockFiles: all.filter((f) => MOCK_MODULE_CALL.test(readFileSync(path.join(ROOT, f), "utf8"))) };
+  const read = (f: string) => readFileSync(path.join(ROOT, f), "utf8");
+  return { allTestFiles: all, mockFiles: all.filter((f) => MOCK_MODULE_CALL.test(read(f))), ownProcessFiles: ownProcessFiles(all, read) };
 }
 
 /** A bun junit report with one file-level suite per file, each holding one testcase. */
@@ -106,6 +107,15 @@ describe("the live chain", () => {
     for (const p of PINNED) expect(p.reason.trim(), linkKey(p)).not.toBe("");
   });
 
+  test("the wiki boot test is an own-process link: alone, and in no other link", () => {
+    const boot = "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts";
+    const t = liveTree();
+    expect(t.ownProcessFiles).toEqual([boot]);
+    const { links } = generate(t, readTable());
+    const running = links.filter((l) => expandLink(l.args, t.allTestFiles).includes(boot));
+    expect(running.map((l) => `${l.kind}:${l.args.join(",")}`)).toEqual([`own:${boot}`]);
+  });
+
   test("the exclude list starts with the live-bot integration test", () => {
     expect(EXCLUDED.map((e) => e.file)).toEqual(["src/chat/integration.test.ts"]);
     const { links } = generate(liveTree(), readTable());
@@ -150,6 +160,25 @@ describe("generate", () => {
       "pinned:src/p.test.ts:src/p.test.ts",
     ]);
     expect(chainScript(links)).toBe("bun test src/a/ && bun test src/b/three.test.ts && bun test src/b/m.test.ts && bun test src/p.test.ts");
+  });
+
+  test("an own-process file runs alone like a mock file, and naming it in a group or a pinned link is a problem", () => {
+    const t: Tree = { ...tree, ownProcessFiles: ["src/a/two.test.ts"] };
+    const { links, problems } = generate(t, table, opts);
+    expect(problems).toEqual([]);
+    expect(links.map((l) => `${l.kind}:${l.key}:${l.args.join(",")}`)).toEqual([
+      "group:g1:src/a/one.test.ts",
+      "group:g2:src/b/three.test.ts",
+      "own:src/a/two.test.ts:src/a/two.test.ts",
+      "mock:src/b/m.test.ts:src/b/m.test.ts",
+      "pinned:src/p.test.ts:src/p.test.ts",
+    ]);
+    expect(generate(t, { ...table, groups: { g1: ["src/a/one.test.ts", "src/a/two.test.ts"], g2: ["src/b/"] } }, opts).problems).toContain(
+      "group g1 names src/a/two.test.ts, which needs a process of its own (ownProcessFiles) and must run alone",
+    );
+    expect(generate(t, { ...table, groups: { g2: ["src/b/"] } }, { pinned: [...pinned, { args: ["src/a/"], reason: "x" }], excluded }).problems).toContain(
+      "pinned link src/a/ runs src/a/two.test.ts, which needs a process of its own (ownProcessFiles) and runs alone",
+    );
   });
 
   test("a mock.module file named in a group is a problem", () => {
@@ -269,6 +298,11 @@ describe("check (the fan-in)", () => {
     j.delete(junitName("src/b/m.test.ts"));
     const r = check(input({ links: groupLinks, junit: j, table: { ...table, shards: [["g1"], ["g2"], ["src/p.test.ts"]] } }));
     expect(r.problems).toEqual(["src/b/m.test.ts calls mock.module and shared its process with 1 other file(s) (link g2)"]);
+  });
+
+  test("red on an own-process file that shared its process", () => {
+    const r = check(input({ tree: { ...tree, ownProcessFiles: ["src/a/two.test.ts"] } }));
+    expect(r.problems).toEqual(["src/a/two.test.ts needs a process of its own (ownProcessFiles) and shared its process with 1 other file(s) (link g1)"]);
   });
 
   test("a link that exits without junit is named as a crash, not as missing files", () => {

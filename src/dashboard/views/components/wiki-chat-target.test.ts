@@ -1034,9 +1034,10 @@ describe("chatEscBarHtml", () => {
 });
 
 // ── Client call sites ────────────────────────────────────────────────
-// Both client files run DOM code at module load and cannot be imported here, so
-// the wiring facts that no pure helper can hold are pinned at the SOURCE level
+// The wiring facts that no pure helper can hold are pinned at the SOURCE level
 // (the `research-page.test.ts` / `connector-selector.test.ts` precedent).
+// `wiki-browser.ts` is importable since its load-time code moved into `boot()`,
+// and `wiki-shell-boot.test.ts` drives it in happy-dom; these greps predate that.
 //
 // The dialog's DOM half now lives in `wiki-chat-options.ts` (2026-08 cut 2), so
 // most of these read THAT file; the two that are genuinely about the reader shell
@@ -1309,26 +1310,9 @@ describe("wiki reader chat-dialog wiring", () => {
     expect(at).toBeLessThan(body.indexOf("data.threadExists"));
   });
 
-  test("the shell calls initChatOptions AFTER registering its own click delegate", async () => {
-    // Load-bearing ordering, and the ONLY thing holding it is the position of one
-    // call in a file: the dialog registers its click delegate inside
-    // `initChatOptions`, and the click-away decision it runs at the end of that
-    // listener reads `document.contains(target)`. A shell branch that
-    // synchronously detaches its own target (`cancelFactcheckIntegrate`) must
-    // therefore run BEFORE the dialog's listener, i.e. be registered first —
-    // exactly as it was when both lived in one listener. Moving the call up would
-    // close the dialog on the integrate panel's Cancel, which neither tsc nor the
-    // module's own listener tests can see.
-    const src = await browserSrc();
-    const delegate = src.indexOf('document.addEventListener("click"');
-    const detaching = src.indexOf('t.closest("#wikiFcIntCancel")');
-    const init = src.indexOf("initChatOptions({");
-    expect(delegate).toBeGreaterThan(-1);
-    expect(detaching).toBeGreaterThan(-1);
-    expect(init).toBeGreaterThan(-1);
-    expect(delegate).toBeLessThan(init);
-    expect(detaching).toBeLessThan(init);
-  });
+  // The click delegate's order against `initChatOptions` used to be pinned here
+  // by source position; it is now asserted on the listeners `boot()` actually
+  // registers, in `src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts`.
 
   test("the shell wires every port member to its real binding", async () => {
     // The port is six callbacks to module-scoped `let`s the dialog can no longer

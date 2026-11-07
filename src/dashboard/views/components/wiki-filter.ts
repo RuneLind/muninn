@@ -1,7 +1,7 @@
 /**
  * Pure, side-effect-free helpers for the /wiki reader page. Split out from
- * `wiki-browser.ts` (which has DOM side effects at module load) so these can be
- * unit-tested directly. Mirrors the listing shape sent by
+ * `wiki-browser.ts` (which then ran DOM code at module load) so these can be
+ * unit-tested directly, without a DOM. Mirrors the listing shape sent by
  * `src/dashboard/routes/wiki-routes.ts`.
  */
 
@@ -595,8 +595,8 @@ export function isImplausibleFutureDate(ms: number, now: number): boolean {
  * The `now` every recency read in this module should be given — the viewer's clock
  * anchored forward to the server's own scan instant.
  *
- * This module is BUNDLED INTO THE BROWSER (`wiki-browser.ts` is a `Bun.build` IIFE
- * entrypoint), so a bare `Date.now()` is the VIEWER's clock, and the future-date guard
+ * This module is BUNDLED INTO THE BROWSER (`wiki-browser.ts` is in the `Bun.build` IIFE
+ * behind `wiki-shell-client.ts`), so a bare `Date.now()` is the VIEWER's clock, and the future-date guard
  * is a comparison against it. A viewer whose clock runs more than 48 h SLOW would
  * therefore judge every legitimate frontmatter stamp implausible and silently collapse
  * the entire wiki onto its git/mtime floors — a whole-listing failure caused by a

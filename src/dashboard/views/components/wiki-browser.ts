@@ -1,8 +1,9 @@
 /// <reference lib="dom" />
 /**
- * Browser entrypoint for the /wiki reader page. Bundled by Bun.build()
- * (see wiki-client.ts) and injected as an IIFE into the wiki page's inline
- * `<script>`. A mechanical port of the former hand-written inline IIFE — same
+ * The /wiki reader page's shell. Bundled by Bun.build() through the two-line
+ * entry `wiki-shell-client.ts` (see wiki-client.ts), which calls {@link boot},
+ * and injected as an IIFE into the wiki page's inline `<script>`. Importing this
+ * module runs nothing: every listener, timer and boot fetch lives in `boot()`. A mechanical port of the former hand-written inline IIFE — same
  * DOM ids/classes, same `/api/wiki/*` fetches, same keyboard/click handling.
  *
  * Three panes: filterable page list · rendered article with clickable
@@ -72,8 +73,8 @@ import {
 // port and registers those listeners; where it is called from is load-bearing —
 // see that file's header.
 import { closeChatOptionsIfNavigatingAway, initChatOptions } from "./wiki-chat-options.ts";
-// The share dialog: IMPORTED, never the standalone bundle. This file is itself a
-// `Bun.build` entrypoint, so loading both would give the page two copies of the
+// The share dialog: IMPORTED, never the standalone bundle. This file is itself
+// bundled (as `wiki-shell-client.ts`'s import), so loading both would give the page two copies of the
 // module — two states, two document listener sets, one split dialog.
 import { openShareDialog, closeShareDialogOnNavigate } from "./share-dialog.ts";
 import { closeWalkthroughOnNavigate, enhanceWalkthroughButtons } from "./wiki-walkthrough.ts";
@@ -88,7 +89,7 @@ import {
 } from "./wiki-felles-publish.ts";
 import { installMirrorStatus } from "./wiki-mirror-status.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
-// load it — this file touches `document` at import time.
+// load it without a DOM.
 import {
   RELATED_HOP_ATTR,
   RELATED_HOP_BODY_ATTR,
@@ -185,7 +186,7 @@ import {
 } from "./wiki-groups.ts";
 import { railInputFor, threadPinAnchor, workBoundariesOf } from "./wiki-rail-input.ts";
 import { rowBoundaryAction, type WorkBoundaries } from "./wiki-work-boundaries.ts";
-import { readSeriesBasesAfterWrites, SERIES_REQUEST_TIMEOUT_MS, SERIES_STALLED_COPY, seriesBaseReader, seriesConflictCopy, seriesPoster, trackSeriesWrite, withinSeriesBound, writeSeriesUnlessOpenChanged, type OpenPageAtLoad } from "./wiki-series-write.ts";
+import { readSeriesBasesAfterWrites, SERIES_REQUEST_TIMEOUT_MS, SERIES_STALLED_COPY, seriesBaseReader, seriesConflictCopy, seriesPoster, trackSeriesWrite, withinSeriesBound, writeSeriesUnlessOpenChanged, type OpenPageAtLoad, type SeriesPoster } from "./wiki-series-write.ts";
 import { checkNewSeriesKey, recheckSaveAsSeries } from "./wiki-work-series.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
@@ -491,7 +492,7 @@ const LENS_PARAM = "lens";
  *  first article this view renders, and is then removed from the address bar
  *  with `replaceState`, so a reload shows the stored choice. It never changes
  *  the stored choice. */
-let pendingUrlLens: string | null = new URLSearchParams(location.search).get(LENS_PARAM);
+let pendingUrlLens!: string | null;
 /** The lens of the view an in-place reload replaces ({@link reloadCheckedPage}),
  *  keyed by the page's relPath: the reloaded page keeps it, unstored. In the
  *  Agent lens, also the pane's inputs and card, which the new pane shows as
@@ -629,17 +630,17 @@ interface WikiPageProvenance {
  *  canonical name (else the raw query) by the shared rule in `wiki-param.ts`,
  *  which `wiki-start-cards.ts` re-uses for its un-wired default. Empty =
  *  default/env. */
-const WIKI = readActiveWikiName();
+let WIKI!: string;
 /** Where this wiki lives ON DISK — injected by the server, `null` when it named
  *  no servable root. Only the breadcrumb's ⧉ Copy path reads it, and like `WIKI`
  *  it is a boot-time fact: switching wiki is a full navigation. */
-const WIKI_ROOT = readActiveWikiRoot();
+let WIKI_ROOT!: string | null;
 /** This wiki's registry name — the requested one, which the answer, new-since
  *  and Agent consumers send as `wiki`. */
-const FIND_SELF_WIKI = readFindSelfWiki();
+let FIND_SELF_WIKI!: string;
 /** The name Everywhere rows carry for this wiki's root (the first registry
  *  entry on it). Only the palette reads it; never send it as `wiki`. */
-const FIND_ROWS_WIKI = readFindRowsWiki();
+let FIND_ROWS_WIKI!: string;
 /** Append the active `wiki` param to a URL so every /api/wiki/* fetch stays on-wiki. */
 function withWiki(url: string): string {
   return withWikiParam(url, WIKI);
@@ -994,23 +995,6 @@ function relPathToName(relPath: string): string | null {
   const hit = allPages.find((p) => (p.relPath || "").replace(/\\/g, "/").toLowerCase() === key);
   return hit ? hit.name : null;
 }
-
-initStartCards({
-  withWiki,
-  resolvePageName: relPathToName,
-  workMapRunAt: () => workMapRunAt,
-  // One map cache for the card, the rail and the effort page (P4). The ↻ poll
-  // asks `fresh` and hands a newer map back through `adoptWorkMap`.
-  fetchWorkMap: (fresh) => (fresh || workMapRunAt === null ? getWorkMap() : workMapFetchFor(workMapRunAt)),
-  adoptWorkMap,
-  pages: () => allPages,
-  waitsCounted: () => waitsCounted,
-  hrefFor: pageUrlByRelPath,
-  effortHref: effortHrefFor,
-});
-initWikiVisuals();
-initRailResize();
-initPaneToggles();
 
 function sortMode(): WikiSortMode {
   return (document.getElementById("wikiSort") as HTMLSelectElement).value as WikiSortMode;
@@ -1460,28 +1444,22 @@ function syncFilters(autoOpen = true): void {
   if (autoOpen && details && count && !details.open) details.open = true;
 }
 
-// The one-time cleanup that ships with the removal of `Recently opened`: the
-// `muninn.wiki.recents.v1:*` keys a reader already carries are dropped here,
-// before the first render, and nothing writes one again. Boot-time and
-// idempotent — see `purgeRecentsKeys` for why the prefix is the whole contract.
-purgeRecentsKeys();
-
 /** The reader's own pin list for THIS wiki, read once at boot and kept in step by
  *  the writer below — re-reading localStorage inside `renderList` would put a
  *  synchronous storage hit on every keystroke in the search box. */
-let pins: string[] = readPins(WIKI);
+let pins!: string[];
 
 /** Which GROUPS this reader has opened on this wiki — same discipline as `pins`:
  *  read once at boot, kept in step by the toggle, never re-read per render. It
  *  also carries the `group families` toggle itself (`GROUP_FAMILIES_TOGGLE_KEY`),
  *  a sentinel in the same flat key namespace as `section:meta`, so the toggle is
  *  remembered per wiki with no second store. */
-let openFolds: string[] = readFolds(WIKI);
+let openFolds!: string[];
 
 /** The reader's pinned work thread on this wiki (D7): `held` (one page
  *  relPath, what the rail renders) and `known` (what this tab last read or
  *  wrote). Every change goes through `stepThreadPin`, the state table. */
-let threadPin: ThreadPinState = threadPinStep({ held: null, known: undefined }, { kind: "boot", stored: readThreadPin(WIKI) }).state;
+let threadPin!: ThreadPinState;
 
 /** Run one row of the pin's state table and perform the write it asks for.
  *  Answers whether the rail should repaint (`storage` rows only). */
@@ -1495,10 +1473,7 @@ function stepThreadPin(t: ThreadPinTrigger): boolean {
  *  the rail renders from; null = D1), `known` (what this tab last read or
  *  wrote) and whether the held record lives in this tab only. Every change
  *  goes through `stepWorkGroup`, the record's state table. */
-let workGroupRec: WorkGroupRecordState = workGroupRecordStep(
-  { held: null, known: undefined, patch: null, failed: false },
-  { kind: "boot", stored: readWorkGroup(WIKI) },
-).state;
+let workGroupRec!: WorkGroupRecordState;
 
 /** Run one row of the record's state table and perform the write it asks for.
  *  Answers whether the rail should repaint (`storage` rows only). */
@@ -3599,7 +3574,7 @@ function miniGraphHtml(data: WikiPageDetail, rows: readonly IssueRow[] | null | 
 
 // ── Right pane: connections ───────────────────────────────────────────
 /** The Related work order this reader picked on this wiki. */
-let relatedOrder: RelatedOrder = readRelatedOrder(WIKI);
+let relatedOrder!: RelatedOrder;
 
 /*
  * Second-hop state for ONE page open, keyed by the hop row's normalized
@@ -4012,18 +3987,6 @@ function renderStale(): void {
   }
   paintStaleSurfaces();
 }
-
-/** The `<details>` the reader folds: its state is the page's from then on. */
-document.getElementById("staleBody")?.addEventListener(
-  "toggle",
-  (e) => {
-    const d = e.target as HTMLElement;
-    const key = d.getAttribute?.("data-stale-open");
-    // A toggle queued by a body since replaced (another page's) is not this page's.
-    if (key && d.isConnected) staleOpen[key] = (d as HTMLDetailsElement).open;
-  },
-  true,
-);
 
 /** What the client holds beyond a freshly loaded report, made to agree with
  *  it: a row a reader has judged is no longer a failed Check row, and no more
@@ -4766,7 +4729,7 @@ function setSeriesMenuNote(state: SeriesMenuState, text: string, bad: boolean): 
  *  base that cannot be read is `null`, which the caller reports rather than
  *  writing without one. */
 const seriesBaseHash = seriesBaseReader((relPath) => withWiki(`/api/wiki/page?relPath=${encodeURIComponent(relPath)}`));
-const postSeriesWrite = seriesPoster(WIKI);
+let postSeriesWrite!: SeriesPoster;
 
 /**
  * Run the editor's writes, in order, stopping at the first failure.
@@ -4924,92 +4887,6 @@ function repaintSeriesHead(): void {
   // A series strip that appears brings the lens switch, as a cost line does.
   if (html) refreshLensSwitch(document.getElementById("articleWrap")!);
 }
-
-document.addEventListener("keydown", (e) => {
-  if ((e as KeyboardEvent).key === "Escape" && seriesMenuEl()) closeSeriesMenu("key");
-});
-// Closed rather than re-anchored — see the block comment above. `capture` so a
-// scroll inside the RAIL (which does not bubble) is seen too; the popover's own
-// scroll is excluded by target, or its `overflow-y: auto` list would dismiss it
-// on the first wheel tick.
-window.addEventListener(
-  "scroll",
-  (e) => {
-    const el = seriesMenuEl();
-    const target = e.target as Node | null;
-    if (el && target && (target === el || el.contains(target))) return;
-    closeSeriesMenu("viewport");
-  },
-  true,
-);
-window.addEventListener("resize", () => closeSeriesMenu("viewport"));
-
-/** The popover's own delegate, on its node, so the shell's document listeners
- *  carry no branch for it and a click inside it never reaches the rail's
- *  row-opening handler. */
-document.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  if (!target?.closest) return;
-  const menuEl = seriesMenuEl();
-  if (menuEl && menuEl.contains(target)) {
-    if (boundaryItemClick(target)) {
-      e.preventDefault();
-      return;
-    }
-    const cmd = target.closest<HTMLElement>("[data-series-cmd]");
-    if (!cmd || !seriesMenu) return;
-    e.preventDefault();
-    const arg = cmd.getAttribute("data-series-arg") || "";
-    const { model } = seriesMenu;
-    if (cmd.getAttribute("data-series-cmd") === "join") {
-      void applySeriesWrites([{ relPath: model.relPath, series: arg }]);
-    } else if (cmd.getAttribute("data-series-cmd") === "remove") {
-      // The route clears `series_label:` with the key — a label on a page in no
-      // series names nothing, and no surface reads it (the rail takes the label
-      // off a MEMBER, and the lint's census skips a page with no key).
-      void applySeriesWrites([{ relPath: model.relPath, series: null }]);
-    } else if (cmd.getAttribute("data-series-cmd") === "head" && arg) {
-      void applySeriesWrites(headMoveWrites(model, arg, model.label));
-    }
-    return;
-  }
-  // An opener. Re-clicking the one that opened the menu closes it, the ordinary
-  // popover convention.
-  const opener =
-    target.closest<HTMLElement>(`[${SERIES_MENU_ATTR}]`) ||
-    target.closest<HTMLElement>(`[${SERIES_EDIT_ATTR}]`);
-  if (opener) {
-    e.preventDefault();
-    e.stopPropagation();
-    const edit = opener.hasAttribute(SERIES_EDIT_ATTR);
-    const rel = opener.getAttribute(edit ? SERIES_EDIT_ATTR : SERIES_MENU_ATTR) || "";
-    const wasOpen = !!seriesMenu && seriesMenu.model.relPath === rel && seriesMenu.edit === edit;
-    closeSeriesMenu(wasOpen ? "toggle" : "replace");
-    if (!wasOpen && rel) openSeriesMenu(opener, rel, edit);
-    return;
-  }
-  // Any other click dismisses, and leaves focus where the click put it.
-  if (menuEl) closeSeriesMenu("outside");
-});
-
-document.addEventListener("submit", (e) => {
-  const form = (e.target as HTMLElement)?.closest?.<HTMLElement>("[data-series-form]");
-  if (!form || !seriesMenu) return;
-  e.preventDefault();
-  const value = (form.querySelector("[data-series-input]") as HTMLInputElement | null)?.value.trim();
-  if (!value) return;
-  const { model } = seriesMenu;
-  if (form.getAttribute("data-series-form") === "label") {
-    // The label lives on the HEAD. With no labelled member yet, it lands on the
-    // page the reader opened the editor from — which is the page they are
-    // looking at, and which `seriesHead` then reads it off.
-    void applySeriesWrites([
-      { relPath: model.headRel || model.relPath, series: model.current, seriesLabel: value },
-    ]);
-    return;
-  }
-  void applySeriesWrites([{ relPath: model.relPath, series: value }]);
-});
 
 /**
  * The retired banner for the open page, or "". Reads `cullReason` and
@@ -5975,31 +5852,6 @@ function refreshEffortFromListing(): void {
 }
 
 const GRAPH_NODE_SEL = `#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`;
-document.addEventListener("mouseover", (e) => {
-  const t = e.target as HTMLElement | null;
-  const node = t?.closest?.(GRAPH_NODE_SEL);
-  if (node) lightGraph(node.getAttribute(GRAPH_NODE_ATTR));
-});
-document.addEventListener("mouseout", (e) => {
-  const t = e.target as HTMLElement | null;
-  if (!t?.closest?.(GRAPH_NODE_SEL)) return;
-  const to = (e as MouseEvent).relatedTarget as HTMLElement | null;
-  if (!to?.closest?.(GRAPH_NODE_SEL)) lightGraph(null);
-});
-document.addEventListener("focusin", (e) => {
-  const t = e.target as HTMLElement | null;
-  // Focus leaving the nodes (into the card, say) falls back to the card's node.
-  const node = t?.closest?.(GRAPH_NODE_SEL);
-  lightGraph(node ? node.getAttribute(GRAPH_NODE_ATTR) : null);
-});
-document.addEventListener("change", (e) => {
-  const t = e.target as HTMLSelectElement | null;
-  if (!t) return;
-  if (t.id === GRAPH_LEVEL_ID) graphLevel = Number(t.value) as GraphLevel;
-  else if (t.id === GRAPH_DEPTH_ID) graphDepth = Number(t.value);
-  else return;
-  loadGraph();
-});
 /**
  * Does another Escape owner hold this keypress? The card's listener runs in the
  * capture phase and stops propagation, so every other owner — all bubble-phase —
@@ -6015,325 +5867,6 @@ function escapeOwnedElsewhere(): boolean {
     navMenuOpen(document)
   );
 }
-// Escape with a card open, and no other owner active, closes the card and
-// nothing else. Capture phase, so it runs before the pane keys' bubble
-// listener, which would leave focus mode.
-document.addEventListener(
-  "keydown",
-  (e) => {
-    if (e.key !== "Escape" || !graphCardId || document.getElementById(GRAPH_CARD_ID)?.hidden) return;
-    if (escapeOwnedElsewhere()) return;
-    e.preventDefault();
-    e.stopPropagation();
-    closeGraphCard();
-  },
-  true,
-);
-document.addEventListener("keydown", (e) => {
-  // Any open modal or menu, not only one around the focused element
-  // (`modalOpen` says why).
-  const toggles = graphKeyToggles(readerKeyEventOf(e));
-  // Only where the toggle is on screen: an article or an issue graph, on a
-  // wiki with a tracker — never the overview or an Ask answer.
-  if (!toggles || !document.getElementById(GRAPH_TOGGLE_ID)) return;
-  e.preventDefault();
-  toggleGraph();
-});
-// `v` swaps Overview and All, as the breadcrumb's lens chip does; a no-op
-// where the page shows no lens switch.
-document.addEventListener("keydown", (e) => {
-  if (!lensKeyToggles(readerKeyEventOf(e))) return;
-  if (toggleLens(document.getElementById("articleWrap")!)) e.preventDefault();
-});
-
-// ── Event wiring (all clicks delegated) ───────────────────────────────
-document.body.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  if (target.closest && target.closest("#wikiWhatsNewRefresh, #wikiWhatsNewRetry")) {
-    loadDigest(true);
-    return;
-  }
-  if (typeof target.closest === "function" && handleWorkCardClick(target)) return;
-  if (target.closest && target.closest("#wikiIndexReindex")) {
-    startReindex();
-    return;
-  }
-  // Effort links (the Your work card, the effort page) open in the reader;
-  // a modifier or middle click keeps the anchor's own href.
-  const effortLink = target.closest ? target.closest("[data-effort-link]") : null;
-  const effortHome = target.closest ? target.closest("[data-effort-home]") : null;
-  const effortRetry = target.closest ? target.closest("#wikiEffortRetry") : null;
-  if (effortLink || effortHome || effortRetry) {
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
-    e.preventDefault();
-    if (effortLink) openEffort(effortLink.getAttribute("data-effort-link") || "");
-    else if (effortRetry && effortOpen !== null) renderEffort(effortOpen);
-    else if (effortHome) {
-      goToStart();
-      document.getElementById("wikiWorkCard")?.scrollIntoView({ block: "start" });
-    }
-    return;
-  }
-  const crumb = target.closest ? target.closest(".wiki-bc-wiki") : null;
-  if (crumb) {
-    // Plain click only: a modifier/middle click keeps the anchor's own href.
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
-    e.preventDefault();
-    goToStart();
-    return;
-  }
-  if (target.closest && target.closest("#wikiIndexRefresh")) {
-    loadIndexCoverage(true);
-    return;
-  }
-  // Coverage footer under the page list → open the full Index card on the start
-  // view (it lazy-loads there); scroll it into view once the render settles.
-  if (target.closest && target.closest("#wikiCoverageLink")) {
-    goToStart();
-    setTimeout(() => {
-      const card = document.getElementById("wikiIndexCard");
-      if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
-    }, 0);
-    return;
-  }
-  const tab = target.closest ? target.closest(".wiki-tab") : null;
-  if (tab) {
-    switchStartTab(tab.getAttribute("data-tab"));
-    return;
-  }
-  // Right rail Connections | Ask tab switch (manual — focus the Ask box).
-  const connTab = target.closest ? target.closest(".wiki-conn-tab") : null;
-  if (connTab) {
-    switchConnTab(connTab.getAttribute("data-conntab") || "conn", true);
-    return;
-  }
-  // The article pill opens the STALE tab; the home line opens the home's Stale tab.
-  if (target.closest && target.closest("[data-stale-pill]")) {
-    e.preventDefault();
-    // A collapsed pane hides the tab and focus mode hides the pane: show it first.
-    revealRightPane();
-    switchConnTab("stale");
-    return;
-  }
-  if (target.closest && target.closest("[data-stale-home-open]")) {
-    e.preventDefault();
-    switchStartTab("stale");
-    return;
-  }
-  // The STALE tab's buttons, before the nav-link branch below.
-  const staleCheck = target.closest ? target.closest("[data-stale-check]") : null;
-  if (staleCheck) {
-    void runStaleCheckClient(staleCheck.getAttribute("data-stale-page") || "");
-    return;
-  }
-  const staleVerdict = target.closest ? target.closest("[data-stale-verdict]") : null;
-  if (staleVerdict) {
-    void postStaleVerdict(staleVerdict);
-    return;
-  }
-  const staleApply = target.closest ? target.closest("[data-stale-apply]") : null;
-  if (staleApply) {
-    void postStaleFix(staleApply, "apply");
-    return;
-  }
-  const staleSend = target.closest ? target.closest("[data-stale-send]") : null;
-  if (staleSend) {
-    void postStaleFix(staleSend, "send");
-    return;
-  }
-  // The rail's ★ lives inside a `[data-relpath]` row; it is the list's own
-  // listener's business, and opening the page as well is not what a click on it
-  // means. Skipped HERE rather than by stopping propagation in that listener, so
-  // one widget's handler cannot silence document-level listeners that have
-  // nothing to do with it.
-  if (target.closest && target.closest("[data-pin]")) return;
-  // The work thread's 📌 is the list's own listener's business too.
-  if (target.closest && target.closest("[data-thread-pin]")) return;
-  // And the work thread ⋯ menus (PR 4): a focus row's own ⋯ sits inside a
-  // `[data-relpath]` row, and the popover is appended to `document.body`.
-  if (target.closest && target.closest(`[data-thread-row-menu], [data-work-card-menu], #${WORK_POP_ID}`)) return;
-  // Same rule for the group chip and the section fold: both live inside a
-  // `[data-relpath]` row, both belong to the list's own listener, and a click on
-  // either means "show me what is folded here", never "open this page".
-  if (target.closest && target.closest("[data-fold-key]")) return;
-  // Same rule again for the series editor: its `⋯` opener sits inside a
-  // `[data-relpath]` row (the rail's and the Related-work panel's), and its
-  // popover is appended to `document.body`, so without this skip a click on
-  // either OPENED THE PAGE underneath — measured, one navigation per menu open.
-  // Skipped by SELECTOR rather than by stopping propagation in the editor's own
-  // listener, which runs after this one: the ★ and the fold chip settled that
-  // rule for exactly this shape.
-  if (
-    target.closest &&
-    target.closest(`[${SERIES_MENU_ATTR}], [${SERIES_EDIT_ATTR}], #${SERIES_MENU_ID}`)
-  ) {
-    return;
-  }
-  // Related work's order toggle and ▸ second hop. The ▸ sits INSIDE a
-  // `[data-relpath]` row, so it is claimed here, before the nav-link branch
-  // below would open the row's page.
-  const relOrderBtn = target.closest ? target.closest(`[${RELATED_ORDER_ATTR}]`) : null;
-  if (relOrderBtn) {
-    e.preventDefault();
-    setRelatedOrder(parseRelatedOrder(relOrderBtn.getAttribute(RELATED_ORDER_ATTR)));
-    return;
-  }
-  const relHopBtn = target.closest ? target.closest<HTMLButtonElement>(`[${RELATED_HOP_ATTR}]`) : null;
-  if (relHopBtn) {
-    e.preventDefault();
-    toggleRelatedHop(relHopBtn);
-    return;
-  }
-  // The article header's project hub chip. Delegated here rather than bound at
-  // render time because `#articleWrap`'s innerHTML is replaced on every page
-  // load — and checked BEFORE the nav-link branch, since the chip sits inside the
-  // article head, which that branch would otherwise not claim but future markup
-  // might.
-  const hubChip = target.closest ? target.closest("[data-project-hub]") : null;
-  if (hubChip) {
-    e.preventDefault();
-    applyProjectFilter(hubChip.getAttribute("data-project-hub") || "");
-    return;
-  }
-  // The series strip's `continue at:` link. Delegated for the hub chip's reason
-  // — `#articleWrap`'s innerHTML is replaced on every page load — and by relPath
-  // rather than by name, since two pages of one series can share a stem.
-  const seriesGo = target.closest ? target.closest("[data-series-go]") : null;
-  if (seriesGo) {
-    e.preventDefault();
-    const rel = seriesGo.getAttribute("data-series-go") || "";
-    if (rel) loadPageByRelPath(rel, true);
-    return;
-  }
-  // A reveal control on an empty surface (the rail, Hubs): turn the toggle on.
-  if (target.closest && target.closest(`[${RETIRED_REVEAL_ATTR}]`)) {
-    e.preventDefault();
-    setShowRetired(true);
-    // The repaint removed the control that had focus; the options button that
-    // holds the toggle it turned on is where a keyboard reader continues.
-    document.getElementById("wikiOptionsBtn")?.focus();
-    return;
-  }
-  // The retired banner's successor link — same shape as `continue at:`, but a
-  // modified click keeps the anchor's own href (a new tab is a fair ask here).
-  const cullGo = target.closest ? target.closest(`[${CULL_GO_ATTR}]`) : null;
-  if (cullGo) {
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
-    e.preventDefault();
-    const rel = cullGo.getAttribute(CULL_GO_ATTR) || "";
-    if (rel) loadPageByRelPath(rel, true);
-    return;
-  }
-  // Graph mode: the toggle, a node (opens its card), the card's controls.
-  if (target.closest && target.closest(`#${GRAPH_TOGGLE_ID}`)) {
-    e.preventDefault();
-    toggleGraph();
-    return;
-  }
-  const graphFocus = target.closest ? target.closest(`[${GRAPH_FOCUS_ATTR}]`) : null;
-  if (graphFocus) {
-    e.preventDefault();
-    focusGraphNode(graphFocus.getAttribute(GRAPH_FOCUS_ATTR) || "");
-    return;
-  }
-  const graphOpen = target.closest ? target.closest(`[${GRAPH_OPEN_ATTR}]`) : null;
-  if (graphOpen) {
-    e.preventDefault();
-    graphMode = false;
-    graphIssue = "";
-    loadPageByRelPath(graphOpen.getAttribute(GRAPH_OPEN_ATTR) || "", true);
-    return;
-  }
-  if (target.closest && target.closest(`[${GRAPH_CARD_CLOSE_ATTR}]`)) {
-    e.preventDefault();
-    closeGraphCard();
-    return;
-  }
-  const graphNode = target.closest ? target.closest(`[${GRAPH_NODE_ATTR}]`) : null;
-  if (graphNode) {
-    e.preventDefault();
-    openGraphCard(graphNode.getAttribute(GRAPH_NODE_ATTR) || "");
-    return;
-  }
-  // Connections' Link and Link all. Before the Jira key below: a Link button
-  // sits beside a key, never inside one, but the order is the decision.
-  const issueLink = target.closest ? target.closest<HTMLButtonElement>(`[${ISSUE_LINK_ATTR}]`) : null;
-  if (issueLink) {
-    e.preventDefault();
-    if (issueLink.disabled || !currentRelPath) return;
-    void linkIssue(
-      currentRelPath,
-      issueLink.getAttribute("data-issue-tracker") || "",
-      issueLink.getAttribute(ISSUE_LINK_ATTR) || "",
-    );
-    return;
-  }
-  if (target.closest && target.closest(`[${ISSUE_LINK_ALL_ATTR}]`)) {
-    e.preventDefault();
-    void linkAllIssues();
-    return;
-  }
-  // The provenance strip's Jira key: the key itself narrows the page list to the
-  // pages serving that issue. Delegated here for the hub chip's reason — the
-  // strip lives inside `#articleWrap`, whose innerHTML is replaced on every load.
-  const provJira = target.closest ? target.closest("[data-prov-jira]") : null;
-  if (provJira) {
-    e.preventDefault();
-    const key = provJira.getAttribute("data-prov-jira") || "";
-    // Re-clicking the active key clears it, the chip row's own convention — so a
-    // reader who filtered from the strip can undo it from the same control.
-    applyJiraFilter(filters.jira === key ? "" : key);
-    return;
-  }
-  // The ⧉ copy button on a chain row. The id is carried ON the button rather
-  // than re-read from the row at click time, the ⧉ Copy path rule: the string
-  // reported and the string copied cannot then be different sessions. Checked
-  // BEFORE the disclosure below, because the button sits INSIDE the chain the
-  // line opens — the outer `closest` would otherwise never be reached, but the
-  // order is what makes that a decision rather than a coincidence of markup.
-  const sessCopy = target.closest ? target.closest<HTMLButtonElement>("[data-sess-copy]") : null;
-  if (sessCopy) {
-    e.preventDefault();
-    copySessionId(sessCopy);
-    return;
-  }
-  // The Stamp button on a ghost row. BEFORE the disclosure, for the ⧉ button's
-  // reason: it sits inside the chain the line opens.
-  const provStamp = target.closest
-    ? target.closest<HTMLButtonElement>("[data-prov-stamp]")
-    : null;
-  if (provStamp) {
-    e.preventDefault();
-    void stampGhost(provStamp);
-    return;
-  }
-  // The provenance line itself: one disclosure over the chain under the title.
-  // Delegated for the same reason as the two above — `#articleWrap`'s innerHTML
-  // is replaced on every page load, so a listener bound at render time would be
-  // re-bound per page and lost on the next one.
-  const provToggle = target.closest
-    ? target.closest<HTMLButtonElement>("[data-prov-toggle]")
-    : null;
-  if (provToggle) {
-    e.preventDefault();
-    toggleProvChain(provToggle);
-    return;
-  }
-  if (target.closest && target.closest("[data-prov-retry]")) {
-    e.preventDefault();
-    retryProvStrip();
-    return;
-  }
-  const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;
-  if (!link) return;
-  // `navTargetFrom` prefers `data-relpath` — the only key that names ONE page on a
-  // wiki with same-stem pages. The decision is pure + unit-tested (`wiki-nav.ts`);
-  // this listener only does the DOM half.
-  const targetPage = navTargetFrom(link);
-  if (!targetPage) return;
-  e.preventDefault();
-  openNavTarget(targetPage, true);
-});
 
 /**
  * The rail's own control: the ★ pin on every row.
@@ -6877,434 +6410,11 @@ function openThreadRowMenu(btn: HTMLElement): void {
   if (html) openWorkPop(btn, `row:${rel}`, html, `Page menu for ${page ? displayTitleOf(page) : rel}`, rel);
 }
 
-document.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  if (!target?.closest) return;
-  const el = workPopEl();
-  if (el && el.contains(target)) {
-    if (boundaryItemClick(target)) return e.preventDefault();
-    const save = target.closest<HTMLElement>("[data-work-save-series]");
-    if (save && workPop) {
-      e.preventDefault();
-      if (save.getAttribute("aria-disabled") === "true") return;
-      const card = drawnWorkCard(save.getAttribute("data-work-save-series") ?? "");
-      if (!card || !isRailGroupCard(card) || !card.series) return;
-      el.innerHTML = saveSeriesConfirmHtml(card, card.series);
-      // A textbox and plain buttons: a dialog, not a menu (whose reading mode
-      // skips anything that is not a menu item). Non-modal: the rail stays live.
-      el.setAttribute("role", "dialog");
-      el.setAttribute("aria-modal", "false");
-      el.setAttribute("aria-label", `Save «${card.name}» as a series`);
-      workPop.series = { card, busy: false };
-      el.querySelector<HTMLElement>("[data-work-series-key], [data-work-series-go]")?.focus({ preventScroll: true });
-      return;
-    }
-    if (target.closest("[data-work-series-go]")) {
-      e.preventDefault();
-      void runSaveAsSeries();
-      return;
-    }
-    if (target.closest("[data-work-series-cancel]")) {
-      e.preventDefault();
-      closeWorkPop("done");
-    }
-    return;
-  }
-  // Refused while a write runs (`closeWorkPop`): its report lands here.
-  if (el && !target.closest("[data-work-card-menu], [data-thread-row-menu]")) closeWorkPop("outside");
-});
-document.addEventListener("keydown", (e) => {
-  if ((e as KeyboardEvent).key === "Escape" && workPopEl()) closeWorkPop("key");
-});
-// The arrows, Home and End move between the items of two body-level menus —
-// the ⋯ work popover and a thread row's page menu (`#wikiSeriesMenu` opened
-// from a thread row, marked `data-page-menu`) — the Group menu's keys. A plain
-// row's, Related work's and the header's series menus are not served: they open
-// on their field. Tab closes the work popover back to its opener, as Tab closes
-// the Group menu; the page menu holds text fields, so Tab stays the browser's
-// there. Inside a text field every key is the field's: an item can move focus
-// INTO the field (End, a wrap), never out of it.
-document.addEventListener("keydown", (e) => {
-  const t = e.target as HTMLElement | null;
-  if (!t?.closest || e.defaultPrevented) return;
-  const work = t.closest<HTMLElement>(`#${WORK_POP_ID}`);
-  const el = work ?? t.closest<HTMLElement>(`#${SERIES_MENU_ID}[data-page-menu]`);
-  if (!el || el.getAttribute("role") !== "menu") return;
-  if (work && e.key === "Tab") {
-    e.preventDefault();
-    closeWorkPop("key");
-    return;
-  }
-  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
-  const items = Array.from(el.querySelectorAll<HTMLElement>("[role^='menuitem'], [data-series-input]")).filter(
-    (x) => x.tabIndex >= 0 && !(x as HTMLButtonElement).disabled,
-  );
-  if (!items.length) return;
-  const at = items.findIndex((x) => x === t || x.contains(t));
-  const move = (i: number) => {
-    const item = items[(i + items.length) % items.length]!;
-    // `preventScroll`: a page scroll closes the popover; its own list scrolls.
-    item.focus({ preventScroll: true });
-    if (item.offsetTop < el.scrollTop) el.scrollTop = item.offsetTop;
-    else if (item.offsetTop + item.offsetHeight > el.scrollTop + el.clientHeight) el.scrollTop = item.offsetTop + item.offsetHeight - el.clientHeight;
-  };
-  if (e.key === "ArrowDown") move(at + 1);
-  else if (e.key === "ArrowUp") move(at < 0 ? -1 : at - 1);
-  else if (e.key === "Home") move(0);
-  else if (e.key === "End") move(items.length - 1);
-  else return;
-  e.preventDefault();
-});
-// Closed on a scroll that MOVES the opener from where the popover was placed.
-// Scroll events arrive a frame late, so the click that opened the popover can
-// deliver its own (a focus or scroll-into-view moving the rail just before the
-// open): measured on a real wiki, that click closed the popover it opened.
-window.addEventListener(
-  "scroll",
-  (e) => {
-    const el = workPopEl();
-    const t = e.target as Node | null;
-    if (!el || !workPop || (t && (t === el || el.contains(t)))) return;
-    const { opener, openerSel, at } = workPop;
-    const anchor = opener.isConnected ? opener : openerSel ? document.querySelector(openerSel) : null;
-    const r = anchor?.getBoundingClientRect();
-    if (r && Math.abs(r.top - at.top) < 1 && Math.abs(r.left - at.left) < 1) return;
-    closeWorkPop("viewport");
-  },
-  true,
-);
-window.addEventListener("resize", () => closeWorkPop("viewport"));
-
-document.getElementById("wikiList")!.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  if (!target.closest) return;
-  // A click outside the open Group menu closes it in the pressed control's own
-  // render, which also refocuses that control; the document handler below
-  // repaints only when no render here removed the menu.
-  if (workMenuOpen && !target.closest(".wiki-work-menu, [data-work-group-menu]")) workMenuOpen = false;
-  // The Group control and its menu (plan `muninn-wiki-work-thread-grouping`).
-  // Menu items are buttons, so a keyboard Enter or Space lands here too.
-  if (target.closest("[data-work-group-menu]")) {
-    e.preventDefault();
-    setWorkMenu(!workMenuOpen, true);
-    return;
-  }
-  // PR 4: Reset your splits and groups — clears the record's four
-  // preferences as this tab shows them (D1), through the state table like
-  // any edit; an entry another tab added unseen stays. The menu closes and
-  // focus returns to the Group button, which reopens it.
-  if (target.closest("[data-work-reset]")) {
-    e.preventDefault();
-    editWorkGroup({ reset: true });
-    showWorkBoundaryStatus(null);
-    setWorkMenu(false, true);
-    return;
-  }
-  // Forget one definition the reset area lists (it has no Return or Allow
-  // grouping item); the menu stays open. Focus, by key, after the repaint:
-  // the Forget now at the forgotten one's place (the next), else the previous,
-  // else the menu's default item (its checked stop) — never Reset, which sits
-  // above every entry, so a second Enter never wipes the record.
-  const forget = target.closest<HTMLElement>(WORK_FORGET_SEL);
-  if (forget) {
-    e.preventDefault();
-    const keys = Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-work-menu :is(${WORK_FORGET_SEL})`), workForgetKey);
-    const at = keys.indexOf(workForgetKey(forget));
-    const next = at < 0 ? [] : [...keys.slice(at + 1), ...keys.slice(0, at).reverse()];
-    const id = forget.getAttribute("data-work-forget-split");
-    editWorkGroup(id !== null ? { forgetSplit: id } : { allowGrouping: [forget.getAttribute("data-work-forget-anchor") ?? ""] });
-    showWorkBoundaryStatus(null);
-    renderList();
-    focusWorkMenuItem(next.find((sel) => document.querySelector(`#wikiList .wiki-work-menu ${sel}`)));
-    return;
-  }
-  // PR 4: a card's ⋯ and a focus row's ⋯ (the one with no series menu).
-  const cardMenuBtn = target.closest<HTMLElement>("[data-work-card-menu]");
-  if (cardMenuBtn) {
-    e.preventDefault();
-    openWorkCardMenu(cardMenuBtn);
-    return;
-  }
-  const rowMenuBtn = target.closest<HTMLElement>("[data-thread-row-menu]");
-  if (rowMenuBtn) {
-    e.preventDefault();
-    openThreadRowMenu(rowMenuBtn);
-    return;
-  }
-  // PR 4: `▸ split into N sessions` — per tab, never stored.
-  const splitBtn = target.closest<HTMLElement>("[data-thread-sessions]");
-  if (splitBtn) {
-    e.preventDefault();
-    if (splitBtn.getAttribute("aria-disabled") === "true") return;
-    const key = normalizeFoldKey(splitBtn.getAttribute("data-thread-sessions") ?? "");
-    if (!key) return;
-    const hadFocus = document.activeElement === splitBtn;
-    if (workSessionsOpen.has(key)) workSessionsOpen.delete(key);
-    else workSessionsOpen.add(key);
-    renderList();
-    if (hadFocus) document.querySelector<HTMLElement>(`#wikiList [data-thread-sessions="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
-    return;
-  }
-  const stopBtn = target.closest("[data-work-stop]");
-  if (stopBtn) {
-    e.preventDefault();
-    editWorkGroup({ stop: stopBtn.getAttribute("data-work-stop") as WorkGroupStop });
-    setWorkMenu(false, true);
-    return;
-  }
-  const boxBtn = target.closest("[data-work-evidence]");
-  if (boxBtn) {
-    e.preventDefault();
-    // Disabled at Threads: the box keeps its value and the click does nothing.
-    if (boxBtn.getAttribute("aria-disabled") === "true") return;
-    const key = boxBtn.getAttribute("data-work-evidence") as keyof WorkGroupEvidenceToggles;
-    editWorkGroup({ evidence: key, value: boxBtn.getAttribute("aria-checked") !== "true" });
-    renderList();
-    focusWorkMenuItem(`[data-work-evidence="${CSS.escape(key)}"]`);
-    return;
-  }
-  // A Pick up row (plan `muninn-wiki-pick-up`): reveal its page in the card
-  // that draws it, or open the page when no drawn card does (D12).
-  const pickBtn = target.closest<HTMLElement>("[data-pickup]");
-  if (pickBtn) {
-    e.preventDefault();
-    const rel = pickBtn.getAttribute("data-pickup");
-    if (rel) jumpToPickUp(rel);
-    return;
-  }
-  const moreBtn = target.closest("[data-thread-more]");
-  if (moreBtn) {
-    e.preventDefault();
-    const key = moreBtn.getAttribute("data-thread-more");
-    if (!key) return;
-    const hadFocus = document.activeElement === moreBtn;
-    const childCards = () => Array.from(document.querySelectorAll<HTMLElement>(`#wikiList [data-thread-group-body="${CSS.escape(key)}"] .wiki-thread-card[data-thread]`));
-    // By key, not by count: a pinned child past the first three is drawn
-    // before the press and moves to its own place after it.
-    const before = new Set(childCards().map((c) => c.getAttribute("data-thread")));
-    workMoreOpen.add(key);
-    renderList();
-    // Focus the first child the press revealed.
-    if (hadFocus) {
-      const after = childCards();
-      const card = after.find((c) => !before.has(c.getAttribute("data-thread"))) ?? after[after.length - 1];
-      card?.querySelector<HTMLElement>(".wiki-thread-fold")?.focus({ preventScroll: true });
-    }
-    return;
-  }
-  // The shared context's `+N`: the full list in place, focus on the first link
-  // the press revealed.
-  const ctxBtn = target.closest("[data-thread-ctx-more]");
-  if (ctxBtn) {
-    e.preventDefault();
-    const key = ctxBtn.getAttribute("data-thread-ctx-more");
-    if (!key) return;
-    const hadFocus = document.activeElement === ctxBtn;
-    const links = () => Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-thread-context[data-thread-group="${CSS.escape(key)}"] .wiki-thread-link`));
-    const shown = links().length;
-    workContextOpen.add(key);
-    renderList();
-    if (hadFocus) links()[shown]?.focus({ preventScroll: true });
-    return;
-  }
-  // The group chip and the section fold — the rail's second control, on the same
-  // listener and BEFORE the pin, since both sit inside a row the body delegate
-  // would otherwise open. A fold DOES re-render (`renderList`): unlike the ★,
-  // which paints one button, this one adds and removes rows, so there is nothing
-  // to paint in place.
-  const fold = target.closest("[data-fold-key]");
-  if (fold) {
-    e.preventDefault();
-    const key = fold.getAttribute("data-fold-key");
-    if (!key) return;
-    const hadFocus = document.activeElement === fold;
-    openFolds = toggleFolded(WIKI, key);
-    renderList();
-    // The key's spelling can flip with the default it is drawn under, so look
-    // for either (`closed:` or not).
-    if (hadFocus) {
-      const base = key.startsWith(CLOSED_FOLD_PREFIX) ? key.slice(CLOSED_FOLD_PREFIX.length) : key;
-      const at = (k: string) => `#wikiList [data-fold-key="${CSS.escape(k)}"]`;
-      refocusRailControl(`${at(base)}, ${at(CLOSED_FOLD_PREFIX + base)}`, fold);
-    }
-    return;
-  }
-  // A work thread's 📌 (D7): the pinned card clears, any other pins its newest
-  // focus page (`pinAnchor`).
-  // This one DOES re-render — the pinned card moves to the top of the section,
-  // so there is no single button to repaint in place (the ★'s rule).
-  const threadPinBtn = target.closest("[data-thread-pin]");
-  if (threadPinBtn) {
-    e.preventDefault();
-    const key = threadPinBtn.getAttribute("data-thread-pin");
-    if (!key) return;
-    const hadFocus = document.activeElement === threadPinBtn;
-    const cardEl = threadPinBtn.closest(".wiki-thread-card");
-    // A group card is addressed by its own key, a thread card (child or not) by its.
-    const attr = cardEl?.hasAttribute("data-thread-group") ? "data-thread-group" : "data-thread";
-    const card = cardEl?.getAttribute(attr);
-    stepThreadPin({ kind: "click", value: threadPinBtn.getAttribute("data-thread-pinned") === "1" ? null : key });
-    renderList();
-    // The card moved: follow it by its own key, not by position.
-    if (hadFocus && card) {
-      refocusRailControl(`#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]`, threadPinBtn);
-    }
-    return;
-  }
-  const pin = target.closest("[data-pin]");
-  if (!pin) return;
-  e.preventDefault();
-  const row = pin.closest(".wiki-list-item");
-  const relPath = row?.getAttribute("data-relpath");
-  if (!relPath) return;
-  pins = togglePinned(WIKI, relPath);
-  // ⚠️ IN PLACE — deliberately NOT `renderList()`. Re-rendering here moved
-  // content under the reader, and the state space of "how much, and which way"
-  // (render cause × scroll position × whether the list reorders) produced a
-  // different defect in each of two review rounds: a numeric restore shifted the
-  // row at the cursor ~96px so a second click pinned a DIFFERENT page; the
-  // anchored restore that replaced it threw the reader down the list on a sort
-  // change and hid the new Pinned header when pinning at the top. Painting one
-  // button removes the space rather than picking a third point in it. The ★
-  // filling in is the confirmation in the meantime.
-  //
-  // ⚠️ The residual, stated because "nothing moves" is only true of THIS click:
-  // the render that first paints the new section can be the BACKGROUND listing
-  // refresh rather than one the reader caused, and the section then appears on a
-  // repaint nothing on screen explains — measured at ~50px of extra downward
-  // shift on top of the ~46px that refresh already moves content by, which is
-  // pre-existing and unrelated to pins. Bounded, and only on a render that
-  // already repaints the list.
-  paintPinState();
-});
-
-(document.getElementById("wikiSearch") as HTMLInputElement).addEventListener("input", (e) => {
-  filters.q = (e.target as HTMLInputElement).value;
-  renderList();
-  refreshStartBody();
-});
-
-document.getElementById("domainChips")!.addEventListener("click", function (this: HTMLElement, e) {
-  const target = e.target as HTMLElement;
-  const chip = target.closest ? target.closest(".wiki-chip") : null;
-  if (!chip) return;
-  filters.domain = chip.getAttribute("data-domain") || "";
-  this.querySelectorAll(".wiki-chip").forEach((c) => c.classList.remove("active"));
-  chip.classList.add("active");
-  renderFolderSelect();
-  renderTypeChips();
-  renderStatusChips();
-  renderProjectChips();
-  renderTagChips();
-  renderList();
-  refreshStartBody();
-  syncFilters();
-});
-
-document.getElementById("wikiFolder")!.addEventListener("change", function (this: HTMLSelectElement) {
-  filters.folder = this.value;
-  // The one facet whose counts are scoped by folder (see `projectCounts`), so
-  // this handler is the only one that has to repaint a chip row at all.
-  renderProjectChips();
-  renderList();
-  refreshStartBody();
-  syncFilters();
-});
-
-document.getElementById("typeChips")!.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  const chip = target.closest ? target.closest(".wiki-chip") : null;
-  if (!chip) return;
-  filters.type = chip.getAttribute("data-type") || "";
-  renderTypeChips();
-  renderStatusChips();
-  renderProjectChips();
-  renderTagChips();
-  renderList();
-  refreshStartBody();
-  syncFilters();
-});
-
-// Status facet: the enum chips and the ⚑ follow-ups toggle share one row (and so
-// one delegated handler), but write to two independent filter fields.
-document.getElementById("statusChips")!.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  const chip = target.closest ? target.closest(".wiki-chip") : null;
-  if (!chip) return;
-  if (chip.hasAttribute("data-followups")) {
-    filters.followups = filters.followups ? "" : "open";
-  } else if (chip.hasAttribute("data-waiting")) {
-    filters.waiting = filters.waiting ? "" : "you";
-  } else {
-    const status = chip.getAttribute("data-status") || "";
-    // Re-clicking the active chip clears it (the tag-row convention); "All status"
-    // carries an empty value and so clears by assignment.
-    filters.status = filters.status === status ? "" : status;
-  }
-  renderStatusChips();
-  renderList();
-  refreshStartBody();
-  syncFilters();
-});
-
-// Project facet. The only facet that is also URL state, so every path through it
-// goes via `applyProjectFilter`, which owns the `replaceState`.
-document.getElementById("projectChips")!.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  const chip = target.closest ? target.closest(".wiki-chip") : null;
-  if (!chip) return;
-  const project = chip.getAttribute("data-project") || "";
-  // Re-clicking the active chip clears it (the tag/status-row convention); "All
-  // projects" carries an empty value and so clears by assignment.
-  applyProjectFilter(filters.project === project ? "" : project);
-});
-
-// Jira facet. The project row's twin, and URL state for the same reason, so
-// every path through it likewise goes via `applyJiraFilter`.
-document.getElementById("jiraChips")!.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  const chip = target.closest ? target.closest(".wiki-chip") : null;
-  if (!chip) return;
-  if (chip.hasAttribute("data-jira-more")) {
-    jiraChipsExpanded = !jiraChipsExpanded;
-    renderJiraChips();
-    // The row was re-rendered under the reader's focus: hand it to the new
-    // expander, so a keyboard user can toggle again without hunting for it.
-    (document.querySelector("#jiraChips [data-jira-more]") as HTMLElement | null)?.focus();
-    return;
-  }
-  const key = chip.getAttribute("data-jira") || "";
-  applyJiraFilter(filters.jira === key ? "" : key);
-});
-
-document.getElementById("tagChips")!.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  const chip = target.closest ? target.closest(".wiki-chip") : null;
-  if (!chip) return;
-  if (chip.hasAttribute("data-tag-more")) {
-    tagsExpanded = !tagsExpanded;
-    renderTagChips();
-    return;
-  }
-  const tag = chip.getAttribute("data-tag") || "";
-  filters.tag = filters.tag === tag ? "" : tag;
-  renderTagChips();
-  renderList();
-  refreshStartBody();
-  syncFilters();
-});
-
-document.getElementById("wikiSort")!.addEventListener("change", () => {
-  sortTouched = true;
-  writeSort(WIKI, sortMode());
-  renderList();
-});
-
 // `group families`, per wiki. The control is painted from the STORE at boot (the
 // server has no idea what this browser remembers) and written back through the
 // same `toggleFolded` every fold uses — the toggle is a sentinel key in that one
 // flat namespace, so nothing about the store changes to hold it.
-const familiesBox = document.getElementById("wikiGroupFamilies") as HTMLInputElement | null;
+let familiesBox!: HTMLInputElement | null;
 function setGroupFamilies(on: boolean): void {
   if (familiesOn() !== on) openFolds = toggleFolded(WIKI, GROUP_FAMILIES_TOGGLE_KEY);
   // Painted from the store rather than trusted from the event: a write that
@@ -7313,117 +6423,43 @@ function setGroupFamilies(on: boolean): void {
   if (familiesBox) familiesBox.checked = familiesOn();
   renderList();
 }
-if (familiesBox) {
-  familiesBox.checked = familiesOn();
-  familiesBox.addEventListener("change", () => setGroupFamilies(familiesBox.checked));
-}
 
 // `group by effort` (P4), per wiki: the same store, inverted — the stored
 // `toggle:no-efforts` is the OFF, so a click writes the exception to an ON
 // default. Painted (and shown) from the listing on every render, since the
 // map can appear or go with any adopt.
-const effortsBox = document.getElementById("wikiGroupEfforts") as HTMLInputElement | null;
+let effortsBox!: HTMLInputElement | null;
 function setGroupEfforts(on: boolean): void {
   if (effortsOn(openFolds, true) !== on) openFolds = toggleFolded(WIKI, EFFORTS_OFF_TOGGLE_KEY);
   paintEffortsToggle();
   renderList();
 }
-if (effortsBox) effortsBox.addEventListener("change", () => setGroupEfforts(effortsBox.checked));
 
 // `Show retired (N)`, per wiki: the same store and discipline as `group
 // families`. A flip changes the pool every facet counts from, so the facets,
 // the start view and the rows all repaint.
-const retiredBox = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
-if (retiredBox) {
-  retiredBox.checked = showRetired();
-  retiredBox.addEventListener("change", () => setShowRetired(retiredBox.checked));
-}
+let retiredBox!: HTMLInputElement | null;
 
 // The toolbar's Filters button flips the <details> under it. The details keeps
 // its own open state, so syncFilters' auto-open and a background adopt read it
 // as before; aria-expanded follows the details whoever opened it.
-const filtersDetails = document.getElementById("wikiFilters") as HTMLDetailsElement | null;
-const filtersBtn = document.getElementById("wikiFiltersBtn");
-if (filtersDetails && filtersBtn) {
-  filtersBtn.addEventListener("click", () => {
-    filtersDetails.open = !filtersDetails.open;
-  });
-  filtersDetails.addEventListener("toggle", () => {
-    filtersBtn.setAttribute("aria-expanded", String(filtersDetails.open));
-  });
-}
+let filtersDetails!: HTMLDetailsElement | null;
+let filtersBtn!: HTMLElement | null;
 
 // The view-options pane: opened by its button; closed by the button, a pointer
 // or focus outside it, Escape from anywhere, or a reader shortcut. It is a
 // role="dialog", so while open modalOpen() makes the page's single keys stand
 // aside — it must never stay open once the reader has moved on.
-const optionsBtn = document.getElementById("wikiOptionsBtn");
-const optionsPane = document.getElementById("wikiOptions");
+let optionsBtn!: HTMLElement | null;
+let optionsPane!: HTMLElement | null;
 function setOptionsOpen(open: boolean): void {
   if (!optionsBtn || !optionsPane) return;
   optionsPane.hidden = !open;
   optionsBtn.setAttribute("aria-expanded", String(open));
 }
-if (optionsBtn && optionsPane) {
-  const inOptions = (n: EventTarget | null) =>
-    n instanceof Node && (optionsPane.contains(n) || optionsBtn.contains(n));
-  optionsBtn.addEventListener("click", () => setOptionsOpen(optionsPane.hidden));
-  document.addEventListener("pointerdown", (e) => {
-    if (!optionsPane.hidden && !inOptions(e.target)) setOptionsOpen(false);
-  });
-  document.addEventListener("focusin", (e) => {
-    if (!optionsPane.hidden && !inOptions(e.target) && !restoringRailFocus) setOptionsOpen(false);
-  });
-  // Capture phase. Escape closes the pane and stops, so it neither leaves focus
-  // mode nor closes a graph card (whose own capture listener, registered
-  // earlier, already stood aside for the open dialog). A shortcut key — one
-  // printable character other than Space (the button's own key), no
-  // modifier — pressed OUTSIDE the pane (on its button,
-  // or on <body> in Safari, which does not focus a clicked button) closes it and
-  // carries on, so modalOpen() is false by the time the shortcut's own listener
-  // reads it. Inside the pane the target is a checkbox, which every shortcut
-  // owner treats as typing; the key is left to it.
-  document.addEventListener(
-    "keydown",
-    (e) => {
-      if (optionsPane.hidden) return;
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        setOptionsOpen(false);
-        optionsBtn.focus();
-      } else if (
-        e.key.length === 1 &&
-        e.key !== " " &&
-        !e.ctrlKey &&
-        !e.metaKey &&
-        !e.altKey &&
-        !optionsPane.contains(e.target as Node)
-      ) {
-        setOptionsOpen(false);
-      }
-    },
-    true,
-  );
-}
-document.getElementById("wikiActiveOptions")?.addEventListener("click", (e) => {
-  const off = (e.target as HTMLElement).closest?.("[data-view-option-off]");
-  if (!off) return;
-  if (off.getAttribute("data-view-option-off") === "families") setGroupFamilies(false);
-  else setShowRetired(false);
-  // The chip is gone; its option lives behind the options button.
-  optionsBtn?.focus();
-});
-paintViewOptions();
 
 // Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
-const wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
-if (wikiSel) {
-  wikiSel.addEventListener("change", () => {
-    const value = wikiSel.value;
-    location.href = value ? "/wiki?wiki=" + encodeURIComponent(value) : "/wiki";
-  });
-}
+let wikiSel!: HTMLSelectElement | null;
 
 function consumeUrlLens(): void {
   if (pendingUrlLens === null) return;
@@ -7433,59 +6469,6 @@ function consumeUrlLens(): void {
   u.searchParams.delete(LENS_PARAM);
   history.replaceState(history.state, "", u);
 }
-
-// An in-article `#id` link to a card inside a closed fold: open it on the way.
-window.addEventListener("hashchange", () => {
-  const article = document.querySelector("#articleWrap > .wiki-article");
-  if (article) revealHashTarget(article);
-});
-
-window.addEventListener("popstate", () => {
-  // Back/Forward is a navigation: an open find palette's rows describe the
-  // page being left.
-  if (isFindOpen()) closeFind(false);
-  const params = new URLSearchParams(location.search);
-  // The project rides in the URL, so Back/Forward is a facet change too — and it
-  // is the one path where the address bar leads. Adopted on EVERY branch (the
-  // article ones included: the rail keeps its chips while a page is open), and
-  // repainted only when it actually moved.
-  const projectBefore = filters.project;
-  adoptProjectFilter(true);
-  if (filters.project !== projectBefore) repaintForProject(false);
-  // Same for the jira facet — same reason, same `false` (Back/Forward is not a
-  // filter click, so a collapsed Filters stack stays collapsed).
-  const jiraBefore = filters.jira;
-  adoptJiraFilter(true);
-  if (filters.jira !== jiraBefore) repaintForJira(false);
-  // Graph mode is URL state: Back and Forward restore it with the page.
-  syncDisplayFromUrl();
-  // A relPath URL round-trips collision-proof (and is what every in-reader
-  // navigation now pushes); check it first, `?page=` stays for older links.
-  const relPath = params.get("relPath");
-  // The page on screen, in another display state: switch the display, never
-  // refetch the page (that reset its scroll and re-ran everything under it).
-  // Only while the pane shows that page: a failed load keeps the previous
-  // page's identity under its error.
-  const shown = document.querySelector("#articleWrap > .wiki-article, #articleWrap > .wiki-explainer-frame");
-  if (relPath && relPath === currentRelPath && currentName && !navInFlight && shown) {
-    applyDisplay();
-    return;
-  }
-  if (relPath) {
-    loadPageByRelPath(relPath, false);
-    return;
-  }
-  const page = params.get("page");
-  const effort = page ? null : effortFromUrl(params);
-  if (page) loadPage(page, false);
-  else if (effort !== null) renderEffort(effort);
-  else if (graphMode && graphIssue && hasTracker()) renderIssueGraph();
-  else {
-    syncStartTabFromUrl();
-    renderStart();
-    loadStaleSummary();
-  }
-});
 
 // ── Ask tab: research-style Q&A scoped to this wiki ───────────────────
 // The controls (question box · status line · history list) live in the right
@@ -8761,7 +7744,7 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
 }
 
 /** Enable/disable the follow-up + Remember controls by id (they may not exist yet
- *  at module load, and the article pane is re-rendered per turn — always look up
+ *  at boot, and the article pane is re-rendered per turn — always look up
  *  fresh). The Remember button rides the same commit gate as the follow-up bar.
  *
  *  The two WRITE buttons are deliberately NOT here. Their state is derived from
@@ -9835,183 +8818,6 @@ function clearAskSession(): void {
   }
 }
 
-document.getElementById("wikiAskBtn")?.addEventListener("click", askQuestion);
-document.getElementById("wikiAskInput")?.addEventListener("keydown", (e) => {
-  const ke = e as KeyboardEvent;
-  if (ke.key === "Enter" && !ke.shiftKey) { e.preventDefault(); askQuestion(); }
-});
-// Re-open a stored answer from the session history (no re-ask), or clear the
-// session via the header affordance.
-document.getElementById("wikiAskHistory")?.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  if (target.closest("#wikiAskHistClear")) { clearAskSession(); return; }
-  const item = target.closest("[data-ask-idx]");
-  if (!item) return;
-  const idx = parseInt(item.getAttribute("data-ask-idx") || "-1", 10);
-  const turn = askTurns[idx];
-  if (turn) showAskAnswer(turn, "");
-});
-
-// Follow-up bar (in the article pane) — delegated at the document level because
-// `showAskAnswer` replaces the pane per turn, destroying any direct listeners.
-document.addEventListener("click", (e) => {
-  const t = e.target as HTMLElement;
-  if (t.closest("#wikiFollowupBtn")) submitFollowup();
-  else if (t.closest("#wikiRememberBtn")) submitRemember();
-  else if (t.closest("#wikiChatEscBtn")) submitChatEscalate(false);
-  // Explicit "start another thread anyway" after a 409 (never automatic).
-  else if (t.closest("#wikiChatEscNewBtn")) submitChatEscalate(true);
-  // 📤 Share — the dialog is IMPORTED here rather than loaded as the standalone
-  // bundle: this file IS a bundle, and doing both would put two copies of the
-  // module (two states, two listener sets) on the same page.
-  else if (t.closest("#" + SHARE_BTN_ID)) openArticleShare();
-  else if (t.closest("#" + FELLES_BTN_ID)) {
-    const relPath = t.closest("#" + FELLES_BTN_ID)?.getAttribute("data-felles-relpath") || "";
-    if (relPath && fellesPublishBin && WIKI_ROOT) {
-      openFellesPublishDialog({
-        wiki: WIKI || "",
-        relPath,
-        bin: fellesPublishBin,
-        root: WIKI_ROOT,
-        bucket: fellesPublishBucket,
-        onRun: () => void fellesSync?.load({ afterRun: true }),
-      });
-    }
-  }
-  // ⧉ Copy path — delegated like its neighbours because the breadcrumb's
-  // innerHTML is rewritten on every navigation, which would drop a direct
-  // listener on the second page the reader opens.
-  else if (t.closest("#" + COPY_PATH_BTN_ID))
-    copyArticlePath(t.closest("#" + COPY_PATH_BTN_ID) as HTMLButtonElement);
-  // ⌖ Show in list — delegated for the same reason.
-  else if (t.closest("#wikiLocateBtn")) showOpenPageInList();
-  else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
-  // ↻ claim retry — the row buttons are injected into the answer body by a DOM
-  // pass, so they are delegated by ATTRIBUTE rather than by id.
-  else if (t.closest("[data-claim-retry-btn]")) {
-    const btn = t.closest("[data-claim-retry-btn]") as HTMLButtonElement;
-    if (!btn.disabled) submitClaimRetry(Number(btn.getAttribute("data-claim-retry-btn")));
-  } else if (t.closest("#wikiClaimRetryAll")) {
-    if (askShownTurn) void retryAllClaims(askShownTurn);
-  }
-  else if (t.closest("#wikiClaimRetryCancel")) cancelClaimRetryBatch();
-  else if (t.closest("#wikiFactcheckIntegrateBtn")) submitFactcheckIntegrate();
-  else if (t.closest("#wikiFcIntAccept")) acceptFactcheckIntegrate();
-  else if (t.closest("#wikiFcIntCancel")) cancelFactcheckIntegrate();
-});
-
-// The chat-options dialog wires its OWN click/change/input/keydown delegates —
-// HERE, deliberately, the slot its `change` listener used to occupy, i.e. AFTER
-// the click delegate above. The dialog's click-away test reads
-// `document.contains(target)`, and a branch above that synchronously detaches its
-// own target (`cancelFactcheckIntegrate`) must still run BEFORE that test, exactly
-// as it did when every branch lived in one listener.
-//
-// Note that ALL the click delegates run for every click — the one above, the
-// dialog's own (registered inside this call) and the `document.body` navigation
-// delegate (`NAV_LINK_SELECTOR` — `[data-wiki-page]`/`[data-page]`/`[data-relpath]`,
-// registered first) — so their
-// selector sets must stay disjoint. The shell's sets are the `if / else if`
-// chain above and the body delegate; the dialog's is the chain in
-// `wireChatOptions` (`wiki-chat-options.ts`). One chain made that exclusivity
-// structural; three make it a convention nothing enforces.
-// The find palette (`/`, ⌘K): ranks `allPages` in the browser, boosted by the
-// open page's `near` map. It owns every key pressed inside it; its opening
-// listener is document-level, bubble phase. See `wiki-find-palette.ts`.
-initFindPalette({
-  getPages: () => allPages,
-  listingState: () => (pagesLoaded ? "ready" : pagesLoadFailed ? "failed" : "loading"),
-  getNear: () => (currentNear && currentNear.relPath === currentRelPath ? currentNear.near : {}),
-  getScannedAt: () => scannedAtMs,
-  openPage: (relPath) => loadPageByRelPath(relPath),
-  hrefFor: (relPath) => pageUrlByRelPath(relPath),
-  onOpen: () => hideRefPeek(),
-  // Everywhere rows name a root by its FIRST registry entry; on aliased roots
-  // that is not the requested name, and under the WIKI_DIR override `WIKI` is "".
-  selfWiki: () => FIND_ROWS_WIKI,
-  // The read slice (nais) does not register the Everywhere route.
-  everywhere: () => wikiToolsFlag(),
-});
-
-initChatOptions({
-  getShownTurn: () => askShownTurn,
-  getAskTurns: () => askTurns,
-  getCurrentArticle: () => currentArticle,
-  getOutgoingTitles: () => currentOutgoingTitles,
-  postAskChat,
-  refreshChatEscalateBar,
-});
-
-// Preview-panel checkboxes — same document-level delegation (the panel is
-// re-rendered wholesale on every toggle, so direct listeners wouldn't survive).
-// State lives on `integratePreview`, never on the DOM.
-document.addEventListener("change", (e) => {
-  const state = integratePreview;
-  if (!state) return;
-  // An apply is in flight: the inputs render disabled, but a programmatic or
-  // racing change must not re-render the panel out from under it either.
-  if (state.applying) return;
-  const t = e.target as HTMLElement;
-  if (t.id === "wikiFcIntCallout") {
-    state.callout = (t as HTMLInputElement).checked;
-    renderIntegratePreview();
-    return;
-  }
-  if (t.classList && t.classList.contains("wiki-fc-int-cb")) {
-    // The annotation GROUP checkbox owns every wrapper-only index at once — the
-    // marks are one editorial act, and a half-marked page would leave chips and
-    // appendix disagreeing about what was checked.
-    if (t.getAttribute("data-edit-group") === "annotations") {
-      const on = (t as HTMLInputElement).checked;
-      for (const i of annotationIndexes(state.proposal.edits || [])) state.selected[i] = on;
-      state.applyBlocked = false;
-      state.applyDropped = undefined;
-      state.applyDroppedOpen = undefined;
-      renderIntegratePreview();
-      return;
-    }
-    const idx = parseInt(t.getAttribute("data-edit-idx") || "-1", 10);
-    if (idx >= 0) {
-      state.selected[idx] = (t as HTMLInputElement).checked;
-      // The selection changed, so the "this exact selection resolved to nothing"
-      // block no longer applies — Apply becomes live again.
-      state.applyBlocked = false;
-      state.applyDropped = undefined;
-      state.applyDroppedOpen = undefined;
-      state.focusEditIdx = idx; // restored after the full re-render
-      renderIntegratePreview();
-    }
-  }
-});
-// The dropped-list disclosure is state, not DOM: without this a checkbox toggle's
-// re-render snapped an opened "N not applied" list shut again.
-//
-// There are TWO such lists (propose-time drops, and the apply route's own
-// rejections) and they share the `.wiki-fc-int-dropped` class, so the `apply-drops`
-// modifier is what tells them apart — into two separate state fields. A single
-// shared field made each list's toggle clobber the other's open state.
-document.addEventListener(
-  "toggle",
-  (e) => {
-    const state = integratePreview;
-    if (!state) return;
-    const t = e.target as HTMLElement;
-    if (t instanceof HTMLDetailsElement && t.classList.contains("wiki-fc-int-dropped")) {
-      if (t.classList.contains("apply-drops")) state.applyDroppedOpen = t.open;
-      else state.droppedOpen = t.open;
-    }
-  },
-  true, // `toggle` does not bubble — capture it
-);
-document.addEventListener("keydown", (e) => {
-  const ke = e as KeyboardEvent;
-  if (ke.key !== "Enter" || ke.shiftKey) return;
-  if ((ke.target as HTMLElement)?.id === "wikiFollowupInput") {
-    ke.preventDefault();
-    submitFollowup();
-  }
-});
-
 // ── Select-to-Explain ─────────────────────────────────────────────────
 // Selecting text inside a rendered (markdown) article — or an HTML explainer,
 // via the iframe bridge — reveals the "✨ Explain" button in the breadcrumb bar
@@ -10176,74 +8982,6 @@ function activateFactcheckArticle(): void {
   });
   runAskStream(url, turn);
 }
-
-// Show on selection release inside the article pane; the timeout lets the browser
-// finalize the selection first. (articleWrap's element persists across page
-// navigations — only its innerHTML is swapped — so a one-time listener suffices.)
-document.getElementById("articleWrap")?.addEventListener("mouseup", () => {
-  setTimeout(maybeShowExplainPill, 0);
-});
-// Dismiss on: selection collapse, article scroll, Escape, any mousedown outside
-// the pill (the pill's own mousedown stops propagation, so it self-excludes).
-document.addEventListener("selectionchange", () => {
-  const sel = window.getSelection();
-  if (!sel || sel.isCollapsed) hideExplainPill();
-});
-document.addEventListener("keydown", (e) => {
-  if ((e as KeyboardEvent).key === "Escape") hideExplainPill();
-});
-// A mousedown on the Explain button activates it (preventDefault keeps the
-// selection alive so `activateExplain` reads its captured passage); a mousedown
-// anywhere else dismisses the button. One handler so the two never race.
-document.addEventListener("mousedown", (e) => {
-  const t = e.target as HTMLElement;
-  if (t.closest && t.closest("#wikiExplainBtn")) {
-    e.preventDefault();
-    activateExplain();
-    return;
-  }
-  // Selection-gated Fact check — preventDefault keeps the selection alive so the
-  // captured passage is read (same pattern as Explain).
-  if (t.closest && t.closest("#wikiFactcheckBtn")) {
-    e.preventDefault();
-    activateFactcheckSel();
-    return;
-  }
-  // Whole-article Fact check — always visible, needs no selection.
-  if (t.closest && t.closest("#wikiFactcheckArticleBtn")) {
-    activateFactcheckArticle();
-    return;
-  }
-  hideExplainPill();
-});
-
-// ── Explainer-iframe bridge ───────────────────────────────────────────
-// Standalone HTML explainers render in a sandboxed (opaque-origin) iframe, so the
-// parent can't read their selection directly — the injected forwarder posts it up
-// (see src/wiki/explainer-bridge.ts). Trust a message ONLY when the current page
-// is that explainer AND the event's source is the live frame's contentWindow
-// (looked up per event — never cached across navigations). Everything else is
-// ignored silently (other pages/extensions post messages constantly).
-window.addEventListener("message", (e: MessageEvent) => {
-  if (!currentName) return;
-  const meta = currentArticle;
-  if (!meta || meta.type !== "explainer") return;
-  const frame = document.querySelector(".wiki-explainer-frame") as HTMLIFrameElement | null;
-  if (!frame || e.source !== frame.contentWindow) return;
-  const data = e.data as { type?: string; sel?: unknown; heading?: unknown };
-  if (!data || typeof data !== "object") return;
-  if (data.type === "wiki-explain-clear") return hideExplainPill();
-  if (data.type !== "wiki-explain-sel") return;
-  const raw = typeof data.sel === "string" ? data.sel.trim() : "";
-  if (raw.length < EXPLAIN_MIN_CHARS) return hideExplainPill();
-  // Cap at the same ceiling as the md path (server re-caps too).
-  pillSel = raw.length > EXPLAIN_MAX_CHARS ? raw.slice(0, EXPLAIN_MAX_CHARS) : raw;
-  pillHeading = typeof data.heading === "string" ? data.heading : "";
-  // The Explain button lives in the breadcrumb (stable spot) — no rect to
-  // translate anymore; just reveal it. `renderBreadcrumb` already ran for this
-  // explainer, so the button exists.
-  showExplainPill();
-});
 
 // ── Listing refresh ───────────────────────────────────────────────────
 // A tab left open for hours used to filter a page set frozen at load time. We
@@ -10573,94 +9311,9 @@ function maybeRefetchPages(refresh: boolean): void {
   fellesSync?.refresh();
 }
 
-// Another tab pinned, unpinned or cleared storage (D7): adopt what storage now
-// holds and repaint. The repaint is `cause: "storage"`, which writes nothing,
-// so no tab's write can make another tab write.
-window.addEventListener("storage", (e) => {
-  // The pin and the grouping record (D17) each run their own table; one
-  // repaint, `cause: "storage"`, which runs no render step and writes nothing.
-  let repaint = false;
-  if (storageEventTouchesThreadPin(e.key, WIKI)) {
-    repaint = stepThreadPin({ kind: "storage", stored: readThreadPin(WIKI), booted: pagesRefresh.bootRendered }) || repaint;
-  }
-  if (storageEventTouchesWorkGroup(e.key, WIKI)) {
-    repaint = stepWorkGroup({ kind: "storage", stored: readWorkGroup(WIKI), booted: pagesRefresh.bootRendered }) || repaint;
-  }
-  if (repaint) renderList("storage");
-});
-
-// The Group menu's keys: the arrows, Home and End move between its items,
-// Escape and Tab close it and return focus to the Group button, and ArrowDown
-// on the button opens it.
-document.getElementById("wikiList")!.addEventListener("keydown", (e) => {
-  const target = e.target as HTMLElement;
-  if (!target.closest) return;
-  if (target.closest("[data-work-group-menu]") && e.key === "ArrowDown" && !workMenuOpen) {
-    e.preventDefault();
-    setWorkMenu(true, true);
-    return;
-  }
-  const menu = target.closest(".wiki-work-menu");
-  if (!menu) return;
-  const items = Array.from(menu.querySelectorAll<HTMLElement>("[role^='menuitem']"));
-  const at = items.indexOf(target.closest("[role^='menuitem']") as HTMLElement);
-  const move = (i: number) => items[(i + items.length) % items.length]?.focus();
-  if (e.key === "ArrowDown") move(at + 1);
-  else if (e.key === "ArrowUp") move(at - 1);
-  else if (e.key === "Home") move(0);
-  else if (e.key === "End") move(items.length - 1);
-  else if (e.key === "Escape" || e.key === "Tab") setWorkMenu(false, true);
-  else return;
-  e.preventDefault();
-});
-
-// Escape closes the open Group menu wherever focus is (the list's handler above
-// takes it first inside the menu); focus goes to the Group button only when it
-// was lost to the page, never away from a control the reader is on.
-document.addEventListener("keydown", (e) => {
-  if (!workMenuOpen || e.key !== "Escape" || e.defaultPrevented) return;
-  const lost = !document.activeElement || document.activeElement === document.body;
-  setWorkMenu(false, lost);
-  if (lost) e.preventDefault();
-});
-
-// A click outside the open Group menu closes it, unless a rail control's own
-// render (the list handler above) already did.
-document.addEventListener("click", (e) => {
-  if (!document.querySelector("#wikiList .wiki-work-menu")) {
-    workMenuOpen = false;
-    return;
-  }
-  const target = e.target as HTMLElement;
-  if (target.closest?.(".wiki-work-menu, [data-work-group-menu]")) return;
-  setWorkMenu(false, false);
-});
-
-window.addEventListener("focus", () => maybeRefetchPages(true));
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) maybeRefetchPages(true);
-});
-// The never-blurred tab: visible on a second monitor for hours, firing neither
-// event. Same gate, but the PLAIN fetch — server TTL freshness is fine for idle
-// drift.
-setInterval(() => maybeRefetchPages(false), WIKI_REFETCH_TICK_MS);
 // The mirror line: painted from every listing, its age redrawn every minute.
-const paintMirrorFromListing = installMirrorStatus({ now: () => Date.now(), setInterval: (tick, ms) => setInterval(tick, ms) });
+let paintMirrorFromListing!: ReturnType<typeof installMirrorStatus>;
 
-// ── Boot ──────────────────────────────────────────────────────────────
-// Two independent flags, one installer (`wikiBlockedSelectorFor`):
-//   - a wiki-readonly INSTANCE dims + blocks the write actions (➕ / ✎ / Apply /
-//     Draft synthesis);
-//   - a read-only WIKI (`WIKI_READONLY_ROOTS`) adds the egress family — Share,
-//     both fact-check buttons, Explain, Discuss, Ask / New chat / follow-up /
-//     Remember, the escalate bar and the claim-retry ↻ — and disables the two
-//     question inputs.
-// Either way the refusal is visible before the click rather than after a 403.
-// No-op when neither flag is set (no listeners installed at all).
-installWikiReadonlyGuard();
-// Rehydrate any persisted Ask session into the "This session" list (does not
-// auto-show an answer). Safe at module load — the history element is static.
-rehydrateAskSession();
 // Remember / return to the wiki last opened BY URL. Stored only when the URL
 // named the wiki (remembering the resolved default would make the redirect inert
 // exactly when it matters); read when it did not — a bare `/wiki` from the nav
@@ -10679,9 +9332,1372 @@ function rememberOrRedirectWiki(): boolean {
   location.replace(url);
   return true;
 }
-// The start tab is resolved HERE, once, whatever the page fetch does: an article
-// deep link needs it for its crumb, and a boot whose fetch failed heals through
-// `bootRender`'s early return with the reader possibly elsewhere — a sync
-// inside that function was skipped on exactly that path.
-syncStartTabFromUrl();
-if (!rememberOrRedirectWiki()) requestPages({ refresh: false, boot: true });
+
+// ── boot() ────────────────────────────────────────────────────────────
+/** Set by the first {@link boot}; a second call throws (two listener sets). */
+let booted = false;
+
+/**
+ * Wire the reader: every listener, timer, storage read, injected-global read and
+ * boot fetch this file used to run at import, in their original source order —
+ * the order is load-bearing (`keydown` handlers read `defaultPrevented`, the
+ * click delegate must precede `initChatOptions`). Importing this module touches
+ * nothing; `wiki-shell-client.ts` is the bundle entry that calls this once.
+ * `dispose()` clears the two intervals (the listing heartbeat and the mirror
+ * line's minute tick); listeners stay on the document.
+ */
+export function boot(): { dispose(): void } {
+  if (booted) throw new Error("boot() called twice: the reader is already wired");
+  booted = true;
+  let mirrorTimer: ReturnType<typeof setInterval> | undefined;
+  pendingUrlLens = new URLSearchParams(location.search).get(LENS_PARAM);
+  WIKI = readActiveWikiName();
+  WIKI_ROOT = readActiveWikiRoot();
+  FIND_SELF_WIKI = readFindSelfWiki();
+  FIND_ROWS_WIKI = readFindRowsWiki();
+  initStartCards({
+    withWiki,
+    resolvePageName: relPathToName,
+    workMapRunAt: () => workMapRunAt,
+    // One map cache for the card, the rail and the effort page (P4). The ↻ poll
+    // asks `fresh` and hands a newer map back through `adoptWorkMap`.
+    fetchWorkMap: (fresh) => (fresh || workMapRunAt === null ? getWorkMap() : workMapFetchFor(workMapRunAt)),
+    adoptWorkMap,
+    pages: () => allPages,
+    waitsCounted: () => waitsCounted,
+    hrefFor: pageUrlByRelPath,
+    effortHref: effortHrefFor,
+  });
+  initWikiVisuals();
+  initRailResize();
+  initPaneToggles();
+  // The one-time cleanup that ships with the removal of `Recently opened`: the
+  // `muninn.wiki.recents.v1:*` keys a reader already carries are dropped here,
+  // before the first render, and nothing writes one again. Boot-time and
+  // idempotent — see `purgeRecentsKeys` for why the prefix is the whole contract.
+  purgeRecentsKeys();
+  pins = readPins(WIKI);
+  openFolds = readFolds(WIKI);
+  threadPin = threadPinStep({ held: null, known: undefined }, { kind: "boot", stored: readThreadPin(WIKI) }).state;
+  workGroupRec = workGroupRecordStep(
+    { held: null, known: undefined, patch: null, failed: false },
+    { kind: "boot", stored: readWorkGroup(WIKI) },
+  ).state;
+  relatedOrder = readRelatedOrder(WIKI);
+  /** The `<details>` the reader folds: its state is the page's from then on. */
+  document.getElementById("staleBody")?.addEventListener(
+    "toggle",
+    (e) => {
+      const d = e.target as HTMLElement;
+      const key = d.getAttribute?.("data-stale-open");
+      // A toggle queued by a body since replaced (another page's) is not this page's.
+      if (key && d.isConnected) staleOpen[key] = (d as HTMLDetailsElement).open;
+    },
+    true,
+  );
+  postSeriesWrite = seriesPoster(WIKI);
+  document.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Escape" && seriesMenuEl()) closeSeriesMenu("key");
+  });
+  // Closed rather than re-anchored — see the block comment above. `capture` so a
+  // scroll inside the RAIL (which does not bubble) is seen too; the popover's own
+  // scroll is excluded by target, or its `overflow-y: auto` list would dismiss it
+  // on the first wheel tick.
+  window.addEventListener(
+    "scroll",
+    (e) => {
+      const el = seriesMenuEl();
+      const target = e.target as Node | null;
+      if (el && target && (target === el || el.contains(target))) return;
+      closeSeriesMenu("viewport");
+    },
+    true,
+  );
+  window.addEventListener("resize", () => closeSeriesMenu("viewport"));
+  /** The popover's own delegate, on its node, so the shell's document listeners
+   *  carry no branch for it and a click inside it never reaches the rail's
+   *  row-opening handler. */
+  document.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    if (!target?.closest) return;
+    const menuEl = seriesMenuEl();
+    if (menuEl && menuEl.contains(target)) {
+      if (boundaryItemClick(target)) {
+        e.preventDefault();
+        return;
+      }
+      const cmd = target.closest<HTMLElement>("[data-series-cmd]");
+      if (!cmd || !seriesMenu) return;
+      e.preventDefault();
+      const arg = cmd.getAttribute("data-series-arg") || "";
+      const { model } = seriesMenu;
+      if (cmd.getAttribute("data-series-cmd") === "join") {
+        void applySeriesWrites([{ relPath: model.relPath, series: arg }]);
+      } else if (cmd.getAttribute("data-series-cmd") === "remove") {
+        // The route clears `series_label:` with the key — a label on a page in no
+        // series names nothing, and no surface reads it (the rail takes the label
+        // off a MEMBER, and the lint's census skips a page with no key).
+        void applySeriesWrites([{ relPath: model.relPath, series: null }]);
+      } else if (cmd.getAttribute("data-series-cmd") === "head" && arg) {
+        void applySeriesWrites(headMoveWrites(model, arg, model.label));
+      }
+      return;
+    }
+    // An opener. Re-clicking the one that opened the menu closes it, the ordinary
+    // popover convention.
+    const opener =
+      target.closest<HTMLElement>(`[${SERIES_MENU_ATTR}]`) ||
+      target.closest<HTMLElement>(`[${SERIES_EDIT_ATTR}]`);
+    if (opener) {
+      e.preventDefault();
+      e.stopPropagation();
+      const edit = opener.hasAttribute(SERIES_EDIT_ATTR);
+      const rel = opener.getAttribute(edit ? SERIES_EDIT_ATTR : SERIES_MENU_ATTR) || "";
+      const wasOpen = !!seriesMenu && seriesMenu.model.relPath === rel && seriesMenu.edit === edit;
+      closeSeriesMenu(wasOpen ? "toggle" : "replace");
+      if (!wasOpen && rel) openSeriesMenu(opener, rel, edit);
+      return;
+    }
+    // Any other click dismisses, and leaves focus where the click put it.
+    if (menuEl) closeSeriesMenu("outside");
+  });
+  document.addEventListener("submit", (e) => {
+    const form = (e.target as HTMLElement)?.closest?.<HTMLElement>("[data-series-form]");
+    if (!form || !seriesMenu) return;
+    e.preventDefault();
+    const value = (form.querySelector("[data-series-input]") as HTMLInputElement | null)?.value.trim();
+    if (!value) return;
+    const { model } = seriesMenu;
+    if (form.getAttribute("data-series-form") === "label") {
+      // The label lives on the HEAD. With no labelled member yet, it lands on the
+      // page the reader opened the editor from — which is the page they are
+      // looking at, and which `seriesHead` then reads it off.
+      void applySeriesWrites([
+        { relPath: model.headRel || model.relPath, series: model.current, seriesLabel: value },
+      ]);
+      return;
+    }
+    void applySeriesWrites([{ relPath: model.relPath, series: value }]);
+  });
+  document.addEventListener("mouseover", (e) => {
+    const t = e.target as HTMLElement | null;
+    const node = t?.closest?.(GRAPH_NODE_SEL);
+    if (node) lightGraph(node.getAttribute(GRAPH_NODE_ATTR));
+  });
+  document.addEventListener("mouseout", (e) => {
+    const t = e.target as HTMLElement | null;
+    if (!t?.closest?.(GRAPH_NODE_SEL)) return;
+    const to = (e as MouseEvent).relatedTarget as HTMLElement | null;
+    if (!to?.closest?.(GRAPH_NODE_SEL)) lightGraph(null);
+  });
+  document.addEventListener("focusin", (e) => {
+    const t = e.target as HTMLElement | null;
+    // Focus leaving the nodes (into the card, say) falls back to the card's node.
+    const node = t?.closest?.(GRAPH_NODE_SEL);
+    lightGraph(node ? node.getAttribute(GRAPH_NODE_ATTR) : null);
+  });
+  document.addEventListener("change", (e) => {
+    const t = e.target as HTMLSelectElement | null;
+    if (!t) return;
+    if (t.id === GRAPH_LEVEL_ID) graphLevel = Number(t.value) as GraphLevel;
+    else if (t.id === GRAPH_DEPTH_ID) graphDepth = Number(t.value);
+    else return;
+    loadGraph();
+  });
+  // Escape with a card open, and no other owner active, closes the card and
+  // nothing else. Capture phase, so it runs before the pane keys' bubble
+  // listener, which would leave focus mode.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape" || !graphCardId || document.getElementById(GRAPH_CARD_ID)?.hidden) return;
+      if (escapeOwnedElsewhere()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeGraphCard();
+    },
+    true,
+  );
+  document.addEventListener("keydown", (e) => {
+    // Any open modal or menu, not only one around the focused element
+    // (`modalOpen` says why).
+    const toggles = graphKeyToggles(readerKeyEventOf(e));
+    // Only where the toggle is on screen: an article or an issue graph, on a
+    // wiki with a tracker — never the overview or an Ask answer.
+    if (!toggles || !document.getElementById(GRAPH_TOGGLE_ID)) return;
+    e.preventDefault();
+    toggleGraph();
+  });
+  // `v` swaps Overview and All, as the breadcrumb's lens chip does; a no-op
+  // where the page shows no lens switch.
+  document.addEventListener("keydown", (e) => {
+    if (!lensKeyToggles(readerKeyEventOf(e))) return;
+    if (toggleLens(document.getElementById("articleWrap")!)) e.preventDefault();
+  });
+  // ── Event wiring (all clicks delegated) ───────────────────────────────
+  document.body.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    if (target.closest && target.closest("#wikiWhatsNewRefresh, #wikiWhatsNewRetry")) {
+      loadDigest(true);
+      return;
+    }
+    if (typeof target.closest === "function" && handleWorkCardClick(target)) return;
+    if (target.closest && target.closest("#wikiIndexReindex")) {
+      startReindex();
+      return;
+    }
+    // Effort links (the Your work card, the effort page) open in the reader;
+    // a modifier or middle click keeps the anchor's own href.
+    const effortLink = target.closest ? target.closest("[data-effort-link]") : null;
+    const effortHome = target.closest ? target.closest("[data-effort-home]") : null;
+    const effortRetry = target.closest ? target.closest("#wikiEffortRetry") : null;
+    if (effortLink || effortHome || effortRetry) {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+      e.preventDefault();
+      if (effortLink) openEffort(effortLink.getAttribute("data-effort-link") || "");
+      else if (effortRetry && effortOpen !== null) renderEffort(effortOpen);
+      else if (effortHome) {
+        goToStart();
+        document.getElementById("wikiWorkCard")?.scrollIntoView({ block: "start" });
+      }
+      return;
+    }
+    const crumb = target.closest ? target.closest(".wiki-bc-wiki") : null;
+    if (crumb) {
+      // Plain click only: a modifier/middle click keeps the anchor's own href.
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+      e.preventDefault();
+      goToStart();
+      return;
+    }
+    if (target.closest && target.closest("#wikiIndexRefresh")) {
+      loadIndexCoverage(true);
+      return;
+    }
+    // Coverage footer under the page list → open the full Index card on the start
+    // view (it lazy-loads there); scroll it into view once the render settles.
+    if (target.closest && target.closest("#wikiCoverageLink")) {
+      goToStart();
+      setTimeout(() => {
+        const card = document.getElementById("wikiIndexCard");
+        if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 0);
+      return;
+    }
+    const tab = target.closest ? target.closest(".wiki-tab") : null;
+    if (tab) {
+      switchStartTab(tab.getAttribute("data-tab"));
+      return;
+    }
+    // Right rail Connections | Ask tab switch (manual — focus the Ask box).
+    const connTab = target.closest ? target.closest(".wiki-conn-tab") : null;
+    if (connTab) {
+      switchConnTab(connTab.getAttribute("data-conntab") || "conn", true);
+      return;
+    }
+    // The article pill opens the STALE tab; the home line opens the home's Stale tab.
+    if (target.closest && target.closest("[data-stale-pill]")) {
+      e.preventDefault();
+      // A collapsed pane hides the tab and focus mode hides the pane: show it first.
+      revealRightPane();
+      switchConnTab("stale");
+      return;
+    }
+    if (target.closest && target.closest("[data-stale-home-open]")) {
+      e.preventDefault();
+      switchStartTab("stale");
+      return;
+    }
+    // The STALE tab's buttons, before the nav-link branch below.
+    const staleCheck = target.closest ? target.closest("[data-stale-check]") : null;
+    if (staleCheck) {
+      void runStaleCheckClient(staleCheck.getAttribute("data-stale-page") || "");
+      return;
+    }
+    const staleVerdict = target.closest ? target.closest("[data-stale-verdict]") : null;
+    if (staleVerdict) {
+      void postStaleVerdict(staleVerdict);
+      return;
+    }
+    const staleApply = target.closest ? target.closest("[data-stale-apply]") : null;
+    if (staleApply) {
+      void postStaleFix(staleApply, "apply");
+      return;
+    }
+    const staleSend = target.closest ? target.closest("[data-stale-send]") : null;
+    if (staleSend) {
+      void postStaleFix(staleSend, "send");
+      return;
+    }
+    // The rail's ★ lives inside a `[data-relpath]` row; it is the list's own
+    // listener's business, and opening the page as well is not what a click on it
+    // means. Skipped HERE rather than by stopping propagation in that listener, so
+    // one widget's handler cannot silence document-level listeners that have
+    // nothing to do with it.
+    if (target.closest && target.closest("[data-pin]")) return;
+    // The work thread's 📌 is the list's own listener's business too.
+    if (target.closest && target.closest("[data-thread-pin]")) return;
+    // And the work thread ⋯ menus (PR 4): a focus row's own ⋯ sits inside a
+    // `[data-relpath]` row, and the popover is appended to `document.body`.
+    if (target.closest && target.closest(`[data-thread-row-menu], [data-work-card-menu], #${WORK_POP_ID}`)) return;
+    // Same rule for the group chip and the section fold: both live inside a
+    // `[data-relpath]` row, both belong to the list's own listener, and a click on
+    // either means "show me what is folded here", never "open this page".
+    if (target.closest && target.closest("[data-fold-key]")) return;
+    // Same rule again for the series editor: its `⋯` opener sits inside a
+    // `[data-relpath]` row (the rail's and the Related-work panel's), and its
+    // popover is appended to `document.body`, so without this skip a click on
+    // either OPENED THE PAGE underneath — measured, one navigation per menu open.
+    // Skipped by SELECTOR rather than by stopping propagation in the editor's own
+    // listener, which runs after this one: the ★ and the fold chip settled that
+    // rule for exactly this shape.
+    if (
+      target.closest &&
+      target.closest(`[${SERIES_MENU_ATTR}], [${SERIES_EDIT_ATTR}], #${SERIES_MENU_ID}`)
+    ) {
+      return;
+    }
+    // Related work's order toggle and ▸ second hop. The ▸ sits INSIDE a
+    // `[data-relpath]` row, so it is claimed here, before the nav-link branch
+    // below would open the row's page.
+    const relOrderBtn = target.closest ? target.closest(`[${RELATED_ORDER_ATTR}]`) : null;
+    if (relOrderBtn) {
+      e.preventDefault();
+      setRelatedOrder(parseRelatedOrder(relOrderBtn.getAttribute(RELATED_ORDER_ATTR)));
+      return;
+    }
+    const relHopBtn = target.closest ? target.closest<HTMLButtonElement>(`[${RELATED_HOP_ATTR}]`) : null;
+    if (relHopBtn) {
+      e.preventDefault();
+      toggleRelatedHop(relHopBtn);
+      return;
+    }
+    // The article header's project hub chip. Delegated here rather than bound at
+    // render time because `#articleWrap`'s innerHTML is replaced on every page
+    // load — and checked BEFORE the nav-link branch, since the chip sits inside the
+    // article head, which that branch would otherwise not claim but future markup
+    // might.
+    const hubChip = target.closest ? target.closest("[data-project-hub]") : null;
+    if (hubChip) {
+      e.preventDefault();
+      applyProjectFilter(hubChip.getAttribute("data-project-hub") || "");
+      return;
+    }
+    // The series strip's `continue at:` link. Delegated for the hub chip's reason
+    // — `#articleWrap`'s innerHTML is replaced on every page load — and by relPath
+    // rather than by name, since two pages of one series can share a stem.
+    const seriesGo = target.closest ? target.closest("[data-series-go]") : null;
+    if (seriesGo) {
+      e.preventDefault();
+      const rel = seriesGo.getAttribute("data-series-go") || "";
+      if (rel) loadPageByRelPath(rel, true);
+      return;
+    }
+    // A reveal control on an empty surface (the rail, Hubs): turn the toggle on.
+    if (target.closest && target.closest(`[${RETIRED_REVEAL_ATTR}]`)) {
+      e.preventDefault();
+      setShowRetired(true);
+      // The repaint removed the control that had focus; the options button that
+      // holds the toggle it turned on is where a keyboard reader continues.
+      document.getElementById("wikiOptionsBtn")?.focus();
+      return;
+    }
+    // The retired banner's successor link — same shape as `continue at:`, but a
+    // modified click keeps the anchor's own href (a new tab is a fair ask here).
+    const cullGo = target.closest ? target.closest(`[${CULL_GO_ATTR}]`) : null;
+    if (cullGo) {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+      e.preventDefault();
+      const rel = cullGo.getAttribute(CULL_GO_ATTR) || "";
+      if (rel) loadPageByRelPath(rel, true);
+      return;
+    }
+    // Graph mode: the toggle, a node (opens its card), the card's controls.
+    if (target.closest && target.closest(`#${GRAPH_TOGGLE_ID}`)) {
+      e.preventDefault();
+      toggleGraph();
+      return;
+    }
+    const graphFocus = target.closest ? target.closest(`[${GRAPH_FOCUS_ATTR}]`) : null;
+    if (graphFocus) {
+      e.preventDefault();
+      focusGraphNode(graphFocus.getAttribute(GRAPH_FOCUS_ATTR) || "");
+      return;
+    }
+    const graphOpen = target.closest ? target.closest(`[${GRAPH_OPEN_ATTR}]`) : null;
+    if (graphOpen) {
+      e.preventDefault();
+      graphMode = false;
+      graphIssue = "";
+      loadPageByRelPath(graphOpen.getAttribute(GRAPH_OPEN_ATTR) || "", true);
+      return;
+    }
+    if (target.closest && target.closest(`[${GRAPH_CARD_CLOSE_ATTR}]`)) {
+      e.preventDefault();
+      closeGraphCard();
+      return;
+    }
+    const graphNode = target.closest ? target.closest(`[${GRAPH_NODE_ATTR}]`) : null;
+    if (graphNode) {
+      e.preventDefault();
+      openGraphCard(graphNode.getAttribute(GRAPH_NODE_ATTR) || "");
+      return;
+    }
+    // Connections' Link and Link all. Before the Jira key below: a Link button
+    // sits beside a key, never inside one, but the order is the decision.
+    const issueLink = target.closest ? target.closest<HTMLButtonElement>(`[${ISSUE_LINK_ATTR}]`) : null;
+    if (issueLink) {
+      e.preventDefault();
+      if (issueLink.disabled || !currentRelPath) return;
+      void linkIssue(
+        currentRelPath,
+        issueLink.getAttribute("data-issue-tracker") || "",
+        issueLink.getAttribute(ISSUE_LINK_ATTR) || "",
+      );
+      return;
+    }
+    if (target.closest && target.closest(`[${ISSUE_LINK_ALL_ATTR}]`)) {
+      e.preventDefault();
+      void linkAllIssues();
+      return;
+    }
+    // The provenance strip's Jira key: the key itself narrows the page list to the
+    // pages serving that issue. Delegated here for the hub chip's reason — the
+    // strip lives inside `#articleWrap`, whose innerHTML is replaced on every load.
+    const provJira = target.closest ? target.closest("[data-prov-jira]") : null;
+    if (provJira) {
+      e.preventDefault();
+      const key = provJira.getAttribute("data-prov-jira") || "";
+      // Re-clicking the active key clears it, the chip row's own convention — so a
+      // reader who filtered from the strip can undo it from the same control.
+      applyJiraFilter(filters.jira === key ? "" : key);
+      return;
+    }
+    // The ⧉ copy button on a chain row. The id is carried ON the button rather
+    // than re-read from the row at click time, the ⧉ Copy path rule: the string
+    // reported and the string copied cannot then be different sessions. Checked
+    // BEFORE the disclosure below, because the button sits INSIDE the chain the
+    // line opens — the outer `closest` would otherwise never be reached, but the
+    // order is what makes that a decision rather than a coincidence of markup.
+    const sessCopy = target.closest ? target.closest<HTMLButtonElement>("[data-sess-copy]") : null;
+    if (sessCopy) {
+      e.preventDefault();
+      copySessionId(sessCopy);
+      return;
+    }
+    // The Stamp button on a ghost row. BEFORE the disclosure, for the ⧉ button's
+    // reason: it sits inside the chain the line opens.
+    const provStamp = target.closest
+      ? target.closest<HTMLButtonElement>("[data-prov-stamp]")
+      : null;
+    if (provStamp) {
+      e.preventDefault();
+      void stampGhost(provStamp);
+      return;
+    }
+    // The provenance line itself: one disclosure over the chain under the title.
+    // Delegated for the same reason as the two above — `#articleWrap`'s innerHTML
+    // is replaced on every page load, so a listener bound at render time would be
+    // re-bound per page and lost on the next one.
+    const provToggle = target.closest
+      ? target.closest<HTMLButtonElement>("[data-prov-toggle]")
+      : null;
+    if (provToggle) {
+      e.preventDefault();
+      toggleProvChain(provToggle);
+      return;
+    }
+    if (target.closest && target.closest("[data-prov-retry]")) {
+      e.preventDefault();
+      retryProvStrip();
+      return;
+    }
+    const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;
+    if (!link) return;
+    // `navTargetFrom` prefers `data-relpath` — the only key that names ONE page on a
+    // wiki with same-stem pages. The decision is pure + unit-tested (`wiki-nav.ts`);
+    // this listener only does the DOM half.
+    const targetPage = navTargetFrom(link);
+    if (!targetPage) return;
+    e.preventDefault();
+    openNavTarget(targetPage, true);
+  });
+  document.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    if (!target?.closest) return;
+    const el = workPopEl();
+    if (el && el.contains(target)) {
+      if (boundaryItemClick(target)) return e.preventDefault();
+      const save = target.closest<HTMLElement>("[data-work-save-series]");
+      if (save && workPop) {
+        e.preventDefault();
+        if (save.getAttribute("aria-disabled") === "true") return;
+        const card = drawnWorkCard(save.getAttribute("data-work-save-series") ?? "");
+        if (!card || !isRailGroupCard(card) || !card.series) return;
+        el.innerHTML = saveSeriesConfirmHtml(card, card.series);
+        // A textbox and plain buttons: a dialog, not a menu (whose reading mode
+        // skips anything that is not a menu item). Non-modal: the rail stays live.
+        el.setAttribute("role", "dialog");
+        el.setAttribute("aria-modal", "false");
+        el.setAttribute("aria-label", `Save «${card.name}» as a series`);
+        workPop.series = { card, busy: false };
+        el.querySelector<HTMLElement>("[data-work-series-key], [data-work-series-go]")?.focus({ preventScroll: true });
+        return;
+      }
+      if (target.closest("[data-work-series-go]")) {
+        e.preventDefault();
+        void runSaveAsSeries();
+        return;
+      }
+      if (target.closest("[data-work-series-cancel]")) {
+        e.preventDefault();
+        closeWorkPop("done");
+      }
+      return;
+    }
+    // Refused while a write runs (`closeWorkPop`): its report lands here.
+    if (el && !target.closest("[data-work-card-menu], [data-thread-row-menu]")) closeWorkPop("outside");
+  });
+  document.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Escape" && workPopEl()) closeWorkPop("key");
+  });
+  // The arrows, Home and End move between the items of two body-level menus —
+  // the ⋯ work popover and a thread row's page menu (`#wikiSeriesMenu` opened
+  // from a thread row, marked `data-page-menu`) — the Group menu's keys. A plain
+  // row's, Related work's and the header's series menus are not served: they open
+  // on their field. Tab closes the work popover back to its opener, as Tab closes
+  // the Group menu; the page menu holds text fields, so Tab stays the browser's
+  // there. Inside a text field every key is the field's: an item can move focus
+  // INTO the field (End, a wrap), never out of it.
+  document.addEventListener("keydown", (e) => {
+    const t = e.target as HTMLElement | null;
+    if (!t?.closest || e.defaultPrevented) return;
+    const work = t.closest<HTMLElement>(`#${WORK_POP_ID}`);
+    const el = work ?? t.closest<HTMLElement>(`#${SERIES_MENU_ID}[data-page-menu]`);
+    if (!el || el.getAttribute("role") !== "menu") return;
+    if (work && e.key === "Tab") {
+      e.preventDefault();
+      closeWorkPop("key");
+      return;
+    }
+    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+    const items = Array.from(el.querySelectorAll<HTMLElement>("[role^='menuitem'], [data-series-input]")).filter(
+      (x) => x.tabIndex >= 0 && !(x as HTMLButtonElement).disabled,
+    );
+    if (!items.length) return;
+    const at = items.findIndex((x) => x === t || x.contains(t));
+    const move = (i: number) => {
+      const item = items[(i + items.length) % items.length]!;
+      // `preventScroll`: a page scroll closes the popover; its own list scrolls.
+      item.focus({ preventScroll: true });
+      if (item.offsetTop < el.scrollTop) el.scrollTop = item.offsetTop;
+      else if (item.offsetTop + item.offsetHeight > el.scrollTop + el.clientHeight) el.scrollTop = item.offsetTop + item.offsetHeight - el.clientHeight;
+    };
+    if (e.key === "ArrowDown") move(at + 1);
+    else if (e.key === "ArrowUp") move(at < 0 ? -1 : at - 1);
+    else if (e.key === "Home") move(0);
+    else if (e.key === "End") move(items.length - 1);
+    else return;
+    e.preventDefault();
+  });
+  // Closed on a scroll that MOVES the opener from where the popover was placed.
+  // Scroll events arrive a frame late, so the click that opened the popover can
+  // deliver its own (a focus or scroll-into-view moving the rail just before the
+  // open): measured on a real wiki, that click closed the popover it opened.
+  window.addEventListener(
+    "scroll",
+    (e) => {
+      const el = workPopEl();
+      const t = e.target as Node | null;
+      if (!el || !workPop || (t && (t === el || el.contains(t)))) return;
+      const { opener, openerSel, at } = workPop;
+      const anchor = opener.isConnected ? opener : openerSel ? document.querySelector(openerSel) : null;
+      const r = anchor?.getBoundingClientRect();
+      if (r && Math.abs(r.top - at.top) < 1 && Math.abs(r.left - at.left) < 1) return;
+      closeWorkPop("viewport");
+    },
+    true,
+  );
+  window.addEventListener("resize", () => closeWorkPop("viewport"));
+  document.getElementById("wikiList")!.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    if (!target.closest) return;
+    // A click outside the open Group menu closes it in the pressed control's own
+    // render, which also refocuses that control; the document handler below
+    // repaints only when no render here removed the menu.
+    if (workMenuOpen && !target.closest(".wiki-work-menu, [data-work-group-menu]")) workMenuOpen = false;
+    // The Group control and its menu (plan `muninn-wiki-work-thread-grouping`).
+    // Menu items are buttons, so a keyboard Enter or Space lands here too.
+    if (target.closest("[data-work-group-menu]")) {
+      e.preventDefault();
+      setWorkMenu(!workMenuOpen, true);
+      return;
+    }
+    // PR 4: Reset your splits and groups — clears the record's four
+    // preferences as this tab shows them (D1), through the state table like
+    // any edit; an entry another tab added unseen stays. The menu closes and
+    // focus returns to the Group button, which reopens it.
+    if (target.closest("[data-work-reset]")) {
+      e.preventDefault();
+      editWorkGroup({ reset: true });
+      showWorkBoundaryStatus(null);
+      setWorkMenu(false, true);
+      return;
+    }
+    // Forget one definition the reset area lists (it has no Return or Allow
+    // grouping item); the menu stays open. Focus, by key, after the repaint:
+    // the Forget now at the forgotten one's place (the next), else the previous,
+    // else the menu's default item (its checked stop) — never Reset, which sits
+    // above every entry, so a second Enter never wipes the record.
+    const forget = target.closest<HTMLElement>(WORK_FORGET_SEL);
+    if (forget) {
+      e.preventDefault();
+      const keys = Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-work-menu :is(${WORK_FORGET_SEL})`), workForgetKey);
+      const at = keys.indexOf(workForgetKey(forget));
+      const next = at < 0 ? [] : [...keys.slice(at + 1), ...keys.slice(0, at).reverse()];
+      const id = forget.getAttribute("data-work-forget-split");
+      editWorkGroup(id !== null ? { forgetSplit: id } : { allowGrouping: [forget.getAttribute("data-work-forget-anchor") ?? ""] });
+      showWorkBoundaryStatus(null);
+      renderList();
+      focusWorkMenuItem(next.find((sel) => document.querySelector(`#wikiList .wiki-work-menu ${sel}`)));
+      return;
+    }
+    // PR 4: a card's ⋯ and a focus row's ⋯ (the one with no series menu).
+    const cardMenuBtn = target.closest<HTMLElement>("[data-work-card-menu]");
+    if (cardMenuBtn) {
+      e.preventDefault();
+      openWorkCardMenu(cardMenuBtn);
+      return;
+    }
+    const rowMenuBtn = target.closest<HTMLElement>("[data-thread-row-menu]");
+    if (rowMenuBtn) {
+      e.preventDefault();
+      openThreadRowMenu(rowMenuBtn);
+      return;
+    }
+    // PR 4: `▸ split into N sessions` — per tab, never stored.
+    const splitBtn = target.closest<HTMLElement>("[data-thread-sessions]");
+    if (splitBtn) {
+      e.preventDefault();
+      if (splitBtn.getAttribute("aria-disabled") === "true") return;
+      const key = normalizeFoldKey(splitBtn.getAttribute("data-thread-sessions") ?? "");
+      if (!key) return;
+      const hadFocus = document.activeElement === splitBtn;
+      if (workSessionsOpen.has(key)) workSessionsOpen.delete(key);
+      else workSessionsOpen.add(key);
+      renderList();
+      if (hadFocus) document.querySelector<HTMLElement>(`#wikiList [data-thread-sessions="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
+      return;
+    }
+    const stopBtn = target.closest("[data-work-stop]");
+    if (stopBtn) {
+      e.preventDefault();
+      editWorkGroup({ stop: stopBtn.getAttribute("data-work-stop") as WorkGroupStop });
+      setWorkMenu(false, true);
+      return;
+    }
+    const boxBtn = target.closest("[data-work-evidence]");
+    if (boxBtn) {
+      e.preventDefault();
+      // Disabled at Threads: the box keeps its value and the click does nothing.
+      if (boxBtn.getAttribute("aria-disabled") === "true") return;
+      const key = boxBtn.getAttribute("data-work-evidence") as keyof WorkGroupEvidenceToggles;
+      editWorkGroup({ evidence: key, value: boxBtn.getAttribute("aria-checked") !== "true" });
+      renderList();
+      focusWorkMenuItem(`[data-work-evidence="${CSS.escape(key)}"]`);
+      return;
+    }
+    // A Pick up row (plan `muninn-wiki-pick-up`): reveal its page in the card
+    // that draws it, or open the page when no drawn card does (D12).
+    const pickBtn = target.closest<HTMLElement>("[data-pickup]");
+    if (pickBtn) {
+      e.preventDefault();
+      const rel = pickBtn.getAttribute("data-pickup");
+      if (rel) jumpToPickUp(rel);
+      return;
+    }
+    const moreBtn = target.closest("[data-thread-more]");
+    if (moreBtn) {
+      e.preventDefault();
+      const key = moreBtn.getAttribute("data-thread-more");
+      if (!key) return;
+      const hadFocus = document.activeElement === moreBtn;
+      const childCards = () => Array.from(document.querySelectorAll<HTMLElement>(`#wikiList [data-thread-group-body="${CSS.escape(key)}"] .wiki-thread-card[data-thread]`));
+      // By key, not by count: a pinned child past the first three is drawn
+      // before the press and moves to its own place after it.
+      const before = new Set(childCards().map((c) => c.getAttribute("data-thread")));
+      workMoreOpen.add(key);
+      renderList();
+      // Focus the first child the press revealed.
+      if (hadFocus) {
+        const after = childCards();
+        const card = after.find((c) => !before.has(c.getAttribute("data-thread"))) ?? after[after.length - 1];
+        card?.querySelector<HTMLElement>(".wiki-thread-fold")?.focus({ preventScroll: true });
+      }
+      return;
+    }
+    // The shared context's `+N`: the full list in place, focus on the first link
+    // the press revealed.
+    const ctxBtn = target.closest("[data-thread-ctx-more]");
+    if (ctxBtn) {
+      e.preventDefault();
+      const key = ctxBtn.getAttribute("data-thread-ctx-more");
+      if (!key) return;
+      const hadFocus = document.activeElement === ctxBtn;
+      const links = () => Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-thread-context[data-thread-group="${CSS.escape(key)}"] .wiki-thread-link`));
+      const shown = links().length;
+      workContextOpen.add(key);
+      renderList();
+      if (hadFocus) links()[shown]?.focus({ preventScroll: true });
+      return;
+    }
+    // The group chip and the section fold — the rail's second control, on the same
+    // listener and BEFORE the pin, since both sit inside a row the body delegate
+    // would otherwise open. A fold DOES re-render (`renderList`): unlike the ★,
+    // which paints one button, this one adds and removes rows, so there is nothing
+    // to paint in place.
+    const fold = target.closest("[data-fold-key]");
+    if (fold) {
+      e.preventDefault();
+      const key = fold.getAttribute("data-fold-key");
+      if (!key) return;
+      const hadFocus = document.activeElement === fold;
+      openFolds = toggleFolded(WIKI, key);
+      renderList();
+      // The key's spelling can flip with the default it is drawn under, so look
+      // for either (`closed:` or not).
+      if (hadFocus) {
+        const base = key.startsWith(CLOSED_FOLD_PREFIX) ? key.slice(CLOSED_FOLD_PREFIX.length) : key;
+        const at = (k: string) => `#wikiList [data-fold-key="${CSS.escape(k)}"]`;
+        refocusRailControl(`${at(base)}, ${at(CLOSED_FOLD_PREFIX + base)}`, fold);
+      }
+      return;
+    }
+    // A work thread's 📌 (D7): the pinned card clears, any other pins its newest
+    // focus page (`pinAnchor`).
+    // This one DOES re-render — the pinned card moves to the top of the section,
+    // so there is no single button to repaint in place (the ★'s rule).
+    const threadPinBtn = target.closest("[data-thread-pin]");
+    if (threadPinBtn) {
+      e.preventDefault();
+      const key = threadPinBtn.getAttribute("data-thread-pin");
+      if (!key) return;
+      const hadFocus = document.activeElement === threadPinBtn;
+      const cardEl = threadPinBtn.closest(".wiki-thread-card");
+      // A group card is addressed by its own key, a thread card (child or not) by its.
+      const attr = cardEl?.hasAttribute("data-thread-group") ? "data-thread-group" : "data-thread";
+      const card = cardEl?.getAttribute(attr);
+      stepThreadPin({ kind: "click", value: threadPinBtn.getAttribute("data-thread-pinned") === "1" ? null : key });
+      renderList();
+      // The card moved: follow it by its own key, not by position.
+      if (hadFocus && card) {
+        refocusRailControl(`#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]`, threadPinBtn);
+      }
+      return;
+    }
+    const pin = target.closest("[data-pin]");
+    if (!pin) return;
+    e.preventDefault();
+    const row = pin.closest(".wiki-list-item");
+    const relPath = row?.getAttribute("data-relpath");
+    if (!relPath) return;
+    pins = togglePinned(WIKI, relPath);
+    // ⚠️ IN PLACE — deliberately NOT `renderList()`. Re-rendering here moved
+    // content under the reader, and the state space of "how much, and which way"
+    // (render cause × scroll position × whether the list reorders) produced a
+    // different defect in each of two review rounds: a numeric restore shifted the
+    // row at the cursor ~96px so a second click pinned a DIFFERENT page; the
+    // anchored restore that replaced it threw the reader down the list on a sort
+    // change and hid the new Pinned header when pinning at the top. Painting one
+    // button removes the space rather than picking a third point in it. The ★
+    // filling in is the confirmation in the meantime.
+    //
+    // ⚠️ The residual, stated because "nothing moves" is only true of THIS click:
+    // the render that first paints the new section can be the BACKGROUND listing
+    // refresh rather than one the reader caused, and the section then appears on a
+    // repaint nothing on screen explains — measured at ~50px of extra downward
+    // shift on top of the ~46px that refresh already moves content by, which is
+    // pre-existing and unrelated to pins. Bounded, and only on a render that
+    // already repaints the list.
+    paintPinState();
+  });
+  (document.getElementById("wikiSearch") as HTMLInputElement).addEventListener("input", (e) => {
+    filters.q = (e.target as HTMLInputElement).value;
+    renderList();
+    refreshStartBody();
+  });
+  document.getElementById("domainChips")!.addEventListener("click", function (this: HTMLElement, e) {
+    const target = e.target as HTMLElement;
+    const chip = target.closest ? target.closest(".wiki-chip") : null;
+    if (!chip) return;
+    filters.domain = chip.getAttribute("data-domain") || "";
+    this.querySelectorAll(".wiki-chip").forEach((c) => c.classList.remove("active"));
+    chip.classList.add("active");
+    renderFolderSelect();
+    renderTypeChips();
+    renderStatusChips();
+    renderProjectChips();
+    renderTagChips();
+    renderList();
+    refreshStartBody();
+    syncFilters();
+  });
+  document.getElementById("wikiFolder")!.addEventListener("change", function (this: HTMLSelectElement) {
+    filters.folder = this.value;
+    // The one facet whose counts are scoped by folder (see `projectCounts`), so
+    // this handler is the only one that has to repaint a chip row at all.
+    renderProjectChips();
+    renderList();
+    refreshStartBody();
+    syncFilters();
+  });
+  document.getElementById("typeChips")!.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    const chip = target.closest ? target.closest(".wiki-chip") : null;
+    if (!chip) return;
+    filters.type = chip.getAttribute("data-type") || "";
+    renderTypeChips();
+    renderStatusChips();
+    renderProjectChips();
+    renderTagChips();
+    renderList();
+    refreshStartBody();
+    syncFilters();
+  });
+  // Status facet: the enum chips and the ⚑ follow-ups toggle share one row (and so
+  // one delegated handler), but write to two independent filter fields.
+  document.getElementById("statusChips")!.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    const chip = target.closest ? target.closest(".wiki-chip") : null;
+    if (!chip) return;
+    if (chip.hasAttribute("data-followups")) {
+      filters.followups = filters.followups ? "" : "open";
+    } else if (chip.hasAttribute("data-waiting")) {
+      filters.waiting = filters.waiting ? "" : "you";
+    } else {
+      const status = chip.getAttribute("data-status") || "";
+      // Re-clicking the active chip clears it (the tag-row convention); "All status"
+      // carries an empty value and so clears by assignment.
+      filters.status = filters.status === status ? "" : status;
+    }
+    renderStatusChips();
+    renderList();
+    refreshStartBody();
+    syncFilters();
+  });
+  // Project facet. The only facet that is also URL state, so every path through it
+  // goes via `applyProjectFilter`, which owns the `replaceState`.
+  document.getElementById("projectChips")!.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    const chip = target.closest ? target.closest(".wiki-chip") : null;
+    if (!chip) return;
+    const project = chip.getAttribute("data-project") || "";
+    // Re-clicking the active chip clears it (the tag/status-row convention); "All
+    // projects" carries an empty value and so clears by assignment.
+    applyProjectFilter(filters.project === project ? "" : project);
+  });
+  // Jira facet. The project row's twin, and URL state for the same reason, so
+  // every path through it likewise goes via `applyJiraFilter`.
+  document.getElementById("jiraChips")!.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    const chip = target.closest ? target.closest(".wiki-chip") : null;
+    if (!chip) return;
+    if (chip.hasAttribute("data-jira-more")) {
+      jiraChipsExpanded = !jiraChipsExpanded;
+      renderJiraChips();
+      // The row was re-rendered under the reader's focus: hand it to the new
+      // expander, so a keyboard user can toggle again without hunting for it.
+      (document.querySelector("#jiraChips [data-jira-more]") as HTMLElement | null)?.focus();
+      return;
+    }
+    const key = chip.getAttribute("data-jira") || "";
+    applyJiraFilter(filters.jira === key ? "" : key);
+  });
+  document.getElementById("tagChips")!.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    const chip = target.closest ? target.closest(".wiki-chip") : null;
+    if (!chip) return;
+    if (chip.hasAttribute("data-tag-more")) {
+      tagsExpanded = !tagsExpanded;
+      renderTagChips();
+      return;
+    }
+    const tag = chip.getAttribute("data-tag") || "";
+    filters.tag = filters.tag === tag ? "" : tag;
+    renderTagChips();
+    renderList();
+    refreshStartBody();
+    syncFilters();
+  });
+  document.getElementById("wikiSort")!.addEventListener("change", () => {
+    sortTouched = true;
+    writeSort(WIKI, sortMode());
+    renderList();
+  });
+  familiesBox = document.getElementById("wikiGroupFamilies") as HTMLInputElement | null;
+  if (familiesBox) {
+    familiesBox.checked = familiesOn();
+    familiesBox.addEventListener("change", () => setGroupFamilies(familiesBox!.checked));
+  }
+  effortsBox = document.getElementById("wikiGroupEfforts") as HTMLInputElement | null;
+  if (effortsBox) effortsBox.addEventListener("change", () => setGroupEfforts(effortsBox!.checked));
+  retiredBox = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
+  if (retiredBox) {
+    retiredBox.checked = showRetired();
+    retiredBox.addEventListener("change", () => setShowRetired(retiredBox!.checked));
+  }
+  filtersDetails = document.getElementById("wikiFilters") as HTMLDetailsElement | null;
+  filtersBtn = document.getElementById("wikiFiltersBtn");
+  if (filtersDetails && filtersBtn) {
+    filtersBtn.addEventListener("click", () => {
+      filtersDetails!.open = !filtersDetails!.open;
+    });
+    filtersDetails.addEventListener("toggle", () => {
+      filtersBtn!.setAttribute("aria-expanded", String(filtersDetails!.open));
+    });
+  }
+  optionsBtn = document.getElementById("wikiOptionsBtn");
+  optionsPane = document.getElementById("wikiOptions");
+  if (optionsBtn && optionsPane) {
+    const inOptions = (n: EventTarget | null) =>
+      n instanceof Node && (optionsPane!.contains(n) || optionsBtn!.contains(n));
+    optionsBtn.addEventListener("click", () => setOptionsOpen(optionsPane!.hidden));
+    document.addEventListener("pointerdown", (e) => {
+      if (!optionsPane!.hidden && !inOptions(e.target)) setOptionsOpen(false);
+    });
+    document.addEventListener("focusin", (e) => {
+      if (!optionsPane!.hidden && !inOptions(e.target) && !restoringRailFocus) setOptionsOpen(false);
+    });
+    // Capture phase. Escape closes the pane and stops, so it neither leaves focus
+    // mode nor closes a graph card (whose own capture listener, registered
+    // earlier, already stood aside for the open dialog). A shortcut key — one
+    // printable character other than Space (the button's own key), no
+    // modifier — pressed OUTSIDE the pane (on its button,
+    // or on <body> in Safari, which does not focus a clicked button) closes it and
+    // carries on, so modalOpen() is false by the time the shortcut's own listener
+    // reads it. Inside the pane the target is a checkbox, which every shortcut
+    // owner treats as typing; the key is left to it.
+    document.addEventListener(
+      "keydown",
+      (e) => {
+        if (optionsPane!.hidden) return;
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          setOptionsOpen(false);
+          optionsBtn!.focus();
+        } else if (
+          e.key.length === 1 &&
+          e.key !== " " &&
+          !e.ctrlKey &&
+          !e.metaKey &&
+          !e.altKey &&
+          !optionsPane!.contains(e.target as Node)
+        ) {
+          setOptionsOpen(false);
+        }
+      },
+      true,
+    );
+  }
+  document.getElementById("wikiActiveOptions")?.addEventListener("click", (e) => {
+    const off = (e.target as HTMLElement).closest?.("[data-view-option-off]");
+    if (!off) return;
+    if (off.getAttribute("data-view-option-off") === "families") setGroupFamilies(false);
+    else setShowRetired(false);
+    // The chip is gone; its option lives behind the options button.
+    optionsBtn?.focus();
+  });
+  paintViewOptions();
+  wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
+  if (wikiSel) {
+    wikiSel.addEventListener("change", () => {
+      const value = wikiSel!.value;
+      location.href = value ? "/wiki?wiki=" + encodeURIComponent(value) : "/wiki";
+    });
+  }
+  // An in-article `#id` link to a card inside a closed fold: open it on the way.
+  window.addEventListener("hashchange", () => {
+    const article = document.querySelector("#articleWrap > .wiki-article");
+    if (article) revealHashTarget(article);
+  });
+  window.addEventListener("popstate", () => {
+    // Back/Forward is a navigation: an open find palette's rows describe the
+    // page being left.
+    if (isFindOpen()) closeFind(false);
+    const params = new URLSearchParams(location.search);
+    // The project rides in the URL, so Back/Forward is a facet change too — and it
+    // is the one path where the address bar leads. Adopted on EVERY branch (the
+    // article ones included: the rail keeps its chips while a page is open), and
+    // repainted only when it actually moved.
+    const projectBefore = filters.project;
+    adoptProjectFilter(true);
+    if (filters.project !== projectBefore) repaintForProject(false);
+    // Same for the jira facet — same reason, same `false` (Back/Forward is not a
+    // filter click, so a collapsed Filters stack stays collapsed).
+    const jiraBefore = filters.jira;
+    adoptJiraFilter(true);
+    if (filters.jira !== jiraBefore) repaintForJira(false);
+    // Graph mode is URL state: Back and Forward restore it with the page.
+    syncDisplayFromUrl();
+    // A relPath URL round-trips collision-proof (and is what every in-reader
+    // navigation now pushes); check it first, `?page=` stays for older links.
+    const relPath = params.get("relPath");
+    // The page on screen, in another display state: switch the display, never
+    // refetch the page (that reset its scroll and re-ran everything under it).
+    // Only while the pane shows that page: a failed load keeps the previous
+    // page's identity under its error.
+    const shown = document.querySelector("#articleWrap > .wiki-article, #articleWrap > .wiki-explainer-frame");
+    if (relPath && relPath === currentRelPath && currentName && !navInFlight && shown) {
+      applyDisplay();
+      return;
+    }
+    if (relPath) {
+      loadPageByRelPath(relPath, false);
+      return;
+    }
+    const page = params.get("page");
+    const effort = page ? null : effortFromUrl(params);
+    if (page) loadPage(page, false);
+    else if (effort !== null) renderEffort(effort);
+    else if (graphMode && graphIssue && hasTracker()) renderIssueGraph();
+    else {
+      syncStartTabFromUrl();
+      renderStart();
+      loadStaleSummary();
+    }
+  });
+  document.getElementById("wikiAskBtn")?.addEventListener("click", askQuestion);
+  document.getElementById("wikiAskInput")?.addEventListener("keydown", (e) => {
+    const ke = e as KeyboardEvent;
+    if (ke.key === "Enter" && !ke.shiftKey) { e.preventDefault(); askQuestion(); }
+  });
+  // Re-open a stored answer from the session history (no re-ask), or clear the
+  // session via the header affordance.
+  document.getElementById("wikiAskHistory")?.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    if (target.closest("#wikiAskHistClear")) { clearAskSession(); return; }
+    const item = target.closest("[data-ask-idx]");
+    if (!item) return;
+    const idx = parseInt(item.getAttribute("data-ask-idx") || "-1", 10);
+    const turn = askTurns[idx];
+    if (turn) showAskAnswer(turn, "");
+  });
+  // Follow-up bar (in the article pane) — delegated at the document level because
+  // `showAskAnswer` replaces the pane per turn, destroying any direct listeners.
+  document.addEventListener("click", (e) => {
+    const t = e.target as HTMLElement;
+    if (t.closest("#wikiFollowupBtn")) submitFollowup();
+    else if (t.closest("#wikiRememberBtn")) submitRemember();
+    else if (t.closest("#wikiChatEscBtn")) submitChatEscalate(false);
+    // Explicit "start another thread anyway" after a 409 (never automatic).
+    else if (t.closest("#wikiChatEscNewBtn")) submitChatEscalate(true);
+    // 📤 Share — the dialog is IMPORTED here rather than loaded as the standalone
+    // bundle: this file IS a bundle, and doing both would put two copies of the
+    // module (two states, two listener sets) on the same page.
+    else if (t.closest("#" + SHARE_BTN_ID)) openArticleShare();
+    else if (t.closest("#" + FELLES_BTN_ID)) {
+      const relPath = t.closest("#" + FELLES_BTN_ID)?.getAttribute("data-felles-relpath") || "";
+      if (relPath && fellesPublishBin && WIKI_ROOT) {
+        openFellesPublishDialog({
+          wiki: WIKI || "",
+          relPath,
+          bin: fellesPublishBin,
+          root: WIKI_ROOT,
+          bucket: fellesPublishBucket,
+          onRun: () => void fellesSync?.load({ afterRun: true }),
+        });
+      }
+    }
+    // ⧉ Copy path — delegated like its neighbours because the breadcrumb's
+    // innerHTML is rewritten on every navigation, which would drop a direct
+    // listener on the second page the reader opens.
+    else if (t.closest("#" + COPY_PATH_BTN_ID))
+      copyArticlePath(t.closest("#" + COPY_PATH_BTN_ID) as HTMLButtonElement);
+    // ⌖ Show in list — delegated for the same reason.
+    else if (t.closest("#wikiLocateBtn")) showOpenPageInList();
+    else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
+    // ↻ claim retry — the row buttons are injected into the answer body by a DOM
+    // pass, so they are delegated by ATTRIBUTE rather than by id.
+    else if (t.closest("[data-claim-retry-btn]")) {
+      const btn = t.closest("[data-claim-retry-btn]") as HTMLButtonElement;
+      if (!btn.disabled) submitClaimRetry(Number(btn.getAttribute("data-claim-retry-btn")));
+    } else if (t.closest("#wikiClaimRetryAll")) {
+      if (askShownTurn) void retryAllClaims(askShownTurn);
+    }
+    else if (t.closest("#wikiClaimRetryCancel")) cancelClaimRetryBatch();
+    else if (t.closest("#wikiFactcheckIntegrateBtn")) submitFactcheckIntegrate();
+    else if (t.closest("#wikiFcIntAccept")) acceptFactcheckIntegrate();
+    else if (t.closest("#wikiFcIntCancel")) cancelFactcheckIntegrate();
+  });
+  // The chat-options dialog wires its OWN click/change/input/keydown delegates —
+  // HERE, deliberately, the slot its `change` listener used to occupy, i.e. AFTER
+  // the click delegate above. The dialog's click-away test reads
+  // `document.contains(target)`, and a branch above that synchronously detaches its
+  // own target (`cancelFactcheckIntegrate`) must still run BEFORE that test, exactly
+  // as it did when every branch lived in one listener.
+  //
+  // Note that ALL the click delegates run for every click — the one above, the
+  // dialog's own (registered inside this call) and the `document.body` navigation
+  // delegate (`NAV_LINK_SELECTOR` — `[data-wiki-page]`/`[data-page]`/`[data-relpath]`,
+  // registered first) — so their
+  // selector sets must stay disjoint. The shell's sets are the `if / else if`
+  // chain above and the body delegate; the dialog's is the chain in
+  // `wireChatOptions` (`wiki-chat-options.ts`). One chain made that exclusivity
+  // structural; three make it a convention nothing enforces.
+  // The find palette (`/`, ⌘K): ranks `allPages` in the browser, boosted by the
+  // open page's `near` map. It owns every key pressed inside it; its opening
+  // listener is document-level, bubble phase. See `wiki-find-palette.ts`.
+  initFindPalette({
+    getPages: () => allPages,
+    listingState: () => (pagesLoaded ? "ready" : pagesLoadFailed ? "failed" : "loading"),
+    getNear: () => (currentNear && currentNear.relPath === currentRelPath ? currentNear.near : {}),
+    getScannedAt: () => scannedAtMs,
+    openPage: (relPath) => loadPageByRelPath(relPath),
+    hrefFor: (relPath) => pageUrlByRelPath(relPath),
+    onOpen: () => hideRefPeek(),
+    // Everywhere rows name a root by its FIRST registry entry; on aliased roots
+    // that is not the requested name, and under the WIKI_DIR override `WIKI` is "".
+    selfWiki: () => FIND_ROWS_WIKI,
+    // The read slice (nais) does not register the Everywhere route.
+    everywhere: () => wikiToolsFlag(),
+  });
+  initChatOptions({
+    getShownTurn: () => askShownTurn,
+    getAskTurns: () => askTurns,
+    getCurrentArticle: () => currentArticle,
+    getOutgoingTitles: () => currentOutgoingTitles,
+    postAskChat,
+    refreshChatEscalateBar,
+  });
+  // Preview-panel checkboxes — same document-level delegation (the panel is
+  // re-rendered wholesale on every toggle, so direct listeners wouldn't survive).
+  // State lives on `integratePreview`, never on the DOM.
+  document.addEventListener("change", (e) => {
+    const state = integratePreview;
+    if (!state) return;
+    // An apply is in flight: the inputs render disabled, but a programmatic or
+    // racing change must not re-render the panel out from under it either.
+    if (state.applying) return;
+    const t = e.target as HTMLElement;
+    if (t.id === "wikiFcIntCallout") {
+      state.callout = (t as HTMLInputElement).checked;
+      renderIntegratePreview();
+      return;
+    }
+    if (t.classList && t.classList.contains("wiki-fc-int-cb")) {
+      // The annotation GROUP checkbox owns every wrapper-only index at once — the
+      // marks are one editorial act, and a half-marked page would leave chips and
+      // appendix disagreeing about what was checked.
+      if (t.getAttribute("data-edit-group") === "annotations") {
+        const on = (t as HTMLInputElement).checked;
+        for (const i of annotationIndexes(state.proposal.edits || [])) state.selected[i] = on;
+        state.applyBlocked = false;
+        state.applyDropped = undefined;
+        state.applyDroppedOpen = undefined;
+        renderIntegratePreview();
+        return;
+      }
+      const idx = parseInt(t.getAttribute("data-edit-idx") || "-1", 10);
+      if (idx >= 0) {
+        state.selected[idx] = (t as HTMLInputElement).checked;
+        // The selection changed, so the "this exact selection resolved to nothing"
+        // block no longer applies — Apply becomes live again.
+        state.applyBlocked = false;
+        state.applyDropped = undefined;
+        state.applyDroppedOpen = undefined;
+        state.focusEditIdx = idx; // restored after the full re-render
+        renderIntegratePreview();
+      }
+    }
+  });
+  // The dropped-list disclosure is state, not DOM: without this a checkbox toggle's
+  // re-render snapped an opened "N not applied" list shut again.
+  //
+  // There are TWO such lists (propose-time drops, and the apply route's own
+  // rejections) and they share the `.wiki-fc-int-dropped` class, so the `apply-drops`
+  // modifier is what tells them apart — into two separate state fields. A single
+  // shared field made each list's toggle clobber the other's open state.
+  document.addEventListener(
+    "toggle",
+    (e) => {
+      const state = integratePreview;
+      if (!state) return;
+      const t = e.target as HTMLElement;
+      if (t instanceof HTMLDetailsElement && t.classList.contains("wiki-fc-int-dropped")) {
+        if (t.classList.contains("apply-drops")) state.applyDroppedOpen = t.open;
+        else state.droppedOpen = t.open;
+      }
+    },
+    true, // `toggle` does not bubble — capture it
+  );
+  document.addEventListener("keydown", (e) => {
+    const ke = e as KeyboardEvent;
+    if (ke.key !== "Enter" || ke.shiftKey) return;
+    if ((ke.target as HTMLElement)?.id === "wikiFollowupInput") {
+      ke.preventDefault();
+      submitFollowup();
+    }
+  });
+  // Show on selection release inside the article pane; the timeout lets the browser
+  // finalize the selection first. (articleWrap's element persists across page
+  // navigations — only its innerHTML is swapped — so a one-time listener suffices.)
+  document.getElementById("articleWrap")?.addEventListener("mouseup", () => {
+    setTimeout(maybeShowExplainPill, 0);
+  });
+  // Dismiss on: selection collapse, article scroll, Escape, any mousedown outside
+  // the pill (the pill's own mousedown stops propagation, so it self-excludes).
+  document.addEventListener("selectionchange", () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) hideExplainPill();
+  });
+  document.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Escape") hideExplainPill();
+  });
+  // A mousedown on the Explain button activates it (preventDefault keeps the
+  // selection alive so `activateExplain` reads its captured passage); a mousedown
+  // anywhere else dismisses the button. One handler so the two never race.
+  document.addEventListener("mousedown", (e) => {
+    const t = e.target as HTMLElement;
+    if (t.closest && t.closest("#wikiExplainBtn")) {
+      e.preventDefault();
+      activateExplain();
+      return;
+    }
+    // Selection-gated Fact check — preventDefault keeps the selection alive so the
+    // captured passage is read (same pattern as Explain).
+    if (t.closest && t.closest("#wikiFactcheckBtn")) {
+      e.preventDefault();
+      activateFactcheckSel();
+      return;
+    }
+    // Whole-article Fact check — always visible, needs no selection.
+    if (t.closest && t.closest("#wikiFactcheckArticleBtn")) {
+      activateFactcheckArticle();
+      return;
+    }
+    hideExplainPill();
+  });
+  // ── Explainer-iframe bridge ───────────────────────────────────────────
+  // Standalone HTML explainers render in a sandboxed (opaque-origin) iframe, so the
+  // parent can't read their selection directly — the injected forwarder posts it up
+  // (see src/wiki/explainer-bridge.ts). Trust a message ONLY when the current page
+  // is that explainer AND the event's source is the live frame's contentWindow
+  // (looked up per event — never cached across navigations). Everything else is
+  // ignored silently (other pages/extensions post messages constantly).
+  window.addEventListener("message", (e: MessageEvent) => {
+    if (!currentName) return;
+    const meta = currentArticle;
+    if (!meta || meta.type !== "explainer") return;
+    const frame = document.querySelector(".wiki-explainer-frame") as HTMLIFrameElement | null;
+    if (!frame || e.source !== frame.contentWindow) return;
+    const data = e.data as { type?: string; sel?: unknown; heading?: unknown };
+    if (!data || typeof data !== "object") return;
+    if (data.type === "wiki-explain-clear") return hideExplainPill();
+    if (data.type !== "wiki-explain-sel") return;
+    const raw = typeof data.sel === "string" ? data.sel.trim() : "";
+    if (raw.length < EXPLAIN_MIN_CHARS) return hideExplainPill();
+    // Cap at the same ceiling as the md path (server re-caps too).
+    pillSel = raw.length > EXPLAIN_MAX_CHARS ? raw.slice(0, EXPLAIN_MAX_CHARS) : raw;
+    pillHeading = typeof data.heading === "string" ? data.heading : "";
+    // The Explain button lives in the breadcrumb (stable spot) — no rect to
+    // translate anymore; just reveal it. `renderBreadcrumb` already ran for this
+    // explainer, so the button exists.
+    showExplainPill();
+  });
+  // Another tab pinned, unpinned or cleared storage (D7): adopt what storage now
+  // holds and repaint. The repaint is `cause: "storage"`, which writes nothing,
+  // so no tab's write can make another tab write.
+  window.addEventListener("storage", (e) => {
+    // The pin and the grouping record (D17) each run their own table; one
+    // repaint, `cause: "storage"`, which runs no render step and writes nothing.
+    let repaint = false;
+    if (storageEventTouchesThreadPin(e.key, WIKI)) {
+      repaint = stepThreadPin({ kind: "storage", stored: readThreadPin(WIKI), booted: pagesRefresh.bootRendered }) || repaint;
+    }
+    if (storageEventTouchesWorkGroup(e.key, WIKI)) {
+      repaint = stepWorkGroup({ kind: "storage", stored: readWorkGroup(WIKI), booted: pagesRefresh.bootRendered }) || repaint;
+    }
+    if (repaint) renderList("storage");
+  });
+  // The Group menu's keys: the arrows, Home and End move between its items,
+  // Escape and Tab close it and return focus to the Group button, and ArrowDown
+  // on the button opens it.
+  document.getElementById("wikiList")!.addEventListener("keydown", (e) => {
+    const target = e.target as HTMLElement;
+    if (!target.closest) return;
+    if (target.closest("[data-work-group-menu]") && e.key === "ArrowDown" && !workMenuOpen) {
+      e.preventDefault();
+      setWorkMenu(true, true);
+      return;
+    }
+    const menu = target.closest(".wiki-work-menu");
+    if (!menu) return;
+    const items = Array.from(menu.querySelectorAll<HTMLElement>("[role^='menuitem']"));
+    const at = items.indexOf(target.closest("[role^='menuitem']") as HTMLElement);
+    const move = (i: number) => items[(i + items.length) % items.length]?.focus();
+    if (e.key === "ArrowDown") move(at + 1);
+    else if (e.key === "ArrowUp") move(at - 1);
+    else if (e.key === "Home") move(0);
+    else if (e.key === "End") move(items.length - 1);
+    else if (e.key === "Escape" || e.key === "Tab") setWorkMenu(false, true);
+    else return;
+    e.preventDefault();
+  });
+  // Escape closes the open Group menu wherever focus is (the list's handler above
+  // takes it first inside the menu); focus goes to the Group button only when it
+  // was lost to the page, never away from a control the reader is on.
+  document.addEventListener("keydown", (e) => {
+    if (!workMenuOpen || e.key !== "Escape" || e.defaultPrevented) return;
+    const lost = !document.activeElement || document.activeElement === document.body;
+    setWorkMenu(false, lost);
+    if (lost) e.preventDefault();
+  });
+  // A click outside the open Group menu closes it, unless a rail control's own
+  // render (the list handler above) already did.
+  document.addEventListener("click", (e) => {
+    if (!document.querySelector("#wikiList .wiki-work-menu")) {
+      workMenuOpen = false;
+      return;
+    }
+    const target = e.target as HTMLElement;
+    if (target.closest?.(".wiki-work-menu, [data-work-group-menu]")) return;
+    setWorkMenu(false, false);
+  });
+  window.addEventListener("focus", () => maybeRefetchPages(true));
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) maybeRefetchPages(true);
+  });
+  // The never-blurred tab: visible on a second monitor for hours, firing neither
+  // event. Same gate, but the PLAIN fetch — server TTL freshness is fine for idle
+  // drift.
+  const refetchTimer = setInterval(() => maybeRefetchPages(false), WIKI_REFETCH_TICK_MS);
+  paintMirrorFromListing = installMirrorStatus({ now: () => Date.now(), setInterval: (tick, ms) => (mirrorTimer = setInterval(tick, ms)) });
+  // ── Boot ──────────────────────────────────────────────────────────────
+  // Two independent flags, one installer (`wikiBlockedSelectorFor`):
+  //   - a wiki-readonly INSTANCE dims + blocks the write actions (➕ / ✎ / Apply /
+  //     Draft synthesis);
+  //   - a read-only WIKI (`WIKI_READONLY_ROOTS`) adds the egress family — Share,
+  //     both fact-check buttons, Explain, Discuss, Ask / New chat / follow-up /
+  //     Remember, the escalate bar and the claim-retry ↻ — and disables the two
+  //     question inputs.
+  // Either way the refusal is visible before the click rather than after a 403.
+  // No-op when neither flag is set (no listeners installed at all).
+  installWikiReadonlyGuard();
+  // Rehydrate any persisted Ask session into the "This session" list (does not
+  // auto-show an answer). Safe at boot — the history element is static.
+  rehydrateAskSession();
+  // The start tab is resolved HERE, once, whatever the page fetch does: an article
+  // deep link needs it for its crumb, and a boot whose fetch failed heals through
+  // `bootRender`'s early return with the reader possibly elsewhere — a sync
+  // inside that function was skipped on exactly that path.
+  syncStartTabFromUrl();
+  if (!rememberOrRedirectWiki()) requestPages({ refresh: false, boot: true });
+
+  return {
+    dispose() {
+      clearInterval(refetchTimer);
+      if (mirrorTimer !== undefined) clearInterval(mirrorTimer);
+    },
+  };
+}

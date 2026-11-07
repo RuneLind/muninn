@@ -211,7 +211,7 @@ export function initChatOptions(d: ChatOptionsDeps): void {
 
 /** The wiki this reader is browsing — read by the same RULE the shell uses
  *  (`wiki-param.ts`), though not at the same moment: the shell snapshots it once
- *  at boot (`const WIKI = readActiveWikiName()` in `wiki-browser.ts`) while this
+ *  in `boot()` (`WIKI = readActiveWikiName()` in `wiki-browser.ts`) while this
  *  re-reads it on every call. Deliberate — this file is imported before the shell
  *  runs, so a module-scope capture here would read the global too early — and the
  *  two cannot disagree, because the value never changes after the bundle loads:
