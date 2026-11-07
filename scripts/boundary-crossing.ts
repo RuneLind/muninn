@@ -9,7 +9,9 @@
  * A file is classified by the first matching rule in `SIDE_RULES`; files that are
  * neither (shared registries, docs, CI) do not count toward either side.
  */
-import { layerOf } from "../src/test/layers.ts";
+import path from "node:path";
+import { importEdges, layerOf, sourceFiles, type Edge } from "../src/test/layers.ts";
+import { BUN_TEST_FILE } from "../src/test/mock-isolation.ts";
 
 export type Side = "knowledge" | "other" | "neutral";
 export type CommitClass = "knowledge" | "other" | "crossing" | "neutral";
@@ -21,6 +23,8 @@ export type CommitClass = "knowledge" | "other" | "crossing" | "neutral";
  */
 const KNOWLEDGE_NAME =
   /wiki|summar|(^|\/)sum-|(^|\/)plans?[-./]|gardener|walkthrough|factcheck|(^|\/)share[-./]|frames|graph|youtube|vimeo|tiktok|x-article|(^|\/)article[-./]|anthropic|(^|\/)component-reference|decision|work-map|theme-map|stale-proposal|diagram|oppfolging|find-links/;
+
+const KNOWLEDGE_DIR = /^src\/(gardener|plans|summaries|share|youtube|vimeo|tiktok|x-article|article|anthropic|video)\//;
 
 /** First match wins. */
 export const SIDE_RULES: readonly (readonly [test: (f: string) => boolean, side: Side, why: string])[] = [
@@ -34,17 +38,68 @@ export const SIDE_RULES: readonly (readonly [test: (f: string) => boolean, side:
   // render includes src/web/web-format.ts, which serves chat too (F7). Kept knowledge: its commits since 10-13
   // are wiki component rendering, and the chat formatters a new component touches still count as the other side.
   [(f) => ["wiki-core", "render"].includes(layerOf(f) ?? ""), "knowledge", "layer table: wiki-core and render"],
-  [(f) => /^src\/(gardener|plans|summaries|share|youtube|vimeo|tiktok|x-article|article|anthropic|video)\//.test(f), "knowledge", "gardener, plans, capture verticals"],
+  [(f) => KNOWLEDGE_DIR.test(f), "knowledge", "gardener, plans, capture verticals"],
   [(f) => /^(src\/(dashboard|chat|db|test|watchers)|db\/migrations|e2e|scripts|extensions)\//.test(f) && KNOWLEDGE_NAME.test(f.slice(f.indexOf("/") + 1)), "knowledge", "wiki/capture files in mixed folders"],
 ];
 
-export function classifyFile(file: string): Side {
+function ruleSide(file: string): Side {
   for (const [test, side] of SIDE_RULES) if (test(file)) return side;
   return "other";
 }
 
+/** Direct imports between source files, both ways. */
+export interface ImportGraph {
+  imports(file: string): readonly string[];
+  importers(file: string): readonly string[];
+}
+
+export function graphFromEdges(edges: readonly Edge[]): ImportGraph {
+  const out = new Map<string, string[]>();
+  const into = new Map<string, string[]>();
+  for (const { from, to } of edges) {
+    out.set(from, [...(out.get(from) ?? []), to]);
+    into.set(to, [...(into.get(to) ?? []), from]);
+  }
+  return { imports: (f) => out.get(f) ?? [], importers: (f) => into.get(f) ?? [] };
+}
+
+let repoGraph: ImportGraph | null = null;
+/** The working tree's import graph, built once. A file no longer on disk has no edges. */
+function liveGraph(): ImportGraph {
+  if (!repoGraph) {
+    const root = path.join(import.meta.dir, "..");
+    // Component test files too, so a test is judged by what it imports.
+    const tests = [...new Bun.Glob("src/{dashboard,chat}/views/components/*.test.ts").scanSync({ cwd: root })];
+    repoGraph = graphFromEdges(importEdges(root, [...sourceFiles(root), ...tests]));
+  }
+  return repoGraph;
+}
+
+const COMPONENT_DIR = /^src\/(dashboard|chat)\/views\/components\//;
+
+/** An import that marks a component as knowledge: wiki-core, a knowledge directory, or a knowledge component. */
+const isKnowledgeModule = (t: string) =>
+  layerOf(t) === "wiki-core" || KNOWLEDGE_DIR.test(t) || (COMPONENT_DIR.test(t) && ruleSide(t) === "knowledge");
+
+/**
+ * Rules first. A shared-component file the rules call "other" is knowledge when it
+ * imports a knowledge module (not render, which chat uses too, and not a name match
+ * such as `watchers/anthropic.ts`), or
+ * when every non-test file importing it is knowledge; a component test file is judged
+ * by its imports. Names alone cannot tell `doc-panel.ts` or
+ * `code-tabs.ts` from `theme.ts`. Edges come from today's tree.
+ */
+export function classifyFile(file: string, graph: ImportGraph = liveGraph()): Side {
+  const side = ruleSide(file);
+  if (side !== "other" || !COMPONENT_DIR.test(file)) return side;
+  if (graph.imports(file).some(isKnowledgeModule)) return "knowledge";
+  const by = graph.importers(file).filter((f) => !BUN_TEST_FILE.test(f));
+  if (by.length > 0 && by.every((f) => ruleSide(f) === "knowledge")) return "knowledge";
+  return "other";
+}
+
 export function classifyCommit(files: readonly string[]): CommitClass {
-  const sides = new Set(files.map(classifyFile));
+  const sides = new Set(files.map((f) => classifyFile(f)));
   if (sides.has("knowledge") && sides.has("other")) return "crossing";
   if (sides.has("knowledge")) return "knowledge";
   if (sides.has("other")) return "other";

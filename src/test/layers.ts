@@ -179,12 +179,6 @@ export function checkAllowlist(listed: readonly string[], current: readonly stri
   };
 }
 
-/** `--update`: keep only listed lines that are still violations, sorted and unique. Never adds a line. */
-export function shrinkAllowlist(listed: readonly string[], current: readonly string[]): string[] {
-  const now = new Set(current);
-  return [...new Set(listed.filter((l) => now.has(l)))].sort();
-}
-
 /**
  * `--update`'s new file text: entries that are no longer violations, and repeats, are
  * dropped; comments and blank lines (recognised trimmed, as `parseAllowlist` does) stay

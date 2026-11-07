@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { classifyCommit, classifyFile, parseGitLog, summarize } from "./boundary-crossing.ts";
+import { classifyCommit, classifyFile, graphFromEdges, parseGitLog, summarize } from "./boundary-crossing.ts";
 
 describe("classifyFile", () => {
   test("knowledge: wiki-core and render layers, capture verticals, wiki files in mixed folders", () => {
@@ -41,6 +41,46 @@ describe("classifyFile", () => {
       "src/dashboard/views/components/plan-board.ts",
     ]) expect([f, classifyFile(f)]).toEqual([f, "knowledge"]);
   });
+  test("live tree: doc-panel (imports summaries) and doc-panel-menu (only sum-article-library imports it) are knowledge", () => {
+    for (const f of ["src/dashboard/views/components/doc-panel.ts", "src/dashboard/views/components/doc-panel-menu.ts"])
+      expect([f, classifyFile(f)]).toEqual([f, "knowledge"]);
+  });
+  test("live tree: a component test file is judged by its imports (client-markdown-links.test.ts imports doc-panel)", () => {
+    expect(classifyFile("src/dashboard/views/components/client-markdown-links.test.ts")).toBe("knowledge");
+  });
+  test("live tree: code-tabs, code-block-chrome and copy-path stay other, since chat's web-format-browser uses them", () => {
+    for (const f of ["src/dashboard/views/components/code-tabs.ts", "src/dashboard/views/components/code-block-chrome.ts", "src/dashboard/views/components/copy-path.ts"])
+      expect([f, classifyFile(f)]).toEqual([f, "other"]);
+  });
+  describe("component evidence on a synthetic graph", () => {
+    const C = "src/dashboard/views/components/";
+    const graph = graphFromEdges([
+      { from: `${C}a.ts`, to: "src/summaries/x.ts" },
+      { from: `${C}b.ts`, to: "src/format/markdown-ast.ts" },
+      { from: `${C}wiki-browser.ts`, to: `${C}c.ts` },
+      { from: `${C}sum-reader.ts`, to: `${C}c.ts` },
+      { from: `${C}wiki-browser.ts`, to: `${C}d.ts` },
+      { from: "src/chat/views/components/web-format-browser.ts", to: `${C}d.ts` },
+      { from: "src/wiki/store.ts", to: "src/ai/e.ts" },
+      { from: `${C}f.ts`, to: "src/watchers/anthropic.ts" },
+      { from: `${C}g.ts`, to: `${C}wiki-filter.ts` },
+      { from: `${C}h.ts`, to: "src/wiki/store.ts" },
+      { from: `${C}wiki-browser.ts`, to: `${C}i.ts` },
+      { from: `${C}i.test.ts`, to: `${C}i.ts` },
+    ]);
+    test("a test file importing it does not count as an importer", () => expect(classifyFile(`${C}i.ts`, graph)).toBe("knowledge"));
+    test("a name-only knowledge file outside the components is no evidence", () => expect(classifyFile(`${C}f.ts`, graph)).toBe("other"));
+    test("imports a knowledge component or wiki-core: knowledge", () => {
+      expect(classifyFile(`${C}g.ts`, graph)).toBe("knowledge");
+      expect(classifyFile(`${C}h.ts`, graph)).toBe("knowledge");
+    });
+    test("imports a knowledge module: knowledge", () => expect(classifyFile(`${C}a.ts`, graph)).toBe("knowledge"));
+    test("imports only render: other", () => expect(classifyFile(`${C}b.ts`, graph)).toBe("other"));
+    test("every importer is knowledge: knowledge", () => expect(classifyFile(`${C}c.ts`, graph)).toBe("knowledge"));
+    test("one importer is not: other", () => expect(classifyFile(`${C}d.ts`, graph)).toBe("other"));
+    test("no edges: other", () => expect(classifyFile(`${C}zz.ts`, graph)).toBe("other"));
+    test("outside the component folders the rules alone decide", () => expect(classifyFile("src/ai/e.ts", graph)).toBe("other"));
+  });
   test("neutral: shared registries, instructions, root config", () => {
     for (const f of [
       "package.json",
@@ -64,8 +104,16 @@ describe("classifyCommit", () => {
     expect(classifyCommit(["src/wiki/store.ts", "package.json", "CLAUDE.md"])).toBe("knowledge");
     expect(classifyCommit(["src/ai/executor.ts", "e2e/ports.ts"])).toBe("other");
     expect(classifyCommit(["package.json"])).toBe("neutral");
-    // #800: chat's authed-fetch and its test only.
-    expect(classifyCommit(["src/auth/CLAUDE.md", "src/chat/views/components/authed-fetch.ts", "src/chat/views/components/authed-fetch.test.ts"])).toBe("other");
+    // #800 (e8628a4f), its full file set.
+    expect(
+      classifyCommit([
+        "e2e/session-expiry.spec.ts",
+        "src/auth/CLAUDE.md",
+        "src/chat/CLAUDE.md",
+        "src/chat/views/components/authed-fetch.test.ts",
+        "src/chat/views/components/authed-fetch.ts",
+      ]),
+    ).toBe("other");
     expect(classifyCommit([])).toBe("neutral");
   });
 });

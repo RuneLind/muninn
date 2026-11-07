@@ -14,7 +14,6 @@ import {
   parseAllowlist,
   resolveSpecifier,
   rewriteAllowlist,
-  shrinkAllowlist,
   sourceFiles,
   violations,
   type Layer,
@@ -150,9 +149,6 @@ describe("allowlist", () => {
   });
   test("a clean list reports nothing", () => {
     expect(checkAllowlist(["a -> b", "c -> d"], ["c -> d", "a -> b"])).toEqual({ unlisted: [], stale: [], format: [] });
-  });
-  test("shrink removes fixed lines and never adds a new violation", () => {
-    expect(shrinkAllowlist(["c -> d", "a -> b", "a -> b", "x -> y"], ["a -> b", "c -> d", "new -> edge"])).toEqual(["a -> b", "c -> d"]);
   });
   test("--update's rewrite drops fixed and duplicate entries, trims them, and adds none", () => {
     expect(rewriteAllowlist("  a -> b \na -> b\nc -> d\nx -> y\n", ["a -> b", "c -> d", "new -> edge"])).toBe("a -> b\nc -> d\n");
