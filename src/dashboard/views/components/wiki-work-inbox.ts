@@ -48,6 +48,10 @@ interface InboxState {
   /** The triage's status line (`GET /api/wiki/decision-triage/status`); null when it did not load. */
   status: TriageStatusBody | null;
   statusOpen: boolean;
+  /** Run now's POST is out. */
+  running: boolean;
+  /** Run now's refusal or a pass that did not end ok, said under the line. */
+  runMsg: string | null;
 }
 
 const KEPT_KEY = "muninn-inbox-kept";
@@ -113,7 +117,7 @@ export function initInbox(paint: (focusSel?: string, passive?: boolean) => void)
 /** Fetch the inbox (`url` carries the wiki). A wiki outside the triage scope answers 404: no section. */
 export function loadInbox(url: string): void {
   const seq = ++loadSeq;
-  if (!st || st.url !== url) st = { url, body: null, open: null, laneOpen: {}, picked: {}, notes: {}, sending: {}, failed: null, msg: {}, preview: {}, showKept: false, closed: null, status: null, statusOpen: false };
+  if (!st || st.url !== url) st = { url, body: null, open: null, laneOpen: {}, picked: {}, notes: {}, sending: {}, failed: null, msg: {}, preview: {}, showKept: false, closed: null, status: null, statusOpen: false, running: false, runMsg: null };
   loadStatus(url, seq);
   fetch(url)
     .then(async (r) => ({ status: r.status, body: r.ok ? ((await r.json().catch(() => null)) as DecisionInboxBody | null) : null }))
@@ -181,8 +185,10 @@ function statusHtml(now: number): string {
     `<div class="wiki-wi-tri" data-wi-tri><span class="wiki-wi-tri-dot${warn ? " warn" : ""}" title="${esc(dotTitle)}"></span>` +
     `<span>${parts.join(" · ")}</span>${missing}${t.pass.on && t.pass.modelOff ? "<span>model off</span>" : ""}${next}` +
     `<span class="wiki-wi-tri-sp"></span>` +
+    runButtonHtml(t) +
     (t.nights.length ? `<button class="wiki-wi-btn small" data-wi-act="tri-details" aria-expanded="${st!.statusOpen}">${st!.statusOpen ? "Hide" : "Details"}</button>` : "") +
-    `</div>`;
+    `</div>` +
+    (st!.runMsg ? `<div class="wiki-wi-msg warn" role="status" data-wi-run-msg>${esc(st!.runMsg)}</div>` : "");
   if (!st!.statusOpen || !t.nights.length) return line;
   const day = (night: string) => night.split("-").slice(1).reverse().join(".");
   const rows = t.nights
@@ -192,6 +198,45 @@ function statusHtml(now: number): string {
     line +
     `<div class="wiki-wi-tri-stats"><table><thead><tr><th>Night</th><th>Outcome</th><th>Cards</th><th>With code facts</th><th>Answered</th><th>Repos not found</th></tr></thead><tbody>${rows}</tbody></table></div>`
   );
+}
+
+/** Why Run now cannot run here, or null when it can. */
+export function runNowBlocked(pass: TriageStatusBody["pass"]): string | null {
+  if (!pass.on) return `The pass is off: ${pass.why ?? "unknown"}`;
+  if (!pass.modelOff) return "The model call is on: Run now never calls the model";
+  return null;
+}
+
+/** `aria-disabled` rather than `disabled`, so the reason's tooltip still shows. */
+function runButtonHtml(t: TriageStatusBody): string {
+  const blocked = runNowBlocked(t.pass);
+  const running = st!.running;
+  const title = blocked ?? (running ? "A pass is running on this wiki" : "Run tonight's pass now, with no model call");
+  return `<button class="wiki-wi-btn small" data-wi-act="tri-run" title="${esc(title)}"${blocked || running ? ' aria-disabled="true"' : ""}${running ? ' aria-busy="true"' : ""}>${running ? "Running…" : "Run now"}</button>`;
+}
+
+async function sendRun(): Promise<void> {
+  const s = st!;
+  const wiki = s.status!.wiki;
+  s.running = true;
+  s.runMsg = null;
+  repaint('[data-wi-act="tri-run"]');
+  let status = 0;
+  let data: { error?: string; outcome?: string; cards?: number; reason?: string } | null = null;
+  try {
+    const res = await fetch(`/api/wiki/decision-triage/run?wiki=${encodeURIComponent(wiki)}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    status = res.status;
+    data = await res.json().catch(() => null);
+  } catch {
+    status = 0;
+  }
+  if (st !== s) return;
+  s.running = false;
+  const ok = status >= 200 && status < 300;
+  if (!ok) s.runMsg = `Couldn’t run the pass: ${data?.error ?? (status ? `HTTP ${status}` : "the server did not answer")}.`;
+  else if (data?.outcome !== "ok" && data?.outcome !== "partial") s.runMsg = `The pass ended ${data?.outcome ?? "without an outcome"}${data?.reason ? `: ${data.reason}` : ""}.`;
+  repaint('[data-wi-act="tri-run"]', true);
+  loadStatus(s.url, loadSeq);
 }
 
 function canAnswer(k: string): boolean {
@@ -426,6 +471,10 @@ export function handleInboxClick(target: Element, hrefFor: (rel: string) => stri
   if (act?.getAttribute("data-wi-act") === "kept") {
     s.showKept = !s.showKept;
     repaint();
+    return true;
+  }
+  if (act?.getAttribute("data-wi-act") === "tri-run") {
+    if (s.status && !s.running && !runNowBlocked(s.status.pass)) void sendRun();
     return true;
   }
   if (act?.getAttribute("data-wi-act") === "tri-details") {

@@ -75,3 +75,22 @@ export function e2eEnv(): Record<string, string> {
   // real log; a dir nothing writes reads as no log. A spec seeding one sets its own.
   return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0", WORK_MAP_GH_CHECK: "off", DECISION_TRIAGE_DIR: path.join(tmpdir(), "muninn-e2e-no-triage-log") };
 }
+
+/**
+ * For a spec server that needs `SCHEDULER_ENABLED=true` (the decision triage's pass
+ * is on only then): the scheduler's other passes kept off the shared test database.
+ * No stale-confirm wikis (no model call). Nothing turns the hourly retention cleanup
+ * off but the scheduler switch, so its configurable windows are set past any row's
+ * age: the seed trace `db:seed:e2e` writes once keeps its first date and must survive
+ * it. The stale-verdict delete keeps a fixed 90 days that no env changes.
+ */
+export function schedulerOnEnv(): Record<string, string> {
+  const keep = "36500";
+  return {
+    SCHEDULER_ENABLED: "true",
+    WIKI_STALE_CONFIRM_WIKIS: "",
+    TRACING_RETENTION_DAYS: keep,
+    PROMPT_SNAPSHOTS_RETENTION_DAYS: keep,
+    PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS: keep,
+  };
+}

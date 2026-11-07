@@ -582,3 +582,56 @@ test("a status that fails or is not a status leaves the line out and the inbox w
     expect(html).toContain("Decisions · 1 open");
   }
 });
+
+const runBtn = (html: string) => /<button[^>]*data-wi-act="tri-run"[^>]*>[^<]*<\/button>/.exec(html)?.[0] ?? "";
+
+test("Run now sits on the line; off or model on, it is aria-disabled with why, and a click sends nothing", async () => {
+  await loadWithStatus(statusBody());
+  expect(runBtn(inboxHtml(() => "", Date.now()))).toMatch(/^<button class="wiki-wi-btn small" data-wi-act="tri-run" title="[^"]+">Run now<\/button>$/);
+  for (const [pass, why] of [
+    [{ on: false, why: "SCHEDULER_ENABLED is off", modelOff: true }, "The pass is off: SCHEDULER_ENABLED is off"],
+    [{ on: true, why: null, modelOff: false }, "The model call is on: Run now never calls the model"],
+  ] as const) {
+    await loadWithStatus(statusBody({ pass }));
+    const btn = runBtn(inboxHtml(() => "", Date.now()));
+    expect(btn).toContain(`title="${why}"`);
+    expect(btn).toContain('aria-disabled="true"');
+    const sent: string[] = [];
+    const before = globalThis.fetch;
+    globalThis.fetch = (async (url: string) => (sent.push(url), { ok: true, status: 200, json: async () => ({}) })) as unknown as typeof fetch;
+    expect(click("tri-run", "")).toBe(true);
+    globalThis.fetch = before;
+    expect(sent).toEqual([]);
+  }
+});
+
+test("a click: busy while the POST is out, then the status is fetched again; a refusal shows its text inline", async () => {
+  await loadWithStatus(statusBody());
+  const sent: { url: string; method?: string }[] = [];
+  let answer!: (r: unknown) => void;
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    sent.push({ url, method: init?.method });
+    if (url.includes("/run")) return new Promise((r) => (answer = r));
+    return Promise.resolve({ ok: true, status: 200, json: async () => statusBody({ lastRun: { at: Date.now(), outcome: "ok", reason: null, cards: 9, model: "none", codeFacts: 0 } }) });
+  }) as unknown as typeof fetch;
+  click("tri-run", "");
+  expect(sent).toEqual([{ url: "/api/wiki/decision-triage/run?wiki=w", method: "POST" }]);
+  const busy = runBtn(inboxHtml(() => "", Date.now()));
+  expect(busy).toContain('aria-busy="true"');
+  expect(busy).toContain("Running…");
+  click("tri-run", "");
+  expect(sent).toHaveLength(1);
+  answer({ ok: true, status: 200, json: async () => ({ wiki: "w", outcome: "ok", cards: 9 }) });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(sent.map((s) => s.url)[1]).toContain("/api/wiki/decision-triage/status?wiki=w");
+  const html = inboxHtml(() => "", Date.now());
+  expect(runBtn(html)).toContain(">Run now<");
+  expect(html).toContain("9 cards");
+  expect(html).not.toContain("data-wi-run-msg");
+
+  globalThis.fetch = (async (url: string) =>
+    url.includes("/run") ? { ok: false, status: 409, json: async () => ({ error: "a triage pass is running: try again when it ends" }) } : { ok: true, status: 200, json: async () => statusBody() }) as unknown as typeof fetch;
+  click("tri-run", "");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(inboxHtml(() => "", Date.now())).toContain('<div class="wiki-wi-msg warn" role="status" data-wi-run-msg>Couldn’t run the pass: a triage pass is running: try again when it ends.</div>');
+});
