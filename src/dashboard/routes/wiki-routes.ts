@@ -1609,22 +1609,25 @@ export function registerWikiReadRoutes(
 
   // The reader's script and stylesheet at their content-hashed URLs
   // (`getWikiAssets`): the page links them rather than inlining ~2 MB per load.
-  // A hash names one byte sequence, so a hit is immutable for a year. Any other
-  // name — a hash from before a restart, a typo — is a 404, not a redirect to
-  // the current build: a page from the old process would otherwise run new code
-  // against its old markup, and a cached redirect would outlive the build it
-  // points at. Gzipped once per process, not per request.
+  // A hash names one byte sequence, so a hit is immutable for a year (`private`:
+  // the route sits behind auth on the pod, so no shared cache should keep it).
+  // A stale hash of the same shape gets this build's asset, `no-store`: a page
+  // replayed by Back after a restart, or served by the other pod during a surge
+  // rollout, names a hash this process never built, and a 404 would leave it
+  // unstyled and dead. Any other name is a 404. Gzipped once per process.
   app.get(`${WIKI_ASSET_PREFIX}:file`, async (c) => {
     const { js, css } = await getWikiAssets();
-    const asset = c.req.path === js.path ? js : c.req.path === css.path ? css : null;
+    const exact = c.req.path === js.path ? js : c.req.path === css.path ? css : null;
+    const shape = /^wiki\.[0-9a-f]{16}\.(js|css)$/.exec(c.req.param("file"));
+    const asset = exact ?? (shape ? (shape[1] === "js" ? js : css) : null);
     if (!asset) {
       c.header("Cache-Control", "no-store");
       return c.text("Not found", 404);
     }
     c.header("Content-Type", asset.contentType);
-    c.header("Cache-Control", "public, max-age=31536000, immutable");
+    c.header("Cache-Control", exact ? "private, max-age=31536000, immutable" : "no-store");
     c.header("Vary", "Accept-Encoding");
-    if (/\bgzip\b/.test(c.req.header("Accept-Encoding") ?? "")) {
+    if (acceptsGzip(c.req.header("Accept-Encoding"))) {
       c.header("Content-Encoding", "gzip");
       return c.body(asset.gzip as Uint8Array<ArrayBuffer>);
     }
@@ -5594,4 +5597,16 @@ export function coerceClientEdits(raw: unknown): IntegrateEdit[] | null {
     });
   }
   return edits;
+}
+
+/** RFC 9110 §12.5.3: gzip's own entry with a q-value above 0, else a `*` entry's; an explicit gzip entry beats `*`. */
+export function acceptsGzip(header: string | undefined): boolean {
+  const q: Record<string, number> = {};
+  for (const part of (header ?? "").split(",")) {
+    const [name, ...params] = part.trim().toLowerCase().split(";").map((x) => x.trim());
+    const qv = params.find((p) => p.startsWith("q="));
+    q[name!] = qv === undefined ? 1 : Number(qv.slice(2));
+  }
+  const v = q.gzip ?? q["*"];
+  return v !== undefined && v > 0;
 }

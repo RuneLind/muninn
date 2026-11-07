@@ -4688,7 +4688,7 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
       const res = await app.request(asset.path);
       expect(res.status, asset.path).toBe(200);
       expect(res.headers.get("content-type")).toContain(type);
-      expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+      expect(res.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
       expect(res.headers.get("content-encoding")).toBeNull();
       expect(await res.text()).toBe(asset.body);
     }
@@ -4704,16 +4704,36 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
     expect(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await res.arrayBuffer())))).toBe(js.body);
   });
 
-  test("a wrong or stale asset hash is a 404 that is not cached", async () => {
+  test("a stale hash of the asset shape gets the current build, never cached; any other name is a no-store 404", async () => {
+    // A page from before a restart (Back replays it) or from the other pod in a
+    // surge rollout names a hash this process never built.
     const { getWikiAssets } = await import("../views/wiki-page.ts");
     const { js, css } = await getWikiAssets();
-    const stale = js.path.replace(/wiki\.[0-9a-f]+\.js$/, "wiki.0000000000000000.js");
-    expect(stale).not.toBe(js.path);
-    // A real hash with the other extension names no asset either.
-    for (const p of [stale, js.path.replace(/\.js$/, ".css"), css.path.replace(/\.css$/, ".js"), "/wiki/assets/x"]) {
+    for (const [p, asset] of [["/wiki/assets/wiki.0000000000000000.js", js], ["/wiki/assets/wiki.0000000000000000.css", css]] as const) {
+      const res = await app.request(p);
+      expect(res.status, p).toBe(200);
+      expect(res.headers.get("cache-control"), p).toBe("no-store");
+      expect(res.headers.get("content-type"), p).toBe(asset.contentType);
+      expect(await res.text(), p).toBe(asset.body);
+    }
+    for (const p of ["/wiki/assets/x", "/wiki/assets/wiki.zz.js", "/wiki/assets/wiki.0000000000000000.map", "/wiki/assets/other.0000000000000000.js"]) {
       const res = await app.request(p);
       expect(res.status, p).toBe(404);
       expect(res.headers.get("cache-control"), p).toBe("no-store");
+    }
+  });
+
+  test("gzip is not sent to a client that refuses it with q=0", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js } = await getWikiAssets();
+    for (const ae of ["gzip;q=0, identity", "GZIP; q=0.0", "br", "gzip;q=0, *"]) {
+      const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
+      expect(res.headers.get("content-encoding"), ae).toBeNull();
+      expect(await res.text(), ae).toBe(js.body);
+    }
+    for (const ae of ["GZIP", "deflate, gzip;q=0.5", "*"]) {
+      const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
+      expect(res.headers.get("content-encoding"), ae).toBe("gzip");
     }
   });
 });
