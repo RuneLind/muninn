@@ -152,11 +152,15 @@ describe("the rule, on fixtures", () => {
 });
 
 /** The files a real `bun test <args>` loads in `dir`, read off its junit report. */
-function bunRuns(dir: string, args: string[]): string[] {
+function bunReport(dir: string, args: string[]): { files: string[]; out: string } {
   // The report sits in a recorded temp dir so the run's cleanup removes it; inside `dir` it would be in the tree bun scans.
   const out = join(testTempDirSync(join(tmpdir(), "bun-junit-")), `${basename(dir)}.xml`);
   Bun.spawnSync(["bun", "test", "--reporter=junit", `--reporter-outfile=${out}`, ...args], { cwd: dir, stdout: "ignore", stderr: "ignore" });
-  return [...new Set([...readFileSync(out, "utf8").matchAll(/ file="([^"]+)"/g)].map((m) => m[1]!))].sort();
+  return { files: [...new Set([...readFileSync(out, "utf8").matchAll(/ file="([^"]+)"/g)].map((m) => m[1]!))].sort(), out };
+}
+
+function bunRuns(dir: string, args: string[]): string[] {
+  return bunReport(dir, args).files;
 }
 
 describe("the model agrees with bun itself (spawns bun on a fixture tree)", () => {
@@ -185,10 +189,11 @@ describe("the model agrees with bun itself (spawns bun on a fixture tree)", () =
   test("the junit report lands inside a recorded temp dir, never next to the fixture", () => {
     const fresh = testTempDirSync(join(tmpdir(), "bun-discovery-"));
     writeFileSync(join(fresh, "a.test.ts"), 'import { test } from "bun:test";\ntest("t", () => {});\n');
-    expect(bunRuns(fresh, [])).toEqual(["a.test.ts"]);
+    const { files, out } = bunReport(fresh, []);
+    expect(files).toEqual(["a.test.ts"]);
+    // Only the path this call wrote: other files' recorded dirs may already be gone.
+    expect(recordedTestTempDirs().some((d) => dirname(out) === d)).toBe(true);
     expect(readdirSync(tmpdir()).filter((n) => n.startsWith(basename(fresh)) && n !== basename(fresh))).toEqual([]);
-    const reports = recordedTestTempDirs().flatMap((d) => readdirSync(d, { recursive: true }).map(String)).filter((n) => n.endsWith(`${basename(fresh)}.xml`));
-    expect(reports).toHaveLength(1);
   }, 20_000);
 
   test("Playwright's specs are e2e/**/*.spec.ts (playwright.config.ts testDir + testMatch)", () => {

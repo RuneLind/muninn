@@ -569,17 +569,17 @@ async function drain(stream: ReadableStream<Uint8Array>, sink: string[]): Promis
   for (let r = await reader.read(); !r.done; r = await reader.read()) sink.push(dec.decode(r.value, { stream: true }));
 }
 
+/** `./` makes the argument an exact path; a bare one is a substring filter that also hits `x.test.tsx` and `sub/x.test.ts`. */
+export function aloneArgv(file: string): string[] {
+  return ["bun", "test", `./${file}`];
+}
+
 /**
  * One file alone in its own `bun test` process, wall clock. The process gets its
  * own group and the whole group is killed when it ends, so neither a timeout nor a
  * leaked grandchild holding the pipes can keep this waiting. `argv` and
  * `timeoutMs` are for tests.
  */
-/** `./` makes the argument an exact path; a bare one is a substring filter that also hits `x.test.tsx` and `sub/x.test.ts`. */
-export function aloneArgv(file: string): string[] {
-  return ["bun", "test", `./${file}`];
-}
-
 export async function timeAlone(file: string, opts: { argv?: string[]; timeoutMs?: number } = {}): Promise<AloneRun> {
   const t0 = performance.now();
   const proc = Bun.spawn(opts.argv ?? aloneArgv(file), { cwd: ROOT, stdout: "pipe", stderr: "pipe", detached: true });
