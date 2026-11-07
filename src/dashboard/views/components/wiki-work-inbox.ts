@@ -38,6 +38,8 @@ interface InboxState {
   /** With the evidence it was made on: a reload that changes the evidence drops it. */
   preview: Record<string, { lines: string[]; warnings: string[]; baseHash: string; rulingHash: string; ev: string }>;
   showKept: boolean;
+  /** The last close, said in the «close?» lane: its row leaves on the reload. */
+  closed: string | null;
 }
 
 const KEPT_KEY = "muninn-inbox-kept";
@@ -105,7 +107,7 @@ export function initInbox(paint: (focusSel?: string, passive?: boolean) => void)
 /** Fetch the inbox (`url` carries the wiki). A wiki outside the triage scope answers 404: no section. */
 export function loadInbox(url: string): void {
   const seq = ++loadSeq;
-  if (!st || st.url !== url) st = { url, body: null, open: null, laneOpen: {}, picked: {}, notes: {}, sending: {}, failed: null, msg: {}, preview: {}, showKept: false };
+  if (!st || st.url !== url) st = { url, body: null, open: null, laneOpen: {}, picked: {}, notes: {}, sending: {}, failed: null, msg: {}, preview: {}, showKept: false, closed: null };
   fetch(url)
     .then(async (r) => ({ status: r.status, body: r.ok ? ((await r.json().catch(() => null)) as DecisionInboxBody | null) : null }))
     .catch(() => ({ status: 0, body: null }))
@@ -218,6 +220,7 @@ export function inboxHtml(hrefFor: (rel: string) => string, now: number): string
     const isOpen = s.laneOpen[lane] ?? (open || list.some((c) => keyOf(c) === s.open));
     const rows =
       (list.length ? `<ul class="wiki-wi-rows">${list.map((c) => rowHtml(c, now, hrefFor)).join("")}</ul>` : `<div class="wiki-wm-empty">None.</div>`) +
+      (lane === "close" && s.closed ? `<div class="wiki-wi-msg" role="status">${esc(s.closed)}</div>` : "") +
       (lane === "close" && hidden ? `<button class="wiki-wi-btn" data-wi-act="kept">${s.showKept ? "Hide" : "Show"} ${hidden} kept open</button>` : "");
     return `<details class="wiki-wi-lane" data-wi-lane="${lane}"${isOpen ? " open" : ""}><summary class="wiki-wm-lane-title">${label} <span class="wiki-wm-count">${list.length}</span> <span class="wiki-wi-hint">${hint}</span></summary>${rows}</details>`;
   }).join("");
@@ -282,9 +285,8 @@ async function sendClose(c: InboxCard, k: string, sent: { baseHash: string; ruli
   if (ok && !sent && data?.lines && data.baseHash && data.rulingHash) s.preview[k] = { lines: data.lines, warnings: data.warnings ?? [], baseHash: data.baseHash, rulingHash: data.rulingHash, ev: evidenceKey(c) };
   else {
     delete s.preview[k];
-    s.msg[k] = ok
-      ? { text: `Closed ${c.id} (${data?.decision ?? ""}).`, warn: false, page: false }
-      : { text: `Couldn’t close: ${data?.error ?? (status ? `HTTP ${status}` : "the server did not answer")}.`, warn: true, page: status === 409 };
+    if (ok) s.closed = `Closed ${c.id} (${data?.decision ?? ""}).`;
+    else s.msg[k] = { text: `Couldn’t close: ${data?.error ?? (status ? `HTTP ${status}` : "the server did not answer")}.`, warn: true, page: status === 409 };
   }
   repaint(`${sel(k)} .wiki-wi-row`, true);
   // A refusal reloads too: the evidence that moved the ruling shows on the row.
@@ -339,7 +341,8 @@ export function handleInboxClick(target: Element, hrefFor: (rel: string) => stri
     case "unkeep":
       setKept(c, act.getAttribute("data-wi-act") === "keep");
       if (s.open === k && !s.showKept) s.open = null;
-      repaint(`${sel(k)} .wiki-wi-row`);
+      // The row may be gone now: focus its lane.
+      repaint(s.showKept ? `${sel(k)} .wiki-wi-row` : '[data-wi-lane="close"] > summary');
       break;
     case "take":
       if (c.recommendation && !s.sending[k]) void sendAnswer(c, k, c.recommendation, "");

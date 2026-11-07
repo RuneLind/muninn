@@ -10,7 +10,7 @@
  */
 import { parseBlocks } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
-import { closeNearMisses, DECISION_ID_RE, parseQuestionPage } from "./question.ts";
+import { DECISION_ID_RE, parseQuestionPage } from "./question.ts";
 import { frontmatterBodyLine } from "../wiki/page-text.ts";
 
 /** What closes the card: a decision the page already holds (the P1 hint), or an answer to record as a new one. */
@@ -176,14 +176,9 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
 
   const after = parseQuestionPage(parseBlocks(content.split(/\r?\n/).slice(from).join("\n")));
   const read = after.states.get(id);
-  const ownAfter = after.entries.find((e) => e.id === id);
-  const ownBefore = before.entries.find((e) => e.id === id);
-  if (
-    read?.kind !== "decided" ||
-    read.decision !== decision ||
-    (ruling.kind === "answer" && after.decisions.size !== before.decisions.size + 1) ||
-    closeNearMisses(ownAfter!.text).length > closeNearMisses(ownBefore?.text ?? "").length
-  ) {
+  // The edit adds one `Closed` phrase. Read decided on `decision` means it is
+  // canonical and last; a phrase that is not canonical leaves the card open.
+  if (read?.kind !== "decided" || read.decision !== decision) {
     return { ok: false, code: "unplaceable", reason: `the page's log has a shape the close cannot place: close ${id} on the page` };
   }
   return { ok: true, content, decision, lines: shown };

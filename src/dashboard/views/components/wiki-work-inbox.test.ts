@@ -220,3 +220,36 @@ test("«Still open» entries are pruned when their card leaves the inbox", async
     g3.localStorage = savedLs;
   }
 });
+
+test("«Still open» hands focus to the lane, not to the row it hid", async () => {
+  const kept = card({ id: "O8", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
+  await load({ wiki: "w", cards: [kept] });
+  const calls: (string | undefined)[] = [];
+  initInbox((sel?: string) => { calls.push(sel); });
+  try {
+    click("keep", "plans/a.mdx#O8");
+    expect(calls.at(-1)).toBe('[data-wi-lane="close"] > summary');
+  } finally {
+    initInbox(() => {});
+  }
+});
+
+test("a close says so in the lane after the closed row has left it", async () => {
+  const closing = card({ id: "O6", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
+  await load({ wiki: "w", cards: [closing] });
+  globalThis.fetch = (async (url: string) =>
+    url.endsWith("/close")
+      ? { ok: true, status: 200, json: async () => ({ ok: true, preview: true, lines: ["- x"], warnings: [], baseHash: "b", rulingHash: "r", decision: "D3" }) }
+      : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [] }) }) as unknown as typeof fetch;
+  click("preview", "plans/a.mdx#O6");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  globalThis.fetch = (async (url: string) =>
+    url.endsWith("/close")
+      ? { ok: true, status: 200, json: async () => ({ ok: true, decision: "D3" }) }
+      : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [] }) }) as unknown as typeof fetch;
+  click("close", "plans/a.mdx#O6");
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).not.toContain('data-wi-key="plans/a.mdx#O6"');
+  expect(html).toContain("Closed O6 (D3).");
+});
