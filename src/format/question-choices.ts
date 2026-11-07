@@ -6,6 +6,7 @@
  * at load.
  */
 
+import { formatWebHtml } from "../web/web-format.ts";
 import { parseRecommendation } from "./question.ts";
 
 export interface QuestionChoiceRow {
@@ -35,14 +36,18 @@ export function splitQuestionLine(body: string): { question: string; rest: strin
   return { question: plainInline(first.replace(/^#+\s*/, "")), rest: body };
 }
 
-/** Inline markdown as the plain text a reader sees: links keep their text, and
- *  code, bold and emphasis markers go. */
+/** One line of markdown as the text the shared renderer prints for it (the card
+ *  body's own renderer), so code spans, escapes, links and emphasis follow its
+ *  rules: tags and Fact-check chips dropped, its five escapes decoded. */
 function plainInline(md: string): string {
-  return md
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/`+/g, "")
-    .replace(/\*\*|__/g, "")
-    .replace(/(^|[^\p{L}\p{N}])[*_](?=\S)(.+?)(?<=\S)[*_](?![\p{L}\p{N}])/gu, "$1$2")
+  return formatWebHtml(md)
+    .replace(/<button\b[^>]*>[^]*?<\/button>/g, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/&amp;/g, "&")
     .trim();
 }
 

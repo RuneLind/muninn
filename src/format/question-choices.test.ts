@@ -17,9 +17,16 @@ describe("splitQuestionLine", () => {
     expect(splitQuestionLine("**How many snapshots should `make backup` keep?**\n\nmore").question).toBe("How many snapshots should make backup keep?");
   });
 
-  test("the question drops every inline marker a reader would not see, in both branches", () => {
-    expect(splitQuestionLine("**Keep __all__ snapshots, *this* one, [the spec](https://x.org) or snake_case_name?**").question).toBe("Keep all snapshots, this one, the spec or snake_case_name?");
+  test("the question is the text the card renderer prints for it, in both branches", () => {
+    expect(splitQuestionLine("**Keep *this* one, [the spec](https://x.org) or snake_case_name?**").question).toBe("Keep this one, the spec or snake_case_name?");
     expect(splitQuestionLine("Use *this* one, [x](y) and `code`?").question).toBe("Use this one, x and code?");
+  });
+
+  test("code-span text, globs and lone markers survive; escapes decode; a Fact chip's label does not leak", () => {
+    expect(splitQuestionLine("**Use `_id_` or `**/*.mdx` here?**").question).toBe("Use _id_ or **/*.mdx here?");
+    expect(splitQuestionLine("**Keep *.ts and old_ files, against tmp_?**").question).toBe("Keep *.ts and old_ files, against tmp_?");
+    expect(splitQuestionLine("**A & B <x> \"q\" 'a'?**").question).toBe("A & B <x> \"q\" 'a'?");
+    expect(splitQuestionLine('**Is <Fact id="1">the claim</Fact> true?**').question).toBe("Is the claim true?");
   });
 
   test("a lone bold first line is the question and leaves the body", () => {
