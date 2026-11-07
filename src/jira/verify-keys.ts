@@ -45,12 +45,12 @@ import {
   jiraKeyFromDocId,
   normalizeJiraUrl,
 } from "./retrieval.ts";
-import { extractJiraKeys } from "./key-scan.ts";
+import { extractJiraKeys } from "../utils/jira-key-scan.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("jira", "verify-keys");
 
-export { extractJiraKeys, JIRA_KEY_DENYLIST } from "./key-scan.ts";
+export { extractJiraKeys, JIRA_KEY_DENYLIST } from "../utils/jira-key-scan.ts";
 
 // ── The corpus listing, behind a TTL cache ───────────────────────────────────
 

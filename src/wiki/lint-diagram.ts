@@ -47,7 +47,7 @@ import {
   type PageFileFailure,
 } from "../format/query-block.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
-import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
+import { fencedLineMask } from "./core/wiki-integrate.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import type { LoadedPageFiles } from "./lint-components.ts";
 import type { LintFinding } from "./lint.ts";

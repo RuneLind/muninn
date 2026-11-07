@@ -24,7 +24,7 @@ import * as factchecks from "../db/summary-factchecks.ts";
 import type { SummaryFactcheck } from "../db/summary-factchecks.ts";
 const countCorrectableClaims = (claims: unknown) => factchecks.countCorrectableClaims(claims);
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { factcheckBodySha256 } from "../summaries/factcheck-body.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 

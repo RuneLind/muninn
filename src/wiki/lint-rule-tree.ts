@@ -24,7 +24,7 @@
 import { componentBlocks, parseBlocks } from "../format/markdown-ast.ts";
 import { visibleText } from "../format/report-top.ts";
 import { readRuleTree, type RuleNode } from "../format/rule-tree.ts";
-import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
+import { fencedLineMask } from "./core/wiki-integrate.ts";
 import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import { findUnfencedLine } from "./lint-lines.ts";
 import { WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";

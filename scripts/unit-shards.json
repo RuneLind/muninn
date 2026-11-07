@@ -122,7 +122,6 @@
       "src/ai/connector.test.ts",
       "src/ai/connectors/copilot-mcp.test.ts",
       "src/ai/huginn-trace-pointer.test.ts",
-      "src/ai/json-extract.test.ts",
       "src/ai/mcp-config-utils.test.ts",
       "src/ai/tool-status.test.ts",
       "src/ai/yggdrasil-trace-pointer.test.ts",

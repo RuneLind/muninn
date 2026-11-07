@@ -20,7 +20,7 @@ import {
 } from "./lockfile.ts";
 import { writeWikiPage, type PageWriteOptions } from "./page-write.ts";
 import { __resetWikiWriteQueueForTest } from "./queue.ts";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
 let root = "";

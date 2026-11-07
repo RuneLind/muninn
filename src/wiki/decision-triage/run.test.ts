@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Config } from "../../config.ts";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256 } from "../../utils/date-hash.ts";
 import { silentTracer } from "../../test/one-shot-drive.ts";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import type { WikiIndex, WikiPageMeta } from "../store.ts";

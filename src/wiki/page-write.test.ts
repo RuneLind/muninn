@@ -9,7 +9,7 @@ import { buildFactcheckBlock } from "./factcheck-context.ts";
 import { commitWikiChange, __resetForTest } from "./commit.ts";
 import { __resetWikiWriteQueueForTest, wikiWriteQueueKey } from "./queue.ts";
 import { applyWikiProposal } from "../gardener/apply.ts";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 

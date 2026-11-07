@@ -10,8 +10,8 @@
  */
 
 import { JIRA_KEY_SHAPE, normalizeJiraKey } from "../provenance.ts";
-import { extractJiraKeys } from "../../jira/key-scan.ts";
-import { maskFencedCode } from "../../jira/markdown-scan.ts";
+import { extractJiraKeys } from "../../utils/jira-key-scan.ts";
+import { maskFencedCode } from "../../utils/markdown-scan.ts";
 import { lineCodeSpanRanges } from "../../format/code-spans.ts";
 import { JIRA_TRACKER_ID } from "./jira-id.ts";
 import { loadIssueFields } from "./jira-lookup.ts";

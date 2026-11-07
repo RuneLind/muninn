@@ -40,7 +40,7 @@ import { encodeDocIdPath } from "../summaries/sources.ts";
 import { loadConfig } from "../config.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
 import { docDateMs } from "./harvest.ts";
-import { todayOslo } from "./util.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 import { DRAFT_TIMEOUT_MS } from "./backlog.ts";
 import { runDrafterOneShot } from "./drafter-oneshot.ts";
 import {

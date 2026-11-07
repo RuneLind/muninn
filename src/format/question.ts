@@ -28,6 +28,18 @@ import { parseLogItem } from "./genre-lists.ts";
 import { maskLineCodeSpans } from "./code-spans.ts";
 import { isCalendarDay, isDayFirstDate } from "./calendar-day.ts";
 import { QUESTION_LABELS, type QuestionLanguage } from "./question-labels.ts";
+// The target and group parsers `src/config.ts` reads live a layer down
+// (architecture review 2026-11, B2).
+import {
+  foldName,
+  ownerGroupName,
+  parseQuestionTarget,
+  targetGroup,
+  type AnswerGroups,
+  type QuestionTarget,
+} from "../utils/config-parsers.ts";
+
+export { foldName, ownerGroupName, parseQuestionTarget, type AnswerGroups, type QuestionTarget };
 
 /** The fixed extra choice every card offers beside its parsed `choices`. */
 export const QUESTION_NOT_SURE = "not-sure";
@@ -48,12 +60,6 @@ export function codePointLength(s: string): number {
   let n = 0;
   for (const _ of s) n++;
   return n;
-}
-
-/** One entry of `questions_to:` or `to=`: `Name` or `Name (IDENT)`. */
-export interface QuestionTarget {
-  name: string;
-  ident: string | null;
 }
 
 export interface ParsedQuestion {
@@ -89,15 +95,6 @@ export interface QuestionRenderOptions {
 }
 
 // ── Targets ─────────────────────────────────────────────────────────────────
-
-/** `Name` or `Name (IDENT)`; a blank entry is null. */
-export function parseQuestionTarget(entry: string): QuestionTarget | null {
-  const s = entry.trim().replace(/^(["'])([\s\S]*)\1$/, "$2").trim();
-  if (!s) return null;
-  const m = /^(.*\S)\s*\(\s*([^()\s][^()]*?)\s*\)$/.exec(s);
-  if (m) return { name: m[1]!.trim(), ident: m[2]! };
-  return { name: s, ident: null };
-}
 
 /** The frontmatter `questions_to:` value — an inline list of strings
  *  (`parseFrontmatter` hands it over as `string[]`), or one bare string. */
@@ -173,30 +170,10 @@ export function resolveQuestionTargets(
   return { to: [], source: "none" };
 }
 
-/** Format characters (zero-width space, soft hyphen, BOM …) dropped, then
- *  NFC — in that order, or a format character between a letter and its
- *  combining mark blocks the composition — white space collapsed, lower-cased:
- *  a name pasted from a document still matches. */
-export const foldName = (s: string) =>
-  s.replace(/\p{Cf}/gu, "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
-
-/** `WIKI_ANSWER_GROUPS`: group name (lower-case) → member NAV idents (upper-case). */
-export type AnswerGroups = ReadonlyMap<string, ReadonlySet<string>>;
+// `foldName`, `AnswerGroups`, `targetGroup` and `ownerGroupName`:
+// `src/utils/config-parsers.ts`.
 
 const NO_GROUPS: AnswerGroups = new Map();
-
-/** The configured group a target names, if any: an entry with no `(IDENT)`
- *  whose folded name is a group name. With no groups, every name is a person. */
-function targetGroup(t: QuestionTarget, groups: AnswerGroups): ReadonlySet<string> | undefined {
-  return t.ident ? undefined : groups.get(foldName(t.name));
-}
-
-/** The group `WIKI_ANSWER_OWNER` names when given as a bare name (no
- *  `(IDENT)`) equal to a group name: the owner fallback then asks that group. */
-export function ownerGroupName(owner: string | null | undefined, groups: AnswerGroups): string | null {
-  const t = owner ? parseQuestionTarget(owner) : null;
-  return t && targetGroup(t, groups) ? foldName(t.name) : null;
-}
 
 /** The groups holding this NAV ident, sorted. Never the ident itself. */
 export function authorGroupsOf(navIdent: string | null, groups: AnswerGroups): string[] {

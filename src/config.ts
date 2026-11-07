@@ -1,8 +1,13 @@
 import { getLog } from "./logging.ts";
-import { ownerGroupName, type AnswerGroups } from "./format/question.ts";
 // The group-name grammar is a role key's (`<Lane role=>`, `roleKeys`): one copy.
-import { DIGIT_RUN_RE, ROLE_KEY_RE } from "./format/lane-roles.ts";
-import { parseWikiDefaultLens, type WikiDefaultLens } from "./format/reader-lens.ts";
+import {
+  DIGIT_RUN_RE,
+  ownerGroupName,
+  parseWikiDefaultLens,
+  ROLE_KEY_RE,
+  type AnswerGroups,
+  type WikiDefaultLens,
+} from "./utils/config-parsers.ts";
 
 const log = getLog("config");
 

@@ -43,7 +43,7 @@ import {
 import { readStatusRowsView } from "../format/component-spec.ts";
 import { decisionFirstSentence } from "../web/web-format.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
-import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
+import { fencedLineMask, frontmatterEndLine } from "./core/wiki-integrate.ts";
 import { parseFrontmatter, stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import { WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { isLiveReportPage } from "./lint-drift.ts";

@@ -32,7 +32,7 @@ import {
   rankFind,
   type FindRow,
 } from "../dashboard/views/components/wiki-find.ts";
-import { displayTitleOf, type WikiListing } from "../dashboard/views/components/wiki-filter.ts";
+import { displayTitleOf, type WikiListing } from "./core/wiki-filter.ts";
 import { bareId, isSessionIdShape } from "./session-refs.ts";
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
 

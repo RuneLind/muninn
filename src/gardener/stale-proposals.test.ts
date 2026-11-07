@@ -11,7 +11,7 @@ import { inReviewByChanged, sendStaleFix, staleEditHash } from "./stale-proposal
 import { memoryStaleProposalStore as memoryStore } from "../test/stale-proposal-store.ts";
 import type { StaleFixEdit } from "../wiki/stale-fix.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
 const PAGES: Record<string, string> = { hub: "hub.md" };

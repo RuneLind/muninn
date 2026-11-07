@@ -716,7 +716,7 @@ export function factClaimIndex(value: string | undefined): number | null {
  * null when the heading is not a claim heading.
  *
  * Deliberately LOOSER than `CLAIM_HEADING_RE` in
- * `dashboard/views/components/wiki-integrate.ts` (which owns the strict prompt
+ * `src/wiki/core/wiki-integrate.ts` (which owns the strict prompt
  * contract used to derive edits): this one only decides whether to open a
  * `<section id="fc-claim-N">` wrapper, so over-matching costs an unused id and
  * under-matching costs a card the client can't find. A shared strict regex would
@@ -841,7 +841,7 @@ function checklistRows(list: ListBlock, top: boolean): ChecklistRow[] {
  * then the rest of the line (an info string on an opener, nothing on a closer).
  *
  * The 0-3 space bound is CommonMark's, and is the same bound
- * `dashboard/views/components/wiki-integrate.ts` uses in its own
+ * `src/wiki/core/wiki-integrate.ts` uses in its own
  * `FENCE_SHAPE_RE`. The two agree on INDENT and disagree on MARKER: that file
  * accepts `~~~` and this parser does not, so a tilde block is code to the
  * fact-check line mask and markdown here. Narrower than the earlier spelling of

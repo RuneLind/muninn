@@ -11,7 +11,7 @@
  * cluster prompt).
  */
 
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
 

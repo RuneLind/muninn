@@ -12,7 +12,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import { parseQueueYaml, serializeQueue } from "./queue.ts";
 import { writePlanQueue } from "./write.ts";

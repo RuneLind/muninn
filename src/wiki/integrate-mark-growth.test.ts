@@ -10,7 +10,7 @@
 import { test, expect, describe } from "bun:test";
 import { annotateEdits } from "./integrate-edits.ts";
 import { formatWebHtml } from "../web/web-format.ts";
-import type { FactcheckClaimAnchor } from "../dashboard/views/components/wiki-integrate.ts";
+import type { FactcheckClaimAnchor } from "./core/wiki-integrate.ts";
 
 const okClaim: FactcheckClaimAnchor = {
   index: 1,

@@ -28,7 +28,7 @@
  */
 
 import type { JiraMarkdownFlag, JiraMarkdownFlagKind } from "./wire.ts";
-import { maskFencedCode, maskInlineCode, lineOfOffset } from "./markdown-scan.ts";
+import { maskFencedCode, maskInlineCode, lineOfOffset } from "../utils/markdown-scan.ts";
 
 /** Max chars of the offending fragment carried on a flag. */
 const SAMPLE_MAX = 80;

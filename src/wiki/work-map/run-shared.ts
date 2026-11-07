@@ -4,7 +4,7 @@
  * themes builder (`theme-run.ts`) imports no runtime value from `run.ts`.
  */
 
-import { extractJson } from "../../ai/json-extract.ts";
+import { extractJson } from "../../utils/json-extract.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
 import type { ModelReply, RunOutcomes, WorkMapRunDeps, WorkMapRunResult } from "./run.ts";
 import type { WorkMap } from "./schema.ts";

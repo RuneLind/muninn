@@ -1,0 +1,2178 @@
+/**
+ * Pure, side-effect-free helpers for the /wiki reader page. Split out from
+ * `wiki-browser.ts` (which then ran DOM code at module load) so these can be
+ * unit-tested directly, without a DOM. Mirrors the listing shape sent by
+ * `src/dashboard/routes/wiki-routes.ts`.
+ */
+
+// Both dependency-free by contract, so the browser bundle may import them: the
+// relation vocabulary and the demoted tier are decided in ONE place.
+import { relationsCount, type IssueRelation } from "../trackers/types.ts";
+import { JIRA_TRACKER_ID } from "../trackers/jira-id.ts";
+import { parseIssueRoot } from "../graph-types.ts";
+import type { PageWork, WorkEvent } from "../work-focus.ts";
+
+/**
+ * A wiki page's type. Independent client-safe copy of the store's alias (this file
+ * has no DOM/server deps so it stays unit-testable). Widened to `string` because a
+ * wiki's `.wiki-reader.json` can introduce custom type strings beyond the built-in
+ * five — the reader's default ontology lives in `TYPE_ORDER` / `TYPE_LABEL` below.
+ */
+export type WikiPageType = string;
+
+export interface WikiListing {
+  name: string;
+  title: string;
+  /** Disambiguated title for row/card/rail surfaces — set by the store ONLY on a
+   *  page whose filename stem is shared with another page in the same wiki and
+   *  whose title is that bare stem (`stemDisplayTitle`). Every render that shows a
+   *  page in a LIST goes through `displayTitleOf`; the article body's own title
+   *  stays `title` (see `WikiPageMeta.displayTitle`). */
+  displayTitle?: string;
+  type: WikiPageType;
+  domain: "ai" | "life";
+  tags: string[];
+  aliases: string[];
+  created?: string;
+  updated?: string;
+  url?: string;
+  /** Short prose summary — explainers (sniffed from `<meta description>`) and
+   *  native blog `.mdx` pages (frontmatter `description`). Rendered as the article
+   *  subtitle for `type: blog` pages; feeds the Similar query for explainers only. */
+  description?: string;
+  /**
+   * The page's first prose line, extracted at index time.
+   *
+   * **Single-page payloads only.** `/api/wiki/pages` strips it (see `toListing`'s
+   * `includeDesc` — on jarvis it is ~100 KB of listing bulk nothing in the list
+   * renders), and so do the outgoing/backlink arrays on `/api/wiki/page`. Only
+   * that response's own `meta` carries it, for the Discuss popover's question
+   * hint — so any consumer must tolerate its absence.
+   */
+  desc?: string;
+  /** Validated CSS color token (`#hex` / `rgb()` / `hsl()`) from a blog page's
+   *  frontmatter `accent`. Server-sanitized (see `sanitizeColorToken`) — anything
+   *  that isn't a strict color token is dropped before it reaches this field, so
+   *  it is safe to inject into a `<style>` sink. Only carried by `type: blog` pages
+   *  that declared it. */
+  accent?: string;
+  /** Dark-theme counterpart of `accent` (frontmatter `accentDark`), same
+   *  sanitization. Absent ⇒ the light `accent` is used in both themes. */
+  accentDark?: string;
+  relPath: string;
+  /**
+   * ATTACHMENTS — the relPath of the page this one folds under in the rail, set
+   * by the store's pairing pass (`src/wiki/store.ts`). Absent on a top-level
+   * page, which is almost every page of every wiki.
+   *
+   * A rendering relation, not containment: a child is still a page of its own in
+   * this listing, with its own row, pin, Activity ranking and page route.
+   *
+   * The store's matching `children` array is deliberately NOT on the wire
+   * (`toListing` strips it): `buildRail` rebuilds each group from the `parent`
+   * links of the pages it was handed, because a group is only ever the children
+   * the FACETS left on screen — so a `children` list would be payload no
+   * consumer may believe.
+   */
+  parent?: string;
+  /** WHICH rule paired this page with its `parent` — `stem` | `suffix` | `link` |
+   *  `superseded` (see the store's `PairedBy`). Absent exactly when `parent` is.
+   *  Kept a plain `string` for the same reason `WikiPageType` is: this file stays
+   *  server-dep-free. */
+  pairedBy?: string;
+  /** The page is retired (`signal: none`, or the `wiki-signal` meta on an
+   *  `.html` page) — the EFFECTIVE value, so an attachment of a culled page
+   *  carries it too. Activity drops it, and the rail hides it unless the reader
+   *  turns `Show retired` on (`railPool`). Absent on a live page. */
+  culled?: boolean;
+  /** The page's `signal-reason:` — single-page `meta` only (`includeCull`). */
+  cullReason?: string;
+  /** The successor's relPath, resolved in any folder — single-page `meta` only. */
+  supersededBy?: string;
+  /** File mtime (epoch ms) — the recency signal for frontmatter-less wikis. */
+  mtimeMs?: number;
+  /** File birthtime (epoch ms) — a WEAK "Recently added" signal: `git mv`, a
+   *  re-clone, and any sweep writing via temp-file+rename all reset it. Absent when
+   *  the filesystem doesn't track it. */
+  birthtimeMs?: number;
+  /** Creation time from git (epoch ms) — the commit that first introduced the page,
+   *  rename-aware. The DURABLE "Recently added" signal (see `src/wiki/git-dates.ts`).
+   *  Absent for a non-git or untracked page — which also makes its PRESENCE the
+   *  "git knows this page" test `updatedSignal` gates the mtime rule on. */
+  gitCreatedMs?: number;
+  /** Last-update time from git (epoch ms) — the newest NON-SWEEP commit to touch the
+   *  page, rename-aware. The DURABLE "Recently updated" signal: a mass edit moves
+   *  every mtime but contributes no touch date at all. Absent for a non-git or
+   *  untracked page, and for a page whose every commit was a sweep. */
+  gitTouchedMs?: number;
+  /** WORKED-ON time (epoch ms) — the newest write to this page by an agent session,
+   *  from claude-usage's ledger (`src/wiki/worked-ledger.ts`). Absent when the
+   *  ledger holds no qualifying write (every one of them was part of a bulk pass,
+   *  or nobody wrote the page with an agent), when the server's memo is cold, and
+   *  on an instance pointed at no claude-usage — so a consumer falls back per page
+   *  rather than treating absence as "old". */
+  workedMs?: number;
+  /** Session work facts (`src/wiki/work-focus.ts`); absent with no sessions memo. */
+  work?: PageWork;
+  /** True when git reports the file dirty (modified / untracked). The one condition
+   *  under which `mtimeMs` still carries information rather than being a checkout or
+   *  sweep artifact. Absent (never `false`) otherwise. */
+  gitDirty?: boolean;
+  /**
+   * Plan lifecycle state, from the frontmatter key `plan_status` — NOT the bare
+   * `status`, which melosys-kode-wiki already uses for an unrelated vocabulary.
+   * Server-validated against the enum in `src/wiki/store.ts`
+   * (`proposed`/`ready`/`in-flight`/`blocked`/`shipped`/`superseded`/`abandoned`),
+   * so an unrecognized value never reaches this field.
+   * Client-side copy of the store's union, kept a plain `string` for the same
+   * reason `WikiPageType` is: this file must stay server-dep-free.
+   *
+   * **"Absent" below means absent from the JSON payload**, which is what any
+   * client of `/api/wiki/pages` sees. In-process the four fields are spread off
+   * `WikiPageMeta` and so exist as own properties holding `undefined` on a page
+   * that declares none of them; `JSON.stringify` elides those, so the distinction
+   * matters only to a key-ITERATING consumer (`Object.keys`/`in`/spread), of which
+   * there are none today. Read the values, not the key set.
+   */
+  plan_status?: string;
+  /** When `plan_status` was last affirmed (`YYYY-MM-DD`). Server-validated to that
+   *  exact shape AND to being a real calendar day (`2026-02-31` is rejected);
+   *  anything looser arrives absent. */
+  status_date?: string;
+  /** `"open"` | `"none"` — whether the plan has open follow-ups. Absent ⇒ treat as
+   *  `none` (both an undeclared field and a rejected value arrive absent). */
+  followups?: string;
+  /** Open steps in the body's `<NextMoves>` `you` lanes (the ✋ flag and the
+   *  "waiting on you" chip). Derived server-side; absent ⇒ 0. */
+  movesYou?: number;
+  /** Open questions asking the owner, named in a waiting lane of the owner's (`waitsOnOwner`); absent at 0. */
+  movesWaiting?: number;
+  /** The oldest `since=` among the lanes holding those questions, `YYYY-MM-DD`. */
+  waitingSince?: string;
+  /** One line of free prose qualifying the status. Unvalidated by nature; absent
+   *  when empty or undeclared. Arrives **unescaped** — the first renderer of this
+   *  field owns escaping it at its own sink. */
+  status_note?: string;
+  /**
+   * The project this page belongs to, resolved SERVER-side from the wiki's own
+   * `.wiki-reader.json` declaration (`resolveProject`, `src/wiki/store.ts`).
+   *
+   * Absent on every page of a wiki that declares no `project` rule — which is
+   * also how the client knows to render no Project facet at all (see
+   * `projectFacetVisible`), rather than one empty control.
+   *
+   * Values arrive CANONICAL: the store answers in the known set's own spelling,
+   * so two pages of one project can never carry two spellings of its name and
+   * the facet's chip list needs no folding of its own.
+   */
+  project?: string;
+  /**
+   * Jira keys this page serves, normalized to trimmed UPPERCASE server-side
+   * (`src/wiki/provenance.ts`). Written by claude-usage's `wiki-stamp` CLI, never
+   * by muninn.
+   *
+   * **Listing field**, the `project` twin: it backs the Jira facet, so it rides
+   * the hot `/api/wiki/pages` payload and is NOT stripped by `toListing`. Absent
+   * — never `[]` — on a page carrying no key, which is most pages.
+   */
+  jira?: string[];
+  /**
+   * The issues this page relates to, on a wiki whose `.wiki-reader.json` names a
+   * tracker — stamped and inferred, every relation per key, strongest first
+   * (`src/wiki/trackers/`). The listing's COMPACT copy: only keys that count
+   * (`relationsCount` — not `link`/`mention` alone), `mention` relations dropped.
+   * Absent on a wiki with no tracker and on a page carrying none.
+   */
+  issues?: ListingIssueRef[];
+  /**
+   * The agent sessions that wrote this page (`provider:id`, in arrival order).
+   *
+   * **Single-page payloads only**, exactly like `desc`: `/api/wiki/pages` strips
+   * it (see `toListing`'s `includeProvenance`), and so do the outgoing/backlink
+   * arrays on `/api/wiki/page`. Any consumer must tolerate its absence.
+   */
+  sessions?: string[];
+  /** `YYYY-MM-DD` — the `sessions` list came from a history sweep rather than
+   *  live stamps. Single-page only, like `sessions`. */
+  sessionsBackfilled?: string;
+  /** Pull requests this page's work landed as (`owner/repo#number`). Single-page
+   *  only, like `sessions`. */
+  prs?: string[];
+  /**
+   * The SERIES this page belongs to — the frontmatter `series:` slug, verbatim
+   * and case-sensitive (see the store's `WikiPageMeta.series`).
+   *
+   * **Listing field**, the `project` twin: the rail's Series fold groups by it,
+   * so it rides the hot `/api/wiki/pages` payload and is NOT stripped by
+   * `toListing`. Absent on every page carrying no key, which is most pages.
+   */
+  series?: string;
+  /** The series' display NAME (`series_label:`), carried by the HEAD page only —
+   *  so at most one page per series has it, and the fold's label costs one string
+   *  on one row. Absent everywhere else; the rail falls back to the key. */
+  seriesLabel?: string;
+  linkCount: number;
+  backlinkCount: number;
+}
+
+/** One issue ref as the listing ships it. `relations` is non-empty and ordered
+ *  strongest first. */
+export interface ListingIssueRef {
+  tracker: string;
+  key: string;
+  relations: IssueRelation[];
+}
+
+/** A tracker a wiki's `.wiki-reader.json` configured, as the listing names it —
+ *  present on the payload only for a wiki that has one. */
+export interface ListingTracker {
+  id: string;
+  label: string;
+}
+
+export interface WikiFilters {
+  q: string;
+  domain: string;
+  /** Top-level folder, `ROOT_FOLDER` for wiki-root pages, "" for all. */
+  folder: string;
+  type: string;
+  tag: string;
+  /** Exact `plan_status` value, "" for all. Independent of `followups` below —
+   *  status answers "has it started / is it finished", follow-ups answers "is
+   *  anything left over", and a page can be `shipped` with open follow-ups. */
+  status: string;
+  /** `"open"` (the ⚑ toggle) or "" for all. Compared against the page's
+   *  `followups` with an ABSENT value read as `"none"`, per the field contract. */
+  followups: string;
+  /** `"you"` (the ✋ toggle) or "" for all: only pages whose `<NextMoves>` block
+   *  has a `you` lane item. A third axis beside status and follow-ups. */
+  waiting: string;
+  /** Exact `project` value, "" for all. The only facet that is also URL state
+   *  (`?project=`), so a narrowed reader can share what they are looking at —
+   *  see `resolveProjectParam` for what happens to a value this wiki doesn't
+   *  know. */
+  project: string;
+  /** Exact `jira` key, "" for all — the `project` twin in every respect: URL
+   *  state (`?jira=`), matched exactly against the page's own normalized keys,
+   *  and cleared when the listing does not know the value. A page serves several
+   *  issues, so unlike `project` this matches membership of a LIST. */
+  jira: string;
+}
+
+/**
+ * Strict CSS color-token validator for the user-controlled `accent` / `accentDark`
+ * frontmatter fields. These are injected into a `<style>` sink (the per-page accent
+ * block in the reader), so the ONLY accepted shapes are a `#rgb` / `#rgba` / `#rrggbb`
+ * / `#rrggbbaa` hex literal, or a `rgb()/rgba()/hsl()/hsla()` call whose argument list
+ * contains only digits, dots, commas, percent signs, and whitespace. Anything else —
+ * a named color, a `var(...)`, or an injection attempt like `red;} body{display:none`
+ * — returns `undefined` and is dropped. Shared by the server (parse-time sanitize in
+ * `src/wiki/store.ts`) and the client (defense-in-depth re-check before injection), so
+ * there is exactly one regex. Lives here because this module is pure (no DOM/server
+ * deps) and already imported by both sides.
+ */
+const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const FUNC_COLOR_RE = /^(?:rgb|rgba|hsl|hsla)\(\s*[0-9.,%\s]+\)$/i;
+export function sanitizeColorToken(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim();
+  if (!v) return undefined;
+  if (HEX_COLOR_RE.test(v) || FUNC_COLOR_RE.test(v)) return v;
+  return undefined;
+}
+
+/** Filter sentinel for pages sitting at the wiki root — no real folder can
+ *  collide with it, so it doubles as a selectable value in the folder picker. */
+export const ROOT_FOLDER = "/";
+
+const SORT_MODES = ["updated", "created", "worked", "backlinks", "title"] as const;
+
+export type WikiSortMode = (typeof SORT_MODES)[number];
+
+/** The three modes that order by a DATE — the subset {@link recencyKeyFor} and
+ *  {@link recencyKindFor} are total over. */
+export type WikiRecencySort = Extract<WikiSortMode, "updated" | "created" | "worked">;
+
+/** The three modes that order by a DATE. Named once, because four sites branch on
+ *  exactly this set — the sort, the row's date chip, the archive's month folding
+ *  and the rail's `Bookkeeping` tail — and each of them was a two-value test that
+ *  turned itself silently off when a third value arrived.
+ *
+ *  A TYPE PREDICATE, so a caller that has tested a mode can hand it straight to
+ *  `recencyKeyFor`/`recencyKindFor` instead of re-spelling the mode→kind map
+ *  beside the test — which is how `wiki-groups`' month fold and `wiki-browser`'s
+ *  row chip each grew their own copy of it. */
+export function isRecencySort(mode: WikiSortMode): mode is WikiRecencySort {
+  return mode === "updated" || mode === "created" || mode === "worked";
+}
+
+/** A stored sort value, validated — a key from an older build, or one edited by
+ *  hand, is `null` rather than a mode the select has no option for. */
+export function parseWikiSortMode(raw: unknown): WikiSortMode | null {
+  return typeof raw === "string" && (SORT_MODES as readonly string[]).includes(raw)
+    ? (raw as WikiSortMode)
+    : null;
+}
+
+/**
+ * The sort the rail should hold after a listing arrives.
+ *
+ * "Worked on" is the default wherever the listing says the ledger covers a page
+ * (`workedShown`), and a sort the reader PICKED — this tab (`touched`) or stored
+ * for this wiki — wins over the default. `workedShown === null` is a listing that
+ * said nothing about coverage (a cold memo after a restart): the current value
+ * stays, and the next listing that does say decides.
+ */
+export function resolveSortMode(o: {
+  current: WikiSortMode;
+  stored: WikiSortMode | null;
+  touched: boolean;
+  workedShown: boolean | null;
+}): WikiSortMode {
+  const wanted = o.touched ? o.current : (o.stored ?? (o.workedShown ? "worked" : o.current));
+  if (wanted !== "worked") return wanted;
+  if (o.workedShown === false) return "updated";
+  // Unknown coverage: `worked` is only reachable while the option is visible, so
+  // keep whatever the select holds until a listing says.
+  return o.workedShown === true ? "worked" : o.current;
+}
+
+/** The built-in type order + labels — the no-`.wiki-reader.json` defaults. A wiki's
+ *  merged type list (see `mergeWikiTypes`) always starts with these, so a wiki with
+ *  no config renders byte-identically to before. */
+export const TYPE_ORDER: string[] = [
+  "concept",
+  "entity",
+  "source",
+  "analysis",
+  "explainer",
+  "note",
+];
+export const TYPE_LABEL: Record<string, string> = {
+  concept: "Concepts",
+  entity: "Entities",
+  source: "Sources",
+  analysis: "Analyses",
+  explainer: "Explainers",
+  note: "Notes",
+};
+
+/**
+ * Chip order for the plan-status facet — a client-side copy of the store's
+ * `PLAN_STATUS_VALUES` (`src/wiki/store.ts`), kept here for the same reason
+ * `TYPE_ORDER` is: this module must stay free of server deps. The server
+ * validates against its own list and DROPS anything else, so a value reaching a
+ * `WikiListing` is always one of these; the chip row still unions in whatever is
+ * actually present (`connectionTypeOrder`) so a future enum member added
+ * server-side surfaces instead of vanishing.
+ */
+export const STATUS_ORDER: string[] = [
+  "proposed",
+  "ready",
+  "in-flight",
+  "blocked",
+  "shipped",
+  "superseded",
+  "abandoned",
+];
+
+/** The ordered type list + labels the client renders chips/stats/hubs/connections
+ *  from — the built-in defaults merged with a wiki's `.wiki-reader.json` customs. */
+export interface WikiTypeList {
+  order: string[];
+  labels: Record<string, string>;
+}
+
+/** Capitalize a raw type slug for a fallback label ("subsystem" → "Subsystem"). */
+function titleCaseType(t: string): string {
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
+/**
+ * Merge the built-in ontology (`TYPE_ORDER`/`TYPE_LABEL`) with a wiki's optional
+ * `.wiki-reader.json` config into the ordered type list + labels sent to the
+ * client. Standard types always come first in their canonical order — so a wiki
+ * with no config yields exactly today's constants. Custom types the config
+ * introduces (its `typeLabels` keys + `typeMap` values that aren't already
+ * standard) are appended, but only when at least one page actually carries them
+ * (`presentTypes`); a custom type's label is its `typeLabels` entry, else a
+ * title-cased slug. Declaration order is preserved (typeLabels first, then typeMap,
+ * then `defaultType` — which is a type the wiki introduces exactly like the other
+ * two, and without it a wiki that declares one but gives it no `typeLabels` entry
+ * would leave it out of the ordered list and rely on each renderer's
+ * belt-and-suspenders union instead).
+ */
+export function mergeWikiTypes(
+  config:
+    | { typeMap: Record<string, string>; typeLabels: Record<string, string>; defaultType?: string }
+    | null
+    | undefined,
+  presentTypes: Iterable<string>,
+): WikiTypeList {
+  const order = [...TYPE_ORDER];
+  const labels: Record<string, string> = { ...TYPE_LABEL };
+  if (!config) return { order, labels };
+  const present = new Set(presentTypes);
+  const seen = new Set(order);
+  const candidates = [
+    ...Object.keys(config.typeLabels),
+    ...Object.values(config.typeMap),
+    ...(config.defaultType ? [config.defaultType] : []),
+  ];
+  for (const t of candidates) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    if (!present.has(t)) continue;
+    order.push(t);
+    labels[t] = config.typeLabels[t] || titleCaseType(t);
+  }
+  return { order, labels };
+}
+
+/** Distinct non-note page types present in `pages` (the ontology's "content" types). */
+function contentTypes(pages: WikiListing[]): Set<string> {
+  const s = new Set<string>();
+  for (const p of pages) if (p.type !== "note") s.add(p.type);
+  return s;
+}
+
+/**
+ * The per-type hub sections to render on the start view: non-note, non-explainer
+ * types present in `pages`, ordered by `order` (extras alpha-sorted after).
+ * Explainers never join the link graph, so a "by connections" hub of them is
+ * always degenerate.
+ *
+ * **`defaultType` is excluded for the same reason.** It names the pages NOTHING
+ * typed — an authored `type:`, a `typeMap` folder and the standard folder names
+ * all win ahead of it — so it is a leftovers bucket by construction, not a
+ * curated section. Measured on the memory wiki (2026-08-20): its `memory-index`
+ * bucket is 32 pages of which exactly ONE carries a backlink, i.e. a "Top Memory
+ * index by connections" hub is 31 zero-backlink cards. The two surfaces
+ * `defaultType` was actually added for — the type facet and the Atlas column,
+ * which `note` was refused — are untouched by this.
+ *
+ * Absent ⇒ byte-identical to what shipped, which is every wiki but `memory`.
+ */
+export function hubTypeList(pages: WikiListing[], order: string[], defaultType?: string): string[] {
+  const present = contentTypes(pages);
+  present.delete("explainer");
+  if (defaultType) present.delete(defaultType);
+  const skip = (t: string) => t === "note" || t === "explainer" || t === defaultType;
+  const known = order.filter((t) => !skip(t) && present.has(t));
+  const extras = [...present].filter((t) => !order.includes(t)).sort();
+  return [...known, ...extras];
+}
+
+/** Grouping order for a connections panel: the stored `order` first (types actually
+ *  present), then any extra types present in the items but missing from `order`
+ *  (alpha). Belt-and-suspenders so a custom-typed neighbor is NEVER dropped even if
+ *  the stored list is late/empty — the pre-fix bug excluded such items entirely. */
+export function connectionTypeOrder(itemTypes: Iterable<string>, order: string[]): string[] {
+  const present = new Set(itemTypes);
+  const known = order.filter((t) => present.has(t));
+  const extras = [...present].filter((t) => !order.includes(t)).sort();
+  return [...known, ...extras];
+}
+
+/** The wiki-root-relative top-level folder a page lives in (`ROOT_FOLDER` when it
+ *  sits directly in the wiki root). Nested pages report their FIRST segment, so
+ *  mimir's `archive/muninn/x.md` is filed under `archive`. */
+export function pageFolder(p: WikiListing): string {
+  const rel = (p.relPath || "").replace(/\\/g, "/");
+  const slash = rel.indexOf("/");
+  return slash === -1 ? ROOT_FOLDER : rel.slice(0, slash);
+}
+
+/** The title to SHOW for a page in a list, card, rail or breadcrumb: the store's
+ *  collision-scoped `displayTitle` when it set one, else the plain title. One
+ *  spelling, so a row and the card for the same page can't read differently. */
+export function displayTitleOf(p: { title: string; displayTitle?: string }): string {
+  return p.displayTitle || p.title;
+}
+
+/**
+ * Clip a `displayTitleOf` value to `max` characters for the mini-graph's `<text>`
+ * node label, WITHOUT truncating inside the prefix.
+ *
+ * A colliding page's displayed title is `<prefix>/<stem>`, and a widened prefix is
+ * long — a plain head-slice turned every one of the memory wiki's project hubs
+ * into `-Users-rune-so…`, i.e. the same label on every node, which is exactly what
+ * the disambiguation exists to prevent. So the STEM is kept whole and the PREFIX
+ * is the part that gets clipped (`-Users-…/MEMORY`). When the stem alone cannot
+ * fit, the prefix is dropped entirely rather than spending two of the remaining
+ * characters on an ellipsis that identifies nothing — the node's `<title>` tooltip
+ * carries the full label either way — and a prefix that would survive as fewer
+ * than `MIN_PREFIX_CHARS` characters is dropped for the same reason (`p…/` is
+ * three characters of punctuation, not a folder name).
+ *
+ * It does NOT promise the clipped labels stay unique: 15 characters cannot hold
+ * two 33-character folder names that differ in their last token. The tooltip and
+ * the Connections rail are where a reader tells those apart; this only stops the
+ * node from losing the one part that says what the page IS.
+ */
+const MIN_PREFIX_CHARS = 3;
+export function shortGraphLabel(label: string, max = 15): string {
+  if (label.length <= max) return label;
+  const head = (t: string) => t.slice(0, max - 1) + "…";
+  const cut = label.lastIndexOf("/");
+  if (cut === -1) return head(label);
+  const stem = label.slice(cut + 1);
+  // "…/" is the two characters a clipped prefix costs.
+  const prefixBudget = max - stem.length - 2;
+  // Below `MIN_PREFIX_CHARS` the prefix says nothing anyone can read (`p…/`), so
+  // spend the whole budget on the stem instead of on punctuation.
+  if (prefixBudget < MIN_PREFIX_CHARS) return stem.length <= max ? stem : head(stem);
+  return label.slice(0, prefixBudget) + "…/" + stem;
+}
+
+/**
+ * The breadcrumb's LAST crumb: the displayed title, minus a leading segment the
+ * folder crumb immediately above it already says.
+ *
+ * The disambiguator's prefix is the folder LABEL when the wiki has one, and the
+ * breadcrumb renders that same label as its own folder crumb — so on the memory
+ * wiki the trail read `memory / muninn / muninn/MEMORY` (measured live). mimir is
+ * not redundant (`mimir / projects / yggdrasil/architecture`: the folder crumb is
+ * `projects`, the prefix is the subsystem), so the strip is conditional on the two
+ * actually matching, and only ever removes ONE whole leading segment.
+ */
+export function breadcrumbLeaf(
+  p: { title: string; displayTitle?: string },
+  folderLabel: string,
+): string {
+  const shown = displayTitleOf(p);
+  if (!folderLabel) return shown;
+  const prefix = folderLabel + "/";
+  return shown.startsWith(prefix) ? shown.slice(prefix.length) : shown;
+}
+
+/** Display label for a folder facet key — the wiki's effective `folderLabels`
+ *  entry (configured or common-prefix-derived), else the folder's own name.
+ *  `ROOT_FOLDER` is the caller's business; it never has a label. */
+export function folderLabelOf(folder: string, labels: Record<string, string>): string {
+  const l = Object.prototype.hasOwnProperty.call(labels, folder) ? labels[folder] : undefined;
+  return l && l.trim() ? l.trim() : folder;
+}
+
+/**
+ * How far past "now" a FRONTMATTER date may sit and still be trusted as a sort key.
+ *
+ * 48 hours. The stamps are plain days (`updated: 2026-06-10`) parsed as UTC midnight
+ * while "now" is a wall-clock instant, so a page stamped with the author's local day
+ * legitimately reads as up to ~14 h in the future in UTC+14 — and a wiki committed
+ * from a machine with a skewed clock adds more. 48 h swallows both without admitting
+ * the failure this guards: a model-emitted `updated: 2027-01-01`, which nothing can
+ * ever exceed and which would therefore pin its page to the top of "Recently updated"
+ * permanently.
+ *
+ * The same window is applied to the git and mtime branches too, for symmetry rather
+ * than for a known failure: git's `%at` is the AUTHOR date, which is settable
+ * (`GIT_AUTHOR_DATE`) and comes off whatever clock made the commit, and an mtime can
+ * likewise be stamped ahead by a skewed clock or a bad `touch`. Neither is the
+ * "machine timestamp of an event that actually happened" it is tempting to call it, so
+ * neither gets to outrank a real signal forever either. Every PAST date — which is all
+ * of them in practice — is untouched, so no existing ordering moves.
+ */
+export const FUTURE_DATE_SKEW_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * True when a parsed date is too far ahead of `now` to be a real date. Applied to
+ * EVERY branch of BOTH recency signals (frontmatter, git, mtime/birthtime) inside
+ * their `consider()` gates, so a page with one bad signal falls back to whatever
+ * remaining evidence it has — and the label stays the date the page actually sorted on.
+ *
+ * Exported because the wiki LINTER (`src/wiki/lint.ts`) reports the same condition
+ * per page: the sort drops a bad stamp silently by design, so without a lint case a
+ * single `updated: 2027-01-01` is invisible to an operator. One predicate, one
+ * constant, two consumers — the server importing this pure module is the established
+ * shape (`src/wiki/store.ts` already imports `sanitizeColorToken` from here).
+ */
+export function isImplausibleFutureDate(ms: number, now: number): boolean {
+  return ms > now + FUTURE_DATE_SKEW_MS;
+}
+
+/**
+ * The `now` every recency read in this module should be given — the viewer's clock
+ * anchored forward to the server's own scan instant.
+ *
+ * This module is BUNDLED INTO THE BROWSER (`wiki-browser.ts` is in the `Bun.build` IIFE
+ * behind `wiki-shell-client.ts`), so a bare `Date.now()` is the VIEWER's clock, and the future-date guard
+ * is a comparison against it. A viewer whose clock runs more than 48 h SLOW would
+ * therefore judge every legitimate frontmatter stamp implausible and silently collapse
+ * the entire wiki onto its git/mtime floors — a whole-listing failure caused by a
+ * machine setting, with no error anywhere.
+ *
+ * `Math.max` is the safe direction, and only that direction: `scannedAt` (sent by
+ * `/api/wiki/pages`, the server's index-build instant) rescues a slow clock, while a
+ * FAST clock keeps its own larger value — which only makes the guard MORE permissive
+ * and can never wrongly drop a real stamp. It is deliberately not a replacement:
+ * `scannedAt` can be up to the index TTL old, and clamping to it would start dropping
+ * stamps a viewer with a correct clock should keep.
+ *
+ * A null/absent/non-finite `scannedAt` (older server, degraded response) degrades to
+ * the bare clock — i.e. exactly the pre-anchor behavior.
+ */
+export function anchorNow(clockNow: number, scannedAt: number | null | undefined): number {
+  return typeof scannedAt === "number" && Number.isFinite(scannedAt)
+    ? Math.max(clockNow, scannedAt)
+    : clockNow;
+}
+
+/**
+ * The authored stamp `updatedSignal` sorts on: frontmatter `updated`, falling back to
+ * `created` when `updated` is absent — **or when it is present but implausible**.
+ *
+ * That second clause is the whole reason this isn't a bare `p.updated || p.created`.
+ * Resolving the chain first and testing plausibility second meant an implausible
+ * `updated:` also discarded a perfectly valid `created:`, dropping the page to its git
+ * floor (or to undated on a page with no git evidence) — punishing the good stamp for
+ * the bad one's sake. An UNPARSEABLE `updated:` deliberately does NOT fall through
+ * (that was the pre-guard behavior and this is not the PR that changes it; the linter's
+ * `stale-updated` check is what surfaces it).
+ */
+/**
+ * The fields the UPDATE and WORKED signals read — a structural subset rather
+ * than `WikiListing`, for the reason `wiki-groups`' `PageDateFields` is one: the
+ * series comparators take a page shape, not a listing row, and the SERVER's
+ * `WikiPageMeta` has to satisfy it too.
+ */
+export type WikiRecencyFields = Pick<
+  WikiListing,
+  "updated" | "created" | "gitCreatedMs" | "gitTouchedMs" | "gitDirty" | "mtimeMs" | "workedMs" | "work" | "birthtimeMs"
+>;
+
+function authoredUpdatedDate(
+  p: WikiRecencyFields,
+  now: number,
+): { ms: number; label: string } | null {
+  const primary = p.updated || p.created || "";
+  const parsed = primary ? Date.parse(primary) : NaN;
+  if (!Number.isFinite(parsed)) return null;
+  if (!isImplausibleFutureDate(parsed, now)) return { ms: parsed, label: primary };
+  // The resolved candidate is implausible. When it was `updated`, `created` has not had
+  // its turn yet.
+  if (primary !== p.updated || !p.created) return null;
+  const created = Date.parse(p.created);
+  if (!Number.isFinite(created) || isImplausibleFutureDate(created, now)) return null;
+  return { ms: created, label: p.created };
+}
+
+/**
+ * The winning "Recently updated" signal for a page: its epoch ms and the label that
+ * explains it. **Newest of every TRUSTWORTHY signal wins** — the mirror image of
+ * `addedSignal`'s min, for the mirror-image reason: corruption moves a creation date
+ * forward and so the oldest claim survives, while an update date is genuinely a "most
+ * recent" question and the work is in deciding which signals get to answer it.
+ *
+ * mtime is the contested one. In a git-managed wiki a clean file's mtime is a
+ * checkout or sweep artifact — mimir's 2026-07-31 backfill made all 148 plans report
+ * as edited that minute, which is true of the sweep and useless about the pages. But
+ * mtime cannot simply be dropped: a page edited RIGHT NOW has no new commit, and its
+ * mtime is the only evidence it has. So mtime is trusted exactly when git says the
+ * file is DIRTY — which is precisely the case where history doesn't know yet.
+ *
+ * Three regimes, and the discriminator is `gitCreatedMs`:
+ *
+ *  - **No git at all** (non-repo wiki, walk failed/timed out): no page carries
+ *    `gitCreatedMs`, and this degrades to max(mtime, frontmatter) — byte-identical
+ *    to the pre-sweep-awareness behavior.
+ *  - **Git-tracked page:** frontmatter, the non-sweep touch date, and mtime-if-dirty
+ *    compete; `gitCreatedMs` joins as a FLOOR so a page whose every commit was a
+ *    sweep (19 of mimir's 151 plans) falls back to its creation date rather than
+ *    sorting as undated. The floor can never win over a real touch — creation
+ *    precedes every touch by construction.
+ *  - **Untracked page** (a draft never committed): no `gitCreatedMs`, so mtime is
+ *    trusted unconditionally and the page sorts to the top, where it belongs.
+ *
+ * Sort key and label come from ONE function so the list always shows the date it
+ * actually sorted on. A frontmatter date is echoed verbatim (it was authored as a
+ * plain day; re-deriving it from the parsed UTC instant would shift it in
+ * negative-offset timezones), while git dates and mtime are wall-clock instants and
+ * so render as LOCAL days — `toISOString()` would label a 00:30 edit in UTC+2 as the
+ * previous day, the same drift `computeWikiFreshness` avoids for `log.md`.
+ *
+ * The frontmatter branch is the one signal that is AUTHORED rather than observed, so
+ * it is the LIKELIEST to claim a date that hasn't happened: a model-emitted
+ * `updated: 2027-01-01` outranks every real signal forever, which no amount of
+ * sweep-discounting can undo. A stamp more than `FUTURE_DATE_SKEW_MS` ahead of now is
+ * therefore ignored outright — not clamped to now, which would invent a "last edited
+ * today" the page never earned — and the page falls back to `created` if that is sound
+ * (`authoredUpdatedDate`), else to its git/mtime evidence. The same test then runs
+ * inside `consider` for every OTHER branch too, since a git author date and an mtime
+ * are also only as honest as the clock that wrote them. Valid past dates are untouched,
+ * so no existing ordering moves.
+ *
+ * `now` is a parameter rather than a `Date.now()` read inside the body because this
+ * function runs INSIDE a sort comparator: at the 48h boundary a clock read per call
+ * makes the comparator impure, so `sortPages` captures one instant for the whole pass.
+ * Label-only call sites (`pageDateLabel` on a rendered row) take the default.
+ */
+function updatedSignal(
+  p: WikiRecencyFields,
+  now: number = Date.now(),
+): { ms: number; label: string; kind: WikiDateKind } {
+  const authored = authoredUpdatedDate(p, now);
+  let best = { ms: 0, label: "", kind: "updated" as WikiDateKind };
+  // Strictly greater, so the FIRST signal considered wins a tie — frontmatter, which
+  // is the authored spelling and the one worth showing.
+  const consider = (ms: number, label: string, kind: WikiDateKind = "updated") => {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    // The future guard sits HERE rather than on the frontmatter branch alone, so it
+    // covers the git + mtime signals on the same terms (see `FUTURE_DATE_SKEW_MS`).
+    // Redundant for `authored`, which `authoredUpdatedDate` already vetted — it has
+    // to test earlier, because only it knows whether to retry `created`.
+    if (isImplausibleFutureDate(ms, now)) return;
+    if (ms > best.ms) best = { ms, label, kind };
+  };
+  const day = (ms: number) => localDay(new Date(ms));
+  if (authored) consider(authored.ms, authored.label);
+  if (p.gitCreatedMs) {
+    if (p.gitTouchedMs) consider(p.gitTouchedMs, day(p.gitTouchedMs));
+    if (p.gitDirty && p.mtimeMs) consider(p.mtimeMs, day(p.mtimeMs));
+    // The floor, and the ONE branch that isn't an update: this page has never been
+    // touched outside a sweep, so the honest word for its date is "added".
+    consider(p.gitCreatedMs, day(p.gitCreatedMs), "added");
+  } else if (p.mtimeMs) {
+    consider(p.mtimeMs, day(p.mtimeMs));
+  }
+  return best;
+}
+
+/**
+ * Which question a page's recency date actually answers. `"added"` only for the
+ * creation-date fallback — a page whose every commit was a sweep, so nothing is known
+ * about when it was last *edited*. That is 19 of mimir's 151 plans but **734 of
+ * jarvis's 952 pages (77%)**, which are bulk-ingested and never edited again: at that
+ * scale a header reading "updated <creation date>" is a claim the data does not
+ * support. Consumed by `pageHeaderDates`, which omits the "updated" slot outright on
+ * this kind rather than relabelling it.
+ *
+ * `"worked"` is the third axis (`workedMs`) and is reachable from ONE caller,
+ * `pageDateSignal(p, "worked")`. `updatedSignal`/`addedSignal` never mint it; the
+ * article header reads the worked day through {@link workedSourceOf} instead, as
+ * its own labelled slot.
+ */
+export type WikiDateKind = "updated" | "added" | "worked";
+
+/** The word that honestly describes `pageDateLabel(p)` for this page. See
+ *  `WikiDateKind`. */
+export function pageDateKind(p: WikiListing, now?: number): WikiDateKind {
+  return updatedSignal(p, now).kind;
+}
+
+/**
+ * BOTH dates for the article header — what the reader actually wants to know about a
+ * page it is looking at, as opposed to a list row, which shows the single date it was
+ * SORTED on and must keep doing so.
+ *
+ * One slot whose word flips between "added" and "updated" was the first attempt, and
+ * it is too subtle to read: a page showing `updated 2026-05-04` gives no hint whether
+ * it was also written that day, and a page showing `added` looks like a typo unless
+ * you already know the rule. Two labelled slots say the whole thing.
+ *
+ * The rules, in order:
+ *  - **No KNOWN edit** (`kind === "added"` — every commit that ever touched the page
+ *    was a sweep) ⇒ the creation date ALONE. Deliberately NOT derived by comparing the
+ *    two labels, because the creation signal takes the OLDEST of its three inputs while
+ *    the update signal fell back to the git floor — so the two legitimately differ and a
+ *    label comparison would render "updated <git floor>" for a page git records no edit
+ *    for. Measured on mimir: 6 pages, driven by `birthtimeMs` older than `gitCreatedMs`
+ *    (`blogs/2026-07-16-agent-maturity-assessment.html` — added 07-16, floor 07-17); a
+ *    truer frontmatter `created` is the same shape by a different field. Only `kind` knows.
+ *  - **Created and last edited on the same day** ⇒ the creation date alone, since
+ *    "created X · updated X" is noise.
+ *  - Otherwise both, and either one alone when the other has no signal.
+ *
+ * With `opts.ledger` (the wiki's ledger covers pages), a page a session wrote gets
+ * a `worked` slot instead, plus `updated` only when a change landed after that
+ * session with no ledger row; a page no session wrote keeps the rules above and
+ * is flagged `noSession`.
+ */
+export function pageHeaderDates(
+  p: WikiListing,
+  nowMs?: number,
+  opts: { ledger?: boolean; ledgerAsOfMs?: number } = {},
+): WikiHeaderDates {
+  // One clock read for all three signal reads on this page (they must agree). The
+  // caller passes a server-ANCHORED instant (`anchorNow`) where it has one — this
+  // module runs in the browser, so the bare default is the viewer's own clock.
+  const now = nowMs ?? Date.now();
+  const created = pageAddedLabel(p, now);
+  if (opts.ledger) {
+    const src = workedSourceOf(p, now, undefined, opts.ledgerAsOfMs);
+    if (src.kind === "worked") {
+      // "created X · worked X" is the same noise the created/updated pair drops.
+      const out: WikiHeaderDates = { worked: src.worked };
+      if (created && created !== src.worked) out.created = created;
+      if (src.changedSince) {
+        out.updated = src.changedSince;
+        out.changedSince = true;
+        if (src.ledgerReadDay) out.ledgerReadDay = src.ledgerReadDay;
+      }
+      if (src.touched) out.touched = src.touched;
+      return out;
+    }
+  }
+  const updated = pageDateLabel(p, now);
+  const out: WikiHeaderDates =
+    pageDateKind(p, now) === "added"
+      ? created ? { created } : {}
+      : !created
+        ? updated ? { updated } : {}
+        : created === updated
+          ? { created }
+          : { created, updated };
+  if (opts.ledger) {
+    // A bash-only touch has no ledger summary row, so it lands here: its events
+    // are the record (D5), so no "no session" claim, and its mark names the touch.
+    const w = pageWorkState(p);
+    if (!w || usableWorkEvents(w, now).length === 0) {
+      out.noSession = true;
+      const readDay = ledgerReadDayFor(p, now, opts.ledgerAsOfMs);
+      if (readDay) out.ledgerReadDay = readDay;
+    }
+    const touched = workedShownSignal(p, now).touched;
+    if (touched) out.touched = touched;
+  }
+  return out;
+}
+
+/**
+ * The article header's slots. `worked`, `changedSince` and `noSession` appear
+ * only when the caller says the wiki's ledger covers pages (`opts.ledger`) —
+ * on a wiki it covers nothing, "no session" would be true of every page and say
+ * nothing.
+ */
+export interface WikiHeaderDates {
+  created?: string;
+  updated?: string;
+  /** The day the last agent session wrote the page. */
+  worked?: string;
+  /** `updated` is a change AFTER `worked` that no session recorded. */
+  changedSince?: boolean;
+  /** No session in the ledger wrote this page: `updated` is the fallback. */
+  noSession?: boolean;
+  /** State T/T0: the page's in-window events are touches or pass markers. */
+  touched?: WorkedTouch;
+  /** With `noSession` or `changedSince`: the page changed after the ledger was
+   *  last read (this day), so "no session write recorded" is not known. */
+  ledgerReadDay?: string;
+}
+
+/**
+ * How long after an edit the ledger may still not hold it. `asOfMs` is when
+ * muninn got the answer, not how fresh the ledger's data is: a laptop edit
+ * reaches the mini's ledger through a push job that runs every minute. An
+ * update newer than `asOfMs` minus this is never set aside. It covers the
+ * steady state only: while that push stalls (one lasted 2h44m) a fresh laptop
+ * edit on a page with an older worked date is demoted until it lands.
+ */
+export const WORKED_INGEST_SLACK_MS = 10 * 60_000;
+
+/**
+ * A claude-usage answer's instant (`asOfMs`), clamped to `now`; undefined when
+ * it is not a usable instant. The one staleness rule both held ledger memos
+ * read their answer time with: the worked chip below (`ledgerReadDayFor`) and
+ * the work-sessions memo's age bound (`workSessionsFor`, `work-sessions.ts`).
+ */
+export function ledgerInstant(ms: number | undefined, now: number): number | undefined {
+  if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return undefined;
+  return Math.min(ms, now);
+}
+
+/**
+ * The day the ledger was last read (`workedCoverage.asOfMs`), when the page's
+ * update is too new for that read to have seen a session write: newer than
+ * `asOfMs` minus {@link WORKED_INGEST_SLACK_MS}. Undefined otherwise. While
+ * claude-usage is down the memo is held (a failure must not blank a good
+ * axis), so this is what keeps a chip from presenting the held answer as
+ * current fact.
+ */
+export function ledgerReadDayFor(p: WikiRecencyFields, now: number, asOfMs: number | undefined): string | undefined {
+  const asOf = ledgerInstant(asOfMs, now);
+  if (asOf === undefined) return undefined;
+  const updated = updatedSignal(p, now);
+  if (!(updated.ms > 0) || updated.ms <= asOf - WORKED_INGEST_SLACK_MS) return undefined;
+  return localDay(new Date(asOf));
+}
+
+/**
+ * The rail chip's extra class and hover for a date's source; `null` (a mode that
+ * answers one question) adds nothing. `fallbackKind` is the fallback date's own
+ * kind, so a sweep-only page's creation date is never called an update.
+ */
+export function workedChip(
+  source: WorkedSource | null,
+  fullDate: string,
+  fallbackKind: "updated" | "added" = "updated",
+): { cls: string; title: string } {
+  if (!source) return { cls: "", title: fullDate };
+  if (source.kind === "fallback") {
+    const why = source.ledgerReadDay ? `ledger last read ${source.ledgerReadDay}` : "no session write recorded";
+    return { cls: " fallback", title: `${fullDate} (${fallbackKind} — ${why})` };
+  }
+  // A T/T0 page (D15): its real date, with a dotted mark whose hover names the touch.
+  const touched = source.touched
+    ? { cls: " touched", line: `\n${touchedLine(source.touched)}` }
+    : { cls: "", line: "" };
+  if (source.kind === "events") return { cls: touched.cls, title: `${fullDate} (${fallbackKind})` + touched.line };
+  if (source.changedSince) {
+    return {
+      cls: " worked changed-since" + touched.cls,
+      title:
+        `${fullDate} (worked)\nchanged ${source.changedSince}, ` +
+        (source.ledgerReadDay ? `ledger last read ${source.ledgerReadDay}` : "no session write recorded") +
+        touched.line,
+    };
+  }
+  return { cls: " worked" + touched.cls, title: `${fullDate} (worked)` + touched.line };
+}
+
+/**
+ * How long after the last session's write an update must land before it counts as
+ * a change the ledger did not see. A day, because a page written late in a
+ * session and committed the next morning is the SAME work: on mimir 11 of the 60
+ * covered pages whose update day is later than their worked day sit within 24h
+ * (measured 2026-09-24).
+ */
+export const CHANGED_SINCE_MIN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Where a page's worked-on date comes from — the fact the rail's date chip and
+ * the article header both mark.
+ *
+ *  - `worked` — an agent session wrote the page. `changedSince` is set when the
+ *    update signal is more than {@link CHANGED_SINCE_MIN_MS} newer: a hand edit,
+ *    a script the ledger cannot read, a lint or sync commit.
+ *  - `fallback` — no usable ledger row, so any worked-on date shown for it is the
+ *    update signal.
+ *  - `events` — an Activity row on a page with session events whose winning
+ *    term is not a worked date: the date is plain, a T/T0 touch still marked.
+ */
+export type WorkedSource =
+  | { kind: "worked"; worked: string; changedSince?: string; touched?: WorkedTouch; ledgerReadDay?: string }
+  | { kind: "fallback"; ledgerReadDay?: string }
+  | { kind: "events"; touched?: WorkedTouch };
+
+/**
+ * `signal` defaults to the SHOWN worked signal ({@link workedShownSignal}). The
+ * changed-since test compares the update against the page's newest write of ANY
+ * kind — the shown instant, the ledger's `workedMs` and every shipped event — so
+ * a touch after the focused write never reads as "no session write recorded".
+ */
+export function workedSourceOf(
+  p: WikiRecencyFields,
+  now: number,
+  // The row already holds this signal; passing it keeps one derivation per row.
+  signal: WikiDateSignal = workedShownSignal(p, now),
+  // `workedCoverage.asOfMs`: a change after the ledger was last read says so.
+  ledgerAsOfMs?: number,
+): WorkedSource {
+  const touched = signal.touched ? { touched: signal.touched } : {};
+  const w = pageWorkState(p);
+  const events = w ? usableWorkEvents(w, now) : [];
+  const readDay = ledgerReadDayFor(p, now, ledgerAsOfMs);
+  const stale = readDay ? { ledgerReadDay: readDay } : {};
+  // D5: a page with usable session events never takes the fallback's "no
+  // session write recorded" claim; its T/T0 touch keeps its mark.
+  if (signal.kind !== "worked") return events.length > 0 ? { kind: "events", ...touched } : { kind: "fallback", ...stale };
+  const updated = updatedSignal(p, now);
+  let newestWrite = signal.ms;
+  if (isUsableWorkedMs(p.workedMs, now)) newestWrite = Math.max(newestWrite, p.workedMs);
+  const newestEvent = newestWorkEvent(events);
+  if (newestEvent) newestWrite = Math.max(newestWrite, newestEvent[0]);
+  if (
+    updated.kind === "updated" &&
+    updated.ms - newestWrite > CHANGED_SINCE_MIN_MS &&
+    updated.label > localDay(new Date(newestWrite))
+  ) {
+    return { kind: "worked", worked: signal.label, changedSince: updated.label, ...touched, ...stale };
+  }
+  return { kind: "worked", worked: signal.label, ...touched };
+}
+
+/** The hover line a touched date carries (D15): the touch it names. */
+export function touchedLine(t: WorkedTouch): string {
+  return t.pass
+    ? `touched ${t.label} by a maintenance pass — not work on this page`
+    : `touched ${t.label} in passing — no session focused on this page`;
+}
+
+/**
+ * The source a WORKED-ON date chip marks, given the date signal the row shows:
+ * `workedSourceOf` when there is a signal (it already answers `fallback` for an
+ * update date standing in for a worked one), `null` when there is none. The
+ * rail's rows and Related work's ages both read it, so the two mark one page
+ * the same way.
+ */
+export function workedAxisSource(
+  p: WikiRecencyFields,
+  now: number,
+  signal: WikiDateSignal | null | undefined,
+  ledgerAsOfMs?: number,
+): WorkedSource | null {
+  return signal ? workedSourceOf(p, now, signal, ledgerAsOfMs) : null;
+}
+
+/**
+ * An Activity row's chip source. `rowSignal` is the axis whose date the row
+ * shows (the winning term's), `dateSignal` that date. A worked row marks its
+ * session; a `changed` row on an open gate with no usable ledger row is the
+ * update standing in for a worked day (`fallback`). A page with usable session
+ * events never takes `fallback`.
+ */
+export function activityRowSource(
+  p: WikiRecencyFields,
+  now: number,
+  rowSignal: "added" | "updated" | "worked",
+  dateSignal: WikiDateSignal | null,
+  rowKind: "new" | "changed",
+  gateOpen: boolean,
+  ledgerAsOfMs?: number,
+): WorkedSource | null {
+  const base = rowSignal === "worked" && dateSignal ? workedSourceOf(p, now, dateSignal, ledgerAsOfMs) : null;
+  const w = pageWorkState(p);
+  if (w && usableWorkEvents(w, now).length > 0) {
+    // D5: the events are the record, so no "no session write" claim; the
+    // winning term's date keeps its mark, a T/T0 page its touch (D15).
+    if (base?.kind === "worked") return base;
+    const touched = workedShownSignal(p, now).touched;
+    return touched ? { kind: "events", touched } : null;
+  }
+  if (base) return base;
+  if (!(rowKind === "changed" && gateOpen && !isUsableWorkedMs(p.workedMs, now))) return null;
+  const readDay = ledgerReadDayFor(p, now, ledgerAsOfMs);
+  return readDay ? { kind: "fallback", ledgerReadDay: readDay } : { kind: "fallback" };
+}
+
+/**
+ * Recency of a page in epoch ms — the sort key behind "Recently updated". 0 when a
+ * page has no usable signal at all. See `updatedSignal` for which signals count and
+ * why mtime is conditional.
+ *
+ * `now` is optional: `sortPages` passes ONE instant captured for the whole pass so the
+ * comparator is pure across the 48h future-date boundary; everything else takes the
+ * default.
+ */
+export function pageTimeMs(p: WikiRecencyFields, now?: number): number {
+  return updatedSignal(p, now).ms;
+}
+
+/**
+ * `YYYY-MM-DD` for `pageTimeMs` — what the list shows next to a page when it is
+ * sorted by recency, so the visible date explains the ordering. Derived from the
+ * same `updatedSignal` as the sort key, so the two cannot drift apart — the one
+ * exception is the sunk meta pages, whose header (`Bookkeeping`) is what
+ * explains their position instead.
+ */
+export function pageDateLabel(p: WikiListing, now?: number): string {
+  return updatedSignal(p, now).label;
+}
+
+/**
+ * The winning "Recently added" signal for a page: its epoch ms and the label that
+ * explains it.
+ *
+ * **Oldest of every available signal wins** — frontmatter `created`, the git
+ * creation date, the file birthtime. This is the mirror image of `pageTimeMs`'s max,
+ * and the asymmetry is principled: every way a creation date gets corrupted moves it
+ * FORWARD (a re-clone, a `git mv`, a sweep writing via temp-file+rename, a `created:`
+ * stamped after the fact), so the oldest surviving claim is the most trustworthy one.
+ *
+ * Ordering the three by trustworthiness would be the wrong model — `git mv` resets
+ * birthtime but git remembers the rename, while a page hand-imported from another
+ * repo has a truer `created:` than git's import date. Neither dominates; the min
+ * picks whichever one still remembers.
+ *
+ * Sort key and label come from ONE function so they can never disagree — the list
+ * shows the date it actually sorted on. A frontmatter date is echoed verbatim (it was
+ * authored as a plain day; re-deriving it from the parsed UTC instant would shift it
+ * in negative-offset timezones), while git/birthtime are wall-clock instants and so
+ * render as LOCAL days — the same split `pageDateLabel` makes for mtime.
+ *
+ * The same future-date guard as `updatedSignal` applies, in the same place (inside
+ * `consider`, so every branch is held to it), for a NARROWER but real hole: taking the
+ * min means an implausible signal loses to any sound one the page has, so the guard
+ * only bites a page whose EVERY signal is bad — which would otherwise sort to the top
+ * of "Recently added" forever. Ignoring them drops such a page to undated (ms 0),
+ * which is the honest answer.
+ *
+ * `now` is a parameter for the same reason `updatedSignal`'s is — this runs inside the
+ * "Recently added" comparator, and one clock read per pass keeps it pure at the 48h
+ * boundary.
+ */
+function addedSignal(
+  p: Pick<WikiListing, "created" | "gitCreatedMs" | "birthtimeMs">,
+  now: number = Date.now(),
+): { ms: number; label: string } {
+  const parsedFm = p.created ? Date.parse(p.created) : NaN;
+  let best = { ms: 0, label: "" };
+  const consider = (ms: number, label: string) => {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    // Same placement as `updatedSignal`'s: one gate covering frontmatter, the git
+    // creation date and birthtime alike (see `FUTURE_DATE_SKEW_MS`). Under a MIN this
+    // is a narrower rule than it looks — an implausible signal loses to any sound one
+    // anyway — so it only bites the page whose every signal is bad, which then reads
+    // as undated (ms 0) rather than squatting on top of "Recently added" forever.
+    if (isImplausibleFutureDate(ms, now)) return;
+    if (best.ms === 0 || ms < best.ms) best = { ms, label };
+  };
+  if (Number.isFinite(parsedFm)) consider(parsedFm, p.created!);
+  const git = p.gitCreatedMs || 0;
+  if (git) consider(git, localDay(new Date(git)));
+  const bt = p.birthtimeMs || 0;
+  if (bt) consider(bt, localDay(new Date(bt)));
+  return best;
+}
+
+/**
+ * Creation time of a page in epoch ms — the sort key behind "Recently added". The
+ * oldest of frontmatter `created`, the git creation date, and the file birthtime;
+ * 0 when a page has none of them. See `addedSignal`.
+ *
+ * Unlike "Recently updated", a mass edit sweep bumping every mtime leaves this
+ * ordering untouched — which is the point. A sweep that rewrites files via
+ * temp-file+rename bumps every BIRTHTIME too (mimir's 2026-07-31 plan-status
+ * backfill did exactly that to 148 files, collapsing the sort into one day), which
+ * is why the git date is in the mix.
+ */
+export function pageAddedMs(p: WikiListing, now?: number): number {
+  return addedSignal(p, now).ms;
+}
+
+/** Meta/bookkeeping pages (index.md, log.md, CLAUDE.md — any folder, matched on
+ *  the stem). Nearly every wiki write touches log.md and index.md, so whichever
+ *  recency signal wins for them is churn, not content: they sink to the bottom
+ *  of both "Recently added" and "Recently updated", where `buildRail` puts them
+ *  under a `Bookkeeping` header. A hand-edited CLAUDE.md sinks with them —
+ *  accepted, since the header says where it went. */
+export function isMetaPage(p: WikiListing): boolean {
+  return isMetaStem(pageStemOf(p.relPath));
+}
+
+/** The bare stem of a wiki-relative path — the one spelling {@link isMetaPage}
+ *  and the store's pairing pass both take their stem from. */
+export function pageStemOf(relPath: string): string {
+  return (relPath || "").replace(/\\/g, "/").split("/").pop()!.replace(/\.[^.]+$/, "");
+}
+
+/**
+ * Is this stem a bookkeeping page (`index`, `log`, `CLAUDE`)? The stem half of
+ * {@link isMetaPage}, exported because `src/wiki/store.ts`'s pairing pass needs
+ * the same test for a page it holds as a `WikiPageMeta` rather than a listing:
+ * a meta page is never an attachment PARENT, since `log.md` embedding a diagram
+ * would otherwise adopt it.
+ *
+ * ⚠️ The dependency runs one way only — `store.ts` imports from here (as it
+ * already does for `sanitizeColorToken`), never the reverse. This module is
+ * bundled into the browser, and a `store.ts` import pulls `node:os` in through
+ * `lockfile.ts`: the build fails and the memoized bundle accessor then serves
+ * `/wiki` no client script at all.
+ */
+export function isMetaStem(stem: string): boolean {
+  return stem === "index" || stem === "log" || stem === "CLAUDE";
+}
+
+/**
+ * `YYYY-MM-DD` for `pageAddedMs` — shown next to a page when sorted by
+ * "Recently added", so the visible date explains the ordering. Derived from the same
+ * `addedSignal` as the sort key, so the two cannot drift apart.
+ */
+export function pageAddedLabel(p: WikiListing, now?: number): string {
+  return addedSignal(p, now).label;
+}
+
+/** One page's winning date signal of one kind: the stamp, the label that explains
+ *  it, and which question it answers (`"added"` for a creation signal and for the
+ *  sweep-floor fallback — see {@link WikiDateKind}). */
+export interface WikiDateSignal {
+  ms: number;
+  label: string;
+  kind: WikiDateKind;
+  /** Worked-on axis only: the page's in-window events are all touches or pass
+   *  markers (state T/T0), so the date shown is not focused work. */
+  touched?: WorkedTouch;
+}
+
+/**
+ * A page's date signal in ONE call — `null` when the page carries no usable signal
+ * of that kind, which is what `pageAddedMs`/`pageTimeMs` report as 0.
+ *
+ * Every real consumer needs two or three of those facts about the same signal at
+ * once, and the per-field wrappers re-derive the whole signal each time: a rail
+ * row ran `pageAddedMs` + `pageAddedLabel` (two derivations per row on every
+ * keystroke over jarvis's 1261 rows) and `scorePage` ran three. Reading them off
+ * one call is also what keeps a row's cell, its hover title and its `why`
+ * sentence talking about the same signal by construction rather than by three
+ * matching call sites.
+ */
+export function pageDateSignal(
+  p: WikiListing,
+  which: "added" | "updated" | "worked",
+  now?: number,
+): WikiDateSignal | null {
+  const signal =
+    which === "added"
+      ? { ...addedSignal(p, now), kind: "added" as WikiDateKind }
+      : which === "worked"
+        ? workedShownSignal(p, now)
+        : updatedSignal(p, now);
+  return signal.ms > 0 ? signal : null;
+}
+
+/**
+ * The WORKED-ON signal: the day an agent session last wrote the page, and the
+ * label that explains it — falling back to the UPDATE signal, kind and all, on a
+ * page the ledger holds no qualifying write for.
+ *
+ * The fallback is what makes the axis honest rather than sparse. A large share
+ * of a covered wiki has no worked date (every write discounted as part of a bulk
+ * pass), and rendering those rows blank would say "nothing ever happened here"
+ * about pages with a perfectly good git history. So an uncovered page shows the
+ * date that DID answer, and its `kind` is what the row's hover names — which is
+ * the whole of acceptance 3: in Worked-on mode the chip says which signal it is
+ * reading, per row.
+ *
+ * `workedMs` is a wall-clock instant, so it renders as a LOCAL day, the same
+ * split `updatedSignal` makes for a git date against a frontmatter one. The
+ * future-date guard applies here too: the ledger's timestamps come from whatever
+ * clock wrote the transcript.
+ *
+ * ⚠️ **This is the ONE worked RUNG.** It is exported because `wiki-groups`'
+ * `workedDateSignal` — the order behind the series fold, the reader strip and
+ * `describeSeries` — reads its top rung from here, so a covered page and a
+ * stamp the future guard rejects are judged once. Below that rung the two part
+ * on purpose: this falls to `updatedSignal` (the row chip), the fold falls to
+ * `seriesDateSignal` (`status_date` first, the authored plan chronology) — a
+ * fold that fell to the update chain collapsed 25 of mimir's 30 series to
+ * alphabetical on a cold instance. So the fold and the chip may date an
+ * uncovered or guard-rejected member differently; that is the declared
+ * divergence class, stated in `src/wiki/CLAUDE.md`.
+ */
+export function workedSignal(
+  p: WikiRecencyFields,
+  now: number = Date.now(),
+): { ms: number; label: string; kind: WikiDateKind } {
+  const ms = p.workedMs;
+  if (isUsableWorkedMs(ms, now)) return { ms, label: localDay(new Date(ms)), kind: "worked" };
+  return updatedSignal(p, now);
+}
+
+/** Whether a `workedMs` is a stamp any reader may use: a positive instant the
+ *  future guard accepts. {@link workedSignal}'s rung, shared with the Activity
+ *  rank so the two cannot judge one stamp two ways. */
+export function isUsableWorkedMs(ms: unknown, now: number): ms is number {
+  return typeof ms === "number" && Number.isFinite(ms) && ms > 0 && !isImplausibleFutureDate(ms, now);
+}
+
+/** The touch a T or T0 page's date carries a mark for: its newest non-focus
+ *  event, and whether that was a maintenance pass. */
+export interface WorkedTouch {
+  ms: number;
+  label: string;
+  pass: boolean;
+}
+
+const WORK_EVENT_KINDS: ReadonlySet<unknown> = new Set(["focus", "touch", "pass"]);
+
+/** An event the client can score: a finite instant, finite non-negative edits
+ *  and a kind it knows. A kind a later server adds degrades to "dropped". */
+function isValidWorkEvent(ev: unknown): ev is WorkEvent {
+  if (!Array.isArray(ev) || ev.length < 3) return false;
+  const [ms, edits, kind] = ev as unknown[];
+  return (
+    typeof ms === "number" && Number.isFinite(ms) &&
+    typeof edits === "number" && Number.isFinite(edits) && edits >= 0 &&
+    WORK_EVENT_KINDS.has(kind)
+  );
+}
+
+/** One validation per shipped `work` object (the listing is re-read often). */
+const validatedWork = new WeakMap<object, PageWork | null>();
+
+/** A page's work facts when they carry a valid event — states F, T and T0.
+ *  Absent (state N, no sessions memo, or no event the client can read) ⇒
+ *  today's chain everywhere (D11). Invalid events are dropped here, once. */
+export function pageWorkState(p: Pick<WikiListing, "work">): PageWork | undefined {
+  const w = p.work;
+  if (!w || typeof w !== "object" || !Array.isArray(w.events) || w.events.length === 0) return undefined;
+  let out = validatedWork.get(w);
+  if (out === undefined) {
+    const events = w.events.filter(isValidWorkEvent);
+    out = events.length === 0 ? null : events.length === w.events.length ? w : { ...w, events };
+    validatedWork.set(w, out);
+  }
+  return out ?? undefined;
+}
+
+/** The events the future guard accepts at `now` — the only ones any reader
+ *  may score, date or rank on. */
+export function usableWorkEvents(w: PageWork, now: number): WorkEvent[] {
+  return w.events.filter(([ms]) => isUsableWorkedMs(ms, now));
+}
+
+/** The newest event of `events` passing `keep` (every event by default), or
+ *  undefined. */
+export function newestWorkEvent(
+  events: readonly WorkEvent[],
+  keep: (ev: WorkEvent) => boolean = () => true,
+): WorkEvent | undefined {
+  let best: WorkEvent | undefined;
+  for (const ev of events) if (keep(ev) && (!best || ev[0] > best[0])) best = ev;
+  return best;
+}
+
+/** The newest touch or pass event of a T/T0 page, for its mark's hover. */
+function touchOf(w: PageWork, now: number): WorkedTouch | undefined {
+  const ev = newestWorkEvent(usableWorkEvents(w, now), ([, , kind]) => kind !== "focus");
+  return ev && { ms: ev[0], label: localDay(new Date(ev[0])), pass: ev[2] === "pass" };
+}
+
+/**
+ * The Worked-on SORT instant (plan `muninn-wiki-work-threads`, D14, D15, D22),
+ * and whether it is a worked rung at all (`worked: false` is the update-chain
+ * fallback of state N, which the series fold replaces with its own chain).
+ *
+ *  - **F** (a focus event in the window): the newest focus event.
+ *  - **T** (only touches or pass markers, with a pre-touch position): that
+ *    position, so a touch neither lifts nor sinks the page.
+ *  - **T0** (as T, with no position): the page's creation (`pageAddedMs`),
+ *    else today's chain when the page has no creation signal either.
+ *  - **N** (no events, or no sessions memo): today's chain, {@link workedSignal}.
+ *
+ * The worked gate does not enter (state C sorts per F/T/T0/N): the gate decides
+ * the Activity SCORE only. A stamp the future guard rejects falls one row down
+ * the table (F → today's chain, T → creation).
+ */
+export function workedSortSignal(
+  p: WikiRecencyFields,
+  now: number = Date.now(),
+): { ms: number; worked: boolean; day?: string } {
+  const w = pageWorkState(p);
+  if (w) {
+    if (w.state === "F" && isUsableWorkedMs(w.focusMs, now)) return { ms: w.focusMs, worked: true };
+    if (w.state === "T" && isUsableWorkedMs(w.preMs, now)) return { ms: w.preMs, worked: true };
+    if (w.state !== "F") {
+      // `day` is the creation signal's own label: a frontmatter `created:` is
+      // an authored day, which `localDay` of its UTC midnight shifts west of UTC.
+      const created = addedSignal(p, now);
+      if (created.ms > 0) return { ms: created.ms, worked: true, day: /^\d{4}-\d{2}-\d{2}/.exec(created.label)?.[0] };
+      // No creation signal: today's chain (state N's instant), not undated.
+    }
+  }
+  const chain = workedSignal(p, now);
+  // `day` is the chain's own label, so `groupMonths` files this page exactly as
+  // state N (an authored `updated:` would shift west of UTC under `localDay`).
+  return { ms: chain.ms, worked: chain.kind === "worked", day: chain.label };
+}
+
+/** The Worked-on sort instant in epoch ms ({@link workedSortSignal}) — the
+ *  rail's "Worked on" key; 0 when the page has no signal at all. */
+export function workedSortMs(p: WikiRecencyFields, now: number = Date.now()): number {
+  return workedSortSignal(p, now).ms;
+}
+
+/**
+ * The Worked-on SHOWN date: the newest focus event on an F page; today's chain
+ * ({@link workedSignal}) on every other page, with a `touched` mark on T and T0
+ * (D15: a touched page shows its real date, marked). The row chip, the article
+ * header, Related work and the find palette's `age:` filter read it.
+ */
+export function workedShownSignal(p: WikiRecencyFields, now: number = Date.now()): WikiDateSignal {
+  const w = pageWorkState(p);
+  if (w?.state === "F" && isUsableWorkedMs(w.focusMs, now)) {
+    return { ms: w.focusMs, label: localDay(new Date(w.focusMs)), kind: "worked" };
+  }
+  const chain = workedSignal(p, now);
+  if (!w || w.state === "F") return chain;
+  const touched = touchOf(w, now);
+  return touched ? { ...chain, touched } : chain;
+}
+
+/** `YYYY-MM-DD` in the viewer's timezone (no UTC shift). */
+export function localDay(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** A page's follow-up state, with the contract's absent-⇒-`none` fold applied
+ *  once. An invalid frontmatter value is dropped server-side, so anything other
+ *  than `open`/`none` here means "the field never arrived". */
+export function pageFollowups(p: WikiListing): string {
+  return p.followups || "none";
+}
+
+/**
+ * Does `q` (already lowercased, and known to contain a `/`) name a PATH inside
+ * `relPath`? True when it is a prefix of the whole relPath or of any of its
+ * `/`-boundary suffixes — `memory/MEM` matches `…/memory/MEMORY.md`, `x-muninn/`
+ * does not match `-Users-x-muninn/…` because it starts mid-segment.
+ */
+export function relPathMatchesQuery(relPath: string, q: string): boolean {
+  const rel = relPath.toLowerCase();
+  if (rel.startsWith(q)) return true;
+  for (let i = rel.indexOf("/"); i !== -1; i = rel.indexOf("/", i + 1)) {
+    if (rel.startsWith(q, i + 1)) return true;
+  }
+  return false;
+}
+
+/** Filter pages by the current domain/folder/type/tag/status/follow-ups facets and
+ *  the free-text query. Query matches title, the DISPLAYED title, canonical name,
+ *  any alias, any tag (all case-insensitive) — and the relPath, but ONLY as a path
+ *  query.
+ *
+ *  The displayTitle and the relPath are what a colliding row actually shows:
+ *  `muninn/MEMORY` on the row and `-Users-rune-source-private-muninn/…` in the URL
+ *  bar. Typing either and getting an empty list back reads as a broken search.
+ *
+ *  **The relPath clause is gated on the query containing a `/`, and anchored at
+ *  segment boundaries.** As a plain substring it was worse than useless on the one
+ *  wiki it was written for: measured on the memory wiki, `MEM` returned 290 of 290
+ *  rows (every relPath contains `memory/`) and `muninn/MEM` returned 104. A query
+ *  with no separator in it is not a path query, and a path query only means
+ *  something anchored where a segment starts. */
+export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiListing[] {
+  const q = filters.q.toLowerCase();
+  return pages.filter((p) => {
+    if (filters.domain && p.domain !== filters.domain) return false;
+    if (filters.folder && pageFolder(p) !== filters.folder) return false;
+    if (filters.type && p.type !== filters.type) return false;
+    if (filters.tag && p.tags.indexOf(filters.tag) === -1) return false;
+    if (filters.status && p.plan_status !== filters.status) return false;
+    if (filters.followups && pageFollowups(p) !== filters.followups) return false;
+    if (filters.waiting && !((p.movesYou ?? 0) > 0)) return false;
+    // Exact, not prefix: the store already answered in the canonical spelling, so
+    // `netgate-monitoring` must never also select a hypothetical
+    // `netgate-monitoring-v2`.
+    if (filters.project && p.project !== filters.project) return false;
+    // Membership of a LIST, and exact: the store normalizes every key to trimmed
+    // UPPERCASE, so a page's spelling and the chip's cannot disagree and a
+    // case-folded compare would only ever admit a spelling no chip carries.
+    if (filters.jira && facetJiraKeys(p).indexOf(filters.jira) === -1) return false;
+    if (!q) return true;
+    if (p.title.toLowerCase().indexOf(q) !== -1) return true;
+    if (displayTitleOf(p).toLowerCase().indexOf(q) !== -1) return true;
+    if (p.name.toLowerCase().indexOf(q) !== -1) return true;
+    if (q.indexOf("/") !== -1 && relPathMatchesQuery(p.relPath, q)) return true;
+    for (const a of p.aliases) {
+      if (a.toLowerCase().indexOf(q) !== -1) return true;
+    }
+    for (const t of p.tags) {
+      if (t.toLowerCase().indexOf(q) !== -1) return true;
+    }
+    return false;
+  });
+}
+
+/**
+ * The filters with every key that hides `page` cleared, and every other key kept —
+ * what the reader's "Show in list" applies so the open page gets a rail row
+ * without discarding the facets it already satisfies. Exact because
+ * `filterPages` is a conjunction: a page passes the whole set iff it passes each
+ * key alone.
+ */
+export function filtersRevealing(page: WikiListing, filters: WikiFilters): WikiFilters {
+  const keys = Object.keys(filters) as (keyof WikiFilters)[];
+  const none = Object.fromEntries(keys.map((k) => [k, ""])) as unknown as WikiFilters;
+  const next = { ...filters };
+  for (const key of keys) {
+    if (filters[key] && filterPages([page], { ...none, [key]: filters[key] }).length === 0) next[key] = "";
+  }
+  return next;
+}
+
+/** Sort a copy of `pages` by the given mode without mutating the input. Recency
+ *  ties (two pages stamped the same day by frontmatter alone) fall back to title
+ *  so the order is stable rather than scan-order.
+ *
+ *  `now` is captured ONCE for the whole pass and threaded into every recency read:
+ *  the future-date guard compares against it, so a per-call `Date.now()` would make
+ *  the comparator impure for a page sitting exactly at the 48h boundary (a > b and
+ *  b > a both true within one sort).
+ *
+ *  This runs in the BROWSER (`wiki-browser.ts` bundles this module), so the default
+ *  is the VIEWER's clock — pass the server-anchored `anchorNow(Date.now(), scannedAt)`
+ *  instead wherever the listing's `scannedAt` is known, or a >48h-slow viewer clock
+ *  silently collapses every frontmatter-dated page onto its git floor. */
+export function sortPages(
+  pages: WikiListing[],
+  mode: WikiSortMode,
+  nowMs?: number,
+): WikiListing[] {
+  const copy = pages.slice();
+  const now = nowMs ?? Date.now();
+  // Title sort AND every tiebreaker compare `displayTitleOf`, not `title`: on a
+  // wiki with same-stem pages the two disagree for exactly the rows the reader is
+  // trying to tell apart, and sorting 30 identical `MEMORY` strings produces an
+  // order nothing on screen explains.
+  const byTitle = (a: WikiListing, b: WikiListing) =>
+    displayTitleOf(a).localeCompare(displayTitleOf(b));
+  // Meta pages sink in every recency mode (see `isMetaPage`): measured
+  // 2026-09-02, two of the top three of "Recently updated" were bookkeeping
+  // pages on mimir and on jarvis alike.
+  const byRecency = (sort: WikiRecencySort) => {
+    const key = recencyKeyFor(sort);
+    // Worked-on only: pages tied on the SORT instant order by the instant they
+    // SHOW (D22), so two touched pages sharing a pre-touch position read in
+    // the order their own chips name.
+    const shown = (p: WikiListing) => (sort === "worked" ? workedShownSignal(p, now).ms : 0);
+    copy.sort(
+      (a, b) =>
+        Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
+        key(b, now) - key(a, now) ||
+        shown(b) - shown(a) ||
+        byTitle(a, b),
+    );
+  };
+  // EXHAUSTIVE, and that is the point of the shape. This used to end in a bare
+  // `else` that sorted anything it did not recognise by `pageTimeMs` — so a mode
+  // added without a branch here LOOKED like it worked, producing "Recently
+  // updated" under another name. The `never` assignment is what makes a fourth
+  // recency mode a compile error instead.
+  switch (mode) {
+    case "title":
+      copy.sort(byTitle);
+      break;
+    case "backlinks":
+      copy.sort((a, b) => b.backlinkCount - a.backlinkCount || byTitle(a, b));
+      break;
+    case "created":
+    case "updated":
+    case "worked":
+      byRecency(mode);
+      break;
+    default: {
+      // Unreachable at COMPILE time — that is what the `never` buys. At RUNTIME
+      // a mode outside the union still arrives (a sort value stored by an older
+      // build, a hand-edited URL), and leaving the array alone showed the reader
+      // the walk's own directory order under a select that says "Recently
+      // updated". So the listing's default order is what an unknown mode falls
+      // back to.
+      const exhaustive: never = mode;
+      void exhaustive;
+      byRecency("updated");
+    }
+  }
+  return copy;
+}
+
+/** The per-page key ONE recency mode orders by. Exported because the Series
+ *  SECTION orders its groups by the newest member's key for the mode on screen
+ *  (`orderSeriesGroups`), and two spellings of "what does this mode sort on"
+ *  would be two answers about one list. */
+export function recencyKeyFor(
+  mode: WikiRecencySort,
+): (p: WikiListing, now?: number) => number {
+  if (mode === "created") return pageAddedMs;
+  if (mode === "worked") return workedSortMs;
+  return pageTimeMs;
+}
+
+/**
+ * The DATE KIND one recency mode reads — the `which` value `pageDateSignal` and
+ * `groupMonths` take.
+ *
+ * Beside {@link recencyKeyFor} because the two answer one question from
+ * different ends, and the mode→kind map had grown a hand-written copy at each
+ * of its two call sites (`railGroups`' month fold and the rail row's date chip).
+ * A third copy is how a fourth mode ends up reading the wrong signal on one
+ * surface only.
+ */
+export function recencyKindFor(mode: WikiRecencySort): "added" | "updated" | "worked" {
+  if (mode === "created") return "added";
+  if (mode === "worked") return "worked";
+  return "updated";
+}
+
+/** Count pages per top-level folder, honoring the active domain filter (used for
+ *  the folder picker). Keyed by `pageFolder`, so wiki-root pages land under
+ *  `ROOT_FOLDER`. */
+export function folderCounts(pages: WikiListing[], domain: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    const f = pageFolder(p);
+    counts[f] = (counts[f] || 0) + 1;
+  });
+  return counts;
+}
+
+/** Count pages per type, honoring the active domain filter (used for the type chip row). */
+export function typeCounts(pages: WikiListing[], domain: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    counts[p.type] = (counts[p.type] || 0) + 1;
+  });
+  return counts;
+}
+
+/** True when the wiki has ≥2 distinct non-note types — enough of an ontology to
+ *  warrant per-type "Top … by connections" hub sections (jarvis: concept/entity/…;
+ *  mimir: subsystem/plan/report/…). Wikis that are all `note` (plain markdown, no
+ *  frontmatter `type`, no config) fall back to a single cross-type hub instead. */
+export function hasTypedHubs(pages: WikiListing[]): boolean {
+  return contentTypes(pages).size >= 2;
+}
+
+/** Top `limit` pages matching `predicate`, most-linked-to first. Drives the hub
+ *  sections: per-type for typed wikis, `backlinkCount > 0` for the untyped fallback. */
+export function topPages(
+  pages: WikiListing[],
+  predicate: (p: WikiListing) => boolean,
+  limit = 12,
+): WikiListing[] {
+  return sortPages(pages.filter(predicate), "backlinks").slice(0, limit);
+}
+
+/**
+ * The values a facet control (folder picker, type/status chip row) should offer:
+ * everything present in the scoped counts, PLUS the currently active value even
+ * when its count has fallen to 0.
+ *
+ * The union is the whole point. A facet render happens on a domain/type switch and
+ * on a background listing refresh, and building the control purely from the scoped
+ * counts meant the active value's control vanished — leaving an empty list, a
+ * filter badge, and no visible way back out of it. Worse, the folder picker
+ * "solved" that by CLEARING `filters.folder` from inside a render, so a page
+ * arriving in the background silently rewrote a filter the user set.
+ *
+ * Zero-count keys in `counts` are dropped (a counter that emits explicit zeroes
+ * must not populate the control), which is why the active value is re-added after.
+ * Callers render the count as `counts[key] || 0`.
+ */
+export function facetKeys(counts: Record<string, number>, active: string): string[] {
+  const keys = Object.keys(counts).filter((k) => counts[k]);
+  if (active && keys.indexOf(active) === -1) keys.push(active);
+  return keys;
+}
+
+/**
+ * Whether to render the domain (All/AI/Life) chip row at all — the whole-wiki gate,
+ * the `statusFacetVisible` sibling.
+ *
+ * `domain` is derived from a `life/` path prefix (`src/wiki/store.ts`), so every
+ * wiki except jarvis's is 100% `ai` and the row there is three chips that can only
+ * narrow the list to itself or to nothing. Unscoped for the same reason its sibling
+ * is: this decides whether the row EXISTS for this wiki.
+ */
+export function domainFacetVisible(pages: WikiListing[]): boolean {
+  return new Set(pages.map((p) => p.domain)).size > 1;
+}
+
+/**
+ * Whether this wiki uses the plan-status convention at all — the gate for the
+ * whole Status facet (chip row + follow-ups toggle). True as soon as ONE page
+ * carries a `plan_status`.
+ *
+ * Presence is equivalent to validity here: `parsePlanFields` (`src/wiki/store.ts`)
+ * drops any value failing the enum before it can reach the payload, so a page that
+ * declared a garbage status arrives with the field absent and does NOT open the
+ * facet. That is what keeps the row hidden on wikis without the convention (jarvis,
+ * melosys-kode-wiki) and on mimir mid-backfill.
+ */
+export function hasPlanStatus(pages: WikiListing[]): boolean {
+  return pages.some((p) => !!p.plan_status);
+}
+
+/**
+ * Whether to render the Status facet row at all — the WHOLE-WIKI gate, one level
+ * above `hasPlanStatus`.
+ *
+ * `status` and `followups` are independent axes, so a wiki can carry
+ * `followups: open` pages and no `plan_status` at all. `hasPlanStatus` alone left
+ * that wiki showing ⚑ flags on its rows with no legend and no way to filter by
+ * them — the flags are correct, the missing toggle was the bug. So the facet opens
+ * on EITHER axis being in use.
+ *
+ * `movesPersonal` false (a shared instance, `MUNINN_PROFILE=nais`) takes the
+ * ✋ waiting-on-you axis out: "you" there is whoever reads, not the author.
+ *
+ * Deliberately unscoped (whole wiki, not the active domain/type): this decides
+ * whether the row exists for this wiki, while `renderStatusChips` separately hides
+ * an empty row for the current scope.
+ */
+export function statusFacetVisible(pages: WikiListing[], movesPersonal = true): boolean {
+  return (
+    hasPlanStatus(pages) || followupCount(pages, "", "") > 0 || (movesPersonal && waitingCount(pages, "", "") > 0)
+  );
+}
+
+/**
+ * Count pages per `plan_status`, honoring the active domain + type filters — the
+ * same facets `tagCounts` honors, since the Status row sits beside the tag row
+ * below the type row in the Filters disclosure and each row counts within the
+ * selection the rows above it have already made. Deliberately NOT filtered by
+ * `followups`: the two are independent axes, so cross-filtering the counts would
+ * make the ⚑ toggle silently rewrite the status numbers.
+ */
+export function statusCounts(
+  pages: WikiListing[],
+  domain: string,
+  type: string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if (!p.plan_status) return;
+    counts[p.plan_status] = (counts[p.plan_status] || 0) + 1;
+  });
+  return counts;
+}
+
+/**
+ * Whether to render the Project chip row at all — the WHOLE-WIKI gate, the
+ * `statusFacetVisible` / `domainFacetVisible` sibling.
+ *
+ * True as soon as ONE page carries a `project`. That is equivalent to "this wiki
+ * declares a project rule AND something matched it": `resolveProject` returns
+ * `undefined` for every page when the rule is absent or unusable, so a wiki
+ * shipping no declaration (jarvis) renders exactly as it did
+ * before — no row, no filter, no URL state.
+ *
+ * Deliberately unscoped (whole wiki, not the active domain/type/folder): this
+ * decides whether the row EXISTS here, while `renderProjectChips` separately
+ * hides an empty row for the current scope.
+ */
+export function projectFacetVisible(pages: WikiListing[]): boolean {
+  return pages.some((p) => !!p.project);
+}
+
+/**
+ * Count pages per `project`, honoring the active domain + type + folder filters.
+ *
+ * One more axis than `statusCounts`/`tagCounts` take, and deliberately: the
+ * Project row sits BELOW the folder picker in the Filters disclosure, and the
+ * rule those rows follow is "each row counts within the selection the rows above
+ * it have already made". Status and tags predate the folder picker's move into
+ * the same stack; this row is the first written after it.
+ *
+ * Pages with no project contribute nothing — they are the facet's "everything
+ * else", reachable by clearing the filter rather than by a chip of their own.
+ */
+export function projectCounts(
+  pages: WikiListing[],
+  domain: string,
+  type: string,
+  folder: string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if (folder && pageFolder(p) !== folder) return;
+    if (!p.project) return;
+    counts[p.project] = (counts[p.project] || 0) + 1;
+  });
+  return counts;
+}
+
+/** Query param naming the active project filter. Deliberately `project` and not
+ *  `repo`: `/plans` already owns `?repo=` with an unrelated meaning (a repo
+ *  family on the board), and one word meaning two things across two pages of the
+ *  same dashboard is how a link gets pasted into the wrong reader. */
+export const PROJECT_PARAM = "project";
+
+/**
+ * The project filter a `?project=` value should actually produce, given the
+ * listing's own `projects` map.
+ *
+ * A value the wiki does not know is CLEARED rather than applied. Applying it
+ * would render an empty list under a chip row that cannot contain the chip which
+ * is emptying it — the exact dead end `facetKeys` exists to prevent for the
+ * scoped facets, except here it is unrecoverable: the value came from the URL,
+ * so there is no earlier state to go back to. A stale or hand-typed link
+ * therefore opens the whole wiki, and the caller drops the param it could not
+ * honour.
+ *
+ * The membership test is on OWN keys with a non-zero count, so `?project=toString`
+ * cannot inherit a truthy answer off `Object.prototype`, and the match is exact:
+ * the server answers in one canonical spelling per project, so a case-folded
+ * match would only ever admit a spelling no chip can be highlighted for.
+ */
+export function resolveProjectParam(
+  value: string | null | undefined,
+  projects: Record<string, number> | null | undefined,
+): string {
+  const v = (value ?? "").trim();
+  if (!v || !projects) return "";
+  return Object.prototype.hasOwnProperty.call(projects, v) && projects[v] ? v : "";
+}
+
+/** Append `?project=`/`&project=` to a URL that is known to carry none — the
+ *  overview URL from `startUrl`, which never emits one. `""` leaves the URL
+ *  untouched, so a reader with no project filter shares exactly today's link. */
+export function urlWithProject(url: string, project: string): string {
+  if (!project) return url;
+  return url + (url.indexOf("?") === -1 ? "?" : "&") + PROJECT_PARAM + "=" + encodeURIComponent(project);
+}
+
+/**
+ * The shareable in-reader URL for ONE page, carrying the active project filter.
+ *
+ * Both key spellings are built here — `page` for the by-name route, `relPath`
+ * for the collision-proof one — because the bug was in the URL BUILDERS, not in
+ * a call site: an article URL assembled from wiki + page alone drops the filter
+ * the rail is still narrowed by, so the pushed entry (and any reload or share of
+ * it) describes a screen nobody is looking at.
+ */
+export function articleUrl(
+  wiki: string,
+  key: "page" | "relPath",
+  value: string,
+  project: string,
+  jira = "",
+  display: DisplayState = NO_DISPLAY,
+): string {
+  const w = wiki ? "wiki=" + encodeURIComponent(wiki) + "&" : "";
+  return urlWithDisplay(
+    urlWithJira(urlWithProject("/wiki?" + w + key + "=" + encodeURIComponent(value), project), jira),
+    display,
+  );
+}
+
+/**
+ * Must the address bar's project param be rewritten to match `project`?
+ *
+ * The non-obvious clause is the middle one: a param that is PRESENT always has
+ * to go when there is no filter, including when it is blank. Comparing the raw
+ * value against `filters.project` reads `?project=` as `"" === ""` and leaves it
+ * standing, while `?project=%20` was cleaned only because a blank string is not
+ * a trimmed one.
+ */
+export function projectParamNeedsRewrite(search: string, project: string): boolean {
+  const raw = new URLSearchParams(search).get(PROJECT_PARAM);
+  if (raw === null) return project !== "";
+  if (project === "") return true;
+  return raw !== project;
+}
+
+/**
+ * The project filter a freshly landed listing should leave in place.
+ *
+ * At BOOT the address bar is the reader's request, so the deep link is adopted.
+ * On every LATER listing the URL is ignored and the CURRENT filter is merely
+ * re-validated against the new map: the address bar is written by the reader's
+ * own clicks, so re-reading it on an adopt turned every background refresh — and
+ * the adopt at the top of every navigation — into a wipe.
+ *
+ * Both directions still answer "" for a project this listing does not know, so
+ * an unknown value continues to open the whole wiki with the param dropped.
+ */
+export function projectFilterAfterListing(
+  boot: boolean,
+  rawParam: string | null | undefined,
+  current: string,
+  projects: Record<string, number> | null | undefined,
+): string {
+  return resolveProjectParam(boot ? rawParam : current, projects);
+}
+
+/**
+ * `location.search` with the project param set to `project` (or removed when it
+ * is `""`), every OTHER param preserved.
+ *
+ * The project filter is written in PLACE rather than by replacing the URL with
+ * the overview's: the left rail — chip row included — is on screen while an
+ * article is open, so pushing an overview URL from a chip click would silently
+ * navigate the address bar off the `?relPath=` the reader is reading and break
+ * both reload and share. Returns a leading `?`, or `""` when nothing is left.
+ */
+export function searchWithProject(search: string, project: string): string {
+  const params = new URLSearchParams(search);
+  if (project) params.set(PROJECT_PARAM, project);
+  else params.delete(PROJECT_PARAM);
+  const q = params.toString();
+  return q ? "?" + q : "";
+}
+
+// ── The Jira facet ───────────────────────────────────────────────────────────
+// The `project` facet's twin, and written as a deliberate mirror rather than a
+// generalisation of it: the two axes differ in the one place that matters — a
+// page has ONE project and SEVERAL Jira keys — and a shared implementation
+// parameterised over "the field" would have to carry that difference anyway,
+// while making both harder to read. Everything else (URL state, the
+// boot-vs-later adopt, the drop-what-the-wiki-doesn't-know rule) is the same
+// decision for the same reason, and the doc comments there are the authority.
+
+/** Query param naming the active Jira filter. */
+export const JIRA_PARAM = "jira";
+
+/**
+ * The Jira filter a `?jira=` value should actually produce, given the listing's
+ * own `jira` count map — `resolveProjectParam`'s twin, including the own-keys
+ * test that keeps `?jira=toString` off `Object.prototype`.
+ *
+ * Case is folded UP before the membership test, and only here: the store
+ * normalizes every key it indexes to trimmed uppercase, while a shared link is
+ * routinely `?jira=melosys-8045` (the reverse-lookup route normalizes for the
+ * same reason). A value the listing does not know still answers `""`, so a stale
+ * link opens the whole wiki with the param dropped.
+ */
+export function resolveJiraParam(
+  value: string | null | undefined,
+  jira: Record<string, number> | null | undefined,
+): string {
+  const v = (value ?? "").trim().toUpperCase();
+  if (!v || !jira) return "";
+  return Object.prototype.hasOwnProperty.call(jira, v) && jira[v] ? v : "";
+}
+
+/** Append `?jira=`/`&jira=` to a URL known to carry none. `""` leaves it
+ *  untouched — `urlWithProject`'s twin. */
+export function urlWithJira(url: string, jira: string): string {
+  if (!jira) return url;
+  return url + (url.indexOf("?") === -1 ? "?" : "&") + JIRA_PARAM + "=" + encodeURIComponent(jira);
+}
+
+/** Must the address bar's jira param be rewritten? `projectParamNeedsRewrite`'s
+ *  twin, blank-param clause included. */
+export function jiraParamNeedsRewrite(search: string, jira: string): boolean {
+  const raw = new URLSearchParams(search).get(JIRA_PARAM);
+  if (raw === null) return jira !== "";
+  if (jira === "") return true;
+  return raw !== jira;
+}
+
+/** The jira filter a freshly landed listing should leave in place —
+ *  `projectFilterAfterListing`'s twin: the address bar leads at BOOT, the
+ *  reader's own filter is merely re-validated on every later listing. */
+export function jiraFilterAfterListing(
+  boot: boolean,
+  rawParam: string | null | undefined,
+  current: string,
+  jira: Record<string, number> | null | undefined,
+): string {
+  return resolveJiraParam(boot ? rawParam : current, jira);
+}
+
+/** `location.search` with the jira param set (or removed), every OTHER param
+ *  preserved — `searchWithProject`'s twin, written in PLACE for the same reason:
+ *  the chip row is on screen while an article is open. */
+export function searchWithJira(search: string, jira: string): string {
+  const params = new URLSearchParams(search);
+  if (jira) params.set(JIRA_PARAM, jira);
+  else params.delete(JIRA_PARAM);
+  const q = params.toString();
+  return q ? "?" + q : "";
+}
+
+/**
+ * Count pages per Jira key within the active domain + type + folder scope —
+ * `projectCounts`' twin, with one extra argument and one extra rule.
+ *
+ * `known` is the listing payload's own `jira` map, and a key not in it is NOT
+ * counted. That map is shape-filtered server-side (`jiraCounts` keeps only
+ * `^[A-Z][A-Z0-9]*-[0-9]+$`) while the store deliberately keeps a typo on the
+ * page's own row — so counting straight off the pages would render a chip for a
+ * malformed key whose only behaviour, once clicked, is a 400 from the
+ * reverse-lookup route. Membership and counts therefore come from the same set,
+ * exactly as `projects` is both the chip row's gate and `resolveJiraParam`'s
+ * membership test.
+ */
+export function jiraChipCounts(
+  pages: WikiListing[],
+  known: Record<string, number> | null | undefined,
+  domain: string,
+  type: string,
+  folder: string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  if (!known) return counts;
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if (folder && pageFolder(p) !== folder) return;
+    facetJiraKeys(p).forEach((key) => {
+      if (!Object.prototype.hasOwnProperty.call(known, key)) return;
+      counts[key] = (counts[key] || 0) + 1;
+    });
+  });
+  return counts;
+}
+
+/**
+ * The keys the Jira facet counts and filters a page by — the ONE definition the
+ * four consumers share: the server's `jiraCounts`, `filterPages`,
+ * `jiraChipCounts` and the listing field they all read.
+ *
+ * A page carrying `issues` (a wiki with a tracker) answers its Jira refs that
+ * COUNT (`relationsCount`: something besides `link` and `mention`) — stamped
+ * and inferred alike. A page without it answers its stamped `jira` list exactly
+ * as before, which is every page of a wiki with no tracker: that path must not
+ * change. The facet stays Jira-only by design: a second tracker gets a facet of
+ * its own, not a share of this one.
+ */
+export function facetJiraKeys(p: {
+  jira?: readonly string[];
+  issues?: readonly { tracker: string; key: string; relations: readonly string[] }[];
+}): string[] {
+  if (!p.issues) return p.jira ? [...p.jira] : [];
+  const out: string[] = [];
+  for (const r of p.issues) {
+    if (r.tracker !== JIRA_TRACKER_ID) continue;
+    if (!relationsCount(r.relations)) continue;
+    if (out.indexOf(r.key) === -1) out.push(r.key);
+  }
+  return out;
+}
+
+/** How many Jira chips a tracker wiki's facet row shows before its `+N`. */
+export const JIRA_CHIPS_MAX = 8;
+
+/**
+ * Which Jira chips to draw. Uncapped on a wiki with no tracker, whose row is
+ * the stamped keys it has always shown. On a tracker wiki: the top
+ * {@link JIRA_CHIPS_MAX} by page count (then key), plus the active key when it
+ * falls outside them — a filter set from the URL must always be on screen — or
+ * every key once expanded. `hidden` is what the `+N` offers; `expander` is
+ * `null` when there is nothing to expand or to collapse.
+ */
+export function jiraChipRow(
+  counts: Record<string, number>,
+  active: string,
+  expanded: boolean,
+  capped: boolean,
+  max: number = JIRA_CHIPS_MAX,
+): { keys: string[]; hidden: number; expander: "more" | "less" | null } {
+  const all = facetKeys(counts, active).sort(
+    (a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b),
+  );
+  const keys = capped ? all.slice(0, max) : all;
+  if (active && keys.indexOf(active) === -1) keys.push(active);
+  const hidden = all.length - keys.length;
+  if (hidden === 0) return { keys: all, hidden: 0, expander: null };
+  if (expanded) return { keys: all, hidden: 0, expander: "less" };
+  return { keys, hidden, expander: "more" };
+}
+
+/** Whether to render the Jira chip row at all — the whole-wiki gate.
+ *
+ *  Unlike `projectFacetVisible` this reads the PAYLOAD's map rather than the
+ *  pages, because that is the contract the server states: `{}` on a wiki nothing
+ *  has stamped is how the client knows to render no facet, and the pages'
+ *  own `jira` arrays include keys the map has filtered out by shape. */
+export function jiraFacetVisible(known: Record<string, number> | null | undefined): boolean {
+  return !!known && Object.keys(known).length > 0;
+}
+
+/**
+ * The project a page is the HUB page OF — its own project's landing page — or
+ * `null`.
+ *
+ * The client cannot see WHICH of the store's six rules resolved a page's
+ * project, so this is the reader-side proxy for "resolved as the page-per-project
+ * page" (rule 2): the file's stem IS its project name. On mimir that is
+ * `repos/<project>.md`; the test is written against the stem rather than the
+ * folder so no muninn code names a folder — the wiki declares its layout, the
+ * reader only ever reads the resolved answer back.
+ *
+ * Case-folded, because the two sides come from different places: the stem is a
+ * filename and the project is the known set's spelling, and a wiki whose file is
+ * `Netgate-Monitoring.md` under a project known as `netgate-monitoring` is the
+ * same page either way. The consequence of the proxy being a heuristic is
+ * bounded: a false negative renders no chip (today's behaviour), and a false
+ * positive renders a chip that filters correctly to the project the page already
+ * declares.
+ */
+export function projectHubPage(p: WikiListing): string | null {
+  if (!p.project) return null;
+  const stem = (p.relPath || "").replace(/\\/g, "/").split("/").pop()!.replace(/\.[^.]+$/, "");
+  return stem && stem.toLowerCase() === p.project.toLowerCase() ? p.project : null;
+}
+
+/** How many pages have OPEN follow-ups — the ⚑ toggle's count. Same domain + type
+ *  scoping as `statusCounts`, and likewise independent of the status facet. */
+export function followupCount(pages: WikiListing[], domain: string, type: string): number {
+  let n = 0;
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if (pageFollowups(p) === "open") n++;
+  });
+  return n;
+}
+
+/** How many pages have a step waiting on the reader (`movesYou > 0`) — the ✋
+ *  chip's count. Scoped like `followupCount`, and independent of both facets. */
+export function waitingCount(pages: WikiListing[], domain: string, type: string): number {
+  let n = 0;
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if ((p.movesYou ?? 0) > 0) n++;
+  });
+  return n;
+}
+
+/** Count pages per tag, honoring the active domain + type filters (used for the tag chip row). */
+export function tagCounts(
+  pages: WikiListing[],
+  domain: string,
+  type: string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    p.tags.forEach((t) => {
+      counts[t] = (counts[t] || 0) + 1;
+    });
+  });
+  return counts;
+}
+
+// ── Graph mode's URL state ───────────────────────────────────────────────────
+// `display=graph` turns the article pane into the lanes graph; `issue=` names
+// its root when the root is an issue rather than the open page. Not `view=`,
+// which is the overview's start-tab parameter (`START_VIEW_PARAM`), and not
+// stored per wiki: the address bar is the only place it lives, so Back and a
+// shared link restore it. `issue=` is independent of `jira=`, the facet filter.
+
+const DISPLAY_PARAM = "display";
+const ISSUE_PARAM = "issue";
+const DISPLAY_GRAPH = "graph";
+
+/** Graph mode on or off, and the issue it is rooted at (`tracker:KEY`, or
+ *  `""` for the open page). */
+export interface DisplayState {
+  graph: boolean;
+  issue: string;
+}
+
+const NO_DISPLAY: DisplayState = Object.freeze({ graph: false, issue: "" });
+
+/** The display state `location.search` asks for. `issue=` counts only beside
+ *  `display=graph`, and only in the one shape an issue root is read as
+ *  (`parseIssueRoot`, `src/wiki/graph-types.ts`); anything else is dropped. */
+export function readDisplayParams(search: string): DisplayState {
+  const params = new URLSearchParams(search);
+  const graph = params.get(DISPLAY_PARAM) === DISPLAY_GRAPH;
+  const issue = (params.get(ISSUE_PARAM) ?? "").trim();
+  return { graph, issue: graph && parseIssueRoot(issue) ? issue : "" };
+}
+
+/** Append the display params to a URL known to carry none. Reading mode leaves
+ *  the URL untouched, so a reader who never opened a graph shares today's link. */
+export function urlWithDisplay(url: string, display: DisplayState): string {
+  if (!display.graph) return url;
+  let out = url + (url.indexOf("?") === -1 ? "?" : "&") + DISPLAY_PARAM + "=" + DISPLAY_GRAPH;
+  if (display.issue) out += "&" + ISSUE_PARAM + "=" + encodeURIComponent(display.issue);
+  return out;
+}
+
+/** `location.search` with the display params set (or removed), every OTHER
+ *  param preserved — `searchWithJira`'s shape. */
+export function searchWithDisplay(search: string, display: DisplayState): string {
+  const params = new URLSearchParams(search);
+  params.delete(DISPLAY_PARAM);
+  params.delete(ISSUE_PARAM);
+  if (display.graph) {
+    params.set(DISPLAY_PARAM, DISPLAY_GRAPH);
+    if (display.issue) params.set(ISSUE_PARAM, display.issue);
+  }
+  const q = params.toString();
+  return q ? "?" + q : "";
+}
