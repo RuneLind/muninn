@@ -65,9 +65,11 @@ import {
   roots,
   openStart,
   openSettled,
+  checksPainted,
   forceAdopt,
   boardCard,
   pressPoint,
+  checksBody,
   DIGEST_OK,
   organizable,
   useWorkCardServer,
@@ -894,7 +896,8 @@ test("an inbox load landing mid-press waits for the release, then paints", async
   });
   await openStart(page, BOARD);
   const card = boardCard(page);
-  await expect(card.locator(".wiki-wm-strip")).toBeVisible();
+  // The checks answer repaints the strip too: one landing between the mark and the press would wipe the mark.
+  await checksPainted(page);
   await card.locator(".wiki-wm-strip").evaluate((el) => el.setAttribute("data-before-repaint", ""));
   const start = await pressPoint(card);
   await page.mouse.move(start.x, start.y);
@@ -909,4 +912,36 @@ test("an inbox load landing mid-press waits for the release, then paints", async
   await page.mouse.up();
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
   await expect(card.locator("#wikiWorkInbox")).toContainText("ZZ title");
+});
+
+// The checks answer repaints through the same only-if-changed path: with the drag passed back over its start,
+// no selection touches the card, so only the held press keeps that paint from ending the drag (CI, 2026-11-07:
+// an unheld checks answer landing mid-press repainted the strip in the inbox test above).
+test("a checks answer landing mid-press waits for the release, then paints", async ({ page }) => {
+  let releaseChecks: () => void = () => {};
+  const gate = new Promise<void>((r) => { releaseChecks = r; });
+  let served = 0;
+  await page.route("**/api/wiki/work-map/checks*", async (route) => {
+    await gate;
+    served++;
+    await route.fulfill({ json: checksBody() });
+  });
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  const checking = card.locator('[data-wm-cell="github"] b', { hasText: "checking…" });
+  await expect(checking).toHaveCount(1);
+  await card.locator(".wiki-wm-strip").evaluate((el) => el.setAttribute("data-before-repaint", ""));
+  const start = await pressPoint(card);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + start.width / 2, start.y + 2, { steps: 6 });
+  await page.mouse.move(start.x, start.y, { steps: 6 });
+  await expect.poll(() => page.evaluate(() => getSelection()!.isCollapsed)).toBe(true);
+  releaseChecks();
+  await expect.poll(() => served).toBe(1);
+  await page.waitForTimeout(300);
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(1);
+  await page.mouse.up();
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  await expect(checking).toHaveCount(0);
 });

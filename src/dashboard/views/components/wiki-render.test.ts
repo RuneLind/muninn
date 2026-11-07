@@ -98,8 +98,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-07: closing a card from the inbox (P3b: preview, Close, Still open) took it to 1,422,452,
 // and its fix round (ruling hash, preview warnings, a validated kept-open store) to 1,423,473.
 // 2026-11-07: wrapping the load-time code in `boot()` (wiki-browser split C1) took
-// it from 1,423,508 to 1,426,483 bytes (357,829 → 358,552 gzipped).
-const WIKI_CLIENT_MAX_BYTES = 1_427_000;
+// it from 1,423,508 to 1,426,483 bytes (357,829 → 358,552 gzipped); the readable
+// decision inbox then took it to 1,428,716.
+const WIKI_CLIENT_MAX_BYTES = 1_429_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

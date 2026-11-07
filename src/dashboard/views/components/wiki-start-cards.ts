@@ -1080,7 +1080,8 @@ function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   // compares against it and does not render the card again for the same keys.
   paintedDeclarationKey = declarationKey(pages, runAt);
   paintedStripKey = currentStripKey();
-  if (onlyIfChanged && (paintedCardHtml === html || selectionTouchesCard(el))) {
+  // A held press waits too: a drag back over its start collapses the selection, and a paint ends the drag.
+  if (onlyIfChanged && (paintedCardHtml === html || pointerHeld || selectionTouchesCard(el))) {
     paintWaiting = paintedCardHtml !== html;
     ensureWorkChecks();
     return;
