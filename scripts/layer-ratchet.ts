@@ -13,38 +13,15 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { addedAllowlistLines, checkAllowlist, countByLayerPair, edgeLine, importEdges, parseAllowlist, rewriteAllowlist, sourceFiles, violations } from "../src/test/layers.ts";
+import { baseCheckVerdict, parseAllowlist, readBaseAllowlist } from "../src/test/layer-allowlist.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
 export const ALLOWLIST_PATH = path.join(ROOT, "scripts", "layer-allowlist.txt");
 const ALLOWLIST_REL = "scripts/layer-allowlist.txt";
 
-function git(...args: string[]) {
-  return Bun.spawnSync(["git", ...args], { cwd: ROOT });
-}
-
-/** Exit code: 0 when the head adds no entry, 1 when it does, 2 on a bad ref. */
-function checkBase(ref: string): number {
-  if (git("rev-parse", "--verify", "--quiet", `${ref}^{commit}`).exitCode !== 0) {
-    console.error(`--check-base: ${ref} is not a commit`);
-    return 2;
-  }
-  const base = git("show", `${ref}:${ALLOWLIST_REL}`);
-  if (base.exitCode !== 0) {
-    // Only the PR that introduces the list meets this.
-    console.log(`--check-base: ${ref} has no ${ALLOWLIST_REL}; nothing to compare`);
-    return 0;
-  }
-  const added = addedAllowlistLines(base.stdout.toString(), readFileSync(ALLOWLIST_PATH, "utf8"));
-  if (added.length === 0) {
-    console.log(`--check-base: ${ALLOWLIST_REL} adds no entry over ${ref}`);
-    return 0;
-  }
-  console.error(
-    `::error::${ALLOWLIST_REL} adds ${added.length} upward import(s) over ${ref}. The list only shrinks: remove the import, or merge it as a reviewed exception whose reason the PR body states.`,
-  );
-  for (const l of added) console.error(`  added: ${l}`);
-  return 1;
+function git(args: string[]) {
+  const r = Bun.spawnSync(["git", ...args], { cwd: ROOT });
+  return { exitCode: r.exitCode, stdout: r.stdout.toString() };
 }
 
 if (import.meta.main) {
@@ -53,8 +30,12 @@ if (import.meta.main) {
   if (baseAt >= 0) {
     const ref = args[baseAt + 1];
     if (!ref) throw new Error("--check-base takes a git ref");
-    process.exit(checkBase(ref));
+    const verdict = baseCheckVerdict(ref, ALLOWLIST_REL, readBaseAllowlist(ref, ALLOWLIST_REL, git), readFileSync(ALLOWLIST_PATH, "utf8"));
+    for (const l of verdict.lines) (verdict.code === 0 ? console.log : console.error)(l);
+    process.exit(verdict.code);
   }
+  // Loaded only here: it imports `typescript`, which the `--check-base` job does not install.
+  const { checkAllowlist, countByLayerPair, edgeLine, importEdges, rewriteAllowlist, sourceFiles, violations } = await import("../src/test/layers.ts");
   const files = sourceFiles(ROOT);
   const bad = violations(importEdges(ROOT, files));
   const current = bad.map(edgeLine);

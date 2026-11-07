@@ -12,6 +12,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import ts from "typescript";
 import { BUN_TEST_FILE } from "./mock-isolation.ts";
+import { parseAllowlist } from "./layer-allowlist.ts";
+
+export { parseAllowlist };
 
 export const LAYERS = ["platform", "render", "wiki-core", "features", "routes/views"] as const;
 export type Layer = (typeof LAYERS)[number];
@@ -161,10 +164,6 @@ export interface AllowlistCheck {
   format: string[];
 }
 
-export function parseAllowlist(text: string): string[] {
-  return text.split("\n").map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#"));
-}
-
 export function checkAllowlist(listed: readonly string[], current: readonly string[]): AllowlistCheck {
   const format: string[] = [];
   for (let i = 1; i < listed.length; i++) {
@@ -178,12 +177,6 @@ export function checkAllowlist(listed: readonly string[], current: readonly stri
     stale: [...have].filter((l) => !now.has(l)).sort(),
     format,
   };
-}
-
-/** Entries the head's allowlist has that the base's does not: what `--check-base` fails on. */
-export function addedAllowlistLines(baseText: string, headText: string): string[] {
-  const base = new Set(parseAllowlist(baseText));
-  return [...new Set(parseAllowlist(headText).filter((l) => !base.has(l)))].sort();
 }
 
 /** `--update`: keep only listed lines that are still violations, sorted and unique. Never adds a line. */

@@ -3,8 +3,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "./temp-dir.ts";
+import { addedAllowlistLines, baseCheckVerdict, readBaseAllowlist, type GitRun } from "./layer-allowlist.ts";
 import {
-  addedAllowlistLines,
   checkAllowlist,
   countByLayerPair,
   edgeLine,
