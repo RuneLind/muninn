@@ -15,6 +15,8 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
+import { existsSync } from "node:fs";
+import path from "node:path";
 // No static import of anything under `src/`: `wiki-page.ts` shares 68 of
 // wiki-browser.ts's 151 modules, and a module already in the cache is not
 // re-evaluated inside the counting window below (pinned by `preloaded`).
@@ -22,6 +24,28 @@ import { GlobalWindow } from "happy-dom";
 type Boot = typeof import("../components/wiki-browser.ts")["boot"];
 
 const g = globalThis as unknown as Record<string, unknown>;
+
+/** True iff `key` (a `require.cache` path) is an app module: under the repo's
+ *  `src/`, outside the `src/test/` preload, and not this file. Decided on the
+ *  absolute path relative to the repo root, so a checkout under any `.../src/...` path
+ *  neither counts `node_modules` nor goes blind. A key outside the repo is
+ *  relative as `../...` (or absolute across Windows drives) and so never
+ *  starts with `src/`. */
+function isAppModule(key: string, repoRoot: string, selfPath: string): boolean {
+  // Builtins and bare specifiers (`node:fs`, `bun:test`, `ws`) are cache keys
+  // too; path.relative would resolve them against the cwd.
+  if (key === selfPath || !path.isAbsolute(key)) return false;
+  const rel = path.relative(repoRoot, key).split(path.sep).join("/");
+  return rel.startsWith("src/") && !rel.startsWith("src/test/");
+}
+
+/** The nearest folder above this file holding a `package.json`. */
+function findRepoRoot(from: string): string {
+  for (let dir = from; ; dir = path.dirname(dir)) {
+    if (existsSync(path.join(dir, "package.json"))) return dir;
+    if (path.dirname(dir) === dir) throw new Error(`no package.json above ${from}`);
+  }
+}
 
 /** Never copied over: globalThis's own identity, the two value-literals, and
  *  `console`, which stays Bun's so test output keeps working. */
@@ -117,7 +141,8 @@ beforeAll(async () => {
   expect(typeof g.document).toBe("undefined");
   expect(typeof g.location).toBe("undefined");
   const cachedBefore = new Set(Object.keys(require.cache));
-  preloaded = [...cachedBefore].filter((k) => k.includes("/src/") && !k.includes("/src/test/") && k !== import.meta.path);
+  const repoRoot = findRepoRoot(import.meta.dir);
+  preloaded = [...cachedBefore].filter((k) => isAppModule(k, repoRoot, import.meta.path));
   const counts = { listeners: 0, timeouts: 0, intervals: 0, fetches: 0, microtasks: 0 };
   const real = {
     addEventListener: g.addEventListener,
@@ -191,7 +216,9 @@ afterAll(async () => {
 });
 
 describe("wiki-browser.ts — import and boot", () => {
-  test("the whole import graph is evaluated inside the counting window", () => {
+  // Covers app modules under the repo's `src/` only; `node_modules` is
+  // deliberately out of scope (happy-dom is loaded before the window opens).
+  test("every app module under src/ is evaluated inside the counting window", () => {
     expect(preloaded).toEqual([]);
     expect(loadedInWindow.some((k) => k.endsWith("/components/wiki-browser.ts"))).toBe(true);
   });
@@ -209,6 +236,28 @@ describe("wiki-browser.ts — import and boot", () => {
   test("a second boot() throws rather than wiring a second listener set", () => {
     expect(() => boot()).toThrow("boot() called twice");
   });
+});
+
+describe("isAppModule — which require.cache keys count as preloaded app modules", () => {
+  const SELF = "/repo/src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts";
+  const cases: [string, string, string, boolean][] = [
+    ["a: repo root without /src/, app module", "/repo", "/repo/src/dashboard/x.ts", true],
+    ["b: the src/test/ preload", "/repo", "/repo/src/test/preload.ts", false],
+    ["c: node_modules", "/repo", "/repo/node_modules/happy-dom/lib/x.js", false],
+    ["d: outside the repo", "/repo", "/opt/other/src/x.ts", false],
+    ["e: root under /src/, node_modules (old false red)", "/home/src/muninn", "/home/src/muninn/node_modules/happy-dom/x.js", false],
+    ["f: root under /src/, app module", "/home/src/muninn", "/home/src/muninn/src/dashboard/x.ts", true],
+    ["g: root under /src/test/, app module (old blind case)", "/x/src/test/muninn", "/x/src/test/muninn/src/dashboard/x.ts", true],
+    ["h: this test file", "/repo", SELF, false],
+    ["i: sibling repo sharing the root as a string prefix", "/home/muninn", "/home/muninn-old/src/x.ts", false],
+    // Non-absolute keys (`node:fs`, `ws`): path.relative resolves them against
+    // the cwd, so with root = cwd a relative key lands under `src/` from any cwd.
+    ["j: a relative key, root = cwd", process.cwd(), "src/dashboard/x.ts", false],
+    ["k: a builtin key, root = cwd", process.cwd(), "node:fs", false],
+  ];
+  for (const [name, root, k, want] of cases) {
+    test(name, () => expect(isAppModule(k, root, SELF)).toBe(want));
+  }
 });
 
 describe("wiki-browser.ts — listener order", () => {
