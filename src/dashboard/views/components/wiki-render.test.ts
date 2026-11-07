@@ -96,9 +96,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // and its load-failure line and per-card sending state to 1,418,173, and its held repaints to 1,418,858.
 // 2026-11-07: closing a card from the inbox (P3b: preview, Close, Still open) took it to 1,422,452,
 // and its fix round (ruling hash, preview warnings, a validated kept-open store) to 1,423,473.
-// 2026-11-07: moving the load-time code into `boot()` (wiki-browser split C1: two
-// spaces of indentation on ~1,300 moved lines, the `wiki-shell-client.ts` entry)
-// took it from 1,423,508 to 1,426,483 bytes (357,829 → 358,552 gzipped).
+// 2026-11-07: wrapping the load-time code in `boot()` (wiki-browser split C1) took
+// it from 1,423,508 to 1,426,483 bytes (357,829 → 358,552 gzipped).
 const WIKI_CLIENT_MAX_BYTES = 1_427_000;
 
 test("wikiClientScript stays under its size pin", async () => {
@@ -109,7 +108,9 @@ test("wikiClientScript stays under its size pin", async () => {
 // Ratchets on the reader shell while it is split into controllers (mimir plan
 // muninn-wiki-browser-split): each number may only FALL. Raise one only in the
 // PR that needs it, with a dated line saying why, like the size pin above.
-// Counted from the TypeScript AST, so a comment or a string cannot move them.
+// Lines are physical lines, comments and blanks included. Module-level `let`s are
+// counted from the TypeScript AST, and a module-level `var` fails outright (it
+// would otherwise dodge the `let` count).
 // 2026-11-07, C1 baseline: 10,703 lines; 119 module-level `let`s (104 before C1,
 // plus the 14 effectful consts that became `let x!: T` and `booted`).
 const WIKI_BROWSER_MAX_LINES = 10_703;
@@ -117,12 +118,17 @@ const WIKI_BROWSER_MAX_MODULE_LETS = 119;
 
 test("wiki-browser.ts does not grow: line count and module-level lets", async () => {
   const src = await Bun.file(new URL("./wiki-browser.ts", import.meta.url)).text();
+  const lines = src.endsWith("\n") ? src.split("\n").length - 1 : src.split("\n").length;
   const sf = ts.createSourceFile("wiki-browser.ts", src, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
-  const lines = sf.getLineAndCharacterOfPosition(sf.getEnd()).line;
   let lets = 0;
+  const vars: string[] = [];
   for (const st of sf.statements) {
-    if (ts.isVariableStatement(st) && st.declarationList.flags & ts.NodeFlags.Let) lets += st.declarationList.declarations.length;
+    if (!ts.isVariableStatement(st)) continue;
+    const { flags, declarations } = st.declarationList;
+    if (flags & ts.NodeFlags.Let) lets += declarations.length;
+    else if (!(flags & ts.NodeFlags.BlockScoped)) vars.push(...declarations.map((d) => d.name.getText(sf)));
   }
   expect(lines).toBeLessThanOrEqual(WIKI_BROWSER_MAX_LINES);
   expect(lets).toBeLessThanOrEqual(WIKI_BROWSER_MAX_MODULE_LETS);
+  expect(vars).toEqual([]);
 });

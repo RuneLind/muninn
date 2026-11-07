@@ -120,10 +120,21 @@ describe("the rule, on fixtures", () => {
     expect(sharedLinkOffenders({ links: l, mockFiles: ["src/b/solo.test.ts"], allTestFiles: all })).toHaveLength(1);
   });
 
-  test("the own-process predicate selects by directory prefix only", () => {
-    expect(
-      ownProcessFiles(["src/dashboard/views/wiki-boot/a.test.ts", "src/dashboard/views/components/a.test.ts", "src/x/wiki-boot/a.test.ts"]),
-    ).toEqual(["src/dashboard/views/wiki-boot/a.test.ts"]);
+  test("the own-process predicate selects by directory prefix, or by a GlobalWindow import from happy-dom", () => {
+    const src: Record<string, string> = {
+      "src/dashboard/views/wiki-boot/a.test.ts": "",
+      "src/dashboard/views/components/a.test.ts": 'import { Window } from "happy-dom";',
+      "src/x/wiki-boot/a.test.ts": "",
+      "src/dashboard/views/components/g.test.ts": 'import { test } from "bun:test";\nimport { GlobalWindow } from "happy-dom";',
+      "src/y/g.test.ts": "import {\n  Window,\n  GlobalWindow,\n} from 'happy-dom';",
+      "src/z/other.test.ts": 'import { GlobalWindow } from "./my-dom";',
+      "src/q/quoted.test.ts": `const s = 'import { GlobalWindow } from "happy-dom"';`,
+    };
+    expect(ownProcessFiles(Object.keys(src), (f) => src[f]!)).toEqual([
+      "src/dashboard/views/wiki-boot/a.test.ts",
+      "src/dashboard/views/components/g.test.ts",
+      "src/y/g.test.ts",
+    ]);
   });
 
   test("a mock file no chain runs is reported, not silently skipped", () => {
@@ -235,9 +246,9 @@ describe("the live chains", () => {
     expect(unrunMockFiles(liveInput())).toEqual([]);
   });
 
-  test("every file under an own-process directory is ALONE in each bun test process that runs it, and run by a chain", () => {
+  test("every own-process file (directory or GlobalWindow import) is ALONE in each bun test process that runs it, and run by a chain", () => {
     const input = liveInput();
-    const own = ownProcessFiles(input.allTestFiles);
+    const own = ownProcessFiles(input.allTestFiles, (f) => readFileSync(join(ROOT, f), "utf8"));
     expect(own).toContain("src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts");
     expect(sharedLinkOffenders({ ...input, mockFiles: own })).toEqual([]);
     expect(unrunMockFiles({ ...input, mockFiles: own })).toEqual([]);
