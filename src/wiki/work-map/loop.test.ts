@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import type { TriageLoopDeps } from "../decision-triage/loop-deps.ts";
+import { triagePassHeld, tryHoldTriagePass, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
 import type { WorkMapRunResult } from "./run.ts";
 import type { WorkMapState } from "./state.ts";
 import {
@@ -177,6 +177,48 @@ describe("the decision triage's due check", () => {
       for (let i = 0; i < 72; i++) await h.jump(20 * MIN);
       expect(h.triageRuns.length).toBeGreaterThanOrEqual(18);
       expect(h.triageRuns.length).toBeLessThanOrEqual(19);
+    });
+
+    test("Run now holding the pass skips the loop's check, which runs on the next tick after the release", async () => {
+      const h = triageHarness();
+      const click = tryHoldTriagePass()!;
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.runs).toHaveLength(1);
+      expect(h.triageRuns).toHaveLength(0);
+      click();
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.triageRuns).toHaveLength(1);
+    });
+
+    test("the loop's check holds the pass Run now shares, until it ends", async () => {
+      const h = triageHarness();
+      let finish!: () => void;
+      h.deps.triage!.run = (wiki) => {
+        h.triageRuns.push({ wiki, at: h.deps.now() });
+        return new Promise((r) => (finish = () => r({ outcome: "ok" })));
+      };
+      startWorkMapLoop(config, { deps: h.deps });
+      await h.advance(WORK_MAP_TICK_MS);
+      expect(h.triageRuns).toHaveLength(1);
+      expect(triagePassHeld()).toBe(true);
+      expect(tryHoldTriagePass()).toBeNull();
+      finish();
+      await Bun.sleep(1);
+      expect(triagePassHeld()).toBe(false);
+    });
+
+    test("the bound and the stop each let go of a pass that never returns", async () => {
+      const bounded = triageHarness();
+      stuck(bounded);
+      startWorkMapLoop(config, { deps: bounded.deps });
+      await bounded.advance(WORK_MAP_TICK_MS);
+      expect(triagePassHeld()).toBe(true);
+      await bounded.advance(2 * HOUR);
+      // The bound let go and the next hourly check took it again.
+      expect(bounded.triageRuns).toHaveLength(2);
+      await stopWorkMapLoop(10);
+      expect(triagePassHeld()).toBe(false);
     });
 
     test("the pass's bound: 2 h, then the wiki records failed, its signal aborts and the guard opens", async () => {

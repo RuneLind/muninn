@@ -7,6 +7,9 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "../../config.ts";
 import { resolveWikiAnswerConfig } from "../../config.ts";
 import { getLog } from "../../logging.ts";
+import { agentStatus } from "../../observability/agent-status.ts";
+import { finishAgentRunTrace } from "../../tracing/agent-run-trace.ts";
+import { Tracer } from "../../tracing/tracer.ts";
 import { getWikiRegistry } from "../registry-memo.ts";
 import { osloDay } from "../work-map/ids.ts";
 import type { WorkMapState } from "../work-map/state.ts";
@@ -24,10 +27,35 @@ export interface TriageLoopDeps {
   /** Called on every check: the two-nights-with-no-run-line warning. */
   beforeCheck: (wiki: string, nowMs: number) => Promise<void>;
   readState: (wiki: string) => Promise<WorkMapState | null>;
-  run: (wiki: string, signal: AbortSignal) => Promise<{ outcome: TriageRunResult["outcome"] }>;
+  run: (wiki: string, signal: AbortSignal) => Promise<TriagePassOutcome>;
   /** A pass that hit its bound, as a throw does: `partial` if it logged verdicts first, else `failed`. */
   recordFailed: (wiki: string, error: string) => Promise<"partial" | "failed" | void>;
 }
+
+/** How a pass ended, for the loop, Run now and the `/agents` row. */
+export interface TriagePassOutcome {
+  outcome: TriageRunResult["outcome"];
+  /** Card lines the pass logged; absent when it wrote no run line. */
+  cards?: number;
+  reason?: string;
+}
+
+/**
+ * One decision-triage pass at a time in this process, shared by the loop's hourly
+ * check and `POST /api/wiki/decision-triage/run`: null while one is held. The
+ * release is the holder's own and idempotent, so a late release, after the loop's
+ * bound or stop has let go, cannot free a later holder.
+ */
+let triageHolder: symbol | null = null;
+export function tryHoldTriagePass(): (() => void) | null {
+  if (triageHolder) return null;
+  const me = Symbol("triage-pass");
+  triageHolder = me;
+  return () => {
+    if (triageHolder === me) triageHolder = null;
+  };
+}
+export const triagePassHeld = (): boolean => triageHolder !== null;
 
 /** Whole Oslo nights between the last run line and today, not counting either. */
 export function missedNights(runs: readonly Pick<RunLine, "at">[], nowMs: number): number {
@@ -58,8 +86,18 @@ export async function settleTriageRun<T extends { outcome: TriageRunResult["outc
   }
 }
 
-/** `over` replaces a real seam of the night's run (tests). */
-export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE_DIR, over: Partial<Pick<TriageRunDeps, "call" | "answers" | "floor" | "append">> = {}): TriageLoopDeps | null {
+export const TRIAGE_AGENT_BOT = "decision-triage";
+
+/** The span a pass's `/agents` row is rebuilt from after a restart. */
+export type TriagePassTracer = Pick<Tracer, "finish" | "traceId">;
+
+/** `over` replaces a real seam of the night's run, `tracer` the pass's span (tests). */
+export function realTriageLoopDeps(
+  config: Config,
+  dir: string = DECISION_TRIAGE_DIR,
+  over: Partial<Pick<TriageRunDeps, "call" | "answers" | "floor" | "append">> = {},
+  tracer: (wiki: string) => TriagePassTracer = () => new Tracer("decision-triage-pass", { botName: TRIAGE_AGENT_BOT, platform: "wiki" }),
+): TriageLoopDeps | null {
   if (!config.decisionTriageRepoRoots) {
     log.info("Decision triage off: DECISION_TRIAGE_REPO_ROOTS is not set");
     return null;
@@ -125,44 +163,83 @@ export function realTriageLoopDeps(config: Config, dir: string = DECISION_TRIAGE
     beforeCheck: warnMissed,
     readState: (wiki) => state.read(wiki),
     recordFailed,
-    run: async (wiki, signal) => {
-      const entry = entryOf(wiki);
-      const at = Date.now();
-      if (!entry) {
-        await state.record(wiki, { at, outcome: "refused", error: "not a registered wiki" });
-        return { outcome: "refused" };
-      }
-      const deps = realTriageRunDeps(config, entry, answerConfig, {
-        append: (lines) => appendLogLines(nightlyLogPath(wiki, dir), lines),
-        nightlyDir: dir,
-        floorEntries: () => names.flatMap((n) => {
-          const e = entryOf(n);
-          return e ? [e] : [];
-        }),
-        signal,
-      });
-      const track = (progress: TriageProgress) => void inFlight.set(wiki, progress);
-      const result = await settleTriageRun(() => runDecisionTriage({ ...deps, ...over, track }), signal, (error) => {
-        log.warn("Decision triage threw for {wiki}: {error}", { wiki, error });
-        return recordFailed(wiki, error);
-      });
-      if (!("run" in result)) return result;
-      inFlight.delete(wiki);
-      await state.record(wiki, {
-        at,
-        outcome: result.outcome === "partial" ? "ok" : result.outcome,
-        ...(result.run.reason ? { error: result.run.reason } : {}),
-      });
-      if (result.outcome === "ok" || result.outcome === "partial") {
-        log.info("Decision triage for {wiki}: {outcome}, {cards} card(s)", { wiki, outcome: result.outcome, cards: result.run.cards });
-      }
-      if (result.run.floor?.met && !floorMet) {
-        const logs = await Promise.all(names.map((n) => readLog(nightlyLogPath(n, dir))));
-        const before = logs.flatMap((l) => l.runs).filter((r) => r.floor?.met && r.runId !== result.run.runId);
-        floorMet = true;
-        if (before.length === 0) log.info("Decision triage: the score's floor is met for the first time");
-      }
-      return result;
-    },
+    run: (wiki, signal) => observedPass(wiki, tracer(wiki), config, () => runPass(wiki, signal)),
   };
+
+  async function runPass(wiki: string, signal: AbortSignal): Promise<TriagePassOutcome> {
+    const entry = entryOf(wiki);
+    const at = Date.now();
+    if (!entry) {
+      await state.record(wiki, { at, outcome: "refused", error: "not a registered wiki" });
+      return { outcome: "refused", reason: "not a registered wiki" };
+    }
+    const deps = realTriageRunDeps(config, entry, answerConfig, {
+      append: (lines) => appendLogLines(nightlyLogPath(wiki, dir), lines),
+      nightlyDir: dir,
+      floorEntries: () => names.flatMap((n) => {
+        const e = entryOf(n);
+        return e ? [e] : [];
+      }),
+      signal,
+    });
+    let progress: TriageProgress | undefined;
+    const track = (p: TriageProgress) => {
+      progress = p;
+      inFlight.set(wiki, p);
+    };
+    const result = await settleTriageRun(() => runDecisionTriage({ ...deps, ...over, track }), signal, (error) => {
+      log.warn("Decision triage threw for {wiki}: {error}", { wiki, error });
+      return recordFailed(wiki, error);
+    });
+    // A throw's line (`recordFailed`) carries what the pass had logged; an abort writes none.
+    if (!("run" in result)) return result.outcome === "aborted" ? result : { outcome: result.outcome, cards: progress?.cardsLogged ?? 0 };
+    inFlight.delete(wiki);
+    await state.record(wiki, {
+      at,
+      outcome: result.outcome === "partial" ? "ok" : result.outcome,
+      ...(result.run.reason ? { error: result.run.reason } : {}),
+    });
+    if (result.outcome === "ok" || result.outcome === "partial") {
+      log.info("Decision triage for {wiki}: {outcome}, {cards} card(s)", { wiki, outcome: result.outcome, cards: result.run.cards });
+    }
+    if (result.run.floor?.met && !floorMet) {
+      const logs = await Promise.all(names.map((n) => readLog(nightlyLogPath(n, dir))));
+      const before = logs.flatMap((l) => l.runs).filter((r) => r.floor?.met && r.runId !== result.run.runId);
+      floorMet = true;
+      if (before.length === 0) log.info("Decision triage: the score's floor is met for the first time");
+    }
+    return { outcome: result.outcome, cards: result.run.cards, ...(result.run.reason ? { reason: result.run.reason } : {}) };
+  }
+}
+
+/**
+ * Every pass, the loop's or Run now's, as one `/agents` run and one stamped span
+ * («Decision triage: <wiki>», kind `decision_triage`), so the durable Recent list
+ * keeps it past a restart. `ok` and `partial` close it ok; anything else, a throw
+ * included, closes it as an error.
+ */
+async function observedPass(wiki: string, tracer: TriagePassTracer, config: Pick<Config, "tracingEnabled">, pass: () => Promise<TriagePassOutcome>): Promise<TriagePassOutcome> {
+  const run = { kind: "decision_triage", name: `Decision triage: ${wiki}` } as const;
+  const reqId = agentStatus.startRequest(TRIAGE_AGENT_BOT, "organizing", undefined, run);
+  agentStatus.setSourcePage(reqId, `/wiki?wiki=${encodeURIComponent(wiki)}`);
+  const traceId = config.tracingEnabled === false ? {} : { traceId: tracer.traceId };
+  try {
+    const res = await pass();
+    const status = res.outcome === "ok" || res.outcome === "partial" ? "ok" : "error";
+    finishAgentRunTrace(tracer, run, status, { wiki, outcome: res.outcome, cards: res.cards ?? 0, ...(res.reason ? { reason: res.reason } : {}) });
+    agentStatus.completeRequest(reqId, { status, ...traceId });
+    return res;
+  } catch (err) {
+    finishAgentRunTrace(tracer, run, "error", { wiki, outcome: "failed", error: err instanceof Error ? err.message : String(err) });
+    agentStatus.completeRequest(reqId, { status: "error", ...traceId });
+    throw err;
+  }
+}
+
+let loopDepsMemo: { config: Config; deps: TriageLoopDeps | null } | null = null;
+/** One loop half per config, shared by the loop and Run now: one set of once-only
+ *  warnings, and the floor's wikis from whichever called `wikis` last. */
+export function triageLoopDepsFor(config: Config): TriageLoopDeps | null {
+  if (loopDepsMemo?.config !== config) loopDepsMemo = { config, deps: realTriageLoopDeps(config) };
+  return loopDepsMemo.deps;
 }

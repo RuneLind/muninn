@@ -18,14 +18,14 @@
  * for the next day's hour.
  *
  * The decision triage's nightly pass is started by the same tick and awaited by
- * nothing in it: its own in-flight guard, hourly check, state and failure count, so
+ * nothing in it: its own in-flight guard (shared with Run now), hourly check, state and failure count, so
  * neither loop's stall, retry or refusal reaches the other. A refused pass waits
  * for its next hourly check; it has no wake retries.
  */
 
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
-import { realTriageLoopDeps, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
+import { triageLoopDepsFor, tryHoldTriagePass, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../readonly.ts";
 import { getWikiRegistry } from "../registry-memo.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
@@ -194,7 +194,7 @@ function realLoopDeps(config: Config): WorkMapLoopDeps {
     readState: (wiki) => runDeps.state.read(wiki),
     run: (wiki, signal) => startWorkMapRun(wiki, runDeps, signal).promise,
     registry: getWikiRegistry,
-    triage: realTriageLoopDeps(config) ?? undefined,
+    triage: triageLoopDepsFor(config) ?? undefined,
   };
 }
 
@@ -205,6 +205,8 @@ let loopAbort: AbortController | null = null;
 let checking: Promise<void> | null = null;
 let activeDeps: WorkMapLoopDeps | null = null;
 let triageWork: Promise<void> | null = null;
+/** The loop's hold on the pass single-flight; a stop lets go, as the bound does. */
+let triageRelease: (() => void) | null = null;
 
 /**
  * Start the loop; returns the covered wikis, or [] when it did not start. A
@@ -256,14 +258,17 @@ export function startWorkMapLoop(
     timer = deps.setTimer(tick, WORK_MAP_TICK_MS);
   };
   let lastTriageCheck: number | null = null;
-  let triageBusy = false;
-  /** The triage's hourly check, started and not awaited: see the header. */
+  /** The triage's hourly check, started and not awaited: see the header. It holds the
+   *  pass single-flight Run now shares; while a click holds it the check is skipped and
+   *  tried again on the next tick. */
   const startTriage = () => {
     const triage = deps.triage;
     const started = deps.now();
-    if (!triage || triageBusy || (lastTriageCheck !== null && started - lastTriageCheck < WORK_MAP_CHECK_INTERVAL_MS)) return;
+    if (!triage || (lastTriageCheck !== null && started - lastTriageCheck < WORK_MAP_CHECK_INTERVAL_MS)) return;
+    const release = tryHoldTriagePass();
+    if (!release) return;
     lastTriageCheck = started;
-    triageBusy = true;
+    triageRelease = release;
     const bound = new AbortController();
     const signal = AbortSignal.any([ac.signal, bound.signal]);
     let running: string | null = null;
@@ -283,7 +288,7 @@ export function startWorkMapLoop(
     const expiry = deps.setTimer(() => {
       timedOut = true;
       bound.abort();
-      triageBusy = false;
+      release();
       const error = `the pass timed out after ${TRIAGE_PASS_BOUND_MS} ms`;
       log.warn("Decision triage: {error} ({wiki})", { error, wiki: running ?? "no wiki running" });
       if (running) void fail(running, error);
@@ -294,7 +299,7 @@ export function startWorkMapLoop(
       if (triageWork === work) triageWork = null;
       if (timedOut) return;
       deps.clearTimer(expiry);
-      triageBusy = false;
+      release();
     });
   };
   const check = async (reason: "boot" | "wake" | "hourly" | "wake-retry") => {
@@ -367,12 +372,17 @@ export async function stopWorkMapLoop(waitMs = 5_000): Promise<void> {
   const writes = abortWorkMapRuns();
   if (triageWork) writes.push(triageWork);
   triageWork = null;
-  if (writes.length === 0) return;
+  // Let go once the aborted pass has finished or the wait gave up on it: a pass
+  // that never returns must not hold Run now off for good.
+  const release = triageRelease;
+  triageRelease = null;
+  if (writes.length === 0) return release?.();
   let t: ReturnType<typeof setTimeout> | undefined;
   const timedOut = await Promise.race([
     Promise.allSettled(writes).then(() => false),
     new Promise<boolean>((r) => (t = setTimeout(() => r(true), waitMs))),
   ]);
   clearTimeout(t);
+  release?.();
   if (timedOut) log.warn("Shutdown: timed out waiting for the work map write or the decision triage");
 }
