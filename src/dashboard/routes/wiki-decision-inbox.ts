@@ -32,6 +32,8 @@ import { sha256, todayOslo } from "../../gardener/util.ts";
 import { postCollectionUpdate } from "../../wiki/reindex.ts";
 import { discoverAllBots } from "../../bots/config.ts";
 import { requireJsonRequest } from "./json-request.ts";
+import { formatWebHtml } from "../../web/web-format.ts";
+import { parseQuestionChoices, splitQuestionLine } from "../../format/question-choices.ts";
 
 const log = getLog("dashboard", "wiki-decision-inbox");
 
@@ -41,7 +43,14 @@ export interface InboxCard {
   relPath: string;
   id: string;
   title: string;
+  /** The raw markdown, kept for older clients. */
   body: string;
+  /** The body's bold question line, else its first line. */
+  question: string;
+  /** The body after the question line, rendered by the chat renderer (which escapes raw HTML). */
+  bodyHtml: string;
+  /** The body read as choice rows, every string rendered; null when it is not in that shape. */
+  structured: InboxStructured | null;
   choices: string[];
   recommendation: string | null;
   targets: string[];
@@ -54,6 +63,27 @@ export interface InboxCard {
    *  live answer to (`authorKeyOf`), so an inbox answer would 409. */
   viewerAnswered: boolean;
   lane: InboxLane;
+}
+
+export interface InboxStructured {
+  context: string;
+  rows: { letter: string; label: string; why: string }[];
+  recommendation: { letter: string; why: string; qualified: boolean } | null;
+}
+
+/** The card body's question, rendered rest and choice rows, as the inbox shows them. */
+export function renderInboxBody(body: string, choices: readonly string[]): Pick<InboxCard, "question" | "bodyHtml" | "structured"> {
+  const { question, rest } = splitQuestionLine(body);
+  const parsed = parseQuestionChoices(body, choices);
+  return {
+    question,
+    bodyHtml: formatWebHtml(rest).trim(),
+    structured: parsed && {
+      context: formatWebHtml(parsed.context).trim(),
+      rows: parsed.rows.map((r) => ({ letter: r.letter, label: formatWebHtml(r.label).trim(), why: formatWebHtml(r.why).trim() })),
+      recommendation: parsed.recommendation && { ...parsed.recommendation, why: formatWebHtml(parsed.recommendation.why).trim() },
+    },
+  };
 }
 
 export interface DecisionInboxBody {
@@ -121,6 +151,7 @@ export async function readDecisionInbox(entry: WikiRegistryEntry, deps: Decision
       id: ref.id,
       title: index.resolveRelPath(ref.relPath)?.title ?? ref.relPath,
       body: card.body,
+      ...renderInboxBody(card.body, card.choices),
       choices: card.choices,
       recommendation: card.recommendation,
       targets: card.targets,

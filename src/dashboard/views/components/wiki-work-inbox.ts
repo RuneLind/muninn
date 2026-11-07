@@ -2,7 +2,10 @@
 /**
  * The «Decisions» section of the Your work card (P3a of mimir
  * plans/muninn-wiki-decision-triage.mdx, layout A of D21): the wiki's open cards
- * from `GET /api/wiki/decision-inbox` in four lanes, «close?» and «ask you» open.
+ * from `GET /api/wiki/decision-inbox` in four lanes, «close?», «ask you» and the
+ * first lane holding cards open, empty lanes folded into one line (D1 of mimir
+ * plans/muninn-decision-triage-visibility.mdx). An opened card shows its choices
+ * as rows (D2) from the server's rendered HTML.
  * A row opens to the card, its evidence and its actions; an answer goes through
  * `POST /api/wiki/answers` with the reader card's body, and a 409 sends the
  * reader to the page, never a second write. Imported by `wiki-start-cards.ts`,
@@ -15,11 +18,11 @@ import { QUESTION_NOT_SURE } from "../../../format/question.ts";
 import { escHtml as esc } from "./escape.ts";
 import { alreadyAnsweredOf, isVersionConflict } from "./wiki-answer-card-model.ts";
 
-const LANES: { lane: InboxLane; label: string; hint: string; open: boolean }[] = [
-  { lane: "close", label: "Close?", hint: "answered or ruled on the page", open: true },
-  { lane: "ask", label: "Ask you", hint: "addressed to you", open: true },
-  { lane: "pass", label: "Pass on", hint: "addressed to someone else", open: false },
-  { lane: "default", label: "Take the default", hint: "the recommendation usually holds", open: false },
+const LANES: { lane: InboxLane; label: string; short: string; hint: string; open: boolean }[] = [
+  { lane: "close", label: "Close?", short: "to close", hint: "answered or ruled on the page", open: true },
+  { lane: "ask", label: "Ask you", short: "for you", hint: "addressed to you", open: true },
+  { lane: "pass", label: "Pass on", short: "to pass on", hint: "addressed to someone else", open: false },
+  { lane: "default", label: "Take the default", short: "to take by default", hint: "the recommendation usually holds", open: false },
 ];
 
 interface InboxState {
@@ -82,6 +85,7 @@ let repaint: (focusSel?: string, passive?: boolean) => void = () => {};
 
 const keyOf = (c: InboxCard) => `${c.relPath}#${c.id}`;
 const sel = (k: string) => `[data-wi-key="${CSS.escape(k)}"]`;
+/** The title of a card from a server older than `question`. */
 const firstLine = (body: string) => (body.split("\n").find((l) => l.trim()) ?? "").replace(/\*\*|__|`/g, "").replace(/^#+\s*/, "");
 const ddmm = (iso: string) => new Date(iso).toLocaleDateString("nb-NO", { day: "2-digit", month: "2-digit" });
 
@@ -149,6 +153,47 @@ function evidenceHtml(c: InboxCard): string {
   return out;
 }
 
+/** The lanes whose open card offers the pick → Answer form. */
+const pickable = (c: InboxCard) => c.lane !== "close" && c.lane !== "pass" && !c.viewerAnswered && c.choices.length > 0;
+
+/** The opened card's text (D2). `bodyHtml` and `structured` are the server's
+ *  rendered, escaped HTML; every other string is escaped here. */
+function bodyHtml(c: InboxCard): string {
+  const s = st!;
+  const k = keyOf(c);
+  const sd = c.structured;
+  if (!sd) return c.bodyHtml ? `<div class="wiki-wi-body wiki-wi-rendered">${c.bodyHtml}</div>` : "";
+  const pick = pickable(c);
+  const busy = s.sending[k] ? " disabled" : "";
+  const recLetter = sd.recommendation?.letter ?? null;
+  const rows = sd.rows
+    .map((r) => {
+      const rec = r.letter === recLetter;
+      const on = pick && s.picked[k] === r.letter;
+      // Only the letter is the pick control: the rendered text can hold links and
+      // Fact chips, which inside a <button> would also pick, or close it early.
+      // The button is named by its letter and described by the row's text, so a
+      // screen reader hears the choice, not only «A».
+      const id = `wi-${k.replace(/[^A-Za-z0-9_-]/g, "_")}-${r.letter.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+      const letter = pick
+        ? `<button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="${esc(r.letter)}" aria-pressed="${on}" aria-describedby="${esc(id)}-t${rec ? ` ${esc(id)}-r` : ""}"${busy}>${esc(r.letter)}</button>`
+        : `<span class="wiki-wi-letter">${esc(r.letter)}</span>`;
+      const cls = `wiki-wi-choice${rec ? " rec" : ""}${on ? " on" : ""}`;
+      return (
+        `<div class="${cls}" data-wi-row="${esc(r.letter)}">${letter}` +
+        `<span class="wiki-wi-choice-text" id="${esc(id)}-t">${r.label ? `<b>${r.label}</b> ` : ""}${r.why}</span>` +
+        (rec ? `<span class="wiki-wi-rec" id="${esc(id)}-r">Recommended</span>` : "") +
+        `</div>`
+      );
+    })
+    .join("");
+  return (
+    (sd.context ? `<div class="wiki-wi-context wiki-wi-rendered">${sd.context}</div>` : "") +
+    `<div class="wiki-wi-choices">${rows}</div>` +
+    (sd.recommendation ? `<div class="wiki-wi-why wiki-wi-rendered"><b>${sd.recommendation.qualified ? "Recommendation:" : `Why ${esc(sd.recommendation.letter)}`}</b> ${sd.recommendation.why}</div>` : "")
+  );
+}
+
 function actionsHtml(c: InboxCard, k: string, href: string): string {
   const s = st!;
   const open = `<a class="wiki-wm-link" href="${esc(href)}" data-relpath="${esc(c.relPath)}">Open on the page</a>`;
@@ -170,9 +215,10 @@ function actionsHtml(c: InboxCard, k: string, href: string): string {
   }
   if (c.viewerAnswered) return `<div class="wiki-wi-acts"><span class="wiki-wi-hint">You have answered this card: change it on the page.</span>${open}</div>`;
   const busy = s.sending[k] ? " disabled" : "";
-  const choices = c.choices.length ? [...c.choices, QUESTION_NOT_SURE] : [];
+  // Structured rows are the letter picks already: only Not sure stays a button.
+  const choices = !c.choices.length ? [] : c.structured ? [QUESTION_NOT_SURE] : [...c.choices, QUESTION_NOT_SURE];
   const picks = choices
-    .map((ch) => `<button class="wiki-wi-btn${s.picked[k] === ch ? " on" : ""}" data-wi-act="pick" data-wi-choice="${esc(ch)}" aria-pressed="${s.picked[k] === ch}"${busy}>${esc(ch === QUESTION_NOT_SURE ? "Not sure" : ch)}${ch === c.recommendation ? " ★" : ""}</button>`)
+    .map((ch) => `<button class="wiki-wi-btn${c.structured ? " small" : ""}${s.picked[k] === ch ? " on" : ""}" data-wi-act="pick" data-wi-choice="${esc(ch)}" aria-pressed="${s.picked[k] === ch}"${busy}>${esc(ch === QUESTION_NOT_SURE ? "Not sure" : ch)}${ch === c.recommendation ? " ★" : ""}</button>`)
     .join("");
   const take = c.lane === "default" && c.recommendation ? `<div class="wiki-wi-acts"><button class="wiki-wi-btn primary" data-wi-act="take"${busy}>Take ${esc(c.recommendation)} (the recommendation)</button></div>` : "";
   return (
@@ -193,12 +239,12 @@ function rowHtml(c: InboxCard, now: number, hrefFor: (rel: string) => string): s
   return (
     `<li class="wiki-wi-item" data-wi-key="${esc(k)}">` +
     `<button class="wiki-wi-row" data-wi-act="row" aria-expanded="${s.open === k}">` +
-    `<span class="wiki-wi-q">${esc(c.id)} · ${esc(firstLine(c.body))}<span class="wiki-wi-page">${esc(c.title)}</span></span>` +
+    `<span class="wiki-wi-q">${esc(c.id)} · ${esc(c.question ?? firstLine(c.body))}<span class="wiki-wi-page">${esc(c.title)}</span></span>` +
     (c.lane === "pass" ? `<span class="wiki-wi-who">→ ${esc(c.targets.join(", "))}</span>` : "") +
     (tag ? `<span class="wiki-wi-tag${tag === "answered" || tag === "page rules" ? "" : " warn"}">${tag}</span>` : "") +
     `<span class="wiki-wi-age${days >= 14 ? " old" : ""}">${days} d</span></button>` +
     (msg ? `<div class="wiki-wi-msg${msg.warn ? " warn" : ""}" role="status">${esc(msg.text)}${msg.page ? ` <a class="wiki-wm-link" href="${esc(hrefFor(c.relPath))}" data-relpath="${esc(c.relPath)}">Open the page</a>` : ""}</div>` : "") +
-    (s.open === k ? `<div class="wiki-wi-detail"><div class="wiki-wi-body">${esc(c.body)}</div>${evidenceHtml(c)}${actionsHtml(c, k, hrefFor(c.relPath))}</div>` : "") +
+    (s.open === k ? `<div class="wiki-wi-detail">${bodyHtml(c)}${evidenceHtml(c)}${actionsHtml(c, k, hrefFor(c.relPath))}</div>` : "") +
     `</li>`
   );
 }
@@ -211,16 +257,25 @@ export function inboxHtml(hrefFor: (rel: string) => string, now: number): string
   if (!s.body) return failed ? `<div class="wiki-wm-section wiki-wi" id="wikiWorkInbox"><div class="wiki-wm-section-title">Decisions</div>${failed}</div>` : "";
   const hidden = s.body.cards.filter((c) => c.lane === "close" && isKept(c)).length;
   const cards = s.showKept ? s.body.cards : s.body.cards.filter((c) => c.lane !== "close" || !isKept(c));
-  const lanes = LANES.map(({ lane, label, hint, open }) => {
+  // D1: empty lanes fold into one muted line; the first lane holding cards opens.
+  const firstFull = LANES.find(({ lane }) => cards.some((c) => c.lane === lane))?.lane;
+  const empty: string[] = [];
+  const lanes = LANES.map(({ lane, label, short, hint, open }) => {
     const list = cards.filter((c) => c.lane === lane);
-    const isOpen = s.laneOpen[lane] ?? (open || list.some((c) => keyOf(c) === s.open));
+    // The close lane stays while it has a close to report or kept cards to show.
+    if (!list.length && !(lane === "close" && (s.closed || hidden))) {
+      empty.push(short);
+      return "";
+    }
+    const isOpen = s.laneOpen[lane] ?? (open || lane === firstFull || list.some((c) => keyOf(c) === s.open));
     const rows =
-      (list.length ? `<ul class="wiki-wi-rows">${list.map((c) => rowHtml(c, now, hrefFor)).join("")}</ul>` : `<div class="wiki-wm-empty">None.</div>`) +
+      (list.length ? `<ul class="wiki-wi-rows">${list.map((c) => rowHtml(c, now, hrefFor)).join("")}</ul>` : "") +
       (lane === "close" && s.closed ? `<div class="wiki-wi-msg" role="status">${esc(s.closed)}</div>` : "") +
       (lane === "close" && hidden ? `<button class="wiki-wi-btn" data-wi-act="kept">${s.showKept ? "Hide" : "Show"} ${hidden} kept open</button>` : "");
     return `<details class="wiki-wi-lane" data-wi-lane="${lane}"${isOpen ? " open" : ""}><summary class="wiki-wm-lane-title">${label} <span class="wiki-wm-count">${list.length}</span> <span class="wiki-wi-hint">${hint}</span></summary>${rows}</details>`;
   }).join("");
-  return `<div class="wiki-wm-section wiki-wi" id="wikiWorkInbox"><div class="wiki-wm-section-title">Decisions · ${cards.length} open</div>${failed}${lanes}</div>`;
+  const emptyLine = empty.length ? `<div class="wiki-wm-empty wiki-wi-empty">Nothing ${empty.join(" · ")}.</div>` : "";
+  return `<div class="wiki-wm-section wiki-wi" id="wikiWorkInbox"><div class="wiki-wm-section-title">Decisions · ${cards.length} open</div>${failed}${lanes}${emptyLine}</div>`;
 }
 
 async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: string): Promise<void> {
