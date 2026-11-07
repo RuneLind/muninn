@@ -1,7 +1,7 @@
 /**
  * The theme page (plan `muninn-wiki-theme-map`, P3): `?effort=<id>` on a wiki
  * whose `.work-map.json` is a themes map. The work map's effort page
- * (`wiki-effort-page.ts`) stays as it was; `paintEffort` in `wiki-browser.ts`
+ * (`wiki-effort-page.ts`) stays as it was; `paintEffort` in `wiki-effort-controller.ts`
  * picks this view by the map's kind. Pure and DOM-free.
  *
  * Every map string is model output, so all of it is escaped; prose markers go

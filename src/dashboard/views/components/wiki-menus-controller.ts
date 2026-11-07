@@ -6,8 +6,8 @@
  * plus the focus rule both body-level popovers close by. Moved out of the shell
  * (`wiki-browser.ts`) whole, in source order (mimir plan
  * muninn-wiki-browser-split, C3). The series editor's popover stays in the
- * shell; it imports {@link closeWorkPop}'s focus rule and the boundary items
- * from here.
+ * shell; it imports the focus rule ({@link popCloseReturnsFocus},
+ * {@link focusPopOpener}) and the boundary items from here.
  *
  * Importing this module runs nothing. The shell's `boot()` calls
  * {@link initMenus} beside `initRail` and {@link registerMenus} where the work

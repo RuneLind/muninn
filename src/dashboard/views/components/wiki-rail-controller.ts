@@ -13,7 +13,7 @@
  * every listener keeps its place in the registration order. This module never imports the shell: what the rail
  * reads and calls there arrives through {@link RailDeps}, the `atlasDeps()`
  * shape. Shared shell lets live in `wiki-shell-state.ts`; rail state lives here,
- * with accessors only for what the shell reads or sets.
+ * with accessors only for what the shell and the ⋯ menus controller read or set.
  */
 import { escHtml as esc } from "./escape.ts";
 import { seriesEditable } from "./wiki-readonly-client.ts";
@@ -128,8 +128,9 @@ import { cullLabels, cullToggleText, railPool, RETIRED_TOGGLE_KEY, retiredReveal
 import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
 import { getCurrentName, getRevealOnRender, getWorkMapRunAt, setRevealOnRender, type WorkFacts } from "./wiki-shell-state.ts";
 
-/** What the rail reads and calls on the shell. The state is read live, through
- *  a function, so a value the shell reassigns is never a stale copy here. */
+/** What the rail reads and calls on the shell, read live through a function so a
+ *  value the shell reassigns is never a stale copy. A member marked `relayed:` is
+ *  another controller's export: that controller imports `renderList` from here. */
 export interface RailDeps {
   WIKI(): string;
   allPages(): WikiListing[];
@@ -141,8 +142,8 @@ export interface RailDeps {
   projects(): Record<string, number>;
   jiraKeys(): Record<string, number>;
   trackerLabels(): Record<string, string>;
-  workMapCache(): { runAt: number; body: WorkMapGetBody & { map: AnyWorkMap } } | null;
-  railMapFailedAt(): number | null;
+  workMapCache(): { runAt: number; body: WorkMapGetBody & { map: AnyWorkMap } } | null; // relayed: effort
+  railMapFailedAt(): number | null; // relayed: effort
   /** The work threads off the last listing (`WorkFacts`), shell-owned. */
   workFacts(): WorkFacts;
   /** The listing's `workMap.kind === "themes"`: View options then says theme. */
@@ -161,15 +162,14 @@ export interface RailDeps {
   refreshStartBody(): void;
   refreshStartStats(): void;
   loadPageByRelPath(relPath: string, push?: boolean, revealHash?: boolean): void;
-  /** `renderList` starts each paint with the rail badges' record emptied. */
-  resetStaleRailPainted(): void;
-  railStaleBadge(relPath: string): string;
-  effortHrefFor(id: string): string;
-  railEffortsIndex(now: number): Map<string, RailEffort> | null;
-  refreshEffortFromListing(): void;
-  openWorkCardMenu(btn: HTMLElement): void;
-  openThreadRowMenu(btn: HTMLElement): void;
-  showWorkBoundaryStatus(text: string | null): void;
+  resetStaleRailPainted(): void; // relayed: stale; `renderList` starts each paint with the badges' record emptied
+  railStaleBadge(relPath: string): string; // relayed: stale
+  effortHrefFor(id: string): string; // relayed: effort
+  railEffortsIndex(now: number): Map<string, RailEffort> | null; // relayed: effort
+  refreshEffortFromListing(): void; // relayed: effort
+  openWorkCardMenu(btn: HTMLElement): void; // relayed: ⋯ menus
+  openThreadRowMenu(btn: HTMLElement): void; // relayed: ⋯ menus
+  showWorkBoundaryStatus(text: string | null): void; // relayed: ⋯ menus
 }
 
 /** Set once, by {@link initRail}, before anything here runs. */
@@ -1781,7 +1781,7 @@ export function editWorkGroup(edit: WorkGroupEdit): void {
   stepWorkGroup({ kind: "click", stored: readWorkGroup(deps.WIKI()), edit });
 }
 
-// ── Accessors: the rail state the shell reads or sets ────────────────
+// ── Accessors: the rail state the shell and the ⋯ menus read or set ──
 /** Flip one stored fold or toggle by its key (the ⋯ menus' Save as series
  *  carries a group's open state onto its new key). */
 export function toggleRailFold(toggleKey: string): void {

@@ -110,7 +110,7 @@ import {
   refreshWorkCardFromListing,
   startReindex,
 } from "./wiki-start-cards.ts";
-// The effort page (work map P3): pure HTML, wired by `renderEffort` below.
+// The effort page (work map P3): pure HTML, wired by the effort controller.
 import { EFFORT_PARAM } from "./wiki-effort-page.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
@@ -712,7 +712,7 @@ let pageFetchSeq = 0;
 /** The one writer of `currentRelPath`. The shown page changing is what ends a
  *  Check that belongs to another page (A9), on every route off it: another
  *  page, an explainer, the start view, an Ask answer, an issue graph; the
- *  STALE tab follows it (`staleFollowPage`). */
+ *  STALE tab follows it (`staleFollowShownPage`). */
 function setCurrentRelPath(relPath: string | null): void {
   currentRelPath = relPath;
   pageViewSeq++;
@@ -998,15 +998,6 @@ function applyWorkedSortOption(coverage: WikiPagesResponse["workedCoverage"]): v
 let workedAxisOn = false;
 /** The listing's `waitsCounted`: the Your work strip's wait cells apply here. */
 let waitsCounted = false;
-/** The listing's `workMap.kind === "themes"`: View options and the effort
- *  page then say theme. Read by the rail and the effort page through their ports. */
-let workMapThemes = false;
-/** The work threads off the last listing (`work`), or null: an older server, a
- *  cold sessions memo, or a wiki with no sessions — no section (D11). Not the
- *  "keep the last known value" degrade: stale threads would lift pages the
- *  listing on screen no longer works on. Read by the rail and the ⋯ menus
- *  through their ports. */
-let workFacts: WorkFacts = null;
 
 // ── Article tools: ⧉ Copy path, the provenance strip, issue links ────
 
@@ -2577,8 +2568,8 @@ function seriesOpenerSel(anchor: HTMLElement): string | null {
   return `${scope} [${attr}="${CSS.escape(anchor.getAttribute(attr) ?? "")}"]`.trim();
 }
 
-/** Close the series popover; focus per the table above. `preventScroll`
- *  because the opener may have been scrolled out of view in the meantime. */
+/** Close the series popover; focus per the `PopCloseCause` table (⋯ menus
+ *  controller). `preventScroll`: the opener may have scrolled out of view. */
 function closeSeriesMenu(cause: PopCloseCause): void {
   const was = seriesMenu;
   const el = seriesMenuEl();
@@ -6137,6 +6128,15 @@ function activateFactcheckArticle(): void {
 // in the DOM-free `wiki-refresh.ts`; the boot load runs through the SAME
 // discipline so a slow boot response can't revert a newer refetch.
 const pagesRefresh = createRefreshModel();
+
+/** The listing's `workMap.kind === "themes"`, set by `setPagesData`: View options
+ *  and the effort page then say theme. Read by the rail and the effort page through their ports. */
+let workMapThemes = false;
+/** The work threads off the last listing (`work`, set by `setPagesData`), or
+ *  null (an older server, a cold sessions memo, no sessions: no section, D11),
+ *  never the last known value: stale threads would lift pages the listing no
+ *  longer works on. Read by the rail and the ⋯ menus through their ports. */
+let workFacts: WorkFacts = null;
 
 /** What the middle pane is showing right now — see `viewStateOf` for the rules.
  *  An Ask/Explain/Fact-check answer nulls `currentName` but is just as much
