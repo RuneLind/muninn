@@ -16,6 +16,11 @@ import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import { registerWikiDecisionTriageRunRoute, type TriageRunBody, type TriageRunDeps } from "./wiki-decision-triage-run.ts";
 
 afterEach(() => __setWikiReadonlyForTest(undefined));
+// Holds and stuck passes a failing test leaves behind, let go so one fault fails one test.
+const cleanups: (() => void)[] = [];
+afterEach(() => {
+  while (cleanups.length) cleanups.pop()!();
+});
 
 function fixture(over: Partial<TriageRunDeps> = {}, configOver: Partial<ReturnType<TriageRunDeps["config"]>> = {}) {
   const tmp = testTempDirSync(path.join(tmpdir(), "triage-run-"));
@@ -117,6 +122,7 @@ describe("POST /api/wiki/decision-triage/run", () => {
   test("the single-flight: 409 while the loop holds it, and the loop's hold fails while a click runs", async () => {
     const { post, runs, setNext } = fixture();
     const loopHold = tryHoldTriagePass()!;
+    cleanups.push(loopHold);
     const busy = await post();
     expect(busy.status).toBe(409);
     expect(await busy.json()).toEqual({ busy: true, error: "a triage pass is still running: try again when it has ended" });
@@ -125,6 +131,7 @@ describe("POST /api/wiki/decision-triage/run", () => {
 
     let finish!: (v: TriagePassOutcome) => void;
     setNext(() => new Promise((r) => (finish = r)));
+    cleanups.push(() => finish?.({ outcome: "ok" }));
     const first = post();
     for (let i = 0; i < 100 && runs.length === 0; i++) await Bun.sleep(1);
     expect(runs).toEqual(["mimir"]);
@@ -144,13 +151,16 @@ describe("POST /api/wiki/decision-triage/run", () => {
       let aborted = false as boolean;
       let heldAfterAbort = null as boolean | null;
       // A pass that sees its signal, then takes a while to wind down, as a real one does.
-      setNext((signal) => new Promise((resolve) => signal.addEventListener("abort", () => {
+      setNext((signal) => new Promise((resolve) => {
+        cleanups.push(() => resolve({ outcome: "aborted" }));
+        signal.addEventListener("abort", () => {
         aborted = true;
         setTimeout(() => {
           heldAfterAbort = triagePassHeld();
           resolve({ outcome: "aborted" });
         }, 30);
-      })));
+        });
+      }));
       const res = await post();
       expect(aborted).toBe(true);
       expect(heldAfterAbort).toBe(true);
