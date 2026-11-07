@@ -43,10 +43,8 @@ import { blankBotTokens, envNamesMatchingPrefixes } from "./blank-bot-tokens.ts"
  * assigning `""` to one the host never set is inert — an unset flag and an empty
  * one resolve identically in every reader (`optionalEnvFlag`, the comma-split
  * parsers, and `resolveAuthConfig`'s `off` default). Blanking makes a flag inert,
- * not hermetic: where the fallback itself reaches the host — `DECISION_TRIAGE_DIR`
- * (blank is `~/.muninn/decision-triage`), `WORK_MAP_GH_CHECK` (blank is on, and
- * spawns `gh` on the machine's login) — `e2eEnv()` sets a value explicitly. A new
- * flag of that kind gets the same.
+ * not hermetic: a blank flag still falls back to its default, which can be host
+ * state. `e2eEnv()` overrides two of those below.
  */
 export function blankInstanceProfile(): Record<string, string> {
   const blanked: Record<string, string> = {};
@@ -75,7 +73,5 @@ export function e2eEnv(): Record<string, string> {
   // `gh` on the machine's login; the specs stub the checks GET.
   // `DECISION_TRIAGE_DIR`: blank means `~/.muninn/decision-triage`, the developer's
   // real log; a dir nothing writes reads as no log. A spec seeding one sets its own.
-  // Shared by every spawned server and never emptied. In muninn only the nightly
-  // loop writes it, and spec servers run with the scheduler off.
   return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0", WORK_MAP_GH_CHECK: "off", DECISION_TRIAGE_DIR: path.join(tmpdir(), "muninn-e2e-no-triage-log") };
 }
