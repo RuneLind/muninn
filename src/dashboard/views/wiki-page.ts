@@ -81,8 +81,9 @@ const SVG_FOCUS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 
  * The whole page listing loads once (/api/wiki/pages) and filters client-side;
  * article + connections come per-page from /api/wiki/page.
  *
- * The client logic is a real bundled TS entrypoint (`components/wiki-browser.ts`),
- * injected below via `wikiClientScript()`.
+ * The client logic is a real bundled TS entrypoint (`components/wiki-shell-client.ts`,
+ * which calls `boot()` from `components/wiki-browser.ts`), injected below via
+ * `wikiClientScript()`.
  *
  * `wikis` populates the wiki picker — every registered wiki (bot wikis with a
  * `wikiDir` plus `WIKI_EXTRA` standalone wikis). `selected` is the canonical

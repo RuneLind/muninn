@@ -12,9 +12,9 @@
  * sentence that disagreed with the rows it opens into would be two renderers
  * disagreeing about one object.
  *
- * Pure on purpose. `wiki-browser.ts` is a 5,000-line browser entrypoint that
- * `bun test` cannot load (it touches `document` at import time), so anything
- * shaped there is provable only through Playwright. Everything here is a string
+ * Pure on purpose. `wiki-browser.ts` is a 10,000-line browser module whose
+ * code needs a DOM (`wiki-shell-boot.test.ts` boots it in happy-dom), so
+ * anything shaped there is costly to prove. Everything here is a string
  * builder over a plain payload, which is how the copy family below —
  * eight ledger states that must not collapse into each other — gets enumerated
  * in a table test instead of being spot-checked in one e2e run.

@@ -11,6 +11,7 @@ import {
   discoverTestFiles,
   expandLink,
   isPlaywrightSpec,
+  ownProcessFiles,
   sharedLinkOffenders,
   unrunMockFiles,
 } from "./mock-isolation.ts";
@@ -113,6 +114,28 @@ describe("the rule, on fixtures", () => {
     expect(l).toEqual([{ script: "test:coverage", args: [] }]);
     expect(expandLink([], all)).toEqual(all);
     expect(sharedLinkOffenders({ links: l, mockFiles: ["src/b/solo.test.ts"], allTestFiles: all })).toHaveLength(1);
+  });
+
+  test("the own-process predicate selects by directory prefix, or by a GlobalWindow import from happy-dom", () => {
+    const src: Record<string, string> = {
+      "src/dashboard/views/wiki-boot/a.test.ts": "",
+      "src/dashboard/views/components/a.test.ts": 'import { Window } from "happy-dom";',
+      "src/x/wiki-boot/a.test.ts": "",
+      "src/dashboard/views/components/g.test.ts": 'import { test } from "bun:test";\nimport { GlobalWindow } from "happy-dom";',
+      "src/y/g.test.ts": "import {\n  Window,\n  GlobalWindow,\n} from 'happy-dom';",
+      "src/z/other.test.ts": 'import { GlobalWindow } from "./my-dom";',
+      "src/q/quoted.test.ts": `const s = 'import { GlobalWindow } from "happy-dom"';`,
+      "src/d/default-named.test.ts": 'import HappyDom, { GlobalWindow } from "happy-dom";',
+      "src/d/aliased.test.ts": 'import { GlobalWindow as GW } from "happy-dom";',
+      "src/n/namespace.test.ts": 'import * as hd from "happy-dom";\nconst w = new hd.GlobalWindow();',
+    };
+    expect(ownProcessFiles(Object.keys(src), (f) => src[f]!)).toEqual([
+      "src/dashboard/views/wiki-boot/a.test.ts",
+      "src/dashboard/views/components/g.test.ts",
+      "src/y/g.test.ts",
+      "src/d/default-named.test.ts",
+      "src/d/aliased.test.ts",
+    ]);
   });
 
   test("a path argument is a substring of the file's path, as bun reads it; a leading `./` makes it a path", () => {
@@ -288,6 +311,14 @@ describe("the live chains", () => {
 
   test("every file that calls mock.module is run by at least one chain", () => {
     expect(unrunMockFiles(liveInput())).toEqual([]);
+  });
+
+  test("every own-process file (directory or GlobalWindow import) is ALONE in each bun test process that runs it, and run by a chain", () => {
+    const input = liveInput();
+    const own = ownProcessFiles(input.allTestFiles, (f) => readFileSync(join(ROOT, f), "utf8"));
+    expect(own).toContain("src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts");
+    expect(sharedLinkOffenders({ ...input, mockFiles: own })).toEqual([]);
+    expect(unrunMockFiles({ ...input, mockFiles: own })).toEqual([]);
   });
 
   /**

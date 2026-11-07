@@ -2,8 +2,7 @@
  * Connections' *Moved with* section (D10, stale check PR 1): the pages
  * committed together with the open page in non-sweep commits over 28 days,
  * as `/api/wiki/page` answers them (`stale.ts`'s `movedWith`). Pure and
- * DOM-free so a test can load it (`wiki-browser.ts` touches `document` at
- * import time).
+ * DOM-free, so a test can load it without DOM globals.
  */
 import { escHtml as esc } from "./escape.ts";
 import { connItemHtml } from "./wiki-cull-view.ts";

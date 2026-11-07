@@ -1,7 +1,7 @@
 /**
  * Pure, side-effect-free helpers for the /wiki reader's **Select-to-Explain**
- * pill. Split out of `wiki-browser.ts` (which runs DOM code at module load, so
- * it can't be imported in tests) so the label-truncation + URL-building logic
+ * pill. Split out of `wiki-browser.ts` (which then ran DOM code at module load;
+ * it is importable since `boot()`, but needs a DOM) so the label-truncation + URL-building logic
  * can be unit-tested directly — the same split rationale as `wiki-filter.ts`
  * and `wiki-ask-render.ts`.
  */

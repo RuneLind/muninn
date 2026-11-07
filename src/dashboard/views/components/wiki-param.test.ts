@@ -70,7 +70,8 @@ describe("readFindRowsWiki / readFindSelfWiki", () => {
     expect(src).toContain("selfWiki: () => FIND_ROWS_WIKI,");
     // Agent lens, new-since, answer cards, answer export.
     expect(src.match(/wiki: FIND_SELF_WIKI \|\| WIKI,/g)?.length).toBe(4);
-    // Nothing else reads the rows name: one declaration, one palette use.
-    expect(src.match(/\bFIND_ROWS_WIKI\b/g)?.length).toBe(2);
+    // Nothing else reads the rows name: the module-scope declaration, its
+    // assignment in `boot()`, one palette use.
+    expect(src.match(/\bFIND_ROWS_WIKI\b/g)?.length).toBe(3);
   });
 });

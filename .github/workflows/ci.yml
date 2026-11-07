@@ -190,7 +190,7 @@ jobs:
   # One status named `test` for the unit chain. Three green shards are not
   # enough: a link on no shard, or on two, leaves every shard green. This
   # checks the merged junit files: every file the chain runs ran exactly once,
-  # every `mock.module` file was alone in its process, a link that wrote no
+  # every `mock.module` and own-process file was alone in its process, a link that wrote no
   # junit is named as a crash, and every shard finished `success`.
   # `!cancelled()`, not `always()`: a superseded PR run would report every
   # file missing.

@@ -4,13 +4,15 @@
  *   bun scripts/test-chain.ts write                  regenerate `test` (and add new links to the shard table)
  *   bun scripts/test-chain.ts run --shard <i>/<n>    run the `test` links the table puts on shard i, one junit file per link
  *   bun scripts/test-chain.ts check [--junit <dir>] [--result <r>]… [--shard <i>/<n>]
- *                                                    the fan-in: every file ran once, mock files alone, no crash
+ *                                                    the fan-in: every file ran once, mock and own-process files alone, no crash
  *   bun scripts/test-chain.ts changed <base-ref>     time the test files this branch adds or changes, alone (10 s bar)
  *   bun scripts/test-chain.ts refresh                time every chain file alone, write scripts/unit-timings.json
  *   bun scripts/test-chain.ts rebalance              regroup link 1 onto the shards by scripts/unit-timings.json
  *
- * The chain is built from five inputs: the files bun discovers, the `mock.module` scan
- * (each such file is a link of its own, see CLAUDE.md, Testing), `PINNED` (whole
+ * The chain is built from six inputs: the files bun discovers, the `mock.module` scan
+ * (each such file is a link of its own, see CLAUDE.md, Testing) and the own-process
+ * scan (`ownProcessFiles`: happy-dom globals or boot module state, a link each the
+ * same way), `PINNED` (whole
  * links kept for other reasons), the groups in `scripts/unit-shards.json` and
  * `EXCLUDED`. A group keeps its directory arguments, so a new test file under one
  * joins it with no edit; a directory is written out file by file only when a file
@@ -26,7 +28,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
-import { BUN_TEST_FILE, MOCK_MODULE_CALL, bunTestLinks, discoverTestFiles, expandLink, isPlaywrightSpec } from "../src/test/mock-isolation.ts";
+import { BUN_TEST_FILE, MOCK_MODULE_CALL, bunTestLinks, discoverTestFiles, expandLink, isPlaywrightSpec, ownProcessFiles } from "../src/test/mock-isolation.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
 const SHARDS_PATH = path.join(ROOT, "scripts", "unit-shards.json");
@@ -130,12 +132,14 @@ export interface ShardTable {
 export interface ChainLink {
   key: string;
   args: string[];
-  kind: "group" | "pinned" | "mock";
+  kind: "group" | "pinned" | "mock" | "own";
 }
 
 export interface Tree {
   allTestFiles: readonly string[];
   mockFiles: readonly string[];
+  /** Files `ownProcessFiles` selects: alone like a mock file, for another reason. */
+  ownProcessFiles?: readonly string[];
 }
 
 export interface GenerateOptions {
@@ -158,6 +162,9 @@ export function generate(tree: Tree, table: ShardTable, opts: GenerateOptions = 
   const all = tree.allTestFiles;
   const onDisk = new Set(all);
   const mock = new Set(tree.mockFiles.filter((f) => !excluded.has(f)));
+  const own = new Set((tree.ownProcessFiles ?? []).filter((f) => !excluded.has(f) && !mock.has(f)));
+  const alone = new Set([...mock, ...own]);
+  const why = (f: string) => (mock.has(f) ? "calls mock.module" : "needs a process of its own (ownProcessFiles)");
   const problems: string[] = [];
   const owner = new Map<string, string>();
   const claim = (f: string, key: string) => {
@@ -174,15 +181,15 @@ export function generate(tree: Tree, table: ShardTable, opts: GenerateOptions = 
     for (const f of files) {
       if (!onDisk.has(f)) problems.push(`pinned link ${key} names ${f}, which is not a test file on disk`);
       else if (excluded.has(f)) problems.push(`pinned link ${key} runs ${f}, which is excluded`);
-      else if (mock.has(f)) problems.push(`pinned link ${key} runs ${f}, which calls mock.module and runs alone`);
+      else if (alone.has(f)) problems.push(`pinned link ${key} runs ${f}, which ${why(f)} and runs alone`);
       else claim(f, key);
     }
     others.push({ key, args: [...p.args], kind: "pinned" });
   }
-  for (const f of [...mock].sort()) {
+  for (const f of [...alone].sort()) {
     if (owner.has(f)) continue; // already a problem above
     claim(f, f);
-    others.push({ key: f, args: [f], kind: "mock" });
+    others.push({ key: f, args: [f], kind: mock.has(f) ? "mock" : "own" });
   }
 
   // A file outside the groups is decided before any group expands a directory.
@@ -203,8 +210,8 @@ export function generate(tree: Tree, table: ShardTable, opts: GenerateOptions = 
         for (const f of kept) claim(f, name);
       } else if (!onDisk.has(arg)) {
         problems.push(`group ${name} names ${arg}, which is not a test file on disk`);
-      } else if (mock.has(arg)) {
-        problems.push(`group ${name} names ${arg}, which calls mock.module and must run alone`);
+      } else if (alone.has(arg)) {
+        problems.push(`group ${name} names ${arg}, which ${why(arg)} and must run alone`);
       } else if (excluded.has(arg)) {
         problems.push(`group ${name} names ${arg}, which is excluded`);
       } else {
@@ -420,6 +427,7 @@ export function check(input: CheckInput): CheckResult {
   const exempt = new Set(input.exempt ?? NO_TESTS_EXEMPT);
   const excluded = excludedFiles(tree, input.excluded);
   const mock = new Set(tree.mockFiles);
+  const own = new Set(tree.ownProcessFiles ?? []);
   const problems: string[] = [...tableProblems(links, table, input.total ?? SHARD_TOTAL)];
   const warnings: string[] = [];
   for (const r of input.results) if (r !== "success") problems.push(`a unit shard finished ${r || "(no result)"}`);
@@ -442,8 +450,9 @@ export function check(input: CheckInput): CheckResult {
       for (const s of suites) {
         ranIn.set(s.file, [...(ranIn.get(s.file) ?? []), l.key]);
         testcaseSeconds.set(s.file, (testcaseSeconds.get(s.file) ?? 0) + s.testcaseSeconds);
-        if (mock.has(s.file) && suites.length > 1) {
-          problems.push(`${s.file} calls mock.module and shared its process with ${suites.length - 1} other file(s) (link ${l.key})`);
+        if ((mock.has(s.file) || own.has(s.file)) && suites.length > 1) {
+          const why = mock.has(s.file) ? "calls mock.module" : "needs a process of its own (ownProcessFiles)";
+          problems.push(`${s.file} ${why} and shared its process with ${suites.length - 1} other file(s) (link ${l.key})`);
         }
       }
     }
@@ -505,7 +514,8 @@ export function needsRetime(seconds: number): boolean {
 
 function readTree(): Tree {
   const all = discoverTestFiles(ROOT);
-  return { allTestFiles: all, mockFiles: all.filter((f) => MOCK_MODULE_CALL.test(readFileSync(path.join(ROOT, f), "utf8"))) };
+  const read = (f: string) => readFileSync(path.join(ROOT, f), "utf8");
+  return { allTestFiles: all, mockFiles: all.filter((f) => MOCK_MODULE_CALL.test(read(f))), ownProcessFiles: ownProcessFiles(all, read) };
 }
 
 export function readTable(): ShardTable {
@@ -622,7 +632,7 @@ async function cmdWrite(): Promise<number> {
   const normalized = normalizeTable(links, table, tree, readTimings());
   const tableText = JSON.stringify(normalized, null, 2) + "\n";
   if (tableText !== readFileSync(SHARDS_PATH, "utf8")) writeFileSync(SHARDS_PATH, tableText);
-  console.log(`test: ${links.length} links (${links.filter((l) => l.kind === "group").length} groups, ${links.filter((l) => l.kind === "pinned").length} pinned, ${links.filter((l) => l.kind === "mock").length} mock)`);
+  console.log(`test: ${links.length} links (${links.filter((l) => l.kind === "group").length} groups, ${links.filter((l) => l.kind === "pinned").length} pinned, ${links.filter((l) => l.kind === "mock").length} mock, ${links.filter((l) => l.kind === "own").length} own-process)`);
   return 0;
 }
 
