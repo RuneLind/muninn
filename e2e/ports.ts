@@ -237,10 +237,12 @@ export const E2E_PORTS = {
   "wiki-system-map": 3164,
   // «Walk me through»: ONE muninn over two synthetic wikis, one of them read-only.
   "wiki-walkthrough": 3165,
-  // The Your work card (plan `muninn-wiki-work-map`, P2): ONE muninn over four
-  // synthetic wikis — a fresh map, a stale one, one for the dismiss reload and
-  // one with no map, which still shows What's new.
-  "wiki-work-card": 3190,
+  // The Your work card (plan `muninn-wiki-work-map`, P2), split in three files
+  // by topic: each boots ONE muninn over the synthetic wikis
+  // `wiki-work-card-fixture.ts` seeds.
+  "wiki-work-card-slot": 3190,
+  "wiki-work-card-board": 3197,
+  "wiki-work-card-strip": 3198,
   // The effort page (work map P3): ONE muninn over a seeded-map wiki and a
   // no-map wiki.
   "wiki-effort-page": 3191,

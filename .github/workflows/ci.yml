@@ -372,6 +372,7 @@ jobs:
   # reason. The merged HTML report and the JSON are uploaded on every run;
   # `bun scripts/e2e-shards.ts refresh e2e-results.json` rewrites the timing
   # table from the JSON.
+  # It also fails once the specs missing from that table took over 60 s.
   e2e:
     needs: e2e-shard
     if: ${{ !cancelled() }}

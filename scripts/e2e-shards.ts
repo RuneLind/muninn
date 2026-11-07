@@ -18,7 +18,8 @@
  * is not, so it compares the merged report with `playwright test --list`:
  * every listed test ran exactly once (a file in two lists or in none is a
  * failure), and the set of skipped tests, each with its reason, equals
- * `e2e/ci-expected-skips.txt`.
+ * `e2e/ci-expected-skips.txt`. It also fails when the specs missing from
+ * `e2e/shard-timings.json` took more than `UNTIMED_SECONDS_LIMIT` together.
  * The skip half exists because this suite's worst failure is a spec that skips
  * itself green when its fixture is missing (e2e/CLAUDE.md).
  */
@@ -74,14 +75,33 @@ export function planShard(files: string[], timings: Timings, index: number, tota
 
 /**
  * One `::warning::` line per spec the table has no entry for. A missing entry
- * costs balance, never coverage, so this warns and never fails the plan: the
+ * costs balance, never coverage, so this warns and never fails the plan (the
+ * fan-in's `check` fails instead, past `UNTIMED_SECONDS_LIMIT`): the
  * three work-thread specs ran at 54, 97 and 17 s while `partition` charged
  * each the median, and nothing said the table was stale.
  */
 export function untimedSpecWarnings(files: string[], timings: Timings): string[] {
   return files
     .filter((f) => typeof timings[f] !== "number")
-    .map((f) => `::warning::${f} has no entry in e2e/shard-timings.json, so the plan charges it the median; run \`bun scripts/e2e-shards.ts refresh e2e-results.json\` from a green run's e2e-report artifact`);
+    .map((f) => `::warning::${f} has no entry in e2e/shard-timings.json, so the plan charges it the median; run \`bun scripts/e2e-shards.ts refresh e2e-results.json\` from the e2e-report artifact of a run whose shards all passed`);
+}
+
+/**
+ * Real seconds the specs missing from the table may take together before `check`
+ * fails. With only the warning, 18 untimed specs (401 s in run 42352843754) grew in by 2026-11-07
+ * and put 557 s on one shard against 323–442 s on the others.
+ */
+export const UNTIMED_SECONDS_LIMIT = 60;
+
+/** `check`'s staleness gate: the untimed specs' measured seconds, or null while their sum is within the limit. */
+export function untimedTimeProblem(measured: Timings, timings: Timings, limit = UNTIMED_SECONDS_LIMIT): string | null {
+  const untimed = Object.entries(measured)
+    .filter(([f]) => typeof timings[f] !== "number")
+    .sort(([a, x], [b, y]) => y - x || a.localeCompare(b));
+  const total = untimed.reduce((a, [, s]) => a + s, 0);
+  if (total <= limit) return null;
+  const list = untimed.map(([f, s]) => `${f} ${s} s`).join(", ");
+  return `specs with no entry in e2e/shard-timings.json took ${Math.round(total)} s, over the ${limit} s limit: ${list}. Run \`bun scripts/e2e-shards.ts refresh e2e-results.json\` on the e2e-report artifact of a run whose shards all passed (this one, if this check is its only failure) and commit the table`;
 }
 
 function median(xs: number[]): number | undefined {
@@ -306,6 +326,8 @@ async function main(argv: string[]): Promise<number> {
     const expectedFile = Bun.file(EXPECTED_SKIPS_PATH);
     const expected = (await expectedFile.exists()) ? parseExpectedSkips(await expectedFile.text()) : [];
     const { problems, ran, skipped } = check(listed, merged, expected);
+    const stale = untimedTimeProblem(timingsFromReport(merged), await readTimings());
+    if (stale) problems.push(stale);
     console.log(`${ran} tests ran across the shards, ${skipped.length} skipped:`);
     for (const s of skipped) console.log(`  ${s}`);
     if (problems.length === 0) return 0;
