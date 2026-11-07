@@ -39,14 +39,31 @@ function isAppModule(key: string, repoRoot: string, selfPath: string): boolean {
   return rel.startsWith("src/") && !rel.startsWith("src/test/");
 }
 
+const lowerFirst = (n: string) => n[0]!.toLowerCase() + n.slice(1);
+
+/** Bare `setX(arg)` → `x = arg`, the argument found by matching parens. */
+function setCallsToAssignments(s: string): string {
+  const re = /(?<![.\w$])set(?!Timeout\(|Interval\()([A-Z]\w*)\(/g;
+  let out = "";
+  let from = 0;
+  for (let m = re.exec(s); m; m = re.exec(s)) {
+    let depth = 1;
+    let j = re.lastIndex;
+    for (; j < s.length && depth; j++) depth += s[j] === "(" ? 1 : s[j] === ")" ? -1 : 0;
+    out += s.slice(from, m.index) + lowerFirst(m[1]!) + " = " + setCallsToAssignments(s.slice(re.lastIndex, j - 1));
+    from = re.lastIndex = j;
+  }
+  return out + s.slice(from);
+}
+
 /** A handler's identity in the listener pin: a hash of its source after the
- *  rewrites a verbatim move into a controller makes (`deps.x`→`x`, `getX()`→`x`,
- *  `setX(v)`→`x = v`, added `!`, whitespace), so a move keeps it and a swap does not. */
+ *  rewrites a verbatim move into a controller makes (`deps.x`→`x`, a bare
+ *  zero-arg call `x()`→`x` and `getX()`→`x`, a bare `setX(v)`→`x = v`, whitespace),
+ *  so a move keeps it; any other token change (a `!`, an operator, a name) does not. */
 function handlerFingerprint(source: string): string {
-  const norm = source
-    .replace(/\bdeps\./g, "")
-    .replace(/\b(get|set)([A-Z]\w*)/g, (_m, kind: string, n: string) => n[0]!.toLowerCase() + n.slice(1) + (kind === "set" ? "=" : ""))
-    .replace(/[\s;!()]/g, "");
+  const norm = setCallsToAssignments(
+    source.replace(/\bdeps\./g, "").replace(/(?<![.\w$])(\w+)\(\)/g, (_m, n: string) => (/^get[A-Z]/.test(n) ? lowerFirst(n.slice(3)) : n)),
+  ).replace(/\s/g, "");
   return Bun.hash(norm).toString(36).slice(0, 5);
 }
 
@@ -321,13 +338,21 @@ describe("isAppModule — which require.cache keys count as preloaded app module
 });
 
 describe("handlerFingerprint — survives a move, tells handlers apart", () => {
-  const before = "(e) => {\n  if (deps.filters.tag && deps.allPages().length) deps.setRailOpen(!getRailOpen());\n  deps.render(e);\n}";
+  const before =
+    "(e) => {\n  if (deps.filters.tag && deps.allPages().length) deps.setRailOpen(!deps.getRailOpen());\n  openFolds = toggleFolded(deps.WIKI(), e.key);\n  deps.render(e);\n}";
   test("the C2–C4 port rewrites leave it unchanged", () => {
-    const moved = "(e) => { if (filters!.tag && allPages().length) railOpen = !railOpen; render(e); }";
+    const moved = "(e) => {\n  if (filters.tag && allPages().length) railOpen = !railOpen;\n  openFolds = toggleFolded(WIKI, e.key);\n  render(e);\n}";
     expect(handlerFingerprint(moved)).toBe(handlerFingerprint(before));
   });
   test("a different handler gets a different one", () => {
     expect(handlerFingerprint(before.replace("render", "paint"))).not.toBe(handlerFingerprint(before));
+  });
+  test("a negation or operator flip gets a different one", () => {
+    const h = "(e) => {\n  if (!open && e.key !== \"Escape\") close();\n}";
+    for (const flipped of [h.replace("!open", "open"), h.replace("!==", "=="), h.replace("!==", "!=")]) {
+      expect(flipped).not.toBe(h);
+      expect(handlerFingerprint(flipped)).not.toBe(handlerFingerprint(h));
+    }
   });
 });
 
@@ -340,38 +365,44 @@ describe("wiki-browser.ts — listener order", () => {
     // and the handler's fingerprint (so a swap inside a run of one label fails).
     // Order captured from the pre-move code at 832e0b9b (base 00eeaa2f); a change
     // here is a reordering to justify, never to re-snapshot. Editing a handler's
-    // body changes its fingerprint only: update that one entry.
+    // body changes its fingerprint only: update that one entry. Fingerprints hash
+    // Bun's re-printed `String(fn)`, pinned by CI's BUN_VERSION: on a Bun bump, re-snapshot
+    // them only after the label-only check below passes (target/type/options unchanged).
     const label = (l: (typeof listened)[number]) =>
       [l.target, l.type, ...(l.capture ? ["capture"] : []), ...l.opts, handlerFingerprint(l.source)].join(" ");
-    expect(listened.map(label)).toEqual([
-      "document input o668b", "document toggle capture 1o8gb", "document click capture 1jua5",
-      "document selectionchange 3ev7p", "document pointerdown capture 1eqzb", "document pointerup capture 2aydd",
-      "document pointercancel capture 2aydd", "document contextmenu capture 2aydd",
-      "document pointermove capture 2tu87", "document click z7ocg", "document keydown 39stb",
-      "document keydown 3g8ca", "document change bvivh", "document mouseover 3ummx", "document focusin 3ummx",
-      "document mouseout hhszm", "document focusout 2w48x", "document keydown capture 18m4q", "window resize 2roli",
-      "#wikiRailResizer pointerdown 1pfz6", "#wikiRailResizer pointermove 3eg6i", "#wikiRailResizer pointerup 1742x",
-      "#wikiRailResizer pointercancel 1742x", "#wikiRailResizer lostpointercapture 1742x",
-      "#wikiRailResizer dblclick viezc", "#wikiRailResizer keydown 2qpq5", "document click spq77",
-      "document keydown 375t1", "#staleBody toggle capture 2t4r6", "document keydown 3i1ru",
-      "window scroll capture 3icnc", "window resize 1pllj", "document click 2qz7k", "document submit 3a7oo",
-      "document mouseover 241o3", "document mouseout 2zgwm", "document focusin 2pk43", "document change q8wsl",
-      "document keydown capture 2bjao", "document keydown 15zmf", "document keydown 2xocs", "body click 2gr2j",
-      "document click 2rfiw", "document keydown 11yw5", "document keydown 1hrkk", "window scroll capture 3inxc",
-      "window resize ezw5m", "#wikiList click 2dh9c", "#wikiSearch input vuk2k", "#domainChips click 1pz3q",
-      "#wikiFolder change 18su4", "#typeChips click 1uu71", "#statusChips click oskq1", "#projectChips click ucr8z",
-      "#jiraChips click ienyi", "#tagChips click 2wcpp", "#wikiSort change 2z54o", "#wikiGroupFamilies change 1zs3o",
-      "#wikiGroupEfforts change xpzlm", "#wikiShowRetired change 31ggc", "#wikiFiltersBtn click 19dyl",
-      "#wikiFilters toggle 313od", "#wikiOptionsBtn click 2ao38", "document pointerdown c4xo9",
-      "document focusin 1f0gm", "document keydown capture 3q6ca", "#wikiActiveOptions click 3hfqd",
-      "#wikiSelect change 1cdex", "window hashchange 8vr2p", "window popstate 1g2xx", "#wikiAskBtn click 2otgq",
-      "#wikiAskInput keydown 3by6q", "#wikiAskHistory click 397kl", "document click 3c964", "document keydown 2gfie",
-      "document click h5lbk", "document change 1q701", "document input 354ch", "document keydown xo9a3",
-      "document change 2rd7b", "document toggle capture 1aw8m", "document keydown 29aya",
-      "#articleWrap mouseup 346qg", "document selectionchange 1grio", "document keydown d1wzz",
-      "document mousedown o5dci", "window message 1ukk1", "window storage 1xqqr", "#wikiList keydown 1uyyu",
-      "document keydown 1cwoh", "document click 2sbpb", "window focus 2n46m", "document visibilitychange bdalg",
-    ]);
+    const PINNED = [
+      "document input 2lr9x", "document toggle capture 1hmo1", "document click capture xplwj",
+      "document selectionchange 2rr9w", "document pointerdown capture 1kth3", "document pointerup capture g28bu",
+      "document pointercancel capture g28bu", "document contextmenu capture g28bu",
+      "document pointermove capture 1qtti", "document click 23ej6", "document keydown hlssx", "document keydown yo4j6",
+      "document change e5k9f", "document mouseover 1s9vt", "document focusin 1s9vt", "document mouseout 3fqd2",
+      "document focusout 78yv1", "document keydown capture 3m8dl", "window resize 9x9xn",
+      "#wikiRailResizer pointerdown s1ktq", "#wikiRailResizer pointermove 2zrwk", "#wikiRailResizer pointerup 2ipmi",
+      "#wikiRailResizer pointercancel 2ipmi", "#wikiRailResizer lostpointercapture 2ipmi",
+      "#wikiRailResizer dblclick 2ix69", "#wikiRailResizer keydown 1hhyy", "document click 29t84",
+      "document keydown 25kek", "#staleBody toggle capture 2a2m2", "document keydown 3nsjp",
+      "window scroll capture p45k6", "window resize 2km4o", "document click 1bnhl", "document submit 3msp4",
+      "document mouseover 1czfm", "document mouseout 2u68x", "document focusin 3ui45", "document change 1cb94",
+      "document keydown capture 2pgt9", "document keydown 2gxm7", "document keydown 1hysz", "body click 20r2i",
+      "document click 33ul7", "document keydown 1mf3n", "document keydown 2p96v", "window scroll capture 17plc",
+      "window resize 24jk9", "#wikiList click jjzww", "#wikiSearch input 2darq", "#domainChips click 7wyxo",
+      "#wikiFolder change 1ytiq", "#typeChips click 1oh5g", "#statusChips click 348ix", "#projectChips click 17olm",
+      "#jiraChips click 2ea4q", "#tagChips click 2hy5a", "#wikiSort change 5y9t3", "#wikiGroupFamilies change 35ij3",
+      "#wikiGroupEfforts change x5cu4", "#wikiShowRetired change vdddp", "#wikiFiltersBtn click 38n1w",
+      "#wikiFilters toggle 1cx2k", "#wikiOptionsBtn click 80q4g", "document pointerdown 3edk0",
+      "document focusin 3l9rj", "document keydown capture 1c2w7", "#wikiActiveOptions click 19s7n",
+      "#wikiSelect change 3le4p", "window hashchange kobbe", "window popstate 24ens", "#wikiAskBtn click 7m320",
+      "#wikiAskInput keydown 36h0q", "#wikiAskHistory click 13b99", "document click 1vfg7", "document keydown 2zmrp",
+      "document click 1ha77", "document change 1typa", "document input smycp", "document keydown 2bnv5",
+      "document change kqu5p", "document toggle capture 2ac08", "document keydown 35n5s", "#articleWrap mouseup 2roml",
+      "document selectionchange 33rjq", "document keydown crscu", "document mousedown m9lmg", "window message 30vgu",
+      "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",
+      "window focus 8kg09", "document visibilitychange 29s0r",
+    ];
+    // The labels alone first, so a failure says whether the order moved or only a fingerprint did.
+    const withoutFingerprint = (s: string) => s.slice(0, s.lastIndexOf(" "));
+    expect(listened.map(label).map(withoutFingerprint)).toEqual(PINNED.map(withoutFingerprint));
+    expect(listened.map(label)).toEqual(PINNED);
   });
 
   test("the shell's click delegate is registered before initChatOptions' (dialog click-away reads a detached target)", () => {

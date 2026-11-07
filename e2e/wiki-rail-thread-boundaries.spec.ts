@@ -1681,6 +1681,23 @@ test.describe("Wiki rail: popover close focus (class check)", () => {
       focus: (p) => p.locator("#wikiWorkPop [data-work-keep]"),
       open: true,
     },
+    {
+      // The last fallback: a filter hid the opener's card (no opener by key,
+      // no card ⋯ or fold) and the Group button stays drawn for the lone card.
+      name: "Escape after a filter hides its card: the Group button",
+      pop: "work popover",
+      act: async (p) => {
+        await p.locator("#wikiFolder").evaluate((sel: HTMLSelectElement) => {
+          sel.value = "notes";
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+        await expect(card(p, TKEY)).toHaveCount(0);
+        await expect(groupBtn(p)).toHaveCount(1);
+        await expect(p.locator(MENU["work popover"])).toHaveCount(1);
+        await p.keyboard.press("Escape");
+      },
+      focus: groupBtn,
+    },
     { name: "Make own thread: the split card's fold", pop: "page menu", act: (p) => p.keyboard.press("Enter"), focus: (p) => card(p, TSPLIT).locator(":scope > .wiki-thread-fold") },
     { name: "Keep separate: the kept-apart card's ⋯", pop: "work popover", act: (p) => p.keyboard.press("Enter"), focus: workOpener },
   ];
