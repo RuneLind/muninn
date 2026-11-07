@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   EXCLUDED,
@@ -18,13 +19,16 @@ import {
   parseJunit,
   readTable,
   rebalance,
+  refreshTimings,
   tableProblems,
+  timeAlone,
   type ChainLink,
   type CheckInput,
   type ShardTable,
   type Tree,
 } from "./test-chain.ts";
 import { MOCK_MODULE_CALL, TEST_FILE_DIRS, TEST_FILE_GLOB } from "../src/test/mock-isolation.ts";
+import { testTempDirSync } from "../src/test/temp-dir.ts";
 
 const ROOT = path.join(import.meta.dir, "..");
 
@@ -164,6 +168,13 @@ describe("generate", () => {
   test("dropping the exclude entry puts the excluded file in no link", () => {
     const { problems } = generate(tree, table, { pinned });
     expect(problems).toEqual(["src/x.test.ts is in no link: add it to a group in scripts/unit-shards.json, or pin it"]);
+  });
+
+  test("an excluded file under a group directory writes that directory out file by file, so bun never runs it", () => {
+    const t: Tree = { ...tree, allTestFiles: [...tree.allTestFiles, "src/a/x.test.ts"].sort() };
+    const { links, problems } = generate(t, table, { pinned, excluded: [...excluded, "src/a/x.test.ts"] });
+    expect(problems).toEqual([]);
+    expect(links.find((l) => l.key === "g1")!.args).toEqual(["src/a/one.test.ts", "src/a/two.test.ts"]);
   });
 
   test("dropping a pinned entry leaves its file in no link", () => {
@@ -347,6 +358,7 @@ describe("the changed-file step", () => {
 
   test("a file within 2 s over the 10 s bar is timed again; under the bar or further over is not", () => {
     expect(needsRetime(9.9)).toBe(false);
+    expect(needsRetime(10)).toBe(false); // exactly on the bar passes (the step fails only `> 10`), so no second timing
     expect(needsRetime(10.1)).toBe(true);
     expect(needsRetime(12)).toBe(true);
     expect(needsRetime(12.1)).toBe(false);
@@ -356,5 +368,45 @@ describe("the changed-file step", () => {
     const { files, problems } = parseAllowlist("# header\nsrc/a.test.ts  # real ffmpeg\nsrc/b.test.ts\n");
     expect([...files]).toEqual(["src/a.test.ts", "src/b.test.ts"]);
     expect(problems).toEqual(["allowlist entry without a reason: src/b.test.ts"]);
+  });
+});
+
+describe("timeAlone", () => {
+  // A grandchild that inherits the pipes keeps them open after its parent dies.
+  const fixture = (body: string) => {
+    const f = path.join(testTempDirSync(path.join(tmpdir(), "time-alone-")), "fixture.ts");
+    writeFileSync(f, body);
+    return f;
+  };
+
+  test("a timed-out run returns at the timeout, reported as a timeout, though a grandchild holds the pipes", async () => {
+    const f = fixture(`Bun.spawn(["sleep", "8"], { stdout: "inherit", stderr: "inherit" });\nsetInterval(() => {}, 1000);\n`);
+    const t0 = performance.now();
+    const r = await timeAlone(f, { argv: ["bun", f], timeoutMs: 1500 });
+    expect((performance.now() - t0) / 1000).toBeLessThan(4);
+    expect(r.timedOut).toBe(true);
+  }, 15_000);
+
+  test("a run that exits while a grandchild outside its group holds the pipes returns promptly, not as a timeout", async () => {
+    const f = fixture(`Bun.spawn(["sleep", "8"], { stdout: "inherit", stderr: "inherit", detached: true }).unref();\nconsole.log("done");\n`);
+    const t0 = performance.now();
+    const r = await timeAlone(f, { argv: ["bun", f], timeoutMs: 6000 });
+    expect((performance.now() - t0) / 1000).toBeLessThan(4);
+    expect(r.timedOut).toBe(false);
+    expect(r.code).toBe(0);
+    expect(r.output).toContain("done");
+  }, 15_000);
+});
+
+describe("refreshTimings", () => {
+  test("a failed or timed-out file gets no timing entry and is reported", () => {
+    const r = refreshTimings([
+      { file: "ok.test.ts", run: { seconds: 1.23, code: 0, output: "", timedOut: false } },
+      { file: "fail.test.ts", run: { seconds: 2, code: 1, output: "", timedOut: false } },
+      { file: "slow.test.ts", run: { seconds: 300, code: 137, output: "", timedOut: true } },
+    ]);
+    expect(r.seconds).toEqual({ "ok.test.ts": 1.2 });
+    expect(r.failed).toEqual(["fail.test.ts"]);
+    expect(r.timedOut).toEqual(["slow.test.ts"]);
   });
 });

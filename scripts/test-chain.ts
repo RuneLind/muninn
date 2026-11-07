@@ -546,16 +546,46 @@ export interface AloneRun {
   seconds: number;
   code: number;
   output: string;
+  /** Killed at the timeout: its seconds are not a timing. */
+  timedOut: boolean;
 }
 
-/** One file alone in its own `bun test` process, wall clock. `argv` and `timeoutMs` are for tests. */
+/** How long the pipes may stay open after the run ends: a grandchild that inherited them can hold them for good. */
+const PIPE_GRACE_MS = 1_000;
+
+async function drain(stream: ReadableStream<Uint8Array>, sink: string[]): Promise<void> {
+  const dec = new TextDecoder();
+  const reader = stream.getReader();
+  for (let r = await reader.read(); !r.done; r = await reader.read()) sink.push(dec.decode(r.value, { stream: true }));
+}
+
+/**
+ * One file alone in its own `bun test` process, wall clock. The process gets its
+ * own group and the whole group is killed when it ends, so neither a timeout nor a
+ * leaked grandchild holding the pipes can keep this waiting. `argv` and
+ * `timeoutMs` are for tests.
+ */
 export async function timeAlone(file: string, opts: { argv?: string[]; timeoutMs?: number } = {}): Promise<AloneRun> {
   const t0 = performance.now();
-  const proc = Bun.spawn(opts.argv ?? ["bun", "test", file], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => proc.kill("SIGKILL"), opts.timeoutMs ?? ALONE_TIMEOUT_MS);
-  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  const proc = Bun.spawn(opts.argv ?? ["bun", "test", file], { cwd: ROOT, stdout: "pipe", stderr: "pipe", detached: true });
+  const out: string[] = [];
+  const err: string[] = [];
+  const pipes = Promise.all([drain(proc.stdout, out), drain(proc.stderr, err)]).catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const ended = await Promise.race([
+    proc.exited.then(() => "exited" as const),
+    new Promise<"timeout">((resolve) => (timer = setTimeout(() => resolve("timeout"), opts.timeoutMs ?? ALONE_TIMEOUT_MS))),
+  ]);
   clearTimeout(timer);
-  return { seconds: (performance.now() - t0) / 1000, code, output: `${out}${err}` };
+  const seconds = (performance.now() - t0) / 1000;
+  try {
+    process.kill(-proc.pid, "SIGKILL");
+  } catch {
+    // ESRCH: the group is already gone
+  }
+  const code = await proc.exited;
+  await Promise.race([pipes, Bun.sleep(PIPE_GRACE_MS)]);
+  return { seconds, code, output: `${out.join("")}${err.join("")}`, timedOut: ended === "timeout" };
 }
 
 function tail(text: string, n = 40): string {
@@ -639,12 +669,15 @@ async function cmdChanged(argv: string[]): Promise<number> {
   for (const f of files) {
     let r = await timeAlone(f);
     let line = `${r.seconds.toFixed(1).padStart(6)} s  ${f}`;
-    if (r.code === 0 && needsRetime(r.seconds) && !allow.files.has(f)) {
+    if (!r.timedOut && r.code === 0 && needsRetime(r.seconds) && !allow.files.has(f)) {
       r = await timeAlone(f);
       line += `  (again: ${r.seconds.toFixed(1)} s)`;
     }
     console.log(line);
-    if (r.code !== 0) {
+    if (r.timedOut) {
+      problems.push(`${f} timed out: killed after ${ALONE_TIMEOUT_MS / 1000} s alone`);
+      console.log(tail(r.output));
+    } else if (r.code !== 0) {
       problems.push(`${f} fails when run alone (exit ${r.code})`);
       console.log(tail(r.output));
     } else if (r.seconds > SLOW_FILE_SECONDS && !allow.files.has(f)) {
@@ -656,14 +689,16 @@ async function cmdChanged(argv: string[]): Promise<number> {
 }
 
 /** The timing table `refresh` writes from its runs, and the files that failed. */
-export function refreshTimings(runs: readonly { file: string; run: AloneRun }[]): { seconds: Record<string, number>; failed: string[] } {
+export function refreshTimings(runs: readonly { file: string; run: AloneRun }[]): { seconds: Record<string, number>; failed: string[]; timedOut: string[] } {
   const seconds: Record<string, number> = {};
   const failed: string[] = [];
+  const timedOut: string[] = [];
   for (const { file, run } of runs) {
-    seconds[file] = Math.round(run.seconds * 10) / 10;
-    if (run.code !== 0) failed.push(file);
+    if (run.timedOut) timedOut.push(file);
+    else if (run.code !== 0) failed.push(file);
+    else seconds[file] = Math.round(run.seconds * 10) / 10;
   }
-  return { seconds, failed };
+  return { seconds, failed, timedOut };
 }
 
 async function cmdRefresh(): Promise<number> {
@@ -673,16 +708,17 @@ async function cmdRefresh(): Promise<number> {
   for (const [i, f] of files.entries()) {
     const r = await timeAlone(f);
     runs.push({ file: f, run: r });
-    console.log(`[${i + 1}/${files.length}] ${r.seconds.toFixed(1).padStart(6)} s${r.code === 0 ? "" : `  exit ${r.code}`}  ${f}`);
-    if (r.code !== 0) console.log(tail(r.output));
+    console.log(`[${i + 1}/${files.length}] ${r.seconds.toFixed(1).padStart(6)} s${r.timedOut ? "  TIMED OUT" : r.code === 0 ? "" : `  exit ${r.code}`}  ${f}`);
+    if (r.timedOut || r.code !== 0) console.log(tail(r.output));
   }
-  const { seconds, failed } = refreshTimings(runs);
+  const { seconds, failed, timedOut } = refreshTimings(runs);
   const sha = process.env.GITHUB_SHA ?? Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: ROOT }).stdout.toString().trim();
   const source = `refresh: each file alone, wall clock, on ${process.env.GITHUB_ACTIONS ? "a CI runner" : hostname()} at ${sha.slice(0, 8)}, ${new Date().toISOString().slice(0, 10)}`;
   writeFileSync(TIMINGS_PATH, JSON.stringify({ source, seconds }, null, 2) + "\n");
-  console.log(`wrote ${files.length} files to scripts/unit-timings.json`);
-  for (const f of failed) console.log(`::error::${f} failed when run alone`);
-  return failed.length === 0 ? 0 : 1;
+  console.log(`wrote ${Object.keys(seconds).length} of ${files.length} files to scripts/unit-timings.json; a file that failed or timed out gets no entry`);
+  for (const f of failed) console.log(`::error::${f} failed when run alone (no timing recorded)`);
+  for (const f of timedOut) console.log(`::error::${f} timed out after ${ALONE_TIMEOUT_MS / 1000} s alone (no timing recorded)`);
+  return failed.length + timedOut.length === 0 ? 0 : 1;
 }
 
 async function cmdRebalance(): Promise<number> {
