@@ -12,7 +12,7 @@ test("a spawned e2e muninn reads no developer triage log: DECISION_TRIAGE_DIR is
   expect(dir.startsWith(path.join(homedir(), ".muninn"))).toBe(false);
 });
 
-test("a scheduler-on spec server keeps every row the hourly retention cleanup would delete from the shared test database", () => {
+test("a scheduler-on spec server sets every configurable retention window of the hourly cleanup past any row of the shared test database", () => {
   const env = schedulerOnEnv();
   expect(env.SCHEDULER_ENABLED).toBe("true");
   // The cleanup runs whenever the scheduler is on (`startRetentionCleanup`), and the seed

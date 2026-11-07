@@ -43,8 +43,8 @@ export interface TriagePassOutcome {
 /**
  * One decision-triage pass at a time in this process, shared by the loop's hourly
  * check and `POST /api/wiki/decision-triage/run`: null while one is held. The
- * release is the holder's own and idempotent, so a late release, after the loop's
- * bound or stop has let go, cannot free a later holder.
+ * release is the holder's own and idempotent, so a second release, or one from
+ * a holder that is no longer current, cannot free a later holder.
  */
 let triageHolder: symbol | null = null;
 export function tryHoldTriagePass(): (() => void) | null {

@@ -80,8 +80,9 @@ export function e2eEnv(): Record<string, string> {
  * For a spec server that needs `SCHEDULER_ENABLED=true` (the decision triage's pass
  * is on only then): the scheduler's other passes kept off the shared test database.
  * No stale-confirm wikis (no model call). Nothing turns the hourly retention cleanup
- * off but the scheduler switch, so its windows are set past any row's age: the seed
- * trace `db:seed:e2e` writes once keeps its first date and must survive it.
+ * off but the scheduler switch, so its configurable windows are set past any row's
+ * age: the seed trace `db:seed:e2e` writes once keeps its first date and must survive
+ * it. The stale-verdict delete keeps a fixed 90 days that no env changes.
  */
 export function schedulerOnEnv(): Record<string, string> {
   const keep = "36500";
