@@ -47,7 +47,12 @@ export function baseCheckVerdict(ref: string, relPath: string, base: BaseAllowli
   const sign = d.head - d.base > 0 ? "+" : "";
   const detail = [...d.added.map((l) => `  added: ${l}`), ...d.removed.map((l) => `  removed: ${l}`)];
   const counts = `${d.base} -> ${d.head} entries (${sign}${d.head - d.base}) over ${ref}`;
-  if (d.head <= d.base) return { code: 0, lines: [`--check-base: ${relPath} ${counts}`, ...detail] };
+  if (d.head <= d.base) {
+    // A swap (fix one upward import, add another) also keeps the count, and git cannot tell it
+    // from a move, so an added line passes with an annotation the PR shows.
+    const warn = d.added.map((l) => `::warning::${relPath} adds ${l} while the count does not grow: a moved file, or a new upward import that replaces a fixed one; the PR body says which`);
+    return { code: 0, lines: [...warn, `--check-base: ${relPath} ${counts}`, ...detail] };
+  }
   return {
     code: 1,
     lines: [

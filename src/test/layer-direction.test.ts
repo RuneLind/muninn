@@ -189,6 +189,16 @@ describe("--check-base: the list's entry count may not grow over the base", () =
   test("a base without the list: exit 0", () => {
     expect(baseCheckVerdict("BASE", rel, { kind: "no-file" }, "a -> b\n").code).toBe(0);
   });
+  test("an added entry at the same or a lower count passes with a warning naming it (a rename and a swap look alike)", () => {
+    const v = verdict("# head\na -> b\nx -> y\n");
+    expect(v.code).toBe(0);
+    expect(v.lines[0]).toBe("::warning::scripts/layer-allowlist.txt adds x -> y while the count does not grow: a moved file, or a new upward import that replaces a fixed one; the PR body says which");
+  });
+  test("no added entry: no warning", () => {
+    const v = verdict("# head\na -> b\n");
+    expect(v.code).toBe(0);
+    expect(v.lines.some((l) => l.startsWith("::warning::"))).toBe(false);
+  });
   test("a ref that is not a commit: exit 2", () => {
     expect(baseCheckVerdict("BASE", rel, { kind: "bad-ref" }, "a -> b\n").code).toBe(2);
   });

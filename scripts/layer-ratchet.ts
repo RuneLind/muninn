@@ -10,8 +10,9 @@
  * entry. CI's `layer-ratchet` job runs `--check-base` on every pull request against the
  * base its merge commit was built on, so a PR that adds an upward import together with
  * its list line is still red there. The count is the ratchet: a moved file renames its
- * entries and passes. A growth is a reviewed exception: the PR body says why, and only
- * the `layer-ratchet` status is red.
+ * entries and passes with a warning per added line. A swap (one fixed, an unrelated one
+ * added) passes the same way, since the text cannot tell it from a move. A growth is a
+ * reviewed exception: the PR body says why, and only the `layer-ratchet` status is red.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
