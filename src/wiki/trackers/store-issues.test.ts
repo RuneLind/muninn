@@ -22,7 +22,7 @@ import {
   jiraChipRow,
   type WikiFilters,
   type WikiListing,
-} from "../../dashboard/views/components/wiki-filter.ts";
+} from "../core/wiki-filter.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 
 const url = (k: string) => `https://example.invalid/browse/${k}`;

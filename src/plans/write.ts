@@ -36,7 +36,7 @@
 
 import path from "node:path";
 import { unlink } from "node:fs/promises";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { runWikiWriteExclusive } from "../wiki/queue.ts";
 import {
   isReadonlyWikiRoot,

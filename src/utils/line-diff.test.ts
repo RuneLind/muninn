@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { lineDiff, trimDiffContext } from "./diff.ts";
+import { lineDiff, trimDiffContext } from "./line-diff.ts";
 
 describe("lineDiff", () => {
   test("all context when unchanged", () => {

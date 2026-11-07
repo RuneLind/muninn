@@ -22,7 +22,7 @@ import { findLedgers } from "../format/pr-ledger.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import { parseFrontmatter, readPlanStatus } from "./store.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
-import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
+import { fencedLineMask, frontmatterEndLine } from "./core/wiki-integrate.ts";
 import type { WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 import { findUnfencedLine as findLine } from "./lint-lines.ts";

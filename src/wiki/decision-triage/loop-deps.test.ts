@@ -12,6 +12,7 @@ import { commitAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 const LOOP_DEPS = path.join(import.meta.dir, "loop-deps.ts");
 const LOGTAPE = Bun.resolveSync("@logtape/logtape", import.meta.dir);
 const LOG = path.join(import.meta.dir, "log.ts");
+const AGENT_STATUS = path.join(import.meta.dir, "..", "..", "observability", "agent-status.ts");
 
 /** Runs `steps` (a function body over `deps`, `step`, `root`), returning what each `step(...)` saw and the log lines. `model` is more of the run's seams. */
 async function drive(steps: string, env: Record<string, string>, tmp: string, model = "") {
@@ -19,6 +20,7 @@ async function drive(steps: string, env: Record<string, string>, tmp: string, mo
   writeFileSync(driver, `
 import { configure } from ${JSON.stringify(LOGTAPE)};
 import { realTriageLoopDeps } from ${JSON.stringify(LOOP_DEPS)};
+import { agentStatus } from ${JSON.stringify(AGENT_STATUS)};
 import { appendLogLines, readLog } from ${JSON.stringify(LOG)};
 import { renameSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 const lines: string[] = [];
@@ -28,7 +30,11 @@ const logs = ${JSON.stringify(path.join(tmp, "logs"))};
 const answerAll = (prompt: string, only?: number) => JSON.stringify({ verdicts: [...prompt.matchAll(/"card": "(c\\d+)"/g)].slice(0, only).map((m) => ({ card: m[1], verdict: "DEFAULT", costOfDelay: "low", reversible: true, onlyOwnerHas: null, why: "w", evidence: [], restsOnPrs: [] })) });
 let calls = 0;
 const seams = { answers: async () => [], floor: async () => ({ labelled: 0, added: 0, addedPages: 0, met: false }) };
-const deps = realTriageLoopDeps(config as never, logs, { ...seams, ${model} })!;
+const finishes: { status: string; attrs: Record<string, unknown> }[] = [];
+const tracer = () => ({ traceId: "t-" + (finishes.length + 1), finish: (status: string, attrs: Record<string, unknown> = {}) => void finishes.push({ status, attrs }) });
+/** Every \`/agents\` run the pass opened, live or completed. */
+const agentRuns = () => agentStatus.getAll().map((r) => ({ kind: r.kind, name: r.name, completed: !!r.completed, status: r.status ?? null, traceId: r.traceId ?? null }));
+const deps = realTriageLoopDeps(config as never, logs, { ...seams, ${model} }, tracer)!;
 /** Until the log holds n card lines. */
 const logged = async (n: number) => {
   for (let i = 0; i < 2000; i++) {
@@ -254,7 +260,7 @@ seen.push(await deps.readState("a"));
     expect(runs[0]).toMatchObject({ outcome: "partial", cards: 25, usage: { calls: 2, costUsd: 1 } });
     expect(String(runs[0]!.reason)).toStartWith("disk full; 25 verdict(s)");
     expect(lines.filter((l) => l.type === "card").every((c) => c.runId === runs[0]!.runId)).toBe(true);
-    expect(seen[0]).toEqual({ outcome: "partial" });
+    expect(seen[0]).toEqual({ outcome: "partial", cards: 25 });
     expect((seen[1] as unknown as { attempts: { outcome: string }[] }).attempts[0]!.outcome).toBe("ok");
   });
 
@@ -324,5 +330,47 @@ describe("a night's one warning", () => {
     const { seen, lines } = await drive(RUN, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) })`);
     expect(seen[0]).toMatchObject({ outcome: "ok" });
     expect(warnings(lines)).toEqual(["warning Decision triage for a: ok: 1 card(s) over the call's size limit"]);
+  });
+});
+
+describe("every pass is one /agents run and one stamped span", () => {
+  const RUN = `
+const p = deps.run("a", new AbortController().signal);
+seen.push(agentRuns());
+try { seen.push(await p); } catch (err) { seen.push({ threw: (err as Error).message.length > 0 }); }
+seen.push(agentRuns(), finishes);
+`;
+  const page = (a: string, body: string) => {
+    mkdirSync(path.join(a, "plans"));
+    writeFileSync(path.join(a, "plans", "p.mdx"), `---\ntitle: T\n---\n# T\n\n<Question id="O1" choices="A|B">\n${body}\n</Question>\n`);
+  };
+
+  test("a pass opens a decision_triage run and closes it ok with the card count", async () => {
+    const w = wikis();
+    page(w.a, "Skal vi?\n\n**Recommendation: A.** Fordi.");
+    const { seen } = await drive(RUN, w.env, w.tmp);
+    expect(seen[0]).toEqual([{ kind: "decision_triage", name: "Decision triage: a", completed: false, status: null, traceId: null }]);
+    expect(seen[1]).toMatchObject({ outcome: "ok", cards: 1 });
+    expect(seen[2]).toEqual([{ kind: "decision_triage", name: "Decision triage: a", completed: true, status: "ok", traceId: "t-1" }]);
+    expect(seen[3]).toEqual([{ status: "ok", attrs: expect.objectContaining({ agentKind: "decision_triage", agentName: "Decision triage: a", wiki: "a", outcome: "ok", cards: 1 }) }]);
+  });
+
+  test("a refused pass closes as an error", async () => {
+    const w = wikis();
+    const { seen } = await drive(RUN, w.env, w.tmp);
+    expect(seen[1]).toMatchObject({ outcome: "refused", reason: "the wiki has no pages" });
+    expect(seen[2]).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    expect(seen[3]).toEqual([{ status: "error", attrs: expect.objectContaining({ agentKind: "decision_triage", outcome: "refused" }) }]);
+  });
+
+  test("a pass that throws closes as an error and rethrows", async () => {
+    const w = wikis();
+    page(w.a, "Skal vi?");
+    // A file where the log folder goes: the run line and the failure record both throw.
+    writeFileSync(path.join(w.tmp, "logs"), "not a folder");
+    const { seen } = await drive(RUN, w.env, w.tmp);
+    expect(seen[1]).toEqual({ threw: true });
+    expect(seen[2]).toEqual([expect.objectContaining({ kind: "decision_triage", completed: true, status: "error" })]);
+    expect(seen[3]).toEqual([{ status: "error", attrs: expect.objectContaining({ agentKind: "decision_triage", agentName: "Decision triage: a", outcome: "failed" }) }]);
   });
 });

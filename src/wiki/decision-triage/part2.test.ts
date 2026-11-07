@@ -2,7 +2,7 @@
  *  known before the model is known before the model. */
 
 import { describe, expect, test } from "bun:test";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256 } from "../../utils/date-hash.ts";
 import type { LabelledAnswer } from "./history.ts";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { amendWithHand, cardDoneToday, currentLog, finalRefusal, handSample, parseScoringRecords, part2Day, part2Plan, runPart2, scoringGate, sinceAfterWindow, type ScoringRecord, type ScoringRecords } from "./part2.ts";

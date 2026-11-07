@@ -32,6 +32,8 @@
  * server. A spec that spreads only `blankBotTokens()` is the shape of the bug.
  */
 
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { AMBIENT_INSTANCE_ENV, AMBIENT_INSTANCE_ENV_PREFIXES } from "../src/test/ambient-env.ts";
 import { blankBotTokens, envNamesMatchingPrefixes } from "./blank-bot-tokens.ts";
 
@@ -40,7 +42,9 @@ import { blankBotTokens, envNamesMatchingPrefixes } from "./blank-bot-tokens.ts"
  * needs no scan of the dotenv files: the names are a fixed, known list, and
  * assigning `""` to one the host never set is inert — an unset flag and an empty
  * one resolve identically in every reader (`optionalEnvFlag`, the comma-split
- * parsers, and `resolveAuthConfig`'s `off` default).
+ * parsers, and `resolveAuthConfig`'s `off` default). Blanking makes a flag inert,
+ * not hermetic: a blank flag still falls back to its default, which can be host
+ * state. `e2eEnv()` overrides two of those below.
  */
 export function blankInstanceProfile(): Record<string, string> {
   const blanked: Record<string, string> = {};
@@ -67,5 +71,26 @@ export function e2eEnv(): Record<string, string> {
   // developer's own muninn already holds (D43, the #670 follow-up).
   // `WORK_MAP_GH_CHECK: "off"`: blank means on, and no spec server may spawn
   // `gh` on the machine's login; the specs stub the checks GET.
-  return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0", WORK_MAP_GH_CHECK: "off" };
+  // `DECISION_TRIAGE_DIR`: blank means `~/.muninn/decision-triage`, the developer's
+  // real log; a dir nothing writes reads as no log. A spec seeding one sets its own.
+  return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0", WORK_MAP_GH_CHECK: "off", DECISION_TRIAGE_DIR: path.join(tmpdir(), "muninn-e2e-no-triage-log") };
+}
+
+/**
+ * For a spec server that needs `SCHEDULER_ENABLED=true` (the decision triage's pass
+ * is on only then): the scheduler's other passes kept off the shared test database.
+ * No stale-confirm wikis (no model call). Nothing turns the hourly retention cleanup
+ * off but the scheduler switch, so its configurable windows are set past any row's
+ * age: the seed trace `db:seed:e2e` writes once keeps its first date and must survive
+ * it. The stale-verdict delete keeps a fixed 90 days that no env changes.
+ */
+export function schedulerOnEnv(): Record<string, string> {
+  const keep = "36500";
+  return {
+    SCHEDULER_ENABLED: "true",
+    WIKI_STALE_CONFIRM_WIKIS: "",
+    TRACING_RETENTION_DAYS: keep,
+    PROMPT_SNAPSHOTS_RETENTION_DAYS: keep,
+    PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS: keep,
+  };
 }

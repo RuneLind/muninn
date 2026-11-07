@@ -40,8 +40,8 @@ import {
   type Block,
   type ListChild,
 } from "../format/markdown-ast.ts";
-import { fenceLineStates, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
-import { todayOslo } from "../gardener/util.ts";
+import { fenceLineStates, frontmatterEndLine } from "./core/wiki-integrate.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 import { parseFrontmatter, type WikiPageMeta } from "./store.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import type { LintFinding } from "./lint.ts";

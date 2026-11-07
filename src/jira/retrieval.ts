@@ -24,6 +24,7 @@
 
 import { badgeFromCollectionMeta } from "../research/corpus.ts";
 import type { JiraCitation, JiraDepth } from "./wire.ts";
+import { JIRA_KEY_SOURCE } from "../utils/jira-key-source.ts";
 
 /** The collection whose docs ARE Jira issues — the one `verify-keys` resolves against. */
 export const JIRA_ISSUES_COLLECTION = "jira-issues";
@@ -58,18 +59,6 @@ export const JIRA_MAX_SOURCES_BY_DEPTH: Record<JiraDepth, number> = {
   // `Full` widens over the STORED set (design call 2's grounding budget).
   full: JIRA_STORED_MAX_SOURCES,
 };
-
-/**
- * THE Jira key shape — one source, two consumers.
- *
- * `verify-keys.ts` scans the generated markdown with it and this module reads it
- * off a doc id; they shipped as two regexes that DISAGREED (prefix ≥1 vs ≥2
- * characters, ≤∞ vs ≤7 digits), which means a key could be extracted from the
- * draft and never found in the index, or the other way round — a red row for a
- * real issue. Digits go to 8: MELOSYS is at 5 figures and a corpus that reaches
- * 7 would otherwise start failing silently.
- */
-export const JIRA_KEY_SOURCE = "[A-Z][A-Z0-9]{1,15}-\\d{1,8}";
 
 /**
  * Pull the Jira key out of a `jira-issues` doc id (`<KEY>_<slug>.md`).

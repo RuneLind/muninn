@@ -17,7 +17,7 @@
  * another page, and the reader's accept is the gate.
  */
 
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { neutralizePromptTags } from "../utils/prompt-fence.ts";
 import { extractLineUrls, linkKey } from "../youtube/description-links.ts";
 import { stripSummaryFactcheckBlock } from "./factcheck-block.ts";

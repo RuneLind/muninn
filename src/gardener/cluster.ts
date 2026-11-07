@@ -11,7 +11,7 @@
 
 import type { Cluster, ClusterDomain, ClusterKind, HarvestedDoc, ResolvedTarget } from "./types.ts";
 import type { WikiIndex } from "../wiki/store.ts";
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
 import { stripFencedCode } from "../summaries/transcript-split.ts";

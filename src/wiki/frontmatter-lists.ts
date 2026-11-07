@@ -14,7 +14,7 @@
 
 import path from "node:path";
 import { frontmatterBodyLine } from "./page-text.ts";
-import { JIRA_KEY_DENYLIST } from "../jira/key-scan.ts";
+import { JIRA_KEY_DENYLIST } from "../utils/jira-key-scan.ts";
 import { stampedKeys } from "./trackers/jira.ts";
 import { extractWikilinks, WIKILINK_RE } from "./wikilinks.ts";
 

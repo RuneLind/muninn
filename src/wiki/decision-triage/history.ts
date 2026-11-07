@@ -4,7 +4,7 @@
  */
 
 import { parseRecommendation } from "../../format/question.ts";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256 } from "../../utils/date-hash.ts";
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { readPageText } from "./facts.ts";
 import type { GitRun } from "./git.ts";

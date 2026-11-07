@@ -41,7 +41,7 @@ import {
   WIKI_READONLY_REASON,
   wikiReadonlyRootReason,
 } from "../wiki/readonly.ts";
-import { sha256, todayOslo } from "./util.ts";
+import { sha256, todayOslo } from "../utils/date-hash.ts";
 import { lintFindingPathOf, lintSeederOf } from "./lint-markers.ts";
 import { applyStaleEdits } from "../wiki/stale-fix.ts";
 import { getLog } from "../logging.ts";

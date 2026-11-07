@@ -24,7 +24,7 @@ import {
 } from "./integrate-edits.ts";
 import { renderWikiHtml } from "./render.ts";
 import type { WikiPageMeta } from "./store.ts";
-import type { FactcheckClaimAnchor } from "../dashboard/views/components/wiki-integrate.ts";
+import type { FactcheckClaimAnchor } from "./core/wiki-integrate.ts";
 
 const anchor = (index: number, verdict: string): FactcheckClaimAnchor => ({
   index,

@@ -18,14 +18,14 @@
  * for the next day's hour.
  *
  * The decision triage's nightly pass is started by the same tick and awaited by
- * nothing in it: its own in-flight guard, hourly check, state and failure count, so
+ * nothing in it: its own in-flight guard (shared with Run now), hourly check, state and failure count, so
  * neither loop's stall, retry or refusal reaches the other. A refused pass waits
  * for its next hourly check; it has no wake retries.
  */
 
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
-import { realTriageLoopDeps, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
+import { triageLoopDepsFor, tryHoldTriagePass, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../readonly.ts";
 import { getWikiRegistry } from "../registry-memo.ts";
 import type { WikiRegistryEntry } from "../registry.ts";
@@ -102,6 +102,36 @@ export function workMapDue(state: WorkMapState | null, nowMs: number, hour: numb
   return { due: true, why: "due" };
 }
 
+/** Why the loop does not start, before any wiki is looked at; null when it may.
+ *  `isReadonly` is read last, only when the rest pass. */
+export function workMapLoopOff(
+  config: Pick<Config, "schedulerEnabled" | "workMapWikis" | "profile">,
+  isReadonly: () => boolean,
+): { kind: "unset" | "nais" | "scheduler" | "readonly"; why: string } | null {
+  if (config.workMapWikis.length === 0) return { kind: "unset", why: "WORK_MAP_WIKIS is not set" };
+  if (config.profile === "nais") return { kind: "nais", why: "the profile is nais" };
+  if (!config.schedulerEnabled) return { kind: "scheduler", why: "SCHEDULER_ENABLED is off" };
+  if (isReadonly()) return { kind: "readonly", why: "the instance is readonly" };
+  return null;
+}
+
+/** The listed wikis the loop covers (registered, no readonly root) in the list's order, and the rest with why. */
+export function workMapCoverage(
+  listed: readonly string[],
+  registry: readonly WikiRegistryEntry[],
+  isReadonlyRoot: (root: string) => boolean,
+): { covered: string[]; skipped: { wiki: string; reason: string }[] } {
+  const byName = new Map(registry.map((e) => [e.name.toLowerCase(), e]));
+  const out = { covered: [] as string[], skipped: [] as { wiki: string; reason: string }[] };
+  for (const name of new Set(listed.map((n) => n.toLowerCase()))) {
+    const entry = byName.get(name);
+    if (!entry) out.skipped.push({ wiki: name, reason: "not a registered wiki" });
+    else if (isReadonlyRoot(entry.root)) out.skipped.push({ wiki: entry.name, reason: "a readonly root (WIKI_READONLY_ROOTS)" });
+    else out.covered.push(entry.name);
+  }
+  return out;
+}
+
 export interface WorkMapLoopDeps {
   now: () => number;
   setTimer: (fn: () => void, ms: number) => unknown;
@@ -164,7 +194,7 @@ function realLoopDeps(config: Config): WorkMapLoopDeps {
     readState: (wiki) => runDeps.state.read(wiki),
     run: (wiki, signal) => startWorkMapRun(wiki, runDeps, signal).promise,
     registry: getWikiRegistry,
-    triage: realTriageLoopDeps(config) ?? undefined,
+    triage: triageLoopDepsFor(config) ?? undefined,
   };
 }
 
@@ -191,27 +221,20 @@ export function startWorkMapLoop(
     if (config.decisionTriageRepoRoots) log.warn("Decision triage off: DECISION_TRIAGE_REPO_ROOTS is set, but {why}", { why });
     return [];
   };
-  if (config.workMapWikis.length === 0) return off("WORK_MAP_WIKIS is not");
   const listed = config.workMapWikis.join(",");
-  if (config.profile === "nais") {
-    log.warn("Work map loop off: MUNINN_PROFILE=nais (WORK_MAP_WIKIS={wikis})", { wikis: listed });
-    return off("the profile is nais");
+  let made: WorkMapLoopDeps | null = null;
+  // Built only past the nais gate, as before: the real deps log the triage's own state.
+  const depsNow = () => (made ??= opts.deps ?? realLoopDeps(config as Config));
+  const gate = workMapLoopOff(config, () => (depsNow().isReadonly ?? isWikiReadonly)());
+  if (gate) {
+    if (gate.kind === "nais") log.warn("Work map loop off: MUNINN_PROFILE=nais (WORK_MAP_WIKIS={wikis})", { wikis: listed });
+    else if (gate.kind !== "unset") log.info("Work map loop off: {why} (WORK_MAP_WIKIS={wikis})", { why: gate.why, wikis: listed });
+    return off(gate.why);
   }
-  const deps = opts.deps ?? realLoopDeps(config as Config);
-  if (!config.schedulerEnabled || (deps.isReadonly ?? isWikiReadonly)()) {
-    const why = config.schedulerEnabled ? "the instance is readonly" : "SCHEDULER_ENABLED is off";
-    log.info("Work map loop off: {why} (WORK_MAP_WIKIS={wikis})", { why, wikis: listed });
-    return off(why);
-  }
-  const byName = new Map(deps.registry().map((e) => [e.name.toLowerCase(), e]));
-  const wikis: string[] = [];
-  for (const name of new Set(config.workMapWikis.map((n) => n.toLowerCase()))) {
-    const entry = byName.get(name);
-    if (!entry) log.warn("Work map: WORK_MAP_WIKIS names {wiki}, which is not a registered wiki — skipped", { wiki: name });
-    else if ((deps.isReadonlyRoot ?? isReadonlyWikiRoot)(entry.root)) {
-      log.warn("Work map: {wiki} has a readonly root (WIKI_READONLY_ROOTS) — skipped", { wiki: entry.name });
-    } else wikis.push(entry.name);
-  }
+  const deps = depsNow();
+  const coverage = workMapCoverage(config.workMapWikis, deps.registry(), deps.isReadonlyRoot ?? isReadonlyWikiRoot);
+  for (const { wiki, reason } of coverage.skipped) log.warn("Work map: {wiki}: {reason} — skipped", { wiki, reason });
+  const wikis = coverage.covered;
   if (wikis.length === 0) return off("WORK_MAP_WIKIS names no wiki the work map can cover");
 
   armWorkMapRuns();
@@ -233,14 +256,17 @@ export function startWorkMapLoop(
     timer = deps.setTimer(tick, WORK_MAP_TICK_MS);
   };
   let lastTriageCheck: number | null = null;
-  let triageBusy = false;
-  /** The triage's hourly check, started and not awaited: see the header. */
+  /** The triage's hourly check, started and not awaited: see the header. It holds the
+   *  pass single-flight Run now shares; while a click holds it the check is skipped and
+   *  tried again on the next tick. The bound and the stop only abort: the hold ends when
+   *  the check's own promise settles, so two passes never write one log at once. */
   const startTriage = () => {
     const triage = deps.triage;
     const started = deps.now();
-    if (!triage || triageBusy || (lastTriageCheck !== null && started - lastTriageCheck < WORK_MAP_CHECK_INTERVAL_MS)) return;
+    if (!triage || (lastTriageCheck !== null && started - lastTriageCheck < WORK_MAP_CHECK_INTERVAL_MS)) return;
+    const release = tryHoldTriagePass();
+    if (!release) return;
     lastTriageCheck = started;
-    triageBusy = true;
     const bound = new AbortController();
     const signal = AbortSignal.any([ac.signal, bound.signal]);
     let running: string | null = null;
@@ -260,7 +286,6 @@ export function startWorkMapLoop(
     const expiry = deps.setTimer(() => {
       timedOut = true;
       bound.abort();
-      triageBusy = false;
       const error = `the pass timed out after ${TRIAGE_PASS_BOUND_MS} ms`;
       log.warn("Decision triage: {error} ({wiki})", { error, wiki: running ?? "no wiki running" });
       if (running) void fail(running, error);
@@ -269,9 +294,8 @@ export function startWorkMapLoop(
     triageWork = work;
     void work.finally(() => {
       if (triageWork === work) triageWork = null;
-      if (timedOut) return;
-      deps.clearTimer(expiry);
-      triageBusy = false;
+      release();
+      if (!timedOut) deps.clearTimer(expiry);
     });
   };
   const check = async (reason: "boot" | "wake" | "hourly" | "wake-retry") => {

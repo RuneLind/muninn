@@ -15,7 +15,7 @@
  * consumer: `render.ts`, `digest.ts`, `graph-routes.ts`, `draft.ts`'s
  * `CONTAIN_BODY_RE`, and the two flatteners in `store.ts` (which share one). The sixth was
  * the fact-check annotate pass, and it is now the exported SOURCE
- * `WIKILINK_SPAN_SOURCE` (`dashboard/views/components/wiki-integrate.ts`) — the
+ * `WIKILINK_SPAN_SOURCE` (`src/wiki/core/wiki-integrate.ts`) — the
  * side of the split that has to answer "is this a link?" rather than "which pages
  * does this page name", so it also rejects a candidate spanning a dangling `[[`
  * (`store.ts`'s `firstDanglingWikilinkOpen` rule) and scans a code-span-masked line.

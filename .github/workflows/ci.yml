@@ -183,7 +183,8 @@ jobs:
       # because it has the full setup; after the links, so it adds no wait.
       - name: Time the test files this PR adds or changes
         if: ${{ !cancelled() && github.event_name == 'pull_request' && matrix.shard == 1 }}
-        # Healthy files take seconds each; 15 min caps a PR with several 300 s kills.
+        # Healthy files take seconds each. 15 min is 900 s: room for two 300 s kills
+        # plus the other files; a third kill uses the whole budget and the step is cut.
         timeout-minutes: 15
         run: bun scripts/test-chain.ts changed origin/${{ github.base_ref }}
 

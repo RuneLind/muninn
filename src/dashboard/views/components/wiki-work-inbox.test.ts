@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { DecisionInboxBody, InboxCard } from "../../routes/wiki-decision-inbox.ts";
+import type { TriageStatusBody } from "../../routes/wiki-decision-triage-status.ts";
+import { TRIAGE_CHECKED_3_CARDS } from "../../../../e2e/triage-patterns.ts";
 import { handleInboxClick, inboxHtml, initInbox, loadInbox } from "./wiki-work-inbox.ts";
 
 // The module's state is shared with the start-cards suites in one `bun test` process:
@@ -483,4 +485,153 @@ test("a card with no choices gets no pick rows", async () => {
   await load({ wiki: "w", cards: [card({ id: "O1", lane: "ask", bodyHtml: "Free text." })] });
   click("row", "plans/a.mdx#O1");
   expect(inboxHtml(() => "", Date.now())).not.toContain('data-wi-act="pick"');
+});
+
+const statusBody = (over: Partial<TriageStatusBody> = {}): TriageStatusBody => ({
+  wiki: "w",
+  lastRun: { at: Date.UTC(2026, 10, 7, 5, 12), outcome: "ok", reason: null, cards: 7, model: "none", codeFacts: 1 },
+  nights: [{ night: "2026-11-07", outcome: "ok", reason: null, cards: 7, codeFacts: 1, answered: 2, reposNotFound: [XSS] }],
+  reposNotFound: [{ repo: XSS, reason: "no such folder" }],
+  nextDueAt: Date.UTC(2026, 10, 8, 4),
+  broken: 0,
+  pass: { on: true, why: null, modelOff: true },
+  ...over,
+});
+
+async function loadWithStatus(status: TriageStatusBody | null, code = 200): Promise<void> {
+  globalThis.fetch = (async (url: string) =>
+    url.includes("/api/wiki/decision-triage/status")
+      ? { ok: code === 200, status: code, json: async () => status }
+      : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [card({ id: "O1" })] }) }) as unknown as typeof fetch;
+  loadInbox(`/api/wiki/decision-inbox?wiki=w${Math.random()}`);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
+
+test("the status line sits above the lanes: checked, cards, code facts, repos not found, model off, next", async () => {
+  await loadWithStatus(statusBody());
+  const html = inboxHtml(() => "", Date.UTC(2026, 10, 7, 9));
+  const line = /<div class="wiki-wi-tri"[\s\S]*?<\/div>/.exec(html)![0];
+  expect(line).toContain("Triage checked <b>06:12</b> · 7 cards · 1 with code facts");
+  expect(line).toContain("1 repo not found");
+  expect(line).toContain("model off");
+  expect(line).toContain("next ~08.11 05:00");
+  expect(html.indexOf("wiki-wi-tri")).toBeLessThan(html.indexOf("wiki-wi-lane"));
+  expect(html).not.toContain("<img");
+  expect(html).not.toContain("wiki-wi-tri-stats");
+});
+
+test("Details opens the per-night table, escaped; Hide folds it", async () => {
+  await loadWithStatus(statusBody());
+  click("tri-details", "");
+  const html = inboxHtml(() => "", Date.UTC(2026, 10, 7, 9));
+  expect(html).toContain('data-wi-act="tri-details" aria-expanded="true">Hide</button>');
+  expect(html).toMatch(/<tr><td>07\.11<\/td><td>ok<\/td><td>7<\/td><td>1<\/td><td>2<\/td><td>&lt;img/);
+  expect(html).not.toContain("<img");
+  click("tri-details", "");
+  expect(inboxHtml(() => "", Date.now())).not.toContain("wiki-wi-tri-stats");
+});
+
+test("a pass that is off says so in place of the next time; no run yet says that", async () => {
+  await loadWithStatus(statusBody({ lastRun: null, nights: [], reposNotFound: [], pass: { on: false, why: "DECISION_TRIAGE_REPO_ROOTS is not set", modelOff: true } }));
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain("Triage has not run on this wiki");
+  expect(html).toContain('title="DECISION_TRIAGE_REPO_ROOTS is not set">pass off</span>');
+  expect(html).not.toContain("next ~");
+  expect(html).not.toContain('data-wi-act="tri-details"');
+});
+
+test("the e2e's checked-line pattern holds at 01:30 Oslo for a run 2 h earlier (yesterday's date)", async () => {
+  const now = Date.UTC(2026, 10, 7, 0, 30); // 01:30 Oslo
+  await loadWithStatus(statusBody({ lastRun: { at: now - 2 * 3_600_000, outcome: "ok", reason: null, cards: 3, model: "none", codeFacts: 1 } }));
+  const line = /<div class="wiki-wi-tri"[\s\S]*?<\/div>/.exec(inboxHtml(() => "", now))![0].replace(/<[^>]+>/g, "");
+  expect(line).toMatch(TRIAGE_CHECKED_3_CARDS);
+});
+
+test("a run line's cards that is not a number never reaches the markup raw", async () => {
+  await loadWithStatus(statusBody({ lastRun: { at: Date.now(), outcome: "ok", reason: null, cards: XSS as unknown as number, model: "none", codeFacts: 1 } }));
+  expect(inboxHtml(() => "", Date.now())).not.toContain("<img");
+});
+
+test("the last run's reason is the outcome word's tooltip, and each night's is its Details outcome cell's, escaped", async () => {
+  const reason = "the model call is off (D19), 6 card(s) with no facts <b>";
+  await loadWithStatus(statusBody({
+    lastRun: { at: Date.now(), outcome: "partial", reason, cards: 6, model: "none", codeFacts: 0 },
+    nights: [{ night: "2026-11-07", outcome: "partial", reason, cards: 6, codeFacts: 0, answered: 0, reposNotFound: [] }],
+  }));
+  const escaped = "the model call is off (D19), 6 card(s) with no facts &lt;b&gt;";
+  expect(inboxHtml(() => "", Date.now())).toContain(`<span title="${escaped}">partial</span>`);
+  click("tri-details", "");
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain(`<td title="${escaped}">partial</td>`);
+  expect(html).not.toContain("facts <b>");
+  click("tri-details", "");
+});
+
+test("an ok last run adds no outcome word to the line", async () => {
+  await loadWithStatus(statusBody({ lastRun: { at: Date.now(), outcome: "ok", reason: "all cards read", cards: 3, model: "none", codeFacts: 1 } }));
+  const line = /<div class="wiki-wi-tri"[\s\S]*?<\/div>/.exec(inboxHtml(() => "", Date.now()))![0];
+  expect(line).not.toContain(">ok<");
+  expect(line).not.toContain("all cards read");
+});
+
+test("a status that fails or is not a status leaves the line out and the inbox whole", async () => {
+  for (const [body, code] of [[null, 500], [null, 404], [{ wiki: "w", cards: [] } as unknown as TriageStatusBody, 200]] as const) {
+    await loadWithStatus(body, code);
+    const html = inboxHtml(() => "", Date.now());
+    expect(html).not.toContain("wiki-wi-tri");
+    expect(html).toContain("Decisions · 1 open");
+  }
+});
+
+const runBtn = (html: string) => /<button[^>]*data-wi-act="tri-run"[^>]*>[^<]*<\/button>/.exec(html)?.[0] ?? "";
+
+test("Run now sits on the line; off or model on, it is aria-disabled with why, and a click sends nothing", async () => {
+  await loadWithStatus(statusBody());
+  expect(runBtn(inboxHtml(() => "", Date.now()))).toMatch(/^<button class="wiki-wi-btn small" data-wi-act="tri-run" title="[^"]+">Run now<\/button>$/);
+  for (const [pass, why] of [
+    [{ on: false, why: "SCHEDULER_ENABLED is off", modelOff: true }, "The pass is off: SCHEDULER_ENABLED is off"],
+    [{ on: true, why: null, modelOff: false }, "The model call is on: Run now never calls the model"],
+  ] as const) {
+    await loadWithStatus(statusBody({ pass }));
+    const btn = runBtn(inboxHtml(() => "", Date.now()));
+    expect(btn).toContain(`title="${why}"`);
+    expect(btn).toContain('aria-disabled="true"');
+    const sent: string[] = [];
+    const before = globalThis.fetch;
+    globalThis.fetch = (async (url: string) => (sent.push(url), { ok: true, status: 200, json: async () => ({}) })) as unknown as typeof fetch;
+    expect(click("tri-run", "")).toBe(true);
+    globalThis.fetch = before;
+    expect(sent).toEqual([]);
+  }
+});
+
+test("a click: busy while the POST is out, then the status is fetched again; a refusal shows its text inline", async () => {
+  await loadWithStatus(statusBody());
+  const sent: { url: string; method?: string }[] = [];
+  let answer!: (r: unknown) => void;
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    sent.push({ url, method: init?.method });
+    if (url.includes("/run")) return new Promise((r) => (answer = r));
+    return Promise.resolve({ ok: true, status: 200, json: async () => statusBody({ lastRun: { at: Date.now(), outcome: "ok", reason: null, cards: 9, model: "none", codeFacts: 0 } }) });
+  }) as unknown as typeof fetch;
+  click("tri-run", "");
+  expect(sent).toEqual([{ url: "/api/wiki/decision-triage/run?wiki=w", method: "POST" }]);
+  const busy = runBtn(inboxHtml(() => "", Date.now()));
+  expect(busy).toContain('aria-busy="true"');
+  expect(busy).toContain("Running…");
+  click("tri-run", "");
+  expect(sent).toHaveLength(1);
+  answer({ ok: true, status: 200, json: async () => ({ wiki: "w", outcome: "ok", cards: 9 }) });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(sent.map((s) => s.url)[1]).toContain("/api/wiki/decision-triage/status?wiki=w");
+  const html = inboxHtml(() => "", Date.now());
+  expect(runBtn(html)).toContain(">Run now<");
+  expect(html).toContain("9 cards");
+  expect(html).not.toContain("data-wi-run-msg");
+
+  globalThis.fetch = (async (url: string) =>
+    url.includes("/run") ? { ok: false, status: 409, json: async () => ({ error: "a triage pass is running: try again when it ends" }) } : { ok: true, status: 200, json: async () => statusBody() }) as unknown as typeof fetch;
+  click("tri-run", "");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(inboxHtml(() => "", Date.now())).toContain('<div class="wiki-wi-msg warn" role="status" data-wi-run-msg>Couldn’t run the pass: a triage pass is running: try again when it ends.</div>');
 });

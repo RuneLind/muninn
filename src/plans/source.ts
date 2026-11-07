@@ -31,7 +31,7 @@ import { readdir, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
 import { extractNextMoves } from "../wiki/next-moves.ts";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { getWikiRegistry } from "../wiki/registry-memo.ts";
 import { findWiki } from "../wiki/registry.ts";
 import { parseQueueYaml, type QueueOrder } from "./queue.ts";

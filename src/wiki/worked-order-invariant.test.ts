@@ -30,8 +30,8 @@ import { computeRelated } from "./related.ts";
 import {
   groupSeries,
   seriesMembersOf,
-} from "../dashboard/views/components/wiki-groups.ts";
-import type { WikiListing } from "../dashboard/views/components/wiki-filter.ts";
+} from "./core/wiki-groups.ts";
+import type { WikiListing } from "./core/wiki-filter.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
 /** A page in one series, with a body that links and names PRs. */

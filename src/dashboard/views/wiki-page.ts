@@ -2746,16 +2746,30 @@ export async function renderWikiPage(opts?: {
       font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
       border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-primary);
     }
-    .wiki-wi-btn:hover:not(:disabled), .wiki-wi-btn:focus-visible { border-color: var(--accent); }
+    .wiki-wi-btn:hover:not(:disabled):not([aria-disabled="true"]), .wiki-wi-btn:focus-visible { border-color: var(--accent); }
     /* --accent-hover, not --accent: white on --accent measured 4.3:1 in Dark. */
     .wiki-wi-btn.primary, .wiki-wi-btn.on { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
-    .wiki-wi-btn:disabled { opacity: .55; cursor: default; }
+    .wiki-wi-btn:disabled, .wiki-wi-btn[aria-disabled="true"] { opacity: .55; cursor: default; }
     .wiki-wi-note {
       display: block; width: 100%; box-sizing: border-box; font: inherit; font-size: 12.5px; padding: 6px 8px; margin: 4px 0;
       border: 1px solid var(--border-secondary); border-radius: 6px; background: var(--bg-surface); color: var(--text-primary);
     }
     .wiki-wi-msg { margin: 0 2px 6px; color: var(--tone-good); }
     .wiki-wi-msg.warn { color: var(--tone-warn); }
+    /* The triage status line and its Details table (decision triage visibility PR 2). */
+    .wiki-wi-tri {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0 0 8px; padding: 6px 10px;
+      font-size: 12.5px; color: var(--text-secondary); background: var(--bg-inset); border-radius: 8px;
+    }
+    .wiki-wi-tri b { color: var(--text-primary); }
+    .wiki-wi-tri-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--tone-good); }
+    .wiki-wi-tri-dot.warn { background: var(--tone-warn); }
+    .wiki-wi-tri-warn { color: var(--tone-warn); font-weight: 600; }
+    .wiki-wi-tri-sp { flex: 1; }
+    .wiki-wi-tri-stats { margin: -2px 0 10px; overflow-x: auto; font-size: 12px; }
+    .wiki-wi-tri-stats table { border-collapse: collapse; width: 100%; }
+    .wiki-wi-tri-stats :is(th, td) { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border-primary); font-variant-numeric: tabular-nums; color: var(--text-primary); }
+    .wiki-wi-tri-stats th { font-weight: 600; color: var(--text-soft); }
     .wiki-wm-efforts { list-style: none; margin: 0; padding: 0; }
     .wiki-wm-effort { padding: 6px 0; border-top: 1px solid var(--border-primary); font-size: 12.5px; min-width: 0; }
     .wiki-wm-efforts > .wiki-wm-effort:first-child { border-top: none; }

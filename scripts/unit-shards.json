@@ -2,6 +2,7 @@
   "groups": {
     "unit-1": [
       "e2e/ports.test.ts",
+      "e2e/e2e-env.test.ts",
       "scripts/preview-role.test.ts",
       "scripts/e2e-shards.test.ts",
       "scripts/decision-chain-dry-run.test.ts",
@@ -67,6 +68,8 @@
       "src/dashboard/routes/wiki-provenance.test.ts",
       "src/dashboard/routes/wiki-work-map.test.ts",
       "src/dashboard/routes/wiki-work-map-checks.test.ts",
+      "src/dashboard/routes/wiki-decision-triage-status.test.ts",
+      "src/dashboard/routes/wiki-decision-triage-run.test.ts",
       "src/dashboard/routes/wiki-plan-card.test.ts",
       "src/dashboard/routes/wiki-series-routes.test.ts",
       "src/dashboard/routes/wiki-gardener-routes.test.ts",
@@ -120,7 +123,6 @@
       "src/ai/connector.test.ts",
       "src/ai/connectors/copilot-mcp.test.ts",
       "src/ai/huginn-trace-pointer.test.ts",
-      "src/ai/json-extract.test.ts",
       "src/ai/mcp-config-utils.test.ts",
       "src/ai/tool-status.test.ts",
       "src/ai/yggdrasil-trace-pointer.test.ts",

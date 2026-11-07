@@ -8,7 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import { resolveFencedAgentCwd } from "../../ai/agent-cwd.ts";
-import { extractJson } from "../../ai/json-extract.ts";
+import { extractJson } from "../../utils/json-extract.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { Config, WorkMapEffort } from "../../config.ts";
 import { runFencedOneShot } from "../../core/fenced-one-shot.ts";
@@ -38,7 +38,7 @@ import {
   type Verdict,
 } from "./schema.ts";
 import { parseRecommendation, type ParsedQuestion } from "../../format/question.ts";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256 } from "../../utils/date-hash.ts";
 
 const log = getLog("wiki", "decision-triage");
 

@@ -14,7 +14,7 @@
 | `tool-restrictions.ts` | Per-user tool allow/deny lists, builds restriction prompts |
 | `embeddings.ts` | Semantic embeddings via HuggingFace `all-MiniLM-L6-v2` (384-dim, quantized) |
 | `result-parser.ts` | Legacy JSON parser — fallback when stream parser misses the result event |
-| `json-extract.ts` | Extract JSON objects from mixed text output |
+| `json-extract.ts` | Re-export of `src/utils/json-extract.ts` (extract JSON objects from mixed text output), moved down in the 2026-11 layering ratchet so wiki code imports it without reaching up |
 | `mcp-tool-caller.ts` | MCP debug client — connect to MCP servers (stdio or HTTP), list/call tools, connection pool keyed by `bot:server`. Consumed by the `openai-compat` connector (tool execution) plus the dashboard MCP debug page and Serena. Moved here from `dashboard/` in the 2026-06 layering cleanup so `ai/` no longer imports up from `dashboard/`. |
 | `knowledge-api-client.ts` | Knowledge API fetch helper (`fetchKnowledgeApi`, its text sibling `fetchKnowledgeApiText`, and the `knowledgeApiHandler` Hono wrapper with an optional `transform`; `KnowledgeApiError`) with AbortController timeout. An optional caller `signal` (`KnowledgeApiOptions.signal`, and `knowledgeApiHandler`'s 6th argument) aborts the fetch beside the timeout; an aborted handler call answers 503 with no warn. It frees muninn's connection only: huginn's sync routes finish the work. Consumed by `research-knowledge.ts` and several dashboard routes. Also moved out of `dashboard/routes/` in the 2026-06 layering cleanup. |
 | `haiku-extraction.ts` | Shared async-extraction wrapper (memory, goal, schedule). Routes through `callHaikuWithFallback` so each call picks the backend from the bot's connector (copilot-sdk → Copilot, else CLI) with the CLI as final fallback — on `MUNINN_PROFILE=nais` that last step throws `HaikuCliUnavailableError` instead (see below). |
@@ -105,7 +105,6 @@ Per-bot config defines tool groups with allowed user lists. `buildToolRestrictio
 | `tool-status.test.ts` | Tool name parsing, status text generation |
 | `tool-restrictions.test.ts` | Allow/deny logic, prompt generation |
 | `result-parser.test.ts` | Legacy JSON parsing fallback |
-| `json-extract.test.ts` | JSON extraction from mixed text |
 | `vertex-access.test.ts` | Vertex endpoint detection, the two `global` refusal doors, token cache/refresh-margin/single-flight |
 | `haiku-vertex.test.ts` | The Vertex Haiku backend: regional vs multi-region URL building, target resolution (name precedence, the missing-variable answer, whitespace-is-unset), the request body/headers, the 401-retried-once / 403-not shape and the `global` refusal before any request. Its own `bun test` link — it stubs the DB with `mock.module` |
 | `connectors/openai-compat-auth.test.ts` | Static vs Vertex credential shape, 401-refresh vs 403-no-retry, refusal at construction |

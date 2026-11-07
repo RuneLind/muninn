@@ -7,7 +7,7 @@
 
 import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { isAskedAuthor, parseQuestionTarget } from "../../format/question.ts";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256 } from "../../utils/date-hash.ts";
 import { osloDay } from "../work-map/ids.ts";
 import { answeredByChoice, liveAnswers, readPageText, type ReplayCard } from "./facts.ts";
 import type { WikiLabels } from "./floor.ts";

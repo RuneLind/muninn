@@ -75,7 +75,7 @@ import {
 // The ONLY server import here, and only as a drift guard: `STATUS_ORDER` is a
 // hand-kept client copy of the store's enum (this module must stay server-dep-free
 // for the browser bundle), so nothing but a test can notice the two diverging.
-import { PLAN_STATUS_VALUES } from "../../../wiki/store.ts";
+import { PLAN_STATUS_VALUES } from "../store.ts";
 
 function page(over: Partial<WikiListing>): WikiListing {
   return {
@@ -1933,7 +1933,7 @@ test("work guard: an event with Infinity edits is dropped, never scored", async 
   // Pins isValidWorkEvent's Number.isFinite(edits): without it raw is Infinity
   // and the work term saturates at WORK_CAP (1.5).
   const { pageWorkState } = await import("./wiki-filter.ts");
-  const { pageWorkTerm } = await import("./wiki-activity-rank.ts");
+  const { pageWorkTerm } = await import("../../dashboard/views/components/wiki-activity-rank.ts");
   const only = withWork({ relPath: "inf.md", workedMs: wAgo(3) }, [[3, Number.POSITIVE_INFINITY, "focus"]]);
   expect(pageWorkState(only)).toBeUndefined();
   expect(pageWorkTerm(only, W_NOW)).toBe(0);

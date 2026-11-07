@@ -21,7 +21,7 @@ import {
   isMetaStem,
   pageStemOf,
   sanitizeColorToken,
-} from "../dashboard/views/components/wiki-filter.ts";
+} from "./core/wiki-filter.ts";
 import {
   parseActivityWeights,
   type ActivityWeights,
