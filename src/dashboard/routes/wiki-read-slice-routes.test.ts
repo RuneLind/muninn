@@ -240,8 +240,8 @@ describe("wiki read slice — routes", () => {
     expect(await relPaths(app, "/api/wiki/pages?wiki=rowiki&refresh=1")).toContain("New.md");
   });
 
-  // The page inlines the whole client bundle (~1 MB); nothing else in the
-  // serving chain compresses it, the nais pod's ingress included.
+  // The page links its script and stylesheet as assets (pre-gzipped by their
+  // own route); the HTML is still compressed only here, the nais pod's ingress included.
   describe("GET /wiki is gzipped for a client that accepts it", () => {
     for (const profile of ["default", "nais"] as const) {
       test(`${profile}: gzip on Accept-Encoding, identity without it, same bytes either way`, async () => {
