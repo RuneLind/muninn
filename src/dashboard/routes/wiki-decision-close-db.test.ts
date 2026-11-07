@@ -20,7 +20,8 @@ import { testTempDir } from "../../test/temp-dir.ts";
 import { registerWikiAnswerRoutes } from "./wiki-answers.ts";
 import { insertWikiAnswerVersion, listWikiAnswerHistory } from "../../db/wiki-answers.ts";
 import { realGit } from "../../wiki/decision-triage/git.ts";
-import { registerWikiDecisionInboxRoute, type DecisionCloseGuards, type DecisionInboxBody } from "./wiki-decision-inbox.ts";
+import { closeRulingFor, registerWikiDecisionInboxRoute, type DecisionCloseGuards, type DecisionInboxBody } from "./wiki-decision-inbox.ts";
+import type { WikiAnswerVersion } from "../../db/wiki-answers.ts";
 
 setupTestDb();
 
@@ -244,5 +245,49 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     expect((await close({ questionId: "O2", preview: true })).status).toBe(403);
     const form = await app.request("/api/wiki/decision-inbox/close", { method: "POST", headers: { "content-type": "text/plain" }, body: "x" });
     expect(form.status).toBe(415);
+  });
+
+  test("a close with no rulingHash is 400, not a 409", async () => {
+    await answer("O2", "B", "");
+    const { body: p } = await preview("O2");
+    const res = await close({ questionId: "O2", baseHash: p.baseHash });
+    expect(res.status).toBe(400);
+  });
+
+  test("a warning whose text changes while the count stays is 409", async () => {
+    const id = crypto.randomUUID();
+    const someone = { userId: null, oid: null, navIdent: null, name: "Someone Else" };
+    await insertWikiAnswerVersion({ answerId: id, version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: someone, choice: "B", body: "", questionHash: "h" });
+    await Bun.sleep(10);
+    await answer("O2", "A", "");
+    const { body: p } = await preview("O2");
+    expect(p.warnings).toEqual(["Someone Else answered B."]);
+    await insertWikiAnswerVersion({ answerId: id, version: 2, wiki: WIKI, relPath: REL, questionId: "O2", author: someone, choice: "not-sure", body: "", questionHash: "h" });
+    const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
+    expect(res.status).toBe(409);
+  });
+});
+
+describe("closeRulingFor's warnings", () => {
+  let n = 0;
+  const v = (name: string, choice: string | null, body: string, over: Partial<WikiAnswerVersion> = {}): WikiAnswerVersion => ({
+    answerId: over.answerId ?? `a${++n}`, version: 1, wiki: WIKI, relPath: REL, questionId: "O5", author: { userId: null, oid: null, navIdent: null, name }, choice, body,
+    questionHash: "older", createdAt: ++n * 1000, redactedAt: null, ...over,
+  } as WikiAnswerVersion);
+
+  test("text against text: a different text warns, the same text does not; not sure says so; a redacted or superseded answer is silent", () => {
+    const owner = "Test Owner";
+    const versions = [
+      v("Other Text", null, "Use the first."),
+      v("Same Text", null, "Use the second."),
+      v("Unsure", "not-sure", ""),
+      v("Redacted", "B", "", { answerId: "red", redactedAt: 1 } as Partial<WikiAnswerVersion>),
+      v("Changed Mind", "B", "", { answerId: "cm" }),
+      v("Changed Mind", null, "Use the second.", { answerId: "cm", version: 2 }),
+      v(owner, null, "Use the second."),
+    ];
+    const r = closeRulingFor(PAGE, "O5", versions, REL)!;
+    expect(r.ruling).toMatchObject({ kind: "answer", choice: null, body: "Use the second.", author: owner });
+    expect(r.warnings.filter((w) => !w.includes("older wording"))).toEqual(["Other Text answered in text.", "Unsure is not sure."]);
   });
 });

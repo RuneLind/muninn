@@ -298,3 +298,43 @@ test("after a close, focus goes to the lane, and a later close's refusal does no
     initInbox(() => {});
   }
 });
+
+test("a preview's warnings show above its lines, escaped, and a close's line sits in the «close?» lane", async () => {
+  const mk = (id: string) => card({ id, lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
+  await load({ wiki: "w", cards: [mk("O6"), card({ id: "O1", lane: "ask" })] });
+  const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, preview: true, lines: ["- x"], warnings: [`${XSS} answered B.`], baseHash: "b", rulingHash: "r", decision: "D3" }) })) as unknown as typeof fetch;
+  click("row", "plans/a.mdx#O6");
+  click("preview", "plans/a.mdx#O6");
+  await tick();
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).toMatch(/<div class="wiki-wi-ev warn"><b>&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt; answered B\.<\/b><\/div><pre class="wiki-wi-pre"/);
+  expect(html).not.toContain(XSS);
+  globalThis.fetch = (async (url: string) =>
+    url.endsWith("/close") ? { ok: true, status: 200, json: async () => ({ ok: true, decision: "D3" }) } : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [card({ id: "O1", lane: "ask" })] }) }) as unknown as typeof fetch;
+  click("close", "plans/a.mdx#O6");
+  await tick();
+  const after = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  const closeLane = /<details class="wiki-wi-lane" data-wi-lane="close"[\s\S]*?<\/details>/.exec(after)![0];
+  expect(closeLane).toContain("Closed O6 (D3).");
+});
+
+test("keeping a card again makes it the newest entry, so the cap drops others first", async () => {
+  const store: Record<string, string> = {};
+  const g3 = globalThis as { localStorage?: unknown };
+  const savedLs = g3.localStorage;
+  g3.localStorage = { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
+  try {
+    const c = card({ id: "O9", lane: "close" });
+    await load({ wiki: "w", cards: [c] });
+    click("keep", "plans/a.mdx#O9");
+    const fill: Record<string, string> = JSON.parse(store["muninn-inbox-kept"]!);
+    for (let i = 0; i < 199; i++) fill[`w|plans/old.mdx#O${i}`] = "[]";
+    store["muninn-inbox-kept"] = JSON.stringify(fill);
+    click("keep", "plans/a.mdx#O9");
+    const before = Object.keys(JSON.parse(store["muninn-inbox-kept"]!));
+    expect(before.at(-1)).toBe("w|plans/a.mdx#O9");
+  } finally {
+    g3.localStorage = savedLs;
+  }
+});
