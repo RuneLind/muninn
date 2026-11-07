@@ -83,7 +83,7 @@ export function planShard(files: string[], timings: Timings, index: number, tota
 export function untimedSpecWarnings(files: string[], timings: Timings): string[] {
   return files
     .filter((f) => typeof timings[f] !== "number")
-    .map((f) => `::warning::${f} has no entry in e2e/shard-timings.json, so the plan charges it the median; run \`bun scripts/e2e-shards.ts refresh e2e-results.json\` from the e2e-report artifact of a run whose shards all passed\`);
+    .map((f) => `::warning::${f} has no entry in e2e/shard-timings.json, so the plan charges it the median; run \`bun scripts/e2e-shards.ts refresh e2e-results.json\` from the e2e-report artifact of a run whose shards all passed`);
 }
 
 /**
