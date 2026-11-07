@@ -2710,6 +2710,10 @@ export async function renderWikiPage(opts?: {
     .wiki-wi-ev { margin: 0 0 8px; padding: 6px 10px; border-left: 3px solid var(--tone-good); border-radius: 0 8px 8px 0; background: var(--tint-success); color: var(--text-primary); }
     .wiki-wi-ev.warn { border-left-color: var(--tone-warn); background: var(--tint-warning); }
     .wiki-wi-quote { margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); }
+    .wiki-wi-pre {
+      white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 8px; padding: 8px 10px; font-size: 12px;
+      background: var(--bg-inset); border: 1px solid var(--border-secondary); border-radius: 8px; color: var(--text-primary);
+    }
     .wiki-wi-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
     .wiki-wi-btn {
       font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 6px; cursor: pointer;

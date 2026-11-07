@@ -2051,7 +2051,10 @@ export function registerWikiToolRoutes(
   // root on this machine and to a model call, so dropped on nais.
   registerWikiWorkMapRoutes(app, config);
   // The decision inbox on the Your work card: bound to a wiki root on this machine.
-  registerWikiDecisionInboxRoute(app, config);
+  registerWikiDecisionInboxRoute(app, config, undefined, {
+    readonlyRefusal,
+    egressRefusal: (c, entry) => egressRefusal(c, entry, false),
+  });
   // The find palette's Everywhere section: every registered wiki through three
   // legs. Same group: it reads every wiki's index on this machine.
   registerWikiFindEverywhereRoute(app, config);

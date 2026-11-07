@@ -7,7 +7,8 @@
  * Admin-only by the zone model's default; in the tool group, so nais drops it.
  */
 
-import type { Hono } from "hono";
+import path from "node:path";
+import type { Context, Hono } from "hono";
 import { resolveWikiAnswerConfig, type Config, type WikiAnswerConfig } from "../../config.ts";
 import { authorKeyOf, listWikiAnswerHistory, type WikiAnswerAuthor, type WikiAnswerVersion } from "../../db/wiki-answers.ts";
 import { answerAuthorFor } from "./wiki-answers.ts";
@@ -19,7 +20,18 @@ import { inboxLane, sortByAge, type InboxLane } from "../../wiki/decision-triage
 import { scopeVerdict, triageScope } from "../../wiki/decision-triage/scope.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
-import { getWikiIndex } from "../../wiki/store.ts";
+import { getWikiIndex, stripFrontmatter } from "../../wiki/store.ts";
+import { parseBlocks } from "../../format/markdown-ast.ts";
+import { parseQuestionPage, QUESTION_NOT_SURE } from "../../format/question.ts";
+import { unclosedCards } from "../../format/question-unclosed.ts";
+import { closeCardEdit, type CloseRuling } from "../../format/question-close.ts";
+import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
+import { commitWikiChange, pageHasUncommittedChanges } from "../../wiki/commit.ts";
+import { heldBy, heldMessage, staleProposalStore } from "../../gardener/stale-proposals.ts";
+import { sha256, todayOslo } from "../../gardener/util.ts";
+import { postCollectionUpdate } from "../../wiki/reindex.ts";
+import { discoverAllBots } from "../../bots/config.ts";
+import { requireJsonRequest } from "./json-request.ts";
 
 const log = getLog("dashboard", "wiki-decision-inbox");
 
@@ -123,7 +135,161 @@ export async function readDecisionInbox(entry: WikiRegistryEntry, deps: Decision
   return { wiki: entry.name, cards: sortByAge(cards, deps.now()) };
 }
 
-export function registerWikiDecisionInboxRoute(app: Hono, config: Config, depsFor: () => DecisionInboxDeps = () => realDecisionInboxDeps(config)): void {
+export const DECISION_CLOSE_PATH = "/api/wiki/decision-inbox/close";
+
+/** The refusals `staleRequest` runs, from `wiki-routes.ts`, so the close refuses as Apply does. */
+export interface DecisionCloseGuards {
+  readonlyRefusal: (c: Context) => Response | null;
+  egressRefusal: (c: Context, entry: WikiRegistryEntry) => Response | null;
+}
+
+/** `DD.MM.YYYY` in Europe/Oslo, as a decision's date tail writes it. */
+const logDate = (ms: number) => todayOslo(ms).split("-").reverse().join(".");
+
+/**
+ * What a close records when the page holds no ruling: the newest live answer
+ * that is not not sure, full body (the inbox's facts cut it), or null.
+ */
+export function closingAnswer(versions: readonly WikiAnswerVersion[], relPath: string, id: string): WikiAnswerVersion | null {
+  const mine = versions.filter((v) => v.relPath === relPath && v.questionId === id);
+  const redacted = new Set(mine.filter((v) => v.redactedAt !== null).map((v) => v.answerId));
+  const latest = new Map<string, WikiAnswerVersion>();
+  for (const v of mine) {
+    if (redacted.has(v.answerId)) continue;
+    const key = authorKeyOf(v.author);
+    const held = latest.get(key);
+    if (!held || v.createdAt > held.createdAt) latest.set(key, v);
+  }
+  return [...latest.values()].filter((v) => v.choice !== QUESTION_NOT_SURE).sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+}
+
+/** The ruling the close writes: the P1 hint's decision first, else the closing answer. */
+export function closeRulingFor(raw: string, id: string, versions: readonly WikiAnswerVersion[], relPath: string): CloseRuling | null {
+  const hint = unclosedCards(parseQuestionPage(parseBlocks(stripFrontmatter(raw)))).find((h) => h.id === id);
+  if (hint?.decision) return { kind: "decision", decision: hint.decision };
+  const a = closingAnswer(versions, relPath, id);
+  return a ? { kind: "answer", choice: a.choice, body: a.body, author: a.author.name, date: logDate(a.createdAt) } : null;
+}
+
+function registerDecisionCloseRoute(app: Hono, config: Config, depsFor: () => DecisionInboxDeps, guards: DecisionCloseGuards): void {
+  // `{wiki, relPath, questionId, preview: true}` answers the lines a close would
+  // add and the page's hash; `{…, baseHash}` writes them, through the per-wiki
+  // queue with a CAS on that hash (Apply's sequence: `POST /api/wiki/stale/apply`).
+  app.post(DECISION_CLOSE_PATH, async (c) => {
+    try {
+      return await closeCard(c);
+    } catch (err) {
+      log.error("Decision close failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "the card could not be closed" }, 500);
+    }
+  });
+
+  async function closeCard(c: Context): Promise<Response> {
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
+    const ro = guards.readonlyRefusal(c);
+    if (ro) return ro;
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+    const str = (k: string) => (typeof body[k] === "string" ? (body[k] as string).trim() : "");
+    const [wiki, relPath, id, baseHash] = [str("wiki"), str("relPath"), str("questionId"), str("baseHash")];
+    const preview = body.preview === true;
+    if (!wiki || !relPath || !id) return c.json({ error: "wiki, relPath and questionId are required" }, 400);
+    if (!preview && !baseHash) return c.json({ error: "baseHash is required: preview the close first" }, 400);
+    const deps = depsFor();
+    const registry = deps.registry();
+    const scope = await triageScope({
+      workMapWikis: deps.workMapWikis(),
+      answerWikis: deps.answerConfig().wikis,
+      entryOf: (name) => registry.find((e) => e.name.toLowerCase() === name.toLowerCase()),
+    });
+    const verdict = scopeVerdict(scope, wiki);
+    if ("reason" in verdict) return c.json({ error: `no decision inbox here: ${verdict.reason}` }, 404);
+    const entry = verdict.entry;
+    const egress = guards.egressRefusal(c, entry);
+    if (egress) return egress;
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return c.json({ error: "wiki directory not found" }, 503);
+    const target = index.resolveRelPath(relPath);
+    if (!target) return c.json({ error: `no page ${relPath}` }, 404);
+    const io = defaultPageWriteIo(entry.root);
+    const current = await io.readFile(path.join(entry.root, target.relPath));
+    if (current === null) return c.json({ error: `${target.relPath} cannot be read` }, 409);
+    let ruling: CloseRuling | null;
+    try {
+      ruling = closeRulingFor(current, id, await deps.answers(entry.name), target.relPath);
+    } catch (err) {
+      log.warn("Decision close: answers unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "the answers could not be read" }, 503);
+    }
+    if (!ruling) return c.json({ error: `nothing on the page or in the answers rules on ${id}: open it on the page`, refused: true }, 409);
+    const today = todayOslo(deps.now());
+    const edit = closeCardEdit(current, id, ruling, today);
+    if (!edit.ok) return c.json({ error: edit.reason, refused: true, code: edit.code }, 409);
+    if (preview) return c.json({ ok: true, preview: true, decision: edit.decision, lines: edit.lines, baseHash: sha256(current) });
+    if (baseHash !== sha256(current)) return c.json({ error: "The page changed since the preview. Preview again.", stale: true }, 409);
+    try {
+      const held = heldBy(await staleProposalStore().liveHolders(entry.name), target.relPath);
+      if (held) return c.json({ error: heldMessage(held), held: true }, 409);
+    } catch (err) {
+      log.warn("Decision close: Gardener cards unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "The Gardener's cards could not be read, so the page's claim is unknown." }, 503);
+    }
+    const owningBot = entry.source === "bot" ? discoverAllBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase()) : undefined;
+    const push = owningBot?.wikiAutoCommit?.push ?? true;
+    let refusal: string | null = null;
+    let dirty: string | null = null;
+    let decision = edit.decision;
+    const result = await writeWikiPage({
+      wikiDir: entry.root,
+      relPath: target.relPath,
+      baseHash,
+      staleReason: "The page changed while the card was closed. Preview again.",
+      collections: entry.collections ?? [],
+      logKind: "decision-inbox",
+      logTitle: target.title ?? target.relPath,
+      logLine: () => `${id} closed (${decision}) from the decision inbox`,
+      commitMessage: () => `[decision-inbox] close ${id} (${decision}): ${target.relPath}`,
+      now: deps.now,
+      proceed: async () => {
+        const has = await pageHasUncommittedChanges(entry.root, target.relPath);
+        if (has === false) return true;
+        dirty = has === null ? `${target.relPath}: git status failed, so its uncommitted edits are unknown` : `${target.relPath} has uncommitted edits — commit them first`;
+        return false;
+      },
+      transform: (raw) => {
+        const again = closeCardEdit(raw, id, ruling, today);
+        if (!again.ok) {
+          refusal = again.reason;
+          return null;
+        }
+        decision = again.decision;
+        return again.content;
+      },
+      ...io,
+      reindex: async (collection) => {
+        await postCollectionUpdate(config.knowledgeApiUrl, collection);
+      },
+      commit: (paths, message) => commitWikiChange(entry.root, paths, message, { push }),
+    });
+    if (result.outcome === "forbidden") return c.json({ error: result.reason, readonly: true }, 403);
+    if (result.outcome === "stale") return c.json({ error: result.reason, stale: true }, 409);
+    if (result.outcome === "locked") return c.json({ error: result.reason, locked: true }, 409);
+    if (dirty) return c.json({ error: dirty, dirty: true }, 409);
+    if (refusal) return c.json({ error: refusal, refused: true }, 409);
+    if (result.outcome !== "written") return c.json({ error: result.outcome === "error" ? result.reason : "nothing was written" }, 500);
+    // Rebuilt after the commit tail, as Apply does: the write's own refresh read an uncommitted page.
+    await getWikiIndex({ root: entry.root, refresh: true }).catch(() => null);
+    return c.json({ ok: true, page: target.relPath, decision, committed: result.commit?.committed ?? false });
+  }
+}
+
+export function registerWikiDecisionInboxRoute(
+  app: Hono,
+  config: Config,
+  depsFor: () => DecisionInboxDeps = () => realDecisionInboxDeps(config),
+  guards?: DecisionCloseGuards,
+): void {
+  if (guards) registerDecisionCloseRoute(app, config, depsFor, guards);
   app.get(DECISION_INBOX_PATH, async (c) => {
     const wiki = c.req.query("wiki")?.trim();
     if (!wiki) return c.json({ error: "wiki is required" }, 400);

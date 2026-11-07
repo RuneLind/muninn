@@ -11,6 +11,8 @@
  *     the recommendation.
  *  3. A card the reader already answered offers the page, not a form (the 409 race is a unit test).
  *  4. The section is legible in the Light and Dark themes.
+ *  5. (P3b) Close previews the lines, writes them, and `/api/wiki/page` reads the
+ *     close back; «Still open» hides a card across a reload until its evidence changes.
  *
  * One muninn on its own port, the test database, two temp git wikis:
  * `melosys-kode-wiki` (the rule's «ask» wiki) and one other. Answers are seeded
@@ -152,10 +154,9 @@ test.describe.serial("the Decisions section", () => {
     }
     await expect(row(page, "close", "O5").locator(".wiki-wi-tag")).toHaveText("read it before closing");
     await expect(row(page, "close", "O7").locator(".wiki-wi-tag")).toHaveText("page rules");
-    // A «close?» row offers only the page in 3a.
+    // A «close?» row offers Close…, Still open and the page (P3b).
     await row(page, "close", "O2").locator(".wiki-wi-row").click();
-    await expect(row(page, "close", "O2").locator(".wiki-wi-acts")).toHaveText("Open on the page");
-    await expect(row(page, "close", "O2").locator("button[data-wi-act]:not(.wiki-wi-row)")).toHaveCount(0);
+    await expect(row(page, "close", "O2").locator(".wiki-wi-acts")).toHaveText(/^Close…\s*Still open\s*Open on the page$/);
   });
 
   test("an answer in place moves the row from «ask you» to «close?»", async ({ page }) => {
@@ -189,6 +190,36 @@ test.describe.serial("the Decisions section", () => {
     await row(page, "default", "O1").locator('[data-wi-act="take"]').click();
     await expect(count(page, "default")).toHaveText("0");
     await expect(row(page, "close", "O1").locator(".wiki-wi-ev")).toContainText("Answered B");
+  });
+
+  test("Close previews the lines, writes them, and the page reads closed", async ({ page }) => {
+    await openInbox(page, KODE);
+    const o2 = row(page, "close", "O2");
+    await o2.locator(".wiki-wi-row").click();
+    await o2.locator('[data-wi-act="preview"]').click();
+    await expect(o2.locator(".wiki-wi-pre")).toHaveText(/- \*\*O2\*\* — See the card\. Closed \d{4}-\d{2}-\d{2} \(D1\)\.\n- \*\*D1\*\* — Answer A on card O2\. Test Owner, \d{2}\.\d{2}\.\d{4}\./);
+    const before = await count(page, "close").textContent();
+    await o2.locator('[data-wi-act="close"]').click();
+    await expect(row(page, "close", "O2")).toHaveCount(0);
+    await expect(count(page, "close")).toHaveText(String(Number(before) - 1));
+    const res = await page.request.get(`${BASE}/api/wiki/page?wiki=${KODE}&relPath=${encodeURIComponent(REL)}`);
+    expect(res.status()).toBe(200);
+    const html = ((await res.json()) as { html: string }).html;
+    expect(html).toContain('data-question-id="O2" data-question-state="decided" data-question-decision="D1"');
+    expect(html).toMatch(/See the card\. Closed \d{4}-\d{2}-\d{2} \(D1\)\./);
+  });
+
+  test("«Still open» hides a card across a reload; Show brings it back", async ({ page }) => {
+    await openInbox(page, KODE);
+    const o5 = row(page, "close", "O5");
+    await o5.locator(".wiki-wi-row").click();
+    await o5.locator('[data-wi-act="keep"]').click();
+    await expect(row(page, "close", "O5")).toHaveCount(0);
+    await page.reload();
+    await expect(page.locator("#wikiWorkInbox")).toBeVisible();
+    await expect(row(page, "close", "O5")).toHaveCount(0);
+    await lane(page, "close").locator('[data-wi-act="kept"]').click();
+    await expect(row(page, "close", "O5").locator(".wiki-wi-tag")).toHaveText("kept open");
   });
 
   for (const theme of ["light", "dark"] as const) {
