@@ -9,6 +9,8 @@
  *   bun scripts/test-chain.ts refresh                time every chain file alone, write scripts/unit-timings.json
  *   bun scripts/test-chain.ts rebalance              regroup link 1 onto the shards by scripts/unit-timings.json
  *
+ * `scripts/test-par.ts` (`bun run test:par`) runs every link locally, several at a time.
+ *
  * The chain is built from six inputs: the files bun discovers, the `mock.module` scan
  * (each such file is a link of its own, see CLAUDE.md, Testing) and the own-process
  * scan (`ownProcessFiles`: happy-dom globals or boot module state, a link each the
@@ -522,7 +524,7 @@ export function readTable(): ShardTable {
   return JSON.parse(readFileSync(SHARDS_PATH, "utf8")) as ShardTable;
 }
 
-function readTimings(): Record<string, number> {
+export function readTimings(): Record<string, number> {
   if (!existsSync(TIMINGS_PATH)) return {};
   return (JSON.parse(readFileSync(TIMINGS_PATH, "utf8")) as { seconds: Record<string, number> }).seconds;
 }
@@ -533,7 +535,7 @@ function readPackage(): { pkg: { scripts: Record<string, string> }; text: string
 }
 
 /** The generated links, refusing when package.json's `test` is not them. */
-function loadChain(): { tree: Tree; table: ShardTable; links: ChainLink[] } {
+export function loadChain(): { tree: Tree; table: ShardTable; links: ChainLink[] } {
   const tree = readTree();
   const table = readTable();
   const { links, problems } = generate(tree, table);

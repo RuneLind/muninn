@@ -132,7 +132,8 @@
       "src/test/no-raw-nul.test.ts",
       "src/benchmarks/retrieval.test.ts",
       "src/dashboard/dashboard-build-hash.test.ts",
-      "scripts/test-chain.test.ts"
+      "scripts/test-chain.test.ts",
+      "scripts/test-par.test.ts"
     ],
     "unit-2": [
       "scripts/wiki-stale.test.ts",
