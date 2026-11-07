@@ -197,15 +197,15 @@ test.describe.serial("the Decisions section", () => {
     const detail = o1.locator(".wiki-wi-detail");
     await expect(detail.locator(".wiki-wi-context strong")).toHaveText("bold");
     await expect(detail.locator(".wiki-wi-choice")).toHaveText([/^A\s*first way cheap\.$/, /^B\s*second way safe\.\s*Recommended$/]);
-    await expect(detail.locator(".wiki-wi-choice.rec")).toHaveAttribute("data-wi-choice", "B");
+    await expect(detail.locator(".wiki-wi-choice.rec")).toHaveAttribute("data-wi-row", "B");
     await expect(detail.locator(".wiki-wi-why")).toHaveText(/^Why B\s+It holds\.$/);
     expect(await detail.textContent()).not.toContain("**");
     await expect(detail).not.toContainText("Default this?");
-    // A row is the pick: it presses, and Answer wakes.
-    await detail.locator('.wiki-wi-choice[data-wi-choice="A"]').click();
-    await expect(o1.locator('.wiki-wi-choice[data-wi-choice="A"]')).toHaveAttribute("aria-pressed", "true");
+    // The letter is the pick: it presses, and Answer wakes.
+    await detail.locator('.wiki-wi-choice [data-wi-choice="A"]').click();
+    await expect(o1.locator('.wiki-wi-choice [data-wi-choice="A"]')).toHaveAttribute("aria-pressed", "true");
     await expect(o1.locator('[data-wi-act="answer"]')).toBeEnabled();
-    await o1.locator('.wiki-wi-choice[data-wi-choice="A"]').click();
+    await o1.locator('.wiki-wi-choice [data-wi-choice="A"]').click();
     await o1.locator('[data-wi-act="take"]').click();
     await expect(lane(page, "default")).toHaveCount(0);
     await expect(row(page, "close", "O1").locator(".wiki-wi-ev")).toContainText("Answered B");

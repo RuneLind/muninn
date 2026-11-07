@@ -2716,9 +2716,10 @@ export async function renderWikiPage(opts?: {
       display: flex; align-items: baseline; gap: 8px; width: 100%; box-sizing: border-box; padding: 6px 10px; text-align: left;
       font: inherit; color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border-secondary); border-radius: 8px;
     }
-    button.wiki-wi-choice { cursor: pointer; }
-    button.wiki-wi-choice:hover:not(:disabled), button.wiki-wi-choice:focus-visible { border-color: var(--accent); }
-    button.wiki-wi-choice:disabled { opacity: .55; cursor: default; }
+    button.wiki-wi-letter { font: inherit; font-weight: 700; color: var(--text-primary); cursor: pointer; padding: 2px 8px; }
+    button.wiki-wi-letter:hover:not(:disabled), button.wiki-wi-letter:focus-visible { border-color: var(--accent); }
+    button.wiki-wi-letter:disabled { opacity: .55; cursor: default; }
+    .wiki-wi-choice.on button.wiki-wi-letter { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
     .wiki-wi-choice.rec { border-color: var(--tone-good); }
     .wiki-wi-choice.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--bg-inset); }
     .wiki-wi-letter {

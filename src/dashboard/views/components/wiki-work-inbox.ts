@@ -170,14 +170,18 @@ function bodyHtml(c: InboxCard): string {
     .map((r) => {
       const rec = r.letter === recLetter;
       const on = pick && s.picked[k] === r.letter;
-      const inner =
-        `<span class="wiki-wi-letter">${esc(r.letter)}</span>` +
-        `<span class="wiki-wi-choice-text">${r.label ? `<b>${r.label}</b> ` : ""}${r.why}</span>` +
-        (rec ? `<span class="wiki-wi-rec">Recommended</span>` : "");
+      // Only the letter is the pick control: the rendered text can hold links and
+      // Fact chips, which inside a <button> would also pick, or close it early.
+      const letter = pick
+        ? `<button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="${esc(r.letter)}" aria-pressed="${on}" aria-label="Choose ${esc(r.letter)}"${busy}>${esc(r.letter)}</button>`
+        : `<span class="wiki-wi-letter">${esc(r.letter)}</span>`;
       const cls = `wiki-wi-choice${rec ? " rec" : ""}${on ? " on" : ""}`;
-      return pick
-        ? `<button class="${cls}" data-wi-act="pick" data-wi-choice="${esc(r.letter)}" aria-pressed="${on}"${busy}>${inner}</button>`
-        : `<div class="${cls}">${inner}</div>`;
+      return (
+        `<div class="${cls}" data-wi-row="${esc(r.letter)}">${letter}` +
+        `<span class="wiki-wi-choice-text">${r.label ? `<b>${r.label}</b> ` : ""}${r.why}</span>` +
+        (rec ? `<span class="wiki-wi-rec">Recommended</span>` : "") +
+        `</div>`
+      );
     })
     .join("");
   return (

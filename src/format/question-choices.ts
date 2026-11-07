@@ -19,14 +19,15 @@ export interface QuestionChoices {
 }
 
 /** The body's leading lone `**…**` line as `question` and the body after it as
- *  `rest`; with no such line, the first line stripped of markup and the whole body. */
+ *  `rest`; with no such line, the first line and the whole body. Either way the
+ *  question is plain text (backticks and bold markers dropped), as the row title prints it. */
 export function splitQuestionLine(body: string): { question: string; rest: string } {
   const lines = body.split("\n");
   const i = lines.findIndex((l) => l.trim());
   if (i < 0) return { question: "", rest: body };
   const first = lines[i]!.trim();
   const bold = /^\*\*([^*]+(?:\*(?!\*)[^*]*)*)\*\*$/.exec(first);
-  if (bold) return { question: bold[1]!.trim(), rest: lines.slice(i + 1).join("\n").replace(/^\s*\n/, "") };
+  if (bold) return { question: bold[1]!.replace(/`/g, "").trim(), rest: lines.slice(i + 1).join("\n").replace(/^\s*\n/, "") };
   return { question: first.replace(/\*\*|__|`/g, "").replace(/^#+\s*/, ""), rest: body };
 }
 

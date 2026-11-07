@@ -13,6 +13,10 @@ const LETTERED = [
 ].join("\n");
 
 describe("splitQuestionLine", () => {
+  test("drops code-span backticks from the question, which prints as plain text", () => {
+    expect(splitQuestionLine("**How many snapshots should `make backup` keep?**\n\nmore").question).toBe("How many snapshots should make backup keep?");
+  });
+
   test("a lone bold first line is the question and leaves the body", () => {
     const { question, rest } = splitQuestionLine(LETTERED);
     expect(question).toBe("Which layout for the Decisions section?");

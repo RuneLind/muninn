@@ -64,7 +64,7 @@ test("a row is titled by the card's question", async () => {
 });
 
 test("every page string is escaped", async () => {
-  await load({ wiki: "w", cards: [card({ id: XSS, title: XSS, body: XSS, lane: "pass", targets: [XSS] })] });
+  await load({ wiki: "w", cards: [card({ id: XSS, title: XSS, body: XSS, question: XSS, lane: "pass", targets: [XSS] })] });
   const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
   expect(html).not.toContain("<img");
   expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
@@ -382,11 +382,11 @@ test("an opened structured card prints a row per choice, the recommended one mar
   click("row", "plans/a.mdx#O1");
   const html = inboxHtml(() => "", Date.now());
   expect(html).toContain('<div class="wiki-wi-context wiki-wi-rendered">Today every lane prints.</div>');
-  expect(html).toMatch(/<button class="wiki-wi-choice rec" data-wi-act="pick" data-wi-choice="A" aria-pressed="false"><span class="wiki-wi-letter">A<\/span><span class="wiki-wi-choice-text"><b>lanes<\/b> the four lanes <code>stay<\/code>\.<\/span><span class="wiki-wi-rec">Recommended<\/span><\/button>/);
-  expect(html).toContain('<button class="wiki-wi-choice" data-wi-act="pick" data-wi-choice="B"');
+  expect(html).toContain('<div class="wiki-wi-choice rec" data-wi-row="A"><button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="A" aria-pressed="false" aria-label="Choose A">A</button><span class="wiki-wi-choice-text"><b>lanes</b> the four lanes <code>stay</code>.</span><span class="wiki-wi-rec">Recommended</span></div>');
+  expect(html).toContain('<div class="wiki-wi-choice" data-wi-row="B"><button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="B"');
   expect(html).toContain("<b>Why A</b> It fixes both faults.");
   expect(html).not.toContain("RAW-FALLBACK");
-  // The letters are the rows now: only Not sure is a button among the picks.
+  // The rows carry the letters now: only Not sure is a wiki-wi-btn among the picks.
   expect(html.match(/class="wiki-wi-btn[^"]*" data-wi-act="pick"/g)!.length).toBe(1);
   expect(html).toContain('data-wi-choice="not-sure"');
 });
@@ -396,7 +396,7 @@ test("clicking a structured row picks it, and Answer sends that choice", async (
   click("row", "plans/a.mdx#O1");
   click("pick", "plans/a.mdx#O1", { "data-wi-choice": "B" });
   const html = inboxHtml(() => "", Date.now());
-  expect(html).toContain('<button class="wiki-wi-choice on" data-wi-act="pick" data-wi-choice="B" aria-pressed="true">');
+  expect(html).toContain('<div class="wiki-wi-choice on" data-wi-row="B"><button class="wiki-wi-letter" data-wi-act="pick" data-wi-choice="B" aria-pressed="true"');
   expect(html).toMatch(/data-wi-act="answer">Answer/);
   let sent: unknown = null;
   globalThis.fetch = ((url: string, init?: { body?: string }) => {
@@ -411,9 +411,19 @@ test("a structured card in the close lane shows its rows without the pick contro
   await load({ wiki: "w", cards: [card({ id: "O1", lane: "close", choices: ["A", "B"], structured: STRUCTURED })] });
   click("row", "plans/a.mdx#O1");
   const html = inboxHtml(() => "", Date.now());
-  expect(html).toContain('<div class="wiki-wi-choice rec">');
+  expect(html).toContain('<div class="wiki-wi-choice rec" data-wi-row="A"><span class="wiki-wi-letter">A</span>');
   expect(html).not.toContain('data-wi-act="pick"');
   expect(html).toContain('data-wi-act="preview"');
+});
+
+test("a link in a choice row sits outside the pick button", async () => {
+  const linked = { ...STRUCTURED, rows: [{ letter: "A", label: "lanes", why: 'see <a href="https://example.org/x">the spec</a>.' }, STRUCTURED.rows[1]!] };
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "ask", choices: ["A", "B"], structured: linked })] });
+  click("row", "plans/a.mdx#O1");
+  const html = inboxHtml(() => "", Date.now());
+  // The pick button closes on its letter; the link comes after, in the row's text.
+  expect(html).toMatch(/<div class="wiki-wi-choice rec" data-wi-row="A"><button [^>]*data-wi-act="pick"[^>]*>A<\/button><span class="wiki-wi-choice-text"><b>lanes<\/b> see <a href="https:\/\/example\.org\/x">/);
+  expect(html).not.toMatch(/<button [^>]*data-wi-act="pick"(?:(?!<\/button>).)*<a /s);
 });
 
 test("an unstructured card prints the server's rendered body and today's pick buttons", async () => {
