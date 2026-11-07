@@ -180,8 +180,11 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // `revealOnRender` to the shared state. The shared state went from 57 / 4 to
 // 50 / 3: `workMapThemes` and `workFacts` have one writer (the shell) and moved
 // back to it, `revealOnRender` (written by the shell and the rail) moved in.
+// C3 fix round: the rail 2,301 / 16. Five of those lets (`effortsBox`,
+// `retiredBox`, `filtersDetails`, `filtersBtn`, `wikiSel`) were read only in
+// `registerRailOptions` and are now its locals.
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
-  ["wiki-rail-controller.ts", 2_309, 21],
+  ["wiki-rail-controller.ts", 2_301, 16],
   ["wiki-shell-state.ts", 50, 3],
   ["wiki-status-pills.ts", 29, 0],
   ["wiki-stale-controller.ts", 509, 18],

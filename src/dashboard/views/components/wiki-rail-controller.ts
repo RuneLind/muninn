@@ -751,23 +751,11 @@ function setGroupFamilies(on: boolean): void {
 // `toggle:no-efforts` is the OFF, so a click writes the exception to an ON
 // default. Painted (and shown) from the listing on every render, since the
 // map can appear or go with any adopt.
-let effortsBox!: HTMLInputElement | null;
 function setGroupEfforts(on: boolean): void {
   if (effortsOn(openFolds, true) !== on) openFolds = toggleFolded(deps.WIKI(), EFFORTS_OFF_TOGGLE_KEY);
   paintEffortsToggle();
   renderList();
 }
-
-// `Show retired (N)`, per wiki: the same store and discipline as `group
-// families`. A flip changes the pool every facet counts from, so the facets,
-// the start view and the rows all repaint.
-let retiredBox!: HTMLInputElement | null;
-
-// The toolbar's Filters button flips the <details> under it. The details keeps
-// its own open state, so syncFilters' auto-open and a background adopt read it
-// as before; aria-expanded follows the details whoever opened it.
-let filtersDetails!: HTMLDetailsElement | null;
-let filtersBtn!: HTMLElement | null;
 
 // The view-options pane: opened by its button; closed by the button, a pointer
 // or focus outside it, Escape from anywhere, or a reader shortcut. It is a
@@ -780,9 +768,6 @@ function setOptionsOpen(open: boolean): void {
   optionsPane.hidden = !open;
   optionsBtn.setAttribute("aria-expanded", String(open));
 }
-
-// Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
-let wikiSel!: HTMLSelectElement | null;
 
 /**
  * ★ — hidden until the row is hovered, always shown once pinned.
@@ -2166,15 +2151,21 @@ export function registerRailOptions(): void {
     familiesBox.checked = familiesOn();
     familiesBox.addEventListener("change", () => setGroupFamilies(familiesBox!.checked));
   }
-  effortsBox = document.getElementById("wikiGroupEfforts") as HTMLInputElement | null;
+  const effortsBox = document.getElementById("wikiGroupEfforts") as HTMLInputElement | null;
   if (effortsBox) effortsBox.addEventListener("change", () => setGroupEfforts(effortsBox!.checked));
-  retiredBox = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
+  // `Show retired (N)`, per wiki: the same store and discipline as `group
+  // families`. A flip changes the pool every facet counts from, so the facets,
+  // the start view and the rows all repaint.
+  const retiredBox = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
   if (retiredBox) {
     retiredBox.checked = showRetired();
     retiredBox.addEventListener("change", () => setShowRetired(retiredBox!.checked));
   }
-  filtersDetails = document.getElementById("wikiFilters") as HTMLDetailsElement | null;
-  filtersBtn = document.getElementById("wikiFiltersBtn");
+  // The toolbar's Filters button flips the <details> under it. The details keeps
+  // its own open state, so syncFilters' auto-open and a background adopt read it
+  // as before; aria-expanded follows the details whoever opened it.
+  const filtersDetails = document.getElementById("wikiFilters") as HTMLDetailsElement | null;
+  const filtersBtn = document.getElementById("wikiFiltersBtn");
   if (filtersDetails && filtersBtn) {
     filtersBtn.addEventListener("click", () => {
       filtersDetails!.open = !filtersDetails!.open;
@@ -2236,7 +2227,8 @@ export function registerRailOptions(): void {
     optionsBtn?.focus();
   });
   paintViewOptions();
-  wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
+  // Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
+  const wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
   if (wikiSel) {
     wikiSel.addEventListener("change", () => {
       const value = wikiSel!.value;

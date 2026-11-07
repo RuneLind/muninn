@@ -42,7 +42,9 @@ function restoreGlobals(): void {
   for (const k of ["__WIKI_NAME__", "__WIKI_ROOT__", "__WIKI_FIND_SELF__", "__WIKI_FIND_ROWS__"]) delete g[k];
 }
 
-// ── The fixture: thread T over k, p, q (the boundaries test's shape) ──────
+// ── The fixture: thread T over k, p, q (the boundaries test's shape); U ──
+// alone; V and W joined by a `related:` pair, so the rail draws one group
+// card, whose ⋯ offers Save as series.
 const NOW = Date.now();
 const H = 3_600_000;
 const page = (relPath: string, focusMs: number) => ({
@@ -61,6 +63,8 @@ const sess = (id: string, last: number) => ({ id, provider: "claude", first: las
 const row = (id: string, p: string, thread: string, first: number, kind = "focus") => [`claude-code:${id}`, p, thread, kind, 2, first, first + H];
 const T = { key: "k.md", pages: ["p.md", "k.md", "q.md"], touched: ["ctx.md"], sessions: [sess("s2", NOW - H), sess("s1", NOW - 3 * H), sess("s3", NOW - 5 * H)] };
 const U = { key: "u.md", pages: ["u.md"], touched: [], sessions: [sess("s4", NOW - 2 * H)] };
+const V = { key: "v.md", pages: ["v.md"], touched: [], sessions: [sess("s5", NOW - 6 * H)] };
+const W = { key: "w.md", pages: ["w.md"], touched: [], sessions: [sess("s6", NOW - 7 * H)] };
 const ROWS = [
   row("s1", "k.md", "k.md", NOW - 9 * H),
   row("s1", "p.md", "k.md", NOW - 4 * H),
@@ -68,19 +72,21 @@ const ROWS = [
   row("s2", "ctx.md", "k.md", NOW - 2 * H, "touch"),
   row("s3", "q.md", "k.md", NOW - 6 * H),
   row("s4", "u.md", "u.md", NOW - 3 * H),
+  row("s5", "v.md", "v.md", NOW - 7 * H),
+  row("s6", "w.md", "w.md", NOW - 8 * H),
 ];
 const LISTING = {
-  pages: [page("k.md", NOW - 8 * H), page("p.md", NOW - H), page("q.md", NOW - 5 * H), page("u.md", NOW - 2 * H), page("ctx.md", NOW - 2 * H)],
+  pages: [page("k.md", NOW - 8 * H), page("p.md", NOW - H), page("q.md", NOW - 5 * H), page("u.md", NOW - 2 * H), page("ctx.md", NOW - 2 * H), page("v.md", NOW - 6 * H), page("w.md", NOW - 7 * H)],
   scannedAt: NOW,
-  workedCoverage: { matched: 5, total: 5 },
+  workedCoverage: { matched: 7, total: 7 },
   work: {
     asOfMs: NOW,
     sinceMs: NOW - 8 * 24 * H,
-    threads: [T, U],
+    threads: [T, U, V, W],
     evidence: {
       version: 1,
-      threads: { candidates: 2, shipped: 2 },
-      relations: { complete: true, reasons: [], series: {}, projects: {}, related: [], issues: [], ambiguousIssues: [], relatedSkipped: { skipped: 0, ambiguous: 0 } },
+      threads: { candidates: 4, shipped: 4 },
+      relations: { complete: true, reasons: [], series: {}, projects: {}, related: [["w.md", "v.md"]], issues: [], ambiguousIssues: [], relatedSkipped: { skipped: 0, ambiguous: 0 } },
       contributions: { complete: true, reasons: [], cut: [], rows: ROWS },
     },
   },
@@ -175,6 +181,21 @@ describe("the stale check (wiki-stale-controller.ts)", () => {
     expect(badge.textContent).toBe("⚠ 1 · 3");
     expect(badge.closest("[data-relpath]")!.getAttribute("data-relpath")).toBe("q.md");
   });
+
+  test("a section the reader folds stays folded when the tab repaints the same page (the #staleBody toggle listener)", async () => {
+    const { loadStale } = await import("../components/wiki-stale-controller.ts");
+    const det = () => doc().querySelector<HTMLDetailsElement>('#staleBody details[data-stale-open="bucket:toCheck"]');
+    expect(det()!.open).toBe(true);
+    let toggled = false;
+    det()!.addEventListener("toggle", () => (toggled = true));
+    // Marked, so the repainted section is told apart from this one.
+    det()!.setAttribute("data-old-body", "1");
+    det()!.open = false;
+    await until(() => toggled, "the toggle event");
+    loadStale("p.md");
+    await until(() => !!det() && !det()!.hasAttribute("data-old-body"), "the tab to repaint");
+    expect(det()!.open).toBe(false);
+  });
 });
 
 describe("the effort page (wiki-effort-controller.ts)", () => {
@@ -204,9 +225,15 @@ describe("the effort page (wiki-effort-controller.ts)", () => {
     clickEffortLink("drift");
     await until(() => !!doc().getElementById("wikiEffortRetry"), "the effort page's error pane");
     const before = fetched.filter((f) => f.url.startsWith("/api/wiki/work-map")).length;
+    // Marked, so the pane Retry paints is told apart from the one it replaces.
+    doc().getElementById("wikiEffortRetry")!.setAttribute("data-old-pane", "1");
     doc().getElementById("wikiEffortRetry")!.click();
     expect(fetched.filter((f) => f.url.startsWith("/api/wiki/work-map")).length).toBeGreaterThan(before);
+    // Retry repaints: the loading state replaces the old pane at once, then the
+    // failed GET paints a new error pane.
+    expect(doc().getElementById("wikiEffortRetry") === null).toBe(true);
     await until(() => !!doc().getElementById("wikiEffortRetry"), "the error pane again");
+    expect(doc().getElementById("wikiEffortRetry")!.hasAttribute("data-old-pane")).toBe(false);
     setWorkMapRunAt(null);
     workMapStatus = 200;
   });
@@ -267,6 +294,47 @@ describe("the ⋯ menus (wiki-menus-controller.ts)", () => {
     expect(pop() === null).toBe(true);
     expect(doc().querySelector('#wikiList .wiki-thread-card[data-thread="thread:q.md"]') === null).toBe(true);
   });
+
+  test("ArrowDown in a thread row's page menu moves focus to the next item", () => {
+    doc().querySelector<HTMLElement>('#wikiList .thread-row [data-series-menu="q.md"]')!.click();
+    const menu = doc().getElementById("wikiSeriesMenu")!;
+    expect(doc().activeElement === menu.querySelector('[data-thread-split="q.md"]')).toBe(true);
+    key("ArrowDown");
+    expect(doc().activeElement === menu.querySelector("[data-series-input]")).toBe(true);
+    key("Escape");
+    expect(doc().getElementById("wikiSeriesMenu") === null).toBe(true);
+  });
+
+  test("Tab in the work popover closes it back to its opener", () => {
+    opener().click();
+    expect(pop()!.contains(doc().activeElement)).toBe(true);
+    key("Tab");
+    expect(pop() === null).toBe(true);
+    expect(opener().getAttribute("aria-expanded")).toBe("false");
+    expect(doc().activeElement === opener()).toBe(true);
+  });
+
+  test("a window resize closes the work popover", () => {
+    opener().click();
+    expect(!!pop()).toBe(true);
+    (g.window as Window).dispatchEvent(new (g.Event as typeof Event)("resize"));
+    expect(pop() === null).toBe(true);
+    expect(opener().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  test("a group card's ⋯ offers Save as series, and its item turns the popover into the confirm dialog on the key", () => {
+    doc().querySelector<HTMLElement>('#wikiList [data-work-card-menu="group:anchor:v.md"]')!.click();
+    pop()!.querySelector<HTMLElement>('[data-work-save-series="group:anchor:v.md"]')!.click();
+    const el = pop()!;
+    expect(el.getAttribute("role")).toBe("dialog");
+    expect(el.getAttribute("aria-modal")).toBe("false");
+    expect(el.getAttribute("aria-label")).toContain("as a series");
+    const keyBox = el.querySelector("[data-work-series-key]");
+    expect(!!keyBox).toBe(true);
+    expect(doc().activeElement === keyBox).toBe(true);
+    el.querySelector<HTMLElement>("[data-work-series-cancel]")!.click();
+    expect(pop() === null).toBe(true);
+  });
 });
 
 describe("the rail toolbar (registerRailOptions, moved into wiki-rail-controller.ts)", () => {
@@ -305,5 +373,6 @@ describe("the rail toolbar (registerRailOptions, moved into wiki-rail-controller
     await until(() => btn.getAttribute("aria-expanded") === String(!was), "aria-expanded to follow");
     btn.click();
     expect(details.open).toBe(was);
+    await until(() => btn.getAttribute("aria-expanded") === String(was), "aria-expanded to follow back");
   });
 });
