@@ -51,6 +51,20 @@ export const TEST_FILE_GLOB = "**/*.test.ts";
  */
 export const SINGLE_PROCESS_SCRIPTS: ReadonlySet<string> = new Set(["test:coverage"]);
 
+/**
+ * Directories whose test files need a process of their own for a reason other
+ * than `mock.module`: `src/dashboard/views/wiki-boot/` installs happy-dom's
+ * globals (`Event`, `URL`, `fetch`, timers, ~500 keys) over Bun's for the life
+ * of the process. The same rule as a mock file applies — alone in every link
+ * that runs it, and run by some chain — so it is read through the same links.
+ */
+export const OWN_PROCESS_DIRS = ["src/dashboard/views/wiki-boot/"] as const;
+
+/** The test files under {@link OWN_PROCESS_DIRS}. */
+export function ownProcessFiles(allTestFiles: readonly string[]): string[] {
+  return allTestFiles.filter((f) => OWN_PROCESS_DIRS.some((d) => f.startsWith(d)));
+}
+
 export interface BunTestLink {
   script: string;
   /** The link's positional arguments, flags removed. */

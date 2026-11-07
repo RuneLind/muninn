@@ -1,8 +1,8 @@
 /**
  * Graph mode in the article pane: the lanes markup, the side card, the `g`
  * key rule and the hover neighbourhood. Pure string building and set logic,
- * in its own module because `wiki-browser.ts` touches `document` at import
- * time and `bun test` cannot load it. The one DOM function here,
+ * in its own module so `bun test` loads it without a DOM (`wiki-browser.ts`
+ * is importable since `boot()`, but its code needs one). The one DOM function here,
  * {@link drawGraphEdges}, runs only when the reader calls it.
  *
  * The data is `GET /api/wiki/graph` (`src/wiki/graph-types.ts`).

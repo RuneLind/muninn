@@ -1,8 +1,7 @@
 /**
  * The reader's STALE tab (plan muninn-wiki-drift-check, PR 2a): what a page
  * change may have made untrue, from `GET /api/wiki/stale?page=`. Pure and
- * DOM-free so a test can load it (`wiki-browser.ts` touches `document` at
- * import time); `wiki-browser.ts` fetches, renders this and wires the buttons.
+ * DOM-free so a test can load it without a DOM; `wiki-browser.ts` fetches, renders this and wires the buttons.
  *
  * - The count (D26): confirmed stale status lines on the page, and its
  *   linking pages to check.

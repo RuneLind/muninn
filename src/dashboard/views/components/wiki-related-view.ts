@@ -2,8 +2,8 @@
  * The Connections panel's `Related work` block — pure string building, so
  * `bun test` can load it.
  *
- * It lived in `wiki-browser.ts`, which touches `document` at import time and is
- * therefore unloadable outside a browser: anything shaped there is provable only
+ * It lived in `wiki-browser.ts`, which then touched `document` at import time
+ * and was unloadable outside a browser: anything shaped there was provable only
  * through Playwright, and the guard below is exactly the shape a spec cannot
  * reach (a block that renders NOTHING has no element to assert on).
  *

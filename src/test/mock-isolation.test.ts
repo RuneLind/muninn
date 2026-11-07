@@ -10,6 +10,7 @@ import {
   TEST_FILE_GLOB,
   bunTestLinks,
   expandLink,
+  ownProcessFiles,
   sharedLinkOffenders,
   unrunMockFiles,
 } from "./mock-isolation.ts";
@@ -119,6 +120,12 @@ describe("the rule, on fixtures", () => {
     expect(sharedLinkOffenders({ links: l, mockFiles: ["src/b/solo.test.ts"], allTestFiles: all })).toHaveLength(1);
   });
 
+  test("the own-process predicate selects by directory prefix only", () => {
+    expect(
+      ownProcessFiles(["src/dashboard/views/wiki-boot/a.test.ts", "src/dashboard/views/components/a.test.ts", "src/x/wiki-boot/a.test.ts"]),
+    ).toEqual(["src/dashboard/views/wiki-boot/a.test.ts"]);
+  });
+
   test("a mock file no chain runs is reported, not silently skipped", () => {
     expect(unrunMockFiles({ links, mockFiles: ["src/zz/lost.test.ts", "src/b/solo.test.ts"], allTestFiles: all })).toEqual([
       "src/zz/lost.test.ts",
@@ -226,6 +233,14 @@ describe("the live chains", () => {
 
   test("every file that calls mock.module is run by at least one chain", () => {
     expect(unrunMockFiles(liveInput())).toEqual([]);
+  });
+
+  test("every file under an own-process directory is ALONE in each bun test process that runs it, and run by a chain", () => {
+    const input = liveInput();
+    const own = ownProcessFiles(input.allTestFiles);
+    expect(own).toContain("src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts");
+    expect(sharedLinkOffenders({ ...input, mockFiles: own })).toEqual([]);
+    expect(unrunMockFiles({ ...input, mockFiles: own })).toEqual([]);
   });
 
   /**
