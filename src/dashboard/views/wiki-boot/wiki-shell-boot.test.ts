@@ -15,7 +15,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 // No static import of anything under `src/`: `wiki-page.ts` shares 68 of
 // wiki-browser.ts's 151 modules, and a module already in the cache is not
@@ -63,9 +63,12 @@ let loadedInWindow: string[];
 let boot: Boot;
 let win: GlobalWindow;
 let handle: { dispose(): void };
-/** Every `document.addEventListener` call `boot()` made, in order, with its
- *  phase (`capture` from a boolean or an options object's `capture`). */
-const registered: { type: string; source: string; capture: boolean }[] = [];
+/** Every `addEventListener` call `boot()` made, on any target, in order: the
+ *  target (`window`, `document`, `#id`, else the tag name), the type, the phase
+ *  (`capture` from a boolean or an options object's `capture`) and the handler. */
+const listened: { target: string; type: string; source: string; capture: boolean }[] = [];
+/** The `document` ones among them. */
+let registered: { type: string; source: string; capture: boolean }[] = [];
 /** Every `setInterval` call `boot()` made: the id it returned and the tick. */
 const intervals: { id: unknown; source: string }[] = [];
 const fetched: string[] = [];
@@ -120,6 +123,13 @@ async function stubFetch(input: unknown): Promise<unknown> {
   }
   const R = g.Response as typeof Response;
   return new R(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+/** The prototype on `node`'s chain that owns `addEventListener`. */
+function findAddOwner(node: object): Record<string, unknown> {
+  let p = Object.getPrototypeOf(node) as Record<string, unknown>;
+  while (!Object.prototype.hasOwnProperty.call(p, "addEventListener")) p = Object.getPrototypeOf(p);
+  return p;
 }
 
 async function until(cond: () => boolean, what: string): Promise<void> {
@@ -185,14 +195,31 @@ beforeAll(async () => {
   // (3) Globals, fetch stub, one boot, the article open.
   Object.assign(g, { __WIKI_NAME__: "w", __WIKI_ROOT__: "/tmp/w", __WIKI_FIND_SELF__: "w", __WIKI_FIND_ROWS__: "w" });
   g.fetch = stubFetch;
-  const doc = g.document as Document & { addEventListener: Document["addEventListener"] };
-  const realAdd = doc.addEventListener;
-  // An own property shadowing the prototype method, for the boot call only.
-  doc.addEventListener = function (this: Document, type: string, fn: unknown, opts?: unknown) {
+  const doc = g.document as Document;
+  // The prototype that owns the document's `addEventListener` (happy-dom's base
+  // EventTarget, shared by every node; `g.EventTarget` is a per-window subclass
+  // it does not reach); the window's is globalThis's (`window` maps to
+  // globalThis), so it is wrapped too. Both originals are taken before either is
+  // replaced: no call records twice.
+  const proto = findAddOwner(doc);
+  expect(findAddOwner(doc.body)).toBe(proto);
+  const realProtoAdd = proto.addEventListener as (...a: unknown[]) => void;
+  const hadOwnWinAdd = Object.prototype.hasOwnProperty.call(g, "addEventListener");
+  const realWinAdd = g.addEventListener as (...a: unknown[]) => void;
+  const record = (t: unknown, type: string, fn: unknown, opts: unknown) => {
     const capture = typeof opts === "boolean" ? opts : !!(opts as { capture?: boolean } | undefined)?.capture;
-    registered.push({ type, source: String(fn), capture });
-    return (realAdd as (...a: unknown[]) => void).call(this, type, fn, opts);
-  } as Document["addEventListener"];
+    const el = t as Element;
+    const target = t === globalThis ? "window" : t === doc ? "document" : el.id ? `#${el.id}` : String(el.tagName ?? t).toLowerCase();
+    listened.push({ target, type, source: String(fn), capture });
+  };
+  proto.addEventListener = function (this: unknown, type: string, fn: unknown, opts?: unknown) {
+    record(this, type, fn, opts);
+    return realProtoAdd.call(this, type, fn, opts);
+  };
+  g.addEventListener = function (type: string, fn: unknown, opts?: unknown) {
+    record(globalThis, type, fn, opts);
+    return realWinAdd.call(globalThis, type, fn, opts);
+  };
   const realSetInterval = g.setInterval as (...a: unknown[]) => unknown;
   g.setInterval = (fn: unknown, ...rest: unknown[]) => {
     const id = realSetInterval(fn, ...rest);
@@ -202,9 +229,12 @@ beforeAll(async () => {
   try {
     handle = boot();
   } finally {
-    delete (doc as unknown as Record<string, unknown>).addEventListener;
+    proto.addEventListener = realProtoAdd;
+    if (hadOwnWinAdd) g.addEventListener = realWinAdd;
+    else delete g.addEventListener;
     g.setInterval = realSetInterval;
   }
+  registered = listened.filter((l) => l.target === "document");
   await until(() => !!doc.querySelector("#articleWrap #alphaBody"), "the article to render");
 }, 30_000);
 
@@ -238,6 +268,20 @@ describe("wiki-browser.ts — import and boot", () => {
   });
 });
 
+describe("findRepoRoot — the root the preload check is decided against", () => {
+  // A wrong root makes `isAppModule` answer false for every key, so `preloaded`
+  // would be empty however many app modules were loaded first: the check above
+  // would pass blind. This pins the root, and that it sees app modules at all.
+  test("is muninn's checkout root, and an app module loaded by boot counts under it", () => {
+    const root = findRepoRoot(import.meta.dir);
+    expect((JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as { name: string }).name).toBe("muninn");
+    expect(existsSync(path.join(root, "scripts", "test-chain.ts"))).toBe(true);
+    const shell = loadedInWindow.find((k) => k.endsWith("/components/wiki-browser.ts"))!;
+    expect(isAppModule(shell, root, import.meta.path)).toBe(true);
+    expect(loadedInWindow.filter((k) => isAppModule(k, root, import.meta.path)).length).toBeGreaterThan(100);
+  });
+});
+
 describe("isAppModule — which require.cache keys count as preloaded app modules", () => {
   const SELF = "/repo/src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts";
   const cases: [string, string, string, boolean][] = [
@@ -261,6 +305,37 @@ describe("isAppModule — which require.cache keys count as preloaded app module
 });
 
 describe("wiki-browser.ts — listener order", () => {
+  test("every listener boot() registers, in registration order, is pinned", () => {
+    // The order is load-bearing (`keydown` handlers read `defaultPrevented`, the
+    // click delegates' selector sets rely on who runs first), and moving code out
+    // of the shell into controllers (mimir plan muninn-wiki-browser-split) must
+    // keep it: each entry is target, type and phase. Captured on main at C1
+    // (00eeaa2f); a change here is a reordering to justify, never to re-snapshot.
+    expect(listened.map((l) => `${l.target} ${l.type}${l.capture ? " capture" : ""}`)).toEqual([
+      "document input", "document toggle capture", "document click capture", "document selectionchange",
+      "document pointerdown capture", "document pointerup capture", "document pointercancel capture",
+      "document contextmenu capture", "document pointermove capture", "document click", "document keydown",
+      "document keydown", "document change", "document mouseover", "document focusin", "document mouseout",
+      "document focusout", "document keydown capture", "window resize", "#wikiRailResizer pointerdown",
+      "#wikiRailResizer pointermove", "#wikiRailResizer pointerup", "#wikiRailResizer pointercancel",
+      "#wikiRailResizer lostpointercapture", "#wikiRailResizer dblclick", "#wikiRailResizer keydown", "document click",
+      "document keydown", "#staleBody toggle capture", "document keydown", "window scroll capture", "window resize",
+      "document click", "document submit", "document mouseover", "document mouseout", "document focusin",
+      "document change", "document keydown capture", "document keydown", "document keydown", "body click",
+      "document click", "document keydown", "document keydown", "window scroll capture", "window resize",
+      "#wikiList click", "#wikiSearch input", "#domainChips click", "#wikiFolder change", "#typeChips click",
+      "#statusChips click", "#projectChips click", "#jiraChips click", "#tagChips click", "#wikiSort change",
+      "#wikiGroupFamilies change", "#wikiGroupEfforts change", "#wikiShowRetired change", "#wikiFiltersBtn click",
+      "#wikiFilters toggle", "#wikiOptionsBtn click", "document pointerdown", "document focusin",
+      "document keydown capture", "#wikiActiveOptions click", "#wikiSelect change", "window hashchange",
+      "window popstate", "#wikiAskBtn click", "#wikiAskInput keydown", "#wikiAskHistory click", "document click",
+      "document keydown", "document click", "document change", "document input", "document keydown", "document change",
+      "document toggle capture", "document keydown", "#articleWrap mouseup", "document selectionchange",
+      "document keydown", "document mousedown", "window message", "window storage", "#wikiList keydown",
+      "document keydown", "document click", "window focus", "document visibilitychange",
+    ]);
+  });
+
   test("the shell's click delegate is registered before initChatOptions' (dialog click-away reads a detached target)", () => {
     // Replaces the `indexOf` grep that `wiki-chat-target.test.ts` held: this is
     // the order the listeners were REGISTERED in at runtime. The shell's
@@ -336,3 +411,4 @@ describe("wiki-browser.ts — dispose", () => {
     expect(intervals.filter((i) => !cleared.includes(i.id)).map((i) => i.source)).toEqual([]);
   });
 });
+
