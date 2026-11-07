@@ -187,7 +187,7 @@ function bodyHtml(c: InboxCard): string {
   return (
     (sd.context ? `<div class="wiki-wi-context wiki-wi-rendered">${sd.context}</div>` : "") +
     `<div class="wiki-wi-choices">${rows}</div>` +
-    (sd.recommendation ? `<div class="wiki-wi-why wiki-wi-rendered"><b>Why ${esc(sd.recommendation.letter)}</b> ${sd.recommendation.why}</div>` : "")
+    (sd.recommendation ? `<div class="wiki-wi-why wiki-wi-rendered"><b>${sd.recommendation.qualified ? "Recommendation:" : `Why ${esc(sd.recommendation.letter)}`}</b> ${sd.recommendation.why}</div>` : "")
   );
 }
 

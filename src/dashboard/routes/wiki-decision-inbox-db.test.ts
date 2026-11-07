@@ -134,7 +134,7 @@ describe("GET /api/wiki/decision-inbox", () => {
         { letter: "A", label: "lanes, empty folded", why: "the lanes <strong>stay</strong>." },
         { letter: "B", label: "one list", why: "every card." },
       ],
-      recommendation: { letter: "A", why: "It fixes both faults." },
+      recommendation: { letter: "A", why: "It fixes both faults.", qualified: false },
     });
     // No choice rows in the body: no structure, and a body with no bold line keeps its first line.
     const o2 = body.cards.find((c) => c.id === "O2")!;

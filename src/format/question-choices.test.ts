@@ -38,14 +38,14 @@ describe("parseQuestionChoices", () => {
         { letter: "A", label: "lanes, empty folded", why: "the four lanes stay; empty ones fold." },
         { letter: "B", label: "one list", why: "every card in one list." },
       ],
-      recommendation: { letter: "A", why: "It fixes both faults." },
+      recommendation: { letter: "A", why: "It fixes both faults.", qualified: false },
     });
   });
 
   test("Anbefaling, with or without the period", () => {
     const body = "**Hvilken?**\n\n- **A — en:** x\n- **B — to:** y\n\n**Anbefaling: B** fordi.";
-    expect(parseQuestionChoices(body, ["A", "B"])!.recommendation).toEqual({ letter: "B", why: "fordi." });
-    expect(parseQuestionChoices(body.replace("B**", "B.**"), ["A", "B"])!.recommendation).toEqual({ letter: "B", why: "fordi." });
+    expect(parseQuestionChoices(body, ["A", "B"])!.recommendation).toEqual({ letter: "B", why: "fordi.", qualified: false });
+    expect(parseQuestionChoices(body.replace("B**", "B.**"), ["A", "B"])!.recommendation).toEqual({ letter: "B", why: "fordi.", qualified: false });
   });
 
   test.each([["—"], ["–"], ["-"]])("dash %s", (dash) => {
@@ -81,12 +81,24 @@ describe("parseQuestionChoices", () => {
 
   test("a qualified recommendation takes its leading choice and keeps the qualifier in the why", () => {
     const r = parseQuestionChoices("**Q?**\n\n- **A:** x\n- **B:** y\n\n**Recommendation: A, with B meanwhile.** z", ["A", "B"])!;
-    expect(r.recommendation).toEqual({ letter: "A", why: "with B meanwhile. z" });
+    expect(r.recommendation).toEqual({ letter: "A", why: "A, with B meanwhile. z", qualified: true });
   });
 
   test("the letter follows the card's own recommendation rule: a quoted choice counts", () => {
     const r = parseQuestionChoices("**Q?**\n\n- **A:** x\n- **B:** y\n\n**Recommendation: «B».** z", ["A", "B"])!;
-    expect(r.recommendation).toEqual({ letter: "B", why: "z" });
+    expect(r.recommendation).toEqual({ letter: "B", why: "«B». z", qualified: true });
+  });
+
+  test("a marked-up or hyphenated letter keeps its whole bold part, unsliced", () => {
+    const q = (rec: string) => parseQuestionChoices(`**Q?**\n\n- **A:** x\n- **B:** y\n\n**Recommendation: ${rec}.** z`, ["A", "B"])!.recommendation;
+    expect(q("`B`, keep `foo` on")).toEqual({ letter: "B", why: "`B`, keep `foo` on. z", qualified: true });
+    expect(q("*B*, not A")).toEqual({ letter: "B", why: "*B*, not A. z", qualified: true });
+    expect(q("B-variant")).toEqual({ letter: "B", why: "B-variant. z", qualified: true });
+  });
+
+  test("a recommendation line naming another letter than the body's first marker refuses the shape", () => {
+    const body = "**Q?**\n\nLast time **Recommendation: A** was rejected.\n\n- **A:** x\n- **B:** y\n\n**Recommendation: B.** z";
+    expect(parseQuestionChoices(body, ["A", "B"])).toBeNull();
   });
 
   test("prose after the rows, before the recommendation, refuses the shape", () => {

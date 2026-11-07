@@ -392,7 +392,7 @@ const STRUCTURED = {
     { letter: "A", label: "lanes", why: "the four lanes <code>stay</code>." },
     { letter: "B", label: "one list", why: "every card." },
   ],
-  recommendation: { letter: "A", why: "It fixes both faults." },
+  recommendation: { letter: "A", why: "It fixes both faults.", qualified: false },
 };
 
 test("an opened structured card prints a row per choice, the recommended one marked, and its why", async () => {
@@ -432,6 +432,15 @@ test("a structured card in the close lane shows its rows without the pick contro
   expect(html).toContain('<div class="wiki-wi-choice rec" data-wi-row="A"><span class="wiki-wi-letter">A</span>');
   expect(html).not.toContain('data-wi-act="pick"');
   expect(html).toContain('data-wi-act="preview"');
+});
+
+test("a qualified recommendation is headed «Recommendation:», not «Why X» before its own letter", async () => {
+  const q = { ...STRUCTURED, recommendation: { letter: "A", why: "A, with B meanwhile. It fixes both.", qualified: true } };
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "ask", choices: ["A", "B"], structured: q })] });
+  click("row", "plans/a.mdx#O1");
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toContain("<b>Recommendation:</b> A, with B meanwhile. It fixes both.");
+  expect(html).not.toContain("<b>Why A</b>");
 });
 
 test("a link in a choice row sits outside the pick button", async () => {

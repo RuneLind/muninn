@@ -68,7 +68,7 @@ export interface InboxCard {
 export interface InboxStructured {
   context: string;
   rows: { letter: string; label: string; why: string }[];
-  recommendation: { letter: string; why: string } | null;
+  recommendation: { letter: string; why: string; qualified: boolean } | null;
 }
 
 /** The card body's question, rendered rest and choice rows, as the inbox shows them. */
@@ -81,7 +81,7 @@ export function renderInboxBody(body: string, choices: readonly string[]): Pick<
     structured: parsed && {
       context: formatWebHtml(parsed.context).trim(),
       rows: parsed.rows.map((r) => ({ letter: r.letter, label: formatWebHtml(r.label).trim(), why: formatWebHtml(r.why).trim() })),
-      recommendation: parsed.recommendation && { letter: parsed.recommendation.letter, why: formatWebHtml(parsed.recommendation.why).trim() },
+      recommendation: parsed.recommendation && { ...parsed.recommendation, why: formatWebHtml(parsed.recommendation.why).trim() },
     },
   };
 }
