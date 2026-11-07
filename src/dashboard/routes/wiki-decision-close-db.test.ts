@@ -18,7 +18,7 @@ import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki
 import { __resetWikiCacheForTest, stripFrontmatter } from "../../wiki/store.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 import { registerWikiAnswerRoutes } from "./wiki-answers.ts";
-import { listWikiAnswerHistory } from "../../db/wiki-answers.ts";
+import { insertWikiAnswerVersion, listWikiAnswerHistory } from "../../db/wiki-answers.ts";
 import { realGit } from "../../wiki/decision-triage/git.ts";
 import { registerWikiDecisionInboxRoute, type DecisionCloseGuards, type DecisionInboxBody } from "./wiki-decision-inbox.ts";
 
@@ -139,7 +139,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
   test("a close writes the page, log.md and a commit, and the card leaves the inbox", async () => {
     await answer("O2", "B", "");
     const { body: p } = await preview("O2");
-    const res = await close({ questionId: "O2", baseHash: p.baseHash });
+    const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, decision: "D2", committed: true });
     expect(await stateOf("O2")).toEqual({ kind: "decided", decision: "D2" });
@@ -153,7 +153,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
   test("a hint naming a decision closes on it, with no new decision", async () => {
     const { body: p } = await preview("O1");
     expect(p.lines).toEqual(["- **O1** — Ruled by a decision. See the card. Closed 2026-11-07 (D1)."]);
-    expect((await close({ questionId: "O1", baseHash: p.baseHash })).status).toBe(200);
+    expect((await close({ questionId: "O1", baseHash: p.baseHash, rulingHash: p.rulingHash })).status).toBe(200);
     expect(await stateOf("O1")).toEqual({ kind: "decided", decision: "D1" });
   });
 
@@ -186,10 +186,21 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     const edited = PAGE.replace("Ruling word only?", "Ruling word only, edited?");
     await Bun.write(path.join(root, REL), edited);
     git("commit", "-q", "-am", "edit");
-    const res = await close({ questionId: "O2", baseHash: p.baseHash });
+    const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ stale: true });
     expect(await Bun.file(path.join(root, REL)).text()).toBe(edited);
+  });
+
+  test("an answer that changed since the preview is 409 and writes nothing", async () => {
+    await answer("O2", "A", "");
+    const { body: p } = await preview("O2");
+    expect(p.lines).toContain("- **D2** — Answer A on card O2. Test Owner, 07.11.2026.");
+    await insertWikiAnswerVersion({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name: "Someone Else" }, choice: "B", body: "", questionHash: "h" });
+    const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ changed: true });
+    expect(await Bun.file(path.join(root, REL)).text()).toBe(PAGE);
   });
 
   test("a page with uncommitted edits is 409 dirty and stays as it was", async () => {
@@ -198,7 +209,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     await Bun.write(path.join(root, REL), dirty);
     __resetWikiCacheForTest();
     const { body: p } = await preview("O2");
-    const res = await close({ questionId: "O2", baseHash: p.baseHash });
+    const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ dirty: true });
     expect(await Bun.file(path.join(root, REL)).text()).toBe(dirty);

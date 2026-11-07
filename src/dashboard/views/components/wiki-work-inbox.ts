@@ -35,7 +35,8 @@ interface InboxState {
   failed: string | null;
   msg: Record<string, { text: string; warn: boolean; page: boolean }>;
   /** A close's preview from `POST …/close` with `preview: true`: the lines it writes and the hash it writes on. */
-  preview: Record<string, { lines: string[]; baseHash: string }>;
+  /** With the evidence it was made on: a reload that changes the evidence drops it. */
+  preview: Record<string, { lines: string[]; baseHash: string; rulingHash: string; ev: string }>;
   showKept: boolean;
 }
 
@@ -96,6 +97,10 @@ export function loadInbox(url: string): void {
       if (seq !== loadSeq || !st || st.url !== url) return;
       if (body && Array.isArray(body.cards)) {
         st.body = body;
+        for (const k of Object.keys(st.preview)) {
+          const c = body.cards.find((x) => keyOf(x) === k);
+          if (!c || evidenceKey(c) !== st.preview[k]!.ev) delete st.preview[k];
+        }
         st.failed = null;
       } else if (status === 404) {
         st.body = null;
@@ -235,18 +240,18 @@ async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: 
   if (status >= 200 && status < 500) loadInbox(s.url);
 }
 
-async function sendClose(c: InboxCard, k: string, baseHash: string | null): Promise<void> {
+async function sendClose(c: InboxCard, k: string, sent: { baseHash: string; rulingHash: string } | null): Promise<void> {
   const s = st!;
   s.sending[k] = true;
   delete s.msg[k];
   repaint(`${sel(k)} .wiki-wi-row`);
   let status = 0;
-  let data: { error?: string; lines?: string[]; baseHash?: string; decision?: string } | null = null;
+  let data: { error?: string; lines?: string[]; baseHash?: string; rulingHash?: string; decision?: string } | null = null;
   try {
     const res = await fetch("/api/wiki/decision-inbox/close", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ wiki: s.body!.wiki, relPath: c.relPath, questionId: c.id, ...(baseHash ? { baseHash } : { preview: true }) }),
+      body: JSON.stringify({ wiki: s.body!.wiki, relPath: c.relPath, questionId: c.id, ...(sent ?? { preview: true }) }),
     });
     status = res.status;
     data = await res.json().catch(() => null);
@@ -256,7 +261,7 @@ async function sendClose(c: InboxCard, k: string, baseHash: string | null): Prom
   if (st !== s) return;
   delete s.sending[k];
   const ok = status >= 200 && status < 300;
-  if (ok && !baseHash && data?.lines && data.baseHash) s.preview[k] = { lines: data.lines, baseHash: data.baseHash };
+  if (ok && !sent && data?.lines && data.baseHash && data.rulingHash) s.preview[k] = { lines: data.lines, baseHash: data.baseHash, rulingHash: data.rulingHash, ev: evidenceKey(c) };
   else {
     delete s.preview[k];
     s.msg[k] = ok
@@ -264,7 +269,8 @@ async function sendClose(c: InboxCard, k: string, baseHash: string | null): Prom
       : { text: `Couldn’t close: ${data?.error ?? (status ? `HTTP ${status}` : "the server did not answer")}.`, warn: true, page: status === 409 };
   }
   repaint(`${sel(k)} .wiki-wi-row`, true);
-  if (ok && baseHash) loadInbox(s.url);
+  // A refusal reloads too: the evidence that moved the ruling shows on the row.
+  if (sent && status >= 200 && status < 500) loadInbox(s.url);
 }
 
 /** The section's clicks, from the card's click handler. True when the click was the inbox's. */
@@ -305,7 +311,7 @@ export function handleInboxClick(target: Element, hrefFor: (rel: string) => stri
       if (!s.sending[k]) void sendClose(c, k, null);
       break;
     case "close":
-      if (!s.sending[k] && s.preview[k]) void sendClose(c, k, s.preview[k].baseHash);
+      if (!s.sending[k] && s.preview[k]) void sendClose(c, k, { baseHash: s.preview[k].baseHash, rulingHash: s.preview[k].rulingHash });
       break;
     case "cancel":
       delete s.preview[k];

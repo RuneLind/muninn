@@ -191,10 +191,10 @@ function registerDecisionCloseRoute(app: Hono, config: Config, depsFor: () => De
     if (ro) return ro;
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
     const str = (k: string) => (typeof body[k] === "string" ? (body[k] as string).trim() : "");
-    const [wiki, relPath, id, baseHash] = [str("wiki"), str("relPath"), str("questionId"), str("baseHash")];
+    const [wiki, relPath, id, baseHash, rulingHash] = [str("wiki"), str("relPath"), str("questionId"), str("baseHash"), str("rulingHash")];
     const preview = body.preview === true;
     if (!wiki || !relPath || !id) return c.json({ error: "wiki, relPath and questionId are required" }, 400);
-    if (!preview && !baseHash) return c.json({ error: "baseHash is required: preview the close first" }, 400);
+    if (!preview && (!baseHash || !rulingHash)) return c.json({ error: "baseHash and rulingHash are required: preview the close first" }, 400);
     const deps = depsFor();
     const registry = deps.registry();
     const scope = await triageScope({
@@ -225,8 +225,11 @@ function registerDecisionCloseRoute(app: Hono, config: Config, depsFor: () => De
     const today = todayOslo(deps.now());
     const edit = closeCardEdit(current, id, ruling, today);
     if (!edit.ok) return c.json({ error: edit.reason, refused: true, code: edit.code }, 409);
-    if (preview) return c.json({ ok: true, preview: true, decision: edit.decision, lines: edit.lines, baseHash: sha256(current) });
+    // The page hash guards the page; the ruling hash guards the answers the lines came from.
+    const shown = sha256(JSON.stringify(edit.lines));
+    if (preview) return c.json({ ok: true, preview: true, decision: edit.decision, lines: edit.lines, baseHash: sha256(current), rulingHash: shown });
     if (baseHash !== sha256(current)) return c.json({ error: "The page changed since the preview. Preview again.", stale: true }, 409);
+    if (rulingHash !== shown) return c.json({ error: "The answers changed since the preview. Preview again.", changed: true }, 409);
     try {
       const held = heldBy(await staleProposalStore().liveHolders(entry.name), target.relPath);
       if (held) return c.json({ error: heldMessage(held), held: true }, 409);

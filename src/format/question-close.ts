@@ -11,6 +11,7 @@
 import { parseBlocks } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
 import { closeNearMisses, DECISION_ID_RE, parseQuestionPage } from "./question.ts";
+import { frontmatterBodyLine } from "../wiki/page-text.ts";
 
 /** What closes the card: a decision the page already holds (the P1 hint), or an answer to record as a new one. */
 export type CloseRuling =
@@ -41,13 +42,6 @@ interface Item {
   gap: string;
   id: string | null;
   sep: string;
-}
-
-/** Where the frontmatter ends: the index of the first body line. */
-function bodyStart(lines: string[]): number {
-  if (lines[0] !== "---") return 0;
-  const end = lines.indexOf("---", 1);
-  return end < 0 ? 0 : end + 1;
 }
 
 /** Every `<DecisionLog>` … `</DecisionLog>` outside a code fence, by line. */
@@ -89,7 +83,9 @@ function regionItems(lines: string[], r: Region): Item[] {
     const limit = starts[k + 1] ?? r.close;
     const m = ITEM_RE.exec(lines[start]!)!;
     let paraEnd = start;
-    while (paraEnd + 1 < limit && lines[paraEnd + 1]!.trim() !== "" && !ITEM_RE.test(lines[paraEnd + 1]!)) paraEnd++;
+    // A fence opens a nested code block, as a blank line or a list item ends the paragraph.
+    const ends = (l: string) => l.trim() === "" || ITEM_RE.test(l) || /^\s*(`{3,}|~{3,})/.test(l);
+    while (paraEnd + 1 < limit && !ends(lines[paraEnd + 1]!)) paraEnd++;
     let end = paraEnd;
     for (let i = paraEnd + 1; i < limit; i++) {
       const line = lines[i]!;
@@ -129,7 +125,8 @@ function withStop(line: string): string {
 export function closeCardEdit(text: string, id: string, ruling: CloseRuling, today: string): CloseEdit {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split(/\r?\n/);
-  const from = bodyStart(lines);
+  // Where the reader and lint end the frontmatter (`splitFrontmatter`).
+  const from = frontmatterBodyLine(text.replace(/\r\n/g, "\n"));
   const before = parseQuestionPage(parseBlocks(lines.slice(from).join("\n")));
   if (!before.questions.some((q) => q.id === id)) return { ok: false, code: "no-card", reason: `the page has no card ${id}` };
   const regions = logRegions(lines, from);

@@ -122,4 +122,17 @@ describe("closeCardEdit", () => {
     expect(r.content).not.toMatch(/[^\r]\n/);
     expect(stateOf(r.content.replace(/\r\n/g, "\n"), "O1")).toEqual({ kind: "decided", decision: "D10" });
   });
+
+  test("a nested fence right after the item text stays a fence: the close goes on the text line", () => {
+    for (const fence of ["```", "~~~"]) {
+      const text = page(q("O1"), `<DecisionLog>\n\n- **O1** — x\n  ${fence}ts\n  code\n  ${fence}\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n`);
+      const r = ok(closeCardEdit(text, "O1", { kind: "decision", decision: "D1" }, TODAY));
+      expect(r.content).toContain(`- **O1** — x. Closed 2026-11-07 (D1).\n  ${fence}ts\n  code\n  ${fence}\n`);
+    }
+  });
+
+  test("the frontmatter ends where the reader ends it, a closing fence with trailing space included", () => {
+    const text = ["---\ntitle: T\n--- ", q("O1"), "<DecisionLog>\n\n- **O1** — x. Closed 2026-01-01 (D1).\n- **D1** — y. Rune Lind, 01.01.2026.\n\n</DecisionLog>\n", "---\n", "<DecisionLog>\n\n- **D5** — z. Rune Lind, 01.01.2026.\n\n</DecisionLog>\n"].join("\n");
+    expect(closeCardEdit(text, "O1", answer(), TODAY)).toMatchObject({ ok: false, code: "not-open" });
+  });
 });
