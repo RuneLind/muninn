@@ -254,23 +254,23 @@ describe("wiki-browser.ts — listener order", () => {
 describe("wiki-browser.ts — dispose", () => {
   // Runs last: it stops the timers the tests above may rely on. Observed before
   // afterAll's `happyDOM.abort()`, which clears every timer on its own.
-  test("dispose() clears the listing-refetch interval and the mirror tick", () => {
-    const refetch = intervals.find((i) => i.source.includes("maybeRefetchPages"));
-    const mirror = intervals.find((i) => i.source.includes("repaintMirrorStatus"));
-    expect(refetch).toBeTruthy();
-    expect(mirror).toBeTruthy();
+  test("dispose() clears every interval boot() registered", () => {
+    // The two known timers, so a renamed callback is noticed here rather than
+    // the set below silently shrinking.
+    expect(intervals.find((i) => i.source.includes("maybeRefetchPages"))).toBeTruthy();
+    expect(intervals.find((i) => i.source.includes("repaintMirrorStatus"))).toBeTruthy();
+    // clearTimeout and clearInterval share one id pool (HTML timers), so either clears an interval.
     const cleared: unknown[] = [];
-    const realClear = g.clearInterval as (id: unknown) => void;
-    g.clearInterval = (id: unknown) => {
-      cleared.push(id);
-      realClear(id);
-    };
+    const realClearInterval = g.clearInterval as (id: unknown) => void;
+    const realClearTimeout = g.clearTimeout as (id: unknown) => void;
+    g.clearInterval = (id: unknown) => (cleared.push(id), realClearInterval(id));
+    g.clearTimeout = (id: unknown) => (cleared.push(id), realClearTimeout(id));
     try {
       handle.dispose();
     } finally {
-      g.clearInterval = realClear;
+      g.clearInterval = realClearInterval;
+      g.clearTimeout = realClearTimeout;
     }
-    expect(cleared).toContain(refetch!.id);
-    expect(cleared).toContain(mirror!.id);
+    expect(intervals.filter((i) => !cleared.includes(i.id)).map((i) => i.source)).toEqual([]);
   });
 });

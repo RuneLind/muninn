@@ -109,26 +109,52 @@ test("wikiClientScript stays under its size pin", async () => {
 // Ratchets on the reader shell while it is split into controllers (mimir plan
 // muninn-wiki-browser-split): each number may only FALL. Raise one only in the
 // PR that needs it, with a dated line saying why, like the size pin above.
-// Lines are physical lines, comments and blanks included. Module-level `let`s are
-// counted from the TypeScript AST, and a module-level `var` fails outright (it
-// would otherwise dodge the `let` count).
+// Lines: the line breaks TypeScript sees (its 0-based index of the last line),
+// which for a file ending in a newline is every physical line, comments and
+// blanks included, so adding any line moves it.
+// Lets: `let` statements directly at the top level of the module.
+// Vars: any `var` whose function scope is the module fails outright, however
+// deeply it sits in top-level blocks (if, try, for, plain braces), because it
+// hoists to module scope and would otherwise dodge the `let` count. A `var`
+// inside a function, method, arrow, class body or namespace is not module state.
 // 2026-11-07, C1 baseline: 10,703 lines; 119 module-level `let`s (104 before C1,
 // plus the 14 effectful consts that became `let x!: T` and `booted`).
 const WIKI_BROWSER_MAX_LINES = 10_703;
 const WIKI_BROWSER_MAX_MODULE_LETS = 119;
 
+function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {
+  const sf = ts.createSourceFile("module.ts", src, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  let lets = 0;
+  for (const st of sf.statements) {
+    if (ts.isVariableStatement(st) && st.declarationList.flags & ts.NodeFlags.Let) lets += st.declarationList.declarations.length;
+  }
+  const vars: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionLike(node) || ts.isClassLike(node) || ts.isModuleDeclaration(node)) return;
+    // BlockScoped is Let | Const | Using (AwaitUsing is Const | Using), so `using` is not a var.
+    if (ts.isVariableDeclarationList(node) && !(node.flags & ts.NodeFlags.BlockScoped)) {
+      vars.push(...node.declarations.map((d) => d.name.getText(sf)));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return { lines: sf.getLineAndCharacterOfPosition(sf.getEnd()).line, lets, vars };
+}
+
+test("moduleScopeDeclarations flags every module-scoped var and nothing else", () => {
+  expect(moduleScopeDeclarations("var a = 1;\n").vars).toEqual(["a"]);
+  expect(moduleScopeDeclarations("if (true) { var b = 1; }\n").vars).toEqual(["b"]);
+  expect(moduleScopeDeclarations("try { var c = 1; } catch {}\n").vars).toEqual(["c"]);
+  expect(moduleScopeDeclarations("for (var i = 0; i < 1; i++) {}\n").vars).toEqual(["i"]);
+  expect(moduleScopeDeclarations("function f() { var d = 1; }\nconst g = () => { var e = 1; };\nclass K { m() { var h = 1; } static { var k = 1; } }\n").vars).toEqual([]);
+  expect(moduleScopeDeclarations("let x = 1;\nconst y = 2;\n")).toEqual({ lines: 2, lets: 1, vars: [] });
+  expect(moduleScopeDeclarations("using u = null;\nawait using w = null;\n").vars).toEqual([]);
+  expect(moduleScopeDeclarations("if (true) { let z = 1; }\n").lets).toBe(0);
+});
+
 test("wiki-browser.ts does not grow: line count and module-level lets", async () => {
   const src = await Bun.file(new URL("./wiki-browser.ts", import.meta.url)).text();
-  const lines = src.endsWith("\n") ? src.split("\n").length - 1 : src.split("\n").length;
-  const sf = ts.createSourceFile("wiki-browser.ts", src, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
-  let lets = 0;
-  const vars: string[] = [];
-  for (const st of sf.statements) {
-    if (!ts.isVariableStatement(st)) continue;
-    const { flags, declarations } = st.declarationList;
-    if (flags & ts.NodeFlags.Let) lets += declarations.length;
-    else if (!(flags & ts.NodeFlags.BlockScoped)) vars.push(...declarations.map((d) => d.name.getText(sf)));
-  }
+  const { lines, lets, vars } = moduleScopeDeclarations(src);
   expect(lines).toBeLessThanOrEqual(WIKI_BROWSER_MAX_LINES);
   expect(lets).toBeLessThanOrEqual(WIKI_BROWSER_MAX_MODULE_LETS);
   expect(vars).toEqual([]);
