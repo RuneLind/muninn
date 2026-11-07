@@ -567,6 +567,13 @@ test("the last run's reason is the outcome word's tooltip, and each night's is i
   click("tri-details", "");
 });
 
+test("an ok last run adds no outcome word to the line", async () => {
+  await loadWithStatus(statusBody({ lastRun: { at: Date.now(), outcome: "ok", reason: "all cards read", cards: 3, model: "none", codeFacts: 1 } }));
+  const line = /<div class="wiki-wi-tri"[\s\S]*?<\/div>/.exec(inboxHtml(() => "", Date.now()))![0];
+  expect(line).not.toContain(">ok<");
+  expect(line).not.toContain("all cards read");
+});
+
 test("a status that fails or is not a status leaves the line out and the inbox whole", async () => {
   for (const [body, code] of [[null, 500], [null, 404], [{ wiki: "w", cards: [] } as unknown as TriageStatusBody, 200]] as const) {
     await loadWithStatus(body, code);

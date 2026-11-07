@@ -40,9 +40,11 @@ import { blankBotTokens, envNamesMatchingPrefixes } from "./blank-bot-tokens.ts"
 /**
  * Every instance-profile flag mapped to `""`. Unlike `blankBotTokens()` this
  * needs no scan of the dotenv files: the names are a fixed, known list, and
- * assigning `""` to one the host never set is inert — an unset flag and an empty
- * one resolve identically in every reader (`optionalEnvFlag`, the comma-split
- * parsers, and `resolveAuthConfig`'s `off` default).
+ * assigning `""` to one the host never set is inert for most readers — an unset
+ * flag and an empty one resolve identically in `optionalEnvFlag`, the comma-split
+ * parsers and `resolveAuthConfig`'s `off` default. Not for a flag whose blank
+ * means a home default (`DECISION_TRIAGE_DIR`, `WORK_MAP_GH_CHECK`): `e2eEnv()`
+ * sets those explicitly, and a new one of that kind must be added there.
  */
 export function blankInstanceProfile(): Record<string, string> {
   const blanked: Record<string, string> = {};
@@ -71,5 +73,7 @@ export function e2eEnv(): Record<string, string> {
   // `gh` on the machine's login; the specs stub the checks GET.
   // `DECISION_TRIAGE_DIR`: blank means `~/.muninn/decision-triage`, the developer's
   // real log; a dir nothing writes reads as no log. A spec seeding one sets its own.
+  // Shared by every spawned server and never emptied, so it stays safe only while
+  // spec servers run with the scheduler off (only the nightly loop writes it).
   return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0", WORK_MAP_GH_CHECK: "off", DECISION_TRIAGE_DIR: path.join(tmpdir(), "muninn-e2e-no-triage-log") };
 }
