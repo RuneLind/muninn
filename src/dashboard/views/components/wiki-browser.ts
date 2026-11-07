@@ -110,7 +110,7 @@ import {
   refreshWorkCardFromListing,
   startReindex,
 } from "./wiki-start-cards.ts";
-// The effort page (work map P3): pure HTML, wired by the effort controller.
+// The effort page (work map P3): pure HTML, rendered by the effort controller; its clicks go through the body click delegate below.
 import { EFFORT_PARAM } from "./wiki-effort-page.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {

@@ -1,8 +1,8 @@
 /**
  * The effort page (plan `muninn-wiki-work-map`, P3): `?effort=<id>` in the
  * article pane, over the stored `.work-map.json` joined to the live listing.
- * Pure and DOM-free — the fetch, the URL state and the clicks live in
- * `wiki-effort-controller.ts` (`renderEffort`).
+ * Pure and DOM-free — the fetch and the URL state live in `wiki-effort-controller.ts`
+ * (`renderEffort`); its clicks are routed by the shell's body click delegate.
  *
  * Every string in the map is model output, so all of it is escaped; prose
  * markers go through the card's `proseHtml`, so a page the listing no longer
