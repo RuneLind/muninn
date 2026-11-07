@@ -214,9 +214,7 @@ jobs:
   # laptop and CI times differ by file type, so the table is made here. Commit
   # it, then `bun scripts/test-chain.ts rebalance` in a PR of its own.
   unit-timings:
-    # TEMP: remove after the first refresh — `pull_request` is here only so the
-    # PR that adds this job produces the first CI-made table; keep `workflow_dispatch`.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
