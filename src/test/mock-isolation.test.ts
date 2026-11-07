@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -147,6 +147,31 @@ describe("the rule, on fixtures", () => {
     expect(expandLink(["src/gone.test.ts"], files)).toEqual(["src/gone.test.ts"]);
   });
 
+  test("matching is case-sensitive, and a directory argument that matches nothing is dropped, not returned", () => {
+    const files = ["src/plans/a.test.ts", "src/plans/G.TEST.TS"];
+    expect(expandLink(["TEST.TS"], files)).toEqual(["src/plans/G.TEST.TS"]);
+    expect(expandLink(["SRC/PLANS/"], files)).toEqual([]);
+    expect(expandLink(["src/nothing/"], files)).toEqual([]);
+  });
+
+  test("Playwright's specs are anchored at the root's e2e/, not any e2e/ segment", () => {
+    expect(isPlaywrightSpec("e2e/a/o.spec.ts")).toBe(true);
+    expect(isPlaywrightSpec("src/e2e/o.spec.ts")).toBe(false);
+    expect(isPlaywrightSpec("xe2e/o.spec.ts")).toBe(false);
+  });
+
+  // Documented divergences from bun 1.3.10 (measured on macOS; no chain uses these shapes):
+  // bun skips `Node_Modules/`, runs a `./` path into a hidden directory, and reads an
+  // absolute argument as a path. The model keeps its simpler rules; this pins them.
+  test("the documented divergences from bun keep the model's behavior", () => {
+    expect(discoverTestFilesIn({ "src/Node_Modules/a.test.ts": "", "src/.hidden/b.test.ts": "" })).toEqual(["src/Node_Modules/a.test.ts"]);
+    const files = ["src/plans/a.test.ts"];
+    expect(expandLink(["./src/.hidden/"], files)).toEqual([]);
+    expect(expandLink(["./src/.hidden/b.test.ts"], files)).toEqual(["./src/.hidden/b.test.ts"]);
+    expect(expandLink(["/abs/src/plans/a.test.ts"], files)).toEqual(["/abs/src/plans/a.test.ts"]);
+    expect(expandLink(["/abs/src/plans/"], files)).toEqual([]);
+  });
+
   test("a mock file whose path contains a group's directory shares that group's process", () => {
     const files = ["e2e/fixtures/src/wiki/m.test.ts", "src/wiki/a.test.ts"];
     const l = bunTestLinks({ test: "bun test src/wiki/" });
@@ -178,12 +203,26 @@ describe("the rule, on fixtures", () => {
 function bunReport(dir: string, args: string[]): { files: string[]; out: string } {
   // The report sits in a recorded temp dir so the run's cleanup removes it; inside `dir` it would be in the tree bun scans.
   const out = join(testTempDirSync(join(tmpdir(), "bun-junit-")), `${basename(dir)}.xml`);
-  Bun.spawnSync(["bun", "test", "--reporter=junit", `--reporter-outfile=${out}`, ...args], { cwd: dir, stdout: "ignore", stderr: "ignore" });
+  const r = Bun.spawnSync(["bun", "test", "--reporter=junit", `--reporter-outfile=${out}`, ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  const log = `${r.stdout.toString()}${r.stderr.toString()}`;
+  // bun 1.3.10 on filters that match nothing: exit 1, no junit file, this line.
+  if (!existsSync(out) && r.exitCode === 1 && log.includes("did not match any test files")) return { files: [], out };
+  if (r.exitCode !== 0 || !existsSync(out)) throw new Error(`bun test ${args.join(" ")} exited ${r.exitCode}${existsSync(out) ? "" : " without a junit file"}:\n${log}`);
   return { files: [...new Set([...readFileSync(out, "utf8").matchAll(/ file="([^"]+)"/g)].map((m) => m[1]!))].sort(), out };
 }
 
 function bunRuns(dir: string, args: string[]): string[] {
   return bunReport(dir, args).files;
+}
+
+/** `discoverTestFiles` over a fresh temp tree holding `files`. */
+function discoverTestFilesIn(files: Record<string, string>): string[] {
+  const dir = testTempDirSync(join(tmpdir(), "discover-"));
+  for (const [f, body] of Object.entries(files)) {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), body);
+  }
+  return discoverTestFiles(dir);
 }
 
 describe("the model agrees with bun itself (spawns bun on a fixture tree)", () => {
@@ -204,9 +243,15 @@ describe("the model agrees with bun itself (spawns bun on a fixture tree)", () =
 
   test("matching: expandLink gives the files bun runs for each argument shape", () => {
     const all = discoverTestFiles(dir);
-    for (const args of [["src/plans/"], ["src/plans/a.test.ts"], ["./src/plans/"], ["./src/plans/a.test.ts"], ["rc/pla"], ["src/plansx/", "./sub/"]]) {
+    for (const args of [["src/plans/"], ["src/plans/a.test.ts"], ["./src/plans/"], ["./src/plans/a.test.ts"], ["rc/pla"], ["src/plansx/", "./sub/"], ["TEST.TS"], ["SRC/PLANS/"], ["src/nothing/"]]) {
       expect(expandLink(args, all).sort(), args.join(" ")).toEqual(bunRuns(dir, args));
     }
+  }, 30_000);
+
+  test("a bun run that fails for any reason but an unmatched filter is an error, not an empty list", () => {
+    const fresh = testTempDirSync(join(tmpdir(), "bun-discovery-"));
+    writeFileSync(join(fresh, "a.test.ts"), 'import { test, expect } from "bun:test";\ntest("t", () => { expect(1).toBe(2); });\n');
+    expect(() => bunRuns(fresh, [])).toThrow(/exited 1:/);
   }, 20_000);
 
   test("the junit report lands inside a recorded temp dir, never next to the fixture", () => {
