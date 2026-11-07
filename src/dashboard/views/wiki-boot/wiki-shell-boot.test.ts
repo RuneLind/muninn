@@ -311,8 +311,9 @@ describe("wiki-browser.ts — listener order", () => {
     // The order is load-bearing (`keydown` handlers read `defaultPrevented`, the
     // click delegates' selector sets rely on who runs first), and moving code out
     // of the shell into controllers (mimir plan muninn-wiki-browser-split) must
-    // keep it: each entry is target, type and phase. Captured on main at C1
-    // (00eeaa2f); a change here is a reordering to justify, never to re-snapshot.
+    // keep it: each entry is target, type and phase. Captured from the pre-move
+    // code at 832e0b9b (base 00eeaa2f); a change here is a reordering to
+    // justify, never to re-snapshot.
     expect(listened.map((l) => `${l.target} ${l.type}${l.capture ? " capture" : ""}`)).toEqual([
       "document input", "document toggle capture", "document click capture", "document selectionchange",
       "document pointerdown capture", "document pointerup capture", "document pointercancel capture",

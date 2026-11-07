@@ -23,6 +23,7 @@ import { staleCountMap, staleHomeBodyHtml, staleHomeLineHtml, stalePillHtml, sta
 import { escHtml as esc } from "./escape.ts";
 import {
   installWikiReadonlyGuard,
+  seriesEditable,
   wikiReadonlyFlag,
   wikiReadonlyWikiFlag,
   WIKI_READONLY_INPUT_PLACEHOLDER,
@@ -410,7 +411,7 @@ import {
   applyJiraFilter,
   applyProjectFilter,
   familiesOn,
-  followupFlagHtml,
+  focusWorkMenuButton,
   getOpenFolds,
   getRestoringRailFocus,
   getWorkBounds,
@@ -428,17 +429,15 @@ import {
   renderPageFacets,
   repaintForJira,
   repaintForProject,
-  seriesEditable,
   setOpenFolds,
   setRevealOnRender,
   setShowRetired,
-  setWorkMenuOpen,
   showOpenPageInList,
   showRetired,
-  statusPillHtml,
   stepWorkGroup,
   type RailDeps,
 } from "./wiki-rail-controller.ts";
+import { followupFlagHtml, statusPillHtml } from "./wiki-status-pills.ts";
 import { getCurrentName, getWorkFacts, getWorkMapRunAt, getWorkMapThemes, setCurrentName, setWorkFacts, setWorkMapRunAt, setWorkMapThemes } from "./wiki-shell-state.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
@@ -996,8 +995,6 @@ let workedAxisOn = false;
 let waitsCounted = false;
 
 // ── Article tools: ⧉ Copy path, the provenance strip, issue links ────
-// The left pane (filters, the page list, the coverage footer) is
-// `wiki-rail-controller.ts`, wired from `boot()` through `railDeps()`.
 
 /**
  * ⧉ Copy path — the open page's path ON DISK, for pasting into an agent brief.
@@ -4341,46 +4338,6 @@ function escapeOwnedElsewhere(): boolean {
   );
 }
 
-/**
- * The rail's own control: the ★ pin on every row.
- *
- * On `#wikiList`, not on the body delegate above — the control sits INSIDE a
- * `.wiki-list-item`, and that delegate opens whatever `[data-relpath]` a click
- * landed in. A listener on the list runs first because it is deeper in the tree.
- *
- * ⚠️ It deliberately does NOT call `stopPropagation`; the body delegate skips
- * this control by selector instead, so a handler on ONE widget cannot
- * silence unrelated document-level listeners.
- *
- * **Correcting the claim this comment first carried**, which a verify pass
- * disproved by measurement: the failure named was "with the Discuss popover
- * open, a click on a ★ leaves the popover standing". It cannot happen. The
- * popover renders a full-viewport scrim (`.wiki-chatopt-scrim`), so a real click
- * never reaches the rail at all — and forced past the scrim, the popover stays
- * open regardless, because `shouldCloseChatOptions` returns false while
- * unattached and `renderList` below swaps the clicked element out of the
- * document synchronously, before any document listener runs. The rule stands as
- * a rule; the story about it was invented.
- */
-/** After a `renderList` that replaced the control the reader pressed, focus the
- *  same control again wherever it now is (the related-order precedent), so a
- *  keyboard reader's next Tab continues from it instead of from the page top.
- *  Prefers a match of the same kind when a key names two controls. */
-function refocusRailControl(selector: string, pressed: Element): void {
-  const found = Array.from(document.querySelectorAll<HTMLElement>(selector));
-  const kind = pressed.classList[0];
-  const pick =
-    found.find((el) => el.classList[0] === kind) ??
-    found[0] ??
-    // A Pick up row whose page a refresh pushed out of the five: the strip's
-    // first row, else its header (folded), rather than `<body>`.
-    (pressed.hasAttribute("data-pickup")
-      ? (document.querySelector<HTMLElement>("#wikiList .wiki-pickup-row") ??
-        document.querySelector<HTMLElement>('#wikiList .wiki-list-sec[data-section="pickup"] [data-fold-key]'))
-      : null);
-  pick?.focus({ preventScroll: true });
-}
-
 /** The rail control `el` is, as a selector by its own key that finds it again
  *  after a repaint; null for anything else (a page row, a link other than an
  *  effort fold's name). Covers the Group button and its menu items, `+ N more
@@ -4428,35 +4385,6 @@ function railControlSelector(el: Element | null): string | null {
     return card ? `#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]` : null;
   }
   return el.hasAttribute("data-work-group-menu") ? "#wikiList [data-work-group-menu]" : null;
-}
-
-/** Focus the Group menu's item for `selector`, else its first item. */
-function focusWorkMenuItem(selector?: string): void {
-  const menu = document.querySelector<HTMLElement>("#wikiList .wiki-work-menu");
-  const items = menu ? Array.from(menu.querySelectorAll<HTMLElement>("[role^='menuitem']")) : [];
-  const pick = (selector ? menu?.querySelector<HTMLElement>(selector) : null) ?? items.find((el) => el.getAttribute("aria-checked") === "true") ?? items[0];
-  pick?.focus({ preventScroll: true });
-}
-
-const WORK_FORGET_SEL = "[data-work-forget-split], [data-work-forget-anchor]";
-
-/** A reset-area Forget's stable selector: its kind and its split id or page. */
-function workForgetKey(el: HTMLElement): string {
-  const attr = el.hasAttribute("data-work-forget-split") ? "data-work-forget-split" : "data-work-forget-anchor";
-  return `[${attr}="${CSS.escape(el.getAttribute(attr) ?? "")}"]`;
-}
-
-function focusWorkMenuButton(): void {
-  document.querySelector<HTMLElement>("#wikiList [data-work-group-menu]")?.focus({ preventScroll: true });
-}
-
-/** Open or close the Group menu and repaint; focus follows the menu. */
-function setWorkMenu(open: boolean, focus: boolean): void {
-  setWorkMenuOpen(open);
-  renderList();
-  if (!focus) return;
-  if (open) focusWorkMenuItem();
-  else focusWorkMenuButton();
 }
 
 /** One explicit edit from the Group menu: merged onto the record as read now
@@ -7825,7 +7753,6 @@ function railDeps(): RailDeps {
     railMapFailedAt: () => railMapFailedAt,
     filters,
     pagesRefresh,
-    WORK_FORGET_SEL,
     withWiki,
     pageUrlByRelPath,
     typeLabel,
@@ -7842,11 +7769,7 @@ function railDeps(): RailDeps {
     effortHrefFor,
     railEffortsIndex,
     refreshEffortFromListing,
-    refocusRailControl,
     railControlSelector,
-    setWorkMenu,
-    focusWorkMenuItem,
-    workForgetKey,
     editWorkGroup,
     openWorkCardMenu,
     openThreadRowMenu,

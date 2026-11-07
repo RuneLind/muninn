@@ -123,8 +123,9 @@ test("wikiClientScript stays under its size pin", async () => {
 // 2026-11-07, C1 baseline: 10,703 lines; 119 module-level `let`s (104 before C1,
 // plus the 14 effectful consts that became `let x!: T` and `booted`).
 // 2026-11-07, C2 (the left pane to `wiki-rail-controller.ts`, shared state to
-// `wiki-shell-state.ts`): 8,850 lines; 103 module-level `let`s.
-const WIKI_BROWSER_MAX_LINES = 8_850;
+// `wiki-shell-state.ts`): 8,850 lines; 103 module-level `let`s. Its fix round
+// (the Group menu's focus helpers to the rail, the shared pills to a leaf): 8,773.
+const WIKI_BROWSER_MAX_LINES = 8_773;
 const WIKI_BROWSER_MAX_MODULE_LETS = 103;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {

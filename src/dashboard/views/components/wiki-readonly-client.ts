@@ -274,6 +274,21 @@ export function wikiReadonlyWikiFlag(win: unknown = globalThis): boolean {
 }
 
 /**
+ * May this reader edit a page's series?
+ *
+ * Both read-only mechanisms refuse the write server-side (`writeWikiPage`'s two
+ * guards, plus the route's own `readonlyRefusal`), and this is what keeps the
+ * control OFF THE PAGE rather than dimmed: the acceptance for a read-only
+ * instance is that the menu is ABSENT, and #557's F2 decision is that a visible
+ * control which cannot act is worse than none. The selectors are in both
+ * lists in this file as well, as the backstop for anything painted
+ * before the flags are read.
+ */
+export function seriesEditable(): boolean {
+  return !wikiReadonlyFlag() && !wikiReadonlyWikiFlag();
+}
+
+/**
  * The selector actually installed, given the two independent flags — pure, so
  * the union rule is unit-testable without a DOM.
  *

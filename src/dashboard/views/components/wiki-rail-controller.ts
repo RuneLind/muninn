@@ -10,11 +10,12 @@
  * positions their statements held in it, so every listener keeps its place in
  * the registration order. This module never imports the shell: what the rail
  * reads and calls there arrives through {@link RailDeps}, the `atlasDeps()`
- * shape, and the state both sides write lives in `wiki-shell-state.ts` or here,
- * behind a getter and a setter.
+ * shape. Shared shell lets live in `wiki-shell-state.ts`; rail state lives here,
+ * with accessors only for what the shell reads or sets.
  */
 import { escHtml as esc } from "./escape.ts";
-import { wikiReadonlyFlag, wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
+import { seriesEditable } from "./wiki-readonly-client.ts";
+import { followupFlagHtml, statusPillHtml } from "./wiki-status-pills.ts";
 import { canEditSeriesPage, seriesMenuBtnHtml } from "./wiki-series-menu.ts";
 import { workMapDoneSet, type IndexCoverage } from "./wiki-start-cards.ts";
 import { proseText, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
@@ -102,7 +103,6 @@ import {
   activityRowSource,
   type WorkedSource,
   pageDateSignal,
-  pageFollowups,
   projectCounts,
   jiraChipCounts,
   jiraChipRow,
@@ -143,7 +143,6 @@ export interface RailDeps {
   /** The shell's one filter object: the rail sets its fields in place. */
   readonly filters: WikiFilters;
   readonly pagesRefresh: { readonly bootRendered: boolean };
-  readonly WORK_FORGET_SEL: string;
   withWiki(url: string): string;
   pageUrlByRelPath(relPath: string): string;
   typeLabel(t: string): string;
@@ -161,11 +160,7 @@ export interface RailDeps {
   effortHrefFor(id: string): string;
   railEffortsIndex(now: number): Map<string, RailEffort> | null;
   refreshEffortFromListing(): void;
-  refocusRailControl(selector: string, pressed: Element): void;
   railControlSelector(el: Element | null): string | null;
-  setWorkMenu(open: boolean, focus: boolean): void;
-  focusWorkMenuItem(selector?: string): void;
-  workForgetKey(el: HTMLElement): string;
   editWorkGroup(edit: WorkGroupEdit): void;
   openWorkCardMenu(btn: HTMLElement): void;
   openThreadRowMenu(btn: HTMLElement): void;
@@ -241,28 +236,8 @@ function renderTypeChips(): void {
   document.getElementById("typeChips")!.innerHTML = html;
 }
 
-/** A colored `plan_status` pill — the ONE spelling shared by the page list and the
- *  article header, so the two never drift. Empty string for a page without one. */
-export function statusPillHtml(p: WikiListing): string {
-  if (!p.plan_status) return "";
-  // `status_note` arrives UNESCAPED from the server (free prose, no validator) —
-  // esc() before it reaches this attribute sink.
-  const note = [p.status_date, p.status_note].filter(Boolean).join(" — ");
-  const title = note ? ` title="${esc(note)}"` : "";
-  return `<span class="wiki-status plan-${esc(p.plan_status)}"${title}>${esc(p.plan_status)}</span>`;
-}
-
 /** A class-list fragment: the class with its leading space, or nothing. */
 const cls = (c: string): string => (c ? " " + c : "");
-
-/** The open-follow-ups marker — deliberately separate from the status pill so the
- *  two axes stay distinguishable, and independent of `plan_status` (a page can
- *  declare follow-ups without a status). */
-export function followupFlagHtml(p: WikiListing): string {
-  return pageFollowups(p) === "open"
-    ? '<span class="wiki-followup-flag" title="has open follow-ups">⚑</span>'
-    : "";
-}
 
 /** Are the ✋ "waiting on you" chip and row flag shown? Not on a shared
  *  instance (the nais read slice, `wikiToolsFlag()` false): a `you` lane is the
@@ -764,21 +739,6 @@ function pinBtnHtml(pinned: boolean): string {
     `<button type="button" class="wiki-pin${pinned ? " on" : ""}" data-pin="1" tabindex="-1"` +
     ` aria-pressed="${pinned}" title="${label}" aria-label="${label}">\u2605</button>`
   );
-}
-
-/**
- * May this reader edit a page's series?
- *
- * Both read-only mechanisms refuse the write server-side (`writeWikiPage`'s two
- * guards, plus the route's own `readonlyRefusal`), and this is what keeps the
- * control OFF THE PAGE rather than dimmed: the acceptance for a read-only
- * instance is that the menu is ABSENT, and #557's F2 decision is that a visible
- * control which cannot act is worse than none. The selectors are in both
- * `wiki-readonly-client.ts` lists as well, as the backstop for anything painted
- * before the flags are read.
- */
-export function seriesEditable(): boolean {
-  return !wikiReadonlyFlag() && !wikiReadonlyWikiFlag();
 }
 
 /**
@@ -1474,7 +1434,7 @@ export function renderList(cause: "storage" | "local" = "local"): void {
     // it (the options pane) must not read this as the reader moving.
     restoringRailFocus = true;
     try {
-      deps.refocusRailControl(keptFocus, focusedEl!);
+      refocusRailControl(keptFocus, focusedEl!);
     } finally {
       restoringRailFocus = false;
     }
@@ -1656,6 +1616,76 @@ export function loadCoverageFooter(): void {
     });
 }
 
+// ── Rail focus after a repaint, and the Group menu's open state ──────
+/**
+ * The rail's own control: the ★ pin on every row.
+ *
+ * On `#wikiList`, not on the body delegate above — the control sits INSIDE a
+ * `.wiki-list-item`, and that delegate opens whatever `[data-relpath]` a click
+ * landed in. A listener on the list runs first because it is deeper in the tree.
+ *
+ * ⚠️ It deliberately does NOT call `stopPropagation`; the body delegate skips
+ * this control by selector instead, so a handler on ONE widget cannot
+ * silence unrelated document-level listeners.
+ *
+ * **Correcting the claim this comment first carried**, which a verify pass
+ * disproved by measurement: the failure named was "with the Discuss popover
+ * open, a click on a ★ leaves the popover standing". It cannot happen. The
+ * popover renders a full-viewport scrim (`.wiki-chatopt-scrim`), so a real click
+ * never reaches the rail at all — and forced past the scrim, the popover stays
+ * open regardless, because `shouldCloseChatOptions` returns false while
+ * unattached and `renderList` below swaps the clicked element out of the
+ * document synchronously, before any document listener runs. The rule stands as
+ * a rule; the story about it was invented.
+ */
+/** After a `renderList` that replaced the control the reader pressed, focus the
+ *  same control again wherever it now is (the related-order precedent), so a
+ *  keyboard reader's next Tab continues from it instead of from the page top.
+ *  Prefers a match of the same kind when a key names two controls. */
+function refocusRailControl(selector: string, pressed: Element): void {
+  const found = Array.from(document.querySelectorAll<HTMLElement>(selector));
+  const kind = pressed.classList[0];
+  const pick =
+    found.find((el) => el.classList[0] === kind) ??
+    found[0] ??
+    // A Pick up row whose page a refresh pushed out of the five: the strip's
+    // first row, else its header (folded), rather than `<body>`.
+    (pressed.hasAttribute("data-pickup")
+      ? (document.querySelector<HTMLElement>("#wikiList .wiki-pickup-row") ??
+        document.querySelector<HTMLElement>('#wikiList .wiki-list-sec[data-section="pickup"] [data-fold-key]'))
+      : null);
+  pick?.focus({ preventScroll: true });
+}
+
+/** Focus the Group menu's item for `selector`, else its first item. */
+function focusWorkMenuItem(selector?: string): void {
+  const menu = document.querySelector<HTMLElement>("#wikiList .wiki-work-menu");
+  const items = menu ? Array.from(menu.querySelectorAll<HTMLElement>("[role^='menuitem']")) : [];
+  const pick = (selector ? menu?.querySelector<HTMLElement>(selector) : null) ?? items.find((el) => el.getAttribute("aria-checked") === "true") ?? items[0];
+  pick?.focus({ preventScroll: true });
+}
+
+const WORK_FORGET_SEL = "[data-work-forget-split], [data-work-forget-anchor]";
+
+/** A reset-area Forget's stable selector: its kind and its split id or page. */
+function workForgetKey(el: HTMLElement): string {
+  const attr = el.hasAttribute("data-work-forget-split") ? "data-work-forget-split" : "data-work-forget-anchor";
+  return `[${attr}="${CSS.escape(el.getAttribute(attr) ?? "")}"]`;
+}
+
+export function focusWorkMenuButton(): void {
+  document.querySelector<HTMLElement>("#wikiList [data-work-group-menu]")?.focus({ preventScroll: true });
+}
+
+/** Open or close the Group menu and repaint; focus follows the menu. */
+function setWorkMenu(open: boolean, focus: boolean): void {
+  workMenuOpen = open;
+  renderList();
+  if (!focus) return;
+  if (open) focusWorkMenuItem();
+  else focusWorkMenuButton();
+}
+
 // ── Accessors: the rail state the shell reads or sets ────────────────
 export function getOpenFolds(): string[] {
   return openFolds;
@@ -1663,10 +1693,6 @@ export function getOpenFolds(): string[] {
 
 export function setOpenFolds(folds: string[]): void {
   openFolds = folds;
-}
-
-export function setWorkMenuOpen(open: boolean): void {
-  workMenuOpen = open;
 }
 
 export function getWorkGroupRec(): WorkGroupRecordState {
@@ -1716,7 +1742,7 @@ export function registerRail(): void {
     // Menu items are buttons, so a keyboard Enter or Space lands here too.
     if (target.closest("[data-work-group-menu]")) {
       e.preventDefault();
-      deps.setWorkMenu(!workMenuOpen, true);
+      setWorkMenu(!workMenuOpen, true);
       return;
     }
     // PR 4: Reset your splits and groups — clears the record's four
@@ -1727,7 +1753,7 @@ export function registerRail(): void {
       e.preventDefault();
       deps.editWorkGroup({ reset: true });
       deps.showWorkBoundaryStatus(null);
-      deps.setWorkMenu(false, true);
+      setWorkMenu(false, true);
       return;
     }
     // Forget one definition the reset area lists (it has no Return or Allow
@@ -1735,17 +1761,17 @@ export function registerRail(): void {
     // the Forget now at the forgotten one's place (the next), else the previous,
     // else the menu's default item (its checked stop) — never Reset, which sits
     // above every entry, so a second Enter never wipes the record.
-    const forget = target.closest<HTMLElement>(deps.WORK_FORGET_SEL);
+    const forget = target.closest<HTMLElement>(WORK_FORGET_SEL);
     if (forget) {
       e.preventDefault();
-      const keys = Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-work-menu :is(${deps.WORK_FORGET_SEL})`), deps.workForgetKey);
-      const at = keys.indexOf(deps.workForgetKey(forget));
+      const keys = Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-work-menu :is(${WORK_FORGET_SEL})`), workForgetKey);
+      const at = keys.indexOf(workForgetKey(forget));
       const next = at < 0 ? [] : [...keys.slice(at + 1), ...keys.slice(0, at).reverse()];
       const id = forget.getAttribute("data-work-forget-split");
       deps.editWorkGroup(id !== null ? { forgetSplit: id } : { allowGrouping: [forget.getAttribute("data-work-forget-anchor") ?? ""] });
       deps.showWorkBoundaryStatus(null);
       renderList();
-      deps.focusWorkMenuItem(next.find((sel) => document.querySelector(`#wikiList .wiki-work-menu ${sel}`)));
+      focusWorkMenuItem(next.find((sel) => document.querySelector(`#wikiList .wiki-work-menu ${sel}`)));
       return;
     }
     // PR 4: a card's ⋯ and a focus row's ⋯ (the one with no series menu).
@@ -1779,7 +1805,7 @@ export function registerRail(): void {
     if (stopBtn) {
       e.preventDefault();
       deps.editWorkGroup({ stop: stopBtn.getAttribute("data-work-stop") as WorkGroupStop });
-      deps.setWorkMenu(false, true);
+      setWorkMenu(false, true);
       return;
     }
     const boxBtn = target.closest("[data-work-evidence]");
@@ -1790,7 +1816,7 @@ export function registerRail(): void {
       const key = boxBtn.getAttribute("data-work-evidence") as keyof WorkGroupEvidenceToggles;
       deps.editWorkGroup({ evidence: key, value: boxBtn.getAttribute("aria-checked") !== "true" });
       renderList();
-      deps.focusWorkMenuItem(`[data-work-evidence="${CSS.escape(key)}"]`);
+      focusWorkMenuItem(`[data-work-evidence="${CSS.escape(key)}"]`);
       return;
     }
     // A Pick up row (plan `muninn-wiki-pick-up`): reveal its page in the card
@@ -1855,7 +1881,7 @@ export function registerRail(): void {
       if (hadFocus) {
         const base = key.startsWith(CLOSED_FOLD_PREFIX) ? key.slice(CLOSED_FOLD_PREFIX.length) : key;
         const at = (k: string) => `#wikiList [data-fold-key="${CSS.escape(k)}"]`;
-        deps.refocusRailControl(`${at(base)}, ${at(CLOSED_FOLD_PREFIX + base)}`, fold);
+        refocusRailControl(`${at(base)}, ${at(CLOSED_FOLD_PREFIX + base)}`, fold);
       }
       return;
     }
@@ -1877,7 +1903,7 @@ export function registerRail(): void {
       renderList();
       // The card moved: follow it by its own key, not by position.
       if (hadFocus && card) {
-        deps.refocusRailControl(`#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]`, threadPinBtn);
+        refocusRailControl(`#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]`, threadPinBtn);
       }
       return;
     }
@@ -2042,7 +2068,7 @@ export function registerRailMenuKeys(): void {
     if (!target.closest) return;
     if (target.closest("[data-work-group-menu]") && e.key === "ArrowDown" && !workMenuOpen) {
       e.preventDefault();
-      deps.setWorkMenu(true, true);
+      setWorkMenu(true, true);
       return;
     }
     const menu = target.closest(".wiki-work-menu");
@@ -2054,7 +2080,7 @@ export function registerRailMenuKeys(): void {
     else if (e.key === "ArrowUp") move(at - 1);
     else if (e.key === "Home") move(0);
     else if (e.key === "End") move(items.length - 1);
-    else if (e.key === "Escape" || e.key === "Tab") deps.setWorkMenu(false, true);
+    else if (e.key === "Escape" || e.key === "Tab") setWorkMenu(false, true);
     else return;
     e.preventDefault();
   });
@@ -2064,7 +2090,7 @@ export function registerRailMenuKeys(): void {
   document.addEventListener("keydown", (e) => {
     if (!workMenuOpen || e.key !== "Escape" || e.defaultPrevented) return;
     const lost = !document.activeElement || document.activeElement === document.body;
-    deps.setWorkMenu(false, lost);
+    setWorkMenu(false, lost);
     if (lost) e.preventDefault();
   });
   // A click outside the open Group menu closes it, unless a rail control's own
@@ -2076,6 +2102,6 @@ export function registerRailMenuKeys(): void {
     }
     const target = e.target as HTMLElement;
     if (target.closest?.(".wiki-work-menu, [data-work-group-menu]")) return;
-    deps.setWorkMenu(false, false);
+    setWorkMenu(false, false);
   });
 }
