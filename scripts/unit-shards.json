@@ -69,6 +69,7 @@
       "src/dashboard/routes/wiki-work-map.test.ts",
       "src/dashboard/routes/wiki-work-map-checks.test.ts",
       "src/dashboard/routes/wiki-decision-triage-status.test.ts",
+      "src/dashboard/routes/wiki-decision-triage-run.test.ts",
       "src/dashboard/routes/wiki-plan-card.test.ts",
       "src/dashboard/routes/wiki-series-routes.test.ts",
       "src/dashboard/routes/wiki-gardener-routes.test.ts",

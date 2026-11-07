@@ -1,4 +1,4 @@
-/** Small helpers shared by the gardener's runner (draft time) and apply step. */
+/** Small helpers shared by the gardener's runner (draft time) and apply step. Server-only: `sha256` uses `Bun.CryptoHasher`, so no browser bundle may import this file. */
 
 const OSLO_DATE_FMT = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Europe/Oslo",
