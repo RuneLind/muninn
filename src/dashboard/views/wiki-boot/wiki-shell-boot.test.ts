@@ -39,6 +39,17 @@ function isAppModule(key: string, repoRoot: string, selfPath: string): boolean {
   return rel.startsWith("src/") && !rel.startsWith("src/test/");
 }
 
+/** A handler's identity in the listener pin: a hash of its source after the
+ *  rewrites a verbatim move into a controller makes (`deps.x`→`x`, `getX()`→`x`,
+ *  `setX(v)`→`x = v`, added `!`, whitespace), so a move keeps it and a swap does not. */
+function handlerFingerprint(source: string): string {
+  const norm = source
+    .replace(/\bdeps\./g, "")
+    .replace(/\b(get|set)([A-Z]\w*)/g, (_m, kind: string, n: string) => n[0]!.toLowerCase() + n.slice(1) + (kind === "set" ? "=" : ""))
+    .replace(/[\s;!()]/g, "");
+  return Bun.hash(norm).toString(36).slice(0, 5);
+}
+
 /** The nearest folder above this file holding a `package.json`. */
 function findRepoRoot(from: string): string {
   for (let dir = from; ; dir = path.dirname(dir)) {
@@ -65,8 +76,9 @@ let win: GlobalWindow;
 let handle: { dispose(): void };
 /** Every `addEventListener` call `boot()` made, on any target, in order: the
  *  target (`window`, `document`, `#id`, else the tag name), the type, the phase
- *  (`capture` from a boolean or an options object's `capture`) and the handler. */
-const listened: { target: string; type: string; source: string; capture: boolean }[] = [];
+ *  (`capture` from a boolean or an options object's `capture`), the other
+ *  options (`once`, `passive`, a `signal`; listed only when set) and the handler. */
+const listened: { target: string; type: string; source: string; capture: boolean; opts: string[] }[] = [];
 /** The `document` ones among them. */
 let registered: { type: string; source: string; capture: boolean }[] = [];
 /** Every `setInterval` call `boot()` made: the id it returned and the tick. */
@@ -209,10 +221,12 @@ beforeAll(async () => {
   const hadOwnWinAdd = Object.prototype.hasOwnProperty.call(g, "addEventListener");
   const realWinAdd = g.addEventListener as (...a: unknown[]) => void;
   const record = (t: unknown, type: string, fn: unknown, opts: unknown) => {
-    const capture = typeof opts === "boolean" ? opts : !!(opts as { capture?: boolean } | undefined)?.capture;
+    const o = (typeof opts === "object" && opts ? opts : {}) as { capture?: boolean; once?: boolean; passive?: boolean; signal?: unknown };
+    const capture = typeof opts === "boolean" ? opts : !!o.capture;
+    const flags = [o.once && "once", o.passive !== undefined && `passive=${o.passive}`, o.signal !== undefined && "signal"];
     const el = t as Element;
     const target = t === globalThis ? "window" : t === doc ? "document" : el.id ? `#${el.id}` : String(el.tagName ?? t).toLowerCase();
-    listened.push({ target, type, source: String(fn), capture });
+    listened.push({ target, type, source: String(fn), capture, opts: flags.filter((f): f is string => !!f) });
   };
   proto.addEventListener = function (this: unknown, type: string, fn: unknown, opts?: unknown) {
     record(this, type, fn, opts);
@@ -306,36 +320,57 @@ describe("isAppModule — which require.cache keys count as preloaded app module
   }
 });
 
+describe("handlerFingerprint — survives a move, tells handlers apart", () => {
+  const before = "(e) => {\n  if (deps.filters.tag && deps.allPages().length) deps.setRailOpen(!getRailOpen());\n  deps.render(e);\n}";
+  test("the C2–C4 port rewrites leave it unchanged", () => {
+    const moved = "(e) => { if (filters!.tag && allPages().length) railOpen = !railOpen; render(e); }";
+    expect(handlerFingerprint(moved)).toBe(handlerFingerprint(before));
+  });
+  test("a different handler gets a different one", () => {
+    expect(handlerFingerprint(before.replace("render", "paint"))).not.toBe(handlerFingerprint(before));
+  });
+});
+
 describe("wiki-browser.ts — listener order", () => {
   test("every listener boot() registers, in registration order, is pinned", () => {
     // The order is load-bearing (`keydown` handlers read `defaultPrevented`, the
     // click delegates' selector sets rely on who runs first), and moving code out
     // of the shell into controllers (mimir plan muninn-wiki-browser-split) must
-    // keep it: each entry is target, type and phase. Captured from the pre-move
-    // code at 832e0b9b (base 00eeaa2f); a change here is a reordering to
-    // justify, never to re-snapshot.
-    expect(listened.map((l) => `${l.target} ${l.type}${l.capture ? " capture" : ""}`)).toEqual([
-      "document input", "document toggle capture", "document click capture", "document selectionchange",
-      "document pointerdown capture", "document pointerup capture", "document pointercancel capture",
-      "document contextmenu capture", "document pointermove capture", "document click", "document keydown",
-      "document keydown", "document change", "document mouseover", "document focusin", "document mouseout",
-      "document focusout", "document keydown capture", "window resize", "#wikiRailResizer pointerdown",
-      "#wikiRailResizer pointermove", "#wikiRailResizer pointerup", "#wikiRailResizer pointercancel",
-      "#wikiRailResizer lostpointercapture", "#wikiRailResizer dblclick", "#wikiRailResizer keydown", "document click",
-      "document keydown", "#staleBody toggle capture", "document keydown", "window scroll capture", "window resize",
-      "document click", "document submit", "document mouseover", "document mouseout", "document focusin",
-      "document change", "document keydown capture", "document keydown", "document keydown", "body click",
-      "document click", "document keydown", "document keydown", "window scroll capture", "window resize",
-      "#wikiList click", "#wikiSearch input", "#domainChips click", "#wikiFolder change", "#typeChips click",
-      "#statusChips click", "#projectChips click", "#jiraChips click", "#tagChips click", "#wikiSort change",
-      "#wikiGroupFamilies change", "#wikiGroupEfforts change", "#wikiShowRetired change", "#wikiFiltersBtn click",
-      "#wikiFilters toggle", "#wikiOptionsBtn click", "document pointerdown", "document focusin",
-      "document keydown capture", "#wikiActiveOptions click", "#wikiSelect change", "window hashchange",
-      "window popstate", "#wikiAskBtn click", "#wikiAskInput keydown", "#wikiAskHistory click", "document click",
-      "document keydown", "document click", "document change", "document input", "document keydown", "document change",
-      "document toggle capture", "document keydown", "#articleWrap mouseup", "document selectionchange",
-      "document keydown", "document mousedown", "window message", "window storage", "#wikiList keydown",
-      "document keydown", "document click", "window focus", "document visibilitychange",
+    // keep it: each entry is target, type, phase, any once/passive/signal option
+    // and the handler's fingerprint (so a swap inside a run of one label fails).
+    // Order captured from the pre-move code at 832e0b9b (base 00eeaa2f); a change
+    // here is a reordering to justify, never to re-snapshot. Editing a handler's
+    // body changes its fingerprint only: update that one entry.
+    const label = (l: (typeof listened)[number]) =>
+      [l.target, l.type, ...(l.capture ? ["capture"] : []), ...l.opts, handlerFingerprint(l.source)].join(" ");
+    expect(listened.map(label)).toEqual([
+      "document input o668b", "document toggle capture 1o8gb", "document click capture 1jua5",
+      "document selectionchange 3ev7p", "document pointerdown capture 1eqzb", "document pointerup capture 2aydd",
+      "document pointercancel capture 2aydd", "document contextmenu capture 2aydd",
+      "document pointermove capture 2tu87", "document click z7ocg", "document keydown 39stb",
+      "document keydown 3g8ca", "document change bvivh", "document mouseover 3ummx", "document focusin 3ummx",
+      "document mouseout hhszm", "document focusout 2w48x", "document keydown capture 18m4q", "window resize 2roli",
+      "#wikiRailResizer pointerdown 1pfz6", "#wikiRailResizer pointermove 3eg6i", "#wikiRailResizer pointerup 1742x",
+      "#wikiRailResizer pointercancel 1742x", "#wikiRailResizer lostpointercapture 1742x",
+      "#wikiRailResizer dblclick viezc", "#wikiRailResizer keydown 2qpq5", "document click spq77",
+      "document keydown 375t1", "#staleBody toggle capture 2t4r6", "document keydown 3i1ru",
+      "window scroll capture 3icnc", "window resize 1pllj", "document click 2qz7k", "document submit 3a7oo",
+      "document mouseover 241o3", "document mouseout 2zgwm", "document focusin 2pk43", "document change q8wsl",
+      "document keydown capture 2bjao", "document keydown 15zmf", "document keydown 2xocs", "body click 2gr2j",
+      "document click 2rfiw", "document keydown 11yw5", "document keydown 1hrkk", "window scroll capture 3inxc",
+      "window resize ezw5m", "#wikiList click 2dh9c", "#wikiSearch input vuk2k", "#domainChips click 1pz3q",
+      "#wikiFolder change 18su4", "#typeChips click 1uu71", "#statusChips click oskq1", "#projectChips click ucr8z",
+      "#jiraChips click ienyi", "#tagChips click 2wcpp", "#wikiSort change 2z54o", "#wikiGroupFamilies change 1zs3o",
+      "#wikiGroupEfforts change xpzlm", "#wikiShowRetired change 31ggc", "#wikiFiltersBtn click 19dyl",
+      "#wikiFilters toggle 313od", "#wikiOptionsBtn click 2ao38", "document pointerdown c4xo9",
+      "document focusin 1f0gm", "document keydown capture 3q6ca", "#wikiActiveOptions click 3hfqd",
+      "#wikiSelect change 1cdex", "window hashchange 8vr2p", "window popstate 1g2xx", "#wikiAskBtn click 2otgq",
+      "#wikiAskInput keydown 3by6q", "#wikiAskHistory click 397kl", "document click 3c964", "document keydown 2gfie",
+      "document click h5lbk", "document change 1q701", "document input 354ch", "document keydown xo9a3",
+      "document change 2rd7b", "document toggle capture 1aw8m", "document keydown 29aya",
+      "#articleWrap mouseup 346qg", "document selectionchange 1grio", "document keydown d1wzz",
+      "document mousedown o5dci", "window message 1ukk1", "window storage 1xqqr", "#wikiList keydown 1uyyu",
+      "document keydown 1cwoh", "document click 2sbpb", "window focus 2n46m", "document visibilitychange bdalg",
     ]);
   });
 

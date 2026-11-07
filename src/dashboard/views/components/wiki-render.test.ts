@@ -165,3 +165,20 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
   expect(lets).toBeLessThanOrEqual(WIKI_BROWSER_MAX_MODULE_LETS);
   expect(vars).toEqual([]);
 });
+
+// The same ratchet on the modules the split creates; each number may only fall.
+// 2026-11-07, C2 fix round: the baselines as C2 left them.
+const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
+  ["wiki-rail-controller.ts", 2_107, 13],
+  ["wiki-shell-state.ts", 57, 4],
+  ["wiki-status-pills.ts", 29, 0],
+];
+
+for (const [file, maxLines, maxLets] of SPLIT_MODULE_CEILINGS) {
+  test(`${file} does not grow: line count and module-level lets`, async () => {
+    const { lines, lets, vars } = moduleScopeDeclarations(await Bun.file(new URL(`./${file}`, import.meta.url)).text());
+    expect(lines).toBeLessThanOrEqual(maxLines);
+    expect(lets).toBeLessThanOrEqual(maxLets);
+    expect(vars).toEqual([]);
+  });
+}
