@@ -14,9 +14,13 @@ import { layerOf } from "../src/test/layers.ts";
 export type Side = "knowledge" | "other" | "neutral";
 export type CommitClass = "knowledge" | "other" | "crossing" | "neutral";
 
-/** Knowledge-side file names in folders that mix both sides (dashboard, chat, db, test, watchers, e2e, scripts, extensions). */
+/**
+ * Knowledge-side file names in folders that mix both sides (dashboard, chat, db, test, watchers, e2e, scripts, extensions).
+ * Short words are anchored at a path segment's start: bare `component` matched every file under a
+ * `components/` folder and `share` matched `shared-styles.ts` (each term's hits since 10-13 reviewed by hand).
+ */
 const KNOWLEDGE_NAME =
-  /wiki|summar|(^|\/)sum-|plan|gardener|walkthrough|factcheck|share|frames|graph|youtube|vimeo|tiktok|x-article|article|anthropic|component|decision|work-map|theme-map|stale-proposal|diagram|oppfolging|find-links/;
+  /wiki|summar|(^|\/)sum-|(^|\/)plans?[-./]|gardener|walkthrough|factcheck|(^|\/)share[-./]|frames|graph|youtube|vimeo|tiktok|x-article|(^|\/)article[-./]|anthropic|(^|\/)component-reference|decision|work-map|theme-map|stale-proposal|diagram|oppfolging|find-links/;
 
 /** First match wins. */
 export const SIDE_RULES: readonly (readonly [test: (f: string) => boolean, side: Side, why: string])[] = [
@@ -27,6 +31,8 @@ export const SIDE_RULES: readonly (readonly [test: (f: string) => boolean, side:
   [(f) => /^e2e\/(ports\.ts|shard-timings\.json|ci-expected-skips\.txt|e2e-env\.ts|own-server\.ts)$/.test(f), "neutral", "e2e shared registries"],
   [(f) => /^src\/test\/(claude-md-budgets\.json|mock-isolation|layers|layer-direction|ambient-env)/.test(f) || f === "e2e/own-server.test.ts", "neutral", "repo guards and the instance-env list"],
   [(f) => /^src\/auth\/(.*inventory\.txt|side-effecting-gets\.test\.ts)$|^src\/dashboard\/(route-groups\.ts|routes-profile\.test\.ts)$/.test(f), "neutral", "route registries every new route joins"],
+  // render includes src/web/web-format.ts, which serves chat too (F7). Kept knowledge: its commits since 10-13
+  // are wiki component rendering, and the chat formatters a new component touches still count as the other side.
   [(f) => ["wiki-core", "render"].includes(layerOf(f) ?? ""), "knowledge", "layer table: wiki-core and render"],
   [(f) => /^src\/(gardener|plans|summaries|share|youtube|vimeo|tiktok|x-article|article|anthropic|video)\//.test(f), "knowledge", "gardener, plans, capture verticals"],
   [(f) => /^(src\/(dashboard|chat|db|test|watchers)|db\/migrations|e2e|scripts|extensions)\//.test(f) && KNOWLEDGE_NAME.test(f.slice(f.indexOf("/") + 1)), "knowledge", "wiki/capture files in mixed folders"],

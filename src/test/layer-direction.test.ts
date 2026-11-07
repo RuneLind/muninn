@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { testTempDirSync } from "./temp-dir.ts";
 import {
+  addedAllowlistLines,
   checkAllowlist,
   countByLayerPair,
   edgeLine,
@@ -34,12 +37,31 @@ describe("the live tree", () => {
     expect(check.unlisted).toEqual([]);
   });
 
-  test("the allowlist only shrinks: fixed edges are removed (bun scripts/layer-ratchet.ts --update)", () => {
+  test("no stale entries: a fixed edge leaves the list (bun scripts/layer-ratchet.ts --update); CI's --check-base step fails a PR that adds one", () => {
     expect(check.stale).toEqual([]);
   });
 
   test("the allowlist is sorted and has no duplicates", () => {
     expect(check.format).toEqual([]);
+  });
+});
+
+describe("sourceFiles and importEdges on a synthetic tree", () => {
+  const root = testTempDirSync(path.join(tmpdir(), "layer-tree-"));
+  const put = (rel: string, text: string) => {
+    mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    writeFileSync(path.join(root, rel), text);
+  };
+  put("src/a.ts", `import { b } from "../db/b.ts";\nimport type { B } from "../db/b.ts";\nexport * from "../db/b.ts";\n`);
+  put("src/a.test.ts", `import { a } from "./a.ts";\n`);
+  put("db/b.ts", `export const b = 1;\n`);
+  put("scripts/c.ts", `export const c = 1;\n`);
+
+  test("scans non-test .ts files under both src/ and db/, nothing else", () => {
+    expect(sourceFiles(root)).toEqual(["db/b.ts", "src/a.ts"]);
+  });
+  test("one edge per (importer, target), however many times it is imported", () => {
+    expect(importEdges(root)).toEqual([{ from: "src/a.ts", to: "db/b.ts" }]);
   });
 });
 
@@ -127,6 +149,13 @@ describe("allowlist", () => {
   });
   test("a clean list reports nothing", () => {
     expect(checkAllowlist(["a -> b", "c -> d"], ["c -> d", "a -> b"])).toEqual({ unlisted: [], stale: [], format: [] });
+  });
+  test("added lines: what the head lists that the base does not, comments and blanks ignored, trimmed", () => {
+    const base = "# header\na -> b\nc -> d\n";
+    expect(addedAllowlistLines(base, "# header\na -> b\nc -> d\n")).toEqual([]);
+    expect(addedAllowlistLines(base, "# new header text\n\na -> b\n")).toEqual([]);
+    expect(addedAllowlistLines(base, "a -> b\n  c -> d  \n# x -> y\n")).toEqual([]);
+    expect(addedAllowlistLines(base, "a -> b\nb -> z\nc -> d\ne -> f\n")).toEqual(["b -> z", "e -> f"]);
   });
   test("shrink removes fixed lines and never adds a new violation", () => {
     expect(shrinkAllowlist(["c -> d", "a -> b", "a -> b", "x -> y"], ["a -> b", "c -> d", "new -> edge"])).toEqual(["a -> b", "c -> d"]);

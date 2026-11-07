@@ -178,6 +178,13 @@ jobs:
           path: junit/
           retention-days: 7
           overwrite: true
+      # PR only: the import-direction allowlist only shrinks. `layer-direction.test.ts`
+      # cannot see a PR that adds an upward import AND its list line; this compares the
+      # list with the base's and fails on any added entry (a reviewed exception's PR body
+      # says why). Needs the base commit, which `fetch-depth: 0` above provides.
+      - name: The layer allowlist adds no entry
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && matrix.shard == 1 }}
+        run: bun scripts/layer-ratchet.ts --check-base ${{ github.event.pull_request.base.sha }}
       # PR only: each test file the PR adds or changes, alone, against a 10 s
       # bar (`scripts/unit-slow-allowlist.txt` lists the exceptions). On shard 1
       # because it has the full setup; after the links, so it adds no wait.

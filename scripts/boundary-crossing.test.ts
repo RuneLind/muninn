@@ -21,6 +21,26 @@ describe("classifyFile", () => {
     for (const f of ["src/ai/executor.ts", "src/chat/routes.ts", "src/auth/origin.ts", "src/dashboard/views/agents-page.ts", "src/watchers/email.ts", "e2e/chat.spec.ts", "db/init.sql"])
       expect([f, classifyFile(f)]).toEqual([f, "other"]);
   });
+  test("name terms are anchored: a folder called components/, shared-*, planner or -article- does not make a file knowledge", () => {
+    for (const f of [
+      "src/chat/views/components/authed-fetch.ts",
+      "src/dashboard/views/components/theme.ts",
+      "src/dashboard/views/shared-styles.ts",
+      "src/dashboard/views/benchmark/shared.ts",
+      "src/chat/planner.ts",
+      "src/watchers/__fixtures__/x-feed-article-trq212.md",
+    ]) expect([f, classifyFile(f)]).toEqual([f, "other"]);
+  });
+  test("the anchored terms still match their own files", () => {
+    for (const f of [
+      "src/dashboard/views/components/share-dialog.ts",
+      "src/dashboard/routes/share-sse.ts",
+      "scripts/component-reference.ts",
+      "src/dashboard/routes/article-routes.ts",
+      "src/dashboard/views/plans-page.ts",
+      "src/dashboard/views/components/plan-board.ts",
+    ]) expect([f, classifyFile(f)]).toEqual([f, "knowledge"]);
+  });
   test("neutral: shared registries, instructions, root config", () => {
     for (const f of [
       "package.json",
@@ -44,6 +64,8 @@ describe("classifyCommit", () => {
     expect(classifyCommit(["src/wiki/store.ts", "package.json", "CLAUDE.md"])).toBe("knowledge");
     expect(classifyCommit(["src/ai/executor.ts", "e2e/ports.ts"])).toBe("other");
     expect(classifyCommit(["package.json"])).toBe("neutral");
+    // #800: chat's authed-fetch and its test only.
+    expect(classifyCommit(["src/auth/CLAUDE.md", "src/chat/views/components/authed-fetch.ts", "src/chat/views/components/authed-fetch.test.ts"])).toBe("other");
     expect(classifyCommit([])).toBe("neutral");
   });
 });

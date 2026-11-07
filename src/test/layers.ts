@@ -4,8 +4,9 @@
  * `LAYER_MAP` places every non-test `.ts` file under `src/` and `db/` by its
  * longest matching prefix; `layer-direction.test.ts` fails on a file no entry
  * matches, so a new directory is classified here first. Today's upward imports
- * sit in `scripts/layer-allowlist.txt`, which may only shrink
- * (`bun scripts/layer-ratchet.ts --update` removes fixed edges and never adds one).
+ * sit in `scripts/layer-allowlist.txt`, which may only shrink: the test fails on a
+ * stale entry (`bun scripts/layer-ratchet.ts --update` removes it), and CI's
+ * `--check-base` step fails a PR whose list adds an entry.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -177,6 +178,12 @@ export function checkAllowlist(listed: readonly string[], current: readonly stri
     stale: [...have].filter((l) => !now.has(l)).sort(),
     format,
   };
+}
+
+/** Entries the head's allowlist has that the base's does not: what `--check-base` fails on. */
+export function addedAllowlistLines(baseText: string, headText: string): string[] {
+  const base = new Set(parseAllowlist(baseText));
+  return [...new Set(parseAllowlist(headText).filter((l) => !base.has(l)))].sort();
 }
 
 /** `--update`: keep only listed lines that are still violations, sorted and unique. Never adds a line. */
