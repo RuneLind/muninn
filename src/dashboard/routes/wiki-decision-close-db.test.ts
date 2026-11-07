@@ -83,6 +83,9 @@ const stateOf = async (id: string) => parseQuestionPage(parseBlocks(stripFrontma
 beforeAll(async () => {
   root = await testTempDir(path.join(tmpdir(), "muninn-close-"));
   git("init", "-q", "-b", "main");
+  // The route's commit (`commitWikiChange`) spawns git with no author env: a CI runner has no identity.
+  git("config", "user.name", "t");
+  git("config", "user.email", "t@example.invalid");
   await resetPages();
   __setWikiRegistryForTest([
     { name: WIKI, root, source: "extra" },
