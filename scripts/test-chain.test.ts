@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -515,17 +515,69 @@ describe("timeAlone's kill", () => {
     expect(r.killWarning).toContain("(EPERM)");
   }, 10_000);
 
-  test("killGroup: ESRCH is a gone group, no fallback; a failed kill of an exited child does not touch its pid", () => {
+  test("killGroup: ESRCH after the child exited is a gone group, no fallback; a failed kill of an exited child does not touch its pid", () => {
     const calls: number[] = [];
     const throwing = (code: string) => (pid: number) => {
       calls.push(pid);
       if (pid < 0) throw Object.assign(new Error(code), { code });
     };
-    expect(killGroup({ pid: 7, exitCode: null, signalCode: null }, throwing("ESRCH"))).toBeUndefined();
+    expect(killGroup({ pid: 7, exitCode: 0, signalCode: null }, throwing("ESRCH"))).toBeUndefined();
     expect(calls).toEqual([-7]);
     calls.length = 0;
     expect(killGroup({ pid: 7, exitCode: 0, signalCode: null }, throwing("EPERM"))).toContain("(EPERM)");
     expect(calls).toEqual([-7]);
+  });
+
+  test("killGroup: ESRCH while the child still runs kills the child", () => {
+    const calls: number[] = [];
+    const w = killGroup({ pid: 7, exitCode: null, signalCode: null }, (pid) => {
+      calls.push(pid);
+      if (pid < 0) throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    });
+    expect(calls).toEqual([-7, 7]);
+    expect(w).toContain("killed only the child");
+  });
+
+  test("killGroup's warning never claims a kill that did not happen", () => {
+    const fail = (pid: number) => {
+      throw Object.assign(new Error("x"), { code: pid < 0 ? "EPERM" : "EACCES" });
+    };
+    const exited = killGroup({ pid: 7, exitCode: 0, signalCode: null }, fail);
+    expect(exited).not.toContain("killed only the child");
+    expect(exited).toContain("after the child exited");
+    const both = killGroup({ pid: 7, exitCode: null, signalCode: null }, fail);
+    expect(both).not.toContain("killed only the child");
+    expect(both).toContain("(EACCES)");
+  });
+
+  test("the wait after the kill is bounded even when no kill lands", async () => {
+    let pid = 0;
+    const noKill = (p: number) => {
+      pid = Math.abs(p);
+      throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    };
+    try {
+      const t0 = performance.now();
+      const r = await timeAlone("x", { argv: ["sleep", "30"], timeoutMs: 300, killWaitMs: 500, kill: noKill });
+      expect((performance.now() - t0) / 1000).toBeLessThan(3);
+      expect(r.timedOut).toBe(true);
+      expect(r.killWarning).toContain("stopped waiting");
+    } finally {
+      if (pid) process.kill(-pid, "SIGKILL");
+    }
+  }, 8_000);
+});
+
+describe("the changed-file step prints a kill warning", () => {
+  test("a run with killWarning yields a ::warning:: line naming the file", async () => {
+    const lines: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((s: unknown) => void lines.push(String(s)));
+    try {
+      await timeChangedFiles(["src/a.test.ts"], new Set(), async () => ({ seconds: 1, code: 0, output: "", timedOut: false, killWarning: "group kill failed" }));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines).toContain("::warning::src/a.test.ts: group kill failed");
   });
 });
 

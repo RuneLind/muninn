@@ -571,35 +571,41 @@ export interface AloneRun {
   output: string;
   /** Killed at the timeout: its seconds are not a timing. */
   timedOut: boolean;
-  /** Set when the group kill failed and only the direct child was killed: grandchildren may still run. */
+  /** Set when the group kill failed (what was killed instead) or the child outlived the wait after the kill. */
   killWarning?: string;
 }
 
 export type KillFn = (pid: number, signal: NodeJS.Signals) => void;
 
 /**
- * SIGKILL the child's process group. A failure other than ESRCH (the group is
- * gone) falls back to the child itself while it still runs, so `proc.exited`
- * resolves; the returned warning says so.
+ * SIGKILL the child's process group. When that fails (ESRCH: no such group) and
+ * the child still runs, the child itself is killed; an exited child's pid is never
+ * touched, since it may already belong to another process. The returned warning
+ * says what was and was not killed.
  */
 export function killGroup(proc: { pid: number; exitCode: number | null; signalCode: string | null }, kill: KillFn = process.kill.bind(process)): string | undefined {
+  const codeOf = (e: unknown) => (e as NodeJS.ErrnoException).code ?? String(e);
+  let groupCode: string;
   try {
     kill(-proc.pid, "SIGKILL");
     return undefined;
   } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "ESRCH") return undefined;
-    // An exited child's pid may already belong to another process.
-    if (proc.exitCode === null && proc.signalCode === null) {
-      try {
-        kill(proc.pid, "SIGKILL");
-      } catch {
-        // gone in between
-      }
-    }
-    return `killing process group ${proc.pid} failed (${code ?? String(e)}); killed only the child, grandchildren may still run`;
+    groupCode = codeOf(e);
   }
+  const failed = `killing process group ${proc.pid} failed (${groupCode})`;
+  if (proc.exitCode !== null || proc.signalCode !== null) {
+    return groupCode === "ESRCH" ? undefined : `${failed} after the child exited; grandchildren may still run`;
+  }
+  try {
+    kill(proc.pid, "SIGKILL");
+  } catch (e) {
+    return `${failed} and killing the child failed (${codeOf(e)})`;
+  }
+  return `${failed}; killed only the child, grandchildren may still run`;
 }
+
+/** How long to wait for the child after the kill: no kill may have landed. */
+const KILL_WAIT_MS = 5_000;
 
 /** How long the pipes may stay open after the run ends: a grandchild that inherited them can hold them for good. */
 const PIPE_GRACE_MS = 1_000;
@@ -619,9 +625,9 @@ export function aloneArgv(file: string): string[] {
  * One file alone in its own `bun test` process, wall clock. The process gets its
  * own group and the whole group is killed when it ends, so neither a timeout nor a
  * leaked grandchild holding the pipes can keep this waiting. `argv`, `cwd`,
- * `timeoutMs` and `kill` are for tests.
+ * `timeoutMs`, `killWaitMs` and `kill` are for tests.
  */
-export async function timeAlone(file: string, opts: { argv?: string[]; cwd?: string; timeoutMs?: number; kill?: KillFn } = {}): Promise<AloneRun> {
+export async function timeAlone(file: string, opts: { argv?: string[]; cwd?: string; timeoutMs?: number; killWaitMs?: number; kill?: KillFn } = {}): Promise<AloneRun> {
   const t0 = performance.now();
   const proc = Bun.spawn(opts.argv ?? aloneArgv(file), { cwd: opts.cwd ?? ROOT, stdout: "pipe", stderr: "pipe", detached: true });
   const out: string[] = [];
@@ -634,8 +640,15 @@ export async function timeAlone(file: string, opts: { argv?: string[]; cwd?: str
   ]);
   clearTimeout(timer);
   const seconds = (performance.now() - t0) / 1000;
-  const killWarning = killGroup(proc, opts.kill);
-  const code = await proc.exited;
+  let killWarning = killGroup(proc, opts.kill);
+  let waitTimer: ReturnType<typeof setTimeout> | undefined;
+  const exitedAfterKill = await Promise.race([
+    proc.exited.then(() => true),
+    new Promise<false>((resolve) => (waitTimer = setTimeout(() => resolve(false), opts.killWaitMs ?? KILL_WAIT_MS))),
+  ]);
+  clearTimeout(waitTimer);
+  const code = exitedAfterKill ? await proc.exited : -1;
+  if (!exitedAfterKill) killWarning = `${killWarning ?? `process ${proc.pid} was killed`}; it did not exit within ${(opts.killWaitMs ?? KILL_WAIT_MS) / 1000} s, stopped waiting`;
   await Promise.race([pipes, Bun.sleep(PIPE_GRACE_MS)]);
   return { seconds, code, output: `${out.join("")}${err.join("")}`, timedOut: ended === "timeout", ...(killWarning ? { killWarning } : {}) };
 }
