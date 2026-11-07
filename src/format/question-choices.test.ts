@@ -27,6 +27,8 @@ describe("splitQuestionLine", () => {
     expect(splitQuestionLine("**Keep *.ts and old_ files, against tmp_?**").question).toBe("Keep *.ts and old_ files, against tmp_?");
     expect(splitQuestionLine("**A & B <x> \"q\" 'a'?**").question).toBe("A & B <x> \"q\" 'a'?");
     expect(splitQuestionLine('**Is <Fact id="1">the claim</Fact> true?**').question).toBe("Is the claim true?");
+    // An author's own entity stays as typed, as the renderer prints it: `&amp;` decodes last.
+    expect(splitQuestionLine("**Is &lt;b&gt; allowed?**").question).toBe("Is &lt;b&gt; allowed?");
   });
 
   test("a lone bold first line is the question and leaves the body", () => {

@@ -445,6 +445,21 @@ test("a qualified recommendation is headed «Recommendation:», not «Why X» be
   expect(html).not.toContain("<b>Why A</b>");
 });
 
+test("a structured row's pick button is disabled while the answer sends, and its letter is escaped", async () => {
+  const q = { ...STRUCTURED, rows: [{ letter: XSS, label: "x", why: "y" }, STRUCTURED.rows[1]!], recommendation: null };
+  await load({ wiki: "w", cards: [card({ id: "O1", lane: "ask", choices: [XSS, "B"], structured: q })] });
+  click("row", "plans/a.mdx#O1");
+  let html = inboxHtml(() => "", Date.now());
+  expect(html).not.toContain("<img");
+  expect(html).toContain('data-wi-row="&lt;img src=x onerror=&quot;alert(1)&quot;&gt;"');
+  expect(html).toContain('data-wi-choice="&lt;img src=x onerror=&quot;alert(1)&quot;&gt;"');
+  click("pick", "plans/a.mdx#O1", { "data-wi-choice": "B" });
+  globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch;
+  click("answer", "plans/a.mdx#O1");
+  html = inboxHtml(() => "", Date.now());
+  expect(html).toMatch(/data-wi-choice="B" aria-pressed="true" aria-describedby="[^"]+" disabled>B<\/button>/);
+});
+
 test("a link in a choice row sits outside the pick button", async () => {
   const linked = { ...STRUCTURED, rows: [{ letter: "A", label: "lanes", why: 'see <a href="https://example.org/x">the spec</a>.' }, STRUCTURED.rows[1]!] };
   await load({ wiki: "w", cards: [card({ id: "O1", lane: "ask", choices: ["A", "B"], structured: linked })] });

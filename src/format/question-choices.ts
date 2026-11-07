@@ -1,9 +1,8 @@
 /**
  * A question card's body read as its parts: the bold question line, the context
  * under it, one row per lettered choice (`- **A — label:** why`) and the
- * `**Recommendation: A.** why` line. Pure: the decision inbox renders the parts.
- * Regexes stay in the functions so a browser bundle importing this pays nothing
- * at load.
+ * `**Recommendation: A.** why` line. Server-side only: it imports the web
+ * renderer for titles, so a browser bundle must not import it.
  */
 
 import { formatWebHtml } from "../web/web-format.ts";
@@ -18,8 +17,8 @@ export interface QuestionChoiceRow {
 export interface QuestionChoices {
   context: string;
   rows: QuestionChoiceRow[];
-  /** `qualified`: the bold part says more than the bare letter (`A, with D meanwhile`),
-   *  and `why` then opens with that whole part, unsliced. */
+  /** `qualified`: the bold part is not the bare letter: more words (`A, with D
+   *  meanwhile`) or markup (`«A»`, `` `A` ``); `why` then opens with that whole part, unsliced. */
   recommendation: { letter: string; why: string; qualified: boolean } | null;
 }
 
@@ -38,7 +37,8 @@ export function splitQuestionLine(body: string): { question: string; rest: strin
 
 /** One line of markdown as the text the shared renderer prints for it (the card
  *  body's own renderer), so code spans, escapes, links and emphasis follow its
- *  rules: tags and Fact-check chips dropped, its five escapes decoded. */
+ *  rules: tags and Fact-check chips dropped, `escapeHtml`'s four escapes decoded
+ *  (`&#39;` too, which it never emits), `&amp;` last so an author's `&lt;` stays. */
 function plainInline(md: string): string {
   return formatWebHtml(md)
     .replace(/<button\b[^>]*>[^]*?<\/button>/g, "")
@@ -55,7 +55,8 @@ function plainInline(md: string): string {
  * The body's choice rows and recommendation, or null when the body is not in that
  * shape: no rows, row letters other than `choices` (same set, same order), or
  * text the parts would drop (prose after the rows, a recommendation that does
- * not open with a choice). `context` is the markdown
+ * not open with a choice), or a recommendation line whose letter is not the
+ * card's own (`parseRecommendation` over the whole body). `context` is the markdown
  * between the question line and the first row.
  */
 export function parseQuestionChoices(body: string, choices: readonly string[]): QuestionChoices | null {
