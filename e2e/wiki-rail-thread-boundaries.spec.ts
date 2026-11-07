@@ -1526,7 +1526,7 @@ test.describe("Wiki rail: reset-area focus (class check)", () => {
 /**
  * Class check (round 3): where focus goes when a ⋯ popover closes. One row per
  * reachable cell of cause × opener state × popover; the table itself is the
- * comment at `PopCloseCause` in `wiki-browser.ts`. A key close returns focus
+ * comment at `PopCloseCause` in `wiki-menus-controller.ts`. A key close returns focus
  * to the opener (re-found by key after a repaint); a click elsewhere never
  * moves it; a scroll or resize moves it only out of the removed popover.
  */

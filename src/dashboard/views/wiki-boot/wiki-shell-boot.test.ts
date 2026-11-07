@@ -463,7 +463,13 @@ describe("the left pane (wiki-rail-controller.ts), driven through the booted she
   const ALL = ["concepts/alpha.md", "concepts/beta.md", "entities/gamma.md"];
 
   test("the modules the shell imports are evaluated inside the import-effect window", () => {
-    for (const m of ["/components/wiki-rail-controller.ts", "/components/wiki-shell-state.ts"]) {
+    for (const m of [
+      "/components/wiki-rail-controller.ts",
+      "/components/wiki-shell-state.ts",
+      "/components/wiki-stale-controller.ts",
+      "/components/wiki-effort-controller.ts",
+      "/components/wiki-menus-controller.ts",
+    ]) {
       expect(loadedInWindow.some((k) => k.endsWith(m))).toBe(true);
     }
   });
