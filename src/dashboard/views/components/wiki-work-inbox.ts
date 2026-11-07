@@ -5,7 +5,8 @@
  * from `GET /api/wiki/decision-inbox` in four lanes, «close?», «ask you» and the
  * first lane holding cards open, empty lanes folded into one line (D1 of mimir
  * plans/muninn-decision-triage-visibility.mdx). An opened card shows its choices
- * as rows (D2) from the server's rendered HTML.
+ * as rows (D2) from the server's rendered HTML. Above the lanes, the triage's
+ * status line and its per-night «Details» (PR 2) from `GET /api/wiki/decision-triage/status`.
  * A row opens to the card, its evidence and its actions; an answer goes through
  * `POST /api/wiki/answers` with the reader card's body, and a 409 sends the
  * reader to the page, never a second write. Imported by `wiki-start-cards.ts`,
@@ -13,6 +14,7 @@
  */
 
 import type { DecisionInboxBody, InboxCard } from "../../routes/wiki-decision-inbox.ts";
+import type { TriageStatusBody } from "../../routes/wiki-decision-triage-status.ts";
 import { inboxBornMs, settlingAnswers, type InboxLane } from "../../../wiki/decision-triage/inbox.ts";
 import { QUESTION_NOT_SURE } from "../../../format/question.ts";
 import { escHtml as esc } from "./escape.ts";
@@ -43,6 +45,9 @@ interface InboxState {
   showKept: boolean;
   /** The last close, said in the «close?» lane: its row leaves on the reload. */
   closed: string | null;
+  /** The triage's status line (`GET /api/wiki/decision-triage/status`); null when it did not load. */
+  status: TriageStatusBody | null;
+  statusOpen: boolean;
 }
 
 const KEPT_KEY = "muninn-inbox-kept";
@@ -108,7 +113,8 @@ export function initInbox(paint: (focusSel?: string, passive?: boolean) => void)
 /** Fetch the inbox (`url` carries the wiki). A wiki outside the triage scope answers 404: no section. */
 export function loadInbox(url: string): void {
   const seq = ++loadSeq;
-  if (!st || st.url !== url) st = { url, body: null, open: null, laneOpen: {}, picked: {}, notes: {}, sending: {}, failed: null, msg: {}, preview: {}, showKept: false, closed: null };
+  if (!st || st.url !== url) st = { url, body: null, open: null, laneOpen: {}, picked: {}, notes: {}, sending: {}, failed: null, msg: {}, preview: {}, showKept: false, closed: null, status: null, statusOpen: false };
+  loadStatus(url, seq);
   fetch(url)
     .then(async (r) => ({ status: r.status, body: r.ok ? ((await r.json().catch(() => null)) as DecisionInboxBody | null) : null }))
     .catch(() => ({ status: 0, body: null }))
@@ -127,6 +133,61 @@ export function loadInbox(url: string): void {
       } else st.failed = !status ? "the server did not answer" : status < 300 ? `HTTP ${status}, not an inbox` : `HTTP ${status}`;
       repaint(undefined, true);
     });
+}
+
+/** The status line's fetch, beside the inbox's: any failure leaves the line out, never the inbox. */
+function loadStatus(inboxUrl: string, seq: number): void {
+  const url = inboxUrl.replace("/api/wiki/decision-inbox", "/api/wiki/decision-triage/status");
+  fetch(url)
+    .then(async (r) => (r.ok ? ((await r.json().catch(() => null)) as TriageStatusBody | null) : null))
+    .catch(() => null)
+    .then((body) => {
+      if (seq !== loadSeq || !st || st.url !== inboxUrl) return;
+      st.status = body && Array.isArray(body.nights) && body.pass ? body : null;
+      repaint(undefined, true);
+    });
+}
+
+const OSLO_TIME = new Intl.DateTimeFormat("nb-NO", { timeZone: "Europe/Oslo", hour: "2-digit", minute: "2-digit" });
+const OSLO_DATE = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Oslo", day: "2-digit", month: "2-digit" });
+/** `DD.MM` in Oslo (nb-NO prints `8.11.`). */
+const osloDdMm = (ms: number) => {
+  const p = Object.fromEntries(OSLO_DATE.formatToParts(ms).map((x) => [x.type, x.value]));
+  return `${p.day}.${p.month}`;
+};
+/** `06:12` today, `06.11 06:12` on another day (Oslo). */
+const atLabel = (ms: number, now: number) => (osloDdMm(ms) === osloDdMm(now) ? OSLO_TIME.format(ms) : `${osloDdMm(ms)} ${OSLO_TIME.format(ms)}`);
+
+/** One line above the lanes, and the per-night table behind «Details». */
+function statusHtml(now: number): string {
+  const t = st?.status;
+  if (!t) return "";
+  const last = t.lastRun;
+  const warn = !t.pass.on || t.pass.modelOff;
+  const dotTitle = !t.pass.on ? `The pass is off: ${t.pass.why ?? "unknown"}` : t.pass.modelOff ? "The model call is off" : "The pass is on";
+  const parts = last
+    ? [`Triage checked <b>${esc(atLabel(last.at, now))}</b>`, `${last.cards} card${last.cards === 1 ? "" : "s"}`, `${last.codeFacts} with code facts`]
+    : ["Triage has not run on this wiki"];
+  if (last && last.outcome !== "ok") parts.push(esc(last.outcome));
+  const missing = t.reposNotFound.length
+    ? `<span class="wiki-wi-tri-warn" title="${esc(t.reposNotFound.map((r) => r.repo + (r.reason ? `: ${r.reason}` : "")).join("\n"))}">${t.reposNotFound.length} repo${t.reposNotFound.length === 1 ? "" : "s"} not found</span>`
+    : "";
+  const next = !t.pass.on ? `<span title="${esc(t.pass.why ?? "")}">pass off</span>` : t.nextDueAt !== null ? `<span>next ~${esc(atLabel(t.nextDueAt, now))}</span>` : "";
+  const line =
+    `<div class="wiki-wi-tri" data-wi-tri><span class="wiki-wi-tri-dot${warn ? " warn" : ""}" title="${esc(dotTitle)}"></span>` +
+    `<span>${parts.join(" · ")}</span>${missing}${t.pass.on && t.pass.modelOff ? "<span>model off</span>" : ""}${next}` +
+    `<span class="wiki-wi-tri-sp"></span>` +
+    (t.nights.length ? `<button class="wiki-wi-btn small" data-wi-act="tri-details" aria-expanded="${st!.statusOpen}">${st!.statusOpen ? "Hide" : "Details"}</button>` : "") +
+    `</div>`;
+  if (!st!.statusOpen || !t.nights.length) return line;
+  const day = (night: string) => night.split("-").slice(1).reverse().join(".");
+  const rows = t.nights
+    .map((n) => `<tr><td>${esc(day(n.night))}</td><td>${esc(n.outcome ?? "no run line")}</td><td>${n.cards}</td><td>${n.codeFacts}</td><td>${n.answered}</td><td>${n.reposNotFound.length ? esc(n.reposNotFound.join(", ")) : "none"}</td></tr>`)
+    .join("");
+  return (
+    line +
+    `<div class="wiki-wi-tri-stats"><table><thead><tr><th>Night</th><th>Outcome</th><th>Cards</th><th>With code facts</th><th>Answered</th><th>Repos not found</th></tr></thead><tbody>${rows}</tbody></table></div>`
+  );
 }
 
 function canAnswer(k: string): boolean {
@@ -275,7 +336,7 @@ export function inboxHtml(hrefFor: (rel: string) => string, now: number): string
     return `<details class="wiki-wi-lane" data-wi-lane="${lane}"${isOpen ? " open" : ""}><summary class="wiki-wm-lane-title">${label} <span class="wiki-wm-count">${list.length}</span> <span class="wiki-wi-hint">${hint}</span></summary>${rows}</details>`;
   }).join("");
   const emptyLine = empty.length ? `<div class="wiki-wm-empty wiki-wi-empty">Nothing ${empty.join(" · ")}.</div>` : "";
-  return `<div class="wiki-wm-section wiki-wi" id="wikiWorkInbox"><div class="wiki-wm-section-title">Decisions · ${cards.length} open</div>${failed}${lanes}${emptyLine}</div>`;
+  return `<div class="wiki-wm-section wiki-wi" id="wikiWorkInbox"><div class="wiki-wm-section-title">Decisions · ${cards.length} open</div>${statusHtml(now)}${failed}${lanes}${emptyLine}</div>`;
 }
 
 async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: string): Promise<void> {
@@ -361,6 +422,11 @@ export function handleInboxClick(target: Element, hrefFor: (rel: string) => stri
   if (act?.getAttribute("data-wi-act") === "kept") {
     s.showKept = !s.showKept;
     repaint();
+    return true;
+  }
+  if (act?.getAttribute("data-wi-act") === "tri-details") {
+    s.statusOpen = !s.statusOpen;
+    repaint('[data-wi-act="tri-details"]');
     return true;
   }
   const k = target.closest("[data-wi-key]")?.getAttribute("data-wi-key");

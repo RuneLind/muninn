@@ -100,7 +100,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-07: wrapping the load-time code in `boot()` (wiki-browser split C1) took
 // it from 1,423,508 to 1,426,483 bytes (357,829 → 358,552 gzipped); the readable
 // decision inbox then took it to 1,428,716.
-const WIKI_CLIENT_MAX_BYTES = 1_429_000;
+// 2026-11-07: the triage status line and its Details table (visibility PR 2) took it to 1,432,143.
+const WIKI_CLIENT_MAX_BYTES = 1_432_500;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

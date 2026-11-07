@@ -57,6 +57,7 @@ import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { registerWikiWorkMapRoutes } from "./wiki-work-map.ts";
 import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
+import { realTriageStatusDeps, registerWikiDecisionTriageStatusRoutes } from "./wiki-decision-triage-status.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
 import { isReadonlyWikiRoot, isWikiReadonly, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { linkingBuckets, movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
@@ -2055,6 +2056,8 @@ export function registerWikiToolRoutes(
     readonlyRefusal,
     egressRefusal: (c, entry) => egressRefusal(c, entry, false),
   });
+  // The triage's status line and /models card: the nightly log on this machine.
+  registerWikiDecisionTriageStatusRoutes(app, () => realTriageStatusDeps(config));
   // The find palette's Everywhere section: every registered wiki through three
   // legs. Same group: it reads every wiki's index on this machine.
   registerWikiFindEverywhereRoute(app, config);

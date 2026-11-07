@@ -207,8 +207,9 @@ const WIKI_LENS_FLAGS = ["WIKI_DEFAULT_LENS"];
 const WIKI_STALE_FLAGS = ["WIKI_STALE_CONFIRM_WIKIS"];
 
 /** The decision triage's switch and repo roots (`src/wiki/decision-triage/`): a
- *  developer's value would start a nightly model pass in every spawned server. */
-const DECISION_TRIAGE_FLAGS = ["DECISION_TRIAGE_REPO_ROOTS"];
+ *  developer's value would start a nightly model pass in every spawned server.
+ *  `DECISION_TRIAGE_DIR` moves the log and state a spec seeds or a run appends to. */
+const DECISION_TRIAGE_FLAGS = ["DECISION_TRIAGE_REPO_ROOTS", "DECISION_TRIAGE_DIR"];
 
 /** The work map's nightly organize (`src/wiki/work-map/`): `WORK_MAP_WIKIS`
  *  would start a background Opus loop in every spawned server on that machine
