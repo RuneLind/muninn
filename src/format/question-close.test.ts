@@ -183,4 +183,23 @@ describe("closeCardEdit", () => {
     expect(closeCardEdit(text, "O1", { kind: "decision", decision: "D1" }, TODAY)).toMatchObject({ ok: false, code: "unplaceable" });
     expect(closeCardEdit(text, "O1", answer(), TODAY)).toMatchObject({ ok: false, code: "unplaceable" });
   });
+
+  test("fences by the parser's rule: an inline-backtick line before a real code block stays prose, and a fenced example log is skipped", () => {
+    const inline = page(q("O1"), "<DecisionLog>\n\n- **O1** — x\n  ```a``` one\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n\n```\ncode\n```\n");
+    expect(ok(closeCardEdit(inline, "O1", { kind: "decision", decision: "D1" }, TODAY)).content).toContain("  ```a``` one. Closed 2026-11-07 (D1).\n");
+    const example = page(q("O1"), "```\n<DecisionLog>\n- **O1** — example\n</DecisionLog>\n```\n", "<DecisionLog>\n\n- **O1** — x\n- **D1** — y. Rune Lind, 01.11.2026.\n\n</DecisionLog>\n");
+    expect(ok(closeCardEdit(example, "O1", { kind: "decision", decision: "D1" }, TODAY)).content).toContain("- **O1** — x. Closed 2026-11-07 (D1).\n");
+  });
+
+  test("«no log» is the parser's answer: a log the parser sees but the line scan cannot place is unplaceable, not no-log", () => {
+    // The parser reads an empty DecisionLog here; the line scan needs its tags on lines of their own.
+    const text = page(q("O1"), "<DecisionLog></DecisionLog>\n");
+    expect(closeCardEdit(text, "O1", answer(), TODAY)).toMatchObject({ ok: false, code: "unplaceable" });
+  });
+
+  test("the date goes on the decision's line, one line and escaped", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — Which\n\n</DecisionLog>\n");
+    const r = ok(closeCardEdit(text, "O1", answer({ date: "06.11.2026\n- **D7** — ghost" }), TODAY));
+    expect(r.content).not.toMatch(/^- \*\*D7\*\*/m);
+  });
 });
