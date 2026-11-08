@@ -114,7 +114,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-08, render-richer PR 2 (reader shapes: number columns, verdict cells, the
 // label grid, in the bundled formatWebHtml): 814,851 bytes (276,668 gzipped); its
 // fix round 1 (id and date headers, traffic lights, the nowrap number span): 816,448 (277,205).
-const WIKI_CLIENT_MAX_BYTES = 816_800;
+// 2026-11-08, render-richer PR 3 (before → after chips in the bundled
+// formatWebHtml, the section bar controller): 823,635 bytes (279,617 gzipped).
+const WIKI_CLIENT_MAX_BYTES = 824_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -144,7 +146,9 @@ test("wikiClientScript stays under its size pin", async () => {
 // the series editor to `wiki-series-controller.ts`): 3,458 lines; 51 lets.
 // 2026-11-08, follow-up (the work-map cache to `wiki-work-map-cache.ts`, four
 // `RailDeps` relays gone): 3,450 lines; 51 lets.
-const WIKI_BROWSER_MAX_LINES = 3_450;
+// 2026-11-08, render-richer PR 3: the section bar's import and its one mount
+// call after each page render (the bar lives in `wiki-section-bar.ts`): 3,452.
+const WIKI_BROWSER_MAX_LINES = 3_452;
 const WIKI_BROWSER_MAX_MODULE_LETS = 51;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {

@@ -138,6 +138,15 @@ export function componentBlockCss(scope: string): string {
     ${scope} .lg-v > :first-child { margin-top: 0; }
     ${scope} .lg-v > p, ${scope} .lg-v > pre { margin: 0.3rem 0 0; }
     @media (max-width: 720px) { ${scope} ul.label-grid > li { grid-template-columns: minmax(0, 1fr); } }
+    /* Before → after chips: no good/bad colour, the reader cannot know which
+       way is better. Pure styling spans, no hidden text. */
+    ${scope} .ba-chip {
+      white-space: nowrap; font-variant-numeric: tabular-nums; padding: 0 0.3em; border-radius: 4px;
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+    }
+    ${scope} .ba-old { color: var(--text-muted); }
+    ${scope} .ba-arr { color: var(--accent); padding: 0 0.15em; }
+    ${scope} .ba-new { font-weight: 650; }
     ${scope} .fileref { color: var(--accent-light); font-family: var(--mono, ui-monospace, monospace); }
     ${scope} .fileref code { background: transparent; box-shadow: none; padding: 0; color: inherit; }
     ${scope} .figure { margin: 1.4rem 0; }

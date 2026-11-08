@@ -146,6 +146,7 @@ import {
 } from "./wiki-lens.ts";
 import { abortAgentRuns, snapshotAgentPane, type AgentPaneSnapshot } from "./wiki-agent-pane.ts";
 import { enhanceNewSince } from "./wiki-new-since.ts";
+import { mountSectionBar } from "./wiki-section-bar.ts";
 import { resolveLens, type Lens } from "../../../format/reader-lens.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
@@ -1780,6 +1781,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
           changedMs: changedMs > 0 ? changedMs : null,
         });
       }
+      mountSectionBar(articleRoot); // after the lens and 🧭 (titles skip them), before the hash reveal
       const renderedEl = articleRoot.querySelector(".wiki-article");
       renderedArticle = currentRelPath && renderedEl ? { relPath: currentRelPath, el: renderedEl } : null;
       // The pill and marks from the report already held for this page (an

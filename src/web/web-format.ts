@@ -29,7 +29,7 @@ import type { Block, ChecklistList, ChecklistRow, ComponentName, FactVerdict, Li
 import { withoutComponentTags } from "../format/component-observer.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
-import { htmlText, labelGridItems, numberCellHtml, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
+import { beforeAfterChipsHtml, htmlText, labelGridItems, numberCellHtml, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
 import { questionCardAnchor, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
@@ -2239,7 +2239,9 @@ const webRenderer: BlockRenderer = {
   hr: () => "<hr>",
   heading(block) {
     const tag = `h${Math.min(block.level + 1, 6)}`;
-    return `<${tag}>${renderInline(block.content)}</${tag}>`;
+    // No before → after chip in a heading: its weight already bolds the new
+    // value, and the reader's section bar and walkthrough read its text.
+    return `<${tag}>${renderInlineWith(block.content, false)}</${tag}>`;
   },
   blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
   ul: (items, nest) => {
@@ -2644,6 +2646,12 @@ const webRenderer: BlockRenderer = {
 };
 
 function renderInline(text: string): string {
+  return renderInlineWith(text, true);
+}
+
+/** `renderInline`; `chips` false keeps the before → after chips out (a
+ *  heading). They are drawn only where the reader shapes apply. */
+function renderInlineWith(text: string, chips: boolean): string {
   const ph = new Placeholders();
 
   // Inline code FIRST — protect its content from further markdown processing.
@@ -2712,6 +2720,10 @@ function renderInline(text: string): string {
   result = result.replace(/(?<!\w)\*([^*]+?)\*(?!\w)/g, "<em>$1</em>");
   result = result.replace(/(?<!\w)_([^_]+?)_(?!\w)/g, "<em>$1</em>");
   result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
+
+  // Before → after chips, on the text between tags and parked sentinels, so
+  // code, hrefs and inline components never take one.
+  if (chips && readerShapesOn()) result = beforeAfterChipsHtml(result);
 
   return ph.restore(result);
 }

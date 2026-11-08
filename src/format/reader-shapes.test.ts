@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isNumberCell, labelGridItems, labelItem, numberColumns, verdictCell } from "./reader-shapes.ts";
+import { beforeAfterChipsHtml, beforeAfterParts, isNumberCell, labelGridItems, labelItem, numberColumns, verdictCell } from "./reader-shapes.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
 
@@ -399,5 +399,111 @@ describe("reader shapes reach the article render only", () => {
     expect(article).toContain('<ul class="label-grid">');
     expect(article).toContain('<td class="num">1,662,435</td>');
     expect(article).toContain('class="v-good"');
+  });
+});
+
+/** Each chip's visible text, in order. */
+function chipTexts(html: string): string[] {
+  const re = /<span class="ba-chip">((?:(?!<span class="ba-chip">)[\s\S])*?<span class="ba-new">[^<]*<\/span>)<\/span>/g;
+  return [...html.matchAll(re)].map((m) => m[1]!.replace(/<[^>]*>/g, ""));
+}
+
+describe("before → after chips: the matcher", () => {
+  // [text as escaped HTML, the chips' text]
+  const cases: [string, string[]][] = [
+    ["CI 10.5 → 6.4 min", ["10.5 → 6.4 min"]],
+    ["10.5 min → 6.4 min", ["10.5 min → 6.4 min"]],
+    ["ratchet 113→57", ["113→57"]],
+    ["1,066 → 992 files", ["1,066 → 992 files"]],
+    ["ranges 3–5 → 6–7", ["3–5 → 6–7"]],
+    ["40% → 55%", ["40% → 55%"]],
+    ["~290 → 300", ["~290 → 300"]],
+    ["≈ 12 → 9", ["≈ 12 → 9"]],
+    ["-3 → 5", ["-3 → 5"]],
+    ["−2 480 → 3", ["−2 480 → 3"]],
+    ["12 345 → 12 400 rows", ["12 345 → 12 400 rows"]],
+    ["$40 → $55", ["$40 → $55"]],
+    ["5 PRs → 3 PRs", ["5 PRs → 3 PRs"]],
+    ["3x → 5x", ["3x → 5x"]],
+    ["+3 pp → +5 pp", ["+3 pp → +5 pp"]],
+    ["2 -&gt; 4", ["2 -&gt; 4"]],
+    ["a chain 1 → 2 → 3 here", ["1 → 2 → 3"]],
+    ["costs 5 → 6.", ["5 → 6"]],
+    ["5 → 6 x", ["5 → 6"]],
+    ["went 1.5 → 2.5, then 7 → 8", ["1.5 → 2.5", "7 → 8"]],
+    // Not a before → after number pair.
+    ["v1.2 → v1.3", []],
+    ["1.2.3 → 1.3.0", []],
+    ["08.11 → 09.11", []],
+    ["15.09 → 16.09", []],
+    ["2026-11-08 → 2026-11-09", []],
+    ["10:30 → 11:00", []],
+    ["#810 → #827", []],
+    ["x-3 → 4", []],
+    ["PR → 5", []],
+    ["5 → done", []],
+    ["5a → 5b", []],
+    ["run 1356583 → 1356590", []],
+    ["006→050", []],
+    ["10-29 → 10-31", []],
+    ["2025-09→2026-07", []],
+    ["on 08-24 → 1 s", []],
+    ["101–160 762.2 → 795.5", ["762.2 → 795.5"]],
+    ["10–12 → 14–16", ["10–12 → 14–16"]],
+    ["10 → 20 ", ["10 → 20"]],
+  ];
+  for (const [text, want] of cases) {
+    test(JSON.stringify(text), () => expect(chipTexts(beforeAfterChipsHtml(text))).toEqual(want));
+  }
+
+  test("the spans hold the source text and nothing else", () => {
+    const html = beforeAfterChipsHtml("CI 10.5 → 6.4 min today");
+    expect(html).toBe(
+      'CI <span class="ba-chip"><span class="ba-old">10.5</span> <span class="ba-arr">→</span> <span class="ba-new">6.4 min</span></span> today',
+    );
+    expect(html.replace(/<[^>]*>/g, "")).toBe("CI 10.5 → 6.4 min today");
+  });
+  test("a chain: every value before the last soft, the last bold", () => {
+    expect(beforeAfterChipsHtml("1 → 2 → 3")).toBe(
+      '<span class="ba-chip"><span class="ba-old">1</span> <span class="ba-arr">→</span> <span class="ba-old">2</span> <span class="ba-arr">→</span> <span class="ba-new">3</span></span>',
+    );
+  });
+  test("never inside a tag or across a placeholder", () => {
+    expect(beforeAfterChipsHtml('<a href="https://x/1 → 2">see</a>')).toBe('<a href="https://x/1 → 2">see</a>');
+    expect(beforeAfterChipsHtml("\x00INLINE0\x00 → 5")).toBe("\x00INLINE0\x00 → 5");
+    expect(beforeAfterParts("1 → 2")).toEqual({ sides: ["1", "2"], arrows: [" → "] });
+  });
+});
+
+describe("before → after chips: where the renderer draws them", () => {
+  test("chat renders byte-identical to the plain renderer", () => {
+    expect(formatWebHtml("CI went 10.5 → 6.4 min.")).toBe("CI went 10.5 → 6.4 min.");
+    expect(formatWebHtml("CI went 10.5 → 6.4 min.", { reader: true })).not.toContain("ba-chip");
+  });
+  test("prose, a list item, a table cell, a grid value and a link's text take one", () => {
+    expect(chipTexts(formatWebHtml("CI went 10.5 → 6.4 min.", SHAPES))).toEqual(["10.5 → 6.4 min"]);
+    expect(chipTexts(formatWebHtml("- one 2 → 3\n- two\n", SHAPES))).toEqual(["2 → 3"]);
+    const table = formatWebHtml("| Step | CI |\n|---|---|\n| a | 10.5 → 6.4 min |\n| b | 7 |\n", SHAPES);
+    // A cell holding a pair is no number cell: the column stays text.
+    expect(table).toContain('<td><span class="ba-chip"><span class="ba-old">10.5</span>');
+    expect(table).not.toContain('class="num"');
+    expect(chipTexts(formatWebHtml("- **A:** 1 → 2\n- **B:** b\n- **C:** c\n", SHAPES))).toEqual(["1 → 2"]);
+    const link = formatWebHtml("[ratchet 113 → 57](https://example.com/a-1-2)", SHAPES);
+    expect(link).toContain('href="https://example.com/a-1-2"');
+    expect(chipTexts(link)).toEqual(["113 → 57"]);
+  });
+  test("a heading, inline code and a fence take none", () => {
+    expect(formatWebHtml("## CI 10 → 6 min\n", SHAPES)).not.toContain("ba-chip");
+    expect(formatWebHtml("run `10 → 6` now", SHAPES)).not.toContain("ba-chip");
+    expect(formatWebHtml("```\n10 → 6\n```\n", SHAPES)).not.toContain("ba-chip");
+  });
+  test("inside a Fold yes, inside a Callout or a Question no (the shapes' SHAPE_TRANSPARENT rule)", () => {
+    expect(chipTexts(formatWebHtml('<Fold title="S">\n\nCI 10 → 6 min\n\n</Fold>\n', SHAPES))).toEqual(["10 → 6 min"]);
+    expect(formatWebHtml('<Callout tone="info">\n\nCI 10 → 6 min\n\n</Callout>\n', SHAPES)).not.toContain("ba-chip");
+    expect(formatWebHtml('<Question id="O1">\n\nCI 10 → 6 min?\n\n</Question>\n', SHAPES)).not.toContain("ba-chip");
+  });
+  test("renderWikiHtml draws them only with readerShapes", () => {
+    expect(renderWikiHtml("CI 10 → 6 min\n", () => undefined)).not.toContain("ba-chip");
+    expect(renderWikiHtml("CI 10 → 6 min\n", () => undefined, { readerShapes: true })).toContain("ba-chip");
   });
 });

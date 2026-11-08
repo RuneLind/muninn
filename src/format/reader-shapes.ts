@@ -284,3 +284,118 @@ export function htmlText(html: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&amp;/g, "&");
 }
+
+// ── Before → after chips ────────────────────────────────────────────────────
+
+/** One number as a chip side writes it: a digit, then digits and `,`/`.`
+ *  ending in a digit (`1,066`, `10.5`; `6.` at a sentence end stops at `6`).
+ *  `parseCellNumberParts` then decides what reads as a number (`1.2.3` does
+ *  not). */
+const CHIP_PLAIN = String.raw`\d(?:[\d,.]*\d)?`;
+/** Groups of three after a space (`12 345`, `−2 480`). */
+const CHIP_GROUPED = String.raw`\d{1,3}(?:[ \u00A0\u202F]\d{3})+(?:[.,]\d+)?`;
+/** A range of two plain numbers (`3–5`, `3-5`), a grouped number or a plain
+ *  one. A range end is never grouped: `101–160 762.2` is a range, then a
+ *  number. */
+const CHIP_NUM = `(?:${CHIP_PLAIN}[–-]${CHIP_PLAIN}|${CHIP_GROUPED}|${CHIP_PLAIN})`;
+/** One side: an optional `~`/`≈`, sign and currency sign, the number, then an
+ *  optional unit token (glued, or after one space) that {@link chipUnit} vets. */
+const CHIP_SIDE = String.raw`(?:[~≈] ?)?[-+−]?[$€£]?${CHIP_NUM}(?: ?[\p{L}%×]+)?`;
+/** The arrow as escaped text holds it: `→`, or `->` escaped to `-&gt;`, with
+ *  at most one space or no-break space on each side. */
+const CHIP_ARROW = String.raw`[ \u00A0]?(?:→|-&gt;)[ \u00A0]?`;
+/** A side, then one or more arrow + side (`a → b → c` is one chip). Not after
+ *  a letter, a digit or `#.,:/_-–` (`v1.2`, `#810`, `2026-11`, `x-3`); not
+ *  before a letter or digit, nor before `.,:/-–` and a digit (`1.2.3`,
+ *  `10:30`, `2026-11-08`). */
+const CHIP_RE = new RegExp(
+  String.raw`(?<![\p{L}\p{N}#.,:/_\-–])${CHIP_SIDE}(?:${CHIP_ARROW}${CHIP_SIDE})+(?![\p{L}\p{N}])(?![.,:/\-–]\d)`,
+  "gu",
+);
+const CHIP_ARROW_SPLIT = new RegExp(`(${CHIP_ARROW})`, "u");
+/** One side split: lead marks, the number (a range: both ends), the space
+ *  before the unit, and the unit token. */
+const CHIP_SIDE_PARTS = new RegExp(
+  String.raw`^((?:[~≈] ?)?[-+−]?[$€£]?)(?:(${CHIP_PLAIN})[–-](${CHIP_PLAIN})|(${CHIP_GROUPED}|${CHIP_PLAIN}))( ?)([\p{L}%×]*)$`,
+  "u",
+);
+/** Units taken only glued: a lone letter after a space is a word (`5 → 6 x`). */
+const CHIP_GLUED_ONLY: ReadonlySet<string> = new Set(["x", "t", "d", "k", "K", "M"]);
+
+/** True when `unit`, written after a number (after a space when `spaced`),
+ *  is a unit: {@link NUM_UNITS}, a count word, or `pp`. */
+function chipUnit(unit: string, spaced: boolean): boolean {
+  if (spaced && CHIP_GLUED_ONLY.has(unit)) return false;
+  return NUM_UNITS.has(unit) || unit === "pp" || NUM_WORDS.has(unit.toLowerCase());
+}
+
+/** A hyphen range that is a date: month and day (`10-29`) or year and month
+ *  (`2025-09`). An en dash range (`10–12`) stays a range. */
+const DATE_RANGE_RE = /^(?:\d{2}|(?:19|20)\d{2})-\d{2}$/;
+
+type ChipSide = { bare: boolean; dayMonth: boolean };
+
+/** One side as the chip reads it: null unless a number (or a range) with an
+ *  optional unit, and not a padded id or date (`006`, `08.11`, `08-24`), a
+ *  hyphen date range ({@link DATE_RANGE_RE}) or a 6+-digit id; `bare` with no
+ *  unit; `dayMonth` when the number reads as a day and month (`15.09`). */
+function chipSide(side: string): ChipSide | null {
+  const m = CHIP_SIDE_PARTS.exec(side);
+  if (!m) return null;
+  const [, , lo, hi, one, space, unit] = m;
+  const ends = one !== undefined ? [one] : [lo!, hi!];
+  if (ends.some((e) => parseCellNumberParts(e) === null || /^0\d/.test(e) || LONG_ID_RE.test(e))) return null;
+  if (one === undefined && side.includes(`${lo}-${hi}`) && DATE_RANGE_RE.test(`${lo}-${hi}`)) return null;
+  if (unit ? !chipUnit(unit, space === " ") : space) return null;
+  return { bare: !unit, dayMonth: one !== undefined && DAY_MONTH_RE.test(one) };
+}
+
+/** A candidate chain's sides and the arrows between them; null when a side
+ *  is no number ({@link chipSide}) or every side is a bare day and month
+ *  (`15.09 → 16.09`). */
+export function beforeAfterParts(text: string): { sides: string[]; arrows: string[] } | null {
+  const parts = text.split(CHIP_ARROW_SPLIT);
+  const sides = parts.filter((_, k) => k % 2 === 0);
+  const arrows = parts.filter((_, k) => k % 2 === 1);
+  const read = sides.map(chipSide);
+  if (read.some((r) => r === null)) return null;
+  if ((read as ChipSide[]).every((r) => r.bare && r.dayMonth)) return null;
+  return { sides, arrows };
+}
+
+/** The before → after numbers in one run of escaped text as chips: every
+ *  value before the last soft (`ba-old`), each arrow in the accent (`ba-arr`),
+ *  the last value bold (`ba-new`). The spans hold the source characters and
+ *  nothing else (an arrow's spaces sit between them), so what shows and what
+ *  a selection copies is the source text. */
+function chipText(text: string): string {
+  return text.replace(CHIP_RE, (whole) => {
+    let p = beforeAfterParts(whole);
+    let tail = "";
+    // A word after the last value that is no unit (`1 → 2 b`, `5 → 6 x`) is
+    // the sentence's, not the chip's: read the chain without it.
+    const spacedWord = p ? null : / [\p{L}%×]+$/u.exec(whole);
+    if (spacedWord) {
+      tail = spacedWord[0];
+      p = beforeAfterParts(whole.slice(0, -tail.length));
+    }
+    if (!p) return whole;
+    const spans = p.sides.map((side, k) => {
+      if (k === p.sides.length - 1) return `<span class="ba-new">${side}</span>`;
+      const a = /^(\s?)(\S+)(\s?)$/u.exec(p.arrows[k]!)!;
+      return `<span class="ba-old">${side}</span>${a[1]}<span class="ba-arr">${a[2]}</span>${a[3]}`;
+    });
+    return `<span class="ba-chip">${spans.join("")}</span>${tail}`;
+  });
+}
+
+/** Rendered inline HTML with the before → after chips drawn in its text:
+ *  never inside a tag (an `href`, an attribute) and never across a parked
+ *  placeholder (`\x00…\x00`: inline code, an inline component). */
+export function beforeAfterChipsHtml(html: string): string {
+  if (!html.includes("→") && !html.includes("-&gt;")) return html;
+  return html
+    .split(/(<[^>]*>|\x00[^\x00]*\x00)/)
+    .map((seg, k) => (k % 2 === 1 || (!seg.includes("→") && !seg.includes("-&gt;")) ? seg : chipText(seg)))
+    .join("");
+}
