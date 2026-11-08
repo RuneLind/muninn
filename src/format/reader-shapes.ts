@@ -95,7 +95,15 @@ const ID_LAST_WORDS: ReadonlySet<string> = new Set([
  *  quantity whatever its last word names. */
 const QUALIFIER_WORDS: ReadonlySet<string> = new Set(["per", "each", "pr", "hver", "with", "without", "med", "uten"]);
 /** Count words: their column is a count even when every value falls in 1900–2099. */
-const COUNT_WORDS: ReadonlySet<string> = new Set(["antall", "count", "av", "of", "n", "total", "totalt", "sum", "number"]);
+const COUNT_WORDS: ReadonlySet<string> = new Set(["antall", "count", "n", "total", "totalt", "sum", "number"]);
+/** `of`/`av` count only as the whole header (a funnel's `Av`, a gate's `Of`);
+ *  beside other words they join two nouns (`Year of release`, `År av vedtak`,
+ *  `Number of the year`), and the header counts nothing. */
+const JOIN_WORDS: ReadonlySet<string> = new Set(["av", "of"]);
+function countsHeader(words: readonly string[]): boolean {
+  if (words.length === 1 && JOIN_WORDS.has(words[0]!)) return true;
+  return !words.some((w) => JOIN_WORDS.has(w)) && words.some((w) => COUNT_WORDS.has(w));
+}
 
 /** True when a header names an id, a date or a position (never a number
  *  column): the whole header from {@link ID_HEADERS}, or its last word from
@@ -127,7 +135,7 @@ export function numberColumns(headers: readonly string[], rows: readonly (readon
     if (isIdHeader(header)) continue;
     const vals = rows.map((r) => (r[c] ?? "").trim()).filter((v) => v !== "" && !DASH_RE.test(v));
     if (!vals.length || !vals.every(isNumberCell)) continue;
-    const counts = headerWords(header).some((w) => COUNT_WORDS.has(w));
+    const counts = countsHeader(headerWords(header));
     if (!counts && vals.every((v) => YEAR_RE.test(numberCore(v)))) continue;
     out.add(c);
   }
@@ -135,11 +143,12 @@ export function numberColumns(headers: readonly string[], rows: readonly (readon
 }
 
 /** A number cell's rendered HTML with the number itself, when it holds a
- *  space (`12 345`, `3.2 s`), in a `num-nw` span the CSS keeps on one line;
+ *  space (`12 345`, `3.2 s`), in a `num-nw` span the CSS keeps on one line,
+ *  inside any leading `<strong>`/`<em>`/`<a>`/`<code>` (a bold totals row);
  *  the note after it and the header still wrap at phone width. Any other
- *  cell (no space in the number, or a tag first) unchanged. */
+ *  cell (no space in the number) unchanged. */
 export function numberCellHtml(html: string): string {
-  const m = /^(\s*)([^<(]*?[^\s<(])(?=\s*(?:\(|<|$))/u.exec(html);
+  const m = /^((?:\s|<(?:strong|em|a|code)\b[^>]*>)*)([^<(]*?[^\s<(])(?=\s*(?:\(|<|$))/u.exec(html);
   if (!m || !/\s/u.test(m[2]!)) return html;
   return `${m[1]}<span class="num-nw">${m[2]}</span>${html.slice(m[0].length)}`;
 }
@@ -179,10 +188,11 @@ const TRAFFIC_LIGHTS: ReadonlySet<string> = new Set(["🔴", "🟡", "🟢"]);
 
 /** A rendered cell that opens with a verdict glyph: its tone, whether the
  *  glyph is a traffic light (`light`), and the cell's HTML. A check, cross or
- *  warning glyph goes into a visually hidden `v-glyph` span (screen readers
- *  and copy keep it; the CSS draws the round icon), and the space after it
- *  stays outside the span, in flow, so a selection reads `✅ text` as the
- *  source does. A traffic light's cell is returned unchanged: its glyph stays
+ *  warning glyph goes into a `v-glyph` span hidden in flow with `font-size: 0`
+ *  (screen readers and copy keep it; the CSS draws the round icon), which
+ *  keeps a selection reading `✅ text` as the source does. The space after it
+ *  sits outside the span only so the gap after the icon stays visible. A
+ *  traffic light's cell is returned unchanged: its glyph stays
  *  visible and draws no icon. Null when the glyph is not first. */
 export function verdictCell(html: string): { tone: CellVerdict; light: boolean; html: string } | null {
   const m = VERDICT_LEAD_RE.exec(html);
@@ -207,11 +217,14 @@ export interface LabelItem {
 }
 
 /** D3: an item that opens `**Label:**` / `**Label.**`, or `**Label**` then
- *  `:`, `—` or `–` with white space after it (the prototype's rule, so
+ *  `:`, `—` or `–` with white space after it (the prototype's separator, so
  *  `**2024**–25` is no label), with text after it. A separator after a
  *  punctuated label (`**Label.**: x`) is still the separator, never the text;
  *  a mark with no space after it, or one that would leave no text
- *  (`**Owner:** —`, `**Port:** :3010`), is the text. Null otherwise. */
+ *  (`**Owner:** —`, `**Port:** :3010`), is the text. Deliberately unlike the
+ *  prototype, which strips leading `:.—–` before its has-text check and so
+ *  leaves a list with `**Owner:** —` as bullets: here that item is a grid
+ *  row with value `—`. Null otherwise. */
 export function labelItem(item: string): LabelItem | null {
   const m = /^\*\*(?!\*)([^\n]+?)\*\*(?!\*)([\s\S]*)$/u.exec(item);
   if (!m) return null;
@@ -228,10 +241,11 @@ export function labelItem(item: string): LabelItem | null {
     : { label: inner, punct: "", sep, rest };
 }
 
-/** The longest label a grid takes, in visible characters with its `:`/`.`:
- *  the prototype's cap (`leadable`, `proto.js`). Over it a label wraps to
- *  three or more lines in the 26% column, and the list is a finding list,
- *  not a key/value one. */
+/** The longest label a grid takes, in code points of its visible text with
+ *  its `:`/`.` (the prototype's cap, `leadable` in `proto.js`, which counts
+ *  `textContent.length`). Longer reads as a finding list, not a key/value
+ *  one. How many lines a label takes in the 26% column depends on the width:
+ *  a 66-character label took two at 1440 px and three at 900 px. */
 export const LABEL_MAX_CHARS = 70;
 
 /** The items of a list the reader draws as a label grid: three or more (the

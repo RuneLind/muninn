@@ -69,6 +69,11 @@ const PAGE = [
   "| Bygg | 790 (just lists, no board) | 123 456 |",
   "| Test | 8 | 7 |",
   "",
+  "| Sak | Hva skjedde i steget, med alle detaljene en leser trenger for å forstå utfallet | Sum |",
+  "|---|---|---|",
+  "| L9 | Bygget gikk gjennom alle stegene og la igjen en rapport med tallene for hver modul | **10 714** |",
+  "| L10 | Kort | **~3.25 dager** |",
+  "",
   "| Sak | Utfall |",
   "|---|---|",
   "| L1 | ✅ Fixed in [PR #3334](https://github.com/navikt/melosys-api/pull/3334), see [[plans/other]] and `fixFn()` |",
@@ -213,7 +218,7 @@ test.describe("Wiki reader shapes: selection text and ref nouns", () => {
     const m = await table.evaluate((t) => {
       const article = t.closest(".wiki-article") as HTMLElement;
       const th = t.querySelector("th.num") as HTMLElement;
-      const nws = Array.from(t.querySelectorAll("td.num > .num-nw"));
+      const nws = Array.from(t.querySelectorAll("td.num .num-nw"));
       const lh = parseFloat(getComputedStyle(th).lineHeight) || parseFloat(getComputedStyle(th).fontSize) * 1.4;
       return {
         table: t.getBoundingClientRect().width,
@@ -226,6 +231,11 @@ test.describe("Wiki reader shapes: selection text and ref nouns", () => {
     expect(m.table).toBeLessThanOrEqual(m.article + 1);
     expect(m.thLines).toBeGreaterThan(1);
     expect(m.numbers).toEqual(["123 456:1"]);
+    // A bold total beside a prose column, its column squeezed: the bold box on one line.
+    const bold = await page.locator(".wiki-article table").filter({ hasText: "Hva skjedde" }).evaluate((t) =>
+      Array.from(t.querySelectorAll("td.num strong")).map((b) => `${b.textContent}:${b.getClientRects().length}`),
+    );
+    expect(bold).toEqual(["10 714:1", "~3.25 dager:1"]);
   });
 
   // Fix round 1 batch 3: a link "PR #3334" in a v-good cell measured 4.19:1

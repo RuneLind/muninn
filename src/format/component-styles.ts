@@ -96,7 +96,7 @@ export function componentBlockCss(scope: string): string {
     /* The header and a cell's note wrap (nowrap on both widened the widest
        table on 55 of 234 pages at 390 px); only the number stays whole. */
     ${scope} th.num, ${scope} td.num { text-align: right; font-variant-numeric: tabular-nums; }
-    ${scope} td.num > .num-nw { white-space: nowrap; }
+    ${scope} td.num .num-nw { white-space: nowrap; }
     ${scope} td.v-good { background: color-mix(in srgb, var(--status-success) 11%, transparent); }
     ${scope} td.v-warn { background: color-mix(in srgb, var(--status-warning) 13%, transparent); }
     ${scope} td.v-bad { background: color-mix(in srgb, var(--status-error) 11%, transparent); }

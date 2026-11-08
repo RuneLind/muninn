@@ -263,9 +263,10 @@ export function formatWebHtml(
      *  since the chat sanitizer drops a class it does not allow. */
     reader?: boolean;
     /** With `reader`: the render lands in the reader's article
-     *  (`.wiki-article`, the only scope that styles them), so a plain table
-     *  and list take the reader shapes (`reader-shapes.ts`). `renderWikiHtml`
-     *  passes it for `GET /api/wiki/page` alone. */
+     *  (`.wiki-article`), so a plain table and list take the reader shapes
+     *  (`reader-shapes.ts`). `componentBlockCss` also styles them under
+     *  `.web-content` and `.answer-body`, which never receive the classes.
+     *  `renderWikiHtml` passes it for `GET /api/wiki/page` alone. */
     readerShapes?: boolean;
     /** The wiki's `.wiki-reader.json` `language`: the `<More>` label and the
      *  `<StatusRows>` state phrases. Absent ⇒ the question option's, else `en`. */
@@ -2186,8 +2187,9 @@ function readerTableHtml(headers: string[], rows: string[][]): string {
 /** A top-level list whose every item opens with a bold label (D3), on the
  *  reader: the label in one column, the text and anything under the item in
  *  the other. The label's `:`/`.` and the `:`/`—` after the bold stay in the
- *  text, hidden (`lg-c`), and the spaces around them stay outside it in flow,
- *  so a selection reads `Label — text` as the source does. `lg-v` is a span
+ *  text, hidden in flow with `font-size: 0` (`lg-c`), which keeps a
+ *  selection reading `Label — text` as the source does; the spaces around
+ *  them sit outside it only so the visible gap stays. `lg-v` is a span
  *  (a grid item, so a block box) because the ref links read the noun before
  *  an id back through inline elements only (`precedingText`). */
 function labelGridHtml(items: LabelItem[], nest: { children: (RenderedChild[] | undefined)[] }): string {

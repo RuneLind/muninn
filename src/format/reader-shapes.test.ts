@@ -108,6 +108,11 @@ describe("numberColumns: headers and values that are not quantities (PR #832 fix
     ["Antall", ["2070", "2060"], true],
     ["Av", ["2070", "2060"], true],
     ["Of", ["1999", "2001"], true],
+    ["Total", ["2070", "2060"], true],
+    // `of`/`av` beside other words join two nouns: a year column stays text
+    ["Year of release", ["2024", "2025"], false],
+    ["År av vedtak", ["2024", "2025"], false],
+    ["Number of the year", ["2024", "2025"], false],
     // quantities whose header mentions an id-ish word, kept
     ["Per PR", ["$35.71", "$101.72"], true],
     ["Cost per run", ["0.42", "0.13"], true],
@@ -279,6 +284,17 @@ describe("formatWebHtml reader shapes", () => {
     expect(html).toContain('<td class="num"><span class="num-nw">3.2 s</span> (cold)</td>');
     expect(html).toContain('<td class="num">790 (just lists)</td>');
     expect(html).toContain('<td class="num">8</td>');
+  });
+  test("a bold, linked or code number holding a space keeps the number whole inside the tag", () => {
+    const html = formatWebHtml(
+      "| Run | Rows | Size |\n|---|---|---|\n| a | **2 921** | *87 MB* (peak) |\n| b | [10 714](https://example.com/x) | `98.5 MB` |\n| c | **−2 480** | 1 |\n",
+      SHAPES,
+    );
+    expect(html).toContain('<td class="num"><strong><span class="num-nw">2 921</span></strong></td>');
+    expect(html).toContain('<td class="num"><em><span class="num-nw">87 MB</span></em> (peak)</td>');
+    expect(html).toMatch(/<td class="num"><a [^>]*><span class="num-nw">10 714<\/span><\/a><\/td>/);
+    expect(html).toContain('<span class="num-nw">98.5 MB</span></code></td>');
+    expect(html).toContain('<td class="num"><strong><span class="num-nw">−2 480</span></strong></td>');
   });
   test("verdict cells tinted, mid-cell glyph not", () => {
     expect(reader).toContain('<td class="v-good"><span class="v-glyph">✅</span> good</td>');
