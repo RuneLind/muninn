@@ -96,6 +96,8 @@ const stateOf = async (id: string) => parseQuestionPage(parseBlocks(stripFrontma
 beforeAll(async () => {
   root = await testTempDir(path.join(tmpdir(), "muninn-close-"));
   [{ now: dbStart }] = (await getDb()`SELECT now()`) as unknown as [{ now: Date }];
+  // backdate's guard tells shifted rows from new ones only while the shift is positive.
+  if (dbStart.getTime() <= NOW) throw new Error(`database clock ${dbStart.toISOString()} is not after NOW; backdate would re-shift rows`);
   git("init", "-q", "-b", "main");
   // The route's commit (`commitWikiChange`) spawns git with no author env: a CI runner has no identity.
   git("config", "user.name", "t");
@@ -208,6 +210,14 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ stale: true });
     expect(await Bun.file(path.join(root, REL)).text()).toBe(edited);
+  });
+
+  test("backdate shifts each row once: earlier rows stay on NOW's day after later inserts", async () => {
+    for (const name of ["First", "Second", "Third"]) {
+      await insertAnswer({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name }, choice: "A", body: "", questionHash: "h" });
+    }
+    const rows = (await getDb()`SELECT created_at FROM wiki_answers`) as unknown as { created_at: Date }[];
+    expect(rows.map((r) => todayOslo(r.created_at.getTime()))).toEqual([todayOslo(NOW), todayOslo(NOW), todayOslo(NOW)]);
   });
 
   test("an answer that changed since the preview is 409 and writes nothing", async () => {
