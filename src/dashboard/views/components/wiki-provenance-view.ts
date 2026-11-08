@@ -12,9 +12,9 @@
  * sentence that disagreed with the rows it opens into would be two renderers
  * disagreeing about one object.
  *
- * Pure on purpose. `wiki-browser.ts` is a 10,000-line browser module whose
- * code needs a DOM (`wiki-shell-boot.test.ts` boots it in happy-dom), so
- * anything shaped there is costly to prove. Everything here is a string
+ * Pure on purpose. The strip's client, `wiki-article-controller.ts`, is DOM
+ * code reached only through the booted shell (`wiki-shell-boot.test.ts` boots
+ * it in happy-dom), so anything shaped there is costly to prove. Everything here is a string
  * builder over a plain payload, which is how the copy family below —
  * eight ledger states that must not collapse into each other — gets enumerated
  * in a table test instead of being spot-checked in one e2e run.
@@ -1073,7 +1073,7 @@ function sessionRowHtml(
         ` title="Record this session on the page's sessions: line">${STAMP_LABEL}</button>` +
         // Where a refusal goes. Rendered EMPTY and hidden rather than created by
         // the client, so the class and the hook are one spelling shared by the
-        // renderer and `wiki-browser.ts` — and so the reason never has to be put
+        // renderer and `wiki-article-controller.ts` — and so the reason never has to be put
         // into the button's own label, which is what made a failed Stamp rename
         // the control to a sentence. The client writes `textContent`, so the
         // route's copy is escaped by the DOM rather than by a second escaper.
@@ -1211,7 +1211,7 @@ export const SESSION_COPY_OK = "✓";
 export const SESSION_COPY_FAIL = "✗";
 
 /** The ⧉ button's accessible name — ONE spelling, shared by the render here and
- *  by `copySessionId`'s revert in `wiki-browser.ts`. Two spellings meant the
+ *  by `copySessionId`'s revert in `wiki-article-controller.ts`. Two spellings meant the
  *  button silently renamed itself the first time it was pressed. */
 export function sessionCopyAriaLabel(id: string): string {
   return id ? `Copy the session id ${id}` : "Copy the session id";

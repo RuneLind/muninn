@@ -3882,8 +3882,9 @@ new article. **`prs` renders nothing at all**: the frontmatter PR row ships with
 campaign 2, and a half-built control is worse than none.
 
 Every string and every fragment of markup lives in **one pure module** — no DOM,
-no import from `wiki-browser.ts` — because that module's code needs a DOM (it is
-importable since `boot()`, and `wiki-shell-boot.test.ts` boots it in happy-dom),
+no import from `wiki-article-controller.ts`, the strip's client — because that
+module's code needs a DOM (it is reached through the shell's `boot()`, and
+`wiki-shell-boot.test.ts` boots it in happy-dom),
 so anything shaped there is costly to prove. `costLine` has **nine outcomes**, enumerated in a table
 test, and the pair that must never collapse is *asked and unreachable*
 ("claude-usage unreachable, cost unknown") against *never asked and unconfigured*
@@ -4048,7 +4049,8 @@ to repaint from it; with that section gone nothing read it, and a cleared-on-
 navigation variable nobody reads is a stale-state trap waiting for its first
 reader.
 
-`wiki-browser.ts` wires four delegated controls on the document, all delegated
+`wiki-browser.ts` wires four delegated controls on the document (their handlers
+live in `wiki-article-controller.ts`), all delegated
 because `#articleWrap`'s innerHTML is replaced on every page load: the Jira key
 (`[data-prov-jira]`), the ⧉ copy button (`[data-sess-copy]`, which keeps its
 contract from the rail rows), the Stamp (`[data-prov-stamp]`) and the disclosure

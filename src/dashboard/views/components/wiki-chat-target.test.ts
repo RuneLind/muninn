@@ -1340,7 +1340,14 @@ describe("wiki reader chat-dialog wiring", () => {
     expect(wholeFn("getAskShownTurn")).toMatch(/^export function getAskShownTurn\(\): AskTurn \| null \{\s*return askShownTurn;\s*\}$/);
     expect(wholeFn("getAskTurns")).toMatch(/^export function getAskTurns\(\): AskTurn\[\] \{\s*return askTurns;\s*\}$/);
     expect(literal).toMatch(/getCurrentArticle:\s*\(\)\s*=>\s*currentArticle\b/);
-    expect(literal).toMatch(/getOutgoingTitles:\s*\(\)\s*=>\s*currentOutgoingTitles\b/);
+    // The outgoing titles are the article controller's (C5), passed through the
+    // same way, and its getter must return its own `let`.
+    expect(literal).toMatch(/getOutgoingTitles:\s*(getCurrentOutgoingTitles\b|\(\)\s*=>\s*getCurrentOutgoingTitles\(\))/);
+    const article = await srcOf("wiki-article-controller.ts");
+    const getter = fnBody(article, "getCurrentOutgoingTitles");
+    expect(getter.slice(0, getter.indexOf("\n}") + 2).trim()).toMatch(
+      /^export function getCurrentOutgoingTitles\(\): string\[\] \{\s*return currentOutgoingTitles;\s*\}$/,
+    );
     // The last two are the shell's own functions, passed by shorthand.
     expect(literal).toMatch(/postAskChat(,|:\s*postAskChat\b)/);
     expect(literal).toMatch(/refreshChatEscalateBar(,|:\s*refreshChatEscalateBar\b)/);

@@ -109,7 +109,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // line above counts the unminified bundle; this pin and later ones the minified.
 // 2026-11-08: merged with Run now, B2's moves and C3 (above): 809,410 bytes (273,708 gzipped).
 // C4 (Ask to wiki-ask-controller.ts): 809,714 bytes, under the same pin.
-const WIKI_CLIENT_MAX_BYTES = 810_000;
+// 2026-11-08, C5 (the article tools, right pane and series editor behind
+// ports): 811,207 bytes (275,384 gzipped); the port reads (`deps.x()`) cost the bytes.
+const WIKI_CLIENT_MAX_BYTES = 811_500;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -135,8 +137,10 @@ test("wikiClientScript stays under its size pin", async () => {
 // 2026-11-07, C3 (the STALE tab, the effort page and the ⋯ menus to their own
 // controllers, the toolbar's boot code to the rail): 7,384 lines; 71 lets.
 // 2026-11-08, C4 (the Ask tab to `wiki-ask-controller.ts`): 4,994 lines; 62 lets.
-const WIKI_BROWSER_MAX_LINES = 4_994;
-const WIKI_BROWSER_MAX_MODULE_LETS = 62;
+// 2026-11-08, C5 (the article tools and right pane to `wiki-article-controller.ts`,
+// the series editor to `wiki-series-controller.ts`): 3,458 lines; 51 lets.
+const WIKI_BROWSER_MAX_LINES = 3_458;
+const WIKI_BROWSER_MAX_MODULE_LETS = 51;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {
   const sf = ts.createSourceFile("module.ts", src, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
@@ -189,6 +193,8 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // `retiredBox`, `filtersDetails`, `filtersBtn`, `wikiSel`) were read only in
 // `registerRailOptions` and are now its locals.
 // 2026-11-08, C4: the Ask controller at its count (the shell's 9 Ask lets and `deps`).
+// 2026-11-08, C5: the article and series controllers at their counts (the
+// shell's 9 article lets and 2 series lets, plus each one's `deps`).
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_301, 16],
   ["wiki-shell-state.ts", 50, 3],
@@ -197,6 +203,8 @@ const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][]
   ["wiki-effort-controller.ts", 333, 8],
   ["wiki-menus-controller.ts", 638, 2],
   ["wiki-ask-controller.ts", 2_503, 10],
+  ["wiki-article-controller.ts", 1_182, 10],
+  ["wiki-series-controller.ts", 548, 3],
 ];
 
 for (const [file, maxLines, maxLets] of SPLIT_MODULE_CEILINGS) {

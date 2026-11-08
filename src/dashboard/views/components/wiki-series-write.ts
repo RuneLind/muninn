@@ -1,6 +1,6 @@
 /**
  * The series editor's WRITE LOOP, out of the popover's state so two callers
- * share it: the `⋯` series menu (`applySeriesWrites` in `wiki-browser.ts`) and
+ * share it: the `⋯` series menu (`applySeriesWrites` in `wiki-series-controller.ts`) and
  * the Work threads' Save as series (plan `muninn-wiki-work-thread-grouping`,
  * D14). DOM-free: the caller hands in the CAS bases it fetched FIRST and a
  * poster for `POST /api/wiki/series`, so the loop is unit-testable.

@@ -4,7 +4,7 @@
  *
  * Everything here is a fact about the listing, so it is testable without a
  * browser — which is the whole reason the module exists apart from
- * `wiki-browser.ts`.
+ * `wiki-series-controller.ts`.
  */
 
 import { describe, expect, test } from "bun:test";

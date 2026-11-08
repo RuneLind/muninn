@@ -5,7 +5,7 @@
  * state, and the footer lines the four new legs degrade to.
  *
  * Pure string building, like the rest of the module, so these tests need no
- * DOM globals; none of it is shaped in `wiki-browser.ts`.
+ * DOM globals; none of it is shaped in `wiki-article-controller.ts`.
  */
 
 import { describe, expect, test } from "bun:test";

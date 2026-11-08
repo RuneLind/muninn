@@ -2570,7 +2570,7 @@ function buildWikiPageCss(): string {
     .wiki-chain-stamp:hover { color: var(--text-primary); }
     .wiki-chain-stamp:disabled { cursor: default; opacity: 0.7; }
     /* A refusal from the Stamp route. Its own span, never the button's label —
-       see stampGhost() in wiki-browser.ts. Hidden until there is something to
+       see stampGhost() in wiki-article-controller.ts. Hidden until there is something to
        say; the [hidden] rule is spelled out for .wiki-prov-chain[hidden]'s reason. */
     .wiki-chain-stamp-msg {
       font-size: 11px; color: var(--text-muted);
