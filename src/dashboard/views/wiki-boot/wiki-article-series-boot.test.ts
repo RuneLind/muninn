@@ -105,6 +105,8 @@ async function stubFetch(input: unknown, init?: { method?: string; body?: string
   if (url.pathname === "/api/wiki/pages") body = listing();
   else if (url.pathname === "/api/wiki/page") {
     const rel = url.searchParams.get("relPath") ?? "a.md";
+    // Read before any hold, as the server reads the file before it answers.
+    const hashAtRead = hashes[rel];
     if (heldPage?.rel === rel && !heldPage.taken) {
       heldPage.taken = true;
       await heldPage.gate;
@@ -118,7 +120,7 @@ async function stubFetch(input: unknown, init?: { method?: string; body?: string
       related: rel === "a.md" ? [{ ...pages["b.md"]!, why: "links to", strength: 2 }, { ...pages["c.md"]!, why: "linked from", strength: 1 }] : [],
       issueRows: rel === "a.md" ? [ISSUE] : undefined,
       issueStampable: true,
-      hash: hashes[rel],
+      hash: hashAtRead,
     };
   } else if (url.pathname === "/api/wiki/series" && method === "POST" && refuseSeriesWrites) {
     const R = g.Response as typeof Response;
@@ -351,24 +353,43 @@ describe("an explainer-typed markdown page (loadExplainer)", () => {
     }
   });
 
-  test("before its payload lands, the previous page's hash does not stand for it: the write goes out", async () => {
+  test("before its payload lands, the previous page's hash does not stand for it, and the late payload does not undo the reader's own write", async () => {
     await openAlpha();
     // The series head renders from the listing; the page payload is held, so
     // only the clear at the switch keeps a.md's hash from being compared.
     holdPage("e.md");
+    const SE = g.SubmitEvent as typeof SubmitEvent;
     try {
       doc().querySelector<HTMLElement>('#wikiList [data-relpath="e.md"]')!.click();
       await until(() => !!edit(), "e.md's series head");
       expect(connBody().textContent).toBe("Loading…");
       const before = seriesPosts().length;
       edit()!.click();
-      seriesMenu()!.querySelector<HTMLElement>('[data-series-cmd="remove"]')!.click();
-      await until(() => seriesPosts().length === before + 1 || menuNote().includes("changed since"), "the remove to answer");
+      const form = seriesMenu()!.querySelector<HTMLFormElement>('[data-series-form="label"]')!;
+      form.querySelector<HTMLInputElement>("[data-series-input]")!.value = "Solo";
+      form.dispatchEvent(new SE("submit", { bubbles: true, cancelable: true }));
+      await until(() => seriesPosts().length === before + 1 || menuNote().includes("changed since"), "the rename to answer");
       expect(menuNote()).toBe("");
-      expect(JSON.parse(seriesPosts()[before]!.body!)).toEqual({ wiki: "w", relPath: "e.md", series: null, baseHash: "h-e" });
+      expect(JSON.parse(seriesPosts()[before]!.body!)).toEqual({ wiki: "w", relPath: "e.md", series: "solo", seriesLabel: "Solo", baseHash: "h-e" });
+      await until(() => seriesMenu() === null, "the menu to close after the write");
+      // The held payload carries the hash read BEFORE that write; it lands now
+      // and must not replace the one the write answered.
+      heldPage!.release();
+      await until(() => connBody().textContent !== "Loading…", "e.md's late payload");
+      edit()!.click();
+      seriesMenu()!.querySelector<HTMLElement>('[data-series-cmd="remove"]')!.click();
+      await until(() => seriesPosts().length === before + 2 || menuNote().includes("changed since"), "the remove to answer");
+      expect(menuNote()).toBe("");
+      expect(JSON.parse(seriesPosts()[before + 1]!.body!)).toEqual({ wiki: "w", relPath: "e.md", series: null, baseHash: "h-e+" });
     } finally {
       heldPage?.release();
       heldPage = null;
+      if (seriesMenu()) key("Escape");
+      await until(() => connBody().textContent !== "Loading…", "e.md's payload to settle");
+      // The fixture as the file starts it, for a case added after this one.
+      Object.assign(pages["e.md"]!, { series: "solo" });
+      delete (pages["e.md"] as { seriesLabel?: string }).seriesLabel;
+      hashes["e.md"] = "h-e";
     }
   });
 });

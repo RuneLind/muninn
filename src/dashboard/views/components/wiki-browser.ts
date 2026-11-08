@@ -1515,7 +1515,8 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       // from came out of `/api/wiki/pages`, which strips `desc` (and an
       // explainer's `description` is sniffed, not always in the listing).
       if (data.meta) currentArticle = data.meta;
-      currentPageHash = typeof data.hash === "string" ? data.hash : null;
+      // Unless the reader's own series write already set a newer one meanwhile.
+      if (currentPageHash === null && typeof data.hash === "string") currentPageHash = data.hash;
       if (data.meta) placeRetiredBanner(data.meta);
       renderConnections(data);
       // The same gate as a markdown page: an explainer with inferred keys has
