@@ -69,6 +69,7 @@ async function stubFetch(input: unknown): Promise<unknown> {
     const rel = url.searchParams.get("relPath") ?? "p.md";
     body = { meta: LISTING.pages.find((p) => p.relPath === rel) ?? LISTING.pages[0], html: `<h1>${rel}</h1><p>Body.</p>`, outgoing: [], backlinks: [], hash: "h-" + rel };
   } else if (url.pathname === "/api/wiki/graph") body = { nodes: [], edges: [] };
+  else if (url.pathname === "/api/wiki/factcheck/append") body = { written: true };
   const R = g.Response as typeof Response;
   return new R(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 }
@@ -108,6 +109,13 @@ async function until(cond: () => boolean, what: string): Promise<void> {
 }
 /** One animation frame, so a progressive render scheduled with rAF has run. */
 const frame = () => new Promise<void>((r) => (g.requestAnimationFrame as typeof requestAnimationFrame)(() => r()));
+
+/** Back/Forward to `url`: the shell's popstate route. */
+function popTo(url: string): void {
+  (g.history as History).pushState(null, "", url);
+  fetched.length = 0;
+  (g.window as Window).dispatchEvent(new (g.PopStateEvent as typeof PopStateEvent)("popstate", { state: null }));
+}
 
 let win: GlobalWindow;
 let handle: { dispose(): void };
@@ -223,5 +231,59 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
     expect(url.searchParams.get("q")).toBe("And the second one?");
     expect((JSON.parse(url.searchParams.get("history")!) as { q: string }[]).map((h) => h.q)).toEqual(["What did we decide?", "How does the queue work?"]);
     expect(getAskShownTurn()?.question).toBe("And the second one?");
+  });
+
+  test("a history item past the first re-shows THAT turn as the shown one, the turn ↻ and escalate act on", async () => {
+    const { getAskShownTurn, getAskTurns } = await import("../components/wiki-ask-controller.ts");
+    FakeEventSource.all.at(-1)!.emit("done", { answer: "The second one too.", cited: [] });
+    expect(getAskTurns().map((t) => t.question)).toEqual(["What did we decide?", "How does the queue work?", "And the second one?"]);
+    doc().querySelector<HTMLElement>('#wikiAskHistory [data-ask-idx="1"]')!.click();
+    expect(getAskShownTurn()?.question).toBe("How does the queue work?");
+    expect(doc().getElementById("askAnswerBody")!.innerHTML).toContain("Final.");
+  });
+
+  test("an answer clears the shown page's identity: no name, and no rail row reads as open", async () => {
+    const { getCurrentName } = await import("../components/wiki-shell-state.ts");
+    const activeRows = () => Array.from(doc().querySelectorAll(".wiki-list-item.active")).map((r) => r.getAttribute("data-relpath")).join(",");
+    // Back/Forward's route opens a page in graph mode rooted at an issue.
+    popTo("/wiki?wiki=w&relPath=k.md&display=graph&issue=jira:K-1");
+    await until(() => fetched.some((u) => u.includes("/api/wiki/graph?scope=issue&root=jira%3AK-1")), "the issue graph to load");
+    expect(getCurrentName()).toBe("k");
+    expect(activeRows()).toBe("k.md");
+    doc().querySelector<HTMLElement>('#wikiAskHistory [data-ask-idx="0"]')!.click();
+    expect(!!doc().getElementById("askAnswerBody")).toBe(true);
+    // `setCurrentName(null)` (showAskAnswer) and `setCurrentRelPath(null)`
+    // (clearShownPage): the rail's active test keys on the relPath and falls back
+    // to the name, so either one left set keeps k.md's row lit.
+    expect(getCurrentName()).toBe(null);
+    expect(activeRows()).toBe("");
+  });
+
+  test("an accepted fact-check append reloads the checked page in place, and the graph no longer roots at the old issue", async () => {
+    // k.md again in graph mode at an issue; the fact check's answer then replaces it.
+    popTo("/wiki?wiki=w&relPath=k.md&display=graph&issue=jira:K-1");
+    await until(() => !!doc().querySelector("#articleWrap .wiki-article h1#kmd"), "k.md to render");
+    await until(() => fetched.some((u) => u.includes("/api/wiki/graph?scope=issue&root=jira%3AK-1")), "the issue graph to load");
+    const before = FakeEventSource.all.length;
+    const ME = g.MouseEvent as typeof MouseEvent;
+    doc().getElementById("wikiFactcheckArticleBtn")!.dispatchEvent(new ME("mousedown", { bubbles: true, cancelable: true }));
+    expect(FakeEventSource.all.length).toBe(before + 1);
+    const es = FakeEventSource.all.at(-1)!;
+    expect(new URL(es.url, "http://x").pathname).toContain("factcheck");
+    es.emit("done", { answer: "## ✅ Claim\n\nHolds.\n", cited: [], baseHash: "h-k.md" });
+    const btn = () => doc().getElementById("wikiFactcheckAppendBtn") as HTMLButtonElement | null;
+    await until(() => !!btn() && !btn()!.disabled, "the append button to enable");
+    fetched.length = 0;
+    btn()!.click();
+    await until(() => fetched.some((u) => u.includes("/api/wiki/factcheck/append")), "the append POST");
+    // `reloadCheckedPage` → `AskTurnPort.reloadPageInPlace` → the shell refetches the page.
+    await until(() => fetched.some((u) => u.startsWith("/api/wiki/page?") && u.includes("relPath=k.md")), "the page refetch");
+    await until(() => !!doc().querySelector("#articleWrap .wiki-article h1#kmd"), "k.md to render again");
+    // The answer cleared `graphIssue` (clearShownPage), and the in-place reload
+    // does not re-read the URL: graph mode turned on here roots at the page.
+    fetched.length = 0;
+    doc().getElementById("wikiGraphToggle")!.click();
+    await until(() => fetched.some((u) => u.includes("/api/wiki/graph")), "the graph fetch");
+    expect(fetched.filter((u) => u.includes("/api/wiki/graph")).map((u) => new URL(u, "http://x").searchParams.get("scope") + ":" + new URL(u, "http://x").searchParams.get("root")).join(" ")).toBe("page:k.md");
   });
 });

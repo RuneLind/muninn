@@ -1331,8 +1331,14 @@ describe("wiki reader chat-dialog wiring", () => {
     expect(literal).toMatch(/getShownTurn:\s*(getAskShownTurn\b|\(\)\s*=>\s*getAskShownTurn\(\))/);
     expect(literal).toMatch(/getAskTurns(\s*,|:\s*(getAskTurns\b|\(\)\s*=>\s*getAskTurns\(\)))/);
     const ask = await srcOf("wiki-ask-controller.ts");
-    expect(fnBody(ask, "getAskShownTurn")).toMatch(/return askShownTurn;/);
-    expect(fnBody(ask, "getAskTurns")).toMatch(/return askTurns;/);
+    // The WHOLE body, up to its closing brace: a substring pin let a getter that
+    // returns another turn first (`if (i > 0) return askTurns[i - 1];`) through.
+    const wholeFn = (name: string) => {
+      const f = fnBody(ask, name);
+      return f.slice(0, f.indexOf("\n}") + 2).trim();
+    };
+    expect(wholeFn("getAskShownTurn")).toMatch(/^export function getAskShownTurn\(\): AskTurn \| null \{\s*return askShownTurn;\s*\}$/);
+    expect(wholeFn("getAskTurns")).toMatch(/^export function getAskTurns\(\): AskTurn\[\] \{\s*return askTurns;\s*\}$/);
     expect(literal).toMatch(/getCurrentArticle:\s*\(\)\s*=>\s*currentArticle\b/);
     expect(literal).toMatch(/getOutgoingTitles:\s*\(\)\s*=>\s*currentOutgoingTitles\b/);
     // The last two are the shell's own functions, passed by shorthand.
