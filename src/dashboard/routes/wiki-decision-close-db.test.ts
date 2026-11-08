@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { setupTestDb } from "../../test/setup-db.ts";
+import { getDb } from "../../db/client.ts";
 import type { Config } from "../../config.ts";
 import { parseBlocks } from "../../format/markdown-ast.ts";
 import { parseQuestionPage } from "../../format/question.ts";
@@ -47,9 +48,16 @@ let root = "";
 let app: Hono;
 let guardRefusal: Response | null = null;
 const NOW = Date.parse("2026-11-07T12:00:00+01:00");
-// A ruling is signed with its answer row's created_at (`closeRulingFor`), set by the
-// database at insert, so the signature carries the day the test runs, not NOW.
-const SIGNED = todayOslo(Date.now()).split("-").reverse().join(".");
+// A ruling is signed with its answer row's `wiki_answers.created_at` (`closeRulingFor`);
+// `backdate` shifts every row by one constant onto NOW's day, keeping their order.
+const SIGNED = todayOslo(NOW).split("-").reverse().join(".");
+let dbStart: Date;
+const backdate = () =>
+  getDb()`UPDATE wiki_answers SET created_at = created_at - (${dbStart}::timestamptz - to_timestamp(${NOW / 1000})) WHERE created_at >= ${dbStart}`;
+const insertAnswer = async (input: Parameters<typeof insertWikiAnswerVersion>[0]) => {
+  await insertWikiAnswerVersion(input);
+  await backdate();
+};
 
 const git = (...args: string[]) =>
   execFileSync("git", ["-C", root, ...args], {
@@ -75,6 +83,7 @@ const close = (body: Record<string, unknown>) =>
 const answer = async (questionId: string, choice: string | null, body: string, relPath = REL) => {
   const res = await app.request("/api/wiki/answers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wiki: WIKI, relPath, questionId, choice, body }) });
   expect(res.status).toBe(201);
+  await backdate();
 };
 
 async function preview(questionId: string, relPath = REL): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -86,6 +95,7 @@ const stateOf = async (id: string) => parseQuestionPage(parseBlocks(stripFrontma
 
 beforeAll(async () => {
   root = await testTempDir(path.join(tmpdir(), "muninn-close-"));
+  [{ now: dbStart }] = (await getDb()`SELECT now()`) as unknown as [{ now: Date }];
   git("init", "-q", "-b", "main");
   // The route's commit (`commitWikiChange`) spawns git with no author env: a CI runner has no identity.
   git("config", "user.name", "t");
@@ -204,7 +214,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     await answer("O2", "A", "");
     const { body: p } = await preview("O2");
     expect(p.lines).toContain(`- **D2** — Answer A on card O2. Test Owner, ${SIGNED}.`);
-    await insertWikiAnswerVersion({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name: "Someone Else" }, choice: "B", body: "", questionHash: "h" });
+    await insertAnswer({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name: "Someone Else" }, choice: "B", body: "", questionHash: "h" });
     const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ changed: true });
@@ -213,7 +223,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
 
   test("the preview warns of an answer to older wording and of an author who answered otherwise", async () => {
     const other = (name: string, choice: string, questionHash: string) =>
-      insertWikiAnswerVersion({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name }, choice, body: "", questionHash });
+      insertAnswer({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name }, choice, body: "", questionHash });
     await other("Someone Else", "A", "an-older-wording");
     await Bun.sleep(10);
     await other("Third Person", "B", "an-older-wording");
@@ -227,7 +237,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     await answer("O2", "A", "");
     const { body: p } = await preview("O2");
     expect(p.warnings).toEqual([]);
-    await insertWikiAnswerVersion({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name: "Someone Else" }, choice: "not-sure", body: "", questionHash: "h" });
+    await insertAnswer({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name: "Someone Else" }, choice: "not-sure", body: "", questionHash: "h" });
     const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ changed: true });
@@ -264,12 +274,12 @@ describe("POST /api/wiki/decision-inbox/close", () => {
   test("a warning whose text changes while the count stays is 409", async () => {
     const id = crypto.randomUUID();
     const someone = { userId: null, oid: null, navIdent: null, name: "Someone Else" };
-    await insertWikiAnswerVersion({ answerId: id, version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: someone, choice: "B", body: "", questionHash: "h" });
+    await insertAnswer({ answerId: id, version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: someone, choice: "B", body: "", questionHash: "h" });
     await Bun.sleep(10);
     await answer("O2", "A", "");
     const { body: p } = await preview("O2");
     expect(p.warnings).toEqual(["Someone Else answered B."]);
-    await insertWikiAnswerVersion({ answerId: id, version: 2, wiki: WIKI, relPath: REL, questionId: "O2", author: someone, choice: "not-sure", body: "", questionHash: "h" });
+    await insertAnswer({ answerId: id, version: 2, wiki: WIKI, relPath: REL, questionId: "O2", author: someone, choice: "not-sure", body: "", questionHash: "h" });
     const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
     expect(res.status).toBe(409);
   });

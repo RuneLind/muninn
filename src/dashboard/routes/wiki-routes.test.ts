@@ -4755,6 +4755,12 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
     // Malformed weights read as 0, never as a missing q.
     for (const h of ["gzip;q=0=1", "gzip;q", "gzip;foo=bar;q=0", "gzip;quality=1;q=0"]) expect(acceptsGzip(h), h).toBe(false);
     expect(acceptsGzip("gzip;foo=bar")).toBe(true);
+    expect(acceptsGzip("gzip;q=1=0")).toBe(false);
+    // The first q wins; the name must match exactly; any finite Number() above 0 admits.
+    expect(acceptsGzip("gzip;q=1;q=0")).toBe(true);
+    expect(acceptsGzip("gzip;q=0;q=1")).toBe(false);
+    for (const h of ["xgzip", "xgzip, gzip;q=0"]) expect(acceptsGzip(h), h).toBe(false);
+    for (const h of ["gzip;q=0x1", "gzip;q=1e0", "gzip;q=2"]) expect(acceptsGzip(h), h).toBe(true);
   });
 
   test("gzip is not sent to a client that refuses it with q=0", async () => {

@@ -5605,9 +5605,10 @@ export function coerceClientEdits(raw: unknown): IntegrateEdit[] | null {
 /**
  * Whether `Accept-Encoding` (RFC 9110 §12.5.3) admits gzip. The most specific
  * name listed decides, by its best weight: `gzip`, else `x-gzip` (its alias,
- * §8.4.1.3), else `*`; the order of entries never matters. A missing q is 1; an
- * unparseable one is 0. Space around `=` is tolerated (the grammar allows none),
- * so a malformed `q = 0` still refuses.
+ * §8.4.1.3), else `*`; the order of entries never matters. A missing q is 1; else the
+ * first q's weight is `Number()` of its value (`0x1`, `1e0`, `2` count as positive),
+ * and NaN, or a q with no `=` or more than one, is 0. Space around `=` is tolerated
+ * (the grammar allows none), so a malformed `q = 0` still refuses.
  */
 export function acceptsGzip(header: string | undefined): boolean {
   const best = new Map<string, number>();
