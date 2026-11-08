@@ -1348,17 +1348,21 @@ describe("wiki reader chat-dialog wiring", () => {
     expect(getter.slice(0, getter.indexOf("\n}") + 2).trim()).toMatch(
       /^export function getCurrentOutgoingTitles\(\): string\[\] \{\s*return currentOutgoingTitles;\s*\}$/,
     );
-    // The last two are the shell's own functions, passed by shorthand.
+    // The last two are the Ask controller's exports (C4), which the shell
+    // imports and passes by shorthand.
     expect(literal).toMatch(/postAskChat(,|:\s*postAskChat\b)/);
     expect(literal).toMatch(/refreshChatEscalateBar(,|:\s*refreshChatEscalateBar\b)/);
   });
 
   test("the shell's controller ports (Ask, menus, article, series) wire every member to its real binding", async () => {
-    // Same silent half as the test above, for four port builders: each member
-    // has an inert default in its controller, so a no-op stub, a member wired
-    // to the wrong `let` or a dropped optional member degrades quietly while
-    // tsc sees a well-typed literal. Each builder's literal must be EXACTLY
-    // this member set, one member per line (shorthand pinned as shorthand).
+    // Same silent half as the test above, for four port builders. No member of
+    // AskTurnPort, MenusDeps, ArticlePort or SeriesPort is optional, so tsc
+    // already fails on a dropped one. What it cannot see is a member wired to
+    // another binding of the same type: a no-op stub, the wrong `let`, a value
+    // captured once instead of read on each call, or a getter body returning
+    // the wrong thing. Each builder's literal must be EXACTLY this member set,
+    // one member per line, shorthand pinned as shorthand and each getter's
+    // body pinned as text.
     const src = await browserSrc();
     const members = (name: string): string[] => {
       const body = fnBody(src, name);

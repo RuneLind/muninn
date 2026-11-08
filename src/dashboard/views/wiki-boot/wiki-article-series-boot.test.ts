@@ -70,6 +70,9 @@ const pages: Record<string, ReturnType<typeof page>> = {
 };
 /** Each page's raw-bytes hash; a series write moves the written page's. */
 const hashes: Record<string, string> = { "a.md": "h-a", "b.md": "h-b", "c.md": "h-c", "d.html": "h-d" };
+/** Set while a case expects no series write at all: a write sent anyway is
+ *  answered 409 and changes nothing, so that case's failure stays its own. */
+let refuseSeriesWrites = false;
 /** A page whose `/api/wiki/page` answer waits until the test releases it. */
 let heldPage: { rel: string; gate: Promise<void>; release: () => void } | null = null;
 function holdPage(rel: string): void {
@@ -110,6 +113,9 @@ async function stubFetch(input: unknown, init?: { method?: string; body?: string
       issueStampable: true,
       hash: hashes[rel],
     };
+  } else if (url.pathname === "/api/wiki/series" && method === "POST" && refuseSeriesWrites) {
+    const R = g.Response as typeof Response;
+    return new R(JSON.stringify({ error: "refused by the test" }), { status: 409, headers: { "content-type": "application/json" } });
   } else if (url.pathname === "/api/wiki/series" && method === "POST") {
     const write = JSON.parse(init!.body!) as { relPath: string; series: string | null; seriesLabel?: string | null };
     const p = pages[write.relPath]! as { series?: string; seriesLabel?: string };
@@ -224,40 +230,50 @@ describe("the series editor (wiki-series-controller.ts)", () => {
     // Somebody else edits a.md: the menu's fresh base read now differs from the
     // hash `openPageAtLoad()` reports for the page as loaded.
     hashes["a.md"] = "h-a-edited";
-    editBtn()!.click();
-    seriesMenu()!.querySelector<HTMLElement>('[data-series-cmd="remove"]')!.click();
-    await until(() => menuNote().includes("changed since you opened it"), "the refusal note");
-    expect(menuNote()).toBe("a.md changed since you opened it — reload it; nothing written");
-    expect(seriesPosts().length).toBe(0);
-    key("Escape");
-    expect(seriesMenu() === null).toBe(true);
-    hashes["a.md"] = "h-a";
+    refuseSeriesWrites = true;
+    try {
+      editBtn()!.click();
+      seriesMenu()!.querySelector<HTMLElement>('[data-series-cmd="remove"]')!.click();
+      await until(() => menuNote().includes("changed since you opened it"), "the refusal note");
+      expect(menuNote()).toBe("a.md changed since you opened it — reload it; nothing written");
+      expect(seriesPosts().length).toBe(0);
+      key("Escape");
+      expect(seriesMenu() === null).toBe(true);
+    } finally {
+      // On failure too: the cases below need a.md unedited and the menu closed.
+      hashes["a.md"] = "h-a";
+      refuseSeriesWrites = false;
+      if (seriesMenu()) key("Escape");
+    }
   });
 
   test("Rename writes through the poster boot built, with the open page's base unchanged since load", async () => {
+    // Counted from here, so a write the case above let through is not this one's.
+    const before = seriesPosts().length;
     editBtn()!.click();
     const form = seriesMenu()!.querySelector<HTMLFormElement>('[data-series-form="label"]')!;
     form.querySelector<HTMLInputElement>("[data-series-input]")!.value = "Trip";
     const SE = g.SubmitEvent as typeof SubmitEvent;
     form.dispatchEvent(new SE("submit", { bubbles: true, cancelable: true }));
-    await until(() => seriesPosts().length === 1 && seriesMenu() === null, "the rename to write and close the menu");
+    await until(() => seriesPosts().length === before + 1 && seriesMenu() === null, "the rename to write and close the menu");
     // `initSeries` built the poster for this wiki; the fresh base equals the load-time hash.
-    expect(JSON.parse(seriesPosts()[0]!.body!)).toEqual({ wiki: "w", relPath: "a.md", series: "trip", seriesLabel: "Trip", baseHash: "h-a" });
+    expect(JSON.parse(seriesPosts()[before]!.body!)).toEqual({ wiki: "w", relPath: "a.md", series: "trip", seriesLabel: "Trip", baseHash: "h-a" });
   });
 
   test("a second write from the same page goes through: its own first write's answer became the load-time hash", async () => {
     // The rename moved a.md to "h-a+" on disk. Only `adoptOwnSeriesHashes` makes
     // the open page's load-time hash follow, or this verb is refused like the first.
     expect(hashes["a.md"]).toBe("h-a+");
+    const before = seriesPosts().length;
     editBtn()!.click();
     const remove = seriesMenu()!.querySelector<HTMLElement>('[data-series-cmd="remove"]')!;
     expect(!!remove).toBe(true);
     const listingsBefore = fetched.filter((f) => f.url.startsWith("/api/wiki/pages")).length;
     remove.click();
-    await until(() => seriesPosts().length === 2 || menuNote().includes("changed since"), "the remove to answer");
+    await until(() => seriesPosts().length === before + 1 || menuNote().includes("changed since"), "the remove to answer");
     expect(menuNote()).toBe("");
     await until(() => seriesMenu() === null, "the menu to close after the write");
-    expect(JSON.parse(seriesPosts()[1]!.body!)).toEqual({ wiki: "w", relPath: "a.md", series: null, baseHash: "h-a+" });
+    expect(JSON.parse(seriesPosts()[before]!.body!)).toEqual({ wiki: "w", relPath: "a.md", series: null, baseHash: "h-a+" });
     expect(fetched.filter((f) => f.url.startsWith("/api/wiki/pages?refresh=1")).length).toBeGreaterThan(0);
     expect(fetched.filter((f) => f.url.startsWith("/api/wiki/pages")).length).toBeGreaterThan(listingsBefore);
     // The page left the series: `repaintSeriesHead` dropped the strip and its opener.
