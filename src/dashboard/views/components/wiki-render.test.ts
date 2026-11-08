@@ -116,8 +116,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // fix round 1 (id and date headers, traffic lights, the nowrap number span): 816,448 (277,205).
 // 2026-11-08, render-richer PR 3 (before → after chips in the bundled
 // formatWebHtml, the section bar controller): 823,635 bytes (279,617 gzipped);
-// its fix round 1 batch 2 (chip rules, quoted-title unchip): 825,675 (280,463).
-const WIKI_CLIENT_MAX_BYTES = 826_000;
+// its fix round 1 batch 2 (chip rules, quoted-title unchip): 825,675 (280,463);
+// batch 3 (sliding reading line, reveal pin, title rule): 826,252 (280,699).
+const WIKI_CLIENT_MAX_BYTES = 827_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

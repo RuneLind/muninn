@@ -4,8 +4,8 @@
  * P3, D2): on a page with three or more sections it shows `n/N`, the current
  * section's title and how far down the page the reader is, and opens a menu of
  * the sections. Sections are the article's top heading level (its direct-child
- * headings, at the smallest level among them, or the level under a lone
- * `# Title` the render kept) plus the summary of each
+ * headings, at the smallest level among them, or the level under one or two
+ * `#` title headings, {@link sectionTargets}) plus the summary of each
  * top-level `<Fold>`; a fold's own heading sits inside the fold, so it is the
  * same section and never counted twice ({@link sectionTargets}).
  *
@@ -22,10 +22,12 @@
  * |------------------------|-----------------------------------------|--------------------------------------------------------------|
  * | page, < 3 sections     | load                                    | no bar (`hidden`); breadcrumb as before                      |
  * | page, ≥ 3 sections     | load at the top                         | `1/N`, the first title, progress 0                           |
- * | any                    | scroll (wheel, keys, scrollbar)         | current = last visible section whose top passed the bar      |
- * |                        |                                         | (`TOP_SLACK` px below the pane's top); at the very bottom,   |
- * |                        |                                         | the last one whose top is on screen; progress follows; one   |
- * |                        |                                         | update per frame (rAF), passive listener                     |
+ * | any                    | scroll (wheel, keys, scrollbar)         | current = last visible section whose heading passed the      |
+ * |                        |                                         | reading line (`READ_LINE` px below the pane's top); when a   |
+ * |                        |                                         | foot heading never reaches it, the line slides to the pane's |
+ * |                        |                                         | bottom over the last stretch, so the foot sections take over |
+ * |                        |                                         | in order, the last at the very bottom; progress              |
+ * |                        |                                         | follows; one update per frame (rAF), passive listener        |
  * | any                    | navigation (rail, wikilink, back/fwd)   | the new render calls mount: the old listeners and observers  |
  * |                        |                                         | go first, the menu closes, the bar is rebuilt or hidden      |
  * | any                    | lens switch (class on `.wiki-article`)  | sections recomputed from what is visible (Overview hides     |
@@ -39,9 +41,11 @@
  * |                        |                                         | closes, focus moves to its heading or summary (no scroll);   |
  * |                        |                                         | near the page's foot the picked section stays current until  |
  * |                        |                                         | the pane scrolls again                                       |
- * | any                    | `#anchor` link, or load with a hash     | the reveal scrolls; the scroll event updates the bar         |
+ * | any                    | `#anchor` link, load with a hash, a     | the section holding the revealed element is current (also    |
+ * |                        | card chip or pill (`wiki:reveal`)       | near the foot) until the pane scrolls again                  |
  * | any                    | 🧭 buttons, reader-only marks, size     | titles read without them (`[data-walkthrough-btn]`,          |
- * |                        | labels beside headings and summaries    | `[data-reader-only]`, `.fold-summary`, `.gl-tip`)            |
+ * |                        | labels, `<Fact>` chips, new-since marks | `[data-reader-only]`, `.fold-summary`, `.gl-tip`, `.fc-chip`;|
+ * |                        |                                         | a new-since mark is `::before`, not text)                    |
  * | any                    | rail drag, window resize, fold resize   | ResizeObserver on the pane and article schedules an update;  |
  * |                        |                                         | the bar writes the DOM only on a change, so no loop          |
  * | any                    | theme or palette flip                   | restyled by tokens, no rebuild                               |
@@ -49,9 +53,12 @@
  * |                        | error, graph (hides the article)        | listener left; graph hides it until the article shows again  |
  */
 
-/** A section's top counts as passed this many px below the pane's top edge:
- *  a jump lands a section `JUMP_GAP` px down, inside it. */
-const TOP_SLACK = 32;
+import { REVEAL_EVENT } from "./wiki-hash-target.ts";
+
+/** The reading line, px below the pane's top edge: a section is current once
+ *  its heading has passed it. The prototype's value (`proto.js`, `top + 140`);
+ *  a jump lands a section `JUMP_GAP` px down, above it. */
+const READ_LINE = 140;
 const JUMP_GAP = 12;
 /** Fewer sections than this: no bar. */
 export const SECTION_BAR_MIN = 3;
@@ -60,8 +67,9 @@ export const SECTION_BAR_ID = "wikiSectionBar";
 const MENU_ID = "wikiSectionMenu";
 
 /** What a section title leaves out: the reader's own chrome beside a heading
- *  or in a fold summary (🧭, size labels, glossary tips, the teaser). */
-const TITLE_CHROME = "[data-walkthrough-btn], [data-reader-only], .fold-summary, .gl-tip";
+ *  or in a fold summary (🧭, size labels, glossary tips, the teaser, a
+ *  `<Fact>` chip). A new-since mark is `::before` content, never text. */
+const TITLE_CHROME = "[data-walkthrough-btn], [data-reader-only], .fold-summary, .gl-tip, .fc-chip";
 
 /** The article's sections in document order: its direct-child headings at
  *  the smallest level among them, plus each top-level fold's summary (a fold
@@ -69,12 +77,16 @@ const TITLE_CHROME = "[data-walkthrough-btn], [data-reader-only], .fold-summary,
  *  over the DOM it is given: no globals. */
 export function sectionTargets(article: Element, visible: (el: Element) => boolean = () => true): Element[] {
   const heads = Array.from(article.children).filter((c) => /^H[2-6]$/.test(c.tagName) && visible(c));
-  const levels = [...new Set(heads.map((h) => Number(h.tagName[1])))].sort();
-  // A page whose body keeps its `# Title` (the frontmatter title differs, so
-  // the render does not strip it) has one heading at the top level, first:
-  // that is the title, and the sections are the level under it.
-  const lone = heads.filter((h) => Number(h.tagName[1]) === levels[0]);
-  const top = lone.length === 1 && lone[0] === heads[0] ? (levels[1] ?? 0) : (levels[0] ?? 0);
+  const level = (h: Element): number => Number(h.tagName[1]);
+  const levels = [...new Set(heads.map(level))].sort();
+  const count = (l: number | undefined): number => heads.filter((h) => level(h) === l).length;
+  // `#` (rendered h2) headings are titles, not sections, when the first heading
+  // is one and there are at most two: one kept `# Title` (the frontmatter title
+  // differs, so the render keeps it), or a title plus a part heading over many
+  // entries (`log.md`: `# Activity Log` … `# Log` over 1,211 `##` entries).
+  const titles = levels[0] === 2 && level(heads[0]!) === 2 &&
+    (count(2) === 1 || (count(2) === 2 && count(levels[1]) >= SECTION_BAR_MIN));
+  const top = titles ? (levels[1] ?? 0) : (levels[0] ?? 0);
   const out: Element[] = [];
   for (const el of Array.from(article.querySelectorAll("h2, h3, h4, h5, h6, details.fold > summary"))) {
     if (el.tagName === "SUMMARY") {
@@ -95,15 +107,34 @@ export function sectionTitle(el: Element): string {
   return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
-/** Which section is current: the last whose top is at or above `line`; at
- *  the bottom of the pane (`atEnd`), the last whose top is above `bottom`;
- *  never before the first. `tops` in document order. */
-export function currentSection(tops: readonly number[], line: number, atEnd: boolean, bottom: number): number {
+/** Which section is current: the last whose heading has passed `line`, never
+ *  before the first. `tops`, `line` and `bottom` (the pane's bottom edge) are
+ *  viewport px, `tops` in document order; `scroll` and `max` are the pane's
+ *  scrollTop and its largest value. When a heading at the foot cannot reach
+ *  `line` even at `max`, the line slides from `line` to `bottom` over the last
+ *  stretch of scroll, so the foot sections take over in order, in proportion
+ *  to where their headings sit, and the bottom reads the last one. */
+export function currentSection(tops: readonly number[], line: number, scroll: number, max: number, bottom: number): number {
+  const stretch = Math.min(bottom - line, max);
+  const stuck = stretch > 0 && tops.some((t) => t - line + scroll > max);
+  const at = stuck ? line + (bottom - line) * Math.min(1, Math.max(0, (scroll - (max - stretch)) / stretch)) : line;
   let cur = 0;
   tops.forEach((t, k) => {
-    if (t <= line || (atEnd && t < bottom)) cur = k;
+    if (t <= at) cur = k;
   });
   return cur;
+}
+
+/** The index of the section a revealed element sits in: the last section at
+ *  or before it in document order, or the section it heads (a fold addressed by
+ *  its own id holds its summary). */
+export function sectionHolding(sections: readonly Element[], el: Element): number {
+  let k = 0;
+  for (const [i, s] of sections.entries()) {
+    if (el.contains(s)) return i;
+    if (s.compareDocumentPosition(el) & 4 /* el follows s, or sits in it */) k = i;
+  }
+  return k;
 }
 
 interface Mounted {
@@ -175,7 +206,11 @@ export function mountSectionBar(wrap: HTMLElement): void {
   };
 
   let lastWidth = "";
-  let pin: { el: Element; top: number } | null = null;
+  // `top` is the anchor's viewport top when pinned: a reader's scroll moves it,
+  // while a layout shift the browser's scroll anchoring absorbs does not (the
+  // hash load's scrollTop moved 961 → 964 after the reveal, measured in e2e).
+  let pin: { el: Element; anchor: Element; top: number } | null = null;
+  let revealed: Element | null = null;
   const paint = (): void => {
     m.frame = 0;
     if (m.dirty) {
@@ -185,14 +220,25 @@ export function mountSectionBar(wrap: HTMLElement): void {
     const n = m.sections.length;
     const show = n >= SECTION_BAR_MIN;
     if (bar.hidden === show) bar.hidden = !show;
-    if (!show) return;
+    if (!show) {
+      revealed = null;
+      return;
+    }
     const box = wrap.getBoundingClientRect();
     const max = wrap.scrollHeight - wrap.clientHeight;
     const tops = m.sections.map((s) => s.getBoundingClientRect().top);
-    let cur = currentSection(tops, box.top + TOP_SLACK, max > 0 && wrap.scrollTop >= max - 2, box.bottom);
+    let cur = currentSection(tops, box.top + READ_LINE, wrap.scrollTop, max, box.bottom);
+    // A revealed element (a hash, a card chip) may sit where the pane cannot
+    // bring it to the top: its section is current until the pane scrolls.
+    if (revealed) {
+      if (m.sections.length) {
+        pin = { el: m.sections[sectionHolding(m.sections, revealed)]!, anchor: revealed, top: revealed.getBoundingClientRect().top };
+      }
+      revealed = null;
+    }
     // A jump near the page's foot cannot scroll its section to the top: the
     // picked section stays current until the pane scrolls again.
-    const pinned = pin && Math.abs(wrap.scrollTop - pin.top) <= 2 ? m.sections.indexOf(pin.el) : -1;
+    const pinned = pin && Math.abs(pin.anchor.getBoundingClientRect().top - pin.top) <= 2 ? m.sections.indexOf(pin.el) : -1;
     if (pinned >= 0) cur = pinned;
     else pin = null;
     if (cur !== m.cur) {
@@ -245,7 +291,7 @@ export function mountSectionBar(wrap: HTMLElement): void {
     // The fold a summary heads, and any fold around the target, open first.
     for (let d = target.closest("details"); d; d = d.parentElement?.closest("details") ?? null) d.open = true;
     wrap.scrollTop += target.getBoundingClientRect().top - wrap.getBoundingClientRect().top - JUMP_GAP;
-    pin = { el: target, top: wrap.scrollTop };
+    pin = { el: target, anchor: target, top: target.getBoundingClientRect().top };
     if (target.tagName !== "SUMMARY" && !target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
     (target as HTMLElement).focus({ preventScroll: true });
     schedule();
@@ -281,6 +327,12 @@ export function mountSectionBar(wrap: HTMLElement): void {
 
   wrap.addEventListener("scroll", schedule, { passive: true });
   article.addEventListener("toggle", relist, true);
+  // Fired before the reveal opens folds and scrolls: read on the next frame.
+  const onReveal = (e: Event): void => {
+    revealed = e.target as Element;
+    schedule();
+  };
+  article.addEventListener(REVEAL_EVENT, onReveal);
   const lens = new MutationObserver(relist);
   lens.observe(article, { attributes: true, attributeFilter: ["class"] });
   // The article leaves the pane (another view), or the pane's class changes (graph).
@@ -298,6 +350,7 @@ export function mountSectionBar(wrap: HTMLElement): void {
     m.frame = 0;
     wrap.removeEventListener("scroll", schedule);
     article.removeEventListener("toggle", relist, true);
+    article.removeEventListener(REVEAL_EVENT, onReveal);
     // A menu left open by a navigation closes with its mount.
     closeMenu(false);
     bar.removeEventListener("keydown", onKey);

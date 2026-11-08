@@ -108,6 +108,10 @@ const FOOT = [
   "",
   "two",
   "",
+  "### Second detail",
+  "",
+  "the detail a hash names",
+  "",
   "</Fold>",
   "",
   "## End",
@@ -167,13 +171,13 @@ async function openLong(page: Page): Promise<void> {
 const n = (page: Page) => page.locator("#wikiSectionBar .wiki-sec-n");
 const title = (page: Page) => page.locator("#wikiSectionBar .wiki-sec-t");
 
-/** Scroll the pane so `selector`'s top sits just under the bar. */
-async function scrollTo(page: Page, selector: string): Promise<void> {
-  await page.evaluate((sel) => {
+/** Scroll the pane so `selector`'s top sits `gap` px under the bar. */
+async function scrollTo(page: Page, selector: string, gap = 4): Promise<void> {
+  await page.evaluate(([sel, g]) => {
     const wrap = document.getElementById("articleWrap")!;
     const el = document.querySelector(sel)!;
-    wrap.scrollTop += el.getBoundingClientRect().top - wrap.getBoundingClientRect().top - 4;
-  }, selector);
+    wrap.scrollTop += el.getBoundingClientRect().top - wrap.getBoundingClientRect().top - g;
+  }, [selector, gap] as const);
 }
 
 test.describe("before → after chips", () => {
@@ -296,7 +300,8 @@ test.describe("section bar", () => {
     await expect(n(page)).toHaveText("1/5");
     await expect(title(page)).toHaveText("Brief");
     expect(parseFloat(await page.locator("#wikiSectionBar .wiki-sec-bar i").evaluate((i) => (i as HTMLElement).style.width))).toBe(0);
-    await scrollTo(page, ".wiki-article > details.fold:nth-of-type(1) > summary");
+    // Just above the reading line (140 px): the closed folds after it sit below.
+    await scrollTo(page, ".wiki-article > details.fold:nth-of-type(1) > summary", 130);
     await expect(n(page)).toHaveText("2/5");
     await expect(title(page)).toHaveText("Decisions");
     // Closed folds are short: the last section is reached at the bottom.
@@ -366,9 +371,10 @@ test.describe("section bar", () => {
     await expect(n(page)).toHaveText("2/4");
     // Without the pin the foot rule names the last section on screen.
     await expect(title(page)).not.toHaveText("End");
-    // A scroll of the pane hands the bar back to the rule.
+    // A scroll of the pane hands the bar back to the rule (up past the stretch
+    // where the line slides, into Lead).
     await page.evaluate(() => {
-      document.getElementById("articleWrap")!.scrollTop -= 60;
+      document.getElementById("articleWrap")!.scrollTop -= 700;
     });
     await expect(title(page)).toHaveText("Lead");
   });
@@ -451,6 +457,23 @@ test.describe("section bar", () => {
     expect(id).toBeTruthy();
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/long.mdx")}&lens=all#${id}`);
     await expect(title(page)).toHaveText("Sources");
+  });
+
+  test("a hash near the page's foot shows the anchored section, not the last one on screen", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const url = `${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/foot.mdx")}&lens=all`;
+    await page.goto(url);
+    await expect(n(page)).toHaveText("1/4");
+    const id = await page.locator(".wiki-article details.fold h4", { hasText: "Second detail" }).getAttribute("id");
+    expect(id).toBeTruthy();
+    await page.goto(`${url}#${id}`);
+    await expect(title(page)).toHaveText("Second fold");
+    await expect(n(page)).toHaveText("3/4");
+    // The case itself: the pane is at its foot, so the target never reached the top.
+    expect(await page.evaluate(() => {
+      const w = document.getElementById("articleWrap")!;
+      return w.scrollTop >= w.scrollHeight - w.clientHeight - 2;
+    })).toBe(true);
   });
 
   test("an Ask answer or the start view replacing the article leaves no bar", async ({ page }) => {
