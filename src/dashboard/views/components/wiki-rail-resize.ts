@@ -16,7 +16,7 @@
  *
  * Storage is best-effort: a private window or a blocked-storage browser leaves
  * the drag working for the session and forgets it on reload, which is the same
- * behaviour the Ask-session persistence in `wiki-browser.ts` settles for.
+ * behaviour the Ask-session persistence in `wiki-ask-controller.ts` settles for.
  */
 import {
   RAIL_WIDTH_KEY,

@@ -2,7 +2,7 @@
  * SSE lifecycle for the **single-claim re-verify** endpoint
  * (`GET /api/wiki/factcheck/claim`) — the server half of the reader's ↻ affordance
  * on a claim that timed out, was skipped, or crashed. The client half now exists:
- * `applyRetryAffordances` in `wiki-browser.ts` injects the ↻ rows and
+ * `applyRetryAffordances` in `wiki-ask-controller.ts` injects the ↻ rows and
  * `wiki-claim-retry.ts` owns the answer surgery, so "the ↻ row" below names a real
  * button. NB it consumes this stream via `fetch` + a ReadableStream rather than an
  * EventSource, precisely so the single-flight 409's body is readable.

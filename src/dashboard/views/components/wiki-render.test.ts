@@ -108,6 +108,7 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11 B3): 1,436,421 -> 806,603 bytes (361,526 -> 271,805 gzipped). Every
 // line above counts the unminified bundle; this pin and later ones the minified.
 // 2026-11-08: merged with Run now, B2's moves and C3 (above): 809,410 bytes (273,708 gzipped).
+// C4 (Ask to wiki-ask-controller.ts): 809,714 bytes, under the same pin.
 const WIKI_CLIENT_MAX_BYTES = 810_000;
 
 test("wikiClientScript stays under its size pin", async () => {
@@ -133,8 +134,9 @@ test("wikiClientScript stays under its size pin", async () => {
 // (the Group menu's focus helpers to the rail, the shared pills to a leaf): 8,773.
 // 2026-11-07, C3 (the STALE tab, the effort page and the ⋯ menus to their own
 // controllers, the toolbar's boot code to the rail): 7,384 lines; 71 lets.
-const WIKI_BROWSER_MAX_LINES = 7_384;
-const WIKI_BROWSER_MAX_MODULE_LETS = 71;
+// 2026-11-08, C4 (the Ask tab to `wiki-ask-controller.ts`): 4,994 lines; 62 lets.
+const WIKI_BROWSER_MAX_LINES = 4_994;
+const WIKI_BROWSER_MAX_MODULE_LETS = 62;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {
   const sf = ts.createSourceFile("module.ts", src, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
@@ -186,6 +188,7 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // C3 fix round: the rail 2,301 / 16. Five of those lets (`effortsBox`,
 // `retiredBox`, `filtersDetails`, `filtersBtn`, `wikiSel`) were read only in
 // `registerRailOptions` and are now its locals.
+// 2026-11-08, C4: the Ask controller at its count (the shell's 9 Ask lets and `deps`).
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_301, 16],
   ["wiki-shell-state.ts", 50, 3],
@@ -193,6 +196,7 @@ const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][]
   ["wiki-stale-controller.ts", 509, 18],
   ["wiki-effort-controller.ts", 333, 8],
   ["wiki-menus-controller.ts", 638, 2],
+  ["wiki-ask-controller.ts", 2_503, 10],
 ];
 
 for (const [file, maxLines, maxLets] of SPLIT_MODULE_CEILINGS) {

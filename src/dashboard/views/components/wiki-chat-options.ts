@@ -100,8 +100,8 @@ import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 // ── The shell port ────────────────────────────────────────────────────
 
 /**
- * The Ask turn as this dialog uses it — structurally a subset of the shell's
- * `AskTurn`, declared here so the two files share no type declaration and no
+ * The Ask turn as this dialog uses it — structurally a subset of the Ask
+ * controller's `AskTurn` (`wiki-ask-controller.ts`), declared here so the two files share no type declaration and no
  * import cycle. Every field is one the dialog genuinely reads (or, for
  * `chatEsc`, writes back).
  */
@@ -128,7 +128,7 @@ export interface ChatOptPage {
 }
 
 /** What POST /api/wiki/ask/chat answers, as this dialog reads it. Mirrors the
- *  shell's `AskChatResponse` — the POST itself stays in the shell, shared with the
+ *  Ask controller's `AskChatResponse` — the POST itself stays there, shared with the
  *  plain (one-click) escalate path. */
 export interface ChatOptPostResult {
   status: number;
@@ -146,23 +146,24 @@ export interface ChatOptPostResult {
 
 /**
  * Everything the dialog needs from the reader shell. Declared with METHOD syntax
- * so a shell function typed on the richer `AskTurn` still satisfies it.
+ * so an Ask-controller function typed on the richer `AskTurn` still satisfies it.
  *
- * Method syntax means those parameters are checked BIVARIANTLY, so the shell's
+ * Method syntax means those parameters are checked BIVARIANTLY, so the Ask controller's
  * `refreshChatEscalateBar(turn: AskTurn)` is accepted here even though this
  * module only promises it a `ChatOptTurn` — the narrower shape. That is unsound
  * in general, and it is safe here for one structural reason: **this module never
  * CONSTRUCTS a turn.** Every turn it holds came out of `getShownTurn()` (via
- * `state.turn`), i.e. it is a real `AskTurn` the shell handed over, narrowed on
+ * `state.turn`), i.e. it is a real `AskTurn` the Ask controller handed over, narrowed on
  * the way in and handed straight back — the `AskTurn`-only fields are still
- * there at runtime, unread. The shell's own guard closes the remaining gap: its
- * `refreshChatEscalateBar` starts with `if (turn !== askShownTurn) return;`, an
- * IDENTITY test, so a turn that did not come from the shell repaints nothing at
- * all rather than being read as an `AskTurn`.
+ * there at runtime, unread. The Ask controller's own guard closes the remaining
+ * gap: its `refreshChatEscalateBar` (the shell passes it through) starts with
+ * `if (turn !== askShownTurn) return;`, an IDENTITY test, so a turn that did
+ * not come from the controller repaints nothing at all rather than being read as an
+ * `AskTurn`.
  *
  * Both halves of that are load-bearing. Synthesizing a `ChatOptTurn` here — a
  * stub for a decline, say — and passing it to `refreshChatEscalateBar` would
- * hand the shell an object missing every field its `AskTurn` type promises, with
+ * hand the controller an object missing every field its `AskTurn` type promises, with
  * no type error anywhere; it survives today only because the identity guard
  * would drop it. Prefer `getShownTurn()` and keep it that way.
  */
@@ -179,7 +180,7 @@ export interface ChatOptionsDeps {
   /** Titles of that page's outgoing links (`currentOutgoingTitles`). */
   getOutgoingTitles(): string[];
   /** The shared `POST /api/wiki/ask/chat` — one spelling of the body encoding for
-   *  both escalation paths, so it stays with the other one, in the shell. */
+   *  both escalation paths, so it stays with the other one, in the Ask controller. */
   postAskChat(payload: Record<string, unknown>): Promise<ChatOptPostResult>;
   /** Repaint a turn's "Continue in chat →" bar after the dialog mirrors its
    *  outcome onto `turn.chatEsc`. */
@@ -343,7 +344,7 @@ function currentChatOptNameSource(state: ChatOptState): string {
 
 /**
  * The most recent real question of this reader's Ask session, for the "Continue
- * …" starter chip. The shell's `askTurns` (read through the port) is oldest-first,
+ * …" starter chip. The Ask controller's `askTurns` (read through the port) is oldest-first,
  * so this walks back from the end.
  *
  * Fact-check turns are skipped: their `question` is the synthetic "Fact check:

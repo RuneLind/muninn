@@ -3487,7 +3487,7 @@ function buildWikiPageCss(): string {
     .wiki-fc-int-msg { margin-top: 8px; }
     .wiki-fc-int-msg.error { color: var(--status-error); }
     /* ↻ Claim retry — one row injected under each retryable claim heading by the
-       DOM pass in wiki-browser.ts (the answer body is opaque HTML, so the rows are
+       DOM pass in wiki-ask-controller.ts (the answer body is opaque HTML, so the rows are
        built from the headings, not rendered with them), plus the batch bar. */
     .wiki-fc-retry {
       display: flex; align-items: center; flex-wrap: wrap; gap: 8px;

@@ -13,8 +13,8 @@
  *
  * PR 2 (UI) grew this module past the parser: the reader's Integrate button gate,
  * the diff-preview HTML builders and the apply-body construction all live here for
- * the same reason — they must be unit-testable without a DOM, which
- * `wiki-browser.ts`'s code needs (it is importable since `boot()`). `src/utils/line-diff.ts` (the
+ * the same reason — they must be unit-testable without a DOM, which their caller
+ * `wiki-ask-controller.ts` needs (the Ask code moved there from `wiki-browser.ts` in C4). `src/utils/line-diff.ts` (the
  * dependency-free LCS line diff behind the gardener's update preview) is the only
  * import, and it is likewise DOM-free + node-free.
  */
