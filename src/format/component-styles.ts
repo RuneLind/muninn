@@ -94,7 +94,7 @@ export function componentBlockCss(scope: string): string {
     /* Reader shapes (reader-shapes.ts, wiki render only): number columns,
        verdict cells, the bold-label grid. */
     /* The header and a cell's note wrap (nowrap on both widened the widest
-       table on 55 of 234 pages at 390 px); only the number stays whole. */
+       table on 54 of 234 pages at 390 px); only the number stays whole. */
     ${scope} th.num, ${scope} td.num { text-align: right; font-variant-numeric: tabular-nums; }
     ${scope} td.num .num-nw { white-space: nowrap; }
     ${scope} td.v-good { background: color-mix(in srgb, var(--status-success) 11%, transparent); }

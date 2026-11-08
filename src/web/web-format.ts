@@ -2186,7 +2186,7 @@ function readerTableHtml(headers: string[], rows: string[][]): string {
 
 /** A top-level list whose every item opens with a bold label (D3), on the
  *  reader: the label in one column, the text and anything under the item in
- *  the other. The label's `:`/`.` and the `:`/`—` after the bold stay in the
+ *  the other. The label's `:`/`.` and the `:`/`—`/`–` after the bold stay in the
  *  text, hidden in flow with `font-size: 0` (`lg-c`), which keeps a
  *  selection reading `Label — text` as the source does; the spaces around
  *  them sit outside it only so the visible gap stays. `lg-v` is a span
