@@ -34,6 +34,7 @@
 
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks, unwrapCodeBlockChrome } from "./code-block-chrome.ts";
+import { adoptMermaidCopies } from "./wiki-mermaid.ts";
 
 const ENHANCED = "data-fc-enhanced";
 const LAYER_OFF = "fc-off";
@@ -207,6 +208,8 @@ function toggleChip(chip: HTMLElement, layer: Element): void {
   if (!point) return;
   const card = buildCard(n, section, chipVerdict(chip));
   point.parent.insertBefore(card, point.before);
+  // A cloned mermaid diagram: redrawn under its own id, with no dead ⤢.
+  adoptMermaidCopies(card);
   chip.setAttribute("aria-expanded", "true");
   chip.setAttribute("aria-controls", card.id);
   openCard = { card, chip };

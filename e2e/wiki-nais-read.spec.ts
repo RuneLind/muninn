@@ -413,6 +413,10 @@ const READER_CONTROLS = [
   "button.cb-okmore",
   ".qx-search",
   ".qx-chip",
+  // A mermaid diagram's ⤢ (opens a client-side <dialog>, no request) and its
+  // body as a keyboard scroll stop while the drawing is wider than the column.
+  ".diagram-expand",
+  '.diagram-body[role="region"]',
   // Out to the tracker.
   'a[href^="https://"][target="_blank"]',
 ];
@@ -526,6 +530,12 @@ for (const scheme of ["light", "dark"] as const) {
     await page.locator("[data-prov-toggle]").click();
     await expect(page.locator("#wikiProvChain")).toBeVisible();
     expect(await unexpectedControls(page)).toEqual([]);
+    // The mermaid ⤢ is a live read control here: it opens the full-window
+    // copy client-side, and the close button returns.
+    await page.locator("#articleWrap .diagram-expand").first().click();
+    await expect(page.locator("dialog.diagram-dialog svg")).toContainText("Søknad mottatt");
+    await page.locator(".diagram-dialog-close").click();
+    await expect(page.locator("dialog.diagram-dialog")).toBeHidden();
     expect(seen.failed).toEqual([]);
     expect(seen.errors).toEqual([]);
     // The scheme actually applied: the body background follows it.

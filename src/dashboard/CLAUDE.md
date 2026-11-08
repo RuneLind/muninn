@@ -57,3 +57,4 @@ t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -s -w 2000 > 
 - Common Pitfalls [trap]
 - The `Jira composer` entry from the root `CLAUDE.md` module table [trap]
 - Corrective Retrieval (Path D, in huginn) — from the root `CLAUDE.md`
+- Mermaid in the reader (`wiki-mermaid.ts`, `mermaid-theme.ts`, `scroll-stop.ts`) [trap]

@@ -632,6 +632,38 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .diagram-body { overflow-x: auto; }
     ${scope} .diagram svg { max-width: 100%; height: auto; }
+    /* The mermaid enhancer's ⤢ button and full-window view (wiki-mermaid.ts). */
+    ${scope} .diagram[data-mermaid-src] { position: relative; }
+    ${scope} .diagram-expand {
+      position: absolute; top: 6px; right: 6px; z-index: 2; cursor: pointer;
+      width: 28px; height: 28px; padding: 0; border-radius: 6px;
+      border: 1px solid var(--border-primary); background: var(--bg-panel);
+      color: var(--text-soft); font-size: 15px; line-height: 1;
+    }
+    ${scope} .diagram-expand:hover, ${scope} .diagram-expand:focus-visible { color: var(--accent); border-color: var(--accent); }
+    dialog.diagram-dialog {
+      /* margin: auto centres a modal dialog; the page's * reset zeroes it. */
+      margin: auto; padding: 0; border: 1px solid var(--border-primary); border-radius: 10px;
+      max-width: 96vw; max-height: 94vh; overflow: auto;
+      background: var(--bg-panel); color: var(--text-primary);
+    }
+    dialog.diagram-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+    dialog.diagram-dialog .diagram-dialog-inner { position: relative; padding: 24px; text-align: center; }
+    dialog.diagram-dialog .diagram-dialog-close {
+      position: sticky; top: 0; float: right; margin: -16px -16px 0 8px; z-index: 2; cursor: pointer;
+      width: 28px; height: 28px; padding: 0; border-radius: 6px;
+      border: 1px solid var(--border-primary); background: var(--bg-panel); color: var(--text-soft); font-size: 14px;
+    }
+    dialog.diagram-dialog .diagram-dialog-close:hover, dialog.diagram-dialog .diagram-dialog-close:focus-visible { color: var(--accent); border-color: var(--accent); }
+    /* Block, so no line box adds a descender gap under it; sized in wiki-mermaid.ts by mermaid-theme.ts dialogBox. */
+    dialog.diagram-dialog svg { display: block; margin: 0 auto; height: auto; }
+    /* Paper does not scroll: a widened diagram (an inline width and max-width:none
+       from wiki-mermaid.ts layout) scales back to the page width, as <Diagram> does. */
+    @media print {
+      ${scope} .diagram-body { overflow: visible; }
+      ${scope} .diagram svg[data-widened] { max-width: 100% !important; height: auto; }
+      ${scope} .diagram-expand, dialog.diagram-dialog { display: none !important; }
+    }
     ${scope} .caption { color: var(--text-muted); font-size: 0.85em; text-align: center; margin-top: 0.5rem; }
     ${scope} .meter { display: flex; align-items: center; gap: 0.6rem; margin: 1rem 0; }
     ${scope} .meter-label { font-weight: 600; color: var(--text-primary); }
