@@ -1467,12 +1467,9 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   return head;
 }
 
-/** Standalone HTML explainers aren't markdown, so the article renders in a
- *  sandboxed <iframe> (scripts allowed — they use inline JS/mermaid and are
- *  trusted local docs on a loopback-only dashboard) instead of the markdown
- *  pane. The Connections panel is fetched from /api/wiki/page like any other
- *  page: explainers carry backlinks ("Linked from") since md→.html links join
- *  the link graph, plus the lazy Similar section; outgoing links stay empty. */
+/** An explainer renders in a sandboxed <iframe> (scripts allowed: trusted local
+ *  docs on a loopback-only dashboard), not the markdown pane. Its Connections
+ *  come from /api/wiki/page like any page: backlinks and Similar, no outgoing. */
 function loadExplainer(m: WikiListing, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
   // An explainer has no lens: a `?lens=` is spent, and a plan-card run dropped.
@@ -1480,9 +1477,10 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   abortAgentRuns();
   setAtlasFull(false);
   setCurrentName(m.name);
-  // The listing IS the identity here (no page response to wait for), so the
-  // active-row test gets its relPath immediately.
+  // The listing IS the identity here, so the active row gets its relPath now; the
+  // previous page's hash is cleared with it (a series write compares it).
   setCurrentRelPath(m.relPath);
+  currentPageHash = null;
   /** This view's number: a later view drops this page's response (R2B4). */
   const seq = pageViewSeq;
   navInFlight = false; // `currentName` now carries the "article" signal on its own
@@ -1513,6 +1511,8 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       // from came out of `/api/wiki/pages`, which strips `desc` (and an
       // explainer's `description` is sniffed, not always in the listing).
       if (data.meta) currentArticle = data.meta;
+      // Unless the reader's own series write already set a newer one meanwhile.
+      if (currentPageHash === null && typeof data.hash === "string") currentPageHash = data.hash;
       if (data.meta) placeRetiredBanner(data.meta);
       renderConnections(data);
       // The same gate as a markdown page: an explainer with inferred keys has
