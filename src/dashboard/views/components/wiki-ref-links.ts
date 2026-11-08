@@ -423,6 +423,8 @@ export const PEEK_STRIP_SELECTOR = [
   ...PEEK_SYSTEM_MAP_CHROME,
   "gl-tip",
   "cb-dots",
+  // The mermaid enhancer's ⤢ button: its listener does not survive a copy.
+  "diagram-expand",
 ]
   .map((c) => `.${c}`)
   .join(", ");

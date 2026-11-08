@@ -17,8 +17,8 @@
  *  3b. **System shows a palette.** With nothing stored, a dark OS shows
  *     Reading mode and a light OS Light reading mode, on the dashboard and on
  *     chat, while an explicit Light or Dark pick still shows the plain base.
- *  4. **Mermaid follows the base.** A palette is a layer, never a third base:
- *     the diagram renders mermaid's theme for the palette's base.
+ *  4. **Mermaid follows the palette.** The diagram draws with mermaid's
+ *     `base` theme from the palette's own tokens, never mermaid's default fills.
  *
  * Boots its own muninn with a temp `WIKI_EXTRA` wiki (the mermaid fixture).
  * The mermaid bundle loads from the CDN, as it does for every reader.
@@ -483,19 +483,61 @@ test.describe("The theme picker", () => {
 });
 
 test.describe("A palette follows its base everywhere that asks light or dark", () => {
-  // mermaid's `default` theme fills nodes #ECECFF; `dark` fills #1f2020.
-  const MERMAID_FILL = { light: "rgb(236, 236, 255)", dark: "rgb(31, 32, 32)" } as const;
+  // mermaid's own `default` theme fills nodes #ECECFF; `dark` fills #1f2020.
+  // The reader draws with the `base` theme from the palette's tokens instead
+  // (wiki-mermaid.ts): a node is accent 4.5% over panel, resolved in the page.
+  const MERMAID_DEFAULT_FILL = { light: "rgb(236, 236, 255)", dark: "rgb(31, 32, 32)" } as const;
+  /** `[r, g, b]` from a computed `rgb()` / `color(srgb …)`. */
+  const channels = (c: string): number[] => {
+    const rgb = /rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/.exec(c);
+    if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+    const s = /color\(srgb ([\d.e-]+) ([\d.e-]+) ([\d.e-]+)/.exec(c);
+    if (s) return [Number(s[1]) * 255, Number(s[2]) * 255, Number(s[3]) * 255];
+    throw new Error("unparsed colour " + c);
+  };
+  const fills: Record<string, string> = {};
   for (const p of PALETTES) {
-    test(`mermaid renders its ${p.base} theme under ${p.id}`, async ({ page }) => {
-      // The OS asks for the other scheme, so only the palette's base can draw this theme.
+    test(`mermaid draws in ${p.id}'s own colours (base ${p.base})`, async ({ page }) => {
+      // The OS asks for the other scheme, so only the palette can draw these colours.
       await page.emulateMedia({ colorScheme: p.base === "light" ? "dark" : "light" });
       await storeChoice(page, p.id);
       await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=diagram-page`);
       const node = page.locator("#articleWrap svg .node rect, #articleWrap svg .node polygon").first();
       await expect(node).toBeVisible({ timeout: 20_000 });
-      expect(await node.evaluate((el) => getComputedStyle(el).fill)).toBe(MERMAID_FILL[p.base]);
+      const fill = await node.evaluate((el) => getComputedStyle(el).fill);
+      expect(fill).not.toBe(MERMAID_DEFAULT_FILL.light);
+      expect(fill).not.toBe(MERMAID_DEFAULT_FILL.dark);
+      const expected = await page.evaluate(() => {
+        const el = document.createElement("span");
+        el.style.color = "color-mix(in srgb, var(--accent) 4.5%, var(--bg-panel))";
+        document.querySelector(".wiki-article")!.appendChild(el);
+        const c = getComputedStyle(el).color;
+        el.remove();
+        return c;
+      });
+      const [a, e] = [channels(fill), channels(expected)];
+      for (let i = 0; i < 3; i++) expect(Math.abs(a[i]! - e[i]!), `${fill} vs ${expected}`).toBeLessThanOrEqual(1.5);
+      fills[p.id] = fill;
     });
   }
+  test("palettes of different bases draw different node fills", async ({ page }) => {
+    const light = PALETTES.find((p) => p.base === "light")!;
+    const dark = PALETTES.find((p) => p.base === "dark")!;
+    const fillUnder = async (id: string, base: "light" | "dark") => {
+      if (fills[id]) return fills[id]!;
+      await page.emulateMedia({ colorScheme: base });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=diagram-page`);
+      await page.evaluate(([t, pal]) => {
+        document.documentElement.setAttribute("data-theme", t!);
+        document.documentElement.setAttribute("data-palette", pal!);
+      }, [base, id] as const);
+      const node = page.locator("#articleWrap svg .node rect, #articleWrap svg .node polygon").first();
+      await expect(node).toBeVisible({ timeout: 20_000 });
+      await page.waitForTimeout(500);
+      return node.evaluate((el) => getComputedStyle(el).fill);
+    };
+    expect(await fillUnder(light.id, "light")).not.toBe(await fillUnder(dark.id, "dark"));
+  });
 });
 
 // ── Fix round 1 (PR #747): a palette is a layer, the bases stay main's ─────

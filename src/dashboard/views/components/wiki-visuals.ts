@@ -12,6 +12,7 @@
  * one document-level listener serves every render without re-wiring.
  */
 import { STEPS_ALL_CAPTION, stepsPosText } from "../../../format/steps-focus.ts";
+import { syncScrollStop } from "./scroll-stop.ts";
 
 /** Press `btn` and release the other buttons of its group. */
 function pressOne(btn: HTMLElement): void {
@@ -363,18 +364,11 @@ function applyDiagramView(target: Element | null): boolean {
  * still measures the box scrolling at a narrow width), so a hidden box may carry
  * the stop; a fold never opened has no layout, so its box carries none. Hidden
  * content takes no focus, and opening the fold resizes the box, which runs this
- * again.
+ * again. The rule itself is `syncScrollStop` (`scroll-stop.ts`), shared with
+ * the mermaid enhancer's scrolling `.diagram-body`.
  */
 function syncDiagramStop(box: HTMLElement): void {
-  if (box.scrollWidth > box.clientWidth) {
-    box.setAttribute("role", "region");
-    box.setAttribute("aria-label", box.dataset.dgmLabel ?? "");
-    box.tabIndex = 0;
-  } else if (box.ownerDocument.activeElement !== box) {
-    box.removeAttribute("role");
-    box.removeAttribute("aria-label");
-    box.removeAttribute("tabindex");
-  }
+  syncScrollStop(box, box.dataset.dgmLabel ?? "");
 }
 
 /** Focus left a box: apply its scroll state now (a kept stop goes if it fits). */
