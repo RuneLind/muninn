@@ -127,6 +127,7 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // its fix round 1 batch 2 (chip rules, quoted-title unchip): 825,675 (280,463);
 // batch 3 (sliding reading line, reveal pin, title rule): 826,252 (280,699).
 // Merged with the mermaid PR (#833, both sides above): 844,882 bytes (287,616 gzipped).
+// PR 3's fix round 1 batch 4 (the chip's punctuation class): 845,061 (287,697).
 const WIKI_CLIENT_MAX_BYTES = 846_000;
 
 test("wikiClientScript stays under its size pin", async () => {

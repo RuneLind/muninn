@@ -120,7 +120,11 @@ const FOOT = [
   "",
 ].join("\n");
 
-const SHORT = ["---", "title: Short page", "type: plan", "---", "", "# Short page", "", "## One", "", "a", "", "## Two", "", "b", ""].join("\n");
+// The second paragraph puts chips right before a comma and a parenthesis.
+const SHORT = [
+  "---", "title: Short page", "type: plan", "---", "", "# Short page", "", "## One", "", "a", "",
+  "The head went 1561 → 1600 px, the list 7→4 (and 2 → 3).", "", "## Two", "", "b", "",
+].join("\n");
 
 let server: ChildProcess | undefined;
 let base = "";
@@ -257,6 +261,97 @@ async function chipContrast(page: Page, chipSel: string): Promise<{ old: number;
     };
   }, chipSel);
 }
+
+test.describe("chip before punctuation", () => {
+  test("a chip right before a comma or parenthesis leaves no padding gap; selection still reads the source", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/short.mdx")}&lens=all`);
+    await expect(page.locator(".wiki-article .ba-chip").first()).toBeVisible();
+    const got = await page.evaluate(() => {
+      // The paragraph renders as text after a `<br>`, no `<p>` of its own.
+      const p = document.querySelector(".wiki-article .ba-chip")!.parentElement!;
+      // Gap from the chip's last glyph to the punctuation after it, both read
+      // as glyph rects, so padding shows as distance.
+      const gaps = Array.from(p.querySelectorAll(".ba-chip")).map((chip) => {
+        const last = chip.querySelector(".ba-new")!.firstChild as Text;
+        const r1 = document.createRange();
+        r1.setStart(last, last.length - 1);
+        r1.setEnd(last, last.length);
+        const next = chip.nextSibling as Text;
+        const r2 = document.createRange();
+        r2.setStart(next, 0);
+        r2.setEnd(next, 1);
+        return { text: chip.textContent, punct: next.data[0], gap: r2.getBoundingClientRect().left - r1.getBoundingClientRect().right };
+      });
+      const chips = p.querySelectorAll(".ba-chip");
+      const end = chips[chips.length - 1]!.nextSibling as Text;
+      const r = document.createRange();
+      r.setStart(chips[0]!.previousSibling!, 0);
+      r.setEnd(end, end.length);
+      const sel = getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(r);
+      return { gaps, selection: sel.toString().replace(/\s+/g, " ").trim() };
+    });
+    console.log(got.gaps.map((g) => `${g.text}|${g.punct} gap=${g.gap.toFixed(2)}px`).join("\n"));
+    expect(got.gaps.map((g) => [g.text, g.punct])).toEqual([["1561 → 1600 px", ","], ["7→4", " "], ["2 → 3", ")"]]);
+    for (const g of got.gaps) if (g.punct !== " ") expect(g.gap).toBeLessThan(1);
+    expect(got.selection).toBe("The head went 1561 → 1600 px, the list 7→4 (and 2 → 3).");
+  });
+});
+
+test.describe("one sticky head", () => {
+  /** Each visible bottom border from the breadcrumb's top to the article: a
+   *  border counts when it has width, a style and a colour that is not fully
+   *  transparent. */
+  const strips = (page: Page) =>
+    page.evaluate(() => {
+      const shown = (el: Element) => {
+        const cs = getComputedStyle(el);
+        const ctx = document.createElement("canvas").getContext("2d")!;
+        ctx.fillStyle = "rgba(0,0,0,0)";
+        ctx.fillStyle = cs.borderBottomColor;
+        ctx.fillRect(0, 0, 1, 1);
+        const alpha = ctx.getImageData(0, 0, 1, 1).data[3];
+        return parseFloat(cs.borderBottomWidth) > 0 && cs.borderBottomStyle !== "none" && alpha! > 0;
+      };
+      const bc = document.getElementById("wikiBreadcrumb")!;
+      const bar = document.getElementById("wikiSectionBar")!;
+      return {
+        breadcrumb: shown(bc),
+        bar: !bar.hidden && shown(bar),
+        barShown: !bar.hidden && getComputedStyle(bar).display !== "none",
+        touching: Math.abs(bar.getBoundingClientRect().top - bc.getBoundingClientRect().bottom) < 0.5,
+      };
+    });
+  const SCHEMES = [
+    { name: "light", theme: "light", palette: null },
+    { name: "dark", theme: "dark", palette: null },
+    { name: "reading", theme: "dark", palette: "reading" },
+    { name: "paper-light", theme: "light", palette: "paper-light" },
+  ];
+  test("breadcrumb and bar draw one divider at desktop width in four palettes; 700 px and a page without a bar keep the breadcrumb's", async ({ page }) => {
+    await openLong(page);
+    for (const width of [1440, 1024]) {
+      await page.setViewportSize({ width, height: 800 });
+      for (const s of SCHEMES) {
+        await page.evaluate(([theme, palette]) => {
+          document.documentElement.setAttribute("data-theme", theme as string);
+          if (palette) document.documentElement.setAttribute("data-palette", palette as string);
+          else document.documentElement.removeAttribute("data-palette");
+        }, [s.theme, s.palette] as const);
+        expect({ at: `${width} ${s.name}`, ...(await strips(page)) }).toEqual({ at: `${width} ${s.name}`, breadcrumb: false, bar: true, barShown: true, touching: true });
+      }
+    }
+    await page.setViewportSize({ width: 700, height: 800 });
+    expect(await strips(page)).toEqual({ breadcrumb: true, bar: true, barShown: true, touching: true });
+    await page.setViewportSize({ width: 1440, height: 800 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/short.mdx")}&lens=all`);
+    await expect(page.locator(".wiki-article h3").first()).toBeVisible();
+    expect((await strips(page)).breadcrumb).toBe(true);
+    expect((await strips(page)).barShown).toBe(false);
+  });
+});
 
 test.describe("chip contrast", () => {
   const SCHEMES = [

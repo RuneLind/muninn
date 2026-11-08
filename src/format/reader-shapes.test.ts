@@ -404,7 +404,7 @@ describe("reader shapes reach the article render only", () => {
 
 /** Each chip's visible text, in order. */
 function chipTexts(html: string): string[] {
-  const re = /<span class="ba-chip">((?:(?!<span class="ba-chip">)[\s\S])*?<span class="ba-new">[^<]*<\/span>)<\/span>/g;
+  const re = /<span class="ba-chip(?: ba-chip-p)?">((?:(?!<span class="ba-chip)[\s\S])*?<span class="ba-new">[^<]*<\/span>)<\/span>/g;
   return [...html.matchAll(re)].map((m) => m[1]!.replace(/<[^>]*>/g, ""));
 }
 
@@ -570,5 +570,26 @@ describe("before → after chips: where the renderer draws them", () => {
   test("renderWikiHtml draws them only with readerShapes", () => {
     expect(renderWikiHtml("CI 10 → 6 min\n", () => undefined)).not.toContain("ba-chip");
     expect(renderWikiHtml("CI 10 → 6 min\n", () => undefined, { readerShapes: true })).toContain("ba-chip");
+  });
+});
+
+describe("before → after chips: punctuation right after a chip", () => {
+  const tight = (html: string) => (beforeAfterChipsHtml(html).match(/<span class="ba-chip[^"]*">/g) ?? []);
+  test.each([
+    ["went 7→4, then", ","],
+    ["went 7→4. Then", "."],
+    ["(went 7→4)", ")"],
+    ["went 7→4; then", ";"],
+    ["went <strong>7→4</strong>, then", "after a closing tag"],
+  ])("%p: the chip drops its right padding (%s)", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip ba-chip-p">']);
+  });
+  test.each([["went 7→4 then"], ["went 7→4 (then)"], ["went 7→4"], ["went 7→4 and, then"]])("%p: padding kept", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip">']);
+  });
+  test("the text is unchanged: the class is the only addition", () => {
+    const out = beforeAfterChipsHtml("went 10 → 6 min, then (1 → 2).");
+    expect(out.replace(/<[^>]*>/g, "")).toBe("went 10 → 6 min, then (1 → 2).");
+    expect(out).toContain('<span class="ba-chip ba-chip-p"><span class="ba-old">10</span> <span class="ba-arr">→</span> <span class="ba-new">6 min</span></span>,');
   });
 });

@@ -399,6 +399,11 @@ export function sectionBarCss(): string {
     .wiki-sec-k { color: var(--text-muted); font-variant-numeric: tabular-nums; min-width: 1.6em; text-align: right; flex-shrink: 0; }
     .wiki-sec-item[aria-current] { color: var(--accent-light); font-weight: 650; }
     .wiki-sec-item:hover, .wiki-sec-item:focus-visible { background: var(--tint-neutral); outline: none; }
+    /* Above phone width the breadcrumb and a shown bar are one head with the
+       bar's divider only; the breadcrumb's tucks away with half its foot pad. */
+    @media (min-width: 721px) {
+      .wiki-breadcrumb:has(+ .wiki-sec:not([hidden])) { border-bottom-width: 0; padding-bottom: 4px; }
+    }
     /* At phone width the progress becomes a line along the bar's foot, so the
        title keeps the row. */
     @media (max-width: 720px) {

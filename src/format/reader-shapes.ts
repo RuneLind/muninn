@@ -464,7 +464,7 @@ export function beforeAfterChipsHtml(html: string): string {
   // across a tag (`<em>v</em>1`); a parked placeholder reads as a letter
   // (`` `v`1.2 ``), a `<br>` as a space.
   let earlier = "";
-  return html
+  const chipped = html
     .split(/(<[^>]*>|\x00[^\x00]*\x00)/)
     .map((seg, k) => {
       const out = k % 2 === 1 || (!seg.includes("→") && !seg.includes("-&gt;")) ? seg : chipText(seg, earlier);
@@ -472,4 +472,11 @@ export function beforeAfterChipsHtml(html: string): string {
       return out;
     })
     .join("");
+  return chipped.replace(CHIP_BEFORE_PUNCT_RE, '<span class="ba-chip ba-chip-p">');
 }
+
+/** A chip followed (past any closing tags) by punctuation: it drops its right
+ *  padding (`ba-chip-p`), which read as a space before `,` `.` `)` (4.19 px
+ *  measured in e2e). A chip's spans hold text only, so `[^<]` or one span. */
+const CHIP_BEFORE_PUNCT_RE =
+  /<span class="ba-chip">(?=(?:<span class="ba-(?:old|arr|new)">[^<]*<\/span>|[^<])*<\/span>(?:<\/[a-z]+>)*[,.;:!?)\]…])/g;
