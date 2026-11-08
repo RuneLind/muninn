@@ -17,14 +17,11 @@
  */
 
 import { movedWithSectionHtml, type MovedWithListing } from "./wiki-moved-with.ts";
-import { confirmedHits, STALE_SHELL_HTML, staleBodyHtml, staleCounts, staleFixKey, staleFixResultNotice, staleTabBadge, type StaleNotice, type StalePageCounts, type StaleReportView, type StaleVerdictView } from "./wiki-stale-tab.ts";
-import { placeStaleMarks } from "./wiki-stale-marks.ts";
-import { staleCountMap, staleHomeBodyHtml, staleHomeLineHtml, stalePillHtml, staleRailBadgeHtml, type StaleSummaryView } from "./wiki-stale-summary.ts";
+import { staleHomeBodyHtml, staleHomeLineHtml } from "./wiki-stale-summary.ts";
 import { escHtml as esc } from "./escape.ts";
 import {
   installWikiReadonlyGuard,
   seriesEditable,
-  wikiReadonlyFlag,
   wikiReadonlyWikiFlag,
   WIKI_READONLY_INPUT_PLACEHOLDER,
 } from "./wiki-readonly-client.ts";
@@ -112,14 +109,9 @@ import {
   mountStartCards,
   refreshWorkCardFromListing,
   startReindex,
-  workMapDoneSet,
 } from "./wiki-start-cards.ts";
-// The effort page (work map P3): pure HTML, wired by `renderEffort` below.
-import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
-import { themeView } from "./wiki-theme-page.ts";
-import type { WorkMapGetBody } from "./wiki-work-card.ts";
-import { isThemeMap, type AnyWorkMap } from "../../../wiki/work-map/join.ts";
-import { EFFORTS_OFF_TOGGLE_KEY, effortsOn, railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
+// The effort page (work map P3): pure HTML, rendered by the effort controller; its clicks go through the body click delegate below.
+import { EFFORT_PARAM } from "./wiki-effort-page.ts";
 import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
@@ -147,17 +139,10 @@ import { relationWord } from "./wiki-issue-pills.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
-  isRailGroupCard,
-  normalizeFoldKey,
   parseRelatedOrder,
-  type RailGroupCard,
-  type RailThreadCard,
-  type RailWorkCard,
   type RelatedOrder,
 } from "./wiki-recents.ts";
 import {
-  CLOSED_FOLD_PREFIX,
-  GROUP_FAMILIES_TOGGLE_KEY,
   clipSeriesTitle,
   seriesContinuePlan,
   seriesKeyOf,
@@ -165,9 +150,7 @@ import {
   seriesStripOrder,
   workedShownDay,
 } from "./wiki-groups.ts";
-import { rowBoundaryAction } from "./wiki-work-boundaries.ts";
-import { readSeriesBasesAfterWrites, SERIES_REQUEST_TIMEOUT_MS, SERIES_STALLED_COPY, seriesBaseReader, seriesConflictCopy, seriesPoster, trackSeriesWrite, withinSeriesBound, writeSeriesUnlessOpenChanged, type OpenPageAtLoad, type SeriesPoster } from "./wiki-series-write.ts";
-import { checkNewSeriesKey, recheckSaveAsSeries } from "./wiki-work-series.ts";
+import { readSeriesBasesAfterWrites, seriesBaseReader, seriesConflictCopy, seriesPoster, trackSeriesWrite, withinSeriesBound, writeSeriesUnlessOpenChanged, type OpenPageAtLoad, type SeriesPoster } from "./wiki-series-write.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   parseActivityWeights,
@@ -179,23 +162,11 @@ import {
   purgeRecentsKeys,
   readRelatedOrder,
   readSort,
-  toggleFolded,
-  readWorkGroup,
   writeRelatedOrder,
-  writeSort,
 } from "./wiki-recents-store.ts";
 import {
-  groupCardMenuHtml,
-  saveSeriesConfirmHtml,
-  threadCardMenuHtml,
-  threadRowMenuHtml,
-  WORK_GROUP_FULL_TEXT,
   WORK_POP_ID,
 } from "./wiki-thread-view.ts";
-import {
-  workGroupAddRefused,
-  type WorkGroupEdit,
-} from "./wiki-work-group-record.ts";
 import { atlasBodyHtml, atlasCullOf, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
 import { readSliceStartTab, wikiToolsFlag } from "./wiki-read-slice.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
@@ -410,35 +381,73 @@ import { initWikiVisuals } from "./wiki-visuals.ts";
 import {
   applyJiraFilter,
   applyProjectFilter,
-  familiesOn,
-  focusWorkMenuButton,
-  getOpenFolds,
-  getRestoringRailFocus,
-  getWorkBounds,
-  getWorkCardsDrawn,
-  getWorkGroupRec,
   initRail,
   loadCoverageFooter,
-  paintEffortsToggle,
-  paintViewOptions,
   railPages,
   registerRail,
   registerRailMenuKeys,
+  registerRailOptions,
+  railControlSelector,
+  getSortTouched,
   renderJiraChips,
   renderList,
   renderPageFacets,
   repaintForJira,
   repaintForProject,
-  setOpenFolds,
-  setRevealOnRender,
   setShowRetired,
   showOpenPageInList,
   showRetired,
-  stepWorkGroup,
   type RailDeps,
 } from "./wiki-rail-controller.ts";
 import { followupFlagHtml, statusPillHtml } from "./wiki-status-pills.ts";
-import { getCurrentName, getWorkFacts, getWorkMapRunAt, getWorkMapThemes, setCurrentName, setWorkFacts, setWorkMapRunAt, setWorkMapThemes } from "./wiki-shell-state.ts";
+import {
+  getStaleSummary,
+  initStale,
+  loadStale,
+  loadStaleSummary,
+  paintStaleSurfaces,
+  postStaleFix,
+  postStaleVerdict,
+  railStaleBadge,
+  registerStale,
+  resetStaleRailPainted,
+  runStaleCheckClient,
+  staleFollowShownPage,
+  staleForFailedPage,
+  staleTabAvailable,
+  type StaleDeps,
+} from "./wiki-stale-controller.ts";
+import {
+  adoptWorkMap,
+  effortFromUrl,
+  effortHrefFor,
+  getEffortOpen,
+  getRailMapFailedAt,
+  getWorkMap,
+  getWorkMapCache,
+  initEffort,
+  openEffort,
+  railEffortsIndex,
+  refreshEffortFromListing,
+  renderEffort,
+  workMapFetchFor,
+  type EffortDeps,
+} from "./wiki-effort-controller.ts";
+import {
+  boundaryItemClick,
+  focusPopOpener,
+  initMenus,
+  openThreadRowMenu,
+  openWorkCardMenu,
+  popCloseReturnsFocus,
+  registerMenus,
+  rowMenuItemHtml,
+  showWorkBoundaryStatus,
+  workPopBusy,
+  type MenusDeps,
+  type PopCloseCause,
+} from "./wiki-menus-controller.ts";
+import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
 const LENS_PARAM = "lens";
@@ -703,12 +712,11 @@ let pageFetchSeq = 0;
 /** The one writer of `currentRelPath`. The shown page changing is what ends a
  *  Check that belongs to another page (A9), on every route off it: another
  *  page, an explainer, the start view, an Ask answer, an issue graph; the
- *  STALE tab follows it (`staleFollowPage`). */
+ *  STALE tab follows it (`staleFollowShownPage`). */
 function setCurrentRelPath(relPath: string | null): void {
   currentRelPath = relPath;
   pageViewSeq++;
-  if (staleCheckRun && staleCheckRun.relPath !== relPath) abortStaleCheck();
-  staleFollowPage(relPath);
+  staleFollowShownPage(relPath);
 }
 /**
  * The open page's content hash, from the `/api/wiki/page` response that
@@ -980,14 +988,11 @@ function applyWorkedSortOption(coverage: WikiPagesResponse["workedCoverage"]): v
   select.value = resolveSortMode({
     current: select.value as WikiSortMode,
     stored: readSort(WIKI),
-    touched: sortTouched,
+    touched: getSortTouched(),
     workedShown,
   });
 }
 
-/** The reader changed the sort in this tab: it outranks the default for the rest
- *  of the session, even where storage refuses the write. */
-let sortTouched = false;
 /** The last listing said the ledger covers pages on this wiki — what lets the
  *  article header name a worked day, or say no session wrote the page. */
 let workedAxisOn = false;
@@ -1823,7 +1828,7 @@ function timelineHtml(): string {
 
 function startBodyHtml(): string {
   if (startTab === "atlas") return atlasBodyHtml();
-  if (startTab === "stale") return staleHomeBodyHtml(staleSummary);
+  if (startTab === "stale") return staleHomeBodyHtml(getStaleSummary());
   return startTab === "hubs" ? hubsHtml() : timelineHtml();
 }
 
@@ -1915,7 +1920,7 @@ function renderStart(): void {
     '<div id="wikiIndexCard" class="wiki-index-card" style="display:none"></div>' +
     // The Stale check's line (PR 2b), beside the Index card rather than in
     // it: that card hides on a wiki with no search collections.
-    (staleTabAvailable() ? `<div id="wikiStaleHome" class="wiki-stale-home">${staleHomeLineHtml(staleSummary)}</div>` : "") +
+    (staleTabAvailable() ? `<div id="wikiStaleHome" class="wiki-stale-home">${staleHomeLineHtml(getStaleSummary())}</div>` : "") +
     '<div class="wiki-start-stats" id="wikiStartStats">' +
     startStatsHtml();
   html +=
@@ -2342,446 +2347,8 @@ function loadSimilar(page: { relPath: string }): void {
     });
 }
 
-// ── The STALE tab (stale check PR 2a, `wiki-stale-tab.ts`) ────────────
-/** The tab's report for the open page, and Check's state. */
-let staleReport: StaleReportView | null = null;
-let staleFor: string | null = null;
-let staleChecking = false;
-let staleProgress = "";
-/** The outcome of the reader's last action, shown above the report whatever
- *  else renders (a verdict not saved, A12; Apply's and Send's answers): a
- *  repaint, Check and a reload of the same page keep it (R2B4); the next
- *  answer replaces it, another page clears it. */
-let staleNotice = "";
-let staleNoticeTone: StaleNotice["tone"] = "error";
-/** Fixes whose Apply or Send is in flight, by `staleFixKey`: every repaint
- *  draws their buttons disabled, so no fix is posted twice. The value is the
- *  last report request issued when the POST answered (Infinity until then):
- *  only a report requested after it can drop the fix, so only such a report
- *  clears the key, never an earlier one landing late or a superseded one. */
-const staleFixPending = new Map<string, number>();
-/** A report from request `seq` landed: fixes answered before it was asked for
- *  are no longer in flight. */
-function settleStaleFixes(seq: number): void {
-  for (const [key, answeredAt] of staleFixPending) if (answeredAt < seq) staleFixPending.delete(key);
-}
-/** Linking pages whose last Check call failed: shown per row, not counted (A12). */
-let staleRowErrors: Record<string, string> = {};
-/** Pages the last Check left at its call limit (A12). */
-let staleCapLeft = 0;
-let staleCapCalls = 10;
-/** Each `<details>`'s open state by its `data-stale-open` key, for the page
- *  in `staleFor` only: a repaint keeps it (A12), a new page starts clean.
- *  Written by the tab's `toggle` listener as the reader folds, never read back
- *  from the DOM at repaint, which may still be another page's (R2B4). */
-let staleOpen: Record<string, boolean> = {};
-/** The report request in flight: an older one answering late is dropped. */
-let staleLoadSeq = 0;
-/** The Check stream in flight: its page and its abort (A9). A Check belongs
- *  to the page it started on; leaving that page aborts it. */
-let staleCheckRun: { relPath: string; abort: AbortController } | null = null;
-
-/** Abort the Check in flight, if any: the reader left its page. */
-function abortStaleCheck(): void {
-  staleCheckRun?.abort.abort();
-  staleCheckRun = null;
-  staleChecking = false;
-}
-
-/** The tab exists where the tool routes do and the instance writes (D25). */
-function staleTabAvailable(): boolean {
-  return wikiToolsFlag() && !wikiReadonlyFlag();
-}
-
-/** The tab follows the page on screen: another page starts from no report
- *  (its own loads next), a view that is not a page shows none (R2B4). */
-function staleFollowPage(relPath: string | null): void {
-  const next = relPath && staleTabAvailable() ? relPath : null;
-  if (staleFor === next) return;
-  abortStaleCheck();
-  staleFor = next;
-  staleReport = null;
-  resetStaleClientState();
-  renderStale();
-}
-
-/** Forget the page's client-side Check state: a new page starts clean. */
-function resetStaleClientState(): void {
-  staleProgress = "";
-  staleNotice = "";
-  staleRowErrors = {};
-  staleCapLeft = 0;
-  staleOpen = {};
-}
-
-/** The open page did not load: its stale report is an error, never the
- *  previous page's report (A12). */
-function staleForFailedPage(): void {
-  abortStaleCheck();
-  staleFor = "";
-  staleReport = { error: "the page did not load" };
-  resetStaleClientState();
-  renderStale();
-}
-
-function renderStale(): void {
-  const body = document.getElementById("staleBody");
-  if (body) {
-    if (!body.querySelector(":scope > [data-stale-content]")) body.innerHTML = STALE_SHELL_HTML;
-    const notice = body.querySelector(":scope > [data-stale-notice]")!;
-    // Written only when it changes: the alert node announces its text once.
-    if (notice.textContent !== staleNotice) notice.textContent = staleNotice;
-    notice.setAttribute("data-tone", staleNotice ? staleNoticeTone : "");
-    body.querySelector(":scope > [data-stale-content]")!.innerHTML = staleFor === null
-      ? '<div class="wiki-conn-empty">Select a page to see what may be stale.</div>'
-      : staleBodyHtml(staleReport, {
-        checking: staleChecking,
-        // "" is no line of Check's: the report's own count shows.
-        progress: staleProgress || undefined,
-        rowErrors: staleRowErrors,
-        capLeft: staleCapLeft,
-        capCalls: staleCapCalls,
-        open: staleOpen,
-        pendingFixes: new Set(staleFixPending.keys()),
-      });
-  }
-  const badge = document.getElementById("wikiStaleCount");
-  if (badge) {
-    const b = staleTabBadge(staleReport);
-    badge.textContent = b.text;
-    badge.parentElement?.setAttribute("title", b.tabTitle);
-  }
-  paintStaleSurfaces();
-}
-
-/** What the client holds beyond a freshly loaded report, made to agree with
- *  it: a row a reader has judged is no longer a failed Check row, and no more
- *  pages are left at Check's limit than the report has without a verdict (R2B4). */
-function reconcileStaleClientState(data: StaleReportView): void {
-  const rows = data.buckets?.linking.filter((l) => l.bucket === "toCheck") ?? [];
-  for (const l of rows) if (l.verdict?.checkedBy === "reader") delete staleRowErrors[l.relPath];
-  staleCapLeft = Math.min(staleCapLeft, rows.filter((l) => !l.verdict).length);
-}
-
-/** Set (or with "" clear) the tab's notice and repaint. */
-function setStaleNotice(text: string, tone: StaleNotice["tone"] = "error"): void {
-  staleNotice = text;
-  staleNoticeTone = tone;
-  renderStale();
-}
-
-/** Fetch the open page's stale report (free hits, buckets, cached verdicts). */
-function loadStale(relPath: string): void {
-  if (!staleTabAvailable()) return;
-  if (staleFor !== relPath) {
-    abortStaleCheck();
-    staleFor = relPath;
-    staleReport = null;
-    resetStaleClientState();
-    renderStale();
-  }
-  const seq = ++staleLoadSeq;
-  /** Still the latest request, and still for the page in the tab. */
-  const mine = () => seq === staleLoadSeq && staleFor === relPath;
-  fetch(withWiki("/api/wiki/stale?page=" + encodeURIComponent(relPath)))
-    .then((r) => r.json())
-    .then((data: StaleReportView) => {
-      if (!mine()) return;
-      staleReport = data;
-      settleStaleFixes(seq);
-      if (!data.error) {
-        reconcileStaleClientState(data);
-        foldStaleReportCounts(relPath, staleCounts(data));
-      }
-      renderStale();
-    })
-    .catch(() => {
-      if (!mine()) return;
-      staleReport = { error: "the stale report could not be loaded" };
-      settleStaleFixes(seq);
-      renderStale();
-    });
-}
-
-/** Check (D6): stream the check route, fill verdicts in as they arrive. */
-async function runStaleCheckClient(relPath: string): Promise<void> {
-  if (staleChecking || staleFor !== relPath) return;
-  const run = { relPath, abort: new AbortController() };
-  staleCheckRun = run;
-  /** This run is still the open page's Check: only then does it paint. */
-  const mine = () => staleCheckRun === run && staleFor === relPath;
-  staleChecking = true;
-  staleProgress = "Starting…";
-  staleRowErrors = {};
-  staleCapLeft = 0;
-  renderStale();
-  let checked = 0;
-  let failed = 0;
-  let total = 0;
-  try {
-    const res = await fetch("/api/wiki/stale/check", {
-      method: "POST",
-      headers: { "content-type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ wiki: WIKI, page: relPath }),
-      signal: run.abort.signal,
-    });
-    if (!mine()) return;
-    if (!res.ok || !res.body || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
-      let msg = "Check could not start (HTTP " + res.status + ").";
-      try {
-        const b = (await res.json()) as { error?: unknown };
-        if (b && typeof b.error === "string") msg = b.error;
-      } catch { /* keep the status copy */ }
-      staleProgress = msg;
-      return;
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    const parser = makeSseFrameParser((frame) => {
-      let d: Record<string, unknown> = {};
-      try { d = JSON.parse(frame.data) as Record<string, unknown>; } catch { return; }
-      if (!mine()) return;
-      const rel = String(d.relPath ?? "");
-      if (frame.event === "start") {
-        total = Number(d.toCheck) || 0;
-        staleCapLeft = Number(d.left) || 0;
-        staleCapCalls = Number(d.toCall) > 0 && staleCapLeft > 0 ? Number(d.toCall) : staleCapCalls;
-      } else if (frame.event === "verdict") {
-        checked++;
-        delete staleRowErrors[rel];
-        const l = staleReport?.buckets?.linking.find((x) => x.relPath === rel);
-        if (l) l.verdict = { verdict: d.verdict, reason: d.reason, edit: d.edit } as StaleVerdictView;
-      } else if (frame.event === "error") {
-        // A failed call is not a checked page (A12): the row says why.
-        failed++;
-        staleRowErrors[rel] = String(d.message ?? "the check call failed");
-      } else if (frame.event === "done") staleCapLeft = Number(d.left) || 0;
-      if (frame.event === "app_error") staleProgress = String(d.message ?? "Check failed");
-      else staleProgress = `${checked} of ${total} checked` + (failed ? ` · ${failed} failed` : "");
-      renderStale();
-    });
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done || !mine()) break;
-      parser.push(decoder.decode(value, { stream: true }));
-    }
-    if (mine()) parser.end();
-  } catch {
-    if (mine()) staleProgress = "Could not reach the server.";
-  } finally {
-    // A run that was aborted or replaced leaves the state to its successor.
-    if (mine()) {
-      staleCheckRun = null;
-      staleChecking = false;
-      renderStale();
-      loadStale(relPath);
-    }
-    // Check's verdicts can change other pages' rows too (PR 2b).
-    loadStaleSummary();
-  }
-}
-
-// ── The counts everywhere (stale check PR 2b, `wiki-stale-summary.ts`) ──
-/** The wiki-wide summary (D31): the rail's badges and the home's line and tab. */
-let staleSummary: StaleSummaryView | null = null;
-let staleSummaryCounts = new Map<string, StalePageCounts>();
-/** The summary request in flight: an older one answering late is dropped. */
-let staleSummarySeq = 0;
-/** Page reports folded into the summary's counts, each stamped when the report
- *  LANDS with the newest summary request at that moment: a summary asked for
- *  before the report landed keeps the report's counts, one asked for after it
- *  landed replaces them. */
-const staleReportFolds = new Map<string, { counts: StalePageCounts; seq: number }>();
-/** Each rail row's badge as `renderList` last painted it, by relPath. */
-let staleRailPainted = new Map<string, string>();
-/** `renderList` starts each paint from an empty record (`RailDeps`). */
-function resetStaleRailPainted(): void {
-  staleRailPainted = new Map();
-}
-/** The article and hits the marks were last placed for. */
-let staleMarksFor: { el: Element; sig: string } | null = null;
-
-/** A page's two numbers for its rail row: the open page's own report once it
- *  has loaded (the numbers its pill and STALE tab show), else the summary's row. */
-function staleRailCounts(relPath: string): StalePageCounts | undefined {
-  if (!staleTabAvailable()) return undefined;
-  if (relPath === staleFor && staleReport && !staleReport.error) return staleCounts(staleReport);
-  return staleSummaryCounts.get(relPath);
-}
-
-/** Fetch the wiki-wide summary and repaint the rail and the home. */
-function loadStaleSummary(): void {
-  if (!staleTabAvailable()) return;
-  const seq = ++staleSummarySeq;
-  fetch(withWiki("/api/wiki/stale"))
-    .then((r) => r.json())
-    .then((data: StaleSummaryView) => {
-      if (seq !== staleSummarySeq) return;
-      staleSummary = data;
-      adoptStaleSummaryCounts(staleCountMap(data), seq);
-      renderStaleHome();
-    })
-    .catch(() => {
-      if (seq !== staleSummarySeq) return;
-      staleSummary = { error: "the summary could not be loaded" };
-      adoptStaleSummaryCounts(new Map(), seq);
-      renderStaleHome();
-    });
-}
-
-/** Take summary `seq`'s counts, keeping the page reports that landed after it
- *  was asked for, and repaint the rail only when a badge would change. */
-function adoptStaleSummaryCounts(next: Map<string, StalePageCounts>, seq: number): void {
-  for (const [relPath, f] of staleReportFolds) {
-    if (f.seq >= seq) next.set(relPath, f.counts);
-    else staleReportFolds.delete(relPath);
-  }
-  staleSummaryCounts = next;
-  repaintRailIfBadgeChanged();
-}
-
-/** A page report's counts become its summary row's, so the row keeps what the
- *  pill showed after the reader leaves the page; no refetch. */
-function foldStaleReportCounts(relPath: string, counts: StalePageCounts): void {
-  staleReportFolds.set(relPath, { counts, seq: staleSummarySeq });
-  staleSummaryCounts.set(relPath, counts);
-}
-
-/** Repaint the rail when some painted row's badge would differ from what it
- *  shows now; otherwise no row render. */
-function repaintRailIfBadgeChanged(): void {
-  for (const [relPath, html] of staleRailPainted) {
-    if (html !== staleRailBadgeHtml(staleRailCounts(relPath))) return renderList();
-  }
-}
-
-/** The home's line, and its Stale tab when that is the one showing. */
-function renderStaleHome(): void {
-  if (getCurrentName() !== null) return;
-  const line = document.getElementById("wikiStaleHome");
-  if (line) line.innerHTML = staleHomeLineHtml(staleSummary);
-  const body = document.getElementById("startBody");
-  if (body && startTab === "stale") body.innerHTML = staleHomeBodyHtml(staleSummary);
-}
-
-/** The pill, the marks and the open page's rail row, from the report for the
- *  page on screen only: a report for another page paints nothing (R2B4). */
-function paintStaleSurfaces(): void {
-  const shown = staleFor !== null && staleFor !== "" && staleFor === currentRelPath ? staleReport : null;
-  const pill = document.getElementById("wikiStalePill");
-  if (pill) {
-    const html = stalePillHtml(shown);
-    if (pill.innerHTML !== html) pill.innerHTML = html;
-  }
-  const art = renderedArticle;
-  if (art && art.el.isConnected) {
-    const hits = shown && !shown.error && art.relPath === staleFor ? confirmedHits(shown) : [];
-    // Everything a mark shows: its words, and the status its title names.
-    const sig = JSON.stringify(hits.map((h) => [h.line, h.target, h.text, h.said, h.now, h.frontmatter]));
-    if (staleMarksFor?.el !== art.el || staleMarksFor.sig !== sig) {
-      placeStaleMarks(art.el, hits);
-      staleMarksFor = { el: art.el, sig };
-    }
-  }
-  // The open page's rail row follows its report: repainted only when a
-  // badge would change, so opening a page costs no extra row render.
-  repaintRailIfBadgeChanged();
-}
-
-/** A rail row's badge, noted as painted. */
-function railStaleBadge(relPath: string): string {
-  const html = staleRailBadgeHtml(staleRailCounts(relPath));
-  staleRailPainted.set(relPath, html);
-  return html;
-}
-
-/** Still true / Not a status: one reader verdict row, then a reload. */
-async function postStaleVerdict(btn: Element): Promise<void> {
-  const relPath = btn.getAttribute("data-stale-page") || "";
-  const kind = btn.getAttribute("data-kind") || "";
-  const payload: Record<string, unknown> = { wiki: WIKI, page: relPath, kind, verdict: btn.getAttribute("data-stale-verdict") };
-  if (kind === "status-line") {
-    payload.line = Number(btn.getAttribute("data-line"));
-    payload.target = btn.getAttribute("data-target") || "";
-  } else payload.linking = btn.getAttribute("data-linking") || "";
-  (btn as HTMLButtonElement).disabled = true;
-  // The notice renders above the report, check bar or not (A12).
-  const fail = (msg: string) => {
-    if (staleFor !== relPath) return;
-    setStaleNotice(msg);
-  };
-  try {
-    const res = await fetch("/api/wiki/stale/verdict", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
-    if (!res.ok) {
-      const b = (await res.json().catch(() => ({}))) as { error?: unknown };
-      fail("The verdict was not saved: " + (typeof b.error === "string" ? b.error : "HTTP " + res.status) + ".");
-      return;
-    }
-  } catch {
-    fail("The verdict was not saved: could not reach the server.");
-    return;
-  }
-  if (staleFor === relPath) {
-    staleNotice = "";
-    // The last Check's line counted this row as failed or unchecked; the
-    // reloaded report's own count replaces it (R2B4).
-    if (kind === "passage" && !staleChecking) staleProgress = "";
-    renderStale();
-    loadStale(relPath);
-  }
-  // The rail and the home drop with the tab (PR 2b).
-  loadStaleSummary();
-}
-
-/**
- * Apply / Send to Gardener on a Draft fix (PR 3): the button names the fix
- * (its kind, page, line + target or linking page, variant and `old`); the
- * server reads the edit off the stored verdict. Then the report and the
- * summary reload, and an Apply that wrote the page on screen reloads it.
- */
-async function postStaleFix(btn: Element, action: "apply" | "send"): Promise<void> {
-  const relPath = btn.getAttribute("data-stale-page") || "";
-  const kind = btn.getAttribute("data-kind") || "";
-  const payload: Record<string, unknown> = {
-    wiki: WIKI,
-    page: relPath,
-    kind,
-    variant: btn.getAttribute("data-variant") || "new",
-    old: btn.getAttribute("data-old") ?? "",
-  };
-  if (kind === "status-line") {
-    payload.line = Number(btn.getAttribute("data-line"));
-    payload.target = btn.getAttribute("data-target") || "";
-  } else payload.linking = btn.getAttribute("data-linking") || "";
-  const key = staleFixKey({ kind, page: relPath, line: btn.getAttribute("data-line"), target: btn.getAttribute("data-target"), linking: btn.getAttribute("data-linking") });
-  // One request per fix: a click on a button a repaint has not yet disabled sends nothing.
-  if (staleFixPending.has(key)) return;
-  staleFixPending.set(key, Infinity);
-  // The fix's buttons repaint disabled; the last notice stands until this answer replaces it.
-  renderStale();
-  let result: StaleNotice;
-  let wrote = "";
-  try {
-    const res = await fetch(`/api/wiki/stale/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
-    const b = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    result = staleFixResultNotice(action, res.status, b);
-    if (result.tone !== "error" && action === "apply" && typeof b.page === "string") wrote = b.page;
-  } catch {
-    result = { tone: "error", text: `${action === "apply" ? "The fix was not applied" : "The fix was not sent to the Gardener"}: could not reach the server.` };
-  }
-  if (result.tone === "error") staleFixPending.delete(key);
-  else {
-    // The buttons stay disabled until a report asked for after this answer
-    // lands (`settleStaleFixes`): an earlier one still offers the fix.
-    staleFixPending.set(key, staleLoadSeq);
-    // The rail, the head and the home drop with the tab; ⧗ appears on a Send.
-    loadStaleSummary();
-    if (wrote && wrote === currentRelPath) loadPageByRelPath(wrote, false, false);
-    if (staleFor === relPath) loadStale(relPath);
-  }
-  // A page opened meanwhile is not the fix's: its tab gets no notice.
-  if (staleFor === relPath) setStaleNotice(result.text, result.tone);
-}
+// ── Article head: the project hub chip and the series strip ──────────
+// (The STALE tab and the stale counts: `wiki-stale-controller.ts`.)
 
 /**
  * The article header's one project affordance: on a project's own hub page,
@@ -2984,50 +2551,8 @@ function seriesMenuEl(): HTMLElement | null {
   return document.getElementById(SERIES_MENU_ID);
 }
 
-// ── Where focus goes when a body-level popover closes ─────────────────
-//
-// Both popovers — `#wikiSeriesMenu` (every series menu, a thread row's page
-// menu included) and `#wikiWorkPop` (a card's or a read-only row's ⋯) — close
-// through ONE function each, `closeSeriesMenu(cause)` / `closeWorkPop(cause)`,
-// and the cause alone decides focus (`popCloseReturnsFocus`):
-//
-//   cause     when                                         focus
-//   key       Escape; Tab (work popover)                   the opener (*)
-//   toggle    its own opener clicked or pressed again      the opener (*)
-//   done      Cancel; a series write that closed the menu  the opener (*) if focus
-//                                                          was in the popover or on <body>
-//   edit      a boundary item (Make own thread, Return,    none here: applyBoundaryEdit's
-//             Keep separate, Allow grouping)               per-edit table
-//   replace   another popover opening                      none: the new one takes it
-//   outside   a click anywhere else                        none: where the click put it
-//   viewport  a scroll that moves the opener; a resize     none, unless focus was IN the
-//                                                          popover: then the opener (*)
-//
-// (*) the opener node while connected; after a repaint, its replacement by
-// key (`openerSel`); then the card holding the page; then the Group button.
-// A repaint while a popover is open closes nothing: the popover is
-// body-level and keeps its own focus.
-
-/** Why a ⋯ popover closes — the one input to where focus goes. */
-type PopCloseCause = "key" | "toggle" | "done" | "edit" | "replace" | "outside" | "viewport";
-
-/** Whether `cause` returns focus to the opener, judged BEFORE `el` is removed
- *  (removing a node that holds focus drops it to `<body>`). */
-function popCloseReturnsFocus(cause: PopCloseCause, el: HTMLElement | null): boolean {
-  const a = document.activeElement;
-  const inside = !!el && !!a && el.contains(a);
-  if (cause === "key" || cause === "toggle") return true;
-  if (cause === "done") return inside || !a || a === document.body;
-  if (cause === "viewport") return inside;
-  return false;
-}
-
-/** Focus a closed popover's opener: the node, its replacement by key, the
- *  card holding `page`, the Group button. */
-function focusPopOpener(opener: HTMLElement | null, openerSel: string | null, page: string): void {
-  if (opener?.isConnected) opener.focus({ preventScroll: true });
-  else focusFirstRailControl([openerSel, workCardControlSel(page, "menu")]);
-}
+// Every close of the popover sets focus by the table at `PopCloseCause`
+// (`wiki-menus-controller.ts`), which the work popover shares.
 
 /** A series opener as a selector by its key, for a repaint that replaces it:
  *  the rail's own selector for a rail control, else the opener's attribute
@@ -3043,8 +2568,8 @@ function seriesOpenerSel(anchor: HTMLElement): string | null {
   return `${scope} [${attr}="${CSS.escape(anchor.getAttribute(attr) ?? "")}"]`.trim();
 }
 
-/** Close the series popover; focus per the table above. `preventScroll`
- *  because the opener may have been scrolled out of view in the meantime. */
+/** Close the series popover; focus per the `PopCloseCause` table (⋯ menus
+ *  controller). `preventScroll`: the opener may have scrolled out of view. */
 function closeSeriesMenu(cause: PopCloseCause): void {
   const was = seriesMenu;
   const el = seriesMenuEl();
@@ -3358,6 +2883,7 @@ function repaintSeriesHead(): void {
   if (html) refreshLensSwitch(document.getElementById("articleWrap")!);
 }
 
+// ── Loading a page: the article head, explainers, the page fetch ──────
 /**
  * The retired banner for the open page, or "". Reads `cullReason` and
  * `supersededBy`, which only the single-page payload carries — an explainer's
@@ -4051,276 +3577,6 @@ function renderIssueGraph(): void {
   applyDisplay();
 }
 
-// ── Effort page (work map P3) ─────────────────────────────────────────
-/** The effort the article pane shows, or null. Read only while
- *  `#wikiEffortPage` is in the pane: every other view replaces it. */
-let effortOpen: string | null = null;
-type WorkMapGet = { ok: boolean; status: number; body: WorkMapGetBody | null };
-/** The one map cache the Your work card, the rail and the effort page read
- *  and write, keyed on the listing's run time (whatever run the body carries). */
-let workMapCache: { runAt: number; body: WorkMapGetBody & { map: AnyWorkMap } } | null = null;
-/** The map GET in flight and the run time it was started for: a repaint while
- *  it runs (a facet change, an adopt) waits on it instead of sending another. */
-let effortMapFetch: { runAt: number; done: Promise<WorkMapGet> } | null = null;
-
-function getWorkMap(): Promise<WorkMapGet> {
-  return fetch(withWiki("/api/wiki/work-map")).then(async (r) => ({
-    ok: r.ok,
-    status: r.status,
-    body: (await r.json().catch(() => null)) as WorkMapGetBody | null,
-  }));
-}
-
-/** The map for one run time: the cache, else the GET in flight, else a new
- *  GET whose map lands in the cache. A failed GET is not cached. */
-function workMapFetchFor(runAt: number): Promise<WorkMapGet> {
-  if (workMapCache?.runAt === runAt) return Promise.resolve({ ok: true, status: 200, body: workMapCache.body });
-  if (effortMapFetch?.runAt !== runAt) {
-    const done = getWorkMap().then((r) => {
-      if (r.ok && r.body?.map && getWorkMapRunAt() === runAt) workMapCache = { runAt, body: r.body as WorkMapGetBody & { map: AnyWorkMap } };
-      return r;
-    });
-    const entry = { runAt, done };
-    effortMapFetch = entry;
-    const clear = () => {
-      if (effortMapFetch === entry) effortMapFetch = null;
-    };
-    done.then(clear, clear);
-  }
-  return effortMapFetch!.done;
-}
-
-/** A map the card's ↻ poll fetched: when it is a newer run than the listing's,
- *  it becomes the cache and the run time, and the rail and an open effort
- *  page repaint from it without waiting for a listing refresh. */
-function adoptWorkMap(body: WorkMapGetBody): void {
-  if (!body.map || getWorkMapRunAt() === null || body.map.runAtMs <= getWorkMapRunAt()!) return;
-  setWorkMapRunAt(body.map.runAtMs);
-  workMapCache = { runAt: getWorkMapRunAt()!, body: body as WorkMapGetBody & { map: AnyWorkMap } };
-  renderList();
-  if (effortOpen !== null && document.getElementById("wikiEffortPage")) paintEffort(effortOpen, true);
-}
-
-/** The run time whose map GET failed for the rail, so a repaint does not
- *  re-fetch on every render; a new run time (or a reload) tries again. */
-let railMapFailedAt: number | null = null;
-/** The run time the rail is waiting on a map GET for (one listener per GET). */
-let railMapPending: number | null = null;
-/** The last effort index the rail built, and what it was built from. */
-let railEffortMemo: { map: AnyWorkMap; pages: WikiListing[]; index: Map<string, RailEffort> } | null = null;
-
-/**
- * The rail's effort index (P4), or null: no map on this wiki, the map not
- * loaded yet (the GET starts here and repaints the rail when it lands, so
- * Activity draws plain until then), or a failed GET. Reads the shared map
- * cache, so the reader never fetches the map twice for one run time.
- */
-function railEffortsIndex(now: number): Map<string, RailEffort> | null {
-  const runAt = getWorkMapRunAt();
-  if (runAt === null) return null;
-  const map = workMapCache?.runAt === runAt ? workMapCache.body.map : null;
-  if (!map) {
-    if (railMapFailedAt !== runAt && railMapPending !== runAt) {
-      railMapPending = runAt;
-      const settle = () => {
-        if (railMapPending === runAt) railMapPending = null;
-      };
-      workMapFetchFor(runAt)
-        .then((r) => {
-          settle();
-          if (getWorkMapRunAt() !== runAt) return;
-          if (!r.ok || !r.body?.map) {
-            railMapFailedAt = runAt;
-            // X1: repaint so the rail stops waiting and draws Work threads.
-            renderList();
-            return;
-          }
-          renderList();
-        })
-        .catch(() => {
-          settle();
-          if (getWorkMapRunAt() !== runAt) return;
-          railMapFailedAt = runAt;
-          renderList();
-        });
-    }
-    return null;
-  }
-  if (railEffortMemo?.map !== map || railEffortMemo.pages !== allPages) {
-    railEffortMemo = { map, pages: allPages, index: railEffortIndex(map, allPages, now) };
-  }
-  return railEffortMemo.index;
-}
-
-/** An effort's reader URL, carrying the facets an article URL carries. */
-function effortHrefFor(id: string): string {
-  return urlWithJira(urlWithProject(effortUrl(WIKI, id), filters.project), filters.jira);
-}
-
-/** The effort a URL's `?effort=` names, or null for none. A blank value is
- *  dropped from the address bar and a case variant (`Drift`) is written as its
- *  slug, both in place (`replaceState`): neither is a navigation. A value that
- *  is already a valid effort id (`a--b`) is kept as typed. */
-function effortFromUrl(params: URLSearchParams): string | null {
-  const raw = params.get(EFFORT_PARAM);
-  if (raw === null) return null;
-  const id = canonicalEffortParam(raw);
-  if (id !== raw) {
-    const u = new URL(location.href);
-    if (id === null) u.searchParams.delete(EFFORT_PARAM);
-    else u.searchParams.set(EFFORT_PARAM, id);
-    history.replaceState(history.state, "", u.pathname + u.search + u.hash);
-  }
-  return id;
-}
-
-/** Open an effort from a link: push its URL (unless already there), render. */
-function openEffort(id: string): void {
-  const target = effortHrefFor(id);
-  if (location.pathname + location.search !== target) history.pushState({}, "", target);
-  renderEffort(id);
-}
-
-/** The markup the effort page last wrote into the article and Connections
- *  panes, so a background re-join that changes nothing writes nothing. */
-let effortShown: { article: string; conn: string } | null = null;
-
-/** A selector that finds the focused control again after a re-render: the
- *  `data-focus-key` the effort view gives every focusable element. */
-function effortFocusKey(el: Element | null): string | null {
-  const key = el instanceof HTMLElement ? el.getAttribute("data-focus-key") : null;
-  return key === null ? null : `[data-focus-key="${CSS.escape(key)}"]`;
-}
-
-/** Write the effort page's two panes. A navigation paints and scrolls to the
- *  top. A background re-join (`background`) skips the write when the markup is
- *  unchanged (a swap drops focus and wipes a selection), and otherwise keeps
- *  the scroll as it is at paint time and focus on the same control. */
-function writeEffortPanes(wrap: HTMLElement, article: string, connHtml: string, background: boolean): void {
-  const conn = document.getElementById("connBody");
-  if (background && effortShown && effortShown.article === article && effortShown.conn === connHtml) return;
-  const active = document.activeElement;
-  const holder = background && active ? (wrap.contains(active) ? wrap : conn?.contains(active) ? conn : null) : null;
-  const key = holder ? effortFocusKey(active) : null;
-  const scroll = background ? wrap.scrollTop : 0;
-  wrap.innerHTML = article;
-  wrap.scrollTop = scroll;
-  if (conn) conn.innerHTML = connHtml;
-  effortShown = { article, conn: connHtml };
-  if (holder && key) (holder.querySelector(key) as HTMLElement | null)?.focus({ preventScroll: true });
-}
-
-/** `?effort=<id>`: the effort page fills the article pane, as the issue graph
- *  does, with no page behind it. A navigation: it applies a stashed listing
- *  first (as `renderStart`/`loadPage` do), then paints. */
-function renderEffort(id: string): void {
-  // A listing stashed while an article was open lands now, before the map is
-  // joined to `allPages`; the list is repainted from it like `renderStart` does.
-  applyPendingPages();
-  consumeUrlLens();
-  abortAgentRuns();
-  if (!document.getElementById("articleWrap")) return;
-  setAtlasFull(false);
-  setCurrentName(null);
-  setCurrentRelPath(null);
-  currentPageHash = null;
-  graphMode = false;
-  graphIssue = "";
-  removeGraph();
-  hideBreadcrumb();
-  // No page is open: repaint the rail, so the highlight goes and a fold the
-  // page forced open gets its caret back.
-  renderList();
-  effortOpen = id;
-  paintEffort(id, false);
-}
-
-/** Join the map to the listing and paint it. The map comes from the cache when
- *  the listing's run time still matches it. A navigation paints a loading
- *  state before a fetch and the error pane when it fails; a background re-join
- *  keeps the effort on screen through both. */
-function paintEffort(id: string, background: boolean): void {
-  const wrap = document.getElementById("articleWrap");
-  if (!wrap) return;
-  const seq = pageViewSeq;
-  // Built at each write, so a pane painted after the GET carries the facets
-  // set while it was in flight.
-  // The listing's map kind is known before the map loads, so a themes wiki's
-  // status panes say theme.
-  const head = () => ({ wiki: WIKI, startHref: currentStartUrl(), id, themes: getWorkMapThemes() });
-  const noMapConn = `<div class="wiki-ef-conn-empty">No ${getWorkMapThemes() ? "theme" : "work"} map.</div>`;
-  const paint = (map: AnyWorkMap) => {
-    // A themes map draws the theme page (theme map P3) on the reader's clock,
-    // so the run's week reads as running only while it has not ended.
-    if (isThemeMap(map)) {
-      const view = themeView({
-        map,
-        pages: allPages,
-        id,
-        wiki: WIKI,
-        startHref: currentStartUrl(),
-        hrefFor: pageUrlByRelPath,
-        effortHref: effortHrefFor,
-        done: workMapDoneSet(map.runAtMs),
-        now: Date.now(),
-      });
-      writeEffortPanes(wrap, view.article, view.connections, background);
-      return;
-    }
-    const view = effortView({
-      map,
-      pages: allPages,
-      id,
-      wiki: WIKI,
-      startHref: currentStartUrl(),
-      hrefFor: pageUrlByRelPath,
-      effortHref: effortHrefFor,
-      pill: statusPillHtml,
-      done: workMapDoneSet(map.runAtMs),
-      now: Date.now(),
-    });
-    writeEffortPanes(wrap, view.article, view.connections, background);
-  };
-  const runAt = getWorkMapRunAt();
-  if (runAt === null) {
-    writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
-    return;
-  }
-  if (workMapCache?.runAt === runAt) {
-    paint(workMapCache.body.map);
-    return;
-  }
-  if (!background) writeEffortPanes(wrap, effortStatusHtml(head(), "loading"), '<div class="wiki-ef-conn-empty">Loading…</div>', false);
-  const current = () => effortOpen === id && pageViewSeq === seq && !!document.getElementById("wikiEffortPage");
-  workMapFetchFor(runAt)
-    .then((r) => {
-      const body = r.body;
-      if (!current()) return;
-      if (!r.ok || !body || typeof body !== "object") throw new Error(r.ok ? "malformed response" : `HTTP ${r.status}`);
-      if (!body.map) {
-        writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
-        return;
-      }
-      paint(body.map);
-    })
-    .catch((err: Error) => {
-      if (!current()) return;
-      // A background re-join that fails keeps the effort being read; the next
-      // adopt or a navigation tries again.
-      if (background) return;
-      writeEffortPanes(wrap, effortStatusHtml(head(), "error", err.message), noMapConn, false);
-    });
-}
-
-/** A listing adopted, or a facet changed, while the effort page is open:
- *  re-join it (a page may have been renamed, a new run landed, or the hrefs
- *  carry another facet). Paint only: no navigation side effects, and nothing
- *  written when the markup is unchanged. */
-function refreshEffortFromListing(): void {
-  if (effortOpen === null || !document.getElementById("wikiEffortPage")) return;
-  paintEffort(effortOpen, true);
-}
-
 const GRAPH_NODE_SEL = `#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`;
 /**
  * Does another Escape owner hold this keypress? The card's listener runs in the
@@ -4338,530 +3594,7 @@ function escapeOwnedElsewhere(): boolean {
   );
 }
 
-/** The rail control `el` is, as a selector by its own key that finds it again
- *  after a repaint; null for anything else (a page row, a link other than an
- *  effort fold's name). Covers the Group button and its menu items, `+ N more
- *  threads`, the shared context's `+N`, a 📌 (by its card's key, never by
- *  position), an effort fold's name (by effort id), and every
- *  `[data-fold-key]` fold in the rail: thread, group and child cards, series
- *  and folder groups, Bookkeeping, under either spelling. */
-function railControlSelector(el: Element | null): string | null {
-  if (!(el instanceof HTMLElement) || !el.closest("#wikiList")) return null;
-  const at = (attr: string, v: string) => `#wikiList [${attr}="${CSS.escape(v)}"]`;
-  for (const attr of [
-    "data-work-stop",
-    "data-work-evidence",
-    "data-thread-more",
-    "data-thread-ctx-more",
-    // PR 4: a card's ⋯ (by its card's fold key), `▸ split into N sessions`
-    // (by its card's fold key), a focus row's own ⋯ (by its page) and Reset.
-    "data-work-card-menu",
-    "data-thread-sessions",
-    "data-thread-row-menu",
-    "data-work-reset",
-    // A Pick up row, by its page: kept through the renders a jump runs.
-    "data-pickup",
-    // An effort fold's name, by effort id: opening the effort repaints the rail.
-    "data-effort-link",
-  ]) {
-    const v = el.getAttribute(attr);
-    if (v !== null) return at(attr, v);
-  }
-  const fold = el.getAttribute("data-fold-key");
-  if (fold !== null) {
-    // Either spelling, as the fold's own click handler looks for.
-    const base = fold.startsWith(CLOSED_FOLD_PREFIX) ? fold.slice(CLOSED_FOLD_PREFIX.length) : fold;
-    return `${at("data-fold-key", base)}, ${at("data-fold-key", CLOSED_FOLD_PREFIX + base)}`;
-  }
-  // A thread row's page menu (a tab stop, unlike a plain row's ⋯), by page.
-  const seriesRow = el.getAttribute("data-series-menu");
-  if (seriesRow !== null && el.closest(".wiki-list-item.thread-row")) {
-    return `#wikiList .wiki-list-item.thread-row [data-series-menu="${CSS.escape(seriesRow)}"]`;
-  }
-  if (el.hasAttribute("data-thread-pin")) {
-    const cardEl = el.closest(".wiki-thread-card");
-    const attr = cardEl?.hasAttribute("data-thread-group") ? "data-thread-group" : "data-thread";
-    const card = cardEl?.getAttribute(attr);
-    return card ? `#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]` : null;
-  }
-  return el.hasAttribute("data-work-group-menu") ? "#wikiList [data-work-group-menu]" : null;
-}
-
-/** One explicit edit from the Group menu: merged onto the record as read now
- *  and written (D17); the first edit is what creates the record. */
-function editWorkGroup(edit: WorkGroupEdit): void {
-  stepWorkGroup({ kind: "click", stored: readWorkGroup(WIKI), edit });
-}
-
-// ── PR 4: the ⋯ menus — boundaries and Save as series ─────────────────────
-// (plan `muninn-wiki-work-thread-grouping`, D5, D8, D14). One popover at a
-// time, `#wikiWorkPop`, painted like the series editor's and closed by the
-// same events. A boundary edit goes through the record's state table like a
-// Group menu edit (D17); Save as series is the only action that writes the
-// wiki, and on a read-only wiki its item is absent.
-
-/** The open work popover: what opened it, and for Save as series, the plan. */
-interface WorkPopState {
-  opener: HTMLElement;
-  /** The opener as a rail selector by its key, taken at open time: a repaint
-   *  while the popover is open detaches the opener node itself. */
-  openerSel: string | null;
-  /** A page of the thread the popover acts on: where focus goes when the
-   *  opener is gone from the rail. */
-  page: string;
-  key: string;
-  /** The opener's viewport position when the popover was placed: a scroll
-   *  that leaves it there is not one the reader made (see the scroll handler). */
-  at: { top: number; left: number };
-  /** Save as series' confirm view: `busy` while its write runs, `done` once
-   *  it has reported a spent plan (Write stays off until the popover reopens). */
-  series?: { card: RailGroupCard; busy: boolean; done?: boolean };
-}
-let workPop: WorkPopState | null = null;
-
-function workPopEl(): HTMLElement | null {
-  return document.getElementById(WORK_POP_ID);
-}
-
-/** A Save as series write is in flight: the popover holds its report. */
-function workPopBusy(): boolean {
-  return !!workPop?.series?.busy;
-}
-
-/** Close the work popover; focus per the table at `PopCloseCause`. Refused
- *  while a Save as series write is in flight (its report lands in this
- *  popover). */
-function closeWorkPop(cause: PopCloseCause): void {
-  if (workPopBusy()) return;
-  const was = workPop;
-  const el = workPopEl();
-  const refocus = popCloseReturnsFocus(cause, el);
-  el?.remove();
-  workPop = null;
-  if (!was) return;
-  was.opener.setAttribute("aria-expanded", "false");
-  if (refocus) focusPopOpener(was.opener, was.openerSel, was.page);
-}
-
-/** Focus the first selector that finds a rail control, else the Group button.
- *  A wiki with no work threads has no Group button, and focus then stays on
- *  `<body>`. */
-function focusFirstRailControl(selectors: readonly (string | null | undefined)[]): void {
-  for (const sel of selectors) {
-    const el = sel ? document.querySelector<HTMLElement>(sel) : null;
-    if (el) {
-      el.focus({ preventScroll: true });
-      return;
-    }
-  }
-  focusWorkMenuButton();
-}
-
-/** The drawn work card holding `page` as a selector for its ⋯ (`menu`) or its
- *  fold: a child card when it is drawn, else the group around it. */
-function workCardControlSel(page: string | undefined, prefer: "menu" | "fold"): string | null {
-  if (!page) return null;
-  const k = normalizeRel(page);
-  const holds = (c: RailThreadCard) => normalizeRel(c.key) === k || c.focus.some((p) => normalizeRel(p.relPath) === k);
-  const sel = (attr: string, fk: string) => {
-    const at = `#wikiList .wiki-thread-card[${attr}="${CSS.escape(fk)}"] > `;
-    const menu = `#wikiList [data-work-card-menu="${CSS.escape(fk)}"]`;
-    const fold = `${at}.wiki-thread-fold`;
-    return prefer === "menu" ? (document.querySelector(menu) ? menu : fold) : fold;
-  };
-  for (const c of getWorkCardsDrawn()) {
-    if (!isRailGroupCard(c)) {
-      if (holds(c)) return sel("data-thread", c.foldKey);
-      continue;
-    }
-    const child = c.children.find(holds);
-    if (!child && normalizeRel(c.key) !== k) continue;
-    if (child && document.querySelector(`#wikiList .wiki-thread-card[data-thread="${CSS.escape(child.foldKey)}"]`)) return sel("data-thread", child.foldKey);
-    return sel("data-thread-group", c.foldKey);
-  }
-  return null;
-}
-
-/** Paint the popover under `anchor` with `html`, focus its first item.
- *  Refused while a Save as series write runs: the one guard for every ⋯. */
-function openWorkPop(anchor: HTMLElement, key: string, html: string, label: string, page: string): HTMLElement | null {
-  if (workPopBusy()) return null;
-  closeWorkPop("replace");
-  closeSeriesMenu("replace");
-  const el = document.createElement("div");
-  el.id = WORK_POP_ID;
-  el.className = "wiki-series-menu wiki-work-pop";
-  el.setAttribute("role", "menu");
-  el.setAttribute("aria-label", label);
-  el.innerHTML = html;
-  document.body.appendChild(el);
-  const rect = anchor.getBoundingClientRect();
-  const width = el.offsetWidth || 260;
-  const height = el.offsetHeight || 120;
-  el.style.left = `${Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)))}px`;
-  const below = rect.bottom + 6;
-  el.style.top = `${Math.round(below + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - 6) : below)}px`;
-  anchor.setAttribute("aria-expanded", "true");
-  workPop = { opener: anchor, openerSel: railControlSelector(anchor), page, key, at: { top: rect.top, left: rect.left } };
-  el.querySelector<HTMLElement>("input, button")?.focus({ preventScroll: true });
-  return el;
-}
-
-/** The drawn card whose fold key is `foldKey` (a child included). */
-function drawnWorkCard(foldKey: string): RailWorkCard | undefined {
-  const k = normalizeFoldKey(foldKey);
-  for (const c of getWorkCardsDrawn()) {
-    if (normalizeFoldKey(c.foldKey) === k) return c;
-    if (isRailGroupCard(c)) for (const ch of c.children) if (normalizeFoldKey(ch.foldKey) === k) return ch;
-  }
-  return undefined;
-}
-
-/** A Make own thread definition's stable id: random, never the path. */
-function newSplitId(): string {
-  const bytes = new Uint8Array(9);
-  crypto.getRandomValues(bytes);
-  return "s" + Array.from(bytes, (b) => b.toString(36).padStart(2, "0")).join("").slice(0, 15);
-}
-
-/** Apply one boundary edit from a ⋯ item and repaint. Focus goes to the
- *  control `focus` names first — a selector, or `{ page, prefer }` for the
- *  drawn card holding that page — then to the opener by its key (taken
- *  BEFORE the render detaches it), then to the Group button. */
-function applyBoundaryEdit(edit: WorkGroupEdit, focus: { page: string; prefer: "menu" | "fold"; first?: "card" | "opener"; sel?: string }): void {
-  const openerSel = workPop?.openerSel ?? railControlSelector(seriesMenu?.opener ?? null);
-  closeWorkPop("edit");
-  closeSeriesMenu("edit");
-  editWorkGroup(edit);
-  // Another tab filled the list after this menu opened: say so, not nothing.
-  // An edit that lands clears the note.
-  const full = workGroupAddRefused(getWorkGroupRec().held, edit);
-  showWorkBoundaryStatus(full ? `${"split" in edit ? "Make own thread" : "Keep separate"} did nothing: ${WORK_GROUP_FULL_TEXT[full]}` : null);
-  renderList();
-  const card = workCardControlSel(focus.page, focus.prefer);
-  focusFirstRailControl(focus.first === "opener" ? [focus.sel, openerSel, card] : [focus.sel, card, openerSel]);
-}
-
-/** A ⋯ item click inside either popover (the work popover, or the series
- *  editor holding a thread row's boundary item). Answers whether it was one. */
-function boundaryItemClick(target: HTMLElement): boolean {
-  const item = target.closest<HTMLElement>("[data-thread-split], [data-work-return], [data-work-keep], [data-work-allow]");
-  if (!item) return false;
-  if (item.getAttribute("aria-disabled") === "true") return true;
-  const split = item.getAttribute("data-thread-split");
-  if (split) {
-    // The split card's fold; the card holding the page when it is not drawn.
-    const fold = `#wikiList .wiki-thread-card[data-thread="${CSS.escape(normalizeFoldKey(`thread:${split}`))}"] > .wiki-thread-fold`;
-    applyBoundaryEdit({ split: { id: newSplitId(), page: split } }, { sel: fold, page: split, prefer: "fold", first: "opener" });
-    return true;
-  }
-  const ret = item.getAttribute("data-work-return");
-  if (ret) {
-    // The card that took the page back: its fold.
-    const page = item.getAttribute("data-work-return-page") ?? "";
-    applyBoundaryEdit({ unsplit: { id: ret, page } }, { page, prefer: "fold" });
-    return true;
-  }
-  const keep = item.getAttribute("data-work-keep");
-  if (keep) {
-    applyBoundaryEdit({ keepApart: keep }, { page: keep, prefer: "menu", first: "opener" });
-    return true;
-  }
-  const allow = item.getAttribute("data-work-allow");
-  if (allow) {
-    let anchors: string[] = [];
-    try {
-      const v = JSON.parse(allow) as unknown;
-      if (Array.isArray(v)) anchors = v.filter((x): x is string => typeof x === "string");
-    } catch {
-      /* a malformed attribute: nothing to remove */
-    }
-    // The anchors this tab drew on the thread, and only those: an anchor
-    // another tab added (or moved) since this tab last read stays.
-    applyBoundaryEdit({ allowGrouping: anchors }, { page: anchors[0] ?? "", prefer: "menu", first: "opener" });
-    return true;
-  }
-  return false;
-}
-
-/** The row ⋯'s boundary item for `rel`, from the boundaries on screen. */
-function rowMenuItemHtml(rel: string): string {
-  const action = getWorkBounds() ? rowBoundaryAction(getWorkBounds()!, getWorkFacts(), rel) : null;
-  return action ? threadRowMenuHtml(rel, action) : "";
-}
-
-/** Save as series' message line, in the confirm view of `state`'s popover.
- *  When that popover is gone, the line goes to a status note on the page, so
- *  a write's report is never painted into nothing. */
-function setWorkSeriesMsg(state: WorkPopState, text: string, bad: boolean): void {
-  const msg = workPop === state ? workPopEl()?.querySelector<HTMLElement>(".wiki-work-series-msg") : null;
-  if (!msg) {
-    showWorkSeriesStatus(text, bad);
-    return;
-  }
-  msg.textContent = text;
-  msg.classList.toggle("bad", bad);
-}
-
-/** The fallback for a report whose popover is gone: one status note, fixed at
- *  the foot of the page, dismissed by a click on it. */
-function showWorkSeriesStatus(text: string, bad: boolean): void {
-  let el = document.getElementById("wikiWorkSeriesStatus");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "wikiWorkSeriesStatus";
-    el.className = "wiki-series-menu wiki-work-series-status";
-    el.setAttribute("role", "status");
-    el.title = "Click to dismiss";
-    el.addEventListener("click", () => el!.remove());
-    document.body.appendChild(el);
-  }
-  el.textContent = text;
-  el.classList.toggle("bad", bad);
-}
-
-/** A boundary click that did nothing says why in its own note (never Save as
- *  series' report line), above that one; `null` clears it. */
-function showWorkBoundaryStatus(text: string | null): void {
-  let el = document.getElementById("wikiWorkBoundaryStatus");
-  if (text === null) {
-    el?.remove();
-    return;
-  }
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "wikiWorkBoundaryStatus";
-    el.className = "wiki-series-menu wiki-work-series-status wiki-work-boundary-status bad";
-    el.setAttribute("role", "status");
-    el.title = "Click to dismiss";
-    el.addEventListener("click", () => el!.remove());
-    document.body.appendChild(el);
-  }
-  el.textContent = text;
-}
-
-/** Lock or unlock the confirm view's buttons and key while a write runs. */
-function setWorkSeriesLocked(state: WorkPopState, locked: boolean, goToo = locked): void {
-  if (workPop !== state) return;
-  const el = workPopEl();
-  if (!el) return;
-  for (const b of Array.from(el.querySelectorAll<HTMLButtonElement | HTMLInputElement>("[data-work-series-cancel], [data-work-series-key]"))) b.disabled = locked;
-  const go = el.querySelector<HTMLButtonElement>("[data-work-series-go]");
-  if (go) go.disabled = goToo;
-}
-
-/** The listing as the server has it NOW (`?refresh=1` rescans), read without
- *  applying it; `null` when it cannot be read, or not within
- *  `SERIES_REQUEST_TIMEOUT_MS` (Save as series holds its popover meanwhile). */
-async function freshListing(): Promise<WikiListing[] | null> {
-  try {
-    const res = await fetch(withWiki("/api/wiki/pages?refresh=1"), { signal: AbortSignal.timeout(SERIES_REQUEST_TIMEOUT_MS) });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { pages?: unknown };
-    return Array.isArray(data.pages) ? (data.pages as WikiListing[]) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Save as series, confirmed (D14): every page's CAS base first, then the plan
- * re-checked against a listing read after them (`recheckSaveAsSeries`: a page
- * another writer put into a series since the click is left alone), then one
- * write per page through the series editor's loop, stopping at the first
- * failure. Either ending refreshes the listing, so the group forms from the
- * series on disk rather than from local state; a failure reports `k of N
- * written` with the pages left, and written pages stay written. While the
- * write runs the popover cannot be dismissed, so the report has a place to
- * land. After a landed write the old group's open state moves onto the fold
- * key of the group that now holds its anchor thread.
- */
-async function runSaveAsSeries(): Promise<void> {
-  const state = workPop;
-  const st = state?.series;
-  if (!state || !st || st.busy || st.done) return;
-  const card = st.card;
-  const plan = card.series;
-  if (!plan?.available) return;
-  let key = plan.key;
-  if (plan.mode === "coin") {
-    const typed = workPopEl()?.querySelector<HTMLInputElement>("[data-work-series-key]")?.value ?? "";
-    const checked = checkNewSeriesKey(plan, typed);
-    if ("error" in checked) {
-      setWorkSeriesMsg(state, checked.error, true);
-      return;
-    }
-    key = checked.key;
-  }
-  st.busy = true;
-  setWorkSeriesLocked(state, true);
-  // Set ⇒ the confirm view stays open with this line. `retry` ⇒ nothing was
-  // written and the reader can resolve it in place (another key, another
-  // try), so Write stays on; otherwise the plan is spent and Write stays off.
-  let report: { text: string; bad: boolean; retry?: boolean } | null = null;
-  const wasOpen = card.open;
-  const anchorKey = card.key;
-  try {
-    const planned = plan.writes.map((w) => w.relPath);
-    setWorkSeriesMsg(state, `Reading ${planned.length} ${planned.length === 1 ? "page" : "pages"}…`, false);
-    const { bases, missing, open, stalled } = await readSeriesBasesAfterWrites(planned, seriesBaseHash, openPageAtLoad);
-    if (stalled) {
-      // Nothing read and nothing written; Write stays on for another try.
-      report = { text: SERIES_STALLED_COPY, bad: true, retry: true };
-      return;
-    }
-    const fresh = await freshListing();
-    if (!fresh) {
-      report = { text: "Could not re-read the wiki listing — nothing written", bad: true, retry: true };
-      return;
-    }
-    const checked = recheckSaveAsSeries(plan, key, fresh);
-    if (checked.error) {
-      report = { text: checked.error, bad: true, retry: checked.retry };
-      await refreshAfterSeriesWrite();
-      return;
-    }
-    const writes = checked.writes.map((w) => ({ relPath: w.relPath, series: key }));
-    const stillMissing = missing.filter((rel) => writes.some((w) => w.relPath === rel));
-    if (stillMissing.length) {
-      report = { text: `Could not read ${stillMissing.join(", ")} — nothing written`, bad: true };
-      return;
-    }
-    const skipped = checked.moved.length
-      ? `Skipped — joined another series since this menu opened: ${checked.moved.map((m) => `${m.title} (in «${m.series}»)`).join(", ")}`
-      : "";
-    setWorkSeriesMsg(state, "Saving…", false);
-    // The open page changed on disk since the reader loaded it: refused before
-    // any write rather than 409 on it mid-sequence (arch review 2026-10, 66).
-    const { refusal, run } = await trackSeriesWrite(async () => {
-      const out = await writeSeriesUnlessOpenChanged({ writes, bases, open, post: postSeriesWrite, batch: true });
-      if (out.refusal === null) adoptOwnSeriesHashes(out.run.hashes);
-      return out;
-    });
-    if (refusal !== null) {
-      report = { text: refusal, bad: true };
-      return;
-    }
-    const outcome = await refreshAfterSeriesWrite();
-    const notes: string[] = [];
-    if (run.failure) {
-      const at = writes.findIndex((w) => w.relPath === run.failure!.write.relPath);
-      const left = writes.slice(at).map((w) => w.relPath);
-      notes.push(`${run.written} of ${run.total} written — stopped at ${run.failure.write.relPath}: ${run.failure.error}. Not written: ${left.join(", ")}`);
-    }
-    if (skipped) notes.push(skipped);
-    if (run.cleared) notes.push(`A page was the head of "${run.cleared}" — that series has no label now`);
-    if (run.written && outcome !== "apply") notes.push("Saved — reload to see the updated list");
-    if (notes.length) {
-      report = { text: notes.join(" · "), bad: !!run.failure || !!run.cleared };
-      return;
-    }
-    st.busy = false;
-    if (workPop === state) closeWorkPop("done");
-    carryGroupFold(anchorKey, wasOpen);
-  } catch (err) {
-    // Anything unforeseen still unlocks and reports; what landed is unknown.
-    report = { text: `Save as series stopped: ${err instanceof Error ? err.message : String(err)} — reload to see what was written`, bad: true };
-  } finally {
-    st.busy = false;
-    if (report) {
-      if (!report.retry) st.done = true;
-      setWorkSeriesLocked(state, false, !report.retry);
-      setWorkSeriesMsg(state, report.text, report.bad);
-    }
-  }
-}
-
-/** After a Save as series refresh: the group holding `anchorKey`'s thread now
- *  folds under another key (`group:series:`, or an anchor key the duplicate
- *  rule kept); give it the open state the old group had. */
-function carryGroupFold(anchorKey: string, wasOpen: boolean): void {
-  const holder = getWorkCardsDrawn().find((c) => isRailGroupCard(c) && c.children.some((ch) => ch.key === anchorKey)) as RailGroupCard | undefined;
-  if (holder && holder.open !== wasOpen) {
-    setOpenFolds(toggleFolded(WIKI, holder.toggleKey));
-    renderList();
-  }
-  const sel = holder ? `#wikiList [data-work-card-menu="${CSS.escape(holder.foldKey)}"], #wikiList [data-thread-group="${CSS.escape(holder.foldKey)}"] .wiki-thread-fold` : null;
-  if (sel) document.querySelector<HTMLElement>(sel)?.focus({ preventScroll: true });
-}
-
-/** Open a card's ⋯: a thread card's boundary item, or a group's Save as series. */
-function openWorkCardMenu(btn: HTMLElement): void {
-  const key = btn.getAttribute("data-work-card-menu") ?? "";
-  if (workPop?.key === `card:${key}`) {
-    closeWorkPop("toggle");
-    return;
-  }
-  const card = drawnWorkCard(key);
-  if (!card) return;
-  const html = isRailGroupCard(card) ? groupCardMenuHtml(card) : card.menu ? threadCardMenuHtml(card.menu) : "";
-  if (!html) return;
-  openWorkPop(btn, `card:${key}`, html, btn.getAttribute("aria-label") ?? "More", card.key);
-}
-
-/** Open a focus row's ⋯ where no series menu applies: Make own thread only. */
-function openThreadRowMenu(btn: HTMLElement): void {
-  const rel = btn.getAttribute("data-thread-row-menu") ?? "";
-  if (workPop?.key === `row:${rel}`) {
-    closeWorkPop("toggle");
-    return;
-  }
-  const html = rowMenuItemHtml(rel);
-  const page = allPages.find((p) => normalizeRel(p.relPath) === normalizeRel(rel));
-  if (html) openWorkPop(btn, `row:${rel}`, html, `Page menu for ${page ? displayTitleOf(page) : rel}`, rel);
-}
-
-// `group families`, per wiki. The control is painted from the STORE at boot (the
-// server has no idea what this browser remembers) and written back through the
-// same `toggleFolded` every fold uses — the toggle is a sentinel key in that one
-// flat namespace, so nothing about the store changes to hold it.
-let familiesBox!: HTMLInputElement | null;
-function setGroupFamilies(on: boolean): void {
-  if (familiesOn() !== on) setOpenFolds(toggleFolded(WIKI, GROUP_FAMILIES_TOGGLE_KEY));
-  // Painted from the store rather than trusted from the event: a write that
-  // localStorage refused still has to leave the box saying what the rail is
-  // about to render.
-  if (familiesBox) familiesBox.checked = familiesOn();
-  renderList();
-}
-
-// `group by effort` (P4), per wiki: the same store, inverted — the stored
-// `toggle:no-efforts` is the OFF, so a click writes the exception to an ON
-// default. Painted (and shown) from the listing on every render, since the
-// map can appear or go with any adopt.
-let effortsBox!: HTMLInputElement | null;
-function setGroupEfforts(on: boolean): void {
-  if (effortsOn(getOpenFolds(), true) !== on) setOpenFolds(toggleFolded(WIKI, EFFORTS_OFF_TOGGLE_KEY));
-  paintEffortsToggle();
-  renderList();
-}
-
-// `Show retired (N)`, per wiki: the same store and discipline as `group
-// families`. A flip changes the pool every facet counts from, so the facets,
-// the start view and the rows all repaint.
-let retiredBox!: HTMLInputElement | null;
-
-// The toolbar's Filters button flips the <details> under it. The details keeps
-// its own open state, so syncFilters' auto-open and a background adopt read it
-// as before; aria-expanded follows the details whoever opened it.
-let filtersDetails!: HTMLDetailsElement | null;
-let filtersBtn!: HTMLElement | null;
-
-// The view-options pane: opened by its button; closed by the button, a pointer
-// or focus outside it, Escape from anywhere, or a reader shortcut. It is a
-// role="dialog", so while open modalOpen() makes the page's single keys stand
-// aside — it must never stay open once the reader has moved on.
-let optionsBtn!: HTMLElement | null;
-let optionsPane!: HTMLElement | null;
-function setOptionsOpen(open: boolean): void {
-  if (!optionsBtn || !optionsPane) return;
-  optionsPane.hidden = !open;
-  optionsBtn.setAttribute("aria-expanded", String(open));
-}
-
-// Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
-let wikiSel!: HTMLSelectElement | null;
-
+// ── The URL lens: `?lens=` is spent by the first view that renders ────
 function consumeUrlLens(): void {
   if (pendingUrlLens === null) return;
   pendingUrlLens = null;
@@ -7396,6 +6129,15 @@ function activateFactcheckArticle(): void {
 // discipline so a slow boot response can't revert a newer refetch.
 const pagesRefresh = createRefreshModel();
 
+/** The listing's `workMap.kind === "themes"`, set by `setPagesData`: View options
+ *  and the effort page then say theme. Read by the rail and the effort page through their ports. */
+let workMapThemes = false;
+/** The work threads off the last listing (`work`, set by `setPagesData`), or
+ *  null (an older server, a cold sessions memo, no sessions: no section, D11),
+ *  never the last known value: stale threads would lift pages the listing no
+ *  longer works on. Read by the rail and the ⋯ menus through their ports. */
+let workFacts: WorkFacts = null;
+
 /** What the middle pane is showing right now — see `viewStateOf` for the rules.
  *  An Ask/Explain/Fact-check answer nulls `currentName` but is just as much
  *  "someone is reading" as an article; its body element is the only signal that
@@ -7447,10 +6189,10 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // `recencyNow()` is anchored).
   workedGate = workedGateFor(data.pages, activityWeights, recencyNow(), data.workedCoverage?.asOfMs);
   // Shape-checked thread by thread in `openThreadCards` (`usableThreads`).
-  setWorkFacts(data.work && typeof data.work === "object" && Array.isArray(data.work.threads) ? data.work : null);
+  workFacts = data.work && typeof data.work === "object" && Array.isArray(data.work.threads) ? data.work : null;
   setWorkMapRunAt(typeof data.workMap?.runAt === "number" ? data.workMap.runAt : null);
   waitsCounted = data.waitsCounted === true;
-  setWorkMapThemes(getWorkMapRunAt() !== null && data.workMap?.kind === "themes");
+  workMapThemes = getWorkMapRunAt() !== null && data.workMap?.kind === "themes";
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one
   // would admit a project the listing on screen no longer has. An older server /
@@ -7749,8 +6491,10 @@ function railDeps(): RailDeps {
     projects: () => projects,
     jiraKeys: () => jiraKeys,
     trackerLabels: () => trackerLabels,
-    workMapCache: () => workMapCache,
-    railMapFailedAt: () => railMapFailedAt,
+    workMapCache: getWorkMapCache,
+    railMapFailedAt: getRailMapFailedAt,
+    workFacts: () => workFacts,
+    workMapThemes: () => workMapThemes,
     filters,
     pagesRefresh,
     withWiki,
@@ -7769,11 +6513,67 @@ function railDeps(): RailDeps {
     effortHrefFor,
     railEffortsIndex,
     refreshEffortFromListing,
-    railControlSelector,
-    editWorkGroup,
     openWorkCardMenu,
     openThreadRowMenu,
     showWorkBoundaryStatus,
+  };
+}
+
+/** The stale check's port (`StaleDeps`). */
+function staleDeps(): StaleDeps {
+  return {
+    WIKI: () => WIKI,
+    currentRelPath: () => currentRelPath,
+    renderedArticle: () => renderedArticle,
+    startTab: () => startTab,
+    withWiki,
+    loadPageByRelPath,
+  };
+}
+
+/** No page is shown, for the effort page (`EffortDeps.clearShownPage`): the
+ *  shell's own lets, cleared in `renderEffort`'s original order. */
+function clearShownPage(): void {
+  setCurrentRelPath(null);
+  currentPageHash = null;
+  graphMode = false;
+  graphIssue = "";
+  removeGraph();
+  hideBreadcrumb();
+}
+
+/** The effort page's port (`EffortDeps`). */
+function effortDeps(): EffortDeps {
+  return {
+    WIKI: () => WIKI,
+    allPages: () => allPages,
+    filters,
+    pageViewSeq: () => pageViewSeq,
+    workMapThemes: () => workMapThemes,
+    withWiki,
+    pageUrlByRelPath,
+    currentStartUrl,
+    applyPendingPages,
+    consumeUrlLens,
+    setAtlasFull,
+    clearShownPage,
+  };
+}
+
+/** The ⋯ menus' port (`MenusDeps`). */
+function menusDeps(): MenusDeps {
+  return {
+    WIKI: () => WIKI,
+    allPages: () => allPages,
+    workFacts: () => workFacts,
+    seriesMenuOpener: () => seriesMenu?.opener ?? null,
+    postSeriesWrite: () => postSeriesWrite,
+    withWiki,
+    closeSeriesMenu,
+    seriesBaseHash,
+    openPageAtLoad,
+    adoptOwnSeriesHashes,
+    refreshAfterSeriesWrite,
   };
 }
 
@@ -7820,18 +6620,11 @@ export function boot(): { dispose(): void } {
   // idempotent — see `purgeRecentsKeys` for why the prefix is the whole contract.
   purgeRecentsKeys();
   initRail(railDeps());
+  initStale(staleDeps());
+  initEffort(effortDeps());
+  initMenus(menusDeps());
   relatedOrder = readRelatedOrder(WIKI);
-  /** The `<details>` the reader folds: its state is the page's from then on. */
-  document.getElementById("staleBody")?.addEventListener(
-    "toggle",
-    (e) => {
-      const d = e.target as HTMLElement;
-      const key = d.getAttribute?.("data-stale-open");
-      // A toggle queued by a body since replaced (another page's) is not this page's.
-      if (key && d.isConnected) staleOpen[key] = (d as HTMLDetailsElement).open;
-    },
-    true,
-  );
+  registerStale();
   postSeriesWrite = seriesPoster(WIKI);
   document.addEventListener("keydown", (e) => {
     if ((e as KeyboardEvent).key === "Escape" && seriesMenuEl()) closeSeriesMenu("key");
@@ -7992,7 +6785,7 @@ export function boot(): { dispose(): void } {
       if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
       e.preventDefault();
       if (effortLink) openEffort(effortLink.getAttribute("data-effort-link") || "");
-      else if (effortRetry && effortOpen !== null) renderEffort(effortOpen);
+      else if (effortRetry && getEffortOpen() !== null) renderEffort(getEffortOpen()!);
       else if (effortHome) {
         goToStart();
         document.getElementById("wikiWorkCard")?.scrollIntoView({ block: "start" });
@@ -8259,191 +7052,9 @@ export function boot(): { dispose(): void } {
     e.preventDefault();
     openNavTarget(targetPage, true);
   });
-  document.addEventListener("click", (e) => {
-    const target = e.target as HTMLElement;
-    if (!target?.closest) return;
-    const el = workPopEl();
-    if (el && el.contains(target)) {
-      if (boundaryItemClick(target)) return e.preventDefault();
-      const save = target.closest<HTMLElement>("[data-work-save-series]");
-      if (save && workPop) {
-        e.preventDefault();
-        if (save.getAttribute("aria-disabled") === "true") return;
-        const card = drawnWorkCard(save.getAttribute("data-work-save-series") ?? "");
-        if (!card || !isRailGroupCard(card) || !card.series) return;
-        el.innerHTML = saveSeriesConfirmHtml(card, card.series);
-        // A textbox and plain buttons: a dialog, not a menu (whose reading mode
-        // skips anything that is not a menu item). Non-modal: the rail stays live.
-        el.setAttribute("role", "dialog");
-        el.setAttribute("aria-modal", "false");
-        el.setAttribute("aria-label", `Save «${card.name}» as a series`);
-        workPop.series = { card, busy: false };
-        el.querySelector<HTMLElement>("[data-work-series-key], [data-work-series-go]")?.focus({ preventScroll: true });
-        return;
-      }
-      if (target.closest("[data-work-series-go]")) {
-        e.preventDefault();
-        void runSaveAsSeries();
-        return;
-      }
-      if (target.closest("[data-work-series-cancel]")) {
-        e.preventDefault();
-        closeWorkPop("done");
-      }
-      return;
-    }
-    // Refused while a write runs (`closeWorkPop`): its report lands here.
-    if (el && !target.closest("[data-work-card-menu], [data-thread-row-menu]")) closeWorkPop("outside");
-  });
-  document.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key === "Escape" && workPopEl()) closeWorkPop("key");
-  });
-  // The arrows, Home and End move between the items of two body-level menus —
-  // the ⋯ work popover and a thread row's page menu (`#wikiSeriesMenu` opened
-  // from a thread row, marked `data-page-menu`) — the Group menu's keys. A plain
-  // row's, Related work's and the header's series menus are not served: they open
-  // on their field. Tab closes the work popover back to its opener, as Tab closes
-  // the Group menu; the page menu holds text fields, so Tab stays the browser's
-  // there. Inside a text field every key is the field's: an item can move focus
-  // INTO the field (End, a wrap), never out of it.
-  document.addEventListener("keydown", (e) => {
-    const t = e.target as HTMLElement | null;
-    if (!t?.closest || e.defaultPrevented) return;
-    const work = t.closest<HTMLElement>(`#${WORK_POP_ID}`);
-    const el = work ?? t.closest<HTMLElement>(`#${SERIES_MENU_ID}[data-page-menu]`);
-    if (!el || el.getAttribute("role") !== "menu") return;
-    if (work && e.key === "Tab") {
-      e.preventDefault();
-      closeWorkPop("key");
-      return;
-    }
-    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
-    const items = Array.from(el.querySelectorAll<HTMLElement>("[role^='menuitem'], [data-series-input]")).filter(
-      (x) => x.tabIndex >= 0 && !(x as HTMLButtonElement).disabled,
-    );
-    if (!items.length) return;
-    const at = items.findIndex((x) => x === t || x.contains(t));
-    const move = (i: number) => {
-      const item = items[(i + items.length) % items.length]!;
-      // `preventScroll`: a page scroll closes the popover; its own list scrolls.
-      item.focus({ preventScroll: true });
-      if (item.offsetTop < el.scrollTop) el.scrollTop = item.offsetTop;
-      else if (item.offsetTop + item.offsetHeight > el.scrollTop + el.clientHeight) el.scrollTop = item.offsetTop + item.offsetHeight - el.clientHeight;
-    };
-    if (e.key === "ArrowDown") move(at + 1);
-    else if (e.key === "ArrowUp") move(at < 0 ? -1 : at - 1);
-    else if (e.key === "Home") move(0);
-    else if (e.key === "End") move(items.length - 1);
-    else return;
-    e.preventDefault();
-  });
-  // Closed on a scroll that MOVES the opener from where the popover was placed.
-  // Scroll events arrive a frame late, so the click that opened the popover can
-  // deliver its own (a focus or scroll-into-view moving the rail just before the
-  // open): measured on a real wiki, that click closed the popover it opened.
-  window.addEventListener(
-    "scroll",
-    (e) => {
-      const el = workPopEl();
-      const t = e.target as Node | null;
-      if (!el || !workPop || (t && (t === el || el.contains(t)))) return;
-      const { opener, openerSel, at } = workPop;
-      const anchor = opener.isConnected ? opener : openerSel ? document.querySelector(openerSel) : null;
-      const r = anchor?.getBoundingClientRect();
-      if (r && Math.abs(r.top - at.top) < 1 && Math.abs(r.left - at.left) < 1) return;
-      closeWorkPop("viewport");
-    },
-    true,
-  );
-  window.addEventListener("resize", () => closeWorkPop("viewport"));
+  registerMenus();
   registerRail();
-  document.getElementById("wikiSort")!.addEventListener("change", () => {
-    sortTouched = true;
-    writeSort(WIKI, sortMode());
-    renderList();
-  });
-  familiesBox = document.getElementById("wikiGroupFamilies") as HTMLInputElement | null;
-  if (familiesBox) {
-    familiesBox.checked = familiesOn();
-    familiesBox.addEventListener("change", () => setGroupFamilies(familiesBox!.checked));
-  }
-  effortsBox = document.getElementById("wikiGroupEfforts") as HTMLInputElement | null;
-  if (effortsBox) effortsBox.addEventListener("change", () => setGroupEfforts(effortsBox!.checked));
-  retiredBox = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
-  if (retiredBox) {
-    retiredBox.checked = showRetired();
-    retiredBox.addEventListener("change", () => setShowRetired(retiredBox!.checked));
-  }
-  filtersDetails = document.getElementById("wikiFilters") as HTMLDetailsElement | null;
-  filtersBtn = document.getElementById("wikiFiltersBtn");
-  if (filtersDetails && filtersBtn) {
-    filtersBtn.addEventListener("click", () => {
-      filtersDetails!.open = !filtersDetails!.open;
-    });
-    filtersDetails.addEventListener("toggle", () => {
-      filtersBtn!.setAttribute("aria-expanded", String(filtersDetails!.open));
-    });
-  }
-  optionsBtn = document.getElementById("wikiOptionsBtn");
-  optionsPane = document.getElementById("wikiOptions");
-  if (optionsBtn && optionsPane) {
-    const inOptions = (n: EventTarget | null) =>
-      n instanceof Node && (optionsPane!.contains(n) || optionsBtn!.contains(n));
-    optionsBtn.addEventListener("click", () => setOptionsOpen(optionsPane!.hidden));
-    document.addEventListener("pointerdown", (e) => {
-      if (!optionsPane!.hidden && !inOptions(e.target)) setOptionsOpen(false);
-    });
-    document.addEventListener("focusin", (e) => {
-      if (!optionsPane!.hidden && !inOptions(e.target) && !getRestoringRailFocus()) setOptionsOpen(false);
-    });
-    // Capture phase. Escape closes the pane and stops, so it neither leaves focus
-    // mode nor closes a graph card (whose own capture listener, registered
-    // earlier, already stood aside for the open dialog). A shortcut key — one
-    // printable character other than Space (the button's own key), no
-    // modifier — pressed OUTSIDE the pane (on its button,
-    // or on <body> in Safari, which does not focus a clicked button) closes it and
-    // carries on, so modalOpen() is false by the time the shortcut's own listener
-    // reads it. Inside the pane the target is a checkbox, which every shortcut
-    // owner treats as typing; the key is left to it.
-    document.addEventListener(
-      "keydown",
-      (e) => {
-        if (optionsPane!.hidden) return;
-        if (e.key === "Escape") {
-          e.preventDefault();
-          e.stopPropagation();
-          setOptionsOpen(false);
-          optionsBtn!.focus();
-        } else if (
-          e.key.length === 1 &&
-          e.key !== " " &&
-          !e.ctrlKey &&
-          !e.metaKey &&
-          !e.altKey &&
-          !optionsPane!.contains(e.target as Node)
-        ) {
-          setOptionsOpen(false);
-        }
-      },
-      true,
-    );
-  }
-  document.getElementById("wikiActiveOptions")?.addEventListener("click", (e) => {
-    const off = (e.target as HTMLElement).closest?.("[data-view-option-off]");
-    if (!off) return;
-    if (off.getAttribute("data-view-option-off") === "families") setGroupFamilies(false);
-    else setShowRetired(false);
-    // The chip is gone; its option lives behind the options button.
-    optionsBtn?.focus();
-  });
-  paintViewOptions();
-  wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
-  if (wikiSel) {
-    wikiSel.addEventListener("change", () => {
-      const value = wikiSel!.value;
-      location.href = value ? "/wiki?wiki=" + encodeURIComponent(value) : "/wiki";
-    });
-  }
+  registerRailOptions();
   // An in-article `#id` link to a card inside a closed fold: open it on the way.
   window.addEventListener("hashchange", () => {
     const article = document.querySelector("#articleWrap > .wiki-article");

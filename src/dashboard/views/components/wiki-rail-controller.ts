@@ -3,15 +3,17 @@
  * The /wiki reader's left pane: the filter chips and their facet rows, the page
  * list (`renderList`), its pins, folds, work threads and Group menu, and the
  * coverage footer under it. Moved out of the shell (`wiki-browser.ts`) whole,
- * in the shell's source order (mimir plan muninn-wiki-browser-split, C2).
+ * in the shell's source order (mimir plan muninn-wiki-browser-split, C2); C3
+ * added the toolbar's boot code (sort, View options, Filters, the wiki picker)
+ * and the rail-control selector the ⋯ menus share.
  *
  * Importing this module runs nothing. The shell's `boot()` calls
- * {@link initRail}, {@link registerRail} and {@link registerRailMenuKeys} at the
- * positions their statements held in it, so every listener keeps its place in
- * the registration order. This module never imports the shell: what the rail
+ * {@link initRail}, {@link registerRail}, {@link registerRailOptions} and
+ * {@link registerRailMenuKeys} at the positions their statements held in it, so
+ * every listener keeps its place in the registration order. This module never imports the shell: what the rail
  * reads and calls there arrives through {@link RailDeps}, the `atlasDeps()`
  * shape. Shared shell lets live in `wiki-shell-state.ts`; rail state lives here,
- * with accessors only for what the shell reads or sets.
+ * with accessors only for what the shell and the ⋯ menus controller read or set.
  */
 import { escHtml as esc } from "./escape.ts";
 import { seriesEditable } from "./wiki-readonly-client.ts";
@@ -20,7 +22,7 @@ import { canEditSeriesPage, seriesMenuBtnHtml } from "./wiki-series-menu.ts";
 import { workMapDoneSet, type IndexCoverage } from "./wiki-start-cards.ts";
 import { proseText, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
-import { effortNeedsOpen, effortsOn, effortsToggleWords, type RailEffort } from "./wiki-effort-rail.ts";
+import { EFFORTS_OFF_TOGGLE_KEY, effortNeedsOpen, effortsOn, effortsToggleWords, type RailEffort } from "./wiki-effort-rail.ts";
 import { railIssuePillsHtml } from "./wiki-issue-pills.ts";
 import { leaveFocusMode } from "./wiki-pane-toggle.ts";
 import { revealScrollTop, rowFullyVisible } from "./wiki-rail-reveal.ts";
@@ -55,6 +57,7 @@ import {
   togglePinned,
   readThreadPin,
   readWorkGroup,
+  writeSort,
   writeThreadPin,
   writeWorkGroup,
 } from "./wiki-recents-store.ts";
@@ -123,10 +126,11 @@ import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
 import { railListHtml } from "./wiki-provenance-view.ts";
 import { cullLabels, cullToggleText, railPool, RETIRED_TOGGLE_KEY, retiredRevealHtml } from "./wiki-cull-view.ts";
 import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
-import { getCurrentName, getWorkFacts, getWorkMapRunAt, getWorkMapThemes } from "./wiki-shell-state.ts";
+import { getCurrentName, getRevealOnRender, getWorkMapRunAt, setRevealOnRender, type WorkFacts } from "./wiki-shell-state.ts";
 
-/** What the rail reads and calls on the shell. The state is read live, through
- *  a function, so a value the shell reassigns is never a stale copy here. */
+/** What the rail reads and calls on the shell, read live through a function so a
+ *  value the shell reassigns is never a stale copy. A member marked `relayed:` is
+ *  another controller's export: that controller imports `renderList` from here. */
 export interface RailDeps {
   WIKI(): string;
   allPages(): WikiListing[];
@@ -138,8 +142,12 @@ export interface RailDeps {
   projects(): Record<string, number>;
   jiraKeys(): Record<string, number>;
   trackerLabels(): Record<string, string>;
-  workMapCache(): { runAt: number; body: WorkMapGetBody & { map: AnyWorkMap } } | null;
-  railMapFailedAt(): number | null;
+  workMapCache(): { runAt: number; body: WorkMapGetBody & { map: AnyWorkMap } } | null; // relayed: effort
+  railMapFailedAt(): number | null; // relayed: effort
+  /** The work threads off the last listing (`WorkFacts`), shell-owned. */
+  workFacts(): WorkFacts;
+  /** The listing's `workMap.kind === "themes"`: View options then says theme. */
+  workMapThemes(): boolean;
   /** The shell's one filter object: the rail sets its fields in place. */
   readonly filters: WikiFilters;
   readonly pagesRefresh: { readonly bootRendered: boolean };
@@ -154,27 +162,19 @@ export interface RailDeps {
   refreshStartBody(): void;
   refreshStartStats(): void;
   loadPageByRelPath(relPath: string, push?: boolean, revealHash?: boolean): void;
-  /** `renderList` starts each paint with the rail badges' record emptied. */
-  resetStaleRailPainted(): void;
-  railStaleBadge(relPath: string): string;
-  effortHrefFor(id: string): string;
-  railEffortsIndex(now: number): Map<string, RailEffort> | null;
-  refreshEffortFromListing(): void;
-  railControlSelector(el: Element | null): string | null;
-  editWorkGroup(edit: WorkGroupEdit): void;
-  openWorkCardMenu(btn: HTMLElement): void;
-  openThreadRowMenu(btn: HTMLElement): void;
-  showWorkBoundaryStatus(text: string | null): void;
+  resetStaleRailPainted(): void; // relayed: stale; `renderList` starts each paint with the badges' record emptied
+  railStaleBadge(relPath: string): string; // relayed: stale
+  effortHrefFor(id: string): string; // relayed: effort
+  railEffortsIndex(now: number): Map<string, RailEffort> | null; // relayed: effort
+  refreshEffortFromListing(): void; // relayed: effort
+  openWorkCardMenu(btn: HTMLElement): void; // relayed: ⋯ menus
+  openThreadRowMenu(btn: HTMLElement): void; // relayed: ⋯ menus
+  showWorkBoundaryStatus(text: string | null): void; // relayed: ⋯ menus
 }
 
 /** Set once, by {@link initRail}, before anything here runs. */
 let deps!: RailDeps;
 
-/** Set by every page navigation that lands, cleared by the first `renderList`
- *  that has a listing to draw: that render scrolls the open page's row into
- *  view. Normally set and consumed in the same render; it waits only when the
- *  boot listing failed and a later refetch heals it. */
-let revealOnRender = false;
 /** The tag row's `+N` expander. */
 let tagsExpanded = false;
 /** The Jira chip row's `+N` expander — `tagsExpanded`'s twin. */
@@ -723,6 +723,52 @@ export function setShowRetired(on: boolean): void {
   renderList();
 }
 
+// ── View options, sort, Filters, wiki picker (moved with C3) ───────────
+/** The reader changed the sort in this tab: it outranks the default for the rest
+ *  of the session, even where storage refuses the write. */
+let sortTouched = false;
+
+/** Whether this tab changed the sort (`applyWorkedSortOption` in the shell). */
+export function getSortTouched(): boolean {
+  return sortTouched;
+}
+
+// `group families`, per wiki. The control is painted from the STORE at boot (the
+// server has no idea what this browser remembers) and written back through the
+// same `toggleFolded` every fold uses — the toggle is a sentinel key in that one
+// flat namespace, so nothing about the store changes to hold it.
+let familiesBox!: HTMLInputElement | null;
+function setGroupFamilies(on: boolean): void {
+  if (familiesOn() !== on) openFolds = toggleFolded(deps.WIKI(), GROUP_FAMILIES_TOGGLE_KEY);
+  // Painted from the store rather than trusted from the event: a write that
+  // localStorage refused still has to leave the box saying what the rail is
+  // about to render.
+  if (familiesBox) familiesBox.checked = familiesOn();
+  renderList();
+}
+
+// `group by effort` (P4), per wiki: the same store, inverted — the stored
+// `toggle:no-efforts` is the OFF, so a click writes the exception to an ON
+// default. Painted (and shown) from the listing on every render, since the
+// map can appear or go with any adopt.
+function setGroupEfforts(on: boolean): void {
+  if (effortsOn(openFolds, true) !== on) openFolds = toggleFolded(deps.WIKI(), EFFORTS_OFF_TOGGLE_KEY);
+  paintEffortsToggle();
+  renderList();
+}
+
+// The view-options pane: opened by its button; closed by the button, a pointer
+// or focus outside it, Escape from anywhere, or a reader shortcut. It is a
+// role="dialog", so while open modalOpen() makes the page's single keys stand
+// aside — it must never stay open once the reader has moved on.
+let optionsBtn!: HTMLElement | null;
+let optionsPane!: HTMLElement | null;
+function setOptionsOpen(open: boolean): void {
+  if (!optionsBtn || !optionsPane) return;
+  optionsPane.hidden = !open;
+  optionsBtn.setAttribute("aria-expanded", String(open));
+}
+
 /**
  * ★ — hidden until the row is hovered, always shown once pinned.
  *
@@ -866,7 +912,7 @@ export function paintEffortsToggle(): void {
   wrap.hidden = getWorkMapRunAt() === null;
   box.checked = effortsOn(openFolds, true);
   // The label's text node follows the checkbox (wiki-page.ts).
-  const words = effortsToggleWords(getWorkMapThemes());
+  const words = effortsToggleWords(deps.workMapThemes());
   if (wrap.title !== words.title) wrap.title = words.title;
   const text = box.nextSibling;
   if (text?.nodeType === Node.TEXT_NODE && text.textContent?.trim() !== words.label) text.textContent = words.label;
@@ -903,7 +949,7 @@ export function renderList(cause: "storage" | "local" = "local"): void {
     stepWorkGroup({ kind: "render", stored: readWorkGroup(deps.WIKI()), focused: tabHasFocus() });
     // PR 4: a kept-apart anchor follows its thread's newest focus page, the
     // way the pin does (A1–A3), over the record as just adopted.
-    const reanchor = workBoundariesOf(getWorkFacts(), deps.allPages(), workGroupPrefsOf(workGroupRec.held)).reanchor;
+    const reanchor = workBoundariesOf(deps.workFacts(), deps.allPages(), workGroupPrefsOf(workGroupRec.held)).reanchor;
     if (reanchor.length) stepWorkGroup({ kind: "render", stored: readWorkGroup(deps.WIKI()), focused: tabHasFocus(), reanchor });
     // The pin re-anchors over the threads AFTER the reader's splits, never
     // the server's raw threads: a split page that becomes its source's newest
@@ -912,11 +958,11 @@ export function renderList(cause: "storage" | "local" = "local"): void {
       kind: "render",
       stored: readThreadPin(deps.WIKI()),
       focused: tabHasFocus(),
-      anchor: threadPinAnchor(workBoundariesOf(getWorkFacts(), deps.allPages(), workGroupPrefsOf(workGroupRec.held)).derived, deps.allPages(), threadPin.held),
+      anchor: threadPinAnchor(workBoundariesOf(deps.workFacts(), deps.allPages(), workGroupPrefsOf(workGroupRec.held)).derived, deps.allPages(), threadPin.held),
     });
   }
   const groupPrefs = workGroupPrefsOf(workGroupRec.held);
-  const bounds = workBoundariesOf(getWorkFacts(), deps.allPages(), groupPrefs);
+  const bounds = workBoundariesOf(deps.workFacts(), deps.allPages(), groupPrefs);
   workBounds = bounds;
   // The input assembly is `railInputFor` (`wiki-rail-input.ts`), shared with the
   // work replay.
@@ -926,7 +972,7 @@ export function renderList(cause: "storage" | "local" = "local"): void {
       projects: deps.projects(),
       activityWeights: deps.activityWeights(),
       workedGate: deps.workedGate(),
-      work: getWorkFacts(),
+      work: deps.workFacts(),
       // Built only when it can be used: the mode on, and no query (a search
       // flattens every group).
       efforts: effortsGrouped() && !deps.filters.q.trim() ? deps.railEffortsIndex(now) : null,
@@ -1401,7 +1447,7 @@ export function renderList(cause: "storage" | "local" = "local"): void {
       // own thread above the series items; where no series opener applies it
       // still renders, on its own attribute, holding Make own thread only. A
       // Sessions-stop card's rows are not a thread's: today's opener.
-      (entry.thread && !entry.thread.session && rowBoundaryAction(bounds, getWorkFacts(), p.relPath)
+      (entry.thread && !entry.thread.session && rowBoundaryAction(bounds, deps.workFacts(), p.relPath)
         ? canEditSeries && canEditSeriesPage(p.relPath)
           ? seriesMenuBtnHtml(p.relPath, !!p.series, true)
           : threadRowMenuBtnHtml(p.relPath)
@@ -1427,7 +1473,7 @@ export function renderList(cause: "storage" | "local" = "local"): void {
   // Retired pages held back under these facets: the empty rail offers them.
   const heldBack = retiredHeldBack();
   const focusedEl = document.activeElement;
-  const keptFocus = deps.railControlSelector(focusedEl);
+  const keptFocus = railControlSelector(focusedEl);
   listEl.innerHTML = railListHtml(html, retiredRevealHtml(heldBack));
   if (keptFocus && (!document.activeElement || document.activeElement === document.body)) {
     // The control focus was already on: a popover that closes on focus leaving
@@ -1459,8 +1505,8 @@ export function renderList(cause: "storage" | "local" = "local"): void {
   if (heldBack) countEl.setAttribute("title", cullToggleText(heldBack));
   else countEl.removeAttribute("title");
   paintRetiredToggle();
-  if (revealOnRender && deps.allPages().length) {
-    revealOnRender = false;
+  if (getRevealOnRender() && deps.allPages().length) {
+    setRevealOnRender(false);
     revealActiveRow(false);
   }
 }
@@ -1665,13 +1711,66 @@ function setWorkMenu(open: boolean, focus: boolean): void {
   else focusWorkMenuButton();
 }
 
-// ── Accessors: the rail state the shell reads or sets ────────────────
-export function getOpenFolds(): string[] {
-  return openFolds;
+/** The rail control `el` is, as a selector by its own key that finds it again
+ *  after a repaint; null for anything else (a page row, a link other than an
+ *  effort fold's name). Covers the Group button and its menu items, `+ N more
+ *  threads`, the shared context's `+N`, a 📌 (by its card's key, never by
+ *  position), an effort fold's name (by effort id), and every
+ *  `[data-fold-key]` fold in the rail: thread, group and child cards, series
+ *  and folder groups, Bookkeeping, under either spelling. */
+export function railControlSelector(el: Element | null): string | null {
+  if (!(el instanceof HTMLElement) || !el.closest("#wikiList")) return null;
+  const at = (attr: string, v: string) => `#wikiList [${attr}="${CSS.escape(v)}"]`;
+  for (const attr of [
+    "data-work-stop",
+    "data-work-evidence",
+    "data-thread-more",
+    "data-thread-ctx-more",
+    // PR 4: a card's ⋯ (by its card's fold key), `▸ split into N sessions`
+    // (by its card's fold key), a focus row's own ⋯ (by its page) and Reset.
+    "data-work-card-menu",
+    "data-thread-sessions",
+    "data-thread-row-menu",
+    "data-work-reset",
+    // A Pick up row, by its page: kept through the renders a jump runs.
+    "data-pickup",
+    // An effort fold's name, by effort id: opening the effort repaints the rail.
+    "data-effort-link",
+  ]) {
+    const v = el.getAttribute(attr);
+    if (v !== null) return at(attr, v);
+  }
+  const fold = el.getAttribute("data-fold-key");
+  if (fold !== null) {
+    // Either spelling, as the fold's own click handler looks for.
+    const base = fold.startsWith(CLOSED_FOLD_PREFIX) ? fold.slice(CLOSED_FOLD_PREFIX.length) : fold;
+    return `${at("data-fold-key", base)}, ${at("data-fold-key", CLOSED_FOLD_PREFIX + base)}`;
+  }
+  // A thread row's page menu (a tab stop, unlike a plain row's ⋯), by page.
+  const seriesRow = el.getAttribute("data-series-menu");
+  if (seriesRow !== null && el.closest(".wiki-list-item.thread-row")) {
+    return `#wikiList .wiki-list-item.thread-row [data-series-menu="${CSS.escape(seriesRow)}"]`;
+  }
+  if (el.hasAttribute("data-thread-pin")) {
+    const cardEl = el.closest(".wiki-thread-card");
+    const attr = cardEl?.hasAttribute("data-thread-group") ? "data-thread-group" : "data-thread";
+    const card = cardEl?.getAttribute(attr);
+    return card ? `#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]` : null;
+  }
+  return el.hasAttribute("data-work-group-menu") ? "#wikiList [data-work-group-menu]" : null;
 }
 
-export function setOpenFolds(folds: string[]): void {
-  openFolds = folds;
+/** One explicit edit from the Group menu: merged onto the record as read now
+ *  and written (D17); the first edit is what creates the record. */
+export function editWorkGroup(edit: WorkGroupEdit): void {
+  stepWorkGroup({ kind: "click", stored: readWorkGroup(deps.WIKI()), edit });
+}
+
+// ── Accessors: the rail state the shell and the ⋯ menus read or set ──
+/** Flip one stored fold or toggle by its key (the ⋯ menus' Save as series
+ *  carries a group's open state onto its new key). */
+export function toggleRailFold(toggleKey: string): void {
+  openFolds = toggleFolded(deps.WIKI(), toggleKey);
 }
 
 export function getWorkGroupRec(): WorkGroupRecordState {
@@ -1688,10 +1787,6 @@ export function getWorkCardsDrawn(): readonly RailWorkCard[] {
 
 export function getRestoringRailFocus(): boolean {
   return restoringRailFocus;
-}
-
-export function setRevealOnRender(on: boolean): void {
-  revealOnRender = on;
 }
 
 // ── Boot: called by the shell's boot(), each where its statements stood ───
@@ -1751,7 +1846,7 @@ export function registerRail(): void {
     // focus returns to the Group button, which reopens it.
     if (target.closest("[data-work-reset]")) {
       e.preventDefault();
-      deps.editWorkGroup({ reset: true });
+      editWorkGroup({ reset: true });
       deps.showWorkBoundaryStatus(null);
       setWorkMenu(false, true);
       return;
@@ -1768,7 +1863,7 @@ export function registerRail(): void {
       const at = keys.indexOf(workForgetKey(forget));
       const next = at < 0 ? [] : [...keys.slice(at + 1), ...keys.slice(0, at).reverse()];
       const id = forget.getAttribute("data-work-forget-split");
-      deps.editWorkGroup(id !== null ? { forgetSplit: id } : { allowGrouping: [forget.getAttribute("data-work-forget-anchor") ?? ""] });
+      editWorkGroup(id !== null ? { forgetSplit: id } : { allowGrouping: [forget.getAttribute("data-work-forget-anchor") ?? ""] });
       deps.showWorkBoundaryStatus(null);
       renderList();
       focusWorkMenuItem(next.find((sel) => document.querySelector(`#wikiList .wiki-work-menu ${sel}`)));
@@ -1804,7 +1899,7 @@ export function registerRail(): void {
     const stopBtn = target.closest("[data-work-stop]");
     if (stopBtn) {
       e.preventDefault();
-      deps.editWorkGroup({ stop: stopBtn.getAttribute("data-work-stop") as WorkGroupStop });
+      editWorkGroup({ stop: stopBtn.getAttribute("data-work-stop") as WorkGroupStop });
       setWorkMenu(false, true);
       return;
     }
@@ -1814,7 +1909,7 @@ export function registerRail(): void {
       // Disabled at Threads: the box keeps its value and the click does nothing.
       if (boxBtn.getAttribute("aria-disabled") === "true") return;
       const key = boxBtn.getAttribute("data-work-evidence") as keyof WorkGroupEvidenceToggles;
-      deps.editWorkGroup({ evidence: key, value: boxBtn.getAttribute("aria-checked") !== "true" });
+      editWorkGroup({ evidence: key, value: boxBtn.getAttribute("aria-checked") !== "true" });
       renderList();
       focusWorkMenuItem(`[data-work-evidence="${CSS.escape(key)}"]`);
       return;
@@ -2041,6 +2136,105 @@ export function registerRail(): void {
     deps.refreshStartBody();
     syncFilters();
   });
+}
+
+/** The sort select, the View options pane and its three toggles, the Filters
+ *  disclosure, the active-options chips and the wiki picker. */
+export function registerRailOptions(): void {
+  document.getElementById("wikiSort")!.addEventListener("change", () => {
+    sortTouched = true;
+    writeSort(deps.WIKI(), deps.sortMode());
+    renderList();
+  });
+  familiesBox = document.getElementById("wikiGroupFamilies") as HTMLInputElement | null;
+  if (familiesBox) {
+    familiesBox.checked = familiesOn();
+    familiesBox.addEventListener("change", () => setGroupFamilies(familiesBox!.checked));
+  }
+  const effortsBox = document.getElementById("wikiGroupEfforts") as HTMLInputElement | null;
+  if (effortsBox) effortsBox.addEventListener("change", () => setGroupEfforts(effortsBox!.checked));
+  // `Show retired (N)`, per wiki: the same store and discipline as `group
+  // families`. A flip changes the pool every facet counts from, so the facets,
+  // the start view and the rows all repaint.
+  const retiredBox = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
+  if (retiredBox) {
+    retiredBox.checked = showRetired();
+    retiredBox.addEventListener("change", () => setShowRetired(retiredBox!.checked));
+  }
+  // The toolbar's Filters button flips the <details> under it. The details keeps
+  // its own open state, so syncFilters' auto-open and a background adopt read it
+  // as before; aria-expanded follows the details whoever opened it.
+  const filtersDetails = document.getElementById("wikiFilters") as HTMLDetailsElement | null;
+  const filtersBtn = document.getElementById("wikiFiltersBtn");
+  if (filtersDetails && filtersBtn) {
+    filtersBtn.addEventListener("click", () => {
+      filtersDetails!.open = !filtersDetails!.open;
+    });
+    filtersDetails.addEventListener("toggle", () => {
+      filtersBtn!.setAttribute("aria-expanded", String(filtersDetails!.open));
+    });
+  }
+  optionsBtn = document.getElementById("wikiOptionsBtn");
+  optionsPane = document.getElementById("wikiOptions");
+  if (optionsBtn && optionsPane) {
+    const inOptions = (n: EventTarget | null) =>
+      n instanceof Node && (optionsPane!.contains(n) || optionsBtn!.contains(n));
+    optionsBtn.addEventListener("click", () => setOptionsOpen(optionsPane!.hidden));
+    document.addEventListener("pointerdown", (e) => {
+      if (!optionsPane!.hidden && !inOptions(e.target)) setOptionsOpen(false);
+    });
+    document.addEventListener("focusin", (e) => {
+      if (!optionsPane!.hidden && !inOptions(e.target) && !getRestoringRailFocus()) setOptionsOpen(false);
+    });
+    // Capture phase. Escape closes the pane and stops, so it neither leaves focus
+    // mode nor closes a graph card (whose own capture listener, registered
+    // earlier, already stood aside for the open dialog). A shortcut key — one
+    // printable character other than Space (the button's own key), no
+    // modifier — pressed OUTSIDE the pane (on its button,
+    // or on <body> in Safari, which does not focus a clicked button) closes it and
+    // carries on, so modalOpen() is false by the time the shortcut's own listener
+    // reads it. Inside the pane the target is a checkbox, which every shortcut
+    // owner treats as typing; the key is left to it.
+    document.addEventListener(
+      "keydown",
+      (e) => {
+        if (optionsPane!.hidden) return;
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          setOptionsOpen(false);
+          optionsBtn!.focus();
+        } else if (
+          e.key.length === 1 &&
+          e.key !== " " &&
+          !e.ctrlKey &&
+          !e.metaKey &&
+          !e.altKey &&
+          !optionsPane!.contains(e.target as Node)
+        ) {
+          setOptionsOpen(false);
+        }
+      },
+      true,
+    );
+  }
+  document.getElementById("wikiActiveOptions")?.addEventListener("click", (e) => {
+    const off = (e.target as HTMLElement).closest?.("[data-view-option-off]");
+    if (!off) return;
+    if (off.getAttribute("data-view-option-off") === "families") setGroupFamilies(false);
+    else setShowRetired(false);
+    // The chip is gone; its option lives behind the options button.
+    optionsBtn?.focus();
+  });
+  paintViewOptions();
+  // Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
+  const wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
+  if (wikiSel) {
+    wikiSel.addEventListener("change", () => {
+      const value = wikiSel!.value;
+      location.href = value ? "/wiki?wiki=" + encodeURIComponent(value) : "/wiki";
+    });
+  }
 }
 
 /** Another tab's pin or grouping record, and the Group menu's keys and click-away. */
