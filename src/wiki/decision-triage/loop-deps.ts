@@ -139,12 +139,19 @@ export function realTriageLoopDeps(
     const done = slot?.progress;
     const now = Date.now();
     const outcome = done && done.verdicts > 0 ? "partial" : "failed";
-    if (slot) slot.line = { by: "record", outcome, cards: done!.cardsLogged };
+    const claim = { by: "record", outcome, cards: done?.cardsLogged ?? 0 } as const;
+    if (slot) slot.line = claim;
     const reason = done && done.open !== null ? `${error}; ${done.verdicts} verdict(s) in ${done.cardsLogged} card line(s) logged of ${done.open} open card(s), ${done.usage.calls} call(s) answered` : error;
-    await state.record(wiki, { at: now, outcome: outcome === "partial" ? "ok" : "failed", error: reason });
-    await appendLogLines(nightlyLogPath(wiki, dir), [
-      { type: "run", runId: done?.runId ?? randomUUID(), at: done?.at ?? now, wiki, model: done?.model ?? (modelOn ? config.workMapModel : MODEL_OFF_MODEL), promptVersion: done?.promptVersion ?? (modelOn ? DECISION_TRIAGE_PROMPT_VERSION : MODEL_OFF_VERSION), usage: done?.usage ?? { calls: 0 }, repoRoots: config.decisionTriageRepoRoots, repos: done?.repos ?? [], cards: done?.cardsLogged ?? 0, floor: null, outcome, reason },
-    ]);
+    try {
+      await state.record(wiki, { at: now, outcome: outcome === "partial" ? "ok" : "failed", error: reason });
+      await appendLogLines(nightlyLogPath(wiki, dir), [
+        { type: "run", runId: done?.runId ?? randomUUID(), at: done?.at ?? now, wiki, model: done?.model ?? (modelOn ? config.workMapModel : MODEL_OFF_MODEL), promptVersion: done?.promptVersion ?? (modelOn ? DECISION_TRIAGE_PROMPT_VERSION : MODEL_OFF_VERSION), usage: done?.usage ?? { calls: 0 }, repoRoots: config.decisionTriageRepoRoots, repos: done?.repos ?? [], cards: done?.cardsLogged ?? 0, floor: null, outcome, reason },
+      ]);
+    } catch (err) {
+      // A record that never landed is no claim: the pass reports its own end.
+      if (slot?.line === claim) slot.line = null;
+      throw err;
+    }
     return outcome;
   };
 
@@ -213,27 +220,31 @@ export function realTriageLoopDeps(
       log.warn("Decision triage threw for {wiki}: {error}", { wiki, error });
       return recordFailed(wiki, error);
     });
-    const line = slot?.line;
-    // An aborted run with no line keeps its progress for a record after it (Run now's bound).
-    if (line && inFlight.get(wiki) === slot) inFlight.delete(wiki);
-    // A throw's or the bound's line was the run's: report it, write nothing more.
-    if (line?.by === "record") return { outcome: line.outcome, cards: line.cards };
-    if (!("run" in result)) return result.outcome === "aborted" ? result : { outcome: result.outcome, cards: slot?.progress.cardsLogged ?? 0 };
-    await state.record(wiki, {
-      at,
-      outcome: result.outcome === "partial" ? "ok" : result.outcome,
-      ...(result.run.reason ? { error: result.run.reason } : {}),
-    });
-    if (result.outcome === "ok" || result.outcome === "partial") {
-      log.info("Decision triage for {wiki}: {outcome}, {cards} card(s)", { wiki, outcome: result.outcome, cards: result.run.cards });
+    try {
+      const line = slot?.line;
+      // A throw's or the bound's line was the run's: report it, write nothing more.
+      if (line?.by === "record") return { outcome: line.outcome, cards: line.cards };
+      if (!("run" in result)) return result.outcome === "aborted" ? result : { outcome: result.outcome, cards: slot?.progress.cardsLogged ?? 0 };
+      await state.record(wiki, {
+        at,
+        outcome: result.outcome === "partial" ? "ok" : result.outcome,
+        ...(result.run.reason ? { error: result.run.reason } : {}),
+      });
+      if (result.outcome === "ok" || result.outcome === "partial") {
+        log.info("Decision triage for {wiki}: {outcome}, {cards} card(s)", { wiki, outcome: result.outcome, cards: result.run.cards });
+      }
+      if (result.run.floor?.met && !floorMet) {
+        const logs = await Promise.all(names.map((n) => readLog(nightlyLogPath(n, dir))));
+        const before = logs.flatMap((l) => l.runs).filter((r) => r.floor?.met && r.runId !== result.run.runId);
+        floorMet = true;
+        if (before.length === 0) log.info("Decision triage: the score's floor is met for the first time");
+      }
+      return { outcome: result.outcome, cards: result.run.cards, ...(result.run.reason ? { reason: result.run.reason } : {}) };
+    } finally {
+      // Held through the state write, so a bound firing there finds the line taken. An
+      // aborted run with no line keeps its progress for a record after it (Run now's bound).
+      if (slot?.line && inFlight.get(wiki) === slot) inFlight.delete(wiki);
     }
-    if (result.run.floor?.met && !floorMet) {
-      const logs = await Promise.all(names.map((n) => readLog(nightlyLogPath(n, dir))));
-      const before = logs.flatMap((l) => l.runs).filter((r) => r.floor?.met && r.runId !== result.run.runId);
-      floorMet = true;
-      if (before.length === 0) log.info("Decision triage: the score's floor is met for the first time");
-    }
-    return { outcome: result.outcome, cards: result.run.cards, ...(result.run.reason ? { reason: result.run.reason } : {}) };
   }
 }
 

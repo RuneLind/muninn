@@ -438,6 +438,61 @@ ${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt), cos
       expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
     });
 
+    test("b2: the bound fires after the pass's run line landed, while it still records its state: no second line or state record", async () => {
+      const { tmp, env } = withCards(3);
+      const { seen } = await drive(`
+const ac = new AbortController();
+let bound: Promise<unknown> | null = null;
+const p = deps.run("a", ac.signal);
+seen.push(await p);
+seen.push((await bound) ?? null);
+${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) }), append: async (l) => { await appendLogLines(logs + "/a.jsonl", l); if (l.some((x) => x.type === "run")) setImmediate(() => { ac.abort(); bound = deps.recordFailed("a", "the pass timed out after 7 ms"); }); }`);
+      expect(runLines(tmp).map((r) => r.outcome)).toEqual(["ok"]);
+      expect(seen[0]).toMatchObject({ outcome: "ok", cards: 3 });
+      expect(seen[1]).toBeNull();
+      expect(attempts(seen[2])).toBe(1);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
+
+    test("Run now's shape: an aborted pass writes no line, and a record after it carries the run's id and counts", async () => {
+      const { tmp, env } = withCards(30);
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+g1.open();
+seen.push(await p);
+seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms"));
+`, env, tmp, SECOND_WAITS);
+      const lines = logOf(tmp);
+      const runs = lines.filter((l) => l.type === "run");
+      expect(seen[0]).toEqual({ outcome: "aborted" });
+      expect(seen[1]).toBe("partial");
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: "partial", cards: 25 });
+      expect(lines.filter((l) => l.type === "card").every((c) => c.runId === runs[0]!.runId)).toBe(true);
+    });
+
+    test("the bound's record fails to write: its claim is released, and the pass reports its own end, not the record's", async () => {
+      const { tmp, env } = withCards(30);
+      // The run line's file is a folder: the record's append throws; the pass's cards go elsewhere.
+      mkdirSync(path.join(tmp, "logs", "a.jsonl"), { recursive: true });
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms").then(() => "recorded", () => "threw"));
+g1.open();
+seen.push(await p);
+seen.push(agentRuns());
+`, env, tmp, `${SECOND_WAITS}, append: (l) => appendLogLines(logs + "/cards.jsonl", l)`);
+      expect(seen[0]).toBe("threw");
+      expect(seen[1]).toEqual({ outcome: "aborted" });
+      expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    });
+
     test("e: the loop stops mid-pass: no run line, no state, the row an error", async () => {
       const { tmp, env } = withCards(30);
       const { seen } = await drive(`
