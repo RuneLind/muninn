@@ -6,7 +6,7 @@
  * against at its own start, so it passes alone (`-t`) as well as in order.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { adoptIfNewer, effortHrefFor, getRailMapFailedAt, getWorkMapCache, railEffortsIndex } from "./wiki-work-map-cache.ts";
+import { adoptIfNewer, effortHrefFor, getRailMapFailedAt, getWorkMapCache, railEffortsIndex, workMapFetchFor } from "./wiki-work-map-cache.ts";
 import { getWorkMapRunAt, setWorkMapRunAt } from "./wiki-shell-state.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { WorkMapGetBody } from "./wiki-work-card.ts";
@@ -85,6 +85,54 @@ describe("wiki-work-map-cache", () => {
     expect(railEffortsIndex(1, PAGES, withWiki, () => repaints++)).toBeNull();
     expect(gets.length).toBe(1);
     expect(getWorkMapCache()).toBe(cachedBefore);
+  });
+
+  test("a rejected GET latches its run time too, repaints once, and is not retried", async () => {
+    serve(() => {
+      throw new Error("network down");
+    });
+    setWorkMapRunAt(400);
+    let repaints = 0;
+    expect(railEffortsIndex(1, PAGES, withWiki, () => repaints++)).toBeNull();
+    await settle();
+    await settle();
+    expect(repaints).toBe(1);
+    expect(getRailMapFailedAt()).toBe(400);
+    expect(railEffortsIndex(1, PAGES, withWiki, () => repaints++)).toBeNull();
+    expect(gets.length).toBe(1);
+  });
+
+  test("an answer for a run the listing has left neither caches, repaints nor blocks a later GET for that run", async () => {
+    let answer!: (r: Response) => void;
+    gets = [];
+    globalThis.fetch = (async (input: unknown) => {
+      gets.push(String(input));
+      return new Promise<Response>((r) => (answer = r));
+    }) as unknown as typeof fetch;
+    setWorkMapRunAt(500);
+    let repaints = 0;
+    expect(railEffortsIndex(1, PAGES, withWiki, () => repaints++)).toBeNull();
+    setWorkMapRunAt(600);
+    answer(new Response(JSON.stringify({ map: mapAt(500) }), { status: 200 }));
+    await settle();
+    await settle();
+    expect(repaints).toBe(0);
+    expect(getWorkMapCache()?.runAt).not.toBe(500);
+    // Back on run 500: its GET settled, so the rail asks again.
+    setWorkMapRunAt(500);
+    railEffortsIndex(1, PAGES, withWiki, () => repaints++);
+    expect(gets.length).toBe(2);
+    answer(new Response("{}", { status: 500 }));
+    await settle();
+    await settle();
+  });
+
+  test("workMapFetchFor answers a cached run from the cache, with no second GET", async () => {
+    serve(() => new Response(JSON.stringify({ map: mapAt(900) }), { status: 200 }));
+    setWorkMapRunAt(900);
+    expect((await workMapFetchFor(900, withWiki)).body?.map?.runAtMs).toBe(900);
+    expect((await workMapFetchFor(900, withWiki)).body?.map?.runAtMs).toBe(900);
+    expect(gets.length).toBe(1);
   });
 
   test("adoptIfNewer takes only a newer run, as both the run time and the cache", () => {
