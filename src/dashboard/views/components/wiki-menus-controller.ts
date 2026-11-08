@@ -5,9 +5,9 @@
  * (Make own thread, Return, Keep separate, Allow grouping) and Save as series;
  * plus the focus rule both body-level popovers close by. Moved out of the shell
  * (`wiki-browser.ts`) whole, in source order (mimir plan
- * muninn-wiki-browser-split, C3). The series editor's popover stays in the
- * shell; it imports the focus rule ({@link popCloseReturnsFocus},
- * {@link focusPopOpener}) and the boundary items from here.
+ * muninn-wiki-browser-split, C3). The series editor's popover lives in
+ * `wiki-series-controller.ts` (C5); it imports the focus rule
+ * ({@link popCloseReturnsFocus}, {@link focusPopOpener}) and the boundary items from here.
  *
  * Importing this module runs nothing. The shell's `boot()` calls
  * {@link initMenus} beside `initRail` and {@link registerMenus} where the work
@@ -43,7 +43,7 @@ import {
   toggleRailFold,
 } from "./wiki-rail-controller.ts";
 
-/** What the ⋯ menus read and call on the shell, read live. */
+/** What the ⋯ menus read and call through the shell, read live; five members relay the series controller's exports. */
 export interface MenusDeps {
   WIKI(): string;
   allPages(): WikiListing[];
@@ -52,7 +52,7 @@ export interface MenusDeps {
   /** The open series menu's opener, or null: a boundary item clicked in it
    *  returns focus there by its key. */
   seriesMenuOpener(): HTMLElement | null;
-  /** The series POST, set once in `boot()`. */
+  /** The series POST, set once by the series controller's `initSeries`. */
   postSeriesWrite(): SeriesPoster;
   withWiki(url: string): string;
   closeSeriesMenu(cause: PopCloseCause): void;

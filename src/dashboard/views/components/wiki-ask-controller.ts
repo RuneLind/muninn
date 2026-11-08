@@ -108,9 +108,9 @@ export interface AskTurnPort {
    *  `removeGraph()` aborts the graph fetch and drops its section, and its
    *  `hideBreadcrumb()` does more than its name says: `abortProvLoad()`,
    *  `unmountAnswerExport()`, `closeWalkthroughOnNavigate(null)` and
-   *  `currentArticle = null` (with `currentOutgoingTitles = []`) run inside it. */
+   *  `currentArticle = null` (with `clearOutgoingTitles()`) run inside it. */
   clearShownPage(): void;
-  /** The shell's `switchConnTab()` (right-rail tabs, C5): `runAskStream` shows the Ask tab. */
+  /** The article controller's `switchConnTab()`, relayed by the shell (right-rail tabs, C5): `runAskStream` shows the Ask tab. */
   switchConnTab(tab: string): void;
   /** The shell's `reloadPageInPlace()` (page loading; the walkthrough's Reload
    *  calls it too): a fact-check write re-opens the checked page. */

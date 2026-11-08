@@ -16,27 +16,21 @@
  * re-sorts mid-article. Article + connections come per-page from /api/wiki/page.
  */
 
-import { movedWithSectionHtml, type MovedWithListing } from "./wiki-moved-with.ts";
 import { staleHomeBodyHtml, staleHomeLineHtml } from "./wiki-stale-summary.ts";
 import { escHtml as esc } from "./escape.ts";
 import {
   installWikiReadonlyGuard,
   seriesEditable,
-  wikiReadonlyWikiFlag,
 } from "./wiki-readonly-client.ts";
 // The series editor's pure half — the menu model, the head-move plan and the
-// markup. Only the DOM (the popover, the writes, the repaint) lives here.
+// markup. The DOM (the popover, the writes, the repaint) lives in
+// `wiki-series-controller.ts`; the shell keeps the header opener's markup.
 import {
-  buildSeriesMenu,
   canEditSeriesPage,
-  headMoveWrites,
   seriesEditBtnHtml,
-  seriesMenuHtml,
   SERIES_EDIT_ATTR,
   SERIES_MENU_ATTR,
   SERIES_MENU_ID,
-  type SeriesMenuModel,
-  type SeriesWrite,
 } from "./wiki-series-menu.ts";
 import {
   buildExplainUrl,
@@ -55,7 +49,7 @@ import { closeChatOptionsIfNavigatingAway, initChatOptions } from "./wiki-chat-o
 // The share dialog: IMPORTED, never the standalone bundle. This file is itself
 // bundled (as `wiki-shell-client.ts`'s import), so loading both would give the page two copies of the
 // module — two states, two document listener sets, one split dialog.
-import { openShareDialog, closeShareDialogOnNavigate } from "./share-dialog.ts";
+import { closeShareDialogOnNavigate } from "./share-dialog.ts";
 import { closeWalkthroughOnNavigate, enhanceWalkthroughButtons } from "./wiki-walkthrough.ts";
 import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
 import {
@@ -71,16 +65,8 @@ import { installMirrorStatus } from "./wiki-mirror-status.ts";
 // load it without a DOM.
 import {
   RELATED_HOP_ATTR,
-  RELATED_HOP_BODY_ATTR,
   RELATED_ORDER_ATTR,
-  relatedHopHtml,
-  relatedSectionHtml,
-  type RelatedHopResponse,
-  type RelatedListing,
-  type RelatedViewOptions,
 } from "./wiki-related-view.ts";
-import { seriesLabelFor, seriesLabels } from "./wiki-find.ts";
-import { RELATED_HOP_LIMIT_DEFAULT } from "../../../wiki/related-constants.ts";
 // The start-view cards (What's new · Index coverage · reindex poller): IMPORTED
 // for the same reason as the share dialog above — one bundle, one module state.
 import {
@@ -108,21 +94,12 @@ import {
 import { readLastWiki, readStartTab, writeLastWiki, writeStartTab } from "./wiki-home-store.ts";
 import {
   COPY_PATH_BTN_ID,
-  COPY_PATH_FAIL,
-  COPY_PATH_IDLE,
-  COPY_PATH_OK,
-  copyPathAriaLabel,
-  copyText,
-  flashCopyResult,
-  wikiPagePath,
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
-import { relationWord } from "./wiki-issue-pills.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
   parseRelatedOrder,
-  type RelatedOrder,
 } from "./wiki-recents.ts";
 import {
   clipSeriesTitle,
@@ -132,7 +109,7 @@ import {
   seriesStripOrder,
   workedShownDay,
 } from "./wiki-groups.ts";
-import { readSeriesBasesAfterWrites, seriesBaseReader, seriesConflictCopy, seriesPoster, trackSeriesWrite, withinSeriesBound, writeSeriesUnlessOpenChanged, type OpenPageAtLoad, type SeriesPoster } from "./wiki-series-write.ts";
+import type { OpenPageAtLoad } from "./wiki-series-write.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   parseActivityWeights,
@@ -142,9 +119,7 @@ import {
 } from "./wiki-activity-rank.ts";
 import {
   purgeRecentsKeys,
-  readRelatedOrder,
   readSort,
-  writeRelatedOrder,
 } from "./wiki-recents-store.ts";
 import {
   WORK_POP_ID,
@@ -165,7 +140,6 @@ import {
   lensKeyToggles,
   lensOf,
   readerSelectionText,
-  refreshLensSwitch,
   removeLensChip,
   storedLens,
   toggleLens,
@@ -173,10 +147,9 @@ import {
 import { abortAgentRuns, snapshotAgentPane, type AgentPaneSnapshot } from "./wiki-agent-pane.ts";
 import { enhanceNewSince } from "./wiki-new-since.ts";
 import { resolveLens, type Lens } from "../../../format/reader-lens.ts";
-import type { ReaderPayload } from "../../../wiki/render.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
-import { enhanceAnswerCards, type PageAnswersInfo } from "./wiki-answer-cards.ts";
+import { enhanceAnswerCards } from "./wiki-answer-cards.ts";
 import { mountAnswerExport, unmountAnswerExport } from "./wiki-answer-export.ts";
 import { DEFAULT_QUESTION_LANGUAGE, parseQuestionLanguage } from "../../../format/question-labels.ts";
 import {
@@ -207,7 +180,6 @@ import {
   connectionTypeOrder,
   breadcrumbLeaf,
   displayTitleOf,
-  shortGraphLabel,
   filterPages,
   folderLabelOf,
   hasTypedHubs,
@@ -235,7 +207,6 @@ import {
   TYPE_ORDER,
   urlWithJira,
   urlWithProject,
-  facetJiraKeys,
   readDisplayParams,
   searchWithDisplay,
   type DisplayState,
@@ -244,7 +215,6 @@ import {
   type WikiListing,
   type WikiSortMode,
 } from "./wiki-filter.ts";
-import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
 // Graph mode: the lanes markup, the side card and the `g` rule are pure and
 // live in that module; this file owns the state, the fetch and the DOM.
 import {
@@ -272,42 +242,26 @@ import {
 import { modalOpen, navMenuOpen, readerKeyEventOf } from "./wiki-panes.ts";
 import { graphDefaults, parseIssueRoot, type GraphLevel, type GraphPayload } from "../../../wiki/graph-types.ts";
 // The provenance strip: one collapsed line under the title that opens into the
-// chain. Every string and every fragment of markup lives in that module (pure,
-// `bun test`-covered); this file only decides WHERE it goes and wires the three
-// controls it carries — the Jira key, the disclosure and the ⧉ copy button.
+// chain. Its strings and markup live in that module (pure, `bun test`-covered);
+// placement and fill are `wiki-article-controller.ts`'s. This file keeps the
+// pending placeholder and the delegate's branches for the strip's five controls.
 import {
   provPendingHtml,
-  provStripHtml,
-  provUnavailableHtml,
-  SESSION_COPY_FAIL,
-  SESSION_COPY_IDLE,
-  SESSION_COPY_OK,
-  sessionCopyAriaLabel,
-  STAMP_CONFIRM_LABEL,
-  STAMP_LABEL,
 } from "./wiki-provenance-view.ts";
 import {
-  connItemHtml,
   CULL_GO_ATTR,
   cullBannerHtml,
   cullLabels,
   cullMarkHtml,
-  miniNodeHtml,
   railPool,
   RETIRED_REVEAL_ATTR,
   retiredRevealHtml,
   setCullLabels,
 } from "./wiki-cull-view.ts";
-import { provenanceStripCertain, type ProvenancePayload } from "../../../wiki/provenance.ts";
-import { compactIssues, relationsCount, type IssueRow } from "../../../wiki/trackers/types.ts";
+import { provenanceStripCertain } from "../../../wiki/provenance.ts";
 import {
-  CONN_ISSUES_ID,
-  DRAFT_PLAN_ATTR,
   ISSUE_LINK_ALL_ATTR,
   ISSUE_LINK_ATTR,
-  issueSectionHtml,
-  linkAllKeys,
-  type IssueRowState,
 } from "./wiki-issue-rows.ts";
 import { initWikiVisuals } from "./wiki-visuals.ts";
 // The left pane: imported, like the start cards, for one bundle and one module state.
@@ -320,9 +274,7 @@ import {
   registerRail,
   registerRailMenuKeys,
   registerRailOptions,
-  railControlSelector,
   getSortTouched,
-  renderJiraChips,
   renderList,
   renderPageFacets,
   repaintForJira,
@@ -367,18 +319,12 @@ import {
   type EffortDeps,
 } from "./wiki-effort-controller.ts";
 import {
-  boundaryItemClick,
-  focusPopOpener,
   initMenus,
   openThreadRowMenu,
   openWorkCardMenu,
-  popCloseReturnsFocus,
   registerMenus,
-  rowMenuItemHtml,
   showWorkBoundaryStatus,
-  workPopBusy,
   type MenusDeps,
-  type PopCloseCause,
 } from "./wiki-menus-controller.ts";
 import {
   acceptFactcheckIntegrate,
@@ -406,6 +352,40 @@ import {
   type AskTurn,
   type AskTurnPort,
 } from "./wiki-ask-controller.ts";
+import {
+  abortProvLoad,
+  clearOutgoingTitles,
+  copyArticlePath,
+  copyPathBtnHtml,
+  copySessionId,
+  getCurrentOutgoingTitles,
+  initArticle,
+  linkAllIssues,
+  linkIssue,
+  loadProvStrip,
+  loadSimilar,
+  openArticleShare,
+  renderConnections,
+  repaintRelatedBlock,
+  retryProvStrip,
+  setRelatedOrder,
+  stampGhost,
+  switchConnTab,
+  toggleProvChain,
+  toggleRelatedHop,
+  type ArticlePort,
+  type WikiPageDetail,
+} from "./wiki-article-controller.ts";
+import {
+  closeSeriesMenu,
+  getPostSeriesWrite,
+  initSeries,
+  refreshAfterSeriesWrite,
+  registerSeriesInputs,
+  seriesBaseHash,
+  seriesMenuOpener,
+  type SeriesPort,
+} from "./wiki-series-controller.ts";
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
@@ -493,56 +473,6 @@ let fellesPublishBucket: string | undefined;
 /** The «Felles: N changed» chip and the status behind ⇪ Felles's marker;
  *  started once, on the first listing that offers ⇪ Felles. */
 let fellesSync: FellesSync | null = null;
-
-// ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
-interface WikiPageDetail {
-  meta: WikiListing;
-  html: string;
-  outgoing: WikiListing[];
-  backlinks: WikiListing[];
-  /** The pages one hop from this one, strongest first. ABSENT on an older server;
-   *  `[]` on a page with no neighbours — both render no block at all. */
-  related?: RelatedListing[];
-  /** TRUE when the page carries any provenance key and the block is worth
-   *  fetching from `/api/wiki/page/provenance`. ABSENT on a page carrying none
-   *  of the frontmatter keys — never `false` — so the client's one gate is "is
-   *  this key here at all". The block itself never rides on this payload: the
-   *  join reaches claude-usage and huginn, and a page open must not wait on it. */
-  provenancePending?: boolean;
-  /** Connections' issue rows, index-local half. ABSENT on a page with none and
-   *  on every page of a wiki with no tracker. The deferred provenance block
-   *  carries the whole row and replaces these when it lands. */
-  issueRows?: IssueRow[];
-  /** Whether a Link may be offered, before the deferred payload says so. */
-  issueStampable?: boolean;
-  /** Connections' *Moved with* rows (`stale.ts`). ABSENT on an older server;
-   *  `[]` without git — both render no section. */
-  movedWith?: MovedWithListing[];
-  /** sha256 of the page's RAW bytes, as of this response — the series editor's
-   *  CAS base for the page the reader has open, captured when the popover opens
-   *  rather than fetched again a millisecond before the POST. Kept in step with
-   *  every write this client makes (`POST /api/wiki/series` answers the new
-   *  hash), so the editor's own first write cannot leave it stale. */
-  hash?: string;
-  /** The find palette's closeness map: relPath (the listing's spelling) →
-   *  (0, 1), one and two hops over the neighbour rule. ABSENT on an older
-   *  server; `{}` for a bookkeeping or hub page. */
-  near?: Record<string, number>;
-  /** Present only on a wiki in `WIKI_ANSWER_WIKIS`: the answer cards' own
-   *  flag (D14). Absent ⇒ every `<Question>` card stays read-only. */
-  answers?: PageAnswersInfo;
-  /** The lens switch's inputs, the ids' nouns and the Agent flag. ABSENT on an
-   *  older server: the reader then shows All with English labels. */
-  reader?: ReaderPayload;
-  error?: string;
-}
-
-/** `GET /api/wiki/page/provenance`'s answer: the block, or `{}` on a page
- *  carrying none of the keys. */
-interface WikiPageProvenance {
-  provenance?: ProvenancePayload;
-  error?: string;
-}
 
 // `WikiPagesResponse` is declared in `wiki-refresh.ts` (imported above) — the
 // refresh model stores whole payloads, so it needs the shape concretely.
@@ -706,42 +636,6 @@ let currentNear: { relPath: string; near: Record<string, number> } | null = null
  * `allPages` would silently lose it.
  */
 let currentArticle: WikiListing | null = null;
-/**
- * Connections' issue rows for the open page: the inline half from the page
- * payload, replaced by the whole rows when the deferred provenance fetch (or a
- * Link's answer) lands — written only under that fetch's sequence guard.
- * `stampable` comes from the same payload; until it lands no Link is offered.
- * Per-key Link state lives beside them and is dropped with them on navigation.
- */
-let issueRows: IssueRow[] | null = null;
-let issueStampable = false;
-const issueStates = new Map<string, IssueRowState>();
-/**
- * In-flight Links, per page (`linkLockId`) → the keys being written, plus
- * {@link LINK_ALL_LOCK} while Link all runs. Module-level and keyed by wiki and
- * relPath, NOT cleared by a render: a reader who leaves a page mid-Link and
- * comes back finds its Links still disabled until the POST lands.
- */
-const linkLocks = new Map<string, Set<string>>();
-const LINK_ALL_LOCK = "*";
-/** The Link control the reader activated and whose POST is still settling — a
- *  key, or {@link LINK_ALL_LOCK} for Link all. While focus is parked on the
- *  section (the control is disabled mid-POST), a redraw returns it there. The
- *  only other way focus lands on a Link is a redraw of the Link that already
- *  held it. Cleared when the Link settles and on navigation. */
-let issueFocusKey: string | null = null;
-/** The page payload Connections last rendered, so the mini-graph can redraw
- *  when the issue rows change under it. */
-let connData: WikiPageDetail | null = null;
-/**
- * Titles of the current page's outgoing links, stamped by `renderConnections`.
- *
- * Only used to offer a "how does this relate to X and Y?" starter question in the
- * Discuss dialog. Kept beside `currentArticle` (rather than read out of the rail's
- * DOM) so the suggestion is derived from data, and cleared with the breadcrumb so
- * a stale page's neighbours can't leak into the next page's chips.
- */
-let currentOutgoingTitles: string[] = [];
 /** True from the moment a page navigation is requested until its response (or
  *  error) lands. `currentName` is only assigned from that response, so this is the
  *  only signal that the pane is "about to be an article" — see `viewStateOf`. */
@@ -958,576 +852,6 @@ let workedAxisOn = false;
 /** The listing's `waitsCounted`: the Your work strip's wait cells apply here. */
 let waitsCounted = false;
 
-// ── Article tools: ⧉ Copy path, the provenance strip, issue links ────
-
-/**
- * ⧉ Copy path — the open page's path ON DISK, for pasting into an agent brief.
- *
- * The same control the plan drawer got, on the surface where the decision is
- * actually made: you read a page, decide it needs an agent, and the one string
- * you then need is the one the breadcrumb does NOT show — its trail's leaf is
- * the page's TITLE, not its filename. Absolute where the server named a root,
- * the relPath alone otherwise (`wikiPagePath`) — and every registered wiki has
- * a root, not just mimir.
- *
- * The path is carried on the button rather than re-derived at click time, so the
- * string in the tooltip and the string on the clipboard cannot be different
- * pages — which is the whole failure mode of a control that reads "the current
- * article" from module state a navigation may already have moved.
- */
-function copyPathBtnHtml(m: WikiListing): string {
-  const full = wikiPagePath(WIKI_ROOT, m.relPath);
-  const aria = copyPathAriaLabel(full);
-  // Icon-only: the `title` is the whole discoverability story AND names the exact
-  // string, which the dropped "Copy path" label never did.
-  return (
-    `<button class="wiki-bc-copy" id="${COPY_PATH_BTN_ID}" type="button" ` +
-    `data-copy-path="${esc(full)}" title="${esc(full ? "Copy " + full : "Nothing to copy")}" ` +
-    `aria-label="${esc(aria)}">${COPY_PATH_IDLE}</button>`
-  );
-}
-
-/** Run the copy and report it IN the button — the only feedback a clipboard
- *  write can give, and the only way the tailnet `execCommand` path's failure is
- *  visible at all. A missing path reports "Copy failed" rather than returning
- *  silently: `writeText("")` RESOLVES, so copying nothing would report success
- *  while emptying the reader's clipboard, and a bare `return` is a control that
- *  looks live and does nothing — the one outcome with no feedback at all. */
-function copyArticlePath(btn: HTMLButtonElement): void {
-  const full = btn.getAttribute("data-copy-path") || "";
-  const idle = {
-    text: COPY_PATH_IDLE,
-    ariaLabel: copyPathAriaLabel(full),
-    okText: COPY_PATH_OK,
-    failText: COPY_PATH_FAIL,
-  };
-  if (!full) return flashCopyResult(btn, false, idle);
-  void copyText(full).then((ok) => flashCopyResult(btn, ok, idle));
-}
-
-/**
- * Copy one session id off a chain row — the ⧉ Copy path control's twin, and
- * through the same `copyText`/`flashCopyResult` pair rather than a second
- * clipboard write.
- *
- * That matters more here than on the breadcrumb: the reader most likely to want
- * a session id is on the tailnet over plain HTTP, where `navigator.clipboard` is
- * simply absent and the `execCommand` fallback is the ONLY path — and the flash
- * is the only report either path can give. The id is the whole reason the chip
- * is copyable text: the browser cannot reach claude-usage (see the strip's own
- * comment), so a search for this string is what a reader does with it.
- */
-function copySessionId(btn: HTMLButtonElement): void {
-  const id = btn.getAttribute("data-sess-copy") || "";
-  const idle = {
-    text: SESSION_COPY_IDLE,
-    // The SAME spelling the button was rendered with — two copies meant the
-    // button quietly renamed itself the first time a reader pressed it.
-    ariaLabel: sessionCopyAriaLabel(id),
-    okText: SESSION_COPY_OK,
-    failText: SESSION_COPY_FAIL,
-  };
-  // An empty id reports a failure rather than returning silently: `writeText("")`
-  // RESOLVES, so copying nothing would report success while emptying the
-  // reader's clipboard (the ⧉ Copy path reasoning, verbatim).
-  if (!id) return flashCopyResult(btn, false, idle);
-  void copyText(id).then((ok) => flashCopyResult(btn, ok, idle));
-}
-
-/**
- * Stamp a ghost session onto the open page — the ONE write the provenance
- * feature makes, and it is a POST to a route that shells out to claude-usage's
- * `wiki-stamp` CLI. muninn writes no frontmatter line here or anywhere.
- *
- * ── The two-step confirm, and the three ways the first cut lost it ──────────
- *
- * A handoff ghost's button carries `data-prov-stamp-confirm`: a handoff link
- * says a later session pasted this one's prompt, which is not the same as saying
- * it wrote the page, and the write is a permanent claim. So the first press only
- * ARMS; a second, separate press writes.
- *
- *  1. **A double-click delivered both presses.** `dblclick` fires two `click`
- *     events milliseconds apart, so the confirm label was set and consumed
- *     inside one gesture and the write happened with the confirmation never on
- *     screen. Arming therefore DISABLES the button for {@link STAMP_ARM_MS};
- *     the second click of a double-click lands on a disabled button and is
- *     dropped, while a deliberate second press half a second later is not.
- *  2. **A failed attempt disarmed the button permanently.** The confirm state
- *     lived in the ATTRIBUTE, which the first press removed — so after a 409 the
- *     row said `not stamped: …` and the NEXT single click wrote with no
- *     confirmation at all. The attribute is now a static fact from the server
- *     ("this ghost needs confirming") and the armed state is
- *     `data-prov-stamp-armed`, which every failure path clears along with the
- *     label.
- *  3. **A 200 carrying no `provenance` disabled the button forever.** The
- *     re-resolve can legitimately answer nothing (the index lost the page, the
- *     ledger context is absent), and the row was left with a dead `…` button.
- *     It now re-enables and re-reads the page's payload.
- *
- * The state lives on the BUTTON, never in a module flag, for `toggleProvChain`'s
- * reason — the strip is re-rendered from scratch on every page load, so a flag
- * would outlive the element it described.
- *
- * The REASON goes in its own `.wiki-chain-stamp-msg` span, not into the label:
- * a label is what the control does, and `not stamped: not-a-stamp-root` as a
- * label is a button that renamed itself to a sentence. `textContent` is the
- * escape — the reason is server copy and a route can echo a `ref` inside it.
- */
-
-/** How long an armed Stamp button stays disabled. Long enough to swallow a
- *  double-click's second event (a system double-click threshold is ~500 ms),
- *  short enough that a reader who meant it is not made to wait. */
-const STAMP_ARM_MS = 500;
-
-/** The message span beside one Stamp button, if the row has one. */
-function stampMsgSpan(btn: HTMLButtonElement): HTMLElement | null {
-  const row = btn.closest(".wiki-chain-row");
-  return row ? row.querySelector<HTMLElement>("[data-prov-stamp-msg]") : null;
-}
-
-function showStampMsg(btn: HTMLButtonElement, text: string): void {
-  const span = stampMsgSpan(btn);
-  if (!span) return;
-  span.textContent = text;
-  span.hidden = false;
-}
-
-function clearStampMsg(btn: HTMLButtonElement): void {
-  const span = stampMsgSpan(btn);
-  if (!span) return;
-  span.textContent = "";
-  span.hidden = true;
-}
-
-/** Back to an offerable Stamp: the label restored, the confirm re-armable, the
- *  button live. Every non-success path ends here. */
-function resetStampButton(btn: HTMLButtonElement): void {
-  btn.disabled = false;
-  btn.textContent = STAMP_LABEL;
-  btn.removeAttribute("data-prov-stamp-armed");
-}
-
-async function stampGhost(btn: HTMLButtonElement): Promise<void> {
-  const ref = btn.getAttribute("data-prov-stamp") || "";
-  if (!ref || !currentRelPath || btn.disabled) return;
-  // The page the button was pressed on. The redraw below keys on the DOM, and
-  // the DOM is another page's if the reader navigated while the POST ran.
-  const pressedOn = currentRelPath;
-  // ARM. `data-prov-stamp-confirm` says this ghost needs confirming and is never
-  // removed; `data-prov-stamp-armed` is the press that answered it.
-  if (btn.getAttribute("data-prov-stamp-confirm") && !btn.hasAttribute("data-prov-stamp-armed")) {
-    btn.setAttribute("data-prov-stamp-armed", "1");
-    btn.textContent = STAMP_CONFIRM_LABEL;
-    clearStampMsg(btn);
-    // See (1) above: the gap is what makes the confirm a separate gesture.
-    btn.disabled = true;
-    setTimeout(() => {
-      // Only re-enable a button still waiting for its confirm — a redraw may
-      // have replaced the row, and a POST cannot have started from here.
-      if (btn.hasAttribute("data-prov-stamp-armed")) btn.disabled = false;
-    }, STAMP_ARM_MS);
-    return;
-  }
-  btn.disabled = true;
-  btn.textContent = "…";
-  clearStampMsg(btn);
-  try {
-    const res = await fetch("/api/wiki/provenance/stamp", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ wiki: WIKI, relPath: currentRelPath, ref }),
-    });
-    const body = (await res.json().catch(() => null)) as
-      | { provenance?: ProvenancePayload; reason?: string; error?: string }
-      | null;
-    if (!res.ok) {
-      // The route's own reason, verbatim — `not-a-stamp-root`, `lock-timeout`, a
-      // 403 from the read-only guards. A refusal the reader can act on beats a
-      // button that silently goes back to saying "Stamp" — but it goes back to
-      // saying "Stamp" all the same, so a retry asks again.
-      resetStampButton(btn);
-      showStampMsg(btn, `not stamped: ${body?.reason || body?.error || res.status}`);
-      return;
-    }
-    // The route answers with the RE-RESOLVED block, so the strip redraws with no
-    // second fetch — and with the chain left open, since the reader was reading
-    // it when they pressed the button.
-    if (body?.provenance) {
-      if (currentRelPath === pressedOn) redrawProvStrip(body.provenance);
-      return;
-    }
-    // A 200 with no block: the write happened, the re-resolve did not answer.
-    // Re-read the page's own payload rather than leaving a dead button.
-    resetStampButton(btn);
-    refetchProvStrip();
-  } catch {
-    resetStampButton(btn);
-    showStampMsg(btn, "not stamped: the request failed");
-  }
-}
-
-/** Re-read the open page's provenance block and redraw the strip from it —
- *  through the ONE load path, so it takes a sequence number like any load and
- *  writes through `placeProvStrip` like any writer. */
-function refetchProvStrip(): void {
-  if (currentRelPath) void loadProvStrip(currentRelPath);
-}
-
-function provenanceUrl(relPath: string): string {
-  return withWiki("/api/wiki/page/provenance?relPath=" + encodeURIComponent(relPath));
-}
-
-/** The newest provenance load's sequence number. Only that load may write —
- *  see `loadProvStrip`; a Stamp redraw bumps it to retire whatever is in
- *  flight. */
-let provLoadSeq = 0;
-
-/** The provenance load in flight. Leaving the page aborts it, which cancels
- *  the server's claude-usage fetches with it (the route passes the request
- *  signal into `pageProvenance`; its huginn reads are raced, not cancelled). */
-let provLoadAbort: AbortController | null = null;
-
-function abortProvLoad(): void {
-  provLoadAbort?.abort();
-  provLoadAbort = null;
-}
-
-/**
- * The ONE writer of the strip. Every writer — a load, the Stamp redraw, the
- * retry — replaces whatever `.wiki-prov-strip` is on the page (the
- * placeholder, the failure line, a real strip), and inserts after the meta
- * row when none is there (a `prs:`-only page rendered no placeholder; an empty
- * insert is a no-op). Two writers with rules of their own is how this page
- * came to show two strips, twice: each rule enumerated the DOM states the
- * OTHER writer could leave and got one wrong. What a load may WRITE is decided
- * in `loadProvStrip` (an empty or failed answer replaces only a placeholder);
- * where it goes is decided here. An open chain stays open across the
- * replacement: the reader was looking at it. A cost line that lands brings
- * the lens switch with it when Overview hides nothing else on the page.
- */
-function placeProvStrip(html: string): void {
-  writeProvStrip(html);
-  refreshLensSwitch(document.getElementById("articleWrap")!);
-}
-
-function writeProvStrip(html: string): void {
-  const existing = document.querySelector(".wiki-prov-strip");
-  if (!existing) {
-    document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", html);
-    return;
-  }
-  const wasOpen =
-    existing.querySelector("[data-prov-toggle]")?.getAttribute("aria-expanded") === "true";
-  existing.outerHTML = html;
-  if (!wasOpen) return;
-  const line = document.querySelector<HTMLButtonElement>("[data-prov-toggle]");
-  if (line) toggleProvChain(line);
-}
-
-/**
- * Fill the placeholder strip a `provenancePending` page rendered. Runs AFTER
- * the article is on screen, so the join's 10 s budget is spent behind a
- * spinner rather than in front of the markdown.
- *
- * Who may write is decided once: the NEWEST load for the page that is still
- * open. Loads overlap whenever the reader leaves a page and returns before
- * its first answer lands, or presses Stamp and the refetch races the page's
- * own load — both are for the same relPath, so a relPath guard alone lets
- * both through. An older answer is dropped whatever it carries; the newest
- * writes through `placeProvStrip`. A failed fetch becomes the failure line
- * with a retry only where a placeholder promised a strip; on a `prs:`-only
- * page, which rendered none, it stays silent.
- */
-async function loadProvStrip(relPath: string): Promise<void> {
-  const seq = ++provLoadSeq;
-  abortProvLoad();
-  const ctl = new AbortController();
-  provLoadAbort = ctl;
-  let next: string | null = null;
-  let prov: ProvenancePayload | undefined;
-  try {
-    const res = await fetch(provenanceUrl(relPath), { signal: ctl.signal });
-    if (res.ok) {
-      const data = (await res.json()) as WikiPageProvenance | null;
-      prov = data?.provenance;
-      next = prov ? provStripHtml(prov, jiraKeys) : "";
-    }
-  } catch {
-    /* falls through to the unavailable line */
-  }
-  // An aborted load was retired on purpose: it never writes the failure line.
-  if (ctl.signal.aborted) return;
-  if (provLoadAbort === ctl) provLoadAbort = null;
-  if (currentRelPath !== relPath || seq !== provLoadSeq) return;
-  // Connections is the fetch's second consumer, under the same guard.
-  if (prov) adoptIssueRows(prov);
-  if (next) {
-    placeProvStrip(next);
-    return;
-  }
-  // Nothing to show, or nothing came back. Either one may only replace a
-  // PLACEHOLDER: a real strip stays (the Stamp refetch re-reads a page that
-  // just resolved to no keys — the same state that answered its POST with no
-  // block — and a successful write must not make the strip, the chain and the
-  // Stamp button vanish), and a bare head stays bare.
-  if (!document.querySelector(".wiki-prov-strip.wiki-prov-pending")) return;
-  placeProvStrip(next === null ? provUnavailableHtml() : "");
-}
-
-/** The retry on a failed load: back to the placeholder, then the fetch again. */
-function retryProvStrip(): void {
-  if (!document.querySelector(".wiki-prov-strip.wiki-prov-unavailable") || !currentRelPath) return;
-  placeProvStrip(provPendingHtml());
-  void loadProvStrip(currentRelPath);
-}
-
-/** Redraw the strip from the block the stamp route answered with. That block
- *  is a re-resolve AFTER the write, so it is fresher than any load in flight:
- *  the sequence is bumped to retire them. */
-function redrawProvStrip(provenance: ProvenancePayload): void {
-  provLoadSeq += 1;
-  abortProvLoad();
-  placeProvStrip(provStripHtml(provenance, jiraKeys));
-  adoptIssueRows(provenance);
-}
-
-/** Take a provenance block's whole issue rows (and its `stampable`) into
- *  Connections and the mini-graph. A block with no `issues` means the page has
- *  none now, so the rows go too. */
-function adoptIssueRows(provenance: ProvenancePayload): void {
-  const had = issueRows !== null;
-  issueRows = provenance.issues ?? null;
-  issueStampable = provenance.stampable;
-  // A wiki with no tracker has rows on neither side: nothing to redraw.
-  if (!had && !issueRows) return;
-  redrawConnIssues();
-  redrawMiniGraph();
-}
-
-function linkLockId(relPath: string): string {
-  return JSON.stringify([WIKI, relPath]);
-}
-
-function pageLinkLocked(relPath: string): boolean {
-  return (linkLocks.get(linkLockId(relPath))?.size ?? 0) > 0;
-}
-
-function setLinkLock(relPath: string, key: string, on: boolean): void {
-  const id = linkLockId(relPath);
-  const held = linkLocks.get(id) ?? new Set<string>();
-  if (on) held.add(key);
-  else held.delete(key);
-  if (held.size) linkLocks.set(id, held);
-  else linkLocks.delete(id);
-}
-
-/** The open page is markdown — only then is Link offered. */
-function isMarkdownRel(relPath: string | null): boolean {
-  return !!relPath && /\.mdx?$/i.test(relPath);
-}
-
-function issueSectionFor(relPath: string | null): string {
-  if (!relPath) return "";
-  // A Link in flight on this page reads "linking…" on its row, whichever
-  // render drew the section.
-  const states = new Map(issueStates);
-  for (const key of linkLocks.get(linkLockId(relPath)) ?? []) {
-    if (key !== LINK_ALL_LOCK) states.set(key, { kind: "busy" });
-  }
-  return issueSectionHtml(issueRows ?? undefined, {
-    labelOf: (id) => trackerLabels[id] || "",
-    stampable: issueStampable,
-    markdown: isMarkdownRel(relPath),
-    relPath,
-    states,
-    discuss: !wikiReadonlyWikiFlag(),
-    locked: pageLinkLocked(relPath),
-  });
-}
-
-/** The ONE writer of Connections' issue section: replaces it in place, or
- *  inserts it at the top of the panel (above the mini-graph). Focus inside
- *  the section stays inside it — see {@link issueFocusSelector}. */
-function redrawConnIssues(): void {
-  const html = issueSectionFor(currentRelPath);
-  const el = document.getElementById(CONN_ISSUES_ID);
-  if (el) {
-    const active = document.activeElement;
-    const sel = active && el.contains(active) ? issueFocusSelector(active, el) : null;
-    el.outerHTML = html;
-    if (sel !== null) {
-      const sec = document.getElementById(CONN_ISSUES_ID);
-      const target = sel ? sec?.querySelector<HTMLElement>(`${sel}:not(:disabled)`) : null;
-      (target ?? sec)?.focus({ preventScroll: true });
-    }
-    return;
-  }
-  if (html) document.getElementById("connBody")?.insertAdjacentHTML("afterbegin", html);
-}
-
-/**
- * Where focus goes after a redraw replaced `active`: the EQUIVALENT control in
- * the new section — same kind, same key — as a selector, or `""` for the
- * section itself (`tabindex="-1"`). Focus is moved onto a Link or Link all only
- * from that same control, or from the section while it holds focus for the
- * Link the reader activated ({@link issueFocusKey}); never from anything else,
- * so Enter on a focused key anchor cannot become a write.
- */
-function issueFocusSelector(active: Element, sec: Element): string {
-  const attr = (name: string) => CSS.escape(active.getAttribute(name) ?? "");
-  if (active === sec) {
-    if (issueFocusKey === LINK_ALL_LOCK) return `[${ISSUE_LINK_ALL_ATTR}]`;
-    return issueFocusKey ? `[${ISSUE_LINK_ATTR}="${CSS.escape(issueFocusKey)}"]` : "";
-  }
-  if (active.hasAttribute(ISSUE_LINK_ATTR)) return `[${ISSUE_LINK_ATTR}="${attr(ISSUE_LINK_ATTR)}"]`;
-  if (active.hasAttribute(ISSUE_LINK_ALL_ATTR)) return `[${ISSUE_LINK_ALL_ATTR}]`;
-  if (active.hasAttribute(DRAFT_PLAN_ATTR)) return `[${DRAFT_PLAN_ATTR}="${attr(DRAFT_PLAN_ATTR)}"]`;
-  const row = active.closest("[data-issue-row]");
-  if (!row) return "";
-  const key = CSS.escape(row.getAttribute("data-issue-row") ?? "");
-  for (const cls of ["wiki-issue-key", "wiki-issue-plan"]) {
-    if (active.classList.contains(cls)) return `[data-issue-row="${key}"] a.${cls}`;
-  }
-  return "";
-}
-
-/** Redraw the mini-graph from the current issue rows (a Link, or the deferred
- *  rows landing), in place. */
-function redrawMiniGraph(): void {
-  if (!connData || (connData.meta?.relPath ?? currentRelPath) !== currentRelPath) return;
-  const html = miniGraphHtml(connData, issueRows);
-  const el = document.querySelector("#connBody .wiki-mini-graph");
-  if (el) {
-    if (html) el.outerHTML = html;
-    else el.remove();
-    return;
-  }
-  if (!html) return;
-  const sec = document.getElementById(CONN_ISSUES_ID);
-  if (sec) sec.insertAdjacentHTML("afterend", html);
-  else document.getElementById("connBody")?.insertAdjacentHTML("afterbegin", html);
-}
-
-/**
- * A Link changed a page's relations: its rail row's pills and the Jira facet
- * take the answer's rows (the listing's own compact shape) without a listing
- * refetch. A key that newly counts joins the facet's membership.
- */
-function refreshListingIssues(relPath: string, rows: readonly IssueRow[]): void {
-  const hit = allPages.find((p) => p.relPath === relPath);
-  if (!hit) return;
-  const before = new Set(facetJiraKeys(hit));
-  hit.issues = compactIssues(rows);
-  if (currentArticle && currentArticle !== hit && currentArticle.relPath === relPath) currentArticle.issues = hit.issues;
-  for (const key of facetJiraKeys(hit)) if (!before.has(key)) jiraKeys[key] = (jiraKeys[key] ?? 0) + 1;
-  renderJiraChips();
-  renderList();
-}
-
-/**
- * **Link**: write one key to a page's tracker line through the Stamp route's
- * `{ tracker, key }` form — the only write path, which shells out to the same
- * CLI as a session Stamp. The answer carries the re-resolved block, so the
- * strip, the rows, the mini-graph and the rail row redraw from it with no
- * second fetch. A skip lands on the row as its named state. The page's Link
- * lock is held for the POST, so no second Link starts beside it (`inLinkAll`:
- * Link all already holds it). Resolves true on success.
- */
-async function linkIssue(relPath: string, tracker: string, key: string, inLinkAll = false): Promise<boolean> {
-  if (!inLinkAll && pageLinkLocked(relPath)) return false;
-  if (!inLinkAll) issueFocusKey = key;
-  if (currentRelPath === relPath) issueStates.delete(key);
-  setLinkLock(relPath, key, true);
-  if (currentRelPath === relPath) redrawConnIssues();
-  let state: IssueRowState | null = null;
-  let provenance: ProvenancePayload | undefined;
-  let ok = false;
-  try {
-    const res = await fetch("/api/wiki/provenance/stamp", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ wiki: WIKI, relPath, tracker, key }),
-    });
-    const body = (await res.json().catch(() => null)) as
-      | { provenance?: ProvenancePayload; reason?: string; error?: string }
-      | null;
-    if (res.ok) {
-      ok = true;
-      provenance = body?.provenance;
-    } else {
-      state =
-        res.status === 409 && body?.reason
-          ? { kind: "refused", reason: body.reason }
-          : { kind: "error", text: `not linked: ${body?.reason || body?.error || res.status}` };
-    }
-  } catch {
-    state = { kind: "error", text: "not linked: the request failed" };
-  } finally {
-    setLinkLock(relPath, key, false);
-  }
-  // The rail row is that page's wherever the reader is now.
-  if (provenance) refreshListingIssues(relPath, provenance.issues ?? []);
-  if (currentRelPath !== relPath) return ok;
-  if (!ok) {
-    issueStates.set(key, state!);
-    redrawConnIssues();
-  } else if (provenance) redrawProvStrip(provenance);
-  else {
-    redrawConnIssues();
-    refetchProvStrip();
-  }
-  if (!inLinkAll && issueFocusKey === key) issueFocusKey = null;
-  return ok;
-}
-
-/** **Link all**: the eligible keys one POST at a time (the CLI's lockfile
- *  serializes them anyway), under the page's Link lock from first to last, and
- *  stopping at the first that does not land. A key the open page already shows
- *  stamped by its turn is skipped. */
-async function linkAllIssues(): Promise<void> {
-  const relPath = currentRelPath;
-  if (!relPath || pageLinkLocked(relPath)) return;
-  const rows = [...(issueRows ?? [])];
-  const keys = linkAllKeys(rows, { stampable: issueStampable, markdown: isMarkdownRel(relPath) });
-  setLinkLock(relPath, LINK_ALL_LOCK, true);
-  issueFocusKey = LINK_ALL_LOCK;
-  try {
-    for (const key of keys) {
-      const row = rows.find((r) => r.key === key)!;
-      const now = currentRelPath === relPath ? issueRows?.find((r) => r.key === key) : undefined;
-      if (now?.relations.includes("stamped")) continue;
-      if (!(await linkIssue(relPath, row.tracker, key, true))) break;
-    }
-  } finally {
-    setLinkLock(relPath, LINK_ALL_LOCK, false);
-    if (currentRelPath === relPath) redrawConnIssues();
-    if (issueFocusKey === LINK_ALL_LOCK) issueFocusKey = null;
-  }
-}
-
-/**
- * Open or close the provenance chain under the page title.
- *
- * The button's `aria-expanded` and the chain's `hidden` are flipped TOGETHER and
- * both read off the DOM rather than a module-level flag: the strip is re-rendered
- * from scratch on every page load (collapsed, by the renderer), so a flag here
- * would outlive the element it described and report the wrong state on the next
- * page.
- *
- * `aria-controls` names the chain, so the element is found through the button
- * rather than by a second selector that could drift from the markup.
- */
-function toggleProvChain(btn: HTMLButtonElement): void {
-  const id = btn.getAttribute("aria-controls") || "";
-  const chain = id ? document.getElementById(id) : null;
-  if (!chain) return;
-  const open = btn.getAttribute("aria-expanded") === "true";
-  btn.setAttribute("aria-expanded", open ? "false" : "true");
-  // `hidden`, not a display style: it is what the renderer ships the element
-  // with, so one property is the whole state.
-  chain.hidden = open;
-}
-
 // ── Breadcrumb bar (above the article) ────────────────────────────────
 // Shows "wiki / folder / page · updated" for the open page and hosts the
 // Explain affordance (a button shown only while a selection exists — see the
@@ -1567,7 +891,7 @@ function renderBreadcrumb(m: WikiListing): void {
   currentArticle = m;
   // A new page's neighbours aren't known until its `/api/wiki/page` response
   // lands, and the PREVIOUS page's are wrong the moment this render runs.
-  currentOutgoingTitles = [];
+  clearOutgoingTitles();
   if (!el) return;
   const crumbs: string[] = [];
   // The wiki crumb is the way BACK to the overview (Hubs / Timeline / Atlas):
@@ -1676,7 +1000,7 @@ function hideBreadcrumb(): void {
   // hidden with the breadcrumb, but every other path that reads `currentArticle`
   // would still be handed a page the reader is no longer on.
   currentArticle = null;
-  currentOutgoingTitles = [];
+  clearOutgoingTitles();
 }
 
 // ── Middle pane: article / start view ─────────────────────────────────
@@ -1906,406 +1230,6 @@ function renderStart(): void {
   renderList();
 }
 
-interface MiniNode {
-  p: WikiListing;
-  out: boolean;
-  inn: boolean;
-  x?: number;
-  y?: number;
-}
-
-/** How many of the page's issue keys the mini-graph draws beside its pages;
- *  the rest are counted in its footer line. */
-const MINI_ISSUES_MAX = 4;
-
-/** 1-hop neighborhood as a small radial SVG: current page centered, top
- *  neighbors on a ring, and the page's counting Jira keys as diamonds on the
- *  same ring (dashed edge when inferred; a click filters by the key). `rows`
- *  are Connections' current issue rows, which a Link or the deferred fetch
- *  replaces after the page renders. */
-function miniGraphHtml(data: WikiPageDetail, rows: readonly IssueRow[] | null | undefined): string {
-  // Jira only: a diamond's click is the Jira facet's filter.
-  const counting = (rows ?? []).filter((r) => r.tracker === JIRA_TRACKER_ID && relationsCount(r.relations));
-  const issues = counting.slice(0, MINI_ISSUES_MAX);
-  const byName: Record<string, MiniNode> = {};
-  data.outgoing.forEach((p) => {
-    byName[p.name] = { p, out: true, inn: false };
-  });
-  data.backlinks.forEach((p) => {
-    if (byName[p.name]) byName[p.name]!.inn = true;
-    else byName[p.name] = { p, out: false, inn: true };
-  });
-  const all = Object.keys(byName).map((k) => byName[k]!);
-  if (!all.length && !issues.length) return "";
-  all.sort((a, b) => {
-    const ab = a.out && a.inn ? 1 : 0;
-    const bb = b.out && b.inn ? 1 : 0;
-    return bb - ab || b.p.backlinkCount - a.p.backlinkCount;
-  });
-  const shown = all.slice(0, 12 - issues.length);
-  const slots = shown.length + issues.length;
-  const W = 272;
-  const H = 244;
-  const cx = W / 2;
-  const cy = H / 2 - 4;
-  const r = 86;
-  // `shortGraphLabel`, not a head-slice: a colliding node's label is
-  // `<prefix>/<stem>`, and cutting from the front threw the stem away entirely.
-  const short = (t: string) => shortGraphLabel(t, 15);
-  let edges = "";
-  let nodes = "";
-  shown.forEach((n, i) => {
-    const ang = (2 * Math.PI * i) / slots - Math.PI / 2;
-    n.x = cx + r * Math.cos(ang);
-    n.y = cy + r * Math.sin(ang);
-    edges +=
-      `<line class="mini-edge${n.out && n.inn ? " both" : ""}"` +
-      (n.inn && !n.out ? ' stroke-dasharray="3,3"' : "") +
-      ` x1="${cx}" y1="${cy}" x2="${n.x.toFixed(1)}" y2="${n.y.toFixed(1)}"/>`;
-  });
-  shown.forEach((n) => {
-    const ly = n.y! + (n.y! >= cy ? 15 : -9);
-    // The VISIBLE label and the `<title>` tooltip read one field — they used to
-    // read two, so a colliding node's hover said `muninn/MEMORY` while the dot
-    // under it said `MEMORY`. A culled neighbour is muted and says so on hover.
-    const title = displayTitleOf(n.p);
-    nodes += miniNodeHtml(n.p, { x: n.x!, y: n.y!, labelY: ly, label: short(title), title });
-  });
-  issues.forEach((row, j) => {
-    const ang = (2 * Math.PI * (shown.length + j)) / slots - Math.PI / 2;
-    const x = cx + r * Math.cos(ang);
-    const y = cy + r * Math.sin(ang);
-    const inferred = !row.relations.includes("stamped");
-    edges +=
-      `<line class="mini-edge mini-issue-edge"${inferred ? ' stroke-dasharray="2,3"' : ""}` +
-      ` x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}"/>`;
-    const ly = y + (y >= cy ? 15 : -9);
-    nodes +=
-      `<g class="mini-node mini-issue${inferred ? " inferred" : ""}" data-prov-jira="${esc(row.key)}" data-mini-issue="${esc(row.key)}">` +
-      `<title>${esc(`${trackerLabels[row.tracker] || row.tracker} ${row.key} — ${row.relations.map(relationWord).join(", ")}`)}</title>` +
-      `<circle class="mini-hit" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="14" fill="transparent"></circle>` +
-      `<rect class="mini-issue-dot" x="${(x - 4.5).toFixed(1)}" y="${(y - 4.5).toFixed(1)}" width="9" height="9"` +
-      ` transform="rotate(45 ${x.toFixed(1)} ${y.toFixed(1)})"></rect>` +
-      `<text x="${x.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle">${esc(row.key)}</text></g>`;
-  });
-  nodes +=
-    `<g class="mini-center"><circle class="mini-dot t-${esc(data.meta.type)}" cx="${cx}" cy="${cy}" r="7"></circle>` +
-    `<text x="${cx}" y="${cy + 21}" text-anchor="middle">${esc(short(data.meta.title))}</text></g>`;
-  const hiddenIssues = counting.length - issues.length;
-  const more = [
-    all.length > shown.length ? `strongest ${shown.length} of ${all.length} — full lists below` : "",
-    hiddenIssues > 0 ? `+${hiddenIssues} issue${hiddenIssues === 1 ? "" : "s"} not drawn` : "",
-  ]
-    .filter(Boolean)
-    .map((t) => `<div class="wiki-mini-more">${esc(t)}</div>`)
-    .join("");
-  return `<div class="wiki-mini-graph"><svg viewBox="0 0 ${W} ${H}">${edges}${nodes}</svg>${more}</div>`;
-}
-
-// ── Right pane: connections ───────────────────────────────────────────
-/** The Related work order this reader picked on this wiki. */
-let relatedOrder!: RelatedOrder;
-
-/*
- * Second-hop state for ONE page open, keyed by the hop row's normalized
- * relPath. `resetRelatedHops` runs on every `renderConnections` — a page open,
- * A → start → A, an in-place reload — so a ▸ never shows a cut made against an
- * earlier open, and an answer arriving for an earlier open is dropped by
- * generation. An answer is cached for the open; a failure is shown while the
- * hop stays open and refetched on the next open.
- */
-const relatedHops = new Map<string, RelatedHopResponse>();
-const relatedHopErrors = new Map<string, RelatedHopResponse>();
-const relatedHopsOpen = new Set<string>();
-/** One request per hop at a time: a re-click while it is in flight waits on it. */
-const relatedHopsInFlight = new Set<string>();
-let relatedHopsGen = 0;
-
-function resetRelatedHops(): void {
-  relatedHops.clear();
-  relatedHopErrors.clear();
-  relatedHopsOpen.clear();
-  relatedHopsInFlight.clear();
-  relatedHopsGen++;
-}
-
-/** A hop's render state: `undefined` closed, `null` loading, else its answer. */
-function relatedHopState(rel: string): RelatedHopResponse | null | undefined {
-  const key = normalizeRel(rel);
-  if (!relatedHopsOpen.has(key)) return undefined;
-  const answer = relatedHops.get(key) ?? relatedHopErrors.get(key);
-  return answer ? { ...answer, related: freshenRelated(answer.related) } : null;
-}
-
-/**
- * Related rows with their LISTING fields taken from the listing the rail holds
- * now; only `why`, `strength` and `signals` stay the row's. The block's rows
- * come from the page response, which a series write or a later listing does
- * not re-send. The fresh entry REPLACES the row's listing fields rather than
- * merging over them: `toListing` omits an absent optional key, so a merge kept
- * a `series` (or `seriesLabel`, `culled`, …) the page had since lost.
- */
-function freshenRelated(rows: RelatedListing[]): RelatedListing[] {
-  const byRel = new Map(allPages.map((p) => [normalizeRel(p.relPath), p]));
-  return rows.map((p) => {
-    const fresh = byRel.get(normalizeRel(p.relPath));
-    return fresh ? { ...fresh, why: p.why, strength: p.strength, signals: p.signals } : p;
-  });
-}
-
-/** The block's options: the worked axis and instant the rail reads, the order,
- *  the rail's series labels and the open hops. */
-function relatedViewOpts(): RelatedViewOptions {
-  const labels = seriesLabels(allPages);
-  return {
-    workedAxis: workedAxisOn,
-    ledgerAsOfMs: workedGate?.asOfMs,
-    now: recencyNow(),
-    order: relatedOrder,
-    hops: true,
-    seriesLabelOf: (p) => seriesLabelFor(p, labels),
-    hopState: relatedHopState,
-  };
-}
-
-function relatedBlockHtml(data: WikiPageDetail): string {
-  return relatedSectionHtml(freshenRelated(data.related ?? []), seriesEditable(), relatedViewOpts());
-}
-
-/** Repaint the block alone from `connData` and the listing held now — after an
- *  order pick, a series write, or a flip of the worked-on axis. Open hops stay
- *  open (`hopState`). */
-function repaintRelatedBlock(): void {
-  const section = document.querySelector("#connBody .wiki-related");
-  if (!section || !connData) return;
-  section.outerHTML = relatedBlockHtml(connData);
-}
-
-/** The reader picked an order: remember it for this wiki and repaint the block
- *  alone, keeping focus on the button pressed. */
-function setRelatedOrder(order: RelatedOrder): void {
-  relatedOrder = order;
-  writeRelatedOrder(WIKI, order);
-  repaintRelatedBlock();
-  document.querySelector<HTMLButtonElement>(`#connBody [${RELATED_ORDER_ATTR}="${order}"]`)?.focus();
-}
-
-/** Paint one hop's ▸ and body from its state, leaving the rest of the block —
- *  and the focus on the ▸ — in place. */
-function paintRelatedHop(rel: string): void {
-  const sel = CSS.escape(rel);
-  const btn = document.querySelector<HTMLButtonElement>(`#connBody .wiki-related [${RELATED_HOP_ATTR}="${sel}"]`);
-  const body = document.querySelector<HTMLElement>(`#connBody .wiki-related [${RELATED_HOP_BODY_ATTR}="${sel}"]`);
-  if (!btn || !body) return;
-  const state = relatedHopState(rel);
-  const open = state !== undefined;
-  btn.setAttribute("aria-expanded", String(open));
-  btn.textContent = open ? "▾" : "▸";
-  body.hidden = !open;
-  const viaRow = connData?.related?.find((p) => p.relPath === rel);
-  body.innerHTML = open ? relatedHopHtml(viaRow ? displayTitleOf(viaRow) : rel, state, relatedViewOpts()) : "";
-}
-
-/**
- * ▸ on a Related work row: open (or close) THAT page's own related work under
- * the row — `GET /api/wiki/related`, minus the page open now and its
- * attachments. One request per row per page open, in flight or answered.
- */
-function toggleRelatedHop(btn: HTMLButtonElement): void {
-  const rel = btn.getAttribute(RELATED_HOP_ATTR) || "";
-  if (!rel) return;
-  const key = normalizeRel(rel);
-  if (relatedHopsOpen.has(key)) {
-    relatedHopsOpen.delete(key);
-    relatedHopErrors.delete(key);
-  } else {
-    relatedHopsOpen.add(key);
-    if (!relatedHops.has(key) && !relatedHopsInFlight.has(key)) fetchRelatedHop(rel, key);
-  }
-  paintRelatedHop(rel);
-}
-
-function fetchRelatedHop(rel: string, key: string): void {
-  const open = currentRelPath;
-  if (!open) return;
-  const gen = relatedHopsGen;
-  relatedHopsInFlight.add(key);
-  const url =
-    "/api/wiki/related?relPath=" +
-    encodeURIComponent(rel) +
-    "&exclude=" +
-    encodeURIComponent(open) +
-    "&limit=" +
-    RELATED_HOP_LIMIT_DEFAULT;
-  const unavailable = (error?: string): RelatedHopResponse => ({ related: [], total: 0, error: error || "unavailable" });
-  fetch(withWiki(url))
-    .then((r) => r.json() as Promise<RelatedHopResponse>)
-    .then((data) => (Array.isArray(data.related) ? data : unavailable(data.error)))
-    .catch(() => unavailable())
-    .then((answer) => {
-      if (gen !== relatedHopsGen) return;
-      relatedHopsInFlight.delete(key);
-      if (!answer.error) relatedHops.set(key, answer);
-      else if (relatedHopsOpen.has(key)) relatedHopErrors.set(key, answer);
-      paintRelatedHop(rel);
-    });
-}
-
-function renderConnections(data: WikiPageDetail): void {
-  // Feeds the Discuss dialog's "How it connects" starter question. Stamped here
-  // because this is the one place the page's resolved neighbours arrive.
-  currentOutgoingTitles = (data.outgoing || []).map((p) => p.title).filter((t) => !!t);
-  function section(title: string, items: WikiListing[]): string {
-    let html = `<div class="wiki-conn-section"><div class="wiki-conn-title">${title} (${items.length})</div>`;
-    if (!items.length) {
-      return html + '<div class="wiki-conn-empty">None</div></div>';
-    }
-    // Group by the union of (stored order ∪ types actually present in the items),
-    // ordered by the stored list — so a custom-typed neighbor is NEVER dropped even
-    // if the stored list arrived late or empty (the pre-fix bug silently excluded it).
-    connectionTypeOrder(items.map((p) => p.type), typeOrder).forEach((t) => {
-      const group = items.filter((p) => p.type === t);
-      if (!group.length) return;
-      html += `<div class="wiki-conn-group">${esc(typeLabel(t))}</div>`;
-      group
-        .sort((a, b) => b.backlinkCount - a.backlinkCount)
-        .forEach((p) => {
-          // A culled page stays in Connections, marked (`connItemHtml`).
-          html += connItemHtml(p, displayTitleOf(p));
-        });
-    });
-    return html + "</div>";
-  }
-  // The inline half of the issue rows; the deferred fetch replaces them. A
-  // Link lock is not cleared here — see `linkLocks`.
-  issueRows = data.issueRows ?? null;
-  issueStampable = data.issueStampable === true;
-  issueStates.clear();
-  issueFocusKey = null;
-  connData = data;
-  resetRelatedHops();
-  document.getElementById("connBody")!.innerHTML =
-    issueSectionFor(data.meta?.relPath ?? currentRelPath) +
-    miniGraphHtml(data, issueRows) +
-    // `Related work` leads: it is the one section that ANSWERS a question
-    // ("what else is this piece of work?") rather than listing a mechanism.
-    // The two below are the raw link lists it is derived from.
-    relatedBlockHtml(data) +
-    section("Linked from", data.backlinks) +
-    section("Links to", data.outgoing) +
-    // Pages committed with this one (D10); absent without git or shared commits.
-    movedWithSectionHtml(data.movedWith, displayTitleOf) +
-    // Placeholder the lazy "Similar" fetch fills in after the page renders.
-    '<div id="wikiSimilar"></div>';
-}
-
-// ── Right rail tabs (Connections | Ask) ───────────────────────────────
-/** Toggle the right rail between the Connections body and the Ask compose body.
- *  Default tab is Connections (so Linked from / Links to / Similar are visible on
- *  page select). Auto-switched to Ask when an Ask/Explain stream starts (via
- *  `runAskStream`); switching back to Connections is manual. `focus` (manual tab
- *  clicks only) drops the caret into the Ask box; the auto-switch path passes it
- *  false so a follow-up ask can't steal focus from the in-pane follow-up input. */
-function switchConnTab(tab: string, focus?: boolean): void {
-  // No Ask route under the read slice: the rail stays on Connections.
-  if (!wikiToolsFlag()) tab = "conn";
-  // The STALE tab is absent where its routes are (the read slice) and hidden
-  // on a read-only instance (D25): the rail stays on Connections there. Decided
-  // before the active mark, so only the tab actually shown is marked (A12).
-  if (tab === "stale" && !staleTabAvailable()) tab = "conn";
-  document.querySelectorAll(".wiki-conn-tab").forEach((b) => {
-    b.classList.toggle("active", b.getAttribute("data-conntab") === tab);
-  });
-  const connBody = document.getElementById("connBody");
-  const askBody = document.getElementById("askBody");
-  const staleBody = document.getElementById("staleBody");
-  const ask = tab === "ask";
-  const stale = tab === "stale";
-  if (connBody) connBody.style.display = ask || stale ? "none" : "";
-  if (askBody) askBody.style.display = ask ? "flex" : "none";
-  if (staleBody) staleBody.style.display = stale ? "" : "none";
-  if (ask && focus) {
-    const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement | null;
-    if (input) input.focus();
-  }
-}
-
-// ── Similar articles (semantic cousins, lazily fetched) ───────────────
-/** One resolved similar page (mirrors SimilarPage in src/wiki/similar.ts). */
-interface SimilarPage {
-  name: string;
-  title: string;
-  relPath: string;
-  type: string;
-  snippet?: string;
-  relevance: number;
-}
-/** Per-page memo so flipping tabs / re-rendering doesn't refetch. */
-const similarMemo = new Map<string, SimilarPage[]>();
-/** In-flight guard so a page render can't kick two concurrent fetches. */
-const similarInFlight = new Set<string>();
-
-/** Render the "Similar" section markup, or "" when there are no cousins (so the
- *  section is simply absent). Rows reuse the connection-item shape → clicking one
- *  opens it in the reader via the delegated `[data-page]` handler. */
-function similarSectionHtml(items: SimilarPage[]): string {
-  if (!items.length) return "";
-  let html = `<div class="wiki-conn-section"><div class="wiki-conn-title">Similar (${items.length})</div>`;
-  items.forEach((p) => {
-    html +=
-      `<div class="wiki-conn-item" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}" title="${esc(p.snippet || "")}">` +
-      `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(displayTitleOf(p))}</span></div>`;
-  });
-  return html + "</div>";
-}
-
-/** Fill the placeholder — but only if the reader is still on the page we fetched
- *  for (a fast tab flip may have moved on). Keyed on relPath, like the fetch. */
-function renderSimilarInto(relPath: string, items: SimilarPage[]): void {
-  if (currentRelPath !== relPath) return;
-  const el = document.getElementById("wikiSimilar");
-  if (el) el.innerHTML = similarSectionHtml(items);
-}
-
-/** Lazily fetch + render the Similar section for a page. Memoized per page and
- *  guarded against concurrent duplicate fetches; a failed/empty fetch leaves the
- *  section absent.
- *
- *  Keyed on relPath end to end — memo, in-flight guard, query param and the
- *  still-on-this-page test. Under the name key, two same-stem pages shared one
- *  memo entry and the route resolved both to whichever registered first, so the
- *  rail showed another page's cousins under this one.
- *
- *  Skipped entirely on a read-only WIKI: the route ships the page's prose to
- *  huginn's embedder, so it now carries the per-wiki egress prologue and can only
- *  answer 403. The section is absent either way — this just stops one pointless
- *  request per page open. Deliberately NOT in the readonly click guard: nothing
- *  here is a click. */
-function loadSimilar(page: { relPath: string }): void {
-  if (wikiReadonlyWikiFlag() || !wikiToolsFlag()) return;
-  const relPath = page.relPath;
-  const memo = similarMemo.get(relPath);
-  if (memo) {
-    renderSimilarInto(relPath, memo);
-    return;
-  }
-  if (similarInFlight.has(relPath)) return;
-  similarInFlight.add(relPath);
-  fetch(withWiki("/api/wiki/similar?relPath=" + encodeURIComponent(relPath)))
-    .then((r) => r.json())
-    .then((data: { similar?: SimilarPage[] }) => {
-      const items = Array.isArray(data.similar) ? data.similar : [];
-      similarMemo.set(relPath, items);
-      renderSimilarInto(relPath, items);
-    })
-    .catch(() => {
-      /* huginn down or route error — hide the section silently */
-    })
-    .finally(() => {
-      similarInFlight.delete(relPath);
-    });
-}
-
 // ── Article head: the project hub chip and the series strip ──────────
 // (The STALE tab and the stale counts: `wiki-stale-controller.ts`.)
 
@@ -2444,171 +1368,6 @@ function seriesStripHtml(m: WikiListing): string {
   return `<div class="wiki-series-head">${strip}<div class="wiki-series-tl">${steps}</div></div>`;
 }
 
-// ── Series editor: the popover, the writes, the repaint ───────────────
-//
-// ONE popover node, keyed by id, so "only one open at a time" is a property of
-// the DOM rather than a rule something has to enforce. It is `position: fixed`
-// and CLOSES on a scroll of the PAGE rather than re-anchoring: the openers live
-// in a scrolling rail, and a menu that chases its row is a menu whose click
-// lands somewhere else. A scroll INSIDE the popover is not that scroll — the
-// listener is a capture-phase one, so its own overflowing list used to dismiss
-// it on the first wheel tick and the `max-height` was unreachable.
-//
-// The CAS bases are captured when the popover OPENS, one per page the menu can
-// write, and held for as long as it is open. Reading them a millisecond before
-// each POST is a CAS whose window is the network round trip, where the window
-// that matters is the one a human spends deciding — exactly the span this menu
-// is on screen. Measured: a file edited while the popover stood open was
-// written anyway, against bytes the reader had never seen and with no refusal
-// shown. The page the reader has OPEN needs no request at all:
-// its `/api/wiki/page` payload carried the hash, and every write here answers
-// the hash it left behind, so the editor's own writes keep it current instead
-// of staling it.
-
-/** The page the open popover acts on, which view it is painting, and the bases
- *  its writes will send. `null` when no menu is open. */
-interface SeriesMenuState {
-  model: SeriesMenuModel;
-  edit: boolean;
-  busy: boolean;
-  /** The control that opened it — focus goes back there on every close, because
-   *  a keyboard reader who dismisses a menu must not be returned to `<body>`. */
-  opener: HTMLElement | null;
-  /** The opener as a selector by its key, taken at open time (a repaint
-   *  detaches the node); see `seriesOpenerSel`. */
-  openerSel: string | null;
-  /** relPath → the page's content hash as of OPEN time. A target missing from
-   *  this map is one whose read failed; its write is refused rather than sent
-   *  with no base. */
-  bases: Map<string, string>;
-  /** Resolves when every base above has been read (or failed). A click that
-   *  beats the fetches waits for it instead of racing them. */
-  basesReady: Promise<void>;
-  /** The open page as loaded, taken with the bases once the reader's own
-   *  writes in flight have settled: at the click, a verb that writes it is
-   *  refused before any write when its base read at open differs
-   *  (`writeSeriesUnlessOpenChanged`). */
-  open: OpenPageAtLoad;
-  /** The base read gave up waiting for an earlier save of the reader's
-   *  (`readSeriesBasesAfterWrites`' bound): every verb is refused with
-   *  `SERIES_STALLED_COPY`, and the menu is free again. */
-  stalled: boolean;
-  /** Set when the held bases no longer describe the files on disk — a write
-   *  came back 409, or one of this menu's own writes landed and the popover
-   *  stayed open to report it. Either way no further write may go out under
-   *  them, and the reader is told to reopen rather than shown a 409 about a
-   *  change they made themselves. */
-  staleBases: boolean;
-  /** What the next click says while `staleBases` holds: reload after a 409 on
-   *  the open page, close and reopen otherwise (`seriesConflictCopy`). */
-  staleNote: string;
-}
-
-let seriesMenu: SeriesMenuState | null = null;
-
-function seriesMenuEl(): HTMLElement | null {
-  return document.getElementById(SERIES_MENU_ID);
-}
-
-// Every close of the popover sets focus by the table at `PopCloseCause`
-// (`wiki-menus-controller.ts`), which the work popover shares.
-
-/** A series opener as a selector by its key, for a repaint that replaces it:
- *  the rail's own selector for a rail control, else the opener's attribute
- *  and page inside its nearest container with an id (a plain rail row, the
- *  Related work block, the article header). */
-function seriesOpenerSel(anchor: HTMLElement): string | null {
-  const rail = railControlSelector(anchor);
-  if (rail) return rail;
-  const attr = anchor.hasAttribute(SERIES_EDIT_ATTR) ? SERIES_EDIT_ATTR : anchor.hasAttribute(SERIES_MENU_ATTR) ? SERIES_MENU_ATTR : null;
-  if (!attr) return null;
-  const box = anchor.parentElement?.closest<HTMLElement>("[id]");
-  const scope = box?.id === "wikiList" ? "#wikiList .wiki-list-item:not(.thread-row)" : box ? `#${CSS.escape(box.id)}` : "";
-  return `${scope} [${attr}="${CSS.escape(anchor.getAttribute(attr) ?? "")}"]`.trim();
-}
-
-/** Close the series popover; focus per the `PopCloseCause` table (⋯ menus
- *  controller). `preventScroll`: the opener may have scrolled out of view. */
-function closeSeriesMenu(cause: PopCloseCause): void {
-  const was = seriesMenu;
-  const el = seriesMenuEl();
-  const refocus = popCloseReturnsFocus(cause, el);
-  el?.remove();
-  seriesMenu = null;
-  if (refocus && was?.opener) focusPopOpener(was.opener, was.openerSel, was.model.relPath);
-}
-
-/** The popover node, positioned under `anchor`. Shared by the real menu and by
- *  the one-line note below, so a refusal lands in the same place a menu would. */
-function paintSeriesMenuEl(anchor: HTMLElement, html: string): HTMLElement {
-  const el = document.createElement("div");
-  el.id = SERIES_MENU_ID;
-  el.className = "wiki-series-menu";
-  el.setAttribute("role", "menu");
-  el.innerHTML = html;
-  document.body.appendChild(el);
-  const rect = anchor.getBoundingClientRect();
-  // Clamped into the viewport on both axes; the rail's rows sit at the left
-  // edge and the reader header's control near the right one.
-  const width = el.offsetWidth || 260;
-  const height = el.offsetHeight || 200;
-  const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
-  const below = rect.bottom + 6;
-  const top = below + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - 6) : below;
-  el.style.left = `${Math.round(left)}px`;
-  el.style.top = `${Math.round(top)}px`;
-  return el;
-}
-
-/** Open the popover for `relPath`, anchored under `anchor`. */
-function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): void {
-  // A Save as series write in flight keeps its popover, the one ⋯ open.
-  if (workPopBusy()) return;
-  closeSeriesMenu("replace");
-  if (!seriesEditable()) return;
-  const model = buildSeriesMenu(allPages, relPath, recencyNow());
-  if (!model) {
-    // The listing moved under the row between its render and this click — a
-    // deleted or renamed page. Said in the popover rather than swallowed: a
-    // control that does nothing at all reads as a broken one.
-    paintSeriesMenuEl(
-      anchor,
-      `<div class="wiki-series-menu-msg bad">${esc(relPath)} is no longer in the listing</div>`,
-    );
-    return;
-  }
-  // On a work thread's focus row the ⋯ is a page menu (PR 4): Make own
-  // thread (or Return to its thread) above today's series items.
-  const row = !edit ? anchor.closest<HTMLElement>(".wiki-list-item.thread-row:not(.session-row)") : null;
-  const boundary = row ? rowMenuItemHtml(relPath) : "";
-  const el = paintSeriesMenuEl(anchor, (boundary ? boundary + `<div class="wiki-work-hr" role="separator"></div>` : "") + seriesMenuHtml(model, edit));
-  // The page menu takes the arrow keys (the keydown delegate by the work
-  // popover's); the other series menus open on their field and keep base keys.
-  if (row) el.setAttribute("data-page-menu", "");
-  const state: SeriesMenuState = {
-    model,
-    edit,
-    busy: false,
-    opener: anchor,
-    openerSel: seriesOpenerSel(anchor),
-    bases: new Map(),
-    basesReady: Promise.resolve(),
-    open: openPageAtLoad(),
-    stalled: false,
-    staleBases: false,
-    staleNote: "Close and reopen this menu — the page has changed",
-  };
-  state.basesReady = loadSeriesBases(state);
-  seriesMenu = state;
-  // `preventScroll`, the ★'s own rule: focusing a field inside a popover that
-  // is taller than the viewport scrolls the PAGE to reach it — and a page
-  // scroll is what this menu closes on, so the menu dismissed itself the moment
-  // it opened (measured on a short viewport, where 70vh really binds).
-  // A page menu opens on its first item, the boundary item (the Group menu's
-  // rule); a series menu on its field.
-  (el.querySelector<HTMLElement>("[data-thread-split], [data-work-return]") ?? el.querySelector<HTMLInputElement>("[data-series-input]"))?.focus({ preventScroll: true });
-}
-
 /** The open page as loaded, the snapshot both series writers compare its
  *  fresh base with (`writeSeriesUnlessOpenChanged`). */
 function openPageAtLoad(): OpenPageAtLoad {
@@ -2621,225 +1380,6 @@ function adoptOwnSeriesHashes(hashes: ReadonlyMap<string, string>): void {
   for (const [rel, hash] of hashes) {
     if (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel)) currentPageHash = hash;
   }
-}
-
-/**
- * Every page this menu's verbs can write, as the CAS bases they will be sent
- * with.
- *
- * The join/new/remove verbs write the page the menu was opened on; the rename
- * writes the head (or, with no head yet, that same page); a head MOVE writes
- * both the old head and the member it is moving to, which is any member row the
- * edit view renders — so all of them are read at open. That is one request per
- * member of one series, issued once per popover open, and the alternative is a
- * base read after the reader has decided, which is the CAS this closes.
- *
- * The open page's base is read FRESH too, by Save as series' rule (arch
- * review 2026-10, finding 66): its load-time hash made every reopen after a
- * 409 send the same stale base. At the click, `writeSeriesUnlessOpenChanged`
- * compares it with `state.open` and refuses a verb that writes the open page
- * before writing. Both are taken after the reader's own writes in flight
- * settle (`readSeriesBasesAfterWrites`), or a menu opened during one blames
- * the reader for their own change; a wait past the bound marks the menu
- * `stalled` instead, and every verb is refused with copy that says so.
- */
-function loadSeriesBases(state: SeriesMenuState): Promise<void> {
-  const { model, edit } = state;
-  const targets = new Set<string>([model.relPath]);
-  if (edit) {
-    if (model.headRel) targets.add(model.headRel);
-    for (const m of model.members) targets.add(m.relPath);
-  }
-  return readSeriesBasesAfterWrites([...targets], seriesBaseHash, openPageAtLoad).then(({ bases, open, stalled }) => {
-    state.open = open;
-    state.stalled = stalled;
-    for (const [rel, hash] of bases) state.bases.set(rel, hash);
-  });
-}
-
-/** Say what happened, in the popover, without tearing it down — a refusal the
- *  reader cannot read is a click that did nothing.
- *
- *  Keyed on the menu the message BELONGS to: a write is a sequence of awaits,
- *  and by the time one answers the reader may have closed this popover and
- *  opened another on a different page. Painting into that one would report a
- *  page it is not about. */
-function setSeriesMenuNote(state: SeriesMenuState, text: string, bad: boolean): void {
-  if (seriesMenu !== state) return;
-  const el = seriesMenuEl();
-  if (!el) return;
-  let note = el.querySelector<HTMLElement>(".wiki-series-menu-msg");
-  if (!note) {
-    note = document.createElement("div");
-    note.className = "wiki-series-menu-msg";
-    el.appendChild(note);
-  }
-  note.classList.toggle("bad", bad);
-  note.textContent = text;
-}
-
-/** The page's current content hash — the CAS base — and the series POST,
- *  both bounded by `SERIES_REQUEST_TIMEOUT_MS` (`wiki-series-write.ts`). A
- *  base that cannot be read is `null`, which the caller reports rather than
- *  writing without one. */
-const seriesBaseHash = seriesBaseReader((relPath) => withWiki(`/api/wiki/page?relPath=${encodeURIComponent(relPath)}`));
-let postSeriesWrite!: SeriesPoster;
-
-/**
- * Run the editor's writes, in order, stopping at the first failure.
- *
- * ORDER MATTERS on the two-call head move (see {@link headMoveWrites}) and the
- * stop is what keeps its failure state the VISIBLE one: the label is cleared
- * first, so a failure leaves a series with no labelled member, which the fold
- * and the header render under its bare key — rather than two members claiming
- * the label, where the rail silently picks one and says nothing (only lint
- * 8.3(b) reports that one, on its next run).
- *
- * Both endings refresh. A second write that fails leaves the FIRST one's effect
- * on disk, and without the refresh the header and the rail went on painting a
- * label that is gone from the file.
- *
- * A sequence the route reports as all-noop (`written: false` on every answer —
- * the key typed is the one the page carries) still refreshes, but reports
- * nothing and stales nothing. The refresh stays because the noop's usual
- * trigger is DRIFT: the key reached the disk after THIS BROWSER fetched its
- * listing (`allPages`, read at page load), so the popover offered a join the
- * file no longer needs. The stale party is the client, not the server — the
- * route rebuilds the index before every write, and the lint Accept and the
- * sync loop refresh it themselves — so only a refetch-and-apply here moves the
- * row into the fold (measured: skipping it closed the menu as a success over a
- * rail that stayed wrong). The note and the stale flag go because a
- * byte-identical listing after a non-write is the expected answer, not a
- * failed one: measured, it read as "Saved — reload" and the menu locked
- * itself over its own non-write, refusing the next verb until reopened.
- */
-async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
-  const state = seriesMenu;
-  if (!state || state.busy) return;
-  if (state.staleBases) {
-    setSeriesMenuNote(state, state.staleNote, true);
-    return;
-  }
-  state.busy = true;
-  setSeriesMenuNote(state, "Saving…", false);
-  try {
-    // Tracked from the click until the open page's hash has adopted the
-    // answers, so a menu opened meanwhile reads its bases after it.
-    const { refusal, run } = await trackSeriesWrite(async () => {
-      await state.basesReady;
-      // The refusal and the loop are `wiki-series-write.ts`'s, shared with
-      // the Work threads' Save as series.
-      const out = await writeSeriesUnlessOpenChanged({ writes, bases: state.bases, open: state.open, post: postSeriesWrite, stalled: state.stalled });
-      if (out.refusal === null) adoptOwnSeriesHashes(out.run.hashes);
-      return out;
-    });
-    if (refusal !== null) {
-      setSeriesMenuNote(state, refusal, true);
-      return;
-    }
-    if (run.failure) {
-      if (run.failure.status === 409) {
-        // The base this menu has held since it opened describes a file
-        // somebody else has moved on from. Every base it holds is suspect
-        // now, so the menu stops writing and says which page it was.
-        // The step follows the page: a reopened menu still holds the open
-        // page's load-time hash, and a verb that writes that page is refused
-        // at the click, so only a reload clears it.
-        const copy = seriesConflictCopy(run.failure.write.relPath, currentRelPath);
-        state.staleBases = true;
-        state.staleNote = copy.again;
-        state.bases.clear();
-        setSeriesMenuNote(state, copy.note, true);
-      } else {
-        setSeriesMenuNote(state, run.failure.error, true);
-      }
-      await refreshAfterSeriesWrite();
-      return;
-    }
-    /** The series this sequence left without a label — the route reports it
-     *  when a MOVE took the page's own `series_label:` with it, since a label
-     *  names a series rather than a page. */
-    const cleared = run.cleared ? { series: run.cleared } : null;
-    /** Whether any answer in the sequence reported bytes moved. */
-    const wrote = run.wrote;
-    const outcome = await refreshAfterSeriesWrite();
-    const notes: string[] = [];
-    if (cleared) {
-      // The label went with the move, and nothing on screen would otherwise say
-      // so: the series this page left renders under its bare key from here on —
-      // visible on its fold and on every member's header, and reported by no
-      // lint check (measured), which is why the reader is told here.
-      notes.push(
-        `This page was the head of "${cleared.series}" — that series has no label now`,
-      );
-    }
-    // The write landed; the listing did not. Saying so beats repainting the
-    // rail from the set it already had and calling that success.
-    if (wrote && outcome !== "apply") notes.push("Saved — reload to see the updated list");
-    if (notes.length) {
-      // The menu stays OPEN so the line can be read — and the bases it still
-      // holds describe files this write has just moved on from, so the next
-      // click reopens instead of spending a 409 that blames another writer.
-      state.staleBases = true;
-      setSeriesMenuNote(state, notes.join(" · "), false);
-      return;
-    }
-    // Keyed to THIS sequence's menu, as the note setter is: the reader can
-    // have dismissed this popover and opened another while the write was in
-    // flight, and that one is theirs to keep.
-    if (seriesMenu === state) closeSeriesMenu("done");
-  } finally {
-    state.busy = false;
-  }
-}
-
-/**
- * Re-read the listing and repaint what the edit moved.
- *
- * Deliberately a FORCED apply (`force: true`): `receivePages` defers an arriving
- * listing while the reader has an article open, which is exactly the state the
- * header's `edit series` acts from — and here the re-sort IS the reader's own
- * click, not the background refresh that rule exists for. `?refresh=1` because
- * the index behind `/api/wiki/pages` is a 5-minute TTL cache; the route rebuilt
- * it inside the write, and this is what makes the rail read the rebuild.
- *
- * The OUTCOME is returned, because three of the five are not a refresh at all:
- * a superseded response (`stale`), a degraded empty set (`empty`) and a
- * byte-identical one (`unchanged`) all leave the screen showing the listing
- * from before the write, and repainting from that is a success the reader can
- * see is false.
- */
-async function refreshAfterSeriesWrite(): Promise<ReceiveOutcome | "error"> {
-  // Bounded: both popovers hold their busy state across this await. A late
-  // answer still lands through the listing's own sequence discipline.
-  const outcome = await withinSeriesBound(requestPagesAwaited({ refresh: true, force: true }), "error");
-  repaintSeriesHead();
-  // Related work's rows carry series too, and the ⋯ on them is one of the
-  // editor's openers.
-  repaintRelatedBlock();
-  return outcome;
-}
-
-/** Repaint the open article's series header from the fresh listing — the rail's
- *  own `renderList` does not reach inside `#articleWrap`. Adds, replaces or
- *  removes the block, in the slot `articleHeadHtml` puts it (right after the
- *  meta row). */
-function repaintSeriesHead(): void {
-  if (!currentRelPath) return;
-  const host = document.querySelector<HTMLElement>(".wiki-article-head");
-  if (!host) return;
-  const key = normalizeRel(currentRelPath);
-  const meta = allPages.find((p) => normalizeRel(p.relPath) === key);
-  const html = meta ? seriesStripHtml(meta) : "";
-  const existing = host.querySelector(".wiki-series-head");
-  if (existing) {
-    if (html) existing.outerHTML = html;
-    else existing.remove();
-  } else if (html) {
-    host.querySelector(".wiki-meta-row")?.insertAdjacentHTML("afterend", html);
-  }
-  // A series strip that appears brings the lens switch, as a cost line does.
-  if (html) refreshLensSwitch(document.getElementById("articleWrap")!);
 }
 
 // ── Loading a page: the article head, explainers, the page fetch ──────
@@ -3563,35 +2103,7 @@ function consumeUrlLens(): void {
   history.replaceState(history.state, "", u);
 }
 
-// ── Article share and in-place reload (left in the shell for C5) ──────
-/**
- * 📤 Share on the open article.
- *
- * Sends `relPath` BESIDE the name: the route prefers the path and falls back to
- * the stem, because `index.resolve(name)` is first-registration-wins — sharing
- * one of two same-stem pages generated a post from the OTHER one under this
- * page's title. (This comment used to assert the opposite; see `resolvePageRef`.)
- *
- * `SHARE_BTN_ID` is declared as the opener so the click that opens the dialog is
- * not also read as a click-away by its own document listener.
- */
-function openArticleShare(): void {
-  // A read-only wiki never opens the dialog. The capture-phase guard already
-  // cancels the click on `#wikiShareBtn`, but this opener is also reachable from
-  // code paths that never dispatch one, and the dialog's own Generate would spend
-  // the one-shot the route then 403s.
-  if (wikiReadonlyWikiFlag()) return;
-  const m = currentArticle;
-  if (!m) return;
-  openShareDialog({
-    wiki: WIKI || "",
-    page: m.name,
-    relPath: m.relPath,
-    title: displayTitleOf(m),
-    openerIds: [SHARE_BTN_ID],
-  });
-}
-
+// ── In-place reload ──────────────────────────────────────────────────
 /** Reload one page in place (no history entry, no hash reveal), keeping the
  *  lens its view showed. Shared by a fact-check write and the walkthrough
  *  panel's Reload on a stale page. */
@@ -4235,14 +2747,48 @@ function menusDeps(): MenusDeps {
     WIKI: () => WIKI,
     allPages: () => allPages,
     workFacts: () => workFacts,
-    seriesMenuOpener: () => seriesMenu?.opener ?? null,
-    postSeriesWrite: () => postSeriesWrite,
+    seriesMenuOpener,
+    postSeriesWrite: getPostSeriesWrite,
     withWiki,
     closeSeriesMenu,
     seriesBaseHash,
     openPageAtLoad,
     adoptOwnSeriesHashes,
     refreshAfterSeriesWrite,
+  };
+}
+
+/** The article controller's port (`ArticlePort`). */
+function articleDeps(): ArticlePort {
+  return {
+    WIKI: () => WIKI,
+    WIKI_ROOT: () => WIKI_ROOT,
+    allPages: () => allPages,
+    currentRelPath: () => currentRelPath,
+    currentArticle: () => currentArticle,
+    typeOrder: () => typeOrder,
+    typeLabel,
+    workedGate: () => workedGate,
+    workedAxisOn: () => workedAxisOn,
+    jiraKeys: () => jiraKeys,
+    trackerLabels: () => trackerLabels,
+    withWiki,
+    recencyNow,
+  };
+}
+
+/** The series editor's port (`SeriesPort`). */
+function seriesDeps(): SeriesPort {
+  return {
+    WIKI: () => WIKI,
+    allPages: () => allPages,
+    currentRelPath: () => currentRelPath,
+    withWiki,
+    recencyNow,
+    requestPagesAwaited,
+    seriesStripHtml,
+    openPageAtLoad,
+    adoptOwnSeriesHashes,
   };
 }
 
@@ -4293,92 +2839,10 @@ export function boot(): { dispose(): void } {
   initEffort(effortDeps());
   initAsk(askDeps());
   initMenus(menusDeps());
-  relatedOrder = readRelatedOrder(WIKI);
+  initArticle(articleDeps());
   registerStale();
-  postSeriesWrite = seriesPoster(WIKI);
-  document.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key === "Escape" && seriesMenuEl()) closeSeriesMenu("key");
-  });
-  // Closed rather than re-anchored — see the block comment above. `capture` so a
-  // scroll inside the RAIL (which does not bubble) is seen too; the popover's own
-  // scroll is excluded by target, or its `overflow-y: auto` list would dismiss it
-  // on the first wheel tick.
-  window.addEventListener(
-    "scroll",
-    (e) => {
-      const el = seriesMenuEl();
-      const target = e.target as Node | null;
-      if (el && target && (target === el || el.contains(target))) return;
-      closeSeriesMenu("viewport");
-    },
-    true,
-  );
-  window.addEventListener("resize", () => closeSeriesMenu("viewport"));
-  /** The popover's own delegate, on its node, so the shell's document listeners
-   *  carry no branch for it and a click inside it never reaches the rail's
-   *  row-opening handler. */
-  document.addEventListener("click", (e) => {
-    const target = e.target as HTMLElement;
-    if (!target?.closest) return;
-    const menuEl = seriesMenuEl();
-    if (menuEl && menuEl.contains(target)) {
-      if (boundaryItemClick(target)) {
-        e.preventDefault();
-        return;
-      }
-      const cmd = target.closest<HTMLElement>("[data-series-cmd]");
-      if (!cmd || !seriesMenu) return;
-      e.preventDefault();
-      const arg = cmd.getAttribute("data-series-arg") || "";
-      const { model } = seriesMenu;
-      if (cmd.getAttribute("data-series-cmd") === "join") {
-        void applySeriesWrites([{ relPath: model.relPath, series: arg }]);
-      } else if (cmd.getAttribute("data-series-cmd") === "remove") {
-        // The route clears `series_label:` with the key — a label on a page in no
-        // series names nothing, and no surface reads it (the rail takes the label
-        // off a MEMBER, and the lint's census skips a page with no key).
-        void applySeriesWrites([{ relPath: model.relPath, series: null }]);
-      } else if (cmd.getAttribute("data-series-cmd") === "head" && arg) {
-        void applySeriesWrites(headMoveWrites(model, arg, model.label));
-      }
-      return;
-    }
-    // An opener. Re-clicking the one that opened the menu closes it, the ordinary
-    // popover convention.
-    const opener =
-      target.closest<HTMLElement>(`[${SERIES_MENU_ATTR}]`) ||
-      target.closest<HTMLElement>(`[${SERIES_EDIT_ATTR}]`);
-    if (opener) {
-      e.preventDefault();
-      e.stopPropagation();
-      const edit = opener.hasAttribute(SERIES_EDIT_ATTR);
-      const rel = opener.getAttribute(edit ? SERIES_EDIT_ATTR : SERIES_MENU_ATTR) || "";
-      const wasOpen = !!seriesMenu && seriesMenu.model.relPath === rel && seriesMenu.edit === edit;
-      closeSeriesMenu(wasOpen ? "toggle" : "replace");
-      if (!wasOpen && rel) openSeriesMenu(opener, rel, edit);
-      return;
-    }
-    // Any other click dismisses, and leaves focus where the click put it.
-    if (menuEl) closeSeriesMenu("outside");
-  });
-  document.addEventListener("submit", (e) => {
-    const form = (e.target as HTMLElement)?.closest?.<HTMLElement>("[data-series-form]");
-    if (!form || !seriesMenu) return;
-    e.preventDefault();
-    const value = (form.querySelector("[data-series-input]") as HTMLInputElement | null)?.value.trim();
-    if (!value) return;
-    const { model } = seriesMenu;
-    if (form.getAttribute("data-series-form") === "label") {
-      // The label lives on the HEAD. With no labelled member yet, it lands on the
-      // page the reader opened the editor from — which is the page they are
-      // looking at, and which `seriesHead` then reads it off.
-      void applySeriesWrites([
-        { relPath: model.headRel || model.relPath, series: model.current, seriesLabel: value },
-      ]);
-      return;
-    }
-    void applySeriesWrites([{ relPath: model.relPath, series: value }]);
-  });
+  initSeries(seriesDeps());
+  registerSeriesInputs();
   document.addEventListener("mouseover", (e) => {
     const t = e.target as HTMLElement | null;
     const node = t?.closest?.(GRAPH_NODE_SEL);
@@ -4801,9 +3265,9 @@ export function boot(): { dispose(): void } {
     else if (t.closest("#wikiChatEscBtn")) submitChatEscalate(false);
     // Explicit "start another thread anyway" after a 409 (never automatic).
     else if (t.closest("#wikiChatEscNewBtn")) submitChatEscalate(true);
-    // 📤 Share — the dialog is IMPORTED here rather than loaded as the standalone
-    // bundle: this file IS a bundle, and doing both would put two copies of the
-    // module (two states, two listener sets) on the same page.
+    // 📤 Share — `openArticleShare` (article controller) IMPORTS the dialog rather
+    // than loading the standalone bundle: this file IS a bundle, and doing both would
+    // put two copies of the module (two states, two listener sets) on the same page.
     else if (t.closest("#" + SHARE_BTN_ID)) openArticleShare();
     else if (t.closest("#" + FELLES_BTN_ID)) {
       const relPath = t.closest("#" + FELLES_BTN_ID)?.getAttribute("data-felles-relpath") || "";
@@ -4875,7 +3339,7 @@ export function boot(): { dispose(): void } {
     getShownTurn: getAskShownTurn,
     getAskTurns,
     getCurrentArticle: () => currentArticle,
-    getOutgoingTitles: () => currentOutgoingTitles,
+    getOutgoingTitles: getCurrentOutgoingTitles,
     postAskChat,
     refreshChatEscalateBar,
   });

@@ -45,7 +45,7 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   "#lintPropose",
   // The SERIES editor's two openers (the rail/related `⋯` and the reader
   // header's `edit series`). Both are already ABSENT on a read-only instance and
-  // on a read-only root — `wiki-browser.ts` renders neither, which is the "no
+  // on a read-only root — the reader (the rail `⋯` in `wiki-rail-controller.ts`, the related `⋯` in `wiki-article-controller.ts`, the header in `wiki-browser.ts`) renders neither, which is the "no
   // dead controls" rule and what the acceptance asserts — so these entries are
   // the BACKSTOP for anything painted before the flags are read. They are in
   // this list and NOT in the egress one below although they must also be dead on

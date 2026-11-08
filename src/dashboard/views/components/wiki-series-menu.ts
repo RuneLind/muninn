@@ -2,11 +2,11 @@
  * The SERIES EDITOR's pure half — the model behind the `⋯` popover and the
  * markup it paints.
  *
- * Its own module for `wiki-related-view.ts`'s reason: `wiki-browser.ts`'s code
- * needs a DOM, so anything shaped there is provable only in a browser or in
- * happy-dom. Everything here is a function of the page listing the rail already
- * holds, so the menu's contents, the head rule and the write PLAN are unit-
- * testable and the browser file keeps only the DOM.
+ * Its own module for `wiki-related-view.ts`'s reason: the editor's DOM half,
+ * `wiki-series-controller.ts`, needs a DOM, so anything shaped there is provable
+ * only in a browser or in happy-dom. Everything here is a function of the page
+ * listing the rail already holds, so the menu's contents, the head rule and the
+ * write PLAN are unit-testable and the controller keeps only the DOM.
  *
  * One popover serves three openers — a rail row, a `Related work` row and the
  * reader's series header — because they ask the same two questions ("which
