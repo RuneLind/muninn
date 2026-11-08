@@ -608,7 +608,8 @@ export function componentBlockCss(scope: string): string {
       border: 1px solid var(--border-primary); background: var(--bg-panel); color: var(--text-soft); font-size: 14px;
     }
     dialog.diagram-dialog .diagram-dialog-close:hover, dialog.diagram-dialog .diagram-dialog-close:focus-visible { color: var(--accent); border-color: var(--accent); }
-    dialog.diagram-dialog svg { height: auto; }
+    /* Block, so no line box adds a descender gap under it; sized by wiki-mermaid.ts dialogBox. */
+    dialog.diagram-dialog svg { display: block; margin: 0 auto; height: auto; }
     ${scope} .caption { color: var(--text-muted); font-size: 0.85em; text-align: center; margin-top: 0.5rem; }
     ${scope} .meter { display: flex; align-items: center; gap: 0.6rem; margin: 1rem 0; }
     ${scope} .meter-label { font-weight: 600; color: var(--text-primary); }

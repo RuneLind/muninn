@@ -45,13 +45,15 @@ import {
   THEMED_FONT_PX,
   buildMermaidPalette,
   chooseLayout,
-  dialogWidth,
+  dialogBox,
+  dialogHostWidth,
   flipToTopDown,
   hostWidthFor,
   injectClassDefs,
   needsFlipCandidate,
   parseViewBox,
-  rewriteSvgId,
+  pickDialogDrawing,
+  rescopeSvgIds,
   type MermaidPalette,
   type TokenColors,
 } from "./mermaid-theme.ts";
@@ -116,12 +118,27 @@ export function hasMermaid(root: ParentNode): boolean {
  * reads at 11 px with no scrollbar (`hostWidthFor`). Decided from the page's
  * own orientation on every measure (`chooseLayout`).
  *
+ * The ⤢ dialog shows a copy at natural × 1.3 while that fits the window (both
+ * axes), smaller to fit, but never with its smallest text under 11 px or under
+ * what the page shows; past that the dialog scrolls inside (`dialogFit`). Of
+ * the page's own orientation and its top-down copy (when drawn), the one that
+ * spills less wins, then the larger text (`pickDialogDrawing`). A gantt is
+ * drawn again for the dialog at the width that fills the window at 1.3 × its
+ * text (`dialogHostWidth`), not at its column-derived width. The copy carries
+ * a new root id in every id reference, never in its text (`rescopeSvgIds`).
+ * A copy of a diagram elsewhere on the page (ref-link peek, fact-check card)
+ * is redrawn plain and fit to width, with no ⤢ and no scroll stop
+ * (`adoptMermaidCopies`).
+ *
  * | Starting state                 | Event                                  | Result                                                        |
  * |--------------------------------|----------------------------------------|---------------------------------------------------------------|
- * | dialog closed, focus on ⤢      | click / Enter / Space                  | showModal; focus on the dialog's close button                 |
+ * | dialog closed, focus on ⤢      | click / Enter / Space                  | showModal; focus on the dialog's close button; sized from the |
+ * |                                |                                        | window (above); a gantt is redrawn for it through the mutex   |
  * | dialog open                    | Esc                                    | closes; focus back on the ⤢ that opened it                    |
- * | dialog open                    | click on the backdrop (target = dialog)| closes; focus back on ⤢ (the dialog itself has no padding, so |
- * |                                |                                        | only a backdrop click targets it)                             |
+ * | dialog open                    | press and release on the backdrop      | closes; focus back on ⤢ (both outside the dialog's box)       |
+ * | dialog open                    | press inside, drag out, release outside| stays open (the click targets the dialog, but the press was   |
+ * |                                |                                        | inside its box)                                               |
+ * | dialog open                    | click on the dialog's own scrollbar    | stays open (inside its box)                                   |
  * | dialog open                    | click inside the diagram               | stays open                                                    |
  * | dialog open                    | close button                           | closes; focus back on ⤢                                       |
  * | dialog open                    | theme / palette / OS scheme flip       | the page diagrams re-render, then the dialog's copy is redrawn|
@@ -130,7 +147,10 @@ export function hasMermaid(root: ParentNode): boolean {
  * | dialog open                    | popstate / hashchange                  | closes at once                                                |
  * | dialog open                    | article swapped (loadPage, Ask)        | the next enhanceMermaid call closes it (its ⤢ is detached, so |
  * |                                |                                        | focus goes to body, as for any control in a replaced article) |
- * | dialog open                    | rail / column / window resize          | no effect on the dialog (its width was set when filled)       |
+ * | dialog open                    | rail / column / window resize          | no effect on the dialog (its size was set when filled)        |
+ * | copy (peek, fact-check card)   | inserted, `adoptMermaidCopies`         | ⤢ and scroll stop removed at once; redrawn fit to width under |
+ * |                                |                                        | its own id in the colours at its place                        |
+ * | copy                           | theme / palette / OS scheme flip       | redrawn in the new colours (`rerenderChanged`, no state)      |
  * | ⤢ focused                      | flip re-renders the page diagram       | only `.diagram-body`'s SVG is replaced: ⤢ survives with focus |
  * | body with no layout (closed    | first render                           | drawn as the page wrote it, not measured, flipped or widened  |
  * | fold, a lens hiding it)        |                                        | (width 0 would read as tiny text)                             |
@@ -196,6 +216,8 @@ interface DiagramState {
   widened: number | null;
   /** Body width the current layout was decided at; 0 = not measured. */
   measuredWidth: number;
+  /** A gantt's dialog drawing, keyed by config and width (see `refineDialog`). */
+  dialogDraw?: { key: string; r: Rendered };
 }
 
 const states = new WeakMap<HTMLElement, DiagramState>();
@@ -517,9 +539,22 @@ function ensureDialog(): HTMLDialogElement {
   dlgBody.className = "diagram-dialog-body";
   inner.append(dlgClose, dlgBody);
   dlg.appendChild(inner);
-  // The dialog has no padding of its own: only a backdrop click targets it.
+  // A backdrop click: pressed AND released outside the dialog's box. A drag
+  // that starts on a label and ends on the backdrop, or a click on the
+  // dialog's own scrollbar, also targets the dialog, and must not close it.
+  const outside = (e: MouseEvent) => {
+    if (!dlg || e.target !== dlg) return false;
+    const r = dlg.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  };
+  let pressedOutside = false;
+  dlg.addEventListener("pointerdown", (e) => {
+    pressedOutside = outside(e);
+  });
   dlg.addEventListener("click", (e) => {
-    if (dlg && e.target === dlg) dlg.close();
+    const pressed = pressedOutside;
+    pressedOutside = false;
+    if (dlg && pressed && outside(e)) dlg.close();
   });
   dlg.addEventListener("close", () => {
     const opener = dlgOpener;
@@ -532,17 +567,62 @@ function ensureDialog(): HTMLDialogElement {
   return dlg;
 }
 
-/** Draw the dialog's copy from the diagram's current render, under a new id
- *  (the page's SVG keeps its own; see `rewriteSvgId`). */
+/** The smallest text the page shows this diagram at, CSS px (0 = not laid out). */
+function pageTextPx(st: DiagramState): number {
+  const r = st.shown === "flip" && st.flip ? st.flip : st.orig;
+  const w = st.body.querySelector("svg")?.getBoundingClientRect().width ?? 0;
+  if (!r.vb || w <= 0) return 0;
+  return ((r.minText ?? st.cfg.fontPx) * w) / r.vb.width;
+}
+
+/**
+ * Draw the dialog's copy from drawings already made: a gantt's dialog drawing
+ * (else its page drawing until `refineDialog` lands), otherwise the page's own
+ * orientation and, when drawn, its top-down copy, whichever spills less in the
+ * window (`pickDialogDrawing`). Under a new id (`rescopeSvgIds`).
+ */
 function fillDialog(st: DiagramState): void {
   if (!dlgBody) return;
-  const r = st.orig;
-  dlgBody.innerHTML = rewriteSvgId(r.svg, r.id, `wm-dlg-${dlgSeq++}`);
-  const svg = dlgBody.querySelector<SVGSVGElement>("svg");
-  if (svg && r.vb) {
-    svg.style.maxWidth = "none";
-    svg.setAttribute("width", String(Math.round(dialogWidth(r.vb.width, window.innerWidth))));
+  const cands: Rendered[] = st.orig.tracksHost
+    ? [st.dialogDraw?.r ?? st.orig]
+    : [st.orig, ...(st.flip ? [st.flip] : [])];
+  const usable = cands.filter((r) => r.vb);
+  const box = dialogBox(window.innerWidth, window.innerHeight);
+  const pick = pickDialogDrawing(
+    usable.map((r) => ({ width: r.vb!.width, height: r.vb!.height, minText: r.minText ?? st.cfg.fontPx })),
+    box,
+    pageTextPx(st),
+  );
+  const r = pick ? usable[pick.index]! : st.orig;
+  const t = document.createElement("template");
+  t.innerHTML = r.svg;
+  const svg = t.content.querySelector<SVGSVGElement>("svg");
+  if (svg) {
+    rescopeSvgIds(svg, r.id, `wm-dlg-${dlgSeq++}`);
+    if (pick) {
+      svg.style.maxWidth = "none";
+      svg.setAttribute("width", String(Math.round(pick.fit.width)));
+    }
   }
+  dlgBody.replaceChildren(t.content);
+  dlgBody.toggleAttribute("data-mermaid-flipped", r === st.flip);
+}
+
+/** A gantt: draw it for the dialog at the width that fills the window at the
+ *  aimed text size (`dialogHostWidth`), then refill. Runs inside the mutex. */
+async function refineDialog(st: DiagramState): Promise<void> {
+  if (!st.orig.tracksHost || !st.orig.minText) return;
+  const box = dialogBox(window.innerWidth, window.innerHeight);
+  const hw = dialogHostWidth(box.width, st.orig.minText, pageTextPx(st));
+  const key = `${st.cfg.key}|${hw}`;
+  if (st.dialogDraw?.key !== key) {
+    try {
+      st.dialogDraw = { key, r: await draw(st.cfg, st.source, hw) };
+    } catch {
+      return; // the page drawing stays in the dialog
+    }
+  }
+  if (dlg?.open && dlgWrap === st.wrap) fillDialog(st);
 }
 
 function openDialog(wrap: HTMLElement, opener: HTMLButtonElement): void {
@@ -554,6 +634,11 @@ function openDialog(wrap: HTMLElement, opener: HTMLButtonElement): void {
   fillDialog(st);
   if (!d.open) d.showModal();
   dlgClose?.focus();
+  if (st.orig.tracksHost) {
+    void enqueue(async () => {
+      if (d.open && dlgWrap === wrap) await refineDialog(st);
+    });
+  }
 }
 
 /** Close the dialog when the diagram that opened it has left the page. */
@@ -611,8 +696,12 @@ async function renderFences(root: ParentNode): Promise<void> {
 async function rerenderChanged(): Promise<void> {
   const wraps = Array.from(document.querySelectorAll<HTMLElement>("div.diagram[data-mermaid-src]"));
   for (const wrap of wraps) {
+    if (!wrap.isConnected) continue;
     const st = states.get(wrap);
-    if (!st || !wrap.isConnected) continue;
+    if (!st) {
+      await drawCopy(wrap); // a copy: no state of its own
+      continue;
+    }
     const cfg = readPassConfig(wrap);
     if (cfg.key === st.cfg.key) continue;
     let orig: Rendered;
@@ -622,11 +711,67 @@ async function rerenderChanged(): Promise<void> {
       continue; // the previous drawing stays
     }
     if (!wrap.isConnected) continue;
-    Object.assign(st, { cfg, orig, flip: undefined, shown: "orig", widened: null, measuredWidth: 0 });
+    Object.assign(st, { cfg, orig, flip: undefined, shown: "orig", widened: null, measuredWidth: 0, dialogDraw: undefined });
     st.body.innerHTML = orig.svg;
     await layout(st);
-    if (dlg?.open && dlgWrap === wrap) fillDialog(st);
+    if (dlg?.open && dlgWrap === wrap) {
+      fillDialog(st);
+      await refineDialog(st);
+    }
   }
+}
+
+// ── Copies (ref-link peeks, fact-check cards) ─────────────────────────
+/** The config each copy was last drawn under. */
+const copyKeys = new WeakMap<HTMLElement, string>();
+
+/** Drop what only a live diagram has: ⤢ (its listener is not copied), the
+ *  flipped mark and the scroll stop (no ResizeObserver keeps them true). */
+function bareCopy(wrap: HTMLElement): void {
+  wrap.querySelectorAll(".diagram-expand").forEach((b) => b.remove());
+  wrap.removeAttribute("data-mermaid-flipped");
+  const body = wrap.querySelector<HTMLElement>(":scope > .diagram-body");
+  body?.removeAttribute("role");
+  body?.removeAttribute("aria-label");
+  body?.removeAttribute("tabindex");
+}
+
+/** Draw a copy afresh, fit to its width, under its own id and the colours at
+ *  its place, unless it already is. Runs inside the mutex. */
+async function drawCopy(wrap: HTMLElement): Promise<void> {
+  bareCopy(wrap);
+  const body = wrap.querySelector<HTMLElement>(":scope > .diagram-body");
+  if (!body || !wrap.isConnected) return;
+  const cfg = readPassConfig(wrap);
+  if (copyKeys.get(wrap) === cfg.key) return;
+  let r: Rendered;
+  try {
+    r = await draw(cfg, wrap.getAttribute("data-mermaid-src") ?? "", body.clientWidth || window.innerWidth);
+  } catch {
+    return; // the copied drawing stays
+  }
+  if (!wrap.isConnected) return;
+  body.innerHTML = r.svg;
+  copyKeys.set(wrap, cfg.key);
+}
+
+/**
+ * A copy of a rendered diagram placed elsewhere on the page (a ref-link peek, a
+ * fact-check card): call once it is in the document. Its ⤢ and scroll stop go
+ * at once; it is then redrawn as a plain fit-to-width diagram, since a copy
+ * that lost its ids (the peek strips them) no longer matches its own `<style>`.
+ * Theme flips redraw it like any diagram (`rerenderChanged`).
+ */
+export function adoptMermaidCopies(root: Element): void {
+  const sel = "div.diagram[data-mermaid-src]";
+  const wraps = [root, ...Array.from(root.querySelectorAll(sel))].filter(
+    (w): w is HTMLElement => w.matches(sel) && !states.has(w as HTMLElement),
+  );
+  if (wraps.length === 0) return;
+  wraps.forEach(bareCopy);
+  void enqueue(async () => {
+    for (const w of wraps) await drawCopy(w);
+  });
 }
 
 /** Wire theme / palette re-render triggers exactly once (after mermaid loaded). */

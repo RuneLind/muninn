@@ -21,7 +21,13 @@
  *  3. **⤢ full-window.** Opens by click and keyboard, closes by Esc, backdrop
  *     and button with focus back on ⤢, stays open on a click inside, redraws
  *     its copy in the new colours on a palette flip (its own svg id, so its
- *     node fill is the themed one), and closes on back navigation.
+ *     node fill is the themed one), and closes on back navigation. Its copy
+ *     reads at ≥ 11 px (a too-wide LR, a gantt), a drag from a label out to
+ *     the backdrop does not close it, and a label naming the svg id keeps its
+ *     text in the copy.
+ *  4. **Copies.** A ref-link peek's copy of a diagram is themed (it lost its
+ *     ids, so it is redrawn) and re-themed on a flip, with no ⤢; a fact-check
+ *     card's copy carries no ⤢ and no scroll stop.
  *
  * Boots its own muninn with a temp `WIKI_EXTRA` wiki. The mermaid bundle loads
  * from the CDN, as it does for every reader. No model calls, no writes.
@@ -153,6 +159,54 @@ const TYPES_PAGE = [
 
 const OTHER_PAGE = ["---", "title: Other Page", "---", "", "# Other Page", "", "See [[diagram-page|the diagrams]].", ""].join("\n");
 
+/** One diagram, so its svg id is the first one drawn on a fresh load: `wm-0`. */
+const ID_PAGE = ["---", "title: Id Page", "---", "", "# Id Page", "", "```mermaid", "flowchart TD", '  A["see wm-0 and wm-0x and dwm-0"] --> B[end]', "```", ""].join("\n");
+
+/** A ref link to a heading whose section opens with a diagram (its peek copies it). */
+const PEEK_PAGE = [
+  "---",
+  "title: Peek Page",
+  "---",
+  "",
+  "# Peek Page",
+  "",
+  "See [the chart](#chart-section).",
+  "",
+  "## Chart section",
+  "",
+  "```mermaid",
+  "flowchart TD",
+  "  A[peek one] --> B[peek two]",
+  "```",
+  "",
+].join("\n");
+
+/** A fact-check card whose evidence holds a wide diagram (scrolls on the page). */
+const FACT_PAGE = [
+  "---",
+  "title: Fact Page",
+  "---",
+  "",
+  "# Fact Page",
+  "",
+  '<Fact n="1" v="bad">The chain is short.</Fact>',
+  "",
+  "<!-- factcheck:start -->",
+  '<FactCheck date="2026-11-08" ok="0" warn="0" bad="1">',
+  "",
+  "### ❌ Claim 1/1 — The chain is short",
+  "",
+  "It is long:",
+  "",
+  SCROLLS,
+  "",
+  "Confidence: 90/100",
+  "",
+  "</FactCheck>",
+  "<!-- factcheck:end -->",
+  "",
+].join("\n");
+
 const BROKEN_PAGE = ["---", "title: Broken Page", "---", "", "# Broken Page", "", "```mermaid", "flowchart LR", "  A -->|unclosed B", "  ((((", "```", ""].join("\n");
 
 let server: ChildProcess | undefined;
@@ -165,6 +219,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "other-page.md"), OTHER_PAGE, "utf8");
   await writeFile(path.join(root, "broken-page.md"), BROKEN_PAGE, "utf8");
   await writeFile(path.join(root, "types-page.md"), TYPES_PAGE, "utf8");
+  await writeFile(path.join(root, "id-page.md"), ID_PAGE, "utf8");
+  await writeFile(path.join(root, "peek-page.md"), PEEK_PAGE, "utf8");
+  await writeFile(path.join(root, "fact-page.mdx"), FACT_PAGE, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -529,3 +586,131 @@ test.describe("⤢ full-window", () => {
     expect(await page.locator("#articleWrap .diagram-expand").count()).toBe(0);
   });
 });
+
+/** The smallest text inside `svg` as drawn on screen: computed font-size × the
+ *  element's screen transform (independent of the code's own maths).
+ *  Self-contained, so `evaluate` can ship its source to the page. */
+function screenMinText(svg: Element): number {
+  let min = Infinity;
+  for (const el of Array.from(svg.querySelectorAll<Element>("*"))) {
+    if (["style", "title", "desc"].includes(el.tagName.toLowerCase())) continue;
+    if (!Array.from(el.childNodes).some((n) => n.nodeType === 3 && (n.textContent ?? "").trim())) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const g = (el instanceof SVGGraphicsElement ? el : el.closest("foreignObject")) as SVGGraphicsElement;
+    const m = g.getScreenCTM()!;
+    min = Math.min(min, parseFloat(getComputedStyle(el).fontSize) * Math.hypot(m.a, m.b));
+  }
+  return min;
+}
+
+test.describe("⤢ full-window size and copy", () => {
+  const dialog = (page: Page) => page.locator("dialog.diagram-dialog");
+  const dialogText = (page: Page) => dialog(page).locator("svg").first().evaluate(screenMinText);
+
+  test("a too-wide LR chain reads at ≥ 11 px and at least as large as the page; the dialog scrolls", async ({ page }) => {
+    await openDiagramPage(page);
+    const wrap = diagrams(page).nth(1);
+    const pagePx = await wrap.locator(".diagram-body svg").evaluate(screenMinText);
+    await wrap.getByRole("button", { name: "Open diagram full-window" }).click();
+    await expect(dialog(page)).toBeVisible();
+    const px = await dialogText(page);
+    expect(px).toBeGreaterThanOrEqual(10.95);
+    expect(px).toBeGreaterThanOrEqual(pagePx - 0.05);
+    expect(await dialog(page).evaluate((d) => d.scrollWidth > d.clientWidth || d.scrollHeight > d.clientHeight), "the dialog scrolls inside").toBe(true);
+  });
+
+  test("a gantt fills the window at ≥ 11 px, from its own width, not its column's", async ({ page }) => {
+    await page.setViewportSize({ width: 1150, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=types-page.md`);
+    await expect(diagrams(page)).toHaveCount(5, { timeout: 20_000 });
+    await page.waitForTimeout(600);
+    await diagrams(page).nth(0).getByRole("button", { name: "Open diagram full-window" }).click();
+    await expect(dialog(page)).toBeVisible();
+    // The redraw for the dialog runs through the pass mutex.
+    await expect.poll(() => dialog(page).locator("svg").first().evaluate((s) => s.getBoundingClientRect().width), { timeout: 10_000 }).toBeGreaterThan(1150 * 0.8);
+    expect(await dialogText(page)).toBeGreaterThanOrEqual(10.95);
+    expect(await dialog(page).evaluate((d) => d.scrollWidth > d.clientWidth + 1), "no sideways scroll").toBe(false);
+  });
+
+  test("a drag from a label out to the backdrop keeps it open; a backdrop click closes it", async ({ page }) => {
+    await openDiagramPage(page);
+    const btn = diagrams(page).nth(2).getByRole("button", { name: "Open diagram full-window" });
+    await btn.click();
+    await expect(dialog(page)).toBeVisible();
+    const label = await dialog(page).locator("svg .node").first().boundingBox();
+    await page.mouse.move(label!.x + label!.width / 2, label!.y + label!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(5, 5, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    await expect(dialog(page)).toBeVisible();
+    await page.mouse.click(3, 3);
+    await expect(dialog(page)).toBeHidden();
+    await expect(btn).toBeFocused();
+  });
+
+  test("a label naming the svg id keeps its text in the copy; ids stay unique and resolve", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=id-page.md`);
+    await expect(diagrams(page)).toHaveCount(1, { timeout: 20_000 });
+    const pageSvg = diagrams(page).locator(".diagram-body svg");
+    expect(await pageSvg.getAttribute("id"), "precondition: the label names this svg's id").toBe("wm-0");
+    await diagrams(page).getByRole("button", { name: "Open diagram full-window" }).click();
+    await expect(dialog(page)).toBeVisible();
+    await expect(dialog(page).locator("svg .node").first()).toContainText("see wm-0 and wm-0x and dwm-0");
+    const audit = await page.evaluate(() => {
+      const ids = Array.from(document.querySelectorAll("[id]")).map((e) => e.id);
+      const dlgSvg = document.querySelector("dialog.diagram-dialog svg")!;
+      const refs: string[] = [];
+      for (const el of Array.from(dlgSvg.querySelectorAll("*"))) {
+        for (const a of Array.from(el.attributes)) {
+          for (const m of a.value.matchAll(/url\(['"]?#([^)'"]+)/g)) refs.push(m[1]!);
+          if ((a.name === "href" || a.name === "xlink:href") && a.value.startsWith("#")) refs.push(a.value.slice(1));
+        }
+      }
+      return { dup: ids.length - new Set(ids).size, refs, dangling: refs.filter((r) => !dlgSvg.querySelector(`[id="${r}"]`)) };
+    });
+    expect(audit.dup, "no duplicated ids").toBe(0);
+    expect(audit.refs.length, "the copy has marker refs to audit").toBeGreaterThan(0);
+    expect(audit.dangling).toEqual([]);
+  });
+});
+
+test.describe("copies of a diagram", () => {
+  test("a ref-link peek's copy is themed, re-themes on a flip, and has no ⤢", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=peek-page.md`);
+    await expect(diagrams(page)).toHaveCount(1, { timeout: 20_000 });
+    await setTheme(page, "light", null);
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "the chart" }).hover();
+    const copy = page.locator(".wiki-ref-peek .diagram[data-mermaid-src]");
+    await expect(copy).toHaveCount(1);
+    await expect(copy.locator(".diagram-expand")).toHaveCount(0);
+    const fill = () => copy.locator("svg .node rect").first().evaluate((el) => getComputedStyle(el).fill);
+    await expect.poll(async () => {
+      const a = channels(await fill());
+      const e = channels(await probeMix(page, "--accent", 4.5));
+      return Math.max(...a.map((v, i) => Math.abs(v - e[i]!)));
+    }, { timeout: 10_000 }).toBeLessThanOrEqual(1.5);
+    const before = await fill();
+    await setTheme(page, "light", "paper-light");
+    await expect.poll(fill, { timeout: 10_000 }).not.toBe(before);
+    expectSameColour(await fill(), await probeMix(page, "--accent", 4.5), "peek copy primaryColor (paper-light)");
+  });
+
+  test("a fact-check card's copy has no ⤢ and no scroll stop", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=fact-page.mdx`);
+    await expect(page.locator(".wiki-article .diagram[data-mermaid-src] .diagram-expand")).toHaveCount(1, { timeout: 20_000 });
+    // The appendix is a closed <details>: opened, its diagram is measured and widened.
+    await page.locator(".wiki-article details:has(.diagram) > summary").first().click();
+    await expect(page.locator(".wiki-article .diagram[data-mermaid-src] .diagram-body[role=region]")).toHaveCount(1, { timeout: 5000 });
+    await page.locator('.wiki-article .fc-chip[data-fact="1"]').click();
+    const card = page.locator(".fc-card .diagram[data-mermaid-src]");
+    await expect(card).toHaveCount(1);
+    await expect(card.locator(".diagram-expand")).toHaveCount(0);
+    const body = card.locator(".diagram-body");
+    await expect(body).not.toHaveAttribute("role", "region");
+    await expect(body).not.toHaveAttribute("tabindex", "0");
+  });
+});
+

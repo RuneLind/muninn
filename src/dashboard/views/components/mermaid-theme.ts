@@ -47,10 +47,15 @@ export const FALLBACK_FONT_PX = 16;
 export const MERMAID_TEXT_MIN_PX = 11;
 /** A flipped (top-down) drawing taller than this stays left-to-right. */
 export const FLIP_MAX_HEIGHT_PX = 900;
-/** The full-window view draws at natural size × this… */
+/** The full-window view draws at natural size × this when the window has room. */
 export const DIALOG_SCALE = 1.3;
-/** …capped at this share of the window width. */
-export const DIALOG_MAX_VW = 0.92;
+/** The dialog's own `max-width` / `max-height` (component-styles.ts `dialog.diagram-dialog`). */
+export const DIALOG_MAX_VW = 0.96;
+export const DIALOG_MAX_VH = 0.94;
+/** Width the dialog spends on padding (2 × 24), border (2) and a vertical scrollbar (16). */
+export const DIALOG_CHROME_W = 66;
+/** Height: padding and border (50), the close button's float above the SVG (12), a horizontal scrollbar (16). */
+export const DIALOG_CHROME_H = 78;
 
 const NUM = String.raw`(-?[\d.]+(?:e-?\d+)?)(%?)`;
 
@@ -532,18 +537,131 @@ export function hostWidthFor(bodyWidth: number, minText: number, minPx = MERMAID
   return Math.floor(bodyWidth * Math.min(1, minText / minPx));
 }
 
-/**
- * Rename an SVG's root id everywhere it is used. mermaid scopes the SVG's own
- * `<style>` (`#id .node rect{…}`) and its arrow markers (`url(#id_flowchart-…)`)
- * by the root id, so a copy that drops the id loses its styling and a copy that
- * keeps it duplicates ids. A token match only: `wm-1` never touches `wm-12`.
- */
-export function rewriteSvgId(svg: string, from: string, to: string): string {
-  const esc = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return svg.replace(new RegExp(`${esc}(?![0-9])`, "g"), to);
+/** One element as {@link rescopeSvgIds} touches it (a DOM `Element` fits). */
+export interface IdElement {
+  readonly tagName: string;
+  readonly attributes: ArrayLike<{ readonly name: string; readonly value: string }>;
+  setAttribute(name: string, value: string): void;
+  textContent: string | null;
 }
 
-/** The full-window view's SVG width: natural × {@link DIALOG_SCALE}, capped. */
-export function dialogWidth(viewBoxWidth: number, windowWidth: number): number {
-  return Math.min(viewBoxWidth * DIALOG_SCALE, windowWidth * DIALOG_MAX_VW);
+/** Attributes whose whole value is an id or a space-separated id list. */
+const ID_LIST_ATTRS = new Set([
+  "id",
+  "aria-labelledby",
+  "aria-describedby",
+  "aria-controls",
+  "aria-owns",
+  "aria-activedescendant",
+  "aria-details",
+  "aria-errormessage",
+  "aria-flowto",
+]);
+
+/**
+ * Rename an SVG's root id in every id reference of a parsed copy, never in its
+ * text. mermaid scopes the SVG's own `<style>` (`#id .node rect{…}`), its
+ * markers (`url(#id_flowchart-…)`) and its a11y title (`chart-title-id`) by the
+ * root id, so a copy that drops the id loses its styling and one that keeps it
+ * duplicates ids. Rewritten: `id` and the aria id-list attributes (bounded:
+ * `wm-1` is not `wm-12` or `dwm-1`), an `href`/`xlink:href` that starts with
+ * `#`, every `url(#…)` in any attribute, and `#id` in `<style>` text. A label
+ * that names the id string is text, so it is left as written.
+ */
+export function rescopeSvgIds(
+  svg: IdElement & { querySelectorAll(sel: string): ArrayLike<IdElement> },
+  from: string,
+  to: string,
+): void {
+  const esc = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const token = new RegExp(`(^|[^A-Za-z0-9])${esc}(?![0-9])`, "g");
+  const hash = new RegExp(`#${esc}(?![0-9])`, "g");
+  const ids = (v: string) => v.replace(token, (_m, pre: string) => pre + to);
+  for (const el of [svg, ...Array.from(svg.querySelectorAll("*"))]) {
+    if (el.tagName.toLowerCase() === "style") {
+      el.textContent = (el.textContent ?? "").replace(hash, `#${to}`);
+      continue;
+    }
+    for (const { name, value } of Array.from(el.attributes)) {
+      let next = value;
+      if (ID_LIST_ATTRS.has(name)) next = ids(value);
+      else if ((name === "href" || name === "xlink:href") && value.startsWith("#")) next = "#" + ids(value.slice(1));
+      else if (value.includes("url(")) next = value.replace(/url\(\s*(['"]?)#([^)'"]*)\1\s*\)/g, (_m, q: string, ref: string) => `url(${q}#${ids(ref)}${q})`);
+      if (next !== value) el.setAttribute(name, next);
+    }
+  }
+}
+
+/** The room the dialog gives its SVG in a `windowWidth` × `windowHeight` window. */
+export function dialogBox(windowWidth: number, windowHeight: number): { width: number; height: number } {
+  return {
+    width: Math.max(1, windowWidth * DIALOG_MAX_VW - DIALOG_CHROME_W),
+    height: Math.max(1, windowHeight * DIALOG_MAX_VH - DIALOG_CHROME_H),
+  };
+}
+
+/** A drawing as the dialog sizes it: viewBox size and smallest text, user units. */
+export interface DialogDrawing {
+  width: number;
+  height: number;
+  minText: number;
+}
+
+export interface DialogFit {
+  /** CSS px per user unit. */
+  scale: number;
+  width: number;
+  height: number;
+  /** The smallest text as shown. */
+  textPx: number;
+  /** How far it spills past the box: overflow ÷ box, summed over both axes. */
+  overflow: number;
+}
+
+/** The scale the dialog aims for: natural × {@link DIALOG_SCALE}, or more when
+ *  that would show text under the floor or under what the page shows (`pagePx`). */
+function dialogFloor(minText: number, pagePx: number): { lo: number; hi: number } {
+  const lo = Math.max(MERMAID_TEXT_MIN_PX, pagePx) / minText;
+  return { lo, hi: Math.max(DIALOG_SCALE, lo) };
+}
+
+/**
+ * Size one drawing for the dialog: as large as {@link DIALOG_SCALE} × natural
+ * while it fits the box (both axes), smaller to fit, but never under
+ * `max(11 px, pagePx)` smallest text: past that it spills and the dialog scrolls.
+ */
+export function dialogFit(d: DialogDrawing, box: { width: number; height: number }, pagePx: number): DialogFit {
+  const { lo, hi } = dialogFloor(d.minText, pagePx);
+  const fit = Math.min(box.width / d.width, box.height / d.height);
+  const scale = Math.max(lo, Math.min(hi, fit));
+  const width = d.width * scale;
+  const height = d.height * scale;
+  const overflow = Math.max(0, width - box.width) / box.width + Math.max(0, height - box.height) / box.height;
+  return { scale, width, height, textPx: d.minText * scale, overflow };
+}
+
+/** Pick the drawing that spills least, then the one with the larger text, then the first. */
+export function pickDialogDrawing(
+  ds: readonly DialogDrawing[],
+  box: { width: number; height: number },
+  pagePx: number,
+): { index: number; fit: DialogFit } | null {
+  let best: { index: number; fit: DialogFit } | null = null;
+  ds.forEach((d, index) => {
+    const fit = dialogFit(d, box, pagePx);
+    if (
+      !best ||
+      fit.overflow < best.fit.overflow - 1e-6 ||
+      (Math.abs(fit.overflow - best.fit.overflow) <= 1e-6 && fit.textPx > best.fit.textPx + 1e-6)
+    ) {
+      best = { index, fit };
+    }
+  });
+  return best;
+}
+
+/** A diagram whose viewBox follows its box (gantt) is drawn for the dialog at
+ *  this width, so that scaled to fill `boxWidth` its text reads at the aimed size. */
+export function dialogHostWidth(boxWidth: number, minText: number, pagePx: number): number {
+  return Math.max(1, Math.floor(boxWidth / dialogFloor(minText, pagePx).hi));
 }

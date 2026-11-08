@@ -4,7 +4,9 @@ import {
   MERMAID_TEXT_MIN_PX,
   buildMermaidPalette,
   chooseLayout,
-  dialogWidth,
+  dialogBox,
+  dialogFit,
+  dialogHostWidth,
   flipToTopDown,
   hostWidthFor,
   injectClassDefs,
@@ -13,7 +15,8 @@ import {
   parseCssColor,
   parseViewBox,
   renderedTextPx,
-  rewriteSvgId,
+  pickDialogDrawing,
+  rescopeSvgIds,
   toHex,
   widenedWidth,
 } from "./mermaid-theme.ts";
@@ -437,18 +440,124 @@ describe("hostWidthFor: a container-driven drawing widened to 11 px fills the bo
   });
 });
 
-test("rewriteSvgId renames the root id, its style scope and marker refs, and only that id", () => {
-  const svg =
-    '<svg id="wm-1"><style>#wm-1 .node rect{fill:#fff}</style><marker id="wm-1_flowchart-v2-pointEnd"/>' +
-    '<path marker-end="url(#wm-1_flowchart-v2-pointEnd)"/><g id="wm-12"/></svg>';
-  const out = rewriteSvgId(svg, "wm-1", "wm-dlg-0");
-  expect(out).toBe(
-    '<svg id="wm-dlg-0"><style>#wm-dlg-0 .node rect{fill:#fff}</style><marker id="wm-dlg-0_flowchart-v2-pointEnd"/>' +
-      '<path marker-end="url(#wm-dlg-0_flowchart-v2-pointEnd)"/><g id="wm-12"/></svg>',
-  );
+/** A minimal element tree: tag, attributes in order, text, children. */
+class FakeEl {
+  attrs: { name: string; value: string }[];
+  constructor(
+    readonly tagName: string,
+    attrs: Record<string, string> = {},
+    public textContent: string | null = null,
+    readonly children: FakeEl[] = [],
+  ) {
+    this.attrs = Object.entries(attrs).map(([name, value]) => ({ name, value }));
+  }
+  get attributes() {
+    return this.attrs;
+  }
+  setAttribute(name: string, value: string): void {
+    const a = this.attrs.find((x) => x.name === name);
+    if (a) a.value = value;
+    else this.attrs.push({ name, value });
+  }
+  attr(name: string): string | undefined {
+    return this.attrs.find((x) => x.name === name)?.value;
+  }
+  querySelectorAll(): FakeEl[] {
+    return this.children.flatMap((c) => [c, ...c.querySelectorAll()]);
+  }
+}
+
+describe("rescopeSvgIds", () => {
+  const tree = () => {
+    const style = new FakeEl("style", {}, "#wm-1 .node rect{fill:#fff} #wm-12 .x{} .dwm-1{}");
+    const marker = new FakeEl("marker", { id: "wm-1_flowchart-v2-pointEnd" });
+    const path = new FakeEl("path", { "marker-end": "url(#wm-1_flowchart-v2-pointEnd)", style: "fill:url('#wm-1-grad')" });
+    const title = new FakeEl("title", { id: "chart-title-wm-1" });
+    const use = new FakeEl("use", { "xlink:href": "#wm-1-sym", href: "https://example.com/wm-1" });
+    const other = new FakeEl("g", { id: "wm-12" });
+    const label = new FakeEl("span", { class: "nodeLabel", "data-note": "wm-1" }, "see wm-1 and wm-1x and dwm-1");
+    const svg = new FakeEl("svg", { id: "wm-1", "aria-labelledby": "chart-title-wm-1 chart-desc-wm-1" }, null, [
+      style, marker, path, title, use, other, label,
+    ]);
+    return { svg, style, marker, path, title, use, other, label };
+  };
+
+  test("renames ids and every id reference, bounded", () => {
+    const t = tree();
+    rescopeSvgIds(t.svg, "wm-1", "wm-dlg-0");
+    expect(t.svg.attr("id")).toBe("wm-dlg-0");
+    expect(t.svg.attr("aria-labelledby")).toBe("chart-title-wm-dlg-0 chart-desc-wm-dlg-0");
+    expect(t.style.textContent).toBe("#wm-dlg-0 .node rect{fill:#fff} #wm-12 .x{} .dwm-1{}");
+    expect(t.marker.attr("id")).toBe("wm-dlg-0_flowchart-v2-pointEnd");
+    expect(t.path.attr("marker-end")).toBe("url(#wm-dlg-0_flowchart-v2-pointEnd)");
+    expect(t.path.attr("style")).toBe("fill:url('#wm-dlg-0-grad')");
+    expect(t.title.attr("id")).toBe("chart-title-wm-dlg-0");
+    expect(t.use.attr("xlink:href")).toBe("#wm-dlg-0-sym");
+    expect(t.other.attr("id"), "wm-12 is another id").toBe("wm-12");
+  });
+
+  test("leaves text, a link off the page and plain attributes as written", () => {
+    const t = tree();
+    rescopeSvgIds(t.svg, "wm-1", "wm-dlg-0");
+    expect(t.label.textContent).toBe("see wm-1 and wm-1x and dwm-1");
+    expect(t.label.attr("data-note")).toBe("wm-1");
+    expect(t.use.attr("href")).toBe("https://example.com/wm-1");
+  });
 });
 
-test("dialogWidth is natural × 1.3, capped at 92% of the window", () => {
-  expect(dialogWidth(500, 1440)).toBe(650);
-  expect(dialogWidth(2000, 1000)).toBe(920);
+describe("dialog size", () => {
+  const box = dialogBox(1440, 900);
+
+  test("the box is the dialog's max size less its chrome", () => {
+    expect(box.width).toBeCloseTo(1440 * 0.96 - 66, 6);
+    expect(box.height).toBeCloseTo(900 * 0.94 - 78, 6);
+  });
+
+  test("a small diagram is drawn at natural × 1.3", () => {
+    const f = dialogFit({ width: 500, height: 300, minText: 14 }, box, 14);
+    expect(f.scale).toBeCloseTo(1.3, 6);
+    expect(f.overflow).toBe(0);
+  });
+
+  test("a large one shrinks to fit the window height, not below 11 px", () => {
+    const f = dialogFit({ width: 600, height: 1200, minText: 20 }, box, 11);
+    expect(f.height).toBeCloseTo(box.height, 6);
+    expect(f.textPx).toBeGreaterThanOrEqual(11);
+    expect(f.overflow).toBe(0);
+  });
+
+  test("too wide to fit at 11 px: drawn at the floor and spills (the dialog scrolls)", () => {
+    const f = dialogFit({ width: 4000, height: 300, minText: 14 }, box, 11);
+    expect(f.textPx).toBeCloseTo(11, 6);
+    expect(f.width).toBeGreaterThan(box.width);
+    expect(f.overflow).toBeGreaterThan(0);
+  });
+
+  test("never smaller than the page shows it", () => {
+    const f = dialogFit({ width: 4000, height: 300, minText: 14 }, box, 12.5);
+    expect(f.textPx).toBeCloseTo(12.5, 6);
+  });
+
+  test("a 9 px drawing reads at 11 px at least", () => {
+    expect(dialogFit({ width: 200, height: 100, minText: 9 }, box, 0).textPx).toBeGreaterThanOrEqual(11);
+  });
+
+  test("the pick prefers the drawing that spills less, then the larger text", () => {
+    const wide = { width: 4000, height: 300, minText: 14 };
+    const tall = { width: 500, height: 900, minText: 14 };
+    expect(pickDialogDrawing([wide, tall], box, 11)!.index).toBe(1);
+    const small = { width: 300, height: 200, minText: 14 };
+    const big = { width: 300, height: 200, minText: 16 };
+    expect(pickDialogDrawing([small, big], box, 11)!.index).toBe(1);
+    expect(pickDialogDrawing([], box, 11)).toBeNull();
+  });
+
+  test("a gantt is drawn for the dialog at the width that fills the box at 1.3 × its text", () => {
+    const hw = dialogHostWidth(box.width, 10, 11);
+    expect(hw).toBe(Math.floor(box.width / 1.3));
+    const f = dialogFit({ width: hw, height: 200, minText: 10 }, box, 11);
+    expect(f.textPx).toBeCloseTo(13, 6);
+    expect(f.width).toBeLessThanOrEqual(box.width);
+    expect(f.width).toBeGreaterThan(box.width - 2);
+  });
 });
