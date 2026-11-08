@@ -1025,7 +1025,9 @@ test.describe("The other prose surfaces", () => {
         document.documentElement.setAttribute("data-theme", "dark");
         for (const link of Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]'))) {
           const st = document.createElement("style");
-          st.textContent = await (await fetch(link.href)).text();
+          const res = await fetch(link.href);
+          if (!res.ok || !res.headers.get("content-type")?.includes("text/css")) throw new Error(`stylesheet ${link.href}: ${res.status}`);
+          st.textContent = await res.text();
           link.replaceWith(st);
         }
         for (const st of Array.from(document.querySelectorAll("style"))) {
