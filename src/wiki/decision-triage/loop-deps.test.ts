@@ -48,6 +48,7 @@ const gate = () => {
 };
 const g1 = gate();
 let appends = 0;
+let floorHits = 0;
 const deps = realTriageLoopDeps(config as never, logs, { ...seams, ${model} }, tracer)!;
 /** The work map's loop on fake timers with \`triage\` as its triage half; the work map itself is never due. */
 let fakeNow = Date.parse("2026-10-20T05:00:00Z");
@@ -489,16 +490,99 @@ const bound = deps.recordFailed("a", "the pass timed out after 7 ms");
 g1.open();
 seen.push(await p);
 seen.push((await bound) ?? null);
-seen.push(await deps.readState("a"));
-`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) }), append: async (l) => { if (l.some((x) => x.type === "run")) { await g1.pass(); throw new Error("disk full"); } await appendLogLines(logs + "/a.jsonl", l); }`);
+${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) }), append: async (l) => { if (l.some((x) => x.type === "run")) { await g1.pass(); throw new Error("disk full"); } await appendLogLines(logs + "/a.jsonl", l); }`);
       const lines = logOf(tmp);
       const runs = lines.filter((l) => l.type === "run");
       expect(runs).toHaveLength(1);
       expect(runs[0]).toMatchObject({ outcome: "partial", cards: 3 });
       expect(String(runs[0]!.reason)).toStartWith("the pass timed out after 7 ms");
       expect(lines.filter((l) => l.type === "card").every((c) => c.runId === runs[0]!.runId)).toBe(true);
+      expect(seen[0]).toEqual({ outcome: "partial", cards: 3 });
       expect(seen[1]).toBe("partial");
       expect(attempts(seen[2])).toBe(1);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
+
+    /** The bound's record is not awaited (as the loop's is not) and its line's file is a folder. */
+    const UNAWAITED_FAILING_RECORD = `
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+const bound = deps.recordFailed("a", "the pass timed out after 7 ms").then(() => "recorded", () => "threw");
+g1.open();
+seen.push(await p);
+seen.push(await bound);
+${SETTLED}`;
+    const failingRecord = async () => {
+      const { tmp, env } = withCards(30);
+      mkdirSync(path.join(tmp, "logs", "a.jsonl"), { recursive: true });
+      return (await drive(UNAWAITED_FAILING_RECORD, env, tmp, `${SECOND_WAITS}, append: (l) => appendLogLines(logs + "/cards.jsonl", l)`)).seen;
+    };
+
+    test("R1a: an un-awaited bound record whose write fails: the pass reports its own end, and the row agrees", async () => {
+      const seen = await failingRecord();
+      expect(seen[0]).toEqual({ outcome: "aborted" });
+      expect(seen[1]).toBe("threw");
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    });
+
+    test("R2: a record whose line fails to write leaves no state record behind", async () => {
+      const seen = await failingRecord();
+      expect(seen[1]).toBe("threw");
+      expect(attempts(seen[2])).toBe(0);
+    });
+
+    /** Two repos: \`r1\`'s git throws, \`r2\`'s waits at the gate, so the refusal's \`finish\`
+     *  passes its abort check and then waits on \`resolver.facts()\` for \`r2\`. */
+    function refusingWithPendingRepo() {
+      const w = withCards(3);
+      const page = path.join(w.a, "plans", "p.mdx");
+      writeFileSync(page, readFileSync(page, "utf8").replace("title: T", "title: T\nrepos: [r1, r2]"));
+      mkdirSync(path.join(w.tmp, "src", "r1"), { recursive: true });
+      mkdirSync(path.join(w.tmp, "src", "r2"), { recursive: true });
+      return { ...w, env: { ...w.env, TEST_REPO_ROOTS: path.join(w.tmp, "src") } };
+    }
+    const PENDING_REPO = `git: async (cwd) => { if (cwd.endsWith("/r1")) throw new Error("git broke"); await g1.pass(); return { ok: false, stdout: "", stderr: "no" }; }, floor: async () => { floorHits++; return { labelled: 0, added: 0, addedPages: 0, met: false }; }`;
+    const BOUND_IN_FACTS = `
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+await until(() => floorHits > 0, "the refusal's finish");
+await Bun.sleep(5);
+ac.abort();`;
+
+    test("the drop branch: the bound's record lands while the refusal waits on its repos: the pass's run line is dropped", async () => {
+      const { tmp, env } = refusingWithPendingRepo();
+      const { seen } = await drive(`${BOUND_IN_FACTS}
+seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms"));
+g1.open();
+seen.push(await p);
+${SETTLED}`, env, tmp, PENDING_REPO);
+      const runs = runLines(tmp);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: "failed", cards: 0 });
+      expect(String(runs[0]!.reason)).toStartWith("the pass timed out after 7 ms");
+      expect(seen[0]).toBe("failed");
+      expect(seen[1]).toEqual({ outcome: "failed", cards: 0 });
+      expect(attempts(seen[2])).toBe(1);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    });
+
+    test("R1b: the pass finds the bound's record claim and that write fails: the pass writes its own line, one state record", async () => {
+      const { tmp, env } = refusingWithPendingRepo();
+      mkdirSync(path.join(tmp, "logs", "a.jsonl"), { recursive: true });
+      const { seen } = await drive(`${BOUND_IN_FACTS}
+const bound = deps.recordFailed("a", "the pass timed out after 7 ms").then(() => "recorded", () => "threw");
+g1.open();
+seen.push(await p);
+seen.push(await bound);
+${SETTLED}`, env, tmp, `${PENDING_REPO}, append: (l) => appendLogLines(logs + "/pass.jsonl", l)`);
+      expect(runLines(tmp, "pass")).toEqual([expect.objectContaining({ outcome: "refused" })]);
+      expect(seen[0]).toMatchObject({ outcome: "refused" });
+      expect(seen[1]).toBe("threw");
+      expect((seen[2] as { attempts: { outcome: string }[] }).attempts.map((a) => a.outcome)).toEqual(["refused"]);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
     });
 
     test("a slot left by Run now's record is not read by a later pass that refuses before it starts", async () => {
