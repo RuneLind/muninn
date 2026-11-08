@@ -139,7 +139,9 @@ test("wikiClientScript stays under its size pin", async () => {
 // 2026-11-08, C4 (the Ask tab to `wiki-ask-controller.ts`): 4,994 lines; 62 lets.
 // 2026-11-08, C5 (the article tools and right pane to `wiki-article-controller.ts`,
 // the series editor to `wiki-series-controller.ts`): 3,458 lines; 51 lets.
-const WIKI_BROWSER_MAX_LINES = 3_458;
+// 2026-11-08, follow-up (the work-map cache to `wiki-work-map-cache.ts`, four
+// `RailDeps` relays gone): 3,450 lines; 51 lets.
+const WIKI_BROWSER_MAX_LINES = 3_450;
 const WIKI_BROWSER_MAX_MODULE_LETS = 51;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {
@@ -195,6 +197,8 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // 2026-11-08, C4: the Ask controller at its count (the shell's 9 Ask lets and `deps`).
 // 2026-11-08, C5: the article and series controllers at their counts (the
 // shell's 9 article lets and 2 series lets, plus each one's `deps`).
+// 2026-11-08, follow-up: the work-map cache's 5 lets out of the effort
+// controller (333 / 8 → 235 / 3) into `wiki-work-map-cache.ts`; the rail 2,298.
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_298, 16],
   ["wiki-shell-state.ts", 50, 3],

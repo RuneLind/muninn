@@ -2,7 +2,8 @@
  * The DOM-free work-map cache the rail reads directly (`wiki-work-map-cache.ts`):
  * one GET per run time, the failed-run latch, the repaint callback, the memo's
  * identity on the listing array, and `adoptIfNewer` as the cache's other write.
- * The module's state lives for the process, so the cases run in order.
+ * The module's state lives for the process: each case reads what it compares
+ * against at its own start, so it passes alone (`-t`) as well as in order.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { adoptIfNewer, effortHrefFor, getRailMapFailedAt, getWorkMapCache, railEffortsIndex } from "./wiki-work-map-cache.ts";
@@ -72,6 +73,7 @@ describe("wiki-work-map-cache", () => {
   });
 
   test("a failed GET latches its run time, repaints once, and is not retried for that run", async () => {
+    const cachedBefore = getWorkMapCache();
     serve(() => new Response("{}", { status: 500 }));
     setWorkMapRunAt(20);
     let repaints = 0;
@@ -82,17 +84,19 @@ describe("wiki-work-map-cache", () => {
     expect(getRailMapFailedAt()).toBe(20);
     expect(railEffortsIndex(1, PAGES, withWiki, () => repaints++)).toBeNull();
     expect(gets.length).toBe(1);
-    expect(getWorkMapCache()?.runAt).toBe(10);
+    expect(getWorkMapCache()).toBe(cachedBefore);
   });
 
   test("adoptIfNewer takes only a newer run, as both the run time and the cache", () => {
-    setWorkMapRunAt(20);
-    expect(adoptIfNewer({ map: mapAt(20) } as WorkMapGetBody)).toBe(false);
-    expect(adoptIfNewer({ map: mapAt(5) } as WorkMapGetBody)).toBe(false);
-    expect(getWorkMapCache()?.runAt).toBe(10);
-    expect(adoptIfNewer({ map: mapAt(30) } as WorkMapGetBody)).toBe(true);
-    expect(getWorkMapRunAt()).toBe(30);
-    expect(getWorkMapCache()?.runAt).toBe(30);
+    const cachedBefore = getWorkMapCache();
+    setWorkMapRunAt(200);
+    expect(adoptIfNewer({ map: mapAt(200) } as WorkMapGetBody)).toBe(false);
+    expect(adoptIfNewer({ map: mapAt(150) } as WorkMapGetBody)).toBe(false);
+    expect(getWorkMapRunAt()).toBe(200);
+    expect(getWorkMapCache()).toBe(cachedBefore);
+    expect(adoptIfNewer({ map: mapAt(300) } as WorkMapGetBody)).toBe(true);
+    expect(getWorkMapRunAt()).toBe(300);
+    expect(getWorkMapCache()?.runAt).toBe(300);
     setWorkMapRunAt(null);
     expect(adoptIfNewer({ map: mapAt(40) } as WorkMapGetBody)).toBe(false);
   });

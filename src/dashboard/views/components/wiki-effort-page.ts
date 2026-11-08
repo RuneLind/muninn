@@ -598,7 +598,7 @@ export function effortStatusHtml(
 }
 
 /** `/wiki?wiki=<w>&effort=<id>`, carrying the wiki only; `effortHrefFor` in
- *  `wiki-effort-controller.ts` adds the project and Jira facets. */
+ *  `wiki-work-map-cache.ts` adds the project and Jira facets. */
 export function effortUrl(wiki: string, id: string): string {
   const w = wiki ? "wiki=" + encodeURIComponent(wiki) + "&" : "";
   return "/wiki?" + w + EFFORT_PARAM + "=" + encodeURIComponent(id);
