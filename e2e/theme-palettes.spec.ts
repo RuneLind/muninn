@@ -18,7 +18,9 @@
  *     Reading mode and a light OS Light reading mode, on the dashboard and on
  *     chat, while an explicit Light or Dark pick still shows the plain base.
  *  4. **Mermaid follows the palette.** The diagram draws with mermaid's
- *     `base` theme from the palette's own tokens, never mermaid's default fills.
+ *     `base` theme from the palette's own tokens, never mermaid's default fills;
+ *     with the OS opposite, the palette's base still decides the light/dark
+ *     shades (a pie's slices) and, with a token missing, mermaid's own theme.
  *
  * Boots its own muninn with a temp `WIKI_EXTRA` wiki (the mermaid fixture).
  * The mermaid bundle loads from the CDN, as it does for every reader.
@@ -64,12 +66,17 @@ const PAGE = [
   "",
 ].join("\n");
 
+/** A pie: its slice fills are lighter in a light base than a dark one (`areaFill`
+ *  in mermaid-theme.ts takes the base), whatever the palette's tokens. */
+const PIE_PAGE = ["---", "title: Pie Page", "---", "", "# Pie Page", "", "```mermaid", "pie", '  "a" : 3', '  "b" : 2', "```", ""].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-palettes-"));
   await writeFile(path.join(root, "diagram-page.md"), PAGE, "utf8");
+  await writeFile(path.join(root, "pie-page.md"), PIE_PAGE, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -538,6 +545,46 @@ test.describe("A palette follows its base everywhere that asks light or dark", (
     };
     expect(await fillUnder(light.id, "light")).not.toBe(await fillUnder(dark.id, "dark"));
   });
+
+  // The node fill above comes from the tokens alone; these two read what only
+  // the palette's base (not the OS, emulated opposite) decides.
+  /** HSL lightness 0–1 of a computed colour. */
+  const lightness = (c: string): number => {
+    const v = channels(c);
+    return (Math.max(...v) + Math.min(...v)) / 2 / 255;
+  };
+  for (const p of PALETTES) {
+    test(`a pie's slices take ${p.id}'s base (${p.base}), not the OS's`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: p.base === "light" ? "dark" : "light" });
+      await storeChoice(page, p.id);
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=pie-page`);
+      const slice = page.locator("#articleWrap svg path.pieCircle").first();
+      await expect(slice).toBeVisible({ timeout: 20_000 });
+      const l = lightness(await slice.evaluate((el) => getComputedStyle(el).fill));
+      // Measured 2026-11-08: paper-light 0.67 (0.49 drawn as dark), reading 0.35 (0.96 drawn as light).
+      if (p.base === "light") expect(l, `slice lightness ${l}`).toBeGreaterThan(0.58);
+      else expect(l, `slice lightness ${l}`).toBeLessThan(0.6);
+    });
+  }
+  for (const base of ["light", "dark"] as const) {
+    const p = PALETTES.find((x) => x.base === base)!;
+    test(`a missing token falls back to mermaid's ${base === "light" ? "default" : "dark"} theme under ${p.id}, not the OS's`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: base === "light" ? "dark" : "light" });
+      await storeChoice(page, p.id);
+      // The probe (a div.diagram inside the fence) reads no --status-error.
+      await page.addInitScript(() => {
+        document.addEventListener("DOMContentLoaded", () => {
+          const st = document.createElement("style");
+          st.textContent = "div.diagram { --status-error: initial !important; }";
+          document.head.appendChild(st);
+        });
+      });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=diagram-page`);
+      const node = page.locator("#articleWrap svg .node rect, #articleWrap svg .node polygon").first();
+      await expect(node).toBeVisible({ timeout: 20_000 });
+      expect(await node.evaluate((el) => getComputedStyle(el).fill)).toBe(MERMAID_DEFAULT_FILL[base]);
+    });
+  }
 });
 
 // ── Fix round 1 (PR #747): a palette is a layer, the bases stay main's ─────

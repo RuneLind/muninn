@@ -147,6 +147,9 @@ export function hasMermaid(root: ParentNode): boolean {
  * | dialog open                    | popstate / hashchange                  | closes at once                                                |
  * | dialog open                    | article swapped (loadPage, Ask)        | the next enhanceMermaid call closes it (its ⤢ is detached, so |
  * |                                |                                        | focus goes to body, as for any control in a replaced article) |
+ * | dialog open                    | the same answer repainted (Ask `done`, | stays open: the redraw pass reuses the detached diagram's     |
+ * |                                | `answer_html`, a ↻ splice)             | drawings (same source and colours, no mermaid.render) and     |
+ * |                                |                                        | hands the dialog to the new ⤢                                 |
  * | dialog open                    | rail / column / window resize          | no effect on the dialog (its size was set when filled)        |
  * | copy (peek, fact-check card)   | inserted, `adoptMermaidCopies`         | ⤢ and scroll stop removed at once; redrawn fit to width under |
  * |                                |                                        | its own id in the colours at its place                        |
@@ -221,6 +224,12 @@ interface DiagramState {
 }
 
 const states = new WeakMap<HTMLElement, DiagramState>();
+/** Every diagram drawn and not yet found detached (see {@link renderFences}). */
+const live = new Set<DiagramState>();
+/** Drawings a later pass may reuse: a detached diagram's, or one drawn for a
+ *  fence the swap removed mid-draw. `wrap` is the detached diagram, if any. */
+type Reusable = Pick<DiagramState, "source" | "cfg" | "orig" | "flip" | "dialogDraw"> & { wrap?: HTMLElement };
+let reusable: Reusable[] = [];
 /** Bodies the ResizeObserver watches (detached ones are dropped on each enhance). */
 const watched = new Set<HTMLElement>();
 let resizer: ResizeObserver | null = null;
@@ -466,6 +475,7 @@ async function layout(st: DiagramState): Promise<void> {
     const w = Math.ceil(d.widenTo - 1e-6); // float noise must not add a 1 px scroll
     svg.style.maxWidth = "none";
     svg.setAttribute("width", String(w));
+    svg.setAttribute("data-widened", ""); // print scales it back (component-styles.ts)
     st.widened = w;
   }
   syncScrollStop(st.body, SCROLL_LABEL);
@@ -510,6 +520,16 @@ function dropDetached(): void {
     if (!b.isConnected) {
       resizer?.unobserve(b);
       watched.delete(b);
+    }
+  }
+}
+
+/** Move every detached diagram into {@link reusable}. Runs inside the mutex. */
+function collectDetached(): void {
+  for (const st of live) {
+    if (!st.wrap.isConnected) {
+      live.delete(st);
+      reusable.push(st);
     }
   }
 }
@@ -641,12 +661,16 @@ function openDialog(wrap: HTMLElement, opener: HTMLButtonElement): void {
   }
 }
 
-/** Close the dialog when the diagram that opened it has left the page. */
-function closeDialogIfDetached(): void {
-  if (dlg?.open && !dlgWrap?.isConnected) dlg.close();
+/** Close the dialog when the diagram that opened it has left the page, unless
+ *  `root` brings its source back: the pass that redraws it hands the dialog on. */
+function closeDialogIfDetached(root?: ParentNode): void {
+  if (!dlg?.open || dlgWrap?.isConnected) return;
+  const src = dlgWrap?.getAttribute("data-mermaid-src");
+  const back = !!root && src != null && Array.from(root.querySelectorAll("code.language-mermaid")).some((c) => c.textContent === src);
+  if (!back) dlg.close();
 }
 
-function addExpandButton(wrap: HTMLElement): void {
+function addExpandButton(wrap: HTMLElement): HTMLButtonElement {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "diagram-expand";
@@ -655,12 +679,21 @@ function addExpandButton(wrap: HTMLElement): void {
   b.textContent = "⤢";
   b.addEventListener("click", () => openDialog(wrap, b));
   wrap.appendChild(b);
+  return b;
 }
 
 // ── Passes ────────────────────────────────────────────────────────────
 
-/** Upgrade each `<pre><code class="language-mermaid">` under `root`. */
+/**
+ * Upgrade each `<pre><code class="language-mermaid">` under `root`. A fence
+ * whose source and colours match a drawing the previous swap left behind
+ * reuses it rather than drawing again: the Ask pane repaints the same answer at
+ * `done`, at `answer_html` (often while the `done` pass is still drawing) and on
+ * each ↻ splice. What this pass does not reuse is dropped at its end.
+ */
 async function renderFences(root: ParentNode): Promise<void> {
+  collectDetached();
+  const offered = new Set(reusable);
   const codes = Array.from(root.querySelectorAll("code.language-mermaid"));
   for (const code of codes) {
     const pre = code.closest("pre");
@@ -668,13 +701,21 @@ async function renderFences(root: ParentNode): Promise<void> {
     // Entities decode automatically via textContent → the raw fence source.
     const source = code.textContent ?? "";
     const cfg = readPassConfig(pre);
+    const i = reusable.findIndex((d) => d.source === source && d.cfg.key === cfg.key);
+    const prev = i >= 0 ? reusable.splice(i, 1)[0] : undefined;
     let orig: Rendered;
-    try {
-      orig = await draw(cfg, source, pre.parentElement?.clientWidth || window.innerWidth);
-    } catch {
-      continue; // fail-visible: leave this diagram's original markup in place.
+    if (prev) orig = prev.orig;
+    else {
+      try {
+        orig = await draw(cfg, source, pre.parentElement?.clientWidth || window.innerWidth);
+      } catch {
+        continue; // fail-visible: leave this diagram's original markup in place.
+      }
     }
-    if (!pre.isConnected) continue;
+    if (!pre.isConnected) {
+      reusable.push(prev ?? { source, cfg, orig, flip: undefined }); // the next pass may want it
+      continue;
+    }
     const wrap = document.createElement("div");
     wrap.className = "diagram";
     // Retain the source so a theme change can re-render without the fence.
@@ -683,13 +724,23 @@ async function renderFences(root: ParentNode): Promise<void> {
     body.className = "diagram-body";
     body.innerHTML = orig.svg;
     wrap.appendChild(body);
-    addExpandButton(wrap);
+    const expand = addExpandButton(wrap);
     pre.replaceWith(wrap);
-    const st: DiagramState = { wrap, body, source, cfg, orig, flip: undefined, shown: "orig", widened: null, measuredWidth: 0 };
+    const st: DiagramState = {
+      wrap, body, source, cfg, orig, flip: prev ? prev.flip : undefined, shown: "orig",
+      widened: null, measuredWidth: 0, dialogDraw: prev?.dialogDraw,
+    };
     states.set(wrap, st);
+    live.add(st);
+    if (prev?.wrap && dlg?.open && dlgWrap === prev.wrap) {
+      dlgWrap = wrap; // the dialog shows these same drawings: it stays open
+      dlgOpener = expand;
+    }
     watchBody(st);
     await layout(st);
   }
+  reusable = reusable.filter((r) => !offered.has(r));
+  closeDialogIfDetached();
 }
 
 /** Re-render every on-screen diagram whose resolved colours changed. */
@@ -801,7 +852,7 @@ function installThemeObservers(): void {
  * closes a full-window view whose diagram the swap removed.
  */
 export function enhanceMermaid(root: ParentNode): void {
-  closeDialogIfDetached();
+  closeDialogIfDetached(root);
   dropDetached();
   if (!hasMermaid(root)) return;
   loadMermaid()
@@ -811,5 +862,6 @@ export function enhanceMermaid(root: ParentNode): void {
     })
     .catch(() => {
       // fail-visible: the library never loaded; leave every <pre> untouched.
+      closeDialogIfDetached();
     });
 }

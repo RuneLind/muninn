@@ -28,6 +28,11 @@
  *  4. **Copies.** A ref-link peek's copy of a diagram is themed (it lost its
  *     ids, so it is redrawn) and re-themed on a flip, with no ⤢; a fact-check
  *     card's copy carries no ⤢ and no scroll stop.
+ *  5. **Print.** A widened diagram scales back to the page width with no
+ *     clipped overflow, and neither ⤢ nor an open dialog prints.
+ *  6. **Ask answers.** An answer painted at `done` and again at `answer_html`
+ *     draws its diagram once (counted on `mermaid.render`, the `EventSource`
+ *     faked so the test sends each event), and an open ⤢ survives the repaint.
  *
  * Boots its own muninn with a temp `WIKI_EXTRA` wiki. The mermaid bundle loads
  * from the CDN, as it does for every reader. No model calls, no writes.
@@ -40,6 +45,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { formatWebHtml } from "../src/web/web-format.ts";
 
 const PORT = e2ePort("wiki-mermaid-readable");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -714,3 +720,131 @@ test.describe("copies of a diagram", () => {
   });
 });
 
+
+test.describe("print", () => {
+  test("a widened diagram scales to the page, nothing clips, ⤢ and the dialog do not print", async ({ page }) => {
+    await openDiagramPage(page);
+    const scrolls = diagrams(page).nth(1);
+    await expect(scrolls.locator(".diagram-body")).toHaveAttribute("role", "region");
+    const fitted = diagrams(page).nth(2).locator(".diagram-body svg");
+    const fittedWidth = () => fitted.evaluate((s) => s.getBoundingClientRect().width);
+    const fittedOnScreen = await fittedWidth();
+    expect(fittedOnScreen, "the third diagram is narrower than its column").toBeLessThan(
+      await diagrams(page).nth(2).locator(".diagram-body").evaluate((b) => b.clientWidth) - 20,
+    );
+    await diagrams(page).nth(2).getByRole("button", { name: "Open diagram full-window" }).click();
+    await expect(page.locator("dialog.diagram-dialog")).toBeVisible();
+    await page.emulateMedia({ media: "print" });
+    expect(await fittedWidth(), "a diagram that fits prints at its own size").toBeCloseTo(fittedOnScreen, 0);
+    const fit = await scrolls.locator(".diagram-body").evaluate((b) => {
+      const svg = b.querySelector("svg")!;
+      return {
+        svg: svg.getBoundingClientRect().width,
+        body: b.getBoundingClientRect().width,
+        overflow: getComputedStyle(b).overflowX,
+        attr: Number(svg.getAttribute("width")),
+      };
+    });
+    expect(fit.attr, "still widened on screen terms").toBeGreaterThan(fit.body);
+    expect(fit.svg, `svg ${fit.svg} px in a ${fit.body} px body`).toBeLessThanOrEqual(fit.body + 0.5);
+    expect(fit.overflow).toBe("visible");
+    await expect(page.locator("#articleWrap .diagram-expand").first()).toBeHidden();
+    await expect(page.locator("dialog.diagram-dialog")).toBeHidden();
+  });
+});
+
+test.describe("Ask answers", () => {
+  const FENCE_SRC = ["flowchart LR", chain(6, "a long label only this answer draws")].join("\n");
+  const ANSWER = ["An answer with a diagram.", "", "```mermaid", FENCE_SRC, "```", "", "Done."].join("\n");
+
+  /** Fake the Ask stream's `EventSource` (others stay real) and count `mermaid.render`. */
+  async function fakeAsk(page: Page): Promise<void> {
+    await page.addInitScript(() => {
+      const Real = window.EventSource;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const w = window as any;
+      w.EventSource = function (url: string, opts?: EventSourceInit) {
+        if (!String(url).includes("/api/wiki/ask?")) return new Real(url, opts);
+        const es = new EventTarget() as EventTarget & { readyState: number; close(): void; onopen: unknown; onerror: unknown };
+        es.readyState = 1;
+        es.close = () => { es.readyState = 2; };
+        w.__askES = es;
+        return es;
+      };
+      // One task per event, as a real EventSource dispatches them.
+      w.__send = async (events: Array<[string, unknown]>) => {
+        for (const [name, data] of events) {
+          w.__askES.dispatchEvent(new MessageEvent(name, { data: JSON.stringify(data) }));
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      };
+    });
+    await openDiagramPage(page); // loads mermaid
+    await page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const w = window as any;
+      const real = w.mermaid.render.bind(w.mermaid);
+      w.__renders = [];
+      w.mermaid.render = async (id: string, src: string, ...a: unknown[]) => {
+        w.__renders.push(src);
+        if (w.__slowRender) await new Promise((r) => setTimeout(r, 50)); // a draw spanning later events
+        return real(id, src, ...a);
+      };
+    });
+    await page.locator(String.raw`.wiki-conn-tab[data-conntab="ask"]`).click();
+    await page.locator("#wikiAskInput").fill("a question");
+    await page.locator("#wikiAskBtn").click();
+    await expect.poll(() => page.evaluate(() => !!(window as unknown as { __askES?: unknown }).__askES)).toBe(true);
+  }
+  const deltas = (): Array<[string, unknown]> =>
+    Array.from({ length: 8 }, (_, i) => ["delta", { text: ANSWER.slice((i * ANSWER.length) / 8, ((i + 1) * ANSWER.length) / 8) }]);
+  /** `mermaid.render` calls for the answer's own fence (the page's diagrams may relayout too). */
+  const renders = (page: Page) =>
+    page.evaluate(() => (window as unknown as { __renders: string[] }).__renders.filter((s) => s.includes("only this answer draws")).length);
+  const answerDiagram = (page: Page) => page.locator("#askAnswerBody .diagram[data-mermaid-src]");
+
+  test("answer_html arriving while the done pass still draws: the diagram is drawn once", async ({ page }) => {
+    await fakeAsk(page);
+    await page.evaluate((ev) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__slowRender = true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (window as any).__send(ev);
+    }, [...deltas(), ["done", { answer: ANSWER, cited: [] }], ["answer_html", { html: formatWebHtml(ANSWER), cited: [] }]] as Array<[string, unknown]>);
+    await expect(answerDiagram(page)).toHaveCount(1, { timeout: 20_000 });
+    await expect(answerDiagram(page)).toHaveAttribute("data-mermaid-flipped", "");
+    await page.waitForTimeout(1000); // let any queued pass run
+    // One drawing of the LR source and one of its top-down candidate.
+    expect(await renders(page)).toBe(2);
+  });
+
+  test("answer_html after done reuses the drawing and keeps an open ⤢ open", async ({ page }) => {
+    await fakeAsk(page);
+    await page.evaluate((ev) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (window as any).__send(ev);
+    }, [...deltas(), ["done", { answer: ANSWER, cited: [] }]] as Array<[string, unknown]>);
+    await expect(answerDiagram(page)).toHaveAttribute("data-mermaid-flipped", "", { timeout: 20_000 });
+    await page.waitForTimeout(500);
+    const afterDone = await renders(page);
+    expect(afterDone).toBe(2);
+    await answerDiagram(page).getByRole("button", { name: "Open diagram full-window" }).click();
+    const dialog = page.locator("dialog.diagram-dialog");
+    await expect(dialog).toBeVisible();
+    const before = await answerDiagram(page).elementHandle();
+    await page.evaluate((html) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (window as any).__send([["answer_html", { html, cited: [] }]]);
+    }, formatWebHtml(ANSWER));
+    // The repaint replaced the diagram's element…
+    await expect.poll(() => before!.evaluate((el) => el.isConnected)).toBe(false);
+    await expect(answerDiagram(page)).toHaveCount(1);
+    await page.waitForTimeout(800);
+    // …drew nothing, and the dialog stayed open, now owned by the new ⤢.
+    expect(await renders(page)).toBe(afterDone);
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(answerDiagram(page).getByRole("button", { name: "Open diagram full-window" })).toBeFocused();
+  });
+});
