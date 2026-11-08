@@ -111,7 +111,10 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // C4 (Ask to wiki-ask-controller.ts): 809,714 bytes, under the same pin.
 // 2026-11-08, C5 (the article tools, right pane and series editor behind
 // ports): 811,207 bytes (275,384 gzipped); the port reads (`deps.x()`) cost the bytes.
-const WIKI_CLIENT_MAX_BYTES = 811_500;
+// 2026-11-08, render-richer PR 2 (reader shapes: number columns, verdict cells, the
+// label grid, in the bundled formatWebHtml): 814,851 bytes (276,668 gzipped); its
+// fix round 1 (id and date headers, traffic lights, the nowrap number span): 816,448 (277,205).
+const WIKI_CLIENT_MAX_BYTES = 816_800;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

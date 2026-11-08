@@ -91,6 +91,53 @@ export function componentBlockCss(scope: string): string {
       vertical-align: top;
     }
     ${scope} .tablewrap th { background: var(--bg-inset); color: var(--text-primary); }
+    /* Reader shapes (reader-shapes.ts, wiki render only): number columns,
+       verdict cells, the bold-label grid. */
+    /* The header and a cell's note wrap (nowrap on both widened the widest
+       table on 54 of 234 pages at 390 px); only the number stays whole. */
+    ${scope} th.num, ${scope} td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    ${scope} td.num .num-nw { white-space: nowrap; }
+    ${scope} td.v-good { background: color-mix(in srgb, var(--status-success) 11%, transparent); }
+    ${scope} td.v-warn { background: color-mix(in srgb, var(--status-warning) 13%, transparent); }
+    ${scope} td.v-bad { background: color-mix(in srgb, var(--status-error) 11%, transparent); }
+    /* The tint cost a coloured child its margin: a link measured 4.19:1 in a
+       light v-good cell. Inside one, the tokens links, refs and chips draw with
+       move 30% toward --text-primary. The table holds each token's value, so
+       the cell's own definition is no cycle. */
+    ${scope} table {
+      --vc-info: var(--status-info); --vc-accent: var(--accent); --vc-accent-light: var(--accent-light);
+      --vc-muted: var(--text-muted); --vc-soft: var(--text-soft);
+    }
+    ${scope} :is(td.v-good, td.v-warn, td.v-bad) {
+      --status-info: color-mix(in oklab, var(--vc-info) 70%, var(--text-primary));
+      --accent: color-mix(in oklab, var(--vc-accent) 70%, var(--text-primary));
+      --accent-light: color-mix(in oklab, var(--vc-accent-light) 70%, var(--text-primary));
+      --text-muted: color-mix(in oklab, var(--vc-muted) 70%, var(--text-primary));
+      --text-soft: color-mix(in oklab, var(--vc-soft) 70%, var(--text-primary));
+    }
+    /* A traffic light (\`v-light\`: a priority, a status) keeps its own glyph
+       and draws no pass/fail icon. */
+    ${scope} :is(td.v-good, td.v-warn, td.v-bad):not(.v-light)::before {
+      display: inline-grid; place-items: center; width: 1.3em; height: 1.3em; border-radius: 50%;
+      margin-right: 0.2em; vertical-align: -0.25em; font: 700 0.8em/1 system-ui, sans-serif; color: var(--bg-panel);
+    }
+    ${scope} td.v-good:not(.v-light)::before { content: "✓"; content: "✓" / ""; background: var(--tone-good); }
+    ${scope} td.v-warn:not(.v-light)::before { content: "!"; content: "!" / ""; background: var(--tone-warn); }
+    ${scope} td.v-bad:not(.v-light)::before { content: "✕"; content: "✕" / ""; background: var(--tone-err); }
+    /* Hidden but in flow: an out-of-flow span made a selection drop the
+       spaces around it (\`✅Targeted\`), which Explain then cannot locate. */
+    ${scope} .v-glyph, ${scope} .lg-c { font-size: 0; }
+    ${scope} ul.label-grid { list-style: none; padding-left: 0; margin: 0.7rem 0 1.1rem; border-top: 1px solid var(--border-subtle); }
+    ${scope} ul.label-grid > li {
+      display: grid; grid-template-columns: minmax(8.5rem, 26%) minmax(0, 1fr); column-gap: 1.1rem;
+      margin: 0; padding: 0.5rem 0; border-bottom: 1px solid var(--border-subtle);
+    }
+    ${scope} .lg-k { font-weight: 650; color: var(--text-primary); }
+    ${scope} .lg-k strong { font-weight: inherit; }
+    ${scope} .lg-v { display: block; min-width: 0; }
+    ${scope} .lg-v > :first-child { margin-top: 0; }
+    ${scope} .lg-v > p, ${scope} .lg-v > pre { margin: 0.3rem 0 0; }
+    @media (max-width: 720px) { ${scope} ul.label-grid > li { grid-template-columns: minmax(0, 1fr); } }
     ${scope} .fileref { color: var(--accent-light); font-family: var(--mono, ui-monospace, monospace); }
     ${scope} .fileref code { background: transparent; box-shadow: none; padding: 0; color: inherit; }
     ${scope} .figure { margin: 1.4rem 0; }

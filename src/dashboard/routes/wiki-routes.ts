@@ -1819,6 +1819,8 @@ export function registerWikiReadRoutes(
         // `plan_status` as the index keeps it (comment-stripped).
         views: true,
         proposedPlan: meta.plan_status === "proposed",
+        // Number columns, verdict cells, the label grid: styled in the article only.
+        readerShapes: true,
       }),
       // The lens switch's inputs: language, id nouns, the page's default lens
       // (`WIKI_DEFAULT_LENS`, else the file's) and the Agent flag (D2, D24).
