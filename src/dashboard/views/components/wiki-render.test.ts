@@ -196,11 +196,12 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // 2026-11-08, C5: the article and series controllers at their counts (the
 // shell's 9 article lets and 2 series lets, plus each one's `deps`).
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
-  ["wiki-rail-controller.ts", 2_301, 16],
+  ["wiki-rail-controller.ts", 2_298, 16],
   ["wiki-shell-state.ts", 50, 3],
   ["wiki-status-pills.ts", 29, 0],
   ["wiki-stale-controller.ts", 509, 18],
-  ["wiki-effort-controller.ts", 333, 8],
+  ["wiki-effort-controller.ts", 235, 3],
+  ["wiki-work-map-cache.ts", 124, 5],
   ["wiki-menus-controller.ts", 638, 2],
   ["wiki-ask-controller.ts", 2_503, 10],
   ["wiki-article-controller.ts", 1_182, 10],

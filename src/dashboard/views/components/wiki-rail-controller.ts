@@ -20,7 +20,7 @@ import { seriesEditable } from "./wiki-readonly-client.ts";
 import { followupFlagHtml, statusPillHtml } from "./wiki-status-pills.ts";
 import { canEditSeriesPage, seriesMenuBtnHtml } from "./wiki-series-menu.ts";
 import { workMapDoneSet, type IndexCoverage } from "./wiki-start-cards.ts";
-import { proseText, type CardPage, type WorkMapGetBody } from "./wiki-work-card.ts";
+import { proseText, type CardPage } from "./wiki-work-card.ts";
 import { normalizeRelPath } from "../../../wiki/rel-path.ts";
 import { EFFORTS_OFF_TOGGLE_KEY, effortNeedsOpen, effortsOn, effortsToggleWords, type RailEffort } from "./wiki-effort-rail.ts";
 import { railIssuePillsHtml } from "./wiki-issue-pills.ts";
@@ -125,12 +125,13 @@ import {
 import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
 import { railListHtml } from "./wiki-provenance-view.ts";
 import { cullLabels, cullToggleText, railPool, RETIRED_TOGGLE_KEY, retiredRevealHtml } from "./wiki-cull-view.ts";
-import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
+import { effortHrefFor, getRailMapFailedAt, getWorkMapCache, railEffortsIndex } from "./wiki-work-map-cache.ts";
 import { getCurrentName, getRevealOnRender, getWorkMapRunAt, setRevealOnRender, type WorkFacts } from "./wiki-shell-state.ts";
 
 /** What the rail reads and calls on the shell, read live through a function so a
  *  value the shell reassigns is never a stale copy. A member marked `relayed:` is
- *  another controller's export: that controller imports `renderList` from here. */
+ *  another controller's export: that controller imports `renderList` from here.
+ *  The work-map cache is not relayed: it is DOM-free and read directly. */
 export interface RailDeps {
   WIKI(): string;
   allPages(): WikiListing[];
@@ -142,8 +143,6 @@ export interface RailDeps {
   projects(): Record<string, number>;
   jiraKeys(): Record<string, number>;
   trackerLabels(): Record<string, string>;
-  workMapCache(): { runAt: number; body: WorkMapGetBody & { map: AnyWorkMap } } | null; // relayed: effort
-  railMapFailedAt(): number | null; // relayed: effort
   /** The work threads off the last listing (`WorkFacts`), shell-owned. */
   workFacts(): WorkFacts;
   /** The listing's `workMap.kind === "themes"`: View options then says theme. */
@@ -164,8 +163,6 @@ export interface RailDeps {
   loadPageByRelPath(relPath: string, push?: boolean, revealHash?: boolean): void;
   resetStaleRailPainted(): void; // relayed: stale; `renderList` starts each paint with the badges' record emptied
   railStaleBadge(relPath: string): string; // relayed: stale
-  effortHrefFor(id: string): string; // relayed: effort
-  railEffortsIndex(now: number): Map<string, RailEffort> | null; // relayed: effort
   refreshEffortFromListing(): void; // relayed: effort
   openWorkCardMenu(btn: HTMLElement): void; // relayed: ⋯ menus
   openThreadRowMenu(btn: HTMLElement): void; // relayed: ⋯ menus
@@ -875,7 +872,7 @@ function effortRowHtml(entry: Extract<RailEntry, { kind: "effort" }>, now: numbe
     ` aria-label="${esc(caretWhy)}" title="${esc(caretWhy)}"><span class="wiki-fold-caret" aria-hidden="true">▸</span></button>` +
     `<div class="wiki-effort-body">` +
     `<div class="wiki-effort-line">` +
-    `<a class="wiki-effort-name" href="${esc(deps.effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}" title="${esc(`Open the ${theme ? "theme" : "effort"} page: ${effort.name}`)}">${esc(effort.name)}</a>` +
+    `<a class="wiki-effort-name" href="${esc(effortHrefFor(deps.WIKI(), deps.filters, effort.id))}" data-effort-link="${esc(effort.id)}" title="${esc(`Open the ${theme ? "theme" : "effort"} page: ${effort.name}`)}">${esc(effort.name)}</a>` +
     (age ? `<span class="wiki-effort-age" title="${esc(`${entry.members.length ? "newest page drawn here" : "newest pinned page"} ${age}`)}">${esc(age)}</span>` : "") +
     `</div>` +
     `<small class="wiki-group-rollup wiki-effort-meta">${meta}</small>` +
@@ -899,7 +896,7 @@ function effortIntroHtml(effort: RailEffort): string {
   const line = text ? `<span class="wiki-effort-oneline" title="${text}">${text}</span> ` : "";
   return (
     `<div class="wiki-effort-intro" data-section="activity" data-effort="${esc(effort.id)}">${line}` +
-    `<a class="wiki-effort-open" href="${esc(deps.effortHrefFor(effort.id))}" data-effort-link="${esc(effort.id)}">Open ${effort.kind === "themes" ? "theme" : "effort"} →</a></div>`
+    `<a class="wiki-effort-open" href="${esc(effortHrefFor(deps.WIKI(), deps.filters, effort.id))}" data-effort-link="${esc(effort.id)}">Open ${effort.kind === "themes" ? "theme" : "effort"} →</a></div>`
   );
 }
 
@@ -975,10 +972,10 @@ export function renderList(cause: "storage" | "local" = "local"): void {
       work: deps.workFacts(),
       // Built only when it can be used: the mode on, and no query (a search
       // flattens every group).
-      efforts: effortsGrouped() && !deps.filters.q.trim() ? deps.railEffortsIndex(now) : null,
+      efforts: effortsGrouped() && !deps.filters.q.trim() ? railEffortsIndex(now, deps.allPages(), deps.withWiki, renderList) : null,
       // X1: a failed GET is not retried for this run time, so the rail draws
       // Work threads instead of waiting for it.
-      effortMapFailed: getWorkMapRunAt() !== null && deps.railMapFailedAt() === getWorkMapRunAt(),
+      effortMapFailed: getWorkMapRunAt() !== null && getRailMapFailedAt() === getWorkMapRunAt(),
     },
     {
       mode,
@@ -1015,7 +1012,7 @@ export function renderList(cause: "storage" | "local" = "local"): void {
   const canEditSeries = seriesEditable();
   // The Needs-you items ✓ on the card for the cached run: an effort fold's ✋
   // leaves them out, as the effort page does.
-  const effortDone: ReadonlySet<string> = deps.workMapCache() ? workMapDoneSet(deps.workMapCache()!.body.map.runAtMs) : new Set();
+  const effortDone: ReadonlySet<string> = getWorkMapCache() ? workMapDoneSet(getWorkMapCache()!.body.map.runAtMs) : new Set();
   rail.entries.forEach((entry: RailEntry) => {
     // A WORK-THREAD card's header and its `touched:` line (`wiki-thread-view.ts`).
     if (entry.kind === "thread") {

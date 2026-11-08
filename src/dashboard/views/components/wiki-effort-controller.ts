@@ -1,9 +1,8 @@
 /// <reference lib="dom" />
 /**
  * The /wiki reader's effort page (work map P3): `?effort=<id>` fills the
- * article pane with one effort or theme, joined from the work map; plus the one
- * work-map cache the Your work card, the rail and the effort page share, and
- * the rail's effort index (P4). Moved out of the shell (`wiki-browser.ts`)
+ * article pane with one effort or theme, joined from the work map that
+ * `wiki-work-map-cache.ts` holds. Moved out of the shell (`wiki-browser.ts`)
  * whole, in source order (mimir plan muninn-wiki-browser-split, C3).
  *
  * Importing this module runs nothing and it registers no listener: its links
@@ -11,17 +10,17 @@
  * {@link initEffort} beside `initRail`. This module never imports the shell:
  * what it reads and calls there arrives through {@link EffortDeps}.
  */
-import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortUrl, effortView } from "./wiki-effort-page.ts";
+import { EFFORT_PARAM, canonicalEffortParam, effortStatusHtml, effortView } from "./wiki-effort-page.ts";
 import { themeView } from "./wiki-theme-page.ts";
 import type { WorkMapGetBody } from "./wiki-work-card.ts";
 import { isThemeMap, type AnyWorkMap } from "../../../wiki/work-map/join.ts";
-import { railEffortIndex, type RailEffort } from "./wiki-effort-rail.ts";
-import { urlWithJira, urlWithProject, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
+import { adoptIfNewer, effortHrefFor as cacheEffortHref, getWorkMapCache, workMapFetchFor } from "./wiki-work-map-cache.ts";
+import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import { abortAgentRuns } from "./wiki-agent-pane.ts";
 import { workMapDoneSet } from "./wiki-start-cards.ts";
 import { statusPillHtml } from "./wiki-status-pills.ts";
 import { renderList } from "./wiki-rail-controller.ts";
-import { getWorkMapRunAt, setCurrentName, setWorkMapRunAt } from "./wiki-shell-state.ts";
+import { getWorkMapRunAt, setCurrentName } from "./wiki-shell-state.ts";
 
 /** What the effort page reads and calls on the shell, read live. */
 export interface EffortDeps {
@@ -51,106 +50,18 @@ let deps!: EffortDeps;
 /** The effort the article pane shows, or null. Read only while
  *  `#wikiEffortPage` is in the pane: every other view replaces it. */
 let effortOpen: string | null = null;
-type WorkMapGet = { ok: boolean; status: number; body: WorkMapGetBody | null };
-/** The one map cache the Your work card, the rail and the effort page read
- *  and write, keyed on the listing's run time (whatever run the body carries). */
-let workMapCache: { runAt: number; body: WorkMapGetBody & { map: AnyWorkMap } } | null = null;
-/** The map GET in flight and the run time it was started for: a repaint while
- *  it runs (a facet change, an adopt) waits on it instead of sending another. */
-let effortMapFetch: { runAt: number; done: Promise<WorkMapGet> } | null = null;
-
-export function getWorkMap(): Promise<WorkMapGet> {
-  return fetch(deps.withWiki("/api/wiki/work-map")).then(async (r) => ({
-    ok: r.ok,
-    status: r.status,
-    body: (await r.json().catch(() => null)) as WorkMapGetBody | null,
-  }));
-}
-
-/** The map for one run time: the cache, else the GET in flight, else a new
- *  GET whose map lands in the cache. A failed GET is not cached. */
-export function workMapFetchFor(runAt: number): Promise<WorkMapGet> {
-  if (workMapCache?.runAt === runAt) return Promise.resolve({ ok: true, status: 200, body: workMapCache.body });
-  if (effortMapFetch?.runAt !== runAt) {
-    const done = getWorkMap().then((r) => {
-      if (r.ok && r.body?.map && getWorkMapRunAt() === runAt) workMapCache = { runAt, body: r.body as WorkMapGetBody & { map: AnyWorkMap } };
-      return r;
-    });
-    const entry = { runAt, done };
-    effortMapFetch = entry;
-    const clear = () => {
-      if (effortMapFetch === entry) effortMapFetch = null;
-    };
-    done.then(clear, clear);
-  }
-  return effortMapFetch!.done;
+/** An effort's reader URL, carrying the facets an article URL carries. */
+export function effortHrefFor(id: string): string {
+  return cacheEffortHref(deps.WIKI(), deps.filters, id);
 }
 
 /** A map the card's ↻ poll fetched: when it is a newer run than the listing's,
- *  it becomes the cache and the run time, and the rail and an open effort
- *  page repaint from it without waiting for a listing refresh. */
+ *  it becomes the cache and the run time (`adoptIfNewer`), and the rail and an
+ *  open effort page repaint from it without waiting for a listing refresh. */
 export function adoptWorkMap(body: WorkMapGetBody): void {
-  if (!body.map || getWorkMapRunAt() === null || body.map.runAtMs <= getWorkMapRunAt()!) return;
-  setWorkMapRunAt(body.map.runAtMs);
-  workMapCache = { runAt: getWorkMapRunAt()!, body: body as WorkMapGetBody & { map: AnyWorkMap } };
+  if (!adoptIfNewer(body)) return;
   renderList();
   if (effortOpen !== null && document.getElementById("wikiEffortPage")) paintEffort(effortOpen, true);
-}
-
-/** The run time whose map GET failed for the rail, so a repaint does not
- *  re-fetch on every render; a new run time (or a reload) tries again. */
-let railMapFailedAt: number | null = null;
-/** The run time the rail is waiting on a map GET for (one listener per GET). */
-let railMapPending: number | null = null;
-/** The last effort index the rail built, and what it was built from. */
-let railEffortMemo: { map: AnyWorkMap; pages: WikiListing[]; index: Map<string, RailEffort> } | null = null;
-
-/**
- * The rail's effort index (P4), or null: no map on this wiki, the map not
- * loaded yet (the GET starts here and repaints the rail when it lands, so
- * Activity draws plain until then), or a failed GET. Reads the shared map
- * cache, so the reader never fetches the map twice for one run time.
- */
-export function railEffortsIndex(now: number): Map<string, RailEffort> | null {
-  const runAt = getWorkMapRunAt();
-  if (runAt === null) return null;
-  const map = workMapCache?.runAt === runAt ? workMapCache.body.map : null;
-  if (!map) {
-    if (railMapFailedAt !== runAt && railMapPending !== runAt) {
-      railMapPending = runAt;
-      const settle = () => {
-        if (railMapPending === runAt) railMapPending = null;
-      };
-      workMapFetchFor(runAt)
-        .then((r) => {
-          settle();
-          if (getWorkMapRunAt() !== runAt) return;
-          if (!r.ok || !r.body?.map) {
-            railMapFailedAt = runAt;
-            // X1: repaint so the rail stops waiting and draws Work threads.
-            renderList();
-            return;
-          }
-          renderList();
-        })
-        .catch(() => {
-          settle();
-          if (getWorkMapRunAt() !== runAt) return;
-          railMapFailedAt = runAt;
-          renderList();
-        });
-    }
-    return null;
-  }
-  if (railEffortMemo?.map !== map || railEffortMemo.pages !== deps.allPages()) {
-    railEffortMemo = { map, pages: deps.allPages(), index: railEffortIndex(map, deps.allPages(), now) };
-  }
-  return railEffortMemo.index;
-}
-
-/** An effort's reader URL, carrying the facets an article URL carries. */
-export function effortHrefFor(id: string): string {
-  return urlWithJira(urlWithProject(effortUrl(deps.WIKI(), id), deps.filters.project), deps.filters.jira);
 }
 
 /** The effort a URL's `?effort=` names, or null for none. A blank value is
@@ -277,13 +188,14 @@ function paintEffort(id: string, background: boolean): void {
     writeEffortPanes(wrap, effortStatusHtml(head(), "no-map"), noMapConn, background);
     return;
   }
-  if (workMapCache?.runAt === runAt) {
-    paint(workMapCache.body.map);
+  const cached = getWorkMapCache();
+  if (cached?.runAt === runAt) {
+    paint(cached.body.map);
     return;
   }
   if (!background) writeEffortPanes(wrap, effortStatusHtml(head(), "loading"), '<div class="wiki-ef-conn-empty">Loading…</div>', false);
   const current = () => effortOpen === id && deps.pageViewSeq() === seq && !!document.getElementById("wikiEffortPage");
-  workMapFetchFor(runAt)
+  workMapFetchFor(runAt, deps.withWiki)
     .then((r) => {
       const body = r.body;
       if (!current()) return;
@@ -314,16 +226,6 @@ export function refreshEffortFromListing(): void {
 /** The effort the article pane shows, or null (the body click delegate's Retry). */
 export function getEffortOpen(): string | null {
   return effortOpen;
-}
-
-/** The shared map cache (`RailDeps.workMapCache`). */
-export function getWorkMapCache(): { runAt: number; body: WorkMapGetBody & { map: AnyWorkMap } } | null {
-  return workMapCache;
-}
-
-/** The run time whose map GET failed for the rail (`RailDeps.railMapFailedAt`). */
-export function getRailMapFailedAt(): number | null {
-  return railMapFailedAt;
 }
 
 // ── Boot: called by the shell's boot() ────────────────────────────────
