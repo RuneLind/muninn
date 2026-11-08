@@ -75,7 +75,11 @@ describe("buildMermaidPalette", () => {
     expect(v.primaryTextColor).toBe("#14151a");
     expect(v.noteBkgColor).toBe(mix(parseCssColor(LIGHT_TOKENS.warn)!, parseCssColor(LIGHT_TOKENS.panel)!, 0.14));
     for (const [k, val] of Object.entries(v)) {
-      if (k === "darkMode" || k === "fontFamily" || k === "fontSize") continue;
+      if (k === "darkMode" || k === "fontFamily" || k === "fontSize" || k === "pieOpacity" || k.endsWith("StrokeWidth")) continue;
+      if (typeof val === "object") {
+        for (const [kk, vv] of Object.entries(val)) if (kk !== "plotColorPalette") expect(vv, `${k}.${kk}`).toMatch(/^#[0-9a-f]{6}$/);
+        continue;
+      }
       expect(val, k).toMatch(/^#[0-9a-f]{6}$/);
     }
   });
@@ -109,6 +113,147 @@ describe("buildMermaidPalette", () => {
   });
 });
 
+// ── Categorical colours for the non-flowchart diagrams ──────────────────
+// Helpers kept here, not imported, so the assertions do not lean on the code
+// under test.
+const DARK_TOKENS = {
+  panel: "rgb(18, 18, 26)", text: "rgb(255, 255, 255)", soft: "rgb(170, 170, 170)", accent: "rgb(108, 99, 255)",
+  border: "rgb(30, 30, 46)", inset: "rgb(13, 13, 20)", good: "rgb(74, 222, 128)", warn: "rgb(251, 191, 36)", bad: "rgb(248, 113, 113)",
+};
+const READING_TOKENS = { ...DARK_TOKENS, panel: "#191513", inset: "#14100e", border: "#28201d", text: "#fdfcfb", soft: "#aca5a2", accent: "#c8875a" };
+const PAPER_TOKENS = {
+  ...LIGHT_TOKENS, panel: "#fcfaf6", inset: "#ebe6dc", border: "#e7dfd0", text: "#1a1814", soft: "#5f5a4e", accent: "#925427",
+  good: "#149544", warn: "#c66d05", bad: "#c72222",
+};
+const SETS = [
+  { name: "light", tokens: LIGHT_TOKENS, dark: false },
+  { name: "paper-light", tokens: PAPER_TOKENS, dark: false },
+  { name: "dark", tokens: DARK_TOKENS, dark: true },
+  { name: "reading", tokens: READING_TOKENS, dark: true },
+];
+
+function rgbOf(hex: string): [number, number, number] {
+  const m = /^#([0-9a-f]{6})$/.exec(hex);
+  if (!m) throw new Error(`not #rrggbb: ${hex}`);
+  return [0, 2, 4].map((i) => parseInt(m[1]!.slice(i, i + 2), 16)) as [number, number, number];
+}
+function lum(hex: string): number {
+  const lin = (v: number) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  const [r, g, b] = rgbOf(hex).map(lin) as [number, number, number];
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrast(a: string, b: string): number {
+  const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p) as [number, number];
+  return (x + 0.05) / (y + 0.05);
+}
+function lab(hex: string): [number, number, number] {
+  const lin = (v: number) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  const [r, g, b] = rgbOf(hex).map(lin) as [number, number, number];
+  const f = (t: number) => (t > 216 / 24389 ? Math.cbrt(t) : (24389 / 27 * t + 16) / 116);
+  const X = f((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047);
+  const Y = f(0.2126 * r + 0.7152 * g + 0.0722 * b);
+  const Z = f((0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883);
+  return [116 * Y - 16, 500 * (X - Y), 200 * (Y - Z)];
+}
+function deltaE(a: string, b: string): number {
+  const [p, q] = [lab(a), lab(b)];
+  return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+}
+/** Smallest ΔE76 between any two colours of the list. */
+function minPairDeltaE(list: string[]): number {
+  let min = Infinity;
+  for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) min = Math.min(min, deltaE(list[i]!, list[j]!));
+  return min;
+}
+
+describe("categorical colours: every diagram type gets real hues, readable labels", () => {
+  for (const set of SETS) {
+    const tv = () => {
+      const p = buildMermaidPalette({ tokens: set.tokens, ground: "", fontFamily: "x", dark: set.dark })!;
+      return p.themeVariables as Record<string, unknown>;
+    };
+    const str = (v: Record<string, unknown>, k: string) => {
+      const x = v[k];
+      if (typeof x !== "string") throw new Error(`${set.name}: ${k} is not set`);
+      return x;
+    };
+
+    test(`${set.name}: the 12 pie slices are distinct, stand off the panel, and carry the label at 4.5:1`, () => {
+      const v = tv();
+      const panel = str(v, "background");
+      const pies = Array.from({ length: 12 }, (_, i) => str(v, `pie${i + 1}`));
+      expect(minPairDeltaE(pies)).toBeGreaterThanOrEqual(10);
+      for (const c of pies) expect(deltaE(c, panel), c).toBeGreaterThanOrEqual(12);
+      for (const c of pies) expect(contrast(c, str(v, "pieSectionTextColor")), c).toBeGreaterThanOrEqual(4.5);
+      expect(v.pieOpacity).toBe("1");
+    });
+
+    test(`${set.name}: cScale0..11 (timeline, mindmap, kanban) are distinct with a per-fill label at 4.5:1`, () => {
+      const v = tv();
+      const fills = Array.from({ length: 12 }, (_, i) => str(v, `cScale${i}`));
+      expect(minPairDeltaE(fills)).toBeGreaterThanOrEqual(10);
+      for (let i = 0; i < 12; i++) {
+        expect(contrast(fills[i]!, str(v, `cScaleLabel${i}`)), `cScale${i}`).toBeGreaterThanOrEqual(4.5);
+        expect(str(v, `cScalePeer${i}`)).toMatch(/^#[0-9a-f]{6}$/);
+        expect(str(v, `cScaleInv${i}`)).toMatch(/^#[0-9a-f]{6}$/);
+      }
+    });
+
+    test(`${set.name}: xychart series and git branches are strong hues that read on the ground`, () => {
+      const v = tv();
+      const ground = str(v, "background");
+      const xy = v.xyChart as Record<string, string>;
+      const series = xy.plotColorPalette!.split(",");
+      expect(series.length).toBeGreaterThanOrEqual(8);
+      expect(minPairDeltaE(series)).toBeGreaterThanOrEqual(10);
+      for (const c of series) expect(contrast(c, ground), c).toBeGreaterThanOrEqual(3);
+      expect(xy.backgroundColor).toBe(ground);
+      expect(contrast(xy.xAxisLabelColor!, ground)).toBeGreaterThanOrEqual(4.5);
+      for (let i = 0; i < 8; i++) {
+        const g = str(v, `git${i}`);
+        expect(contrast(g, ground), `git${i}`).toBeGreaterThanOrEqual(3);
+        expect(contrast(g, str(v, `gitBranchLabel${i}`)), `gitBranchLabel${i}`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+
+    test(`${set.name}: gantt bars are filled, bands stay near the panel, text reads`, () => {
+      const v = tv();
+      const panel = str(v, "background");
+      expect(deltaE(str(v, "taskBkgColor"), panel)).toBeGreaterThanOrEqual(12);
+      expect(contrast(str(v, "taskBkgColor"), str(v, "taskTextColor"))).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(str(v, "critBkgColor"), str(v, "taskTextDarkColor"))).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(str(v, "activeTaskBkgColor"), str(v, "taskTextDarkColor"))).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(str(v, "doneTaskBkgColor"), str(v, "taskTextDarkColor"))).toBeGreaterThanOrEqual(4.5);
+      for (const k of ["sectionBkgColor", "altSectionBkgColor", "sectionBkgColor2", "excludeBkgColor"]) {
+        // A band behind the bars: close to the panel, never a white or black stripe.
+        expect(deltaE(str(v, k), panel), k).toBeLessThanOrEqual(12);
+      }
+    });
+
+    test(`${set.name}: er attribute rows stay near the panel and keep the text readable`, () => {
+      const v = tv();
+      const panel = str(v, "background");
+      for (const k of ["rowOdd", "rowEven", "attributeBackgroundColorOdd", "attributeBackgroundColorEven"]) {
+        expect(deltaE(str(v, k), panel), k).toBeLessThanOrEqual(12);
+        expect(contrast(str(v, k), str(v, "textColor")), k).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+
+    test(`${set.name}: a low-contrast text token still gets 4.5:1 labels (fills step away from it)`, () => {
+      const tokens = { ...set.tokens, text: set.dark ? "rgb(175, 175, 175)" : "rgb(105, 105, 105)" };
+      const v = buildMermaidPalette({ tokens, ground: "", fontFamily: "x", dark: set.dark })!.themeVariables as Record<string, string>;
+      for (let i = 1; i <= 12; i++) expect(contrast(v[`pie${i}`]!, v.pieSectionTextColor!), `pie${i}`).toBeGreaterThanOrEqual(4.5);
+    });
+
+    test(`${set.name}: quadrant fills differ and carry their text`, () => {
+      const v = tv();
+      const q = [1, 2, 3, 4].map((i) => str(v, `quadrant${i}Fill`));
+      expect(minPairDeltaE(q)).toBeGreaterThanOrEqual(5);
+      for (let i = 1; i <= 4; i++) expect(contrast(str(v, `quadrant${i}Fill`), str(v, `quadrant${i}TextFill`))).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+});
+
 describe("injectClassDefs", () => {
   const defs = ["classDef good fill:#000", "classDef bad fill:#111"];
   test("right after a flowchart / graph header", () => {
@@ -128,9 +273,21 @@ describe("injectClassDefs", () => {
       expect(injectClassDefs(src, defs)).toBe(src);
     }
   });
-  test("a page's own classDef of the same name stays after ours (it wins in mermaid)", () => {
-    const out = injectClassDefs("graph TD\n  classDef good fill:#f00\n  A:::good", defs);
-    expect(out.indexOf("classDef good fill:#000")).toBeLessThan(out.indexOf("classDef good fill:#f00"));
+  test("a class the page defines itself is not injected, so a partial page classDef is not merged with ours", () => {
+    // mermaid merges two classDefs of one name property by property: a page's
+    // `stroke` alone would keep our fill. The page's class must stand alone.
+    const out = injectClassDefs("graph TD\n  classDef good stroke:#f00\n  A:::good", defs);
+    expect(out).not.toContain("classDef good fill:#000");
+    expect(out).toContain("classDef bad fill:#111");
+    expect(out).toContain("classDef good stroke:#f00");
+  });
+  test("a comma list in the page's classDef counts for every name in it", () => {
+    const out = injectClassDefs("flowchart LR\n  A --> B\n  classDef good,bad color:#fff", defs);
+    expect(out).toBe("flowchart LR\n  A --> B\n  classDef good,bad color:#fff");
+  });
+  test("a longer class name sharing a prefix is not the same class", () => {
+    const out = injectClassDefs("graph TD\n  classDef goodish fill:#f00", defs);
+    expect(out).toContain("classDef good fill:#000");
   });
 });
 

@@ -7,7 +7,8 @@
  *     resolve to (accent 4.5% over panel, from a `color-mix()` probe in the
  *     page, never a literal hex), not mermaid's `#ECECFF` / `#1f2020`; a node
  *     with `class X warn` takes the warn tone; a page's own `classDef good`
- *     beats the predefined one.
+ *     beats the predefined one, and a page's partial `classDef bad` (stroke
+ *     only) stands alone instead of merging with ours.
  *  2. **Readable size.** A too-wide `LR` chain that reads larger top-down is
  *     drawn `TD`; one too tall top-down keeps `LR` at 11 px text and scrolls
  *     sideways as a named tab stop; a fence in a closed `<Fold>` is measured
@@ -45,9 +46,11 @@ const MARKS = [
   "```mermaid",
   "flowchart TD",
   "  classDef good fill:#ff0000",
-  "  A[plain] --> W[warned] --> G[good]",
+  "  classDef bad stroke:#00ff00",
+  "  A[plain] --> W[warned] --> G[good] --> P[partial]",
   "  class W warn",
   "  class G good",
+  "  class P bad",
   "```",
 ].join("\n");
 
@@ -218,7 +221,7 @@ test.describe("palette", () => {
     expectSameColour(await plainNodeFill(page, 2), expected, "final primaryColor");
   });
 
-  test("class X warn takes the warn tone; the page's own classDef good wins over ours", async ({ page }) => {
+  test("class X warn takes the warn tone; the page's own classDef good or bad replaces ours", async ({ page }) => {
     await page.emulateMedia({ colorScheme: "light" });
     await openDiagramPage(page);
     const marks = diagrams(page).nth(2);
@@ -236,6 +239,12 @@ test.describe("palette", () => {
     expectSameColour(warnStroke, warnToken, "warn stroke");
     const goodFill = await marks.locator("svg .node.good rect").first().evaluate((el) => getComputedStyle(el).fill);
     expect(goodFill, "the page's classDef good comes later in the source and wins").toBe("rgb(255, 0, 0)");
+    // A page classDef that sets only a stroke is not merged with the injected
+    // `bad` fill: the node keeps the plain fill and the page's stroke.
+    const partial = marks.locator("svg .node.bad rect").first();
+    expect(await partial.evaluate((el) => getComputedStyle(el).stroke)).toBe("rgb(0, 255, 0)");
+    const plain = await marks.locator("svg .node:not(.warn):not(.good):not(.bad) rect").first().evaluate((el) => getComputedStyle(el).fill);
+    expect(await partial.evaluate((el) => getComputedStyle(el).fill), "no injected bad fill under the page's partial classDef").toBe(plain);
     // The injected classes never reach the retained source.
     expect(await marks.getAttribute("data-mermaid-src")).not.toContain("classDef warn");
   });

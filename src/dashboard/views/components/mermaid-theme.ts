@@ -96,9 +96,108 @@ export function flatten(c: Rgba, ground: Rgba): Rgba {
   return { r: c.r * c.a + ground.r * (1 - c.a), g: c.g * c.a + ground.g * (1 - c.a), b: c.b * c.a + ground.b * (1 - c.a), a: 1 };
 }
 
+/** WCAG relative luminance of an opaque colour. */
+export function luminance(c: Rgba): number {
+  const lin = (v: number) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+}
+
+/** WCAG contrast ratio of two opaque colours (1–21). */
+export function contrastRatio(a: Rgba, b: Rgba): number {
+  const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p) as [number, number];
+  return (x + 0.05) / (y + 0.05);
+}
+
+function toHsl(c: Rgba): { h: number; s: number; l: number } {
+  const r = c.r / 255, g = c.g / 255, b = c.b / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  const h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return { h: h * 60, s, l };
+}
+
+function fromHsl(h: number, s: number, l: number): Rgba {
+  const k = (n: number) => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => 255 * (l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1)));
+  return { r: f(0), g: f(8), b: f(4), a: 1 };
+}
+
+const hueGap = (a: number, b: number) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+
+/**
+ * `n` hues: the accent's, then each status tone's that is at least 30° from
+ * the ones taken (a near-grey tone has no hue to give), then farthest-point
+ * fill on a 5° grid, so the twelve spread round the whole circle.
+ */
+export function categoricalHues(seeds: Rgba[], n: number): number[] {
+  const hues: number[] = [];
+  for (const c of seeds) {
+    const { h, s } = toHsl(c);
+    if (s >= 0.25 && hues.every((x) => hueGap(x, h) >= 30)) hues.push(h);
+  }
+  const start = hues[0] ?? 250;
+  if (hues.length === 0) hues.push(start);
+  while (hues.length < n) {
+    let best = start, bestGap = -1;
+    for (let k = 0; k < 72; k++) {
+      const h = (start + k * 5) % 360;
+      const gap = Math.min(...hues.map((x) => hueGap(x, h)));
+      if (gap > bestGap) [best, bestGap] = [h, gap];
+    }
+    hues.push(best);
+  }
+  return hues.slice(0, n);
+}
+
+/**
+ * One hue drawn as an AREA (pie slice, timeline section, gantt bar): pale in
+ * light, deep in dark, a little of the panel mixed in so it sits on Reading's
+ * warm ground, then stepped away from the text until the text reads on it at
+ * 4.5:1. (Alternating two lightness steps between hue neighbours was measured
+ * and dropped: it lowered the smallest pairwise ΔE76 of the 12 in light.)
+ */
+function areaFill(h: number, dark: boolean, panel: Rgba, text: Rgba): Rgba {
+  let l = dark ? 0.4 : 0.62;
+  const s = dark ? 0.6 : 0.7;
+  for (let i = 0; i < 60; i++) {
+    const c = parseCssColor(mix(fromHsl(h, s, l), panel, 0.85))!;
+    if (contrastRatio(c, text) >= 4.6) return c;
+    l += dark ? -0.01 : 0.01;
+  }
+  return parseCssColor(mix(fromHsl(h, s, l), panel, 0.85))!;
+}
+
+/**
+ * One hue drawn as a LINE or a small mark on the ground (xychart series, git
+ * branch): 3:1 against the ground, and one of text / panel reads on it at 4.5:1
+ * (a git branch label sits on it). Stepped away from the ground until both hold.
+ */
+function strokeColor(h: number, dark: boolean, ground: Rgba, text: Rgba, panel: Rgba): Rgba {
+  let l = dark ? 0.66 : 0.42;
+  const s = dark ? 0.7 : 0.68;
+  let c = fromHsl(h, s, l);
+  for (let i = 0; i < 60; i++) {
+    c = parseCssColor(toHex(fromHsl(h, s, l)))!; // rounded, as mermaid will see it
+    if (contrastRatio(c, ground) >= 3 && Math.max(contrastRatio(c, text), contrastRatio(c, panel)) >= 4.6) return c;
+    l += dark ? 0.01 : -0.01;
+  }
+  return c;
+}
+
+/** Of text and panel, whichever reads better on `fill`. */
+function labelOn(fill: Rgba, text: Rgba, panel: Rgba): Rgba {
+  return contrastRatio(fill, text) >= contrastRatio(fill, panel) ? text : panel;
+}
+
+export type ThemeValue = string | boolean | Record<string, string>;
+
 export interface MermaidPalette {
   /** `mermaid.initialize` options for the pass (minus security settings). */
-  themeVariables: Record<string, string | boolean>;
+  themeVariables: Record<string, ThemeValue>;
   /** The four `classDef` lines, injected after a flowchart header. */
   classDefs: string[];
   /** Identifies the resolved colours: equal keys draw identical diagrams. */
@@ -131,7 +230,7 @@ export function buildMermaidPalette(input: {
     parsed.text, parsed.soft, parsed.accent, parsed.border, parsed.inset, parsed.good, parsed.warn, parsed.bad,
   ].map(on) as [Rgba, Rgba, Rgba, Rgba, Rgba, Rgba, Rgba, Rgba];
   const h = toHex;
-  const themeVariables: Record<string, string | boolean> = {
+  const themeVariables: Record<string, ThemeValue> = {
     darkMode: input.dark,
     fontFamily: input.fontFamily,
     fontSize: `${THEMED_FONT_PX}px`,
@@ -163,6 +262,7 @@ export function buildMermaidPalette(input: {
     labelBoxBorderColor: h(border),
     labelTextColor: h(text),
   };
+  Object.assign(themeVariables, categoricalVariables({ panel, ground, text, soft, accent, border, inset, good, warn, bad, dark: input.dark }));
   const classDefs = [
     `classDef good fill:${mix(good, panel, 0.16)},stroke:${h(good)},color:${h(text)},stroke-width:1.5px`,
     `classDef warn fill:${mix(warn, panel, 0.16)},stroke:${h(warn)},color:${h(text)},stroke-width:1.5px`,
@@ -170,6 +270,124 @@ export function buildMermaidPalette(input: {
     `classDef muted fill:${h(inset)},stroke:${h(border)},color:${h(soft)},stroke-dasharray:4 3`,
   ];
   return { themeVariables, classDefs, key: JSON.stringify([themeVariables, classDefs]) };
+}
+
+/**
+ * The variables every non-flowchart diagram colours from. Unset, mermaid's
+ * `base` theme derives them from `primaryColor` (here near the panel) and then
+ * darkens them: in dark every timeline section came out `#000`, pie slices near
+ * black, gantt section bands white. mermaid 11.16 `theme-base.js` names:
+ * `pie1..12`, `cScale0..11` (+ `cScaleLabel*`, `cScalePeer*`, `cScaleInv*`:
+ * timeline, mindmap, kanban), `fillType0..7` (journey), `venn1..8`, `git0..7`
+ * (+ `gitBranchLabel*`, `gitInv*`), the gantt `task*`/`section*`/`crit*` set,
+ * `rowOdd`/`rowEven` (erDiagram attribute rows), `quadrant*` and `xyChart`.
+ * An override survives mermaid's own darken pass (`calculate` re-applies it).
+ */
+function categoricalVariables(t: {
+  panel: Rgba; ground: Rgba; text: Rgba; soft: Rgba; accent: Rgba; border: Rgba; inset: Rgba;
+  good: Rgba; warn: Rgba; bad: Rgba; dark: boolean;
+}): Record<string, ThemeValue> {
+  const h = toHex;
+  const hues = categoricalHues([t.accent, t.good, t.warn, t.bad], 12);
+  const fills = hues.map((hue) => areaFill(hue, t.dark, t.panel, t.text));
+  const labels = fills.map((f) => labelOn(f, t.text, t.panel));
+  const strokes = hues.map((hue) => strokeColor(hue, t.dark, t.ground, t.text, t.panel));
+  const strokeLabels = strokes.map((c) => labelOn(c, t.text, t.panel));
+  const badHue = toHsl(t.bad).h;
+  const crit = areaFill(badHue, t.dark, t.panel, t.text);
+  const v: Record<string, ThemeValue> = {};
+  fills.forEach((f, i) => {
+    v[`pie${i + 1}`] = h(f);
+    v[`cScale${i}`] = h(f);
+    v[`cScaleLabel${i}`] = h(labels[i]!);
+    v[`cScalePeer${i}`] = h(strokes[i]!);
+    v[`cScaleInv${i}`] = h(strokes[i]!);
+  });
+  for (let i = 0; i < 8; i++) {
+    v[`fillType${i}`] = h(fills[i]!);
+    v[`venn${i + 1}`] = h(fills[i]!);
+    v[`git${i}`] = h(strokes[i]!);
+    v[`gitBranchLabel${i}`] = h(strokeLabels[i]!);
+    v[`gitInv${i}`] = h(strokeLabels[i]!);
+  }
+  Object.assign(v, {
+    // pie: full-strength slices (mermaid draws them at 0.7 over the ground,
+    // which would wash the label contrast computed above), ground-coloured gaps.
+    pieOpacity: "1",
+    pieStrokeColor: h(t.ground),
+    pieOuterStrokeColor: h(t.border),
+    pieSectionTextColor: h(t.text),
+    pieTitleTextColor: h(t.text),
+    pieLegendTextColor: h(t.text),
+    scaleLabelColor: h(t.text),
+    vennTitleTextColor: h(t.text),
+    vennSetTextColor: h(t.text),
+    // gantt: filled bars on faint bands.
+    taskBkgColor: h(fills[0]!),
+    taskBorderColor: h(strokes[0]!),
+    taskTextColor: h(labels[0]!),
+    taskTextLightColor: h(labels[0]!),
+    taskTextDarkColor: h(t.text),
+    taskTextOutsideColor: h(t.text),
+    taskTextClickableColor: h(t.accent),
+    activeTaskBkgColor: mix(fills[0]!, t.panel, 0.5),
+    activeTaskBorderColor: h(strokes[0]!),
+    doneTaskBkgColor: mix(t.soft, t.panel, 0.22),
+    doneTaskBorderColor: h(t.soft),
+    critBkgColor: h(crit),
+    critBorderColor: h(t.bad),
+    sectionBkgColor: mix(t.accent, t.panel, 0.07),
+    sectionBkgColor2: mix(t.warn, t.panel, 0.07),
+    altSectionBkgColor: h(t.panel),
+    excludeBkgColor: h(t.inset),
+    gridColor: mix(t.soft, t.ground, 0.35),
+    todayLineColor: h(t.bad),
+    vertLineColor: h(t.soft),
+    titleColor: h(t.text),
+    // erDiagram attribute rows: the panel and a faint stripe.
+    rowOdd: h(t.panel),
+    rowEven: mix(t.soft, t.panel, 0.08),
+    attributeBackgroundColorOdd: h(t.panel),
+    attributeBackgroundColorEven: mix(t.soft, t.panel, 0.08),
+    // quadrantChart: four tints of the first four hues.
+    quadrant1Fill: mix(fills[0]!, t.panel, 0.55),
+    quadrant2Fill: mix(fills[1]!, t.panel, 0.55),
+    quadrant3Fill: mix(fills[2]!, t.panel, 0.55),
+    quadrant4Fill: mix(fills[3]!, t.panel, 0.55),
+    quadrant1TextFill: h(t.text),
+    quadrant2TextFill: h(t.text),
+    quadrant3TextFill: h(t.text),
+    quadrant4TextFill: h(t.text),
+    quadrantPointFill: h(strokes[0]!),
+    quadrantPointTextFill: h(t.text),
+    quadrantXAxisTextFill: h(t.text),
+    quadrantYAxisTextFill: h(t.text),
+    quadrantTitleFill: h(t.text),
+    quadrantInternalBorderStrokeFill: h(t.border),
+    quadrantExternalBorderStrokeFill: h(t.border),
+    // gitGraph chrome.
+    commitLabelColor: h(t.text),
+    commitLabelBackground: h(t.inset),
+    tagLabelColor: h(labels[0]!),
+    tagLabelBackground: h(fills[0]!),
+    tagLabelBorder: h(strokes[0]!),
+    // xychart: a whole object (mermaid merges it over its defaults).
+    xyChart: {
+      backgroundColor: h(t.ground),
+      titleColor: h(t.text),
+      dataLabelColor: h(t.text),
+      xAxisTitleColor: h(t.text),
+      xAxisLabelColor: h(t.text),
+      xAxisTickColor: h(t.soft),
+      xAxisLineColor: h(t.soft),
+      yAxisTitleColor: h(t.text),
+      yAxisLabelColor: h(t.text),
+      yAxisTickColor: h(t.soft),
+      yAxisLineColor: h(t.soft),
+      plotColorPalette: strokes.map(h).join(","),
+    },
+  });
+  return v;
 }
 
 /** Index of the first line after an optional `---` front-matter block and any
@@ -191,15 +409,27 @@ function headerLineIndex(lines: string[]): number {
 
 const FLOW_HEADER = /^\s*(?:flowchart|graph)\b/;
 
+/** Every class name the source's own `classDef` lines define (`classDef a,b …`). */
+function definedClasses(source: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of source.matchAll(/^\s*classDef\s+([^\s]+)/gm)) for (const n of m[1]!.split(",")) if (n) names.add(n);
+  return names;
+}
+
 /** Insert `classDefs` right after a `flowchart`/`graph` header line. Any other
- *  diagram type comes back unchanged (`classDef` is flowchart syntax). The page's
- *  own `classDef` of the same name sits later in the source and wins. */
+ *  diagram type comes back unchanged (`classDef` is flowchart syntax). A class
+ *  the page defines itself is left out: mermaid merges two `classDef`s of one
+ *  name property by property, so a page's partial `classDef good stroke:…`
+ *  would otherwise keep our fill. */
 export function injectClassDefs(source: string, classDefs: readonly string[]): string {
   if (classDefs.length === 0) return source;
   const lines = source.split("\n");
   const i = headerLineIndex(lines);
   if (i < 0 || !FLOW_HEADER.test(lines[i]!)) return source;
-  lines.splice(i + 1, 0, ...classDefs.map((d) => `  ${d}`));
+  const own = definedClasses(source);
+  const keep = classDefs.filter((d) => !own.has(/^classDef\s+(\S+)/.exec(d)?.[1] ?? ""));
+  if (keep.length === 0) return source;
+  lines.splice(i + 1, 0, ...keep.map((d) => `  ${d}`));
   return lines.join("\n");
 }
 
