@@ -1315,8 +1315,8 @@ describe("wiki reader chat-dialog wiring", () => {
   // registers, in `src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts`.
 
   test("the shell wires every port member to its real binding", async () => {
-    // The port is six callbacks to module-scoped `let`s (the shell's, and since
-    // C4 the Ask controller's) the dialog can no longer reach. Each one has an inert default (`() => null`, `() => []`, a rejected
+    // The port is six callbacks to module-scoped `let`s (the shell's, the Ask
+    // controller's since C4, the article controller's since C5) the dialog can no longer reach. Each one has an inert default (`() => null`, `() => []`, a rejected
     // POST), so a member wired to the WRONG `let` degrades SILENTLY: the
     // suggestion chips lose the page's outgoing links, the "Continue …" chip loses
     // the session, the escalate bar stops repainting — and tsc sees a well-typed

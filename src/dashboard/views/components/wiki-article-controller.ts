@@ -159,7 +159,7 @@ let connData: WikiPageDetail | null = null;
  * Titles of the current page's outgoing links, stamped by `renderConnections`.
  *
  * Only used to offer a "how does this relate to X and Y?" starter question in the
- * Discuss dialog. Kept beside `currentArticle` (rather than read out of the rail's
+ * Discuss dialog. Kept as data in this controller (rather than read out of the rail's
  * DOM) so the suggestion is derived from data, and cleared with the breadcrumb so
  * a stale page's neighbours can't leak into the next page's chips.
  */

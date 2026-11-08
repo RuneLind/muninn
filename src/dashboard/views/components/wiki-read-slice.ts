@@ -12,9 +12,11 @@
  *     {@link wikiReadSliceStyles}. CSS survives the re-renders that replace the
  *     breadcrumb, the answer pane and the rail.
  *  2. **Client guards** — {@link wikiToolsFlag} reads the same class; the
- *     reader (`wiki-browser.ts`) uses it to skip the fetches whose panels are
- *     hidden (index coverage, the start cards, Similar), to leave the Atlas tab
- *     out and to keep the rail on Connections ({@link readSliceStartTab}).
+ *     reader uses it to skip the fetches whose panels are hidden (index
+ *     coverage in `wiki-rail-controller.ts`, the start cards in `wiki-browser.ts`,
+ *     Similar in `wiki-article-controller.ts`), to leave the Atlas tab out and to
+ *     keep the rail on Connections (`switchConnTab`, article controller;
+ *     {@link readSliceStartTab}).
  *  3. **Server omissions** — `renderWikiPage({ tools: false })`
  *     (`views/wiki-page.ts`) renders no agent-presence chip, withholds the host
  *     path from `window.__WIKI_ROOT__`, and the `/wiki` route resolves no ask

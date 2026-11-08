@@ -242,9 +242,9 @@ import {
 import { modalOpen, navMenuOpen, readerKeyEventOf } from "./wiki-panes.ts";
 import { graphDefaults, parseIssueRoot, type GraphLevel, type GraphPayload } from "../../../wiki/graph-types.ts";
 // The provenance strip: one collapsed line under the title that opens into the
-// chain. Every string and every fragment of markup lives in that module (pure,
-// `bun test`-covered); this file only decides WHERE it goes and wires the three
-// controls it carries — the Jira key, the disclosure and the ⧉ copy button.
+// chain. Its strings and markup live in that module (pure, `bun test`-covered);
+// placement and fill are `wiki-article-controller.ts`'s. This file keeps the
+// pending placeholder and the delegate's branches for the strip's three controls.
 import {
   provPendingHtml,
 } from "./wiki-provenance-view.ts";
@@ -3265,9 +3265,9 @@ export function boot(): { dispose(): void } {
     else if (t.closest("#wikiChatEscBtn")) submitChatEscalate(false);
     // Explicit "start another thread anyway" after a 409 (never automatic).
     else if (t.closest("#wikiChatEscNewBtn")) submitChatEscalate(true);
-    // 📤 Share — the dialog is IMPORTED here rather than loaded as the standalone
-    // bundle: this file IS a bundle, and doing both would put two copies of the
-    // module (two states, two listener sets) on the same page.
+    // 📤 Share — `openArticleShare` (article controller) IMPORTS the dialog rather
+    // than loading the standalone bundle: this file IS a bundle, and doing both would
+    // put two copies of the module (two states, two listener sets) on the same page.
     else if (t.closest("#" + SHARE_BTN_ID)) openArticleShare();
     else if (t.closest("#" + FELLES_BTN_ID)) {
       const relPath = t.closest("#" + FELLES_BTN_ID)?.getAttribute("data-felles-relpath") || "";

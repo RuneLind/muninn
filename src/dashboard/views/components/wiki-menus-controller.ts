@@ -43,7 +43,7 @@ import {
   toggleRailFold,
 } from "./wiki-rail-controller.ts";
 
-/** What the ⋯ menus read and call on the shell, read live. */
+/** What the ⋯ menus read and call through the shell, read live; five members relay the series controller's exports. */
 export interface MenusDeps {
   WIKI(): string;
   allPages(): WikiListing[];
