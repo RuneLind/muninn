@@ -258,6 +258,23 @@ function precedingText(node: Text): string {
   return out.slice(-PRECEDING_MAX);
 }
 
+/** A before → after chip (`reader-shapes.ts`) splits its text node, and
+ *  `findRefs` reads one text node: a quoted section title holding a chip
+ *  (`see «Cut 12 → 9 ms»`) gets its chip back as plain text so it links. */
+function unchipTitleQuotes(root: Element, titles: ReadonlySet<string>): void {
+  for (const chip of Array.from(root.querySelectorAll(".ba-chip"))) {
+    const parent = chip.parentNode;
+    if (!parent) continue;
+    let start = 0;
+    for (let n = parent.firstChild; n && n !== chip; n = n.nextSibling) start += (n.textContent ?? "").length;
+    const end = start + (chip.textContent ?? "").length;
+    const quoted = findRefs(parent.textContent ?? "", new Set(), titles).some((m) => m.start < start && m.end > end);
+    if (!quoted) continue;
+    chip.replaceWith(chip.textContent ?? "");
+    parent.normalize();
+  }
+}
+
 /** Wrap every reference under `root` in an `a.wiki-ref`, with the wiki's id
  *  nouns before the id runs ({@link nounRuns}). Returns how many links. */
 export function linkRefs(root: Element, idLabels?: IdLabels): number {
@@ -274,6 +291,7 @@ export function linkRefs(root: Element, idLabels?: IdLabels): number {
   if (!ids.size && !titles.size) return 0;
   const idKeys = new Set(ids.keys());
   const titleKeys = new Set(titles.keys());
+  if (titleKeys.size) unchipTitleQuotes(root, titleKeys);
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (n) => (n.parentElement?.closest(SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
   });

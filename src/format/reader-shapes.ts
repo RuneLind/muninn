@@ -298,16 +298,20 @@ const CHIP_GROUPED = String.raw`\d{1,3}(?:[ \u00A0\u202F]\d{3})+(?:[.,]\d+)?`;
  *  one. A range end is never grouped: `101–160 762.2` is a range, then a
  *  number. */
 const CHIP_NUM = `(?:${CHIP_PLAIN}[–-]${CHIP_PLAIN}|${CHIP_GROUPED}|${CHIP_PLAIN})`;
+/** The space before a unit: a space or a no-break space (U+00A0, U+202F). */
+const CHIP_USP = String.raw`[ \u00A0\u202F]`;
+/** A unit token: letters, `%` or `×`, and an optional `/` and letters (`MB/s`). */
+const CHIP_UNIT = String.raw`[\p{L}%×]+(?:\/\p{L}+)?`;
 /** One side: an optional `~`/`≈`, sign and currency sign, the number, then an
  *  optional unit token (glued, or after one space) that {@link chipUnit} vets. */
-const CHIP_SIDE = String.raw`(?:[~≈] ?)?[-+−]?[$€£]?${CHIP_NUM}(?: ?[\p{L}%×]+)?`;
+const CHIP_SIDE = String.raw`(?:[~≈] ?)?[-+−]?[$€£]?${CHIP_NUM}(?:${CHIP_USP}?${CHIP_UNIT})?`;
 /** The arrow as escaped text holds it: `→`, or `->` escaped to `-&gt;`, with
  *  at most one space or no-break space on each side. */
 const CHIP_ARROW = String.raw`[ \u00A0]?(?:→|-&gt;)[ \u00A0]?`;
 /** A side, then one or more arrow + side (`a → b → c` is one chip). Not after
  *  a letter, a digit or `#.,:/_-–` (`v1.2`, `#810`, `2026-11`, `x-3`); not
  *  before a letter or digit, nor before `.,:/-–` and a digit (`1.2.3`,
- *  `10:30`, `2026-11-08`). */
+ *  `10:30`, `2026-11-08`). {@link chipBlocked} reads the text around it. */
 const CHIP_RE = new RegExp(
   String.raw`(?<![\p{L}\p{N}#.,:/_\-–])${CHIP_SIDE}(?:${CHIP_ARROW}${CHIP_SIDE})+(?![\p{L}\p{N}])(?![.,:/\-–]\d)`,
   "gu",
@@ -316,15 +320,22 @@ const CHIP_ARROW_SPLIT = new RegExp(`(${CHIP_ARROW})`, "u");
 /** One side split: lead marks, the number (a range: both ends), the space
  *  before the unit, and the unit token. */
 const CHIP_SIDE_PARTS = new RegExp(
-  String.raw`^((?:[~≈] ?)?[-+−]?[$€£]?)(?:(${CHIP_PLAIN})[–-](${CHIP_PLAIN})|(${CHIP_GROUPED}|${CHIP_PLAIN}))( ?)([\p{L}%×]*)$`,
+  String.raw`^((?:[~≈] ?)?[-+−]?[$€£]?)(?:(${CHIP_PLAIN})[–-](${CHIP_PLAIN})|(${CHIP_GROUPED}|${CHIP_PLAIN}))(${CHIP_USP}?)((?:${CHIP_UNIT})?)$`,
   "u",
 );
 /** Units taken only glued: a lone letter after a space is a word (`5 → 6 x`). */
 const CHIP_GLUED_ONLY: ReadonlySet<string> = new Set(["x", "t", "d", "k", "K", "M"]);
 
+/** What a rate's `/…` may be: a unit or a span of time (`MB/s`, `kr/mnd`);
+ *  `s/claim` is no rate. */
+const CHIP_PER: ReadonlySet<string> = new Set([...NUM_UNITS, "day", "dag", "døgn", "uke", "week", "mnd", "month", "år", "year", "run"]);
+
 /** True when `unit`, written after a number (after a space when `spaced`),
- *  is a unit: {@link NUM_UNITS}, a count word, or `pp`. */
+ *  is a unit: {@link NUM_UNITS}, a count word, or `pp`; a rate when its
+ *  first part is one and its `/…` is in {@link CHIP_PER}. */
 function chipUnit(unit: string, spaced: boolean): boolean {
+  const slash = unit.indexOf("/");
+  if (slash > 0) return CHIP_PER.has(unit.slice(slash + 1)) && chipUnit(unit.slice(0, slash), spaced);
   if (spaced && CHIP_GLUED_ONLY.has(unit)) return false;
   return NUM_UNITS.has(unit) || unit === "pp" || NUM_WORDS.has(unit.toLowerCase());
 }
@@ -332,8 +343,11 @@ function chipUnit(unit: string, spaced: boolean): boolean {
 /** A hyphen range that is a date: month and day (`10-29`) or year and month
  *  (`2025-09`). An en dash range (`10–12`) stays a range. */
 const DATE_RANGE_RE = /^(?:\d{2}|(?:19|20)\d{2})-\d{2}$/;
+/** A day and month with the month's zero optional (`1.1`): a date only next
+ *  to a side {@link DAY_MONTH_RE} reads as one (`24.12 → 1.1`). */
+const DAY_MONTH_LOOSE_RE = /^(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])$/;
 
-type ChipSide = { bare: boolean; dayMonth: boolean };
+type ChipSide = { bare: boolean; dayMonth: boolean; dayMonthLoose: boolean; integer: boolean; grouped: boolean };
 
 /** One side as the chip reads it: null unless a number (or a range) with an
  *  optional unit, and not a padded id or date (`006`, `08.11`, `08-24`), a
@@ -346,21 +360,64 @@ function chipSide(side: string): ChipSide | null {
   const ends = one !== undefined ? [one] : [lo!, hi!];
   if (ends.some((e) => parseCellNumberParts(e) === null || /^0\d/.test(e) || LONG_ID_RE.test(e))) return null;
   if (one === undefined && side.includes(`${lo}-${hi}`) && DATE_RANGE_RE.test(`${lo}-${hi}`)) return null;
-  if (unit ? !chipUnit(unit, space === " ") : space) return null;
-  return { bare: !unit, dayMonth: one !== undefined && DAY_MONTH_RE.test(one) };
+  if (unit ? !chipUnit(unit, space !== "") : space) return null;
+  return {
+    bare: !unit,
+    dayMonth: one !== undefined && DAY_MONTH_RE.test(one),
+    dayMonthLoose: one !== undefined && DAY_MONTH_LOOSE_RE.test(one),
+    integer: one !== undefined && /^[\d \u00A0\u202F]+$/.test(one),
+    grouped: one !== undefined && /[ \u00A0\u202F]/.test(one),
+  };
 }
 
 /** A candidate chain's sides and the arrows between them; null when a side
- *  is no number ({@link chipSide}) or every side is a bare day and month
- *  (`15.09 → 16.09`). */
+ *  is no number ({@link chipSide}) or every side is a bare day and month, one
+ *  of them with a two-digit month (`15.09 → 16.09`, `24.12 → 1.1`). */
 export function beforeAfterParts(text: string): { sides: string[]; arrows: string[] } | null {
+  const chain = readChain(text);
+  return chain && { sides: chain.sides, arrows: chain.arrows };
+}
+
+function readChain(text: string): { sides: string[]; arrows: string[]; read: ChipSide[] } | null {
   const parts = text.split(CHIP_ARROW_SPLIT);
   const sides = parts.filter((_, k) => k % 2 === 0);
   const arrows = parts.filter((_, k) => k % 2 === 1);
   const read = sides.map(chipSide);
   if (read.some((r) => r === null)) return null;
-  if ((read as ChipSide[]).every((r) => r.bare && r.dayMonth)) return null;
-  return { sides, arrows };
+  const ok = read as ChipSide[];
+  if (ok.every((r) => r.bare && r.dayMonthLoose) && ok.some((r) => r.dayMonth)) return null;
+  return { sides, arrows, read: ok };
+}
+
+/** A word that makes the bare integers after it positions, not values: PR,
+ *  phase or step numbers and an order (`PR 1 → 2`, `Reasonable order: 4 → 1 →
+ *  5`, `strict 1→2→3`); one more word before a colon is allowed (`Final order
+ *  shipped:`). `rows` and `PRs went` stay values (`rows 3 → 133`). */
+const ORDER_WORD_RE =
+  /(?:^|[^\p{L}\p{N}_])(?:order|ordered|sequence|sequencing|sequentially|serially|strict|round|PRs?|phase|fase|steps?|steg|row)(?: \p{L}+:)?[\s:,;(—–-]*$/iu;
+/** A word that makes the number after it a version: `Opus 4.6 → 429` is a
+ *  model and a status code, `version 1.2 → 1.3` a release. */
+const VERSION_WORD_RE =
+  /(?:^|[^\p{L}\p{N}_])(?:versions?|versjon(?:en|er)?|release|Opus|Sonnet|Haiku|Fable|Claude|GPT|Gemini|CDM)\s*:?\s*$/iu;
+/** Text that glues to the number after it: a letter, a digit or `#.,:/_-–*`
+ *  ({@link CHIP_RE}'s lookbehind, across a tag or a parked code span). */
+const GLUED_RE = /[\p{L}\p{N}#.,:/_\-–*]$/u;
+/** A bound before the first value: `≥3 → 260` is a threshold and a count. */
+const BOUND_RE = /(?:[≥≤±]|&[lg]t;) ?$/u;
+/** An arrow with a value on its far side, glued to a chip's start or end: the
+ *  chain goes on past a side that is no number (`a → 5 → 6`, `1 → 2 → v3`). */
+const ARROW_BEFORE_RE = new RegExp(String.raw`\S${CHIP_ARROW}$`, "u");
+const ARROW_AFTER_RE = new RegExp(String.raw`^${CHIP_ARROW}\S`, "u");
+
+/** Why a candidate chain draws no chip, from the text around it: glued to a
+ *  word or code span, after a bound, a version word or (bare integers only)
+ *  an order word, or one link of a longer chain. `before` is the visible text
+ *  before it (earlier runs included), `run` the text before it in its own
+ *  run, `after` the text after it in its run. */
+function chipBlocked(read: ChipSide[], before: string, run: string, after: string): boolean {
+  if (GLUED_RE.test(before) || BOUND_RE.test(before) || VERSION_WORD_RE.test(before)) return true;
+  if (ARROW_BEFORE_RE.test(run) || ARROW_AFTER_RE.test(after)) return true;
+  return read.every((r) => r.bare && r.integer) && ORDER_WORD_RE.test(before);
 }
 
 /** The before → after numbers in one run of escaped text as chips: every
@@ -368,25 +425,34 @@ export function beforeAfterParts(text: string): { sides: string[]; arrows: strin
  *  the last value bold (`ba-new`). The spans hold the source characters and
  *  nothing else (an arrow's spaces sit between them), so what shows and what
  *  a selection copies is the source text. */
-function chipText(text: string): string {
-  return text.replace(CHIP_RE, (whole) => {
-    let p = beforeAfterParts(whole);
-    let tail = "";
-    // A word after the last value that is no unit (`1 → 2 b`, `5 → 6 x`) is
-    // the sentence's, not the chip's: read the chain without it.
-    const spacedWord = p ? null : / [\p{L}%×]+$/u.exec(whole);
-    if (spacedWord) {
-      tail = spacedWord[0];
-      p = beforeAfterParts(whole.slice(0, -tail.length));
-    }
-    if (!p) return whole;
-    const spans = p.sides.map((side, k) => {
-      if (k === p.sides.length - 1) return `<span class="ba-new">${side}</span>`;
-      const a = /^(\s?)(\S+)(\s?)$/u.exec(p.arrows[k]!)!;
-      return `<span class="ba-old">${side}</span>${a[1]}<span class="ba-arr">${a[2]}</span>${a[3]}`;
-    });
-    return `<span class="ba-chip">${spans.join("")}</span>${tail}`;
+function chipText(text: string, earlier: string): string {
+  return text.replace(CHIP_RE, (whole: string, at: number) => chipOne(whole, earlier + text.slice(0, at), text.slice(0, at), text.slice(at + whole.length)));
+}
+
+/** One candidate chain as a chip, or as it came when it is none. */
+function chipOne(whole: string, before: string, run: string, after: string): string {
+  let p = readChain(whole);
+  let tail = "";
+  // A word after the last value that is no unit (`1 → 2 b`, `5 → 6 x`) is
+  // the sentence's, not the chip's: read the chain without it.
+  const spacedWord = p ? null : new RegExp(`${CHIP_USP}${CHIP_UNIT}$`, "u").exec(whole);
+  if (spacedWord) {
+    tail = spacedWord[0];
+    p = readChain(whole.slice(0, -tail.length));
+  }
+  if (!p) return whole;
+  // `row 1 315→179px`: a grouped first value after an order word is the
+  // position and the value (`1` + `315`), not 1,315.
+  const lead = p.read[0]!.grouped && ORDER_WORD_RE.test(before) ? /^\d{1,3}[ \u00A0\u202F]/u.exec(whole) : null;
+  if (lead) return lead[0] + chipOne(whole.slice(lead[0].length), before + lead[0], run + lead[0], after);
+  if (chipBlocked(p.read, before, run, tail + after)) return whole;
+  const { sides, arrows } = p;
+  const spans = sides.map((side, k) => {
+    if (k === sides.length - 1) return `<span class="ba-new">${side}</span>`;
+    const a = /^(\s?)(\S+)(\s?)$/u.exec(arrows[k]!)!;
+    return `<span class="ba-old">${side}</span>${a[1]}<span class="ba-arr">${a[2]}</span>${a[3]}`;
   });
+  return `<span class="ba-chip">${spans.join("")}</span>${tail}`;
 }
 
 /** Rendered inline HTML with the before → after chips drawn in its text:
@@ -394,8 +460,16 @@ function chipText(text: string): string {
  *  placeholder (`\x00…\x00`: inline code, an inline component). */
 export function beforeAfterChipsHtml(html: string): string {
   if (!html.includes("→") && !html.includes("-&gt;")) return html;
+  // The visible text so far, so a run's first value reads what precedes it
+  // across a tag (`<em>v</em>1`); a parked placeholder reads as a letter
+  // (`` `v`1.2 ``), a `<br>` as a space.
+  let earlier = "";
   return html
     .split(/(<[^>]*>|\x00[^\x00]*\x00)/)
-    .map((seg, k) => (k % 2 === 1 || (!seg.includes("→") && !seg.includes("-&gt;")) ? seg : chipText(seg)))
+    .map((seg, k) => {
+      const out = k % 2 === 1 || (!seg.includes("→") && !seg.includes("-&gt;")) ? seg : chipText(seg, earlier);
+      earlier = (earlier + (k % 2 === 0 ? seg : seg.startsWith("\x00") ? "x" : /^<br\b/i.test(seg) ? " " : "")).slice(-48);
+      return out;
+    })
     .join("");
 }

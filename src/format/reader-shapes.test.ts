@@ -451,6 +451,50 @@ describe("before → after chips: the matcher", () => {
     ["101–160 762.2 → 795.5", ["762.2 → 795.5"]],
     ["10–12 → 14–16", ["10–12 → 14–16"]],
     ["10 → 20 ", ["10 → 20"]],
+    // Fix round 1 batch 2: order notation, thresholds, versions, cut chains.
+    ["Reasonable order: 4 → 1 → 5 → 6 → 3 → 2", []],
+    ["Final order shipped: 4 → 1 → 5", []],
+    ["Sequencing: PR 1 → 2 → 3, then", []],
+    ["3 ordered PRs (1→2→3; review", []],
+    ["PR 1 → 2", []],
+    ["fase 1 → 2", []],
+    ["phase 2 → 3", []],
+    ["strict 1→2→3→4", []],
+    ["must land serially, 4 → 5", []],
+    ["sequence 4 → 5 → 10", []],
+    ["(round 1 → 2 → 3)", []],
+    ["Steps 6→12 all pass", []],
+    ["rows 3 → 133 during the run", ["3 → 133"]],
+    ["POLICY_VERSION 1→2", ["1→2"]],
+    ["PRs went 5 → 3", ["5 → 3"]],
+    ["fase 10% → 50%", ["10% → 50%"]],
+    ["≥3 → 260", []],
+    ["≥ 3 → 260", []],
+    ["≤2 → 4", []],
+    ["refs &gt;3 → 5", []],
+    ["refs &lt; 3 → 5", []],
+    ["chrome above row 1 315→179px", ["315→179px"]],
+    ["row 1 314 → 194px", ["314 → 194px"]],
+    ["Opus 4.6 → 429", []],
+    ["Sonnet 5 → 404", []],
+    ["version 1.2 → 1.3", []],
+    ["CDM 4.2 → 4.3 → 4.4", []],
+    ["Jira-oppgavene → 8332 → 8337 → 8351", []],
+    ["24.12 → 1.1", []],
+    ["1.5 → 2.5", ["1.5 → 2.5"]],
+    ["1 → 2 → v3", []],
+    ["8501 → 47 → 46 → 38/8 → 3", []],
+    ["a → 5 → 6", []],
+    ["*v*1 → 2", []],
+    ["10\u00A0kr → 20\u00A0kr", ["10\u00A0kr → 20\u00A0kr"]],
+    ["5\u202Fms → 6\u202Fms", ["5\u202Fms → 6\u202Fms"]],
+    ["20 000 → 25 000\u00A0kr", ["20 000 → 25 000\u00A0kr"]],
+    ["5 → 6\u00A0x", ["5 → 6"]],
+    ["10 → 20 ms/s", ["10 → 20 ms/s"]],
+    ["5 MB/s → 9 MB/s", ["5 MB/s → 9 MB/s"]],
+    ["10 → 20 req/s", ["10 → 20"]],
+    ["cleared ~15s/claim → 8-claim/280s budget", []],
+    ["20 000 → 25 000 kr/mnd", ["20 000 → 25 000 kr/mnd"]],
   ];
   for (const [text, want] of cases) {
     test(JSON.stringify(text), () => expect(chipTexts(beforeAfterChipsHtml(text))).toEqual(want));
@@ -467,6 +511,17 @@ describe("before → after chips: the matcher", () => {
     expect(beforeAfterChipsHtml("1 → 2 → 3")).toBe(
       '<span class="ba-chip"><span class="ba-old">1</span> <span class="ba-arr">→</span> <span class="ba-old">2</span> <span class="ba-arr">→</span> <span class="ba-new">3</span></span>',
     );
+  });
+  test("a value glued to the inline code or tag before it is not free-standing", () => {
+    expect(chipTexts(beforeAfterChipsHtml("<code>v</code>1.2 → 1.3"))).toEqual([]);
+    expect(chipTexts(beforeAfterChipsHtml("<em>v</em>1 → 2"))).toEqual([]);
+    expect(chipTexts(beforeAfterChipsHtml("\x00INLINE0\x001 → 2"))).toEqual([]);
+    expect(chipTexts(beforeAfterChipsHtml("<code>v</code> 1 → 2"))).toEqual(["1 → 2"]);
+    expect(chipTexts(beforeAfterChipsHtml("<strong>CI</strong>: 10 → 6 min"))).toEqual(["10 → 6 min"]);
+    expect(chipTexts(beforeAfterChipsHtml("one<br>2 → 3"))).toEqual(["2 → 3"]);
+  });
+  test("a chain cut by a tag keeps its chip: the arrow ends the text run", () => {
+    expect(chipTexts(beforeAfterChipsHtml("(100% → 88% → 67% → <strong>60%</strong>)"))).toEqual(["100% → 88% → 67%"]);
   });
   test("never inside a tag or across a placeholder", () => {
     expect(beforeAfterChipsHtml('<a href="https://x/1 → 2">see</a>')).toBe('<a href="https://x/1 → 2">see</a>');
