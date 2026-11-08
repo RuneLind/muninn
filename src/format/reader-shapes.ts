@@ -391,10 +391,14 @@ function readChain(text: string): { sides: string[]; arrows: string[]; read: Chi
 
 /** A word that makes the bare integers after it positions, not values: PR,
  *  phase or step numbers and an order (`PR 1 → 2`, `Reasonable order: 4 → 1 →
- *  5`, `strict 1→2→3`); one more word before a colon is allowed (`Final order
- *  shipped:`). `rows` and `PRs went` stay values (`rows 3 → 133`). */
+ *  5`, `strict 1→2→3`). Only an order word itself takes one more word (`Final
+ *  order shipped:`, `ordered PRs (`), never a measure (`sequence length:`).
+ *  Plurals and `row` stay values (`PRs: 5 → 3`, `Steps 6 → 12`, `row 3 → 5`). */
 const ORDER_WORD_RE =
-  /(?:^|[^\p{L}\p{N}_])(?:order|ordered|sequence|sequencing|sequentially|serially|strict|round|PRs?|phase|fase|steps?|steg|row)(?: \p{L}+:)?[\s:,;(—–-]*$/iu;
+  /(?:^|[^\p{L}\p{N}_])(?:(?:order|ordered|sequence|sequencing)(?: (?!(?:count|length|size|time|total|number)\b)\p{L}+:?)?|sequentially|serially|strict|round|PR|phase|fase|step|steg)[\s:,;(—–-]*$/iu;
+/** `row` before a grouped first value: the row's number, then the value
+ *  (`row 1 315→179px`). */
+const ROW_WORD_RE = /(?:^|[^\p{L}\p{N}_])row[\s:,;(—–-]*$/iu;
 /** A word that makes the number after it a version: `Opus 4.6 → 429` is a
  *  model and a status code, `version 1.2 → 1.3` a release. */
 const VERSION_WORD_RE =
@@ -426,24 +430,38 @@ function chipBlocked(read: ChipSide[], before: string, run: string, after: strin
  *  nothing else (an arrow's spaces sit between them), so what shows and what
  *  a selection copies is the source text. */
 function chipText(text: string, earlier: string): string {
-  return text.replace(CHIP_RE, (whole: string, at: number) => chipOne(whole, earlier + text.slice(0, at), text.slice(0, at), text.slice(at + whole.length)));
+  return text.replace(CHIP_RE, (whole: string, at: number) => {
+    // The rules read a few characters each side; passing the whole prefix
+    // made one long run quadratic (fix round 2).
+    const run = text.slice(Math.max(0, at - CHIP_LOOK), at);
+    const end = at + whole.length;
+    return chipOne(whole, at >= CHIP_LOOK ? run : earlier + run, run, text.slice(end, end + CHIP_LOOK));
+  });
 }
+
+/** How far around a candidate {@link chipBlocked}'s rules look. */
+const CHIP_LOOK = 64;
+
+const CHIP_TAIL_RES = [/\/\p{L}+$/u, new RegExp(`${CHIP_USP}${CHIP_UNIT}$`, "u")];
 
 /** One candidate chain as a chip, or as it came when it is none. */
 function chipOne(whole: string, before: string, run: string, after: string): string {
   let p = readChain(whole);
   let tail = "";
-  // A word after the last value that is no unit (`1 → 2 b`, `5 → 6 x`) is
-  // the sentence's, not the chip's: read the chain without it.
-  const spacedWord = p ? null : new RegExp(`${CHIP_USP}${CHIP_UNIT}$`, "u").exec(whole);
-  if (spacedWord) {
-    tail = spacedWord[0];
-    p = readChain(whole.slice(0, -tail.length));
+  // A `/…` that is no rate (`80ms/req`) or a word after the last value that
+  // is no unit (`1 → 2 b`, `5 → 6 x`) is the sentence's, not the chip's:
+  // read the chain without it, the `/…` first.
+  for (const re of CHIP_TAIL_RES) {
+    const m = p ? null : re.exec(whole);
+    if (m) {
+      tail = m[0];
+      p = readChain(whole.slice(0, -tail.length));
+    }
   }
   if (!p) return whole;
   // `row 1 315→179px`: a grouped first value after an order word is the
   // position and the value (`1` + `315`), not 1,315.
-  const lead = p.read[0]!.grouped && ORDER_WORD_RE.test(before) ? /^\d{1,3}[ \u00A0\u202F]/u.exec(whole) : null;
+  const lead = p.read[0]!.grouped && (ORDER_WORD_RE.test(before) || ROW_WORD_RE.test(before)) ? /^\d{1,3}[ \u00A0\u202F]/u.exec(whole) : null;
   if (lead) return lead[0] + chipOne(whole.slice(lead[0].length), before + lead[0], run + lead[0], after);
   if (chipBlocked(p.read, before, run, tail + after)) return whole;
   const { sides, arrows } = p;

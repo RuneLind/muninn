@@ -463,7 +463,7 @@ describe("before → after chips: the matcher", () => {
     ["must land serially, 4 → 5", []],
     ["sequence 4 → 5 → 10", []],
     ["(round 1 → 2 → 3)", []],
-    ["Steps 6→12 all pass", []],
+    ["Step 6→12 all pass", []],
     ["rows 3 → 133 during the run", ["3 → 133"]],
     ["POLICY_VERSION 1→2", ["1→2"]],
     ["PRs went 5 → 3", ["5 → 3"]],
@@ -495,6 +495,22 @@ describe("before → after chips: the matcher", () => {
     ["10 → 20 req/s", ["10 → 20"]],
     ["cleared ~15s/claim → 8-claim/280s budget", []],
     ["20 000 → 25 000 kr/mnd", ["20 000 → 25 000 kr/mnd"]],
+    // Fix round 2 batch 1: a count or measure word is no order word, even
+    // before a colon; only an order word itself takes one more word.
+    ["Row count: 315 → 179", ["315 → 179"]],
+    ["Phase time: 30 → 20", ["30 → 20"]],
+    ["Round trip: 120 → 80", ["120 → 80"]],
+    ["Step count: 6 → 12", ["6 → 12"]],
+    ["open PRs: 12 → 4", ["12 → 4"]],
+    ["PRs: 5 → 3", ["5 → 3"]],
+    ["strict mode: 3 → 0", ["3 → 0"]],
+    ["Steps 6 → 12 in CI", ["6 → 12"]],
+    ["row 3 → 5", ["3 → 5"]],
+    ["sequence length: 5 → 10", ["5 → 10"]],
+    // A rejected rate falls back to the unit before its `/`.
+    ["latency 120 → 80ms/req", ["120 → 80ms"]],
+    ["latency 120 → 80 ms/request", ["120 → 80 ms"]],
+    ["10 → 20 tokens/turn", ["10 → 20 tokens"]],
   ];
   for (const [text, want] of cases) {
     test(JSON.stringify(text), () => expect(chipTexts(beforeAfterChipsHtml(text))).toEqual(want));
@@ -528,6 +544,25 @@ describe("before → after chips: the matcher", () => {
     expect(beforeAfterChipsHtml("\x00INLINE0\x00 → 5")).toBe("\x00INLINE0\x00 → 5");
     expect(beforeAfterParts("1 → 2")).toEqual({ sides: ["1", "2"], arrows: [" → "] });
   });
+});
+
+describe("before → after chips: fix round 2 batch 1", () => {
+  test("a rejected rate keeps its `/…` outside the chip", () => {
+    expect(beforeAfterChipsHtml("latency 120 → 80ms/req")).toBe(
+      'latency <span class="ba-chip"><span class="ba-old">120</span> <span class="ba-arr">→</span> <span class="ba-new">80ms</span></span>/req',
+    );
+  });
+  // Each candidate used to rescan the whole run before it: 5.2 s at 50k
+  // chars on 27bce79f, 34 ms after, 81 ms at the 150k used here (measured).
+  test("one long run full of pairs renders in linear time", () => {
+    for (const unit of ["5 → 6, ", "order: 1 → 2; "]) {
+      const text = unit.repeat(Math.ceil(150_000 / unit.length));
+      const t0 = performance.now();
+      const out = beforeAfterChipsHtml(text);
+      expect(performance.now() - t0).toBeLessThan(3_000);
+      expect(out.length).toBeGreaterThan(text.length - 1);
+    }
+  }, 120_000);
 });
 
 describe("before → after chips: where the renderer draws them", () => {
