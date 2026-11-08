@@ -2,8 +2,9 @@
  * The DOM-free work-map cache the rail reads directly (`wiki-work-map-cache.ts`):
  * one GET per run time, the failed-run latch, the repaint callback, the memo's
  * identity on the listing array, and `adoptIfNewer` as the cache's other write.
- * The module's state lives for the process: each case reads what it compares
- * against at its own start, so it passes alone (`-t`) as well as in order.
+ * The module's state lives for the process: every case sets the run time and
+ * the cache it asserts on at its own start, so it passes alone (`-t`) as well
+ * as in order.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { adoptIfNewer, effortHrefFor, getRailMapFailedAt, getWorkMapCache, railEffortsIndex, workMapFetchFor } from "./wiki-work-map-cache.ts";
@@ -73,7 +74,11 @@ describe("wiki-work-map-cache", () => {
   });
 
   test("a failed GET latches its run time, repaints once, and is not retried for that run", async () => {
+    // A cached map for an earlier run, so the case pins that a failure leaves it.
+    setWorkMapRunAt(1);
+    expect(adoptIfNewer({ map: mapAt(15) } as WorkMapGetBody)).toBe(true);
     const cachedBefore = getWorkMapCache();
+    expect(cachedBefore?.runAt).toBe(15);
     serve(() => new Response("{}", { status: 500 }));
     setWorkMapRunAt(20);
     let repaints = 0;
