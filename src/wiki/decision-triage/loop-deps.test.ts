@@ -14,6 +14,7 @@ const LOGTAPE = Bun.resolveSync("@logtape/logtape", import.meta.dir);
 const LOG = path.join(import.meta.dir, "log.ts");
 const AGENT_STATUS = path.join(import.meta.dir, "..", "..", "observability", "agent-status.ts");
 const LOOP = path.join(import.meta.dir, "..", "work-map", "loop.ts");
+const REGISTRY = path.join(import.meta.dir, "..", "registry-memo.ts");
 
 /** Runs `steps` (a function body over `deps`, `step`, `root`), returning what each `step(...)` saw and the log lines. `model` is more of the run's seams. */
 async function drive(steps: string, env: Record<string, string>, tmp: string, model = "") {
@@ -22,6 +23,7 @@ async function drive(steps: string, env: Record<string, string>, tmp: string, mo
 import { configure } from ${JSON.stringify(LOGTAPE)};
 import { realTriageLoopDeps, triagePassHeld } from ${JSON.stringify(LOOP_DEPS)};
 import { startWorkMapLoop, stopWorkMapLoop, TRIAGE_PASS_BOUND_MS } from ${JSON.stringify(LOOP)};
+import { getWikiRegistry } from ${JSON.stringify(REGISTRY)};
 import { agentStatus } from ${JSON.stringify(AGENT_STATUS)};
 import { appendLogLines, readLog } from ${JSON.stringify(LOG)};
 import { renameSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
@@ -385,8 +387,10 @@ const ac = new AbortController();
 const p = deps.run("a", ac.signal);
 await g1.reached;
 ac.abort();
-seen.push((await deps.recordFailed("a", "the pass timed out after 7 ms")) ?? null);
+// As the loop's bound does: not awaited; it waits for the pass's write in flight.
+const bound = deps.recordFailed("a", "the pass timed out after 7 ms");
 g1.open();
+seen.push((await bound) ?? null);
 seen.push(await p);
 ${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) }), append: async (l) => { if (l.some((x) => x.type === "run")) await g1.pass(); await appendLogLines(logs + "/a.jsonl", l); }`);
       const runs = runLines(tmp);
@@ -472,6 +476,54 @@ seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms"));
       expect(runs).toHaveLength(1);
       expect(runs[0]).toMatchObject({ outcome: "partial", cards: 25 });
       expect(lines.filter((l) => l.type === "card").every((c) => c.runId === runs[0]!.runId)).toBe(true);
+    });
+
+    test("the pass's run line fails to write while the bound fires: the bound waits for it, then writes the one line", async () => {
+      const { tmp, env } = withCards(3);
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+const bound = deps.recordFailed("a", "the pass timed out after 7 ms");
+g1.open();
+seen.push(await p);
+seen.push((await bound) ?? null);
+seen.push(await deps.readState("a"));
+`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) }), append: async (l) => { if (l.some((x) => x.type === "run")) { await g1.pass(); throw new Error("disk full"); } await appendLogLines(logs + "/a.jsonl", l); }`);
+      const lines = logOf(tmp);
+      const runs = lines.filter((l) => l.type === "run");
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: "partial", cards: 3 });
+      expect(String(runs[0]!.reason)).toStartWith("the pass timed out after 7 ms");
+      expect(lines.filter((l) => l.type === "card").every((c) => c.runId === runs[0]!.runId)).toBe(true);
+      expect(seen[1]).toBe("partial");
+      expect(attempts(seen[2])).toBe(1);
+    });
+
+    test("a slot left by Run now's record is not read by a later pass that refuses before it starts", async () => {
+      const { tmp, env } = withCards(30);
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+g1.open();
+await p;
+seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms"));
+// The wiki leaves the registry: the next pass refuses before it has any progress.
+const reg = getWikiRegistry();
+reg.splice(reg.findIndex((e) => e.name === "a"), 1);
+seen.push(await deps.run("a", new AbortController().signal));
+seen.push(await deps.recordFailed("a", "later"));
+`, env, tmp, SECOND_WAITS);
+      const runs = logOf(tmp).filter((l) => l.type === "run");
+      expect(seen[0]).toBe("partial");
+      expect(seen[1]).toMatchObject({ outcome: "refused" });
+      expect(seen[2]).toBe("failed");
+      expect(runs).toHaveLength(2);
+      expect(runs[1]).toMatchObject({ outcome: "failed", cards: 0, reason: "later" });
+      expect(runs[1]!.runId).not.toBe(runs[0]!.runId);
     });
 
     test("the bound's record fails to write: its claim is released, and the pass reports its own end, not the record's", async () => {

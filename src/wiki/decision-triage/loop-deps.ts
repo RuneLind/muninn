@@ -124,23 +124,38 @@ export function realTriageLoopDeps(
     }
   };
   /** A run's progress and who took its one run line: the pass (its own line) or this
-   *  record (a throw or the bound). The first to claim writes; the other writes nothing. */
-  type Slot = { progress: TriageProgress; line: null | { by: "pass" } | { by: "record"; outcome: "partial" | "failed"; cards: number } };
+   *  record (a throw or the bound). The first to claim writes; `landed` settles with
+   *  whether its write landed, and a failed write releases the claim first. */
+  type ClaimFields = { by: "pass" } | { by: "record"; outcome: "partial" | "failed"; cards: number };
+  type Claim = ClaimFields & { landed: Promise<boolean> };
+  type Slot = { progress: TriageProgress; line: Claim | null };
   const inFlight = new Map<string, Slot>();
+  /** Claims `slot`'s line; call the returned function with whether the write landed. */
+  const claimLine = (slot: Slot, fields: ClaimFields): ((ok: boolean) => void) => {
+    let land!: (ok: boolean) => void;
+    const claim = { ...fields, landed: new Promise<boolean>((r) => (land = r)) } as Claim;
+    slot.line = claim;
+    return (ok) => {
+      if (!ok && slot.line === claim) slot.line = null;
+      land(ok);
+    };
+  };
   /** A run that threw or hit the bound, in the state's count and the log: the line
    *  carries its run id and what it had done, so its card lines have their run line.
    *  Verdicts already logged make it `partial`, which is `ok` to the state, so the
-   *  next check does not pay for them twice. Claims the line before its first await:
-   *  the bound calls this right after the abort that ends the run. A run whose line
-   *  is already taken gets no second line or state record. */
+   *  next check does not pay for them twice. Claims the line before its first await
+   *  of its own: the bound calls this right after the abort that ends the run. A run
+   *  whose line is taken gets no second line or state record, unless the claimant's
+   *  write fails: then this waits for it and writes the line itself. */
   const recordFailed = async (wiki: string, error: string) => {
     const slot = inFlight.get(wiki);
-    if (slot?.line) return slot.line.by === "record" ? slot.line.outcome : undefined;
+    for (let taken = slot?.line ?? null; taken; taken = slot?.line ?? null) {
+      if (await taken.landed) return taken.by === "record" ? taken.outcome : undefined;
+    }
     const done = slot?.progress;
     const now = Date.now();
     const outcome = done && done.verdicts > 0 ? "partial" : "failed";
-    const claim = { by: "record", outcome, cards: done?.cardsLogged ?? 0 } as const;
-    if (slot) slot.line = claim;
+    const land = slot ? claimLine(slot, { by: "record", outcome, cards: done?.cardsLogged ?? 0 }) : null;
     const reason = done && done.open !== null ? `${error}; ${done.verdicts} verdict(s) in ${done.cardsLogged} card line(s) logged of ${done.open} open card(s), ${done.usage.calls} call(s) answered` : error;
     try {
       await state.record(wiki, { at: now, outcome: outcome === "partial" ? "ok" : "failed", error: reason });
@@ -149,9 +164,10 @@ export function realTriageLoopDeps(
       ]);
     } catch (err) {
       // A record that never landed is no claim: the pass reports its own end.
-      if (slot?.line === claim) slot.line = null;
+      land?.(false);
       throw err;
     }
+    land?.(true);
     return outcome;
   };
 
@@ -181,6 +197,9 @@ export function realTriageLoopDeps(
   };
 
   async function runPass(wiki: string, signal: AbortSignal): Promise<TriagePassOutcome> {
+    // A slot left from the last run (Run now's record after it) is no longer this wiki's
+    // run; the single-flight hold means no other pass for it is live.
+    inFlight.delete(wiki);
     const entry = entryOf(wiki);
     const at = Date.now();
     if (!entry) {
@@ -206,13 +225,15 @@ export function realTriageLoopDeps(
     const append = async (lines: Parameters<typeof sink>[0]) => {
       if (slot && lines.some((l) => l.type === "run")) {
         if (slot.line) return;
-        slot.line = { by: "pass" };
+        const land = claimLine(slot, { by: "pass" });
         try {
-          return await sink(lines);
+          await sink(lines);
         } catch (err) {
-          slot.line = null;
+          land(false);
           throw err;
         }
+        land(true);
+        return;
       }
       return sink(lines);
     };
