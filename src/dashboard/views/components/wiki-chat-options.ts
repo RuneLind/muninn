@@ -100,8 +100,8 @@ import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 // ── The shell port ────────────────────────────────────────────────────
 
 /**
- * The Ask turn as this dialog uses it — structurally a subset of the shell's
- * `AskTurn`, declared here so the two files share no type declaration and no
+ * The Ask turn as this dialog uses it — structurally a subset of the Ask
+ * controller's `AskTurn` (`wiki-ask-controller.ts`), declared here so the two files share no type declaration and no
  * import cycle. Every field is one the dialog genuinely reads (or, for
  * `chatEsc`, writes back).
  */
@@ -128,7 +128,7 @@ export interface ChatOptPage {
 }
 
 /** What POST /api/wiki/ask/chat answers, as this dialog reads it. Mirrors the
- *  shell's `AskChatResponse` — the POST itself stays in the shell, shared with the
+ *  Ask controller's `AskChatResponse` — the POST itself stays there, shared with the
  *  plain (one-click) escalate path. */
 export interface ChatOptPostResult {
   status: number;
@@ -155,10 +155,11 @@ export interface ChatOptPostResult {
  * CONSTRUCTS a turn.** Every turn it holds came out of `getShownTurn()` (via
  * `state.turn`), i.e. it is a real `AskTurn` the shell handed over, narrowed on
  * the way in and handed straight back — the `AskTurn`-only fields are still
- * there at runtime, unread. The shell's own guard closes the remaining gap: its
- * `refreshChatEscalateBar` starts with `if (turn !== askShownTurn) return;`, an
- * IDENTITY test, so a turn that did not come from the shell repaints nothing at
- * all rather than being read as an `AskTurn`.
+ * there at runtime, unread. The Ask controller's own guard closes the remaining
+ * gap: its `refreshChatEscalateBar` (the shell passes it through) starts with
+ * `if (turn !== askShownTurn) return;`, an IDENTITY test, so a turn that did
+ * not come from the shell repaints nothing at all rather than being read as an
+ * `AskTurn`.
  *
  * Both halves of that are load-bearing. Synthesizing a `ChatOptTurn` here — a
  * stub for a decline, say — and passing it to `refreshChatEscalateBar` would

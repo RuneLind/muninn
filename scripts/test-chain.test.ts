@@ -108,7 +108,11 @@ describe("the live chain", () => {
   // Through `readTree`, the scan `write` and `check` themselves run: a copy of it
   // here would leave its `ownProcessFiles` wiring unexercised.
   test("the wiki boot tests are own-process links: each alone, and in no other link", () => {
-    const boots = ["src/dashboard/views/wiki-boot/wiki-controllers-boot.test.ts", "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts"];
+    const boots = [
+      "src/dashboard/views/wiki-boot/wiki-ask-boot.test.ts",
+      "src/dashboard/views/wiki-boot/wiki-controllers-boot.test.ts",
+      "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts",
+    ];
     const t = readTree();
     expect(t.ownProcessFiles).toBeDefined();
     expect([...(t.ownProcessFiles ?? [])].sort()).toEqual(boots);

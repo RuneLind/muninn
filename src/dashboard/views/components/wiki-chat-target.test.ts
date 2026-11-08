@@ -1315,8 +1315,8 @@ describe("wiki reader chat-dialog wiring", () => {
   // registers, in `src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts`.
 
   test("the shell wires every port member to its real binding", async () => {
-    // The port is six callbacks to module-scoped `let`s the dialog can no longer
-    // reach. Each one has an inert default (`() => null`, `() => []`, a rejected
+    // The port is six callbacks to module-scoped `let`s (the shell's, and since
+    // C4 the Ask controller's) the dialog can no longer reach. Each one has an inert default (`() => null`, `() => []`, a rejected
     // POST), so a member wired to the WRONG `let` degrades SILENTLY: the
     // suggestion chips lose the page's outgoing links, the "Continue …" chip loses
     // the session, the escalate bar stops repainting — and tsc sees a well-typed
@@ -1326,8 +1326,13 @@ describe("wiki reader chat-dialog wiring", () => {
     const at = src.indexOf("initChatOptions({");
     expect(at).toBeGreaterThan(-1);
     const literal = src.slice(at, src.indexOf("});", at));
-    expect(literal).toMatch(/getShownTurn:\s*\(\)\s*=>\s*askShownTurn\b/);
-    expect(literal).toMatch(/getAskTurns:\s*\(\)\s*=>\s*askTurns\b/);
+    // The two turn getters are the Ask controller's (C4): the shell passes them
+    // through, and each must return its own `let` there.
+    expect(literal).toMatch(/getShownTurn:\s*(getAskShownTurn\b|\(\)\s*=>\s*getAskShownTurn\(\))/);
+    expect(literal).toMatch(/getAskTurns(\s*,|:\s*(getAskTurns\b|\(\)\s*=>\s*getAskTurns\(\)))/);
+    const ask = await srcOf("wiki-ask-controller.ts");
+    expect(fnBody(ask, "getAskShownTurn")).toMatch(/return askShownTurn;/);
+    expect(fnBody(ask, "getAskTurns")).toMatch(/return askTurns;/);
     expect(literal).toMatch(/getCurrentArticle:\s*\(\)\s*=>\s*currentArticle\b/);
     expect(literal).toMatch(/getOutgoingTitles:\s*\(\)\s*=>\s*currentOutgoingTitles\b/);
     // The last two are the shell's own functions, passed by shorthand.

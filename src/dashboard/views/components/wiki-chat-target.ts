@@ -728,7 +728,7 @@ export function captureChatOptFocus(
  *  bytes the server is about to discard.
  *
  *  Lives HERE rather than in either caller because BOTH escalation paths apply it
- *  and they no longer share a file: the one-click bar is `wiki-browser.ts`'s
+ *  and they no longer share a file: the one-click bar is `wiki-ask-controller.ts`'s
  *  `submitChatEscalate`, the dialog is `wiki-chat-options.ts`. Two copies of a cap
  *  that mirrors a server constant is exactly the pair that drifts. */
 export const CHAT_ESC_ANSWER_MAX = 32_000;
