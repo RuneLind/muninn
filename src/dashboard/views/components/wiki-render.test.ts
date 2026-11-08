@@ -113,8 +113,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // ports): 811,207 bytes (275,384 gzipped); the port reads (`deps.x()`) cost the bytes.
 // 2026-11-08: mermaid in the reader's palette, readable size and the ⤢ view
 // (wiki-mermaid.ts + mermaid-theme.ts): 819,709 bytes (278,693 gzipped); its fix
-// round's categorical colours for every other diagram type: 824,039 (280,294 gzipped).
-const WIKI_CLIENT_MAX_BYTES = 825_000;
+// round's categorical colours for every other diagram type: 824,039 (280,294 gzipped);
+// its batch 2 (measured smallest text, the gantt redraw, the header search): 825,630.
+const WIKI_CLIENT_MAX_BYTES = 827_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

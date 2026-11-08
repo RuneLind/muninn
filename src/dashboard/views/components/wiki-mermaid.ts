@@ -47,6 +47,7 @@ import {
   chooseLayout,
   dialogWidth,
   flipToTopDown,
+  hostWidthFor,
   injectClassDefs,
   needsFlipCandidate,
   parseViewBox,
@@ -102,12 +103,18 @@ export function hasMermaid(root: ParentNode): boolean {
  * `graph` also gets four node classes (`good`, `warn`, `bad`, `muted`),
  * injected at render time only: `data-mermaid-src` keeps the page's source.
  *
- * Readable size: node text is drawn at 14 px × min(1, body width ÷ viewBox
- * width). Under 11 px, an `LR`/`RL` flowchart is drawn top-down too and shown
- * that way when its text is larger and it stays under 900 px tall; still under
- * 11 px, the SVG is given the width that draws 11 px and `.diagram-body`
- * scrolls sideways, a named tab stop while it does (`syncScrollStop`). Decided
- * from the page's own orientation on every measure (`chooseLayout`).
+ * Readable size: each drawing is measured once after render for its smallest
+ * visible text in SVG user units (`measureMinText`: 14 px for flowchart nodes,
+ * 10 px for gantt ticks, 16 px for sequence messages, whatever a page's init
+ * sets), drawn at that × min(1, body width ÷ viewBox width). Under 11 px, an
+ * `LR`/`RL` flowchart is drawn top-down too and shown that way when its text
+ * is larger and it stays under 900 px tall as shown; still under 11 px, the
+ * SVG is given the width that draws its smallest text at 11 px and
+ * `.diagram-body` scrolls sideways, a named tab stop while it does
+ * (`syncScrollStop`). A diagram whose viewBox follows its box (gantt) is
+ * redrawn at the width that, widened to 11 px, fills the body exactly, so it
+ * reads at 11 px with no scrollbar (`hostWidthFor`). Decided from the page's
+ * own orientation on every measure (`chooseLayout`).
  *
  * | Starting state                 | Event                                  | Result                                                        |
  * |--------------------------------|----------------------------------------|---------------------------------------------------------------|
@@ -168,6 +175,12 @@ interface Rendered {
   svg: string;
   id: string;
   vb: { width: number; height: number } | null;
+  /** Smallest visible text in SVG user units, or null when it has none. */
+  minText: number | null;
+  /** Width of the box it was drawn in. */
+  hostWidth: number;
+  /** Its viewBox width followed that box (gantt), so a redraw can resize it. */
+  tracksHost: boolean;
 }
 
 interface DiagramState {
@@ -304,12 +317,49 @@ function ensureInit(cfg: PassConfig): void {
   initializedKey = cfg.key;
 }
 
-/** Render one source under `cfg` (classes injected). Throws on a bad fence. */
-async function draw(cfg: PassConfig, source: string): Promise<Rendered> {
+/**
+ * The smallest visible text in a laid-out SVG, in its own user units: the
+ * computed `font-size` of each element with its own non-blank text and a
+ * non-empty box (foreignObject HTML labels included; mermaid's hidden
+ * measuring text and `<style>` excluded). Null when it has no visible text.
+ */
+function measureMinText(svg: SVGSVGElement): number | null {
+  let min = Infinity;
+  for (const el of Array.from(svg.querySelectorAll<Element>("*"))) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === "style" || tag === "title" || tag === "desc" || tag === "script") continue;
+    if (!Array.from(el.childNodes).some((n) => n.nodeType === 3 && (n.textContent ?? "").trim())) continue;
+    const box = el.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) continue;
+    const size = parseFloat(getComputedStyle(el).fontSize);
+    if (size > 0) min = Math.min(min, size);
+  }
+  return Number.isFinite(min) ? min : null;
+}
+
+/**
+ * Render one source under `cfg` (classes injected) inside an off-screen box
+ * `hostWidth` px wide, then lay the result out there once to measure its
+ * smallest text. Throws on a bad fence.
+ */
+async function draw(cfg: PassConfig, source: string, hostWidth: number): Promise<Rendered> {
   ensureInit(cfg);
   const id = `wm-${idCounter++}`;
-  const { svg } = await mermaidLib().render(id, injectClassDefs(source, cfg.classDefs));
-  return { svg, id, vb: parseViewBox(svg) };
+  const w = Math.max(1, Math.round(hostWidth));
+  const host = document.createElement("div");
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = `position:absolute;left:-100000px;top:0;width:${w}px;visibility:hidden;pointer-events:none`;
+  document.body.appendChild(host);
+  try {
+    const { svg } = await mermaidLib().render(id, injectClassDefs(source, cfg.classDefs), host);
+    const vb = parseViewBox(svg);
+    host.innerHTML = svg;
+    const el = host.querySelector<SVGSVGElement>("svg");
+    const minText = el ? measureMinText(el) : null;
+    return { svg, id, vb, minText, hostWidth: w, tracksHost: !!vb && Math.abs(vb.width - w) < 1 };
+  } finally {
+    host.remove();
+  }
 }
 
 /** Queue `fn` behind any in-flight pass (see {@link passChain}). Anything read
@@ -342,21 +392,47 @@ async function layout(st: DiagramState): Promise<void> {
     return;
   }
   st.measuredWidth = width;
+  let redrawn = false;
+  if (st.orig.tracksHost && st.orig.minText) {
+    // A gantt's viewBox is its box's width: draw it at the width that, widened
+    // to 11 px text, fills this body exactly (`hostWidthFor`).
+    const target = hostWidthFor(width, st.orig.minText);
+    if (target > 0 && target !== st.orig.hostWidth) {
+      try {
+        st.orig = await draw(st.cfg, st.source, target);
+        redrawn = true;
+      } catch {
+        /* the previous drawing stays */
+      }
+      if (!st.wrap.isConnected) return;
+    }
+  }
+  const origVb = st.orig.vb;
+  if (!origVb) {
+    syncScrollStop(st.body, SCROLL_LABEL);
+    return;
+  }
+  const original = { ...origVb, minText: st.orig.minText };
   if (st.flip === undefined) {
     const flipped = flipToTopDown(st.source);
     if (!flipped) st.flip = null;
-    else if (needsFlipCandidate(width, st.cfg.fontPx, st.orig.vb)) {
+    else if (needsFlipCandidate(width, st.cfg.fontPx, original)) {
       try {
-        st.flip = await draw(st.cfg, flipped);
+        st.flip = await draw(st.cfg, flipped, width);
       } catch {
         st.flip = null;
       }
       if (!st.wrap.isConnected) return;
     }
   }
-  const d = chooseLayout({ bodyWidth: width, fontPx: st.cfg.fontPx, original: st.orig.vb, flipped: st.flip?.vb ?? null });
+  const d = chooseLayout({
+    bodyWidth: width,
+    fontPx: st.cfg.fontPx,
+    original,
+    flipped: st.flip?.vb ? { ...st.flip.vb, minText: st.flip.minText } : null,
+  });
   const want = d.flipped && st.flip ? "flip" : "orig";
-  if (want !== st.shown || (st.widened !== null && d.widenTo === null) || !st.body.querySelector("svg")) {
+  if (redrawn || want !== st.shown || (st.widened !== null && d.widenTo === null) || !st.body.querySelector("svg")) {
     st.body.innerHTML = (want === "flip" ? st.flip! : st.orig).svg;
     st.shown = want;
     st.widened = null;
@@ -365,7 +441,7 @@ async function layout(st: DiagramState): Promise<void> {
   else st.wrap.removeAttribute("data-mermaid-flipped");
   const svg = st.body.querySelector<SVGSVGElement>("svg");
   if (svg && d.widenTo !== null) {
-    const w = Math.ceil(d.widenTo);
+    const w = Math.ceil(d.widenTo - 1e-6); // float noise must not add a 1 px scroll
     svg.style.maxWidth = "none";
     svg.setAttribute("width", String(w));
     st.widened = w;
@@ -509,7 +585,7 @@ async function renderFences(root: ParentNode): Promise<void> {
     const cfg = readPassConfig(pre);
     let orig: Rendered;
     try {
-      orig = await draw(cfg, source);
+      orig = await draw(cfg, source, pre.parentElement?.clientWidth || window.innerWidth);
     } catch {
       continue; // fail-visible: leave this diagram's original markup in place.
     }
@@ -541,7 +617,7 @@ async function rerenderChanged(): Promise<void> {
     if (cfg.key === st.cfg.key) continue;
     let orig: Rendered;
     try {
-      orig = await draw(cfg, st.source);
+      orig = await draw(cfg, st.source, st.body.clientWidth || window.innerWidth);
     } catch {
       continue; // the previous drawing stays
     }

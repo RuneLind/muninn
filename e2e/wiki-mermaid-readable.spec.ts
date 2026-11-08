@@ -13,6 +13,11 @@
  *     drawn `TD`; one too tall top-down keeps `LR` at 11 px text and scrolls
  *     sideways as a named tab stop; a fence in a closed `<Fold>` is measured
  *     only once the fold opens.
+ *     The floor is the smallest REAL text drawn (gantt 10 px ticks, sequence
+ *     16 px messages, a page's 9 px init), measured here from computed
+ *     font-size × screen transform: under 11 px only with a scrollbar, a gantt
+ *     fills the column at 11 px with none, and a flip that would stand over
+ *     900 px once widened stays LR.
  *  3. **⤢ full-window.** Opens by click and keyboard, closes by Esc, backdrop
  *     and button with focus back on ⤢, stays open on a click inside, redraws
  *     its copy in the new colours on a palette flip (its own svg id, so its
@@ -90,6 +95,62 @@ const FOLD_PAGE = [
   "",
 ].join("\n");
 
+/** A gantt: its smallest text is a 10 px tick and its viewBox follows its box. */
+const GANTT = [
+  "```mermaid",
+  "gantt",
+  "  title Release plan",
+  "  dateFormat YYYY-MM-DD",
+  "  section Build",
+  "  Design the parser :a1, 2026-01-01, 30d",
+  "  Write the renderer :after a1, 25d",
+  "  section Ship",
+  "  Review and land :2026-02-20, 14d",
+  "```",
+].join("\n");
+/** A sequence diagram (16 px messages) a little wider than the column. */
+const SEQUENCE = [
+  "```mermaid",
+  "sequenceDiagram",
+  ...Array.from({ length: 4 }, (_, i) => `  participant P${i} as Participant number ${i}`),
+  ...Array.from({ length: 3 }, (_, i) => `  P${i}->>P${i + 1}: message ${i}`),
+  "```",
+].join("\n");
+/** A small flowchart whose page init sets 9 px text. */
+const NINE_PX = ["```mermaid", '%%{init:{"themeVariables":{"fontSize":"9px"}}}%%', "flowchart LR", "  A[small] --> B[text]", "```"].join("\n");
+/** Eight parallel twelve-node chains: TD fits under 900 px scaled to the
+ *  column, but widened to 11 px text it would stand far over 900 px. */
+const TALL_FLIP = [
+  "```mermaid",
+  "flowchart LR",
+  ...Array.from({ length: 8 }, (_, r) =>
+    Array.from({ length: 11 }, (_, i) => `  R${r}N${i}[row ${r} step ${i} label] --> R${r}N${i + 1}[row ${r} step ${i + 1} label]`).join("\n"),
+  ),
+  "```",
+].join("\n");
+
+/** A node hidden by its own class, with 6 px text: hidden text is no floor. */
+const HIDDEN = ["```mermaid", "flowchart TD", "  A[visible] --> B[gone]", "  classDef gone display:none,font-size:6px", "  class B gone", "```"].join("\n");
+
+const TYPES_PAGE = [
+  "---",
+  "title: Types Page",
+  "---",
+  "",
+  "# Types Page",
+  "",
+  GANTT,
+  "",
+  SEQUENCE,
+  "",
+  NINE_PX,
+  "",
+  TALL_FLIP,
+  "",
+  HIDDEN,
+  "",
+].join("\n");
+
 const OTHER_PAGE = ["---", "title: Other Page", "---", "", "# Other Page", "", "See [[diagram-page|the diagrams]].", ""].join("\n");
 
 const BROKEN_PAGE = ["---", "title: Broken Page", "---", "", "# Broken Page", "", "```mermaid", "flowchart LR", "  A -->|unclosed B", "  ((((", "```", ""].join("\n");
@@ -103,6 +164,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "fold-page.mdx"), FOLD_PAGE, "utf8");
   await writeFile(path.join(root, "other-page.md"), OTHER_PAGE, "utf8");
   await writeFile(path.join(root, "broken-page.md"), BROKEN_PAGE, "utf8");
+  await writeFile(path.join(root, "types-page.md"), TYPES_PAGE, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -305,6 +367,77 @@ test.describe("readable size", () => {
     await page.locator("#articleWrap details > summary").first().click();
     await expect(wrap.locator(".diagram-body")).toHaveAttribute("role", "region", { timeout: 5000 });
     expect(await wrap.locator(".diagram-body svg").evaluate((s) => (14 * s.getBoundingClientRect().width) / (s as SVGSVGElement).viewBox.baseVal.width)).toBeCloseTo(11, 0);
+  });
+});
+
+test.describe("readable size from the smallest real text", () => {
+  /** Per diagram: the smallest text as drawn on screen (computed font-size ×
+   *  the element's screen transform), whether the body scrolls, the drawn
+   *  height and whether it was flipped. Independent of the code's own maths. */
+  const measure = (page: Page) =>
+    diagrams(page).evaluateAll((wraps) =>
+      wraps.map((w) => {
+        const body = w.querySelector<HTMLElement>(".diagram-body")!;
+        const svg = body.querySelector<SVGSVGElement>("svg")!;
+        let min = Infinity;
+        for (const el of Array.from(svg.querySelectorAll<Element>("*"))) {
+          if (["style", "title", "desc"].includes(el.tagName.toLowerCase())) continue;
+          if (!Array.from(el.childNodes).some((n) => n.nodeType === 3 && (n.textContent ?? "").trim())) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          const g = (el instanceof SVGGraphicsElement ? el : el.closest("foreignObject")) as SVGGraphicsElement;
+          const m = g.getScreenCTM()!;
+          min = Math.min(min, parseFloat(getComputedStyle(el).fontSize) * Math.hypot(m.a, m.b));
+        }
+        return {
+          head: (w.getAttribute("data-mermaid-src") ?? "").split("\n").find((l) => l.trim() && !l.trim().startsWith("%%")) ?? "",
+          px: min,
+          over: body.scrollWidth - body.clientWidth,
+          widened: svg.getAttribute("width") !== "100%",
+          scrolls: body.scrollWidth > body.clientWidth + 1,
+          height: svg.getBoundingClientRect().height,
+          flipped: w.hasAttribute("data-mermaid-flipped"),
+        };
+      }),
+    );
+
+  for (const vp of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) {
+    test(`at ${vp.width}×${vp.height}: no text under 11 px without a scrollbar, no flip over 900 px`, async ({ page }) => {
+      await page.setViewportSize(vp);
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=types-page.md`);
+      await expect(diagrams(page)).toHaveCount(5, { timeout: 20_000 });
+      await page.waitForTimeout(600); // a resize or redraw pass settles
+      const rows = await measure(page);
+      for (const r of rows) {
+        expect.soft(r.px >= 10.95 || r.scrolls, `${r.head}: ${r.px.toFixed(2)} px with no scrollbar`).toBe(true);
+        if (r.flipped) expect.soft(r.height, `${r.head}: flipped ${r.height} px tall`).toBeLessThanOrEqual(900);
+      }
+      const [gantt, seq, nine, tall, hidden] = rows;
+      // gantt: drawn at the width that fills the column at 11 px, not 1 px more.
+      expect.soft(gantt!.over, "gantt needs no scrollbar").toBeLessThanOrEqual(0);
+      expect.soft(gantt!.px).toBeGreaterThanOrEqual(10.95);
+      // sequence: 16 px messages read ≥ 11 px in the column: never widened for 14 px maths.
+      expect.soft(seq!.px).toBeGreaterThanOrEqual(10.95);
+      // 9 px init: drawn larger than natural so its text reads 11 px.
+      expect.soft(nine!.px).toBeGreaterThanOrEqual(10.95);
+      // the tall flip stays LR and scrolls.
+      expect.soft(tall!.flipped, "TD widened would be over 900 px tall").toBe(false);
+      expect.soft(tall!.scrolls).toBe(true);
+      // a hidden 6 px label is not the floor: the visible 14 px nodes fit unwidened.
+      expect.soft(hidden!.widened, "hidden text widened nothing").toBe(false);
+      expect.soft(hidden!.px).toBeCloseTo(14, 1);
+    });
+  }
+
+  test("sequence at a scale where 14 px maths would widen it shows no scrollbar", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=types-page.md`);
+    await expect(diagrams(page)).toHaveCount(5, { timeout: 20_000 });
+    const seq = diagrams(page).nth(1).locator(".diagram-body");
+    const scale = await seq.evaluate((b) => b.clientWidth / (b.querySelector("svg") as SVGSVGElement).viewBox.baseVal.width);
+    // The fixture sits where 14 px × scale < 11 ≤ 16 px × scale.
+    expect(14 * scale).toBeLessThan(11);
+    expect(16 * scale).toBeGreaterThanOrEqual(11);
+    expect(await seq.evaluate((b) => b.scrollWidth > b.clientWidth + 1)).toBe(false);
   });
 });
 

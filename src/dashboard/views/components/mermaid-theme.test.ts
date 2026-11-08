@@ -6,6 +6,7 @@ import {
   chooseLayout,
   dialogWidth,
   flipToTopDown,
+  hostWidthFor,
   injectClassDefs,
   mix,
   needsFlipCandidate,
@@ -304,6 +305,30 @@ describe("flipToTopDown", () => {
   });
 });
 
+describe("the header search skips every block mermaid allows before the header", () => {
+  const defs = ["classDef good fill:#000"];
+  const multiInit = '%%{\n  init: {\n    "theme": "base"\n  }\n}%%\nflowchart LR\n  A --> B';
+  const fmConfig = "---\nconfig:\n  theme: base\n  flowchart:\n    curve: basis\n---\nflowchart LR\n  A --> B";
+  const blankThenFm = "\n\n---\ntitle: x\n---\ngraph RL\n  A --> B";
+  test("a %%{ … }%% directive across several lines", () => {
+    expect(flipToTopDown(multiInit)).toBe(multiInit.replace("flowchart LR", "flowchart TD"));
+    expect(injectClassDefs(multiInit, defs).split("\n")[6]).toBe("  classDef good fill:#000");
+  });
+  test("a --- config front-matter block", () => {
+    expect(flipToTopDown(fmConfig)).toBe(fmConfig.replace("flowchart LR", "flowchart TD"));
+    expect(injectClassDefs(fmConfig, defs).split("\n")[7]).toBe("  classDef good fill:#000");
+  });
+  test("blank lines before the front matter", () => {
+    expect(flipToTopDown(blankThenFm)).toBe(blankThenFm.replace("graph RL", "graph TD"));
+    expect(injectClassDefs(blankThenFm, defs).split("\n")[6]).toBe("  classDef good fill:#000");
+  });
+  test("a directive and front matter together; an unclosed directive finds no header", () => {
+    const both = "---\ntitle: t\n---\n%%{init:\n {}}%%\nflowchart LR\n  A";
+    expect(flipToTopDown(both)).toBe(both.replace("flowchart LR", "flowchart TD"));
+    expect(flipToTopDown("%%{init:\nflowchart LR\n  A")).toBeNull();
+  });
+});
+
 test("parseViewBox reads width and height of the root svg", () => {
   expect(parseViewBox('<svg id="wm-1" width="100%" viewBox="-8 -8 1234.5 300" style="max-width: 1234.5px;">')).toEqual({ width: 1234.5, height: 300 });
   expect(parseViewBox('<svg viewBox="0,0,10,20">')).toEqual({ width: 10, height: 20 });
@@ -351,6 +376,64 @@ describe("chooseLayout", () => {
   test("needsFlipCandidate is the same 11 px line", () => {
     expect(needsFlipCandidate(700, 14, original)).toBe(true);
     expect(needsFlipCandidate(1960, 14, original)).toBe(false);
+  });  test("the flip's 900 px cap holds for the height it is shown at once widened", () => {
+    // Column-scaled the TD copy is 600 px tall; widened to 11 px text it is 1178.6 px.
+    const wide = { width: 4000, height: 300 };
+    const tall = { width: 2000, height: 1500 };
+    const d = chooseLayout({ bodyWidth: 800, fontPx: 14, original: wide, flipped: tall });
+    expect(d).toEqual({ flipped: false, widenTo: (4000 * 11) / 14 });
+    // The same copy short enough once widened (≤ 900 px) still flips.
+    const ok = { width: 2000, height: 1100 }; // widened 1571.4 → 864.3 px tall
+    const f = chooseLayout({ bodyWidth: 800, fontPx: 14, original: wide, flipped: ok });
+    expect(f.flipped).toBe(true);
+    expect((ok.height * f.widenTo!) / ok.width).toBeLessThan(FLIP_MAX_HEIGHT_PX);
+  });
+});
+
+describe("chooseLayout reads each drawing's smallest real text, not 14 px", () => {
+  const original = { width: 1960, height: 200 };
+  test("gantt (10 px ticks) at its natural width is widened to 11 px", () => {
+    const gantt = { width: 1424, height: 148, minText: 10 };
+    expect(chooseLayout({ bodyWidth: 1424, fontPx: 14, original: gantt })).toEqual({ flipped: false, widenTo: 1424 * 1.1 });
+  });
+  test("a page's 9 px init fits the column and is still widened to 11 px", () => {
+    const small = { width: 300, height: 60, minText: 9 };
+    const d = chooseLayout({ bodyWidth: 800, fontPx: 14, original: small });
+    expect(d.widenTo).toBeCloseTo((300 * 11) / 9, 9);
+    expect((9 * d.widenTo!) / 300, "drawn scaled up past natural size").toBeCloseTo(MERMAID_TEXT_MIN_PX, 9);
+  });
+  test("sequence (16 px) at 0.75 reads 12 px: no needless widen, no flip candidate", () => {
+    const seq = { width: 1000, height: 300, minText: 16 };
+    expect(chooseLayout({ bodyWidth: 750, fontPx: 14, original: seq })).toEqual({ flipped: false, widenTo: null });
+    expect(needsFlipCandidate(750, 14, seq)).toBe(false);
+  });
+  test("no measured text falls back to the pass's font size", () => {
+    expect(chooseLayout({ bodyWidth: 700, fontPx: 14, original: { ...original, minText: null } })).toEqual({ flipped: false, widenTo: 1540 });
+    expect(chooseLayout({ bodyWidth: 700, fontPx: 14, original: { ...original, minText: 0 } })).toEqual({ flipped: false, widenTo: 1540 });
+  });
+  test("the flipped copy is judged by its own smallest text", () => {
+    // TD copy 900 wide in 800: 14 px nodes → 12.4 px, but its 10 px label → 8.9 px: widened.
+    const d = chooseLayout({ bodyWidth: 800, fontPx: 14, original, flipped: { width: 900, height: 400, minText: 10 } });
+    expect(d.flipped).toBe(true);
+    expect(d.widenTo).toBeCloseTo(990, 6);
+  });
+});
+
+describe("hostWidthFor: a container-driven drawing widened to 11 px fills the body exactly", () => {
+  test("10 px text in 800 px → drawn 727 wide", () => {
+    expect(hostWidthFor(800, 10)).toBe(727);
+    expect(hostWidthFor(800, 14)).toBe(800);
+  });
+  test("never a scrollbar, never under 11 px", () => {
+    for (let w = 280; w <= 2400; w += 7) {
+      for (const m of [7.07, 9, 10, 10.5, 11, 16]) {
+        const host = hostWidthFor(w, m);
+        const d = chooseLayout({ bodyWidth: w, fontPx: 14, original: { width: host, height: 100, minText: m } });
+        const shownW = d.widenTo === null ? Math.min(w, host) : Math.ceil(d.widenTo - 1e-6);
+        expect(shownW).toBeLessThanOrEqual(w);
+        expect(m * (shownW / host)).toBeGreaterThanOrEqual(MERMAID_TEXT_MIN_PX - 0.02);
+      }
+    }
   });
 });
 

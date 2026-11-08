@@ -43,7 +43,7 @@ export const MERMAID_TOKENS: Readonly<Record<keyof TokenColors, string>> = {
 export const THEMED_FONT_PX = 14;
 /** Node text size under mermaid's own `default`/`dark` themes (the fallback). */
 export const FALLBACK_FONT_PX = 16;
-/** The smallest node text a page diagram is shown at without a scrollbar. */
+/** The smallest text (any label, measured) a page diagram is shown at without a scrollbar. */
 export const MERMAID_TEXT_MIN_PX = 11;
 /** A flipped (top-down) drawing taller than this stays left-to-right. */
 export const FLIP_MAX_HEIGHT_PX = 900;
@@ -390,17 +390,23 @@ function categoricalVariables(t: {
   return v;
 }
 
-/** Index of the first line after an optional `---` front-matter block and any
- *  blank or `%%` comment/directive lines; -1 when there is none. */
+/** Index of the diagram header line: past leading blank lines, an optional
+ *  `---` front-matter block, blank lines, `%%` comments and `%%{ … }%%`
+ *  directives (one line or several); -1 when there is none. */
 function headerLineIndex(lines: string[]): number {
   let i = 0;
-  if (lines[0]?.trim() === "---") {
-    const end = lines.findIndex((l, j) => j > 0 && l.trim() === "---");
+  while (i < lines.length && lines[i]!.trim() === "") i++;
+  if (lines[i]?.trim() === "---") {
+    const end = lines.findIndex((l, j) => j > i && l.trim() === "---");
     if (end < 0) return -1;
     i = end + 1;
   }
   for (; i < lines.length; i++) {
     const t = lines[i]!.trim();
+    if (t.startsWith("%%{") && !t.includes("}%%")) {
+      while (i < lines.length && !lines[i]!.includes("}%%")) i++;
+      continue; // unclosed: runs off the end → -1
+    }
     if (t === "" || t.startsWith("%%")) continue;
     return i;
   }
@@ -454,14 +460,23 @@ export function parseViewBox(svg: string): { width: number; height: number } | n
   return width > 0 && height > 0 ? { width, height } : null;
 }
 
-/** Node text size as drawn: mermaid scales the SVG down to the column, never up. */
+/** Text size as drawn: mermaid scales the SVG down to the column, never up.
+ *  `fontPx` is the drawing's smallest text in SVG user units. */
 export function renderedTextPx(fontPx: number, bodyWidth: number, viewBoxWidth: number): number {
   return fontPx * Math.min(1, bodyWidth / viewBoxWidth);
 }
 
-/** The width (CSS px) that draws the SVG's text at exactly the floor. */
+/** The width (CSS px) that draws the SVG's smallest text at exactly the floor. */
 export function widenedWidth(viewBoxWidth: number, fontPx: number, minPx = MERMAID_TEXT_MIN_PX): number {
   return (viewBoxWidth * minPx) / fontPx;
+}
+
+/** One drawing as `chooseLayout` sees it. `minText` is its smallest rendered
+ *  text in SVG user units (measured after render); absent → the pass's fontPx. */
+export interface Drawing {
+  width: number;
+  height: number;
+  minText?: number | null;
 }
 
 export interface Layout {
@@ -471,38 +486,50 @@ export interface Layout {
   widenTo: number | null;
 }
 
+/** Text px, widen width and displayed height of one drawing in `bodyWidth`. */
+function shown(d: Drawing, fontPx: number, bodyWidth: number): { px: number; widenTo: number | null; height: number } {
+  const text = d.minText && d.minText > 0 ? d.minText : fontPx;
+  const px = renderedTextPx(text, bodyWidth, d.width);
+  if (px >= MERMAID_TEXT_MIN_PX) return { px, widenTo: null, height: d.height * Math.min(1, bodyWidth / d.width) };
+  const widenTo = widenedWidth(d.width, text);
+  return { px, widenTo, height: (d.height * widenTo) / d.width };
+}
+
 /**
  * Decide orientation and width from the page's own drawing and, when there is
  * one, its top-down copy. Pure: always decided from the original orientation,
  * so a resize wider un-flips and un-widens. `bodyWidth` must be > 0 — a box with
- * no layout (closed fold, hidden lens) is never measured.
+ * no layout (closed fold, hidden lens) is never measured. The flip's height cap
+ * is checked on the height it is SHOWN at, widened or not.
  */
 export function chooseLayout(input: {
   bodyWidth: number;
   fontPx: number;
-  original: { width: number; height: number };
-  flipped?: { width: number; height: number } | null;
+  original: Drawing;
+  flipped?: Drawing | null;
 }): Layout {
   const { bodyWidth, fontPx, original, flipped } = input;
-  const pxOrig = renderedTextPx(fontPx, bodyWidth, original.width);
-  let chosen = original;
-  let px = pxOrig;
-  let isFlipped = false;
-  if (pxOrig < MERMAID_TEXT_MIN_PX && flipped) {
-    const pxFlip = renderedTextPx(fontPx, bodyWidth, flipped.width);
-    const heightFlip = flipped.height * Math.min(1, bodyWidth / flipped.width);
-    if (pxFlip > pxOrig && heightFlip < FLIP_MAX_HEIGHT_PX) {
-      chosen = flipped;
-      px = pxFlip;
-      isFlipped = true;
-    }
+  const orig = shown(original, fontPx, bodyWidth);
+  if (orig.px < MERMAID_TEXT_MIN_PX && flipped) {
+    const flip = shown(flipped, fontPx, bodyWidth);
+    if (flip.px > orig.px && flip.height < FLIP_MAX_HEIGHT_PX) return { flipped: true, widenTo: flip.widenTo };
   }
-  return { flipped: isFlipped, widenTo: px < MERMAID_TEXT_MIN_PX ? widenedWidth(chosen.width, fontPx) : null };
+  return { flipped: false, widenTo: orig.widenTo };
 }
 
 /** True when an un-flipped layout needs the top-down copy to decide. */
-export function needsFlipCandidate(bodyWidth: number, fontPx: number, original: { width: number }): boolean {
-  return renderedTextPx(fontPx, bodyWidth, original.width) < MERMAID_TEXT_MIN_PX;
+export function needsFlipCandidate(bodyWidth: number, fontPx: number, original: Drawing): boolean {
+  return shown(original, fontPx, bodyWidth).px < MERMAID_TEXT_MIN_PX;
+}
+
+/**
+ * The width to draw a diagram whose viewBox follows its container (gantt) at,
+ * so that widened to the floor it fills `bodyWidth` exactly: its smallest text
+ * then reads at 11 px without a scrollbar. Text already ≥ 11 px → `bodyWidth`.
+ * Floored, so `ceil(widenedWidth(result, minText))` never exceeds `bodyWidth`.
+ */
+export function hostWidthFor(bodyWidth: number, minText: number, minPx = MERMAID_TEXT_MIN_PX): number {
+  return Math.floor(bodyWidth * Math.min(1, minText / minPx));
 }
 
 /**
