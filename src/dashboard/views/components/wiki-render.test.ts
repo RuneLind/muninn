@@ -112,8 +112,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-08, C5 (the article tools, right pane and series editor behind
 // ports): 811,207 bytes (275,384 gzipped); the port reads (`deps.x()`) cost the bytes.
 // 2026-11-08, render-richer PR 2 (reader shapes: number columns, verdict cells, the
-// label grid, in the bundled formatWebHtml): 814,851 bytes (276,668 gzipped).
-const WIKI_CLIENT_MAX_BYTES = 815_200;
+// label grid, in the bundled formatWebHtml): 814,851 bytes (276,668 gzipped); its
+// fix round 1 (id and date headers, traffic lights, the nowrap number span): 816,448 (277,205).
+const WIKI_CLIENT_MAX_BYTES = 816_800;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

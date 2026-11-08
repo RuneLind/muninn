@@ -29,7 +29,7 @@ import type { Block, ChecklistList, ChecklistRow, ComponentName, FactVerdict, Li
 import { withoutComponentTags } from "../format/component-observer.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
-import { htmlText, labelGridItems, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
+import { htmlText, labelGridItems, numberCellHtml, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
 import { questionCardAnchor, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
@@ -2166,7 +2166,8 @@ function runListHtml(list: ChecklistList): string {
 }
 
 /** A pipe table on the reader: number columns (`num`, on the header too) and
- *  verdict cells (`v-good`/`v-warn`/`v-bad`, the glyph kept as hidden text). */
+ *  verdict cells (`v-good`/`v-warn`/`v-bad`, the glyph kept as hidden text;
+ *  a traffic light adds `v-light` and keeps its glyph on screen). */
 function readerTableHtml(headers: string[], rows: string[][]): string {
   const head = headers.map(renderInline);
   const body = rows.map((row) => row.map(renderInline));
@@ -2174,9 +2175,9 @@ function readerTableHtml(headers: string[], rows: string[][]): string {
   const thead = "<thead><tr>" + head.map((h, c) => `<th${nums.has(c) ? ' class="num"' : ""}>${h}</th>`).join("") + "</tr></thead>";
   const tbody = "<tbody>" + body.map((row) =>
     "<tr>" + row.map((cell, c) => {
-      if (nums.has(c)) return `<td class="num">${cell}</td>`;
+      if (nums.has(c)) return `<td class="num">${numberCellHtml(cell)}</td>`;
       const v = verdictCell(cell);
-      return v ? `<td class="v-${v.tone}">${v.html}</td>` : `<td>${cell}</td>`;
+      return v ? `<td class="v-${v.tone}${v.light ? " v-light" : ""}">${v.html}</td>` : `<td>${cell}</td>`;
     }).join("") + "</tr>"
   ).join("") + "</tbody>";
   return `<table>${thead}${tbody}</table>`;

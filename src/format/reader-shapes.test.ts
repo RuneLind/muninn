@@ -18,7 +18,15 @@ describe("isNumberCell", () => {
     ["790 (just lists, no board)", true],
     ["~290 (agent skills, ADRs, operational guides, e2e specs)", false],
     ["27305752256", false],
-    ["1234567", true],
+    ["1234567", false],
+    ["719717", false],
+    ["12345", true],
+    ["1234e56", false],
+    ["08.11", false],
+    ["07.11", false],
+    ["15.09 (15f7bf5108)", false],
+    ["15.09", true],
+    ["1.10", true],
     ["12%", true],
     ["3.2 s", true],
     ["450ms", true],
@@ -64,6 +72,62 @@ describe("numberColumns", () => {
   test("a year beside a non-year number is numeric", () => expect(numberColumns(["n", "v"], [["a", "2026"], ["b", "17"]]).has(1)).toBe(true));
 });
 
+describe("numberColumns: headers and values that are not quantities (PR #832 fix round 1)", () => {
+  const cases: [string, string[], boolean][] = [
+    // id headers, with values short enough to read as numbers on their own
+    ["behandlingsresultat_id", ["4521", "4522"], false],
+    ["Behandling ID", ["4521"], false],
+    ["Behandling", ["4521", "4522"], false],
+    ["Aktiv behandling", ["4521"], false],
+    ["behandlingId", ["4521"], false],
+    ["Commit", ["4521"], false],
+    ["SHA", ["4521"], false],
+    ["hash", ["4521"], false],
+    ["Run", ["4521"], false],
+    ["CI run", ["4521"], false],
+    ["Uke", ["44", "45"], false],
+    ["week", ["44", "45"], false],
+    ["Saks-nr", ["4521"], false],
+    // HTTP status codes
+    ["Status", ["200", "204", "500"], false],
+    // dates
+    ["Landet", ["15.09 (15f7bf5108)"], false],
+    ["Landet", ["15.10", "29.10"], false],
+    ["Merged", ["08.11", "07.11"], false],
+    ["Merged", ["10.30", "1.10"], false],
+    ["Merge date", ["10.30"], false],
+    ["Kandidat siden", ["03.07", "18.09", "29.09"], false],
+    // ids and hashes by value
+    ["Value", ["1234567", "12"], false],
+    ["Value", ["1234e56", "5"], false],
+    // years after the note and lead are stripped
+    ["Target", ["2026 (draft)", "2027"], false],
+    ["Target", ["~2026", "2027"], false],
+    ["Planned", ["2026", "2025"], false],
+    // count headers win over the year guess
+    ["Antall", ["2070", "2060"], true],
+    ["Av", ["2070", "2060"], true],
+    ["Of", ["1999", "2001"], true],
+    // quantities whose header mentions an id-ish word, kept
+    ["Per PR", ["$35.71", "$101.72"], true],
+    ["Cost per run", ["0.42", "0.13"], true],
+    ["Commits since 09-01", ["116", "32"], true],
+    ["Commits", ["105", "75"], true],
+    ["runs", ["94", "47"], true],
+    ["Behandlinger", ["12", "1 (1337478, 25.09)"], true],
+    ["Lines of code", ["1200", "88"], true],
+    ["Dryrun 08.09", ["132", "0"], true],
+    ["Antall saker", ["186", "198"], true],
+    ["with trace_id", ["0", "12"], true],
+    ["PRs merged", ["12", "4"], true],
+    ["Code", ["248,261", "107,314"], true],
+    ["shipped", ["142px", "194px"], true],
+  ];
+  test.each(cases)("%p %p → %p", (header, vals, want) => {
+    expect(numberColumns(["k", header], vals.map((v, i) => [`r${i}`, v])).has(1)).toBe(want);
+  });
+});
+
 describe("verdictCell", () => {
   test.each([
     ["✅ good", "good"],
@@ -83,6 +147,19 @@ describe("verdictCell", () => {
   test("the glyph stays as hidden text", () => {
     expect(verdictCell("✅ good")!.html).toBe('<span class="v-glyph">✅</span> good');
     expect(verdictCell("⚠️  meh")!.html).toBe('<span class="v-glyph">⚠️</span>  meh');
+  });
+  test.each([
+    ["🔴 Critical", "bad"],
+    ["🟡 Medium", "warn"],
+    ["🟢 Low", "good"],
+    ["<strong>🔴</strong> P1", "bad"],
+  ])("a traffic light %p keeps its glyph on screen, tone %p", (html, tone) => {
+    expect(verdictCell(html)).toEqual({ tone: tone as "bad", light: true, html });
+  });
+  test("a pass/fail glyph is no traffic light", () => {
+    expect(verdictCell("✅ good")!.light).toBe(false);
+    expect(verdictCell("❌ no")!.light).toBe(false);
+    expect(verdictCell("⚠️ meh")!.light).toBe(false);
   });
   test("a glyph mid-cell is not a verdict", () => {
     expect(verdictCell("works ✅")).toBeNull();
@@ -134,6 +211,19 @@ describe("formatWebHtml reader shapes", () => {
     expect(reader).toContain('<td class="num">—</td>');
     expect(reader).toContain("<th>Year</th>");
     expect(reader).toContain("<td>2026</td>");
+  });
+  test("a traffic light cell is tinted and keeps its glyph", () => {
+    const html = formatWebHtml("| Item | Priority |\n|---|---|\n| Login | 🔴 Critical |\n| Logout | 🟢 Low |\n", SHAPES);
+    expect(html).toContain('<td class="v-bad v-light">🔴 Critical</td>');
+    expect(html).toContain('<td class="v-good v-light">🟢 Low</td>');
+    expect(html).not.toContain("v-glyph");
+  });
+  test("a number holding a space sits in a nowrap span, a note outside it", () => {
+    const html = formatWebHtml("| Run | Rows | Time | Note |\n|---|---|---|---|\n| a | 12 345 | 3.2 s (cold) | 790 (just lists) |\n| b | 8 | 1 s | 4 |\n", SHAPES);
+    expect(html).toContain('<td class="num"><span class="num-nw">12 345</span></td>');
+    expect(html).toContain('<td class="num"><span class="num-nw">3.2 s</span> (cold)</td>');
+    expect(html).toContain('<td class="num">790 (just lists)</td>');
+    expect(html).toContain('<td class="num">8</td>');
   });
   test("verdict cells tinted, mid-cell glyph not", () => {
     expect(reader).toContain('<td class="v-good"><span class="v-glyph">✅</span> good</td>');

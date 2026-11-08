@@ -29,21 +29,36 @@ const LEAD_RE = /^(?:[~≈<>≤≥±]|ca\.)\s*/iu;
  *  longer one is prose: a column of `~290 (agent skills, ADRs, …)` is text
  *  (measured on the wikis: those right-aligned read as a false positive). */
 const TAIL_RE = /\s*\([^()]{0,24}\)\s*$/u;
-/** An ungrouped integer of eight digits or more is an id (a CI run, a commit
- *  count no one writes ungrouped), not a quantity. */
-const LONG_ID_RE = /^\d{8,}$/;
+/** An ungrouped integer of six digits or more is an id (a behandling, a CI
+ *  run), not a quantity: every 6–7-digit bare integer in a number column of
+ *  the two wikis was a behandling id (PR #832 fix round 1). */
+const LONG_ID_RE = /^\d{6,}$/;
+/** `1234e56`: an exponent reads as a hash, not a number, in a wiki table. */
+const EXPONENT_RE = /\d[eE][+-]?\d/;
+/** A day and month (`08.11`, `15.09`). */
+const DAY_MONTH_RE = /^(?:0?[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])$/;
+/** A note that is a commit hash: `15.09 (15f7bf5108)` is a date and a commit. */
+const HASH_TAIL_RE = /\(\s*(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\s*\)\s*$/u;
+
+/** A cell's text without its short note and leading marks: what the number
+ *  rules read. */
+function numberCore(text: string): string {
+  return text.trim().replace(TAIL_RE, "").trim().replace(LEAD_RE, "");
+}
 
 /** True when a cell's visible text reads as one number: an optional `~ ≈ < >
  *  ± ca.`, a sign, a currency sign, the number as `parseCellNumberParts`
  *  reads it (`1,662,435`, `10,3`, `12 345`), a unit from a closed list or a
  *  count word, and an optional short parenthesised note. A range, a date, a
- *  version string and an id (`#782`, `D7`, `27305752256`) are not. */
+ *  version string, a hash and an id (`#782`, `D7`, `1356583`) are not, nor
+ *  is a day and month written with a leading zero (`08.11`) or before a
+ *  commit hash (`15.09 (15f7bf5108)`). */
 export function isNumberCell(text: string): boolean {
-  let t = text.trim().replace(TAIL_RE, "").trim();
-  t = t.replace(LEAD_RE, "");
+  let t = numberCore(text);
+  if (DAY_MONTH_RE.test(t) && (/^0/.test(t) || HASH_TAIL_RE.test(text))) return false;
   t = t.replace(/^[-+−]\s*/u, "");
   t = t.replace(/^[$€£]\s*/u, "");
-  if (!/^\d/.test(t) || LONG_ID_RE.test(t)) return false;
+  if (!/^\d/.test(t) || LONG_ID_RE.test(t) || EXPONENT_RE.test(t)) return false;
   if (parseCellNumberParts(t)) return true;
   const m = /^(.*\d)\s*([^\d\s][^\s]*)$/u.exec(t);
   if (!m) return false;
@@ -52,26 +67,81 @@ export function isNumberCell(text: string): boolean {
   return parseCellNumberParts(m[1]!.trim()) !== null;
 }
 
-/** Headers that name an id, a date or a position: their column is never a number column. */
-const ID_HEADER_RE = /^(?:#|id|ids|nr\.?|no\.?|pr|år|year|dato|date|versjon|version|port|line|linje|rank|issue|sak)$/iu;
+/** A header's words, its parenthesised note dropped, split at punctuation,
+ *  `_` and camelCase, lower-cased: `behandlingsresultat_id` → `…, id`. */
+function headerWords(header: string): string[] {
+  return header
+    .replace(/\([^()]*\)/g, " ")
+    .replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}#]+/u)
+    .filter(Boolean);
+}
+
+/** Whole headers that name an id, a date or a position. A verb names a date
+ *  only alone: `Merged` holds dates, `PRs merged` a count. */
+const ID_HEADERS: ReadonlySet<string> = new Set([
+  "#", "id", "ids", "nr", "nr.", "no", "no.", "pr", "år", "year", "dato", "date", "versjon", "version", "port", "line",
+  "linje", "rank", "issue", "sak", "run", "uke", "week", "http", "merged", "merget", "landet", "levert", "deployed",
+  "deployet", "released", "opened", "closed",
+]);
+/** A header's last word that names an id or a date: `Behandling ID`, `Aktiv
+ *  behandling`, `Merge date`, `Status` (200/500 are codes). */
+const ID_LAST_WORDS: ReadonlySet<string> = new Set([
+  "id", "ids", "nr", "dato", "date", "versjon", "version", "issue", "sak", "commit", "sha", "hash", "run", "uke", "week",
+  "behandling", "uuid", "status", "når", "when", "#",
+]);
+/** A rate or a qualified count (`Cost per run`, `with trace_id`) is a
+ *  quantity whatever its last word names. */
+const QUALIFIER_WORDS: ReadonlySet<string> = new Set(["per", "each", "pr", "hver", "with", "without", "med", "uten"]);
+/** Count words: their column is a count even when every value falls in 1900–2099. */
+const COUNT_WORDS: ReadonlySet<string> = new Set(["antall", "count", "av", "of", "n", "total", "totalt", "sum", "number"]);
+
+/** True when a header names an id, a date or a position (never a number
+ *  column): the whole header from {@link ID_HEADERS}, or its last word from
+ *  {@link ID_LAST_WORDS} unless an earlier word makes it a rate or a
+ *  qualified count. */
+export function isIdHeader(header: string): boolean {
+  const h = header.trim().toLowerCase();
+  if (ID_HEADERS.has(h)) return true;
+  const words = headerWords(header);
+  if (!words.length) return false;
+  if (words.length === 1 && ID_HEADERS.has(words[0]!)) return true;
+  if (words.slice(0, -1).some((w) => QUALIFIER_WORDS.has(w))) return false;
+  return ID_LAST_WORDS.has(words[words.length - 1]!);
+}
+
 /** A lone dash: an empty cell as a table writes it. */
 const DASH_RE = /^[—–-]$/u;
 const YEAR_RE = /^(?:19|20)\d{2}$/;
 
 /** The columns (after the first) of a table that read as numbers: every
  *  non-empty body cell other than a lone dash is a number cell, at least one
- *  is, the header names no id or date, and the column is not all bare years.
- *  `headers` and `rows` are visible text. */
+ *  is, the header names no id or date ({@link isIdHeader}), and the column is
+ *  not all years (`2026`, `~2026`, `2026 (draft)`) unless the header counts
+ *  (`Antall`, `Of`, `Total`). `headers` and `rows` are visible text. */
 export function numberColumns(headers: readonly string[], rows: readonly (readonly string[])[]): Set<number> {
   const out = new Set<number>();
   for (let c = 1; c < headers.length; c++) {
-    if (ID_HEADER_RE.test(headers[c]!.trim())) continue;
+    const header = headers[c]!;
+    if (isIdHeader(header)) continue;
     const vals = rows.map((r) => (r[c] ?? "").trim()).filter((v) => v !== "" && !DASH_RE.test(v));
     if (!vals.length || !vals.every(isNumberCell)) continue;
-    if (vals.every((v) => YEAR_RE.test(v))) continue;
+    const counts = headerWords(header).some((w) => COUNT_WORDS.has(w));
+    if (!counts && vals.every((v) => YEAR_RE.test(numberCore(v)))) continue;
     out.add(c);
   }
   return out;
+}
+
+/** A number cell's rendered HTML with the number itself, when it holds a
+ *  space (`12 345`, `3.2 s`), in a `num-nw` span the CSS keeps on one line;
+ *  the note after it and the header still wrap at phone width. Any other
+ *  cell (no space in the number, or a tag first) unchanged. */
+export function numberCellHtml(html: string): string {
+  const m = /^(\s*)([^<(]*?[^\s<(])(?=\s*(?:\(|<|$))/u.exec(html);
+  if (!m || !/\s/u.test(m[2]!)) return html;
+  return `${m[1]}<span class="num-nw">${m[2]}</span>${html.slice(m[0].length)}`;
 }
 
 // ── Verdict cells ───────────────────────────────────────────────────────────
@@ -101,18 +171,27 @@ const GLYPH_ALT = [...new Set(Object.keys(CELL_VERDICT_GLYPHS).map((g) => g.repl
 /** Leading tags (never a code span) and white space, the glyph, its VS16, then white space. */
 const VERDICT_LEAD_RE = new RegExp(`^((?:\\s|<(?!code)[a-z][^>]*>)*)(${GLYPH_ALT})(\\uFE0F?)(\\s*)`, "u");
 
-/** A rendered cell that opens with a verdict glyph: its tone and the cell with
- *  the glyph in a visually hidden `v-glyph` span (screen readers and copy keep
- *  it; the CSS draws the round icon). The space after the glyph stays outside
- *  the span, in flow, so a selection reads `✅ text` as the source does. Null
- *  when the glyph is not first. */
-export function verdictCell(html: string): { tone: CellVerdict; html: string } | null {
+/** Traffic lights: a priority or a status, not a pass or a fail. Their cell
+ *  is tinted but keeps its glyph on screen: drawn as ✕ / ! / ✓, `🔴 Critical`
+ *  read as failed (18 of the 34 traffic-light cells in the two wikis sit in
+ *  `Priority` columns). */
+const TRAFFIC_LIGHTS: ReadonlySet<string> = new Set(["🔴", "🟡", "🟢"]);
+
+/** A rendered cell that opens with a verdict glyph: its tone, whether the
+ *  glyph is a traffic light (`light`), and the cell's HTML. A check, cross or
+ *  warning glyph goes into a visually hidden `v-glyph` span (screen readers
+ *  and copy keep it; the CSS draws the round icon), and the space after it
+ *  stays outside the span, in flow, so a selection reads `✅ text` as the
+ *  source does. A traffic light's cell is returned unchanged: its glyph stays
+ *  visible and draws no icon. Null when the glyph is not first. */
+export function verdictCell(html: string): { tone: CellVerdict; light: boolean; html: string } | null {
   const m = VERDICT_LEAD_RE.exec(html);
   if (!m) return null;
   const tone = CELL_VERDICT_GLYPHS[m[2]!] ?? CELL_VERDICT_GLYPHS[`${m[2]!}️`];
   if (!tone) return null;
+  if (TRAFFIC_LIGHTS.has(m[2]!)) return { tone, light: true, html };
   const rest = html.slice(m[0].length);
-  return { tone, html: `${m[1]}<span class="v-glyph">${m[2]}${m[3]}</span>${m[4]}${rest}` };
+  return { tone, light: false, html: `${m[1]}<span class="v-glyph">${m[2]}${m[3]}</span>${m[4]}${rest}` };
 }
 
 // ── Label lists ─────────────────────────────────────────────────────────────

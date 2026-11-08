@@ -6,7 +6,10 @@
  * to `locateExcerpt`; and the ref links still read the bold label as the noun
  * before an id in a grid item, so no second noun is inserted. A unit test
  * cannot see either: whitespace around a hidden span is a layout outcome of
- * `Selection.toString()`, and the noun read-back walks the live DOM.
+ * `Selection.toString()`, and the noun read-back walks the live DOM. Nor
+ * can it see that a traffic light keeps its glyph on screen with no icon, or
+ * that a number column's header and note wrap at phone width while the
+ * number itself stays whole: both are computed style and layout.
  *
  * One muninn on its own port (the wiki's `.wiki-reader.json` declares the
  * `D` id noun, and the shared 3011 server's wikis are the developer's). No
@@ -53,6 +56,16 @@ const PAGE = [
   "- **Beslutning:** D7 holder.",
   "- **Eier:** fag",
   "- **Frist:** fredag",
+  "",
+  "| Oppgave | Priority |",
+  "|---|---|",
+  "| Login | 🔴 Critical |",
+  "| Logout | 🟢 Low |",
+  "",
+  "| Steg | Playwright-steget etter (min) | Rader |",
+  "|---|---|---|",
+  "| Bygg | 790 (just lists, no board) | 123 456 |",
+  "| Test | 8 | 7 |",
   "",
   "<DecisionLog>",
   "",
@@ -151,5 +164,57 @@ test.describe("Wiki reader shapes: selection text and ref nouns", () => {
     await openPage(page);
     await expect(page.locator(".wiki-article ul.label-grid .id-noun")).toHaveCount(0);
     expect(await page.locator(".wiki-article ul.label-grid > li").nth(3).evaluate((e) => e.textContent)).toBe("Beslutning: D7 holder.");
+  });
+
+  test("a traffic light keeps its own glyph on screen and draws no pass/fail icon", async ({ page }) => {
+    await openPage(page);
+    const cell = page.locator(".wiki-article td", { hasText: "Critical" });
+    await expect(cell).toHaveText("🔴 Critical");
+    const look = await cell.evaluate((td) => {
+      // The glyph's own text node, wherever the renderer put it.
+      const walker = document.createTreeWalker(td, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node && !node.textContent!.includes("🔴")) node = walker.nextNode();
+      const r = document.createRange();
+      const at = node!.textContent!.indexOf("🔴");
+      r.setStart(node!, at);
+      r.setEnd(node!, at + 2);
+      return {
+        before: getComputedStyle(td, "::before").content,
+        glyphWidth: r.getBoundingClientRect().width,
+        tint: getComputedStyle(td).backgroundColor,
+      };
+    });
+    expect(look.before).toBe("none");
+    expect(look.glyphWidth).toBeGreaterThan(8);
+    expect(look.tint).not.toBe("rgba(0, 0, 0, 0)");
+    // A pass/fail glyph still draws the round icon in place of its glyph.
+    expect(await page.locator(".wiki-article td.v-bad:not(.v-light)").evaluate((td) => getComputedStyle(td, "::before").content)).not.toBe("none");
+  });
+
+  test("at phone width a number column's header and note wrap, the number stays whole", async ({ page }) => {
+    await openPage(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    // Focus mode: the article alone, as a phone reads it (wiki-genre-blocks.spec.ts).
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("f");
+    await expect.poll(async () => (await page.locator(".wiki-article").boundingBox())!.width).toBeGreaterThan(250);
+    const table = page.locator(".wiki-article table").filter({ hasText: "Playwright-steget" });
+    const m = await table.evaluate((t) => {
+      const article = t.closest(".wiki-article") as HTMLElement;
+      const th = t.querySelector("th.num") as HTMLElement;
+      const nws = Array.from(t.querySelectorAll("td.num > .num-nw"));
+      const lh = parseFloat(getComputedStyle(th).lineHeight) || parseFloat(getComputedStyle(th).fontSize) * 1.4;
+      return {
+        table: t.getBoundingClientRect().width,
+        article: article.getBoundingClientRect().width,
+        thLines: Math.round((th.clientHeight - parseFloat(getComputedStyle(th).paddingTop) - parseFloat(getComputedStyle(th).paddingBottom)) / lh),
+        // Each number on one line box: one client rect.
+        numbers: nws.map((n) => `${n.textContent}:${n.getClientRects().length}`),
+      };
+    });
+    expect(m.table).toBeLessThanOrEqual(m.article + 1);
+    expect(m.thLines).toBeGreaterThan(1);
+    expect(m.numbers).toEqual(["123 456:1"]);
   });
 });

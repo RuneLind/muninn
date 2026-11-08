@@ -93,17 +93,22 @@ export function componentBlockCss(scope: string): string {
     ${scope} .tablewrap th { background: var(--bg-inset); color: var(--text-primary); }
     /* Reader shapes (reader-shapes.ts, wiki render only): number columns,
        verdict cells, the bold-label grid. */
-    ${scope} th.num, ${scope} td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    /* The header and a cell's note wrap (nowrap on both widened the widest
+       table on 55 of 234 pages at 390 px); only the number stays whole. */
+    ${scope} th.num, ${scope} td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    ${scope} td.num > .num-nw { white-space: nowrap; }
     ${scope} td.v-good { background: color-mix(in srgb, var(--status-success) 11%, transparent); }
     ${scope} td.v-warn { background: color-mix(in srgb, var(--status-warning) 13%, transparent); }
     ${scope} td.v-bad { background: color-mix(in srgb, var(--status-error) 11%, transparent); }
-    ${scope} :is(td.v-good, td.v-warn, td.v-bad)::before {
+    /* A traffic light (\`v-light\`: a priority, a status) keeps its own glyph
+       and draws no pass/fail icon. */
+    ${scope} :is(td.v-good, td.v-warn, td.v-bad):not(.v-light)::before {
       display: inline-grid; place-items: center; width: 1.3em; height: 1.3em; border-radius: 50%;
       margin-right: 0.2em; vertical-align: -0.25em; font: 700 0.8em/1 system-ui, sans-serif; color: var(--bg-panel);
     }
-    ${scope} td.v-good::before { content: "✓"; content: "✓" / ""; background: var(--tone-good); }
-    ${scope} td.v-warn::before { content: "!"; content: "!" / ""; background: var(--tone-warn); }
-    ${scope} td.v-bad::before { content: "✕"; content: "✕" / ""; background: var(--tone-err); }
+    ${scope} td.v-good:not(.v-light)::before { content: "✓"; content: "✓" / ""; background: var(--tone-good); }
+    ${scope} td.v-warn:not(.v-light)::before { content: "!"; content: "!" / ""; background: var(--tone-warn); }
+    ${scope} td.v-bad:not(.v-light)::before { content: "✕"; content: "✕" / ""; background: var(--tone-err); }
     /* Hidden but in flow: an out-of-flow span made a selection drop the
        spaces around it (\`✅Targeted\`), which Explain then cannot locate. */
     ${scope} .v-glyph, ${scope} .lg-c { font-size: 0; }
