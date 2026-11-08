@@ -13,13 +13,17 @@ const LOOP_DEPS = path.join(import.meta.dir, "loop-deps.ts");
 const LOGTAPE = Bun.resolveSync("@logtape/logtape", import.meta.dir);
 const LOG = path.join(import.meta.dir, "log.ts");
 const AGENT_STATUS = path.join(import.meta.dir, "..", "..", "observability", "agent-status.ts");
+const LOOP = path.join(import.meta.dir, "..", "work-map", "loop.ts");
+const REGISTRY = path.join(import.meta.dir, "..", "registry-memo.ts");
 
 /** Runs `steps` (a function body over `deps`, `step`, `root`), returning what each `step(...)` saw and the log lines. `model` is more of the run's seams. */
 async function drive(steps: string, env: Record<string, string>, tmp: string, model = "") {
   const driver = path.join(tmp, "driver.ts");
   writeFileSync(driver, `
 import { configure } from ${JSON.stringify(LOGTAPE)};
-import { realTriageLoopDeps } from ${JSON.stringify(LOOP_DEPS)};
+import { realTriageLoopDeps, triagePassHeld } from ${JSON.stringify(LOOP_DEPS)};
+import { startWorkMapLoop, stopWorkMapLoop, TRIAGE_PASS_BOUND_MS } from ${JSON.stringify(LOOP)};
+import { getWikiRegistry } from ${JSON.stringify(REGISTRY)};
 import { agentStatus } from ${JSON.stringify(AGENT_STATUS)};
 import { appendLogLines, readLog } from ${JSON.stringify(LOG)};
 import { renameSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
@@ -34,7 +38,55 @@ const finishes: { status: string; attrs: Record<string, unknown> }[] = [];
 const tracer = () => ({ traceId: "t-" + (finishes.length + 1), finish: (status: string, attrs: Record<string, unknown> = {}) => void finishes.push({ status, attrs }) });
 /** Every \`/agents\` run the pass opened, live or completed. */
 const agentRuns = () => agentStatus.getAll().map((r) => ({ kind: r.kind, name: r.name, completed: !!r.completed, status: r.status ?? null, traceId: r.traceId ?? null }));
+/** A seam that stops at \`pass()\` until \`open()\`; \`reached\` resolves when it gets there. */
+const gate = () => {
+  let open!: () => void;
+  let hit!: () => void;
+  const opened = new Promise<void>((r) => (open = r));
+  const reached = new Promise<void>((r) => (hit = r));
+  return { open, reached, pass: async () => { hit(); await opened; } };
+};
+const g1 = gate();
+let appends = 0;
+let floorHits = 0;
 const deps = realTriageLoopDeps(config as never, logs, { ...seams, ${model} }, tracer)!;
+/** The work map's loop on fake timers with \`triage\` as its triage half; the work map itself is never due. */
+let fakeNow = Date.parse("2026-10-20T05:00:00Z");
+const timers: { at: number; fn: () => void; id: number }[] = [];
+let timerId = 0;
+const advance = async (ms: number) => {
+  const end = fakeNow + ms;
+  while (true) {
+    timers.sort((x, y) => x.at - y.at);
+    const t = timers[0];
+    if (!t || t.at > end) break;
+    timers.shift();
+    fakeNow = t.at;
+    t.fn();
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+  }
+  fakeNow = end;
+};
+const loop = (triage: typeof deps, names: string[]) => startWorkMapLoop({ schedulerEnabled: true, workMapWikis: names, workMapHour: 5, profile: "default" }, { deps: {
+  now: () => fakeNow,
+  setTimer: (fn, ms) => { const t = { at: fakeNow + ms, fn, id: ++timerId }; timers.push(t); return t.id; },
+  clearTimer: (h) => { const i = timers.findIndex((t) => t.id === h); if (i >= 0) timers.splice(i, 1); },
+  readState: async (wiki) => ({ wiki, lastSuccessAt: fakeNow, attempts: [] }),
+  run: async () => ({ outcome: "refused", reason: "x" }),
+  registry: () => names.map((name) => ({ name, root: "/w/" + name, source: "extra" }) as never),
+  isReadonly: () => false,
+  isReadonlyRoot: () => false,
+  triage,
+} });
+const until = async (ok: () => boolean | Promise<boolean>, what: string) => {
+  for (let i = 0; i < 2000; i++) {
+    if (await ok()) return;
+    await Bun.sleep(5);
+  }
+  throw new Error("never: " + what);
+};
+const runsOf = async (wiki: string) => (await readLog(logs + "/" + wiki + ".jsonl")).runs;
 /** Until the log holds n card lines. */
 const logged = async (n: number) => {
   for (let i = 0; i < 2000; i++) {
@@ -289,12 +341,367 @@ await deps.recordFailed("a", "later");
     expect(runs[1]!.runId).not.toBe(runs[0]!.runId);
   });
 
-  test("a record consumes the progress, so a second one is no second partial", async () => {
+  test("a second record of the same run writes no second line or state record, and answers the first's outcome", async () => {
     const { tmp, env } = withCards(30);
     const { seen } = await drive(`${BOUND}
 seen.push(await deps.recordFailed("a", "again"));
+seen.push(await deps.readState("a"));
 `, env, tmp, HANG_SECOND);
-    expect(seen[2]).toBe("failed");
+    expect(seen[2]).toBe("partial");
+    expect(logOf(tmp).filter((l) => l.type === "run")).toHaveLength(1);
+    expect((seen[3] as unknown as { attempts: unknown[] }).attempts).toHaveLength(1);
+  });
+
+  /** Every way a pass ends, through the real `run`: one run line and one state
+   *  record per run, and the `/agents` row's status agrees with the line. */
+  describe("one run line per run, however the pass ends", () => {
+    type Row = { name: string; completed: boolean; status: string | null };
+    type State = { attempts: { outcome: string }[] } | null;
+    const rows = (v: unknown) => v as Row[];
+    const attempts = (v: unknown) => (v as State)?.attempts.length ?? 0;
+    const runLines = (tmp: string, wiki = "a") => {
+      try {
+        return readFileSync(path.join(tmp, "logs", `${wiki}.jsonl`), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.type === "run");
+      } catch {
+        return [];
+      }
+    };
+    const SETTLED = `seen.push(await deps.readState("a"), agentRuns());`;
+    /** The first batch lands; the second call waits at the gate. */
+    const SECOND_WAITS = `call: async (req) => { if (++calls === 2) await g1.pass(); return { text: answerAll(req.prompt), costUsd: 0.5 }; }`;
+
+    test("a: ok, and partial: one line, one state record, the row ok", async () => {
+      for (const [only, outcome] of [[undefined, "ok"], [1, "partial"]] as const) {
+        const { tmp, env } = withCards(3);
+        const { seen } = await drive(`seen.push(await deps.run("a", new AbortController().signal));\n${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt, ${only}) })`);
+        expect(runLines(tmp).map((r) => r.outcome)).toEqual([outcome]);
+        expect(seen[0]).toMatchObject({ outcome });
+        expect(attempts(seen[1])).toBe(1);
+        expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+      }
+    });
+
+    test("b: the bound fires while the pass writes its run line, and the pass returns normally: one line, one state record", async () => {
+      const { tmp, env } = withCards(3);
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+// As the loop's bound does: not awaited; it waits for the pass's write in flight.
+const bound = deps.recordFailed("a", "the pass timed out after 7 ms");
+g1.open();
+seen.push((await bound) ?? null);
+seen.push(await p);
+${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) }), append: async (l) => { if (l.some((x) => x.type === "run")) await g1.pass(); await appendLogLines(logs + "/a.jsonl", l); }`);
+      const runs = runLines(tmp);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: "ok", cards: 3 });
+      expect(seen[0]).toBeNull();
+      expect(seen[1]).toMatchObject({ outcome: "ok", cards: 3 });
+      expect(attempts(seen[2])).toBe(1);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
+
+    test("c: the bound fires, then the pass throws: the bound's one line, and the row agrees with it", async () => {
+      const { tmp, env } = withCards(30);
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms"));
+g1.open();
+seen.push(await p);
+${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt), costUsd: 0.5 }), append: async (l) => { if (l.some((x) => x.type === "card") && ++appends === 2) { await g1.pass(); throw new Error("disk full"); } await appendLogLines(logs + "/a.jsonl", l); }`);
+      const runs = runLines(tmp);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: "partial", cards: 25 });
+      expect(String(runs[0]!.reason)).toStartWith("the pass timed out after 7 ms");
+      expect(seen[0]).toBe("partial");
+      expect(seen[1]).toEqual({ outcome: "partial", cards: 25 });
+      expect(attempts(seen[2])).toBe(1);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
+
+    test("d: a throw with no abort: one line through the failure record, the row agrees", async () => {
+      const { tmp, env } = withCards(30);
+      const { seen } = await drive(`seen.push(await deps.run("a", new AbortController().signal));\n${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt), costUsd: 0.5 }), append: async (l) => { if (l.some((x) => x.type === "card") && ++appends === 2) throw new Error("disk full"); await appendLogLines(logs + "/a.jsonl", l); }`);
+      expect(runLines(tmp).map((r) => r.outcome)).toEqual(["partial"]);
+      expect(seen[0]).toEqual({ outcome: "partial", cards: 25 });
+      expect(attempts(seen[1])).toBe(1);
+      expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
+
+    test("d: the pass's own run line fails to write: the failure record still writes the one line", async () => {
+      const { tmp, env } = withCards(3);
+      const { seen } = await drive(`seen.push(await deps.run("a", new AbortController().signal));\n${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) }), append: async (l) => { if (l.some((x) => x.type === "run")) throw new Error("disk full"); await appendLogLines(logs + "/a.jsonl", l); }`);
+      expect(runLines(tmp)).toEqual([expect.objectContaining({ outcome: "partial", cards: 3 })]);
+      expect(String(runLines(tmp)[0]!.reason)).toStartWith("disk full");
+      expect(seen[0]).toEqual({ outcome: "partial", cards: 3 });
+      expect(attempts(seen[1])).toBe(1);
+      expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
+
+    test("b2: the bound fires after the pass's run line landed, while it still records its state: no second line or state record", async () => {
+      const { tmp, env } = withCards(3);
+      const { seen } = await drive(`
+const ac = new AbortController();
+let bound: Promise<unknown> | null = null;
+const p = deps.run("a", ac.signal);
+seen.push(await p);
+seen.push((await bound) ?? null);
+${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) }), append: async (l) => { await appendLogLines(logs + "/a.jsonl", l); if (l.some((x) => x.type === "run")) setImmediate(() => { ac.abort(); bound = deps.recordFailed("a", "the pass timed out after 7 ms"); }); }`);
+      expect(runLines(tmp).map((r) => r.outcome)).toEqual(["ok"]);
+      expect(seen[0]).toMatchObject({ outcome: "ok", cards: 3 });
+      expect(seen[1]).toBeNull();
+      expect(attempts(seen[2])).toBe(1);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
+
+    test("Run now's shape: an aborted pass writes no line, and a record after it carries the run's id and counts", async () => {
+      const { tmp, env } = withCards(30);
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+g1.open();
+seen.push(await p);
+seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms"));
+`, env, tmp, SECOND_WAITS);
+      const lines = logOf(tmp);
+      const runs = lines.filter((l) => l.type === "run");
+      expect(seen[0]).toEqual({ outcome: "aborted" });
+      expect(seen[1]).toBe("partial");
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: "partial", cards: 25 });
+      expect(lines.filter((l) => l.type === "card").every((c) => c.runId === runs[0]!.runId)).toBe(true);
+    });
+
+    test("the pass's run line fails to write while the bound fires: the bound waits for it, then writes the one line", async () => {
+      const { tmp, env } = withCards(3);
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+const bound = deps.recordFailed("a", "the pass timed out after 7 ms");
+g1.open();
+seen.push(await p);
+seen.push((await bound) ?? null);
+${SETTLED}`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) }), append: async (l) => { if (l.some((x) => x.type === "run")) { await g1.pass(); throw new Error("disk full"); } await appendLogLines(logs + "/a.jsonl", l); }`);
+      const lines = logOf(tmp);
+      const runs = lines.filter((l) => l.type === "run");
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: "partial", cards: 3 });
+      expect(String(runs[0]!.reason)).toStartWith("the pass timed out after 7 ms");
+      expect(lines.filter((l) => l.type === "card").every((c) => c.runId === runs[0]!.runId)).toBe(true);
+      expect(seen[0]).toEqual({ outcome: "partial", cards: 3 });
+      expect(seen[1]).toBe("partial");
+      expect(attempts(seen[2])).toBe(1);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
+
+    /** The bound's record is not awaited (as the loop's is not) and its line's file is a folder. */
+    const UNAWAITED_FAILING_RECORD = `
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+const bound = deps.recordFailed("a", "the pass timed out after 7 ms").then(() => "recorded", () => "threw");
+g1.open();
+seen.push(await p);
+seen.push(await bound);
+${SETTLED}`;
+    const failingRecord = async () => {
+      const { tmp, env } = withCards(30);
+      mkdirSync(path.join(tmp, "logs", "a.jsonl"), { recursive: true });
+      return (await drive(UNAWAITED_FAILING_RECORD, env, tmp, `${SECOND_WAITS}, append: (l) => appendLogLines(logs + "/cards.jsonl", l)`)).seen;
+    };
+
+    test("R1a: an un-awaited bound record whose write fails: the pass reports its own end, and the row agrees", async () => {
+      const seen = await failingRecord();
+      expect(seen[0]).toEqual({ outcome: "aborted" });
+      expect(seen[1]).toBe("threw");
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    });
+
+    test("R2: a record whose line fails to write leaves no state record behind", async () => {
+      const seen = await failingRecord();
+      expect(seen[1]).toBe("threw");
+      expect(attempts(seen[2])).toBe(0);
+    });
+
+    /** Two repos: \`r1\`'s git throws, \`r2\`'s waits at the gate, so the refusal's \`finish\`
+     *  passes its abort check and then waits on \`resolver.facts()\` for \`r2\`. */
+    function refusingWithPendingRepo() {
+      const w = withCards(3);
+      const page = path.join(w.a, "plans", "p.mdx");
+      writeFileSync(page, readFileSync(page, "utf8").replace("title: T", "title: T\nrepos: [r1, r2]"));
+      mkdirSync(path.join(w.tmp, "src", "r1"), { recursive: true });
+      mkdirSync(path.join(w.tmp, "src", "r2"), { recursive: true });
+      return { ...w, env: { ...w.env, TEST_REPO_ROOTS: path.join(w.tmp, "src") } };
+    }
+    const PENDING_REPO = `git: async (cwd) => { if (cwd.endsWith("/r1")) throw new Error("git broke"); await g1.pass(); return { ok: false, stdout: "", stderr: "no" }; }, floor: async () => { floorHits++; return { labelled: 0, added: 0, addedPages: 0, met: false }; }`;
+    const BOUND_IN_FACTS = `
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+await until(() => floorHits > 0, "the refusal's finish");
+await Bun.sleep(5);
+ac.abort();`;
+
+    test("the drop branch: the bound's record lands while the refusal waits on its repos: the pass's run line is dropped", async () => {
+      const { tmp, env } = refusingWithPendingRepo();
+      const { seen } = await drive(`${BOUND_IN_FACTS}
+seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms"));
+g1.open();
+seen.push(await p);
+${SETTLED}`, env, tmp, PENDING_REPO);
+      const runs = runLines(tmp);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: "failed", cards: 0 });
+      expect(String(runs[0]!.reason)).toStartWith("the pass timed out after 7 ms");
+      expect(seen[0]).toBe("failed");
+      expect(seen[1]).toEqual({ outcome: "failed", cards: 0 });
+      expect(attempts(seen[2])).toBe(1);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    });
+
+    test("R1b: the pass finds the bound's record claim and that write fails: the pass writes its own line, one state record", async () => {
+      const { tmp, env } = refusingWithPendingRepo();
+      mkdirSync(path.join(tmp, "logs", "a.jsonl"), { recursive: true });
+      const { seen } = await drive(`${BOUND_IN_FACTS}
+const bound = deps.recordFailed("a", "the pass timed out after 7 ms").then(() => "recorded", () => "threw");
+g1.open();
+seen.push(await p);
+seen.push(await bound);
+${SETTLED}`, env, tmp, `${PENDING_REPO}, append: (l) => appendLogLines(logs + "/pass.jsonl", l)`);
+      expect(runLines(tmp, "pass")).toEqual([expect.objectContaining({ outcome: "refused" })]);
+      expect(seen[0]).toMatchObject({ outcome: "refused" });
+      expect(seen[1]).toBe("threw");
+      expect((seen[2] as { attempts: { outcome: string }[] }).attempts.map((a) => a.outcome)).toEqual(["refused"]);
+      expect(rows(seen[3])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    });
+
+    test("a slot left by Run now's record is not read by a later pass that refuses before it starts", async () => {
+      const { tmp, env } = withCards(30);
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+g1.open();
+await p;
+seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms"));
+// The wiki leaves the registry: the next pass refuses before it has any progress.
+const reg = getWikiRegistry();
+reg.splice(reg.findIndex((e) => e.name === "a"), 1);
+seen.push(await deps.run("a", new AbortController().signal));
+seen.push(await deps.recordFailed("a", "later"));
+`, env, tmp, SECOND_WAITS);
+      const runs = logOf(tmp).filter((l) => l.type === "run");
+      expect(seen[0]).toBe("partial");
+      expect(seen[1]).toMatchObject({ outcome: "refused" });
+      expect(seen[2]).toBe("failed");
+      expect(runs).toHaveLength(2);
+      expect(runs[1]).toMatchObject({ outcome: "failed", cards: 0, reason: "later" });
+      expect(runs[1]!.runId).not.toBe(runs[0]!.runId);
+    });
+
+    test("the bound's record fails to write: its claim is released, and the pass reports its own end, not the record's", async () => {
+      const { tmp, env } = withCards(30);
+      // The run line's file is a folder: the record's append throws; the pass's cards go elsewhere.
+      mkdirSync(path.join(tmp, "logs", "a.jsonl"), { recursive: true });
+      const { seen } = await drive(`
+const ac = new AbortController();
+const p = deps.run("a", ac.signal);
+await g1.reached;
+ac.abort();
+seen.push(await deps.recordFailed("a", "the pass timed out after 7 ms").then(() => "recorded", () => "threw"));
+g1.open();
+seen.push(await p);
+seen.push(agentRuns());
+`, env, tmp, `${SECOND_WAITS}, append: (l) => appendLogLines(logs + "/cards.jsonl", l)`);
+      expect(seen[0]).toBe("threw");
+      expect(seen[1]).toEqual({ outcome: "aborted" });
+      expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    });
+
+    test("e: the loop stops mid-pass: no run line, no state, the row an error", async () => {
+      const { tmp, env } = withCards(30);
+      const { seen } = await drive(`
+loop(deps, ["a"]);
+await advance(60_000);
+await g1.reached;
+const stopping = stopWorkMapLoop(5_000);
+g1.open();
+await stopping;
+await until(() => agentRuns().every((r) => r.completed), "the row closes");
+${SETTLED}`, env, tmp, SECOND_WAITS);
+      expect(runLines(tmp)).toEqual([]);
+      expect(attempts(seen[0])).toBe(0);
+      expect(rows(seen[1])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    });
+
+    test("f: the loop stops after the bound fired: still the bound's one line, and the row agrees", async () => {
+      const { tmp, env } = withCards(30);
+      const { seen } = await drive(`
+loop(deps, ["a"]);
+await advance(60_000);
+await g1.reached;
+await advance(TRIAGE_PASS_BOUND_MS);
+await until(async () => (await runsOf("a")).length === 1, "the bound's line");
+const stopping = stopWorkMapLoop(5_000);
+g1.open();
+await stopping;
+await until(() => agentRuns().every((r) => r.completed), "the row closes");
+${SETTLED}`, env, tmp, SECOND_WAITS);
+      const runs = runLines(tmp);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ outcome: "partial", cards: 25 });
+      expect(String(runs[0]!.reason)).toStartWith("the pass timed out after");
+      expect(attempts(seen[0])).toBe(1);
+      expect(rows(seen[1])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
+
+    test("g: the bound fires between wikis: no line and no pass for the next wiki, no timeout on the one that finished", async () => {
+      const { tmp, b, env } = withCards(1);
+      mkdirSync(path.join(b, "plans"));
+      writeFileSync(path.join(b, "plans", "p.mdx"), `---\ntitle: T\n---\n# T\n\n${card(1)}`);
+      const { seen } = await drive(`
+const triage = { ...deps, beforeCheck: async (wiki: string, nowMs: number) => { if (wiki === "b") await g1.pass(); return deps.beforeCheck(wiki, nowMs); } };
+loop(triage, ["a", "b"]);
+await advance(60_000);
+await g1.reached;
+await advance(TRIAGE_PASS_BOUND_MS);
+g1.open();
+await until(() => !triagePassHeld(), "the check ends");
+seen.push(agentRuns().map((r) => r.name));
+`, env, tmp, `call: async (req) => ({ text: answerAll(req.prompt) })`);
+      expect(runLines(tmp).map((r) => r.outcome)).toEqual(["ok"]);
+      expect(runLines(tmp, "b")).toEqual([]);
+      expect(seen[0]).toEqual(["Decision triage: a"]);
+    });
+
+    test("h: a pass that does not settle: the bound's line at the bound, nothing more when it settles, the row agrees", async () => {
+      const { tmp, env } = withCards(30);
+      const { seen } = await drive(`
+loop(deps, ["a"]);
+await advance(60_000);
+await g1.reached;
+await advance(TRIAGE_PASS_BOUND_MS);
+await until(async () => (await runsOf("a")).length === 1, "the bound's line");
+seen.push(agentRuns().map((r) => r.completed));
+g1.open();
+await until(() => !triagePassHeld(), "the pass settles");
+${SETTLED}`, env, tmp, SECOND_WAITS);
+      expect(runLines(tmp).map((r) => r.outcome)).toEqual(["partial"]);
+      expect(seen[0]).toEqual([false]);
+      expect(attempts(seen[1])).toBe(1);
+      expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
+    });
   });
 });
 
