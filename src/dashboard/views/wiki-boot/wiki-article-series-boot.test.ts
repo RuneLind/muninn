@@ -67,14 +67,18 @@ const pages: Record<string, ReturnType<typeof page>> = {
   // An explainer: its breadcrumb renders from the listing BEFORE its page
   // fetch, the window the outgoing-titles case below needs.
   "d.html": page("d.html", "Delta", { name: "d", type: "explainer" }),
+  // A markdown page the wiki types `explainer`: it opens through `loadExplainer`
+  // yet takes series writes (`canEditSeriesPage` tests the extension).
+  "e.md": page("e.md", "Epsilon", { type: "explainer", series: "solo" }),
 };
 /** Each page's raw-bytes hash; a series write moves the written page's. */
-const hashes: Record<string, string> = { "a.md": "h-a", "b.md": "h-b", "c.md": "h-c", "d.html": "h-d" };
+const hashes: Record<string, string> = { "a.md": "h-a", "b.md": "h-b", "c.md": "h-c", "d.html": "h-d", "e.md": "h-e" };
 /** Set while a case expects no series write at all: a write sent anyway is
  *  answered 409 and changes nothing, so that case's failure stays its own. */
 let refuseSeriesWrites = false;
-/** A page whose `/api/wiki/page` answer waits until the test releases it. */
-let heldPage: { rel: string; gate: Promise<void>; release: () => void } | null = null;
+/** A page whose first `/api/wiki/page` answer waits until the test releases
+ *  it; later reads of it (a series base read) answer at once. */
+let heldPage: { rel: string; gate: Promise<void>; release: () => void; taken?: boolean } | null = null;
 function holdPage(rel: string): void {
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
@@ -101,7 +105,10 @@ async function stubFetch(input: unknown, init?: { method?: string; body?: string
   if (url.pathname === "/api/wiki/pages") body = listing();
   else if (url.pathname === "/api/wiki/page") {
     const rel = url.searchParams.get("relPath") ?? "a.md";
-    if (heldPage?.rel === rel) await heldPage.gate;
+    if (heldPage?.rel === rel && !heldPage.taken) {
+      heldPage.taken = true;
+      await heldPage.gate;
+    }
     const meta = pages[rel] ?? pages["a.md"]!;
     body = {
       meta,
@@ -309,5 +316,59 @@ describe("the outgoing titles (clearOutgoingTitles)", () => {
     heldPage = null;
     await until(() => connBody().textContent !== "Loading…", "d.html's connections");
     expect(getCurrentOutgoingTitles()).toEqual([]);
+  });
+});
+
+describe("an explainer-typed markdown page (loadExplainer)", () => {
+  const seriesPosts = () => fetched.filter((f) => f.method === "POST" && f.url === "/api/wiki/series");
+  const menuNote = () => seriesMenu()?.querySelector(".wiki-series-menu-msg")?.textContent ?? "";
+  const edit = () => doc().querySelector<HTMLElement>('#articleWrap [data-series-edit="e.md"]');
+  /** A markdown page first: its load leaves its hash as the open page's. */
+  async function openAlpha(): Promise<void> {
+    doc().querySelector<HTMLElement>('#wikiList [data-relpath="a.md"]')!.click();
+    await until(() => doc().querySelector("#articleWrap h1")?.textContent === "Alpha", "a.md");
+    await until(() => !!connBody().querySelector(".wiki-related"), "a.md's connections");
+  }
+
+  test("its payload's hash becomes the load-time hash: an edit on disk after it loaded is refused", async () => {
+    await openAlpha();
+    doc().querySelector<HTMLElement>('#wikiList [data-relpath="e.md"]')!.click();
+    await until(() => !!edit(), "e.md's series head");
+    await until(() => fetched.some((f) => f.url.includes("/api/wiki/page?relPath=e.md")) && connBody().textContent !== "Loading…", "e.md's page payload");
+    const before = seriesPosts().length;
+    hashes["e.md"] = "h-e-edited";
+    refuseSeriesWrites = true;
+    try {
+      edit()!.click();
+      seriesMenu()!.querySelector<HTMLElement>('[data-series-cmd="remove"]')!.click();
+      await until(() => seriesPosts().length > before || menuNote().includes("changed since"), "the refusal");
+      expect(menuNote()).toBe("e.md changed since you opened it — reload it; nothing written");
+      expect(seriesPosts().length).toBe(before);
+    } finally {
+      hashes["e.md"] = "h-e";
+      refuseSeriesWrites = false;
+      if (seriesMenu()) key("Escape");
+    }
+  });
+
+  test("before its payload lands, the previous page's hash does not stand for it: the write goes out", async () => {
+    await openAlpha();
+    // The series head renders from the listing; the page payload is held, so
+    // only the clear at the switch keeps a.md's hash from being compared.
+    holdPage("e.md");
+    try {
+      doc().querySelector<HTMLElement>('#wikiList [data-relpath="e.md"]')!.click();
+      await until(() => !!edit(), "e.md's series head");
+      expect(connBody().textContent).toBe("Loading…");
+      const before = seriesPosts().length;
+      edit()!.click();
+      seriesMenu()!.querySelector<HTMLElement>('[data-series-cmd="remove"]')!.click();
+      await until(() => seriesPosts().length === before + 1 || menuNote().includes("changed since"), "the remove to answer");
+      expect(menuNote()).toBe("");
+      expect(JSON.parse(seriesPosts()[before]!.body!)).toEqual({ wiki: "w", relPath: "e.md", series: null, baseHash: "h-e" });
+    } finally {
+      heldPage?.release();
+      heldPage = null;
+    }
   });
 });

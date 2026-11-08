@@ -1487,6 +1487,10 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   // The listing IS the identity here (no page response to wait for), so the
   // active-row test gets its relPath immediately.
   setCurrentRelPath(m.relPath);
+  // The two identities move together: the previous page's hash must not stand
+  // for this one (a series write compares it), so it is cleared now and set
+  // from this page's payload below.
+  currentPageHash = null;
   /** This view's number: a later view drops this page's response (R2B4). */
   const seq = pageViewSeq;
   navInFlight = false; // `currentName` now carries the "article" signal on its own
@@ -1517,6 +1521,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       // from came out of `/api/wiki/pages`, which strips `desc` (and an
       // explainer's `description` is sniffed, not always in the listing).
       if (data.meta) currentArticle = data.meta;
+      currentPageHash = typeof data.hash === "string" ? data.hash : null;
       if (data.meta) placeRetiredBanner(data.meta);
       renderConnections(data);
       // The same gate as a markdown page: an explainer with inferred keys has
