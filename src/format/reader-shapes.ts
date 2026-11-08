@@ -197,7 +197,8 @@ export function verdictCell(html: string): { tone: CellVerdict; light: boolean; 
 // ── Label lists ─────────────────────────────────────────────────────────────
 
 /** An item split at its bold label. `punct` is the `:`/`.` that ends the
- *  label inside the bold; `sep` the `:`/`—` after the bold (with its spaces). */
+ *  label inside the bold; `sep` the `:`/`—`/`–` after the bold (with its
+ *  spaces), or only the spaces. */
 export interface LabelItem {
   label: string;
   punct: string;
@@ -206,36 +207,47 @@ export interface LabelItem {
 }
 
 /** D3: an item that opens `**Label:**` / `**Label.**`, or `**Label**` then
- *  `:` or `—`, with text after it. Null for anything else. */
+ *  `:`, `—` or `–` (the en dash with a space after it, so `**2024**–25` is
+ *  no label), with text after it. A separator after a punctuated label
+ *  (`**Label.**: x`) is still the separator, never the text. Null otherwise. */
 export function labelItem(item: string): LabelItem | null {
   const m = /^\*\*(?!\*)([^\n]+?)\*\*(?!\*)([\s\S]*)$/u.exec(item);
   if (!m) return null;
   const inner = m[1]!;
   const after = m[2]!;
   const inside = /^([\s\S]*?\S)\s*([:.])$/u.exec(inner);
-  if (inside) {
-    if (!/\S/.test(after)) return null;
-    const sp = /^\s*/.exec(after)![0];
-    return { label: inside[1]!, punct: inside[2]!, sep: sp, rest: after.slice(sp.length) };
-  }
-  const sep = /^(\s*:\s*|\s*—\s*)/u.exec(after);
-  if (!sep) return null;
-  const rest = after.slice(sep[0].length);
+  const sep = /^\s*(?:[:—]\s*|–\s+)/u.exec(after)?.[0] ?? (inside ? /^\s*/.exec(after)![0] : null);
+  if (sep === null) return null;
+  const rest = after.slice(sep.length);
   if (!/\S/.test(rest)) return null;
-  return { label: inner, punct: "", sep: sep[0], rest };
+  return inside
+    ? { label: inside[1]!, punct: inside[2]!, sep, rest }
+    : { label: inner, punct: "", sep, rest };
 }
+
+/** The longest label a grid takes, in visible characters with its `:`/`.`:
+ *  the prototype's cap (`leadable`, `proto.js`). Over it a label wraps to
+ *  three or more lines in the 26% column, and the list is a finding list,
+ *  not a key/value one. */
+export const LABEL_MAX_CHARS = 70;
 
 /** The items of a list the reader draws as a label grid: three or more (the
  *  prototype's floor; D3 takes 0 of the 4 bold-label lists on the plans-format
- *  blog, two of which hold only two items), every one a {@link labelItem},
- *  none with a nested list. Null otherwise. */
-export function labelGridItems(items: readonly string[], hasNestedList: (k: number) => boolean): LabelItem[] | null {
+ *  blog, two of which hold only two items), every one a {@link labelItem}
+ *  whose label is at most {@link LABEL_MAX_CHARS} long as `labelText` reads
+ *  it, none with a nested list. Null otherwise. */
+export function labelGridItems(
+  items: readonly string[],
+  hasNestedList: (k: number) => boolean,
+  labelText: (label: string) => string = (l) => l,
+): LabelItem[] | null {
   if (items.length < 3) return null;
   const out: LabelItem[] = [];
   for (let k = 0; k < items.length; k++) {
     if (hasNestedList(k)) return null;
     const it = labelItem(items[k]!);
     if (!it) return null;
+    if ([...labelText(it.label).trim()].length + it.punct.length > LABEL_MAX_CHARS) return null;
     out.push(it);
   }
   return out;

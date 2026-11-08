@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isNumberCell, labelItem, numberColumns, verdictCell } from "./reader-shapes.ts";
+import { isNumberCell, labelGridItems, labelItem, numberColumns, verdictCell } from "./reader-shapes.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
 
@@ -185,9 +185,45 @@ describe("labelItem (D3)", () => {
     "**Label** text",
     "plain **Label:** text",
     "**a** and **b:** text",
-    "**Label** – text",
+    "**2024**–25 was the year",
   ])("%p is no label item", (item) => {
     expect(labelItem(item)).toBeNull();
+  });
+  // Fix round 1 batch 3: a `:`/`—` after a punctuated label is the separator,
+  // never the start of the text column.
+  test.each([
+    ["**Label.**: x", "Label", ".", ": ", "x"],
+    ["**Label:** — x", "Label", ":", " — ", "x"],
+    ["**Label.** – x", "Label", ".", " – ", "x"],
+  ])("%p: the separator after a punctuated label is not text", (item, label, punct, sep, rest) => {
+    expect(labelItem(item)).toEqual({ label, punct, sep, rest });
+  });
+  // The prototype's separators: an en dash beside `:` and `—`.
+  test("**Label** – text: an en dash separates", () => {
+    expect(labelItem("**Label** – text")).toEqual({ label: "Label", punct: "", sep: " – ", rest: "text" });
+  });
+});
+
+describe("labelGridItems label cap (prototype's 70)", () => {
+  const none = () => false;
+  const label = (n: number) => "x".repeat(n);
+  test("a label of 70 characters with its colon is a grid", () => {
+    expect(labelGridItems([`**${label(69)}:** a`, "**B:** b", "**C:** c"], none)).not.toBeNull();
+  });
+  test("one label over the cap and the whole list is no grid", () => {
+    expect(labelGridItems([`**${label(70)}:** a`, "**B:** b", "**C:** c"], none)).toBeNull();
+    expect(labelGridItems(["**A** — a", `**${label(71)}** — b`, "**C** — c"], none)).toBeNull();
+  });
+  test("the cap counts what labelText shows, not the source", () => {
+    const items = [`**[${label(60)}](https://example.com/${label(40)}):** a`, "**B:** b", "**C:** c"];
+    expect(labelGridItems(items, none)).toBeNull();
+    expect(labelGridItems(items, none, (l) => l.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"))).not.toBeNull();
+  });
+  test("the reader render measures the rendered label: a long link target keeps the grid, a long label does not", () => {
+    const longTarget = formatWebHtml(`- **[Short](https://example.com/${label(90)}):** a\n- **B:** b\n- **C:** c\n`, SHAPES);
+    expect(longTarget).toContain("label-grid");
+    const longLabel = formatWebHtml(`- **A bad waitMs THROWS rather than clamping, so a caller that passes ${label(10)}:** a\n- **B:** b\n- **C:** c\n`, SHAPES);
+    expect(longLabel).not.toContain("label-grid");
   });
 });
 
@@ -237,6 +273,12 @@ describe("formatWebHtml reader shapes", () => {
     expect(reader).toContain('<strong>Three</strong><span class="lg-c">:</span> </span><span class="lg-v">third</span>');
     const dash = formatWebHtml("- **A** — a\n- **B** — b\n- **C** — c\n", SHAPES);
     expect(dash).toContain('<strong>A</strong> <span class="lg-c">—</span> </span><span class="lg-v">a</span>');
+  });
+  test("a separator after a punctuated label is hidden in the key, the text column starts at the text", () => {
+    const html = formatWebHtml("- **A.**: a\n- **B.** — b\n- **C** – c\n", SHAPES);
+    expect(html).toContain('<strong>A<span class="lg-c">.</span></strong><span class="lg-c">:</span> </span><span class="lg-v">a</span>');
+    expect(html).toContain('<strong>B<span class="lg-c">.</span></strong> <span class="lg-c">—</span> </span><span class="lg-v">b</span>');
+    expect(html).toContain('<strong>C</strong> <span class="lg-c">–</span> </span><span class="lg-v">c</span>');
   });
 
   test("chat renders byte-identical to the plain renderer", () => {

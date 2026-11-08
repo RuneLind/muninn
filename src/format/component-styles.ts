@@ -100,6 +100,21 @@ export function componentBlockCss(scope: string): string {
     ${scope} td.v-good { background: color-mix(in srgb, var(--status-success) 11%, transparent); }
     ${scope} td.v-warn { background: color-mix(in srgb, var(--status-warning) 13%, transparent); }
     ${scope} td.v-bad { background: color-mix(in srgb, var(--status-error) 11%, transparent); }
+    /* The tint cost a coloured child its margin: a link measured 4.19:1 in a
+       light v-good cell. Inside one, the tokens links, refs and chips draw with
+       move 30% toward --text-primary. The table holds each token's value, so
+       the cell's own definition is no cycle. */
+    ${scope} table {
+      --vc-info: var(--status-info); --vc-accent: var(--accent); --vc-accent-light: var(--accent-light);
+      --vc-muted: var(--text-muted); --vc-soft: var(--text-soft);
+    }
+    ${scope} :is(td.v-good, td.v-warn, td.v-bad) {
+      --status-info: color-mix(in oklab, var(--vc-info) 70%, var(--text-primary));
+      --accent: color-mix(in oklab, var(--vc-accent) 70%, var(--text-primary));
+      --accent-light: color-mix(in oklab, var(--vc-accent-light) 70%, var(--text-primary));
+      --text-muted: color-mix(in oklab, var(--vc-muted) 70%, var(--text-primary));
+      --text-soft: color-mix(in oklab, var(--vc-soft) 70%, var(--text-primary));
+    }
     /* A traffic light (\`v-light\`: a priority, a status) keeps its own glyph
        and draws no pass/fail icon. */
     ${scope} :is(td.v-good, td.v-warn, td.v-bad):not(.v-light)::before {

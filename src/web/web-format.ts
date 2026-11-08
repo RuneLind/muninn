@@ -2193,17 +2193,18 @@ function readerTableHtml(headers: string[], rows: string[][]): string {
 function labelGridHtml(items: LabelItem[], nest: { children: (RenderedChild[] | undefined)[] }): string {
   const lis = items.map((it, k) => {
     const punct = it.punct ? `<span class="lg-c">${escapeHtml(it.punct)}</span>` : "";
-    const sep = it.punct ? (it.sep ? " " : "") : hiddenSep(it.sep);
+    const sep = hiddenSep(it.sep);
     const key = `<span class="lg-k"><strong>${renderInline(it.label)}${punct}</strong>${sep}</span>`;
     return `<li>${key}<span class="lg-v">${itemHtml(it.rest)}${childrenHtml(nest.children[k])}</span></li>`;
   });
   return `<ul class="label-grid">${lis.join("")}</ul>`;
 }
 
-/** A separator after the bold (`: `, ` — `): its mark hidden, its spaces not. */
+/** A separator after the bold (`: `, ` — `): its mark hidden, its spaces not
+ *  (one space for any run). Only spaces, as after `**Label:**`: one space. */
 function hiddenSep(sep: string): string {
   const m = /^(\s*)(\S+)(\s*)$/u.exec(sep);
-  if (!m) return sep;
+  if (!m) return sep ? " " : "";
   return `${m[1] ? " " : ""}<span class="lg-c">${escapeHtml(m[2]!)}</span>${m[3] ? " " : ""}`;
 }
 
@@ -2241,7 +2242,11 @@ const webRenderer: BlockRenderer = {
   blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
   ul: (items, nest) => {
     const grid = nest.depth === 0 && readerShapesOn()
-      ? labelGridItems(items, (k) => (nest.children[k] ?? []).some((c) => c.kind === "list"))
+      ? labelGridItems(
+          items,
+          (k) => (nest.children[k] ?? []).some((c) => c.kind === "list"),
+          (label) => shownLinkText(htmlText(renderInline(label))).replace(/\s+/g, " "),
+        )
       : null;
     if (grid) return labelGridHtml(grid, nest);
     return `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`;

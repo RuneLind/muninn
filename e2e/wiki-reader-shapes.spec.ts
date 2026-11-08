@@ -25,6 +25,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { paintedMeasure } from "./contrast.ts";
+import { PALETTES } from "../src/dashboard/views/components/palettes.ts";
 
 const PORT = e2ePort("wiki-reader-shapes");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -67,6 +69,13 @@ const PAGE = [
   "| Bygg | 790 (just lists, no board) | 123 456 |",
   "| Test | 8 | 7 |",
   "",
+  "| Sak | Utfall |",
+  "|---|---|",
+  "| L1 | ✅ Fixed in [PR #3334](https://github.com/navikt/melosys-api/pull/3334), see [[plans/other]] and `fixFn()` |",
+  "| L2 | ⚠️ Partly, [PR #3335](https://github.com/navikt/melosys-api/pull/3335) and [[plans/no-such-page]], `warnFn()` |",
+  "| L3 | ❌ Broken, [PR #3336](https://github.com/navikt/melosys-api/pull/3336) and [[plans/other]], `badFn()` |",
+  "| L4 | 🟢 Low, [PR #3337](https://github.com/navikt/melosys-api/pull/3337) and `lowFn()` |",
+  "",
   "<DecisionLog>",
   "",
   "- **D7** — Vi gjør det slik.",
@@ -83,6 +92,7 @@ test.beforeAll(async () => {
   const root = path.join(base, "wiki");
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, PAGE_REL), PAGE, "utf8");
+  await writeFile(path.join(root, "plans/other.mdx"), "---\ntitle: Other page\ntype: plan\n---\n\n# Other page\n", "utf8");
   await writeFile(
     path.join(root, ".wiki-reader.json"),
     JSON.stringify({ language: "no", idLabels: { D: { one: "Beslutning", other: "beslutninger" } } }),
@@ -147,7 +157,7 @@ test.describe("Wiki reader shapes: selection text and ref nouns", () => {
     });
     expect((await selected(page, ".wiki-article td.v-bad")).selection).toBe("❌ Fails on retry");
     // The glyph is in the text, not on screen: the round icon stands for it.
-    expect(await page.locator(".wiki-article td.v-good .v-glyph").evaluate((e) => e.getBoundingClientRect().width)).toBe(0);
+    expect(await page.locator(".wiki-article td.v-good .v-glyph").first().evaluate((e) => e.getBoundingClientRect().width)).toBe(0);
   });
 
   test("a grid item selects as label, separator, text", async ({ page }) => {
@@ -189,7 +199,7 @@ test.describe("Wiki reader shapes: selection text and ref nouns", () => {
     expect(look.glyphWidth).toBeGreaterThan(8);
     expect(look.tint).not.toBe("rgba(0, 0, 0, 0)");
     // A pass/fail glyph still draws the round icon in place of its glyph.
-    expect(await page.locator(".wiki-article td.v-bad:not(.v-light)").evaluate((td) => getComputedStyle(td, "::before").content)).not.toBe("none");
+    expect(await page.locator(".wiki-article td.v-bad:not(.v-light)").first().evaluate((td) => getComputedStyle(td, "::before").content)).not.toBe("none");
   });
 
   test("at phone width a number column's header and note wrap, the number stays whole", async ({ page }) => {
@@ -216,5 +226,55 @@ test.describe("Wiki reader shapes: selection text and ref nouns", () => {
     expect(m.table).toBeLessThanOrEqual(m.article + 1);
     expect(m.thLines).toBeGreaterThan(1);
     expect(m.numbers).toEqual(["123 456:1"]);
+  });
+
+  // Fix round 1 batch 3: a link "PR #3334" in a v-good cell measured 4.19:1
+  // in light. Every element in a tinted cell that paints text of its own
+  // (links, code, bold) is measured against what is painted behind it: the
+  // cell's resolved tint composited over the table, or its own fill (code).
+  const THEMES = [
+    { name: "light", theme: "light", palette: null },
+    { name: "dark", theme: "dark", palette: null },
+    ...PALETTES.map((p) => ({ name: p.id, theme: p.base, palette: p.id })),
+  ];
+  test("every coloured inline child of a tinted verdict cell reads at AA in light, dark and every palette", async ({ page }) => {
+    await openPage(page);
+    const measure = await paintedMeasure(page);
+    const failures: string[] = [];
+    let measured = 0;
+    for (const t of THEMES) {
+      const rows = await page.evaluate(
+        ([theme, palette, measure]) => {
+          if (!document.getElementById("noTransitions")) {
+            document.head.insertAdjacentHTML("beforeend", '<style id="noTransitions">*, *::before, *::after { transition: none !important; }</style>');
+          }
+          document.documentElement.setAttribute("data-theme", theme as string);
+          if (palette) document.documentElement.setAttribute("data-palette", palette as string);
+          else document.documentElement.removeAttribute("data-palette");
+          const out: { cell: string; el: string; text: string; ratio: number }[] = [];
+          const plain: string[] = [];
+          for (const td of Array.from(document.querySelectorAll(".wiki-article td.v-good, .wiki-article td.v-warn, .wiki-article td.v-bad"))) {
+            // A link keeps a colour of its own: darkened, not dropped to the text's.
+            for (const a of Array.from(td.querySelectorAll("a"))) if (getComputedStyle(a).color === getComputedStyle(td).color) plain.push(`${td.className} ${a.textContent}`);
+            for (const el of [td, ...Array.from(td.querySelectorAll("*"))]) {
+              if (el.matches(".v-glyph, .lg-c")) continue;
+              const own = Array.from(el.childNodes).filter((n) => n.nodeType === 3 && n.textContent!.trim()).map((n) => n.textContent!.trim()).join(" ");
+              if (!own) continue;
+              out.push({ cell: td.className, el: el.tagName.toLowerCase(), text: own, ratio: (measure as (e: Element, o: boolean, f: boolean) => number)(el, false, false) });
+            }
+          }
+          return { out, plain };
+        },
+        [t.theme, t.palette, measure] as const,
+      );
+      for (const p of rows.plain) failures.push(`${t.name} ${p}: drawn in the text colour`);
+      for (const r of rows.out) {
+        measured++;
+        if (r.ratio < 4.5) failures.push(`${t.name} ${r.cell} <${r.el}> "${r.text}" ${r.ratio.toFixed(2)}`);
+      }
+    }
+    // Four tinted tables' worth of cells, links and code under every theme.
+    expect(measured).toBeGreaterThanOrEqual(THEMES.length * 12);
+    expect(failures).toEqual([]);
   });
 });
