@@ -8,3 +8,4 @@ src/summaries/author-backfill-script.test.ts  # 9 bun <script> spawns and an oEm
 src/sync/wiki-file-lock.test.ts  # real git in temp dirs and a real lockfile [10.6 s]
 src/video/media.test.ts  # one test sleeps through a real 16 s retry budget [20.1 s]
 src/vimeo/captions.test.ts  # 54 tests waiting out real budgets [29.7 s]
+src/wiki/decision-triage/loop-deps.test.ts  # every end of a pass through the real runDecisionTriage over temp wikis, ~0.4 s a case [13.5 s]
