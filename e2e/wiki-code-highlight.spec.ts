@@ -1019,9 +1019,15 @@ test.describe("The other prose surfaces", () => {
     // holds var()) and computes it to `inherit`. Renaming the function to one
     // no browser knows reproduces that: the @supports guard fails, and so
     // would the declaration at computed-value time.
+    // The wiki's stylesheet is a linked asset (B3): inline it first so the rename reaches it.
     const unsupport = () =>
-      page.evaluate(() => {
+      page.evaluate(async () => {
         document.documentElement.setAttribute("data-theme", "dark");
+        for (const link of Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]'))) {
+          const st = document.createElement("style");
+          st.textContent = await (await fetch(link.href)).text();
+          link.replaceWith(st);
+        }
         for (const st of Array.from(document.querySelectorAll("style"))) {
           st.textContent = st.textContent!.replaceAll("oklch(from", "oklchx(from");
         }
