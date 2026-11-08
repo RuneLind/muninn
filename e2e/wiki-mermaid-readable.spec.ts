@@ -215,6 +215,38 @@ const FACT_PAGE = [
 
 const BROKEN_PAGE = ["---", "title: Broken Page", "---", "", "# Broken Page", "", "```mermaid", "flowchart LR", "  A -->|unclosed B", "  ((((", "```", ""].join("\n");
 
+/** A page classDef on a one-line `;` source, and a quadrant chart with a point in each quadrant. */
+const EXTRA_PAGE = [
+  "---",
+  "title: Extra Page",
+  "---",
+  "",
+  "# Extra Page",
+  "",
+  "```mermaid",
+  "flowchart LR; A[plain] --> G[good]; class G good; classDef good fill:#ff0000",
+  "```",
+  "",
+  "```mermaid",
+  "quadrantChart",
+  "  x-axis Low --> High",
+  "  y-axis Low --> High",
+  "  quadrant-1 Do",
+  "  quadrant-2 Plan",
+  "  quadrant-3 Drop",
+  "  quadrant-4 Hand off",
+  "  A: [0.8, 0.8]",
+  "  B: [0.2, 0.8]",
+  "  C: [0.2, 0.2]",
+  "  D: [0.8, 0.2]",
+  "```",
+  "",
+].join("\n");
+
+/** Two pages that link to each other, one diagram each (the reuse pool's bound). */
+const poolPage = (own: string, other: string) =>
+  ["---", `title: Pool ${own}`, "---", "", `# Pool ${own}`, "", `[[pool-${other}|to pool ${other}]]`, "", "```mermaid", "flowchart TD", `  A[pool ${own} one] --> B[pool ${own} two]`, "```", ""].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -228,6 +260,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "id-page.md"), ID_PAGE, "utf8");
   await writeFile(path.join(root, "peek-page.md"), PEEK_PAGE, "utf8");
   await writeFile(path.join(root, "fact-page.mdx"), FACT_PAGE, "utf8");
+  await writeFile(path.join(root, "extra-page.md"), EXTRA_PAGE, "utf8");
+  await writeFile(path.join(root, "pool-a.md"), poolPage("a", "b"), "utf8");
+  await writeFile(path.join(root, "pool-b.md"), poolPage("b", "a"), "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -278,6 +313,16 @@ function channels(c: string): number[] {
   const s = /color\(srgb ([\d.e-]+) ([\d.e-]+) ([\d.e-]+)/.exec(c);
   if (s) return [Number(s[1]) * 255, Number(s[2]) * 255, Number(s[3]) * 255];
   throw new Error("unparsed colour " + c);
+}
+
+/** WCAG contrast of two computed colours. */
+function contrastOf(a: string, b: string): number {
+  const lum = (c: string) => {
+    const [r, g, bl] = channels(c).map((v) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)) as [number, number, number];
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p) as [number, number];
+  return (x + 0.05) / (y + 0.05);
 }
 
 function expectSameColour(actual: string, expected: string, what: string): void {
@@ -373,6 +418,41 @@ test.describe("palette", () => {
     // The injected classes never reach the retained source.
     expect(await marks.getAttribute("data-mermaid-src")).not.toContain("classDef warn");
   });
+});
+
+test.describe("one-line source and quadrant chart", () => {
+  const extra = (page: Page) => page.locator("#articleWrap .diagram[data-mermaid-src]");
+  async function openExtra(page: Page): Promise<void> {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=extra-page.md`);
+    await expect(extra(page)).toHaveCount(2, { timeout: 20_000 });
+  }
+
+  test("a page classDef after a `;` on a one-line source stands alone", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "light" });
+    await openExtra(page);
+    const good = extra(page).nth(0).locator("svg .node.good rect").first();
+    expect(await good.evaluate((el) => getComputedStyle(el).fill), "no injected good fill merged over the page's").toBe("rgb(255, 0, 0)");
+  });
+
+  for (const t of [
+    { theme: "light", palette: null },
+    { theme: "light", palette: "paper-light" },
+    { theme: "dark", palette: null },
+    { theme: "dark", palette: "reading" },
+  ]) {
+    test(`quadrant points read at 3:1 on every quadrant fill in ${t.palette ?? t.theme}`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: t.theme as "light" | "dark" });
+      await openExtra(page);
+      await setTheme(page, t.theme, t.palette);
+      await page.waitForTimeout(800); // the flip's pass
+      const q = extra(page).nth(1);
+      const fills = await q.locator("svg g.quadrant rect").evaluateAll((els) => els.map((el) => getComputedStyle(el).fill));
+      const points = await q.locator("svg g.data-point circle").evaluateAll((els) => els.map((el) => getComputedStyle(el).fill));
+      expect(fills.length).toBe(4);
+      expect(points.length).toBe(4);
+      for (const f of fills) for (const p of points) expect(contrastOf(p, f), `point ${p} on ${f}`).toBeGreaterThanOrEqual(3);
+    });
+  }
 });
 
 test.describe("readable size", () => {
@@ -846,5 +926,77 @@ test.describe("Ask answers", () => {
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
     await expect(answerDiagram(page).getByRole("button", { name: "Open diagram full-window" })).toBeFocused();
+  });
+
+  const answerFill = (page: Page) =>
+    answerDiagram(page).locator("svg .node rect").first().evaluate((el) => getComputedStyle(el).fill);
+  /** `done`, then `answer_html` with a theme flip in the same task: the swap's
+   *  pass reads the new colours, so nothing the swap left behind matches them. */
+  async function swapWithFlip(page: Page, openDialog: boolean): Promise<string> {
+    await page.emulateMedia({ colorScheme: "light" });
+    await fakeAsk(page);
+    await page.evaluate((ev) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (window as any).__send(ev);
+    }, [...deltas(), ["done", { answer: ANSWER, cited: [] }]] as Array<[string, unknown]>);
+    await expect(answerDiagram(page)).toHaveAttribute("data-mermaid-flipped", "", { timeout: 20_000 });
+    await page.waitForTimeout(500);
+    const lightFill = await answerFill(page);
+    if (openDialog) {
+      await answerDiagram(page).getByRole("button", { name: "Open diagram full-window" }).click();
+      await expect(page.locator("dialog.diagram-dialog")).toBeVisible();
+    }
+    await page.evaluate((html) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__askES.dispatchEvent(new MessageEvent("answer_html", { data: JSON.stringify({ html, cited: [] }) }));
+      document.documentElement.setAttribute("data-theme", "dark"); // before the swap's queued pass runs
+    }, formatWebHtml(ANSWER));
+    return lightFill;
+  }
+
+  test("a theme flip between the answer_html swap and its pass draws the answer in the new colours", async ({ page }) => {
+    const lightFill = await swapWithFlip(page, false);
+    await expect.poll(() => answerFill(page), { timeout: 10_000 }).not.toBe(lightFill);
+    await page.waitForTimeout(800); // no later pass changes it back
+    const expected = await page.evaluate(() => {
+      const el = document.createElement("span");
+      el.style.color = "color-mix(in srgb, var(--accent) 4.5%, var(--bg-panel))";
+      document.getElementById("askAnswerBody")!.appendChild(el);
+      const c = getComputedStyle(el).color;
+      el.remove();
+      return c;
+    });
+    expectSameColour(await answerFill(page), expected, "answer node after the flip");
+  });
+
+  test("the same flip closes an open ⤢ the pass could not hand over", async ({ page }) => {
+    await swapWithFlip(page, true);
+    await expect(answerDiagram(page)).toHaveCount(1);
+    await expect(page.locator("dialog.diagram-dialog")).toBeHidden({ timeout: 10_000 });
+  });
+});
+
+test.describe("drawing reuse pool", () => {
+  test("drawings the next pass does not reuse are dropped: A → B → A draws A again", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=pool-a.md`);
+    const diagramOf = (own: string) => page.locator(`#articleWrap .diagram[data-mermaid-src*="pool ${own} one"]`);
+    await expect(diagramOf("a")).toHaveCount(1, { timeout: 20_000 });
+    await page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const w = window as any;
+      const real = w.mermaid.render.bind(w.mermaid);
+      w.__renders = [];
+      w.mermaid.render = (id: string, src: string, ...a: unknown[]) => {
+        w.__renders.push(src);
+        return real(id, src, ...a);
+      };
+    });
+    await page.locator("#articleWrap a", { hasText: "to pool b" }).click();
+    await expect(diagramOf("b")).toHaveCount(1, { timeout: 20_000 });
+    await page.locator("#articleWrap a", { hasText: "to pool a" }).click();
+    await expect(diagramOf("a")).toHaveCount(1, { timeout: 20_000 });
+    await page.waitForTimeout(500);
+    const drawsOfA = await page.evaluate(() => (window as unknown as { __renders: string[] }).__renders.filter((s) => s.includes("pool a one")).length);
+    expect(drawsOfA, "pool B's pass dropped A's drawing, so A is drawn afresh").toBe(1);
   });
 });

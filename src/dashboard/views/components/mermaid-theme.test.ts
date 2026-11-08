@@ -255,6 +255,14 @@ describe("categorical colours: every diagram type gets real hues, readable label
       expect(minPairDeltaE(q)).toBeGreaterThanOrEqual(5);
       for (let i = 1; i <= 4; i++) expect(contrast(str(v, `quadrant${i}Fill`), str(v, `quadrant${i}TextFill`))).toBeGreaterThanOrEqual(4.5);
     });
+
+    test(`${set.name}: a quadrant point stands out at 3:1 on every quadrant fill`, () => {
+      const v = tv();
+      const point = str(v, "quadrantPointFill");
+      for (let i = 1; i <= 4; i++) {
+        expect(contrast(point, str(v, `quadrant${i}Fill`)), `point on quadrant${i}`).toBeGreaterThanOrEqual(3);
+      }
+    });
   }
 });
 
@@ -288,6 +296,28 @@ describe("injectClassDefs", () => {
   test("a comma list in the page's classDef counts for every name in it", () => {
     const out = injectClassDefs("flowchart LR\n  A --> B\n  classDef good,bad color:#fff", defs);
     expect(out).toBe("flowchart LR\n  A --> B\n  classDef good,bad color:#fff");
+  });
+  test("a page classDef after a `;` separator counts, on one line or after a newline", () => {
+    // mermaid's flowchart grammar ends a statement at `;` as at a newline (a
+    // classDef's own styles run to the line's end, so it comes last on it).
+    const one = injectClassDefs("flowchart LR; A-->B; class A good; classDef good fill:#f00", defs);
+    expect(one).not.toContain("classDef good fill:#000");
+    expect(one).toContain("classDef bad fill:#111");
+    expect(injectClassDefs("graph TD\n  A-->B ;classDef good,bad stroke:#f00", defs)).toBe("graph TD\n  A-->B ;classDef good,bad stroke:#f00");
+    // A `>` inside a label (`<br>`) opens no asymmetric-node label.
+    expect(injectClassDefs("flowchart LR; A[one<br>two] --> B; classDef good fill:#f00", defs)).not.toContain("classDef good fill:#000");
+  });
+  test("the text `classDef good` inside a label or an edge label is not a page classDef", () => {
+    for (const src of [
+      'flowchart LR\n  A["a ] b; classDef good now"] --> B',
+      "flowchart LR\n  A[x; classDef good now] --> B",
+      "flowchart LR\n  A(x; classDef good now) --> B",
+      "flowchart LR\n  A>x; classDef good now] --> B",
+      "flowchart LR\n  A -->|x; classDef good now| B",
+      "flowchart LR\n  %% x; classDef good now\n  A --> B",
+    ]) {
+      expect(injectClassDefs(src, defs), src).toContain("classDef good fill:#000");
+    }
   });
   test("a longer class name sharing a prefix is not the same class", () => {
     const out = injectClassDefs("graph TD\n  classDef goodish fill:#f00", defs);

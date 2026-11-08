@@ -363,7 +363,9 @@ function categoricalVariables(t: {
     quadrant2TextFill: h(t.text),
     quadrant3TextFill: h(t.text),
     quadrant4TextFill: h(t.text),
-    quadrantPointFill: h(strokes[0]!),
+    // The point is drawn on all four tinted fills: the text colour reads on each
+    // (≥ 4.5:1 above), where the hue-0 line colour measured 2.3:1 on some.
+    quadrantPointFill: h(t.text),
     quadrantPointTextFill: h(t.text),
     quadrantXAxisTextFill: h(t.text),
     quadrantYAxisTextFill: h(t.text),
@@ -420,10 +422,32 @@ function headerLineIndex(lines: string[]): number {
 
 const FLOW_HEADER = /^\s*(?:flowchart|graph)\b/;
 
-/** Every class name the source's own `classDef` lines define (`classDef a,b …`). */
+/** Every class name the source's own `classDef` statements define (`classDef a,b …`).
+ *  A statement starts at a line start or after a `;`; a `;` inside a label
+ *  (`"…"`, `[…]`, `(…)`, `{…}`, `>…]`, an edge's `|…|`) or a `%%` comment
+ *  starts none. */
 function definedClasses(source: string): Set<string> {
   const names = new Set<string>();
-  for (const m of source.matchAll(/^\s*classDef\s+([^\s]+)/gm)) for (const n of m[1]!.split(",")) if (n) names.add(n);
+  const take = (i: number) => {
+    const m = /^[ \t]*classDef\s+([^\s;]+)/.exec(source.slice(i));
+    if (m) for (const n of m[1]!.split(",")) if (n) names.add(n);
+  };
+  let depth = 0, inStr = false, inPipe = false, inComment = false;
+  take(0);
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i]!;
+    if (c === "\n") {
+      depth = 0; inPipe = false; inComment = false;
+      if (!inStr) take(i + 1);
+    } else if (inComment) continue;
+    else if (c === '"') inStr = !inStr;
+    else if (inStr) continue;
+    else if (c === "%" && source[i + 1] === "%" && depth === 0 && !inPipe) inComment = true;
+    else if ("[({".includes(c) || (c === ">" && depth === 0 && /\w/.test(source[i - 1] ?? ""))) depth++;
+    else if ("])}".includes(c)) depth = Math.max(0, depth - 1);
+    else if (c === "|" && depth === 0) inPipe = !inPipe;
+    else if (c === ";" && depth === 0 && !inPipe) take(i + 1);
+  }
   return names;
 }
 
