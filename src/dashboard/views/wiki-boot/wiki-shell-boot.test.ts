@@ -469,6 +469,7 @@ describe("the left pane (wiki-rail-controller.ts), driven through the booted she
       "/components/wiki-stale-controller.ts",
       "/components/wiki-effort-controller.ts",
       "/components/wiki-menus-controller.ts",
+      "/components/wiki-ask-controller.ts",
     ]) {
       expect(loadedInWindow.some((k) => k.endsWith(m))).toBe(true);
     }

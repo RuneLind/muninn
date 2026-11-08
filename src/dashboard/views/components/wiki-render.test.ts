@@ -108,6 +108,7 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11 B3): 1,436,421 -> 806,603 bytes (361,526 -> 271,805 gzipped). Every
 // line above counts the unminified bundle; this pin and later ones the minified.
 // 2026-11-08: merged with Run now, B2's moves and C3 (above): 809,410 bytes (273,708 gzipped).
+// C4 (Ask to wiki-ask-controller.ts): 809,714 bytes, under the same pin.
 const WIKI_CLIENT_MAX_BYTES = 810_000;
 
 test("wikiClientScript stays under its size pin", async () => {

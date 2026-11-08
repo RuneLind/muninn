@@ -10,8 +10,8 @@
  * where those two listeners sat in it; every other Ask listener stays in
  * `boot()` and calls the exports. This module never imports the shell: what Ask
  * reads and calls there arrives through {@link AskTurnPort}, the `RailDeps`
- * shape. Ask owns its turn state (`askTurns`, `askShownTurn`,
- * `integratePreview`) and exports getters for the shell, so the port carries no
+ * shape. Ask owns its turn state (`askTurns`, `askShownTurn`, `integratePreview`)
+ * and exports getters for the first two, so the port carries no
  * `getShownTurn()` or `repaintBody()`: those flow the other way. Leaf imports
  * (`wiki-ask-render.ts`, `wiki-ask-session.ts`, `wiki-shell-state.ts`'s
  * `setCurrentName`, the rail's `renderList`) are imported directly and are not

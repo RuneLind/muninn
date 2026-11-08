@@ -19,7 +19,7 @@
 import { isClaimOutcome } from "./wiki-claim-retry.ts";
 import { toDeclineReason, type DeclineReason } from "../../../wiki/ask-chat.ts";
 
-/** The full shape of a persisted Ask turn — mirrors `AskTurn` in wiki-browser.ts.
+/** The full shape of a persisted Ask turn — mirrors `AskTurn` in wiki-ask-controller.ts.
  *  `citations` is kept loose (`unknown[]`) so this module stays free of the
  *  DOM-side `AskCitation` type; the client casts back to `AskTurn[]` on rehydrate. */
 export interface StoredAskTurn {
