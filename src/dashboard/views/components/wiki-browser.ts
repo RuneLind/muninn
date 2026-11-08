@@ -1471,12 +1471,9 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   return head;
 }
 
-/** Standalone HTML explainers aren't markdown, so the article renders in a
- *  sandboxed <iframe> (scripts allowed — they use inline JS/mermaid and are
- *  trusted local docs on a loopback-only dashboard) instead of the markdown
- *  pane. The Connections panel is fetched from /api/wiki/page like any other
- *  page: explainers carry backlinks ("Linked from") since md→.html links join
- *  the link graph, plus the lazy Similar section; outgoing links stay empty. */
+/** An explainer renders in a sandboxed <iframe> (scripts allowed: trusted local
+ *  docs on a loopback-only dashboard), not the markdown pane. Its Connections
+ *  come from /api/wiki/page like any page: backlinks and Similar, no outgoing. */
 function loadExplainer(m: WikiListing, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
   // An explainer has no lens: a `?lens=` is spent, and a plan-card run dropped.
@@ -1484,12 +1481,9 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   abortAgentRuns();
   setAtlasFull(false);
   setCurrentName(m.name);
-  // The listing IS the identity here (no page response to wait for), so the
-  // active-row test gets its relPath immediately.
+  // The listing IS the identity here, so the active row gets its relPath now; the
+  // previous page's hash is cleared with it (a series write compares it).
   setCurrentRelPath(m.relPath);
-  // The two identities move together: the previous page's hash must not stand
-  // for this one (a series write compares it), so it is cleared now and set
-  // from this page's payload below.
   currentPageHash = null;
   /** This view's number: a later view drops this page's response (R2B4). */
   const seq = pageViewSeq;
