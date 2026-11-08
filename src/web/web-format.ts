@@ -1254,7 +1254,7 @@ function foldBodyHtml(title: string, children: string, rawChildren: Block[]): st
   const first = rawChildren[i];
   if (!first || first.type !== "heading" || first.content.trim() !== title) return children;
   const tag = `h${Math.min(first.level + 1, 6)}`;
-  const head = `<${tag} class="fold-heading-dup">${renderInline(first.content)}</${tag}>`;
+  const head = `<${tag} class="fold-heading-dup">${renderInlineWith(first.content, false)}</${tag}>`;
   const rest = rawChildren.slice(i + 1);
   return [
     ...(i > 0 ? [renderBlocks(rawChildren.slice(0, i), webRenderer)] : []),
@@ -2170,7 +2170,7 @@ function runListHtml(list: ChecklistList): string {
  *  verdict cells (`v-good`/`v-warn`/`v-bad`, the glyph kept as hidden text;
  *  a traffic light adds `v-light` and keeps its glyph on screen). */
 function readerTableHtml(headers: string[], rows: string[][]): string {
-  const head = headers.map(renderInline);
+  const head = headers.map((h) => renderInlineWith(h, false));
   const body = rows.map((row) => row.map(renderInline));
   const nums = numberColumns(head.map(htmlText), body.map((r) => r.map(htmlText)));
   const thead = "<thead><tr>" + head.map((h, c) => `<th${nums.has(c) ? ' class="num"' : ""}>${h}</th>`).join("") + "</tr></thead>";
@@ -2650,7 +2650,8 @@ function renderInline(text: string): string {
 }
 
 /** `renderInline`; `chips` false keeps the before → after chips out (a
- *  heading). They are drawn only where the reader shapes apply. */
+ *  heading, a fold's duplicate heading, a table header). They are drawn
+ *  only where the reader shapes apply. */
 function renderInlineWith(text: string, chips: boolean): string {
   const ph = new Placeholders();
 

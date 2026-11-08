@@ -2,9 +2,10 @@
  * Before → after chips and the section bar (plan muninn-wiki-render-richer
  * P3) in a real browser, over a temp wiki.
  *
- * Chips: the old value is drawn soft (the muted token, resolved on a body
- * probe), the arrow in the accent, the new value bold, and a selection over
- * the chip reads as the source does (`10.5 → 6.4 min`), which is the text
+ * Chips: the old value is drawn soft and the arrow in the light accent (the
+ * tokens resolved on a body probe), both at 4.5:1 or more on the composited
+ * chip in four palettes; the new value is bold, and a selection over the chip
+ * reads as the source does (`10.5 → 6.4 min`), which is the text
  * Explain and fact-check send to `locateExcerpt`. Computed style and
  * `Selection.toString()` are layout outcomes a unit test cannot see.
  *
@@ -99,7 +100,7 @@ const FOOT = [
   "",
   '<Fold title="First fold">',
   "",
-  "one",
+  "one went 3 → 4 s",
   "",
   "</Fold>",
   "",
@@ -176,7 +177,7 @@ async function scrollTo(page: Page, selector: string): Promise<void> {
 }
 
 test.describe("before → after chips", () => {
-  test("old value muted, arrow accent, new value bold; selection reads the source", async ({ page }) => {
+  test("old value soft, arrow light accent, new value bold; selection reads the source", async ({ page }) => {
     await openLong(page);
     const look = await page.evaluate(() => {
       const probe = document.createElement("span");
@@ -193,9 +194,9 @@ test.describe("before → after chips", () => {
       sel.addRange(r);
       const out = {
         old: getComputedStyle(chip.querySelector(".ba-old")!).color,
-        muted: resolve("--text-muted"),
+        soft: resolve("--text-soft"),
         arr: getComputedStyle(chip.querySelector(".ba-arr")!).color,
-        accent: resolve("--accent"),
+        accent: resolve("--accent-light"),
         weight: Number(getComputedStyle(chip.querySelector(".ba-new")!).fontWeight),
         bg: getComputedStyle(chip).backgroundColor,
         chips: Array.from(document.querySelectorAll(".wiki-article .ba-chip")).map((c) => c.textContent),
@@ -206,12 +207,86 @@ test.describe("before → after chips", () => {
       return out;
     });
     expect(look.chips).toEqual(["10.5 → 6.4 min", "113→57"]);
-    expect(look.old).toBe(look.muted);
+    expect(look.old).toBe(look.soft);
     expect(look.arr).toBe(look.accent);
     expect(look.weight).toBeGreaterThanOrEqual(600);
     expect(look.bg).not.toBe("rgba(0, 0, 0, 0)");
     expect(look.selection).toBe("CI went 10.5 → 6.4 min after the split; the allowlist 113→57.");
     expect(look.selection).toBe(look.source);
+  });
+});
+
+/** Contrast of `.ba-old` and `.ba-arr` on the chip's background composited
+ *  over every ancestor's, all colours read from the page (a canvas parses
+ *  whatever form `getComputedStyle` returns, `color(srgb …)` included). */
+async function chipContrast(page: Page, chipSel: string): Promise<{ old: number; arr: number }> {
+  return page.evaluate((sel) => {
+    const chip = document.querySelector(sel)!;
+    const ctx = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+    const layers: string[] = [];
+    for (let el: Element | null = chip; el; el = el.parentElement) layers.unshift(getComputedStyle(el).backgroundColor);
+    const paint = (colors: string[]) => {
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, 1, 1);
+      for (const c of colors) {
+        ctx.fillStyle = c;
+        ctx.fillRect(0, 0, 1, 1);
+      }
+      return Array.from(ctx.getImageData(0, 0, 1, 1).data.slice(0, 3));
+    };
+    const lum = (rgb: number[]) => {
+      const [r, g, b] = rgb.map((v) => {
+        const c = v / 255;
+        return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+    };
+    const ratio = (fg: string) => {
+      const a = lum(paint(layers));
+      const b = lum(paint([...layers, fg]));
+      return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    };
+    return {
+      old: ratio(getComputedStyle(chip.querySelector(".ba-old")!).color),
+      arr: ratio(getComputedStyle(chip.querySelector(".ba-arr")!).color),
+    };
+  }, chipSel);
+}
+
+test.describe("chip contrast", () => {
+  const SCHEMES = [
+    { name: "light", theme: "light", palette: null },
+    { name: "dark", theme: "dark", palette: null },
+    { name: "reading", theme: "dark", palette: "reading" },
+    { name: "paper-light", theme: "light", palette: "paper-light" },
+  ];
+  test("old value and arrow clear 4.5:1 on the chip, in prose and inside a fold, in light, dark, reading and paper-light", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/long.mdx")}&lens=all`);
+    const measured: string[] = [];
+    const low: string[] = [];
+    for (const where of ["prose", "fold"] as const) {
+      if (where === "fold") {
+        await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/foot.mdx")}&lens=all`);
+        await page.locator(".wiki-article details.fold summary", { hasText: "First fold" }).click();
+      }
+      const sel = where === "fold" ? ".wiki-article details.fold .ba-chip" : ".wiki-article .ba-chip";
+      await expect(page.locator(sel).first()).toBeVisible();
+      for (const s of SCHEMES) {
+        await page.evaluate(([theme, palette]) => {
+          document.documentElement.setAttribute("data-theme", theme as string);
+          if (palette) document.documentElement.setAttribute("data-palette", palette as string);
+          else document.documentElement.removeAttribute("data-palette");
+        }, [s.theme, s.palette] as const);
+        const c = await chipContrast(page, sel);
+        measured.push(`${s.name} ${where} old=${c.old.toFixed(2)} arr=${c.arr.toFixed(2)}`);
+        if (c.old < 4.5) low.push(`${s.name} ${where} old ${c.old.toFixed(2)}`);
+        if (c.arr < 4.5) low.push(`${s.name} ${where} arr ${c.arr.toFixed(2)}`);
+      }
+    }
+    console.log(measured.join("\n"));
+    expect(low).toEqual([]);
   });
 });
 
@@ -329,6 +404,45 @@ test.describe("section bar", () => {
     await expect(page.locator("#wikiSectionBar")).toBeVisible();
     await expect(n(page)).toHaveText("1/5");
     await expect(page.locator("#wikiSectionMenu")).toBeHidden();
+  });
+
+  test("navigations leave no keydown listener behind on the bar's host", async ({ page }) => {
+    await openLong(page);
+    const cdp = await page.context().newCDPSession(page);
+    const keydowns = async (): Promise<number> => {
+      const { result } = await cdp.send("Runtime.evaluate", { expression: "document.getElementById('wikiSectionBar')" });
+      const { listeners } = await cdp.send("DOMDebugger.getEventListeners", { objectId: result.objectId! });
+      return listeners.filter((l) => l.type === "keydown").length;
+    };
+    const before = await keydowns();
+    for (let k = 0; k < 3; k++) {
+      await page.locator(".wiki-article a", { hasText: /Short page|short/ }).first().click();
+      await expect(page.locator(".wiki-article-head h1")).toHaveText("Short page");
+      await page.goBack();
+      await expect(page.locator(".wiki-article-head h1")).toHaveText("Long plan");
+    }
+    expect(await keydowns()).toBe(before);
+  });
+
+  test("a navigation with the menu open closes it: Esc in the next bar still leaves focus mode", async ({ page }) => {
+    await openLong(page);
+    await page.locator(".wiki-article a", { hasText: /Short page|short/ }).first().click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Short page");
+    await page.goBack();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Long plan");
+    await page.locator("#wikiSectionBar .wiki-sec-btn").click();
+    await expect(page.locator("#wikiSectionMenu")).toBeVisible();
+    // History moves without a pointer event, so the outside-click close never runs.
+    await page.goForward();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Short page");
+    await page.goBack();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Long plan");
+    await expect(page.locator("#wikiSectionMenu")).toBeHidden();
+    await page.locator("body").press("f");
+    await expect(page.locator(".wiki-layout.focus-mode")).toHaveCount(1);
+    await page.locator("#wikiSectionBar .wiki-sec-btn").focus();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".wiki-layout.focus-mode")).toHaveCount(0);
   });
 
   test("a page loaded with a hash shows the anchored section", async ({ page }) => {

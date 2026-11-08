@@ -256,7 +256,8 @@ export function mountSectionBar(wrap: HTMLElement): void {
     const it = (e.target as Element).closest<HTMLElement>(".wiki-sec-item");
     if (it) jump(Number(it.dataset.sec));
   });
-  bar.addEventListener("keydown", (e) => {
+  // On the host, which outlives this mount: teardown removes it.
+  const onKey = (e: KeyboardEvent): void => {
     if (menu.hidden) return;
     const list = items();
     const at = list.indexOf(document.activeElement as HTMLElement);
@@ -275,7 +276,8 @@ export function mountSectionBar(wrap: HTMLElement): void {
     if (to < 0) return;
     e.preventDefault();
     list[to]!.focus();
-  });
+  };
+  bar.addEventListener("keydown", onKey);
 
   wrap.addEventListener("scroll", schedule, { passive: true });
   article.addEventListener("toggle", relist, true);
@@ -296,7 +298,9 @@ export function mountSectionBar(wrap: HTMLElement): void {
     m.frame = 0;
     wrap.removeEventListener("scroll", schedule);
     article.removeEventListener("toggle", relist, true);
-    document.removeEventListener("pointerdown", onOutside, true);
+    // A menu left open by a navigation closes with its mount.
+    closeMenu(false);
+    bar.removeEventListener("keydown", onKey);
     lens.disconnect();
     pane.disconnect();
     sizes?.disconnect();

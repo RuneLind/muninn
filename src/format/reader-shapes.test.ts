@@ -497,6 +497,16 @@ describe("before → after chips: where the renderer draws them", () => {
     expect(formatWebHtml("run `10 → 6` now", SHAPES)).not.toContain("ba-chip");
     expect(formatWebHtml("```\n10 → 6\n```\n", SHAPES)).not.toContain("ba-chip");
   });
+  test("a table header takes none; a cell under it still does", () => {
+    const table = formatWebHtml("| H 1 → 2 | B |\n|---|---|\n| 3 → 4 | x |\n", SHAPES);
+    expect(table).toContain("<th>H 1 → 2</th>");
+    expect(chipTexts(table)).toEqual(["3 → 4"]);
+  });
+  test("a Fold's duplicate heading takes none; the body under it still does", () => {
+    const html = formatWebHtml('<Fold title="Speed 10 → 20 s">\n\n## Speed 10 → 20 s\n\nCI 7 → 5 min\n\n</Fold>\n', SHAPES);
+    expect(html).toContain('<h3 class="fold-heading-dup">Speed 10 → 20 s</h3>');
+    expect(chipTexts(html)).toEqual(["7 → 5 min"]);
+  });
   test("inside a Fold yes, inside a Callout or a Question no (the shapes' SHAPE_TRANSPARENT rule)", () => {
     expect(chipTexts(formatWebHtml('<Fold title="S">\n\nCI 10 → 6 min\n\n</Fold>\n', SHAPES))).toEqual(["10 → 6 min"]);
     expect(formatWebHtml('<Callout tone="info">\n\nCI 10 → 6 min\n\n</Callout>\n', SHAPES)).not.toContain("ba-chip");
