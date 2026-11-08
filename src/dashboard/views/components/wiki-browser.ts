@@ -24,7 +24,7 @@ import {
 } from "./wiki-readonly-client.ts";
 // The series editor's pure half — the menu model, the head-move plan and the
 // markup. The DOM (the popover, the writes, the repaint) lives in
-// `wiki-series-controller.ts`; the shell keeps the openers' markup.
+// `wiki-series-controller.ts`; the shell keeps the header opener's markup.
 import {
   canEditSeriesPage,
   seriesEditBtnHtml,
@@ -244,7 +244,7 @@ import { graphDefaults, parseIssueRoot, type GraphLevel, type GraphPayload } fro
 // The provenance strip: one collapsed line under the title that opens into the
 // chain. Its strings and markup live in that module (pure, `bun test`-covered);
 // placement and fill are `wiki-article-controller.ts`'s. This file keeps the
-// pending placeholder and the delegate's branches for the strip's three controls.
+// pending placeholder and the delegate's branches for the strip's five controls.
 import {
   provPendingHtml,
 } from "./wiki-provenance-view.ts";
