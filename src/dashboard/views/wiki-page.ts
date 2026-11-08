@@ -82,8 +82,11 @@ const SVG_FOCUS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 
  * article + connections come per-page from /api/wiki/page.
  *
  * The client logic is a real bundled TS entrypoint (`components/wiki-shell-client.ts`,
- * which calls `boot()` from `components/wiki-browser.ts`), injected below via
- * `wikiClientScript()`.
+ * which calls `boot()` from `components/wiki-browser.ts`), minified by
+ * `wikiClientScript()`. It and the stylesheet (`buildWikiPageCss`) are NOT
+ * inlined: the page links them at content-hashed URLs under `/wiki/assets/`
+ * (`getWikiAssets`), which the browser caches as immutable. Only the per-request
+ * `window.__WIKI_*__` globals stay inline, before the script tag.
  *
  * `wikis` populates the wiki picker — every registered wiki (bot wikis with a
  * `wikiDir` plus `WIKI_EXTRA` standalone wikis). `selected` is the canonical
@@ -142,7 +145,7 @@ export async function renderWikiPage(opts?: {
   /** The viewer's role, for the nav (`renderNav`'s `role`). */
   role?: AuthRole | null;
 }): Promise<string> {
-  const clientScript = await wikiClientScript();
+  const assets = await getWikiAssets();
   const wikis = opts?.wikis ?? [];
   const wikiDates = opts?.wikiDates ?? {};
   const selected = opts?.selected ?? "";
@@ -200,7 +203,200 @@ export async function renderWikiPage(opts?: {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <title>Wiki — Muninn</title>
-  <style>
+  <link rel="stylesheet" href="${assets.css.path}">
+</head>
+<body${tools ? "" : ` class="${WIKI_READ_SLICE_CLASS}"`}>
+  ${renderNav("wiki", { role: opts?.role })}
+  <div class="wiki-layout">
+    <div class="wiki-pane">
+      <div class="wiki-browse-head">
+        ${
+          wikiSelector || gardenerLink || boardLink
+            ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${boardLink}${gardenerLink}</div>`
+            : ""
+        }
+        ${tools ? `<div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>` : ""}
+        <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags, paths…">
+        <!-- Domain facet — un-hidden client-side only on a wiki whose pages span
+             more than one domain (i.e. one with a life/ subtree). -->
+        <div class="wiki-chip-row wiki-segmented" id="domainChips" style="display:none">
+          <button class="wiki-chip active" data-domain="">All</button>
+          <button class="wiki-chip" data-domain="ai">AI</button>
+          <button class="wiki-chip" data-domain="life">Life</button>
+        </div>
+        <div class="wiki-sort-row wiki-sort-row-main">
+          <select id="wikiSort" class="wiki-sort">
+            <option value="updated" selected>Recently updated</option>
+            <option value="created">Recently added</option>
+            <!-- The worked-on axis: the day an agent session last wrote the page,
+                 out of claude-usage's ledger. HIDDEN until the listing says this
+                 wiki has any covered page (workedCoverage.matched > 0) — on a
+                 corpus written entirely by bulk passes every page falls back to
+                 its update date, so the option would be "Recently updated" under
+                 a second name (the measured corpus is named once, on
+                 WikiIndex.workedCoverage). Hidden rather than disabled: a control
+                 that can never be chosen is furniture (the rail's own F2 rule).
+                 Once shown it becomes the DEFAULT unless the reader picked a
+                 sort (resolveSortMode in wiki-filter.ts). -->
+            <option value="worked" hidden>Worked on</option>
+            <option value="backlinks">Most linked</option>
+            <option value="title">Title A–Z</option>
+          </select>
+          <!-- Filters: the toolbar's button for the <details> below. The details
+               keeps its own (hidden) summary so its open state, toggle event and
+               auto-open stay what they were; this button only flips it. -->
+          <button type="button" class="wiki-tool-btn" id="wikiFiltersBtn" aria-controls="wikiFilters" aria-expanded="false" title="Filters">${SVG_FILTER}<span class="wiki-tool-label">Filters</span><span class="wiki-filter-count" id="wikiFilterCount" style="display:none"></span></button>
+          <span class="wiki-count" id="wikiCount"></span>
+          <!-- View options: the two per-wiki toggles the reader sets once and
+               rarely touches, out of the toolbar. Both are unchecked here and
+               painted from the folds store at boot (the server does not know
+               what this browser remembers). The dot says a toggle is on while
+               the pane is closed; the strip under the toolbar names it. The pane
+               is a non-modal role="dialog"; it closes when focus or a pointer
+               leaves it, on Escape, and on a reader shortcut key pressed
+               outside it, which then runs (wiki-rail-controller.ts, setOptionsOpen). -->
+          <button type="button" class="wiki-tool-btn wiki-tool-icon" id="wikiOptionsBtn" aria-controls="wikiOptions" aria-expanded="false" aria-label="View options" title="View options">${SVG_OPTIONS}<span class="wiki-options-dot" id="wikiOptionsDot" hidden></span></button>
+          <div class="wiki-options-pane" id="wikiOptions" role="dialog" aria-label="View options" hidden>
+            <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
+              <input type="checkbox" id="wikiGroupFamilies">group families
+            </label>
+            <!-- group by effort (work map P4): ON by default on a wiki with a
+                 work map, so it is the one toggle painted checked; shown only
+                 where the listing says a map exists. -->
+            <label class="wiki-efforts-toggle" id="wikiEffortsToggle" title="Fold Activity under the work map's efforts" hidden>
+              <input type="checkbox" id="wikiGroupEfforts">group by effort
+            </label>
+            <!-- Retired (culled) pages, per wiki. Hidden on a wiki with none and
+                 while the facets select none (unless checked); the label and its
+                 count are painted by the client from the wiki's cullLabels, so it
+                 carries no English hover of its own. -->
+            <label class="wiki-retired-toggle" id="wikiRetiredToggle" hidden>
+              <input type="checkbox" id="wikiShowRetired"><span id="wikiRetiredLabel"></span>
+            </label>
+          </div>
+        </div>
+        <div class="wiki-active-options" id="wikiActiveOptions" hidden></div>
+        <!-- «Felles: N changed» — painted by the client on a wiki that offers
+             ⇪ Felles, after the page has rendered (wiki-felles-publish.ts). -->
+        <div class="wiki-felles-sync" id="wikiFellesSync" aria-live="polite" hidden></div>
+        <!-- A bucket-mirrored wiki whose copy is stale — painted from the
+             listing's \`mirror\` field (wiki-mirror-status.ts). -->
+        ${mirrorStatusSlotHtml()}
+        <details class="wiki-filters" id="wikiFilters">
+          <summary class="wiki-filters-summary">Filters</summary>
+          <div class="wiki-filters-body">
+            <div class="wiki-sort-row" id="wikiFolderRow" style="display:none">
+              <select id="wikiFolder" class="wiki-sort wiki-folder"></select>
+            </div>
+            <div class="wiki-chip-row" id="typeChips"></div>
+            <!-- Plan-status facet — populated (and un-hidden) only on wikis where
+                 at least one page carries a valid plan_status. -->
+            <div class="wiki-chip-row" id="statusChips" style="display:none"></div>
+            <!-- Project facet — populated (and un-hidden) only on wikis whose
+                 .wiki-reader.json declares a project rule that resolved at least
+                 one page. -->
+            <div class="wiki-chip-row" id="projectChips" style="display:none"></div>
+            <!-- Jira facet — populated (and un-hidden) only on wikis the
+                 claude-usage stamper has written a jira: key to. -->
+            <div class="wiki-chip-row" id="jiraChips" style="display:none"></div>
+            <div class="wiki-chip-row" id="tagChips"></div>
+          </div>
+        </details>
+      </div>
+      <div class="wiki-list" id="wikiList"></div>
+      <div class="wiki-coverage-foot" id="wikiCoverageFoot" style="display:none"></div>
+      <div class="wiki-rail-resizer" id="wikiRailResizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the page list" title="Drag or use ← → to resize · double-click or Home to reset"></div>
+    </div>
+
+    <div class="wiki-pane">
+      <div class="wiki-focus-bar"><button class="wiki-focus-exit" id="wikiFocusExit" type="button" data-pane-toggle="focus" title="Leave focus (Esc)">${SVG_FOCUS_EXIT} Exit focus <kbd>Esc</kbd></button></div>
+      <div class="wiki-breadcrumb" id="wikiBreadcrumb" style="display:none"></div>
+      <div class="wiki-article-wrap" id="articleWrap">
+        <div class="wiki-empty-state">Loading wiki…</div>
+      </div>
+    </div>
+
+    <div class="wiki-pane wiki-conn-pane">
+      <!-- Collapsed form: shown only under .right-collapsed (wiki-pane-toggle.ts). -->
+      <div class="wiki-conn-strip" id="wikiConnStrip">
+        <button class="wiki-pane-btn" type="button" data-pane-toggle="right" title="Show connections (])">${SVG_EXPAND}</button>
+        <button class="wiki-pane-btn" type="button" data-pane-open="conn" title="Connections">${SVG_CONN}</button>
+        <button class="wiki-pane-btn" type="button" data-pane-open="ask" title="Ask">${SVG_ASK}</button>
+        <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
+      </div>
+      <div class="wiki-conn-tabs">
+        <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
+        <button class="wiki-conn-tab" data-conntab="stale" title="${STALE_TAB_TITLE}">Stale<span class="wiki-stale-count" id="wikiStaleCount"></span></button>
+        <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
+        <div class="wiki-conn-tools">
+          <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
+          <button class="wiki-pane-btn" type="button" data-pane-toggle="right" aria-pressed="false" title="Hide connections (])">${SVG_COLLAPSE}</button>
+        </div>
+      </div>
+      <div class="wiki-conn-body" id="connBody">
+        <div class="wiki-conn-empty">Select a page to see its connections.</div>
+      </div>
+      <div class="wiki-conn-body wiki-stale-body" id="staleBody" style="display:none">
+        <div class="wiki-conn-empty">Select a page to see what may be stale.</div>
+      </div>
+      <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
+        <div class="wiki-ask-compose">
+          <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="${readonlyWiki ? escHtml(WIKI_READONLY_INPUT_PLACEHOLDER) : "Ask this wiki…"}"${readonlyWiki ? " disabled" : ""}></textarea>
+          <div class="wiki-ask-actions">
+            <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
+            <button class="wiki-ask-newchat" id="wikiNewChatBtn"
+              title="Send this question straight to a chat thread — full context and tools, no wiki-only answer first">New chat</button>
+          </div>
+        </div>
+        <div class="wiki-ask-status" id="wikiAskStatus" style="display:none"><span class="spinner"></span><span class="st"></span></div>
+        <div class="wiki-ask-hint" id="wikiAskHint">${readonlyWiki ? escHtml(WIKI_READONLY_ASK_HINT) : "Ask a question and this wiki answers in the main pane, with citations you can open as pages."}</div>
+        ${askBotLine}
+        <div class="wiki-ask-history" id="wikiAskHistory"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.__WIKI_NAME__ = ${escJsonScript(selected)};
+    // Wiki-readonly instance: the client dims + blocks the write actions so the
+    // 403 is visible before the click (the server is still the authority).
+    window.__WIKI_READONLY__ = ${isWikiReadonly() ? "true" : "false"};
+    // …and the PER-WIKI flag (WIKI_READONLY_ROOTS), which additionally dims the
+    // egress affordances (Share, fact check, Explain, Discuss, Ask, Remember).
+    // Independent of the one above — this laptop owns writes and still reads one
+    // wiki it must never write or send to a model. The picker navigates with a
+    // full page load, so the flag is always the open wiki's.
+    window.__WIKI_READONLY_WIKI__ = ${readonlyWiki ? "true" : "false"};
+    // The wiki's root on THIS host — what makes the breadcrumb's ⧉ Copy path
+    // yield a path an agent can open. A boot-time fact for the open wiki; the
+    // picker navigates with a full page load, so it cannot go stale in place.
+    // Under the read slice (role \`user\` on the pod) the host path is withheld:
+    // "" still says "a wiki is served" (the nav's check) and ⧉ Copy path copies
+    // the relPath alone.
+    window.__WIKI_ROOT__ = ${escJsonScript(tools || wikiRoot === null ? wikiRoot : "")};
+    // The registry name of the wiki served here, under the WIKI_DIR override
+    // too: the answer cards, new-since and the Agent lens send it as \`wiki\`.
+    window.__WIKI_FIND_SELF__ = ${escJsonScript(opts?.findSelf ?? selected)};
+    // The name Everywhere rows carry for this ROOT (the first registry entry on
+    // it): the palette's dedupe and open-in-place key, never a request param.
+    window.__WIKI_FIND_ROWS__ = ${escJsonScript(opts?.findRows ?? opts?.findSelf ?? selected)};
+  </script>
+  <!-- Plain (no defer/async): it runs after the globals above, as the inline
+       bundle did, and before the presence script below. -->
+  <script src="${assets.js.path}"></script>
+  ${tools ? `<script>
+    ${agentPresenceScript("wikiPresence", { kinds: ["gardener_drain", "research"] })}
+  </script>` : ""}
+</body>
+</html>`;
+}
+
+/** The reader's stylesheet: every rule the page used to carry in its inline
+ *  `<style>`. Nothing in it varies per request (theme, profile and role are
+ *  body classes and tokens the rules key on), so it is built once per process
+ *  and served as an asset. */
+function buildWikiPageCss(): string {
+  return `
     ${SHARED_STYLES}
 
     /* The rail column reads --wiki-rail-w, which the drag handle sets inline
@@ -3596,190 +3792,44 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     ${wikiStaleTabStyles()}
     ${wikiStaleSummaryStyles()}
     ${wikiStaleMarkStyles()}
-  </style>
-</head>
-<body${tools ? "" : ` class="${WIKI_READ_SLICE_CLASS}"`}>
-  ${renderNav("wiki", { role: opts?.role })}
-  <div class="wiki-layout">
-    <div class="wiki-pane">
-      <div class="wiki-browse-head">
-        ${
-          wikiSelector || gardenerLink || boardLink
-            ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${boardLink}${gardenerLink}</div>`
-            : ""
-        }
-        ${tools ? `<div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>` : ""}
-        <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags, paths…">
-        <!-- Domain facet — un-hidden client-side only on a wiki whose pages span
-             more than one domain (i.e. one with a life/ subtree). -->
-        <div class="wiki-chip-row wiki-segmented" id="domainChips" style="display:none">
-          <button class="wiki-chip active" data-domain="">All</button>
-          <button class="wiki-chip" data-domain="ai">AI</button>
-          <button class="wiki-chip" data-domain="life">Life</button>
-        </div>
-        <div class="wiki-sort-row wiki-sort-row-main">
-          <select id="wikiSort" class="wiki-sort">
-            <option value="updated" selected>Recently updated</option>
-            <option value="created">Recently added</option>
-            <!-- The worked-on axis: the day an agent session last wrote the page,
-                 out of claude-usage's ledger. HIDDEN until the listing says this
-                 wiki has any covered page (workedCoverage.matched > 0) — on a
-                 corpus written entirely by bulk passes every page falls back to
-                 its update date, so the option would be "Recently updated" under
-                 a second name (the measured corpus is named once, on
-                 WikiIndex.workedCoverage). Hidden rather than disabled: a control
-                 that can never be chosen is furniture (the rail's own F2 rule).
-                 Once shown it becomes the DEFAULT unless the reader picked a
-                 sort (resolveSortMode in wiki-filter.ts). -->
-            <option value="worked" hidden>Worked on</option>
-            <option value="backlinks">Most linked</option>
-            <option value="title">Title A–Z</option>
-          </select>
-          <!-- Filters: the toolbar's button for the <details> below. The details
-               keeps its own (hidden) summary so its open state, toggle event and
-               auto-open stay what they were; this button only flips it. -->
-          <button type="button" class="wiki-tool-btn" id="wikiFiltersBtn" aria-controls="wikiFilters" aria-expanded="false" title="Filters">${SVG_FILTER}<span class="wiki-tool-label">Filters</span><span class="wiki-filter-count" id="wikiFilterCount" style="display:none"></span></button>
-          <span class="wiki-count" id="wikiCount"></span>
-          <!-- View options: the two per-wiki toggles the reader sets once and
-               rarely touches, out of the toolbar. Both are unchecked here and
-               painted from the folds store at boot (the server does not know
-               what this browser remembers). The dot says a toggle is on while
-               the pane is closed; the strip under the toolbar names it. The pane
-               is a non-modal role="dialog"; it closes when focus or a pointer
-               leaves it, on Escape, and on a reader shortcut key pressed
-               outside it, which then runs (wiki-rail-controller.ts, setOptionsOpen). -->
-          <button type="button" class="wiki-tool-btn wiki-tool-icon" id="wikiOptionsBtn" aria-controls="wikiOptions" aria-expanded="false" aria-label="View options" title="View options">${SVG_OPTIONS}<span class="wiki-options-dot" id="wikiOptionsDot" hidden></span></button>
-          <div class="wiki-options-pane" id="wikiOptions" role="dialog" aria-label="View options" hidden>
-            <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
-              <input type="checkbox" id="wikiGroupFamilies">group families
-            </label>
-            <!-- group by effort (work map P4): ON by default on a wiki with a
-                 work map, so it is the one toggle painted checked; shown only
-                 where the listing says a map exists. -->
-            <label class="wiki-efforts-toggle" id="wikiEffortsToggle" title="Fold Activity under the work map's efforts" hidden>
-              <input type="checkbox" id="wikiGroupEfforts">group by effort
-            </label>
-            <!-- Retired (culled) pages, per wiki. Hidden on a wiki with none and
-                 while the facets select none (unless checked); the label and its
-                 count are painted by the client from the wiki's cullLabels, so it
-                 carries no English hover of its own. -->
-            <label class="wiki-retired-toggle" id="wikiRetiredToggle" hidden>
-              <input type="checkbox" id="wikiShowRetired"><span id="wikiRetiredLabel"></span>
-            </label>
-          </div>
-        </div>
-        <div class="wiki-active-options" id="wikiActiveOptions" hidden></div>
-        <!-- «Felles: N changed» — painted by the client on a wiki that offers
-             ⇪ Felles, after the page has rendered (wiki-felles-publish.ts). -->
-        <div class="wiki-felles-sync" id="wikiFellesSync" aria-live="polite" hidden></div>
-        <!-- A bucket-mirrored wiki whose copy is stale — painted from the
-             listing's \`mirror\` field (wiki-mirror-status.ts). -->
-        ${mirrorStatusSlotHtml()}
-        <details class="wiki-filters" id="wikiFilters">
-          <summary class="wiki-filters-summary">Filters</summary>
-          <div class="wiki-filters-body">
-            <div class="wiki-sort-row" id="wikiFolderRow" style="display:none">
-              <select id="wikiFolder" class="wiki-sort wiki-folder"></select>
-            </div>
-            <div class="wiki-chip-row" id="typeChips"></div>
-            <!-- Plan-status facet — populated (and un-hidden) only on wikis where
-                 at least one page carries a valid plan_status. -->
-            <div class="wiki-chip-row" id="statusChips" style="display:none"></div>
-            <!-- Project facet — populated (and un-hidden) only on wikis whose
-                 .wiki-reader.json declares a project rule that resolved at least
-                 one page. -->
-            <div class="wiki-chip-row" id="projectChips" style="display:none"></div>
-            <!-- Jira facet — populated (and un-hidden) only on wikis the
-                 claude-usage stamper has written a jira: key to. -->
-            <div class="wiki-chip-row" id="jiraChips" style="display:none"></div>
-            <div class="wiki-chip-row" id="tagChips"></div>
-          </div>
-        </details>
-      </div>
-      <div class="wiki-list" id="wikiList"></div>
-      <div class="wiki-coverage-foot" id="wikiCoverageFoot" style="display:none"></div>
-      <div class="wiki-rail-resizer" id="wikiRailResizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the page list" title="Drag or use ← → to resize · double-click or Home to reset"></div>
-    </div>
+`;
+}
 
-    <div class="wiki-pane">
-      <div class="wiki-focus-bar"><button class="wiki-focus-exit" id="wikiFocusExit" type="button" data-pane-toggle="focus" title="Leave focus (Esc)">${SVG_FOCUS_EXIT} Exit focus <kbd>Esc</kbd></button></div>
-      <div class="wiki-breadcrumb" id="wikiBreadcrumb" style="display:none"></div>
-      <div class="wiki-article-wrap" id="articleWrap">
-        <div class="wiki-empty-state">Loading wiki…</div>
-      </div>
-    </div>
+/** One built asset: its bytes, a gzip of them, and the hashed URL it is served at. */
+export interface WikiAsset {
+  readonly body: string;
+  readonly gzip: Uint8Array;
+  readonly contentType: string;
+  /** `/wiki/assets/wiki.<hash>.<ext>` — the hash is of `body`, so a URL names
+   *  exactly one byte sequence and can be cached as immutable. */
+  readonly path: string;
+}
 
-    <div class="wiki-pane wiki-conn-pane">
-      <!-- Collapsed form: shown only under .right-collapsed (wiki-pane-toggle.ts). -->
-      <div class="wiki-conn-strip" id="wikiConnStrip">
-        <button class="wiki-pane-btn" type="button" data-pane-toggle="right" title="Show connections (])">${SVG_EXPAND}</button>
-        <button class="wiki-pane-btn" type="button" data-pane-open="conn" title="Connections">${SVG_CONN}</button>
-        <button class="wiki-pane-btn" type="button" data-pane-open="ask" title="Ask">${SVG_ASK}</button>
-        <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
-      </div>
-      <div class="wiki-conn-tabs">
-        <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
-        <button class="wiki-conn-tab" data-conntab="stale" title="${STALE_TAB_TITLE}">Stale<span class="wiki-stale-count" id="wikiStaleCount"></span></button>
-        <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
-        <div class="wiki-conn-tools">
-          <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
-          <button class="wiki-pane-btn" type="button" data-pane-toggle="right" aria-pressed="false" title="Hide connections (])">${SVG_COLLAPSE}</button>
-        </div>
-      </div>
-      <div class="wiki-conn-body" id="connBody">
-        <div class="wiki-conn-empty">Select a page to see its connections.</div>
-      </div>
-      <div class="wiki-conn-body wiki-stale-body" id="staleBody" style="display:none">
-        <div class="wiki-conn-empty">Select a page to see what may be stale.</div>
-      </div>
-      <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
-        <div class="wiki-ask-compose">
-          <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="${readonlyWiki ? escHtml(WIKI_READONLY_INPUT_PLACEHOLDER) : "Ask this wiki…"}"${readonlyWiki ? " disabled" : ""}></textarea>
-          <div class="wiki-ask-actions">
-            <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
-            <button class="wiki-ask-newchat" id="wikiNewChatBtn"
-              title="Send this question straight to a chat thread — full context and tools, no wiki-only answer first">New chat</button>
-          </div>
-        </div>
-        <div class="wiki-ask-status" id="wikiAskStatus" style="display:none"><span class="spinner"></span><span class="st"></span></div>
-        <div class="wiki-ask-hint" id="wikiAskHint">${readonlyWiki ? escHtml(WIKI_READONLY_ASK_HINT) : "Ask a question and this wiki answers in the main pane, with citations you can open as pages."}</div>
-        ${askBotLine}
-        <div class="wiki-ask-history" id="wikiAskHistory"></div>
-      </div>
-    </div>
-  </div>
+export interface WikiAssets {
+  readonly js: WikiAsset;
+  readonly css: WikiAsset;
+}
 
-  <script>
-    window.__WIKI_NAME__ = ${escJsonScript(selected)};
-    // Wiki-readonly instance: the client dims + blocks the write actions so the
-    // 403 is visible before the click (the server is still the authority).
-    window.__WIKI_READONLY__ = ${isWikiReadonly() ? "true" : "false"};
-    // …and the PER-WIKI flag (WIKI_READONLY_ROOTS), which additionally dims the
-    // egress affordances (Share, fact check, Explain, Discuss, Ask, Remember).
-    // Independent of the one above — this laptop owns writes and still reads one
-    // wiki it must never write or send to a model. The picker navigates with a
-    // full page load, so the flag is always the open wiki's.
-    window.__WIKI_READONLY_WIKI__ = ${readonlyWiki ? "true" : "false"};
-    // The wiki's root on THIS host — what makes the breadcrumb's ⧉ Copy path
-    // yield a path an agent can open. A boot-time fact for the open wiki; the
-    // picker navigates with a full page load, so it cannot go stale in place.
-    // Under the read slice (role \`user\` on the pod) the host path is withheld:
-    // "" still says "a wiki is served" (the nav's check) and ⧉ Copy path copies
-    // the relPath alone.
-    window.__WIKI_ROOT__ = ${escJsonScript(tools || wikiRoot === null ? wikiRoot : "")};
-    // The registry name of the wiki served here, under the WIKI_DIR override
-    // too: the answer cards, new-since and the Agent lens send it as \`wiki\`.
-    window.__WIKI_FIND_SELF__ = ${escJsonScript(opts?.findSelf ?? selected)};
-    // The name Everywhere rows carry for this ROOT (the first registry entry on
-    // it): the palette's dedupe and open-in-place key, never a request param.
-    window.__WIKI_FIND_ROWS__ = ${escJsonScript(opts?.findRows ?? opts?.findSelf ?? selected)};
-  </script>
-  <script>
-    ${clientScript}
-  </script>
-  ${tools ? `<script>
-    ${agentPresenceScript("wikiPresence", { kinds: ["gardener_drain", "research"] })}
-  </script>` : ""}
-</body>
-</html>`;
+/** Where the reader's assets are served (`registerWikiReadRoutes`). */
+export const WIKI_ASSET_PREFIX = "/wiki/assets/";
+
+function wikiAsset(body: string, ext: "js" | "css", contentType: string): WikiAsset {
+  const hash = new Bun.CryptoHasher("sha256").update(body).digest("hex").slice(0, 16);
+  return { body, gzip: Bun.gzipSync(Buffer.from(body)), contentType, path: `${WIKI_ASSET_PREFIX}wiki.${hash}.${ext}` };
+}
+
+let wikiAssetsCache: Promise<WikiAssets> | null = null;
+
+/** The reader's script and stylesheet, built and hashed once per process. The
+ *  page and the asset route both read this one memo, so the URL a page names is
+ *  always one the route serves. It shares `wikiClientScript`'s memo, so
+ *  `bun --watch` still serves the first build until the process restarts. */
+export function getWikiAssets(): Promise<WikiAssets> {
+  return (wikiAssetsCache ??= (async () => {
+    const js = await wikiClientScript();
+    return {
+      js: wikiAsset(js, "js", "text/javascript; charset=utf-8"),
+      css: wikiAsset(buildWikiPageCss(), "css", "text/css; charset=utf-8"),
+    };
+  })());
 }

@@ -5,7 +5,7 @@ import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens,
 import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest, resolveScopedPage, type ScopedPageLookup } from "./wiki-read-scope.ts";
-import { renderWikiPage } from "../views/wiki-page.ts";
+import { renderWikiPage, getWikiAssets, WIKI_ASSET_PREFIX } from "../views/wiki-page.ts";
 import { waitOwnerFrom } from "../../wiki/next-moves.ts";
 import { getWikiIndex, normalizeRelPath, parseFrontmatter, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { pageDecisionDataOf } from "../../wiki/decision-text.ts";
@@ -1458,7 +1458,7 @@ export function registerWikiRoutes(
  *  stays an explicit legacy override with no wiki claimed in the picker.
  *
  *  The READ SLICE (`wiki-read` group): only what a reader needs to list and
- *  render a page — the page, the listing, one page, its provenance block,
+ *  render a page — the page and its hashed script and stylesheet, the listing, one page, its provenance block,
  *  explainer HTML and graph mode. No route here writes or spends a model call.
  *  Two make bounded GET fan-outs: `/api/wiki/page/provenance` asks huginn's
  *  jira-issues corpus about a page's `jira:` keys and claude-usage about its
@@ -1512,8 +1512,7 @@ export function registerWikiReadRoutes(
     return true;
   };
 
-  // gzip, because the page inlines the whole client bundle and CSS (~1.2 MB,
-  // ~0.29 MB gzipped) and nothing in front of muninn compresses it. Scoped to
+  // gzip, because nothing in front of muninn compresses the page. Scoped to
   // this route: the SSE and JSON routes beside it keep their framing. Called
   // from inside the one GET handler: a second handler or an `app.use` adds a
   // /wiki row that the route-table guards read as a separate route.
@@ -1607,6 +1606,33 @@ export function registerWikiReadRoutes(
       c.res = await serveWikiPage(c);
     });
     return c.res;
+  });
+
+  // The reader's script and stylesheet at their content-hashed URLs
+  // (`getWikiAssets`): the page links them rather than inlining ~2 MB per load.
+  // A hash names one byte sequence, so a hit is immutable for a year (`private`:
+  // the route sits behind auth on the pod, so no shared cache should keep it).
+  // A stale hash of the same shape gets this build's asset, `no-store`: a page
+  // replayed by Back after a restart, or served by the other pod during a surge
+  // rollout, names a hash this process never built, and a 404 would leave it
+  // unstyled and dead. Any other name is a 404. Gzipped once per process.
+  app.get(`${WIKI_ASSET_PREFIX}:file`, async (c) => {
+    const { js, css } = await getWikiAssets();
+    const exact = c.req.path === js.path ? js : c.req.path === css.path ? css : null;
+    const shape = /^wiki\.[0-9a-f]{16}\.(js|css)$/.exec(c.req.param("file"));
+    const asset = exact ?? (shape ? (shape[1] === "js" ? js : css) : null);
+    if (!asset) {
+      c.header("Cache-Control", "no-store");
+      return c.text("Not found", 404);
+    }
+    c.header("Content-Type", asset.contentType);
+    c.header("Cache-Control", exact ? "private, max-age=31536000, immutable" : "no-store");
+    c.header("Vary", "Accept-Encoding");
+    if (acceptsGzip(c.req.header("Accept-Encoding"))) {
+      c.header("Content-Encoding", "gzip");
+      return c.body(asset.gzip as Uint8Array<ArrayBuffer>);
+    }
+    return c.body(asset.body);
   });
 
   // Full page listing — the client filters/sorts locally (712 pages ≈ trivial).
@@ -5574,4 +5600,26 @@ export function coerceClientEdits(raw: unknown): IntegrateEdit[] | null {
     });
   }
   return edits;
+}
+
+/**
+ * Whether `Accept-Encoding` (RFC 9110 §12.5.3) admits gzip. The most specific
+ * name listed decides, by its best weight: `gzip`, else `x-gzip` (its alias,
+ * §8.4.1.3), else `*`; the order of entries never matters. A missing q is 1; an
+ * unparseable one is 0. Space around `=` is tolerated (the grammar allows none),
+ * so a malformed `q = 0` still refuses.
+ */
+export function acceptsGzip(header: string | undefined): boolean {
+  const best = new Map<string, number>();
+  for (const part of (header ?? "").split(",")) {
+    const [name, ...params] = part.split(";").map((x) => x.trim().toLowerCase());
+    const q = params.map((p) => p.split("=")).find((kv) => kv[0]!.trim() === "q");
+    const w = q === undefined ? 1 : q.length === 2 ? Number(q[1]) : NaN;
+    best.set(name!, Math.max(best.get(name!) ?? 0, Number.isFinite(w) ? w : 0));
+  }
+  for (const name of ["gzip", "x-gzip", "*"]) {
+    const w = best.get(name);
+    if (w !== undefined) return w > 0;
+  }
+  return false;
 }

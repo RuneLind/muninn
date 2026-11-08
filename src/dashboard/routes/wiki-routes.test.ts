@@ -4670,4 +4670,108 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
     expect(first).toContain('window.__WIKI_FIND_SELF__ = "aliasfirst"');
     expect(first).toContain('window.__WIKI_FIND_ROWS__ = "aliasfirst"');
   });
+
+  // B3 (arch review 2026-11): the page links its script and stylesheet at
+  // content-hashed URLs instead of inlining ~1.8 MB, and the route serves them.
+  test("the served page links both assets, inlines neither, and the route serves those URLs", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js, css } = await getWikiAssets();
+    const html = await (await app.request("/wiki?wiki=aliasfirst")).text();
+    expect(html).toContain(`<script src="${js.path}"></script>`);
+    expect(html).toContain(`<link rel="stylesheet" href="${css.path}">`);
+    expect(html).not.toContain(js.body.slice(0, 2000));
+    expect(html).not.toContain(css.body.slice(0, 2000));
+    // The globals still precede the bundle: it reads them at boot.
+    expect(html.indexOf("window.__WIKI_FIND_ROWS__")).toBeLessThan(html.indexOf(js.path));
+    expect(Buffer.byteLength(html)).toBeLessThan(100_000);
+    for (const [asset, type] of [[js, "text/javascript"], [css, "text/css"]] as const) {
+      const res = await app.request(asset.path);
+      expect(res.status, asset.path).toBe(200);
+      expect(res.headers.get("content-type")).toContain(type);
+      expect(res.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
+      expect(res.headers.get("content-encoding")).toBeNull();
+      expect(await res.text()).toBe(asset.body);
+    }
+  });
+
+  test("an asset gzips for a client that accepts it, and inflates to the same bytes", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js } = await getWikiAssets();
+    const res = await app.request(js.path, { headers: { "Accept-Encoding": "gzip, deflate, br" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-encoding")).toBe("gzip");
+    expect(res.headers.get("vary")).toBe("Accept-Encoding");
+    expect(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await res.arrayBuffer())))).toBe(js.body);
+  });
+
+  test("a stale hash of the asset shape gets the current build, never cached; any other name is a no-store 404", async () => {
+    // A page from before a restart (Back replays it) or from the other pod in a
+    // surge rollout names a hash this process never built.
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js, css } = await getWikiAssets();
+    for (const [p, asset] of [["/wiki/assets/wiki.0000000000000000.js", js], ["/wiki/assets/wiki.0000000000000000.css", css]] as const) {
+      const res = await app.request(p);
+      expect(res.status, p).toBe(200);
+      expect(res.headers.get("cache-control"), p).toBe("no-store");
+      expect(res.headers.get("content-type"), p).toBe(asset.contentType);
+      expect(await res.text(), p).toBe(asset.body);
+    }
+    const near = ["000000000000000", "00000000000000000", "000000000000000g", "000000000000000A"].map((h) => `/wiki/assets/wiki.${h}.js`);
+    const wrapped = ["wikiX0000000000000000.js", "wiki.0000000000000000Xjs", "xwiki.0000000000000000.js", "wiki.0000000000000000.jsx", "wiki.0000000000000000.js.map", "wiki.0000000000000000.css.js.x"].map((f) => `/wiki/assets/${f}`);
+    for (const p of ["/wiki/assets/x", "/wiki/assets/wiki.zz.js", "/wiki/assets/wiki.0000000000000000.map", "/wiki/assets/other.0000000000000000.js", ...near, ...wrapped]) {
+      const res = await app.request(p);
+      expect(res.status, p).toBe(404);
+      expect(res.headers.get("cache-control"), p).toBe("no-store");
+    }
+  });
+
+  test("acceptsGzip: every one- and two-entry header, in both orders, follows gzip > x-gzip > * and never the order", async () => {
+    const { acceptsGzip } = await import("./wiki-routes.ts");
+    const names = ["gzip", "x-gzip", "*", "br"];
+    const qs = [undefined, "0", "0.5", "1", "abc"];
+    const entries = names.flatMap((n) => qs.map((q) => ({ n, q })));
+    const text = (e: { n: string; q?: string }) => (e.q === undefined ? e.n : `${e.n};q=${e.q}`);
+    const weight = (q?: string) => (q === undefined ? 1 : Number.isFinite(Number(q)) ? Number(q) : 0);
+    // The oracle: the most specific name present decides, by its best weight.
+    const oracle = (list: { n: string; q?: string }[]) => {
+      for (const n of ["gzip", "x-gzip", "*"]) {
+        const ws = list.filter((e) => e.n === n).map((e) => weight(e.q));
+        if (ws.length > 0) return Math.max(...ws) > 0;
+      }
+      return false;
+    };
+    let checked = 0;
+    for (const a of entries) {
+      expect(acceptsGzip(text(a)), text(a)).toBe(oracle([a]));
+      for (const b of entries) {
+        const h = `${text(a)}, ${text(b)}`;
+        expect(acceptsGzip(h), h).toBe(oracle([a, b]));
+        checked++;
+      }
+    }
+    expect(checked).toBe(400);
+    expect(acceptsGzip(undefined)).toBe(false);
+    expect(acceptsGzip("")).toBe(false);
+    // Malformed weights read as 0, never as a missing q.
+    for (const h of ["gzip;q=0=1", "gzip;q", "gzip;foo=bar;q=0", "gzip;quality=1;q=0"]) expect(acceptsGzip(h), h).toBe(false);
+    expect(acceptsGzip("gzip;foo=bar")).toBe(true);
+  });
+
+  test("gzip is not sent to a client that refuses it with q=0", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js } = await getWikiAssets();
+    for (const ae of ["gzip;q=0, identity", "GZIP; q=0.0", "br", "gzip;q=0, *"]) {
+      const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
+      expect(res.headers.get("content-encoding"), ae).toBeNull();
+      expect(await res.text(), ae).toBe(js.body);
+    }
+    for (const ae of ["gzip ; q = 0", "gzip;q= 0", "x-gzip;q=0"]) {
+      const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
+      expect(res.headers.get("content-encoding"), ae).toBeNull();
+    }
+    for (const ae of ["GZIP", "deflate, gzip;q=0.5", "*", "x-gzip", "gzip ; q = 0.5"]) {
+      const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
+      expect(res.headers.get("content-encoding"), ae).toBe("gzip");
+    }
+  });
 });

@@ -17,6 +17,7 @@ import { parseQuestionPage } from "../../format/question.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest, stripFrontmatter } from "../../wiki/store.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { todayOslo } from "../../utils/date-hash.ts";
 import { registerWikiAnswerRoutes } from "./wiki-answers.ts";
 import { insertWikiAnswerVersion, listWikiAnswerHistory } from "../../db/wiki-answers.ts";
 import { realGit } from "../../wiki/decision-triage/git.ts";
@@ -46,6 +47,9 @@ let root = "";
 let app: Hono;
 let guardRefusal: Response | null = null;
 const NOW = Date.parse("2026-11-07T12:00:00+01:00");
+// A ruling is signed with its answer row's created_at (`closeRulingFor`), set by the
+// database at insert, so the signature carries the day the test runs, not NOW.
+const SIGNED = todayOslo(Date.now()).split("-").reverse().join(".");
 
 const git = (...args: string[]) =>
   execFileSync("git", ["-C", root, ...args], {
@@ -135,7 +139,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     const { status, body } = await preview("O2");
     expect(status).toBe(200);
     expect(body.decision).toBe("D2");
-    expect(body.lines).toEqual(["- **O2** — See the card. Closed 2026-11-07 (D2).", "- **D2** — Answer B on card O2. Test Owner, 07.11.2026."]);
+    expect(body.lines).toEqual(["- **O2** — See the card. Closed 2026-11-07 (D2).", `- **D2** — Answer B on card O2. Test Owner, ${SIGNED}.`]);
     expect(typeof body.baseHash).toBe("string");
     expect(await Bun.file(path.join(root, REL)).text()).toBe(PAGE);
   });
@@ -165,7 +169,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     const long = `Go with the second, ${"because it holds ".repeat(40)}end`;
     await answer("O5", null, long);
     const { body: p } = await preview("O5");
-    expect((p.lines as string[])[1]).toContain(`${long}. Test Owner, 07.11.2026.`);
+    expect((p.lines as string[])[1]).toContain(`${long}. Test Owner, ${SIGNED}.`);
   });
 
   test("a not-sure answer and a bare ruling word rule on nothing: refused", async () => {
@@ -199,7 +203,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
   test("an answer that changed since the preview is 409 and writes nothing", async () => {
     await answer("O2", "A", "");
     const { body: p } = await preview("O2");
-    expect(p.lines).toContain("- **D2** — Answer A on card O2. Test Owner, 07.11.2026.");
+    expect(p.lines).toContain(`- **D2** — Answer A on card O2. Test Owner, ${SIGNED}.`);
     await insertWikiAnswerVersion({ answerId: crypto.randomUUID(), version: 1, wiki: WIKI, relPath: REL, questionId: "O2", author: { userId: null, oid: null, navIdent: null, name: "Someone Else" }, choice: "B", body: "", questionHash: "h" });
     const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
     expect(res.status).toBe(409);
@@ -215,7 +219,7 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     await other("Third Person", "B", "an-older-wording");
     const { status, body } = await preview("O2");
     expect(status).toBe(200);
-    expect(body.lines).toContain("- **D2** — Answer B on card O2. Third Person, 07.11.2026.");
+    expect(body.lines).toContain(`- **D2** — Answer B on card O2. Third Person, ${SIGNED}.`);
     expect(body.warnings).toEqual(["Third Person answered an older wording of the card.", "Someone Else answered A."]);
   });
 
