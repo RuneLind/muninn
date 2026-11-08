@@ -262,6 +262,11 @@ export function formatWebHtml(
      *  classes and DecisionLog items their state. Absent (chat) ⇒ neither,
      *  since the chat sanitizer drops a class it does not allow. */
     reader?: boolean;
+    /** With `reader`: the render lands in the reader's article
+     *  (`.wiki-article`, the only scope that styles them), so a plain table
+     *  and list take the reader shapes (`reader-shapes.ts`). `renderWikiHtml`
+     *  passes it for `GET /api/wiki/page` alone. */
+    readerShapes?: boolean;
     /** The wiki's `.wiki-reader.json` `language`: the `<More>` label and the
      *  `<StatusRows>` state phrases. Absent ⇒ the question option's, else `en`. */
     language?: QuestionLanguage;
@@ -326,6 +331,7 @@ export function formatWebHtml(
   const prevQuestion = currentQuestionPage;
   const prevReader = currentReader;
   const prevComponents = currentComponents;
+  const prevShapes = currentShapes;
   const prevLanguage = currentLanguage;
   const prevLaneCards = currentLaneCards;
   const prevLinkTexts = currentLinkTexts;
@@ -367,6 +373,7 @@ export function formatWebHtml(
   currentLinkSources = opts?.wikiLinkSources;
   currentReader = opts?.reader === true;
   currentComponents = [];
+  currentShapes = currentReader && opts?.readerShapes === true;
   currentItemDates = currentReader ? opts?.itemDates : undefined;
   currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
   try {
@@ -451,6 +458,7 @@ export function formatWebHtml(
     currentQuestionPage = prevQuestion;
     currentReader = prevReader;
     currentComponents = prevComponents;
+    currentShapes = prevShapes;
     currentLanguage = prevLanguage;
     currentLaneCards = prevLaneCards;
     currentLinkTexts = prevLinkTexts;
@@ -518,16 +526,19 @@ let currentReader = false;
  *  walker's `inComponent` hook keeps it). */
 let currentComponents: ComponentName[] = [];
 
+/** `opts.reader && opts.readerShapes` for the call in progress. */
+let currentShapes = false;
+
 /** Components that only wrap a section of the page: a table or list in one is
  *  still the page's own, so the reader shapes reach it. Every other component
  *  draws its own table or list, or is a card whose body stays as written. */
 const SHAPE_TRANSPARENT: ReadonlySet<ComponentName> = new Set<ComponentName>(["Fold", "More", "Historic", "ComparisonTable", "Figure"]);
 
 /** True when a table or list rendered now takes the reader shapes (number
- *  columns, verdict cells, the label grid): the reader's render, outside any
+ *  columns, verdict cells, the label grid): the reader's article render, outside any
  *  component but a section wrapper. Chat never does, byte for byte. */
 function readerShapesOn(): boolean {
-  return currentReader && currentComponents.every((n) => SHAPE_TRANSPARENT.has(n));
+  return currentShapes && currentComponents.every((n) => SHAPE_TRANSPARENT.has(n));
 }
 
 /** `opts.views` for the call in progress: `<StatusRows view="tiles">` draws tiles. */
@@ -2173,16 +2184,26 @@ function readerTableHtml(headers: string[], rows: string[][]): string {
 
 /** A top-level list whose every item opens with a bold label (D3), on the
  *  reader: the label in one column, the text and anything under the item in
- *  the other. The label's `:`/`.` and a separator after the bold stay in the
- *  text, hidden (`lg-c`), so a copy keeps them. */
+ *  the other. The label's `:`/`.` and the `:`/`—` after the bold stay in the
+ *  text, hidden (`lg-c`), and the spaces around them stay outside it in flow,
+ *  so a selection reads `Label — text` as the source does. `lg-v` is a span
+ *  (a grid item, so a block box) because the ref links read the noun before
+ *  an id back through inline elements only (`precedingText`). */
 function labelGridHtml(items: LabelItem[], nest: { children: (RenderedChild[] | undefined)[] }): string {
   const lis = items.map((it, k) => {
     const punct = it.punct ? `<span class="lg-c">${escapeHtml(it.punct)}</span>` : "";
-    const sep = it.punct ? (it.sep ? " " : "") : `<span class="lg-c">${escapeHtml(it.sep)}</span>`;
+    const sep = it.punct ? (it.sep ? " " : "") : hiddenSep(it.sep);
     const key = `<span class="lg-k"><strong>${renderInline(it.label)}${punct}</strong>${sep}</span>`;
-    return `<li>${key}<div class="lg-v">${itemHtml(it.rest)}${childrenHtml(nest.children[k])}</div></li>`;
+    return `<li>${key}<span class="lg-v">${itemHtml(it.rest)}${childrenHtml(nest.children[k])}</span></li>`;
   });
   return `<ul class="label-grid">${lis.join("")}</ul>`;
+}
+
+/** A separator after the bold (`: `, ` — `): its mark hidden, its spaces not. */
+function hiddenSep(sep: string): string {
+  const m = /^(\s*)(\S+)(\s*)$/u.exec(sep);
+  if (!m) return sep;
+  return `${m[1] ? " " : ""}<span class="lg-c">${escapeHtml(m[2]!)}</span>${m[3] ? " " : ""}`;
 }
 
 /** One labelled row. A command that is one code span renders as a one-line

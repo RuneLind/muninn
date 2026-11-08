@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { isNumberCell, labelItem, numberColumns, verdictCell } from "./reader-shapes.ts";
 import { formatWebHtml } from "../web/web-format.ts";
+import { renderWikiHtml } from "../wiki/render.ts";
 
 describe("isNumberCell", () => {
   const cases: [string, boolean][] = [
@@ -80,7 +81,8 @@ describe("verdictCell", () => {
     expect(verdictCell(html)?.tone).toBe(tone as "good");
   });
   test("the glyph stays as hidden text", () => {
-    expect(verdictCell("✅ good")!.html).toBe('<span class="v-glyph">✅ </span>good');
+    expect(verdictCell("✅ good")!.html).toBe('<span class="v-glyph">✅</span> good');
+    expect(verdictCell("⚠️  meh")!.html).toBe('<span class="v-glyph">⚠️</span>  meh');
   });
   test("a glyph mid-cell is not a verdict", () => {
     expect(verdictCell("works ✅")).toBeNull();
@@ -122,8 +124,10 @@ const TABLE = [
 const LABELS = ["- **One:** first", "- **Two.** second", "- **Three**: third"].join("\n");
 const PAGE = `${TABLE}\n\n${LABELS}\n`;
 
+const SHAPES = { reader: true, readerShapes: true } as const;
+
 describe("formatWebHtml reader shapes", () => {
-  const reader = formatWebHtml(PAGE, { reader: true });
+  const reader = formatWebHtml(PAGE, SHAPES);
   test("number column on th and td", () => {
     expect(reader).toContain('<th class="num">Cost</th>');
     expect(reader).toContain('<td class="num">1,662,435</td>');
@@ -132,15 +136,17 @@ describe("formatWebHtml reader shapes", () => {
     expect(reader).toContain("<td>2026</td>");
   });
   test("verdict cells tinted, mid-cell glyph not", () => {
-    expect(reader).toContain('<td class="v-good"><span class="v-glyph">✅ </span>good</td>');
-    expect(reader).toContain('<td class="v-warn"><span class="v-glyph">⚠️ </span>meh</td>');
+    expect(reader).toContain('<td class="v-good"><span class="v-glyph">✅</span> good</td>');
+    expect(reader).toContain('<td class="v-warn"><span class="v-glyph">⚠️</span> meh</td>');
     expect(reader).toContain("<td>works ❌ mid-cell</td>");
   });
   test("label grid, separators hidden not deleted", () => {
     expect(reader).toContain(
-      '<ul class="label-grid"><li><span class="lg-k"><strong>One<span class="lg-c">:</span></strong> </span><div class="lg-v">first</div></li>',
+      '<ul class="label-grid"><li><span class="lg-k"><strong>One<span class="lg-c">:</span></strong> </span><span class="lg-v">first</span></li>',
     );
-    expect(reader).toContain('<strong>Three</strong><span class="lg-c">: </span></span><div class="lg-v">third</div>');
+    expect(reader).toContain('<strong>Three</strong><span class="lg-c">:</span> </span><span class="lg-v">third</span>');
+    const dash = formatWebHtml("- **A** — a\n- **B** — b\n- **C** — c\n", SHAPES);
+    expect(dash).toContain('<strong>A</strong> <span class="lg-c">—</span> </span><span class="lg-v">a</span>');
   });
 
   test("chat renders byte-identical to the plain renderer", () => {
@@ -157,57 +163,74 @@ describe("formatWebHtml reader shapes", () => {
   });
 
   test("a list with one non-matching item draws no grid", () => {
-    const html = formatWebHtml("- **One:** a\n- **Two**, which b\n- **Three:** c\n", { reader: true });
+    const html = formatWebHtml("- **One:** a\n- **Two**, which b\n- **Three:** c\n", SHAPES);
     expect(html).not.toContain("label-grid");
   });
   test("a list item with a nested list disqualifies the list", () => {
-    const html = formatWebHtml("- **One:** a\n  - sub\n- **Two:** b\n- **Three:** c\n", { reader: true });
+    const html = formatWebHtml("- **One:** a\n  - sub\n- **Two:** b\n- **Three:** c\n", SHAPES);
     expect(html).not.toContain("label-grid");
   });
   test("a two-item list draws no grid", () => {
-    expect(formatWebHtml("- **One:** a\n- **Two:** b\n", { reader: true })).not.toContain("label-grid");
+    expect(formatWebHtml("- **One:** a\n- **Two:** b\n", SHAPES)).not.toContain("label-grid");
   });
   test("a nested label list inside an ordinary item stays bullets", () => {
-    const html = formatWebHtml("- top\n  - **A:** a\n  - **B:** b\n", { reader: true });
+    const html = formatWebHtml("- top\n  - **A:** a\n  - **B:** b\n", SHAPES);
     expect(html).not.toContain("label-grid");
   });
   test("a loose item's later paragraph lands in the text column", () => {
-    const html = formatWebHtml("- **One:** a\n\n  more\n\n- **Two:** b\n\n- **Three:** c\n", { reader: true });
-    expect(html).toContain('<div class="lg-v">a<p>more</p></div>');
+    const html = formatWebHtml("- **One:** a\n\n  more\n\n- **Two:** b\n\n- **Three:** c\n", SHAPES);
+    expect(html).toContain('<span class="lg-v">a<p>more</p></span>');
   });
 
   test("a table and list inside a Fold are styled", () => {
-    const html = formatWebHtml(`<Fold title="Section">\n\n${PAGE}\n</Fold>\n`, { reader: true });
+    const html = formatWebHtml(`<Fold title="Section">\n\n${PAGE}\n</Fold>\n`, SHAPES);
     expect(html).toContain('<td class="num">1,662,435</td>');
     expect(html).toContain('class="v-good"');
     expect(html).toContain("label-grid");
   });
   test("a table inside a ComparisonTable is styled", () => {
-    const html = formatWebHtml(`<ComparisonTable>\n\n${TABLE}\n\n</ComparisonTable>\n`, { reader: true });
+    const html = formatWebHtml(`<ComparisonTable>\n\n${TABLE}\n\n</ComparisonTable>\n`, SHAPES);
     expect(html).toContain('<div class="tablewrap">');
     expect(html).toContain('<td class="num">1,662,435</td>');
     expect(html).toContain('class="v-good"');
   });
   test("a table inside a Chart is untouched", () => {
     const md = '<Chart kind="bars" value="Cost">\n\n| Run | Cost |\n|---|---|\n| a | 30 |\n| b | 45 |\n\n</Chart>\n';
-    const html = formatWebHtml(md, { reader: true });
+    const html = formatWebHtml(md, SHAPES);
     expect(html).toContain("<td>30</td>");
     expect(html).not.toContain('class="num"');
   });
   test("a list inside a Question card draws no grid", () => {
     const md = `<Question id="O1">\n\nWhich one?\n\n${LABELS}\n\n</Question>\n`;
-    const html = formatWebHtml(md, { reader: true });
+    const html = formatWebHtml(md, SHAPES);
     expect(html).toContain("<strong>One:</strong> first");
     expect(html).not.toContain("label-grid");
   });
   test("a table inside a Callout is untouched, and a Fold inside it too", () => {
     const md = `<Callout tone="info">\n\n<Fold title="x">\n\n${TABLE}\n\n</Fold>\n\n</Callout>\n`;
-    const html = formatWebHtml(md, { reader: true });
+    const html = formatWebHtml(md, SHAPES);
     expect(html).not.toContain('class="num"');
     expect(html).not.toContain("v-good");
   });
   test("after a component closes, the page's next table is styled again", () => {
     const md = `<Callout tone="info">\n\nbody\n\n</Callout>\n\n${TABLE}\n`;
-    expect(formatWebHtml(md, { reader: true })).toContain('<td class="num">1,662,435</td>');
+    expect(formatWebHtml(md, SHAPES)).toContain('<td class="num">1,662,435</td>');
+  });
+});
+
+describe("reader shapes reach the article render only", () => {
+  test("reader alone (the gardener preview, the What's-new card) draws none", () => {
+    const html = formatWebHtml(PAGE, { reader: true });
+    for (const cls of ["num", "v-good", "v-glyph", "label-grid", "lg-k"]) expect(html).not.toContain(cls);
+  });
+  test("renderWikiHtml draws them only with readerShapes", () => {
+    const plain = renderWikiHtml(PAGE, () => undefined);
+    expect(plain).not.toContain("label-grid");
+    expect(plain).not.toContain('class="num"');
+    expect(plain).not.toContain("v-good");
+    const article = renderWikiHtml(PAGE, () => undefined, { readerShapes: true });
+    expect(article).toContain('<ul class="label-grid">');
+    expect(article).toContain('<td class="num">1,662,435</td>');
+    expect(article).toContain('class="v-good"');
   });
 });

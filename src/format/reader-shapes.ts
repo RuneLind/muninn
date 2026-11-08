@@ -99,18 +99,20 @@ const GLYPH_ALT = [...new Set(Object.keys(CELL_VERDICT_GLYPHS).map((g) => g.repl
   .sort((a, b) => b.length - a.length)
   .join("|");
 /** Leading tags (never a code span) and white space, the glyph, its VS16, then white space. */
-const VERDICT_LEAD_RE = new RegExp(`^((?:\\s|<(?!code)[a-z][^>]*>)*)(${GLYPH_ALT})(\\uFE0F?\\s*)`, "u");
+const VERDICT_LEAD_RE = new RegExp(`^((?:\\s|<(?!code)[a-z][^>]*>)*)(${GLYPH_ALT})(\\uFE0F?)(\\s*)`, "u");
 
 /** A rendered cell that opens with a verdict glyph: its tone and the cell with
  *  the glyph in a visually hidden `v-glyph` span (screen readers and copy keep
- *  it; the CSS draws the round icon). Null when the glyph is not first. */
+ *  it; the CSS draws the round icon). The space after the glyph stays outside
+ *  the span, in flow, so a selection reads `✅ text` as the source does. Null
+ *  when the glyph is not first. */
 export function verdictCell(html: string): { tone: CellVerdict; html: string } | null {
   const m = VERDICT_LEAD_RE.exec(html);
   if (!m) return null;
   const tone = CELL_VERDICT_GLYPHS[m[2]!] ?? CELL_VERDICT_GLYPHS[`${m[2]!}️`];
   if (!tone) return null;
   const rest = html.slice(m[0].length);
-  return { tone, html: `${m[1]}<span class="v-glyph">${m[2]}${m[3]}</span>${rest}` };
+  return { tone, html: `${m[1]}<span class="v-glyph">${m[2]}${m[3]}</span>${m[4]}${rest}` };
 }
 
 // ── Label lists ─────────────────────────────────────────────────────────────
