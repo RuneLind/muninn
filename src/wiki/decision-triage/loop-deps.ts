@@ -28,7 +28,8 @@ export interface TriageLoopDeps {
   beforeCheck: (wiki: string, nowMs: number) => Promise<void>;
   readState: (wiki: string) => Promise<WorkMapState | null>;
   run: (wiki: string, signal: AbortSignal) => Promise<TriagePassOutcome>;
-  /** A pass that hit its bound, as a throw does: `partial` if it logged verdicts first, else `failed`. */
+  /** A pass that hit its bound, as a throw does: `partial` if it logged verdicts first, else `failed`.
+   *  Writes nothing for a run whose run line is already taken. */
   recordFailed: (wiki: string, error: string) => Promise<"partial" | "failed" | void>;
 }
 
@@ -122,17 +123,23 @@ export function realTriageLoopDeps(
       log.warn("Decision triage: {wiki} has {missed} nights with no run line", { wiki, missed });
     }
   };
-  const inFlight = new Map<string, TriageProgress>();
+  /** A run's progress and who took its one run line: the pass (its own line) or this
+   *  record (a throw or the bound). The first to claim writes; the other writes nothing. */
+  type Slot = { progress: TriageProgress; line: null | { by: "pass" } | { by: "record"; outcome: "partial" | "failed"; cards: number } };
+  const inFlight = new Map<string, Slot>();
   /** A run that threw or hit the bound, in the state's count and the log: the line
    *  carries its run id and what it had done, so its card lines have their run line.
    *  Verdicts already logged make it `partial`, which is `ok` to the state, so the
-   *  next check does not pay for them twice. Reads the progress before its first await:
-   *  the bound calls this right after the abort that ends the run. */
+   *  next check does not pay for them twice. Claims the line before its first await:
+   *  the bound calls this right after the abort that ends the run. A run whose line
+   *  is already taken gets no second line or state record. */
   const recordFailed = async (wiki: string, error: string) => {
-    const done = inFlight.get(wiki);
-    inFlight.delete(wiki);
+    const slot = inFlight.get(wiki);
+    if (slot?.line) return slot.line.by === "record" ? slot.line.outcome : undefined;
+    const done = slot?.progress;
     const now = Date.now();
     const outcome = done && done.verdicts > 0 ? "partial" : "failed";
+    if (slot) slot.line = { by: "record", outcome, cards: done!.cardsLogged };
     const reason = done && done.open !== null ? `${error}; ${done.verdicts} verdict(s) in ${done.cardsLogged} card line(s) logged of ${done.open} open card(s), ${done.usage.calls} call(s) answered` : error;
     await state.record(wiki, { at: now, outcome: outcome === "partial" ? "ok" : "failed", error: reason });
     await appendLogLines(nightlyLogPath(wiki, dir), [
@@ -182,18 +189,36 @@ export function realTriageLoopDeps(
       }),
       signal,
     });
-    let progress: TriageProgress | undefined;
+    let slot: Slot | undefined;
     const track = (p: TriageProgress) => {
-      progress = p;
-      inFlight.set(wiki, p);
+      slot = { progress: p, line: null };
+      inFlight.set(wiki, slot);
     };
-    const result = await settleTriageRun(() => runDecisionTriage({ ...deps, ...over, track }), signal, (error) => {
+    const sink = over.append ?? deps.append;
+    /** The pass's run line, only if no record (the bound) took this run's line first. */
+    const append = async (lines: Parameters<typeof sink>[0]) => {
+      if (slot && lines.some((l) => l.type === "run")) {
+        if (slot.line) return;
+        slot.line = { by: "pass" };
+        try {
+          return await sink(lines);
+        } catch (err) {
+          slot.line = null;
+          throw err;
+        }
+      }
+      return sink(lines);
+    };
+    const result = await settleTriageRun(() => runDecisionTriage({ ...deps, ...over, append, track }), signal, (error) => {
       log.warn("Decision triage threw for {wiki}: {error}", { wiki, error });
       return recordFailed(wiki, error);
     });
-    // A throw's line (`recordFailed`) carries what the pass had logged; an abort writes none.
-    if (!("run" in result)) return result.outcome === "aborted" ? result : { outcome: result.outcome, cards: progress?.cardsLogged ?? 0 };
-    inFlight.delete(wiki);
+    const line = slot?.line;
+    // An aborted run with no line keeps its progress for a record after it (Run now's bound).
+    if (line && inFlight.get(wiki) === slot) inFlight.delete(wiki);
+    // A throw's or the bound's line was the run's: report it, write nothing more.
+    if (line?.by === "record") return { outcome: line.outcome, cards: line.cards };
+    if (!("run" in result)) return result.outcome === "aborted" ? result : { outcome: result.outcome, cards: slot?.progress.cardsLogged ?? 0 };
     await state.record(wiki, {
       at,
       outcome: result.outcome === "partial" ? "ok" : result.outcome,

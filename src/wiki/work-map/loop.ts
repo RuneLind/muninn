@@ -276,6 +276,8 @@ export function startWorkMapLoop(
         if (signal.aborted) return;
         await triage.beforeCheck(wiki, deps.now());
         if (!workMapDue(await triage.readState(wiki), deps.now(), hour).due) continue;
+        // The bound may have fired during those awaits: an aborted signal starts no pass.
+        if (signal.aborted) return;
         running = wiki;
         await triage.run(wiki, signal);
         running = null;
