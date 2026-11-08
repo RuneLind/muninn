@@ -64,9 +64,19 @@ const pages: Record<string, ReturnType<typeof page>> = {
   "a.md": page("a.md", "Alpha", { series: "trip" }),
   "b.md": page("b.md", "Beta", { series: "trip" }),
   "c.md": page("c.md", "Gamma"),
+  // An explainer: its breadcrumb renders from the listing BEFORE its page
+  // fetch, the window the outgoing-titles case below needs.
+  "d.html": page("d.html", "Delta", { name: "d", type: "explainer" }),
 };
 /** Each page's raw-bytes hash; a series write moves the written page's. */
-const hashes: Record<string, string> = { "a.md": "h-a", "b.md": "h-b", "c.md": "h-c" };
+const hashes: Record<string, string> = { "a.md": "h-a", "b.md": "h-b", "c.md": "h-c", "d.html": "h-d" };
+/** A page whose `/api/wiki/page` answer waits until the test releases it. */
+let heldPage: { rel: string; gate: Promise<void>; release: () => void } | null = null;
+function holdPage(rel: string): void {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  heldPage = { rel, gate, release };
+}
 const listing = () => ({
   pages: Object.values(pages),
   scannedAt: NOW,
@@ -88,6 +98,7 @@ async function stubFetch(input: unknown, init?: { method?: string; body?: string
   if (url.pathname === "/api/wiki/pages") body = listing();
   else if (url.pathname === "/api/wiki/page") {
     const rel = url.searchParams.get("relPath") ?? "a.md";
+    if (heldPage?.rel === rel) await heldPage.gate;
     const meta = pages[rel] ?? pages["a.md"]!;
     body = {
       meta,
@@ -100,10 +111,11 @@ async function stubFetch(input: unknown, init?: { method?: string; body?: string
       hash: hashes[rel],
     };
   } else if (url.pathname === "/api/wiki/series" && method === "POST") {
-    const write = JSON.parse(init!.body!) as { relPath: string; series: string | null };
-    const p = pages[write.relPath]!;
-    if (write.series === null) delete (p as { series?: string }).series;
-    else (p as { series?: string }).series = write.series;
+    const write = JSON.parse(init!.body!) as { relPath: string; series: string | null; seriesLabel?: string | null };
+    const p = pages[write.relPath]! as { series?: string; seriesLabel?: string };
+    if (write.series === null) delete p.series;
+    else p.series = write.series;
+    if (write.seriesLabel) p.seriesLabel = write.seriesLabel;
     hashes[write.relPath] = hashes[write.relPath] + "+";
     body = { hash: hashes[write.relPath], written: true };
   }
@@ -202,16 +214,50 @@ describe("the series editor (wiki-series-controller.ts)", () => {
     expect(seriesMenu() === null).toBe(true);
   });
 
-  test("Remove from series writes through the poster boot built, then repaints the head from the refetched listing", async () => {
+  const seriesPosts = () => fetched.filter((f) => f.method === "POST" && f.url === "/api/wiki/series");
+  const menuNote = () => seriesMenu()?.querySelector(".wiki-series-menu-msg")?.textContent ?? "";
+
+  test("the open page changed on disk after it loaded: Remove is refused at the click and nothing is written", async () => {
+    // Preconditions: no write yet, and the page still answers its load-time hash.
+    expect(seriesPosts().length).toBe(0);
+    expect(hashes["a.md"]).toBe("h-a");
+    // Somebody else edits a.md: the menu's fresh base read now differs from the
+    // hash `openPageAtLoad()` reports for the page as loaded.
+    hashes["a.md"] = "h-a-edited";
+    editBtn()!.click();
+    seriesMenu()!.querySelector<HTMLElement>('[data-series-cmd="remove"]')!.click();
+    await until(() => menuNote().includes("changed since you opened it"), "the refusal note");
+    expect(menuNote()).toBe("a.md changed since you opened it — reload it; nothing written");
+    expect(seriesPosts().length).toBe(0);
+    key("Escape");
+    expect(seriesMenu() === null).toBe(true);
+    hashes["a.md"] = "h-a";
+  });
+
+  test("Rename writes through the poster boot built, with the open page's base unchanged since load", async () => {
+    editBtn()!.click();
+    const form = seriesMenu()!.querySelector<HTMLFormElement>('[data-series-form="label"]')!;
+    form.querySelector<HTMLInputElement>("[data-series-input]")!.value = "Trip";
+    const SE = g.SubmitEvent as typeof SubmitEvent;
+    form.dispatchEvent(new SE("submit", { bubbles: true, cancelable: true }));
+    await until(() => seriesPosts().length === 1 && seriesMenu() === null, "the rename to write and close the menu");
+    // `initSeries` built the poster for this wiki; the fresh base equals the load-time hash.
+    expect(JSON.parse(seriesPosts()[0]!.body!)).toEqual({ wiki: "w", relPath: "a.md", series: "trip", seriesLabel: "Trip", baseHash: "h-a" });
+  });
+
+  test("a second write from the same page goes through: its own first write's answer became the load-time hash", async () => {
+    // The rename moved a.md to "h-a+" on disk. Only `adoptOwnSeriesHashes` makes
+    // the open page's load-time hash follow, or this verb is refused like the first.
+    expect(hashes["a.md"]).toBe("h-a+");
     editBtn()!.click();
     const remove = seriesMenu()!.querySelector<HTMLElement>('[data-series-cmd="remove"]')!;
     expect(!!remove).toBe(true);
     const listingsBefore = fetched.filter((f) => f.url.startsWith("/api/wiki/pages")).length;
     remove.click();
+    await until(() => seriesPosts().length === 2 || menuNote().includes("changed since"), "the remove to answer");
+    expect(menuNote()).toBe("");
     await until(() => seriesMenu() === null, "the menu to close after the write");
-    const post = fetched.find((f) => f.method === "POST" && f.url === "/api/wiki/series")!;
-    // `initSeries` built the poster for this wiki; the base is the open page's load-time hash.
-    expect(JSON.parse(post.body!)).toEqual({ wiki: "w", relPath: "a.md", series: null, baseHash: "h-a" });
+    expect(JSON.parse(seriesPosts()[1]!.body!)).toEqual({ wiki: "w", relPath: "a.md", series: null, baseHash: "h-a+" });
     expect(fetched.filter((f) => f.url.startsWith("/api/wiki/pages?refresh=1")).length).toBeGreaterThan(0);
     expect(fetched.filter((f) => f.url.startsWith("/api/wiki/pages")).length).toBeGreaterThan(listingsBefore);
     // The page left the series: `repaintSeriesHead` dropped the strip and its opener.
@@ -227,6 +273,25 @@ describe("the outgoing titles (clearOutgoingTitles)", () => {
     // The wiki crumb goes back to the overview, which hides the breadcrumb.
     doc().querySelector<HTMLElement>("#wikiBreadcrumb a")!.click();
     await until(() => doc().querySelector("#articleWrap h1")?.textContent !== "Alpha", "the start view");
+    expect(getCurrentOutgoingTitles()).toEqual([]);
+  });
+
+  test("opening a page clears the previous page's titles at breadcrumb render, before its own connections land", async () => {
+    const { getCurrentOutgoingTitles } = await import("../components/wiki-article-controller.ts");
+    // Back on a.md (its titles are ["Beta"] again), from the start view the case above left.
+    doc().querySelector<HTMLElement>('#wikiList [data-relpath="a.md"]')!.click();
+    await until(() => getCurrentOutgoingTitles().join() === "Beta", "a.md's connections");
+    // An explainer renders its breadcrumb from the listing and only then fetches
+    // its page, held here: nothing but `renderBreadcrumb` can clear the titles.
+    holdPage("d.html");
+    doc().querySelector<HTMLElement>('#wikiList [data-relpath="d.html"]')!.click();
+    await until(() => (doc().getElementById("wikiBreadcrumb")?.textContent ?? "").includes("Delta"), "d.html's breadcrumb");
+    expect(fetched.some((f) => f.url.includes("/api/wiki/page?relPath=d.html"))).toBe(true);
+    expect(connBody().textContent).toBe("Loading…");
+    expect(getCurrentOutgoingTitles()).toEqual([]);
+    heldPage!.release();
+    heldPage = null;
+    await until(() => connBody().textContent !== "Loading…", "d.html's connections");
     expect(getCurrentOutgoingTitles()).toEqual([]);
   });
 });

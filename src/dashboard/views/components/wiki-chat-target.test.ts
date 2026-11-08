@@ -1352,6 +1352,84 @@ describe("wiki reader chat-dialog wiring", () => {
     expect(literal).toMatch(/postAskChat(,|:\s*postAskChat\b)/);
     expect(literal).toMatch(/refreshChatEscalateBar(,|:\s*refreshChatEscalateBar\b)/);
   });
+
+  test("the shell's controller ports (Ask, menus, article, series) wire every member to its real binding", async () => {
+    // Same silent half as the test above, for four port builders: each member
+    // has an inert default in its controller, so a no-op stub, a member wired
+    // to the wrong `let` or a dropped optional member degrades quietly while
+    // tsc sees a well-typed literal. Each builder's literal must be EXACTLY
+    // this member set, one member per line (shorthand pinned as shorthand).
+    const src = await browserSrc();
+    const members = (name: string): string[] => {
+      const body = fnBody(src, name);
+      const open = body.indexOf("return {\n");
+      const close = body.indexOf("\n  };\n}");
+      expect(open).toBeGreaterThan(-1);
+      expect(close).toBeGreaterThan(open);
+      return body
+        .slice(open + "return {\n".length, close)
+        .split("\n")
+        .map((l) => l.trim().replace(/,$/, "").replace(/\s+/g, " "))
+        .filter((l) => l !== "")
+        .sort();
+    };
+    const expected: Record<string, string[]> = {
+      askDeps: ["WIKI: () => WIKI", "clearShownPage", "switchConnTab", "reloadPageInPlace"],
+      menusDeps: [
+        "WIKI: () => WIKI",
+        "allPages: () => allPages",
+        "workFacts: () => workFacts",
+        "seriesMenuOpener",
+        "postSeriesWrite: getPostSeriesWrite",
+        "withWiki",
+        "closeSeriesMenu",
+        "seriesBaseHash",
+        "openPageAtLoad",
+        "adoptOwnSeriesHashes",
+        "refreshAfterSeriesWrite",
+      ],
+      articleDeps: [
+        "WIKI: () => WIKI",
+        "WIKI_ROOT: () => WIKI_ROOT",
+        "allPages: () => allPages",
+        "currentRelPath: () => currentRelPath",
+        "currentArticle: () => currentArticle",
+        "typeOrder: () => typeOrder",
+        "typeLabel",
+        "workedGate: () => workedGate",
+        "workedAxisOn: () => workedAxisOn",
+        "jiraKeys: () => jiraKeys",
+        "trackerLabels: () => trackerLabels",
+        "withWiki",
+        "recencyNow",
+      ],
+      seriesDeps: [
+        "WIKI: () => WIKI",
+        "allPages: () => allPages",
+        "currentRelPath: () => currentRelPath",
+        "withWiki",
+        "recencyNow",
+        "requestPagesAwaited",
+        "seriesStripHtml",
+        "openPageAtLoad",
+        "adoptOwnSeriesHashes",
+      ],
+    };
+    for (const [name, want] of Object.entries(expected)) {
+      expect({ name, members: members(name) }).toEqual({ name, members: [...want].sort() });
+    }
+    // The two getters the menus port relays live in the series controller:
+    // each must return its own live state, whole body.
+    const series = await srcOf("wiki-series-controller.ts");
+    const wholeFn = (name: string) => {
+      const f = fnBody(series, name);
+      return f.slice(0, f.indexOf("\n}") + 2).trim();
+    };
+    expect(wholeFn("getPostSeriesWrite")).toMatch(/^export function getPostSeriesWrite\(\): SeriesPoster \{\s*return postSeriesWrite;\s*\}$/);
+    expect(wholeFn("seriesMenuOpener")).toMatch(
+      /^export function seriesMenuOpener\(\): HTMLElement \| null \{\s*return seriesMenu\?\.opener \?\? null;\s*\}$/,
+    );
+  });
 });
 
 describe("Draft plan's starter chip", () => {
