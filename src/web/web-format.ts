@@ -2245,7 +2245,8 @@ const webRenderer: BlockRenderer = {
       ? labelGridItems(
           items,
           (k) => (nest.children[k] ?? []).some((c) => c.kind === "list"),
-          (label) => shownLinkText(htmlText(renderInline(label))).replace(/\s+/g, " "),
+          // A wikilink counts as its own text, unpadded: the cap reads what the label shows.
+          (label) => peekText(htmlText(renderInline(label))).replace(/\s+/g, " "),
         )
       : null;
     if (grid) return labelGridHtml(grid, nest);

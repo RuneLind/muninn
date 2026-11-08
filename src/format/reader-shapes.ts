@@ -207,16 +207,19 @@ export interface LabelItem {
 }
 
 /** D3: an item that opens `**Label:**` / `**Label.**`, or `**Label**` then
- *  `:`, `—` or `–` (the en dash with a space after it, so `**2024**–25` is
- *  no label), with text after it. A separator after a punctuated label
- *  (`**Label.**: x`) is still the separator, never the text. Null otherwise. */
+ *  `:`, `—` or `–` with white space after it (the prototype's rule, so
+ *  `**2024**–25` is no label), with text after it. A separator after a
+ *  punctuated label (`**Label.**: x`) is still the separator, never the text;
+ *  a mark with no space after it, or one that would leave no text
+ *  (`**Owner:** —`, `**Port:** :3010`), is the text. Null otherwise. */
 export function labelItem(item: string): LabelItem | null {
   const m = /^\*\*(?!\*)([^\n]+?)\*\*(?!\*)([\s\S]*)$/u.exec(item);
   if (!m) return null;
   const inner = m[1]!;
   const after = m[2]!;
   const inside = /^([\s\S]*?\S)\s*([:.])$/u.exec(inner);
-  const sep = /^\s*(?:[:—]\s*|–\s+)/u.exec(after)?.[0] ?? (inside ? /^\s*/.exec(after)![0] : null);
+  const mark = /^\s*[:—–]\s+/u.exec(after)?.[0];
+  const sep = mark !== undefined && /\S/.test(after.slice(mark.length)) ? mark : inside ? /^\s*/.exec(after)![0] : null;
   if (sep === null) return null;
   const rest = after.slice(sep.length);
   if (!/\S/.test(rest)) return null;

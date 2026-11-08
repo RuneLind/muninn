@@ -198,6 +198,20 @@ describe("labelItem (D3)", () => {
   ])("%p: the separator after a punctuated label is not text", (item, label, punct, sep, rest) => {
     expect(labelItem(item)).toEqual({ label, punct, sep, rest });
   });
+  // Fix round 2: a mark is a separator only with white space after it and
+  // text left over; otherwise it stays in the text.
+  test.each([
+    ["**Owner:** —", "Owner", ":", " ", "—"],
+    ["**Owner:** — ", "Owner", ":", " ", "— "],
+    ["**Port:** :3010 is the dev port", "Port", ":", " ", ":3010 is the dev port"],
+    ["**Mood.** :) fine", "Mood", ".", " ", ":) fine"],
+  ])("%p: the mark is the text", (item, label, punct, sep, rest) => {
+    expect(labelItem(item)).toEqual({ label, punct, sep, rest });
+  });
+  test("a list whose value is a lone em dash is still a grid, the dash shown", () => {
+    const html = formatWebHtml("- **Owner:** —\n- **Due:** fredag\n- **Status:** open\n", SHAPES);
+    expect(html).toContain('<span class="lg-v">—</span>');
+  });
   // The prototype's separators: an en dash beside `:` and `—`.
   test("**Label** – text: an en dash separates", () => {
     expect(labelItem("**Label** – text")).toEqual({ label: "Label", punct: "", sep: " – ", rest: "text" });
@@ -218,6 +232,11 @@ describe("labelGridItems label cap (prototype's 70)", () => {
     const items = [`**[${label(60)}](https://example.com/${label(40)}):** a`, "**B:** b", "**C:** c"];
     expect(labelGridItems(items, none)).toBeNull();
     expect(labelGridItems(items, none, (l) => l.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"))).not.toBeNull();
+  });
+  test("a wikilink counts as the text it shows: 69 shown + colon is a grid, 70 + colon is not", () => {
+    const md = (n: number) => `- **${label(n)}[[ab]]'s:** a\n- **B:** b\n- **C:** c\n`;
+    expect(renderWikiHtml(md(65), () => undefined, { readerShapes: true })).toContain("label-grid");
+    expect(renderWikiHtml(md(66), () => undefined, { readerShapes: true })).not.toContain("label-grid");
   });
   test("the reader render measures the rendered label: a long link target keeps the grid, a long label does not", () => {
     const longTarget = formatWebHtml(`- **[Short](https://example.com/${label(90)}):** a\n- **B:** b\n- **C:** c\n`, SHAPES);
