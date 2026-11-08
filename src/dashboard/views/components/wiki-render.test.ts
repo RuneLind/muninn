@@ -120,6 +120,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // its batch 2 (measured smallest text, the gantt redraw, the header search): 825,630;
 // its batch 3 (dialog sizing, DOM id rescope, redrawn peek and card copies): 829,016 (281,928 gzipped).
 // Merged with render-richer PR 2 (both sides above): 834,461 bytes (283,849 gzipped).
+// Its fix round 2 (quadrant colours, the `;` classDef scanner, four dead theme
+// variables removed): 835,319 bytes (284,202 gzipped).
 const WIKI_CLIENT_MAX_BYTES = 836_000;
 
 test("wikiClientScript stays under its size pin", async () => {

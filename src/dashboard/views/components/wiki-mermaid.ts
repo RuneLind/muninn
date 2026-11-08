@@ -145,8 +145,11 @@ export function hasMermaid(root: ParentNode): boolean {
  * |                                |                                        | from the new render in the same pass; it stays open and focus |
  * |                                |                                        | stays where it was in the dialog                              |
  * | dialog open                    | popstate / hashchange                  | closes at once                                                |
- * | dialog open                    | article swapped (loadPage, Ask)        | the next enhanceMermaid call closes it (its ⤢ is detached, so |
- * |                                |                                        | focus goes to body, as for any control in a replaced article) |
+ * | dialog open                    | article swapped (loadPage, Ask)        | the next enhanceMermaid call closes it, unless the new root   |
+ * |                                |                                        | holds the same fence source: then its pass hands the dialog   |
+ * |                                |                                        | on (row below), or closes it at the pass's end when it drew   |
+ * |                                |                                        | afresh (`closeDialogIfDetached`). Closed with its ⤢ detached, |
+ * |                                |                                        | focus goes to body, as for any control in a replaced article  |
  * | dialog open                    | the same answer repainted (Ask `done`, | stays open: the redraw pass reuses the detached diagram's     |
  * |                                | `answer_html`, a ↻ splice)             | drawings (same source and colours, no mermaid.render) and     |
  * |                                |                                        | hands the dialog to the new ⤢                                 |

@@ -655,7 +655,7 @@ export function componentBlockCss(scope: string): string {
       border: 1px solid var(--border-primary); background: var(--bg-panel); color: var(--text-soft); font-size: 14px;
     }
     dialog.diagram-dialog .diagram-dialog-close:hover, dialog.diagram-dialog .diagram-dialog-close:focus-visible { color: var(--accent); border-color: var(--accent); }
-    /* Block, so no line box adds a descender gap under it; sized by wiki-mermaid.ts dialogBox. */
+    /* Block, so no line box adds a descender gap under it; sized in wiki-mermaid.ts by mermaid-theme.ts dialogBox. */
     dialog.diagram-dialog svg { display: block; margin: 0 auto; height: auto; }
     /* Paper does not scroll: a widened diagram (an inline width and max-width:none
        from wiki-mermaid.ts layout) scales back to the page width, as <Diagram> does. */

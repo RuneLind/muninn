@@ -282,8 +282,9 @@ export function buildMermaidPalette(input: {
  * `base` theme derives them from `primaryColor` (here near the panel) and then
  * darkens them: in dark every timeline section came out `#000`, pie slices near
  * black, gantt section bands white. mermaid 11.16 `theme-base.js` names:
- * `pie1..12`, `cScale0..11` (+ `cScaleLabel*`, `cScalePeer*`, `cScaleInv*`:
- * timeline, mindmap, kanban), `fillType0..7` (journey), `venn1..8`, `git0..7`
+ * `pie1..12`, `cScale0..11` (timeline, mindmap, kanban, radar, treemap; with
+ * `cScaleLabel*` for the first three and treemap, `cScaleInv*` for the first
+ * three, `cScalePeer*` for treemap), `fillType0..7` (journey), `venn1..8`, `git0..7`
  * (+ `gitBranchLabel*`, `gitInv*`), the gantt `task*`/`section*`/`crit*` set,
  * `rowOdd`/`rowEven` (erDiagram attribute rows), `quadrant*` and `xyChart`.
  * An override survives mermaid's own darken pass (`calculate` re-applies it).
@@ -324,14 +325,12 @@ function categoricalVariables(t: {
     pieSectionTextColor: h(t.text),
     pieTitleTextColor: h(t.text),
     pieLegendTextColor: h(t.text),
-    scaleLabelColor: h(t.text),
     vennTitleTextColor: h(t.text),
     vennSetTextColor: h(t.text),
     // gantt: filled bars on faint bands.
     taskBkgColor: h(fills[0]!),
     taskBorderColor: h(strokes[0]!),
     taskTextColor: h(labels[0]!),
-    taskTextLightColor: h(labels[0]!),
     taskTextDarkColor: h(t.text),
     taskTextOutsideColor: h(t.text),
     taskTextClickableColor: h(t.accent),
@@ -352,8 +351,6 @@ function categoricalVariables(t: {
     // erDiagram attribute rows: the panel and a faint stripe.
     rowOdd: h(t.panel),
     rowEven: mix(t.soft, t.panel, 0.08),
-    attributeBackgroundColorOdd: h(t.panel),
-    attributeBackgroundColorEven: mix(t.soft, t.panel, 0.08),
     // quadrantChart: four tints of the first four hues.
     quadrant1Fill: mix(fills[0]!, t.panel, 0.55),
     quadrant2Fill: mix(fills[1]!, t.panel, 0.55),
@@ -425,7 +422,10 @@ const FLOW_HEADER = /^\s*(?:flowchart|graph)\b/;
 /** Every class name the source's own `classDef` statements define (`classDef a,b …`).
  *  A statement starts at a line start or after a `;`; a `;` inside a label
  *  (`"…"`, `[…]`, `(…)`, `{…}`, `>…]`, an edge's `|…|`) or a `%%` comment
- *  starts none. */
+ *  starts none. A heuristic, not mermaid's grammar. Known gaps (pinned in the
+ *  tests): `<br>`, `>` or `(` in unquoted edge text (`|a<br>b|`, `-- a (b -->`)
+ *  leaves the depth raised, so a later `; classDef` on that line is missed; and
+ *  `-- text; classDef x -->` edge text counts as a classDef. */
 function definedClasses(source: string): Set<string> {
   const names = new Set<string>();
   const take = (i: number) => {

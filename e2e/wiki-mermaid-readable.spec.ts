@@ -17,14 +17,16 @@
  *     16 px messages, a page's 9 px init), measured here from computed
  *     font-size × screen transform: under 11 px only with a scrollbar, a gantt
  *     fills the column at 11 px with none, and a flip that would stand over
- *     900 px once widened stays LR.
+ *     900 px once widened stays LR. A widen width with float noise above a
+ *     whole pixel is not rounded up to the next one.
  *  3. **⤢ full-window.** Opens by click and keyboard, closes by Esc, backdrop
  *     and button with focus back on ⤢, stays open on a click inside, redraws
  *     its copy in the new colours on a palette flip (its own svg id, so its
  *     node fill is the themed one), and closes on back navigation. Its copy
- *     reads at ≥ 11 px (a too-wide LR, a gantt), a drag from a label out to
- *     the backdrop does not close it, and a label naming the svg id keeps its
- *     text in the copy.
+ *     reads at ≥ 11 px (a too-wide LR, a gantt) and never under the page's
+ *     text, opens top-down when the page drew it so, a drag from a label out
+ *     to the backdrop (or in from it) does not close it, and a label naming
+ *     the svg id keeps its text in the copy.
  *  4. **Copies.** A ref-link peek's copy of a diagram is themed (it lost its
  *     ids, so it is redrawn) and re-themed on a flip, with no ⤢; a fact-check
  *     card's copy carries no ⤢ and no scroll stop.
@@ -243,6 +245,12 @@ const EXTRA_PAGE = [
   "",
 ].join("\n");
 
+/** A narrow top-down chain far taller than the window: the page shows it at
+ *  14 px, the dialog's box would shrink it under that. */
+const TALL_PAGE = ["---", "title: Tall Page", "---", "", "# Tall Page", "", "```mermaid", "flowchart TD", chain(20, "tall"), "```", ""].join("\n");
+/** One top-down diagram whose viewBox width the test rewrites (see the widen test). */
+const EPS_PAGE = ["---", "title: Eps Page", "---", "", "# Eps Page", "", "```mermaid", "flowchart TD", "  A[epsilon probe] --> B[end]", "```", ""].join("\n");
+
 /** Two pages that link to each other, one diagram each (the reuse pool's bound). */
 const poolPage = (own: string, other: string) =>
   ["---", `title: Pool ${own}`, "---", "", `# Pool ${own}`, "", `[[pool-${other}|to pool ${other}]]`, "", "```mermaid", "flowchart TD", `  A[pool ${own} one] --> B[pool ${own} two]`, "```", ""].join("\n");
@@ -261,6 +269,8 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "peek-page.md"), PEEK_PAGE, "utf8");
   await writeFile(path.join(root, "fact-page.mdx"), FACT_PAGE, "utf8");
   await writeFile(path.join(root, "extra-page.md"), EXTRA_PAGE, "utf8");
+  await writeFile(path.join(root, "tall-page.md"), TALL_PAGE, "utf8");
+  await writeFile(path.join(root, "eps-page.md"), EPS_PAGE, "utf8");
   await writeFile(path.join(root, "pool-a.md"), poolPage("a", "b"), "utf8");
   await writeFile(path.join(root, "pool-b.md"), poolPage("b", "a"), "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
@@ -690,6 +700,34 @@ function screenMinText(svg: Element): number {
   return min;
 }
 
+test("the widen width rounds float noise down, not up a whole pixel", async ({ page }) => {
+  // A viewBox width of 1099.6363636363637 at 14 px text widens to 1099.63… × 11 ÷ 14,
+  // which computes as 864.0000000000001: a bare Math.ceil would give 865.
+  await page.addInitScript((width) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let lib: any;
+    Object.defineProperty(globalThis, "mermaid", {
+      configurable: true,
+      get: () => lib,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      set: (m: any) => {
+        const real = m.render.bind(m);
+        m.render = async (id: string, src: string, ...a: unknown[]) => {
+          const r = await real(id, src, ...a);
+          if (src.includes("epsilon probe")) r.svg = r.svg.replace(/viewBox="([-\d.e]+) ([-\d.e]+) [\d.e]+ /, `viewBox="$1 $2 ${width} `);
+          return r;
+        };
+        lib = m;
+      },
+    });
+  }, "1099.6363636363637");
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=eps-page.md`);
+  const svg = diagrams(page).locator(".diagram-body svg");
+  await expect(svg).toHaveAttribute("data-widened", "", { timeout: 20_000 });
+  expect(await svg.evaluate((s) => (s as SVGSVGElement).viewBox.baseVal.width), "precondition: the rewritten viewBox").toBeCloseTo(1099.636, 2);
+  expect(await svg.getAttribute("width")).toBe("864");
+});
+
 test.describe("⤢ full-window size and copy", () => {
   const dialog = (page: Page) => page.locator("dialog.diagram-dialog");
   const dialogText = (page: Page) => dialog(page).locator("svg").first().evaluate(screenMinText);
@@ -734,6 +772,45 @@ test.describe("⤢ full-window size and copy", () => {
     await page.mouse.click(3, 3);
     await expect(dialog(page)).toBeHidden();
     await expect(btn).toBeFocused();
+  });
+
+  test("a diagram the page shows over 11 px never reads smaller in the dialog", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=tall-page.md`);
+    await expect(diagrams(page)).toHaveCount(1, { timeout: 20_000 });
+    const pagePx = await diagrams(page).locator(".diagram-body svg").evaluate(screenMinText);
+    expect(pagePx, "precondition: the page shows it over 11 px").toBeGreaterThan(12);
+    await diagrams(page).getByRole("button", { name: "Open diagram full-window" }).click();
+    await expect(dialog(page)).toBeVisible();
+    expect(await dialog(page).evaluate((d) => d.scrollHeight > d.clientHeight), "precondition: taller than the window").toBe(true);
+    expect(await dialogText(page)).toBeGreaterThanOrEqual(pagePx - 0.05);
+  });
+
+  test("a diagram the page draws top-down opens top-down when that spills less", async ({ page }) => {
+    await openDiagramPage(page);
+    const wrap = diagrams(page).nth(0);
+    await expect(wrap).toHaveAttribute("data-mermaid-flipped", "");
+    await wrap.getByRole("button", { name: "Open diagram full-window" }).click();
+    await expect(dialog(page)).toBeVisible();
+    const vb = await dialog(page).locator("svg").first().evaluate((s) => {
+      const b = (s as SVGSVGElement).viewBox.baseVal;
+      return { width: b.width, height: b.height };
+    });
+    expect(vb.height, "the top-down copy: taller than wide").toBeGreaterThan(vb.width);
+  });
+
+  test("a press on the backdrop released inside the dialog keeps it open", async ({ page }) => {
+    await openDiagramPage(page);
+    await diagrams(page).nth(2).getByRole("button", { name: "Open diagram full-window" }).click();
+    await expect(dialog(page)).toBeVisible();
+    const label = await dialog(page).locator("svg .node").first().boundingBox();
+    await page.mouse.move(3, 3);
+    await page.mouse.down();
+    await page.mouse.move(label!.x + label!.width / 2, label!.y + label!.height / 2, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    await expect(dialog(page)).toBeVisible();
+    await page.mouse.click(3, 3);
+    await expect(dialog(page)).toBeHidden();
   });
 
   test("a label naming the svg id keeps its text in the copy; ids stay unique and resolve", async ({ page }) => {

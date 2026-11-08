@@ -237,7 +237,7 @@ describe("categorical colours: every diagram type gets real hues, readable label
     test(`${set.name}: er attribute rows stay near the panel and keep the text readable`, () => {
       const v = tv();
       const panel = str(v, "background");
-      for (const k of ["rowOdd", "rowEven", "attributeBackgroundColorOdd", "attributeBackgroundColorEven"]) {
+      for (const k of ["rowOdd", "rowEven"]) {
         expect(deltaE(str(v, k), panel), k).toBeLessThanOrEqual(12);
         expect(contrast(str(v, k), str(v, "textColor")), k).toBeGreaterThanOrEqual(4.5);
       }
@@ -318,6 +318,35 @@ describe("injectClassDefs", () => {
     ]) {
       expect(injectClassDefs(src, defs), src).toContain("classDef good fill:#000");
     }
+  });
+  // Each expected value below is mermaid 11.16's own reading, checked by
+  // rendering the source in headless chromium (a page `classDef good
+  // fill:#ff0000` either turns its node red or does not).
+  const pageDefines = (src: string) => !injectClassDefs(src, defs).includes("classDef good fill:#000");
+  test("a newline inside a quoted label starts no statement", () => {
+    expect(pageDefines('flowchart LR\n  A["x\nclassDef good fill:#ff0000"] --> B\n  class A good')).toBe(false);
+  });
+  test("a newline ends an unclosed bracket or edge-label pipe count, and a comment", () => {
+    // `<br>` in a pipe label raises the depth, so the second `|` cannot close it.
+    expect(pageDefines("flowchart LR\n  A -->|a<br>b| B\n  B --> C; classDef good fill:#ff0000\n  class C good")).toBe(true);
+    expect(pageDefines("flowchart LR\n  %% a note\n  A --> B; classDef good fill:#ff0000\n  class A good")).toBe(true);
+  });
+  test("`%%` inside a bracket label opens no comment", () => {
+    expect(pageDefines("flowchart LR\n  A[50%% done] --> B; classDef good fill:#ff0000\n  class B good")).toBe(true);
+  });
+  test("known gaps of the hand-written scanner (today's output, not mermaid's)", () => {
+    // (a) `<br>`, `>` or `(` in unquoted edge text leaves the depth raised, so a
+    // later `;` classDef on that line is missed: mermaid reads it, we inject ours too.
+    for (const src of [
+      "flowchart LR\n  A -->|one<br>two| B; classDef good fill:#ff0000",
+      "flowchart LR\n  A-- one<br>two -->B; classDef good fill:#ff0000",
+      "flowchart LR\n  A-- go>stop -->B; classDef good fill:#ff0000",
+      "flowchart LR\n  A-- a (b -->B; classDef good fill:#ff0000",
+    ]) {
+      expect(pageDefines(src), src).toBe(false);
+    }
+    // (b) a `;` inside `-- text -->` edge text: mermaid reads it as edge text, we as a classDef.
+    expect(pageDefines("flowchart LR\n  A-- text; classDef good -->B")).toBe(true);
   });
   test("a longer class name sharing a prefix is not the same class", () => {
     const out = injectClassDefs("graph TD\n  classDef goodish fill:#f00", defs);
@@ -505,11 +534,12 @@ describe("rescopeSvgIds", () => {
     const title = new FakeEl("title", { id: "chart-title-wm-1" });
     const use = new FakeEl("use", { "xlink:href": "#wm-1-sym", href: "https://example.com/wm-1" });
     const other = new FakeEl("g", { id: "wm-12" });
+    const longer = new FakeEl("g", { id: "dwm-1", "aria-describedby": "dwm-1 wm-1" });
     const label = new FakeEl("span", { class: "nodeLabel", "data-note": "wm-1" }, "see wm-1 and wm-1x and dwm-1");
     const svg = new FakeEl("svg", { id: "wm-1", "aria-labelledby": "chart-title-wm-1 chart-desc-wm-1" }, null, [
-      style, marker, path, title, use, other, label,
+      style, marker, path, title, use, other, longer, label,
     ]);
-    return { svg, style, marker, path, title, use, other, label };
+    return { svg, style, marker, path, title, use, other, longer, label };
   };
 
   test("renames ids and every id reference, bounded", () => {
@@ -524,6 +554,8 @@ describe("rescopeSvgIds", () => {
     expect(t.title.attr("id")).toBe("chart-title-wm-dlg-0");
     expect(t.use.attr("xlink:href")).toBe("#wm-dlg-0-sym");
     expect(t.other.attr("id"), "wm-12 is another id").toBe("wm-12");
+    expect(t.longer.attr("id"), "dwm-1 is another id").toBe("dwm-1");
+    expect(t.longer.attr("aria-describedby")).toBe("dwm-1 wm-dlg-0");
   });
 
   test("leaves text, a link off the page and plain attributes as written", () => {
@@ -572,6 +604,16 @@ describe("dialog size", () => {
     expect(dialogFit({ width: 200, height: 100, minText: 9 }, box, 0).textPx).toBeGreaterThanOrEqual(11);
   });
 
+  test("the 11 px floor holds when the page shows less and the box would shrink it", () => {
+    expect(dialogFit({ width: 4000, height: 300, minText: 20 }, box, 5).textPx).toBeCloseTo(11, 6);
+  });
+
+  test("a drawing that spills down counts as overflow", () => {
+    const f = dialogFit({ width: 300, height: 4000, minText: 14 }, box, 11);
+    expect(f.overflow).toBeCloseTo((f.height - box.height) / box.height, 6);
+    expect(f.overflow).toBeGreaterThan(0);
+  });
+
   test("the pick prefers the drawing that spills less, then the larger text", () => {
     const wide = { width: 4000, height: 300, minText: 14 };
     const tall = { width: 500, height: 900, minText: 14 };
@@ -589,5 +631,13 @@ describe("dialog size", () => {
     expect(f.textPx).toBeCloseTo(13, 6);
     expect(f.width).toBeLessThanOrEqual(box.width);
     expect(f.width).toBeGreaterThan(box.width - 2);
+  });
+
+  test("a gantt whose floor is over 1.3× is drawn narrower, so at the floor it still fills the box", () => {
+    const hw = dialogHostWidth(box.width, 8, 11); // floor 11 ÷ 8 = 1.375
+    expect(hw).toBe(Math.floor(box.width / 1.375));
+    const f = dialogFit({ width: hw, height: 200, minText: 8 }, box, 11);
+    expect(f.textPx).toBeCloseTo(11, 6);
+    expect(f.width).toBeLessThanOrEqual(box.width);
   });
 });
