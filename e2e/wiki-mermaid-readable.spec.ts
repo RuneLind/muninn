@@ -24,7 +24,7 @@
  *     its copy in the new colours on a palette flip (its own svg id, so its
  *     node fill is the themed one), and closes on back navigation. Its copy
  *     reads at ≥ 11 px (a too-wide LR, a gantt) and never under the page's
- *     text, opens top-down when the page drew it so, a drag from a label out
+ *     text, opens top-down when that spills less, a drag from a label out
  *     to the backdrop (or in from it) does not close it, and a label naming
  *     the svg id keeps its text in the copy.
  *  4. **Copies.** A ref-link peek's copy of a diagram is themed (it lost its

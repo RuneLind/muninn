@@ -423,8 +423,9 @@ const FLOW_HEADER = /^\s*(?:flowchart|graph)\b/;
  *  A statement starts at a line start or after a `;`; a `;` inside a label
  *  (`"…"`, `[…]`, `(…)`, `{…}`, `>…]`, an edge's `|…|`) or a `%%` comment
  *  starts none. A heuristic, not mermaid's grammar. Known gaps (pinned in the
- *  tests): `<br>`, `>` or `(` in unquoted edge text (`|a<br>b|`, `-- a (b -->`)
- *  leaves the depth raised, so a later `; classDef` on that line is missed; and
+ *  tests): any unmatched opener (`<br>`, `>`, `(`, `[`, `{`) in unquoted edge
+ *  text (`|a<br>b|`, `-- a (b -->`) leaves the depth raised, so a later
+ *  `; classDef` on that line is missed; and
  *  `-- text; classDef x -->` edge text counts as a classDef. */
 function definedClasses(source: string): Set<string> {
   const names = new Set<string>();
