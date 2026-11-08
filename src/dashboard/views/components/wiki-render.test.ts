@@ -114,11 +114,20 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-08, render-richer PR 2 (reader shapes: number columns, verdict cells, the
 // label grid, in the bundled formatWebHtml): 814,851 bytes (276,668 gzipped); its
 // fix round 1 (id and date headers, traffic lights, the nowrap number span): 816,448 (277,205).
+// 2026-11-08: mermaid in the reader's palette, readable size and the ⤢ view
+// (wiki-mermaid.ts + mermaid-theme.ts): 819,709 bytes (278,693 gzipped); its fix
+// round's categorical colours for every other diagram type: 824,039 (280,294 gzipped);
+// its batch 2 (measured smallest text, the gantt redraw, the header search): 825,630;
+// its batch 3 (dialog sizing, DOM id rescope, redrawn peek and card copies): 829,016 (281,928 gzipped).
+// Merged with render-richer PR 2 (both sides above): 834,461 bytes (283,849 gzipped).
+// Its fix round 2 (quadrant colours, the `;` classDef scanner, four dead theme
+// variables removed): 835,319 bytes (284,202 gzipped).
 // 2026-11-08, render-richer PR 3 (before → after chips in the bundled
 // formatWebHtml, the section bar controller): 823,635 bytes (279,617 gzipped);
 // its fix round 1 batch 2 (chip rules, quoted-title unchip): 825,675 (280,463);
 // batch 3 (sliding reading line, reveal pin, title rule): 826,252 (280,699).
-const WIKI_CLIENT_MAX_BYTES = 827_000;
+// Merged with the mermaid PR (#833, both sides above): 844,882 bytes (287,616 gzipped).
+const WIKI_CLIENT_MAX_BYTES = 846_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

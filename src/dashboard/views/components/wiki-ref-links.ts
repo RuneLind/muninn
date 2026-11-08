@@ -27,6 +27,7 @@
  */
 
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
+import { adoptMermaidCopies } from "./wiki-mermaid.ts";
 import {
   CB_LINE_CLASS,
   CB_MORE_CLASS,
@@ -441,6 +442,8 @@ export const PEEK_STRIP_SELECTOR = [
   ...PEEK_SYSTEM_MAP_CHROME,
   "gl-tip",
   "cb-dots",
+  // The mermaid enhancer's ⤢ button: its listener does not survive a copy.
+  "diagram-expand",
 ]
   .map((c) => `.${c}`)
   .join(", ");
@@ -627,6 +630,9 @@ function showPeek(a: HTMLAnchorElement): void {
   });
   // Inside the article so its scoped styles reach the copy.
   (article ?? document.body).append(card);
+  // A copied mermaid diagram lost its ids, so its own <style> no longer
+  // matches: redraw it here, and drop its dead ⤢.
+  adoptMermaidCopies(card);
   peek = card;
   peekFor = a;
   place(card, a);
