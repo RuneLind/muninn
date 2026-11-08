@@ -466,6 +466,7 @@ describe("the left pane (wiki-rail-controller.ts), driven through the booted she
     for (const m of [
       "/components/wiki-rail-controller.ts",
       "/components/wiki-shell-state.ts",
+      "/components/wiki-work-map-cache.ts",
       "/components/wiki-stale-controller.ts",
       "/components/wiki-effort-controller.ts",
       "/components/wiki-menus-controller.ts",

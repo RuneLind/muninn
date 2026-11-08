@@ -307,17 +307,13 @@ import {
   effortFromUrl,
   effortHrefFor,
   getEffortOpen,
-  getRailMapFailedAt,
-  getWorkMap,
-  getWorkMapCache,
   initEffort,
   openEffort,
-  railEffortsIndex,
   refreshEffortFromListing,
   renderEffort,
-  workMapFetchFor,
   type EffortDeps,
 } from "./wiki-effort-controller.ts";
+import { getWorkMap, workMapFetchFor } from "./wiki-work-map-cache.ts";
 import {
   initMenus,
   openThreadRowMenu,
@@ -2660,8 +2656,6 @@ function railDeps(): RailDeps {
     projects: () => projects,
     jiraKeys: () => jiraKeys,
     trackerLabels: () => trackerLabels,
-    workMapCache: getWorkMapCache,
-    railMapFailedAt: getRailMapFailedAt,
     workFacts: () => workFacts,
     workMapThemes: () => workMapThemes,
     filters,
@@ -2679,8 +2673,6 @@ function railDeps(): RailDeps {
     loadPageByRelPath,
     resetStaleRailPainted,
     railStaleBadge,
-    effortHrefFor,
-    railEffortsIndex,
     refreshEffortFromListing,
     openWorkCardMenu,
     openThreadRowMenu,
@@ -2819,7 +2811,7 @@ export function boot(): { dispose(): void } {
     workMapRunAt: () => getWorkMapRunAt(),
     // One map cache for the card, the rail and the effort page (P4). The ↻ poll
     // asks `fresh` and hands a newer map back through `adoptWorkMap`.
-    fetchWorkMap: (fresh) => (fresh || getWorkMapRunAt() === null ? getWorkMap() : workMapFetchFor(getWorkMapRunAt()!)),
+    fetchWorkMap: (fresh) => (fresh || getWorkMapRunAt() === null ? getWorkMap(withWiki) : workMapFetchFor(getWorkMapRunAt()!, withWiki)),
     adoptWorkMap,
     pages: () => allPages,
     waitsCounted: () => waitsCounted,
