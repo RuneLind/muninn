@@ -4761,6 +4761,7 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
     expect(acceptsGzip("gzip;q=0;q=1")).toBe(false);
     for (const h of ["xgzip", "xgzip, gzip;q=0"]) expect(acceptsGzip(h), h).toBe(false);
     for (const h of ["gzip;q=0x1", "gzip;q=1e0", "gzip;q=2"]) expect(acceptsGzip(h), h).toBe(true);
+    for (const h of ["gzip;q=Infinity", "gzip;q=1e999"]) expect(acceptsGzip(h), h).toBe(false);
   });
 
   test("gzip is not sent to a client that refuses it with q=0", async () => {

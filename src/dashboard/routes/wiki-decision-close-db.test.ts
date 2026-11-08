@@ -96,8 +96,9 @@ const stateOf = async (id: string) => parseQuestionPage(parseBlocks(stripFrontma
 beforeAll(async () => {
   root = await testTempDir(path.join(tmpdir(), "muninn-close-"));
   [{ now: dbStart }] = (await getDb()`SELECT now()`) as unknown as [{ now: Date }];
-  // backdate's guard tells shifted rows from new ones only while the shift is positive.
-  if (dbStart.getTime() <= NOW) throw new Error(`database clock ${dbStart.toISOString()} is not after NOW; backdate would re-shift rows`);
+  // backdate's guard tells shifted rows from new ones only while the shift outlasts the
+  // suite, and the once-only test needs two shifts to leave NOW's day: require 12 h.
+  if (dbStart.getTime() - NOW < 12 * 3600_000) throw new Error(`database clock ${dbStart.toISOString()} is under 12 h after NOW; backdate would re-shift rows`);
   git("init", "-q", "-b", "main");
   // The route's commit (`commitWikiChange`) spawns git with no author env: a CI runner has no identity.
   git("config", "user.name", "t");
