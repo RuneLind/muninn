@@ -1090,7 +1090,8 @@ function declineNote(reason: DeclineReason): string {
  * DECLINED to answer, rendered in place of the ordinary "Continue in chat →"
  * button. Pure `reason → html` (no user content is interpolated, so nothing here
  * needs escaping) and it is what makes the hook derivable from turn state alone —
- * `wiki-ask-controller.ts` holds only the wiring.
+ * the bar's slot and repaint live in `wiki-ask-controller.ts`, the decline click in
+ * `wiki-chat-options.ts`.
  *
  * The action is the direct-mode chat path: an honest failure is exactly the moment
  * to offer the bot its tools and memories instead of the wiki index, and the reader
