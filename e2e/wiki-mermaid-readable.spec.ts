@@ -433,10 +433,15 @@ test.describe("readable size from the smallest real text", () => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=types-page.md`);
     await expect(diagrams(page)).toHaveCount(5, { timeout: 20_000 });
     const seq = diagrams(page).nth(1).locator(".diagram-body");
+    // Font metrics differ by OS, so size the body to put the drawing at 0.74 of
+    // its natural width: 14 px × 0.74 = 10.4 (old maths widened), 16 px × 0.74 = 11.8.
+    const vbw = await seq.evaluate((b) => (b.querySelector("svg") as SVGSVGElement).viewBox.baseVal.width);
+    await seq.evaluate((b, w) => { (b as HTMLElement).style.width = `${w}px`; }, Math.round(vbw * 0.74));
+    await page.waitForTimeout(600); // the debounced re-measure
     const scale = await seq.evaluate((b) => b.clientWidth / (b.querySelector("svg") as SVGSVGElement).viewBox.baseVal.width);
-    // The fixture sits where 14 px × scale < 11 ≤ 16 px × scale.
     expect(14 * scale).toBeLessThan(11);
     expect(16 * scale).toBeGreaterThanOrEqual(11);
+    expect(await seq.evaluate((b) => (b.querySelector("svg") as SVGSVGElement).getAttribute("width")), "not widened").toBe("100%");
     expect(await seq.evaluate((b) => b.scrollWidth > b.clientWidth + 1)).toBe(false);
   });
 });
