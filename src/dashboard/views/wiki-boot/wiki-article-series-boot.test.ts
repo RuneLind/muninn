@@ -385,11 +385,12 @@ describe("an explainer-typed markdown page (loadExplainer)", () => {
       heldPage?.release();
       heldPage = null;
       if (seriesMenu()) key("Escape");
-      await until(() => connBody().textContent !== "Loading…", "e.md's payload to settle");
-      // The fixture as the file starts it, for a case added after this one.
+      // The fixture as the file starts it, for a case added after this one;
+      // reset before the wait, so a wait that times out cannot skip it.
       Object.assign(pages["e.md"]!, { series: "solo" });
       delete (pages["e.md"] as { seriesLabel?: string }).seriesLabel;
       hashes["e.md"] = "h-e";
+      await until(() => connBody().textContent !== "Loading…", "e.md's payload to settle");
     }
   });
 });
