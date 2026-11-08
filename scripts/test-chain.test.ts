@@ -26,6 +26,7 @@ import {
   tableProblems,
   timeAlone,
   timeChangedFiles,
+  timeRefreshFiles,
   type AloneRun,
   type ChainLink,
   type CheckInput,
@@ -593,6 +594,21 @@ describe("the changed-file step prints a kill warning", () => {
       spy.mockRestore();
     }
     expect(lines).toContain("::warning::src/a.test.ts: group kill failed");
+  });
+});
+
+describe("refresh prints a kill warning", () => {
+  test("a run with killWarning yields a ::warning:: line naming the file", async () => {
+    const lines: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((s: unknown) => void lines.push(String(s)));
+    let runs: Awaited<ReturnType<typeof timeRefreshFiles>> = [];
+    try {
+      runs = await timeRefreshFiles(["src/a.test.ts"], async () => ({ seconds: 1, code: 0, output: "", timedOut: false, killWarning: "group kill failed" }));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines).toContain("::warning::src/a.test.ts: group kill failed");
+    expect(runs.map((r) => r.file)).toEqual(["src/a.test.ts"]);
   });
 });
 

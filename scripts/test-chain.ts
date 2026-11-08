@@ -773,18 +773,23 @@ export function refreshTimings(runs: readonly { file: string; run: AloneRun }[])
   return { seconds, failed, timedOut };
 }
 
-async function cmdRefresh(): Promise<number> {
-  const { tree, links } = loadChain();
-  const files = [...new Set(links.flatMap((l) => expandLink(l.args, tree.allTestFiles)))].sort();
+/** `refresh`'s runs, one per file, printed as they finish. `time` is for tests. */
+export async function timeRefreshFiles(files: readonly string[], time: (f: string) => Promise<AloneRun> = (f) => timeAlone(f)): Promise<{ file: string; run: AloneRun }[]> {
   const runs: { file: string; run: AloneRun }[] = [];
   for (const [i, f] of files.entries()) {
-    const r = await timeAlone(f);
+    const r = await time(f);
     runs.push({ file: f, run: r });
     console.log(`[${i + 1}/${files.length}] ${r.seconds.toFixed(1).padStart(6)} s${r.timedOut ? "  TIMED OUT" : r.code === 0 ? "" : `  exit ${r.code}`}  ${f}`);
     if (r.killWarning) console.log(`::warning::${f}: ${r.killWarning}`);
     if (r.timedOut || r.code !== 0) console.log(tail(r.output));
   }
-  const { seconds, failed, timedOut } = refreshTimings(runs);
+  return runs;
+}
+
+async function cmdRefresh(): Promise<number> {
+  const { tree, links } = loadChain();
+  const files = [...new Set(links.flatMap((l) => expandLink(l.args, tree.allTestFiles)))].sort();
+  const { seconds, failed, timedOut } = refreshTimings(await timeRefreshFiles(files));
   const sha = process.env.GITHUB_SHA ?? Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: ROOT }).stdout.toString().trim();
   const source = `refresh: each file alone, wall clock, on ${process.env.GITHUB_ACTIONS ? "a CI runner" : hostname()} at ${sha.slice(0, 8)}, ${new Date().toISOString().slice(0, 10)}`;
   writeFileSync(TIMINGS_PATH, JSON.stringify({ source, seconds }, null, 2) + "\n");
