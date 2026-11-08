@@ -53,13 +53,18 @@ const page = (relPath: string) => ({
   linkCount: 0,
   backlinkCount: 0,
 });
-// A tracker on the listing: graph mode exists only there.
-const LISTING = { pages: [page("p.md"), page("k.md")], scannedAt: Date.now(), trackers: [{ id: "jira", label: "Jira" }] };
+// A tracker on the listing: graph mode exists only there. `e.md` is typed
+// `explainer` (a `.wiki-reader.json` can type a markdown page so): it opens
+// through `loadExplainer`, which leaves `currentPageHash` alone, yet its rail
+// row keeps the series ⋯ (`canEditSeriesPage` tests the extension).
+const LISTING = { pages: [page("p.md"), page("k.md"), { ...page("e.md"), type: "explainer" }], scannedAt: Date.now(), trackers: [{ id: "jira", label: "Jira" }] };
 /** The session a previous visit stored: one answered turn. */
 const STORED = [{ question: "What did we decide?", answer: "We decided X.", citations: [], cited: [], html: "<p>We decided X.</p>", askedAt: Date.now() - 60_000 }];
 
 const fetched: string[] = [];
-async function stubFetch(input: unknown): Promise<unknown> {
+/** The bodies of every `POST /api/wiki/series`, parsed. */
+const seriesPosts: Record<string, unknown>[] = [];
+async function stubFetch(input: unknown, init?: { method?: string; body?: unknown }): Promise<unknown> {
   const raw = String(input);
   fetched.push(raw);
   const url = new URL(raw, "http://localhost:3011");
@@ -70,6 +75,10 @@ async function stubFetch(input: unknown): Promise<unknown> {
     body = { meta: LISTING.pages.find((p) => p.relPath === rel) ?? LISTING.pages[0], html: `<h1>${rel}</h1><p>Body.</p>`, outgoing: [], backlinks: [], hash: "h-" + rel };
   } else if (url.pathname === "/api/wiki/graph") body = { nodes: [], edges: [] };
   else if (url.pathname === "/api/wiki/factcheck/append") body = { written: true };
+  else if (url.pathname === "/api/wiki/series" && init?.method === "POST") {
+    seriesPosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    body = { written: true };
+  }
   const R = g.Response as typeof Response;
   return new R(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 }
@@ -285,5 +294,35 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
     doc().getElementById("wikiGraphToggle")!.click();
     await until(() => fetched.some((u) => u.includes("/api/wiki/graph")), "the graph fetch");
     expect(fetched.filter((u) => u.includes("/api/wiki/graph")).map((u) => new URL(u, "http://x").searchParams.get("scope") + ":" + new URL(u, "http://x").searchParams.get("root")).join(" ")).toBe("page:k.md");
+  });
+
+  test("after an answer, an explainer opened from the rail carries no hash: a series write on it goes out with its fresh base", async () => {
+    const { getCurrentName } = await import("../components/wiki-shell-state.ts");
+    // md page p.md, loaded with the hash its page response carries (`h-p.md`).
+    popTo("/wiki?wiki=w&relPath=p.md");
+    await until(() => !!doc().querySelector("#articleWrap .wiki-article h1#pmd"), "p.md to render");
+    expect(getCurrentName()).toBe("p");
+    expect(fetched.some((u) => u.startsWith("/api/wiki/page?") && u.includes("relPath=p.md"))).toBe(true);
+    // An Ask answer replaces it (`clearShownPage`).
+    doc().querySelector<HTMLElement>('#wikiAskHistory [data-ask-idx="0"]')!.click();
+    expect(!!doc().getElementById("askAnswerBody")).toBe(true);
+    expect(getCurrentName()).toBe(null);
+    // The explainer from the rail: `loadExplainer` sets the relPath, not the hash.
+    doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="e.md"]')!.click();
+    await until(() => !!doc().querySelector("#articleWrap iframe.wiki-explainer-frame"), "the explainer frame");
+    expect(getCurrentName()).toBe("e");
+    // Its ⋯, then a new series key: the menu reads e.md's fresh base (`h-e.md`)
+    // and compares it with `openPageAtLoad().loadedHash`. Left at p.md's hash,
+    // the two differ and the write is refused as "changed since you opened it".
+    seriesPosts.length = 0;
+    doc().querySelector<HTMLElement>('#wikiList [data-series-menu="e.md"]')!.click();
+    const menu = doc().getElementById("wikiSeriesMenu")!;
+    expect(!!menu).toBe(true);
+    const form = menu.querySelector<HTMLFormElement>('[data-series-form="new"]')!;
+    form.querySelector<HTMLInputElement>("[data-series-input]")!.value = "fresh-key";
+    form.dispatchEvent(new (g.Event as typeof Event)("submit", { bubbles: true, cancelable: true }));
+    await until(() => seriesPosts.length > 0 || /changed since you opened it/.test(doc().getElementById("wikiSeriesMenu")?.textContent ?? ""), "the write or its refusal");
+    expect(doc().getElementById("wikiSeriesMenu")?.textContent ?? "").not.toContain("changed since you opened it");
+    expect(seriesPosts.map((b) => `${b.relPath} ${b.series} ${b.baseHash}`)).toEqual(["e.md fresh-key h-e.md"]);
   });
 });
