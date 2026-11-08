@@ -74,6 +74,10 @@ export interface BlockRenderer {
    *  living on the interface is what forces every platform to implement it. */
   inlineComponent(name: InlineComponentName, attrs: Record<string, string>, text: string): string;
   text(lines: string[]): string;
+  /** Optional: runs around a component block's whole render (its body walk
+   *  and its own `component` call), so a renderer can tell which component
+   *  its tables and lists sit in. */
+  inComponent?<T>(name: ComponentName, render: () => T): T;
 }
 
 /** Render a parsed block list with a platform's {@link BlockRenderer}, joining
@@ -97,13 +101,16 @@ function renderBlock(block: Block, r: BlockRenderer): string {
       return renderList(block, r, 0);
     case "table":
       return r.table(block.headers, block.rows);
-    case "component":
+    case "component": {
       // A component may emit the walked body or render it again: the observer
       // gets each tag once either way.
-      return observeComponentScope(
-        () => renderBlocks(componentChildren(block), r),
-        (rendered) => r.component(block.name, block.attrs, rendered, componentChildren(block)),
-      );
+      const render = () =>
+        observeComponentScope(
+          () => renderBlocks(componentChildren(block), r),
+          (rendered) => r.component(block.name, block.attrs, rendered, componentChildren(block)),
+        );
+      return r.inComponent ? r.inComponent(block.name, render) : render();
+    }
     case "text":
       return r.text(block.lines);
     default: {

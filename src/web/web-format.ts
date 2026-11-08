@@ -25,10 +25,11 @@ import {
   taskListRows,
   componentBlocks,
 } from "../format/markdown-ast.ts";
-import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
+import type { Block, ChecklistList, ChecklistRow, ComponentName, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
 import { withoutComponentTags } from "../format/component-observer.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+import { htmlText, labelGridItems, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
 import { questionCardAnchor, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
@@ -324,6 +325,7 @@ export function formatWebHtml(
   const prev = currentPageFiles;
   const prevQuestion = currentQuestionPage;
   const prevReader = currentReader;
+  const prevComponents = currentComponents;
   const prevLanguage = currentLanguage;
   const prevLaneCards = currentLaneCards;
   const prevLinkTexts = currentLinkTexts;
@@ -364,6 +366,7 @@ export function formatWebHtml(
   currentLinkTexts = opts?.wikiLinkTexts;
   currentLinkSources = opts?.wikiLinkSources;
   currentReader = opts?.reader === true;
+  currentComponents = [];
   currentItemDates = currentReader ? opts?.itemDates : undefined;
   currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
   try {
@@ -447,6 +450,7 @@ export function formatWebHtml(
     currentPageFiles = prev;
     currentQuestionPage = prevQuestion;
     currentReader = prevReader;
+    currentComponents = prevComponents;
     currentLanguage = prevLanguage;
     currentLaneCards = prevLaneCards;
     currentLinkTexts = prevLinkTexts;
@@ -509,6 +513,22 @@ let currentPageFiles: PageFiles | undefined;
 
 /** `opts.reader` for the call in progress. */
 let currentReader = false;
+
+/** The components the block in progress sits in, outermost first (the
+ *  walker's `inComponent` hook keeps it). */
+let currentComponents: ComponentName[] = [];
+
+/** Components that only wrap a section of the page: a table or list in one is
+ *  still the page's own, so the reader shapes reach it. Every other component
+ *  draws its own table or list, or is a card whose body stays as written. */
+const SHAPE_TRANSPARENT: ReadonlySet<ComponentName> = new Set<ComponentName>(["Fold", "More", "Historic", "ComparisonTable", "Figure"]);
+
+/** True when a table or list rendered now takes the reader shapes (number
+ *  columns, verdict cells, the label grid): the reader's render, outside any
+ *  component but a section wrapper. Chat never does, byte for byte. */
+function readerShapesOn(): boolean {
+  return currentReader && currentComponents.every((n) => SHAPE_TRANSPARENT.has(n));
+}
 
 /** `opts.views` for the call in progress: `<StatusRows view="tiles">` draws tiles. */
 let currentViews = false;
@@ -2134,6 +2154,37 @@ function runListHtml(list: ChecklistList): string {
     .join("");
 }
 
+/** A pipe table on the reader: number columns (`num`, on the header too) and
+ *  verdict cells (`v-good`/`v-warn`/`v-bad`, the glyph kept as hidden text). */
+function readerTableHtml(headers: string[], rows: string[][]): string {
+  const head = headers.map(renderInline);
+  const body = rows.map((row) => row.map(renderInline));
+  const nums = numberColumns(head.map(htmlText), body.map((r) => r.map(htmlText)));
+  const thead = "<thead><tr>" + head.map((h, c) => `<th${nums.has(c) ? ' class="num"' : ""}>${h}</th>`).join("") + "</tr></thead>";
+  const tbody = "<tbody>" + body.map((row) =>
+    "<tr>" + row.map((cell, c) => {
+      if (nums.has(c)) return `<td class="num">${cell}</td>`;
+      const v = verdictCell(cell);
+      return v ? `<td class="v-${v.tone}">${v.html}</td>` : `<td>${cell}</td>`;
+    }).join("") + "</tr>"
+  ).join("") + "</tbody>";
+  return `<table>${thead}${tbody}</table>`;
+}
+
+/** A top-level list whose every item opens with a bold label (D3), on the
+ *  reader: the label in one column, the text and anything under the item in
+ *  the other. The label's `:`/`.` and a separator after the bold stay in the
+ *  text, hidden (`lg-c`), so a copy keeps them. */
+function labelGridHtml(items: LabelItem[], nest: { children: (RenderedChild[] | undefined)[] }): string {
+  const lis = items.map((it, k) => {
+    const punct = it.punct ? `<span class="lg-c">${escapeHtml(it.punct)}</span>` : "";
+    const sep = it.punct ? (it.sep ? " " : "") : `<span class="lg-c">${escapeHtml(it.sep)}</span>`;
+    const key = `<span class="lg-k"><strong>${renderInline(it.label)}${punct}</strong>${sep}</span>`;
+    return `<li>${key}<div class="lg-v">${itemHtml(it.rest)}${childrenHtml(nest.children[k])}</div></li>`;
+  });
+  return `<ul class="label-grid">${lis.join("")}</ul>`;
+}
+
 /** One labelled row. A command that is one code span renders as a one-line
  *  code block, so the reader's copy button reaches it; anything under the
  *  entry follows as written. (A fence cannot sit this deep; one directly under
@@ -2166,18 +2217,32 @@ const webRenderer: BlockRenderer = {
     return `<${tag}>${renderInline(block.content)}</${tag}>`;
   },
   blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
-  ul: (items, nest) =>
-    `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`,
+  ul: (items, nest) => {
+    const grid = nest.depth === 0 && readerShapesOn()
+      ? labelGridItems(items, (k) => (nest.children[k] ?? []).some((c) => c.kind === "list"))
+      : null;
+    if (grid) return labelGridHtml(grid, nest);
+    return `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`;
+  },
   ol: (items, start, nest) =>
     `<ol${start !== 1 ? ` start="${start}"` : ""}>` +
     items.map((i, k) => `<li${liValue(nest.values, k)}>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("") +
     `</ol>`,
   table(headers, rows) {
+    if (readerShapesOn()) return readerTableHtml(headers, rows);
     const thead = "<thead><tr>" + headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead>";
     const tbody = "<tbody>" + rows.map((row) =>
       "<tr>" + row.map((cell) => `<td>${renderInline(cell)}</td>`).join("") + "</tr>"
     ).join("") + "</tbody>";
     return `<table>${thead}${tbody}</table>`;
+  },
+  inComponent(name, render) {
+    currentComponents.push(name);
+    try {
+      return render();
+    } finally {
+      currentComponents.pop();
+    }
   },
   component(name, attrs, children, rawChildren) {
     switch (name) {

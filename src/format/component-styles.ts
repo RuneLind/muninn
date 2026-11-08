@@ -91,6 +91,33 @@ export function componentBlockCss(scope: string): string {
       vertical-align: top;
     }
     ${scope} .tablewrap th { background: var(--bg-inset); color: var(--text-primary); }
+    /* Reader shapes (reader-shapes.ts, wiki render only): number columns,
+       verdict cells, the bold-label grid. */
+    ${scope} th.num, ${scope} td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    ${scope} td.v-good { background: color-mix(in srgb, var(--status-success) 11%, transparent); }
+    ${scope} td.v-warn { background: color-mix(in srgb, var(--status-warning) 13%, transparent); }
+    ${scope} td.v-bad { background: color-mix(in srgb, var(--status-error) 11%, transparent); }
+    ${scope} :is(td.v-good, td.v-warn, td.v-bad)::before {
+      display: inline-grid; place-items: center; width: 1.3em; height: 1.3em; border-radius: 50%;
+      margin-right: 0.45em; vertical-align: -0.25em; font: 700 0.8em/1 system-ui, sans-serif; color: var(--bg-panel);
+    }
+    ${scope} td.v-good::before { content: "✓"; content: "✓" / ""; background: var(--tone-good); }
+    ${scope} td.v-warn::before { content: "!"; content: "!" / ""; background: var(--tone-warn); }
+    ${scope} td.v-bad::before { content: "✕"; content: "✕" / ""; background: var(--tone-err); }
+    ${scope} .v-glyph, ${scope} .lg-c {
+      position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+      overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+    }
+    ${scope} ul.label-grid { list-style: none; padding-left: 0; margin: 0.7rem 0 1.1rem; border-top: 1px solid var(--border-subtle); }
+    ${scope} ul.label-grid > li {
+      display: grid; grid-template-columns: minmax(8.5rem, 26%) minmax(0, 1fr); column-gap: 1.1rem;
+      margin: 0; padding: 0.5rem 0; border-bottom: 1px solid var(--border-subtle);
+    }
+    ${scope} .lg-k { font-weight: 650; color: var(--text-primary); }
+    ${scope} .lg-k strong { font-weight: inherit; }
+    ${scope} .lg-v > :first-child { margin-top: 0; }
+    ${scope} .lg-v > p, ${scope} .lg-v > pre { margin: 0.3rem 0 0; }
+    @media (max-width: 720px) { ${scope} ul.label-grid > li { grid-template-columns: minmax(0, 1fr); } }
     ${scope} .fileref { color: var(--accent-light); font-family: var(--mono, ui-monospace, monospace); }
     ${scope} .fileref code { background: transparent; box-shadow: none; padding: 0; color: inherit; }
     ${scope} .figure { margin: 1.4rem 0; }

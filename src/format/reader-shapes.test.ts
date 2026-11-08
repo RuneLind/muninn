@@ -1,0 +1,213 @@
+import { describe, expect, test } from "bun:test";
+import { isNumberCell, labelItem, numberColumns, verdictCell } from "./reader-shapes.ts";
+import { formatWebHtml } from "../web/web-format.ts";
+
+describe("isNumberCell", () => {
+  const cases: [string, boolean][] = [
+    ["10,3", true],
+    ["1,662,435", true],
+    ["~17,300", true],
+    ["≈ 4.5", true],
+    ["< 5", true],
+    ["−12", true],
+    ["+3", true],
+    ["$40", true],
+    ["€1.25", true],
+    ["12 345", true],
+    ["790 (just lists, no board)", true],
+    ["~290 (agent skills, ADRs, operational guides, e2e specs)", false],
+    ["27305752256", false],
+    ["1234567", true],
+    ["12%", true],
+    ["3.2 s", true],
+    ["450ms", true],
+    ["3×", true],
+    ["1.2k", true],
+    ["40 MB", true],
+    ["5 files", true],
+    ["12 PRs", true],
+    ["2026", true],
+    ["#782", false],
+    ["D7", false],
+    ["PR 782", false],
+    ["2026-11-08", false],
+    ["1.2.3", false],
+    ["v2", false],
+    ["3–5", false],
+    ["5 apples", false],
+    ["—", false],
+    ["", false],
+    ["yes", false],
+  ];
+  test.each(cases)("%p → %p", (cell, want) => {
+    expect(isNumberCell(cell)).toBe(want);
+  });
+});
+
+describe("numberColumns", () => {
+  const headers = ["Name", "Count", "Year", "Note", "Ms", "PR", "Mixed"];
+  const rows = [
+    ["a", "1,662,435", "2026", "fine", "450ms", "782", "3 s"],
+    ["b", "—", "2025", "12", "—", "790", "12%"],
+    ["c", "~17,300", "2024", "x", "–", "801", "40 MB"],
+  ];
+  const cols = numberColumns(headers, rows);
+  test("a number column, a lone dash skipped", () => expect(cols.has(1)).toBe(true));
+  test("bare years are not a number column", () => expect(cols.has(2)).toBe(false));
+  test("one text cell keeps the column text", () => expect(cols.has(3)).toBe(false));
+  test("dashes and numbers", () => expect(cols.has(4)).toBe(true));
+  test("an id header is never a number column", () => expect(cols.has(5)).toBe(false));
+  test("mixed units, each a number, still number", () => expect(cols.has(6)).toBe(true));
+  test("the first column never", () => expect(numberColumns(["n", "v"], [["1", "2"]]).has(0)).toBe(false));
+  test("an all-dash column is not numeric", () => expect(numberColumns(["n", "v"], [["a", "—"], ["b", "-"]]).size).toBe(0));
+  test("a year beside a non-year number is numeric", () => expect(numberColumns(["n", "v"], [["a", "2026"], ["b", "17"]]).has(1)).toBe(true));
+});
+
+describe("verdictCell", () => {
+  test.each([
+    ["✅ good", "good"],
+    ["✔️ ok", "good"],
+    ["✔ ok", "good"],
+    ["🟢 up", "good"],
+    ["⚠️ meh", "warn"],
+    ["⚠ meh", "warn"],
+    ["🟡 slow", "warn"],
+    ["❌ no", "bad"],
+    ["✗ no", "bad"],
+    ["🔴 down", "bad"],
+    ["<strong>❌</strong> bad", "bad"],
+  ])("%p → %p", (html, tone) => {
+    expect(verdictCell(html)?.tone).toBe(tone as "good");
+  });
+  test("the glyph stays as hidden text", () => {
+    expect(verdictCell("✅ good")!.html).toBe('<span class="v-glyph">✅ </span>good');
+  });
+  test("a glyph mid-cell is not a verdict", () => {
+    expect(verdictCell("works ✅")).toBeNull();
+  });
+  test("a glyph in a code span is not a verdict", () => {
+    expect(verdictCell("<code>✅</code> x")).toBeNull();
+  });
+});
+
+describe("labelItem (D3)", () => {
+  test.each([
+    ["**Label:** text", "Label", ":", "text"],
+    ["**Label.** text", "Label", ".", "text"],
+    ["**Label**: text", "Label", "", "text"],
+    ["**Label** — text", "Label", "", "text"],
+  ])("%p", (item, label, punct, rest) => {
+    expect(labelItem(item)).toMatchObject({ label, punct, rest });
+  });
+  test.each([
+    "**Markdown with a renderer**, which reads it",
+    "**Label:**",
+    "**Label**:  ",
+    "**Label** text",
+    "plain **Label:** text",
+    "**a** and **b:** text",
+    "**Label** – text",
+  ])("%p is no label item", (item) => {
+    expect(labelItem(item)).toBeNull();
+  });
+});
+
+const TABLE = [
+  "| Option | Cost | Year | Verdict |",
+  "|---|---|---|---|",
+  "| A | 1,662,435 | 2026 | ✅ good |",
+  "| B | — | 2025 | works ❌ mid-cell |",
+  "| C | ~17,300 | 2024 | ⚠️ meh |",
+].join("\n");
+const LABELS = ["- **One:** first", "- **Two.** second", "- **Three**: third"].join("\n");
+const PAGE = `${TABLE}\n\n${LABELS}\n`;
+
+describe("formatWebHtml reader shapes", () => {
+  const reader = formatWebHtml(PAGE, { reader: true });
+  test("number column on th and td", () => {
+    expect(reader).toContain('<th class="num">Cost</th>');
+    expect(reader).toContain('<td class="num">1,662,435</td>');
+    expect(reader).toContain('<td class="num">—</td>');
+    expect(reader).toContain("<th>Year</th>");
+    expect(reader).toContain("<td>2026</td>");
+  });
+  test("verdict cells tinted, mid-cell glyph not", () => {
+    expect(reader).toContain('<td class="v-good"><span class="v-glyph">✅ </span>good</td>');
+    expect(reader).toContain('<td class="v-warn"><span class="v-glyph">⚠️ </span>meh</td>');
+    expect(reader).toContain("<td>works ❌ mid-cell</td>");
+  });
+  test("label grid, separators hidden not deleted", () => {
+    expect(reader).toContain(
+      '<ul class="label-grid"><li><span class="lg-k"><strong>One<span class="lg-c">:</span></strong> </span><div class="lg-v">first</div></li>',
+    );
+    expect(reader).toContain('<strong>Three</strong><span class="lg-c">: </span></span><div class="lg-v">third</div>');
+  });
+
+  test("chat renders byte-identical to the plain renderer", () => {
+    const plainTable =
+      "<table><thead><tr><th>Option</th><th>Cost</th><th>Year</th><th>Verdict</th></tr></thead><tbody>" +
+      "<tr><td>A</td><td>1,662,435</td><td>2026</td><td>✅ good</td></tr>" +
+      "<tr><td>B</td><td>—</td><td>2025</td><td>works ❌ mid-cell</td></tr>" +
+      "<tr><td>C</td><td>~17,300</td><td>2024</td><td>⚠️ meh</td></tr></tbody></table>";
+    const plainList = "<ul><li><strong>One:</strong> first</li><li><strong>Two.</strong> second</li><li><strong>Three</strong>: third</li></ul>";
+    const chat = formatWebHtml(PAGE);
+    expect(chat).toBe(`${plainTable}\n${plainList}`);
+    expect(formatWebHtml(PAGE, { reader: false })).toBe(chat);
+    for (const cls of ["num", "v-good", "v-glyph", "label-grid", "lg-k"]) expect(chat).not.toContain(cls);
+  });
+
+  test("a list with one non-matching item draws no grid", () => {
+    const html = formatWebHtml("- **One:** a\n- **Two**, which b\n- **Three:** c\n", { reader: true });
+    expect(html).not.toContain("label-grid");
+  });
+  test("a list item with a nested list disqualifies the list", () => {
+    const html = formatWebHtml("- **One:** a\n  - sub\n- **Two:** b\n- **Three:** c\n", { reader: true });
+    expect(html).not.toContain("label-grid");
+  });
+  test("a two-item list draws no grid", () => {
+    expect(formatWebHtml("- **One:** a\n- **Two:** b\n", { reader: true })).not.toContain("label-grid");
+  });
+  test("a nested label list inside an ordinary item stays bullets", () => {
+    const html = formatWebHtml("- top\n  - **A:** a\n  - **B:** b\n", { reader: true });
+    expect(html).not.toContain("label-grid");
+  });
+  test("a loose item's later paragraph lands in the text column", () => {
+    const html = formatWebHtml("- **One:** a\n\n  more\n\n- **Two:** b\n\n- **Three:** c\n", { reader: true });
+    expect(html).toContain('<div class="lg-v">a<p>more</p></div>');
+  });
+
+  test("a table and list inside a Fold are styled", () => {
+    const html = formatWebHtml(`<Fold title="Section">\n\n${PAGE}\n</Fold>\n`, { reader: true });
+    expect(html).toContain('<td class="num">1,662,435</td>');
+    expect(html).toContain('class="v-good"');
+    expect(html).toContain("label-grid");
+  });
+  test("a table inside a ComparisonTable is styled", () => {
+    const html = formatWebHtml(`<ComparisonTable>\n\n${TABLE}\n\n</ComparisonTable>\n`, { reader: true });
+    expect(html).toContain('<div class="tablewrap">');
+    expect(html).toContain('<td class="num">1,662,435</td>');
+    expect(html).toContain('class="v-good"');
+  });
+  test("a table inside a Chart is untouched", () => {
+    const md = '<Chart kind="bars" value="Cost">\n\n| Run | Cost |\n|---|---|\n| a | 30 |\n| b | 45 |\n\n</Chart>\n';
+    const html = formatWebHtml(md, { reader: true });
+    expect(html).toContain("<td>30</td>");
+    expect(html).not.toContain('class="num"');
+  });
+  test("a list inside a Question card draws no grid", () => {
+    const md = `<Question id="O1">\n\nWhich one?\n\n${LABELS}\n\n</Question>\n`;
+    const html = formatWebHtml(md, { reader: true });
+    expect(html).toContain("<strong>One:</strong> first");
+    expect(html).not.toContain("label-grid");
+  });
+  test("a table inside a Callout is untouched, and a Fold inside it too", () => {
+    const md = `<Callout tone="info">\n\n<Fold title="x">\n\n${TABLE}\n\n</Fold>\n\n</Callout>\n`;
+    const html = formatWebHtml(md, { reader: true });
+    expect(html).not.toContain('class="num"');
+    expect(html).not.toContain("v-good");
+  });
+  test("after a component closes, the page's next table is styled again", () => {
+    const md = `<Callout tone="info">\n\nbody\n\n</Callout>\n\n${TABLE}\n`;
+    expect(formatWebHtml(md, { reader: true })).toContain('<td class="num">1,662,435</td>');
+  });
+});
