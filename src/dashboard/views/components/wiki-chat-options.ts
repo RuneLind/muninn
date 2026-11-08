@@ -145,7 +145,9 @@ export interface ChatOptPostResult {
 }
 
 /**
- * Everything the dialog needs from the reader shell. Declared with METHOD syntax
+ * Everything the dialog needs from the reader, wired by the shell's `boot()`: four
+ * Ask-controller members (the turns, the POST, the escalate bar), the open page
+ * (shell) and its outgoing titles (article controller). Declared with METHOD syntax
  * so an Ask-controller function typed on the richer `AskTurn` still satisfies it.
  *
  * Method syntax means those parameters are checked BIVARIANTLY, so the Ask controller's
