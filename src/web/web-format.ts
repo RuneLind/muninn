@@ -25,10 +25,11 @@ import {
   taskListRows,
   componentBlocks,
 } from "../format/markdown-ast.ts";
-import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
+import type { Block, ChecklistList, ChecklistRow, ComponentName, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
 import { withoutComponentTags } from "../format/component-observer.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+import { htmlText, labelGridItems, numberCellHtml, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
 import { questionCardAnchor, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
@@ -261,6 +262,12 @@ export function formatWebHtml(
      *  classes and DecisionLog items their state. Absent (chat) ⇒ neither,
      *  since the chat sanitizer drops a class it does not allow. */
     reader?: boolean;
+    /** With `reader`: the render lands in the reader's article
+     *  (`.wiki-article`), so a plain table and list take the reader shapes
+     *  (`reader-shapes.ts`). `componentBlockCss` also styles them under
+     *  `.web-content` and `.answer-body`, which never receive the classes.
+     *  `renderWikiHtml` passes it for `GET /api/wiki/page` alone. */
+    readerShapes?: boolean;
     /** The wiki's `.wiki-reader.json` `language`: the `<More>` label and the
      *  `<StatusRows>` state phrases. Absent ⇒ the question option's, else `en`. */
     language?: QuestionLanguage;
@@ -324,6 +331,8 @@ export function formatWebHtml(
   const prev = currentPageFiles;
   const prevQuestion = currentQuestionPage;
   const prevReader = currentReader;
+  const prevComponents = currentComponents;
+  const prevShapes = currentShapes;
   const prevLanguage = currentLanguage;
   const prevLaneCards = currentLaneCards;
   const prevLinkTexts = currentLinkTexts;
@@ -364,6 +373,8 @@ export function formatWebHtml(
   currentLinkTexts = opts?.wikiLinkTexts;
   currentLinkSources = opts?.wikiLinkSources;
   currentReader = opts?.reader === true;
+  currentComponents = [];
+  currentShapes = currentReader && opts?.readerShapes === true;
   currentItemDates = currentReader ? opts?.itemDates : undefined;
   currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
   try {
@@ -447,6 +458,8 @@ export function formatWebHtml(
     currentPageFiles = prev;
     currentQuestionPage = prevQuestion;
     currentReader = prevReader;
+    currentComponents = prevComponents;
+    currentShapes = prevShapes;
     currentLanguage = prevLanguage;
     currentLaneCards = prevLaneCards;
     currentLinkTexts = prevLinkTexts;
@@ -509,6 +522,25 @@ let currentPageFiles: PageFiles | undefined;
 
 /** `opts.reader` for the call in progress. */
 let currentReader = false;
+
+/** The components the block in progress sits in, outermost first (the
+ *  walker's `inComponent` hook keeps it). */
+let currentComponents: ComponentName[] = [];
+
+/** `opts.reader && opts.readerShapes` for the call in progress. */
+let currentShapes = false;
+
+/** Components that only wrap a section of the page: a table or list in one is
+ *  still the page's own, so the reader shapes reach it. Every other component
+ *  draws its own table or list, or is a card whose body stays as written. */
+const SHAPE_TRANSPARENT: ReadonlySet<ComponentName> = new Set<ComponentName>(["Fold", "More", "Historic", "ComparisonTable", "Figure"]);
+
+/** True when a table or list rendered now takes the reader shapes (number
+ *  columns, verdict cells, the label grid): the reader's article render, outside any
+ *  component but a section wrapper. Chat never does, byte for byte. */
+function readerShapesOn(): boolean {
+  return currentShapes && currentComponents.every((n) => SHAPE_TRANSPARENT.has(n));
+}
 
 /** `opts.views` for the call in progress: `<StatusRows view="tiles">` draws tiles. */
 let currentViews = false;
@@ -2134,6 +2166,50 @@ function runListHtml(list: ChecklistList): string {
     .join("");
 }
 
+/** A pipe table on the reader: number columns (`num`, on the header too) and
+ *  verdict cells (`v-good`/`v-warn`/`v-bad`, the glyph kept as hidden text;
+ *  a traffic light adds `v-light` and keeps its glyph on screen). */
+function readerTableHtml(headers: string[], rows: string[][]): string {
+  const head = headers.map(renderInline);
+  const body = rows.map((row) => row.map(renderInline));
+  const nums = numberColumns(head.map(htmlText), body.map((r) => r.map(htmlText)));
+  const thead = "<thead><tr>" + head.map((h, c) => `<th${nums.has(c) ? ' class="num"' : ""}>${h}</th>`).join("") + "</tr></thead>";
+  const tbody = "<tbody>" + body.map((row) =>
+    "<tr>" + row.map((cell, c) => {
+      if (nums.has(c)) return `<td class="num">${numberCellHtml(cell)}</td>`;
+      const v = verdictCell(cell);
+      return v ? `<td class="v-${v.tone}${v.light ? " v-light" : ""}">${v.html}</td>` : `<td>${cell}</td>`;
+    }).join("") + "</tr>"
+  ).join("") + "</tbody>";
+  return `<table>${thead}${tbody}</table>`;
+}
+
+/** A top-level list whose every item opens with a bold label (D3), on the
+ *  reader: the label in one column, the text and anything under the item in
+ *  the other. The label's `:`/`.` and the `:`/`—`/`–` after the bold stay in the
+ *  text, hidden in flow with `font-size: 0` (`lg-c`), which keeps a
+ *  selection reading `Label — text` as the source does; the spaces around
+ *  them sit outside it only so the visible gap stays. `lg-v` is a span
+ *  (a grid item, so a block box) because the ref links read the noun before
+ *  an id back through inline elements only (`precedingText`). */
+function labelGridHtml(items: LabelItem[], nest: { children: (RenderedChild[] | undefined)[] }): string {
+  const lis = items.map((it, k) => {
+    const punct = it.punct ? `<span class="lg-c">${escapeHtml(it.punct)}</span>` : "";
+    const sep = hiddenSep(it.sep);
+    const key = `<span class="lg-k"><strong>${renderInline(it.label)}${punct}</strong>${sep}</span>`;
+    return `<li>${key}<span class="lg-v">${itemHtml(it.rest)}${childrenHtml(nest.children[k])}</span></li>`;
+  });
+  return `<ul class="label-grid">${lis.join("")}</ul>`;
+}
+
+/** A separator after the bold (`: `, ` — `): its mark hidden, its spaces not
+ *  (one space for any run). Only spaces, as after `**Label:**`: one space. */
+function hiddenSep(sep: string): string {
+  const m = /^(\s*)(\S+)(\s*)$/u.exec(sep);
+  if (!m) return sep ? " " : "";
+  return `${m[1] ? " " : ""}<span class="lg-c">${escapeHtml(m[2]!)}</span>${m[3] ? " " : ""}`;
+}
+
 /** One labelled row. A command that is one code span renders as a one-line
  *  code block, so the reader's copy button reaches it; anything under the
  *  entry follows as written. (A fence cannot sit this deep; one directly under
@@ -2166,18 +2242,37 @@ const webRenderer: BlockRenderer = {
     return `<${tag}>${renderInline(block.content)}</${tag}>`;
   },
   blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
-  ul: (items, nest) =>
-    `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`,
+  ul: (items, nest) => {
+    const grid = nest.depth === 0 && readerShapesOn()
+      ? labelGridItems(
+          items,
+          (k) => (nest.children[k] ?? []).some((c) => c.kind === "list"),
+          // A wikilink counts as its own text, unpadded: the cap reads what the label shows.
+          (label) => peekText(htmlText(renderInline(label))).replace(/\s+/g, " "),
+        )
+      : null;
+    if (grid) return labelGridHtml(grid, nest);
+    return `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`;
+  },
   ol: (items, start, nest) =>
     `<ol${start !== 1 ? ` start="${start}"` : ""}>` +
     items.map((i, k) => `<li${liValue(nest.values, k)}>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("") +
     `</ol>`,
   table(headers, rows) {
+    if (readerShapesOn()) return readerTableHtml(headers, rows);
     const thead = "<thead><tr>" + headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead>";
     const tbody = "<tbody>" + rows.map((row) =>
       "<tr>" + row.map((cell) => `<td>${renderInline(cell)}</td>`).join("") + "</tr>"
     ).join("") + "</tbody>";
     return `<table>${thead}${tbody}</table>`;
+  },
+  inComponent(name, render) {
+    currentComponents.push(name);
+    try {
+      return render();
+    } finally {
+      currentComponents.pop();
+    }
   },
   component(name, attrs, children, rawChildren) {
     switch (name) {

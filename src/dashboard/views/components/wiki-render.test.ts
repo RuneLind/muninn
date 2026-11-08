@@ -111,12 +111,16 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // C4 (Ask to wiki-ask-controller.ts): 809,714 bytes, under the same pin.
 // 2026-11-08, C5 (the article tools, right pane and series editor behind
 // ports): 811,207 bytes (275,384 gzipped); the port reads (`deps.x()`) cost the bytes.
+// 2026-11-08, render-richer PR 2 (reader shapes: number columns, verdict cells, the
+// label grid, in the bundled formatWebHtml): 814,851 bytes (276,668 gzipped); its
+// fix round 1 (id and date headers, traffic lights, the nowrap number span): 816,448 (277,205).
 // 2026-11-08: mermaid in the reader's palette, readable size and the ⤢ view
 // (wiki-mermaid.ts + mermaid-theme.ts): 819,709 bytes (278,693 gzipped); its fix
 // round's categorical colours for every other diagram type: 824,039 (280,294 gzipped);
 // its batch 2 (measured smallest text, the gantt redraw, the header search): 825,630;
 // its batch 3 (dialog sizing, DOM id rescope, redrawn peek and card copies): 829,016 (281,928 gzipped).
-const WIKI_CLIENT_MAX_BYTES = 830_500;
+// Merged with render-richer PR 2 (both sides above): 834,461 bytes (283,849 gzipped).
+const WIKI_CLIENT_MAX_BYTES = 836_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

@@ -67,6 +67,7 @@ Rules and traps about one function stay in their section of the notes; ` [trap]`
 - `<CaseBoard>` and `<DeltaTable>` — tracked cases and run-to-run numbers [trap]
 - `<Tldr>`, `<Timeline>`, `<DecisionLog>`, `<RunChecklist>` — list wrappers [trap]
 - `<Question>` — an open question as an answer card [trap]
+- Reader shapes — number columns, verdict cells, the label grid [trap]
 - Fact-check annotation pair [trap]
 - Write side [trap]
 - Reader interaction layer [trap]

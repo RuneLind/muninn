@@ -400,7 +400,9 @@ export const E2E_PORTS = {
   // Decision triage visibility PR 3: Run now on a server whose pass is on, model off.
   "wiki-decision-run-now": 3199,
   // Mermaid in the reader's palette, readable size and the ⤢ full-window view.
-  "wiki-mermaid-readable": 3200,
+  "wiki-mermaid-readable": 3417,
+  // Wiki render richer PR 2: selection text and ref nouns over the reader shapes.
+  "wiki-reader-shapes": 3200,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

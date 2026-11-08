@@ -100,6 +100,12 @@ export function renderWikiHtml(
     /** The reader's page render: the decision chain view and the PR strip.
      *  Set by `GET /api/wiki/page` alone. */
     views?: boolean;
+    /** The render lands in the reader's article (`.wiki-article`), whose CSS
+     *  styles the reader shapes: number columns, verdict cells, the label grid
+     *  (`reader-shapes.ts`). Set by `GET /api/wiki/page` alone: the gardener
+     *  preview and the What's-new card have no such CSS, and the walkthrough's
+     *  plain text and the component lint read the source's shape. */
+    readerShapes?: boolean;
     /** With `views`: the index's `plan_status` is `proposed`, so a page with
      *  no ledger draws its at-a-glance slate (`pageLedgers`). */
     proposedPlan?: boolean;
@@ -150,6 +156,7 @@ export function renderWikiHtml(
       question: opts?.question,
       idLabels: opts?.idLabels,
       reader: true,
+      ...(opts?.readerShapes ? { readerShapes: true } : {}),
       wikiLinkTexts: linkTexts,
       wikiLinkSources: literal,
       itemDates: itemDateDaysOf(markdown, opts?.today),
