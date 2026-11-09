@@ -78,7 +78,7 @@ const REPORT = [
   "",
 ].join("\n");
 
-const SECOND = ["---", "title: Second page", "---", "", "# Second page", "", "Back to [[phone-report]].", "", para(2), ""].join("\n");
+const SECOND = ["---", "title: Second page", "type: concept", "---", "", "# Second page", "", "Back to [[phone-report]].", "", para(2), ""].join("\n");
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -236,6 +236,82 @@ test.describe("Wiki reader at phone width", () => {
     await expect(page.locator(RAIL)).toBeHidden();
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect((await measure(page)).docScroll).toBe(390);
+  });
+
+  // Review finding 1: the Atlas's nodes carry their own z-index (5 to 7) and
+  // the article pane makes no stacking context, so a selected node was drawn
+  // over the open page list and took its taps.
+  test("390px, Atlas tab: nothing of the Atlas shows through the open rail", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&view=atlas`);
+    const node = page.locator('.wiki-atlas-canvas[data-view="types"] .wiki-atlas-node').first();
+    await expect(node).toBeVisible();
+    await node.click();
+    await expect(page.locator(".wiki-atlas-node.on")).toHaveCount(1);
+    const at = await page.locator(".wiki-atlas-node.on").evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    });
+    await page.locator(TOGGLE).click();
+    await expect(page.locator(RAIL)).toBeVisible();
+    const hit = await page.evaluate(([p, sel]) => document.elementFromPoint((p as { x: number }).x, (p as { y: number }).y)?.closest(sel as string) !== null, [at, RAIL] as const);
+    expect(hit, "the rail is what a tap on the selected node's place reaches").toBe(true);
+    await expect(page.locator(".wiki-atlas-node.on")).toBeHidden();
+  });
+
+  // Review finding 2: the covered article stayed in the tab order, Tab from
+  // the button left the page, and a closed panel dropped focus on <body>.
+  test("390px: focus goes into the open rail, the covered article takes none, and closing returns it to the button", async ({ page }) => {
+    await open(page, 390);
+    const toggle = page.locator(TOGGLE);
+    const inRail = () => page.evaluate((sel) => document.activeElement?.closest(sel) !== null, RAIL);
+    const railId = await page.locator(RAIL).getAttribute("id");
+    expect(railId).toBeTruthy();
+    await expect(toggle).toHaveAttribute("aria-controls", railId!);
+
+    await toggle.click();
+    expect(await inRail(), "focus is in the rail after opening").toBe(true);
+    // The article under the panel is not rendered to the reader or to Tab.
+    await expect(page.locator("#articleWrap")).toBeHidden();
+    await page.keyboard.press("Tab");
+    expect(await inRail(), "Tab stays in the rail").toBe(true);
+
+    await page.locator(".wiki-list-item", { hasText: "Second page" }).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Second page");
+    await expect(toggle, "opening a page returns focus to the button").toBeFocused();
+    await expect(page.locator("#articleWrap")).toBeVisible();
+
+    // Show in list is pressed from the article, which the panel then covers.
+    await page.locator("#wikiLocateBtn").click();
+    await expect(page.locator(RAIL)).toBeVisible();
+    expect(await inRail(), "focus is in the rail after Show in list").toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(toggle, "Escape returns focus to the button").toBeFocused();
+  });
+
+  // Review finding 5: with a menu open and focus on <body>, the panel's Escape
+  // ran first and prevented the menu's own. The menu here is a stand-in with
+  // the role the rail's Group menu and the reader's popovers carry: the rule
+  // under test is "a rendered menu or dialog owns Escape", whoever drew it.
+  test("390px: Escape belongs to an open menu, wherever focus is", async ({ page }) => {
+    await open(page, 390);
+    await page.locator(TOGGLE).click();
+    await expect(page.locator(RAIL)).toBeVisible();
+    await page.locator("#wikiList").evaluate((el) => {
+      el.insertAdjacentHTML("afterbegin", '<div role="menu" id="e2eMenu">menu</div>');
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+    const prevented = await page.evaluate(() => new Promise<boolean>((resolve) => {
+      document.addEventListener("keydown", (e) => resolve(e.defaultPrevented), { once: true });
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    }));
+    expect(prevented, "the panel left the menu's Escape alone").toBe(false);
+    await expect(page.locator(RAIL)).toBeVisible();
+    // With the menu gone, Escape is the panel's again.
+    await page.locator("#e2eMenu").evaluate((el) => el.remove());
+    await page.keyboard.press("Escape");
+    await expect(page.locator(RAIL)).toBeHidden();
   });
 
   test("an open rail does not follow the reader to a wide window", async ({ page }) => {

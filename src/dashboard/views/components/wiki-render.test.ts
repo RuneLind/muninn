@@ -131,6 +131,7 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Fix round 2 batch 2 (opening-bracket class, day.month, unchip scope): 845,569.
 // 2026-11-09, issue #623 (the Pages button and the rail panel's open, close and
 // Escape in wiki-pane-toggle.ts): 846,217 bytes (288,039 gzipped).
+// Its fix round 1 batch 1 (focus into and out of the panel, the menu's Escape): 846,591 (288,093).
 const WIKI_CLIENT_MAX_BYTES = 847_000;
 
 test("wikiClientScript stays under its size pin", async () => {

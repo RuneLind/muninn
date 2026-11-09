@@ -211,7 +211,7 @@ export async function renderWikiPage(opts?: {
 <body${tools ? "" : ` class="${WIKI_READ_SLICE_CLASS}"`}>
   ${renderNav("wiki", { role: opts?.role })}
   <div class="wiki-layout">
-    <div class="wiki-pane">
+    <div class="wiki-pane" id="wikiRailPane">
       <div class="wiki-browse-head">
         ${
           wikiSelector || gardenerLink || boardLink
@@ -362,7 +362,7 @@ export async function renderWikiPage(opts?: {
          (issue #623): the one way to the page list there. LAST child, placed
          in the grid's first row by CSS: the pane rules count children from
          the start (:first-child, :nth-child(2)). -->
-    <div class="wiki-rail-bar"><button class="wiki-focus-exit" id="wikiRailToggle" type="button" data-pane-toggle="rail" aria-expanded="false" title="Show or hide the page list">${SVG_PAGES} Pages</button></div>
+    <div class="wiki-rail-bar"><button class="wiki-focus-exit" id="wikiRailToggle" type="button" data-pane-toggle="rail" aria-controls="wikiRailPane" aria-expanded="false" title="Show or hide the page list">${SVG_PAGES} Pages</button></div>
   </div>
 
   <script>
@@ -3796,8 +3796,8 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
        to any width, so at 390px the article was 0px wide and the document
        scrolled sideways. Here the grid is one column with a 16px gutter: the
        Pages button in the first row, the article in the second. \`.rail-open\`
-       (wiki-pane-toggle.ts) puts the rail in the article's cell, over it, so
-       the article keeps its scroll position underneath. The open rule comes
+       (wiki-pane-toggle.ts) puts the rail in the article's cell and hides
+       the article without removing its box, so it keeps its scroll position. The open rule comes
        after the \`:first-child\` hides, focus mode's and the Atlas tab's
        included: equal specificity, so source order lets the button win in
        those states too. \`e2e/wiki-phone-width.spec.ts\` measures 390, 430,
@@ -3810,7 +3810,11 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
       .wiki-rail-bar { display: flex; grid-row: 1; grid-column: 1; }
       .wiki-layout > .wiki-pane { grid-row: 2; grid-column: 1; }
       .wiki-layout > .wiki-pane:first-child { display: none; }
-      .wiki-layout.rail-open > .wiki-pane:first-child { display: flex; z-index: 1; }
+      .wiki-layout.rail-open > .wiki-pane:first-child { display: flex; }
+      /* Hidden, not covered: the article keeps its box and scroll position
+         but takes no tap or Tab, and nothing in it (the Atlas's nodes carry
+         their own z-index) shows through the list. */
+      .wiki-layout.rail-open > .wiki-pane:nth-child(2) { visibility: hidden; }
       .wiki-rail-resizer { display: none; }
       .wiki-article-wrap { padding: 16px; }
       /* An unbroken URL in prose breaks instead of scrolling the pane. */
