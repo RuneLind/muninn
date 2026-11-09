@@ -126,6 +126,12 @@ const SHORT = [
   "The head went 1561 → 1600 px, the list 7→4 (and 2 → 3).", "", "## Two", "", "b", "",
 ].join("\n");
 
+/** Chips inside brackets and quotes: fix round 2 batch 2's padding mirror. */
+const QUOTES = [
+  "---", "title: Quotes page", "type: plan", "---", "", "# Quotes page", "", "## One", "", "a", "",
+  "The allowlist (113 → 57) and «105 → 15» here.", "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let base = "";
 
@@ -135,6 +141,7 @@ test.beforeAll(async () => {
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, "plans/long.mdx"), LONG, "utf8");
   await writeFile(path.join(root, "plans/short.mdx"), SHORT, "utf8");
+  await writeFile(path.join(root, "plans/quotes.mdx"), QUOTES, "utf8");
   await writeFile(path.join(root, "plans/foot.mdx"), FOOT, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -297,6 +304,40 @@ test.describe("chip before punctuation", () => {
     expect(got.gaps.map((g) => [g.text, g.punct])).toEqual([["1561 → 1600 px", ","], ["7→4", " "], ["2 → 3", ")"]]);
     for (const g of got.gaps) if (g.punct !== " ") expect(g.gap).toBeLessThan(1);
     expect(got.selection).toBe("The head went 1561 → 1600 px, the list 7→4 (and 2 → 3).");
+  });
+});
+
+test.describe("chip inside brackets and quotes", () => {
+  test("a chip right after ( or « and right before ) or » leaves no padding gap on either side", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/quotes.mdx")}&lens=all`);
+    await expect(page.locator(".wiki-article .ba-chip").first()).toBeVisible();
+    const got = await page.evaluate(() => {
+      // One glyph's rect: padding shows as distance between glyphs.
+      const glyph = (node: Text, at: number) => {
+        const r = document.createRange();
+        r.setStart(node, at);
+        r.setEnd(node, at + 1);
+        return r.getBoundingClientRect();
+      };
+      return Array.from(document.querySelectorAll(".wiki-article .ba-chip")).map((chip) => {
+        const prev = chip.previousSibling as Text;
+        const next = chip.nextSibling as Text;
+        const first = chip.querySelector(".ba-old")!.firstChild as Text;
+        const last = chip.querySelector(".ba-new")!.firstChild as Text;
+        return {
+          text: `${prev.data.slice(-1)}${chip.textContent}${next.data[0]}`,
+          left: glyph(first, 0).left - glyph(prev, prev.length - 1).right,
+          right: glyph(next, 0).left - glyph(last, last.length - 1).right,
+        };
+      });
+    });
+    console.log(got.map((g) => `${g.text} left=${g.left.toFixed(2)}px right=${g.right.toFixed(2)}px`).join("\n"));
+    expect(got.map((g) => g.text)).toEqual(["(113 → 57)", "«105 → 15»"]);
+    for (const g of got) {
+      expect(g.left).toBeLessThan(1);
+      expect(g.right).toBeLessThan(1);
+    }
   });
 });
 

@@ -146,6 +146,7 @@ export function componentBlockCss(scope: string): string {
       background: color-mix(in srgb, var(--accent) 10%, transparent);
     }
     ${scope} .ba-chip-p { padding-right: 0; }
+    ${scope} .ba-chip-o { padding-left: 0; }
     ${scope} .ba-old { color: var(--text-soft); }
     ${scope} .ba-arr { color: var(--accent-light); padding: 0 0.15em; }
     ${scope} .ba-new { font-weight: 650; }

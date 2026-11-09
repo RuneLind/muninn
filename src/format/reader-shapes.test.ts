@@ -404,7 +404,7 @@ describe("reader shapes reach the article render only", () => {
 
 /** Each chip's visible text, in order. */
 function chipTexts(html: string): string[] {
-  const re = /<span class="ba-chip(?: ba-chip-p)?">((?:(?!<span class="ba-chip)[\s\S])*?<span class="ba-new">[^<]*<\/span>)<\/span>/g;
+  const re = /<span class="ba-chip(?: ba-chip-[op])*">((?:(?!<span class="ba-chip)[\s\S])*?<span class="ba-new">[^<]*<\/span>)<\/span>/g;
   return [...html.matchAll(re)].map((m) => m[1]!.replace(/<[^>]*>/g, ""));
 }
 
@@ -511,6 +511,16 @@ describe("before → after chips: the matcher", () => {
     ["latency 120 → 80ms/req", ["120 → 80ms"]],
     ["latency 120 → 80 ms/request", ["120 → 80 ms"]],
     ["10 → 20 tokens/turn", ["10 → 20 tokens"]],
+    // Fix round 2 batch 2: a loose day.month is a date only beside a side
+    // whose day is past 12 with a two-digit month; else it is a decimal.
+    ["1.5 → 2.10", ["1.5 → 2.10"]],
+    ["2.5 → 3.10", ["2.5 → 3.10"]],
+    ["13.5 → 14.5", ["13.5 → 14.5"]],
+    ["9.12 → 1.1", ["9.12 → 1.1"]],
+    ["1.1 → 24.12", []],
+    ["31.12 → 1.1", []],
+    ["13.5 → 14.10", []],
+    ["3.10 → 4.10", []],
   ];
   for (const [text, want] of cases) {
     test(JSON.stringify(text), () => expect(chipTexts(beforeAfterChipsHtml(text))).toEqual(want));
@@ -622,6 +632,40 @@ describe("before → after chips: punctuation right after a chip", () => {
   test.each([["went 7→4 then"], ["went 7→4 (then)"], ["went 7→4"], ["went 7→4 and, then"]])("%p: padding kept", (html) => {
     expect(tight(html)).toEqual(['<span class="ba-chip">']);
   });
+  // Fix round 2 batch 2: closing quotes and the rest of the class.
+  test.each([
+    ["«went 105 → 15» then", "»"],
+    ["“went 105 → 15” then", "”"],
+    ["‘went 105 → 15’ then", "’"],
+    ["went 7→4: then", ":"],
+    ["went 7→4! Then", "!"],
+    ["went 7→4? Then", "?"],
+    ["[went 7→4] then", "]"],
+    ["went 7→4… then", "…"],
+    ['went <a href="https://x.example">7→4</a>, then', "after a link's closing tag"],
+  ])("%p: the chip drops its right padding (%s)", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip ba-chip-p">']);
+  });
+  test.each([
+    ["went (7→4 then", "("],
+    ["went [7→4 then", "["],
+    ["went «7→4 then", "«"],
+    ["went “7→4 then", "“"],
+    ["went ‘7→4 then", "‘"],
+    ["went (<strong>7→4</strong> then", "past an opening tag"],
+    ['went (<a href="https://x.example">7→4</a> then', "past a link's opening tag"],
+  ])("%p: the chip drops its left padding (%s)", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip ba-chip-o">']);
+  });
+  test.each([["went (113 → 57)"], ["went «105 → 15»"], ["went [<em>7→4</em>]"]])("%p: both sides drop", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip ba-chip-o ba-chip-p">']);
+  });
+  test.each([["went ( 7→4 then"], ["went x7 → 4"], ['went <a href="(">7→4</a> then'], ["went (a) 7→4 then"]])(
+    "%p: left padding kept",
+    (html) => {
+      expect(tight(html).every((t) => !t.includes("ba-chip-o"))).toBe(true);
+    },
+  );
   test("the text is unchanged: the class is the only addition", () => {
     const out = beforeAfterChipsHtml("went 10 → 6 min, then (1 → 2).");
     expect(out.replace(/<[^>]*>/g, "")).toBe("went 10 → 6 min, then (1 → 2).");

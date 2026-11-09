@@ -261,15 +261,20 @@ function precedingText(node: Text): string {
 
 /** A before → after chip (`reader-shapes.ts`) splits its text node, and
  *  `findRefs` reads one text node: a quoted section title holding a chip
- *  (`see «Cut 12 → 9 ms»`) gets its chip back as plain text so it links. */
-function unchipTitleQuotes(root: Element, titles: ReadonlySet<string>): void {
+ *  (`see «Cut 12 → 9 ms»`) gets its chip back as plain text so it links.
+ *  Only where the walker below would link it: outside {@link SKIP}, and not
+ *  inside the section the quote names. */
+function unchipTitleQuotes(root: Element, titles: ReadonlyMap<string, Element>): void {
+  const keys = new Set(titles.keys());
   for (const chip of Array.from(root.querySelectorAll(".ba-chip"))) {
-    const parent = chip.parentNode;
-    if (!parent) continue;
+    const parent = chip.parentElement;
+    if (!parent || parent.closest(SKIP)) continue;
     let start = 0;
     for (let n = parent.firstChild; n && n !== chip; n = n.nextSibling) start += (n.textContent ?? "").length;
     const end = start + (chip.textContent ?? "").length;
-    const quoted = findRefs(parent.textContent ?? "", new Set(), titles).some((m) => m.start < start && m.end > end);
+    const quoted = findRefs(parent.textContent ?? "", new Set(), keys).some(
+      (m) => m.start < start && m.end > end && !titles.get(m.key)!.contains(parent),
+    );
     if (!quoted) continue;
     chip.replaceWith(chip.textContent ?? "");
     parent.normalize();
@@ -292,7 +297,7 @@ export function linkRefs(root: Element, idLabels?: IdLabels): number {
   if (!ids.size && !titles.size) return 0;
   const idKeys = new Set(ids.keys());
   const titleKeys = new Set(titles.keys());
-  if (titleKeys.size) unchipTitleQuotes(root, titleKeys);
+  if (titleKeys.size) unchipTitleQuotes(root, titles);
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (n) => (n.parentElement?.closest(SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
   });

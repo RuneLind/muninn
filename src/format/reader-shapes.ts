@@ -344,10 +344,18 @@ function chipUnit(unit: string, spaced: boolean): boolean {
  *  (`2025-09`). An en dash range (`10–12`) stays a range. */
 const DATE_RANGE_RE = /^(?:\d{2}|(?:19|20)\d{2})-\d{2}$/;
 /** A day and month with the month's zero optional (`1.1`): a date only next
- *  to a side {@link DAY_MONTH_RE} reads as one (`24.12 → 1.1`). */
+ *  to a side that must be one, a {@link DAY_MONTH_RE} with a day past 12
+ *  (`24.12 → 1.1`); `1.5 → 2.10` stays a decimal pair. */
 const DAY_MONTH_LOOSE_RE = /^(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])$/;
 
-type ChipSide = { bare: boolean; dayMonth: boolean; dayMonthLoose: boolean; integer: boolean; grouped: boolean };
+type ChipSide = {
+  bare: boolean;
+  dayMonth: boolean;
+  dayMonthSure: boolean;
+  dayMonthLoose: boolean;
+  integer: boolean;
+  grouped: boolean;
+};
 
 /** One side as the chip reads it: null unless a number (or a range) with an
  *  optional unit, and not a padded id or date (`006`, `08.11`, `08-24`), a
@@ -364,6 +372,7 @@ function chipSide(side: string): ChipSide | null {
   return {
     bare: !unit,
     dayMonth: one !== undefined && DAY_MONTH_RE.test(one),
+    dayMonthSure: one !== undefined && DAY_MONTH_RE.test(one) && Number(one.split(".")[0]) > 12,
     dayMonthLoose: one !== undefined && DAY_MONTH_LOOSE_RE.test(one),
     integer: one !== undefined && /^[\d \u00A0\u202F]+$/.test(one),
     grouped: one !== undefined && /[ \u00A0\u202F]/.test(one),
@@ -371,8 +380,9 @@ function chipSide(side: string): ChipSide | null {
 }
 
 /** A candidate chain's sides and the arrows between them; null when a side
- *  is no number ({@link chipSide}) or every side is a bare day and month, one
- *  of them with a two-digit month (`15.09 → 16.09`, `24.12 → 1.1`). */
+ *  is no number ({@link chipSide}) or every side is a bare day and month with
+ *  a two-digit month (`15.09 → 16.09`), or with the month's zero optional
+ *  beside one whose day is past 12 (`24.12 → 1.1`). */
 export function beforeAfterParts(text: string): { sides: string[]; arrows: string[] } | null {
   const chain = readChain(text);
   return chain && { sides: chain.sides, arrows: chain.arrows };
@@ -385,7 +395,8 @@ function readChain(text: string): { sides: string[]; arrows: string[]; read: Chi
   const read = sides.map(chipSide);
   if (read.some((r) => r === null)) return null;
   const ok = read as ChipSide[];
-  if (ok.every((r) => r.bare && r.dayMonthLoose) && ok.some((r) => r.dayMonth)) return null;
+  if (ok.every((r) => r.bare && r.dayMonth)) return null;
+  if (ok.every((r) => r.bare && r.dayMonthLoose) && ok.some((r) => r.dayMonthSure)) return null;
   return { sides, arrows, read: ok };
 }
 
@@ -490,11 +501,17 @@ export function beforeAfterChipsHtml(html: string): string {
       return out;
     })
     .join("");
-  return chipped.replace(CHIP_BEFORE_PUNCT_RE, '<span class="ba-chip ba-chip-p">');
+  return chipped
+    .replace(CHIP_BEFORE_PUNCT_RE, '<span class="ba-chip ba-chip-p">')
+    .replace(CHIP_AFTER_OPEN_RE, '$1<span class="ba-chip ba-chip-o');
 }
 
-/** A chip followed (past any closing tags) by punctuation: it drops its right
- *  padding (`ba-chip-p`), which read as a space before `,` `.` `)` (4.19 px
- *  measured in e2e). A chip's spans hold text only, so `[^<]` or one span. */
+/** A chip followed (past any closing tags) by closing punctuation or a
+ *  closing quote: it drops its right padding (`ba-chip-p`), which read as a
+ *  space before `,` `.` `)` (4.19 px measured in e2e). A chip's spans hold
+ *  text only, so `[^<]` or one span. */
 const CHIP_BEFORE_PUNCT_RE =
-  /<span class="ba-chip">(?=(?:<span class="ba-(?:old|arr|new)">[^<]*<\/span>|[^<])*<\/span>(?:<\/[a-z]+>)*[,.;:!?)\]…])/g;
+  /<span class="ba-chip">(?=(?:<span class="ba-(?:old|arr|new)">[^<]*<\/span>|[^<])*<\/span>(?:<\/[a-z]+>)*[,.;:!?)\]…»”’])/g;
+/** A chip right after an opening bracket or quote (past any opening tags):
+ *  it drops its left padding (`ba-chip-o`), the mirror of `ba-chip-p`. */
+const CHIP_AFTER_OPEN_RE = /([(\[«“‘](?:<[a-z][^>]*>)*)<span class="ba-chip(?=[ "])/g;

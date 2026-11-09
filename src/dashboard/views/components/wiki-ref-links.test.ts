@@ -345,4 +345,11 @@ describe("linkRefs: a quoted section title holding a before → after chip", () 
   test("a quote that names no section keeps its chip", () => {
     expect(linked(md("«Trim 12 → 9 ms»"))).toEqual({ refs: [], chips: ["12 → 9 ms", "3 → 4"] });
   });
+  test("a quote in link text keeps its chip (no ref link goes inside a link)", () => {
+    expect(linked(md("[«Cut 12 → 9 ms»](https://x.example)"))).toEqual({ refs: [], chips: ["12 → 9 ms", "3 → 4"] });
+  });
+  test("a quote inside the section it names keeps its chip (a section never links to itself)", () => {
+    const own = '<Fold title="Cut 12 → 9 ms">\n\nSee «Cut 12 → 9 ms» here.\n\n</Fold>\n\n## A\n\nx\n\n## B\n\ny\n';
+    expect(linked(own)).toEqual({ refs: [], chips: ["12 → 9 ms"] });
+  });
 });
