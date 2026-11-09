@@ -22,6 +22,9 @@ export const RAIL_WIDTH_MAX = 560;
  *  whichever applies. */
 export const RAIL_WIDTH_DEFAULT = 300;
 export const RAIL_WIDTH_DEFAULT_NARROW = 260;
+/** At or under this viewport width the rail has no column: it is a panel over
+ *  the article, opened by the Pages button (issue #623). */
+export const RAIL_DRAWER_MAX = 768;
 /** Pixels one arrow-key press moves the rail. */
 export const RAIL_WIDTH_KEY_STEP = 16;
 /** Toolbar width (the content box of `.wiki-browse-head`, i.e. rail − 26px) at

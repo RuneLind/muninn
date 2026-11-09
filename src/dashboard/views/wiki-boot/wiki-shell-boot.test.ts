@@ -379,8 +379,10 @@ describe("wiki-browser.ts — listener order", () => {
       "document focusout 78yv1", "document keydown capture 3m8dl", "window resize 9x9xn",
       "#wikiRailResizer pointerdown s1ktq", "#wikiRailResizer pointermove 2zrwk", "#wikiRailResizer pointerup 2ipmi",
       "#wikiRailResizer pointercancel 2ipmi", "#wikiRailResizer lostpointercapture 2ipmi",
-      "#wikiRailResizer dblclick 2ix69", "#wikiRailResizer keydown 1hhyy", "document click 29t84",
-      "document keydown 25kek", "#staleBody toggle capture 2a2m2", "document keydown 3nsjp",
+      "#wikiRailResizer dblclick 2ix69", "#wikiRailResizer keydown 1hhyy",
+      // Issue #623: the rail panel closes on Back/Forward and on leaving the narrow width.
+      "window popstate 3fyct", "[object eventtarget] change 1g0ma", "document click 1wxv0",
+      "document keydown 1wnp1", "#staleBody toggle capture 2a2m2", "document keydown 3nsjp",
       "window scroll capture p45k6", "window resize 2km4o", "document click 1bnhl", "document submit 3msp4",
       "document mouseover 1czfm", "document mouseout 2u68x", "document focusin 3ui45", "document change 1cb94",
       "document keydown capture 2pgt9", "document keydown 2gxm7", "document keydown 1hysz", "body click 20r2i",

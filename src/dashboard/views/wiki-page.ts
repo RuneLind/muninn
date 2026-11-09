@@ -31,6 +31,7 @@ import {
   RAIL_TOOLBAR_COMPACT,
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_DEFAULT_NARROW,
+  RAIL_DRAWER_MAX,
 } from "./components/wiki-rail-width.ts";
 import { STRIP_WIDTH } from "./components/wiki-panes.ts";
 import {
@@ -72,6 +73,7 @@ const SVG_ASK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11
 const SVG_FOCUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>';
 const SVG_FILTER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8.5V19l-4-2v-3.5z"/></svg>';
 const SVG_OPTIONS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h10M18 7h3M3 17h3M11 17h10"/><circle cx="15.5" cy="7" r="2.5"/><circle cx="8.5" cy="17" r="2.5"/></svg>';
+const SVG_PAGES = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>';
 const SVG_FOCUS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>';
 
 /**
@@ -209,7 +211,7 @@ export async function renderWikiPage(opts?: {
 <body${tools ? "" : ` class="${WIKI_READ_SLICE_CLASS}"`}>
   ${renderNav("wiki", { role: opts?.role })}
   <div class="wiki-layout">
-    <div class="wiki-pane">
+    <div class="wiki-pane" id="wikiRailPane">
       <div class="wiki-browse-head">
         ${
           wikiSelector || gardenerLink || boardLink
@@ -356,6 +358,11 @@ export async function renderWikiPage(opts?: {
         <div class="wiki-ask-history" id="wikiAskHistory"></div>
       </div>
     </div>
+    <!-- Shown only at or under RAIL_DRAWER_MAX, where the rail has no column
+         (issue #623): the one way to the page list there. LAST child, placed
+         in the grid's first row by CSS: the pane rules count children from
+         the start (:first-child, :nth-child(2)). -->
+    <div class="wiki-rail-bar"><button class="wiki-focus-exit" id="wikiRailToggle" type="button" data-pane-toggle="rail" aria-controls="wikiRailPane" aria-expanded="false" title="Show or hide the page list">${SVG_PAGES} Pages</button></div>
   </div>
 
   <script>
@@ -448,6 +455,7 @@ function buildWikiPageCss(): string {
        the pane's top-right sat on Share/Discuss (measured in review). */
     .wiki-focus-bar { display: none; justify-content: flex-end; padding: 6px 12px 0; flex-shrink: 0; }
     .wiki-layout.focus-mode .wiki-focus-bar { display: flex; }
+    .wiki-rail-bar { display: none; }
     .wiki-focus-exit {
       display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 3px 6px; border-radius: 6px;
       border: 1px solid var(--border-primary); background: var(--bg-panel); white-space: nowrap;
@@ -3783,6 +3791,37 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
       .wiki-layout, .wiki-layout.right-collapsed { grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT_NARROW}px) minmax(0, 1fr); }
       .wiki-layout.atlas-full, .wiki-layout.focus-mode { grid-template-columns: minmax(0, 1fr); }
       .wiki-conn-pane { display: none; }
+    }
+    /* Phone and small tablet (issue #623): the rail kept its 260px column down
+       to any width, so at 390px the article was 0px wide and the document
+       scrolled sideways. Here the grid is one column with a 16px gutter: the
+       Pages button in the first row, the article in the second. \`.rail-open\`
+       (wiki-pane-toggle.ts) puts the rail in the article's cell and hides
+       the article without removing its box, so it keeps its scroll position. The open rule comes
+       after the \`:first-child\` hides, focus mode's and the Atlas tab's
+       included: equal specificity, so source order lets the button win in
+       those states too. \`e2e/wiki-phone-width.spec.ts\` measures 390, 430,
+       600 and 768px. */
+    @media (max-width: ${RAIL_DRAWER_MAX}px) {
+      /* \`.right-collapsed\` is named because the 1100px block gives it a rail
+         column at this specificity; focus mode's and the Atlas tab's rule
+         there is already this one column. */
+      .wiki-layout, .wiki-layout.right-collapsed {
+        grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr);
+        row-gap: 8px; padding: 16px;
+      }
+      .wiki-rail-bar { display: flex; grid-row: 1; grid-column: 1; }
+      .wiki-layout > .wiki-pane { grid-row: 2; grid-column: 1; }
+      .wiki-layout > .wiki-pane:first-child { display: none; }
+      .wiki-layout.rail-open > .wiki-pane:first-child { display: flex; }
+      /* Hidden, not covered: the article keeps its box and scroll position
+         but takes no tap or Tab, and nothing in it (the Atlas's nodes carry
+         their own z-index) shows through the list. */
+      .wiki-layout.rail-open > .wiki-pane:nth-child(2) { visibility: hidden; }
+      .wiki-rail-resizer { display: none; }
+      .wiki-article-wrap { padding: 16px; }
+      /* An unbroken URL in prose breaks instead of scrolling the pane. */
+      .wiki-article { overflow-wrap: break-word; }
     }
     ${agentPresenceStyles()}
     ${shareDialogStyles()}

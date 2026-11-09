@@ -129,7 +129,12 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Merged with the mermaid PR (#833, both sides above): 844,882 bytes (287,616 gzipped).
 // PR 3's fix round 1 batch 4 (the chip's punctuation class): 845,061 (287,697).
 // Fix round 2 batch 2 (opening-bracket class, day.month, unchip scope): 845,569.
-const WIKI_CLIENT_MAX_BYTES = 846_000;
+// 2026-11-09, issue #623 (the Pages button and the rail panel's open, close and
+// Escape in wiki-pane-toggle.ts): 846,217 bytes (288,039 gzipped).
+// Its fix round 1 batch 1 (focus into and out of the panel, the menu's Escape): 846,591 (288,093).
+// Batch 2 (closing on Back, on an effort link and on leaving the narrow width): 846,727 (288,154).
+// Fix round 2 batch 1 (an Escape a menu already took, closing on the way to the start view): 846,684 (288,157).
+const WIKI_CLIENT_MAX_BYTES = 847_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -161,7 +166,9 @@ test("wikiClientScript stays under its size pin", async () => {
 // `RailDeps` relays gone): 3,450 lines; 51 lets.
 // 2026-11-08, render-richer PR 3: the section bar's import and its one mount
 // call after each page render (the bar lives in `wiki-section-bar.ts`): 3,452.
-const WIKI_BROWSER_MAX_LINES = 3_452;
+// 2026-11-09, issue #623: `closeRailPanel()` in `loadPageByRelPath`, where a
+// rail row's click lands, and in `goToStart`, where its footer link does: 3,454.
+const WIKI_BROWSER_MAX_LINES = 3_454;
 const WIKI_BROWSER_MAX_MODULE_LETS = 51;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {
@@ -219,12 +226,14 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // shell's 9 article lets and 2 series lets, plus each one's `deps`).
 // 2026-11-08, follow-up: the work-map cache's 5 lets out of the effort
 // controller (333 / 8 → 235 / 3) into `wiki-work-map-cache.ts`; the rail 2,298.
+// 2026-11-09, issue #623: the effort controller 235 → 237, for `closeRailPanel()`
+// in `renderEffort` and its import (an effort opened from the rail panel).
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_298, 16],
   ["wiki-shell-state.ts", 50, 3],
   ["wiki-status-pills.ts", 29, 0],
   ["wiki-stale-controller.ts", 509, 18],
-  ["wiki-effort-controller.ts", 235, 3],
+  ["wiki-effort-controller.ts", 237, 3],
   ["wiki-work-map-cache.ts", 124, 5],
   ["wiki-menus-controller.ts", 638, 2],
   ["wiki-ask-controller.ts", 2_503, 10],

@@ -160,8 +160,10 @@ const WIDE_PAGE = [
 
 /**
  * A drawing whose legibility floor (`ceil(600 × 8.5 / 12)` = 425 px) sits
- * between the 760 px window's column (~344 px) and the 1280 px one's (~508
- * px): it fills the wide column and scrolls in the narrow one. Its views put
+ * between the 780 px window's column and the 1280 px one's (~508 px): it
+ * fills the wide column and scrolls in the narrow one. 780, not narrower: at
+ * or under 768 px the rail has no column (issue #623) and the article is
+ * wider than the floor again. Its views put
  * buttons before the picture, to Tab from.
  */
 const FIT_FLOOR = 425;
@@ -580,8 +582,8 @@ test.describe("Wiki reader: a Diagram fills the column down to its legibility fl
     expect(await tabFromViews(page)).toBe(false);
   });
 
-  test("760: past the column it draws at its floor and scrolls in a focusable named region", async ({ page }) => {
-    await openFit(page, 760);
+  test("780: past the column it draws at its floor and scrolls in a focusable named region", async ({ page }) => {
+    await openFit(page, 780);
     await expect.poll(async () => (await pictureBox(page)).tabIndex).toBe(0);
     const m = await pictureBox(page);
     expect(m.clientW).toBeLessThan(FIT_FLOOR);
@@ -604,7 +606,7 @@ test.describe("Wiki reader: a Diagram fills the column down to its legibility fl
       return { scrolls: m.scrollW > m.clientW, tabIndex: m.tabIndex, role: m.role };
     };
     await expect.poll(stop).toEqual({ scrolls: false, tabIndex: -1, role: null });
-    await page.setViewportSize({ width: 760, height: 900 });
+    await page.setViewportSize({ width: 780, height: 900 });
     await expect.poll(stop).toEqual({ scrolls: true, tabIndex: 0, role: "region" });
     await page.setViewportSize({ width: 1280, height: 900 });
     await expect.poll(stop).toEqual({ scrolls: false, tabIndex: -1, role: null });
@@ -631,12 +633,12 @@ test.describe("Wiki reader: a Diagram fills the column down to its legibility fl
 /**
  * The picture box's keyboard stop across its state space (the table on
  * `syncDiagramStop`, wiki-visuals.ts): one test per row Chromium can reach.
- * The fit drawing's floor (425 px) sits between the 760 px window's column and
- * the 1280 px one's; 700 and 1200 are a second width on each side.
+ * The fit drawing's floor (425 px) sits between the 780 px window's column and
+ * the 1280 px one's; 800 and 1200 are a second width on each side.
  */
 test.describe("Wiki reader: a Diagram picture's keyboard stop across its states", () => {
-  const SCROLLS = 760;
-  const SCROLLS_TOO = 700;
+  const SCROLLS = 780;
+  const SCROLLS_TOO = 800;
   const FITS = 1280;
   const FITS_TOO = 1200;
   const NAME = "Fit map (drawing)";

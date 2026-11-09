@@ -31,6 +31,7 @@ import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 import {
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_DEFAULT_NARROW,
+  RAIL_WIDTH_MIN,
   RAIL_WIDTH_KEY,
   RAIL_WIDTH_KEY_STEP,
   RAIL_WIDTH_MAX,
@@ -373,15 +374,17 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     expect(await railWidth(page)).toBe(after);
   });
 
+  // 800px, not narrower: at or under RAIL_DRAWER_MAX (768) the rail has no
+  // column to bound (issue #623; `wiki-phone-width.spec.ts`).
   test("a width stored on a wide monitor is bounded by a narrow window", async ({ page }) => {
     await open(page);
     await page.evaluate((k) => localStorage.setItem(k, "560"), RAIL_WIDTH_KEY);
-    await page.setViewportSize({ width: 700, height: 900 });
+    await page.setViewportSize({ width: 800, height: 900 });
     await page.reload();
     await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
-    // 45% of 700 = 315: the stored value is bounded at APPLY time, never
+    // 45% of 800 = 360: the stored value is bounded at APPLY time, never
     // rewritten — widening the window again gets the stored width back.
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     await page.setViewportSize({ width: 1400, height: 900 });
     await expect.poll(() => railWidth(page)).toBe(560);
     expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("560");
@@ -424,33 +427,33 @@ test.describe("Wiki rail: full titles + remembered width", () => {
   }) => {
     await open(page);
     await page.evaluate((k) => localStorage.setItem(k, "560"), RAIL_WIDTH_KEY);
-    await page.setViewportSize({ width: 700, height: 900 });
+    await page.setViewportSize({ width: 800, height: 900 });
     await page.reload();
     await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     // Stepping from the STORED 560 moved nothing press after press while
     // rewriting the stored value (measured in review); the base is what is shown.
     // A GROW the bound makes inert must not lower the stored desktop width.
     await page.locator(HANDLE).focus();
     await page.keyboard.press("ArrowRight");
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("560");
-    // The same inert grow by a SHORT drag (to 320, under the stored 560).
+    // The same inert grow by a SHORT drag (to 365, under the stored 560).
     const hb0 = await page.locator(HANDLE).boundingBox();
     if (!hb0) throw new Error("handle not laid out");
     await page.mouse.move(hb0.x + hb0.width / 2, hb0.y + 40);
     await page.mouse.down();
     await page.mouse.move(hb0.x + hb0.width / 2 + 5, hb0.y + 40, { steps: 2 });
     await page.mouse.up();
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("560");
     await page.keyboard.press("ArrowLeft");
-    expect(await railWidth(page)).toBe(315 - RAIL_WIDTH_KEY_STEP);
+    expect(await railWidth(page)).toBe(360 - RAIL_WIDTH_KEY_STEP);
     expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(
-      315 - RAIL_WIDTH_KEY_STEP,
+      360 - RAIL_WIDTH_KEY_STEP,
     );
     // A drag all the way right is a GROW: it stores what was asked for (the
-    // pointer's clamped width, 560) while the bound keeps showing 315 — the same
+    // pointer's clamped width, 560) while the bound keeps showing 360 — the same
     // rule as the arrow keys, so the desktop width is what the reader dragged to.
     const hb = await page.locator(HANDLE).boundingBox();
     if (!hb) throw new Error("handle not laid out");
@@ -458,7 +461,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await page.mouse.down();
     await page.mouse.move(650, hb.y + 40, { steps: 4 });
     await page.mouse.up();
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe(String(RAIL_WIDTH_MAX));
     // And a drag back to a width UNDER the bound is a shrink: stored = shown.
     const hb2 = await page.locator(HANDLE).boundingBox();
@@ -468,7 +471,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await page.mouse.move(hb2.x - 40, hb2.y + 40, { steps: 4 });
     await page.mouse.up();
     const shown = await railWidth(page);
-    expect(shown).toBeLessThan(315);
+    expect(shown).toBeLessThan(360);
     expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(shown);
   });
 
@@ -476,7 +479,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     page,
   }) => {
     await open(page);
-    await page.setViewportSize({ width: 700, height: 900 });
+    await page.setViewportSize({ width: 800, height: 900 });
     await page.reload();
     await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
     const rb = await page.locator(RAIL).boundingBox();
@@ -486,13 +489,13 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     const y = hb.y + 40;
     await page.mouse.move(hb.x + hb.width / 2, y);
     await page.mouse.down();
-    await page.mouse.move(rb.x + 500, y, { steps: 4 }); // out past the bound (shown pins at 315)
-    await page.mouse.move(rb.x + 330, y, { steps: 4 }); // back, still over the bound
+    await page.mouse.move(rb.x + 500, y, { steps: 4 }); // out past the bound (shown pins at 360)
+    await page.mouse.move(rb.x + 380, y, { steps: 4 }); // back, still over the bound
     await page.mouse.up();
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     // The rule is judged against the state at the START of the gesture; fed its
     // own running result it stored the maximum the pointer ever reached (500).
-    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("330");
+    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("380");
   });
 
   test("the hit zone starts at the pane's border: the list's last pixel never starts a drag", async ({
@@ -847,21 +850,30 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     expect(clipped).toEqual([]);
   });
 
-  test("no header-row chip label is clipped, in windows down to 400px", async ({ page }) => {
+  // Until issue #623 this swept windows from 700 to 400 px, where the 45%
+  // bound took the rail from 300 down to 180. Those windows now show the rail
+  // as the Pages panel, so the sweep has two halves: the column from 300 down
+  // to its 260 minimum, and the panel in windows from 700 down to 320.
+  test("no header-row chip label is clipped, at a 300 to 260px rail and in the Pages panel down to a 320px window", async ({ page }) => {
     const clipped: string[] = [];
-    await page.addInitScript(
-      ([key, foldsKey]) => {
-        localStorage.setItem(key as string, "300");
-        localStorage.setItem(foldsKey as string, JSON.stringify(["toggle:families"]));
-      },
-      [RAIL_WIDTH_KEY, `muninn.wiki.folds.v1:${WIKI}`] as const,
-    );
-    for (let vw = 700; vw >= 400; vw -= 20) {
+    const header = page.locator('.wiki-list-group[data-group="family:plans/gone-slate"]');
+    await page.addInitScript((foldsKey) => localStorage.setItem(foldsKey, JSON.stringify(["toggle:families"])), `muninn.wiki.folds.v1:${WIKI}`);
+    await page.setViewportSize({ width: 1000, height: 900 });
+    for (let rail = 300; rail >= RAIL_WIDTH_MIN; rail -= 4) {
+      // Init scripts run in the order added, so the latest width wins.
+      await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, rail] as const);
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+      await expect(header.locator(".wiki-fold-chip-label")).toHaveText("12 superseded");
+      expect(await railWidth(page), `column at ${rail}`).toBe(rail);
+      for (const c of await clippedChips(page)) clipped.push(`${rail}px rail ${c}`);
+    }
+    for (let vw = 700; vw >= 320; vw -= 20) {
       await page.setViewportSize({ width: vw, height: 900 });
       await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
-      const header = page.locator('.wiki-list-group[data-group="family:plans/gone-slate"]');
-      await expect(header).toHaveCount(1);
       await expect(header.locator(".wiki-fold-chip-label")).toHaveText("12 superseded");
+      await page.locator("#wikiRailToggle").click();
+      await expect(header).toBeVisible();
+      expect(await railWidth(page), `panel in a ${vw}px window`).toBe(vw - 32);
       for (const c of await clippedChips(page)) clipped.push(`${vw}px window ${c}`);
     }
     expect(clipped).toEqual([]);

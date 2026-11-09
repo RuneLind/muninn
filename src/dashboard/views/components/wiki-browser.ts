@@ -97,7 +97,7 @@ import {
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
-import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
+import { closeRailPanel, initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
   parseRelatedOrder,
 } from "./wiki-recents.ts";
@@ -767,6 +767,7 @@ function refreshCrumbHref(): void {
  * is the one already there.
  */
 function goToStart(): void {
+  closeRailPanel();
   const target = currentStartUrl();
   // `sameStartUrl` reads an `?effort=` URL as the overview it sits on, so the
   // effort page's way home must push explicitly.
@@ -1602,6 +1603,7 @@ function loadPage(name: string, push: boolean, revealHash = true): void {
  *  `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true, revealHash = true): void {
   hideExplainPill();
+  closeRailPanel();
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
   // The explainer branch is `loadPage`'s, and it has to exist here too now that
