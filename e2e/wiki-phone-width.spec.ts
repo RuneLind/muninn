@@ -351,6 +351,48 @@ test.describe("Wiki reader at phone width", () => {
     await expect(page.locator(RAIL)).toBeHidden();
   });
 
+  // Fix round 2: the rail's Group menu takes its own Escape in a listener on
+  // the list, removes itself and prevents the default without stopping the
+  // event; the panel's handler then saw no menu left and closed the panel
+  // too. The stand-in has that shape (the real menu needs a work-thread
+  // fixture; `wiki-rail-controller.ts`, the list's keydown listener).
+  test("390px: Escape that a menu in the rail already took does not close the panel", async ({ page }) => {
+    await open(page, 390);
+    await page.locator(TOGGLE).click();
+    await expect(page.locator(RAIL)).toBeVisible();
+    await page.locator("#wikiList").evaluate((list) => {
+      list.insertAdjacentHTML("afterbegin", '<div role="menu" id="e2eMenu"><button role="menuitem" id="e2eItem">item</button></div>');
+      list.addEventListener("keydown", (ev) => {
+        const e = ev as KeyboardEvent;
+        if (e.key !== "Escape" || !document.getElementById("e2eMenu")) return;
+        document.getElementById("e2eMenu")!.remove();
+        e.preventDefault();
+      });
+      document.getElementById("e2eItem")!.focus();
+    });
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#e2eMenu")).toHaveCount(0);
+    await expect(page.locator(RAIL), "the menu's Escape leaves the panel open").toBeVisible();
+    await expect(page.locator(TOGGLE)).toHaveAttribute("aria-expanded", "true");
+  });
+
+  // Fix round 2: the footer's coverage link is a rail control that opens the
+  // start view, which rendered under the open panel. The link is painted
+  // only on an instance with the tools flag and a coverage answer, so the
+  // test supplies the element the shell's click delegate looks for.
+  test("390px: the rail's link to the start view closes the panel", async ({ page }) => {
+    await open(page, 390);
+    await page.locator(TOGGLE).click();
+    await page.locator("#wikiCoverageFoot").evaluate((foot) => {
+      (foot as HTMLElement).style.display = "";
+      if (!document.getElementById("wikiCoverageLink")) foot.insertAdjacentHTML("beforeend", '<span id="wikiCoverageLink">2 pages</span>');
+    });
+    await page.locator("#wikiCoverageLink").click();
+    await expect(page.locator(".wiki-start")).toBeVisible();
+    await expect(page.locator(RAIL)).toBeHidden();
+    await expect(page.locator(TOGGLE)).toHaveAttribute("aria-expanded", "false");
+  });
+
   // Review finding 3: only the two page loaders closed the panel, so an
   // effort link in the rail and Back to the start view rendered under it.
   test("390px: an effort link in the rail closes the panel over the effort page", async ({ page }) => {

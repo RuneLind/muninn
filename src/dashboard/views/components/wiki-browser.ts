@@ -767,6 +767,7 @@ function refreshCrumbHref(): void {
  * is the one already there.
  */
 function goToStart(): void {
+  closeRailPanel();
   const target = currentStartUrl();
   // `sameStartUrl` reads an `?effort=` URL as the overview it sits on, so the
   // effort page's way home must push explicitly.

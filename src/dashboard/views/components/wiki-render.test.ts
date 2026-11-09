@@ -133,6 +133,7 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Escape in wiki-pane-toggle.ts): 846,217 bytes (288,039 gzipped).
 // Its fix round 1 batch 1 (focus into and out of the panel, the menu's Escape): 846,591 (288,093).
 // Batch 2 (closing on Back, on an effort link and on leaving the narrow width): 846,727 (288,154).
+// Fix round 2 batch 1 (an Escape a menu already took, closing on the way to the start view): 846,684 (288,157).
 const WIKI_CLIENT_MAX_BYTES = 847_000;
 
 test("wikiClientScript stays under its size pin", async () => {
@@ -166,8 +167,8 @@ test("wikiClientScript stays under its size pin", async () => {
 // 2026-11-08, render-richer PR 3: the section bar's import and its one mount
 // call after each page render (the bar lives in `wiki-section-bar.ts`): 3,452.
 // 2026-11-09, issue #623: `closeRailPanel()` in `loadPageByRelPath`, where a
-// rail row's click lands: 3,453.
-const WIKI_BROWSER_MAX_LINES = 3_453;
+// rail row's click lands, and in `goToStart`, where its footer link does: 3,454.
+const WIKI_BROWSER_MAX_LINES = 3_454;
 const WIKI_BROWSER_MAX_MODULE_LETS = 51;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {

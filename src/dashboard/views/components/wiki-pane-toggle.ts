@@ -185,12 +185,13 @@ export function initPaneToggles(): void {
   document.addEventListener("keydown", (e) => {
     const t = e.target as HTMLElement | null;
     // The rail panel's Escape, from a typing target too (its search box). A
-    // rendered dialog or menu owns its Escape wherever focus is (`modalOpen`:
-    // the Group menu leaves focus on its opener or on the body).
-    if (e.key === "Escape" && layout.classList.contains(RAIL_OPEN) && !modalOpen(document)) {
+    // menu or dialog owns its Escape: one still rendered (`modalOpen`, page
+    // wide, since a menu can leave focus on its opener), and one whose own
+    // handler ran first, removed it and prevented the default (the rail's
+    // Group menu, from a listener on the list).
+    if (e.key === "Escape" && layout.classList.contains(RAIL_OPEN) && !e.defaultPrevented && !modalOpen(document)) {
       if (document.getElementById("wikiRailToggle")?.getClientRects().length) {
         closeRailPanel();
-        document.getElementById("wikiRailToggle")?.focus({ preventScroll: true });
         e.preventDefault();
         return;
       }
