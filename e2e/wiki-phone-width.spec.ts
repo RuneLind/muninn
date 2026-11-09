@@ -32,12 +32,15 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { e2ePort } from "./ports.ts";
+import { PANES_KEY } from "../src/dashboard/views/components/wiki-panes.ts";
 import { RAIL_WIDTH_DEFAULT } from "../src/dashboard/views/components/wiki-rail-width.ts";
 
 const PORT = e2ePort("wiki-phone-width");
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-phone";
+/** A second wiki with a work map, so its rail carries an effort link. */
+const WIKI_MAP = "e2e-phone-map";
 const SHOTS = process.env.WIKI_PHONE_SHOTS ?? "";
 
 const NARROW = [390, 430, 600, 768] as const;
@@ -80,14 +83,36 @@ const REPORT = [
 
 const SECOND = ["---", "title: Second page", "type: concept", "---", "", "# Second page", "", "Back to [[phone-report]].", "", para(2), ""].join("\n");
 
+const HOUR = 3_600_000;
+const mapJson = (runAtMs: number) =>
+  JSON.stringify({
+    version: 1,
+    wiki: WIKI_MAP,
+    runAtMs,
+    model: "test-model",
+    coverage: { sessionsSinceMs: runAtMs - 8 * 24 * HOUR, sessionsAsOfMs: runAtMs, touchWindowDays: 28, activePages: 1, threads: 1, logEntries: 1, digestChars: 1, warnings: [] },
+    summary: "Phone work moves.",
+    needsYou: [],
+    themes: [{ name: "Reader", efforts: ["phone"] }],
+    efforts: [
+      { id: "phone", name: "Phone layout", aliases: [], oneLine: "", state: "active", pages: [{ id: "plans/phone.md", role: "plan" }], why: "", confidence: 0.9, next: "", related: [], daily: [] },
+    ],
+    loose: [],
+  });
+
 let server: ChildProcess | undefined;
 let root = "";
+let rootMap = "";
 
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-phone-"));
   await mkdir(path.join(root, "notes"), { recursive: true });
   await writeFile(path.join(root, "phone-report.md"), REPORT, "utf8");
   await writeFile(path.join(root, "notes", "second-page.md"), SECOND, "utf8");
+  rootMap = await mkdtemp(path.join(tmpdir(), "muninn-e2e-phone-map-"));
+  await mkdir(path.join(rootMap, "plans"), { recursive: true });
+  await writeFile(path.join(rootMap, "plans", "phone.md"), ["---", "title: Phone plan", "type: plan", "---", "", "# Phone plan", "", para(2), ""].join("\n"), "utf8");
+  await writeFile(path.join(rootMap, ".work-map.json"), mapJson(Date.now() - 2 * HOUR), "utf8");
   if (SHOTS) await mkdir(SHOTS, { recursive: true });
 
   await assertPortFree(PORT);
@@ -99,7 +124,8 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root}`,
+      WORK_MAP_WIKIS: "",
+      WIKI_EXTRA: `${WIKI}=${root},${WIKI_MAP}=${rootMap}`,
     },
     stdio: "ignore",
   });
@@ -109,6 +135,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
+  if (rootMap) await rm(rootMap, { recursive: true, force: true });
 });
 
 const RAIL = ".wiki-layout > .wiki-pane:first-child";
@@ -314,7 +341,39 @@ test.describe("Wiki reader at phone width", () => {
     await expect(page.locator(RAIL)).toBeHidden();
   });
 
-  test("an open rail does not follow the reader to a wide window", async ({ page }) => {
+  // Review finding 3: only the two page loaders closed the panel, so an
+  // effort link in the rail and Back to the start view rendered under it.
+  test("390px: an effort link in the rail closes the panel over the effort page", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_MAP}&relPath=${encodeURIComponent("plans/phone.md")}`);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Phone plan");
+    await page.locator(TOGGLE).click();
+    const link = page.locator(`${RAIL} [data-effort-link="phone"]`).first();
+    await expect(link).toBeVisible();
+    await link.click();
+    await expect(page.locator("#wikiEffortPage")).toBeVisible();
+    await expect(page.locator(RAIL)).toBeHidden();
+    await expect(page.locator(TOGGLE)).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("390px: Back to the start view closes the panel", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await expect(page.locator(".wiki-start")).toBeVisible();
+    await page.locator(TOGGLE).click();
+    await page.locator(".wiki-list-item", { hasText: "Second page" }).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Second page");
+    await page.locator(TOGGLE).click();
+    await expect(page.locator(RAIL)).toBeVisible();
+    await page.goBack();
+    await expect(page.locator(".wiki-start")).toBeVisible();
+    await expect(page.locator(RAIL)).toBeHidden();
+    await expect(page.locator(TOGGLE)).toHaveAttribute("aria-expanded", "false");
+  });
+
+  // Review finding 4: `.rail-open` outlived a trip to a wide window, where
+  // nothing could close it, and the panel was open again on the way back.
+  test("a rail opened at 390 is the desktop column at 1440 and is closed back at 390", async ({ page }) => {
     await open(page, 390);
     await page.locator(TOGGLE).click();
     await expect(page.locator(RAIL)).toBeVisible();
@@ -322,6 +381,48 @@ test.describe("Wiki reader at phone width", () => {
     const m = await measure(page);
     expect(m.rail).toEqual({ x: 24, w: RAIL_WIDTH_DEFAULT, shown: true });
     expect(m.pane.x).toBe(24 + RAIL_WIDTH_DEFAULT + 16);
+    await expect(page.locator("#articleWrap")).toBeVisible();
+    // The pane is focusable only as the panel.
+    await expect.soft(page.locator(RAIL)).not.toHaveAttribute("tabindex", /.*/);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator(RAIL)).toBeHidden();
+    await expect(page.locator(TOGGLE)).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator("#articleWrap")).toBeVisible();
+  });
+
+  // Review finding 7: the narrow states the first spec left out. Each has a
+  // wider rule of its own that the narrow block must outrank.
+  test("390px: focus mode, a stored collapsed right pane and the start view keep the one-column layout, and Pages opens in each", async ({ page }) => {
+    const oneColumn = async (label: string) => {
+      const m = await measure(page);
+      expect(m.pane, label).toEqual({ x: GUTTER, w: 390 - 2 * GUTTER });
+      expect(m.docScroll, label).toBe(390);
+      expect(m.rail.shown, label).toBe(false);
+      await page.locator(TOGGLE).click();
+      expect((await measure(page)).rail, label).toEqual({ x: GUTTER, w: 390 - 2 * GUTTER, shown: true });
+      await page.locator(TOGGLE).click();
+      await expect(page.locator(RAIL)).toBeHidden();
+    };
+    await open(page, 390);
+    await page.locator("body").press("f");
+    await expect(page.locator("#wikiFocusExit")).toBeVisible();
+    await oneColumn("focus mode");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiFocusExit")).toBeHidden();
+
+    await page.evaluate((k) => localStorage.setItem(k, "collapsed"), PANES_KEY);
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Phone report");
+    await expect(page.locator(".wiki-layout")).toHaveClass(/right-collapsed/);
+    await oneColumn("right pane collapsed");
+    await page.evaluate((k) => localStorage.removeItem(k), PANES_KEY);
+
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&view=atlas`);
+    await expect(page.locator(".wiki-layout")).toHaveClass(/atlas-full/);
+    await oneColumn("Atlas tab");
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await expect(page.locator(".wiki-start")).toBeVisible();
+    await oneColumn("start view");
   });
 
   test("1440px: the three columns measure what they did before the fix and the toggle is not on screen", async ({ page }) => {

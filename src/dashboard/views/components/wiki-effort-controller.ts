@@ -19,6 +19,7 @@ import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import { abortAgentRuns } from "./wiki-agent-pane.ts";
 import { workMapDoneSet } from "./wiki-start-cards.ts";
 import { statusPillHtml } from "./wiki-status-pills.ts";
+import { closeRailPanel } from "./wiki-pane-toggle.ts";
 import { renderList } from "./wiki-rail-controller.ts";
 import { getWorkMapRunAt, setCurrentName } from "./wiki-shell-state.ts";
 
@@ -121,6 +122,7 @@ function writeEffortPanes(wrap: HTMLElement, article: string, connHtml: string, 
  *  does, with no page behind it. A navigation: it applies a stashed listing
  *  first (as `renderStart`/`loadPage` do), then paints. */
 export function renderEffort(id: string): void {
+  closeRailPanel(); // an effort link in the rail: the page it opens is under the panel
   // A listing stashed while an article was open lands now, before the map is
   // joined to `allPages`; the list is repainted from it like `renderStart` does.
   deps.applyPendingPages();

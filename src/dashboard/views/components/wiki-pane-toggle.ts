@@ -32,6 +32,7 @@
  * The right-pane state persists (localStorage, best-effort like the rail width);
  * focus does not — see the rationale in `wiki-panes.ts`.
  */
+import { RAIL_DRAWER_MAX } from "./wiki-rail-width.ts";
 import { PANES_KEY, modalOpen, paneKeyAction, parseStoredRightCollapsed } from "./wiki-panes.ts";
 
 const RIGHT = "right-collapsed";
@@ -149,6 +150,14 @@ export function initPaneToggles(): void {
     syncButtons();
     window.dispatchEvent(new Event("resize"));
   };
+
+  // The panel is a narrow-window state. Back and Forward render a view under
+  // it whichever loader they reach (a page, the start view, an effort), and a
+  // window grown past the breakpoint has no button left to close it with.
+  window.addEventListener("popstate", closeRailPanel);
+  matchMedia(`(max-width: ${RAIL_DRAWER_MAX}px)`).addEventListener("change", (m) => {
+    if (!m.matches) closeRailPanel();
+  });
 
   // Boot: apply the stored preference before the pane's first paint.
   layout.classList.toggle(RIGHT, readStored());

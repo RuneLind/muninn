@@ -3803,7 +3803,10 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
        those states too. \`e2e/wiki-phone-width.spec.ts\` measures 390, 430,
        600 and 768px. */
     @media (max-width: ${RAIL_DRAWER_MAX}px) {
-      .wiki-layout, .wiki-layout.right-collapsed, .wiki-layout.atlas-full, .wiki-layout.focus-mode {
+      /* \`.right-collapsed\` is named because the 1100px block gives it a rail
+         column at this specificity; focus mode's and the Atlas tab's rule
+         there is already this one column. */
+      .wiki-layout, .wiki-layout.right-collapsed {
         grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr);
         row-gap: 8px; padding: 16px;
       }

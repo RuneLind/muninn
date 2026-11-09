@@ -1573,7 +1573,6 @@ function openNavTarget(target: NavTarget, push: boolean): void {
 
 function loadPage(name: string, push: boolean, revealHash = true): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
-  closeRailPanel();
   // Raised BEFORE anything else: `currentName` is only set from the response, so
   // without this signal the whole round-trip reads as the "start" view and a
   // refetch resolving mid-click would re-sort the list under the row just clicked.
