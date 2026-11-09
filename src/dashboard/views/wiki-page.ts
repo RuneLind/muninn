@@ -49,6 +49,7 @@ import { refLinksCss } from "./components/wiki-ref-links.ts";
 import { GRAPH_ON_CLASS } from "./components/wiki-graph-view.ts";
 import { lensCss } from "./components/wiki-lens.ts";
 import { NEW_TAG_LOOK, newSinceCss } from "./components/wiki-new-since.ts";
+import { SECTION_BAR_ID, sectionBarCss } from "./components/wiki-section-bar.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
@@ -311,6 +312,7 @@ export async function renderWikiPage(opts?: {
     <div class="wiki-pane">
       <div class="wiki-focus-bar"><button class="wiki-focus-exit" id="wikiFocusExit" type="button" data-pane-toggle="focus" title="Leave focus (Esc)">${SVG_FOCUS_EXIT} Exit focus <kbd>Esc</kbd></button></div>
       <div class="wiki-breadcrumb" id="wikiBreadcrumb" style="display:none"></div>
+      <div class="wiki-sec" id="${SECTION_BAR_ID}" hidden></div>
       <div class="wiki-article-wrap" id="articleWrap">
         <div class="wiki-empty-state">Loading wiki…</div>
       </div>
@@ -2676,6 +2678,7 @@ function buildWikiPageCss(): string {
     ${lensCss()}
     /* "New since last read" (D20): item marks and the head line (wiki-new-since.ts). */
     ${newSinceCss()}
+    ${sectionBarCss()}
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */
     ${factcheckReaderCss(".wiki-article")}

@@ -403,6 +403,8 @@ export const E2E_PORTS = {
   "wiki-mermaid-readable": 3417,
   // Wiki render richer PR 2: selection text and ref nouns over the reader shapes.
   "wiki-reader-shapes": 3200,
+  // Wiki render richer PR 3: before → after chips and the section bar.
+  "wiki-section-bar": 3240,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

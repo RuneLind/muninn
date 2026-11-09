@@ -122,7 +122,14 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Merged with render-richer PR 2 (both sides above): 834,461 bytes (283,849 gzipped).
 // Its fix round 2 (quadrant colours, the `;` classDef scanner, four dead theme
 // variables removed): 835,319 bytes (284,202 gzipped).
-const WIKI_CLIENT_MAX_BYTES = 836_000;
+// 2026-11-08, render-richer PR 3 (before → after chips in the bundled
+// formatWebHtml, the section bar controller): 823,635 bytes (279,617 gzipped);
+// its fix round 1 batch 2 (chip rules, quoted-title unchip): 825,675 (280,463);
+// batch 3 (sliding reading line, reveal pin, title rule): 826,252 (280,699).
+// Merged with the mermaid PR (#833, both sides above): 844,882 bytes (287,616 gzipped).
+// PR 3's fix round 1 batch 4 (the chip's punctuation class): 845,061 (287,697).
+// Fix round 2 batch 2 (opening-bracket class, day.month, unchip scope): 845,569.
+const WIKI_CLIENT_MAX_BYTES = 846_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -152,7 +159,9 @@ test("wikiClientScript stays under its size pin", async () => {
 // the series editor to `wiki-series-controller.ts`): 3,458 lines; 51 lets.
 // 2026-11-08, follow-up (the work-map cache to `wiki-work-map-cache.ts`, four
 // `RailDeps` relays gone): 3,450 lines; 51 lets.
-const WIKI_BROWSER_MAX_LINES = 3_450;
+// 2026-11-08, render-richer PR 3: the section bar's import and its one mount
+// call after each page render (the bar lives in `wiki-section-bar.ts`): 3,452.
+const WIKI_BROWSER_MAX_LINES = 3_452;
 const WIKI_BROWSER_MAX_MODULE_LETS = 51;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {

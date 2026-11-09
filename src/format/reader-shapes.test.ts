@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isNumberCell, labelGridItems, labelItem, numberColumns, verdictCell } from "./reader-shapes.ts";
+import { beforeAfterChipsHtml, beforeAfterParts, isNumberCell, labelGridItems, labelItem, numberColumns, verdictCell } from "./reader-shapes.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
 
@@ -399,5 +399,296 @@ describe("reader shapes reach the article render only", () => {
     expect(article).toContain('<ul class="label-grid">');
     expect(article).toContain('<td class="num">1,662,435</td>');
     expect(article).toContain('class="v-good"');
+  });
+});
+
+/** Each chip's visible text, in order. */
+function chipTexts(html: string): string[] {
+  const re = /<span class="ba-chip(?: ba-chip-[op])*">((?:(?!<span class="ba-chip)[\s\S])*?<span class="ba-new">[^<]*<\/span>)<\/span>/g;
+  return [...html.matchAll(re)].map((m) => m[1]!.replace(/<[^>]*>/g, ""));
+}
+
+describe("before → after chips: the matcher", () => {
+  // [text as escaped HTML, the chips' text]
+  const cases: [string, string[]][] = [
+    ["CI 10.5 → 6.4 min", ["10.5 → 6.4 min"]],
+    ["10.5 min → 6.4 min", ["10.5 min → 6.4 min"]],
+    ["ratchet 113→57", ["113→57"]],
+    ["1,066 → 992 files", ["1,066 → 992 files"]],
+    ["ranges 3–5 → 6–7", ["3–5 → 6–7"]],
+    ["40% → 55%", ["40% → 55%"]],
+    ["~290 → 300", ["~290 → 300"]],
+    ["≈ 12 → 9", ["≈ 12 → 9"]],
+    ["-3 → 5", ["-3 → 5"]],
+    ["−2 480 → 3", ["−2 480 → 3"]],
+    ["12 345 → 12 400 rows", ["12 345 → 12 400 rows"]],
+    ["$40 → $55", ["$40 → $55"]],
+    ["5 PRs → 3 PRs", ["5 PRs → 3 PRs"]],
+    ["3x → 5x", ["3x → 5x"]],
+    ["+3 pp → +5 pp", ["+3 pp → +5 pp"]],
+    ["2 -&gt; 4", ["2 -&gt; 4"]],
+    ["a chain 1 → 2 → 3 here", ["1 → 2 → 3"]],
+    ["costs 5 → 6.", ["5 → 6"]],
+    ["5 → 6 x", ["5 → 6"]],
+    ["went 1.5 → 2.5, then 7 → 8", ["1.5 → 2.5", "7 → 8"]],
+    // Not a before → after number pair.
+    ["v1.2 → v1.3", []],
+    ["1.2.3 → 1.3.0", []],
+    ["08.11 → 09.11", []],
+    ["15.09 → 16.09", []],
+    ["2026-11-08 → 2026-11-09", []],
+    ["10:30 → 11:00", []],
+    ["#810 → #827", []],
+    ["x-3 → 4", []],
+    ["PR → 5", []],
+    ["5 → done", []],
+    ["5a → 5b", []],
+    ["run 1356583 → 1356590", []],
+    ["006→050", []],
+    ["10-29 → 10-31", []],
+    ["2025-09→2026-07", []],
+    ["on 08-24 → 1 s", []],
+    ["101–160 762.2 → 795.5", ["762.2 → 795.5"]],
+    ["10–12 → 14–16", ["10–12 → 14–16"]],
+    ["10 → 20 ", ["10 → 20"]],
+    // Fix round 1 batch 2: order notation, thresholds, versions, cut chains.
+    ["Reasonable order: 4 → 1 → 5 → 6 → 3 → 2", []],
+    ["Final order shipped: 4 → 1 → 5", []],
+    ["Sequencing: PR 1 → 2 → 3, then", []],
+    ["3 ordered PRs (1→2→3; review", []],
+    ["PR 1 → 2", []],
+    ["fase 1 → 2", []],
+    ["phase 2 → 3", []],
+    ["strict 1→2→3→4", []],
+    ["must land serially, 4 → 5", []],
+    ["sequence 4 → 5 → 10", []],
+    ["(round 1 → 2 → 3)", []],
+    ["Step 6→12 all pass", []],
+    ["rows 3 → 133 during the run", ["3 → 133"]],
+    ["POLICY_VERSION 1→2", ["1→2"]],
+    ["PRs went 5 → 3", ["5 → 3"]],
+    ["fase 10% → 50%", ["10% → 50%"]],
+    ["≥3 → 260", []],
+    ["≥ 3 → 260", []],
+    ["≤2 → 4", []],
+    ["refs &gt;3 → 5", []],
+    ["refs &lt; 3 → 5", []],
+    ["chrome above row 1 315→179px", ["315→179px"]],
+    ["row 1 314 → 194px", ["314 → 194px"]],
+    ["Opus 4.6 → 429", []],
+    ["Sonnet 5 → 404", []],
+    ["version 1.2 → 1.3", []],
+    ["CDM 4.2 → 4.3 → 4.4", []],
+    ["Jira-oppgavene → 8332 → 8337 → 8351", []],
+    ["24.12 → 1.1", []],
+    ["1.5 → 2.5", ["1.5 → 2.5"]],
+    ["1 → 2 → v3", []],
+    ["8501 → 47 → 46 → 38/8 → 3", []],
+    ["a → 5 → 6", []],
+    ["*v*1 → 2", []],
+    ["10\u00A0kr → 20\u00A0kr", ["10\u00A0kr → 20\u00A0kr"]],
+    ["5\u202Fms → 6\u202Fms", ["5\u202Fms → 6\u202Fms"]],
+    ["20 000 → 25 000\u00A0kr", ["20 000 → 25 000\u00A0kr"]],
+    ["5 → 6\u00A0x", ["5 → 6"]],
+    ["10 → 20 ms/s", ["10 → 20 ms/s"]],
+    ["5 MB/s → 9 MB/s", ["5 MB/s → 9 MB/s"]],
+    ["10 → 20 req/s", ["10 → 20"]],
+    ["cleared ~15s/claim → 8-claim/280s budget", []],
+    ["20 000 → 25 000 kr/mnd", ["20 000 → 25 000 kr/mnd"]],
+    // Fix round 2 batch 1: a count or measure word is no order word, even
+    // before a colon; only an order word itself takes one more word.
+    ["Row count: 315 → 179", ["315 → 179"]],
+    ["Phase time: 30 → 20", ["30 → 20"]],
+    ["Round trip: 120 → 80", ["120 → 80"]],
+    ["Step count: 6 → 12", ["6 → 12"]],
+    ["open PRs: 12 → 4", ["12 → 4"]],
+    ["PRs: 5 → 3", ["5 → 3"]],
+    ["strict mode: 3 → 0", ["3 → 0"]],
+    ["Steps 6 → 12 in CI", ["6 → 12"]],
+    ["row 3 → 5", ["3 → 5"]],
+    ["sequence length: 5 → 10", ["5 → 10"]],
+    // A rejected rate falls back to the unit before its `/`.
+    ["latency 120 → 80ms/req", ["120 → 80ms"]],
+    ["latency 120 → 80 ms/request", ["120 → 80 ms"]],
+    ["10 → 20 tokens/turn", ["10 → 20 tokens"]],
+    // Fix round 2 batch 2: a loose day.month is a date only beside a side
+    // whose day is past 12 with a two-digit month; else it is a decimal.
+    ["1.5 → 2.10", ["1.5 → 2.10"]],
+    ["2.5 → 3.10", ["2.5 → 3.10"]],
+    ["13.5 → 14.5", ["13.5 → 14.5"]],
+    ["9.12 → 1.1", ["9.12 → 1.1"]],
+    ["1.1 → 24.12", []],
+    ["31.12 → 1.1", []],
+    ["13.5 → 14.10", []],
+    ["3.10 → 4.10", []],
+  ];
+  for (const [text, want] of cases) {
+    test(JSON.stringify(text), () => expect(chipTexts(beforeAfterChipsHtml(text))).toEqual(want));
+  }
+
+  test("the spans hold the source text and nothing else", () => {
+    const html = beforeAfterChipsHtml("CI 10.5 → 6.4 min today");
+    expect(html).toBe(
+      'CI <span class="ba-chip"><span class="ba-old">10.5</span> <span class="ba-arr">→</span> <span class="ba-new">6.4 min</span></span> today',
+    );
+    expect(html.replace(/<[^>]*>/g, "")).toBe("CI 10.5 → 6.4 min today");
+  });
+  test("a chain: every value before the last soft, the last bold", () => {
+    expect(beforeAfterChipsHtml("1 → 2 → 3")).toBe(
+      '<span class="ba-chip"><span class="ba-old">1</span> <span class="ba-arr">→</span> <span class="ba-old">2</span> <span class="ba-arr">→</span> <span class="ba-new">3</span></span>',
+    );
+  });
+  test("a value glued to the inline code or tag before it is not free-standing", () => {
+    expect(chipTexts(beforeAfterChipsHtml("<code>v</code>1.2 → 1.3"))).toEqual([]);
+    expect(chipTexts(beforeAfterChipsHtml("<em>v</em>1 → 2"))).toEqual([]);
+    expect(chipTexts(beforeAfterChipsHtml("\x00INLINE0\x001 → 2"))).toEqual([]);
+    expect(chipTexts(beforeAfterChipsHtml("<code>v</code> 1 → 2"))).toEqual(["1 → 2"]);
+    expect(chipTexts(beforeAfterChipsHtml("<strong>CI</strong>: 10 → 6 min"))).toEqual(["10 → 6 min"]);
+    expect(chipTexts(beforeAfterChipsHtml("one<br>2 → 3"))).toEqual(["2 → 3"]);
+  });
+  test("a chain cut by a tag keeps its chip: the arrow ends the text run", () => {
+    expect(chipTexts(beforeAfterChipsHtml("(100% → 88% → 67% → <strong>60%</strong>)"))).toEqual(["100% → 88% → 67%"]);
+  });
+  test("never inside a tag or across a placeholder", () => {
+    expect(beforeAfterChipsHtml('<a href="https://x/1 → 2">see</a>')).toBe('<a href="https://x/1 → 2">see</a>');
+    expect(beforeAfterChipsHtml("\x00INLINE0\x00 → 5")).toBe("\x00INLINE0\x00 → 5");
+    expect(beforeAfterParts("1 → 2")).toEqual({ sides: ["1", "2"], arrows: [" → "] });
+  });
+});
+
+describe("before → after chips: fix round 2 batch 1", () => {
+  test("a rejected rate keeps its `/…` outside the chip", () => {
+    expect(beforeAfterChipsHtml("latency 120 → 80ms/req")).toBe(
+      'latency <span class="ba-chip"><span class="ba-old">120</span> <span class="ba-arr">→</span> <span class="ba-new">80ms</span></span>/req',
+    );
+  });
+  // Each candidate used to rescan the whole run before it: 5.2 s at 50k
+  // chars on 27bce79f, 34 ms after, 81 ms at the 150k used here (measured).
+  test("one long run full of pairs renders in linear time", () => {
+    for (const unit of ["5 → 6, ", "order: 1 → 2; "]) {
+      const text = unit.repeat(Math.ceil(150_000 / unit.length));
+      const t0 = performance.now();
+      const out = beforeAfterChipsHtml(text);
+      expect(performance.now() - t0).toBeLessThan(3_000);
+      // Every pair a chip, every ordered one none: a fast matcher that drops
+      // or blocks them all fails here.
+      expect(out.match(/<span class="ba-chip/g)?.length ?? 0).toBe(unit.startsWith("order") ? 0 : Math.ceil(150_000 / unit.length));
+    }
+  }, 120_000);
+});
+
+describe("before → after chips: the context rules, pinned (fix round 2 batch 3)", () => {
+  test("an arrow at the start of a run, after a tag, does not cut the chain after it", () => {
+    expect(chipTexts(beforeAfterChipsHtml("<strong>40%</strong> → 30% → 20%"))).toEqual(["30% → 20%"]);
+  });
+  test("a word split off the chain's end is read with the text after it", () => {
+    // ` then` is no unit: the chain is `3 → 5`, and ` then → done` follows it.
+    expect(chipTexts(beforeAfterChipsHtml("tests 3 → 5 then → done"))).toEqual(["3 → 5"]);
+  });
+  test("an order or version word in an earlier run blocks the pair after the tag", () => {
+    expect(chipTexts(beforeAfterChipsHtml("<strong>Phase</strong> 2 → 3"))).toEqual([]);
+    expect(chipTexts(beforeAfterChipsHtml("<strong>Opus</strong> 4.6 → 429"))).toEqual([]);
+  });
+  test("an order phrase longer than 20 chars still blocks (the look-back is 64)", () => {
+    // ` order recommendation: ` is 23 chars.
+    expect(chipTexts(beforeAfterChipsHtml("Rollout order recommendation: 3 → 1 → 2"))).toEqual([]);
+  });
+});
+
+describe("before → after chips: where the renderer draws them", () => {
+  test("chat renders byte-identical to the plain renderer", () => {
+    expect(formatWebHtml("CI went 10.5 → 6.4 min.")).toBe("CI went 10.5 → 6.4 min.");
+    expect(formatWebHtml("CI went 10.5 → 6.4 min.", { reader: true })).not.toContain("ba-chip");
+  });
+  test("prose, a list item, a table cell, a grid value and a link's text take one", () => {
+    expect(chipTexts(formatWebHtml("CI went 10.5 → 6.4 min.", SHAPES))).toEqual(["10.5 → 6.4 min"]);
+    expect(chipTexts(formatWebHtml("- one 2 → 3\n- two\n", SHAPES))).toEqual(["2 → 3"]);
+    const table = formatWebHtml("| Step | CI |\n|---|---|\n| a | 10.5 → 6.4 min |\n| b | 7 |\n", SHAPES);
+    // A cell holding a pair is no number cell: the column stays text.
+    expect(table).toContain('<td><span class="ba-chip"><span class="ba-old">10.5</span>');
+    expect(table).not.toContain('class="num"');
+    expect(chipTexts(formatWebHtml("- **A:** 1 → 2\n- **B:** b\n- **C:** c\n", SHAPES))).toEqual(["1 → 2"]);
+    const link = formatWebHtml("[ratchet 113 → 57](https://example.com/a-1-2)", SHAPES);
+    expect(link).toContain('href="https://example.com/a-1-2"');
+    expect(chipTexts(link)).toEqual(["113 → 57"]);
+  });
+  test("a heading, inline code and a fence take none", () => {
+    expect(formatWebHtml("## CI 10 → 6 min\n", SHAPES)).not.toContain("ba-chip");
+    expect(formatWebHtml("run `10 → 6` now", SHAPES)).not.toContain("ba-chip");
+    expect(formatWebHtml("```\n10 → 6\n```\n", SHAPES)).not.toContain("ba-chip");
+  });
+  test("a table header takes none; a cell under it still does", () => {
+    const table = formatWebHtml("| H 1 → 2 | B |\n|---|---|\n| 3 → 4 | x |\n", SHAPES);
+    expect(table).toContain("<th>H 1 → 2</th>");
+    expect(chipTexts(table)).toEqual(["3 → 4"]);
+  });
+  test("a Fold's duplicate heading takes none; the body under it still does", () => {
+    const html = formatWebHtml('<Fold title="Speed 10 → 20 s">\n\n## Speed 10 → 20 s\n\nCI 7 → 5 min\n\n</Fold>\n', SHAPES);
+    expect(html).toContain('<h3 class="fold-heading-dup">Speed 10 → 20 s</h3>');
+    expect(chipTexts(html)).toEqual(["7 → 5 min"]);
+  });
+  test("inside a Fold yes, inside a Callout or a Question no (the shapes' SHAPE_TRANSPARENT rule)", () => {
+    expect(chipTexts(formatWebHtml('<Fold title="S">\n\nCI 10 → 6 min\n\n</Fold>\n', SHAPES))).toEqual(["10 → 6 min"]);
+    expect(formatWebHtml('<Callout tone="info">\n\nCI 10 → 6 min\n\n</Callout>\n', SHAPES)).not.toContain("ba-chip");
+    expect(formatWebHtml('<Question id="O1">\n\nCI 10 → 6 min?\n\n</Question>\n', SHAPES)).not.toContain("ba-chip");
+  });
+  test("renderWikiHtml draws them only with readerShapes", () => {
+    expect(renderWikiHtml("CI 10 → 6 min\n", () => undefined)).not.toContain("ba-chip");
+    expect(renderWikiHtml("CI 10 → 6 min\n", () => undefined, { readerShapes: true })).toContain("ba-chip");
+  });
+});
+
+describe("before → after chips: punctuation right after a chip", () => {
+  const tight = (html: string) => (beforeAfterChipsHtml(html).match(/<span class="ba-chip[^"]*">/g) ?? []);
+  test.each([
+    ["went 7→4, then", ","],
+    ["went 7→4. Then", "."],
+    ["(went 7→4)", ")"],
+    ["went 7→4; then", ";"],
+    ["went <strong>7→4</strong>, then", "after a closing tag"],
+  ])("%p: the chip drops its right padding (%s)", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip ba-chip-p">']);
+  });
+  test.each([["went 7→4 then"], ["went 7→4 (then)"], ["went 7→4"], ["went 7→4 and, then"]])("%p: padding kept", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip">']);
+  });
+  // Fix round 2 batch 2: closing quotes and the rest of the class.
+  test.each([
+    ["«went 105 → 15» then", "»"],
+    ["“went 105 → 15” then", "”"],
+    ["‘went 105 → 15’ then", "’"],
+    ["went 7→4: then", ":"],
+    ["went 7→4! Then", "!"],
+    ["went 7→4? Then", "?"],
+    ["[went 7→4] then", "]"],
+    ["went 7→4… then", "…"],
+    ['went <a href="https://x.example">7→4</a>, then', "after a link's closing tag"],
+  ])("%p: the chip drops its right padding (%s)", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip ba-chip-p">']);
+  });
+  test.each([
+    ["went (7→4 then", "("],
+    ["went [7→4 then", "["],
+    ["went «7→4 then", "«"],
+    ["went “7→4 then", "“"],
+    ["went ‘7→4 then", "‘"],
+    ["went (<strong>7→4</strong> then", "past an opening tag"],
+    ['went (<a href="https://x.example">7→4</a> then', "past a link's opening tag"],
+  ])("%p: the chip drops its left padding (%s)", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip ba-chip-o">']);
+  });
+  test.each([["went (113 → 57)"], ["went «105 → 15»"], ["went [<em>7→4</em>]"]])("%p: both sides drop", (html) => {
+    expect(tight(html)).toEqual(['<span class="ba-chip ba-chip-o ba-chip-p">']);
+  });
+  test.each([["went ( 7→4 then"], ["went x7 → 4"], ['went <a href="(">7→4</a> then'], ["went (a) 7→4 then"]])(
+    "%p: left padding kept",
+    (html) => {
+      expect(tight(html).every((t) => !t.includes("ba-chip-o"))).toBe(true);
+    },
+  );
+  test("the text is unchanged: the class is the only addition", () => {
+    const out = beforeAfterChipsHtml("went 10 → 6 min, then (1 → 2).");
+    expect(out.replace(/<[^>]*>/g, "")).toBe("went 10 → 6 min, then (1 → 2).");
+    expect(out).toContain('<span class="ba-chip ba-chip-p"><span class="ba-old">10</span> <span class="ba-arr">→</span> <span class="ba-new">6 min</span></span>,');
   });
 });

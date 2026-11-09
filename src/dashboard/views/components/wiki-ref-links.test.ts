@@ -1,6 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import { findRefs, headingSlug, isRefId, linkRefs, nounRuns, refTargets } from "./wiki-ref-links.ts";
 import { foldSizeLabel, formatChars, readingMinutes } from "./wiki-lens.ts";
+import { Window } from "happy-dom";
+import { renderWikiHtml } from "../../../wiki/render.ts";
 
 /** The browser half (wrapping, the peek, the jump and Back) is driven in
  *  e2e/wiki-ref-links.spec.ts. */
@@ -307,5 +309,47 @@ describe("linkRefs: hidden text gets no link", () => {
     }
     expect(prose.replacedBy).not.toBeNull();
     expect(hidden.replacedBy).toBeNull();
+  });
+});
+
+describe("linkRefs: a quoted section title holding a before → after chip", () => {
+  /** The reader's article for `md` in a happy-dom Window of its own, linked
+   *  with that window's `document` lent to `linkRefs`: the links' and the
+   *  chips' text. */
+  function linked(md: string): { refs: string[]; chips: string[] } {
+    const win = new Window();
+    const article = win.document.createElement("div");
+    article.className = "wiki-article";
+    article.innerHTML = renderWikiHtml(md, () => undefined, { readerShapes: true });
+    win.document.body.appendChild(article);
+    const g = globalThis as Record<string, unknown>;
+    const saved = { document: g.document, NodeFilter: g.NodeFilter };
+    g.document = win.document;
+    g.NodeFilter = win.NodeFilter;
+    try {
+      linkRefs(article as unknown as Element);
+    } finally {
+      g.document = saved.document;
+      g.NodeFilter = saved.NodeFilter;
+    }
+    const texts = (sel: string) => [...article.querySelectorAll(sel)].map((e) => e.textContent ?? "");
+    return { refs: texts("a.wiki-ref"), chips: texts(".ba-chip") };
+  }
+  const md = (quote: string) => `## Cut 12 → 9 ms\n\ntext\n\n## Other\n\nSee ${quote} for the numbers, and 3 → 4 here.\n`;
+
+  test("the quote still links to its section, in each quote style; the chip outside it stays", () => {
+    for (const q of ["«Cut 12 → 9 ms»", '"Cut 12 → 9 ms"', "“Cut 12 → 9 ms”"]) {
+      expect(linked(md(q))).toEqual({ refs: [q], chips: ["3 → 4"] });
+    }
+  });
+  test("a quote that names no section keeps its chip", () => {
+    expect(linked(md("«Trim 12 → 9 ms»"))).toEqual({ refs: [], chips: ["12 → 9 ms", "3 → 4"] });
+  });
+  test("a quote in link text keeps its chip (no ref link goes inside a link)", () => {
+    expect(linked(md("[«Cut 12 → 9 ms»](https://x.example)"))).toEqual({ refs: [], chips: ["12 → 9 ms", "3 → 4"] });
+  });
+  test("a quote inside the section it names keeps its chip (a section never links to itself)", () => {
+    const own = '<Fold title="Cut 12 → 9 ms">\n\nSee «Cut 12 → 9 ms» here.\n\n</Fold>\n\n## A\n\nx\n\n## B\n\ny\n';
+    expect(linked(own)).toEqual({ refs: [], chips: ["12 → 9 ms"] });
   });
 });
