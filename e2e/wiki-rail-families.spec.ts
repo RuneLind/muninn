@@ -166,10 +166,6 @@ type Page = import("@playwright/test").Page;
 async function openRail(page: Page, params = ""): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${WIKI}${params}`);
   await expect(page.locator(".wiki-list-item").first()).toBeAttached();
-  // At or under 768 px the rail is the Pages panel (issue #623): open it.
-  const pages = page.locator("#wikiRailToggle");
-  if (await pages.isVisible()) await pages.click();
-  await expect(page.locator(".wiki-list-item").first()).toBeVisible();
 }
 
 const row = (page: Page, rel: string) => page.locator(`.wiki-list-item[data-relpath="${rel}"]`);
@@ -383,8 +379,11 @@ test.describe("Wiki rail: families and months", () => {
   test("the head's three controls do not push the rail into a horizontal scroll", async ({
     page,
   }) => {
-    await page.setViewportSize({ width: 420, height: 900 });
+    // 1000 px: the rail at its 260 px minimum (a 420 px window gave that until
+    // issue #623 made the rail a panel there).
+    await page.setViewportSize({ width: 1000, height: 900 });
     await openRail(page);
+    expect(Math.round((await page.locator(".wiki-layout > .wiki-pane:first-child").boundingBox())!.width)).toBe(RAIL_WIDTH_MIN);
     await turnGroupingOn(page);
     const overflow = await page.locator(".wiki-browse-head").evaluate((el) => ({
       scrollWidth: el.scrollWidth,

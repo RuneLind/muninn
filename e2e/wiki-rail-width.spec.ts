@@ -31,7 +31,7 @@ import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 import {
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_DEFAULT_NARROW,
-  RAIL_DRAWER_MAX,
+  RAIL_WIDTH_MIN,
   RAIL_WIDTH_KEY,
   RAIL_WIDTH_KEY_STEP,
   RAIL_WIDTH_MAX,
@@ -850,24 +850,30 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     expect(clipped).toEqual([]);
   });
 
-  test("no header-row chip label is clipped, in windows down to 400px", async ({ page }) => {
+  // Until issue #623 this swept windows from 700 to 400 px, where the 45%
+  // bound took the rail from 300 down to 180. Those windows now show the rail
+  // as the Pages panel, so the sweep has two halves: the column from 300 down
+  // to its 260 minimum, and the panel in windows from 700 down to 320.
+  test("no header-row chip label is clipped, at a 300 to 260px rail and in the Pages panel down to a 320px window", async ({ page }) => {
     const clipped: string[] = [];
-    await page.addInitScript(
-      ([key, foldsKey]) => {
-        localStorage.setItem(key as string, "300");
-        localStorage.setItem(foldsKey as string, JSON.stringify(["toggle:families"]));
-      },
-      [RAIL_WIDTH_KEY, `muninn.wiki.folds.v1:${WIKI}`] as const,
-    );
-    for (let vw = 700; vw >= 400; vw -= 20) {
+    const header = page.locator('.wiki-list-group[data-group="family:plans/gone-slate"]');
+    await page.addInitScript((foldsKey) => localStorage.setItem(foldsKey, JSON.stringify(["toggle:families"])), `muninn.wiki.folds.v1:${WIKI}`);
+    await page.setViewportSize({ width: 1000, height: 900 });
+    for (let rail = 300; rail >= RAIL_WIDTH_MIN; rail -= 4) {
+      // Init scripts run in the order added, so the latest width wins.
+      await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, rail] as const);
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+      await expect(header.locator(".wiki-fold-chip-label")).toHaveText("12 superseded");
+      expect(await railWidth(page), `column at ${rail}`).toBe(rail);
+      for (const c of await clippedChips(page)) clipped.push(`${rail}px rail ${c}`);
+    }
+    for (let vw = 700; vw >= 320; vw -= 20) {
       await page.setViewportSize({ width: vw, height: 900 });
       await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
-      const header = page.locator('.wiki-list-group[data-group="family:plans/gone-slate"]');
-      await expect(header).toHaveCount(1);
       await expect(header.locator(".wiki-fold-chip-label")).toHaveText("12 superseded");
-      // At or under RAIL_DRAWER_MAX the rail is the Pages panel (issue #623).
-      if (vw <= RAIL_DRAWER_MAX) await page.locator("#wikiRailToggle").click();
+      await page.locator("#wikiRailToggle").click();
       await expect(header).toBeVisible();
+      expect(await railWidth(page), `panel in a ${vw}px window`).toBe(vw - 32);
       for (const c of await clippedChips(page)) clipped.push(`${vw}px window ${c}`);
     }
     expect(clipped).toEqual([]);

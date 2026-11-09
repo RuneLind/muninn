@@ -205,12 +205,22 @@ test.describe("Wiki reader at phone width", () => {
       const m = await measure(page);
       console.log(`measure ${w}: ${JSON.stringify(m)}`);
       // Prose never runs past the pane: the unbroken URL breaks. (A wide table
-      // and a long code line still scroll inside the pane, by design.)
-      const proseOver = await page.evaluate(() => {
+      // and a long code line still scroll inside the pane, by design.) The
+      // reader draws a paragraph as bare text between <br>s, so the URL is a
+      // text node of the article: measure its own line boxes.
+      const url = await page.evaluate(() => {
+        const article = document.querySelector(".wiki-article")!;
         const edge = document.querySelector("#articleWrap")!.getBoundingClientRect().right;
-        return Array.from(document.querySelectorAll(".wiki-article p, .wiki-article p a")).filter((e) => e.getBoundingClientRect().right > edge).length;
+        const node = Array.from(article.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && n.textContent!.includes("example.com/a/very/long"));
+        if (!node) return null;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const rects = Array.from(range.getClientRects());
+        return { lines: rects.length, past: rects.filter((r) => r.right > edge + 0.5).length };
       });
-      expect(proseOver, "paragraphs past the pane's right edge").toBe(0);
+      expect(url, "the URL's text node").not.toBeNull();
+      expect(url!.past, "URL line boxes past the pane's right edge").toBe(0);
+      if (w <= 430) expect(url!.lines, "the URL takes more than one line").toBeGreaterThan(1);
       await shots(page, `w${w}`);
 
       expect(m.docScroll, "document scrollWidth").toBe(w);
