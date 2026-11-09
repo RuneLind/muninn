@@ -26,8 +26,13 @@
  * A third class, `.rail-open`, means something only at or under
  * `RAIL_DRAWER_MAX` (issue #623), where the rail has no column: the Pages
  * button (`#wikiRailToggle`, shown only there) opens it in the article's
- * place. Escape, the button and opening a page close it. Not persisted: a
- * phone reader came for the page.
+ * place. The button and Escape close it, and so does anything that shows the
+ * reader a view: opening a page, an effort or the start view, Back and
+ * Forward, and a window grown past the breakpoint. Not persisted: a phone
+ * reader came for the page. Known gaps: `g` draws the graph under the open
+ * panel, and Escape on the header's Tools ▾ dropdown closes both (the
+ * dropdown is neither a rendered menu nor a handler that prevents the
+ * default).
  *
  * The right-pane state persists (localStorage, best-effort like the rail width);
  * focus does not — see the rationale in `wiki-panes.ts`.
@@ -100,9 +105,10 @@ function openRailPanel(): void {
   pane?.focus({ preventScroll: true });
 }
 
-/** Close the rail panel: a page is opening, and under it is where it shows.
- *  Focus the closing would strand, in the rail or already on the body, goes
- *  to the button. */
+/** Close the rail panel: a view is about to show where it is (a page, an
+ *  effort, the start view), or the window left the narrow width. Focus the
+ *  closing would strand, in the rail or already on the body, goes to the
+ *  button; focus anywhere else stays. */
 export function closeRailPanel(): void {
   if (!layoutEl?.classList.contains(RAIL_OPEN)) return;
   const active = document.activeElement;

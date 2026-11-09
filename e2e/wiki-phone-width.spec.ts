@@ -1,19 +1,36 @@
 /**
  * The /wiki reader at phone and tablet widths (issue #623), in a real browser
- * over a temp wiki.
+ * over two temp wikis.
  *
  * Before the fix the rail kept its column at every width: at 390 px the
  * article was 0 px wide and the document scrolled sideways. Column widths,
- * `scrollWidth` and what a toggle shows are layout outcomes no unit test sees.
+ * `scrollWidth`, focus and what a toggle shows are layout outcomes no unit
+ * test sees.
  *  1. At 390, 430, 600 and 768 px the article pane spans the viewport less a
  *     16 px gutter each side, the rail and the right pane take no column, and
  *     neither the document nor the layout scrolls sideways — on a page with a
- *     wide table, a long code line and an unbroken URL, which breaks.
- *  2. The Pages toggle shows the rail in the article's place and hides it
- *     again (Esc, the toggle, and opening a page from it); the article keeps
- *     its scroll position underneath.
- *  3. At 1440 px the three columns measure what they did before the fix, and
- *     the toggle is not on screen.
+ *     wide table, a long code line and an unbroken URL, which breaks. The
+ *     same holds in focus mode, with the right pane stored collapsed, on the
+ *     Atlas tab and on the start view.
+ *  2. The Pages button shows the rail in the article's place and hides the
+ *     article without losing its scroll position; nothing of the article (an
+ *     Atlas node) shows through or takes a tap or Tab.
+ *  3. What closes the panel: the button, Escape, opening a page, an effort
+ *     link, the rail's link to the start view, Back, and a window grown past
+ *     768 px (opened at 390 and at 768).
+ *  4. Focus: into the rail on opening and on Show in list; to the button when
+ *     closing would strand it (in the rail or on the body); left alone when
+ *     it is elsewhere. Escape belongs to an open menu, and to a menu whose
+ *     own handler already took it.
+ *  5. At 1440 px the three columns measure what they did before the fix, and
+ *     the button is not on screen.
+ *
+ * Fixture: `e2e-phone` (a report page and a second page that link to each
+ * other) and `e2e-phone-map` (one plan page and a `.work-map.json`, so its
+ * rail carries an effort link; `WORK_MAP_WIKIS` is blank, so no map run
+ * starts). Two stand-ins are injected where the real control needs a fixture
+ * this spec does not build, each named at its test: a `role="menu"` in the
+ * rail, and the footer's `#wikiCoverageLink`.
  *
  * `WIKI_PHONE_SHOTS=<dir>` also writes a screenshot per width and theme (the
  * PR's pictures); unset, the spec takes none.
@@ -440,6 +457,45 @@ test.describe("Wiki reader at phone width", () => {
     await expect(page.locator(RAIL)).toBeHidden();
     await expect(page.locator(TOGGLE)).toHaveAttribute("aria-expanded", "false");
     await expect(page.locator("#articleWrap")).toBeVisible();
+  });
+
+  // Fix round 2: the breakpoint the close listens on is the CSS one. A panel
+  // opened AT 768 and widened by one pixel is the case a narrower query misses
+  // (no change event) and a wider one misses too.
+  test("a rail opened at 768 is closed one pixel wider", async ({ page }) => {
+    await open(page, 768);
+    await page.locator(TOGGLE).click();
+    await expect(page.locator(".wiki-layout")).toHaveClass(/rail-open/);
+    await page.setViewportSize({ width: 769, height: 844 });
+    await expect(page.locator(".wiki-layout")).not.toHaveClass(/rail-open/);
+    await expect(page.locator(RAIL)).not.toHaveAttribute("tabindex", /.*/);
+    await expect(page.locator(TOGGLE)).toBeHidden();
+    expect((await measure(page)).rail.shown).toBe(true);
+  });
+
+  // Fix round 2: closing moves only focus it would strand. Focus on <body>
+  // (a click that focused nothing) goes to the button; focus on a control
+  // outside the rail stays where the reader put it.
+  test("390px: closing the panel moves focus from the body to the button, and leaves focus elsewhere alone", async ({ page }) => {
+    await open(page, 390);
+    const toggle = page.locator(TOGGLE);
+    await toggle.click();
+    await page.locator(".wiki-list-item", { hasText: "Second page" }).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Second page");
+
+    await toggle.click();
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+    await page.goBack();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Phone report");
+    await expect(page.locator(RAIL)).toBeHidden();
+    await expect(toggle, "focus on the body goes to the button").toBeFocused();
+
+    await toggle.click();
+    await page.locator("#themeToggle").focus();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(RAIL)).toBeHidden();
+    await expect(page.locator("#themeToggle"), "focus outside the rail is not moved").toBeFocused();
   });
 
   // Review finding 7: the narrow states the first spec left out. Each has a
