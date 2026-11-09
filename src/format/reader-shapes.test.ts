@@ -570,9 +570,29 @@ describe("before → after chips: fix round 2 batch 1", () => {
       const t0 = performance.now();
       const out = beforeAfterChipsHtml(text);
       expect(performance.now() - t0).toBeLessThan(3_000);
-      expect(out.length).toBeGreaterThan(text.length - 1);
+      // Every pair a chip, every ordered one none: a fast matcher that drops
+      // or blocks them all fails here.
+      expect(out.match(/<span class="ba-chip/g)?.length ?? 0).toBe(unit.startsWith("order") ? 0 : Math.ceil(150_000 / unit.length));
     }
   }, 120_000);
+});
+
+describe("before → after chips: the context rules, pinned (fix round 2 batch 3)", () => {
+  test("an arrow at the start of a run, after a tag, does not cut the chain after it", () => {
+    expect(chipTexts(beforeAfterChipsHtml("<strong>40%</strong> → 30% → 20%"))).toEqual(["30% → 20%"]);
+  });
+  test("a word split off the chain's end is read with the text after it", () => {
+    // ` then` is no unit: the chain is `3 → 5`, and ` then → done` follows it.
+    expect(chipTexts(beforeAfterChipsHtml("tests 3 → 5 then → done"))).toEqual(["3 → 5"]);
+  });
+  test("an order or version word in an earlier run blocks the pair after the tag", () => {
+    expect(chipTexts(beforeAfterChipsHtml("<strong>Phase</strong> 2 → 3"))).toEqual([]);
+    expect(chipTexts(beforeAfterChipsHtml("<strong>Opus</strong> 4.6 → 429"))).toEqual([]);
+  });
+  test("an order phrase longer than 20 chars still blocks (the look-back is 64)", () => {
+    // ` order recommendation: ` is 23 chars.
+    expect(chipTexts(beforeAfterChipsHtml("Rollout order recommendation: 3 → 1 → 2"))).toEqual([]);
+  });
 });
 
 describe("before → after chips: where the renderer draws them", () => {

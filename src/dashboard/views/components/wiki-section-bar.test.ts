@@ -35,6 +35,9 @@ describe("sectionTargets", () => {
     expect(sections("# Activity Log\n\n## e1\n\n## e2\n\n# Log\n\n## e3\n\n## e4\n")).toEqual(["e1", "e2", "e3", "e4"]);
     expect(sections("# Activity Log\n\n# Wiki Log\n\n## e1\n\n## e2\n\n## e3\n")).toEqual(["e1", "e2", "e3"]);
   });
+  test("three `#` headings, the first leading, over three or more `##`: the `#` stay the sections", () => {
+    expect(sections("# A\n\n## a1\n\n## a2\n\n# B\n\n## b1\n\n# C\n")).toEqual(["A", "B", "C"]);
+  });
   test("two `#` over fewer than three `##`, or text before the first `#`: the `#` stay the sections", () => {
     expect(sections("# A\n\n## a1\n\n# B\n\n## b1\n")).toEqual(["A", "B"]);
     expect(sections("## lead\n\n# A\n\n## a1\n\n## a2\n\n# B\n")).toEqual(["A", "B"]);
@@ -139,6 +142,12 @@ describe("currentSection", () => {
     ["a short pane: the line slides from scroll 0, nothing passed yet", [300, 400, 500], 100, 30, 100, 0],
     ["a short pane: the second heading meets the sliding line", [300, 400, 500], 100, 40, 100, 1],
     ["a short pane: at max, the last", [300, 400, 500], 100, 100, 100, 2],
+    // Heading 2 is stuck (1700 − 100 > 1000): before the slide starts (scroll
+    // 300) the line stays at 100, never above it, so heading 1 at 50 has passed.
+    ["stuck foot, before the slide: the line is not raised above `line`", [0, 250, 1700], 100, 200, 1000, 1],
+    // Heading 2 reaches the line exactly at max (1100 − 100 = 1000): not stuck,
+    // so no slide; a slide would put the line at 700 and pass it at scroll 900.
+    ["a heading that reaches the line exactly at max is not stuck", [0, 500, 1100], 100, 900, 1000, 1],
   ];
   test.each(rows)("%s", (_name, abs, line, s, max, want) => {
     expect(at(abs, line, s, max)).toBe(want);
@@ -168,7 +177,7 @@ describe("sectionHolding", () => {
   const doc = new Window().document;
   const article = doc.createElement("div");
   article.innerHTML = [
-    '<h3 id="a">A</h3><p id="pa">a</p>',
+    '<p id="intro">intro</p><h3 id="a">A</h3><p id="pa">a</p>',
     '<details class="fold" id="f"><summary>F</summary><p id="pf">f</p></details>',
     '<h3 id="b">B</h3><p id="pb">b</p>',
   ].join("");
@@ -177,6 +186,7 @@ describe("sectionHolding", () => {
   const holding = (id: string) => sectionHolding(secs, article.querySelector(`#${id}`) as unknown as Element);
   test.each([
     ["a heading is its own section", "b", 2],
+    ["text before the first section: the first", "intro", 0],
     ["text after a heading", "pa", 0],
     ["text in a fold's body: the fold's summary", "pf", 1],
     ["a fold addressed by its own id: the summary inside it", "f", 1],

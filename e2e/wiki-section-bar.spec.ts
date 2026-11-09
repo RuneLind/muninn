@@ -344,7 +344,9 @@ test.describe("chip inside brackets and quotes", () => {
 test.describe("one sticky head", () => {
   /** Each visible bottom border from the breadcrumb's top to the article: a
    *  border counts when it has width, a style and a colour that is not fully
-   *  transparent. */
+   *  transparent. `pad` is the breadcrumb's foot padding; `textGap` the px
+   *  from the bottom of its text to the head's divider (the bar's top when the
+   *  bar shows, else the breadcrumb's bottom). */
   const strips = (page: Page) =>
     page.evaluate(() => {
       const shown = (el: Element) => {
@@ -358,11 +360,14 @@ test.describe("one sticky head", () => {
       };
       const bc = document.getElementById("wikiBreadcrumb")!;
       const bar = document.getElementById("wikiSectionBar")!;
+      const text = document.createRange();
+      text.selectNodeContents(bc);
       return {
         breadcrumb: shown(bc),
         bar: !bar.hidden && shown(bar),
         barShown: !bar.hidden && getComputedStyle(bar).display !== "none",
-        touching: Math.abs(bar.getBoundingClientRect().top - bc.getBoundingClientRect().bottom) < 0.5,
+        pad: getComputedStyle(bc).paddingBottom,
+        textGap: (bar.hidden ? bc.getBoundingClientRect().bottom : bar.getBoundingClientRect().top) - text.getBoundingClientRect().bottom,
       };
     });
   const SCHEMES = [
@@ -373,6 +378,7 @@ test.describe("one sticky head", () => {
   ];
   test("breadcrumb and bar draw one divider at desktop width in four palettes; 700 px and a page without a bar keep the breadcrumb's", async ({ page }) => {
     await openLong(page);
+    const gaps: number[] = [];
     for (const width of [1440, 1024]) {
       await page.setViewportSize({ width, height: 800 });
       for (const s of SCHEMES) {
@@ -381,16 +387,58 @@ test.describe("one sticky head", () => {
           if (palette) document.documentElement.setAttribute("data-palette", palette as string);
           else document.documentElement.removeAttribute("data-palette");
         }, [s.theme, s.palette] as const);
-        expect({ at: `${width} ${s.name}`, ...(await strips(page)) }).toEqual({ at: `${width} ${s.name}`, breadcrumb: false, bar: true, barShown: true, touching: true });
+        const { textGap, ...got } = await strips(page);
+        gaps.push(textGap);
+        expect({ at: `${width} ${s.name}`, ...got }).toEqual({ at: `${width} ${s.name}`, breadcrumb: false, bar: true, barShown: true, pad: "4px" });
       }
     }
     await page.setViewportSize({ width: 700, height: 800 });
-    expect(await strips(page)).toEqual({ breadcrumb: true, bar: true, barShown: true, touching: true });
+    const { textGap: _phone, ...phone } = await strips(page);
+    expect(phone).toEqual({ breadcrumb: true, bar: true, barShown: true, pad: "9px" });
     await page.setViewportSize({ width: 1440, height: 800 });
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/short.mdx")}&lens=all`);
     await expect(page.locator(".wiki-article h3").first()).toBeVisible();
-    expect((await strips(page)).breadcrumb).toBe(true);
-    expect((await strips(page)).barShown).toBe(false);
+    const alone = await strips(page);
+    expect(alone.breadcrumb).toBe(true);
+    expect(alone.barShown).toBe(false);
+    expect(alone.pad).toBe("9px");
+    // The bar sits right under the breadcrumb's text: 5 px of foot padding and
+    // the 1 px border closer than the breadcrumb alone (9 px + border), in
+    // every scheme. A bar that drifts off the breadcrumb, or a foot padding
+    // left at 9 px, moves this.
+    for (const g of gaps) expect(alone.textGap - g).toBeCloseTo(6, 0);
+  });
+});
+
+test.describe("section bar on a 2× screen", () => {
+  // Measured: at device scale 2, content inserted above the anchor after the
+  // reveal (10.3 px here, a late image or diagram) moves the anchored heading
+  // 0.3 px though scroll anchoring keeps it in place; the pin's 2 px tolerance
+  // absorbs that, tolerance 0 dropped the pin and showed the last section.
+  test.use({ deviceScaleFactor: 2 });
+  test("a hash near the foot keeps its section when late content above shifts it by a fraction of a px", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const url = `${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/foot.mdx")}&lens=all`;
+    await page.goto(url);
+    await expect(n(page)).toHaveText("1/4");
+    const id = await page.locator(".wiki-article details.fold h4", { hasText: "Second detail" }).getAttribute("id");
+    await page.goto(`${url}#${id}`);
+    await expect(title(page)).toHaveText("Second fold");
+    const drift = await page.evaluate(async (id) => {
+      const el = document.getElementById(id!)!;
+      const top = el.getBoundingClientRect().top;
+      const d = document.createElement("div");
+      d.style.height = "10.3px";
+      document.querySelector(".wiki-article")!.prepend(d);
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      return Math.abs(el.getBoundingClientRect().top - top);
+    }, id);
+    // The case itself: the anchor moved, by less than the tolerance.
+    expect(drift).toBeGreaterThan(0);
+    expect(drift).toBeLessThan(2);
+    await page.waitForTimeout(200);
+    await expect(title(page)).toHaveText("Second fold");
+    await expect(n(page)).toHaveText("3/4");
   });
 });
 
@@ -564,6 +612,32 @@ test.describe("section bar", () => {
       await expect(page.locator(".wiki-article-head h1")).toHaveText("Long plan");
     }
     expect(await keydowns()).toBe(before);
+  });
+
+  test("navigations with the menu open leave no pointerdown listener behind on the document", async ({ page }) => {
+    await openLong(page);
+    const cdp = await page.context().newCDPSession(page);
+    const pointerdowns = async (): Promise<number> => {
+      const { result } = await cdp.send("Runtime.evaluate", { expression: "document" });
+      const { listeners } = await cdp.send("DOMDebugger.getEventListeners", { objectId: result.objectId! });
+      return listeners.filter((l) => l.type === "pointerdown").length;
+    };
+    await page.locator(".wiki-article a", { hasText: /Short page|short/ }).first().click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Short page");
+    await page.goBack();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Long plan");
+    const before = await pointerdowns();
+    for (let k = 0; k < 3; k++) {
+      await page.locator("#wikiSectionBar .wiki-sec-btn").click();
+      await expect(page.locator("#wikiSectionMenu")).toBeVisible();
+      expect(await pointerdowns()).toBe(before + 1);
+      // A history move fires no pointer event: only the teardown closes the menu.
+      await page.goForward();
+      await expect(page.locator(".wiki-article-head h1")).toHaveText("Short page");
+      await page.goBack();
+      await expect(page.locator(".wiki-article-head h1")).toHaveText("Long plan");
+    }
+    expect(await pointerdowns()).toBe(before);
   });
 
   test("a navigation with the menu open closes it: Esc in the next bar still leaves focus mode", async ({ page }) => {
