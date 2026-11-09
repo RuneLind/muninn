@@ -129,7 +129,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Merged with the mermaid PR (#833, both sides above): 844,882 bytes (287,616 gzipped).
 // PR 3's fix round 1 batch 4 (the chip's punctuation class): 845,061 (287,697).
 // Fix round 2 batch 2 (opening-bracket class, day.month, unchip scope): 845,569.
-const WIKI_CLIENT_MAX_BYTES = 846_000;
+// 2026-11-09, issue #623 (the Pages button and the rail panel's open, close and
+// Escape in wiki-pane-toggle.ts): 846,217 bytes (288,039 gzipped).
+const WIKI_CLIENT_MAX_BYTES = 847_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -161,7 +163,9 @@ test("wikiClientScript stays under its size pin", async () => {
 // `RailDeps` relays gone): 3,450 lines; 51 lets.
 // 2026-11-08, render-richer PR 3: the section bar's import and its one mount
 // call after each page render (the bar lives in `wiki-section-bar.ts`): 3,452.
-const WIKI_BROWSER_MAX_LINES = 3_452;
+// 2026-11-09, issue #623: `closeRailPanel()` in `loadPage` and
+// `loadPageByRelPath`, the two places every page open passes: 3,454.
+const WIKI_BROWSER_MAX_LINES = 3_454;
 const WIKI_BROWSER_MAX_MODULE_LETS = 51;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {

@@ -850,10 +850,12 @@ test.describe("Wiki rail: grouped work threads", () => {
         const side = (k: string) => `${s.getPropertyValue(`border-${k}-style`)} ${s.getPropertyValue(`border-${k}-width`)}`;
         return { content: s.content, position: s.position, shadow: s.boxShadow, top: side("top"), left: side("left"), right: side("right"), bottom: side("bottom") };
       }, pseudo);
-    for (const rail of [260, 200]) {
+    // 260 only: a 200 px rail needed a 445 px window, where the rail is now
+    // the Pages panel (issue #623).
+    for (const rail of [260]) {
       await page.emulateMedia({ forcedColors: "none" });
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, rail] as const);
-      await page.setViewportSize({ width: rail === 200 ? 445 : 1400, height: 900 });
+      await page.setViewportSize({ width: 1400, height: 900 });
       await openReader(page);
       await expect(groupCard(page, `group:anchor:${REL1}`)).not.toHaveClass(/\bopen\b/);
       const normal = await layout();
@@ -1101,11 +1103,12 @@ test.describe("Wiki rail: grouped work threads", () => {
       { rail: 260, win: 1400, scheme: "dark" },
       { rail: 300, win: 1400, scheme: "light" },
       { rail: 300, win: 1400, scheme: "dark" },
-      { rail: 200, win: 445, scheme: "light" },
       // Forced colours: the group's edges are drawn without layout, so the table holds there too.
       { rail: 260, win: 1400, scheme: "light", forced: true },
-      { rail: 200, win: 445, scheme: "light", forced: true },
-    ] as const;
+      // No 200 px pass: a rail under 260 was reachable only through the
+      // viewport bound in a 445 px window, where the rail is now the Pages
+      // panel (issue #623). The under-260 branches below no longer run.
+    ] as const satisfies ReadonlyArray<{ rail: number; win: number; scheme: "light" | "dark"; forced?: true }>;
     for (const p of passes) {
       const forced = "forced" in p;
       await page.emulateMedia({ colorScheme: p.scheme, forcedColors: forced ? "active" : "none" });
@@ -1159,7 +1162,7 @@ test.describe("Wiki rail: grouped work threads", () => {
     console.log(`[group width table, ${font}] ` + JSON.stringify(Object.fromEntries([...widest].map(([k, v]) => [k, Math.round(v * 10) / 10]))));
     // Forced colours cost no label width: the narrowest label is never below
     // normal's (it can be wider where the 📌 renders as a text glyph).
-    for (const kind of ["group", "child"]) for (const rail of [260, 200]) expect.soft(labels.get(`${kind} @${rail} forced`), `${kind} @${rail}`).toBeGreaterThanOrEqual(labels.get(`${kind} @${rail}`)!);
+    for (const kind of ["group", "child"]) for (const rail of [260]) expect.soft(labels.get(`${kind} @${rail} forced`), `${kind} @${rail}`).toBeGreaterThanOrEqual(labels.get(`${kind} @${rail}`)!);
     const kinds = new Map<string, number>();
     for (const f of failures) {
       const k = f.replace(/\[[^\]]*\]/, "").replace(/"[^"]*"/, "…");

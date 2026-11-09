@@ -991,13 +991,11 @@ test.describe("Wiki rail: Work threads", () => {
       { rail: 260, win: 1400, scheme: "dark" },
       { rail: 300, win: 1400, scheme: "light" },
       { rail: 300, win: 1400, scheme: "dark" },
-      // Under 260 only through the viewport bound (a 445 px window): the meta
-      // lines may wrap at their separators, but nothing may be cut.
-      { rail: 200, win: 445, scheme: "light" },
-      // A 330 px window: the widest part is wider than the line, so it wraps
-      // inside itself rather than running under the 📌.
-      { rail: 148, win: 330, scheme: "light" },
-    ] as const;
+      // A rail under 260 was reachable only through the viewport bound, in a
+      // 445 or 330 px window. At or under 768 px the rail is now the Pages
+      // panel, the window's width less its gutters (issue #623), so those two
+      // passes are gone; the under-260 branches below no longer run.
+    ] as const satisfies ReadonlyArray<{ rail: number; win: number; scheme: "light" | "dark" }>;
     for (const p of passes) {
       await page.emulateMedia({ colorScheme: p.scheme });
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, p.rail] as const);

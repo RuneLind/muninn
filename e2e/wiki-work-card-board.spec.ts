@@ -100,7 +100,7 @@ for (const [width, tracks, shown] of [
   [1512, 3, ["you", "moving"]],
   [1728, 4, ["you", "moving"]],
   [1920, 5, COLUMN_IDS],
-  [700, 1, ["you", "moving"]],
+  [390, 1, ["you", "moving"]],
 ] as const) {
   test(`at a ${width} window the board has ${tracks} track${tracks === 1 ? "" : "s"} and shows ${shown.length} columns' content, with nothing overflowing`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
@@ -218,7 +218,7 @@ for (const [label, width, f, tracks] of [
   ["1920", 1920, false, 5],
   ["1280 under F", 1280, true, 5],
   ["800 under F", 800, true, 3],
-  ["700", 700, false, 1],
+  ["390", 390, false, 1],
 ] as const) {
   test(`beside a tall Waiting on you at ${label}, the other columns land right under each other`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
@@ -234,7 +234,7 @@ for (const [label, width, f, tracks] of [
   });
 }
 
-for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [700, 1]] as const) {
+for (const [width, tracks] of [[1280, 2], [1512, 3], [1728, 4], [390, 1]] as const) {
   test(`at ${width}, a Waiting on you the reader folds leaves no gap`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await openSettled(page, BOARD_TALL);
@@ -305,7 +305,7 @@ for (const [width, tracks] of [[1512, 3], [1728, 4]] as const) {
   });
 }
 
-for (const width of [600, 420]) {
+for (const width of [390, 320]) {
   test(`at a ${width} window the track fits the board, however narrow`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await openSettled(page, BOARD_TALL);
@@ -322,8 +322,8 @@ for (const width of [600, 420]) {
     console.log(`window ${width}: board ${r.board}, tracks ${r.tracks.join(" ")}`);
     expect(r.tracks).toHaveLength(1);
     expect(r.tracks[0]!).toBeLessThanOrEqual(r.board + 0.5);
-    // At 420 the page leaves the card no width at all, so there is nothing to hold it to.
-    if (r.board > 0) expect(r.past).toEqual([]);
+    expect(r.board).toBeGreaterThan(0);
+    expect(r.past).toEqual([]);
   });
 }
 

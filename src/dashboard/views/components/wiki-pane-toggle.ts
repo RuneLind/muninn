@@ -23,6 +23,11 @@
  * window folded the pane on the reader's next wide session with no memory of
  * asking.
  *
+ * A third class, `.rail-open`, means something only at or under
+ * `RAIL_DRAWER_MAX` (issue #623), where the rail has no column: the Pages
+ * button (`#wikiRailToggle`, shown only there) opens it in the article's place, over it. article. Escape, the button and opening a page close
+ * it. Not persisted: a phone reader came for the page.
+ *
  * The right-pane state persists (localStorage, best-effort like the rail width);
  * focus does not — see the rationale in `wiki-panes.ts`.
  */
@@ -30,6 +35,7 @@ import { PANES_KEY, paneKeyAction, parseStoredRightCollapsed } from "./wiki-pane
 
 const RIGHT = "right-collapsed";
 const FOCUS = "focus-mode";
+const RAIL_OPEN = "rail-open";
 
 function readStored(): boolean {
   try {
@@ -68,10 +74,21 @@ export function revealRightPane(): void {
 /** Leave focus mode — for code about to show something in the RAIL, which
  *  focus mode hides. The right pane's own collapse is left as it is. */
 export function leaveFocusMode(): void {
-  if (!layoutEl?.classList.contains(FOCUS)) return;
+  if (!layoutEl) return;
+  // Where the rail is a panel, showing something in it means opening it.
+  const btn = document.getElementById("wikiRailToggle");
+  if (btn && btn.getClientRects().length > 0) layoutEl.classList.add(RAIL_OPEN);
+  const focus = layoutEl.classList.contains(FOCUS);
   layoutEl.classList.remove(FOCUS);
   syncButtons();
-  window.dispatchEvent(new Event("resize"));
+  if (focus) window.dispatchEvent(new Event("resize"));
+}
+
+/** Close the rail panel: a page is opening, and under it is where it shows. */
+export function closeRailPanel(): void {
+  if (!layoutEl?.classList.contains(RAIL_OPEN)) return;
+  layoutEl.classList.remove(RAIL_OPEN);
+  syncButtons();
 }
 
 export function initPaneToggles(): void {
@@ -90,6 +107,7 @@ export function initPaneToggles(): void {
     const focus = String(layout.classList.contains(FOCUS));
     document.querySelectorAll<HTMLElement>("[data-pane-toggle='right'][aria-pressed]").forEach((b) => b.setAttribute("aria-pressed", right));
     document.querySelectorAll<HTMLElement>("[data-pane-toggle='focus'][aria-pressed]").forEach((b) => b.setAttribute("aria-pressed", focus));
+    document.getElementById("wikiRailToggle")?.setAttribute("aria-expanded", String(layout.classList.contains(RAIL_OPEN)));
   };
 
   /** The pane is toggleable only while it is on screen — its computed display,
@@ -118,6 +136,10 @@ export function initPaneToggles(): void {
   document.addEventListener("click", (e) => {
     const t = e.target as HTMLElement | null;
     const btn = t?.closest?.("[data-pane-toggle], [data-pane-open]") as HTMLElement | null;
+    if (btn?.getAttribute("data-pane-toggle") === "rail") {
+      layout.classList.toggle(RAIL_OPEN);
+      return syncButtons();
+    }
     if (!btn) return;
     const toggle = btn.getAttribute("data-pane-toggle");
     if (toggle === "right") return setRight(!layout.classList.contains(RIGHT));
@@ -133,6 +155,17 @@ export function initPaneToggles(): void {
 
   document.addEventListener("keydown", (e) => {
     const t = e.target as HTMLElement | null;
+    // The rail panel's Escape, from a typing target too (its search box), but
+    // never from a dialog or a menu, whose Escape is their own.
+    if (e.key === "Escape" && layout.classList.contains(RAIL_OPEN) && !t?.closest?.("dialog, [role='dialog'], [role='menu']")) {
+      const btn = document.getElementById("wikiRailToggle");
+      if (btn && btn.getClientRects().length > 0) {
+        closeRailPanel();
+        btn.focus();
+        e.preventDefault();
+        return;
+      }
+    }
     const action = paneKeyAction({
       key: e.key,
       ctrlKey: e.ctrlKey,

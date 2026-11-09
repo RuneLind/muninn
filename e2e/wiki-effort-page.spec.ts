@@ -483,9 +483,9 @@ test("the activity strip paints its session dots, clips no label, and fits at de
     expect(g.clippedLabels, `${width}px: clipped run labels`).toEqual([]);
     expect(g.scrolls, `${width}px: the strip scrolls sideways`).toBe(false);
   }
-  // A narrow article (600 px viewport) scrolls; the scroll region is then a
-  // named tab stop. (Below ~600 px the reader has no article column at all.)
-  await page.setViewportSize({ width: 600, height: 800 });
+  // A narrow article (a 320 px phone) scrolls; the scroll region is then a
+  // named tab stop.
+  await page.setViewportSize({ width: 320, height: 800 });
   const narrow = await stripGeometry(page);
   expect(narrow.scrolls).toBe(true);
   expect(narrow.dots).toEqual(narrow.dots.map(() => true));

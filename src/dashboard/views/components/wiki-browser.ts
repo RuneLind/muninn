@@ -97,7 +97,7 @@ import {
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
-import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
+import { closeRailPanel, initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
   parseRelatedOrder,
 } from "./wiki-recents.ts";
@@ -1573,6 +1573,7 @@ function openNavTarget(target: NavTarget, push: boolean): void {
 
 function loadPage(name: string, push: boolean, revealHash = true): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
+  closeRailPanel();
   // Raised BEFORE anything else: `currentName` is only set from the response, so
   // without this signal the whole round-trip reads as the "start" view and a
   // refetch resolving mid-click would re-sort the list under the row just clicked.
@@ -1602,6 +1603,7 @@ function loadPage(name: string, push: boolean, revealHash = true): void {
  *  `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true, revealHash = true): void {
   hideExplainPill();
+  closeRailPanel();
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
   // The explainer branch is `loadPage`'s, and it has to exist here too now that
