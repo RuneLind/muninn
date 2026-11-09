@@ -850,28 +850,27 @@ test.describe("Wiki rail: grouped work threads", () => {
         const side = (k: string) => `${s.getPropertyValue(`border-${k}-style`)} ${s.getPropertyValue(`border-${k}-width`)}`;
         return { content: s.content, position: s.position, shadow: s.boxShadow, top: side("top"), left: side("left"), right: side("right"), bottom: side("bottom") };
       }, pseudo);
-    // 260 only: a 200 px rail needed a 445 px window, where the rail is now
+    // At 260 only: a 200 px rail needed a 445 px window, where the rail is now
     // the Pages panel (issue #623).
-    for (const rail of [260]) {
-      await page.emulateMedia({ forcedColors: "none" });
-      await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, rail] as const);
-      await page.setViewportSize({ width: 1400, height: 900 });
-      await openReader(page);
-      await expect(groupCard(page, `group:anchor:${REL1}`)).not.toHaveClass(/\bopen\b/);
-      const normal = await layout();
-      expect(normal.rows.length).toBeGreaterThan(0);
-      await page.emulateMedia({ forcedColors: "active" });
-      // The rows inside the body keep today's width, the closed stack keeps
-      // its height (no header grows a line), and its label loses no room. The
-      // label can GAIN room: on Linux forced colours draw the 📌 as a narrower
-      // text glyph (CI measured 188 against 185), so it is a floor, not equal.
-      const forced = await layout();
-      expect.soft(forced.rows, `rail ${rail} rows`).toEqual(normal.rows);
-      expect.soft(forced.stack.h, `rail ${rail} stack height`).toBe(normal.stack.h);
-      expect.soft(forced.stack.w, `rail ${rail} stack width`).toBe(normal.stack.w);
-      expect.soft(forced.stackLabel.h, `rail ${rail} label height`).toBe(normal.stackLabel.h);
-      expect.soft(forced.stackLabel.w, `rail ${rail} label width`).toBeGreaterThanOrEqual(normal.stackLabel.w);
-    }
+    const rail = 260;
+    await page.emulateMedia({ forcedColors: "none" });
+    await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, rail] as const);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await openReader(page);
+    await expect(groupCard(page, `group:anchor:${REL1}`)).not.toHaveClass(/\bopen\b/);
+    const normal = await layout();
+    expect(normal.rows.length).toBeGreaterThan(0);
+    await page.emulateMedia({ forcedColors: "active" });
+    // The rows inside the body keep today's width, the closed stack keeps
+    // its height (no header grows a line), and its label loses no room. The
+    // label can GAIN room: on Linux forced colours draw the 📌 as a narrower
+    // text glyph (CI measured 188 against 185), so it is a floor, not equal.
+    const forced = await layout();
+    expect.soft(forced.rows, `rail ${rail} rows`).toEqual(normal.rows);
+    expect.soft(forced.stack.h, `rail ${rail} stack height`).toBe(normal.stack.h);
+    expect.soft(forced.stack.w, `rail ${rail} stack width`).toBe(normal.stack.w);
+    expect.soft(forced.stackLabel.h, `rail ${rail} label height`).toBe(normal.stackLabel.h);
+    expect.soft(forced.stackLabel.w, `rail ${rail} label width`).toBeGreaterThanOrEqual(normal.stackLabel.w);
     // The open series group: its body's outline was a box shadow, gone here;
     // an ::after draws its sides and bottom, never its top (the open header
     // closes it there), and the body itself takes no border.
@@ -1107,7 +1106,7 @@ test.describe("Wiki rail: grouped work threads", () => {
       { rail: 260, win: 1400, scheme: "light", forced: true },
       // No 200 px pass: a rail under 260 was reachable only through the
       // viewport bound in a 445 px window, where the rail is now the Pages
-      // panel (issue #623). The under-260 branches below no longer run.
+      // panel (issue #623).
     ] as const satisfies ReadonlyArray<{ rail: number; win: number; scheme: "light" | "dark"; forced?: true }>;
     for (const p of passes) {
       const forced = "forced" in p;
@@ -1130,26 +1129,21 @@ test.describe("Wiki rail: grouped work threads", () => {
       for (const m of measured) {
         const at = `${font} ${p.rail}/${p.scheme}${forced ? "/forced" : ""} [${m.id}]`;
         for (const issue of m.fit.issues) failures.push(`${at}: ${issue}`);
-        // Tally and span: one line each at 260 and 300; two below.
-        // A child card's span line holds three parts since D14 (`since`, the
-        // date and the age chip) in a narrower label, so at 200 px it may take
-        // 3 lines; a group header's keeps 2.
-        const maxLines = p.rail >= 260 ? 1 : 2;
+        // Tally and span: one line each at 260 and 300.
         for (const l of m.fit.lines) {
           if (l.cls.includes("wiki-thread-why")) continue;
-          const bound = m.kind === "child" && l.cls.includes("wiki-thread-span") && p.rail < 260 ? 3 : maxLines;
-          if (l.lines > bound) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
+          if (l.lines > 1) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
         }
-        // A part never breaks inside itself (the chip may, past the line).
-        // At 260 and 300 the also chip (its label cut to 24 characters) is one line too.
+        // A part never breaks inside itself, the also chip (its label cut to
+        // 24 characters) included.
         for (const q of m.fit.partLines)
-          if (q.lines > 1 && (p.rail >= 260 || !String(q.text).startsWith("also "))) failures.push(`${at}: "${q.text}" breaks inside itself`);
+          if (q.lines > 1) failures.push(`${at}: "${q.text}" breaks inside itself`);
         if (m.fit.nameLines > 2) failures.push(`${at}: the name takes ${m.fit.nameLines} lines`);
         if (p.scheme === "light" && p.rail !== 300) {
           const lk = `${m.kind} @${p.rail}${forced ? " forced" : ""}`;
           labels.set(lk, Math.min(labels.get(lk) ?? Infinity, m.fit.label));
         }
-        if (p.rail >= 260 && p.scheme === "light" && !forced) {
+        if (p.scheme === "light" && !forced) {
           const lk = `${m.kind} label @${p.rail}`;
           widest.set(lk, Math.min(widest.get(lk) ?? Infinity, m.fit.label));
           for (const part of m.fit.parts) if (!NAMES.includes(part.text)) widest.set(part.text, Math.max(widest.get(part.text) ?? 0, part.width));
@@ -1162,7 +1156,7 @@ test.describe("Wiki rail: grouped work threads", () => {
     console.log(`[group width table, ${font}] ` + JSON.stringify(Object.fromEntries([...widest].map(([k, v]) => [k, Math.round(v * 10) / 10]))));
     // Forced colours cost no label width: the narrowest label is never below
     // normal's (it can be wider where the 📌 renders as a text glyph).
-    for (const kind of ["group", "child"]) for (const rail of [260]) expect.soft(labels.get(`${kind} @${rail} forced`), `${kind} @${rail}`).toBeGreaterThanOrEqual(labels.get(`${kind} @${rail}`)!);
+    for (const kind of ["group", "child"]) expect.soft(labels.get(`${kind} @260 forced`), `${kind} @260`).toBeGreaterThanOrEqual(labels.get(`${kind} @260`)!);
     const kinds = new Map<string, number>();
     for (const f of failures) {
       const k = f.replace(/\[[^\]]*\]/, "").replace(/"[^"]*"/, "…");

@@ -939,8 +939,9 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
   });
 
   test("fix round 2, item 6: between 18rem and 28rem the date cell sits under the text", async ({ page }) => {
-    // 780: the narrowest three-pane window's column (at or under 768 the rail
-    // has no column, issue #623, and the log is wider than 28rem).
+    // 780: a window just over the 768 px breakpoint, where the rail still has
+    // its column (at or under it the rail has none, issue #623, and the log
+    // is wider than 28rem).
     await page.setViewportSize({ width: 780, height: 900 });
     const seen = await open_(page);
     const log = page.locator(".wiki-article section.decision-log").first();
