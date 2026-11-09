@@ -262,8 +262,9 @@ function precedingText(node: Text): string {
 /** A before → after chip (`reader-shapes.ts`) splits its text node, and
  *  `findRefs` reads one text node: a quoted section title holding a chip
  *  (`see «Cut 12 → 9 ms»`) gets its chip back as plain text so it links.
- *  Only where the walker below would link it: outside {@link SKIP}, and not
- *  inside the section the quote names. */
+ *  Skipped inside {@link SKIP} and inside the target the quote names. The quote
+ *  is read from `parent.textContent`, so one that crosses an element (`«**Cut**
+ *  12 → 9 ms»`) still loses its chip without linking: a known gap. */
 function unchipTitleQuotes(root: Element, titles: ReadonlyMap<string, Element>): void {
   const keys = new Set(titles.keys());
   for (const chip of Array.from(root.querySelectorAll(".ba-chip"))) {

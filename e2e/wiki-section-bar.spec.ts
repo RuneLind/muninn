@@ -411,10 +411,11 @@ test.describe("one sticky head", () => {
 });
 
 test.describe("section bar on a 2× screen", () => {
-  // Measured: at device scale 2, content inserted above the anchor after the
-  // reveal (10.3 px here, a late image or diagram) moves the anchored heading
-  // 0.3 px though scroll anchoring keeps it in place; the pin's 2 px tolerance
-  // absorbs that, tolerance 0 dropped the pin and showed the last section.
+  // Content inserted above the anchor after the reveal (10.3 px here, a late
+  // image or diagram) moves the anchored heading ~0.3 px: Chromium's scroll
+  // anchoring adjusts by whole px. Device scale does not change it (scale 1
+  // measures the same). The pin's 2 px tolerance absorbs that; tolerance 0
+  // dropped the pin and showed the last section.
   test.use({ deviceScaleFactor: 2 });
   test("a hash near the foot keeps its section when late content above shifts it by a fraction of a px", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });

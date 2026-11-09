@@ -140,7 +140,8 @@ export function componentBlockCss(scope: string): string {
     @media (max-width: 720px) { ${scope} ul.label-grid > li { grid-template-columns: minmax(0, 1fr); } }
     /* Before → after chips: no good/bad colour, the reader cannot know which
        way is better. Pure styling spans, no hidden text. Soft and light accent,
-       not muted and accent: those measured 3.6–4.4:1 on the chip (e2e chip contrast). */
+       not muted and accent: those fell under 4.5:1 in some light, dark and paper-light
+       cells (e2e chip contrast). */
     ${scope} .ba-chip {
       white-space: nowrap; font-variant-numeric: tabular-nums; padding: 0 0.3em; border-radius: 4px;
       background: color-mix(in srgb, var(--accent) 10%, transparent);

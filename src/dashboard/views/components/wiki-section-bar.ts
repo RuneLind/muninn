@@ -39,8 +39,8 @@
  * | menu open              | ↑ / ↓ / Home / End                      | focus moves between entries                                  |
  * | menu open              | pick a section (in a closed fold too)   | its fold opens, the pane scrolls it under the bar, the menu  |
  * |                        |                                         | closes, focus moves to its heading or summary (no scroll);   |
- * |                        |                                         | near the page's foot the picked section stays current until  |
- * |                        |                                         | the pane scrolls again                                       |
+ * |                        |                                         | the picked section stays current until its heading moves     |
+ * |                        |                                         | more than 2 px in the viewport                               |
  * | any                    | `#anchor` link, load with a hash, a     | the section holding the revealed element is current (also    |
  * |                        | card chip or pill (`wiki:reveal`)       | near the foot) until the pane scrolls again                  |
  * | any                    | 🧭 buttons, reader-only marks, size     | titles read without them (`[data-walkthrough-btn]`,          |

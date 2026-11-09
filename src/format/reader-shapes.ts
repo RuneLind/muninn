@@ -326,7 +326,7 @@ const CHIP_SIDE_PARTS = new RegExp(
 /** Units taken only glued: a lone letter after a space is a word (`5 → 6 x`). */
 const CHIP_GLUED_ONLY: ReadonlySet<string> = new Set(["x", "t", "d", "k", "K", "M"]);
 
-/** What a rate's `/…` may be: a unit or a span of time (`MB/s`, `kr/mnd`);
+/** What a rate's `/…` may be: a unit, a span of time or `run` (`MB/s`, `kr/mnd`);
  *  `s/claim` is no rate. */
 const CHIP_PER: ReadonlySet<string> = new Set([...NUM_UNITS, "day", "dag", "døgn", "uke", "week", "mnd", "month", "år", "year", "run"]);
 
