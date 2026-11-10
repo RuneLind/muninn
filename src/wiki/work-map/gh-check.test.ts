@@ -930,6 +930,27 @@ describe("the live pages' prs:", () => {
     expect(cached(both, AT + GH_STATE_TTL_MS).failures.size).toBe(0);
   });
 
+  test("a repo that failed in both caches reads the card's reason", async () => {
+    // The card's query (#1) finds no gh; the pages' query (#5) is refused the login.
+    const gh: GhRunner = async (args) =>
+      args.some((a) => a.startsWith("query=") && a.includes("number:5")) ? { exitCode: 4, stdout: "", stderr: "gh auth login" } : { exitCode: -1, stdout: "", stderr: "", noBinary: true };
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${WIDGETS}#5]`, [[url(WIDGETS, 1), "x", "open", ""]]) });
+    await ran(r, deps(gh));
+    expect(cached([`${WIDGETS}#5`]).failures).toEqual(new Map([[WIDGETS, "no-gh"]]));
+  });
+
+  test("a card record past its hour does not hide the pages' newer one for the same repo", async () => {
+    const refused: GhRunner = async () => ({ exitCode: 4, stdout: "", stderr: "gh auth login" });
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${WIDGETS}#5]`, [[url(WIDGETS, 1), "x", "open", ""]]) });
+    await ran(r, deps(refused));
+    // The row goes, so the card stops asking widgets and its record stays at AT; the page's PR is asked again 50 minutes on.
+    writeFileSync(path.join(r, "plans/a.mdx"), PRS_PAGE(`[${WIDGETS}#5]`));
+    const later = AT + 50 * 60_000;
+    await ran(r, deps(refused), map(), () => later);
+    expect(cached([`${WIDGETS}#5`], AT + 70 * 60_000).failures).toEqual(new Map([[WIDGETS, "auth"]]));
+    expect(cached([`${WIDGETS}#5`], later + GH_STATE_TTL_MS).failures.size).toBe(0);
+  });
+
   test("the pages' prs: have an hourly cap of their own, and a PR the card asks for is not asked twice", async () => {
     const rows = Array.from({ length: GH_PRS_PER_HOUR }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
     const prs = Array.from({ length: GH_PRS_PER_HOUR + 1 }, (_, i) => `${GEARS}#${i + 1}`);
@@ -1053,6 +1074,29 @@ describe("the pages' prs: and the card's own answer", () => {
     expect(second.notChecked).toBeUndefined();
     // The page side still learns why its PR is unknown.
     expect(cachedPrFacts("w", prsRefsOf({ prs: [`${WIDGETS}#5`] }).refs, AT).failures).toEqual(new Map([[WIDGETS, "auth"]]));
+  });
+
+  test("a failure the pages' flight recorded stays out of the card's body while that flight still runs", async () => {
+    const table = { [`${WIDGETS}#1`]: { state: "OPEN" } as Pr, [`${GEARS}#7`]: { state: "OPEN" } as Pr };
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    // The pages' flight has two queries: widgets#5 is refused at once, gears#7 hangs, so the flight is not started again.
+    const gh: GhRunner = async (args) => {
+      if (args.includes("repo=gears")) await gate;
+      if (args.some((a) => a.startsWith("query=") && a.includes("number:5"))) return { exitCode: 4, stdout: "", stderr: "gh auth login" };
+      return stubGh(table)(args);
+    };
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${WIDGETS}#5, ${GEARS}#7]`, OWN) });
+    const first = await run(r, deps(gh));
+    const failuresOf = () => cachedPrFacts("w", prsRefsOf({ prs: [`${WIDGETS}#5`] }).refs, AT).failures;
+    for (let i = 0; i < 50 && failuresOf().size === 0; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(failuresOf()).toEqual(new Map([[WIDGETS, "auth"]]));
+    const second = await run(r, deps(gh));
+    expect(second).toEqual(first);
+    expect(second.notChecked).toBeUndefined();
+    expect(second.checked).toBe(1);
+    release();
+    await pagePrsSettled();
   });
 
   test("what the pages' prs: asked takes nothing from the card's hour: a row added later is still checked", async () => {
