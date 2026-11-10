@@ -133,7 +133,10 @@ describe("/api/wiki/step-done", () => {
     const { status: ps, body: p } = await previewOf("**Restart the server:** so the bundle is fresh.");
     expect(ps).toBe(200);
     expect(p.removed).toEqual([{ line: 9, text: "1. **Restart the server:** so the bundle is fresh." }]);
-    expect(p.renumbered).toEqual({ line: 10, before: "2. Read the second note.", after: "1. Read the second note." });
+    expect(p.renumbered).toEqual([
+      { line: 10, before: "2. Read the second note.", after: "1. Read the second note." },
+      { line: 11, before: "3. Read the third note.", after: "2. Read the third note." },
+    ]);
     expect(p.logEntry).toBe("## [2026-11-10] step-done | Step fixture\n- Step done: Restart the server — so the bundle is fresh.");
     expect(String(p.logNote)).toContain("if appending it fails");
     expect(await pageText()).toBe(PAGE);

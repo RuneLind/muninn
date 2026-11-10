@@ -26,7 +26,9 @@ import {
   type ComponentBlock,
   type ListBlock,
   type NextMovesLane,
+  type OlBlock,
 } from "./markdown-ast.ts";
+import { ordinals } from "./block-renderer.ts";
 import { frontmatterBodyLine } from "./frontmatter-fence.ts";
 import { leadSentence } from "./lead-sentence.ts";
 import { sha256 } from "../utils/date-hash.ts";
@@ -57,8 +59,8 @@ export type StepDoneEdit =
       content: string;
       /** Every removed non-blank line, 1-based on the page. */
       removed: { line: number; text: string }[];
-      /** The next item's marker line, when it took the deleted first item's number. */
-      renumbered: { line: number; before: string; after: string } | null;
+      /** The later items of the step's numbered list, each taking its number minus one. */
+      renumbered: { line: number; before: string; after: string }[];
       laneRemoved: boolean;
       nextMovesRemoved: boolean;
       /** The step's bold label, when it opens with one. */
@@ -120,7 +122,8 @@ function countedLaneRefs(blocks: Block[]): LaneRef[] {
 
 interface Parsed {
   lines: string[];
-  eol: string;
+  /** `ends[i]` is the line break after `lines[i]`, byte for byte ("" after the last). */
+  ends: string[];
   from: number;
   blocks: Block[];
   refs: LaneRef[];
@@ -130,8 +133,9 @@ interface Parsed {
 }
 
 function parsePage(text: string): Parsed | { error: string } {
-  const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split(/\r?\n/);
+  const ends = [...text.matchAll(/\r?\n/g)].map((m) => m[0]);
+  ends.push("");
   const from = frontmatterBodyLine(text.replace(/\r\n/g, "\n"));
   const blocks = parseBlocks(lines.slice(from).join("\n"));
   const refs = countedLaneRefs(blocks);
@@ -187,7 +191,7 @@ function parsePage(text: string): Parsed | { error: string } {
     if (found.join("\0") !== ref.lane.items.join("\0")) return { error: "a lane's steps read differently here than in the index" };
     laneRows.push(row);
   }
-  return { lines, eol, from, blocks, refs, steps, laneRows };
+  return { lines, ends, from, blocks, refs, steps, laneRows };
 }
 
 /** The open steps of every counted `you` lane, with their keys, in page order. */
@@ -225,15 +229,52 @@ function closeLine(lines: string[], from: number, fenced: boolean[], open: numbe
 
 const blank = (s: string | undefined) => s !== undefined && s.trim() === "";
 
-/** Add to `del` the blank line after each deleted run that a blank line also precedes. */
-function collapseBlanks(lines: string[], del: Set<number>, lo: number, hi: number): void {
-  for (let i = lo; i <= hi; i++) {
-    if (!del.has(i) || del.has(i - 1)) continue;
+const TAG_RE = /^<\/?[A-Z][\w.]*(?:\s[^>]*)?\/?>$/;
+const MARKER_RE = /^([ \t]*)(\d{1,9})(\.)([ \t]+)/;
+
+/**
+ * Settle the blank lines around each deleted run: a blank line on both sides
+ * collapses to one; text directly on both sides keeps one blank line between
+ * (returned: the runs' first lines, to emit a blank there); a run at the top
+ * of the page takes the blank lines after it, a run at its end the ones
+ * before. A component tag line is not text: it interrupts a paragraph anyway.
+ * `joinsSiblings` says a run sits between items of one list, where no blank
+ * line goes in.
+ */
+function settleBlanks(lines: string[], del: Set<number>, from: number, joinsSiblings: (s: number, e: number) => boolean): Set<number> {
+  const gapAt = new Set<number>();
+  const text = (i: number) => i >= from && i < lines.length && !blank(lines[i]) && !TAG_RE.test(lines[i]!.trim());
+  const runs: [number, number][] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!del.has(i)) continue;
     let e = i;
     while (del.has(e + 1)) e++;
-    if (blank(lines[i - 1]) && blank(lines[e + 1]) && e + 1 <= hi) del.add(e + 1);
+    runs.push([i, e]);
     i = e;
   }
+  for (const [s, e] of runs) {
+    if (s === 0) for (let j = e + 1; j < lines.length - 1 && blank(lines[j]); j++) del.add(j);
+    else if (e === lines.length - 1) for (let j = s - 1; j >= from && blank(lines[j]); j--) del.add(j);
+    else if (blank(lines[s - 1]) && blank(lines[e + 1])) del.add(e + 1);
+    else if (text(s - 1) && text(e + 1) && !joinsSiblings(s, e)) gapAt.add(s);
+  }
+  return gapAt;
+}
+
+/** `line` with its numbered-list marker's number set to `n`, the marker's
+ *  width and indentation kept: a shorter number takes the difference as
+ *  spaces after the delimiter, a zero-padded one stays padded. */
+function withNumber(line: string, n: number): string | null {
+  const m = MARKER_RE.exec(line);
+  if (!m || n < 0) return null;
+  const digits = m[2]!;
+  let next = String(n);
+  let pad = "";
+  if (next.length < digits.length) {
+    if (digits.startsWith("0")) next = next.padStart(digits.length, "0");
+    else pad = " ".repeat(digits.length - next.length);
+  }
+  return `${m[1]}${next}${m[3]}${pad}${line.slice(m[1]!.length + digits.length + 1)}`;
 }
 
 const laneShape = (l: NextMovesLane) => JSON.stringify([l.kind, l.known, l.label, l.who, l.role, l.since, l.sinceRaw, l.items]);
@@ -246,7 +287,7 @@ export function stepDoneEdit(text: string, key: string): StepDoneEdit {
   const step = p.steps.find((s) => s.key === key);
   if (!step) return { ok: false, code: "no-step", reason: "the page has no such open step: it changed or the step is gone" };
   if (step.refusal) return { ok: false, code: step.list ? "nested" : "checklist", reason: step.refusal };
-  const { lines, from, eol } = p;
+  const { lines, ends, from } = p;
   const list = step.list!;
   const src = listItemLines(list)![step.item]!.map((n) => from + n);
   const fenced = readerFencedLines(lines.slice(from).join("\n"));
@@ -258,20 +299,26 @@ export function stepDoneEdit(text: string, key: string): StepDoneEdit {
   if (laneClose <= laneOpen || nmClose <= nmOpen || src.some((n) => n <= laneOpen || n >= laneClose)) return unplaceable("the step shares a line with its lane's tags");
 
   const del = new Set(src);
-  let renumbered: { line: number; before: string; after: string } | null = null;
+  const renumbered: { line: number; before: string; after: string }[] = [];
   const out = [...lines];
-  if (list.type === "ol" && step.item === 0 && list.items.length > 1) {
-    const all = listItemLines(list)!;
-    const next = from + all[1]![0]!;
-    const own = /^(\s*)(\d{1,9})([.)])/.exec(lines[src[0]!]!);
-    const theirs = /^(\s*)(\d{1,9})([.)])/.exec(lines[next]!);
-    if (!own || !theirs) return unplaceable("the numbered list's markers could not be read");
-    if (own[2] !== theirs[2]) {
-      out[next] = `${theirs[1]}${own[2]}${lines[next]!.slice(theirs[1]!.length + theirs[2]!.length)}`;
-      renumbered = { line: next + 1, before: lines[next]!, after: out[next]! };
+  const all = listItemLines(list)!;
+  // A numbered list: every later item takes its number minus one, unless all
+  // its items carry the same number (`1.` `1.` `1.`), which stays as written.
+  if (list.type === "ol") {
+    const heads = all.map((ls) => from + ls[0]!);
+    const nums = heads.map((n) => MARKER_RE.exec(lines[n]!)?.[2]);
+    if (nums.some((n) => n === undefined)) return unplaceable("the numbered list's markers could not be read");
+    const values = nums.map((n) => parseInt(n!, 10));
+    if (values.some((v) => v !== values[0])) {
+      for (let k = step.item + 1; k < heads.length; k++) {
+        const at = heads[k]!;
+        const next = withNumber(lines[at]!, values[k]! - 1);
+        if (next === null) return unplaceable("the numbered list could not be renumbered");
+        out[at] = next;
+        renumbered.push({ line: at + 1, before: lines[at]!, after: next });
+      }
     }
   }
-  collapseBlanks(lines, del, laneOpen + 1, laneClose - 1);
   const bodyLeft = (open: number, close: number) => {
     for (let i = open + 1; i < close; i++) if (!del.has(i) && !blank(lines[i])) return true;
     return false;
@@ -281,14 +328,25 @@ export function stepDoneEdit(text: string, key: string): StepDoneEdit {
   if (!bodyLeft(laneOpen, laneClose)) {
     laneRemoved = true;
     for (let i = laneOpen; i <= laneClose; i++) del.add(i);
-    collapseBlanks(lines, del, nmOpen + 1, nmClose - 1);
     if (!bodyLeft(nmOpen, nmClose)) {
       nextMovesRemoved = true;
       for (let i = nmOpen; i <= nmClose; i++) del.add(i);
-      collapseBlanks(lines, del, from, lines.length - 1);
     }
   }
-  const content = out.filter((_, i) => !del.has(i)).join(eol);
+  const siblings = new Set(all.filter((_, k) => k !== step.item).flat().map((n) => from + n));
+  const gapAt = settleBlanks(lines, del, from, (s, e) => !laneRemoved && (siblings.has(s - 1) || siblings.has(e + 1)));
+  // Each surviving line keeps its own line break; the page's last line break
+  // (none, or a final one) stays the last.
+  const kept: string[] = [];
+  let last = -1;
+  for (let i = 0; i < out.length; i++) {
+    if (gapAt.has(i)) kept.push(ends[i]!);
+    if (del.has(i)) continue;
+    kept.push(out[i]! + ends[i]!);
+    last = kept.length - 1;
+  }
+  if (del.has(lines.length - 1) && last >= 0) kept[last] = kept[last]!.replace(/\r?\n$/, "");
+  const content = kept.join("");
   const removed = [...del].sort((a, b) => a - b).filter((i) => !blank(lines[i])).map((i) => ({ line: i + 1, text: lines[i]! }));
 
   // The postcondition, through the walk the index counts with.
@@ -306,6 +364,20 @@ export function stepDoneEdit(text: string, key: string): StepDoneEdit {
   }
   const got = after.map(laneShape);
   if (got.length !== expected.length || got.some((g, k) => g !== expected[k])) return unplaceable("the page would not read back as the step removed");
+  // A renumbered line changes its marker's number and nothing else, and the
+  // list renders as before with the step's number gone and later ones one lower.
+  const sameBut = (a: string, b: string) => a.replace(MARKER_RE, "$1#$3").replace(/^([ \t]*#\.)[ \t]+/, "$1 ") === b.replace(MARKER_RE, "$1#$3").replace(/^([ \t]*#\.)[ \t]+/, "$1 ");
+  if (renumbered.some((r) => !sameBut(r.before, r.after))) return unplaceable("a renumbered line would change more than its number");
+  if (renumbered.length && !laneRemoved) {
+    const lists = (l: ComponentBlock) => l.children.filter((b): b is ListBlock => b.type === "ol" || b.type === "ul");
+    const afterLane = countedLaneRefs(parseBlocks(content.split(/\r?\n/).slice(from).join("\n")))[at];
+    const idx = lists(step.laneRef.laneBlock).indexOf(list);
+    const now = afterLane ? lists(afterLane.laneBlock)[idx] : undefined;
+    const was = ordinals((list as OlBlock).start, list.items.length, (list as OlBlock).values);
+    const want = [...was.slice(0, step.item), ...was.slice(step.item + 1).map((n) => n - 1)];
+    const shown = now?.type === "ol" ? ordinals(now.start, now.items.length, now.values) : null;
+    if (!shown || shown.join() !== want.join()) return unplaceable("the numbered list would not render as one sequence");
+  }
   return {
     ok: true,
     content,

@@ -51,7 +51,7 @@ interface StepList {
 
 interface Preview {
   removed: { line: number; text: string }[];
-  renumbered: { line: number; before: string; after: string } | null;
+  renumbered: { line: number; before: string; after: string }[];
   laneRemoved: boolean;
   nextMovesRemoved: boolean;
   logEntry: string;
@@ -73,12 +73,12 @@ function laneRows(lane: HTMLElement): HTMLElement[] {
   return body ? Array.from(body.querySelectorAll<HTMLElement>(":scope > ul > li, :scope > ol > li")) : [];
 }
 
-/** The preview's body: the lines that go, the renumbered line, what goes with them, the log entry. */
+/** The preview's body: the lines that go, the renumbered lines, what goes with them, the log entry. */
 export function previewHtml(p: Preview): string {
   const lines = p.removed.map((r) => `<span class="wiki-step-done-ln">${r.line}</span> ${esc(r.text)}`).join("\n");
   const renum = p.renumbered
-    ? `<div class="wiki-step-done-sub">Line ${p.renumbered.line} takes the number: <code>${esc(p.renumbered.before.trim())}</code> → <code>${esc(p.renumbered.after.trim())}</code></div>`
-    : "";
+    .map((r) => `<div class="wiki-step-done-sub">Line ${r.line} takes a new number: <code>${esc(r.before.trim())}</code> → <code>${esc(r.after.trim())}</code></div>`)
+    .join("");
   const goes = p.nextMovesRemoved
     ? `<div class="wiki-step-done-sub">That was the last step in the last lane: the lane and the next-moves block go too.</div>`
     : p.laneRemoved
