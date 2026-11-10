@@ -3,12 +3,12 @@
  * than the newest merge among the PRs its `prs:` names? Then the status was
  * written before the last thing landed (`GET /api/wiki/claim-check`).
  *
- * It never asks GitHub. The work map card's check (`work-map/gh-check.ts`) asks
- * for the `prs:` of every live plan page in its own flight, and this module
- * reads what that left in the per-wiki cache ({@link cachedPrFacts}). A PR the
- * card has not asked within the hour is `not-asked`. So is every PR of a wiki
- * whose card never asks: one with no work map, a read-only one, or the check
- * switched off.
+ * It never asks GitHub. A request for the work map card's check
+ * (`work-map/gh-check.ts`) also starts a flight for the `prs:` of every live
+ * plan page, and this module reads what the two left in the wiki's caches
+ * ({@link cachedPrFacts}). A PR neither has asked within the hour is
+ * `not-asked`. So is every PR of a wiki whose card never asks: one with no
+ * work map, a read-only one, or the check switched off.
  *
  * It answers only for the pages the card's check reads (`isLiveCheckPage`);
  * any other page is `not-live`, since the card never asks for its `prs:`.

@@ -4,8 +4,9 @@
  * newest merge among its `prs:`? In the `wiki` tool group beside the Stale
  * routes, so `MUNINN_PROFILE=nais` drops it.
  *
- * A plain read: the page's index entry and the PR states the work map card's
- * check (`GET /api/wiki/work-map/checks`) left in its cache. It asks GitHub
+ * A plain read: the page's index entry and the PR states a request for the
+ * work map card's check (`GET /api/wiki/work-map/checks`) left in the wiki's
+ * two caches. It asks GitHub
  * nothing and spawns nothing, so it is not on `SIDE_EFFECTING_GETS`.
  *
  * Answers in this order: a missing parameter 400; an unknown wiki 404; an

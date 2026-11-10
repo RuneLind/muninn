@@ -14,7 +14,7 @@ import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import { getWikiIndex, readWikiPage } from "../../wiki/store.ts";
-import { __resetGhCheckForTest, GH_PRS_PER_HOUR, GH_STATE_TTL_MS, type GhCheckDeps, type GhResult, type GhRunner } from "../../wiki/work-map/gh-check.ts";
+import { __pagePrsSettledForTest, __resetGhCheckForTest, GH_PRS_PER_HOUR, GH_STATE_TTL_MS, type GhCheckDeps, type GhResult, type GhRunner } from "../../wiki/work-map/gh-check.ts";
 import type { WorkMapRunDeps } from "../../wiki/work-map/run.ts";
 import { registerWikiClaimCheckRoute } from "./wiki-claim-check.ts";
 import { registerWikiWorkMapRoutes } from "./wiki-work-map.ts";
@@ -122,10 +122,11 @@ function setup(o: Setup = {}) {
     const res = await app.request(`/api/wiki/claim-check?${q}`);
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };
-  /** The work map card's check, the same wiki and cache; with the spawns it caused. */
+  /** The work map card's check on the same wiki, then the end of the flight it starts for the pages' `prs:`; with the spawns both caused. */
   const card = async () => {
     const before = spawns.length;
     const res = await app.request("/api/wiki/work-map/checks?wiki=w");
+    await __pagePrsSettledForTest("w");
     return { status: res.status, body: (await res.json()) as Record<string, unknown>, spawns: spawns.length - before };
   };
   return { get, card, spawns, root };
@@ -247,13 +248,20 @@ describe("what the card's check could not read", () => {
     expect((await s.get()).body).toEqual(NOT_ASKED);
   });
 
-  test("a PR the hour's cap cut is not-asked", async () => {
-    // The card's own rows fill the hour; the page's `prs:` come after them.
+  test("the card's rows filling its hour leave the pages' prs: their own", async () => {
     const rows = Array.from({ length: GH_PRS_PER_HOUR }, (_, i) => [url("acme/widgets", i + 1), "open"] as [string, string]);
     const table = Object.fromEntries(rows.map((_, i) => [`acme/widgets#${i + 1}`, { state: "OPEN" } as Pr]));
     const s = setup({ pages: { "plans/a.mdx": LATE_PAGE + ledger(rows) }, gh: stubGh({ ...table, ...TABLE }) });
     const card = await s.card();
     expect(card.body).toMatchObject({ checked: GH_PRS_PER_HOUR, unchecked: 0 });
+    expect((await s.get()).body).toEqual(LATE);
+  });
+
+  test("a PR past the pages' own hourly cap is not-asked", async () => {
+    const prs = Array.from({ length: GH_PRS_PER_HOUR + 1 }, (_, i) => `acme/gears#${i + 100}`);
+    const table = Object.fromEntries(prs.map((k) => [k, { state: "OPEN" } as Pr]));
+    const s = setup({ pages: { "plans/a.mdx": page(`status_date: 2026-05-10\nprs: [${prs.join(", ")}]\n`) }, gh: stubGh(table) });
+    await s.card();
     expect((await s.get()).body).toEqual(NOT_ASKED);
   });
 });
@@ -321,13 +329,13 @@ describe("request shape", () => {
   });
 });
 
-describe("the card with the pages' prs: in its flight", () => {
+describe("the card beside the flight for the pages' prs:", () => {
   const ROWS: [string, string][] = [[url("acme/widgets", 1), "open"], [url("acme/widgets", 2), "merged"]];
   const CARD_TABLE: Record<string, Pr> = { "acme/widgets#1": { state: "MERGED", mergedAt: "2026-05-11T08:00:00Z" }, "acme/widgets#2": { state: "MERGED", mergedAt: "2026-05-01T08:00:00Z" } };
   const askedOf = (spawns: string[][]) =>
     spawns.map((args) => `${args.find((a) => a.startsWith("owner="))!.slice(6)}/${args.find((a) => a.startsWith("repo="))!.slice(5)}: ${[...args.find((a) => a.startsWith("query="))!.matchAll(/number:(\d+)/g)].map((m) => m[1]).join(",")}`);
 
-  test("one flight asks for the rows' PRs and the live pages' prs:, a query per repo", async () => {
+  test("the card's flight asks for the rows' PRs, a second one for the pages' prs: it does not ask itself", async () => {
     const s = setup({
       pages: {
         "plans/a.mdx": page("status_date: 2026-05-10\nprs: [acme/gears#7, acme/widgets#1, acme/widgets#3]\n") + ledger(ROWS),
@@ -335,9 +343,12 @@ describe("the card with the pages' prs: in its flight", () => {
       },
       gh: stubGh({ ...CARD_TABLE, ...TABLE }),
     });
-    expect((await s.card()).spawns).toBe(2);
-    expect(askedOf(s.spawns).sort()).toEqual(["acme/gears: 7", "acme/widgets: 1,2,3"]);
-    // And a second card request asks nothing: the pages' PRs are cached like the rows'.
+    expect((await s.card()).spawns).toBe(3);
+    // widgets#1 is a row's PR, so the pages' flight leaves it to the card's.
+    expect(askedOf(s.spawns).sort()).toEqual(["acme/gears: 7", "acme/widgets: 1,2", "acme/widgets: 3"]);
+    // The page reads #1 from the card's cache and the other two from the pages'.
+    expect((await s.get()).body).toMatchObject({ verdict: "late", newest: { pr: "acme/gears#7" } });
+    // And a second card request asks nothing.
     expect((await s.card()).spawns).toBe(0);
   });
 
@@ -348,10 +359,14 @@ describe("the card with the pages' prs: in its flight", () => {
     for (const gh of [stubGh({ ...CARD_TABLE, ...TABLE }), gearsDown]) {
       const a = await setup({ pages: plain, gh }).card();
       __resetGhCheckForTest();
-      const b = await setup({ pages: withPrs, gh }).card();
+      const withThem = setup({ pages: withPrs, gh });
+      const b = await withThem.card();
+      // Also once the pages' flight has ended, failed or not.
+      const again = await withThem.card();
       __resetGhCheckForTest();
       expect(a.status).toBe(200);
       expect(b.body).toEqual(a.body);
+      expect(again.body).toEqual(a.body);
       expect(a.body).toMatchObject({ checked: 2, contradictions: [{ pr: 1 }] });
       expect(a.body.notChecked).toBeUndefined();
     }

@@ -9,10 +9,12 @@
  * matched at once. One flight per wiki asks for what is due; a failed call
  * caches nothing and counts as unchecked, never as a contradiction.
  *
- * The same flight also asks for the PRs in the `prs:` of each live plan page
- * ({@link prsRefsOf}), after the card's own. The card's body never reads those;
- * the status date check (`../status-date-check.ts`) does, through
- * {@link cachedPrFacts}, which only reads the cache.
+ * A request for the card also starts a second flight, for the PRs in the
+ * `prs:` of each live plan page ({@link prsRefsOf}) that the card does not ask
+ * for itself. It has a cache of its own (states, failures, hourly cap) and the
+ * request does not wait for it, so nothing asked for a page reaches the card's
+ * body. The status date check (`../status-date-check.ts`) reads both caches
+ * through {@link cachedPrFacts}, which never asks.
  *
  * Nothing here writes to a wiki.
  */
@@ -410,7 +412,7 @@ interface Scan {
   needs: ScannedNeed[];
   /** What is looked up, Needs you first: an item's mark outranks a row under the cap. */
   refs: Map<string, PrRef>;
-  /** The `prs:` of the live plan pages: asked after `refs`, read by no part of the card's body. */
+  /** The `prs:` of the live plan pages: asked in a flight of their own, read by no part of the card's body. */
   pagePrs: Map<string, PrRef>;
 }
 
@@ -493,28 +495,36 @@ interface WikiCache {
 }
 
 const caches = new Map<string, WikiCache>();
+/** Per wiki, what was asked for the pages' `prs:`: apart from the card's cache, so its failures and its hourly cap are its own. */
+const pagePrCaches = new Map<string, WikiCache>();
 
-function cacheFor(wiki: string): WikiCache {
+function cacheFor(wiki: string, of: Map<string, WikiCache> = caches): WikiCache {
   const key = wiki.toLowerCase();
-  let c = caches.get(key);
+  let c = of.get(key);
   if (!c) {
     c = { states: new Map(), asked: [], failures: new Map(), flight: null };
-    caches.set(key, c);
+    of.set(key, c);
   }
   return c;
 }
 
 export function __resetGhCheckForTest(): void {
   caches.clear();
+  pagePrCaches.clear();
+}
+
+/** Resolves when the running flight for the wiki's page `prs:` has ended. */
+export function __pagePrsSettledForTest(wiki: string): Promise<void> {
+  return pagePrCaches.get(wiki.toLowerCase())?.flight?.promise ?? Promise.resolve();
 }
 
 /**
- * What the wiki's cache holds for `refs`, with no ask and no spawn. `facts`
- * has an entry per PR GitHub answered for within the hour: its state, or null
- * for a number that is no PR. A PR with no entry was never asked, was asked
- * more than an hour ago, or went unanswered. `failures` is the reason the last
- * query for a repo could not be read, by lowercased repo, as the card's check
- * recorded it.
+ * What the wiki's two caches hold for `refs`, with no ask and no spawn.
+ * `facts` has an entry per PR GitHub answered for within the hour: its state,
+ * or null for a number that is no PR; where both caches hold one, the newer
+ * answer. A PR with no entry was never asked, was asked more than an hour ago,
+ * or went unanswered. `failures` is the reason the last query for a repo could
+ * not be read, by lowercased repo, the card's cache first.
  */
 export function cachedPrFacts(
   wiki: string,
@@ -523,13 +533,19 @@ export function cachedPrFacts(
 ): { facts: Map<string, PrFact | null>; failures: Map<string, Exclude<NotCheckedReason, "disabled">> } {
   const facts = new Map<string, PrFact | null>();
   const failures = new Map<string, Exclude<NotCheckedReason, "disabled">>();
-  const c = caches.get(wiki.toLowerCase());
-  if (!c) return { facts, failures };
-  for (const ref of refs) {
-    const hit = c.states.get(ref.id);
-    if (hit && at - hit.at < GH_STATE_TTL_MS) facts.set(ref.id, hit.state);
-    const failure = c.failures.get(ref.repo.toLowerCase());
-    if (failure) failures.set(ref.repo.toLowerCase(), failure.reason);
+  const answeredAt = new Map<string, number>();
+  for (const c of [caches.get(wiki.toLowerCase()), pagePrCaches.get(wiki.toLowerCase())]) {
+    if (!c) continue;
+    for (const ref of refs) {
+      const hit = c.states.get(ref.id);
+      if (hit && at - hit.at < GH_STATE_TTL_MS && hit.at > (answeredAt.get(ref.id) ?? -Infinity)) {
+        facts.set(ref.id, hit.state);
+        answeredAt.set(ref.id, hit.at);
+      }
+      const repo = ref.repo.toLowerCase();
+      const failure = c.failures.get(repo);
+      if (failure && !failures.has(repo)) failures.set(repo, failure.reason);
+    }
   }
   return { facts, failures };
 }
@@ -762,7 +778,27 @@ export async function checkWorkMapPrs(
   if (!index) return emptyBody(now());
   const scanned = await scan(index, input.map, deps);
   const c = cacheFor(input.wiki);
-  // The card's own PRs first, so the hourly cap cuts the pages' `prs:` before them.
-  const refreshing = await refreshDue(c, new Map([...scanned.refs, ...scanned.pagePrs]), deps, now);
+  const refreshing = await refreshDue(c, scanned.refs, deps, now);
+  if (!refreshing) askPagePrs(cacheFor(input.wiki, pagePrCaches), scanned, deps, now);
   return buildBody(scanned, c, refreshing, now());
+}
+
+/**
+ * Starts the flight for the pages' `prs:` that are due and that the card does
+ * not ask for itself, unless one is running. Not awaited: the card's answer
+ * never waits for it.
+ */
+function askPagePrs(pc: WikiCache, scanned: Scan, deps: GhCheckDeps, now: () => number): void {
+  if (pc.flight) return;
+  const at = now();
+  const due = [...scanned.pagePrs.values()].filter((ref) => {
+    if (scanned.refs.has(ref.id)) return false;
+    const hit = pc.states.get(ref.id);
+    return !hit || at - hit.at >= GH_STATE_TTL_MS;
+  });
+  const ask = due.slice(0, budgetLeft(pc, at));
+  if (!ask.length) return;
+  startFlight(pc, ask, deps, now).promise.catch((err) => {
+    log.warn("GitHub check: the flight for the pages' prs: failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+  });
 }
