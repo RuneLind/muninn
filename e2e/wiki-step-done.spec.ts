@@ -11,9 +11,12 @@
  *  3. The lane's last step takes the lane with it; the waiting lane stays.
  *  4. A page changed underneath after the preview gets the refusal text.
  *  5. Each Done is tied to the step its row shows, after the viewer's role
- *     lanes moved to the top; a row whose text is not its step gets no button.
+ *     lanes moved to the top; a lane that renders another number of rows than
+ *     the server counted gets no button; a row that shows other text than its
+ *     source (a wikilink's label, a tag in code) gets one.
  *  6. A write that returns after the reader left the page, or while the next
- *     page is still loading, does not pull the reader back to it.
+ *     page is still loading, does not pull the reader back to it; one that
+ *     returns after its preview was cancelled still renders the page again.
  *  7. The preview sits under a task row's text, at the row's width, and wraps
  *     its lines inside that width.
  *  8. Escape and Cancel close the preview with focus back on its Done; each
@@ -51,6 +54,20 @@ const NAV2_REL = "plans/e2e-steps-nav-2.mdx";
 const OTHER_REL = "plans/e2e-other.mdx";
 const TASK_REL = "plans/e2e-steps-tasks.mdx";
 const KEYS_REL = "plans/e2e-steps-keys.mdx";
+const LINK_REL = "plans/e2e-steps-links.mdx";
+const CANCEL_REL = "plans/e2e-steps-cancel.mdx";
+
+/** Steps whose rendered row is not their source text: a wikilink shows its label, a tag in code shows as text. */
+const linkPage = () =>
+  [
+    "---\ntitle: Link fixture\n---\n",
+    "<NextMoves>\n",
+    '<Lane kind="you">\n',
+    "1. Read [[plans/e2e-other|the other fixture]] before lunch.",
+    "2. Wrap the claim in a `<Fact>` tag.",
+    "\n</Lane>\n",
+    "</NextMoves>\n",
+  ].join("\n");
 
 const page = (title: string) =>
   [
@@ -113,6 +130,8 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, OTHER_REL), "---\ntitle: Other fixture\n---\n\nNothing to do here.\n", "utf8");
   await writeFile(path.join(root, TASK_REL), taskPage(), "utf8");
   await writeFile(path.join(root, KEYS_REL), page("Keys fixture"), "utf8");
+  await writeFile(path.join(root, LINK_REL), linkPage(), "utf8");
+  await writeFile(path.join(root, CANCEL_REL), page("Cancel fixture"), "utf8");
   git(root, "init", "-q", "-b", "main");
   // The route's commit spawns git with no author env.
   git(root, "config", "user.name", "e2e");
@@ -176,7 +195,9 @@ test.describe.serial("Done on a you step", () => {
     await li.locator("[data-step-done]").click();
     const panel = li.locator(".wiki-step-done-panel");
     await expect(panel.locator(".wiki-step-done-lines")).toContainText("1. **Water the plants:** the ferns first.");
-    await expect(panel).toContainText("2. Sort the blue folders. → 1. Sort the blue folders.");
+    // The two later steps take one line, and their text is not repeated.
+    await expect(panel).toContainText("The 2 steps after it take new numbers: 2–3 become 1–2.");
+    await expect(panel).not.toContainText("Sort the blue folders");
     await expect(panel.locator(".wiki-step-done-log")).toContainText("step-done | Step fixture");
     await expect(panel.locator(".wiki-step-done-log")).toContainText("- Step done: Water the plants: the ferns first.");
     await expect(panel).toContainText("if appending it fails, the page edit still stands");
@@ -279,12 +300,12 @@ test.describe.serial("Done after the role lanes moved", () => {
     expect(await readFile(path.join(root, ROLE_REL), "utf8")).toBe(rolePage("Role fixture", ["Alpha two."], ["Beta one."]));
   });
 
-  test("a lane with a row whose text is not its step gets no buttons", async ({ page: p }) => {
-    // The server's list is altered in flight: the fag lane's second step names other text.
+  test("a lane that renders another number of rows than the server counted gets no buttons", async ({ page: p }) => {
+    // The server's list is altered in flight: it counts three rows in the fag lane, which renders two.
     await p.route("**/api/wiki/step-done?*", async (route) => {
       const res = await route.fetch();
-      const body = (await res.json()) as { steps: { text: string }[] };
-      for (const s of body.steps) if (s.text === "Alpha two.") s.text = "Polish the brass door knob.";
+      const body = (await res.json()) as { laneRows: number[] };
+      body.laneRows[0] = 3;
       await route.fulfill({ response: res, json: body });
     });
     await openRolePage(p, MATCH_REL);
@@ -296,6 +317,50 @@ test.describe.serial("Done after the role lanes moved", () => {
     await expect(roleLane(p, "fag").locator("li", { hasText: "Alpha one" })).toBeVisible();
     expect(await roleLane(p, "fag").locator("[data-step-done]").count()).toBe(0);
   });
+});
+
+test("a row that shows other text than its source still gets its Done: a wikilink's label, a tag in code", async ({ page: p }) => {
+  await openPage(p, LINK_REL);
+  const link = step(p, "the other fixture");
+  const code = step(p, "Wrap the claim");
+  // The rows show the label and the tag as text; the source holds the target and the ticks.
+  await expect(link).toHaveText(/^Read the other fixture before lunch\./);
+  await expect(code).toContainText("<Fact>");
+  await expect(link.locator("[data-step-done]")).toHaveCount(1);
+  await expect(code.locator("[data-step-done]")).toHaveCount(1);
+  await link.locator("[data-step-done]").click();
+  await expect(link.locator(".wiki-step-done-lines")).toHaveText(/1\. Read \[\[plans\/e2e-other\|the other fixture\]\] before lunch\./);
+  await link.locator(".wiki-step-done-cancel").click();
+  await code.locator("[data-step-done]").click();
+  await expect(code.locator(".wiki-step-done-lines")).toContainText("2. Wrap the claim in a `<Fact>` tag.");
+});
+
+test("a write that lands after its preview was cancelled still renders the page again", async ({ page: p }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let held = false;
+  await p.route("**/api/wiki/step-done", async (route) => {
+    const req = route.request();
+    if (req.method() === "POST" && (req.postDataJSON() as { preview?: boolean }).preview !== true) {
+      held = true;
+      await gate;
+    }
+    await route.continue();
+  });
+  await openPage(p, CANCEL_REL);
+  const li = step(p, "Sort the blue folders");
+  await li.locator("[data-step-done]").click();
+  await li.locator("[data-step-done-confirm]").click();
+  await expect.poll(() => held).toBe(true);
+  await li.locator(".wiki-step-done-cancel").click();
+  await expect(li.locator(".wiki-step-done-panel")).toHaveCount(0);
+  const written = p.waitForResponse((r) => r.url().endsWith("/api/wiki/step-done") && r.request().method() === "POST");
+  release();
+  expect((await (await written).json()).ok).toBe(true);
+  // The page on screen is the page on disk again, and it says what happened.
+  await expect(step(p, "Sort the blue folders")).toHaveCount(0);
+  await expect(p.locator(".wiki-article .wiki-step-done-note")).toHaveText("The step is removed from the page.");
+  expect(await readFile(path.join(root, CANCEL_REL), "utf8")).not.toContain("Sort the blue folders");
 });
 
 test("a write that returns after the reader left the page leaves the new page on screen", async ({ page: p }) => {

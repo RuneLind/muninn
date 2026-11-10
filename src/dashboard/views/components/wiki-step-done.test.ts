@@ -1,30 +1,23 @@
 /**
- * The pairing of the server's step list with the rendered rows (fix round 1
- * batch 3, finding 1). DOM-free: the reader's own lane reorder is pinned in
- * `e2e/wiki-step-done.spec.ts`.
+ * The pairing of the server's step list with the rendered rows, and the
+ * preview's line for renumbered steps. DOM-free: the reader's own lane reorder
+ * is pinned in `e2e/wiki-step-done.spec.ts`.
  */
 import { expect, test } from "bun:test";
-import { needsReload, pairStepRows, renderedMatchText, retryable, sourceMatchText, type RenderedLane } from "./wiki-step-done.ts";
+import { needsReload, pairStepRows, previewHtml, renumberLine, retryable, type RenderedLane } from "./wiki-step-done.ts";
 
-const step = (key: string, lane: number, row: number | null, text: string, refusal: string | null = null) => ({ key, lane, row, text, refusal });
+const step = (key: string, lane: number, row: number | null, refusal: string | null = null) => ({ key, lane, row, refusal });
 
 const list = {
   laneRows: [2, 2],
-  steps: [step("a1", 0, 0, "Alpha one."), step("a2", 0, 1, "**Alpha** two."), step("b1", 1, 0, "Beta one."), step("b2", 1, 1, "Beta two.")],
+  steps: [step("a1", 0, 0), step("a2", 0, 1), step("b1", 1, 0), step("b2", 1, 1)],
 };
 
-const lane = (kind: string, group: number, order: number | null, rows: string[]): RenderedLane => ({ kind, group, order, rows });
-
-test("source text matches its rendered row: emphasis, links, autolinks, tags and entities", () => {
-  expect(sourceMatchText("**Water the plants:** the ferns first.")).toBe(renderedMatchText("Water the plants: the ferns first."));
-  expect(sourceMatchText("Read [the guide](https://example.invalid/g) & `run it`")).toBe(renderedMatchText("Read the guide & run it"));
-  expect(sourceMatchText("See <https://example.invalid/x> &amp; <Kbd>Enter</Kbd>")).toBe(renderedMatchText("See https://example.invalid/x & Enter"));
-  expect(sourceMatchText("Alpha one.")).not.toBe(renderedMatchText("Beta one."));
-});
+const lane = (kind: string, group: number, order: number | null, rows: number): RenderedLane => ({ kind, group, order, rows });
 
 test("lanes reordered on screen pair by their source order, not their DOM position", () => {
   // DOM order [utvikler (source 1), fag (source 0)], as applyLaneRoles leaves it.
-  const lanes = [lane("you", 0, 1, ["Beta one.", "Beta two."]), lane("you", 0, 0, ["Alpha one.", "Alpha two."])];
+  const lanes = [lane("you", 0, 1, 2), lane("you", 0, 0, 2)];
   expect(pairStepRows(lanes, list)).toEqual([
     { lane: 1, row: 0, key: "a1" },
     { lane: 1, row: 1, key: "a2" },
@@ -33,38 +26,78 @@ test("lanes reordered on screen pair by their source order, not their DOM positi
   ]);
 });
 
-test("a lane whose rows do not all match their steps gets nothing; the other lane keeps its pairs", () => {
-  const lanes = [lane("you", 0, 0, ["Alpha one.", "Polish the brass knob."]), lane("you", 0, 1, ["Beta one.", "Beta two."])];
-  expect(pairStepRows(lanes, list).map((p) => p.key)).toEqual(["b1", "b2"]);
-});
-
-test("without a source order the DOM order is the guess, and the text check refuses a wrong guess", () => {
-  const lanes = [lane("you", 0, null, ["Beta one.", "Beta two."]), lane("you", 0, null, ["Alpha one.", "Alpha two."])];
-  expect(pairStepRows(lanes, list)).toEqual([]);
+test("without a source order the DOM order is the source order", () => {
+  const lanes = [lane("you", 0, null, 2), lane("you", 0, null, 2)];
+  expect(pairStepRows(lanes, list).map((p) => [p.lane, p.key])).toEqual([
+    [0, "a1"],
+    [0, "a2"],
+    [1, "b1"],
+    [1, "b2"],
+  ]);
 });
 
 test("other kinds count for the order but get no steps; blocks keep their order; refused steps are skipped", () => {
-  const lanes = [
-    lane("waiting", 0, 0, ["Parcel."]),
-    lane("you", 0, 1, ["Alpha one.", "Alpha two."]),
-    lane("you", 1, 0, ["Beta one.", "Beta two."]),
-  ];
-  const refused = { laneRows: [2, 2], steps: [...list.steps.slice(0, 3), step("b2", 1, null, "Beta two.", "a <Checklist> row")] };
-  expect(pairStepRows(lanes, refused).map((p) => p.key)).toEqual(["a1", "a2", "b1"]);
+  const lanes = [lane("waiting", 0, 0, 1), lane("you", 0, 1, 2), lane("you", 1, 0, 2)];
+  const refused = { laneRows: [2, 2], steps: [...list.steps.slice(0, 3), step("b2", 1, null, "a <Checklist> row")] };
+  expect(pairStepRows(lanes, refused)).toEqual([
+    { lane: 1, row: 0, key: "a1" },
+    { lane: 1, row: 1, key: "a2" },
+    { lane: 2, row: 0, key: "b1" },
+  ]);
+  // A refused list step keeps its row and still gets nothing.
+  const nested = { laneRows: [2, 2], steps: [step("a1", 0, 0), step("a2", 0, 1, "the step holds a nested list"), ...list.steps.slice(2)] };
+  expect(pairStepRows(lanes, nested).map((p) => p.key)).toEqual(["a1", "b1", "b2"]);
 });
 
-test("a row-count or lane-count mismatch pairs nothing in that scope", () => {
-  expect(pairStepRows([lane("you", 0, 0, ["Alpha one.", "Alpha two."])], list)).toEqual([]);
-  const short = [lane("you", 0, 0, ["Alpha one."]), lane("you", 0, 1, ["Beta one.", "Beta two."])];
-  expect(pairStepRows(short, list).map((p) => p.key)).toEqual(["b1", "b2"]);
-  // Every step's row still matches, but the lane renders a row the server did not count.
-  const extra = [lane("you", 0, 0, ["Alpha one.", "Alpha two.", "A row from elsewhere."]), lane("you", 0, 1, ["Beta one.", "Beta two."])];
-  expect(pairStepRows(extra, list).map((p) => p.key)).toEqual(["b1", "b2"]);
+test("a lane that renders another number of rows than the server counted gets nothing; the other lane keeps its pairs", () => {
+  expect(pairStepRows([lane("you", 0, 0, 1), lane("you", 0, 1, 2)], list).map((p) => p.key)).toEqual(["b1", "b2"]);
+  expect(pairStepRows([lane("you", 0, 0, 3), lane("you", 0, 1, 2)], list).map((p) => p.key)).toEqual(["b1", "b2"]);
+  expect(pairStepRows([lane("you", 0, 0, 2), lane("you", 0, 1, 0)], list).map((p) => p.key)).toEqual(["a1", "a2"]);
 });
 
-test("empty match text never pairs", () => {
-  const lanes = [lane("you", 0, 0, [""])];
-  expect(pairStepRows(lanes, { laneRows: [1], steps: [step("x", 0, 0, "![](img.png)")] })).toEqual([]);
+test("another number of you lanes than the server counted pairs nothing", () => {
+  expect(pairStepRows([lane("you", 0, 0, 2)], list)).toEqual([]);
+  expect(pairStepRows([lane("you", 0, 0, 2), lane("you", 0, 1, 2), lane("you", 1, 0, 2)], list)).toEqual([]);
+  expect(pairStepRows([lane("waiting", 0, 0, 2), lane("you", 0, 1, 2)], list)).toEqual([]);
+});
+
+test("a step whose row the lane does not hold pairs nothing in that lane", () => {
+  const off = { laneRows: [2, 2], steps: [step("a1", 0, 0), step("a9", 0, 2), step("b1", 1, 0)] };
+  expect(pairStepRows([lane("you", 0, 0, 2), lane("you", 0, 1, 2)], off).map((p) => p.key)).toEqual(["b1"]);
+});
+
+const preview = (renumbered: { line: number; before: string; after: string }[]) => ({
+  removed: [{ line: 10, text: "1. First step, with a long sentence of its own." }],
+  renumbered,
+  laneRemoved: false,
+  nextMovesRemoved: false,
+  logEntry: "## [2026-11-10] step-done | Fixture\n- Step done: First step.",
+  logNote: "log.md gets this entry.",
+  previewHash: "h",
+});
+const later = (n: number, from = 2) =>
+  Array.from({ length: n }, (_, k) => ({ line: 11 + k, before: `${from + k}. Later step ${k} <b>with</b> prose of its own.`, after: `${from + k - 1}. Later step ${k} <b>with</b> prose of its own.` }));
+
+test("the renumbered steps take one line, however many they are", () => {
+  expect(renumberLine(later(7))).toBe("The 7 steps after it take new numbers: 2–8 become 1–7.");
+  expect(renumberLine(later(2))).toBe("The 2 steps after it take new numbers: 2–3 become 1–2.");
+  expect(renumberLine(later(1, 6))).toBe("The step after it takes a new number: 6 becomes 5.");
+  expect(renumberLine([])).toBe("");
+  // Indented and padded markers read the same; a line with no readable marker leaves the numbers out.
+  expect(renumberLine([{ line: 3, before: "  10. X", after: "  9.  X" }])).toBe("The step after it takes a new number: 10 becomes 9.");
+  expect(renumberLine([{ line: 3, before: "X", after: "X" }])).toBe("The step after it takes a new number.");
+  expect(renumberLine([...later(1), { line: 3, before: "X", after: "X" }])).toBe("The 2 steps after it take new numbers.");
+});
+
+test("the preview shows that line once and none of the renumbered steps' text", () => {
+  const html = previewHtml(preview(later(7)));
+  expect(html.split("take new numbers").length - 1).toBe(1);
+  expect(html).toContain(`<div class="wiki-step-done-sub">The 7 steps after it take new numbers: 2–8 become 1–7.</div>`);
+  expect(html).not.toContain("Later step");
+  expect(html).toContain("1. First step, with a long sentence of its own.");
+  const none = previewHtml(preview([]));
+  expect(none).not.toContain("new number");
+  expect(none.split("wiki-step-done-sub").length - 1).toBe(1);
 });
 
 // What each refusal of the write leaves the reader to do (fix round 1 batch 4).

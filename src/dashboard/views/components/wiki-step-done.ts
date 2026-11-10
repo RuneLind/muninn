@@ -16,11 +16,12 @@
  *
  * Which rendered row is which step comes from `GET /api/wiki/step-done`: per
  * counted `you` lane in source order, how many rows its lists hold, and which
- * row each open step is with its text (`pairStepRows`). The reader may have
- * moved the viewer's role lanes up (`applyLaneRoles`), so the lanes are put
- * back in source order by `data-nm-order` first, and a row gets a button only
- * if its text is its step's: a lane with any row that does not match, or that
- * does not count the same, gets no buttons.
+ * row each open step is (`pairStepRows`). The reader may have moved the
+ * viewer's role lanes up (`applyLaneRoles`), so the lanes are put back in
+ * source order by `data-nm-order` first. A lane that renders another number
+ * of rows than the server counted gets no buttons. Row text is not compared:
+ * a row shows a wikilink's label and a tag in code as text, which its source
+ * does not read as.
  *
  * Gating: no fetch under the read slice or on a read-only wiki; the buttons
  * also sit in `WIKI_READONLY_BLOCKED_SELECTOR` (and so in the read slice's
@@ -50,8 +51,6 @@ export interface StepDonePageContext {
 
 interface ListedStep {
   key: string;
-  /** The step's source text, as `listYouSteps` gives it. */
-  text: string;
   lane: number;
   row: number | null;
   refusal: string | null;
@@ -98,37 +97,21 @@ export interface RenderedLane {
   group: number;
   /** Its authored position in that block (`data-nm-order`), or null when the reader never reordered it. */
   order: number | null;
-  /** Each row's rendered text, as `rowText` reads it. */
-  rows: string[];
-}
-
-/** Text reduced to its letters and digits, lowercased: what a row and its step must share. */
-export const renderedMatchText = (s: string): string => s.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-
-/** A step's markdown source as `renderedMatchText` would read its rendered row:
- *  images go, a link keeps its label, an autolink its URL, a tag its content, an entity nothing. */
-export function sourceMatchText(src: string): string {
-  return renderedMatchText(
-    src
-      .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
-      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-      .replace(/<(https?:\/\/[^>\s]+)>/g, "$1")
-      .replace(/<\/?[A-Za-z][^>]*>/g, "")
-      .replace(/&(?:[a-z]+|#\d+);/gi, ""),
-  );
+  /** How many rows its own lists render. */
+  rows: number;
 }
 
 /**
  * Which rendered row gets which step's key. Lanes are put in source order
  * (block, then `order` where the reader set it, else DOM position); the `n`th
- * `you` lane of that order is the server's lane `n`. A lane pairs only when its
- * row count is the server's and every open step's row shows that step's text:
- * otherwise it pairs nothing (fail closed). `lane` in the result is the index
- * into `lanes` (DOM order).
+ * `you` lane of that order is the server's lane `n`. A lane pairs only when it
+ * renders the number of rows the server counted and holds every open step's
+ * row: otherwise it pairs nothing (fail closed). `lane` in the result is the
+ * index into `lanes` (DOM order).
  */
 export function pairStepRows(
   lanes: RenderedLane[],
-  list: { laneRows: number[]; steps: Pick<ListedStep, "key" | "text" | "lane" | "row" | "refusal">[] },
+  list: { laneRows: number[]; steps: Pick<ListedStep, "key" | "lane" | "row" | "refusal">[] },
 ): { lane: number; row: number; key: string }[] {
   const pos = new Map<RenderedLane, number>();
   const seen = new Map<number, number>();
@@ -144,13 +127,11 @@ export function pairStepRows(
   if (source.length !== list.laneRows.length) return [];
   const out: { lane: number; row: number; key: string }[] = [];
   source.forEach(({ l, dom }, i) => {
-    if (l.rows.length !== list.laneRows[i]) return;
+    if (l.rows !== list.laneRows[i]) return;
     const pairs: { lane: number; row: number; key: string }[] = [];
     for (const step of list.steps) {
       if (step.lane !== i || step.row === null || step.refusal) continue;
-      const shown = l.rows[step.row];
-      const want = sourceMatchText(step.text ?? "");
-      if (shown === undefined || want === "" || renderedMatchText(shown) !== want) return;
+      if (step.row >= l.rows) return;
       pairs.push({ lane: dom, row: step.row, key: step.key });
     }
     out.push(...pairs);
@@ -173,16 +154,27 @@ function renderedLanes(article: HTMLElement): { el: HTMLElement; lane: RenderedL
     const block = el.closest(".next-moves")!;
     if (!blocks.includes(block)) blocks.push(block);
     const order = el.dataset.nmOrder !== undefined && /^\d+$/.test(el.dataset.nmOrder) ? Number(el.dataset.nmOrder) : null;
-    return { el, lane: { kind: el.dataset.kind ?? "", group: blocks.indexOf(block), order, rows: laneRows(el).map(rowText) } };
+    return { el, lane: { kind: el.dataset.kind ?? "", group: blocks.indexOf(block), order, rows: laneRows(el).length } };
   });
 }
 
-/** The preview's body: the lines that go, the renumbered lines, what goes with them, the log entry. */
+/** One line for the later steps a Done renumbers: how many, and which numbers become which. Empty when none. */
+export function renumberLine(renumbered: Preview["renumbered"]): string {
+  if (!renumbered.length) return "";
+  const one = renumbered.length === 1;
+  const says = one ? "The step after it takes a new number" : `The ${renumbered.length} steps after it take new numbers`;
+  const num = (line: string) => /^[ \t]*(\d+)\./.exec(line)?.[1];
+  const [first, last] = [renumbered[0]!, renumbered[renumbered.length - 1]!];
+  const n = [num(first.before), num(last.before), num(first.after), num(last.after)];
+  if (renumbered.some((r) => num(r.before) === undefined || num(r.after) === undefined)) return `${says}.`;
+  return one ? `${says}: ${n[0]} becomes ${n[2]}.` : `${says}: ${n[0]}–${n[1]} become ${n[2]}–${n[3]}.`;
+}
+
+/** The preview's body: the lines that go, one line for the renumbered steps, what goes with them, the log entry. */
 export function previewHtml(p: Preview): string {
   const lines = p.removed.map((r) => `<span class="wiki-step-done-ln">${r.line}</span> ${esc(r.text)}`).join("\n");
-  const renum = p.renumbered
-    .map((r) => `<div class="wiki-step-done-sub">Line ${r.line} takes a new number: <code>${esc(r.before.trim())}</code> → <code>${esc(r.after.trim())}</code></div>`)
-    .join("");
+  const renumbers = renumberLine(p.renumbered);
+  const renum = renumbers ? `<div class="wiki-step-done-sub">${esc(renumbers)}</div>` : "";
   const goes = p.nextMovesRemoved
     ? `<div class="wiki-step-done-sub">That was the last step in the last lane: the lane and the next-moves block go too.</div>`
     : p.laneRemoved
@@ -315,8 +307,9 @@ async function write(
   }
   if (r.status === 200 && r.data.ok === true) {
     // Only a page still on screen is fetched again: a reader who went to
-    // another page meanwhile stays there (its render already took this panel).
-    const reloads = ctx.current() && panel.isConnected;
+    // another page meanwhile stays there. A preview closed meanwhile (Cancel,
+    // Escape, another Done) does not stop it: the page changed all the same.
+    const reloads = ctx.current() && article.isConnected;
     if (r.data.uncommitted === true) uncommitted.add(pageKey(ctx));
     notices.set(pageKey(ctx), { text: r.data.uncommitted === true ? UNCOMMITTED_NOTICE : REMOVED_NOTICE, focus: reloads });
     if (reloads) ctx.reload();
