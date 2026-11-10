@@ -216,11 +216,18 @@ describe("/api/wiki/step-done", () => {
     expect((await list(LOCKED)).status).toBe(403);
   });
 
-  test("a wiki outside the scope is 404, a non-JSON request 415, a missing hash 400", async () => {
+  test("outside the scope the write is 404 and the list has no steps; a non-JSON request 415, a missing hash 400", async () => {
     const { body: l } = await list();
     const key = keyOf(l, "Read the second note.");
     expect((await post({ wiki: OUTSIDE, step: key, baseHash: l.baseHash, preview: true })).status).toBe(404);
-    expect((await list(OUTSIDE)).status).toBe(404);
+    // The list is asked on every page view, so there it is an answer with no steps and no base hash.
+    const outside = await app.request(`/api/wiki/step-done?wiki=${OUTSIDE}&relPath=${encodeURIComponent(REL)}`);
+    expect(outside.status).toBe(200);
+    expect(await outside.json()).toEqual({ relPath: REL, offered: false, reason: `${OUTSIDE}: not in WORK_MAP_WIKIS`, steps: [], laneRows: [], readable: false });
+    const unknown = await app.request(`/api/wiki/step-done?wiki=no-such-wiki&relPath=${encodeURIComponent(REL)}`);
+    expect([unknown.status, ((await unknown.json()) as { offered: boolean; steps: unknown[] }).offered]).toEqual([200, false]);
+    // A read-only root still refuses the list: the reader does not ask there.
+    expect((await list(LOCKED)).status).toBe(403);
     const form = await app.request("/api/wiki/step-done", { method: "POST", headers: { "content-type": "text/plain" }, body: "x" });
     expect(form.status).toBe(415);
     expect((await post({ step: key, baseHash: l.baseHash })).status).toBe(400);

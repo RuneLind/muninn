@@ -3,7 +3,9 @@
  * muninn-wiki-first-screen-claims, PR 1). The pure edit is `src/format/step-done.ts`.
  *
  *  - `GET  /api/wiki/step-done?wiki=&relPath=` lists the page's open `you` steps
- *    with their keys (a read: one page file, no spawn).
+ *    with their keys (a read: one page file, no spawn). For a wiki outside the
+ *    triage scope it answers 200 with `offered: false` and no steps, since the
+ *    reader asks on every page that has a `you` lane.
  *  - `POST /api/wiki/step-done` with `{wiki, relPath, step, baseHash, preview: true}`
  *    answers what would go and the log line; with `{…, previewHash}` it writes.
  *
@@ -59,15 +61,16 @@ export function realStepDoneDeps(config: Config): StepDoneDeps {
   };
 }
 
-/** The wiki `name` names, if Done may write it: a 403 for a readonly root, a 404 outside the close route's scope. */
-async function resolveWiki(c: Context, deps: StepDoneDeps, name: string): Promise<{ entry: WikiRegistryEntry } | { res: Response }> {
+/** The wiki `name` names, if Done may write it: a 403 for a readonly root, a 404 outside the close route's scope.
+ *  `outside` is set with that 404 and says why, so the list can answer it without failing. */
+async function resolveWiki(c: Context, deps: StepDoneDeps, name: string): Promise<{ entry: WikiRegistryEntry } | { res: Response; outside?: string }> {
   const registry = deps.registry();
   const entryOf = (n: string) => registry.find((e) => e.name.toLowerCase() === n.toLowerCase());
   const named = entryOf(name);
   if (named && deps.isReadonlyRoot(named.root)) return { res: c.json({ error: "This wiki is read-only here.", readonly: true }, 403) };
   const scope = await triageScope({ workMapWikis: deps.workMapWikis(), answerWikis: deps.answerConfig().wikis, entryOf, isReadonlyRoot: deps.isReadonlyRoot });
   const verdict = scopeVerdict(scope, name);
-  if ("reason" in verdict) return { res: c.json({ error: `no Done here: ${verdict.reason}` }, 404) };
+  if ("reason" in verdict) return { res: c.json({ error: `no Done here: ${verdict.reason}` }, 404), outside: verdict.reason };
   return { entry: verdict.entry };
 }
 
@@ -80,7 +83,9 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
     if (!wiki || !relPath) return c.json({ error: "wiki and relPath are required" }, 400);
     try {
       const found = await resolveWiki(c, depsFor(), wiki);
-      if ("res" in found) return found.res;
+      // The reader asks on every page with a `you` lane, in any wiki: outside the
+      // scope that is an ordinary answer with no steps, not a failed request.
+      if ("res" in found) return found.outside === undefined ? found.res : c.json({ relPath, offered: false, reason: found.outside, steps: [], laneRows: [], readable: false });
       const index = await getWikiIndex({ root: found.entry.root });
       if (!index) return c.json({ error: "wiki directory not found" }, 503);
       const target = index.resolveRelPath(relPath);
