@@ -421,7 +421,7 @@ describe("the lookups", () => {
       "api",
       "graphql",
       "-f",
-      "query=query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){p1:pullRequest(number:1){state mergedAt} p2:pullRequest(number:2){state mergedAt}}}",
+      "query=query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){p1:pullRequest(number:1){state mergedAt closedAt} p2:pullRequest(number:2){state mergedAt closedAt}}}",
       "-f",
       "owner=acme",
       "-f",
@@ -456,7 +456,7 @@ describe("the lookups", () => {
       [1, 2],
     );
     expect(answer.unanswered).toBe(false);
-    expect(answer.states.get(1)).toEqual({ state: "MERGED", mergedAt: MERGED_AT });
+    expect(answer.states.get(1)).toEqual({ state: "MERGED", mergedAt: MERGED_AT, closedAt: null });
     expect(answer.states.get(2)).toBeNull();
   });
 
@@ -688,7 +688,7 @@ describe("notChecked", () => {
     test("junk in errors does not cost the data beside it", () => {
       const answer = answerOf({ data: { repository: { p1: { state: "OPEN", mergedAt: null } } }, errors: [null, 5, "x"] });
       expect(answer.unanswered).toBe(false);
-      expect(answer.states.get(1)).toEqual({ state: "OPEN", mergedAt: null });
+      expect(answer.states.get(1)).toEqual({ state: "OPEN", mergedAt: null, closedAt: null });
     });
 
     test("through a request: it resolves, the other repo counts, and no budget goes", async () => {

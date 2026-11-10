@@ -2268,6 +2268,19 @@ PR 3 of plan `muninn-wiki-drift-check`: a drafted fix (D8) lands through the exi
 
 Acceptance: `stale-fix.test.ts`, `wiki-stale-fix-routes.test.ts`, `src/gardener/stale-proposals.test.ts`, `e2e/wiki-stale-fix.spec.ts`.
 
+## Claim check (`claim-check.ts`, `GET /api/wiki/claim-check`)
+
+One page's status lines against GitHub (plan muninn-wiki-first-screen-claims, PR 2). Server only; no client reads it yet.
+
+- **R1** reads only check 14's homes (`stateLineRoles`, whose home units now carry a `home` kind) and only an open word DIRECTLY after the PR: at most four gap characters (space, emphasis, `,` `:` `(`, dashes) between them, or a ledger row's state cell opening with the word for the row's own PRs (`parseLedgerTable`'s `ownPrs`). A word anywhere else on the line raised 12 false flags of 16 in the 2026-11-09 dry run on 213 live plan pages; the narrow form raised 4, all true. A not-merged word (`ikke merget`, `unmerged`) agrees with a CLOSED PR. Word edges are `\p{L}\p{N}`, never `\b`, which finds no boundary before «å».
+- **R2** fires when `status_date` is an older day than the newest merge among `prs:`, the merge dated in Europe/Oslo (`CLAIM_DAY_ZONE`). A `prs:` entry with no known state makes R2 not checked unless a known merge already fires it.
+- **Repos.** `repo#n` takes its owner from the page's `prs:`, else from the wiki's `prRefs` (`repoOwners`, a name with two owners gives none). A bare `#n` is: the repo a word right before it names (a repo name or one `-` token of it, among `repos:` and `prs:`, the work map's `repoWordFits` rule), else the one `prs:` entry with that number, else that number in the one repo `repos:` names. Anything else is `unresolved`, never guessed.
+- **PR states** come from the work map's GitHub check cache (`prStatesFor` in `gh-check.ts`): the same per-wiki cache, flight, one-hour TTL and 500-PRs-an-hour budget, so a page view spawns `gh` at most once an hour per PR. The query now reads `closedAt` too; the card's body still serves `{state, mergedAt}`.
+- **Not checked is never 0.** `contradicted` is null whenever `compared` is 0, with `notChecked.reason`: `disabled` (`WORK_MAP_GH_CHECK=off` or a `WIKI_READONLY_ROOTS` root; nothing spawned), `no-lines` (no line a rule reads), the GitHub reasons (`no-gh`, `auth`, `sso`, `no-access`), else `no-state`.
+- **Route**: tool half beside the Stale routes (nais drops it), `wiki` and `relPath` required (400), unknown wiki or page 404, on `SIDE_EFFECTING_GETS` because it can spawn `gh`.
+
+Acceptance: `claim-check.test.ts`, `wiki-claim-check.test.ts`.
+
 ## Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`)
 
 A nightly, tool-less model run groups a wiki's recent activity into EFFORTS and writes them to `.work-map.json` at the wiki root, so every reader of the wiki reads one map (plan `muninn-wiki-work-map`, P1). P2 renders it as the start view's Your work card; P3 adds the effort page; P4 groups the rail's Activity by effort.

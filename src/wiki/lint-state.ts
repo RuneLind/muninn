@@ -216,14 +216,20 @@ export function isStateScopePage(relPath: string, fm: Record<string, unknown>, p
 /** Text units of a page: one or more 0-based lines read as one string. A body
  *  line is a unit; a frontmatter `description`/`status_note` with its
  *  continuation lines is one; `row` marks a table row (one clause). */
-interface Unit {
+export interface Unit {
   lines: number[];
   row?: true;
+  /** Which home a home unit is (the claim check, `claim-check.ts`, reports it). */
+  home?: HomeKind;
 }
+
+/** The four homes: frontmatter `status_note`, a `<StatusRows>` line, a
+ *  `**Status**` paragraph or list item, a PR-ledger row. */
+export type HomeKind = "status_note" | "status-rows" | "status" | "ledger";
 
 /** Where each line of a page stands. `home` units are exempt from check 1 and
  *  are what check 2 reads; lines in neither are read by neither check. */
-interface LineRoles {
+export interface LineRoles {
   linted: Unit[];
   home: Unit[];
   /** The page's lines as the checks read them: CRLF folded. */
@@ -382,7 +388,8 @@ export function stateLineRoles(content: string): LineRoles {
       const unit = [i];
       for (let k = i + 1; k < body - 1 && (lines[k]!.trim() === "" || /^\s/.test(lines[k]!)); k++) unit.push(k);
       while (unit.length > 1 && lines[unit.at(-1)!]!.trim() === "") unit.pop();
-      (m[1] === "description" ? linted : home).push({ lines: unit });
+      if (m[1] === "description") linted.push({ lines: unit });
+      else home.push({ lines: unit, home: "status_note" });
       i = unit.at(-1)!;
     }
   }
@@ -400,7 +407,7 @@ export function stateLineRoles(content: string): LineRoles {
     const role = tracked.get(i);
     if (role) {
       ledger = false;
-      if (role === "home") home.push({ lines: [i] });
+      if (role === "home") home.push({ lines: [i], home: "status-rows" });
       continue;
     }
     const t = lines[i]!.trim();
@@ -411,7 +418,7 @@ export function stateLineRoles(content: string): LineRoles {
     // A Status paragraph or list item, exactly where the parser makes it.
     if (status.has(i)) {
       ledger = false;
-      home.push({ lines: [i] });
+      home.push({ lines: [i], home: "status" });
       continue;
     }
     // The reader renders the unprefixed line after a quote as its own text.
@@ -430,7 +437,7 @@ export function stateLineRoles(content: string): LineRoles {
       }
       if (headers.has(i)) continue;
       if (ledger) {
-        home.push({ lines: [i], row: true });
+        home.push({ lines: [i], row: true, home: "ledger" });
         continue;
       }
       linted.push({ lines: [i], row: true });

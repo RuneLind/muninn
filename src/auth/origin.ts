@@ -127,6 +127,9 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // The work map's GitHub check SPAWNS `gh` per uncached request, a query per 50
   // PRs on the machine's login. The card's same-origin fetch passes.
   "/api/wiki/work-map/checks",
+  // The claim check asks the same cache for one page's PRs, so it SPAWNS `gh`
+  // the same way when they are due.
+  "/api/wiki/claim-check",
   // The decision inbox SPAWNS one `git log` per open card (the commit that added
   // it), a fan-out the wiki sizes. The card's same-origin fetch passes.
   "/api/wiki/decision-inbox",

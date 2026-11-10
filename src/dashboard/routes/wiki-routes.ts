@@ -56,6 +56,7 @@ import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { registerWikiWorkMapRoutes } from "./wiki-work-map.ts";
+import { registerWikiClaimCheckRoute } from "./wiki-claim-check.ts";
 import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
 import { realTriageStatusDeps, registerWikiDecisionTriageStatusRoutes } from "./wiki-decision-triage-status.ts";
 import { realTriageRunDeps, registerWikiDecisionTriageRunRoute } from "./wiki-decision-triage-run.ts";
@@ -2874,6 +2875,10 @@ export function registerWikiToolRoutes(
       return c.json({ error: "The fix could not be sent to the Gardener. The server log has the details." }, 503);
     }
   });
+
+  // The claim check (`src/wiki/claim-check.ts`): one page's status lines
+  // against GitHub, through the work map check's per-wiki PR cache.
+  registerWikiClaimCheckRoute(app);
 
   app.get("/api/wiki/index-coverage", async (c) => {
     const nullCoverage = (extra: Partial<IndexCoverageResponse> & { error?: string }) =>

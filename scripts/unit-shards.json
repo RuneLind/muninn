@@ -68,6 +68,7 @@
       "src/dashboard/routes/wiki-provenance.test.ts",
       "src/dashboard/routes/wiki-work-map.test.ts",
       "src/dashboard/routes/wiki-work-map-checks.test.ts",
+      "src/dashboard/routes/wiki-claim-check.test.ts",
       "src/dashboard/routes/wiki-decision-triage-status.test.ts",
       "src/dashboard/routes/wiki-decision-triage-run.test.ts",
       "src/dashboard/routes/wiki-plan-card.test.ts",

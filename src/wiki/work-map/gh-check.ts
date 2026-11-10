@@ -166,7 +166,7 @@ export function isLiveCheckPage(p: Pick<WikiPageMeta, "plan_status" | "followups
   return s === "proposed" || s === "ready" || s === "in-flight" || s === "blocked" || (s === "shipped" && p.followups === "open");
 }
 
-interface PrRef {
+export interface PrRef {
   repo: string;
   n: number;
   /** `owner/repo#n` as first spelled. */
@@ -177,13 +177,13 @@ interface PrRef {
 
 const REPO_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9-]*\/(?!\.{1,2}$)[A-Za-z0-9._][A-Za-z0-9._-]*$/;
 
-function prRef(repo: string, n: number): PrRef | null {
+export function prRef(repo: string, n: number): PrRef | null {
   if (!REPO_SLUG_RE.test(repo) || !Number.isSafeInteger(n) || n <= 0) return null;
   const key = `${repo}#${n}`;
   return { repo, n, key, id: key.toLowerCase() };
 }
 
-function parseRefString(s: string): PrRef | null {
+export function parseRefString(s: string): PrRef | null {
   const m = /^(.+)#(\d+)$/.exec(s);
   return m ? prRef(m[1]!, Number(m[2])) : null;
 }
@@ -439,10 +439,18 @@ async function scan(index: WikiIndex, map: WorkMap, deps: GhCheckDeps): Promise<
 }
 
 // ── Asking GitHub ──────────────────────────────────────────────────────
+/** What GitHub says about one PR. `closedAt` is read for the claim check
+ *  (`claim-check.ts`), which dates a closed PR; this card's body leaves it out. */
+export interface PrFact {
+  state: GhState;
+  mergedAt: string | null;
+  closedAt: string | null;
+}
+
 interface CachedState {
   at: number;
   /** Null: GitHub answered that no such PR exists (an issue, a gone number). */
-  state: { state: GhState; mergedAt: string | null } | null;
+  state: PrFact | null;
 }
 
 interface Flight {
@@ -478,7 +486,7 @@ export function __resetGhCheckForTest(): void {
 /** The arguments of one query. Variables carry the slug; the numbers are integers. */
 export function ghQueryArgs(repo: string, numbers: readonly number[]): string[] {
   const [owner, name] = repo.split("/") as [string, string];
-  const fields = numbers.map((n) => `p${n}:pullRequest(number:${n}){state mergedAt}`).join(" ");
+  const fields = numbers.map((n) => `p${n}:pullRequest(number:${n}){state mergedAt closedAt}`).join(" ");
   const query = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){${fields}}}`;
   return ["api", "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `repo=${name}`];
 }
@@ -533,9 +541,13 @@ export function readGhAnswer(result: GhResult, numbers: readonly number[], repo 
   const notFound = (n: number): boolean => errors.some((e) => e.type === "NOT_FOUND" && Array.isArray(e.path) && e.path.includes(`p${n}`));
   const states = new Map<number, CachedState["state"]>();
   for (const n of numbers) {
-    const alias = repository[`p${n}`] as { state?: unknown; mergedAt?: unknown } | null | undefined;
+    const alias = repository[`p${n}`] as { state?: unknown; mergedAt?: unknown; closedAt?: unknown } | null | undefined;
     if (alias && (alias.state === "OPEN" || alias.state === "MERGED" || alias.state === "CLOSED")) {
-      states.set(n, { state: alias.state, mergedAt: typeof alias.mergedAt === "string" ? alias.mergedAt : null });
+      states.set(n, {
+        state: alias.state,
+        mergedAt: typeof alias.mergedAt === "string" ? alias.mergedAt : null,
+        closedAt: typeof alias.closedAt === "string" ? alias.closedAt : null,
+      });
     } else if (notFound(n)) {
       states.set(n, null);
     }
@@ -644,10 +656,7 @@ function buildBody(s: Scan, c: WikiCache, refreshing: boolean, at: number): Work
   const body = emptyBody(at);
   // A state past its hour is served only while its refresh runs: once that
   // refresh has failed, the state counts as unchecked.
-  const known = (ref: PrRef): { state: GhState; mergedAt: string | null } | null => {
-    const hit = c.states.get(ref.id);
-    return hit?.state && (refreshing || at - hit.at < GH_STATE_TTL_MS) ? hit.state : null;
-  };
+  const known = (ref: PrRef): PrFact | null => knownFact(c, ref, refreshing, at);
   const listed = new Set<string>();
   for (const row of s.rows) {
     if (row.kind === "skipped") body.skipped++;
@@ -682,14 +691,53 @@ function buildBody(s: Scan, c: WikiCache, refreshing: boolean, at: number): Work
   }
   for (const ref of s.refs.values()) {
     const gh = known(ref);
-    if (gh) body.prs[ref.key] = gh;
+    if (gh) body.prs[ref.key] = { state: gh.state, mergedAt: gh.mergedAt };
   }
   if (refreshing) body.refreshing = true;
-  const wanted = new Set([...s.refs.values()].map((r) => r.repo.toLowerCase()));
+  const failure = failureFor(c, s.refs.values());
+  if (failure) body.notChecked = failure;
+  return body;
+}
+
+/** A state past its hour is served only while its refresh runs: once that
+ *  refresh has failed, the state counts as unchecked. */
+function knownFact(c: WikiCache, ref: PrRef, refreshing: boolean, at: number): PrFact | null {
+  const hit = c.states.get(ref.id);
+  return hit?.state && (refreshing || at - hit.at < GH_STATE_TTL_MS) ? hit.state : null;
+}
+
+/** The worst reason a wanted repo's last query went unread, with its repos. */
+function failureFor(c: WikiCache, refs: Iterable<PrRef>): { reason: NotCheckedReason; repos: string[] } | undefined {
+  const wanted = new Set([...refs].map((r) => r.repo.toLowerCase()));
   const failed = [...c.failures.entries()].filter(([repo]) => wanted.has(repo)).map(([, f]) => f);
   const reason = FAILURE_ORDER.find((r) => failed.some((f) => f.reason === r));
-  if (reason) body.notChecked = { reason, repos: failed.filter((f) => f.reason === reason).map((f) => f.repo) };
-  return body;
+  return reason ? { reason, repos: failed.filter((f) => f.reason === reason).map((f) => f.repo) } : undefined;
+}
+
+/**
+ * The states of some PRs through this wiki's cache, the flight and the hourly
+ * budget the card's check uses: what is due is asked once, everything fresh is
+ * served from the cache, so a page view asks GitHub at most once an hour per PR.
+ * The claim check (`claim-check.ts`) reads one page's PRs through it. A PR with
+ * no known state is absent from `states`.
+ */
+export async function prStatesFor(
+  wiki: string,
+  refs: readonly PrRef[],
+  deps: GhCheckDeps,
+  now: () => number,
+): Promise<{ states: Map<string, PrFact>; refreshing: boolean; notChecked?: { reason: NotCheckedReason; repos: string[] } }> {
+  const c = cacheFor(wiki);
+  const byId = new Map(refs.map((r) => [r.id, r]));
+  const refreshing = await refreshDue(c, byId, deps, now);
+  const at = now();
+  const states = new Map<string, PrFact>();
+  for (const ref of byId.values()) {
+    const fact = knownFact(c, ref, refreshing, at);
+    if (fact) states.set(ref.id, fact);
+  }
+  const notChecked = failureFor(c, byId.values());
+  return { states, refreshing, ...(notChecked ? { notChecked } : {}) };
 }
 
 /** The check for one wiki, against its current pages and `map`. */

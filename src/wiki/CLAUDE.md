@@ -133,6 +133,7 @@ Pages and routes:
 - Stale check — model half (`stale-confirm.ts`, `wiki_stale_verdicts`, the STALE tab) [trap]
 - Stale check — the counts everywhere (PR 2b: `wiki-stale-summary.ts`, `wiki-stale-marks.ts`)
 - Stale check — the fix paths (PR 3: `stale-fix.ts`, `stale-fix-verdicts.ts`, Apply, Send to Gardener) [trap]
+- Claim check (`claim-check.ts`, `GET /api/wiki/claim-check`)
 - Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`) [trap]
 - Decision triage (`src/wiki/decision-triage/`, `DECISION_TRIAGE_REPO_ROOTS`)
 - Related work (`related.ts`, `prRefs`, the Connections panel's top block)
