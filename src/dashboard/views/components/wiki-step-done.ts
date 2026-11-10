@@ -8,6 +8,12 @@
  * writes, and the page is then fetched and rendered again (`reload`), so the
  * next Done reads the new page and its new hash. There is no undo.
  *
+ * A refusal stays in the preview with what the reader can do next: Remove
+ * stays on only where a retry can help (`retryable`), and Reload shows where
+ * the page on screen is no longer the page on disk (`needsReload`). A refusal
+ * whose preview has closed meanwhile goes on the page as a notice. Escape and
+ * Cancel close the preview and put focus back on its Done.
+ *
  * Which rendered row is which step comes from `GET /api/wiki/step-done`: per
  * counted `you` lane in source order, how many rows its lists hold, and which
  * row each open step is with its text (`pairStepRows`). The reader may have
@@ -67,10 +73,14 @@ interface Preview {
   previewHash: string;
 }
 
+const REMOVED_NOTICE = "The step is removed from the page.";
+const UNCOMMITTED_NOTICE =
+  "The step is removed, but the commit failed: the page has uncommitted edits, so Done is not offered on it again until they are committed.";
+
 /** Pages whose last Done wrote but did not commit: Done is not offered there again. */
 const uncommitted = new Set<string>();
-/** A line to show above the steps after the reload a Done asked for. */
-const notices = new Map<string, string>();
+/** A line to show above the steps the next time the page renders; `focus` when that render is the reload a Done asked for. */
+const notices = new Map<string, { text: string; focus: boolean }>();
 const pageKey = (ctx: StepDonePageContext) => `${ctx.wiki}\u0000${ctx.relPath}`;
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -184,6 +194,7 @@ export function previewHtml(p: Preview): string {
     `<div class="wiki-step-done-sub">${esc(p.logNote)}</div>` +
     `<pre class="wiki-step-done-log">${esc(p.logEntry)}</pre>` +
     `<div class="wiki-step-done-acts"><button type="button" class="wiki-step-done-go" ${STEP_DONE_CONFIRM_ATTR}>Remove the step</button>` +
+    `<button type="button" class="wiki-step-done-reload" hidden>Reload the page</button>` +
     `<button type="button" class="wiki-step-done-cancel">Cancel</button></div>` +
     `<div class="wiki-step-done-err" role="alert" hidden></div>`
   );
@@ -197,15 +208,34 @@ async function postJson(body: Record<string, unknown>): Promise<{ status: number
 
 const errorText = (data: Record<string, unknown>, fallback: string) => (typeof data.error === "string" && data.error ? data.error : fallback);
 
-function showNotice(article: Element, text: string): void {
+/** One line above the steps (above the article when no block is left), replacing an earlier one. */
+function showNotice(article: Element, text: string, role: "status" | "alert"): HTMLElement {
+  article.querySelectorAll(`.${STEP_DONE_NOTE_CLASS}`).forEach((n) => n.remove());
   const note = document.createElement("div");
   note.className = STEP_DONE_NOTE_CLASS;
-  note.setAttribute("role", "status");
+  note.setAttribute("role", role);
   note.setAttribute("data-reader-only", "");
+  note.tabIndex = -1;
   note.textContent = text;
   const block = article.querySelector(".next-moves");
   if (block) block.prepend(note);
   else article.prepend(note);
+  return note;
+}
+
+/** A refused write a second click on Remove can get through: a wiki being written right now, or Gardener cards that could not be read. */
+export const retryable = (status: number, data: Record<string, unknown>): boolean => data.locked === true || status === 503;
+
+/** A refused write after which the page on screen may not be the page on disk: it changed, the preview no longer fits, or the answer never came. */
+export const needsReload = (status: number, data: Record<string, unknown>): boolean =>
+  data.stale === true || data.changed === true || status === 0 || status === 500;
+
+/** A row's text as a button's name carries it: one line, capped. */
+const NAME_CHARS = 120;
+function rowName(li: HTMLElement): string {
+  const text = rowText(li).replace(/\s+/g, " ").trim();
+  const chars = [...text];
+  return chars.length > NAME_CHARS ? `${chars.slice(0, NAME_CHARS - 1).join("").trimEnd()}…` : text;
 }
 
 function closePanels(root: ParentNode): void {
@@ -216,6 +246,7 @@ function openPreview(root: HTMLElement, li: HTMLElement, btn: HTMLButtonElement,
   const had = li.querySelector(`:scope > .${STEP_DONE_PANEL_CLASS}`);
   closePanels(root);
   if (had) return; // a second click on Done closes its own preview
+  const name = rowName(li);
   const panel = document.createElement("div");
   panel.className = STEP_DONE_PANEL_CLASS;
   panel.setAttribute("role", "region");
@@ -225,6 +256,17 @@ function openPreview(root: HTMLElement, li: HTMLElement, btn: HTMLButtonElement,
   // On the row itself, after its text and before any nested list: a task row
   // wraps (see the styles), so the panel takes a line of its own under the text.
   li.insertBefore(panel, li.querySelector(":scope > ul, :scope > ol"));
+  const close = () => {
+    panel.remove();
+    btn.focus({ preventScroll: true });
+  };
+  // Escape from inside the preview closes it; the shell's own Escape handlers do not also run.
+  panel.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  });
   btn.disabled = true;
   void (async () => {
     let r: { status: number; data: Record<string, unknown> };
@@ -242,17 +284,29 @@ function openPreview(root: HTMLElement, li: HTMLElement, btn: HTMLButtonElement,
     }
     const p = r.data as unknown as Preview;
     panel.innerHTML = previewHtml(p);
-    panel.querySelector<HTMLButtonElement>(".wiki-step-done-cancel")!.addEventListener("click", () => panel.remove());
+    panel.querySelector<HTMLButtonElement>(".wiki-step-done-cancel")!.addEventListener("click", close);
+    panel.querySelector<HTMLButtonElement>(".wiki-step-done-reload")!.addEventListener("click", () => ctx.reload());
     const go = panel.querySelector<HTMLButtonElement>(`[${STEP_DONE_CONFIRM_ATTR}]`)!;
     go.focus({ preventScroll: true });
-    go.addEventListener("click", () => void write(panel, go, step, ctx, baseHash, p.previewHash));
+    go.addEventListener("click", () => void write(root, panel, go, step, name, ctx, baseHash, p.previewHash));
   })();
 }
 
-async function write(panel: HTMLElement, go: HTMLButtonElement, step: ListedStep, ctx: StepDonePageContext, baseHash: string, previewHash: string): Promise<void> {
+async function write(
+  article: HTMLElement,
+  panel: HTMLElement,
+  go: HTMLButtonElement,
+  step: ListedStep,
+  name: string,
+  ctx: StepDonePageContext,
+  baseHash: string,
+  previewHash: string,
+): Promise<void> {
   const err = panel.querySelector<HTMLElement>(".wiki-step-done-err")!;
+  const reload = panel.querySelector<HTMLButtonElement>(".wiki-step-done-reload")!;
   go.disabled = true;
   err.hidden = true;
+  reload.hidden = true;
   let r: { status: number; data: Record<string, unknown> };
   try {
     r = await postJson({ wiki: ctx.wiki, relPath: ctx.relPath, step: step.key, baseHash, previewHash });
@@ -260,20 +314,27 @@ async function write(panel: HTMLElement, go: HTMLButtonElement, step: ListedStep
     r = { status: 0, data: { error: "The request failed: nothing is known to have been written. Reload the page." } };
   }
   if (r.status === 200 && r.data.ok === true) {
-    if (r.data.uncommitted === true) {
-      uncommitted.add(pageKey(ctx));
-      notices.set(pageKey(ctx), "The step is removed, but the commit failed: the page has uncommitted edits, so Done is not offered on it again until they are committed.");
-    }
     // Only a page still on screen is fetched again: a reader who went to
     // another page meanwhile stays there (its render already took this panel).
-    if (ctx.current() && panel.isConnected) ctx.reload();
+    const reloads = ctx.current() && panel.isConnected;
+    if (r.data.uncommitted === true) uncommitted.add(pageKey(ctx));
+    notices.set(pageKey(ctx), { text: r.data.uncommitted === true ? UNCOMMITTED_NOTICE : REMOVED_NOTICE, focus: reloads });
+    if (reloads) ctx.reload();
     return;
   }
   // A refusal stays on screen and says why: a page changed underneath, a
   // session editing it, a preview that no longer fits.
-  err.textContent = errorText(r.data, "Done could not remove the step.");
+  const why = errorText(r.data, "Done could not remove the step.");
+  if (!panel.isConnected) {
+    // The preview closed while the write ran (another Done was opened, or
+    // Escape): the refusal goes on the page, while it is still the page shown.
+    if (ctx.current() && article.isConnected) showNotice(article, `Done did not remove «${name}»: ${why}`, "alert");
+    return;
+  }
+  err.textContent = why;
   err.hidden = false;
-  go.disabled = r.data.stale === true || r.data.dirty === true || r.data.changed === true;
+  reload.hidden = !needsReload(r.status, r.data);
+  go.disabled = !retryable(r.status, r.data);
 }
 
 /** Put a Done button on each open step of the rendered article's `you` lanes. */
@@ -284,7 +345,9 @@ export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): vo
   const notice = notices.get(key);
   if (notice) {
     notices.delete(key);
-    showNotice(article, notice);
+    // After the reload a Done asked for, the keyboard goes here: the article was replaced under it.
+    const note = showNotice(article, notice.text, "status");
+    if (notice.focus) note.focus({ preventScroll: true });
   }
   if (wikiReadonlyWikiFlag() || !wikiToolsFlag() || uncommitted.has(key)) return;
   if (!countedLanes(article).some((l) => l.dataset.kind === "you" && Number(l.dataset.count) > 0)) return;
@@ -313,6 +376,14 @@ export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): vo
       btn.setAttribute("data-reader-only", "");
       btn.title = "Mark this step done: preview what goes from the page";
       btn.textContent = "Done";
+      btn.setAttribute("aria-label", `Done: ${rowName(li)}`);
+      // Escape on the Done itself closes its preview too (focus is here while the preview is read).
+      btn.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape" || !li.querySelector(`:scope > .${STEP_DONE_PANEL_CLASS}`)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        closePanels(li);
+      });
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -351,7 +422,7 @@ export function stepDoneStyles(): string {
     .wiki-step-done-head { font-weight: 600; }
     .wiki-step-done-sub { color: var(--text-secondary); }
     .wiki-step-done-lines, .wiki-step-done-log {
-      margin: 0; padding: 6px 8px; border-radius: 6px; overflow-x: auto; white-space: pre;
+      margin: 0; padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere;
       background: var(--bg-surface); border: 1px solid var(--border-secondary); font-size: 12px;
     }
     .wiki-step-done-ln { color: var(--text-secondary); user-select: none; }
@@ -363,9 +434,10 @@ export function stepDoneStyles(): string {
     .wiki-step-done-acts .wiki-step-done-go { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
     .wiki-step-done-acts button:disabled { opacity: 0.5; cursor: not-allowed; }
     .wiki-step-done-err { color: var(--status-error); font-weight: 500; }
-    .wiki-step-done-err[hidden] { display: none; }
+    .wiki-step-done-err[hidden], .wiki-step-done-acts button[hidden] { display: none; }
     .${STEP_DONE_NOTE_CLASS} {
       margin: 0 0 8px; padding: 6px 10px; border-radius: 8px; font-size: 13px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary);
-    }`;
+    }
+    .${STEP_DONE_NOTE_CLASS}[role="alert"] { color: var(--status-error); font-weight: 500; }`;
 }

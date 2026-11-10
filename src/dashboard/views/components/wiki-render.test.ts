@@ -136,7 +136,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Fix round 2 batch 1 (an Escape a menu already took, closing on the way to the start view): 846,684 (288,157).
 // 2026-11-10, step Done (wiki-step-done.ts: the button, the preview panel, the write): 851,669 (289,849).
 // Its fix round 1 batch 3 (pairing rows by source order and text, the reload guard, the panel's place): 853,205 (290,401).
-const WIKI_CLIENT_MAX_BYTES = 854_000;
+// Batch 4 (Reload and the retry rule on a refusal, Escape and focus, each Done's name, the notice): 854,354 (290,712).
+const WIKI_CLIENT_MAX_BYTES = 855_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

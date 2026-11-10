@@ -14,7 +14,13 @@
  *     lanes moved to the top; a row whose text is not its step gets no button.
  *  6. A write that returns after the reader left the page, or while the next
  *     page is still loading, does not pull the reader back to it.
- *  7. The preview sits under a task row's text, at the row's width.
+ *  7. The preview sits under a task row's text, at the row's width, and wraps
+ *     its lines inside that width.
+ *  8. Escape and Cancel close the preview with focus back on its Done; each
+ *     Done's name carries its step; after a write the page says so.
+ *  9. A refusal says what the reader can do: Reload after a changed page,
+ *     Remove off unless a retry can help, and a refusal whose preview has
+ *     closed lands on the page.
  *
  * One muninn on its own port (the close route's scope needs WORK_MAP_WIKIS and
  * WIKI_ANSWER_WIKIS), the test database (the Gardener-held check reads it), a
@@ -44,6 +50,7 @@ const NAV_REL = "plans/e2e-steps-nav.mdx";
 const NAV2_REL = "plans/e2e-steps-nav-2.mdx";
 const OTHER_REL = "plans/e2e-other.mdx";
 const TASK_REL = "plans/e2e-steps-tasks.mdx";
+const KEYS_REL = "plans/e2e-steps-keys.mdx";
 
 const page = (title: string) =>
   [
@@ -105,6 +112,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, NAV2_REL), page("Nav fixture two"), "utf8");
   await writeFile(path.join(root, OTHER_REL), "---\ntitle: Other fixture\n---\n\nNothing to do here.\n", "utf8");
   await writeFile(path.join(root, TASK_REL), taskPage(), "utf8");
+  await writeFile(path.join(root, KEYS_REL), page("Keys fixture"), "utf8");
   git(root, "init", "-q", "-b", "main");
   // The route's commit spawns git with no author env.
   git(root, "config", "user.name", "e2e");
@@ -178,6 +186,11 @@ test.describe.serial("Done on a you step", () => {
   test("Remove takes the step off, and a second step on the same page goes after it", async ({ page: p }) => {
     await openPage(p, REL);
     await markDone(p, "Water the plants");
+    // The page says what happened, where the keyboard now is.
+    const note = p.locator(".wiki-article .wiki-step-done-note");
+    await expect(note).toHaveText("The step is removed from the page.");
+    await expect(note).toHaveAttribute("role", "status");
+    await expect(note).toBeFocused();
     // The list still starts at 1: the next item took the number.
     expect(await readFile(path.join(root, REL), "utf8")).toContain("1. Sort the blue folders.");
     await expect(youLane(p).locator(".nm-body ol")).not.toHaveAttribute("start", /.+/);
@@ -209,6 +222,16 @@ test.describe.serial("Done on a you step", () => {
     await li.locator("[data-step-done-confirm]").click();
     await expect(li.locator(".wiki-step-done-err")).toHaveText("The page changed since it was shown. Reload it and try again.");
     expect(await readFile(path.join(root, STALE_REL), "utf8")).toBe(changed);
+    // Remove cannot help now; Reload renders the changed page, and its Done works.
+    await expect(li.locator("[data-step-done-confirm]")).toBeDisabled();
+    await li.locator(".wiki-step-done-reload").click();
+    await expect(p.locator(".wiki-article")).toContainText("Some intro text, edited elsewhere.");
+    await expect(p.locator(".wiki-step-done-panel")).toHaveCount(0);
+    await openYouLane(p);
+    const again = step(p, "Sort the blue folders");
+    await again.locator("[data-step-done]").click();
+    await expect(again.locator(".wiki-step-done-lines")).toContainText("2. Sort the blue folders.");
+    await expect(again.locator(".wiki-step-done-reload")).toBeHidden();
   });
 });
 
@@ -371,6 +394,10 @@ for (const width of [390, 1280]) {
       const panel = r.locator(".wiki-step-done-panel");
       await expect(panel.locator(".wiki-step-done-lines")).toBeVisible();
       const box = (await panel.boundingBox())!;
+      // The removed line and the log entry wrap: nothing to scroll sideways for.
+      const over = await panel.locator(".wiki-step-done-lines, .wiki-step-done-log").evaluateAll((els) => els.map((e) => e.scrollWidth - e.clientWidth));
+      expect(over).toHaveLength(2);
+      for (const px of over) expect(px).toBeLessThanOrEqual(1);
       if (col && colBefore) {
         const after = (await col.boundingBox())!;
         expect(Math.abs(after.width - colBefore.width)).toBeLessThanOrEqual(1);
@@ -392,3 +419,91 @@ for (const width of [390, 1280]) {
     }
   });
 }
+
+/** Answer every write (never a preview) with `answer()`, once `gate` lets it through. */
+async function answerWrites(p: Page, answer: () => { status: number; json: Record<string, unknown> }, gate?: Promise<void>): Promise<{ held: () => boolean }> {
+  let held = false;
+  await p.route("**/api/wiki/step-done", async (route) => {
+    const req = route.request();
+    if (req.method() !== "POST" || (req.postDataJSON() as { preview?: boolean }).preview === true) return route.continue();
+    held = true;
+    await gate;
+    await route.fulfill(answer());
+  });
+  return { held: () => held };
+}
+
+test.describe("the preview's keys, names and refusals", () => {
+  test("Escape and Cancel close the preview and put focus back on its Done", async ({ page: p }) => {
+    await openPage(p, KEYS_REL);
+    const li = step(p, "Sort the blue folders");
+    const done = li.locator("[data-step-done]");
+    await done.click();
+    await expect(li.locator("[data-step-done-confirm]")).toBeFocused();
+    await p.keyboard.press("Escape");
+    await expect(p.locator(".wiki-step-done-panel")).toHaveCount(0);
+    await expect(done).toBeFocused();
+    await done.click();
+    await li.locator(".wiki-step-done-cancel").click();
+    await expect(p.locator(".wiki-step-done-panel")).toHaveCount(0);
+    await expect(done).toBeFocused();
+    // Escape on the Done itself, where focus is while the preview is read.
+    await done.click();
+    await expect(li.locator("[data-step-done-confirm]")).toBeFocused();
+    await done.focus();
+    await p.keyboard.press("Escape");
+    await expect(p.locator(".wiki-step-done-panel")).toHaveCount(0);
+    await expect(done).toBeFocused();
+  });
+
+  test("each Done's name carries its step", async ({ page: p }) => {
+    await openPage(p, KEYS_REL);
+    await expect(step(p, "Water the plants").locator("[data-step-done]")).toHaveAccessibleName("Done: Water the plants: the ferns first.");
+    await expect(step(p, "Sort the blue folders").locator("[data-step-done]")).toHaveAccessibleName("Done: Sort the blue folders.");
+    await expect(step(p, "Wind the hall clock").locator("[data-step-done]")).toHaveText("Done");
+  });
+
+  test("a refusal a retry cannot change turns Remove off; a wiki being written leaves it on", async ({ page: p }) => {
+    let answer = { status: 409, json: { error: "The Gardener holds this page.", held: true } as Record<string, unknown> };
+    await answerWrites(p, () => answer);
+    await openPage(p, KEYS_REL);
+    const li = step(p, "Sort the blue folders");
+    await li.locator("[data-step-done]").click();
+    await li.locator("[data-step-done-confirm]").click();
+    await expect(li.locator(".wiki-step-done-err")).toHaveText("The Gardener holds this page.");
+    await expect(li.locator("[data-step-done-confirm]")).toBeDisabled();
+    await expect(li.locator(".wiki-step-done-reload")).toBeHidden();
+    await li.locator(".wiki-step-done-cancel").click();
+
+    answer = { status: 409, json: { error: "A session is writing to this wiki. Try again in a moment.", locked: true } };
+    await li.locator("[data-step-done]").click();
+    await li.locator("[data-step-done-confirm]").click();
+    await expect(li.locator(".wiki-step-done-err")).toHaveText("A session is writing to this wiki. Try again in a moment.");
+    await expect(li.locator("[data-step-done-confirm]")).toBeEnabled();
+    await expect(li.locator(".wiki-step-done-reload")).toBeHidden();
+    expect(await readFile(path.join(root, KEYS_REL), "utf8")).toBe(page("Keys fixture"));
+  });
+
+  test("a refusal that arrives after its preview closed is shown on the page", async ({ page: p }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const writes = await answerWrites(p, () => ({ status: 409, json: { error: "The Gardener holds this page.", held: true } }), gate);
+    await openPage(p, KEYS_REL);
+    const li = step(p, "Sort the blue folders");
+    await li.locator("[data-step-done]").click();
+    await li.locator("[data-step-done-confirm]").click();
+    await expect.poll(() => writes.held()).toBe(true);
+    // Another step's Done closes the preview that is writing.
+    // (By its own text: the open preview also names this step, as a renumbered line.)
+    const other = youLane(p).locator(".nm-body li", { hasText: /^Wind the hall clock/ });
+    await other.locator("[data-step-done]").click();
+    await expect(other.locator("[data-step-done-confirm]")).toBeVisible();
+    await expect(li.locator(".wiki-step-done-panel")).toHaveCount(0);
+    release();
+    const note = p.locator(".wiki-article .wiki-step-done-note");
+    await expect(note).toHaveText("Done did not remove «Sort the blue folders.»: The Gardener holds this page.");
+    await expect(note).toHaveAttribute("role", "alert");
+    // The other step's preview is still open.
+    await expect(other.locator("[data-step-done-confirm]")).toBeVisible();
+  });
+});

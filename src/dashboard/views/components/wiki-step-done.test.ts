@@ -4,7 +4,7 @@
  * `e2e/wiki-step-done.spec.ts`.
  */
 import { expect, test } from "bun:test";
-import { pairStepRows, renderedMatchText, sourceMatchText, type RenderedLane } from "./wiki-step-done.ts";
+import { needsReload, pairStepRows, renderedMatchText, retryable, sourceMatchText, type RenderedLane } from "./wiki-step-done.ts";
 
 const step = (key: string, lane: number, row: number | null, text: string, refusal: string | null = null) => ({ key, lane, row, text, refusal });
 
@@ -66,3 +66,26 @@ test("empty match text never pairs", () => {
   const lanes = [lane("you", 0, 0, [""])];
   expect(pairStepRows(lanes, { laneRows: [1], steps: [step("x", 0, 0, "![](img.png)")] })).toEqual([]);
 });
+
+// What each refusal of the write leaves the reader to do (fix round 1 batch 4).
+// The shapes are the route's own answers in `routes/wiki-step-done.ts`.
+const REFUSALS: [name: string, status: number, data: Record<string, unknown>, retry: boolean, reload: boolean][] = [
+  ["the page changed", 409, { stale: true }, false, true],
+  ["the preview no longer fits", 409, { changed: true }, false, true],
+  ["the answer never came", 0, {}, false, true],
+  ["the route failed", 500, {}, false, true],
+  ["a session is writing to the wiki", 409, { locked: true }, true, false],
+  ["the Gardener's cards could not be read", 503, {}, true, false],
+  ["a Gardener card holds the page", 409, { held: true }, false, false],
+  ["the page has uncommitted edits", 409, { dirty: true }, false, false],
+  ["the step cannot be removed", 409, { refused: true, code: "nested" }, false, false],
+  ["the wiki is read-only", 403, { readonly: true }, false, false],
+  ["no Done on this wiki", 404, {}, false, false],
+];
+
+for (const [name, status, data, retry, reload] of REFUSALS) {
+  test(`refusal, ${name}: Remove ${retry ? "stays on" : "goes off"}, Reload ${reload ? "shows" : "stays hidden"}`, () => {
+    expect(retryable(status, data)).toBe(retry);
+    expect(needsReload(status, data)).toBe(reload);
+  });
+}
