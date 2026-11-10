@@ -135,7 +135,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Batch 2 (closing on Back, on an effort link and on leaving the narrow width): 846,727 (288,154).
 // Fix round 2 batch 1 (an Escape a menu already took, closing on the way to the start view): 846,684 (288,157).
 // 2026-11-10, step Done (wiki-step-done.ts: the button, the preview panel, the write): 851,669 (289,849).
-const WIKI_CLIENT_MAX_BYTES = 852_000;
+// Its fix round 1 batch 3 (pairing rows by source order and text, the reload guard, the panel's place): 853,205 (290,401).
+const WIKI_CLIENT_MAX_BYTES = 854_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -170,8 +171,9 @@ test("wikiClientScript stays under its size pin", async () => {
 // 2026-11-09, issue #623: `closeRailPanel()` in `loadPageByRelPath`, where a
 // rail row's click lands, and in `goToStart`, where its footer link does: 3,454.
 // 2026-11-10, step Done: its import and one call beside the 🧭 buttons (the
-// control lives in `wiki-step-done.ts`): 3,456.
-const WIKI_BROWSER_MAX_LINES = 3_456;
+// control lives in `wiki-step-done.ts`): 3,456. Its fix round 1 batch 3: the
+// page view the write's reload is guarded by: 3,458.
+const WIKI_BROWSER_MAX_LINES = 3_458;
 const WIKI_BROWSER_MAX_MODULE_LETS = 51;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {

@@ -9,8 +9,12 @@
  * next Done reads the new page and its new hash. There is no undo.
  *
  * Which rendered row is which step comes from `GET /api/wiki/step-done`: per
- * counted `you` lane, how many rows its lists hold and which row each open
- * step is. A lane whose rendered rows do not count the same gets no buttons.
+ * counted `you` lane in source order, how many rows its lists hold, and which
+ * row each open step is with its text (`pairStepRows`). The reader may have
+ * moved the viewer's role lanes up (`applyLaneRoles`), so the lanes are put
+ * back in source order by `data-nm-order` first, and a row gets a button only
+ * if its text is its step's: a lane with any row that does not match, or that
+ * does not count the same, gets no buttons.
  *
  * Gating: no fetch under the read slice or on a read-only wiki; the buttons
  * also sit in `WIKI_READONLY_BLOCKED_SELECTOR` (and so in the read slice's
@@ -34,10 +38,14 @@ export interface StepDonePageContext {
   hash: () => string | null;
   /** Fetch and render the open page again. */
   reload: () => void;
+  /** Whether the reader still shows this page: no other view has started since it rendered. */
+  current: () => boolean;
 }
 
 interface ListedStep {
   key: string;
+  /** The step's source text, as `listYouSteps` gives it. */
+  text: string;
   lane: number;
   row: number | null;
   refusal: string | null;
@@ -71,6 +79,92 @@ const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 function laneRows(lane: HTMLElement): HTMLElement[] {
   const body = lane.querySelector<HTMLElement>(":scope > .nm-body");
   return body ? Array.from(body.querySelectorAll<HTMLElement>(":scope > ul > li, :scope > ol > li")) : [];
+}
+
+/** A rendered lane as the pairing reads it, in DOM order. */
+export interface RenderedLane {
+  kind: string;
+  /** Which counted `.next-moves` block the lane sits in, in DOM order: blocks are never reordered. */
+  group: number;
+  /** Its authored position in that block (`data-nm-order`), or null when the reader never reordered it. */
+  order: number | null;
+  /** Each row's rendered text, as `rowText` reads it. */
+  rows: string[];
+}
+
+/** Text reduced to its letters and digits, lowercased: what a row and its step must share. */
+export const renderedMatchText = (s: string): string => s.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+/** A step's markdown source as `renderedMatchText` would read its rendered row:
+ *  images go, a link keeps its label, an autolink its URL, a tag its content, an entity nothing. */
+export function sourceMatchText(src: string): string {
+  return renderedMatchText(
+    src
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/<(https?:\/\/[^>\s]+)>/g, "$1")
+      .replace(/<\/?[A-Za-z][^>]*>/g, "")
+      .replace(/&(?:[a-z]+|#\d+);/gi, ""),
+  );
+}
+
+/**
+ * Which rendered row gets which step's key. Lanes are put in source order
+ * (block, then `order` where the reader set it, else DOM position); the `n`th
+ * `you` lane of that order is the server's lane `n`. A lane pairs only when its
+ * row count is the server's and every open step's row shows that step's text:
+ * otherwise it pairs nothing (fail closed). `lane` in the result is the index
+ * into `lanes` (DOM order).
+ */
+export function pairStepRows(
+  lanes: RenderedLane[],
+  list: { laneRows: number[]; steps: Pick<ListedStep, "key" | "text" | "lane" | "row" | "refusal">[] },
+): { lane: number; row: number; key: string }[] {
+  const pos = new Map<RenderedLane, number>();
+  const seen = new Map<number, number>();
+  for (const l of lanes) {
+    const n = seen.get(l.group) ?? 0;
+    pos.set(l, n);
+    seen.set(l.group, n + 1);
+  }
+  const source = lanes
+    .map((l, dom) => ({ l, dom }))
+    .sort((a, b) => a.l.group - b.l.group || (a.l.order ?? pos.get(a.l)!) - (b.l.order ?? pos.get(b.l)!))
+    .filter((x) => x.l.kind === "you");
+  if (source.length !== list.laneRows.length) return [];
+  const out: { lane: number; row: number; key: string }[] = [];
+  source.forEach(({ l, dom }, i) => {
+    if (l.rows.length !== list.laneRows[i]) return;
+    const pairs: { lane: number; row: number; key: string }[] = [];
+    for (const step of list.steps) {
+      if (step.lane !== i || step.row === null || step.refusal) continue;
+      const shown = l.rows[step.row];
+      const want = sourceMatchText(step.text ?? "");
+      if (shown === undefined || want === "" || renderedMatchText(shown) !== want) return;
+      pairs.push({ lane: dom, row: step.row, key: step.key });
+    }
+    out.push(...pairs);
+  });
+  return out;
+}
+
+/** A row's own text: a task row's `.check-text`, else the row without its nested lists; reader-only additions left out. */
+function rowText(li: HTMLElement): string {
+  const own = li.querySelector<HTMLElement>(":scope > .check-text") ?? li;
+  const copy = own.cloneNode(true) as HTMLElement;
+  copy.querySelectorAll(":scope > ul, :scope > ol, [data-reader-only]").forEach((n) => n.remove());
+  return copy.textContent ?? "";
+}
+
+/** The counted lanes as the pairing reads them. */
+function renderedLanes(article: HTMLElement): { el: HTMLElement; lane: RenderedLane }[] {
+  const blocks: Element[] = [];
+  return countedLanes(article).map((el) => {
+    const block = el.closest(".next-moves")!;
+    if (!blocks.includes(block)) blocks.push(block);
+    const order = el.dataset.nmOrder !== undefined && /^\d+$/.test(el.dataset.nmOrder) ? Number(el.dataset.nmOrder) : null;
+    return { el, lane: { kind: el.dataset.kind ?? "", group: blocks.indexOf(block), order, rows: laneRows(el).map(rowText) } };
+  });
 }
 
 /** The preview's body: the lines that go, the renumbered lines, what goes with them, the log entry. */
@@ -128,7 +222,9 @@ function openPreview(root: HTMLElement, li: HTMLElement, btn: HTMLButtonElement,
   panel.setAttribute("aria-label", "Mark the step done");
   panel.setAttribute("data-reader-only", "");
   panel.textContent = "Reading what Done removes…";
-  li.appendChild(panel);
+  // On the row itself, after its text and before any nested list: a task row
+  // wraps (see the styles), so the panel takes a line of its own under the text.
+  li.insertBefore(panel, li.querySelector(":scope > ul, :scope > ol"));
   btn.disabled = true;
   void (async () => {
     let r: { status: number; data: Record<string, unknown> };
@@ -168,7 +264,9 @@ async function write(panel: HTMLElement, go: HTMLButtonElement, step: ListedStep
       uncommitted.add(pageKey(ctx));
       notices.set(pageKey(ctx), "The step is removed, but the commit failed: the page has uncommitted edits, so Done is not offered on it again until they are committed.");
     }
-    ctx.reload();
+    // Only a page still on screen is fetched again: a reader who went to
+    // another page meanwhile stays there (its render already took this panel).
+    if (ctx.current() && panel.isConnected) ctx.reload();
     return;
   }
   // A refusal stays on screen and says why: a page changed underneath, a
@@ -189,8 +287,7 @@ export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): vo
     showNotice(article, notice);
   }
   if (wikiReadonlyWikiFlag() || !wikiToolsFlag() || uncommitted.has(key)) return;
-  const lanes = countedLanes(article).filter((l) => l.dataset.kind === "you");
-  if (!lanes.some((l) => Number(l.dataset.count) > 0)) return;
+  if (!countedLanes(article).some((l) => l.dataset.kind === "you" && Number(l.dataset.count) > 0)) return;
   const shownHash = ctx.hash();
   void (async () => {
     let list: StepList;
@@ -202,31 +299,31 @@ export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): vo
       return;
     }
     // The article must still be the one asked about, at the same page bytes.
-    if (!article.isConnected || !Array.isArray(list.steps) || list.baseHash !== shownHash || list.laneRows.length !== lanes.length) return;
-    lanes.forEach((lane, i) => {
-      const rows = laneRows(lane);
-      if (rows.length !== list.laneRows[i]) return;
-      for (const step of list.steps) {
-        if (step.lane !== i || step.row === null || step.refusal) continue;
-        const li = rows[step.row];
-        if (!li || li.querySelector(`:scope > [${STEP_DONE_ATTR}]`)) continue;
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "wiki-step-done-btn";
-        btn.setAttribute(STEP_DONE_ATTR, step.key);
-        btn.setAttribute("data-reader-only", "");
-        btn.title = "Mark this step done: preview what goes from the page";
-        btn.textContent = "Done";
-        btn.addEventListener("click", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          openPreview(article, li, btn, step, ctx, list.baseHash);
-        });
-        // In a checklist row the text sits in `.check-text`: the button goes after it, before any nested list.
-        const nested = li.querySelector(":scope > ul, :scope > ol");
-        li.insertBefore(btn, nested);
-      }
-    });
+    if (!article.isConnected || !Array.isArray(list.steps) || !Array.isArray(list.laneRows) || list.baseHash !== shownHash) return;
+    const lanes = renderedLanes(article);
+    const byKey = new Map(list.steps.map((s) => [s.key, s]));
+    for (const pair of pairStepRows(lanes.map((l) => l.lane), list)) {
+      const step = byKey.get(pair.key)!;
+      const li = laneRows(lanes[pair.lane]!.el)[pair.row];
+      if (!li || li.querySelector(`:scope > [${STEP_DONE_ATTR}], :scope > .check-text > [${STEP_DONE_ATTR}]`)) continue;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "wiki-step-done-btn";
+      btn.setAttribute(STEP_DONE_ATTR, step.key);
+      btn.setAttribute("data-reader-only", "");
+      btn.title = "Mark this step done: preview what goes from the page";
+      btn.textContent = "Done";
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openPreview(article, li, btn, step, ctx, list.baseHash);
+      });
+      // In a task row the button goes inside `.check-text`, at the end of the
+      // text: a flex sibling there would narrow the text column.
+      const text = li.querySelector<HTMLElement>(":scope > .check-text");
+      if (text) text.appendChild(btn);
+      else li.insertBefore(btn, li.querySelector(":scope > ul, :scope > ol"));
+    }
   })();
 }
 
@@ -238,9 +335,14 @@ export function stepDoneStyles(): string {
       border: 1px solid var(--border-secondary); background: transparent;
       color: var(--text-secondary); opacity: 0.55;
     }
-    li:hover > .wiki-step-done-btn, .wiki-step-done-btn:focus-visible { opacity: 1; }
+    li:hover > .wiki-step-done-btn, li:hover > .check-text > .wiki-step-done-btn, .wiki-step-done-btn:focus-visible { opacity: 1; }
     .wiki-step-done-btn:disabled { cursor: progress; }
+    /* A task row with a Done wraps, so the panel (basis 100%) takes a line under
+       the text; the text's basis 0 keeps it on the mark's line at its full width. */
+    li.check-item:has(> .check-text > .wiki-step-done-btn) { flex-wrap: wrap; }
+    li.check-item:has(> .check-text > .wiki-step-done-btn) > .check-text { flex: 1 1 0; min-width: 0; }
     .${STEP_DONE_PANEL_CLASS} {
+      flex: 0 0 100%; min-width: 0; box-sizing: border-box;
       margin: 6px 0 8px; padding: 10px 12px; border-radius: 10px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
       color: var(--text-primary); font-size: 13px; line-height: 1.5;

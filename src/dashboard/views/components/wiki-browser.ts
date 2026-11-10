@@ -1745,7 +1745,9 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
           withWiki,
           reload: () => reloadPageInPlace(wtRelPath),
         });
-        enhanceStepDone(articleRoot, { wiki: FIND_SELF_WIKI || WIKI, relPath: wtRelPath, hash: () => currentPageHash, reload: () => reloadPageInPlace(wtRelPath) });
+        // A Done write that returns after any later view started reloads nothing.
+        const view = pageViewSeq;
+        enhanceStepDone(articleRoot, { wiki: FIND_SELF_WIKI || WIKI, relPath: wtRelPath, hash: () => currentPageHash, reload: () => reloadPageInPlace(wtRelPath), current: () => view === pageViewSeq && currentRelPath === wtRelPath });
       }
       // The lens (D2's precedence): a `?lens=` the page was opened with, once,
       // then the viewer's stored choice, then the page's default. Before the
