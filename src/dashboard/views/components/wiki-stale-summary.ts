@@ -134,7 +134,7 @@ export function wikiStaleSummaryStyles(): string {
     .wiki-stale-pill { font: inherit; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; cursor: pointer; border: 1px solid color-mix(in srgb, var(--status-warning) 55%, transparent); background: color-mix(in srgb, var(--status-warning) 14%, transparent); color: var(--text-primary); }
     .wiki-stale-pill.none { border-color: var(--border-primary); background: transparent; color: var(--text-dim); }
     .wiki-stale-pill:hover { border-color: var(--accent); }
-    .wiki-status-date { font-size: 11.5px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border-primary); color: var(--text-dim); }
+    .wiki-status-date { display: inline-block; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border-primary); color: var(--text-dim); }
     .wiki-stale-pill + .wiki-status-date { margin-left: 6px; }
     .wiki-status-date.late { border-color: color-mix(in srgb, var(--status-warning) 55%, transparent); background: color-mix(in srgb, var(--status-warning) 14%, transparent); color: var(--text-primary); }
     .wiki-stale-home { font-size: 12.5px; color: var(--text-secondary); padding: 8px 12px; margin: 0 0 12px; border-radius: 8px; border: 1px solid var(--border-primary); background: var(--bg-panel); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }

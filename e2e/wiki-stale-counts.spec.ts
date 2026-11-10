@@ -404,6 +404,83 @@ test("the status date line sits beside the pill and says what was compared", asy
   expect(await border()).not.toBe(lateFill);
 });
 
+/** Hold the Stale check's report for `rel` until `gate`; with `fail`, answer it with a page that is no JSON. */
+async function holdStaleReport(p: Page, rel: string, gate: Promise<void>, fail = false): Promise<void> {
+  await p.route(
+    (u) => u.pathname === "/api/wiki/stale" && u.searchParams.get("page") === rel,
+    async (route: Route) => {
+      await gate;
+      await (fail ? route.fulfill({ status: 502, contentType: "text/html", body: "<html>bad gateway</html>" }) : route.continue()).catch(() => {});
+    },
+  );
+}
+const twoFrames = (p: Page) => p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
+test("the line waits for the Stale check's report: it never stands alone and then moves", async ({ page: p }) => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await holdStaleReport(p, "hub.md", gate);
+  await answerClaimCheck(p, "hub.md", { json: LATE });
+  const answered = p.waitForResponse((r) => new URL(r.url()).pathname === "/api/wiki/claim-check");
+  await p.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=hub.md`);
+  await expect(p.locator(".wiki-article")).toContainText("The pin moved.");
+  await answered;
+  await twoFrames(p);
+  // The check has answered and the report has not: the slot is still empty.
+  await expect(p.locator("#wikiStalePill")).toBeEmpty();
+  release();
+  await expect(pill(p)).toHaveText(HUB_TEXT);
+  await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  expect(await p.locator("#wikiStalePill").evaluate((slot) => Array.from(slot.children, (c) => c.tagName))).toEqual(["BUTTON", "SPAN"]);
+});
+
+test("a Stale report that failed leaves the line, with no pill", async ({ page: p }) => {
+  await holdStaleReport(p, "hub.md", Promise.resolve(), true);
+  await answerClaimCheck(p, "hub.md", { json: LATE });
+  await p.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=hub.md`);
+  await expect(p.locator(".wiki-article")).toContainText("The pin moved.");
+  await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  await expect(pill(p)).toHaveCount(0);
+});
+
+test("the line arriving keeps the reader's focus on the pill", async ({ page: p }) => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await answerClaimCheck(p, "hub.md", { json: LATE }, gate);
+  await open(p, "hub.md", "The pin moved.");
+  await expect(pill(p)).toHaveText(HUB_TEXT);
+  await pill(p).focus();
+  await expect(pill(p)).toBeFocused();
+  release();
+  await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  await expect(pill(p)).toBeFocused();
+});
+
+test("the line arriving takes no focus the reader did not have on the pill", async ({ page: p }) => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await answerClaimCheck(p, "hub.md", { json: LATE }, gate);
+  await open(p, "hub.md", "The pin moved.");
+  await expect(pill(p)).toHaveText(HUB_TEXT);
+  release();
+  await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  await expect(pill(p)).not.toBeFocused();
+});
+
+test("a long line wraps as one box at phone width, and the page does not scroll sideways", async ({ page: p }) => {
+  const long = { ...LATE, newest: { ...LATE.newest, pr: "navikt/faktureringskomponenten#355", repo: "navikt/faktureringskomponenten", n: 355 } };
+  await answerClaimCheck(p, "hub.md", { json: long });
+  await p.setViewportSize({ width: 390, height: 800 });
+  await p.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=hub.md`);
+  await expect(dateLine(p)).toHaveText(LATE_TEXT.replace("muninn#802", "faktureringskomponenten#355"));
+  const box = await dateLine(p).evaluate((el) => {
+    const slot = el.parentElement!.parentElement!.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    return { rects: el.getClientRects().length, inside: r.left >= slot.left - 0.5 && r.right <= slot.right + 0.5, sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth };
+  });
+  expect(box).toEqual({ rects: 1, inside: true, sideways: false });
+});
+
 test("the real route's answer for a page that is no live plan gives no line", async ({ page: p }) => {
   const answered = p.waitForResponse((r) => new URL(r.url()).pathname === "/api/wiki/claim-check");
   await open(p, "hub.md", "The pin moved.");

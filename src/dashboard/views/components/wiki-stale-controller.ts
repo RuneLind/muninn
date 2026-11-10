@@ -369,9 +369,14 @@ export function paintStaleSurfaces(): void {
   const shown = onScreen ? staleReport : null;
   const pill = document.getElementById("wikiStalePill");
   if (pill) {
-    // The line is the loader's answer for the tab's page, so never another page's.
-    const html = onScreen ? stalePillHtml(staleReport) + statusDatePillHtml(statusDates.answerFor(staleFor)) : "";
-    if (pill.innerHTML !== html) pill.innerHTML = html;
+    // The line is the loader's answer for the tab's page. It waits for the report, read
+    // or failed, so it never stands alone and then moves. A repaint keeps focus on the pill.
+    const html = shown ? stalePillHtml(shown) + statusDatePillHtml(statusDates.answerFor(staleFor)) : "";
+    if (pill.innerHTML !== html) {
+      const focused = pill.contains(document.activeElement);
+      pill.innerHTML = html;
+      if (focused) pill.querySelector<HTMLElement>("button")?.focus();
+    }
   }
   const art = deps.renderedArticle();
   if (art && art.el.isConnected) {
