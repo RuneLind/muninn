@@ -916,6 +916,20 @@ describe("the live pages' prs:", () => {
     expect(cached([`${WIDGETS}#1`]).failures.size).toBe(0);
   });
 
+  test("a failure is read for an hour, from the pages' cache and from the card's", async () => {
+    // gears is named by the page only, widgets by a row too: both logins are refused.
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${WIDGETS}#1]`, [[url(WIDGETS, 1), "x", "open", ""]]) });
+    await ran(r, deps(async () => ({ exitCode: 4, stdout: "", stderr: "gh auth login" })));
+    const both = [`${GEARS}#7`, `${WIDGETS}#1`];
+    expect(cached(both, AT + GH_STATE_TTL_MS - 1).failures).toEqual(
+      new Map([
+        [WIDGETS, "auth"],
+        [GEARS, "auth"],
+      ]),
+    );
+    expect(cached(both, AT + GH_STATE_TTL_MS).failures.size).toBe(0);
+  });
+
   test("the pages' prs: have an hourly cap of their own, and a PR the card asks for is not asked twice", async () => {
     const rows = Array.from({ length: GH_PRS_PER_HOUR }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
     const prs = Array.from({ length: GH_PRS_PER_HOUR + 1 }, (_, i) => `${GEARS}#${i + 1}`);

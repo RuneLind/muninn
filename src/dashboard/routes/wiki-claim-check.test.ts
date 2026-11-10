@@ -236,6 +236,16 @@ describe("what the card's check could not read", () => {
     expect((await s.get()).body).toEqual(LATE);
   });
 
+  test("a refusal the card recorded more than an hour ago reads not-asked", async () => {
+    let now = NOW;
+    const s = setup({ pages: { "plans/a.mdx": LATE_PAGE }, gh: failing({ exitCode: 4, stdout: "", stderr: "gh auth login" }), now: () => now });
+    await s.card();
+    now = NOW + GH_STATE_TTL_MS - 1;
+    expect((await s.get()).body).toMatchObject({ verdict: "notChecked", reason: "auth", repos: ["acme/gears"] });
+    now = NOW + GH_STATE_TTL_MS;
+    expect((await s.get()).body).toEqual({ ...NOT_ASKED, at: now });
+  });
+
   test("no gh binary reads no-gh", async () => {
     const s = setup({ pages: { "plans/a.mdx": LATE_PAGE }, gh: failing({ exitCode: -1, stdout: "", stderr: "", noBinary: true }) });
     await s.card();
@@ -309,6 +319,31 @@ describe("request shape", () => {
     const s = setup({ pages: { "plans/a.mdx": LATE_PAGE } });
     expect(await s.get("relPath=plans/a.mdx")).toEqual({ status: 400, body: { error: "wiki is required" } });
     expect(await s.get("wiki=w")).toEqual({ status: 400, body: { error: "relPath is required" } });
+  });
+
+  test("a failure before the page is read is a 500 with a JSON body, after the parameter checks", async () => {
+    const throwing: (() => WorkMapRunDeps)[] = [
+      () => {
+        throw new Error("no deps");
+      },
+      () =>
+        ({
+          now: () => NOW,
+          registry: () => {
+            throw new Error("no registry");
+          },
+        }) as unknown as WorkMapRunDeps,
+    ];
+    for (const workMap of throwing) {
+      const app = new Hono();
+      registerWikiClaimCheckRoute(app, {} as Config, { workMap, index: async () => null });
+      const res = await app.request("/api/wiki/claim-check?wiki=w&relPath=plans/a.mdx");
+      expect(res.status).toBe(500);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(await res.json()).toEqual({ error: "the status date check failed" });
+      expect((await app.request("/api/wiki/claim-check?relPath=plans/a.mdx")).status).toBe(400);
+      expect((await app.request("/api/wiki/claim-check?wiki=w")).status).toBe(400);
+    }
   });
 
   test("an unknown wiki and an unknown page are 404", async () => {

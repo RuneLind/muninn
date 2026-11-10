@@ -490,7 +490,7 @@ interface WikiCache {
   /** PRs GitHub answered for, per ask: the hourly cap's ledger. */
   asked: { at: number; n: number }[];
   /** Per lowercased repo, why its last query could not be read. */
-  failures: Map<string, { repo: string; reason: Exclude<NotCheckedReason, "disabled"> }>;
+  failures: Map<string, { repo: string; reason: Exclude<NotCheckedReason, "disabled">; at: number }>;
   flight: Flight | null;
 }
 
@@ -524,7 +524,8 @@ export function __pagePrsSettledForTest(wiki: string): Promise<void> {
  * or null for a number that is no PR; where both caches hold one, the newer
  * answer. A PR with no entry was never asked, was asked more than an hour ago,
  * or went unanswered. `failures` is the reason the last query for a repo could
- * not be read, by lowercased repo, the card's cache first.
+ * not be read, by lowercased repo, the card's cache first; like a state, it is
+ * read for an hour.
  */
 export function cachedPrFacts(
   wiki: string,
@@ -544,7 +545,7 @@ export function cachedPrFacts(
       }
       const repo = ref.repo.toLowerCase();
       const failure = c.failures.get(repo);
-      if (failure && !failures.has(repo)) failures.set(repo, failure.reason);
+      if (failure && at - failure.at < GH_STATE_TTL_MS && !failures.has(repo)) failures.set(repo, failure.reason);
     }
   }
   return { facts, failures };
@@ -645,7 +646,7 @@ function startFlight(c: WikiCache, ask: readonly PrRef[], deps: GhCheckDeps, now
       result = { exitCode: -1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
     }
     const answer = readGhAnswer(result, numbers, job.repo);
-    if (answer.failure) c.failures.set(job.repo.toLowerCase(), { repo: job.repo, reason: answer.failure });
+    if (answer.failure) c.failures.set(job.repo.toLowerCase(), { repo: job.repo, reason: answer.failure, at: now() });
     if (answer.unanswered) {
       log.warn("GitHub check: the query for {repo} was not answered (exit {code}): {stderr}", { repo: job.repo, code: result.exitCode, stderr: result.stderr.trim().slice(0, 200) });
       return;

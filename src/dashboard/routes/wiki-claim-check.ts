@@ -37,20 +37,21 @@ export function registerWikiClaimCheckRoute(
   deps: ClaimCheckRouteDeps = { workMap: () => workMapRunDepsFor(config), index: (root) => getWikiIndex({ root }) },
 ): void {
   app.get("/api/wiki/claim-check", async (c) => {
-    const wm = deps.workMap();
-    if (!c.req.query("wiki")?.trim()) return c.json({ error: "wiki is required" }, 400);
+    const wiki = c.req.query("wiki")?.trim();
+    if (!wiki) return c.json({ error: "wiki is required" }, 400);
     const relPath = c.req.query("relPath")?.trim();
     if (!relPath) return c.json({ error: "relPath is required" }, 400);
-    const { entry } = resolveWikiRequest([...wm.registry()], c.req.query("wiki"), undefined, undefined);
-    if (!entry) return c.json({ error: "no wiki configured for that name" }, 404);
     try {
+      const wm = deps.workMap();
+      const { entry } = resolveWikiRequest([...wm.registry()], c.req.query("wiki"), undefined, undefined);
+      if (!entry) return c.json({ error: "no wiki configured for that name" }, 404);
       const index = await deps.index(entry.root);
       const meta = index?.resolveRelPath(relPath);
       if (!meta) return c.json({ error: "no such page in this wiki" }, 404);
       if (!isStatusDatePage(meta.relPath)) return c.json({ error: "only .md and .mdx pages carry a status date" }, 400);
       return c.json(checkStatusDate({ wiki: entry.name, meta }, wm.now()));
     } catch (err) {
-      log.warn("The status date check for {wiki} {relPath} failed: {error}", { wiki: entry.name, relPath, error: err instanceof Error ? err.message : String(err) });
+      log.warn("The status date check for {wiki} {relPath} failed: {error}", { wiki, relPath, error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "the status date check failed" }, 500);
     }
   });
