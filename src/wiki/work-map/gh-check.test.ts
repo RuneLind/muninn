@@ -12,6 +12,7 @@ import { getWikiIndex, readWikiPage } from "../store.ts";
 import { needGhMarks } from "../../dashboard/views/components/wiki-work-card.ts";
 import {
   __resetGhCheckForTest,
+  cachedPrFacts,
   checkWorkMapPrs,
   GH_PRS_PER_HOUR,
   GH_PRS_PER_QUERY,
@@ -20,6 +21,7 @@ import {
   ghCheckDisabled,
   ghQueryArgs,
   isLiveCheckPage,
+  prsRefsOf,
   readGhAnswer,
   spawnGhRunner,
   type GhCheckDeps,
@@ -849,6 +851,81 @@ describe("the cache", () => {
     const body = await run(r, deps(stubGh(table, calls)), map([{ title: "T", action: "Merge #7", pages: ["plans/b.mdx"] }]), () => AT + 1);
     expect(calls.length).toBe(2);
     expect(body.needs[0]!.state).toBe("MERGED");
+  });
+});
+
+describe("the live pages' prs:", () => {
+  const PRS_PAGE = (prs: string, rows: string[][] = []) => page("in-flight", rows, `prs: ${prs}\n`);
+  const refsOf = (prs: string[]) => prsRefsOf({ prs }).refs;
+  const cached = (prs: string[], at = AT, name = "w") => cachedPrFacts(name, refsOf(prs), at);
+
+  test("prsRefsOf: each entry once whatever its spelling, and what is no PR reference apart", () => {
+    const read = prsRefsOf({ prs: [`${GEARS}#7`, `https://github.com/${GEARS}/pull/7`, "Acme/Gears#7", `${WIDGETS}#3`, " TBD ", "#838", "TBD", ""] });
+    expect(read.refs.map((r) => r.key)).toEqual([`${GEARS}#7`, `${WIDGETS}#3`]);
+    expect(read.unreadable).toEqual(["TBD", "#838"]);
+    expect(prsRefsOf({ prs: undefined })).toEqual({ refs: [], unreadable: [] });
+  });
+
+  test("the cache holds nothing before the check has run, and nothing for another wiki after it", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7]`) });
+    expect(cached([`${GEARS}#7`])).toEqual({ facts: new Map(), failures: new Map() });
+    await run(r, deps(stubGh({ [`${GEARS}#7`]: { state: "MERGED", mergedAt: MERGED_AT } })));
+    expect(cached([`${GEARS}#7`]).facts).toEqual(new Map([[`${GEARS}#7`, { state: "MERGED", mergedAt: MERGED_AT }]]));
+    expect(cached([`${GEARS}#7`], AT, "W").facts.size).toBe(1);
+    expect(cached([`${GEARS}#7`], AT, "other").facts.size).toBe(0);
+  });
+
+  test("a state is read for an hour; NOT_FOUND reads null; a PR never asked has no entry", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${GEARS}#99]`) });
+    await run(r, deps(stubGh({ [`${GEARS}#7`]: { state: "OPEN" } })));
+    const asked = [`${GEARS}#7`, `${GEARS}#99`, `${GEARS}#100`];
+    expect(cached(asked).facts).toEqual(new Map<string, unknown>([[`${GEARS}#7`, { state: "OPEN", mergedAt: null }], [`${GEARS}#99`, null]]) as never);
+    expect(cached(asked, AT + GH_STATE_TTL_MS - 1).facts.size).toBe(2);
+    expect(cached(asked, AT + GH_STATE_TTL_MS).facts.size).toBe(0);
+  });
+
+  test("reading the cache never spawns", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7]`) });
+    const calls: string[][] = [];
+    await run(r, deps(stubGh({}, calls)));
+    const n = calls.length;
+    for (let i = 0; i < 3; i++) cached([`${GEARS}#7`, `${GEARS}#8`], AT + i * GH_STATE_TTL_MS);
+    expect(calls.length).toBe(n);
+  });
+
+  test("a failed repo is reported by reason, for the repos asked about only", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${WIDGETS}#1]`) });
+    const gh: GhRunner = async (args) => (args.includes("repo=gears") ? { exitCode: 4, stdout: "", stderr: "gh auth login" } : stubGh({ [`${WIDGETS}#1`]: { state: "OPEN" } })(args));
+    await run(r, deps(gh));
+    expect(cached([`${GEARS}#7`, `${WIDGETS}#1`]).failures).toEqual(new Map([[GEARS, "auth"]]));
+    expect(cached([`${WIDGETS}#1`]).failures.size).toBe(0);
+  });
+
+  test("the pages' prs: are asked after the card's own PRs: the cap cuts them first", async () => {
+    const rows = Array.from({ length: GH_PRS_PER_HOUR - 1 }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
+    const table = Object.fromEntries(rows.map((_, i) => [`${WIDGETS}#${i + 1}`, { state: "OPEN" } as Pr]));
+    // The page with only `prs:` sorts first; its two PRs still come after the other page's rows.
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${GEARS}#8]`), "plans/b.mdx": page("ready", rows) });
+    const body = await run(r, deps(stubGh({ ...table, [`${GEARS}#7`]: { state: "OPEN" }, [`${GEARS}#8`]: { state: "OPEN" } })));
+    expect([body.checked, body.unchecked]).toEqual([GH_PRS_PER_HOUR - 1, 0]);
+    expect([...cached([`${GEARS}#7`, `${GEARS}#8`]).facts.keys()]).toEqual([`${GEARS}#7`]);
+  });
+
+  test("a page that is not live has its prs: left alone", async () => {
+    const r = wiki({ "plans/a.mdx": page("shipped", [], `followups: none\nprs: [${GEARS}#7]\n`), "plans/b.mdx": `---\ntitle: No plan\nprs: [${GEARS}#8]\n---\n\nBody.\n` });
+    const calls: string[][] = [];
+    await run(r, deps(stubGh({}, calls)));
+    expect(calls.length).toBe(0);
+  });
+
+  test("no part of the card's body reads them", async () => {
+    const rows = [[url(WIDGETS, 1), "x", "open", ""]];
+    const table = { [`${WIDGETS}#1`]: { state: "OPEN" } as Pr, [`${GEARS}#7`]: { state: "MERGED", mergedAt: MERGED_AT } as Pr };
+    const plain = await run(wiki({ "plans/a.mdx": page("in-flight", rows) }), deps(stubGh(table)));
+    __resetGhCheckForTest();
+    const withPrs = await run(wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${GEARS}#99]`, rows) }), deps(stubGh(table)));
+    expect(withPrs).toEqual(plain);
+    expect(Object.keys(withPrs.prs)).toEqual([`${WIDGETS}#1`]);
   });
 });
 
