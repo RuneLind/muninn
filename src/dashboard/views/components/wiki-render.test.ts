@@ -134,9 +134,13 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Its fix round 1 batch 1 (focus into and out of the panel, the menu's Escape): 846,591 (288,093).
 // Batch 2 (closing on Back, on an effort link and on leaving the narrow width): 846,727 (288,154).
 // Fix round 2 batch 1 (an Escape a menu already took, closing on the way to the start view): 846,684 (288,157).
+// 2026-11-10, step Done (wiki-step-done.ts: the button, the preview panel, the write): 851,669 (289,849).
+// Its fix round 1 batch 3 (pairing rows by source order and text, the reload guard, the panel's place): 853,205 (290,401).
+// Batch 4 (Reload and the retry rule on a refusal, Escape and focus, each Done's name, the notice): 854,354 (290,712).
+// Fix round 2 (pairing by lane order, aria-disabled, Reload after an answer that is not the route's): 854,712 (290,833).
 // 2026-11-10, first-screen-claims P3 (the status date line beside the stale pill,
-// `wiki-status-date.ts`): 849,661 bytes (289,217 gzipped), from 846,684.
-const WIKI_CLIENT_MAX_BYTES = 850_000;
+// `wiki-status-date.ts`): 857,625 bytes (291,880 gzipped), from 854,712.
+const WIKI_CLIENT_MAX_BYTES = 858_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -170,7 +174,10 @@ test("wikiClientScript stays under its size pin", async () => {
 // call after each page render (the bar lives in `wiki-section-bar.ts`): 3,452.
 // 2026-11-09, issue #623: `closeRailPanel()` in `loadPageByRelPath`, where a
 // rail row's click lands, and in `goToStart`, where its footer link does: 3,454.
-const WIKI_BROWSER_MAX_LINES = 3_454;
+// 2026-11-10, step Done: its import and one call beside the 🧭 buttons (the
+// control lives in `wiki-step-done.ts`): 3,456. Its fix round 1 batch 3: the
+// page view the write's reload is guarded by: 3,458.
+const WIKI_BROWSER_MAX_LINES = 3_458;
 const WIKI_BROWSER_MAX_MODULE_LETS = 51;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {
