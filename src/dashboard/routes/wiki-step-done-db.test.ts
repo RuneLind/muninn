@@ -146,7 +146,7 @@ describe("/api/wiki/step-done", () => {
     expect(await pageText()).toBe(PAGE);
   });
 
-  test("a write removes the step, logs, commits, and its new base hash serves a second Done", async () => {
+  test("a write removes the step, logs and commits; a second Done starts from a new list", async () => {
     const { body: p } = await previewOf("Read the second note.");
     const { body: l } = await list();
     const res = await post({ step: keyOf(l, "Read the second note."), baseHash: p.baseHash, previewHash: p.previewHash });
@@ -155,16 +155,17 @@ describe("/api/wiki/step-done", () => {
     expect(w).toMatchObject({ ok: true, committed: true });
     const after = await pageText();
     expect(after).not.toContain("Read the second note.");
-    expect(w.baseHash).toBe(new Bun.CryptoHasher("sha256").update(after).digest("hex"));
+    expect("baseHash" in w).toBe(false);
     expect(await Bun.file(path.join(root, "log.md")).text()).toContain("- Step done: Read the second note.");
     expect(git("log", "-1", "--format=%s")).toBe(`[step-done] Read the second note.: ${REL}\n`);
     expect(git("status", "--porcelain")).toBe("");
 
-    // The second Done on the same page, from the returned hash alone.
+    // The second Done on the same page: the list of the page as it now is.
     const { body: l2 } = await list();
+    expect(l2.baseHash).toBe(new Bun.CryptoHasher("sha256").update(after).digest("hex"));
     const third = keyOf(l2, "Read the third note.");
-    const p2 = (await (await post({ step: third, baseHash: w.baseHash, preview: true })).json()) as Record<string, unknown>;
-    const res2 = await post({ step: third, baseHash: w.baseHash, previewHash: p2.previewHash });
+    const p2 = (await (await post({ step: third, baseHash: l2.baseHash, preview: true })).json()) as Record<string, unknown>;
+    const res2 = await post({ step: third, baseHash: l2.baseHash, previewHash: p2.previewHash });
     expect(res2.status).toBe(200);
     expect(await pageText()).not.toContain("Read the third note.");
   });
@@ -272,29 +273,29 @@ describe("/api/wiki/step-done", () => {
     expect(await res.json()).toMatchObject({ ok: true, committed: false, uncommitted: true });
   });
 
-  test("a key read before a Done still names its step after it: a second Done needs no GET (fix round 2, finding 1)", async () => {
+  test("a key read before a Done names no step on the page that Done left", async () => {
     const nine = PAGE.replace(
       "1. **Restart the server:** so the bundle is fresh.\n2. Read the second note.\n3. Read the third note.",
-      Array.from({ length: 9 }, (_, k) => `${k + 1}. Nine-step ${k + 1}.`).join("\n"),
+      Array.from({ length: 9 }, (_, k) => `${k % 2 ? "Twin step." : `Nine-step ${k + 1}.`}`).map((t, k) => `${k + 1}. ${t}`).join("\n"),
     );
     await Bun.write(path.join(root, REL), nine);
     git("commit", "-q", "-am", "nine");
     __resetWikiCacheForTest();
     const { body: l } = await list();
-    const [k1, k2] = [keyOf(l, "Nine-step 1."), keyOf(l, "Nine-step 2.")];
+    const k1 = keyOf(l, "Nine-step 1.");
     const p1 = (await (await post({ step: k1, baseHash: l.baseHash, preview: true })).json()) as Record<string, unknown>;
     const w1 = (await (await post({ step: k1, baseHash: l.baseHash, previewHash: p1.previewHash })).json()) as Record<string, unknown>;
     expect(w1).toMatchObject({ ok: true, committed: true });
-    // No GET between: step 2's ORIGINAL key and the returned base hash.
-    const r2 = await post({ step: k2, baseHash: w1.baseHash, preview: true });
-    expect(r2.status).toBe(200);
-    const p2 = (await r2.json()) as Record<string, unknown>;
-    expect(p2.removed).toEqual([{ line: 9, text: "1. Nine-step 2." }]);
-    const w2 = await post({ step: k2, baseHash: w1.baseHash, previewHash: p2.previewHash });
-    expect(w2.status).toBe(200);
-    const after = await pageText();
-    expect(after).not.toContain("Nine-step 2.");
-    expect(after).toContain("1. Nine-step 3.\n2. Nine-step 4.");
+    const left = await pageText();
+    const { body: l2 } = await list();
+    // Every old key, twins among them, with the hash of the page as it now is: refused, nothing written.
+    for (const old of l.steps) {
+      const r = await post({ step: old.key, baseHash: l2.baseHash, preview: true });
+      expect(r.status).toBe(409);
+      expect(await r.json()).toMatchObject({ refused: true, code: "no-step" });
+    }
+    expect(await pageText()).toBe(left);
+    expect(l2.steps.map((x) => x.text)).toEqual(l.steps.slice(1).map((x) => x.text));
   });
 
   test("a step with a nested list is refused, not written", async () => {

@@ -4,11 +4,9 @@
  * (`wiki-step-done.ts`) runs it inside the wiki's write queue, as
  * `question-close.ts` is run for a card.
  *
- * A step is named by {@link stepKey}: a hash of its source lines with a
- * numbered marker's number left out ({@link keyLines}), and its ordinal among
- * steps with the same such lines in the page's counted `you` lanes. A Done
- * renumbers later items, so a number in the key would rename them. Never by
- * index: the parser skips `[x]` and empty items, so indices shift.
+ * A step is named by a key of the page's own bytes and the step's place among
+ * the page's open `you` steps. A key read from one page text names nothing on
+ * any other, so every Done starts from a fresh list of the page it edits.
  *
  * The result is re-read through `countedNextMovesLanes`, the walk the index and
  * the reader count with: the target lane must equal the old one minus that
@@ -24,7 +22,6 @@ import {
   readerFencedLines,
   runChecklistSteps,
   COMPONENT_OPEN_RE,
-  COMPONENT_TAG_SOURCE_SINGLE_LINE,
   type Block,
   type ComponentBlock,
   type ListBlock,
@@ -33,7 +30,7 @@ import {
 } from "./markdown-ast.ts";
 import { ordinals } from "./block-renderer.ts";
 import { frontmatterBodyLine } from "./frontmatter-fence.ts";
-import { MOVES_STEP_CHARS, sentenceEnd } from "./lead-sentence.ts";
+import { leadSentence } from "./lead-sentence.ts";
 import { sha256 } from "../utils/date-hash.ts";
 
 const CHECK_RE = /^\[([ xX])\][ \t]*([\s\S]*)$/;
@@ -66,51 +63,11 @@ export type StepDoneEdit =
       renumbered: { line: number; before: string; after: string }[];
       laneRemoved: boolean;
       nextMovesRemoved: boolean;
-      /** What the log line says of the step: {@link stepLogSentence}. */
+      /** What the log line says of the step: its lead sentence as plain text, a bold label kept. */
       lead: string;
       text: string;
     }
   | { ok: false; code: StepDoneCode; reason: string };
-
-/** The key a step is named by: the hash of its {@link keyLines} and its ordinal among equal ones. */
-export function stepKey(raw: string, ordinal: number): string {
-  return `${sha256(raw).slice(0, 16)}.${ordinal}`;
-}
-
-const OL_MARKER_RE = /^([ \t]*)\d{1,9}\.[ \t]+/;
-
-/** A list item's source lines as its key hashes them: a numbered item's first
- *  line loses its number and the spaces after the `.` (a renumber pads those to
- *  keep the marker's width), so `10. X` and `9.  X` read `.` + `X`. Every other
- *  byte stays. */
-export function keyLines(raw: string, numbered: boolean): string {
-  return numbered ? raw.replace(OL_MARKER_RE, "$1.") : raw;
-}
-
-const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
-
-/**
- * What a Done's log line says of the step: the first sentence of its first
- * line with emphasis markers removed, so a bold label or opening stays as
- * plain words with the rest of its sentence (`**Label:** rest. More.` gives
- * `Label: rest.`). Only the first line, so step text cannot put a heading or a
- * line break into `log.md`; component tags go; capped at
- * `MOVES_STEP_CHARS` with an ellipsis.
- */
-export function stepLogSentence(text: string): string {
-  const plain = text
-    .split("\n")[0]!
-    .replace(COMPONENT_TAG_RE, "")
-    .trim()
-    .replace(/(\*\*|__)(.+?)\1/g, "$2")
-    .replace(/(^|[^\w*])\*(?=\S)([^*]*?\S)\*(?![\w*])/g, "$1$2")
-    .replace(/(^|[^\w_])_(?=\S)([^_]*?\S)_(?![\w_])/g, "$1$2")
-    .trim();
-  const end = sentenceEnd(plain);
-  const sentence = end === -1 ? plain : plain.slice(0, end);
-  const chars = [...sentence];
-  return chars.length > MOVES_STEP_CHARS ? `${chars.slice(0, MOVES_STEP_CHARS - 1).join("").trimEnd()}…` : sentence;
-}
 
 /** The `log.md` bullet a Done writes. */
 export function stepDoneLogLine(edit: { lead: string }): string {
@@ -124,7 +81,6 @@ interface LaneRef {
 }
 
 interface StepRef extends YouStep {
-  raw: string;
   list: ListBlock | null;
   item: number;
   laneRef: LaneRef;
@@ -174,11 +130,9 @@ function parsePage(text: string): Parsed | { error: string } {
     return { error: "the page's lanes read differently here than in the index" };
   }
   const steps: StepRef[] = [];
-  const seen = new Map<string, number>();
+  const pageHash = sha256(text).slice(0, 16);
   const push = (s: Omit<StepRef, "key">) => {
-    const n = seen.get(s.raw) ?? 0;
-    seen.set(s.raw, n + 1);
-    steps.push({ ...s, key: stepKey(s.raw, n) });
+    steps.push({ ...s, key: `${pageHash}.${steps.length}` });
   };
   let youIndex = 0;
   const laneRows: number[] = [];
@@ -198,23 +152,22 @@ function parsePage(text: string): Parsed | { error: string } {
           found.push(text);
           const src = at?.[k];
           if (!src?.length) {
-            push({ text, lane, row: r, refusal: "the parser gave this step no source lines", raw: `\0nolines\0${text}`, list: b, item: k, laneRef: ref });
+            push({ text, lane, row: r, refusal: "the parser gave this step no source lines", list: b, item: k, laneRef: ref });
             return;
           }
-          const raw = keyLines(src.map((n) => lines[from + n]!).join("\n"), b.type === "ol");
           const nested = b.nested?.[k] ?? [];
           const refusal = nested.some((c) => c.type === "ul" || c.type === "ol")
             ? "the step holds a nested list: edit it on the page"
             : nested.length
               ? "the step holds more than its own lines (a paragraph or code under it): edit it on the page"
               : null;
-          push({ text, lane, row: r, refusal, raw, list: b, item: k, laneRef: ref });
+          push({ text, lane, row: r, refusal, list: b, item: k, laneRef: ref });
         });
       } else if (b.type === "component" && (b.name === "Checklist" || b.name === "RunChecklist")) {
         const rows = b.name === "Checklist" ? parseChecklist(b.children).filter((x) => !x.checked && x.text.trim() !== "") : runChecklistSteps(b.children).filter((x) => !x.checked);
         for (const x of rows) {
           found.push(x.text);
-          push({ text: x.text, lane, row: null, refusal: `a <${b.name}> row: tick it on the page`, raw: `\0${b.name}\0${x.text}`, list: null, item: -1, laneRef: ref });
+          push({ text: x.text, lane, row: null, refusal: `a <${b.name}> row: tick it on the page`, list: null, item: -1, laneRef: ref });
         }
       }
     }
@@ -442,7 +395,7 @@ export function stepDoneEdit(text: string, key: string, violationOf: typeof remo
     renumbered,
     laneRemoved,
     nextMovesRemoved,
-    lead: stepLogSentence(step.text),
+    lead: leadSentence(step.text, { keepLabel: true }),
     text: step.text,
   };
 }

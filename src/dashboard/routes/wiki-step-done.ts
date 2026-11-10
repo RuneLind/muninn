@@ -13,12 +13,9 @@
  * only, readonly refusal, the triage scope, egress, base hash, the hash of what
  * the preview showed, the Gardener-held check, `writeWikiPage` inside the
  * per-wiki queue with a dirty-page `proceed`, the commit after it, the index
- * rebuilt after the commit. The response carries the new base hash, so a
- * second Done on the same page needs no other read: a step's key leaves out
- * its list number, so the keys read before the first Done still name every
- * other step. The exception is a twin: among steps with the same text, each
- * one after the done step moves down one ordinal, so its old key now names
- * the next such twin, or none.
+ * rebuilt after the commit. A step's key belongs to the page bytes it was
+ * listed from, so a second Done on the same page starts from a new list: a
+ * key read before the first one names no step afterwards.
  */
 
 import path from "node:path";
@@ -221,7 +218,6 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
     return c.json({
       ok: true,
       page: target.relPath,
-      baseHash: sha256(written),
       committed,
       // `uncommitted`: the commit failed, so the page now carries edits no commit holds, and the next Done would be refused.
       ...(committed ? {} : { commitReason, uncommitted: commitReason === "error" || commitReason === "not-default-branch" }),
