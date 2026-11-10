@@ -203,6 +203,19 @@ describe("leadSentence", () => {
     expect(leadSentence("first line\nsecond")).toBe("first line");
   });
 
+  test("keepLabel puts the label back in front of its sentence, flattened like the rest", () => {
+    const kept = (item: string) => leadSentence(item, { keepLabel: true });
+    expect(kept("**Rune:** send the draft. Then wait.")).toBe("Rune: send the draft.");
+    expect(kept("__Rune__: send the draft. Then wait.")).toBe("Rune: send the draft.");
+    expect(kept("**Open `/wiki`:** read [the page](https://example.invalid/p). Then wait.")).toBe("Open /wiki: read the page.");
+    // A label with nothing after it is no label, with the option or without.
+    expect(kept("**Rune:**")).toBe(leadSentence("**Rune:**"));
+    // No label: the option changes nothing.
+    for (const item of ["**Send the draft.** Blocks O3.", "Read the page. Twice.", "**Send** the draft to **Rune:** now."]) {
+      expect(kept(item)).toBe(leadSentence(item));
+    }
+  });
+
   test("a bold label ending in a colon names who; the step after it is the sentence", () => {
     expect(leadSentence("**Rune:** send the draft. Then wait.")).toBe("send the draft.");
     expect(leadSentence("**Rune**: send the draft")).toBe("send the draft");

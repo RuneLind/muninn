@@ -72,7 +72,7 @@ describe("the live chain", () => {
     }
   });
 
-  test("the pinned links are the 25 kept from the hand-written chain plus one A2 found, each with a reason", () => {
+  test("the pinned links are the 25 kept from the hand-written chain, one A2 found and the DB suites added since, each with a reason", () => {
     expect(PINNED.map(linkKey)).toEqual([
       "src/ai/connectors/openai-compat-request.test.ts",
       "src/ai/connectors/copilot-sdk.test.ts",
@@ -84,6 +84,7 @@ describe("the live chain", () => {
       "src/dashboard/routes/wiki-answers-export-db.test.ts",
       "src/dashboard/routes/wiki-decision-inbox-db.test.ts",
       "src/dashboard/routes/wiki-decision-close-db.test.ts",
+      "src/dashboard/routes/wiki-step-done-db.test.ts",
       "src/dashboard/routes/wiki-gardener-drift-db.test.ts",
       "src/dashboard/routes/wiki-gardener-factcheck-db.test.ts",
       "src/bot/handler.test.ts",

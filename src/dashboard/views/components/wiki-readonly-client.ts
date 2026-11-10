@@ -93,6 +93,10 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   // routes refuse on a read-only instance and root.
   "[data-stale-apply]",
   "[data-stale-send]",
+  // Done on a `you`-lane step and its preview's Remove: a page write the route
+  // refuses on a read-only instance and root. Not the preview's Cancel.
+  "[data-step-done]",
+  "[data-step-done-confirm]",
   "#wikiFcIntAccept",
   ".wiki-atlas-cdraft",
 ].join(",");
