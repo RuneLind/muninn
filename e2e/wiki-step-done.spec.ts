@@ -56,6 +56,9 @@ const TASK_REL = "plans/e2e-steps-tasks.mdx";
 const KEYS_REL = "plans/e2e-steps-keys.mdx";
 const LINK_REL = "plans/e2e-steps-links.mdx";
 const CANCEL_REL = "plans/e2e-steps-cancel.mdx";
+const LEFT_REL = "plans/e2e-steps-left.mdx";
+const SETTLED_REL = "plans/e2e-steps-settled.mdx";
+const FOLD_REL = "plans/e2e-steps-fold.mdx";
 
 /** Steps whose rendered row is not their source text: a wikilink shows its label, a tag in code shows as text. */
 const linkPage = () =>
@@ -68,6 +71,25 @@ const linkPage = () =>
     "\n</Lane>\n",
     "</NextMoves>\n",
   ].join("\n");
+
+const LIVE_BLOCK = ["<NextMoves>\n", '<Lane kind="you">\n', "1. Oil the gate hinge.", "2. Stack the firewood.", "\n</Lane>\n", "</NextMoves>\n"];
+
+/** A settled block (inside a resolved callout) above the live one. */
+const settledPage = () =>
+  [
+    "---\ntitle: Settled fixture\n---\n",
+    '<Callout resolved="2026-09-01" title="Closed">\n',
+    "<NextMoves>\n",
+    '<Lane kind="you">\n',
+    "1. An old step nobody counts.",
+    "\n</Lane>\n",
+    "</NextMoves>\n",
+    "</Callout>\n",
+    ...LIVE_BLOCK,
+  ].join("\n");
+
+/** The only live block sits in a fold, which renders closed. */
+const foldPage = () => ["---\ntitle: Fold fixture\n---\n", "Intro.\n", '<Fold title="The steps">\n', ...LIVE_BLOCK, "</Fold>\n"].join("\n");
 
 const page = (title: string) =>
   [
@@ -132,6 +154,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, KEYS_REL), page("Keys fixture"), "utf8");
   await writeFile(path.join(root, LINK_REL), linkPage(), "utf8");
   await writeFile(path.join(root, CANCEL_REL), page("Cancel fixture"), "utf8");
+  await writeFile(path.join(root, LEFT_REL), page("Left fixture"), "utf8");
+  await writeFile(path.join(root, SETTLED_REL), settledPage(), "utf8");
+  await writeFile(path.join(root, FOLD_REL), foldPage(), "utf8");
   git(root, "init", "-q", "-b", "main");
   // The route's commit spawns git with no author env.
   git(root, "config", "user.name", "e2e");
@@ -547,6 +572,147 @@ test.describe("the preview's keys, names and refusals", () => {
     await expect(li.locator("[data-step-done-confirm]")).toBeEnabled();
     await expect(li.locator(".wiki-step-done-reload")).toBeHidden();
     expect(await readFile(path.join(root, KEYS_REL), "utf8")).toBe(page("Keys fixture"));
+  });
+
+  test("Escape closes the preview from a Remove that is off: while its write runs, and after a refusal", async ({ page: p }) => {
+    let release!: () => void;
+    let gate: Promise<void> | undefined = new Promise<void>((r) => (release = r));
+    let writes = 0;
+    await p.route("**/api/wiki/step-done", async (route) => {
+      const req = route.request();
+      if (req.method() !== "POST" || (req.postDataJSON() as { preview?: boolean }).preview === true) return route.continue();
+      writes++;
+      await gate;
+      await route.fulfill({ status: 409, json: { error: "The Gardener holds this page.", held: true } });
+    });
+    await openPage(p, KEYS_REL);
+    const li = step(p, "Sort the blue folders");
+    const done = li.locator("[data-step-done]");
+    const remove = li.locator("[data-step-done-confirm]");
+    await done.click();
+    await remove.click();
+    await expect.poll(() => writes).toBe(1);
+    // The write runs: Remove is off, keeps focus, and a second press sends nothing.
+    await expect(remove).toBeDisabled();
+    await expect(remove).toBeFocused();
+    await p.keyboard.press("Enter");
+    await remove.dispatchEvent("click");
+    await p.keyboard.press("Escape");
+    await expect(p.locator(".wiki-step-done-panel")).toHaveCount(0);
+    await expect(done).toBeFocused();
+    release();
+    await expect(p.locator(".wiki-article .wiki-step-done-note")).toHaveText("Done did not remove «Sort the blue folders.»: The Gardener holds this page.");
+    expect(writes).toBe(1);
+
+    // After a refusal a retry cannot change, Remove stays off and still holds focus.
+    gate = undefined;
+    await done.click();
+    await remove.click();
+    await expect(li.locator(".wiki-step-done-err")).toHaveText("The Gardener holds this page.");
+    await expect(remove).toBeDisabled();
+    await expect(remove).toBeFocused();
+    await remove.dispatchEvent("click");
+    await p.keyboard.press("Escape");
+    await expect(p.locator(".wiki-step-done-panel")).toHaveCount(0);
+    await expect(done).toBeFocused();
+    expect(writes).toBe(2);
+  });
+
+  test("Escape closes a preview that is still being read, and a second press on its Done does not", async ({ page: p }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let previews = 0;
+    await p.route("**/api/wiki/step-done", async (route) => {
+      const req = route.request();
+      if (req.method() === "POST" && (req.postDataJSON() as { preview?: boolean }).preview === true) {
+        previews++;
+        await gate;
+      }
+      await route.continue();
+    });
+    await openPage(p, KEYS_REL);
+    const li = step(p, "Sort the blue folders");
+    const done = li.locator("[data-step-done]");
+    await done.click();
+    await expect.poll(() => previews).toBe(1);
+    await expect(li.locator(".wiki-step-done-panel")).toHaveText("Reading what Done removes…");
+    await expect(done).toBeFocused();
+    await done.dispatchEvent("click");
+    await expect(li.locator(".wiki-step-done-panel")).toHaveCount(1);
+    await p.keyboard.press("Escape");
+    await expect(p.locator(".wiki-step-done-panel")).toHaveCount(0);
+    await expect(done).toBeFocused();
+    release();
+    // The preview that arrives for the closed panel opens nothing, and Done works again.
+    await expect(done).toBeEnabled();
+    await expect(p.locator(".wiki-step-done-panel")).toHaveCount(0);
+    await done.click();
+    await expect(li.locator("[data-step-done-confirm]")).toBeFocused();
+    expect(previews).toBe(2);
+  });
+
+  test("a refusal that arrives after the reader left the page is shown when the page is next opened, once", async ({ page: p }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const writes = await answerWrites(p, () => ({ status: 409, json: { error: "The Gardener holds this page.", held: true } }), gate);
+    await openPage(p, LEFT_REL);
+    const li = step(p, "Sort the blue folders");
+    await li.locator("[data-step-done]").click();
+    await li.locator("[data-step-done-confirm]").click();
+    await expect.poll(() => writes.held()).toBe(true);
+    const open = async (rel: string, title: string) => {
+      await p.locator(`.wiki-list-item[data-relpath="${rel}"]`).first().click();
+      await expect(p.locator(".wiki-article-head h1")).toHaveText(title);
+    };
+    await open(OTHER_REL, "Other fixture");
+    const refused = p.waitForResponse((r) => r.url().endsWith("/api/wiki/step-done") && r.request().method() === "POST");
+    release();
+    expect((await refused).status()).toBe(409);
+    await expect(p.locator(".wiki-step-done-note")).toHaveCount(0);
+    await open(LEFT_REL, "Left fixture");
+    const note = p.locator(".wiki-article .wiki-step-done-note");
+    await expect(note).toHaveText("Done did not remove «Sort the blue folders.»: The Gardener holds this page.");
+    await expect(note).toHaveAttribute("role", "alert");
+    await expect(note).not.toBeFocused();
+    await open(OTHER_REL, "Other fixture");
+    await open(LEFT_REL, "Left fixture");
+    await expect(p.locator(".wiki-article .next-moves")).toBeVisible();
+    await expect(p.locator(".wiki-step-done-note")).toHaveCount(0);
+  });
+
+  test("the notice goes in the live block, not in a settled one above it", async ({ page: p }) => {
+    await p.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(SETTLED_REL)}`);
+    const live = p.locator(".wiki-article .next-moves", { hasText: "Stack the firewood" });
+    await expect(live).toBeVisible();
+    await live.locator(".nm-lane.nm-you").evaluate((d) => ((d as HTMLDetailsElement).open = true));
+    // The settled block's step gets no Done.
+    await expect(live.locator("[data-step-done]")).toHaveCount(2);
+    await expect(p.locator(".wiki-article [data-step-done]")).toHaveCount(2);
+    const li = live.locator(".nm-body li", { hasText: "Oil the gate hinge" });
+    await li.locator("[data-step-done]").click();
+    await li.locator("[data-step-done-confirm]").click();
+    const note = p.locator(".wiki-article .wiki-step-done-note");
+    await expect(note).toHaveText("The step is removed from the page.");
+    await expect(note).toBeVisible();
+    await expect(note).toBeFocused();
+    expect(await note.evaluate((n) => n.parentElement?.classList.contains("next-moves") && !n.closest("details.callout-resolved"))).toBe(true);
+    await expect(p.locator(".wiki-article .next-moves", { hasText: "Stack the firewood" }).locator(".wiki-step-done-note")).toHaveCount(1);
+  });
+
+  test("the notice goes above the article when the only live block is in a closed fold", async ({ page: p }) => {
+    await p.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(FOLD_REL)}`);
+    const fold = p.locator(".wiki-article details", { has: p.locator(".next-moves") }).first();
+    await fold.evaluate((d) => ((d as HTMLDetailsElement).open = true));
+    await youLane(p).evaluate((d) => ((d as HTMLDetailsElement).open = true));
+    const li = step(p, "Oil the gate hinge");
+    await li.locator("[data-step-done]").click();
+    await li.locator("[data-step-done-confirm]").click();
+    const note = p.locator(".wiki-article .wiki-step-done-note");
+    await expect(note).toHaveText("The step is removed from the page.");
+    await expect(note).toBeVisible();
+    await expect(note).toBeFocused();
+    // The page rendered again with its fold closed: the line is the article's first child, outside it.
+    expect(await note.evaluate((n) => n === n.closest(".wiki-article")?.firstElementChild)).toBe(true);
   });
 
   test("a refusal that arrives after its preview closed is shown on the page", async ({ page: p }) => {
