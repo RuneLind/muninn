@@ -58,11 +58,11 @@ function notCheckedLine(v: StatusDateView): { text: string; title: string } | nu
     case "not-asked":
       return {
         text: "status date not checked: no PR state on hand",
-        title: "No state under an hour old is on hand for at least one of this page's PRs. Where the work map card's check runs, it asks GitHub; this line only reads what that check got, when the page loads.",
+        title: "No state under an hour old is on hand for at least one of this page's PRs. This line reads what the work map card's check got from GitHub and asks nothing itself.",
       };
     case "auth": {
       const repos = list(v.repos);
-      return { text: "status date not checked: no GitHub access", title: `The gh command here is not logged in, or its login cannot read ${repos || "a repo in the page's prs:"}.` };
+      return { text: "status date not checked: no GitHub access", title: `Within the last hour GitHub did not let the gh command here read ${repos || "a repo in the page's prs:"}: not logged in, no access, or no such repo.` };
     }
     case "no-gh":
       return { text: "status date not checked: no gh command", title: "The gh command is not installed where muninn runs, so GitHub was not asked." };
@@ -114,7 +114,12 @@ export function statusDateLine(v: StatusDateView | null | undefined): StatusDate
 
 /** The line as it sits in the pill slot, after the Stale check's pill; "" for no line. */
 export function statusDatePillHtml(v: StatusDateView | null | undefined): string {
-  const l = statusDateLine(v);
+  let l: StatusDateLine | null = null;
+  try {
+    l = statusDateLine(v);
+  } catch {
+    // The answer is unchecked JSON. One of a shape the wording cannot read gives no line, and the paint that asked goes on.
+  }
   if (!l) return "";
   return `<span class="wiki-status-date ${l.tone}" data-status-date="${l.tone}" title="${esc(l.title)}">${esc(l.text)}</span>`;
 }

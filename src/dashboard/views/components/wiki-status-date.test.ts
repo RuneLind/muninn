@@ -50,9 +50,9 @@ describe("what the line says", () => {
   });
 
   const NOT_CHECKED: [reason: string, extra: Partial<StatusDateView>, text: string, title: string][] = [
-    ["not-asked", {}, "status date not checked: no PR state on hand", "No state under an hour old is on hand for at least one of this page's PRs. Where the work map card's check runs, it asks GitHub; this line only reads what that check got, when the page loads."],
-    ["auth", { repos: ["Acme/Gears", "acme/widgets"] }, "status date not checked: no GitHub access", "The gh command here is not logged in, or its login cannot read Acme/Gears, acme/widgets."],
-    ["auth", {}, "status date not checked: no GitHub access", "The gh command here is not logged in, or its login cannot read a repo in the page's prs:."],
+    ["not-asked", {}, "status date not checked: no PR state on hand", "No state under an hour old is on hand for at least one of this page's PRs. This line reads what the work map card's check got from GitHub and asks nothing itself."],
+    ["auth", { repos: ["Acme/Gears", "acme/widgets"] }, "status date not checked: no GitHub access", "Within the last hour GitHub did not let the gh command here read Acme/Gears, acme/widgets: not logged in, no access, or no such repo."],
+    ["auth", {}, "status date not checked: no GitHub access", "Within the last hour GitHub did not let the gh command here read a repo in the page's prs:: not logged in, no access, or no such repo."],
     ["no-gh", {}, "status date not checked: no gh command", "The gh command is not installed where muninn runs, so GitHub was not asked."],
     ["unreadable-prs", { unreadable: ["soon", "#12"] }, "status date not checked: prs: holds an entry that is no PR", "Not a PR reference: soon, #12."],
     ["unreadable-prs", {}, "status date not checked: prs: holds an entry that is no PR", "An entry in the page's prs: is not a PR reference."],
@@ -152,6 +152,26 @@ describe("the server's own verdicts", () => {
       expect(statusDateLine({ verdict: "notChecked", reason }) !== null).toBe(spoken);
     });
   }
+});
+
+describe("an answer of another shape", () => {
+  test("gives no line and does not throw into the paint that asked", () => {
+    for (const v of [
+      { verdict: "notChecked", reason: "auth", repos: "acme/gears" },
+      { verdict: "notChecked", reason: "auth", repos: {} },
+      { verdict: "notChecked", reason: "unreadable-prs", unreadable: 7 },
+      { verdict: "late", statusDate: "2026-11-03", newest: "RuneLind/muninn#802" },
+      "late",
+      7,
+      [],
+    ]) {
+      expect(statusDatePillHtml(v as unknown as StatusDateView)).toBe("");
+    }
+    // A list with entries that are no strings keeps the ones that are.
+    expect(statusDateLine({ verdict: "notChecked", reason: "auth", repos: ["acme/gears", 7, null, ""] } as unknown as StatusDateView)!.title).toBe(
+      "Within the last hour GitHub did not let the gh command here read acme/gears: not logged in, no access, or no such repo.",
+    );
+  });
 });
 
 describe("the loader", () => {
