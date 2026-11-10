@@ -68,8 +68,8 @@ describe("readFindRowsWiki / readFindSelfWiki", () => {
   test("the reader wires the rows name to the palette only, the self name to every consumer that sends `wiki`", async () => {
     const src = await Bun.file(new URL("./wiki-browser.ts", import.meta.url)).text();
     expect(src).toContain("selfWiki: () => FIND_ROWS_WIKI,");
-    // Agent lens, new-since, answer cards, answer export.
-    expect(src.match(/wiki: FIND_SELF_WIKI \|\| WIKI,/g)?.length).toBe(4);
+    // Agent lens, new-since, answer cards, answer export, step Done.
+    expect(src.match(/wiki: FIND_SELF_WIKI \|\| WIKI,/g)?.length).toBe(5);
     // Nothing else reads the rows name: the module-scope declaration, its
     // assignment in `boot()`, one palette use.
     expect(src.match(/\bFIND_ROWS_WIKI\b/g)?.length).toBe(3);

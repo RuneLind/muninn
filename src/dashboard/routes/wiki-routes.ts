@@ -57,6 +57,7 @@ import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { registerWikiWorkMapRoutes } from "./wiki-work-map.ts";
 import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
+import { registerWikiStepDoneRoutes } from "./wiki-step-done.ts";
 import { realTriageStatusDeps, registerWikiDecisionTriageStatusRoutes } from "./wiki-decision-triage-status.ts";
 import { realTriageRunDeps, registerWikiDecisionTriageRunRoute } from "./wiki-decision-triage-run.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
@@ -2082,6 +2083,11 @@ export function registerWikiToolRoutes(
   registerWikiWorkMapRoutes(app, config);
   // The decision inbox on the Your work card: bound to a wiki root on this machine.
   registerWikiDecisionInboxRoute(app, config, undefined, {
+    readonlyRefusal,
+    egressRefusal: (c, entry) => egressRefusal(c, entry, false),
+  });
+  // Done on a `you`-lane step: the same wikis and guards as the close above.
+  registerWikiStepDoneRoutes(app, config, {
     readonlyRefusal,
     egressRefusal: (c, entry) => egressRefusal(c, entry, false),
   });

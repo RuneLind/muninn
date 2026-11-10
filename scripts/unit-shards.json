@@ -270,6 +270,7 @@
       "src/dashboard/routes/summaries-factcheck-routes.test.ts",
       "src/dashboard/routes/wiki-decision-close-db.test.ts",
       "src/dashboard/routes/wiki-decision-inbox-db.test.ts",
+      "src/dashboard/routes/wiki-step-done-db.test.ts",
       "src/dashboard/routes/wiki-gardener-drift-db.test.ts",
       "src/dashboard/routes/wiki-integrate-nesting-routes.test.ts",
       "src/db/",
