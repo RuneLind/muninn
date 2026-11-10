@@ -41,11 +41,13 @@ function dayMonth(day: string | undefined): string {
   return m ? `${m[2]}.${m[1]}` : "";
 }
 
-/** `repo#n, DD.MM`: the merge the answer names, its repo without the owner. */
-function mergeLabel(n: NonNullable<StatusDateView["newest"]>): string {
-  const repo = (n.repo ?? "").split("/").pop() ?? "";
-  const pr = repo && n.n ? `${repo}#${n.n}` : (n.pr ?? "");
-  return [pr, dayMonth(n.mergedDay)].filter(Boolean).join(", ");
+/** The merge an answer names, when it carries what a line needs: the PR and its merge day. `label` is `repo#n, DD.MM`, the repo without its owner. */
+function mergeOf(v: StatusDateView): { pr: string; mergedDay: string; label: string } | null {
+  const n = v.newest;
+  if (!n || typeof n.pr !== "string" || !n.pr || typeof n.mergedDay !== "string" || !dayMonth(n.mergedDay)) return null;
+  const repo = typeof n.repo === "string" ? (n.repo.split("/").pop() ?? "") : "";
+  const short = repo && typeof n.n === "number" ? `${repo}#${n.n}` : n.pr;
+  return { pr: n.pr, mergedDay: n.mergedDay, label: `${short}, ${dayMonth(n.mergedDay)}` };
 }
 
 const list = (xs: string[] | undefined): string => (xs ?? []).filter((x) => typeof x === "string" && x).join(", ");
@@ -78,24 +80,29 @@ function notCheckedLine(v: StatusDateView): { text: string; title: string } | nu
 /** The line for one answer, or null where the head says nothing. */
 export function statusDateLine(v: StatusDateView | null | undefined): StatusDateLine | null {
   if (!v || v.error) return null;
-  if (v.verdict === "late" && v.newest && v.statusDate) {
-    const label = mergeLabel(v.newest);
+  const statusDate = typeof v.statusDate === "string" ? v.statusDate : "";
+  const merge = mergeOf(v);
+  if (v.verdict === "late" && merge && statusDate) {
     return {
       tone: "late",
       // «a merged PR», not «its last»: a later merge is `late` whatever the page's other PRs are, also ones with no state on hand.
-      text: `⚠ status older than a merged PR${label ? ` (${label})` : ""}`,
-      title: `status_date ${v.statusDate} is older than a merge among the page's prs: ${v.newest.pr ?? ""}, merged ${v.newest.mergedDay ?? ""}. ${COMPARES}`,
+      text: `⚠ status older than a merged PR (${merge.label})`,
+      title: `status_date ${statusDate} is older than a merge among the page's prs: ${merge.pr}, merged ${merge.mergedDay}. ${COMPARES}`,
     };
   }
-  if (v.verdict === "clear" && v.statusDate) {
-    const label = v.newest ? mergeLabel(v.newest) : "";
+  if (v.verdict === "clear" && statusDate) {
     if (!v.newest) {
-      return { tone: "clear", text: "status date checked: no merged PR in prs:", title: `status_date ${v.statusDate}; none of the PRs in the page's prs: is merged. ${COMPARES}` };
+      return {
+        tone: "clear",
+        text: "status date checked: no merged PR in prs:",
+        title: `status_date ${statusDate}; none of the PRs in the page's prs: is merged, so there is no merge date to compare it with. The check reads no status line.`,
+      };
     }
+    if (!merge) return null;
     return {
       tone: "clear",
-      text: `status dated on or after its last merged PR${label ? ` (${label})` : ""}`,
-      title: `status_date ${v.statusDate} is not older than the newest merge among the page's prs: ${v.newest.pr ?? ""}, merged ${v.newest.mergedDay ?? ""}. ${COMPARES}`,
+      text: `status dated on or after its last merged PR (${merge.label})`,
+      title: `status_date ${statusDate} is not older than the newest merge among the page's prs: ${merge.pr}, merged ${merge.mergedDay}. ${COMPARES}`,
     };
   }
   if (v.verdict === "notChecked") {

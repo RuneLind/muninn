@@ -393,15 +393,23 @@ test("the status date line sits beside the pill and says what was compared", asy
   expect(asked).toHaveLength(1);
   const url = new URL(asked[0]!);
   expect([url.searchParams.get("wiki"), url.searchParams.get("relPath")]).toEqual([WIKI, "hub.md"]);
-  // The late line is drawn as a warning, the others are not.
-  const border = () => dateLine(p).evaluate((el) => getComputedStyle(el).backgroundColor);
-  const lateFill = await border();
+  // The late line is drawn as a warning, in the pill's tint resolved on a body probe; the others have no fill.
+  // `toHaveCSS` reads the span in the slot at that moment: a repaint replaces it.
+  const tint = await p.evaluate(() => {
+    const probe = document.body.appendChild(document.createElement("span"));
+    probe.style.background = "color-mix(in srgb, var(--status-warning) 14%, transparent)";
+    const fill = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return fill;
+  });
+  expect(tint).not.toBe("rgba(0, 0, 0, 0)");
+  await expect(dateLine(p)).toHaveCSS("background-color", tint);
   await p.unrouteAll({ behavior: "wait" });
   await answerClaimCheck(p, "hub.md", { json: CLEAR });
   await open(p, "hub.md", "The pin moved.");
   await expect(dateLine(p)).toHaveText(CLEAR_TEXT);
   await expect(dateLine(p)).toHaveAttribute("data-status-date", "clear");
-  expect(await border()).not.toBe(lateFill);
+  await expect(dateLine(p)).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
 });
 
 /** Hold the Stale check's report for `rel` until `gate`; with `fail`, answer it with a page that is no JSON. */

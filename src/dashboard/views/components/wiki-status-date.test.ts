@@ -36,7 +36,7 @@ describe("what the line says", () => {
     expect(statusDateLine({ verdict: "clear", statusDate: "2026-11-04" })).toEqual({
       tone: "clear",
       text: "status date checked: no merged PR in prs:",
-      title: "status_date 2026-11-04; none of the PRs in the page's prs: is merged. The check compares these two dates and reads no status line.",
+      title: "status_date 2026-11-04; none of the PRs in the page's prs: is merged, so there is no merge date to compare it with. The check reads no status line.",
     });
   });
 
@@ -80,17 +80,28 @@ describe("what the line says", () => {
       { verdict: "late", newest },
       { verdict: "clear" },
       { ...late, error: "x" },
+      // So does one whose merge lost its PR or its day, or carries a field of the wrong type.
+      { ...late, newest: {} },
+      { ...late, newest: { repo: "RuneLind/muninn", n: 802, mergedDay: "2026-11-04" } },
+      { ...late, newest: { ...newest, mergedDay: "soon" } },
+      { ...late, newest: { ...newest, mergedDay: undefined } },
+      { ...late, newest: { ...newest, pr: 802 } },
+      { ...late, statusDate: 20261103 },
+      { ...clear, newest: {} },
+      { ...clear, newest: { ...newest, pr: "" } },
+      { ...clear, statusDate: null },
     ] as (StatusDateView | null | undefined)[]) {
       expect(statusDateLine(v)).toBeNull();
       expect(statusDatePillHtml(v)).toBe("");
     }
   });
 
-  test("the merge label falls back: no repo gives the full PR, a day that is no date gives none", () => {
-    expect(statusDateLine({ ...late, newest: { pr: "RuneLind/muninn#802", mergedDay: "2026-11-04" } })!.text).toBe("⚠ status older than a merged PR (RuneLind/muninn#802, 04.11)");
-    expect(statusDateLine({ ...late, newest: { ...newest, mergedDay: "soon" } })!.text).toBe("⚠ status older than a merged PR (muninn#802)");
-    expect(statusDateLine({ ...late, newest: {} })!.text).toBe("⚠ status older than a merged PR");
-    expect(statusDateLine({ ...clear, newest: { repo: "muninn", n: 7, mergedDay: "2026-01-09" } })!.text).toBe("status dated on or after its last merged PR (muninn#7, 09.01)");
+  test("the merge label falls back to the full PR when the repo or the number is missing or of the wrong type", () => {
+    const pr = "RuneLind/muninn#802";
+    for (const n of [{ pr, mergedDay: "2026-11-04" }, { pr, n: 802, mergedDay: "2026-11-04" }, { pr, repo: "RuneLind/muninn", mergedDay: "2026-11-04" }, { pr, repo: 7, n: 802, mergedDay: "2026-11-04" }, { pr, repo: "RuneLind/muninn", n: "802", mergedDay: "2026-11-04" }]) {
+      expect(statusDateLine({ ...late, newest: n } as unknown as StatusDateView)!.text).toBe("⚠ status older than a merged PR (RuneLind/muninn#802, 04.11)");
+    }
+    expect(statusDateLine({ ...clear, newest: { pr: "muninn#7", repo: "muninn", n: 7, mergedDay: "2026-01-09" } })!.text).toBe("status dated on or after its last merged PR (muninn#7, 09.01)");
   });
 });
 
