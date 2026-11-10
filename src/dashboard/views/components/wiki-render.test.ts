@@ -138,7 +138,13 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Its fix round 1 batch 3 (pairing rows by source order and text, the reload guard, the panel's place): 853,205 (290,401).
 // Batch 4 (Reload and the retry rule on a refusal, Escape and focus, each Done's name, the notice): 854,354 (290,712).
 // Fix round 2 (pairing by lane order, aria-disabled, Reload after an answer that is not the route's): 854,712 (290,833).
-const WIKI_CLIENT_MAX_BYTES = 855_000;
+// 2026-11-10, first-screen-claims P3 (the status date line beside the stale pill,
+// `wiki-status-date.ts`): 857,625 bytes (291,880 gzipped), from 854,712.
+// Its fix round 1 batch 1 (the line waits for the report, focus kept on the pill): 857,703 (291,903).
+// Batch 2 (wording): 857,779 (291,963). Batch 3 (a merge that lost a field): 857,936 (292,034).
+// Fix round 2 batch 1 (the line in a slot of its own, the focus code gone): 858,008 (292,035).
+// Batch 2 (hover wording, one guard around the line's html): 858,042 (292,040).
+const WIKI_CLIENT_MAX_BYTES = 859_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -235,11 +241,15 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // controller (333 / 8 → 235 / 3) into `wiki-work-map-cache.ts`; the rail 2,298.
 // 2026-11-09, issue #623: the effort controller 235 → 237, for `closeRailPanel()`
 // in `renderEffort` and its import (an effort opened from the rail panel).
+// 2026-11-10, first-screen-claims P3: the stale controller 509 → 522, for the
+// status date line it paints in the slot after the pill's (one const, one call,
+// the line's own paint). The
+// line's request and state are in `wiki-status-date.ts`, so no new let.
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_298, 16],
   ["wiki-shell-state.ts", 50, 3],
   ["wiki-status-pills.ts", 29, 0],
-  ["wiki-stale-controller.ts", 509, 18],
+  ["wiki-stale-controller.ts", 522, 18],
   ["wiki-effort-controller.ts", 237, 3],
   ["wiki-work-map-cache.ts", 124, 5],
   ["wiki-menus-controller.ts", 638, 2],

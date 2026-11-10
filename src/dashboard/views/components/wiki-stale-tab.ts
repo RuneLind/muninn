@@ -80,12 +80,14 @@ export interface StalePageCounts {
   inReview?: number;
 }
 
-/** The two numbers in words (D26): «⚠ N stale status lines · M linking pages
- *  to check», or «✓ nothing stale». The tab's head, the article pill and the
- *  wiki home all read it. */
+/** The two numbers in words (D26): «N stale status lines · M linking pages
+ *  to check», with a «⚠» in front unless both are 0. The tab's head, the
+ *  article pill and the wiki home all read it. The zero case names the two
+ *  things counted too: «✓ nothing stale» read as a verdict on the whole page
+ *  (first-screen-claims F15). */
 export function staleCountsText(c: StalePageCounts): string {
-  if (!c.staleLines && !c.toCheck) return "✓ nothing stale";
-  return `⚠ ${c.staleLines} stale status line${c.staleLines === 1 ? "" : "s"} · ${c.toCheck} linking page${c.toCheck === 1 ? "" : "s"} to check`;
+  const words = `${c.staleLines} stale status line${c.staleLines === 1 ? "" : "s"} · ${c.toCheck} linking page${c.toCheck === 1 ? "" : "s"} to check`;
+  return c.staleLines || c.toCheck ? `⚠ ${words}` : words;
 }
 
 /** The hits a reader sees: confirmed stale only (D11). */

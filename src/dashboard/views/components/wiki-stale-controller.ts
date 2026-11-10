@@ -12,6 +12,7 @@
  */
 import { confirmedHits, STALE_SHELL_HTML, staleBodyHtml, staleCounts, staleFixKey, staleFixResultNotice, staleTabBadge, type StaleNotice, type StalePageCounts, type StaleReportView, type StaleVerdictView } from "./wiki-stale-tab.ts";
 import { placeStaleMarks } from "./wiki-stale-marks.ts";
+import { makeStatusDateLoader, statusDatePillHtml } from "./wiki-status-date.ts";
 import { staleCountMap, staleHomeBodyHtml, staleHomeLineHtml, stalePillHtml, staleRailBadgeHtml, type StaleSummaryView } from "./wiki-stale-summary.ts";
 import { wikiReadonlyFlag } from "./wiki-readonly-client.ts";
 import { wikiToolsFlag } from "./wiki-read-slice.ts";
@@ -72,6 +73,10 @@ let staleLoadSeq = 0;
 /** The Check stream in flight: its page and its abort (A9). A Check belongs
  *  to the page it started on; leaving that page aborts it. */
 let staleCheckRun: { relPath: string; abort: AbortController } | null = null;
+
+/** The status date check's answer for the open page (first-screen-claims P3):
+ *  the line after the pill. Its state and request live in `wiki-status-date.ts`. */
+const statusDates = makeStatusDateLoader({ wiki: () => deps.WIKI(), onAnswer: () => paintStaleSurfaces() });
 
 /** Abort the Check in flight, if any: the reader left its page. */
 function abortStaleCheck(): void {
@@ -165,6 +170,7 @@ function setStaleNotice(text: string, tone: StaleNotice["tone"] = "error"): void
 /** Fetch the open page's stale report (free hits, buckets, cached verdicts). */
 export function loadStale(relPath: string): void {
   if (!staleTabAvailable()) return;
+  statusDates.load(relPath);
   if (staleFor !== relPath) {
     abortStaleCheck();
     staleFor = relPath;
@@ -359,11 +365,18 @@ function renderStaleHome(): void {
 /** The pill, the marks and the open page's rail row, from the report for the
  *  page on screen only: a report for another page paints nothing (R2B4). */
 export function paintStaleSurfaces(): void {
-  const shown = staleFor !== null && staleFor !== "" && staleFor === deps.currentRelPath() ? staleReport : null;
+  const onScreen = staleFor !== null && staleFor !== "" && staleFor === deps.currentRelPath();
+  const shown = onScreen ? staleReport : null;
   const pill = document.getElementById("wikiStalePill");
   if (pill) {
     const html = stalePillHtml(shown);
     if (pill.innerHTML !== html) pill.innerHTML = html;
+  }
+  // The status date line has the slot after the pill's, so painting it never rebuilds the pill's button. It waits for the report, read or failed.
+  const line = document.getElementById("wikiStatusDate");
+  if (line) {
+    const html = shown ? statusDatePillHtml(statusDates.answerFor(staleFor)) : "";
+    if (line.innerHTML !== html) line.innerHTML = html;
   }
   const art = deps.renderedArticle();
   if (art && art.el.isConnected) {

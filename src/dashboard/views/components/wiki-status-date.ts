@@ -1,0 +1,164 @@
+/**
+ * The status date check in the article head (mimir plan
+ * muninn-wiki-first-screen-claims, P3): one line beside the Stale check's pill
+ * that says what `GET /api/wiki/claim-check` compared for the open page and
+ * what it found. The wording is pure; {@link makeStatusDateLoader} holds the
+ * open page's answer and its request for `wiki-stale-controller.ts`, which
+ * paints.
+ *
+ * Every line names the comparison (the page's `status_date` against the
+ * merge dates of its `prs:`), so none reads as a verdict on the page: the
+ * check compares two dates and reads no status line. There is no line where
+ * nothing was compared and the page gives nothing to compare: no `prs:`, a
+ * page the check does not read (`not-live`), a request that failed, a verdict
+ * or reason this file does not know.
+ */
+import { escHtml as esc } from "./escape.ts";
+
+/** The route's answer as the line reads it (`StatusDateBody` in `src/wiki/status-date-check.ts`). */
+export interface StatusDateView {
+  verdict?: string;
+  statusDate?: string;
+  newest?: { pr?: string; repo?: string; n?: number; mergedDay?: string };
+  reason?: string;
+  repos?: string[];
+  unreadable?: string[];
+  error?: string;
+}
+
+export interface StatusDateLine {
+  tone: "late" | "clear" | "unchecked";
+  text: string;
+  /** The hover text: the two dates in full, or why nothing was compared. */
+  title: string;
+}
+
+const COMPARES = "The check compares these two dates and reads no status line.";
+
+/** `DD.MM` of a `YYYY-MM-DD` day, "" for anything else. */
+function dayMonth(day: string | undefined): string {
+  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(day ?? "");
+  return m ? `${m[2]}.${m[1]}` : "";
+}
+
+/** The merge an answer names, when it carries what a line needs: the PR and its merge day. `label` is `repo#n, DD.MM`, the repo without its owner, or the full PR in front of the day where the repo or the number is missing. */
+function mergeOf(v: StatusDateView): { pr: string; mergedDay: string; label: string } | null {
+  const n = v.newest;
+  if (!n || typeof n.pr !== "string" || !n.pr || typeof n.mergedDay !== "string" || !dayMonth(n.mergedDay)) return null;
+  const repo = typeof n.repo === "string" ? (n.repo.split("/").pop() ?? "") : "";
+  const short = repo && typeof n.n === "number" ? `${repo}#${n.n}` : n.pr;
+  return { pr: n.pr, mergedDay: n.mergedDay, label: `${short}, ${dayMonth(n.mergedDay)}` };
+}
+
+const list = (xs: string[] | undefined): string => (xs ?? []).filter((x) => typeof x === "string" && x).join(", ");
+
+/** Why nothing was compared, per reason the line speaks for. `no-prs` and `not-live` are not here: no line. */
+function notCheckedLine(v: StatusDateView): { text: string; title: string } | null {
+  switch (v.reason) {
+    case "not-asked":
+      return {
+        text: "status date not checked: no PR state on hand",
+        title: "No state under an hour old is on hand for at least one of this page's PRs. This line reads what the work map card's check got from GitHub and asks nothing itself.",
+      };
+    case "auth": {
+      const repos = list(v.repos);
+      return { text: "status date not checked: no GitHub access", title: `Within the last hour GitHub did not let the gh command here read ${repos || "a repo in the page's prs:"}: not logged in, no access, or no such repo.` };
+    }
+    case "no-gh":
+      return { text: "status date not checked: no gh command", title: "The gh command is not installed where muninn runs, so GitHub was not asked." };
+    case "unreadable-prs": {
+      const entries = list(v.unreadable);
+      return { text: "status date not checked: prs: holds an entry that is no PR", title: entries ? `Not a PR reference: ${entries}.` : "An entry in the page's prs: is not a PR reference." };
+    }
+    case "no-status-date":
+      return { text: "status date not checked: the page has no status_date", title: "The page lists PRs in prs: but has no status_date to compare with their merges." };
+    default:
+      return null;
+  }
+}
+
+/** The line for one answer, or null where the head says nothing. */
+export function statusDateLine(v: StatusDateView | null | undefined): StatusDateLine | null {
+  if (!v || v.error) return null;
+  const statusDate = typeof v.statusDate === "string" ? v.statusDate : "";
+  const merge = mergeOf(v);
+  if (v.verdict === "late" && merge && statusDate) {
+    return {
+      tone: "late",
+      // «a merged PR», not «its last»: a later merge is `late` whatever the page's other PRs are, also ones with no state on hand.
+      text: `⚠ status older than a merged PR (${merge.label})`,
+      title: `status_date ${statusDate} is older than a merge among the page's prs: ${merge.pr}, merged ${merge.mergedDay}. ${COMPARES}`,
+    };
+  }
+  if (v.verdict === "clear" && statusDate) {
+    if (!v.newest) {
+      return {
+        tone: "clear",
+        text: "status date checked: no merged PR in prs:",
+        title: `status_date ${statusDate}; none of the PRs in the page's prs: is merged, so there is no merge date to compare it with. The check reads no status line.`,
+      };
+    }
+    if (!merge) return null;
+    return {
+      tone: "clear",
+      text: `status dated on or after its last merged PR (${merge.label})`,
+      title: `status_date ${statusDate} is not older than the newest merge among the page's prs: ${merge.pr}, merged ${merge.mergedDay}. ${COMPARES}`,
+    };
+  }
+  if (v.verdict === "notChecked") {
+    const line = notCheckedLine(v);
+    return line ? { tone: "unchecked", ...line } : null;
+  }
+  return null;
+}
+
+/** The line as it sits in its slot, after the Stale check's pill; "" for no line. */
+export function statusDatePillHtml(v: StatusDateView | null | undefined): string {
+  let l: StatusDateLine | null = null;
+  try {
+    l = statusDateLine(v);
+  } catch {
+    // The answer is unchecked JSON. One of a shape the wording cannot read gives no line, and the paint that asked goes on.
+  }
+  if (!l) return "";
+  return `<span class="wiki-status-date ${l.tone}" data-status-date="${l.tone}" title="${esc(l.title)}">${esc(l.text)}</span>`;
+}
+
+/** The check's URL for a page, or null where the route would refuse: it needs
+ *  the wiki's name and answers only for `.md`/`.mdx` pages. */
+export function claimCheckUrl(wiki: string, relPath: string): string | null {
+  if (!wiki || !/\.mdx?$/i.test(relPath)) return null;
+  return `/api/wiki/claim-check?wiki=${encodeURIComponent(wiki)}&relPath=${encodeURIComponent(relPath)}`;
+}
+
+/**
+ * The open page's answer and the request behind it. `load` moves to a page,
+ * forgets the last page's answer at once and asks. An answer is kept when it
+ * is the newest request's and its page is still the loader's; `answerFor`
+ * gives it for that page alone. A request that fails or is refused leaves no
+ * answer, so no line.
+ */
+export function makeStatusDateLoader(io: { wiki: () => string; onAnswer: () => void; fetch?: typeof fetch }) {
+  let page: string | null = null;
+  let answer: StatusDateView | null = null;
+  let seq = 0;
+  return {
+    load(relPath: string): void {
+      if (page !== relPath) answer = null;
+      page = relPath;
+      const url = claimCheckUrl(io.wiki(), relPath);
+      if (!url) return;
+      const mine = ++seq;
+      (io.fetch ?? fetch)(url)
+        .then((r) => (r.ok ? (r.json() as Promise<StatusDateView>) : null))
+        .catch(() => null)
+        .then((v) => {
+          if (mine !== seq || page !== relPath) return;
+          answer = v;
+          io.onAnswer();
+        });
+    },
+    /** The answer for `relPath`: null for another page, and until it arrives. */
+    answerFor: (relPath: string | null): StatusDateView | null => (relPath !== null && relPath === page ? answer : null),
+  };
+}

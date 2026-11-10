@@ -65,7 +65,7 @@ describe("the STALE tab", () => {
 
   test("a page that did not change has no buckets and no Check; nothing at all reads ✓", () => {
     const html = staleBodyHtml({ ...report, buckets: null, hits: [] });
-    expect(html).toContain("✓ nothing stale");
+    expect(html).toContain(">0 stale status lines · 0 linking pages to check<");
     expect(html).toContain("Not changed in the last 14 days");
     expect(html).not.toContain("data-stale-check");
   });

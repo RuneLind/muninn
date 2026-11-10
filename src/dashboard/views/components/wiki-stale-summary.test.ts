@@ -36,8 +36,11 @@ describe("the counts everywhere (PR 2b)", () => {
   test("no pill before the report loads or when it failed; ✓ when nothing is stale", () => {
     expect(stalePillHtml(null)).toBe("");
     expect(stalePillHtml({ error: "x" })).toBe("");
-    expect(stalePillHtml({ hits: [], buckets: null })).toContain("✓ nothing stale");
-    expect(staleCountsText({ staleLines: 0, toCheck: 0 })).toBe("✓ nothing stale");
+    expect(stalePillHtml({ hits: [], buckets: null })).toContain(">0 stale status lines · 0 linking pages to check</button>");
+    // The zero case names what was counted, with no «✓»: it is no verdict on the page.
+    expect(staleCountsText({ staleLines: 0, toCheck: 0 })).toBe("0 stale status lines · 0 linking pages to check");
+    expect(staleCountsText({ staleLines: 0, toCheck: 1 })).toBe("⚠ 0 stale status lines · 1 linking page to check");
+    expect(staleCountsText({ staleLines: 1, toCheck: 0 })).toBe("⚠ 1 stale status line · 0 linking pages to check");
   });
 
   test("the rail badge carries both numbers, and nothing at 0 · 0", () => {
@@ -59,7 +62,7 @@ describe("the counts everywhere (PR 2b)", () => {
   test("the home line totals the rows and the home tab lists the stale ones, escaped", () => {
     expect(staleHomeLineHtml(summary)).toContain(">⚠ 2 stale status lines · 2 linking pages to check on 2 pages<");
     expect(staleHomeLineHtml(summary)).toContain("data-stale-home-open");
-    expect(staleHomeLineHtml({ pages: [], totals: { staleLines: 0, toCheck: 0 } })).toContain("✓ nothing stale");
+    expect(staleHomeLineHtml({ pages: [], totals: { staleLines: 0, toCheck: 0 } })).toContain(">0 stale status lines · 0 linking pages to check<");
     expect(staleHomeLineHtml({ pages: [] })).not.toContain("data-stale-home-open");
     expect(staleHomeLineHtml(null)).toContain("Loading…");
     const body = staleHomeBodyHtml(summary);
