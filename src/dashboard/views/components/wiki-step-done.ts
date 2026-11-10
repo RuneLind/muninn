@@ -26,7 +26,8 @@
  *
  * Gating: no fetch under the read slice or on a read-only wiki; the buttons
  * also sit in `WIKI_READONLY_BLOCKED_SELECTOR` (and so in the read slice's
- * hidden set). A wiki outside the close route's scope answers 404: no buttons.
+ * hidden set). For a wiki outside the close route's scope, or one with no
+ * registry name, the list answers 200 with no steps and no hash: no buttons.
  */
 
 import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
@@ -201,6 +202,10 @@ async function postJson(body: Record<string, unknown>): Promise<{ status: number
 
 const errorText = (data: Record<string, unknown>, fallback: string) => (typeof data.error === "string" && data.error ? data.error : fallback);
 
+/** The statuses the route refuses a write with, each with an `error` text (`routes/wiki-step-done.ts`). */
+const REFUSAL_STATUSES = [400, 403, 404, 409, 415, 503];
+const ownRefusal = (status: number, data: Record<string, unknown>): boolean => REFUSAL_STATUSES.includes(status) && typeof data.error === "string";
+
 /** Off without `disabled`: a disabled button drops focus to the body, and Escape then never reaches the preview. */
 function setOff(b: HTMLElement, off: boolean): void {
   if (off) b.setAttribute("aria-disabled", "true");
@@ -229,12 +234,17 @@ function showNotice(article: HTMLElement, text: string, role: "status" | "alert"
   return note;
 }
 
-/** A refused write a second click on Remove can get through: a wiki being written right now, or Gardener cards that could not be read. */
+/** A refused write a second click on Remove can get through: a wiki being written right now, or a 503 (Gardener cards that could not be read; the route also answers 503 for a wiki whose directory is gone, where a retry changes nothing). */
 export const retryable = (status: number, data: Record<string, unknown>): boolean => data.locked === true || status === 503;
 
-/** A refused write after which the page on screen may not be the page on disk: it changed, the preview no longer fits, or the answer never came. */
+/**
+ * A write after which the page on screen may not be the page on disk: it
+ * changed, the preview no longer fits, or the answer is not one of the route's
+ * own refusals (no answer, the route's 500, a gateway's 502 or 504, a body
+ * that is not JSON), so the write may have landed.
+ */
 export const needsReload = (status: number, data: Record<string, unknown>): boolean =>
-  data.stale === true || data.changed === true || status === 0 || status === 500;
+  data.stale === true || data.changed === true || !ownRefusal(status, data);
 
 /** A row's text as a button's name carries it: one line, capped. */
 const NAME_CHARS = 120;
@@ -333,7 +343,7 @@ async function write(
   }
   // A refusal stays on screen and says why: a page changed underneath, a
   // session editing it, a preview that no longer fits.
-  const why = errorText(r.data, "Done could not remove the step.");
+  const why = errorText(r.data, "Done got an answer it cannot read. Reload the page to see whether the step is removed.");
   if (!panel.isConnected) {
     // The preview closed while the write ran (another Done was opened, or
     // Escape): the refusal goes on the page, while it is still the page shown.

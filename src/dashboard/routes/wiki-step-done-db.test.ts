@@ -225,6 +225,13 @@ describe("/api/wiki/step-done", () => {
     const outside = await app.request(`/api/wiki/step-done?wiki=${OUTSIDE}&relPath=${encodeURIComponent(REL)}`);
     expect(outside.status).toBe(200);
     expect(await outside.json()).toEqual({ relPath: REL, offered: false, reason: `${OUTSIDE}: not in WORK_MAP_WIKIS`, steps: [], laneRows: [], readable: false });
+    // So is a wiki with no name: a bare /wiki on an unregistered WIKI_DIR sends an empty one.
+    for (const q of [`wiki=&relPath=${encodeURIComponent(REL)}`, `relPath=${encodeURIComponent(REL)}`]) {
+      const unnamed = await app.request(`/api/wiki/step-done?${q}`);
+      expect([unnamed.status, await unnamed.json()]).toEqual([200, { relPath: REL, offered: false, reason: "the wiki has no registry name", steps: [], laneRows: [], readable: false }]);
+    }
+    const noPage = await app.request(`/api/wiki/step-done?wiki=${OUTSIDE}`);
+    expect([noPage.status, await noPage.json()]).toEqual([400, { error: "relPath is required" }]);
     const unknown = await app.request(`/api/wiki/step-done?wiki=no-such-wiki&relPath=${encodeURIComponent(REL)}`);
     expect([unknown.status, ((await unknown.json()) as { offered: boolean; steps: unknown[] }).offered]).toEqual([200, false]);
     // A read-only root still refuses the list: the reader does not ask there.

@@ -77,7 +77,10 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
   app.get(STEP_DONE_PATH, async (c) => {
     const wiki = c.req.query("wiki")?.trim();
     const relPath = c.req.query("relPath")?.trim();
-    if (!wiki || !relPath) return c.json({ error: "wiki and relPath are required" }, 400);
+    if (!relPath) return c.json({ error: "relPath is required" }, 400);
+    // A bare `/wiki` served from an unregistered `WIKI_DIR` has no name to send. The
+    // reader asks on every page with a `you` lane, so that is an answer with no steps.
+    if (!wiki) return c.json({ relPath, offered: false, reason: "the wiki has no registry name", steps: [], laneRows: [], readable: false });
     try {
       const found = await resolveWiki(c, depsFor(), wiki);
       // The reader asks on every page with a `you` lane, in any wiki: outside the

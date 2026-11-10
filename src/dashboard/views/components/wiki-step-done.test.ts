@@ -100,20 +100,34 @@ test("the preview shows that line once and none of the renumbered steps' text", 
   expect(none.split("wiki-step-done-sub").length - 1).toBe(1);
 });
 
-// What each refusal of the write leaves the reader to do (fix round 1 batch 4).
-// The shapes are the route's own answers in `routes/wiki-step-done.ts`.
+// What each answer to the write, other than `ok`, leaves the reader to do.
+// The first block is the route's refusals in `routes/wiki-step-done.ts`, each
+// with its status, its flag and an `error` text as the route sends them; the
+// second is what can come back when the route did not answer.
+const e = "why, as the route words it";
 const REFUSALS: [name: string, status: number, data: Record<string, unknown>, retry: boolean, reload: boolean][] = [
-  ["the page changed", 409, { stale: true }, false, true],
-  ["the preview no longer fits", 409, { changed: true }, false, true],
-  ["the answer never came", 0, {}, false, true],
-  ["the route failed", 500, {}, false, true],
-  ["a session is writing to the wiki", 409, { locked: true }, true, false],
-  ["the Gardener's cards could not be read", 503, {}, true, false],
-  ["a Gardener card holds the page", 409, { held: true }, false, false],
-  ["the page has uncommitted edits", 409, { dirty: true }, false, false],
-  ["the step cannot be removed", 409, { refused: true, code: "nested" }, false, false],
-  ["the wiki is read-only", 403, { readonly: true }, false, false],
-  ["no Done on this wiki", 404, {}, false, false],
+  ["the page changed", 409, { error: e, stale: true }, false, true],
+  ["the preview no longer fits", 409, { error: e, changed: true }, false, true],
+  ["a session is writing to the wiki", 409, { error: e, locked: true }, true, false],
+  ["the Gardener's cards could not be read", 503, { error: e }, true, false],
+  ["a Gardener card holds the page", 409, { error: e, held: true }, false, false],
+  ["the page has uncommitted edits", 409, { error: e, dirty: true }, false, false],
+  ["the step cannot be removed", 409, { error: e, refused: true, code: "nested" }, false, false],
+  ["the page cannot be read", 409, { error: e }, false, false],
+  ["a field is missing", 400, { error: e }, false, false],
+  ["the request is not JSON", 415, { error: e }, false, false],
+  ["the wiki is read-only", 403, { error: e, readonly: true }, false, false],
+  ["no Done on this wiki", 404, { error: e }, false, false],
+
+  ["the answer never came", 0, { error: e }, false, true],
+  ["the route failed", 500, { error: e }, false, true],
+  ["a gateway timed out, with a page of its own", 504, {}, false, true],
+  ["a bad gateway", 502, {}, false, true],
+  ["a gateway's 404 that is not JSON", 404, {}, false, true],
+  ["a gateway's 503 that is not JSON", 503, {}, true, true],
+  ["a JSON body with no error text", 409, { message: "x" }, false, true],
+  ["a 200 that does not say ok", 200, {}, false, true],
+  ["a 200 that does not say ok, with an error text", 200, { error: e }, false, true],
 ];
 
 for (const [name, status, data, retry, reload] of REFUSALS) {

@@ -684,6 +684,26 @@ test.describe("the preview's keys, names and refusals", () => {
     expect(await note.evaluate((n) => n === n.closest(".wiki-article")?.firstElementChild)).toBe(true);
   });
 
+  test("an answer that is not the route's own offers Reload: a gateway's 504 page", async ({ page: p }) => {
+    await p.route("**/api/wiki/step-done", async (route) => {
+      const req = route.request();
+      if (req.method() !== "POST" || (req.postDataJSON() as { preview?: boolean }).preview === true) return route.continue();
+      await route.fulfill({ status: 504, contentType: "text/html", body: "<html><body>504 Gateway Time-out</body></html>" });
+    });
+    await openPage(p, KEYS_REL);
+    const li = step(p, "Sort the blue folders");
+    await li.locator("[data-step-done]").click();
+    await li.locator("[data-step-done-confirm]").click();
+    await expect(li.locator(".wiki-step-done-err")).toBeVisible();
+    await expect(li.locator(".wiki-step-done-reload")).toBeVisible();
+    await expect(li.locator(".wiki-step-done-err")).toHaveText("Done got an answer it cannot read. Reload the page to see whether the step is removed.");
+    await expect(li.locator("[data-step-done-confirm]")).toBeDisabled();
+    await li.locator(".wiki-step-done-reload").click();
+    await expect(p.locator(".wiki-step-done-panel")).toHaveCount(0);
+    await openYouLane(p);
+    await expect(step(p, "Sort the blue folders").locator("[data-step-done]")).toBeVisible();
+  });
+
   test("a refusal that arrives after its preview closed is shown on the page", async ({ page: p }) => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
