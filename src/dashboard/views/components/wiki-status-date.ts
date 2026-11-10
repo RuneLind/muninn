@@ -41,7 +41,7 @@ function dayMonth(day: string | undefined): string {
   return m ? `${m[2]}.${m[1]}` : "";
 }
 
-/** `repo#n, DD.MM`: the newest merge, its repo without the owner. */
+/** `repo#n, DD.MM`: the merge the answer names, its repo without the owner. */
 function mergeLabel(n: NonNullable<StatusDateView["newest"]>): string {
   const repo = (n.repo ?? "").split("/").pop() ?? "";
   const pr = repo && n.n ? `${repo}#${n.n}` : (n.pr ?? "");
@@ -55,12 +55,12 @@ function notCheckedLine(v: StatusDateView): { text: string; title: string } | nu
   switch (v.reason) {
     case "not-asked":
       return {
-        text: "status date not checked yet",
-        title: "GitHub has not been asked about this page's PRs within the last hour. The work map card's check asks; this line only reads its answers.",
+        text: "status date not checked: no PR state on hand",
+        title: "No state under an hour old is on hand for at least one of this page's PRs. Where the work map card's check runs, it asks GitHub; this line only reads what that check got, when the page loads.",
       };
     case "auth": {
       const repos = list(v.repos);
-      return { text: "status date not checked: no GitHub access", title: `GitHub gave the gh login here no answer for ${repos || "a repo in the page's prs:"}.` };
+      return { text: "status date not checked: no GitHub access", title: `The gh command here is not logged in, or its login cannot read ${repos || "a repo in the page's prs:"}.` };
     }
     case "no-gh":
       return { text: "status date not checked: no gh command", title: "The gh command is not installed where muninn runs, so GitHub was not asked." };
@@ -82,8 +82,9 @@ export function statusDateLine(v: StatusDateView | null | undefined): StatusDate
     const label = mergeLabel(v.newest);
     return {
       tone: "late",
-      text: `⚠ status older than its last merged PR${label ? ` (${label})` : ""}`,
-      title: `status_date ${v.statusDate} is older than the newest merge among the page's prs: ${v.newest.pr ?? ""}, merged ${v.newest.mergedDay ?? ""}. ${COMPARES}`,
+      // «a merged PR», not «its last»: a later merge is `late` whatever the page's other PRs are, also ones with no state on hand.
+      text: `⚠ status older than a merged PR${label ? ` (${label})` : ""}`,
+      title: `status_date ${v.statusDate} is older than a merge among the page's prs: ${v.newest.pr ?? ""}, merged ${v.newest.mergedDay ?? ""}. ${COMPARES}`,
     };
   }
   if (v.verdict === "clear" && v.statusDate) {

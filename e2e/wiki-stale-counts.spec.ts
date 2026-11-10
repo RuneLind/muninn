@@ -223,7 +223,7 @@ const marks = (p: Page) => p.locator(".wiki-article mark.wiki-stale-mark");
 /** The status date line beside the pill (first-screen-claims P3). */
 const dateLine = (p: Page) => p.locator("#wikiStalePill [data-status-date]");
 const LATE = { verdict: "late", statusDate: "2026-11-03", newest: { pr: "RuneLind/muninn#802", repo: "RuneLind/muninn", n: 802, mergedAt: "2026-11-04T09:12:00Z", mergedDay: "2026-11-04" } };
-const LATE_TEXT = "⚠ status older than its last merged PR (muninn#802, 04.11)";
+const LATE_TEXT = "⚠ status older than a merged PR (muninn#802, 04.11)";
 const CLEAR = { ...LATE, verdict: "clear", statusDate: "2026-11-05" };
 const CLEAR_TEXT = "status dated on or after its last merged PR (muninn#802, 04.11)";
 
@@ -383,7 +383,7 @@ test("the status date line sits beside the pill and says what was compared", asy
   await expect(dateLine(p)).toHaveAttribute("data-status-date", "late");
   await expect(dateLine(p)).toHaveAttribute(
     "title",
-    "status_date 2026-11-03 is older than the newest merge among the page's prs: RuneLind/muninn#802, merged 2026-11-04. The check compares these two dates and reads no status line.",
+    "status_date 2026-11-03 is older than a merge among the page's prs: RuneLind/muninn#802, merged 2026-11-04. The check compares these two dates and reads no status line.",
   );
   // The Stale check's pill keeps its own text and is still the one button in the slot.
   await expect(pill(p)).toHaveText(HUB_TEXT);
@@ -497,7 +497,7 @@ test("a not-checked answer says why, and a failed or unknown one says nothing", 
   await answerClaimCheck(p, "hub.md", { json: { verdict: "notChecked", reason: "not-asked" } });
   await answerClaimCheck(p, "hub2.md", { status: 500, json: { error: "the status date check failed" } });
   await open(p, "hub.md", "The pin moved.");
-  await expect(dateLine(p)).toHaveText("status date not checked yet");
+  await expect(dateLine(p)).toHaveText("status date not checked: no PR state on hand");
   await expect(dateLine(p)).toHaveAttribute("data-status-date", "unchecked");
   await p.locator('.wiki-list-item[data-relpath="hub2.md"]').click();
   await expect(p.locator(".wiki-article")).toContainText("The second hub.");

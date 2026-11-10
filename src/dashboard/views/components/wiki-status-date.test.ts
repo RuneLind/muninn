@@ -17,9 +17,9 @@ describe("what the line says", () => {
   test("a late status date names the PR and its merge day", () => {
     expect(statusDateLine(late)).toEqual({
       tone: "late",
-      text: "⚠ status older than its last merged PR (muninn#802, 04.11)",
+      text: "⚠ status older than a merged PR (muninn#802, 04.11)",
       title:
-        "status_date 2026-11-03 is older than the newest merge among the page's prs: RuneLind/muninn#802, merged 2026-11-04. The check compares these two dates and reads no status line.",
+        "status_date 2026-11-03 is older than a merge among the page's prs: RuneLind/muninn#802, merged 2026-11-04. The check compares these two dates and reads no status line.",
     });
   });
 
@@ -50,9 +50,9 @@ describe("what the line says", () => {
   });
 
   const NOT_CHECKED: [reason: string, extra: Partial<StatusDateView>, text: string, title: string][] = [
-    ["not-asked", {}, "status date not checked yet", "GitHub has not been asked about this page's PRs within the last hour. The work map card's check asks; this line only reads its answers."],
-    ["auth", { repos: ["Acme/Gears", "acme/widgets"] }, "status date not checked: no GitHub access", "GitHub gave the gh login here no answer for Acme/Gears, acme/widgets."],
-    ["auth", {}, "status date not checked: no GitHub access", "GitHub gave the gh login here no answer for a repo in the page's prs:."],
+    ["not-asked", {}, "status date not checked: no PR state on hand", "No state under an hour old is on hand for at least one of this page's PRs. Where the work map card's check runs, it asks GitHub; this line only reads what that check got, when the page loads."],
+    ["auth", { repos: ["Acme/Gears", "acme/widgets"] }, "status date not checked: no GitHub access", "The gh command here is not logged in, or its login cannot read Acme/Gears, acme/widgets."],
+    ["auth", {}, "status date not checked: no GitHub access", "The gh command here is not logged in, or its login cannot read a repo in the page's prs:."],
     ["no-gh", {}, "status date not checked: no gh command", "The gh command is not installed where muninn runs, so GitHub was not asked."],
     ["unreadable-prs", { unreadable: ["soon", "#12"] }, "status date not checked: prs: holds an entry that is no PR", "Not a PR reference: soon, #12."],
     ["unreadable-prs", {}, "status date not checked: prs: holds an entry that is no PR", "An entry in the page's prs: is not a PR reference."],
@@ -87,9 +87,9 @@ describe("what the line says", () => {
   });
 
   test("the merge label falls back: no repo gives the full PR, a day that is no date gives none", () => {
-    expect(statusDateLine({ ...late, newest: { pr: "RuneLind/muninn#802", mergedDay: "2026-11-04" } })!.text).toBe("⚠ status older than its last merged PR (RuneLind/muninn#802, 04.11)");
-    expect(statusDateLine({ ...late, newest: { ...newest, mergedDay: "soon" } })!.text).toBe("⚠ status older than its last merged PR (muninn#802)");
-    expect(statusDateLine({ ...late, newest: {} })!.text).toBe("⚠ status older than its last merged PR");
+    expect(statusDateLine({ ...late, newest: { pr: "RuneLind/muninn#802", mergedDay: "2026-11-04" } })!.text).toBe("⚠ status older than a merged PR (RuneLind/muninn#802, 04.11)");
+    expect(statusDateLine({ ...late, newest: { ...newest, mergedDay: "soon" } })!.text).toBe("⚠ status older than a merged PR (muninn#802)");
+    expect(statusDateLine({ ...late, newest: {} })!.text).toBe("⚠ status older than a merged PR");
     expect(statusDateLine({ ...clear, newest: { repo: "muninn", n: 7, mergedDay: "2026-01-09" } })!.text).toBe("status dated on or after its last merged PR (muninn#7, 09.01)");
   });
 });
@@ -97,7 +97,7 @@ describe("what the line says", () => {
 describe("the line in the pill slot", () => {
   test("one span with its tone, its text and the two dates on hover, escaped", () => {
     expect(statusDatePillHtml(late)).toBe(
-      `<span class="wiki-status-date late" data-status-date="late" title="status_date 2026-11-03 is older than the newest merge among the page&#39;s prs: RuneLind/muninn#802, merged 2026-11-04. The check compares these two dates and reads no status line.">⚠ status older than its last merged PR (muninn#802, 04.11)</span>`,
+      `<span class="wiki-status-date late" data-status-date="late" title="status_date 2026-11-03 is older than a merge among the page&#39;s prs: RuneLind/muninn#802, merged 2026-11-04. The check compares these two dates and reads no status line.">⚠ status older than a merged PR (muninn#802, 04.11)</span>`,
     );
     const hostile = statusDatePillHtml({ verdict: "notChecked", reason: "unreadable-prs", unreadable: ['"><img src=x>'] });
     expect(hostile).not.toContain("<img");
@@ -115,10 +115,14 @@ describe("the server's own verdicts", () => {
   const merged = { state: "MERGED" as const, mergedAt: "2026-11-04T09:12:00Z" };
 
   test("late, clear, clear with nothing merged and not asked each give their line", () => {
-    expect(statusDateLine(judge("2026-11-03", ["acme/gears#7"], { "acme/gears#7": merged }))!.text).toBe("⚠ status older than its last merged PR (gears#7, 04.11)");
+    expect(statusDateLine(judge("2026-11-03", ["acme/gears#7"], { "acme/gears#7": merged }))!.text).toBe("⚠ status older than a merged PR (gears#7, 04.11)");
     expect(statusDateLine(judge("2026-11-04", ["acme/gears#7"], { "acme/gears#7": merged }))!.text).toBe("status dated on or after its last merged PR (gears#7, 04.11)");
     expect(statusDateLine(judge("2026-11-04", ["acme/gears#7"], { "acme/gears#7": { state: "OPEN", mergedAt: null } }))!.text).toBe("status date checked: no merged PR in prs:");
-    expect(statusDateLine(judge("2026-11-04", ["acme/gears#7"], {}))!.text).toBe("status date not checked yet");
+    expect(statusDateLine(judge("2026-11-04", ["acme/gears#7"], {}))!.text).toBe("status date not checked: no PR state on hand");
+    // A later merge is late whatever the other PRs are: the line names a merged PR, never «the last».
+    const beside = statusDateLine(judge("2026-11-03", ["acme/gears#7", "other/repo#5"], { "acme/gears#7": merged }))!;
+    expect(beside.text).toBe("⚠ status older than a merged PR (gears#7, 04.11)");
+    expect(beside.text + beside.title).not.toMatch(/last|newest/);
     expect(statusDateLine(judge("2026-11-04", [], {}))).toBeNull();
   });
 
