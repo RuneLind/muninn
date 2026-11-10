@@ -6,8 +6,9 @@
  *
  * A plain read: the page's index entry and the PR states a request for the
  * work map card's check (`GET /api/wiki/work-map/checks`) left in the wiki's
- * two caches. It asks GitHub
- * nothing and spawns nothing, so it is not on `SIDE_EFFECTING_GETS`.
+ * two caches. It asks GitHub nothing and starts no `gh`, so it is not on
+ * `SIDE_EFFECTING_GETS`. Like any page route it reads the wiki's index, and
+ * building a cold one runs git.
  *
  * Answers in this order: a missing parameter 400; an unknown wiki 404; an
  * unknown page 404; a page other than `.md`/`.mdx` 400; then the verdict

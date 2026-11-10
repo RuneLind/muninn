@@ -13,7 +13,7 @@
  * It answers only for the pages the card's check reads (`isLiveCheckPage`);
  * any other page is `not-live`, since the card never asks for its `prs:`.
  *
- * Nothing here writes to a wiki or spawns a process.
+ * Nothing here writes to a wiki or starts a process.
  */
 
 import { todayOslo } from "../utils/date-hash.ts";

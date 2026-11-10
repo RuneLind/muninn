@@ -246,6 +246,13 @@ describe("what the card's check could not read", () => {
     expect((await s.get()).body).toEqual({ ...NOT_ASKED, at: now });
   });
 
+  test("a repo written in another case on the page finds its failure record, and is listed as written", async () => {
+    const pageFm = "status_date: 2026-05-10\nprs: [Acme/Gears#7]\n";
+    const s = setup({ pages: { "plans/a.mdx": page(pageFm) }, gh: failing({ exitCode: 4, stdout: "", stderr: "gh auth login" }) });
+    await s.card();
+    expect((await s.get()).body).toEqual({ wiki: "w", relPath: "plans/a.mdx", at: NOW, verdict: "notChecked", reason: "auth", repos: ["Acme/Gears"] });
+  });
+
   test("no gh binary reads no-gh", async () => {
     const s = setup({ pages: { "plans/a.mdx": LATE_PAGE }, gh: failing({ exitCode: -1, stdout: "", stderr: "", noBinary: true }) });
     await s.card();
