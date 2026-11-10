@@ -11,10 +11,9 @@
  * A refusal stays in the preview with what the reader can do next: Remove
  * stays on only where a retry can help (`retryable`), and Reload shows where
  * the page on screen is no longer the page on disk (`needsReload`). A refusal
- * whose preview has closed meanwhile goes on the page as a notice, at the
- * page's next render if the reader has left it. Escape and Cancel close the
- * preview and put focus back on its Done, also while a write runs: a button
- * is turned off with `aria-disabled`, which keeps focus on it.
+ * whose preview has closed meanwhile goes on the page as a notice. Escape and
+ * Cancel close the preview and put focus back on its Done, also while a write
+ * runs: a button is turned off with `aria-disabled`, which keeps focus on it.
  *
  * Which rendered row is which step comes from `GET /api/wiki/step-done`: per
  * counted `you` lane in source order, how many rows its lists hold, and which
@@ -81,7 +80,7 @@ const UNCOMMITTED_NOTICE =
 /** Pages whose last Done wrote but did not commit: Done is not offered there again. */
 const uncommitted = new Set<string>();
 /** A line to show above the steps the next time the page renders; `focus` when that render is the reload a Done asked for. */
-const notices = new Map<string, { text: string; focus: boolean; role?: "alert" }>();
+const notices = new Map<string, { text: string; focus: boolean }>();
 const pageKey = (ctx: StepDonePageContext) => `${ctx.wiki}\u0000${ctx.relPath}`;
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -336,12 +335,9 @@ async function write(
   // session editing it, a preview that no longer fits.
   const why = errorText(r.data, "Done could not remove the step.");
   if (!panel.isConnected) {
-    // The preview closed while the write ran (another Done, Escape, or the
-    // reader left the page): the refusal goes on the page if it is still the
-    // one shown, else it waits for that page's next render.
-    const text = `Done did not remove «${name}»: ${why}`;
-    if (ctx.current() && article.isConnected) showNotice(article, text, "alert");
-    else notices.set(pageKey(ctx), { text, focus: false, role: "alert" });
+    // The preview closed while the write ran (another Done was opened, or
+    // Escape): the refusal goes on the page, while it is still the page shown.
+    if (ctx.current() && article.isConnected) showNotice(article, `Done did not remove «${name}»: ${why}`, "alert");
     return;
   }
   err.textContent = why;
@@ -359,7 +355,7 @@ export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): vo
   if (notice) {
     notices.delete(key);
     // After the reload a Done asked for, the keyboard goes here: the article was replaced under it.
-    const note = showNotice(article, notice.text, notice.role ?? "status");
+    const note = showNotice(article, notice.text, "status");
     if (notice.focus) note.focus({ preventScroll: true });
   }
   if (wikiReadonlyWikiFlag() || !wikiToolsFlag() || uncommitted.has(key)) return;

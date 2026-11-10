@@ -56,7 +56,6 @@ const TASK_REL = "plans/e2e-steps-tasks.mdx";
 const KEYS_REL = "plans/e2e-steps-keys.mdx";
 const LINK_REL = "plans/e2e-steps-links.mdx";
 const CANCEL_REL = "plans/e2e-steps-cancel.mdx";
-const LEFT_REL = "plans/e2e-steps-left.mdx";
 const SETTLED_REL = "plans/e2e-steps-settled.mdx";
 const FOLD_REL = "plans/e2e-steps-fold.mdx";
 
@@ -154,7 +153,6 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, KEYS_REL), page("Keys fixture"), "utf8");
   await writeFile(path.join(root, LINK_REL), linkPage(), "utf8");
   await writeFile(path.join(root, CANCEL_REL), page("Cancel fixture"), "utf8");
-  await writeFile(path.join(root, LEFT_REL), page("Left fixture"), "utf8");
   await writeFile(path.join(root, SETTLED_REL), settledPage(), "utf8");
   await writeFile(path.join(root, FOLD_REL), foldPage(), "utf8");
   git(root, "init", "-q", "-b", "main");
@@ -649,35 +647,6 @@ test.describe("the preview's keys, names and refusals", () => {
     await done.click();
     await expect(li.locator("[data-step-done-confirm]")).toBeFocused();
     expect(previews).toBe(2);
-  });
-
-  test("a refusal that arrives after the reader left the page is shown when the page is next opened, once", async ({ page: p }) => {
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const writes = await answerWrites(p, () => ({ status: 409, json: { error: "The Gardener holds this page.", held: true } }), gate);
-    await openPage(p, LEFT_REL);
-    const li = step(p, "Sort the blue folders");
-    await li.locator("[data-step-done]").click();
-    await li.locator("[data-step-done-confirm]").click();
-    await expect.poll(() => writes.held()).toBe(true);
-    const open = async (rel: string, title: string) => {
-      await p.locator(`.wiki-list-item[data-relpath="${rel}"]`).first().click();
-      await expect(p.locator(".wiki-article-head h1")).toHaveText(title);
-    };
-    await open(OTHER_REL, "Other fixture");
-    const refused = p.waitForResponse((r) => r.url().endsWith("/api/wiki/step-done") && r.request().method() === "POST");
-    release();
-    expect((await refused).status()).toBe(409);
-    await expect(p.locator(".wiki-step-done-note")).toHaveCount(0);
-    await open(LEFT_REL, "Left fixture");
-    const note = p.locator(".wiki-article .wiki-step-done-note");
-    await expect(note).toHaveText("Done did not remove «Sort the blue folders.»: The Gardener holds this page.");
-    await expect(note).toHaveAttribute("role", "alert");
-    await expect(note).not.toBeFocused();
-    await open(OTHER_REL, "Other fixture");
-    await open(LEFT_REL, "Left fixture");
-    await expect(p.locator(".wiki-article .next-moves")).toBeVisible();
-    await expect(p.locator(".wiki-step-done-note")).toHaveCount(0);
   });
 
   test("the notice goes in the live block, not in a settled one above it", async ({ page: p }) => {
