@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { listYouSteps, stepDoneEdit, stepDoneLogLine, stepKey, youLaneRows, type StepDoneEdit } from "./step-done.ts";
+import { listYouSteps, stepDoneEdit, stepDoneLogLine, stepKey, stepRemovalViolation, youLaneRows, type ProposedRemoval, type StepDoneEdit } from "./step-done.ts";
 import { countedNextMovesLanes, parseBlocks } from "./markdown-ast.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
@@ -384,5 +384,89 @@ describe("stepDoneLogLine: the step's first sentence, emphasis removed (fix roun
     const line = logOf(long).slice("Step done: ".length);
     expect([...line].length).toBe(160);
     expect(line.endsWith("…")).toBe(true);
+  });
+});
+
+// The check the edit's result must pass (fix round 1 batch 5). No page is known
+// that makes the edit itself fail it, so each refusal is driven with a result
+// some other, wrong edit would propose.
+describe("the postcondition", () => {
+  const WAIT = waiting("- Waiting on O1.");
+  const text = page(moves(you("1. First step.\n2. Second step.\n3. Third step."), WAIT));
+  const NOT_THE_STEP = "the page would not read back as the step removed";
+  const proposal = (over: Partial<ProposedRemoval> = {}, from = text, stepText = "Second step.") => {
+    const r = done(from, stepText);
+    return stepRemovalViolation(from, keyOf(from, stepText), { content: r.content, laneRemoved: r.laneRemoved, renumbered: r.renumbered, ...over });
+  };
+
+  test("holds for the edit's own result: a middle step, a last step with its lane, a bulleted step", () => {
+    expect(proposal()).toBeNull();
+    const one = page(moves(you("1. Only step."), WAIT));
+    expect(done(one, "Only step.").laneRemoved).toBe(true);
+    expect(proposal({}, one, "Only step.")).toBeNull();
+    expect(proposal({}, page(moves(you("- First step.\n- Second step."), WAIT)))).toBeNull();
+  });
+
+  test("the step still on the page", () => {
+    expect(proposal({ content: text })).toBe(NOT_THE_STEP);
+  });
+
+  test("a second step gone with it", () => {
+    expect(proposal({ content: page(moves(you("1. First step."), WAIT)) })).toBe(NOT_THE_STEP);
+  });
+
+  test("the wrong step gone", () => {
+    expect(proposal({ content: page(moves(you("1. Second step.\n2. Third step."), WAIT)) })).toBe(NOT_THE_STEP);
+  });
+
+  test("a step left in the lane reworded, or another lane's row", () => {
+    const good = done(text, "Second step.").content;
+    expect(proposal({ content: good.replace("Third step.", "Third stop.") })).toBe(NOT_THE_STEP);
+    expect(proposal({ content: good.replace("Waiting on O1.", "Waiting on O2.") })).toBe(NOT_THE_STEP);
+    expect(proposal({ content: good.replace('who="Someone"', 'who="Another"') })).toBe(NOT_THE_STEP);
+  });
+
+  test("the lane gone while steps are left in it", () => {
+    expect(proposal({ laneRemoved: true })).toBe("the lane would go with steps still in it");
+    expect(proposal({ laneRemoved: true, content: page(moves(WAIT)) })).toBe("the lane would go with steps still in it");
+  });
+
+  test("a last step's lane said gone but still on the page, or gone with another lane", () => {
+    const one = page(moves(you("1. Only step."), WAIT));
+    expect(proposal({ content: page(moves(you(""), WAIT)) }, one, "Only step.")).toBe(NOT_THE_STEP);
+    expect(proposal({ content: page("Nothing left.\n") }, one, "Only step.")).toBe(NOT_THE_STEP);
+  });
+
+  test("a renumbered line that changes more than its number", () => {
+    expect(proposal({ renumbered: [{ before: "3. Third step.", after: "2. Third stop." }] })).toBe("a renumbered line would change more than its number");
+    expect(proposal({ renumbered: [{ before: "3. Third step.", after: "2) Third step." }] })).toBe("a renumbered line would change more than its number");
+    expect(proposal({ renumbered: [{ before: "3. Third step.", after: "2. Third step." }] })).toBeNull();
+  });
+
+  test("numbers left as they were, where the reader shows them: the list no longer reads 1, 2", () => {
+    const SEQUENCE = "the numbered list would not render as one sequence";
+    // The first step gone and the list left starting at 2.
+    expect(proposal({ content: page(moves(you("2. Second step.\n3. Third step."), WAIT)) }, text, "First step.")).toBe(SEQUENCE);
+    // After a blank line the reader shows an item's own number.
+    const loose = page(moves(you("1. First step.\n\n2. Second step.\n\n3. Third step."), WAIT));
+    expect(proposal({}, loose)).toBeNull();
+    expect(proposal({ content: page(moves(you("1. First step.\n\n3. Third step."), WAIT)) }, loose)).toBe(SEQUENCE);
+    // A tight list counts on from its first number whatever the later markers say, so this one passes.
+    expect(proposal({ content: page(moves(you("1. First step.\n3. Third step."), WAIT)) })).toBeNull();
+  });
+
+  test("a row that is no list step has no postcondition to pass", () => {
+    expect(stepRemovalViolation(text, "no-such-key", { content: text, laneRemoved: false, renumbered: [] })).toBe("the page has no such list step");
+  });
+
+  test("the edit refuses what the check refuses, and writes what it passes", () => {
+    const key = keyOf(text, "Second step.");
+    expect(stepDoneEdit(text, key, () => "the check said no")).toEqual({ ok: false, code: "unplaceable", reason: "the check said no: edit the step on the page" });
+    expect(stepDoneEdit(text, key, () => null)).toEqual(stepDoneEdit(text, key));
+    // And it hands the check its own result.
+    let seen: ProposedRemoval | null = null;
+    const r = stepDoneEdit(text, key, (_p, _s, proposed) => ((seen = proposed), null));
+    if (!r.ok) throw new Error(r.reason);
+    expect(seen as ProposedRemoval | null).toEqual({ content: r.content, laneRemoved: false, renumbered: r.renumbered });
   });
 });

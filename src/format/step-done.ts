@@ -309,8 +309,62 @@ function withNumber(line: string, n: number): string | null {
 
 const laneShape = (l: NextMovesLane) => JSON.stringify([l.kind, l.known, l.label, l.who, l.role, l.since, l.sinceRaw, l.items]);
 
-/** The page text with step `key` deleted, or why not. */
-export function stepDoneEdit(text: string, key: string): StepDoneEdit {
+/** What an edit proposes, as the postcondition reads it. */
+export interface ProposedRemoval {
+  content: string;
+  laneRemoved: boolean;
+  renumbered: readonly { before: string; after: string }[];
+}
+
+/**
+ * The postcondition: why `proposed` is not the page with exactly `step`
+ * removed, or null. Through the walk the index counts with.
+ */
+function removalViolation(p: Parsed, step: StepRef, proposed: ProposedRemoval): string | null {
+  const { content, laneRemoved, renumbered } = proposed;
+  const { from } = p;
+  const list = step.list!;
+  const before = countedNextMovesLanes(p.blocks).lanes;
+  const after = countedNextMovesLanes(parseBlocks(content.split(/\r?\n/).slice(from).join("\n"))).lanes;
+  const at = p.refs.indexOf(step.laneRef);
+  const ownIndex = p.steps.filter((s) => s.laneRef === step.laneRef).indexOf(step);
+  const target = before[at]!;
+  const expected = before.map(laneShape);
+  if (laneRemoved) {
+    if (target.items.length !== 1) return "the lane would go with steps still in it";
+    expected.splice(at, 1);
+  } else {
+    expected[at] = laneShape({ ...target, items: target.items.filter((_, k) => k !== ownIndex) });
+  }
+  const got = after.map(laneShape);
+  if (got.length !== expected.length || got.some((g, k) => g !== expected[k])) return "the page would not read back as the step removed";
+  // A renumbered line changes its marker's number and nothing else, and the
+  // list renders as before with the step's number gone and later ones one lower.
+  const sameBut = (a: string, b: string) => a.replace(MARKER_RE, "$1#$3").replace(/^([ \t]*#\.)[ \t]+/, "$1 ") === b.replace(MARKER_RE, "$1#$3").replace(/^([ \t]*#\.)[ \t]+/, "$1 ");
+  if (renumbered.some((r) => !sameBut(r.before, r.after))) return "a renumbered line would change more than its number";
+  if (renumbered.length && !laneRemoved) {
+    const lists = (l: ComponentBlock) => l.children.filter((b): b is ListBlock => b.type === "ol" || b.type === "ul");
+    const afterLane = countedLaneRefs(parseBlocks(content.split(/\r?\n/).slice(from).join("\n")))[at];
+    const idx = lists(step.laneRef.laneBlock).indexOf(list);
+    const now = afterLane ? lists(afterLane.laneBlock)[idx] : undefined;
+    const was = ordinals((list as OlBlock).start, list.items.length, (list as OlBlock).values);
+    const want = [...was.slice(0, step.item), ...was.slice(step.item + 1).map((n) => n - 1)];
+    const shown = now?.type === "ol" ? ordinals(now.start, now.items.length, now.values) : null;
+    if (!shown || shown.join() !== want.join()) return "the numbered list would not render as one sequence";
+  }
+  return null;
+}
+
+/** The postcondition for a list step of `text`, for a result some edit proposes. Null: it holds. */
+export function stepRemovalViolation(text: string, key: string, proposed: ProposedRemoval): string | null {
+  const p = parsePage(text);
+  if ("error" in p) return p.error;
+  const step = p.steps.find((s) => s.key === key);
+  return step?.list ? removalViolation(p, step, proposed) : "the page has no such list step";
+}
+
+/** The page text with step `key` deleted, or why not. `violationOf` is the postcondition it must pass. */
+export function stepDoneEdit(text: string, key: string, violationOf: typeof removalViolation = removalViolation): StepDoneEdit {
   const p = parsePage(text);
   const unplaceable = (why: string): StepDoneEdit => ({ ok: false, code: "unplaceable", reason: `${why}: edit the step on the page` });
   if ("error" in p) return unplaceable(p.error);
@@ -379,35 +433,8 @@ export function stepDoneEdit(text: string, key: string): StepDoneEdit {
   const content = kept.join("");
   const removed = [...del].sort((a, b) => a - b).filter((i) => !blank(lines[i])).map((i) => ({ line: i + 1, text: lines[i]! }));
 
-  // The postcondition, through the walk the index counts with.
-  const before = countedNextMovesLanes(p.blocks).lanes;
-  const after = countedNextMovesLanes(parseBlocks(content.split(/\r?\n/).slice(from).join("\n"))).lanes;
-  const at = p.refs.indexOf(step.laneRef);
-  const ownIndex = p.steps.filter((s) => s.laneRef === step.laneRef).indexOf(step);
-  const target = before[at]!;
-  const expected = before.map(laneShape);
-  if (laneRemoved) {
-    if (target.items.length !== 1) return unplaceable("the lane would go with steps still in it");
-    expected.splice(at, 1);
-  } else {
-    expected[at] = laneShape({ ...target, items: target.items.filter((_, k) => k !== ownIndex) });
-  }
-  const got = after.map(laneShape);
-  if (got.length !== expected.length || got.some((g, k) => g !== expected[k])) return unplaceable("the page would not read back as the step removed");
-  // A renumbered line changes its marker's number and nothing else, and the
-  // list renders as before with the step's number gone and later ones one lower.
-  const sameBut = (a: string, b: string) => a.replace(MARKER_RE, "$1#$3").replace(/^([ \t]*#\.)[ \t]+/, "$1 ") === b.replace(MARKER_RE, "$1#$3").replace(/^([ \t]*#\.)[ \t]+/, "$1 ");
-  if (renumbered.some((r) => !sameBut(r.before, r.after))) return unplaceable("a renumbered line would change more than its number");
-  if (renumbered.length && !laneRemoved) {
-    const lists = (l: ComponentBlock) => l.children.filter((b): b is ListBlock => b.type === "ol" || b.type === "ul");
-    const afterLane = countedLaneRefs(parseBlocks(content.split(/\r?\n/).slice(from).join("\n")))[at];
-    const idx = lists(step.laneRef.laneBlock).indexOf(list);
-    const now = afterLane ? lists(afterLane.laneBlock)[idx] : undefined;
-    const was = ordinals((list as OlBlock).start, list.items.length, (list as OlBlock).values);
-    const want = [...was.slice(0, step.item), ...was.slice(step.item + 1).map((n) => n - 1)];
-    const shown = now?.type === "ol" ? ordinals(now.start, now.items.length, now.values) : null;
-    if (!shown || shown.join() !== want.join()) return unplaceable("the numbered list would not render as one sequence");
-  }
+  const why = violationOf(p, step, { content, laneRemoved, renumbered });
+  if (why) return unplaceable(why);
   return {
     ok: true,
     content,

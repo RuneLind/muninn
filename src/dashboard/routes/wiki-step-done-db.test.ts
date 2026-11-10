@@ -16,6 +16,8 @@ import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 import { commitWikiChange, type CommitWikiResult } from "../../wiki/commit.ts";
+import { __setStaleProposalStoreForTest, dbStaleProposalStore } from "../../gardener/stale-proposals.ts";
+import type { LivePageHolder } from "../../db/wiki-proposals.ts";
 import { registerWikiStepDoneRoutes, type StepDoneDeps } from "./wiki-step-done.ts";
 import type { DecisionCloseGuards } from "./wiki-decision-inbox.ts";
 
@@ -112,11 +114,13 @@ beforeAll(async () => {
 beforeEach(async () => {
   guardRefusal = null;
   commitResult = null;
+  __setStaleProposalStoreForTest(null);
   git("reset", "-q", "--hard");
   await resetPage();
 });
 
 afterAll(() => {
+  __setStaleProposalStoreForTest(null);
   __resetWikiRegistryForTest();
   __resetWikiCacheForTest();
 });
@@ -295,5 +299,65 @@ describe("/api/wiki/step-done", () => {
     const res = await post({ step: keyOf(l, "Read the second note."), baseHash: l.baseHash, preview: true });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ refused: true, code: "nested" });
+  });
+
+  // Fix round 1 batch 5: the two checks between the first read and the write.
+  describe("between the first read and the write", () => {
+    const holder = (targetPath: string): LivePageHolder => ({ id: "00000000-0000-4000-8000-000000000001", groupKey: "stale:2026-11-10", topicKey: "t", targetPath, kind: "stale-check", status: "draft" });
+    const holders = (liveHolders: (wiki: string) => Promise<LivePageHolder[]>) => __setStaleProposalStoreForTest({ ...dbStaleProposalStore, liveHolders });
+    async function previewed() {
+      const { body: l } = await list();
+      const key = keyOf(l, "Read the second note.");
+      const p = (await (await post({ step: key, baseHash: l.baseHash, preview: true })).json()) as Record<string, unknown>;
+      return { step: key, baseHash: l.baseHash, previewHash: p.previewHash };
+    }
+
+    test("a Gardener card holding the page refuses the write and names the card; the preview still answers", async () => {
+      const asked: string[] = [];
+      holders(async (wiki) => (asked.push(wiki), [holder(REL)]));
+      const ready = await previewed();
+      expect(asked).toEqual([]);
+      const res = await post(ready);
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body).toMatchObject({ held: true });
+      expect(body.error).toBe(`${REL} is held by another Gardener card (Stale check, stale:2026-11-10): accept or dismiss it first.`);
+      expect(asked).toEqual([WIKI]);
+      expect(await pageText()).toBe(PAGE);
+      expect(git("status", "--porcelain")).toBe("");
+    });
+
+    test("a card holding another page does not refuse it", async () => {
+      holders(async () => [holder("plans/another.mdx")]);
+      const res = await post(await previewed());
+      expect(res.status).toBe(200);
+      expect(await pageText()).not.toContain("Read the second note.");
+    });
+
+    test("cards that cannot be read: 503, and nothing written", async () => {
+      holders(async () => {
+        throw new Error("connection refused");
+      });
+      const res = await post(await previewed());
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "The Gardener's cards could not be read, so the page's claim is unknown." });
+      expect(await pageText()).toBe(PAGE);
+    });
+
+    test("a page that changes after the first read is refused by the write itself, and the other edit stays", async () => {
+      // The card read runs after the route compared the base hash and before the
+      // write queue: an edit committed there is one only the write's own compare can see.
+      const edited = PAGE.replace("Waiting on O1.", "Waiting on O1, edited.");
+      holders(async () => {
+        await Bun.write(path.join(root, REL), edited);
+        git("commit", "-q", "-am", "an edit from elsewhere");
+        return [];
+      });
+      const res = await post(await previewed());
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: "The page changed while the step was marked done. Reload it and try again.", stale: true });
+      expect(await pageText()).toBe(edited);
+      expect(git("status", "--porcelain")).toBe("");
+    });
   });
 });
