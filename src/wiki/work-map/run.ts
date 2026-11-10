@@ -28,7 +28,7 @@ import { declaredEffortOf } from "./ids.ts";
 import { normalizeWorkMapAnswer } from "./normalize.ts";
 import { WORK_MAP_VERSION, workMapAnswerSchema, type WorkMap, type WorkMapAnswer } from "./schema.ts";
 import { workMapKindFromReaderText } from "./kind.ts";
-import { previousMapOf } from "./map-file.ts";
+import { previousMapOf, readMapFile } from "./map-file.ts";
 import type { ThemeMap } from "./theme-schema.ts";
 import { buildThemeMap } from "./theme-run.ts";
 import type { GhCheckDeps } from "./gh-check.ts";
@@ -185,6 +185,26 @@ export function workMapOrganizable(
   if (!entry) return { ok: false, reason: `${wiki} is not a registered wiki` };
   if ((deps.isReadonlyRoot ?? isReadonlyWikiRoot)(entry.root)) return { ok: false, reason: `${entry.name} has a readonly root` };
   return { ok: true, entry };
+}
+
+export type WorkMapGhGate = { ok: true; map: WorkMap; gh: GhCheckDeps } | { ok: false; reason: "no-map" | "disabled" };
+
+/**
+ * May a GitHub check spawn `gh` for this wiki? Only when its `.work-map.json`
+ * exists and is a `work` map, its root is not read-only and the check is on
+ * (`ghCheck` present, `WORK_MAP_GH_CHECK` not off). The card's check and the
+ * status date check both ask this, so a wiki whose repos this machine must not
+ * query is kept from `gh` by one rule.
+ */
+export async function workMapGhGate(
+  entry: Pick<WikiRegistryEntry, "root">,
+  deps: Pick<WorkMapRunDeps, "readText" | "ghCheck" | "isReadonlyRoot">,
+): Promise<WorkMapGhGate> {
+  const text = await deps.readText(path.join(entry.root, WORK_MAP_FILE));
+  const stored = text === null ? null : readMapFile(text);
+  if (!stored || stored.kind !== "work") return { ok: false, reason: "no-map" };
+  if (!deps.ghCheck || (deps.isReadonlyRoot ?? isReadonlyWikiRoot)(entry.root) || deps.ghCheck.disabled()) return { ok: false, reason: "disabled" };
+  return { ok: true, map: stored.map, gh: deps.ghCheck };
 }
 
 export type WorkMapRunResult =

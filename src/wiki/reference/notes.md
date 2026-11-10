@@ -2268,6 +2268,18 @@ PR 3 of plan `muninn-wiki-drift-check`: a drafted fix (D8) lands through the exi
 
 Acceptance: `stale-fix.test.ts`, `wiki-stale-fix-routes.test.ts`, `src/gardener/stale-proposals.test.ts`, `e2e/wiki-stale-fix.spec.ts`.
 
+## Status date check (`status-date-check.ts`, `GET /api/wiki/claim-check`)
+
+For one page: is its frontmatter `status_date` older than the newest merge among its `prs:`? Server only (plan muninn-wiki-first-screen-claims, PR 2); the header pill is a later PR. It reads no status line, no ledger and no body text: a rule that read status lines for state words raised false flags and was cut.
+
+- **Inputs.** `meta.prs` (the index's `parseFrontmatter` read through `asStringArray`), each entry through `normalizePrRef` then `parseRefString`, deduped; `meta.status_date` through `readStatusDate`. `parseFrontmatter` reads an inline array or a scalar, never a block list (`prs:` + `  - x`): such a page reads as `no-prs`. Only `.md`/`.mdx` (`.html` answers 400).
+- **The rule** (`judgeStatusDate`, pure): the newest `mergedAt`'s Europe/Oslo day (`todayOslo`) later than `status_date` is `late`; equal or earlier is `clear`. An entry GitHub answered NOT_FOUND for (cached as null) is no PR and is left out; all of them NOT_FOUND is `no-prs`. A known later merge fires beside an unknown entry; otherwise an unknown entry is `notChecked` with the worst of `no-gh`, `auth` (`sso` and `no-access` read as `auth`), `budget`, `no-state`. One verdict, never a count.
+- **The gate** is `workMapGhGate` (`work-map/run.ts`), the code the card's `GET /api/wiki/work-map/checks` runs: a `work` kind `.work-map.json`, not a `WIKI_READONLY_ROOTS` root, `WORK_MAP_GH_CHECK` on. Failing it answers `notChecked: disabled` with no spawn (the card's route answers 404 for no map). The page lookup comes first, so an unknown page is 404 under any root.
+- **PR facts** come from `prFactsFor` (`gh-check.ts`): the card's per-wiki cache, flight and 500-an-hour budget, so a second view spawns nothing for an hour. Due PRs the budget cuts come back as `overBudget`, read as `budget`.
+- **A failing repo is held 10 minutes** (`GH_FAILED_REPO_HOLD_MS`): any unanswered query (no `gh`, auth, SSO, no access, a timeout) stamps `failedAt` for the repo, and `prFactsFor` treats its PRs as not due until the hold ends, so repeated views spawn nothing; its last reason stays in `failures`. The card does NOT read the hold: its tests pin that the next request asks again once the login comes back.
+
+Acceptance: `status-date-check.test.ts`, `wiki-claim-check.test.ts`.
+
 ## Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`)
 
 A nightly, tool-less model run groups a wiki's recent activity into EFFORTS and writes them to `.work-map.json` at the wiki root, so every reader of the wiki reads one map (plan `muninn-wiki-work-map`, P1). P2 renders it as the start view's Your work card; P3 adds the effort page; P4 groups the rail's Activity by effort.

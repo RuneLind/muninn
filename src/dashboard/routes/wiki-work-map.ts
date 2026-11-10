@@ -28,7 +28,7 @@ import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
 import { checkWorkMapPrs, disabledChecksBody } from "../../wiki/work-map/gh-check.ts";
 import { workMapRunDepsFor } from "../../wiki/work-map/loop.ts";
-import { startWorkMapRun, workMapOrganizable, workMapRunInFlight, type WorkMapRunDeps } from "../../wiki/work-map/run.ts";
+import { startWorkMapRun, workMapGhGate, workMapOrganizable, workMapRunInFlight, type WorkMapRunDeps } from "../../wiki/work-map/run.ts";
 import { readMapFile } from "../../wiki/work-map/map-file.ts";
 import { WORK_MAP_FILE } from "../../wiki/work-map/write.ts";
 import { requireJsonRequest } from "./json-request.ts";
@@ -85,12 +85,11 @@ export function registerWikiWorkMapRoutes(
     if (!c.req.query("wiki")?.trim()) return c.json({ error: "wiki is required" }, 400);
     const entry = resolve(c, deps);
     if (!entry) return c.json({ error: "no wiki configured for that name" }, 404);
-    const text = await deps.readText(path.join(entry.root, WORK_MAP_FILE));
-    const stored = text === null ? null : readMapFile(text);
-    if (!stored || stored.kind !== "work") return c.json({ error: "this wiki has no work map to check" }, 404);
-    if (!deps.ghCheck || (deps.isReadonlyRoot ?? isReadonlyWikiRoot)(entry.root)) return c.json(disabledChecksBody(deps.now()));
+    const gate = await workMapGhGate(entry, deps);
+    if (!gate.ok && gate.reason === "no-map") return c.json({ error: "this wiki has no work map to check" }, 404);
+    if (!gate.ok) return c.json(disabledChecksBody(deps.now()));
     try {
-      return c.json(await checkWorkMapPrs({ wiki: entry.name, root: entry.root, map: stored.map }, deps.ghCheck, deps.now));
+      return c.json(await checkWorkMapPrs({ wiki: entry.name, root: entry.root, map: gate.map }, gate.gh, deps.now));
     } catch (err) {
       log.warn("The GitHub check for {wiki} failed: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "the GitHub check failed" }, 500);

@@ -32,6 +32,9 @@ export const GH_PRS_PER_QUERY = 50;
 export const GH_QUERIES_AT_ONCE = 4;
 /** PRs asked per wiki per hour; the rest count as unchecked. */
 export const GH_PRS_PER_HOUR = 500;
+/** How long {@link prFactsFor} asks nothing of a repo whose last query went
+ *  unanswered (no `gh`, auth, no access, SSO, a timeout). */
+export const GH_FAILED_REPO_HOLD_MS = 10 * 60_000;
 /** How much of an unlinked row's label the drill list carries. */
 const ROW_LABEL_MAX = 80;
 
@@ -166,7 +169,7 @@ export function isLiveCheckPage(p: Pick<WikiPageMeta, "plan_status" | "followups
   return s === "proposed" || s === "ready" || s === "in-flight" || s === "blocked" || (s === "shipped" && p.followups === "open");
 }
 
-interface PrRef {
+export interface PrRef {
   repo: string;
   n: number;
   /** `owner/repo#n` as first spelled. */
@@ -183,7 +186,7 @@ function prRef(repo: string, n: number): PrRef | null {
   return { repo, n, key, id: key.toLowerCase() };
 }
 
-function parseRefString(s: string): PrRef | null {
+export function parseRefString(s: string): PrRef | null {
   const m = /^(.+)#(\d+)$/.exec(s);
   return m ? prRef(m[1]!, Number(m[2])) : null;
 }
@@ -439,10 +442,16 @@ async function scan(index: WikiIndex, map: WorkMap, deps: GhCheckDeps): Promise<
 }
 
 // ── Asking GitHub ──────────────────────────────────────────────────────
+/** What GitHub says about one PR. */
+export interface PrFact {
+  state: GhState;
+  mergedAt: string | null;
+}
+
 interface CachedState {
   at: number;
   /** Null: GitHub answered that no such PR exists (an issue, a gone number). */
-  state: { state: GhState; mergedAt: string | null } | null;
+  state: PrFact | null;
 }
 
 interface Flight {
@@ -456,6 +465,10 @@ interface WikiCache {
   asked: { at: number; n: number }[];
   /** Per lowercased repo, why its last query could not be read. */
   failures: Map<string, { repo: string; reason: Exclude<NotCheckedReason, "disabled"> }>;
+  /** Per lowercased repo, when its last query went unanswered, whatever the
+   *  cause; cleared when one is answered. Only callers that pass
+   *  `holdFailedRepos` read it (the status date check): the card asks again. */
+  failedAt: Map<string, number>;
   flight: Flight | null;
 }
 
@@ -465,7 +478,7 @@ function cacheFor(wiki: string): WikiCache {
   const key = wiki.toLowerCase();
   let c = caches.get(key);
   if (!c) {
-    c = { states: new Map(), asked: [], failures: new Map(), flight: null };
+    c = { states: new Map(), asked: [], failures: new Map(), failedAt: new Map(), flight: null };
     caches.set(key, c);
   }
   return c;
@@ -572,10 +585,12 @@ function startFlight(c: WikiCache, ask: readonly PrRef[], deps: GhCheckDeps, now
     const answer = readGhAnswer(result, numbers, job.repo);
     if (answer.failure) c.failures.set(job.repo.toLowerCase(), { repo: job.repo, reason: answer.failure });
     if (answer.unanswered) {
+      c.failedAt.set(job.repo.toLowerCase(), now());
       log.warn("GitHub check: the query for {repo} was not answered (exit {code}): {stderr}", { repo: job.repo, code: result.exitCode, stderr: result.stderr.trim().slice(0, 200) });
       return;
     }
     const at = now();
+    c.failedAt.delete(job.repo.toLowerCase());
     c.asked.push({ at, n: job.refs.length });
     for (const ref of job.refs) if (answer.states.has(ref.n)) c.states.set(ref.id, { at, state: answer.states.get(ref.n)! });
   };
@@ -598,14 +613,37 @@ function budgetLeft(c: WikiCache, at: number): number {
   return Math.max(0, GH_PRS_PER_HOUR - c.asked.reduce((sum, a) => sum + a.n, 0));
 }
 
-/** Bring what is due up to date; true when the refresh outlasted the wait. */
-async function refreshDue(c: WikiCache, refs: ReadonlyMap<string, PrRef>, deps: GhCheckDeps, now: () => number): Promise<boolean> {
+interface Refresh {
+  /** The refresh outlasted the wait. */
+  refreshing: boolean;
+  /** Due PRs the hourly budget left unasked. */
+  overBudget: Set<string>;
+}
+
+/**
+ * Bring what is due up to date. With `holdFailedRepos`, a PR whose repo went
+ * unanswered under {@link GH_FAILED_REPO_HOLD_MS} ago is not due, so a failing
+ * repo costs one spawn per hold, not one per request.
+ */
+async function refreshDue(
+  c: WikiCache,
+  refs: ReadonlyMap<string, PrRef>,
+  deps: GhCheckDeps,
+  now: () => number,
+  opts: { holdFailedRepos?: boolean } = {},
+): Promise<Refresh> {
+  const overBudget = new Set<string>();
+  const held = (r: PrRef): boolean => {
+    if (!opts.holdFailedRepos) return false;
+    const at = c.failedAt.get(r.repo.toLowerCase());
+    return at !== undefined && now() - at < GH_FAILED_REPO_HOLD_MS;
+  };
   const due = (): PrRef[] =>
     [...refs.values()].filter((r) => {
       const hit = c.states.get(r.id);
-      return !hit || now() - hit.at >= GH_STATE_TTL_MS;
+      return (!hit || now() - hit.at >= GH_STATE_TTL_MS) && !held(r);
     });
-  if (!due().length) return false;
+  if (!due().length) return { refreshing: false, overBudget };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<"timeout">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), deps.refreshWaitMs ?? GH_REFRESH_WAIT_MS);
@@ -616,14 +654,20 @@ async function refreshDue(c: WikiCache, refs: ReadonlyMap<string, PrRef>, deps: 
     for (let pass = 0; pass < 2; pass++) {
       const asked: ReadonlySet<string> | null = joined;
       const open: PrRef[] = due().filter((r) => !asked?.has(r.id));
-      if (!open.length) return false;
+      if (!open.length) return { refreshing: false, overBudget };
       const running: Flight | null = c.flight;
-      const flight: Flight = running ?? startFlight(c, open.slice(0, budgetLeft(c, now())), deps, now);
-      if ((await Promise.race([flight.promise, timeout])) === "timeout") return true;
-      if (!running) return false;
+      let flight: Flight;
+      if (running) flight = running;
+      else {
+        const budget = budgetLeft(c, now());
+        for (const r of open.slice(budget)) overBudget.add(r.id);
+        flight = startFlight(c, open.slice(0, budget), deps, now);
+      }
+      if ((await Promise.race([flight.promise, timeout])) === "timeout") return { refreshing: true, overBudget };
+      if (!running) return { refreshing: false, overBudget };
       joined = flight.ids;
     }
-    return false;
+    return { refreshing: false, overBudget };
   } finally {
     clearTimeout(timer);
   }
@@ -644,10 +688,7 @@ function buildBody(s: Scan, c: WikiCache, refreshing: boolean, at: number): Work
   const body = emptyBody(at);
   // A state past its hour is served only while its refresh runs: once that
   // refresh has failed, the state counts as unchecked.
-  const known = (ref: PrRef): { state: GhState; mergedAt: string | null } | null => {
-    const hit = c.states.get(ref.id);
-    return hit?.state && (refreshing || at - hit.at < GH_STATE_TTL_MS) ? hit.state : null;
-  };
+  const known = (ref: PrRef): PrFact | null => knownFact(c, ref, refreshing, at) ?? null;
   const listed = new Set<string>();
   for (const row of s.rows) {
     if (row.kind === "skipped") body.skipped++;
@@ -685,11 +726,58 @@ function buildBody(s: Scan, c: WikiCache, refreshing: boolean, at: number): Work
     if (gh) body.prs[ref.key] = gh;
   }
   if (refreshing) body.refreshing = true;
-  const wanted = new Set([...s.refs.values()].map((r) => r.repo.toLowerCase()));
+  const failure = failureFor(c, s.refs.values());
+  if (failure) body.notChecked = failure;
+  return body;
+}
+
+/** A state past its hour is served only while its refresh runs: once that
+ *  refresh has failed, the state counts as unchecked. Undefined: not known;
+ *  null: GitHub said no such PR. */
+function knownFact(c: WikiCache, ref: PrRef, refreshing: boolean, at: number): PrFact | null | undefined {
+  const hit = c.states.get(ref.id);
+  return hit && (refreshing || at - hit.at < GH_STATE_TTL_MS) ? hit.state : undefined;
+}
+
+/** The worst reason a wanted repo's last query went unread, with its repos. */
+function failureFor(c: WikiCache, refs: Iterable<PrRef>): { reason: Exclude<NotCheckedReason, "disabled">; repos: string[] } | undefined {
+  const wanted = new Set([...refs].map((r) => r.repo.toLowerCase()));
   const failed = [...c.failures.entries()].filter(([repo]) => wanted.has(repo)).map(([, f]) => f);
   const reason = FAILURE_ORDER.find((r) => failed.some((f) => f.reason === r));
-  if (reason) body.notChecked = { reason, repos: failed.filter((f) => f.reason === reason).map((f) => f.repo) };
-  return body;
+  return reason ? { reason, repos: failed.filter((f) => f.reason === reason).map((f) => f.repo) } : undefined;
+}
+
+/** What {@link prFactsFor} knows about some PRs. */
+export interface PrFacts {
+  /** Per `PrRef.id`: the fact, or null when GitHub said no such PR. A PR with
+   *  no known state is absent. */
+  facts: Map<string, PrFact | null>;
+  refreshing: boolean;
+  /** Ids the hourly budget left unasked. */
+  overBudget: Set<string>;
+  /** Per lowercased repo, why its last query went unread. */
+  failures: Map<string, Exclude<NotCheckedReason, "disabled">>;
+}
+
+/**
+ * Some PRs' states through this wiki's cache, flight and hourly budget, the
+ * ones the card's check uses (the status date check reads one page's `prs:`
+ * through it). A repo that went unanswered is held for
+ * {@link GH_FAILED_REPO_HOLD_MS}: no spawn for it until then.
+ */
+export async function prFactsFor(wiki: string, refs: readonly PrRef[], deps: GhCheckDeps, now: () => number): Promise<PrFacts> {
+  const c = cacheFor(wiki);
+  const byId = new Map(refs.map((r) => [r.id, r]));
+  const { refreshing, overBudget } = await refreshDue(c, byId, deps, now, { holdFailedRepos: true });
+  const at = now();
+  const facts = new Map<string, PrFact | null>();
+  for (const ref of byId.values()) {
+    const fact = knownFact(c, ref, refreshing, at);
+    if (fact !== undefined) facts.set(ref.id, fact);
+  }
+  const failures = new Map<string, Exclude<NotCheckedReason, "disabled">>();
+  for (const [repo, f] of c.failures) if ([...byId.values()].some((r) => r.repo.toLowerCase() === repo)) failures.set(repo, f.reason);
+  return { facts, refreshing, overBudget, failures };
 }
 
 /** The check for one wiki, against its current pages and `map`. */
@@ -703,6 +791,6 @@ export async function checkWorkMapPrs(
   if (!index) return emptyBody(now());
   const scanned = await scan(index, input.map, deps);
   const c = cacheFor(input.wiki);
-  const refreshing = await refreshDue(c, scanned.refs, deps, now);
+  const { refreshing } = await refreshDue(c, scanned.refs, deps, now);
   return buildBody(scanned, c, refreshing, now());
 }
