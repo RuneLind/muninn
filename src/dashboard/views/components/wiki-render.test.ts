@@ -134,7 +134,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Its fix round 1 batch 1 (focus into and out of the panel, the menu's Escape): 846,591 (288,093).
 // Batch 2 (closing on Back, on an effort link and on leaving the narrow width): 846,727 (288,154).
 // Fix round 2 batch 1 (an Escape a menu already took, closing on the way to the start view): 846,684 (288,157).
-const WIKI_CLIENT_MAX_BYTES = 847_000;
+// 2026-11-10, first-screen-claims P3 (the status date line beside the stale pill,
+// `wiki-status-date.ts`): 849,661 bytes (289,217 gzipped), from 846,684.
+const WIKI_CLIENT_MAX_BYTES = 850_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -228,11 +230,14 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // controller (333 / 8 → 235 / 3) into `wiki-work-map-cache.ts`; the rail 2,298.
 // 2026-11-09, issue #623: the effort controller 235 → 237, for `closeRailPanel()`
 // in `renderEffort` and its import (an effort opened from the rail panel).
+// 2026-11-10, first-screen-claims P3: the stale controller 509 → 517, for the
+// status date line it paints in the pill slot (one const, two calls). The
+// line's request and state are in `wiki-status-date.ts`, so no new let.
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_298, 16],
   ["wiki-shell-state.ts", 50, 3],
   ["wiki-status-pills.ts", 29, 0],
-  ["wiki-stale-controller.ts", 509, 18],
+  ["wiki-stale-controller.ts", 517, 18],
   ["wiki-effort-controller.ts", 237, 3],
   ["wiki-work-map-cache.ts", 124, 5],
   ["wiki-menus-controller.ts", 638, 2],

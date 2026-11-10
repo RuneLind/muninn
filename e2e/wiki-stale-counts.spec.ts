@@ -220,6 +220,26 @@ async function open(p: Page, rel: string, text: string, base = BASE): Promise<vo
 
 const pill = (p: Page) => p.locator("#wikiStalePill [data-stale-pill]");
 const marks = (p: Page) => p.locator(".wiki-article mark.wiki-stale-mark");
+/** The status date line beside the pill (first-screen-claims P3). */
+const dateLine = (p: Page) => p.locator("#wikiStalePill [data-status-date]");
+const LATE = { verdict: "late", statusDate: "2026-11-03", newest: { pr: "RuneLind/muninn#802", repo: "RuneLind/muninn", n: 802, mergedAt: "2026-11-04T09:12:00Z", mergedDay: "2026-11-04" } };
+const LATE_TEXT = "⚠ status older than its last merged PR (muninn#802, 04.11)";
+const CLEAR = { ...LATE, verdict: "clear", statusDate: "2026-11-05" };
+const CLEAR_TEXT = "status dated on or after its last merged PR (muninn#802, 04.11)";
+
+/** Answer the status date check for `rel` with `json`, once `gate` (if any) lets it through. Returns the URLs asked. */
+async function answerClaimCheck(p: Page, rel: string, answer: { status?: number; json: unknown }, gate?: Promise<void>): Promise<string[]> {
+  const asked: string[] = [];
+  await p.route(
+    (u) => u.pathname === "/api/wiki/claim-check" && u.searchParams.get("relPath") === rel,
+    async (route: Route) => {
+      asked.push(route.request().url());
+      await gate;
+      await route.fulfill({ status: answer.status ?? 200, json: answer.json }).catch(() => {});
+    },
+  );
+  return asked;
+}
 const railBadge = (p: Page, rel: string) => p.locator(`.wiki-list-item[data-relpath="${rel}"] .wiki-stale-rail`);
 
 /** Each mark's text and where it sits: its list item, table row, or neither (a paragraph line). */
@@ -335,7 +355,7 @@ test("the open page's rail row follows its own report when the summary is older"
   try {
     await p.locator('.wiki-list-item[data-relpath="hub2.md"]').click();
     await expect(p.locator(".wiki-article")).toContainText("The second hub.");
-    await expect(pill(p)).toHaveText("✓ nothing stale");
+    await expect(pill(p)).toHaveText("0 stale status lines · 0 linking pages to check");
     await expect(railBadge(p, "hub2.md")).toHaveCount(0);
     await expect(railBadge(p, "hub.md")).toHaveText("⚠ 6 · 1");
     // Leaving hub2 repaints the rail: its row keeps what its pill showed, not
@@ -350,10 +370,92 @@ test("the open page's rail row follows its own report when the summary is older"
   }
 });
 
+test("the status date line sits beside the pill and says what was compared", async ({ page: p }) => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const asked = await answerClaimCheck(p, "hub.md", { json: LATE }, gate);
+  await open(p, "hub.md", "The pin moved.");
+  // The answer arrives after the Stale check's report has painted the pill: it paints itself.
+  await expect(pill(p)).toHaveText(HUB_TEXT);
+  await expect(dateLine(p)).toHaveCount(0);
+  release();
+  await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  await expect(dateLine(p)).toHaveAttribute("data-status-date", "late");
+  await expect(dateLine(p)).toHaveAttribute(
+    "title",
+    "status_date 2026-11-03 is older than the newest merge among the page's prs: RuneLind/muninn#802, merged 2026-11-04. The check compares these two dates and reads no status line.",
+  );
+  // The Stale check's pill keeps its own text and is still the one button in the slot.
+  await expect(pill(p)).toHaveText(HUB_TEXT);
+  await expect(p.locator("#wikiStalePill button")).toHaveCount(1);
+  expect(await p.locator("#wikiStalePill").evaluate((slot) => Array.from(slot.children, (c) => c.tagName))).toEqual(["BUTTON", "SPAN"]);
+  // Asked once, by the wiki's name and the page's path.
+  expect(asked).toHaveLength(1);
+  const url = new URL(asked[0]!);
+  expect([url.searchParams.get("wiki"), url.searchParams.get("relPath")]).toEqual([WIKI, "hub.md"]);
+  // The late line is drawn as a warning, the others are not.
+  const border = () => dateLine(p).evaluate((el) => getComputedStyle(el).backgroundColor);
+  const lateFill = await border();
+  await p.unrouteAll({ behavior: "wait" });
+  await answerClaimCheck(p, "hub.md", { json: CLEAR });
+  await open(p, "hub.md", "The pin moved.");
+  await expect(dateLine(p)).toHaveText(CLEAR_TEXT);
+  await expect(dateLine(p)).toHaveAttribute("data-status-date", "clear");
+  expect(await border()).not.toBe(lateFill);
+});
+
+test("the real route's answer for a page that is no live plan gives no line", async ({ page: p }) => {
+  const answered = p.waitForResponse((r) => new URL(r.url()).pathname === "/api/wiki/claim-check");
+  await open(p, "hub.md", "The pin moved.");
+  const res = await answered;
+  expect(res.status()).toBe(200);
+  const body = (await res.json()) as { verdict: string; reason: string; wiki: string; relPath: string };
+  expect([body.verdict, body.wiki, body.relPath]).toEqual(["notChecked", WIKI, "hub.md"]);
+  expect(["not-live", "no-prs"]).toContain(body.reason);
+  await expect(pill(p)).toHaveText(HUB_TEXT);
+  await expect(dateLine(p)).toHaveCount(0);
+});
+
+test("a not-checked answer says why, and a failed or unknown one says nothing", async ({ page: p }) => {
+  await answerClaimCheck(p, "hub.md", { json: { verdict: "notChecked", reason: "not-asked" } });
+  await answerClaimCheck(p, "hub2.md", { status: 500, json: { error: "the status date check failed" } });
+  await open(p, "hub.md", "The pin moved.");
+  await expect(dateLine(p)).toHaveText("status date not checked yet");
+  await expect(dateLine(p)).toHaveAttribute("data-status-date", "unchecked");
+  await p.locator('.wiki-list-item[data-relpath="hub2.md"]').click();
+  await expect(p.locator(".wiki-article")).toContainText("The second hub.");
+  await expect(pill(p)).toBeVisible();
+  await expect(dateLine(p)).toHaveCount(0);
+});
+
+test("the line follows the page: no other page's answer is painted, early or late", async ({ page: p }) => {
+  let releaseHub2: () => void = () => {};
+  const hub2Gate = new Promise<void>((r) => (releaseHub2 = r));
+  await answerClaimCheck(p, "hub.md", { json: LATE });
+  await answerClaimCheck(p, "hub2.md", { json: CLEAR }, hub2Gate);
+  await open(p, "hub.md", "The pin moved.");
+  await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  // hub2's answer is held: hub's line goes with hub's page.
+  await p.locator('.wiki-list-item[data-relpath="hub2.md"]').click();
+  await expect(p.locator(".wiki-article")).toContainText("The second hub.");
+  await expect(pill(p)).toBeVisible();
+  await expect(dateLine(p)).toHaveCount(0);
+  // Back on hub before hub2's answer arrives: that answer, landing late, paints nothing.
+  await p.locator('.wiki-list-item[data-relpath="hub.md"]').click();
+  await expect(p.locator(".wiki-article")).toContainText("The pin moved.");
+  await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  const hub2Answered = p.waitForResponse((r) => r.url().includes("/api/wiki/claim-check") && r.url().includes("hub2.md"));
+  releaseHub2();
+  await hub2Answered;
+  await p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  await expect(dateLine(p)).toHaveCount(1);
+});
+
 test("a read-only instance shows no pill, badge, mark or home line (D25)", async ({ page: p }) => {
   const staleGets: string[] = [];
   p.on("request", (r) => {
-    if (r.url().includes("/api/wiki/stale")) staleGets.push(r.url());
+    if (r.url().includes("/api/wiki/stale") || r.url().includes("/api/wiki/claim-check")) staleGets.push(r.url());
   });
   await open(p, "hub.md", "The pin moved.", RO_BASE);
   await expect(p.locator(".wiki-list-item[data-relpath='hub.md']")).toBeVisible();
