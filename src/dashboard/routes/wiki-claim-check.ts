@@ -6,7 +6,9 @@
  *
  * Answers in this order: a missing parameter 400; an unknown wiki 404; an
  * unknown page 404 (looked up before the gate, so a read-only root still
- * 404s); a page other than `.md`/`.mdx` 400; then the work map's `gh` gate
+ * 404s); a page other than `.md`/`.mdx` 400; a page the work map card's check
+ * does not read (`isLiveCheckPage`) `notChecked: not-live`, with no spawn and
+ * whatever the gate says; then the work map's `gh` gate
  * (`workMapGhGate`, the code `GET /api/wiki/work-map/checks` runs), which
  * answers `notChecked: disabled` with no spawn. It can spawn `gh`, so it is on
  * `SIDE_EFFECTING_GETS`.
@@ -16,8 +18,9 @@ import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
-import { checkStatusDate, disabledStatusDateBody, isStatusDatePage } from "../../wiki/status-date-check.ts";
-import { getWikiIndex, type WikiIndex } from "../../wiki/store.ts";
+import { splitFrontmatter } from "../../wiki/page-text.ts";
+import { checkStatusDate, disabledStatusDateBody, isStatusDatePage, notLiveStatusDateBody } from "../../wiki/status-date-check.ts";
+import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { workMapRunDepsFor } from "../../wiki/work-map/loop.ts";
 import { workMapGhGate, type WorkMapRunDeps } from "../../wiki/work-map/run.ts";
 
@@ -27,6 +30,8 @@ export interface ClaimCheckRouteDeps {
   /** The work map's deps: the registry, the clock and the `gh` gate's inputs. */
   workMap: () => WorkMapRunDeps;
   index: (root: string) => Promise<WikiIndex | null>;
+  /** The page's text, for its raw frontmatter; defaults to `readWikiPage`. */
+  readPage?: (index: WikiIndex, meta: WikiPageMeta) => Promise<string | null>;
 }
 
 export function registerWikiClaimCheckRoute(
@@ -46,9 +51,13 @@ export function registerWikiClaimCheckRoute(
       const meta = index?.resolveRelPath(relPath);
       if (!meta) return c.json({ error: "no such page in this wiki" }, 404);
       if (!isStatusDatePage(meta.relPath)) return c.json({ error: "only .md and .mdx pages carry a status date" }, 400);
+      const notLive = notLiveStatusDateBody(entry.name, meta, wm.now());
+      if (notLive) return c.json(notLive);
       const gate = await workMapGhGate(entry, wm);
       if (!gate.ok) return c.json(disabledStatusDateBody(entry.name, meta.relPath, wm.now()));
-      return c.json(await checkStatusDate({ wiki: entry.name, meta }, gate.gh, wm.now));
+      const text = await (deps.readPage ?? readWikiPage)(index!, meta);
+      const frontmatter = text === null ? null : splitFrontmatter(text).frontmatter;
+      return c.json(await checkStatusDate({ wiki: entry.name, meta, frontmatter }, gate.gh, wm.now));
     } catch (err) {
       log.warn("The status date check for {wiki} {relPath} failed: {error}", { wiki: entry.name, relPath, error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "the status date check failed" }, 500);

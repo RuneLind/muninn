@@ -82,7 +82,10 @@ interface Setup {
 function setup(o: Setup = {}) {
   const root = testTempDirSync(path.join(tmpdir(), "claim-check-"));
   mkdirSync(path.join(root, "plans"), { recursive: true });
-  for (const [rel, text] of Object.entries(o.pages ?? {})) writeFileSync(path.join(root, rel), text);
+  for (const [rel, text] of Object.entries(o.pages ?? {})) {
+    mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    writeFileSync(path.join(root, rel), text);
+  }
   const map = o.map === undefined ? WORK_MAP : o.map;
   if (map !== null) writeFileSync(path.join(root, ".work-map.json"), map);
   const spawns: string[][] = [];
@@ -238,6 +241,66 @@ describe("not checked", () => {
         expect(s.spawns.length).toBe(0);
       });
     }
+  });
+});
+
+describe("only the card's live check pages", () => {
+  const fm = "status_date: 2026-05-10\nprs: [acme/gears#7, acme/gears#8]\n";
+  const cases: [string, string, string][] = [
+    ["a blog", "blogs/b.mdx", `---\ntitle: B\ntype: blog\n${fm}---\n\n# B\n`],
+    ["an archive page", "archive/r.md", `---\ntitle: R\ntype: report\n${fm}---\n\n# R\n`],
+    ["a shipped plan", "plans/s.mdx", `---\ntitle: S\nplan_status: shipped\n${fm}---\n\n# S\n`],
+    ["a shipped plan whose follow-ups are done", "plans/f.mdx", `---\ntitle: F\nplan_status: shipped\nfollowups: done\n${fm}---\n\n# F\n`],
+  ];
+  for (const [name, rel, text] of cases) {
+    test(`${name} answers not-live with zero spawns`, async () => {
+      const s = setup({ pages: { "plans/a.mdx": LATE_PAGE, [rel]: text }, gh: stubGh(TABLE) });
+      const r = await s.get(`wiki=w&relPath=${rel}`);
+      expect(s.spawns.length).toBe(0);
+      expect(r.status).toBe(200);
+      expect(r.body).toEqual({ wiki: "w", relPath: rel, at: NOW, verdict: "notChecked", reason: "not-live" });
+    });
+  }
+
+  test("not-live comes before the gate: a blog on a wiki with no map is not-live, not disabled", async () => {
+    const s = setup({ pages: { [cases[0]![1]]: cases[0]![2] }, map: null, gh: stubGh(TABLE) });
+    expect((await s.get(`wiki=w&relPath=${cases[0]![1]}`)).body).toMatchObject({ verdict: "notChecked", reason: "not-live" });
+    expect(s.spawns.length).toBe(0);
+  });
+
+  test("a live plan beside them still answers late", async () => {
+    const s = setup({ pages: { "plans/a.mdx": LATE_PAGE, [cases[0]![1]]: cases[0]![2] }, gh: stubGh(TABLE) });
+    expect((await s.get()).body).toMatchObject({ verdict: "late" });
+    expect(s.spawns.length).toBe(1);
+  });
+
+  test("a shipped plan with follow-ups open is live", async () => {
+    const s = setup({ pages: { "plans/a.mdx": page("plan_status: shipped\nfollowups: open\nstatus_date: 2026-05-10\nprs: [acme/gears#7]\n").replace("plan_status: in-flight\n", "") }, gh: stubGh(TABLE) });
+    expect((await s.get()).body).toMatchObject({ verdict: "late" });
+  });
+
+  test("an unknown page is still 404", async () => {
+    const s = setup({ pages: { [cases[0]![1]]: cases[0]![2] } });
+    expect((await s.get("wiki=w&relPath=blogs/missing.mdx")).status).toBe(404);
+  });
+});
+
+describe("prs: the rule cannot read", () => {
+  test("an unreadable entry beside an earlier merge is unreadable-prs, not clear", async () => {
+    const s = setup({ pages: { "plans/a.mdx": page('status_date: 2026-05-12\nprs: [acme/gears#7, "#838"]\n') }, gh: stubGh(TABLE) });
+    expect((await s.get()).body).toMatchObject({ verdict: "notChecked", reason: "unreadable-prs", unreadable: ["#838"] });
+  });
+
+  test("an unreadable entry alone spawns nothing", async () => {
+    const s = setup({ pages: { "plans/a.mdx": page('status_date: 2026-05-12\nprs: ["#838"]\n') }, gh: stubGh(TABLE) });
+    expect((await s.get()).body).toMatchObject({ verdict: "notChecked", reason: "unreadable-prs", unreadable: ["#838"] });
+    expect(s.spawns.length).toBe(0);
+  });
+
+  test("a block list is unreadable-prs, with zero spawns", async () => {
+    const s = setup({ pages: { "plans/a.mdx": page("status_date: 2026-05-12\nprs:\n  - acme/gears#7\n") }, gh: stubGh(TABLE) });
+    expect((await s.get()).body).toMatchObject({ verdict: "notChecked", reason: "unreadable-prs", unreadable: ["prs:", "- acme/gears#7"] });
+    expect(s.spawns.length).toBe(0);
   });
 });
 
