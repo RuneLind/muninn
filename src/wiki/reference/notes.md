@@ -2268,6 +2268,18 @@ PR 3 of plan `muninn-wiki-drift-check`: a drafted fix (D8) lands through the exi
 
 Acceptance: `stale-fix.test.ts`, `wiki-stale-fix-routes.test.ts`, `src/gardener/stale-proposals.test.ts`, `e2e/wiki-stale-fix.spec.ts`.
 
+## Status date check (`status-date-check.ts`, `GET /api/wiki/claim-check`)
+
+For one page: is its frontmatter `status_date` an older Europe/Oslo day than the newest merge among the PRs its `prs:` names? The answer is one verdict, `late`, `clear` or `notChecked` with a reason. No client reads it yet.
+
+- **It never asks GitHub.** A request for the work map card's check (`checkWorkMapPrs`, `work-map/gh-check.ts`) answers the card as before and then starts a second flight (`askPagePrs`) for the `prs:` of every live plan page that the card does not ask for itself. The request does not wait for that flight, and while the card's own refresh outlasts its wait the flight is left for the next request. The route reads both caches through `cachedPrFacts`, the card's first. It starts no `gh`, so it is in `READ_ONLY_GETS`, not `SIDE_EFFECTING_GETS`; like any page route it reads the wiki's index, and building a cold index runs git.
+- **The pages' `prs:` have a cache of their own** (`pagePrCaches`: states, failure records, hourly cap of 500), a second instance of the card's. So a slow or failing query for a page's PR, or the PRs it spent, never shows in the card's body: no `refreshing`, no `notChecked`, no row left unchecked. A wiki can ask up to 1,000 PRs an hour, 500 for each.
+- **`not-asked`** means neither cache holds a state under an hour old for one of the page's PRs: the card has not been asked since muninn started, was asked more than an hour ago, the pages' flight has not ended yet, the cap cut the PR, or its query timed out. A wiki whose card never asks (no work map, a theme map, a read-only root, `WORK_MAP_GH_CHECK` off) answers `not-asked` for every live page with `prs:`. `auth` and `no-gh` are the failure record for the PR's repo in either cache (`sso` and `no-access` read as `auth`), with the repos listed; a record is read for an hour after its query failed, then that repo's unknown PRs read `not-asked`.
+- **`prs:` is read as the index reads it** (`prsRefsOf`: `WikiPageMeta.prs`, each entry through `normalizePrRef`). So `no-prs` means no `prs:` the index could read: a block list, which `parseFrontmatter` drops, is `no-prs`. An entry that is no PR reference (`TBD`, a bare `#838`, a list with a trailing comment) makes the page `unreadable-prs`, unless a known merge already makes it `late`.
+- **Only the card's pages.** A page `isLiveCheckPage` does not count as live is `not-live`: the card never asks for its `prs:`.
+- **Order of answers:** `not-live`, then `no-prs` or `unreadable-prs`, then `no-status-date`, then the rule. A known merge on a later day is `late` even beside an unknown entry. A PR GitHub answered NOT_FOUND for is left out, and a page whose entries are all NOT_FOUND is `no-prs`.
+- **Measured 2026-11-10 with recorded PR facts and a stubbed `gh`:** the card's own flight asks 211 PRs on mimir and 85 on melosys-kode-wiki, as on main; the pages' flight adds 86 and 12, in 8 and 5 more queries. The card's body is byte-identical to main's on both.
+
 ## Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`)
 
 A nightly, tool-less model run groups a wiki's recent activity into EFFORTS and writes them to `.work-map.json` at the wiki root, so every reader of the wiki reads one map (plan `muninn-wiki-work-map`, P1). P2 renders it as the start view's Your work card; P3 adds the effort page; P4 groups the rail's Activity by effort.

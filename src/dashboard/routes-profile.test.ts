@@ -107,6 +107,13 @@ describe("MUNINN_PROFILE=nais route surface", () => {
     expect(registeredPaths(build("default")).has(path)).toBe(true);
   });
 
+  test("the status date check goes with the wiki tool group: it reads what that check cached", async () => {
+    const path = "/api/wiki/claim-check";
+    expect(await status(build("nais"), `${path}?wiki=w&relPath=plans/a.mdx`)).toBe(404);
+    expect(registeredPaths(build("nais")).has(path)).toBe(false);
+    expect(registeredPaths(build("default")).has(path)).toBe(true);
+  });
+
   test("the same paths are REGISTERED on the default profile", () => {
     // The other half of the pin: a 404 above has to mean "dropped", not "that
     // path never existed" — a typo'd path would make the whole suite vacuous.

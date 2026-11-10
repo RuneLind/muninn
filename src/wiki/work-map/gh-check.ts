@@ -9,6 +9,13 @@
  * matched at once. One flight per wiki asks for what is due; a failed call
  * caches nothing and counts as unchecked, never as a contradiction.
  *
+ * A request for the card also starts a second flight, for the PRs in the
+ * `prs:` of each live plan page ({@link prsRefsOf}) that the card does not ask
+ * for itself. It has a cache of its own (states, failures, hourly cap) and the
+ * request does not wait for it, so nothing asked for a page reaches the card's
+ * body. The status date check (`../status-date-check.ts`) reads both caches
+ * through {@link cachedPrFacts}, which never asks.
+ *
  * Nothing here writes to a wiki.
  */
 
@@ -18,7 +25,7 @@ import { CLAIMABLE_STATES, pageLedgers, type Ledger, type LedgerRow, type PrStat
 import { getLog } from "../../logging.ts";
 import { truncateUnits } from "../ask-chat.ts";
 import { splitFrontmatter } from "../page-text.ts";
-import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from "../store.ts";
+import { getWikiIndex, normalizePrRef, readWikiPage, type WikiIndex, type WikiPageMeta } from "../store.ts";
 
 const log = getLog("wiki", "work-map-gh");
 
@@ -166,7 +173,7 @@ export function isLiveCheckPage(p: Pick<WikiPageMeta, "plan_status" | "followups
   return s === "proposed" || s === "ready" || s === "in-flight" || s === "blocked" || (s === "shipped" && p.followups === "open");
 }
 
-interface PrRef {
+export interface PrRef {
   repo: string;
   n: number;
   /** `owner/repo#n` as first spelled. */
@@ -186,6 +193,24 @@ function prRef(repo: string, n: number): PrRef | null {
 function parseRefString(s: string): PrRef | null {
   const m = /^(.+)#(\d+)$/.exec(s);
   return m ? prRef(m[1]!, Number(m[2])) : null;
+}
+
+/**
+ * The PRs a page's frontmatter `prs:` names, as the index read the field
+ * (`WikiPageMeta.prs`), each entry through `normalizePrRef`, deduped. An entry
+ * that is no PR reference goes to `unreadable`, trimmed, once.
+ */
+export function prsRefsOf(meta: Pick<WikiPageMeta, "prs">): { refs: PrRef[]; unreadable: string[] } {
+  const refs = new Map<string, PrRef>();
+  const unreadable = new Set<string>();
+  for (const raw of meta.prs ?? []) {
+    const norm = normalizePrRef(raw);
+    const ref = norm ? parseRefString(norm) : null;
+    if (ref) {
+      if (!refs.has(ref.id)) refs.set(ref.id, ref);
+    } else if (raw.trim()) unreadable.add(raw.trim());
+  }
+  return { refs: [...refs.values()], unreadable: [...unreadable] };
 }
 
 // ── Reading the pages ──────────────────────────────────────────────────
@@ -387,6 +412,8 @@ interface Scan {
   needs: ScannedNeed[];
   /** What is looked up, Needs you first: an item's mark outranks a row under the cap. */
   refs: Map<string, PrRef>;
+  /** The `prs:` of the live plan pages: asked in a flight of their own, read by no part of the card's body. */
+  pagePrs: Map<string, PrRef>;
 }
 
 async function scan(index: WikiIndex, map: WorkMap, deps: GhCheckDeps): Promise<Scan> {
@@ -426,7 +453,9 @@ async function scan(index: WikiIndex, map: WorkMap, deps: GhCheckDeps): Promise<
   }
 
   const rows: ScannedRow[] = [];
+  const pagePrs = new Map<string, PrRef>();
   for (const meta of index.pages.filter(isLiveCheckPage)) {
+    for (const ref of prsRefsOf(meta).refs) if (!pagePrs.has(ref.id)) pagePrs.set(ref.id, ref);
     for (const ledger of await ledgers(meta)) {
       for (const row of ledger.rows) {
         const scanned = scanRow(row, ledger, meta.relPath, index);
@@ -435,14 +464,20 @@ async function scan(index: WikiIndex, map: WorkMap, deps: GhCheckDeps): Promise<
       }
     }
   }
-  return { rows, needs, refs };
+  return { rows, needs, refs, pagePrs };
 }
 
 // ── Asking GitHub ──────────────────────────────────────────────────────
+/** One PR as GitHub answered it. */
+export interface PrFact {
+  state: GhState;
+  mergedAt: string | null;
+}
+
 interface CachedState {
   at: number;
   /** Null: GitHub answered that no such PR exists (an issue, a gone number). */
-  state: { state: GhState; mergedAt: string | null } | null;
+  state: PrFact | null;
 }
 
 interface Flight {
@@ -455,24 +490,65 @@ interface WikiCache {
   /** PRs GitHub answered for, per ask: the hourly cap's ledger. */
   asked: { at: number; n: number }[];
   /** Per lowercased repo, why its last query could not be read. */
-  failures: Map<string, { repo: string; reason: Exclude<NotCheckedReason, "disabled"> }>;
+  failures: Map<string, { repo: string; reason: Exclude<NotCheckedReason, "disabled">; at: number }>;
   flight: Flight | null;
 }
 
 const caches = new Map<string, WikiCache>();
+/** Per wiki, what was asked for the pages' `prs:`: apart from the card's cache, so its failures and its hourly cap are its own. */
+const pagePrCaches = new Map<string, WikiCache>();
 
-function cacheFor(wiki: string): WikiCache {
+function cacheFor(wiki: string, of: Map<string, WikiCache> = caches): WikiCache {
   const key = wiki.toLowerCase();
-  let c = caches.get(key);
+  let c = of.get(key);
   if (!c) {
     c = { states: new Map(), asked: [], failures: new Map(), flight: null };
-    caches.set(key, c);
+    of.set(key, c);
   }
   return c;
 }
 
 export function __resetGhCheckForTest(): void {
   caches.clear();
+  pagePrCaches.clear();
+}
+
+/** Resolves when the running flight for the wiki's page `prs:` has ended. */
+export function __pagePrsSettledForTest(wiki: string): Promise<void> {
+  return pagePrCaches.get(wiki.toLowerCase())?.flight?.promise ?? Promise.resolve();
+}
+
+/**
+ * What the wiki's two caches hold for `refs`, with no ask and no spawn.
+ * `facts` has an entry per PR GitHub answered for within the hour: its state,
+ * or null for a number that is no PR; where both caches hold one, the newer
+ * answer. A PR with no entry was never asked, was asked more than an hour ago,
+ * or went unanswered. `failures` is the reason the last query for a repo could
+ * not be read, by lowercased repo, the card's cache first; like a state, it is
+ * read for an hour.
+ */
+export function cachedPrFacts(
+  wiki: string,
+  refs: readonly PrRef[],
+  at: number,
+): { facts: Map<string, PrFact | null>; failures: Map<string, Exclude<NotCheckedReason, "disabled">> } {
+  const facts = new Map<string, PrFact | null>();
+  const failures = new Map<string, Exclude<NotCheckedReason, "disabled">>();
+  const answeredAt = new Map<string, number>();
+  for (const c of [caches.get(wiki.toLowerCase()), pagePrCaches.get(wiki.toLowerCase())]) {
+    if (!c) continue;
+    for (const ref of refs) {
+      const hit = c.states.get(ref.id);
+      if (hit && at - hit.at < GH_STATE_TTL_MS && hit.at > (answeredAt.get(ref.id) ?? -Infinity)) {
+        facts.set(ref.id, hit.state);
+        answeredAt.set(ref.id, hit.at);
+      }
+      const repo = ref.repo.toLowerCase();
+      const failure = c.failures.get(repo);
+      if (failure && at - failure.at < GH_STATE_TTL_MS && !failures.has(repo)) failures.set(repo, failure.reason);
+    }
+  }
+  return { facts, failures };
 }
 
 /** The arguments of one query. Variables carry the slug; the numbers are integers. */
@@ -570,7 +646,7 @@ function startFlight(c: WikiCache, ask: readonly PrRef[], deps: GhCheckDeps, now
       result = { exitCode: -1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
     }
     const answer = readGhAnswer(result, numbers, job.repo);
-    if (answer.failure) c.failures.set(job.repo.toLowerCase(), { repo: job.repo, reason: answer.failure });
+    if (answer.failure) c.failures.set(job.repo.toLowerCase(), { repo: job.repo, reason: answer.failure, at: now() });
     if (answer.unanswered) {
       log.warn("GitHub check: the query for {repo} was not answered (exit {code}): {stderr}", { repo: job.repo, code: result.exitCode, stderr: result.stderr.trim().slice(0, 200) });
       return;
@@ -704,5 +780,26 @@ export async function checkWorkMapPrs(
   const scanned = await scan(index, input.map, deps);
   const c = cacheFor(input.wiki);
   const refreshing = await refreshDue(c, scanned.refs, deps, now);
+  if (!refreshing) askPagePrs(cacheFor(input.wiki, pagePrCaches), scanned, deps, now);
   return buildBody(scanned, c, refreshing, now());
+}
+
+/**
+ * Starts the flight for the pages' `prs:` that are due and that the card does
+ * not ask for itself, unless one is running. Not awaited: the card's answer
+ * never waits for it.
+ */
+function askPagePrs(pc: WikiCache, scanned: Scan, deps: GhCheckDeps, now: () => number): void {
+  if (pc.flight) return;
+  const at = now();
+  const due = [...scanned.pagePrs.values()].filter((ref) => {
+    if (scanned.refs.has(ref.id)) return false;
+    const hit = pc.states.get(ref.id);
+    return !hit || at - hit.at >= GH_STATE_TTL_MS;
+  });
+  const ask = due.slice(0, budgetLeft(pc, at));
+  if (!ask.length) return;
+  startFlight(pc, ask, deps, now).promise.catch((err) => {
+    log.warn("GitHub check: the flight for the pages' prs: failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+  });
 }

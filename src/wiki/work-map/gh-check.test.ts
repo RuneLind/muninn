@@ -12,6 +12,7 @@ import { getWikiIndex, readWikiPage } from "../store.ts";
 import { needGhMarks } from "../../dashboard/views/components/wiki-work-card.ts";
 import {
   __resetGhCheckForTest,
+  cachedPrFacts,
   checkWorkMapPrs,
   GH_PRS_PER_HOUR,
   GH_PRS_PER_QUERY,
@@ -20,6 +21,7 @@ import {
   ghCheckDisabled,
   ghQueryArgs,
   isLiveCheckPage,
+  prsRefsOf,
   readGhAnswer,
   spawnGhRunner,
   type GhCheckDeps,
@@ -27,6 +29,11 @@ import {
   type GhRunner,
 } from "./gh-check.ts";
 import type { WorkMap } from "./schema.ts";
+import * as ghCheck from "./gh-check.ts";
+
+/** Waits for the flight that asks for the pages' `prs:`, which the card's request starts and does not wait for.
+ *  Through the namespace, so the file still loads on a tree without the hook. */
+const pagePrsSettled = (name = "w"): Promise<void> => (ghCheck as { __pagePrsSettledForTest?: (wiki: string) => Promise<void> }).__pagePrsSettledForTest?.(name) ?? Promise.resolve();
 
 afterEach(() => __resetGhCheckForTest());
 
@@ -849,6 +856,262 @@ describe("the cache", () => {
     const body = await run(r, deps(stubGh(table, calls)), map([{ title: "T", action: "Merge #7", pages: ["plans/b.mdx"] }]), () => AT + 1);
     expect(calls.length).toBe(2);
     expect(body.needs[0]!.state).toBe("MERGED");
+  });
+});
+
+describe("the live pages' prs:", () => {
+  const PRS_PAGE = (prs: string, rows: string[][] = []) => page("in-flight", rows, `prs: ${prs}\n`);
+  const refsOf = (prs: string[]) => prsRefsOf({ prs }).refs;
+  const cached = (prs: string[], at = AT, name = "w") => cachedPrFacts(name, refsOf(prs), at);
+  /** A card request, then the end of the flight it started for the pages' `prs:`. */
+  const ran = async (...args: Parameters<typeof run>) => {
+    const body = await run(...args);
+    await pagePrsSettled();
+    return body;
+  };
+
+  test("prsRefsOf: each entry once whatever its spelling, and what is no PR reference apart", () => {
+    const read = prsRefsOf({ prs: [`${GEARS}#7`, `https://github.com/${GEARS}/pull/7`, "Acme/Gears#7", `${WIDGETS}#3`, " TBD ", "#838", "TBD", ""] });
+    expect(read.refs.map((r) => r.key)).toEqual([`${GEARS}#7`, `${WIDGETS}#3`]);
+    expect(read.unreadable).toEqual(["TBD", "#838"]);
+    expect(prsRefsOf({ prs: undefined })).toEqual({ refs: [], unreadable: [] });
+  });
+
+  test("the cache holds nothing before the check has run, and nothing for another wiki after it", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7]`) });
+    expect(cached([`${GEARS}#7`])).toEqual({ facts: new Map(), failures: new Map() });
+    await ran(r, deps(stubGh({ [`${GEARS}#7`]: { state: "MERGED", mergedAt: MERGED_AT } })));
+    expect(cached([`${GEARS}#7`]).facts).toEqual(new Map([[`${GEARS}#7`, { state: "MERGED", mergedAt: MERGED_AT }]]));
+    expect(cached([`${GEARS}#7`], AT, "W").facts.size).toBe(1);
+    expect(cached([`${GEARS}#7`], AT, "other").facts.size).toBe(0);
+    // A wiki asked under a mixed-case name is read under any case.
+    await checkWorkMapPrs({ wiki: "Mixed", root: r, map: map() }, deps(stubGh({ [`${GEARS}#7`]: { state: "OPEN" } })), () => AT);
+    await pagePrsSettled("Mixed");
+    expect(cached([`${GEARS}#7`], AT, "mixed").facts.size).toBe(1);
+  });
+
+  test("a state is read for an hour; NOT_FOUND reads null; a PR never asked has no entry", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${GEARS}#99]`) });
+    await ran(r, deps(stubGh({ [`${GEARS}#7`]: { state: "OPEN" } })));
+    const asked = [`${GEARS}#7`, `${GEARS}#99`, `${GEARS}#100`];
+    expect(cached(asked).facts).toEqual(new Map<string, unknown>([[`${GEARS}#7`, { state: "OPEN", mergedAt: null }], [`${GEARS}#99`, null]]) as never);
+    expect(cached(asked, AT + GH_STATE_TTL_MS - 1).facts.size).toBe(2);
+    expect(cached(asked, AT + GH_STATE_TTL_MS).facts.size).toBe(0);
+  });
+
+  test("reading the cache never spawns", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7]`) });
+    const calls: string[][] = [];
+    await ran(r, deps(stubGh({}, calls)));
+    const n = calls.length;
+    for (let i = 0; i < 3; i++) cached([`${GEARS}#7`, `${GEARS}#8`], AT + i * GH_STATE_TTL_MS);
+    expect(calls.length).toBe(n);
+  });
+
+  test("a failed repo is reported by reason, for the repos asked about only", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${WIDGETS}#1]`) });
+    const gh: GhRunner = async (args) => (args.includes("repo=gears") ? { exitCode: 4, stdout: "", stderr: "gh auth login" } : stubGh({ [`${WIDGETS}#1`]: { state: "OPEN" } })(args));
+    await ran(r, deps(gh));
+    expect(cached([`${GEARS}#7`, `${WIDGETS}#1`]).failures).toEqual(new Map([[GEARS, "auth"]]));
+    expect(cached([`${WIDGETS}#1`]).failures.size).toBe(0);
+  });
+
+  test("a failure is read for an hour, from the pages' cache and from the card's", async () => {
+    // gears is named by the page only, widgets by a row too: both logins are refused.
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${WIDGETS}#1]`, [[url(WIDGETS, 1), "x", "open", ""]]) });
+    await ran(r, deps(async () => ({ exitCode: 4, stdout: "", stderr: "gh auth login" })));
+    const both = [`${GEARS}#7`, `${WIDGETS}#1`];
+    expect(cached(both, AT + GH_STATE_TTL_MS - 1).failures).toEqual(
+      new Map([
+        [WIDGETS, "auth"],
+        [GEARS, "auth"],
+      ]),
+    );
+    expect(cached(both, AT + GH_STATE_TTL_MS).failures.size).toBe(0);
+  });
+
+  test("a repo that failed in both caches reads the card's reason", async () => {
+    // The card's query (#1) finds no gh; the pages' query (#5) is refused the login.
+    const gh: GhRunner = async (args) =>
+      args.some((a) => a.startsWith("query=") && a.includes("number:5")) ? { exitCode: 4, stdout: "", stderr: "gh auth login" } : { exitCode: -1, stdout: "", stderr: "", noBinary: true };
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${WIDGETS}#5]`, [[url(WIDGETS, 1), "x", "open", ""]]) });
+    await ran(r, deps(gh));
+    expect(cached([`${WIDGETS}#5`]).failures).toEqual(new Map([[WIDGETS, "no-gh"]]));
+  });
+
+  test("a card record past its hour does not hide the pages' newer one for the same repo", async () => {
+    const refused: GhRunner = async () => ({ exitCode: 4, stdout: "", stderr: "gh auth login" });
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${WIDGETS}#5]`, [[url(WIDGETS, 1), "x", "open", ""]]) });
+    await ran(r, deps(refused));
+    // The row goes, so the card stops asking widgets and its record stays at AT; the page's PR is asked again 50 minutes on.
+    writeFileSync(path.join(r, "plans/a.mdx"), PRS_PAGE(`[${WIDGETS}#5]`));
+    const later = AT + 50 * 60_000;
+    await ran(r, deps(refused), map(), () => later);
+    expect(cached([`${WIDGETS}#5`], AT + 70 * 60_000).failures).toEqual(new Map([[WIDGETS, "auth"]]));
+    expect(cached([`${WIDGETS}#5`], later + GH_STATE_TTL_MS).failures.size).toBe(0);
+  });
+
+  test("the pages' prs: have an hourly cap of their own, and a PR the card asks for is not asked twice", async () => {
+    const rows = Array.from({ length: GH_PRS_PER_HOUR }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
+    const prs = Array.from({ length: GH_PRS_PER_HOUR + 1 }, (_, i) => `${GEARS}#${i + 1}`);
+    const table: Record<string, Pr> = {};
+    for (let i = 1; i <= GH_PRS_PER_HOUR + 1; i++) table[`${WIDGETS}#${i}`] = table[`${GEARS}#${i}`] = { state: "OPEN" };
+    const calls: string[][] = [];
+    // The card's rows fill its hour; the page names one PR more than its own hour holds, and two of the card's.
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${WIDGETS}#1, ${WIDGETS}#2, ${prs.join(", ")}]`, rows) });
+    const body = await ran(r, deps(stubGh(table, calls)));
+    expect([body.checked, body.unchecked]).toEqual([GH_PRS_PER_HOUR, 0]);
+    expect(cached(prs).facts.size).toBe(GH_PRS_PER_HOUR);
+    expect(cached(prs).facts.has(`${GEARS}#${GH_PRS_PER_HOUR + 1}`)).toBe(false);
+    // widgets#1 and #2 are read from the card's cache: every widgets number was asked once.
+    expect(cached([`${WIDGETS}#1`, `${WIDGETS}#2`]).facts.size).toBe(2);
+    const asked = calls.filter((c) => c.includes("repo=widgets")).flatMap((c) => [...c.find((a) => a.startsWith("query="))!.matchAll(/number:(\d+)/g)].map((m) => m[1]));
+    expect(asked.length).toBe(GH_PRS_PER_HOUR);
+    expect(new Set(asked).size).toBe(GH_PRS_PER_HOUR);
+  });
+
+  test("a PR both flights have asked reads as the newer answer, whichever cache holds it", async () => {
+    const row = [[url(GEARS, 7), "x", "open", ""]];
+    const later = () => AT + 10 * 60_000;
+    const OPEN_7 = { [`${GEARS}#7`]: { state: "OPEN" } as Pr };
+    const MERGED_7 = { [`${GEARS}#7`]: { state: "MERGED", mergedAt: MERGED_AT } as Pr };
+    // First a page's PR only, then a row's: the card's answer is the newer one.
+    let r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7]`) });
+    await ran(r, deps(stubGh(OPEN_7)));
+    writeFileSync(path.join(r, "plans/a.mdx"), PRS_PAGE(`[${GEARS}#7]`, row));
+    await ran(r, deps(stubGh(MERGED_7)), map(), later);
+    expect(cached([`${GEARS}#7`], later()).facts.get(`${GEARS}#7`)).toEqual({ state: "MERGED", mergedAt: MERGED_AT });
+    __resetGhCheckForTest();
+    // First a row's PR, then only a page's: the pages' answer is the newer one.
+    r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7]`, row) });
+    await ran(r, deps(stubGh(OPEN_7)));
+    writeFileSync(path.join(r, "plans/a.mdx"), PRS_PAGE(`[${GEARS}#7]`));
+    await ran(r, deps(stubGh(MERGED_7)), map(), later);
+    expect(cached([`${GEARS}#7`], later()).facts.get(`${GEARS}#7`)).toEqual({ state: "MERGED", mergedAt: MERGED_AT });
+  });
+
+  test("while the card's own refresh outlasts its wait, the pages' prs: are left for the next request", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7]`, [[url(WIDGETS, 1), "x", "open", ""]]) });
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const calls: string[][] = [];
+    const gh: GhRunner = async (args) => {
+      calls.push(args);
+      if (args.includes("repo=widgets")) await gate;
+      return stubGh({ [`${WIDGETS}#1`]: { state: "OPEN" }, [`${GEARS}#7`]: { state: "OPEN" } })(args);
+    };
+    const first = await run(r, deps(gh, { refreshWaitMs: 30 }));
+    expect(first.refreshing).toBe(true);
+    await pagePrsSettled();
+    expect(calls.filter((c) => c.includes("repo=gears")).length).toBe(0);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await ran(r, deps(gh, { refreshWaitMs: 30 }));
+    expect(second.refreshing).toBeUndefined();
+    expect(cached([`${GEARS}#7`]).facts.size).toBe(1);
+  });
+
+  test("a page that is not live has its prs: left alone", async () => {
+    const r = wiki({ "plans/a.mdx": page("shipped", [], `followups: none\nprs: [${GEARS}#7]\n`), "plans/b.mdx": `---\ntitle: No plan\nprs: [${GEARS}#8]\n---\n\nBody.\n` });
+    const calls: string[][] = [];
+    await ran(r, deps(stubGh({}, calls)));
+    expect(calls.length).toBe(0);
+  });
+
+  test("no part of the card's body reads them", async () => {
+    const rows = [[url(WIDGETS, 1), "x", "open", ""]];
+    const table = { [`${WIDGETS}#1`]: { state: "OPEN" } as Pr, [`${GEARS}#7`]: { state: "MERGED", mergedAt: MERGED_AT } as Pr };
+    const plain = await ran(wiki({ "plans/a.mdx": page("in-flight", rows) }), deps(stubGh(table)));
+    __resetGhCheckForTest();
+    const withPrs = await ran(wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${GEARS}#99]`, rows) }), deps(stubGh(table)));
+    expect(withPrs).toEqual(plain);
+    expect(Object.keys(withPrs.prs)).toEqual([`${WIDGETS}#1`]);
+  });
+});
+
+// Fix round 1 batch 1: nothing asked for the pages' `prs:` may reach the card.
+describe("the pages' prs: and the card's own answer", () => {
+  const PRS_PAGE = (prs: string, rows: string[][] = []) => page("in-flight", rows, `prs: ${prs}\n`);
+  const OWN = [[url(WIDGETS, 1), "x", "open", ""]];
+
+  test("a slow repo that only a prs: names does not hold the card or mark it refreshing", async () => {
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7]`, OWN) });
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let gearsAsked = 0;
+    const gh: GhRunner = async (args) => {
+      if (args.includes("repo=gears")) {
+        gearsAsked++;
+        await gate;
+      }
+      return stubGh({ [`${WIDGETS}#1`]: { state: "OPEN" }, [`${GEARS}#7`]: { state: "OPEN" } })(args);
+    };
+    const first = await run(r, deps(gh, { refreshWaitMs: 40 }));
+    expect(first.refreshing).toBeUndefined();
+    expect(first.checked).toBe(1);
+    // And again while that query is still running: no second query for it.
+    const second = await run(r, deps(gh, { refreshWaitMs: 40 }));
+    expect(second.refreshing).toBeUndefined();
+    expect(gearsAsked).toBe(1);
+    release();
+    await pagePrsSettled();
+    expect(cachedPrFacts("w", prsRefsOf({ prs: [`${GEARS}#7`] }).refs, AT).facts.size).toBe(1);
+  });
+
+  test("a failed query for a prs: entry in a repo the card also asks leaves the card's body as it was", async () => {
+    const table = { [`${WIDGETS}#1`]: { state: "OPEN" } as Pr };
+    const plain = await run(wiki({ "plans/a.mdx": page("in-flight", OWN) }), deps(stubGh(table)));
+    __resetGhCheckForTest();
+    // The query that carries #5 is refused; the card's own #1 is answered.
+    const gh: GhRunner = async (args) => (args.some((a) => a.startsWith("query=") && a.includes("number:5")) ? { exitCode: 4, stdout: "", stderr: "gh auth login" } : stubGh(table)(args));
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${WIDGETS}#5]`, OWN) });
+    const first = await run(r, deps(gh));
+    await pagePrsSettled();
+    const second = await run(r, deps(gh));
+    await pagePrsSettled();
+    expect(first).toEqual(plain);
+    expect(second).toEqual(plain);
+    expect(second.notChecked).toBeUndefined();
+    // The page side still learns why its PR is unknown.
+    expect(cachedPrFacts("w", prsRefsOf({ prs: [`${WIDGETS}#5`] }).refs, AT).failures).toEqual(new Map([[WIDGETS, "auth"]]));
+  });
+
+  test("a failure the pages' flight recorded stays out of the card's body while that flight still runs", async () => {
+    const table = { [`${WIDGETS}#1`]: { state: "OPEN" } as Pr, [`${GEARS}#7`]: { state: "OPEN" } as Pr };
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    // The pages' flight has two queries: widgets#5 is refused at once, gears#7 hangs, so the flight is not started again.
+    const gh: GhRunner = async (args) => {
+      if (args.includes("repo=gears")) await gate;
+      if (args.some((a) => a.startsWith("query=") && a.includes("number:5"))) return { exitCode: 4, stdout: "", stderr: "gh auth login" };
+      return stubGh(table)(args);
+    };
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${WIDGETS}#5, ${GEARS}#7]`, OWN) });
+    const first = await run(r, deps(gh));
+    const failuresOf = () => cachedPrFacts("w", prsRefsOf({ prs: [`${WIDGETS}#5`] }).refs, AT).failures;
+    for (let i = 0; i < 50 && failuresOf().size === 0; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(failuresOf()).toEqual(new Map([[WIDGETS, "auth"]]));
+    const second = await run(r, deps(gh));
+    expect(second).toEqual(first);
+    expect(second.notChecked).toBeUndefined();
+    expect(second.checked).toBe(1);
+    release();
+    await pagePrsSettled();
+  });
+
+  test("what the pages' prs: asked takes nothing from the card's hour: a row added later is still checked", async () => {
+    const rows = (n: number) => Array.from({ length: n }, (_, i) => [url(WIDGETS, i + 1), "x", "open", ""]);
+    const table: Record<string, Pr> = Object.fromEntries(Array.from({ length: GH_PRS_PER_HOUR }, (_, i) => [`${WIDGETS}#${i + 1}`, { state: "OPEN" } as Pr]));
+    for (const n of [7, 8, 9]) table[`${GEARS}#${n}`] = { state: "OPEN" };
+    const own = GH_PRS_PER_HOUR - 2;
+    const r = wiki({ "plans/a.mdx": PRS_PAGE(`[${GEARS}#7, ${GEARS}#8, ${GEARS}#9]`, rows(own)) });
+    const first = await run(r, deps(stubGh(table)));
+    await pagePrsSettled();
+    expect([first.checked, first.unchecked]).toEqual([own, 0]);
+    // Ten minutes on, two more rows: the card's hour has room for exactly two.
+    writeFileSync(path.join(r, "plans/a.mdx"), PRS_PAGE(`[${GEARS}#7, ${GEARS}#8, ${GEARS}#9]`, rows(own + 2)));
+    const later = await run(r, deps(stubGh(table)), map(), () => AT + 10 * 60_000);
+    expect([later.checked, later.unchecked]).toEqual([own + 2, 0]);
   });
 });
 
