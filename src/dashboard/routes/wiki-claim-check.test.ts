@@ -15,6 +15,7 @@ import { getWikiIndex, readWikiPage } from "../../wiki/store.ts";
 import { __resetGhCheckForTest, GH_FAILED_REPO_HOLD_MS, GH_PRS_PER_HOUR, type GhCheckDeps, type GhResult, type GhRunner } from "../../wiki/work-map/gh-check.ts";
 import type { WorkMapRunDeps } from "../../wiki/work-map/run.ts";
 import { registerWikiClaimCheckRoute } from "./wiki-claim-check.ts";
+import { registerWikiWorkMapRoutes } from "./wiki-work-map.ts";
 
 const NOW = Date.parse("2026-06-01T12:00:00Z");
 
@@ -114,11 +115,18 @@ function setup(o: Setup = {}) {
   } as unknown as WorkMapRunDeps;
   const app = new Hono();
   registerWikiClaimCheckRoute(app, {} as Config, { workMap: () => deps, index: (r) => getWikiIndex({ root: r, refresh: true }) });
+  registerWikiWorkMapRoutes(app, {} as Config, () => deps);
   const get = async (q = "wiki=w&relPath=plans/a.mdx") => {
     const res = await app.request(`/api/wiki/claim-check?${q}`);
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };
-  return { get, spawns, root };
+  /** The work map card's check, the same wiki and cache; with the spawns it caused. */
+  const card = async () => {
+    const before = spawns.length;
+    const res = await app.request("/api/wiki/work-map/checks?wiki=w");
+    return { status: res.status, body: (await res.json()) as Record<string, unknown>, spawns: spawns.length - before };
+  };
+  return { get, card, spawns, root };
 }
 
 const LATE_PAGE = page("status_date: 2026-05-10\nprs: [acme/gears#7, https://github.com/acme/gears/pull/8]\n");
@@ -332,4 +340,264 @@ describe("request shape", () => {
     expect(r.status).toBe(400);
     expect(s.spawns.length).toBe(0);
   });
+});
+
+// ── The card and page views on one cache ─────────────────────────────────
+const MIN = 60_000;
+const ledgerPage = (title: string, rows: string[]) =>
+  `---\ntitle: ${title}\nplan_status: in-flight\n---\n\n# ${title}\n\n**PR ledger.**\n\n| PR | State |\n|---|---|\n${rows.map((r) => `| [#${r.split("#")[1]}](https://github.com/${r.split("#")[0]}/pull/${r.split("#")[1]}) | open |`).join("\n")}\n`;
+/** The card watches acme/gears#1; the viewed page names only acme/gears#99. */
+const CARD_PAGES = { "plans/card.mdx": ledgerPage("Card", ["acme/gears#1"]), "plans/a.mdx": page("status_date: 2026-05-10\nprs: [acme/gears#99]\n") };
+const CARD_TABLE: Record<string, Pr> = { "acme/gears#1": { state: "OPEN" }, "acme/gears#99": { state: "MERGED", mergedAt: "2026-05-12T08:00:00Z" } };
+
+const AUTH: GhResult = { exitCode: 4, stdout: "", stderr: "gh auth login" };
+const NO_GH: GhResult = { exitCode: -1, stdout: "", stderr: "ENOENT", noBinary: true };
+const NO_ACCESS: GhResult = {
+  exitCode: 1,
+  stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository" }] }),
+  stderr: "",
+};
+/** The repository answers, the asked aliases come back null and FORBIDDEN: no state, no NOT_FOUND. */
+function forbiddenAliases(args: string[]): GhResult {
+  const q = args.find((a) => a.startsWith("query="))!;
+  const fields: Record<string, null> = {};
+  const errors: unknown[] = [];
+  for (const m of q.matchAll(/pullRequest\(number:(\d+)\)/g)) {
+    fields[`p${m[1]}`] = null;
+    errors.push({ type: "FORBIDDEN", path: ["repository", `p${m[1]}`], message: "Resource protected by organization SAML enforcement" });
+  }
+  return { exitCode: 1, stdout: JSON.stringify({ data: { repository: fields }, errors }), stderr: "" };
+}
+
+describe("a page view's failure stays out of the card's body", () => {
+  /** t0 the card answers; t1 GitHub fails and (maybe) a page view asks #99; t2 the card again. */
+  async function run(fail: (args: string[]) => GhResult, withPageView: boolean) {
+    __resetGhCheckForTest();
+    let t = NOW;
+    let failing = false;
+    const ok = stubGh(CARD_TABLE);
+    const s = setup({ pages: CARD_PAGES, gh: async (a) => (failing ? fail(a) : ok(a)), now: () => t });
+    const t0 = await s.card();
+    failing = true;
+    t = NOW + 10 * MIN;
+    const view = withPageView ? await s.get() : null;
+    t = NOW + 30 * MIN;
+    const t2 = await s.card();
+    return { t0, t2, view };
+  }
+  const cases: [string, (args: string[]) => GhResult, string][] = [
+    ["auth", () => AUTH, "auth"],
+    ["no gh", () => NO_GH, "no-gh"],
+    ["a no-access answer", () => NO_ACCESS, "auth"],
+    ["a partial sso answer", forbiddenAliases, "auth"],
+  ];
+  for (const [name, fail, pageReason] of cases) {
+    test(name, async () => {
+      const without = await run(fail, false);
+      const withView = await run(fail, true);
+      expect(withView.view!.body).toMatchObject({ verdict: "notChecked", reason: pageReason });
+      expect(withView.t2.body.notChecked).toBeUndefined();
+      expect(withView.t2.body).toEqual(without.t2.body);
+      expect(withView.t2.spawns).toBe(without.t2.spawns);
+      expect(withView.t0.body).toEqual(without.t0.body);
+    });
+  }
+});
+
+describe("joining the other one's flight", () => {
+  /** A `gh` whose first call waits for `release`; every call answers AUTH. */
+  function gatedAuth() {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const gh: GhRunner = async () => {
+      if (calls++ === 0) await gate;
+      return AUTH;
+    };
+    return { gh, release };
+  }
+  const shared = { "plans/card.mdx": ledgerPage("Card", ["acme/gears#1"]), "plans/a.mdx": page("status_date: 2026-05-10\nprs: [acme/gears#1]\n") };
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 200 && !cond(); i++) await Bun.sleep(2);
+  };
+
+  test("the card joining a page view's failing flight still gets its own failure", async () => {
+    const { gh, release } = gatedAuth();
+    const s = setup({ pages: shared, gh });
+    const view = s.get();
+    await until(() => s.spawns.length === 1);
+    const card = s.card();
+    await Bun.sleep(5);
+    release();
+    await view;
+    const r = await card;
+    expect(r.body.notChecked).toEqual({ reason: "auth", repos: ["acme/gears"] });
+    expect(r.spawns).toBe(1);
+  });
+
+  test("a page view joining the card's failing flight gets its own failure and its own hold", async () => {
+    const { gh, release } = gatedAuth();
+    const s = setup({ pages: shared, gh });
+    const card = s.card();
+    await until(() => s.spawns.length === 1);
+    const view = s.get();
+    await Bun.sleep(5);
+    release();
+    await card;
+    expect((await view).body).toMatchObject({ verdict: "notChecked", reason: "auth", repos: ["acme/gears"] });
+    expect(s.spawns.length).toBe(2);
+    await s.get();
+    expect(s.spawns.length).toBe(2);
+  });
+});
+
+describe("the failed-repo hold", () => {
+  test("set by the card's failure? no: after the login is fixed a page view asks at once", async () => {
+    let t = NOW;
+    let failing = true;
+    const ok = stubGh(CARD_TABLE);
+    const s = setup({ pages: CARD_PAGES, gh: async (a) => (failing ? AUTH : ok(a)), now: () => t });
+    expect((await s.card()).body.notChecked).toEqual({ reason: "auth", repos: ["acme/gears"] });
+    failing = false;
+    t = NOW + MIN;
+    const view = await s.get();
+    expect(view.body).toMatchObject({ verdict: "late", newest: { pr: "acme/gears#99" } });
+    expect(s.spawns.length).toBe(2);
+  });
+
+  test("card fails, login fixed, the card answers: a page view right after gets a real verdict with one spawn", async () => {
+    let t = NOW;
+    let failing = true;
+    const ok = stubGh(CARD_TABLE);
+    const s = setup({ pages: CARD_PAGES, gh: async (a) => (failing ? AUTH : ok(a)), now: () => t });
+    await s.card();
+    failing = false;
+    t = NOW + MIN;
+    const again = await s.card();
+    expect(again.spawns).toBe(1);
+    expect(again.body.notChecked).toBeUndefined();
+    t = NOW + 2 * MIN;
+    const before = s.spawns.length;
+    expect((await s.get()).body).toMatchObject({ verdict: "late" });
+    expect(s.spawns.length - before).toBe(1);
+  });
+
+  test("a page view's failure is cleared by the card's later answer for that repo", async () => {
+    let t = NOW;
+    let failing = true;
+    const ok = stubGh(CARD_TABLE);
+    const s = setup({ pages: { ...CARD_PAGES, "plans/card.mdx": ledgerPage("Card", ["acme/gears#2"]) }, gh: async (a) => (failing ? AUTH : ok(a)), now: () => t });
+    expect((await s.get()).body).toMatchObject({ reason: "auth" });
+    failing = false;
+    t = NOW + MIN;
+    await s.card();
+    t = NOW + 2 * MIN;
+    const before = s.spawns.length;
+    expect((await s.get()).body).toMatchObject({ verdict: "late" });
+    expect(s.spawns.length - before).toBe(1);
+  });
+
+  /** 51 PRs in one repo: two jobs. The 51st's job answers; the first job times out. */
+  async function twoJobs(answeredFirst: boolean) {
+    __resetGhCheckForTest();
+    const many = Array.from({ length: 51 }, (_, i) => `acme/gears#${i + 1}`);
+    const ok = stubGh(Object.fromEntries(many.map((k) => [k, { state: "OPEN" } as Pr])));
+    const s = setup({
+      pages: { "plans/big.mdx": page(`status_date: 2026-05-12\nprs: [${many.join(", ")}]\n`), "plans/a.mdx": page("status_date: 2026-05-10\nprs: [acme/gears#99]\n") },
+      gh: async (args) => {
+        const second = args.some((a) => a.includes("number:51)"));
+        await Bun.sleep(second === answeredFirst ? 0 : 30);
+        return second ? ok(args) : { exitCode: -1, stdout: "", stderr: "", timedOut: true };
+      },
+    });
+    await s.get("wiki=w&relPath=plans/big.mdx");
+    expect(s.spawns.length).toBe(2);
+    const again = s.spawns.length;
+    await s.get("wiki=w&relPath=plans/big.mdx");
+    const bigAgain = s.spawns.length - again;
+    const other = s.spawns.length;
+    await s.get();
+    return { bigAgain, otherPage: s.spawns.length - other };
+  }
+
+  test("one flight, two jobs: the hold does not depend on which job finishes last", async () => {
+    const answeredFirst = await twoJobs(true);
+    const answeredLast = await twoJobs(false);
+    expect(answeredFirst).toEqual(answeredLast);
+    // The repo answered, so it is not held; the timed-out job's own PRs are.
+    expect(answeredFirst).toEqual({ bigAgain: 0, otherPage: 1 });
+  });
+});
+
+describe("a PR asked and left with no state and no NOT_FOUND", () => {
+  const pages = { "plans/a.mdx": page("status_date: 2026-05-10\nprs: [acme/gears#7]\n"), "plans/card.mdx": ledgerPage("Card", ["acme/gears#7"]) };
+
+  test("five page views spawn gh once, and it is asked again after the hold", async () => {
+    let t = NOW;
+    const s = setup({ pages, gh: async (a) => forbiddenAliases(a), now: () => t });
+    for (let i = 0; i < 5; i++) expect((await s.get()).body).toMatchObject({ verdict: "notChecked", reason: "auth", repos: ["acme/gears"] });
+    expect(s.spawns.length).toBe(1);
+    t = NOW + GH_FAILED_REPO_HOLD_MS - 1;
+    await s.get();
+    expect(s.spawns.length).toBe(1);
+    t = NOW + GH_FAILED_REPO_HOLD_MS;
+    await s.get();
+    expect(s.spawns.length).toBe(2);
+  });
+
+  test("the card still asks it on every request, page views or not", async () => {
+    let t = NOW;
+    const s = setup({ pages, gh: async (a) => forbiddenAliases(a), now: () => t });
+    const counts: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      t = NOW + i * 2 * MIN;
+      counts.push((await s.card()).spawns);
+      t += MIN;
+      await s.get();
+    }
+    expect(counts).toEqual([1, 1, 1]);
+  });
+});
+
+describe("the card's body and spawns are the same with page views interleaved", () => {
+  const widgets = Array.from({ length: GH_PRS_PER_HOUR + 1 }, (_, i) => `acme/widgets#${i + 1}`);
+  const scenarios: [string, Record<string, string>, GhRunner][] = [
+    ["healthy", CARD_PAGES, stubGh(CARD_TABLE)],
+    ["auth failure", CARD_PAGES, async () => AUTH],
+    ["no gh", CARD_PAGES, async () => NO_GH],
+    [
+      "budget exhausted",
+      { ...CARD_PAGES, "plans/card.mdx": ledgerPage("Card", widgets) },
+      stubGh({ ...CARD_TABLE, ...Object.fromEntries(widgets.map((k) => [k, { state: "OPEN" } as Pr])) }),
+    ],
+  ];
+  const CARD_AT = [0, 2 * MIN, 61 * MIN, 75 * MIN];
+
+  async function run(pages: Record<string, string>, gh: GhRunner, withViews: boolean) {
+    __resetGhCheckForTest();
+    let t = NOW;
+    const s = setup({ pages, gh, now: () => t });
+    const out: { body: Record<string, unknown>; spawns: number }[] = [];
+    const views: Record<string, unknown>[] = [];
+    for (const at of CARD_AT) {
+      t = NOW + at;
+      const r = await s.card();
+      out.push({ body: r.body, spawns: r.spawns });
+      if (withViews) {
+        t += MIN;
+        views.push((await s.get()).body);
+        views.push((await s.get()).body);
+      }
+    }
+    return { out, views };
+  }
+
+  for (const [name, pages, gh] of scenarios) {
+    test(name, async () => {
+      const without = await run(pages, gh, false);
+      const withViews = await run(pages, gh, true);
+      expect(withViews.out).toEqual(without.out);
+      expect(withViews.views.length).toBe(CARD_AT.length * 2);
+    });
+  }
 });
