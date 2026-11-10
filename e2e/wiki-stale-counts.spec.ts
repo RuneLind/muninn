@@ -398,7 +398,7 @@ test("the status date line sits beside the pill and says what was compared", asy
   expect(asked).toHaveLength(1);
   const url = new URL(asked[0]!);
   expect([url.searchParams.get("wiki"), url.searchParams.get("relPath")]).toEqual([WIKI, "hub.md"]);
-  // The late line is drawn as a warning, in the pill's tint resolved on a body probe; the others have no fill.
+  // The late line is drawn as a warning, in the pill's tint resolved on a body probe; the clear line has no fill.
   // `toHaveCSS` reads the span in the slot at that moment: a repaint replaces it.
   const tint = await p.evaluate(() => {
     const probe = document.body.appendChild(document.createElement("span"));
@@ -429,7 +429,7 @@ async function holdStaleReport(p: Page, rel: string, gate: Promise<void>, fail =
 }
 const twoFrames = (p: Page) => p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 
-test("the line waits for the Stale check's report: it never stands alone and then moves", async ({ page: p }) => {
+test("the line waits for the Stale check's report: it is not painted before the pill", async ({ page: p }) => {
   let release: () => void = () => {};
   const gate = new Promise<void>((r) => (release = r));
   await holdStaleReport(p, "hub.md", gate);

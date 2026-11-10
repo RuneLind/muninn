@@ -143,6 +143,7 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Its fix round 1 batch 1 (the line waits for the report, focus kept on the pill): 857,703 (291,903).
 // Batch 2 (wording): 857,779 (291,963). Batch 3 (a merge that lost a field): 857,936 (292,034).
 // Fix round 2 batch 1 (the line in a slot of its own, the focus code gone): 858,008 (292,035).
+// Batch 2 (hover wording, one guard around the line's html): 858,042 (292,040).
 const WIKI_CLIENT_MAX_BYTES = 859_000;
 
 test("wikiClientScript stays under its size pin", async () => {

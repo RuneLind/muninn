@@ -7,7 +7,7 @@
  * paints.
  *
  * Every line names the comparison (the page's `status_date` against the
- * newest merge among its `prs:`), so none reads as a verdict on the page: the
+ * merge dates of its `prs:`), so none reads as a verdict on the page: the
  * check compares two dates and reads no status line. There is no line where
  * nothing was compared and the page gives nothing to compare: no `prs:`, a
  * page the check does not read (`not-live`), a request that failed, a verdict
@@ -41,7 +41,7 @@ function dayMonth(day: string | undefined): string {
   return m ? `${m[2]}.${m[1]}` : "";
 }
 
-/** The merge an answer names, when it carries what a line needs: the PR and its merge day. `label` is `repo#n, DD.MM`, the repo without its owner. */
+/** The merge an answer names, when it carries what a line needs: the PR and its merge day. `label` is `repo#n, DD.MM`, the repo without its owner, or the full PR in front of the day where the repo or the number is missing. */
 function mergeOf(v: StatusDateView): { pr: string; mergedDay: string; label: string } | null {
   const n = v.newest;
   if (!n || typeof n.pr !== "string" || !n.pr || typeof n.mergedDay !== "string" || !dayMonth(n.mergedDay)) return null;
@@ -112,7 +112,7 @@ export function statusDateLine(v: StatusDateView | null | undefined): StatusDate
   return null;
 }
 
-/** The line as it sits in the pill slot, after the Stale check's pill; "" for no line. */
+/** The line as it sits in its slot, after the Stale check's pill; "" for no line. */
 export function statusDatePillHtml(v: StatusDateView | null | undefined): string {
   let l: StatusDateLine | null = null;
   try {
