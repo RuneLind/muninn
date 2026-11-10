@@ -221,7 +221,13 @@ async function open(p: Page, rel: string, text: string, base = BASE): Promise<vo
 const pill = (p: Page) => p.locator("#wikiStalePill [data-stale-pill]");
 const marks = (p: Page) => p.locator(".wiki-article mark.wiki-stale-mark");
 /** The status date line beside the pill (first-screen-claims P3). */
-const dateLine = (p: Page) => p.locator("#wikiStalePill [data-status-date]");
+const dateLine = (p: Page) => p.locator("#wikiStatusDate [data-status-date]");
+/** What the pill's slot and the line's slot hold, and that the line's slot comes right after the pill's. */
+const slots = (p: Page) =>
+  p.evaluate(() => {
+    const tags = (id: string) => Array.from(document.getElementById(id)?.children ?? [], (c) => c.tagName);
+    return { pill: tags("wikiStalePill"), line: tags("wikiStatusDate"), next: document.getElementById("wikiStalePill")?.nextElementSibling?.id };
+  });
 const LATE = { verdict: "late", statusDate: "2026-11-03", newest: { pr: "RuneLind/muninn#802", repo: "RuneLind/muninn", n: 802, mergedAt: "2026-11-04T09:12:00Z", mergedDay: "2026-11-04" } };
 const LATE_TEXT = "⚠ status older than a merged PR (muninn#802, 04.11)";
 const CLEAR = { ...LATE, verdict: "clear", statusDate: "2026-11-05" };
@@ -387,8 +393,7 @@ test("the status date line sits beside the pill and says what was compared", asy
   );
   // The Stale check's pill keeps its own text and is still the one button in the slot.
   await expect(pill(p)).toHaveText(HUB_TEXT);
-  await expect(p.locator("#wikiStalePill button")).toHaveCount(1);
-  expect(await p.locator("#wikiStalePill").evaluate((slot) => Array.from(slot.children, (c) => c.tagName))).toEqual(["BUTTON", "SPAN"]);
+  expect(await slots(p)).toEqual({ pill: ["BUTTON"], line: ["SPAN"], next: "wikiStatusDate" });
   // Asked once, by the wiki's name and the page's path.
   expect(asked).toHaveLength(1);
   const url = new URL(asked[0]!);
@@ -434,12 +439,13 @@ test("the line waits for the Stale check's report: it never stands alone and the
   await expect(p.locator(".wiki-article")).toContainText("The pin moved.");
   await answered;
   await twoFrames(p);
-  // The check has answered and the report has not: the slot is still empty.
+  // The check has answered and the report has not: both slots are still empty.
   await expect(p.locator("#wikiStalePill")).toBeEmpty();
+  await expect(p.locator("#wikiStatusDate")).toBeEmpty();
   release();
   await expect(pill(p)).toHaveText(HUB_TEXT);
   await expect(dateLine(p)).toHaveText(LATE_TEXT);
-  expect(await p.locator("#wikiStalePill").evaluate((slot) => Array.from(slot.children, (c) => c.tagName))).toEqual(["BUTTON", "SPAN"]);
+  expect(await slots(p)).toEqual({ pill: ["BUTTON"], line: ["SPAN"], next: "wikiStatusDate" });
 });
 
 test("a Stale report that failed leaves the line, with no pill", async ({ page: p }) => {
@@ -451,17 +457,48 @@ test("a Stale report that failed leaves the line, with no pill", async ({ page: 
   await expect(pill(p)).toHaveCount(0);
 });
 
-test("the line arriving keeps the reader's focus on the pill", async ({ page: p }) => {
+test("the line arriving leaves the pill's button in place: its focus, and where the article is scrolled", async ({ page: p }) => {
   let release: () => void = () => {};
   const gate = new Promise<void>((r) => (release = r));
   await answerClaimCheck(p, "hub.md", { json: LATE }, gate);
   await open(p, "hub.md", "The pin moved.");
   await expect(pill(p)).toHaveText(HUB_TEXT);
-  await pill(p).focus();
-  await expect(pill(p)).toBeFocused();
+  await pill(p).evaluate((el) => {
+    (el as HTMLElement & { kept?: boolean }).kept = true;
+    (el as HTMLElement).focus();
+  });
+  // The reader scrolls down with focus still on the pill.
+  const scrolled = await p.evaluate(() => {
+    const wrap = document.getElementById("articleWrap")!;
+    const spacer = wrap.querySelector(".wiki-article")!.appendChild(document.createElement("div"));
+    spacer.style.height = "4000px";
+    wrap.scrollTop = 1500;
+    return wrap.scrollTop;
+  });
+  expect(scrolled).toBe(1500);
   release();
   await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  await twoFrames(p);
+  // The same button, still focused, and no jump back to the top to show it.
+  expect.soft(await pill(p).evaluate((el) => (el as HTMLElement & { kept?: boolean }).kept === true), "the same button").toBe(true);
+  expect.soft(await p.evaluate(() => document.getElementById("articleWrap")!.scrollTop), "the article's scroll").toBeGreaterThan(1400);
   await expect(pill(p)).toBeFocused();
+});
+
+test("a press on the pill that the line arrives under still opens the STALE tab", async ({ page: p }) => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await answerClaimCheck(p, "hub.md", { json: LATE }, gate);
+  await open(p, "hub.md", "The pin moved.");
+  await expect(pill(p)).toHaveText(HUB_TEXT);
+  await p.locator('.wiki-conn-tab[data-conntab="conn"]').click();
+  await expect(p.locator('.wiki-conn-tab[data-conntab="stale"]')).not.toHaveClass(/\bactive\b/);
+  await pill(p).hover();
+  await p.mouse.down();
+  release();
+  await expect(dateLine(p)).toHaveText(LATE_TEXT);
+  await p.mouse.up();
+  await expect(p.locator('.wiki-conn-tab[data-conntab="stale"]')).toHaveClass(/\bactive\b/);
 });
 
 test("the line arriving takes no focus the reader did not have on the pill", async ({ page: p }) => {
@@ -482,11 +519,20 @@ test("a long line wraps as one box at phone width, and the page does not scroll 
   await p.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=hub.md`);
   await expect(dateLine(p)).toHaveText(LATE_TEXT.replace("muninn#802", "faktureringskomponenten#355"));
   const box = await dateLine(p).evaluate((el) => {
-    const slot = el.parentElement!.parentElement!.getBoundingClientRect();
+    const row = el.parentElement!.parentElement!.getBoundingClientRect();
     const r = el.getBoundingClientRect();
-    return { rects: el.getClientRects().length, inside: r.left >= slot.left - 0.5 && r.right <= slot.right + 0.5, sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth };
+    const pillBox = document.querySelector("#wikiStalePill [data-stale-pill]")!.getBoundingClientRect();
+    return {
+      rects: el.getClientRects().length,
+      inside: r.left >= row.left - 0.5 && r.right <= row.right + 0.5,
+      sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      // On a row of its own under the pill: at the row's left edge, with the row's gap between them.
+      under: r.top >= pillBox.bottom,
+      indent: Math.round(r.left - row.left),
+      gap: Math.round(r.top - pillBox.bottom),
+    };
   });
-  expect(box).toEqual({ rects: 1, inside: true, sideways: false });
+  expect(box).toEqual({ rects: 1, inside: true, sideways: false, under: true, indent: 0, gap: 6 });
 });
 
 test("the real route's answer for a page that is no live plan gives no line", async ({ page: p }) => {
@@ -499,6 +545,8 @@ test("the real route's answer for a page that is no live plan gives no line", as
   expect(["not-live", "no-prs"]).toContain(body.reason);
   await expect(pill(p)).toHaveText(HUB_TEXT);
   await expect(dateLine(p)).toHaveCount(0);
+  // An empty slot takes no place in the row.
+  await expect(p.locator("#wikiStatusDate")).toHaveCSS("display", "none");
 });
 
 test("a not-checked answer says why, and a failed or unknown one says nothing", async ({ page: p }) => {

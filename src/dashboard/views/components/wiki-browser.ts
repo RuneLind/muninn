@@ -1449,7 +1449,7 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   }
   head += projectHubChipHtml(m);
   // The Stale check's pill (PR 2b), painted from the open page's report.
-  if (staleTabAvailable()) head += `<span id="wikiStalePill" class="wiki-stale-pill-slot"></span>`;
+  if (staleTabAvailable()) head += `<span id="wikiStalePill" class="wiki-stale-pill-slot"></span><span id="wikiStatusDate" class="wiki-stale-pill-slot"></span>`;
   // Graph mode's toggle, on a wiki with a tracker only.
   if (hasTracker()) head += graphToggleHtml(displayState().graph);
   // The meta row closes first: the strip is a BLOCK under it (the Jira row plus
