@@ -167,7 +167,7 @@ describe("stepDoneEdit", () => {
   test("the log line carries the bold label and the lead sentence", () => {
     const text = page(moves(you("- **Restart 3010:** so the bundle is fresh. Then look.")));
     const r = done(text, "**Restart 3010:** so the bundle is fresh. Then look.");
-    expect(stepDoneLogLine(r)).toBe("Step done: Restart 3010 — so the bundle is fresh.");
+    expect(stepDoneLogLine(r)).toBe("Step done: Restart 3010: so the bundle is fresh.");
     const plain = done(page(moves(you("- Read the page. Twice."))), "Read the page. Twice.");
     expect(stepDoneLogLine(plain)).toBe("Step done: Read the page.");
   });
@@ -314,5 +314,75 @@ describe("stepDoneEdit: blank lines around the removed lines (finding 3)", () =>
   test("a tight list's middle item leaves no blank line", () => {
     const text = page(moves(you("Prose above.\n- A.\n- B.\n- C.")));
     expect(done(text, "B.").content).toBe(page(moves(you("Prose above.\n- A.\n- C."))));
+  });
+});
+
+describe("stepKey: a key survives a renumber (fix round 2, finding 1)", () => {
+  /** Done on every editable step in turn: every other step keeps its key across the edit. */
+  function assertKeysStable(text: string): number {
+    const before = listYouSteps(text)!;
+    expect(new Set(before.map((s) => s.key)).size).toBe(before.length);
+    let edits = 0;
+    for (const s of before) {
+      if (s.refusal) continue;
+      const r = stepDoneEdit(text, s.key);
+      if (!r.ok) throw new Error(r.reason);
+      edits++;
+      const after = listYouSteps(r.content)!;
+      expect(after.map((x) => x.key)).toEqual(before.filter((x) => x !== s).map((x) => x.key));
+    }
+    return edits;
+  }
+
+  test("a numbered page, past a marker-width change (9. to 11.)", () => {
+    const items = Array.from({ length: 11 }, (_, k) => `${k + 1}. Step ${String.fromCharCode(65 + k)}.`).join("\n");
+    expect(assertKeysStable(page(moves(you(items))))).toBe(11);
+  });
+
+  test("a bulleted page", () => {
+    expect(assertKeysStable(page(moves(you("- A.\n- [ ] B.\n- **C:** see.\n  wraps."), waiting("- W."), you("- D."))))).toBe(4);
+  });
+
+  test("a mixed page: bullets and two numbered lists across lanes", () => {
+    const text = page(moves(you("- A.\n- B.\n\nProse.\n\n1. C.\n2. D.\n3. E."), you("5. F.\n\n6. G.\n\n7. H.")));
+    expect(assertKeysStable(text)).toBe(8);
+  });
+
+  test("two steps with the same text and different numbers: one hash, ordinals 0 and 1", () => {
+    const steps = listYouSteps(page(moves(you("1. Same.\n2. Same."))))!;
+    expect(steps.map((s) => s.key.split(".")[1])).toEqual(["0", "1"]);
+    expect(steps[0]!.key.split(".")[0]).toBe(steps[1]!.key.split(".")[0]);
+  });
+});
+
+describe("stepDoneLogLine: the step's first sentence, emphasis removed (fix round 2, finding 3)", () => {
+  const logOf = (step: string) => stepDoneLogLine(done(page(moves(you(`3. ${step}`))), step));
+
+  test("a bold opening with no colon keeps the rest of its sentence", () => {
+    expect(logOf("**Rotate the database password** once PR 1 lands (see the note)")).toBe(
+      "Step done: Rotate the database password once PR 1 lands (see the note)",
+    );
+    expect(logOf("**Rotate the password** once PR 1 lands (note). More.")).toBe("Step done: Rotate the password once PR 1 lands (note).");
+  });
+
+  test("a bold label with a colon reads as label, colon, sentence", () => {
+    expect(logOf("**Label:** rest of sentence. More.")).toBe("Step done: Label: rest of sentence.");
+    expect(logOf("__Label__: rest. More.")).toBe("Step done: Label: rest.");
+  });
+
+  test("a bold whole sentence, emphasis inside, and a plain step", () => {
+    expect(logOf("**Send the draft.** Blocks O3.")).toBe("Step done: Send the draft.");
+    expect(logOf("Read *every* page, e.g. the plan. Then stop.")).toBe("Step done: Read every page, e.g. the plan.");
+    expect(logOf("Read _all_ of snake_case_name. Then stop.")).toBe("Step done: Read all of snake_case_name.");
+    expect(logOf('<Pill tone="warn">new</Pill> Check the gate. Then stop.')).toBe("Step done: new Check the gate.");
+  });
+
+  test("only the first line reaches log.md, and the line is capped at 160 chars", () => {
+    const text = page(moves(you("- **First** line\n  ## not a heading.")));
+    expect(stepDoneLogLine(done(text, "**First** line\n## not a heading."))).toBe("Step done: First line");
+    const long = `Do ${"x".repeat(300)} now.`;
+    const line = logOf(long).slice("Step done: ".length);
+    expect([...line].length).toBe(160);
+    expect(line.endsWith("…")).toBe(true);
   });
 });

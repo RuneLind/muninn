@@ -4,9 +4,11 @@
  * (`wiki-step-done.ts`) runs it inside the wiki's write queue, as
  * `question-close.ts` is run for a card.
  *
- * A step is named by {@link stepKey}: a hash of its raw source lines and its
- * ordinal among steps with the same lines in the page's counted `you` lanes.
- * Never by index: the parser skips `[x]` and empty items, so indices shift.
+ * A step is named by {@link stepKey}: a hash of its source lines with a
+ * numbered marker's number left out ({@link keyLines}), and its ordinal among
+ * steps with the same such lines in the page's counted `you` lanes. A Done
+ * renumbers later items, so a number in the key would rename them. Never by
+ * index: the parser skips `[x]` and empty items, so indices shift.
  *
  * The result is re-read through `countedNextMovesLanes`, the walk the index and
  * the reader count with: the target lane must equal the old one minus that
@@ -22,6 +24,7 @@ import {
   readerFencedLines,
   runChecklistSteps,
   COMPONENT_OPEN_RE,
+  COMPONENT_TAG_SOURCE_SINGLE_LINE,
   type Block,
   type ComponentBlock,
   type ListBlock,
@@ -30,7 +33,7 @@ import {
 } from "./markdown-ast.ts";
 import { ordinals } from "./block-renderer.ts";
 import { frontmatterBodyLine } from "./frontmatter-fence.ts";
-import { leadSentence } from "./lead-sentence.ts";
+import { MOVES_STEP_CHARS, sentenceEnd } from "./lead-sentence.ts";
 import { sha256 } from "../utils/date-hash.ts";
 
 const CHECK_RE = /^\[([ xX])\][ \t]*([\s\S]*)$/;
@@ -63,28 +66,55 @@ export type StepDoneEdit =
       renumbered: { line: number; before: string; after: string }[];
       laneRemoved: boolean;
       nextMovesRemoved: boolean;
-      /** The step's bold label, when it opens with one. */
-      label: string | null;
+      /** What the log line says of the step: {@link stepLogSentence}. */
       lead: string;
       text: string;
     }
   | { ok: false; code: StepDoneCode; reason: string };
 
-/** The key a step is named by: its raw lines' hash and its ordinal among equal lines. */
+/** The key a step is named by: the hash of its {@link keyLines} and its ordinal among equal ones. */
 export function stepKey(raw: string, ordinal: number): string {
   return `${sha256(raw).slice(0, 16)}.${ordinal}`;
 }
 
-const LABEL_RE = /^(?:\[[ xX]\][ \t]*)?(\*\*|__)((?:(?!\1).)+?)(?::\1|\1:)/;
+const OL_MARKER_RE = /^([ \t]*)\d{1,9}\.[ \t]+/;
 
-/** A step's bold label (`**Label:** …` or `**Label**: …`), or null. */
-export function stepLabel(text: string): string | null {
-  return LABEL_RE.exec(text.split("\n")[0]!.trim())?.[2]?.trim() ?? null;
+/** A list item's source lines as its key hashes them: a numbered item's first
+ *  line loses its number and the spaces after the `.` (a renumber pads those to
+ *  keep the marker's width), so `10. X` and `9.  X` read `.` + `X`. Every other
+ *  byte stays. */
+export function keyLines(raw: string, numbered: boolean): string {
+  return numbered ? raw.replace(OL_MARKER_RE, "$1.") : raw;
+}
+
+const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
+
+/**
+ * What a Done's log line says of the step: the first sentence of its first
+ * line with emphasis markers removed, so a bold label or opening stays as
+ * plain words with the rest of its sentence (`**Label:** rest. More.` gives
+ * `Label: rest.`). Only the first line, so step text cannot put a heading or a
+ * line break into `log.md`; component tags go; capped at
+ * `MOVES_STEP_CHARS` with an ellipsis.
+ */
+export function stepLogSentence(text: string): string {
+  const plain = text
+    .split("\n")[0]!
+    .replace(COMPONENT_TAG_RE, "")
+    .trim()
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/(^|[^\w*])\*(?=\S)([^*]*?\S)\*(?![\w*])/g, "$1$2")
+    .replace(/(^|[^\w_])_(?=\S)([^_]*?\S)_(?![\w_])/g, "$1$2")
+    .trim();
+  const end = sentenceEnd(plain);
+  const sentence = end === -1 ? plain : plain.slice(0, end);
+  const chars = [...sentence];
+  return chars.length > MOVES_STEP_CHARS ? `${chars.slice(0, MOVES_STEP_CHARS - 1).join("").trimEnd()}…` : sentence;
 }
 
 /** The `log.md` bullet a Done writes. */
-export function stepDoneLogLine(edit: { label: string | null; lead: string }): string {
-  return edit.label && edit.label !== edit.lead ? `Step done: ${edit.label} — ${edit.lead}` : `Step done: ${edit.lead}`;
+export function stepDoneLogLine(edit: { lead: string }): string {
+  return `Step done: ${edit.lead}`;
 }
 
 interface LaneRef {
@@ -171,7 +201,7 @@ function parsePage(text: string): Parsed | { error: string } {
             push({ text, lane, row: r, refusal: "the parser gave this step no source lines", raw: `\0nolines\0${text}`, list: b, item: k, laneRef: ref });
             return;
           }
-          const raw = src.map((n) => lines[from + n]!).join("\n");
+          const raw = keyLines(src.map((n) => lines[from + n]!).join("\n"), b.type === "ol");
           const nested = b.nested?.[k] ?? [];
           const refusal = nested.some((c) => c.type === "ul" || c.type === "ol")
             ? "the step holds a nested list: edit it on the page"
@@ -385,8 +415,7 @@ export function stepDoneEdit(text: string, key: string): StepDoneEdit {
     renumbered,
     laneRemoved,
     nextMovesRemoved,
-    label: stepLabel(step.text),
-    lead: leadSentence(step.text),
+    lead: stepLogSentence(step.text),
     text: step.text,
   };
 }

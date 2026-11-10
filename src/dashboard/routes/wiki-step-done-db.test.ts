@@ -137,7 +137,7 @@ describe("/api/wiki/step-done", () => {
       { line: 10, before: "2. Read the second note.", after: "1. Read the second note." },
       { line: 11, before: "3. Read the third note.", after: "2. Read the third note." },
     ]);
-    expect(p.logEntry).toBe("## [2026-11-10] step-done | Step fixture\n- Step done: Restart the server — so the bundle is fresh.");
+    expect(p.logEntry).toBe("## [2026-11-10] step-done | Step fixture\n- Step done: Restart the server: so the bundle is fresh.");
     expect(String(p.logNote)).toContain("if appending it fails");
     expect(await pageText()).toBe(PAGE);
   });
@@ -222,7 +222,7 @@ describe("/api/wiki/step-done", () => {
     expect((await post({ step: key, baseHash: l.baseHash })).status).toBe(400);
   });
 
-  test("a page with uncommitted edits is refused as a session editing it", async () => {
+  test("a page with uncommitted edits is refused, naming both causes", async () => {
     const dirty = `${PAGE}\nA hand edit.\n`;
     await Bun.write(path.join(root, REL), dirty);
     __resetWikiCacheForTest();
@@ -232,8 +232,24 @@ describe("/api/wiki/step-done", () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.dirty).toBe(true);
-    expect(String(body.error)).toContain("A session is editing");
+    expect(body.error).toBe(`${REL} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`);
     expect(await pageText()).toBe(dirty);
+  });
+
+  test("after a failed commit, the next Done's refusal does not blame a session (fix round 2, finding 2)", async () => {
+    commitResult = { committed: false, reason: "error" };
+    const { body: p } = await previewOf("Read the second note.");
+    const { body: l } = await list();
+    const w = (await (await post({ step: keyOf(l, "Read the second note."), baseHash: p.baseHash, previewHash: p.previewHash })).json()) as Record<string, unknown>;
+    expect(w).toMatchObject({ ok: true, uncommitted: true });
+    const { body: p2 } = await previewOf("Read the third note.");
+    const { body: l2 } = await list();
+    const res = await post({ step: keyOf(l2, "Read the third note."), baseHash: p2.baseHash, previewHash: p2.previewHash });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.dirty).toBe(true);
+    expect(String(body.error)).toContain("an earlier Done could not be committed");
+    expect(String(body.error)).not.toMatch(/^A session is editing/);
   });
 
   test("a failed commit says the page is left uncommitted", async () => {
@@ -243,6 +259,31 @@ describe("/api/wiki/step-done", () => {
     const res = await post({ step: keyOf(l, "Read the second note."), baseHash: p.baseHash, previewHash: p.previewHash });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, committed: false, uncommitted: true });
+  });
+
+  test("a key read before a Done still names its step after it: a second Done needs no GET (fix round 2, finding 1)", async () => {
+    const nine = PAGE.replace(
+      "1. **Restart the server:** so the bundle is fresh.\n2. Read the second note.\n3. Read the third note.",
+      Array.from({ length: 9 }, (_, k) => `${k + 1}. Nine-step ${k + 1}.`).join("\n"),
+    );
+    await Bun.write(path.join(root, REL), nine);
+    git("commit", "-q", "-am", "nine");
+    __resetWikiCacheForTest();
+    const { body: l } = await list();
+    const [k1, k2] = [keyOf(l, "Nine-step 1."), keyOf(l, "Nine-step 2.")];
+    const p1 = (await (await post({ step: k1, baseHash: l.baseHash, preview: true })).json()) as Record<string, unknown>;
+    const w1 = (await (await post({ step: k1, baseHash: l.baseHash, previewHash: p1.previewHash })).json()) as Record<string, unknown>;
+    expect(w1).toMatchObject({ ok: true, committed: true });
+    // No GET between: step 2's ORIGINAL key and the returned base hash.
+    const r2 = await post({ step: k2, baseHash: w1.baseHash, preview: true });
+    expect(r2.status).toBe(200);
+    const p2 = (await r2.json()) as Record<string, unknown>;
+    expect(p2.removed).toEqual([{ line: 9, text: "1. Nine-step 2." }]);
+    const w2 = await post({ step: k2, baseHash: w1.baseHash, previewHash: p2.previewHash });
+    expect(w2.status).toBe(200);
+    const after = await pageText();
+    expect(after).not.toContain("Nine-step 2.");
+    expect(after).toContain("1. Nine-step 3.\n2. Nine-step 4.");
   });
 
   test("a step with a nested list is refused, not written", async () => {

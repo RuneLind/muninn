@@ -12,7 +12,11 @@
  * the preview showed, the Gardener-held check, `writeWikiPage` inside the
  * per-wiki queue with a dirty-page `proceed`, the commit after it, the index
  * rebuilt after the commit. The response carries the new base hash, so a
- * second Done on the same page needs no other read.
+ * second Done on the same page needs no other read: a step's key leaves out
+ * its list number, so the keys read before the first Done still name every
+ * other step. The exception is a twin: among steps with the same text, each
+ * one after the done step moves down one ordinal, so its old key now names
+ * the next such twin, or none.
  */
 
 import path from "node:path";
@@ -176,7 +180,11 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
       proceed: async () => {
         const has = await pageHasUncommittedChanges(entry.root, target.relPath);
         if (has === false) return true;
-        dirty = has === null ? `${target.relPath}: git status failed, so its uncommitted edits are unknown` : `A session is editing ${target.relPath}: it has uncommitted edits. Try again when they are committed.`;
+        // Git cannot tell a session's edits from an earlier Done whose commit failed, so the text names both.
+        dirty =
+          has === null
+            ? `${target.relPath}: git status failed, so its uncommitted edits are unknown`
+            : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`;
         return false;
       },
       transform: (raw) => {

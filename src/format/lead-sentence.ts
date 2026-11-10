@@ -11,7 +11,7 @@ export const MOVES_STEP_CHARS = 160;
 
 /** Where the first sentence of `text` ends (the index after its `.`/`!`/`?`),
  *  or -1. A dot closing a known abbreviation is not an end. */
-function sentenceEnd(text: string): number {
+export function sentenceEnd(text: string): number {
   const re = /[.!?](?=\s|$)/g;
   for (let m = re.exec(text); m; m = re.exec(text)) {
     if (m[0] === ".") {

@@ -124,7 +124,7 @@ test.describe.serial("Done on a you step", () => {
     await expect(panel.locator(".wiki-step-done-lines")).toContainText("1. **Water the plants:** the ferns first.");
     await expect(panel).toContainText("2. Sort the blue folders. → 1. Sort the blue folders.");
     await expect(panel.locator(".wiki-step-done-log")).toContainText("step-done | Step fixture");
-    await expect(panel.locator(".wiki-step-done-log")).toContainText("- Step done: Water the plants — the ferns first.");
+    await expect(panel.locator(".wiki-step-done-log")).toContainText("- Step done: Water the plants: the ferns first.");
     await expect(panel).toContainText("if appending it fails, the page edit still stands");
     expect(await readFile(path.join(root, REL), "utf8")).toBe(page("Step fixture"));
   });
