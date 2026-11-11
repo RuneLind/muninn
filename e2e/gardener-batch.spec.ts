@@ -30,6 +30,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const DEAD_HUGINN = `http://127.0.0.1:${e2ePort("gardener-batch/dead-huginn")}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const BOT = "e2ebatch";
+const PLAIN_BOT = "e2ebatchplain";
 const COLLECTION = "youtube-summaries";
 
 let server: ChildProcess | undefined;
@@ -70,9 +71,16 @@ test.beforeAll(async () => {
   writeFileSync(path.join(wikiDir, "index.md"), "# Index\n");
   writeFileSync(path.join(botDir, "CLAUDE.md"), "# throwaway e2e bot\n");
   writeFileSync(path.join(botDir, "config.json"), JSON.stringify({ wikiDir }));
+  // A second bot whose wiki has no life/ domain (fix round 2 batch 1).
+  const plainDir = path.join(tmpRoot, "bots", PLAIN_BOT);
+  mkdirSync(plainDir, { recursive: true });
+  mkdirSync(path.join(tmpRoot, "plain-wiki", "sources"), { recursive: true });
+  writeFileSync(path.join(tmpRoot, "plain-wiki", "index.md"), "# Index\n");
+  writeFileSync(path.join(plainDir, "CLAUDE.md"), "# throwaway e2e bot\n");
+  writeFileSync(path.join(plainDir, "config.json"), JSON.stringify({ wikiDir: path.join(tmpRoot, "plain-wiki") }));
 
   sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
-  await sql`DELETE FROM wiki_proposals WHERE bot_name = ${BOT}`;
+  await sql`DELETE FROM wiki_proposals WHERE bot_name IN ${sql([BOT, PLAIN_BOT])}`;
   await seedDraft("ai1", "Agent Skills Primer", "agent-skills, claude-code");
   await seedDraft("ai2", "Local Model Hardware", "local-ai, hardware, streaming");
   await seedDraft("twinA", "Same Page", "claude-code");
@@ -95,6 +103,7 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       LOG_DIR: "none",
       [`TELEGRAM_BOT_TOKEN_${BOT.toUpperCase()}`]: "",
+      [`TELEGRAM_BOT_TOKEN_${PLAIN_BOT.toUpperCase()}`]: "",
     },
     stdio: "ignore",
   });
@@ -113,7 +122,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   try {
-    if (sql) await sql`DELETE FROM wiki_proposals WHERE bot_name = ${BOT}`;
+    if (sql) await sql`DELETE FROM wiki_proposals WHERE bot_name IN ${sql([BOT, PLAIN_BOT])}`;
   } finally {
     await sql?.end();
     if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
@@ -130,12 +139,12 @@ test("drafts are filed by their tags, and the same-page pair is left out of Appr
   const ent = head(page, "entertainment");
   await expect(other).toContainText("AI and tech");
   await expect(other).toContainText("4 drafts");
-  await expect(other.locator('[data-batch-action="approve"]')).toHaveText("Approve all 2 of 4");
+  await expect(other.locator('[data-batch-action="approve"]')).toHaveText("Approve 2 of 4 AI drafts");
   await expect(other.locator('[data-batch-action="reject"]')).toHaveCount(0);
   await expect(other.locator(".gard-batch-note")).toHaveText("left for you: 2 another draft writes the same page");
   await expect(ent).toContainText("2 drafts");
-  await expect(ent.locator('[data-batch-action="approve"]')).toHaveText("Approve all 2");
-  await expect(ent.locator('[data-batch-action="reject"]')).toHaveText("Reject all 2");
+  await expect(ent.locator('[data-batch-action="approve"]')).toHaveText("Approve all 2 Entertainment drafts");
+  await expect(ent.locator('[data-batch-action="reject"]')).toHaveText("Reject all 2 Entertainment drafts");
   // "AI and tech" leads, and each film card sits under the entertainment header.
   const order = await page.locator(".gard-batch-head").evaluateAll((els) => els.map((e) => e.getAttribute("data-batch-section")));
   expect(order).toEqual(["ai", "entertainment"]);
@@ -249,7 +258,7 @@ test("a batch takes only the drafts on screen at the click, never one that arriv
   await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
   await seedDraft("u1", "Seen Draft", "claude-code");
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
-  await expect(head(page, "ai").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1");
+  await expect(head(page, "ai").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1 AI draft");
   await seedDraft("u2", "Unseen Draft", "claude-code");
   await head(page, "ai").locator('[data-batch-action="approve"]').click();
   await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
@@ -327,7 +336,7 @@ test("a page edited after the click's listing drops its update draft from the ba
     RETURNING id`;
   ids.drift = row!.id;
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
-  await expect(head(page, "ai").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1");
+  await expect(head(page, "ai").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1 AI draft");
   writeFileSync(path.join(wikiDir, rel), before + "\nEdited by hand.\n");
   await head(page, "ai").locator('[data-batch-action="approve"]').click();
   await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("0 of 0 approved");
@@ -495,4 +504,22 @@ test("the section chips count what the status and kind filters let through", asy
   await page.locator('#gardFilters .gard-filter[data-kind=""]').click();
   await page.locator('#gardFilters .gard-filter[data-status="applied"]').click();
   await expect(chip("life")).toHaveText("Life 0");
+});
+
+// Fix round 2 batch 1 (batch-1 verify finding 2): a wiki with no life domain hides the chips.
+test("a wiki with no life/ rows hides the section chips and calls its one section Drafts", async ({ page }) => {
+  await sql!`
+    INSERT INTO wiki_proposals (bot_name, topic_key, kind, mode, target_path, draft, source_docs, status)
+    VALUES (${PLAIN_BOT}, 'source:e2e:plain', 'source', 'create', 'sources/Plain Page.mdx', ${page_("Plain Page", "claude-code")},
+            ${sql!.json([{ collection: COLLECTION, docId: "e2e-batch/plain.md", title: "Plain Page", url: "" }])}, 'draft')`;
+  await page.goto(`${BASE}/wiki/gardener?bot=${PLAIN_BOT}`);
+  await expect(head(page, "ai")).toContainText("Drafts");
+  await expect(head(page, "ai").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1 draft");
+  for (const s of ["", "ai", "life", "entertainment"]) {
+    await expect(page.locator(`#gardFilters .gard-filter[data-section="${s}"]`)).toBeHidden();
+  }
+  await expect(page.locator('#gardFilters .gard-filter[data-kind="lint"]')).toBeVisible();
+  // And on the bot with a life domain they show.
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await expect(page.locator('#gardFilters .gard-filter[data-section="life"]')).toBeVisible();
 });

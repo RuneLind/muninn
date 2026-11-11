@@ -377,6 +377,7 @@ function batchSectionsHtml(shown: ProposalView[]): string {
     html += batchHeadHtml({
       section: key,
       label: sectionLabel(key, allProposals),
+      noun: hasLifeDomain(allProposals) ? BATCH_SECTIONS.find((b) => b.key === key)!.chip : "",
       cards: shown,
       count: inSection.length,
       progress: batchState.get(key) ?? null,

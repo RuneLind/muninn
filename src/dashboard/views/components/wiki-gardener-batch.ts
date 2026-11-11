@@ -231,6 +231,8 @@ function skippedText(skipped: Map<string, number>): string {
 export function batchHeadHtml(opts: {
   section: BatchSection;
   label: string;
+  /** The section's name on its buttons ("AI"), or "" on a wiki with one section. */
+  noun?: string;
   cards: readonly BatchCard[];
   count: number;
   progress: BatchProgress | null;
@@ -249,14 +251,18 @@ export function batchHeadHtml(opts: {
     html += `<button class="gard-btn gard-batch-stop" data-batch-stop>${progress.stopped ? "Stopping…" : "Stop"}</button>`;
   } else {
     const dis = anyRunning ? " disabled" : "";
+    // Each button names its section, since every batch acts on one section only.
+    const drafts = (m: number) => `${opts.noun ? opts.noun + " " : ""}draft${m === 1 ? "" : "s"}`;
     if (approve.ids.length) {
-      // "N of M" when it leaves some for a human; the reason line says which.
+      // "Approve N of M" when it leaves some for a human; the reason line says which.
       const left = [...approve.skipped.values()].reduce((a, b) => a + b, 0);
       const n = approve.ids.length;
-      html += `<button class="gard-btn gard-approve" data-batch-action="approve" data-batch="${esc(section)}"${dis}>Approve all ${left ? `${n} of ${n + left}` : n}</button>`;
+      const text = left ? `Approve ${n} of ${n + left} ${drafts(n + left)}` : `Approve all ${n} ${drafts(n)}`;
+      html += `<button class="gard-btn gard-approve" data-batch-action="approve" data-batch="${esc(section)}"${dis}>${esc(text)}</button>`;
     }
     if (section === "entertainment" && reject.ids.length) {
-      html += `<button class="gard-btn gard-reject" data-batch-action="reject" data-batch="${esc(section)}"${dis}>Reject all ${reject.ids.length}</button>`;
+      const n = reject.ids.length;
+      html += `<button class="gard-btn gard-reject" data-batch-action="reject" data-batch="${esc(section)}"${dis}>Reject all ${n} ${esc(drafts(n))}</button>`;
     }
   }
   html += "</span>";

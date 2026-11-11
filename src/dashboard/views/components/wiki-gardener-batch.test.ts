@@ -70,10 +70,10 @@ describe("batchHeadHtml", () => {
     batchHeadHtml({ section, label: "L", cards, count: 1, progress: null, anyRunning: false, ...over });
 
   test("Approve all counts what the batch takes; only entertainment offers Reject all", () => {
-    expect(head("ai")).toContain(">Approve all 1 of 2<");
+    expect(head("ai")).toContain(">Approve 1 of 2 drafts<");
     expect(head("ai")).not.toContain("Reject all");
     expect(head("ai")).toContain("left for you: 1 fact-check lock");
-    expect(head("entertainment")).toContain(">Reject all 1<");
+    expect(head("entertainment")).toContain(">Reject all 1 draft<");
   });
 
   test("a running batch shows Stop; another running batch disables the buttons", () => {
@@ -230,13 +230,27 @@ describe("hasLifeDomain and the AI label", () => {
 
 // Fix round 1 batch 2 (review findings 2, 5) and the two asks: a total chip, "N of M".
 describe("batch 2", () => {
-  test("Approve all names what it skips: N of M; no skip reads plain", () => {
+  test("with no skip the button reads plain Approve all N", () => {
     const html = batchHeadHtml({ section: "ai", label: "L", cards: [card("a"), card("b")], count: 2, progress: null, anyRunning: false });
-    expect(html).toContain(">Approve all 2<");
+    expect(html).toContain(">Approve all 2 drafts<");
   });
 
   test("a lifestyle/ path is not Life", () => {
     expect(sectionOf(card("x", { targetPath: "lifestyle/x.mdx" }))).toBe("ai");
+    expect(sectionOf(card("y", { targetPath: "projects/life/y.md" }))).toBe("ai");
     expect(hasLifeDomain([card("x", { targetPath: "lifestyle/x.mdx" }), card("y", { targetPath: "projects/life/y.md" })])).toBe(false);
   });
+});
+
+// Fix round 2 batch 1: each button names its section (the user's ask).
+test("the buttons name their section, and a wiki with no life domain says plain drafts", () => {
+  const cards = [card("a"), card("t1", { targetPath: "p.mdx" }), card("t2", { targetPath: "p.mdx" })];
+  const html = (section: "ai" | "entertainment", noun: string) =>
+    batchHeadHtml({ section, label: "L", cards, count: 3, progress: null, anyRunning: false, noun });
+  expect(html("ai", "AI")).toContain(">Approve 1 of 3 AI drafts<");
+  expect(html("ai", "")).toContain(">Approve 1 of 3 drafts<");
+  const ent = [card("e", { targetPath: "life/e.mdx", category: "entertainment" })];
+  const entHtml = batchHeadHtml({ section: "entertainment", label: "L", cards: ent, count: 1, progress: null, anyRunning: false, noun: "Entertainment" });
+  expect(entHtml).toContain(">Approve all 1 Entertainment draft<");
+  expect(entHtml).toContain(">Reject all 1 Entertainment draft<");
 });
