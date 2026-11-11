@@ -2827,6 +2827,8 @@ no key. Acceptance: `strength.test.ts`,
 `session-refs.test.ts`, `routes/wiki-near.test.ts`,
 `views/components/wiki-find.test.ts` and `e2e/wiki-find.spec.ts`.
 
+**The query log** (`find-log.ts`, `POST /api/wiki/find-log`). Each palette session that typed two characters or more appends one line to `~/.muninn/wiki-find/queries.jsonl` (`WIKI_FIND_LOG_DIR`): the text, the row opened (wiki, relPath, rank, `local` or `everywhere`) or `null` for an Escape or a scrim click, and the row counts. `findLogBody` (`wiki-find.ts`) decides what is sent; a new-tab open keeps the palette up, so a later dismissal of the same text is not sent. A modifier or middle click on a row is the link's own and is not seen; a Back press logs nothing. The route is JSON-gated and in the `wiki` group, so a pod has none; the palette sends only where Everywhere is served.
+
 **Find everywhere** (`GET /api/wiki/find-everywhere?q=&limit=`, default 20,
 max 50; core `src/wiki/find-everywhere.ts`, route
 `dashboard/routes/wiki-find-everywhere.ts`). Tier 2 of the palette: one query

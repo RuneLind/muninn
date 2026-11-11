@@ -26,7 +26,7 @@
  */
 
 import { anchorNow, displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { applySeriesChip, everywhereRequestQuery, rankFind, type FindResult } from "./wiki-find.ts";
+import { applySeriesChip, everywhereRequestQuery, findLogBody, rankFind, type FindLogOpened, type FindResult } from "./wiki-find.ts";
 import {
   FIND_CHIPS_ID,
   FIND_EVERY_ID,
@@ -102,6 +102,8 @@ let everySettled: FindEverywhereState | null = null;
 let everyShown: FindEverywhereResult[] = [];
 let everyTimer: ReturnType<typeof setTimeout> | null = null;
 let everyCtrl: AbortController | null = null;
+/** The text whose row this palette session already opened (see `findLogBody`). */
+let openedQ: string | null = null;
 const mac = typeof navigator !== "undefined" && isMacPlatform(navigator.platform || navigator.userAgent || "");
 
 export function isFindOpen(): boolean {
@@ -360,14 +362,26 @@ function scheduleRender(): void {
   }, FIND_DEBOUNCE_MS);
 }
 
+/** One line to the query log (`POST /api/wiki/find-log`): the text and the row
+ *  opened, or `null` for a dismissal. Fire and forget; `keepalive` lets it
+ *  outlive the page load a cross-wiki open starts. */
+function logFind(opened: FindLogOpened | null): void {
+  if (!port || !port.everywhere()) return;
+  const body = findLogBody(input()?.value ?? "", opened, { wiki: port.selfWiki(), local: localCount(), everywhere: everyShown.length, openedQ });
+  if (!body) return;
+  if (opened) openedQ = body.q;
+  void fetch("/api/wiki/find-log", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), keepalive: true }).catch(() => {});
+}
+
 function openRow(i: number, newTab: boolean): void {
   if (!port) return;
   if (i >= localCount()) {
-    openEverywhereRow(everyShown[i - localCount()], newTab);
+    openEverywhereRow(everyShown[i - localCount()], newTab, i);
     return;
   }
   const row = result?.rows[i];
   if (!row) return;
+  logFind({ wiki: port.selfWiki(), relPath: row.page.relPath, rank: i, section: "local" });
   if (newTab) {
     window.open(port.hrefFor(row.page.relPath), "_blank", "noopener");
     return;
@@ -378,8 +392,9 @@ function openRow(i: number, newTab: boolean): void {
 }
 
 /** An Everywhere row: this wiki's page opens in place, another wiki's loads. */
-function openEverywhereRow(r: FindEverywhereResult | undefined, newTab: boolean): void {
+function openEverywhereRow(r: FindEverywhereResult | undefined, newTab: boolean, rank: number): void {
   if (!r || !port) return;
+  logFind({ wiki: r.wiki, relPath: r.relPath, rank, section: "everywhere" });
   const href = everywhereHref(r.wiki, r.relPath);
   if (newTab) {
     window.open(href, "_blank", "noopener");
@@ -432,6 +447,9 @@ export function openFind(): void {
 
 /** Close and, unless a row is being opened, give focus back to the opener. */
 export function closeFind(returnFocus = true): void {
+  // Every in-place open closes with `false` after logging its row.
+  if (returnFocus) logFind(null);
+  openedQ = null;
   if (debounce) {
     clearTimeout(debounce);
     debounce = null;

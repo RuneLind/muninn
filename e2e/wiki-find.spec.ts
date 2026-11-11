@@ -40,7 +40,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { utimesSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
@@ -121,6 +121,7 @@ test.beforeAll(async () => {
       MUNINN_BOTS_DIR: botsDir,
       KNOWLEDGE_API_URL: `http://127.0.0.1:${DEAD_HUGINN}`,
       CLAUDE_USAGE_URL: `http://127.0.0.1:${DEAD_LEDGER}`,
+      WIKI_FIND_LOG_DIR: path.join(botsDir, "find-log"),
     },
     stdio: "ignore",
   });
@@ -311,6 +312,29 @@ test("Enter opens the active row", async ({ page }) => {
   await expect(palette(page)).toHaveCount(0);
   await expect(page.locator(".wiki-article-head h1")).toHaveText("Four fix rounds on widget #500");
   expect(new URL(page.url()).searchParams.get("relPath")).toBe("archive/four-fix-rounds.mdx");
+});
+
+test("the query log gets the opened row for an Enter and a null for an Escape", async ({ page }) => {
+  const logged = async (q: string) => {
+    const text = await readFile(path.join(botsDir, "find-log", "queries.jsonl"), "utf8").catch(() => "");
+    return text.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.q === q);
+  };
+  await openReader(page);
+  await find(page, "fix rounds log-open");
+  await input(page).fill("fix rounds");
+  await expect(rows(page).first()).toHaveAttribute("data-relpath", "archive/four-fix-rounds.mdx");
+  await page.keyboard.press("Enter");
+  await expect(palette(page)).toHaveCount(0);
+  await find(page, "ledger notes");
+  await page.keyboard.press("Escape");
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await logged("ledger notes")).length).toBeGreaterThan(0);
+  const miss = (await logged("ledger notes")).at(-1);
+  expect(miss.opened).toBeNull();
+  expect(miss.wiki).toBe(WIKI);
+  expect(miss.rows.local).toBe(3);
+  const hit = (await logged("fix rounds")).at(-1);
+  expect(hit.opened).toEqual({ wiki: WIKI, relPath: "archive/four-fix-rounds.mdx", rank: 0, section: "local" });
 });
 
 test("Escape in focus mode closes the palette and keeps focus mode", async ({ page }) => {

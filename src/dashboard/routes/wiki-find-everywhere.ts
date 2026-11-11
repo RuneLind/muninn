@@ -8,6 +8,9 @@
  * unconfigured leg is reported in `sources`. The request's own abort signal
  * reaches every upstream call, so a palette fetch the reader abandoned stops
  * the huginn and claude-usage reads behind it.
+ *
+ * `POST /api/wiki/find-log` appends one line to the palette's query log
+ * (`src/wiki/find-log.ts`): what was typed and which row was opened, if any.
  */
 
 import type { Hono } from "hono";
@@ -18,6 +21,8 @@ import { ClaudeUsageHttpError, ClaudeUsageReadError, claudeUsageJson } from "../
 import { sameWikiRoot } from "../../wiki/readonly.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
+import { appendFindLog, findLogLine, type FindLogLine } from "../../wiki/find-log.ts";
+import { requireJsonRequest } from "./json-request.ts";
 import {
   HUGINN_MAX_BYTES,
   LegFetchError,
@@ -213,6 +218,14 @@ export function __setFindEverywhereDepsForTest(deps?: FindEverywhereDeps | ((sig
   depsOverride = deps === undefined ? null : typeof deps === "function" ? deps : (signal) => ({ ...deps, signal });
 }
 
+export const FIND_LOG_PATH = "/api/wiki/find-log";
+let findLogAppend: ((line: FindLogLine) => Promise<void>) | null = null;
+
+/** Test seam: where the find-log route appends. No argument restores the file. */
+export function __setFindLogAppendForTest(append?: (line: FindLogLine) => Promise<void>): void {
+  findLogAppend = append ?? null;
+}
+
 export function registerWikiFindEverywhereRoute(app: Hono, config: Config): void {
   app.get("/api/wiki/find-everywhere", async (c) => {
     const q = c.req.query("q") ?? "";
@@ -226,5 +239,19 @@ export function registerWikiFindEverywhereRoute(app: Hono, config: Config): void
     logLegFailures(body, { huginn: hostOf(config.knowledgeApiUrl), sessions: hostOf(config.claudeUsageUrl) });
     c.header("Cache-Control", "no-store");
     return c.json(body);
+  });
+
+  app.post(FIND_LOG_PATH, async (c) => {
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
+    try {
+      const line = findLogLine(await c.req.json().catch(() => null), Date.now());
+      if (!line) return c.json({ error: "not a find-log line" }, 400);
+      await (findLogAppend ?? appendFindLog)(line);
+      return c.body(null, 204);
+    } catch (err) {
+      log.warn("find-log append failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "the query log could not be written" }, 500);
+    }
   });
 }

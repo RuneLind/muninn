@@ -680,3 +680,28 @@ export function highlightFind(text: string, terms: readonly string[]): string {
   }
   return out + escHtml(text.slice(at));
 }
+
+/** The row a palette session opened, as the query log names it. */
+export interface FindLogOpened {
+  wiki: string;
+  relPath: string;
+  rank: number;
+  section: "local" | "everywhere";
+}
+
+/**
+ * The body `POST /api/wiki/find-log` gets for one palette session, or `null`
+ * when there is nothing to log: no text of two characters or more, or a
+ * dismissal of text that already opened a row (a new-tab open keeps the
+ * palette up, so its later Escape is not a miss).
+ */
+export function findLogBody(
+  raw: string,
+  opened: FindLogOpened | null,
+  s: { wiki: string; local: number; everywhere: number; openedQ: string | null },
+): { wiki: string; q: string; opened: FindLogOpened | null; rows: { local: number; everywhere: number } } | null {
+  const q = raw.trim().slice(0, 200);
+  if (q.length < 2 || !s.wiki) return null;
+  if (opened === null && s.openedQ === q) return null;
+  return { wiki: s.wiki, q, opened, rows: { local: s.local, everywhere: s.everywhere } };
+}
