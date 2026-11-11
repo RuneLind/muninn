@@ -101,10 +101,13 @@ export function pageTargets(cards: readonly BatchCard[]): PageTargets {
 
 /**
  * Why one card's answer ends the whole batch, or null. A 5xx, an `error`
- * outcome, a read-only 403 or a network failure is a fault every later card
- * shares (no wikiDir, wiki not registered, a disk error), and each `error`
- * answer has already turned its row terminal. A 409 or a `stale` outcome is
- * that card's own, and the batch moves on.
+ * outcome, a read-only 403 or a network failure stops it. Many of those are
+ * faults every later card would share (no wikiDir, wiki not registered, a
+ * read-only wiki, a disk error), and an `error` answer has already turned its
+ * row terminal, so the batch stops rather than risk burning the section; some
+ * 500s are one card's own (an unindexed target, path confinement), which costs
+ * one more click. A 409 or a `stale` outcome is that card's own, and the batch
+ * moves on.
  */
 export function batchStopReason(r: { status: number; outcome: string; error: string }): string | null {
   if (r.status === 0 || r.status === 403 || r.status >= 500 || r.outcome === "error") {
@@ -185,7 +188,7 @@ export function batchProgressText(b: BatchProgress): string {
   if (b.running && b.preparing) return `Checking the listing before ${verbing.toLowerCase()} ${b.total}…`;
   if (b.running) return `${verbing} ${b.done + 1} of ${b.total}…${failed}`;
   const ok = b.done - b.failed;
-  const head = b.haltedBy ? `Stopped on a server error (${b.haltedBy}): ` : b.stopped ? "Stopped: " : "";
+  const head = b.haltedBy ? `Stopped after an error (${b.haltedBy}): ` : b.stopped ? "Stopped: " : "";
   return `${head}${ok} of ${b.total} ${verbed}${failed}`;
 }
 

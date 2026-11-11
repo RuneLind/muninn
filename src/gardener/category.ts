@@ -8,7 +8,9 @@
  * `sources/` and keeps its `entertainment` tag), and its frontmatter `tags:`
  * carry one of the tags below. Measured 2026-11-11 on 32 jarvis drafts: the 7
  * film/TV drafts match, none of the other 25 does. A plain `streaming` tag is
- * left out: it also means LLM token streaming.
+ * left out (it also means LLM token streaming), and so is `documentary`:
+ * `life/` holds health and parenting pages, and a documentary there is not
+ * one to reject with the films.
  */
 
 import { parseFrontmatter } from "../wiki/store.ts";
@@ -26,8 +28,6 @@ const ENTERTAINMENT_TAGS = new Set([
   "movie-list",
   "movie-review",
   "cinema",
-  "documentary",
-  "documentaries",
   "television",
   "tv",
   "tv-series",
@@ -47,14 +47,23 @@ const ENTERTAINMENT_TAGS = new Set([
 ]);
 
 /** The draft's tags: an inline list or a comma string through `parseFrontmatter`,
- *  else a block list (`tags:` then `- item` lines), which it does not read. */
+ *  else a block list, which it does not read: `tags:` with no value, then
+ *  `- item` lines at any indent (zero included), blank lines allowed between
+ *  them, up to the next key. */
 function draftTags(draft: string): string[] {
   const raw = parseFrontmatter(draft).tags;
   if (Array.isArray(raw)) return raw;
   if (typeof raw === "string") return raw.split(",");
-  const fm = splitFrontmatter(draft).frontmatter ?? "";
-  const block = /^tags:[ \t]*\r?\n((?:[ \t]+-[^\n]*\n?)+)/m.exec(fm);
-  return block ? block[1]!.split("\n").map((l) => l.replace(/^\s*-\s*/, "")) : [];
+  const lines = (splitFrontmatter(draft).frontmatter ?? "").split("\n").map((l) => l.replace(/\r$/, ""));
+  const start = lines.findIndex((l) => /^tags:[ \t]*$/.test(l));
+  if (start < 0) return [];
+  const tags: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    const item = /^[ \t]*-[ \t]*(.*)$/.exec(line);
+    if (item) tags.push(item[1]!);
+    else if (line.trim()) break;
+  }
+  return tags;
 }
 
 /** The category of a draft at `targetPath`, or null. */

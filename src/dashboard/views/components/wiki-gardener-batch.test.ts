@@ -172,3 +172,9 @@ describe("planBatch — an applied twin blocks only a draft made before it", () 
     expect(Object.fromEntries(plan.skipped)).toEqual({ "page written since drafting": 1 });
   });
 });
+
+// Fix round 2 batch 3 (batch-1 verify finding 2).
+test("a halted batch says it stopped after an error, not that the fault is shared", () => {
+  const b = { section: "other" as const, verb: "approve" as const, total: 3, done: 1, failed: 1, running: false, stopped: false, haltedBy: "path confinement failed" };
+  expect(batchProgressText(b)).toBe("Stopped after an error (path confinement failed): 0 of 3 approved · 1 failed (see the cards)");
+});

@@ -33,7 +33,7 @@ describe("proposalCategory — domain and wider tags", () => {
   });
 
   test("documentary, review and other platform tags count", () => {
-    for (const tags of ["[documentary, history]", "[hulu, thriller]", "[movie-review]", "[k-drama]", "[paramount-plus]"]) {
+    for (const tags of ["[film-review, history]", "[hulu, thriller]", "[movie-review]", "[k-drama]", "[paramount-plus]"]) {
       expect(proposalCategory(page(tags), "life/sources/X.mdx")).toBe("entertainment");
     }
   });
@@ -41,5 +41,18 @@ describe("proposalCategory — domain and wider tags", () => {
   test("a block-style tags list is read too", () => {
     const draft = "---\ntitle: X\ntags:\n  - film\n  - countdown\n---\n\n# X\n";
     expect(proposalCategory(draft, "life/sources/X.mdx")).toBe("entertainment");
+  });
+});
+
+// Fix round 2 batch 3 (batch-2 verify findings 1, 4).
+describe("proposalCategory — block lists and documentaries", () => {
+  test("a zero-indent block list and one with a blank line inside are read", () => {
+    expect(proposalCategory("---\ntitle: X\ntags:\n- film\n- countdown\n---\n\n# X\n", LIFE)).toBe("entertainment");
+    expect(proposalCategory("---\ntitle: X\ntags:\n  - countdown\n\n  - film\nurl: u\n---\n\n# X\n", LIFE)).toBe("entertainment");
+    expect(proposalCategory("---\ntitle: X\ntags:\n  - countdown\nurl: film\n---\n\n# X\n", LIFE)).toBeNull();
+  });
+
+  test("a documentary tag alone does not file a life/ page as entertainment: health and parenting documentaries live there too", () => {
+    expect(proposalCategory(page("[documentary, longevity, health]"), LIFE)).toBeNull();
   });
 });
