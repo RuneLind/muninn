@@ -418,6 +418,9 @@ export const E2E_PORTS = {
   // spec binding it, which would quietly turn those assertions into a live-ledger
   // run.
   "plans-write/dead-ledger": 8799,
+  "gardener-batch": 3243,
+  // Not bound: approve's reindex points here so it fails fast on a refused connect.
+  "gardener-batch/dead-huginn": 8800,
 } as const;
 
 export type E2ePortName = keyof typeof E2E_PORTS;

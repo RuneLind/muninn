@@ -37,6 +37,16 @@ import {
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
 import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
 import { approveButtonFor, FACTCHECK_UNKNOWN_NOTE, singleDriftNote } from "./wiki-gardener-drift.ts";
+import {
+  BATCH_SECTIONS,
+  batchHeadHtml,
+  isBatchCard,
+  planBatch,
+  sectionOf,
+  type BatchProgress,
+  type BatchSection,
+  type BatchVerb,
+} from "./wiki-gardener-batch.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 interface SourceDoc {
@@ -90,6 +100,8 @@ interface ProposalView {
   staleChanged?: string | null;
   /** A superseded `stale-check` group's row: the group that replaced it. */
   replacedByGroup?: string | null;
+  /** Ungrouped drafts: the batch section the card is filed under. */
+  category?: string | null;
 }
 interface ProposalsResponse {
   proposals: ProposalView[];
@@ -313,9 +325,41 @@ function factcheckNoteHtml(p: ProposalView): string {
   return `<div class="gard-fc-note info" data-fc="missing-block">The source doc was fact-checked (${esc(date)}), but this draft carries no fact-check block or Fact check section.</div>`;
 }
 
+function shownProposals(): ProposalView[] {
+  return allProposals.filter((p) => (!statusFilter || p.status === statusFilter) && kindMatches(p.kind, kindFilter));
+}
+
+/** The ungrouped drafts, filed by section under a header with the batch verbs.
+ *  Empty when the view holds no such draft. */
+function batchSectionsHtml(shown: ProposalView[]): string {
+  const drafts = shown.filter(isBatchCard);
+  // A section a batch just emptied keeps its header, so the result stays on screen.
+  if (!drafts.length && !batchState.size) return "";
+  let html = "";
+  for (const { key, label } of BATCH_SECTIONS) {
+    const inSection = drafts.filter((p) => sectionOf(p) === key);
+    if (!inSection.length && !batchState.has(key)) continue;
+    html += batchHeadHtml({
+      section: key,
+      label,
+      cards: shown,
+      count: inSection.length,
+      progress: batchState.get(key) ?? null,
+      anyRunning: !!runningBatch,
+      redrafting: redraftsInFlight,
+      all: allProposals,
+    });
+    for (const p of inSection) html += cardHtml(p);
+  }
+  if (shown.some((p) => !isBatchCard(p))) {
+    html += '<div class="gard-batch-head"><span class="gard-batch-label">Other proposals</span></div>';
+  }
+  return html;
+}
+
 function render(): void {
   const list = document.getElementById("gardList")!;
-  const shown = allProposals.filter((p) => (!statusFilter || p.status === statusFilter) && kindMatches(p.kind, kindFilter));
+  const shown = shownProposals();
   if (!shown.length) {
     list.innerHTML =
       '<div class="gard-empty">' +
@@ -331,8 +375,9 @@ function render(): void {
   // never decide which rows a card holds, or a half-applied group renders as a
   // two-page fix with the applied member silently missing.
   const emitted = new Set<string>();
-  let html = "";
+  let html = batchSectionsHtml(shown);
   for (const p of shown) {
+    if (isBatchCard(p)) continue;
     if (!p.groupKey) {
       html += cardHtml(p);
       continue;
@@ -344,6 +389,10 @@ function render(): void {
   list.innerHTML = html;
   // A Redraft's state lives here, not on the card this render just replaced.
   for (const id of new Set([...redraftsInFlight, ...redraftNotes.keys()])) paintRedraftState(id);
+  // Cards a running batch has still to reach keep their buttons disabled.
+  for (const id of batchQueued) {
+    cardById(id)?.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
+  }
   // A group's outcome note lives on the card, which this render just replaced.
   // Re-paint whatever the last group action said, or a `Stopped at …` note is
   // wiped by the very reload the stop triggers.
@@ -386,8 +435,9 @@ const JSON_POST: RequestInit = {
 type CardAction = "approve" | "reject" | "redraft";
 
 /** Proposals with a Redraft in flight, and the last Redraft answer per
- *  proposal. Kept outside the DOM so every re-render (a poll, a filter, an
- *  inspector action) paints them again instead of re-enabling the card. */
+ *  proposal (a batch's per-card failure lands in `redraftNotes` too). Kept
+ *  outside the DOM so every re-render (a poll, a filter, an inspector action)
+ *  paints them again instead of re-enabling the card. */
 const redraftsInFlight = new Set<string>();
 const redraftNotes = new Map<string, { text: string; kind: "ok" | "err" | "" }>();
 const REDRAFTING = "Redrafting… (a model call, up to a few minutes)";
@@ -434,37 +484,105 @@ function unlockButtons(buttons: NodeListOf<Element>): void {
   });
 }
 
+/**
+ * POST one card's approve/reject and fold a terminal outcome into the local
+ * row. A 500 that reports `outcome: "error"` flips the row too: the server has
+ * marked it `error`, and a card still showing Approve would only 409.
+ */
+async function postAction(
+  id: string,
+  action: "approve" | "reject",
+): Promise<{ ok: true; outcome: string } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(
+      withBot("/api/wiki/proposals/" + encodeURIComponent(id) + "/" + action),
+      JSON_POST,
+    );
+    const data = (await jsonOrNull(res)) ?? {};
+    const outcome = typeof data.outcome === "string" ? data.outcome : "";
+    const p = allProposals.find((x) => x.id === id);
+    if (p && ["applied", "stale", "rejected", "error"].includes(outcome)) {
+      p.status = outcome;
+      p.resolvedAt = Date.now();
+    }
+    if (!res.ok) return { ok: false, error: String(data.error || "Failed (" + res.status + ")") };
+    return { ok: true, outcome };
+  } catch (err) {
+    return { ok: false, error: "Network error: " + (err as Error).message };
+  }
+}
+
 async function act(id: string, action: CardAction, card: HTMLElement): Promise<void> {
   if (action === "redraft") return redraft(id);
   redraftNotes.delete(id);
   const buttons = card.querySelectorAll(".gard-btn");
   buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
   setOutcome(card, action === "approve" ? "Applying…" : "Rejecting…", "");
-  try {
-    const res = await fetch(
-      withBot("/api/wiki/proposals/" + encodeURIComponent(id) + "/" + action),
-      JSON_POST,
-    );
-    const data = await res.json();
-    if (!res.ok) {
-      setOutcome(card, data.error || "Failed (" + res.status + ")", "err");
+  const r = await postAction(id, action);
+  if (!r.ok) {
+    if (allProposals.find((x) => x.id === id)?.status === "draft") {
+      setOutcome(card, r.error, "err");
       unlockButtons(buttons);
-      return;
+    } else {
+      redraftNotes.set(id, { text: r.error, kind: "err" });
+      render();
+      rerenderStrip();
     }
-    // Update local state + re-render so the status chip + filters reflect the outcome.
-    const p = allProposals.find((x) => x.id === id);
-    if (p) {
-      p.status = ["applied", "stale", "rejected", "error"].includes(data.outcome)
-        ? data.outcome
-        : p.status;
-      p.resolvedAt = Date.now();
+    return;
+  }
+  // Re-render so the status chip + filters reflect the outcome.
+  render();
+  // A draft that just got applied/rejected changes "drafts awaiting review".
+  rerenderStrip();
+}
+
+/** The last batch per section (running or finished), the one running now, and
+ *  the ids it has still to reach. Outside the DOM, like the Redraft state. */
+const batchState = new Map<BatchSection, BatchProgress>();
+let runningBatch: BatchProgress | null = null;
+const batchQueued = new Set<string>();
+
+/**
+ * Approve or reject a whole section, one card at a time through the per-card
+ * route, so every server guard runs and each card settles as it goes. Strictly
+ * sequential: approves on one wiki serialize on its write queue anyway. A
+ * failed card keeps its note and the batch moves on; Stop ends it after the
+ * card in flight.
+ */
+async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
+  if (runningBatch) return;
+  const { ids } = planBatch(shownProposals(), section, verb, redraftsInFlight, allProposals);
+  if (!ids.length) return;
+  const prog: BatchProgress = { section, verb, total: ids.length, done: 0, failed: 0, running: true, stopped: false };
+  batchState.set(section, prog);
+  runningBatch = prog;
+  for (const id of ids) {
+    batchQueued.add(id);
+    redraftNotes.delete(id);
+  }
+  render();
+  try {
+    for (const id of ids) {
+      if (prog.stopped) break;
+      const r = await postAction(id, verb);
+      const settled = verb === "approve" ? "applied" : "rejected";
+      if (!r.ok) {
+        prog.failed++;
+        redraftNotes.set(id, { text: r.error, kind: "err" });
+      } else if (r.outcome !== settled) {
+        prog.failed++;
+        redraftNotes.set(id, { text: `Not ${settled}: ${r.outcome || "unknown outcome"}`, kind: "err" });
+      }
+      batchQueued.delete(id);
+      prog.done++;
+      if (prog.done < prog.total && !prog.stopped) render();
     }
+  } finally {
+    prog.running = false;
+    runningBatch = null;
+    batchQueued.clear();
     render();
-    // A draft that just got applied/rejected changes "drafts awaiting review".
     rerenderStrip();
-  } catch (err) {
-    setOutcome(card, "Network error: " + (err as Error).message, "err");
-    unlockButtons(buttons);
   }
 }
 
@@ -604,6 +722,22 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
       const open = panel.classList.toggle("open");
       toggle.textContent = (open ? "Hide " : "Show ") + section;
     }
+    return;
+  }
+
+  if (target.closest("[data-batch-stop]")) {
+    if (runningBatch) {
+      runningBatch.stopped = true;
+      render();
+    }
+    return;
+  }
+  const batchBtn = target.closest("[data-batch-action]");
+  if (batchBtn) {
+    void runBatch(
+      batchBtn.getAttribute("data-batch") as BatchSection,
+      batchBtn.getAttribute("data-batch-action") as BatchVerb,
+    );
     return;
   }
 

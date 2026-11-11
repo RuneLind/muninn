@@ -1,0 +1,163 @@
+/**
+ * `/wiki/gardener` — batch review: the ungrouped drafts filed into sections
+ * ("Everything else", "Entertainment — films and TV") by their frontmatter
+ * tags, each with Approve all (and Reject all on entertainment), run one card at
+ * a time through the per-card routes.
+ *
+ * What no unit test reaches: the listing's `category` from a real draft's tags,
+ * the sections on the page, a batch writing every page to disk and settling
+ * every row, the same-page pair left for a human, and the other section left
+ * alone.
+ *
+ * A throwaway bot under `MUNINN_BOTS_DIR` owns a temp wiki (no git repo, so the
+ * commit is skipped); the rows go into the test database. Playwright runs this
+ * file under NODE — hence `postgres`, not `Bun.sql`.
+ */
+
+import { test, expect, type Page } from "@playwright/test";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import postgres from "postgres";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
+import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
+
+const PORT = e2ePort("gardener-batch");
+const BASE = `http://127.0.0.1:${PORT}`;
+const DEAD_HUGINN = `http://127.0.0.1:${e2ePort("gardener-batch/dead-huginn")}`;
+const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
+const BOT = "e2ebatch";
+const COLLECTION = "youtube-summaries";
+
+let server: ChildProcess | undefined;
+let sql: ReturnType<typeof postgres> | null = null;
+let tmpRoot = "";
+let wikiDir = "";
+const ids: Record<string, string> = {};
+
+test.describe.configure({ mode: "serial" });
+
+function page(title: string, tags: string): string {
+  const url = `https://www.youtube.com/watch?v=${encodeURIComponent(title)}`;
+  return `---\ntype: source\ntitle: ${title}\naliases: []\ncreated: 2026-11-11\nupdated: 2026-11-11\ntags: [${tags}]\nurl: ${url}\nsources: [${url}]\n---\n\n# ${title}\n\nBody.\n`;
+}
+
+async function seedDraft(key: string, title: string, tags: string, target = `sources/${title}.mdx`): Promise<void> {
+  const docId = `e2e-batch/${key}.md`;
+  const [row] = await sql!`
+    INSERT INTO wiki_proposals (bot_name, topic_key, kind, mode, target_path, draft, source_docs, status)
+    VALUES (${BOT}, ${`source:${COLLECTION}:${docId}`}, 'source', 'create', ${target},
+            ${page(title, tags)}, ${sql!.json([{ collection: COLLECTION, docId, title, url: "" }])}, 'draft')
+    RETURNING id`;
+  ids[key] = row!.id;
+}
+
+async function statusOf(key: string): Promise<string> {
+  const [row] = await sql!`SELECT status FROM wiki_proposals WHERE id = ${ids[key]!}`;
+  return row!.status;
+}
+
+test.beforeAll(async () => {
+  tmpRoot = mkdtempSync(path.join(tmpdir(), "e2e-batch-"));
+  const botDir = path.join(tmpRoot, "bots", BOT);
+  wikiDir = path.join(tmpRoot, "wiki");
+  mkdirSync(botDir, { recursive: true });
+  mkdirSync(path.join(wikiDir, "sources"), { recursive: true });
+  writeFileSync(path.join(wikiDir, "index.md"), "# Index\n");
+  writeFileSync(path.join(botDir, "CLAUDE.md"), "# throwaway e2e bot\n");
+  writeFileSync(path.join(botDir, "config.json"), JSON.stringify({ wikiDir }));
+
+  sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
+  await sql`DELETE FROM wiki_proposals WHERE bot_name = ${BOT}`;
+  await seedDraft("ai1", "Agent Skills Primer", "agent-skills, claude-code");
+  await seedDraft("ai2", "Local Model Hardware", "local-ai, hardware, streaming");
+  await seedDraft("twinA", "Same Page", "claude-code");
+  await seedDraft("twinB", "Same Page Again", "claude-code", "sources/Same Page.mdx");
+  await seedDraft("film1", "Sci-Fi Film Countdown", "film, science-fiction, entertainment");
+  await seedDraft("film2", "Netflix Series Ranking", "netflix, tv-series");
+
+  server = spawn("bun", ["run", "src/index.ts"], {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      ...e2eEnv(),
+      DATABASE_URL: TEST_DB,
+      DASHBOARD_PORT: String(PORT),
+      DASHBOARD_HOST: "127.0.0.1",
+      MUNINN_BOTS_DIR: path.join(tmpRoot, "bots"),
+      KNOWLEDGE_API_URL: DEAD_HUGINN,
+      SCHEDULER_ENABLED: "false",
+      LOG_DIR: "none",
+      [`TELEGRAM_BOT_TOKEN_${BOT.toUpperCase()}`]: "",
+    },
+    stdio: "ignore",
+  });
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      if ((await fetch(`${BASE}/api/live`)).ok) break;
+    } catch {
+      /* not up yet */
+    }
+    if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
+    await new Promise((r) => setTimeout(r, 400));
+  }
+});
+
+test.afterAll(async () => {
+  server?.kill("SIGTERM");
+  try {
+    if (sql) await sql`DELETE FROM wiki_proposals WHERE bot_name = ${BOT}`;
+  } finally {
+    await sql?.end();
+    if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+const head = (p: Page, section: string) => p.locator(`.gard-batch-head[data-batch-section="${section}"]`);
+const sectionCards = (p: Page, section: string) =>
+  p.locator(`.gard-batch-head[data-batch-section="${section}"] ~ .gard-card`);
+
+test("drafts are filed by their tags, and the same-page pair is left out of Approve all", async ({ page }) => {
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  const other = head(page, "other");
+  const ent = head(page, "entertainment");
+  await expect(other).toContainText("Everything else");
+  await expect(other).toContainText("4 drafts");
+  await expect(other.locator('[data-batch-action="approve"]')).toHaveText("Approve all 2");
+  await expect(other.locator('[data-batch-action="reject"]')).toHaveCount(0);
+  await expect(other.locator(".gard-batch-note")).toHaveText("left for you: 2 another draft writes the same page");
+  await expect(ent).toContainText("2 drafts");
+  await expect(ent.locator('[data-batch-action="approve"]')).toHaveText("Approve all 2");
+  await expect(ent.locator('[data-batch-action="reject"]')).toHaveText("Reject all 2");
+  // "Everything else" leads, and each film card sits under the entertainment header.
+  const order = await page.locator(".gard-batch-head").evaluateAll((els) => els.map((e) => e.getAttribute("data-batch-section")));
+  expect(order).toEqual(["other", "entertainment"]);
+  await expect(page.locator(`.gard-batch-head[data-batch-section="entertainment"] ~ .gard-card[data-id="${ids.film1}"]`)).toHaveCount(1);
+  await expect(sectionCards(page, "entertainment")).toHaveCount(2);
+});
+
+test("Approve all writes every page in its section and leaves the rest as drafts", async ({ page }) => {
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("2 of 2 approved", { timeout: 30_000 });
+  expect(await statusOf("ai1")).toBe("applied");
+  expect(await statusOf("ai2")).toBe("applied");
+  expect(existsSync(path.join(wikiDir, "sources/Agent Skills Primer.mdx"))).toBe(true);
+  expect(existsSync(path.join(wikiDir, "sources/Local Model Hardware.mdx"))).toBe(true);
+  for (const key of ["twinA", "twinB", "film1", "film2"]) expect(await statusOf(key)).toBe("draft");
+  expect(existsSync(path.join(wikiDir, "sources/Same Page.mdx"))).toBe(false);
+  // The pair is still reviewable one by one.
+  await expect(page.locator(`.gard-card[data-id="${ids.twinA}"] [data-action="approve"]`)).toBeEnabled();
+});
+
+test("Reject all on entertainment rejects only the films", async ({ page }) => {
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await head(page, "entertainment").locator('[data-batch-action="reject"]').click();
+  await expect(head(page, "entertainment").locator(".gard-batch-note")).toContainText("2 of 2 rejected", { timeout: 30_000 });
+  expect(await statusOf("film1")).toBe("rejected");
+  expect(await statusOf("film2")).toBe("rejected");
+  expect(await statusOf("twinA")).toBe("draft");
+});
