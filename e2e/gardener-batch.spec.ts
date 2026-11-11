@@ -207,3 +207,37 @@ test("Approve all does not post a card whose single Approve is still in flight",
   await expect.poll(() => statusOf("c1")).toBe("applied");
   expect(await statusOf("c2")).toBe("applied");
 });
+
+// Fix round 1 batch 3 (review findings 7, 8).
+test("a batch re-reads the listing first, so a draft settled elsewhere is not posted", async ({ page }) => {
+  await seedDraft("s1", "Settled Elsewhere", "claude-code");
+  await seedDraft("s2", "Still A Draft", "claude-code");
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await expect(page.locator(`.gard-card[data-id="${ids.s1}"]`)).toHaveCount(1);
+  // Another tab rejects s1 after this one loaded.
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE id = ${ids.s1!}`;
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  const note = head(page, "other").locator(".gard-batch-note");
+  await expect(note).toContainText("1 of 1 approved", { timeout: 30_000 });
+  await expect(note).not.toContainText("failed");
+  expect(await statusOf("s1")).toBe("rejected");
+  expect(await statusOf("s2")).toBe("applied");
+});
+
+test("a finished batch's note survives the Pending filter emptying, and leaves with a filter change", async ({ page }) => {
+  // Only one draft left anywhere, so the batch empties the Pending view.
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("film3", "Anime Film Picks", "anime, film", "life/sources/Anime Film Picks.mdx");
+  await sql!`
+    INSERT INTO wiki_proposals (bot_name, wiki_name, topic_key, kind, mode, target_path, draft, source_docs, status, group_key)
+    VALUES (${BOT}, ${BOT}, 'lint:e2e:batch:index.md', 'lint', 'update', 'index.md', '# Index\n', '[]'::jsonb, 'draft', 'lint:e2e:batch')`;
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await page.locator('#gardFilters .gard-filter[data-kind="pages"]').click();
+  await page.locator('#gardFilters .gard-filter[data-status="draft"]').click();
+  await head(page, "entertainment").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "entertainment").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
+  // Another filter: the result was about a view that is gone.
+  await page.locator('#gardFilters .gard-filter[data-kind="lint"]').click();
+  await expect(page.locator(".gard-card[data-group]")).toHaveCount(1);
+  await expect(page.locator(".gard-batch-head[data-batch-section]")).toHaveCount(0);
+});

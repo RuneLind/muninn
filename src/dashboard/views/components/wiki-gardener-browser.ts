@@ -362,7 +362,10 @@ function render(): void {
   const list = document.getElementById("gardList")!;
   const shown = shownProposals();
   if (!shown.length) {
+    // A batch that just emptied this view keeps its header and result above
+    // the empty note.
     list.innerHTML =
+      batchSectionsHtml(shown) +
       '<div class="gard-empty">' +
       (allProposals.length ? "No proposals in this view." : "No wiki proposals yet. The gardener drafts them on its weekly run.") +
       "</div>";
@@ -561,11 +564,23 @@ const batchQueued = new Set<string>();
  */
 async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
   if (runningBatch) return;
-  const { ids } = planBatch(shownProposals(), section, verb, busyIds(), allProposals);
-  if (!ids.length) return;
-  const prog: BatchProgress = { section, verb, total: ids.length, done: 0, failed: 0, running: true, stopped: false };
-  batchState.set(section, prog);
+  // Claimed before the listing re-read, so a second click cannot start another.
+  const prog: BatchProgress = { section, verb, total: 0, done: 0, failed: 0, running: true, stopped: false };
   runningBatch = prog;
+  // Plan from a fresh listing, not the one this tab loaded: a draft settled in
+  // another tab, or a page edited since (now `drifted`), would otherwise be
+  // posted and burned. A failed re-read keeps the loaded listing.
+  const fresh = await fetchProposals().catch(() => null);
+  if (fresh) allProposals = fresh;
+  const { ids } = planBatch(shownProposals(), section, verb, busyIds(), allProposals);
+  if (!ids.length || prog.stopped) {
+    runningBatch = null;
+    render();
+    rerenderStrip();
+    return;
+  }
+  prog.total = ids.length;
+  batchState.set(section, prog);
   for (const id of ids) {
     batchQueued.add(id);
     redraftNotes.delete(id);
@@ -722,6 +737,8 @@ document.getElementById("gardFilters")!.addEventListener("click", (e) => {
     .querySelectorAll(`#gardFilters .gard-filter[${isKind ? "data-kind" : "data-status"}]`)
     .forEach((c) => c.classList.remove("active"));
   chipEl.classList.add("active");
+  // A finished batch's result belongs to the view it ran in.
+  if (!runningBatch) batchState.clear();
   render();
 });
 
@@ -1813,6 +1830,12 @@ if (wikiBotSel) {
     const value = wikiBotSel.value;
     location.href = value ? "/wiki/gardener?bot=" + encodeURIComponent(value) : "/wiki/gardener";
   });
+}
+
+/** The listing's rows, or null when it answers an error with no rows. */
+async function fetchProposals(): Promise<ProposalView[] | null> {
+  const data = (await (await fetch(withBot("/api/wiki/proposals"))).json()) as ProposalsResponse;
+  return data.error && !(data.proposals || []).length ? null : data.proposals || [];
 }
 
 function loadProposals(): void {
