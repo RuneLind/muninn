@@ -31,6 +31,7 @@ import { parseQuestionLanguage, type QuestionLanguage } from "../format/question
 import { parseDefaultLens, parseIdLabels, type IdLabels, type StoredLens } from "../format/reader-lens.ts";
 import { parseRoleKeys } from "../format/lane-roles.ts";
 import { parseStatePhrases, type StatePhrasesConfig } from "../format/state-phrases.ts";
+import { parseLogKinds, type LogKindsConfig } from "./lint-log-kind.ts";
 import {
   ATTR_RE,
   COMPONENT_TAG_SOURCE,
@@ -238,6 +239,9 @@ export interface WikiReaderConfig {
    * `readWikiReaderConfig` always sets it.
    */
   statePhrases?: StatePhrasesConfig | null;
+  /** The kinds a `log.md` entry may carry (`logKinds`, lint check 27). Null or
+   *  absent ⇒ the check does not run. */
+  logKinds?: LogKindsConfig | null;
   /**
    * The heading names whose sections the `system-map-drift` lint reads for
    * links between `repos/` pages (`systemMapLinkHeadings`). Undefined ⇒ the
@@ -2199,6 +2203,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   for (const reason of statePhrases.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "statePhrases", reason });
   }
+  const logKinds = parseLogKinds(obj.logKinds);
+  for (const reason of logKinds.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "logKinds", reason });
+  }
   const systemMapLinkHeadings = parseSystemMapLinkHeadings(obj.systemMapLinkHeadings);
   for (const reason of systemMapLinkHeadings.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "systemMapLinkHeadings", reason });
@@ -2236,6 +2244,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     defaultLens: defaultLens.lens,
     roleKeys: roleKeys.keys,
     statePhrases: statePhrases.config,
+    logKinds: logKinds.config,
     ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
     workMap: { kind: workMap.kind },
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
