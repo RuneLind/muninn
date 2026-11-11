@@ -377,3 +377,47 @@ test("a filter change during a batch drops its result when it ends", async ({ pa
   await expect(page.locator(".gard-batch-head[data-batch-section]")).toHaveCount(0);
   await page.unroute("**/api/wiki/proposals/*/approve*");
 });
+
+// Class check on the gate client's per-card state (round-2 verify findings 1, 2).
+test("a single click that fails after a batch re-render unlocks its card and shows the error", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("k1", "Fails Late", "claude-code");
+  await seedDraft("k2", "Batch Other", "claude-code");
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/proposals/*/approve*", async (route) => {
+    if (!route.request().url().includes(ids.k1!)) return route.continue();
+    await held;
+    await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "boom-409" }) });
+  });
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  const k1 = page.locator(`.gard-card[data-id="${ids.k1}"]`);
+  await k1.locator('[data-action="approve"]').click();
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
+  release();
+  await expect(k1.locator(".gard-outcome")).toHaveText("boom-409");
+  await expect(k1.locator('[data-action="approve"]')).toBeEnabled();
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+});
+
+test("a twin approved in this tab blocks its pair even when the browser clock runs behind", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("t1", "Clock Twin", "claude-code", "sources/Clock Twin.mdx");
+  await seedDraft("t2", "Clock Twin Again", "claude-code", "sources/Clock Twin.mdx");
+  // The browser's clock is a day behind the server's.
+  await page.addInitScript(() => {
+    const shift = -86_400_000;
+    const RealDate = Date;
+    const now = RealDate.now.bind(RealDate);
+    RealDate.now = () => now() + shift;
+  });
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await page.locator(`.gard-card[data-id="${ids.t1}"] [data-action="approve"]`).click();
+  await expect.poll(() => statusOf("t1")).toBe("applied");
+  await expect(page.locator(`.gard-card[data-id="${ids.t1}"] [data-action="approve"]`)).toHaveCount(0);
+  // Nothing left to approve: the header offers no Approve all and says why.
+  await expect(head(page, "other").locator('[data-batch-action="approve"]')).toHaveCount(0);
+  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("1 page written since drafting");
+  expect(await statusOf("t2")).toBe("draft");
+});

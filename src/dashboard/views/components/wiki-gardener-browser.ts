@@ -392,18 +392,10 @@ function render(): void {
     html += groupCardHtml(allProposals.filter((r) => r.groupKey === p.groupKey));
   }
   list.innerHTML = html;
-  // A Redraft's state lives here, not on the card this render just replaced.
-  for (const id of new Set([...redraftsInFlight, ...redraftNotes.keys()])) paintRedraftState(id);
-  // Cards a running batch has still to reach keep their buttons disabled, and
-  // so does a card whose single click is still waiting, with its note.
-  for (const id of batchQueued) {
-    cardById(id)?.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
-  }
-  for (const [id, action] of actsInFlight) {
-    const card = cardById(id);
-    if (!card) continue;
-    card.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
-    setOutcome(card, action === "approve" ? "Applying…" : "Rejecting…", "");
+  // Every card's lock and note live in module state, not on the card this
+  // render just replaced.
+  for (const id of new Set([...redraftsInFlight, ...actsInFlight.keys(), ...batchQueued, ...cardNotes.keys()])) {
+    paintCardState(id);
   }
   // A group's outcome note lives on the card, which this render just replaced.
   // Re-paint whatever the last group action said, or a `Stopped at …` note is
@@ -447,27 +439,34 @@ const JSON_POST: RequestInit = {
 type CardAction = "approve" | "reject" | "redraft";
 
 /** Proposals with a Redraft in flight, and the last Redraft answer per
- *  proposal (a batch's per-card failure lands in `redraftNotes` too). Kept
+ *  proposal (a batch's per-card failure lands in `cardNotes` too). Kept
  *  outside the DOM so every re-render (a poll, a filter, an inspector action)
  *  paints them again instead of re-enabling the card. */
 const redraftsInFlight = new Set<string>();
-const redraftNotes = new Map<string, { text: string; kind: "ok" | "err" | "" }>();
+const cardNotes = new Map<string, { text: string; kind: "ok" | "err" | "" }>();
 const REDRAFTING = "Redrafting… (a model call, up to a few minutes)";
 
 function cardById(id: string): HTMLElement | null {
   return document.querySelector(`#gardList .gard-card[data-id="${cssEscape(id)}"]`);
 }
 
-/** Paint one proposal's Redraft state onto its current card, if it is shown. */
-function paintRedraftState(id: string): void {
+/**
+ * Paint one card's state onto its current element, if it is shown. The whole
+ * state space, in order: a single click in flight (locked, "Applying…" /
+ * "Rejecting…"), a Redraft in flight (locked, REDRAFTING), queued in a running
+ * batch (locked, note kept), else unlocked as `cardHtml` drew it, with the last
+ * note if any. Unlocking is never done here: a card only unlocks by being drawn
+ * again, so `act()`, `redraft()` and `runBatch()` change state and `render()`.
+ */
+function paintCardState(id: string): void {
   const card = cardById(id);
   if (!card) return;
-  if (redraftsInFlight.has(id)) {
-    card.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
-    setOutcome(card, REDRAFTING, "");
-    return;
-  }
-  const note = redraftNotes.get(id);
+  const inFlight = actsInFlight.get(id);
+  const locked = !!inFlight || redraftsInFlight.has(id) || batchQueued.has(id);
+  if (locked) card.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
+  if (inFlight) return setOutcome(card, inFlight === "approve" ? "Applying…" : "Rejecting…", "");
+  if (redraftsInFlight.has(id)) return setOutcome(card, REDRAFTING, "");
+  const note = cardNotes.get(id);
   if (!note) return;
   // A card that is no longer a draft has no action row to carry the note.
   if (!card.querySelector(".gard-outcome")) {
@@ -486,14 +485,6 @@ async function jsonOrNull(res: Response): Promise<Record<string, unknown> | null
   } catch {
     return null;
   }
-}
-
-/** Re-enable a card's buttons after a failed action, except an Approve the
- *  fact-check flag locked. */
-function unlockButtons(buttons: NodeListOf<Element>): void {
-  buttons.forEach((b) => {
-    if (!(b as HTMLElement).hasAttribute("data-fc-locked")) (b as HTMLButtonElement).disabled = false;
-  });
 }
 
 /**
@@ -515,7 +506,9 @@ async function postAction(
     const p = allProposals.find((x) => x.id === id);
     if (p && ["applied", "stale", "rejected", "error"].includes(outcome)) {
       p.status = outcome;
-      p.resolvedAt = Date.now();
+      // The server's time is unknown here, and this browser's clock is not the
+      // server's: null counts as later than any listed draft (`pageTargets`).
+      p.resolvedAt = null;
     }
     if (!res.ok) return { ok: false, status: res.status, outcome, error: String(data.error || "Failed (" + res.status + ")") };
     return { ok: true, status: res.status, outcome, error: "" };
@@ -532,26 +525,14 @@ function busyIds(): Set<string> {
   return new Set([...redraftsInFlight, ...actsInFlight.keys()]);
 }
 
-async function act(id: string, action: CardAction, card: HTMLElement): Promise<void> {
+async function act(id: string, action: CardAction): Promise<void> {
   if (action === "redraft") return redraft(id);
-  redraftNotes.delete(id);
-  const buttons = card.querySelectorAll(".gard-btn");
-  buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
-  setOutcome(card, action === "approve" ? "Applying…" : "Rejecting…", "");
+  cardNotes.delete(id);
   actsInFlight.set(id, action);
+  paintCardState(id);
   const r = await postAction(id, action).finally(() => actsInFlight.delete(id));
-  if (!r.ok) {
-    if (allProposals.find((x) => x.id === id)?.status === "draft") {
-      setOutcome(card, r.error, "err");
-      unlockButtons(buttons);
-    } else {
-      redraftNotes.set(id, { text: r.error, kind: "err" });
-      render();
-      rerenderStrip();
-    }
-    return;
-  }
-  // Re-render so the status chip + filters reflect the outcome.
+  if (!r.ok) cardNotes.set(id, { text: r.error, kind: "err" });
+  // Re-render so the status chip, the filters and the card's lock reflect the outcome.
   render();
   // A draft that just got applied/rejected changes "drafts awaiting review".
   rerenderStrip();
@@ -583,7 +564,7 @@ async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
   batchState.set(section, prog);
   for (const id of planned) {
     batchQueued.add(id);
-    redraftNotes.delete(id);
+    cardNotes.delete(id);
   }
   render();
   let ids: string[] = [];
@@ -619,10 +600,10 @@ async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
       const halt = batchStopReason(r);
       if (!r.ok) {
         prog.failed++;
-        redraftNotes.set(id, { text: r.error, kind: "err" });
+        cardNotes.set(id, { text: r.error, kind: "err" });
       } else if (r.outcome !== settled) {
         prog.failed++;
-        redraftNotes.set(id, { text: `Not ${settled}: ${r.outcome || "unknown outcome"}`, kind: "err" });
+        cardNotes.set(id, { text: `Not ${settled}: ${r.outcome || "unknown outcome"}`, kind: "err" });
       }
       batchQueued.delete(id);
       prog.done++;
@@ -646,14 +627,14 @@ async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
  * Redraft one draft: a real model call, then the server's one-transaction
  * replace. `drafted`, `superseded_meanwhile` and `covered` all mean the rows
  * on screen are stale, so the list reloads; every other answer leaves the
- * draft as it was. The answer is kept in `redraftNotes`, so the reload does
+ * draft as it was. The answer is kept in `cardNotes`, so the reload does
  * not wipe it.
  */
 async function redraft(id: string): Promise<void> {
   if (redraftsInFlight.has(id)) return;
-  redraftNotes.delete(id);
+  cardNotes.delete(id);
   redraftsInFlight.add(id);
-  paintRedraftState(id);
+  paintCardState(id);
   let note: { text: string; kind: "ok" | "err" | "" } | null = null;
   let reload = false;
   try {
@@ -679,14 +660,12 @@ async function redraft(id: string): Promise<void> {
     note = { text: "Network error: " + (err as Error).message, kind: "err" };
   }
   redraftsInFlight.delete(id);
-  if (note) redraftNotes.set(id, note);
+  if (note) cardNotes.set(id, note);
   if (reload) {
     loadProposals();
     return;
   }
-  const card = cardById(id);
-  if (card) unlockButtons(card.querySelectorAll(".gard-btn"));
-  paintRedraftState(id);
+  render();
 }
 
 /**
@@ -730,7 +709,7 @@ async function actOnGroup(
     allProposals.forEach((p) => {
       if (p.groupKey === groupKey && p.status === "draft") {
         p.status = next;
-        p.resolvedAt = Date.now();
+        p.resolvedAt = null; // server time unknown; see postAction
       }
     });
     if (action === "approve" && (data.noop?.length || 0) > 0) {
@@ -816,7 +795,7 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
   if (actionBtn) {
     const card = actionBtn.closest(".gard-card") as HTMLElement;
     const id = card.getAttribute("data-id")!;
-    act(id, actionBtn.getAttribute("data-action") as CardAction, card);
+    act(id, actionBtn.getAttribute("data-action") as CardAction);
   }
 });
 
