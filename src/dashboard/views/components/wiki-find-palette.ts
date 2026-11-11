@@ -26,7 +26,7 @@
  */
 
 import { anchorNow, displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { applySeriesChip, everywhereRequestQuery, findLogBody, rankFind, type FindLogOpen, type FindLogOpened, type FindResult } from "./wiki-find.ts";
+import { applySeriesChip, everywhereRequestQuery, findLogBody, rankFind, type FindLogOpened, type FindResult } from "./wiki-find.ts";
 import {
   FIND_CHIPS_ID,
   FIND_EVERY_ID,
@@ -102,11 +102,11 @@ let everySettled: FindEverywhereState | null = null;
 let everyShown: FindEverywhereResult[] = [];
 let everyTimer: ReturnType<typeof setTimeout> | null = null;
 let everyCtrl: AbortController | null = null;
-/** The text the rows on screen were ranked for: what the query log records,
- *  since a key or click inside the re-rank debounce acts on those rows. */
+/** The text the rows on screen were ranked for; the query log records it
+ *  beside the box's text, since the two differ inside the re-rank debounce. */
 let shownQ = "";
-/** The rows this palette session already logged (see `findLogBody`). */
-let loggedOpens: FindLogOpen[] = [];
+/** This palette opening, for the query log. */
+let findSession = "";
 const mac = typeof navigator !== "undefined" && isMacPlatform(navigator.platform || navigator.userAgent || "");
 
 export function isFindOpen(): boolean {
@@ -366,14 +366,18 @@ function scheduleRender(): void {
   }, FIND_DEBOUNCE_MS);
 }
 
-/** One line to the query log (`POST /api/wiki/find-log`): the text and the row
- *  opened, or `null` for a dismissal. Fire and forget; `keepalive` lets it
- *  outlive the page load a cross-wiki open starts. */
+/** One line to the query log (`POST /api/wiki/find-log`): the row opened, or
+ *  `null` for a dismissal. Fire and forget; `keepalive` lets it outlive the
+ *  page load a cross-wiki open starts. */
 function logFind(opened: FindLogOpened | null): void {
   if (!port || !port.everywhere()) return;
-  const body = findLogBody(shownQ, opened, { wiki: port.selfWiki(), local: localCount(), everywhere: everyShown.length, opened: loggedOpens });
+  const body = findLogBody(input()?.value ?? "", shownQ, opened, {
+    wiki: port.selfWiki(),
+    session: findSession,
+    local: localCount(),
+    everywhere: every?.status === "done" ? everyShown.length : null,
+  });
   if (!body) return;
-  if (opened) loggedOpens.push({ q: body.q, wiki: opened.wiki, relPath: opened.relPath });
   void fetch("/api/wiki/find-log", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), keepalive: true }).catch(() => {});
 }
 
@@ -385,7 +389,7 @@ function loggedRow(i: number): FindLogOpened | null {
     return row ? { wiki: port.selfWiki(), relPath: row.page.relPath, rank: i, section: "local" } : null;
   }
   const r = everyShown[i - localCount()];
-  return r ? { wiki: r.wiki, relPath: r.relPath, rank: i, section: "everywhere" } : null;
+  return r ? { wiki: r.wiki, relPath: r.relPath, rank: i - localCount(), section: "everywhere" } : null;
 }
 
 function openRow(i: number, newTab: boolean): void {
@@ -430,6 +434,8 @@ function onInput(e: Event): void {
 
 export function openFind(): void {
   if (!port || isFindOpen()) return;
+  findSession = crypto.randomUUID();
+  shownQ = "";
   port.onOpen();
   const focused = document.activeElement;
   opener = focused instanceof HTMLElement && focused !== document.body ? focused : null;
@@ -441,6 +447,7 @@ export function openFind(): void {
   const root = document.getElementById(FIND_ID)!;
   root.addEventListener("keydown", onRootKeydown);
   root.addEventListener("click", onRootClick);
+  root.addEventListener("auxclick", onRootAuxclick);
   const box = root.querySelector(`#${FIND_INPUT_ID}`)!;
   box.addEventListener("input", onInput);
   box.addEventListener("compositionend", () => updateEverywhere());
@@ -464,8 +471,6 @@ export function openFind(): void {
 export function closeFind(returnFocus = true): void {
   // Every in-place open closes with `false` after logging its row.
   if (returnFocus) logFind(null);
-  loggedOpens = [];
-  shownQ = "";
   if (debounce) {
     clearTimeout(debounce);
     debounce = null;
@@ -546,17 +551,28 @@ function onRootClick(e: MouseEvent): void {
   }
   const row = t.closest<HTMLElement>("[data-find-row]");
   if (row) {
-    // A modifier click or a middle click is the link's own; a plain one opens
-    // in place without a page load. The link's open is still an open to the
-    // query log, or the Escape after it would read as a miss.
+    // A modifier click is the link's own; a plain one opens in place without
+    // a page load. Meta, Ctrl and Shift open the page, so the query log gets
+    // the row; Alt downloads it, which is no open.
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
-      const logged = loggedRow(Number(row.getAttribute("data-find-row")));
-      if (logged) logFind(logged);
+      if (!e.altKey) logClicked(row);
       return;
     }
     e.preventDefault();
     openRow(Number(row.getAttribute("data-find-row")), false);
   }
+}
+
+/** The query-log line for a row the link itself opens. */
+function logClicked(row: HTMLElement): void {
+  const logged = loggedRow(Number(row.getAttribute("data-find-row")));
+  if (logged) logFind(logged);
+}
+
+/** A middle click fires `auxclick`, never `click`: the link opens a tab. */
+function onRootAuxclick(e: MouseEvent): void {
+  const row = (e.target as HTMLElement).closest<HTMLElement>("[data-find-row]");
+  if (row && e.button === 1) logClicked(row);
 }
 
 /**

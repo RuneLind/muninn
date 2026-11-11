@@ -689,28 +689,19 @@ export interface FindLogOpened {
   section: "local" | "everywhere";
 }
 
-/** A row this palette session already logged, with the text it was opened for. */
-export interface FindLogOpen {
-  q: string;
-  wiki: string;
-  relPath: string;
-}
-
 /**
- * The body `POST /api/wiki/find-log` gets, or `null` when there is nothing to
- * log: text under two characters, a row this session already logged for the
- * same text, or a dismissal of text that opened a row (a new-tab open keeps
- * the palette up, so its later Escape is not a miss). `raw` is the text the
- * rows on screen were ranked for.
+ * The body `POST /api/wiki/find-log` gets for one palette event, or `null`
+ * when the box holds under two characters. `typed` is the box, `shown` the
+ * text the rows on screen were ranked for. Nothing is deduped or judged here:
+ * the file's reader groups lines by `session`.
  */
 export function findLogBody(
-  raw: string,
+  typed: string,
+  shown: string,
   opened: FindLogOpened | null,
-  s: { wiki: string; local: number; everywhere: number; opened: readonly FindLogOpen[] },
-): { wiki: string; q: string; opened: FindLogOpened | null; rows: { local: number; everywhere: number } } | null {
-  const q = raw.trim().slice(0, 200);
+  s: { wiki: string; session: string; local: number; everywhere: number | null },
+): { wiki: string; session: string; q: string; shown: string; opened: FindLogOpened | null; rows: { local: number; everywhere: number | null } } | null {
+  const q = typed.trim().slice(0, 200);
   if (q.length < 2 || !s.wiki) return null;
-  const forText = s.opened.filter((o) => o.q === q);
-  if (opened === null ? forText.length > 0 : forText.some((o) => o.wiki === opened.wiki && o.relPath === opened.relPath)) return null;
-  return { wiki: s.wiki, q, opened, rows: { local: s.local, everywhere: s.everywhere } };
+  return { wiki: s.wiki, session: s.session, q, shown: shown.trim().slice(0, 200), opened, rows: { local: s.local, everywhere: s.everywhere } };
 }
