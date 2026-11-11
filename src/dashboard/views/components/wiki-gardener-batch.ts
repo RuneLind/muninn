@@ -1,6 +1,7 @@
 /**
- * Batch review on `/wiki/gardener`: the ungrouped drafts are filed into
- * sections (`category` on the listing, `src/gardener/category.ts`), and each
+ * Batch review on `/wiki/gardener`: the ungrouped drafts are filed into three
+ * sections, AI and tech (outside `life/`), Life (`life/`, no film/TV tag) and
+ * Entertainment (`category` on the listing, `src/gardener/category.ts`), and each
  * section header approves or rejects the whole section one card at a time,
  * through the same per-card routes a click uses, so every server guard still runs.
  *
@@ -11,7 +12,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 
-export type BatchSection = "other" | "entertainment";
+export type BatchSection = "ai" | "life" | "entertainment";
 export type BatchVerb = "approve" | "reject";
 
 /** The listing fields a batch decision reads. */
@@ -29,11 +30,28 @@ export interface BatchCard {
   factcheckUnknown?: boolean;
 }
 
-/** Section order on the page: the cards a reviewer usually takes first lead. */
-export const BATCH_SECTIONS: { key: BatchSection; label: string }[] = [
-  { key: "other", label: "Everything else" },
-  { key: "entertainment", label: "Entertainment — films and TV" },
+/** Section order on the page: the cards a reviewer usually takes first lead.
+ *  `chip` is the section filter's label. */
+export const BATCH_SECTIONS: { key: BatchSection; label: string; chip: string }[] = [
+  { key: "ai", label: "AI and tech", chip: "AI" },
+  { key: "life", label: "Life", chip: "Life" },
+  { key: "entertainment", label: "Entertainment — films and TV", chip: "Entertainment" },
 ];
+
+/** A section's header label. A wiki with no `life/` drafts (no life domain)
+ *  files everything under the first section, which is then just "Drafts". */
+export function sectionLabel(key: BatchSection, cards: readonly BatchCard[]): string {
+  const entry = BATCH_SECTIONS.find((s) => s.key === key)!;
+  if (key === "ai" && !cards.some((p) => isBatchCard(p) && sectionOf(p) !== "ai")) return "Drafts";
+  return entry.label;
+}
+
+/** Draft count per section, for the section chips. */
+export function sectionCounts(cards: readonly BatchCard[]): Record<BatchSection, number> {
+  const counts: Record<BatchSection, number> = { ai: 0, life: 0, entertainment: 0 };
+  for (const p of cards) if (isBatchCard(p)) counts[sectionOf(p)]++;
+  return counts;
+}
 
 /** True for a card the batch sections hold: an ungrouped draft. */
 export function isBatchCard(p: BatchCard): boolean {
@@ -41,7 +59,8 @@ export function isBatchCard(p: BatchCard): boolean {
 }
 
 export function sectionOf(p: BatchCard): BatchSection {
-  return p.category === "entertainment" ? "entertainment" : "other";
+  if (p.category === "entertainment") return "entertainment";
+  return p.targetPath.startsWith("life/") ? "life" : "ai";
 }
 
 /**

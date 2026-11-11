@@ -1,6 +1,6 @@
 /**
  * `/wiki/gardener` — batch review: the ungrouped drafts filed into sections
- * ("Everything else", "Entertainment — films and TV") by their frontmatter
+ * ("AI and tech", "Life", "Entertainment — films and TV") by path and
  * tags, each with Approve all (and Reject all on entertainment), run one card at
  * a time through the per-card routes.
  *
@@ -78,7 +78,7 @@ test.beforeAll(async () => {
   await seedDraft("twinA", "Same Page", "claude-code");
   await seedDraft("twinB", "Same Page Again", "claude-code", "sources/Same Page.mdx");
   // Films and TV land under life/, as the drafter files them; an AI-domain page
-  // tagged entertainment stays in "Everything else".
+  // tagged entertainment stays in "AI and tech".
   await seedDraft("film1", "Sci-Fi Film Countdown", "film, science-fiction, entertainment", "life/sources/Sci-Fi Film Countdown.mdx");
   await seedDraft("film2", "Netflix Series Ranking", "netflix, tv-series", "life/sources/Netflix Series Ranking.mdx");
 
@@ -126,9 +126,9 @@ const sectionCards = (p: Page, section: string) =>
 
 test("drafts are filed by their tags, and the same-page pair is left out of Approve all", async ({ page }) => {
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
-  const other = head(page, "other");
+  const other = head(page, "ai");
   const ent = head(page, "entertainment");
-  await expect(other).toContainText("Everything else");
+  await expect(other).toContainText("AI and tech");
   await expect(other).toContainText("4 drafts");
   await expect(other.locator('[data-batch-action="approve"]')).toHaveText("Approve all 2");
   await expect(other.locator('[data-batch-action="reject"]')).toHaveCount(0);
@@ -136,17 +136,17 @@ test("drafts are filed by their tags, and the same-page pair is left out of Appr
   await expect(ent).toContainText("2 drafts");
   await expect(ent.locator('[data-batch-action="approve"]')).toHaveText("Approve all 2");
   await expect(ent.locator('[data-batch-action="reject"]')).toHaveText("Reject all 2");
-  // "Everything else" leads, and each film card sits under the entertainment header.
+  // "AI and tech" leads, and each film card sits under the entertainment header.
   const order = await page.locator(".gard-batch-head").evaluateAll((els) => els.map((e) => e.getAttribute("data-batch-section")));
-  expect(order).toEqual(["other", "entertainment"]);
+  expect(order).toEqual(["ai", "entertainment"]);
   await expect(page.locator(`.gard-batch-head[data-batch-section="entertainment"] ~ .gard-card[data-id="${ids.film1}"]`)).toHaveCount(1);
   await expect(sectionCards(page, "entertainment")).toHaveCount(2);
 });
 
 test("Approve all writes every page in its section and leaves the rest as drafts", async ({ page }) => {
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("2 of 2 approved", { timeout: 30_000 });
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("2 of 2 approved", { timeout: 30_000 });
   expect(await statusOf("ai1")).toBe("applied");
   expect(await statusOf("ai2")).toBe("applied");
   expect(existsSync(path.join(wikiDir, "sources/Agent Skills Primer.mdx"))).toBe(true);
@@ -177,8 +177,8 @@ test("a fault every card shares stops the batch at the first card", async ({ pag
     await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ outcome: "error", error: "bot has no wikiDir configured" }) });
   });
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("bot has no wikiDir configured");
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("bot has no wikiDir configured");
   expect(hits).toBe(1);
   await page.unroute("**/api/wiki/proposals/*/approve*");
   await sql!`DELETE FROM wiki_proposals WHERE id IN ${sql!([ids.f1!, ids.f2!])}`;
@@ -199,10 +199,10 @@ test("Approve all does not post a card whose single Approve is still in flight",
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
   await page.locator(`.gard-card[data-id="${ids.c1}"] [data-action="approve"]`).click();
   await expect.poll(() => posts.length).toBe(1);
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
   await expect.poll(() => posts.includes(ids.c2!)).toBe(true);
   release();
-  const note = head(page, "other").locator(".gard-batch-note");
+  const note = head(page, "ai").locator(".gard-batch-note");
   await expect(note).toContainText(/^\d+ of \d+ approved/, { timeout: 30_000 });
   await expect(note).not.toContainText("failed");
   expect(posts.filter((p) => p === ids.c1)).toHaveLength(1);
@@ -218,8 +218,8 @@ test("a batch re-reads the listing first, so a draft settled elsewhere is not po
   await expect(page.locator(`.gard-card[data-id="${ids.s1}"]`)).toHaveCount(1);
   // Another tab rejects s1 after this one loaded.
   await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE id = ${ids.s1!}`;
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  const note = head(page, "other").locator(".gard-batch-note");
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  const note = head(page, "ai").locator(".gard-batch-note");
   await expect(note).toContainText("1 of 1 approved", { timeout: 30_000 });
   await expect(note).not.toContainText("failed");
   expect(await statusOf("s1")).toBe("rejected");
@@ -249,10 +249,10 @@ test("a batch takes only the drafts on screen at the click, never one that arriv
   await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
   await seedDraft("u1", "Seen Draft", "claude-code");
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
-  await expect(head(page, "other").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1");
+  await expect(head(page, "ai").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1");
   await seedDraft("u2", "Unseen Draft", "claude-code");
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
   expect(await statusOf("u1")).toBe("applied");
   expect(await statusOf("u2")).toBe("draft");
 });
@@ -282,8 +282,8 @@ test("a single Approve that lands while the batch re-reads the listing is not po
     await landed;
     await route.fulfill({ response: stale });
   });
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  const note = head(page, "other").locator(".gard-batch-note");
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  const note = head(page, "ai").locator(".gard-batch-note");
   await expect(note).toContainText(/approved/, { timeout: 30_000 });
   await expect(note).not.toContainText("…");
   expect(posts.filter((p) => p === ids.r1)).toHaveLength(1);
@@ -307,10 +307,10 @@ test("the batch shows Stop at once, and Stop during the listing re-read posts no
     approves += 1;
     await route.continue();
   });
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  await head(page, "other").locator("[data-batch-stop]").click();
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await head(page, "ai").locator("[data-batch-stop]").click();
   releaseList();
-  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("Stopped: 0 of 1 approved");
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("Stopped: 0 of 1 approved");
   expect(approves).toBe(0);
   expect(await statusOf("p1")).toBe("draft");
 });
@@ -327,10 +327,10 @@ test("a page edited after the click's listing drops its update draft from the ba
     RETURNING id`;
   ids.drift = row!.id;
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
-  await expect(head(page, "other").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1");
+  await expect(head(page, "ai").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1");
   writeFileSync(path.join(wikiDir, rel), before + "\nEdited by hand.\n");
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("0 of 0 approved");
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("0 of 0 approved");
   expect(await statusOf("drift")).toBe("draft");
   expect(readFileSync(path.join(wikiDir, rel), "utf8")).toContain("Edited by hand.");
 });
@@ -349,8 +349,8 @@ test("a card whose single Approve is in flight stays locked through the batch's 
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
   const h1 = page.locator(`.gard-card[data-id="${ids.h1}"]`);
   await h1.locator('[data-action="approve"]').click();
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
   await expect(h1.locator('[data-action="approve"]')).toBeDisabled();
   await expect(h1.locator(".gard-outcome")).toHaveText("Applying…");
   release();
@@ -368,8 +368,8 @@ test("a filter change during a batch drops its result when it ends", async ({ pa
     await route.continue();
   });
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("Approving 1 of 1");
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("Approving 1 of 1");
   await page.locator('#gardFilters .gard-filter[data-kind="lint"]').click();
   release();
   await expect.poll(() => statusOf("v1")).toBe("applied");
@@ -393,8 +393,8 @@ test("a single click that fails after a batch re-render unlocks its card and sho
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
   const k1 = page.locator(`.gard-card[data-id="${ids.k1}"]`);
   await k1.locator('[data-action="approve"]').click();
-  await head(page, "other").locator('[data-batch-action="approve"]').click();
-  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
   release();
   await expect(k1.locator(".gard-outcome")).toHaveText("boom-409");
   await expect(k1.locator('[data-action="approve"]')).toBeEnabled();
@@ -417,7 +417,37 @@ test("a twin approved in this tab blocks its pair even when the browser clock ru
   await expect.poll(() => statusOf("t1")).toBe("applied");
   await expect(page.locator(`.gard-card[data-id="${ids.t1}"] [data-action="approve"]`)).toHaveCount(0);
   // Nothing left to approve: the header offers no Approve all and says why.
-  await expect(head(page, "other").locator('[data-batch-action="approve"]')).toHaveCount(0);
-  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("1 page written since drafting");
+  await expect(head(page, "ai").locator('[data-batch-action="approve"]')).toHaveCount(0);
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("1 page written since drafting");
   expect(await statusOf("t2")).toBe("draft");
+});
+
+// Three sections and the section chip row.
+test("the section chips count each section and show only the chosen one, with its Approve all", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("x1", "Agent Notes", "claude-code");
+  await seedDraft("x2", "Agent Notes Two", "claude-code");
+  await seedDraft("lf1", "Morning Habits", "focus, health", "life/sources/Morning Habits.mdx");
+  await seedDraft("en1", "Series Ranking", "netflix, tv-series", "life/sources/Series Ranking.mdx");
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  const chip = (s: string) => page.locator(`#gardFilters .gard-filter[data-section="${s}"]`);
+  await expect(chip("ai")).toHaveText("AI 2");
+  await expect(chip("life")).toHaveText("Life 1");
+  await expect(chip("entertainment")).toHaveText("Entertainment 1");
+  const order = await page.locator(".gard-batch-head[data-batch-section]").evaluateAll((els) => els.map((e) => e.getAttribute("data-batch-section")));
+  expect(order).toEqual(["ai", "life", "entertainment"]);
+  await expect(head(page, "life")).toContainText("Life");
+
+  await chip("life").click();
+  await expect(page.locator(".gard-batch-head[data-batch-section]")).toHaveCount(1);
+  await expect(page.locator(".gard-card")).toHaveCount(1);
+  await expect(page.locator(`.gard-card[data-id="${ids.lf1}"]`)).toHaveCount(1);
+  await head(page, "life").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "life").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
+  expect(await statusOf("lf1")).toBe("applied");
+  for (const k of ["x1", "x2", "en1"]) expect(await statusOf(k)).toBe("draft");
+  await expect(chip("life")).toHaveText("Life 0");
+
+  await page.locator('#gardFilters .gard-filter[data-section=""]').click();
+  await expect(page.locator(`.gard-card[data-id="${ids.x1}"]`)).toHaveCount(1);
 });

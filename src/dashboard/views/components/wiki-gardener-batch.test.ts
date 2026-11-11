@@ -19,7 +19,7 @@ describe("planBatch", () => {
       card("applied", { status: "applied" }),
       card("lint", { groupKey: "lint:x:1" }),
     ];
-    expect(planBatch(cards, "other", "approve").ids).toEqual(["a", "b"]);
+    expect(planBatch(cards, "ai", "approve").ids).toEqual(["a", "b"]);
     expect(planBatch(cards, "entertainment", "approve").ids).toEqual(["film"]);
   });
 
@@ -32,30 +32,30 @@ describe("planBatch", () => {
       card("twin1", { targetPath: "sources/Same.mdx" }),
       card("twin2", { targetPath: "sources/Same.mdx" }),
     ];
-    const approve = planBatch(cards, "other", "approve");
+    const approve = planBatch(cards, "ai", "approve");
     expect(approve.ids).toEqual(["ok"]);
     expect(Object.fromEntries(approve.skipped)).toEqual({
       "fact-check lock": 2,
       "page changed since drafting": 1,
       "another draft writes the same page": 2,
     });
-    expect(planBatch(cards, "other", "reject").ids).toEqual(["ok", "locked", "unknown", "drift", "twin1", "twin2"]);
+    expect(planBatch(cards, "ai", "reject").ids).toEqual(["ok", "locked", "unknown", "drift", "twin1", "twin2"]);
   });
 
   test("a same-page twin hidden by a filter still blocks the visible one", () => {
     const visible = [card("twin1", { targetPath: "p.mdx" })];
     const all = [...visible, card("twin2", { targetPath: "p.mdx", category: "entertainment" })];
-    expect(planBatch(visible, "other", "approve", new Set(), all).ids).toEqual([]);
+    expect(planBatch(visible, "ai", "approve", new Set(), all).ids).toEqual([]);
   });
 
   test("a card with a Redraft in flight is skipped by both verbs", () => {
     const cards = [card("a"), card("b")];
-    expect(planBatch(cards, "other", "reject", new Set(["a"])).ids).toEqual(["b"]);
+    expect(planBatch(cards, "ai", "reject", new Set(["a"])).ids).toEqual(["b"]);
   });
 });
 
 describe("batchProgressText", () => {
-  const base = { section: "other" as const, verb: "approve" as const, total: 5, done: 2, failed: 0, running: true, stopped: false };
+  const base = { section: "ai" as const, verb: "approve" as const, total: 5, done: 2, failed: 0, running: true, stopped: false };
   test("running, finished, stopped and failed", () => {
     expect(batchProgressText(base)).toBe("Approving 3 of 5…");
     expect(batchProgressText({ ...base, done: 5, running: false })).toBe("5 of 5 approved");
@@ -66,19 +66,19 @@ describe("batchProgressText", () => {
 
 describe("batchHeadHtml", () => {
   const cards = [card("a"), card("film", { category: "entertainment" }), card("locked", { factcheck: { needsRedraft: true } })];
-  const head = (section: "other" | "entertainment", over: Partial<Parameters<typeof batchHeadHtml>[0]> = {}) =>
+  const head = (section: "ai" | "entertainment", over: Partial<Parameters<typeof batchHeadHtml>[0]> = {}) =>
     batchHeadHtml({ section, label: "L", cards, count: 1, progress: null, anyRunning: false, ...over });
 
   test("Approve all counts what the batch takes; only entertainment offers Reject all", () => {
-    expect(head("other")).toContain(">Approve all 1<");
-    expect(head("other")).not.toContain("Reject all");
-    expect(head("other")).toContain("left for you: 1 fact-check lock");
+    expect(head("ai")).toContain(">Approve all 1<");
+    expect(head("ai")).not.toContain("Reject all");
+    expect(head("ai")).toContain("left for you: 1 fact-check lock");
     expect(head("entertainment")).toContain(">Reject all 1<");
   });
 
   test("a running batch shows Stop; another running batch disables the buttons", () => {
-    const progress = { section: "other" as const, verb: "approve" as const, total: 1, done: 0, failed: 0, running: true, stopped: false };
-    expect(head("other", { progress, anyRunning: true })).toContain("data-batch-stop");
+    const progress = { section: "ai" as const, verb: "approve" as const, total: 1, done: 0, failed: 0, running: true, stopped: false };
+    expect(head("ai", { progress, anyRunning: true })).toContain("data-batch-stop");
     expect(head("entertainment", { anyRunning: true })).toMatch(/data-batch-action="approve"[^>]*disabled/);
   });
 });
@@ -92,7 +92,7 @@ describe("planBatch — a page another row already wrote", () => {
       card("A", { status: "applied", targetPath: "sources/Fable.mdx", mode: "create" }),
       card("B", { targetPath: "sources/Fable.mdx", mode: "create" }),
     ];
-    const plan = planBatch(cards, "other", "approve");
+    const plan = planBatch(cards, "ai", "approve");
     expect(plan.ids).toEqual([]);
     expect(Object.fromEntries(plan.skipped)).toEqual({ "page written since drafting": 1 });
   });
@@ -102,7 +102,7 @@ describe("planBatch — a page another row already wrote", () => {
       card("A", { status: "applied", targetPath: "sources/Fable.mdx", mode: "create" }),
       card("U", { targetPath: "sources/Fable.mdx", mode: "update" }),
     ];
-    expect(planBatch(cards, "other", "approve").ids).toEqual(["U"]);
+    expect(planBatch(cards, "ai", "approve").ids).toEqual(["U"]);
   });
 });
 
@@ -126,7 +126,7 @@ describe("batchStopReason", () => {
 import { WIKI_READONLY_BLOCKED_SELECTOR } from "./wiki-readonly-client.ts";
 
 test("a read-only instance blocks Approve all, spelled as the header renders it", () => {
-  const html = batchHeadHtml({ section: "other", label: "L", cards: [card("a")], count: 1, progress: null, anyRunning: false });
+  const html = batchHeadHtml({ section: "ai", label: "L", cards: [card("a")], count: 1, progress: null, anyRunning: false });
   expect(html).toContain('data-batch-action="approve"');
   expect(WIKI_READONLY_BLOCKED_SELECTOR.split(",").map((s) => s.trim())).toContain('[data-batch-action="approve"]');
 });
@@ -159,7 +159,7 @@ describe("planBatch — an applied twin blocks only a draft made before it", () 
       card("old", { status: "applied", targetPath: "p.mdx", mode: "create", resolvedAt: 1_000 }),
       card("new", { targetPath: "p.mdx", mode: "create", createdAt: 5_000 }),
     ];
-    expect(planBatch(cards, "other", "approve").ids).toEqual(["new"]);
+    expect(planBatch(cards, "ai", "approve").ids).toEqual(["new"]);
   });
 
   test("a page applied after the draft was made blocks it, under its own reason", () => {
@@ -167,7 +167,7 @@ describe("planBatch — an applied twin blocks only a draft made before it", () 
       card("twin", { status: "applied", targetPath: "p.mdx", mode: "create", resolvedAt: 9_000 }),
       card("late", { targetPath: "p.mdx", mode: "create", createdAt: 5_000 }),
     ];
-    const plan = planBatch(cards, "other", "approve");
+    const plan = planBatch(cards, "ai", "approve");
     expect(plan.ids).toEqual([]);
     expect(Object.fromEntries(plan.skipped)).toEqual({ "page written since drafting": 1 });
   });
@@ -175,6 +175,40 @@ describe("planBatch — an applied twin blocks only a draft made before it", () 
 
 // Fix round 2 batch 3 (batch-1 verify finding 2).
 test("a halted batch says it stopped after an error, not that the fault is shared", () => {
-  const b = { section: "other" as const, verb: "approve" as const, total: 3, done: 1, failed: 1, running: false, stopped: false, haltedBy: "path confinement failed" };
+  const b = { section: "ai" as const, verb: "approve" as const, total: 3, done: 1, failed: 1, running: false, stopped: false, haltedBy: "path confinement failed" };
   expect(batchProgressText(b)).toBe("Stopped after an error (path confinement failed): 0 of 3 approved · 1 failed (see the cards)");
+});
+
+// Three sections and their chips.
+import { sectionCounts, sectionLabel, sectionOf } from "./wiki-gardener-batch.ts";
+
+describe("sections", () => {
+  test("AI outside life/, Life inside it, Entertainment by category wherever it is", () => {
+    expect(sectionOf(card("a", { targetPath: "sources/X.mdx" }))).toBe("ai");
+    expect(sectionOf(card("l", { targetPath: "life/sources/Clove.mdx" }))).toBe("life");
+    expect(sectionOf(card("e", { targetPath: "life/sources/Films.mdx", category: "entertainment" }))).toBe("entertainment");
+  });
+
+  test("the chip counts are drafts per section, ungrouped only", () => {
+    const cards = [
+      card("a"),
+      card("a2"),
+      card("l", { targetPath: "life/sources/L.mdx" }),
+      card("e", { targetPath: "life/sources/E.mdx", category: "entertainment" }),
+      card("done", { status: "applied" }),
+      card("lint", { groupKey: "lint:x:1" }),
+    ];
+    expect(sectionCounts(cards)).toEqual({ ai: 2, life: 1, entertainment: 1 });
+  });
+
+  test("a wiki with only AI-side drafts calls that section Drafts", () => {
+    expect(sectionLabel("ai", [card("a")])).toBe("Drafts");
+    expect(sectionLabel("ai", [card("a"), card("l", { targetPath: "life/x.mdx" })])).toBe("AI and tech");
+    expect(sectionLabel("life", [card("l", { targetPath: "life/x.mdx" })])).toBe("Life");
+  });
+
+  test("Approve all on Life leaves the AI and entertainment drafts alone", () => {
+    const cards = [card("a"), card("l", { targetPath: "life/sources/L.mdx" }), card("e", { targetPath: "life/sources/E.mdx", category: "entertainment" })];
+    expect(planBatch(cards, "life", "approve").ids).toEqual(["l"]);
+  });
 });
