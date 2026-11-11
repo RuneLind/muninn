@@ -70,7 +70,7 @@ describe("batchHeadHtml", () => {
     batchHeadHtml({ section, label: "L", cards, count: 1, progress: null, anyRunning: false, ...over });
 
   test("Approve all counts what the batch takes; only entertainment offers Reject all", () => {
-    expect(head("ai")).toContain(">Approve all 1<");
+    expect(head("ai")).toContain(">Approve all 1 of 2<");
     expect(head("ai")).not.toContain("Reject all");
     expect(head("ai")).toContain("left for you: 1 fact-check lock");
     expect(head("entertainment")).toContain(">Reject all 1<");
@@ -225,5 +225,18 @@ describe("hasLifeDomain and the AI label", () => {
   test("the AI label does not flip to Drafts when the last life draft is approved", () => {
     const cards = [card("a"), card("l", { status: "applied", targetPath: "life/sources/L.mdx" })];
     expect(sectionLabel("ai", cards)).toBe("AI and tech");
+  });
+});
+
+// Fix round 1 batch 2 (review findings 2, 5) and the two asks: a total chip, "N of M".
+describe("batch 2", () => {
+  test("Approve all names what it skips: N of M; no skip reads plain", () => {
+    const html = batchHeadHtml({ section: "ai", label: "L", cards: [card("a"), card("b")], count: 2, progress: null, anyRunning: false });
+    expect(html).toContain(">Approve all 2<");
+  });
+
+  test("a lifestyle/ path is not Life", () => {
+    expect(sectionOf(card("x", { targetPath: "lifestyle/x.mdx" }))).toBe("ai");
+    expect(hasLifeDomain([card("x", { targetPath: "lifestyle/x.mdx" }), card("y", { targetPath: "projects/life/y.md" })])).toBe(false);
   });
 });

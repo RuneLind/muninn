@@ -130,7 +130,7 @@ test("drafts are filed by their tags, and the same-page pair is left out of Appr
   const ent = head(page, "entertainment");
   await expect(other).toContainText("AI and tech");
   await expect(other).toContainText("4 drafts");
-  await expect(other.locator('[data-batch-action="approve"]')).toHaveText("Approve all 2");
+  await expect(other.locator('[data-batch-action="approve"]')).toHaveText("Approve all 2 of 4");
   await expect(other.locator('[data-batch-action="reject"]')).toHaveCount(0);
   await expect(other.locator(".gard-batch-note")).toHaveText("left for you: 2 another draft writes the same page");
   await expect(ent).toContainText("2 drafts");
@@ -431,6 +431,7 @@ test("the section chips count each section and show only the chosen one, with it
   await seedDraft("en1", "Series Ranking", "netflix, tv-series", "life/sources/Series Ranking.mdx");
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
   const chip = (s: string) => page.locator(`#gardFilters .gard-filter[data-section="${s}"]`);
+  await expect(page.locator('#gardFilters .gard-filter[data-section=""]')).toHaveText("All sections 4");
   await expect(chip("ai")).toHaveText("AI 2");
   await expect(chip("life")).toHaveText("Life 1");
   await expect(chip("entertainment")).toHaveText("Entertainment 1");
@@ -477,4 +478,21 @@ test("a section chip clicked during a batch keeps the running section's header a
   await expect(head(page, "ai")).toHaveCount(0);
   expect(await statusOf("rl1")).toBe("draft");
   await page.unroute("**/api/wiki/proposals/*/approve*");
+});
+
+// Fix round 1 batch 2 (review finding 2): the chip counts follow the status and kind filters.
+test("the section chips count what the status and kind filters let through", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("cf1", "Count One", "claude-code");
+  await seedDraft("cf2", "Count Life", "focus", "life/sources/Count Life.mdx");
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  const chip = (s: string) => page.locator(`#gardFilters .gard-filter[data-section="${s}"]`);
+  await expect(chip("ai")).toHaveText("AI 1");
+  await page.locator('#gardFilters .gard-filter[data-kind="lint"]').click();
+  await expect(chip("ai")).toHaveText("AI 0");
+  await expect(chip("life")).toHaveText("Life 0");
+  await expect(chip("")).toHaveText("All sections 0");
+  await page.locator('#gardFilters .gard-filter[data-kind=""]').click();
+  await page.locator('#gardFilters .gard-filter[data-status="applied"]').click();
+  await expect(chip("life")).toHaveText("Life 0");
 });

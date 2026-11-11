@@ -250,7 +250,10 @@ export function batchHeadHtml(opts: {
   } else {
     const dis = anyRunning ? " disabled" : "";
     if (approve.ids.length) {
-      html += `<button class="gard-btn gard-approve" data-batch-action="approve" data-batch="${esc(section)}"${dis}>Approve all ${approve.ids.length}</button>`;
+      // "N of M" when it leaves some for a human; the reason line says which.
+      const left = [...approve.skipped.values()].reduce((a, b) => a + b, 0);
+      const n = approve.ids.length;
+      html += `<button class="gard-btn gard-approve" data-batch-action="approve" data-batch="${esc(section)}"${dis}>Approve all ${left ? `${n} of ${n + left}` : n}</button>`;
     }
     if (section === "entertainment" && reject.ids.length) {
       html += `<button class="gard-btn gard-reject" data-batch-action="reject" data-batch="${esc(section)}"${dis}>Reject all ${reject.ids.length}</button>`;

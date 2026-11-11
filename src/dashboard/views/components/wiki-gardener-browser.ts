@@ -342,17 +342,24 @@ function shownProposals(): ProposalView[] {
   );
 }
 
-/** Each section chip carries its draft count, read off the whole listing. On a
- *  wiki with no life domain the chip group is hidden: only one section exists. */
+/** Each section chip carries its draft count under the status and kind filters
+ *  (so a chip never promises cards the list will not show), and "All sections"
+ *  their total. On a wiki with no life domain the chip group is hidden. */
 function paintSectionChips(): void {
   const show = hasLifeDomain(allProposals);
   document.querySelectorAll("#gardFilters [data-section-group]").forEach((el) => ((el as HTMLElement).hidden = !show));
   if (!show && sectionFilter) sectionFilter = "";
-  const counts = sectionCounts(allProposals);
+  const counts = sectionCounts(
+    allProposals.filter((p) => (!statusFilter || p.status === statusFilter) && kindMatches(p.kind, kindFilter)),
+  );
+  let total = 0;
   for (const { key, chip } of BATCH_SECTIONS) {
+    total += counts[key];
     const el = document.querySelector(`#gardFilters .gard-filter[data-section="${key}"]`);
     if (el) el.textContent = `${chip} ${counts[key]}`;
   }
+  const all = document.querySelector('#gardFilters .gard-filter[data-section=""]');
+  if (all) all.textContent = `All sections ${total}`;
 }
 
 /** The ungrouped drafts, filed by section under a header with the batch verbs.
