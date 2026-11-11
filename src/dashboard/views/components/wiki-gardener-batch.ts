@@ -21,6 +21,8 @@ export interface BatchCard {
   groupKey?: string | null;
   targetPath: string;
   mode?: string;
+  createdAt?: number;
+  resolvedAt?: number | null;
   category?: string | null;
   drifted?: string | null;
   factcheck?: { needsRedraft: boolean } | null;
@@ -48,10 +50,12 @@ export function sectionOf(p: BatchCard): BatchSection {
  * Reject skips nothing. Approve skips a card the server would refuse or that
  * needs a decision: the fact-check lock (known or unknown), a drifted page
  * (Approve writes nothing and marks it stale), two drafts for one page, and a
- * create draft for a page an applied row wrote. Those last two would fail as
- * "target path already exists" (or a moved base hash) and burn the draft. The
- * listing flags a written page as `drifted` only for update rows and only on a
- * reload, so a twin approved in this tab is caught here or not at all.
+ * create draft for a page an applied row wrote AFTER the draft was made. Those
+ * last two would fail as "target path already exists" (or a moved base hash)
+ * and burn the draft. The listing flags a written page as `drifted` only for
+ * update rows and only on a reload, so a twin approved in this tab is caught
+ * here or not at all. A page applied before the draft was made does not block
+ * it: the drafter saw no page there, so it was deleted or moved since.
  * `busy` holds the ids a Redraft or a single click is still working on.
  */
 export function batchSkipReason(
@@ -64,8 +68,10 @@ export function batchSkipReason(
   if (verb === "reject") return null;
   if (p.factcheck?.needsRedraft || p.factcheckUnknown) return "fact-check lock";
   if (p.drifted) return "page changed since drafting";
-  if (pages.sharedByDrafts.has(p.targetPath) || (p.mode !== "update" && pages.written.has(p.targetPath))) {
-    return "another draft writes the same page";
+  if (pages.sharedByDrafts.has(p.targetPath)) return "another draft writes the same page";
+  const writtenAt = pages.written.get(p.targetPath);
+  if (p.mode !== "update" && writtenAt !== undefined && writtenAt >= (p.createdAt ?? 0)) {
+    return "page written since drafting";
   }
   return null;
 }
@@ -73,16 +79,19 @@ export function batchSkipReason(
 export interface PageTargets {
   /** Target paths more than one batch card holds. */
   sharedByDrafts: Set<string>;
-  /** Target paths an applied row wrote. */
-  written: Set<string>;
+  /** Target paths an applied row wrote, with the latest time one did. */
+  written: Map<string, number>;
 }
 
 export function pageTargets(cards: readonly BatchCard[]): PageTargets {
   const seen = new Set<string>();
   const sharedByDrafts = new Set<string>();
-  const written = new Set<string>();
+  const written = new Map<string, number>();
   for (const p of cards) {
-    if (p.status === "applied") written.add(p.targetPath);
+    if (p.status === "applied") {
+      const at = p.resolvedAt ?? Number.MAX_SAFE_INTEGER;
+      written.set(p.targetPath, Math.max(at, written.get(p.targetPath) ?? 0));
+    }
     if (!isBatchCard(p)) continue;
     if (seen.has(p.targetPath)) sharedByDrafts.add(p.targetPath);
     seen.add(p.targetPath);
@@ -165,6 +174,8 @@ export interface BatchProgress {
   haltedBy?: string;
   /** Re-reading the listing before the first post. */
   preparing?: boolean;
+  /** A filter changed while it ran: its result is dropped when it ends. */
+  viewChanged?: boolean;
 }
 
 export function batchProgressText(b: BatchProgress): string {

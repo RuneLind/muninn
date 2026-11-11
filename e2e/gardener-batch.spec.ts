@@ -334,3 +334,46 @@ test("a page edited after the click's listing drops its update draft from the ba
   expect(await statusOf("drift")).toBe("draft");
   expect(readFileSync(path.join(wikiDir, rel), "utf8")).toContain("Edited by hand.");
 });
+
+// Fix round 2 batch 2 (batch-3 verify finding 3, batch-1 verify finding 1).
+test("a card whose single Approve is in flight stays locked through the batch's re-renders", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("h1", "Held One", "claude-code");
+  await seedDraft("h2", "Held Two", "claude-code");
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/proposals/*/approve*", async (route) => {
+    if (route.request().url().includes(ids.h1!)) await held;
+    await route.continue();
+  });
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  const h1 = page.locator(`.gard-card[data-id="${ids.h1}"]`);
+  await h1.locator('[data-action="approve"]').click();
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
+  await expect(h1.locator('[data-action="approve"]')).toBeDisabled();
+  await expect(h1.locator(".gard-outcome")).toHaveText("Applying…");
+  release();
+  await expect.poll(() => statusOf("h1")).toBe("applied");
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+});
+
+test("a filter change during a batch drops its result when it ends", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("v1", "View One", "claude-code");
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/proposals/*/approve*", async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("Approving 1 of 1");
+  await page.locator('#gardFilters .gard-filter[data-kind="lint"]').click();
+  release();
+  await expect.poll(() => statusOf("v1")).toBe("applied");
+  await page.waitForTimeout(300);
+  await expect(page.locator(".gard-batch-head[data-batch-section]")).toHaveCount(0);
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+});

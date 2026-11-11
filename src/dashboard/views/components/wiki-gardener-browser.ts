@@ -394,9 +394,16 @@ function render(): void {
   list.innerHTML = html;
   // A Redraft's state lives here, not on the card this render just replaced.
   for (const id of new Set([...redraftsInFlight, ...redraftNotes.keys()])) paintRedraftState(id);
-  // Cards a running batch has still to reach keep their buttons disabled.
+  // Cards a running batch has still to reach keep their buttons disabled, and
+  // so does a card whose single click is still waiting, with its note.
   for (const id of batchQueued) {
     cardById(id)?.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
+  }
+  for (const [id, action] of actsInFlight) {
+    const card = cardById(id);
+    if (!card) continue;
+    card.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    setOutcome(card, action === "approve" ? "Applying…" : "Rejecting…", "");
   }
   // A group's outcome note lives on the card, which this render just replaced.
   // Re-paint whatever the last group action said, or a `Stopped at …` note is
@@ -517,12 +524,12 @@ async function postAction(
   }
 }
 
-/** Single-card approve/reject clicks still waiting on the server. */
-const actsInFlight = new Set<string>();
+/** Single-card approve/reject clicks still waiting on the server, by id. */
+const actsInFlight = new Map<string, "approve" | "reject">();
 
 /** Ids a batch must not post: a Redraft or a single click is working on them. */
 function busyIds(): Set<string> {
-  return new Set([...redraftsInFlight, ...actsInFlight]);
+  return new Set([...redraftsInFlight, ...actsInFlight.keys()]);
 }
 
 async function act(id: string, action: CardAction, card: HTMLElement): Promise<void> {
@@ -531,7 +538,7 @@ async function act(id: string, action: CardAction, card: HTMLElement): Promise<v
   const buttons = card.querySelectorAll(".gard-btn");
   buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
   setOutcome(card, action === "approve" ? "Applying…" : "Rejecting…", "");
-  actsInFlight.add(id);
+  actsInFlight.set(id, action);
   const r = await postAction(id, action).finally(() => actsInFlight.delete(id));
   if (!r.ok) {
     if (allProposals.find((x) => x.id === id)?.status === "draft") {
@@ -629,6 +636,7 @@ async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
     prog.running = false;
     runningBatch = null;
     batchQueued.clear();
+    if (prog.viewChanged) batchState.delete(section);
     render();
     rerenderStrip();
   }
@@ -755,8 +763,10 @@ document.getElementById("gardFilters")!.addEventListener("click", (e) => {
     .querySelectorAll(`#gardFilters .gard-filter[${isKind ? "data-kind" : "data-status"}]`)
     .forEach((c) => c.classList.remove("active"));
   chipEl.classList.add("active");
-  // A finished batch's result belongs to the view it ran in.
-  if (!runningBatch) batchState.clear();
+  // A batch's result belongs to the view it ran in: a finished one goes now,
+  // a running one when it ends.
+  if (runningBatch) runningBatch.viewChanged = true;
+  for (const [section, b] of batchState) if (!b.running) batchState.delete(section);
   render();
 });
 

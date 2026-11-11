@@ -94,7 +94,7 @@ describe("planBatch — a page another row already wrote", () => {
     ];
     const plan = planBatch(cards, "other", "approve");
     expect(plan.ids).toEqual([]);
-    expect(Object.fromEntries(plan.skipped)).toEqual({ "another draft writes the same page": 1 });
+    expect(Object.fromEntries(plan.skipped)).toEqual({ "page written since drafting": 1 });
   });
 
   test("an update draft of a page an applied row wrote is taken: that is the normal update", () => {
@@ -149,5 +149,26 @@ describe("narrowBatch", () => {
 
   test("drops a row a single click is working on, and one gone from the listing", () => {
     expect(narrowBatch(["a", "b"], [card("a"), card("b")], [card("a")], "approve", new Set(["a"]))).toEqual([]);
+  });
+});
+
+// Fix round 2 batch 2 (batch-1 verify finding 3).
+describe("planBatch — an applied twin blocks only a draft made before it", () => {
+  test("a page applied long before the draft (since deleted or moved) does not block it", () => {
+    const cards = [
+      card("old", { status: "applied", targetPath: "p.mdx", mode: "create", resolvedAt: 1_000 }),
+      card("new", { targetPath: "p.mdx", mode: "create", createdAt: 5_000 }),
+    ];
+    expect(planBatch(cards, "other", "approve").ids).toEqual(["new"]);
+  });
+
+  test("a page applied after the draft was made blocks it, under its own reason", () => {
+    const cards = [
+      card("twin", { status: "applied", targetPath: "p.mdx", mode: "create", resolvedAt: 9_000 }),
+      card("late", { targetPath: "p.mdx", mode: "create", createdAt: 5_000 }),
+    ];
+    const plan = planBatch(cards, "other", "approve");
+    expect(plan.ids).toEqual([]);
+    expect(Object.fromEntries(plan.skipped)).toEqual({ "page written since drafting": 1 });
   });
 });
