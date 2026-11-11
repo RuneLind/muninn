@@ -356,6 +356,21 @@ test("query log: the palette opens and logs on an origin with no crypto.randomUU
   expect((await loggedFor(q))[0]!.session).toMatch(/^[0-9a-f]{32}$/);
 });
 
+test("query log: a press on the scrim and the toggle key each log a dismissal", async ({ page }) => {
+  const viaScrim = "fix     rounds";
+  const viaToggle = "fix      rounds";
+  await openReader(page);
+  await find(page, viaScrim);
+  await page.locator(".wiki-find-scrim").click({ position: { x: 4, y: 4 } });
+  await expect(palette(page)).toHaveCount(0);
+  await find(page, viaToggle);
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(viaToggle)).length).toBe(1);
+  expect(opens(await loggedFor(viaScrim))).toEqual([null]);
+  expect(opens(await loggedFor(viaToggle))).toEqual([null]);
+});
+
 test("query log: a modifier click and a middle click on a row are each logged as an open, an Alt click is not, all in the session of the Escape after them", async ({ page }) => {
   const q = "fix  rounds";
   await openReader(page);

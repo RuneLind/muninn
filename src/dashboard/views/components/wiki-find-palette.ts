@@ -372,7 +372,9 @@ function scheduleRender(): void {
 function logFind(opened: FindLogOpened | null): void {
   if (!port || !port.everywhere()) return;
   const typed = input()?.value ?? "";
-  // A count only for an answer to this text: under a filter `every` can still hold the last one.
+  // A count only for an answer to this text. `every` can hold an older one:
+  // under a filter (no fetch plan), and during an IME composition, when
+  // `onInput` returns before `updateEverywhere` (the key match; no test pins it).
   const plan = everywherePlan(typed, true);
   const answered = plan.kind === "fetch" && every?.key === plan.key && every.status === "done";
   const body = findLogBody(typed, shownQ, opened, {
