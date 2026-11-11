@@ -40,10 +40,13 @@ import { approveButtonFor, FACTCHECK_UNKNOWN_NOTE, singleDriftNote } from "./wik
 import {
   BATCH_SECTIONS,
   batchHeadHtml,
+  hasLifeDomain,
   batchStopReason,
   narrowBatch,
   isBatchCard,
   planBatch,
+  sectionCounts,
+  sectionLabel,
   sectionOf,
   type BatchProgress,
   type BatchSection,
@@ -327,8 +330,36 @@ function factcheckNoteHtml(p: ProposalView): string {
   return `<div class="gard-fc-note info" data-fc="missing-block">The source doc was fact-checked (${esc(date)}), but this draft carries no fact-check block or Fact check section.</div>`;
 }
 
+/** The section chip: "" for every section, else one section's drafts only. */
+let sectionFilter: BatchSection | "" = "";
+
 function shownProposals(): ProposalView[] {
-  return allProposals.filter((p) => (!statusFilter || p.status === statusFilter) && kindMatches(p.kind, kindFilter));
+  return allProposals.filter(
+    (p) =>
+      (!statusFilter || p.status === statusFilter) &&
+      kindMatches(p.kind, kindFilter) &&
+      (!sectionFilter || (isBatchCard(p) && sectionOf(p) === sectionFilter)),
+  );
+}
+
+/** Each section chip carries its draft count under the status and kind filters
+ *  (so a chip never promises cards the list will not show), and "All sections"
+ *  their total. On a wiki with no life domain the chip group is hidden. */
+function paintSectionChips(): void {
+  const show = hasLifeDomain(allProposals);
+  document.querySelectorAll("#gardFilters [data-section-group]").forEach((el) => ((el as HTMLElement).hidden = !show));
+  if (!show && sectionFilter) sectionFilter = "";
+  const counts = sectionCounts(
+    allProposals.filter((p) => (!statusFilter || p.status === statusFilter) && kindMatches(p.kind, kindFilter)),
+  );
+  let total = 0;
+  for (const { key, chip } of BATCH_SECTIONS) {
+    total += counts[key];
+    const el = document.querySelector(`#gardFilters .gard-filter[data-section="${key}"]`);
+    if (el) el.textContent = `${chip} ${counts[key]}`;
+  }
+  const all = document.querySelector('#gardFilters .gard-filter[data-section=""]');
+  if (all) all.textContent = `All sections ${total}`;
 }
 
 /** The ungrouped drafts, filed by section under a header with the batch verbs.
@@ -338,12 +369,15 @@ function batchSectionsHtml(shown: ProposalView[]): string {
   // A section a batch just emptied keeps its header, so the result stays on screen.
   if (!drafts.length && !batchState.size) return "";
   let html = "";
-  for (const { key, label } of BATCH_SECTIONS) {
+  for (const { key } of BATCH_SECTIONS) {
+    // A running batch keeps its header (and Stop) under any section chip.
+    if (sectionFilter && key !== sectionFilter && runningBatch?.section !== key) continue;
     const inSection = drafts.filter((p) => sectionOf(p) === key);
     if (!inSection.length && !batchState.has(key)) continue;
     html += batchHeadHtml({
       section: key,
-      label,
+      label: sectionLabel(key, allProposals),
+      noun: hasLifeDomain(allProposals) ? BATCH_SECTIONS.find((b) => b.key === key)!.chip : "",
       cards: shown,
       count: inSection.length,
       progress: batchState.get(key) ?? null,
@@ -361,6 +395,7 @@ function batchSectionsHtml(shown: ProposalView[]): string {
 
 function render(): void {
   const list = document.getElementById("gardList")!;
+  paintSectionChips();
   const shown = shownProposals();
   if (!shown.length) {
     // A batch that just emptied this view keeps its header and result above
@@ -736,14 +771,14 @@ async function actOnGroup(
 document.getElementById("gardFilters")!.addEventListener("click", (e) => {
   const chipEl = (e.target as HTMLElement).closest(".gard-filter");
   if (!chipEl) return;
-  // Two filters in one row: the status chips and the kind chips, each with
+  // Three filters in one row: the status, kind and section chips, each with
   // its own active chip.
-  const isKind = chipEl.hasAttribute("data-kind");
-  if (isKind) kindFilter = chipEl.getAttribute("data-kind") || "";
-  else statusFilter = chipEl.getAttribute("data-status") || "";
-  document
-    .querySelectorAll(`#gardFilters .gard-filter[${isKind ? "data-kind" : "data-status"}]`)
-    .forEach((c) => c.classList.remove("active"));
+  const attr = ["data-kind", "data-section", "data-status"].find((a) => chipEl.hasAttribute(a))!;
+  const value = chipEl.getAttribute(attr) || "";
+  if (attr === "data-kind") kindFilter = value;
+  else if (attr === "data-section") sectionFilter = value as BatchSection | "";
+  else statusFilter = value;
+  document.querySelectorAll(`#gardFilters .gard-filter[${attr}]`).forEach((c) => c.classList.remove("active"));
   chipEl.classList.add("active");
   // A batch's result belongs to the view it ran in: a finished one goes now,
   // a running one when it ends.

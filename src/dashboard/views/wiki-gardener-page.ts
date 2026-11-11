@@ -500,6 +500,14 @@ ${readonly ? `    <div class="gard-readonly">This muninn instance is <strong>wik
       <button class="gard-filter" data-kind="stale-check">Stale check</button>
       <button class="gard-filter" data-kind="lint">Lint</button>
       <button class="gard-filter" data-kind="pages">Drafted pages</button>
+      <span class="gard-filter-sep" aria-hidden="true" data-section-group></span>
+      <!-- The SECTION filter (wiki-gardener-batch.ts): one batch section's
+           drafts and its Approve all. The client adds each chip's count and
+           hides the group on a wiki with no life domain. -->
+      <button class="gard-filter active" data-section="" data-section-group>All sections</button>
+      <button class="gard-filter" data-section="ai" data-section-group>AI</button>
+      <button class="gard-filter" data-section="life" data-section-group>Life</button>
+      <button class="gard-filter" data-section="entertainment" data-section-group>Entertainment</button>
     </div>
     <div id="gardList">${gardListInit}</div>
 

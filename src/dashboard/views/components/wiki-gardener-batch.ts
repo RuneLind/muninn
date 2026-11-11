@@ -1,6 +1,7 @@
 /**
- * Batch review on `/wiki/gardener`: the ungrouped drafts are filed into
- * sections (`category` on the listing, `src/gardener/category.ts`), and each
+ * Batch review on `/wiki/gardener`: the ungrouped drafts are filed into three
+ * sections, AI and tech (outside `life/`), Life (`life/`, no film/TV tag) and
+ * Entertainment (`category` on the listing, `src/gardener/category.ts`), and each
  * section header approves or rejects the whole section one card at a time,
  * through the same per-card routes a click uses, so every server guard still runs.
  *
@@ -11,7 +12,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 
-export type BatchSection = "other" | "entertainment";
+export type BatchSection = "ai" | "life" | "entertainment";
 export type BatchVerb = "approve" | "reject";
 
 /** The listing fields a batch decision reads. */
@@ -29,11 +30,34 @@ export interface BatchCard {
   factcheckUnknown?: boolean;
 }
 
-/** Section order on the page: the cards a reviewer usually takes first lead. */
-export const BATCH_SECTIONS: { key: BatchSection; label: string }[] = [
-  { key: "other", label: "Everything else" },
-  { key: "entertainment", label: "Entertainment — films and TV" },
+/** Section order on the page: the cards a reviewer usually takes first lead.
+ *  `chip` is the section filter's label. */
+export const BATCH_SECTIONS: { key: BatchSection; label: string; chip: string }[] = [
+  { key: "ai", label: "AI and tech", chip: "AI" },
+  { key: "life", label: "Life", chip: "Life" },
+  { key: "entertainment", label: "Entertainment — films and TV", chip: "Entertainment" },
 ];
+
+/** True when any row on the listing, in any status, targets `life/`: the wiki
+ *  has a life domain (jarvis), so the three sections and their chips apply. A
+ *  wiki without one (mimir, racewiki) files everything under the first section. */
+export function hasLifeDomain(cards: readonly BatchCard[]): boolean {
+  return cards.some((p) => p.targetPath.startsWith("life/"));
+}
+
+/** A section's header label: "Drafts" for the first section on a wiki with no
+ *  life domain. Read off every row, so it does not flip mid-session. */
+export function sectionLabel(key: BatchSection, cards: readonly BatchCard[]): string {
+  if (key === "ai" && !hasLifeDomain(cards)) return "Drafts";
+  return BATCH_SECTIONS.find((s) => s.key === key)!.label;
+}
+
+/** Draft count per section, for the section chips. */
+export function sectionCounts(cards: readonly BatchCard[]): Record<BatchSection, number> {
+  const counts: Record<BatchSection, number> = { ai: 0, life: 0, entertainment: 0 };
+  for (const p of cards) if (isBatchCard(p)) counts[sectionOf(p)]++;
+  return counts;
+}
 
 /** True for a card the batch sections hold: an ungrouped draft. */
 export function isBatchCard(p: BatchCard): boolean {
@@ -41,7 +65,8 @@ export function isBatchCard(p: BatchCard): boolean {
 }
 
 export function sectionOf(p: BatchCard): BatchSection {
-  return p.category === "entertainment" ? "entertainment" : "other";
+  if (p.category === "entertainment") return "entertainment";
+  return p.targetPath.startsWith("life/") ? "life" : "ai";
 }
 
 /**
@@ -206,6 +231,8 @@ function skippedText(skipped: Map<string, number>): string {
 export function batchHeadHtml(opts: {
   section: BatchSection;
   label: string;
+  /** The section's name on its buttons ("AI"), or "" on a wiki with one section. */
+  noun?: string;
   cards: readonly BatchCard[];
   count: number;
   progress: BatchProgress | null;
@@ -224,11 +251,18 @@ export function batchHeadHtml(opts: {
     html += `<button class="gard-btn gard-batch-stop" data-batch-stop>${progress.stopped ? "Stopping…" : "Stop"}</button>`;
   } else {
     const dis = anyRunning ? " disabled" : "";
+    // Each button names its section, since every batch acts on one section only.
+    const drafts = (m: number) => `${opts.noun ? opts.noun + " " : ""}draft${m === 1 ? "" : "s"}`;
     if (approve.ids.length) {
-      html += `<button class="gard-btn gard-approve" data-batch-action="approve" data-batch="${esc(section)}"${dis}>Approve all ${approve.ids.length}</button>`;
+      // "Approve N of M" when it leaves some for a human; the reason line says which.
+      const left = [...approve.skipped.values()].reduce((a, b) => a + b, 0);
+      const n = approve.ids.length;
+      const text = left ? `Approve ${n} of ${n + left} ${drafts(n + left)}` : `Approve all ${n} ${drafts(n)}`;
+      html += `<button class="gard-btn gard-approve" data-batch-action="approve" data-batch="${esc(section)}"${dis}>${esc(text)}</button>`;
     }
     if (section === "entertainment" && reject.ids.length) {
-      html += `<button class="gard-btn gard-reject" data-batch-action="reject" data-batch="${esc(section)}"${dis}>Reject all ${reject.ids.length}</button>`;
+      const n = reject.ids.length;
+      html += `<button class="gard-btn gard-reject" data-batch-action="reject" data-batch="${esc(section)}"${dis}>Reject all ${n} ${esc(drafts(n))}</button>`;
     }
   }
   html += "</span>";
