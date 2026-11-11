@@ -40,7 +40,7 @@
 
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -259,6 +259,9 @@ test("selecting another wiki's Everywhere row opens that wiki's page", async ({ 
   await expect(target(page)).toHaveCount(1);
   // Arrow keys walk the local rows, then the Everywhere rows.
   const index = Number(await target(page).getAttribute("data-find-row"));
+  const locals = await localRows(page).count();
+  const shownEvery = await everyRows(page).count();
+  const since = new Date().toISOString();
   for (let i = 0; i < index; i++) await page.keyboard.press("ArrowDown");
   await expect(target(page)).toHaveAttribute("aria-selected", "true");
   await expect(input(page)).toHaveAttribute("aria-activedescendant", `wikiFindRow-${index}`);
@@ -267,6 +270,15 @@ test("selecting another wiki's Everywhere row opens that wiki's page", async ({ 
   const url = new URL(page.url());
   expect(url.searchParams.get("wiki")).toBe(OTHER);
   expect(url.searchParams.get("relPath")).toBe("plans/shared-wiki.mdx");
+  // The query log's line outlives the page load, and ranks the row inside its own section.
+  const logged = async () => {
+    const text = await readFile(path.join(e2eEnv().WIKI_FIND_LOG_DIR!, "queries.jsonl"), "utf8").catch(() => "");
+    return text.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.q === "felles kode" && l.at >= since);
+  };
+  await expect.poll(async () => (await logged()).length).toBe(1);
+  const [line] = await logged();
+  expect(line.opened).toEqual({ wiki: OTHER, relPath: "plans/shared-wiki.mdx", rank: index - locals, section: "everywhere" });
+  expect(line.rows).toEqual({ local: locals, everywhere: shownEvery });
 });
 
 for (const [label, url] of [
@@ -352,6 +364,24 @@ test("a filter token turns the section off without fetching; removing it brings 
   await expect(target(page)).toHaveCount(1);
   await page.waitForTimeout(500);
   expect(ledger.searches).toEqual(["felles kode"]);
+});
+
+test("query log: under a filter the Everywhere count is null, even after an answer for the same free text", async ({ page }) => {
+  const q = "felles kode type:plan";
+  const since = new Date().toISOString();
+  await openReader(page);
+  await find(page, "felles kode");
+  await expect(target(page)).toHaveCount(1);
+  await input(page).fill(q);
+  await expect(every(page).locator("[data-find-filtered]")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(palette(page)).toHaveCount(0);
+  const logged = async () => {
+    const text = await readFile(path.join(e2eEnv().WIKI_FIND_LOG_DIR!, "queries.jsonl"), "utf8").catch(() => "");
+    return text.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.q === q && l.at >= since);
+  };
+  await expect.poll(async () => (await logged()).length).toBe(1);
+  expect((await logged())[0].rows.everywhere).toBeNull();
 });
 
 test("short free text asks nothing", async ({ page }) => {

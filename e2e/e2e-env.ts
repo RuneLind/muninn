@@ -73,7 +73,16 @@ export function e2eEnv(): Record<string, string> {
   // `gh` on the machine's login; the specs stub the checks GET.
   // `DECISION_TRIAGE_DIR`: blank means `~/.muninn/decision-triage`, the developer's
   // real log; a dir nothing writes reads as no log. A spec seeding one sets its own.
-  return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0", WORK_MAP_GH_CHECK: "off", DECISION_TRIAGE_DIR: path.join(tmpdir(), "muninn-e2e-no-triage-log") };
+  // `WIKI_FIND_LOG_DIR`: blank means `~/.muninn/wiki-find`, where a spec's palette
+  // queries would land among the developer's own.
+  return {
+    ...blankBotTokens(),
+    ...blankInstanceProfile(),
+    RESEARCH_MCP_PORT: "0",
+    WORK_MAP_GH_CHECK: "off",
+    DECISION_TRIAGE_DIR: path.join(tmpdir(), "muninn-e2e-no-triage-log"),
+    WIKI_FIND_LOG_DIR: path.join(tmpdir(), "muninn-e2e-find-log"),
+  };
 }
 
 /**

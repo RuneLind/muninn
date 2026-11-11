@@ -40,7 +40,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { utimesSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
@@ -121,6 +121,7 @@ test.beforeAll(async () => {
       MUNINN_BOTS_DIR: botsDir,
       KNOWLEDGE_API_URL: `http://127.0.0.1:${DEAD_HUGINN}`,
       CLAUDE_USAGE_URL: `http://127.0.0.1:${DEAD_LEDGER}`,
+      WIKI_FIND_LOG_DIR: path.join(botsDir, "find-log"),
     },
     stdio: "ignore",
   });
@@ -311,6 +312,124 @@ test("Enter opens the active row", async ({ page }) => {
   await expect(palette(page)).toHaveCount(0);
   await expect(page.locator(".wiki-article-head h1")).toHaveText("Four fix rounds on widget #500");
   expect(new URL(page.url()).searchParams.get("relPath")).toBe("archive/four-fix-rounds.mdx");
+});
+
+type LogLine = { q: string; shown: string; session: string; opened: { relPath: string; rank: number; section: string; wiki: string } | null; rows: { local: number; everywhere: number | null } };
+/** The query log's lines whose typed text is `q`. Each case types a text no other test types (odd inner spacing). */
+async function loggedFor(q: string): Promise<LogLine[]> {
+  const text = await readFile(path.join(botsDir, "find-log", "queries.jsonl"), "utf8").catch(() => "");
+  return text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as LogLine).filter((l) => l.q === q);
+}
+const opens = (lines: LogLine[]) => lines.map((l) => l.opened?.relPath ?? null);
+
+test("query log: Enter logs the opened row, Escape a null, and two palette sessions carry two session ids", async ({ page }) => {
+  const hit = "fix   rounds";
+  const miss = "ledger    notes";
+  await openReader(page);
+  await find(page, hit);
+  await page.keyboard.press("Enter");
+  await expect(palette(page)).toHaveCount(0);
+  await find(page, miss);
+  await page.keyboard.press("Escape");
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(miss)).length).toBe(1);
+  const [m] = await loggedFor(miss);
+  expect(m!.opened).toBeNull();
+  expect(m!.rows.local).toBe(3);
+  const [h] = await loggedFor(hit);
+  expect(h!.opened).toEqual({ wiki: WIKI, relPath: "archive/four-fix-rounds.mdx", rank: 0, section: "local" });
+  expect(h!.session).toMatch(/^[0-9a-f-]{8,}$/);
+  expect(m!.session).not.toBe(h!.session);
+});
+
+test("query log: the palette opens and logs on an origin with no crypto.randomUUID (plain http off loopback)", async ({ page }) => {
+  const q = "gamma    rep";
+  await page.addInitScript(() => {
+    delete (Crypto.prototype as { randomUUID?: unknown }).randomUUID;
+  });
+  await openReader(page);
+  expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe("undefined");
+  await find(page, q);
+  await page.keyboard.press("Escape");
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(q)).length).toBe(1);
+  expect((await loggedFor(q))[0]!.session).toMatch(/^[0-9a-f]{32}$/);
+});
+
+test("query log: a press on the scrim and the toggle key each log a dismissal", async ({ page }) => {
+  const viaScrim = "fix     rounds";
+  const viaToggle = "fix      rounds";
+  await openReader(page);
+  await find(page, viaScrim);
+  await page.locator(".wiki-find-scrim").click({ position: { x: 4, y: 4 } });
+  await expect(palette(page)).toHaveCount(0);
+  await find(page, viaToggle);
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(viaToggle)).length).toBe(1);
+  expect(opens(await loggedFor(viaScrim))).toEqual([null]);
+  expect(opens(await loggedFor(viaToggle))).toEqual([null]);
+});
+
+test("query log: a modifier click and a middle click on a row are each logged as an open, an Alt click is not, all in the session of the Escape after them", async ({ page }) => {
+  const q = "fix  rounds";
+  await openReader(page);
+  await find(page, q);
+  // The link's own new-tab navigation is not the subject: keep it from opening a tab.
+  await page.evaluate(() => {
+    const row = document.querySelector("#wikiFindList .wiki-find-row")!;
+    for (const type of ["click", "auxclick"]) row.addEventListener(type, (e) => e.preventDefault());
+  });
+  await rows(page).first().click({ modifiers: ["ControlOrMeta"] });
+  await rows(page).first().click({ button: "middle" });
+  // Alt downloads the link: no open.
+  await rows(page).first().click({ modifiers: ["Alt"] });
+  await expect(palette(page)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(q)).length).toBe(3);
+  const lines = await loggedFor(q);
+  expect(opens(lines)).toEqual(["archive/four-fix-rounds.mdx", "archive/four-fix-rounds.mdx", null]);
+  expect(new Set(lines.map((l) => l.session)).size).toBe(1);
+});
+
+test("query log: inside the re-rank debounce a line carries the typed text and the text the rows were ranked for", async ({ page }) => {
+  const shown = "ledger   notes";
+  const typed = "ledger   notes zzqq";
+  await openReader(page);
+  await find(page, shown);
+  const first = await rows(page).first().getAttribute("data-relpath");
+  await page.evaluate((value) => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    box.value = value;
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    (document.querySelector("#wikiFindList .wiki-find-row") as HTMLElement).click();
+  }, typed);
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(typed)).length).toBe(1);
+  const [line] = await loggedFor(typed);
+  expect(line!.shown).toBe(shown);
+  expect(line!.opened?.relPath).toBe(first);
+});
+
+test("query log: an Escape inside the debounce logs the text that was typed", async ({ page }) => {
+  const typed = "gamma   rep";
+  await openReader(page);
+  await page.locator("body").press("/");
+  await expect(palette(page)).toBeVisible();
+  await page.evaluate((value) => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    box.value = value;
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    box.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  }, typed);
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(typed)).length).toBe(1);
+  const [line] = await loggedFor(typed);
+  expect(line!.opened).toBeNull();
+  expect(line!.shown).toBe("");
+  // The Everywhere section had not answered: no count, not a zero.
+  expect(line!.rows.everywhere).toBeNull();
 });
 
 test("Escape in focus mode closes the palette and keeps focus mode", async ({ page }) => {
