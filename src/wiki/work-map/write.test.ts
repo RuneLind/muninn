@@ -87,6 +87,29 @@ describe("writeWorkMapFile — stop signal and atomic write", () => {
     return dir;
   }
 
+  test("a map the wiki's git ignores is written and not committed; a tracked one still commits", async () => {
+    const dir = await wikiDir();
+    const sh = (...args: string[]) => Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "ignore", stderr: "ignore" });
+    sh("init", "-q");
+    // The developer's global excludes file must not decide the first assertion.
+    sh("config", "core.excludesFile", path.join(dir, "no-such-excludes"));
+    let commits = 0;
+    const write = (content: string) =>
+      writeWorkMapFile({ wikiDir: dir, content, commitMessage: "m", isReadonly: () => false, isReadonlyRoot: () => false, commit: async () => (commits++, { committed: true }) });
+    // Not ignored: the commit tail runs.
+    expect(await write("{}\n")).toEqual({ outcome: "written", commit: { committed: true } });
+    expect(commits).toBe(1);
+    // Ignored and untracked: written, no commit.
+    await writeFile(path.join(dir, ".gitignore"), `${WORK_MAP_FILE}\n`);
+    expect(await write('{"a":1}\n')).toEqual({ outcome: "written" });
+    expect(await readFile(path.join(dir, WORK_MAP_FILE), "utf8")).toBe('{"a":1}\n');
+    expect(commits).toBe(1);
+    // Ignored but tracked: git still follows it, so it commits.
+    sh("add", "-f", WORK_MAP_FILE);
+    expect(await write('{"a":2}\n')).toEqual({ outcome: "written", commit: { committed: true } });
+    expect(commits).toBe(2);
+  });
+
   test("a stop that fires while the write is in its section commits nothing", async () => {
     const dir = syncWikiDir();
     let stopped = false;

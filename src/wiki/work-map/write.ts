@@ -13,7 +13,12 @@
  *   - the **commit tail OUTSIDE** both, pushing where the repo has an upstream
  *     (`commitWikiChange`), since the write owner may run no sync loop — and
  *     skipped when the stop signal fired during the write: the landed file
- *     stays uncommitted until the next successful run commits it;
+ *     stays uncommitted until the next successful run commits it — and skipped
+ *     when the wiki's git ignores the map (it is untracked and any ignore
+ *     source names it: a `.gitignore` in the root or, when the root sits inside
+ *     a larger repo, above it; `.git/info/exclude`; the machine's global
+ *     excludes file): the map changes on every run, so a
+ *     wiki no other machine reads can keep it out of its history;
  *   - the write itself is a temp file in the root plus a rename, so a reader
  *     never sees a half-written map.
  *
@@ -24,7 +29,7 @@
 import { rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getLog } from "../../logging.ts";
-import { commitWikiChange, type CommitWikiResult } from "../commit.ts";
+import { commitWikiChange, runGit, type CommitWikiResult } from "../commit.ts";
 import { takeWikiWriteLock, WORK_MAP_TMP_PREFIX } from "../lockfile.ts";
 import { runWikiWriteExclusive } from "../queue.ts";
 import { isReadonlyWikiRoot, isWikiReadonly, WIKI_READONLY_REASON, wikiReadonlyRootReason } from "../readonly.ts";
@@ -54,6 +59,8 @@ export interface WorkMapWriteOptions {
   lockWaitMs?: number;
   readFile?: (absPath: string) => Promise<string | null>;
   writeFile?: (absPath: string, content: string) => Promise<void>;
+  /** Does the wiki's git ignore the map? Default: `git check-ignore`. */
+  isIgnored?: (wikiDir: string) => Promise<boolean>;
   /** The commit tail; `null` commits nothing (tests). */
   commit?: ((wikiDir: string, paths: string[], message: string) => Promise<CommitWikiResult>) | null;
 }
@@ -82,6 +89,12 @@ async function atomicWrite(absPath: string, content: string): Promise<void> {
     await unlink(tmp).catch(() => {});
     throw err;
   }
+}
+
+/** `git check-ignore` exits 0 only for an ignored, UNTRACKED path: a tracked map
+ *  still commits whatever `.gitignore` says, and so does a wiki outside git. */
+async function mapIsIgnored(wikiDir: string): Promise<boolean> {
+  return (await runGit(wikiDir, ["check-ignore", "-q", "--", WORK_MAP_FILE])).code === 0;
 }
 
 const errMsg = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -120,6 +133,10 @@ export async function writeWorkMapFile(opts: WorkMapWriteOptions): Promise<WorkM
     return section;
   }
   try {
+    if (await (opts.isIgnored ?? mapIsIgnored)(opts.wikiDir)) {
+      log.info("Work map for {root} written; commit skipped — git ignores {file}", { root: opts.wikiDir, file: WORK_MAP_FILE });
+      return section;
+    }
     return { outcome: "written", commit: await commit(opts.wikiDir, [WORK_MAP_FILE], opts.commitMessage) };
   } catch (err) {
     log.warn("Work map commit failed for {root}: {error}", { root: opts.wikiDir, error: errMsg(err) });
