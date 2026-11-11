@@ -4,7 +4,8 @@
  *
  * The list is `.wiki-reader.json` `logKinds`: `{ "kinds": [...], "since":
  * "YYYY-MM-DD" }`. `since` is optional and leaves older entries alone, since the
- * log is append-only and its history is not rewritten. A wiki that declares no
+ * log is append-only and its history is not rewritten. Every line is read, a
+ * line inside a code fence included. A wiki that declares no
  * list is not checked. Why: melosys-kode-wiki's log held about 100 kinds for
  * 711 entries on 2026-11-11, with repo names and three spellings of one act
  * among them, so the kind could not filter anything.
@@ -19,7 +20,8 @@ export interface LogKindsConfig {
 }
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-const KIND_RE = /^[a-z0-9][a-z0-9-]*$/;
+/** A lower-case word: letters of any alphabet (`spørring`), digits, `-` and `+`. */
+const KIND_RE = /^[\p{Ll}\p{N}][\p{Ll}\p{N}+-]*$/u;
 const ENTRY_RE = /^## \[(\d{4}-\d{2}-\d{2})\]\s+(.*)$/;
 
 /** `.wiki-reader.json` `logKinds`. A malformed block warns and is null; a bad entry warns and is dropped. */
@@ -32,7 +34,7 @@ export function parseLogKinds(value: unknown): { config: LogKindsConfig | null; 
   const kinds: string[] = [];
   for (const k of obj.kinds) {
     if (typeof k === "string" && KIND_RE.test(k)) kinds.push(k);
-    else warnings.push(`kinds entry ${JSON.stringify(k)} is not a lower-case word (a–z, 0–9, "-") — dropping it`);
+    else warnings.push(`kinds entry ${JSON.stringify(k)} is not a lower-case word (letters, digits, "-", "+") — dropping it`);
   }
   if (kinds.length === 0) return { config: null, warnings: [...warnings, "kinds names no usable kind — ignoring the block"] };
   if (obj.since === undefined) return { config: { kinds }, warnings };
@@ -51,10 +53,9 @@ export function checkLogKinds(content: string, cfg: LogKindsConfig): LogKindFind
   const known = new Set(cfg.kinds);
   const list = `.wiki-reader.json logKinds (${cfg.kinds.join(", ")})`;
   const out: LogKindFinding[] = [];
-  let fence = false;
-  content.split("\n").forEach((text, i) => {
-    if (/^\s*(```|~~~)/.test(text)) fence = !fence;
-    if (fence) return;
+  // No code-fence rule: a log holds entries, and one stray fence line would
+  // hide every entry after it.
+  content.split(/\r?\n/).forEach((text, i) => {
     const m = ENTRY_RE.exec(text);
     if (!m) return;
     const [, day, rest] = m;

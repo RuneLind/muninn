@@ -2197,7 +2197,7 @@ Two warnings, both reading a block through `readSystemMapBlock` (`src/format/sys
 
 ### Lint check 27 — log kinds (`log-kind`, `lint-log-kind.ts`)
 
-`log-kind`, warning, on `log.md`. `checkLogKinds` flags an entry header `## [YYYY-MM-DD] <kind> | <title>` whose kind is not in `.wiki-reader.json` `logKinds.kinds`, and one with no ` | ` after its date. `logKinds.since` (a day) leaves older entries alone: the log is append-only, so the list applies from the day a wiki adopts it. Headers inside a code fence are skipped (both wikis' `CLAUDE.md` quote the format in their own log). A wiki with no `logKinds` is not checked; `parseLogKinds` drops an entry that is not a lower-case word and warns.
+`log-kind`, warning, on `log.md`. `checkLogKinds` flags an entry header `## [YYYY-MM-DD] <kind> | <title>` whose kind is not in `.wiki-reader.json` `logKinds.kinds`, and one with no ` | ` after its date. `logKinds.since` (a day) leaves older entries alone: the log is append-only, so the list applies from the day a wiki adopts it. Every line is read, CRLF or LF, with no code-fence rule: one stray fence line would otherwise hide every entry after it, and neither wiki's log holds a fence (2026-11-11). A wiki with no `logKinds` is not checked; `parseLogKinds` drops an entry that is not a lower-case word (letters of any alphabet, digits, `-`, `+`, so `spørring` and `review+implement` are kinds) and warns.
 
 ### Lint check 26 — genre and its picture (`lint-genre.ts`)
 

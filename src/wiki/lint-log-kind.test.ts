@@ -15,14 +15,11 @@ const LOG = [
   "## [2026-11-12] melosys-api | a repo name as the kind",
   "## [2026-11-13] no bar here",
   "",
-  "```markdown",
-  "## [2026-11-14] example | inside a fence",
-  "```",
   "## [2026-11-15]  ship  | padded kind is still ship",
   "## Not an entry",
 ].join("\n");
 
-test("an entry on or after `since` with an unlisted kind or no bar is flagged; fences and older entries are not", () => {
+test("an entry on or after `since` with an unlisted kind or no bar is flagged; older entries are not", () => {
   const got = checkLogKinds(LOG, { kinds: ["update", "ship"], since: "2026-11-12" });
   expect(got.map((f) => [f.line, f.kind])).toEqual([
     [6, "melosys-api"],
@@ -44,7 +41,7 @@ test("parseLogKinds: absent is silent, a malformed block warns and is null, a ba
   expect(parseLogKinds({ kinds: [3, "Update"] }).config).toBeNull();
   expect(parseLogKinds({ kinds: ["update", "step-done", "Bad Kind"], since: "2026-11-12" })).toEqual({
     config: { kinds: ["update", "step-done"], since: "2026-11-12" },
-    warnings: ['kinds entry "Bad Kind" is not a lower-case word (a–z, 0–9, "-") — dropping it'],
+    warnings: ['kinds entry "Bad Kind" is not a lower-case word (letters, digits, "-", "+") — dropping it'],
   });
   const badDay = parseLogKinds({ kinds: ["update"], since: "12.11.2026" });
   expect(badDay.config).toEqual({ kinds: ["update"] });
@@ -59,4 +56,21 @@ test("lintWiki reports log-kind on log.md only when the wiki declares logKinds",
   expect(await kinds()).toEqual([]);
   await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ logKinds: { kinds: ["update", "ship"], since: "2026-11-12" } }));
   expect(await kinds()).toEqual(["log.md:6:melosys-api", "log.md:7:no bar here"]);
+});
+
+test("a CRLF log is checked like an LF one", () => {
+  expect(checkLogKinds("## [2026-11-12] bad | x\r\n## [2026-11-12] update | y\r\n", { kinds: ["update"] }).map((f) => [f.line, f.kind])).toEqual([[1, "bad"]]);
+});
+
+test("no fence rule: a stray ``` line, an inline ```code``` opener or a ~~~ line hides no later entry", () => {
+  for (const opener of ["```", "```code``` in prose", "~~~", "````"]) {
+    expect(checkLogKinds(`${opener}\n## [2026-11-12] bad | x\n`, { kinds: ["update"] }).map((f) => f.kind), opener).toEqual(["bad"]);
+  }
+});
+
+test("a kind may carry Norwegian letters and a plus; upper case and spaces are still dropped", () => {
+  const got = parseLogKinds({ kinds: ["spørring", "måling", "prod-kjøring", "review+implement", "Update", "two words", "+x"] });
+  expect(got.config).toEqual({ kinds: ["spørring", "måling", "prod-kjøring", "review+implement"] });
+  expect(got.warnings).toHaveLength(3);
+  expect(checkLogKinds("## [2026-11-12] spørring | x\n", got.config!)).toEqual([]);
 });
