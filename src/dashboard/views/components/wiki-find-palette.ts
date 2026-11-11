@@ -371,11 +371,15 @@ function scheduleRender(): void {
  *  page load a cross-wiki open starts. */
 function logFind(opened: FindLogOpened | null): void {
   if (!port || !port.everywhere()) return;
-  const body = findLogBody(input()?.value ?? "", shownQ, opened, {
+  const typed = input()?.value ?? "";
+  // A count only for an answer to this text: under a filter `every` can still hold the last one.
+  const plan = everywherePlan(typed, true);
+  const answered = plan.kind === "fetch" && every?.key === plan.key && every.status === "done";
+  const body = findLogBody(typed, shownQ, opened, {
     wiki: port.selfWiki(),
     session: findSession,
     local: localCount(),
-    everywhere: every?.status === "done" ? everyShown.length : null,
+    everywhere: answered ? everyShown.length : null,
   });
   if (!body) return;
   void fetch("/api/wiki/find-log", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), keepalive: true }).catch(() => {});
@@ -434,7 +438,8 @@ function onInput(e: Event): void {
 
 export function openFind(): void {
   if (!port || isFindOpen()) return;
-  findSession = crypto.randomUUID();
+  // Not `randomUUID`: it is missing on plain http off loopback, and would throw here.
+  findSession = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
   shownQ = "";
   port.onOpen();
   const focused = document.activeElement;

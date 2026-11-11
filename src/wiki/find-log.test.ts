@@ -82,7 +82,6 @@ test("the palette sends every event with typed text of two characters or more, t
   expect(findLogBody("   ", "felles", open, s)).toBeNull();
   expect(findLogBody("felles", "", null, { ...s, wiki: "" })).toBeNull();
   expect(findLogBody("x".repeat(300), "y".repeat(300), null, s)).toMatchObject({ q: "x".repeat(200), shown: "y".repeat(200) });
-  // The same open twice is two lines: the reader of the file dedupes on session.
-  expect(findLogBody("felles", "felles", open, s)).toEqual(findLogBody("felles", "felles", open, s));
+  expect(findLogBody("felles", "felles", open, s)?.opened).toEqual(open);
   expect(findLogBody("felles", "felles", open, { ...s, everywhere: 4 })?.rows).toEqual({ local: 2, everywhere: 4 });
 });

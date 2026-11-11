@@ -342,6 +342,20 @@ test("query log: Enter logs the opened row, Escape a null, and two palette sessi
   expect(m!.session).not.toBe(h!.session);
 });
 
+test("query log: the palette opens and logs on an origin with no crypto.randomUUID (plain http off loopback)", async ({ page }) => {
+  const q = "gamma    rep";
+  await page.addInitScript(() => {
+    delete (Crypto.prototype as { randomUUID?: unknown }).randomUUID;
+  });
+  await openReader(page);
+  expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe("undefined");
+  await find(page, q);
+  await page.keyboard.press("Escape");
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(q)).length).toBe(1);
+  expect((await loggedFor(q))[0]!.session).toMatch(/^[0-9a-f]{32}$/);
+});
+
 test("query log: a modifier click and a middle click on a row are each logged as an open, an Alt click is not, all in the session of the Escape after them", async ({ page }) => {
   const q = "fix  rounds";
   await openReader(page);

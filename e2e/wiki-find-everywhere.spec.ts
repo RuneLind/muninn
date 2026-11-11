@@ -366,6 +366,24 @@ test("a filter token turns the section off without fetching; removing it brings 
   expect(ledger.searches).toEqual(["felles kode"]);
 });
 
+test("query log: under a filter the Everywhere count is null, even after an answer for the same free text", async ({ page }) => {
+  const q = "felles kode type:plan";
+  const since = new Date().toISOString();
+  await openReader(page);
+  await find(page, "felles kode");
+  await expect(target(page)).toHaveCount(1);
+  await input(page).fill(q);
+  await expect(every(page).locator("[data-find-filtered]")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(palette(page)).toHaveCount(0);
+  const logged = async () => {
+    const text = await readFile(path.join(e2eEnv().WIKI_FIND_LOG_DIR!, "queries.jsonl"), "utf8").catch(() => "");
+    return text.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.q === q && l.at >= since);
+  };
+  await expect.poll(async () => (await logged()).length).toBe(1);
+  expect((await logged())[0].rows.everywhere).toBeNull();
+});
+
 test("short free text asks nothing", async ({ page }) => {
   await openReader(page);
   await find(page, "fe");
