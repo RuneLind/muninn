@@ -41,6 +41,7 @@ import {
   BATCH_SECTIONS,
   batchHeadHtml,
   batchStopReason,
+  narrowBatch,
   isBatchCard,
   planBatch,
   sectionOf,
@@ -564,31 +565,48 @@ const batchQueued = new Set<string>();
  */
 async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
   if (runningBatch) return;
-  // Claimed before the listing re-read, so a second click cannot start another.
-  const prog: BatchProgress = { section, verb, total: 0, done: 0, failed: 0, running: true, stopped: false };
+  // Planned from the cards on screen at the click: the batch never takes a
+  // draft the reviewer did not see.
+  const planned = planBatch(shownProposals(), section, verb, busyIds(), allProposals).ids;
+  if (!planned.length) return;
+  const prog: BatchProgress = {
+    section, verb, total: planned.length, done: 0, failed: 0, running: true, stopped: false, preparing: true,
+  };
   runningBatch = prog;
-  // Plan from a fresh listing, not the one this tab loaded: a draft settled in
-  // another tab, or a page edited since (now `drifted`), would otherwise be
-  // posted and burned. A failed re-read keeps the loaded listing.
-  const fresh = await fetchProposals().catch(() => null);
-  if (fresh) allProposals = fresh;
-  const { ids } = planBatch(shownProposals(), section, verb, busyIds(), allProposals);
-  if (!ids.length || prog.stopped) {
-    runningBatch = null;
-    render();
-    rerenderStrip();
-    return;
-  }
-  prog.total = ids.length;
   batchState.set(section, prog);
-  for (const id of ids) {
+  for (const id of planned) {
     batchQueued.add(id);
     redraftNotes.delete(id);
   }
   render();
+  let ids: string[] = [];
   try {
+    // A fresh listing only NARROWS the plan: a draft settled in another tab, or
+    // a page edited since (now `drifted`), drops out instead of being posted and
+    // burned. It never replaces local rows, which hold outcomes this tab got
+    // after the read was answered. A failed re-read keeps the plan.
+    const fresh = await fetchProposals().catch(() => null);
+    ids = fresh ? narrowBatch(planned, allProposals, fresh, verb, busyIds()) : planned.filter((id) => !busyIds().has(id));
+    if (fresh) {
+      const freshById = new Map(fresh.map((p) => [p.id, p]));
+      for (const p of allProposals) {
+        const f = freshById.get(p.id);
+        if (!f || p.status !== "draft" || !planned.includes(p.id)) continue;
+        Object.assign(p, { status: f.status, drifted: f.drifted, factcheck: f.factcheck, factcheckUnknown: f.factcheckUnknown });
+      }
+    }
+    prog.preparing = false;
+    for (const id of planned) if (!ids.includes(id)) batchQueued.delete(id);
+    if (!prog.stopped) prog.total = ids.length;
+    render();
     for (const id of ids) {
       if (prog.stopped) break;
+      // A single click on this card since the plan, or a Redraft: leave it.
+      if (busyIds().has(id) || allProposals.find((p) => p.id === id)?.status !== "draft") {
+        batchQueued.delete(id);
+        prog.total--;
+        continue;
+      }
       const r = await postAction(id, verb);
       const settled = verb === "approve" ? "applied" : "rejected";
       const halt = batchStopReason(r);

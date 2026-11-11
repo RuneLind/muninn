@@ -16,7 +16,8 @@
 
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import postgres from "postgres";
@@ -39,6 +40,7 @@ const ids: Record<string, string> = {};
 
 test.describe.configure({ mode: "serial" });
 
+const page_ = (title: string, tags: string) => page(title, tags);
 function page(title: string, tags: string): string {
   const url = `https://www.youtube.com/watch?v=${encodeURIComponent(title)}`;
   return `---\ntype: source\ntitle: ${title}\naliases: []\ncreated: 2026-11-11\nupdated: 2026-11-11\ntags: [${tags}]\nurl: ${url}\nsources: [${url}]\n---\n\n# ${title}\n\nBody.\n`;
@@ -240,4 +242,95 @@ test("a finished batch's note survives the Pending filter emptying, and leaves w
   await page.locator('#gardFilters .gard-filter[data-kind="lint"]').click();
   await expect(page.locator(".gard-card[data-group]")).toHaveCount(1);
   await expect(page.locator(".gard-batch-head[data-batch-section]")).toHaveCount(0);
+});
+
+// Fix round 2 batch 1 (batch-3 verify findings 1, 2, 4).
+test("a batch takes only the drafts on screen at the click, never one that arrived since", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("u1", "Seen Draft", "claude-code");
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await expect(head(page, "other").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1");
+  await seedDraft("u2", "Unseen Draft", "claude-code");
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("1 of 1 approved", { timeout: 30_000 });
+  expect(await statusOf("u1")).toBe("applied");
+  expect(await statusOf("u2")).toBe("draft");
+});
+
+test("a single Approve that lands while the batch re-reads the listing is not posted again", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("r1", "Race One", "claude-code");
+  await seedDraft("r2", "Race Two", "claude-code");
+  const posts: string[] = [];
+  let releaseApprove!: () => void;
+  const approveHeld = new Promise<void>((r) => (releaseApprove = r));
+  await page.route("**/api/wiki/proposals/*/approve*", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/")[4]!;
+    posts.push(id);
+    if (id === ids.r1 && posts.length === 1) await approveHeld;
+    await route.continue();
+  });
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await page.locator(`.gard-card[data-id="${ids.r1}"] [data-action="approve"]`).click();
+  await expect.poll(() => posts.length).toBe(1);
+  // The batch's listing re-read is answered while r1 is still a draft, and
+  // reaches the page only after r1's approve has landed.
+  await page.route("**/api/wiki/proposals?*", async (route) => {
+    const stale = await route.fetch();
+    const landed = page.waitForResponse((r) => r.url().includes(`/api/wiki/proposals/${ids.r1}/approve`));
+    releaseApprove();
+    await landed;
+    await route.fulfill({ response: stale });
+  });
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  const note = head(page, "other").locator(".gard-batch-note");
+  await expect(note).toContainText(/approved/, { timeout: 30_000 });
+  await expect(note).not.toContainText("…");
+  expect(posts.filter((p) => p === ids.r1)).toHaveLength(1);
+  await expect(note).not.toContainText("failed");
+  await page.unroute("**/api/wiki/proposals?*");
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+});
+
+test("the batch shows Stop at once, and Stop during the listing re-read posts nothing", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("p1", "Pending One", "claude-code");
+  let releaseList!: () => void;
+  const listHeld = new Promise<void>((r) => (releaseList = r));
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await page.route("**/api/wiki/proposals?*", async (route) => {
+    await listHeld;
+    await route.continue();
+  });
+  let approves = 0;
+  await page.route("**/api/wiki/proposals/*/approve*", async (route) => {
+    approves += 1;
+    await route.continue();
+  });
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await head(page, "other").locator("[data-batch-stop]").click();
+  releaseList();
+  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("Stopped: 0 of 1 approved");
+  expect(approves).toBe(0);
+  expect(await statusOf("p1")).toBe("draft");
+});
+
+test("a page edited after the click's listing drops its update draft from the batch", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  const rel = "sources/Drift Target.mdx";
+  const before = page_("Drift Target", "claude-code");
+  writeFileSync(path.join(wikiDir, rel), before);
+  const [row] = await sql!`
+    INSERT INTO wiki_proposals (bot_name, topic_key, kind, mode, target_path, base_hash, draft, source_docs, status)
+    VALUES (${BOT}, 'source:e2e:drift', 'source', 'update', ${rel}, ${createHash("sha256").update(before).digest("hex")},
+            ${before + "\nMore.\n"}, ${sql!.json([{ collection: COLLECTION, docId: "e2e-batch/drift.md", title: "Drift Target", url: "" }])}, 'draft')
+    RETURNING id`;
+  ids.drift = row!.id;
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await expect(head(page, "other").locator('[data-batch-action="approve"]')).toHaveText("Approve all 1");
+  writeFileSync(path.join(wikiDir, rel), before + "\nEdited by hand.\n");
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("0 of 0 approved");
+  expect(await statusOf("drift")).toBe("draft");
+  expect(readFileSync(path.join(wikiDir, rel), "utf8")).toContain("Edited by hand.");
 });

@@ -126,6 +126,32 @@ export function planBatch(
   return { ids, skipped };
 }
 
+/**
+ * The ids a batch planned at the click, narrowed by a fresh listing: a row no
+ * longer a draft there or here, a row a single click or Redraft is now working
+ * on, or a row the fresh listing now gives a skip reason (drifted, locked)
+ * drops out. Never adds an id: a draft that arrived since the click is one the
+ * reviewer did not see.
+ */
+export function narrowBatch(
+  planned: readonly string[],
+  local: readonly BatchCard[],
+  fresh: readonly BatchCard[],
+  verb: BatchVerb,
+  busy: ReadonlySet<string>,
+): string[] {
+  const freshById = new Map(fresh.map((p) => [p.id, p]));
+  const localById = new Map(local.map((p) => [p.id, p]));
+  // Fresh rows for the page check, plus what this tab applied since the read
+  // was answered. Applied rows only ever add to `written`.
+  const pages = pageTargets([...fresh, ...local.filter((p) => p.status === "applied")]);
+  return planned.filter((id) => {
+    const f = freshById.get(id);
+    if (!f || !isBatchCard(f) || localById.get(id)?.status !== "draft") return false;
+    return batchSkipReason(f, verb, pages, busy) === null;
+  });
+}
+
 /** A running or finished batch, as the section header paints it. */
 export interface BatchProgress {
   section: BatchSection;
@@ -137,12 +163,15 @@ export interface BatchProgress {
   stopped: boolean;
   /** The shared fault that ended the batch (`batchStopReason`). */
   haltedBy?: string;
+  /** Re-reading the listing before the first post. */
+  preparing?: boolean;
 }
 
 export function batchProgressText(b: BatchProgress): string {
   const verbing = b.verb === "approve" ? "Approving" : "Rejecting";
   const verbed = b.verb === "approve" ? "approved" : "rejected";
   const failed = b.failed ? ` · ${b.failed} failed (see the cards)` : "";
+  if (b.running && b.preparing) return `Checking the listing before ${verbing.toLowerCase()} ${b.total}…`;
   if (b.running) return `${verbing} ${b.done + 1} of ${b.total}…${failed}`;
   const ok = b.done - b.failed;
   const head = b.haltedBy ? `Stopped on a server error (${b.haltedBy}): ` : b.stopped ? "Stopped: " : "";

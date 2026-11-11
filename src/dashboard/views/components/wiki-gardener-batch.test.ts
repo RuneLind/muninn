@@ -130,3 +130,24 @@ test("a read-only instance blocks Approve all, spelled as the header renders it"
   expect(html).toContain('data-batch-action="approve"');
   expect(WIKI_READONLY_BLOCKED_SELECTOR.split(",").map((s) => s.trim())).toContain('[data-batch-action="approve"]');
 });
+
+// Fix round 2 batch 1 (batch-3 verify findings 1, 2).
+import { narrowBatch } from "./wiki-gardener-batch.ts";
+
+describe("narrowBatch", () => {
+  test("never adds a draft that arrived after the plan", () => {
+    const fresh = [card("a"), card("new")];
+    expect(narrowBatch(["a"], [card("a")], fresh, "approve", new Set())).toEqual(["a"]);
+  });
+
+  test("drops a row settled or drifted on the fresh listing, or settled in this tab", () => {
+    // c is an update draft, so only its local status (not the written-page check) drops it.
+    const local = [card("a"), card("b"), card("c", { status: "applied", mode: "update" }), card("d")];
+    const fresh = [card("a", { status: "rejected" }), card("b", { drifted: "moved" }), card("c", { mode: "update" }), card("d")];
+    expect(narrowBatch(["a", "b", "c", "d"], local, fresh, "approve", new Set())).toEqual(["d"]);
+  });
+
+  test("drops a row a single click is working on, and one gone from the listing", () => {
+    expect(narrowBatch(["a", "b"], [card("a"), card("b")], [card("a")], "approve", new Set(["a"]))).toEqual([]);
+  });
+});
