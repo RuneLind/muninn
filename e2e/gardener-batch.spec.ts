@@ -451,3 +451,30 @@ test("the section chips count each section and show only the chosen one, with it
   await page.locator('#gardFilters .gard-filter[data-section=""]').click();
   await expect(page.locator(`.gard-card[data-id="${ids.x1}"]`)).toHaveCount(1);
 });
+
+// Fix round 1 batch 1 (review finding 1).
+test("a section chip clicked during a batch keeps the running section's header and Stop", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("rb1", "Running One", "claude-code");
+  await seedDraft("rb2", "Running Two", "claude-code");
+  await seedDraft("rl1", "Life While Running", "focus", "life/sources/Life While Running.mdx");
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/proposals/*/approve*", async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("Approving 1 of 2");
+  await page.locator('#gardFilters .gard-filter[data-section="life"]').click();
+  await expect(head(page, "ai").locator("[data-batch-stop]")).toHaveCount(1);
+  await head(page, "ai").locator("[data-batch-stop]").click();
+  release();
+  // Stop ended it after the card in flight; the view changed, so the result goes.
+  // Exactly one card (the newest, first in list order) went through.
+  await expect.poll(async () => [await statusOf("rb1"), await statusOf("rb2")].sort().join()).toBe("applied,draft");
+  await expect(head(page, "ai")).toHaveCount(0);
+  expect(await statusOf("rl1")).toBe("draft");
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+});

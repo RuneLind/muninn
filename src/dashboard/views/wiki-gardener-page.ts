@@ -328,6 +328,7 @@ export async function renderWikiGardenerPage(opts?: {
     /* Outlined, in the accent: the warning fill is the stale status chip's, and a kind tag is not a status. */
     .badge-stale-check { background: transparent; color: var(--accent-light); box-shadow: inset 0 0 0 1px var(--accent); }
     .gard-filter-sep { width: 1px; align-self: stretch; background: var(--border-secondary); margin: 2px 6px; }
+    #gardFilters [data-section-group][hidden] { display: none; }
     .badge-group { background: var(--tint-neutral); color: var(--text-muted); }
     .badge-create { background: var(--tint-success); color: var(--status-success); }
     .badge-update { background: var(--tint-info); color: var(--status-info); }
@@ -500,13 +501,14 @@ ${readonly ? `    <div class="gard-readonly">This muninn instance is <strong>wik
       <button class="gard-filter" data-kind="stale-check">Stale check</button>
       <button class="gard-filter" data-kind="lint">Lint</button>
       <button class="gard-filter" data-kind="pages">Drafted pages</button>
-      <span class="gard-filter-sep" aria-hidden="true"></span>
+      <span class="gard-filter-sep" aria-hidden="true" data-section-group></span>
       <!-- The SECTION filter (wiki-gardener-batch.ts): one batch section's
-           drafts and its Approve all. The client adds each chip's count. -->
-      <button class="gard-filter active" data-section="">All sections</button>
-      <button class="gard-filter" data-section="ai">AI</button>
-      <button class="gard-filter" data-section="life">Life</button>
-      <button class="gard-filter" data-section="entertainment">Entertainment</button>
+           drafts and its Approve all. The client adds each chip's count and
+           hides the group on a wiki with no life domain. -->
+      <button class="gard-filter active" data-section="" data-section-group>All sections</button>
+      <button class="gard-filter" data-section="ai" data-section-group>AI</button>
+      <button class="gard-filter" data-section="life" data-section-group>Life</button>
+      <button class="gard-filter" data-section="entertainment" data-section-group>Entertainment</button>
     </div>
     <div id="gardList">${gardListInit}</div>
 

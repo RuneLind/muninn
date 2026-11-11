@@ -38,12 +38,18 @@ export const BATCH_SECTIONS: { key: BatchSection; label: string; chip: string }[
   { key: "entertainment", label: "Entertainment — films and TV", chip: "Entertainment" },
 ];
 
-/** A section's header label. A wiki with no `life/` drafts (no life domain)
- *  files everything under the first section, which is then just "Drafts". */
+/** True when any row on the listing, in any status, targets `life/`: the wiki
+ *  has a life domain (jarvis), so the three sections and their chips apply. A
+ *  wiki without one (mimir, racewiki) files everything under the first section. */
+export function hasLifeDomain(cards: readonly BatchCard[]): boolean {
+  return cards.some((p) => p.targetPath.startsWith("life/"));
+}
+
+/** A section's header label: "Drafts" for the first section on a wiki with no
+ *  life domain. Read off every row, so it does not flip mid-session. */
 export function sectionLabel(key: BatchSection, cards: readonly BatchCard[]): string {
-  const entry = BATCH_SECTIONS.find((s) => s.key === key)!;
-  if (key === "ai" && !cards.some((p) => isBatchCard(p) && sectionOf(p) !== "ai")) return "Drafts";
-  return entry.label;
+  if (key === "ai" && !hasLifeDomain(cards)) return "Drafts";
+  return BATCH_SECTIONS.find((s) => s.key === key)!.label;
 }
 
 /** Draft count per section, for the section chips. */

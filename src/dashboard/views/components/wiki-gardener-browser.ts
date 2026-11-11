@@ -40,6 +40,7 @@ import { approveButtonFor, FACTCHECK_UNKNOWN_NOTE, singleDriftNote } from "./wik
 import {
   BATCH_SECTIONS,
   batchHeadHtml,
+  hasLifeDomain,
   batchStopReason,
   narrowBatch,
   isBatchCard,
@@ -341,8 +342,12 @@ function shownProposals(): ProposalView[] {
   );
 }
 
-/** Each section chip carries its draft count, read off the whole listing. */
+/** Each section chip carries its draft count, read off the whole listing. On a
+ *  wiki with no life domain the chip group is hidden: only one section exists. */
 function paintSectionChips(): void {
+  const show = hasLifeDomain(allProposals);
+  document.querySelectorAll("#gardFilters [data-section-group]").forEach((el) => ((el as HTMLElement).hidden = !show));
+  if (!show && sectionFilter) sectionFilter = "";
   const counts = sectionCounts(allProposals);
   for (const { key, chip } of BATCH_SECTIONS) {
     const el = document.querySelector(`#gardFilters .gard-filter[data-section="${key}"]`);
@@ -358,7 +363,8 @@ function batchSectionsHtml(shown: ProposalView[]): string {
   if (!drafts.length && !batchState.size) return "";
   let html = "";
   for (const { key } of BATCH_SECTIONS) {
-    if (sectionFilter && key !== sectionFilter) continue;
+    // A running batch keeps its header (and Stop) under any section chip.
+    if (sectionFilter && key !== sectionFilter && runningBatch?.section !== key) continue;
     const inSection = drafts.filter((p) => sectionOf(p) === key);
     if (!inSection.length && !batchState.has(key)) continue;
     html += batchHeadHtml({

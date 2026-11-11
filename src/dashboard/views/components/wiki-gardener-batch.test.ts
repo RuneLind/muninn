@@ -212,3 +212,18 @@ describe("sections", () => {
     expect(planBatch(cards, "life", "approve").ids).toEqual(["l"]);
   });
 });
+
+// Fix round 1 batch 1 (review findings 3, 4): the life domain is read off every row, not live drafts.
+import { hasLifeDomain } from "./wiki-gardener-batch.ts";
+
+describe("hasLifeDomain and the AI label", () => {
+  test("a wiki with any life/ row, in any status, has a life domain", () => {
+    expect(hasLifeDomain([card("a"), card("l", { status: "applied", targetPath: "life/sources/L.mdx" })])).toBe(true);
+    expect(hasLifeDomain([card("a"), card("b", { status: "applied" })])).toBe(false);
+  });
+
+  test("the AI label does not flip to Drafts when the last life draft is approved", () => {
+    const cards = [card("a"), card("l", { status: "applied", targetPath: "life/sources/L.mdx" })];
+    expect(sectionLabel("ai", cards)).toBe("AI and tech");
+  });
+});
