@@ -1544,7 +1544,7 @@ export function registerWikiGardenerRoutes(
           ),
           replacedBy: replacements.get(p.id) ?? null,
           drifted,
-          category: p.status === "draft" && !p.groupKey ? proposalCategory(p.draft) : null,
+          category: p.status === "draft" && !p.groupKey ? proposalCategory(p.draft, p.targetPath) : null,
           ...(p.kind === "stale-check"
             ? { staleChanged: p.staleMeta?.changed ?? null, replacedByGroup: (p.groupKey && replacedByGroup.get(p.groupKey)) || null }
             : {}),

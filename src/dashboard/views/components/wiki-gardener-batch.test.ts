@@ -121,3 +121,12 @@ describe("batchStopReason", () => {
     expect(batchStopReason({ status: 200, outcome: "applied", error: "" })).toBeNull();
   });
 });
+
+// Fix round 1 batch 2 (review finding 4).
+import { WIKI_READONLY_BLOCKED_SELECTOR } from "./wiki-readonly-client.ts";
+
+test("a read-only instance blocks Approve all, spelled as the header renders it", () => {
+  const html = batchHeadHtml({ section: "other", label: "L", cards: [card("a")], count: 1, progress: null, anyRunning: false });
+  expect(html).toContain('data-batch-action="approve"');
+  expect(WIKI_READONLY_BLOCKED_SELECTOR.split(",").map((s) => s.trim())).toContain('[data-batch-action="approve"]');
+});
