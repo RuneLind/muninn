@@ -20,6 +20,7 @@ export interface BatchCard {
   status: string;
   groupKey?: string | null;
   targetPath: string;
+  mode?: string;
   category?: string | null;
   drifted?: string | null;
   factcheck?: { needsRedraft: boolean } | null;
@@ -46,34 +47,61 @@ export function sectionOf(p: BatchCard): BatchSection {
  *
  * Reject skips nothing. Approve skips a card the server would refuse or that
  * needs a decision: the fact-check lock (known or unknown), a drifted page
- * (Approve writes nothing and marks it stale), and two drafts for one page: the
- * second write would fail as "target path already exists" and burn its draft.
- * `samePage` is the set of target paths more than one draft holds.
+ * (Approve writes nothing and marks it stale), two drafts for one page, and a
+ * create draft for a page an applied row wrote. Those last two would fail as
+ * "target path already exists" (or a moved base hash) and burn the draft. The
+ * listing flags a written page as `drifted` only for update rows and only on a
+ * reload, so a twin approved in this tab is caught here or not at all.
+ * `busy` holds the ids a Redraft or a single click is still working on.
  */
 export function batchSkipReason(
   p: BatchCard,
   verb: BatchVerb,
-  samePage: ReadonlySet<string>,
-  redrafting: ReadonlySet<string>,
+  pages: PageTargets,
+  busy: ReadonlySet<string>,
 ): string | null {
-  if (redrafting.has(p.id)) return "redraft running";
+  if (busy.has(p.id)) return "already in progress";
   if (verb === "reject") return null;
   if (p.factcheck?.needsRedraft || p.factcheckUnknown) return "fact-check lock";
   if (p.drifted) return "page changed since drafting";
-  if (samePage.has(p.targetPath)) return "another draft writes the same page";
+  if (pages.sharedByDrafts.has(p.targetPath) || (p.mode !== "update" && pages.written.has(p.targetPath))) {
+    return "another draft writes the same page";
+  }
   return null;
 }
 
-/** Target paths held by more than one batch card, across every section. */
-export function samePageTargets(cards: readonly BatchCard[]): Set<string> {
+export interface PageTargets {
+  /** Target paths more than one batch card holds. */
+  sharedByDrafts: Set<string>;
+  /** Target paths an applied row wrote. */
+  written: Set<string>;
+}
+
+export function pageTargets(cards: readonly BatchCard[]): PageTargets {
   const seen = new Set<string>();
-  const dup = new Set<string>();
+  const sharedByDrafts = new Set<string>();
+  const written = new Set<string>();
   for (const p of cards) {
+    if (p.status === "applied") written.add(p.targetPath);
     if (!isBatchCard(p)) continue;
-    if (seen.has(p.targetPath)) dup.add(p.targetPath);
+    if (seen.has(p.targetPath)) sharedByDrafts.add(p.targetPath);
     seen.add(p.targetPath);
   }
-  return dup;
+  return { sharedByDrafts, written };
+}
+
+/**
+ * Why one card's answer ends the whole batch, or null. A 5xx, an `error`
+ * outcome, a read-only 403 or a network failure is a fault every later card
+ * shares (no wikiDir, wiki not registered, a disk error), and each `error`
+ * answer has already turned its row terminal. A 409 or a `stale` outcome is
+ * that card's own, and the batch moves on.
+ */
+export function batchStopReason(r: { status: number; outcome: string; error: string }): string | null {
+  if (r.status === 0 || r.status === 403 || r.status >= 500 || r.outcome === "error") {
+    return r.error || `HTTP ${r.status}`;
+  }
+  return null;
 }
 
 /** The ids a batch takes, in list order, and the skipped count per reason. */
@@ -81,17 +109,17 @@ export function planBatch(
   cards: readonly BatchCard[],
   section: BatchSection,
   verb: BatchVerb,
-  redrafting: ReadonlySet<string> = new Set(),
+  busy: ReadonlySet<string> = new Set(),
   /** Every card on the listing, for the same-page check: a filter can hide
    *  the other draft for a page, and its write still collides. */
   all: readonly BatchCard[] = cards,
 ): { ids: string[]; skipped: Map<string, number> } {
-  const samePage = samePageTargets(all);
+  const pages = pageTargets(all);
   const ids: string[] = [];
   const skipped = new Map<string, number>();
   for (const p of cards) {
     if (!isBatchCard(p) || sectionOf(p) !== section) continue;
-    const reason = batchSkipReason(p, verb, samePage, redrafting);
+    const reason = batchSkipReason(p, verb, pages, busy);
     if (reason) skipped.set(reason, (skipped.get(reason) ?? 0) + 1);
     else ids.push(p.id);
   }
@@ -107,6 +135,8 @@ export interface BatchProgress {
   failed: number;
   running: boolean;
   stopped: boolean;
+  /** The shared fault that ended the batch (`batchStopReason`). */
+  haltedBy?: string;
 }
 
 export function batchProgressText(b: BatchProgress): string {
@@ -115,7 +145,8 @@ export function batchProgressText(b: BatchProgress): string {
   const failed = b.failed ? ` · ${b.failed} failed (see the cards)` : "";
   if (b.running) return `${verbing} ${b.done + 1} of ${b.total}…${failed}`;
   const ok = b.done - b.failed;
-  return `${b.stopped ? "Stopped: " : ""}${ok} of ${b.total} ${verbed}${failed}`;
+  const head = b.haltedBy ? `Stopped on a server error (${b.haltedBy}): ` : b.stopped ? "Stopped: " : "";
+  return `${head}${ok} of ${b.total} ${verbed}${failed}`;
 }
 
 function skippedText(skipped: Map<string, number>): string {
@@ -136,12 +167,12 @@ export function batchHeadHtml(opts: {
   count: number;
   progress: BatchProgress | null;
   anyRunning: boolean;
-  redrafting?: ReadonlySet<string>;
+  busy?: ReadonlySet<string>;
   all?: readonly BatchCard[];
 }): string {
   const { section, label, cards, count, progress, anyRunning } = opts;
-  const approve = planBatch(cards, section, "approve", opts.redrafting, opts.all);
-  const reject = planBatch(cards, section, "reject", opts.redrafting, opts.all);
+  const approve = planBatch(cards, section, "approve", opts.busy, opts.all);
+  const reject = planBatch(cards, section, "reject", opts.busy, opts.all);
   let html = `<div class="gard-batch-head" data-batch-section="${esc(section)}">`;
   html += `<span class="gard-batch-label">${esc(label)}</span>`;
   html += `<span class="gard-batch-count">${count} draft${count === 1 ? "" : "s"}</span>`;

@@ -82,3 +82,42 @@ describe("batchHeadHtml", () => {
     expect(head("entertainment", { anyRunning: true })).toMatch(/data-batch-action="approve"[^>]*disabled/);
   });
 });
+
+// Fix round 1 batch 1 (review findings 1, 5).
+import { batchStopReason } from "./wiki-gardener-batch.ts";
+
+describe("planBatch — a page another row already wrote", () => {
+  test("a create draft whose page an applied row wrote is left out", () => {
+    const cards = [
+      card("A", { status: "applied", targetPath: "sources/Fable.mdx", mode: "create" }),
+      card("B", { targetPath: "sources/Fable.mdx", mode: "create" }),
+    ];
+    const plan = planBatch(cards, "other", "approve");
+    expect(plan.ids).toEqual([]);
+    expect(Object.fromEntries(plan.skipped)).toEqual({ "another draft writes the same page": 1 });
+  });
+
+  test("an update draft of a page an applied row wrote is taken: that is the normal update", () => {
+    const cards = [
+      card("A", { status: "applied", targetPath: "sources/Fable.mdx", mode: "create" }),
+      card("U", { targetPath: "sources/Fable.mdx", mode: "update" }),
+    ];
+    expect(planBatch(cards, "other", "approve").ids).toEqual(["U"]);
+  });
+});
+
+describe("batchStopReason", () => {
+  test("a fault every card shares stops the batch", () => {
+    expect(batchStopReason({ status: 500, outcome: "error", error: "bot has no wikiDir configured" })).toContain("bot has no wikiDir");
+    expect(batchStopReason({ status: 403, outcome: "", error: "read-only" })).toContain("read-only");
+    expect(batchStopReason({ status: 0, outcome: "", error: "Network error: x" })).toContain("Network error");
+    // An `error` outcome has turned its row terminal, whatever the status says.
+    expect(batchStopReason({ status: 200, outcome: "error", error: "" })).toBe("HTTP 200");
+  });
+
+  test("one card's own refusal does not", () => {
+    expect(batchStopReason({ status: 409, outcome: "", error: "collision" })).toBeNull();
+    expect(batchStopReason({ status: 200, outcome: "stale", error: "" })).toBeNull();
+    expect(batchStopReason({ status: 200, outcome: "applied", error: "" })).toBeNull();
+  });
+});

@@ -161,3 +161,47 @@ test("Reject all on entertainment rejects only the films", async ({ page }) => {
   expect(await statusOf("film2")).toBe("rejected");
   expect(await statusOf("twinA")).toBe("draft");
 });
+
+// Fix round 1 batch 1 (review findings 1, 6). Both seed their own drafts: the
+// tests above have settled the first ones.
+test("a fault every card shares stops the batch at the first card", async ({ page }) => {
+  await seedDraft("f1", "Fault One", "claude-code");
+  await seedDraft("f2", "Fault Two", "claude-code");
+  let hits = 0;
+  await page.route("**/api/wiki/proposals/*/approve*", async (route) => {
+    hits += 1;
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ outcome: "error", error: "bot has no wikiDir configured" }) });
+  });
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "other").locator(".gard-batch-note")).toContainText("bot has no wikiDir configured");
+  expect(hits).toBe(1);
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+  await sql!`DELETE FROM wiki_proposals WHERE id IN ${sql!([ids.f1!, ids.f2!])}`;
+});
+
+test("Approve all does not post a card whose single Approve is still in flight", async ({ page }) => {
+  await seedDraft("c1", "Click One", "claude-code");
+  await seedDraft("c2", "Click Two", "claude-code");
+  const posts: string[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/proposals/*/approve*", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/")[4]!;
+    posts.push(id);
+    if (id === ids.c1 && posts.filter((p) => p === ids.c1).length === 1) await held;
+    await route.continue();
+  });
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await page.locator(`.gard-card[data-id="${ids.c1}"] [data-action="approve"]`).click();
+  await expect.poll(() => posts.length).toBe(1);
+  await head(page, "other").locator('[data-batch-action="approve"]').click();
+  await expect.poll(() => posts.includes(ids.c2!)).toBe(true);
+  release();
+  const note = head(page, "other").locator(".gard-batch-note");
+  await expect(note).toContainText(/^\d+ of \d+ approved/, { timeout: 30_000 });
+  await expect(note).not.toContainText("failed");
+  expect(posts.filter((p) => p === ids.c1)).toHaveLength(1);
+  await expect.poll(() => statusOf("c1")).toBe("applied");
+  expect(await statusOf("c2")).toBe("applied");
+});

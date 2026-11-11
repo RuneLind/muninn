@@ -40,6 +40,7 @@ import { approveButtonFor, FACTCHECK_UNKNOWN_NOTE, singleDriftNote } from "./wik
 import {
   BATCH_SECTIONS,
   batchHeadHtml,
+  batchStopReason,
   isBatchCard,
   planBatch,
   sectionOf,
@@ -346,7 +347,7 @@ function batchSectionsHtml(shown: ProposalView[]): string {
       count: inSection.length,
       progress: batchState.get(key) ?? null,
       anyRunning: !!runningBatch,
-      redrafting: redraftsInFlight,
+      busy: busyIds(),
       all: allProposals,
     });
     for (const p of inSection) html += cardHtml(p);
@@ -492,7 +493,7 @@ function unlockButtons(buttons: NodeListOf<Element>): void {
 async function postAction(
   id: string,
   action: "approve" | "reject",
-): Promise<{ ok: true; outcome: string } | { ok: false; error: string }> {
+): Promise<{ ok: boolean; status: number; outcome: string; error: string }> {
   try {
     const res = await fetch(
       withBot("/api/wiki/proposals/" + encodeURIComponent(id) + "/" + action),
@@ -505,11 +506,19 @@ async function postAction(
       p.status = outcome;
       p.resolvedAt = Date.now();
     }
-    if (!res.ok) return { ok: false, error: String(data.error || "Failed (" + res.status + ")") };
-    return { ok: true, outcome };
+    if (!res.ok) return { ok: false, status: res.status, outcome, error: String(data.error || "Failed (" + res.status + ")") };
+    return { ok: true, status: res.status, outcome, error: "" };
   } catch (err) {
-    return { ok: false, error: "Network error: " + (err as Error).message };
+    return { ok: false, status: 0, outcome: "", error: "Network error: " + (err as Error).message };
   }
+}
+
+/** Single-card approve/reject clicks still waiting on the server. */
+const actsInFlight = new Set<string>();
+
+/** Ids a batch must not post: a Redraft or a single click is working on them. */
+function busyIds(): Set<string> {
+  return new Set([...redraftsInFlight, ...actsInFlight]);
 }
 
 async function act(id: string, action: CardAction, card: HTMLElement): Promise<void> {
@@ -518,7 +527,8 @@ async function act(id: string, action: CardAction, card: HTMLElement): Promise<v
   const buttons = card.querySelectorAll(".gard-btn");
   buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
   setOutcome(card, action === "approve" ? "Applying…" : "Rejecting…", "");
-  const r = await postAction(id, action);
+  actsInFlight.add(id);
+  const r = await postAction(id, action).finally(() => actsInFlight.delete(id));
   if (!r.ok) {
     if (allProposals.find((x) => x.id === id)?.status === "draft") {
       setOutcome(card, r.error, "err");
@@ -551,7 +561,7 @@ const batchQueued = new Set<string>();
  */
 async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
   if (runningBatch) return;
-  const { ids } = planBatch(shownProposals(), section, verb, redraftsInFlight, allProposals);
+  const { ids } = planBatch(shownProposals(), section, verb, busyIds(), allProposals);
   if (!ids.length) return;
   const prog: BatchProgress = { section, verb, total: ids.length, done: 0, failed: 0, running: true, stopped: false };
   batchState.set(section, prog);
@@ -566,6 +576,7 @@ async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
       if (prog.stopped) break;
       const r = await postAction(id, verb);
       const settled = verb === "approve" ? "applied" : "rejected";
+      const halt = batchStopReason(r);
       if (!r.ok) {
         prog.failed++;
         redraftNotes.set(id, { text: r.error, kind: "err" });
@@ -575,6 +586,10 @@ async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
       }
       batchQueued.delete(id);
       prog.done++;
+      if (halt) {
+        prog.haltedBy = halt;
+        break;
+      }
       if (prog.done < prog.total && !prog.stopped) render();
     }
   } finally {
