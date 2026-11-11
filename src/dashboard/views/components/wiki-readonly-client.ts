@@ -32,6 +32,9 @@
  */
 export const WIKI_READONLY_BLOCKED_SELECTOR = [
   '[data-action="approve"]',
+  // The gate's section Approve all: N single approves. Its Reject all stays
+  // open, like the single reject it repeats.
+  '[data-batch-action="approve"]',
   // Redraft persists a replacement proposal; the route refuses it like the
   // drafting verbs.
   '[data-action="redraft"]',

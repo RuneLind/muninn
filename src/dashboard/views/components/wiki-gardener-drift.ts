@@ -21,7 +21,7 @@ export function singleDriftNote(drifted: string): string {
 }
 
 /**
- * The Approve button. `data-fc-locked` (kept disabled by `unlockButtons`) is the
+ * The Approve button. `data-fc-locked` (drawn disabled; a card only unlocks by being redrawn) is the
  * fact-check lock and nothing else; a drifted row's Approve stays enabled.
  */
 export function approveButtonHtml(opts: {

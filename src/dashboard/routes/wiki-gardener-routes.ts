@@ -19,6 +19,7 @@ import { findWikiByRoot, getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
+import { proposalCategory, type ProposalCategory } from "../../gardener/category.ts";
 import { applyWikiProposal, draftTitle, isMechanicalKind, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
 import { commitWikiChange, pageHasUncommittedChanges } from "../../wiki/commit.ts";
 import {
@@ -280,6 +281,9 @@ interface ProposalView {
    *  containment now changes the draft. The diff is against the page as it is
    *  now, not the page the draft was written on. */
   drifted: string | null;
+  /** Ungrouped drafts only: the review section the gate files the card under
+   *  (`proposalCategory`), null for everything else. */
+  category: ProposalCategory | null;
   /** `stale-check` rows only (PR 3): the changed page the card is about. */
   staleChanged?: string | null;
   /** A superseded `stale-check` group's row (D20, D28): the group that
@@ -1540,6 +1544,7 @@ export function registerWikiGardenerRoutes(
           ),
           replacedBy: replacements.get(p.id) ?? null,
           drifted,
+          category: p.status === "draft" && !p.groupKey ? proposalCategory(p.draft, p.targetPath) : null,
           ...(p.kind === "stale-check"
             ? { staleChanged: p.staleMeta?.changed ?? null, replacedByGroup: (p.groupKey && replacedByGroup.get(p.groupKey)) || null }
             : {}),

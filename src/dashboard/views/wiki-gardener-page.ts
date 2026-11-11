@@ -403,6 +403,15 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-preview .wiki-link { color: var(--accent-light); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
     .gard-preview .wiki-link-missing { color: var(--text-muted); border-bottom: 1px dashed var(--text-disabled); }
 
+    /* Batch section headers (wiki-gardener-batch.ts) */
+    .gard-batch-head { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 22px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border-primary); }
+    .gard-batch-head:first-child { margin-top: 0; }
+    .gard-batch-label { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+    .gard-batch-count { font-size: 12.5px; color: var(--text-soft); }
+    .gard-batch-actions { display: flex; gap: 8px; margin-left: auto; }
+    .gard-batch-note { flex-basis: 100%; font-size: 12.5px; color: var(--text-soft); }
+    .gard-batch-stop { background: transparent; border-color: var(--border-secondary); color: var(--text-secondary); }
+
     /* Actions */
     .gard-actions { display: flex; gap: 10px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border-primary); }
     .gard-btn { font-size: 13px; font-family: inherit; padding: 7px 16px; border-radius: 7px; border: 1px solid transparent; cursor: pointer; }
