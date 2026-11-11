@@ -451,12 +451,15 @@ function cardById(id: string): HTMLElement | null {
 }
 
 /**
- * Paint one card's state onto its current element, if it is shown. The whole
- * state space, in order: a single click in flight (locked, "Applying…" /
- * "Rejecting…"), a Redraft in flight (locked, REDRAFTING), queued in a running
- * batch (locked, note kept), else unlocked as `cardHtml` drew it, with the last
- * note if any. Unlocking is never done here: a card only unlocks by being drawn
- * again, so `act()`, `redraft()` and `runBatch()` change state and `render()`.
+ * Paint one single card's state onto its current element, if it is shown. Its
+ * states, in order: a click in flight (locked, "Applying…" / "Rejecting…"), a
+ * Redraft in flight (locked, REDRAFTING), queued in a running batch (locked; a
+ * plan clears the card's note), else unlocked as `cardHtml` drew it, with its
+ * last note if any. Unlocking is never done here: a card only unlocks by being
+ * drawn again, so `act()`, `redraft()` and `runBatch()` change state and
+ * `render()`. Not covered: group cards (`actOnGroup` still paints the card it
+ * captured), and a Redraft whose answer reloads the list keeps its old card
+ * locked until `loadProposals()` draws the new one.
  */
 function paintCardState(id: string): void {
   const card = cardById(id);

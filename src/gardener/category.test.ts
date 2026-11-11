@@ -32,7 +32,7 @@ describe("proposalCategory — domain and wider tags", () => {
     expect(proposalCategory(page("[film, entertainment]"), "life/sources/Sci-Fi Films.mdx")).toBe("entertainment");
   });
 
-  test("documentary, review and other platform tags count", () => {
+  test("review, drama and other platform tags count", () => {
     for (const tags of ["[film-review, history]", "[hulu, thriller]", "[movie-review]", "[k-drama]", "[paramount-plus]"]) {
       expect(proposalCategory(page(tags), "life/sources/X.mdx")).toBe("entertainment");
     }
@@ -55,4 +55,10 @@ describe("proposalCategory — block lists and documentaries", () => {
   test("a documentary tag alone does not file a life/ page as entertainment: health and parenting documentaries live there too", () => {
     expect(proposalCategory(page("[documentary, longevity, health]"), LIFE)).toBeNull();
   });
+});
+
+// Fix round 2 batch 4 (batch-2 verify finding 5) and the batch-3 verify's next-key gap.
+test("a CRLF block list is read, and the walk stops at the next key", () => {
+  expect(proposalCategory("---\r\ntitle: X\r\ntags:\r\n  - film\r\n---\r\n\r\n# X\r\n", LIFE)).toBe("entertainment");
+  expect(proposalCategory("---\ntitle: X\ntags:\n  - countdown\nrelated:\n  - film\n---\n\n# X\n", LIFE)).toBeNull();
 });
