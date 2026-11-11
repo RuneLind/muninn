@@ -23,6 +23,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "role-key": "Lane roles and question targets outside roleKeys",
   "case-board-labels": "<CaseBoard labels=> entries that name no case status",
   "effort-unknown": "effort: values that name no effort in the work map",
+  "log-kind": "log.md entries whose kind is outside logKinds",
   "ledger-row-state": "PR ledger rows the strip cannot read a state from",
   "plan-no-ledger": "Plans with two or more PRs and no PR ledger on the page",
   "chain-close-conflict": "Decisions whose «Lukker» the question's own close contradicts",

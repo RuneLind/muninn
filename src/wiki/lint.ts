@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Forty-one check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Forty-two check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -149,6 +149,9 @@
  *                      `EFFORT_ID_RE`, or names an id in neither `efforts` nor
  *                      `retired` of the wiki's `.work-map.json` (warning). Silent
  *                      on a wiki without a map; culled pages are not subjects.
+ * 27. log-kind       — a `log.md` entry whose kind is outside
+ *                      `.wiki-reader.json` `logKinds` (warning). Silent on a
+ *                      wiki that declares none. Rules: `lint-log-kind.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -196,6 +199,7 @@ import { checkSteps, STEPS_LINT_CHECKS } from "./lint-steps.ts";
 import { checkSystemMapDrift, checkSystemMaps, SYSTEM_MAP_DRIFT_LINT_CHECKS, SYSTEM_MAP_LINT_CHECKS, type SystemMapPage } from "./lint-system-map.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { EFFORT_ID_RE } from "./work-map/ids.ts";
+import { checkLogKinds, LOG_KIND_LINT_CHECKS } from "./lint-log-kind.ts";
 import { parseWorkMap } from "./work-map/schema.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
@@ -241,6 +245,7 @@ export const LINT_CHECKS = [
   ...SYSTEM_MAP_DRIFT_LINT_CHECKS,
   ...STALE_LINT_CHECKS,
   ...GENRE_LINT_CHECKS,
+  ...LOG_KIND_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -1214,6 +1219,12 @@ export async function lintWiki(
   const mapText = await readFile(path.join(index.root, ".work-map.json"));
   const map = mapText === null ? null : parseWorkMap(mapText);
   if (map) findings.push(...checkDeclaredEfforts(index.pages, map));
+  // Check 27 — log.md entry kinds against the wiki's own list.
+  const logKinds = index.readerConfig?.logKinds;
+  const logText = logKinds ? await readFile(path.join(index.root, "log.md")) : null;
+  if (logKinds && logText !== null) {
+    for (const f of checkLogKinds(logText, logKinds)) findings.push({ check: "log-kind", relPath: "log.md", message: f.message, detail: f.kind, line: f.line });
+  }
 
   // Pre-seeded by a typed loop rather than `Object.fromEntries(...) as Record<…>`
   // — the cast is what let a partially-seeded map type-check as complete.
