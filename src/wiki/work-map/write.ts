@@ -15,8 +15,9 @@
  *     skipped when the stop signal fired during the write: the landed file
  *     stays uncommitted until the next successful run commits it — and skipped
  *     when the wiki's git ignores the map (it is untracked and any ignore
- *     source names it: a `.gitignore` in or above the root, `.git/info/exclude`,
- *     the machine's global excludes file): the map changes on every run, so a
+ *     source names it: a `.gitignore` in the root or, when the root sits inside
+ *     a larger repo, above it; `.git/info/exclude`; the machine's global
+ *     excludes file): the map changes on every run, so a
  *     wiki no other machine reads can keep it out of its history;
  *   - the write itself is a temp file in the root plus a rename, so a reader
  *     never sees a half-written map.
