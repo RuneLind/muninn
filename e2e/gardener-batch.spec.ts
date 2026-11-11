@@ -75,8 +75,10 @@ test.beforeAll(async () => {
   await seedDraft("ai2", "Local Model Hardware", "local-ai, hardware, streaming");
   await seedDraft("twinA", "Same Page", "claude-code");
   await seedDraft("twinB", "Same Page Again", "claude-code", "sources/Same Page.mdx");
-  await seedDraft("film1", "Sci-Fi Film Countdown", "film, science-fiction, entertainment");
-  await seedDraft("film2", "Netflix Series Ranking", "netflix, tv-series");
+  // Films and TV land under life/, as the drafter files them; an AI-domain page
+  // tagged entertainment stays in "Everything else".
+  await seedDraft("film1", "Sci-Fi Film Countdown", "film, science-fiction, entertainment", "life/sources/Sci-Fi Film Countdown.mdx");
+  await seedDraft("film2", "Netflix Series Ranking", "netflix, tv-series", "life/sources/Netflix Series Ranking.mdx");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
