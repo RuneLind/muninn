@@ -91,6 +91,8 @@ describe("writeWorkMapFile — stop signal and atomic write", () => {
     const dir = await wikiDir();
     const sh = (...args: string[]) => Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "ignore", stderr: "ignore" });
     sh("init", "-q");
+    // The developer's global excludes file must not decide the first assertion.
+    sh("config", "core.excludesFile", path.join(dir, "no-such-excludes"));
     let commits = 0;
     const write = (content: string) =>
       writeWorkMapFile({ wikiDir: dir, content, commitMessage: "m", isReadonly: () => false, isReadonlyRoot: () => false, commit: async () => (commits++, { committed: true }) });

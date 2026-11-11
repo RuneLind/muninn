@@ -14,9 +14,10 @@
  *     (`commitWikiChange`), since the write owner may run no sync loop — and
  *     skipped when the stop signal fired during the write: the landed file
  *     stays uncommitted until the next successful run commits it — and skipped
- *     when the wiki's git ignores the map (`.gitignore` names it and it is
- *     untracked): the map changes on every run, so a wiki no other machine
- *     reads can keep it out of its history;
+ *     when the wiki's git ignores the map (it is untracked and any ignore
+ *     source names it: a `.gitignore` in or above the root, `.git/info/exclude`,
+ *     the machine's global excludes file): the map changes on every run, so a
+ *     wiki no other machine reads can keep it out of its history;
  *   - the write itself is a temp file in the root plus a rename, so a reader
  *     never sees a half-written map.
  *
@@ -131,7 +132,10 @@ export async function writeWorkMapFile(opts: WorkMapWriteOptions): Promise<WorkM
     return section;
   }
   try {
-    if (await (opts.isIgnored ?? mapIsIgnored)(opts.wikiDir)) return section;
+    if (await (opts.isIgnored ?? mapIsIgnored)(opts.wikiDir)) {
+      log.info("Work map for {root} written; commit skipped — git ignores {file}", { root: opts.wikiDir, file: WORK_MAP_FILE });
+      return section;
+    }
     return { outcome: "written", commit: await commit(opts.wikiDir, [WORK_MAP_FILE], opts.commitMessage) };
   } catch (err) {
     log.warn("Work map commit failed for {root}: {error}", { root: opts.wikiDir, error: errMsg(err) });
