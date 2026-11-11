@@ -337,6 +337,58 @@ test("the query log gets the opened row for an Enter and a null for an Escape", 
   expect(hit.opened).toEqual({ wiki: WIKI, relPath: "archive/four-fix-rounds.mdx", rank: 0, section: "local" });
 });
 
+/** The query log's lines for one exact text. Each case below types a text no other test types (odd inner spacing). */
+async function loggedFor(q: string): Promise<Array<{ q: string; opened: { relPath: string; rank: number } | null; rows: { local: number } }>> {
+  const text = await readFile(path.join(botsDir, "find-log", "queries.jsonl"), "utf8").catch(() => "");
+  return text.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.q === q);
+}
+
+test("query log: a modifier click on a row logs the open, and the Escape after it is no miss", async ({ page }) => {
+  const q = "fix  rounds";
+  await openReader(page);
+  await find(page, q);
+  // The link's own new-tab navigation is not the subject: keep it from opening a tab.
+  await page.evaluate(() => document.querySelector("#wikiFindList .wiki-find-row")!.addEventListener("click", (e) => e.preventDefault()));
+  await rows(page).first().click({ modifiers: ["ControlOrMeta"] });
+  await expect(palette(page)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(q)).length).toBeGreaterThan(0);
+  await page.waitForTimeout(300);
+  expect((await loggedFor(q)).map((l) => l.opened?.relPath ?? null)).toEqual(["archive/four-fix-rounds.mdx"]);
+});
+
+test("query log: opening the same row three times in one palette session writes one line", async ({ page, context }) => {
+  const q = "ledger  notes";
+  await openReader(page);
+  await find(page, q);
+  context.on("page", (p) => void p.close());
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.press("Enter");
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(q)).length).toBeGreaterThan(0);
+  await page.waitForTimeout(300);
+  expect(await loggedFor(q)).toHaveLength(1);
+});
+
+test("query log: a click inside the re-rank debounce logs the text the rows were ranked for", async ({ page }) => {
+  const shown = "ledger   notes";
+  await openReader(page);
+  await find(page, shown);
+  const first = await rows(page).first().getAttribute("data-relpath");
+  await page.evaluate(() => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    box.value = "ledger   notes zzqq";
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    (document.querySelector("#wikiFindList .wiki-find-row") as HTMLElement).click();
+  });
+  await expect(palette(page)).toHaveCount(0);
+  await expect.poll(async () => (await loggedFor(shown)).length).toBe(1);
+  expect((await loggedFor(shown))[0]!.opened?.relPath).toBe(first);
+  expect(await loggedFor("ledger   notes zzqq")).toHaveLength(0);
+});
+
 test("Escape in focus mode closes the palette and keeps focus mode", async ({ page }) => {
   await openReader(page);
   await page.locator("body").press("f");

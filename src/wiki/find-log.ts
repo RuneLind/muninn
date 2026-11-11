@@ -1,7 +1,7 @@
 /**
- * The find palette's query log: `~/.muninn/wiki-find/queries.jsonl`, one line
- * per palette session that typed something: the text, and the row it opened
- * or `null` when it was dismissed. It collects the real misses the search plan
+ * The find palette's query log: `~/.muninn/wiki-find/queries.jsonl`. A palette
+ * session appends one line per row it opened, with the text it was ranked for,
+ * or one line with `opened: null` when it was dismissed. It collects the real misses the search plan
  * asks for (mimir plan muninn-smart-wiki-search, O1). Local file only: the
  * route is in the `wiki` group, so a nais pod has none.
  */

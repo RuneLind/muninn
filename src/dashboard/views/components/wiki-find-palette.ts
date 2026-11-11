@@ -26,7 +26,7 @@
  */
 
 import { anchorNow, displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { applySeriesChip, everywhereRequestQuery, findLogBody, rankFind, type FindLogOpened, type FindResult } from "./wiki-find.ts";
+import { applySeriesChip, everywhereRequestQuery, findLogBody, rankFind, type FindLogOpen, type FindLogOpened, type FindResult } from "./wiki-find.ts";
 import {
   FIND_CHIPS_ID,
   FIND_EVERY_ID,
@@ -102,8 +102,11 @@ let everySettled: FindEverywhereState | null = null;
 let everyShown: FindEverywhereResult[] = [];
 let everyTimer: ReturnType<typeof setTimeout> | null = null;
 let everyCtrl: AbortController | null = null;
-/** The text whose row this palette session already opened (see `findLogBody`). */
-let openedQ: string | null = null;
+/** The text the rows on screen were ranked for: what the query log records,
+ *  since a key or click inside the re-rank debounce acts on those rows. */
+let shownQ = "";
+/** The rows this palette session already logged (see `findLogBody`). */
+let loggedOpens: FindLogOpen[] = [];
 const mac = typeof navigator !== "undefined" && isMacPlatform(navigator.platform || navigator.userAgent || "");
 
 export function isFindOpen(): boolean {
@@ -164,6 +167,7 @@ function render(keep = false): void {
   const kept = keep ? captureRows() : null;
   const hadRowFocus = !!kept && kept.focused !== null;
   const query = box.value;
+  shownQ = query;
   shownState = port.listingState();
   if (shownState !== "ready") {
     // No listing yet (or it failed): Everywhere is the fallback list.
@@ -367,21 +371,33 @@ function scheduleRender(): void {
  *  outlive the page load a cross-wiki open starts. */
 function logFind(opened: FindLogOpened | null): void {
   if (!port || !port.everywhere()) return;
-  const body = findLogBody(input()?.value ?? "", opened, { wiki: port.selfWiki(), local: localCount(), everywhere: everyShown.length, openedQ });
+  const body = findLogBody(shownQ, opened, { wiki: port.selfWiki(), local: localCount(), everywhere: everyShown.length, opened: loggedOpens });
   if (!body) return;
-  if (opened) openedQ = body.q;
+  if (opened) loggedOpens.push({ q: body.q, wiki: opened.wiki, relPath: opened.relPath });
   void fetch("/api/wiki/find-log", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), keepalive: true }).catch(() => {});
+}
+
+/** Row `i` as the query log names it; null when there is no such row. */
+function loggedRow(i: number): FindLogOpened | null {
+  if (!port) return null;
+  if (i < localCount()) {
+    const row = result?.rows[i];
+    return row ? { wiki: port.selfWiki(), relPath: row.page.relPath, rank: i, section: "local" } : null;
+  }
+  const r = everyShown[i - localCount()];
+  return r ? { wiki: r.wiki, relPath: r.relPath, rank: i, section: "everywhere" } : null;
 }
 
 function openRow(i: number, newTab: boolean): void {
   if (!port) return;
+  const logged = loggedRow(i);
+  if (logged) logFind(logged);
   if (i >= localCount()) {
-    openEverywhereRow(everyShown[i - localCount()], newTab, i);
+    openEverywhereRow(everyShown[i - localCount()], newTab);
     return;
   }
   const row = result?.rows[i];
   if (!row) return;
-  logFind({ wiki: port.selfWiki(), relPath: row.page.relPath, rank: i, section: "local" });
   if (newTab) {
     window.open(port.hrefFor(row.page.relPath), "_blank", "noopener");
     return;
@@ -392,9 +408,8 @@ function openRow(i: number, newTab: boolean): void {
 }
 
 /** An Everywhere row: this wiki's page opens in place, another wiki's loads. */
-function openEverywhereRow(r: FindEverywhereResult | undefined, newTab: boolean, rank: number): void {
+function openEverywhereRow(r: FindEverywhereResult | undefined, newTab: boolean): void {
   if (!r || !port) return;
-  logFind({ wiki: r.wiki, relPath: r.relPath, rank, section: "everywhere" });
   const href = everywhereHref(r.wiki, r.relPath);
   if (newTab) {
     window.open(href, "_blank", "noopener");
@@ -449,7 +464,8 @@ export function openFind(): void {
 export function closeFind(returnFocus = true): void {
   // Every in-place open closes with `false` after logging its row.
   if (returnFocus) logFind(null);
-  openedQ = null;
+  loggedOpens = [];
+  shownQ = "";
   if (debounce) {
     clearTimeout(debounce);
     debounce = null;
@@ -531,8 +547,13 @@ function onRootClick(e: MouseEvent): void {
   const row = t.closest<HTMLElement>("[data-find-row]");
   if (row) {
     // A modifier click or a middle click is the link's own; a plain one opens
-    // in place without a page load.
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    // in place without a page load. The link's open is still an open to the
+    // query log, or the Escape after it would read as a miss.
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
+      const logged = loggedRow(Number(row.getAttribute("data-find-row")));
+      if (logged) logFind(logged);
+      return;
+    }
     e.preventDefault();
     openRow(Number(row.getAttribute("data-find-row")), false);
   }
