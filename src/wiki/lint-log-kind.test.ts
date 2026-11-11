@@ -69,8 +69,8 @@ test("no fence rule: a stray ``` line, an inline ```code``` opener or a ~~~ line
 });
 
 test("a kind may carry Norwegian letters and a plus; upper case and spaces are still dropped", () => {
-  const got = parseLogKinds({ kinds: ["spørring", "måling", "prod-kjøring", "review+implement", "Update", "two words", "+x"] });
-  expect(got.config).toEqual({ kinds: ["spørring", "måling", "prod-kjøring", "review+implement"] });
+  const got = parseLogKinds({ kinds: ["spørring", "måling", "prod-kjøring", "review+implement", "øving", "Update", "two words", "+x"] });
+  expect(got.config).toEqual({ kinds: ["spørring", "måling", "prod-kjøring", "review+implement", "øving"] });
   expect(got.warnings).toHaveLength(3);
   expect(checkLogKinds("## [2026-11-12] spørring | x\n", got.config!)).toEqual([]);
 });

@@ -20,7 +20,8 @@ export interface LogKindsConfig {
 }
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-/** A lower-case word: letters of any alphabet (`spørring`), digits, `-` and `+`. */
+/** A lower-case word: cased lower-case letters (`spørring`; no uncased script,
+ *  no combining mark, so write `å` precomposed), digits, `-` and `+`. */
 const KIND_RE = /^[\p{Ll}\p{N}][\p{Ll}\p{N}+-]*$/u;
 const ENTRY_RE = /^## \[(\d{4}-\d{2}-\d{2})\]\s+(.*)$/;
 
