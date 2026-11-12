@@ -515,7 +515,7 @@ test.describe("owner-step check chips: a fixed box", () => {
   }
 });
 
-/** Two animation frames: what a frame watch or a queued scroll does has run. */
+/** Two animation frames: what a queued scroll or layout does has run. */
 const frames = (p: Page) => p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 /** Listeners on window and document, net of removals, per type (an init script wraps `addEventListener`). */
 const LISTENER_COUNT = () => {
