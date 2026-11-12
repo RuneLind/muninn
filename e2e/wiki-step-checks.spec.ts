@@ -7,7 +7,9 @@
  *
  *  1. A step whose `env` key is in no `.env` reads «not yet»; one whose
  *     migration the e2e database has applied reads «checked»; one whose
- *     migration does not exist reads «not yet»; a step with no tag gets none.
+ *     migration does not exist reads «not yet»; a step that names `restart`
+ *     (which muninn cannot prove yet) reads «unknown» although its migration
+ *     holds; a step with no tag gets none.
  *  2. The chip sits in the reader-only slot: the Done button's accessible name
  *     is the step's text alone, and Done still removes a chipped row, after
  *     which the page's chips come back for the steps left.
@@ -45,6 +47,7 @@ const PAGE = [
   '2. Apply the old migration. <Check migration="086" />',
   '3. Apply the missing migration. <Check migration="999" />',
   "4. Water the plants.",
+  '5. Restart muninn. <Check migration="086" restart="3010" />',
   "\n</Lane>\n",
   "</NextMoves>\n",
 ].join("\n");
@@ -108,8 +111,11 @@ test.describe.serial("owner-step check chips", () => {
     await expect(chip(p, "Apply the missing migration")).toHaveText("○ not yet");
     await expect(chip(p, "Add the key")).toHaveText("○ not yet");
     await expect(chip(p, "Add the key")).toHaveAttribute("title", new RegExp(`^env=${KEY}: ${KEY} is not in \\.env`));
+    await expect(chip(p, "Restart muninn")).toHaveText("? unknown");
+    await expect(chip(p, "Restart muninn")).toHaveAttribute("data-state", "unknown");
+    await expect(chip(p, "Restart muninn")).toHaveAttribute("title", /restart=3010: muninn cannot prove this yet/);
     await expect(row(p, "Water the plants").locator(".step-check")).toHaveCount(0);
-    await expect(p.locator(".wiki-article .step-chip")).toHaveCount(3);
+    await expect(p.locator(".wiki-article .step-chip")).toHaveCount(4);
   });
 
   test("the chip takes no part in Done's name, and Done removes a chipped row", async ({ page: p }) => {
@@ -127,6 +133,6 @@ test.describe.serial("owner-step check chips", () => {
     // The page rendered again with the new hash: the steps left get their chips.
     await p.locator(".wiki-article .nm-lane.nm-you").evaluate((d) => ((d as HTMLDetailsElement).open = true));
     await expect(chip(p, "Apply the old migration")).toHaveText("✓ checked");
-    await expect(p.locator(".wiki-article .step-chip")).toHaveCount(2);
+    await expect(p.locator(".wiki-article .step-chip")).toHaveCount(3);
   });
 });

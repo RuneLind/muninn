@@ -1,16 +1,18 @@
 /**
- * The five probes' truth tables against an in-memory machine: a fake git
- * runner, an in-memory `.env`, a fake migrations table. Each row pins the one
+ * The probes' truth tables against an in-memory machine: a fake git runner,
+ * an in-memory `.env`, a fake migrations table (and one real-git row on
+ * throwaway repos). Each row pins the one
  * state a fact may give, and every `unknown`/`not-yet` path; `ok` only where
  * the fact is proven.
  */
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import type { GitResult, GitRun } from "../decision-triage/git.ts";
-import { bounded, combineStates, probeCheckout, probeEnv, probeMigration, probePushed, probeRestart, type ProbeDeps } from "./probes.ts";
+import { realGit, type GitResult, type GitRun } from "../decision-triage/git.ts";
+import { bounded, combineStates, probeCheckout, probeEnv, probeMigration, runProbe, type ProbeDeps } from "./probes.ts";
 
 const DIR = realpathSync(testTempDirSync(path.join(tmpdir(), "step-probes-")));
 
@@ -20,38 +22,27 @@ const EXIT = (code: number): GitResult => ({ ok: false, stdout: "", exitCode: co
 const TIMED_OUT: GitResult = { ok: false, stdout: "", timedOut: true };
 
 interface World {
-  lsRemote?: GitResult;
+  symref?: GitResult;
   catFile?: GitResult;
   ancestor?: GitResult;
-  originHead?: string | null;
-  refs?: string;
-  head?: GitResult;
-  symHead?: GitResult;
-  reflog?: Record<string, number | null>;
-  status?: string;
 }
 
-/** A git that answers as one repo at {@link DIR} named `muninn`; `calls` records every argv. */
+/**
+ * A git that answers as one repo at {@link DIR} named `muninn`; `calls` records every argv.
+ * Its LOCAL `origin/HEAD` names `master` on purpose: the checkout probe must never read it.
+ */
 function fakeGit(w: World = {}, calls: string[][] = []): GitRun {
   return async (_cwd, args) => {
     calls.push([...args]);
     const a = args.join(" ");
     if (a === "rev-parse --show-toplevel") return OK(`${DIR}\n`);
     if (a === "remote get-url origin") return OK("https://github.com/x/muninn.git\n");
-    if (a.startsWith("symbolic-ref --quiet --short refs/remotes/origin/HEAD")) return w.originHead === null ? EXIT(1) : OK(`origin/${w.originHead ?? "main"}\n`);
-    if (a.startsWith("rev-parse --verify --quiet refs/remotes/origin/")) return w.originHead === null ? EXIT(1) : OK(TIP);
-    if (a.startsWith("ls-remote origin refs/heads/")) return w.lsRemote ?? OK(`${TIP}\trefs/heads/main\n`);
+    if (a.startsWith("symbolic-ref --quiet --short refs/remotes/origin/HEAD")) return OK("origin/master\n");
+    if (a.startsWith("rev-parse --verify --quiet refs/remotes/origin/")) return OK("b".repeat(40));
+    if (a === "ls-remote --symref origin HEAD") return w.symref ?? OK(`ref: refs/heads/main\tHEAD\n${TIP}\tHEAD\n`);
+    if (a.startsWith("ls-remote origin refs/heads/")) return OK(`${"b".repeat(40)}\t${args[2]}\n`);
     if (a.startsWith("cat-file -e")) return w.catFile ?? OK();
     if (a.startsWith("merge-base --is-ancestor")) return w.ancestor ?? OK();
-    if (a.startsWith("for-each-ref")) return OK(w.refs ?? "main\trefs/remotes/origin/main\t\n");
-    if (a === "symbolic-ref --quiet --short HEAD") return w.head ?? OK("main\n");
-    if (a === "symbolic-ref --quiet HEAD") return w.symHead ?? OK("refs/heads/main\n");
-    if (a.startsWith("log -g -1 --date=unix --format=%gd")) {
-      const ref = args[args.length - 2]!;
-      const at = (w.reflog ?? {})[ref] !== undefined ? w.reflog![ref] : 1_000;
-      return at === null ? EXIT(128) : OK(`${ref}@{${at}}\n`);
-    }
-    if (a.startsWith("status --porcelain")) return OK(w.status ?? "");
     return EXIT(128);
   };
 }
@@ -63,10 +54,6 @@ function deps(over: Partial<ProbeDeps> = {}, w?: World, calls?: string[][]): Pro
     readEnvFile: async () => ({ text: "SET_KEY=s3cr3t-value\nBLANK_KEY=\n" }),
     processHasEnv: () => true,
     hasMigration: async (v) => v === "086",
-    dashboardPort: 3010,
-    ownRepoDir: DIR,
-    processStartMs: 5_000_000,
-    mtimeMs: async () => 1_000,
     ...over,
   };
 }
@@ -104,6 +91,21 @@ describe("env", () => {
     expect((await probeEnv("SET_KEY", deps({ readEnvFile: async () => ({ missing: true }) }))).state).toBe("not-yet");
     expect(await probeEnv("SET_KEY", deps({ readEnvFile: async () => ({ failed: true }) }))).toEqual({ state: "unknown", why: ".env could not be read" });
   });
+  test("a key on a line the reader cannot read the way Bun does: unknown, even when the process has it", async () => {
+    const UNREAD = { state: "unknown" as const, why: ".env has a line muninn cannot read the way Bun does" };
+    // `$UNSET` loads empty under Bun; `KEY: v` is Bun syntax the reader does not follow.
+    for (const text of ["K=$UNSET\n", "K=${UNSET}\n", 'K="a$b"\n', "K: v\n", 'K="a\\"b"\n'])
+      expect([text, await probeEnv("K", deps({ readEnvFile: async () => ({ text }) }))]).toEqual([text, UNREAD]);
+  });
+  test("an unclosed quote, or a backslash in a quoted value, makes every key unknown: a clean line after it may be no key", async () => {
+    const UNREAD = { state: "unknown" as const, why: ".env has a line muninn cannot read the way Bun does" };
+    // Bun reads `\"` as an escaped quote, so INESC is inside ESC's value.
+    expect(await probeEnv("INESC", deps({ readEnvFile: async () => ({ text: 'ESC="a\\"\nINESC=fake\ntail"\n' }) }))).toEqual(UNREAD);
+    // Bun sets AFTER and reads UNCLOSED raw; the reader cannot follow either.
+    expect(await probeEnv("AFTER", deps({ readEnvFile: async () => ({ text: 'UNCLOSED="abc\nAFTER=after\n' }) }))).toEqual(UNREAD);
+    // A key BEFORE the open quote is unknown too: a later line could assign it again.
+    expect(await probeEnv("EARLY", deps({ readEnvFile: async () => ({ text: 'EARLY=1\nUNCLOSED="abc\n' }) }))).toEqual(UNREAD);
+  });
   test("no answer carries a value", async () => {
     for (const over of [{}, { processHasEnv: () => false }]) for (const k of ["SET_KEY", "BLANK_KEY", "NOPE"]) expect(JSON.stringify(await probeEnv(k, deps(over)))).not.toContain("s3cr3t");
   });
@@ -119,91 +121,99 @@ describe("migration", () => {
 });
 
 describe("checkout", () => {
-  test("HEAD contains origin's tip (equal or ahead): ok, read with ls-remote and never a fetch", async () => {
+  const SHORT = TIP.slice(0, 7);
+  const SYMREF = (lines: string[]) => ({ symref: OK(lines.join("\n") + "\n") });
+  test("HEAD equal to or ahead of origin's live tip: ok, read with one ls-remote --symref and never a fetch", async () => {
     const calls: string[][] = [];
-    expect(await probeCheckout("muninn", deps({}, {}, calls))).toEqual({ state: "ok", why: `muninn contains origin's main tip ${TIP.slice(0, 7)}` });
-    expect(calls.some((c) => c[0] === "ls-remote")).toBe(true);
+    expect(await probeCheckout("muninn", deps({}, {}, calls))).toEqual({ state: "ok", why: `muninn contains origin's main tip ${SHORT}` });
+    expect(calls.filter((c) => c[0] === "ls-remote")).toEqual([["ls-remote", "--symref", "origin", "HEAD"]]);
     expect(calls.some((c) => ["fetch", "pull", "checkout", "reset"].includes(c[0]!))).toBe(false);
+    // HEAD ahead of the tip answers the same: merge-base --is-ancestor exits 0.
+    expect((await probeCheckout("muninn", deps({}, { ancestor: OK() }))).state).toBe("ok");
+  });
+  test("the default branch comes from the live symref, never the local origin/HEAD or a guessed main/master", async () => {
+    const calls: string[][] = [];
+    const r = await probeCheckout("muninn", deps({}, SYMREF(["ref: refs/heads/trunk\tHEAD", `${TIP}\tHEAD`]), calls));
+    expect(r).toEqual({ state: "ok", why: `muninn contains origin's trunk tip ${SHORT}` });
+    expect(calls.some((c) => c.join(" ").includes("refs/remotes/origin/"))).toBe(false);
+    expect(calls.find((c) => c[0] === "merge-base")).toEqual(["merge-base", "--is-ancestor", TIP, "HEAD"]);
   });
   test("HEAD behind origin's tip: not-yet", async () => {
-    expect((await probeCheckout("muninn", deps({}, { ancestor: EXIT(1) }))).state).toBe("not-yet");
+    expect(await probeCheckout("muninn", deps({}, { ancestor: EXIT(1) }))).toEqual({ state: "not-yet", why: `muninn does not contain origin's main tip ${SHORT}: pull` });
   });
-  test("the tip is not in the checkout at all: not-yet", async () => {
-    expect((await probeCheckout("muninn", deps({}, { catFile: EXIT(128) }))).why).toBe(`origin's main tip ${TIP.slice(0, 7)} is not in muninn: pull`);
-    expect((await probeCheckout("muninn", deps({}, { catFile: EXIT(1) }))).state).toBe("not-yet");
+  test("the tip is cleanly missing here (cat-file -e exit 1, no stderr): not-yet", async () => {
+    expect(await probeCheckout("muninn", deps({}, { catFile: EXIT(1) }))).toEqual({ state: "not-yet", why: `origin's main tip ${SHORT} is not in muninn: pull` });
   });
-  test("ls-remote fails, times out, or names no single tip: unknown", async () => {
-    expect((await probeCheckout("muninn", deps({}, { lsRemote: EXIT(128) }))).state).toBe("unknown");
-    expect(await probeCheckout("muninn", deps({}, { lsRemote: TIMED_OUT }))).toEqual({ state: "unknown", why: "git ls-remote timed out: origin's main is unknown" });
-    expect((await probeCheckout("muninn", deps({}, { lsRemote: OK("") }))).state).toBe("unknown");
-    expect((await probeCheckout("muninn", deps({}, { lsRemote: OK(`${TIP}\trefs/heads/main\n${"b".repeat(40)}\trefs/heads/main\n`) }))).state).toBe("unknown");
-    expect((await probeCheckout("muninn", deps({}, { lsRemote: OK("zzz\trefs/heads/main\n") }))).state).toBe("unknown");
-  });
-  test("a merge-base or cat-file that fails otherwise: unknown", async () => {
-    expect((await probeCheckout("muninn", deps({}, { ancestor: EXIT(128) }))).state).toBe("unknown");
+  test("cat-file failing any other way (fatal 128, stderr, timeout): unknown", async () => {
+    expect((await probeCheckout("muninn", deps({}, { catFile: { ok: false, stdout: "", stderr: "fatal: not a git repository", exitCode: 128 } }))).state).toBe("unknown");
+    expect((await probeCheckout("muninn", deps({}, { catFile: EXIT(128) }))).state).toBe("unknown");
+    expect((await probeCheckout("muninn", deps({}, { catFile: { ok: false, stdout: "", stderr: "error: something", exitCode: 1 } }))).state).toBe("unknown");
     expect((await probeCheckout("muninn", deps({}, { catFile: TIMED_OUT }))).state).toBe("unknown");
   });
-  test("no roots, a repo not found, no origin default branch: unknown", async () => {
+  test("ls-remote fails or times out: unknown", async () => {
+    expect((await probeCheckout("muninn", deps({}, { symref: EXIT(128) }))).state).toBe("unknown");
+    expect(await probeCheckout("muninn", deps({}, { symref: TIMED_OUT }))).toEqual({ state: "unknown", why: "git ls-remote timed out: origin's default branch is unknown" });
+  });
+  test("a symref answer that is not exactly one branch line and one sha line: unknown", async () => {
+    const rows: string[][] = [
+      [`${TIP}\tHEAD`], // symref line missing (a remote with a detached HEAD, or no --symref support)
+      ["ref: refs/heads/main\tHEAD", "ref: refs/heads/dev\tHEAD", `${TIP}\tHEAD`], // two symref lines
+      ["ref: refs/heads/main\tHEAD"], // sha line missing
+      ["ref: refs/heads/main\tHEAD", `${TIP}\tHEAD`, `${"c".repeat(40)}\tHEAD`], // two sha lines
+      ["ref: refs/heads/main\tHEAD", "zzz\tHEAD"], // garbled sha
+      ["ref: refs/heads/main\tHEAD", `${TIP.slice(1)}\tHEAD`], // short sha
+      ["ref: refs/tags/v1\tHEAD", `${TIP}\tHEAD`], // HEAD is no branch
+      ["ref: refs/heads/main HEAD", `${TIP}\tHEAD`], // no tab
+      ["ref: refs/heads/main\tHEAD", `${TIP}\tHEAD`, "something else"], // a line of no known shape
+      [],
+    ];
+    for (const lines of rows) expect([lines, (await probeCheckout("muninn", deps({}, SYMREF(lines)))).state]).toEqual([lines, "unknown"]);
+  });
+  test("a merge-base that fails otherwise: unknown", async () => {
+    expect((await probeCheckout("muninn", deps({}, { ancestor: EXIT(128) }))).state).toBe("unknown");
+  });
+  test("no roots, a repo not found: unknown", async () => {
     expect(await probeCheckout("muninn", deps({ roots: null }))).toEqual({ state: "unknown", why: "DECISION_TRIAGE_REPO_ROOTS is not set, so muninn cannot be found" });
     expect((await probeCheckout("huginn", deps())).state).toBe("unknown");
     // mimir resolves to a folder whose origin names muninn.
     expect((await probeCheckout("mimir", deps())).why).toBe("mimir not found under the repo roots: origin names another repo");
-    expect((await probeCheckout("muninn", deps({}, { originHead: null }))).state).toBe("unknown");
   });
 });
 
-describe("pushed", () => {
-  const REFS = ["main\trefs/remotes/origin/main\t", "feat-a\trefs/remotes/origin/feat-a\t[ahead 2]", "feat-b\trefs/remotes/origin/feat-b\t[ahead 1, behind 3]", "old\trefs/remotes/origin/old\t[behind 4]", "local-only\t\t"].join("\n");
-  test("branches ahead of their upstream: not-yet, naming them", async () => {
-    expect(await probePushed("muninn", deps({}, { refs: REFS }))).toEqual({ state: "not-yet", why: "2 branches feat-a, feat-b have commits not pushed in muninn" });
-    expect((await probePushed("muninn", deps({}, { refs: "main\trefs/remotes/origin/main\t[ahead 1]" }))).why).toBe("branch main has commits not pushed in muninn");
-  });
-  test("behind, or no upstream on another branch, is pushed: ok", async () => {
-    expect((await probePushed("muninn", deps({}, { refs: "main\trefs/remotes/origin/main\t[behind 1]\nlocal-only\t\t" }))).state).toBe("ok");
-  });
-  test("the current branch without an upstream, a detached HEAD, a gone upstream: unknown", async () => {
-    expect((await probePushed("muninn", deps({}, { refs: "main\t\t" }))).why).toBe("muninn's current branch main has no upstream");
-    expect((await probePushed("muninn", deps({}, { head: EXIT(1) }))).why).toBe("muninn has a detached HEAD");
-    expect((await probePushed("muninn", deps({}, { refs: "main\trefs/remotes/origin/main\t\nx\trefs/remotes/origin/x\t[gone]" }))).state).toBe("unknown");
-    expect((await probePushed("muninn", deps({ roots: null }))).state).toBe("unknown");
-  });
-});
-
-describe("restart", () => {
-  // Reflog second 1000 ⇒ the move is proven over only from 1_001_000 ms on.
-  test("this port, current code, started after the code last changed: ok", async () => {
-    expect((await probeRestart("3010", deps({ processStartMs: 1_001_000 }))).state).toBe("ok");
-  });
-  test("another port: unknown, naming this muninn's", async () => {
-    expect(await probeRestart("3011", deps())).toEqual({ state: "unknown", why: "this muninn serves port 3010, not 3011" });
-  });
-  test("started inside the second HEAD moved, or before: not-yet", async () => {
-    expect((await probeRestart("3010", deps({ processStartMs: 1_000_500 }, { reflog: { "refs/heads/main": 500 } }))).state).toBe("not-yet");
-    expect((await probeRestart("3010", deps({ processStartMs: 900_000 }))).why).toContain(": restart");
-  });
-  test("the branch moved after HEAD's reflog: its time counts", async () => {
-    expect((await probeRestart("3010", deps({ processStartMs: 1_500_000 }, { reflog: { HEAD: 1_000, "refs/heads/main": 2_000 } }))).state).toBe("not-yet");
-  });
-  test("code on disk not current: not-yet, even when started after HEAD moved", async () => {
-    expect((await probeRestart("3010", deps({}, { ancestor: EXIT(1) }))).why).toContain("does not contain origin's main tip");
-  });
-  test("origin unreachable: unknown", async () => {
-    expect((await probeRestart("3010", deps({}, { lsRemote: TIMED_OUT }))).state).toBe("unknown");
-  });
-  test("no reflog: unknown", async () => {
-    expect((await probeRestart("3010", deps({}, { reflog: { HEAD: null } }))).state).toBe("unknown");
-    expect((await probeRestart("3010", deps({}, { reflog: { "refs/heads/main": null } }))).state).toBe("unknown");
-  });
-  test("a tracked file edited after the start: not-yet; one deleted: unknown", async () => {
-    expect((await probeRestart("3010", deps({ mtimeMs: async () => 6_000_000 }, { status: " M src/x.ts\0" }))).state).toBe("not-yet");
-    expect((await probeRestart("3010", deps({ mtimeMs: async () => 4_000_000 }, { status: " M src/x.ts\0" }))).state).toBe("ok");
-    expect((await probeRestart("3010", deps({ mtimeMs: async () => null }, { status: " D src/x.ts\0" }))).state).toBe("unknown");
+describe("checkout, real git: a stale local origin/HEAD", () => {
+  const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: ENV, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  test("origin moved its default from master to main after the clone; a fetch leaves origin/HEAD on master: not-yet, never ok", async () => {
+    const base = realpathSync(testTempDirSync(path.join(tmpdir(), "step-probes-git-")));
+    const remote = path.join(base, "muninn.git");
+    const work = path.join(base, "work");
+    const clone = path.join(base, "clone");
+    sh(base, "init", "-q", "--bare", "-b", "master", remote);
+    sh(base, "clone", "-q", remote, work);
+    sh(work, "commit", "-q", "--allow-empty", "-m", "one");
+    sh(work, "push", "-q", "origin", "HEAD:master");
+    sh(base, "clone", "-q", remote, clone);
+    sh(work, "commit", "-q", "--allow-empty", "-m", "two on main");
+    sh(work, "push", "-q", "origin", "HEAD:main");
+    sh(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+    sh(clone, "fetch", "-q");
+    // The precondition the false ok needed: the local origin/HEAD still names master.
+    expect(sh(clone, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")).toBe("origin/master");
+    const mainTip = sh(work, "rev-parse", "HEAD");
+    const r = await probeCheckout("muninn", deps({ git: realGit, roots: { dirs: [], named: new Map([["muninn", clone]]) } }));
+    expect(r).toEqual({ state: "not-yet", why: `muninn does not contain origin's main tip ${mainTip.slice(0, 7)}: pull` });
   });
 });
 
-describe("the --watch rule", () => {
-  test("the real start time is performance.timeOrigin, which a watch reload re-executes and moves", async () => {
-    const { realProbeDeps } = await import("./real-deps.ts");
-    expect(realProbeDeps({ decisionTriageRepoRoots: null, dashboardPort: 3010 } as never).processStartMs).toBe(performance.timeOrigin);
-  });
+describe("pushed and restart: muninn cannot prove these yet", () => {
+  for (const kind of ["pushed", "restart"] as const) {
+    test(`${kind} answers unknown and spawns nothing, reads nothing`, async () => {
+      const calls: string[][] = [];
+      let reads = 0;
+      const d = deps({ readEnvFile: async () => (reads++, { text: "" }), hasMigration: async () => (reads++, true), processHasEnv: () => (reads++, true) }, {}, calls);
+      expect(await runProbe({ kind, value: kind === "restart" ? "3010" : "muninn" }, d)).toEqual({ state: "unknown", why: "muninn cannot prove this yet" });
+      expect(calls).toEqual([]);
+      expect(reads).toBe(0);
+    });
+  }
 });

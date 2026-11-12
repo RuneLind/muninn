@@ -40,10 +40,6 @@ function app(over: Partial<ProbeDeps> = {}, opts: { cache?: ProbeCache; boundMs?
     readEnvFile: async () => ({ text: "HAVE=v4lue-n0t-t0-leak\n" }),
     processHasEnv: () => true,
     hasMigration: async (v) => v === "086",
-    dashboardPort: 3010,
-    ownRepoDir: ROOT,
-    processStartMs: 0,
-    mtimeMs: async () => null,
     ...over,
   };
   const deps: StepChecksRouteDeps = {

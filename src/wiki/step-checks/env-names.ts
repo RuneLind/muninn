@@ -1,57 +1,72 @@
 /**
- * The key NAMES a `.env` file sets, for the `env` probe. Pure. A value is read
- * only far enough to tell empty from non-empty and to skip the lines a quoted
- * value spans; no value, nor any part of one, leaves this function.
+ * The state of each key NAME a `.env` file assigns, for the `env` probe. Pure.
+ * A value is read only far enough to tell empty from non-empty and to find
+ * where it ends; no value, nor any part of one, leaves this function.
  *
- * The read follows dotenv as Bun loads it, and leans to "not set" where the two
- * could differ: a later line for the same key wins, `export KEY=` counts, a
- * value that is only quotes or starts with `#` is empty, and a quoted value
- * left open runs on to the line its quote closes, so a `KEY=` inside it is no
- * key. A value never runs on unquoted: `KEY=` with text on the next line is
- * an empty `KEY`.
+ * The reader claims only what it reads the way Bun 1.3.10's loader does
+ * (measured differentially, `env-names.test.ts`). `set`: the last assignment
+ * has a value that is non-empty once trimmed (the probe's `processHasEnv`
+ * rule); `unset`: it is empty; `unsure`: Bun could read it otherwise, which is
+ * a `$` anywhere in the value (Bun expands it, single quotes included) or the
+ * `KEY: value` form. `lostTrack`: from some line on, the reader cannot tell
+ * where values end, so a later line may be no key or a hidden one; it stops
+ * there and marks every key it read `unsure`. That is a quote that never closes
+ * (Bun reads it raw and goes on), a backslash inside a quoted value (Bun reads
+ * `\"` as an escaped quote), the opening quote character again before the
+ * close (Bun closes only on a quote followed by spaces, `#` or the line's
+ * end), and a line holding a quote that is no assignment the reader knows.
  */
 
-const LINE = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=(.*)$/;
+export type EnvKeyState = "set" | "unset" | "unsure";
 
-export interface EnvKeyNames {
-  /** Keys whose last assignment has a non-empty value. */
-  set: ReadonlySet<string>;
-  /** Keys whose last assignment is empty. */
-  blank: ReadonlySet<string>;
+export interface EnvKeyStates {
+  keys: ReadonlyMap<string, EnvKeyState>;
+  lostTrack: boolean;
 }
 
-export function envFileKeyNames(text: string): EnvKeyNames {
-  const last = new Map<string, boolean>();
-  const lines = text.split(/\r?\n|\r/);
+/** Bun accepts `-` and `.` in a key and a leading digit: tracked so a quote they open is followed. */
+const ASSIGN = /^[ \t]*(?:export[ \t]+)?([A-Za-z0-9_.-]+)[ \t]*([=:])(.*)$/;
+const QUOTES = new Set(['"', "'", "`"]);
+/** A closing quote: spaces, then a comment or the line's end. */
+const AFTER_CLOSE = /^[ \t]*(?:#.*)?$/;
+
+export function envFileKeyStates(text: string): EnvKeyStates {
+  const keys = new Map<string, EnvKeyState>();
+  const lines = text.split(/\r\n|\r|\n/);
+  // Every key read so far is unsure too: a line past this point may assign it again.
+  const lost = (key?: string): EnvKeyStates => {
+    if (key) keys.set(key, "unsure");
+    for (const k of keys.keys()) keys.set(k, "unsure");
+    return { keys, lostTrack: true };
+  };
   for (let i = 0; i < lines.length; i++) {
-    const m = LINE.exec(lines[i]!);
-    if (!m) continue;
-    const rest = m[2]!.trim();
+    const line = lines[i]!;
+    if (/^[ \t]*(?:#.*)?$/.test(line)) continue;
+    const m = ASSIGN.exec(line);
+    if (!m) {
+      if ([...QUOTES].some((q) => line.includes(q))) return lost();
+      continue;
+    }
+    const key = m[1]!;
+    const rest = m[3]!.replace(/^[ \t]+/, "");
+    let value: string;
     const q = rest[0];
-    let filled: boolean;
-    if (q === '"' || q === "'" || q === "`") {
-      const close = rest.indexOf(q, 1);
-      if (close >= 0) filled = close > 1;
-      else {
-        // Open quote: the value runs to the line holding the closing quote.
-        filled = rest.length > 1;
-        let j = i + 1;
-        for (; j < lines.length; j++) {
-          if (lines[j]!.includes(q)) {
-            filled = filled || lines[j]!.indexOf(q) > 0;
-            break;
-          }
-          if (lines[j]!.trim() !== "") filled = true;
-        }
-        // Never closed: dotenv reads such a value inconsistently, so it counts as empty.
-        if (j === lines.length) filled = false;
-        i = j;
+    if (q !== undefined && QUOTES.has(q)) {
+      // The quoted region: from after the opening quote to the first `q`, across lines.
+      let region = rest.slice(1);
+      let at = region.indexOf(q);
+      let j = i;
+      while (at < 0 && j + 1 < lines.length) {
+        j++;
+        region += "\n" + lines[j]!;
+        at = region.indexOf(q);
       }
-    } else filled = rest !== "" && !rest.startsWith("#");
-    last.set(m[1]!, filled);
+      if (at < 0) return lost(key);
+      value = region.slice(0, at);
+      if (value.includes("\\") || !AFTER_CLOSE.test(region.slice(at + 1).split("\n")[0]!)) return lost(key);
+      i = j;
+    } else value = rest.split("#")[0]!; // a backslash here is literal to Bun too
+    keys.set(key, m[2] === ":" || value.includes("$") ? "unsure" : value.trim() === "" ? "unset" : "set");
   }
-  const set = new Set<string>();
-  const blank = new Set<string>();
-  for (const [k, filled] of last) (filled ? set : blank).add(k);
-  return { set, blank };
+  return { keys, lostTrack: false };
 }

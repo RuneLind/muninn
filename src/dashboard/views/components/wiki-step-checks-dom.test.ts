@@ -43,10 +43,6 @@ const probes: ProbeDeps = {
   readEnvFile: async () => ({ text: "HAVE=1\n" }),
   processHasEnv: () => true,
   hasMigration: async (v) => v === "086",
-  dashboardPort: 3010,
-  ownRepoDir: "/nowhere",
-  processStartMs: 0,
-  mtimeMs: async () => null,
 };
 
 const answer = () => answerStepChecks(PAGE, { probes, machine: "laptop", cache: new ProbeCache() });

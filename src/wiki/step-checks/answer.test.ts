@@ -23,10 +23,6 @@ function probes(over: Partial<ProbeDeps> = {}): ProbeDeps {
     readEnvFile: async () => ({ text: "HAVE=1\n" }),
     processHasEnv: () => true,
     hasMigration: async (v) => v === "086",
-    dashboardPort: 3010,
-    ownRepoDir: "/nowhere",
-    processStartMs: 0,
-    mtimeMs: async () => null,
     ...over,
   };
 }
@@ -74,6 +70,16 @@ describe("answerStepChecks", () => {
           { kind: "migration", value: "086", state: "ok", why: "migration 086 is applied on this machine's database" },
         ],
       },
+    ]);
+  });
+
+  test("a step naming restart or pushed is never ok, whatever else holds, and runs no git", async () => {
+    const text = page('1. A <Check env="HAVE" restart="3010" />', '2. B <Check migration="086" pushed="muninn" />', '3. C <Check pushed="muninn" restart="3010" />');
+    const a = await answerStepChecks(text, deps());
+    expect(a.steps.map((s) => s.state)).toEqual(["unknown", "unknown", "unknown"]);
+    expect(a.steps[0]!.machines[0]!.probes.map((p) => [p.kind, p.state, p.why])).toEqual([
+      ["env", "ok", "HAVE is set in .env and in the running process"],
+      ["restart", "unknown", "muninn cannot prove this yet"],
     ]);
   });
 
