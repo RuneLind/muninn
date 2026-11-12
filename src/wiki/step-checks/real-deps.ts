@@ -1,19 +1,19 @@
 /**
  * The real readers behind the step-check probes. Read only: one `.env` read
  * (key names leave `envFileKeyStates` and nothing else does), one
- * `SELECT version FROM schema_migrations` per cache window, cancelled at its
- * bound, and `git` through the triage's runner (allowlisted environment, no
- * prompts, no optional locks).
+ * `SELECT version FROM schema_migrations` per cache window under a server-side
+ * statement timeout, and `git` through the triage's runner (allowlisted
+ * environment, no prompts, no optional locks).
  */
 
 import path from "node:path";
 import type { Config } from "../../config.ts";
-import { getDb } from "../../db/client.ts";
+import { withStatementTimeout } from "../../db/statement-timeout.ts";
 import { parseRepoRoots, realGit } from "../decision-triage/git.ts";
 import type { EnvFileRead, ProbeDeps } from "./probes.ts";
 import { ProbeCache } from "./answer.ts";
 
-/** The applied-set read's bound, the wait for a pool connection included; under the migration probe's 3 s. */
+/** The applied-set read's server-side statement timeout; under the migration probe's 3 s. The wait for a pool connection is not inside it. */
 export const MIGRATIONS_READ_MS = 2_000;
 
 /** Bun loads `.env` from the working directory it starts in. */
@@ -26,19 +26,15 @@ export async function readDotEnv(dir: string = process.cwd()): Promise<EnvFileRe
 }
 
 /**
- * A postgres.js query that rejects at `ms` and is cancelled there: still queued
- * for a connection, postgres.js drops it from the pool's queue; running, it
- * asks the server to cancel it. Neither answers late nor holds the pool.
+ * Every applied migration version, in a `SET LOCAL statement_timeout`
+ * transaction. Never cancelled from the client: a postgres.js `cancel()` on a
+ * pipelined query lands on whatever its backend runs then, usually another
+ * caller's statement (reproduced). The probe answers `unknown` at its own bound
+ * by a timer race and leaves this read to finish; it may wait in the pool's
+ * queue past that bound.
  */
-export function cancellableQuery<T>(query: PromiseLike<T> & { cancel(): unknown }, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const expiry = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      Promise.resolve(query.cancel()).catch(() => {});
-      reject(new Error(`timed out after ${ms} ms`));
-    }, ms);
-  });
-  return Promise.race([Promise.resolve(query), expiry]).finally(() => clearTimeout(timer));
+export function readAppliedMigrations(): Promise<Set<string>> {
+  return withStatementTimeout({ statementTimeoutMs: MIGRATIONS_READ_MS }, async (sql) => new Set((await sql<{ version: string }[]>`SELECT version FROM schema_migrations`).map((r) => r.version)));
 }
 
 export function realProbeDeps(config: Config): ProbeDeps {
@@ -47,10 +43,7 @@ export function realProbeDeps(config: Config): ProbeDeps {
     roots: config.decisionTriageRepoRoots ? parseRepoRoots(config.decisionTriageRepoRoots) : null,
     readEnvFile: () => readDotEnv(),
     processHasEnv: (key) => (process.env[key] ?? "").trim() !== "",
-    appliedMigrations: async () => {
-      const rows = await cancellableQuery(getDb()<{ version: string }[]>`SELECT version FROM schema_migrations`, MIGRATIONS_READ_MS);
-      return new Set(rows.map((r) => r.version));
-    },
+    appliedMigrations: readAppliedMigrations,
   };
 }
 

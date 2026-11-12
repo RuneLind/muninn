@@ -4,15 +4,15 @@
  * once, a bounded cache, and none of it ever making an answer `ok` that the
  * direct probe would not give. Every outside read is a counting fake.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import type { CheckProbe } from "../../format/check-tag.ts";
 import type { GitResult, GitRun } from "../decision-triage/git.ts";
-import { answerStepChecks, ProbeCache, type AnswerDeps } from "./answer.ts";
-import { runProbe, type ProbeDeps, type ProbeResult } from "./probes.ts";
+import { answerStepChecks, ProbeCache, ProbeSlots, type AnswerDeps } from "./answer.ts";
+import { PROBE_BOUND_MS, runProbe, type ProbeDeps, type ProbeResult } from "./probes.ts";
 
 const page = (...items: string[]) => ["---", "title: T", "---", "", "<NextMoves>", "", '<Lane kind="you">', "", ...items, "", "</Lane>", "", "</NextMoves>", ""].join("\n");
 const pad = (n: number) => String(n).padStart(3, "0");
@@ -111,6 +111,104 @@ describe("the per-page cap", () => {
   });
 });
 
+describe("only probes that run count toward the cap", () => {
+  test("60 `pushed=` steps and one `env=`: the env probe runs", async () => {
+    const counts = { dbReads: 0, envReads: 0 };
+    const items = [...Array.from({ length: 60 }, (_, i) => `${i + 1}. P <Check pushed="repo${i}" />`), '61. E <Check env="K0" />'];
+    const a = await answerStepChecks(page(...items), deps(world({ env: new Set(["K0"]) }, counts)));
+    expect(a.steps[60]!.machines[0]!.probes[0]).toEqual({ kind: "env", value: "K0", state: "ok", why: "K0 is set in .env and in the running process" });
+    expect(counts.envReads).toBe(1);
+    expect(a.steps[0]!.machines[0]!.probes[0]!.why).toBe("muninn cannot prove this yet");
+  });
+
+  test("60 running probes, then restart and pushed: those answer as always, not as capped", async () => {
+    const env = new Set(Array.from({ length: 60 }, (_, i) => `K${i}`));
+    const items = [...Array.from({ length: 60 }, (_, i) => `${i + 1}. E <Check env="K${i}" />`), '61. R <Check restart="3010" pushed="muninn" />'];
+    const a = await answerStepChecks(page(...items), deps(world({ env })));
+    expect(a.steps[60]!.machines[0]!.probes.map((p) => p.why)).toEqual(["muninn cannot prove this yet", "muninn cannot prove this yet"]);
+  });
+});
+
+describe("cache invariants the answer leans on", () => {
+  test("a failed migrations read is not served for the TTL: the next page reads again", async () => {
+    let now = 0;
+    let calls = 0;
+    const cache = new ProbeCache(() => now, 30_000);
+    const p = world({ applyRead: async () => (++calls === 1 ? Promise.reject(new Error("db down")) : new Set(["086"])) });
+    const text = page('1. A <Check migration="086" />');
+    expect((await answerStepChecks(text, deps(p, { cache }))).steps[0]!.machines[0]!.probes[0]!.why).toBe("this machine's database could not be read");
+    now = 1_000;
+    expect((await answerStepChecks(text, deps(p, { cache }))).steps[0]!.state).toBe("ok");
+    expect(calls).toBe(2);
+  });
+
+  test("the TTL counts from when a read settles, not from when it started", async () => {
+    let now = 0;
+    let settle!: (r: ProbeResult) => void;
+    let runs = 0;
+    const cache = new ProbeCache(() => now, 30_000);
+    const probe: CheckProbe = { kind: "env", value: "K" };
+    const first = cache.get(probe, () => (runs++, new Promise<ProbeResult>((r) => (settle = r))));
+    now = 25_000;
+    settle({ state: "ok", why: "x" });
+    await first;
+    now = 40_000;
+    await cache.get(probe, async () => (runs++, { state: "ok", why: "y" }));
+    expect(runs).toBe(1);
+    now = 55_001;
+    await cache.get(probe, async () => (runs++, { state: "ok", why: "z" }));
+    expect(runs).toBe(2);
+  });
+
+  test("a migrations read still unsettled past the TTL is no longer shared: the next page reads again", async () => {
+    let now = 0;
+    const counts = { dbReads: 0, envReads: 0 };
+    const cache = new ProbeCache(() => now, 30_000);
+    const p = world({ applyRead: () => (counts.dbReads++, new Promise(() => {})) }, counts);
+    const text = page('1. A <Check migration="086" />');
+    await answerStepChecks(text, deps(p, { cache, boundMs: 30 }));
+    now = 29_999;
+    await answerStepChecks(text, deps(p, { cache, boundMs: 30 }));
+    expect(counts.dbReads).toBe(1);
+    now = 30_001;
+    await answerStepChecks(text, deps(p, { cache, boundMs: 30 }));
+    expect(counts.dbReads).toBe(2);
+  });
+
+  test("a migrations read that settles after the bound fills the cache with its true set, stamped at settle", async () => {
+    let now = 0;
+    const counts = { dbReads: 0, envReads: 0 };
+    const cache = new ProbeCache(() => now, 30_000);
+    let settle!: (s: ReadonlySet<string>) => void;
+    const p = world({ applyRead: () => (counts.dbReads++, new Promise((r) => (settle = r))) }, counts);
+    const text = page('1. A <Check migration="086" />');
+    expect((await answerStepChecks(text, deps(p, { cache, boundMs: 30 }))).steps[0]!.state).toBe("unknown");
+    now = 29_000;
+    settle(new Set(["086"]));
+    await Bun.sleep(0);
+    now = 50_000;
+    expect((await answerStepChecks(text, deps(p, { cache }))).steps[0]!.state).toBe("ok");
+    expect(counts.dbReads).toBe(1);
+  });
+});
+
+describe("peer answers land on their own probes around capped ones", () => {
+  test("a step with a capped probe before an allowed one: the peer's answer goes to the allowed probe", async () => {
+    const env = new Set(Array.from({ length: 59 }, (_, i) => `K${i}`));
+    const asked: unknown[] = [];
+    const items = [...Array.from({ length: 59 }, (_, i) => `${i + 1}. E <Check env="K${i}" />`), '60. M <Check migration="001" />', '61. Both <Check env="NEW" migration="001" on="mini" />'];
+    const a = await answerStepChecks(
+      page(...items),
+      deps(world({ env, applied: new Set(["001"]) }), { machine: "laptop", peer: async (m, ps) => (asked.push([m, ps]), ps.map((p) => ({ state: "ok" as const, why: `peer has ${p.value}` }))) }),
+    );
+    expect(asked).toEqual([["mini", [{ kind: "migration", value: "001" }]]]);
+    expect(a.steps[60]!.machines[0]!.probes.map((p) => [p.kind, p.state, p.why])).toEqual([
+      ["env", "unknown", "too many checks on this page"],
+      ["migration", "ok", "peer has 001"],
+    ]);
+  });
+});
+
 describe("git-spawning probes run at most 4 at a time", () => {
   test("12 distinct checkout probes: never more than 4 git processes at once, all answered", async () => {
     const base = realpathSync(testTempDirSync(path.join(tmpdir(), "step-limits-")));
@@ -174,40 +272,72 @@ describe("ProbeCache is bounded", () => {
   });
 });
 
-describe("property: capped and cached answers are never ok where the direct probe is not", () => {
+describe("property: capped, cached and slotted answers are never ok where the direct probe is not", () => {
   // A seeded generator, so a failure replays.
   let seed = 12345;
   const rand = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const tip = "c".repeat(40);
+  const REPOS = 12;
+  const realBound = PROBE_BOUND_MS.checkout;
+  afterEach(() => {
+    PROBE_BOUND_MS.checkout = realBound;
+  });
+
+  /** Per repo: ok, not-yet (tip missing), failing (ls-remote fails) or slow (past the probe's bound). */
+  type RepoKind = "ok" | "not-yet" | "failing" | "slow";
+  const repoGit = (kinds: RepoKind[]): GitRun => async (cwd, args) => {
+    const kind = kinds[Number(path.basename(cwd).slice(4))]!;
+    const a = args.join(" ");
+    if (kind === "slow") await Bun.sleep(25);
+    if (a === "rev-parse --show-toplevel") return { ok: true, stdout: `${cwd}\n`, exitCode: 0 };
+    if (a === "remote get-url origin") return { ok: true, stdout: `https://github.com/x/${path.basename(cwd)}.git\n`, exitCode: 0 };
+    if (a.startsWith("config --get-regexp")) return { ok: false, stdout: "", exitCode: 1 };
+    if (a.startsWith("ls-remote")) return kind === "failing" ? { ok: false, stdout: "", exitCode: 128 } : { ok: true, stdout: `ref: refs/heads/main\tHEAD\n${tip}\tHEAD\n`, exitCode: 0 };
+    if (a.startsWith("cat-file")) return kind === "not-yet" ? { ok: false, stdout: "", exitCode: 1 } : { ok: true, stdout: "", exitCode: 0 };
+    return { ok: true, stdout: "", exitCode: 0 };
+  };
 
   // The world changes only when time moves past the TTL: inside one TTL a cached
   // answer may be stale by design, past it never.
-  test("400 random pages over changing worlds, many past the cap", async () => {
+  test("250 random pages over changing worlds: capped, cached, slotted, slow and failing probes", async () => {
+    PROBE_BOUND_MS.checkout = 15;
+    const base = realpathSync(testTempDirSync(path.join(tmpdir(), "step-prop-")));
+    const named = new Map<string, string>();
+    for (let i = 0; i < REPOS; i++) {
+      mkdirSync(path.join(base, `repo${i}`));
+      named.set(`repo${i}`, path.join(base, `repo${i}`));
+    }
     let now = 0;
     const cache = new ProbeCache(() => now, 30_000, 40);
+    const gitSlots = new ProbeSlots(2);
+    const kindsOf: RepoKind[] = ["ok", "not-yet", "failing", "slow"];
     const newWorld = () => ({
       applied: new Set(Array.from({ length: 50 }, (_, i) => pad(i)).filter(() => rand() < 0.5)),
       env: new Set(Array.from({ length: 50 }, (_, i) => `K${i}`).filter(() => rand() < 0.5)),
+      dbDown: rand() < 0.2,
+      kinds: Array.from({ length: REPOS }, () => kindsOf[Math.floor(rand() * (rand() < 0.9 ? 3 : 4))]!),
     });
-    let { applied, env } = newWorld();
-    for (let trial = 0; trial < 400; trial++) {
-      const p = world({ applied, env });
-      // Up to 120 steps over 101 distinct probes: past the cap of 60 on many pages.
+    let w = newWorld();
+    const probeWorld = () => world({ env: w.env, git: repoGit(w.kinds), roots: { dirs: [], named }, applyRead: async () => (w.dbDown ? Promise.reject(new Error("down")) : w.applied) });
+    for (let trial = 0; trial < 250; trial++) {
+      // Up to 120 steps over 125 distinct probes: past the cap of 60 on many pages.
       const n = 1 + Math.floor(rand() * 120);
       const items = Array.from({ length: n }, (_, i) => {
         const r = rand();
         const v = Math.floor(rand() * 50);
-        return `${i + 1}. S <Check ${r < 0.45 ? `migration="${pad(v)}"` : r < 0.9 ? `env="K${v}"` : `restart="3010"`} />`;
+        const attr = r < 0.4 ? `migration="${pad(v)}"` : r < 0.8 ? `env="K${v}"` : r < 0.9 ? `checkout="repo${v % REPOS}"` : r < 0.95 ? `pushed="repo${v % REPOS}"` : `restart="3010"`;
+        return `${i + 1}. S <Check ${attr} />`;
       });
-      const a = await answerStepChecks(page(...items), deps(p, { cache }));
+      const a = await answerStepChecks(page(...items), deps(probeWorld(), { cache, gitSlots }));
       for (const got of probesOf(a)) {
         if (got.state !== "ok") continue;
-        const direct = await runProbe({ kind: got.kind, value: got.value } as CheckProbe, world({ applied, env }));
+        const direct = await runProbe({ kind: got.kind, value: got.value } as CheckProbe, probeWorld());
         expect([trial, got.kind, got.value, direct.state]).toEqual([trial, got.kind, got.value, "ok"]);
       }
       if (rand() < 0.3) {
         now += 30_001;
-        ({ applied, env } = newWorld());
+        w = newWorld();
       } else now += 100;
     }
-  });
+  }, 30_000);
 });

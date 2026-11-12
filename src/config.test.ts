@@ -530,5 +530,11 @@ describe("resolveMachineName (MUNINN_MACHINE)", () => {
       expect(at).toBeGreaterThan(src.indexOf("await setupLogging("));
       expect(src.indexOf("machineBootWarning(", at + 1)).toBe(-1);
     });
+
+    test("index.ts passes its result to log.warn when there is one", async () => {
+      const src = await Bun.file(new URL("./index.ts", import.meta.url)).text();
+      const m = /const (\w+) = machineBootWarning\(\);\s*if \(\1\) log\.warn\("\{line\}", \{ line: \1 \}\);/.exec(src);
+      expect(m?.[1]).toBe("machineLine");
+    });
   });
 });

@@ -3,9 +3,10 @@
  * PR 2): every open list step of a counted `you` lane whose first line ends in
  * a valid `<Check …/>`, each probe run once per (kind, value) inside a short
  * cache, per machine the check names. A page runs at most
- * {@link MAX_PROBES_PER_PAGE} distinct probes, its `migration=` probes share
- * one applied-set read, and git-spawning probes take one of
- * {@link GIT_PROBE_SLOTS} process-wide slots. Read only: the route
+ * {@link MAX_PROBES_PER_PAGE} distinct probes that run anything, its
+ * `migration=` probes share one applied-set read, and git-spawning probes take
+ * one of {@link GIT_PROBE_SLOTS} process-wide slots, held until their git has
+ * ended. Read only: the route
  * (`routes/wiki-step-checks.ts`) reads the page and hands the text here.
  *
  * Steps come from `youListStepLines` + `stepCheck`, the walk lint's
@@ -17,7 +18,7 @@
 import { stepCheck, type CheckProbe } from "../../format/check-tag.ts";
 import { listYouSteps, youLaneRows, youListStepLines } from "../../format/step-done.ts";
 import { sha256 } from "../../utils/date-hash.ts";
-import { combineStates, runProbe, type ProbeDeps, type ProbeResult, type ProbeState } from "./probes.ts";
+import { combineStates, probeRuns, runProbe, startProbe, type ProbeDeps, type ProbeResult, type ProbeState } from "./probes.ts";
 
 /** How long one probe answer is reused: opening a page twice runs no git. */
 export const PROBE_TTL_MS = 30_000;
@@ -67,7 +68,7 @@ export const noPeer: PeerAnswerer = async (machine, probes) => probes.map(() => 
 
 /** How many answers {@link ProbeCache} keeps: past it the oldest goes first. */
 export const PROBE_CACHE_MAX = 500;
-/** Distinct (kind, value) probes one page may run; the rest answer `unknown`. The largest real `you` lane has under 20 steps. */
+/** Distinct (kind, value) probes one page may run; the rest answer `unknown`. `pushed`/`restart` run nothing and do not count. The largest real `you` lane has under 20 steps. */
 export const MAX_PROBES_PER_PAGE = 60;
 /** Git-spawning probes running at once, process-wide: 8 at once timed `ls-remote` out (measured in review). */
 export const GIT_PROBE_SLOTS = 4;
@@ -77,14 +78,23 @@ const MIGRATIONS_KEY = "migrations\u0000*";
 const TOO_MANY: ProbeResult = { state: "unknown", why: "too many checks on this page" };
 const probeKey = (p: CheckProbe) => `${p.kind}\u0000${p.value}`;
 
+interface CacheEntry {
+  promise: Promise<unknown>;
+  /** Null while a read waits for a slot: it has not started running. */
+  startedAt: number | null;
+  settledAt: number | null;
+}
+
 /**
  * Answers by key: reused for {@link PROBE_TTL_MS} after they settle, identical
  * reads in flight share one run. At most `maxEntries`, oldest first out;
  * expired entries are dropped on every miss. A read that rejects is not kept,
- * and one still unsettled after the TTL is no longer shared.
+ * and one still unsettled {@link PROBE_TTL_MS} after it started running is no
+ * longer shared. A read that first waits for a slot (`startsLater`) is shared
+ * while it waits, and its age counts from the `started()` its run calls.
  */
 export class ProbeCache {
-  private readonly entries = new Map<string, { promise: Promise<unknown>; startedAt: number; settledAt: number | null }>();
+  private readonly entries = new Map<string, CacheEntry>();
   constructor(
     private readonly now: () => number = Date.now,
     private readonly ttlMs = PROBE_TTL_MS,
@@ -95,17 +105,23 @@ export class ProbeCache {
     return this.entries.size;
   }
 
-  get(probe: CheckProbe, run: () => Promise<ProbeResult>): Promise<ProbeResult> {
-    return this.getKey(probeKey(probe), run);
+  get(probe: CheckProbe, run: (started: () => void) => Promise<ProbeResult>, opts: { startsLater?: boolean } = {}): Promise<ProbeResult> {
+    return this.getKey(probeKey(probe), run, opts);
   }
 
-  getKey<T>(key: string, run: () => Promise<T>): Promise<T> {
+  getKey<T>(key: string, run: (started: () => void) => Promise<T>, opts: { startsLater?: boolean } = {}): Promise<T> {
     const now = this.now();
-    const fresh = (e: { startedAt: number; settledAt: number | null }) => now - (e.settledAt ?? e.startedAt) < this.ttlMs;
+    const fresh = (e: CacheEntry) => {
+      const since = e.settledAt ?? e.startedAt;
+      return since === null || now - since < this.ttlMs;
+    };
     const hit = this.entries.get(key);
     if (hit && fresh(hit)) return hit.promise as Promise<T>;
     for (const [k, e] of this.entries) if (!fresh(e)) this.entries.delete(k);
-    const entry = { promise: run() as Promise<unknown>, startedAt: now, settledAt: null as number | null };
+    const entry: CacheEntry = { promise: Promise.resolve(), startedAt: opts.startsLater ? null : now, settledAt: null };
+    entry.promise = run(() => {
+      if (entry.startedAt === null) entry.startedAt = this.now();
+    });
     this.entries.delete(key);
     this.entries.set(key, entry);
     while (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value!);
@@ -121,7 +137,11 @@ export class ProbeCache {
   }
 }
 
-/** A counting semaphore: at most `limit` runs at once, the rest wait in order. */
+/**
+ * A counting semaphore: at most `limit` runs at once, the rest wait in arrival
+ * order. A run holds its slot until the promise `fn` returns settles; a
+ * finished run hands its slot straight to the first waiter.
+ */
 export class ProbeSlots {
   private active = 0;
   private readonly waiting: (() => void)[] = [];
@@ -201,16 +221,38 @@ export async function answerStepChecks(text: string, deps: AnswerDeps): Promise<
     timer = setTimeout(() => resolve({ state: "unknown", why: "timed out" }), deps.boundMs ?? ANSWER_BOUND_MS);
   });
   // The page's first MAX_PROBES_PER_PAGE distinct probes run; the rest are capped.
+  // `pushed`/`restart` run nothing, so they take no seat and are never capped.
   const allowed = new Set<string>();
-  for (const s of found.steps) for (const p of s.probes) if (allowed.size < MAX_PROBES_PER_PAGE) allowed.add(probeKey(p));
-  const capped = (p: CheckProbe) => !allowed.has(probeKey(p));
+  for (const s of found.steps) for (const p of s.probes) if (probeRuns(p.kind) && allowed.size < MAX_PROBES_PER_PAGE) allowed.add(probeKey(p));
+  const capped = (p: CheckProbe) => probeRuns(p.kind) && !allowed.has(probeKey(p));
   // One applied-set read per cache window, shared by every `migration=` probe.
   const probeDeps: ProbeDeps = { ...deps.probes, appliedMigrations: () => deps.cache.getKey(MIGRATIONS_KEY, () => deps.probes.appliedMigrations()) };
   const slots = deps.gitSlots ?? sharedGitSlots;
-  const run = (p: CheckProbe) => (GIT_KINDS.has(p.kind) ? slots.run(() => runProbe(p, probeDeps)) : runProbe(p, probeDeps));
+  // A git probe answers at its bound but keeps its slot until its git chain has
+  // ended, so the git still running behind a timed-out answer counts against the slots.
+  const slotted = (p: CheckProbe, started: () => void) =>
+    new Promise<ProbeResult>((resolve) => {
+      slots
+        .run(() => {
+          started();
+          const s = startProbe(p, probeDeps);
+          void s.answer.then(resolve);
+          return s.settled;
+        })
+        .catch(() => resolve({ state: "unknown", why: "the probe failed" }));
+    });
   // A migration answer is not cached on its own: it would outlive the set it was read from.
   const local = (p: CheckProbe): Promise<ProbeResult> =>
-    capped(p) ? Promise.resolve(TOO_MANY) : Promise.race([p.kind === "migration" ? run(p) : deps.cache.get(p, () => run(p)), deadline]);
+    capped(p)
+      ? Promise.resolve(TOO_MANY)
+      : Promise.race([
+          p.kind === "migration"
+            ? runProbe(p, probeDeps)
+            : GIT_KINDS.has(p.kind)
+              ? deps.cache.get(p, (started) => slotted(p, started), { startsLater: true })
+              : deps.cache.get(p, () => runProbe(p, probeDeps)),
+          deadline,
+        ]);
   const peer = deps.peer ?? noPeer;
   const viaPeer = async (name: string, probes: readonly CheckProbe[]): Promise<ProbeResult[]> => {
     const asked = probes.filter((p) => !capped(p));

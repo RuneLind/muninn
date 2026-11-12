@@ -199,7 +199,32 @@ export const PROBES: Record<CheckProbe["kind"], (value: string, deps: ProbeDeps)
   restart: notProvableYet,
 };
 
+/** Whether a probe kind runs anything: `pushed` and `restart` answer without reading or spawning. */
+export const probeRuns = (kind: CheckProbe["kind"]): boolean => PROBES[kind] !== notProvableYet;
+
+/**
+ * One probe started: `answer` resolves inside the probe's bound (`unknown` at
+ * it), `settled` once the probe's own work has ended, however long after the
+ * answer that is. A git-spawning probe holds its slot until `settled`, so the
+ * git processes still running after a timed-out answer are counted.
+ */
+export function startProbe(probe: CheckProbe, deps: ProbeDeps): { answer: Promise<ProbeResult>; settled: Promise<void> } {
+  let work: Promise<ProbeResult>;
+  try {
+    work = PROBES[probe.kind](probe.value, deps);
+  } catch (err) {
+    work = Promise.reject(err);
+  }
+  return {
+    answer: bounded(work, PROBE_BOUND_MS[probe.kind]),
+    settled: work.then(
+      () => undefined,
+      () => undefined,
+    ),
+  };
+}
+
 /** One probe, inside its own bound. */
 export function runProbe(probe: CheckProbe, deps: ProbeDeps): Promise<ProbeResult> {
-  return bounded(PROBES[probe.kind](probe.value, deps), PROBE_BOUND_MS[probe.kind]);
+  return startProbe(probe, deps).answer;
 }
