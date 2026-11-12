@@ -53,9 +53,9 @@ export interface ProbeDeps {
 
 /**
  * Bounds per probe and per git call. `ls-remote` is the one network read.
- * `pushed`'s per-worktree checks took 70–90 ms a worktree on the real skills
- * checkout and 160–410 ms on the real muninn checkout (measured 2026-11-12,
- * after content comparison replaced the stat-trusting `status`); its bound
+ * `pushed`'s seven per-worktree git calls took 51–106 ms a worktree on the real
+ * skills checkout and 140–406 ms on the real muninn checkout (measured
+ * 2026-11-13, five runs each, the first one cold); its bound
  * stays under the answer's `ANSWER_BOUND_MS`.
  */
 export const PROBE_BOUND_MS: Record<CheckProbe["kind"], number> = { env: 2_000, migration: 3_000, checkout: 6_500, pushed: 7_000, restart: 1_000 };
@@ -215,8 +215,8 @@ export const PUSHED_MAX_HEADS = 2_000;
 
 /**
  * Worktrees checked for uncommitted files; past it the answer is `unknown`.
- * One worktree's checks took 160–410 ms on the real muninn checkout (measured
- * 2026-11-12), run one after another inside `PROBE_BOUND_MS.pushed`.
+ * One worktree's seven git calls took 140–406 ms on the real muninn checkout
+ * (measured 2026-11-13), run one after another inside `PROBE_BOUND_MS.pushed`.
  */
 export const PUSHED_MAX_WORKTREES = 12;
 
@@ -507,16 +507,30 @@ async function recordedDir(gitDir: string): Promise<string | null> {
 }
 
 /**
- * Null only when the worktree records and the git dirs are in bijection inside
- * ONE repository, so every check runs in the worktree git recorded: every
- * record's directory exists and resolves to a distinct directory; in each, git
- * names (i) the probed repo's common dir and (ii) that directory as its
- * toplevel; (iii) no two directories share a git dir; (iv) the main record's
- * git dir is the common dir, and a linked record's is a linked git dir whose
- * `gitdir` file names that directory. A directory replaced by a clone fails
- * (i); one standing in for another worktree of the repo, listed or not (its
- * `gitdir` file gone), fails (iv); a symlink onto another record's directory
- * fails (iii). `resolved[0]` is the main record when it is not bare.
+ * Null only when every record's directory D is the worktree git listed, so each
+ * check reads the index and HEAD that record stands for. Every D exists and the
+ * Ds are distinct; in each, `rev-parse` names (i) the probed repo's common dir
+ * C and (ii) D as its toplevel; (iii) no two Ds share a git dir; (iv) the git
+ * dir G (realpath'd) sits in exactly one cell:
+ *
+ * 1. G == C: D must be the main record, and the main record must be here. Git
+ *    lists the main record from C itself, and by (iii) no other D uses C.
+ * 2. dirname(G) == C/worktrees (a direct child): G's `gitdir` file must name D.
+ *    Git lists every direct child of C/worktrees whose `gitdir` file it can
+ *    read, at the path that file names, resolved against G as here, so G is
+ *    listed at D; the Ds are distinct, so that listing is D's own record, and
+ *    by (iii) no other D uses G. A direct child git does not list (its `gitdir`
+ *    file gone, empty or naming another directory) fails the back-link.
+ * 3. Anything else (outside C, nested deeper under C/worktrees, C/worktrees
+ *    itself, C's parent): `unknown`. Git accepts such a G when it has an
+ *    absolute `commondir`, but lists none, so its index and HEAD are no
+ *    record's (reproduced: a copied admin dir answered `ok` over the record's
+ *    staged index, and over an unpushed commit checked out at D).
+ *
+ * So a D that passes uses its own record's git dir, and (ii) rules out a
+ * working tree moved off D. A clone at D fails (i); a symlink onto another
+ * record's D fails the distinctness check. `resolved[0]` is the main record
+ * when it is not bare.
  */
 async function refuseMisplacedWorktrees(resolved: readonly (WorktreeRecord & { real: string | null; main: boolean })[], dir: string, name: string, git: GitRun): Promise<ProbeResult | null> {
   if (resolved.some((w) => w.prunable || !w.real)) return unknown(`a worktree of ${name} is missing its directory: muninn cannot check it`);
@@ -535,8 +549,12 @@ async function refuseMisplacedWorktrees(resolved: readonly (WorktreeRecord & { r
   const common = answers.get(own[0]!)!.common;
   if (common === null || [...answers].some(([w, a]) => a.common !== common || a.gitDir === null || a.top !== w.real)) return misplaced;
   if (new Set([...answers.values()].map((a) => a.gitDir)).size !== answers.size) return unknown(`two worktrees of ${name} share one git dir`);
+  const admins = path.join(common, "worktrees");
   for (const [w, { gitDir }] of answers) {
-    if (w.main ? gitDir !== common : gitDir === common || (await recordedDir(gitDir!)) !== w.real) return misplaced;
+    // Cell 1: the common dir, the main record's only. Cell 2: a direct child of worktrees/ naming D. Cell 3: neither.
+    if (gitDir === common) {
+      if (!w.main) return misplaced;
+    } else if (w.main || path.dirname(gitDir!) !== admins || (await recordedDir(gitDir!)) !== w.real) return misplaced;
   }
   return null;
 }

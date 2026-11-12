@@ -274,7 +274,7 @@ describe("pushed: the truth table over a fake git", () => {
     ]);
   });
 
-  describe("finding 1 (verify pass on PR #850): records and git dirs in bijection inside one repository", () => {
+  describe("finding 1 (verify pass on PR #850): each record's directory is the worktree git listed", () => {
     const TWO = OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0branch refs/heads/side\0\0`);
     const THREE = OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0branch refs/heads/side\0\0worktree ${DIR3}\0HEAD ${WT}\0detached\0\0`);
     const MISPLACED: ProbeResult = { state: "unknown", why: "a worktree of skills is not where git recorded it" };
@@ -373,6 +373,69 @@ describe("pushed: the truth table over a fake git", () => {
       mkdirSync(rel, { recursive: true });
       writeFileSync(path.join(rel, "gitdir"), `${path.relative(rel, DIR2)}/.git\n`);
       expect((await run({ worktrees: TWO, identity: at(DIR2, answer(rel, COMMON, DIR2)) })).state).toBe("ok");
+    });
+
+    describe("the three cells of a record's git dir G", () => {
+      /** A git dir at `gitDir` whose `gitdir` file names DIR2, so only WHERE it is can refuse it. */
+      const backLinked = (gitDir: string) => {
+        mkdirSync(gitDir, { recursive: true });
+        writeFileSync(path.join(gitDir, "gitdir"), `${DIR2}/.git\n`);
+        return gitDir;
+      };
+      const outside = realpathSync(testTempDirSync(path.join(tmpdir(), "step-pushed-outside-")));
+
+      test("cell 1: G is the common dir only for the main record, and the main record's G is the common dir", async () => {
+        expect((await run({ worktrees: TWO })).state).toBe("ok");
+        expect(await run({ worktrees: TWO, identity: at(DIR, answer(ADMIN3, COMMON, DIR)) })).toEqual(MISPLACED);
+        expect(await run({ worktrees: TWO, identity: at(DIR2, answer(COMMON, COMMON, DIR2)) })).toEqual({ state: "unknown", why: "two worktrees of skills share one git dir" });
+        // The main record answering a direct child of worktrees/ that names it back: still not cell 1.
+        const mainAdmin = path.join(COMMON, "worktrees", "main-copy");
+        mkdirSync(mainAdmin, { recursive: true });
+        writeFileSync(path.join(mainAdmin, "gitdir"), `${DIR}/.git\n`);
+        expect(await run({ worktrees: TWO, identity: at(DIR, answer(mainAdmin, COMMON, DIR)) })).toEqual(MISPLACED);
+      });
+
+      test("cell 2: a direct child of <common>/worktrees naming the record's directory: ok", async () => {
+        expect((await run({ worktrees: TWO, identity: at(DIR2, answer(backLinked(path.join(COMMON, "worktrees", "direct")), COMMON, DIR2)) })).state).toBe("ok");
+      });
+
+      test("cell 3: outside the common dir, though its gitdir file names the record's directory: unknown", async () => {
+        expect(await run({ worktrees: TWO, identity: at(DIR2, answer(backLinked(path.join(outside, "xadmin")), COMMON, DIR2)) })).toEqual(MISPLACED);
+      });
+
+      test("cell 3: nested deeper than a direct child of <common>/worktrees: unknown", async () => {
+        expect(await run({ worktrees: TWO, identity: at(DIR2, answer(backLinked(path.join(ADMIN2, "inner")), COMMON, DIR2)) })).toEqual(MISPLACED);
+        expect(await run({ worktrees: TWO, identity: at(DIR2, answer(backLinked(path.join(COMMON, "worktrees", "holder", "copy")), COMMON, DIR2)) })).toEqual(MISPLACED);
+      });
+
+      test("cell 3: <common>/worktrees itself, a sibling sharing its prefix, a direct child of the common dir, the common dir's parent: unknown", async () => {
+        const admins = path.join(COMMON, "worktrees");
+        writeFileSync(path.join(admins, "gitdir"), `${DIR2}/.git\n`);
+        try {
+          expect(await run({ worktrees: TWO, identity: at(DIR2, answer(admins, COMMON, DIR2)) })).toEqual(MISPLACED);
+        } finally {
+          rmSync(path.join(admins, "gitdir"));
+        }
+        expect(await run({ worktrees: TWO, identity: at(DIR2, answer(backLinked(path.join(COMMON, "worktrees-x", "w2")), COMMON, DIR2)) })).toEqual(MISPLACED);
+        expect(await run({ worktrees: TWO, identity: at(DIR2, answer(backLinked(path.join(COMMON, "w2")), COMMON, DIR2)) })).toEqual(MISPLACED);
+        // The common dir's parent is the main worktree's directory: its own gitdir file names DIR2.
+        writeFileSync(path.join(DIR, "gitdir"), `${DIR2}/.git\n`);
+        try {
+          expect(await run({ worktrees: TWO, identity: at(DIR2, answer(DIR, COMMON, DIR2)) })).toEqual(MISPLACED);
+        } finally {
+          rmSync(path.join(DIR, "gitdir"));
+        }
+      });
+
+      test("cell 3 under a bare main record: a linked G outside the bare repo's worktrees/: unknown", async () => {
+        const admin1 = path.join(COMMON, "worktrees", "w1");
+        mkdirSync(admin1, { recursive: true });
+        writeFileSync(path.join(admin1, "gitdir"), `${DIR}/.git\n`);
+        const bareMain = OK(`worktree /bare\0bare\0\0worktree ${DIR}\0HEAD ${LOCAL}\0branch refs/heads/main\0\0worktree ${DIR2}\0HEAD ${WT}\0detached\0\0`);
+        const linked = (g2: string) => (cwd: string) => (cwd === DIR ? answer(admin1, COMMON, DIR) : cwd === DIR2 ? answer(g2, COMMON, DIR2) : identityOf(cwd));
+        expect((await run({ worktrees: bareMain, identity: linked(ADMIN2) })).state).toBe("ok");
+        expect(await run({ worktrees: bareMain, identity: linked(backLinked(path.join(outside, "bare-x"))) })).toEqual(MISPLACED);
+      });
     });
   });
 
