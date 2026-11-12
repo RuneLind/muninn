@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import { realGit, type GitResult, type GitRun } from "../decision-triage/git.ts";
-import { bounded, combineStates, probeCheckout, probeEnv, probeMigration, runProbe, type ProbeDeps } from "./probes.ts";
+import { bounded, CHECKOUT_GIT_ENV, combineStates, parseRemoteHeads, probeCheckout, probeEnv, probeMigration, probePushed, type ProbeDeps } from "./probes.ts";
 
 const DIR = realpathSync(testTempDirSync(path.join(tmpdir(), "step-probes-")));
 
@@ -299,15 +299,126 @@ describe("checkout, real git: replace refs and a partial clone", () => {
   });
 });
 
-describe("pushed and restart: muninn cannot prove these yet", () => {
-  for (const kind of ["pushed", "restart"] as const) {
-    test(`${kind} answers unknown and spawns nothing, reads nothing`, async () => {
-      const calls: string[][] = [];
-      let reads = 0;
-      const d = deps({ readEnvFile: async () => (reads++, { bytes: new Uint8Array() }), appliedMigrations: async () => (reads++, new Set<string>()), processHasEnv: () => (reads++, true) }, {}, calls);
-      expect(await runProbe({ kind, value: kind === "restart" ? "3010" : "muninn" }, d)).toEqual({ state: "unknown", why: "muninn cannot prove this yet" });
-      expect(calls).toEqual([]);
-      expect(reads).toBe(0);
+describe("pushed: the truth table over a fake git", () => {
+  const LOCAL = "1".repeat(40);
+  const R1 = "2".repeat(40);
+  const R2 = "3".repeat(40);
+  interface PushedWorld {
+    promisor?: GitResult;
+    shallow?: GitResult;
+    status?: GitResult;
+    head?: GitResult;
+    branch?: GitResult;
+    heads?: GitResult;
+    batch?: (stdin: string) => GitResult;
+    count?: GitResult;
+    source?: GitResult;
+  }
+  /** One repo `skills` at {@link DIR}; records argv, env and stdin of every call. */
+  function pushedGit(w: PushedWorld, log: { args: string[]; env?: Readonly<Record<string, string>>; stdin?: string }[] = []): GitRun {
+    return async (_cwd, args, opts) => {
+      log.push({ args: [...args], env: opts?.env, stdin: opts?.stdin });
+      const a = args.join(" ");
+      if (a === "rev-parse --show-toplevel") return OK(`${DIR}\n`);
+      if (a === "remote get-url origin") return OK("git@github.com:x/skills.git\n");
+      if (a.startsWith("config --get-regexp")) return w.promisor ?? EXIT(1);
+      if (a === "rev-parse --is-shallow-repository") return w.shallow ?? OK("false\n");
+      if (a.startsWith("status --porcelain")) return w.status ?? OK("");
+      if (a === "rev-parse --verify --quiet HEAD^{commit}") return w.head ?? OK(`${LOCAL}\n`);
+      if (a.startsWith("for-each-ref")) return w.branch ?? OK("refs/heads/main\n");
+      if (a === "ls-remote --heads origin") return w.heads ?? OK(`${R1}\trefs/heads/main\n${R2}\trefs/heads/wip\n`);
+      if (a === "cat-file --batch-check") return w.batch ? w.batch(opts?.stdin ?? "") : OK((opts?.stdin ?? "").split("\n").filter(Boolean).map((t) => `${t} commit 200`).join("\n") + "\n");
+      if (a.startsWith("rev-list --count")) return w.count ?? OK("0\n");
+      if (a.startsWith("log ")) return w.source ?? OK("wip-x\n");
+      return EXIT(128);
+    };
+  }
+  const run = (w: PushedWorld = {}, log?: { args: string[]; env?: Readonly<Record<string, string>>; stdin?: string }[]) =>
+    probePushed("skills", deps({ git: pushedGit(w, log), roots: { dirs: [], named: new Map([["skills", DIR]]) } }));
+
+  test("nothing missing from the live remote and a clean tree: ok", async () => {
+    expect(await run()).toEqual({ state: "ok", why: "every commit on skills's branches and HEAD is on origin, and nothing tracked is uncommitted" });
+  });
+
+  test("every call carries the lookup switches; tips go on stdin, local branches and HEAD are walked, refs/remotes is never read", async () => {
+    const log: { args: string[]; env?: Readonly<Record<string, string>>; stdin?: string }[] = [];
+    await run({}, log);
+    expect(log.every((c) => c.env === CHECKOUT_GIT_ENV)).toBe(true);
+    expect(log.some((c) => c.args.join(" ").includes("refs/remotes"))).toBe(false);
+    const revList = log.find((c) => c.args[0] === "rev-list")!;
+    expect(revList.args).toEqual(["rev-list", "--count", "--branches", "HEAD", "--stdin"]);
+    expect(revList.stdin).toBe(`^${R1}\n^${R2}\n`);
+    expect(log.find((c) => c.args[0] === "cat-file")!.stdin).toBe(`${R1}\n${R2}\n`);
+  });
+
+  test("commits missing and every remote tip here: not-yet, naming the count and one branch", async () => {
+    expect(await run({ count: OK("3\n") })).toEqual({ state: "not-yet", why: "3 commits on wip-x in skills are not on origin: push" });
+    expect(await run({ count: OK("1\n"), source: OK("HEAD\n") })).toEqual({ state: "not-yet", why: "1 commit on a detached HEAD in skills is not on origin: push" });
+    // A source git cannot name still says how many.
+    expect(await run({ count: OK("2\n"), source: EXIT(128) })).toEqual({ state: "not-yet", why: "2 commits in skills are not on origin: push" });
+  });
+
+  test("commits missing while a remote tip is absent here: unknown, they may sit under that tip; only present tips are walked", async () => {
+    const log: { args: string[]; env?: Readonly<Record<string, string>>; stdin?: string }[] = [];
+    const r = await run({ count: OK("2\n"), batch: () => OK(`${R1} commit 200\n${R2} missing\n`) }, log);
+    expect(r).toEqual({ state: "unknown", why: "origin has commits skills lacks: fetch first" });
+    expect(log.find((c) => c.args[0] === "rev-list")!.stdin).toBe(`^${R1}\n`);
+  });
+
+  test("nothing missing while a remote tip is absent here: ok, every local commit is under a tip origin has", async () => {
+    expect((await run({ batch: () => OK(`${R1} commit 200\n${R2} missing\n`) })).state).toBe("ok");
+  });
+
+  test("an empty remote with a local commit: not-yet", async () => {
+    expect((await run({ heads: OK(""), count: OK("4\n"), source: OK("main\n") })).state).toBe("not-yet");
+  });
+
+  test("tracked changes, staged or not: not-yet before anything remote is asked", async () => {
+    const log: { args: string[]; env?: Readonly<Record<string, string>>; stdin?: string }[] = [];
+    expect(await run({ status: OK(" M f\0") }, log)).toEqual({ state: "not-yet", why: "skills has uncommitted changes: commit and push" });
+    expect(log.some((c) => c.args[0] === "ls-remote")).toBe(false);
+    expect(log.find((c) => c.args[0] === "status")!.args).toContain("--untracked-files=no");
+    expect((await run({ status: { ok: true, stdout: "M  f\0", capped: true } })).state).toBe("not-yet");
+  });
+
+  const unknownRows: [string, PushedWorld][] = [
+    ["a partial clone", { promisor: OK("remote.origin.promisor true\n") }],
+    ["config failing", { promisor: TIMED_OUT }],
+    ["a shallow clone", { shallow: OK("true\n") }],
+    ["shallow unreadable", { shallow: OK("maybe\n") }],
+    ["status failing", { status: EXIT(128) }],
+    ["status timing out", { status: TIMED_OUT }],
+    ["an unborn HEAD", { head: EXIT(1) }],
+    ["no local branch", { branch: OK("") }],
+    ["for-each-ref failing", { branch: EXIT(128) }],
+    ["ls-remote failing", { heads: EXIT(128) }],
+    ["ls-remote timing out", { heads: TIMED_OUT }],
+    ["ls-remote capped", { heads: { ok: true, stdout: `${R1}\trefs/heads/main`, capped: true } }],
+    ["a garbled ls-remote line", { heads: OK(`${R1}\trefs/heads/main\nnot a line\n`) }],
+    ["a short sha in ls-remote", { heads: OK("abc\trefs/heads/main\n") }],
+    ["a tag in the heads list", { heads: OK(`${R1}\trefs/tags/v1\n`) }],
+    ["cat-file failing", { batch: () => EXIT(128) }],
+    ["cat-file answering short", { batch: () => OK(`${R1} commit 1\n`) }],
+    ["a remote tip that is not a commit", { batch: () => OK(`${R1} tree 10\n${R2} commit 1\n`) }],
+    ["rev-list failing", { count: EXIT(128) }],
+    ["rev-list garbled", { count: OK("lots\n") }],
+  ];
+  for (const [what, w] of unknownRows) {
+    test(`${what}: unknown`, async () => {
+      expect((await run(w)).state).toBe("unknown");
     });
   }
+
+  test("a partial clone is refused before any object lookup", async () => {
+    const log: { args: string[]; env?: Readonly<Record<string, string>>; stdin?: string }[] = [];
+    await run({ promisor: OK("remote.origin.promisor true\n") }, log);
+    expect(log.map((c) => c.args[0])).toEqual(["rev-parse", "remote", "config"]);
+  });
+
+  test("parseRemoteHeads: distinct tips; any other line is null", () => {
+    expect(parseRemoteHeads(`${R1}\trefs/heads/a\n${R1}\trefs/heads/b\n`)).toEqual([R1]);
+    expect(parseRemoteHeads("")).toEqual([]);
+    expect(parseRemoteHeads(`${R1}\tHEAD\n`)).toBeNull();
+    expect(parseRemoteHeads(`${R1} refs/heads/a\n`)).toBeNull();
+  });
 });

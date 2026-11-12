@@ -7,9 +7,9 @@
  *
  *  1. A step whose `env` key is in no `.env` reads «not yet»; one whose
  *     migration the e2e database has applied reads «checked»; one whose
- *     migration does not exist reads «not yet»; a step that names `restart`
- *     (which muninn cannot prove yet) reads «unknown» although its migration
- *     holds; a step with no tag gets none.
+ *     migration does not exist reads «not yet»; a step whose `restart` names
+ *     a port this muninn does not listen on reads «unknown» although its
+ *     migration holds; a step with no tag gets none.
  *  2. The chip sits in the reader-only slot: the Done button's accessible name
  *     is the step's text alone, and Done still removes a chipped row, after
  *     which the page's chips come back for the steps left.
@@ -57,6 +57,8 @@ import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 const PORT = e2ePort("wiki-step-checks");
 const RO_BASE = `http://127.0.0.1:${e2ePort("wiki-step-checks/readonly")}`;
 const BASE = `http://127.0.0.1:${PORT}`;
+/** A `restart=` value that is not this server's port. */
+const OTHER_PORT = 1;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-step-checks";
 const REL = "plans/e2e-checks.mdx";
@@ -70,8 +72,9 @@ const PAGE = [
   '2. Apply the old migration. <Check migration="086" />',
   '3. Apply the missing migration. <Check migration="999" />',
   "4. Water the plants.",
-  // This spec's own muninn: a port muninn cannot prove restarted yet.
-  `5. Restart muninn. <Check migration="086" restart="${PORT}" />`,
+  // A port no muninn here listens on: the answer is «unknown» on every machine,
+  // whatever the checkout's state (the own port's answer depends on the disk).
+  `5. Restart muninn. <Check migration="086" restart="${OTHER_PORT}" />`,
   "\n</Lane>\n",
   "</NextMoves>\n",
 ].join("\n");
@@ -103,7 +106,7 @@ const PAGES: Record<string, string> = {
 const REL_30 = "plans/e2e-checks-thirty.mdx";
 const WORDS = "apply the change and then read what the probe says about it before you move on to the next".split(" ");
 const words = (n: number) => Array.from({ length: n }, (_, i) => WORDS[i % WORDS.length]).join(" ");
-const TAGS = ['<Check migration="086" />', '<Check migration="999" />', `<Check migration="086" restart="${PORT}" />`, '<Check migration="086" on="laptop,mini" />', `<Check env="${KEY}" />`];
+const TAGS = ['<Check migration="086" />', '<Check migration="999" />', `<Check migration="086" restart="${OTHER_PORT}" />`, '<Check migration="086" on="laptop,mini" />', `<Check env="${KEY}" />`];
 const tag = (i: number) => TAGS[i % TAGS.length];
 const THIRTY_TIGHT = Array.from({ length: 16 }, (_, i) => {
   const n = i + 1;
@@ -193,7 +196,7 @@ test.describe.serial("owner-step check chips", () => {
     await expect(chip(p, "Add the key")).toHaveAttribute("title", new RegExp(`^env=${KEY}: ${KEY} is not in \\.env`));
     await expect(chip(p, "Restart muninn")).toHaveText("?");
     await expect(chip(p, "Restart muninn")).toHaveAttribute("data-state", "unknown");
-    await expect(chip(p, "Restart muninn")).toHaveAttribute("title", new RegExp(`restart=${PORT}: muninn cannot prove this yet`));
+    await expect(chip(p, "Restart muninn")).toHaveAttribute("title", new RegExp(`restart=${OTHER_PORT}: this muninn listens on ${PORT}`));
     await expect(row(p, "Water the plants").locator(".step-check")).toHaveCount(0);
     await expect(p.locator(".wiki-article .step-chip")).toHaveCount(4);
   });

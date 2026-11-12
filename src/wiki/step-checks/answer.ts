@@ -3,7 +3,7 @@
  * PR 2): every open list step of a counted `you` lane whose first line ends in
  * a valid `<Check …/>`, each probe run once per (kind, value) inside a short
  * cache, per machine the check names. A page runs at most
- * {@link MAX_PROBES_PER_PAGE} distinct probes that run anything, its
+ * {@link MAX_PROBES_PER_PAGE} distinct probes, its
  * `migration=` probes share one applied-set read, and git-spawning probes take
  * one of {@link GIT_PROBE_SLOTS} process-wide slots, held until their git has
  * ended. Read only: the route
@@ -18,7 +18,7 @@
 import { stepCheck, type CheckProbe } from "../../format/check-tag.ts";
 import { listYouSteps, youLaneRows, youListStepLines } from "../../format/step-done.ts";
 import { sha256 } from "../../utils/date-hash.ts";
-import { combineStates, probeRuns, runProbe, startProbe, type ProbeDeps, type ProbeResult, type ProbeState } from "./probes.ts";
+import { combineStates, runProbe, startProbe, type ProbeDeps, type ProbeResult, type ProbeState } from "./probes.ts";
 
 /** How long one probe answer is reused: opening a page twice runs no git. */
 export const PROBE_TTL_MS = 30_000;
@@ -68,12 +68,12 @@ export const noPeer: PeerAnswerer = async (machine, probes) => probes.map(() => 
 
 /** How many answers {@link ProbeCache} keeps: past it the oldest goes first. */
 export const PROBE_CACHE_MAX = 500;
-/** Distinct (kind, value) probes one page may run; the rest answer `unknown`. `pushed`/`restart` run nothing and do not count. The largest real `you` lane has under 20 steps. */
+/** Distinct (kind, value) probes one page may run; the rest answer `unknown`. The largest real `you` lane has under 20 steps. */
 export const MAX_PROBES_PER_PAGE = 60;
 /** Git-spawning probes running at once, process-wide: 8 at once timed `ls-remote` out (measured in review). */
 export const GIT_PROBE_SLOTS = 4;
 
-const GIT_KINDS: ReadonlySet<CheckProbe["kind"]> = new Set(["checkout"]);
+const GIT_KINDS: ReadonlySet<CheckProbe["kind"]> = new Set(["checkout", "pushed", "restart"]);
 const MIGRATIONS_KEY = "migrations\u0000*";
 const TOO_MANY: ProbeResult = { state: "unknown", why: "too many checks on this page" };
 const probeKey = (p: CheckProbe) => `${p.kind}\u0000${p.value}`;
@@ -221,10 +221,9 @@ export async function answerStepChecks(text: string, deps: AnswerDeps): Promise<
     timer = setTimeout(() => resolve({ state: "unknown", why: "timed out" }), deps.boundMs ?? ANSWER_BOUND_MS);
   });
   // The page's first MAX_PROBES_PER_PAGE distinct probes run; the rest are capped.
-  // `pushed`/`restart` run nothing, so they take no seat and are never capped.
   const allowed = new Set<string>();
-  for (const s of found.steps) for (const p of s.probes) if (probeRuns(p.kind) && allowed.size < MAX_PROBES_PER_PAGE) allowed.add(probeKey(p));
-  const capped = (p: CheckProbe) => probeRuns(p.kind) && !allowed.has(probeKey(p));
+  for (const s of found.steps) for (const p of s.probes) if (allowed.size < MAX_PROBES_PER_PAGE) allowed.add(probeKey(p));
+  const capped = (p: CheckProbe) => !allowed.has(probeKey(p));
   // One applied-set read per cache window, shared by every `migration=` probe.
   const probeDeps: ProbeDeps = { ...deps.probes, appliedMigrations: () => deps.cache.getKey(MIGRATIONS_KEY, () => deps.probes.appliedMigrations()) };
   const slots = deps.gitSlots ?? sharedGitSlots;

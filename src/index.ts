@@ -1,6 +1,6 @@
 import { setupLogging, getLog } from "./logging.ts";
 import { answerGroupsBootLines, ConfigError, loadConfig, machineBootWarning, resolveServingProfile } from "./config.ts";
-import { discoverActiveBots, discoverAllBots } from "./bots/config.ts";
+import { discoverActiveBots, discoverAllBots, resolveBotsDir } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createSlackApp } from "./slack/index.ts";
@@ -423,6 +423,13 @@ const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
 });
 
 log.info("Dashboard: http://localhost:{port}", { port: server.port });
+
+// The `restart=` step check's boot fingerprint (`src/wiki/step-checks/boot-fingerprint.ts`):
+// taken a moment after listening, in the background, where the step-check route exists.
+if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
+  const { startBootFingerprint } = await import("./wiki/step-checks/real-deps.ts");
+  startBootFingerprint({ envDir: process.cwd(), botsDir: resolveBotsDir() }, server.port ?? config.dashboardPort);
+}
 activityLog.push("system", `Dashboard running on http://localhost:${server.port}`);
 
 // An authenticating mode is invisible from the outside until a request is

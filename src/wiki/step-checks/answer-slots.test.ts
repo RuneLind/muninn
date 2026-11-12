@@ -107,6 +107,37 @@ describe("a checkout probe holds its slot until its git chain settles", () => {
   });
 });
 
+describe("pushed and restart are git probes: slotted and cached like checkout", () => {
+  test("six pushed probes and one restart on one slot: one git call at a time; a second page inside the TTL runs no git", async () => {
+    const named = repos(6);
+    const { git, c } = countingGit(() => Bun.sleep(2));
+    const snapshot = { fingerprint: "f", hashes: new Map<string, string | null>() };
+    const p: ProbeDeps = {
+      ...probeDeps(git, named),
+      restart: {
+        listenPort: () => 3010,
+        boot: () => Promise.resolve({ proven: true as const, snapshot, modules: new Set<string>() }),
+        disk: async () => snapshot,
+        loadedModules: () => [],
+        bundles: () => ({ inputs: new Map(), unaccounted: false }),
+        hashNow: async () => null,
+        checkout: named.get("repo0")!,
+      },
+    };
+    const text = page(...Array.from({ length: 6 }, (_, i) => `${i + 1}. P <Check pushed="repo${i}" />`), '7. R <Check restart="3010" />');
+    const cache = new ProbeCache();
+    await answerStepChecks(text, deps(p, { cache, gitSlots: new ProbeSlots(1), boundMs: 5_000 }));
+    expect(c.peak).toBe(1);
+    expect(c.lsRemote).toBeGreaterThan(0);
+    const before = c.lsRemote;
+    let calls = 0;
+    const counted: GitRun = async (cwd, args, opts) => (calls++, git(cwd, args, opts));
+    await answerStepChecks(text, deps({ ...p, git: counted }, { cache, gitSlots: new ProbeSlots(1), boundMs: 5_000 }));
+    expect(calls).toBe(0);
+    expect(c.lsRemote).toBe(before);
+  });
+});
+
 describe("an unsettled read's age counts from when it got its slot", () => {
   test("a checkout queued past the TTL, then started: a second page shares it, one ls-remote", async () => {
     let now = 0;

@@ -111,21 +111,21 @@ describe("the per-page cap", () => {
   });
 });
 
-describe("only probes that run count toward the cap", () => {
-  test("60 `pushed=` steps and one `env=`: the env probe runs", async () => {
+describe("pushed and restart take seats like every probe", () => {
+  test("60 `pushed=` steps and one `env=`: the env probe is capped", async () => {
     const counts = { dbReads: 0, envReads: 0 };
     const items = [...Array.from({ length: 60 }, (_, i) => `${i + 1}. P <Check pushed="repo${i}" />`), '61. E <Check env="K0" />'];
     const a = await answerStepChecks(page(...items), deps(world({ env: new Set(["K0"]) }, counts)));
-    expect(a.steps[60]!.machines[0]!.probes[0]).toEqual({ kind: "env", value: "K0", state: "ok", why: "K0 is set in .env and in the running process" });
-    expect(counts.envReads).toBe(1);
-    expect(a.steps[0]!.machines[0]!.probes[0]!.why).toBe("muninn cannot prove this yet");
+    expect(a.steps[60]!.machines[0]!.probes[0]).toEqual({ kind: "env", value: "K0", state: "unknown", why: "too many checks on this page" });
+    expect(counts.envReads).toBe(0);
+    expect(a.steps[0]!.machines[0]!.probes[0]!.why).toBe("DECISION_TRIAGE_REPO_ROOTS is not set, so repo0 cannot be found");
   });
 
-  test("60 running probes, then restart and pushed: those answer as always, not as capped", async () => {
+  test("60 env probes, then restart and pushed: both are capped", async () => {
     const env = new Set(Array.from({ length: 60 }, (_, i) => `K${i}`));
     const items = [...Array.from({ length: 60 }, (_, i) => `${i + 1}. E <Check env="K${i}" />`), '61. R <Check restart="3010" pushed="muninn" />'];
     const a = await answerStepChecks(page(...items), deps(world({ env })));
-    expect(a.steps[60]!.machines[0]!.probes.map((p) => p.why)).toEqual(["muninn cannot prove this yet", "muninn cannot prove this yet"]);
+    expect(a.steps[60]!.machines[0]!.probes.map((p) => p.why)).toEqual(["too many checks on this page", "too many checks on this page"]);
   });
 });
 

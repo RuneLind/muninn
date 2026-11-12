@@ -11,7 +11,13 @@
  *  `minify` defaults to false (the bundles inlined into a page stay readable in
  *  view-source); the /wiki reader passes true because it is served as its own
  *  cached asset (`getWikiAssets`, `wiki-page.ts`).
+ *
+ *  Every build goes through `bundleRecorderPlugin`, which hands the bundler
+ *  muninn's own sources itself and records their hashes, so the `restart=`
+ *  step check can tell a memoized bundle from the disk (`boot-fingerprint.ts`).
  */
+
+import { bundleRecorderPlugin, MUNINN_CHECKOUT } from "../../../wiki/step-checks/boot-fingerprint.ts";
 
 export function makeBundledClientScript(
   entryFilename: string,
@@ -28,6 +34,7 @@ async function build(entryFilename: string, callerDir: string, minify: boolean):
     target: "browser",
     format: "iife",
     minify,
+    plugins: [bundleRecorderPlugin(MUNINN_CHECKOUT)],
   });
   if (!result.success) {
     throw new Error(`${entryFilename} bundle failed:\n${result.logs.join("\n")}`);
