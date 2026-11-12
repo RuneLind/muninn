@@ -299,15 +299,13 @@ describe("checkout, real git: replace refs and a partial clone", () => {
   });
 });
 
-describe("pushed and restart: muninn cannot prove these yet", () => {
-  for (const kind of ["pushed", "restart"] as const) {
-    test(`${kind} answers unknown and spawns nothing, reads nothing`, async () => {
-      const calls: string[][] = [];
-      let reads = 0;
-      const d = deps({ readEnvFile: async () => (reads++, { bytes: new Uint8Array() }), appliedMigrations: async () => (reads++, new Set<string>()), processHasEnv: () => (reads++, true) }, {}, calls);
-      expect(await runProbe({ kind, value: kind === "restart" ? "3010" : "muninn" }, d)).toEqual({ state: "unknown", why: "muninn cannot prove this yet" });
-      expect(calls).toEqual([]);
-      expect(reads).toBe(0);
-    });
-  }
+describe("restart: muninn cannot prove it yet", () => {
+  test("restart answers unknown and spawns nothing, reads nothing", async () => {
+    const calls: string[][] = [];
+    let reads = 0;
+    const d = deps({ readEnvFile: async () => (reads++, { bytes: new Uint8Array() }), appliedMigrations: async () => (reads++, new Set<string>()), processHasEnv: () => (reads++, true) }, {}, calls);
+    expect(await runProbe({ kind: "restart", value: "3010" }, d)).toEqual({ state: "unknown", why: "muninn cannot prove this yet" });
+    expect(calls).toEqual([]);
+    expect(reads).toBe(0);
+  });
 });

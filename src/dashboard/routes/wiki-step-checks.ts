@@ -2,8 +2,11 @@
  * `GET /api/wiki/step-checks?wiki=&relPath=` (mimir plan
  * muninn-wiki-owner-step-checks, PR 2): the page's owner-step checks answered
  * on this machine (`src/wiki/step-checks/`). It reads one page file and then
- * only reads: `.env` key names, `schema_migrations`, `git` (with one
- * `ls-remote` per repo, the network read). It spawns git, so it is on
+ * only reads: `.env` key names, `schema_migrations`, and for `checkout=` and
+ * `pushed=` read-only `git` in the named repo (one `ls-remote` per repo and
+ * probe, the network read; `status` with no optional locks and fsmonitor off)
+ * plus `pushed=`'s `lstat` of the git-dir files an operation in progress
+ * leaves. `restart=` reads and spawns nothing. It spawns git, so it is on
  * `SIDE_EFFECTING_GETS`. Registered in the `wiki` group: a pod has no such route.
  *
  * Checks are answered on exactly the pages Done is offered on: the wiki is
