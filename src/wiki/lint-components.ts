@@ -9,6 +9,12 @@
  *  - `component-attr` — an attribute `COMPONENT_ATTRS` does not list, which
  *    `parseAttrs` drops before any renderer sees it, or an earlier spelling of
  *    a repeated attribute, which it drops for the last one.
+ *  - `check-placement` — a `<Check>` the list walker did not take as a step's
+ *    trailing tag (`check-trailing.ts`): the inline scanner or the block parser
+ *    read it, or it ends a list item outside a `you` lane, or a `<Check` outside
+ *    code read as no tag at all (wrapped, unclosed, single-quoted). A `<Check>`
+ *    value `parseCheckAttrs` rejects, or one naming no probe, is a
+ *    `component-value` finding.
  *
  * Not reported: an unknown tag name (it renders as visible escaped text), the
  * `parseString` attributes, the other attributes of a component whose
@@ -52,18 +58,20 @@
  * with no `.env`.
  */
 
-import { ATTR_RE, observeComponentTags, type ObservedComponentTag } from "../format/markdown-ast.ts";
-import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type ComponentName, type ComponentSpec } from "../format/component-spec.ts";
+import { ATTR_RE, observeComponentTags, parseAttrs, readerFencedLines, type ObservedComponentTag } from "../format/markdown-ast.ts";
+import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, normalizeLaneKind, type AttrSpec, type ComponentName, type ComponentSpec } from "../format/component-spec.ts";
 import { COMPONENT_DOCS, attrAliasFor, attrDoc, hintFor, suggestFor, type ComponentDoc } from "../format/component-docs.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { resolveEmbedRelPath } from "../format/embed.ts";
+import { parseCheckAttrs } from "../format/check-tag.ts";
+import { lineCodeSpanRanges } from "../format/code-spans.ts";
 import { renderWikiHtml } from "./render.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import { parkLinksThenCodeSpans } from "./park-links.ts";
 import type { PageFileResult, PageFiles } from "../format/query-block.ts";
 import type { LintFinding } from "./lint.ts";
 
-export const COMPONENT_LINT_CHECKS = ["component-value", "component-attr"] as const;
+export const COMPONENT_LINT_CHECKS = ["component-value", "component-attr", "check-placement"] as const;
 
 const SPEC: Readonly<Record<ComponentName, ComponentSpec>> = COMPONENT_SPEC;
 
@@ -78,6 +86,10 @@ interface Tag {
   name: ComponentName;
   attrs: string;
   inNextMoves?: true;
+  /** A `<Check>` the list walker took as a step's trailing tag. */
+  trailing?: true;
+  /** A trailing `<Check>` whose line is in no `you` lane ({@link youLaneLines}). */
+  outsideYou?: true;
   sourceAttrs?: string;
   line?: number;
   offset?: number;
@@ -251,6 +263,7 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
       });
     }
   }
+  if (tag.name === "Check") return [...out, ...checkFindings(at, tag, known)];
   const attrs = Object.entries(SPEC[tag.name].attrs);
   const doc = COMPONENT_DOCS[tag.name] as ComponentDoc;
   const valueFinding = (attr: string, spec: AttrSpec, phrase: string): LintFinding => ({
@@ -284,6 +297,32 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
     const lane = attr === "kind" ? laneKindPhrase(tag, known) : undefined;
     if (lane === null) continue;
     out.push(valueFinding(attr, spec, lane ?? fallbackPhrase(tag.name, attr, spec, raw, known)));
+  }
+  return out;
+}
+
+const CHECK_EXAMPLE = '`1. **Restart.** <Check restart="3010" />`';
+
+/** A `<Check>`'s own findings: where it sits, then each value problem. */
+function checkFindings(at: { relPath: string; line?: number }, tag: Tag, known: Readonly<Record<string, string>>): LintFinding[] {
+  const out: LintFinding[] = [];
+  if (!tag.trailing) {
+    out.push({
+      check: "check-placement",
+      ...at,
+      message: "Check is not the last thing on a step's first line; it names no step there and renders nothing",
+      detail: `Write one self-closing tag at the end of the step item's first line, after its sentence: ${CHECK_EXAMPLE}.`,
+    });
+  } else if (tag.outsideYou) {
+    out.push({
+      check: "check-placement",
+      ...at,
+      message: "Check ends a list item outside a you lane; only a you step is checked",
+      detail: `Move the step into a \`<Lane kind="you">\`, or drop the tag.`,
+    });
+  }
+  for (const problem of parseCheckAttrs(known).problems) {
+    out.push({ check: "component-value", ...at, message: `Check ${problem}`, detail: `Check takes ${COMPONENT_ATTRS.Check.join(", ")}.` });
   }
   return out;
 }
@@ -379,8 +418,11 @@ function markBody(content: string): { marked: string; offsets: number[] } {
   return { marked: content.slice(0, bodyAt) + out + body.slice(last), offsets };
 }
 
-const tagKey = (t: ObservedComponentTag) => `${t.name}\u0000${t.inline}\u0000${t.inNextMoves ?? ""}\u0000${t.rawAttrs}`;
-const nmOf = (t: ObservedComponentTag): { inNextMoves?: true } => (t.inNextMoves ? { inNextMoves: true } : {});
+const tagKey = (t: ObservedComponentTag) => `${t.name}\u0000${t.inline}\u0000${t.inNextMoves ?? ""}\u0000${t.trailing ?? ""}\u0000${t.rawAttrs}`;
+const nmOf = (t: ObservedComponentTag): { inNextMoves?: true; trailing?: true } => ({
+  ...(t.inNextMoves ? { inNextMoves: true as const } : {}),
+  ...(t.trailing ? { trailing: true as const } : {}),
+});
 
 /** The marked render's tags with their source offsets, or null when they are
  *  not, tag for tag, the plain render's. A tag read with no marker has none. */
@@ -415,8 +457,9 @@ function lineAt(content: string, offset: number): number {
   return line;
 }
 
-/** Components with a `required` attribute (Meter, Chart): a bare `<Meter>` or `<Chart>` is a finding. */
-const REQUIRED_NAMES = COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs).some((a) => a.required));
+/** Components with a `required` attribute (Meter, Chart): a bare `<Meter>` or
+ *  `<Chart>` is a finding. So is a bare `<Check />`: it names no probe. */
+const REQUIRED_NAMES = [...COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs).some((a) => a.required)), "Check"];
 /**
  * A tag this check could judge: a component name followed by an attribute, or
  * a component with a required attribute in any form. A page with neither has
@@ -425,6 +468,9 @@ const REQUIRED_NAMES = COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs
 const JUDGEABLE_RE = new RegExp(
   `<(?:${COMPONENT_NAMES.join("|")})\\s+[^\\s/>]` + (REQUIRED_NAMES.length > 0 ? `|<(?:${REQUIRED_NAMES.join("|")})(?=[\\s/>])` : ""),
 );
+
+/** A `<Check` that is not a longer name (`<Checklist`). */
+const CHECK_MENTION_RE = /<Check(?![\w-])/;
 
 /** Results per render seam, keyed on relPath, content length and a content
  *  hash, least recently used evicted past the cap. A lint run repeats on every
@@ -447,7 +493,7 @@ export function checkComponents(
   render: PageRender = readerRender,
   files: LoadedPageFiles = new Map(),
 ): LintFinding[] {
-  if (!JUDGEABLE_RE.test(content)) return [];
+  if (!JUDGEABLE_RE.test(content) && !CHECK_MENTION_RE.test(content)) return [];
   let memo = memos.get(render);
   if (memo === undefined) memos.set(render, (memo = new Map()));
   const read = [...files].filter((e): e is [string, { ok: true; text: string }] => e[1].ok);
@@ -470,11 +516,96 @@ function findComponents(relPath: string, content: string, render: PageRender, fi
 }
 
 function pageFindings(relPath: string, content: string, render: PageRender, plain: readonly ObservedComponentTag[]): LintFinding[] {
+  const hasCheck = CHECK_MENTION_RE.test(content);
   const unlocated = plain.flatMap((t) => checkTag(relPath, { name: t.name, attrs: t.rawAttrs, ...nmOf(t) }));
-  if (unlocated.length === 0) return [];
+  // A page with a `<Check` is always located: a valid trailing tag outside a
+  // `you` lane and a `<Check` no scanner read are known only by line.
+  if (unlocated.length === 0 && !hasCheck) return [];
   const tags = locate(render, content, plain);
-  if (tags === null) return unlocated;
-  const located = tags.filter((t) => t.offset !== undefined).sort((a, b) => a.offset! - b.offset!);
+  if (tags === null) return [...unlocated, ...(hasCheck ? unreadChecks(relPath, content, null, plain.filter((t) => t.name === "Check").length) : [])];
+  // At one offset a `<Check>` read by the inline scanner wins over the list
+  // walker's trailing read: the walker renders every component body as a
+  // list, and a body the component draws its own way (a lane task list, a
+  // `<Tldr>`) is what the page shows.
+  const located = tags.filter((t) => t.offset !== undefined).sort((a, b) => a.offset! - b.offset! || Number(a.trailing ?? 0) - Number(b.trailing ?? 0));
   const once = located.filter((t, i) => i === 0 || t.offset !== located[i - 1]!.offset);
-  return [...once, ...tags.filter((t) => t.offset === undefined)].flatMap((t) => checkTag(relPath, t));
+  if (hasCheck) {
+    const you = youLaneLines(content);
+    for (const t of once) if (t.name === "Check" && t.trailing && !you.has(t.line!)) t.outsideYou = true;
+  }
+  // An unmarked `<Check>` sits inside another tag's quoted value: the line
+  // scan below reports it on its line, so it is not judged here as well.
+  const unmarked = tags.filter((t) => t.offset === undefined && t.name !== "Check");
+  const found = [...once, ...unmarked].flatMap((t) => checkTag(relPath, t));
+  return hasCheck ? [...found, ...unreadChecks(relPath, content, once, 0)].sort(byLine) : found;
+}
+
+/** Located findings in line order (stable), then the unlocated. */
+const byLine = (a: LintFinding, b: LintFinding) => (a.line ?? Infinity) - (b.line ?? Infinity);
+
+/** Each `<Check` the body spells outside fences and code spans, as its 1-based
+ *  line, one entry per occurrence. Frontmatter is skipped. */
+function checkMentions(content: string): number[] {
+  const lines = content.split("\n");
+  const first = content.slice(0, content.length - splitFrontmatter(content).body.length).split("\n").length;
+  const fenced = readerFencedLines(content);
+  const out: number[] = [];
+  for (let k = first - 1; k < lines.length; k++) {
+    const line = lines[k]!;
+    if (fenced[k] || !CHECK_MENTION_RE.test(line)) continue;
+    const code = lineCodeSpanRanges(line);
+    for (const m of line.matchAll(new RegExp(CHECK_MENTION_RE, "g"))) {
+      if (!code.some((r) => m.index >= r.start && m.index < r.end)) out.push(k + 1);
+    }
+  }
+  return out;
+}
+
+/**
+ * A `<Check` outside code that no scanner read as a tag (wrapped across
+ * lines, unclosed, single-quoted, inside another tag's quoted value, or in a
+ * body a component prints as written, a `<Pill>`'s): one
+ * finding per occurrence past the located tags on its line. With no located
+ * tags (`located` null), the page-wide surplus over `observed`, unlocated.
+ */
+function unreadChecks(relPath: string, content: string, located: readonly Tag[] | null, observed: number): LintFinding[] {
+  const finding = (line?: number): LintFinding => ({
+    check: "check-placement",
+    relPath,
+    ...(line === undefined ? {} : { line }),
+    message: "<Check here is read as no tag (not a well-formed self-closing tag, or in text a component prints as written); it names no step",
+    detail: `Write it on the step's first line with double-quoted attributes, closed by />: ${CHECK_EXAMPLE}.`,
+  });
+  const mentions = checkMentions(content);
+  if (located === null) return Array.from({ length: Math.max(0, mentions.length - observed) }, () => finding());
+  const left = new Map<number, number>();
+  for (const t of located) if (t.name === "Check") left.set(t.line!, (left.get(t.line!) ?? 0) + 1);
+  const out: LintFinding[] = [];
+  for (const line of mentions) {
+    const n = left.get(line) ?? 0;
+    if (n > 0) left.set(line, n - 1);
+    else out.push(finding(line));
+  }
+  return out;
+}
+
+/**
+ * The 1-based lines inside a `<Lane>` whose kind reads `you`: from its own
+ * opener line to its `</Lane>` line, each on a line of its own, outside
+ * fences. Cheap and syntactic; nested lanes take the innermost kind.
+ */
+function youLaneLines(content: string): Set<number> {
+  const lines = content.split("\n");
+  const fenced = readerFencedLines(content);
+  const stack: boolean[] = [];
+  const out = new Set<number>();
+  lines.forEach((line, k) => {
+    if (fenced[k]) return;
+    const t = line.trim();
+    const open = /^<Lane\b((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*>$/.exec(t);
+    if (open) stack.push(normalizeLaneKind(parseAttrs(open[1]!, "Lane").kind).kind === "you");
+    if (stack[stack.length - 1]) out.add(k + 1);
+    if (t === "</Lane>") stack.pop();
+  });
+  return out;
 }

@@ -27,7 +27,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { Block, ChecklistList, ChecklistRow, ComponentName, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
 import { withoutComponentTags } from "../format/component-observer.ts";
-import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
+import { ordinals, renderBlocks, type BlockRenderer, type ListNest, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { beforeAfterChipsHtml, htmlText, labelGridItems, numberCellHtml, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
 import { highlightCode } from "../format/highlight.ts";
@@ -323,6 +323,10 @@ export function formatWebHtml(
     /** With `views` and `itemDates`: the timeline lanes after the decision
      *  views (`renderWikiHtml` passes `timelineLanesHtml`). Absent ⇒ none. */
     timelineLanes?: TimelineLanesRenderer;
+    /** A step's trailing `<Check>` (its raw attribute run) as the reader's
+     *  empty slot: `renderWikiHtml` passes `checkSlotHtml` (`check-tag.ts`), so
+     *  the bundle carries no slot. Absent ⇒ the tag prints nothing. */
+    checkSlot?: (attrs: string) => string;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -339,6 +343,7 @@ export function formatWebHtml(
   const prevLinkSources = currentLinkSources;
   const prevItemDates = currentItemDates;
   const prevViews = currentViews;
+  const prevCheckSlot = currentCheckSlot;
   const prevChartView = currentChartView;
   const prevLedgerRows = currentLedgerRows;
   const prevLogIds = currentLogIds;
@@ -353,6 +358,7 @@ export function formatWebHtml(
   const prevCaseDotsPending = currentCaseDotsPending;
   currentCaseDotsPending = [];
   currentViews = opts?.views === true;
+  currentCheckSlot = opts?.checkSlot;
   currentCaseDotsView = currentViews && text.includes("<CaseBoard") ? (opts?.caseDotsView ?? null) : null;
   currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
   currentDiagramView = currentViews && text.includes("<Diagram") ? (opts?.diagramView ?? null) : null;
@@ -466,6 +472,7 @@ export function formatWebHtml(
     currentLinkSources = prevLinkSources;
     currentItemDates = prevItemDates;
     currentViews = prevViews;
+    currentCheckSlot = prevCheckSlot;
     currentChartView = prevChartView;
     currentLedgerRows = prevLedgerRows;
     currentLogIds = prevLogIds;
@@ -544,6 +551,8 @@ function readerShapesOn(): boolean {
 
 /** `opts.views` for the call in progress: `<StatusRows view="tiles">` draws tiles. */
 let currentViews = false;
+/** `formatWebHtml`'s `checkSlot`, for this call. */
+let currentCheckSlot: ((attrs: string) => string) | undefined;
 
 /** `opts.chartView` for the call in progress; null ⇒ a `<Chart>` is its table. */
 let currentChartView: ChartViewRenderer | null = null;
@@ -1271,6 +1280,13 @@ function isBlankTextBlock(block: Block): boolean {
  *  `pre-wrap` shows as a line break and the wiki reader as a space. */
 function itemHtml(text: string): string {
   return text.split("\n").map(renderInline).join("\n");
+}
+
+/** Item `k`'s trailing `<Check>` (`renderList` took it off) as the reader's
+ *  slot, after the item's text; nothing without `checkSlot`. */
+function checkSlot(nest: ListNest, k: number): string {
+  const raw = nest.checks?.[k];
+  return raw === undefined ? "" : currentCheckSlot?.(raw) ?? "";
 }
 
 /** ` value="n"` on an ordered item that keeps its own source number. */
@@ -2192,12 +2208,12 @@ function readerTableHtml(headers: string[], rows: string[][]): string {
  *  them sit outside it only so the visible gap stays. `lg-v` is a span
  *  (a grid item, so a block box) because the ref links read the noun before
  *  an id back through inline elements only (`precedingText`). */
-function labelGridHtml(items: LabelItem[], nest: { children: (RenderedChild[] | undefined)[] }): string {
+function labelGridHtml(items: LabelItem[], nest: ListNest): string {
   const lis = items.map((it, k) => {
     const punct = it.punct ? `<span class="lg-c">${escapeHtml(it.punct)}</span>` : "";
     const sep = hiddenSep(it.sep);
     const key = `<span class="lg-k"><strong>${renderInline(it.label)}${punct}</strong>${sep}</span>`;
-    return `<li>${key}<span class="lg-v">${itemHtml(it.rest)}${childrenHtml(nest.children[k])}</span></li>`;
+    return `<li>${key}<span class="lg-v">${itemHtml(it.rest)}${checkSlot(nest, k)}${childrenHtml(nest.children[k])}</span></li>`;
   });
   return `<ul class="label-grid">${lis.join("")}</ul>`;
 }
@@ -2254,11 +2270,11 @@ const webRenderer: BlockRenderer = {
         )
       : null;
     if (grid) return labelGridHtml(grid, nest);
-    return `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`;
+    return `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${checkSlot(nest, k)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`;
   },
   ol: (items, start, nest) =>
     `<ol${start !== 1 ? ` start="${start}"` : ""}>` +
-    items.map((i, k) => `<li${liValue(nest.values, k)}>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("") +
+    items.map((i, k) => `<li${liValue(nest.values, k)}>${itemHtml(i)}${checkSlot(nest, k)}${childrenHtml(nest.children[k])}</li>`).join("") +
     `</ol>`,
   table(headers, rows) {
     if (readerShapesOn()) return readerTableHtml(headers, rows);
@@ -2610,6 +2626,9 @@ const webRenderer: BlockRenderer = {
         }
         return questionCardHtml(attrs, children);
       }
+      case "Check":
+        // Off its step's line (lint `check-placement`): nothing.
+        return "";
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -2636,6 +2655,10 @@ const webRenderer: BlockRenderer = {
         // `**1.32 kg**` as literal asterisks. Chip-only is the safe answer here.
         return factMarkParts(attrs).chip;
       }
+      case "Check":
+        // Mid-text it names no step (lint `check-placement`); a step's trailing
+        // tag never gets here: `renderList` takes it off and `itemHtml` draws it.
+        return "";
       default: {
         const _exhaustive: never = name;
         return _exhaustive;

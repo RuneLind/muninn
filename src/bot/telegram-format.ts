@@ -213,6 +213,9 @@ const telegramRenderer: BlockRenderer = {
       case "Question":
         // No card and no state: a bold lead line naming the question, then its body.
         return `<b>${escapeHtml(questionLeadText(attrs))}</b>\n${children}`;
+      case "Check":
+        // Off its step's line it names no step (lint `check-placement`).
+        return "";
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -230,6 +233,9 @@ const telegramRenderer: BlockRenderer = {
         return `[${text.trim()}]`;
       case "Fact":
         return `${text}${text.trim() ? ` ${FACT_VERDICT_MARK[normalizeFactVerdict(attrs.v)]}` : ""}`;
+      case "Check":
+        // Mid-text it names no step; a step's trailing tag never gets here (`renderList`).
+        return "";
       default: {
         const _exhaustive: never = name;
         return _exhaustive;

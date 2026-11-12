@@ -127,6 +127,59 @@ describe("checkComponents — one finding each", () => {
   });
 });
 
+describe("checkComponents — <Check>", () => {
+  const C = '<Check env="WIKI_STALE_CONFIRM_WIKIS" restart="3010" />';
+  // Line 9 is the first step line.
+  const lane = (...items: string[]) => page("<NextMoves>", "", '<Lane kind="you">', "", ...items, "", "</Lane>", "", "</NextMoves>");
+  const found = (content: string) => run(content).map((f) => `${f.check}@${f.line}`);
+
+  test("valid trailing tags, and code spans and fences: nothing", () => {
+    expect(run(lane(`1. **Restart.** ${C}`, `2. Run \`x\` ${C}  `, `3. no space${C}`, '4. Migrate <Check migration="086" on="laptop,Mini" />'))).toEqual([]);
+    expect(run(lane("1. Quote `<Check env=\"X\" />` here", "", "```", C, "<Check env='x'", "```"))).toEqual([]);
+  });
+
+  test("exactly one check-placement on the line of every misplaced or malformed shape", () => {
+    const shapes: [string, string[], number][] = [
+      ["mid-line", [`1. Do ${C} then go`], 9],
+      ["before the final punctuation", [`1. Do ${C}.`], 9],
+      ["inside bold", [`1. **Do ${C}**`], 9],
+      ["inside link text", [`1. [Do ${C}](https://x)`], 9],
+      ["inside another component's body", [`1. <Pill>x ${C}</Pill>`], 9],
+      ["inside another component's attribute", ['<Callout title="Do <Check> now">', "x", "</Callout>"], 9],
+      ["on a line of its own", ["1. Do", "", C], 11],
+      ["on a continuation line", ["1. Do", `   more ${C}`], 10],
+      ["on a nested sub-bullet", ["1. Do", `   - sub ${C}`], 10],
+      ["in a heading", [`## Head ${C}`, "1. x"], 9],
+      ["in a table cell", ["| a | b |", "|---|---|", `| x ${C} | y |`], 11],
+      ["the earlier of two on a line", [`1. Do ${C} and ${C}`], 9],
+      ["the paired form", ['1. Do <Check env="A">x</Check>'], 9],
+      ["wrapped across lines", ['1. Do <Check env="A"', '   restart="3010" />'], 9],
+      ["unclosed", ['1. Do <Check env="A"'], 9],
+      ["single-quoted attributes", ["1. Do <Check env='A' />"], 9],
+      ["a task-list row", [`1. [ ] Do ${C}`], 9],
+    ];
+    for (const [shape, items, line] of shapes) {
+      const f = run(lane(...items)).filter((x) => x.check === "check-placement");
+      expect({ shape, found: f.map((x) => x.line) }).toEqual({ shape, found: [line] });
+      expect({ shape, others: run(lane(...items)).length - f.length }).toEqual({ shape, others: 0 });
+    }
+  });
+
+  test("a trailing tag outside a you lane", () => {
+    expect(found(page(`1. Do ${C}`))).toEqual(["check-placement@5"]);
+    expect(found(page("<NextMoves>", '<Lane kind="waiting" who="Fag">', `- Wait ${C}`, "</Lane>", "</NextMoves>"))).toEqual(["check-placement@7"]);
+  });
+
+  test("attributes: one finding each", () => {
+    expect(found(lane(`1. Do <Check env="A" foo="1" />`))).toEqual(["component-attr@9"]);
+    expect(found(lane("1. Do <Check />"))).toEqual(["component-value@9"]);
+    expect(found(lane('1. Do <Check on="mini" />'))).toEqual(["component-value@9"]);
+    for (const bad of ['env="1A"', 'migration="86"', 'migration="8a6"', 'checkout="-x"', 'pushed="a b"', 'restart="123456"', 'env="A" on="lap top"']) {
+      expect({ bad, found: found(lane(`1. Do <Check ${bad} />`)) }).toEqual({ bad, found: ["component-value@9"] });
+    }
+  });
+});
+
 /** Each review shape, asserted on the renderer's HTML AND on the finding, so
  *  the test proves agreement rather than a model of the renderer. */
 describe("checkComponents agrees with the renderer on the review shapes", () => {

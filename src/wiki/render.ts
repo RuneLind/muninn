@@ -25,6 +25,8 @@
 
 import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
+import { checkSlotHtml } from "../format/check-tag.ts";
+import { observingComponentTags, reportComponentTag } from "../format/component-observer.ts";
 import { chartViewHtml } from "../format/chart-view.ts";
 import { diagramViewHtml } from "../format/diagram-block.ts";
 import { stepsViewHtml } from "../format/steps-block.ts";
@@ -71,6 +73,14 @@ export function readerBody(markdown: string, stripTitle?: string): string {
     }
   }
   return body;
+}
+
+/** A step's trailing `<Check>` as the reader's slot, reported to the lint
+ *  observer as trailing here, where the slot is drawn (`lint-components.ts`):
+ *  the client bundle carries neither. */
+function readerCheckSlot(rawAttrs: string): string {
+  if (observingComponentTags()) reportComponentTag({ name: "Check", rawAttrs, inline: true, trailing: true });
+  return checkSlotHtml(rawAttrs);
 }
 
 export function renderWikiHtml(
@@ -156,6 +166,7 @@ export function renderWikiHtml(
       question: opts?.question,
       idLabels: opts?.idLabels,
       reader: true,
+      checkSlot: readerCheckSlot,
       ...(opts?.readerShapes ? { readerShapes: true } : {}),
       wikiLinkTexts: linkTexts,
       wikiLinkSources: literal,

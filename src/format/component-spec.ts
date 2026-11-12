@@ -463,6 +463,14 @@ export const COMPONENT_SPEC = {
   // (`PDL;Sigrun`), `groups` a node's column (`web=frontend;api=core`). See
   // `src/format/system-map.ts`; lint checks `system-map` and `system-map-drift`.
   SystemMap: { attrs: { caption: text, external: text, groups: text } },
+  // The facts a `you` step names, the last thing on the step's first line
+  // (`check-trailing.ts`). Each attribute but `on` is one probe; the value
+  // shapes are `parseCheckAttrs` (`check-tag.ts`, server-only).
+  Check: {
+    attrs: { env: text, migration: text, checkout: text, pushed: text, restart: text, on: text },
+    selfClosing: true,
+    inline: true,
+  },
 } as const satisfies Record<string, ComponentSpec>;
 
 export type ComponentName = keyof typeof COMPONENT_SPEC;

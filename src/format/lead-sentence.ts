@@ -5,6 +5,7 @@
 
 import { COMPONENT_TAG_SOURCE_SINGLE_LINE } from "./markdown-ast.ts";
 import { isAbbreviation } from "./abbreviations.ts";
+import { trailingCheck } from "./check-trailing.ts";
 
 /** A lead sentence's length cap. */
 export const MOVES_STEP_CHARS = 160;
@@ -35,8 +36,9 @@ const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
  * capped at `MOVES_STEP_CHARS` with an ellipsis.
  */
 export function leadSentence(item: string, opts: { keepLabel?: boolean } = {}): string {
-  let first = item
-    .split("\n")[0]!
+  const line = item.split("\n")[0]!;
+  // A step's trailing `<Check>` prints nothing, so it is no part of the sentence.
+  let first = (trailingCheck(line)?.[0] ?? line)
     .replace(COMPONENT_TAG_RE, "")
     .trim()
     .replace(/^\[[ xX]\][ \t]*/, "");

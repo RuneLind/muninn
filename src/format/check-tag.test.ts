@@ -1,0 +1,255 @@
+import { describe, expect, test } from "bun:test";
+import { CHECK_PROBES, checkSlotHtml, parseCheckAttrs, stepCheck } from "./check-tag.ts";
+import { leadSentence } from "./lead-sentence.ts";
+import { listYouSteps, stepDoneEdit, stepDoneLogLine } from "./step-done.ts";
+import { formatEmailHtml } from "./email-format.ts";
+import { COMPONENT_NAMES } from "./component-spec.ts";
+import { formatWebHtml } from "../web/web-format.ts";
+import { formatSlackMrkdwn } from "../slack/slack-format.ts";
+import { formatTelegramHtml } from "../bot/telegram-format.ts";
+import { extractNextMoves } from "../wiki/next-moves.ts";
+import { renderWikiHtml } from "../wiki/render.ts";
+
+const ENV = `<Check env="WIKI_STALE_CONFIRM_WIKIS" restart="3010" />`;
+const MIG = `<Check migration="086" on="Laptop,mini,laptop" />`;
+const page = (body: string) => `---\ntitle: Fixture\n---\n\n${body}`;
+const moves = (lane: string) => `<NextMoves>\n\n<Lane kind="you">\n\n${lane}\n\n</Lane>\n\n</NextMoves>\n`;
+const SLOT = /<span class="step-check" data-reader-only[^>]*><\/span>/g;
+
+/** The four surfaces that print nothing for a trailing tag. */
+const textSurfaces: [string, (md: string) => string][] = [
+  ["slack", formatSlackMrkdwn],
+  ["telegram", formatTelegramHtml],
+  ["email", formatEmailHtml],
+  ["chat", (md) => formatWebHtml(md)],
+];
+const reader = (md: string) => renderWikiHtml(md, () => undefined);
+
+describe("parseCheckAttrs", () => {
+  test("reads every probe and the machines, lower-cased and deduped", () => {
+    expect(parseCheckAttrs({ env: "WIKI_STALE_CONFIRM_WIKIS", restart: "3010" })).toEqual({
+      probes: [{ kind: "env", value: "WIKI_STALE_CONFIRM_WIKIS" }, { kind: "restart", value: "3010" }],
+      on: null,
+      problems: [],
+    });
+    expect(parseCheckAttrs({ migration: "086", checkout: "muninn", pushed: "claude-skills", on: "Laptop, mini,LAPTOP" })).toEqual({
+      probes: [{ kind: "migration", value: "086" }, { kind: "checkout", value: "muninn" }, { kind: "pushed", value: "claude-skills" }],
+      on: ["laptop", "mini"],
+      problems: [],
+    });
+  });
+
+  test("a malformed value drops that probe with exactly one problem, and no «names no probe»", () => {
+    for (const [attrs, kind] of [
+      [{ migration: "86" }, "migration"],
+      [{ env: "1A" }, "env"],
+      [{ restart: "123456" }, "restart"],
+      [{ checkout: "-x" }, "checkout"],
+      [{ pushed: "a b" }, "pushed"],
+    ] as const) {
+      const r = parseCheckAttrs(attrs);
+      expect(r.probes).toEqual([]);
+      expect(r.problems).toHaveLength(1);
+      expect(r.problems[0]).toStartWith(`${kind}=`);
+    }
+    expect(parseCheckAttrs({ migration: "086" }).problems).toEqual([]);
+  });
+
+  test("a malformed `on` keeps the good names with one problem", () => {
+    expect(parseCheckAttrs({ env: "X", on: "laptop,,mini" })).toMatchObject({ on: ["laptop", "mini"], problems: [expect.any(String)] });
+    expect(parseCheckAttrs({ env: "X", on: "lap top" })).toMatchObject({ on: null, problems: [expect.any(String)] });
+  });
+
+  test("no probe attribute at all is the one problem, `on` alone included", () => {
+    expect(parseCheckAttrs({}).problems).toEqual([`names no probe: give one of ${CHECK_PROBES.join(", ")}`]);
+    expect(parseCheckAttrs({ on: "mini" }).problems).toHaveLength(1);
+  });
+});
+
+describe("stepCheck", () => {
+  test("the trailing tag only", () => {
+    expect(stepCheck(`**Do it.** ${ENV}`)?.probes.map((p) => p.kind)).toEqual(["env", "restart"]);
+    expect(stepCheck(`Do ${MIG} then ${ENV}`)?.probes.map((p) => p.kind)).toEqual(["env", "restart"]);
+    expect(stepCheck(`Do ${ENV} then.`)).toBeNull();
+    expect(stepCheck(`Do \`${ENV}\``)).toBeNull();
+    expect(stepCheck(`Do it\n${ENV}`)).toBeNull();
+    expect(stepCheck(ENV)).toBeNull();
+  });
+});
+
+describe("checkSlotHtml", () => {
+  test("escapes & < > \" and emits only the six spec attributes", () => {
+    expect(checkSlotHtml(` env="A&B<c>" foo="1" on="x'y"`)).toBe(
+      `<span class="step-check" data-reader-only data-check-env="A&amp;B&lt;c&gt;" data-check-on="x'y"></span>`,
+    );
+    expect(reader(`- x <Check pushed="a&quot;b" />`)).toContain(`data-check-pushed="a&amp;quot;b"`);
+  });
+});
+
+describe("a step line carrying <Check>", () => {
+  const before = page(moves("1. **Add the key and restart** to 3010\n2. Run the migration on both machines\n3. Read the result."));
+  const after = page(moves(`1. **Add the key and restart** to 3010 ${ENV}\n2. Run the migration on both machines ${MIG}\n3. Read the result.`));
+
+  test("is one step: the same count and the same keys", () => {
+    const a = listYouSteps(before)!;
+    const b = listYouSteps(after)!;
+    expect(b.length).toBe(3);
+    expect(b.map((s) => s.refusal)).toEqual([null, null, null]);
+    expect(b.map((s) => s.key.split(".")[1])).toEqual(a.map((s) => s.key.split(".")[1]));
+  });
+
+  test("Done removes the raw line whole and renumbers", () => {
+    const r = stepDoneEdit(after, listYouSteps(after)![0]!.key);
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.content).toBe(page(moves(`1. Run the migration on both machines ${MIG}\n2. Read the result.`)));
+    expect(r.removed).toEqual([{ line: 9, text: `1. **Add the key and restart** to 3010 ${ENV}` }]);
+    const second = stepDoneEdit(r.content, listYouSteps(r.content)![0]!.key);
+    if (!second.ok) throw new Error(second.reason);
+    expect(second.content).toBe(page(moves("1. Read the result.")));
+  });
+
+  test("the Done log line, commit subject, /plans steps and lane peek equal the untagged page's", () => {
+    const logs = (p: string) =>
+      listYouSteps(p)!.map((s) => {
+        const r = stepDoneEdit(p, s.key);
+        if (!r.ok) throw new Error(r.reason);
+        return stepDoneLogLine(r);
+      });
+    expect(logs(after)).toEqual(logs(before));
+    expect(logs(after)[1]).toBe("Step done: Run the migration on both machines");
+    expect(extractNextMoves(after)!.youSteps).toEqual(extractNextMoves(before)!.youSteps);
+    const peek = (p: string) => /<span class="nm-peek"[^>]*>([^<]*)<\/span>/.exec(reader(p))?.[1];
+    expect(peek(after)).toBe(peek(before));
+  });
+});
+
+describe("leadSentence", () => {
+  test("reads the step as if the trailing tag were absent", () => {
+    expect(leadSentence(`**Restart.** ${ENV}`)).toBe("Restart.");
+    expect(leadSentence(`Restart the server ${ENV}`)).toBe("Restart the server");
+    expect(leadSentence(`Restart the server${ENV}`)).toBe("Restart the server");
+    expect(leadSentence(`Run \`x\`. ${ENV}  `)).toBe("Run x.");
+    expect(leadSentence(`Restart ${ENV}\nmore`)).toBe("Restart");
+  });
+
+  test("a <Check> in a code span, or mid-line, survives as on main", () => {
+    expect(leadSentence("Quote `<Check env=\"X\" />` here")).toBe('Quote <Check env="X" /> here');
+    expect(leadSentence(`Do ${ENV} then.`)).toBe(`Do ${ENV} then.`);
+  });
+
+  test("every other component name reads as on main: stripped in and out of code", () => {
+    for (const name of COMPONENT_NAMES.filter((n) => n !== "Check")) {
+      expect(leadSentence(`Ship <${name} value="x" /> now. More.`)).toBe("Ship  now.");
+      expect(leadSentence(`Ship \`<${name} value="x" />\` now`)).toBe("Ship  now");
+      expect(leadSentence(`**Ship <${name}>x</${name}>.** ${ENV}`)).toBe("Ship x.");
+    }
+  });
+});
+
+describe("rendering a valid trailing tag", () => {
+  const shapes: [string, string][] = [
+    ["plain sentence", "Restart the server."],
+    ["bold", "**Restart.**"],
+    ["code span", "Run `bun run db:migrate`"],
+    ["link", "Read [the plan](https://example.com/plan)"],
+    ["pill", "Ship it <Pill>today</Pill>"],
+    ["verdict", 'Decide <Verdict value="yes" />'],
+    ["no sentence end", "restart 3010"],
+  ];
+  const variants = (text: string): [string, string, string][] => [
+    ["numbered", `1. ${text} ${ENV}\n2. Next`, `1. ${text}\n2. Next`],
+    ["bulleted", `- ${text} ${ENV}\n- Next`, `- ${text}\n- Next`],
+    ["no space", `- ${text}${ENV}`, `- ${text}`],
+    ["trailing whitespace", `- ${text} ${ENV}  \t`, `- ${text}  \t`],
+    ["tabs before", `- ${text}\t \t${ENV}`, `- ${text}`],
+  ];
+
+  test("Slack, Telegram, email and chat equal the line without the tag", () => {
+    for (const [shape, text] of shapes) {
+      for (const [variant, tagged, plain] of variants(text)) {
+        for (const [surface, fmt] of textSurfaces) {
+          expect({ shape, variant, surface, out: fmt(tagged) }).toEqual({ shape, variant, surface, out: fmt(plain) });
+        }
+      }
+    }
+  });
+
+  test("the reader equals the untagged render plus one slot after the item's text", () => {
+    for (const [shape, text] of shapes) {
+      for (const [variant, tagged, plain] of variants(text)) {
+        const out = reader(tagged);
+        expect({ shape, variant, slots: out.match(SLOT)?.length }).toEqual({ shape, variant, slots: 1 });
+        expect({ shape, variant, out: out.replace(SLOT, "") }).toEqual({ shape, variant, out: reader(plain) });
+      }
+    }
+    expect(reader(`1. **Restart.** ${ENV}`)).toContain(
+      `<li><strong>Restart.</strong><span class="step-check" data-reader-only data-check-env="WIKI_STALE_CONFIRM_WIKIS" data-check-restart="3010"></span></li>`,
+    );
+  });
+
+  test("the chat path of formatWebHtml emits no slot, even with reader on", () => {
+    expect(formatWebHtml(`1. Restart ${ENV}`)).not.toContain("step-check");
+    expect(formatWebHtml(`1. Restart ${ENV}`, { reader: true })).not.toContain("step-check");
+  });
+});
+
+describe("misplaced parsed tags", () => {
+  const misplaced = [
+    `- Restart ${ENV} then go.`,
+    `- Restart ${ENV}.`,
+    `- **Restart ${ENV}**`,
+    `- [Restart ${ENV}](https://x)`,
+    // Not here: `<Pill>x <Check …/></Pill>`. Telegram and Slack print a
+    // Pill's body as literal text, so the tag there is never parsed.
+    `Text.\n\n${ENV}\n\nMore.`,
+    `- Restart\n  more ${ENV}`,
+    `- Restart\n  - sub ${ENV}`,
+    `## Heading ${ENV}`,
+    `| a | b |\n|---|---|\n| x ${ENV} | y |`,
+    `- Restart <Check env="X">body</Check>`,
+  ];
+  test("render no slot and no visible <Check on all five surfaces", () => {
+    for (const md of misplaced) {
+      for (const [surface, out] of [...textSurfaces.map(([s, f]) => [s, f(md)] as const), ["reader", reader(md)] as const]) {
+        expect({ md, surface, slot: out.includes("step-check"), visible: /Check|WIKI_STALE/.test(out) }).toEqual({ md, surface, slot: false, visible: false });
+      }
+    }
+  });
+
+  test("a <Check> in a code span or fence is never a check", () => {
+    const md = "- Quote `<Check env=\"X\" />`\n\n```\n<Check env=\"X\" />\n```";
+    for (const out of [...textSurfaces.map(([, f]) => f(md)), reader(md)]) {
+      expect(out).not.toContain("step-check");
+      expect(out).toMatch(/&lt;Check env=(&quot;|")X(&quot;|") \/&gt;|<Check env="X" \/>/);
+    }
+  });
+});
+
+describe("no backtracking blow-up", () => {
+  const big = (ch: string) => [
+    ch.repeat(50_000),
+    `- a${ch.repeat(50_000)}${ENV}`,
+    `- a${ch.repeat(50_000)}<Check`,
+    `- a <Check${ch.repeat(50_000)}`,
+    `- ${`a${ch}`.repeat(25_000)}<Check env="x"`,
+  ];
+  test("50,000 spaces or tabs format in under 50 ms on every surface", () => {
+    const surfaces: [string, (s: string) => unknown][] = [
+      ...textSurfaces,
+      ["reader", reader],
+      ["leadSentence", leadSentence],
+      ["stepCheck", stepCheck],
+    ];
+    for (const ch of [" ", "\t"]) {
+      for (const [k, line] of big(ch).entries()) {
+        for (const [surface, fmt] of surfaces) {
+          fmt(line.slice(0, 200)); // warm the JIT on the shape
+          const t0 = performance.now();
+          fmt(line);
+          const ms = performance.now() - t0;
+          expect({ ch, k, surface, slow: ms >= 50 ? ms : false }).toEqual({ ch, k, surface, slow: false });
+        }
+      }
+    }
+  });
+});

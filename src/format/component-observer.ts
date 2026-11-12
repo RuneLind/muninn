@@ -28,6 +28,10 @@ export interface ObservedComponentTag {
   rawAttrs: string;
   inline: boolean;
   inNextMoves?: true;
+  /** A `<Check>` a top-level list item ends its first line with
+   *  (`check-trailing.ts`), reported where the reader draws its slot
+   *  (`renderWikiHtml`'s `checkSlot`), not by the inline scanner. */
+  trailing?: true;
 }
 
 type Observer = (tag: ObservedComponentTag) => void;
@@ -71,7 +75,7 @@ export function withoutComponentTags<T>(fn: () => T): T {
   return current === null ? fn() : withObserver(null, fn);
 }
 
-const tagKey = (t: ObservedComponentTag) => `${t.name}\u0000${t.inline}\u0000${t.inNextMoves ?? ""}\u0000${t.rawAttrs}`;
+const tagKey = (t: ObservedComponentTag) => `${t.name}\u0000${t.inline}\u0000${t.inNextMoves ?? ""}\u0000${t.trailing ?? ""}\u0000${t.rawAttrs}`;
 
 /**
  * A component block's render: `children` is the walker's render of its body,
