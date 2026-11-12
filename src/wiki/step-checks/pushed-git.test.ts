@@ -65,6 +65,14 @@ describe("pushed, real git", () => {
     expect(await pushed(work)).toEqual({ state: "not-yet", why: "1 commit in skills is on no origin branch (on wip-x): push" });
   });
 
+  test("finding C (round 2): a branch name git allows but the sentence filter does not: left out of the why", async () => {
+    const { work } = fixture();
+    sh(work, "checkout", "-q", "-b", "wip+x");
+    commit(work, "wip");
+    sh(work, "checkout", "-q", "main");
+    expect(await pushed(work)).toEqual({ state: "not-yet", why: "1 commit in skills is on no origin branch: push" });
+  });
+
   test("a commit on a detached HEAD: not-yet", async () => {
     const { work } = fixture();
     sh(work, "checkout", "-q", "--detach");

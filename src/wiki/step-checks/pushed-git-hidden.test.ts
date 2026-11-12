@@ -141,4 +141,28 @@ describe("pushed, real git: submodules, operations, origin", () => {
     sh(work, "push", "-q", "origin", "HEAD:main");
     expect(await pushed(work)).toEqual({ state: "unknown", why: "skills's origin pushes to another URL than the one muninn reads" });
   });
+
+  test("finding A (round 2): remote.pushDefault, a branch pushRemote or an origin push refspec, after a push that went there: unknown, not not-yet", async () => {
+    const { base, work } = fixture();
+    const fork = path.join(base, "fork.git");
+    sh(base, "clone", "-q", "--bare", path.join(base, "skills.git"), fork);
+    sh(work, "remote", "add", "fork", fork);
+    commit(work, "two");
+    sh(work, "config", "remote.pushDefault", "fork");
+    sh(work, "push", "-q");
+    expect(await pushed(work)).toEqual({ state: "unknown", why: "skills's remote.pushDefault names a remote other than origin" });
+    sh(work, "config", "--unset", "remote.pushDefault");
+    sh(work, "config", "branch.main.pushRemote", "fork");
+    expect(await pushed(work)).toEqual({ state: "unknown", why: "a branch of skills pushes to a remote other than origin" });
+    sh(work, "config", "--unset", "branch.main.pushRemote");
+    sh(work, "config", "remote.origin.push", "refs/heads/*:refs/heads/mirror/*");
+    expect(await pushed(work)).toEqual({ state: "unknown", why: "skills's origin has a push refspec: muninn does not check where it sends commits" });
+  });
+
+  test("finding B (round 2): an origin branch pointing at a tree: unknown, saying so", async () => {
+    const { remote, work } = fixture();
+    // update-ref refuses a non-commit under refs/heads; a loose ref file does not.
+    writeFileSync(path.join(remote, "refs", "heads", "treeish"), `${sh(work, "rev-parse", "HEAD^{tree}")}\n`);
+    expect(await pushed(work)).toEqual({ state: "unknown", why: "an origin branch points at an object that is not a commit" });
+  });
 });

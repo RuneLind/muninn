@@ -187,6 +187,35 @@ describe("pushed: the truth table over a fake git", () => {
     expect(await run({ origin: EXIT(1) })).toEqual({ state: "unknown", why: "skills has no origin" });
   });
 
+  test("finding A (PR #850 round 2): a push default, a branch pushRemote or a push refspec sending pushes past origin's branches: unknown", async () => {
+    const at = (extra: string) => run({ origin: OK(`remote.origin.url ${URL}\n${extra}\n`) });
+    expect(await at("remote.pushdefault fork")).toEqual({ state: "unknown", why: "skills's remote.pushDefault names a remote other than origin" });
+    expect(await at("branch.wip.pushremote fork")).toEqual({ state: "unknown", why: "a branch of skills pushes to a remote other than origin" });
+    expect(await at("remote.origin.push refs/heads/*:refs/heads/mirror/*")).toEqual({ state: "unknown", why: "skills's origin has a push refspec: muninn does not check where it sends commits" });
+    // Naming origin itself changes nothing.
+    expect((await at("remote.pushdefault origin\nbranch.main.pushremote origin")).state).toBe("ok");
+  });
+
+  test("finding C (PR #850 round 2): an origin config read that failed or timed out after printing the url line: unknown, never ok", async () => {
+    const partial = `remote.origin.url ${URL}\n`;
+    expect(await run({ origin: { ok: false, stdout: partial, exitCode: 128, stderr: "fatal: bad config line" } })).toEqual({ state: "unknown", why: "git config failed on skills" });
+    expect(await run({ origin: { ok: false, stdout: partial, timedOut: true } })).toEqual({ state: "unknown", why: "git config timed out on skills" });
+  });
+
+  test("finding B (PR #850 round 2): the cat-file and ls-files whys say what happened", async () => {
+    expect(await run({ batch: () => OK(`${R1} tree 10\n${R2} commit 1\n`) })).toEqual({ state: "unknown", why: "an origin branch points at an object that is not a commit" });
+    expect(await run({ batch: () => OK(`${R1} commit 1\n`) })).toEqual({ state: "unknown", why: "git cat-file gave an answer muninn cannot read on skills" });
+    expect(await run({ batch: () => EXIT(128) })).toEqual({ state: "unknown", why: "git cat-file failed on skills" });
+    expect(await run({ index: { ok: true, stdout: INDEX, capped: true } })).toEqual({ state: "unknown", why: "skills has too many tracked files for muninn to read" });
+    expect(await run({ index: TIMED_OUT })).toEqual({ state: "unknown", why: "git ls-files timed out on skills" });
+  });
+
+  test("finding C (PR #850 round 2): only a plain branch name reaches the not-yet sentence", async () => {
+    expect(await run({ count: OK("1\n"), source: OK("a/b-c.d\n") })).toEqual({ state: "not-yet", why: "1 commit in skills is on no origin branch (on a/b-c.d): push" });
+    // A name outside the filter is left out; the count still stands.
+    expect(await run({ count: OK("1\n"), source: OK("wip+x\n") })).toEqual({ state: "not-yet", why: "1 commit in skills is on no origin branch: push" });
+  });
+
   test("findings 1-3 (PR #850): filter config, staged index, scratch index and worktree list rows", async () => {
     expect(await run({ filters: OK("filter.lfs.clean git-lfs clean -- %f\n") })).toEqual({ state: "unknown", why: "skills uses a content filter: muninn does not run the repo's own commands" });
     expect(await run({ filters: EXIT(128) })).toEqual({ state: "unknown", why: "git config failed on skills" });

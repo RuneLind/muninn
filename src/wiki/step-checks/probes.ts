@@ -304,21 +304,26 @@ export function parseWorktreeList(stdout: string): WorktreeRecord[] | null {
 /**
  * Which of `tips` this repo has as commits, read with `cat-file --batch-check`
  * on stdin (no lazy fetch: the caller refused a partial clone and carries
- * {@link CHECKOUT_GIT_ENV}). Null when the answer is not one known line per tip.
+ * {@link CHECKOUT_GIT_ENV}). Otherwise the `unknown` to answer: git failed,
+ * a tip names a tag or tree, or a line muninn cannot read.
  */
-async function presentTips(dir: string, tips: readonly string[], git: GitRun): Promise<{ present: string[]; missing: number } | null> {
+async function presentTips(dir: string, name: string, tips: readonly string[], git: GitRun): Promise<{ present: string[]; missing: number } | ProbeResult> {
   if (tips.length === 0) return { present: [], missing: 0 };
   const res = await git(dir, ["cat-file", "--batch-check"], { timeoutMs: GIT_LOCAL_MS, maxLines: tips.length, stdin: `${tips.join("\n")}\n` });
-  if (!res.ok || res.capped || res.exitCode !== 0) return null;
+  const garbled = unknown(`git cat-file gave an answer muninn cannot read on ${name}`);
+  if (res.capped) return garbled;
+  if (!res.ok || res.exitCode !== 0) return unknown(`${gitFailure(res, "git cat-file")} on ${name}`);
   const lines = res.stdout.split("\n").filter((l) => l !== "");
-  if (lines.length !== tips.length) return null;
+  if (lines.length !== tips.length) return garbled;
   const present: string[] = [];
   let missing = 0;
   for (let i = 0; i < tips.length; i++) {
     const tip = tips[i]!;
+    const m = new RegExp(`^${tip} (\\w+) \\d+$`).exec(lines[i]!);
     if (lines[i] === `${tip} missing`) missing++;
-    else if (new RegExp(`^${tip} commit \\d+$`).test(lines[i]!)) present.push(tip);
-    else return null;
+    else if (m?.[1] === "commit") present.push(tip);
+    else if (m) return unknown("an origin branch points at an object that is not a commit");
+    else return garbled;
   }
   return { present, missing };
 }
@@ -327,13 +332,16 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 
 /**
  * Origin is where a push goes and where `ls-remote` reads: exactly one
- * `remote.origin.url`, no `remote.origin.pushurl`, and no `pushInsteadOf`
- * rewriting that URL. Null when that holds.
+ * `remote.origin.url`, no `remote.origin.pushurl`, no `pushInsteadOf`
+ * rewriting that URL, no `remote.origin.push` refspec, and no
+ * `remote.pushDefault` or `branch.<x>.pushRemote` naming another remote.
+ * Null when that holds; a read that failed, timed out or was capped is `unknown`.
  */
 async function refuseSplitOrigin(dir: string, name: string, git: GitRun): Promise<ProbeResult | null> {
-  const res = await git(dir, ["config", "--get-regexp", "^(remote\\.origin\\.(url|pushurl)|url\\..*\\.pushinsteadof)$"], { timeoutMs: GIT_LOCAL_MS });
+  const res = await git(dir, ["config", "--get-regexp", "^(remote\\.origin\\.(url|pushurl|push)|remote\\.pushdefault|branch\\..*\\.pushremote|url\\..*\\.pushinsteadof)$"], { timeoutMs: GIT_LOCAL_MS });
   if (res.exitCode === 1 && !res.stderr?.trim() && !res.timedOut) return unknown(`${name} has no origin`);
-  if (!res.ok || res.exitCode !== 0) return unknown(`${gitFailure(res, "git config")} on ${name}`);
+  // realGit keeps partial stdout on a timeout: a url line read without the rest proves nothing.
+  if (!res.ok || res.capped || res.exitCode !== 0) return unknown(`${gitFailure(res, "git config")} on ${name}`);
   const urls: string[] = [];
   const pushInsteadOf: string[] = [];
   for (const line of res.stdout.split("\n")) {
@@ -342,7 +350,12 @@ async function refuseSplitOrigin(dir: string, name: string, git: GitRun): Promis
     const key = space === -1 ? line : line.slice(0, space);
     const value = space === -1 ? "" : line.slice(space + 1);
     if (key === "remote.origin.pushurl") return unknown(`${name}'s origin pushes to another URL than the one muninn reads`);
-    if (key === "remote.origin.url") urls.push(value);
+    if (key === "remote.origin.push") return unknown(`${name}'s origin has a push refspec: muninn does not check where it sends commits`);
+    if (key === "remote.pushdefault") {
+      if (value !== "origin") return unknown(`${name}'s remote.pushDefault names a remote other than origin`);
+    } else if (key.startsWith("branch.")) {
+      if (value !== "origin") return unknown(`a branch of ${name} pushes to a remote other than origin`);
+    } else if (key === "remote.origin.url") urls.push(value);
     else pushInsteadOf.push(value);
   }
   if (urls.length !== 1) return unknown(`${name}'s origin has ${urls.length} URLs`);
@@ -374,7 +387,9 @@ async function refuseInProgress(dir: string, name: string, git: GitRun): Promise
  */
 async function refuseHiddenEntries(dir: string, name: string, git: GitRun): Promise<ProbeResult | null> {
   const res = await git(dir, [...NO_FSMONITOR, "ls-files", "-v", "-s", "-z"], { timeoutMs: GIT_LOCAL_MS });
-  if (!res.ok || res.capped || res.exitCode !== 0) return unknown(`${res.capped ? "git ls-files ran too long" : gitFailure(res, "git ls-files")} on ${name}`);
+  // No line cap here: a capped read hit the byte cap.
+  if (res.capped) return unknown(`${name} has too many tracked files for muninn to read`);
+  if (!res.ok || res.exitCode !== 0) return unknown(`${gitFailure(res, "git ls-files")} on ${name}`);
   let hidden = 0;
   for (const entry of res.stdout.split("\0")) {
     if (entry === "") continue;
@@ -509,8 +524,8 @@ export async function probePushed(name: string, deps: ProbeDeps): Promise<ProbeR
   if (!remote.ok || remote.exitCode !== 0) return unknown(`${gitFailure(remote, "git ls-remote")}: what origin has is unknown`);
   const tips = parseRemoteHeads(remote.stdout);
   if (!tips) return unknown("origin's branch list has a line muninn cannot read");
-  const have = await presentTips(dir, tips, git);
-  if (!have) return unknown(`git cat-file failed on ${name}`);
+  const have = await presentTips(dir, name, tips, git);
+  if ("state" in have) return have;
   // Every worktree's HEAD is a start, every present origin tip an end. HEAD on the command line is the probed worktree's.
   const stdin = [...worktreeHeads, ...have.present.map((t) => `^${t}`)].map((l) => `${l}\n`).join("");
   const walk = ["--branches", "HEAD", "--stdin"];
