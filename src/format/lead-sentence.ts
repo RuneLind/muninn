@@ -6,6 +6,7 @@
 import { COMPONENT_TAG_SOURCE_SINGLE_LINE } from "./markdown-ast.ts";
 import { isAbbreviation } from "./abbreviations.ts";
 import { trailingCheck } from "./check-trailing.ts";
+import { lineCodeSpanRanges } from "./code-spans.ts";
 
 /** A lead sentence's length cap. */
 export const MOVES_STEP_CHARS = 160;
@@ -25,6 +26,17 @@ export function sentenceEnd(text: string): number {
 }
 
 const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
+const CHECK_TAG_RE = /^<\/?Check\b/;
+
+/** `line` without its component tags, except a `<Check>` inside a code span:
+ *  quoted there, it is text, as it was before the tag existed. Every other
+ *  name goes in code too, as it always has. */
+function withoutTags(line: string): string {
+  const code = line.includes("<Check") ? lineCodeSpanRanges(line) : [];
+  return line.replace(COMPONENT_TAG_RE, (tag: string, at: number) =>
+    code.length && CHECK_TAG_RE.test(tag) && code.some((r) => at >= r.start && at < r.end) ? tag : "",
+  );
+}
 
 /**
  * An item's lead sentence as plain text: the bold run it opens with (the house
@@ -37,9 +49,9 @@ const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
  */
 export function leadSentence(item: string, opts: { keepLabel?: boolean } = {}): string {
   const line = item.split("\n")[0]!;
-  // A step's trailing `<Check>` prints nothing, so it is no part of the sentence.
-  let first = (trailingCheck(line)?.[0] ?? line)
-    .replace(COMPONENT_TAG_RE, "")
+  // A step's trailing `<Check>` prints nothing, so it is no part of the sentence:
+  // it goes with the spaces before it.
+  let first = withoutTags(trailingCheck(line)?.[0] ?? line)
     .trim()
     .replace(/^\[[ xX]\][ \t]*/, "");
   // The label run may not contain its own delimiter: only the FIRST bold run

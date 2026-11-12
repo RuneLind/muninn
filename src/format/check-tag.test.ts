@@ -9,6 +9,7 @@ import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { extractNextMoves } from "../wiki/next-moves.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
+import { checkComponents } from "../wiki/lint-components.ts";
 
 const ENV = `<Check env="WIKI_STALE_CONFIRM_WIKIS" restart="3010" />`;
 const MIG = `<Check migration="086" on="Laptop,mini,laptop" />`;
@@ -132,12 +133,30 @@ describe("leadSentence", () => {
     expect(leadSentence(`Restart ${ENV}\nmore`)).toBe("Restart");
   });
 
-  test("a <Check> in a code span, or mid-line, survives as on main", () => {
+  test("a <Check> in a code span survives as on main", () => {
     expect(leadSentence("Quote `<Check env=\"X\" />` here")).toBe('Quote <Check env="X" /> here');
-    expect(leadSentence(`Do ${ENV} then.`)).toBe(`Do ${ENV} then.`);
+    expect(leadSentence('Use `<Check restart="3010" />` on the line.')).toBe('Use <Check restart="3010" /> on the line.');
+    // One in code, a real one outside it: only the real one goes.
+    expect(leadSentence(`Use \`<Check restart="3010" />\` and ${ENV} here.`)).toBe('Use <Check restart="3010" /> and  here.');
+    expect(leadSentence(`Use \`<Check restart="3010" />\` here ${ENV}`)).toBe('Use <Check restart="3010" /> here');
   });
 
-  test("every other component name reads as on main: stripped in and out of code", () => {
+  test("every <Check> outside code is stripped, misplaced or valid", () => {
+    expect(leadSentence(`Do ${ENV} then go.`)).toBe("Do  then go.");
+    expect(leadSentence(`Do ${ENV}.`)).toBe("Do .");
+    expect(leadSentence(`**Do ${ENV}**`)).toBe("Do");
+    expect(leadSentence(`Do ${ENV} and ${ENV}`)).toBe("Do  and");
+    expect(leadSentence(ENV)).toBe("");
+    expect(leadSentence('Restart <Check env="X">muninn now</Check> please.')).toBe("Restart muninn now please.");
+    // A match that starts right where a code span closes is outside it.
+    expect(leadSentence('Run `a`<Check env="X" /> now.')).toBe("Run a now.");
+  });
+
+  test("every other component name reads as on main: stripped in and out of code (and with a Check beside it)", () => {
+    for (const name of COMPONENT_NAMES.filter((n) => n !== "Check")) {
+      expect(leadSentence(`Ship \`<${name} value="x" />\` and \`<Check env="X" />\` now`)).toBe('Ship  and <Check env="X" /> now');
+      expect(leadSentence(`Run \`a\`<${name} /> now.`)).toBe("Run a now.");
+    }
     for (const name of COMPONENT_NAMES.filter((n) => n !== "Check")) {
       expect(leadSentence(`Ship <${name} value="x" /> now. More.`)).toBe("Ship  now.");
       expect(leadSentence(`Ship \`<${name} value="x" />\` now`)).toBe("Ship  now");
@@ -225,6 +244,55 @@ describe("misplaced parsed tags", () => {
   });
 });
 
+describe("a misplaced tag on a you step leaks into no step text", () => {
+  const C = '<Check env="X" />';
+  const steps = [`Do ${C} then go`, `${C} alone`, `**Do ${C}**`, `Do ${C} and ${C}`];
+  const before = page(moves(steps.map((s, k) => `${k + 1}. ${s.replaceAll(C, "").replace(/\s+/g, " ").trim()}`).join("\n")));
+  const after = page(moves(steps.map((s, k) => `${k + 1}. ${s}`).join("\n")));
+  const peek = (p: string) => /<span class="nm-peek"[^>]*>([^<]*)<\/span>/.exec(reader(p))?.[1];
+
+  test("the lane peek, /plans youSteps and the Done log line carry no <Check", () => {
+    expect(peek(after)).toBeDefined();
+    expect(peek(after)).not.toContain("Check");
+    for (const s of extractNextMoves(after)!.youSteps) expect(s).not.toContain("Check");
+    for (const s of listYouSteps(after)!) {
+      const r = stepDoneEdit(after, s.key);
+      if (!r.ok) throw new Error(r.reason);
+      expect(stepDoneLogLine(r)).not.toContain("Check");
+    }
+    // Stripped like any other component tag: the spaces around it stay.
+    expect(extractNextMoves(after)!.youSteps).toEqual(["Do  then go", "alone", "Do", "Do  and"]);
+    expect(listYouSteps(before)!.length).toBe(listYouSteps(after)!.length);
+  });
+});
+
+describe("the paired form renders its body as if the tag were absent", () => {
+  const surfaces: [string, (md: string) => string][] = [...textSurfaces, ["reader", (md) => reader(md)]];
+  const cases: [string, string, string][] = [
+    ["inline", 'Restart <Check env="X">muninn **now**</Check> please.', "Restart muninn **now** please."],
+    ["block", 'Before.\n\n<Check env="X">\n\nThe body with **bold**.\n\n</Check>\n\nAfter.', "Before.\n\nThe body with **bold**.\n\nAfter."],
+    ["one-line block", '<Check env="X">just this</Check>', "just this"],
+  ];
+  test("on all five surfaces, with no slot", () => {
+    for (const [shape, tagged, plain] of cases) {
+      for (const [surface, fmt] of surfaces) {
+        const out = fmt(tagged);
+        expect({ shape, surface, slot: out.includes("step-check"), body: out.includes("muninn") || out.includes("body") || out.includes("just this") }).toEqual({ shape, surface, slot: false, body: true });
+        // Email joins a component's blocks to its neighbours with a newline
+        // between the tags, where one paragraph run has none: no rendered change.
+        const norm = (h: string) => (surface === "email" ? h.replace(/>\n</g, "><") : h);
+        expect({ shape, surface, out: norm(out) }).toEqual({ shape, surface, out: norm(fmt(plain)) });
+      }
+    }
+  });
+
+  test("the self-closing form still prints nothing", () => {
+    for (const [surface, fmt] of surfaces) {
+      expect({ surface, out: fmt('Restart <Check env="X" /> please.') }).toEqual({ surface, out: fmt("Restart  please.") });
+    }
+  });
+});
+
 describe("no backtracking blow-up", () => {
   const big = (ch: string) => [
     ch.repeat(50_000),
@@ -239,6 +307,7 @@ describe("no backtracking blow-up", () => {
       ["reader", reader],
       ["leadSentence", leadSentence],
       ["stepCheck", stepCheck],
+      ["lint", (s) => checkComponents("plans/x.mdx", page(moves(s)))],
     ];
     for (const ch of [" ", "\t"]) {
       for (const [k, line] of big(ch).entries()) {

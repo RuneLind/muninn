@@ -147,6 +147,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-11: the find palette's query log (one POST per palette event) took it to 859,149.
 // 2026-11-12, the <Check> tag (the trailing-tag strip in the list walker, the reader slot hook, the
 // spec entry and the renderers' empty cases): 859,942 bytes (292,745 gzipped), from 859,282.
+// Its fix round 1 (Check back in the tag sources, the lead sentence's code-span keep, the paired
+// form's body): 860,073 (292,789).
 const WIKI_CLIENT_MAX_BYTES = 861_000;
 
 test("wikiClientScript stays under its size pin", async () => {

@@ -117,6 +117,21 @@ describe("prepareWikiPageBody", () => {
   });
 });
 
+describe("prepareWikiPageBody — <Check> is stripped like every other component", () => {
+  test("a valid trailing tag, a misplaced one and the paired form, as <Verdict> is", () => {
+    for (const name of ["Check", "Verdict"]) {
+      const raw = `1. Restart now <${name} env="WIKI_X" restart="3010" />\n2. Do <${name} env="X" /> then\n3. Say <${name} env="X">hi</${name}>.`;
+      expect({ name, out: prepareWikiPageBody(raw) }).toEqual({ name, out: "1. Restart now \n2. Do  then\n3. Say hi." });
+    }
+  });
+
+  test("in a code span, too, exactly as any other component in code", () => {
+    for (const name of ["Check", "Verdict"]) {
+      expect({ name, out: prepareWikiPageBody(`Quote \`<${name} env="X" />\` here.`) }).toEqual({ name, out: "Quote `` here." });
+    }
+  });
+});
+
 describe("prepareExplainerBody", () => {
   test("reduces HTML to prose, keeping heading markers", () => {
     const raw = "<html><head><style>p{color:red}</style></head><body><h2>Findings</h2><p>The point.</p></body></html>";

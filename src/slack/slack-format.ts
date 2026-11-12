@@ -224,8 +224,9 @@ const slackRenderer: BlockRenderer = {
         // No card and no state: a bold lead line naming the question, then its body.
         return `*${slackLiteral(questionLeadText(attrs))}*\n${children}`;
       case "Check":
-        // Off its step's line it names no step (lint `check-placement`).
-        return "";
+        // Off its step's line it names no step (lint `check-placement`): a
+        // paired one prints its body alone.
+        return children;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -244,8 +245,9 @@ const slackRenderer: BlockRenderer = {
       case "Fact":
         return `${text}${text.trim() ? ` ${FACT_VERDICT_MARK[normalizeFactVerdict(attrs.v)]}` : ""}`;
       case "Check":
-        // Mid-text it names no step; a step's trailing tag never gets here (`renderList`).
-        return "";
+        // Off its step's line: a paired tag's body rides on as prose, a
+        // self-closing one prints nothing. A step's trailing tag never gets here (`renderList`).
+        return text;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;

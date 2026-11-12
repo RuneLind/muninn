@@ -75,11 +75,12 @@ export function readerBody(markdown: string, stripTitle?: string): string {
   return body;
 }
 
-/** A step's trailing `<Check>` as the reader's slot, reported to the lint
- *  observer as trailing here, where the slot is drawn (`lint-components.ts`):
- *  the client bundle carries neither. */
+/** A step's trailing `<Check>` as the reader's slot. The inline scanner never
+ *  sees that tag (`renderList` took it off), so it is reported to the lint
+ *  observer here, for its values (`lint-components.ts`); its placement lint
+ *  reads from the page's steps. The client bundle carries neither. */
 function readerCheckSlot(rawAttrs: string): string {
-  if (observingComponentTags()) reportComponentTag({ name: "Check", rawAttrs, inline: true, trailing: true });
+  if (observingComponentTags()) reportComponentTag({ name: "Check", rawAttrs, inline: true });
   return checkSlotHtml(rawAttrs);
 }
 

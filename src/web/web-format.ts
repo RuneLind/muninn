@@ -2627,8 +2627,9 @@ const webRenderer: BlockRenderer = {
         return questionCardHtml(attrs, children);
       }
       case "Check":
-        // Off its step's line (lint `check-placement`): nothing.
-        return "";
+        // Off its step's line it names no step (lint `check-placement`): a
+        // self-closing tag prints nothing, a paired one its body alone.
+        return children;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -2656,9 +2657,10 @@ const webRenderer: BlockRenderer = {
         return factMarkParts(attrs).chip;
       }
       case "Check":
-        // Mid-text it names no step (lint `check-placement`); a step's trailing
-        // tag never gets here: `renderList` takes it off and `itemHtml` draws it.
-        return "";
+        // Reachable only via a direct call: `renderInline` leaves a paired
+        // tag's body in the stream, as prose. A step's trailing tag never gets
+        // here: `renderList` takes it off and `itemHtml` draws it.
+        return escapeHtml(text);
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -2705,6 +2707,9 @@ function renderInlineWith(text: string, chips: boolean): string {
       // label: only its generated tags are parked, and the body is left in the
       // stream so the bold/link/escape passes below still apply to it. Every other
       // inline component escapes its own label inside `inlineComponent`.
+      // A `<Check>` off its step's line names no step: a paired one's body
+      // stays in the stream as prose, a self-closing one prints nothing.
+      if (seg.name === "Check") return seg.text;
       if (seg.name === "Fact") {
         const { open, close, chip } = factMarkParts(seg.attrs);
         if (!seg.text) return ph.add("INLINECMP", chip);

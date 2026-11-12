@@ -157,6 +157,11 @@ describe("checkComponents — <Check>", () => {
       ["unclosed", ['1. Do <Check env="A"'], 9],
       ["single-quoted attributes", ["1. Do <Check env='A' />"], 9],
       ["a task-list row", [`1. [ ] Do ${C}`], 9],
+      ["the plain row of a task list", ["1. [ ] First", `2. Do ${C}`], 10],
+      ["a list in a Callout inside the you lane", ["<Callout>", "", `- Do ${C}`, "", "</Callout>"], 11],
+      ["a list in a Fold inside the you lane", ['<Fold title="f">', "", `- Do ${C}`, "", "</Fold>"], 11],
+      ["a list in a Diagram body inside the you lane", ['<Diagram src="d.json">', "", `1. Do it ${C}`, "", "</Diagram>"], 11],
+      ["a list in an Embed body inside the you lane", ['<Embed src="e.html">', "", `1. Do it ${C}`, "", "</Embed>"], 11],
     ];
     for (const [shape, items, line] of shapes) {
       const f = run(lane(...items)).filter((x) => x.check === "check-placement");
@@ -168,6 +173,29 @@ describe("checkComponents — <Check>", () => {
   test("a trailing tag outside a you lane", () => {
     expect(found(page(`1. Do ${C}`))).toEqual(["check-placement@5"]);
     expect(found(page("<NextMoves>", '<Lane kind="waiting" who="Fag">', `- Wait ${C}`, "</Lane>", "</NextMoves>"))).toEqual(["check-placement@7"]);
+    // A you lane outside any NextMoves, and an unclosed one: neither holds a step.
+    expect(found(page('<Lane kind="you">', "", `1. Do ${C}`, "", "</Lane>"))).toEqual(["check-placement@7"]);
+    expect(found(page("<NextMoves>", "", '<Lane kind="you">', "", "1. First", "", "</NextMoves>", "", `1. Later ${C}`))).toEqual(["check-placement@13"]);
+  });
+
+  test("a step listYouSteps refuses (it holds a nested list) is still a step", () => {
+    expect(run(lane(`1. Do ${C}`, "   - sub"))).toEqual([]);
+  });
+
+  test("each placement message is true for its case", () => {
+    const msg = (content: string) => run(content).filter((f) => f.check === "check-placement").map((f) => f.message);
+    expect(msg(lane(`1. Do ${C} then go`))).toEqual([expect.stringContaining("not the last thing after the step's text")]);
+    expect(msg(lane("1. [ ] First", `2. Do ${C}`))).toEqual([expect.stringContaining("task list")]);
+    expect(msg(lane(`1. [ ] Do ${C}`))).toEqual([expect.stringContaining("task list")]);
+    expect(msg(lane("<Callout>", "", `- Do ${C}`, "", "</Callout>"))).toEqual([expect.stringContaining("not on the first line of a step")]);
+    expect(msg(page(`## Head ${C}`))).toEqual([expect.stringContaining("not on the first line of a step")]);
+    expect(msg(lane('1. Do <Check env="A"'))).toEqual([expect.stringContaining("read as no tag")]);
+    expect(msg(lane("1. Do <Check env='A' />"))).toEqual([expect.stringContaining("read as no tag")]);
+    expect(msg(lane('1. Do <Check env="A">x</Check>'))).toEqual([expect.stringContaining("paired form")]);
+    for (const m of [
+      ...msg(lane("1. [ ] First", `2. Do ${C}`)),
+      ...msg(lane("<Callout>", "", `- Do ${C}`, "", "</Callout>")),
+    ]) expect(m).not.toContain("not the last thing");
   });
 
   test("attributes: one finding each", () => {

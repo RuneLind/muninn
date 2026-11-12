@@ -248,12 +248,6 @@ export const COMPONENT_OPEN_RE = /^<([A-Za-z][A-Za-z0-9]*)((?:\s+[A-Za-z][\w-]*=
  */
 export const ATTR_RE = /([A-Za-z][\w-]*)="([^"]*)"/g;
 
-/** Every name but `Check`: a step's tag is read where it counts, at the end of
- *  its line (`check-trailing.ts`), so the text consumers built on these
- *  sources (search text, share prep, fact-check context, edit zones, the lead
- *  sentence) see a `<Check` — one quoted in a code span above all — as before. */
-const TAG_SOURCE_NAMES = COMPONENT_NAMES.filter((n) => n !== "Check");
-
 /**
  * Regex SOURCE (not a compiled regex — callers pick their own flags/anchors) for
  * ANY whitelisted component tag: opening, closing, or self-closing, with its
@@ -311,7 +305,7 @@ export function componentTagSourceSingleLine(names: readonly ComponentName[]): s
   return componentTagSource(SINGLE_LINE_ATTR_TAIL, names);
 }
 
-function componentTagSource(attrTail: string, names: readonly string[] = TAG_SOURCE_NAMES): string {
+function componentTagSource(attrTail: string, names: readonly string[] = COMPONENT_NAMES): string {
   return `</?(?:${names.join("|")})\\b${attrTail}>`;
 }
 
