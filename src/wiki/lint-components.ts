@@ -498,10 +498,17 @@ function findComponents(relPath: string, content: string, render: PageRender, fi
 }
 
 function pageFindings(relPath: string, content: string, render: PageRender, plain: readonly ObservedComponentTag[]): LintFinding[] {
-  const placement = CHECK_MENTION_RE.test(content) ? checkPlacement(relPath, content) : [];
+  let read: Tag[] | null | undefined;
+  const locatedTags = () => (read === undefined ? (read = locate(render, content, plain)) : read);
+  // An opener is the paired form only where the render read it as a Check;
+  // a render that read no Check pairs none, with no second render.
+  let checks: Set<number | undefined> | undefined;
+  const paired = () =>
+    (checks ??= new Set(plain.some((t) => t.name === "Check") ? (locatedTags() ?? []).map((t) => t.offset) : []));
+  const placement = CHECK_MENTION_RE.test(content) ? checkPlacement(relPath, content, paired) : [];
   const unlocated = plain.flatMap((t) => checkTag(relPath, { name: t.name, attrs: t.rawAttrs, ...nmOf(t) }));
   if (unlocated.length === 0) return placement;
-  const tags = locate(render, content, plain);
+  const tags = locatedTags();
   if (tags === null) return [...placement, ...unlocated];
   const located = tags.filter((t) => t.offset !== undefined).sort((a, b) => a.offset! - b.offset!);
   const once = located.filter((t, i) => i === 0 || t.offset !== located[i - 1]!.offset);
@@ -543,9 +550,9 @@ const PLACEMENT: Record<"unread" | "paired" | "steps" | "off-step" | "task-list"
   unread: "<Check here is read as no tag (not a well-formed tag on one line: wrapped, unclosed or single-quoted); it names no step",
   paired: "Check here is the paired form (<Check …>…</Check>); only the self-closing tag names a step, and the body renders as if the tag were absent",
   steps: "Check names no step: this page's you steps could not be read (its lanes parse differently than the index reads them)",
-  "off-step": "Check is not on the first line of a step (an item of a list directly inside <Lane kind=\"you\"> inside <NextMoves>); it names no step",
+  "off-step": "Check is not on the first line of an open step (an item of a list directly inside <Lane kind=\"you\"> inside <NextMoves> that is not a done [x] row); it names no step",
   "task-list": "Check is on a row of a task list (a list with a [ ] or [x] row), which the reader draws without a check; it names no step",
-  "not-last": "Check is on a step's first line but not the last thing after the step's text; it names no step there",
+  "not-last": "Check is on a step's first line but does not end it after the step's text; it names no step there",
 };
 
 /**
@@ -555,11 +562,10 @@ const PLACEMENT: Record<"unread" | "paired" | "steps" | "off-step" | "task-list"
  * no task list: the steps Done lists and PR 2 keys on. On such a line the last
  * `<Check` is that tag; every other `<Check` is judged by its own shape.
  */
-function checkPlacement(relPath: string, content: string): LintFinding[] {
+function checkPlacement(relPath: string, content: string, paired: () => ReadonlySet<number | undefined>): LintFinding[] {
   const steps = youListStepLines(content);
   const firstLines = new Map((steps ?? []).map((s) => [s.line, { trailing: trailingCheck(s.text.split("\n")[0]!) !== undefined, taskList: s.taskList }]));
   const mentions = checkMentions(content);
-  const lastClose = content.lastIndexOf("</Check>");
   const out: LintFinding[] = [];
   mentions.forEach((m, k) => {
     const lastOnLine = mentions[k + 1]?.line !== m.line;
@@ -568,7 +574,7 @@ function checkPlacement(relPath: string, content: string): LintFinding[] {
     const step = firstLines.get(m.line);
     let kind: keyof typeof PLACEMENT | null;
     if (!tag) kind = "unread";
-    else if (tag[1] !== "/") kind = lastClose > m.offset ? "paired" : "unread";
+    else if (tag[1] !== "/") kind = paired().has(m.offset) ? "paired" : "unread";
     else if (steps === null) kind = "steps";
     else if (!step) kind = "off-step";
     else if (step.taskList) kind = "task-list";

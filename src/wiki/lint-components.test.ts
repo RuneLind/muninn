@@ -184,18 +184,43 @@ describe("checkComponents — <Check>", () => {
 
   test("each placement message is true for its case", () => {
     const msg = (content: string) => run(content).filter((f) => f.check === "check-placement").map((f) => f.message);
-    expect(msg(lane(`1. Do ${C} then go`))).toEqual([expect.stringContaining("not the last thing after the step's text")]);
+    expect(msg(lane(`1. Do ${C} then go`))).toEqual([expect.stringContaining("does not end it after the step's text")]);
     expect(msg(lane("1. [ ] First", `2. Do ${C}`))).toEqual([expect.stringContaining("task list")]);
     expect(msg(lane(`1. [ ] Do ${C}`))).toEqual([expect.stringContaining("task list")]);
-    expect(msg(lane("<Callout>", "", `- Do ${C}`, "", "</Callout>"))).toEqual([expect.stringContaining("not on the first line of a step")]);
-    expect(msg(page(`## Head ${C}`))).toEqual([expect.stringContaining("not on the first line of a step")]);
+    expect(msg(lane("<Callout>", "", `- Do ${C}`, "", "</Callout>"))).toEqual([expect.stringContaining("not on the first line of an open step")]);
+    expect(msg(page(`## Head ${C}`))).toEqual([expect.stringContaining("not on the first line of an open step")]);
     expect(msg(lane('1. Do <Check env="A"'))).toEqual([expect.stringContaining("read as no tag")]);
     expect(msg(lane("1. Do <Check env='A' />"))).toEqual([expect.stringContaining("read as no tag")]);
     expect(msg(lane('1. Do <Check env="A">x</Check>'))).toEqual([expect.stringContaining("paired form")]);
     for (const m of [
       ...msg(lane("1. [ ] First", `2. Do ${C}`)),
       ...msg(lane("<Callout>", "", `- Do ${C}`, "", "</Callout>")),
-    ]) expect(m).not.toContain("not the last thing");
+    ]) expect(m).not.toContain("does not end it");
+  });
+
+  test("a done row, an empty row and a tag-only step: one true message each", () => {
+    const msg = (content: string) => run(content).map((f) => `${f.check} ${f.message}`);
+    // A done row is a lane-list item but no open step.
+    expect(msg(lane("1. [ ] Open", '2. [x] Done it <Check env="X" />'))).toEqual([expect.stringContaining("that is not a done [x] row")]);
+    expect(msg(lane('- [x] Done <Check env="X" />'))).toEqual([expect.stringContaining("that is not a done [x] row")]);
+    expect(msg(lane('1. [ ] <Check env="X" />'))).toEqual([expect.stringContaining("row of a task list")]);
+    // Nothing comes before the tag: it ends the line but follows no text.
+    expect(msg(lane('1. <Check env="X" />'))).toEqual([expect.stringContaining("does not end it after the step's text")]);
+  });
+
+  test("the paired message only where the renderer pairs the tag", () => {
+    const msg = (content: string) => run(content).map((f) => `${f.check} ${f.message}`);
+    // A `</Check>` quoted in code later on the page closes nothing: the reader shows the opener raw.
+    const quoted = lane('1. Text <Check env="X"> open.', "2. Quote `</Check>` here");
+    expect(html(quoted)).toContain("&lt;Check");
+    expect(msg(quoted)).toEqual([expect.stringContaining("read as no tag")]);
+    // A closer after the lane ends pairs nothing either.
+    const outside = page("<NextMoves>", "", '<Lane kind="you">', "", '1. Do <Check env="X"> it', "", "</Lane>", "", "</Check>", "</NextMoves>");
+    expect(html(outside)).toContain("&lt;Check");
+    expect(msg(outside)).toEqual([expect.stringContaining("read as no tag")]);
+    // The renderer's pairs, inline and as a block, keep the paired message.
+    expect(msg(lane('1. Do <Check env="A">x</Check>'))).toEqual([expect.stringContaining("paired form")]);
+    expect(msg(page('<Check env="X">', "", "body", "", "</Check>"))).toEqual([expect.stringContaining("paired form")]);
   });
 
   test("attributes: one finding each", () => {

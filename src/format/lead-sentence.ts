@@ -3,7 +3,8 @@
  * and the «Oppfølging» block's peek. Browser-safe.
  */
 
-import { COMPONENT_TAG_SOURCE_SINGLE_LINE } from "./markdown-ast.ts";
+import { COMPONENT_TAG_SOURCE_SINGLE_LINE, componentTagSourceSingleLine } from "./markdown-ast.ts";
+import { COMPONENT_NAMES } from "./component-spec.ts";
 import { isAbbreviation } from "./abbreviations.ts";
 import { trailingCheck } from "./check-trailing.ts";
 import { lineCodeSpanRanges } from "./code-spans.ts";
@@ -26,16 +27,19 @@ export function sentenceEnd(text: string): number {
 }
 
 const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
-const CHECK_TAG_RE = /^<\/?Check\b/;
+/** Main's tag set, before `Check` existed. */
+const NO_CHECK_TAG_RE = new RegExp(componentTagSourceSingleLine(COMPONENT_NAMES.filter((n) => n !== "Check")), "g");
+const CHECK_TAG_RE = /<\/?Check(?![\w-])/g;
+const CHECK_TAG_START_RE = /^<\/?Check\b/;
 
-/** `line` without its component tags, except a `<Check>` inside a code span:
- *  quoted there, it is text, as it was before the tag existed. Every other
- *  name goes in code too, as it always has. */
+/** `line` without its component tags. A line with no `<Check>`/`</Check>`
+ *  outside a code span reads exactly as before the tag existed. Otherwise a
+ *  `<Check>` that starts inside a code span is kept and every other tag goes. */
 function withoutTags(line: string): string {
-  const code = line.includes("<Check") ? lineCodeSpanRanges(line) : [];
-  return line.replace(COMPONENT_TAG_RE, (tag: string, at: number) =>
-    code.length && CHECK_TAG_RE.test(tag) && code.some((r) => at >= r.start && at < r.end) ? tag : "",
-  );
+  const code = line.includes("Check") ? lineCodeSpanRanges(line) : [];
+  const inCode = (at: number) => code.some((r) => at >= r.start && at < r.end);
+  if (![...line.matchAll(CHECK_TAG_RE)].some((m) => !inCode(m.index))) return line.replace(NO_CHECK_TAG_RE, "");
+  return line.replace(COMPONENT_TAG_RE, (tag: string, at: number) => CHECK_TAG_START_RE.test(tag) && inCode(at) ? tag : "");
 }
 
 /**

@@ -4,6 +4,7 @@ import { leadSentence } from "./lead-sentence.ts";
 import { listYouSteps, stepDoneEdit, stepDoneLogLine } from "./step-done.ts";
 import { formatEmailHtml } from "./email-format.ts";
 import { COMPONENT_NAMES } from "./component-spec.ts";
+import { lineCodeSpanRanges } from "./code-spans.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
@@ -162,6 +163,46 @@ describe("leadSentence", () => {
       expect(leadSentence(`Ship \`<${name} value="x" />\` now`)).toBe("Ship  now");
       expect(leadSentence(`**Ship <${name}>x</${name}>.** ${ENV}`)).toBe("Ship x.");
     }
+  });
+
+  // Every name (plus `Checklist` and an unknown one) × five tag forms × in,
+  // out of, right before and right after a code span × three prefixes ×
+  // keepLabel. A line with no `<Check`/`</Check>` outside code must read as on
+  // main. Expected: Bun.hash of main's outputs per name, joined by NUL, from
+  // `git archive origin/main` (8d437ca3's base); every name not listed hashes
+  // to DEFAULT, because main strips each one the same way.
+  const leadGrid = (names: readonly string[]) =>
+    [...names, "Checklist", "Zork"].flatMap((name) =>
+      [`<${name} a="1" />`, `<${name} a="1">`, `</${name}>`, `<${name} a="1">x</${name}>`, `<${name} a="<Pill />" />`].flatMap((tag) =>
+        [`Do \`${tag}\` now`, `Do ${tag} now`, `Do ${tag}\`x\` now`, `Do \`x\`${tag} now`].flatMap((shape) =>
+          ["", "1. ", "**Rune:** "].flatMap((prefix) => [false, true].map((keepLabel) => ({ name, input: prefix + shape, keepLabel }))),
+        ),
+      ),
+    );
+  const bareCheck = (line: string) => {
+    const code = lineCodeSpanRanges(line);
+    return [...line.matchAll(/<\/?Check(?![\w-])/g)].some((m) => !code.some((r) => m.index >= r.start && m.index < r.end));
+  };
+  const DEFAULT = "1xojtqby6bvf8";
+  const MAIN_HASH: Record<string, string> = { Check: "30193oix1ynrw", Checklist: "328xfj2ah447", Zork: "1vj9d04ihw9zo" };
+
+  test("a line with no <Check> outside code reads as on main (4,590 grid cases)", () => {
+    const scoped = leadGrid(COMPONENT_NAMES).filter((c) => !bareCheck(c.input));
+    expect(scoped.length).toBe(4590);
+    const by = new Map<string, string[]>();
+    for (const c of scoped) (by.get(c.name) ?? by.set(c.name, []).get(c.name)!).push(leadSentence(c.input, { keepLabel: c.keepLabel }));
+    for (const [name, outs] of by) expect({ name, hash: Bun.hash(outs.join("\u0000")).toString(36) }).toEqual({ name, hash: MAIN_HASH[name] ?? DEFAULT });
+  });
+
+  test("a quoted </Check>, and a tag inside a quoted Check's value, read as on main", () => {
+    for (const keepLabel of [false, true]) {
+      expect(leadSentence("Do `</Check>` now", { keepLabel })).toBe("Do </Check> now");
+      expect(leadSentence('Do `<Check a="<Pill />" />` now', { keepLabel })).toBe('Do <Check a="" /> now');
+    }
+    expect(leadSentence("**Rune:** Do `</Check>` now", { keepLabel: true })).toBe("Rune: Do </Check> now");
+    expect(extractNextMoves(page(moves("1. Do `</Check>` now")))!.youSteps).toEqual(["Do </Check> now"]);
+    // Outside code a closer is a tag, alone or not.
+    expect(leadSentence("Do </Check> now")).toBe("Do  now");
   });
 });
 
