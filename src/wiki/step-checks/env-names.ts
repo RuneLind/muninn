@@ -3,18 +3,21 @@
  * A value is read only far enough to tell empty from non-empty and to find
  * where it ends; no value, nor any part of one, leaves this function.
  *
- * The reader claims only what it reads the way Bun 1.3.10's loader does
- * (measured differentially, `env-names.test.ts`). `set`: the last assignment
- * has a value that is non-empty once trimmed (the probe's `processHasEnv`
- * rule); `unset`: it is empty; `unsure`: Bun could read it otherwise, which is
- * a `$` anywhere in the value (Bun expands it, single quotes included) or the
- * `KEY: value` form. `lostTrack`: from some line on, the reader cannot tell
- * where values end, so a later line may be no key or a hidden one; it stops
- * there and marks every key it read `unsure`. That is a quote that never closes
- * (Bun reads it raw and goes on), a backslash inside a quoted value (Bun reads
- * `\"` as an escaped quote), the opening quote character again before the
- * close (Bun closes only on a quote followed by spaces, `#` or the line's
- * end), and a line holding a quote that is no assignment the reader knows.
+ * The reader owns only the lines it reads the way Bun 1.3.10's loader does
+ * (held to a child `bun --env-file` by a differential test and a seeded fuzz,
+ * `env-names.test.ts`). `set`: the last assignment has a value that is
+ * non-empty once trimmed (the probe's `processHasEnv` rule); `unset`: it is
+ * empty; `unsure`: a `$` anywhere in the value (Bun expands it, single quotes
+ * included). `lostTrack`: from some line on, the reader cannot tell what Bun
+ * reads, so a later line may be no key or a hidden one; it stops there and
+ * marks every key it read `unsure`. That is any non-blank, non-comment line
+ * that is not `[export ]KEY=value`: every colon form (measured: `K: v` sets K,
+ * `K:v` sets nothing, an empty `K:` takes the whole next line as its value), a
+ * BOM, a line with no `=`. Inside an assignment it is a quote that never
+ * closes (Bun reads it raw and goes on), a backslash inside a quoted value
+ * (Bun reads `\"` as an escaped quote), and the opening quote character again
+ * before the close (Bun closes only on a quote followed by spaces, `#` or the
+ * line's end).
  */
 
 export type EnvKeyState = "set" | "unset" | "unsure";
@@ -25,7 +28,7 @@ export interface EnvKeyStates {
 }
 
 /** Bun accepts `-` and `.` in a key and a leading digit: tracked so a quote they open is followed. */
-const ASSIGN = /^[ \t]*(?:export[ \t]+)?([A-Za-z0-9_.-]+)[ \t]*([=:])(.*)$/;
+const ASSIGN = /^[ \t]*(?:export[ \t]+)?([A-Za-z0-9_.-]+)[ \t]*=(.*)$/;
 const QUOTES = new Set(['"', "'", "`"]);
 /** A closing quote: spaces, then a comment or the line's end. */
 const AFTER_CLOSE = /^[ \t]*(?:#.*)?$/;
@@ -43,12 +46,9 @@ export function envFileKeyStates(text: string): EnvKeyStates {
     const line = lines[i]!;
     if (/^[ \t]*(?:#.*)?$/.test(line)) continue;
     const m = ASSIGN.exec(line);
-    if (!m) {
-      if ([...QUOTES].some((q) => line.includes(q))) return lost();
-      continue;
-    }
+    if (!m) return lost();
     const key = m[1]!;
-    const rest = m[3]!.replace(/^[ \t]+/, "");
+    const rest = m[2]!.replace(/^[ \t]+/, "");
     let value: string;
     const q = rest[0];
     if (q !== undefined && QUOTES.has(q)) {
@@ -66,7 +66,7 @@ export function envFileKeyStates(text: string): EnvKeyStates {
       if (value.includes("\\") || !AFTER_CLOSE.test(region.slice(at + 1).split("\n")[0]!)) return lost(key);
       i = j;
     } else value = rest.split("#")[0]!; // a backslash here is literal to Bun too
-    keys.set(key, m[2] === ":" || value.includes("$") ? "unsure" : value.trim() === "" ? "unset" : "set");
+    keys.set(key, value.includes("$") ? "unsure" : value.trim() === "" ? "unset" : "set");
   }
   return { keys, lostTrack: false };
 }

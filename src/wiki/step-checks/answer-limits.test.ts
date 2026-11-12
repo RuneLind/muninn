@@ -133,6 +133,8 @@ describe("git-spawning probes run at most 4 at a time", () => {
         if (a === "rev-parse --show-toplevel") return ok(`${cwd}\n`);
         if (a === "remote get-url origin") return ok(`https://github.com/x/${path.basename(cwd)}.git\n`);
         if (a === "ls-remote --symref origin HEAD") return ok(`ref: refs/heads/main\tHEAD\n${tip}\tHEAD\n`);
+        // No partial-clone key (git config exits 1 on no match).
+        if (a.startsWith("config --get-regexp")) return { ok: false, stdout: "", exitCode: 1 };
         return ok();
       } finally {
         active--;

@@ -4,7 +4,9 @@
  * PROVEN the fact on this machine; anything it cannot prove is `not-yet` (the
  * fact provably does not hold yet) or `unknown`. `pushed` and `restart` have
  * no probe yet (`notProvableYet`): they always answer `unknown`. None writes: no `.env`
- * write, no fetch, pull or checkout, no DB write. Every outside read comes in
+ * write, no fetch, pull or checkout, no DB write; the checkout probe's git runs
+ * with lazy fetch off and answers a partial clone `unknown` before any object
+ * lookup (`checkoutCurrent`). Every outside read comes in
  * through {@link ProbeDeps}, so tests never touch the real machine.
  *
  * A `why` is one short sentence for the reader: it names keys, repos,
@@ -122,11 +124,34 @@ export function parseSymrefHead(stdout: string): { branch: string; tip: string }
 }
 
 /**
+ * Set on every git call the checkout probe makes. Replace refs and an
+ * `info/grafts` file rewrite parents, so `merge-base --is-ancestor` read a fake
+ * child of origin's tip as containing it (reproduced; `--no-replace-objects`
+ * alone leaves grafts on, measured on git 2.54). `GIT_NO_LAZY_FETCH` (git ≥ 2.44)
+ * stops a partial clone fetching a missing object from its promisor remote;
+ * older gits ignore it, which is why the probe also refuses a partial clone.
+ */
+export const CHECKOUT_GIT_ENV: Readonly<Record<string, string>> = { GIT_NO_REPLACE_OBJECTS: "1", GIT_GRAFT_FILE: "/dev/null", GIT_NO_LAZY_FETCH: "1" };
+
+/** `git`, with {@link CHECKOUT_GIT_ENV} on every call. */
+const checkoutGit = (git: GitRun): GitRun => (cwd, args, opts) => git(cwd, args, { ...opts, env: CHECKOUT_GIT_ENV });
+
+/** A partial clone's config: any promisor remote, or the repository extension. Matched against git's lower-cased names. */
+const PARTIAL_CLONE_KEYS = "^(remote\\..*\\.promisor|extensions\\.partialclone)$";
+
+/**
  * Whether `dir`'s HEAD contains origin's default-branch tip as origin has it
  * NOW, never the local `origin/<branch>` ref, which is only as fresh as the
- * last fetch.
+ * last fetch. A partial clone is `unknown` before anything else: looking up a
+ * missing object there fetches it (measured: `cat-file -e` grew the pack
+ * directory and made the tip present).
  */
-export async function checkoutCurrent(dir: string, label: string, git: GitRun): Promise<ProbeResult> {
+export async function checkoutCurrent(dir: string, label: string, rawGit: GitRun): Promise<ProbeResult> {
+  const git = checkoutGit(rawGit);
+  // Exit 1 with nothing on stderr is «no such key»; a match, or anything else, proves nothing.
+  const partial = await git(dir, ["config", "--get-regexp", PARTIAL_CLONE_KEYS], { timeoutMs: GIT_LOCAL_MS });
+  if (partial.exitCode === 0) return unknown(`${label} is a partial clone: muninn does not look up objects it would have to fetch`);
+  if (partial.exitCode !== 1 || partial.stderr?.trim()) return unknown(`${gitFailure(partial, "git config")} on ${label}`);
   const remote = await git(dir, ["ls-remote", "--symref", "origin", "HEAD"], { timeoutMs: LS_REMOTE_MS, maxLines: 20 });
   if (!remote.ok || remote.capped) return unknown(`${gitFailure(remote, "git ls-remote")}: origin's default branch is unknown`);
   const head = parseSymrefHead(remote.stdout);
@@ -150,7 +175,8 @@ async function repoDir(name: string, deps: ProbeDeps): Promise<{ dir: string } |
 }
 
 export async function probeCheckout(name: string, deps: ProbeDeps): Promise<ProbeResult> {
-  const found = await repoDir(name, deps);
+  // The repo lookup's git calls carry the same switches as the probe's own.
+  const found = await repoDir(name, { ...deps, git: checkoutGit(deps.git) });
   return "dir" in found ? checkoutCurrent(found.dir, name, deps.git) : found;
 }
 

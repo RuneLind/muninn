@@ -32,12 +32,12 @@ describe("envFileKeyStates: simple lines read as before", () => {
   test("an unquoted value ends at #, as Bun reads it", () => {
     expect(states("A=abc#c\nB=abc # c\nC=#\n")).toEqual(clean(["A", "B"], ["C"]));
   });
-  test("KEY= with a value on a later line is unset: an unquoted value never runs on", () => {
-    expect(states("A=\nsecret-on-its-own-line\nB=x")).toEqual(clean(["B"], ["A"]));
+  test("KEY= followed by a line that is no assignment loses track: the reader owns only lines it reads exactly", () => {
+    expect(states("A=\nsecret-on-its-own-line\nB=x")).toEqual({ set: [], unset: [], unsure: ["A"], lostTrack: true });
   });
-  test("CRLF and a lone CR end lines; a BOM is part of the first key, as Bun reads it", () => {
+  test("CRLF and a lone CR end lines; a BOM (part of the first key to Bun) loses track", () => {
     expect(states("A=1\r\nB=\r\nC=3\rD=4")).toEqual(clean(["A", "C", "D"], ["B"]));
-    expect(states("﻿A=1\nB=2")).toEqual(clean(["B"]));
+    expect(states("﻿A=1\nB=2")).toEqual({ set: [], unset: [], unsure: [], lostTrack: true });
   });
   test("a value holding = and other quotes counts once, for its own key", () => {
     expect(states("A=postgres://u:p@h/db?x=1&y=2\nB=\"k=v\"\nC='a=b'\nD=\"it's\"\nE=a\"b\n")).toEqual(clean(["A", "B", "C", "D", "E"]));
@@ -54,8 +54,9 @@ describe("envFileKeyStates: simple lines read as before", () => {
     // Bun accepts `-` and `.` in a key, so this one's quote spans lines too.
     expect(states('T-B="x\nHID=1\n"\nAFT=2')).toEqual(clean(["AFT", "T-B"]));
   });
-  test("lines that are not assignments, with no quote in them, are skipped", () => {
-    expect(states("just text\nA/B=no\n=x\nOK=1")).toEqual(clean(["OK"]));
+  test("any non-blank, non-comment line that is no assignment the reader knows loses track", () => {
+    for (const text of ["just text\nOK=1", "OK=1\nA/B=no", "=x\nOK=1", "export\nOK=1", "export OK\nOK=1"])
+      expect([text, states(text).lostTrack, states(text).set]).toEqual([text, true, []]);
   });
 });
 
@@ -63,8 +64,19 @@ describe("envFileKeyStates: what it does not read the way Bun does is unsure", (
   test("a $ anywhere in a value (Bun expands it, even in single quotes)", () => {
     expect(states("A=$UNSET\nB=${UNSET}\nC=\"$U\"\nD='$U'\nE=`$U`\nF=a$\nG=x # $c\n")).toEqual(clean(["G"], [], ["A", "B", "C", "D", "E", "F"]));
   });
-  test("KEY: value (Bun accepts the colon form)", () => {
-    expect(states("A: v\nB : w\nexport C: x\nD=1")).toEqual(clean(["D"], [], ["A", "B", "C"]));
+  test("every colon form loses track: `K: v` sets K, `K:v` sets nothing, an empty `K:` takes the WHOLE next line (Bun 1.3.10)", () => {
+    for (const line of ["K:", "K: v", "K:v", "export K:", "K :", "K:'", 'K:"', "export K : v", "K:\t"])
+      expect([line, states(`A=1\nB=\n${line}\nZ=1\n`)]).toMatchObject([line, { set: [], unset: [], lostTrack: true }]);
+  });
+  test("the verify pass's repros: a colon line never lets the reader read the next line as its own", () => {
+    // Bun takes `WIKI_FLAG=1` as OTHER_SETTING's value and sets no WIKI_FLAG from the file.
+    expect(states("OTHER_SETTING:\nWIKI_FLAG=1\n").lostTrack).toBe(true);
+    expect(states("OTHER_SETTING:\nWIKI_FLAG=1\n").set).toEqual([]);
+    // Bun: AA=x stays (the `AA=` line is BB's value); the reader said AA unset.
+    expect(states("AA=x\nBB:\nAA=\n")).toMatchObject({ unset: [], set: [], lostTrack: true });
+    // Bun sets E (`x'`); the reader followed F's quote across lines and hid E.
+    const fe = envFileKeyStates("F:'\nE=x'\n");
+    expect(fe.lostTrack).toBe(true);
   });
   test("a closed quote with text after it loses track (Bun reads it raw, or runs on to a later quote)", () => {
     expect(states('A="a" junk\nC=1')).toEqual({ set: [], unset: [], unsure: ["A"], lostTrack: true });
@@ -105,7 +117,7 @@ function bunLoads(text: string, dir: string, i: number): Map<string, number> {
   const file = path.join(dir, `case-${i}.env`);
   writeFileSync(file, text);
   const proc = Bun.spawnSync(
-    [process.execPath, `--env-file=${file}`, "-e", "for (const [k, v] of Object.entries(process.env)) if (k.startsWith('Q')) console.log(k + '\\t' + (v ?? '').trim().length)"],
+    [process.execPath, `--env-file=${file}`, "-e", "for (const [k, v] of Object.entries(process.env)) if (/^1?Q/.test(k)) console.log(k + '\\t' + (v ?? '').trim().length)"],
     { cwd: dir, env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" },
   );
   if (proc.exitCode !== 0) throw new Error(`bun exited ${proc.exitCode}`);
@@ -161,4 +173,83 @@ describe("envFileKeyStates against Bun's own loader (differential)", () => {
       expect(disagree).toEqual([]);
     });
   });
+});
+
+// The fuzz grammar: the same text as the scratch harness that ran 5,000+ files per seed (PR #848, fix round 2).
+/** mulberry32: a fixed seed gives the same files every run. */
+function rng(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const FUZZ_KEYS = ["QA", "QB", "QC", "QD", "Q_E", "Q-B", "Q.C", "1Q"];
+const FUZZ_SEPS = ["=", "=", "=", " = ", "\t=", ":", ": ", " :", " : ", ":'", ':"', ""];
+const FUZZ_VALUE_PARTS = ["v", "val", " ", "\t", '"', "'", "`", "\\", "$", "$QA", "${QB}", "#", " #c", "x y", "=", "\\n", "é"];
+const FUZZ_RAW_LINES = ["", "   ", "# c", '# "q', "  # x=1", "text", "just 'text", "=x", "Q/B=1", "export", "export QA", '"', "'"];
+const FUZZ_EOLS = ["\n", "\n", "\n", "\r\n", "\r"];
+/** One `.env` text from a grammar of what a hand-written file holds and what Bun reads oddly. */
+function fuzzEnvText(r: () => number): string {
+  const pick = <T,>(xs: readonly T[]) => xs[Math.floor(r() * xs.length)]!;
+  const eol = pick(FUZZ_EOLS);
+  const lines: string[] = [];
+  const n = 1 + Math.floor(r() * 7);
+  for (let i = 0; i < n; i++) {
+    if (r() < 0.12) {
+      lines.push(pick(FUZZ_RAW_LINES));
+      continue;
+    }
+    let value = "";
+    const parts = Math.floor(r() * 4);
+    for (let p = 0; p < parts; p++) value += pick(FUZZ_VALUE_PARTS);
+    if (r() < 0.25) {
+      const q = pick(['"', "'", "`"]);
+      value = q + value + (r() < 0.8 ? q : "") + (r() < 0.2 ? pick([" #c", " x", "", "\t"]) : "");
+    }
+    // Mostly plain separators, so the reader claims something in most files.
+    const sep = r() < 0.75 ? "=" : pick(FUZZ_SEPS);
+    lines.push((r() < 0.15 ? "export " : "") + (r() < 0.08 ? "  " : "") + pick(FUZZ_KEYS) + sep + value);
+  }
+  return (r() < 0.04 ? "﻿" : "") + lines.join(eol) + (r() < 0.7 ? eol : "");
+}
+
+/** Whether this host can spawn a child Bun at all; the fuzz skips cleanly when it cannot. */
+const canSpawnBun = (() => {
+  try {
+    return Bun.spawnSync([process.execPath, "--version"], { stdout: "pipe", stderr: "pipe" }).exitCode === 0;
+  } catch {
+    return false;
+  }
+})();
+
+describe("envFileKeyStates against Bun's own loader: a seeded fuzz", () => {
+  const FILES = 400;
+  test.skipIf(!canSpawnBun)(`${FILES} generated files (colon forms, quotes, backslashes, $, #, CRLF, BOM): no false set, unset or absent where the reader keeps track`, () => {
+    const dir = testTempDirSync(path.join(tmpdir(), "env-names-fuzz-"));
+    const r = rng(848);
+    const bad: string[] = [];
+    let lost = 0;
+    for (let i = 0; i < FILES; i++) {
+      const text = fuzzEnvText(r);
+      const ours = envFileKeyStates(text);
+      if (ours.lostTrack) {
+        lost++;
+        continue;
+      }
+      const bun = bunLoads(text, dir, i);
+      for (const [k, s] of ours.keys) {
+        const len = bun.get(k) ?? 0;
+        if (s === "set" && len === 0) bad.push(`${JSON.stringify(text)}: ${k} reader set, Bun empty`);
+        if (s === "unset" && len > 0) bad.push(`${JSON.stringify(text)}: ${k} reader unset, Bun non-empty`);
+      }
+      for (const [k, len] of bun) if (len > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !ours.keys.has(k)) bad.push(`${JSON.stringify(text)}: ${k} reader absent, Bun non-empty`);
+    }
+    expect(bad).toEqual([]);
+    // The fuzz must still test claims: most files keep track.
+    expect(lost).toBeLessThan(FILES);
+  }, 30_000);
 });

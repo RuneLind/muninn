@@ -7,7 +7,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
@@ -22,6 +22,7 @@ const EXIT = (code: number): GitResult => ({ ok: false, stdout: "", exitCode: co
 const TIMED_OUT: GitResult = { ok: false, stdout: "", timedOut: true };
 
 interface World {
+  promisor?: GitResult;
   symref?: GitResult;
   catFile?: GitResult;
   ancestor?: GitResult;
@@ -31,10 +32,12 @@ interface World {
  * A git that answers as one repo at {@link DIR} named `muninn`; `calls` records every argv.
  * Its LOCAL `origin/HEAD` names `master` on purpose: the checkout probe must never read it.
  */
-function fakeGit(w: World = {}, calls: string[][] = []): GitRun {
-  return async (_cwd, args) => {
+function fakeGit(w: World = {}, calls: string[][] = [], envs: (Readonly<Record<string, string>> | undefined)[] = []): GitRun {
+  return async (_cwd, args, opts) => {
     calls.push([...args]);
+    envs.push(opts?.env);
     const a = args.join(" ");
+    if (a.startsWith("config --get-regexp")) return w.promisor ?? EXIT(1);
     if (a === "rev-parse --show-toplevel") return OK(`${DIR}\n`);
     if (a === "remote get-url origin") return OK("https://github.com/x/muninn.git\n");
     if (a.startsWith("symbolic-ref --quiet --short refs/remotes/origin/HEAD")) return OK("origin/master\n");
@@ -47,9 +50,9 @@ function fakeGit(w: World = {}, calls: string[][] = []): GitRun {
   };
 }
 
-function deps(over: Partial<ProbeDeps> = {}, w?: World, calls?: string[][]): ProbeDeps {
+function deps(over: Partial<ProbeDeps> = {}, w?: World, calls?: string[][], envs?: (Readonly<Record<string, string>> | undefined)[]): ProbeDeps {
   return {
-    git: fakeGit(w, calls),
+    git: fakeGit(w, calls, envs),
     roots: { dirs: [], named: new Map([["muninn", DIR], ["mimir", DIR]]) },
     readEnvFile: async () => ({ text: "SET_KEY=s3cr3t-value\nBLANK_KEY=\n" }),
     processHasEnv: () => true,
@@ -105,6 +108,14 @@ describe("env", () => {
     expect(await probeEnv("AFTER", deps({ readEnvFile: async () => ({ text: 'UNCLOSED="abc\nAFTER=after\n' }) }))).toEqual(UNREAD);
     // A key BEFORE the open quote is unknown too: a later line could assign it again.
     expect(await probeEnv("EARLY", deps({ readEnvFile: async () => ({ text: 'EARLY=1\nUNCLOSED="abc\n' }) }))).toEqual(UNREAD);
+  });
+  test("a colon line before the key: unknown, never ok, though the shell exported the key (Bun reads the next line as the colon key's value)", async () => {
+    const r = await probeEnv("WIKI_FLAG", deps({ readEnvFile: async () => ({ text: "OTHER_SETTING:\nWIKI_FLAG=1\n" }), processHasEnv: () => true }));
+    expect(r).toEqual({ state: "unknown", why: ".env has a line muninn cannot read the way Bun does" });
+    // Bun keeps AA=x (the `AA=` line is BB's value): not «empty value».
+    expect((await probeEnv("AA", deps({ readEnvFile: async () => ({ text: "AA=x\nBB:\nAA=\n" }) }))).state).toBe("unknown");
+    // Bun sets E: not «not in .env».
+    expect((await probeEnv("E", deps({ readEnvFile: async () => ({ text: "F:'\nE=x'\n" }) }))).state).toBe("unknown");
   });
   test("no answer carries a value", async () => {
     for (const over of [{}, { processHasEnv: () => false }]) for (const k of ["SET_KEY", "BLANK_KEY", "NOPE"]) expect(JSON.stringify(await probeEnv(k, deps(over)))).not.toContain("s3cr3t");
@@ -172,6 +183,26 @@ describe("checkout", () => {
   test("a merge-base that fails otherwise: unknown", async () => {
     expect((await probeCheckout("muninn", deps({}, { ancestor: EXIT(128) }))).state).toBe("unknown");
   });
+  test("every git call the probe makes, repo lookup included, runs with replace objects, grafts and lazy fetch off", async () => {
+    const calls: string[][] = [];
+    const envs: (Readonly<Record<string, string>> | undefined)[] = [];
+    expect((await probeCheckout("muninn", deps({}, {}, calls, envs))).state).toBe("ok");
+    const OFF = { GIT_NO_REPLACE_OBJECTS: "1", GIT_GRAFT_FILE: "/dev/null", GIT_NO_LAZY_FETCH: "1" };
+    expect(calls.map((c, i) => [c[0], envs[i]])).toEqual(calls.map((c) => [c[0], OFF]));
+    // findRepo's two reads, the config read, ls-remote, cat-file, merge-base.
+    expect(calls.map((c) => c[0])).toEqual(["rev-parse", "remote", "config", "ls-remote", "cat-file", "merge-base"]);
+  });
+  test("a partial clone (a promisor remote or extensions.partialclone): unknown before any object lookup", async () => {
+    const calls: string[][] = [];
+    const r = await probeCheckout("muninn", deps({}, { promisor: OK("remote.origin.promisor true\n") }, calls));
+    expect(r).toEqual({ state: "unknown", why: "muninn is a partial clone: muninn does not look up objects it would have to fetch" });
+    expect(calls.some((c) => ["cat-file", "merge-base", "ls-remote"].includes(c[0]!))).toBe(false);
+    expect(calls.find((c) => c[0] === "config")).toEqual(["config", "--get-regexp", "^(remote\\..*\\.promisor|extensions\\.partialclone)$"]);
+    // The config read failing any way but «no match» (exit 1) proves nothing.
+    expect((await probeCheckout("muninn", deps({}, { promisor: EXIT(128) }))).state).toBe("unknown");
+    expect((await probeCheckout("muninn", deps({}, { promisor: TIMED_OUT }))).state).toBe("unknown");
+    expect((await probeCheckout("muninn", deps({}, { promisor: { ok: false, stdout: "", stderr: "error: x", exitCode: 1 } }))).state).toBe("unknown");
+  });
   test("no roots, a repo not found: unknown", async () => {
     expect(await probeCheckout("muninn", deps({ roots: null }))).toEqual({ state: "unknown", why: "DECISION_TRIAGE_REPO_ROOTS is not set, so muninn cannot be found" });
     expect((await probeCheckout("huginn", deps())).state).toBe("unknown");
@@ -202,6 +233,69 @@ describe("checkout, real git: a stale local origin/HEAD", () => {
     const mainTip = sh(work, "rev-parse", "HEAD");
     const r = await probeCheckout("muninn", deps({ git: realGit, roots: { dirs: [], named: new Map([["muninn", clone]]) } }));
     expect(r).toEqual({ state: "not-yet", why: `muninn does not contain origin's main tip ${mainTip.slice(0, 7)}: pull` });
+  });
+});
+
+describe("checkout, real git: replace refs and a partial clone", () => {
+  const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: ENV, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  /** A bare `muninn.git` with one commit on main, and a work clone that pushes. */
+  function remoteWithOneCommit() {
+    const base = realpathSync(testTempDirSync(path.join(tmpdir(), "step-probes-git-")));
+    const remote = path.join(base, "muninn.git");
+    const work = path.join(base, "work");
+    sh(base, "init", "-q", "--bare", "-b", "main", remote);
+    sh(remote, "config", "uploadpack.allowFilter", "true");
+    sh(base, "clone", "-q", remote, work);
+    writeFileSync(path.join(work, "f"), "one\n");
+    sh(work, "add", "f");
+    sh(work, "commit", "-q", "-m", "one");
+    sh(work, "push", "-q", "origin", "HEAD:main");
+    return { base, remote, work };
+  }
+  const realDeps = (clone: string) => deps({ git: realGit, roots: { dirs: [], named: new Map([["muninn", clone]]) } });
+
+  test("HEAD an orphan commit that `git replace` swaps for a fake child of origin's tip: not-yet, never ok", async () => {
+    const { base, remote } = remoteWithOneCommit();
+    const clone = path.join(base, "clone");
+    sh(base, "clone", "-q", remote, clone);
+    const tip = sh(clone, "rev-parse", "HEAD");
+    sh(clone, "checkout", "-q", "--orphan", "lonely");
+    sh(clone, "commit", "-q", "-m", "orphan");
+    const orphan = sh(clone, "rev-parse", "HEAD");
+    const fake = sh(clone, "commit-tree", `${orphan}^{tree}`, "-p", tip, "-m", "fake child");
+    sh(clone, "replace", orphan, fake);
+    // The precondition: honouring replace refs, git itself says the tip is in HEAD.
+    expect(() => sh(clone, "merge-base", "--is-ancestor", tip, "HEAD")).not.toThrow();
+    expect(await probeCheckout("muninn", realDeps(clone))).toEqual({ state: "not-yet", why: `muninn does not contain origin's main tip ${tip.slice(0, 7)}: pull` });
+  });
+
+  test("an info/grafts parent the same way: not-yet, never ok", async () => {
+    const { base, remote } = remoteWithOneCommit();
+    const clone = path.join(base, "clone");
+    sh(base, "clone", "-q", remote, clone);
+    const tip = sh(clone, "rev-parse", "HEAD");
+    sh(clone, "checkout", "-q", "--orphan", "lonely");
+    sh(clone, "commit", "-q", "-m", "orphan");
+    writeFileSync(path.join(clone, ".git", "info", "grafts"), `${sh(clone, "rev-parse", "HEAD")} ${tip}\n`);
+    expect(() => sh(clone, "merge-base", "--is-ancestor", tip, "HEAD")).not.toThrow();
+    expect((await probeCheckout("muninn", realDeps(clone))).state).toBe("not-yet");
+  });
+
+  test("a blob:none partial clone behind origin: unknown, and nothing is fetched into it", async () => {
+    const { base, remote, work } = remoteWithOneCommit();
+    const clone = path.join(base, "partial");
+    sh(base, "clone", "-q", "--filter=blob:none", `file://${remote}`, clone);
+    writeFileSync(path.join(work, "f"), "two\n");
+    sh(work, "commit", "-q", "-am", "two");
+    sh(work, "push", "-q", "origin", "HEAD:main");
+    const packs = () => readdirSync(path.join(clone, ".git", "objects", "pack")).sort();
+    const loose = () => readdirSync(path.join(clone, ".git", "objects")).sort();
+    const before = { packs: packs(), loose: loose() };
+    const r = await probeCheckout("muninn", realDeps(clone));
+    expect({ packs: packs().length, loose: loose() }).toEqual({ packs: before.packs.length, loose: before.loose });
+    expect(packs()).toEqual(before.packs);
+    expect(r).toEqual({ state: "unknown", why: "muninn is a partial clone: muninn does not look up objects it would have to fetch" });
   });
 });
 
