@@ -20,6 +20,14 @@
  *     malformed body and an answer released after the reader moved on draw
  *     nothing; copying a chipped row copies what it copies with no chip; the
  *     chip is named in words, describes its reasons and is reached by Tab.
+ *  4. The slot is a fixed box and the reasons an overlay: on a thirty-row lane
+ *     (tight and loose, code spans, links, sub-items) no Done moves in page
+ *     coordinates at 1280, 768, 414, 375 or 320 px when the answer lands (any
+ *     state, three machines, or none) or row 2's reasons open and close; the
+ *     reasons stay in the viewport and on top; the chip is one glyph; Escape,
+ *     a second activation, a click outside and focus leaving close them, one
+ *     at a time; print hides them; each glyph's tone reads at 4.5:1 in both
+ *     explicit and both system themes.
  *
  * One muninn on its own port (Done's scope needs WORK_MAP_WIKIS and
  * WIKI_ANSWER_WIKIS; the migration probe reads the test database), a temp git
@@ -34,7 +42,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { token } from "./contrast.ts";
+import { paintedContrast, token } from "./contrast.ts";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
@@ -55,7 +63,8 @@ const PAGE = [
   '2. Apply the old migration. <Check migration="086" />',
   '3. Apply the missing migration. <Check migration="999" />',
   "4. Water the plants.",
-  '5. Restart muninn. <Check migration="086" restart="3010" />',
+  // This spec's own muninn: a port muninn cannot prove restarted yet.
+  `5. Restart muninn. <Check migration="086" restart="${PORT}" />`,
   "\n</Lane>\n",
   "</NextMoves>\n",
 ].join("\n");
@@ -77,6 +86,35 @@ const PAGES: Record<string, string> = {
   // A loose list; its third step holds a paragraph, so Done refuses it and its chip stays after its text.
   [REL_L]: lanePage("Check fixture loose", ['1. Apply the loose step. <Check migration="086" />', "", '2. Go. <Check migration="999" />', "", '3. Apply the step with a paragraph. <Check migration="086" />', "", "   A paragraph under it."]),
 };
+
+/**
+ * Thirty rows in one lane: a tight list, a paragraph, a loose list. Row lengths
+ * step through many widths so some row ends just short of the edge at every
+ * viewport; rows end in code spans and links; two hold sub-items (no Done
+ * there: Done refuses a nested list). Every state and two machine counts.
+ */
+const REL_30 = "plans/e2e-checks-thirty.mdx";
+const WORDS = "apply the change and then read what the probe says about it before you move on to the next".split(" ");
+const words = (n: number) => Array.from({ length: n }, (_, i) => WORDS[i % WORDS.length]).join(" ");
+const TAGS = ['<Check migration="086" />', '<Check migration="999" />', `<Check migration="086" restart="${PORT}" />`, '<Check migration="086" on="laptop,mini" />', `<Check env="${KEY}" />`];
+const tag = (i: number) => TAGS[i % TAGS.length];
+const THIRTY_TIGHT = Array.from({ length: 16 }, (_, i) => {
+  const n = i + 1;
+  if (n === 1) return `1. Go. ${tag(0)}`;
+  if (n === 2) return `2. Open the reasons on this row. ${tag(1)}`;
+  if (n === 4) return `4. Run \`bun run db:migrate\` ${tag(3)}`;
+  if (n === 6) return `6. Read [the runbook](https://example.invalid/runbook) ${tag(5)}`;
+  if (n === 9) return `9. Tidy the sub-items. ${tag(8)}\n   - one sub-item\n   - another sub-item`;
+  return `${n}. Step ${n}: ${words(3 + ((i * 7) % 29))}. ${tag(i)}`;
+});
+const THIRTY_LOOSE = Array.from({ length: 14 }, (_, i) => {
+  const n = i + 1;
+  if (n === 3) return `3. Run \`git push origin main\` ${tag(2)}\n`;
+  if (n === 5) return `5. Nest it. ${tag(4)}\n   - a nested row\n`;
+  if (n === 8) return `8. See [[e2e-checks]] and [the notes](https://example.invalid/notes) ${tag(7)}\n`;
+  return `${n}. Loose ${n}: ${words(2 + ((i * 11) % 31))}. ${tag(i + 1)}\n`;
+});
+PAGES[REL_30] = lanePage("Check fixture thirty", [...THIRTY_TIGHT, "", "Then, when those hold:", "", ...THIRTY_LOOSE]);
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "e2e", GIT_AUTHOR_EMAIL: "e2e@example.invalid", GIT_COMMITTER_NAME: "e2e", GIT_COMMITTER_EMAIL: "e2e@example.invalid" };
 const git = (root: string, ...args: string[]) => execFileSync("git", ["-C", root, ...args], { stdio: "ignore", env: GIT_ENV });
@@ -132,15 +170,15 @@ async function openPage(p: Page): Promise<void> {
 test.describe.serial("owner-step check chips", () => {
   test("each tagged step shows what its probes proved; the untagged one shows nothing", async ({ page: p }) => {
     await openPage(p);
-    await expect(chip(p, "Apply the old migration")).toHaveText("✓ checked");
+    await expect(chip(p, "Apply the old migration")).toHaveText("✓");
     await expect(chip(p, "Apply the old migration")).toHaveAttribute("data-state", "ok");
     await expect(chip(p, "Apply the old migration")).toHaveAttribute("title", "migration=086: migration 086 is applied on this machine's database");
-    await expect(chip(p, "Apply the missing migration")).toHaveText("○ not yet");
-    await expect(chip(p, "Add the key")).toHaveText("○ not yet");
+    await expect(chip(p, "Apply the missing migration")).toHaveText("○");
+    await expect(chip(p, "Add the key")).toHaveText("○");
     await expect(chip(p, "Add the key")).toHaveAttribute("title", new RegExp(`^env=${KEY}: ${KEY} is not in \\.env`));
-    await expect(chip(p, "Restart muninn")).toHaveText("? unknown");
+    await expect(chip(p, "Restart muninn")).toHaveText("?");
     await expect(chip(p, "Restart muninn")).toHaveAttribute("data-state", "unknown");
-    await expect(chip(p, "Restart muninn")).toHaveAttribute("title", /restart=3010: muninn cannot prove this yet/);
+    await expect(chip(p, "Restart muninn")).toHaveAttribute("title", new RegExp(`restart=${PORT}: muninn cannot prove this yet`));
     await expect(row(p, "Water the plants").locator(".step-check")).toHaveCount(0);
     await expect(p.locator(".wiki-article .step-chip")).toHaveCount(4);
   });
@@ -159,7 +197,7 @@ test.describe.serial("owner-step check chips", () => {
     expect(await readFile(path.join(root, REL), "utf8")).not.toContain("missing migration");
     // The page rendered again with the new hash: the steps left get their chips.
     await p.locator(".wiki-article .nm-lane.nm-you").evaluate((d) => ((d as HTMLDetailsElement).open = true));
-    await expect(chip(p, "Apply the old migration")).toHaveText("✓ checked");
+    await expect(chip(p, "Apply the old migration")).toHaveText("✓");
     await expect(p.locator(".wiki-article .step-chip")).toHaveCount(3);
   });
 });
@@ -173,11 +211,7 @@ async function openAt(p: Page, rel: string): Promise<void> {
 const CHECKS = "**/api/wiki/step-checks?*";
 const dones = (p: Page) => p.locator(".wiki-article [data-step-done]");
 const chips = (p: Page) => p.locator(".wiki-article .step-chip");
-/**
- * Each Done's box on its own row: relative to its `li`, so a chip that wraps
- * onto a second line of an EARLIER row (content below that row's Done, which
- * moves every later row down) is not read as this row's Done moving.
- */
+/** Each Done's box on its own row, relative to its `li`; `donePageBoxes` below measures the page, where an earlier row growing counts too. */
 const doneBoxes = (p: Page) =>
   dones(p).evaluateAll((els) => els.map((e) => {
     const r = e.getBoundingClientRect();
@@ -219,7 +253,7 @@ test.describe("owner-step check chips, answer shaped", () => {
         if (rel === REL_L) {
           const lone = row(p, "Apply the step with a paragraph");
           await expect(lone.locator("[data-step-done]")).toHaveCount(0);
-          await expect(lone.locator(":scope > .step-check > .step-chip")).toHaveText("✓ checked");
+          await expect(lone.locator(":scope > .step-check > .step-chip")).toHaveText("✓");
         }
         before.forEach((b, i) => {
           expect(Math.abs(after[i]!.x - b.x), `row ${i} x ${b.x}→${after[i]!.x}`).toBeLessThanOrEqual(1);
@@ -260,7 +294,7 @@ test.describe("owner-step check chips, answer shaped", () => {
     );
     await openAt(p, REL_B);
     const c = row(p, "Check two machines").locator(".step-chip");
-    await expect(c).toHaveText("laptop ✓ · mini ?");
+    await expect(c).toHaveText("?");
     await expect(c).toHaveAttribute("data-state", "unknown");
     await expect(c).toHaveAccessibleName("Check: unknown (laptop checked, mini unknown)");
     const color = await c.evaluate((e) => getComputedStyle(e).color);
@@ -310,7 +344,7 @@ test.describe("owner-step check chips, answer shaped", () => {
   test("copying a chipped row copies exactly what the row copies with no chip", async ({ page: p }) => {
     await openAt(p, REL_B);
     const li = row(p, "Apply the old migration");
-    await expect(li.locator(".step-chip")).toHaveText("✓ checked");
+    await expect(li.locator(".step-chip")).toHaveText("✓");
     await expect(li.locator("[data-step-done]")).toBeVisible();
     const copy = async () => {
       await li.evaluate((el) => {
@@ -358,4 +392,240 @@ test.describe("owner-step check chips, answer shaped", () => {
     await expect(li.locator(".wiki-step-done-panel")).toHaveCount(0);
     expect(asked).toEqual([]);
   });
+});
+
+/** Every Done's box in page coordinates: relative to the article's own origin, so a row that grows pushes every later Done and that counts. */
+const donePageBoxes = (p: Page) =>
+  p.evaluate(() => {
+    const art = document.querySelector(".wiki-article:not(.wiki-ask-article)")!.getBoundingClientRect();
+    return Array.from(document.querySelectorAll(".wiki-article [data-step-done]")).map((e) => {
+      const r = e.getBoundingClientRect();
+      return { x: r.x - art.x, y: r.y - art.y, w: r.width, h: r.height };
+    });
+  });
+type Box = { x: number; y: number; w: number; h: number };
+/** How far the Done buttons moved between two measures: the worst edge, and how many moved over 1 px. */
+function moved(a: Box[], b: Box[]): { max: number; count: number } {
+  expect(b.length).toBe(a.length);
+  const d = a.map((x, i) => Math.max(Math.abs(x.x - b[i]!.x), Math.abs(x.y - b[i]!.y), Math.abs(x.w - b[i]!.w), Math.abs(x.h - b[i]!.h)));
+  return { max: Math.round(Math.max(0, ...d) * 10) / 10, count: d.filter((v) => v > 1).length };
+}
+const pop = (p: Page) => p.locator(".wiki-article .step-chip-pop:visible");
+/** The open popover's box, the viewport's width, and whether its own bottom line is what the page shows there (nothing paints over it, nothing clips it). */
+const popBox = (p: Page) =>
+  pop(p).evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.x + r.width / 2, r.bottom - 3);
+    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, vw: document.documentElement.clientWidth, vh: innerHeight, onTop: !!hit && el.contains(hit) };
+  });
+/** Every step on several machines, one of them unknown: the widest answer the route can give. */
+const threeMachines = shaped((a) => ({
+  ...a,
+  steps: (a.steps as Record<string, unknown>[]).map((s) => ({
+    ...s,
+    state: "unknown",
+    machines: ["laptop-with-a-long-name", "mini", "pod"].map((name, k) => ({ name, state: k === 1 ? "unknown" : "ok", why: "", probes: [{ kind: "migration", value: "086", state: "ok", why: `applied on ${name}` }] })),
+  })),
+}));
+
+test.describe("owner-step check chips: a fixed box, and reasons over the page", () => {
+  test.use({ permissions: ["clipboard-read", "clipboard-write"] });
+
+  for (const width of [1280, 768, 414, 375, 320]) {
+    test(`on thirty rows nothing the checks do moves any Done: the answer, opening and closing row 2's reasons (${width} px)`, async ({ page: p }) => {
+      await p.setViewportSize({ width, height: 900 });
+      const g = gate();
+      await p.route(CHECKS, async (route) => (await g.wait, route.continue()));
+      await openAt(p, REL_30);
+      await expect(dones(p)).toHaveCount(28);
+      const before = await donePageBoxes(p);
+      g.release();
+      await expect(chips(p)).toHaveCount(30);
+      const answered = await donePageBoxes(p);
+      const onAnswer = moved(before, answered);
+      console.log(`MOVED ${width}px answer ${JSON.stringify(onAnswer)}`);
+      expect(onAnswer, "the answer arriving").toEqual({ max: 0, count: 0 });
+      const row2 = row(p, "Open the reasons on this row").locator(".step-chip");
+      await row2.click();
+      await expect(pop(p)).toHaveCount(1);
+      const open = await donePageBoxes(p);
+      const box = await popBox(p);
+      await p.keyboard.press("Escape");
+      await expect(pop(p)).toHaveCount(0);
+      const closed = await donePageBoxes(p);
+      const m = { answer: moved(before, answered), open: moved(before, open), close: moved(before, closed) };
+      console.log(`MOVED ${width}px ${JSON.stringify(m)} pop ${JSON.stringify(box)}`);
+      expect(m).toEqual({ answer: { max: 0, count: 0 }, open: { max: 0, count: 0 }, close: { max: 0, count: 0 } });
+      expect(box.left).toBeGreaterThanOrEqual(0);
+      expect(box.right).toBeLessThanOrEqual(box.vw);
+      expect(box.onTop).toBe(true);
+    });
+  }
+
+  for (const width of [1280, 320]) {
+    test(`three machines on every step, or no answer at all, moves no Done either (${width} px)`, async ({ page: p }) => {
+      await p.setViewportSize({ width, height: 900 });
+      const g = gate();
+      await p.route(CHECKS, async (route) => (await g.wait, threeMachines(route)));
+      await openAt(p, REL_30);
+      await expect(dones(p)).toHaveCount(28);
+      const before = await donePageBoxes(p);
+      g.release();
+      await expect(chips(p)).toHaveCount(30);
+      const onAnswer = moved(before, await donePageBoxes(p));
+      console.log(`MOVED three machines ${width}px ${JSON.stringify(onAnswer)}`);
+      expect(onAnswer).toEqual({ max: 0, count: 0 });
+      await expect(chips(p).first()).toHaveText("?");
+      // No answer: a 500, then the client's wait runs out with nothing drawn.
+      const q = await p.context().newPage();
+      await q.setViewportSize({ width, height: 900 });
+      await q.route(CHECKS, (route) => route.fulfill({ status: 500, body: "{}" }));
+      await openAt(q, REL_30);
+      await expect(dones(q)).toHaveCount(28);
+      const bare = await donePageBoxes(q);
+      await q.evaluate(() => new Promise((r) => setTimeout(r, 500)));
+      expect(moved(bare, await donePageBoxes(q))).toEqual({ max: 0, count: 0 });
+      // And the empty slots hold the same boxes the chips later fill: the answered page's Done buttons sit where the unanswered page's do.
+      expect(moved(bare, before)).toEqual({ max: 0, count: 0 });
+      await q.close();
+    });
+  }
+
+  for (const width of [320, 375, 1280]) {
+    test(`the reasons stay inside the viewport and over the page, for the chip furthest right, furthest left and last (${width} px)`, async ({ page: p }) => {
+      await p.setViewportSize({ width, height: 900 });
+      await openAt(p, REL_30);
+      await expect(chips(p)).toHaveCount(30);
+      await expect(dones(p)).toHaveCount(28);
+      const xs = await chips(p).evaluateAll((els) => els.map((e) => e.getBoundingClientRect().x));
+      const right = xs.indexOf(Math.max(...xs));
+      const left = xs.indexOf(Math.min(...xs));
+      // The last row too: its reasons run past the lane's bottom edge, which clips its overflow in the compact block.
+      for (const [which, i] of [["right", right], ["left", left], ["last", xs.length - 1]] as const) {
+        await chips(p).nth(i).scrollIntoViewIfNeeded();
+        const before = await donePageBoxes(p);
+        await chips(p).nth(i).click();
+        await expect(pop(p)).toHaveCount(1);
+        const box = await popBox(p);
+        console.log(`POP ${width}px ${which} chip x=${Math.round(xs[i]!)} ${JSON.stringify(box)}`);
+        expect(box.left, which).toBeGreaterThanOrEqual(0);
+        expect(box.right, which).toBeLessThanOrEqual(box.vw);
+        expect(box.onTop, which).toBe(true);
+        expect(moved(before, await donePageBoxes(p))).toEqual({ max: 0, count: 0 });
+        await chips(p).nth(i).click();
+        await expect(pop(p)).toHaveCount(0);
+      }
+    });
+  }
+
+  test("the chip is one glyph; its words are its name and the reasons'", async ({ page: p }) => {
+    await openAt(p, REL_B);
+    await expect(chips(p)).toHaveCount(4);
+    expect(await chips(p).allTextContents()).toEqual(["✓", "?", "✓", "○"]);
+    const two = row(p, "Check two machines").locator(".step-chip");
+    // This muninn has no MUNINN_MACHINE, so neither machine is proved.
+    await expect(two).toHaveAccessibleName("Check: unknown (laptop unknown, mini unknown)");
+    await two.click();
+    const box = pop(p);
+    await expect(box.locator(".step-chip-state")).toHaveText("Check: unknown");
+    await expect(box.locator(".step-chip-machine")).toHaveText(["laptop: unknown", "mini: unknown"]);
+    await expect(box.locator(".step-chip-why")).toContainText("laptop: migration=086:");
+  });
+
+  test("the reasons open on activation only and close on Escape, a second activation, a click outside and focus leaving; one at a time", async ({ page: p }) => {
+    await openAt(p, REL_B);
+    await expect(chips(p)).toHaveCount(4);
+    const li = row(p, "Apply the old migration");
+    const c = li.locator(".step-chip");
+    const done = li.locator("[data-step-done]");
+    const asked: string[] = [];
+    p.on("request", (r) => asked.push(r.url()));
+    // What reaches the shell: an Escape the chip took, or a click on the chip, does not.
+    await p.evaluate(() => {
+      const w = window as unknown as { seen: string[] };
+      w.seen = [];
+      document.addEventListener("keydown", (e) => e.key === "Escape" && w.seen.push("escape"));
+      document.querySelector(".wiki-article")!.addEventListener("click", (e) => (e.target as Element).closest(".step-chip") && w.seen.push("click"));
+    });
+    const seen = () => p.evaluate(() => (window as unknown as { seen: string[] }).seen);
+    const popId = await c.getAttribute("aria-controls");
+    expect(popId).toMatch(/^step-check-pop-\d+-\d+$/);
+    const ids = await chips(p).evaluateAll((els) => els.map((e) => e.getAttribute("aria-controls")));
+    expect(new Set(ids).size).toBe(4);
+    expect(await p.locator(`[id="${popId}"]`).count()).toBe(1);
+    await expect(c).toHaveAttribute("aria-expanded", "false");
+    // Focus alone opens nothing.
+    await done.focus();
+    await p.keyboard.press("Tab");
+    await expect(c).toBeFocused();
+    await expect(pop(p)).toHaveCount(0);
+    await p.keyboard.press("Enter");
+    await expect(p.locator(`[id="${popId}"]`)).toBeVisible();
+    await expect(c).toHaveAttribute("aria-expanded", "true");
+    await expect(c).toHaveAccessibleDescription("migration=086: migration 086 is applied on this machine's database");
+    await p.keyboard.press("Escape");
+    await expect(pop(p)).toHaveCount(0);
+    await expect(c).toBeFocused();
+    await expect(c).toHaveAttribute("aria-expanded", "false");
+    expect(await seen()).toEqual([]);
+    // A second activation closes.
+    await p.keyboard.press("Space");
+    await expect(pop(p)).toHaveCount(1);
+    await p.keyboard.press("Space");
+    await expect(pop(p)).toHaveCount(0);
+    // A click outside closes.
+    await c.click();
+    await expect(pop(p)).toHaveCount(1);
+    await p.locator(".wiki-article-head h1").click();
+    await expect(pop(p)).toHaveCount(0);
+    // Focus leaving the chip closes: Tab goes on to the next row's Done.
+    await c.focus();
+    await p.keyboard.press("Enter");
+    await expect(pop(p)).toHaveCount(1);
+    await p.keyboard.press("Tab");
+    await expect(row(p, "Check two machines").locator("[data-step-done]")).toBeFocused();
+    await expect(pop(p)).toHaveCount(0);
+    // One at a time.
+    await c.click();
+    await row(p, "Go.").locator(".step-chip").click();
+    await expect(pop(p)).toHaveCount(1);
+    await expect(row(p, "Go.").locator(".step-chip-pop")).toBeVisible();
+    await expect(c).toHaveAttribute("aria-expanded", "false");
+    expect(await seen()).toEqual([]);
+    expect(asked).toEqual([]);
+  });
+
+  test("print leaves the slot and its reasons out", async ({ page: p }) => {
+    await openAt(p, REL_B);
+    await expect(chips(p)).toHaveCount(4);
+    await row(p, "Go.").locator(".step-chip").click();
+    await expect(pop(p)).toHaveCount(1);
+    await p.emulateMedia({ media: "print" });
+    expect(await p.locator(".wiki-article .step-check").evaluateAll((els) => els.map((e) => getComputedStyle(e).display))).toEqual(["none", "none", "none", "none"]);
+    await expect(pop(p)).toHaveCount(0);
+  });
+
+  for (const [mode, setup] of [
+    ["data-theme=light", async (p: Page) => p.evaluate(() => document.documentElement.setAttribute("data-theme", "light"))],
+    ["data-theme=dark", async (p: Page) => p.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"))],
+    ["system light", async (p: Page) => p.emulateMedia({ colorScheme: "light" })],
+    ["system dark", async (p: Page) => p.emulateMedia({ colorScheme: "dark" })],
+  ] as const) {
+    test(`each glyph reads at 4.5:1 in its tone (${mode})`, async ({ page: p }) => {
+      await openAt(p, REL_B);
+      await expect(chips(p)).toHaveCount(4);
+      await setup(p);
+      await p.mouse.move(0, 0);
+      const out: string[] = [];
+      for (const [text, state, tok] of [["Go.", "ok", "--tone-good"], ["Apply a long step", "not-yet", "--tone-warn"], ["Check two machines", "unknown", "--text-secondary"]] as const) {
+        const c = row(p, text).locator(".step-chip");
+        await expect(c).toHaveAttribute("data-state", state);
+        expect(await c.evaluate((e) => getComputedStyle(e).color), `${state} colour is ${tok}`).toBe(await token(p, tok));
+        const ratio = await paintedContrast(c);
+        out.push(`${state} ${ratio.toFixed(2)}`);
+        expect(ratio, `${state} contrast`).toBeGreaterThanOrEqual(4.5);
+      }
+      console.log(`CONTRAST ${mode}: ${out.join(", ")}`);
+    });
+  }
 });

@@ -67,7 +67,7 @@ describe("step-check chips", () => {
     const urls: string[] = [];
     await enhanceStepChecks(a, ctx(sha256(PAGE)), async (u) => (urls.push(u), respond(await answer())()));
     expect(urls).toEqual(["/api/wiki/step-checks?wiki=w&relPath=plans%2Fp.mdx"]);
-    expect(chips(a)).toEqual(["✓ checked", "", "○ not yet", "laptop ✓ · mini ?"]);
+    expect(chips(a)).toEqual(["✓", "", "○", "?"]);
     const chip = a.querySelector<HTMLElement>(".step-chip")!;
     expect(chip.dataset.state).toBe("ok");
     expect(chip.title).toBe("env=HAVE: HAVE is set in .env and in the running process");
@@ -79,7 +79,7 @@ describe("step-check chips", () => {
     const a = mount();
     const full = await answer();
     await enhanceStepChecks(a, ctx(sha256(PAGE)), respond({ ...full, steps: full.steps.filter((s) => s.row === 2) }));
-    expect(chips(a)).toEqual(["", "", "○ not yet", ""]);
+    expect(chips(a)).toEqual(["", "", "○", ""]);
   });
 
   test("an answer for other page bytes, an error, a thrown fetch or a malformed answer: no chips", async () => {
@@ -127,11 +127,13 @@ describe("step-check chips: what a route string can do", () => {
     expect(a.querySelectorAll("img, script, b").length).toBe(0);
     expect(a.querySelectorAll(".step-chip").length).toBe(3);
     const many = rowLi(a, 3).querySelector<HTMLElement>(".step-chip")!;
-    expect(many.textContent).toBe(`laptop${HOSTILE} \u2713 \u00B7 mini${HOSTILE} ?`);
+    expect(many.textContent).toBe("?");
+    expect(Array.from(a.ownerDocument.getElementById(many.getAttribute("aria-controls")!)!.querySelectorAll(".step-chip-machine")).map((m) => m.textContent)).toEqual([`laptop${HOSTILE}: checked`, `mini${HOSTILE}: unknown`]);
+    expect(many.getAttribute("aria-label")).toBe(`Check: unknown (laptop${HOSTILE} checked, mini${HOSTILE} unknown)`);
     expect(many.title).toBe([`laptop${HOSTILE}: kind${HOSTILE}=value${HOSTILE}: probe why ${HOSTILE}`, `mini${HOSTILE}: kind${HOSTILE}=value${HOSTILE}: probe why ${HOSTILE}`, `problem ${HOSTILE}`].join("\n"));
     // Every node the slot holds is the chip's own: its text and the reasons, as text.
     for (const slot of Array.from(a.querySelectorAll<HTMLElement>(".step-check"))) {
-      for (const el of Array.from(slot.querySelectorAll("*"))) expect(["step-chip", "step-chip-why"]).toContain(el.className);
+      for (const el of Array.from(slot.querySelectorAll("*"))) expect(["step-chip", "step-chip-pop", "step-chip-state", "step-chip-machine", "step-chip-why"]).toContain(el.className);
     }
   });
 
@@ -184,13 +186,15 @@ describe("step-check chips: state, name and placement", () => {
     expect(one.getAttribute("type")).toBe("button");
     const why = a.ownerDocument.getElementById(one.getAttribute("aria-describedby") ?? "")!;
     expect(why.textContent).toBe("env=HAVE: HAVE is set in .env and in the running process");
-    expect(why.hidden).toBe(true);
+    const pop = a.ownerDocument.getElementById(one.getAttribute("aria-controls") ?? "")!;
+    expect(pop.contains(why)).toBe(true);
+    expect(pop.hidden).toBe(true);
     expect(one.getAttribute("aria-expanded")).toBe("false");
     one.click();
-    expect(why.hidden).toBe(false);
+    expect(pop.hidden).toBe(false);
     expect(one.getAttribute("aria-expanded")).toBe("true");
     one.click();
-    expect(why.hidden).toBe(true);
+    expect(pop.hidden).toBe(true);
     expect(asked).toBe(1);
     // Every chip's reasons node has an id of its own.
     const ids = Array.from(a.querySelectorAll(".step-chip")).map((c) => c.getAttribute("aria-describedby"));
@@ -208,8 +212,116 @@ describe("step-check chips: state, name and placement", () => {
 
 describe("checkChip", () => {
   test("an unknown state reads unknown; problems join the title", () => {
-    expect(checkChip({ key: "k", lane: 0, row: 0, state: "bogus" as never, machines: [], problems: ["p1"] })).toEqual({ state: "unknown", text: "? unknown", name: "Check: unknown", title: "p1" });
+    expect(checkChip({ key: "k", lane: 0, row: 0, state: "bogus" as never, machines: [], problems: ["p1"] })).toEqual({ state: "unknown", glyph: "?", name: "Check: unknown", head: "Check: unknown", machines: [], title: "p1" });
     // An inherited property name is no state either.
-    expect(checkChip({ key: "k", lane: 0, row: 0, state: "toString" as never, machines: [{ name: "a", state: "constructor" as never, why: "", probes: [] }, { name: "b", state: "ok", why: "", probes: [] }] }).text).toBe("a ? \u00B7 b \u2713");
+    const c = checkChip({ key: "k", lane: 0, row: 0, state: "toString" as never, machines: [{ name: "a", state: "constructor" as never, why: "", probes: [] }, { name: "b", state: "ok", why: "", probes: [] }] });
+    expect([c.glyph, c.machines, c.name]).toEqual(["?", ["a: unknown", "b: checked"], "Check: unknown (a unknown, b checked)"]);
+  });
+});
+
+describe("step-check chips: one glyph, and the reasons as a popover (fix round 2 batch 3)", () => {
+  const popOf = (a: HTMLElement, chip: HTMLElement) => a.ownerDocument.getElementById(chip.getAttribute("aria-controls") ?? "");
+  const key = (el: Element, k: string) => el.dispatchEvent(new (el.ownerDocument.defaultView as unknown as typeof globalThis).KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+
+  test("the chip shows one glyph and no words; the words are its name", async () => {
+    const a = mount();
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
+    expect(chips(a)).toEqual(["✓", "", "○", "?"]);
+    expect(rowLi(a, 3).querySelector(".step-chip")!.getAttribute("aria-label")).toBe("Check: unknown (laptop checked, mini unknown)");
+  });
+
+  test("the popover holds the state in words, one line per machine and the reasons, as text", async () => {
+    const a = mount();
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
+    const chip = rowLi(a, 3).querySelector<HTMLElement>(".step-chip")!;
+    const pop = popOf(a, chip)!;
+    expect(pop).not.toBeNull();
+    expect(chip.parentElement!.contains(pop)).toBe(true);
+    expect(pop.hidden).toBe(true);
+    expect(pop.querySelector(".step-chip-state")!.textContent).toBe("Check: unknown");
+    expect(Array.from(pop.querySelectorAll(".step-chip-machine")).map((m) => m.textContent)).toEqual(["laptop: checked", "mini: unknown"]);
+    const why = a.ownerDocument.getElementById(chip.getAttribute("aria-describedby") ?? "")!;
+    expect(pop.contains(why)).toBe(true);
+    expect(why.textContent).toBe(chip.title);
+    // One machine: no machine lines.
+    const one = popOf(a, rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!)!;
+    expect(one.querySelector(".step-chip-state")!.textContent).toBe("Check: checked");
+    expect(one.querySelectorAll(".step-chip-machine").length).toBe(0);
+  });
+
+  test("ids are unique per row and the same on a fresh render of the same page", async () => {
+    const full = await answer();
+    const idsOf = async () => {
+      const a = mount();
+      await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(full));
+      return Array.from(a.querySelectorAll(".step-chip")).map((c) => [c.getAttribute("aria-controls"), c.getAttribute("aria-describedby")]);
+    };
+    const first = await idsOf();
+    expect(new Set(first.flat()).size).toBe(6);
+    expect(await idsOf()).toEqual(first);
+  });
+
+  test("activation toggles it; Escape closes it with focus on the chip and goes no further; a click outside closes it; only one is open", async () => {
+    const a = mount();
+    let asked = 0;
+    const full = await answer();
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), async () => (asked++, respond(full)()));
+    const doc = a.ownerDocument;
+    const reached: string[] = [];
+    doc.addEventListener("keydown", (e) => reached.push(`key:${(e as KeyboardEvent).key}`));
+    a.addEventListener("click", () => reached.push("click"));
+    const c0 = rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!;
+    const c2 = rowLi(a, 2).querySelector<HTMLElement>(".step-chip")!;
+    const p0 = popOf(a, c0)!;
+    const p2 = popOf(a, c2)!;
+    c0.click();
+    expect(p0.hidden).toBe(false);
+    expect(c0.getAttribute("aria-expanded")).toBe("true");
+    c0.click();
+    expect(p0.hidden).toBe(true);
+    expect(c0.getAttribute("aria-expanded")).toBe("false");
+    c0.click();
+    key(c0, "Escape");
+    expect(p0.hidden).toBe(true);
+    expect(doc.activeElement).toBe(c0);
+    // Escape with nothing open goes on to the shell.
+    key(c0, "Escape");
+    expect(reached).toEqual(["key:Escape"]);
+    c0.click();
+    c2.click();
+    expect(p0.hidden).toBe(true);
+    expect(c0.getAttribute("aria-expanded")).toBe("false");
+    expect(p2.hidden).toBe(false);
+    doc.body.dispatchEvent(new (doc.defaultView as unknown as typeof globalThis).PointerEvent("pointerdown", { bubbles: true }));
+    expect(p2.hidden).toBe(true);
+    // A pointerdown on the popover itself keeps it.
+    c2.click();
+    p2.dispatchEvent(new (doc.defaultView as unknown as typeof globalThis).PointerEvent("pointerdown", { bubbles: true }));
+    expect(p2.hidden).toBe(false);
+    expect(reached.filter((r) => r === "click")).toEqual([]);
+    expect(asked).toBe(1);
+  });
+
+  test("focus leaving the chip and its popover closes it", async () => {
+    const a = mount();
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
+    const c0 = rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!;
+    const c2 = rowLi(a, 2).querySelector<HTMLElement>(".step-chip")!;
+    c0.focus();
+    c0.click();
+    expect(popOf(a, c0)!.hidden).toBe(false);
+    c2.focus();
+    expect(popOf(a, c0)!.hidden).toBe(true);
+  });
+});
+
+describe("a task-list step takes no check (item 2: the render, the route and lint agree)", () => {
+  const TASKS = PAGE.replace('1. Add the key <Check env="HAVE" />', '1. [ ] Add the key <Check env="HAVE" />');
+  test("the reader renders no slot on a task-list row, and the route answers no step for it", async () => {
+    const a = mount(TASKS);
+    expect(a.querySelectorAll(".step-check").length).toBe(0);
+    expect(a.querySelector(".nm-body li.check-item")).not.toBeNull();
+    const got = await answerStepChecks(TASKS, { probes, machine: "laptop", cache: new ProbeCache() });
+    expect(got.steps).toEqual([]);
   });
 });

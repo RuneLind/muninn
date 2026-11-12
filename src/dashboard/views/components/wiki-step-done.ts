@@ -374,29 +374,119 @@ const CHIP: Record<CheckState, [glyph: string, label: string]> = { ok: ["\u2713"
 const known = (s: unknown): s is CheckState => typeof s === "string" && Object.prototype.hasOwnProperty.call(CHIP, s);
 const chipOf = (s: unknown) => (known(s) ? CHIP[s] : CHIP.unknown);
 
-/** A chip's text, its name and its title: one machine reads «✓ checked» (named «Check: checked»), several «laptop ✓ · mini ?»; the title holds every probe's why. */
-export function checkChip(step: CheckedStep): { state: CheckState; text: string; name: string; title: string } {
+/**
+ * A chip's glyph, its name, its popover's lines and its title. The glyph is
+ * all the row shows (✓, ○ or ?, the step's overall state); the words are the
+ * name, «Check: checked», with «(laptop checked, mini unknown)» for several
+ * machines, and the popover's. The title holds every probe's why.
+ */
+export function checkChip(step: CheckedStep): { state: CheckState; glyph: string; name: string; head: string; machines: string[]; title: string } {
   const state = known(step.state) ? step.state : "unknown";
   const ms = Array.isArray(step.machines) ? step.machines : [];
   const many = ms.length > 1;
-  const each = (i: 0 | 1, sep: string) => ms.map((m) => `${m.name ?? "here"} ${chipOf(m.state)[i]}`).join(sep);
-  const text = many ? each(0, " \u00B7 ") : chipOf(state).join(" ");
-  const name = `Check: ${CHIP[state][1]}${many ? ` (${each(1, ", ")})` : ""}`;
+  const head = `Check: ${CHIP[state][1]}`;
+  const machines = many ? ms.map((m) => `${m.name ?? "here"}: ${chipOf(m.state)[1]}`) : [];
+  const name = many ? `${head} (${ms.map((m) => `${m.name ?? "here"} ${chipOf(m.state)[1]}`).join(", ")})` : head;
   const title = ms
     .flatMap((m) => (Array.isArray(m.probes) ? m.probes : []).map((p) => `${many && m.name ? `${m.name}: ` : ""}${p.kind}=${p.value}: ${p.why}`))
     .concat(step.problems ?? [])
     .join("\n");
-  return { state, text, name, title };
+  return { state, glyph: CHIP[state][0], name, head, machines, title };
 }
 
-/** Done goes before its row's slot, whichever answer came first: a chip that lands late then only ever grows the row to Done's right or below it. */
+/** Done goes before its row's slot, whichever answer came first. The slot is a fixed box (see the styles), so what lands in it later moves nothing. */
 function slotAfterDone(li: Element): void {
   const slot = li.querySelector(":scope > .step-check");
   const done = li.querySelector(`:scope > [${STEP_DONE_ATTR}]`);
   if (slot && done) done.after(slot);
 }
 
-let whyIds = 0;
+const isNode = (t: unknown): t is Node => !!t && typeof (t as Node).nodeType === "number";
+
+/** The one open popover's close, so opening another closes it first. */
+let closeOpenPop: (() => void) | null = null;
+
+/**
+ * Place an open popover under its chip (above it when there is no room
+ * below), clamped 8 px inside the viewport. It is `position: fixed`, whose
+ * containing block may be an ancestor rather than the viewport (the lanes'
+ * `container-type` makes `.next-moves` one): its origin is measured at 0,0
+ * first, so the same arithmetic holds for either.
+ */
+function placePop(chip: HTMLElement, pop: HTMLElement): void {
+  pop.style.left = "0px";
+  pop.style.top = "0px";
+  const origin = pop.getBoundingClientRect();
+  const c = chip.getBoundingClientRect();
+  const win = chip.ownerDocument.defaultView!;
+  const vw = chip.ownerDocument.documentElement.clientWidth || win.innerWidth;
+  const vh = win.innerHeight;
+  const left = Math.max(8, Math.min(c.left, vw - origin.width - 8));
+  const below = c.bottom + 4;
+  const top = below + origin.height > vh - 8 && c.top - 4 - origin.height >= 8 ? c.top - 4 - origin.height : below;
+  pop.style.left = `${Math.round(left - origin.left)}px`;
+  pop.style.top = `${Math.round(top - origin.top)}px`;
+}
+
+/**
+ * The chip's popover: opens and closes on activation only (hover keeps the
+ * title), closes on Escape (focus stays on the chip), a pointer outside the
+ * slot, and focus leaving it. One open at a time; nothing is sent anywhere.
+ */
+function wirePop(slot: HTMLElement, chip: HTMLButtonElement, pop: HTMLElement): void {
+  const doc = slot.ownerDocument;
+  const win = doc.defaultView!;
+  const outside = (e: Event) => {
+    if (!slot.isConnected || !isNode(e.target) || !slot.contains(e.target)) close();
+  };
+  const follow = () => (slot.isConnected ? placePop(chip, pop) : close());
+  const close = () => {
+    if (pop.hidden) return;
+    pop.hidden = true;
+    chip.setAttribute("aria-expanded", "false");
+    doc.removeEventListener("pointerdown", outside, true);
+    win.removeEventListener("scroll", follow, true);
+    win.removeEventListener("resize", follow);
+    if (closeOpenPop === close) closeOpenPop = null;
+  };
+  const open = () => {
+    closeOpenPop?.();
+    pop.hidden = false;
+    chip.setAttribute("aria-expanded", "true");
+    placePop(chip, pop);
+    doc.addEventListener("pointerdown", outside, true);
+    win.addEventListener("scroll", follow, { capture: true, passive: true });
+    win.addEventListener("resize", follow);
+    closeOpenPop = close;
+  };
+  chip.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (pop.hidden) open();
+    else close();
+  });
+  // Escape closes an open popover, and the shell's own Escape handlers do not also run; with none open it goes on.
+  slot.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || pop.hidden) return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+    chip.focus({ preventScroll: true });
+  });
+  slot.addEventListener("focusout", (e) => {
+    const to = (e as FocusEvent).relatedTarget;
+    if (isNode(to) && slot.contains(to)) return;
+    if (to === null && !doc.hasFocus()) return; // the window lost focus: the reader comes back to it open
+    close();
+  });
+}
+
+const span = (doc: Document, cls: string, text: string) => {
+  const el = doc.createElement("span");
+  el.className = cls;
+  el.textContent = text;
+  return el;
+};
 
 /**
  * Fill the `.step-check` slot of each step the route answered with a chip.
@@ -426,31 +516,31 @@ export function enhanceStepChecks(article: HTMLElement, ctx: StepDonePageContext
       if (!li || !slot || slot.firstChild) continue;
       const c = checkChip(byKey.get(pair.key)!);
       const doc = article.ownerDocument;
+      // Ids from the row's place: unique on the page, the same on every render of it.
+      const id = `step-check-pop-${pair.lane}-${pair.row}`;
       // A button, so keyboard and touch reach the reasons: activating it shows or hides them, nothing else.
       const chip = doc.createElement("button");
       chip.type = "button";
       chip.className = "step-chip";
       chip.dataset.state = c.state;
-      chip.textContent = c.text;
+      chip.textContent = c.glyph;
       chip.title = c.title;
       chip.setAttribute("aria-label", c.name);
-      slot.appendChild(chip);
+      chip.setAttribute("aria-expanded", "false");
+      chip.setAttribute("aria-controls", id);
+      const pop = span(doc, "step-chip-pop", "");
+      pop.id = id;
+      pop.hidden = true;
+      pop.appendChild(span(doc, "step-chip-state", c.head));
+      for (const m of c.machines) pop.appendChild(span(doc, "step-chip-machine", m));
       if (c.title) {
-        const why = doc.createElement("span");
-        why.className = "step-chip-why";
-        why.id = `step-chip-why-${++whyIds}`;
-        why.hidden = true;
-        why.textContent = c.title;
+        const why = span(doc, "step-chip-why", c.title);
+        why.id = `step-check-why-${pair.lane}-${pair.row}`;
         chip.setAttribute("aria-describedby", why.id);
-        chip.setAttribute("aria-expanded", "false");
-        chip.addEventListener("click", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          why.hidden = !why.hidden;
-          chip.setAttribute("aria-expanded", String(!why.hidden));
-        });
-        slot.appendChild(why);
+        pop.appendChild(why);
       }
+      slot.append(chip, pop);
+      wirePop(slot, chip, pop);
     }
   })();
 }
@@ -562,16 +652,38 @@ export function stepDoneStyles(): string {
       border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary);
     }
     .${STEP_DONE_NOTE_CLASS}[role="alert"] { color: var(--status-error); font-weight: 500; }
-    /* The chip and its reasons are no part of a copied row. */
-    .step-check { user-select: none; -webkit-user-select: none; }
-    .step-chip {
-      margin-left: 0.5em; padding: 0 0.45em; font-family: inherit; font-size: 11px; line-height: 1.5; vertical-align: baseline;
-      border-radius: 6px; white-space: nowrap; background: transparent; cursor: pointer;
-      border: 1px solid var(--border-secondary); color: var(--text-secondary);
+    /* The slot is a fixed box from first paint: it wraps with the row when
+       Done goes in and never again, so a chip landing, or none, moves nothing
+       (e2e/wiki-step-checks.spec.ts, thirty rows at five widths). The chip and
+       its reasons are no part of a copied row. */
+    .step-check {
+      display: inline-block; position: relative; box-sizing: border-box;
+      width: 1.5em; height: 1.2em; margin-left: 0.2em; vertical-align: middle; white-space: nowrap;
+      user-select: none; -webkit-user-select: none;
     }
-    .step-chip-why { display: block; margin: 2px 0 4px; font-size: 12px; color: var(--text-secondary); white-space: pre-line; }
-    .step-chip-why[hidden] { display: none; }
-    /* The pill text tones (shared-styles), not the bare status colours: those measure under AA at 11px in light. */
-    .step-chip[data-state="ok"] { color: var(--tone-good); border-color: var(--status-success); }
-    .step-chip[data-state="not-yet"] { color: var(--tone-warn); border-color: var(--status-warning); }`;
+    .step-chip {
+      display: block; box-sizing: border-box; width: 100%; height: 100%; margin: 0; padding: 0;
+      border: 0; border-radius: 4px; background: transparent; cursor: pointer; overflow: hidden;
+      font: inherit; font-size: 1em; line-height: 1.2em; text-align: center; color: var(--text-secondary);
+    }
+    .step-chip:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
+    /* An overlay: fixed, placed by the client (placePop), so it takes no room
+       in the row; the series menu's layer and ground. */
+    .step-chip-pop {
+      position: fixed; z-index: 120; display: block; box-sizing: border-box;
+      width: max-content; max-width: min(22rem, calc(100vw - 16px));
+      padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border-primary);
+      background: var(--bg-surface); box-shadow: 0 8px 28px rgba(0,0,0,0.3);
+      color: var(--text-primary); font-size: 12.5px; line-height: 1.45; font-weight: normal;
+      text-align: left; white-space: normal;
+    }
+    .step-chip-pop[hidden] { display: none; }
+    .step-chip-pop > span { display: block; }
+    .step-chip-state { font-weight: 600; }
+    .step-chip-why { margin-top: 2px; color: var(--text-secondary); white-space: pre-line; overflow-wrap: anywhere; }
+    /* A glyph says little on paper. */
+    @media print { .step-check { display: none !important; } }
+    /* The pill text tones (shared-styles), not the bare status colours: those measure under AA in light. */
+    .step-chip[data-state="ok"] { color: var(--tone-good); }
+    .step-chip[data-state="not-yet"] { color: var(--tone-warn); }`;
 }
