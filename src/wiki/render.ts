@@ -25,6 +25,8 @@
 
 import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
+import { checkSlotHtml } from "../format/check-tag.ts";
+import { observingComponentTags, reportComponentTag } from "../format/component-observer.ts";
 import { chartViewHtml } from "../format/chart-view.ts";
 import { diagramViewHtml } from "../format/diagram-block.ts";
 import { stepsViewHtml } from "../format/steps-block.ts";
@@ -71,6 +73,15 @@ export function readerBody(markdown: string, stripTitle?: string): string {
     }
   }
   return body;
+}
+
+/** A step's trailing `<Check>` as the reader's slot. The inline scanner never
+ *  sees that tag (`renderList` took it off), so it is reported to the lint
+ *  observer here, for its values (`lint-components.ts`); its placement lint
+ *  reads from the page's steps. The client bundle carries neither. */
+function readerCheckSlot(rawAttrs: string): string {
+  if (observingComponentTags()) reportComponentTag({ name: "Check", rawAttrs, inline: true });
+  return checkSlotHtml(rawAttrs);
 }
 
 export function renderWikiHtml(
@@ -156,6 +167,7 @@ export function renderWikiHtml(
       question: opts?.question,
       idLabels: opts?.idLabels,
       reader: true,
+      checkSlot: readerCheckSlot,
       ...(opts?.readerShapes ? { readerShapes: true } : {}),
       wikiLinkTexts: linkTexts,
       wikiLinkSources: literal,

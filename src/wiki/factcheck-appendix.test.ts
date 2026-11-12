@@ -150,6 +150,15 @@ describe("tag neutralization (the answer is CLIENT-POSTED)", () => {
     expect(out).toContain("Callout");
   });
 
+  test("a <Check> tag in the answer is defanged like every other component", () => {
+    for (const name of ["Check", "Verdict"]) {
+      const answer = ["### ✅ Claim 1/1 — first", "", `Do <${name} env="X" /> now.`, `<${name} env="Y">`, "body", `</${name}>`].join("\n");
+      const out = buildFactcheckAppendix(answer, "2026-07-29");
+      expect({ name, live: out.includes(`<${name}`) || out.includes(`</${name}`) }).toEqual({ name, live: false });
+      expect(out).toContain(`${name} env="X" /`);
+    }
+  });
+
   test("an embedded end sentinel is neutralized, as in the .md form", () => {
     const answer = `### ✅ Claim 1/1 — first\n\n${FACTCHECK_SENTINEL_END} quoted.\n`;
     const out = buildFactcheckAppendix(answer, "2026-07-29");

@@ -53,6 +53,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "state-owns-unread": "owns: entries that name no key",
   "component-value": "Component values the renderer falls back on",
   "component-attr": "Component attributes the renderer drops",
+  "check-placement": "<Check> tags that are malformed or not the last thing on a you step's first line",
   "status-line": "Status words beside a plan link that disagree with its plan_status",
   "genre-missing": "Live report pages with no genre: key",
   "genre-picture": "Report pages whose first screen lacks their genre's picture, or whose genre: is not a slug",

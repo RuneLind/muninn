@@ -396,6 +396,10 @@ const emailRenderer: BlockRenderer = {
           `<div style="margin:12px 0;padding:10px 12px;border:1px solid ${BORDER};border-radius:6px;">` +
           `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">${escapeHtml(questionLeadText(attrs))}</div>${children}</div>`
         );
+      case "Check":
+        // Off its step's line it names no step (lint `check-placement`): a
+        // paired one prints its body alone.
+        return children;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -416,6 +420,10 @@ const emailRenderer: BlockRenderer = {
         // its wrapped PROSE keeps running through the inline pipeline (escaping it
         // here would render `**1.32 kg**` as literal asterisks). Marker-only.
         return factMarker(normalizeFactVerdict(attrs.v));
+      case "Check":
+        // Reachable only via a direct call: `renderInline` leaves a paired
+        // tag's body in the stream. A step's trailing tag never gets here (`renderList`).
+        return escapeHtml(text);
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -519,6 +527,8 @@ function renderInline(text: string): string {
   result = scanInlineComponents(result)
     .map((seg) => {
       if (seg.kind === "text") return seg.text;
+      // Off its step's line: a paired `<Check>`'s body stays in the stream as prose.
+      if (seg.name === "Check") return seg.text;
       if (seg.name === "Fact") {
         // `Fact` wraps PROSE: park only the generated tags, leave the body in the
         // stream for the escape/bold/link passes below.

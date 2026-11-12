@@ -9,6 +9,13 @@
  *  - `component-attr` — an attribute `COMPONENT_ATTRS` does not list, which
  *    `parseAttrs` drops before any renderer sees it, or an earlier spelling of
  *    a repeated attribute, which it drops for the last one.
+ *  - `check-placement` — each `<Check` outside code that is not the trailing
+ *    tag (`trailingCheck`, the renderer's rule) on the first line of a list
+ *    step `youListStepLines` returns (`step-done.ts`, the steps Done lists,
+ *    refused ones included) in a list that is no task list. One finding per
+ *    `<Check`, its message naming the case. A `<Check>` value
+ *    `parseCheckAttrs` rejects, or one naming no probe, is a `component-value`
+ *    finding, judged on every tag the render reads.
  *
  * Not reported: an unknown tag name (it renders as visible escaped text), the
  * `parseString` attributes, the other attributes of a component whose
@@ -52,18 +59,22 @@
  * with no `.env`.
  */
 
-import { ATTR_RE, observeComponentTags, type ObservedComponentTag } from "../format/markdown-ast.ts";
+import { ATTR_RE, observeComponentTags, readerFencedLines, type ObservedComponentTag } from "../format/markdown-ast.ts";
 import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type ComponentName, type ComponentSpec } from "../format/component-spec.ts";
 import { COMPONENT_DOCS, attrAliasFor, attrDoc, hintFor, suggestFor, type ComponentDoc } from "../format/component-docs.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { resolveEmbedRelPath } from "../format/embed.ts";
+import { parseCheckAttrs } from "../format/check-tag.ts";
+import { trailingCheck } from "../format/check-trailing.ts";
+import { youListStepLines } from "../format/step-done.ts";
+import { lineCodeSpanRanges } from "../format/code-spans.ts";
 import { renderWikiHtml } from "./render.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import { parkLinksThenCodeSpans } from "./park-links.ts";
 import type { PageFileResult, PageFiles } from "../format/query-block.ts";
 import type { LintFinding } from "./lint.ts";
 
-export const COMPONENT_LINT_CHECKS = ["component-value", "component-attr"] as const;
+export const COMPONENT_LINT_CHECKS = ["component-value", "component-attr", "check-placement"] as const;
 
 const SPEC: Readonly<Record<ComponentName, ComponentSpec>> = COMPONENT_SPEC;
 
@@ -251,6 +262,7 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
       });
     }
   }
+  if (tag.name === "Check") return [...out, ...checkFindings(at, known)];
   const attrs = Object.entries(SPEC[tag.name].attrs);
   const doc = COMPONENT_DOCS[tag.name] as ComponentDoc;
   const valueFinding = (attr: string, spec: AttrSpec, phrase: string): LintFinding => ({
@@ -286,6 +298,18 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
     out.push(valueFinding(attr, spec, lane ?? fallbackPhrase(tag.name, attr, spec, raw, known)));
   }
   return out;
+}
+
+const CHECK_EXAMPLE = '`1. **Restart.** <Check restart="3010" />`';
+
+/** A `<Check>`'s value problems. Where it sits is {@link checkPlacement}'s. */
+function checkFindings(at: { relPath: string; line?: number }, known: Readonly<Record<string, string>>): LintFinding[] {
+  return parseCheckAttrs(known).problems.map((problem) => ({
+    check: "component-value",
+    ...at,
+    message: `Check ${problem}`,
+    detail: `Check takes ${COMPONENT_ATTRS.Check.join(", ")}.`,
+  }));
 }
 
 /** Renders a page the way the reader does, with the files it reads beside
@@ -415,8 +439,9 @@ function lineAt(content: string, offset: number): number {
   return line;
 }
 
-/** Components with a `required` attribute (Meter, Chart): a bare `<Meter>` or `<Chart>` is a finding. */
-const REQUIRED_NAMES = COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs).some((a) => a.required));
+/** Components with a `required` attribute (Meter, Chart): a bare `<Meter>` or
+ *  `<Chart>` is a finding. So is a bare `<Check />`: it names no probe. */
+const REQUIRED_NAMES = [...COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs).some((a) => a.required)), "Check"];
 /**
  * A tag this check could judge: a component name followed by an attribute, or
  * a component with a required attribute in any form. A page with neither has
@@ -425,6 +450,9 @@ const REQUIRED_NAMES = COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs
 const JUDGEABLE_RE = new RegExp(
   `<(?:${COMPONENT_NAMES.join("|")})\\s+[^\\s/>]` + (REQUIRED_NAMES.length > 0 ? `|<(?:${REQUIRED_NAMES.join("|")})(?=[\\s/>])` : ""),
 );
+
+/** A `<Check` that is not a longer name (`<Checklist`). */
+const CHECK_MENTION_RE = /<Check(?![\w-])/;
 
 /** Results per render seam, keyed on relPath, content length and a content
  *  hash, least recently used evicted past the cap. A lint run repeats on every
@@ -447,7 +475,7 @@ export function checkComponents(
   render: PageRender = readerRender,
   files: LoadedPageFiles = new Map(),
 ): LintFinding[] {
-  if (!JUDGEABLE_RE.test(content)) return [];
+  if (!JUDGEABLE_RE.test(content) && !CHECK_MENTION_RE.test(content)) return [];
   let memo = memos.get(render);
   if (memo === undefined) memos.set(render, (memo = new Map()));
   const read = [...files].filter((e): e is [string, { ok: true; text: string }] => e[1].ok);
@@ -470,11 +498,95 @@ function findComponents(relPath: string, content: string, render: PageRender, fi
 }
 
 function pageFindings(relPath: string, content: string, render: PageRender, plain: readonly ObservedComponentTag[]): LintFinding[] {
+  let read: Tag[] | null | undefined;
+  const locatedTags = () => (read === undefined ? (read = locate(render, content, plain)) : read);
+  // An opener is the paired form only where the render read it as a Check;
+  // a render that read no Check pairs none, with no second render.
+  let checks: Set<number | undefined> | undefined;
+  const paired = () =>
+    (checks ??= new Set(plain.some((t) => t.name === "Check") ? (locatedTags() ?? []).map((t) => t.offset) : []));
+  const placement = CHECK_MENTION_RE.test(content) ? checkPlacement(relPath, content, paired) : [];
   const unlocated = plain.flatMap((t) => checkTag(relPath, { name: t.name, attrs: t.rawAttrs, ...nmOf(t) }));
-  if (unlocated.length === 0) return [];
-  const tags = locate(render, content, plain);
-  if (tags === null) return unlocated;
+  if (unlocated.length === 0) return placement;
+  const tags = locatedTags();
+  if (tags === null) return [...placement, ...unlocated];
   const located = tags.filter((t) => t.offset !== undefined).sort((a, b) => a.offset! - b.offset!);
   const once = located.filter((t, i) => i === 0 || t.offset !== located[i - 1]!.offset);
-  return [...once, ...tags.filter((t) => t.offset === undefined)].flatMap((t) => checkTag(relPath, t));
+  // An unmarked `<Check>` sits inside another tag's quoted value: its
+  // placement finding is its whole report.
+  const found = [...once, ...tags.filter((t) => t.offset === undefined && t.name !== "Check")].flatMap((t) => checkTag(relPath, t));
+  return placement.length ? [...placement, ...found].sort(byLine) : found;
+}
+
+/** Located findings in line order (stable), then the unlocated. */
+const byLine = (a: LintFinding, b: LintFinding) => (a.line ?? Infinity) - (b.line ?? Infinity);
+
+/** Each `<Check` the body spells outside fences and code spans: its 1-based
+ *  line, its index on that line, the line and its page offset. Frontmatter is
+ *  skipped. */
+function checkMentions(content: string): { line: number; at: number; text: string; offset: number }[] {
+  const lines = content.split("\n");
+  const first = content.slice(0, content.length - splitFrontmatter(content).body.length).split("\n").length;
+  const fenced = readerFencedLines(content);
+  const out: { line: number; at: number; text: string; offset: number }[] = [];
+  let lineStart = 0;
+  for (let k = 0; k < lines.length; lineStart += lines[k]!.length + 1, k++) {
+    const line = lines[k]!;
+    if (k < first - 1 || fenced[k] || !CHECK_MENTION_RE.test(line)) continue;
+    const code = lineCodeSpanRanges(line);
+    for (const m of line.matchAll(new RegExp(CHECK_MENTION_RE, "g"))) {
+      if (!code.some((r) => m.index >= r.start && m.index < r.end)) out.push({ line: k + 1, at: m.index, text: line, offset: lineStart + m.index });
+    }
+  }
+  return out;
+}
+
+/** A tag where `lastIndex` points, in the inline scanner's attribute shape:
+ *  `[1]` is "/" when it is self-closing. Sticky, so a line with many `<Check`
+ *  is not copied once per mention. */
+const CHECK_TAG_AT = /<Check(?:\s+[A-Za-z][\w-]*="[^"]*")*\s*(\/?)>/y;
+
+const PLACEMENT: Record<"unread" | "paired" | "steps" | "off-step" | "task-list" | "not-last", string> = {
+  unread: "<Check here is read as no tag (not a well-formed tag on one line: wrapped, unclosed or single-quoted); it names no step",
+  paired: "Check here is the paired form (<Check …>…</Check>); only the self-closing tag names a step, and the body renders as if the tag were absent",
+  steps: "Check names no step: this page's you steps could not be read (its lanes parse differently than the index reads them)",
+  "off-step": "Check is not on the first line of an open step (an item of a list directly inside <Lane kind=\"you\"> inside <NextMoves> that is not a done [x] row); it names no step",
+  "task-list": "Check is on a row of a task list (a list with a [ ] or [x] row), which the reader draws without a check; it names no step",
+  "not-last": "Check is on a step's first line but does not end it after the step's text; it names no step there",
+};
+
+/**
+ * One `check-placement` per `<Check` outside code that is not a step's check.
+ * A check is the trailing tag (`trailingCheck`, as the renderer reads it) on
+ * the first line of a list step `youListStepLines` returns, in a list that is
+ * no task list: the steps Done lists and PR 2 keys on. On such a line the last
+ * `<Check` is that tag; every other `<Check` is judged by its own shape.
+ */
+function checkPlacement(relPath: string, content: string, paired: () => ReadonlySet<number | undefined>): LintFinding[] {
+  const steps = youListStepLines(content);
+  const firstLines = new Map((steps ?? []).map((s) => [s.line, { trailing: trailingCheck(s.text.split("\n")[0]!) !== undefined, taskList: s.taskList }]));
+  const mentions = checkMentions(content);
+  const out: LintFinding[] = [];
+  mentions.forEach((m, k) => {
+    const lastOnLine = mentions[k + 1]?.line !== m.line;
+    CHECK_TAG_AT.lastIndex = m.at;
+    const tag = CHECK_TAG_AT.exec(m.text);
+    const step = firstLines.get(m.line);
+    let kind: keyof typeof PLACEMENT | null;
+    if (!tag) kind = "unread";
+    else if (tag[1] !== "/") kind = paired().has(m.offset) ? "paired" : "unread";
+    else if (steps === null) kind = "steps";
+    else if (!step) kind = "off-step";
+    else if (step.taskList) kind = "task-list";
+    else kind = step.trailing && lastOnLine ? null : "not-last";
+    if (kind === null) return;
+    out.push({
+      check: "check-placement",
+      relPath,
+      line: m.line,
+      message: PLACEMENT[kind],
+      detail: `Write one self-closing tag, double-quoted attributes, as the last thing on a you step's first line, after its sentence: ${CHECK_EXAMPLE}.`,
+    });
+  });
+  return out;
 }

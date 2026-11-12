@@ -1,5 +1,6 @@
 import { observeComponentScope } from "./component-observer.ts";
 import { numberStepLists } from "./steps-focus.ts";
+import { trailingCheck } from "./check-trailing.ts";
 import type { Block, ComponentName, InlineComponentName, ListBlock, ListChild } from "./markdown-ast.ts";
 
 /** What sits under one list item: a child list one `depth` deeper or a fenced
@@ -17,6 +18,9 @@ export interface ListNest {
   /** Ordered lists: an item's own number where it does not count on from the
    *  item before (`OlBlock.values`). */
   values?: (number | undefined)[];
+  /** A top-level list whose items carry a trailing `<Check>`: each such item's
+   *  raw attribute run, the tag already gone from `items[k]` (`check-trailing.ts`). */
+  checks?: (string | undefined)[];
 }
 
 /** The number each of `count` ordered items shows: `values[k]` where set, else
@@ -139,6 +143,14 @@ export function nestedChildren(children: ListChild[] | undefined, r: BlockRender
 }
 
 function renderList(list: ListBlock, r: BlockRenderer, depth: number): string {
+  let items = list.items;
+  const checks: string[] = [];
+  if (!depth) {
+    items = items.map((item, k) => {
+      const t = trailingCheck(item);
+      return t ? ((checks[k] = t[1]), t[0]) : item;
+    });
+  }
   const nest: ListNest = {
     children: list.items.map((_, k) =>
       list.nested?.[k]?.map((c): RenderedChild =>
@@ -152,8 +164,9 @@ function renderList(list: ListBlock, r: BlockRenderer, depth: number): string {
     depth,
     loose: list.loose === true,
     ...(list.type === "ol" && list.values ? { values: list.values } : {}),
+    ...(checks.length ? { checks } : {}),
   };
-  return list.type === "ul" ? r.ul(list.items, nest) : r.ol(list.items, list.start, nest);
+  return list.type === "ul" ? r.ul(items, nest) : r.ol(items, list.start, nest);
 }
 
 /**

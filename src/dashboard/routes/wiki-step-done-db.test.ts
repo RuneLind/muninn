@@ -183,6 +183,19 @@ describe("/api/wiki/step-done", () => {
     expect(after).toContain('<Lane kind="waiting" who="Someone">');
   });
 
+  test("a misplaced <Check> on the step reaches neither the log line nor the commit subject", async () => {
+    const step = 'Read the <Check env="X" /> second note.';
+    await Bun.write(path.join(root, REL), PAGE.replace("Read the second note.", step));
+    git("commit", "-q", "-am", "tag");
+    __resetWikiCacheForTest();
+    const { body: l } = await list();
+    const key = keyOf(l, step);
+    const p = (await (await post({ step: key, baseHash: l.baseHash, preview: true })).json()) as Record<string, unknown>;
+    expect(p.logEntry).toBe("## [2026-11-10] step-done | Step fixture\n- Step done: Read the  second note.");
+    expect((await post({ step: key, baseHash: l.baseHash, previewHash: p.previewHash })).status).toBe(200);
+    expect(git("log", "-1", "--format=%s")).toBe(`[step-done] Read the  second note.: ${REL}\n`);
+  });
+
   test("a stale base hash is refused and the page stays as it was", async () => {
     const { body: l } = await list();
     const key = keyOf(l, "Read the second note.");

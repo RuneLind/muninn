@@ -63,6 +63,7 @@ Rules and traps about one function stay in their section of the notes; ` [trap]`
 - `<Diagram src>` — an archify diagram (Wiki visuals v2 PR 2) [trap]
 - `<Steps src>` — a diagram stepped through (Wiki visuals v2 PR 3) [trap]
 - `<SystemMap>` — an edge table drawn as a map of systems (Wiki visuals v2 PR 4)
+- `<Check>` — the facts a `you` step names, trailing its first line (Owner step checks PR 1) [trap]
 - `<Query>` — one prod query as a card [trap]
 - `<CaseBoard>` and `<DeltaTable>` — tracked cases and run-to-run numbers [trap]
 - `<Tldr>`, `<Timeline>`, `<DecisionLog>`, `<RunChecklist>` — list wrappers [trap]

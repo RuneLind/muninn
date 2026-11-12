@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { listYouSteps, stepDoneEdit, stepDoneLogLine, stepRemovalViolation, youLaneRows, type ProposedRemoval, type StepDoneEdit } from "./step-done.ts";
+import { listYouSteps, stepDoneEdit, stepDoneLogLine, stepRemovalViolation, youLaneRows, youListStepLines, type ProposedRemoval, type StepDoneEdit } from "./step-done.ts";
 import { countedNextMovesLanes, parseBlocks } from "./markdown-ast.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
@@ -481,5 +481,15 @@ describe("the postcondition", () => {
     const r = stepDoneEdit(text, key, (_p, _s, proposed) => ((seen = proposed), null));
     if (!r.ok) throw new Error(r.reason);
     expect(seen as ProposedRemoval | null).toEqual({ content: r.content, laneRemoved: false, renumbered: r.renumbered });
+  });
+});
+
+describe("youListStepLines", () => {
+  test("each step's FIRST source line, counted from the top of the file", () => {
+    const text = page(moves(you("1. Do\n   more\n2. Second")));
+    expect(youListStepLines(text)).toEqual([
+      { line: 9, text: "Do\nmore", taskList: false },
+      { line: 11, text: "Second", taskList: false },
+    ]);
   });
 });
