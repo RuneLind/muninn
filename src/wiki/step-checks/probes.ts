@@ -25,8 +25,8 @@ export interface ProbeResult {
   why: string;
 }
 
-/** What `readEnvFile` found: the text, no file at all, or a read that failed. */
-export type EnvFileRead = { text: string } | { missing: true } | { failed: true };
+/** What `readEnvFile` found: the file's raw bytes (never decoded: Bun parses bytes), no file at all, or a read that failed. */
+export type EnvFileRead = { bytes: Uint8Array } | { missing: true } | { failed: true };
 
 export interface ProbeDeps {
   git: GitRun;
@@ -77,7 +77,7 @@ export async function probeEnv(key: string, deps: ProbeDeps): Promise<ProbeResul
   if ("failed" in read) return unknown(".env could not be read");
   // No file: nothing was loaded from one, so the key provably is not in it.
   if ("missing" in read) return notYet(`${key} is not in .env (there is no .env here)`);
-  const states = envFileKeyStates(read.text);
+  const states = envFileKeyStates(read.bytes);
   if (states.lostTrack) return unknown(`.env line ${states.lostLine} is not a form muninn can read the way Bun does`);
   const state = states.keys.get(key);
   if (state === "unset") return notYet(`${key} is in .env with an empty value`);

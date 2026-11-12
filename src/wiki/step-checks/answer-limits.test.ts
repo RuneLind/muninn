@@ -33,7 +33,7 @@ function world(opts: { applied?: Set<string>; env?: Set<string>; git?: GitRun; r
         throw new Error("git must not run");
       }),
     roots: opts.roots ?? null,
-    readEnvFile: async () => (counts.envReads++, { text: [...env].map((k) => `${k}=1`).join("\n") + "\n" }),
+    readEnvFile: async () => (counts.envReads++, { bytes: new TextEncoder().encode([...env].map((k) => `${k}=1`).join("\n") + "\n") }),
     processHasEnv: (k: string) => env.has(k),
     appliedMigrations: opts.applyRead ?? (async () => (counts.dbReads++, applied)),
   };

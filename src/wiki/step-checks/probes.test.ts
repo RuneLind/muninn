@@ -54,7 +54,7 @@ function deps(over: Partial<ProbeDeps> = {}, w?: World, calls?: string[][], envs
   return {
     git: fakeGit(w, calls, envs),
     roots: { dirs: [], named: new Map([["muninn", DIR], ["mimir", DIR]]) },
-    readEnvFile: async () => ({ text: "SET_KEY=s3cr3t-value\nBLANK_KEY=\n" }),
+    readEnvFile: async () => ({ bytes: new TextEncoder().encode("SET_KEY=s3cr3t-value\nBLANK_KEY=\n") }),
     processHasEnv: () => true,
     appliedMigrations: async () => new Set(["086"]),
     ...over,
@@ -98,24 +98,24 @@ describe("env", () => {
     const UNREAD = { state: "unknown" as const, why: ".env line 1 is not a form muninn can read the way Bun does" };
     // `$UNSET` loads empty under Bun; `KEY: v` is Bun syntax the reader does not follow.
     for (const text of ["K=$UNSET\n", "K=${UNSET}\n", 'K="a$b"\n', "K: v\n", 'K="a\\"b"\n'])
-      expect([text, await probeEnv("K", deps({ readEnvFile: async () => ({ text }) }))]).toEqual([text, UNREAD]);
+      expect([text, await probeEnv("K", deps({ readEnvFile: async () => ({ bytes: new TextEncoder().encode(text) }) }))]).toEqual([text, UNREAD]);
   });
   test("an unclosed quote, or a backslash in a quoted value, makes every key unknown: a clean line after it may be no key", async () => {
     const UNREAD = { state: "unknown" as const, why: ".env line 1 is not a form muninn can read the way Bun does" };
     // Bun reads `\"` as an escaped quote, so INESC is inside ESC's value.
-    expect(await probeEnv("INESC", deps({ readEnvFile: async () => ({ text: 'ESC="a\\"\nINESC=fake\ntail"\n' }) }))).toEqual(UNREAD);
+    expect(await probeEnv("INESC", deps({ readEnvFile: async () => ({ bytes: new TextEncoder().encode('ESC="a\\"\nINESC=fake\ntail"\n') }) }))).toEqual(UNREAD);
     // Bun sets AFTER and reads UNCLOSED raw; the reader cannot follow either.
-    expect(await probeEnv("AFTER", deps({ readEnvFile: async () => ({ text: 'UNCLOSED="abc\nAFTER=after\n' }) }))).toEqual(UNREAD);
+    expect(await probeEnv("AFTER", deps({ readEnvFile: async () => ({ bytes: new TextEncoder().encode('UNCLOSED="abc\nAFTER=after\n') }) }))).toEqual(UNREAD);
     // A key BEFORE the open quote is unknown too: a later line could assign it again.
-    expect(await probeEnv("EARLY", deps({ readEnvFile: async () => ({ text: 'EARLY=1\nUNCLOSED="abc\n' }) }))).toEqual({ ...UNREAD, why: ".env line 2 is not a form muninn can read the way Bun does" });
+    expect(await probeEnv("EARLY", deps({ readEnvFile: async () => ({ bytes: new TextEncoder().encode('EARLY=1\nUNCLOSED="abc\n') }) }))).toEqual({ ...UNREAD, why: ".env line 2 is not a form muninn can read the way Bun does" });
   });
   test("a colon line before the key: unknown, never ok, though the shell exported the key (Bun reads the next line as the colon key's value)", async () => {
-    const r = await probeEnv("WIKI_FLAG", deps({ readEnvFile: async () => ({ text: "OTHER_SETTING:\nWIKI_FLAG=1\n" }), processHasEnv: () => true }));
+    const r = await probeEnv("WIKI_FLAG", deps({ readEnvFile: async () => ({ bytes: new TextEncoder().encode("OTHER_SETTING:\nWIKI_FLAG=1\n") }), processHasEnv: () => true }));
     expect(r).toEqual({ state: "unknown", why: ".env line 1 is not a form muninn can read the way Bun does" });
     // Bun keeps AA=x (the `AA=` line is BB's value): not «empty value».
-    expect((await probeEnv("AA", deps({ readEnvFile: async () => ({ text: "AA=x\nBB:\nAA=\n" }) }))).state).toBe("unknown");
+    expect((await probeEnv("AA", deps({ readEnvFile: async () => ({ bytes: new TextEncoder().encode("AA=x\nBB:\nAA=\n") }) }))).state).toBe("unknown");
     // Bun sets E: not «not in .env».
-    expect((await probeEnv("E", deps({ readEnvFile: async () => ({ text: "F:'\nE=x'\n" }) }))).state).toBe("unknown");
+    expect((await probeEnv("E", deps({ readEnvFile: async () => ({ bytes: new TextEncoder().encode("F:'\nE=x'\n") }) }))).state).toBe("unknown");
   });
   test("no answer carries a value", async () => {
     for (const over of [{}, { processHasEnv: () => false }]) for (const k of ["SET_KEY", "BLANK_KEY", "NOPE"]) expect(JSON.stringify(await probeEnv(k, deps(over)))).not.toContain("s3cr3t");
@@ -304,7 +304,7 @@ describe("pushed and restart: muninn cannot prove these yet", () => {
     test(`${kind} answers unknown and spawns nothing, reads nothing`, async () => {
       const calls: string[][] = [];
       let reads = 0;
-      const d = deps({ readEnvFile: async () => (reads++, { text: "" }), appliedMigrations: async () => (reads++, new Set<string>()), processHasEnv: () => (reads++, true) }, {}, calls);
+      const d = deps({ readEnvFile: async () => (reads++, { bytes: new Uint8Array() }), appliedMigrations: async () => (reads++, new Set<string>()), processHasEnv: () => (reads++, true) }, {}, calls);
       expect(await runProbe({ kind, value: kind === "restart" ? "3010" : "muninn" }, d)).toEqual({ state: "unknown", why: "muninn cannot prove this yet" });
       expect(calls).toEqual([]);
       expect(reads).toBe(0);

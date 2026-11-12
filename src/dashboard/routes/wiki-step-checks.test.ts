@@ -70,7 +70,7 @@ function app(over: Partial<ProbeDeps> = {}, opts: { cache?: ProbeCache; boundMs?
       throw new Error("git must not run");
     },
     roots: null,
-    readEnvFile: async () => (reads.n++, { text: "HAVE=v4lue-n0t-t0-leak\n" }),
+    readEnvFile: async () => (reads.n++, { bytes: new TextEncoder().encode("HAVE=v4lue-n0t-t0-leak\n") }),
     processHasEnv: () => (reads.n++, true),
     appliedMigrations: async () => (reads.n++, new Set(["086"])),
     ...over,
@@ -144,7 +144,7 @@ describe("GET /api/wiki/step-checks", () => {
 
   test("a page without a lane, or with only misplaced tags, answers no steps and runs no probe", async () => {
     let ran = 0;
-    const a = app({ readEnvFile: async () => (ran++, { text: "" }) });
+    const a = app({ readEnvFile: async () => (ran++, { bytes: new Uint8Array() }) });
     for (const rel of ["plans/no-lane.mdx", "plans/misplaced.mdx"]) {
       const body = await (await get(a, `wiki=W&relPath=${rel}`)).json();
       expect(body.steps).toEqual([]);

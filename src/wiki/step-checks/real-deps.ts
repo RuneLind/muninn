@@ -16,10 +16,10 @@ import { ProbeCache } from "./answer.ts";
 /** The applied-set read's server-side statement timeout; under the migration probe's 3 s. The wait for a pool connection is not inside it. */
 export const MIGRATIONS_READ_MS = 2_000;
 
-/** Bun loads `.env` from the working directory it starts in. */
+/** Bun loads `.env` from the working directory it starts in. Raw bytes: `.text()` would strip a BOM and decode UTF-16 that Bun's loader does not. */
 export async function readDotEnv(dir: string = process.cwd()): Promise<EnvFileRead> {
   try {
-    return { text: await Bun.file(path.join(dir, ".env")).text() };
+    return { bytes: await Bun.file(path.join(dir, ".env")).bytes() };
   } catch (err) {
     return (err as { code?: string }).code === "ENOENT" ? { missing: true } : { failed: true };
   }

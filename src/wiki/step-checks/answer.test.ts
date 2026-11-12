@@ -20,7 +20,7 @@ function probes(over: Partial<ProbeDeps> = {}): ProbeDeps {
   return {
     git: noGit,
     roots: null,
-    readEnvFile: async () => ({ text: "HAVE=1\n" }),
+    readEnvFile: async () => ({ bytes: new TextEncoder().encode("HAVE=1\n") }),
     processHasEnv: () => true,
     appliedMigrations: async () => new Set(["086"]),
     ...over,
@@ -51,7 +51,7 @@ describe("answerStepChecks", () => {
   test("a page with no check answers no steps and runs nothing", async () => {
     let ran = 0;
     const text = page("1. Plain step.");
-    const a = await answerStepChecks(text, deps({}, { readEnvFile: async () => (ran++, { text: "" }), appliedMigrations: async () => (ran++, new Set<string>()) }));
+    const a = await answerStepChecks(text, deps({}, { readEnvFile: async () => (ran++, { bytes: new Uint8Array() }), appliedMigrations: async () => (ran++, new Set<string>()) }));
     expect(a).toEqual({ hash: sha256(text), machine: null, laneRows: [1], steps: [] });
     expect(ran).toBe(0);
   });

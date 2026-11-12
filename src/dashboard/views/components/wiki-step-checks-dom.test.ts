@@ -40,7 +40,7 @@ const probes: ProbeDeps = {
     throw new Error("no git");
   },
   roots: null,
-  readEnvFile: async () => ({ text: "HAVE=1\n" }),
+  readEnvFile: async () => ({ bytes: new TextEncoder().encode("HAVE=1\n") }),
   processHasEnv: () => true,
   appliedMigrations: async () => new Set(["086"]),
 };
