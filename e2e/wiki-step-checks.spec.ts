@@ -19,22 +19,23 @@
  *     with one machine unknown is not drawn as checked; a wrong hash, a 500, a
  *     malformed body and an answer released after the reader moved on draw
  *     nothing; copying a chipped row copies what it copies with no chip; the
- *     chip is named in words, describes its reasons and is reached by Tab.
- *  4. The slot is a fixed box and the reasons a native popover: on a
- *     thirty-row lane (tight and loose, code spans, links, sub-items) no Done
- *     moves in page coordinates at 1280, 768, 414, 375 or 320 px when the
- *     answer lands (any state, three machines, or none) or row 2's reasons
- *     open and close; the reasons stay in the viewport and on top; the chip is
- *     one glyph; print hides them; each glyph's tone reads at 4.5:1 in both
- *     explicit and both system themes; a browser without the popover API gets
- *     a plain button.
- *  5. Every way the popover opens (click, tap, Enter, Space) against every way
- *     it closes, a table of tests; then where it goes: under the chip or over
- *     it, 8 px inside the viewport at 280, 320 and 1280 px, six thousand
- *     characters scrolling inside it. CI runs Chromium; WebKit and Firefox run
- *     this file by hand (a config with those projects).
+ *     chip is one glyph named in words, its reasons in its title, and no tab
+ *     stop.
+ *  4. The slot is a fixed box: on a thirty-row lane (tight and loose, code
+ *     spans, links, sub-items) no Done moves in page coordinates at 1280, 768,
+ *     414, 375 or 320 px when the answer lands (any state, three machines, or
+ *     none); print hides the slot; each glyph's tone reads at 4.5:1 in both
+ *     explicit and both system themes.
+ *  5. The chip owns no listener: with chips landed before Done and a row
+ *     re-slotted after, the window and document hold the listeners they held
+ *     before, and Escape on the page still reaches the shell (focus mode).
+ *     (The reasons popover that leaked them was removed; a follow-up.)
+ *  6. A `MUNINN_WIKI_READONLY=1` instance draws the chips.
  *
- * One muninn on its own port (Done's scope needs WORK_MAP_WIKIS and
+ * CI runs Chromium; WebKit and Firefox run this file by hand (a config with
+ * those projects).
+ *
+ * One muninn on its own port, and a read-only one (Done's scope needs WORK_MAP_WIKIS and
  * WIKI_ANSWER_WIKIS; the migration probe reads the test database), a temp git
  * wiki. Made-up fixtures. The server runs from the repo root, so the env probe
  * reads that `.env`'s key NAMES; a CI runner has none, which reads «not yet»
@@ -50,11 +51,11 @@ import path from "node:path";
 import { paintedContrast, token } from "./contrast.ts";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { MODAL_SELECTOR, modalOpen } from "../src/dashboard/views/components/wiki-panes.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 
 const PORT = e2ePort("wiki-step-checks");
+const RO_BASE = `http://127.0.0.1:${e2ePort("wiki-step-checks/readonly")}`;
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-step-checks";
@@ -126,6 +127,7 @@ const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "e2e", GIT_AUTHOR_EMAIL: "e2e
 const git = (root: string, ...args: string[]) => execFileSync("git", ["-C", root, ...args], { stdio: "ignore", env: GIT_ENV });
 
 let server: ChildProcess | undefined;
+let roServer: ChildProcess | undefined;
 let root = "";
 
 test.beforeAll(async () => {
@@ -138,29 +140,36 @@ test.beforeAll(async () => {
   git(root, "config", "user.email", "e2e@example.invalid");
   git(root, "add", "-A");
   git(root, "commit", "-q", "-m", "fixture");
+  const boot = (port: number, extra: Record<string, string> = {}) =>
+    spawn("bun", ["run", "src/index.ts"], {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        ...e2eEnv(),
+        DATABASE_URL: TEST_DB,
+        DASHBOARD_PORT: String(port),
+        DASHBOARD_HOST: "127.0.0.1",
+        SCHEDULER_ENABLED: "false",
+        WIKI_DIR: "",
+        WIKI_EXTRA: `${WIKI}=${root}`,
+        WORK_MAP_WIKIS: WIKI,
+        WIKI_ANSWER_WIKIS: WIKI,
+        WIKI_ANSWER_OWNER: "Test Owner (T000001)",
+        ...extra,
+      },
+      stdio: "ignore",
+    });
+  const roPort = e2ePort("wiki-step-checks/readonly");
   await assertPortFree(PORT);
-  server = spawn("bun", ["run", "src/index.ts"], {
-    cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      ...e2eEnv(),
-      DATABASE_URL: TEST_DB,
-      DASHBOARD_PORT: String(PORT),
-      DASHBOARD_HOST: "127.0.0.1",
-      SCHEDULER_ENABLED: "false",
-      WIKI_DIR: "",
-      WIKI_EXTRA: `${WIKI}=${root}`,
-      WORK_MAP_WIKIS: WIKI,
-      WIKI_ANSWER_WIKIS: WIKI,
-      WIKI_ANSWER_OWNER: "Test Owner (T000001)",
-    },
-    stdio: "ignore",
-  });
-  await waitForOwnServer(server, `${BASE}/api/wiki/pages?wiki=${WIKI}`);
+  await assertPortFree(roPort);
+  server = boot(PORT);
+  roServer = boot(roPort, { MUNINN_WIKI_READONLY: "1" });
+  await Promise.all([waitForOwnServer(server, `${BASE}/api/wiki/pages?wiki=${WIKI}`), waitForOwnServer(roServer, `${RO_BASE}/api/wiki/pages?wiki=${WIKI}`)]);
 });
 
 test.afterAll(async () => {
   server?.kill("SIGTERM");
+  roServer?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
 });
 
@@ -370,31 +379,33 @@ test.describe("owner-step check chips, answer shaped", () => {
     expect(chipped).toBe(bare);
   });
 
-  test("the chip is named in words, describes its reasons, follows Done in tab order and asks nothing", async ({ page: p }) => {
+  test("the chip is one glyph named in words, its reasons its title and description; no tab stop, and a click asks nothing", async ({ page: p }) => {
     await openAt(p, REL_B);
+    await expect(chips(p)).toHaveCount(4);
+    expect(await chips(p).allTextContents()).toEqual(["✓", "?", "✓", "○"]);
     const li = row(p, "Apply the old migration");
     const c = li.locator(".step-chip");
     const done = li.locator("[data-step-done]");
+    await expect(c).toHaveAttribute("role", "img");
     await expect(c).toHaveAccessibleName("Check: checked");
+    await expect(c).toHaveAttribute("title", "migration=086: migration 086 is applied on this machine's database");
     await expect(c).toHaveAccessibleDescription("migration=086: migration 086 is applied on this machine's database");
     await expect(done).toHaveAccessibleName("Done: Apply the old migration.");
-    await expect(row(p, "Go.").locator(".step-chip")).toHaveAccessibleName("Check: checked");
     await expect(row(p, "Apply a long step").locator(".step-chip")).toHaveAccessibleName("Check: not yet");
+    // This muninn has no MUNINN_MACHINE, so neither machine is proved; the title says each machine's reason.
+    const two = row(p, "Check two machines").locator(".step-chip");
+    await expect(two).toHaveAccessibleName("Check: unknown (laptop unknown, mini unknown)");
+    expect((await two.getAttribute("title"))!.split("\n").map((l) => l.split(":")[0])).toEqual(["laptop", "mini"]);
+    // Not focusable: neither Tab nor a script puts focus on it.
+    expect(await chips(p).evaluateAll((els) => els.map((e) => (e as HTMLElement).focus() ?? document.activeElement === e))).toEqual([false, false, false, false]);
     await done.focus();
     await p.keyboard.press("Tab");
-    await expect(c).toBeFocused();
+    expect(await p.evaluate(() => !!document.activeElement?.closest(".step-check"))).toBe(false);
     const box = await done.boundingBox();
     const asked: string[] = [];
     p.on("request", (r) => asked.push(r.url()));
-    const why = li.locator(".step-chip-why");
-    await expect(why).toBeHidden();
-    await p.keyboard.press("Enter");
-    await expect(why).toBeVisible();
-    await expect(why).toHaveText("migration=086: migration 086 is applied on this machine's database");
-    await expect(c).toHaveAttribute("aria-expanded", "true");
+    await c.click();
     expect(await done.boundingBox()).toEqual(box);
-    await p.keyboard.press("Space");
-    await expect(why).toBeHidden();
     await expect(li.locator(".wiki-step-done-panel")).toHaveCount(0);
     expect(asked).toEqual([]);
   });
@@ -416,14 +427,6 @@ function moved(a: Box[], b: Box[]): { max: number; count: number } {
   const d = a.map((x, i) => Math.max(Math.abs(x.x - b[i]!.x), Math.abs(x.y - b[i]!.y), Math.abs(x.w - b[i]!.w), Math.abs(x.h - b[i]!.h)));
   return { max: Math.round(Math.max(0, ...d) * 10) / 10, count: d.filter((v) => v > 1).length };
 }
-const pop = (p: Page) => p.locator(".wiki-article .step-chip-pop:visible");
-/** The open popover's box, the viewport's width, and whether its own bottom line is what the page shows there (nothing paints over it, nothing clips it). */
-const popBox = async (p: Page) =>
-  (await frames(p), pop(p)).evaluate((el) => {
-    const r = el.getBoundingClientRect();
-    const hit = document.elementFromPoint(r.x + r.width / 2, r.bottom - 3);
-    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, vw: document.documentElement.clientWidth, vh: innerHeight, onTop: !!hit && el.contains(hit) };
-  });
 /** Every step on several machines, one of them unknown: the widest answer the route can give. */
 const threeMachines = shaped((a) => ({
   ...a,
@@ -434,9 +437,9 @@ const threeMachines = shaped((a) => ({
   })),
 }));
 
-test.describe("owner-step check chips: a fixed box, and reasons over the page", () => {
+test.describe("owner-step check chips: a fixed box", () => {
   for (const width of [1280, 768, 414, 375, 320]) {
-    test(`on thirty rows nothing the checks do moves any Done: the answer, opening and closing row 2's reasons (${width} px)`, async ({ page: p }) => {
+    test(`on thirty rows the answer arriving moves no Done (${width} px)`, async ({ page: p }) => {
       await p.setViewportSize({ width, height: 900 });
       const g = gate();
       await p.route(CHECKS, async (route) => (await g.wait, route.continue()));
@@ -445,24 +448,9 @@ test.describe("owner-step check chips: a fixed box, and reasons over the page", 
       const before = await donePageBoxes(p);
       g.release();
       await expect(chips(p)).toHaveCount(30);
-      const answered = await donePageBoxes(p);
-      const onAnswer = moved(before, answered);
+      const onAnswer = moved(before, await donePageBoxes(p));
       console.log(`MOVED ${width}px answer ${JSON.stringify(onAnswer)}`);
       expect(onAnswer, "the answer arriving").toEqual({ max: 0, count: 0 });
-      const row2 = row(p, "Open the reasons on this row").locator(".step-chip");
-      await row2.click();
-      await expect(pop(p)).toHaveCount(1);
-      const open = await donePageBoxes(p);
-      const box = await popBox(p);
-      await p.keyboard.press("Escape");
-      await expect(pop(p)).toHaveCount(0);
-      const closed = await donePageBoxes(p);
-      const m = { answer: moved(before, answered), open: moved(before, open), close: moved(before, closed) };
-      console.log(`MOVED ${width}px ${JSON.stringify(m)} pop ${JSON.stringify(box)}`);
-      expect(m).toEqual({ answer: { max: 0, count: 0 }, open: { max: 0, count: 0 }, close: { max: 0, count: 0 } });
-      expect(box.left).toBeGreaterThanOrEqual(0);
-      expect(box.right).toBeLessThanOrEqual(box.vw);
-      expect(box.onTop).toBe(true);
     });
   }
 
@@ -495,71 +483,11 @@ test.describe("owner-step check chips: a fixed box, and reasons over the page", 
     });
   }
 
-  for (const width of [320, 375, 1280]) {
-    test(`the reasons stay inside the viewport and over the page, for the chip furthest right, furthest left and last (${width} px)`, async ({ page: p }) => {
-      await p.setViewportSize({ width, height: 900 });
-      await openAt(p, REL_30);
-      await expect(chips(p)).toHaveCount(30);
-      await expect(dones(p)).toHaveCount(28);
-      const xs = await chips(p).evaluateAll((els) => els.map((e) => e.getBoundingClientRect().x));
-      const right = xs.indexOf(Math.max(...xs));
-      const left = xs.indexOf(Math.min(...xs));
-      // The last row too: its reasons run past the lane's bottom edge, which clips its overflow in the compact block.
-      for (const [which, i] of [["right", right], ["left", left], ["last", xs.length - 1]] as const) {
-        await chips(p).nth(i).scrollIntoViewIfNeeded();
-        const before = await donePageBoxes(p);
-        await chips(p).nth(i).click();
-        await expect(pop(p)).toHaveCount(1);
-        const box = await popBox(p);
-        console.log(`POP ${width}px ${which} chip x=${Math.round(xs[i]!)} ${JSON.stringify(box)}`);
-        expect(box.left, which).toBeGreaterThanOrEqual(0);
-        expect(box.right, which).toBeLessThanOrEqual(box.vw);
-        expect(box.onTop, which).toBe(true);
-        expect(moved(before, await donePageBoxes(p))).toEqual({ max: 0, count: 0 });
-        await chips(p).nth(i).click();
-        await expect(pop(p)).toHaveCount(0);
-      }
-    });
-  }
-
-  test("the chip is one glyph; its words are its name and the reasons'", async ({ page: p }) => {
+  test("print leaves the slot out", async ({ page: p }) => {
     await openAt(p, REL_B);
     await expect(chips(p)).toHaveCount(4);
-    expect(await chips(p).allTextContents()).toEqual(["✓", "?", "✓", "○"]);
-    const two = row(p, "Check two machines").locator(".step-chip");
-    // This muninn has no MUNINN_MACHINE, so neither machine is proved.
-    await expect(two).toHaveAccessibleName("Check: unknown (laptop unknown, mini unknown)");
-    await two.click();
-    const box = pop(p);
-    await expect(box.locator(".step-chip-state")).toHaveText("Check: unknown");
-    await expect(box.locator(".step-chip-machine")).toHaveText(["laptop: unknown", "mini: unknown"]);
-    await expect(box.locator(".step-chip-why")).toContainText("laptop: migration=086:");
-  });
-
-  test("the popover is the platform's, and a modal check does not see it open", async ({ page: p }) => {
-    await openAt(p, REL_B);
-    await expect(chips(p)).toHaveCount(4);
-    const c = row(p, "Apply the old migration").locator(".step-chip");
-    const id = await c.getAttribute("aria-controls");
-    expect(id).toMatch(/^step-check-pop-\d+-\d+$/);
-    await expect(c).toHaveAttribute("popovertarget", id!);
-    await expect(p.locator(`[id="${id}"]`)).toHaveAttribute("popover", "auto");
-    expect(new Set(await chips(p).evaluateAll((els) => els.map((e) => e.getAttribute("aria-controls")))).size).toBe(4);
-    await c.click();
-    await expect(pop(p)).toHaveCount(1);
-    expect(await openPops(p)).toBe(1);
-    // The reader's own modal check: a chip's popover is no dialog, so reader keys still work beside it.
-    expect(await p.evaluate(`var MODAL_SELECTOR = ${JSON.stringify(MODAL_SELECTOR)}; (${modalOpen.toString()})(document)`)).toBe(false);
-  });
-
-  test("print leaves the slot and its reasons out", async ({ page: p }) => {
-    await openAt(p, REL_B);
-    await expect(chips(p)).toHaveCount(4);
-    await row(p, "Go.").locator(".step-chip").click();
-    await expect(pop(p)).toHaveCount(1);
     await p.emulateMedia({ media: "print" });
     expect(await p.locator(".wiki-article .step-check").evaluateAll((els) => els.map((e) => getComputedStyle(e).display))).toEqual(["none", "none", "none", "none"]);
-    await expect(pop(p)).toHaveCount(0);
   });
 
   for (const [mode, setup] of [
@@ -589,25 +517,6 @@ test.describe("owner-step check chips: a fixed box, and reasons over the page", 
 
 /** Two animation frames: what a frame watch or a queued scroll does has run. */
 const frames = (p: Page) => p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
-/** The open popover's box, its chip's, the viewport, and the popover's scroll and client heights, once its first frame has placed it. */
-const boxes = async (p: Page) =>
-  (await frames(p), p).evaluate(() => {
-    const el = document.querySelector(".wiki-article .step-chip-pop:popover-open") ?? document.querySelector(".wiki-article .step-chip-pop:not([hidden])");
-    const r = el!.getBoundingClientRect();
-    const chip = el!.parentElement!.querySelector(".step-chip")!.getBoundingClientRect();
-    return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, chipTop: chip.top, chipBottom: chip.bottom, vw: document.documentElement.clientWidth, vh: document.documentElement.clientHeight, sh: el!.scrollHeight, ch: el!.clientHeight };
-  });
-/** How many popovers the platform has open. */
-const openPops = (p: Page) => p.evaluate(() => document.querySelectorAll(":popover-open").length);
-/** Every Done's box in page coordinates: the viewport's plus the inner scroller's and the window's offsets. */
-const doneAbsBoxes = (p: Page) =>
-  p.evaluate(() => {
-    const wrap = document.querySelector(".wiki-article-wrap")!;
-    return Array.from(document.querySelectorAll(".wiki-article [data-step-done]")).map((e) => {
-      const r = e.getBoundingClientRect();
-      return { x: r.x + wrap.scrollLeft + scrollX, y: r.y + wrap.scrollTop + scrollY, w: r.width, h: r.height };
-    });
-  });
 /** Listeners on window and document, net of removals, per type (an init script wraps `addEventListener`). */
 const LISTENER_COUNT = () => {
   const counts: Record<string, number> = {};
@@ -637,249 +546,48 @@ const LISTENER_COUNT = () => {
 };
 const listeners = (p: Page) => p.evaluate(() => ({ ...(window as unknown as { listenerCounts: Record<string, number> }).listenerCounts }));
 
-/**
- * Every way a chip's popover opens against every way it closes, in whichever
- * engine runs the spec (CI runs Chromium; WebKit and Firefox run it by hand).
- * After each close: no popover is open, focus is where the reader left it, the
- * shell's Escape (focus mode's, here) did not run while the popover was open
- * and does run on the next Escape, every listener the popover added is gone,
- * and no Done moved in page coordinates.
- */
-const REL_T = "plans/e2e-checks-table.mdx";
-PAGES[REL_T] = [
-  "---\ntitle: Check fixture table\n---\n",
-  // Overview hides it and All shows it: the lens key moves every row under it.
-  '<Historic since="2026-01-01" note="what the plan said before">\n\nAn older paragraph.\n\n</Historic>\n',
-  "<NextMoves>\n",
-  '<Lane kind="you">\n',
-  ...THIRTY_TIGHT,
-  "",
-  "Then, when those hold:",
-  "",
-  ...THIRTY_LOOSE,
-  "\n</Lane>\n",
-  "</NextMoves>\n",
-].join("\n");
-type Opener = "click" | "tap" | "Enter" | "Space";
-type Closer = "Escape" | "again" | "outside" | "scroll" | "resize" | "another" | "row removed by Done" | "lens switch" | "navigation" | "answer re-render";
-const OPENERS: Opener[] = ["click", "tap", "Enter", "Space"];
-const CLOSERS: Closer[] = ["Escape", "again", "outside", "scroll", "resize", "another", "row removed by Done", "lens switch", "navigation", "answer re-render"];
-/** Rows a write removes: one per test, so no two tests take the same row. */
-const removes = (o: Opener) => `Loose ${{ click: 2, tap: 4, Enter: 6, Space: 7 }[o]}:`;
-const rerenders = (o: Opener) => `Loose ${{ click: 9, tap: 10, Enter: 11, Space: 12 }[o]}:`;
 const layout = (p: Page) => p.locator(".wiki-layout");
 
-test.describe("owner-step check chips: every way the popover opens and closes", () => {
-  for (const opener of OPENERS) {
-    for (const closer of CLOSERS) {
-      test(`opened by ${opener}, closed by ${closer}`, async ({ browser, browserName }) => {
-        const ctxt = await browser.newContext({ hasTouch: opener === "tap", viewport: { width: 1280, height: 900 } });
-        const p = await ctxt.newPage();
-        await p.addInitScript(LISTENER_COUNT);
-        try {
-          await openAt(p, REL_B);
-          await expect(chips(p)).toHaveCount(4);
-          // In-app navigation to the table page, so Back is in-app too.
-          const answeredT = p.waitForResponse((r) => r.url().includes("/api/wiki/step-checks") && r.url().includes(encodeURIComponent(REL_T)));
-          await p.locator(`.wiki-list-item[data-relpath="${REL_T}"]`).first().click();
-          await expect(p.locator(".wiki-article-head h1")).toHaveText("Check fixture table");
-          await p.locator(".wiki-article .nm-lane.nm-you").evaluate((d) => ((d as HTMLDetailsElement).open = true));
-          await answered(p, answeredT);
-          await expect(p.locator(".wiki-article .step-check:empty")).toHaveCount(0);
-          // Focus mode on: its Escape is the shell's, and the instrument. By its
-          // button: the F key also asks for fullscreen, whose Escape the browser takes.
-          await p.locator('.wiki-pane-btn[data-pane-toggle="focus"]:visible').first().click();
-          await expect(layout(p)).toHaveClass(/focus-mode/);
-          await p.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-          const target = closer === "row removed by Done" ? removes(opener) : "Open the reasons on this row";
-          const c = row(p, target).locator(":scope > .step-check > .step-chip");
-          const other = row(p, "Go.").locator(":scope > .step-check > .step-chip");
-          await c.scrollIntoViewIfNeeded();
-          const activate = async (chip: typeof c) => {
-            if (opener === "click") await chip.click();
-            else if (opener === "tap") await chip.tap();
-            else {
-              await chip.focus();
-              // A key a frame after focus, as a hand presses it: a scroll the focus caused lands first.
-              await frames(p);
-              await p.keyboard.press(opener);
-            }
-          };
-          const before = await doneAbsBoxes(p);
-          const heard = await listeners(p);
-          await activate(c);
-          await expect(pop(p)).toHaveCount(1);
-          // Its first frame places it and takes the chip's place as the one to watch: a hand is slower than that.
-          await frames(p);
-          await expect(c).toHaveAttribute("aria-expanded", "true");
-          const focusOpen = await p.evaluate(() => document.activeElement?.className ?? null);
-          let focus: "chip" | "same" | "body" | "other" | "not in a popover" = "same";
-          let measure = true;
-          let chipStays = true;
-          if (closer === "Escape") {
-            await p.keyboard.press("Escape");
-            focus = "chip";
-          } else if (closer === "again") {
-            await activate(c);
-          } else if (closer === "outside") {
-            const h1 = p.locator(".wiki-article-head h1");
-            if (opener === "tap") await h1.tap();
-            else await h1.click();
-            focus = "body";
-          } else if (closer === "scroll") {
-            await p.locator(".wiki-article-wrap").evaluate((w) => w.scrollBy(0, 60));
-          } else if (closer === "resize") {
-            await p.setViewportSize({ width: 1279, height: 900 });
-            await expect(pop(p)).toHaveCount(0);
-            await p.setViewportSize({ width: 1280, height: 900 });
-          } else if (closer === "another") {
-            await activate(other);
-            await expect(row(p, "Go.").locator(".step-chip-pop")).toBeVisible();
-            await expect(pop(p)).toHaveCount(1);
-            await expect(c).toHaveAttribute("aria-expanded", "false");
-            await expect(other).toHaveAttribute("aria-expanded", "true");
-            await p.keyboard.press("Escape");
-            focus = "other";
-          } else if (closer === "row removed by Done" || closer === "answer re-render") {
-            const li = row(p, closer === "row removed by Done" ? target : rerenders(opener));
-            const again = p.waitForResponse((r) => r.url().includes("/api/wiki/step-checks"));
-            await li.locator("[data-step-done]").focus();
-            await p.keyboard.press("Enter");
-            await li.locator("[data-step-done-confirm]").focus();
-            await p.keyboard.press("Enter");
-            await expect(li).toHaveCount(0);
-            await p.locator(".wiki-article .nm-lane.nm-you").evaluate((d) => ((d as HTMLDetailsElement).open = true));
-            await answered(p, again);
-            focus = "not in a popover";
-            measure = false;
-            chipStays = false;
-          } else if (closer === "lens switch") {
-            const lens = await p.locator(".wiki-article:not(.wiki-ask-article)").getAttribute("class");
-            await p.keyboard.press("v");
-            // The lens moves every row under the Historic block: the chip moved, so the popover closes.
-            await expect(p.locator(".wiki-article:not(.wiki-ask-article)")).not.toHaveAttribute("class", lens!);
-            focus = "not in a popover";
-            measure = false;
-          } else if (closer === "navigation") {
-            await p.goBack();
-            await expect(p.locator(".wiki-article-head h1")).toHaveText("Check fixture B");
-            focus = "not in a popover";
-            measure = false;
-            chipStays = false;
-          }
-          await expect(pop(p)).toHaveCount(0);
-          expect(await openPops(p), "no popover open").toBe(0);
-          if (chipStays) await expect(c).toHaveAttribute("aria-expanded", "false");
-          const f = await p.evaluate(() => ({ cls: document.activeElement?.className ?? null, body: document.activeElement === document.body, inPop: !!document.activeElement?.closest("[popover], .step-chip-pop") }));
-          if (focus === "chip") await expect(c).toBeFocused();
-          else if (focus === "other") await expect(other).toBeFocused();
-          else if (focus === "body") expect(f.body, "focus on the page").toBe(true);
-          else if (focus === "same") expect(f.cls, "focus unchanged").toBe(focusOpen);
-          expect(f.inPop, "focus not in a popover").toBe(false);
-          // The shell's Escape did not run while the popover was open...
-          await expect(layout(p)).toHaveClass(/focus-mode/);
-          // A removed popover fires no toggle: its chip's frame watch is what lets go, a frame later.
-          await frames(p);
-          expect(await listeners(p), "listeners back").toEqual(heard);
-          if (measure) {
-            if (closer === "scroll") await p.locator(".wiki-article-wrap").evaluate((w) => w.scrollBy(0, -60));
-            expect(moved(before, await doneAbsBoxes(p)), "no Done moved").toEqual({ max: 0, count: 0 });
-          }
-          // ...and runs on the next one, with none open.
-          await p.keyboard.press("Escape");
-          await expect(layout(p)).not.toHaveClass(/focus-mode/);
-          console.log(`ROW ${browserName} ${opener} × ${closer}: pass`);
-        } finally {
-          await ctxt.close();
-        }
-      });
-    }
-  }
-});
-
-test.describe("owner-step check chips: where the popover goes", () => {
-  const long = "Probe reason. ".repeat(430).slice(0, 6000);
-  const longReasons = shaped((a) => ({ ...a, steps: (a.steps as Record<string, unknown>[]).map((s) => ({ ...s, problems: [long] })) }));
-  test("under the chip, or over it when the chip sits near the viewport's bottom", async ({ page: p }) => {
+test.describe("owner-step check chips: no listener of their own", () => {
+  test("chips landing before Done, one clicked, then Done re-slotting the rows: the page keeps its listeners and Escape reaches the shell", async ({ page: p }) => {
     await p.setViewportSize({ width: 1280, height: 900 });
-    await openAt(p, REL_30);
-    await expect(chips(p)).toHaveCount(30);
-    const c = row(p, "Open the reasons on this row").locator(".step-chip");
-    await c.scrollIntoViewIfNeeded();
-    await c.click();
-    const below = await boxes(p);
-    console.log(`PLACE below ${JSON.stringify(below)}`);
-    expect(below.top).toBeGreaterThanOrEqual(below.chipBottom);
-    expect(below.top - below.chipBottom).toBeLessThanOrEqual(8);
-    await p.keyboard.press("Escape");
-    // Put a chip from the lane's middle 30 px over the viewport's bottom edge.
-    const mid = chips(p).nth(18);
-    await mid.evaluate((el) => {
-      const w = document.querySelector(".wiki-article-wrap")!;
-      w.scrollTop += el.getBoundingClientRect().bottom - (document.documentElement.clientHeight - 30);
-    });
-    await mid.click();
-    const above = await boxes(p);
-    console.log(`PLACE above ${JSON.stringify(above)}`);
-    expect(above.chipBottom).toBeGreaterThan(above.vh - 60);
-    expect(above.bottom).toBeLessThanOrEqual(above.chipTop);
-    expect(above.chipTop - above.bottom).toBeLessThanOrEqual(8);
-  });
-
-  for (const width of [280, 320, 1280]) {
-    test(`six thousand characters of reasons stay 8 px inside the viewport on every side and scroll inside (${width} px)`, async ({ page: p }) => {
-      await p.setViewportSize({ width, height: 700 });
-      await p.route(CHECKS, longReasons);
-      await openAt(p, REL_30);
-      await expect(chips(p)).toHaveCount(30);
-      const xs = await chips(p).evaluateAll((els) => els.map((e) => e.getBoundingClientRect().x));
-      for (const [which, i] of [["right", xs.indexOf(Math.max(...xs))], ["left", xs.indexOf(Math.min(...xs))], ["last", xs.length - 1]] as const) {
-        await chips(p).nth(i).scrollIntoViewIfNeeded();
-        await chips(p).nth(i).click();
-        await expect(pop(p)).toHaveCount(1);
-        const b = await boxes(p);
-        console.log(`CLAMP ${width}px ${which} ${JSON.stringify(b)}`);
-        expect(b.left, `${which} left`).toBeGreaterThanOrEqual(8 - 0.5);
-        expect(b.right, `${which} right`).toBeLessThanOrEqual(b.vw - 8 + 0.5);
-        expect(b.top, `${which} top`).toBeGreaterThanOrEqual(8 - 0.5);
-        expect(b.bottom, `${which} bottom`).toBeLessThanOrEqual(b.vh - 8 + 0.5);
-        expect(b.sh, `${which} scrolls inside`).toBeGreaterThan(b.ch);
-        // A scroll inside the reasons is reading them: it keeps them open.
-        await pop(p).evaluate((el) => el.scrollBy(0, 200));
-        await p.evaluate(() => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50))));
-        await expect(pop(p)).toHaveCount(1);
-        await p.keyboard.press("Escape");
-        await expect(pop(p)).toHaveCount(0);
-      }
-    });
-  }
-
-  test("a scroll of the page or a resize closes it rather than leaving it behind", async ({ page: p }) => {
-    await p.setViewportSize({ width: 1280, height: 900 });
-    await openAt(p, REL_30);
-    await expect(chips(p)).toHaveCount(30);
-    const c = row(p, "Open the reasons on this row").locator(".step-chip");
-    await c.click();
-    await expect(pop(p)).toHaveCount(1);
-    await p.locator(".wiki-article-wrap").evaluate((w) => w.scrollBy(0, 40));
-    await expect(pop(p)).toHaveCount(0);
-    await c.click();
-    await expect(pop(p)).toHaveCount(1);
-    await p.setViewportSize({ width: 1200, height: 900 });
-    await expect(pop(p)).toHaveCount(0);
-  });
-
-  test("a browser without the popover API gets a plain button: its name and title, no popover", async ({ page: p }) => {
-    await p.addInitScript(() => {
-      for (const k of ["popover", "showPopover", "hidePopover", "togglePopover"]) delete (HTMLElement.prototype as unknown as Record<string, unknown>)[k];
-    });
+    await p.addInitScript(LISTENER_COUNT);
+    const g = gate();
+    await p.route("**/api/wiki/step-done?*", async (route) => (await g.wait, route.continue()));
     await openAt(p, REL_B);
     await expect(chips(p)).toHaveCount(4);
-    const c = row(p, "Apply the old migration").locator(".step-chip");
-    await expect(c).toHaveAccessibleName("Check: checked");
-    await expect(c).toHaveAttribute("title", "migration=086: migration 086 is applied on this machine's database");
-    await expect(p.locator(".wiki-article .step-chip-pop")).toHaveCount(0);
+    await expect(dones(p)).toHaveCount(0);
+    // Focus mode on: its Escape is the shell's, and the instrument. By its button:
+    // the F key also asks for fullscreen, whose Escape the browser takes.
+    await p.locator('.wiki-pane-btn[data-pane-toggle="focus"]:visible').first().click();
+    await expect(layout(p)).toHaveClass(/focus-mode/);
+    await frames(p);
+    const heard = await listeners(p);
+    const c = row(p, "Apply the old migration").locator(":scope > .step-check > .step-chip");
     await c.click();
-    await expect(p.locator(".wiki-article .step-chip-pop")).toHaveCount(0);
+    await frames(p);
+    g.release();
+    await expect(dones(p)).toHaveCount(4);
+    // Done moved every slot to just after itself.
+    await expect(p.locator(".wiki-article .nm-body li > [data-step-done] + .step-check > .step-chip")).toHaveCount(4);
+    await frames(p);
+    await frames(p);
+    expect(await listeners(p), "window and document listeners").toEqual(heard);
+    await p.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await p.keyboard.press("Escape");
+    await expect(layout(p)).not.toHaveClass(/focus-mode/);
+  });
+});
+
+test.describe("owner-step check chips on a read-only instance", () => {
+  test("MUNINN_WIKI_READONLY=1 draws the chips", async ({ page: p }) => {
+    const got = p.waitForResponse((r) => r.url().includes("/api/wiki/step-checks"));
+    await p.goto(`${RO_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL_B)}`);
+    await expect(p.locator(".wiki-article .next-moves")).toBeVisible();
+    await p.locator(".wiki-article .nm-lane.nm-you").evaluate((d) => ((d as HTMLDetailsElement).open = true));
+    await answered(p, got);
+    await expect(chips(p)).toHaveCount(4);
+    expect(await chips(p).allTextContents()).toEqual(["✓", "?", "✓", "○"]);
+    for (const c of await chips(p).all()) await expect(c).toBeVisible();
   });
 });

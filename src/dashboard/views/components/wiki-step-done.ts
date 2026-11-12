@@ -375,23 +375,22 @@ const known = (s: unknown): s is CheckState => typeof s === "string" && Object.p
 const chipOf = (s: unknown) => (known(s) ? CHIP[s] : CHIP.unknown);
 
 /**
- * A chip's glyph, its name, its popover's lines and its title. The glyph is
- * all the row shows (✓, ○ or ?, the step's overall state); the words are the
- * name, «Check: checked», with «(laptop checked, mini unknown)» for several
- * machines, and the popover's. The title holds every probe's why.
+ * A chip's glyph, its name and its title. The glyph is all the row shows (✓, ○
+ * or ?, the step's overall state); the words are the name, «Check: checked»,
+ * with «(laptop checked, mini unknown)» for several machines. The title holds
+ * every probe's why.
  */
-export function checkChip(step: CheckedStep): { state: CheckState; glyph: string; name: string; head: string; machines: string[]; title: string } {
+export function checkChip(step: CheckedStep): { state: CheckState; glyph: string; name: string; title: string } {
   const state = known(step.state) ? step.state : "unknown";
   const ms = Array.isArray(step.machines) ? step.machines : [];
   const many = ms.length > 1;
   const head = `Check: ${CHIP[state][1]}`;
-  const machines = many ? ms.map((m) => `${m.name ?? "here"}: ${chipOf(m.state)[1]}`) : [];
   const name = many ? `${head} (${ms.map((m) => `${m.name ?? "here"} ${chipOf(m.state)[1]}`).join(", ")})` : head;
   const title = ms
     .flatMap((m) => (Array.isArray(m.probes) ? m.probes : []).map((p) => `${many && m.name ? `${m.name}: ` : ""}${p.kind}=${p.value}: ${p.why}`))
     .concat(step.problems ?? [])
     .join("\n");
-  return { state, glyph: CHIP[state][0], name, head, machines, title };
+  return { state, glyph: CHIP[state][0], name, title };
 }
 
 /** Done goes before its row's slot, whichever answer came first. The slot is a fixed box (see the styles), so what lands in it later moves nothing. */
@@ -400,101 +399,6 @@ function slotAfterDone(li: Element): void {
   const done = li.querySelector(`:scope > [${STEP_DONE_ATTR}]`);
   if (slot && done) done.after(slot);
 }
-
-const isNode = (t: unknown): t is Node => !!t && typeof (t as Node).nodeType === "number";
-
-/** Between chip and popover, and the popover's least distance from each viewport edge. */
-const GAP = 4;
-const EDGE = 8;
-
-/**
- * Place an open popover under its chip, over it when there is no room below,
- * EDGE px inside the viewport on every side; one taller than the viewport is
- * held by its `max-height` and scrolls inside. A popover in the top layer is
- * placed against the viewport, whatever its ancestors.
- */
-function placePop(chip: HTMLElement, pop: HTMLElement): void {
-  const root = chip.ownerDocument.documentElement;
-  const vw = root.clientWidth;
-  const vh = root.clientHeight;
-  const c = chip.getBoundingClientRect();
-  const p = pop.getBoundingClientRect();
-  const left = Math.max(EDGE, Math.min(c.left, vw - p.width - EDGE));
-  const below = c.bottom + GAP;
-  const above = c.top - GAP - p.height;
-  const top = below + p.height <= vh - EDGE ? below : above >= EDGE ? above : Math.max(EDGE, Math.min(below, vh - EDGE - p.height));
-  pop.style.left = `${Math.round(left)}px`;
-  pop.style.top = `${Math.round(top)}px`;
-}
-
-/**
- * The browser opens and closes the popover (`popover` + `popovertarget`): on
- * activation, on a click or tap outside, and when another opens. Ours, only
- * while it is open: placing it, in the first frame, before it paints; closing
- * it on a scroll outside it or a resize, rather than following the chip; closing
- * it when the chip moves or goes (a lens, a fold, the row removed, which fires
- * no toggle event); and Escape, which every engine measured still hands to the
- * page's keydown listeners while a popover is open: ours, on the window in
- * capture, closes it, puts focus on the chip (WebKit focuses no button on a
- * click) and goes no further.
- */
-function wirePop(chip: HTMLButtonElement, pop: HTMLElement): void {
-  const win = chip.ownerDocument.defaultView!;
-  let shown = false;
-  let frame = 0;
-  let at: DOMRect | null = null;
-  const hide = () => {
-    if (shown) pop.hidePopover();
-  };
-  const onScroll = (e: Event) => {
-    if (!(isNode(e.target) && pop.contains(e.target))) hide();
-  };
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key !== "Escape") return;
-    e.preventDefault();
-    e.stopPropagation();
-    hide();
-    chip.focus({ preventScroll: true });
-  };
-  const watch = () => {
-    if (!chip.isConnected) return stop();
-    const r = chip.getBoundingClientRect();
-    if (!at) {
-      placePop(chip, pop);
-      at = r;
-    } else if (!r.width || Math.abs(r.x - at.x) > 0.5 || Math.abs(r.y - at.y) > 0.5) return hide();
-    frame = win.requestAnimationFrame(watch);
-  };
-  function stop(): void {
-    shown = false;
-    win.removeEventListener("scroll", onScroll, true);
-    win.removeEventListener("resize", hide);
-    win.removeEventListener("keydown", onKey, true);
-    win.cancelAnimationFrame(frame);
-    frame = 0;
-  }
-  pop.addEventListener("beforetoggle", (e) => {
-    const open = (e as Event & { newState?: string }).newState === "open";
-    chip.setAttribute("aria-expanded", String(open));
-    if (!open) return stop();
-    if (shown) return;
-    shown = true;
-    at = null;
-    win.addEventListener("scroll", onScroll, { capture: true, passive: true });
-    win.addEventListener("resize", hide);
-    win.addEventListener("keydown", onKey, true);
-    frame = win.requestAnimationFrame(watch);
-  });
-  // A click on the chip is the chip's: it goes no further into the page.
-  chip.addEventListener("click", (e) => e.stopPropagation());
-}
-
-const span = (doc: Document, cls: string, text: string) => {
-  const el = doc.createElement("span");
-  el.className = cls;
-  el.textContent = text;
-  return el;
-};
 
 /**
  * Fill the `.step-check` slot of each step the route answered with a chip.
@@ -523,38 +427,15 @@ export function enhanceStepChecks(article: HTMLElement, ctx: StepDonePageContext
       const slot = li?.querySelector<HTMLElement>(":scope > .step-check");
       if (!li || !slot || slot.firstChild) continue;
       const c = checkChip(byKey.get(pair.key)!);
-      const doc = article.ownerDocument;
-      // Ids from the row's place: unique on the page, the same on every render of it.
-      const id = `step-check-pop-${pair.lane}-${pair.row}`;
-      // A button, so keyboard and touch reach the reasons: activating it shows or hides them, nothing else.
-      const chip = doc.createElement("button");
-      chip.type = "button";
+      // Not a control: activating it would do nothing, so it is no tab stop. The reasons are its title.
+      const chip = article.ownerDocument.createElement("span");
       chip.className = "step-chip";
+      chip.setAttribute("role", "img");
       chip.dataset.state = c.state;
       chip.textContent = c.glyph;
       chip.title = c.title;
       chip.setAttribute("aria-label", c.name);
-      // No popover API (a browser from before 2024): the button, its name and its title.
-      if (typeof doc.defaultView?.HTMLElement.prototype.showPopover !== "function") {
-        slot.append(chip);
-        continue;
-      }
-      chip.setAttribute("popovertarget", id);
-      chip.setAttribute("aria-expanded", "false");
-      chip.setAttribute("aria-controls", id);
-      const pop = span(doc, "step-chip-pop", "");
-      pop.id = id;
-      pop.setAttribute("popover", "auto");
-      pop.appendChild(span(doc, "step-chip-state", c.head));
-      for (const m of c.machines) pop.appendChild(span(doc, "step-chip-machine", m));
-      if (c.title) {
-        const why = span(doc, "step-chip-why", c.title);
-        why.id = `step-check-why-${pair.lane}-${pair.row}`;
-        chip.setAttribute("aria-describedby", why.id);
-        pop.appendChild(why);
-      }
-      slot.append(chip, pop);
-      wirePop(chip, pop);
+      slot.append(chip);
     }
   })();
 }
@@ -668,33 +549,17 @@ export function stepDoneStyles(): string {
     .${STEP_DONE_NOTE_CLASS}[role="alert"] { color: var(--status-error); font-weight: 500; }
     /* The slot is a fixed box from first paint: it wraps with the row when
        Done goes in and never again, so a chip landing, or none, moves nothing
-       (e2e/wiki-step-checks.spec.ts, thirty rows at five widths). The chip and
-       its reasons are no part of a copied row. */
+       (e2e/wiki-step-checks.spec.ts, thirty rows at five widths). The chip is
+       no part of a copied row. */
     .step-check {
-      display: inline-block; position: relative; box-sizing: border-box;
+      display: inline-block; box-sizing: border-box;
       width: 1.5em; height: 1.2em; margin-left: 0.2em; vertical-align: middle; white-space: nowrap;
       user-select: none; -webkit-user-select: none;
     }
     .step-chip {
-      display: block; box-sizing: border-box; width: 100%; height: 100%; margin: 0; padding: 0;
-      border: 0; border-radius: 4px; background: transparent; cursor: pointer; overflow: hidden;
-      font: inherit; font-size: 1em; line-height: 1.2em; text-align: center; color: var(--text-secondary);
+      display: block; box-sizing: border-box; width: 100%; height: 100%; overflow: hidden;
+      font-size: 1em; line-height: 1.2em; text-align: center; color: var(--text-secondary); cursor: default;
     }
-    .step-chip:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
-    /* A native popover: the top layer takes it out of the row and above every
-       clip; placePop sets left and top. inset and margin undo the UA's centring. */
-    .step-chip-pop {
-      position: fixed; inset: auto; margin: 0; box-sizing: border-box;
-      width: max-content; max-width: min(22rem, calc(100vw - 16px));
-      max-height: calc(100vh - 16px); overflow: auto;
-      padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border-primary);
-      background: var(--bg-surface); box-shadow: 0 8px 28px rgba(0,0,0,0.3);
-      color: var(--text-primary); font-size: 12.5px; line-height: 1.45; font-weight: normal;
-      text-align: left; white-space: normal;
-    }
-    .step-chip-pop > span { display: block; }
-    .step-chip-state { font-weight: 600; }
-    .step-chip-why { margin-top: 2px; color: var(--text-secondary); white-space: pre-line; overflow-wrap: anywhere; }
     /* A glyph says little on paper. */
     @media print { .step-check { display: none !important; } }
     /* The pill text tones (shared-styles), not the bare status colours: those measure under AA in light. */

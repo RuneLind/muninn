@@ -5,8 +5,8 @@
  * `enhanceStepChecks` with an injected fetch. Pins: chips only on rows the
  * route answered, paired by Done's rule; none on a hash mismatch, an error or
  * a bad answer; no request when the page has no slot; the chip stays inside
- * the reader-only slot; the popover's wiring (attributes, Escape, what it
- * listens to while open and lets go of, the fallback without the popover API).
+ * the reader-only slot; the chip is one glyph, named in words, its reasons in
+ * its title, no control and no listener of its own.
  */
 import { describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
@@ -48,64 +48,20 @@ const probes: ProbeDeps = {
 
 const answer = () => answerStepChecks(PAGE, { probes, machine: "laptop", cache: new ProbeCache() });
 
-type Fake = { frames: Set<number>; listeners: Map<string, number>; open: Set<Element> };
-/**
- * happy-dom has the `popover` attribute but no `showPopover` (21.0.4), so the
- * reader takes its fallback there. `popover: true` stands the platform's half
- * in: `showPopover`/`hidePopover` firing `beforetoggle` and `toggle` as an
- * engine does; the test counts the window listeners added and not yet removed,
- * per type, and the animation frames asked for and not yet run or cancelled.
- */
-function platform(win: Window): Fake {
-  const w = win as unknown as Record<string, unknown> & typeof globalThis;
-  const fake: Fake = { frames: new Set(), listeners: new Map(), open: new Set() };
-  const proto = w.HTMLElement.prototype as unknown as Record<string, unknown>;
-  const fire = (el: HTMLElement, type: string, newState: string) => el.dispatchEvent(Object.assign(new w.Event(type), { newState, oldState: newState === "open" ? "closed" : "open" }));
-  proto.showPopover = function (this: HTMLElement) {
-    if (fake.open.has(this)) return;
-    fire(this, "beforetoggle", "open");
-    fake.open.add(this);
-    fire(this, "toggle", "open");
-  };
-  proto.hidePopover = function (this: HTMLElement) {
-    if (!fake.open.has(this)) return;
-    fire(this, "beforetoggle", "closed");
-    fake.open.delete(this);
-    fire(this, "toggle", "closed");
-  };
-  let n = 0;
-  w.requestAnimationFrame = ((cb: FrameRequestCallback) => {
-    const id = ++n;
-    fake.frames.add(id);
-    setTimeout(() => fake.frames.delete(id) && cb(0), 5);
-    return id;
-  }) as never;
-  w.cancelAnimationFrame = ((id: number) => void fake.frames.delete(id)) as never;
-  const add = w.addEventListener.bind(w);
-  const remove = w.removeEventListener.bind(w);
-  const seen = new Set<unknown>();
-  w.addEventListener = ((type: string, fn: EventListener, o?: unknown) => {
-    if (!seen.has(fn)) fake.listeners.set(type, (fake.listeners.get(type) ?? 0) + 1);
-    seen.add(fn);
-    add(type, fn, o as never);
-  }) as never;
-  w.removeEventListener = ((type: string, fn: EventListener, o?: unknown) => {
-    if (seen.delete(fn)) fake.listeners.set(type, (fake.listeners.get(type) ?? 0) - 1);
-    remove(type, fn, o as never);
-  }) as never;
-  return fake;
-}
-/** The platform stand-in of the last `mount`, or null when it mounted without one. */
-let fake: Fake | null = null;
-/** Window listeners the reader added and has not removed, all types. */
-const live = () => Array.from(fake!.listeners.values()).reduce((a, b) => a + b, 0);
+/** Window and document listeners added, per type, counted from the mount on. */
+let added: Map<string, number> = new Map();
 
-function mount(md = PAGE, opts: { popover?: boolean } = {}) {
+function mount(md = PAGE) {
   const win = new Window();
-  fake = opts.popover === false ? null : platform(win);
-  // happy-dom's element classes are shared by its windows: a stand-in another mount installed is taken off again.
-  if (!fake) for (const k of ["showPopover", "hidePopover"]) delete (win.HTMLElement.prototype as unknown as Record<string, unknown>)[k];
+  added = new Map();
   const doc = win.document;
+  for (const t of [win, doc] as unknown as EventTarget[]) {
+    const add = t.addEventListener.bind(t);
+    t.addEventListener = ((type: string, fn: EventListener, o?: unknown) => {
+      added.set(type, (added.get(type) ?? 0) + 1);
+      add(type, fn, o as never);
+    }) as never;
+  }
   const article = doc.createElement("div");
   article.className = "wiki-article";
   article.innerHTML = renderWikiHtml(md, () => undefined);
@@ -185,26 +141,15 @@ describe("step-check chips: what a route string can do", () => {
     expect(a.querySelectorAll(".step-chip").length).toBe(3);
     const many = rowLi(a, 3).querySelector<HTMLElement>(".step-chip")!;
     expect(many.textContent).toBe("?");
-    expect(Array.from(a.ownerDocument.getElementById(many.getAttribute("aria-controls")!)!.querySelectorAll(".step-chip-machine")).map((m) => m.textContent)).toEqual([`laptop${HOSTILE}: checked`, `mini${HOSTILE}: unknown`]);
     expect(many.getAttribute("aria-label")).toBe(`Check: unknown (laptop${HOSTILE} checked, mini${HOSTILE} unknown)`);
     expect(many.title).toBe([`laptop${HOSTILE}: kind${HOSTILE}=value${HOSTILE}: probe why ${HOSTILE}`, `mini${HOSTILE}: kind${HOSTILE}=value${HOSTILE}: probe why ${HOSTILE}`, `problem ${HOSTILE}`].join("\n"));
-    // Every node the slot holds is the chip's own: its text and the reasons, as text.
+    // The slot holds the chip and nothing else; the chip holds only its glyph, as text.
     for (const slot of Array.from(a.querySelectorAll<HTMLElement>(".step-check"))) {
-      for (const el of Array.from(slot.querySelectorAll("*"))) expect(["step-chip", "step-chip-pop", "step-chip-state", "step-chip-machine", "step-chip-why"]).toContain(el.className);
+      expect(Array.from(slot.querySelectorAll("*")).map((el) => el.className)).toEqual(["step-chip"]);
+      expect(slot.firstElementChild!.children.length).toBe(0);
     }
   });
 
-  test("the reasons node the chip points at holds the same strings as text", async () => {
-    const a = mount();
-    const full = await answer();
-    const steps = full.steps.map((s) => ({ ...s, machines: [{ name: `here${HOSTILE}`, state: s.state, why: HOSTILE, probes: [{ kind: `k${HOSTILE}`, value: `v${HOSTILE}`, state: s.state, why: `w${HOSTILE}` }] }], problems: [`p${HOSTILE}`] }));
-    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond({ ...full, steps }));
-    const chip = rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!;
-    const why = a.ownerDocument.getElementById(chip.getAttribute("aria-describedby") ?? "")!;
-    expect(why.textContent).toBe(`k${HOSTILE}=v${HOSTILE}: w${HOSTILE}\np${HOSTILE}`);
-    expect(why.children.length).toBe(0);
-    expect(a.querySelectorAll("img, script, b").length).toBe(0);
-  });
 });
 
 describe("step-check chips: state, name and placement", () => {
@@ -229,34 +174,24 @@ describe("step-check chips: state, name and placement", () => {
     expect(Array.from(a.querySelectorAll(".step-check")).map((s) => s.querySelectorAll(".step-chip").length)).toEqual([1, 1, 1]);
   });
 
-  test("the chip names its state in words apart from the step's text, describes its reasons and shows them on activation, asking nothing", async () => {
+  test("the chip is an image named in words, its reasons its title; no control, no listener, and asking nothing", async () => {
     const a = mount();
     let asked = 0;
     const full = await answer();
     await enhanceStepChecks(a, ctx(sha256(PAGE)), async () => (asked++, respond(full)()));
     const one = rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!;
     expect(one.getAttribute("aria-label")).toBe("Check: checked");
+    expect(one.title).toBe("env=HAVE: HAVE is set in .env and in the running process");
     expect(rowLi(a, 2).querySelector(".step-chip")!.getAttribute("aria-label")).toBe("Check: not yet");
     expect(rowLi(a, 3).querySelector(".step-chip")!.getAttribute("aria-label")).toBe("Check: unknown (laptop checked, mini unknown)");
-    // Reachable from the keyboard and by touch: a native button.
-    expect(one.tagName).toBe("BUTTON");
-    expect(one.getAttribute("type")).toBe("button");
-    const why = a.ownerDocument.getElementById(one.getAttribute("aria-describedby") ?? "")!;
-    expect(why.textContent).toBe("env=HAVE: HAVE is set in .env and in the running process");
-    const pop = a.ownerDocument.getElementById(one.getAttribute("aria-controls") ?? "")!;
-    expect(pop.contains(why)).toBe(true);
-    // The platform's popover, the chip its invoker: the browser opens and closes it.
-    expect(pop.getAttribute("popover")).toBe("auto");
-    expect(one.getAttribute("popovertarget")).toBe(pop.id);
-    expect(one.getAttribute("aria-expanded")).toBe("false");
-    pop.showPopover();
-    expect(one.getAttribute("aria-expanded")).toBe("true");
-    pop.hidePopover();
-    expect(one.getAttribute("aria-expanded")).toBe("false");
+    // Activating it would do nothing, so it is no control and no tab stop.
+    expect(one.tagName).toBe("SPAN");
+    expect(one.getAttribute("role")).toBe("img");
+    expect(one.hasAttribute("tabindex")).toBe(false);
+    for (const attr of ["popover", "popovertarget", "aria-expanded", "aria-controls", "aria-describedby", "id"]) expect(a.querySelectorAll(`.step-check [${attr}]`).length).toBe(0);
+    one.click();
+    expect(added).toEqual(new Map());
     expect(asked).toBe(1);
-    // Every chip's reasons node has an id of its own.
-    const ids = Array.from(a.querySelectorAll(".step-chip")).map((c) => c.getAttribute("aria-describedby"));
-    expect(new Set(ids).size).toBe(3);
   });
 
   // The chip after Done (Done moves the slot when it inserts itself) is pinned in e2e/wiki-step-checks.spec.ts.
@@ -270,160 +205,22 @@ describe("step-check chips: state, name and placement", () => {
 
 describe("checkChip", () => {
   test("an unknown state reads unknown; problems join the title", () => {
-    expect(checkChip({ key: "k", lane: 0, row: 0, state: "bogus" as never, machines: [], problems: ["p1"] })).toEqual({ state: "unknown", glyph: "?", name: "Check: unknown", head: "Check: unknown", machines: [], title: "p1" });
+    expect(checkChip({ key: "k", lane: 0, row: 0, state: "bogus" as never, machines: [], problems: ["p1"] })).toEqual({ state: "unknown", glyph: "?", name: "Check: unknown", title: "p1" });
     // An inherited property name is no state either.
     const c = checkChip({ key: "k", lane: 0, row: 0, state: "toString" as never, machines: [{ name: "a", state: "constructor" as never, why: "", probes: [] }, { name: "b", state: "ok", why: "", probes: [] }] });
-    expect([c.glyph, c.machines, c.name]).toEqual(["?", ["a: unknown", "b: checked"], "Check: unknown (a unknown, b checked)"]);
+    expect([c.glyph, c.name]).toEqual(["?", "Check: unknown (a unknown, b checked)"]);
   });
 });
 
-describe("step-check chips: one glyph, and the reasons as a popover (fix round 2 batch 3)", () => {
-  const popOf = (a: HTMLElement, chip: HTMLElement) => a.ownerDocument.getElementById(chip.getAttribute("aria-controls") ?? "");
-  const key = (el: Element, k: string) => el.dispatchEvent(new (el.ownerDocument.defaultView as unknown as typeof globalThis).KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
-
-  test("the chip shows one glyph and no words; the words are its name", async () => {
+describe("step-check chips: one glyph", () => {
+  test("the chip shows one glyph and no words; the words are its name, the reasons its title", async () => {
     const a = mount();
     await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
     expect(chips(a)).toEqual(["✓", "", "○", "?"]);
-    expect(rowLi(a, 3).querySelector(".step-chip")!.getAttribute("aria-label")).toBe("Check: unknown (laptop checked, mini unknown)");
-  });
-
-  test("the popover holds the state in words, one line per machine and the reasons, as text", async () => {
-    const a = mount();
-    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
-    const chip = rowLi(a, 3).querySelector<HTMLElement>(".step-chip")!;
-    const pop = popOf(a, chip)!;
-    expect(pop).not.toBeNull();
-    expect(chip.parentElement!.contains(pop)).toBe(true);
-    expect(pop.hasAttribute("hidden")).toBe(false);
-    expect(fake!.open.size).toBe(0);
-    expect(pop.querySelector(".step-chip-state")!.textContent).toBe("Check: unknown");
-    expect(Array.from(pop.querySelectorAll(".step-chip-machine")).map((m) => m.textContent)).toEqual(["laptop: checked", "mini: unknown"]);
-    const why = a.ownerDocument.getElementById(chip.getAttribute("aria-describedby") ?? "")!;
-    expect(pop.contains(why)).toBe(true);
-    expect(why.textContent).toBe(chip.title);
-    // One machine: no machine lines.
-    const one = popOf(a, rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!)!;
-    expect(one.querySelector(".step-chip-state")!.textContent).toBe("Check: checked");
-    expect(one.querySelectorAll(".step-chip-machine").length).toBe(0);
-  });
-
-  test("ids are unique per row and the same on a fresh render of the same page", async () => {
-    const full = await answer();
-    const idsOf = async () => {
-      const a = mount();
-      await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(full));
-      return Array.from(a.querySelectorAll(".step-chip")).map((c) => [c.getAttribute("aria-controls"), c.getAttribute("aria-describedby")]);
-    };
-    const first = await idsOf();
-    expect(new Set(first.flat()).size).toBe(6);
-    expect(await idsOf()).toEqual(first);
-  });
-
-  test("Escape while one is open closes it, puts focus on the chip and reaches no other listener; with none open it goes on", async () => {
-    const a = mount();
-    let asked = 0;
-    const full = await answer();
-    await enhanceStepChecks(a, ctx(sha256(PAGE)), async () => (asked++, respond(full)()));
-    const doc = a.ownerDocument;
-    const reached: string[] = [];
-    doc.addEventListener("keydown", (e) => reached.push(`key:${(e as KeyboardEvent).key}`));
-    a.addEventListener("click", () => reached.push("click"));
-    const c0 = rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!;
-    const p0 = popOf(a, c0)!;
-    // WebKit focuses no button on click: focus is elsewhere when Escape comes.
-    doc.body.focus();
-    p0.showPopover();
-    key(doc.body, "Escape");
-    expect(fake!.open.has(p0)).toBe(false);
-    expect(doc.activeElement).toBe(c0);
-    expect(c0.getAttribute("aria-expanded")).toBe("false");
-    expect(reached).toEqual([]);
-    key(c0, "Escape");
-    expect(reached).toEqual(["key:Escape"]);
-    // Another key while open is not ours.
-    p0.showPopover();
-    key(c0, "v");
-    expect(fake!.open.has(p0)).toBe(true);
-    expect(reached).toEqual(["key:Escape", "key:v"]);
-    // A click on the chip goes no further than the chip.
-    c0.click();
-    expect(reached.filter((r) => r === "click")).toEqual([]);
-    expect(asked).toBe(1);
-  });
-
-  test("what it listens to while open it adds on open and removes on close: fifty cycles leave nothing", async () => {
-    const a = mount();
-    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
-    const base = live();
-    const p0 = popOf(a, rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!)!;
-    const p2 = popOf(a, rowLi(a, 2).querySelector<HTMLElement>(".step-chip")!)!;
-    p0.showPopover();
-    expect(live()).toBeGreaterThan(base);
-    expect(fake!.listeners.get("scroll")).toBe(1);
-    expect(fake!.listeners.get("resize")).toBe(1);
-    expect(fake!.frames.size).toBe(1);
-    p0.hidePopover();
-    for (let i = 0; i < 50; i++) {
-      (i % 2 ? p0 : p2).showPopover();
-      (i % 2 ? p0 : p2).hidePopover();
-    }
-    expect(live()).toBe(base);
-    expect(fake!.frames.size).toBe(0);
-  });
-
-  test("a row removed while its popover is open (the platform fires no toggle then) leaves no listener a frame later", async () => {
-    const a = mount();
-    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
-    const base = live();
-    const li = rowLi(a, 0);
-    const p0 = popOf(a, li.querySelector<HTMLElement>(".step-chip")!)!;
-    p0.showPopover();
-    expect(live()).toBeGreaterThan(base);
-    li.remove();
-    await new Promise((r) => setTimeout(r, 30));
-    expect(live()).toBe(base);
-    expect(fake!.frames.size).toBe(0);
-  });
-
-  test("a scroll anywhere closes it, a scroll inside it does not; a resize closes it", async () => {
-    const a = mount();
-    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
-    const win = a.ownerDocument.defaultView as unknown as typeof globalThis;
-    const p0 = popOf(a, rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!)!;
-    p0.showPopover();
-    p0.dispatchEvent(new win.Event("scroll"));
-    expect(fake!.open.has(p0)).toBe(true);
-    a.dispatchEvent(new win.Event("scroll"));
-    expect(fake!.open.has(p0)).toBe(false);
-    p0.showPopover();
-    win.dispatchEvent(new win.Event("resize"));
-    expect(fake!.open.has(p0)).toBe(false);
-  });
-
-  test("ids are unique across two lanes and two NextMoves blocks", async () => {
-    const block = (n: number) => ["<NextMoves>", "", '<Lane kind="you">', "", `1. Lane ${n}a step <Check env="HAVE" />`, "", "</Lane>", "", '<Lane kind="you">', "", `1. Lane ${n}b step <Check env="HAVE" />`, "", "</Lane>", "", "</NextMoves>", ""];
-    const md = ["---", "title: T", "---", "", ...block(1), ...block(2)].join("\n");
-    const a = mount(md);
-    await enhanceStepChecks(a, ctx(sha256(md)), respond(await answerStepChecks(md, { probes, machine: "laptop", cache: new ProbeCache() })));
-    const ids = Array.from(a.querySelectorAll(".step-chip")).flatMap((c) => [c.getAttribute("popovertarget"), c.getAttribute("aria-describedby")]);
-    expect(ids.length).toBe(8);
-    expect(new Set(ids).size).toBe(8);
-    for (const id of ids) expect(a.ownerDocument.querySelectorAll(`[id="${id}"]`).length).toBe(1);
-  });
-
-  test("a browser without the popover API gets a plain button with its name and title, and no popover", async () => {
-    const a = mount(PAGE, { popover: false });
-    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
-    expect(chips(a)).toEqual(["✓", "", "○", "?"]);
-    const c = rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!;
-    expect(c.tagName).toBe("BUTTON");
-    expect(c.getAttribute("aria-label")).toBe("Check: checked");
-    expect(c.title).toBe("env=HAVE: HAVE is set in .env and in the running process");
-    expect(c.hasAttribute("popovertarget")).toBe(false);
-    expect(a.querySelectorAll(".step-chip-pop, [popover]").length).toBe(0);
-    c.click();
-    expect(a.querySelectorAll(".step-chip-pop").length).toBe(0);
+    const many = rowLi(a, 3).querySelector<HTMLElement>(".step-chip")!;
+    expect(many.getAttribute("aria-label")).toBe("Check: unknown (laptop checked, mini unknown)");
+    // One reason line per machine's probe, each named by its machine.
+    expect(many.title.split("\n").map((l) => l.split(":")[0])).toEqual(["laptop", "mini"]);
   });
 });
 

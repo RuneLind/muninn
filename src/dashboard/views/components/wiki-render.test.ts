@@ -155,7 +155,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Its fix round 2 batch 3 (a one-glyph chip in a fixed box, the reasons as a placed popover): 863,930 (294,038).
 // 2026-11-12, its class check (the native popover; the hand-written close rules gone, a frame watch, the
 // Escape guard and the no-popover fallback added): 864,039 (294,161), so the pin moves to 865,000.
-const WIKI_CLIENT_MAX_BYTES = 865_000;
+// 2026-11-12, the popover removed (the chip one glyph with its name and title): 861,919 (293,484),
+// so the pin moves down to 862,000.
+const WIKI_CLIENT_MAX_BYTES = 862_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
