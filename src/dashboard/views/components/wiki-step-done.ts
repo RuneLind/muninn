@@ -403,82 +403,90 @@ function slotAfterDone(li: Element): void {
 
 const isNode = (t: unknown): t is Node => !!t && typeof (t as Node).nodeType === "number";
 
-/** The one open popover's close, so opening another closes it first. */
-let closeOpenPop: (() => void) | null = null;
+/** Between chip and popover, and the popover's least distance from each viewport edge. */
+const GAP = 4;
+const EDGE = 8;
 
 /**
- * Place an open popover under its chip (above it when there is no room
- * below), clamped 8 px inside the viewport. It is `position: fixed`, whose
- * containing block may be an ancestor rather than the viewport (the lanes'
- * `container-type` makes `.next-moves` one): its origin is measured at 0,0
- * first, so the same arithmetic holds for either.
+ * Place an open popover under its chip, over it when there is no room below,
+ * EDGE px inside the viewport on every side; one taller than the viewport is
+ * held by its `max-height` and scrolls inside. A popover in the top layer is
+ * placed against the viewport, whatever its ancestors.
  */
 function placePop(chip: HTMLElement, pop: HTMLElement): void {
-  pop.style.left = "0px";
-  pop.style.top = "0px";
-  const origin = pop.getBoundingClientRect();
+  const root = chip.ownerDocument.documentElement;
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
   const c = chip.getBoundingClientRect();
-  const win = chip.ownerDocument.defaultView!;
-  const vw = chip.ownerDocument.documentElement.clientWidth || win.innerWidth;
-  const vh = win.innerHeight;
-  const left = Math.max(8, Math.min(c.left, vw - origin.width - 8));
-  const below = c.bottom + 4;
-  const top = below + origin.height > vh - 8 && c.top - 4 - origin.height >= 8 ? c.top - 4 - origin.height : below;
-  pop.style.left = `${Math.round(left - origin.left)}px`;
-  pop.style.top = `${Math.round(top - origin.top)}px`;
+  const p = pop.getBoundingClientRect();
+  const left = Math.max(EDGE, Math.min(c.left, vw - p.width - EDGE));
+  const below = c.bottom + GAP;
+  const above = c.top - GAP - p.height;
+  const top = below + p.height <= vh - EDGE ? below : above >= EDGE ? above : Math.max(EDGE, Math.min(below, vh - EDGE - p.height));
+  pop.style.left = `${Math.round(left)}px`;
+  pop.style.top = `${Math.round(top)}px`;
 }
 
 /**
- * The chip's popover: opens and closes on activation only (hover keeps the
- * title), closes on Escape (focus stays on the chip), a pointer outside the
- * slot, and focus leaving it. One open at a time; nothing is sent anywhere.
+ * The browser opens and closes the popover (`popover` + `popovertarget`): on
+ * activation, on a click or tap outside, and when another opens. Ours, only
+ * while it is open: placing it, in the first frame, before it paints; closing
+ * it on a scroll outside it or a resize, rather than following the chip; closing
+ * it when the chip moves or goes (a lens, a fold, the row removed, which fires
+ * no toggle event); and Escape, which every engine measured still hands to the
+ * page's keydown listeners while a popover is open: ours, on the window in
+ * capture, closes it, puts focus on the chip (WebKit focuses no button on a
+ * click) and goes no further.
  */
-function wirePop(slot: HTMLElement, chip: HTMLButtonElement, pop: HTMLElement): void {
-  const doc = slot.ownerDocument;
-  const win = doc.defaultView!;
-  const outside = (e: Event) => {
-    if (!slot.isConnected || !isNode(e.target) || !slot.contains(e.target)) close();
+function wirePop(chip: HTMLButtonElement, pop: HTMLElement): void {
+  const win = chip.ownerDocument.defaultView!;
+  let shown = false;
+  let frame = 0;
+  let at: DOMRect | null = null;
+  const hide = () => {
+    if (shown) pop.hidePopover();
   };
-  const follow = () => (slot.isConnected ? placePop(chip, pop) : close());
-  const close = () => {
-    if (pop.hidden) return;
-    pop.hidden = true;
-    chip.setAttribute("aria-expanded", "false");
-    doc.removeEventListener("pointerdown", outside, true);
-    win.removeEventListener("scroll", follow, true);
-    win.removeEventListener("resize", follow);
-    if (closeOpenPop === close) closeOpenPop = null;
+  const onScroll = (e: Event) => {
+    if (!(isNode(e.target) && pop.contains(e.target))) hide();
   };
-  const open = () => {
-    closeOpenPop?.();
-    pop.hidden = false;
-    chip.setAttribute("aria-expanded", "true");
-    placePop(chip, pop);
-    doc.addEventListener("pointerdown", outside, true);
-    win.addEventListener("scroll", follow, { capture: true, passive: true });
-    win.addEventListener("resize", follow);
-    closeOpenPop = close;
-  };
-  chip.addEventListener("click", (e) => {
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key !== "Escape") return;
     e.preventDefault();
     e.stopPropagation();
-    if (pop.hidden) open();
-    else close();
-  });
-  // Escape closes an open popover, and the shell's own Escape handlers do not also run; with none open it goes on.
-  slot.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || pop.hidden) return;
-    e.preventDefault();
-    e.stopPropagation();
-    close();
+    hide();
     chip.focus({ preventScroll: true });
+  };
+  const watch = () => {
+    if (!chip.isConnected) return stop();
+    const r = chip.getBoundingClientRect();
+    if (!at) {
+      placePop(chip, pop);
+      at = r;
+    } else if (!r.width || Math.abs(r.x - at.x) > 0.5 || Math.abs(r.y - at.y) > 0.5) return hide();
+    frame = win.requestAnimationFrame(watch);
+  };
+  function stop(): void {
+    shown = false;
+    win.removeEventListener("scroll", onScroll, true);
+    win.removeEventListener("resize", hide);
+    win.removeEventListener("keydown", onKey, true);
+    win.cancelAnimationFrame(frame);
+    frame = 0;
+  }
+  pop.addEventListener("beforetoggle", (e) => {
+    const open = (e as Event & { newState?: string }).newState === "open";
+    chip.setAttribute("aria-expanded", String(open));
+    if (!open) return stop();
+    if (shown) return;
+    shown = true;
+    at = null;
+    win.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    win.addEventListener("resize", hide);
+    win.addEventListener("keydown", onKey, true);
+    frame = win.requestAnimationFrame(watch);
   });
-  slot.addEventListener("focusout", (e) => {
-    const to = (e as FocusEvent).relatedTarget;
-    if (isNode(to) && slot.contains(to)) return;
-    if (to === null && !doc.hasFocus()) return; // the window lost focus: the reader comes back to it open
-    close();
-  });
+  // A click on the chip is the chip's: it goes no further into the page.
+  chip.addEventListener("click", (e) => e.stopPropagation());
 }
 
 const span = (doc: Document, cls: string, text: string) => {
@@ -526,11 +534,17 @@ export function enhanceStepChecks(article: HTMLElement, ctx: StepDonePageContext
       chip.textContent = c.glyph;
       chip.title = c.title;
       chip.setAttribute("aria-label", c.name);
+      // No popover API (a browser from before 2024): the button, its name and its title.
+      if (typeof doc.defaultView?.HTMLElement.prototype.showPopover !== "function") {
+        slot.append(chip);
+        continue;
+      }
+      chip.setAttribute("popovertarget", id);
       chip.setAttribute("aria-expanded", "false");
       chip.setAttribute("aria-controls", id);
       const pop = span(doc, "step-chip-pop", "");
       pop.id = id;
-      pop.hidden = true;
+      pop.setAttribute("popover", "auto");
       pop.appendChild(span(doc, "step-chip-state", c.head));
       for (const m of c.machines) pop.appendChild(span(doc, "step-chip-machine", m));
       if (c.title) {
@@ -540,7 +554,7 @@ export function enhanceStepChecks(article: HTMLElement, ctx: StepDonePageContext
         pop.appendChild(why);
       }
       slot.append(chip, pop);
-      wirePop(slot, chip, pop);
+      wirePop(chip, pop);
     }
   })();
 }
@@ -667,17 +681,17 @@ export function stepDoneStyles(): string {
       font: inherit; font-size: 1em; line-height: 1.2em; text-align: center; color: var(--text-secondary);
     }
     .step-chip:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
-    /* An overlay: fixed, placed by the client (placePop), so it takes no room
-       in the row; the series menu's layer and ground. */
+    /* A native popover: the top layer takes it out of the row and above every
+       clip; placePop sets left and top. inset and margin undo the UA's centring. */
     .step-chip-pop {
-      position: fixed; z-index: 120; display: block; box-sizing: border-box;
+      position: fixed; inset: auto; margin: 0; box-sizing: border-box;
       width: max-content; max-width: min(22rem, calc(100vw - 16px));
+      max-height: calc(100vh - 16px); overflow: auto;
       padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border-primary);
       background: var(--bg-surface); box-shadow: 0 8px 28px rgba(0,0,0,0.3);
       color: var(--text-primary); font-size: 12.5px; line-height: 1.45; font-weight: normal;
       text-align: left; white-space: normal;
     }
-    .step-chip-pop[hidden] { display: none; }
     .step-chip-pop > span { display: block; }
     .step-chip-state { font-weight: 600; }
     .step-chip-why { margin-top: 2px; color: var(--text-secondary); white-space: pre-line; overflow-wrap: anywhere; }

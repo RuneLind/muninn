@@ -5,7 +5,8 @@
  * `enhanceStepChecks` with an injected fetch. Pins: chips only on rows the
  * route answered, paired by Done's rule; none on a hash mismatch, an error or
  * a bad answer; no request when the page has no slot; the chip stays inside
- * the reader-only slot.
+ * the reader-only slot; the popover's wiring (attributes, Escape, what it
+ * listens to while open and lets go of, the fallback without the popover API).
  */
 import { describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
@@ -47,8 +48,64 @@ const probes: ProbeDeps = {
 
 const answer = () => answerStepChecks(PAGE, { probes, machine: "laptop", cache: new ProbeCache() });
 
-function mount(md = PAGE) {
-  const doc = new Window().document;
+type Fake = { frames: Set<number>; listeners: Map<string, number>; open: Set<Element> };
+/**
+ * happy-dom has the `popover` attribute but no `showPopover` (21.0.4), so the
+ * reader takes its fallback there. `popover: true` stands the platform's half
+ * in: `showPopover`/`hidePopover` firing `beforetoggle` and `toggle` as an
+ * engine does; the test counts the window listeners added and not yet removed,
+ * per type, and the animation frames asked for and not yet run or cancelled.
+ */
+function platform(win: Window): Fake {
+  const w = win as unknown as Record<string, unknown> & typeof globalThis;
+  const fake: Fake = { frames: new Set(), listeners: new Map(), open: new Set() };
+  const proto = w.HTMLElement.prototype as unknown as Record<string, unknown>;
+  const fire = (el: HTMLElement, type: string, newState: string) => el.dispatchEvent(Object.assign(new w.Event(type), { newState, oldState: newState === "open" ? "closed" : "open" }));
+  proto.showPopover = function (this: HTMLElement) {
+    if (fake.open.has(this)) return;
+    fire(this, "beforetoggle", "open");
+    fake.open.add(this);
+    fire(this, "toggle", "open");
+  };
+  proto.hidePopover = function (this: HTMLElement) {
+    if (!fake.open.has(this)) return;
+    fire(this, "beforetoggle", "closed");
+    fake.open.delete(this);
+    fire(this, "toggle", "closed");
+  };
+  let n = 0;
+  w.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+    const id = ++n;
+    fake.frames.add(id);
+    setTimeout(() => fake.frames.delete(id) && cb(0), 5);
+    return id;
+  }) as never;
+  w.cancelAnimationFrame = ((id: number) => void fake.frames.delete(id)) as never;
+  const add = w.addEventListener.bind(w);
+  const remove = w.removeEventListener.bind(w);
+  const seen = new Set<unknown>();
+  w.addEventListener = ((type: string, fn: EventListener, o?: unknown) => {
+    if (!seen.has(fn)) fake.listeners.set(type, (fake.listeners.get(type) ?? 0) + 1);
+    seen.add(fn);
+    add(type, fn, o as never);
+  }) as never;
+  w.removeEventListener = ((type: string, fn: EventListener, o?: unknown) => {
+    if (seen.delete(fn)) fake.listeners.set(type, (fake.listeners.get(type) ?? 0) - 1);
+    remove(type, fn, o as never);
+  }) as never;
+  return fake;
+}
+/** The platform stand-in of the last `mount`, or null when it mounted without one. */
+let fake: Fake | null = null;
+/** Window listeners the reader added and has not removed, all types. */
+const live = () => Array.from(fake!.listeners.values()).reduce((a, b) => a + b, 0);
+
+function mount(md = PAGE, opts: { popover?: boolean } = {}) {
+  const win = new Window();
+  fake = opts.popover === false ? null : platform(win);
+  // happy-dom's element classes are shared by its windows: a stand-in another mount installed is taken off again.
+  if (!fake) for (const k of ["showPopover", "hidePopover"]) delete (win.HTMLElement.prototype as unknown as Record<string, unknown>)[k];
+  const doc = win.document;
   const article = doc.createElement("div");
   article.className = "wiki-article";
   article.innerHTML = renderWikiHtml(md, () => undefined);
@@ -188,13 +245,14 @@ describe("step-check chips: state, name and placement", () => {
     expect(why.textContent).toBe("env=HAVE: HAVE is set in .env and in the running process");
     const pop = a.ownerDocument.getElementById(one.getAttribute("aria-controls") ?? "")!;
     expect(pop.contains(why)).toBe(true);
-    expect(pop.hidden).toBe(true);
+    // The platform's popover, the chip its invoker: the browser opens and closes it.
+    expect(pop.getAttribute("popover")).toBe("auto");
+    expect(one.getAttribute("popovertarget")).toBe(pop.id);
     expect(one.getAttribute("aria-expanded")).toBe("false");
-    one.click();
-    expect(pop.hidden).toBe(false);
+    pop.showPopover();
     expect(one.getAttribute("aria-expanded")).toBe("true");
-    one.click();
-    expect(pop.hidden).toBe(true);
+    pop.hidePopover();
+    expect(one.getAttribute("aria-expanded")).toBe("false");
     expect(asked).toBe(1);
     // Every chip's reasons node has an id of its own.
     const ids = Array.from(a.querySelectorAll(".step-chip")).map((c) => c.getAttribute("aria-describedby"));
@@ -237,7 +295,8 @@ describe("step-check chips: one glyph, and the reasons as a popover (fix round 2
     const pop = popOf(a, chip)!;
     expect(pop).not.toBeNull();
     expect(chip.parentElement!.contains(pop)).toBe(true);
-    expect(pop.hidden).toBe(true);
+    expect(pop.hasAttribute("hidden")).toBe(false);
+    expect(fake!.open.size).toBe(0);
     expect(pop.querySelector(".step-chip-state")!.textContent).toBe("Check: unknown");
     expect(Array.from(pop.querySelectorAll(".step-chip-machine")).map((m) => m.textContent)).toEqual(["laptop: checked", "mini: unknown"]);
     const why = a.ownerDocument.getElementById(chip.getAttribute("aria-describedby") ?? "")!;
@@ -261,7 +320,7 @@ describe("step-check chips: one glyph, and the reasons as a popover (fix round 2
     expect(await idsOf()).toEqual(first);
   });
 
-  test("activation toggles it; Escape closes it with focus on the chip and goes no further; a click outside closes it; only one is open", async () => {
+  test("Escape while one is open closes it, puts focus on the chip and reaches no other listener; with none open it goes on", async () => {
     const a = mount();
     let asked = 0;
     const full = await answer();
@@ -271,47 +330,100 @@ describe("step-check chips: one glyph, and the reasons as a popover (fix round 2
     doc.addEventListener("keydown", (e) => reached.push(`key:${(e as KeyboardEvent).key}`));
     a.addEventListener("click", () => reached.push("click"));
     const c0 = rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!;
-    const c2 = rowLi(a, 2).querySelector<HTMLElement>(".step-chip")!;
     const p0 = popOf(a, c0)!;
-    const p2 = popOf(a, c2)!;
-    c0.click();
-    expect(p0.hidden).toBe(false);
-    expect(c0.getAttribute("aria-expanded")).toBe("true");
-    c0.click();
-    expect(p0.hidden).toBe(true);
-    expect(c0.getAttribute("aria-expanded")).toBe("false");
-    c0.click();
-    key(c0, "Escape");
-    expect(p0.hidden).toBe(true);
+    // WebKit focuses no button on click: focus is elsewhere when Escape comes.
+    doc.body.focus();
+    p0.showPopover();
+    key(doc.body, "Escape");
+    expect(fake!.open.has(p0)).toBe(false);
     expect(doc.activeElement).toBe(c0);
-    // Escape with nothing open goes on to the shell.
+    expect(c0.getAttribute("aria-expanded")).toBe("false");
+    expect(reached).toEqual([]);
     key(c0, "Escape");
     expect(reached).toEqual(["key:Escape"]);
+    // Another key while open is not ours.
+    p0.showPopover();
+    key(c0, "v");
+    expect(fake!.open.has(p0)).toBe(true);
+    expect(reached).toEqual(["key:Escape", "key:v"]);
+    // A click on the chip goes no further than the chip.
     c0.click();
-    c2.click();
-    expect(p0.hidden).toBe(true);
-    expect(c0.getAttribute("aria-expanded")).toBe("false");
-    expect(p2.hidden).toBe(false);
-    doc.body.dispatchEvent(new (doc.defaultView as unknown as typeof globalThis).PointerEvent("pointerdown", { bubbles: true }));
-    expect(p2.hidden).toBe(true);
-    // A pointerdown on the popover itself keeps it.
-    c2.click();
-    p2.dispatchEvent(new (doc.defaultView as unknown as typeof globalThis).PointerEvent("pointerdown", { bubbles: true }));
-    expect(p2.hidden).toBe(false);
     expect(reached.filter((r) => r === "click")).toEqual([]);
     expect(asked).toBe(1);
   });
 
-  test("focus leaving the chip and its popover closes it", async () => {
+  test("what it listens to while open it adds on open and removes on close: fifty cycles leave nothing", async () => {
     const a = mount();
     await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
-    const c0 = rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!;
-    const c2 = rowLi(a, 2).querySelector<HTMLElement>(".step-chip")!;
-    c0.focus();
-    c0.click();
-    expect(popOf(a, c0)!.hidden).toBe(false);
-    c2.focus();
-    expect(popOf(a, c0)!.hidden).toBe(true);
+    const base = live();
+    const p0 = popOf(a, rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!)!;
+    const p2 = popOf(a, rowLi(a, 2).querySelector<HTMLElement>(".step-chip")!)!;
+    p0.showPopover();
+    expect(live()).toBeGreaterThan(base);
+    expect(fake!.listeners.get("scroll")).toBe(1);
+    expect(fake!.listeners.get("resize")).toBe(1);
+    expect(fake!.frames.size).toBe(1);
+    p0.hidePopover();
+    for (let i = 0; i < 50; i++) {
+      (i % 2 ? p0 : p2).showPopover();
+      (i % 2 ? p0 : p2).hidePopover();
+    }
+    expect(live()).toBe(base);
+    expect(fake!.frames.size).toBe(0);
+  });
+
+  test("a row removed while its popover is open (the platform fires no toggle then) leaves no listener a frame later", async () => {
+    const a = mount();
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
+    const base = live();
+    const li = rowLi(a, 0);
+    const p0 = popOf(a, li.querySelector<HTMLElement>(".step-chip")!)!;
+    p0.showPopover();
+    expect(live()).toBeGreaterThan(base);
+    li.remove();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(live()).toBe(base);
+    expect(fake!.frames.size).toBe(0);
+  });
+
+  test("a scroll anywhere closes it, a scroll inside it does not; a resize closes it", async () => {
+    const a = mount();
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
+    const win = a.ownerDocument.defaultView as unknown as typeof globalThis;
+    const p0 = popOf(a, rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!)!;
+    p0.showPopover();
+    p0.dispatchEvent(new win.Event("scroll"));
+    expect(fake!.open.has(p0)).toBe(true);
+    a.dispatchEvent(new win.Event("scroll"));
+    expect(fake!.open.has(p0)).toBe(false);
+    p0.showPopover();
+    win.dispatchEvent(new win.Event("resize"));
+    expect(fake!.open.has(p0)).toBe(false);
+  });
+
+  test("ids are unique across two lanes and two NextMoves blocks", async () => {
+    const block = (n: number) => ["<NextMoves>", "", '<Lane kind="you">', "", `1. Lane ${n}a step <Check env="HAVE" />`, "", "</Lane>", "", '<Lane kind="you">', "", `1. Lane ${n}b step <Check env="HAVE" />`, "", "</Lane>", "", "</NextMoves>", ""];
+    const md = ["---", "title: T", "---", "", ...block(1), ...block(2)].join("\n");
+    const a = mount(md);
+    await enhanceStepChecks(a, ctx(sha256(md)), respond(await answerStepChecks(md, { probes, machine: "laptop", cache: new ProbeCache() })));
+    const ids = Array.from(a.querySelectorAll(".step-chip")).flatMap((c) => [c.getAttribute("popovertarget"), c.getAttribute("aria-describedby")]);
+    expect(ids.length).toBe(8);
+    expect(new Set(ids).size).toBe(8);
+    for (const id of ids) expect(a.ownerDocument.querySelectorAll(`[id="${id}"]`).length).toBe(1);
+  });
+
+  test("a browser without the popover API gets a plain button with its name and title, and no popover", async () => {
+    const a = mount(PAGE, { popover: false });
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()));
+    expect(chips(a)).toEqual(["✓", "", "○", "?"]);
+    const c = rowLi(a, 0).querySelector<HTMLElement>(".step-chip")!;
+    expect(c.tagName).toBe("BUTTON");
+    expect(c.getAttribute("aria-label")).toBe("Check: checked");
+    expect(c.title).toBe("env=HAVE: HAVE is set in .env and in the running process");
+    expect(c.hasAttribute("popovertarget")).toBe(false);
+    expect(a.querySelectorAll(".step-chip-pop, [popover]").length).toBe(0);
+    c.click();
+    expect(a.querySelectorAll(".step-chip-pop").length).toBe(0);
   });
 });
 

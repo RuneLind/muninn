@@ -153,7 +153,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-12, owner-step chips (enhanceStepChecks, checkChip and its glyph table): 861,690 bytes (293,395 gzipped), from 860,258.
 // Its fix round 1 batch 3 (the chip after Done, a button with its reasons, no part of a copy): 862,338 (293,607).
 // Its fix round 2 batch 3 (a one-glyph chip in a fixed box, the reasons as a placed popover): 863,930 (294,038).
-const WIKI_CLIENT_MAX_BYTES = 864_000;
+// 2026-11-12, its class check (the native popover; the hand-written close rules gone, a frame watch, the
+// Escape guard and the no-popover fallback added): 864,039 (294,161), so the pin moves to 865,000.
+const WIKI_CLIENT_MAX_BYTES = 865_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
