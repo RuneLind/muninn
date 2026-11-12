@@ -5,8 +5,8 @@
  *
  * It takes the file's raw BYTES, because Bun's loader parses raw bytes: a
  * decoded string hides what Bun sees. `Bun.file().text()` strips a leading
- * UTF-8 BOM (Bun then loads the first key under a name that starts with
- * U+FEFF), decodes a UTF-16 file Bun loads nothing from, and turns ill-formed
+ * UTF-8 BOM (Bun then does not load the first line's key under its name),
+ * decodes a UTF-16 file Bun loads nothing from, and turns ill-formed
  * UTF-8 into U+FFFD. Here each line (split on byte 0x0A, one trailing 0x0D
  * dropped) is decoded strictly (`fatal`, `ignoreBOM`): an ill-formed sequence
  * loses track on its line, and a BOM stays U+FEFF in the text.
